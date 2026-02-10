@@ -1,0 +1,217 @@
+import { useState } from 'react'
+import type { ContentBlock } from '../../../../shared/types'
+
+interface Props {
+  block: ContentBlock
+  result?: ContentBlock
+}
+
+export function ToolCallBlock({ block, result }: Props): React.JSX.Element {
+  const [expanded, setExpanded] = useState(false)
+  const summary = getSummary(block)
+  const hasResult = !!result
+  const isError = result?.isError ?? false
+  const isSuccess = hasResult && !isError
+
+  // Determine border color based on result status
+  const borderColor = isError
+    ? 'border-danger/30'
+    : isSuccess
+      ? 'border-success/30'
+      : 'border-border'
+
+  const statusIcon = isError ? (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-danger shrink-0">
+      <circle cx="12" cy="12" r="10" />
+      <line x1="15" y1="9" x2="9" y2="15" />
+      <line x1="9" y1="9" x2="15" y2="15" />
+    </svg>
+  ) : isSuccess ? (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-success shrink-0">
+      <circle cx="12" cy="12" r="10" />
+      <polyline points="8 12 11 15 16 9" />
+    </svg>
+  ) : (
+    <span className="w-3 h-3 rounded-full border-2 border-text-muted border-t-transparent shrink-0 animate-spin-slow" />
+  )
+
+  return (
+    <div className={`rounded-lg border ${borderColor} bg-bg-secondary overflow-hidden`}>
+      {/* Header */}
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="w-full flex items-center gap-2 px-3 h-8 text-[12px] hover:bg-bg-hover transition-colors cursor-pointer"
+      >
+        {statusIcon}
+        <span className="font-mono font-medium text-accent">{block.toolName}</span>
+        <span className="text-text-muted truncate flex-1 text-left font-mono text-[11px]">{summary}</span>
+        <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={`text-text-muted transition-transform shrink-0 ${expanded ? 'rotate-180' : ''}`}>
+          <polyline points="6 9 12 15 18 9" />
+        </svg>
+      </button>
+
+      {/* Expanded content */}
+      {expanded && (
+        <div className="border-t border-border">
+          {/* Input section */}
+          <div className="px-3 py-2">
+            <div className="text-[10px] text-text-muted uppercase tracking-wider mb-1">Input</div>
+            <ToolInput block={block} />
+          </div>
+
+          {/* Result section */}
+          {hasResult && result.toolResult && (
+            <div className="px-3 py-2 border-t border-border">
+              <div className={`text-[10px] uppercase tracking-wider mb-1 ${isError ? 'text-danger' : 'text-success'}`}>
+                {isError ? 'Error' : 'Result'}
+              </div>
+              <ToolResult block={block} result={result} />
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function ToolInput({ block }: { block: ContentBlock }): React.JSX.Element {
+  const input = block.toolInput
+  const toolName = block.toolName
+
+  // Show command for Bash
+  if (toolName === 'Bash' && input?.command) {
+    return (
+      <pre className="text-[11px] text-text-secondary font-mono whitespace-pre-wrap break-words max-h-32 overflow-y-auto leading-[1.5] bg-bg-primary rounded-md p-2 border border-border">
+        $ {String(input.command)}
+      </pre>
+    )
+  }
+
+  // Show file path + old/new for Edit
+  if (toolName === 'Edit' && input?.file_path) {
+    return (
+      <div className="flex flex-col gap-1.5">
+        <span className="text-[11px] font-mono text-text-secondary">{shorten(String(input.file_path))}</span>
+        {input.old_string != null && input.new_string != null && (
+          <DiffView oldStr={String(input.old_string)} newStr={String(input.new_string)} />
+        )}
+      </div>
+    )
+  }
+
+  // Show file path for Read/Write
+  if ((toolName === 'Read' || toolName === 'Write') && input?.file_path) {
+    return (
+      <span className="text-[11px] font-mono text-text-secondary">{shorten(String(input.file_path))}</span>
+    )
+  }
+
+  // Default: JSON
+  return (
+    <pre className="text-[11px] text-text-secondary font-mono whitespace-pre-wrap break-words max-h-32 overflow-y-auto leading-[1.5] bg-bg-primary rounded-md p-2 border border-border">
+      {JSON.stringify(input, null, 2)}
+    </pre>
+  )
+}
+
+function ToolResult({ block, result }: { block: ContentBlock; result: ContentBlock }): React.JSX.Element {
+  const toolName = block.toolName
+  const text = result.toolResult || ''
+  const isError = result.isError
+
+  // Write tool: show the content that was written (from input)
+  if (toolName === 'Write' && block.toolInput?.content) {
+    return (
+      <pre className="text-[11px] font-mono whitespace-pre-wrap break-words max-h-48 overflow-y-auto leading-[1.5] bg-bg-primary rounded-md p-2 border border-border text-success/80">
+        {trunc(String(block.toolInput.content), 2000)}
+      </pre>
+    )
+  }
+
+  // Edit tool: show diff from input
+  if (toolName === 'Edit' && block.toolInput?.old_string != null && block.toolInput?.new_string != null) {
+    return (
+      <div className="max-h-48 overflow-y-auto">
+        <DiffView oldStr={String(block.toolInput.old_string)} newStr={String(block.toolInput.new_string)} />
+      </div>
+    )
+  }
+
+  // Read tool: show file content
+  if (toolName === 'Read' && !isError) {
+    return (
+      <pre className="text-[11px] text-text-secondary font-mono whitespace-pre-wrap break-words max-h-48 overflow-y-auto leading-[1.5] bg-bg-primary rounded-md p-2 border border-border">
+        {trunc(text, 2000)}
+      </pre>
+    )
+  }
+
+  // Bash tool: show output
+  if (toolName === 'Bash' && !isError) {
+    return (
+      <pre className="text-[11px] text-text-secondary font-mono whitespace-pre-wrap break-words max-h-48 overflow-y-auto leading-[1.5] bg-bg-primary rounded-md p-2 border border-border">
+        {trunc(text, 2000)}
+      </pre>
+    )
+  }
+
+  // Error or default
+  return (
+    <pre className={`text-[11px] font-mono whitespace-pre-wrap break-words max-h-48 overflow-y-auto leading-[1.5] bg-bg-primary rounded-md p-2 border border-border ${isError ? 'text-danger' : 'text-text-secondary'}`}>
+      {trunc(text, 2000)}
+    </pre>
+  )
+}
+
+function DiffView({ oldStr, newStr }: { oldStr: string; newStr: string }): React.JSX.Element {
+  const oldLines = oldStr.split('\n')
+  const newLines = newStr.split('\n')
+
+  return (
+    <div className="rounded-md border border-border bg-bg-primary overflow-hidden text-[11px] font-mono leading-[1.5]">
+      {oldLines.length > 0 && oldStr && (
+        <div className="border-b border-border">
+          {oldLines.map((line, i) => (
+            <div key={`old-${i}`} className="flex">
+              <span className="shrink-0 w-6 text-right pr-1 select-none text-danger/50 bg-danger/5">&minus;</span>
+              <pre className="flex-1 px-2 whitespace-pre-wrap break-words text-danger bg-danger/5">{line}</pre>
+            </div>
+          ))}
+        </div>
+      )}
+      {newLines.length > 0 && newStr && (
+        <div>
+          {newLines.map((line, i) => (
+            <div key={`new-${i}`} className="flex">
+              <span className="shrink-0 w-6 text-right pr-1 select-none text-success/50 bg-success/5">+</span>
+              <pre className="flex-1 px-2 whitespace-pre-wrap break-words text-success bg-success/5">{line}</pre>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function getSummary(block: ContentBlock): string {
+  const input = block.toolInput
+  if (!input) return ''
+
+  if (block.toolName === 'Read' && input.file_path) return shorten(String(input.file_path))
+  if (block.toolName === 'Write' && input.file_path) return shorten(String(input.file_path))
+  if (block.toolName === 'Edit' && input.file_path) return shorten(String(input.file_path))
+  if (block.toolName === 'Bash' && input.command) return trunc(String(input.command), 50)
+  if (block.toolName === 'Glob' && input.pattern) return String(input.pattern)
+  if (block.toolName === 'Grep' && input.pattern) return trunc(String(input.pattern), 50)
+
+  return trunc(JSON.stringify(input), 50)
+}
+
+function shorten(path: string): string {
+  const parts = path.split('/')
+  return parts.length <= 3 ? path : '.../' + parts.slice(-2).join('/')
+}
+
+function trunc(s: string, n: number): string {
+  return s.length > n ? s.slice(0, n) + '...' : s
+}

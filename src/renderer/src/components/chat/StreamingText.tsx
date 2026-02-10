@@ -1,0 +1,16 @@
+import { useSessionStore } from '../../stores/session-store'
+import { MarkdownRenderer } from './MarkdownRenderer'
+
+export function StreamingText(): React.JSX.Element | null {
+  const text = useSessionStore((s) => s.streamingText)
+  if (!text) return null
+
+  return (
+    <div className="animate-fade-in">
+      <div className="text-[13px] text-text-primary leading-[1.6]">
+        <MarkdownRenderer content={text} />
+      </div>
+      <span className="inline-block w-[2px] h-[16px] bg-accent rounded-[1px] animate-cursor-blink ml-px" />
+    </div>
+  )
+}
