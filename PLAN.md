@@ -1,4 +1,4 @@
-# ClaudeHub — Claude Code GUI
+# ClaudeUI — Claude Code GUI
 
 A cross-platform desktop GUI for managing multiple Claude Code sessions, with integrated diff review, terminal, and git workflows.
 

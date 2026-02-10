@@ -1,8 +1,8 @@
-# ClaudeHub Phase 1 — Implementation Plan
+# ClaudeUI Phase 1 — Implementation Plan
 
 ## Context
 
-We're building a cross-platform Electron GUI ("ClaudeHub") for managing Claude Code sessions. Phase 1 delivers a **single-session** app: open a project folder, chat with Claude, see streaming responses, view tool calls, and approve/deny permissions — all in a dark-themed desktop app.
+We're building a cross-platform Electron GUI ("ClaudeUI") for managing Claude Code sessions. Phase 1 delivers a **single-session** app: open a project folder, chat with Claude, see streaming responses, view tool calls, and approve/deny permissions — all in a dark-themed desktop app.
 
 The key architectural insight from our investigation: use `@anthropic-ai/claude-agent-sdk` directly (not CLI spawning). The SDK provides `query()` as an async generator, `canUseTool` callback for approvals, and full TypeScript types.
 
