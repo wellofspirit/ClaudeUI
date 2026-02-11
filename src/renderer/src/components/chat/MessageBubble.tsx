@@ -2,6 +2,7 @@ import type { ChatMessage, ContentBlock, PendingApproval } from '../../../../sha
 import { useSessionStore } from '../../stores/session-store'
 import { MarkdownRenderer } from './MarkdownRenderer'
 import { ToolCallBlock } from './ToolCallBlock'
+import { AskUserQuestionBlock } from './AskUserQuestionBlock'
 import { ThinkingBlock } from './ThinkingBlock'
 
 export function MessageBubble({ message }: { message: ChatMessage }): React.JSX.Element {
@@ -110,6 +111,9 @@ export function MessageBubble({ message }: { message: ChatMessage }): React.JSX.
           const { block, index } = item.blocks[0]
           const result = block.toolUseId ? resultMap.get(block.toolUseId) : undefined
           const approval = block.toolUseId ? approvalMap.get(block.toolUseId) : undefined
+          if (block.toolName === 'AskUserQuestion') {
+            return <AskUserQuestionBlock key={index} block={block} result={result} approval={approval} />
+          }
           return <ToolCallBlock key={index} block={block} result={result} approval={approval} />
         }
         // Multiple tool calls — wrap in bordered group
@@ -118,6 +122,9 @@ export function MessageBubble({ message }: { message: ChatMessage }): React.JSX.
             {item.blocks.map(({ block, index }) => {
               const result = block.toolUseId ? resultMap.get(block.toolUseId) : undefined
               const approval = block.toolUseId ? approvalMap.get(block.toolUseId) : undefined
+              if (block.toolName === 'AskUserQuestion') {
+                return <AskUserQuestionBlock key={index} block={block} result={result} approval={approval} />
+              }
               return <ToolCallBlock key={index} block={block} result={result} approval={approval} />
             })}
           </div>

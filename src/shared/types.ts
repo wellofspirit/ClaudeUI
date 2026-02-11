@@ -37,6 +37,23 @@ export interface SessionResult {
 
 export type ApprovalDecision = 'allow' | 'deny'
 
+// AskUserQuestion tool types
+export interface AskUserQuestionOption {
+  label: string
+  description: string
+}
+
+export interface AskUserQuestion {
+  question: string
+  header: string
+  options: AskUserQuestionOption[]
+  multiSelect: boolean
+}
+
+export interface AskUserQuestionInput {
+  questions: AskUserQuestion[]
+}
+
 export interface StreamDelta {
   type: 'text' | 'thinking'
   text: string
@@ -47,7 +64,7 @@ export interface ClaudeAPI {
   createSession(cwd: string): Promise<void>
   sendPrompt(prompt: string): Promise<void>
   cancelSession(): Promise<void>
-  respondApproval(requestId: string, decision: ApprovalDecision): Promise<void>
+  respondApproval(requestId: string, decision: ApprovalDecision, answers?: Record<string, string>): Promise<void>
   onMessage(cb: (message: ChatMessage) => void): () => void
   onStreamEvent(cb: (data: StreamDelta) => void): () => void
   onApprovalRequest(cb: (approval: PendingApproval) => void): () => void

@@ -6,8 +6,8 @@ const api: ClaudeAPI = {
   createSession: (cwd: string) => ipcRenderer.invoke('session:create', cwd),
   sendPrompt: (prompt: string) => ipcRenderer.invoke('session:send', prompt),
   cancelSession: () => ipcRenderer.invoke('session:cancel'),
-  respondApproval: (requestId: string, decision: ApprovalDecision) =>
-    ipcRenderer.invoke('session:approval-response', requestId, decision),
+  respondApproval: (requestId: string, decision: ApprovalDecision, answers?: Record<string, string>) =>
+    ipcRenderer.invoke('session:approval-response', requestId, decision, answers),
 
   onMessage: (cb) => {
     const handler = (_: Electron.IpcRendererEvent, msg: unknown): void => cb(msg as never)

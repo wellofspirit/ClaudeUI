@@ -29,8 +29,8 @@ export function registerSessionIpc(win: BrowserWindow): void {
 
   ipcMain.handle(
     'session:approval-response',
-    (_event, requestId: string, decision: ApprovalDecision) => {
-      session?.resolveApproval(requestId, decision)
+    (_event, requestId: string, decision: ApprovalDecision, answers?: Record<string, string>) => {
+      session?.resolveApproval(requestId, decision, answers)
     }
   )
 }

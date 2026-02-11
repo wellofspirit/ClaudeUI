@@ -9,8 +9,13 @@ import type {
   PendingApproval
 } from '../../shared/types'
 
+interface ApprovalResult {
+  decision: ApprovalDecision
+  answers?: Record<string, string>
+}
+
 interface PendingApprovalEntry {
-  resolve: (decision: ApprovalDecision) => void
+  resolve: (result: ApprovalResult) => void
 }
 
 export class ClaudeSession {
@@ -56,19 +61,20 @@ export class ClaudeSession {
             const approval: PendingApproval = { requestId, toolName, input }
             this.send('session:approval-request', approval)
 
-            const decision = await new Promise<ApprovalDecision>((resolve) => {
+            const { decision, answers } = await new Promise<ApprovalResult>((resolve) => {
               this.pendingApprovals.set(requestId, { resolve })
 
               opts.signal.addEventListener('abort', () => {
                 this.pendingApprovals.delete(requestId)
-                resolve('deny')
+                resolve({ decision: 'deny' })
               })
             })
 
             this.pendingApprovals.delete(requestId)
 
             if (decision === 'allow') {
-              return { behavior: 'allow' as const, updatedInput: input }
+              const updatedInput = answers ? { ...input, answers } : input
+              return { behavior: 'allow' as const, updatedInput }
             }
             return { behavior: 'deny' as const, message: 'User denied' }
           }
@@ -131,17 +137,17 @@ export class ClaudeSession {
     }
   }
 
-  resolveApproval(requestId: string, decision: ApprovalDecision): void {
+  resolveApproval(requestId: string, decision: ApprovalDecision, answers?: Record<string, string>): void {
     const entry = this.pendingApprovals.get(requestId)
     if (entry) {
-      entry.resolve(decision)
+      entry.resolve({ decision, answers })
     }
   }
 
   cancel(): void {
     // Deny all pending approvals
     for (const [, entry] of this.pendingApprovals) {
-      entry.resolve('deny')
+      entry.resolve({ decision: 'deny' })
     }
     this.pendingApprovals.clear()
 

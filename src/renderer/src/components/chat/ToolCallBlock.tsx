@@ -243,6 +243,10 @@ function getSummary(block: ContentBlock): string {
   if (block.toolName === 'Bash' && input.command) return trunc(String(input.command), 50)
   if (block.toolName === 'Glob' && input.pattern) return String(input.pattern)
   if (block.toolName === 'Grep' && input.pattern) return trunc(String(input.pattern), 50)
+  if (block.toolName === 'AskUserQuestion' && Array.isArray(input.questions)) {
+    const n = input.questions.length
+    return `${n} question${n !== 1 ? 's' : ''}`
+  }
 
   return trunc(JSON.stringify(input), 50)
 }
