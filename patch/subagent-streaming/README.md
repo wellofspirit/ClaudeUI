@@ -9,10 +9,18 @@ internally but the SDK stream only receives the final summarized result.
 `@anthropic-ai/claude-agent-sdk` — bundled `cli.js` file (same file patched
 by `task-notification`).
 
+The SDK bundles its own copy of Claude Code CLI as `cli.js` in the package
+directory. This file is executed by the SDK via `node` or `bun` when you call
+`query()`. It is **independent** of the native `claude` binary installed on
+your system, and may trail behind in version.
+
 | Component | Version at time of discovery |
 |---|---|
-| SDK package | 0.2.38 |
-| Bundled CLI (`cli.js`) | 2.1.38 |
+| SDK package | 0.2.38 → 0.2.39 |
+| Bundled CLI (`cli.js`) | 2.1.38 → 2.1.39 |
+
+Both versions exhibit the same behavior. Function names change between
+versions but the architecture is identical.
 
 ## The Problem
 
@@ -25,8 +33,8 @@ consumers. The SDK only receives:
 2. `tool_progress` elapsed-time ticks
 3. The parent's `tool_result` containing a text-only summary
 
-Thinking tokens, streaming text, individual tool calls, and tool results from
-the sub-agent are all invisible.
+Thinking tokens, streaming text deltas, individual text blocks, and
+stream events from the sub-agent are all invisible.
 
 ## Architecture Overview
 
@@ -73,19 +81,67 @@ The sub-agent's `dR()` generator yields full messages with all content block
 types. But these messages are consumed entirely within `Task.call()` — they
 are never yielded back to the parent's `NMq.submitMessage()` generator.
 
+### How progress messages flow to the SDK
+
+When the Task tool's progress callback `j` is called:
+
+```
+j({toolUseID: `agent_${D.message.id}`, data: {...}})
+  │
+  ▼
+Tool executor wraps via U1q():
+  {type:"progress", data:..., toolUseID:..., parentToolUseID:...,
+   uuid:_f(), timestamp:...}
+  │
+  ▼
+Yielded from tool executor to parent NMq.submitMessage() generator
+  │
+  ▼
+ZhA()/ihA() converts to SDK output format:
+  For data.type==="agent_progress":
+    → yields {type:"assistant", parent_tool_use_id:..., ...} for assistant msgs
+    → yields {type:"user", parent_tool_use_id:..., ...} for user msgs
+  │
+  ▼
+P.enqueue → SDK stdout
+```
+
+Key function `U1q()` wraps progress callback arguments:
+
+```js
+// v2.1.38: char ~10400725
+// v2.1.39: same location, same name
+function U1q({toolUseID:A,parentToolUseID:q,data:K}){
+    return{type:"progress",data:K,toolUseID:A,parentToolUseID:q,
+           uuid:_f(),timestamp:new Date().toISOString()}
+}
+```
+
+This is the bridge between the Task tool's progress callback and the parent
+generator. Our patches use this existing bridge — we just call `j()` with
+new data types, and `U1q()` wraps them automatically.
+
 ## Root Cause: Three Filters
 
 ### Filter #1 — Progress callback only sends tool_use/tool_result
 
-Location: Task tool sync path, `cli.js` char ~7988696
+Location: Task tool sync path, inside the for-await loop that iterates
+sub-agent messages.
 
 ```js
+// v2.1.38: char ~7988696
+// v2.1.39: char ~7991000
+//
+// Variable names change between versions:
+//   v2.1.38: $1, _1, G1, j, D, T1, A, z, r
+//   v2.1.39: X1, P1, f1, j, D, T1, A, z, r
+
 // Inside the Task tool's sync for-await loop:
-for (let z1 of dR({...})) {
-    O1.push(z1);  // collect ALL messages
+for (let z1 of dR({...})) {           // dR = sub-agent generator
+    O1.push(z1);                        // collect ALL messages
 
     if (z1.type === "assistant") {
-        let _1 = iO([z1]);   // normalize to individual content blocks
+        let _1 = iO([z1]);             // normalize to individual content blocks
         T1.push(..._1);
 
         for (let $1 of _1) {
@@ -118,19 +174,46 @@ the progress message flows through `ZhA()` which converts it to SDK-format
 messages with `parent_tool_use_id` set, then they're yielded to the parent
 generator and enqueued to `P` (SDK stdout).
 
-### Filter #2 — Task result extracts text-only content
+### Filter #2 — Stream events silently dropped
 
-Location: `UEA()` function, `cli.js` char ~7983000
+Location: Same for-await loop, just before Filter #1.
 
 ```js
+// v2.1.38: char ~7988696 (O1, Y1)
+// v2.1.39: char ~7991000 (J1, w1)
+
+let Y1 = z1.value;                    // unwrap the generator result
+if (O1.push(Y1),
+    Y1.type !== "assistant" && Y1.type !== "user")
+    continue;                          // ← stream_events DROPPED here
+```
+
+**Effect:** Sub-agent `stream_event` messages (which carry `thinking_delta`,
+`text_delta`, `content_block_start`, `content_block_stop`, etc.) are pushed
+to the collection array `O1` but then skipped by `continue`. They never
+reach the progress callback. The entire streaming experience of the
+sub-agent is invisible.
+
+This is separate from Filter #1 — even if we fixed Filter #1, stream events
+would still be dropped because they're filtered by message type before the
+content-block loop is reached.
+
+### Filter #3 — Task result extracts text-only content
+
+Location: `UEA()` function.
+
+```js
+// v2.1.38: char ~7983000
+// v2.1.39: similar location
+
 function UEA(A, q, K) {
-    let O = GN(A);  // get last assistant message
+    let O = GN(A);                     // get last assistant message
     // ↓↓↓ FILTER: only text blocks ↓↓↓
     let _ = O.message.content.filter((D) => D.type === "text");
     // ...
     return {
         agentId: q,
-        content: _,          // text-only
+        content: _,                    // text-only
         totalDurationMs: ...,
         totalTokens: ...,
         totalToolUseCount: ...,
@@ -143,11 +226,36 @@ function UEA(A, q, K) {
 only text blocks. All thinking is stripped. This is what appears in the
 `tool_result` message in the SDK stream.
 
-### Filter #3 — Output file writer strips non-text
+**We intentionally do NOT patch this.** Including thinking tokens in the task
+result would waste the parent model's context window. The parent doesn't need
+to see the sub-agent's internal reasoning — it just needs the final answer.
 
-Location: Remote agent polling loop, `cli.js` char ~8589577
+### Filter #4 — Output file writer strips non-text
+
+Location: Text extraction function (`FM6` in v2.1.38, `sM6` in v2.1.39)
+and the background agent polling loop.
 
 ```js
+// v2.1.38: FM6, char ~9019631
+// v2.1.39: sM6, char ~9022069
+
+function FM6(A, q = "Execution completed") {
+    let K = GN(A);                     // get last assistant message
+    if (!K) return q;
+    // ↓↓↓ FILTER: only text blocks ↓↓↓
+    return K.message.content
+        .filter((z) => z.type === "text")
+        .map((z) => ("text" in z) ? z.text : "")
+        .join("\n") || q;
+}
+```
+
+And in the background agent polling loop:
+
+```js
+// v2.1.38: char ~8589577
+// v2.1.39: char ~8592091
+
 let j = J.map((M) => {
     if (M.type === "assistant")
         // ↓↓↓ FILTER: only text blocks ↓↓↓
@@ -155,19 +263,25 @@ let j = J.map((M) => {
             .filter((P) => P.type === "text")
             .map((P) => ("text" in P) ? P.text : "")
             .join("\n");
-    return Q1(M);  // JSON.stringify for non-assistant messages
+    return Q1(M);                      // JSON.stringify for non-assistant messages
 }).join("\n");
-if (j) ZK1(A, j + "\n");   // append to .output file
+if (j) ZK1(A, j + "\n");             // append to .output file
 ```
 
 **Effect:** The `.output` file (used for background agents, tailed via `Read`
 tool) only contains text from assistant messages. Thinking tokens, tool use
-blocks, and tool result details are all discarded.
+blocks, and tool result details are all discarded for assistant messages.
+Non-assistant messages (user, tool_result) are JSON-stringified in full.
 
-## Message Flow Diagram
+## Message Flow Diagram — Before Patching
 
 ```
 Sub-agent dR() generator
+  │
+  ├── stream_event (thinking_delta, text_delta, etc.)
+  │     │
+  │     ├── O1.push(msg)              ← collected internally
+  │     └── DROPPED (Filter #2)       ← type !== "assistant" && !== "user"
   │
   ├── assistant msg: [thinking, text, tool_use]
   │     │
@@ -178,10 +292,10 @@ Sub-agent dR() generator
   │     └── tool_use block            ← progress callback j()
   │           │
   │           ▼
-  │         ZhA({type:"progress", data:{type:"agent_progress",...}})
+  │         U1q() wraps → {type:"progress", data:{type:"agent_progress",...}}
   │           │
   │           ▼
-  │         yield {type:"assistant", parent_tool_use_id: "...", ...}
+  │         ZhA() converts → {type:"assistant", parent_tool_use_id:...}
   │           │
   │           ▼
   │         P.enqueue → SDK stdout    ← only tool_use messages arrive!
@@ -193,16 +307,12 @@ Sub-agent dR() generator
   │           ▼
   │         (same path as above)      ← tool_result messages arrive
   │
-  ├── stream_event (thinking_delta, text_delta, etc.)
-  │     │
-  │     └── DROPPED entirely          ← never sent to progress callback
-  │
   └── (loop ends)
         │
         ▼
       UEA(O1, agentId, ...)
         │
-        ├── Extracts text-only (Filter #2)
+        ├── Extracts text-only (Filter #3) — NOT PATCHED (by design)
         │
         ▼
       return {status:"completed", content: [text blocks only]}
@@ -211,130 +321,538 @@ Sub-agent dR() generator
       Parent receives tool_result with text summary only
 ```
 
-## What the SDK Consumer Currently Receives
-
-For a sub-agent that thinks, writes text, calls Read tool, then writes more:
+## Message Flow Diagram — After Patching
 
 ```
-1. {type:"assistant", content:[{type:"tool_use", name:"Task", ...}]}     ← parent calls Task
-2. {type:"tool_progress", tool_name:"Task", elapsed_time_seconds:1}       ← ticks
-3. {type:"tool_progress", tool_name:"Task", elapsed_time_seconds:2}
-4. {type:"assistant", parent_tool_use_id:"X", content:[{type:"tool_use", name:"Read",...}]}  ← sub-agent Read (via progress)
-5. {type:"user", parent_tool_use_id:"X", content:[{type:"tool_result",...}]}                  ← sub-agent Read result
-6. {type:"tool_progress", tool_name:"Task", elapsed_time_seconds:5}
-7. {type:"user", content:[{type:"tool_result", text:"Agent completed..."}]}                   ← final result (text only)
-8. {type:"assistant", content:[...]}                                                           ← parent continues
+Sub-agent dR() generator
+  │
+  ├── stream_event (thinking_delta, text_delta, etc.)
+  │     │
+  │     ├── O1.push(msg)
+  │     └── (Patch B) j({data:{type:"agent_stream_event", event:...}})
+  │           │
+  │           ▼
+  │         U1q() wraps → {type:"progress", data:{type:"agent_stream_event",...}}
+  │           │
+  │           ▼
+  │         (Patch C) ZhA() yields → {type:"stream_event", parent_tool_use_id:...}
+  │           │
+  │           ▼
+  │         P.enqueue → SDK stdout ✓  ← stream events now arrive!
+  │
+  ├── assistant msg: [thinking, text, tool_use]
+  │     │
+  │     ├── (Patch A) ALL blocks trigger progress callback
+  │     │
+  │     ├── thinking block            ← progress callback j() ✓
+  │     ├── text block                ← progress callback j() ✓
+  │     └── tool_use block            ← progress callback j() ✓
+  │           │
+  │           ▼
+  │         U1q() → ZhA() → P.enqueue → SDK stdout
+  │
+  ├── user msg: [tool_result]         ← (unchanged, already worked)
+  │
+  └── (loop ends)
+        │
+        ▼
+      UEA() → text-only result       ← NOT CHANGED (by design)
 ```
 
-**Missing from the stream:**
-- Sub-agent thinking tokens (never sent)
-- Sub-agent text responses (never sent)
-- Sub-agent stream_events / deltas (never sent)
-- Sub-agent thinking in final result (stripped by UEA)
+## The Patches
 
-## What the Output File Contains
+### Patch A — Content-block filter removal
 
-The `.output` file (for background agents) contains even less:
+**Removes Filter #1.** The inner loop over content blocks and the
+`tool_use`/`tool_result` type check are replaced with a simpler loop that
+fires the progress callback once per normalized message.
+
+Before:
+
+```js
+for (let $1 of _1)
+    for (let G1 of $1.message.content) {
+        if (G1.type !== "tool_use" && G1.type !== "tool_result") continue;
+        if (j) j({toolUseID: `agent_${D.message.id}`, data: {
+            message: $1, normalizedMessages: T1,
+            type: "agent_progress", prompt: A, resume: z, agentId: r
+        }});
+    }
+```
+
+After:
+
+```js
+for (let $1 of _1) {
+    if (j) j({toolUseID: `agent_${D.message.id}`, data: {
+        message: $1, normalizedMessages: T1,
+        type: "agent_progress", prompt: A, resume: z, agentId: r
+    }});
+}
+```
+
+The inner `for (let G1 of $1.message.content)` and the
+`if (G1.type !== "tool_use" ...)` filter are both removed. The callback now
+fires once per normalized message regardless of what content blocks it
+contains.
+
+**Why this is safe:**
+- `ZhA()` already handles `agent_progress` data type correctly for both
+  assistant and user messages
+- The `iO()` normalization splits multi-block messages into individual
+  messages (one content block each), so each progress callback call contains
+  exactly one content block
+- The SDK consumer sees the same message structure, just with additional
+  content block types it wasn't seeing before (text, thinking)
+- The parent model's tool_result (via UEA) is not affected
+
+**How to find this code in a new version:**
+Search for the unique pattern of nested for-loops with a `tool_use`/
+`tool_result` type check followed by a progress callback call containing
+`agent_progress`:
 
 ```
-(text content from assistant messages only, concatenated with newlines)
+type!=="tool_use"&&.*type!=="tool_result".*continue.*agent_progress
 ```
 
-No JSON structure, no message boundaries, no thinking, no tool calls.
+### Patch B — Stream event forwarding
 
-## Where Thinking Tokens DO Exist
+**Removes Filter #2.** Adds a branch in the type-check code that catches
+`stream_event` messages and forwards them through the progress callback as
+a new `agent_stream_event` data type.
+
+Before:
+
+```js
+if (O1.push(Y1),
+    Y1.type !== "assistant" && Y1.type !== "user")
+    continue;
+```
+
+After:
+
+```js
+if (O1.push(Y1),
+    Y1.type !== "assistant" && Y1.type !== "user") {
+    if (Y1.type === "stream_event" && j) j({
+        toolUseID: `agent_${D.message.id}`,
+        data: {type: "agent_stream_event", event: Y1.event, agentId: r}
+    });
+    continue
+}
+```
+
+The `continue;` is changed to a block `{...continue}` that first checks for
+stream events and forwards them.
+
+**Why this is safe:**
+- All other message types (system, progress, etc.) still hit `continue` and
+  are skipped, matching the original behavior
+- The stream event's `event` property is passed through unchanged — it
+  contains the raw API event (`content_block_delta`, etc.)
+- The `U1q()` wrapper adds `uuid`, `timestamp`, and `parentToolUseID`
+  automatically
+- No modification to `O1` collection — stream events are still pushed to
+  the internal array as before
+
+**How to find this code in a new version:**
+Search for the comma-expression pattern that pushes to an array and then
+checks for assistant/user type:
+
+```
+\.push\(.*\.type!=="assistant"&&.*\.type!=="user"\)continue
+```
+
+### Patch C — ZhA/ihA handler for agent_stream_event
+
+**Adds a new handler in the message converter.** The `ZhA()` (v2.1.38) /
+`ihA()` (v2.1.39) generator function converts internal messages to SDK
+output format. We add handling for the new `agent_stream_event` data type
+so it yields proper `{type: "stream_event", parent_tool_use_id}` SDK
+messages.
+
+Injected before the `bash_progress` handler:
+
+```js
+else if (A.data.type === "agent_stream_event") {
+    yield {
+        type: "stream_event",
+        event: A.data.event,
+        parent_tool_use_id: A.parentToolUseID,
+        session_id: U6(),
+        uuid: A.uuid
+    }
+}
+```
+
+**The full ZhA/ihA function structure (for reference):**
+
+```js
+// v2.1.38: function*ZhA(A), char ~9069375
+// v2.1.39: function*ihA(A), char ~9085100
+function* ZhA(A) {
+    switch (A.type) {
+        case "assistant":
+            // Direct assistant messages (from parent model)
+            for (let q of iO([A])) {
+                if (!et(q)) continue;
+                yield {type:"assistant", message:q.message,
+                       parent_tool_use_id:null, session_id:U6(), ...};
+            }
+            return;
+
+        case "progress":
+            if (A.data.type === "agent_progress")
+                // Sub-agent messages (our Patch A sends more through here)
+                for (let q of iO([A.data.message]))
+                    switch (q.type) {
+                        case "assistant":
+                            yield {type:"assistant", parent_tool_use_id:A.parentToolUseID, ...};
+                            break;
+                        case "user":
+                            yield {type:"user", parent_tool_use_id:A.parentToolUseID, ...};
+                            break;
+                    }
+
+            // ← Patch C injects here ←
+            // else if (A.data.type === "agent_stream_event") { yield ... }
+
+            else if (A.data.type === "bash_progress")
+                // Bash tool progress (elapsed time)
+                yield {type:"tool_progress", ...};
+            break;
+
+        case "user":
+            // Direct user messages
+            ...
+    }
+}
+```
+
+**Why this is safe:**
+- `ZhA` is a generator function — our injected `yield` integrates naturally
+- The yielded message matches the SDK's `stream_event` Zod schema:
+  `{type, event, parent_tool_use_id, uuid, session_id}`
+- `A.parentToolUseID` comes from `U1q()` wrapping (set by the tool executor)
+- `A.uuid` comes from `U1q()` wrapping (generated by `_f()`)
+- `U6()` is the session ID function (same one used by all other yields in
+  this function)
+- The `else if` placement means it only triggers for the new
+  `agent_stream_event` type — existing `agent_progress` and `bash_progress`
+  paths are untouched
+
+**How to find this code in a new version:**
+Search for a generator function that contains both `agent_progress` and
+`bash_progress` string literals, with `parent_tool_use_id` in yields:
+
+```
+function\*.*agent_progress.*bash_progress
+```
+
+Or search for the `bash_progress` anchor specifically:
+
+```
+else if(A.data.type==="bash_progress"){
+```
+
+This pattern is unique in the codebase (verified: only 1 occurrence).
+
+### Patch D — .output file thinking inclusion
+
+**Patches Filter #4.** Updates the text extraction function and background
+agent output writer to include thinking blocks alongside text blocks.
+
+For the text extraction function:
+
+Before:
+
+```js
+.filter((z) => z.type === "text")
+.map((z) => ("text" in z) ? z.text : "")
+```
+
+After:
+
+```js
+.filter((z) => z.type === "text" || z.type === "thinking")
+.map((z) => ("text" in z) ? z.text : ("thinking" in z) ? z.thinking : "")
+```
+
+The same change is applied to the background agent polling map.
+
+**Note on text extraction function naming:**
+- v2.1.38: `FM6` at char ~9019631
+- v2.1.39: `sM6` at char ~9022069
+- The function structure is stable: `function NAME(A, q="Execution completed")`
+  followed by `GN(A)` / `PN(A)` / `HN(A)` call (get-last-assistant-message),
+  then `.filter().map().join()`
+
+**How to find this code in a new version:**
+Search for the unique function signature with "Execution completed" default:
+
+```
+function.*="Execution completed".*\.filter.*type==="text"
+```
+
+For the background polling map, search for:
+
+```
+\.map.*type==="assistant".*\.filter.*type==="text".*\.join.*return.*\(
+```
+
+This pattern is unique — it's the only place that maps over messages,
+extracts text from assistant messages, and JSON-stringifies everything else.
+
+## What's NOT Changed
+
+**UEA (task result)** — The final result returned to the parent model from
+a sub-agent still contains text-only content. Thinking tokens are not
+included in the task result, as they would waste the parent model's context
+window. The parent doesn't need the sub-agent's internal reasoning — it
+just needs the final answer.
+
+## What the SDK Consumer Now Receives
+
+For a sub-agent that thinks, writes text, calls Read tool, then responds:
+
+```
+ 1. {type:"assistant", content:[{type:"tool_use", name:"Task",...}]}
+      ← parent calls Task
+
+ 2. {type:"stream_event", parent_tool_use_id:"X",
+      event:{type:"content_block_delta", delta:{type:"thinking_delta",...}}}
+      ← sub-agent thinking delta (NEW, Patch B+C)
+
+ 3. {type:"stream_event", parent_tool_use_id:"X",
+      event:{type:"content_block_delta", delta:{type:"text_delta",...}}}
+      ← sub-agent text delta (NEW, Patch B+C)
+
+ 4. {type:"assistant", parent_tool_use_id:"X",
+      content:[{type:"thinking", thinking:"..."}]}
+      ← sub-agent thinking block (NEW, Patch A)
+
+ 5. {type:"assistant", parent_tool_use_id:"X",
+      content:[{type:"text", text:"..."}]}
+      ← sub-agent text block (NEW, Patch A)
+
+ 6. {type:"assistant", parent_tool_use_id:"X",
+      content:[{type:"tool_use", name:"Read",...}]}
+      ← sub-agent tool call (already worked)
+
+ 7. {type:"user", parent_tool_use_id:"X",
+      content:[{type:"tool_result",...}]}
+      ← sub-agent tool result (already worked)
+
+ 8. {type:"tool_progress", tool_name:"Task", elapsed_time_seconds:5}
+      ← progress ticks (unchanged)
+
+ 9. {type:"user", content:[{type:"tool_result",
+      text:"Agent completed: ...text-only summary..."}]}
+      ← final result, text only (unchanged, UEA not patched)
+
+10. {type:"assistant", content:[...]}
+      ← parent continues with sub-agent's text summary
+```
+
+Messages from sub-agents carry `parent_tool_use_id` for attribution.
+
+## Where Thinking Tokens Exist After Patching
 
 | Location | Has thinking? | Accessible? |
 |---|---|---|
-| Sub-agent `dR()` yield | Yes | No — consumed inside Task.call() |
-| `O1[]` array in Task.call() | Yes | No — local variable, discarded after UEA() |
-| Sub-agent transcript (`.jsonl`) | Yes | Yes — but requires knowing the path and parsing JSONL |
-| Sub-agent stream_events | Yes | No — never forwarded to progress callback |
-| SDK stdout stream | No | N/A |
-| `.output` file | No | N/A |
+| Sub-agent `dR()` yield | Yes | Yes — forwarded via Patch A |
+| Sub-agent stream_events | Yes | Yes — forwarded via Patch B+C |
+| SDK stdout stream | Yes | Yes — `parent_tool_use_id` set |
+| `.output` file (background) | Yes | Yes — included via Patch D |
+| Sub-agent transcript (`.jsonl`) | Yes | Yes — always had it |
+| Main session transcript (`.jsonl`) | Yes | Yes — via progress messages |
+| Task tool_result (UEA) | No | N/A — intentionally excluded |
 
-The transcript path follows the pattern:
+## Applying the Patch
+
+```bash
+node patch/subagent-streaming/apply.mjs
+```
+
+The script locates functions by **content pattern** rather than minified
+names, since function names change between versions. It will:
+
+1. Find `cli.js` in the SDK package
+2. Locate the content-block filter by nested for-loop pattern (Patch A)
+3. Locate the type filter by push+type-check pattern (Patch B)
+4. Locate the message converter by `bash_progress` anchor (Patch C)
+5. Locate the text extraction function by "Execution completed" pattern (Patch D)
+6. Locate the background polling map by assistant/text/stringify pattern (Patch D)
+7. Apply all patches and verify markers
+
+### Re-applying after SDK updates
+
+After running `bun install` or updating `@anthropic-ai/claude-agent-sdk`, the
+patch needs to be re-applied since `cli.js` will be replaced. Run:
+
+```bash
+node patch/task-notification/apply.mjs
+node patch/subagent-streaming/apply.mjs
+```
+
+Both patches coexist safely. Apply order doesn't matter.
+
+The script is idempotent — it detects if patches are already applied and
+skips them.
+
+### When the patch breaks
+
+If a future SDK version changes the code structure enough that pattern
+matching fails, the script will exit with an error explaining what it
+couldn't find. In that case:
+
+1. Check if the bug is fixed upstream — test if sub-agent thinking/text/
+   stream events appear in the SDK stream without patching
+2. If not fixed, extract and inspect the new `cli.js` to find equivalent
+   functions using the search patterns listed in each patch section above
+3. Update the regex patterns in `apply.mjs`
+
+## Verification
+
+After patching, launch a session and ask the model to use the Task tool
+(e.g., "use the Task tool to read file X"). In the console you should see:
+
+```
+[SDK msg] type=stream_event event.type=content_block_delta
+```
+
+With `parent_tool_use_id` set (indicating it's from a sub-agent, not the
+parent). You should also see assistant messages with thinking content:
+
+```
+[SDK msg] type=assistant subkeys=[type,message,parent_tool_use_id,session_id,uuid]
+```
+
+Where the message content includes `type:"thinking"` blocks.
+
+## Key Functions Reference
+
+| Name (v2.1.38 → v2.1.39) | Purpose | Char offset (v2.1.39) |
+|---|---|---|
+| `dR()` → (unchanged) | Sub-agent execution generator | ~7904721 |
+| `UEA()` → (unchanged) | Extract text-only result from agent messages | ~7983000 |
+| `FM6()` → `sM6()` | Extract text from last assistant message | ~9022069 |
+| `ZhA()` → `ihA()` | Convert internal messages to SDK output format | ~9085100 |
+| `U1q()` → (unchanged) | Wrap progress data into progress message format | ~10400725 |
+| `iO()` → `rO()` | Normalize messages to individual content blocks | ~10401417 |
+| `NMq` → (unchanged) | Main query class (parent loop) | ~10786784 |
+| `TMq()` → (unchanged) | Main query generator wrapper | ~10796462 |
+| `ZK1()` → (unchanged) | Write to `.output` file | ~5257061 |
+| `ww()` → (unchanged) | Generate `.output` file path | ~5257005 |
+| `GN()` → `PN()` | Get last assistant message from array | varies |
+| `Q1()` → `F1()` | JSON.stringify wrapper | varies |
+| `_f()` → (unchanged) | UUID generator for message wrapping | varies |
+
+**Note:** "unchanged" means the name happened to be the same between v2.1.38
+and v2.1.39. Names WILL change in future versions — always use content
+patterns, not names.
+
+## Broader Analysis
+
+### Sub-agent transcript is independent
+
+The sub-agent writes its own transcript to a `.jsonl` file at:
 ```
 ~/.claude/projects/<project-hash>/<session-id>/subagents/agent-<agent-id>.jsonl
 ```
 
-Each line is a JSON object. Assistant messages contain full `content` arrays
-with `thinking`, `text`, `tool_use`, etc.
+This transcript is written by the sub-agent's own recording logic (via
+`insertMessageChain`) and is **not affected by our patches**. It already
+contains full messages including thinking blocks. Our patches affect what
+flows through the SDK stream to the consumer, not what the sub-agent records.
 
-## Proposed Fix
+### Main session transcript behavior
 
-Patch the progress callback invocation in the Task tool's sync path to send
-ALL sub-agent messages to the parent, not just tool_use/tool_result. This
-would make thinking tokens, text blocks, and stream_events visible in the SDK
-stream with `parent_tool_use_id` set.
+The main session's transcript (via `bI()` → `EJq()` → `insertMessageChain()`)
+records progress messages. The `EJq()` filter clears `normalizedMessages`
+arrays from progress messages to save space, but preserves everything else.
 
-### Approach: Patch the progress callback filter
+After Patch A, the progress messages contain more content (text, thinking
+blocks), and these flow through to the transcript. The normalizedMessages
+clearing is still correct — it prevents duplicate storage of accumulated
+messages.
 
-The current filter:
+### Stream event volume considerations
+
+Forwarding sub-agent stream events (Patch B+C) significantly increases the
+volume of SDK output. Each thinking token and text token generates a separate
+`content_block_delta` event. For a sub-agent with extensive thinking, this
+can be thousands of additional messages.
+
+SDK consumers should handle the volume. Our app already handles stream events
+efficiently (appending deltas to streaming text in the Zustand store).
+
+### Background agents (async path) use a different code path
+
+The async Task path (background agents) doesn't use the progress callback.
+Instead, it runs the sub-agent detached and writes results via `ZK1()` to
+the `.output` file. Patch D handles the `.output` file writer. The stream
+event forwarding (Patches B+C) doesn't apply to background agents since
+they don't have a live progress callback connection.
+
+Background agent completion notifications are handled by the separate
+`task-notification` patch.
+
+### Zod schema validation
+
+The SDK validates messages against Zod schemas before passing them to
+consumers. The relevant schema for stream events:
+
 ```js
-if (G1.type !== "tool_use" && G1.type !== "tool_result") continue;
+// v2.1.39
+gZY = u.object({
+    type: u.literal("stream_event"),
+    event: SZY,                        // permissive event schema
+    parent_tool_use_id: u.string().nullable(),
+    uuid: oD,
+    session_id: u.string()
+})
 ```
 
-Should be removed or relaxed to allow all content block types through. This
-means the progress callback `j()` would fire for every assistant message
-content block, sending full sub-agent messages (including thinking) to the
-parent's `ZhA()` converter and out through the SDK stream.
+Our Patch C yields messages matching this schema:
+- `type: "stream_event"` ✓
+- `event: A.data.event` ✓ (raw API event, matches SZY)
+- `parent_tool_use_id: A.parentToolUseID` ✓ (string, from U1q wrapping)
+- `uuid: A.uuid` ✓ (from U1q wrapping via `_f()`)
+- `session_id: U6()` ✓
 
-### Considerations
+### `et()` filter for empty messages
 
-1. **`ZhA()` already handles `agent_progress`** — it converts them to
-   proper SDK messages with `parent_tool_use_id`. No changes needed there.
+The `ZhA()` function calls `et(q)` to filter empty messages before yielding
+assistant messages. `et()` checks:
 
-2. **Stream events** — The sub-agent's `stream_event` messages (deltas) are
-   a separate type. The current progress callback is only called for
-   `assistant` and `user` type messages. To get streaming deltas, we'd need
-   to also forward `stream_event` messages through progress. This requires
-   adding a new case in `ZhA()` or a new message type.
+```js
+function et(A) {
+    if (A.type === "progress" || A.type === "attachment" || A.type === "system")
+        return true;
+    if (typeof A.message.content === "string")
+        return A.message.content.trim().length > 0;
+    if (A.message.content.length === 0) return false;
+    if (A.message.content.length > 1) return true;
+    if (A.message.content[0].type !== "text") return true;  // non-text always passes
+    return A.message.content[0].text?.trim().length > 0;
+}
+```
 
-3. **Bandwidth** — Forwarding all sub-agent messages significantly increases
-   the volume of SDK output. Thinking tokens in particular can be very large.
-   SDK consumers should be prepared for this.
+This means:
+- Thinking-only messages pass (`type !== "text"` → returns true)
+- Text messages with empty text are filtered out
+- Messages with tool_use blocks pass
 
-4. **Background agents** — The async (background) Task path has a different
-   code structure. The background agent collects messages via `Qj1()` and
-   writes summaries via `RjA()`. The progress callback is not used. For
-   background agents, we'd also need to patch the output file writer
-   (Filter #3) or add a separate streaming mechanism.
-
-5. **The `includePartialMessages` flag** — The parent loop passes this flag
-   to `TMq()`. It controls whether `stream_event` messages are yielded. The
-   sub-agent's stream_events are independent of this flag since they never
-   reach the parent loop at all.
-
-6. **Sync vs Async paths** — The sync path (foreground Task) can be patched
-   at the progress callback. The async path (background Task) needs a
-   different approach since it runs detached and writes to the `.output` file.
-
-## Key Functions Reference
-
-| Minified name | Purpose | Location (char offset) |
-|---|---|---|
-| `dR()` | Sub-agent execution generator | ~7904721 |
-| `UEA()` | Extract text-only result from agent messages | ~7983000 |
-| `ZK1()` | Write to `.output` file | ~5257061 |
-| `ww()` | Generate `.output` file path | ~5257005 |
-| `ZhA()` | Convert internal messages to SDK output format | ~9069375 |
-| `NMq` | Main query class (parent loop) | ~10786784 |
-| `TMq()` | Main query generator wrapper | ~10796462 |
-| `RJz()` | Headless streaming entry point | ~10808000 |
-| `Qj1()` | Progress tracking (token/tool counts) | ~5276596 |
-| `RjA()` | Update task progress state | ~5278384 |
-| `vK1()` | Task completion notification (→ HST) | ~5277508 |
-| `iO()` | Normalize messages to individual content blocks | ~10401417 |
-| `JT6()` | Transform content blocks (parse tool input) | ~10410482 |
-| `Ij1()` | Create symlink for output file | ~5257819 |
-| `kh()` | Generate transcript path for subagent | ~10451189 |
+After Patch A, more messages flow through `ZhA()`, but `et()` correctly
+handles all content types. No change needed to `et()`.
 
 ## Files
 
 | File | Purpose |
 |---|---|
 | `README.md` | This document |
+| `apply.mjs` | Patch script — run after install or SDK update |
 
 ## Related Patches
 
@@ -346,14 +864,27 @@ parent's `ZhA()` converter and out through the SDK stream.
 
 ## Discovery Method
 
-1. Traced the Task tool's `call()` function in `cli.js`
+1. Traced the Task tool's `call()` function in `cli.js` by searching for
+   `agent_progress` string literal (3 occurrences — one in forked slash
+   commands, two in the Task tool sync path)
 2. Found the progress callback `j` only fires for `tool_use` and
-   `tool_result` content blocks
-3. Traced `ZhA()` to confirm it correctly handles `agent_progress` type
-   messages — the converter works, it just never receives thinking/text
-4. Verified `UEA()` strips thinking from the final result
-5. Confirmed the `.output` file writer also strips to text-only
-6. Checked `readSdkMessages()` in `sdk.mjs` — no filtering there, everything
+   `tool_result` content blocks (Filter #1)
+3. Found stream events are dropped before reaching the content-block loop
+   by the `type !== "assistant" && type !== "user"` check (Filter #2)
+4. Traced `ZhA()`/`ihA()` to confirm it correctly handles `agent_progress`
+   type messages — the converter works, it just never receives thinking/text
+5. Verified `UEA()` strips thinking from the final result (Filter #3) —
+   intentionally NOT patched
+6. Found `.output` file writer and `FM6()`/`sM6()` strip to text-only
+   (Filter #4)
+7. Confirmed `U1q()` wraps progress callback arguments with uuid, timestamp,
+   and parentToolUseID — this is the bridge that makes our progress callback
+   calls flow through the existing architecture
+8. Checked `readSdkMessages()` in `sdk.mjs` — no filtering there, everything
    that reaches stdout flows through to the SDK consumer
-7. Confirmed thinking tokens exist in the sub-agent's transcript `.jsonl`
-   file but nowhere in the SDK stream
+9. Confirmed thinking tokens exist in the sub-agent's transcript `.jsonl`
+   file but not in the SDK stream (before patching)
+10. Verified the Zod schema for `stream_event` messages accepts our
+    yielded structure
+11. Tested on both v2.1.38 and v2.1.39 — function names changed but
+    architecture identical
