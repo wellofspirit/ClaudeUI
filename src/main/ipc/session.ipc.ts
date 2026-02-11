@@ -1,4 +1,5 @@
 import { ipcMain, dialog, BrowserWindow } from 'electron'
+import { existsSync, readFileSync } from 'fs'
 import { ClaudeSession } from '../services/claude-session'
 import type { ApprovalDecision } from '../../shared/types'
 
@@ -33,4 +34,13 @@ export function registerSessionIpc(win: BrowserWindow): void {
       session?.resolveApproval(requestId, decision, answers)
     }
   )
+
+  ipcMain.handle('session:read-task-output', (_event, filePath: string) => {
+    try {
+      if (!existsSync(filePath)) return null
+      return readFileSync(filePath, 'utf-8')
+    } catch {
+      return null
+    }
+  })
 }

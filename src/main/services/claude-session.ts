@@ -116,6 +116,23 @@ export class ClaudeSession {
               }
             }
           }
+        } else if (type === 'tool_progress') {
+          this.send('session:task-progress', {
+            toolUseId: (msg.tool_use_id as string) || '',
+            toolName: (msg.tool_name as string) || '',
+            parentToolUseId: (msg.parent_tool_use_id as string) || null,
+            elapsedTimeSeconds: (msg.elapsed_time_seconds as number) || 0
+          })
+        } else if (type === 'system') {
+          const subtype = msg.subtype as string | undefined
+          if (subtype === 'task_notification') {
+            this.send('session:task-notification', {
+              taskId: (msg.task_id as string) || '',
+              status: (msg.status as string) || 'completed',
+              outputFile: (msg.output_file as string) || '',
+              summary: (msg.summary as string) || ''
+            })
+          }
         } else if (type === 'result') {
           const cost = (msg.total_cost_usd as number) || 0
           this.totalCostUsd += cost

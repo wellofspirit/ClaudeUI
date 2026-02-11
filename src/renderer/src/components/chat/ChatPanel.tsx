@@ -4,6 +4,8 @@ import { MessageBubble } from './MessageBubble'
 import { StreamingText } from './StreamingText'
 import { ThinkingBlock } from './ThinkingBlock'
 import { InputBox } from './InputBox'
+import { TodoWidget } from '../TodoWidget'
+import { FloatingApproval } from './FloatingApproval'
 
 export function ChatPanel(): React.JSX.Element {
   const messages = useSessionStore((s) => s.messages)
@@ -55,6 +57,12 @@ export function ChatPanel(): React.JSX.Element {
           </div>
         )}
       </div>
+
+      {/* Todo widget */}
+      <TodoWidget />
+
+      {/* Floating approval for sub-agent tool calls */}
+      <FloatingApproval />
 
       {/* Error banner + Input — fixed at bottom, centered */}
       <div className="absolute bottom-0 left-0 right-0 pointer-events-none">

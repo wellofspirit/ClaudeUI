@@ -4,6 +4,10 @@ import { MarkdownRenderer } from './MarkdownRenderer'
 import { ToolCallBlock } from './ToolCallBlock'
 import { AskUserQuestionBlock } from './AskUserQuestionBlock'
 import { ThinkingBlock } from './ThinkingBlock'
+import { TodoToolBlock } from './TodoToolBlock'
+import { TaskCard } from './TaskCard'
+
+const TODO_TOOLS = new Set(['TodoWrite'])
 
 export function MessageBubble({ message }: { message: ChatMessage }): React.JSX.Element {
   const pendingApprovals = useSessionStore((s) => s.pendingApprovals)
@@ -114,6 +118,12 @@ export function MessageBubble({ message }: { message: ChatMessage }): React.JSX.
           if (block.toolName === 'AskUserQuestion') {
             return <AskUserQuestionBlock key={index} block={block} result={result} approval={approval} />
           }
+          if (block.toolName && TODO_TOOLS.has(block.toolName)) {
+            return <TodoToolBlock key={index} block={block} result={result} />
+          }
+          if (block.toolName === 'Task') {
+            return <TaskCard key={index} block={block} result={result} />
+          }
           return <ToolCallBlock key={index} block={block} result={result} approval={approval} />
         }
         // Multiple tool calls — wrap in bordered group
@@ -124,6 +134,12 @@ export function MessageBubble({ message }: { message: ChatMessage }): React.JSX.
               const approval = block.toolUseId ? approvalMap.get(block.toolUseId) : undefined
               if (block.toolName === 'AskUserQuestion') {
                 return <AskUserQuestionBlock key={index} block={block} result={result} approval={approval} />
+              }
+              if (block.toolName && TODO_TOOLS.has(block.toolName)) {
+                return <TodoToolBlock key={index} block={block} result={result} />
+              }
+              if (block.toolName === 'Task') {
+                return <TaskCard key={index} block={block} result={result} />
               }
               return <ToolCallBlock key={index} block={block} result={result} approval={approval} />
             })}

@@ -3,7 +3,10 @@ import type {
   ChatMessage,
   SessionStatus,
   PendingApproval,
-  ContentBlock
+  ContentBlock,
+  TodoItem,
+  TaskProgress,
+  TaskNotification
 } from '../../../shared/types'
 
 /**
@@ -87,6 +90,11 @@ interface SessionState {
   status: SessionStatus
   pendingApprovals: PendingApproval[]
   error: string | null
+  todos: TodoItem[]
+  taskProgressMap: Record<string, TaskProgress>
+  taskNotifications: TaskNotification[]
+  openedTaskToolUseIds: string[]
+  taskPanelOpen: boolean
 
   setCwd: (cwd: string | null) => void
   openDirectory: (cwd: string) => void
@@ -101,6 +109,12 @@ interface SessionState {
   clearPendingApprovals: () => void
   setError: (error: string | null) => void
   appendToolResult: (toolUseId: string, result: string, isError: boolean) => void
+  setTodos: (todos: TodoItem[]) => void
+  updateTaskProgress: (progress: TaskProgress) => void
+  addTaskNotification: (notification: TaskNotification) => void
+  openTaskPanel: (toolUseId: string) => void
+  closeTaskPanel: () => void
+  removeTaskFromPanel: (toolUseId: string) => void
 }
 
 export const useSessionStore = create<SessionState>((set) => ({
@@ -120,6 +134,11 @@ export const useSessionStore = create<SessionState>((set) => ({
   },
   pendingApprovals: [],
   error: null,
+  todos: [],
+  taskProgressMap: {},
+  taskNotifications: [],
+  openedTaskToolUseIds: [],
+  taskPanelOpen: false,
 
   setCwd: (cwd) => set({ cwd }),
 
@@ -130,7 +149,7 @@ export const useSessionStore = create<SessionState>((set) => ({
         ? state.recentDirs
         : [cwd, ...state.recentDirs].slice(0, 20)
       if (!alreadyExists) saveRecentDirs(recentDirs)
-      return { cwd, messages: [], streamingText: '', streamingThinking: '', thinkingStartedAt: null, thinkingDurationMs: null, error: null, pendingApprovals: [], recentDirs }
+      return { cwd, messages: [], streamingText: '', streamingThinking: '', thinkingStartedAt: null, thinkingDurationMs: null, error: null, pendingApprovals: [], recentDirs, todos: [], taskProgressMap: {}, taskNotifications: [], openedTaskToolUseIds: [], taskPanelOpen: false }
     }),
 
   addMessage: (message) =>
@@ -241,5 +260,34 @@ export const useSessionStore = create<SessionState>((set) => ({
         }
       }
       return { messages }
+    }),
+
+  setTodos: (todos) => set({ todos }),
+
+  updateTaskProgress: (progress) =>
+    set((state) => ({
+      taskProgressMap: { ...state.taskProgressMap, [progress.toolUseId]: progress }
+    })),
+
+  addTaskNotification: (notification) =>
+    set((state) => ({
+      taskNotifications: [...state.taskNotifications, notification]
+    })),
+
+  openTaskPanel: (toolUseId) =>
+    set((state) => ({
+      openedTaskToolUseIds: state.openedTaskToolUseIds.includes(toolUseId)
+        ? state.openedTaskToolUseIds
+        : [...state.openedTaskToolUseIds, toolUseId],
+      taskPanelOpen: true
+    })),
+
+  closeTaskPanel: () =>
+    set({ openedTaskToolUseIds: [], taskPanelOpen: false }),
+
+  removeTaskFromPanel: (toolUseId) =>
+    set((state) => {
+      const updated = state.openedTaskToolUseIds.filter((id) => id !== toolUseId)
+      return { openedTaskToolUseIds: updated, taskPanelOpen: updated.length > 0 }
     })
 }))

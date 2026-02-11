@@ -247,6 +247,11 @@ function getSummary(block: ContentBlock): string {
     const n = input.questions.length
     return `${n} question${n !== 1 ? 's' : ''}`
   }
+  if (block.toolName === 'TodoWrite' && Array.isArray(input.todos)) {
+    const completed = input.todos.filter((t: Record<string, unknown>) => t.status === 'completed').length
+    return `${completed}/${input.todos.length} tasks`
+  }
+  if (block.toolName === 'Task' && input.description) return trunc(String(input.description), 60)
 
   return trunc(JSON.stringify(input), 50)
 }

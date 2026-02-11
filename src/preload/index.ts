@@ -46,6 +46,17 @@ const api: ClaudeAPI = {
     const handler = (_: Electron.IpcRendererEvent, data: unknown): void => cb(data as never)
     ipcRenderer.on('session:tool-result', handler)
     return () => ipcRenderer.removeListener('session:tool-result', handler)
+  },
+  readTaskOutput: (filePath: string) => ipcRenderer.invoke('session:read-task-output', filePath),
+  onTaskProgress: (cb) => {
+    const handler = (_: Electron.IpcRendererEvent, data: unknown): void => cb(data as never)
+    ipcRenderer.on('session:task-progress', handler)
+    return () => ipcRenderer.removeListener('session:task-progress', handler)
+  },
+  onTaskNotification: (cb) => {
+    const handler = (_: Electron.IpcRendererEvent, data: unknown): void => cb(data as never)
+    ipcRenderer.on('session:task-notification', handler)
+    return () => ipcRenderer.removeListener('session:task-notification', handler)
   }
 }
 

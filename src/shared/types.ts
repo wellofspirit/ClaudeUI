@@ -59,6 +59,28 @@ export interface StreamDelta {
   text: string
 }
 
+export type TodoStatus = 'pending' | 'in_progress' | 'completed'
+
+export interface TodoItem {
+  content: string
+  status: TodoStatus
+  activeForm: string
+}
+
+export interface TaskProgress {
+  toolUseId: string
+  toolName: string
+  parentToolUseId: string | null
+  elapsedTimeSeconds: number
+}
+
+export interface TaskNotification {
+  taskId: string
+  status: 'completed' | 'failed' | 'stopped'
+  outputFile: string
+  summary: string
+}
+
 export interface ClaudeAPI {
   pickFolder(): Promise<string | null>
   createSession(cwd: string): Promise<void>
@@ -72,4 +94,7 @@ export interface ClaudeAPI {
   onResult(cb: (result: SessionResult) => void): () => void
   onError(cb: (error: string) => void): () => void
   onToolResult(cb: (data: { toolUseId: string; result: string; isError: boolean }) => void): () => void
+  readTaskOutput(filePath: string): Promise<string | null>
+  onTaskProgress(cb: (data: TaskProgress) => void): () => void
+  onTaskNotification(cb: (data: TaskNotification) => void): () => void
 }
