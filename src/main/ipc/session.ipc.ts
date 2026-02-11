@@ -15,6 +15,8 @@ export function registerSessionIpc(win: BrowserWindow): void {
   })
 
   ipcMain.handle('session:create', (_event, cwd: string) => {
+    // Clean up old session before creating a new one
+    session?.cancel()
     session = new ClaudeSession(win, cwd)
   })
 

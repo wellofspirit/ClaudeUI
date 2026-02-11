@@ -28,6 +28,53 @@ interface BackgroundTaskEntry {
   lastContent: string
 }
 
+/**
+ * Push-based async iterable for feeding user messages into the SDK's
+ * streaming input mode. This keeps the CLI subprocess alive so background
+ * agents can report back via task_notification.
+ */
+class MessageChannel<T> {
+  private queue: T[] = []
+  private waiting: ((result: IteratorResult<T>) => void) | null = null
+  private isDone = false
+
+  push(msg: T): void {
+    if (this.isDone) return
+    if (this.waiting) {
+      const resolve = this.waiting
+      this.waiting = null
+      resolve({ value: msg, done: false })
+    } else {
+      this.queue.push(msg)
+    }
+  }
+
+  end(): void {
+    this.isDone = true
+    if (this.waiting) {
+      const resolve = this.waiting
+      this.waiting = null
+      resolve({ value: undefined as T, done: true })
+    }
+  }
+
+  [Symbol.asyncIterator](): AsyncIterator<T> {
+    return this
+  }
+
+  async next(): Promise<IteratorResult<T>> {
+    if (this.queue.length > 0) {
+      return { value: this.queue.shift()!, done: false }
+    }
+    if (this.isDone) {
+      return { value: undefined as T, done: true }
+    }
+    return new Promise((resolve) => {
+      this.waiting = resolve
+    })
+  }
+}
+
 const AGENT_ID_RE = /agentId:\s*(\S+)/
 const OUTPUT_FILE_RE = /output_file:\s*(\S+)/
 const TASK_ID_RE = /task_id:\s*(\S+)/
@@ -35,11 +82,13 @@ const TASK_ID_RE = /task_id:\s*(\S+)/
 export class ClaudeSession {
   private sessionId: string | null = null
   private abortController: AbortController | null = null
+  private isProcessing = false
   private pendingApprovals = new Map<string, PendingApprovalEntry>()
   private backgroundTasks = new Map<string, BackgroundTaskEntry>()
   private win: BrowserWindow
   private cwd: string
   private totalCostUsd = 0
+  private messageChannel: MessageChannel<unknown> | null = null
 
   constructor(win: BrowserWindow, cwd: string) {
     this.win = win
@@ -49,7 +98,7 @@ export class ClaudeSession {
 
   get status(): SessionStatus {
     return {
-      state: this.abortController ? 'running' : 'idle',
+      state: this.isProcessing ? 'running' : 'idle',
       sessionId: this.sessionId,
       model: 'claude-sonnet-4-5-20250929',
       cwd: this.cwd,
@@ -58,18 +107,49 @@ export class ClaudeSession {
   }
 
   async run(prompt: string): Promise<void> {
-    this.abortController = new AbortController()
+    this.isProcessing = true
     this.sendStatus()
 
+    // SDK streaming input format — must match SDKUserMessage type
+    // (session_id and parent_tool_use_id are required by the CLI parser)
+    const sdkMessage = {
+      type: 'user' as const,
+      session_id: this.sessionId || '',
+      message: { role: 'user' as const, content: prompt },
+      parent_tool_use_id: null
+    }
+
+    if (this.messageChannel) {
+      // Session already active — push to existing channel
+      console.log('[run] Pushing message to existing channel')
+      this.messageChannel.push(sdkMessage)
+      return
+    }
+
+    // First run — start persistent session with streaming input mode.
+    // Passing an AsyncIterable (instead of a string) keeps the CLI subprocess
+    // alive so background agents can report back via task_notification.
+    const channel = new MessageChannel<unknown>()
+    this.messageChannel = channel
+    channel.push(sdkMessage)
+    this.abortController = new AbortController()
+
     try {
+      console.log('[run] Starting SDK query in streaming input mode')
       const q = sdkQuery({
-        prompt,
+        prompt: channel as AsyncIterable<never>,
         options: {
           cwd: this.cwd,
           permissionMode: 'default',
           abortController: this.abortController,
           includePartialMessages: true,
           thinking: { type: 'enabled', budgetTokens: 10000 },
+          stderr: (text: string) => {
+            // SDK debug output — only log interesting lines
+            if (text.includes('streamInput') || text.includes('endInput') || text.includes('result') || text.includes('exit')) {
+              console.log(`[SDK stderr] ${text.trim()}`)
+            }
+          },
           ...(this.sessionId ? { resume: this.sessionId } : {}),
           canUseTool: async (toolName, input, opts) => {
             const requestId = uuid()
@@ -108,16 +188,25 @@ export class ClaudeSession {
           this.sendStatus()
         }
 
-        // Debug: log all non-streaming SDK message types
-        if (type !== 'stream_event') {
-          console.log(`[SDK msg] type=${type}`, type === 'system' ? JSON.stringify(msg, null, 2) : `subkeys=[${Object.keys(msg).join(',')}]`)
+        // Debug: log ALL SDK messages
+        if (type === 'stream_event') {
+          const evt = (msg.event as Record<string, unknown>)?.type
+          console.log(`[SDK msg] type=stream_event event.type=${evt}`)
+        } else {
+          console.log(`[SDK msg] type=${type} subkeys=[${Object.keys(msg).join(',')}]`, JSON.stringify(msg).substring(0, 500))
+        }
+
+        // Any assistant or stream content means we're processing
+        if ((type === 'assistant' || type === 'stream_event') && !this.isProcessing) {
+          this.isProcessing = true
+          this.sendStatus()
         }
 
         if (type === 'assistant') {
           const chatMsg = this.transformAssistantMessage(msg)
           if (chatMsg) this.send('session:message', chatMsg)
         } else if (type === 'user') {
-          this.extractToolResults(msg)
+          await this.handleUserMessage(msg)
         } else if (type === 'stream_event') {
           const event = msg.event as Record<string, unknown> | undefined
           if (event) {
@@ -155,7 +244,7 @@ export class ClaudeSession {
             for (const [tuId, entry] of this.backgroundTasks) {
               if (entry.agentId === taskId) {
                 matchedToolUseId = tuId
-                console.log(`[SDK task_notification] matched toolUseId=${tuId} (already resolved by poll: false)`)
+                console.log(`[SDK task_notification] matched toolUseId=${tuId}`)
                 // Do a final poll before stopping
                 await this.pollBackgroundOutput(tuId)
                 clearInterval(entry.pollInterval)
@@ -179,20 +268,39 @@ export class ClaudeSession {
         } else if (type === 'result') {
           const cost = (msg.total_cost_usd as number) || 0
           this.totalCostUsd += cost
+          this.isProcessing = false
+
+          // Handle error results
+          const subtype = msg.subtype as string | undefined
+          if (subtype && subtype !== 'success') {
+            const errors = (msg.errors as string[]) || []
+            if (errors.length) {
+              this.send('session:error', errors.join('; '))
+            }
+          }
+
           this.send('session:result', {
             totalCostUsd: this.totalCostUsd,
             durationMs: (msg.duration_ms as number) || 0,
             result: (msg.result as string) || ''
           })
+          this.sendStatus()
+          console.log(`[run] Result received (subtype=${subtype}), isProcessing=false, loop continues waiting for more messages`)
         }
       }
+      console.log('[run] for-await loop ended (SDK generator completed — CLI process exited)')
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err)
+      console.log(`[run] catch: ${errorMsg}`)
       if (!errorMsg.includes('abort')) {
         this.send('session:error', errorMsg)
       }
     } finally {
+      console.log(`[run] finally: cleaning up session (bgTasks=${this.backgroundTasks.size})`)
+      this.messageChannel?.end()
+      this.messageChannel = null
       this.abortController = null
+      this.isProcessing = false
       this.sendStatus()
     }
   }
@@ -214,8 +322,12 @@ export class ClaudeSession {
     // Stop all background task polling
     this.clearBackgroundPolling()
 
+    // End the message channel before aborting so the SDK's streamInput
+    // loop can unblock and the CLI subprocess exits cleanly
+    this.messageChannel?.end()
     this.abortController?.abort()
     this.abortController = null
+    this.isProcessing = false
     this.sendStatus()
   }
 
@@ -270,13 +382,34 @@ export class ClaudeSession {
     }
   }
 
-  private extractToolResults(msg: Record<string, unknown>): void {
+  /**
+   * Handle SDK user messages. Two cases:
+   *
+   * 1. Array content with tool_result blocks → extract tool results (normal flow)
+   * 2. String content with <task-notification> XML → background agent completed.
+   *    The SDK injects this as a synthetic user message so the model can respond.
+   *    We parse the notification, resolve the background task, and insert the
+   *    message into the conversation so the assistant's response has context.
+   */
+  private async handleUserMessage(msg: Record<string, unknown>): Promise<void> {
     const messageParam = msg.message as Record<string, unknown> | undefined
     if (!messageParam) return
 
     const content = messageParam.content
-    if (!Array.isArray(content)) return
 
+    // Case 1: Array content — extract tool_result blocks
+    if (Array.isArray(content)) {
+      this.extractToolResultsFromContent(content)
+      return
+    }
+
+    // Case 2: String content — check for task notification
+    if (typeof content === 'string' && content.includes('<task-notification>')) {
+      await this.handleTaskNotificationUserMessage(msg, content)
+    }
+  }
+
+  private extractToolResultsFromContent(content: Array<Record<string, unknown>>): void {
     for (const block of content) {
       if (typeof block !== 'object' || !block) continue
       const b = block as Record<string, unknown>
@@ -304,6 +437,64 @@ export class ClaudeSession {
         isError: !!(b.is_error)
       })
     }
+  }
+
+  /**
+   * When a background agent completes, the SDK injects a user message with
+   * <task-notification> XML (see session log line 12 of 45d85f49-...).
+   * We parse it to resolve the background task and insert the message
+   * into the conversation.
+   */
+  private async handleTaskNotificationUserMessage(
+    msg: Record<string, unknown>,
+    content: string
+  ): Promise<void> {
+    const taskId = this.extractXmlTag(content, 'task-id')
+    const status = this.extractXmlTag(content, 'status') || 'completed'
+    const summary = this.extractXmlTag(content, 'summary') || ''
+    const outputFile = ''
+
+    console.log(`[task-notification user msg] taskId=${taskId} status=${status} summary=${summary}`)
+
+    if (taskId) {
+      // Correlate with background task by agentId
+      let matchedToolUseId: string | null = null
+      for (const [tuId, entry] of this.backgroundTasks) {
+        if (entry.agentId === taskId) {
+          matchedToolUseId = tuId
+          console.log(`[task-notification user msg] matched toolUseId=${tuId}`)
+          // Do a final poll before stopping
+          await this.pollBackgroundOutput(tuId)
+          clearInterval(entry.pollInterval)
+          this.backgroundTasks.delete(tuId)
+          break
+        }
+      }
+
+      this.send('session:task-notification', {
+        taskId,
+        toolUseId: matchedToolUseId,
+        status,
+        outputFile,
+        summary
+      })
+    }
+
+    // Insert the synthetic user message into the conversation so the
+    // assistant's response (which follows) has visible context
+    const chatMsg: ChatMessage = {
+      id: (msg.uuid as string) || uuid(),
+      role: 'user',
+      content: [{ type: 'text', text: content }],
+      timestamp: Date.now()
+    }
+    this.send('session:message', chatMsg)
+  }
+
+  private extractXmlTag(xml: string, tag: string): string | null {
+    const re = new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`)
+    const match = xml.match(re)
+    return match ? match[1].trim() : null
   }
 
   private detectBackgroundTask(toolUseId: string, resultText: string): void {
