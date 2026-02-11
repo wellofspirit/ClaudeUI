@@ -10,7 +10,6 @@ export function StreamingText(): React.JSX.Element | null {
       <div className="text-[13px] text-text-primary leading-[1.6]">
         <MarkdownRenderer content={text} />
       </div>
-      <span className="inline-block w-[2px] h-[16px] bg-accent rounded-[1px] animate-cursor-blink ml-px" />
     </div>
   )
 }
