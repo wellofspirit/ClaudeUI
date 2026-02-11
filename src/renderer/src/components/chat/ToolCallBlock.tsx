@@ -1,26 +1,44 @@
 import { useState } from 'react'
-import type { ContentBlock } from '../../../../shared/types'
+import type { ContentBlock, PendingApproval } from '../../../../shared/types'
+import { useSessionStore } from '../../stores/session-store'
 
 interface Props {
   block: ContentBlock
   result?: ContentBlock
+  approval?: PendingApproval
 }
 
-export function ToolCallBlock({ block, result }: Props): React.JSX.Element {
+export function ToolCallBlock({ block, result, approval }: Props): React.JSX.Element {
+  const removePendingApproval = useSessionStore((s) => s.removePendingApproval)
   const [expanded, setExpanded] = useState(false)
   const summary = getSummary(block)
   const hasResult = !!result
   const isError = result?.isError ?? false
   const isSuccess = hasResult && !isError
+  const isPendingApproval = !!approval
 
-  // Determine border color based on result status
-  const borderColor = isError
-    ? 'border-danger/30'
-    : isSuccess
-      ? 'border-success/30'
-      : 'border-border'
+  const handleApproval = async (decision: 'allow' | 'deny'): Promise<void> => {
+    if (!approval) return
+    await window.api.respondApproval(approval.requestId, decision)
+    removePendingApproval(approval.requestId)
+  }
 
-  const statusIcon = isError ? (
+  // Determine border color based on state
+  const borderColor = isPendingApproval
+    ? 'border-warning/40'
+    : isError
+      ? 'border-danger/30'
+      : isSuccess
+        ? 'border-success/30'
+        : 'border-border'
+
+  const statusIcon = isPendingApproval ? (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-warning shrink-0">
+      <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
+      <line x1="12" y1="9" x2="12" y2="13" />
+      <line x1="12" y1="17" x2="12.01" y2="17" />
+    </svg>
+  ) : isError ? (
     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-danger shrink-0">
       <circle cx="12" cy="12" r="10" />
       <line x1="15" y1="9" x2="9" y2="15" />
@@ -40,12 +58,15 @@ export function ToolCallBlock({ block, result }: Props): React.JSX.Element {
       {/* Header */}
       <button
         onClick={() => setExpanded(!expanded)}
-        className="w-full flex items-center gap-2 px-3 h-8 text-[12px] hover:bg-bg-hover transition-colors cursor-pointer"
+        className="w-full flex items-center gap-2 px-3 h-9 text-[13px] hover:bg-bg-hover transition-colors cursor-pointer"
       >
         {statusIcon}
         <span className="font-mono font-medium text-accent">{block.toolName}</span>
-        <span className="text-text-muted truncate flex-1 text-left font-mono text-[11px]">{summary}</span>
-        <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={`text-text-muted transition-transform shrink-0 ${expanded ? 'rotate-180' : ''}`}>
+        <span className="text-text-secondary truncate flex-1 text-left font-mono text-[12px]">{summary}</span>
+        {isPendingApproval && (
+          <span className="text-[11px] font-semibold text-warning uppercase tracking-wider mr-1">Permission</span>
+        )}
+        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={`text-text-secondary transition-transform shrink-0 ${expanded ? 'rotate-180' : ''}`}>
           <polyline points="6 9 12 15 18 9" />
         </svg>
       </button>
@@ -54,20 +75,39 @@ export function ToolCallBlock({ block, result }: Props): React.JSX.Element {
       {expanded && (
         <div className="border-t border-border">
           {/* Input section */}
-          <div className="px-3 py-2">
-            <div className="text-[10px] text-text-muted uppercase tracking-wider mb-1">Input</div>
+          <div className="px-3 py-2.5">
+            <div className="text-[11px] text-text-secondary uppercase tracking-wider mb-1.5">Input</div>
             <ToolInput block={block} />
           </div>
 
           {/* Result section */}
           {hasResult && result.toolResult && (
-            <div className="px-3 py-2 border-t border-border">
-              <div className={`text-[10px] uppercase tracking-wider mb-1 ${isError ? 'text-danger' : 'text-success'}`}>
+            <div className="px-3 py-2.5 border-t border-border">
+              <div className={`text-[11px] uppercase tracking-wider mb-1.5 ${isError ? 'text-danger' : 'text-success'}`}>
                 {isError ? 'Error' : 'Result'}
               </div>
               <ToolResult block={block} result={result} />
             </div>
           )}
+        </div>
+      )}
+
+      {/* Approval buttons */}
+      {isPendingApproval && (
+        <div className="flex border-t border-warning/20">
+          <button
+            onClick={() => handleApproval('deny')}
+            className="flex-1 h-8 text-[12px] font-medium text-danger hover:bg-danger/5 transition-colors cursor-pointer"
+          >
+            Deny
+          </button>
+          <div className="w-px bg-warning/20" />
+          <button
+            onClick={() => handleApproval('allow')}
+            className="flex-1 h-8 text-[12px] font-medium text-success hover:bg-success/5 transition-colors cursor-pointer"
+          >
+            Allow
+          </button>
         </div>
       )}
     </div>
@@ -81,7 +121,7 @@ function ToolInput({ block }: { block: ContentBlock }): React.JSX.Element {
   // Show command for Bash
   if (toolName === 'Bash' && input?.command) {
     return (
-      <pre className="text-[11px] text-text-secondary font-mono whitespace-pre-wrap break-words max-h-32 overflow-y-auto leading-[1.5] bg-bg-primary rounded-md p-2 border border-border">
+      <pre className="text-[12px] text-text-primary/70 font-mono whitespace-pre-wrap break-words max-h-32 overflow-y-auto leading-[1.5] bg-bg-primary rounded-md p-2 border border-border">
         $ {String(input.command)}
       </pre>
     )
@@ -108,7 +148,7 @@ function ToolInput({ block }: { block: ContentBlock }): React.JSX.Element {
 
   // Default: JSON
   return (
-    <pre className="text-[11px] text-text-secondary font-mono whitespace-pre-wrap break-words max-h-32 overflow-y-auto leading-[1.5] bg-bg-primary rounded-md p-2 border border-border">
+    <pre className="text-[12px] text-text-primary/70 font-mono whitespace-pre-wrap break-words max-h-32 overflow-y-auto leading-[1.5] bg-bg-primary rounded-md p-2 border border-border">
       {JSON.stringify(input, null, 2)}
     </pre>
   )
@@ -122,7 +162,7 @@ function ToolResult({ block, result }: { block: ContentBlock; result: ContentBlo
   // Write tool: show the content that was written (from input)
   if (toolName === 'Write' && block.toolInput?.content) {
     return (
-      <pre className="text-[11px] font-mono whitespace-pre-wrap break-words max-h-48 overflow-y-auto leading-[1.5] bg-bg-primary rounded-md p-2 border border-border text-success/80">
+      <pre className="text-[12px] font-mono whitespace-pre-wrap break-words max-h-48 overflow-y-auto leading-[1.5] bg-bg-primary rounded-md p-2 border border-border text-success/80">
         {trunc(String(block.toolInput.content), 2000)}
       </pre>
     )
@@ -140,7 +180,7 @@ function ToolResult({ block, result }: { block: ContentBlock; result: ContentBlo
   // Read tool: show file content
   if (toolName === 'Read' && !isError) {
     return (
-      <pre className="text-[11px] text-text-secondary font-mono whitespace-pre-wrap break-words max-h-48 overflow-y-auto leading-[1.5] bg-bg-primary rounded-md p-2 border border-border">
+      <pre className="text-[12px] text-text-primary/70 font-mono whitespace-pre-wrap break-words max-h-48 overflow-y-auto leading-[1.5] bg-bg-primary rounded-md p-2 border border-border">
         {trunc(text, 2000)}
       </pre>
     )
@@ -149,7 +189,7 @@ function ToolResult({ block, result }: { block: ContentBlock; result: ContentBlo
   // Bash tool: show output
   if (toolName === 'Bash' && !isError) {
     return (
-      <pre className="text-[11px] text-text-secondary font-mono whitespace-pre-wrap break-words max-h-48 overflow-y-auto leading-[1.5] bg-bg-primary rounded-md p-2 border border-border">
+      <pre className="text-[12px] text-text-primary/70 font-mono whitespace-pre-wrap break-words max-h-48 overflow-y-auto leading-[1.5] bg-bg-primary rounded-md p-2 border border-border">
         {trunc(text, 2000)}
       </pre>
     )
@@ -157,7 +197,7 @@ function ToolResult({ block, result }: { block: ContentBlock; result: ContentBlo
 
   // Error or default
   return (
-    <pre className={`text-[11px] font-mono whitespace-pre-wrap break-words max-h-48 overflow-y-auto leading-[1.5] bg-bg-primary rounded-md p-2 border border-border ${isError ? 'text-danger' : 'text-text-secondary'}`}>
+    <pre className={`text-[12px] font-mono whitespace-pre-wrap break-words max-h-48 overflow-y-auto leading-[1.5] bg-bg-primary rounded-md p-2 border border-border ${isError ? 'text-danger' : 'text-text-primary/70'}`}>
       {trunc(text, 2000)}
     </pre>
   )
@@ -168,7 +208,7 @@ function DiffView({ oldStr, newStr }: { oldStr: string; newStr: string }): React
   const newLines = newStr.split('\n')
 
   return (
-    <div className="rounded-md border border-border bg-bg-primary overflow-hidden text-[11px] font-mono leading-[1.5]">
+    <div className="rounded-md border border-border bg-bg-primary overflow-hidden text-[12px] font-mono leading-[1.5]">
       {oldLines.length > 0 && oldStr && (
         <div className="border-b border-border">
           {oldLines.map((line, i) => (

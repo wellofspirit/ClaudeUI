@@ -76,9 +76,15 @@ html, #root {
   30% { transform: translateY(-4px); opacity: 1; }
 }
 
+@keyframes thinking-wave {
+  0%, 100% { color: var(--color-text-secondary); }
+  40%, 60% { color: var(--color-text-primary); }
+}
+
 .animate-fade-in { animation: fade-in 0.15s ease-out; }
 .animate-cursor-blink { animation: cursor-blink 1s step-end infinite; }
 .animate-spin-slow { animation: spin-slow 1.5s linear infinite; }
+.animate-thinking-wave { animation: thinking-wave 2s ease-in-out infinite; }
 
 ::selection {
   background: var(--color-accent);

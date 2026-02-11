@@ -2,13 +2,15 @@ import { useRef, useEffect, useState } from 'react'
 import { useSessionStore } from '../../stores/session-store'
 import { MessageBubble } from './MessageBubble'
 import { StreamingText } from './StreamingText'
-import { ApprovalPrompt } from './ApprovalPrompt'
+import { ThinkingBlock } from './ThinkingBlock'
 import { InputBox } from './InputBox'
 
 export function ChatPanel(): React.JSX.Element {
   const messages = useSessionStore((s) => s.messages)
   const streamingText = useSessionStore((s) => s.streamingText)
-  const pendingApproval = useSessionStore((s) => s.pendingApproval)
+  const streamingThinking = useSessionStore((s) => s.streamingThinking)
+  const thinkingStartedAt = useSessionStore((s) => s.thinkingStartedAt)
+  const pendingApprovals = useSessionStore((s) => s.pendingApprovals)
   const status = useSessionStore((s) => s.status)
   const error = useSessionStore((s) => s.error)
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -20,9 +22,9 @@ export function ChatPanel(): React.JSX.Element {
     if (isNearBottom) {
       setTimeout(() => el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' }), 50)
     }
-  }, [messages, streamingText, pendingApproval])
+  }, [messages, streamingText, thinkingStartedAt, pendingApprovals])
 
-  const hasContent = messages.length > 0 || !!streamingText
+  const hasContent = messages.length > 0 || !!streamingText || !!thinkingStartedAt
   const showEmptyScreen = !hasContent && status.state === 'idle'
 
   return (
@@ -46,8 +48,10 @@ export function ChatPanel(): React.JSX.Element {
               <MessageBubble key={msg.id} message={msg} />
             ))}
             {streamingText && <StreamingText />}
-            {!streamingText && status.state === 'running' && <TypingIndicator />}
-            <ApprovalPrompt />
+            {thinkingStartedAt && (
+              <ThinkingBlock text={streamingThinking} isActive />
+            )}
+            {!streamingText && !thinkingStartedAt && status.state === 'running' && <TypingIndicator />}
           </div>
         )}
       </div>

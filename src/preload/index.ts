@@ -15,7 +15,7 @@ const api: ClaudeAPI = {
     return () => ipcRenderer.removeListener('session:message', handler)
   },
   onStreamEvent: (cb) => {
-    const handler = (_: Electron.IpcRendererEvent, text: string): void => cb(text)
+    const handler = (_: Electron.IpcRendererEvent, data: unknown): void => cb(data as never)
     ipcRenderer.on('session:stream', handler)
     return () => ipcRenderer.removeListener('session:stream', handler)
   },

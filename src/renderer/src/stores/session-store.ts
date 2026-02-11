@@ -6,6 +6,54 @@ import type {
   ContentBlock
 } from '../../../shared/types'
 
+/**
+ * Merges content blocks when upserting an assistant message by ID.
+ * The SDK sends partial messages that may not include all previously accumulated
+ * content blocks. This function preserves tool_use and tool_result blocks from the
+ * old message that aren't present in the incoming update.
+ */
+function mergeContentBlocks(
+  oldBlocks: ContentBlock[],
+  newBlocks: ContentBlock[]
+): ContentBlock[] {
+  // Index what's in the new message
+  const newToolUseIds = new Set(
+    newBlocks.filter((b) => b.type === 'tool_use' && b.toolUseId).map((b) => b.toolUseId)
+  )
+  const newToolResultIds = new Set(
+    newBlocks.filter((b) => b.type === 'tool_result' && b.toolUseId).map((b) => b.toolUseId)
+  )
+  const newThinkingCount = newBlocks.filter((b) => b.type === 'thinking').length
+  const newHasText = newBlocks.some((b) => b.type === 'text')
+
+  // Collect preserved old blocks in their original order (maintains interleaving)
+  const droppedThinkingCount = Math.max(
+    0,
+    oldBlocks.filter((b) => b.type === 'thinking').length - newThinkingCount
+  )
+  let thinkingsSeen = 0
+  const preserved: ContentBlock[] = []
+
+  for (const b of oldBlocks) {
+    if (b.type === 'tool_use' && b.toolUseId && !newToolUseIds.has(b.toolUseId)) {
+      preserved.push(b)
+    } else if (b.type === 'tool_result' && b.toolUseId && !newToolResultIds.has(b.toolUseId)) {
+      preserved.push(b)
+    } else if (b.type === 'thinking') {
+      if (thinkingsSeen < droppedThinkingCount) {
+        preserved.push(b)
+      }
+      thinkingsSeen++
+    } else if (b.type === 'text' && !newHasText) {
+      preserved.push(b)
+    }
+  }
+
+  // Preserved blocks (from earlier turns, in original order) first,
+  // then new blocks in their natural interleaved order from the SDK
+  return [...preserved, ...newBlocks]
+}
+
 const RECENT_DIRS_KEY = 'claudeui-recent-dirs'
 
 function loadRecentDirs(): string[] {
@@ -33,8 +81,11 @@ interface SessionState {
   recentDirs: string[]
   messages: ChatMessage[]
   streamingText: string
+  streamingThinking: string
+  thinkingStartedAt: number | null
+  thinkingDurationMs: number | null
   status: SessionStatus
-  pendingApproval: PendingApproval | null
+  pendingApprovals: PendingApproval[]
   error: string | null
 
   setCwd: (cwd: string | null) => void
@@ -42,9 +93,12 @@ interface SessionState {
   addMessage: (message: ChatMessage) => void
   addUserMessage: (id: string, text: string) => void
   appendStreamingText: (text: string) => void
+  appendStreamingThinking: (text: string) => void
   clearStreamingText: () => void
   setStatus: (status: SessionStatus) => void
-  setPendingApproval: (approval: PendingApproval | null) => void
+  addPendingApproval: (approval: PendingApproval) => void
+  removePendingApproval: (requestId: string) => void
+  clearPendingApprovals: () => void
   setError: (error: string | null) => void
   appendToolResult: (toolUseId: string, result: string, isError: boolean) => void
 }
@@ -54,6 +108,9 @@ export const useSessionStore = create<SessionState>((set) => ({
   recentDirs: loadRecentDirs(),
   messages: [],
   streamingText: '',
+  streamingThinking: '',
+  thinkingStartedAt: null,
+  thinkingDurationMs: null,
   status: {
     state: 'idle',
     sessionId: null,
@@ -61,7 +118,7 @@ export const useSessionStore = create<SessionState>((set) => ({
     cwd: null,
     totalCostUsd: 0
   },
-  pendingApproval: null,
+  pendingApprovals: [],
   error: null,
 
   setCwd: (cwd) => set({ cwd }),
@@ -73,17 +130,42 @@ export const useSessionStore = create<SessionState>((set) => ({
         ? state.recentDirs
         : [cwd, ...state.recentDirs].slice(0, 20)
       if (!alreadyExists) saveRecentDirs(recentDirs)
-      return { cwd, messages: [], streamingText: '', error: null, pendingApproval: null, recentDirs }
+      return { cwd, messages: [], streamingText: '', streamingThinking: '', thinkingStartedAt: null, thinkingDurationMs: null, error: null, pendingApprovals: [], recentDirs }
     }),
 
   addMessage: (message) =>
     set((state) => {
       const idx = state.messages.findIndex((m) => m.id === message.id)
-      const messages =
-        idx >= 0
-          ? state.messages.map((m, i) => (i === idx ? message : m))
-          : [...state.messages, message]
-      return { messages, streamingText: '' }
+
+      // Finalize thinking if message has non-thinking content (text or tool_use)
+      const hasNonThinking = message.content.some(
+        (b) => b.type === 'text' || b.type === 'tool_use'
+      )
+      const thinkingUpdate =
+        state.thinkingStartedAt && hasNonThinking
+          ? {
+              streamingThinking: '',
+              thinkingDurationMs: Date.now() - state.thinkingStartedAt,
+              thinkingStartedAt: null
+            }
+          : {}
+
+      if (idx < 0) {
+        return { messages: [...state.messages, message], streamingText: '', ...thinkingUpdate }
+      }
+
+      // Merge content blocks to preserve tool_use/tool_result from previous partials
+      const existing = state.messages[idx]
+      const merged = {
+        ...message,
+        content: mergeContentBlocks(existing.content, message.content)
+      }
+
+      return {
+        messages: state.messages.map((m, i) => (i === idx ? merged : m)),
+        streamingText: '',
+        ...thinkingUpdate
+      }
     }),
 
   addUserMessage: (id, text) =>
@@ -101,13 +183,39 @@ export const useSessionStore = create<SessionState>((set) => ({
     })),
 
   appendStreamingText: (text) =>
-    set((state) => ({ streamingText: state.streamingText + text })),
+    set((state) => {
+      // If we were thinking, finalize the thinking duration
+      if (state.thinkingStartedAt) {
+        return {
+          streamingText: state.streamingText + text,
+          streamingThinking: '',
+          thinkingDurationMs: Date.now() - state.thinkingStartedAt,
+          thinkingStartedAt: null
+        }
+      }
+      return { streamingText: state.streamingText + text }
+    }),
 
-  clearStreamingText: () => set({ streamingText: '' }),
+  appendStreamingThinking: (text) =>
+    set((state) => ({
+      streamingThinking: state.streamingThinking + text,
+      thinkingStartedAt: state.thinkingStartedAt ?? Date.now()
+    })),
+
+  clearStreamingText: () =>
+    set({ streamingText: '', streamingThinking: '', thinkingStartedAt: null, thinkingDurationMs: null }),
 
   setStatus: (status) => set({ status }),
 
-  setPendingApproval: (approval) => set({ pendingApproval: approval }),
+  addPendingApproval: (approval) =>
+    set((state) => ({ pendingApprovals: [...state.pendingApprovals, approval] })),
+
+  removePendingApproval: (requestId) =>
+    set((state) => ({
+      pendingApprovals: state.pendingApprovals.filter((a) => a.requestId !== requestId)
+    })),
+
+  clearPendingApprovals: () => set({ pendingApprovals: [] }),
 
   setError: (error) => set({ error }),
 

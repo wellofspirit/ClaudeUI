@@ -37,6 +37,11 @@ export interface SessionResult {
 
 export type ApprovalDecision = 'allow' | 'deny'
 
+export interface StreamDelta {
+  type: 'text' | 'thinking'
+  text: string
+}
+
 export interface ClaudeAPI {
   pickFolder(): Promise<string | null>
   createSession(cwd: string): Promise<void>
@@ -44,7 +49,7 @@ export interface ClaudeAPI {
   cancelSession(): Promise<void>
   respondApproval(requestId: string, decision: ApprovalDecision): Promise<void>
   onMessage(cb: (message: ChatMessage) => void): () => void
-  onStreamEvent(cb: (text: string) => void): () => void
+  onStreamEvent(cb: (data: StreamDelta) => void): () => void
   onApprovalRequest(cb: (approval: PendingApproval) => void): () => void
   onStatus(cb: (status: SessionStatus) => void): () => void
   onResult(cb: (result: SessionResult) => void): () => void

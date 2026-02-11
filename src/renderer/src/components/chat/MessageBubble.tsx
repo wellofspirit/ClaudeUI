@@ -1,8 +1,14 @@
-import type { ChatMessage, ContentBlock } from '../../../../shared/types'
+import type { ChatMessage, ContentBlock, PendingApproval } from '../../../../shared/types'
+import { useSessionStore } from '../../stores/session-store'
 import { MarkdownRenderer } from './MarkdownRenderer'
 import { ToolCallBlock } from './ToolCallBlock'
+import { ThinkingBlock } from './ThinkingBlock'
 
 export function MessageBubble({ message }: { message: ChatMessage }): React.JSX.Element {
+  const pendingApprovals = useSessionStore((s) => s.pendingApprovals)
+  const messages = useSessionStore((s) => s.messages)
+  const thinkingStartedAt = useSessionStore((s) => s.thinkingStartedAt)
+
   if (message.role === 'user') {
     return (
       <div className="flex justify-end animate-fade-in">
@@ -23,15 +29,99 @@ export function MessageBubble({ message }: { message: ChatMessage }): React.JSX.
     }
   }
 
+  // Match pending approvals to tool_use blocks by toolName + input
+  const approvalMap = new Map<string, PendingApproval>()
+  const matchedApprovalIds = new Set<string>()
+  for (const block of message.content) {
+    if (block.type !== 'tool_use' || !block.toolUseId) continue
+    const match = pendingApprovals.find(
+      (a) =>
+        !matchedApprovalIds.has(a.requestId) &&
+        a.toolName === block.toolName &&
+        JSON.stringify(a.input) === JSON.stringify(block.toolInput)
+    )
+    if (match) {
+      approvalMap.set(block.toolUseId, match)
+      matchedApprovalIds.add(match.requestId)
+    }
+  }
+
+  // Determine if this is the last assistant message (for active thinking indicator)
+  const lastAssistantMsg = [...messages].reverse().find((m) => m.role === 'assistant')
+  const isLastAssistant = lastAssistantMsg?.id === message.id
+
+  // Group consecutive tool_use blocks so we can wrap them in a bordered container
+  type RenderItem =
+    | { kind: 'tool_group'; blocks: { block: ContentBlock; index: number }[] }
+    | { kind: 'thinking'; block: ContentBlock; index: number }
+    | { kind: 'other'; block: ContentBlock; index: number }
+  const items: RenderItem[] = []
+
+  const visible = message.content.filter((b) => b.type !== 'tool_result')
+  for (let i = 0; i < visible.length; i++) {
+    const block = visible[i]
+    if (block.type === 'tool_use') {
+      const last = items[items.length - 1]
+      if (last?.kind === 'tool_group') {
+        last.blocks.push({ block, index: i })
+      } else {
+        items.push({ kind: 'tool_group', blocks: [{ block, index: i }] })
+      }
+    } else if (block.type === 'thinking') {
+      items.push({ kind: 'thinking', block, index: i })
+    } else {
+      items.push({ kind: 'other', block, index: i })
+    }
+  }
+
+  // Find the last thinking item so only it can be "active"
+  const lastThinkingGi = items.reduce(
+    (acc, item, i) => (item.kind === 'thinking' ? i : acc),
+    -1
+  )
+
   return (
     <div className="flex flex-col gap-2 animate-fade-in">
-      {message.content.map((block, i) => {
-        if (block.type === 'tool_result') return null
-        if (block.type === 'tool_use') {
-          const result = block.toolUseId ? resultMap.get(block.toolUseId) : undefined
-          return <ToolCallBlock key={i} block={block} result={result} />
+      {items.map((item, gi) => {
+        if (item.kind === 'thinking') {
+          const isLast = gi === lastThinkingGi
+          // Only hide if this message was updated during the current thinking session
+          // (meaning the SDK sent a partial with this thinking block for the active turn)
+          const isActive =
+            isLast &&
+            isLastAssistant &&
+            !!thinkingStartedAt &&
+            message.timestamp >= thinkingStartedAt
+          // Active thinking is rendered by the standalone ThinkingBlock in ChatPanel
+          if (isActive) return null
+          return (
+            <ThinkingBlock
+              key={item.index}
+              text={item.block.text || ''}
+              isActive={false}
+            />
+          )
         }
-        return <ContentBlockView key={i} block={block} />
+        if (item.kind === 'other') {
+          return <ContentBlockView key={item.index} block={item.block} />
+        }
+        // Single tool call — render directly
+        if (item.blocks.length === 1) {
+          const { block, index } = item.blocks[0]
+          const result = block.toolUseId ? resultMap.get(block.toolUseId) : undefined
+          const approval = block.toolUseId ? approvalMap.get(block.toolUseId) : undefined
+          return <ToolCallBlock key={index} block={block} result={result} approval={approval} />
+        }
+        // Multiple tool calls — wrap in bordered group
+        return (
+          <div key={`group-${gi}`} className="rounded-xl border border-border p-2 flex flex-col gap-2">
+            {item.blocks.map(({ block, index }) => {
+              const result = block.toolUseId ? resultMap.get(block.toolUseId) : undefined
+              const approval = block.toolUseId ? approvalMap.get(block.toolUseId) : undefined
+              return <ToolCallBlock key={index} block={block} result={result} approval={approval} />
+            })}
+          </div>
+        )
       })}
     </div>
   )
@@ -43,20 +133,6 @@ function ContentBlockView({ block }: { block: ContentBlock }): React.JSX.Element
       <div className="text-[13px] text-text-primary leading-[1.6]">
         <MarkdownRenderer content={block.text} />
       </div>
-    )
-  }
-
-  if (block.type === 'thinking' && block.text) {
-    return (
-      <details className="group">
-        <summary className="text-[11px] text-text-muted cursor-pointer select-none hover:text-text-secondary transition-colors flex items-center gap-1">
-          <span className="italic">Thinking</span>
-          <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="transition-transform group-open:rotate-90"><polyline points="9 18 15 12 9 6" /></svg>
-        </summary>
-        <div className="mt-1 pl-3 border-l border-border text-[11px] text-text-muted leading-[1.5] whitespace-pre-wrap max-h-40 overflow-y-auto">
-          {block.text}
-        </div>
-      </details>
     )
   }
 

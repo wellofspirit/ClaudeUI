@@ -49,6 +49,7 @@ export class ClaudeSession {
           permissionMode: 'default',
           abortController: this.abortController,
           includePartialMessages: true,
+          thinking: { type: 'enabled', budgetTokens: 10000 },
           ...(this.sessionId ? { resume: this.sessionId } : {}),
           canUseTool: async (toolName, input, opts) => {
             const requestId = uuid()
@@ -99,12 +100,12 @@ export class ClaudeSession {
               const delta = event.delta as Record<string, unknown> | undefined
               if (delta) {
                 if (delta.type === 'text_delta' && typeof delta.text === 'string') {
-                  this.send('session:stream', delta.text)
+                  this.send('session:stream', { type: 'text', text: delta.text })
                 } else if (
                   delta.type === 'thinking_delta' &&
                   typeof delta.thinking === 'string'
                 ) {
-                  this.send('session:stream', delta.thinking)
+                  this.send('session:stream', { type: 'thinking', text: delta.thinking })
                 }
               }
             }
