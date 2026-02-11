@@ -43,6 +43,9 @@ export function useClaudeEvents(): void {
   const appendToolResult = useSessionStore((s) => s.appendToolResult)
   const updateTaskProgress = useSessionStore((s) => s.updateTaskProgress)
   const addTaskNotification = useSessionStore((s) => s.addTaskNotification)
+  const markBackgroundTask = useSessionStore((s) => s.markBackgroundTask)
+  const updateBackgroundOutput = useSessionStore((s) => s.updateBackgroundOutput)
+  const resolveBackgroundTask = useSessionStore((s) => s.resolveBackgroundTask)
 
   useEffect(() => {
     const cleanups = [
@@ -97,10 +100,21 @@ export function useClaudeEvents(): void {
         updateTaskProgress(data)
       }),
       window.api.onTaskNotification((data) => {
-        addTaskNotification(data)
+        // If this notification has a toolUseId, resolve the background task
+        if (data.toolUseId) {
+          resolveBackgroundTask(data.toolUseId, data)
+        } else {
+          addTaskNotification(data)
+        }
+      }),
+      window.api.onBackgroundTaskStarted((data) => {
+        markBackgroundTask(data.toolUseId)
+      }),
+      window.api.onBackgroundOutput((data) => {
+        updateBackgroundOutput(data.toolUseId, data.messages)
       })
     ]
 
     return () => cleanups.forEach((fn) => fn())
-  }, [addMessage, appendStreamingText, appendStreamingThinking, addPendingApproval, clearPendingApprovals, setStatus, setError, appendToolResult, updateTaskProgress, addTaskNotification])
+  }, [addMessage, appendStreamingText, appendStreamingThinking, addPendingApproval, clearPendingApprovals, setStatus, setError, appendToolResult, updateTaskProgress, addTaskNotification, markBackgroundTask, updateBackgroundOutput, resolveBackgroundTask])
 }

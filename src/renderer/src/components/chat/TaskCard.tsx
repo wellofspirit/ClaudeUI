@@ -2,6 +2,7 @@ import { useState, useMemo } from 'react'
 import type { ContentBlock } from '../../../../shared/types'
 import { useSessionStore } from '../../stores/session-store'
 import { MarkdownRenderer } from './MarkdownRenderer'
+import { BackgroundMessages } from './BackgroundMessages'
 
 interface Props {
   block: ContentBlock
@@ -62,13 +63,22 @@ function formatTokens(n: number): string {
 export function TaskCard({ block, result }: Props): React.JSX.Element {
   const taskProgressMap = useSessionStore((s) => s.taskProgressMap)
   const openTaskPanel = useSessionStore((s) => s.openTaskPanel)
+  const backgroundTaskToolUseIds = useSessionStore((s) => s.backgroundTaskToolUseIds)
+  const backgroundOutputs = useSessionStore((s) => s.backgroundOutputs)
+  const taskNotifications = useSessionStore((s) => s.taskNotifications)
   const [expanded, setExpanded] = useState(false)
 
   const toolUseId = block.toolUseId || ''
   const input = block.toolInput || {}
   const hasResult = !!result
-  const isError = result?.isError ?? false
-  const isRunning = !hasResult
+  const bgOutput = backgroundOutputs[toolUseId]
+  const isActiveBackground = backgroundTaskToolUseIds.has(toolUseId)
+  const bgNotification = taskNotifications.find((n) => n.toolUseId === toolUseId)
+  // A task is a background task if it's currently active OR was resolved as one (has output or notification)
+  const isBackgroundTask = isActiveBackground || !!bgOutput || !!bgNotification
+  // Background tasks stay "running" until their task_notification arrives
+  const isError = bgNotification ? bgNotification.status === 'failed' : (result?.isError ?? false)
+  const isRunning = isBackgroundTask ? !bgNotification : !hasResult
 
   const description = String(input.description || input.prompt || '').slice(0, 120)
   const subagentType = String(input.subagent_type || input.subagentType || '')
@@ -89,13 +99,15 @@ export function TaskCard({ block, result }: Props): React.JSX.Element {
       ? 'border-danger/30'
       : 'border-success/30'
 
+  const isCompleted = isBackgroundTask ? !!bgNotification && !isError : (hasResult && !isError)
+
   const statusIcon = isError ? (
     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-danger shrink-0">
       <circle cx="12" cy="12" r="10" />
       <line x1="15" y1="9" x2="9" y2="15" />
       <line x1="9" y1="9" x2="15" y2="15" />
     </svg>
-  ) : hasResult ? (
+  ) : isCompleted ? (
     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-success shrink-0">
       <circle cx="12" cy="12" r="10" />
       <polyline points="8 12 11 15 16 9" />
@@ -169,7 +181,20 @@ export function TaskCard({ block, result }: Props): React.JSX.Element {
         <>
           {/* Result / running state */}
           <div className="border-t border-border">
-            {resultBody ? (
+            {isBackgroundTask && bgOutput && bgOutput.length > 0 ? (
+              <div className="px-3 py-2">
+                {isRunning && (
+                  <div className="flex items-center gap-2 text-[12px] text-text-muted mb-2">
+                    <span className="w-2.5 h-2.5 rounded-full border-[1.5px] border-accent border-t-transparent animate-spin-slow" />
+                    <span>Running in background...</span>
+                    {elapsed != null && (
+                      <span className="font-mono text-[11px]">{formatElapsed(elapsed)}</span>
+                    )}
+                  </div>
+                )}
+                <BackgroundMessages messages={bgOutput} maxHeight="300px" />
+              </div>
+            ) : resultBody && !isBackgroundTask ? (
               <div className="px-3 py-2 text-[12px] text-text-primary/70">
                 <div className="leading-[1.5] max-h-[300px] overflow-y-auto">
                   <MarkdownRenderer content={resultBody} />
@@ -178,7 +203,7 @@ export function TaskCard({ block, result }: Props): React.JSX.Element {
             ) : isRunning ? (
               <div className="px-3 py-2 flex items-center gap-2 text-[12px] text-text-muted">
                 <span className="w-2.5 h-2.5 rounded-full border-[1.5px] border-accent border-t-transparent animate-spin-slow" />
-                <span>Running...</span>
+                <span>{isBackgroundTask ? 'Running in background...' : 'Running...'}</span>
                 {elapsed != null && (
                   <span className="font-mono text-[11px]">{formatElapsed(elapsed)}</span>
                 )}

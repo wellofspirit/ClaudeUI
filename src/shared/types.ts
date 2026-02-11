@@ -76,9 +76,22 @@ export interface TaskProgress {
 
 export interface TaskNotification {
   taskId: string
+  toolUseId: string | null
   status: 'completed' | 'failed' | 'stopped'
   outputFile: string
   summary: string
+}
+
+export interface BackgroundTaskStarted {
+  toolUseId: string
+  outputFile: string
+  agentId: string
+}
+
+export interface BackgroundOutput {
+  toolUseId: string
+  messages: ChatMessage[]
+  outputFile: string
 }
 
 export interface ClaudeAPI {
@@ -102,4 +115,6 @@ export interface ClaudeAPI {
   readTaskOutput(filePath: string): Promise<string | null>
   onTaskProgress(cb: (data: TaskProgress) => void): () => void
   onTaskNotification(cb: (data: TaskNotification) => void): () => void
+  onBackgroundTaskStarted(cb: (data: BackgroundTaskStarted) => void): () => void
+  onBackgroundOutput(cb: (data: BackgroundOutput) => void): () => void
 }

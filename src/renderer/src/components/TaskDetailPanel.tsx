@@ -1,6 +1,7 @@
 import { useState, useCallback } from 'react'
 import { useSessionStore } from '../stores/session-store'
 import { MarkdownRenderer } from './chat/MarkdownRenderer'
+import { BackgroundMessages } from './chat/BackgroundMessages'
 import type { ContentBlock } from '../../../shared/types'
 
 function formatElapsed(seconds: number): string {
@@ -30,6 +31,8 @@ function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Element | nu
   const messages = useSessionStore((s) => s.messages)
   const taskProgressMap = useSessionStore((s) => s.taskProgressMap)
   const taskNotifications = useSessionStore((s) => s.taskNotifications)
+  const backgroundTaskToolUseIds = useSessionStore((s) => s.backgroundTaskToolUseIds)
+  const backgroundOutputs = useSessionStore((s) => s.backgroundOutputs)
   const removeTaskFromPanel = useSessionStore((s) => s.removeTaskFromPanel)
   const [expanded, setExpanded] = useState(true)
   const [outputContent, setOutputContent] = useState<string | null>(null)
@@ -40,21 +43,25 @@ function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Element | nu
 
   const input = taskBlock.toolInput || {}
   const description = String(input.description || input.prompt || '')
-  const isBackground = !!input.run_in_background
+  const bgOutput = backgroundOutputs[toolUseId]
+  const isActiveBackground = backgroundTaskToolUseIds.has(toolUseId)
+  const bgNotification = taskNotifications.find((n) => n.toolUseId === toolUseId)
+  const isBackgroundTask = isActiveBackground || !!bgOutput || !!bgNotification
   const progress = taskProgressMap[toolUseId]
   const elapsed = progress?.elapsedTimeSeconds
   const hasResult = !!resultBlock
   const resultText = resultBlock?.toolResult?.replace(/<usage>[\s\S]*?<\/usage>/, '').trimEnd() || ''
+  const isRunning = isBackgroundTask ? !bgNotification : !hasResult
 
-  // Derive output file
+  // Derive output file for non-background tasks (fallback)
   let outputFile: string | null = null
-  if (resultBlock?.toolResult) {
+  if (!isBackgroundTask && resultBlock?.toolResult) {
     try {
       const parsed = JSON.parse(resultBlock.toolResult)
       if (parsed?.output_file) outputFile = parsed.output_file
     } catch { /* ignore */ }
   }
-  if (!outputFile) {
+  if (!outputFile && !isBackgroundTask) {
     const notification = taskNotifications.find((n) => {
       try {
         if (resultBlock?.toolResult) {
@@ -78,9 +85,13 @@ function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Element | nu
     }
   }, [outputFile])
 
-  const statusBadge = resultBlock?.isError ? (
+  const isError = isBackgroundTask
+    ? bgNotification?.status === 'failed'
+    : resultBlock?.isError
+
+  const statusBadge = isError ? (
     <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-danger/10 text-danger shrink-0">failed</span>
-  ) : hasResult ? (
+  ) : !isRunning ? (
     <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-success/10 text-success shrink-0">completed</span>
   ) : (
     <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-accent/10 text-accent shrink-0">running</span>
@@ -120,22 +131,36 @@ function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Element | nu
       {/* Body */}
       {expanded && (
         <div className="px-4 py-3">
-          {hasResult && resultText ? (
+          {/* Background task: show live-tailed output */}
+          {isBackgroundTask && bgOutput && bgOutput.length > 0 ? (
+            <div>
+              {isRunning && (
+                <div className="flex items-center gap-2 text-[13px] text-text-muted mb-2">
+                  <span className="w-3 h-3 rounded-full border-2 border-accent border-t-transparent animate-spin-slow" />
+                  <span>Running in background...</span>
+                  {elapsed != null && (
+                    <span className="font-mono text-[11px]">{formatElapsed(elapsed)}</span>
+                  )}
+                </div>
+              )}
+              <BackgroundMessages messages={bgOutput} maxHeight="400px" />
+            </div>
+          ) : hasResult && resultText && !isBackgroundTask ? (
             <div className="text-[12px] text-text-primary/80 leading-[1.6]">
               <MarkdownRenderer content={resultText} />
             </div>
-          ) : (
+          ) : isRunning ? (
             <div className="flex items-center gap-2 text-[13px] text-text-muted">
               <span className="w-3 h-3 rounded-full border-2 border-accent border-t-transparent animate-spin-slow" />
-              <span>Running...</span>
+              <span>{isBackgroundTask ? 'Running in background...' : 'Running...'}</span>
               {elapsed != null && (
                 <span className="font-mono text-[11px]">{formatElapsed(elapsed)}</span>
               )}
             </div>
-          )}
+          ) : null}
 
-          {/* Background task output file */}
-          {isBackground && outputFile && (
+          {/* Non-background task output file (fallback) */}
+          {!isBackgroundTask && outputFile && (
             <div className="mt-4 border-t border-border pt-3">
               <div className="text-[11px] text-text-secondary uppercase tracking-wider mb-2">Output File</div>
               {outputContent ? (

@@ -1,5 +1,6 @@
 import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk'
 import { v4 as uuid } from 'uuid'
+import { readFile } from 'fs/promises'
 import type { BrowserWindow } from 'electron'
 import type {
   ChatMessage,
@@ -8,6 +9,7 @@ import type {
   ApprovalDecision,
   PendingApproval
 } from '../../shared/types'
+import { parseBackgroundJsonl } from './jsonl-parser'
 
 interface ApprovalResult {
   decision: ApprovalDecision
@@ -18,10 +20,23 @@ interface PendingApprovalEntry {
   resolve: (result: ApprovalResult) => void
 }
 
+interface BackgroundTaskEntry {
+  outputFile: string
+  agentId: string
+  toolUseId: string
+  pollInterval: ReturnType<typeof setInterval>
+  lastContent: string
+}
+
+const AGENT_ID_RE = /agentId:\s*(\S+)/
+const OUTPUT_FILE_RE = /output_file:\s*(\S+)/
+const TASK_ID_RE = /task_id:\s*(\S+)/
+
 export class ClaudeSession {
   private sessionId: string | null = null
   private abortController: AbortController | null = null
   private pendingApprovals = new Map<string, PendingApprovalEntry>()
+  private backgroundTasks = new Map<string, BackgroundTaskEntry>()
   private win: BrowserWindow
   private cwd: string
   private totalCostUsd = 0
@@ -93,6 +108,11 @@ export class ClaudeSession {
           this.sendStatus()
         }
 
+        // Debug: log all non-streaming SDK message types
+        if (type !== 'stream_event') {
+          console.log(`[SDK msg] type=${type}`, type === 'system' ? JSON.stringify(msg, null, 2) : `subkeys=[${Object.keys(msg).join(',')}]`)
+        }
+
         if (type === 'assistant') {
           const chatMsg = this.transformAssistantMessage(msg)
           if (chatMsg) this.send('session:message', chatMsg)
@@ -126,10 +146,33 @@ export class ClaudeSession {
         } else if (type === 'system') {
           const subtype = msg.subtype as string | undefined
           if (subtype === 'task_notification') {
+            const taskId = (msg.task_id as string) || ''
+            const outputFile = (msg.output_file as string) || ''
+            console.log(`[SDK task_notification] taskId=${taskId} status=${msg.status} activeBgTasks=[${[...this.backgroundTasks.keys()].join(',')}]`)
+
+            // Correlate with background task by agentId/taskId
+            let matchedToolUseId: string | null = null
+            for (const [tuId, entry] of this.backgroundTasks) {
+              if (entry.agentId === taskId) {
+                matchedToolUseId = tuId
+                console.log(`[SDK task_notification] matched toolUseId=${tuId} (already resolved by poll: false)`)
+                // Do a final poll before stopping
+                await this.pollBackgroundOutput(tuId)
+                clearInterval(entry.pollInterval)
+                this.backgroundTasks.delete(tuId)
+                break
+              }
+            }
+
+            if (!matchedToolUseId) {
+              console.log(`[SDK task_notification] no match found — task may have been auto-resolved by poll`)
+            }
+
             this.send('session:task-notification', {
-              taskId: (msg.task_id as string) || '',
+              taskId,
+              toolUseId: matchedToolUseId,
               status: (msg.status as string) || 'completed',
-              outputFile: (msg.output_file as string) || '',
+              outputFile,
               summary: (msg.summary as string) || ''
             })
           }
@@ -167,6 +210,9 @@ export class ClaudeSession {
       entry.resolve({ decision: 'deny' })
     }
     this.pendingApprovals.clear()
+
+    // Stop all background task polling
+    this.clearBackgroundPolling()
 
     this.abortController?.abort()
     this.abortController = null
@@ -249,12 +295,71 @@ export class ClaudeSession {
           .join('\n')
       }
 
+      // Detect background task launch patterns
+      this.detectBackgroundTask(toolUseId, resultText)
+
       this.send('session:tool-result', {
         toolUseId,
         result: resultText,
         isError: !!(b.is_error)
       })
     }
+  }
+
+  private detectBackgroundTask(toolUseId: string, resultText: string): void {
+    const outputMatch = resultText.match(OUTPUT_FILE_RE)
+    if (!outputMatch) return
+
+    const outputFile = outputMatch[1]
+    const agentMatch = resultText.match(AGENT_ID_RE)
+    const taskIdMatch = resultText.match(TASK_ID_RE)
+    const agentId = agentMatch?.[1] || taskIdMatch?.[1] || ''
+
+    if (!agentId) return
+
+    console.log(`[detectBackgroundTask] toolUseId=${toolUseId} agentId=${agentId} outputFile=${outputFile}`)
+    // Notify renderer this is a background task
+    this.send('session:background-task-started', { toolUseId, outputFile, agentId })
+
+    // Start polling the output file
+    const entry: BackgroundTaskEntry = {
+      outputFile,
+      agentId,
+      toolUseId,
+      lastContent: '',
+      pollInterval: setInterval(() => this.pollBackgroundOutput(toolUseId), 2000)
+    }
+    this.backgroundTasks.set(toolUseId, entry)
+
+    // Also do an immediate poll
+    this.pollBackgroundOutput(toolUseId)
+  }
+
+  private async pollBackgroundOutput(toolUseId: string): Promise<void> {
+    const entry = this.backgroundTasks.get(toolUseId)
+    if (!entry) return
+
+    try {
+      const content = await readFile(entry.outputFile, 'utf-8')
+      if (content !== entry.lastContent) {
+        entry.lastContent = content
+        const parsed = parseBackgroundJsonl(content)
+        this.send('session:background-output', {
+          toolUseId,
+          messages: parsed.messages,
+          outputFile: entry.outputFile
+        })
+      }
+    } catch {
+      // File may not exist yet — that's fine
+    }
+  }
+
+  private clearBackgroundPolling(): void {
+    for (const [, entry] of this.backgroundTasks) {
+      clearInterval(entry.pollInterval)
+    }
+    this.backgroundTasks.clear()
   }
 
   private send(channel: string, data: unknown): void {

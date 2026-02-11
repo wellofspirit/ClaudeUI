@@ -66,6 +66,16 @@ const api: ClaudeAPI = {
     const handler = (_: Electron.IpcRendererEvent, data: unknown): void => cb(data as never)
     ipcRenderer.on('session:task-notification', handler)
     return () => ipcRenderer.removeListener('session:task-notification', handler)
+  },
+  onBackgroundTaskStarted: (cb) => {
+    const handler = (_: Electron.IpcRendererEvent, data: unknown): void => cb(data as never)
+    ipcRenderer.on('session:background-task-started', handler)
+    return () => ipcRenderer.removeListener('session:background-task-started', handler)
+  },
+  onBackgroundOutput: (cb) => {
+    const handler = (_: Electron.IpcRendererEvent, data: unknown): void => cb(data as never)
+    ipcRenderer.on('session:background-output', handler)
+    return () => ipcRenderer.removeListener('session:background-output', handler)
   }
 }
 

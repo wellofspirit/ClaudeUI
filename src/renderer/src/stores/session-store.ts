@@ -95,6 +95,8 @@ interface SessionState {
   taskNotifications: TaskNotification[]
   openedTaskToolUseIds: string[]
   taskPanelOpen: boolean
+  backgroundTaskToolUseIds: Set<string>
+  backgroundOutputs: Record<string, ChatMessage[]>
 
   setCwd: (cwd: string | null) => void
   openDirectory: (cwd: string) => void
@@ -112,6 +114,9 @@ interface SessionState {
   setTodos: (todos: TodoItem[]) => void
   updateTaskProgress: (progress: TaskProgress) => void
   addTaskNotification: (notification: TaskNotification) => void
+  markBackgroundTask: (toolUseId: string) => void
+  updateBackgroundOutput: (toolUseId: string, messages: ChatMessage[]) => void
+  resolveBackgroundTask: (toolUseId: string, notification: TaskNotification) => void
   openTaskPanel: (toolUseId: string) => void
   closeTaskPanel: () => void
   removeTaskFromPanel: (toolUseId: string) => void
@@ -139,6 +144,8 @@ export const useSessionStore = create<SessionState>((set) => ({
   taskNotifications: [],
   openedTaskToolUseIds: [],
   taskPanelOpen: false,
+  backgroundTaskToolUseIds: new Set<string>(),
+  backgroundOutputs: {},
 
   setCwd: (cwd) => set({ cwd }),
 
@@ -149,7 +156,7 @@ export const useSessionStore = create<SessionState>((set) => ({
         ? state.recentDirs
         : [cwd, ...state.recentDirs].slice(0, 20)
       if (!alreadyExists) saveRecentDirs(recentDirs)
-      return { cwd, messages: [], streamingText: '', streamingThinking: '', thinkingStartedAt: null, thinkingDurationMs: null, error: null, pendingApprovals: [], recentDirs, todos: [], taskProgressMap: {}, taskNotifications: [], openedTaskToolUseIds: [], taskPanelOpen: false }
+      return { cwd, messages: [], streamingText: '', streamingThinking: '', thinkingStartedAt: null, thinkingDurationMs: null, error: null, pendingApprovals: [], recentDirs, todos: [], taskProgressMap: {}, taskNotifications: [], openedTaskToolUseIds: [], taskPanelOpen: false, backgroundTaskToolUseIds: new Set<string>(), backgroundOutputs: {} }
     }),
 
   addMessage: (message) =>
@@ -273,6 +280,28 @@ export const useSessionStore = create<SessionState>((set) => ({
     set((state) => ({
       taskNotifications: [...state.taskNotifications, notification]
     })),
+
+  markBackgroundTask: (toolUseId) =>
+    set((state) => {
+      const next = new Set(state.backgroundTaskToolUseIds)
+      next.add(toolUseId)
+      return { backgroundTaskToolUseIds: next }
+    }),
+
+  updateBackgroundOutput: (toolUseId, messages) =>
+    set((state) => ({
+      backgroundOutputs: { ...state.backgroundOutputs, [toolUseId]: messages }
+    })),
+
+  resolveBackgroundTask: (toolUseId, notification) =>
+    set((state) => {
+      const next = new Set(state.backgroundTaskToolUseIds)
+      next.delete(toolUseId)
+      return {
+        backgroundTaskToolUseIds: next,
+        taskNotifications: [...state.taskNotifications, notification]
+      }
+    }),
 
   openTaskPanel: (toolUseId) =>
     set((state) => ({
