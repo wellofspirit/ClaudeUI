@@ -6,6 +6,7 @@ import { ThinkingBlock } from './ThinkingBlock'
 import { InputBox } from './InputBox'
 import { TodoWidget } from '../TodoWidget'
 import { FloatingApproval } from './FloatingApproval'
+import { WindowControls } from '../WindowControls'
 
 export function ChatPanel(): React.JSX.Element {
   const messages = useSessionStore((s) => s.messages)
@@ -92,6 +93,7 @@ function TopBar({ hasContent, cost }: { hasContent: boolean; cost: number }): Re
         {cost > 0 && (
           <span className="text-[11px] text-text-muted font-mono">${cost.toFixed(4)}</span>
         )}
+        <WindowControls />
       </div>
     </div>
   )
@@ -119,7 +121,7 @@ function WelcomeState(): React.JSX.Element {
   }
 
   const currentLabel = cwd
-    ? cwd.split('/').pop() || cwd
+    ? cwd.split(/[\\/]/).pop() || cwd
     : 'Select a folder'
 
   return (
@@ -161,7 +163,7 @@ function WelcomeState(): React.JSX.Element {
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" className="shrink-0 text-text-muted" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" />
                 </svg>
-                <span className="truncate">{dir.split('/').pop() || dir}</span>
+                <span className="truncate">{dir.split(/[\\/]/).pop() || dir}</span>
               </button>
             ))}
             <div className="border-t border-border">

@@ -2,12 +2,16 @@ import { contextBridge, ipcRenderer } from 'electron'
 import type { ApprovalDecision, ClaudeAPI } from '../shared/types'
 
 const api: ClaudeAPI = {
+  platform: process.platform,
   pickFolder: () => ipcRenderer.invoke('session:pick-folder'),
   createSession: (cwd: string) => ipcRenderer.invoke('session:create', cwd),
   sendPrompt: (prompt: string) => ipcRenderer.invoke('session:send', prompt),
   cancelSession: () => ipcRenderer.invoke('session:cancel'),
   respondApproval: (requestId: string, decision: ApprovalDecision, answers?: Record<string, string>) =>
     ipcRenderer.invoke('session:approval-response', requestId, decision, answers),
+  minimizeWindow: () => ipcRenderer.invoke('window:minimize'),
+  maximizeWindow: () => ipcRenderer.invoke('window:maximize'),
+  closeWindow: () => ipcRenderer.invoke('window:close'),
 
   onMessage: (cb) => {
     const handler = (_: Electron.IpcRendererEvent, msg: unknown): void => cb(msg as never)
@@ -52,6 +56,11 @@ const api: ClaudeAPI = {
     const handler = (_: Electron.IpcRendererEvent, data: unknown): void => cb(data as never)
     ipcRenderer.on('session:task-progress', handler)
     return () => ipcRenderer.removeListener('session:task-progress', handler)
+  },
+  onMaximizeChange: (cb) => {
+    const handler = (_: Electron.IpcRendererEvent, isMaximized: boolean): void => cb(isMaximized)
+    ipcRenderer.on('window:maximized-change', handler)
+    return () => ipcRenderer.removeListener('window:maximized-change', handler)
   },
   onTaskNotification: (cb) => {
     const handler = (_: Electron.IpcRendererEvent, data: unknown): void => cb(data as never)

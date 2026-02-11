@@ -82,11 +82,15 @@ export interface TaskNotification {
 }
 
 export interface ClaudeAPI {
+  platform: string
   pickFolder(): Promise<string | null>
   createSession(cwd: string): Promise<void>
   sendPrompt(prompt: string): Promise<void>
   cancelSession(): Promise<void>
   respondApproval(requestId: string, decision: ApprovalDecision, answers?: Record<string, string>): Promise<void>
+  minimizeWindow(): Promise<void>
+  maximizeWindow(): Promise<void>
+  closeWindow(): Promise<void>
   onMessage(cb: (message: ChatMessage) => void): () => void
   onStreamEvent(cb: (data: StreamDelta) => void): () => void
   onApprovalRequest(cb: (approval: PendingApproval) => void): () => void
@@ -94,6 +98,7 @@ export interface ClaudeAPI {
   onResult(cb: (result: SessionResult) => void): () => void
   onError(cb: (error: string) => void): () => void
   onToolResult(cb: (data: { toolUseId: string; result: string; isError: boolean }) => void): () => void
+  onMaximizeChange(cb: (isMaximized: boolean) => void): () => void
   readTaskOutput(filePath: string): Promise<string | null>
   onTaskProgress(cb: (data: TaskProgress) => void): () => void
   onTaskNotification(cb: (data: TaskNotification) => void): () => void

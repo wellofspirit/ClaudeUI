@@ -19,7 +19,7 @@ export function Sidebar(): React.JSX.Element {
   }
 
   return (
-    <div className="w-60 shrink-0 flex flex-col bg-bg-secondary/80 select-none">
+    <div className={`w-60 shrink-0 flex flex-col select-none ${window.api.platform === 'darwin' ? 'bg-bg-secondary/80' : 'bg-bg-secondary/85'}`}>
       {/* Traffic light clearance */}
       <div className="h-12 shrink-0 [-webkit-app-region:drag]" />
 
@@ -45,7 +45,7 @@ export function Sidebar(): React.JSX.Element {
           </div>
           <nav className="flex flex-col gap-px">
             {recentDirs.map((dir) => {
-              const name = dir.split('/').pop() || dir
+              const name = dir.split(/[\\/]/).pop() || dir
               const isActive = dir === cwd
               return (
                 <NavItem

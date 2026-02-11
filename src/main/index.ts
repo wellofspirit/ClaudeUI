@@ -1,10 +1,12 @@
-import { app, shell, BrowserWindow } from 'electron'
+import { app, shell, BrowserWindow, ipcMain } from 'electron'
 import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import { registerSessionIpc } from './ipc/session.ipc'
 import icon from '../../resources/icon.png?asset'
 
 function createWindow(): void {
+  const isMac = process.platform === 'darwin'
+
   // Create the browser window.
   const mainWindow = new BrowserWindow({
     width: 1100,
@@ -12,11 +14,20 @@ function createWindow(): void {
     minWidth: 600,
     minHeight: 400,
     show: false,
-    transparent: true,
-    vibrancy: 'under-window',
     autoHideMenuBar: true,
-    titleBarStyle: 'hiddenInset',
-    trafficLightPosition: { x: 15, y: 10 },
+    // macOS: transparent + vibrancy for frosted glass, hidden inset title bar
+    ...(isMac
+      ? {
+          transparent: true,
+          vibrancy: 'under-window',
+          titleBarStyle: 'hiddenInset',
+          trafficLightPosition: { x: 15, y: 10 }
+        }
+      : {
+          frame: false,
+          backgroundColor: '#00000000',
+          backgroundMaterial: 'acrylic'
+        }),
     ...(process.platform === 'linux' ? { icon } : {}),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
@@ -25,6 +36,25 @@ function createWindow(): void {
   })
 
   registerSessionIpc(mainWindow)
+
+  // Window control IPC handlers (for frameless windows on Windows/Linux)
+  ipcMain.handle('window:minimize', () => mainWindow.minimize())
+  ipcMain.handle('window:maximize', () => {
+    if (mainWindow.isMaximized()) {
+      mainWindow.unmaximize()
+    } else {
+      mainWindow.maximize()
+    }
+  })
+  ipcMain.handle('window:close', () => mainWindow.close())
+
+  // Send maximize/unmaximize state changes to renderer
+  mainWindow.on('maximize', () => {
+    mainWindow.webContents.send('window:maximized-change', true)
+  })
+  mainWindow.on('unmaximize', () => {
+    mainWindow.webContents.send('window:maximized-change', false)
+  })
 
   mainWindow.on('ready-to-show', () => {
     mainWindow.show()
