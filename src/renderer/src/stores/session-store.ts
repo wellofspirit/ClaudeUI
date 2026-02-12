@@ -89,7 +89,7 @@ interface SessionState {
   thinkingDurationMs: number | null
   status: SessionStatus
   pendingApprovals: PendingApproval[]
-  error: string | null
+  errors: string[]
   todos: TodoItem[]
   taskProgressMap: Record<string, TaskProgress>
   taskNotifications: TaskNotification[]
@@ -110,7 +110,9 @@ interface SessionState {
   addPendingApproval: (approval: PendingApproval) => void
   removePendingApproval: (requestId: string) => void
   clearPendingApprovals: () => void
-  setError: (error: string | null) => void
+  addError: (error: string) => void
+  removeError: (index: number) => void
+  clearErrors: () => void
   appendToolResult: (toolUseId: string, result: string, isError: boolean) => void
   setTodos: (todos: TodoItem[]) => void
   updateTaskProgress: (progress: TaskProgress) => void
@@ -140,7 +142,7 @@ export const useSessionStore = create<SessionState>((set) => ({
     totalCostUsd: 0
   },
   pendingApprovals: [],
-  error: null,
+  errors: [],
   todos: [],
   taskProgressMap: {},
   taskNotifications: [],
@@ -159,7 +161,7 @@ export const useSessionStore = create<SessionState>((set) => ({
         ? state.recentDirs
         : [cwd, ...state.recentDirs].slice(0, 20)
       if (!alreadyExists) saveRecentDirs(recentDirs)
-      return { cwd, messages: [], streamingText: '', streamingThinking: '', thinkingStartedAt: null, thinkingDurationMs: null, error: null, pendingApprovals: [], recentDirs, todos: [], taskProgressMap: {}, taskNotifications: [], openedTaskToolUseIds: [], taskPanelOpen: false, subagentMessages: {}, subagentStreamingText: {}, subagentStreamingThinking: {} }
+      return { cwd, messages: [], streamingText: '', streamingThinking: '', thinkingStartedAt: null, thinkingDurationMs: null, errors: [], pendingApprovals: [], recentDirs, todos: [], taskProgressMap: {}, taskNotifications: [], openedTaskToolUseIds: [], taskPanelOpen: false, subagentMessages: {}, subagentStreamingText: {}, subagentStreamingThinking: {} }
     }),
 
   addMessage: (message) =>
@@ -246,7 +248,9 @@ export const useSessionStore = create<SessionState>((set) => ({
 
   clearPendingApprovals: () => set({ pendingApprovals: [] }),
 
-  setError: (error) => set({ error }),
+  addError: (error) => set((state) => ({ errors: [...state.errors, error] })),
+  removeError: (index) => set((state) => ({ errors: state.errors.filter((_, i) => i !== index) })),
+  clearErrors: () => set({ errors: [] }),
 
   appendToolResult: (toolUseId, result, isError) =>
     set((state) => {

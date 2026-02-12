@@ -39,7 +39,7 @@ export function useClaudeEvents(): void {
   const addPendingApproval = useSessionStore((s) => s.addPendingApproval)
   const clearPendingApprovals = useSessionStore((s) => s.clearPendingApprovals)
   const setStatus = useSessionStore((s) => s.setStatus)
-  const setError = useSessionStore((s) => s.setError)
+  const addError = useSessionStore((s) => s.addError)
   const appendToolResult = useSessionStore((s) => s.appendToolResult)
   const updateTaskProgress = useSessionStore((s) => s.updateTaskProgress)
   const addTaskNotification = useSessionStore((s) => s.addTaskNotification)
@@ -83,14 +83,13 @@ export function useClaudeEvents(): void {
       }),
       window.api.onStatus((status) => {
         setStatus(status)
-        if (status.state !== 'error') setError(null)
         if (status.state === 'idle') clearPendingApprovals()
       }),
       window.api.onResult(() => {
         // Cost/duration handled via status
       }),
       window.api.onError((error) => {
-        setError(error)
+        addError(error)
       }),
       window.api.onToolResult(({ toolUseId, result, isError }) => {
         appendToolResult(toolUseId, result, isError)
@@ -119,5 +118,5 @@ export function useClaudeEvents(): void {
     ]
 
     return () => cleanups.forEach((fn) => fn())
-  }, [addMessage, appendStreamingText, appendStreamingThinking, addPendingApproval, clearPendingApprovals, setStatus, setError, appendToolResult, updateTaskProgress, addTaskNotification, addSubagentMessage, appendSubagentStreamingText, appendSubagentStreamingThinking, appendSubagentToolResult])
+  }, [addMessage, appendStreamingText, appendStreamingThinking, addPendingApproval, clearPendingApprovals, setStatus, addError, appendToolResult, updateTaskProgress, addTaskNotification, addSubagentMessage, appendSubagentStreamingText, appendSubagentStreamingThinking, appendSubagentToolResult])
 }

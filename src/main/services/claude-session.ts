@@ -252,6 +252,7 @@ export class ClaudeSession {
           if (subtype && subtype !== 'success') {
             const errors = (msg.errors as string[]) || []
             if (errors.length) {
+              console.error('[ClaudeSession] Result error:', errors.join('; '))
               this.send('session:error', errors.join('; '))
             }
           }
@@ -266,12 +267,13 @@ export class ClaudeSession {
       }
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err)
+      const stack = err instanceof Error ? err.stack : undefined
       console.error('[ClaudeSession] SDK error:', errorMsg)
-      if (err instanceof Error && err.stack) {
-        console.error('[ClaudeSession] Stack:', err.stack)
+      if (stack) {
+        console.error('[ClaudeSession] Stack:', stack)
       }
       if (!errorMsg.includes('abort')) {
-        this.send('session:error', errorMsg)
+        this.send('session:error', stack || errorMsg)
       }
     } finally {
       this.messageChannel?.end()

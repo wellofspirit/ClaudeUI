@@ -6,6 +6,7 @@ import { ThinkingBlock } from './ThinkingBlock'
 import { InputBox } from './InputBox'
 import { TodoWidget } from '../TodoWidget'
 import { FloatingApproval } from './FloatingApproval'
+import { FloatingError } from './FloatingError'
 import { WindowControls } from '../WindowControls'
 
 export function ChatPanel(): React.JSX.Element {
@@ -15,7 +16,7 @@ export function ChatPanel(): React.JSX.Element {
   const thinkingStartedAt = useSessionStore((s) => s.thinkingStartedAt)
   const pendingApprovals = useSessionStore((s) => s.pendingApprovals)
   const status = useSessionStore((s) => s.status)
-  const error = useSessionStore((s) => s.error)
+
   const scrollRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -65,16 +66,12 @@ export function ChatPanel(): React.JSX.Element {
       {/* Floating approval for sub-agent tool calls */}
       <FloatingApproval />
 
-      {/* Error banner + Input — fixed at bottom, centered */}
+      {/* Floating error */}
+      <FloatingError />
+
+      {/* Input — fixed at bottom, centered */}
       <div className="absolute bottom-0 left-0 right-0 pointer-events-none">
         <div className="pointer-events-auto">
-          {error && (
-            <div className="px-5 pb-2">
-              <div className="max-w-[740px] mx-auto text-[12px] text-danger bg-danger/5 border border-danger/15 rounded-lg px-3 py-2">
-                {error}
-              </div>
-            </div>
-          )}
           <InputBox />
         </div>
       </div>
