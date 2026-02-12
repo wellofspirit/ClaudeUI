@@ -101,6 +101,13 @@ export interface SubagentToolResultData {
   isError: boolean
 }
 
+export interface BackgroundOutput {
+  toolUseId: string
+  tail: string
+  totalSize: number
+  done: boolean
+}
+
 export interface ClaudeAPI {
   platform: string
   pickFolder(): Promise<string | null>
@@ -124,4 +131,8 @@ export interface ClaudeAPI {
   onSubagentStream(cb: (data: SubagentStreamDelta) => void): () => void
   onSubagentMessage(cb: (data: SubagentMessageData) => void): () => void
   onSubagentToolResult(cb: (data: SubagentToolResultData) => void): () => void
+  onBackgroundOutput(cb: (data: BackgroundOutput) => void): () => void
+  watchBackground(toolUseId: string): Promise<void>
+  unwatchBackground(toolUseId: string): Promise<void>
+  readBackgroundRange(toolUseId: string, offset: number, length: number): Promise<string>
 }

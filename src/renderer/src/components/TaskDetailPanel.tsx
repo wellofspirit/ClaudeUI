@@ -187,6 +187,173 @@ function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Element | nu
   )
 }
 
+function BashBackgroundEntry({ toolUseId }: { toolUseId: string }): React.JSX.Element | null {
+  const messages = useSessionStore((s) => s.messages)
+  const taskNotifications = useSessionStore((s) => s.taskNotifications)
+  const removeTaskFromPanel = useSessionStore((s) => s.removeTaskFromPanel)
+  const bgOutput = useSessionStore((s) => s.backgroundOutputs[toolUseId])
+  const watchBg = useSessionStore((s) => s.watchBackgroundOutput)
+  const unwatchBg = useSessionStore((s) => s.unwatchBackgroundOutput)
+  const [expanded, setExpanded] = useState(true)
+  const [prependedContent, setPrependedContent] = useState('')
+  const [loadingMore, setLoadingMore] = useState(false)
+
+  const { taskBlock } = findTaskBlocks(messages, toolUseId)
+  if (!taskBlock) return null
+
+  const command = String(taskBlock.toolInput?.command || '')
+  const bgNotification = taskNotifications.find((n) => n.toolUseId === toolUseId)
+  const isRunning = !bgNotification
+  const isError = bgNotification?.status === 'failed'
+
+  const bodyRef = useRef<HTMLDivElement>(null)
+  const [following, setFollowing] = useState(true)
+  const isAutoScrolling = useRef(false)
+
+  // Watch on mount/expand, unwatch on unmount/collapse (ref-counted)
+  useEffect(() => {
+    if (!expanded) return
+    watchBg(toolUseId)
+    return () => {
+      unwatchBg(toolUseId)
+      setPrependedContent('')
+    }
+  }, [toolUseId, expanded, watchBg, unwatchBg])
+
+  // Auto-scroll
+  useEffect(() => {
+    const el = bodyRef.current
+    if (!el || !following) return
+    isAutoScrolling.current = true
+    el.scrollTop = el.scrollHeight
+    requestAnimationFrame(() => { isAutoScrolling.current = false })
+  }, [bgOutput?.tail, following])
+
+  const handleScroll = useCallback(() => {
+    if (isAutoScrolling.current) return
+    const el = bodyRef.current
+    if (!el) return
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40
+    setFollowing(nearBottom)
+  }, [])
+
+  const scrollToBottom = useCallback(() => {
+    const el = bodyRef.current
+    if (!el) return
+    isAutoScrolling.current = true
+    el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
+    setFollowing(true)
+    requestAnimationFrame(() => { isAutoScrolling.current = false })
+  }, [])
+
+  const handleLoadEarlier = useCallback(async () => {
+    if (!bgOutput || loadingMore) return
+    const alreadyLoaded = prependedContent.length
+    const tailLen = new TextEncoder().encode(bgOutput.tail).length
+    const loaded = alreadyLoaded + tailLen
+    if (loaded >= bgOutput.totalSize) return
+
+    setLoadingMore(true)
+    const chunkSize = 64 * 1024
+    const offset = Math.max(0, bgOutput.totalSize - loaded - chunkSize)
+    const length = Math.min(chunkSize, bgOutput.totalSize - loaded)
+    const chunk = await window.api.readBackgroundRange(toolUseId, offset, length)
+    setPrependedContent((prev) => chunk + prev)
+    setLoadingMore(false)
+  }, [bgOutput, prependedContent, loadingMore, toolUseId])
+
+  const statusBadge = isError ? (
+    <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-danger/10 text-danger shrink-0">failed</span>
+  ) : !isRunning ? (
+    <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-success/10 text-success shrink-0">completed</span>
+  ) : (
+    <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-accent/10 text-accent shrink-0">running</span>
+  )
+
+  const tailLen = bgOutput ? new TextEncoder().encode(bgOutput.tail).length : 0
+  const hasMore = bgOutput ? bgOutput.totalSize > prependedContent.length + tailLen : false
+
+  return (
+    <div className="border-b border-border">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="w-full flex items-center px-4 h-10 gap-2 hover:bg-bg-hover transition-colors cursor-pointer"
+      >
+        <svg
+          width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
+          className="text-text-secondary shrink-0 transition-transform duration-150"
+          style={{ transform: expanded ? 'rotate(180deg)' : 'rotate(0deg)' }}
+        >
+          <polyline points="6 9 12 15 18 9" />
+        </svg>
+        <span className="text-[13px] text-accent font-medium shrink-0">Bash</span>
+        <span className="text-[12px] text-text-primary truncate flex-1 text-left font-mono">{command.slice(0, 60)}</span>
+        {statusBadge}
+        <button
+          onClick={(e) => { e.stopPropagation(); removeTaskFromPanel(toolUseId) }}
+          className="text-text-muted hover:text-text-primary transition-colors shrink-0 ml-1"
+        >
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <line x1="18" y1="6" x2="6" y2="18" />
+            <line x1="6" y1="6" x2="18" y2="18" />
+          </svg>
+        </button>
+      </button>
+
+      {expanded && (
+        <div className="relative">
+          <div ref={bodyRef} onScroll={handleScroll} className="px-4 py-3 max-h-[60vh] overflow-y-auto">
+            {isRunning && (
+              <div className="flex items-center gap-2 text-[13px] text-text-muted mb-2">
+                <span className="w-3 h-3 rounded-full border-2 border-accent border-t-transparent animate-spin-slow" />
+                <span>Running in background...</span>
+              </div>
+            )}
+            {hasMore && (
+              <button
+                onClick={handleLoadEarlier}
+                disabled={loadingMore}
+                className="text-[11px] text-accent hover:underline cursor-pointer mb-1 disabled:opacity-50"
+              >
+                {loadingMore ? 'Loading...' : 'Load earlier output...'}
+              </button>
+            )}
+            {bgOutput ? (
+              <pre className="text-[12px] font-mono text-text-primary/70 bg-bg-primary rounded-md p-2 border border-border whitespace-pre-wrap break-words leading-[1.5]">
+                {prependedContent}{bgOutput.tail}
+              </pre>
+            ) : isRunning ? (
+              <div className="text-[12px] text-text-muted">Waiting for output...</div>
+            ) : null}
+          </div>
+          {!following && (
+            <button
+              onClick={scrollToBottom}
+              className="absolute bottom-2 left-1/2 -translate-x-1/2 bg-bg-tertiary border border-border rounded-full p-1.5 shadow-md shadow-black/20 hover:bg-bg-hover transition-colors cursor-pointer z-10"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-text-secondary">
+                <polyline points="6 9 12 15 18 9" />
+              </svg>
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** Determine which entry component to render based on the tool type */
+function PanelEntry({ toolUseId }: { toolUseId: string }): React.JSX.Element | null {
+  const messages = useSessionStore((s) => s.messages)
+  const { taskBlock } = findTaskBlocks(messages, toolUseId)
+  if (!taskBlock) return null
+
+  if (taskBlock.toolName === 'Bash' && taskBlock.toolInput?.run_in_background) {
+    return <BashBackgroundEntry toolUseId={toolUseId} />
+  }
+  return <TaskEntry toolUseId={toolUseId} />
+}
+
 export function TaskDetailPanel(): React.JSX.Element | null {
   const taskPanelOpen = useSessionStore((s) => s.taskPanelOpen)
   const openedTaskToolUseIds = useSessionStore((s) => s.openedTaskToolUseIds)
@@ -210,10 +377,10 @@ export function TaskDetailPanel(): React.JSX.Element | null {
         </button>
       </div>
 
-      {/* Stacked task entries */}
+      {/* Stacked entries */}
       <div className="flex-1 overflow-y-auto">
         {openedTaskToolUseIds.map((id) => (
-          <TaskEntry key={id} toolUseId={id} />
+          <PanelEntry key={id} toolUseId={id} />
         ))}
       </div>
     </div>

@@ -98,6 +98,8 @@ interface SessionState {
   subagentMessages: Record<string, ChatMessage[]>
   subagentStreamingText: Record<string, string>
   subagentStreamingThinking: Record<string, string>
+  backgroundOutputs: Record<string, { tail: string; totalSize: number }>
+  backgroundWatcherCounts: Record<string, number>
 
   setCwd: (cwd: string | null) => void
   openDirectory: (cwd: string) => void
@@ -121,6 +123,9 @@ interface SessionState {
   appendSubagentStreamingText: (toolUseId: string, text: string) => void
   appendSubagentStreamingThinking: (toolUseId: string, text: string) => void
   appendSubagentToolResult: (toolUseId: string, toolResultToolUseId: string, result: string, isError: boolean) => void
+  setBackgroundOutput: (toolUseId: string, tail: string, totalSize: number) => void
+  watchBackgroundOutput: (toolUseId: string) => void
+  unwatchBackgroundOutput: (toolUseId: string) => void
   openTaskPanel: (toolUseId: string) => void
   closeTaskPanel: () => void
   removeTaskFromPanel: (toolUseId: string) => void
@@ -151,6 +156,8 @@ export const useSessionStore = create<SessionState>((set) => ({
   subagentMessages: {},
   subagentStreamingText: {},
   subagentStreamingThinking: {},
+  backgroundOutputs: {},
+  backgroundWatcherCounts: {},
 
   setCwd: (cwd) => set({ cwd }),
 
@@ -161,7 +168,7 @@ export const useSessionStore = create<SessionState>((set) => ({
         ? state.recentDirs
         : [cwd, ...state.recentDirs].slice(0, 20)
       if (!alreadyExists) saveRecentDirs(recentDirs)
-      return { cwd, messages: [], streamingText: '', streamingThinking: '', thinkingStartedAt: null, thinkingDurationMs: null, errors: [], pendingApprovals: [], recentDirs, todos: [], taskProgressMap: {}, taskNotifications: [], openedTaskToolUseIds: [], taskPanelOpen: false, subagentMessages: {}, subagentStreamingText: {}, subagentStreamingThinking: {} }
+      return { cwd, messages: [], streamingText: '', streamingThinking: '', thinkingStartedAt: null, thinkingDurationMs: null, errors: [], pendingApprovals: [], recentDirs, todos: [], taskProgressMap: {}, taskNotifications: [], openedTaskToolUseIds: [], taskPanelOpen: false, subagentMessages: {}, subagentStreamingText: {}, subagentStreamingThinking: {}, backgroundOutputs: {}, backgroundWatcherCounts: {} }
     }),
 
   addMessage: (message) =>
@@ -351,6 +358,30 @@ export const useSessionStore = create<SessionState>((set) => ({
         }
       }
       return { subagentMessages: { ...state.subagentMessages, [toolUseId]: updated } }
+    }),
+
+  setBackgroundOutput: (toolUseId, tail, totalSize) =>
+    set((state) => ({
+      backgroundOutputs: { ...state.backgroundOutputs, [toolUseId]: { tail, totalSize } }
+    })),
+
+  watchBackgroundOutput: (toolUseId) =>
+    set((state) => {
+      const count = (state.backgroundWatcherCounts[toolUseId] || 0) + 1
+      window.api.watchBackground(toolUseId)
+      return { backgroundWatcherCounts: { ...state.backgroundWatcherCounts, [toolUseId]: count } }
+    }),
+
+  unwatchBackgroundOutput: (toolUseId) =>
+    set((state) => {
+      const count = (state.backgroundWatcherCounts[toolUseId] || 1) - 1
+      if (count <= 0) {
+        window.api.unwatchBackground(toolUseId)
+        const { [toolUseId]: _, ...restOutputs } = state.backgroundOutputs
+        const { [toolUseId]: __, ...restCounts } = state.backgroundWatcherCounts
+        return { backgroundOutputs: restOutputs, backgroundWatcherCounts: restCounts }
+      }
+      return { backgroundWatcherCounts: { ...state.backgroundWatcherCounts, [toolUseId]: count } }
     }),
 
   openTaskPanel: (toolUseId) =>

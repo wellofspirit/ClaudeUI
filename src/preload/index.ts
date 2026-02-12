@@ -80,7 +80,16 @@ const api: ClaudeAPI = {
     const handler = (_: Electron.IpcRendererEvent, data: unknown): void => cb(data as never)
     ipcRenderer.on('session:subagent-tool-result', handler)
     return () => ipcRenderer.removeListener('session:subagent-tool-result', handler)
-  }
+  },
+  onBackgroundOutput: (cb) => {
+    const handler = (_: Electron.IpcRendererEvent, data: unknown): void => cb(data as never)
+    ipcRenderer.on('session:background-output', handler)
+    return () => ipcRenderer.removeListener('session:background-output', handler)
+  },
+  watchBackground: (toolUseId: string) => ipcRenderer.invoke('session:watch-background', toolUseId),
+  unwatchBackground: (toolUseId: string) => ipcRenderer.invoke('session:unwatch-background', toolUseId),
+  readBackgroundRange: (toolUseId: string, offset: number, length: number) =>
+    ipcRenderer.invoke('session:read-background-range', toolUseId, offset, length)
 }
 
 if (process.contextIsolated) {

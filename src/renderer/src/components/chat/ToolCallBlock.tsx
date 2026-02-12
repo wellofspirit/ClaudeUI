@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import type { ContentBlock, PendingApproval } from '../../../../shared/types'
 import { useSessionStore } from '../../stores/session-store'
 
@@ -10,12 +10,22 @@ interface Props {
 
 export function ToolCallBlock({ block, result, approval }: Props): React.JSX.Element {
   const removePendingApproval = useSessionStore((s) => s.removePendingApproval)
+  const openTaskPanel = useSessionStore((s) => s.openTaskPanel)
   const [expanded, setExpanded] = useState(false)
+
+  const toolUseId = block.toolUseId || ''
+  const isBackgroundBash = block.toolName === 'Bash' && !!block.toolInput?.run_in_background
+  const taskNotifications = useSessionStore((s) => s.taskNotifications)
   const summary = getSummary(block)
   const hasResult = !!result
-  const isError = result?.isError ?? false
-  const isSuccess = hasResult && !isError
   const isPendingApproval = !!approval
+
+  // For background bash, "done" means we got a task_notification, not just a tool_result
+  const bgNotification = isBackgroundBash ? taskNotifications.find((n) => n.toolUseId === toolUseId) : null
+  const bgRunning = isBackgroundBash && !bgNotification
+  const bgError = isBackgroundBash && bgNotification?.status === 'failed'
+  const isError = isBackgroundBash ? bgError : (result?.isError ?? false)
+  const isSuccess = isBackgroundBash ? (!!bgNotification && !bgError) : (hasResult && !isError)
 
   const handleApproval = async (decision: 'allow' | 'deny'): Promise<void> => {
     if (!approval) return
@@ -28,9 +38,11 @@ export function ToolCallBlock({ block, result, approval }: Props): React.JSX.Ele
     ? 'border-warning/40'
     : isError
       ? 'border-danger/30'
-      : isSuccess
-        ? 'border-success/30'
-        : 'border-border'
+      : bgRunning
+        ? 'border-accent/30'
+        : isSuccess
+          ? 'border-success/30'
+          : 'border-border'
 
   const statusIcon = isPendingApproval ? (
     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-warning shrink-0">
@@ -49,6 +61,8 @@ export function ToolCallBlock({ block, result, approval }: Props): React.JSX.Ele
       <circle cx="12" cy="12" r="10" />
       <polyline points="8 12 11 15 16 9" />
     </svg>
+  ) : bgRunning ? (
+    <span className="w-3 h-3 rounded-full border-2 border-accent border-t-transparent shrink-0 animate-spin-slow" />
   ) : (
     <span className="w-3 h-3 rounded-full border-2 border-text-muted border-t-transparent shrink-0 animate-spin-slow" />
   )
@@ -80,8 +94,8 @@ export function ToolCallBlock({ block, result, approval }: Props): React.JSX.Ele
             <ToolInput block={block} />
           </div>
 
-          {/* Result section */}
-          {hasResult && result.toolResult && (
+          {/* Result section (skip for background bash — live output shown separately) */}
+          {hasResult && result.toolResult && !isBackgroundBash && (
             <div className="px-3 py-2.5 border-t border-border">
               <div className={`text-[11px] uppercase tracking-wider mb-1.5 ${isError ? 'text-danger' : 'text-success'}`}>
                 {isError ? 'Error' : 'Result'}
@@ -90,6 +104,11 @@ export function ToolCallBlock({ block, result, approval }: Props): React.JSX.Ele
             </div>
           )}
         </div>
+      )}
+
+      {/* Background bash output */}
+      {expanded && isBackgroundBash && (
+        <BackgroundBashOutput toolUseId={toolUseId} />
       )}
 
       {/* Approval buttons */}
@@ -110,6 +129,97 @@ export function ToolCallBlock({ block, result, approval }: Props): React.JSX.Ele
           </button>
         </div>
       )}
+
+      {/* Footer for background bash */}
+      {isBackgroundBash && !isPendingApproval && (
+        <div className="border-t border-border px-3 py-1.5 flex items-center gap-1.5">
+          <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-warning/10 text-warning">background</span>
+          <div className="flex-1" />
+          <button
+            onClick={() => openTaskPanel(toolUseId)}
+            className="text-[11px] text-accent hover:underline cursor-pointer"
+          >
+            Open in panel
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function BackgroundBashOutput({ toolUseId }: { toolUseId: string }): React.JSX.Element | null {
+  const bgOutput = useSessionStore((s) => s.backgroundOutputs[toolUseId])
+  const watchBg = useSessionStore((s) => s.watchBackgroundOutput)
+  const unwatchBg = useSessionStore((s) => s.unwatchBackgroundOutput)
+  const [prependedContent, setPrependedContent] = useState('')
+  const [loadingMore, setLoadingMore] = useState(false)
+  const preRef = useRef<HTMLPreElement>(null)
+  const isAutoScrolling = useRef(false)
+  const [following, setFollowing] = useState(true)
+
+  // Watch on mount, unwatch on unmount (ref-counted)
+  useEffect(() => {
+    watchBg(toolUseId)
+    return () => { unwatchBg(toolUseId) }
+  }, [toolUseId, watchBg, unwatchBg])
+
+  // Auto-scroll
+  useEffect(() => {
+    const el = preRef.current
+    if (!el || !following) return
+    isAutoScrolling.current = true
+    el.scrollTop = el.scrollHeight
+    requestAnimationFrame(() => { isAutoScrolling.current = false })
+  }, [bgOutput?.tail, following])
+
+  const handleScroll = useCallback(() => {
+    if (isAutoScrolling.current) return
+    const el = preRef.current
+    if (!el) return
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40
+    setFollowing(nearBottom)
+  }, [])
+
+  const handleLoadEarlier = useCallback(async () => {
+    if (!bgOutput || loadingMore) return
+    const alreadyLoaded = prependedContent.length
+    const tailLen = new TextEncoder().encode(bgOutput.tail).length
+    const loaded = alreadyLoaded + tailLen
+    if (loaded >= bgOutput.totalSize) return
+
+    setLoadingMore(true)
+    const chunkSize = 64 * 1024
+    const offset = Math.max(0, bgOutput.totalSize - loaded - chunkSize)
+    const length = Math.min(chunkSize, bgOutput.totalSize - loaded)
+    const chunk = await window.api.readBackgroundRange(toolUseId, offset, length)
+    setPrependedContent((prev) => chunk + prev)
+    setLoadingMore(false)
+  }, [bgOutput, prependedContent, loadingMore, toolUseId])
+
+  if (!bgOutput) return null
+
+  const tailLen = new TextEncoder().encode(bgOutput.tail).length
+  const hasMore = bgOutput.totalSize > prependedContent.length + tailLen
+
+  return (
+    <div className="border-t border-border px-3 py-2.5">
+      <div className="text-[11px] text-text-secondary uppercase tracking-wider mb-1.5">Output</div>
+      {hasMore && (
+        <button
+          onClick={handleLoadEarlier}
+          disabled={loadingMore}
+          className="text-[11px] text-accent hover:underline cursor-pointer mb-1 disabled:opacity-50"
+        >
+          {loadingMore ? 'Loading...' : 'Load earlier output...'}
+        </button>
+      )}
+      <pre
+        ref={preRef}
+        onScroll={handleScroll}
+        className="text-[12px] font-mono text-text-primary/70 bg-bg-primary rounded-md p-2 border border-border max-h-48 overflow-y-auto whitespace-pre-wrap break-words leading-[1.5]"
+      >
+        {prependedContent}{bgOutput.tail}
+      </pre>
     </div>
   )
 }

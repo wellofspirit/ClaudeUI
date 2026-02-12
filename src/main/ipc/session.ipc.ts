@@ -36,4 +36,16 @@ export function registerSessionIpc(win: BrowserWindow): void {
     }
   )
 
+  ipcMain.handle('session:watch-background', (_e, toolUseId: string) => {
+    session?.watchBackground(toolUseId)
+  })
+
+  ipcMain.handle('session:unwatch-background', (_e, toolUseId: string) => {
+    session?.unwatchBackground(toolUseId)
+  })
+
+  ipcMain.handle('session:read-background-range', (_e, toolUseId: string, offset: number, length: number) => {
+    return session?.readBackgroundRange(toolUseId, offset, length) ?? ''
+  })
+
 }

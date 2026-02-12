@@ -513,3 +513,73 @@ The `InputBox` model picker and effort level dropdowns manage local state only �
 
 ### Plus Menu Not Wired
 The "Attach image" option in the plus menu is UI-only — no file attachment logic is implemented yet.
+
+## Analyzing the SDK Bundle
+
+The SDK ships a minified `cli.js` (~11 MB) at `node_modules/@anthropic-ai/claude-agent-sdk/cli.js`. **Always use the `bundle-analyzer` skill** (invoke via `/bundle-analyzer`) to navigate this code. Standard grep/read tools are ineffective on minified single-line bundles.
+
+### Typical workflow
+
+1. `bundle-analyzer find cli.js "<string>"` — locate code by string literals (never by minified variable names)
+2. `bundle-analyzer extract-fn cli.js <offset>` — pull out the enclosing function
+3. `bundle-analyzer strings cli.js --near <offset>` — see nearby string landmarks
+4. `bundle-analyzer refs cli.js <offset>` — what external variables does this function use?
+5. `bundle-analyzer calls cli.js <offset>` — call graph (incoming + outgoing)
+6. `bundle-analyzer decompile cli.js <offset>` — readable version with annotations
+7. `bundle-analyzer patch-check cli.js <pattern>` — verify patch pattern uniqueness
+
+### Key minified identifiers (version 2.1.39)
+
+| Identifier | Purpose |
+|---|---|
+| `ihA(A)` | Generator that converts internal progress events → SDK messages |
+| `VlY` | bash_progress rate limit interval (30000ms) |
+| `flY` | bash_progress map size cap (100) |
+| `wp1` | bash_progress throttle map (toolUseId → lastTimestamp) |
+| `p6()` | Returns current session ID |
+| `X6()` | Boolean coerce/check utility |
+
+## SDK Patches
+
+Patches live in `patch/` and fix limitations in the bundled `cli.js`. Run `node patch/apply-all.mjs` after install or SDK update.
+
+### Writing a new patch
+
+Each patch is a directory under `patch/` with two files:
+
+| File | Purpose |
+|---|---|
+| `apply.mjs` | Node script that reads `cli.js`, finds the target code, applies the fix, verifies |
+| `README.md` | Documents the bug, the fix, how to find the code in new versions |
+
+#### `apply.mjs` conventions
+
+1. **Read cli.js** from `node_modules/@anthropic-ai/claude-agent-sdk/cli.js`
+2. **Check idempotency** — look for a `/*PATCHED:<name>*/` marker; exit early if found
+3. **Find code by content patterns** — use unique string literals as anchors, never char offsets or minified variable names directly. Extract variable names dynamically from regex captures.
+4. **Verify uniqueness** — ensure the match pattern appears exactly once
+5. **Apply the patch** — string replacement with the marker included
+6. **Write and verify** — write back, re-read, confirm marker and key strings are present
+7. **Use `const V = '[\\w$]+'`** for matching minified identifiers (they can contain `$`)
+
+#### `README.md` structure
+
+1. **Title + one-line summary** of what the patch does
+2. **Affected Component** — package name, version at time of discovery
+3. **The Bug** — what's wrong, with code snippets from the minified source
+4. **The Fix** — before/after code showing the change
+5. **How the code was found** — which `bundle-analyzer` commands were used (helps reproduce for new versions)
+6. **Applying the Patch** — `node patch/<name>/apply.mjs`
+7. **How to find this code in a new version** — stable anchors to search for
+
+#### Register in `apply-all.mjs`
+
+Add the new patch to the `patches` array in `patch/apply-all.mjs`.
+
+### Current patches
+
+| Patch | Purpose |
+|---|---|
+| `task-notification` | Forwards task_notification system messages to SDK consumer |
+| `subagent-streaming` | Forwards subagent stream events + messages to SDK consumer |
+| `task-notification-usage` | Extracts `<usage>` data from task-notification XML |
