@@ -95,8 +95,9 @@ interface SessionState {
   taskNotifications: TaskNotification[]
   openedTaskToolUseIds: string[]
   taskPanelOpen: boolean
-  backgroundTaskToolUseIds: Set<string>
-  backgroundOutputs: Record<string, ChatMessage[]>
+  subagentMessages: Record<string, ChatMessage[]>
+  subagentStreamingText: Record<string, string>
+  subagentStreamingThinking: Record<string, string>
 
   setCwd: (cwd: string | null) => void
   openDirectory: (cwd: string) => void
@@ -114,9 +115,10 @@ interface SessionState {
   setTodos: (todos: TodoItem[]) => void
   updateTaskProgress: (progress: TaskProgress) => void
   addTaskNotification: (notification: TaskNotification) => void
-  markBackgroundTask: (toolUseId: string) => void
-  updateBackgroundOutput: (toolUseId: string, messages: ChatMessage[]) => void
-  resolveBackgroundTask: (toolUseId: string, notification: TaskNotification) => void
+  addSubagentMessage: (toolUseId: string, message: ChatMessage) => void
+  appendSubagentStreamingText: (toolUseId: string, text: string) => void
+  appendSubagentStreamingThinking: (toolUseId: string, text: string) => void
+  appendSubagentToolResult: (toolUseId: string, toolResultToolUseId: string, result: string, isError: boolean) => void
   openTaskPanel: (toolUseId: string) => void
   closeTaskPanel: () => void
   removeTaskFromPanel: (toolUseId: string) => void
@@ -144,8 +146,9 @@ export const useSessionStore = create<SessionState>((set) => ({
   taskNotifications: [],
   openedTaskToolUseIds: [],
   taskPanelOpen: false,
-  backgroundTaskToolUseIds: new Set<string>(),
-  backgroundOutputs: {},
+  subagentMessages: {},
+  subagentStreamingText: {},
+  subagentStreamingThinking: {},
 
   setCwd: (cwd) => set({ cwd }),
 
@@ -156,7 +159,7 @@ export const useSessionStore = create<SessionState>((set) => ({
         ? state.recentDirs
         : [cwd, ...state.recentDirs].slice(0, 20)
       if (!alreadyExists) saveRecentDirs(recentDirs)
-      return { cwd, messages: [], streamingText: '', streamingThinking: '', thinkingStartedAt: null, thinkingDurationMs: null, error: null, pendingApprovals: [], recentDirs, todos: [], taskProgressMap: {}, taskNotifications: [], openedTaskToolUseIds: [], taskPanelOpen: false, backgroundTaskToolUseIds: new Set<string>(), backgroundOutputs: {} }
+      return { cwd, messages: [], streamingText: '', streamingThinking: '', thinkingStartedAt: null, thinkingDurationMs: null, error: null, pendingApprovals: [], recentDirs, todos: [], taskProgressMap: {}, taskNotifications: [], openedTaskToolUseIds: [], taskPanelOpen: false, subagentMessages: {}, subagentStreamingText: {}, subagentStreamingThinking: {} }
     }),
 
   addMessage: (message) =>
@@ -281,26 +284,69 @@ export const useSessionStore = create<SessionState>((set) => ({
       taskNotifications: [...state.taskNotifications, notification]
     })),
 
-  markBackgroundTask: (toolUseId) =>
+  addSubagentMessage: (toolUseId, message) =>
     set((state) => {
-      const next = new Set(state.backgroundTaskToolUseIds)
-      next.add(toolUseId)
-      return { backgroundTaskToolUseIds: next }
+      const existing = state.subagentMessages[toolUseId] || []
+      const idx = existing.findIndex((m) => m.id === message.id)
+      let updated: ChatMessage[]
+      if (idx < 0) {
+        updated = [...existing, message]
+      } else {
+        const merged = {
+          ...message,
+          content: mergeContentBlocks(existing[idx].content, message.content)
+        }
+        updated = existing.map((m, i) => (i === idx ? merged : m))
+      }
+      return {
+        subagentMessages: { ...state.subagentMessages, [toolUseId]: updated },
+        subagentStreamingText: { ...state.subagentStreamingText, [toolUseId]: '' },
+        subagentStreamingThinking: { ...state.subagentStreamingThinking, [toolUseId]: '' }
+      }
     }),
 
-  updateBackgroundOutput: (toolUseId, messages) =>
+  appendSubagentStreamingText: (toolUseId, text) =>
     set((state) => ({
-      backgroundOutputs: { ...state.backgroundOutputs, [toolUseId]: messages }
+      subagentStreamingText: {
+        ...state.subagentStreamingText,
+        [toolUseId]: (state.subagentStreamingText[toolUseId] || '') + text
+      },
+      subagentStreamingThinking: {
+        ...state.subagentStreamingThinking,
+        [toolUseId]: ''
+      }
     })),
 
-  resolveBackgroundTask: (toolUseId, notification) =>
-    set((state) => {
-      const next = new Set(state.backgroundTaskToolUseIds)
-      next.delete(toolUseId)
-      return {
-        backgroundTaskToolUseIds: next,
-        taskNotifications: [...state.taskNotifications, notification]
+  appendSubagentStreamingThinking: (toolUseId, text) =>
+    set((state) => ({
+      subagentStreamingThinking: {
+        ...state.subagentStreamingThinking,
+        [toolUseId]: (state.subagentStreamingThinking[toolUseId] || '') + text
       }
+    })),
+
+  appendSubagentToolResult: (toolUseId, toolResultToolUseId, result, isError) =>
+    set((state) => {
+      const msgs = state.subagentMessages[toolUseId] || []
+      const updated = [...msgs]
+      for (let i = updated.length - 1; i >= 0; i--) {
+        const msg = updated[i]
+        if (msg.role !== 'assistant') continue
+        const hasToolUse = msg.content.some(
+          (b: ContentBlock) => b.type === 'tool_use' && b.toolUseId === toolResultToolUseId
+        )
+        if (hasToolUse) {
+          updated[i] = {
+            ...msg,
+            content: [
+              ...msg.content,
+              { type: 'tool_result', toolUseId: toolResultToolUseId, toolResult: result, isError }
+            ]
+          }
+          break
+        }
+      }
+      return { subagentMessages: { ...state.subagentMessages, [toolUseId]: updated } }
     }),
 
   openTaskPanel: (toolUseId) =>

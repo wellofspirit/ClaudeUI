@@ -82,16 +82,22 @@ export interface TaskNotification {
   summary: string
 }
 
-export interface BackgroundTaskStarted {
+export interface SubagentStreamDelta {
   toolUseId: string
-  outputFile: string
-  agentId: string
+  type: 'text' | 'thinking'
+  text: string
 }
 
-export interface BackgroundOutput {
+export interface SubagentMessageData {
   toolUseId: string
-  messages: ChatMessage[]
-  outputFile: string
+  message: ChatMessage
+}
+
+export interface SubagentToolResultData {
+  toolUseId: string
+  toolResultToolUseId: string
+  result: string
+  isError: boolean
 }
 
 export interface ClaudeAPI {
@@ -112,9 +118,9 @@ export interface ClaudeAPI {
   onError(cb: (error: string) => void): () => void
   onToolResult(cb: (data: { toolUseId: string; result: string; isError: boolean }) => void): () => void
   onMaximizeChange(cb: (isMaximized: boolean) => void): () => void
-  readTaskOutput(filePath: string): Promise<string | null>
   onTaskProgress(cb: (data: TaskProgress) => void): () => void
   onTaskNotification(cb: (data: TaskNotification) => void): () => void
-  onBackgroundTaskStarted(cb: (data: BackgroundTaskStarted) => void): () => void
-  onBackgroundOutput(cb: (data: BackgroundOutput) => void): () => void
+  onSubagentStream(cb: (data: SubagentStreamDelta) => void): () => void
+  onSubagentMessage(cb: (data: SubagentMessageData) => void): () => void
+  onSubagentToolResult(cb: (data: SubagentToolResultData) => void): () => void
 }

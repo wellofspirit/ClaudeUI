@@ -51,7 +51,6 @@ const api: ClaudeAPI = {
     ipcRenderer.on('session:tool-result', handler)
     return () => ipcRenderer.removeListener('session:tool-result', handler)
   },
-  readTaskOutput: (filePath: string) => ipcRenderer.invoke('session:read-task-output', filePath),
   onTaskProgress: (cb) => {
     const handler = (_: Electron.IpcRendererEvent, data: unknown): void => cb(data as never)
     ipcRenderer.on('session:task-progress', handler)
@@ -67,15 +66,20 @@ const api: ClaudeAPI = {
     ipcRenderer.on('session:task-notification', handler)
     return () => ipcRenderer.removeListener('session:task-notification', handler)
   },
-  onBackgroundTaskStarted: (cb) => {
+  onSubagentStream: (cb) => {
     const handler = (_: Electron.IpcRendererEvent, data: unknown): void => cb(data as never)
-    ipcRenderer.on('session:background-task-started', handler)
-    return () => ipcRenderer.removeListener('session:background-task-started', handler)
+    ipcRenderer.on('session:subagent-stream', handler)
+    return () => ipcRenderer.removeListener('session:subagent-stream', handler)
   },
-  onBackgroundOutput: (cb) => {
+  onSubagentMessage: (cb) => {
     const handler = (_: Electron.IpcRendererEvent, data: unknown): void => cb(data as never)
-    ipcRenderer.on('session:background-output', handler)
-    return () => ipcRenderer.removeListener('session:background-output', handler)
+    ipcRenderer.on('session:subagent-message', handler)
+    return () => ipcRenderer.removeListener('session:subagent-message', handler)
+  },
+  onSubagentToolResult: (cb) => {
+    const handler = (_: Electron.IpcRendererEvent, data: unknown): void => cb(data as never)
+    ipcRenderer.on('session:subagent-tool-result', handler)
+    return () => ipcRenderer.removeListener('session:subagent-tool-result', handler)
   }
 }
 

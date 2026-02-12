@@ -43,9 +43,10 @@ export function useClaudeEvents(): void {
   const appendToolResult = useSessionStore((s) => s.appendToolResult)
   const updateTaskProgress = useSessionStore((s) => s.updateTaskProgress)
   const addTaskNotification = useSessionStore((s) => s.addTaskNotification)
-  const markBackgroundTask = useSessionStore((s) => s.markBackgroundTask)
-  const updateBackgroundOutput = useSessionStore((s) => s.updateBackgroundOutput)
-  const resolveBackgroundTask = useSessionStore((s) => s.resolveBackgroundTask)
+  const addSubagentMessage = useSessionStore((s) => s.addSubagentMessage)
+  const appendSubagentStreamingText = useSessionStore((s) => s.appendSubagentStreamingText)
+  const appendSubagentStreamingThinking = useSessionStore((s) => s.appendSubagentStreamingThinking)
+  const appendSubagentToolResult = useSessionStore((s) => s.appendSubagentToolResult)
 
   useEffect(() => {
     const cleanups = [
@@ -100,21 +101,23 @@ export function useClaudeEvents(): void {
         updateTaskProgress(data)
       }),
       window.api.onTaskNotification((data) => {
-        // If this notification has a toolUseId, resolve the background task
-        if (data.toolUseId) {
-          resolveBackgroundTask(data.toolUseId, data)
+        addTaskNotification(data)
+      }),
+      window.api.onSubagentStream((data) => {
+        if (data.type === 'thinking') {
+          appendSubagentStreamingThinking(data.toolUseId, data.text)
         } else {
-          addTaskNotification(data)
+          appendSubagentStreamingText(data.toolUseId, data.text)
         }
       }),
-      window.api.onBackgroundTaskStarted((data) => {
-        markBackgroundTask(data.toolUseId)
+      window.api.onSubagentMessage((data) => {
+        addSubagentMessage(data.toolUseId, data.message)
       }),
-      window.api.onBackgroundOutput((data) => {
-        updateBackgroundOutput(data.toolUseId, data.messages)
+      window.api.onSubagentToolResult((data) => {
+        appendSubagentToolResult(data.toolUseId, data.toolResultToolUseId, data.result, data.isError)
       })
     ]
 
     return () => cleanups.forEach((fn) => fn())
-  }, [addMessage, appendStreamingText, appendStreamingThinking, addPendingApproval, clearPendingApprovals, setStatus, setError, appendToolResult, updateTaskProgress, addTaskNotification, markBackgroundTask, updateBackgroundOutput, resolveBackgroundTask])
+  }, [addMessage, appendStreamingText, appendStreamingThinking, addPendingApproval, clearPendingApprovals, setStatus, setError, appendToolResult, updateTaskProgress, addTaskNotification, addSubagentMessage, appendSubagentStreamingText, appendSubagentStreamingThinking, appendSubagentToolResult])
 }

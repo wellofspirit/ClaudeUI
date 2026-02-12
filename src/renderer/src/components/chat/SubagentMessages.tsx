@@ -34,7 +34,7 @@ function ContentBlockView({ block }: { block: ContentBlock }): React.JSX.Element
   return null
 }
 
-export function BackgroundMessages({ messages, maxHeight = '400px' }: Props): React.JSX.Element {
+export function SubagentMessages({ messages, maxHeight = '400px' }: Props): React.JSX.Element {
   return (
     <div className="flex flex-col gap-2 overflow-y-auto" style={{ maxHeight }}>
       {messages.map((msg) => {

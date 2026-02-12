@@ -1,6 +1,5 @@
 import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk'
 import { v4 as uuid } from 'uuid'
-import { readFile } from 'fs/promises'
 import type { BrowserWindow } from 'electron'
 import type {
   ChatMessage,
@@ -9,7 +8,6 @@ import type {
   ApprovalDecision,
   PendingApproval
 } from '../../shared/types'
-import { parseBackgroundJsonl } from './jsonl-parser'
 
 interface ApprovalResult {
   decision: ApprovalDecision
@@ -18,14 +16,6 @@ interface ApprovalResult {
 
 interface PendingApprovalEntry {
   resolve: (result: ApprovalResult) => void
-}
-
-interface BackgroundTaskEntry {
-  outputFile: string
-  agentId: string
-  toolUseId: string
-  pollInterval: ReturnType<typeof setInterval>
-  lastContent: string
 }
 
 /**
@@ -76,7 +66,6 @@ class MessageChannel<T> {
 }
 
 const AGENT_ID_RE = /agentId:\s*(\S+)/
-const OUTPUT_FILE_RE = /output_file:\s*(\S+)/
 const TASK_ID_RE = /task_id:\s*(\S+)/
 
 export class ClaudeSession {
@@ -84,7 +73,7 @@ export class ClaudeSession {
   private abortController: AbortController | null = null
   private isProcessing = false
   private pendingApprovals = new Map<string, PendingApprovalEntry>()
-  private backgroundTasks = new Map<string, BackgroundTaskEntry>()
+  private taskIdMap = new Map<string, string>() // agentId → toolUseId
   private win: BrowserWindow
   private cwd: string
   private totalCostUsd = 0
@@ -121,7 +110,6 @@ export class ClaudeSession {
 
     if (this.messageChannel) {
       // Session already active — push to existing channel
-      console.log('[run] Pushing message to existing channel')
       this.messageChannel.push(sdkMessage)
       return
     }
@@ -135,7 +123,6 @@ export class ClaudeSession {
     this.abortController = new AbortController()
 
     try {
-      console.log('[run] Starting SDK query in streaming input mode')
       const q = sdkQuery({
         prompt: channel as AsyncIterable<never>,
         options: {
@@ -144,12 +131,7 @@ export class ClaudeSession {
           abortController: this.abortController,
           includePartialMessages: true,
           thinking: { type: 'enabled', budgetTokens: 10000 },
-          stderr: (text: string) => {
-            // SDK debug output — only log interesting lines
-            if (text.includes('streamInput') || text.includes('endInput') || text.includes('result') || text.includes('exit')) {
-              console.log(`[SDK stderr] ${text.trim()}`)
-            }
-          },
+          stderr: () => {},
           ...(this.sessionId ? { resume: this.sessionId } : {}),
           canUseTool: async (toolName, input, opts) => {
             const requestId = uuid()
@@ -188,12 +170,21 @@ export class ClaudeSession {
           this.sendStatus()
         }
 
-        // Debug: log ALL SDK messages
-        if (type === 'stream_event') {
+        // Debug: subagent routing diagnostics
+        const _ptui = msg.parent_tool_use_id
+        if (type === 'assistant') {
+          const betaMsg = msg.message as Record<string, unknown> | undefined
+          const content = betaMsg?.content as Array<Record<string, unknown>> | undefined
+          const blockTypes = content?.map((b) => b.type).join(',') || '?'
+          console.log(`[subagent-debug] type=assistant parent_tool_use_id=${JSON.stringify(_ptui)} blocks=[${blockTypes}]`)
+        } else if (type === 'user') {
+          console.log(`[subagent-debug] type=user parent_tool_use_id=${JSON.stringify(_ptui)}`)
+        } else if (type === 'stream_event') {
           const evt = (msg.event as Record<string, unknown>)?.type
-          console.log(`[SDK msg] type=stream_event event.type=${evt}`)
-        } else {
-          console.log(`[SDK msg] type=${type} subkeys=[${Object.keys(msg).join(',')}]`, JSON.stringify(msg).substring(0, 500))
+          const delta = ((msg.event as Record<string, unknown>)?.delta as Record<string, unknown>)?.type
+          console.log(`[subagent-debug] type=stream_event event=${evt} delta=${delta} parent_tool_use_id=${JSON.stringify(_ptui)}`)
+        } else if (type !== 'tool_progress') {
+          console.log(`[subagent-debug] type=${type} parent_tool_use_id=${JSON.stringify(_ptui)}`)
         }
 
         // Any assistant or stream content means we're processing
@@ -203,11 +194,19 @@ export class ClaudeSession {
         }
 
         if (type === 'assistant') {
+          const parentToolUseId = msg.parent_tool_use_id as string | undefined
           const chatMsg = this.transformAssistantMessage(msg)
-          if (chatMsg) this.send('session:message', chatMsg)
+          if (chatMsg) {
+            if (parentToolUseId) {
+              this.send('session:subagent-message', { toolUseId: parentToolUseId, message: chatMsg })
+            } else {
+              this.send('session:message', chatMsg)
+            }
+          }
         } else if (type === 'user') {
           await this.handleUserMessage(msg)
         } else if (type === 'stream_event') {
+          const parentToolUseId = msg.parent_tool_use_id as string | undefined
           const event = msg.event as Record<string, unknown> | undefined
           if (event) {
             const eventType = event.type as string
@@ -215,12 +214,20 @@ export class ClaudeSession {
               const delta = event.delta as Record<string, unknown> | undefined
               if (delta) {
                 if (delta.type === 'text_delta' && typeof delta.text === 'string') {
-                  this.send('session:stream', { type: 'text', text: delta.text })
+                  if (parentToolUseId) {
+                    this.send('session:subagent-stream', { toolUseId: parentToolUseId, type: 'text', text: delta.text })
+                  } else {
+                    this.send('session:stream', { type: 'text', text: delta.text })
+                  }
                 } else if (
                   delta.type === 'thinking_delta' &&
                   typeof delta.thinking === 'string'
                 ) {
-                  this.send('session:stream', { type: 'thinking', text: delta.thinking })
+                  if (parentToolUseId) {
+                    this.send('session:subagent-stream', { toolUseId: parentToolUseId, type: 'thinking', text: delta.thinking })
+                  } else {
+                    this.send('session:stream', { type: 'thinking', text: delta.thinking })
+                  }
                 }
               }
             }
@@ -237,24 +244,10 @@ export class ClaudeSession {
           if (subtype === 'task_notification') {
             const taskId = (msg.task_id as string) || ''
             const outputFile = (msg.output_file as string) || ''
-            console.log(`[SDK task_notification] taskId=${taskId} status=${msg.status} activeBgTasks=[${[...this.backgroundTasks.keys()].join(',')}]`)
-
-            // Correlate with background task by agentId/taskId
-            let matchedToolUseId: string | null = null
-            for (const [tuId, entry] of this.backgroundTasks) {
-              if (entry.agentId === taskId) {
-                matchedToolUseId = tuId
-                console.log(`[SDK task_notification] matched toolUseId=${tuId}`)
-                // Do a final poll before stopping
-                await this.pollBackgroundOutput(tuId)
-                clearInterval(entry.pollInterval)
-                this.backgroundTasks.delete(tuId)
-                break
-              }
-            }
-
-            if (!matchedToolUseId) {
-              console.log(`[SDK task_notification] no match found — task may have been auto-resolved by poll`)
+            // Correlate with task by agentId
+            const matchedToolUseId = this.taskIdMap.get(taskId) || null
+            if (matchedToolUseId) {
+              this.taskIdMap.delete(taskId)
             }
 
             this.send('session:task-notification', {
@@ -285,18 +278,18 @@ export class ClaudeSession {
             result: (msg.result as string) || ''
           })
           this.sendStatus()
-          console.log(`[run] Result received (subtype=${subtype}), isProcessing=false, loop continues waiting for more messages`)
         }
       }
-      console.log('[run] for-await loop ended (SDK generator completed — CLI process exited)')
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err)
-      console.log(`[run] catch: ${errorMsg}`)
+      console.error('[ClaudeSession] SDK error:', errorMsg)
+      if (err instanceof Error && err.stack) {
+        console.error('[ClaudeSession] Stack:', err.stack)
+      }
       if (!errorMsg.includes('abort')) {
         this.send('session:error', errorMsg)
       }
     } finally {
-      console.log(`[run] finally: cleaning up session (bgTasks=${this.backgroundTasks.size})`)
       this.messageChannel?.end()
       this.messageChannel = null
       this.abortController = null
@@ -318,9 +311,6 @@ export class ClaudeSession {
       entry.resolve({ decision: 'deny' })
     }
     this.pendingApprovals.clear()
-
-    // Stop all background task polling
-    this.clearBackgroundPolling()
 
     // End the message channel before aborting so the SDK's streamInput
     // loop can unblock and the CLI subprocess exits cleanly
@@ -395,11 +385,12 @@ export class ClaudeSession {
     const messageParam = msg.message as Record<string, unknown> | undefined
     if (!messageParam) return
 
+    const parentToolUseId = msg.parent_tool_use_id as string | undefined
     const content = messageParam.content
 
     // Case 1: Array content — extract tool_result blocks
     if (Array.isArray(content)) {
-      this.extractToolResultsFromContent(content)
+      this.extractToolResultsFromContent(content, parentToolUseId)
       return
     }
 
@@ -409,7 +400,10 @@ export class ClaudeSession {
     }
   }
 
-  private extractToolResultsFromContent(content: Array<Record<string, unknown>>): void {
+  private extractToolResultsFromContent(
+    content: Array<Record<string, unknown>>,
+    parentToolUseId?: string
+  ): void {
     for (const block of content) {
       if (typeof block !== 'object' || !block) continue
       const b = block as Record<string, unknown>
@@ -428,14 +422,25 @@ export class ClaudeSession {
           .join('\n')
       }
 
-      // Detect background task launch patterns
-      this.detectBackgroundTask(toolUseId, resultText)
+      // Record agentId→toolUseId mapping for task notifications
+      if (!parentToolUseId) {
+        this.detectTaskMapping(toolUseId, resultText)
+      }
 
-      this.send('session:tool-result', {
-        toolUseId,
-        result: resultText,
-        isError: !!(b.is_error)
-      })
+      if (parentToolUseId) {
+        this.send('session:subagent-tool-result', {
+          toolUseId: parentToolUseId,
+          toolResultToolUseId: toolUseId,
+          result: resultText,
+          isError: !!(b.is_error)
+        })
+      } else {
+        this.send('session:tool-result', {
+          toolUseId,
+          result: resultText,
+          isError: !!(b.is_error)
+        })
+      }
     }
   }
 
@@ -454,21 +459,10 @@ export class ClaudeSession {
     const summary = this.extractXmlTag(content, 'summary') || ''
     const outputFile = ''
 
-    console.log(`[task-notification user msg] taskId=${taskId} status=${status} summary=${summary}`)
-
     if (taskId) {
-      // Correlate with background task by agentId
-      let matchedToolUseId: string | null = null
-      for (const [tuId, entry] of this.backgroundTasks) {
-        if (entry.agentId === taskId) {
-          matchedToolUseId = tuId
-          console.log(`[task-notification user msg] matched toolUseId=${tuId}`)
-          // Do a final poll before stopping
-          await this.pollBackgroundOutput(tuId)
-          clearInterval(entry.pollInterval)
-          this.backgroundTasks.delete(tuId)
-          break
-        }
+      const matchedToolUseId = this.taskIdMap.get(taskId) || null
+      if (matchedToolUseId) {
+        this.taskIdMap.delete(taskId)
       }
 
       this.send('session:task-notification', {
@@ -497,60 +491,14 @@ export class ClaudeSession {
     return match ? match[1].trim() : null
   }
 
-  private detectBackgroundTask(toolUseId: string, resultText: string): void {
-    const outputMatch = resultText.match(OUTPUT_FILE_RE)
-    if (!outputMatch) return
-
-    const outputFile = outputMatch[1]
+  private detectTaskMapping(toolUseId: string, resultText: string): void {
     const agentMatch = resultText.match(AGENT_ID_RE)
     const taskIdMatch = resultText.match(TASK_ID_RE)
     const agentId = agentMatch?.[1] || taskIdMatch?.[1] || ''
 
     if (!agentId) return
 
-    console.log(`[detectBackgroundTask] toolUseId=${toolUseId} agentId=${agentId} outputFile=${outputFile}`)
-    // Notify renderer this is a background task
-    this.send('session:background-task-started', { toolUseId, outputFile, agentId })
-
-    // Start polling the output file
-    const entry: BackgroundTaskEntry = {
-      outputFile,
-      agentId,
-      toolUseId,
-      lastContent: '',
-      pollInterval: setInterval(() => this.pollBackgroundOutput(toolUseId), 2000)
-    }
-    this.backgroundTasks.set(toolUseId, entry)
-
-    // Also do an immediate poll
-    this.pollBackgroundOutput(toolUseId)
-  }
-
-  private async pollBackgroundOutput(toolUseId: string): Promise<void> {
-    const entry = this.backgroundTasks.get(toolUseId)
-    if (!entry) return
-
-    try {
-      const content = await readFile(entry.outputFile, 'utf-8')
-      if (content !== entry.lastContent) {
-        entry.lastContent = content
-        const parsed = parseBackgroundJsonl(content)
-        this.send('session:background-output', {
-          toolUseId,
-          messages: parsed.messages,
-          outputFile: entry.outputFile
-        })
-      }
-    } catch {
-      // File may not exist yet — that's fine
-    }
-  }
-
-  private clearBackgroundPolling(): void {
-    for (const [, entry] of this.backgroundTasks) {
-      clearInterval(entry.pollInterval)
-    }
-    this.backgroundTasks.clear()
+    this.taskIdMap.set(agentId, toolUseId)
   }
 
   private send(channel: string, data: unknown): void {

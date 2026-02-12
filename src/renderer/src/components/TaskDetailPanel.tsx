@@ -1,7 +1,7 @@
-import { useState, useCallback } from 'react'
+import { useState } from 'react'
 import { useSessionStore } from '../stores/session-store'
 import { MarkdownRenderer } from './chat/MarkdownRenderer'
-import { BackgroundMessages } from './chat/BackgroundMessages'
+import { SubagentMessages } from './chat/SubagentMessages'
 import type { ContentBlock } from '../../../shared/types'
 
 function formatElapsed(seconds: number): string {
@@ -30,62 +30,32 @@ function findTaskBlocks(
 function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Element | null {
   const messages = useSessionStore((s) => s.messages)
   const taskProgressMap = useSessionStore((s) => s.taskProgressMap)
-  const taskNotifications = useSessionStore((s) => s.taskNotifications)
-  const backgroundTaskToolUseIds = useSessionStore((s) => s.backgroundTaskToolUseIds)
-  const backgroundOutputs = useSessionStore((s) => s.backgroundOutputs)
+  const subagentMsgs = useSessionStore((s) => s.subagentMessages)
+  const subagentText = useSessionStore((s) => s.subagentStreamingText)
+  const subagentThinking = useSessionStore((s) => s.subagentStreamingThinking)
   const removeTaskFromPanel = useSessionStore((s) => s.removeTaskFromPanel)
   const [expanded, setExpanded] = useState(true)
-  const [outputContent, setOutputContent] = useState<string | null>(null)
-  const [loadingOutput, setLoadingOutput] = useState(false)
 
   const { taskBlock, resultBlock } = findTaskBlocks(messages, toolUseId)
   if (!taskBlock) return null
 
   const input = taskBlock.toolInput || {}
   const description = String(input.description || input.prompt || '')
-  const bgOutput = backgroundOutputs[toolUseId]
-  const isActiveBackground = backgroundTaskToolUseIds.has(toolUseId)
-  const bgNotification = taskNotifications.find((n) => n.toolUseId === toolUseId)
-  const isBackgroundTask = isActiveBackground || !!bgOutput || !!bgNotification
+  const msgs = subagentMsgs[toolUseId] || []
+  const streamText = subagentText[toolUseId] || ''
+  const streamThinking = subagentThinking[toolUseId] || ''
+  const hasSubagentOutput = msgs.length > 0 || !!streamText || !!streamThinking
+  const isBackground = !!input.run_in_background
   const progress = taskProgressMap[toolUseId]
   const elapsed = progress?.elapsedTimeSeconds
   const hasResult = !!resultBlock
   const resultText = resultBlock?.toolResult?.replace(/<usage>[\s\S]*?<\/usage>/, '').trimEnd() || ''
-  const isRunning = isBackgroundTask ? !bgNotification : !hasResult
+  // Background tasks get a tool_result immediately ("agent launched") but keep running until task_notification
+  const taskNotifications = useSessionStore((s) => s.taskNotifications)
+  const bgNotification = taskNotifications.find((n) => n.toolUseId === toolUseId)
+  const isRunning = isBackground ? !bgNotification : !hasResult
 
-  // Derive output file for non-background tasks (fallback)
-  let outputFile: string | null = null
-  if (!isBackgroundTask && resultBlock?.toolResult) {
-    try {
-      const parsed = JSON.parse(resultBlock.toolResult)
-      if (parsed?.output_file) outputFile = parsed.output_file
-    } catch { /* ignore */ }
-  }
-  if (!outputFile && !isBackgroundTask) {
-    const notification = taskNotifications.find((n) => {
-      try {
-        if (resultBlock?.toolResult) {
-          const parsed = JSON.parse(resultBlock.toolResult)
-          return parsed?.task_id === n.taskId
-        }
-      } catch { /* ignore */ }
-      return false
-    })
-    if (notification?.outputFile) outputFile = notification.outputFile
-  }
-
-  const handleLoadOutput = useCallback(async () => {
-    if (!outputFile) return
-    setLoadingOutput(true)
-    try {
-      const content = await window.api.readTaskOutput(outputFile)
-      setOutputContent(content)
-    } finally {
-      setLoadingOutput(false)
-    }
-  }, [outputFile])
-
-  const isError = isBackgroundTask
+  const isError = isBackground
     ? bgNotification?.status === 'failed'
     : resultBlock?.isError
 
@@ -131,10 +101,9 @@ function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Element | nu
       {/* Body */}
       {expanded && (
         <div className="px-4 py-3">
-          {/* Background task: show live-tailed output */}
-          {isBackgroundTask && bgOutput && bgOutput.length > 0 ? (
+          {hasSubagentOutput ? (
             <div>
-              {isRunning && (
+              {isRunning && isBackground && (
                 <div className="flex items-center gap-2 text-[13px] text-text-muted mb-2">
                   <span className="w-3 h-3 rounded-full border-2 border-accent border-t-transparent animate-spin-slow" />
                   <span>Running in background...</span>
@@ -143,41 +112,30 @@ function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Element | nu
                   )}
                 </div>
               )}
-              <BackgroundMessages messages={bgOutput} maxHeight="400px" />
+              {streamThinking && (
+                <div className="text-[12px] text-text-secondary/60 italic mb-1.5">{streamThinking.slice(-200)}</div>
+              )}
+              {msgs.length > 0 && <SubagentMessages messages={msgs} maxHeight="400px" />}
+              {streamText && (
+                <div className="text-[12px] text-text-primary/80 leading-[1.6] mt-1">
+                  <MarkdownRenderer content={streamText} />
+                  <span className="inline-block w-[2px] h-[14px] bg-accent ml-0.5 align-middle animate-cursor-blink" />
+                </div>
+              )}
             </div>
-          ) : hasResult && resultText && !isBackgroundTask ? (
+          ) : hasResult && resultText && !isBackground ? (
             <div className="text-[12px] text-text-primary/80 leading-[1.6]">
               <MarkdownRenderer content={resultText} />
             </div>
           ) : isRunning ? (
             <div className="flex items-center gap-2 text-[13px] text-text-muted">
               <span className="w-3 h-3 rounded-full border-2 border-accent border-t-transparent animate-spin-slow" />
-              <span>{isBackgroundTask ? 'Running in background...' : 'Running...'}</span>
+              <span>{isBackground ? 'Running in background...' : 'Running...'}</span>
               {elapsed != null && (
                 <span className="font-mono text-[11px]">{formatElapsed(elapsed)}</span>
               )}
             </div>
           ) : null}
-
-          {/* Non-background task output file (fallback) */}
-          {!isBackgroundTask && outputFile && (
-            <div className="mt-4 border-t border-border pt-3">
-              <div className="text-[11px] text-text-secondary uppercase tracking-wider mb-2">Output File</div>
-              {outputContent ? (
-                <pre className="text-[11px] font-mono text-text-primary/70 whitespace-pre-wrap break-words bg-bg-primary rounded-md p-2 border border-border max-h-[400px] overflow-y-auto">
-                  {outputContent}
-                </pre>
-              ) : (
-                <button
-                  onClick={handleLoadOutput}
-                  disabled={loadingOutput}
-                  className="text-[12px] text-accent hover:underline cursor-pointer disabled:opacity-50"
-                >
-                  {loadingOutput ? 'Loading...' : 'Load output'}
-                </button>
-              )}
-            </div>
-          )}
         </div>
       )}
     </div>

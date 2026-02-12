@@ -290,6 +290,108 @@ if (src.includes(patchDMarker)) {
 }
 
 // ===========================================================================
+// Patch E: Direct stdout streaming for background agents
+//
+// Background (async) Task paths run detached — by the time their for-await
+// loop executes, the tool executor has closed its output queue and the
+// progress callback j() is dead. Instead, we write directly to stdout using
+// the CLI's binary message transport (fY1 equivalent), formatting messages
+// the same way ihA/ZhA would.
+//
+// Before:
+//   for await(let D1 of cR({...}))N1.push(D1),s01(...),s0A(AGENTID,...);
+//
+// After:
+//   for await(let D1 of cR({...})){N1.push(D1),s01(...),s0A(AGENTID,...);
+//     let _ptu=D.message.content[0].id;
+//     if(D1.type==="stream_event") TRANSPORT(JSON.stringify({...}));
+//     else if(D1.type==="assistant") TRANSPORT(JSON.stringify({...}));
+//     else if(D1.type==="user") TRANSPORT(JSON.stringify({...}));
+//   }
+// ===========================================================================
+
+console.log('\n--- Patch E: Background agent direct stdout streaming ---')
+
+const patchEMarker = '/*PATCHED:subagent-E*/'
+
+if (src.includes(patchEMarker)) {
+  console.log('Already applied. Skipping.')
+} else {
+  // Find the session ID function from ihA/ZhA yields
+  const sessFnRe = /session_id:([\w$]+)\(\).*?parent_tool_use_id/
+  const sessFnMatch = src.match(sessFnRe)
+  if (!sessFnMatch) {
+    console.error('ERROR: Cannot locate session ID function.')
+    process.exit(1)
+  }
+  const sessFn = sessFnMatch[1]
+  console.log(`Session ID function: ${sessFn}()`)
+
+  // Find async for-await+cR loops by matching the body pattern after )).
+  const asyncBodyRe = new RegExp(
+    `\\)\\)(${V})\\.push\\((${V})\\),` +             // ))ARR.push(MSG),
+    `${V}\\(${V},\\2,` +                             // STATS(STATS,MSG,
+    `${V},${V}\\.options\\.tools\\),` +               // ...,J.options.tools),
+    `${V}\\((${V}(?:\\.${V})?),` +                   // s0A(AGENTID or s0A(x.prop,
+    `[^;]+;`                                          // ...);
+  , 'g')
+
+  let asyncMatch
+  let asyncPatchCount = 0
+
+  const matches = []
+  while ((asyncMatch = asyncBodyRe.exec(src)) !== null) {
+    const before = src.slice(Math.max(0, asyncMatch.index - 500), asyncMatch.index)
+    if (!before.includes('for await') || !before.includes('cR({')) continue
+    matches.push({
+      fullMatch: asyncMatch[0],
+      msgVar: asyncMatch[2],
+      agentIdExpr: asyncMatch[3],
+      index: asyncMatch.index
+    })
+  }
+
+  if (matches.length === 0) {
+    console.error('ERROR: Cannot locate async for-await+cR loops with s0A.')
+    process.exit(1)
+  }
+
+  console.log(`Found ${matches.length} async for-await loop(s) to patch.`)
+
+  // Apply in reverse order so indices stay valid
+  for (let i = matches.length - 1; i >= 0; i--) {
+    const { fullMatch, msgVar, index } = matches[i]
+
+    const body = fullMatch.slice(2) // strip leading "))"
+
+    // Write line-delimited JSON to stdout (the SDK reads newline-delimited
+    // JSON, NOT binary-framed). D is the full assistant message (may contain
+    // text/thinking blocks before the tool_use). Find the matching tool_use
+    // block by description (K) for parent_tool_use_id.
+    const replacement =
+      `){${patchEMarker}${body}` +
+      `{let _ptu=null;for(let _b of D.message.content){if(_b.type==="tool_use"&&_b.input&&_b.input.description===K){_ptu=_b.id;break}}` +
+      `if(${msgVar}.type==="stream_event")` +
+        `process.stdout.write(JSON.stringify({type:"stream_event",event:${msgVar}.event,` +
+        `parent_tool_use_id:_ptu,session_id:${sessFn}(),uuid:_f()})+"\\n");` +
+      `else if(${msgVar}.type==="assistant")` +
+        `process.stdout.write(JSON.stringify({type:"assistant",message:${msgVar}.message,` +
+        `parent_tool_use_id:_ptu,session_id:${sessFn}(),uuid:_f()})+"\\n");` +
+      `else if(${msgVar}.type==="user")` +
+        `process.stdout.write(JSON.stringify({type:"user",message:${msgVar}.message,` +
+        `parent_tool_use_id:_ptu,session_id:${sessFn}(),uuid:_f()})+"\\n");` +
+      `}}`
+
+    src = src.slice(0, index + 1) + replacement + src.slice(index + fullMatch.length)
+    asyncPatchCount++
+    console.log(`  Patched loop ${i + 1} at char ${index} (msg=${msgVar})`)
+  }
+
+  patchCount++
+  console.log(`Applied to ${asyncPatchCount} loop(s).`)
+}
+
+// ===========================================================================
 // Write and verify
 // ===========================================================================
 
@@ -306,7 +408,8 @@ const markers = [
   ['A', patchAMarker, 'Content-block filter removal'],
   ['B', patchBMarker, 'Stream_event forwarding'],
   ['C', patchCMarker, 'ZhA agent_stream_event handler'],
-  ['D', patchDMarker, '.output file thinking inclusion']
+  ['D', patchDMarker, '.output file thinking inclusion'],
+  ['E', patchEMarker, 'Background agent stdout streaming']
 ]
 
 let allGood = true
@@ -331,6 +434,8 @@ console.log('      via new agent_stream_event progress type.')
 console.log('  C — ZhA converts agent_stream_event to SDK stream_event with')
 console.log('      parent_tool_use_id for proper attribution.')
 console.log('  D — .output files include thinking blocks alongside text.')
+console.log('  E — Background (async) agents forward messages through progress')
+console.log('      callback for real-time streaming in SDK consumers.')
 console.log('')
 console.log('NOT changed:')
 console.log('  UEA (task result) still returns text-only to parent model.')

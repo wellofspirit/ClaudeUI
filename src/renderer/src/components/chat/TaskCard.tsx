@@ -2,7 +2,7 @@ import { useState, useMemo } from 'react'
 import type { ContentBlock } from '../../../../shared/types'
 import { useSessionStore } from '../../stores/session-store'
 import { MarkdownRenderer } from './MarkdownRenderer'
-import { BackgroundMessages } from './BackgroundMessages'
+import { SubagentMessages } from './SubagentMessages'
 
 interface Props {
   block: ContentBlock
@@ -63,27 +63,28 @@ function formatTokens(n: number): string {
 export function TaskCard({ block, result }: Props): React.JSX.Element {
   const taskProgressMap = useSessionStore((s) => s.taskProgressMap)
   const openTaskPanel = useSessionStore((s) => s.openTaskPanel)
-  const backgroundTaskToolUseIds = useSessionStore((s) => s.backgroundTaskToolUseIds)
-  const backgroundOutputs = useSessionStore((s) => s.backgroundOutputs)
+  const subagentMsgs = useSessionStore((s) => s.subagentMessages)
+  const subagentText = useSessionStore((s) => s.subagentStreamingText)
+  const subagentThinking = useSessionStore((s) => s.subagentStreamingThinking)
   const taskNotifications = useSessionStore((s) => s.taskNotifications)
   const [expanded, setExpanded] = useState(false)
 
   const toolUseId = block.toolUseId || ''
   const input = block.toolInput || {}
   const hasResult = !!result
-  const bgOutput = backgroundOutputs[toolUseId]
-  const isActiveBackground = backgroundTaskToolUseIds.has(toolUseId)
+  const msgs = subagentMsgs[toolUseId] || []
+  const streamText = subagentText[toolUseId] || ''
+  const streamThinking = subagentThinking[toolUseId] || ''
   const bgNotification = taskNotifications.find((n) => n.toolUseId === toolUseId)
-  // A task is a background task if it's currently active OR was resolved as one (has output or notification)
-  const isBackgroundTask = isActiveBackground || !!bgOutput || !!bgNotification
-  // Background tasks stay "running" until their task_notification arrives
+  const hasSubagentOutput = msgs.length > 0 || !!streamText || !!streamThinking
+  const isBackground = !!input.run_in_background
+  // Background tasks get a tool_result immediately ("agent launched") but keep running until task_notification
   const isError = bgNotification ? bgNotification.status === 'failed' : (result?.isError ?? false)
-  const isRunning = isBackgroundTask ? !bgNotification : !hasResult
+  const isRunning = isBackground ? !bgNotification : !hasResult
 
   const description = String(input.description || input.prompt || '').slice(0, 120)
   const subagentType = String(input.subagent_type || input.subagentType || '')
   const model = input.model ? String(input.model) : null
-  const isBackground = !!input.run_in_background
 
   const progress = taskProgressMap[toolUseId]
   const elapsed = progress?.elapsedTimeSeconds
@@ -99,7 +100,7 @@ export function TaskCard({ block, result }: Props): React.JSX.Element {
       ? 'border-danger/30'
       : 'border-success/30'
 
-  const isCompleted = isBackgroundTask ? !!bgNotification && !isError : (hasResult && !isError)
+  const isCompleted = !isRunning && !isError
 
   const statusIcon = isError ? (
     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-danger shrink-0">
@@ -181,9 +182,9 @@ export function TaskCard({ block, result }: Props): React.JSX.Element {
         <>
           {/* Result / running state */}
           <div className="border-t border-border">
-            {isBackgroundTask && bgOutput && bgOutput.length > 0 ? (
+            {hasSubagentOutput ? (
               <div className="px-3 py-2">
-                {isRunning && (
+                {isRunning && isBackground && (
                   <div className="flex items-center gap-2 text-[12px] text-text-muted mb-2">
                     <span className="w-2.5 h-2.5 rounded-full border-[1.5px] border-accent border-t-transparent animate-spin-slow" />
                     <span>Running in background...</span>
@@ -192,9 +193,18 @@ export function TaskCard({ block, result }: Props): React.JSX.Element {
                     )}
                   </div>
                 )}
-                <BackgroundMessages messages={bgOutput} maxHeight="300px" />
+                {streamThinking && (
+                  <div className="text-[12px] text-text-secondary/60 italic mb-1.5">{streamThinking.slice(-200)}</div>
+                )}
+                {msgs.length > 0 && <SubagentMessages messages={msgs} maxHeight="300px" />}
+                {streamText && (
+                  <div className="text-[12px] text-text-primary/80 leading-[1.6] mt-1">
+                    <MarkdownRenderer content={streamText} />
+                    <span className="inline-block w-[2px] h-[14px] bg-accent ml-0.5 align-middle animate-cursor-blink" />
+                  </div>
+                )}
               </div>
-            ) : resultBody && !isBackgroundTask ? (
+            ) : resultBody && !isBackground ? (
               <div className="px-3 py-2 text-[12px] text-text-primary/70">
                 <div className="leading-[1.5] max-h-[300px] overflow-y-auto">
                   <MarkdownRenderer content={resultBody} />
@@ -203,7 +213,7 @@ export function TaskCard({ block, result }: Props): React.JSX.Element {
             ) : isRunning ? (
               <div className="px-3 py-2 flex items-center gap-2 text-[12px] text-text-muted">
                 <span className="w-2.5 h-2.5 rounded-full border-[1.5px] border-accent border-t-transparent animate-spin-slow" />
-                <span>{isBackgroundTask ? 'Running in background...' : 'Running...'}</span>
+                <span>{isBackground ? 'Running in background...' : 'Running...'}</span>
                 {elapsed != null && (
                   <span className="font-mono text-[11px]">{formatElapsed(elapsed)}</span>
                 )}

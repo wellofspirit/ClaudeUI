@@ -89,7 +89,7 @@ When the Task tool's progress callback `j` is called:
 j({toolUseID: `agent_${D.message.id}`, data: {...}})
   │
   ▼
-Tool executor wraps via U1q():
+Tool executor wraps via U1q()/O6q():
   {type:"progress", data:..., toolUseID:..., parentToolUseID:...,
    uuid:_f(), timestamp:...}
   │
@@ -106,12 +106,12 @@ ZhA()/ihA() converts to SDK output format:
 P.enqueue → SDK stdout
 ```
 
-Key function `U1q()` wraps progress callback arguments:
+Key function `U1q()` / `O6q()` wraps progress callback arguments:
 
 ```js
-// v2.1.38: char ~10400725
-// v2.1.39: same location, same name
-function U1q({toolUseID:A,parentToolUseID:q,data:K}){
+// v2.1.38: U1q, char ~10400725
+// v2.1.39: O6q, char ~10407267
+function O6q({toolUseID:A,parentToolUseID:q,data:K}){
     return{type:"progress",data:K,toolUseID:A,parentToolUseID:q,
            uuid:_f(),timestamp:new Date().toISOString()}
 }
@@ -321,7 +321,7 @@ Sub-agent dR() generator
       Parent receives tool_result with text summary only
 ```
 
-## Message Flow Diagram — After Patching
+## Message Flow Diagram — After Patching (Sync Path, Patches A–C)
 
 ```
 Sub-agent dR() generator
@@ -332,7 +332,7 @@ Sub-agent dR() generator
   │     └── (Patch B) j({data:{type:"agent_stream_event", event:...}})
   │           │
   │           ▼
-  │         U1q() wraps → {type:"progress", data:{type:"agent_stream_event",...}}
+  │         O6q() wraps → {type:"progress", data:{type:"agent_stream_event",...}}
   │           │
   │           ▼
   │         (Patch C) ZhA() yields → {type:"stream_event", parent_tool_use_id:...}
@@ -349,7 +349,7 @@ Sub-agent dR() generator
   │     └── tool_use block            ← progress callback j() ✓
   │           │
   │           ▼
-  │         U1q() → ZhA() → P.enqueue → SDK stdout
+  │         O6q() → ZhA() → P.enqueue → SDK stdout
   │
   ├── user msg: [tool_result]         ← (unchanged, already worked)
   │
@@ -358,6 +358,43 @@ Sub-agent dR() generator
         ▼
       UEA() → text-only result       ← NOT CHANGED (by design)
 ```
+
+## Message Flow Diagram — After Patching (Async Path, Patch E)
+
+```
+Background sub-agent cR() generator (inside q01 async context)
+  │
+  ├── stream_event
+  │     │
+  │     └── (Patch E) process.stdout.write(JSON + "\n")
+  │           → {type:"stream_event", event:..., parent_tool_use_id:_ptu}
+  │           → SDK readline → q4() parse → consumer ✓
+  │
+  ├── assistant msg
+  │     │
+  │     └── (Patch E) process.stdout.write(JSON + "\n")
+  │           → {type:"assistant", message:..., parent_tool_use_id:_ptu}
+  │           → SDK readline → q4() parse → consumer ✓
+  │
+  ├── user msg
+  │     │
+  │     └── (Patch E) process.stdout.write(JSON + "\n")
+  │           → {type:"user", message:..., parent_tool_use_id:_ptu}
+  │           → SDK readline → q4() parse → consumer ✓
+  │
+  ├── result                          ← not forwarded (no streaming value)
+  │
+  └── (loop ends)
+        │
+        ▼
+      _kA() → text-only result       ← NOT CHANGED (by design)
+```
+
+Note: `_ptu` is the `parent_tool_use_id`, resolved by searching
+`D.message.content` for the `tool_use` block matching this Task call's
+description. The progress callback `j()` is dead in the async path, so
+Patch E bypasses the entire O6q/ZhA pipeline and writes directly to
+stdout.
 
 ## The Patches
 
@@ -603,6 +640,183 @@ For the background polling map, search for:
 This pattern is unique — it's the only place that maps over messages,
 extracts text from assistant messages, and JSON-stringifies everything else.
 
+### Patch E — Background agent stdout streaming
+
+**Bypasses the dead progress callback for async (background) agents.**
+When the Task tool runs with `run_in_background: true`, the tool executor
+returns immediately with an `async_launched` result. The actual sub-agent
+runs inside a `q01()` async context. At this point the progress callback
+`j()` is dead — its output queue has been closed by the tool executor.
+
+Patch E injects code into the background agent's `for await` loop to
+write sub-agent messages directly to stdout as newline-delimited JSON.
+
+Before (async for-await body is a single statement):
+
+```js
+for await (let D1 of cR({...}))
+    N1.push(D1), s01(...), s0A(agentId, ...);
+```
+
+After (wrapped in block with stdout writes):
+
+```js
+for await (let D1 of cR({...})) {
+    N1.push(D1), s01(...), s0A(agentId, ...);
+
+    // Find this Task call's tool_use_id from the parent message
+    let _ptu = null;
+    for (let _b of D.message.content) {
+        if (_b.type === "tool_use" && _b.input && _b.input.description === K) {
+            _ptu = _b.id; break;
+        }
+    }
+
+    if (D1.type === "stream_event")
+        process.stdout.write(JSON.stringify({
+            type: "stream_event", event: D1.event,
+            parent_tool_use_id: _ptu, session_id: p6(), uuid: _f()
+        }) + "\n");
+    else if (D1.type === "assistant")
+        process.stdout.write(JSON.stringify({
+            type: "assistant", message: D1.message,
+            parent_tool_use_id: _ptu, session_id: p6(), uuid: _f()
+        }) + "\n");
+    else if (D1.type === "user")
+        process.stdout.write(JSON.stringify({
+            type: "user", message: D1.message,
+            parent_tool_use_id: _ptu, session_id: p6(), uuid: _f()
+        }) + "\n");
+}
+```
+
+There are **two** async for-await loops patched — one in the initial
+async launch path, and one in the "backgrounded from sync" path (where
+a sync task transitions to background mid-execution).
+
+**Key design decisions and pitfalls:**
+
+#### stdout transport: newline-delimited JSON, NOT binary framing
+
+The CLI has a binary transport function (`fY1` in v2.1.39) that writes
+a 4-byte UInt32LE length header followed by the message body:
+
+```js
+function fY1(A) {
+    let q = Buffer.from(A, "utf-8"),
+        K = Buffer.alloc(4);
+    K.writeUInt32LE(q.length, 0),
+    process.stdout.write(K),
+    process.stdout.write(q)
+}
+```
+
+**Do NOT use this function.** The SDK's `readMessages()` in `sdk.mjs`
+reads stdout as **newline-delimited JSON lines**, not binary-framed:
+
+```js
+async* readMessages() {
+    let X = WV({input: this.processStdout}); // readline interface
+    for await (let Q of X)
+        if (Q.trim())
+            yield q4(Q)  // JSON.parse + Zod validation
+}
+```
+
+Using `fY1()` corrupts the stream — the 4-byte binary header is
+interpreted as text. For example, a message of length 597 (0x00000255)
+produces header bytes `55 02 00 00`, where `0x55` = ASCII `U`. The SDK
+sees `U{"type":"assistant",...}` and throws:
+
+```
+Error: CLI output was not valid JSON. This may indicate an error during
+startup. Output: U{"type":"assistant",...}
+```
+
+The correct approach is `process.stdout.write(JSON.stringify(msg) + "\n")`.
+
+The `fY1()` binary transport appears to be used for a different purpose
+(possibly the interactive TUI mode or tmux pane communication), not for
+SDK stdout communication.
+
+#### parent_tool_use_id: finding the right tool_use block
+
+The `D` parameter (4th arg to `Task.call()`) is the **full, un-normalized**
+assistant message from the parent model. The tool executor does NOT pass
+an iO-normalized single-block message — `D.message.content` contains ALL
+content blocks from the assistant turn.
+
+When the model outputs text before tool calls (common pattern), the
+content array looks like:
+
+```js
+D.message.content = [
+    {type: "text", text: "I'll launch 5 tasks..."},   // NO .id
+    {type: "tool_use", id: "toolu_01K...", name: "Task", input: {...}},
+    {type: "tool_use", id: "toolu_01C...", name: "Task", input: {...}},
+    // ...
+]
+```
+
+**Do NOT use `D.message.content[0].id`** — `content[0]` is often a text
+or thinking block, which has no `id` property. The result is `undefined`,
+which gets omitted by `JSON.stringify`, causing the SDK's Zod validation
+to reject the message (the `parent_tool_use_id` field is required, though
+nullable).
+
+Instead, find the matching `tool_use` block by matching the `description`
+field from the destructured input (variable `K` in the minified code):
+
+```js
+let _ptu = null;
+for (let _b of D.message.content) {
+    if (_b.type === "tool_use" && _b.input && _b.input.description === K) {
+        _ptu = _b.id; break;
+    }
+}
+```
+
+This correctly identifies the specific Task tool_use block even when
+multiple Task calls coexist in the same message (e.g., 5 parallel
+background tasks).
+
+#### Tool executor architecture (for reference)
+
+The tool executor chain for understanding how `D` and `parentToolUseID`
+flow:
+
+```
+sdY(tool, toolUseId, input, context, canUseTool, message, ...)
+  │
+  ├─ Wraps progress callback:
+  │    (X) => O6q({toolUseID: X.toolUseID, parentToolUseID: toolUseId, ...})
+  │
+  └─ tdY(tool, toolUseId, input, context, canUseTool, message, ...)
+       │
+       └─ tool.call(input, context, canUseTool, message, progressCallback)
+```
+
+- `O6q` (v2.1.39) = `U1q` (v2.1.38) — wraps progress data with
+  `parentToolUseID`, `uuid`, `timestamp`
+- The `parentToolUseID` is the tool_use_id from the executor (correct)
+- But `call()` only receives `D` (the message), not the tool_use_id
+  directly — hence the need to search `D.message.content`
+
+**How to find this code in a new version:**
+
+Search for async for-await loops that use `cR({` (the sub-agent execution
+function) and contain `s0A` (the task state updater):
+
+```
+for await.*cR\(\{.*\.push\(.*s0A\(
+```
+
+Or search for the push+stats+state pattern after `))`:
+
+```
+\)[\w$]+\.push\([\w$]+\),[\w$]+\([\w$]+,[\w$]+,[\w$]+,[\w$]+\.options\.tools\),[\w$]+\(
+```
+
 ## What's NOT Changed
 
 **UEA (task result)** — The final result returned to the parent model from
@@ -660,8 +874,9 @@ Messages from sub-agents carry `parent_tool_use_id` for attribution.
 
 | Location | Has thinking? | Accessible? |
 |---|---|---|
-| Sub-agent `dR()` yield | Yes | Yes — forwarded via Patch A |
-| Sub-agent stream_events | Yes | Yes — forwarded via Patch B+C |
+| Sub-agent `dR()` yield (sync) | Yes | Yes — forwarded via Patch A |
+| Sub-agent stream_events (sync) | Yes | Yes — forwarded via Patch B+C |
+| Sub-agent messages (async/bg) | Yes | Yes — forwarded via Patch E |
 | SDK stdout stream | Yes | Yes — `parent_tool_use_id` set |
 | `.output` file (background) | Yes | Yes — included via Patch D |
 | Sub-agent transcript (`.jsonl`) | Yes | Yes — always had it |
@@ -683,7 +898,9 @@ names, since function names change between versions. It will:
 4. Locate the message converter by `bash_progress` anchor (Patch C)
 5. Locate the text extraction function by "Execution completed" pattern (Patch D)
 6. Locate the background polling map by assistant/text/stringify pattern (Patch D)
-7. Apply all patches and verify markers
+7. Locate the session ID function from ZhA/ihA yields (Patch E)
+8. Locate async for-await+cR loops by body pattern (Patch E)
+9. Apply all patches and verify markers
 
 ### Re-applying after SDK updates
 
@@ -738,7 +955,7 @@ Where the message content includes `type:"thinking"` blocks.
 | `UEA()` → (unchanged) | Extract text-only result from agent messages | ~7983000 |
 | `FM6()` → `sM6()` | Extract text from last assistant message | ~9022069 |
 | `ZhA()` → `ihA()` | Convert internal messages to SDK output format | ~9085100 |
-| `U1q()` → (unchanged) | Wrap progress data into progress message format | ~10400725 |
+| `U1q()` → `O6q()` | Wrap progress data into progress message format | ~10407267 |
 | `iO()` → `rO()` | Normalize messages to individual content blocks | ~10401417 |
 | `NMq` → (unchanged) | Main query class (parent loop) | ~10786784 |
 | `TMq()` → (unchanged) | Main query generator wrapper | ~10796462 |
@@ -747,6 +964,11 @@ Where the message content includes `type:"thinking"` blocks.
 | `GN()` → `PN()` | Get last assistant message from array | varies |
 | `Q1()` → `F1()` | JSON.stringify wrapper | varies |
 | `_f()` → (unchanged) | UUID generator for message wrapping | varies |
+| `fY1()` → (unchanged) | Binary transport (stdout, NOT for SDK) | varies |
+| `sdY()` → (unchanged) | Tool executor dispatch (creates progress wrapper) | ~8981800 |
+| `tdY()` → (unchanged) | Tool executor inner (calls tool.call()) | ~8982000 |
+| `Ed7()` → (unchanged) | Create async task descriptor | varies |
+| `cR()` → (unchanged) | Sub-agent query function (async iterable) | varies |
 
 **Note:** "unchanged" means the name happened to be the same between v2.1.38
 and v2.1.39. Names WILL change in future versions — always use content
@@ -789,14 +1011,37 @@ efficiently (appending deltas to streaming text in the Zustand store).
 
 ### Background agents (async path) use a different code path
 
-The async Task path (background agents) doesn't use the progress callback.
-Instead, it runs the sub-agent detached and writes results via `ZK1()` to
-the `.output` file. Patch D handles the `.output` file writer. The stream
-event forwarding (Patches B+C) doesn't apply to background agents since
-they don't have a live progress callback connection.
+The async Task path (background agents) runs detached from the parent's
+tool executor. By the time the background agent's `for await` loop
+executes, the tool executor has returned the `async_launched` result and
+the progress callback `j()` is dead (its output queue is closed).
+
+Patches A–C (progress callback based) therefore do **not** work for
+background agents. Instead, **Patch E** writes messages directly to
+stdout using `process.stdout.write(JSON + "\n")`, bypassing the progress
+callback / `O6q()` / ZhA pipeline entirely.
+
+Patch D handles the `.output` file writer (used by background agents for
+the `Read` tool to tail output).
 
 Background agent completion notifications are handled by the separate
 `task-notification` patch.
+
+### SDK transport protocol
+
+The CLI-to-SDK communication uses **newline-delimited JSON** on stdout.
+Each message is a single JSON object followed by `\n`. The SDK reads
+lines via a `readline` interface (`WV({input: processStdout})`), trims
+whitespace, and parses with `JSON.parse` + Zod validation (`q4()`).
+
+The CLI also has a **binary transport** function (`fY1` in v2.1.39) that
+writes a 4-byte UInt32LE length header followed by the message body.
+This is used for a different communication channel (possibly interactive
+TUI mode or tmux pane IPC) — NOT for SDK stdout communication.
+
+**Critical:** Never use `fY1()` (or its equivalent) for writing messages
+intended for the SDK consumer. The binary header bytes corrupt the
+newline-delimited JSON stream.
 
 ### Zod schema validation
 
@@ -880,11 +1125,19 @@ handles all content types. No change needed to `et()`.
 7. Confirmed `U1q()` wraps progress callback arguments with uuid, timestamp,
    and parentToolUseID — this is the bridge that makes our progress callback
    calls flow through the existing architecture
-8. Checked `readSdkMessages()` in `sdk.mjs` — no filtering there, everything
-   that reaches stdout flows through to the SDK consumer
+8. Checked `readMessages()` in `sdk.mjs` — discovered it reads
+   newline-delimited JSON (via `readline`), NOT binary-framed protocol.
+   The binary transport function `fY1()` is for a different purpose.
 9. Confirmed thinking tokens exist in the sub-agent's transcript `.jsonl`
    file but not in the SDK stream (before patching)
 10. Verified the Zod schema for `stream_event` messages accepts our
     yielded structure
 11. Tested on both v2.1.38 and v2.1.39 — function names changed but
     architecture identical
+12. Traced tool executor chain: `sdY()` → `tdY()` → `tool.call()`.
+    The 4th parameter `D` (message) is the full un-normalized assistant
+    message — `D.message.content` contains ALL blocks (text, thinking,
+    tool_use), not just the relevant tool_use block
+13. Discovered `O6q()` (v2.1.39 rename of `U1q()`) wraps progress
+    callback data with `parentToolUseID` from the executor context.
+    Background agents bypass this entirely since `j()` is dead.
