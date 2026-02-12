@@ -83,16 +83,22 @@ export function TaskCard({ block, result }: Props): React.JSX.Element {
   const isRunning = isBackground ? !bgNotification : !hasResult
 
   const description = String(input.description || input.prompt || '').slice(0, 120)
+  const prompt = String(input.prompt || '')
   const subagentType = String(input.subagent_type || input.subagentType || '')
   const model = input.model ? String(input.model) : null
 
   const progress = taskProgressMap[toolUseId]
   const elapsed = progress?.elapsedTimeSeconds
 
-  const { body: resultBody, usage } = useMemo(
+  const { body: resultBody, usage: parsedUsage } = useMemo(
     () => parseUsage(result?.toolResult || ''),
     [result?.toolResult]
   )
+
+  // For background tasks, usage comes from the task notification, not the tool result
+  const usage = bgNotification?.usage
+    ? { totalTokens: bgNotification.usage.totalTokens, toolUses: bgNotification.usage.toolUses, durationMs: bgNotification.usage.durationMs }
+    : parsedUsage
 
   const borderColor = isRunning
     ? 'border-accent/30'
@@ -180,10 +186,20 @@ export function TaskCard({ block, result }: Props): React.JSX.Element {
       {/* Expanded content */}
       {expanded && (
         <>
+          {/* Instructions */}
+          {prompt && (
+            <div className="border-t border-border px-3 py-2">
+              <div className="text-[10px] uppercase tracking-wider text-text-muted font-semibold mb-1">Instructions</div>
+              <div className="text-[12px] text-text-secondary leading-[1.5] max-h-[200px] overflow-y-auto whitespace-pre-wrap">
+                {prompt}
+              </div>
+            </div>
+          )}
+
           {/* Result / running state */}
           <div className="border-t border-border">
             {hasSubagentOutput ? (
-              <div className="px-3 py-2">
+              <div className="px-3 py-2 max-h-[300px] overflow-y-auto">
                 {isRunning && isBackground && (
                   <div className="flex items-center gap-2 text-[12px] text-text-muted mb-2">
                     <span className="w-2.5 h-2.5 rounded-full border-[1.5px] border-accent border-t-transparent animate-spin-slow" />
@@ -196,7 +212,7 @@ export function TaskCard({ block, result }: Props): React.JSX.Element {
                 {streamThinking && (
                   <div className="text-[12px] text-text-secondary/60 italic mb-1.5">{streamThinking.slice(-200)}</div>
                 )}
-                {msgs.length > 0 && <SubagentMessages messages={msgs} maxHeight="300px" />}
+                {msgs.length > 0 && <SubagentMessages messages={msgs} maxHeight="none" />}
                 {streamText && (
                   <div className="text-[12px] text-text-primary/80 leading-[1.6] mt-1">
                     <MarkdownRenderer content={streamText} />

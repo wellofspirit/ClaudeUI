@@ -234,13 +234,24 @@ export class ClaudeSession {
               this.taskIdMap.delete(taskId)
             }
 
-            this.send('session:task-notification', {
+            // Extract usage from the patched system message (task-notification-usage patch)
+            const rawUsage = msg.usage as { total_tokens?: number; tool_uses?: number; duration_ms?: number } | null
+            const usage = rawUsage ? {
+              totalTokens: rawUsage.total_tokens || 0,
+              toolUses: rawUsage.tool_uses || 0,
+              durationMs: rawUsage.duration_ms || 0
+            } : undefined
+
+            const sysNotification = {
               taskId,
               toolUseId: matchedToolUseId,
               status: (msg.status as string) || 'completed',
               outputFile,
-              summary: (msg.summary as string) || ''
-            })
+              summary: (msg.summary as string) || '',
+              usage
+            }
+            console.log('[ClaudeSession] sending task-notification (system):', JSON.stringify(sysNotification))
+            this.send('session:task-notification', sysNotification)
           }
         } else if (type === 'result') {
           const cost = (msg.total_cost_usd as number) || 0
@@ -445,19 +456,37 @@ export class ClaudeSession {
     const summary = this.extractXmlTag(content, 'summary') || ''
     const outputFile = ''
 
+    // Extract <usage> block if present (background agents include this on completion)
+    const usageBlock = this.extractXmlTag(content, 'usage')
+    let usage: { totalTokens: number; toolUses: number; durationMs: number } | undefined
+    if (usageBlock) {
+      const getNum = (key: string): number => {
+        const m = usageBlock.match(new RegExp(`${key}:\\s*(\\d+)`))
+        return m ? Number(m[1]) : 0
+      }
+      usage = {
+        totalTokens: getNum('total_tokens'),
+        toolUses: getNum('tool_uses'),
+        durationMs: getNum('duration_ms')
+      }
+    }
+
     if (taskId) {
       const matchedToolUseId = this.taskIdMap.get(taskId) || null
       if (matchedToolUseId) {
         this.taskIdMap.delete(taskId)
       }
 
-      this.send('session:task-notification', {
+      const notification = {
         taskId,
         toolUseId: matchedToolUseId,
         status,
         outputFile,
-        summary
-      })
+        summary,
+        usage
+      }
+      console.log('[ClaudeSession] sending task-notification (user msg):', JSON.stringify(notification))
+      this.send('session:task-notification', notification)
     }
 
     // Insert the synthetic user message into the conversation so the

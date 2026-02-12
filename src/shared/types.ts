@@ -80,6 +80,7 @@ export interface TaskNotification {
   status: 'completed' | 'failed' | 'stopped'
   outputFile: string
   summary: string
+  usage?: { totalTokens: number; toolUses: number; durationMs: number }
 }
 
 export interface SubagentStreamDelta {
