@@ -45,6 +45,89 @@ if (versionMatch) {
 let patchCount = 0
 
 // ===========================================================================
+// Patch F: Yield stream_event from cR without collecting it
+//
+// cR() is the sub-agent query loop generator. It iterates fR() (which
+// yields stream_event, assistant, user, etc.) but filters what it yields
+// via RVY(). stream_event is NOT in RVY's whitelist.
+//
+// We can't just add stream_event to RVY because the yield line also
+// pushes to the collection array x[] and records to transcript via E51.
+// stream_event messages lack .message/.uuid properties that those
+// operations expect.
+//
+// Instead, we inject a check BEFORE the RVY gate to yield stream_events
+// directly without collecting or recording them:
+//
+// Before:
+//   if(RVY($1))x.push($1),await E51(...),...,yield $1
+//
+// After:
+//   if($1.type==="stream_event"){yield $1}else
+//   if(RVY($1))x.push($1),await E51(...),...,yield $1
+// ===========================================================================
+
+console.log('\n--- Patch F: cR yield — stream_event bypass before RVY ---')
+
+const patchFMarker = '/*PATCHED:subagent-F*/'
+
+if (src.includes(patchFMarker)) {
+  console.log('Already applied. Skipping.')
+} else {
+  // Find RVY function by its unique type-check pattern
+  const rvyRe = new RegExp(
+    `function (${V})\\(${V}\\)\\{` +
+    `return ${V}\\.type==="assistant"\\|\\|` +
+    `${V}\\.type==="user"\\|\\|` +
+    `${V}\\.type==="progress"\\|\\|` +
+    `${V}\\.type==="system"&&"subtype"in ${V}&&${V}\\.subtype==="compact_boundary"` +
+    `\\}`
+  )
+  const rvyMatch = src.match(rvyRe)
+  if (!rvyMatch) {
+    console.error('ERROR: Cannot locate RVY function.')
+    process.exit(1)
+  }
+  const rvyName = rvyMatch[1]
+  console.log(`Found RVY function: ${rvyName}()`)
+
+  // Find: if(RVY(MSG))ARRAY.push(MSG),
+  const callRe = new RegExp(
+    `if\\(${rvyName}\\((${V})\\)\\)(${V})\\.push\\(\\1\\),`
+  )
+  const callMatch = src.match(callRe)
+  if (!callMatch) {
+    console.error('ERROR: Cannot locate RVY call site in cR.')
+    process.exit(1)
+  }
+
+  const oldStr = callMatch[0]
+  const msgVar = callMatch[1]
+  const arrVar = callMatch[2]
+  const idx = src.indexOf(oldStr)
+
+  // Verify it's inside cR
+  const before = src.slice(Math.max(0, idx - 5000), idx)
+  if (!before.includes('async function*cR(')) {
+    console.error('ERROR: RVY call site is not inside cR. Aborting.')
+    process.exit(1)
+  }
+
+  if (src.indexOf(oldStr, idx + 1) !== -1) {
+    console.error('ERROR: Multiple matches for Patch F. Aborting.')
+    process.exit(1)
+  }
+
+  const newStr =
+    `${patchFMarker}if(${msgVar}.type==="stream_event"){yield ${msgVar}}else ` +
+    `if(${rvyName}(${msgVar}))${arrVar}.push(${msgVar}),`
+
+  src = src.slice(0, idx) + newStr + src.slice(idx + oldStr.length)
+  patchCount++
+  console.log(`Applied at char ${idx}. msg=${msgVar}, arr=${arrVar}`)
+}
+
+// ===========================================================================
 // Patch A: Remove content-block filter from sub-agent progress callback
 //
 // Before:
@@ -94,13 +177,28 @@ if (src.includes(patchAMarker)) {
 // ===========================================================================
 // Patch B: Forward sub-agent stream_events through progress callback
 //
+// The original code is: if(O1.push(Y1),Y1.type!=="assistant"&&Y1.type!=="user")continue;
+// The regex matches from "O1.push(..." onward (the "if(" prefix is NOT matched).
+//
+// Problem: stream_events get pushed into O1 (the collection array). When the
+// Task tool finishes, O1 is processed by UEA/_kA which expect .message.content
+// on every item — stream_events lack .message, causing:
+//   "Cannot read properties of undefined (reading 'type')"
+//
+// Fix: Intercept stream_events BEFORE O1.push, forward via progress callback,
+// then continue. Since the regex starts after "if(", we replace the matched
+// portion to inject the stream_event check as a preceding if-block.
+//
 // Before:
 //   if(O1.push(Y1),Y1.type!=="assistant"&&Y1.type!=="user")continue;
 //
 // After:
-//   if(O1.push(Y1),Y1.type!=="assistant"&&Y1.type!=="user"){
-//     if(Y1.type==="stream_event"&&j)j({toolUseID:`agent_${D.message.id}`,
+//   if(Y1.type==="stream_event"){
+//     if(j)j({toolUseID:`agent_${D.message.id}`,
 //       data:{type:"agent_stream_event",event:Y1.event,agentId:r}});continue}
+//   if(O1.push(Y1),Y1.type!=="assistant"&&Y1.type!=="user")continue;
+//
+// stream_events never enter O1 — they're forwarded and skipped.
 // ===========================================================================
 
 console.log('\n--- Patch B: Sub-agent stream_event forwarding ---')
@@ -143,15 +241,25 @@ if (src.includes(patchBMarker)) {
     process.exit(1)
   }
 
+  // The matched string starts AFTER "if(" in the source. We need to:
+  // 1. Close the existing "if(" with a stream_event check
+  // 2. Re-open with the original push+type check
+  //
+  // Source context: ...if(  O1.push(Y1),Y1.type!=="assistant"&&Y1.type!=="user")continue;
+  //                    ^    ^-- idx (start of match)
+  //                    |-- "if(" is at idx-3
+  //
+  // We replace the matched portion so the full source becomes:
+  //   if(Y1.type==="stream_event"){if(j)j({...});continue}if(O1.push(Y1),...)continue;
   const newStr =
-    `${arrVar}.push(${msgVar}),${msgVar}.type!=="assistant"&&${msgVar}.type!=="user")` +
-    `{${patchBMarker}if(${msgVar}.type==="stream_event"&&${cbVar})` +
-    `${cbVar}({toolUseID:\`agent_\${${parentVar}.message.id}\`,` +
-    `data:{type:"agent_stream_event",event:${msgVar}.event,agentId:${agentVar}}});continue}`
+    `${patchBMarker}${msgVar}.type==="stream_event"){` +
+    `if(${cbVar})${cbVar}({toolUseID:\`agent_\${${parentVar}.message.id}\`,` +
+    `data:{type:"agent_stream_event",event:${msgVar}.event,agentId:${agentVar}}});continue}` +
+    `if(${arrVar}.push(${msgVar}),${msgVar}.type!=="assistant"&&${msgVar}.type!=="user")continue;`
 
   src = src.slice(0, idx) + newStr + src.slice(idx + oldStr.length)
   patchCount++
-  console.log('Applied. Stream events now forwarded via progress callback.')
+  console.log('Applied. Stream events intercepted before O1.push — never enter collection array.')
 }
 
 // ===========================================================================
@@ -368,19 +476,28 @@ if (src.includes(patchEMarker)) {
     // JSON, NOT binary-framed). D is the full assistant message (may contain
     // text/thinking blocks before the tool_use). Find the matching tool_use
     // block by description (K) for parent_tool_use_id.
+    //
+    // stream_events are forwarded directly without pushing to the collection
+    // array (they lack .message/.uuid and break downstream processing).
+    // For assistant/user messages, the original push+stats+state runs first.
     const replacement =
-      `){${patchEMarker}${body}` +
-      `{let _ptu=null;for(let _b of D.message.content){if(_b.type==="tool_use"&&_b.input&&_b.input.description===K){_ptu=_b.id;break}}` +
-      `if(${msgVar}.type==="stream_event")` +
+      `){${patchEMarker}` +
+      // stream_event: forward directly, skip push to collection array
+      `if(${msgVar}.type==="stream_event"){` +
+        `let _ptu=null;for(let _b of D.message.content){if(_b.type==="tool_use"&&_b.input&&_b.input.description===K){_ptu=_b.id;break}}` +
         `process.stdout.write(JSON.stringify({type:"stream_event",event:${msgVar}.event,` +
-        `parent_tool_use_id:_ptu,session_id:${sessFn}(),uuid:_f()})+"\\n");` +
-      `else if(${msgVar}.type==="assistant")` +
+        `parent_tool_use_id:_ptu,session_id:${sessFn}(),uuid:_f()})+"\\n")` +
+      `}else{` +
+      // non-stream_event: original body (push, stats, state update)
+      `${body}` +
+      `{let _ptu=null;for(let _b of D.message.content){if(_b.type==="tool_use"&&_b.input&&_b.input.description===K){_ptu=_b.id;break}}` +
+      `if(${msgVar}.type==="assistant")` +
         `process.stdout.write(JSON.stringify({type:"assistant",message:${msgVar}.message,` +
         `parent_tool_use_id:_ptu,session_id:${sessFn}(),uuid:_f()})+"\\n");` +
       `else if(${msgVar}.type==="user")` +
         `process.stdout.write(JSON.stringify({type:"user",message:${msgVar}.message,` +
         `parent_tool_use_id:_ptu,session_id:${sessFn}(),uuid:_f()})+"\\n");` +
-      `}}`
+      `}}}`
 
     src = src.slice(0, index + 1) + replacement + src.slice(index + fullMatch.length)
     asyncPatchCount++
@@ -405,8 +522,9 @@ console.log(`\nWrote patched file to ${cliPath}`)
 
 const verify = readFileSync(cliPath, 'utf-8')
 const markers = [
+  ['F', patchFMarker, 'cR yield filter (RVY) — allow stream_event'],
   ['A', patchAMarker, 'Content-block filter removal'],
-  ['B', patchBMarker, 'Stream_event forwarding'],
+  ['B', patchBMarker, 'Stream_event forwarding (before O1.push)'],
   ['C', patchCMarker, 'ZhA agent_stream_event handler'],
   ['D', patchDMarker, '.output file thinking inclusion'],
   ['E', patchEMarker, 'Background agent stdout streaming']
@@ -427,10 +545,12 @@ if (!allGood) {
 console.log('\nAll patches verified.')
 console.log('')
 console.log('Summary:')
+console.log('  F — cR yield: stream_events bypass RVY and yield directly,')
+console.log('      without being collected into results array or transcript.')
 console.log('  A — All sub-agent content blocks (text, thinking, tool_use, tool_result)')
 console.log('      flow through progress callback to SDK stream.')
-console.log('  B — Sub-agent stream_events (thinking_delta, text_delta) forwarded')
-console.log('      via new agent_stream_event progress type.')
+console.log('  B — Sub-agent stream_events intercepted BEFORE O1.push (never enter')
+console.log('      collection array), forwarded via agent_stream_event progress type.')
 console.log('  C — ZhA converts agent_stream_event to SDK stream_event with')
 console.log('      parent_tool_use_id for proper attribution.')
 console.log('  D — .output files include thinking blocks alongside text.')

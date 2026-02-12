@@ -121,7 +121,55 @@ This is the bridge between the Task tool's progress callback and the parent
 generator. Our patches use this existing bridge — we just call `j()` with
 new data types, and `U1q()` wraps them automatically.
 
-## Root Cause: Three Filters
+## Root Cause: Four Filters
+
+### Filter #0 — cR yield filter drops stream_event (RVY)
+
+Location: `RVY()` function, used as the yield gate inside `cR()` (the
+sub-agent query loop generator).
+
+```js
+// v2.1.39: RVY, char ~7907312
+function RVY(A) {
+    return A.type === "assistant" ||
+           A.type === "user" ||
+           A.type === "progress" ||
+           A.type === "system" && "subtype" in A && A.subtype === "compact_boundary"
+}
+```
+
+`cR()` iterates `fR()` (the inner query loop), which yields all message
+types including `{type: "stream_event", event: ...}` for every raw API
+event (content_block_delta, content_block_start, etc.). But `cR()` only
+yields messages that pass `RVY()`:
+
+```js
+// Inside cR(), char ~7967730
+for await (let $1 of fR({...})) {
+    // ...
+    if (RVY($1))
+        x.push($1), ..., yield $1    // ← only if RVY returns true
+}
+```
+
+**Effect:** `stream_event` is not in the RVY whitelist, so ALL sub-agent
+stream events are silently dropped inside `cR()`. They never reach the
+Task tool's for-await loop where Patch B would forward them. This is the
+**primary root cause** of missing sub-agent streaming — without fixing
+this, Patches B and C have no effect on the sync path.
+
+**Discovery:** We observed that Patch B (which intercepts `stream_event`
+in the Task tool's for-await loop) was never triggered — zero
+`stream_event` messages appeared in debug logs. Tracing upstream revealed
+`cR()` filters via `RVY()` before yielding.
+
+**Pitfall — O1 collection array corruption:** We cannot simply add
+`stream_event` to `RVY()` because the yield line also pushes to the
+collection array `x[]` and records to transcript via `E51()`. Stream
+events lack `.message` and `.uuid` properties that those operations
+expect, causing "Cannot read properties of undefined (reading 'type')"
+errors in downstream result processing (`_kA`, `dP`). See Patch F for
+the safe approach.
 
 ### Filter #1 — Progress callback only sends tool_use/tool_result
 
@@ -276,29 +324,33 @@ Non-assistant messages (user, tool_result) are JSON-stringified in full.
 ## Message Flow Diagram — Before Patching
 
 ```
-Sub-agent dR() generator
+fR() inner query loop (yields ALL message types from API)
+  │
+  ▼
+cR() sub-agent query loop (filters via RVY before yielding)
   │
   ├── stream_event (thinking_delta, text_delta, etc.)
-  │     │
-  │     ├── O1.push(msg)              ← collected internally
-  │     └── DROPPED (Filter #2)       ← type !== "assistant" && !== "user"
+  │     └── DROPPED (Filter #0)       ← RVY() returns false for stream_event
+  │                                       Never reaches Task tool's for-await
   │
   ├── assistant msg: [thinking, text, tool_use]
   │     │
-  │     ├── O1.push(msg)              ← collected internally
+  │     ├── RVY() returns true         ← yielded to Task tool
   │     │
-  │     ├── thinking block            ← DROPPED (Filter #1)
-  │     ├── text block                ← DROPPED (Filter #1)
-  │     └── tool_use block            ← progress callback j()
-  │           │
-  │           ▼
-  │         U1q() wraps → {type:"progress", data:{type:"agent_progress",...}}
-  │           │
-  │           ▼
-  │         ZhA() converts → {type:"assistant", parent_tool_use_id:...}
-  │           │
-  │           ▼
-  │         P.enqueue → SDK stdout    ← only tool_use messages arrive!
+  │     └── Task tool for-await:
+  │           ├── O1.push(msg)         ← collected
+  │           ├── thinking block       ← DROPPED (Filter #1)
+  │           ├── text block           ← DROPPED (Filter #1)
+  │           └── tool_use block       ← progress callback j()
+  │                 │
+  │                 ▼
+  │               U1q() wraps → {type:"progress", data:{type:"agent_progress",...}}
+  │                 │
+  │                 ▼
+  │               ZhA() converts → {type:"assistant", parent_tool_use_id:...}
+  │                 │
+  │                 ▼
+  │               P.enqueue → SDK stdout    ← only tool_use messages arrive!
   │
   ├── user msg: [tool_result]
   │     │
@@ -312,6 +364,7 @@ Sub-agent dR() generator
         ▼
       UEA(O1, agentId, ...)
         │
+        ├── Iterates O1 — expects all items to have .message.content
         ├── Extracts text-only (Filter #3) — NOT PATCHED (by design)
         │
         ▼
@@ -321,27 +374,34 @@ Sub-agent dR() generator
       Parent receives tool_result with text summary only
 ```
 
-## Message Flow Diagram — After Patching (Sync Path, Patches A–C)
+## Message Flow Diagram — After Patching (Sync Path, Patches F+A+B+C)
 
 ```
-Sub-agent dR() generator
+fR() inner query loop (yields ALL message types from API)
+  │
+  ▼
+cR() sub-agent query loop (Patch F: stream_event bypasses RVY)
   │
   ├── stream_event (thinking_delta, text_delta, etc.)
   │     │
-  │     ├── O1.push(msg)
-  │     └── (Patch B) j({data:{type:"agent_stream_event", event:...}})
-  │           │
-  │           ▼
-  │         O6q() wraps → {type:"progress", data:{type:"agent_stream_event",...}}
-  │           │
-  │           ▼
-  │         (Patch C) ZhA() yields → {type:"stream_event", parent_tool_use_id:...}
-  │           │
-  │           ▼
-  │         P.enqueue → SDK stdout ✓  ← stream events now arrive!
+  │     ├── (Patch F) yield directly — NOT pushed to x[], NOT recorded
+  │     │
+  │     └── Task tool for-await:
+  │           ├── (Patch B) intercepted BEFORE O1.push — NOT collected
+  │           └── j({data:{type:"agent_stream_event", event:...}})
+  │                 │
+  │                 ▼
+  │               O6q() wraps → {type:"progress", data:{type:"agent_stream_event",...}}
+  │                 │
+  │                 ▼
+  │               (Patch C) ZhA() yields → {type:"stream_event", parent_tool_use_id:...}
+  │                 │
+  │                 ▼
+  │               P.enqueue → SDK stdout ✓  ← stream events now arrive!
   │
   ├── assistant msg: [thinking, text, tool_use]
   │     │
+  │     ├── O1.push(msg)              ← collected (has .message, safe for UEA)
   │     ├── (Patch A) ALL blocks trigger progress callback
   │     │
   │     ├── thinking block            ← progress callback j() ✓
@@ -356,28 +416,38 @@ Sub-agent dR() generator
   └── (loop ends)
         │
         ▼
-      UEA() → text-only result       ← NOT CHANGED (by design)
+      UEA(O1) → text-only result     ← O1 contains only assistant/user msgs (safe)
 ```
 
-## Message Flow Diagram — After Patching (Async Path, Patch E)
+**Critical safety property:** Stream events are excluded from both
+collection arrays — `x[]` in `cR()` (Patch F) and `O1[]` in the Task
+tool (Patch B). This prevents "Cannot read properties of undefined
+(reading 'type')" errors from downstream functions (`UEA`, `_kA`, `dP`)
+that iterate these arrays and access `.message.content`.
+
+## Message Flow Diagram — After Patching (Async Path, Patches F+E)
 
 ```
 Background sub-agent cR() generator (inside q01 async context)
+  │  (Patch F applies here too — cR yields stream_events without collecting)
   │
   ├── stream_event
   │     │
-  │     └── (Patch E) process.stdout.write(JSON + "\n")
+  │     └── (Patch E) intercepted BEFORE N1.push — NOT collected
+  │           → process.stdout.write(JSON + "\n")
   │           → {type:"stream_event", event:..., parent_tool_use_id:_ptu}
   │           → SDK readline → q4() parse → consumer ✓
   │
   ├── assistant msg
   │     │
+  │     ├── N1.push(msg)              ← collected (has .message, safe for _kA)
   │     └── (Patch E) process.stdout.write(JSON + "\n")
   │           → {type:"assistant", message:..., parent_tool_use_id:_ptu}
   │           → SDK readline → q4() parse → consumer ✓
   │
   ├── user msg
   │     │
+  │     ├── N1.push(msg)              ← collected
   │     └── (Patch E) process.stdout.write(JSON + "\n")
   │           → {type:"user", message:..., parent_tool_use_id:_ptu}
   │           → SDK readline → q4() parse → consumer ✓
@@ -387,7 +457,7 @@ Background sub-agent cR() generator (inside q01 async context)
   └── (loop ends)
         │
         ▼
-      _kA() → text-only result       ← NOT CHANGED (by design)
+      _kA(N1) → text-only result     ← N1 contains only assistant/user msgs (safe)
 ```
 
 Note: `_ptu` is the `parent_tool_use_id`, resolved by searching
@@ -397,6 +467,56 @@ Patch E bypasses the entire O6q/ZhA pipeline and writes directly to
 stdout.
 
 ## The Patches
+
+### Patch F — cR yield — stream_event bypass before RVY
+
+**Fixes Filter #0.** Injects a `stream_event` check before the `RVY()`
+gate in `cR()`'s for-await loop, yielding stream_events directly without
+collecting them into the results array or recording them to transcript.
+
+We cannot simply add `stream_event` to `RVY()` because the yield line
+also pushes to the collection array `x[]` and records to transcript via
+`E51()`. Stream events lack `.message` and `.uuid` properties that
+those operations expect, causing "Cannot read properties of undefined
+(reading 'type')" errors in downstream result processing (`_kA`, `dP`).
+
+Before:
+
+```js
+if (RVY($1))
+    x.push($1), await E51([$1], f, a).catch(...), a = $1.uuid, yield $1
+```
+
+After:
+
+```js
+if ($1.type === "stream_event") { yield $1 }
+else if (RVY($1))
+    x.push($1), await E51([$1], f, a).catch(...), a = $1.uuid, yield $1
+```
+
+**Why this approach over modifying RVY:**
+- Modifying RVY to include `stream_event` causes stream events to be:
+  - Pushed to `x[]` — later processed by `_kA()` which expects `.message.content`
+  - Passed to `E51()` which expects a `.uuid` property
+  - Setting `a = $1.uuid` to `undefined`, corrupting transcript chain
+- By intercepting before `RVY()`, we yield without side effects
+
+**Why this is safe:**
+- `stream_event` messages are lightweight (`{type, event}`) — no state
+  to track
+- They don't need transcript recording (they're transient deltas)
+- They don't affect the results array (they're not final messages)
+- The Task tool's for-await loop (Patch B) handles them correctly
+
+**How to find this code in a new version:**
+1. Find the RVY function by its unique type-check pattern:
+
+```
+function.*type==="assistant".*type==="user".*type==="progress".*compact_boundary
+```
+
+2. Find its call site: `if(RVY(VAR))ARR.push(VAR),` inside `cR()`
 
 ### Patch A — Content-block filter removal
 
@@ -452,11 +572,12 @@ Search for the unique pattern of nested for-loops with a `tool_use`/
 type!=="tool_use"&&.*type!=="tool_result".*continue.*agent_progress
 ```
 
-### Patch B — Stream event forwarding
+### Patch B — Stream event forwarding (before O1.push)
 
-**Removes Filter #2.** Adds a branch in the type-check code that catches
-`stream_event` messages and forwards them through the progress callback as
-a new `agent_stream_event` data type.
+**Removes Filter #2.** Intercepts `stream_event` messages **before** the
+`O1.push()` call and forwards them through the progress callback as a new
+`agent_stream_event` data type. Stream events never enter the `O1`
+collection array.
 
 Before:
 
@@ -469,28 +590,39 @@ if (O1.push(Y1),
 After:
 
 ```js
-if (O1.push(Y1),
-    Y1.type !== "assistant" && Y1.type !== "user") {
-    if (Y1.type === "stream_event" && j) j({
+if (Y1.type === "stream_event") {
+    if (j) j({
         toolUseID: `agent_${D.message.id}`,
         data: {type: "agent_stream_event", event: Y1.event, agentId: r}
     });
     continue
 }
+if (O1.push(Y1),
+    Y1.type !== "assistant" && Y1.type !== "user")
+    continue;
 ```
 
-The `continue;` is changed to a block `{...continue}` that first checks for
-stream events and forwards them.
+The stream_event check is a separate `if` block that runs **before** the
+original `if(O1.push(Y1),...)` statement. When a stream_event is
+detected, it's forwarded and skipped via `continue` — the `O1.push()`
+line is never reached.
+
+**Why stream_events must NOT enter O1:**
+- `O1` is passed to `UEA()` when the Task tool finishes
+- `UEA()` calls `GN(O1)` to get the last assistant message, then
+  iterates `.message.content` to extract text blocks
+- Stream events have `{type, event}` structure — no `.message` property
+- If stream_events are in O1, downstream processing crashes with
+  "Cannot read properties of undefined (reading 'type')" when
+  `_kA()` or `dP()` access `.message.content` on a stream_event
 
 **Why this is safe:**
-- All other message types (system, progress, etc.) still hit `continue` and
-  are skipped, matching the original behavior
-- The stream event's `event` property is passed through unchanged — it
-  contains the raw API event (`content_block_delta`, etc.)
+- Stream events are forwarded via the progress callback before being
+  skipped — they reach the SDK consumer via Patch C
+- All other message types (assistant, user, system, progress) follow the
+  original code path and are pushed to O1 normally
 - The `U1q()` wrapper adds `uuid`, `timestamp`, and `parentToolUseID`
   automatically
-- No modification to `O1` collection — stream events are still pushed to
-  the internal array as before
 
 **How to find this code in a new version:**
 Search for the comma-expression pattern that pushes to an array and then
@@ -650,6 +782,8 @@ runs inside a `q01()` async context. At this point the progress callback
 
 Patch E injects code into the background agent's `for await` loop to
 write sub-agent messages directly to stdout as newline-delimited JSON.
+Like Patch B, stream_events are intercepted **before** the collection
+array push (`N1.push`) to prevent downstream crashes.
 
 Before (async for-await body is a single statement):
 
@@ -662,31 +796,39 @@ After (wrapped in block with stdout writes):
 
 ```js
 for await (let D1 of cR({...})) {
-    N1.push(D1), s01(...), s0A(agentId, ...);
-
-    // Find this Task call's tool_use_id from the parent message
-    let _ptu = null;
-    for (let _b of D.message.content) {
-        if (_b.type === "tool_use" && _b.input && _b.input.description === K) {
-            _ptu = _b.id; break;
+    if (D1.type === "stream_event") {
+        // Stream events: forward directly, do NOT push to N1
+        let _ptu = null;
+        for (let _b of D.message.content) {
+            if (_b.type === "tool_use" && _b.input && _b.input.description === K) {
+                _ptu = _b.id; break;
+            }
         }
-    }
-
-    if (D1.type === "stream_event")
         process.stdout.write(JSON.stringify({
             type: "stream_event", event: D1.event,
             parent_tool_use_id: _ptu, session_id: p6(), uuid: _f()
         }) + "\n");
-    else if (D1.type === "assistant")
-        process.stdout.write(JSON.stringify({
-            type: "assistant", message: D1.message,
-            parent_tool_use_id: _ptu, session_id: p6(), uuid: _f()
-        }) + "\n");
-    else if (D1.type === "user")
-        process.stdout.write(JSON.stringify({
-            type: "user", message: D1.message,
-            parent_tool_use_id: _ptu, session_id: p6(), uuid: _f()
-        }) + "\n");
+    } else {
+        // Non-stream: original push + stats + state, then forward
+        N1.push(D1), s01(...), s0A(agentId, ...);
+
+        let _ptu = null;
+        for (let _b of D.message.content) {
+            if (_b.type === "tool_use" && _b.input && _b.input.description === K) {
+                _ptu = _b.id; break;
+            }
+        }
+        if (D1.type === "assistant")
+            process.stdout.write(JSON.stringify({
+                type: "assistant", message: D1.message,
+                parent_tool_use_id: _ptu, session_id: p6(), uuid: _f()
+            }) + "\n");
+        else if (D1.type === "user")
+            process.stdout.write(JSON.stringify({
+                type: "user", message: D1.message,
+                parent_tool_use_id: _ptu, session_id: p6(), uuid: _f()
+            }) + "\n");
+    }
 }
 ```
 
@@ -875,7 +1017,7 @@ Messages from sub-agents carry `parent_tool_use_id` for attribution.
 | Location | Has thinking? | Accessible? |
 |---|---|---|
 | Sub-agent `dR()` yield (sync) | Yes | Yes — forwarded via Patch A |
-| Sub-agent stream_events (sync) | Yes | Yes — forwarded via Patch B+C |
+| Sub-agent stream_events (sync) | Yes | Yes — Patch F unblocks cR, B+C forward |
 | Sub-agent messages (async/bg) | Yes | Yes — forwarded via Patch E |
 | SDK stdout stream | Yes | Yes — `parent_tool_use_id` set |
 | `.output` file (background) | Yes | Yes — included via Patch D |
@@ -893,14 +1035,15 @@ The script locates functions by **content pattern** rather than minified
 names, since function names change between versions. It will:
 
 1. Find `cli.js` in the SDK package
-2. Locate the content-block filter by nested for-loop pattern (Patch A)
-3. Locate the type filter by push+type-check pattern (Patch B)
-4. Locate the message converter by `bash_progress` anchor (Patch C)
-5. Locate the text extraction function by "Execution completed" pattern (Patch D)
-6. Locate the background polling map by assistant/text/stringify pattern (Patch D)
-7. Locate the session ID function from ZhA/ihA yields (Patch E)
-8. Locate async for-await+cR loops by body pattern (Patch E)
-9. Apply all patches and verify markers
+2. Locate the cR yield filter function by type-check pattern (Patch F)
+3. Locate the content-block filter by nested for-loop pattern (Patch A)
+4. Locate the type filter by push+type-check pattern (Patch B)
+5. Locate the message converter by `bash_progress` anchor (Patch C)
+6. Locate the text extraction function by "Execution completed" pattern (Patch D)
+7. Locate the background polling map by assistant/text/stringify pattern (Patch D)
+8. Locate the session ID function from ZhA/ihA yields (Patch E)
+9. Locate async for-await+cR loops by body pattern (Patch E)
+10. Apply all patches and verify markers
 
 ### Re-applying after SDK updates
 
@@ -951,6 +1094,7 @@ Where the message content includes `type:"thinking"` blocks.
 
 | Name (v2.1.38 → v2.1.39) | Purpose | Char offset (v2.1.39) |
 |---|---|---|
+| `RVY()` → (unchanged) | cR yield filter (gates what cR yields to callers) | ~7907312 |
 | `dR()` → (unchanged) | Sub-agent execution generator | ~7904721 |
 | `UEA()` → (unchanged) | Extract text-only result from agent messages | ~7983000 |
 | `FM6()` → `sM6()` | Extract text from last assistant message | ~9022069 |
@@ -1001,7 +1145,7 @@ messages.
 
 ### Stream event volume considerations
 
-Forwarding sub-agent stream events (Patch B+C) significantly increases the
+Forwarding sub-agent stream events (Patches F+B+C) significantly increases the
 volume of SDK output. Each thinking token and text token generates a separate
 `content_block_delta` event. For a sub-agent with extensive thinking, this
 can be thousands of additional messages.
@@ -1019,7 +1163,9 @@ the progress callback `j()` is dead (its output queue is closed).
 Patches A–C (progress callback based) therefore do **not** work for
 background agents. Instead, **Patch E** writes messages directly to
 stdout using `process.stdout.write(JSON + "\n")`, bypassing the progress
-callback / `O6q()` / ZhA pipeline entirely.
+callback / `O6q()` / ZhA pipeline entirely. Like Patch B, Patch E
+intercepts stream_events before the collection array push to prevent
+downstream crashes.
 
 Patch D handles the `.output` file writer (used by background agents for
 the `Read` tool to tail output).
@@ -1141,3 +1287,18 @@ handles all content types. No change needed to `et()`.
 13. Discovered `O6q()` (v2.1.39 rename of `U1q()`) wraps progress
     callback data with `parentToolUseID` from the executor context.
     Background agents bypass this entirely since `j()` is dead.
+14. After deploying Patches A–E, observed that sub-agent text blocks
+    arrived as complete `assistant` messages but zero `stream_event`
+    messages appeared in debug logs. Traced the chain:
+    `fR()` → yields `stream_event` → `cR()` → `RVY()` filter → dropped.
+    `RVY()` only whitelists `assistant`, `user`, `progress`, and
+    `compact_boundary` system messages. Found at char ~7907312 using
+    `bundle-analyzer find`. This is Filter #0 — the **primary root cause**
+    that made Patches B+C ineffective on the sync path.
+15. First Patch F attempt simply yielded stream_events from cR, but
+    the Task tool's for-await loop still pushed them to `O1` via the
+    comma expression `if(O1.push(Y1),...)`. When `UEA(O1)` later
+    iterated O1 and accessed `.message.content` on stream_events,
+    it crashed: "Cannot read properties of undefined (reading 'type')".
+    Fix: modified Patch B to intercept stream_events **before** O1.push,
+    and Patch E to do the same for background agent loops.

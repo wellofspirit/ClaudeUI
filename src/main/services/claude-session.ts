@@ -170,22 +170,6 @@ export class ClaudeSession {
           this.sendStatus()
         }
 
-        // Debug: subagent routing diagnostics
-        const _ptui = msg.parent_tool_use_id
-        if (type === 'assistant') {
-          const betaMsg = msg.message as Record<string, unknown> | undefined
-          const content = betaMsg?.content as Array<Record<string, unknown>> | undefined
-          const blockTypes = content?.map((b) => b.type).join(',') || '?'
-          console.log(`[subagent-debug] type=assistant parent_tool_use_id=${JSON.stringify(_ptui)} blocks=[${blockTypes}]`)
-        } else if (type === 'user') {
-          console.log(`[subagent-debug] type=user parent_tool_use_id=${JSON.stringify(_ptui)}`)
-        } else if (type === 'stream_event') {
-          const evt = (msg.event as Record<string, unknown>)?.type
-          const delta = ((msg.event as Record<string, unknown>)?.delta as Record<string, unknown>)?.type
-          console.log(`[subagent-debug] type=stream_event event=${evt} delta=${delta} parent_tool_use_id=${JSON.stringify(_ptui)}`)
-        } else if (type !== 'tool_progress') {
-          console.log(`[subagent-debug] type=${type} parent_tool_use_id=${JSON.stringify(_ptui)}`)
-        }
 
         // Any assistant or stream content means we're processing
         if ((type === 'assistant' || type === 'stream_event') && !this.isProcessing) {
