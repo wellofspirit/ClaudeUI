@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useCallback } from 'react'
 import { useSessionStore } from '../stores/session-store'
 import { MarkdownRenderer } from './chat/MarkdownRenderer'
 import { SubagentMessages } from './chat/SubagentMessages'
@@ -60,14 +60,36 @@ function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Element | nu
     : resultBlock?.isError
 
   const bodyRef = useRef<HTMLDivElement>(null)
+  const [following, setFollowing] = useState(true)
+  const isAutoScrolling = useRef(false)
+
+  // Auto-scroll when following — use instant scroll to avoid fighting with user
   useEffect(() => {
     const el = bodyRef.current
+    if (!el || !following) return
+    isAutoScrolling.current = true
+    el.scrollTop = el.scrollHeight
+    // Clear flag after browser paints
+    requestAnimationFrame(() => { isAutoScrolling.current = false })
+  }, [msgs, streamText, streamThinking, following])
+
+  // Only react to user-initiated scroll events
+  const handleScroll = useCallback(() => {
+    if (isAutoScrolling.current) return
+    const el = bodyRef.current
     if (!el) return
-    const isNearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 100
-    if (isNearBottom) {
-      el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
-    }
-  }, [msgs, streamText, streamThinking])
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40
+    setFollowing(nearBottom)
+  }, [])
+
+  const scrollToBottom = useCallback(() => {
+    const el = bodyRef.current
+    if (!el) return
+    isAutoScrolling.current = true
+    el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
+    setFollowing(true)
+    requestAnimationFrame(() => { isAutoScrolling.current = false })
+  }, [])
 
   const statusBadge = isError ? (
     <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-danger/10 text-danger shrink-0">failed</span>
@@ -110,7 +132,8 @@ function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Element | nu
 
       {/* Body */}
       {expanded && (
-        <div ref={bodyRef} className="px-4 py-3 max-h-[60vh] overflow-y-auto">
+        <div className="relative">
+        <div ref={bodyRef} onScroll={handleScroll} className="px-4 py-3 max-h-[60vh] overflow-y-auto">
           {hasSubagentOutput ? (
             <div>
               {isRunning && isBackground && (
@@ -146,6 +169,18 @@ function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Element | nu
               )}
             </div>
           ) : null}
+        </div>
+        {/* Scroll-to-bottom button */}
+        {!following && (
+          <button
+            onClick={scrollToBottom}
+            className="absolute bottom-2 left-1/2 -translate-x-1/2 bg-bg-tertiary border border-border rounded-full p-1.5 shadow-md shadow-black/20 hover:bg-bg-hover transition-colors cursor-pointer z-10"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-text-secondary">
+              <polyline points="6 9 12 15 18 9" />
+            </svg>
+          </button>
+        )}
         </div>
       )}
     </div>
