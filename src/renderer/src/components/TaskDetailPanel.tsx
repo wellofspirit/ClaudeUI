@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import { useSessionStore } from '../stores/session-store'
 import { MarkdownRenderer } from './chat/MarkdownRenderer'
 import { SubagentMessages } from './chat/SubagentMessages'
@@ -59,6 +59,16 @@ function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Element | nu
     ? bgNotification?.status === 'failed'
     : resultBlock?.isError
 
+  const bodyRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    const el = bodyRef.current
+    if (!el) return
+    const isNearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 100
+    if (isNearBottom) {
+      el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
+    }
+  }, [msgs, streamText, streamThinking])
+
   const statusBadge = isError ? (
     <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-danger/10 text-danger shrink-0">failed</span>
   ) : !isRunning ? (
@@ -100,7 +110,7 @@ function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Element | nu
 
       {/* Body */}
       {expanded && (
-        <div className="px-4 py-3">
+        <div ref={bodyRef} className="px-4 py-3 max-h-[60vh] overflow-y-auto">
           {hasSubagentOutput ? (
             <div>
               {isRunning && isBackground && (
@@ -115,7 +125,7 @@ function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Element | nu
               {streamThinking && (
                 <div className="text-[12px] text-text-secondary/60 italic mb-1.5">{streamThinking.slice(-200)}</div>
               )}
-              {msgs.length > 0 && <SubagentMessages messages={msgs} maxHeight="400px" />}
+              {msgs.length > 0 && <SubagentMessages messages={msgs} maxHeight="none" />}
               {streamText && (
                 <div className="text-[12px] text-text-primary/80 leading-[1.6] mt-1">
                   <MarkdownRenderer content={streamText} />
