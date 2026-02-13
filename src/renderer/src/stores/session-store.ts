@@ -7,7 +7,8 @@ import type {
   TodoItem,
   TaskProgress,
   TaskNotification,
-  PermissionMode
+  PermissionMode,
+  ModelInfo
 } from '../../../shared/types'
 
 /**
@@ -104,6 +105,7 @@ interface SessionState {
   stoppingTaskIds: string[]
   permissionMode: PermissionMode
   effort: 'low' | 'medium' | 'high'
+  availableModels: ModelInfo[]
 
   setCwd: (cwd: string | null) => void
   openDirectory: (cwd: string) => void
@@ -137,6 +139,7 @@ interface SessionState {
   clearTaskStopping: (toolUseId: string) => void
   setPermissionMode: (mode: PermissionMode) => void
   setEffort: (effort: 'low' | 'medium' | 'high') => void
+  setAvailableModels: (models: ModelInfo[]) => void
 }
 
 export const useSessionStore = create<SessionState>((set) => ({
@@ -168,7 +171,8 @@ export const useSessionStore = create<SessionState>((set) => ({
   backgroundWatcherCounts: {},
   stoppingTaskIds: [],
   permissionMode: 'default',
-  effort: 'high',
+  effort: 'medium',
+  availableModels: [],
 
   setCwd: (cwd) => set({ cwd }),
 
@@ -432,5 +436,7 @@ export const useSessionStore = create<SessionState>((set) => ({
 
   setPermissionMode: (mode) => set({ permissionMode: mode }),
 
-  setEffort: (effort) => set({ effort })
+  setEffort: (effort) => set({ effort }),
+
+  setAvailableModels: (models) => set({ availableModels: models })
 }))

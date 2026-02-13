@@ -110,6 +110,12 @@ export interface BackgroundOutput {
   done: boolean
 }
 
+export interface ModelInfo {
+  value: string
+  displayName: string
+  description: string
+}
+
 export interface ClaudeAPI {
   platform: string
   pickFolder(): Promise<string | null>
@@ -142,4 +148,5 @@ export interface ClaudeAPI {
   setPermissionMode(mode: string): Promise<void>
   setModel(model: string): Promise<void>
   setEffort(effort: string): Promise<void>
+  getModels(): Promise<ModelInfo[]>
 }

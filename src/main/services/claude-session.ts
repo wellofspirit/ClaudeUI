@@ -98,12 +98,12 @@ export class ClaudeSession {
   } | null = null
   private permissionMode: string = 'default'
   private effort: string
-  private model: string = 'claude-sonnet-4-5-20250929'
+  private model: string = 'default'
 
   constructor(win: BrowserWindow, cwd: string, effort?: string) {
     this.win = win
     this.cwd = cwd
-    this.effort = effort || 'high'
+    this.effort = effort || 'medium'
     this.sendStatus()
   }
 

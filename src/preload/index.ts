@@ -98,7 +98,8 @@ const api: ClaudeAPI = {
   stopTask: (toolUseId: string) => ipcRenderer.invoke('session:stop-task', toolUseId),
   setPermissionMode: (mode: string) => ipcRenderer.invoke('session:set-permission-mode', mode),
   setModel: (model: string) => ipcRenderer.invoke('session:set-model', model),
-  setEffort: (effort: string) => ipcRenderer.invoke('session:set-effort', effort)
+  setEffort: (effort: string) => ipcRenderer.invoke('session:set-effort', effort),
+  getModels: () => ipcRenderer.invoke('session:get-models')
 }
 
 if (process.contextIsolated) {

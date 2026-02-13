@@ -2,12 +2,6 @@ import { useState, useRef, useCallback, useEffect } from 'react'
 import { useSessionStore } from '../../stores/session-store'
 import { v4 as uuid } from 'uuid'
 
-const MODELS = [
-  { id: 'claude-sonnet-4-5-20250929', label: 'sonnet-4-5' },
-  { id: 'claude-opus-4-6', label: 'opus-4-6' },
-  { id: 'claude-haiku-4-5-20251001', label: 'haiku-4-5' }
-]
-
 const EFFORT_LEVELS = ['low', 'medium', 'high'] as const
 
 const PERMISSION_MODES = [
@@ -31,9 +25,21 @@ export function InputBox(): React.JSX.Element {
   const [modelOpen, setModelOpen] = useState(false)
   const [effortOpen, setEffortOpen] = useState(false)
   const [plusOpen, setPlusOpen] = useState(false)
-  const [selectedModel, setSelectedModel] = useState(MODELS[0])
+  const availableModels = useSessionStore((s) => s.availableModels)
+  const setAvailableModels = useSessionStore((s) => s.setAvailableModels)
+  const models = availableModels.map((m) => {
+    // Extract short name from description (e.g. "Opus 4.6 · Most capable..." → "Opus 4.6")
+    const shortName = m.description?.split('·')[0]?.trim() || m.displayName
+    return { ...m, shortName }
+  })
+  const [selectedModelValue, setSelectedModelValue] = useState('default')
+  const selectedModel = models.find((m) => m.value === selectedModelValue) || models[0] || { value: 'default', displayName: 'Default', shortName: 'Default' }
   const effort = useSessionStore((s) => s.effort)
   const setEffort = useSessionStore((s) => s.setEffort)
+
+  useEffect(() => {
+    window.api.getModels().then(setAvailableModels)
+  }, [setAvailableModels])
 
   useEffect(() => {
     if (!isRunning) textareaRef.current?.focus()
@@ -178,28 +184,31 @@ export function InputBox(): React.JSX.Element {
                   }}
                   className="h-7 px-2 flex items-center gap-1 rounded-lg text-[11px] text-text-muted hover:text-text-secondary hover:bg-bg-hover transition-colors cursor-pointer"
                 >
-                  <span>{selectedModel.label}</span>
+                  <span>{selectedModel.shortName}</span>
                   <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
                     <polyline points="6 9 12 15 18 9" />
                   </svg>
                 </button>
                 {modelOpen && (
-                  <div className="absolute bottom-full mb-1 left-0 w-44 bg-bg-tertiary border border-border rounded-lg overflow-hidden shadow-lg shadow-black/30 z-20">
-                    {MODELS.map((m) => (
+                  <div className="absolute bottom-full mb-1 left-0 w-56 bg-bg-tertiary border border-border rounded-lg overflow-hidden shadow-lg shadow-black/30 z-20">
+                    {models.map((m) => (
                       <button
-                        key={m.id}
+                        key={m.value}
                         onClick={() => {
-                          setSelectedModel(m)
-                          window.api.setModel(m.id)
+                          setSelectedModelValue(m.value)
+                          window.api.setModel(m.value)
                           setModelOpen(false)
                         }}
-                        className={`w-full flex items-center gap-2 px-3 h-8 text-[12px] transition-colors cursor-pointer text-left ${
-                          m.id === selectedModel.id
+                        className={`w-full flex flex-col px-3 py-1.5 transition-colors cursor-pointer text-left ${
+                          m.value === selectedModel.value
                             ? 'text-text-primary bg-bg-hover'
                             : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary'
                         }`}
                       >
-                        {m.label}
+                        <span className="text-[12px]">{m.shortName}</span>
+                        {m.description && (
+                          <span className="text-text-muted text-[10px]">{m.description.split('·')[1]?.trim()}</span>
+                        )}
                       </button>
                     ))}
                   </div>
@@ -216,7 +225,7 @@ export function InputBox(): React.JSX.Element {
                     setPlusOpen(false)
               
                   }}
-                  className="h-7 px-2 flex items-center gap-1 rounded-lg text-[11px] text-text-muted hover:text-text-secondary hover:bg-bg-hover transition-colors cursor-pointer"
+                  className="h-7 px-2 flex items-center gap-1 rounded-lg text-[11px] text-text-muted hover:text-text-secondary hover:bg-bg-hover transition-colors cursor-pointer capitalize"
                 >
                   <span>{effort}</span>
                   <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">

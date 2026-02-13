@@ -1,8 +1,31 @@
 import { ipcMain, dialog, BrowserWindow } from 'electron'
+import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk'
 import { ClaudeSession } from '../services/claude-session'
-import type { ApprovalDecision } from '../../shared/types'
+import type { ApprovalDecision, ModelInfo } from '../../shared/types'
 
 let session: ClaudeSession | null = null
+let cachedModels: ModelInfo[] | null = null
+
+async function fetchModels(): Promise<ModelInfo[]> {
+  if (cachedModels) return cachedModels
+
+  const abort = new AbortController()
+  const q = sdkQuery({
+    prompt: '',
+    options: {
+      cwd: process.cwd(),
+      abortController: abort
+    }
+  })
+
+  try {
+    const models = await (q as unknown as { supportedModels(): Promise<ModelInfo[]> }).supportedModels()
+    cachedModels = models
+    return models
+  } finally {
+    abort.abort()
+  }
+}
 
 export function registerSessionIpc(win: BrowserWindow): void {
   ipcMain.handle('session:pick-folder', async () => {
@@ -65,6 +88,10 @@ export function registerSessionIpc(win: BrowserWindow): void {
 
   ipcMain.handle('session:set-effort', (_e, effort: string) => {
     session?.setEffort(effort)
+  })
+
+  ipcMain.handle('session:get-models', async () => {
+    return await fetchModels()
   })
 
 }
