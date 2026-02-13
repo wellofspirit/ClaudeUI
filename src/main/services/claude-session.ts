@@ -95,6 +95,7 @@ export class ClaudeSession {
   private activeQuery: {
     setPermissionMode(mode: string): Promise<void>
     setModel(model?: string): Promise<void>
+    stopTask(taskId: string): Promise<void>
   } | null = null
   private permissionMode: string = 'default'
   private effort: string
@@ -190,6 +191,7 @@ export class ClaudeSession {
       this.activeQuery = q as unknown as {
         setPermissionMode(mode: string): Promise<void>
         setModel(model?: string): Promise<void>
+        stopTask(taskId: string): Promise<void>
       }
 
       for await (const message of q) {
@@ -402,33 +404,20 @@ export class ClaudeSession {
     }
 
     if (!taskId) {
-      return {
-        success: false,
-        error: 'Task ID not found. Task may not be a background task.'
-      }
+      return { success: false, error: 'Task ID not found. Task may not be a background task.' }
     }
 
-    if (!this.messageChannel) {
-      return {
-        success: false,
-        error: 'No active session'
-      }
+    if (!this.activeQuery) {
+      return { success: false, error: 'No active session' }
     }
 
-    // Push control_request message to SDK
-    // The SDK patch recognizes this and invokes TaskStop directly
-    const stopMessage = {
-      type: 'control_request' as const,
-      request: {
-        subtype: 'stop_task',
-        task_id: taskId
-      },
-      request_id: uuid()
+    try {
+      await this.activeQuery.stopTask(taskId)
+      return { success: true }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      return { success: false, error: msg }
     }
-
-    console.log('[ClaudeSession] Sending stop_task control_request:', stopMessage)
-    this.messageChannel.push(stopMessage)
-    return { success: true }
   }
 
   private transformAssistantMessage(msg: Record<string, unknown>): ChatMessage | null {

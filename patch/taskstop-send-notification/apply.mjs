@@ -116,7 +116,9 @@ if (anchorIdx === -1) {
 console.log(`Found TaskStop at char ${anchorIdx}`)
 
 // Extract context around TaskStop (need to search before the anchor for the notified setter)
-const contextStart = Math.max(0, anchorIdx - 2000)
+// In SDK 0.2.41+, the notified setter moved into a helper function (vZ6), increasing the
+// distance from the anchor. Use 3000 chars to accommodate this.
+const contextStart = Math.max(0, anchorIdx - 3000)
 const contextEnd = Math.min(src.length, anchorIdx + 500)
 const context = src.slice(contextStart, contextEnd)
 
@@ -160,21 +162,25 @@ if (src[commaIdx] !== ',') {
   process.exit(1)
 }
 
-// Now we need to find the task variable ($) - it's defined in the function body
-// Pattern: let TASK_VAR=(await GET_STATE_FN()).tasks?.[TASK_ID_VAR];
-// This retrieves the task object which has .cwd, .command, etc.
-const taskVarRe = new RegExp(
+// Now we need to find the task variable — it's defined in the function body.
+// Two patterns seen across SDK versions:
+//   Old (0.2.39): let TASK_VAR=(await GET_STATE_FN()).tasks?.[TASK_ID_VAR];
+//   New (0.2.41): (TASK_VAR)=(await GET_STATE_FN()).tasks?.[TASK_ID_VAR];  (in destructured let)
+const taskVarRe1 = new RegExp(
   `let (${V})=\\(await [^)]+\\(\\)\\)\\.tasks\\?\\.\\[${taskIdVarName}\\];`
+)
+const taskVarRe2 = new RegExp(
+  `(${V})=\\(await (${V})\\(\\)\\)\\.tasks\\?\\.\\[${taskIdVarName}\\]`
 )
 
 // Search backwards from the notified setter (task var should be defined before it)
-const searchStart = Math.max(0, fullSetterIdx - 1000)
+const searchStart = Math.max(0, fullSetterIdx - 2000)
 const searchContext = src.slice(searchStart, fullSetterIdx)
-const taskVarMatch = searchContext.match(taskVarRe)
+const taskVarMatch = searchContext.match(taskVarRe1) || searchContext.match(taskVarRe2)
 
 if (!taskVarMatch) {
-  console.error('ERROR: Cannot locate task variable in TaskStop call method.')
-  console.error(`Expected pattern: let VAR=(await ...).tasks?.[${taskIdVarName}];`)
+  console.error('ERROR: Cannot locate task variable in TaskStop/vZ6 function.')
+  console.error(`Expected pattern: VAR=(await ...).tasks?.[${taskIdVarName}]`)
   process.exit(1)
 }
 
