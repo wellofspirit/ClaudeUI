@@ -62,17 +62,27 @@ export function InputBox(): React.JSX.Element {
     const prompt = text.trim()
     if (!prompt || isDisabled || !activeSessionId) return
 
+    // Check historical state BEFORE adding user message, otherwise the
+    // newly added message makes messages.length > 0 and misidentifies
+    // a brand-new session as historical (causing "No conversation found" error).
+    let needsSdkCreate = false
+    let resumeId: string | undefined
+    if (!sdkActive) {
+      const { sessions } = useSessionStore.getState()
+      const session = sessions[activeSessionId]
+      const isHistorical = session && session.messages.length > 0 && !session.sdkActive
+      resumeId = isHistorical ? activeSessionId : undefined
+      needsSdkCreate = true
+    }
+
     addUserMessage(activeSessionId, uuid(), prompt)
     setText('')
     if (textareaRef.current) textareaRef.current.style.height = 'auto'
 
     // Lazy SDK creation: create session on first message
-    if (!sdkActive) {
+    if (needsSdkCreate) {
       const { effort: currentEffort, sessions } = useSessionStore.getState()
       const session = sessions[activeSessionId]
-      // For historical sessions, routingId === sessionId, pass as resumeSessionId
-      const isHistorical = session && session.messages.length > 0 && !session.sdkActive
-      const resumeId = isHistorical ? activeSessionId : undefined
       await window.api.createSession(activeSessionId, session?.cwd || '', currentEffort, resumeId)
       markSdkActive(activeSessionId)
     }

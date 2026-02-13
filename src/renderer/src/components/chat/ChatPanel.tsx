@@ -1,5 +1,5 @@
 import { useRef, useEffect } from 'react'
-import { useActiveSession } from '../../stores/session-store'
+import { useActiveSession, useSessionStore } from '../../stores/session-store'
 import { MessageBubble } from './MessageBubble'
 import { StreamingText } from './StreamingText'
 import { ThinkingBlock } from './ThinkingBlock'
@@ -17,8 +17,17 @@ export function ChatPanel(): React.JSX.Element {
   const pendingApprovals = useActiveSession((s) => s.pendingApprovals)
   const status = useActiveSession((s) => s.status)
 
+  const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const scrollRef = useRef<HTMLDivElement>(null)
 
+  // Scroll to bottom when switching sessions
+  useEffect(() => {
+    const el = scrollRef.current
+    if (!el) return
+    el.scrollTop = el.scrollHeight
+  }, [activeSessionId])
+
+  // Auto-scroll on new content if near bottom
   useEffect(() => {
     const el = scrollRef.current
     if (!el) return

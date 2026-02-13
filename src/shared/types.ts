@@ -118,6 +118,12 @@ export interface BackgroundOutput {
   done: boolean
 }
 
+export interface WatchUpdate {
+  routingId: string
+  messages: ChatMessage[]
+  taskNotifications: TaskNotification[]
+}
+
 export interface ModelInfo {
   value: string
   displayName: string
@@ -186,4 +192,8 @@ export interface ClaudeAPI {
   getModels(): Promise<ModelInfo[]>
   getPlanContent(routingId: string): Promise<string | null>
   getSessionLogPath(routingId: string): Promise<string | null>
+  watchSession(routingId: string, sessionId: string, projectKey: string): Promise<void>
+  unwatchSession(routingId: string): Promise<void>
+  onWatchUpdate(cb: (data: WatchUpdate) => void): () => void
+  onDirectoriesChanged(cb: () => void): () => void
 }

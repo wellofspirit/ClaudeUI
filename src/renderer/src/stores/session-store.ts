@@ -56,6 +56,73 @@ function mergeContentBlocks(
   return [...preserved, ...newBlocks]
 }
 
+const TASK_TOOL_NAMES = new Set(['TaskCreate', 'TaskUpdate', 'TodoWrite'])
+
+/**
+ * Scan messages for TaskCreate/TaskUpdate/TodoWrite tool calls and build the
+ * final TodoItem[] state. Returns null if no relevant tool calls found.
+ */
+export function buildTodosFromMessages(messages: ChatMessage[]): TodoItem[] | null {
+  const tasks = new Map<string, TodoItem>()
+  let hasTaskCalls = false
+
+  for (const msg of messages) {
+    if (msg.role !== 'assistant') continue
+    for (const block of msg.content) {
+      if (block.type !== 'tool_use' || !block.toolName || !TASK_TOOL_NAMES.has(block.toolName)) continue
+      const input = block.toolInput || {}
+
+      if (block.toolName === 'TodoWrite') {
+        hasTaskCalls = true
+        tasks.clear()
+        if (Array.isArray(input.todos)) {
+          (input.todos as Record<string, unknown>[]).forEach((t, i) => {
+            tasks.set(String(i), {
+              content: String(t.content || ''),
+              status: (t.status as TodoItem['status']) || 'pending',
+              activeForm: String(t.activeForm || '')
+            })
+          })
+        }
+      } else if (block.toolName === 'TaskCreate') {
+        hasTaskCalls = true
+        // New batch: if all existing tasks are completed/empty, start fresh
+        if (tasks.size > 0) {
+          const allDone = Array.from(tasks.values()).every((t) => t.status === 'completed')
+          if (allDone) tasks.clear()
+        }
+        // Extract ID from the tool_result in the same message
+        const resultBlock = msg.content.find(
+          (b) => b.type === 'tool_result' && b.toolUseId === block.toolUseId
+        )
+        const idMatch = resultBlock?.toolResult?.match(/Task #(\w+)/)
+        const id = idMatch ? idMatch[1] : block.toolUseId || String(tasks.size)
+        tasks.set(id, {
+          content: String(input.subject || ''),
+          status: 'pending',
+          activeForm: String(input.activeForm || '')
+        })
+      } else if (block.toolName === 'TaskUpdate') {
+        hasTaskCalls = true
+        const id = String(input.taskId || '')
+        const existing = tasks.get(id)
+        if (existing) {
+          if (input.status === 'deleted') {
+            tasks.delete(id)
+          } else if (input.status) {
+            existing.status = input.status as TodoItem['status']
+          }
+          if (input.subject) existing.content = String(input.subject)
+          if (input.activeForm) existing.activeForm = String(input.activeForm)
+        }
+      }
+    }
+  }
+
+  if (!hasTaskCalls) return null
+  return Array.from(tasks.values())
+}
+
 const RECENT_SESSIONS_KEY = 'claudeui-recent-sessions'
 
 function loadRecentSessions(): string[] {
@@ -95,6 +162,7 @@ export interface PerSessionState {
   backgroundOutputs: Record<string, { tail: string; totalSize: number }>
   backgroundWatcherCounts: Record<string, number>
   stoppingTaskIds: string[]
+  isWatching: boolean
 }
 
 const EMPTY_SESSION_STATE: PerSessionState = {
@@ -119,7 +187,8 @@ const EMPTY_SESSION_STATE: PerSessionState = {
   subagentStreamingThinking: {},
   backgroundOutputs: {},
   backgroundWatcherCounts: {},
-  stoppingTaskIds: []
+  stoppingTaskIds: [],
+  isWatching: false
 }
 
 function createEmptySession(cwd: string): PerSessionState {
@@ -188,6 +257,8 @@ interface SessionState {
   removeTaskFromPanel: (routingId: string, toolUseId: string) => void
   setTaskStopping: (routingId: string, toolUseId: string) => void
   clearTaskStopping: (routingId: string, toolUseId: string) => void
+  setWatching: (routingId: string, watching: boolean) => void
+  updateWatchedSession: (routingId: string, messages: ChatMessage[], taskNotifications: TaskNotification[]) => void
   setPermissionMode: (mode: PermissionMode) => void
   setEffort: (effort: 'low' | 'medium' | 'high') => void
   setAvailableModels: (models: ModelInfo[]) => void
@@ -637,6 +708,16 @@ export const useSessionStore = create<SessionState>((set) => ({
       sessions: updateSession(state.sessions, routingId, (s) => ({
         stoppingTaskIds: s.stoppingTaskIds.filter((id) => id !== toolUseId)
       }))
+    })),
+
+  setWatching: (routingId, watching) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, routingId, () => ({ isWatching: watching }))
+    })),
+
+  updateWatchedSession: (routingId, messages, taskNotifications) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, routingId, () => ({ messages, taskNotifications }))
     })),
 
   setPermissionMode: (mode) => set({ permissionMode: mode }),

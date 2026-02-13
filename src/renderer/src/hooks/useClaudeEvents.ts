@@ -1,36 +1,15 @@
 import { useEffect } from 'react'
-import { useSessionStore } from '../stores/session-store'
-import type { TodoItem } from '../../../shared/types'
+import { useSessionStore, buildTodosFromMessages } from '../stores/session-store'
 
-/**
- * When a TodoWrite tool completes, extract the todos from its input
- * and update the store. TodoWrite replaces the entire list atomically.
- */
-function processTodoWriteResult(routingId: string, toolUseId: string, isError: boolean): void {
-  if (isError) return
+const TASK_TOOLS = new Set(['TaskCreate', 'TaskUpdate', 'TodoWrite'])
 
+/** Rebuild todos from all messages when a task-related tool call is detected */
+function rebuildTodos(routingId: string): void {
   const { sessions, setTodos } = useSessionStore.getState()
   const session = sessions[routingId]
   if (!session) return
-
-  for (let i = session.messages.length - 1; i >= 0; i--) {
-    const msg = session.messages[i]
-    if (msg.role !== 'assistant') continue
-    for (const b of msg.content) {
-      if (b.type === 'tool_use' && b.toolUseId === toolUseId && b.toolName === 'TodoWrite') {
-        const input = b.toolInput
-        if (input && Array.isArray(input.todos)) {
-          const todos: TodoItem[] = input.todos.map((t: Record<string, unknown>) => ({
-            content: String(t.content || ''),
-            status: (t.status as TodoItem['status']) || 'pending',
-            activeForm: String(t.activeForm || '')
-          }))
-          setTodos(routingId, todos)
-        }
-        return
-      }
-    }
-  }
+  const todos = buildTodosFromMessages(session.messages)
+  if (todos) setTodos(routingId, todos)
 }
 
 export function useClaudeEvents(): void {
@@ -56,20 +35,11 @@ export function useClaudeEvents(): void {
       window.api.onMessage(({ routingId, data: msg }) => {
         addMessage(routingId, msg)
 
-        // Intercept TodoWrite from assistant messages directly.
-        for (const b of msg.content) {
-          if (b.type === 'tool_use' && b.toolName === 'TodoWrite' && b.toolInput) {
-            const input = b.toolInput
-            if (Array.isArray(input.todos)) {
-              const todos: TodoItem[] = input.todos.map((t: Record<string, unknown>) => ({
-                content: String(t.content || ''),
-                status: (t.status as TodoItem['status']) || 'pending',
-                activeForm: String(t.activeForm || '')
-              }))
-              useSessionStore.getState().setTodos(routingId, todos)
-            }
-          }
-        }
+        // Rebuild todos when task-related tool calls arrive
+        const hasTaskTool = msg.content.some(
+          (b) => b.type === 'tool_use' && b.toolName && TASK_TOOLS.has(b.toolName)
+        )
+        if (hasTaskTool) rebuildTodos(routingId)
       }),
       window.api.onStreamEvent(({ routingId, data }) => {
         if (data.type === 'thinking') {
@@ -85,15 +55,22 @@ export function useClaudeEvents(): void {
         setStatus(routingId, status)
         if (status.state === 'idle') clearPendingApprovals(routingId)
       }),
-      window.api.onResult(() => {
-        // Cost/duration handled via status
+      window.api.onResult(({ routingId }) => {
+        // Dismiss completed task list when turn ends
+        const { sessions, setTodos } = useSessionStore.getState()
+        const session = sessions[routingId]
+        if (session && session.todos.length > 0) {
+          const allDone = session.todos.every((t) => t.status === 'completed')
+          if (allDone) setTodos(routingId, [])
+        }
       }),
       window.api.onError(({ routingId, data: error }) => {
         addError(routingId, error)
       }),
       window.api.onToolResult(({ routingId, data: { toolUseId, result, isError } }) => {
         appendToolResult(routingId, toolUseId, result, isError)
-        processTodoWriteResult(routingId, toolUseId, isError)
+        // Rebuild todos when a task tool result arrives (e.g. TaskCreate gets its ID)
+        if (!isError) rebuildTodos(routingId)
       }),
       window.api.onTaskProgress(({ routingId, data }) => {
         updateTaskProgress(routingId, data)
@@ -119,6 +96,16 @@ export function useClaudeEvents(): void {
       }),
       window.api.onPermissionMode(({ data: mode }) => {
         setPermissionMode(mode)
+      }),
+      window.api.onWatchUpdate(({ routingId, messages, taskNotifications }) => {
+        useSessionStore.getState().updateWatchedSession(routingId, messages, taskNotifications)
+        rebuildTodos(routingId)
+        // Dismiss completed task list for watched sessions (no result event)
+        const session = useSessionStore.getState().sessions[routingId]
+        if (session && session.todos.length > 0) {
+          const allDone = session.todos.every((t) => t.status === 'completed')
+          if (allDone) useSessionStore.getState().setTodos(routingId, [])
+        }
       })
     ]
 

@@ -1,7 +1,11 @@
+import * as fs from 'fs'
+import * as path from 'path'
+import * as os from 'os'
 import { ipcMain, dialog, BrowserWindow } from 'electron'
 import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk'
 import { SessionManager } from '../services/session-manager'
 import { listDirectories, loadSessionHistory, loadSubagentHistory, loadBackgroundOutput } from '../services/session-history'
+import { watchSession, unwatchSession } from '../services/session-watcher'
 import type { ApprovalDecision, ModelInfo } from '../../shared/types'
 
 let cachedModels: ModelInfo[] | null = null
@@ -124,4 +128,43 @@ export function registerSessionIpc(win: BrowserWindow): void {
   ipcMain.handle('session:load-background-output', (_e, projectKey: string, taskId: string, outputFile?: string) => {
     return loadBackgroundOutput(projectKey, taskId, outputFile)
   })
+
+  ipcMain.handle('session:watch-session', (_e, routingId: string, sessionId: string, projectKey: string) => {
+    watchSession(routingId, sessionId, projectKey, win)
+  })
+
+  ipcMain.handle('session:unwatch-session', (_e, routingId: string) => {
+    unwatchSession(routingId)
+  })
+
+  // Watch ~/.claude/projects/ for JSONL changes and notify renderer to refresh
+  startProjectsWatcher(win)
+}
+
+function startProjectsWatcher(win: BrowserWindow): void {
+  const projectsDir = path.join(os.homedir(), '.claude', 'projects')
+  if (!fs.existsSync(projectsDir)) return
+
+  let debounceTimer: ReturnType<typeof setTimeout> | null = null
+
+  const notify = (): void => {
+    if (debounceTimer) clearTimeout(debounceTimer)
+    debounceTimer = setTimeout(() => {
+      if (!win.isDestroyed()) {
+        win.webContents.send('session:directories-changed')
+      }
+    }, 500)
+  }
+
+  // Watch each project subdirectory for JSONL file changes
+  // (fs.watch recursive option works on macOS and Windows)
+  try {
+    fs.watch(projectsDir, { recursive: true }, (_event, filename) => {
+      if (filename && filename.endsWith('.jsonl')) {
+        notify()
+      }
+    })
+  } catch {
+    // Fallback: silently ignore if watching fails
+  }
 }

@@ -116,7 +116,21 @@ const api: ClaudeAPI = {
   getPlanContent: (routingId: string) =>
     ipcRenderer.invoke('session:get-plan-content', routingId),
   getSessionLogPath: (routingId: string) =>
-    ipcRenderer.invoke('session:get-session-log-path', routingId)
+    ipcRenderer.invoke('session:get-session-log-path', routingId),
+  watchSession: (routingId: string, sessionId: string, projectKey: string) =>
+    ipcRenderer.invoke('session:watch-session', routingId, sessionId, projectKey),
+  unwatchSession: (routingId: string) =>
+    ipcRenderer.invoke('session:unwatch-session', routingId),
+  onWatchUpdate: (cb) => {
+    const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as never)
+    ipcRenderer.on('session:watch-update', handler)
+    return () => ipcRenderer.removeListener('session:watch-update', handler)
+  },
+  onDirectoriesChanged: (cb) => {
+    const handler = (): void => cb()
+    ipcRenderer.on('session:directories-changed', handler)
+    return () => ipcRenderer.removeListener('session:directories-changed', handler)
+  }
 }
 
 if (process.contextIsolated) {

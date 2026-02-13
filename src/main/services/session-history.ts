@@ -3,6 +3,7 @@ import * as path from 'path'
 import * as os from 'os'
 import * as readline from 'readline'
 import type { ChatMessage, ContentBlock, DirectoryGroup, SessionInfo, TaskNotification } from '../../shared/types'
+import { getCachedSummary } from './session-summary-cache'
 
 const CLAUDE_PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects')
 
@@ -54,11 +55,14 @@ export async function listDirectories(): Promise<DirectoryGroup[]> {
 
       if (!groupCwd && info.cwd) groupCwd = info.cwd
 
+      // Use cached summary title if available, fall back to first user prompt
+      const summary = getCachedSummary(filePath, mtime)
+
       sessions.push({
         sessionId,
         cwd: info.cwd || '',
         projectKey,
-        title: info.title || 'Untitled',
+        title: summary || info.title || 'Untitled',
         timestamp: info.timestamp || mtime,
         lastActivityAt: mtime
       })
