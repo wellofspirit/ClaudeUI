@@ -150,13 +150,26 @@ export function TaskCard({ block, result }: Props): React.JSX.Element {
       {/* Header — always visible, clickable to expand/collapse */}
       <button
         onClick={() => setExpanded(!expanded)}
-        className="w-full flex items-center gap-2 px-3 h-9 hover:bg-bg-hover transition-colors cursor-pointer"
+        className="w-full flex items-center gap-2 px-3 h-9 border-b border-border hover:bg-bg-hover transition-colors cursor-pointer"
       >
         {statusIcon}
         <span className="font-medium text-[13px] text-accent shrink-0">Task</span>
         <span className="text-text-secondary text-[12px] truncate flex-1 text-left">{description}</span>
         {elapsed != null && (
           <span className="text-[11px] text-text-muted font-mono shrink-0">{formatElapsed(elapsed)}</span>
+        )}
+        {isRunning && !isStopping && (
+          <button
+            onClick={(e) => { e.stopPropagation(); handleStopTask() }}
+            className="text-[11px] px-2 py-0.5 rounded bg-danger/10 text-danger hover:bg-danger/20 transition-colors shrink-0"
+          >
+            Stop
+          </button>
+        )}
+        {isStopping && (
+          <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-warning/10 text-warning shrink-0">
+            stopping...
+          </span>
         )}
         <svg
           width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
@@ -169,7 +182,7 @@ export function TaskCard({ block, result }: Props): React.JSX.Element {
 
       {/* Collapsed footer */}
       {!expanded && (hasResult || isRunning) && (
-        <div className="flex items-center px-3 pt-1 pb-2 gap-1.5">
+        <div className="flex items-center px-3 py-1.5 gap-1.5">
           {subagentType && (
             <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-accent/10 text-accent">
               {subagentType}
@@ -196,19 +209,6 @@ export function TaskCard({ block, result }: Props): React.JSX.Element {
             </span>
           )}
           <div className="flex-1" />
-          {isRunning && !isStopping && (
-            <button
-              onClick={handleStopTask}
-              className="text-[11px] px-2 py-0.5 rounded bg-danger/10 text-danger hover:bg-danger/20 transition-colors"
-            >
-              Stop
-            </button>
-          )}
-          {isStopping && (
-            <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-warning/10 text-warning">
-              stopping...
-            </span>
-          )}
           <button
             onClick={() => openTaskPanel(toolUseId)}
             className="text-[11px] text-accent hover:underline cursor-pointer"
