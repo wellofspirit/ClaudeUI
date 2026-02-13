@@ -141,4 +141,5 @@ export interface ClaudeAPI {
   stopTask(toolUseId: string): Promise<{ success: boolean; error?: string }>
   setPermissionMode(mode: string): Promise<void>
   setModel(model: string): Promise<void>
+  setEffort(effort: string): Promise<void>
 }

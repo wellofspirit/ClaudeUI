@@ -97,7 +97,8 @@ const api: ClaudeAPI = {
     ipcRenderer.invoke('session:read-background-range', toolUseId, offset, length),
   stopTask: (toolUseId: string) => ipcRenderer.invoke('session:stop-task', toolUseId),
   setPermissionMode: (mode: string) => ipcRenderer.invoke('session:set-permission-mode', mode),
-  setModel: (model: string) => ipcRenderer.invoke('session:set-model', model)
+  setModel: (model: string) => ipcRenderer.invoke('session:set-model', model),
+  setEffort: (effort: string) => ipcRenderer.invoke('session:set-effort', effort)
 }
 
 if (process.contextIsolated) {

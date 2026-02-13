@@ -63,4 +63,8 @@ export function registerSessionIpc(win: BrowserWindow): void {
     await session?.setModel(model)
   })
 
+  ipcMain.handle('session:set-effort', (_e, effort: string) => {
+    session?.setEffort(effort)
+  })
+
 }

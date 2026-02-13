@@ -360,6 +360,10 @@ export class ClaudeSession {
     }
   }
 
+  setEffort(effort: string): void {
+    this.effort = effort
+  }
+
   resolveApproval(requestId: string, decision: ApprovalDecision, answers?: Record<string, string>): void {
     const entry = this.pendingApprovals.get(requestId)
     if (entry) {

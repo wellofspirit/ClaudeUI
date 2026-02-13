@@ -230,6 +230,7 @@ export function InputBox(): React.JSX.Element {
                         key={level}
                         onClick={() => {
                           setEffort(level)
+                          window.api.setEffort(level)
                           setEffortOpen(false)
                         }}
                         className={`w-full flex items-center px-3 h-8 text-[12px] transition-colors cursor-pointer text-left capitalize ${
