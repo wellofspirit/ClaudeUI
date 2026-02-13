@@ -135,4 +135,5 @@ export interface ClaudeAPI {
   watchBackground(toolUseId: string): Promise<void>
   unwatchBackground(toolUseId: string): Promise<void>
   readBackgroundRange(toolUseId: string, offset: number, length: number): Promise<string>
+  stopTask(toolUseId: string): Promise<{ success: boolean; error?: string }>
 }

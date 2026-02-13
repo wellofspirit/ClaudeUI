@@ -100,6 +100,7 @@ interface SessionState {
   subagentStreamingThinking: Record<string, string>
   backgroundOutputs: Record<string, { tail: string; totalSize: number }>
   backgroundWatcherCounts: Record<string, number>
+  stoppingTaskIds: string[]
 
   setCwd: (cwd: string | null) => void
   openDirectory: (cwd: string) => void
@@ -129,6 +130,8 @@ interface SessionState {
   openTaskPanel: (toolUseId: string) => void
   closeTaskPanel: () => void
   removeTaskFromPanel: (toolUseId: string) => void
+  setTaskStopping: (toolUseId: string) => void
+  clearTaskStopping: (toolUseId: string) => void
 }
 
 export const useSessionStore = create<SessionState>((set) => ({
@@ -158,6 +161,7 @@ export const useSessionStore = create<SessionState>((set) => ({
   subagentStreamingThinking: {},
   backgroundOutputs: {},
   backgroundWatcherCounts: {},
+  stoppingTaskIds: [],
 
   setCwd: (cwd) => set({ cwd }),
 
@@ -291,9 +295,16 @@ export const useSessionStore = create<SessionState>((set) => ({
     })),
 
   addTaskNotification: (notification) =>
-    set((state) => ({
-      taskNotifications: [...state.taskNotifications, notification]
-    })),
+    set((state) => {
+      // Clear stopping state for this task when notification arrives
+      const stoppingTaskIds = notification.toolUseId
+        ? state.stoppingTaskIds.filter((id) => id !== notification.toolUseId)
+        : state.stoppingTaskIds
+      return {
+        taskNotifications: [...state.taskNotifications, notification],
+        stoppingTaskIds
+      }
+    }),
 
   addSubagentMessage: (toolUseId, message) =>
     set((state) => {
@@ -399,5 +410,16 @@ export const useSessionStore = create<SessionState>((set) => ({
     set((state) => {
       const updated = state.openedTaskToolUseIds.filter((id) => id !== toolUseId)
       return { openedTaskToolUseIds: updated, taskPanelOpen: updated.length > 0 }
-    })
+    }),
+
+  setTaskStopping: (toolUseId) =>
+    set((state) => {
+      if (state.stoppingTaskIds.includes(toolUseId)) return state
+      return { stoppingTaskIds: [...state.stoppingTaskIds, toolUseId] }
+    }),
+
+  clearTaskStopping: (toolUseId) =>
+    set((state) => ({
+      stoppingTaskIds: state.stoppingTaskIds.filter((id) => id !== toolUseId)
+    }))
 }))

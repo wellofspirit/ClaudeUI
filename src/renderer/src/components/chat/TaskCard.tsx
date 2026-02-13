@@ -67,6 +67,9 @@ export function TaskCard({ block, result }: Props): React.JSX.Element {
   const subagentText = useSessionStore((s) => s.subagentStreamingText)
   const subagentThinking = useSessionStore((s) => s.subagentStreamingThinking)
   const taskNotifications = useSessionStore((s) => s.taskNotifications)
+  const stoppingTaskIds = useSessionStore((s) => s.stoppingTaskIds)
+  const setTaskStopping = useSessionStore((s) => s.setTaskStopping)
+  const clearTaskStopping = useSessionStore((s) => s.clearTaskStopping)
   const [expanded, setExpanded] = useState(false)
 
   const toolUseId = block.toolUseId || ''
@@ -107,6 +110,25 @@ export function TaskCard({ block, result }: Props): React.JSX.Element {
       : 'border-success/30'
 
   const isCompleted = !isRunning && !isError
+  const isStopping = stoppingTaskIds.includes(toolUseId)
+
+  const handleStopTask = async (): Promise<void> => {
+    setTaskStopping(toolUseId)
+    const result = await window.api.stopTask(toolUseId)
+
+    if (!result.success) {
+      console.error('Failed to stop task:', result.error)
+      clearTaskStopping(toolUseId)
+      return
+    }
+
+    // Set timeout to clear state if notification doesn't arrive within 10s
+    setTimeout(() => {
+      if (stoppingTaskIds.includes(toolUseId)) {
+        clearTaskStopping(toolUseId)
+      }
+    }, 10000)
+  }
 
   const statusIcon = isError ? (
     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-danger shrink-0">
@@ -174,6 +196,19 @@ export function TaskCard({ block, result }: Props): React.JSX.Element {
             </span>
           )}
           <div className="flex-1" />
+          {isRunning && !isStopping && (
+            <button
+              onClick={handleStopTask}
+              className="text-[11px] px-2 py-0.5 rounded bg-danger/10 text-danger hover:bg-danger/20 transition-colors"
+            >
+              Stop
+            </button>
+          )}
+          {isStopping && (
+            <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-warning/10 text-warning">
+              stopping...
+            </span>
+          )}
           <button
             onClick={() => openTaskPanel(toolUseId)}
             className="text-[11px] text-accent hover:underline cursor-pointer"

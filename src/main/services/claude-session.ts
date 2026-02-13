@@ -145,7 +145,11 @@ export class ClaudeSession {
           abortController: this.abortController,
           includePartialMessages: true,
           thinking: { type: 'enabled', budgetTokens: 10000 },
-          stderr: () => {},
+          stderr: (chunk) => {
+            // Log SDK stderr to help debug issues
+            const text = chunk.toString().trim()
+            if (text) console.error('[SDK stderr]', text)
+          },
           ...(this.sessionId ? { resume: this.sessionId } : {}),
           canUseTool: async (toolName, input, opts) => {
             const requestId = uuid()
@@ -268,6 +272,16 @@ export class ClaudeSession {
             console.log('[ClaudeSession] sending task-notification (system):', JSON.stringify(sysNotification))
             this.send('session:task-notification', sysNotification)
           }
+        } else if (type === 'control_response') {
+          const response = msg.response as Record<string, unknown> | undefined
+          if (response) {
+            const subtype = response.subtype as string
+            if (subtype === 'error') {
+              console.error('[ClaudeSession] Control response error:', response.error)
+            } else if (subtype === 'success') {
+              console.log('[ClaudeSession] Control response success:', JSON.stringify(response.response))
+            }
+          }
         } else if (type === 'result') {
           const cost = (msg.total_cost_usd as number) || 0
           this.totalCostUsd += cost
@@ -333,6 +347,46 @@ export class ClaudeSession {
     this.abortController = null
     this.isProcessing = false
     this.sendStatus()
+  }
+
+  async stopTask(toolUseId: string): Promise<{ success: boolean; error?: string }> {
+    // Reverse lookup: toolUseId → task_id
+    let taskId: string | null = null
+    for (const [tid, tuid] of this.taskIdMap.entries()) {
+      if (tuid === toolUseId) {
+        taskId = tid
+        break
+      }
+    }
+
+    if (!taskId) {
+      return {
+        success: false,
+        error: 'Task ID not found. Task may not be a background task.'
+      }
+    }
+
+    if (!this.messageChannel) {
+      return {
+        success: false,
+        error: 'No active session'
+      }
+    }
+
+    // Push control_request message to SDK
+    // The SDK patch recognizes this and invokes TaskStop directly
+    const stopMessage = {
+      type: 'control_request' as const,
+      request: {
+        subtype: 'stop_task',
+        task_id: taskId
+      },
+      request_id: uuid()
+    }
+
+    console.log('[ClaudeSession] Sending stop_task control_request:', stopMessage)
+    this.messageChannel.push(stopMessage)
+    return { success: true }
   }
 
   private transformAssistantMessage(msg: Record<string, unknown>): ChatMessage | null {
@@ -637,9 +691,14 @@ export class ClaudeSession {
   }
 
   private markBackgroundDone(toolUseId: string): void {
+    console.error('[DEBUG-TN] markBackgroundDone called for:', toolUseId)
     const poller = this.backgroundPollers.get(toolUseId)
-    if (!poller) return
+    if (!poller) {
+      console.error('[DEBUG-TN] No poller found for:', toolUseId)
+      return
+    }
 
+    console.error('[DEBUG-TN] Setting poller.done = true')
     poller.done = true
     if (poller.interval) {
       // User is watching — do final read and stop

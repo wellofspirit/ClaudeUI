@@ -34,6 +34,9 @@ function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Element | nu
   const subagentText = useSessionStore((s) => s.subagentStreamingText)
   const subagentThinking = useSessionStore((s) => s.subagentStreamingThinking)
   const removeTaskFromPanel = useSessionStore((s) => s.removeTaskFromPanel)
+  const stoppingTaskIds = useSessionStore((s) => s.stoppingTaskIds)
+  const setTaskStopping = useSessionStore((s) => s.setTaskStopping)
+  const clearTaskStopping = useSessionStore((s) => s.clearTaskStopping)
   const [expanded, setExpanded] = useState(true)
 
   const { taskBlock, resultBlock } = findTaskBlocks(messages, toolUseId)
@@ -94,10 +97,35 @@ function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Element | nu
   const statusBadge = isError ? (
     <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-danger/10 text-danger shrink-0">failed</span>
   ) : !isRunning ? (
-    <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-success/10 text-success shrink-0">completed</span>
+    bgNotification?.status === 'stopped' ? (
+      <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-warning/10 text-warning shrink-0">stopped</span>
+    ) : (
+      <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-success/10 text-success shrink-0">completed</span>
+    )
   ) : (
     <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-accent/10 text-accent shrink-0">running</span>
   )
+
+  const isStopping = stoppingTaskIds.includes(toolUseId)
+
+  const handleStopTask = async (e: React.MouseEvent): Promise<void> => {
+    e.stopPropagation()
+    setTaskStopping(toolUseId)
+    const result = await window.api.stopTask(toolUseId)
+
+    if (!result.success) {
+      console.error('Failed to stop task:', result.error)
+      clearTaskStopping(toolUseId)
+      return
+    }
+
+    // Set timeout to clear state if notification doesn't arrive within 10s
+    setTimeout(() => {
+      if (stoppingTaskIds.includes(toolUseId)) {
+        clearTaskStopping(toolUseId)
+      }
+    }, 10000)
+  }
 
   return (
     <div className="border-b border-border">
@@ -118,6 +146,19 @@ function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Element | nu
         {statusBadge}
         {elapsed != null && (
           <span className="text-[11px] text-text-muted font-mono shrink-0">{formatElapsed(elapsed)}</span>
+        )}
+        {isRunning && !isStopping && (
+          <button
+            onClick={handleStopTask}
+            className="text-[11px] px-2 py-0.5 rounded bg-danger/10 text-danger hover:bg-danger/20 transition-colors shrink-0"
+          >
+            Stop
+          </button>
+        )}
+        {isStopping && (
+          <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-warning/10 text-warning shrink-0">
+            stopping...
+          </span>
         )}
         <button
           onClick={(e) => { e.stopPropagation(); removeTaskFromPanel(toolUseId) }}
@@ -194,6 +235,9 @@ function BashBackgroundEntry({ toolUseId }: { toolUseId: string }): React.JSX.El
   const bgOutput = useSessionStore((s) => s.backgroundOutputs[toolUseId])
   const watchBg = useSessionStore((s) => s.watchBackgroundOutput)
   const unwatchBg = useSessionStore((s) => s.unwatchBackgroundOutput)
+  const stoppingTaskIds = useSessionStore((s) => s.stoppingTaskIds)
+  const setTaskStopping = useSessionStore((s) => s.setTaskStopping)
+  const clearTaskStopping = useSessionStore((s) => s.clearTaskStopping)
   const [expanded, setExpanded] = useState(true)
   const [prependedContent, setPrependedContent] = useState('')
   const [loadingMore, setLoadingMore] = useState(false)
@@ -265,10 +309,35 @@ function BashBackgroundEntry({ toolUseId }: { toolUseId: string }): React.JSX.El
   const statusBadge = isError ? (
     <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-danger/10 text-danger shrink-0">failed</span>
   ) : !isRunning ? (
-    <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-success/10 text-success shrink-0">completed</span>
+    bgNotification?.status === 'stopped' ? (
+      <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-warning/10 text-warning shrink-0">stopped</span>
+    ) : (
+      <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-success/10 text-success shrink-0">completed</span>
+    )
   ) : (
     <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-accent/10 text-accent shrink-0">running</span>
   )
+
+  const isStopping = stoppingTaskIds.includes(toolUseId)
+
+  const handleStopTask = async (e: React.MouseEvent): Promise<void> => {
+    e.stopPropagation()
+    setTaskStopping(toolUseId)
+    const result = await window.api.stopTask(toolUseId)
+
+    if (!result.success) {
+      console.error('Failed to stop task:', result.error)
+      clearTaskStopping(toolUseId)
+      return
+    }
+
+    // Set timeout to clear state if notification doesn't arrive within 10s
+    setTimeout(() => {
+      if (stoppingTaskIds.includes(toolUseId)) {
+        clearTaskStopping(toolUseId)
+      }
+    }, 10000)
+  }
 
   const tailLen = bgOutput ? new TextEncoder().encode(bgOutput.tail).length : 0
   const hasMore = bgOutput ? bgOutput.totalSize > prependedContent.length + tailLen : false
@@ -289,6 +358,19 @@ function BashBackgroundEntry({ toolUseId }: { toolUseId: string }): React.JSX.El
         <span className="text-[13px] text-accent font-medium shrink-0">Bash</span>
         <span className="text-[12px] text-text-primary truncate flex-1 text-left font-mono">{command.slice(0, 60)}</span>
         {statusBadge}
+        {isRunning && !isStopping && (
+          <button
+            onClick={handleStopTask}
+            className="text-[11px] px-2 py-0.5 rounded bg-danger/10 text-danger hover:bg-danger/20 transition-colors shrink-0"
+          >
+            Stop
+          </button>
+        )}
+        {isStopping && (
+          <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-warning/10 text-warning shrink-0">
+            stopping...
+          </span>
+        )}
         <button
           onClick={(e) => { e.stopPropagation(); removeTaskFromPanel(toolUseId) }}
           className="text-text-muted hover:text-text-primary transition-colors shrink-0 ml-1"

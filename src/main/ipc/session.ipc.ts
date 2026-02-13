@@ -48,4 +48,11 @@ export function registerSessionIpc(win: BrowserWindow): void {
     return session?.readBackgroundRange(toolUseId, offset, length) ?? ''
   })
 
+  ipcMain.handle('session:stop-task', async (_e, toolUseId: string) => {
+    if (!session) {
+      return { success: false, error: 'No active session' }
+    }
+    return await session.stopTask(toolUseId)
+  })
+
 }

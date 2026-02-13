@@ -89,7 +89,8 @@ const api: ClaudeAPI = {
   watchBackground: (toolUseId: string) => ipcRenderer.invoke('session:watch-background', toolUseId),
   unwatchBackground: (toolUseId: string) => ipcRenderer.invoke('session:unwatch-background', toolUseId),
   readBackgroundRange: (toolUseId: string, offset: number, length: number) =>
-    ipcRenderer.invoke('session:read-background-range', toolUseId, offset, length)
+    ipcRenderer.invoke('session:read-background-range', toolUseId, offset, length),
+  stopTask: (toolUseId: string) => ipcRenderer.invoke('session:stop-task', toolUseId)
 }
 
 if (process.contextIsolated) {

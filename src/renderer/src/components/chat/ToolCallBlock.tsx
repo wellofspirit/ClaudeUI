@@ -11,6 +11,9 @@ interface Props {
 export function ToolCallBlock({ block, result, approval }: Props): React.JSX.Element {
   const removePendingApproval = useSessionStore((s) => s.removePendingApproval)
   const openTaskPanel = useSessionStore((s) => s.openTaskPanel)
+  const stoppingTaskIds = useSessionStore((s) => s.stoppingTaskIds)
+  const setTaskStopping = useSessionStore((s) => s.setTaskStopping)
+  const clearTaskStopping = useSessionStore((s) => s.clearTaskStopping)
   const [expanded, setExpanded] = useState(false)
 
   const toolUseId = block.toolUseId || ''
@@ -67,6 +70,27 @@ export function ToolCallBlock({ block, result, approval }: Props): React.JSX.Ele
     <span className="w-3 h-3 rounded-full border-2 border-text-muted border-t-transparent shrink-0 animate-spin-slow" />
   )
 
+  const isStopping = stoppingTaskIds.includes(toolUseId)
+
+  const handleStopTask = async (e: React.MouseEvent): Promise<void> => {
+    e.stopPropagation()
+    setTaskStopping(toolUseId)
+    const result = await window.api.stopTask(toolUseId)
+
+    if (!result.success) {
+      console.error('Failed to stop task:', result.error)
+      clearTaskStopping(toolUseId)
+      return
+    }
+
+    // Set timeout to clear state if notification doesn't arrive within 10s
+    setTimeout(() => {
+      if (stoppingTaskIds.includes(toolUseId)) {
+        clearTaskStopping(toolUseId)
+      }
+    }, 10000)
+  }
+
   return (
     <div className={`rounded-lg border ${borderColor} bg-bg-secondary overflow-hidden`}>
       {/* Header */}
@@ -79,6 +103,19 @@ export function ToolCallBlock({ block, result, approval }: Props): React.JSX.Ele
         <span className="text-text-secondary truncate flex-1 text-left font-mono text-[12px]">{summary}</span>
         {isPendingApproval && (
           <span className="text-[11px] font-semibold text-warning uppercase tracking-wider mr-1">Permission</span>
+        )}
+        {bgRunning && !isStopping && (
+          <button
+            onClick={handleStopTask}
+            className="text-[11px] px-2 py-0.5 rounded bg-danger/10 text-danger hover:bg-danger/20 transition-colors shrink-0"
+          >
+            Stop
+          </button>
+        )}
+        {isStopping && (
+          <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-warning/10 text-warning shrink-0">
+            stopping...
+          </span>
         )}
         <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={`text-text-secondary transition-transform shrink-0 ${expanded ? 'rotate-180' : ''}`}>
           <polyline points="6 9 12 15 18 9" />
