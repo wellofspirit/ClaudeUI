@@ -14,7 +14,6 @@ const patches = [
   resolve(__dirname, 'task-notification/apply.mjs'),
   resolve(__dirname, 'subagent-streaming/apply.mjs'),
   resolve(__dirname, 'task-notification-usage/apply.mjs'),
-  resolve(__dirname, 'task-stop-direct/apply.mjs'),
   resolve(__dirname, 'task-notification-killed-mapping/apply.mjs'),
   resolve(__dirname, 'taskstop-send-notification/apply.mjs')
 ]

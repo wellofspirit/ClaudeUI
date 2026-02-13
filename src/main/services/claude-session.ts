@@ -293,7 +293,6 @@ export class ClaudeSession {
               summary: (msg.summary as string) || '',
               usage
             }
-            console.log('[ClaudeSession] sending task-notification (system):', JSON.stringify(sysNotification))
             this.send('session:task-notification', sysNotification)
           }
         } else if (type === 'control_response') {
@@ -302,8 +301,6 @@ export class ClaudeSession {
             const subtype = response.subtype as string
             if (subtype === 'error') {
               console.error('[ClaudeSession] Control response error:', response.error)
-            } else if (subtype === 'success') {
-              console.log('[ClaudeSession] Control response success:', JSON.stringify(response.response))
             }
           }
         } else if (type === 'result') {
@@ -588,7 +585,6 @@ export class ClaudeSession {
         summary,
         usage
       }
-      console.log('[ClaudeSession] sending task-notification (user msg):', JSON.stringify(notification))
       this.send('session:task-notification', notification)
     }
 
@@ -722,14 +718,9 @@ export class ClaudeSession {
   }
 
   private markBackgroundDone(toolUseId: string): void {
-    console.error('[DEBUG-TN] markBackgroundDone called for:', toolUseId)
     const poller = this.backgroundPollers.get(toolUseId)
-    if (!poller) {
-      console.error('[DEBUG-TN] No poller found for:', toolUseId)
-      return
-    }
+    if (!poller) return
 
-    console.error('[DEBUG-TN] Setting poller.done = true')
     poller.done = true
     if (poller.interval) {
       // User is watching — do final read and stop

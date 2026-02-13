@@ -16,10 +16,10 @@ your system, and may trail behind in version.
 
 | Component | Version at time of discovery |
 |---|---|
-| SDK package | 0.2.38 → 0.2.39 |
-| Bundled CLI (`cli.js`) | 2.1.38 → 2.1.39 |
+| SDK package | 0.2.38 → 0.2.39 → 0.2.41 |
+| Bundled CLI (`cli.js`) | 2.1.38 → 2.1.39 → 2.1.41 |
 
-Both versions exhibit the same behavior. Function names change between
+All versions exhibit the same behavior. Function names change between
 versions but the architecture is identical.
 
 ## The Problem
@@ -1092,31 +1092,22 @@ Where the message content includes `type:"thinking"` blocks.
 
 ## Key Functions Reference
 
-| Name (v2.1.38 → v2.1.39) | Purpose | Char offset (v2.1.39) |
-|---|---|---|
-| `RVY()` → (unchanged) | cR yield filter (gates what cR yields to callers) | ~7907312 |
-| `dR()` → (unchanged) | Sub-agent execution generator | ~7904721 |
-| `UEA()` → (unchanged) | Extract text-only result from agent messages | ~7983000 |
-| `FM6()` → `sM6()` | Extract text from last assistant message | ~9022069 |
-| `ZhA()` → `ihA()` | Convert internal messages to SDK output format | ~9085100 |
-| `U1q()` → `O6q()` | Wrap progress data into progress message format | ~10407267 |
-| `iO()` → `rO()` | Normalize messages to individual content blocks | ~10401417 |
-| `NMq` → (unchanged) | Main query class (parent loop) | ~10786784 |
-| `TMq()` → (unchanged) | Main query generator wrapper | ~10796462 |
-| `ZK1()` → (unchanged) | Write to `.output` file | ~5257061 |
-| `ww()` → (unchanged) | Generate `.output` file path | ~5257005 |
-| `GN()` → `PN()` | Get last assistant message from array | varies |
-| `Q1()` → `F1()` | JSON.stringify wrapper | varies |
-| `_f()` → (unchanged) | UUID generator for message wrapping | varies |
-| `fY1()` → (unchanged) | Binary transport (stdout, NOT for SDK) | varies |
-| `sdY()` → (unchanged) | Tool executor dispatch (creates progress wrapper) | ~8981800 |
-| `tdY()` → (unchanged) | Tool executor inner (calls tool.call()) | ~8982000 |
-| `Ed7()` → (unchanged) | Create async task descriptor | varies |
-| `cR()` → (unchanged) | Sub-agent query function (async iterable) | varies |
+| Name (v2.1.38 → v2.1.39 → v2.1.41) | Purpose |
+|---|---|
+| `RVY()` → `RVY()` → `BRY()` | cR/jy yield filter (gates what the generator yields to callers) |
+| `dR()` → `dR()` → ? | Sub-agent execution generator (may be merged into jy) |
+| `UEA()` → `UEA()` → `NR8()` | Extract text-only result from agent messages |
+| `FM6()` → `sM6()` → `QW6()` | Extract text from last assistant message |
+| `ZhA()` → `ihA()` → `mI8()` | Convert internal messages to SDK output format |
+| `U1q()` → `O6q()` → ? | Wrap progress data into progress message format |
+| `iO()` → `rO()` → `lO()` | Normalize messages to individual content blocks |
+| `_f()` → `_f()` → `Gf()` | UUID generator for message wrapping |
+| `cR()` → `cR()` → `jy()` | Sub-agent query function (async generator) |
+| `s0A()` → `s0A()` → `XW8()` | Task state updater (in async loops) |
+| `s01()` → `s01()` → `QM1()` | Stats updater (in async loops) |
 
-**Note:** "unchanged" means the name happened to be the same between v2.1.38
-and v2.1.39. Names WILL change in future versions — always use content
-patterns, not names.
+**Note:** Names change between versions — always use content patterns, not
+names. Use `bundle-analyzer find` with string literals as anchors.
 
 ## Broader Analysis
 

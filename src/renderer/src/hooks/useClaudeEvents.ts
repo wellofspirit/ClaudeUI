@@ -102,7 +102,6 @@ export function useClaudeEvents(): void {
         updateTaskProgress(data)
       }),
       window.api.onTaskNotification((data) => {
-        console.log('[useClaudeEvents] task notification:', JSON.stringify(data))
         addTaskNotification(data)
       }),
       window.api.onSubagentStream((data) => {

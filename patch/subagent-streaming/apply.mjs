@@ -106,10 +106,10 @@ if (src.includes(patchFMarker)) {
   const arrVar = callMatch[2]
   const idx = src.indexOf(oldStr)
 
-  // Verify it's inside cR
+  // Verify it's inside the sub-agent query generator (cR in v2.1.39, jy in v2.1.41)
   const before = src.slice(Math.max(0, idx - 5000), idx)
-  if (!before.includes('async function*cR(')) {
-    console.error('ERROR: RVY call site is not inside cR. Aborting.')
+  if (!/async function\*[\w$]+\(/.test(before)) {
+    console.error('ERROR: RVY call site is not inside an async generator. Aborting.')
     process.exit(1)
   }
 
@@ -177,28 +177,26 @@ if (src.includes(patchAMarker)) {
 // ===========================================================================
 // Patch B: Forward sub-agent stream_events through progress callback
 //
-// The original code is: if(O1.push(Y1),Y1.type!=="assistant"&&Y1.type!=="user")continue;
-// The regex matches from "O1.push(..." onward (the "if(" prefix is NOT matched).
+// In the sync Task tool loop, after unwrapping the iterator result, the code
+// pushes to the collection array and filters by message type. Stream events
+// must be intercepted BEFORE the push (they lack .message/.uuid and break
+// downstream processing in UEA/_kA).
 //
-// Problem: stream_events get pushed into O1 (the collection array). When the
-// Task tool finishes, O1 is processed by UEA/_kA which expect .message.content
-// on every item — stream_events lack .message, causing:
-//   "Cannot read properties of undefined (reading 'type')"
-//
-// Fix: Intercept stream_events BEFORE O1.push, forward via progress callback,
-// then continue. Since the regex starts after "if(", we replace the matched
-// portion to inject the stream_event check as a preceding if-block.
-//
-// Before:
+// v2.1.39 had a single combined if:
 //   if(O1.push(Y1),Y1.type!=="assistant"&&Y1.type!=="user")continue;
+//
+// v2.1.41 splits this into two ifs:
+//   if(X1.push(w1),w1.type==="progress"&&w1.data.type==="bash_progress"&&D)D({...});
+//   if(w1.type!=="assistant"&&w1.type!=="user")continue;
+//
+// We match the "if(ARR.push(MSG)," pattern that starts the sync loop body,
+// and inject a stream_event check before it.
 //
 // After:
-//   if(Y1.type==="stream_event"){
-//     if(j)j({toolUseID:`agent_${D.message.id}`,
-//       data:{type:"agent_stream_event",event:Y1.event,agentId:r}});continue}
-//   if(O1.push(Y1),Y1.type!=="assistant"&&Y1.type!=="user")continue;
-//
-// stream_events never enter O1 — they're forwarded and skipped.
+//   if(w1.type==="stream_event"){
+//     if(D)D({toolUseID:`agent_${j.message.id}`,
+//       data:{type:"agent_stream_event",event:w1.event,agentId:r}});continue}
+//   if(X1.push(w1),w1.type==="progress"&&...
 // ===========================================================================
 
 console.log('\n--- Patch B: Sub-agent stream_event forwarding ---')
@@ -208,22 +206,23 @@ const patchBMarker = '/*PATCHED:subagent-B*/'
 if (src.includes(patchBMarker)) {
   console.log('Already applied. Skipping.')
 } else {
-  // Find: VAR.push(MSG),MSG.type!=="assistant"&&MSG.type!=="user")continue;
-  const typeFilterRe = new RegExp(
-    `(${V})\\.push\\((${V})\\),\\2\\.type!=="assistant"&&\\2\\.type!=="user"\\)continue;`
+  // Find the unique sync loop pattern: if(ARR.push(MSG),MSG.type==="progress"&&MSG.data.type==="bash_progress"
+  // This pattern is unique to the Task tool's sync for-await loop body.
+  const pushRe = new RegExp(
+    `if\\((${V})\\.push\\((${V})\\),\\2\\.type==="progress"&&\\2\\.data\\.type==="bash_progress"`
   )
-  const m = src.match(typeFilterRe)
+  const m = src.match(pushRe)
   if (!m) {
-    console.error('ERROR: Cannot locate sub-agent type filter.')
+    console.error('ERROR: Cannot locate sub-agent sync loop push+bash_progress pattern.')
     process.exit(1)
   }
 
-  const [oldStr, arrVar, msgVar] = m
-  const idx = src.indexOf(oldStr)
-  console.log(`Found type filter at char ${idx} (arr=${arrVar}, msg=${msgVar})`)
+  const [matchStr, arrVar, msgVar] = m
+  const idx = src.indexOf(matchStr)
+  console.log(`Found sync loop body at char ${idx} (arr=${arrVar}, msg=${msgVar})`)
 
-  // Extract callback var (j), parent msg var (D), agent ID var (r) from nearby code
-  const nearby = src.slice(idx, idx + 800)
+  // Extract callback var (D), parent msg var (j), agent ID var (r) from nearby code
+  const nearby = src.slice(idx, idx + 1200)
   const cbRe = new RegExp(
     `if\\((${V})\\)\\1\\(\\{toolUseID:\`agent_\\$\\{(${V})\\.message\\.id\\}\`.*?agentId:(${V})\\}`
   )
@@ -236,30 +235,22 @@ if (src.includes(patchBMarker)) {
   const [, cbVar, parentVar, agentVar] = cbm
   console.log(`  Callback=${cbVar}, ParentMsg=${parentVar}, AgentId=${agentVar}`)
 
-  if (src.indexOf(oldStr, idx + 1) !== -1) {
+  if (src.indexOf(matchStr, idx + 1) !== -1) {
     console.error('ERROR: Multiple matches for Patch B. Aborting.')
     process.exit(1)
   }
 
-  // The matched string starts AFTER "if(" in the source. We need to:
-  // 1. Close the existing "if(" with a stream_event check
-  // 2. Re-open with the original push+type check
-  //
-  // Source context: ...if(  O1.push(Y1),Y1.type!=="assistant"&&Y1.type!=="user")continue;
-  //                    ^    ^-- idx (start of match)
-  //                    |-- "if(" is at idx-3
-  //
-  // We replace the matched portion so the full source becomes:
-  //   if(Y1.type==="stream_event"){if(j)j({...});continue}if(O1.push(Y1),...)continue;
-  const newStr =
-    `${patchBMarker}${msgVar}.type==="stream_event"){` +
+  // Inject stream_event check BEFORE the if(ARR.push(...)) statement.
+  // The full "if(" is part of the match, so we prepend our check.
+  const injection =
+    `${patchBMarker}if(${msgVar}.type==="stream_event"){` +
     `if(${cbVar})${cbVar}({toolUseID:\`agent_\${${parentVar}.message.id}\`,` +
-    `data:{type:"agent_stream_event",event:${msgVar}.event,agentId:${agentVar}}});continue}` +
-    `if(${arrVar}.push(${msgVar}),${msgVar}.type!=="assistant"&&${msgVar}.type!=="user")continue;`
+    `data:{type:"agent_stream_event",event:${msgVar}.event,agentId:${agentVar}}});continue}`
 
-  src = src.slice(0, idx) + newStr + src.slice(idx + oldStr.length)
+  // Insert before the matched "if(ARR.push(..." — don't remove anything
+  src = src.slice(0, idx) + injection + src.slice(idx)
   patchCount++
-  console.log('Applied. Stream events intercepted before O1.push — never enter collection array.')
+  console.log('Applied. Stream events intercepted before push — never enter collection array.')
 }
 
 // ===========================================================================
@@ -402,19 +393,18 @@ if (src.includes(patchDMarker)) {
 //
 // Background (async) Task paths run detached — by the time their for-await
 // loop executes, the tool executor has closed its output queue and the
-// progress callback j() is dead. Instead, we write directly to stdout using
-// the CLI's binary message transport (fY1 equivalent), formatting messages
-// the same way ihA/ZhA would.
+// progress callback j() is dead. Instead, we write directly to stdout as
+// newline-delimited JSON, formatting messages the same way mI8/ihA/ZhA would.
 //
-// Before:
-//   for await(let D1 of cR({...}))N1.push(D1),s01(...),s0A(AGENTID,...);
+// Before (v2.1.41):
+//   for await(let W1 of jy({...}))f1.push(W1),QM1(k1,W1,e,J.options.tools),XW8(AGENTID,...);
 //
 // After:
-//   for await(let D1 of cR({...})){N1.push(D1),s01(...),s0A(AGENTID,...);
-//     let _ptu=D.message.content[0].id;
-//     if(D1.type==="stream_event") TRANSPORT(JSON.stringify({...}));
-//     else if(D1.type==="assistant") TRANSPORT(JSON.stringify({...}));
-//     else if(D1.type==="user") TRANSPORT(JSON.stringify({...}));
+//   for await(let W1 of jy({...})){
+//     if(W1.type==="stream_event"){...forward directly...}
+//     else{f1.push(W1),QM1(k1,W1,e,J.options.tools),XW8(AGENTID,...);
+//       ...forward assistant/user via stdout...
+//     }
 //   }
 // ===========================================================================
 
@@ -425,7 +415,7 @@ const patchEMarker = '/*PATCHED:subagent-E*/'
 if (src.includes(patchEMarker)) {
   console.log('Already applied. Skipping.')
 } else {
-  // Find the session ID function from ihA/ZhA yields
+  // Find the session ID function from mI8/ihA/ZhA yields
   const sessFnRe = /session_id:([\w$]+)\(\).*?parent_tool_use_id/
   const sessFnMatch = src.match(sessFnRe)
   if (!sessFnMatch) {
@@ -435,12 +425,24 @@ if (src.includes(patchEMarker)) {
   const sessFn = sessFnMatch[1]
   console.log(`Session ID function: ${sessFn}()`)
 
-  // Find async for-await+cR loops by matching the body pattern after )).
+  // Find the UUID generator from the progress wrapping function
+  // Pattern: {type:"progress",data:...,uuid:FUNC(),timestamp:new Date
+  const uuidFnRe = /\{type:"progress",data:[\w$]+,toolUseID:[\w$]+,parentToolUseID:[\w$]+,uuid:([\w$]+)\(\),timestamp:new Date/
+  const uuidFnMatch = src.match(uuidFnRe)
+  if (!uuidFnMatch) {
+    console.error('ERROR: Cannot locate UUID generator function.')
+    process.exit(1)
+  }
+  const uuidFn = uuidFnMatch[1]
+  console.log(`UUID function: ${uuidFn}()`)
+
+  // Find async for-await+jy loops by matching the body pattern after )).
+  // v2.1.41 pattern: ))ARR.push(MSG),QM1(STATS,MSG,TOOLS,J.options.tools),XW8(AGENTID,...);
   const asyncBodyRe = new RegExp(
     `\\)\\)(${V})\\.push\\((${V})\\),` +             // ))ARR.push(MSG),
-    `${V}\\(${V},\\2,` +                             // STATS(STATS,MSG,
-    `${V},${V}\\.options\\.tools\\),` +               // ...,J.options.tools),
-    `${V}\\((${V}(?:\\.${V})?),` +                   // s0A(AGENTID or s0A(x.prop,
+    `(${V})\\((${V}),\\2,` +                         // QM1(STATS,MSG,
+    `(${V}),(${V})\\.options\\.tools\\),` +           // TOOLS,J.options.tools),
+    `(${V})\\((${V}(?:\\.${V})?),` +                 // XW8(AGENTID or XW8(x.prop,
     `[^;]+;`                                          // ...);
   , 'g')
 
@@ -450,17 +452,18 @@ if (src.includes(patchEMarker)) {
   const matches = []
   while ((asyncMatch = asyncBodyRe.exec(src)) !== null) {
     const before = src.slice(Math.max(0, asyncMatch.index - 500), asyncMatch.index)
-    if (!before.includes('for await') || !before.includes('cR({')) continue
+    if (!before.includes('for await') || !before.includes('jy({')) continue
     matches.push({
       fullMatch: asyncMatch[0],
       msgVar: asyncMatch[2],
-      agentIdExpr: asyncMatch[3],
       index: asyncMatch.index
     })
   }
 
   if (matches.length === 0) {
-    console.error('ERROR: Cannot locate async for-await+cR loops with s0A.')
+    console.error('ERROR: Cannot locate async for-await+jy loops.')
+    console.error('The sub-agent generator function name may have changed.')
+    console.error('Search for "for await" loops with .push() + QM1/stats + XW8/state-update patterns.')
     process.exit(1)
   }
 
@@ -473,9 +476,9 @@ if (src.includes(patchEMarker)) {
     const body = fullMatch.slice(2) // strip leading "))"
 
     // Write line-delimited JSON to stdout (the SDK reads newline-delimited
-    // JSON, NOT binary-framed). D is the full assistant message (may contain
-    // text/thinking blocks before the tool_use). Find the matching tool_use
-    // block by description (K) for parent_tool_use_id.
+    // JSON, NOT binary-framed). j is the full assistant message from the parent
+    // (may contain text/thinking blocks before the tool_use). Find the matching
+    // tool_use block by description (K) for parent_tool_use_id.
     //
     // stream_events are forwarded directly without pushing to the collection
     // array (they lack .message/.uuid and break downstream processing).
@@ -484,19 +487,19 @@ if (src.includes(patchEMarker)) {
       `){${patchEMarker}` +
       // stream_event: forward directly, skip push to collection array
       `if(${msgVar}.type==="stream_event"){` +
-        `let _ptu=null;for(let _b of D.message.content){if(_b.type==="tool_use"&&_b.input&&_b.input.description===K){_ptu=_b.id;break}}` +
+        `let _ptu=null;for(let _b of j.message.content){if(_b.type==="tool_use"&&_b.input&&_b.input.description===K){_ptu=_b.id;break}}` +
         `process.stdout.write(JSON.stringify({type:"stream_event",event:${msgVar}.event,` +
-        `parent_tool_use_id:_ptu,session_id:${sessFn}(),uuid:_f()})+"\\n")` +
+        `parent_tool_use_id:_ptu,session_id:${sessFn}(),uuid:${uuidFn}()})+"\\n")` +
       `}else{` +
       // non-stream_event: original body (push, stats, state update)
       `${body}` +
-      `{let _ptu=null;for(let _b of D.message.content){if(_b.type==="tool_use"&&_b.input&&_b.input.description===K){_ptu=_b.id;break}}` +
+      `{let _ptu=null;for(let _b of j.message.content){if(_b.type==="tool_use"&&_b.input&&_b.input.description===K){_ptu=_b.id;break}}` +
       `if(${msgVar}.type==="assistant")` +
         `process.stdout.write(JSON.stringify({type:"assistant",message:${msgVar}.message,` +
-        `parent_tool_use_id:_ptu,session_id:${sessFn}(),uuid:_f()})+"\\n");` +
+        `parent_tool_use_id:_ptu,session_id:${sessFn}(),uuid:${uuidFn}()})+"\\n");` +
       `else if(${msgVar}.type==="user")` +
         `process.stdout.write(JSON.stringify({type:"user",message:${msgVar}.message,` +
-        `parent_tool_use_id:_ptu,session_id:${sessFn}(),uuid:_f()})+"\\n");` +
+        `parent_tool_use_id:_ptu,session_id:${sessFn}(),uuid:${uuidFn}()})+"\\n");` +
       `}}}`
 
     src = src.slice(0, index + 1) + replacement + src.slice(index + fullMatch.length)
