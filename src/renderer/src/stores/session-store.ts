@@ -103,6 +103,7 @@ interface SessionState {
   backgroundWatcherCounts: Record<string, number>
   stoppingTaskIds: string[]
   permissionMode: PermissionMode
+  effort: 'low' | 'medium' | 'high'
 
   setCwd: (cwd: string | null) => void
   openDirectory: (cwd: string) => void
@@ -135,6 +136,7 @@ interface SessionState {
   setTaskStopping: (toolUseId: string) => void
   clearTaskStopping: (toolUseId: string) => void
   setPermissionMode: (mode: PermissionMode) => void
+  setEffort: (effort: 'low' | 'medium' | 'high') => void
 }
 
 export const useSessionStore = create<SessionState>((set) => ({
@@ -166,6 +168,7 @@ export const useSessionStore = create<SessionState>((set) => ({
   backgroundWatcherCounts: {},
   stoppingTaskIds: [],
   permissionMode: 'default',
+  effort: 'high',
 
   setCwd: (cwd) => set({ cwd }),
 
@@ -427,5 +430,7 @@ export const useSessionStore = create<SessionState>((set) => ({
       stoppingTaskIds: state.stoppingTaskIds.filter((id) => id !== toolUseId)
     })),
 
-  setPermissionMode: (mode) => set({ permissionMode: mode })
+  setPermissionMode: (mode) => set({ permissionMode: mode }),
+
+  setEffort: (effort) => set({ effort })
 }))

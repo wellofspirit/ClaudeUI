@@ -32,7 +32,8 @@ export function InputBox(): React.JSX.Element {
   const [effortOpen, setEffortOpen] = useState(false)
   const [plusOpen, setPlusOpen] = useState(false)
   const [selectedModel, setSelectedModel] = useState(MODELS[0])
-  const [effort, setEffort] = useState<(typeof EFFORT_LEVELS)[number]>('high')
+  const effort = useSessionStore((s) => s.effort)
+  const setEffort = useSessionStore((s) => s.setEffort)
 
   useEffect(() => {
     if (!isRunning) textareaRef.current?.focus()
@@ -189,6 +190,7 @@ export function InputBox(): React.JSX.Element {
                         key={m.id}
                         onClick={() => {
                           setSelectedModel(m)
+                          window.api.setModel(m.id)
                           setModelOpen(false)
                         }}
                         className={`w-full flex items-center gap-2 px-3 h-8 text-[12px] transition-colors cursor-pointer text-left ${

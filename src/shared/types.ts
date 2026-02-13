@@ -113,7 +113,7 @@ export interface BackgroundOutput {
 export interface ClaudeAPI {
   platform: string
   pickFolder(): Promise<string | null>
-  createSession(cwd: string): Promise<void>
+  createSession(cwd: string, effort?: string): Promise<void>
   sendPrompt(prompt: string): Promise<void>
   cancelSession(): Promise<void>
   respondApproval(requestId: string, decision: ApprovalDecision, answers?: Record<string, string>): Promise<void>
@@ -133,10 +133,12 @@ export interface ClaudeAPI {
   onSubagentStream(cb: (data: SubagentStreamDelta) => void): () => void
   onSubagentMessage(cb: (data: SubagentMessageData) => void): () => void
   onSubagentToolResult(cb: (data: SubagentToolResultData) => void): () => void
+  onPermissionMode(cb: (mode: PermissionMode) => void): () => void
   onBackgroundOutput(cb: (data: BackgroundOutput) => void): () => void
   watchBackground(toolUseId: string): Promise<void>
   unwatchBackground(toolUseId: string): Promise<void>
   readBackgroundRange(toolUseId: string, offset: number, length: number): Promise<string>
   stopTask(toolUseId: string): Promise<{ success: boolean; error?: string }>
   setPermissionMode(mode: string): Promise<void>
+  setModel(model: string): Promise<void>
 }

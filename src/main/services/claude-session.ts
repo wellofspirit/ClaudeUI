@@ -92,12 +92,18 @@ export class ClaudeSession {
   private cwd: string
   private totalCostUsd = 0
   private messageChannel: MessageChannel<unknown> | null = null
-  private activeQuery: { setPermissionMode(mode: string): Promise<void> } | null = null
+  private activeQuery: {
+    setPermissionMode(mode: string): Promise<void>
+    setModel(model?: string): Promise<void>
+  } | null = null
   private permissionMode: string = 'default'
+  private effort: string
+  private model: string = 'claude-sonnet-4-5-20250929'
 
-  constructor(win: BrowserWindow, cwd: string) {
+  constructor(win: BrowserWindow, cwd: string, effort?: string) {
     this.win = win
     this.cwd = cwd
+    this.effort = effort || 'high'
     this.sendStatus()
   }
 
@@ -105,7 +111,7 @@ export class ClaudeSession {
     return {
       state: this.isProcessing ? 'running' : 'idle',
       sessionId: this.sessionId,
-      model: 'claude-sonnet-4-5-20250929',
+      model: this.model,
       cwd: this.cwd,
       totalCostUsd: this.totalCostUsd
     }
@@ -143,10 +149,12 @@ export class ClaudeSession {
         prompt: channel as AsyncIterable<never>,
         options: {
           cwd: this.cwd,
+          model: this.model,
           permissionMode: this.permissionMode as 'default',
           abortController: this.abortController,
           includePartialMessages: true,
           thinking: { type: 'enabled', budgetTokens: 10000 },
+          effort: this.effort as 'low' | 'medium' | 'high',
           stderr: (chunk) => {
             // Log SDK stderr to help debug issues
             const text = chunk.toString().trim()
@@ -178,7 +186,10 @@ export class ClaudeSession {
         }
       })
 
-      this.activeQuery = q as unknown as { setPermissionMode(mode: string): Promise<void> }
+      this.activeQuery = q as unknown as {
+        setPermissionMode(mode: string): Promise<void>
+        setModel(model?: string): Promise<void>
+      }
 
       for await (const message of q) {
         if (!message || typeof message !== 'object') continue
@@ -247,7 +258,13 @@ export class ClaudeSession {
           })
         } else if (type === 'system') {
           const subtype = msg.subtype as string | undefined
-          if (subtype === 'task_notification') {
+          if (subtype === 'status') {
+            const newMode = msg.permissionMode as string | undefined
+            if (newMode && newMode !== this.permissionMode) {
+              this.permissionMode = newMode
+              this.send('session:permission-mode', newMode)
+            }
+          } else if (subtype === 'task_notification') {
             const taskId = (msg.task_id as string) || ''
             const outputFile = (msg.output_file as string) || ''
             // Correlate with task by agentId
@@ -333,6 +350,13 @@ export class ClaudeSession {
     this.permissionMode = mode
     if (this.activeQuery) {
       await this.activeQuery.setPermissionMode(mode)
+    }
+  }
+
+  async setModel(model: string): Promise<void> {
+    this.model = model
+    if (this.activeQuery) {
+      await this.activeQuery.setModel(model)
     }
   }
 

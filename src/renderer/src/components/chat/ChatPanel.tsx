@@ -106,14 +106,16 @@ function WelcomeState(): React.JSX.Element {
     setDropdownOpen(false)
     const folder = await window.api.pickFolder()
     if (folder) {
-      await window.api.createSession(folder)
+      const { effort } = useSessionStore.getState()
+      await window.api.createSession(folder, effort)
       openDirectory(folder)
     }
   }
 
   const handleSelectDir = async (dir: string): Promise<void> => {
     setDropdownOpen(false)
-    await window.api.createSession(dir)
+    const { effort } = useSessionStore.getState()
+    await window.api.createSession(dir, effort)
     openDirectory(dir)
   }
 

@@ -10,7 +10,8 @@ export function WelcomeScreen(): React.JSX.Element {
     try {
       const folder = await window.api.pickFolder()
       if (folder) {
-        await window.api.createSession(folder)
+        const { effort } = useSessionStore.getState()
+        await window.api.createSession(folder, effort)
         setCwd(folder)
       }
     } finally {

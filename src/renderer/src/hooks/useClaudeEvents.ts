@@ -48,6 +48,7 @@ export function useClaudeEvents(): void {
   const appendSubagentStreamingThinking = useSessionStore((s) => s.appendSubagentStreamingThinking)
   const appendSubagentToolResult = useSessionStore((s) => s.appendSubagentToolResult)
   const setBackgroundOutput = useSessionStore((s) => s.setBackgroundOutput)
+  const setPermissionMode = useSessionStore((s) => s.setPermissionMode)
 
   useEffect(() => {
     const cleanups = [
@@ -119,9 +120,12 @@ export function useClaudeEvents(): void {
       }),
       window.api.onBackgroundOutput((data) => {
         setBackgroundOutput(data.toolUseId, data.tail, data.totalSize)
+      }),
+      window.api.onPermissionMode((mode) => {
+        setPermissionMode(mode)
       })
     ]
 
     return () => cleanups.forEach((fn) => fn())
-  }, [addMessage, appendStreamingText, appendStreamingThinking, addPendingApproval, clearPendingApprovals, setStatus, addError, appendToolResult, updateTaskProgress, addTaskNotification, addSubagentMessage, appendSubagentStreamingText, appendSubagentStreamingThinking, appendSubagentToolResult, setBackgroundOutput])
+  }, [addMessage, appendStreamingText, appendStreamingThinking, addPendingApproval, clearPendingApprovals, setStatus, addError, appendToolResult, updateTaskProgress, addTaskNotification, addSubagentMessage, appendSubagentStreamingText, appendSubagentStreamingThinking, appendSubagentToolResult, setBackgroundOutput, setPermissionMode])
 }

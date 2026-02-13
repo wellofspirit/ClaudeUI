@@ -62,7 +62,10 @@ export function MessageBubble({ message }: { message: ChatMessage }): React.JSX.
     | { kind: 'other'; block: ContentBlock; index: number }
   const items: RenderItem[] = []
 
-  const visible = message.content.filter((b) => b.type !== 'tool_result')
+  const HIDDEN_TOOLS = new Set(['EnterPlanMode', 'ExitPlanMode'])
+  const visible = message.content.filter(
+    (b) => b.type !== 'tool_result' && !(b.type === 'tool_use' && b.toolName && HIDDEN_TOOLS.has(b.toolName))
+  )
   for (let i = 0; i < visible.length; i++) {
     const block = visible[i]
     if (block.type === 'tool_use') {

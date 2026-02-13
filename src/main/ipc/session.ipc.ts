@@ -13,10 +13,10 @@ export function registerSessionIpc(win: BrowserWindow): void {
     return result.filePaths[0]
   })
 
-  ipcMain.handle('session:create', (_event, cwd: string) => {
+  ipcMain.handle('session:create', (_event, cwd: string, effort?: string) => {
     // Clean up old session before creating a new one
     session?.cancel()
-    session = new ClaudeSession(win, cwd)
+    session = new ClaudeSession(win, cwd, effort)
   })
 
   ipcMain.handle('session:send', (_event, prompt: string) => {
@@ -57,6 +57,10 @@ export function registerSessionIpc(win: BrowserWindow): void {
 
   ipcMain.handle('session:set-permission-mode', async (_e, mode: string) => {
     await session?.setPermissionMode(mode)
+  })
+
+  ipcMain.handle('session:set-model', async (_e, model: string) => {
+    await session?.setModel(model)
   })
 
 }

@@ -6,14 +6,16 @@ export function Sidebar(): React.JSX.Element {
   const openDirectory = useSessionStore((s) => s.openDirectory)
 
   const handleOpen = async (dir: string): Promise<void> => {
-    await window.api.createSession(dir)
+    const { effort } = useSessionStore.getState()
+    await window.api.createSession(dir, effort)
     openDirectory(dir)
   }
 
   const handlePickFolder = async (): Promise<void> => {
     const folder = await window.api.pickFolder()
     if (folder) {
-      await window.api.createSession(folder)
+      const { effort } = useSessionStore.getState()
+      await window.api.createSession(folder, effort)
       openDirectory(folder)
     }
   }

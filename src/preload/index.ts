@@ -4,7 +4,7 @@ import type { ApprovalDecision, ClaudeAPI } from '../shared/types'
 const api: ClaudeAPI = {
   platform: process.platform,
   pickFolder: () => ipcRenderer.invoke('session:pick-folder'),
-  createSession: (cwd: string) => ipcRenderer.invoke('session:create', cwd),
+  createSession: (cwd: string, effort?: string) => ipcRenderer.invoke('session:create', cwd, effort),
   sendPrompt: (prompt: string) => ipcRenderer.invoke('session:send', prompt),
   cancelSession: () => ipcRenderer.invoke('session:cancel'),
   respondApproval: (requestId: string, decision: ApprovalDecision, answers?: Record<string, string>) =>
@@ -81,6 +81,11 @@ const api: ClaudeAPI = {
     ipcRenderer.on('session:subagent-tool-result', handler)
     return () => ipcRenderer.removeListener('session:subagent-tool-result', handler)
   },
+  onPermissionMode: (cb) => {
+    const handler = (_: Electron.IpcRendererEvent, mode: unknown): void => cb(mode as never)
+    ipcRenderer.on('session:permission-mode', handler)
+    return () => ipcRenderer.removeListener('session:permission-mode', handler)
+  },
   onBackgroundOutput: (cb) => {
     const handler = (_: Electron.IpcRendererEvent, data: unknown): void => cb(data as never)
     ipcRenderer.on('session:background-output', handler)
@@ -91,7 +96,8 @@ const api: ClaudeAPI = {
   readBackgroundRange: (toolUseId: string, offset: number, length: number) =>
     ipcRenderer.invoke('session:read-background-range', toolUseId, offset, length),
   stopTask: (toolUseId: string) => ipcRenderer.invoke('session:stop-task', toolUseId),
-  setPermissionMode: (mode: string) => ipcRenderer.invoke('session:set-permission-mode', mode)
+  setPermissionMode: (mode: string) => ipcRenderer.invoke('session:set-permission-mode', mode),
+  setModel: (model: string) => ipcRenderer.invoke('session:set-model', model)
 }
 
 if (process.contextIsolated) {
