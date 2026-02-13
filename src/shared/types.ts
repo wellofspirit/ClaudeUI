@@ -37,6 +37,8 @@ export interface SessionResult {
 
 export type ApprovalDecision = 'allow' | 'deny'
 
+export type PermissionMode = 'default' | 'acceptEdits' | 'plan'
+
 // AskUserQuestion tool types
 export interface AskUserQuestionOption {
   label: string
@@ -136,4 +138,5 @@ export interface ClaudeAPI {
   unwatchBackground(toolUseId: string): Promise<void>
   readBackgroundRange(toolUseId: string, offset: number, length: number): Promise<string>
   stopTask(toolUseId: string): Promise<{ success: boolean; error?: string }>
+  setPermissionMode(mode: string): Promise<void>
 }

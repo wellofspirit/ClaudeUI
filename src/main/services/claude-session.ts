@@ -92,6 +92,8 @@ export class ClaudeSession {
   private cwd: string
   private totalCostUsd = 0
   private messageChannel: MessageChannel<unknown> | null = null
+  private activeQuery: { setPermissionMode(mode: string): Promise<void> } | null = null
+  private permissionMode: string = 'default'
 
   constructor(win: BrowserWindow, cwd: string) {
     this.win = win
@@ -141,7 +143,7 @@ export class ClaudeSession {
         prompt: channel as AsyncIterable<never>,
         options: {
           cwd: this.cwd,
-          permissionMode: 'default',
+          permissionMode: this.permissionMode as 'default',
           abortController: this.abortController,
           includePartialMessages: true,
           thinking: { type: 'enabled', budgetTokens: 10000 },
@@ -175,6 +177,8 @@ export class ClaudeSession {
           }
         }
       })
+
+      this.activeQuery = q as unknown as { setPermissionMode(mode: string): Promise<void> }
 
       for await (const message of q) {
         if (!message || typeof message !== 'object') continue
@@ -318,9 +322,17 @@ export class ClaudeSession {
     } finally {
       this.messageChannel?.end()
       this.messageChannel = null
+      this.activeQuery = null
       this.abortController = null
       this.isProcessing = false
       this.sendStatus()
+    }
+  }
+
+  async setPermissionMode(mode: string): Promise<void> {
+    this.permissionMode = mode
+    if (this.activeQuery) {
+      await this.activeQuery.setPermissionMode(mode)
     }
   }
 

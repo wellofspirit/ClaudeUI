@@ -6,7 +6,8 @@ import type {
   ContentBlock,
   TodoItem,
   TaskProgress,
-  TaskNotification
+  TaskNotification,
+  PermissionMode
 } from '../../../shared/types'
 
 /**
@@ -101,6 +102,7 @@ interface SessionState {
   backgroundOutputs: Record<string, { tail: string; totalSize: number }>
   backgroundWatcherCounts: Record<string, number>
   stoppingTaskIds: string[]
+  permissionMode: PermissionMode
 
   setCwd: (cwd: string | null) => void
   openDirectory: (cwd: string) => void
@@ -132,6 +134,7 @@ interface SessionState {
   removeTaskFromPanel: (toolUseId: string) => void
   setTaskStopping: (toolUseId: string) => void
   clearTaskStopping: (toolUseId: string) => void
+  setPermissionMode: (mode: PermissionMode) => void
 }
 
 export const useSessionStore = create<SessionState>((set) => ({
@@ -162,6 +165,7 @@ export const useSessionStore = create<SessionState>((set) => ({
   backgroundOutputs: {},
   backgroundWatcherCounts: {},
   stoppingTaskIds: [],
+  permissionMode: 'default',
 
   setCwd: (cwd) => set({ cwd }),
 
@@ -421,5 +425,7 @@ export const useSessionStore = create<SessionState>((set) => ({
   clearTaskStopping: (toolUseId) =>
     set((state) => ({
       stoppingTaskIds: state.stoppingTaskIds.filter((id) => id !== toolUseId)
-    }))
+    })),
+
+  setPermissionMode: (mode) => set({ permissionMode: mode })
 }))

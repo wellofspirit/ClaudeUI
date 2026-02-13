@@ -10,6 +10,12 @@ const MODELS = [
 
 const EFFORT_LEVELS = ['low', 'medium', 'high'] as const
 
+const PERMISSION_MODES = [
+  { id: 'default' as const, label: 'Normal' },
+  { id: 'acceptEdits' as const, label: 'Auto-edit' },
+  { id: 'plan' as const, label: 'Plan' }
+]
+
 export function InputBox(): React.JSX.Element {
   const [text, setText] = useState('')
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -18,6 +24,9 @@ export function InputBox(): React.JSX.Element {
   const addUserMessage = useSessionStore((s) => s.addUserMessage)
   const isRunning = status.state === 'running'
   const isDisabled = !cwd || isRunning
+
+  const permissionMode = useSessionStore((s) => s.permissionMode)
+  const setPermissionMode = useSessionStore((s) => s.setPermissionMode)
 
   const [modelOpen, setModelOpen] = useState(false)
   const [effortOpen, setEffortOpen] = useState(false)
@@ -35,6 +44,7 @@ export function InputBox(): React.JSX.Element {
       setModelOpen(false)
       setEffortOpen(false)
       setPlusOpen(false)
+
     }
     document.addEventListener('click', handler)
     return () => document.removeEventListener('click', handler)
@@ -58,6 +68,13 @@ export function InputBox(): React.JSX.Element {
       e.preventDefault()
       handleSend()
     }
+    if (e.key === 'Tab' && e.shiftKey) {
+      e.preventDefault()
+      const ids = PERMISSION_MODES.map((m) => m.id)
+      const next = ids[(ids.indexOf(permissionMode) + 1) % ids.length]
+      setPermissionMode(next)
+      window.api.setPermissionMode(next)
+    }
     if (e.key === 'Escape' && isRunning) handleCancel()
   }
 
@@ -72,16 +89,35 @@ export function InputBox(): React.JSX.Element {
     <div style={{ padding: '24px 13px 16px' }} className="shrink-0 bg-gradient-to-t from-bg-primary from-70% to-transparent">
       <div className="max-w-[740px] mx-auto">
         <div
-          onClick={() => { setModelOpen(false); setEffortOpen(false); setPlusOpen(false) }}
-          className="rounded-2xl border border-border bg-bg-input focus-within:border-border-bright transition-colors"
+          onClick={() => { setModelOpen(false); setEffortOpen(false); setPlusOpen(false); }}
+          className={`group relative rounded-2xl border bg-bg-input transition-colors ${
+            permissionMode === 'acceptEdits'
+              ? 'border-mode-edit-dim focus-within:border-mode-edit'
+              : permissionMode === 'plan'
+                ? 'border-mode-plan-dim focus-within:border-mode-plan'
+                : 'border-border focus-within:border-border-bright'
+          }`}
         >
+          {/* Mode tab */}
+          {permissionMode !== 'default' && (
+            <div
+              className={`absolute bottom-full left-3 px-1.5 pt-0.5 pb-px rounded-t text-[9px] font-semibold tracking-wider uppercase text-text-primary border border-b-0 transition-colors ${
+                permissionMode === 'acceptEdits'
+                  ? 'border-mode-edit-dim group-focus-within:border-mode-edit bg-mode-edit-dim group-focus-within:bg-mode-edit'
+                  : 'border-mode-plan-dim group-focus-within:border-mode-plan bg-mode-plan-dim group-focus-within:bg-mode-plan'
+              }`}
+            >
+              {permissionMode === 'acceptEdits' ? 'Accept Edits' : 'Plan'}
+            </div>
+          )}
+
           {/* Top section — input area */}
           <textarea
             ref={textareaRef}
             value={text}
             onChange={handleInput}
             onKeyDown={handleKeyDown}
-            onMouseDown={() => { setModelOpen(false); setEffortOpen(false); setPlusOpen(false) }}
+            onMouseDown={() => { setModelOpen(false); setEffortOpen(false); setPlusOpen(false); }}
             placeholder={
               !cwd
                 ? 'Select a folder to get started'
@@ -106,6 +142,7 @@ export function InputBox(): React.JSX.Element {
                     setPlusOpen(!plusOpen)
                     setModelOpen(false)
                     setEffortOpen(false)
+              
                   }}
                   className="w-7 h-7 flex items-center justify-center rounded-lg text-text-muted hover:text-text-secondary hover:bg-bg-hover transition-colors cursor-pointer"
                 >
@@ -136,6 +173,7 @@ export function InputBox(): React.JSX.Element {
                     setModelOpen(!modelOpen)
                     setEffortOpen(false)
                     setPlusOpen(false)
+              
                   }}
                   className="h-7 px-2 flex items-center gap-1 rounded-lg text-[11px] text-text-muted hover:text-text-secondary hover:bg-bg-hover transition-colors cursor-pointer"
                 >
@@ -174,6 +212,7 @@ export function InputBox(): React.JSX.Element {
                     setEffortOpen(!effortOpen)
                     setModelOpen(false)
                     setPlusOpen(false)
+              
                   }}
                   className="h-7 px-2 flex items-center gap-1 rounded-lg text-[11px] text-text-muted hover:text-text-secondary hover:bg-bg-hover transition-colors cursor-pointer"
                 >

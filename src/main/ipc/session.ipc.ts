@@ -55,4 +55,8 @@ export function registerSessionIpc(win: BrowserWindow): void {
     return await session.stopTask(toolUseId)
   })
 
+  ipcMain.handle('session:set-permission-mode', async (_e, mode: string) => {
+    await session?.setPermissionMode(mode)
+  })
+
 }

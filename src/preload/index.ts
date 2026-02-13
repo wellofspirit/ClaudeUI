@@ -90,7 +90,8 @@ const api: ClaudeAPI = {
   unwatchBackground: (toolUseId: string) => ipcRenderer.invoke('session:unwatch-background', toolUseId),
   readBackgroundRange: (toolUseId: string, offset: number, length: number) =>
     ipcRenderer.invoke('session:read-background-range', toolUseId, offset, length),
-  stopTask: (toolUseId: string) => ipcRenderer.invoke('session:stop-task', toolUseId)
+  stopTask: (toolUseId: string) => ipcRenderer.invoke('session:stop-task', toolUseId),
+  setPermissionMode: (mode: string) => ipcRenderer.invoke('session:set-permission-mode', mode)
 }
 
 if (process.contextIsolated) {

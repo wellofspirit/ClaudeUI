@@ -17,6 +17,10 @@
   --color-success: #4ade80;
   --color-danger: #f87171;
   --color-warning: #fbbf24;
+  --color-mode-edit: #8b5fcc;
+  --color-mode-edit-dim: #6b3fa0;
+  --color-mode-plan: #2a8a7a;
+  --color-mode-plan-dim: #1a5c52;
 
   --font-mono: 'SF Mono', 'Fira Code', Menlo, Consolas, monospace;
 }
