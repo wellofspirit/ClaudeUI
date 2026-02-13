@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
-import { useSessionStore } from '../stores/session-store'
+import { useSessionStore, useActiveSession } from '../stores/session-store'
 import { MarkdownRenderer } from './chat/MarkdownRenderer'
 import { SubagentMessages } from './chat/SubagentMessages'
 import type { ContentBlock } from '../../../shared/types'
@@ -28,15 +28,17 @@ function findTaskBlocks(
 }
 
 function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Element | null {
-  const messages = useSessionStore((s) => s.messages)
-  const taskProgressMap = useSessionStore((s) => s.taskProgressMap)
-  const subagentMsgs = useSessionStore((s) => s.subagentMessages)
-  const subagentText = useSessionStore((s) => s.subagentStreamingText)
-  const subagentThinking = useSessionStore((s) => s.subagentStreamingThinking)
+  const activeSessionId = useSessionStore((s) => s.activeSessionId)
+  const messages = useActiveSession((s) => s.messages)
+  const taskProgressMap = useActiveSession((s) => s.taskProgressMap)
+  const subagentMsgs = useActiveSession((s) => s.subagentMessages)
+  const subagentText = useActiveSession((s) => s.subagentStreamingText)
+  const subagentThinking = useActiveSession((s) => s.subagentStreamingThinking)
   const removeTaskFromPanel = useSessionStore((s) => s.removeTaskFromPanel)
-  const stoppingTaskIds = useSessionStore((s) => s.stoppingTaskIds)
+  const stoppingTaskIds = useActiveSession((s) => s.stoppingTaskIds)
   const setTaskStopping = useSessionStore((s) => s.setTaskStopping)
   const clearTaskStopping = useSessionStore((s) => s.clearTaskStopping)
+  const taskNotifications = useActiveSession((s) => s.taskNotifications)
   const [expanded, setExpanded] = useState(true)
 
   const { taskBlock, resultBlock } = findTaskBlocks(messages, toolUseId)
@@ -53,8 +55,6 @@ function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Element | nu
   const elapsed = progress?.elapsedTimeSeconds
   const hasResult = !!resultBlock
   const resultText = resultBlock?.toolResult?.replace(/<usage>[\s\S]*?<\/usage>/, '').trimEnd() || ''
-  // Background tasks get a tool_result immediately ("agent launched") but keep running until task_notification
-  const taskNotifications = useSessionStore((s) => s.taskNotifications)
   const bgNotification = taskNotifications.find((n) => n.toolUseId === toolUseId)
   const isRunning = isBackground ? !bgNotification : !hasResult
 
@@ -110,20 +110,19 @@ function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Element | nu
 
   const handleStopTask = async (e: React.MouseEvent): Promise<void> => {
     e.stopPropagation()
-    setTaskStopping(toolUseId)
-    const result = await window.api.stopTask(toolUseId)
+    if (!activeSessionId) return
+    setTaskStopping(activeSessionId, toolUseId)
+    const result = await window.api.stopTask(activeSessionId, toolUseId)
 
     if (!result.success) {
       console.error('Failed to stop task:', result.error)
-      clearTaskStopping(toolUseId)
+      clearTaskStopping(activeSessionId, toolUseId)
       return
     }
 
-    // Set timeout to clear state if notification doesn't arrive within 10s
     setTimeout(() => {
-      if (stoppingTaskIds.includes(toolUseId)) {
-        clearTaskStopping(toolUseId)
-      }
+      const rid = useSessionStore.getState().activeSessionId
+      if (rid) clearTaskStopping(rid, toolUseId)
     }, 10000)
   }
 
@@ -161,7 +160,7 @@ function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Element | nu
           </span>
         )}
         <button
-          onClick={(e) => { e.stopPropagation(); removeTaskFromPanel(toolUseId) }}
+          onClick={(e) => { e.stopPropagation(); activeSessionId && removeTaskFromPanel(activeSessionId, toolUseId) }}
           className="text-text-muted hover:text-text-primary transition-colors shrink-0 ml-1"
         >
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -229,13 +228,14 @@ function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Element | nu
 }
 
 function BashBackgroundEntry({ toolUseId }: { toolUseId: string }): React.JSX.Element | null {
-  const messages = useSessionStore((s) => s.messages)
-  const taskNotifications = useSessionStore((s) => s.taskNotifications)
+  const activeSessionId = useSessionStore((s) => s.activeSessionId)
+  const messages = useActiveSession((s) => s.messages)
+  const taskNotifications = useActiveSession((s) => s.taskNotifications)
   const removeTaskFromPanel = useSessionStore((s) => s.removeTaskFromPanel)
-  const bgOutput = useSessionStore((s) => s.backgroundOutputs[toolUseId])
+  const bgOutput = useActiveSession((s) => s.backgroundOutputs[toolUseId])
   const watchBg = useSessionStore((s) => s.watchBackgroundOutput)
   const unwatchBg = useSessionStore((s) => s.unwatchBackgroundOutput)
-  const stoppingTaskIds = useSessionStore((s) => s.stoppingTaskIds)
+  const stoppingTaskIds = useActiveSession((s) => s.stoppingTaskIds)
   const setTaskStopping = useSessionStore((s) => s.setTaskStopping)
   const clearTaskStopping = useSessionStore((s) => s.clearTaskStopping)
   const [expanded, setExpanded] = useState(true)
@@ -256,13 +256,13 @@ function BashBackgroundEntry({ toolUseId }: { toolUseId: string }): React.JSX.El
 
   // Watch on mount/expand, unwatch on unmount/collapse (ref-counted)
   useEffect(() => {
-    if (!expanded) return
-    watchBg(toolUseId)
+    if (!expanded || !activeSessionId) return
+    watchBg(activeSessionId, toolUseId)
     return () => {
-      unwatchBg(toolUseId)
+      if (activeSessionId) unwatchBg(activeSessionId, toolUseId)
       setPrependedContent('')
     }
-  }, [toolUseId, expanded, watchBg, unwatchBg])
+  }, [toolUseId, expanded, watchBg, unwatchBg, activeSessionId])
 
   // Auto-scroll
   useEffect(() => {
@@ -291,7 +291,7 @@ function BashBackgroundEntry({ toolUseId }: { toolUseId: string }): React.JSX.El
   }, [])
 
   const handleLoadEarlier = useCallback(async () => {
-    if (!bgOutput || loadingMore) return
+    if (!bgOutput || loadingMore || !activeSessionId) return
     const alreadyLoaded = prependedContent.length
     const tailLen = new TextEncoder().encode(bgOutput.tail).length
     const loaded = alreadyLoaded + tailLen
@@ -301,10 +301,10 @@ function BashBackgroundEntry({ toolUseId }: { toolUseId: string }): React.JSX.El
     const chunkSize = 64 * 1024
     const offset = Math.max(0, bgOutput.totalSize - loaded - chunkSize)
     const length = Math.min(chunkSize, bgOutput.totalSize - loaded)
-    const chunk = await window.api.readBackgroundRange(toolUseId, offset, length)
+    const chunk = await window.api.readBackgroundRange(activeSessionId, toolUseId, offset, length)
     setPrependedContent((prev) => chunk + prev)
     setLoadingMore(false)
-  }, [bgOutput, prependedContent, loadingMore, toolUseId])
+  }, [bgOutput, prependedContent, loadingMore, toolUseId, activeSessionId])
 
   const statusBadge = isError ? (
     <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-danger/10 text-danger shrink-0">failed</span>
@@ -322,20 +322,19 @@ function BashBackgroundEntry({ toolUseId }: { toolUseId: string }): React.JSX.El
 
   const handleStopTask = async (e: React.MouseEvent): Promise<void> => {
     e.stopPropagation()
-    setTaskStopping(toolUseId)
-    const result = await window.api.stopTask(toolUseId)
+    if (!activeSessionId) return
+    setTaskStopping(activeSessionId, toolUseId)
+    const result = await window.api.stopTask(activeSessionId, toolUseId)
 
     if (!result.success) {
       console.error('Failed to stop task:', result.error)
-      clearTaskStopping(toolUseId)
+      clearTaskStopping(activeSessionId, toolUseId)
       return
     }
 
-    // Set timeout to clear state if notification doesn't arrive within 10s
     setTimeout(() => {
-      if (stoppingTaskIds.includes(toolUseId)) {
-        clearTaskStopping(toolUseId)
-      }
+      const rid = useSessionStore.getState().activeSessionId
+      if (rid) clearTaskStopping(rid, toolUseId)
     }, 10000)
   }
 
@@ -372,7 +371,7 @@ function BashBackgroundEntry({ toolUseId }: { toolUseId: string }): React.JSX.El
           </span>
         )}
         <button
-          onClick={(e) => { e.stopPropagation(); removeTaskFromPanel(toolUseId) }}
+          onClick={(e) => { e.stopPropagation(); activeSessionId && removeTaskFromPanel(activeSessionId, toolUseId) }}
           className="text-text-muted hover:text-text-primary transition-colors shrink-0 ml-1"
         >
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -426,7 +425,7 @@ function BashBackgroundEntry({ toolUseId }: { toolUseId: string }): React.JSX.El
 
 /** Determine which entry component to render based on the tool type */
 function PanelEntry({ toolUseId }: { toolUseId: string }): React.JSX.Element | null {
-  const messages = useSessionStore((s) => s.messages)
+  const messages = useActiveSession((s) => s.messages)
   const { taskBlock } = findTaskBlocks(messages, toolUseId)
   if (!taskBlock) return null
 
@@ -437,8 +436,9 @@ function PanelEntry({ toolUseId }: { toolUseId: string }): React.JSX.Element | n
 }
 
 export function TaskDetailPanel(): React.JSX.Element | null {
-  const taskPanelOpen = useSessionStore((s) => s.taskPanelOpen)
-  const openedTaskToolUseIds = useSessionStore((s) => s.openedTaskToolUseIds)
+  const activeSessionId = useSessionStore((s) => s.activeSessionId)
+  const taskPanelOpen = useActiveSession((s) => s.taskPanelOpen)
+  const openedTaskToolUseIds = useActiveSession((s) => s.openedTaskToolUseIds)
   const closeTaskPanel = useSessionStore((s) => s.closeTaskPanel)
 
   if (!taskPanelOpen || openedTaskToolUseIds.length === 0) return null
@@ -449,7 +449,7 @@ export function TaskDetailPanel(): React.JSX.Element | null {
       <div className="shrink-0 flex items-center px-4 h-10 border-b border-border">
         <span className="text-[13px] text-text-secondary font-medium flex-1">Tasks</span>
         <button
-          onClick={closeTaskPanel}
+          onClick={() => activeSessionId && closeTaskPanel(activeSessionId)}
           className="text-text-muted hover:text-text-primary transition-colors cursor-pointer"
         >
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">

@@ -1,5 +1,5 @@
-import { useRef, useEffect, useState } from 'react'
-import { useSessionStore } from '../../stores/session-store'
+import { useRef, useEffect } from 'react'
+import { useActiveSession } from '../../stores/session-store'
 import { MessageBubble } from './MessageBubble'
 import { StreamingText } from './StreamingText'
 import { ThinkingBlock } from './ThinkingBlock'
@@ -10,12 +10,12 @@ import { FloatingError } from './FloatingError'
 import { WindowControls } from '../WindowControls'
 
 export function ChatPanel(): React.JSX.Element {
-  const messages = useSessionStore((s) => s.messages)
-  const streamingText = useSessionStore((s) => s.streamingText)
-  const streamingThinking = useSessionStore((s) => s.streamingThinking)
-  const thinkingStartedAt = useSessionStore((s) => s.thinkingStartedAt)
-  const pendingApprovals = useSessionStore((s) => s.pendingApprovals)
-  const status = useSessionStore((s) => s.status)
+  const messages = useActiveSession((s) => s.messages)
+  const streamingText = useActiveSession((s) => s.streamingText)
+  const streamingThinking = useActiveSession((s) => s.streamingThinking)
+  const thinkingStartedAt = useActiveSession((s) => s.thinkingStartedAt)
+  const pendingApprovals = useActiveSession((s) => s.pendingApprovals)
+  const status = useActiveSession((s) => s.status)
 
   const scrollRef = useRef<HTMLDivElement>(null)
 
@@ -80,7 +80,7 @@ export function ChatPanel(): React.JSX.Element {
 }
 
 function TopBar({ hasContent, cost }: { hasContent: boolean; cost: number }): React.JSX.Element {
-  const cwd = useSessionStore((s) => s.cwd)
+  const cwd = useActiveSession((s) => s.cwd)
   return (
     <div style={{ padding: '0 13px' }} className="shrink-0 h-12 flex items-center justify-between [-webkit-app-region:drag] border-b border-border">
       <span className="text-[13px] text-text-secondary font-normal [-webkit-app-region:no-drag]">
@@ -97,31 +97,7 @@ function TopBar({ hasContent, cost }: { hasContent: boolean; cost: number }): Re
 }
 
 function WelcomeState(): React.JSX.Element {
-  const cwd = useSessionStore((s) => s.cwd)
-  const recentDirs = useSessionStore((s) => s.recentDirs)
-  const openDirectory = useSessionStore((s) => s.openDirectory)
-  const [dropdownOpen, setDropdownOpen] = useState(false)
-
-  const handlePickFolder = async (): Promise<void> => {
-    setDropdownOpen(false)
-    const folder = await window.api.pickFolder()
-    if (folder) {
-      const { effort } = useSessionStore.getState()
-      await window.api.createSession(folder, effort)
-      openDirectory(folder)
-    }
-  }
-
-  const handleSelectDir = async (dir: string): Promise<void> => {
-    setDropdownOpen(false)
-    const { effort } = useSessionStore.getState()
-    await window.api.createSession(dir, effort)
-    openDirectory(dir)
-  }
-
-  const currentLabel = cwd
-    ? cwd.split(/[\\/]/).pop() || cwd
-    : 'Select a folder'
+  const cwd = useActiveSession((s) => s.cwd)
 
   return (
     <div className="flex flex-col items-center gap-4 -mt-16 animate-fade-in">
@@ -137,49 +113,12 @@ function WelcomeState(): React.JSX.Element {
       {/* Title */}
       <p className="text-[22px] text-text-secondary font-light tracking-tight">Let's build</p>
 
-      {/* Directory dropdown */}
-      <div className="relative">
-        <button
-          onClick={() => recentDirs.length > 0 ? setDropdownOpen(!dropdownOpen) : handlePickFolder()}
-          className="flex items-center gap-1.5 text-[15px] text-text-muted hover:text-text-secondary transition-colors cursor-pointer"
-        >
-          <span>{currentLabel}</span>
-          {recentDirs.length > 0 && (
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <polyline points="6 9 12 15 18 9" />
-            </svg>
-          )}
-        </button>
-
-        {dropdownOpen && (
-          <div className="absolute top-full mt-1 left-1/2 -translate-x-1/2 w-64 bg-bg-tertiary border border-border rounded-lg overflow-hidden shadow-lg shadow-black/30 z-10">
-            {recentDirs.map((dir) => (
-              <button
-                key={dir}
-                onClick={() => handleSelectDir(dir)}
-                className="w-full flex items-center gap-2 px-3 h-8 text-[12px] text-text-secondary hover:bg-bg-hover hover:text-text-primary transition-colors cursor-pointer text-left"
-              >
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" className="shrink-0 text-text-muted" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" />
-                </svg>
-                <span className="truncate">{dir.split(/[\\/]/).pop() || dir}</span>
-              </button>
-            ))}
-            <div className="border-t border-border">
-              <button
-                onClick={handlePickFolder}
-                className="w-full flex items-center gap-2 px-3 h-8 text-[12px] text-text-muted hover:bg-bg-hover hover:text-text-primary transition-colors cursor-pointer"
-              >
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" className="shrink-0" strokeLinecap="round">
-                  <line x1="12" y1="5" x2="12" y2="19" />
-                  <line x1="5" y1="12" x2="19" y2="12" />
-                </svg>
-                <span>Open another folder...</span>
-              </button>
-            </div>
-          </div>
-        )}
-      </div>
+      {/* Current directory */}
+      {cwd && (
+        <span className="text-[15px] text-text-muted">
+          {cwd.split(/[\\/]/).pop() || cwd}
+        </span>
+      )}
     </div>
   )
 }
@@ -212,4 +151,3 @@ function TypingIndicator(): React.JSX.Element {
     </div>
   )
 }
-

@@ -1,16 +1,23 @@
 export interface ContentBlock {
-  type: 'text' | 'tool_use' | 'tool_result' | 'thinking'
+  type: 'text' | 'tool_use' | 'tool_result' | 'thinking' | 'cli_command' | 'api_error' | 'compact_separator'
   text?: string
   toolName?: string
   toolInput?: Record<string, unknown>
   toolUseId?: string
   toolResult?: string
   isError?: boolean
+  // cli_command fields
+  commandName?: string
+  commandArgs?: string
+  commandOutput?: string
+  // api_error fields
+  errorType?: string
+  errorMessage?: string
 }
 
 export interface ChatMessage {
   id: string
-  role: 'user' | 'assistant'
+  role: 'user' | 'assistant' | 'system'
   content: ContentBlock[]
   timestamp: number
   planContent?: string
@@ -117,39 +124,66 @@ export interface ModelInfo {
   description: string
 }
 
+export interface SessionInfo {
+  sessionId: string
+  cwd: string
+  projectKey: string
+  title: string
+  timestamp: number
+  lastActivityAt: number
+}
+
+export interface DirectoryGroup {
+  cwd: string
+  projectKey: string
+  folderName: string
+  sessions: SessionInfo[]
+}
+
+/** Wrapper for routed event data — all session events include routingId */
+export interface RoutedData<T> {
+  routingId: string
+  data: T
+}
+
 export interface ClaudeAPI {
   platform: string
   pickFolder(): Promise<string | null>
-  createSession(cwd: string, effort?: string): Promise<void>
-  sendPrompt(prompt: string): Promise<void>
-  cancelSession(): Promise<void>
-  respondApproval(requestId: string, decision: ApprovalDecision, answers?: Record<string, string>): Promise<void>
+  createSession(routingId: string, cwd: string, effort?: string, resumeSessionId?: string): Promise<void>
+  sendPrompt(routingId: string, prompt: string): Promise<void>
+  cancelSession(routingId: string): Promise<void>
+  respondApproval(routingId: string, requestId: string, decision: ApprovalDecision, answers?: Record<string, string>): Promise<void>
   minimizeWindow(): Promise<void>
   maximizeWindow(): Promise<void>
   closeWindow(): Promise<void>
-  onMessage(cb: (message: ChatMessage) => void): () => void
-  onStreamEvent(cb: (data: StreamDelta) => void): () => void
-  onApprovalRequest(cb: (approval: PendingApproval) => void): () => void
-  onStatus(cb: (status: SessionStatus) => void): () => void
-  onResult(cb: (result: SessionResult) => void): () => void
-  onError(cb: (error: string) => void): () => void
-  onToolResult(cb: (data: { toolUseId: string; result: string; isError: boolean }) => void): () => void
+  listDirectories(): Promise<DirectoryGroup[]>
+  loadSessionHistory(sessionId: string, projectKey: string): Promise<{ messages: ChatMessage[]; taskNotifications: TaskNotification[] }>
+  loadSubagentHistory(sessionId: string, projectKey: string, agentId: string): Promise<ChatMessage[]>
+  loadBackgroundOutput(projectKey: string, taskId: string, outputFile?: string): Promise<{ content: string | null; purged: boolean }>
+
+  onMessage(cb: (data: RoutedData<ChatMessage>) => void): () => void
+  onStreamEvent(cb: (data: RoutedData<StreamDelta>) => void): () => void
+  onApprovalRequest(cb: (data: RoutedData<PendingApproval>) => void): () => void
+  onStatus(cb: (data: RoutedData<SessionStatus>) => void): () => void
+  onResult(cb: (data: RoutedData<SessionResult>) => void): () => void
+  onError(cb: (data: RoutedData<string>) => void): () => void
+  onToolResult(cb: (data: RoutedData<{ toolUseId: string; result: string; isError: boolean }>) => void): () => void
   onMaximizeChange(cb: (isMaximized: boolean) => void): () => void
-  onTaskProgress(cb: (data: TaskProgress) => void): () => void
-  onTaskNotification(cb: (data: TaskNotification) => void): () => void
-  onSubagentStream(cb: (data: SubagentStreamDelta) => void): () => void
-  onSubagentMessage(cb: (data: SubagentMessageData) => void): () => void
-  onSubagentToolResult(cb: (data: SubagentToolResultData) => void): () => void
-  onPermissionMode(cb: (mode: PermissionMode) => void): () => void
-  onBackgroundOutput(cb: (data: BackgroundOutput) => void): () => void
-  watchBackground(toolUseId: string): Promise<void>
-  unwatchBackground(toolUseId: string): Promise<void>
-  readBackgroundRange(toolUseId: string, offset: number, length: number): Promise<string>
-  stopTask(toolUseId: string): Promise<{ success: boolean; error?: string }>
-  setPermissionMode(mode: string): Promise<void>
-  setModel(model: string): Promise<void>
-  setEffort(effort: string): Promise<void>
+  onTaskProgress(cb: (data: RoutedData<TaskProgress>) => void): () => void
+  onTaskNotification(cb: (data: RoutedData<TaskNotification>) => void): () => void
+  onSubagentStream(cb: (data: RoutedData<SubagentStreamDelta>) => void): () => void
+  onSubagentMessage(cb: (data: RoutedData<SubagentMessageData>) => void): () => void
+  onSubagentToolResult(cb: (data: RoutedData<SubagentToolResultData>) => void): () => void
+  onPermissionMode(cb: (data: RoutedData<PermissionMode>) => void): () => void
+  onBackgroundOutput(cb: (data: RoutedData<BackgroundOutput>) => void): () => void
+  watchBackground(routingId: string, toolUseId: string): Promise<void>
+  unwatchBackground(routingId: string, toolUseId: string): Promise<void>
+  readBackgroundRange(routingId: string, toolUseId: string, offset: number, length: number): Promise<string>
+  stopTask(routingId: string, toolUseId: string): Promise<{ success: boolean; error?: string }>
+  setPermissionMode(routingId: string, mode: string): Promise<void>
+  setModel(routingId: string, model: string): Promise<void>
+  setEffort(routingId: string, effort: string): Promise<void>
   getModels(): Promise<ModelInfo[]>
-  getPlanContent(): Promise<string | null>
-  getSessionLogPath(): Promise<string | null>
+  getPlanContent(routingId: string): Promise<string | null>
+  getSessionLogPath(routingId: string): Promise<string | null>
 }

@@ -1,5 +1,6 @@
+import { useState } from 'react'
 import type { ChatMessage, ContentBlock, PendingApproval } from '../../../../shared/types'
-import { useSessionStore } from '../../stores/session-store'
+import { useActiveSession } from '../../stores/session-store'
 import { MarkdownRenderer } from './MarkdownRenderer'
 import { ToolCallBlock } from './ToolCallBlock'
 import { ExitPlanModeCard } from './ExitPlanModeCard'
@@ -11,9 +12,29 @@ import { TaskCard } from './TaskCard'
 const TODO_TOOLS = new Set(['TodoWrite'])
 
 export function MessageBubble({ message }: { message: ChatMessage }): React.JSX.Element {
-  const pendingApprovals = useSessionStore((s) => s.pendingApprovals)
-  const messages = useSessionStore((s) => s.messages)
-  const thinkingStartedAt = useSessionStore((s) => s.thinkingStartedAt)
+  const pendingApprovals = useActiveSession((s) => s.pendingApprovals)
+  const messages = useActiveSession((s) => s.messages)
+  const thinkingStartedAt = useActiveSession((s) => s.thinkingStartedAt)
+
+  // System messages (compact separators, CLI commands, API errors)
+  if (message.role === 'system') {
+    return (
+      <div className="flex flex-col gap-2 animate-fade-in">
+        {message.content.map((block, i) => {
+          if (block.type === 'compact_separator') {
+            return <CompactSeparator key={i} summary={block.text} />
+          }
+          if (block.type === 'cli_command') {
+            return <CliCommandBlock key={i} block={block} />
+          }
+          if (block.type === 'api_error') {
+            return <ApiErrorBlock key={i} block={block} />
+          }
+          return null
+        })}
+      </div>
+    )
+  }
 
   if (message.role === 'user') {
     // User message with planContent: show plan block instead of raw text
@@ -185,4 +206,114 @@ function ContentBlockView({ block }: { block: ContentBlock }): React.JSX.Element
   }
 
   return null
+}
+
+function CompactSeparator({ summary }: { summary?: string }): React.JSX.Element {
+  const [expanded, setExpanded] = useState(false)
+  const hasSummary = !!summary?.trim()
+
+  if (!hasSummary) {
+    return (
+      <div className="flex items-center gap-3 py-1">
+        <div className="flex-1 h-px bg-border" />
+        <span className="text-[11px] text-text-muted font-mono">compacted</span>
+        <div className="flex-1 h-px bg-border" />
+      </div>
+    )
+  }
+
+  return (
+    <div className="rounded-lg border border-warning/30 bg-bg-secondary overflow-hidden">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="w-full flex items-center gap-2 px-3 h-9 text-[13px] bg-warning/5 hover:bg-warning/10 transition-colors cursor-pointer"
+      >
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-warning shrink-0">
+          <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" />
+        </svg>
+        <span className="font-mono font-medium text-warning">Compacted</span>
+        <span className="text-text-secondary text-[12px] truncate flex-1 text-left">Context summary</span>
+        <svg
+          width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
+          className={`text-text-secondary transition-transform shrink-0 ${expanded ? 'rotate-180' : ''}`}
+        >
+          <polyline points="6 9 12 15 18 9" />
+        </svg>
+      </button>
+      {expanded && (
+        <div className="border-t border-border px-3 py-2.5">
+          <div className="text-[12px] leading-[1.6] max-h-80 overflow-y-auto">
+            <MarkdownRenderer content={summary!} />
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function CliCommandBlock({ block }: { block: ContentBlock }): React.JSX.Element {
+  const name = block.commandName || ''
+  const args = block.commandArgs || ''
+  const output = block.commandOutput || ''
+
+  // "output" type is just stdout/stderr from a previous command — show inline
+  if (name === 'output') {
+    if (!output) return <></>
+    return (
+      <div className="flex justify-end">
+        <div className="max-w-[85%] bg-bg-tertiary rounded-2xl px-4 py-2.5 text-[13px] text-text-primary leading-[1.6]">
+          <pre className="font-mono text-[12px] text-text-primary/70 whitespace-pre-wrap break-words">{output}</pre>
+        </div>
+      </div>
+    )
+  }
+
+  // Command execution — show as user bubble with code block
+  const display = args ? `/${name} ${args}` : `/${name}`
+  return (
+    <div className="flex justify-end">
+      <div className="max-w-[85%] bg-bg-tertiary rounded-2xl px-4 py-2.5 text-[13px] text-text-primary leading-[1.6]">
+        <pre className="font-mono text-[12px] text-accent whitespace-pre-wrap break-words">{display}</pre>
+      </div>
+    </div>
+  )
+}
+
+function ApiErrorBlock({ block }: { block: ContentBlock }): React.JSX.Element {
+  const [expanded, setExpanded] = useState(false)
+  const errorType = block.errorType || 'unknown'
+  const errorMessage = block.errorMessage || ''
+
+  const label = errorType === 'rate_limit'
+    ? 'Rate Limited'
+    : errorType === 'invalid_request'
+      ? 'Invalid Request'
+      : errorType.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
+
+  return (
+    <div className="rounded-lg border border-danger/30 bg-bg-secondary overflow-hidden">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="w-full flex items-center gap-2 px-3 h-9 text-[13px] hover:bg-bg-hover transition-colors cursor-pointer"
+      >
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-danger shrink-0">
+          <circle cx="12" cy="12" r="10" />
+          <line x1="15" y1="9" x2="9" y2="15" />
+          <line x1="9" y1="9" x2="15" y2="15" />
+        </svg>
+        <span className="font-medium text-danger">API Error</span>
+        <span className="text-text-secondary truncate flex-1 text-left text-[12px]">{label}</span>
+        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={`text-text-secondary transition-transform shrink-0 ${expanded ? 'rotate-180' : ''}`}>
+          <polyline points="6 9 12 15 18 9" />
+        </svg>
+      </button>
+      {expanded && errorMessage && (
+        <div className="border-t border-border px-3 py-2.5">
+          <pre className="text-[12px] font-mono text-danger/80 whitespace-pre-wrap break-words max-h-32 overflow-y-auto leading-[1.5]">
+            {errorMessage}
+          </pre>
+        </div>
+      )}
+    </div>
+  )
 }

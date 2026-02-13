@@ -1,8 +1,8 @@
-import { useSessionStore } from '../../stores/session-store'
+import { useActiveSession } from '../../stores/session-store'
 import { MarkdownRenderer } from './MarkdownRenderer'
 
 export function StreamingText(): React.JSX.Element | null {
-  const text = useSessionStore((s) => s.streamingText)
+  const text = useActiveSession((s) => s.streamingText)
   if (!text) return null
 
   return (

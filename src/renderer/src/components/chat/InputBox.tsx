@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
-import { useSessionStore } from '../../stores/session-store'
+import { useSessionStore, useActiveSession } from '../../stores/session-store'
 import { v4 as uuid } from 'uuid'
 
 const EFFORT_LEVELS = ['low', 'medium', 'high'] as const
@@ -13,11 +13,14 @@ const PERMISSION_MODES = [
 export function InputBox(): React.JSX.Element {
   const [text, setText] = useState('')
   const textareaRef = useRef<HTMLTextAreaElement>(null)
-  const cwd = useSessionStore((s) => s.cwd)
-  const status = useSessionStore((s) => s.status)
+  const activeSessionId = useSessionStore((s) => s.activeSessionId)
+  const cwd = useActiveSession((s) => s.cwd)
+  const status = useActiveSession((s) => s.status)
+  const sdkActive = useActiveSession((s) => s.sdkActive)
   const addUserMessage = useSessionStore((s) => s.addUserMessage)
+  const markSdkActive = useSessionStore((s) => s.markSdkActive)
   const isRunning = status.state === 'running'
-  const isDisabled = !cwd || isRunning
+  const isDisabled = !activeSessionId || !cwd || isRunning
 
   const permissionMode = useSessionStore((s) => s.permissionMode)
   const setPermissionMode = useSessionStore((s) => s.setPermissionMode)
@@ -28,7 +31,6 @@ export function InputBox(): React.JSX.Element {
   const availableModels = useSessionStore((s) => s.availableModels)
   const setAvailableModels = useSessionStore((s) => s.setAvailableModels)
   const models = availableModels.map((m) => {
-    // Extract short name from description (e.g. "Opus 4.6 · Most capable..." → "Opus 4.6")
     const shortName = m.description?.split('·')[0]?.trim() || m.displayName
     return { ...m, shortName }
   })
@@ -51,7 +53,6 @@ export function InputBox(): React.JSX.Element {
       setModelOpen(false)
       setEffortOpen(false)
       setPlusOpen(false)
-
     }
     document.addEventListener('click', handler)
     return () => document.removeEventListener('click', handler)
@@ -59,16 +60,31 @@ export function InputBox(): React.JSX.Element {
 
   const handleSend = useCallback(async () => {
     const prompt = text.trim()
-    if (!prompt || isDisabled) return
-    addUserMessage(uuid(), prompt)
+    if (!prompt || isDisabled || !activeSessionId) return
+
+    addUserMessage(activeSessionId, uuid(), prompt)
     setText('')
     if (textareaRef.current) textareaRef.current.style.height = 'auto'
-    await window.api.sendPrompt(prompt)
-  }, [text, isDisabled, addUserMessage])
+
+    // Lazy SDK creation: create session on first message
+    if (!sdkActive) {
+      const { effort: currentEffort, sessions } = useSessionStore.getState()
+      const session = sessions[activeSessionId]
+      // For historical sessions, routingId === sessionId, pass as resumeSessionId
+      const isHistorical = session && session.messages.length > 0 && !session.sdkActive
+      const resumeId = isHistorical ? activeSessionId : undefined
+      await window.api.createSession(activeSessionId, session?.cwd || '', currentEffort, resumeId)
+      markSdkActive(activeSessionId)
+    }
+
+    await window.api.sendPrompt(activeSessionId, prompt)
+  }, [text, isDisabled, activeSessionId, addUserMessage, sdkActive, markSdkActive])
 
   const handleCancel = useCallback(async () => {
-    await window.api.cancelSession()
-  }, [])
+    if (activeSessionId) {
+      await window.api.cancelSession(activeSessionId)
+    }
+  }, [activeSessionId])
 
   const handleKeyDown = (e: React.KeyboardEvent): void => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -80,7 +96,7 @@ export function InputBox(): React.JSX.Element {
       const ids = PERMISSION_MODES.map((m) => m.id)
       const next = ids[(ids.indexOf(permissionMode) + 1) % ids.length]
       setPermissionMode(next)
-      window.api.setPermissionMode(next)
+      if (activeSessionId) window.api.setPermissionMode(activeSessionId, next)
     }
     if (e.key === 'Escape' && isRunning) handleCancel()
   }
@@ -126,7 +142,7 @@ export function InputBox(): React.JSX.Element {
             onKeyDown={handleKeyDown}
             onMouseDown={() => { setModelOpen(false); setEffortOpen(false); setPlusOpen(false); }}
             placeholder={
-              !cwd
+              !activeSessionId || !cwd
                 ? 'Select a folder to get started'
                 : isRunning
                   ? 'Claude is working...'
@@ -149,7 +165,6 @@ export function InputBox(): React.JSX.Element {
                     setPlusOpen(!plusOpen)
                     setModelOpen(false)
                     setEffortOpen(false)
-              
                   }}
                   className="w-7 h-7 flex items-center justify-center rounded-lg text-text-muted hover:text-text-secondary hover:bg-bg-hover transition-colors cursor-pointer"
                 >
@@ -180,7 +195,6 @@ export function InputBox(): React.JSX.Element {
                     setModelOpen(!modelOpen)
                     setEffortOpen(false)
                     setPlusOpen(false)
-              
                   }}
                   className="h-7 px-2 flex items-center gap-1 rounded-lg text-[11px] text-text-muted hover:text-text-secondary hover:bg-bg-hover transition-colors cursor-pointer"
                 >
@@ -196,7 +210,7 @@ export function InputBox(): React.JSX.Element {
                         key={m.value}
                         onClick={() => {
                           setSelectedModelValue(m.value)
-                          window.api.setModel(m.value)
+                          if (activeSessionId) window.api.setModel(activeSessionId, m.value)
                           setModelOpen(false)
                         }}
                         className={`w-full flex flex-col px-3 py-1.5 transition-colors cursor-pointer text-left ${
@@ -223,7 +237,6 @@ export function InputBox(): React.JSX.Element {
                     setEffortOpen(!effortOpen)
                     setModelOpen(false)
                     setPlusOpen(false)
-              
                   }}
                   className="h-7 px-2 flex items-center gap-1 rounded-lg text-[11px] text-text-muted hover:text-text-secondary hover:bg-bg-hover transition-colors cursor-pointer capitalize"
                 >
@@ -239,7 +252,7 @@ export function InputBox(): React.JSX.Element {
                         key={level}
                         onClick={() => {
                           setEffort(level)
-                          window.api.setEffort(level)
+                          if (activeSessionId) window.api.setEffort(activeSessionId, level)
                           setEffortOpen(false)
                         }}
                         className={`w-full flex items-center px-3 h-8 text-[12px] transition-colors cursor-pointer text-left capitalize ${

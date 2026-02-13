@@ -1,6 +1,6 @@
 import { useState, useMemo } from 'react'
 import type { ContentBlock } from '../../../../shared/types'
-import { useSessionStore } from '../../stores/session-store'
+import { useSessionStore, useActiveSession } from '../../stores/session-store'
 import { MarkdownRenderer } from './MarkdownRenderer'
 import { SubagentMessages } from './SubagentMessages'
 
@@ -61,19 +61,21 @@ function formatTokens(n: number): string {
 }
 
 export function TaskCard({ block, result }: Props): React.JSX.Element {
-  const taskProgressMap = useSessionStore((s) => s.taskProgressMap)
+  const activeSessionId = useSessionStore((s) => s.activeSessionId)
+  const taskProgressMap = useActiveSession((s) => s.taskProgressMap)
   const openTaskPanel = useSessionStore((s) => s.openTaskPanel)
-  const subagentMsgs = useSessionStore((s) => s.subagentMessages)
-  const subagentText = useSessionStore((s) => s.subagentStreamingText)
-  const subagentThinking = useSessionStore((s) => s.subagentStreamingThinking)
-  const taskNotifications = useSessionStore((s) => s.taskNotifications)
-  const stoppingTaskIds = useSessionStore((s) => s.stoppingTaskIds)
+  const subagentMsgs = useActiveSession((s) => s.subagentMessages)
+  const subagentText = useActiveSession((s) => s.subagentStreamingText)
+  const subagentThinking = useActiveSession((s) => s.subagentStreamingThinking)
+  const taskNotifications = useActiveSession((s) => s.taskNotifications)
+  const stoppingTaskIds = useActiveSession((s) => s.stoppingTaskIds)
   const setTaskStopping = useSessionStore((s) => s.setTaskStopping)
   const clearTaskStopping = useSessionStore((s) => s.clearTaskStopping)
   const [expanded, setExpanded] = useState(false)
 
   const toolUseId = block.toolUseId || ''
   const input = block.toolInput || {}
+  const isHistorical = useActiveSession((s) => s.isHistorical)
   const hasResult = !!result
   const msgs = subagentMsgs[toolUseId] || []
   const streamText = subagentText[toolUseId] || ''
@@ -83,7 +85,9 @@ export function TaskCard({ block, result }: Props): React.JSX.Element {
   const isBackground = !!input.run_in_background
   // Background tasks get a tool_result immediately ("agent launched") but keep running until task_notification
   const isError = bgNotification ? bgNotification.status === 'failed' : (result?.isError ?? false)
-  const isRunning = isBackground ? !bgNotification : !hasResult
+  const isRunning = isHistorical ? false : (isBackground ? !bgNotification : !hasResult)
+  // In historical mode, tasks without results show as "loaded" (neutral state)
+  const isLoaded = isHistorical && !hasResult && !bgNotification
 
   const description = String(input.description || input.prompt || '').slice(0, 120)
   const prompt = String(input.prompt || '')
@@ -113,20 +117,20 @@ export function TaskCard({ block, result }: Props): React.JSX.Element {
   const isStopping = stoppingTaskIds.includes(toolUseId)
 
   const handleStopTask = async (): Promise<void> => {
-    setTaskStopping(toolUseId)
-    const result = await window.api.stopTask(toolUseId)
+    if (!activeSessionId) return
+    setTaskStopping(activeSessionId, toolUseId)
+    const result = await window.api.stopTask(activeSessionId, toolUseId)
 
     if (!result.success) {
       console.error('Failed to stop task:', result.error)
-      clearTaskStopping(toolUseId)
+      clearTaskStopping(activeSessionId, toolUseId)
       return
     }
 
     // Set timeout to clear state if notification doesn't arrive within 10s
     setTimeout(() => {
-      if (stoppingTaskIds.includes(toolUseId)) {
-        clearTaskStopping(toolUseId)
-      }
+      const rid = useSessionStore.getState().activeSessionId
+      if (rid) clearTaskStopping(rid, toolUseId)
     }, 10000)
   }
 
@@ -135,6 +139,11 @@ export function TaskCard({ block, result }: Props): React.JSX.Element {
       <circle cx="12" cy="12" r="10" />
       <line x1="15" y1="9" x2="9" y2="15" />
       <line x1="9" y1="9" x2="15" y2="15" />
+    </svg>
+  ) : isLoaded ? (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-text-muted shrink-0">
+      <circle cx="12" cy="12" r="10" />
+      <line x1="8" y1="12" x2="16" y2="12" />
     </svg>
   ) : isCompleted ? (
     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-success shrink-0">
@@ -158,7 +167,10 @@ export function TaskCard({ block, result }: Props): React.JSX.Element {
         {elapsed != null && (
           <span className="text-[11px] text-text-muted font-mono shrink-0">{formatElapsed(elapsed)}</span>
         )}
-        {isRunning && !isStopping && (
+        {isLoaded && (
+          <span className="text-[10px] text-text-muted shrink-0">loaded</span>
+        )}
+        {isRunning && !isStopping && !isHistorical && (
           <button
             onClick={(e) => { e.stopPropagation(); handleStopTask() }}
             className="text-[11px] px-2 py-0.5 rounded bg-danger/10 text-danger hover:bg-danger/20 transition-colors shrink-0"
@@ -166,7 +178,7 @@ export function TaskCard({ block, result }: Props): React.JSX.Element {
             Stop
           </button>
         )}
-        {isStopping && (
+        {isStopping && !isHistorical && (
           <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-warning/10 text-warning shrink-0">
             stopping...
           </span>
@@ -210,7 +222,7 @@ export function TaskCard({ block, result }: Props): React.JSX.Element {
           )}
           <div className="flex-1" />
           <button
-            onClick={() => openTaskPanel(toolUseId)}
+            onClick={() => activeSessionId && openTaskPanel(activeSessionId, toolUseId)}
             className="text-[11px] text-accent hover:underline cursor-pointer"
           >
             Open in panel
@@ -301,7 +313,7 @@ export function TaskCard({ block, result }: Props): React.JSX.Element {
               )}
               <div className="flex-1" />
               <button
-                onClick={() => openTaskPanel(toolUseId)}
+                onClick={() => activeSessionId && openTaskPanel(activeSessionId, toolUseId)}
                 className="text-[11px] text-accent hover:underline cursor-pointer"
               >
                 Open in panel

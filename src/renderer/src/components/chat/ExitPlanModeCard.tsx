@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
-import { useSessionStore } from '../../stores/session-store'
+import { useSessionStore, useActiveSession } from '../../stores/session-store'
 import { v4 as uuid } from 'uuid'
 import type { PendingApproval, ContentBlock } from '../../../../shared/types'
 import { MarkdownRenderer } from './MarkdownRenderer'
@@ -32,11 +32,13 @@ interface ExitPlanModeCardProps {
 }
 
 export function ExitPlanModeCard({ block, approval }: ExitPlanModeCardProps): React.JSX.Element {
+  const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const removePendingApproval = useSessionStore((s) => s.removePendingApproval)
   const clearConversation = useSessionStore((s) => s.clearConversation)
   const setPermissionMode = useSessionStore((s) => s.setPermissionMode)
   const addUserMessage = useSessionStore((s) => s.addUserMessage)
-  const cwd = useSessionStore((s) => s.cwd)
+  const markSdkActive = useSessionStore((s) => s.markSdkActive)
+  const cwd = useActiveSession((s) => s.cwd)
 
   const [expanded, setExpanded] = useState(true)
   const [showFeedback, setShowFeedback] = useState(false)
@@ -52,62 +54,65 @@ export function ExitPlanModeCard({ block, approval }: ExitPlanModeCardProps): Re
 
   // Option 1: Start fresh, auto-accept edits
   const handleStartFresh = useCallback(async () => {
-    if (!planContent || !cwd || !approval) return
+    if (!planContent || !cwd || !approval || !activeSessionId) return
 
     // Get the session log path before cancelling (for transcript reference)
-    const sessionLogPath = await window.api.getSessionLogPath()
+    const sessionLogPath = await window.api.getSessionLogPath(activeSessionId)
 
-    await window.api.respondApproval(approval.requestId, 'deny')
-    removePendingApproval(approval.requestId)
+    await window.api.respondApproval(activeSessionId, approval.requestId, 'deny')
+    removePendingApproval(activeSessionId, approval.requestId)
 
-    await window.api.cancelSession()
-    clearConversation()
+    await window.api.cancelSession(activeSessionId)
+    clearConversation(activeSessionId)
 
-    await window.api.createSession(cwd)
+    // Create a fresh SDK session for the same routingId
+    const { effort } = useSessionStore.getState()
+    await window.api.createSession(activeSessionId, cwd, effort)
+    markSdkActive(activeSessionId)
     setPermissionMode('acceptEdits')
-    await window.api.setPermissionMode('acceptEdits')
+    await window.api.setPermissionMode(activeSessionId, 'acceptEdits')
 
     // Build prompt matching CLI format, including transcript reference
     let prompt = `Implement the following plan:\n\n${planContent}`
     if (sessionLogPath) {
       prompt += `\n\nIf you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: ${sessionLogPath}`
     }
-    addUserMessage(uuid(), prompt, planContent)
-    await window.api.sendPrompt(prompt)
-  }, [planContent, approval, cwd, removePendingApproval, clearConversation, setPermissionMode, addUserMessage])
+    addUserMessage(activeSessionId, uuid(), prompt, planContent)
+    await window.api.sendPrompt(activeSessionId, prompt)
+  }, [planContent, approval, cwd, activeSessionId, removePendingApproval, clearConversation, setPermissionMode, addUserMessage, markSdkActive])
 
   // Option 2: Continue, auto-accept edits
   const handleContinueAutoEdit = useCallback(async () => {
-    if (!approval) return
-    await window.api.respondApproval(approval.requestId, 'allow')
-    removePendingApproval(approval.requestId)
+    if (!approval || !activeSessionId) return
+    await window.api.respondApproval(activeSessionId, approval.requestId, 'allow')
+    removePendingApproval(activeSessionId, approval.requestId)
     await waitForModeChange()
 
     setPermissionMode('acceptEdits')
-    await window.api.setPermissionMode('acceptEdits')
-  }, [approval, removePendingApproval, setPermissionMode])
+    await window.api.setPermissionMode(activeSessionId, 'acceptEdits')
+  }, [approval, activeSessionId, removePendingApproval, setPermissionMode])
 
   // Option 3: Continue, approve manually
   const handleContinueManual = useCallback(async () => {
-    if (!approval) return
-    await window.api.respondApproval(approval.requestId, 'allow')
-    removePendingApproval(approval.requestId)
+    if (!approval || !activeSessionId) return
+    await window.api.respondApproval(activeSessionId, approval.requestId, 'allow')
+    removePendingApproval(activeSessionId, approval.requestId)
     await waitForModeChange()
 
     setPermissionMode('default')
-    await window.api.setPermissionMode('default')
-  }, [approval, removePendingApproval, setPermissionMode])
+    await window.api.setPermissionMode(activeSessionId, 'default')
+  }, [approval, activeSessionId, removePendingApproval, setPermissionMode])
 
   // Option 4: Keep planning — submit feedback
   const handleKeepPlanning = useCallback(async () => {
-    if (!approval) return
+    if (!approval || !activeSessionId) return
     const text = feedback.trim()
     if (!text) return
-    await window.api.respondApproval(approval.requestId, 'deny', { feedback: text })
-    removePendingApproval(approval.requestId)
+    await window.api.respondApproval(activeSessionId, approval.requestId, 'deny', { feedback: text })
+    removePendingApproval(activeSessionId, approval.requestId)
     setShowFeedback(false)
     setFeedback('')
-  }, [feedback, approval, removePendingApproval])
+  }, [feedback, approval, activeSessionId, removePendingApproval])
 
   return (
     <div className="rounded-lg border border-accent/40 bg-bg-secondary overflow-hidden animate-fade-in">

@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import type { ContentBlock, PendingApproval } from '../../../../shared/types'
-import { useSessionStore } from '../../stores/session-store'
+import { useSessionStore, useActiveSession } from '../../stores/session-store'
 
 interface Props {
   block: ContentBlock
@@ -9,31 +9,35 @@ interface Props {
 }
 
 export function ToolCallBlock({ block, result, approval }: Props): React.JSX.Element {
+  const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const removePendingApproval = useSessionStore((s) => s.removePendingApproval)
   const openTaskPanel = useSessionStore((s) => s.openTaskPanel)
-  const stoppingTaskIds = useSessionStore((s) => s.stoppingTaskIds)
+  const stoppingTaskIds = useActiveSession((s) => s.stoppingTaskIds)
   const setTaskStopping = useSessionStore((s) => s.setTaskStopping)
   const clearTaskStopping = useSessionStore((s) => s.clearTaskStopping)
+  const isHistorical = useActiveSession((s) => s.isHistorical)
   const [expanded, setExpanded] = useState(false)
 
   const toolUseId = block.toolUseId || ''
   const isBackgroundBash = block.toolName === 'Bash' && !!block.toolInput?.run_in_background
-  const taskNotifications = useSessionStore((s) => s.taskNotifications)
+  const taskNotifications = useActiveSession((s) => s.taskNotifications)
   const summary = getSummary(block)
   const hasResult = !!result
-  const isPendingApproval = !!approval
+  const isPendingApproval = !isHistorical && !!approval
 
   // For background bash, "done" means we got a task_notification, not just a tool_result
   const bgNotification = isBackgroundBash ? taskNotifications.find((n) => n.toolUseId === toolUseId) : null
-  const bgRunning = isBackgroundBash && !bgNotification
+  const bgRunning = isBackgroundBash && !bgNotification && !isHistorical
   const bgError = isBackgroundBash && bgNotification?.status === 'failed'
   const isError = isBackgroundBash ? bgError : (result?.isError ?? false)
   const isSuccess = isBackgroundBash ? (!!bgNotification && !bgError) : (hasResult && !isError)
+  // In historical mode, tools without results show as "loaded" (neutral state)
+  const isLoaded = isHistorical && !hasResult && !isSuccess && !isError
 
   const handleApproval = async (decision: 'allow' | 'deny'): Promise<void> => {
-    if (!approval) return
-    await window.api.respondApproval(approval.requestId, decision)
-    removePendingApproval(approval.requestId)
+    if (!approval || !activeSessionId) return
+    await window.api.respondApproval(activeSessionId, approval.requestId, decision)
+    removePendingApproval(activeSessionId, approval.requestId)
   }
 
   // Determine border color based on state
@@ -64,6 +68,11 @@ export function ToolCallBlock({ block, result, approval }: Props): React.JSX.Ele
       <circle cx="12" cy="12" r="10" />
       <polyline points="8 12 11 15 16 9" />
     </svg>
+  ) : isLoaded ? (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-text-muted shrink-0">
+      <circle cx="12" cy="12" r="10" />
+      <line x1="8" y1="12" x2="16" y2="12" />
+    </svg>
   ) : bgRunning ? (
     <span className="w-3 h-3 rounded-full border-2 border-accent border-t-transparent shrink-0 animate-spin-slow" />
   ) : (
@@ -74,20 +83,20 @@ export function ToolCallBlock({ block, result, approval }: Props): React.JSX.Ele
 
   const handleStopTask = async (e: React.MouseEvent): Promise<void> => {
     e.stopPropagation()
-    setTaskStopping(toolUseId)
-    const result = await window.api.stopTask(toolUseId)
+    if (!activeSessionId) return
+    setTaskStopping(activeSessionId, toolUseId)
+    const result = await window.api.stopTask(activeSessionId, toolUseId)
 
     if (!result.success) {
       console.error('Failed to stop task:', result.error)
-      clearTaskStopping(toolUseId)
+      clearTaskStopping(activeSessionId, toolUseId)
       return
     }
 
     // Set timeout to clear state if notification doesn't arrive within 10s
     setTimeout(() => {
-      if (stoppingTaskIds.includes(toolUseId)) {
-        clearTaskStopping(toolUseId)
-      }
+      const rid = useSessionStore.getState().activeSessionId
+      if (rid) clearTaskStopping(rid, toolUseId)
     }, 10000)
   }
 
@@ -104,7 +113,10 @@ export function ToolCallBlock({ block, result, approval }: Props): React.JSX.Ele
         {isPendingApproval && (
           <span className="text-[11px] font-semibold text-warning uppercase tracking-wider mr-1">Permission</span>
         )}
-        {bgRunning && !isStopping && (
+        {isLoaded && (
+          <span className="text-[10px] text-text-muted shrink-0">loaded</span>
+        )}
+        {bgRunning && !isStopping && !isHistorical && (
           <button
             onClick={handleStopTask}
             className="text-[11px] px-2 py-0.5 rounded bg-danger/10 text-danger hover:bg-danger/20 transition-colors shrink-0"
@@ -112,7 +124,7 @@ export function ToolCallBlock({ block, result, approval }: Props): React.JSX.Ele
             Stop
           </button>
         )}
-        {isStopping && (
+        {isStopping && !isHistorical && (
           <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-warning/10 text-warning shrink-0">
             stopping...
           </span>
@@ -173,7 +185,7 @@ export function ToolCallBlock({ block, result, approval }: Props): React.JSX.Ele
           <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-warning/10 text-warning">background</span>
           <div className="flex-1" />
           <button
-            onClick={() => openTaskPanel(toolUseId)}
+            onClick={() => activeSessionId && openTaskPanel(activeSessionId, toolUseId)}
             className="text-[11px] text-accent hover:underline cursor-pointer"
           >
             Open in panel
@@ -185,7 +197,8 @@ export function ToolCallBlock({ block, result, approval }: Props): React.JSX.Ele
 }
 
 function BackgroundBashOutput({ toolUseId }: { toolUseId: string }): React.JSX.Element | null {
-  const bgOutput = useSessionStore((s) => s.backgroundOutputs[toolUseId])
+  const activeSessionId = useSessionStore((s) => s.activeSessionId)
+  const bgOutput = useActiveSession((s) => s.backgroundOutputs[toolUseId])
   const watchBg = useSessionStore((s) => s.watchBackgroundOutput)
   const unwatchBg = useSessionStore((s) => s.unwatchBackgroundOutput)
   const [prependedContent, setPrependedContent] = useState('')
@@ -196,9 +209,10 @@ function BackgroundBashOutput({ toolUseId }: { toolUseId: string }): React.JSX.E
 
   // Watch on mount, unwatch on unmount (ref-counted)
   useEffect(() => {
-    watchBg(toolUseId)
-    return () => { unwatchBg(toolUseId) }
-  }, [toolUseId, watchBg, unwatchBg])
+    if (!activeSessionId) return
+    watchBg(activeSessionId, toolUseId)
+    return () => { if (activeSessionId) unwatchBg(activeSessionId, toolUseId) }
+  }, [toolUseId, activeSessionId, watchBg, unwatchBg])
 
   // Auto-scroll
   useEffect(() => {
@@ -228,7 +242,9 @@ function BackgroundBashOutput({ toolUseId }: { toolUseId: string }): React.JSX.E
     const chunkSize = 64 * 1024
     const offset = Math.max(0, bgOutput.totalSize - loaded - chunkSize)
     const length = Math.min(chunkSize, bgOutput.totalSize - loaded)
-    const chunk = await window.api.readBackgroundRange(toolUseId, offset, length)
+    const rid = useSessionStore.getState().activeSessionId
+    if (!rid) return
+    const chunk = await window.api.readBackgroundRange(rid, toolUseId, offset, length)
     setPrependedContent((prev) => chunk + prev)
     setLoadingMore(false)
   }, [bgOutput, prependedContent, loadingMore, toolUseId])

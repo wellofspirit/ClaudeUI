@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useSessionStore } from '../stores/session-store'
+import { useActiveSession } from '../stores/session-store'
 import type { TodoItem } from '../../../shared/types'
 
 function StatusIndicator({ status }: { status: TodoItem['status'] }): React.JSX.Element {
@@ -37,7 +37,7 @@ function CircularProgress({ pct }: { pct: number }): React.JSX.Element {
 }
 
 export function TodoWidget(): React.JSX.Element | null {
-  const todos = useSessionStore((s) => s.todos)
+  const todos = useActiveSession((s) => s.todos)
   const [expanded, setExpanded] = useState(false)
 
   if (todos.length === 0) return null

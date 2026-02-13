@@ -6,14 +6,15 @@ import type { TodoItem } from '../../../shared/types'
  * When a TodoWrite tool completes, extract the todos from its input
  * and update the store. TodoWrite replaces the entire list atomically.
  */
-function processTodoWriteResult(toolUseId: string, isError: boolean): void {
+function processTodoWriteResult(routingId: string, toolUseId: string, isError: boolean): void {
   if (isError) return
 
-  const { messages, setTodos } = useSessionStore.getState()
+  const { sessions, setTodos } = useSessionStore.getState()
+  const session = sessions[routingId]
+  if (!session) return
 
-  // Find the TodoWrite tool_use block
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const msg = messages[i]
+  for (let i = session.messages.length - 1; i >= 0; i--) {
+    const msg = session.messages[i]
     if (msg.role !== 'assistant') continue
     for (const b of msg.content) {
       if (b.type === 'tool_use' && b.toolUseId === toolUseId && b.toolName === 'TodoWrite') {
@@ -24,7 +25,7 @@ function processTodoWriteResult(toolUseId: string, isError: boolean): void {
             status: (t.status as TodoItem['status']) || 'pending',
             activeForm: String(t.activeForm || '')
           }))
-          setTodos(todos)
+          setTodos(routingId, todos)
         }
         return
       }
@@ -52,13 +53,10 @@ export function useClaudeEvents(): void {
 
   useEffect(() => {
     const cleanups = [
-      window.api.onMessage((msg) => {
-        addMessage(msg)
+      window.api.onMessage(({ routingId, data: msg }) => {
+        addMessage(routingId, msg)
 
         // Intercept TodoWrite from assistant messages directly.
-        // The SDK sends partial messages with tool_use blocks — when we see
-        // a TodoWrite tool_use, we can extract the todos from its input
-        // immediately (we don't need to wait for the tool_result).
         for (const b of msg.content) {
           if (b.type === 'tool_use' && b.toolName === 'TodoWrite' && b.toolInput) {
             const input = b.toolInput
@@ -68,59 +66,58 @@ export function useClaudeEvents(): void {
                 status: (t.status as TodoItem['status']) || 'pending',
                 activeForm: String(t.activeForm || '')
               }))
-              useSessionStore.getState().setTodos(todos)
+              useSessionStore.getState().setTodos(routingId, todos)
             }
           }
         }
       }),
-      window.api.onStreamEvent((data) => {
+      window.api.onStreamEvent(({ routingId, data }) => {
         if (data.type === 'thinking') {
-          appendStreamingThinking(data.text)
+          appendStreamingThinking(routingId, data.text)
         } else {
-          appendStreamingText(data.text)
+          appendStreamingText(routingId, data.text)
         }
       }),
-      window.api.onApprovalRequest((approval) => {
-        addPendingApproval(approval)
+      window.api.onApprovalRequest(({ routingId, data: approval }) => {
+        addPendingApproval(routingId, approval)
       }),
-      window.api.onStatus((status) => {
-        setStatus(status)
-        if (status.state === 'idle') clearPendingApprovals()
+      window.api.onStatus(({ routingId, data: status }) => {
+        setStatus(routingId, status)
+        if (status.state === 'idle') clearPendingApprovals(routingId)
       }),
       window.api.onResult(() => {
         // Cost/duration handled via status
       }),
-      window.api.onError((error) => {
-        addError(error)
+      window.api.onError(({ routingId, data: error }) => {
+        addError(routingId, error)
       }),
-      window.api.onToolResult(({ toolUseId, result, isError }) => {
-        appendToolResult(toolUseId, result, isError)
-        // Also update todos on tool_result in case the input wasn't captured earlier
-        processTodoWriteResult(toolUseId, isError)
+      window.api.onToolResult(({ routingId, data: { toolUseId, result, isError } }) => {
+        appendToolResult(routingId, toolUseId, result, isError)
+        processTodoWriteResult(routingId, toolUseId, isError)
       }),
-      window.api.onTaskProgress((data) => {
-        updateTaskProgress(data)
+      window.api.onTaskProgress(({ routingId, data }) => {
+        updateTaskProgress(routingId, data)
       }),
-      window.api.onTaskNotification((data) => {
-        addTaskNotification(data)
+      window.api.onTaskNotification(({ routingId, data }) => {
+        addTaskNotification(routingId, data)
       }),
-      window.api.onSubagentStream((data) => {
+      window.api.onSubagentStream(({ routingId, data }) => {
         if (data.type === 'thinking') {
-          appendSubagentStreamingThinking(data.toolUseId, data.text)
+          appendSubagentStreamingThinking(routingId, data.toolUseId, data.text)
         } else {
-          appendSubagentStreamingText(data.toolUseId, data.text)
+          appendSubagentStreamingText(routingId, data.toolUseId, data.text)
         }
       }),
-      window.api.onSubagentMessage((data) => {
-        addSubagentMessage(data.toolUseId, data.message)
+      window.api.onSubagentMessage(({ routingId, data }) => {
+        addSubagentMessage(routingId, data.toolUseId, data.message)
       }),
-      window.api.onSubagentToolResult((data) => {
-        appendSubagentToolResult(data.toolUseId, data.toolResultToolUseId, data.result, data.isError)
+      window.api.onSubagentToolResult(({ routingId, data }) => {
+        appendSubagentToolResult(routingId, data.toolUseId, data.toolResultToolUseId, data.result, data.isError)
       }),
-      window.api.onBackgroundOutput((data) => {
-        setBackgroundOutput(data.toolUseId, data.tail, data.totalSize)
+      window.api.onBackgroundOutput(({ routingId, data }) => {
+        setBackgroundOutput(routingId, data.toolUseId, data.tail, data.totalSize)
       }),
-      window.api.onPermissionMode((mode) => {
+      window.api.onPermissionMode(({ data: mode }) => {
         setPermissionMode(mode)
       })
     ]

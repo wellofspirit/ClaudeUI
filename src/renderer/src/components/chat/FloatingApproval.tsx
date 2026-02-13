@@ -1,4 +1,4 @@
-import { useSessionStore } from '../../stores/session-store'
+import { useSessionStore, useActiveSession } from '../../stores/session-store'
 import type { PendingApproval } from '../../../../shared/types'
 
 /**
@@ -7,8 +7,8 @@ import type { PendingApproval } from '../../../../shared/types'
  * in the parent's message stream).
  */
 function useUnmatchedApprovals(): PendingApproval[] {
-  const pendingApprovals = useSessionStore((s) => s.pendingApprovals)
-  const messages = useSessionStore((s) => s.messages)
+  const pendingApprovals = useActiveSession((s) => s.pendingApprovals)
+  const messages = useActiveSession((s) => s.messages)
 
   if (pendingApprovals.length === 0) return []
 
@@ -29,11 +29,13 @@ function useUnmatchedApprovals(): PendingApproval[] {
 }
 
 function ApprovalCard({ approval }: { approval: PendingApproval }): React.JSX.Element {
+  const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const removePendingApproval = useSessionStore((s) => s.removePendingApproval)
 
   const handleRespond = async (decision: 'allow' | 'deny'): Promise<void> => {
-    await window.api.respondApproval(approval.requestId, decision)
-    removePendingApproval(approval.requestId)
+    if (!activeSessionId) return
+    await window.api.respondApproval(activeSessionId, approval.requestId, decision)
+    removePendingApproval(activeSessionId, approval.requestId)
   }
 
   const input = approval.input

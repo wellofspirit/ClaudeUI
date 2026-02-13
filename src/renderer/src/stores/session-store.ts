@@ -8,7 +8,8 @@ import type {
   TaskProgress,
   TaskNotification,
   PermissionMode,
-  ModelInfo
+  ModelInfo,
+  DirectoryGroup
 } from '../../../shared/types'
 
 /**
@@ -21,7 +22,6 @@ function mergeContentBlocks(
   oldBlocks: ContentBlock[],
   newBlocks: ContentBlock[]
 ): ContentBlock[] {
-  // Index what's in the new message
   const newToolUseIds = new Set(
     newBlocks.filter((b) => b.type === 'tool_use' && b.toolUseId).map((b) => b.toolUseId)
   )
@@ -31,7 +31,6 @@ function mergeContentBlocks(
   const newThinkingCount = newBlocks.filter((b) => b.type === 'thinking').length
   const newHasText = newBlocks.some((b) => b.type === 'text')
 
-  // Collect preserved old blocks in their original order (maintains interleaving)
   const droppedThinkingCount = Math.max(
     0,
     oldBlocks.filter((b) => b.type === 'thinking').length - newThinkingCount
@@ -54,36 +53,29 @@ function mergeContentBlocks(
     }
   }
 
-  // Preserved blocks (from earlier turns, in original order) first,
-  // then new blocks in their natural interleaved order from the SDK
   return [...preserved, ...newBlocks]
 }
 
-const RECENT_DIRS_KEY = 'claudeui-recent-dirs'
+const RECENT_SESSIONS_KEY = 'claudeui-recent-sessions'
 
-function loadRecentDirs(): string[] {
+function loadRecentSessions(): string[] {
   try {
-    const raw = localStorage.getItem(RECENT_DIRS_KEY)
+    const raw = localStorage.getItem(RECENT_SESSIONS_KEY)
     return raw ? JSON.parse(raw) : []
   } catch {
     return []
   }
 }
 
-function saveRecentDirs(dirs: string[]): void {
-  localStorage.setItem(RECENT_DIRS_KEY, JSON.stringify(dirs))
+function saveRecentSessions(ids: string[]): void {
+  localStorage.setItem(RECENT_SESSIONS_KEY, JSON.stringify(ids))
 }
 
-function addToRecent(dir: string, existing: string[]): string[] {
-  const filtered = existing.filter((d) => d !== dir)
-  const updated = [dir, ...filtered].slice(0, 20)
-  saveRecentDirs(updated)
-  return updated
-}
-
-interface SessionState {
-  cwd: string | null
-  recentDirs: string[]
+/** Per-session state — everything that varies between sessions */
+export interface PerSessionState {
+  cwd: string
+  sdkActive: boolean
+  isHistorical: boolean
   messages: ChatMessage[]
   streamingText: string
   streamingThinking: string
@@ -103,61 +95,18 @@ interface SessionState {
   backgroundOutputs: Record<string, { tail: string; totalSize: number }>
   backgroundWatcherCounts: Record<string, number>
   stoppingTaskIds: string[]
-  permissionMode: PermissionMode
-  effort: 'low' | 'medium' | 'high'
-  availableModels: ModelInfo[]
-
-  setCwd: (cwd: string | null) => void
-  openDirectory: (cwd: string) => void
-  addMessage: (message: ChatMessage) => void
-  addUserMessage: (id: string, text: string, planContent?: string) => void
-  appendStreamingText: (text: string) => void
-  appendStreamingThinking: (text: string) => void
-  clearStreamingText: () => void
-  setStatus: (status: SessionStatus) => void
-  addPendingApproval: (approval: PendingApproval) => void
-  removePendingApproval: (requestId: string) => void
-  clearPendingApprovals: () => void
-  addError: (error: string) => void
-  removeError: (index: number) => void
-  clearErrors: () => void
-  appendToolResult: (toolUseId: string, result: string, isError: boolean) => void
-  setTodos: (todos: TodoItem[]) => void
-  updateTaskProgress: (progress: TaskProgress) => void
-  addTaskNotification: (notification: TaskNotification) => void
-  addSubagentMessage: (toolUseId: string, message: ChatMessage) => void
-  appendSubagentStreamingText: (toolUseId: string, text: string) => void
-  appendSubagentStreamingThinking: (toolUseId: string, text: string) => void
-  appendSubagentToolResult: (toolUseId: string, toolResultToolUseId: string, result: string, isError: boolean) => void
-  setBackgroundOutput: (toolUseId: string, tail: string, totalSize: number) => void
-  watchBackgroundOutput: (toolUseId: string) => void
-  unwatchBackgroundOutput: (toolUseId: string) => void
-  openTaskPanel: (toolUseId: string) => void
-  closeTaskPanel: () => void
-  removeTaskFromPanel: (toolUseId: string) => void
-  setTaskStopping: (toolUseId: string) => void
-  clearTaskStopping: (toolUseId: string) => void
-  setPermissionMode: (mode: PermissionMode) => void
-  setEffort: (effort: 'low' | 'medium' | 'high') => void
-  setAvailableModels: (models: ModelInfo[]) => void
-  clearConversation: () => void
 }
 
-export const useSessionStore = create<SessionState>((set) => ({
-  cwd: null,
-  recentDirs: loadRecentDirs(),
+const EMPTY_SESSION_STATE: PerSessionState = {
+  cwd: '',
+  sdkActive: false,
+  isHistorical: false,
   messages: [],
   streamingText: '',
   streamingThinking: '',
   thinkingStartedAt: null,
   thinkingDurationMs: null,
-  status: {
-    state: 'idle',
-    sessionId: null,
-    model: null,
-    cwd: null,
-    totalCostUsd: 0
-  },
+  status: { state: 'idle', sessionId: null, model: null, cwd: null, totalCostUsd: 0 },
   pendingApprovals: [],
   errors: [],
   todos: [],
@@ -170,115 +119,291 @@ export const useSessionStore = create<SessionState>((set) => ({
   subagentStreamingThinking: {},
   backgroundOutputs: {},
   backgroundWatcherCounts: {},
-  stoppingTaskIds: [],
+  stoppingTaskIds: []
+}
+
+function createEmptySession(cwd: string): PerSessionState {
+  return { ...EMPTY_SESSION_STATE, cwd }
+}
+
+/** Helper to update a specific session's state */
+function updateSession(
+  sessions: Record<string, PerSessionState>,
+  routingId: string,
+  updater: (s: PerSessionState) => Partial<PerSessionState>
+): Record<string, PerSessionState> {
+  const session = sessions[routingId]
+  if (!session) return sessions
+  return { ...sessions, [routingId]: { ...session, ...updater(session) } }
+}
+
+interface SessionState {
+  // Multi-session
+  activeSessionId: string | null
+  sessions: Record<string, PerSessionState>
+
+  // Sidebar data
+  directories: DirectoryGroup[]
+  recentSessionIds: string[]
+
+  // Global (not per-session)
+  permissionMode: PermissionMode
+  effort: 'low' | 'medium' | 'high'
+  availableModels: ModelInfo[]
+
+  // Multi-session actions
+  switchSession: (routingId: string) => void
+  createNewSession: (routingId: string, cwd: string) => void
+  loadHistoricalSession: (routingId: string, messages: ChatMessage[], cwd: string, taskNotifications?: TaskNotification[]) => void
+  markSdkActive: (routingId: string) => void
+  setDirectories: (dirs: DirectoryGroup[]) => void
+  addRecentSession: (routingId: string) => void
+
+  // Per-session actions (all take routingId)
+  addMessage: (routingId: string, message: ChatMessage) => void
+  addUserMessage: (routingId: string, id: string, text: string, planContent?: string) => void
+  appendStreamingText: (routingId: string, text: string) => void
+  appendStreamingThinking: (routingId: string, text: string) => void
+  clearStreamingText: (routingId: string) => void
+  setStatus: (routingId: string, status: SessionStatus) => void
+  addPendingApproval: (routingId: string, approval: PendingApproval) => void
+  removePendingApproval: (routingId: string, requestId: string) => void
+  clearPendingApprovals: (routingId: string) => void
+  addError: (routingId: string, error: string) => void
+  removeError: (routingId: string, index: number) => void
+  clearErrors: (routingId: string) => void
+  appendToolResult: (routingId: string, toolUseId: string, result: string, isError: boolean) => void
+  setTodos: (routingId: string, todos: TodoItem[]) => void
+  updateTaskProgress: (routingId: string, progress: TaskProgress) => void
+  addTaskNotification: (routingId: string, notification: TaskNotification) => void
+  addSubagentMessage: (routingId: string, toolUseId: string, message: ChatMessage) => void
+  appendSubagentStreamingText: (routingId: string, toolUseId: string, text: string) => void
+  appendSubagentStreamingThinking: (routingId: string, toolUseId: string, text: string) => void
+  appendSubagentToolResult: (routingId: string, toolUseId: string, toolResultToolUseId: string, result: string, isError: boolean) => void
+  setBackgroundOutput: (routingId: string, toolUseId: string, tail: string, totalSize: number) => void
+  watchBackgroundOutput: (routingId: string, toolUseId: string) => void
+  unwatchBackgroundOutput: (routingId: string, toolUseId: string) => void
+  openTaskPanel: (routingId: string, toolUseId: string) => void
+  closeTaskPanel: (routingId: string) => void
+  removeTaskFromPanel: (routingId: string, toolUseId: string) => void
+  setTaskStopping: (routingId: string, toolUseId: string) => void
+  clearTaskStopping: (routingId: string, toolUseId: string) => void
+  setPermissionMode: (mode: PermissionMode) => void
+  setEffort: (effort: 'low' | 'medium' | 'high') => void
+  setAvailableModels: (models: ModelInfo[]) => void
+  clearConversation: (routingId: string) => void
+}
+
+export const useSessionStore = create<SessionState>((set) => ({
+  activeSessionId: null,
+  sessions: {},
+  directories: [],
+  recentSessionIds: loadRecentSessions(),
   permissionMode: 'default',
   effort: 'medium',
   availableModels: [],
 
-  setCwd: (cwd) => set({ cwd }),
+  switchSession: (routingId) => set({ activeSessionId: routingId }),
 
-  openDirectory: (cwd) =>
+  createNewSession: (routingId, cwd) =>
     set((state) => {
-      const alreadyExists = state.recentDirs.includes(cwd)
-      const recentDirs = alreadyExists
-        ? state.recentDirs
-        : [cwd, ...state.recentDirs].slice(0, 20)
-      if (!alreadyExists) saveRecentDirs(recentDirs)
-      return { cwd, messages: [], streamingText: '', streamingThinking: '', thinkingStartedAt: null, thinkingDurationMs: null, errors: [], pendingApprovals: [], recentDirs, todos: [], taskProgressMap: {}, taskNotifications: [], openedTaskToolUseIds: [], taskPanelOpen: false, subagentMessages: {}, subagentStreamingText: {}, subagentStreamingThinking: {}, backgroundOutputs: {}, backgroundWatcherCounts: {} }
+      const recentSessionIds = [routingId, ...state.recentSessionIds.filter((id) => id !== routingId)].slice(0, 5)
+      saveRecentSessions(recentSessionIds)
+      return {
+        activeSessionId: routingId,
+        sessions: { ...state.sessions, [routingId]: createEmptySession(cwd) },
+        recentSessionIds
+      }
     }),
 
-  addMessage: (message) =>
-    set((state) => {
-      const idx = state.messages.findIndex((m) => m.id === message.id)
+  loadHistoricalSession: (routingId, messages, cwd, taskNotifications?) =>
+    set((state) => ({
+      sessions: {
+        ...state.sessions,
+        [routingId]: {
+          ...createEmptySession(cwd),
+          messages,
+          isHistorical: true,
+          taskNotifications: taskNotifications || []
+        }
+      }
+    })),
 
-      // Finalize thinking if message has non-thinking content (text or tool_use)
+  markSdkActive: (routingId) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, routingId, () => ({ sdkActive: true, isHistorical: false }))
+    })),
+
+  setDirectories: (dirs) => set({ directories: dirs }),
+
+  addRecentSession: (routingId) =>
+    set((state) => {
+      const recentSessionIds = [routingId, ...state.recentSessionIds.filter((id) => id !== routingId)].slice(0, 5)
+      saveRecentSessions(recentSessionIds)
+      return { recentSessionIds }
+    }),
+
+  addMessage: (routingId, message) =>
+    set((state) => {
+      const session = state.sessions[routingId]
+      if (!session) return state
+
+      const idx = session.messages.findIndex((m) => m.id === message.id)
       const hasNonThinking = message.content.some(
         (b) => b.type === 'text' || b.type === 'tool_use'
       )
       const thinkingUpdate =
-        state.thinkingStartedAt && hasNonThinking
+        session.thinkingStartedAt && hasNonThinking
           ? {
               streamingThinking: '',
-              thinkingDurationMs: Date.now() - state.thinkingStartedAt,
+              thinkingDurationMs: Date.now() - session.thinkingStartedAt,
               thinkingStartedAt: null
             }
           : {}
 
+      let updatedMessages: ChatMessage[]
       if (idx < 0) {
-        return { messages: [...state.messages, message], streamingText: '', ...thinkingUpdate }
-      }
-
-      // Merge content blocks to preserve tool_use/tool_result from previous partials
-      const existing = state.messages[idx]
-      const merged = {
-        ...message,
-        content: mergeContentBlocks(existing.content, message.content)
+        updatedMessages = [...session.messages, message]
+      } else {
+        const existing = session.messages[idx]
+        const merged = {
+          ...message,
+          content: mergeContentBlocks(existing.content, message.content)
+        }
+        updatedMessages = session.messages.map((m, i) => (i === idx ? merged : m))
       }
 
       return {
-        messages: state.messages.map((m, i) => (i === idx ? merged : m)),
-        streamingText: '',
-        ...thinkingUpdate
+        sessions: {
+          ...state.sessions,
+          [routingId]: {
+            ...session,
+            messages: updatedMessages,
+            streamingText: '',
+            ...thinkingUpdate
+          }
+        }
       }
     }),
 
-  addUserMessage: (id, text, planContent?) =>
-    set((state) => ({
-      messages: [
-        ...state.messages,
-        {
-          id,
-          role: 'user' as const,
-          content: [{ type: 'text' as const, text }],
-          timestamp: Date.now(),
-          ...(planContent ? { planContent } : {})
-        }
-      ],
-      recentDirs: state.cwd ? addToRecent(state.cwd, state.recentDirs) : state.recentDirs
-    })),
-
-  appendStreamingText: (text) =>
+  addUserMessage: (routingId, id, text, planContent?) =>
     set((state) => {
-      // If we were thinking, finalize the thinking duration
-      if (state.thinkingStartedAt) {
+      const session = state.sessions[routingId]
+      if (!session) return state
+
+      const recentSessionIds = [routingId, ...state.recentSessionIds.filter((rid) => rid !== routingId)].slice(0, 5)
+      saveRecentSessions(recentSessionIds)
+
+      return {
+        sessions: {
+          ...state.sessions,
+          [routingId]: {
+            ...session,
+            messages: [
+              ...session.messages,
+              {
+                id,
+                role: 'user' as const,
+                content: [{ type: 'text' as const, text }],
+                timestamp: Date.now(),
+                ...(planContent ? { planContent } : {})
+              }
+            ]
+          }
+        },
+        recentSessionIds
+      }
+    }),
+
+  appendStreamingText: (routingId, text) =>
+    set((state) => {
+      const session = state.sessions[routingId]
+      if (!session) return state
+
+      if (session.thinkingStartedAt) {
         return {
-          streamingText: state.streamingText + text,
-          streamingThinking: '',
-          thinkingDurationMs: Date.now() - state.thinkingStartedAt,
-          thinkingStartedAt: null
+          sessions: updateSession(state.sessions, routingId, (s) => ({
+            streamingText: s.streamingText + text,
+            streamingThinking: '',
+            thinkingDurationMs: Date.now() - s.thinkingStartedAt!,
+            thinkingStartedAt: null
+          }))
         }
       }
-      return { streamingText: state.streamingText + text }
+      return {
+        sessions: updateSession(state.sessions, routingId, (s) => ({
+          streamingText: s.streamingText + text
+        }))
+      }
     }),
 
-  appendStreamingThinking: (text) =>
+  appendStreamingThinking: (routingId, text) =>
     set((state) => ({
-      streamingThinking: state.streamingThinking + text,
-      thinkingStartedAt: state.thinkingStartedAt ?? Date.now()
+      sessions: updateSession(state.sessions, routingId, (s) => ({
+        streamingThinking: s.streamingThinking + text,
+        thinkingStartedAt: s.thinkingStartedAt ?? Date.now()
+      }))
     })),
 
-  clearStreamingText: () =>
-    set({ streamingText: '', streamingThinking: '', thinkingStartedAt: null, thinkingDurationMs: null }),
-
-  setStatus: (status) => set({ status }),
-
-  addPendingApproval: (approval) =>
-    set((state) => ({ pendingApprovals: [...state.pendingApprovals, approval] })),
-
-  removePendingApproval: (requestId) =>
+  clearStreamingText: (routingId) =>
     set((state) => ({
-      pendingApprovals: state.pendingApprovals.filter((a) => a.requestId !== requestId)
+      sessions: updateSession(state.sessions, routingId, () => ({
+        streamingText: '',
+        streamingThinking: '',
+        thinkingStartedAt: null,
+        thinkingDurationMs: null
+      }))
     })),
 
-  clearPendingApprovals: () => set({ pendingApprovals: [] }),
+  setStatus: (routingId, status) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, routingId, () => ({ status }))
+    })),
 
-  addError: (error) => set((state) => ({ errors: [...state.errors, error] })),
-  removeError: (index) => set((state) => ({ errors: state.errors.filter((_, i) => i !== index) })),
-  clearErrors: () => set({ errors: [] }),
+  addPendingApproval: (routingId, approval) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, routingId, (s) => ({
+        pendingApprovals: [...s.pendingApprovals, approval]
+      }))
+    })),
 
-  appendToolResult: (toolUseId, result, isError) =>
+  removePendingApproval: (routingId, requestId) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, routingId, (s) => ({
+        pendingApprovals: s.pendingApprovals.filter((a) => a.requestId !== requestId)
+      }))
+    })),
+
+  clearPendingApprovals: (routingId) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, routingId, () => ({ pendingApprovals: [] }))
+    })),
+
+  addError: (routingId, error) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, routingId, (s) => ({
+        errors: [...s.errors, error]
+      }))
+    })),
+
+  removeError: (routingId, index) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, routingId, (s) => ({
+        errors: s.errors.filter((_, i) => i !== index)
+      }))
+    })),
+
+  clearErrors: (routingId) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, routingId, () => ({ errors: [] }))
+    })),
+
+  appendToolResult: (routingId, toolUseId, result, isError) =>
     set((state) => {
-      const messages = [...state.messages]
+      const session = state.sessions[routingId]
+      if (!session) return state
+
+      const messages = [...session.messages]
       for (let i = messages.length - 1; i >= 0; i--) {
         const msg = messages[i]
         if (msg.role === 'assistant') {
@@ -297,31 +422,42 @@ export const useSessionStore = create<SessionState>((set) => ({
           }
         }
       }
-      return { messages }
-    }),
-
-  setTodos: (todos) => set({ todos }),
-
-  updateTaskProgress: (progress) =>
-    set((state) => ({
-      taskProgressMap: { ...state.taskProgressMap, [progress.toolUseId]: progress }
-    })),
-
-  addTaskNotification: (notification) =>
-    set((state) => {
-      // Clear stopping state for this task when notification arrives
-      const stoppingTaskIds = notification.toolUseId
-        ? state.stoppingTaskIds.filter((id) => id !== notification.toolUseId)
-        : state.stoppingTaskIds
       return {
-        taskNotifications: [...state.taskNotifications, notification],
-        stoppingTaskIds
+        sessions: { ...state.sessions, [routingId]: { ...session, messages } }
       }
     }),
 
-  addSubagentMessage: (toolUseId, message) =>
+  setTodos: (routingId, todos) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, routingId, () => ({ todos }))
+    })),
+
+  updateTaskProgress: (routingId, progress) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, routingId, (s) => ({
+        taskProgressMap: { ...s.taskProgressMap, [progress.toolUseId]: progress }
+      }))
+    })),
+
+  addTaskNotification: (routingId, notification) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, routingId, (s) => {
+        const stoppingTaskIds = notification.toolUseId
+          ? s.stoppingTaskIds.filter((id) => id !== notification.toolUseId)
+          : s.stoppingTaskIds
+        return {
+          taskNotifications: [...s.taskNotifications, notification],
+          stoppingTaskIds
+        }
+      })
+    })),
+
+  addSubagentMessage: (routingId, toolUseId, message) =>
     set((state) => {
-      const existing = state.subagentMessages[toolUseId] || []
+      const session = state.sessions[routingId]
+      if (!session) return state
+
+      const existing = session.subagentMessages[toolUseId] || []
       const idx = existing.findIndex((m) => m.id === message.id)
       let updated: ChatMessage[]
       if (idx < 0) {
@@ -334,35 +470,48 @@ export const useSessionStore = create<SessionState>((set) => ({
         updated = existing.map((m, i) => (i === idx ? merged : m))
       }
       return {
-        subagentMessages: { ...state.subagentMessages, [toolUseId]: updated },
-        subagentStreamingText: { ...state.subagentStreamingText, [toolUseId]: '' },
-        subagentStreamingThinking: { ...state.subagentStreamingThinking, [toolUseId]: '' }
+        sessions: {
+          ...state.sessions,
+          [routingId]: {
+            ...session,
+            subagentMessages: { ...session.subagentMessages, [toolUseId]: updated },
+            subagentStreamingText: { ...session.subagentStreamingText, [toolUseId]: '' },
+            subagentStreamingThinking: { ...session.subagentStreamingThinking, [toolUseId]: '' }
+          }
+        }
       }
     }),
 
-  appendSubagentStreamingText: (toolUseId, text) =>
+  appendSubagentStreamingText: (routingId, toolUseId, text) =>
     set((state) => ({
-      subagentStreamingText: {
-        ...state.subagentStreamingText,
-        [toolUseId]: (state.subagentStreamingText[toolUseId] || '') + text
-      },
-      subagentStreamingThinking: {
-        ...state.subagentStreamingThinking,
-        [toolUseId]: ''
-      }
+      sessions: updateSession(state.sessions, routingId, (s) => ({
+        subagentStreamingText: {
+          ...s.subagentStreamingText,
+          [toolUseId]: (s.subagentStreamingText[toolUseId] || '') + text
+        },
+        subagentStreamingThinking: {
+          ...s.subagentStreamingThinking,
+          [toolUseId]: ''
+        }
+      }))
     })),
 
-  appendSubagentStreamingThinking: (toolUseId, text) =>
+  appendSubagentStreamingThinking: (routingId, toolUseId, text) =>
     set((state) => ({
-      subagentStreamingThinking: {
-        ...state.subagentStreamingThinking,
-        [toolUseId]: (state.subagentStreamingThinking[toolUseId] || '') + text
-      }
+      sessions: updateSession(state.sessions, routingId, (s) => ({
+        subagentStreamingThinking: {
+          ...s.subagentStreamingThinking,
+          [toolUseId]: (s.subagentStreamingThinking[toolUseId] || '') + text
+        }
+      }))
     })),
 
-  appendSubagentToolResult: (toolUseId, toolResultToolUseId, result, isError) =>
+  appendSubagentToolResult: (routingId, toolUseId, toolResultToolUseId, result, isError) =>
     set((state) => {
-      const msgs = state.subagentMessages[toolUseId] || []
+      const session = state.sessions[routingId]
+      if (!session) return state
+
+      const msgs = session.subagentMessages[toolUseId] || []
       const updated = [...msgs]
       for (let i = updated.length - 1; i >= 0; i--) {
         const msg = updated[i]
@@ -381,59 +530,113 @@ export const useSessionStore = create<SessionState>((set) => ({
           break
         }
       }
-      return { subagentMessages: { ...state.subagentMessages, [toolUseId]: updated } }
-    }),
-
-  setBackgroundOutput: (toolUseId, tail, totalSize) =>
-    set((state) => ({
-      backgroundOutputs: { ...state.backgroundOutputs, [toolUseId]: { tail, totalSize } }
-    })),
-
-  watchBackgroundOutput: (toolUseId) =>
-    set((state) => {
-      const count = (state.backgroundWatcherCounts[toolUseId] || 0) + 1
-      window.api.watchBackground(toolUseId)
-      return { backgroundWatcherCounts: { ...state.backgroundWatcherCounts, [toolUseId]: count } }
-    }),
-
-  unwatchBackgroundOutput: (toolUseId) =>
-    set((state) => {
-      const count = (state.backgroundWatcherCounts[toolUseId] || 1) - 1
-      if (count <= 0) {
-        window.api.unwatchBackground(toolUseId)
-        const { [toolUseId]: _, ...restOutputs } = state.backgroundOutputs
-        const { [toolUseId]: __, ...restCounts } = state.backgroundWatcherCounts
-        return { backgroundOutputs: restOutputs, backgroundWatcherCounts: restCounts }
+      return {
+        sessions: {
+          ...state.sessions,
+          [routingId]: {
+            ...session,
+            subagentMessages: { ...session.subagentMessages, [toolUseId]: updated }
+          }
+        }
       }
-      return { backgroundWatcherCounts: { ...state.backgroundWatcherCounts, [toolUseId]: count } }
     }),
 
-  openTaskPanel: (toolUseId) =>
+  setBackgroundOutput: (routingId, toolUseId, tail, totalSize) =>
     set((state) => ({
-      openedTaskToolUseIds: state.openedTaskToolUseIds.includes(toolUseId)
-        ? state.openedTaskToolUseIds
-        : [...state.openedTaskToolUseIds, toolUseId],
-      taskPanelOpen: true
+      sessions: updateSession(state.sessions, routingId, (s) => ({
+        backgroundOutputs: { ...s.backgroundOutputs, [toolUseId]: { tail, totalSize } }
+      }))
     })),
 
-  closeTaskPanel: () =>
-    set({ openedTaskToolUseIds: [], taskPanelOpen: false }),
-
-  removeTaskFromPanel: (toolUseId) =>
+  watchBackgroundOutput: (routingId, toolUseId) =>
     set((state) => {
-      const updated = state.openedTaskToolUseIds.filter((id) => id !== toolUseId)
-      return { openedTaskToolUseIds: updated, taskPanelOpen: updated.length > 0 }
+      const session = state.sessions[routingId]
+      if (!session) return state
+
+      const count = (session.backgroundWatcherCounts[toolUseId] || 0) + 1
+      window.api.watchBackground(routingId, toolUseId)
+      return {
+        sessions: {
+          ...state.sessions,
+          [routingId]: {
+            ...session,
+            backgroundWatcherCounts: { ...session.backgroundWatcherCounts, [toolUseId]: count }
+          }
+        }
+      }
     }),
 
-  setTaskStopping: (toolUseId) =>
+  unwatchBackgroundOutput: (routingId, toolUseId) =>
     set((state) => {
-      if (state.stoppingTaskIds.includes(toolUseId)) return state
-      return { stoppingTaskIds: [...state.stoppingTaskIds, toolUseId] }
+      const session = state.sessions[routingId]
+      if (!session) return state
+
+      const count = (session.backgroundWatcherCounts[toolUseId] || 1) - 1
+      if (count <= 0) {
+        window.api.unwatchBackground(routingId, toolUseId)
+        const { [toolUseId]: _, ...restOutputs } = session.backgroundOutputs
+        const { [toolUseId]: __, ...restCounts } = session.backgroundWatcherCounts
+        return {
+          sessions: {
+            ...state.sessions,
+            [routingId]: {
+              ...session,
+              backgroundOutputs: restOutputs,
+              backgroundWatcherCounts: restCounts
+            }
+          }
+        }
+      }
+      return {
+        sessions: {
+          ...state.sessions,
+          [routingId]: {
+            ...session,
+            backgroundWatcherCounts: { ...session.backgroundWatcherCounts, [toolUseId]: count }
+          }
+        }
+      }
     }),
 
-  clearTaskStopping: (toolUseId) =>
+  openTaskPanel: (routingId, toolUseId) =>
     set((state) => ({
-      stoppingTaskIds: state.stoppingTaskIds.filter((id) => id !== toolUseId)
+      sessions: updateSession(state.sessions, routingId, (s) => ({
+        openedTaskToolUseIds: s.openedTaskToolUseIds.includes(toolUseId)
+          ? s.openedTaskToolUseIds
+          : [...s.openedTaskToolUseIds, toolUseId],
+        taskPanelOpen: true
+      }))
+    })),
+
+  closeTaskPanel: (routingId) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, routingId, () => ({
+        openedTaskToolUseIds: [],
+        taskPanelOpen: false
+      }))
+    })),
+
+  removeTaskFromPanel: (routingId, toolUseId) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, routingId, (s) => {
+        const updated = s.openedTaskToolUseIds.filter((id) => id !== toolUseId)
+        return { openedTaskToolUseIds: updated, taskPanelOpen: updated.length > 0 }
+      })
+    })),
+
+  setTaskStopping: (routingId, toolUseId) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, routingId, (s) => {
+        if (s.stoppingTaskIds.includes(toolUseId)) return {}
+        return { stoppingTaskIds: [...s.stoppingTaskIds, toolUseId] }
+      })
+    })),
+
+  clearTaskStopping: (routingId, toolUseId) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, routingId, (s) => ({
+        stoppingTaskIds: s.stoppingTaskIds.filter((id) => id !== toolUseId)
+      }))
     })),
 
   setPermissionMode: (mode) => set({ permissionMode: mode }),
@@ -442,25 +645,27 @@ export const useSessionStore = create<SessionState>((set) => ({
 
   setAvailableModels: (models) => set({ availableModels: models }),
 
-  clearConversation: () =>
-    set({
-      messages: [],
-      streamingText: '',
-      streamingThinking: '',
-      thinkingStartedAt: null,
-      thinkingDurationMs: null,
-      errors: [],
-      pendingApprovals: [],
-      todos: [],
-      taskProgressMap: {},
-      taskNotifications: [],
-      openedTaskToolUseIds: [],
-      taskPanelOpen: false,
-      subagentMessages: {},
-      subagentStreamingText: {},
-      subagentStreamingThinking: {},
-      backgroundOutputs: {},
-      backgroundWatcherCounts: {},
-      stoppingTaskIds: []
+  clearConversation: (routingId) =>
+    set((state) => {
+      const session = state.sessions[routingId]
+      if (!session) return state
+      return {
+        sessions: {
+          ...state.sessions,
+          [routingId]: { ...createEmptySession(session.cwd), sdkActive: session.sdkActive }
+        }
+      }
     })
 }))
+
+/**
+ * Selector hook for the active session. Components use this to read per-session
+ * state without needing to know the routingId.
+ */
+export function useActiveSession<T>(selector: (s: PerSessionState) => T): T {
+  return useSessionStore((state) => {
+    const id = state.activeSessionId
+    if (!id || !state.sessions[id]) return selector(EMPTY_SESSION_STATE)
+    return selector(state.sessions[id])
+  })
+}

@@ -2,6 +2,10 @@ import { useState } from 'react'
 import type { ContentBlock, PendingApproval, AskUserQuestion, AskUserQuestionInput } from '../../../../shared/types'
 import { useSessionStore } from '../../stores/session-store'
 
+function useRoutingId(): string | null {
+  return useSessionStore((s) => s.activeSessionId)
+}
+
 interface Props {
   block: ContentBlock
   result?: ContentBlock
@@ -9,6 +13,7 @@ interface Props {
 }
 
 export function AskUserQuestionBlock({ block, result, approval }: Props): React.JSX.Element {
+  const routingId = useRoutingId()
   const removePendingApproval = useSessionStore((s) => s.removePendingApproval)
   const input = block.toolInput as unknown as AskUserQuestionInput | undefined
   const questions = input?.questions ?? []
@@ -88,17 +93,17 @@ export function AskUserQuestionBlock({ block, result, approval }: Props): React.
   }
 
   const handleSubmit = async (): Promise<void> => {
-    if (!approval || !allAnswered()) return
+    if (!approval || !allAnswered() || !routingId) return
     setSubmitted(true)
-    await window.api.respondApproval(approval.requestId, 'allow', answers)
-    removePendingApproval(approval.requestId)
+    await window.api.respondApproval(routingId, approval.requestId, 'allow', answers)
+    removePendingApproval(routingId, approval.requestId)
   }
 
   const handleDeny = async (): Promise<void> => {
-    if (!approval) return
+    if (!approval || !routingId) return
     setSubmitted(true)
-    await window.api.respondApproval(approval.requestId, 'deny')
-    removePendingApproval(approval.requestId)
+    await window.api.respondApproval(routingId, approval.requestId, 'deny')
+    removePendingApproval(routingId, approval.requestId)
   }
 
   // Completed state: show summary

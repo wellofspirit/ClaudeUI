@@ -91,6 +91,7 @@ export class ClaudeSession {
   private backgroundFilePaths = new Map<string, string>() // toolUseId → filePath (permanent)
   private backgroundPollers = new Map<string, BackgroundPoller>() // toolUseId → poller state
   private win: BrowserWindow
+  readonly routingId: string
   private cwd: string
   private totalCostUsd = 0
   private messageChannel: MessageChannel<unknown> | null = null
@@ -103,11 +104,14 @@ export class ClaudeSession {
   private permissionMode: string = 'default'
   private effort: string
   private model: string = 'default'
+  private resumeSessionId: string | undefined
 
-  constructor(win: BrowserWindow, cwd: string, effort?: string) {
+  constructor(routingId: string, win: BrowserWindow, cwd: string, effort?: string, resumeSessionId?: string) {
+    this.routingId = routingId
     this.win = win
     this.cwd = cwd
     this.effort = effort || 'medium'
+    this.resumeSessionId = resumeSessionId
     this.sendStatus()
   }
 
@@ -164,7 +168,7 @@ export class ClaudeSession {
             const text = chunk.toString().trim()
             if (text) console.error('[SDK stderr]', text)
           },
-          ...(this.sessionId ? { resume: this.sessionId } : {}),
+          ...(this.resumeSessionId ? { resume: this.resumeSessionId } : this.sessionId ? { resume: this.sessionId } : {}),
           canUseTool: async (toolName, input, opts) => {
             const requestId = uuid()
             const approval: PendingApproval = { requestId, toolName, input }
@@ -790,7 +794,7 @@ export class ClaudeSession {
 
   private send(channel: string, data: unknown): void {
     if (!this.win.isDestroyed()) {
-      this.win.webContents.send(channel, data)
+      this.win.webContents.send(channel, { routingId: this.routingId, data })
     }
   }
 

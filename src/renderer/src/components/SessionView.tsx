@@ -1,10 +1,10 @@
 import { Sidebar } from './Sidebar'
 import { ChatPanel } from './chat/ChatPanel'
 import { TaskDetailPanel } from './TaskDetailPanel'
-import { useSessionStore } from '../stores/session-store'
+import { useActiveSession } from '../stores/session-store'
 
 export function SessionView(): React.JSX.Element {
-  const taskPanelOpen = useSessionStore((s) => s.taskPanelOpen)
+  const taskPanelOpen = useActiveSession((s) => s.taskPanelOpen)
 
   return (
     <div className="h-screen flex">
