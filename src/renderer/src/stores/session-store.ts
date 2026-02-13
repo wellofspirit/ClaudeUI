@@ -110,7 +110,7 @@ interface SessionState {
   setCwd: (cwd: string | null) => void
   openDirectory: (cwd: string) => void
   addMessage: (message: ChatMessage) => void
-  addUserMessage: (id: string, text: string) => void
+  addUserMessage: (id: string, text: string, planContent?: string) => void
   appendStreamingText: (text: string) => void
   appendStreamingThinking: (text: string) => void
   clearStreamingText: () => void
@@ -222,7 +222,7 @@ export const useSessionStore = create<SessionState>((set) => ({
       }
     }),
 
-  addUserMessage: (id, text) =>
+  addUserMessage: (id, text, planContent?) =>
     set((state) => ({
       messages: [
         ...state.messages,
@@ -230,7 +230,8 @@ export const useSessionStore = create<SessionState>((set) => ({
           id,
           role: 'user' as const,
           content: [{ type: 'text' as const, text }],
-          timestamp: Date.now()
+          timestamp: Date.now(),
+          ...(planContent ? { planContent } : {})
         }
       ],
       recentDirs: state.cwd ? addToRecent(state.cwd, state.recentDirs) : state.recentDirs

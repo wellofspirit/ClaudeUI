@@ -1,6 +1,8 @@
 import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk'
 import { v4 as uuid } from 'uuid'
 import * as fs from 'fs'
+import * as os from 'os'
+import * as path from 'path'
 import type { BrowserWindow } from 'electron'
 import type {
   ChatMessage,
@@ -97,6 +99,7 @@ export class ClaudeSession {
     setModel(model?: string): Promise<void>
     stopTask(taskId: string): Promise<void>
   } | null = null
+  private slug: string | null = null
   private permissionMode: string = 'default'
   private effort: string
   private model: string = 'default'
@@ -204,6 +207,11 @@ export class ClaudeSession {
         if ('session_id' in msg && msg.session_id && !this.sessionId) {
           this.sessionId = msg.session_id as string
           this.sendStatus()
+        }
+
+        // Capture slug for plan file resolution
+        if ('slug' in msg && msg.slug && !this.slug) {
+          this.slug = msg.slug as string
         }
 
 
@@ -363,6 +371,46 @@ export class ClaudeSession {
 
   setEffort(effort: string): void {
     this.effort = effort
+  }
+
+  getSessionLogPath(): string | null {
+    if (!this.sessionId) return null
+    // Project key is derived from cwd by replacing / with -
+    const projectKey = this.cwd.replace(/\//g, '-')
+    return path.join(os.homedir(), '.claude', 'projects', projectKey, `${this.sessionId}.jsonl`)
+  }
+
+  getPlanContent(): string | null {
+    const plansDir = path.join(os.homedir(), '.claude', 'plans')
+
+    // Try slug-based lookup first
+    if (this.slug) {
+      const planPath = path.join(plansDir, `${this.slug}.md`)
+      try {
+        return fs.readFileSync(planPath, 'utf-8')
+      } catch {
+        // Fall through to mtime-based lookup
+      }
+    }
+
+    // Fallback: find the most recently modified .md file in plans dir
+    try {
+      const files = fs.readdirSync(plansDir)
+        .filter((f) => f.endsWith('.md'))
+        .map((f) => {
+          const full = path.join(plansDir, f)
+          return { path: full, mtime: fs.statSync(full).mtimeMs }
+        })
+        .sort((a, b) => b.mtime - a.mtime)
+
+      if (files.length > 0) {
+        return fs.readFileSync(files[0].path, 'utf-8')
+      }
+    } catch {
+      // Plans directory doesn't exist or is unreadable
+    }
+
+    return null
   }
 
   resolveApproval(requestId: string, decision: ApprovalDecision, answers?: Record<string, string>): void {

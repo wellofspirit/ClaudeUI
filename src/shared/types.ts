@@ -13,6 +13,7 @@ export interface ChatMessage {
   role: 'user' | 'assistant'
   content: ContentBlock[]
   timestamp: number
+  planContent?: string
 }
 
 export interface SessionStatus {
@@ -149,4 +150,6 @@ export interface ClaudeAPI {
   setModel(model: string): Promise<void>
   setEffort(effort: string): Promise<void>
   getModels(): Promise<ModelInfo[]>
+  getPlanContent(): Promise<string | null>
+  getSessionLogPath(): Promise<string | null>
 }

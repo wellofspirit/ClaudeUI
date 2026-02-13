@@ -99,7 +99,9 @@ const api: ClaudeAPI = {
   setPermissionMode: (mode: string) => ipcRenderer.invoke('session:set-permission-mode', mode),
   setModel: (model: string) => ipcRenderer.invoke('session:set-model', model),
   setEffort: (effort: string) => ipcRenderer.invoke('session:set-effort', effort),
-  getModels: () => ipcRenderer.invoke('session:get-models')
+  getModels: () => ipcRenderer.invoke('session:get-models'),
+  getPlanContent: () => ipcRenderer.invoke('session:get-plan-content'),
+  getSessionLogPath: () => ipcRenderer.invoke('session:get-session-log-path')
 }
 
 if (process.contextIsolated) {

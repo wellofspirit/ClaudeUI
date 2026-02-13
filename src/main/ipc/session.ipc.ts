@@ -94,4 +94,12 @@ export function registerSessionIpc(win: BrowserWindow): void {
     return await fetchModels()
   })
 
+  ipcMain.handle('session:get-plan-content', () => {
+    return session?.getPlanContent() ?? null
+  })
+
+  ipcMain.handle('session:get-session-log-path', () => {
+    return session?.getSessionLogPath() ?? null
+  })
+
 }

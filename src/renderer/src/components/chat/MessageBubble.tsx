@@ -16,6 +16,21 @@ export function MessageBubble({ message }: { message: ChatMessage }): React.JSX.
   const thinkingStartedAt = useSessionStore((s) => s.thinkingStartedAt)
 
   if (message.role === 'user') {
+    // User message with planContent: show plan block instead of raw text
+    if (message.planContent) {
+      const planBlock: ContentBlock = {
+        type: 'tool_use',
+        toolName: 'ExitPlanMode',
+        toolInput: { plan: message.planContent },
+        toolUseId: `plan-${message.id}`
+      }
+      return (
+        <div className="animate-fade-in">
+          <ExitPlanModeCard block={planBlock} />
+        </div>
+      )
+    }
+
     return (
       <div className="flex justify-end animate-fade-in">
         <div className="max-w-[85%] bg-bg-tertiary rounded-2xl px-4 py-2.5 text-[13px] text-text-primary leading-[1.6] whitespace-pre-wrap">
@@ -120,7 +135,7 @@ export function MessageBubble({ message }: { message: ChatMessage }): React.JSX.
           const result = block.toolUseId ? resultMap.get(block.toolUseId) : undefined
           const approval = block.toolUseId ? approvalMap.get(block.toolUseId) : undefined
           if (block.toolName === 'ExitPlanMode') {
-            return approval ? <ExitPlanModeCard key={index} approval={approval} /> : null
+            return <ExitPlanModeCard key={index} block={block} approval={approval} />
           }
           if (block.toolName === 'AskUserQuestion') {
             return <AskUserQuestionBlock key={index} block={block} result={result} approval={approval} />
@@ -139,8 +154,8 @@ export function MessageBubble({ message }: { message: ChatMessage }): React.JSX.
             {item.blocks.map(({ block, index }) => {
               const result = block.toolUseId ? resultMap.get(block.toolUseId) : undefined
               const approval = block.toolUseId ? approvalMap.get(block.toolUseId) : undefined
-              if (block.toolName === 'ExitPlanMode' && approval) {
-                return <ExitPlanModeCard key={index} approval={approval} />
+              if (block.toolName === 'ExitPlanMode') {
+                return <ExitPlanModeCard key={index} block={block} approval={approval} />
               }
               if (block.toolName === 'AskUserQuestion') {
                 return <AskUserQuestionBlock key={index} block={block} result={result} approval={approval} />
