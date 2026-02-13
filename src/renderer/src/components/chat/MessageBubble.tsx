@@ -2,6 +2,7 @@ import type { ChatMessage, ContentBlock, PendingApproval } from '../../../../sha
 import { useSessionStore } from '../../stores/session-store'
 import { MarkdownRenderer } from './MarkdownRenderer'
 import { ToolCallBlock } from './ToolCallBlock'
+import { ExitPlanModeCard } from './ExitPlanModeCard'
 import { AskUserQuestionBlock } from './AskUserQuestionBlock'
 import { ThinkingBlock } from './ThinkingBlock'
 import { TodoToolBlock } from './TodoToolBlock'
@@ -62,7 +63,7 @@ export function MessageBubble({ message }: { message: ChatMessage }): React.JSX.
     | { kind: 'other'; block: ContentBlock; index: number }
   const items: RenderItem[] = []
 
-  const HIDDEN_TOOLS = new Set(['EnterPlanMode', 'ExitPlanMode'])
+  const HIDDEN_TOOLS = new Set(['EnterPlanMode'])
   const visible = message.content.filter(
     (b) => b.type !== 'tool_result' && !(b.type === 'tool_use' && b.toolName && HIDDEN_TOOLS.has(b.toolName))
   )
@@ -118,6 +119,9 @@ export function MessageBubble({ message }: { message: ChatMessage }): React.JSX.
           const { block, index } = item.blocks[0]
           const result = block.toolUseId ? resultMap.get(block.toolUseId) : undefined
           const approval = block.toolUseId ? approvalMap.get(block.toolUseId) : undefined
+          if (block.toolName === 'ExitPlanMode') {
+            return approval ? <ExitPlanModeCard key={index} approval={approval} /> : null
+          }
           if (block.toolName === 'AskUserQuestion') {
             return <AskUserQuestionBlock key={index} block={block} result={result} approval={approval} />
           }
@@ -135,6 +139,9 @@ export function MessageBubble({ message }: { message: ChatMessage }): React.JSX.
             {item.blocks.map(({ block, index }) => {
               const result = block.toolUseId ? resultMap.get(block.toolUseId) : undefined
               const approval = block.toolUseId ? approvalMap.get(block.toolUseId) : undefined
+              if (block.toolName === 'ExitPlanMode' && approval) {
+                return <ExitPlanModeCard key={index} approval={approval} />
+              }
               if (block.toolName === 'AskUserQuestion') {
                 return <AskUserQuestionBlock key={index} block={block} result={result} approval={approval} />
               }

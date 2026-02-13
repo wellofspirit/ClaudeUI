@@ -181,7 +181,8 @@ export class ClaudeSession {
               const updatedInput = answers ? { ...input, answers } : input
               return { behavior: 'allow' as const, updatedInput }
             }
-            return { behavior: 'deny' as const, message: 'User denied' }
+            const message = answers?.feedback || 'User denied'
+            return { behavior: 'deny' as const, message }
           }
         }
       })
@@ -348,6 +349,7 @@ export class ClaudeSession {
 
   async setPermissionMode(mode: string): Promise<void> {
     this.permissionMode = mode
+    this.send('session:permission-mode', mode)
     if (this.activeQuery) {
       await this.activeQuery.setPermissionMode(mode)
     }

@@ -140,6 +140,7 @@ interface SessionState {
   setPermissionMode: (mode: PermissionMode) => void
   setEffort: (effort: 'low' | 'medium' | 'high') => void
   setAvailableModels: (models: ModelInfo[]) => void
+  clearConversation: () => void
 }
 
 export const useSessionStore = create<SessionState>((set) => ({
@@ -438,5 +439,27 @@ export const useSessionStore = create<SessionState>((set) => ({
 
   setEffort: (effort) => set({ effort }),
 
-  setAvailableModels: (models) => set({ availableModels: models })
+  setAvailableModels: (models) => set({ availableModels: models }),
+
+  clearConversation: () =>
+    set({
+      messages: [],
+      streamingText: '',
+      streamingThinking: '',
+      thinkingStartedAt: null,
+      thinkingDurationMs: null,
+      errors: [],
+      pendingApprovals: [],
+      todos: [],
+      taskProgressMap: {},
+      taskNotifications: [],
+      openedTaskToolUseIds: [],
+      taskPanelOpen: false,
+      subagentMessages: {},
+      subagentStreamingText: {},
+      subagentStreamingThinking: {},
+      backgroundOutputs: {},
+      backgroundWatcherCounts: {},
+      stoppingTaskIds: []
+    })
 }))
