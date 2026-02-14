@@ -242,6 +242,7 @@ export interface PerSessionState {
   permissionMode: PermissionMode
   effort: 'low' | 'medium' | 'high'
   draftText: string
+  selectedModel: string
 }
 
 const EMPTY_SESSION_STATE: PerSessionState = {
@@ -271,7 +272,8 @@ const EMPTY_SESSION_STATE: PerSessionState = {
   needsAttention: false,
   permissionMode: 'default',
   effort: 'medium',
-  draftText: ''
+  draftText: '',
+  selectedModel: 'default'
 }
 
 function createEmptySession(cwd: string): PerSessionState {
@@ -355,6 +357,7 @@ interface SessionState {
   setPermissionMode: (mode: PermissionMode, routingId?: string) => void
   setEffort: (effort: 'low' | 'medium' | 'high', routingId?: string) => void
   setDraftText: (text: string) => void
+  setSelectedModel: (model: string) => void
   setAvailableModels: (models: ModelInfo[]) => void
   clearConversation: (routingId: string) => void
 }
@@ -915,6 +918,13 @@ export const useSessionStore = create<SessionState>((set) => ({
       const id = state.activeSessionId
       if (!id) return {}
       return { sessions: updateSession(state.sessions, id, () => ({ draftText: text })) }
+    }),
+
+  setSelectedModel: (model) =>
+    set((state) => {
+      const id = state.activeSessionId
+      if (!id) return {}
+      return { sessions: updateSession(state.sessions, id, () => ({ selectedModel: model })) }
     }),
 
   setAvailableModels: (models) => set({ availableModels: models }),

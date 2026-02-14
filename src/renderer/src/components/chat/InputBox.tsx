@@ -31,7 +31,8 @@ export function InputBox(): React.JSX.Element {
     const shortName = m.description?.split('·')[0]?.trim() || m.displayName
     return { ...m, shortName }
   })
-  const [selectedModelValue, setSelectedModelValue] = useState('default')
+  const selectedModelValue = useActiveSession((s) => s.selectedModel)
+  const setSelectedModel = useSessionStore((s) => s.setSelectedModel)
   const selectedModel = models.find((m) => m.value === selectedModelValue) || models[0] || { value: 'default', displayName: 'Default', shortName: 'Default' }
   const effort = useActiveSession((s) => s.effort)
   const setEffort = useSessionStore((s) => s.setEffort)
@@ -217,7 +218,7 @@ export function InputBox(): React.JSX.Element {
                       <button
                         key={m.value}
                         onClick={() => {
-                          setSelectedModelValue(m.value)
+                          setSelectedModel(m.value)
                           if (activeSessionId) window.api.setModel(activeSessionId, m.value)
                           setModelOpen(false)
                         }}
@@ -258,10 +259,17 @@ export function InputBox(): React.JSX.Element {
                     {EFFORT_LEVELS.map((level) => (
                       <button
                         key={level}
-                        onClick={() => {
+                        onClick={async () => {
                           setEffort(level)
-                          if (activeSessionId) window.api.setEffort(activeSessionId, level)
                           setEffortOpen(false)
+                          if (activeSessionId && sdkActive) {
+                            await window.api.cancelSession(activeSessionId)
+                            const { sessions } = useSessionStore.getState()
+                            const session = sessions[activeSessionId]
+                            await window.api.createSession(activeSessionId, session?.cwd || '', level, activeSessionId, session?.permissionMode)
+                            await window.api.setModel(activeSessionId, session?.selectedModel ?? 'default')
+                            markSdkActive(activeSessionId)
+                          }
                         }}
                         className={`w-full flex items-center px-3 h-8 text-[12px] transition-colors cursor-pointer text-left capitalize ${
                           level === effort
