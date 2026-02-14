@@ -113,6 +113,10 @@ const api: ClaudeAPI = {
   setEffort: (routingId: string, effort: string) =>
     ipcRenderer.invoke('session:set-effort', routingId, effort),
   getModels: () => ipcRenderer.invoke('session:get-models'),
+  generateTitle: (conversationText: string) =>
+    ipcRenderer.invoke('session:generate-title', conversationText),
+  writeCustomTitle: (sessionId: string, projectKey: string, title: string) =>
+    ipcRenderer.invoke('session:write-custom-title', sessionId, projectKey, title),
   getPlanContent: (routingId: string) =>
     ipcRenderer.invoke('session:get-plan-content', routingId),
   getSessionLogPath: (routingId: string) =>

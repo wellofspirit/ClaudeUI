@@ -10,6 +10,61 @@ import type { ApprovalDecision, ModelInfo } from '../../shared/types'
 
 let cachedModels: ModelInfo[] | null = null
 
+const TITLE_SYSTEM_PROMPT =
+  'Your task: output ONLY a short title (1-3 words) that captures the main topic of the user\'s conversation. No explanation, no quotes, no JSON, no markdown — just the title itself. Use title case. Examples: Fix Login Bug, Auth Feature, Refactor API, Debug Tests, Rename Sessions'
+
+async function generateTitle(conversationText: string): Promise<string | null> {
+  const abort = new AbortController()
+  console.log('[generateTitle] request:', conversationText.length, 'chars:', conversationText.slice(0, 200))
+
+  try {
+    const q = sdkQuery({
+      prompt: conversationText,
+      options: {
+        cwd: process.cwd(),
+        abortController: abort,
+        systemPrompt: TITLE_SYSTEM_PROMPT,
+        model: 'claude-haiku-4-5-20251001',
+        maxTurns: 1,
+        tools: [],
+        thinking: { type: 'disabled' },
+        persistSession: false
+      }
+    })
+
+    let result = ''
+    for await (const message of q) {
+      if (!message || typeof message !== 'object') continue
+      const msg = message as Record<string, unknown>
+      if (msg.type === 'assistant') {
+        const betaMessage = msg.message as { content?: Array<{ type: string; text?: string }> } | undefined
+        if (betaMessage?.content) {
+          for (const block of betaMessage.content) {
+            if (block.type === 'text' && block.text) result += block.text
+          }
+        }
+      }
+    }
+
+    console.log('[generateTitle] response:', JSON.stringify(result))
+
+    // Take the first line, strip quotes/punctuation, limit to 3 words
+    const cleaned = result.trim().split('\n')[0].replace(/^["'`]+|["'`]+$/g, '').trim()
+    const words = cleaned.split(/\s+/).slice(0, 3).join(' ')
+    if (words.length >= 2) {
+      console.log('[generateTitle] title:', words)
+      return words
+    }
+    console.log('[generateTitle] no usable title extracted')
+    return null
+  } catch (err) {
+    console.error('[generateTitle] error:', err)
+    return null
+  } finally {
+    abort.abort()
+  }
+}
+
 async function fetchModels(): Promise<ModelInfo[]> {
   if (cachedModels) return cachedModels
 
@@ -103,6 +158,16 @@ export function registerSessionIpc(win: BrowserWindow): void {
 
   ipcMain.handle('session:get-models', async () => {
     return await fetchModels()
+  })
+
+  ipcMain.handle('session:generate-title', async (_e, conversationText: string) => {
+    return await generateTitle(conversationText)
+  })
+
+  ipcMain.handle('session:write-custom-title', async (_e, sessionId: string, projectKey: string, title: string) => {
+    const filePath = path.join(os.homedir(), '.claude', 'projects', projectKey, `${sessionId}.jsonl`)
+    const entry = JSON.stringify({ type: 'custom-title', customTitle: title, sessionId })
+    await fs.promises.appendFile(filePath, entry + '\n', { mode: 0o600 })
   })
 
   ipcMain.handle('session:get-plan-content', (_e, routingId: string) => {

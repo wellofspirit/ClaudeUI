@@ -152,6 +152,7 @@ function saveSettings(settings: AppSettings): void {
   localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings))
 }
 
+const CUSTOM_TITLES_KEY = 'claudeui-custom-titles'
 const RECENT_SESSIONS_KEY = 'claudeui-recent-sessions'
 const PINNED_SESSIONS_KEY = 'claudeui-pinned-sessions'
 
@@ -179,6 +180,19 @@ function loadPinnedSessions(): string[] {
 
 function savePinnedSessions(ids: string[]): void {
   localStorage.setItem(PINNED_SESSIONS_KEY, JSON.stringify(ids))
+}
+
+function loadCustomTitles(): Record<string, string> {
+  try {
+    const raw = localStorage.getItem(CUSTOM_TITLES_KEY)
+    return raw ? JSON.parse(raw) : {}
+  } catch {
+    return {}
+  }
+}
+
+function saveCustomTitles(titles: Record<string, string>): void {
+  localStorage.setItem(CUSTOM_TITLES_KEY, JSON.stringify(titles))
 }
 
 /** Remove a session from state if it has no messages (empty new session) */
@@ -278,6 +292,7 @@ interface SessionState {
   directories: DirectoryGroup[]
   recentSessionIds: string[]
   pinnedSessionIds: string[]
+  customTitles: Record<string, string>
 
   // Global (not per-session)
   settings: AppSettings
@@ -294,6 +309,7 @@ interface SessionState {
   setDirectories: (dirs: DirectoryGroup[]) => void
   addRecentSession: (routingId: string) => void
   removeRecentSession: (routingId: string) => void
+  setCustomTitle: (sessionId: string, title: string | null) => void
   pinSession: (routingId: string) => void
   unpinSession: (routingId: string) => void
   reorderPinnedSessions: (ids: string[]) => void
@@ -343,6 +359,7 @@ export const useSessionStore = create<SessionState>((set) => ({
   directories: [],
   recentSessionIds: loadRecentSessions(),
   pinnedSessionIds: loadPinnedSessions(),
+  customTitles: loadCustomTitles(),
   settings: loadSettings(),
   permissionMode: 'default',
   effort: 'medium',
@@ -411,6 +428,18 @@ export const useSessionStore = create<SessionState>((set) => ({
       const recentSessionIds = state.recentSessionIds.filter((id) => id !== routingId)
       saveRecentSessions(recentSessionIds)
       return { recentSessionIds }
+    }),
+
+  setCustomTitle: (sessionId, title) =>
+    set((state) => {
+      const customTitles = { ...state.customTitles }
+      if (title) {
+        customTitles[sessionId] = title
+      } else {
+        delete customTitles[sessionId]
+      }
+      saveCustomTitles(customTitles)
+      return { customTitles }
     }),
 
   pinSession: (routingId) =>

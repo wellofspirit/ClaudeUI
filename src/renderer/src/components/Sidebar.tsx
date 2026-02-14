@@ -18,9 +18,101 @@ export function Sidebar(): React.JSX.Element {
   const pinSession = useSessionStore((s) => s.pinSession)
   const unpinSession = useSessionStore((s) => s.unpinSession)
   const removeRecentSession = useSessionStore((s) => s.removeRecentSession)
+  const setCustomTitle = useSessionStore((s) => s.setCustomTitle)
+  const customTitles = useSessionStore((s) => s.customTitles)
   const reorderPinnedSessions = useSessionStore((s) => s.reorderPinnedSessions)
 
   const [expandedDir, setExpandedDir] = useState<string | null>(null)
+  const [renamingKey, setRenamingKey] = useState<string | null>(null)
+
+  // Find the projectKey for a session from directories
+  const findProjectKey = useCallback((sessionId: string): string | undefined => {
+    for (const group of directories) {
+      if (group.sessions.some((s) => s.sessionId === sessionId)) return group.projectKey
+    }
+    return undefined
+  }, [directories])
+
+  // Set custom title in state and persist to JSONL
+  const applyTitle = useCallback((sessionId: string, title: string) => {
+    setCustomTitle(sessionId, title)
+    const projectKey = findProjectKey(sessionId)
+    if (projectKey && title) {
+      window.api.writeCustomTitle(sessionId, projectKey, title)
+    }
+  }, [setCustomTitle, findProjectKey])
+
+  const handleRename = useCallback(async (sessionId: string, newTitle: string) => {
+    setRenamingKey(null)
+    if (newTitle.trim()) {
+      applyTitle(sessionId, newTitle.trim())
+      return
+    }
+    // Auto-generate: collect text from session messages
+    let session = sessions[sessionId]
+    // If session not loaded in memory, try loading from disk
+    if (!session) {
+      const info = (() => {
+        for (const group of directories) {
+          const found = group.sessions.find((s) => s.sessionId === sessionId)
+          if (found) return found
+        }
+        return undefined
+      })()
+      if (info?.projectKey) {
+        const { messages, taskNotifications } = await window.api.loadSessionHistory(sessionId, info.projectKey)
+        loadHistoricalSession(sessionId, messages, info.cwd, taskNotifications)
+        session = useSessionStore.getState().sessions[sessionId]
+      }
+    }
+    if (!session) return
+    const texts: string[] = []
+    let totalLen = 0
+    for (let i = session.messages.length - 1; i >= 0; i--) {
+      const msg = session.messages[i]
+      if (msg.role !== 'user' && msg.role !== 'assistant') continue
+      for (const block of msg.content) {
+        if (block.type === 'text' && block.text) {
+          texts.unshift(block.text)
+          totalLen += block.text.length
+        }
+      }
+      if (totalLen >= 1000) break
+    }
+    let conversationText = texts.join('\n')
+    if (conversationText.length > 1000) {
+      conversationText = conversationText.slice(-1000)
+    }
+    if (!conversationText) return
+    // Show a temporary "generating..." title
+    setCustomTitle(sessionId, 'generating...')
+    try {
+      const generated = await window.api.generateTitle(conversationText)
+      if (generated) {
+        applyTitle(sessionId, generated)
+      } else {
+        // Fallback: kebab slug from first user message
+        const firstText = session.messages.find((m) => m.role === 'user')
+          ?.content.find((b) => b.type === 'text')?.text
+        if (firstText) {
+          const slug = firstText.slice(0, 60).toLowerCase()
+            .replace(/[^a-z0-9\s-]/g, '').trim()
+            .replace(/\s+/g, '-').replace(/-+/g, '-').slice(0, 40)
+          if (slug) applyTitle(sessionId, slug)
+          else setCustomTitle(sessionId, '') // remove temp title
+        } else {
+          setCustomTitle(sessionId, '') // remove temp title
+        }
+      }
+    } catch (err) {
+      console.error('[handleRename] auto-generate failed for', sessionId, err)
+      setCustomTitle(sessionId, '') // clear stuck "generating..." title
+    }
+  }, [sessions, directories, setCustomTitle, applyTitle, loadHistoricalSession])
+
+  const handleAutoRename = useCallback((sessionId: string) => {
+    handleRename(sessionId, '')
+  }, [handleRename])
 
   // Load directories on mount and auto-refresh when JSONL files change on disk
   useEffect(() => {
@@ -54,8 +146,9 @@ export function Sidebar(): React.JSX.Element {
       return
     }
     // Load from JSONL
-    const { messages, taskNotifications } = await window.api.loadSessionHistory(info.sessionId, info.projectKey)
+    const { messages, taskNotifications, customTitle } = await window.api.loadSessionHistory(info.sessionId, info.projectKey)
     loadHistoricalSession(routingId, messages, info.cwd, taskNotifications)
+    if (customTitle) setCustomTitle(routingId, customTitle)
     // Rebuild todos from TaskCreate/TaskUpdate/TodoWrite tool calls
     const todos = buildTodosFromMessages(messages)
     if (todos) useSessionStore.getState().setTodos(routingId, todos)
@@ -80,8 +173,9 @@ export function Sidebar(): React.JSX.Element {
     } else {
       // Need to load historical session first if not in memory
       if (!session) {
-        window.api.loadSessionHistory(info.sessionId, info.projectKey).then(({ messages, taskNotifications }) => {
+        window.api.loadSessionHistory(info.sessionId, info.projectKey).then(({ messages, taskNotifications, customTitle: ct }) => {
           loadHistoricalSession(routingId, messages, info.cwd, taskNotifications)
+          if (ct) setCustomTitle(routingId, ct)
           window.api.watchSession(routingId, info.sessionId, info.projectKey)
           setWatching(routingId, true)
         })
@@ -94,24 +188,31 @@ export function Sidebar(): React.JSX.Element {
 
   // Helper to resolve a session ID to a SessionInfo
   const resolveSessionInfo = (rid: string): SessionInfo | undefined => {
+    let info: SessionInfo | undefined
     for (const group of directories) {
-      const found = group.sessions.find((s) => s.sessionId === rid)
-      if (found) return found
+      info = group.sessions.find((s) => s.sessionId === rid)
+      if (info) break
     }
-    const memSession = sessions[rid]
-    if (memSession) {
-      const firstUserMsg = memSession.messages.find((m) => m.role === 'user')
-      const titleText = firstUserMsg?.content.find((b) => b.type === 'text')?.text
-      return {
-        sessionId: rid,
-        cwd: memSession.cwd,
-        projectKey: '',
-        title: titleText ? titleText.slice(0, 80).replace(/\n/g, ' ').trim() : 'New session',
-        timestamp: Date.now(),
-        lastActivityAt: Date.now()
+    if (!info) {
+      const memSession = sessions[rid]
+      if (memSession) {
+        const firstUserMsg = memSession.messages.find((m) => m.role === 'user')
+        const titleText = firstUserMsg?.content.find((b) => b.type === 'text')?.text
+        info = {
+          sessionId: rid,
+          cwd: memSession.cwd,
+          projectKey: '',
+          title: titleText ? titleText.slice(0, 80).replace(/\n/g, ' ').trim() : 'New session',
+          timestamp: Date.now(),
+          lastActivityAt: Date.now()
+        }
       }
     }
-    return undefined
+    // Apply custom title if set
+    if (info && customTitles[rid]) {
+      info = { ...info, title: customTitles[rid] }
+    }
+    return info
   }
 
   // Build pinned sessions list
@@ -156,12 +257,18 @@ export function Sidebar(): React.JSX.Element {
     inMemoryByDir[key].push(info)
   }
 
-  // Merge in-memory sessions into existing groups or create new groups
+  // Merge in-memory sessions into existing groups or create new groups,
+  // and apply custom titles to all sessions
+  const applyCustomTitles = (sessions: SessionInfo[]): SessionInfo[] =>
+    sessions.map((s) => customTitles[s.sessionId] ? { ...s, title: customTitles[s.sessionId] } : s)
+
   const augmentedDirs: DirectoryGroup[] = directories.map((group) => {
     const extra = inMemoryByDir[group.cwd]
-    if (!extra) return group
+    if (!extra) {
+      return { ...group, sessions: applyCustomTitles(group.sessions) }
+    }
     delete inMemoryByDir[group.cwd]
-    return { ...group, sessions: [...extra, ...group.sessions] }
+    return { ...group, sessions: applyCustomTitles([...extra, ...group.sessions]) }
   })
   // Create new groups for cwds not matching any existing directory
   for (const [cwd, extraSessions] of Object.entries(inMemoryByDir)) {
@@ -170,7 +277,7 @@ export function Sidebar(): React.JSX.Element {
       cwd,
       projectKey: '',
       folderName,
-      sessions: extraSessions
+      sessions: applyCustomTitles(extraSessions)
     })
   }
 
@@ -210,6 +317,12 @@ export function Sidebar(): React.JSX.Element {
               onToggleWatch={handleToggleWatch}
               onUnpin={unpinSession}
               onReorder={reorderPinnedSessions}
+              renamingKey={renamingKey}
+              renamePrefix="pinned"
+              onStartRename={(key) => setRenamingKey(key)}
+              onFinishRename={handleRename}
+              onAutoRename={handleAutoRename}
+              onCancelRename={() => setRenamingKey(null)}
             />
           </div>
         )}
@@ -236,6 +349,11 @@ export function Sidebar(): React.JSX.Element {
                     onToggleWatch={info.projectKey ? () => handleToggleWatch(info) : undefined}
                     onPin={() => pinSession(info.sessionId)}
                     onRemove={() => removeRecentSession(info.sessionId)}
+                    isRenaming={renamingKey === `recent:${info.sessionId}`}
+                    onStartRename={() => setRenamingKey(`recent:${info.sessionId}`)}
+                    onFinishRename={(title) => handleRename(info.sessionId, title)}
+                    onAutoRename={() => handleAutoRename(info.sessionId)}
+                    onCancelRename={() => setRenamingKey(null)}
                   />
                 )
               })}
@@ -262,6 +380,12 @@ export function Sidebar(): React.JSX.Element {
                   onSessionClick={handleClickSession}
                   onSessionDoubleClick={(info) => { if (!pinnedSessionIds.includes(info.sessionId)) addRecentSession(info.sessionId) }}
                   onToggleWatch={handleToggleWatch}
+                  renamingKey={renamingKey}
+                  renamePrefix={`project:${group.projectKey || group.cwd}`}
+                  onStartRename={(key) => setRenamingKey(key)}
+                  onFinishRename={handleRename}
+                  onAutoRename={handleAutoRename}
+                  onCancelRename={() => setRenamingKey(null)}
                 />
               ))}
             </nav>
@@ -291,7 +415,13 @@ function DirectoryItem({
   onDoubleClick,
   onSessionClick,
   onSessionDoubleClick,
-  onToggleWatch
+  onToggleWatch,
+  renamingKey,
+  renamePrefix,
+  onStartRename,
+  onFinishRename,
+  onAutoRename,
+  onCancelRename
 }: {
   group: DirectoryGroup
   expanded: boolean
@@ -302,6 +432,12 @@ function DirectoryItem({
   onSessionClick: (info: SessionInfo) => void
   onSessionDoubleClick: (info: SessionInfo) => void
   onToggleWatch: (info: SessionInfo) => void
+  renamingKey: string | null
+  renamePrefix: string
+  onStartRename: (key: string) => void
+  onFinishRename: (id: string, title: string) => void
+  onAutoRename: (id: string) => void
+  onCancelRename: () => void
 }): React.JSX.Element {
   return (
     <div>
@@ -344,6 +480,11 @@ function DirectoryItem({
                 onClick={() => onSessionClick(info)}
                 onDoubleClick={() => onSessionDoubleClick(info)}
                 onToggleWatch={() => onToggleWatch(info)}
+                isRenaming={renamingKey === `${renamePrefix}:${info.sessionId}`}
+                onStartRename={() => onStartRename(`${renamePrefix}:${info.sessionId}`)}
+                onFinishRename={(title) => onFinishRename(info.sessionId, title)}
+                onAutoRename={() => onAutoRename(info.sessionId)}
+                onCancelRename={onCancelRename}
               />
             )
           })}
@@ -366,6 +507,11 @@ function SessionItem({
   onPin,
   onUnpin,
   onRemove,
+  isRenaming,
+  onStartRename,
+  onFinishRename,
+  onCancelRename,
+  onAutoRename,
   draggable,
   onDragStart,
   onDragOver,
@@ -384,12 +530,23 @@ function SessionItem({
   onPin?: () => void
   onUnpin?: () => void
   onRemove?: () => void
+  isRenaming?: boolean
+  onStartRename?: () => void
+  onFinishRename?: (title: string) => void
+  onCancelRename?: () => void
+  onAutoRename?: () => void
   draggable?: boolean
   onDragStart?: (e: React.DragEvent) => void
   onDragOver?: (e: React.DragEvent) => void
   onDragEnd?: (e: React.DragEvent) => void
   onDrop?: (e: React.DragEvent) => void
 }): React.JSX.Element {
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null)
+  const [renameValue, setRenameValue] = useState('')
+  const renameRef = useRef<HTMLInputElement>(null)
+  const contextMenuRef = useRef<HTMLDivElement>(null)
+  const renameCommittedRef = useRef(false)
+
   const dotColor = needsAttention && !active
     ? 'bg-warning animate-pulse'
     : isRunning
@@ -400,37 +557,87 @@ function SessionItem({
           ? 'bg-blue-400'
           : 'bg-text-muted/30'
 
+  const handleContextMenu = (e: React.MouseEvent): void => {
+    e.preventDefault()
+    setContextMenu({ x: e.clientX, y: e.clientY })
+  }
+
+  // Close context menu on outside click
+  useEffect(() => {
+    if (!contextMenu) return
+    const handler = (e: MouseEvent): void => {
+      if (contextMenuRef.current && !contextMenuRef.current.contains(e.target as Node)) {
+        setContextMenu(null)
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [contextMenu])
+
+  // Focus rename input when entering rename mode
+  useEffect(() => {
+    if (isRenaming && renameRef.current) {
+      renameCommittedRef.current = false
+      setRenameValue('')
+      renameRef.current.focus()
+    }
+  }, [isRenaming])
+
+  const handleRenameKeyDown = (e: React.KeyboardEvent): void => {
+    if (e.key === 'Enter') {
+      renameCommittedRef.current = true
+      onFinishRename?.(renameValue)
+    } else if (e.key === 'Escape') {
+      renameCommittedRef.current = true
+      onCancelRename?.()
+    }
+  }
+
   return (
-    <div
-      onClick={onClick}
-      onDoubleClick={onDoubleClick}
-      draggable={draggable}
-      onDragStart={onDragStart}
-      onDragOver={onDragOver}
-      onDragEnd={onDragEnd}
-      onDrop={onDrop}
-      style={{ padding: '0 5px' }}
-      className={`
-        group flex items-center gap-2.5 h-8 rounded-md text-[13px] cursor-default transition-colors
-        ${active ? 'text-text-primary bg-bg-tertiary' : 'text-text-secondary hover:text-text-primary hover:bg-bg-hover'}
-      `}
-    >
-      <span className="shrink-0 w-[14px] h-[14px] flex items-center justify-center">
-        <span className={`inline-block w-[6px] h-[6px] rounded-full ${dotColor} ${onRemove ? 'group-hover:hidden' : ''}`} />
-        {onRemove && (
-          <span
-            onClick={(e) => { e.stopPropagation(); onRemove() }}
-            className="hidden group-hover:flex items-center justify-center w-[14px] h-[14px] rounded text-text-muted hover:text-text-primary transition-colors cursor-pointer"
-            title="Remove from recent"
-          >
-            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
-              <path d="M18 6L6 18" />
-              <path d="M6 6l12 12" />
-            </svg>
-          </span>
+    <>
+      <div
+        onClick={onClick}
+        onDoubleClick={onDoubleClick}
+        onContextMenu={handleContextMenu}
+        draggable={draggable}
+        onDragStart={onDragStart}
+        onDragOver={onDragOver}
+        onDragEnd={onDragEnd}
+        onDrop={onDrop}
+        style={{ padding: '0 5px' }}
+        className={`
+          group flex items-center gap-2.5 h-8 rounded-md text-[13px] cursor-default transition-colors
+          ${active ? 'text-text-primary bg-bg-tertiary' : 'text-text-secondary hover:text-text-primary hover:bg-bg-hover'}
+        `}
+      >
+        <span className="shrink-0 w-[14px] h-[14px] flex items-center justify-center">
+          <span className={`inline-block w-[6px] h-[6px] rounded-full ${dotColor} ${onRemove ? 'group-hover:hidden' : ''}`} />
+          {onRemove && (
+            <span
+              onClick={(e) => { e.stopPropagation(); onRemove() }}
+              className="hidden group-hover:flex items-center justify-center w-[14px] h-[14px] rounded text-text-muted hover:text-text-primary transition-colors cursor-pointer"
+              title="Remove from recent"
+            >
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                <path d="M18 6L6 18" />
+                <path d="M6 6l12 12" />
+              </svg>
+            </span>
+          )}
+        </span>
+        {isRenaming ? (
+          <input
+            ref={renameRef}
+            value={renameValue}
+            onChange={(e) => setRenameValue(e.target.value)}
+            onKeyDown={handleRenameKeyDown}
+            onBlur={() => { setTimeout(() => { if (!renameCommittedRef.current) onCancelRename?.() }, 0) }}
+            placeholder="Enter to auto-generate"
+            className="flex-1 min-w-0 bg-transparent border-b border-accent text-[13px] text-text-primary outline-none placeholder:text-text-muted/50"
+          />
+        ) : (
+          <span className="truncate flex-1">{info.title}</span>
         )}
-      </span>
-      <span className="truncate flex-1">{info.title}</span>
       {/* Pin/Unpin button */}
       {onPin && (
         <span
@@ -471,6 +678,33 @@ function SessionItem({
         </span>
       )}
     </div>
+    {contextMenu && (
+      <div
+        ref={contextMenuRef}
+        className="fixed z-[9999] min-w-[160px] rounded-lg bg-bg-tertiary border border-border shadow-lg overflow-hidden"
+        style={{ left: contextMenu.x, top: contextMenu.y }}
+      >
+        <button
+          onClick={() => {
+            setContextMenu(null)
+            onStartRename?.()
+          }}
+          className="w-full text-left px-3 py-1.5 text-[13px] text-text-secondary hover:bg-bg-hover hover:text-text-primary transition-colors cursor-default"
+        >
+          Rename session
+        </button>
+        <button
+          onClick={() => {
+            setContextMenu(null)
+            onAutoRename?.()
+          }}
+          className="w-full text-left px-3 py-1.5 text-[13px] text-text-secondary hover:bg-bg-hover hover:text-text-primary transition-colors cursor-default"
+        >
+          Auto rename
+        </button>
+      </div>
+    )}
+  </>
   )
 }
 
@@ -481,7 +715,13 @@ function PinnedSessionList({
   onClickSession,
   onToggleWatch,
   onUnpin,
-  onReorder
+  onReorder,
+  renamingKey,
+  renamePrefix,
+  onStartRename,
+  onFinishRename,
+  onAutoRename,
+  onCancelRename
 }: {
   pinnedSessions: SessionInfo[]
   activeSessionId: string | null
@@ -490,6 +730,12 @@ function PinnedSessionList({
   onToggleWatch: (info: SessionInfo) => void
   onUnpin: (routingId: string) => void
   onReorder: (ids: string[]) => void
+  renamingKey: string | null
+  renamePrefix: string
+  onStartRename: (key: string) => void
+  onFinishRename: (id: string, title: string) => void
+  onAutoRename: (id: string) => void
+  onCancelRename: () => void
 }): React.JSX.Element {
   const dragItemRef = useRef<number | null>(null)
   const dragOverRef = useRef<number | null>(null)
@@ -541,6 +787,11 @@ function PinnedSessionList({
             onClick={() => onClickSession(info)}
             onToggleWatch={info.projectKey ? () => onToggleWatch(info) : undefined}
             onUnpin={() => onUnpin(info.sessionId)}
+            isRenaming={renamingKey === `${renamePrefix}:${info.sessionId}`}
+            onStartRename={() => onStartRename(`${renamePrefix}:${info.sessionId}`)}
+            onFinishRename={(title) => onFinishRename(info.sessionId, title)}
+            onAutoRename={() => onAutoRename(info.sessionId)}
+            onCancelRename={onCancelRename}
             draggable
             onDragStart={handleDragStart(idx)}
             onDragOver={handleDragOver(idx)}

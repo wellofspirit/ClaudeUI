@@ -55,14 +55,15 @@ export async function listDirectories(): Promise<DirectoryGroup[]> {
 
       if (!groupCwd && info.cwd) groupCwd = info.cwd
 
-      // Use cached summary title if available, fall back to first user prompt
+      // Priority: custom-title from JSONL > cached summary > first user prompt
+      const customTitle = readLastCustomTitle(filePath)
       const summary = getCachedSummary(filePath, mtime)
 
       sessions.push({
         sessionId,
         cwd: info.cwd || '',
         projectKey,
-        title: summary || info.title || 'Untitled',
+        title: customTitle || summary || info.title || 'Untitled',
         timestamp: info.timestamp || mtime,
         lastActivityAt: mtime
       })
@@ -164,9 +165,42 @@ async function parseSessionHeader(
   })
 }
 
+/**
+ * Read the last custom-title entry from a JSONL file.
+ * Scans the tail of the file (last 8KB) for efficiency since titles are appended.
+ */
+function readLastCustomTitle(filePath: string): string | null {
+  try {
+    const stat = fs.statSync(filePath)
+    const readSize = Math.min(stat.size, 8192)
+    const buf = Buffer.alloc(readSize)
+    const fd = fs.openSync(filePath, 'r')
+    fs.readSync(fd, buf, 0, readSize, stat.size - readSize)
+    fs.closeSync(fd)
+
+    const tail = buf.toString('utf-8')
+    let lastTitle: string | null = null
+    for (const line of tail.split('\n')) {
+      if (!line.includes('"custom-title"')) continue
+      try {
+        const obj = JSON.parse(line)
+        if (obj.type === 'custom-title' && typeof obj.customTitle === 'string') {
+          lastTitle = obj.customTitle
+        }
+      } catch {
+        // partial line at start of buffer, skip
+      }
+    }
+    return lastTitle
+  } catch {
+    return null
+  }
+}
+
 export interface SessionHistoryResult {
   messages: ChatMessage[]
   taskNotifications: TaskNotification[]
+  customTitle: string | null
 }
 
 /**
@@ -252,6 +286,7 @@ export async function loadSessionHistory(
   return new Promise((resolve) => {
     const messages: ChatMessage[] = []
     const taskNotifications: TaskNotification[] = []
+    let customTitle: string | null = null
     // Map agentId (from task-notification <task-id>) → toolUseId (from Task tool_use)
     const agentIdToToolUseId: Record<string, string> = {}
 
@@ -259,7 +294,7 @@ export async function loadSessionHistory(
     try {
       stream = fs.createReadStream(filePath, { encoding: 'utf-8' })
     } catch {
-      resolve({ messages: [], taskNotifications: [] })
+      resolve({ messages: [], taskNotifications: [], customTitle: null })
       return
     }
 
@@ -269,6 +304,11 @@ export async function loadSessionHistory(
       try {
         const obj = JSON.parse(line)
         const type = obj.type as string
+
+        if (type === 'custom-title') {
+          if (typeof obj.customTitle === 'string') customTitle = obj.customTitle
+          return
+        }
 
         if (type === 'user') {
           const content = obj.message?.content
@@ -528,8 +568,8 @@ export async function loadSessionHistory(
       }
     })
 
-    rl.on('close', () => resolve({ messages, taskNotifications }))
-    rl.on('error', () => resolve({ messages: [], taskNotifications: [] }))
+    rl.on('close', () => resolve({ messages, taskNotifications, customTitle }))
+    rl.on('error', () => resolve({ messages: [], taskNotifications: [], customTitle: null }))
   })
 }
 

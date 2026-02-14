@@ -163,7 +163,7 @@ export interface ClaudeAPI {
   maximizeWindow(): Promise<void>
   closeWindow(): Promise<void>
   listDirectories(): Promise<DirectoryGroup[]>
-  loadSessionHistory(sessionId: string, projectKey: string): Promise<{ messages: ChatMessage[]; taskNotifications: TaskNotification[] }>
+  loadSessionHistory(sessionId: string, projectKey: string): Promise<{ messages: ChatMessage[]; taskNotifications: TaskNotification[]; customTitle: string | null }>
   loadSubagentHistory(sessionId: string, projectKey: string, agentId: string): Promise<ChatMessage[]>
   loadBackgroundOutput(projectKey: string, taskId: string, outputFile?: string): Promise<{ content: string | null; purged: boolean }>
 
@@ -190,6 +190,8 @@ export interface ClaudeAPI {
   setModel(routingId: string, model: string): Promise<void>
   setEffort(routingId: string, effort: string): Promise<void>
   getModels(): Promise<ModelInfo[]>
+  generateTitle(conversationText: string): Promise<string | null>
+  writeCustomTitle(sessionId: string, projectKey: string, title: string): Promise<void>
   getPlanContent(routingId: string): Promise<string | null>
   getSessionLogPath(routingId: string): Promise<string | null>
   watchSession(routingId: string, sessionId: string, projectKey: string): Promise<void>
