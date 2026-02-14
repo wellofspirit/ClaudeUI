@@ -1,15 +1,17 @@
+import { memo, useDeferredValue } from 'react'
 import { useActiveSession } from '../../stores/session-store'
 import { MarkdownRenderer } from './MarkdownRenderer'
 
-export function StreamingText(): React.JSX.Element | null {
+export const StreamingText = memo(function StreamingText(): React.JSX.Element | null {
   const text = useActiveSession((s) => s.streamingText)
-  if (!text) return null
+  const deferred = useDeferredValue(text)
+  if (!deferred) return null
 
   return (
     <div className="animate-fade-in">
       <div className="text-[13px] text-text-primary leading-[1.6]">
-        <MarkdownRenderer content={text} />
+        <MarkdownRenderer content={deferred} />
       </div>
     </div>
   )
-}
+})

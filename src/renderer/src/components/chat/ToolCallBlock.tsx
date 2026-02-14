@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { memo, useState, useEffect, useRef, useCallback } from 'react'
 import type { ContentBlock, PendingApproval } from '../../../../shared/types'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
 import { CodeView } from './CodeView'
@@ -11,7 +11,7 @@ interface Props {
   approval?: PendingApproval
 }
 
-export function ToolCallBlock({ block, result, approval }: Props): React.JSX.Element {
+export const ToolCallBlock = memo(function ToolCallBlock({ block, result, approval }: Props): React.JSX.Element {
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const removePendingApproval = useSessionStore((s) => s.removePendingApproval)
   const openTaskPanel = useSessionStore((s) => s.openTaskPanel)
@@ -214,7 +214,7 @@ export function ToolCallBlock({ block, result, approval }: Props): React.JSX.Ele
       )}
     </div>
   )
-}
+})
 
 function BackgroundBashOutput({ toolUseId }: { toolUseId: string }): React.JSX.Element | null {
   const activeSessionId = useSessionStore((s) => s.activeSessionId)

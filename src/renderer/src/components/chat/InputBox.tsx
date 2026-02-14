@@ -118,7 +118,7 @@ export function InputBox(): React.JSX.Element {
   }
 
   return (
-    <div style={{ padding: '24px 13px 16px' }} className="shrink-0 bg-gradient-to-t from-bg-primary from-70% to-transparent">
+    <div style={{ padding: '8px 13px 16px' }} className="shrink-0">
       <div className="max-w-[740px] mx-auto">
         <div
           onClick={() => { setModelOpen(false); setEffortOpen(false); setPlusOpen(false); }}

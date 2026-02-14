@@ -1,4 +1,5 @@
 import { useRef, useEffect, useState, useMemo, useCallback } from 'react'
+import { useVirtualizer } from '@tanstack/react-virtual'
 import { v4 as uuid } from 'uuid'
 import { useActiveSession, useSessionStore } from '../../stores/session-store'
 import { MessageBubble } from './MessageBubble'
@@ -13,7 +14,8 @@ import { useSidebarCollapsed } from '../SessionView'
 
 export function ChatPanel(): React.JSX.Element {
   const messages = useActiveSession((s) => s.messages)
-  const streamingText = useActiveSession((s) => s.streamingText)
+  // Only subscribe to boolean flags — not the full streaming text
+  const hasStreamingText = useActiveSession((s) => !!s.streamingText)
   const streamingThinking = useActiveSession((s) => s.streamingThinking)
   const thinkingStartedAt = useActiveSession((s) => s.thinkingStartedAt)
   const pendingApprovals = useActiveSession((s) => s.pendingApprovals)
@@ -45,15 +47,45 @@ export function ChatPanel(): React.JSX.Element {
     setIsAtBottom(true)
   }, [activeSessionId])
 
-  // Auto-scroll on new content if near bottom
+  // Auto-scroll on new content if near bottom (throttled via rAF to avoid layout thrashing)
+  const scrollRafRef = useRef(0)
   useEffect(() => {
     const el = scrollRef.current
     if (!el) return
-    const isNearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 400
-    if (isNearBottom) {
-      setTimeout(() => el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' }), 50)
+    cancelAnimationFrame(scrollRafRef.current)
+    scrollRafRef.current = requestAnimationFrame(() => {
+      const isNearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 400
+      if (isNearBottom) {
+        el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
+      }
+    })
+  }, [messages, hasStreamingText, thinkingStartedAt, pendingApprovals])
+
+  // Auto-scroll during streaming without subscribing to full streamingText
+  useEffect(() => {
+    let rafId = 0
+    const unsub = useSessionStore.subscribe((state, prevState) => {
+      const id = state.activeSessionId
+      if (!id) return
+      const cur = state.sessions[id]?.streamingText
+      const prev = prevState.sessions[id]?.streamingText
+      if (cur !== prev) {
+        cancelAnimationFrame(rafId)
+        rafId = requestAnimationFrame(() => {
+          const el = scrollRef.current
+          if (!el) return
+          const isNearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 400
+          if (isNearBottom) {
+            el.scrollTop = el.scrollHeight
+          }
+        })
+      }
+    })
+    return () => {
+      unsub()
+      cancelAnimationFrame(rafId)
     }
-  }, [messages, streamingText, thinkingStartedAt, pendingApprovals])
+  }, [])
 
   const scrollToBottom = useCallback(() => {
     const el = scrollRef.current
@@ -69,36 +101,116 @@ export function ChatPanel(): React.JSX.Element {
   const chatMaxWidth = chatWidthMode === 'px' ? `${chatWidthPx}px` : `${chatWidthPercent}%`
   // Chat area lives inside the UI-zoomed root, so compensate: divide out uiFontScale, apply chatFontScale
   const chatZoom = chatFontScale / uiFontScale
-  const hasContent = messages.length > 0 || !!streamingText || !!thinkingStartedAt
+  const hasContent = messages.length > 0 || hasStreamingText || !!thinkingStartedAt
   const showEmptyScreen = !hasContent && status.state === 'idle'
+
+  // Pre-compute isLastAssistant for each message
+  const lastAssistantId = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === 'assistant') return messages[i].id
+    }
+    return null
+  }, [messages])
+
+  // Virtualizer for the message list
+  const virtualizer = useVirtualizer({
+    count: messages.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => 250,
+    overscan: 5,
+  })
+
+  // Notify virtualizer when streaming items appear/disappear (affects total height)
+  useEffect(() => {
+    virtualizer.measure()
+  }, [hasStreamingText, thinkingStartedAt, virtualizer])
 
   return (
     <div className="flex-1 flex flex-col min-h-0 min-w-0 relative">
       {/* Top bar */}
       <TopBar hasContent={hasContent} cost={status.totalCostUsd} />
 
-      {/* Main area */}
-      <div ref={scrollRef} className="flex-1 overflow-y-auto">
-        {showEmptyScreen ? (
-          <div className="h-full flex items-center justify-center">
-            <WelcomeState />
-          </div>
-        ) : !hasContent && status.state === 'running' ? (
-          <div className="h-full flex items-center justify-center">
-            <LoadingState />
-          </div>
-        ) : (
-          <div style={{ ...(chatZoom !== 1 ? { zoom: chatZoom } : {}), maxWidth: chatMaxWidth }} className="mx-auto px-8 pt-5 pb-36 flex flex-col gap-5">
-            {messages.map((msg) => (
-              <MessageBubble key={msg.id} message={msg} />
-            ))}
-            {streamingText && <StreamingText />}
-            {thinkingStartedAt && (
-              <ThinkingBlock text={streamingThinking} isActive />
-            )}
-            {!streamingText && !thinkingStartedAt && status.state === 'running' && <TypingIndicator />}
-          </div>
-        )}
+      {/* Scroll + input wrapper */}
+      <div className="flex-1 flex flex-col min-h-0 relative">
+        {/* Gradient fade below top bar */}
+        <div className="h-8 bg-gradient-to-b from-bg-primary to-transparent pointer-events-none -mb-8 relative z-[1]" />
+
+        {/* Main scroll area — stops above input */}
+        <div ref={scrollRef} className="flex-1 overflow-y-auto chat-scroll mr-2">
+          {showEmptyScreen ? (
+            <div className="h-full flex items-center justify-center">
+              <WelcomeState />
+            </div>
+          ) : !hasContent && status.state === 'running' ? (
+            <div className="h-full flex items-center justify-center">
+              <LoadingState />
+            </div>
+          ) : (
+            <div style={{ ...(chatZoom !== 1 ? { zoom: chatZoom } : {}), maxWidth: chatMaxWidth }} className="mx-auto px-8 pt-5 pb-6 flex flex-col">
+              {/* Virtualized message list */}
+              <div
+                style={{ height: virtualizer.getTotalSize(), position: 'relative', width: '100%' }}
+              >
+                {virtualizer.getVirtualItems().map((virtualRow) => {
+                  const msg = messages[virtualRow.index]
+                  return (
+                    <div
+                      key={msg.id}
+                      data-index={virtualRow.index}
+                      ref={virtualizer.measureElement}
+                      style={{
+                        position: 'absolute',
+                        top: 0,
+                        left: 0,
+                        width: '100%',
+                        transform: `translateY(${virtualRow.start}px)`,
+                      }}
+                    >
+                      <div style={{ paddingBottom: 20 }}>
+                        <MessageBubble
+                          message={msg}
+                          pendingApprovals={pendingApprovals}
+                          isLastAssistant={msg.id === lastAssistantId}
+                          thinkingStartedAt={thinkingStartedAt}
+                        />
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+              {/* Non-virtualized tail items — always visible at bottom */}
+              <div className="flex flex-col gap-5">
+                {hasStreamingText && <StreamingText />}
+                {thinkingStartedAt && (
+                  <ThinkingBlock text={streamingThinking} isActive />
+                )}
+                {!hasStreamingText && !thinkingStartedAt && status.state === 'running' && <TypingIndicator />}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Gradient fade above input */}
+        <div className="h-8 bg-gradient-to-t from-bg-primary to-transparent pointer-events-none -mt-8 relative z-[1]" />
+
+        {/* Input box — normal flow, sits below scroll area */}
+        <div className="relative">
+          {/* Go to bottom button — absolutely positioned so it doesn't affect layout */}
+          {!isAtBottom && hasContent && (
+            <div className="absolute -top-10 left-0 right-0 flex justify-center pointer-events-none z-[1]">
+              <button
+                onClick={scrollToBottom}
+                className="pointer-events-auto w-8 h-8 flex items-center justify-center rounded-full bg-bg-tertiary border border-border text-text-muted hover:text-text-primary hover:bg-bg-hover shadow-lg transition-all cursor-default animate-fade-in"
+                title="Scroll to bottom"
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M6 9l6 6 6-6" />
+                </svg>
+              </button>
+            </div>
+          )}
+          <InputBox />
+        </div>
       </div>
 
       {/* Todo widget */}
@@ -109,27 +221,6 @@ export function ChatPanel(): React.JSX.Element {
 
       {/* Floating error */}
       <FloatingError />
-
-      {/* Input — fixed at bottom, centered */}
-      <div className="absolute bottom-0 left-0 right-0 pointer-events-none">
-        {/* Go to bottom button */}
-        {!isAtBottom && hasContent && (
-          <div className="flex justify-center mb-1.5 pointer-events-auto">
-            <button
-              onClick={scrollToBottom}
-              className="w-8 h-8 flex items-center justify-center rounded-full bg-bg-tertiary border border-border text-text-muted hover:text-text-primary hover:bg-bg-hover shadow-lg transition-all cursor-default animate-fade-in"
-              title="Scroll to bottom"
-            >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M6 9l6 6 6-6" />
-              </svg>
-            </button>
-          </div>
-        )}
-        <div className="pointer-events-auto">
-          <InputBox />
-        </div>
-      </div>
     </div>
   )
 }

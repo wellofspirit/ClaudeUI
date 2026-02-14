@@ -1,6 +1,5 @@
-import { useState } from 'react'
+import { memo, useState } from 'react'
 import type { ChatMessage, ContentBlock, PendingApproval } from '../../../../shared/types'
-import { useActiveSession } from '../../stores/session-store'
 import { MarkdownRenderer } from './MarkdownRenderer'
 import { ToolCallBlock } from './ToolCallBlock'
 import { ExitPlanModeCard } from './ExitPlanModeCard'
@@ -10,12 +9,21 @@ import { TodoToolBlock } from './TodoToolBlock'
 import { TaskCard } from './TaskCard'
 
 const TODO_TOOLS = new Set(['TodoWrite'])
+const HIDDEN_TOOLS = new Set(['EnterPlanMode', 'TaskCreate', 'TaskUpdate', 'TaskList', 'TaskGet'])
 
-export function MessageBubble({ message }: { message: ChatMessage }): React.JSX.Element {
-  const pendingApprovals = useActiveSession((s) => s.pendingApprovals)
-  const messages = useActiveSession((s) => s.messages)
-  const thinkingStartedAt = useActiveSession((s) => s.thinkingStartedAt)
+interface MessageBubbleProps {
+  message: ChatMessage
+  pendingApprovals: PendingApproval[]
+  isLastAssistant: boolean
+  thinkingStartedAt: number | null
+}
 
+export const MessageBubble = memo(function MessageBubble({
+  message,
+  pendingApprovals,
+  isLastAssistant,
+  thinkingStartedAt
+}: MessageBubbleProps): React.JSX.Element {
   // System messages (compact separators, CLI commands, API errors)
   if (message.role === 'system') {
     return (
@@ -88,10 +96,6 @@ export function MessageBubble({ message }: { message: ChatMessage }): React.JSX.
     }
   }
 
-  // Determine if this is the last assistant message (for active thinking indicator)
-  const lastAssistantMsg = [...messages].reverse().find((m) => m.role === 'assistant')
-  const isLastAssistant = lastAssistantMsg?.id === message.id
-
   // Group consecutive tool_use blocks so we can wrap them in a bordered container
   type RenderItem =
     | { kind: 'tool_group'; blocks: { block: ContentBlock; index: number }[] }
@@ -99,7 +103,6 @@ export function MessageBubble({ message }: { message: ChatMessage }): React.JSX.
     | { kind: 'other'; block: ContentBlock; index: number }
   const items: RenderItem[] = []
 
-  const HIDDEN_TOOLS = new Set(['EnterPlanMode', 'TaskCreate', 'TaskUpdate', 'TaskList', 'TaskGet'])
   const visible = message.content.filter(
     (b) => b.type !== 'tool_result' && !(b.type === 'tool_use' && b.toolName && HIDDEN_TOOLS.has(b.toolName))
   )
@@ -194,9 +197,9 @@ export function MessageBubble({ message }: { message: ChatMessage }): React.JSX.
       })}
     </div>
   )
-}
+})
 
-function ContentBlockView({ block }: { block: ContentBlock }): React.JSX.Element | null {
+const ContentBlockView = memo(function ContentBlockView({ block }: { block: ContentBlock }): React.JSX.Element | null {
   if (block.type === 'text' && block.text) {
     return (
       <div className="text-[13px] text-text-primary leading-[1.6]">
@@ -206,7 +209,7 @@ function ContentBlockView({ block }: { block: ContentBlock }): React.JSX.Element
   }
 
   return null
-}
+})
 
 function CompactSeparator({ summary }: { summary?: string }): React.JSX.Element {
   const [expanded, setExpanded] = useState(false)
