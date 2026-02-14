@@ -77,6 +77,12 @@ export function useClaudeEvents(): void {
         notifyIfNeeded(routingId, 'Permission required', `${approval.toolName || 'Tool'} needs approval`)
       }),
       window.api.onStatus(({ routingId, data: status }) => {
+        if (status.state === 'disconnected') {
+          useSessionStore.getState().markSdkInactive(routingId)
+          setStatus(routingId, { ...status, state: 'idle' })
+          clearPendingApprovals(routingId)
+          return
+        }
         setStatus(routingId, status)
         if (status.state === 'idle') {
           clearPendingApprovals(routingId)
@@ -132,8 +138,8 @@ export function useClaudeEvents(): void {
       window.api.onBackgroundOutput(({ routingId, data }) => {
         setBackgroundOutput(routingId, data.toolUseId, data.tail, data.totalSize)
       }),
-      window.api.onPermissionMode(({ data: mode }) => {
-        setPermissionMode(mode)
+      window.api.onPermissionMode(({ routingId, data: mode }) => {
+        setPermissionMode(mode, routingId)
       }),
       window.api.onWatchUpdate(({ routingId, messages, taskNotifications }) => {
         useSessionStore.getState().updateWatchedSession(routingId, messages, taskNotifications)

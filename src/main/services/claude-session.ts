@@ -106,12 +106,13 @@ export class ClaudeSession {
   private model: string = 'default'
   private resumeSessionId: string | undefined
 
-  constructor(routingId: string, win: BrowserWindow, cwd: string, effort?: string, resumeSessionId?: string) {
+  constructor(routingId: string, win: BrowserWindow, cwd: string, effort?: string, resumeSessionId?: string, permissionMode?: string) {
     this.routingId = routingId
     this.win = win
     this.cwd = cwd
     this.effort = effort || 'medium'
     this.resumeSessionId = resumeSessionId
+    if (permissionMode) this.permissionMode = permissionMode
     this.sendStatus()
   }
 
@@ -439,7 +440,7 @@ export class ClaudeSession {
     this.abortController?.abort()
     this.abortController = null
     this.isProcessing = false
-    this.sendStatus()
+    this.send('session:status', { ...this.status, state: 'disconnected' })
   }
 
   async stopTask(toolUseId: string): Promise<{ success: boolean; error?: string }> {

@@ -3,7 +3,10 @@ import { v4 as uuid } from 'uuid'
 import { useSessionStore, buildTodosFromMessages } from '../stores/session-store'
 import type { DirectoryGroup, SessionInfo } from '../../../shared/types'
 
-export function Sidebar(): React.JSX.Element {
+export function Sidebar({ style, onToggleCollapse }: {
+  style?: React.CSSProperties
+  onToggleCollapse?: () => void
+}): React.JSX.Element {
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const directories = useSessionStore((s) => s.directories)
   const recentSessionIds = useSessionStore((s) => s.recentSessionIds)
@@ -282,9 +285,22 @@ export function Sidebar(): React.JSX.Element {
   }
 
   return (
-    <div className={`w-60 shrink-0 flex flex-col select-none ${window.api.platform === 'darwin' ? 'bg-bg-secondary/80' : 'bg-bg-secondary/85'}`}>
-      {/* Traffic light clearance */}
-      <div className="h-12 shrink-0 [-webkit-app-region:drag]" />
+    <div style={style} className={`shrink-0 flex flex-col select-none ${window.api.platform === 'darwin' ? 'bg-bg-secondary/80' : 'bg-bg-secondary/85'}`}>
+      {/* Traffic light clearance + collapse toggle */}
+      <div className="h-12 shrink-0 [-webkit-app-region:drag] relative">
+        <button
+          onClick={onToggleCollapse}
+          style={{ position: 'absolute', left: 82, top: '50%', transform: 'translateY(-50%)' }}
+          className="[-webkit-app-region:no-drag] w-[26px] h-[26px] flex items-center justify-center rounded-md text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
+          title="Collapse sidebar"
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="3" y="3" width="18" height="18" rx="2" />
+            <path d="M9 3v18" />
+            <path d="M16 15l-3-3 3-3" />
+          </svg>
+        </button>
+      </div>
 
       {/* Top nav */}
       <nav style={{ margin: '0 8px' }} className="flex flex-col gap-px">
@@ -702,6 +718,17 @@ function SessionItem({
         >
           Auto rename
         </button>
+        {isSdkActive && (
+          <button
+            onClick={() => {
+              setContextMenu(null)
+              window.api.cancelSession(info.sessionId)
+            }}
+            className="w-full text-left px-3 py-1.5 text-[13px] text-red-400 hover:bg-bg-hover hover:text-red-300 transition-colors cursor-default"
+          >
+            Disconnect
+          </button>
+        )}
       </div>
     )}
   </>

@@ -12,9 +12,12 @@ import { MarkdownRenderer } from './MarkdownRenderer'
  */
 function waitForModeChange(): Promise<void> {
   return new Promise((resolve) => {
-    const currentMode = useSessionStore.getState().permissionMode
-    const unsub = useSessionStore.subscribe((state) => {
-      if (state.permissionMode !== currentMode) {
+    const state = useSessionStore.getState()
+    const rid = state.activeSessionId
+    const currentMode = rid ? state.sessions[rid]?.permissionMode : 'default'
+    const unsub = useSessionStore.subscribe((s) => {
+      const mode = rid ? s.sessions[rid]?.permissionMode : 'default'
+      if (mode !== currentMode) {
         unsub()
         resolve()
       }
@@ -66,11 +69,10 @@ export function ExitPlanModeCard({ block, approval }: ExitPlanModeCardProps): Re
     clearConversation(activeSessionId)
 
     // Create a fresh SDK session for the same routingId
-    const { effort } = useSessionStore.getState()
-    await window.api.createSession(activeSessionId, cwd, effort)
+    const session = useSessionStore.getState().sessions[activeSessionId]
+    await window.api.createSession(activeSessionId, cwd, session?.effort ?? 'medium', undefined, 'acceptEdits')
     markSdkActive(activeSessionId)
-    setPermissionMode('acceptEdits')
-    await window.api.setPermissionMode(activeSessionId, 'acceptEdits')
+    setPermissionMode('acceptEdits', activeSessionId)
 
     // Build prompt matching CLI format, including transcript reference
     let prompt = `Implement the following plan:\n\n${planContent}`
@@ -88,7 +90,7 @@ export function ExitPlanModeCard({ block, approval }: ExitPlanModeCardProps): Re
     removePendingApproval(activeSessionId, approval.requestId)
     await waitForModeChange()
 
-    setPermissionMode('acceptEdits')
+    setPermissionMode('acceptEdits', activeSessionId)
     await window.api.setPermissionMode(activeSessionId, 'acceptEdits')
   }, [approval, activeSessionId, removePendingApproval, setPermissionMode])
 
@@ -99,7 +101,7 @@ export function ExitPlanModeCard({ block, approval }: ExitPlanModeCardProps): Re
     removePendingApproval(activeSessionId, approval.requestId)
     await waitForModeChange()
 
-    setPermissionMode('default')
+    setPermissionMode('default', activeSessionId)
     await window.api.setPermissionMode(activeSessionId, 'default')
   }, [approval, activeSessionId, removePendingApproval, setPermissionMode])
 

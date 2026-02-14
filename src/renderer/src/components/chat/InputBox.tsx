@@ -4,16 +4,13 @@ import { v4 as uuid } from 'uuid'
 
 const EFFORT_LEVELS = ['low', 'medium', 'high'] as const
 
-const PERMISSION_MODES = [
-  { id: 'default' as const, label: 'Normal' },
-  { id: 'acceptEdits' as const, label: 'Auto-edit' },
-  { id: 'plan' as const, label: 'Plan' }
-]
 
 export function InputBox(): React.JSX.Element {
-  const [text, setText] = useState('')
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
+  const text = useActiveSession((s) => s.draftText)
+  const setDraftText = useSessionStore((s) => s.setDraftText)
+  const setText = setDraftText
   const cwd = useActiveSession((s) => s.cwd)
   const status = useActiveSession((s) => s.status)
   const sdkActive = useActiveSession((s) => s.sdkActive)
@@ -22,8 +19,8 @@ export function InputBox(): React.JSX.Element {
   const isRunning = status.state === 'running'
   const isDisabled = !activeSessionId || !cwd || isRunning
 
-  const permissionMode = useSessionStore((s) => s.permissionMode)
-  const setPermissionMode = useSessionStore((s) => s.setPermissionMode)
+  const permissionMode = useActiveSession((s) => s.permissionMode)
+
 
   const [modelOpen, setModelOpen] = useState(false)
   const [effortOpen, setEffortOpen] = useState(false)
@@ -36,7 +33,7 @@ export function InputBox(): React.JSX.Element {
   })
   const [selectedModelValue, setSelectedModelValue] = useState('default')
   const selectedModel = models.find((m) => m.value === selectedModelValue) || models[0] || { value: 'default', displayName: 'Default', shortName: 'Default' }
-  const effort = useSessionStore((s) => s.effort)
+  const effort = useActiveSession((s) => s.effort)
   const setEffort = useSessionStore((s) => s.setEffort)
 
   useEffect(() => {
@@ -81,9 +78,9 @@ export function InputBox(): React.JSX.Element {
 
     // Lazy SDK creation: create session on first message
     if (needsSdkCreate) {
-      const { effort: currentEffort, sessions } = useSessionStore.getState()
+      const { sessions } = useSessionStore.getState()
       const session = sessions[activeSessionId]
-      await window.api.createSession(activeSessionId, session?.cwd || '', currentEffort, resumeId)
+      await window.api.createSession(activeSessionId, session?.cwd || '', session?.effort ?? 'medium', resumeId, session?.permissionMode)
       markSdkActive(activeSessionId)
     }
 
@@ -101,15 +98,16 @@ export function InputBox(): React.JSX.Element {
       e.preventDefault()
       handleSend()
     }
-    if (e.key === 'Tab' && e.shiftKey) {
-      e.preventDefault()
-      const ids = PERMISSION_MODES.map((m) => m.id)
-      const next = ids[(ids.indexOf(permissionMode) + 1) % ids.length]
-      setPermissionMode(next)
-      if (activeSessionId) window.api.setPermissionMode(activeSessionId, next)
-    }
     if (e.key === 'Escape' && isRunning) handleCancel()
   }
+
+  // Resize textarea when switching sessions (draft text changes)
+  useEffect(() => {
+    const el = textareaRef.current
+    if (!el) return
+    el.style.height = 'auto'
+    el.style.height = Math.min(el.scrollHeight, 200) + 'px'
+  }, [text])
 
   const handleInput = (e: React.ChangeEvent<HTMLTextAreaElement>): void => {
     setText(e.target.value)

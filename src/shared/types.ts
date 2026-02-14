@@ -24,7 +24,7 @@ export interface ChatMessage {
 }
 
 export interface SessionStatus {
-  state: 'idle' | 'running' | 'error'
+  state: 'idle' | 'running' | 'error' | 'disconnected'
   sessionId: string | null
   model: string | null
   cwd: string | null
@@ -155,7 +155,7 @@ export interface RoutedData<T> {
 export interface ClaudeAPI {
   platform: string
   pickFolder(): Promise<string | null>
-  createSession(routingId: string, cwd: string, effort?: string, resumeSessionId?: string): Promise<void>
+  createSession(routingId: string, cwd: string, effort?: string, resumeSessionId?: string, permissionMode?: string): Promise<void>
   sendPrompt(routingId: string, prompt: string): Promise<void>
   cancelSession(routingId: string): Promise<void>
   respondApproval(routingId: string, requestId: string, decision: ApprovalDecision, answers?: Record<string, string>): Promise<void>

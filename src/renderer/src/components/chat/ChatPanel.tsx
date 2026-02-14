@@ -9,6 +9,7 @@ import { TodoWidget } from '../TodoWidget'
 import { FloatingApproval } from './FloatingApproval'
 import { FloatingError } from './FloatingError'
 import { WindowControls } from '../WindowControls'
+import { useSidebarCollapsed } from '../SessionView'
 
 export function ChatPanel(): React.JSX.Element {
   const messages = useActiveSession((s) => s.messages)
@@ -91,10 +92,44 @@ export function ChatPanel(): React.JSX.Element {
 
 function TopBar({ hasContent, cost }: { hasContent: boolean; cost: number }): React.JSX.Element {
   const cwd = useActiveSession((s) => s.cwd)
+  const activeSessionId = useSessionStore((s) => s.activeSessionId)
+  const customTitle = useSessionStore((s) => activeSessionId ? s.customTitles[activeSessionId] : undefined)
+  const { collapsed: sidebarCollapsed, toggle: toggleSidebar } = useSidebarCollapsed()
+  const showWelcome = useSessionStore((s) => s.showWelcome)
+  const isMac = window.api.platform === 'darwin'
+  const leftPadding = sidebarCollapsed && isMac ? 148 : 13
   return (
-    <div style={{ padding: '0 13px' }} className="shrink-0 h-12 flex items-center justify-between [-webkit-app-region:drag] border-b border-border">
-      <span className="text-[13px] text-text-secondary font-normal [-webkit-app-region:no-drag]">
-        {!cwd ? 'New session' : hasContent ? 'Session' : 'New session'}
+    <div style={{ paddingLeft: leftPadding, paddingRight: 13 }} className="shrink-0 h-12 flex items-center justify-between [-webkit-app-region:drag] border-b border-border relative">
+      {sidebarCollapsed && (
+        <div
+          style={isMac ? { position: 'absolute', left: 82, top: '50%', transform: 'translateY(-50%)' } : { marginRight: 8 }}
+          className="[-webkit-app-region:no-drag] flex items-center gap-1"
+        >
+          <button
+            onClick={toggleSidebar}
+            className="w-[26px] h-[26px] flex items-center justify-center rounded-md text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
+            title="Show sidebar"
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="3" y="3" width="18" height="18" rx="2" />
+              <path d="M9 3v18" />
+              <path d="M14 9l3 3-3 3" />
+            </svg>
+          </button>
+          <button
+            onClick={showWelcome}
+            className="w-[26px] h-[26px] flex items-center justify-center rounded-md text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
+            title="New session"
+          >
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+              <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" />
+              <path d="M18.5 2.5a2.12 2.12 0 013 3L12 15l-4 1 1-4z" />
+            </svg>
+          </button>
+        </div>
+      )}
+      <span className="text-[13px] text-text-secondary font-normal [-webkit-app-region:no-drag] truncate">
+        {!cwd ? 'New session' : hasContent ? (customTitle || 'Session') : 'New session'}
       </span>
       <div className="flex items-center gap-3 [-webkit-app-region:no-drag]">
         {cost > 0 && (

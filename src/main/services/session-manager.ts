@@ -9,7 +9,8 @@ export class SessionManager {
     win: BrowserWindow,
     cwd: string,
     effort?: string,
-    resumeSessionId?: string
+    resumeSessionId?: string,
+    permissionMode?: string
   ): ClaudeSession {
     // Clean up existing session with same routingId
     const existing = this.sessions.get(routingId)
@@ -17,7 +18,7 @@ export class SessionManager {
       existing.cancel()
     }
 
-    const session = new ClaudeSession(routingId, win, cwd, effort, resumeSessionId)
+    const session = new ClaudeSession(routingId, win, cwd, effort, resumeSessionId, permissionMode)
     this.sessions.set(routingId, session)
     return session
   }

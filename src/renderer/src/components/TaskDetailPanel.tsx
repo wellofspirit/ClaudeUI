@@ -435,7 +435,7 @@ function PanelEntry({ toolUseId }: { toolUseId: string }): React.JSX.Element | n
   return <TaskEntry toolUseId={toolUseId} />
 }
 
-export function TaskDetailPanel(): React.JSX.Element | null {
+export function TaskDetailPanel({ style }: { style?: React.CSSProperties }): React.JSX.Element | null {
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const taskPanelOpen = useActiveSession((s) => s.taskPanelOpen)
   const openedTaskToolUseIds = useActiveSession((s) => s.openedTaskToolUseIds)
@@ -444,7 +444,7 @@ export function TaskDetailPanel(): React.JSX.Element | null {
   if (!taskPanelOpen || openedTaskToolUseIds.length === 0) return null
 
   return (
-    <div className="w-[400px] shrink-0 border-l border-border bg-bg-secondary flex flex-col h-full">
+    <div style={style} className="shrink-0 border-l border-border bg-bg-secondary flex flex-col h-full">
       {/* Panel header */}
       <div className="shrink-0 flex items-center px-4 h-10 border-b border-border">
         <span className="text-[13px] text-text-secondary font-medium flex-1">Tasks</span>

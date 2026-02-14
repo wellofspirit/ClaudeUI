@@ -239,6 +239,9 @@ export interface PerSessionState {
   stoppingTaskIds: string[]
   isWatching: boolean
   needsAttention: boolean
+  permissionMode: PermissionMode
+  effort: 'low' | 'medium' | 'high'
+  draftText: string
 }
 
 const EMPTY_SESSION_STATE: PerSessionState = {
@@ -265,7 +268,10 @@ const EMPTY_SESSION_STATE: PerSessionState = {
   backgroundWatcherCounts: {},
   stoppingTaskIds: [],
   isWatching: false,
-  needsAttention: false
+  needsAttention: false,
+  permissionMode: 'default',
+  effort: 'medium',
+  draftText: ''
 }
 
 function createEmptySession(cwd: string): PerSessionState {
@@ -296,8 +302,6 @@ interface SessionState {
 
   // Global (not per-session)
   settings: AppSettings
-  permissionMode: PermissionMode
-  effort: 'low' | 'medium' | 'high'
   availableModels: ModelInfo[]
 
   // Multi-session actions
@@ -306,6 +310,7 @@ interface SessionState {
   createNewSession: (routingId: string, cwd: string) => void
   loadHistoricalSession: (routingId: string, messages: ChatMessage[], cwd: string, taskNotifications?: TaskNotification[]) => void
   markSdkActive: (routingId: string) => void
+  markSdkInactive: (routingId: string) => void
   setDirectories: (dirs: DirectoryGroup[]) => void
   addRecentSession: (routingId: string) => void
   removeRecentSession: (routingId: string) => void
@@ -347,8 +352,9 @@ interface SessionState {
   setWatching: (routingId: string, watching: boolean) => void
   updateWatchedSession: (routingId: string, messages: ChatMessage[], taskNotifications: TaskNotification[]) => void
   updateSettings: (partial: Partial<AppSettings>) => void
-  setPermissionMode: (mode: PermissionMode) => void
-  setEffort: (effort: 'low' | 'medium' | 'high') => void
+  setPermissionMode: (mode: PermissionMode, routingId?: string) => void
+  setEffort: (effort: 'low' | 'medium' | 'high', routingId?: string) => void
+  setDraftText: (text: string) => void
   setAvailableModels: (models: ModelInfo[]) => void
   clearConversation: (routingId: string) => void
 }
@@ -361,8 +367,6 @@ export const useSessionStore = create<SessionState>((set) => ({
   pinnedSessionIds: loadPinnedSessions(),
   customTitles: loadCustomTitles(),
   settings: loadSettings(),
-  permissionMode: 'default',
-  effort: 'medium',
   availableModels: [],
 
   showWelcome: () =>
@@ -410,6 +414,11 @@ export const useSessionStore = create<SessionState>((set) => ({
   markSdkActive: (routingId) =>
     set((state) => ({
       sessions: updateSession(state.sessions, routingId, () => ({ sdkActive: true, isHistorical: false }))
+    })),
+
+  markSdkInactive: (routingId) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, routingId, () => ({ sdkActive: false }))
     })),
 
   setDirectories: (dirs) => set({ directories: dirs }),
@@ -887,9 +896,26 @@ export const useSessionStore = create<SessionState>((set) => ({
       return { settings }
     }),
 
-  setPermissionMode: (mode) => set({ permissionMode: mode }),
+  setPermissionMode: (mode, routingId) =>
+    set((state) => {
+      const id = routingId ?? state.activeSessionId
+      if (!id) return {}
+      return { sessions: updateSession(state.sessions, id, () => ({ permissionMode: mode })) }
+    }),
 
-  setEffort: (effort) => set({ effort }),
+  setEffort: (effort, routingId) =>
+    set((state) => {
+      const id = routingId ?? state.activeSessionId
+      if (!id) return {}
+      return { sessions: updateSession(state.sessions, id, () => ({ effort })) }
+    }),
+
+  setDraftText: (text) =>
+    set((state) => {
+      const id = state.activeSessionId
+      if (!id) return {}
+      return { sessions: updateSession(state.sessions, id, () => ({ draftText: text })) }
+    }),
 
   setAvailableModels: (models) => set({ availableModels: models }),
 

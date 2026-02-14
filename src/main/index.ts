@@ -21,7 +21,7 @@ function createWindow(): void {
           transparent: true,
           vibrancy: 'under-window',
           titleBarStyle: 'hiddenInset',
-          trafficLightPosition: { x: 15, y: 10 }
+          trafficLightPosition: { x: 15, y: 16 }
         }
       : {
           frame: false,
