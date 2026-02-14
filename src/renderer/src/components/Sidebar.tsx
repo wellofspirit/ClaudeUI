@@ -24,7 +24,13 @@ export function Sidebar(): React.JSX.Element {
     return cleanup
   }, [setDirectories])
 
-  const handleNewThread = async (): Promise<void> => {
+  const showWelcome = useSessionStore((s) => s.showWelcome)
+
+  const handleNewSession = (): void => {
+    showWelcome()
+  }
+
+  const handleNewSessionDblClick = async (): Promise<void> => {
     const folder = await window.api.pickFolder()
     if (folder) {
       const routingId = uuid()
@@ -159,8 +165,9 @@ export function Sidebar(): React.JSX.Element {
       {/* Top nav */}
       <nav style={{ margin: '0 8px' }} className="flex flex-col gap-px">
         <NavItem
-          label="New thread"
-          onClick={handleNewThread}
+          label="New session"
+          onClick={handleNewSession}
+          onDoubleClick={handleNewSessionDblClick}
           icon={
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
               <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" />
@@ -352,16 +359,18 @@ function SessionItem({
   )
 }
 
-function NavItem({ label, icon, active, onClick }: {
+function NavItem({ label, icon, active, onClick, onDoubleClick }: {
   label: string
   icon: React.ReactNode
   active?: boolean
   onClick?: () => void
+  onDoubleClick?: () => void
 }): React.JSX.Element {
   return (
     <div
       style={{ padding: '0 5px' }}
       onClick={onClick}
+      onDoubleClick={onDoubleClick}
       className={`
         flex items-center gap-2.5 h-8 rounded-md text-[13px] cursor-default transition-colors
         ${active ? 'text-text-primary bg-bg-tertiary' : 'text-text-secondary hover:text-text-primary hover:bg-bg-hover'}

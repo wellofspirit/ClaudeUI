@@ -1,4 +1,5 @@
-import { useRef, useEffect } from 'react'
+import { useRef, useEffect, useState, useMemo } from 'react'
+import { v4 as uuid } from 'uuid'
 import { useActiveSession, useSessionStore } from '../../stores/session-store'
 import { MessageBubble } from './MessageBubble'
 import { StreamingText } from './StreamingText'
@@ -93,7 +94,7 @@ function TopBar({ hasContent, cost }: { hasContent: boolean; cost: number }): Re
   return (
     <div style={{ padding: '0 13px' }} className="shrink-0 h-12 flex items-center justify-between [-webkit-app-region:drag] border-b border-border">
       <span className="text-[13px] text-text-secondary font-normal [-webkit-app-region:no-drag]">
-        {!cwd ? 'New thread' : hasContent ? 'Thread' : 'New thread'}
+        {!cwd ? 'New session' : hasContent ? 'Session' : 'New session'}
       </span>
       <div className="flex items-center gap-3 [-webkit-app-region:no-drag]">
         {cost > 0 && (
@@ -105,8 +106,47 @@ function TopBar({ hasContent, cost }: { hasContent: boolean; cost: number }): Re
   )
 }
 
+const WELCOME_PHRASES = [
+  "Let's build",
+  "What's the plan?",
+  "Ready when you are",
+  "Where to next?",
+  "Let's ship it",
+  "What shall we make?",
+  "Got an idea?",
+  "Let's get started",
+  "What's on your mind?",
+  "Time to create",
+]
+
 function WelcomeState(): React.JSX.Element {
   const cwd = useActiveSession((s) => s.cwd)
+  const directories = useSessionStore((s) => s.directories)
+  const createNewSession = useSessionStore((s) => s.createNewSession)
+  const activeSessionId = useSessionStore((s) => s.activeSessionId)
+  const [dropdownOpen, setDropdownOpen] = useState(false)
+
+  // Pick a random phrase each time welcome view appears
+  const phrase = useMemo(
+    () => WELCOME_PHRASES[Math.floor(Math.random() * WELCOME_PHRASES.length)],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [activeSessionId]
+  )
+
+  const handleSelectDir = (dirCwd: string): void => {
+    const routingId = uuid()
+    createNewSession(routingId, dirCwd)
+    setDropdownOpen(false)
+  }
+
+  const handleBrowse = async (): Promise<void> => {
+    setDropdownOpen(false)
+    const folder = await window.api.pickFolder()
+    if (folder) {
+      const routingId = uuid()
+      createNewSession(routingId, folder)
+    }
+  }
 
   return (
     <div className="flex flex-col items-center gap-4 -mt-16 animate-fade-in">
@@ -120,9 +160,63 @@ function WelcomeState(): React.JSX.Element {
       </div>
 
       {/* Title */}
-      <p className="text-[22px] text-text-secondary font-light tracking-tight">Let's build</p>
+      <p className="text-[22px] text-text-secondary font-light tracking-tight">{phrase}</p>
 
-      {/* Current directory */}
+      {/* Directory dropdown */}
+      {!cwd && (
+        <div className="relative">
+          <button
+            onClick={() => setDropdownOpen(!dropdownOpen)}
+            className="flex items-center gap-1 text-[14px] text-accent hover:text-accent/80 transition-colors cursor-default"
+          >
+            <span>Select a project folder</span>
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="mt-px">
+              <path d="M6 9l6 6 6-6" />
+            </svg>
+          </button>
+
+          {dropdownOpen && (
+            <>
+              {/* Backdrop */}
+              <div className="fixed inset-0 z-10" onClick={() => setDropdownOpen(false)} />
+
+              {/* Dropdown menu */}
+              <div className="absolute top-full left-1/2 -translate-x-1/2 mt-1 w-72 max-h-64 overflow-y-auto rounded-lg bg-bg-tertiary border border-border shadow-lg z-20">
+                {directories.map((group) => (
+                  <button
+                    key={group.projectKey || group.cwd}
+                    onClick={() => handleSelectDir(group.cwd)}
+                    className="w-full flex items-center gap-2.5 px-3 py-2 text-[13px] text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-colors text-left cursor-default"
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="shrink-0 text-text-muted">
+                      <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" />
+                    </svg>
+                    <div className="flex flex-col min-w-0">
+                      <span className="truncate">{group.folderName}</span>
+                      <span className="text-[11px] text-text-muted truncate">{group.cwd}</span>
+                    </div>
+                  </button>
+                ))}
+
+                {directories.length > 0 && <div className="border-t border-border" />}
+
+                <button
+                  onClick={handleBrowse}
+                  className="w-full flex items-center gap-2.5 px-3 py-2 text-[13px] text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-colors text-left cursor-default"
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" className="shrink-0 text-text-muted">
+                    <circle cx="11" cy="11" r="8" />
+                    <path d="M21 21l-4.35-4.35" />
+                  </svg>
+                  <span>Browse...</span>
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* Current directory (when session already has one) */}
       {cwd && (
         <span className="text-[15px] text-text-muted">
           {cwd.split(/[\\/]/).pop() || cwd}

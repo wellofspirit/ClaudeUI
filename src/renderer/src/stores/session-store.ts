@@ -221,6 +221,7 @@ interface SessionState {
   availableModels: ModelInfo[]
 
   // Multi-session actions
+  showWelcome: () => void
   switchSession: (routingId: string) => void
   createNewSession: (routingId: string, cwd: string) => void
   loadHistoricalSession: (routingId: string, messages: ChatMessage[], cwd: string, taskNotifications?: TaskNotification[]) => void
@@ -273,6 +274,8 @@ export const useSessionStore = create<SessionState>((set) => ({
   permissionMode: 'default',
   effort: 'medium',
   availableModels: [],
+
+  showWelcome: () => set({ activeSessionId: null }),
 
   switchSession: (routingId) => set({ activeSessionId: routingId }),
 
