@@ -5,4 +5,4 @@ out
 .eslintcache
 *.log*
 test-prompt.txt
-.claude
+.claude/settings.local.json

@@ -13,7 +13,7 @@ export function WindowControls(): React.JSX.Element | null {
     <div className="flex items-center [-webkit-app-region:no-drag]">
       <button
         onClick={() => window.api.minimizeWindow()}
-        className="w-[46px] h-8 flex items-center justify-center text-text-secondary hover:bg-white/10 transition-colors"
+        className="w-[46px] h-12 flex items-center justify-center text-text-secondary hover:bg-white/10 transition-colors"
       >
         <svg width="10" height="1" viewBox="0 0 10 1">
           <rect width="10" height="1" fill="currentColor" />
@@ -21,7 +21,7 @@ export function WindowControls(): React.JSX.Element | null {
       </button>
       <button
         onClick={() => window.api.maximizeWindow()}
-        className="w-[46px] h-8 flex items-center justify-center text-text-secondary hover:bg-white/10 transition-colors"
+        className="w-[46px] h-12 flex items-center justify-center text-text-secondary hover:bg-white/10 transition-colors"
       >
         {isMaximized ? (
           <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1">
@@ -36,7 +36,7 @@ export function WindowControls(): React.JSX.Element | null {
       </button>
       <button
         onClick={() => window.api.closeWindow()}
-        className="w-[46px] h-8 flex items-center justify-center text-text-secondary hover:bg-[#e81123] hover:text-white transition-colors"
+        className="w-[46px] h-12 flex items-center justify-center text-text-secondary hover:bg-[#e81123] hover:text-white transition-colors"
       >
         <svg width="10" height="10" viewBox="0 0 10 10" stroke="currentColor" strokeWidth="1.2">
           <line x1="0" y1="0" x2="10" y2="10" />

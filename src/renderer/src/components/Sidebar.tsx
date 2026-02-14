@@ -290,7 +290,7 @@ export function Sidebar({ style, onToggleCollapse }: {
       <div className="h-12 shrink-0 [-webkit-app-region:drag] relative">
         <button
           onClick={onToggleCollapse}
-          style={{ position: 'absolute', left: 82, top: '50%', transform: 'translateY(-50%)' }}
+          style={{ position: 'absolute', left: window.api.platform === 'darwin' ? 82 : 8, top: '50%', transform: 'translateY(-50%)' }}
           className="[-webkit-app-region:no-drag] w-[26px] h-[26px] flex items-center justify-center rounded-md text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
           title="Collapse sidebar"
         >
@@ -409,15 +409,8 @@ export function Sidebar({ style, onToggleCollapse }: {
         )}
       </div>
 
-      {/* Footer */}
-      <div style={{ padding: '12px 16px' }} className="border-t border-border/50 flex items-center gap-2 text-[11px] text-text-muted">
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" className="text-text-muted">
-          <path d="M12 2L2 7l10 5 10-5-10-5z" strokeLinecap="round" strokeLinejoin="round" />
-          <path d="M2 17l10 5 10-5" strokeLinecap="round" strokeLinejoin="round" />
-        </svg>
-        <span className="flex-1">ClaudeUI</span>
-        <SettingsButton />
-      </div>
+      {/* Settings panel + Footer */}
+      <SettingsPanel />
     </div>
   )
 }
@@ -854,17 +847,17 @@ function NavItem({ label, icon, active, onClick, onDoubleClick }: {
   )
 }
 
-function SettingsButton(): React.JSX.Element {
+function SettingsPanel(): React.JSX.Element {
   const [open, setOpen] = useState(false)
   const settings = useSessionStore((s) => s.settings)
   const updateSettings = useSessionStore((s) => s.updateSettings)
-  const popoverRef = useRef<HTMLDivElement>(null)
+  const panelRef = useRef<HTMLDivElement>(null)
 
   // Close on outside click
   useEffect(() => {
     if (!open) return
     const handler = (e: MouseEvent): void => {
-      if (popoverRef.current && !popoverRef.current.contains(e.target as Node)) {
+      if (panelRef.current && !panelRef.current.contains(e.target as Node)) {
         setOpen(false)
       }
     }
@@ -873,49 +866,50 @@ function SettingsButton(): React.JSX.Element {
   }, [open])
 
   return (
-    <div className="relative" ref={popoverRef}>
-      <button
-        onClick={() => setOpen(!open)}
-        className="flex items-center justify-center w-6 h-6 rounded-md hover:bg-bg-hover transition-colors cursor-default"
-        title="Settings"
-      >
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="text-text-muted">
-          <circle cx="12" cy="12" r="3" />
-          <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z" />
-        </svg>
-      </button>
-
+    <div ref={panelRef}>
       {open && (
-        <div className="absolute bottom-full right-0 mb-2 w-56 rounded-lg bg-bg-tertiary border border-border shadow-lg z-50 overflow-hidden">
-          <div className="px-3 py-2 border-b border-border">
-            <span className="text-[11px] font-semibold text-text-muted uppercase tracking-wider">Settings</span>
-          </div>
-          <div className="py-1">
-            <SettingsToggle
-              label="Expand tool calls"
-              checked={settings.expandToolCalls}
-              onChange={(v) => updateSettings({ expandToolCalls: v })}
-            />
-            <SettingsToggle
-              label="Hide tool input"
-              checked={settings.hideToolInput}
-              onChange={(v) => updateSettings({ hideToolInput: v })}
-            />
-            <SettingsToggle
-              label="Expand thinking"
-              checked={settings.expandThinking}
-              onChange={(v) => updateSettings({ expandThinking: v })}
-            />
-            <SettingsSlider
-              label="Recent sessions"
-              value={settings.maxRecentSessions}
-              min={1}
-              max={10}
-              onChange={(v) => updateSettings({ maxRecentSessions: v })}
-            />
-          </div>
+        <div className="border-t border-border/50 px-2 py-1 bg-white/5 rounded-t-lg">
+          <SettingsToggle
+            label="Expand tool calls"
+            checked={settings.expandToolCalls}
+            onChange={(v) => updateSettings({ expandToolCalls: v })}
+          />
+          <SettingsToggle
+            label="Hide tool input"
+            checked={settings.hideToolInput}
+            onChange={(v) => updateSettings({ hideToolInput: v })}
+          />
+          <SettingsToggle
+            label="Expand thinking"
+            checked={settings.expandThinking}
+            onChange={(v) => updateSettings({ expandThinking: v })}
+          />
+          <SettingsSlider
+            label="Recent sessions"
+            value={settings.maxRecentSessions}
+            min={1}
+            max={10}
+            onChange={(v) => updateSettings({ maxRecentSessions: v })}
+          />
         </div>
       )}
+      <div style={{ padding: '12px 16px' }} className="border-t border-border/50 flex items-center gap-2 text-[11px] text-text-muted">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" className="text-text-muted">
+          <path d="M12 2L2 7l10 5 10-5-10-5z" strokeLinecap="round" strokeLinejoin="round" />
+          <path d="M2 17l10 5 10-5" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+        <span className="flex-1">ClaudeUI</span>
+        <button
+          onClick={() => setOpen(!open)}
+          className="flex items-center justify-center w-6 h-6 rounded-md hover:bg-bg-hover transition-colors cursor-default"
+          title="Settings"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="text-text-muted">
+            <circle cx="12" cy="12" r="3" />
+            <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z" />
+          </svg>
+        </button>
+      </div>
     </div>
   )
 }

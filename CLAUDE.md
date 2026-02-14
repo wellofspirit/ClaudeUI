@@ -91,6 +91,13 @@ User types prompt → InputBox.handleSend()
 - Transparent window with `vibrancy: 'under-window'` on macOS
 - Sidebar (240px, semi-transparent) + rounded card chat panel with left shadow
 
+## Windows Path Format in Bash Commands
+
+On Windows (Git Bash), the SDK's working directory uses POSIX format (`/d/WorkPlace/ClaudeUI`), not Windows format (`D:\WorkPlace\ClaudeUI` or `REDACTED_PATH/ClaudeUI`). This matters for permission checks:
+
+- **Never prefix Bash commands with `cd D:/...`** — it's redundant (already in the working dir) and causes permission prompts because the SDK filters `cd <cwd>` by exact string match, and `REDACTED_PATH/ClaudeUI` ≠ `/d/WorkPlace/ClaudeUI`.
+- When a path **must** be specified in a command argument, use POSIX format: `/d/WorkPlace/ClaudeUI` not `D:\WorkPlace\ClaudeUI`. This matches what the SDK sees as the working directory and ensures `cd` auto-filtering and permission rules work correctly.
+
 ## Known Gotchas
 
 ### Tailwind v4 + CSS Reset
