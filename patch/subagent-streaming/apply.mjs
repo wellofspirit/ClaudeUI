@@ -437,13 +437,14 @@ if (src.includes(patchEMarker)) {
   console.log(`UUID function: ${uuidFn}()`)
 
   // Find async for-await+jy loops by matching the body pattern after )).
-  // v2.1.41 pattern: ))ARR.push(MSG),QM1(STATS,MSG,TOOLS,J.options.tools),XW8(AGENTID,...);
+  // Pattern: ))ARR.push(MSG),STATS_FN(STATS,MSG,TOOLS,J.options.tools),STATE_FN(AGENTID,...);
+  // v2.1.41: ))f1.push(W1),QM1(k1,W1,e,J.options.tools),XW8(t.agentId,Nm1(k1),J.setAppState);
+  // v2.1.42: ))J1.push(q6),tM1(M1,q6,y1,J.options.tools),kWA(S1,pm1(M1),J.setAppState);
   const asyncBodyRe = new RegExp(
     `\\)\\)(${V})\\.push\\((${V})\\),` +             // ))ARR.push(MSG),
-    `(${V})\\((${V}),\\2,` +                         // QM1(STATS,MSG,
+    `(${V})\\((${V}),\\2,` +                         // tM1(STATS,MSG,
     `(${V}),(${V})\\.options\\.tools\\),` +           // TOOLS,J.options.tools),
-    `(${V})\\((${V}(?:\\.${V})?),` +                 // XW8(AGENTID or XW8(x.prop,
-    `[^;]+;`                                          // ...);
+    `(${V})\\([^;]+;`                                 // kWA(...);
   , 'g')
 
   let asyncMatch
@@ -452,7 +453,7 @@ if (src.includes(patchEMarker)) {
   const matches = []
   while ((asyncMatch = asyncBodyRe.exec(src)) !== null) {
     const before = src.slice(Math.max(0, asyncMatch.index - 500), asyncMatch.index)
-    if (!before.includes('for await') || !before.includes('jy({')) continue
+    if (!before.includes('for await') || !before.includes('isAsync:!0')) continue
     matches.push({
       fullMatch: asyncMatch[0],
       msgVar: asyncMatch[2],
@@ -461,13 +462,31 @@ if (src.includes(patchEMarker)) {
   }
 
   if (matches.length === 0) {
-    console.error('ERROR: Cannot locate async for-await+jy loops.')
-    console.error('The sub-agent generator function name may have changed.')
-    console.error('Search for "for await" loops with .push() + QM1/stats + XW8/state-update patterns.')
+    console.error('ERROR: Cannot locate async for-await loops with isAsync:!0.')
+    console.error('The background agent loop structure may have changed.')
+    console.error('Search for "for await" loops with .push() + stats + state-update patterns near isAsync:!0.')
     process.exit(1)
   }
 
   console.log(`Found ${matches.length} async for-await loop(s) to patch.`)
+
+  // Extract parent message var and description var from the Task tool's call() signature.
+  // Pattern: async call({...description:DESC,...},CONTEXT,CANUSE,PARENT_MSG,CALLBACK){
+  // DESC is the minified name for the "description" input field.
+  // PARENT_MSG is the 4th positional param (the parent assistant message).
+  const callSigRe = new RegExp(
+    `async call\\(\\{[^}]*description:(${V})[^}]*\\},` +  // {prompt:A,...,description:K,...},
+    `(${V}),(${V}),(${V}),(${V})\\)\\{`                    // J,X,j,D){
+  )
+  const callSigMatch = src.match(callSigRe)
+  if (!callSigMatch) {
+    console.error('ERROR: Cannot locate Task tool call() signature.')
+    console.error('Need to extract description and parent message variable names.')
+    process.exit(1)
+  }
+  const descVar = callSigMatch[1]       // K in current version — "description" input
+  const parentMsgVar = callSigMatch[4]  // j in current version — parent assistant message
+  console.log(`Task call() signature: description=${descVar}, parentMsg=${parentMsgVar}`)
 
   // Apply in reverse order so indices stay valid
   for (let i = matches.length - 1; i >= 0; i--) {
@@ -476,24 +495,28 @@ if (src.includes(patchEMarker)) {
     const body = fullMatch.slice(2) // strip leading "))"
 
     // Write line-delimited JSON to stdout (the SDK reads newline-delimited
-    // JSON, NOT binary-framed). j is the full assistant message from the parent
-    // (may contain text/thinking blocks before the tool_use). Find the matching
-    // tool_use block by description (K) for parent_tool_use_id.
+    // JSON, NOT binary-framed). parentMsgVar is the full assistant message
+    // from the parent (may contain text/thinking blocks before the tool_use).
+    // Find the matching tool_use block by description (descVar) for parent_tool_use_id.
     //
     // stream_events are forwarded directly without pushing to the collection
     // array (they lack .message/.uuid and break downstream processing).
     // For assistant/user messages, the original push+stats+state runs first.
+    const ptuLookup =
+      `let _ptu=null;for(let _b of ${parentMsgVar}.message.content)` +
+      `{if(_b.type==="tool_use"&&_b.input&&_b.input.description===${descVar}){_ptu=_b.id;break}}`
+
     const replacement =
       `){${patchEMarker}` +
       // stream_event: forward directly, skip push to collection array
       `if(${msgVar}.type==="stream_event"){` +
-        `let _ptu=null;for(let _b of j.message.content){if(_b.type==="tool_use"&&_b.input&&_b.input.description===K){_ptu=_b.id;break}}` +
+        `${ptuLookup}` +
         `process.stdout.write(JSON.stringify({type:"stream_event",event:${msgVar}.event,` +
         `parent_tool_use_id:_ptu,session_id:${sessFn}(),uuid:${uuidFn}()})+"\\n")` +
       `}else{` +
       // non-stream_event: original body (push, stats, state update)
       `${body}` +
-      `{let _ptu=null;for(let _b of j.message.content){if(_b.type==="tool_use"&&_b.input&&_b.input.description===K){_ptu=_b.id;break}}` +
+      `{${ptuLookup}` +
       `if(${msgVar}.type==="assistant")` +
         `process.stdout.write(JSON.stringify({type:"assistant",message:${msgVar}.message,` +
         `parent_tool_use_id:_ptu,session_id:${sessFn}(),uuid:${uuidFn}()})+"\\n");` +

@@ -125,9 +125,9 @@ Patches live in `patch/` and fix limitations in the bundled `cli.js`. Each patch
 
 | Patch | Purpose |
 |---|---|
-| `task-notification` | Forwards task_notification system messages to SDK consumer |
 | `subagent-streaming` | Forwards subagent stream events + messages to SDK consumer |
 | `task-notification-usage` | Extracts `<usage>` data from task-notification XML |
+| `taskstop-notification` | Sends task_notification on TaskStop + maps "killed" → "stopped" |
 
 ### Writing a new patch
 
