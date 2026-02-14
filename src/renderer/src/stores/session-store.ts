@@ -324,7 +324,7 @@ interface SessionState {
   showWelcome: () => void
   switchSession: (routingId: string) => void
   createNewSession: (routingId: string, cwd: string) => void
-  loadHistoricalSession: (routingId: string, messages: ChatMessage[], cwd: string, taskNotifications?: TaskNotification[]) => void
+  loadHistoricalSession: (routingId: string, messages: ChatMessage[], cwd: string, taskNotifications?: TaskNotification[], subagentMessages?: Record<string, ChatMessage[]>) => void
   markSdkActive: (routingId: string) => void
   markSdkInactive: (routingId: string) => void
   setDirectories: (dirs: DirectoryGroup[]) => void
@@ -415,7 +415,7 @@ export const useSessionStore = create<SessionState>((set) => ({
       }
     }),
 
-  loadHistoricalSession: (routingId, messages, cwd, taskNotifications?) =>
+  loadHistoricalSession: (routingId, messages, cwd, taskNotifications?, subagentMessages?) =>
     set((state) => ({
       sessions: {
         ...state.sessions,
@@ -423,7 +423,8 @@ export const useSessionStore = create<SessionState>((set) => ({
           ...createEmptySession(cwd),
           messages,
           isHistorical: true,
-          taskNotifications: taskNotifications || []
+          taskNotifications: taskNotifications || [],
+          subagentMessages: subagentMessages || {}
         }
       }
     })),

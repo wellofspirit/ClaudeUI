@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { v4 as uuid } from 'uuid'
 import { useSessionStore, buildTodosFromMessages } from '../stores/session-store'
-import type { DirectoryGroup, SessionInfo } from '../../../shared/types'
+import type { ChatMessage, DirectoryGroup, SessionInfo } from '../../../shared/types'
 
 export function Sidebar({ style, onToggleCollapse }: {
   style?: React.CSSProperties
@@ -64,7 +64,7 @@ export function Sidebar({ style, onToggleCollapse }: {
       })()
       if (info?.projectKey) {
         const { messages, taskNotifications } = await window.api.loadSessionHistory(sessionId, info.projectKey)
-        loadHistoricalSession(sessionId, messages, info.cwd, taskNotifications)
+        loadHistoricalSession(sessionId, messages, info.cwd, taskNotifications, {})
         session = useSessionStore.getState().sessions[sessionId]
       }
     }
@@ -149,8 +149,26 @@ export function Sidebar({ style, onToggleCollapse }: {
       return
     }
     // Load from JSONL
-    const { messages, taskNotifications, customTitle } = await window.api.loadSessionHistory(info.sessionId, info.projectKey)
-    loadHistoricalSession(routingId, messages, info.cwd, taskNotifications)
+    const { messages, taskNotifications, customTitle, agentIdToToolUseId } = await window.api.loadSessionHistory(info.sessionId, info.projectKey)
+    // Load subagent histories in parallel
+    const subagentMessages: Record<string, ChatMessage[]> = {}
+    const entries = Object.entries(agentIdToToolUseId)
+    if (entries.length > 0) {
+      const results = await Promise.all(
+        entries.map(async ([agentId, toolUseId]) => {
+          try {
+            const msgs = await window.api.loadSubagentHistory(info.sessionId, info.projectKey, agentId)
+            return { toolUseId, msgs }
+          } catch {
+            return { toolUseId, msgs: [] as ChatMessage[] }
+          }
+        })
+      )
+      for (const { toolUseId, msgs } of results) {
+        if (msgs.length > 0) subagentMessages[toolUseId] = msgs
+      }
+    }
+    loadHistoricalSession(routingId, messages, info.cwd, taskNotifications, subagentMessages)
     if (customTitle) setCustomTitle(routingId, customTitle)
     // Rebuild todos from TaskCreate/TaskUpdate/TodoWrite tool calls
     const todos = buildTodosFromMessages(messages)

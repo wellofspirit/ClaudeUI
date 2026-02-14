@@ -163,7 +163,7 @@ export interface ClaudeAPI {
   maximizeWindow(): Promise<void>
   closeWindow(): Promise<void>
   listDirectories(): Promise<DirectoryGroup[]>
-  loadSessionHistory(sessionId: string, projectKey: string): Promise<{ messages: ChatMessage[]; taskNotifications: TaskNotification[]; customTitle: string | null }>
+  loadSessionHistory(sessionId: string, projectKey: string): Promise<{ messages: ChatMessage[]; taskNotifications: TaskNotification[]; customTitle: string | null; agentIdToToolUseId: Record<string, string> }>
   loadSubagentHistory(sessionId: string, projectKey: string, agentId: string): Promise<ChatMessage[]>
   loadBackgroundOutput(projectKey: string, taskId: string, outputFile?: string): Promise<{ content: string | null; purged: boolean }>
 

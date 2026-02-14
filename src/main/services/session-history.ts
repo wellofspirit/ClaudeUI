@@ -201,6 +201,8 @@ export interface SessionHistoryResult {
   messages: ChatMessage[]
   taskNotifications: TaskNotification[]
   customTitle: string | null
+  /** Maps agentId → toolUseId for subagent JSONL lookup */
+  agentIdToToolUseId: Record<string, string>
 }
 
 /**
@@ -294,7 +296,7 @@ export async function loadSessionHistory(
     try {
       stream = fs.createReadStream(filePath, { encoding: 'utf-8' })
     } catch {
-      resolve({ messages: [], taskNotifications: [], customTitle: null })
+      resolve({ messages: [], taskNotifications: [], customTitle: null, agentIdToToolUseId: {} })
       return
     }
 
@@ -568,8 +570,8 @@ export async function loadSessionHistory(
       }
     })
 
-    rl.on('close', () => resolve({ messages, taskNotifications, customTitle }))
-    rl.on('error', () => resolve({ messages: [], taskNotifications: [], customTitle: null }))
+    rl.on('close', () => resolve({ messages, taskNotifications, customTitle, agentIdToToolUseId }))
+    rl.on('error', () => resolve({ messages: [], taskNotifications: [], customTitle: null, agentIdToToolUseId: {} }))
   })
 }
 
