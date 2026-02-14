@@ -452,8 +452,10 @@ if (src.includes(patchEMarker)) {
 
   const matches = []
   while ((asyncMatch = asyncBodyRe.exec(src)) !== null) {
-    const before = src.slice(Math.max(0, asyncMatch.index - 500), asyncMatch.index)
-    if (!before.includes('for await') || !before.includes('isAsync:!0')) continue
+    // v2.1.42: the initial async path spreads isAsync from a variable via ...n,
+    // and it can be up to ~800 chars before the loop body. Use a 1000-char window.
+    const before = src.slice(Math.max(0, asyncMatch.index - 1000), asyncMatch.index)
+    if (!before.includes('for await')) continue
     matches.push({
       fullMatch: asyncMatch[0],
       msgVar: asyncMatch[2],
@@ -462,9 +464,9 @@ if (src.includes(patchEMarker)) {
   }
 
   if (matches.length === 0) {
-    console.error('ERROR: Cannot locate async for-await loops with isAsync:!0.')
+    console.error('ERROR: Cannot locate async for-await loops.')
     console.error('The background agent loop structure may have changed.')
-    console.error('Search for "for await" loops with .push() + stats + state-update patterns near isAsync:!0.')
+    console.error('Search for "for await" loops with .push() + stats + state-update patterns.')
     process.exit(1)
   }
 

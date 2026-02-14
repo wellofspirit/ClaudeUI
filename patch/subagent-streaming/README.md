@@ -16,8 +16,8 @@ your system, and may trail behind in version.
 
 | Component | Version at time of discovery |
 |---|---|
-| SDK package | 0.2.38 → 0.2.39 → 0.2.41 |
-| Bundled CLI (`cli.js`) | 2.1.38 → 2.1.39 → 2.1.41 |
+| SDK package | 0.2.38 → 0.2.39 → 0.2.41 → 0.2.42 |
+| Bundled CLI (`cli.js`) | 2.1.38 → 2.1.39 → 2.1.41 → 2.1.42 |
 
 All versions exhibit the same behavior. Function names change between
 versions but the architecture is identical.
@@ -959,6 +959,31 @@ Or search for the push+stats+state pattern after `))`:
 \)[\w$]+\.push\([\w$]+\),[\w$]+\([\w$]+,[\w$]+,[\w$]+,[\w$]+\.options\.tools\),[\w$]+\(
 ```
 
+**v2.1.42 gotcha — initial async loop `isAsync` is a variable:**
+
+In v2.1.42, the initial async path (where `run_in_background: true` from
+the start) builds an `n` object containing `isAsync:g` (where `g` is a
+variable), then spreads `{...n,...}` into the `Wy()` call. The literal
+`isAsync:!0` does NOT appear near this loop. Only the "backgrounded from
+sync" loop passes `isAsync:!0` directly.
+
+The `apply.mjs` filter was originally checking for literal `isAsync:!0`
+within 500 chars before the loop body. In v2.1.42, the `isAsync:g` is
+~713 chars before the loop body pattern, so the initial async loop was
+silently skipped. This caused:
+
+1. Stream events from `Wy()` entering the collection array `N1`
+2. `uRA(N1)` → `pCY(N1)` → `j$(N1)` where the normalize function
+   has no `case "stream_event"` in its switch, returning `undefined`
+   from the `flatMap` callback
+3. Downstream code accessing `.type` on `undefined` → crash:
+   `Cannot read properties of undefined (reading 'type')`
+
+Fix: Changed the filter to use a 1000-char window and only require
+`for await` (dropping the `isAsync` literal check). The `for await` +
+`))ARR.push(MSG),STATS(...)` pattern is specific enough to only match
+the two background agent loops.
+
 ## What's NOT Changed
 
 **UEA (task result)** — The final result returned to the parent model from
@@ -1092,19 +1117,19 @@ Where the message content includes `type:"thinking"` blocks.
 
 ## Key Functions Reference
 
-| Name (v2.1.38 → v2.1.39 → v2.1.41) | Purpose |
+| Name (v2.1.38 → v2.1.39 → v2.1.41 → v2.1.42) | Purpose |
 |---|---|
-| `RVY()` → `RVY()` → `BRY()` | cR/jy yield filter (gates what the generator yields to callers) |
-| `dR()` → `dR()` → ? | Sub-agent execution generator (may be merged into jy) |
-| `UEA()` → `UEA()` → `NR8()` | Extract text-only result from agent messages |
-| `FM6()` → `sM6()` → `QW6()` | Extract text from last assistant message |
-| `ZhA()` → `ihA()` → `mI8()` | Convert internal messages to SDK output format |
-| `U1q()` → `O6q()` → ? | Wrap progress data into progress message format |
-| `iO()` → `rO()` → `lO()` | Normalize messages to individual content blocks |
-| `_f()` → `_f()` → `Gf()` | UUID generator for message wrapping |
-| `cR()` → `cR()` → `jy()` | Sub-agent query function (async generator) |
-| `s0A()` → `s0A()` → `XW8()` | Task state updater (in async loops) |
-| `s01()` → `s01()` → `QM1()` | Stats updater (in async loops) |
+| `RVY()` → `RVY()` → `BRY()` → `myY()` | cR/jy/Wy yield filter (gates what the generator yields to callers) |
+| `dR()` → `dR()` → ? → (merged into Wy) | Sub-agent execution generator |
+| `UEA()` → `UEA()` → `NR8()` → `uRA()` | Extract text-only result from agent messages |
+| `FM6()` → `sM6()` → `QW6()` → `tW6()` | Extract text from last assistant message |
+| `ZhA()` → `ihA()` → `mI8()` → ? | Convert internal messages to SDK output format |
+| `U1q()` → `O6q()` → ? → ? | Wrap progress data into progress message format |
+| `iO()` → `rO()` → `lO()` → `j$()` | Normalize messages to individual content blocks |
+| `_f()` → `_f()` → `Gf()` → `Zf()` | UUID generator for message wrapping |
+| `cR()` → `cR()` → `jy()` → `Wy()` | Sub-agent query function (async generator) |
+| `s0A()` → `s0A()` → `XW8()` → `kWA()` | Task state updater (in async loops) |
+| `s01()` → `s01()` → `QM1()` → `tM1()` | Stats updater (in async loops) |
 
 **Note:** Names change between versions — always use content patterns, not
 names. Use `bundle-analyzer find` with string literals as anchors.
