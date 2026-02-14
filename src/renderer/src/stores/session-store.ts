@@ -123,7 +123,37 @@ export function buildTodosFromMessages(messages: ChatMessage[]): TodoItem[] | nu
   return Array.from(tasks.values())
 }
 
+const SETTINGS_KEY = 'claudeui-settings'
+
+export interface AppSettings {
+  expandToolCalls: boolean
+  hideToolInput: boolean
+  expandThinking: boolean
+  maxRecentSessions: number
+}
+
+const DEFAULT_SETTINGS: AppSettings = {
+  expandToolCalls: true,
+  hideToolInput: false,
+  expandThinking: false,
+  maxRecentSessions: 5
+}
+
+function loadSettings(): AppSettings {
+  try {
+    const raw = localStorage.getItem(SETTINGS_KEY)
+    return raw ? { ...DEFAULT_SETTINGS, ...JSON.parse(raw) } : DEFAULT_SETTINGS
+  } catch {
+    return DEFAULT_SETTINGS
+  }
+}
+
+function saveSettings(settings: AppSettings): void {
+  localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings))
+}
+
 const RECENT_SESSIONS_KEY = 'claudeui-recent-sessions'
+const PINNED_SESSIONS_KEY = 'claudeui-pinned-sessions'
 
 function loadRecentSessions(): string[] {
   try {
@@ -136,6 +166,37 @@ function loadRecentSessions(): string[] {
 
 function saveRecentSessions(ids: string[]): void {
   localStorage.setItem(RECENT_SESSIONS_KEY, JSON.stringify(ids))
+}
+
+function loadPinnedSessions(): string[] {
+  try {
+    const raw = localStorage.getItem(PINNED_SESSIONS_KEY)
+    return raw ? JSON.parse(raw) : []
+  } catch {
+    return []
+  }
+}
+
+function savePinnedSessions(ids: string[]): void {
+  localStorage.setItem(PINNED_SESSIONS_KEY, JSON.stringify(ids))
+}
+
+/** Remove a session from state if it has no messages (empty new session) */
+function cleanupEmptySession(
+  sessions: Record<string, PerSessionState>,
+  recentSessionIds: string[],
+  routingId: string | null
+): { sessions: Record<string, PerSessionState>; recentSessionIds: string[] } {
+  if (!routingId) return { sessions, recentSessionIds }
+  const session = sessions[routingId]
+  if (!session) return { sessions, recentSessionIds }
+  // Only clean up sessions with no messages and no active SDK
+  if (session.messages.length > 0 || session.sdkActive) return { sessions, recentSessionIds }
+  const { [routingId]: _, ...rest } = sessions
+  return {
+    sessions: rest,
+    recentSessionIds: recentSessionIds.filter((id) => id !== routingId)
+  }
 }
 
 /** Per-session state — everything that varies between sessions */
@@ -163,6 +224,7 @@ export interface PerSessionState {
   backgroundWatcherCounts: Record<string, number>
   stoppingTaskIds: string[]
   isWatching: boolean
+  needsAttention: boolean
 }
 
 const EMPTY_SESSION_STATE: PerSessionState = {
@@ -188,7 +250,8 @@ const EMPTY_SESSION_STATE: PerSessionState = {
   backgroundOutputs: {},
   backgroundWatcherCounts: {},
   stoppingTaskIds: [],
-  isWatching: false
+  isWatching: false,
+  needsAttention: false
 }
 
 function createEmptySession(cwd: string): PerSessionState {
@@ -214,8 +277,10 @@ interface SessionState {
   // Sidebar data
   directories: DirectoryGroup[]
   recentSessionIds: string[]
+  pinnedSessionIds: string[]
 
   // Global (not per-session)
+  settings: AppSettings
   permissionMode: PermissionMode
   effort: 'low' | 'medium' | 'high'
   availableModels: ModelInfo[]
@@ -228,6 +293,10 @@ interface SessionState {
   markSdkActive: (routingId: string) => void
   setDirectories: (dirs: DirectoryGroup[]) => void
   addRecentSession: (routingId: string) => void
+  removeRecentSession: (routingId: string) => void
+  pinSession: (routingId: string) => void
+  unpinSession: (routingId: string) => void
+  reorderPinnedSessions: (ids: string[]) => void
 
   // Per-session actions (all take routingId)
   addMessage: (routingId: string, message: ChatMessage) => void
@@ -258,8 +327,10 @@ interface SessionState {
   removeTaskFromPanel: (routingId: string, toolUseId: string) => void
   setTaskStopping: (routingId: string, toolUseId: string) => void
   clearTaskStopping: (routingId: string, toolUseId: string) => void
+  setNeedsAttention: (routingId: string, value: boolean) => void
   setWatching: (routingId: string, watching: boolean) => void
   updateWatchedSession: (routingId: string, messages: ChatMessage[], taskNotifications: TaskNotification[]) => void
+  updateSettings: (partial: Partial<AppSettings>) => void
   setPermissionMode: (mode: PermissionMode) => void
   setEffort: (effort: 'low' | 'medium' | 'high') => void
   setAvailableModels: (models: ModelInfo[]) => void
@@ -271,17 +342,33 @@ export const useSessionStore = create<SessionState>((set) => ({
   sessions: {},
   directories: [],
   recentSessionIds: loadRecentSessions(),
+  pinnedSessionIds: loadPinnedSessions(),
+  settings: loadSettings(),
   permissionMode: 'default',
   effort: 'medium',
   availableModels: [],
 
-  showWelcome: () => set({ activeSessionId: null }),
+  showWelcome: () =>
+    set((state) => {
+      const cleaned = cleanupEmptySession(state.sessions, state.recentSessionIds, state.activeSessionId)
+      if (cleaned.recentSessionIds !== state.recentSessionIds) saveRecentSessions(cleaned.recentSessionIds)
+      return { activeSessionId: null, ...cleaned }
+    }),
 
-  switchSession: (routingId) => set({ activeSessionId: routingId }),
+  switchSession: (routingId) =>
+    set((state) => {
+      const cleaned = cleanupEmptySession(state.sessions, state.recentSessionIds, state.activeSessionId)
+      if (cleaned.recentSessionIds !== state.recentSessionIds) saveRecentSessions(cleaned.recentSessionIds)
+      return {
+        activeSessionId: routingId,
+        sessions: updateSession(cleaned.sessions, routingId, () => ({ needsAttention: false })),
+        recentSessionIds: cleaned.recentSessionIds
+      }
+    }),
 
   createNewSession: (routingId, cwd) =>
     set((state) => {
-      const recentSessionIds = [routingId, ...state.recentSessionIds.filter((id) => id !== routingId)].slice(0, 5)
+      const recentSessionIds = [routingId, ...state.recentSessionIds.filter((id) => id !== routingId)].slice(0, state.settings.maxRecentSessions)
       saveRecentSessions(recentSessionIds)
       return {
         activeSessionId: routingId,
@@ -312,9 +399,45 @@ export const useSessionStore = create<SessionState>((set) => ({
 
   addRecentSession: (routingId) =>
     set((state) => {
-      const recentSessionIds = [routingId, ...state.recentSessionIds.filter((id) => id !== routingId)].slice(0, 5)
+      // Don't add pinned sessions to recents — they have their own section
+      if (state.pinnedSessionIds.includes(routingId)) return state
+      const recentSessionIds = [routingId, ...state.recentSessionIds.filter((id) => id !== routingId)].slice(0, state.settings.maxRecentSessions)
       saveRecentSessions(recentSessionIds)
       return { recentSessionIds }
+    }),
+
+  removeRecentSession: (routingId) =>
+    set((state) => {
+      const recentSessionIds = state.recentSessionIds.filter((id) => id !== routingId)
+      saveRecentSessions(recentSessionIds)
+      return { recentSessionIds }
+    }),
+
+  pinSession: (routingId) =>
+    set((state) => {
+      if (state.pinnedSessionIds.includes(routingId)) return state
+      const pinnedSessionIds = [...state.pinnedSessionIds, routingId]
+      savePinnedSessions(pinnedSessionIds)
+      // Remove from recents to free the slot
+      const recentSessionIds = state.recentSessionIds.filter((id) => id !== routingId)
+      saveRecentSessions(recentSessionIds)
+      return { pinnedSessionIds, recentSessionIds }
+    }),
+
+  unpinSession: (routingId) =>
+    set((state) => {
+      const pinnedSessionIds = state.pinnedSessionIds.filter((id) => id !== routingId)
+      savePinnedSessions(pinnedSessionIds)
+      // Add back to recents so it doesn't disappear
+      const recentSessionIds = [routingId, ...state.recentSessionIds.filter((id) => id !== routingId)].slice(0, state.settings.maxRecentSessions)
+      saveRecentSessions(recentSessionIds)
+      return { pinnedSessionIds, recentSessionIds }
+    }),
+
+  reorderPinnedSessions: (ids) =>
+    set(() => {
+      savePinnedSessions(ids)
+      return { pinnedSessionIds: ids }
     }),
 
   addMessage: (routingId, message) =>
@@ -365,7 +488,7 @@ export const useSessionStore = create<SessionState>((set) => ({
       const session = state.sessions[routingId]
       if (!session) return state
 
-      const recentSessionIds = [routingId, ...state.recentSessionIds.filter((rid) => rid !== routingId)].slice(0, 5)
+      const recentSessionIds = [routingId, ...state.recentSessionIds.filter((rid) => rid !== routingId)].slice(0, state.settings.maxRecentSessions)
       saveRecentSessions(recentSessionIds)
 
       return {
@@ -713,6 +836,11 @@ export const useSessionStore = create<SessionState>((set) => ({
       }))
     })),
 
+  setNeedsAttention: (routingId, value) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, routingId, () => ({ needsAttention: value }))
+    })),
+
   setWatching: (routingId, watching) =>
     set((state) => ({
       sessions: updateSession(state.sessions, routingId, () => ({ isWatching: watching }))
@@ -722,6 +850,13 @@ export const useSessionStore = create<SessionState>((set) => ({
     set((state) => ({
       sessions: updateSession(state.sessions, routingId, () => ({ messages, taskNotifications }))
     })),
+
+  updateSettings: (partial) =>
+    set((state) => {
+      const settings = { ...state.settings, ...partial }
+      saveSettings(settings)
+      return { settings }
+    }),
 
   setPermissionMode: (mode) => set({ permissionMode: mode }),
 

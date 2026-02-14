@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { v4 as uuid } from 'uuid'
 import { useSessionStore, buildTodosFromMessages } from '../stores/session-store'
 import type { DirectoryGroup, SessionInfo } from '../../../shared/types'
@@ -7,12 +7,18 @@ export function Sidebar(): React.JSX.Element {
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const directories = useSessionStore((s) => s.directories)
   const recentSessionIds = useSessionStore((s) => s.recentSessionIds)
+  const pinnedSessionIds = useSessionStore((s) => s.pinnedSessionIds)
+  const maxRecentSessions = useSessionStore((s) => s.settings.maxRecentSessions)
   const sessions = useSessionStore((s) => s.sessions)
   const setDirectories = useSessionStore((s) => s.setDirectories)
   const createNewSession = useSessionStore((s) => s.createNewSession)
   const switchSession = useSessionStore((s) => s.switchSession)
   const loadHistoricalSession = useSessionStore((s) => s.loadHistoricalSession)
   const setWatching = useSessionStore((s) => s.setWatching)
+  const pinSession = useSessionStore((s) => s.pinSession)
+  const unpinSession = useSessionStore((s) => s.unpinSession)
+  const removeRecentSession = useSessionStore((s) => s.removeRecentSession)
+  const reorderPinnedSessions = useSessionStore((s) => s.reorderPinnedSessions)
 
   const [expandedDir, setExpandedDir] = useState<string | null>(null)
 
@@ -37,6 +43,8 @@ export function Sidebar(): React.JSX.Element {
       createNewSession(routingId, folder)
     }
   }
+
+  const addRecentSession = useSessionStore((s) => s.addRecentSession)
 
   const handleClickSession = async (info: SessionInfo): Promise<void> => {
     const routingId = info.sessionId
@@ -84,34 +92,43 @@ export function Sidebar(): React.JSX.Element {
     }
   }
 
-  // Build recent sessions list from recentSessionIds + directories + in-memory sessions
-  const recentSessions: SessionInfo[] = []
-  for (const rid of recentSessionIds) {
-    if (recentSessions.length >= 5) break
-    // Check if it's in directories
-    let found: SessionInfo | undefined
+  // Helper to resolve a session ID to a SessionInfo
+  const resolveSessionInfo = (rid: string): SessionInfo | undefined => {
     for (const group of directories) {
-      found = group.sessions.find((s) => s.sessionId === rid)
-      if (found) break
+      const found = group.sessions.find((s) => s.sessionId === rid)
+      if (found) return found
     }
-    if (found) {
-      recentSessions.push(found)
-      continue
-    }
-    // Synthesize from in-memory session state (new sessions without JSONL yet)
     const memSession = sessions[rid]
     if (memSession) {
       const firstUserMsg = memSession.messages.find((m) => m.role === 'user')
       const titleText = firstUserMsg?.content.find((b) => b.type === 'text')?.text
-      recentSessions.push({
+      return {
         sessionId: rid,
         cwd: memSession.cwd,
         projectKey: '',
         title: titleText ? titleText.slice(0, 80).replace(/\n/g, ' ').trim() : 'New session',
         timestamp: Date.now(),
         lastActivityAt: Date.now()
-      })
+      }
     }
+    return undefined
+  }
+
+  // Build pinned sessions list
+  const pinnedSet = new Set(pinnedSessionIds)
+  const pinnedSessions: SessionInfo[] = []
+  for (const rid of pinnedSessionIds) {
+    const info = resolveSessionInfo(rid)
+    if (info) pinnedSessions.push(info)
+  }
+
+  // Build recent sessions list (exclude pinned, capped at 5)
+  const recentSessions: SessionInfo[] = []
+  for (const rid of recentSessionIds) {
+    if (recentSessions.length >= maxRecentSessions) break
+    if (pinnedSet.has(rid)) continue
+    const info = resolveSessionInfo(rid)
+    if (info) recentSessions.push(info)
   }
 
   // Build augmented directories: inject in-memory sessions into matching project groups
@@ -179,6 +196,24 @@ export function Sidebar(): React.JSX.Element {
 
       {/* Scrollable sidebar content */}
       <div className="flex-1 overflow-y-auto min-h-0">
+        {/* Pinned sessions */}
+        {pinnedSessions.length > 0 && (
+          <div style={{ margin: '20px 8px 0' }}>
+            <div style={{ paddingLeft: 5, marginBottom: 3 }}>
+              <span className="text-[10px] font-semibold text-text-muted uppercase tracking-[0.08em]">Pinned</span>
+            </div>
+            <PinnedSessionList
+              pinnedSessions={pinnedSessions}
+              activeSessionId={activeSessionId}
+              sessions={sessions}
+              onClickSession={handleClickSession}
+              onToggleWatch={handleToggleWatch}
+              onUnpin={unpinSession}
+              onReorder={reorderPinnedSessions}
+            />
+          </div>
+        )}
+
         {/* Recent sessions */}
         {recentSessions.length > 0 && (
           <div style={{ margin: '20px 8px 0' }}>
@@ -186,18 +221,24 @@ export function Sidebar(): React.JSX.Element {
               <span className="text-[10px] font-semibold text-text-muted uppercase tracking-[0.08em]">Recent</span>
             </div>
             <nav className="flex flex-col gap-px">
-              {recentSessions.map((info) => (
-                <SessionItem
-                  key={info.sessionId}
-                  info={info}
-                  active={info.sessionId === activeSessionId}
-                  isRunning={sessions[info.sessionId]?.status?.state === 'running'}
-                  isSdkActive={sessions[info.sessionId]?.sdkActive}
-                  isWatching={sessions[info.sessionId]?.isWatching}
-                  onClick={() => handleClickSession(info)}
-                  onToggleWatch={info.projectKey ? () => handleToggleWatch(info) : undefined}
-                />
-              ))}
+              {recentSessions.map((info) => {
+                const s = sessions[info.sessionId]
+                return (
+                  <SessionItem
+                    key={info.sessionId}
+                    info={info}
+                    active={info.sessionId === activeSessionId}
+                    isRunning={s?.status?.state === 'running'}
+                    isSdkActive={s?.sdkActive}
+                    isWatching={s?.isWatching}
+                    needsAttention={s?.needsAttention}
+                    onClick={() => handleClickSession(info)}
+                    onToggleWatch={info.projectKey ? () => handleToggleWatch(info) : undefined}
+                    onPin={() => pinSession(info.sessionId)}
+                    onRemove={() => removeRecentSession(info.sessionId)}
+                  />
+                )
+              })}
             </nav>
           </div>
         )}
@@ -219,6 +260,7 @@ export function Sidebar(): React.JSX.Element {
                   onClick={() => handleDirClick(group.projectKey || group.cwd)}
                   onDoubleClick={() => handleDirDoubleClick(group)}
                   onSessionClick={handleClickSession}
+                  onSessionDoubleClick={(info) => { if (!pinnedSessionIds.includes(info.sessionId)) addRecentSession(info.sessionId) }}
                   onToggleWatch={handleToggleWatch}
                 />
               ))}
@@ -233,7 +275,8 @@ export function Sidebar(): React.JSX.Element {
           <path d="M12 2L2 7l10 5 10-5-10-5z" strokeLinecap="round" strokeLinejoin="round" />
           <path d="M2 17l10 5 10-5" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
-        <span>ClaudeUI</span>
+        <span className="flex-1">ClaudeUI</span>
+        <SettingsButton />
       </div>
     </div>
   )
@@ -247,15 +290,17 @@ function DirectoryItem({
   onClick,
   onDoubleClick,
   onSessionClick,
+  onSessionDoubleClick,
   onToggleWatch
 }: {
   group: DirectoryGroup
   expanded: boolean
   activeSessionId: string | null
-  sessions: Record<string, { status?: { state: string }; sdkActive?: boolean; isWatching?: boolean }>
+  sessions: Record<string, { status?: { state: string }; sdkActive?: boolean; isWatching?: boolean; needsAttention?: boolean }>
   onClick: () => void
   onDoubleClick: () => void
   onSessionClick: (info: SessionInfo) => void
+  onSessionDoubleClick: (info: SessionInfo) => void
   onToggleWatch: (info: SessionInfo) => void
 }): React.JSX.Element {
   return (
@@ -285,18 +330,23 @@ function DirectoryItem({
       </div>
       {expanded && (
         <div className="ml-3">
-          {group.sessions.map((info) => (
-            <SessionItem
-              key={info.sessionId}
-              info={info}
-              active={info.sessionId === activeSessionId}
-              isRunning={sessions[info.sessionId]?.status?.state === 'running'}
-              isSdkActive={sessions[info.sessionId]?.sdkActive}
-              isWatching={sessions[info.sessionId]?.isWatching}
-              onClick={() => onSessionClick(info)}
-              onToggleWatch={() => onToggleWatch(info)}
-            />
-          ))}
+          {group.sessions.map((info) => {
+            const s = sessions[info.sessionId]
+            return (
+              <SessionItem
+                key={info.sessionId}
+                info={info}
+                active={info.sessionId === activeSessionId}
+                isRunning={s?.status?.state === 'running'}
+                isSdkActive={s?.sdkActive}
+                isWatching={s?.isWatching}
+                needsAttention={s?.needsAttention}
+                onClick={() => onSessionClick(info)}
+                onDoubleClick={() => onSessionDoubleClick(info)}
+                onToggleWatch={() => onToggleWatch(info)}
+              />
+            )
+          })}
         </div>
       )}
     </div>
@@ -309,38 +359,103 @@ function SessionItem({
   isRunning,
   isSdkActive,
   isWatching,
+  needsAttention,
   onClick,
-  onToggleWatch
+  onDoubleClick,
+  onToggleWatch,
+  onPin,
+  onUnpin,
+  onRemove,
+  draggable,
+  onDragStart,
+  onDragOver,
+  onDragEnd,
+  onDrop
 }: {
   info: SessionInfo
   active: boolean
   isRunning?: boolean
   isSdkActive?: boolean
   isWatching?: boolean
+  needsAttention?: boolean
   onClick: () => void
+  onDoubleClick?: () => void
   onToggleWatch?: () => void
+  onPin?: () => void
+  onUnpin?: () => void
+  onRemove?: () => void
+  draggable?: boolean
+  onDragStart?: (e: React.DragEvent) => void
+  onDragOver?: (e: React.DragEvent) => void
+  onDragEnd?: (e: React.DragEvent) => void
+  onDrop?: (e: React.DragEvent) => void
 }): React.JSX.Element {
-  const dotColor = isRunning
-    ? 'bg-green-400 animate-pulse'
-    : isSdkActive
-      ? 'bg-green-400'
-      : isWatching
-        ? 'bg-blue-400'
-        : 'bg-text-muted/30'
+  const dotColor = needsAttention && !active
+    ? 'bg-warning animate-pulse'
+    : isRunning
+      ? 'bg-green-400 animate-pulse'
+      : isSdkActive
+        ? 'bg-green-400'
+        : isWatching
+          ? 'bg-blue-400'
+          : 'bg-text-muted/30'
 
   return (
     <div
       onClick={onClick}
+      onDoubleClick={onDoubleClick}
+      draggable={draggable}
+      onDragStart={onDragStart}
+      onDragOver={onDragOver}
+      onDragEnd={onDragEnd}
+      onDrop={onDrop}
       style={{ padding: '0 5px' }}
       className={`
         group flex items-center gap-2.5 h-8 rounded-md text-[13px] cursor-default transition-colors
         ${active ? 'text-text-primary bg-bg-tertiary' : 'text-text-secondary hover:text-text-primary hover:bg-bg-hover'}
       `}
     >
-      <span className="shrink-0">
-        <span className={`inline-block w-[6px] h-[6px] rounded-full ${dotColor}`} />
+      <span className="shrink-0 w-[14px] h-[14px] flex items-center justify-center">
+        <span className={`inline-block w-[6px] h-[6px] rounded-full ${dotColor} ${onRemove ? 'group-hover:hidden' : ''}`} />
+        {onRemove && (
+          <span
+            onClick={(e) => { e.stopPropagation(); onRemove() }}
+            className="hidden group-hover:flex items-center justify-center w-[14px] h-[14px] rounded text-text-muted hover:text-text-primary transition-colors cursor-pointer"
+            title="Remove from recent"
+          >
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+              <path d="M18 6L6 18" />
+              <path d="M6 6l12 12" />
+            </svg>
+          </span>
+        )}
       </span>
       <span className="truncate flex-1">{info.title}</span>
+      {/* Pin/Unpin button */}
+      {onPin && (
+        <span
+          onClick={(e) => { e.stopPropagation(); onPin() }}
+          className="shrink-0 opacity-0 group-hover:opacity-50 text-text-muted hover:!opacity-80 transition-opacity cursor-pointer"
+          title="Pin session"
+        >
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M12 17v5" />
+            <path d="M5 17h14v-1.76a2 2 0 00-1.11-1.79l-1.78-.9A2 2 0 0115 10.76V6h1a2 2 0 000-4H8a2 2 0 000 4h1v4.76a2 2 0 01-1.11 1.79l-1.78.9A2 2 0 005 15.24z" />
+          </svg>
+        </span>
+      )}
+      {onUnpin && (
+        <span
+          onClick={(e) => { e.stopPropagation(); onUnpin() }}
+          className="shrink-0 opacity-0 group-hover:opacity-50 text-text-muted hover:!opacity-80 transition-opacity cursor-pointer"
+          title="Unpin session"
+        >
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M12 17v5" />
+            <path d="M5 17h14v-1.76a2 2 0 00-1.11-1.79l-1.78-.9A2 2 0 0115 10.76V6h1a2 2 0 000-4H8a2 2 0 000 4h1v4.76a2 2 0 01-1.11 1.79l-1.78.9A2 2 0 005 15.24z" />
+          </svg>
+        </span>
+      )}
       {onToggleWatch && !isSdkActive && (
         <span
           onClick={(e) => { e.stopPropagation(); onToggleWatch() }}
@@ -356,6 +471,85 @@ function SessionItem({
         </span>
       )}
     </div>
+  )
+}
+
+function PinnedSessionList({
+  pinnedSessions,
+  activeSessionId,
+  sessions,
+  onClickSession,
+  onToggleWatch,
+  onUnpin,
+  onReorder
+}: {
+  pinnedSessions: SessionInfo[]
+  activeSessionId: string | null
+  sessions: Record<string, { status?: { state: string }; sdkActive?: boolean; isWatching?: boolean; needsAttention?: boolean }>
+  onClickSession: (info: SessionInfo) => void
+  onToggleWatch: (info: SessionInfo) => void
+  onUnpin: (routingId: string) => void
+  onReorder: (ids: string[]) => void
+}): React.JSX.Element {
+  const dragItemRef = useRef<number | null>(null)
+  const dragOverRef = useRef<number | null>(null)
+
+  const handleDragStart = useCallback((idx: number) => (e: React.DragEvent) => {
+    dragItemRef.current = idx
+    e.dataTransfer.effectAllowed = 'move'
+    ;(e.currentTarget as HTMLElement).style.opacity = '0.5'
+  }, [])
+
+  const handleDragOver = useCallback((idx: number) => (e: React.DragEvent) => {
+    e.preventDefault()
+    e.dataTransfer.dropEffect = 'move'
+    dragOverRef.current = idx
+  }, [])
+
+  const handleDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault()
+    const from = dragItemRef.current
+    const to = dragOverRef.current
+    if (from == null || to == null || from === to) return
+    const ids = pinnedSessions.map((s) => s.sessionId)
+    const [moved] = ids.splice(from, 1)
+    ids.splice(to, 0, moved)
+    onReorder(ids)
+    dragItemRef.current = null
+    dragOverRef.current = null
+  }, [pinnedSessions, onReorder])
+
+  const handleDragEnd = useCallback((e: React.DragEvent) => {
+    ;(e.currentTarget as HTMLElement).style.opacity = '1'
+    dragItemRef.current = null
+    dragOverRef.current = null
+  }, [])
+
+  return (
+    <nav className="flex flex-col gap-px">
+      {pinnedSessions.map((info, idx) => {
+        const s = sessions[info.sessionId]
+        return (
+          <SessionItem
+            key={info.sessionId}
+            info={info}
+            active={info.sessionId === activeSessionId}
+            isRunning={s?.status?.state === 'running'}
+            isSdkActive={s?.sdkActive}
+            isWatching={s?.isWatching}
+            needsAttention={s?.needsAttention}
+            onClick={() => onClickSession(info)}
+            onToggleWatch={info.projectKey ? () => onToggleWatch(info) : undefined}
+            onUnpin={() => onUnpin(info.sessionId)}
+            draggable
+            onDragStart={handleDragStart(idx)}
+            onDragOver={handleDragOver(idx)}
+            onDrop={handleDrop}
+            onDragEnd={handleDragEnd}
+          />
+        )
+      })}
+    </nav>
   )
 }
 
@@ -378,6 +572,117 @@ function NavItem({ label, icon, active, onClick, onDoubleClick }: {
     >
       <span className="shrink-0 text-text-muted">{icon}</span>
       <span className="truncate flex-1">{label}</span>
+    </div>
+  )
+}
+
+function SettingsButton(): React.JSX.Element {
+  const [open, setOpen] = useState(false)
+  const settings = useSessionStore((s) => s.settings)
+  const updateSettings = useSessionStore((s) => s.updateSettings)
+  const popoverRef = useRef<HTMLDivElement>(null)
+
+  // Close on outside click
+  useEffect(() => {
+    if (!open) return
+    const handler = (e: MouseEvent): void => {
+      if (popoverRef.current && !popoverRef.current.contains(e.target as Node)) {
+        setOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [open])
+
+  return (
+    <div className="relative" ref={popoverRef}>
+      <button
+        onClick={() => setOpen(!open)}
+        className="flex items-center justify-center w-6 h-6 rounded-md hover:bg-bg-hover transition-colors cursor-default"
+        title="Settings"
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="text-text-muted">
+          <circle cx="12" cy="12" r="3" />
+          <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z" />
+        </svg>
+      </button>
+
+      {open && (
+        <div className="absolute bottom-full right-0 mb-2 w-56 rounded-lg bg-bg-tertiary border border-border shadow-lg z-50 overflow-hidden">
+          <div className="px-3 py-2 border-b border-border">
+            <span className="text-[11px] font-semibold text-text-muted uppercase tracking-wider">Settings</span>
+          </div>
+          <div className="py-1">
+            <SettingsToggle
+              label="Expand tool calls"
+              checked={settings.expandToolCalls}
+              onChange={(v) => updateSettings({ expandToolCalls: v })}
+            />
+            <SettingsToggle
+              label="Hide tool input"
+              checked={settings.hideToolInput}
+              onChange={(v) => updateSettings({ hideToolInput: v })}
+            />
+            <SettingsToggle
+              label="Expand thinking"
+              checked={settings.expandThinking}
+              onChange={(v) => updateSettings({ expandThinking: v })}
+            />
+            <SettingsSlider
+              label="Recent sessions"
+              value={settings.maxRecentSessions}
+              min={1}
+              max={10}
+              onChange={(v) => updateSettings({ maxRecentSessions: v })}
+            />
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function SettingsToggle({ label, checked, onChange }: {
+  label: string
+  checked: boolean
+  onChange: (value: boolean) => void
+}): React.JSX.Element {
+  return (
+    <button
+      onClick={() => onChange(!checked)}
+      className="w-full flex items-center justify-between px-3 py-1.5 text-[13px] text-text-secondary hover:bg-bg-hover transition-colors cursor-default"
+    >
+      <span>{label}</span>
+      <span className={`w-7 h-4 rounded-full relative transition-colors ${checked ? 'bg-accent' : 'bg-text-muted/30'}`}>
+        <span className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform ${checked ? 'left-3.5' : 'left-0.5'}`} />
+      </span>
+    </button>
+  )
+}
+
+function SettingsSlider({ label, value, min, max, onChange }: {
+  label: string
+  value: number
+  min: number
+  max: number
+  onChange: (value: number) => void
+}): React.JSX.Element {
+  const pct = ((value - min) / (max - min)) * 100
+  return (
+    <div className="px-3 py-1.5 text-[13px] text-text-secondary">
+      <div className="flex items-center justify-between mb-1">
+        <span>{label}</span>
+        <span className="text-[11px] text-text-muted tabular-nums">{value}</span>
+      </div>
+      <input
+        type="range"
+        min={min}
+        max={max}
+        value={value}
+        onChange={(e) => onChange(Number(e.target.value))}
+        style={{ background: `linear-gradient(to right, var(--color-accent) ${pct}%, var(--color-text-muted) ${pct}%)` }}
+        className="w-full h-1 appearance-none rounded-full opacity-30 [&]:hover:opacity-50 transition-opacity cursor-pointer [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:bg-accent [&::-webkit-slider-thumb]:opacity-100"
+      />
     </div>
   )
 }

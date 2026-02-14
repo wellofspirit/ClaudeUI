@@ -1,6 +1,19 @@
 import { useEffect } from 'react'
 import { useSessionStore, buildTodosFromMessages } from '../stores/session-store'
 
+/** Send a system notification if the session is not currently focused */
+function notifyIfNeeded(routingId: string, title: string, body: string): void {
+  const state = useSessionStore.getState()
+  // Don't notify if this session is currently active and window is focused
+  if (state.activeSessionId === routingId && document.hasFocus()) return
+  // Don't notify if notifications not supported or denied
+  if (!('Notification' in window) || Notification.permission !== 'granted') return
+
+  const session = state.sessions[routingId]
+  const folderName = session?.cwd.split(/[\\/]/).pop() || 'Session'
+  new Notification(title, { body: `${folderName}: ${body}`, silent: false })
+}
+
 const TASK_TOOLS = new Set(['TaskCreate', 'TaskUpdate', 'TodoWrite'])
 
 /** Rebuild todos from all messages when a task-related tool call is detected */
@@ -30,6 +43,13 @@ export function useClaudeEvents(): void {
   const setBackgroundOutput = useSessionStore((s) => s.setBackgroundOutput)
   const setPermissionMode = useSessionStore((s) => s.setPermissionMode)
 
+  // Request notification permission on mount
+  useEffect(() => {
+    if ('Notification' in window && Notification.permission === 'default') {
+      Notification.requestPermission()
+    }
+  }, [])
+
   useEffect(() => {
     const cleanups = [
       window.api.onMessage(({ routingId, data: msg }) => {
@@ -50,18 +70,36 @@ export function useClaudeEvents(): void {
       }),
       window.api.onApprovalRequest(({ routingId, data: approval }) => {
         addPendingApproval(routingId, approval)
+        const state = useSessionStore.getState()
+        if (state.activeSessionId !== routingId || !document.hasFocus()) {
+          state.setNeedsAttention(routingId, true)
+        }
+        notifyIfNeeded(routingId, 'Permission required', `${approval.toolName || 'Tool'} needs approval`)
       }),
       window.api.onStatus(({ routingId, data: status }) => {
         setStatus(routingId, status)
-        if (status.state === 'idle') clearPendingApprovals(routingId)
+        if (status.state === 'idle') {
+          clearPendingApprovals(routingId)
+        }
+        // Clear attention when a new turn starts
+        if (status.state === 'running') {
+          useSessionStore.getState().setNeedsAttention(routingId, false)
+        }
       }),
       window.api.onResult(({ routingId }) => {
         // Dismiss completed task list when turn ends
-        const { sessions, setTodos } = useSessionStore.getState()
-        const session = sessions[routingId]
+        const state = useSessionStore.getState()
+        const session = state.sessions[routingId]
         if (session && session.todos.length > 0) {
           const allDone = session.todos.every((t) => t.status === 'completed')
-          if (allDone) setTodos(routingId, [])
+          if (allDone) state.setTodos(routingId, [])
+        }
+        // Mark attention + notify when Claude's turn ends (user's turn)
+        if (session?.sdkActive) {
+          if (state.activeSessionId !== routingId || !document.hasFocus()) {
+            state.setNeedsAttention(routingId, true)
+          }
+          notifyIfNeeded(routingId, 'Ready for input', 'Claude has finished — your turn')
         }
       }),
       window.api.onError(({ routingId, data: error }) => {

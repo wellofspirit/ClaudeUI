@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from 'react'
-import { useActiveSession } from '../../stores/session-store'
+import { useActiveSession, useSessionStore } from '../../stores/session-store'
 
 interface Props {
   text: string
@@ -31,7 +31,8 @@ function WaveText({ text }: { text: string }): React.JSX.Element {
 }
 
 export function ThinkingBlock({ text, isActive }: Props): React.JSX.Element {
-  const [expanded, setExpanded] = useState(false)
+  const expandThinking = useSessionStore((s) => s.settings.expandThinking)
+  const [expanded, setExpanded] = useState(expandThinking)
   const thinkingDurationMs = useActiveSession((s) => s.thinkingDurationMs)
   const thinkingStartedAt = useActiveSession((s) => s.thinkingStartedAt)
   const [elapsed, setElapsed] = useState(0)

@@ -16,7 +16,9 @@ export function ToolCallBlock({ block, result, approval }: Props): React.JSX.Ele
   const setTaskStopping = useSessionStore((s) => s.setTaskStopping)
   const clearTaskStopping = useSessionStore((s) => s.clearTaskStopping)
   const isHistorical = useActiveSession((s) => s.isHistorical)
-  const [expanded, setExpanded] = useState(false)
+  const expandToolCalls = useSessionStore((s) => s.settings.expandToolCalls)
+  const hideToolInput = useSessionStore((s) => s.settings.hideToolInput)
+  const [expanded, setExpanded] = useState(expandToolCalls)
 
   const toolUseId = block.toolUseId || ''
   const isBackgroundBash = block.toolName === 'Bash' && !!block.toolInput?.run_in_background
@@ -138,10 +140,12 @@ export function ToolCallBlock({ block, result, approval }: Props): React.JSX.Ele
       {expanded && (
         <div className="border-t border-border">
           {/* Input section */}
-          <div className="px-3 py-2.5">
-            <div className="text-[11px] text-text-secondary uppercase tracking-wider mb-1.5">Input</div>
-            <ToolInput block={block} />
-          </div>
+          {!hideToolInput && (
+            <div className="px-3 py-2.5">
+              <div className="text-[11px] text-text-secondary uppercase tracking-wider mb-1.5">Input</div>
+              <ToolInput block={block} />
+            </div>
+          )}
 
           {/* Result section (skip for background bash — live output shown separately) */}
           {hasResult && result.toolResult && !isBackgroundBash && (
