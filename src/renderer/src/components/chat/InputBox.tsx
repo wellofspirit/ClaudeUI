@@ -159,7 +159,7 @@ export function InputBox(): React.JSX.Element {
             }
             disabled={isDisabled}
             rows={2}
-            className="w-full bg-transparent text-[13px] text-text-primary placeholder:text-text-muted pt-2 px-2 pb-1 resize-none outline-none disabled:opacity-30 leading-relaxed"
+            className="w-full bg-transparent text-[13px] text-text-primary placeholder:text-text-muted pt-2 pl-3 pr-2 pb-1 resize-none outline-none disabled:opacity-30 leading-relaxed"
           />
 
           {/* Bottom section — controls bar */}

@@ -47,6 +47,9 @@ function createWindow(): void {
     }
   })
   ipcMain.handle('window:close', () => mainWindow.close())
+  ipcMain.handle('app:open-in-vscode', (_e, cwd: string) => {
+    shell.openExternal(`vscode://file/${cwd}`)
+  })
 
   // Send maximize/unmaximize state changes to renderer
   mainWindow.on('maximize', () => {

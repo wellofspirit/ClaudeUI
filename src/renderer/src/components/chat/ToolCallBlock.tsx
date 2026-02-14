@@ -17,8 +17,19 @@ export function ToolCallBlock({ block, result, approval }: Props): React.JSX.Ele
   const clearTaskStopping = useSessionStore((s) => s.clearTaskStopping)
   const isHistorical = useActiveSession((s) => s.isHistorical)
   const expandToolCalls = useSessionStore((s) => s.settings.expandToolCalls)
+  const expandReadResults = useSessionStore((s) => s.settings.expandReadResults)
   const hideToolInput = useSessionStore((s) => s.settings.hideToolInput)
-  const [expanded, setExpanded] = useState(expandToolCalls)
+  const [expanded, setExpanded] = useState(
+    block.toolName === 'Read' ? expandToolCalls && expandReadResults : expandToolCalls
+  )
+
+  useEffect(() => {
+    if (block.toolName === 'Read') {
+      setExpanded(expandToolCalls && expandReadResults)
+    } else {
+      setExpanded(expandToolCalls)
+    }
+  }, [expandToolCalls, expandReadResults, block.toolName])
 
   const toolUseId = block.toolUseId || ''
   const isBackgroundBash = block.toolName === 'Bash' && !!block.toolInput?.run_in_background
@@ -149,10 +160,12 @@ export function ToolCallBlock({ block, result, approval }: Props): React.JSX.Ele
 
           {/* Result section (skip for background bash — live output shown separately) */}
           {hasResult && result.toolResult && !isBackgroundBash && (
-            <div className="px-3 py-2.5 border-t border-border">
-              <div className={`text-[11px] uppercase tracking-wider mb-1.5 ${isError ? 'text-danger' : 'text-success'}`}>
-                {isError ? 'Error' : 'Result'}
-              </div>
+            <div className={`px-3 py-2.5 ${hideToolInput ? '' : 'border-t border-border'}`}>
+              {!hideToolInput && (
+                <div className={`text-[11px] uppercase tracking-wider mb-1.5 ${isError ? 'text-danger' : 'text-success'}`}>
+                  {isError ? 'Error' : 'Result'}
+                </div>
+              )}
               <ToolResult block={block} result={result} />
             </div>
           )}
@@ -344,11 +357,11 @@ function ToolResult({ block, result }: { block: ContentBlock; result: ContentBlo
     )
   }
 
-  // Read tool: show file content
+  // Read tool: show file content (strip cat -n line-number prefixes)
   if (toolName === 'Read' && !isError) {
     return (
       <pre className="text-[12px] text-text-primary/70 font-mono whitespace-pre-wrap break-words max-h-48 overflow-y-auto leading-[1.5] bg-bg-primary rounded-md p-2 border border-border">
-        {trunc(text, 2000)}
+        {trunc(stripLineNumbers(text), 2000)}
       </pre>
     )
   }
@@ -430,4 +443,9 @@ function shorten(path: string): string {
 
 function trunc(s: string, n: number): string {
   return s.length > n ? s.slice(0, n) + '...' : s
+}
+
+/** Strip `cat -n` style line-number prefixes (e.g. "     1→content") */
+function stripLineNumbers(s: string): string {
+  return s.replace(/^ *\d+→/gm, '')
 }

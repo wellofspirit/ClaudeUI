@@ -134,7 +134,8 @@ const api: ClaudeAPI = {
     const handler = (): void => cb()
     ipcRenderer.on('session:directories-changed', handler)
     return () => ipcRenderer.removeListener('session:directories-changed', handler)
-  }
+  },
+  openInVSCode: (cwd: string) => ipcRenderer.invoke('app:open-in-vscode', cwd)
 }
 
 if (process.contextIsolated) {

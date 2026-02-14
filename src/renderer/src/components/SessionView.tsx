@@ -58,6 +58,7 @@ function ResizeHandle({ onMouseDown }: { onMouseDown: (e: React.MouseEvent) => v
 }
 
 export function SessionView(): React.JSX.Element {
+  const uiFontScale = useSessionStore((s) => s.settings.uiFontScale)
   const taskPanelOpen = useActiveSession((s) => s.taskPanelOpen)
   const sidebar = useResizablePanel('sidebarWidth', 240, 180, 480)
   const taskPanel = useResizablePanel('taskPanelWidth', 400, 280, 700)
@@ -90,7 +91,7 @@ export function SessionView(): React.JSX.Element {
 
   return (
     <SidebarContext.Provider value={{ collapsed: sidebarCollapsed, toggle: toggleSidebar }}>
-      <div className="h-screen flex">
+      <div style={uiFontScale !== 1 ? { zoom: uiFontScale, height: `calc(100vh / ${uiFontScale})`, width: `calc(100vw / ${uiFontScale})` } : undefined} className="h-screen flex">
         {!sidebarCollapsed && (
           <>
             <Sidebar style={{ width: sidebar.width }} onToggleCollapse={toggleSidebar} />

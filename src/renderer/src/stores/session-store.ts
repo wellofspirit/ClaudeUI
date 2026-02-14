@@ -127,16 +127,22 @@ const SETTINGS_KEY = 'claudeui-settings'
 
 export interface AppSettings {
   expandToolCalls: boolean
+  expandReadResults: boolean
   hideToolInput: boolean
   expandThinking: boolean
   maxRecentSessions: number
+  chatFontScale: number
+  uiFontScale: number
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
   expandToolCalls: true,
+  expandReadResults: false,
   hideToolInput: false,
   expandThinking: false,
-  maxRecentSessions: 5
+  maxRecentSessions: 5,
+  chatFontScale: 1,
+  uiFontScale: 1
 }
 
 function loadSettings(): AppSettings {

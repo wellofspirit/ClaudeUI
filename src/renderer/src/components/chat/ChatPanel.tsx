@@ -1,4 +1,4 @@
-import { useRef, useEffect, useState, useMemo } from 'react'
+import { useRef, useEffect, useState, useMemo, useCallback } from 'react'
 import { v4 as uuid } from 'uuid'
 import { useActiveSession, useSessionStore } from '../../stores/session-store'
 import { MessageBubble } from './MessageBubble'
@@ -21,12 +21,28 @@ export function ChatPanel(): React.JSX.Element {
 
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const scrollRef = useRef<HTMLDivElement>(null)
+  const [isAtBottom, setIsAtBottom] = useState(true)
+
+  const checkAtBottom = useCallback(() => {
+    const el = scrollRef.current
+    if (!el) return
+    setIsAtBottom(el.scrollHeight - el.scrollTop - el.clientHeight < 100)
+  }, [])
+
+  // Track scroll position
+  useEffect(() => {
+    const el = scrollRef.current
+    if (!el) return
+    el.addEventListener('scroll', checkAtBottom, { passive: true })
+    return () => el.removeEventListener('scroll', checkAtBottom)
+  }, [checkAtBottom])
 
   // Scroll to bottom when switching sessions
   useEffect(() => {
     const el = scrollRef.current
     if (!el) return
     el.scrollTop = el.scrollHeight
+    setIsAtBottom(true)
   }, [activeSessionId])
 
   // Auto-scroll on new content if near bottom
@@ -39,6 +55,16 @@ export function ChatPanel(): React.JSX.Element {
     }
   }, [messages, streamingText, thinkingStartedAt, pendingApprovals])
 
+  const scrollToBottom = useCallback(() => {
+    const el = scrollRef.current
+    if (!el) return
+    el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
+  }, [])
+
+  const chatFontScale = useSessionStore((s) => s.settings.chatFontScale)
+  const uiFontScale = useSessionStore((s) => s.settings.uiFontScale)
+  // Chat area lives inside the UI-zoomed root, so compensate: divide out uiFontScale, apply chatFontScale
+  const chatZoom = chatFontScale / uiFontScale
   const hasContent = messages.length > 0 || !!streamingText || !!thinkingStartedAt
   const showEmptyScreen = !hasContent && status.state === 'idle'
 
@@ -58,7 +84,7 @@ export function ChatPanel(): React.JSX.Element {
             <LoadingState />
           </div>
         ) : (
-          <div className="max-w-[740px] mx-auto px-8 pt-5 pb-36 flex flex-col gap-5">
+          <div style={chatZoom !== 1 ? { zoom: chatZoom } : undefined} className="max-w-[740px] mx-auto px-8 pt-5 pb-36 flex flex-col gap-5">
             {messages.map((msg) => (
               <MessageBubble key={msg.id} message={msg} />
             ))}
@@ -82,6 +108,20 @@ export function ChatPanel(): React.JSX.Element {
 
       {/* Input — fixed at bottom, centered */}
       <div className="absolute bottom-0 left-0 right-0 pointer-events-none">
+        {/* Go to bottom button */}
+        {!isAtBottom && hasContent && (
+          <div className="flex justify-center mb-1.5 pointer-events-auto">
+            <button
+              onClick={scrollToBottom}
+              className="w-8 h-8 flex items-center justify-center rounded-full bg-bg-tertiary border border-border text-text-muted hover:text-text-primary hover:bg-bg-hover shadow-lg transition-all cursor-default animate-fade-in"
+              title="Scroll to bottom"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M6 9l6 6 6-6" />
+              </svg>
+            </button>
+          </div>
+        )}
         <div className="pointer-events-auto">
           <InputBox />
         </div>
@@ -134,6 +174,25 @@ function TopBar({ hasContent, cost }: { hasContent: boolean; cost: number }): Re
         </span>
       </div>
       <div className="flex items-center gap-3 [-webkit-app-region:no-drag]">
+        {cwd && (
+          <button
+            onClick={() => window.api.openInVSCode(cwd)}
+            className="group flex items-center gap-1.5 px-2 py-1 rounded-md text-[12px] text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
+            title="Open in VS Code"
+          >
+            <svg width="14" height="14" viewBox="0 0 100 100" fill="none" className="shrink-0 -mt-px transition-opacity">
+              <mask id="vsc" maskUnits="userSpaceOnUse" x="0" y="0" width="100" height="100">
+                <path fillRule="evenodd" clipRule="evenodd" d="M70.912 99.317a6.223 6.223 0 004.96-.19l20.589-9.907A6.25 6.25 0 00100 83.587V16.413a6.25 6.25 0 00-3.539-5.633L75.872.873a6.226 6.226 0 00-7.109 1.318L29.355 38.044 12.187 25.02a4.162 4.162 0 00-5.318.27L1.382 30.308a4.168 4.168 0 00-.005 6.146L16.674 50 1.377 63.546a4.168 4.168 0 00.005 6.146l5.487 5.018a4.162 4.162 0 005.318.27l17.168-13.024 39.408 35.853a6.213 6.213 0 002.149 1.508zM75.015 27.3L45.11 50l29.906 22.7V27.3z" fill="#fff"/>
+              </mask>
+              <g mask="url(#vsc)">
+                <path d="M96.461 10.796L75.857.873a6.23 6.23 0 00-7.108 1.318l-67.37 61.354a4.167 4.167 0 00.006 6.146l5.487 5.018a4.163 4.163 0 005.318.27L96.47 10.87l-.009-.073z" className="fill-current group-hover:fill-[#0065A9] transition-colors"/>
+                <path d="M96.461 89.204L75.857 99.127a6.23 6.23 0 01-7.108-1.318L1.38 36.455a4.167 4.167 0 01.006-6.146l5.487-5.018a4.163 4.163 0 015.318-.27L96.47 89.13l-.009.073z" className="fill-current group-hover:fill-[#007ACC] transition-colors"/>
+                <path d="M75.857 99.127a6.226 6.226 0 01-7.108-1.318C73.952 102.61 81.25 98.28 81.25 91.667V8.333c0-6.614-7.298-10.943-12.5-6.142a6.226 6.226 0 017.108-1.318l20.604 9.923A6.25 6.25 0 01100 16.43v67.14a6.25 6.25 0 01-3.538 5.634l-20.605 9.923z" className="fill-current group-hover:fill-[#1F9CF0] transition-colors"/>
+              </g>
+            </svg>
+            <span>VSCode</span>
+          </button>
+        )}
         {cost > 0 && (
           <span className="text-[11px] text-text-muted font-mono">${cost.toFixed(4)}</span>
         )}

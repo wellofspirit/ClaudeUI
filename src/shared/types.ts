@@ -198,4 +198,5 @@ export interface ClaudeAPI {
   unwatchSession(routingId: string): Promise<void>
   onWatchUpdate(cb: (data: WatchUpdate) => void): () => void
   onDirectoriesChanged(cb: () => void): () => void
+  openInVSCode(cwd: string): Promise<void>
 }

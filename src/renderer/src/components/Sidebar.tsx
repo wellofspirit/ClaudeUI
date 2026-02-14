@@ -235,6 +235,16 @@ export function Sidebar({ style, onToggleCollapse }: {
     if (info) recentSessions.push(info)
   }
 
+  // Build watching sessions list (exclude pinned and recent)
+  const recentSet = new Set(recentSessionIds)
+  const watchingSessions: SessionInfo[] = []
+  for (const [rid, session] of Object.entries(sessions)) {
+    if (!session.isWatching) continue
+    if (pinnedSet.has(rid) || recentSet.has(rid)) continue
+    const info = resolveSessionInfo(rid)
+    if (info) watchingSessions.push(info)
+  }
+
   // Build augmented directories: inject in-memory sessions into matching project groups
   const dirSessionIds = new Set<string>()
   for (const group of directories) {
@@ -340,6 +350,38 @@ export function Sidebar({ style, onToggleCollapse }: {
               onAutoRename={handleAutoRename}
               onCancelRename={() => setRenamingKey(null)}
             />
+          </div>
+        )}
+
+        {/* Watching sessions */}
+        {watchingSessions.length > 0 && (
+          <div style={{ margin: '20px 8px 0' }}>
+            <div style={{ paddingLeft: 5, marginBottom: 3 }}>
+              <span className="text-[10px] font-semibold text-text-muted uppercase tracking-[0.08em]">Watching</span>
+            </div>
+            <nav className="flex flex-col gap-px">
+              {watchingSessions.map((info) => {
+                const s = sessions[info.sessionId]
+                return (
+                  <SessionItem
+                    key={info.sessionId}
+                    info={info}
+                    active={info.sessionId === activeSessionId}
+                    isRunning={s?.status?.state === 'running'}
+                    isSdkActive={s?.sdkActive}
+                    isWatching={s?.isWatching}
+                    needsAttention={s?.needsAttention}
+                    onClick={() => handleClickSession(info)}
+                    onToggleWatch={() => handleToggleWatch(info)}
+                    isRenaming={renamingKey === `watching:${info.sessionId}`}
+                    onStartRename={() => setRenamingKey(`watching:${info.sessionId}`)}
+                    onFinishRename={(title) => handleRename(info.sessionId, title)}
+                    onAutoRename={() => handleAutoRename(info.sessionId)}
+                    onCancelRename={() => setRenamingKey(null)}
+                  />
+                )
+              })}
+            </nav>
           </div>
         )}
 
@@ -874,6 +916,15 @@ function SettingsPanel(): React.JSX.Element {
             checked={settings.expandToolCalls}
             onChange={(v) => updateSettings({ expandToolCalls: v })}
           />
+          {settings.expandToolCalls && (
+            <div className="pl-4">
+              <SettingsToggle
+                label="Include read results"
+                checked={settings.expandReadResults}
+                onChange={(v) => updateSettings({ expandReadResults: v })}
+              />
+            </div>
+          )}
           <SettingsToggle
             label="Hide tool input"
             checked={settings.hideToolInput}
@@ -883,6 +934,24 @@ function SettingsPanel(): React.JSX.Element {
             label="Expand thinking"
             checked={settings.expandThinking}
             onChange={(v) => updateSettings({ expandThinking: v })}
+          />
+          <SettingsSlider
+            label="UI font size"
+            value={settings.uiFontScale}
+            min={1}
+            max={1.5}
+            step={0.05}
+            onChange={(v) => updateSettings({ uiFontScale: v })}
+            formatValue={(v) => `${Math.round(v * 100)}%`}
+          />
+          <SettingsSlider
+            label="Chat font size"
+            value={settings.chatFontScale}
+            min={1}
+            max={1.5}
+            step={0.05}
+            onChange={(v) => updateSettings({ chatFontScale: v })}
+            formatValue={(v) => `${Math.round(v * 100)}%`}
           />
           <SettingsSlider
             label="Recent sessions"
@@ -932,24 +1001,27 @@ function SettingsToggle({ label, checked, onChange }: {
   )
 }
 
-function SettingsSlider({ label, value, min, max, onChange }: {
+function SettingsSlider({ label, value, min, max, step, onChange, formatValue }: {
   label: string
   value: number
   min: number
   max: number
+  step?: number
   onChange: (value: number) => void
+  formatValue?: (value: number) => string
 }): React.JSX.Element {
   const pct = ((value - min) / (max - min)) * 100
   return (
     <div className="px-3 py-1.5 text-[13px] text-text-secondary">
       <div className="flex items-center justify-between mb-1">
         <span>{label}</span>
-        <span className="text-[11px] text-text-muted tabular-nums">{value}</span>
+        <span className="text-[11px] text-text-muted tabular-nums">{formatValue ? formatValue(value) : value}</span>
       </div>
       <input
         type="range"
         min={min}
         max={max}
+        step={step}
         value={value}
         onChange={(e) => onChange(Number(e.target.value))}
         style={{ background: `linear-gradient(to right, var(--color-accent) ${pct}%, var(--color-text-muted) ${pct}%)` }}
