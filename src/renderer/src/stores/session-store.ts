@@ -130,6 +130,10 @@ export interface AppSettings {
   expandReadResults: boolean
   hideToolInput: boolean
   expandThinking: boolean
+  diffViewSplit: boolean
+  chatWidthMode: 'px' | 'percent'
+  chatWidthPx: number
+  chatWidthPercent: number
   maxRecentSessions: number
   chatFontScale: number
   uiFontScale: number
@@ -140,6 +144,10 @@ const DEFAULT_SETTINGS: AppSettings = {
   expandReadResults: false,
   hideToolInput: false,
   expandThinking: false,
+  diffViewSplit: false,
+  chatWidthMode: 'percent',
+  chatWidthPx: 740,
+  chatWidthPercent: 80,
   maxRecentSessions: 5,
   chatFontScale: 1,
   uiFontScale: 1

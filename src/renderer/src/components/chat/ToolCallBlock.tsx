@@ -1,6 +1,9 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import type { ContentBlock, PendingApproval } from '../../../../shared/types'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
+import { CodeView } from './CodeView'
+import { DiffViewer } from './DiffViewer'
+import { TerminalView } from './TerminalView'
 
 interface Props {
   block: ContentBlock
@@ -286,7 +289,7 @@ function BackgroundBashOutput({ toolUseId }: { toolUseId: string }): React.JSX.E
       <pre
         ref={preRef}
         onScroll={handleScroll}
-        className="text-[12px] font-mono text-text-primary/70 bg-bg-primary rounded-md p-2 border border-border max-h-48 overflow-y-auto whitespace-pre-wrap break-words leading-[1.5]"
+        className="text-[12px] font-mono text-text-primary/70 bg-bg-primary rounded-md p-2 border border-border overflow-y-auto whitespace-pre-wrap break-words leading-[1.3]"
       >
         {prependedContent}{bgOutput.tail}
       </pre>
@@ -301,7 +304,7 @@ function ToolInput({ block }: { block: ContentBlock }): React.JSX.Element {
   // Show command for Bash
   if (toolName === 'Bash' && input?.command) {
     return (
-      <pre className="text-[12px] text-text-primary/70 font-mono whitespace-pre-wrap break-words max-h-32 overflow-y-auto leading-[1.5] bg-bg-primary rounded-md p-2 border border-border">
+      <pre className="text-[12px] text-text-primary/70 font-mono whitespace-pre-wrap break-words max-h-32 overflow-y-auto leading-[1.3] bg-bg-primary rounded-md p-2 border border-border">
         $ {String(input.command)}
       </pre>
     )
@@ -313,7 +316,7 @@ function ToolInput({ block }: { block: ContentBlock }): React.JSX.Element {
       <div className="flex flex-col gap-1.5">
         <span className="text-[11px] font-mono text-text-secondary">{shorten(String(input.file_path))}</span>
         {input.old_string != null && input.new_string != null && (
-          <DiffView oldStr={String(input.old_string)} newStr={String(input.new_string)} />
+          <DiffViewer oldStr={String(input.old_string)} newStr={String(input.new_string)} fileName={String(input.file_path)} />
         )}
       </div>
     )
@@ -328,7 +331,7 @@ function ToolInput({ block }: { block: ContentBlock }): React.JSX.Element {
 
   // Default: JSON
   return (
-    <pre className="text-[12px] text-text-primary/70 font-mono whitespace-pre-wrap break-words max-h-32 overflow-y-auto leading-[1.5] bg-bg-primary rounded-md p-2 border border-border">
+    <pre className="text-[12px] text-text-primary/70 font-mono whitespace-pre-wrap break-words max-h-32 overflow-y-auto leading-[1.3] bg-bg-primary rounded-md p-2 border border-border">
       {JSON.stringify(input, null, 2)}
     </pre>
   )
@@ -341,77 +344,45 @@ function ToolResult({ block, result }: { block: ContentBlock; result: ContentBlo
 
   // Write tool: show the content that was written (from input)
   if (toolName === 'Write' && block.toolInput?.content) {
-    return (
-      <pre className="text-[12px] font-mono whitespace-pre-wrap break-words max-h-48 overflow-y-auto leading-[1.5] bg-bg-primary rounded-md p-2 border border-border text-success/80">
-        {trunc(String(block.toolInput.content), 2000)}
-      </pre>
-    )
+    return <CodeView code={trunc(String(block.toolInput.content), 5000)} filePath={block.toolInput?.file_path ? String(block.toolInput.file_path) : undefined} />
   }
 
-  // Edit tool: show diff from input
+  // Edit tool: show diff with @git-diff-view
   if (toolName === 'Edit' && block.toolInput?.old_string != null && block.toolInput?.new_string != null) {
     return (
-      <div className="max-h-48 overflow-y-auto">
-        <DiffView oldStr={String(block.toolInput.old_string)} newStr={String(block.toolInput.new_string)} />
+      <div className="overflow-y-auto">
+        <DiffViewer
+          oldStr={String(block.toolInput.old_string)}
+          newStr={String(block.toolInput.new_string)}
+          fileName={block.toolInput?.file_path ? String(block.toolInput.file_path) : undefined}
+        />
       </div>
     )
   }
 
-  // Read tool: show file content (strip cat -n line-number prefixes)
+  // Read tool: show file content with syntax highlighting and line numbers
   if (toolName === 'Read' && !isError) {
-    return (
-      <pre className="text-[12px] text-text-primary/70 font-mono whitespace-pre-wrap break-words max-h-48 overflow-y-auto leading-[1.5] bg-bg-primary rounded-md p-2 border border-border">
-        {trunc(stripLineNumbers(text), 2000)}
-      </pre>
-    )
+    return <CodeView code={trunc(text, 5000)} filePath={block.toolInput?.file_path ? String(block.toolInput.file_path) : undefined} />
   }
 
-  // Bash tool: show output
+  // Bash tool: show output with ANSI support
   if (toolName === 'Bash' && !isError) {
+    return <TerminalView text={text} />
+  }
+
+  // Error: keep as styled pre
+  if (isError) {
     return (
-      <pre className="text-[12px] text-text-primary/70 font-mono whitespace-pre-wrap break-words max-h-48 overflow-y-auto leading-[1.5] bg-bg-primary rounded-md p-2 border border-border">
+      <pre className="text-[12px] font-mono whitespace-pre-wrap break-words overflow-y-auto leading-[1.3] bg-bg-primary rounded-md p-2 border border-border text-danger">
         {trunc(text, 2000)}
       </pre>
     )
   }
 
-  // Error or default
-  return (
-    <pre className={`text-[12px] font-mono whitespace-pre-wrap break-words max-h-48 overflow-y-auto leading-[1.5] bg-bg-primary rounded-md p-2 border border-border ${isError ? 'text-danger' : 'text-text-primary/70'}`}>
-      {trunc(text, 2000)}
-    </pre>
-  )
+  // Default: render with terminal (handles ANSI from Grep, Glob, etc.)
+  return <TerminalView text={text} />
 }
 
-function DiffView({ oldStr, newStr }: { oldStr: string; newStr: string }): React.JSX.Element {
-  const oldLines = oldStr.split('\n')
-  const newLines = newStr.split('\n')
-
-  return (
-    <div className="rounded-md border border-border bg-bg-primary overflow-hidden text-[12px] font-mono leading-[1.5]">
-      {oldLines.length > 0 && oldStr && (
-        <div className="border-b border-border">
-          {oldLines.map((line, i) => (
-            <div key={`old-${i}`} className="flex">
-              <span className="shrink-0 w-6 text-right pr-1 select-none text-danger/50 bg-danger/5">&minus;</span>
-              <pre className="flex-1 px-2 whitespace-pre-wrap break-words text-danger bg-danger/5">{line}</pre>
-            </div>
-          ))}
-        </div>
-      )}
-      {newLines.length > 0 && newStr && (
-        <div>
-          {newLines.map((line, i) => (
-            <div key={`new-${i}`} className="flex">
-              <span className="shrink-0 w-6 text-right pr-1 select-none text-success/50 bg-success/5">+</span>
-              <pre className="flex-1 px-2 whitespace-pre-wrap break-words text-success bg-success/5">{line}</pre>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  )
-}
 
 function getSummary(block: ContentBlock): string {
   const input = block.toolInput
@@ -443,9 +414,4 @@ function shorten(path: string): string {
 
 function trunc(s: string, n: number): string {
   return s.length > n ? s.slice(0, n) + '...' : s
-}
-
-/** Strip `cat -n` style line-number prefixes (e.g. "     1→content") */
-function stripLineNumbers(s: string): string {
-  return s.replace(/^ *\d+→/gm, '')
 }

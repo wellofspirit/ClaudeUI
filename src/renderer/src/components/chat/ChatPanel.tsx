@@ -63,6 +63,10 @@ export function ChatPanel(): React.JSX.Element {
 
   const chatFontScale = useSessionStore((s) => s.settings.chatFontScale)
   const uiFontScale = useSessionStore((s) => s.settings.uiFontScale)
+  const chatWidthMode = useSessionStore((s) => s.settings.chatWidthMode)
+  const chatWidthPx = useSessionStore((s) => s.settings.chatWidthPx)
+  const chatWidthPercent = useSessionStore((s) => s.settings.chatWidthPercent)
+  const chatMaxWidth = chatWidthMode === 'px' ? `${chatWidthPx}px` : `${chatWidthPercent}%`
   // Chat area lives inside the UI-zoomed root, so compensate: divide out uiFontScale, apply chatFontScale
   const chatZoom = chatFontScale / uiFontScale
   const hasContent = messages.length > 0 || !!streamingText || !!thinkingStartedAt
@@ -84,7 +88,7 @@ export function ChatPanel(): React.JSX.Element {
             <LoadingState />
           </div>
         ) : (
-          <div style={chatZoom !== 1 ? { zoom: chatZoom } : undefined} className="max-w-[740px] mx-auto px-8 pt-5 pb-36 flex flex-col gap-5">
+          <div style={{ ...(chatZoom !== 1 ? { zoom: chatZoom } : {}), maxWidth: chatMaxWidth }} className="mx-auto px-8 pt-5 pb-36 flex flex-col gap-5">
             {messages.map((msg) => (
               <MessageBubble key={msg.id} message={msg} />
             ))}

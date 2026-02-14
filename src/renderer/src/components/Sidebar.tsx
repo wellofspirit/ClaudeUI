@@ -931,10 +931,54 @@ function SettingsPanel(): React.JSX.Element {
             onChange={(v) => updateSettings({ hideToolInput: v })}
           />
           <SettingsToggle
+            label="Split diff view"
+            checked={settings.diffViewSplit}
+            onChange={(v) => updateSettings({ diffViewSplit: v })}
+          />
+          <SettingsToggle
             label="Expand thinking"
             checked={settings.expandThinking}
             onChange={(v) => updateSettings({ expandThinking: v })}
           />
+          {/* Chat width section */}
+          <div className="px-3 pt-2 pb-1">
+            <div className="text-[11px] text-text-muted uppercase tracking-wider mb-1">Chat width</div>
+            <div className="flex items-center gap-1 mb-1">
+              <button
+                onClick={() => updateSettings({ chatWidthMode: 'px' })}
+                className={`flex-1 text-[11px] py-0.5 rounded transition-colors ${settings.chatWidthMode === 'px' ? 'bg-accent/20 text-accent' : 'text-text-muted hover:text-text-secondary'}`}
+              >
+                Pixels
+              </button>
+              <button
+                onClick={() => updateSettings({ chatWidthMode: 'percent' })}
+                className={`flex-1 text-[11px] py-0.5 rounded transition-colors ${settings.chatWidthMode === 'percent' ? 'bg-accent/20 text-accent' : 'text-text-muted hover:text-text-secondary'}`}
+              >
+                Percent
+              </button>
+            </div>
+          </div>
+          {settings.chatWidthMode === 'px' ? (
+            <SettingsSlider
+              label="Width"
+              value={settings.chatWidthPx}
+              min={500}
+              max={3420}
+              step={10}
+              onChange={(v) => updateSettings({ chatWidthPx: v })}
+              formatValue={(v) => `${v}px`}
+            />
+          ) : (
+            <SettingsSlider
+              label="Width"
+              value={settings.chatWidthPercent}
+              min={60}
+              max={100}
+              step={1}
+              onChange={(v) => updateSettings({ chatWidthPercent: v })}
+              formatValue={(v) => `${v}%`}
+            />
+          )}
           <SettingsSlider
             label="UI font size"
             value={settings.uiFontScale}
