@@ -295,7 +295,7 @@ export function Sidebar({ style, onToggleCollapse }: {
   }
 
   return (
-    <div style={style} className={`shrink-0 flex flex-col select-none ${window.api.platform === 'darwin' ? 'bg-bg-secondary/80' : 'bg-bg-secondary/85'}`}>
+    <div style={style} className={`shrink-0 flex flex-col select-none ${window.api.platform === 'darwin' ? 'bg-bg-secondary/60' : 'bg-bg-secondary/85'}`}>
       {/* Traffic light clearance + collapse toggle */}
       <div className="h-12 shrink-0 [-webkit-app-region:drag] relative">
         <button

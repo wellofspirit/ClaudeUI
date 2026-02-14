@@ -98,7 +98,7 @@ export function SessionView(): React.JSX.Element {
             <ResizeHandle onMouseDown={sidebar.onMouseDown(1)} />
           </>
         )}
-        <div className={`flex-1 min-w-0 flex ${window.api.platform === 'darwin' ? 'bg-bg-secondary/80' : 'bg-bg-secondary/80'}`}>
+        <div className={`flex-1 min-w-0 flex ${window.api.platform === 'darwin' ? 'bg-bg-secondary/60' : 'bg-bg-secondary/80'}`}>
           <div className={`flex-1 min-w-0 h-full flex flex-col bg-bg-primary overflow-hidden ${sidebarCollapsed ? '' : 'rounded-l-2xl shadow-[-1px_0_4px_rgba(0,0,0,0.15),-3px_0_12px_rgba(0,0,0,0.1)]'}`}>
             <ChatPanel />
           </div>

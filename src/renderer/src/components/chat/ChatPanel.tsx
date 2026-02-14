@@ -1,5 +1,4 @@
 import { useRef, useEffect, useState, useMemo, useCallback } from 'react'
-import { useVirtualizer } from '@tanstack/react-virtual'
 import { v4 as uuid } from 'uuid'
 import { useActiveSession, useSessionStore } from '../../stores/session-store'
 import { MessageBubble } from './MessageBubble'
@@ -112,19 +111,6 @@ export function ChatPanel(): React.JSX.Element {
     return null
   }, [messages])
 
-  // Virtualizer for the message list
-  const virtualizer = useVirtualizer({
-    count: messages.length,
-    getScrollElement: () => scrollRef.current,
-    estimateSize: () => 250,
-    overscan: 5,
-  })
-
-  // Notify virtualizer when streaming items appear/disappear (affects total height)
-  useEffect(() => {
-    virtualizer.measure()
-  }, [hasStreamingText, thinkingStartedAt, virtualizer])
-
   return (
     <div className="flex-1 flex flex-col min-h-0 min-w-0 relative">
       {/* Top bar */}
@@ -146,39 +132,18 @@ export function ChatPanel(): React.JSX.Element {
               <LoadingState />
             </div>
           ) : (
-            <div style={{ ...(chatZoom !== 1 ? { zoom: chatZoom } : {}), maxWidth: chatMaxWidth }} className="mx-auto px-8 pt-5 pb-6 flex flex-col">
-              {/* Virtualized message list */}
-              <div
-                style={{ height: virtualizer.getTotalSize(), position: 'relative', width: '100%' }}
-              >
-                {virtualizer.getVirtualItems().map((virtualRow) => {
-                  const msg = messages[virtualRow.index]
-                  return (
-                    <div
-                      key={msg.id}
-                      data-index={virtualRow.index}
-                      ref={virtualizer.measureElement}
-                      style={{
-                        position: 'absolute',
-                        top: 0,
-                        left: 0,
-                        width: '100%',
-                        transform: `translateY(${virtualRow.start}px)`,
-                      }}
-                    >
-                      <div style={{ paddingBottom: 20 }}>
-                        <MessageBubble
-                          message={msg}
-                          pendingApprovals={pendingApprovals}
-                          isLastAssistant={msg.id === lastAssistantId}
-                          thinkingStartedAt={thinkingStartedAt}
-                        />
-                      </div>
-                    </div>
-                  )
-                })}
-              </div>
-              {/* Non-virtualized tail items — always visible at bottom */}
+            <div style={{ ...(chatZoom !== 1 ? { zoom: chatZoom } : {}), maxWidth: chatMaxWidth }} className="mx-auto px-8 pt-5 pb-6 flex flex-col gap-5">
+              {messages.map((msg) => (
+                <div key={msg.id} className="cv-auto">
+                  <MessageBubble
+                    message={msg}
+                    pendingApprovals={pendingApprovals}
+                    isLastAssistant={msg.id === lastAssistantId}
+                    thinkingStartedAt={thinkingStartedAt}
+                  />
+                </div>
+              ))}
+              {/* Tail items — always visible at bottom */}
               <div className="flex flex-col gap-5">
                 {hasStreamingText && <StreamingText />}
                 {thinkingStartedAt && (
@@ -194,7 +159,7 @@ export function ChatPanel(): React.JSX.Element {
         <div className="h-8 bg-gradient-to-t from-bg-primary to-transparent pointer-events-none -mt-8 relative z-[1]" />
 
         {/* Input box — normal flow, sits below scroll area */}
-        <div className="relative">
+        <div className="relative z-[2]">
           {/* Go to bottom button — absolutely positioned so it doesn't affect layout */}
           {!isAtBottom && hasContent && (
             <div className="absolute -top-10 left-0 right-0 flex justify-center pointer-events-none z-[1]">

@@ -27,6 +27,19 @@ function findTaskBlocks(
   return { taskBlock, resultBlock }
 }
 
+/* ── Horizontal resize handle between entries ── */
+function HResizeHandle({ onMouseDown }: { onMouseDown: (e: React.MouseEvent) => void }) {
+  return (
+    <div
+      onMouseDown={onMouseDown}
+      className="h-0 shrink-0 cursor-row-resize relative z-10"
+    >
+      <div className="absolute -top-1.5 left-0 right-0 h-3" />
+      <div className="absolute top-0 left-4 right-4 border-t border-border" />
+    </div>
+  )
+}
+
 function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Element | null {
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const messages = useActiveSession((s) => s.messages)
@@ -127,11 +140,11 @@ function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Element | nu
   }
 
   return (
-    <div className="border-b border-border">
+    <div className="flex flex-col min-h-0 h-full overflow-hidden">
       {/* Header — clickable to expand/collapse */}
       <button
         onClick={() => setExpanded(!expanded)}
-        className="w-full flex items-center px-4 h-10 gap-2 hover:bg-bg-hover transition-colors cursor-pointer"
+        className="w-full flex items-center px-4 h-10 shrink-0 gap-2 hover:bg-bg-hover transition-colors cursor-pointer"
       >
         <svg
           width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
@@ -172,8 +185,8 @@ function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Element | nu
 
       {/* Body */}
       {expanded && (
-        <div className="relative">
-        <div ref={bodyRef} onScroll={handleScroll} className="px-4 py-3 max-h-[60vh] overflow-y-auto">
+        <div className="relative flex-1 min-h-0">
+        <div ref={bodyRef} onScroll={handleScroll} className="px-4 py-3 h-full overflow-y-auto">
           {hasSubagentOutput ? (
             <div>
               {isRunning && isBackground && (
@@ -342,10 +355,10 @@ function BashBackgroundEntry({ toolUseId }: { toolUseId: string }): React.JSX.El
   const hasMore = bgOutput ? bgOutput.totalSize > prependedContent.length + tailLen : false
 
   return (
-    <div className="border-b border-border">
+    <div className="flex flex-col min-h-0 h-full overflow-hidden">
       <button
         onClick={() => setExpanded(!expanded)}
-        className="w-full flex items-center px-4 h-10 gap-2 hover:bg-bg-hover transition-colors cursor-pointer"
+        className="w-full flex items-center px-4 h-10 shrink-0 gap-2 hover:bg-bg-hover transition-colors cursor-pointer"
       >
         <svg
           width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
@@ -382,8 +395,8 @@ function BashBackgroundEntry({ toolUseId }: { toolUseId: string }): React.JSX.El
       </button>
 
       {expanded && (
-        <div className="relative">
-          <div ref={bodyRef} onScroll={handleScroll} className="px-4 py-3 max-h-[60vh] overflow-y-auto">
+        <div className="relative flex-1 min-h-0">
+          <div ref={bodyRef} onScroll={handleScroll} className="px-4 py-3 h-full overflow-y-auto">
             {isRunning && (
               <div className="flex items-center gap-2 text-[13px] text-text-muted mb-2">
                 <span className="w-3 h-3 rounded-full border-2 border-accent border-t-transparent animate-spin-slow" />
@@ -440,8 +453,66 @@ export function TaskDetailPanel({ style }: { style?: React.CSSProperties }): Rea
   const taskPanelOpen = useActiveSession((s) => s.taskPanelOpen)
   const openedTaskToolUseIds = useActiveSession((s) => s.openedTaskToolUseIds)
   const closeTaskPanel = useSessionStore((s) => s.closeTaskPanel)
+  const count = openedTaskToolUseIds.length
 
-  if (!taskPanelOpen || openedTaskToolUseIds.length === 0) return null
+  // Ratios for vertical split — reset to equal when task count changes
+  const [ratios, setRatios] = useState<number[]>(() => Array(count).fill(1 / Math.max(count, 1)))
+  const prevCount = useRef(count)
+  useEffect(() => {
+    if (count !== prevCount.current) {
+      prevCount.current = count
+      setRatios(Array(count).fill(1 / Math.max(count, 1)))
+    }
+  }, [count])
+
+  const containerRef = useRef<HTMLDivElement>(null)
+
+  const handleResizeMouseDown = useCallback((index: number) => (e: React.MouseEvent) => {
+    e.preventDefault()
+    const container = containerRef.current
+    if (!container) return
+    const containerH = container.clientHeight
+    if (containerH === 0) return
+
+    const startY = e.clientY
+    const startRatios = [...ratios]
+    const MIN_RATIO = 0.08
+
+    const onMouseMove = (ev: MouseEvent): void => {
+      const deltaRatio = (ev.clientY - startY) / containerH
+      let newAbove = startRatios[index] + deltaRatio
+      let newBelow = startRatios[index + 1] - deltaRatio
+
+      // Clamp both
+      if (newAbove < MIN_RATIO) {
+        newBelow += newAbove - MIN_RATIO
+        newAbove = MIN_RATIO
+      }
+      if (newBelow < MIN_RATIO) {
+        newAbove += newBelow - MIN_RATIO
+        newBelow = MIN_RATIO
+      }
+
+      const next = [...startRatios]
+      next[index] = newAbove
+      next[index + 1] = newBelow
+      setRatios(next)
+    }
+
+    const onMouseUp = (): void => {
+      document.removeEventListener('mousemove', onMouseMove)
+      document.removeEventListener('mouseup', onMouseUp)
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+    }
+
+    document.body.style.cursor = 'row-resize'
+    document.body.style.userSelect = 'none'
+    document.addEventListener('mousemove', onMouseMove)
+    document.addEventListener('mouseup', onMouseUp)
+  }, [ratios])
+
+  if (!taskPanelOpen || count === 0) return null
 
   return (
     <div style={style} className="shrink-0 border-l border-border bg-bg-secondary flex flex-col h-full">
@@ -459,10 +530,15 @@ export function TaskDetailPanel({ style }: { style?: React.CSSProperties }): Rea
         </button>
       </div>
 
-      {/* Stacked entries */}
-      <div className="flex-1 overflow-y-auto">
-        {openedTaskToolUseIds.map((id) => (
-          <PanelEntry key={id} toolUseId={id} />
+      {/* Entries with even split + resizable dividers */}
+      <div ref={containerRef} className="flex-1 min-h-0 flex flex-col">
+        {openedTaskToolUseIds.map((id, i) => (
+          <div key={id} className="contents">
+            {i > 0 && <HResizeHandle onMouseDown={handleResizeMouseDown(i - 1)} />}
+            <div style={{ flex: `${ratios[i] ?? 1} 0 0%` }} className="min-h-0 overflow-hidden">
+              <PanelEntry toolUseId={id} />
+            </div>
+          </div>
         ))}
       </div>
     </div>

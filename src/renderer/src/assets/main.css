@@ -1,6 +1,15 @@
 @import "tailwindcss";
 @source "../../";
 
+/* Native browser virtualization — skips rendering off-screen items while
+   keeping them in normal document flow (no position calculation issues).
+   `auto` for contain-intrinsic-size means the browser remembers the real
+   height after first paint, so scrollbar and positions stay accurate. */
+.cv-auto {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 100px;
+}
+
 @font-face {
   font-family: 'JetBrains Mono';
   src: url('./fonts/JetBrainsMono-Regular.woff2') format('woff2');
