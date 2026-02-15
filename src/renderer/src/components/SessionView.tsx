@@ -2,7 +2,7 @@ import { useState, useCallback, useRef, useEffect, createContext, useContext } f
 import { Sidebar } from './Sidebar'
 import { ChatPanel } from './chat/ChatPanel'
 import { TaskDetailPanel } from './TaskDetailPanel'
-import { useActiveSession, useSessionStore } from '../stores/session-store'
+import { useActiveSession, useSessionStore, applyTheme } from '../stores/session-store'
 
 const PERMISSION_MODES = ['default', 'acceptEdits', 'plan'] as const
 
@@ -71,6 +71,11 @@ export function SessionView(): React.JSX.Element {
     })
   }, [])
 
+  // Apply saved theme on mount
+  useEffect(() => {
+    applyTheme(useSessionStore.getState().settings.theme)
+  }, [])
+
   // Global Shift+Tab to cycle permission mode
   useEffect(() => {
     const handler = (e: KeyboardEvent): void => {
@@ -91,7 +96,7 @@ export function SessionView(): React.JSX.Element {
 
   return (
     <SidebarContext.Provider value={{ collapsed: sidebarCollapsed, toggle: toggleSidebar }}>
-      <div style={uiFontScale !== 1 ? { zoom: uiFontScale, height: `calc(100vh / ${uiFontScale})`, width: `calc(100vw / ${uiFontScale})` } : undefined} className="h-screen flex">
+      <div style={uiFontScale !== 1 ? { zoom: uiFontScale, height: `calc(100vh / ${uiFontScale})`, width: `calc(100vw / ${uiFontScale})` } : undefined} className={`h-screen flex ${import.meta.env.DEV ? 'border-2 border-orange-400 rounded-2xl overflow-hidden' : ''}`}>
         {!sidebarCollapsed && (
           <>
             <Sidebar style={{ width: sidebar.width }} onToggleCollapse={toggleSidebar} />

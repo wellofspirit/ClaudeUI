@@ -125,7 +125,10 @@ export function buildTodosFromMessages(messages: ChatMessage[]): TodoItem[] | nu
 
 const SETTINGS_KEY = 'claudeui-settings'
 
+export type ThemeId = 'dark' | 'light' | 'monokai'
+
 export interface AppSettings {
+  theme: ThemeId
   expandToolCalls: boolean
   expandReadResults: boolean
   hideToolInput: boolean
@@ -140,6 +143,7 @@ export interface AppSettings {
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
+  theme: 'dark',
   expandToolCalls: true,
   expandReadResults: false,
   hideToolInput: false,
@@ -164,6 +168,14 @@ function loadSettings(): AppSettings {
 
 function saveSettings(settings: AppSettings): void {
   localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings))
+}
+
+export function applyTheme(theme: ThemeId): void {
+  if (theme === 'dark') {
+    delete document.documentElement.dataset.theme
+  } else {
+    document.documentElement.dataset.theme = theme
+  }
 }
 
 const CUSTOM_TITLES_KEY = 'claudeui-custom-titles'
@@ -911,6 +923,7 @@ export const useSessionStore = create<SessionState>((set) => ({
     set((state) => {
       const settings = { ...state.settings, ...partial }
       saveSettings(settings)
+      if (partial.theme) applyTheme(partial.theme)
       return { settings }
     }),
 

@@ -929,6 +929,21 @@ function SettingsPanel(): React.JSX.Element {
     <div ref={panelRef}>
       {open && (
         <div className="border-t border-border/50 px-2 py-1 bg-white/5 rounded-t-lg">
+          {/* Theme selector */}
+          <div className="px-3 pt-2 pb-1">
+            <div className="text-[11px] text-text-muted uppercase tracking-wider mb-1">Theme</div>
+            <div className="flex items-center gap-1 mb-1">
+              {(['dark', 'light', 'monokai'] as const).map((t) => (
+                <button
+                  key={t}
+                  onClick={() => updateSettings({ theme: t })}
+                  className={`flex-1 text-[11px] py-0.5 rounded transition-colors capitalize ${settings.theme === t ? 'bg-accent/20 text-accent' : 'text-text-muted hover:text-text-secondary'}`}
+                >
+                  {t === 'monokai' ? 'Monokai' : t.charAt(0).toUpperCase() + t.slice(1)}
+                </button>
+              ))}
+            </div>
+          </div>
           <SettingsToggle
             label="Expand tool calls"
             checked={settings.expandToolCalls}

@@ -50,6 +50,52 @@
   --font-mono: 'JetBrains Mono', 'SF Mono', Menlo, Consolas, monospace;
 }
 
+/* ── Light theme ── */
+[data-theme="light"] {
+  --color-bg-primary: #f0f0f0;
+  --color-bg-secondary: #dddfe3;
+  --color-bg-tertiary: #c5c8cf;
+  --color-bg-hover: #c5c8cf;
+  --color-bg-input: #d0d2d8;
+  --color-border: #9a9ea8;
+  --color-border-bright: #6b7080;
+  --color-text-primary: #000000;
+  --color-text-secondary: #1a1d24;
+  --color-text-muted: #4b5060;
+  --color-accent: #3a6fd8;
+  --color-accent-hover: #5284e0;
+  --color-success: #15803d;
+  --color-danger: #b91c1c;
+  --color-warning: #a16207;
+  --color-mode-edit: #6d35c7;
+  --color-mode-edit-dim: #9571d4;
+  --color-mode-plan: #1a7a6e;
+  --color-mode-plan-dim: #4bbcac;
+}
+
+/* ── Monokai theme ── */
+[data-theme="monokai"] {
+  --color-bg-primary: #272822;
+  --color-bg-secondary: #1e1f1a;
+  --color-bg-tertiary: #3e3d32;
+  --color-bg-hover: #3e3d32;
+  --color-bg-input: #2d2e27;
+  --color-border: #49483e;
+  --color-border-bright: #75715e;
+  --color-text-primary: #f8f8f2;
+  --color-text-secondary: #a6a69c;
+  --color-text-muted: #75715e;
+  --color-accent: #66d9ef;
+  --color-accent-hover: #89e3f4;
+  --color-success: #a6e22e;
+  --color-danger: #f92672;
+  --color-warning: #e6db74;
+  --color-mode-edit: #ae81ff;
+  --color-mode-edit-dim: #8c6bc8;
+  --color-mode-plan: #a6e22e;
+  --color-mode-plan-dim: #7aa31e;
+}
+
 /* Force diff view to use our mono font (library hardcodes Menlo/Consolas as inline styles) */
 .diff-tailwindcss-wrapper * {
   font-family: 'JetBrains Mono', 'SF Mono', Menlo, Consolas, monospace !important;
@@ -189,6 +235,14 @@ html, #root {
 .animate-cursor-blink { animation: cursor-blink 1s step-end infinite; }
 .animate-spin-slow { animation: spin-slow 1.5s linear infinite; }
 .animate-thinking-wave { animation: thinking-wave 2s ease-in-out infinite; }
+
+[data-theme="light"] .light-no-border {
+  border-color: transparent;
+}
+
+.xterm-viewport, .xterm-screen {
+  background: inherit !important;
+}
 
 ::selection {
   background: var(--color-accent);

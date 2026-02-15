@@ -41,6 +41,7 @@ export function TodoWidget(): React.JSX.Element | null {
   const [expanded, setExpanded] = useState(false)
 
   if (todos.length === 0) return null
+  if (todos.every((t) => t.status === 'completed')) return null
 
   const completedCount = todos.filter((t) => t.status === 'completed').length
   const totalCount = todos.length
@@ -48,7 +49,7 @@ export function TodoWidget(): React.JSX.Element | null {
 
   return (
     <div
-      className="absolute top-14 right-4 z-10 bg-bg-tertiary border border-border shadow-lg shadow-black/30 overflow-hidden transition-all duration-200 ease-out"
+      className="absolute top-14 right-4 z-10 bg-bg-tertiary border border-border light-no-border shadow-lg shadow-black/30 overflow-hidden transition-all duration-200 ease-out"
       style={{
         width: expanded ? 'min(400px, 45%)' : 155,
         borderRadius: expanded ? 12 : 8
@@ -59,7 +60,7 @@ export function TodoWidget(): React.JSX.Element | null {
         onClick={() => setExpanded(!expanded)}
         className="w-full flex items-center px-3 h-9 hover:bg-bg-hover transition-colors cursor-pointer"
       >
-        <span className="text-[12px] text-text-secondary font-medium whitespace-nowrap">Tasks</span>
+        <span className="text-[12px] text-text-secondary font-medium whitespace-nowrap">To Do</span>
         <div className="flex-1" />
         <div className="flex items-center gap-2">
           <CircularProgress pct={progressPct} />

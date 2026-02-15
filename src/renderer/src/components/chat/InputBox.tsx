@@ -122,12 +122,12 @@ export function InputBox(): React.JSX.Element {
       <div className="max-w-[740px] mx-auto">
         <div
           onClick={() => { setModelOpen(false); setEffortOpen(false); setPlusOpen(false); }}
-          className={`group relative rounded-2xl border bg-bg-input transition-colors ${
+          className={`group relative rounded-2xl bg-bg-input transition-colors ${
             permissionMode === 'acceptEdits'
-              ? 'border-mode-edit-dim focus-within:border-mode-edit'
+              ? 'border border-mode-edit-dim focus-within:border-mode-edit'
               : permissionMode === 'plan'
-                ? 'border-mode-plan-dim focus-within:border-mode-plan'
-                : 'border-border focus-within:border-border-bright'
+                ? 'border border-mode-plan-dim focus-within:border-mode-plan'
+                : 'shadow-[0_1px_6px_rgba(0,0,0,0.12),0_2px_16px_rgba(0,0,0,0.08)] focus-within:shadow-[0_1px_8px_rgba(0,0,0,0.18),0_4px_20px_rgba(0,0,0,0.12)]'
           }`}
         >
           {/* Mode tab */}

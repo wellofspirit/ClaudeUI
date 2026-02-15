@@ -117,7 +117,7 @@ export const ToolCallBlock = memo(function ToolCallBlock({ block, result, approv
   }
 
   return (
-    <div className={`rounded-lg border ${borderColor} bg-bg-secondary overflow-hidden`}>
+    <div className={`rounded-lg ${borderColor === 'border-border' ? 'border' : 'border-2'} ${borderColor} bg-bg-secondary overflow-hidden`}>
       {/* Header */}
       <button
         onClick={() => setExpanded(!expanded)}
