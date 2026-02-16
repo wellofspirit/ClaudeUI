@@ -122,6 +122,7 @@ export interface WatchUpdate {
   routingId: string
   messages: ChatMessage[]
   taskNotifications: TaskNotification[]
+  statusLine?: StatusLineData | null
 }
 
 export interface ModelInfo {
@@ -213,15 +214,13 @@ export interface StatusLineData {
   totalCostUsd: number
   totalDurationMs: number
   totalApiDurationMs: number
-  totalLinesAdded: number
-  totalLinesRemoved: number
   totalInputTokens: number
   totalOutputTokens: number
+  cachedTokens: number
+  totalTokens: number
   contextWindowSize: number
   usedPercentage: number | null
   remainingPercentage: number | null
-  /** Present when status_line patch data is unavailable — shows JSONL file size instead */
-  jsonlFileSize?: number
 }
 
 export interface UISessionConfig {

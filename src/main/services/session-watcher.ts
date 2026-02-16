@@ -40,9 +40,9 @@ export function watchSession(
     if (entry.debounceTimer) clearTimeout(entry.debounceTimer)
     entry.debounceTimer = setTimeout(async () => {
       try {
-        const { messages, taskNotifications } = await loadSessionHistory(sessionId, projectKey)
+        const { messages, taskNotifications, statusLine } = await loadSessionHistory(sessionId, projectKey)
         if (!win.isDestroyed()) {
-          win.webContents.send('session:watch-update', { routingId, messages, taskNotifications })
+          win.webContents.send('session:watch-update', { routingId, messages, taskNotifications, statusLine })
         }
       } catch {
         // Ignore parse errors during rapid writes

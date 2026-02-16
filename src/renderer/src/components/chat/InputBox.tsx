@@ -24,23 +24,15 @@ function formatCost(usd: number): string {
   return '$' + usd.toFixed(2)
 }
 
-function formatFileSize(bytes: number): string {
-  if (bytes >= 1_048_576) return `${(bytes / 1_048_576).toFixed(1)} MB`
-  if (bytes >= 1_024) return `${(bytes / 1_024).toFixed(1)} KB`
-  return `${bytes} B`
-}
-
 function interpolateTemplate(template: string, data: StatusLineData): string {
-  const total = data.totalInputTokens + data.totalOutputTokens
   return template
     .replace(/\{in\}/g, formatTokens(data.totalInputTokens))
     .replace(/\{out\}/g, formatTokens(data.totalOutputTokens))
-    .replace(/\{total\}/g, formatTokens(total))
+    .replace(/\{cached\}/g, formatTokens(data.cachedTokens))
+    .replace(/\{total\}/g, formatTokens(data.totalTokens))
     .replace(/\{cost\}/g, formatCost(data.totalCostUsd))
     .replace(/\{used\}/g, data.usedPercentage !== null ? String(data.usedPercentage) : '–')
     .replace(/\{remaining\}/g, data.usedPercentage !== null ? String(100 - data.usedPercentage) : '–')
-    .replace(/\{lines\+\}/g, String(data.totalLinesAdded))
-    .replace(/\{lines-\}/g, String(data.totalLinesRemoved))
     .replace(/\{duration\}/g, formatDuration(data.totalDurationMs))
 }
 
@@ -54,15 +46,9 @@ function StatusLine({ data }: { data: StatusLineData }): React.JSX.Element {
   const align = useSessionStore((s) => s.settings.statusLineAlign)
   const template = useSessionStore((s) => s.settings.statusLineTemplate)
 
-  // Fallback: when patched status_line data is unavailable, show JSONL file size
-  const isFallback = data.jsonlFileSize != null && data.totalInputTokens === 0 && data.totalOutputTokens === 0
-  const text = isFallback
-    ? `Session: ${formatFileSize(data.jsonlFileSize!)}${data.totalCostUsd > 0 ? ` · ${formatCost(data.totalCostUsd)}` : ''}`
-    : interpolateTemplate(template, data)
-
   return (
     <div className={`text-[10px] text-text-muted ${ALIGN_CLASS[align]} pt-1.5 select-none truncate`}>
-      {text}
+      {interpolateTemplate(template, data)}
     </div>
   )
 }

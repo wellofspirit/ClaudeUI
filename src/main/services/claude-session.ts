@@ -5,6 +5,7 @@ import * as os from 'os'
 import * as path from 'path'
 import { app } from 'electron'
 import type { BrowserWindow } from 'electron'
+import { computeTokenMetrics } from './session-history'
 
 /** In production, cli.js is unpacked from the asar — resolve its real path */
 export function getCliJsPath(): string | undefined {
@@ -292,21 +293,6 @@ export class ClaudeSession {
               this.permissionMode = newMode
               this.send('session:permission-mode', newMode)
             }
-          } else if (subtype === 'status_line') {
-            const cost = msg.cost as Record<string, unknown> | undefined
-            const ctxWindow = msg.context_window as Record<string, unknown> | undefined
-            this.send('session:status-line', {
-              totalCostUsd: (cost?.total_cost_usd as number) ?? 0,
-              totalDurationMs: (cost?.total_duration_ms as number) ?? 0,
-              totalApiDurationMs: (cost?.total_api_duration_ms as number) ?? 0,
-              totalLinesAdded: (cost?.total_lines_added as number) ?? 0,
-              totalLinesRemoved: (cost?.total_lines_removed as number) ?? 0,
-              totalInputTokens: (ctxWindow?.total_input_tokens as number) ?? 0,
-              totalOutputTokens: (ctxWindow?.total_output_tokens as number) ?? 0,
-              contextWindowSize: (ctxWindow?.context_window_size as number) ?? 0,
-              usedPercentage: (ctxWindow?.used_percentage as number) ?? null,
-              remainingPercentage: (ctxWindow?.remaining_percentage as number) ?? null
-            })
           } else if (subtype === 'task_notification') {
             const taskId = (msg.task_id as string) || ''
             const outputFile = (msg.output_file as string) || ''
@@ -364,6 +350,16 @@ export class ClaudeSession {
             result: (msg.result as string) || ''
           })
           this.sendStatus()
+
+          // Compute token metrics from JSONL transcript (same approach as ccstatusline)
+          const logPath = this.getSessionLogPath()
+          if (logPath) {
+            computeTokenMetrics(logPath).then((metrics) => {
+              this.send('session:status-line', metrics)
+            }).catch(() => {
+              // Non-critical — status line just won't update
+            })
+          }
         }
       }
     } catch (err) {

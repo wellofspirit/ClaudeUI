@@ -156,8 +156,9 @@ export function useClaudeEvents(): void {
       window.api.onPermissionMode(({ routingId, data: mode }) => {
         setPermissionMode(mode, routingId)
       }),
-      window.api.onWatchUpdate(({ routingId, messages, taskNotifications }) => {
+      window.api.onWatchUpdate(({ routingId, messages, taskNotifications, statusLine }) => {
         useSessionStore.getState().updateWatchedSession(routingId, messages, taskNotifications)
+        if (statusLine) setStatusLine(routingId, statusLine)
         rebuildTodos(routingId)
         // Dismiss completed task list for watched sessions (no result event)
         const session = useSessionStore.getState().sessions[routingId]

@@ -13,8 +13,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 const patches = [
   resolve(__dirname, 'subagent-streaming/apply.mjs'),
   resolve(__dirname, 'task-notification-usage/apply.mjs'),
-  resolve(__dirname, 'taskstop-notification/apply.mjs'),
-  resolve(__dirname, 'status-line-data/apply.mjs')
+  resolve(__dirname, 'taskstop-notification/apply.mjs')
 ]
 
 for (const patch of patches) {

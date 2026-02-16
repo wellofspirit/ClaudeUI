@@ -8,6 +8,94 @@ import { getCachedSummary } from './session-summary-cache'
 const CLAUDE_PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects')
 
 /**
+ * Compute token metrics from a JSONL transcript file.
+ * Mirrors ccstatusline's approach: sums message.usage from every assistant entry.
+ */
+export async function computeTokenMetrics(filePath: string): Promise<StatusLineData> {
+  const empty: StatusLineData = {
+    totalCostUsd: 0,
+    totalDurationMs: 0,
+    totalApiDurationMs: 0,
+    totalInputTokens: 0,
+    totalOutputTokens: 0,
+    cachedTokens: 0,
+    totalTokens: 0,
+    contextWindowSize: 0,
+    usedPercentage: null,
+    remainingPercentage: null
+  }
+
+  if (!fs.existsSync(filePath)) return empty
+
+  return new Promise((resolve) => {
+    let inputTokens = 0
+    let outputTokens = 0
+    let cachedTokens = 0
+    let totalCostUsd = 0
+    let totalDurationMs = 0
+    let totalApiDurationMs = 0
+    let contextLength = 0
+
+    // Track the most recent non-sidechain assistant for context length
+    let mostRecentMainChainUsage: Record<string, number> | null = null
+
+    const stream = fs.createReadStream(filePath, { encoding: 'utf-8' })
+    const rl = readline.createInterface({ input: stream })
+
+    rl.on('line', (line) => {
+      try {
+        const data = JSON.parse(line)
+
+        if (data.type === 'assistant' && data.message?.usage) {
+          const usage = data.message.usage
+          inputTokens += usage.input_tokens || 0
+          outputTokens += usage.output_tokens || 0
+          cachedTokens += (usage.cache_read_input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0)
+
+          if (data.isSidechain !== true && !data.isApiErrorMessage) {
+            mostRecentMainChainUsage = usage
+          }
+        } else if (data.type === 'result') {
+          totalCostUsd += (data.total_cost_usd as number) || 0
+          totalDurationMs += (data.duration_ms as number) || 0
+          totalApiDurationMs += (data.duration_api_ms as number) || 0
+        }
+      } catch {
+        // Skip malformed lines
+      }
+    })
+
+    rl.on('close', () => {
+      if (mostRecentMainChainUsage) {
+        contextLength =
+          (mostRecentMainChainUsage.input_tokens || 0) +
+          (mostRecentMainChainUsage.cache_read_input_tokens ?? 0) +
+          (mostRecentMainChainUsage.cache_creation_input_tokens ?? 0)
+      }
+
+      const totalTokens = inputTokens + outputTokens + cachedTokens
+      const usedPercentage = contextLength > 0 ? Math.round((contextLength / 200000) * 100) : null
+      const remainingPercentage = usedPercentage !== null ? 100 - usedPercentage : null
+
+      resolve({
+        totalCostUsd,
+        totalDurationMs,
+        totalApiDurationMs,
+        totalInputTokens: inputTokens,
+        totalOutputTokens: outputTokens,
+        cachedTokens,
+        totalTokens,
+        contextWindowSize: contextLength,
+        usedPercentage,
+        remainingPercentage
+      })
+    })
+
+    rl.on('error', () => resolve(empty))
+  })
+}
+
+/**
  * Scan ~/.claude/projects/ for session directories and build DirectoryGroup[].
  * For each JSONL, reads the first ~20 lines to extract the title (first user prompt)
  * and uses file mtime for lastActivityAt.
@@ -292,10 +380,6 @@ export async function loadSessionHistory(
     let customTitle: string | null = null
     // Map agentId (from task-notification <task-id>) → toolUseId (from Task tool_use)
     const agentIdToToolUseId: Record<string, string> = {}
-    // Status line: prefer the last status_line event; fall back to JSONL file size
-    let lastStatusLine: StatusLineData | null = null
-    let fallbackCost = 0
-    let fallbackDurationMs = 0
 
     let stream: fs.ReadStream
     try {
@@ -559,9 +643,6 @@ export async function loadSessionHistory(
               })
             }
           }
-        } else if (type === 'result') {
-          fallbackCost += (obj.total_cost_usd as number) || 0
-          fallbackDurationMs += (obj.duration_ms as number) || 0
         } else if (type === 'system') {
           const subtype = obj.subtype as string | undefined
           if (subtype === 'compact_boundary') {
@@ -571,21 +652,6 @@ export async function loadSessionHistory(
               content: [{ type: 'compact_separator' }],
               timestamp: obj.timestamp ? new Date(obj.timestamp).getTime() : Date.now()
             })
-          } else if (subtype === 'status_line') {
-            const cost = obj.cost as Record<string, unknown> | undefined
-            const ctxWindow = obj.context_window as Record<string, unknown> | undefined
-            lastStatusLine = {
-              totalCostUsd: (cost?.total_cost_usd as number) ?? 0,
-              totalDurationMs: (cost?.total_duration_ms as number) ?? 0,
-              totalApiDurationMs: (cost?.total_api_duration_ms as number) ?? 0,
-              totalLinesAdded: (cost?.total_lines_added as number) ?? 0,
-              totalLinesRemoved: (cost?.total_lines_removed as number) ?? 0,
-              totalInputTokens: (ctxWindow?.total_input_tokens as number) ?? 0,
-              totalOutputTokens: (ctxWindow?.total_output_tokens as number) ?? 0,
-              contextWindowSize: (ctxWindow?.context_window_size as number) ?? 0,
-              usedPercentage: (ctxWindow?.used_percentage as number) ?? null,
-              remainingPercentage: (ctxWindow?.remaining_percentage as number) ?? null
-            }
           }
         }
       } catch {
@@ -593,29 +659,8 @@ export async function loadSessionHistory(
       }
     })
 
-    rl.on('close', () => {
-      // Use the last status_line event if available; otherwise show JSONL file size
-      let statusLine: StatusLineData | null = lastStatusLine
-      if (!statusLine) {
-        try {
-          const fileSize = fs.statSync(filePath).size
-          statusLine = {
-            totalCostUsd: fallbackCost,
-            totalDurationMs: fallbackDurationMs,
-            totalApiDurationMs: 0,
-            totalLinesAdded: 0,
-            totalLinesRemoved: 0,
-            totalInputTokens: 0,
-            totalOutputTokens: 0,
-            contextWindowSize: 0,
-            usedPercentage: null,
-            remainingPercentage: null,
-            jsonlFileSize: fileSize
-          }
-        } catch {
-          // Can't stat file — leave statusLine null
-        }
-      }
+    rl.on('close', async () => {
+      const statusLine = await computeTokenMetrics(filePath)
       resolve({ messages, taskNotifications, customTitle, agentIdToToolUseId, statusLine })
     })
     rl.on('error', () => resolve({ messages: [], taskNotifications: [], customTitle: null, agentIdToToolUseId: {}, statusLine: null }))
