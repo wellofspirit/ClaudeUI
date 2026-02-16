@@ -7,8 +7,8 @@ import { SessionManager } from '../services/session-manager'
 import { getCliJsPath } from '../services/claude-session'
 import { listDirectories, loadSessionHistory, loadSubagentHistory, loadBackgroundOutput } from '../services/session-history'
 import { watchSession, unwatchSession } from '../services/session-watcher'
-import { loadSettings, saveSettings, loadSessionConfig, saveSessionConfig, startConfigWatcher } from '../services/ui-config'
-import type { UISettings, UISessionConfig } from '../services/ui-config'
+import { loadSettings, saveSettings, loadSessionConfig, saveSessionConfig, loadSlashCommands, saveSlashCommands, startConfigWatcher } from '../services/ui-config'
+import type { UISettings, UISessionConfig, SlashCommandCache } from '../services/ui-config'
 import type { ApprovalDecision, ModelInfo } from '../../shared/types'
 
 let cachedModels: ModelInfo[] | null = null
@@ -218,6 +218,8 @@ export function registerSessionIpc(win: BrowserWindow): void {
   ipcMain.handle('config:save-settings', (_e, settings: UISettings) => saveSettings(settings))
   ipcMain.handle('config:load-sessions', () => loadSessionConfig())
   ipcMain.handle('config:save-sessions', (_e, config: UISessionConfig) => saveSessionConfig(config))
+  ipcMain.handle('config:load-slash-commands', () => loadSlashCommands())
+  ipcMain.handle('config:save-slash-commands', (_e, commands: SlashCommandCache[]) => saveSlashCommands(commands))
 
   // Watch ~/.claude/projects/ for JSONL changes and notify renderer to refresh
   startProjectsWatcher(win)

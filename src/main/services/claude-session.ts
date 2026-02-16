@@ -6,6 +6,7 @@ import * as path from 'path'
 import { app } from 'electron'
 import type { BrowserWindow } from 'electron'
 import { computeTokenMetrics } from './session-history'
+import { saveSlashCommands } from './ui-config'
 
 /** In production, cli.js is unpacked from the asar — resolve its real path */
 export function getCliJsPath(): string | undefined {
@@ -233,6 +234,19 @@ export class ClaudeSession {
         // Capture session_id from first message
         if ('session_id' in msg && msg.session_id && !this.sessionId) {
           this.sessionId = msg.session_id as string
+
+          // Extract slash commands from init before sendStatus triggers a rekey
+          if (type === 'system' && (msg.subtype as string) === 'init') {
+            // CLI-only commands that produce no output through the SDK
+            const CLI_ONLY = new Set(['context', 'cost', 'login', 'logout', 'release-notes', 'doctor'])
+            const raw = (msg.slash_commands as string[]) || []
+            const slashCommands = raw
+              .filter((name) => !CLI_ONLY.has(name))
+              .map((name) => ({ name: name.startsWith('/') ? name : '/' + name }))
+            this.send('session:slash-commands', slashCommands)
+            saveSlashCommands(slashCommands)
+          }
+
           this.sendStatus()
         }
 

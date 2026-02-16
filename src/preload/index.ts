@@ -90,6 +90,11 @@ const api: ClaudeAPI = {
     ipcRenderer.on('session:subagent-tool-result', handler)
     return () => ipcRenderer.removeListener('session:subagent-tool-result', handler)
   },
+  onSlashCommands: (cb) => {
+    const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as never)
+    ipcRenderer.on('session:slash-commands', handler)
+    return () => ipcRenderer.removeListener('session:slash-commands', handler)
+  },
   onPermissionMode: (cb) => {
     const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as never)
     ipcRenderer.on('session:permission-mode', handler)
@@ -142,6 +147,8 @@ const api: ClaudeAPI = {
   saveSettings: (settings) => ipcRenderer.invoke('config:save-settings', settings),
   loadSessionConfig: () => ipcRenderer.invoke('config:load-sessions'),
   saveSessionConfig: (config) => ipcRenderer.invoke('config:save-sessions', config),
+  loadSlashCommands: () => ipcRenderer.invoke('config:load-slash-commands'),
+  saveSlashCommands: (commands) => ipcRenderer.invoke('config:save-slash-commands', commands),
   onStatusLine: (cb) => {
     const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as never)
     ipcRenderer.on('session:status-line', handler)

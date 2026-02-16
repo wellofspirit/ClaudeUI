@@ -6,6 +6,7 @@ import type { BrowserWindow } from 'electron'
 const CONFIG_DIR = path.join(os.homedir(), '.claude', 'ui')
 const SETTINGS_FILE = path.join(CONFIG_DIR, 'settings.json')
 const SESSIONS_FILE = path.join(CONFIG_DIR, 'sessions.json')
+const SLASH_COMMANDS_FILE = path.join(CONFIG_DIR, 'slash-commands.json')
 const LEGACY_CONFIG_FILE = path.join(CONFIG_DIR, 'config.json')
 
 export interface UISettings {
@@ -105,6 +106,19 @@ export function loadSessionConfig(): UISessionConfig {
 
 export function saveSessionConfig(config: UISessionConfig): void {
   writeJson(SESSIONS_FILE, config)
+}
+
+export interface SlashCommandCache {
+  name: string
+  description?: string
+}
+
+export function loadSlashCommands(): SlashCommandCache[] {
+  return readJson<SlashCommandCache[]>(SLASH_COMMANDS_FILE) ?? []
+}
+
+export function saveSlashCommands(commands: SlashCommandCache[]): void {
+  writeJson(SLASH_COMMANDS_FILE, commands)
 }
 
 /**

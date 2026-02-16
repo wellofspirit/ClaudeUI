@@ -205,6 +205,9 @@ export interface ClaudeAPI {
   saveSettings(settings: Record<string, unknown>): Promise<void>
   loadSessionConfig(): Promise<UISessionConfig>
   saveSessionConfig(config: UISessionConfig): Promise<void>
+  loadSlashCommands(): Promise<SlashCommandInfo[]>
+  saveSlashCommands(commands: SlashCommandInfo[]): Promise<void>
+  onSlashCommands(cb: (data: RoutedData<SlashCommandInfo[]>) => void): () => void
   onStatusLine(cb: (data: RoutedData<StatusLineData>) => void): () => void
   onSettingsChanged(cb: (settings: Record<string, unknown>) => void): () => void
   onSessionConfigChanged(cb: (config: UISessionConfig) => void): () => void
@@ -227,4 +230,9 @@ export interface UISessionConfig {
   recentSessions?: string[]
   pinnedSessions?: string[]
   customTitles?: Record<string, string>
+}
+
+export interface SlashCommandInfo {
+  name: string
+  description?: string
 }

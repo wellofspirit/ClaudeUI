@@ -43,6 +43,7 @@ export function useClaudeEvents(): void {
   const setBackgroundOutput = useSessionStore((s) => s.setBackgroundOutput)
   const setStatusLine = useSessionStore((s) => s.setStatusLine)
   const setPermissionMode = useSessionStore((s) => s.setPermissionMode)
+  const setSlashCommands = useSessionStore((s) => s.setSlashCommands)
 
   // Request notification permission on mount
   useEffect(() => {
@@ -156,6 +157,10 @@ export function useClaudeEvents(): void {
       window.api.onPermissionMode(({ routingId, data: mode }) => {
         setPermissionMode(mode, routingId)
       }),
+      window.api.onSlashCommands(({ data: commands }) => {
+        setSlashCommands(commands)
+        window.api.saveSlashCommands(commands)
+      }),
       window.api.onWatchUpdate(({ routingId, messages, taskNotifications, statusLine }) => {
         useSessionStore.getState().updateWatchedSession(routingId, messages, taskNotifications)
         if (statusLine) setStatusLine(routingId, statusLine)
@@ -177,5 +182,5 @@ export function useClaudeEvents(): void {
     ]
 
     return () => cleanups.forEach((fn) => fn())
-  }, [addMessage, appendStreamingText, appendStreamingThinking, addPendingApproval, clearPendingApprovals, setStatus, addError, appendToolResult, updateTaskProgress, addTaskNotification, addSubagentMessage, appendSubagentStreamingText, appendSubagentStreamingThinking, appendSubagentToolResult, setBackgroundOutput, setStatusLine, setPermissionMode])
+  }, [addMessage, appendStreamingText, appendStreamingThinking, addPendingApproval, clearPendingApprovals, setStatus, addError, appendToolResult, updateTaskProgress, addTaskNotification, addSubagentMessage, appendSubagentStreamingText, appendSubagentStreamingThinking, appendSubagentToolResult, setBackgroundOutput, setStatusLine, setPermissionMode, setSlashCommands])
 }

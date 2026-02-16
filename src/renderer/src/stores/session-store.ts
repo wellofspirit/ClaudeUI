@@ -10,7 +10,8 @@ import type {
   PermissionMode,
   ModelInfo,
   DirectoryGroup,
-  StatusLineData
+  StatusLineData,
+  SlashCommandInfo
 } from '../../../shared/types'
 
 /**
@@ -194,9 +195,10 @@ function saveSessionConfig(recentSessionIds: string[], pinnedSessionIds: string[
  * Called once at startup; migrates from localStorage on first run.
  */
 export async function hydrateConfigFromDisk(): Promise<void> {
-  let [savedSettings, sessionConfig] = await Promise.all([
+  let [savedSettings, sessionConfig, slashCommands] = await Promise.all([
     window.api.loadSettings(),
-    window.api.loadSessionConfig()
+    window.api.loadSessionConfig(),
+    window.api.loadSlashCommands()
   ])
 
   // One-time migration from localStorage → disk
@@ -232,7 +234,8 @@ export async function hydrateConfigFromDisk(): Promise<void> {
     settings,
     recentSessionIds: sessionConfig.recentSessions ?? [],
     pinnedSessionIds: sessionConfig.pinnedSessions ?? [],
-    customTitles: sessionConfig.customTitles ?? {}
+    customTitles: sessionConfig.customTitles ?? {},
+    slashCommands: slashCommands ?? []
   })
 }
 
@@ -357,6 +360,7 @@ interface SessionState {
   // Global (not per-session)
   settings: AppSettings
   availableModels: ModelInfo[]
+  slashCommands: SlashCommandInfo[]
 
   // Multi-session actions
   showWelcome: () => void
@@ -413,6 +417,7 @@ interface SessionState {
   setStatusLine: (routingId: string, data: StatusLineData) => void
   setDraftText: (text: string) => void
   setSelectedModel: (model: string) => void
+  setSlashCommands: (commands: SlashCommandInfo[]) => void
   setAvailableModels: (models: ModelInfo[]) => void
   rekeySession: (oldId: string, newId: string) => void
   clearConversation: (routingId: string) => void
@@ -427,6 +432,7 @@ export const useSessionStore = create<SessionState>((set) => ({
   customTitles: {},
   settings: DEFAULT_SETTINGS,
   availableModels: [],
+  slashCommands: [],
 
   showWelcome: () =>
     set((state) => {
@@ -1006,6 +1012,8 @@ export const useSessionStore = create<SessionState>((set) => ({
       if (!id) return {}
       return { sessions: updateSession(state.sessions, id, () => ({ selectedModel: model })) }
     }),
+
+  setSlashCommands: (commands) => set({ slashCommands: commands }),
 
   setAvailableModels: (models) => set({ availableModels: models }),
 

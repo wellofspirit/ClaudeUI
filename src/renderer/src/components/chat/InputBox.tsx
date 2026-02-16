@@ -1,7 +1,8 @@
-import { useState, useRef, useCallback, useEffect } from 'react'
+import { useState, useRef, useCallback, useEffect, useMemo } from 'react'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
 import type { StatusLineData } from '../../../../shared/types'
 import { v4 as uuid } from 'uuid'
+import { SlashCommandMenu, filterSlashCommands } from './SlashCommandMenu'
 
 const EFFORT_LEVELS = ['low', 'medium', 'high'] as const
 
@@ -87,6 +88,16 @@ export function InputBox(): React.JSX.Element {
   const [modelOpen, setModelOpen] = useState(false)
   const [effortOpen, setEffortOpen] = useState(false)
   const [plusOpen, setPlusOpen] = useState(false)
+
+  // Slash command autocomplete
+  const slashCommands = useSessionStore((s) => s.slashCommands)
+  const [slashMenuOpen, setSlashMenuOpen] = useState(false)
+  const [slashMenuIndex, setSlashMenuIndex] = useState(0)
+  const slashFilter = slashMenuOpen && text.startsWith('/') ? text.slice(1).split(/\s/)[0] : ''
+  const filteredSlashCommands = useMemo(
+    () => (slashMenuOpen ? filterSlashCommands(slashCommands, slashFilter) : []),
+    [slashMenuOpen, slashCommands, slashFilter]
+  )
   const availableModels = useSessionStore((s) => s.availableModels)
   const setAvailableModels = useSessionStore((s) => s.setAvailableModels)
   const models = availableModels.map((m) => {
@@ -123,6 +134,19 @@ export function InputBox(): React.JSX.Element {
     const prompt = text.trim()
     if (!prompt || isDisabled || !activeSessionId) return
 
+    // Handle /clear as a client-side command: start a new session with the same project
+    if (prompt === '/clear') {
+      const { sessions, createNewSession } = useSessionStore.getState()
+      const session = sessions[activeSessionId]
+      if (session) {
+        const newId = uuid()
+        createNewSession(newId, session.cwd)
+      }
+      setText('')
+      if (textareaRef.current) textareaRef.current.style.height = 'auto'
+      return
+    }
+
     // Check historical state BEFORE adding user message, otherwise the
     // newly added message makes messages.length > 0 and misidentifies
     // a brand-new session as historical (causing "No conversation found" error).
@@ -158,6 +182,30 @@ export function InputBox(): React.JSX.Element {
   }, [activeSessionId])
 
   const handleKeyDown = (e: React.KeyboardEvent): void => {
+    // Slash command menu keyboard navigation
+    if (slashMenuOpen && filteredSlashCommands.length > 0) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault()
+        setSlashMenuIndex((i) => (i + 1) % filteredSlashCommands.length)
+        return
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault()
+        setSlashMenuIndex((i) => (i - 1 + filteredSlashCommands.length) % filteredSlashCommands.length)
+        return
+      }
+      if (e.key === 'Enter' || e.key === 'Tab') {
+        e.preventDefault()
+        handleSlashSelect(filteredSlashCommands[slashMenuIndex].name)
+        return
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        setSlashMenuOpen(false)
+        return
+      }
+    }
+
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
       handleSend()
@@ -174,11 +222,27 @@ export function InputBox(): React.JSX.Element {
   }, [text])
 
   const handleInput = (e: React.ChangeEvent<HTMLTextAreaElement>): void => {
-    setText(e.target.value)
+    const value = e.target.value
+    setText(value)
     const el = e.target
     el.style.height = 'auto'
     el.style.height = Math.min(el.scrollHeight, 200) + 'px'
+
+    // Show slash command menu when typing "/" at the start with no spaces yet
+    if (value.startsWith('/') && !value.includes(' ')) {
+      setSlashMenuOpen(true)
+      setSlashMenuIndex(0)
+    } else {
+      setSlashMenuOpen(false)
+    }
   }
+
+  const handleSlashSelect = useCallback((name: string): void => {
+    setText(name + ' ')
+    setSlashMenuOpen(false)
+    setSlashMenuIndex(0)
+    textareaRef.current?.focus()
+  }, [setText])
 
   return (
     <div style={{ padding: '8px 13px 16px' }} className="shrink-0">
@@ -204,6 +268,16 @@ export function InputBox(): React.JSX.Element {
             >
               {permissionMode === 'acceptEdits' ? 'Accept Edits' : 'Plan'}
             </div>
+          )}
+
+          {/* Slash command autocomplete */}
+          {slashMenuOpen && filteredSlashCommands.length > 0 && (
+            <SlashCommandMenu
+              commands={slashCommands}
+              filter={slashFilter}
+              selectedIndex={slashMenuIndex}
+              onSelect={handleSlashSelect}
+            />
           )}
 
           {/* Top section — input area */}
