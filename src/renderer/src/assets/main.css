@@ -240,10 +240,6 @@ html, #root {
   border-color: transparent;
 }
 
-.xterm-viewport, .xterm-screen {
-  background: inherit !important;
-}
-
 ::selection {
   background: var(--color-accent);
   color: white;

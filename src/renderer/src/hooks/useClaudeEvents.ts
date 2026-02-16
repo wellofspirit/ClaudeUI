@@ -41,6 +41,7 @@ export function useClaudeEvents(): void {
   const appendSubagentStreamingThinking = useSessionStore((s) => s.appendSubagentStreamingThinking)
   const appendSubagentToolResult = useSessionStore((s) => s.appendSubagentToolResult)
   const setBackgroundOutput = useSessionStore((s) => s.setBackgroundOutput)
+  const setStatusLine = useSessionStore((s) => s.setStatusLine)
   const setPermissionMode = useSessionStore((s) => s.setPermissionMode)
 
   // Request notification permission on mount
@@ -77,19 +78,30 @@ export function useClaudeEvents(): void {
         notifyIfNeeded(routingId, 'Permission required', `${approval.toolName || 'Tool'} needs approval`)
       }),
       window.api.onStatus(({ routingId, data: status }) => {
+        // Re-key session when SDK provides its stable session ID
+        let effectiveRoutingId = routingId
+        if (status.sessionId && status.sessionId !== routingId) {
+          const store = useSessionStore.getState()
+          if (store.sessions[routingId]) {
+            store.rekeySession(routingId, status.sessionId)
+            window.api.rekeySession(routingId, status.sessionId)
+            effectiveRoutingId = status.sessionId
+          }
+        }
+
         if (status.state === 'disconnected') {
-          useSessionStore.getState().markSdkInactive(routingId)
-          setStatus(routingId, { ...status, state: 'idle' })
-          clearPendingApprovals(routingId)
+          useSessionStore.getState().markSdkInactive(effectiveRoutingId)
+          setStatus(effectiveRoutingId, { ...status, state: 'idle' })
+          clearPendingApprovals(effectiveRoutingId)
           return
         }
-        setStatus(routingId, status)
+        setStatus(effectiveRoutingId, status)
         if (status.state === 'idle') {
-          clearPendingApprovals(routingId)
+          clearPendingApprovals(effectiveRoutingId)
         }
         // Clear attention when a new turn starts
         if (status.state === 'running') {
-          useSessionStore.getState().setNeedsAttention(routingId, false)
+          useSessionStore.getState().setNeedsAttention(effectiveRoutingId, false)
         }
       }),
       window.api.onResult(({ routingId }) => {
@@ -138,6 +150,9 @@ export function useClaudeEvents(): void {
       window.api.onBackgroundOutput(({ routingId, data }) => {
         setBackgroundOutput(routingId, data.toolUseId, data.tail, data.totalSize)
       }),
+      window.api.onStatusLine(({ routingId, data }) => {
+        setStatusLine(routingId, data)
+      }),
       window.api.onPermissionMode(({ routingId, data: mode }) => {
         setPermissionMode(mode, routingId)
       }),
@@ -150,9 +165,16 @@ export function useClaudeEvents(): void {
           const allDone = session.todos.every((t) => t.status === 'completed')
           if (allDone) useSessionStore.getState().setTodos(routingId, [])
         }
+      }),
+      // Cross-instance config sync
+      window.api.onSettingsChanged((settings) => {
+        useSessionStore.getState().applyExternalSettings(settings)
+      }),
+      window.api.onSessionConfigChanged((config) => {
+        useSessionStore.getState().applyExternalSessionConfig(config)
       })
     ]
 
     return () => cleanups.forEach((fn) => fn())
-  }, [addMessage, appendStreamingText, appendStreamingThinking, addPendingApproval, clearPendingApprovals, setStatus, addError, appendToolResult, updateTaskProgress, addTaskNotification, addSubagentMessage, appendSubagentStreamingText, appendSubagentStreamingThinking, appendSubagentToolResult, setBackgroundOutput, setPermissionMode])
+  }, [addMessage, appendStreamingText, appendStreamingThinking, addPendingApproval, clearPendingApprovals, setStatus, addError, appendToolResult, updateTaskProgress, addTaskNotification, addSubagentMessage, appendSubagentStreamingText, appendSubagentStreamingThinking, appendSubagentToolResult, setBackgroundOutput, setStatusLine, setPermissionMode])
 }

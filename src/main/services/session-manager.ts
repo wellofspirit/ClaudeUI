@@ -31,6 +31,14 @@ export class SessionManager {
     return this.sessions.has(routingId)
   }
 
+  rekey(oldId: string, newId: string): void {
+    const session = this.sessions.get(oldId)
+    if (!session) return
+    session.routingId = newId
+    this.sessions.delete(oldId)
+    this.sessions.set(newId, session)
+  }
+
   cancel(routingId: string): void {
     const session = this.sessions.get(routingId)
     if (session) {

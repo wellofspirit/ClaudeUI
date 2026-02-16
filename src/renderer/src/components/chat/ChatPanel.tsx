@@ -114,7 +114,7 @@ export function ChatPanel(): React.JSX.Element {
   return (
     <div className="flex-1 flex flex-col min-h-0 min-w-0 relative">
       {/* Top bar */}
-      <TopBar hasContent={hasContent} cost={status.totalCostUsd} />
+      <TopBar hasContent={hasContent} />
 
       {/* Scroll + input wrapper */}
       <div className="flex-1 flex flex-col min-h-0 relative">
@@ -190,14 +190,48 @@ export function ChatPanel(): React.JSX.Element {
   )
 }
 
-function TopBar({ hasContent, cost }: { hasContent: boolean; cost: number }): React.JSX.Element {
+function shortenHome(p: string): string {
+  const home = window.api.platform === 'win32' ? '' : '/Users/' + p.split('/')[2]
+  return home && p.startsWith(home) ? '~' + p.slice(home.length) : p
+}
+
+function formatTopBarCost(cost: number): string {
+  if (cost < 0.01) return '$' + cost.toFixed(4)
+  return '$' + cost.toFixed(2)
+}
+
+function formatTopBarDuration(ms: number): string {
+  const totalSec = Math.floor(ms / 1000)
+  if (totalSec < 60) return `${totalSec}s`
+  const min = Math.floor(totalSec / 60)
+  const sec = totalSec % 60
+  return `${min}m ${sec}s`
+}
+
+function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Element {
   const cwd = useActiveSession((s) => s.cwd)
+  const sdkSessionId = useActiveSession((s) => s.status.sessionId)
+  const statusLine = useActiveSession((s) => s.statusLine)
+  const fallbackCost = useActiveSession((s) => s.status.totalCostUsd)
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const customTitle = useSessionStore((s) => activeSessionId ? s.customTitles[activeSessionId] : undefined)
   const { collapsed: sidebarCollapsed, toggle: toggleSidebar } = useSidebarCollapsed()
   const showWelcome = useSessionStore((s) => s.showWelcome)
   const isMac = window.api.platform === 'darwin'
   const leftPadding = sidebarCollapsed && isMac ? 148 : 13
+  const [copied, setCopied] = useState(false)
+
+  const cost = statusLine ? statusLine.totalCostUsd : fallbackCost
+  const durationStr = statusLine ? formatTopBarDuration(statusLine.totalDurationMs) : null
+
+  const displaySessionId = sdkSessionId || activeSessionId
+  const handleCopySessionId = useCallback(() => {
+    if (!displaySessionId) return
+    navigator.clipboard.writeText(displaySessionId)
+    setCopied(true)
+    setTimeout(() => setCopied(false), 1500)
+  }, [displaySessionId])
+
   return (
     <div style={{ paddingLeft: leftPadding, paddingRight: 13 }} className="shrink-0 h-12 flex items-center justify-between [-webkit-app-region:drag] border-b border-border relative">
       <div className="flex items-center min-w-0">
@@ -229,9 +263,25 @@ function TopBar({ hasContent, cost }: { hasContent: boolean; cost: number }): Re
             </button>
           </div>
         )}
-        <span className="text-[13px] text-text-secondary font-normal [-webkit-app-region:no-drag] truncate">
-          {!cwd ? 'New session' : hasContent ? (customTitle || 'Session') : 'New session'}
-        </span>
+        <div className="flex items-center gap-2 min-w-0 [-webkit-app-region:no-drag]">
+          <span className="text-[13px] text-text-secondary font-normal truncate">
+            {!cwd ? 'New session' : hasContent ? (customTitle || 'Session') : 'New session'}
+          </span>
+          {cwd && (
+            <span className="text-[11px] text-text-muted font-mono truncate shrink-0" title={cwd}>
+              {shortenHome(cwd)}
+            </span>
+          )}
+          {displaySessionId && (
+            <button
+              onClick={handleCopySessionId}
+              className="text-[10px] text-text-muted/60 hover:text-text-muted font-mono truncate max-w-[140px] transition-colors cursor-default shrink-0"
+              title={`Session: ${displaySessionId}\nClick to copy`}
+            >
+              {copied ? 'Copied!' : displaySessionId.slice(0, 8)}
+            </button>
+          )}
+        </div>
       </div>
       <div className="flex items-center gap-3 [-webkit-app-region:no-drag]">
         {cwd && (
@@ -254,7 +304,9 @@ function TopBar({ hasContent, cost }: { hasContent: boolean; cost: number }): Re
           </button>
         )}
         {cost > 0 && (
-          <span className="text-[11px] text-text-muted font-mono">${cost.toFixed(4)}</span>
+          <span className="text-[11px] text-text-muted font-mono">
+            {formatTopBarCost(cost)}{durationStr ? ` (${durationStr})` : ''}
+          </span>
         )}
         <WindowControls />
       </div>

@@ -9,7 +9,8 @@ import type {
   TaskNotification,
   PermissionMode,
   ModelInfo,
-  DirectoryGroup
+  DirectoryGroup,
+  StatusLineData
 } from '../../../shared/types'
 
 /**
@@ -123,8 +124,6 @@ export function buildTodosFromMessages(messages: ChatMessage[]): TodoItem[] | nu
   return Array.from(tasks.values())
 }
 
-const SETTINGS_KEY = 'claudeui-settings'
-
 export type ThemeId = 'dark' | 'light' | 'monokai'
 
 export interface AppSettings {
@@ -140,6 +139,8 @@ export interface AppSettings {
   maxRecentSessions: number
   chatFontScale: number
   uiFontScale: number
+  statusLineAlign: 'left' | 'center' | 'right'
+  statusLineTemplate: string
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -154,20 +155,9 @@ const DEFAULT_SETTINGS: AppSettings = {
   chatWidthPercent: 80,
   maxRecentSessions: 5,
   chatFontScale: 1,
-  uiFontScale: 1
-}
-
-function loadSettings(): AppSettings {
-  try {
-    const raw = localStorage.getItem(SETTINGS_KEY)
-    return raw ? { ...DEFAULT_SETTINGS, ...JSON.parse(raw) } : DEFAULT_SETTINGS
-  } catch {
-    return DEFAULT_SETTINGS
-  }
-}
-
-function saveSettings(settings: AppSettings): void {
-  localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings))
+  uiFontScale: 1,
+  statusLineAlign: 'center',
+  statusLineTemplate: 'In: {in} / Out: {out} / Total: {total} · {used}% context used'
 }
 
 export function applyTheme(theme: ThemeId): void {
@@ -178,47 +168,81 @@ export function applyTheme(theme: ThemeId): void {
   }
 }
 
-const CUSTOM_TITLES_KEY = 'claudeui-custom-titles'
-const RECENT_SESSIONS_KEY = 'claudeui-recent-sessions'
-const PINNED_SESSIONS_KEY = 'claudeui-pinned-sessions'
+// ---------------------------------------------------------------------------
+// Persistent config via ~/.claude/ui/ (through main-process IPC)
+// ---------------------------------------------------------------------------
 
-function loadRecentSessions(): string[] {
-  try {
-    const raw = localStorage.getItem(RECENT_SESSIONS_KEY)
-    return raw ? JSON.parse(raw) : []
-  } catch {
-    return []
+/**
+ * Persist settings to disk. Must be passed the actual data to save — never
+ * re-read from getState() because callers may be inside a set() callback
+ * where the store hasn't committed yet.
+ */
+function saveSettings(settings: AppSettings): void {
+  window.api.saveSettings(settings as unknown as Record<string, unknown>)
+}
+
+function saveSessionConfig(recentSessionIds: string[], pinnedSessionIds: string[], customTitles: Record<string, string>): void {
+  window.api.saveSessionConfig({
+    recentSessions: recentSessionIds,
+    pinnedSessions: pinnedSessionIds,
+    customTitles: customTitles
+  })
+}
+
+/**
+ * Hydrate the store from ~/.claude/ui/ config files.
+ * Called once at startup; migrates from localStorage on first run.
+ */
+export async function hydrateConfigFromDisk(): Promise<void> {
+  let [savedSettings, sessionConfig] = await Promise.all([
+    window.api.loadSettings(),
+    window.api.loadSessionConfig()
+  ])
+
+  // One-time migration from localStorage → disk
+  const MIGRATION_FLAG = 'claudeui-migrated-to-disk'
+  if (!localStorage.getItem(MIGRATION_FLAG)) {
+    const migratedSettings = tryParseLocalStorage<Record<string, unknown>>('claudeui-settings')
+    const migratedRecent = tryParseLocalStorage<string[]>('claudeui-recent-sessions')
+    const migratedPinned = tryParseLocalStorage<string[]>('claudeui-pinned-sessions')
+    const migratedTitles = tryParseLocalStorage<Record<string, string>>('claudeui-custom-titles')
+
+    if (migratedSettings) {
+      savedSettings = migratedSettings
+      await window.api.saveSettings(savedSettings)
+    }
+    if (migratedRecent || migratedPinned || migratedTitles) {
+      sessionConfig = {
+        recentSessions: migratedRecent ?? sessionConfig.recentSessions,
+        pinnedSessions: migratedPinned ?? sessionConfig.pinnedSessions,
+        customTitles: migratedTitles ?? sessionConfig.customTitles
+      }
+      await window.api.saveSessionConfig(sessionConfig)
+    }
+    localStorage.setItem(MIGRATION_FLAG, '1')
   }
+
+  const settings: AppSettings = Object.keys(savedSettings).length > 0
+    ? { ...DEFAULT_SETTINGS, ...(savedSettings as Partial<AppSettings>) }
+    : DEFAULT_SETTINGS
+
+  applyTheme(settings.theme)
+
+  useSessionStore.setState({
+    settings,
+    recentSessionIds: sessionConfig.recentSessions ?? [],
+    pinnedSessionIds: sessionConfig.pinnedSessions ?? [],
+    customTitles: sessionConfig.customTitles ?? {}
+  })
 }
 
-function saveRecentSessions(ids: string[]): void {
-  localStorage.setItem(RECENT_SESSIONS_KEY, JSON.stringify(ids))
-}
-
-function loadPinnedSessions(): string[] {
+function tryParseLocalStorage<T>(key: string): T | null {
   try {
-    const raw = localStorage.getItem(PINNED_SESSIONS_KEY)
-    return raw ? JSON.parse(raw) : []
+    const raw = localStorage.getItem(key)
+    return raw ? (JSON.parse(raw) as T) : null
   } catch {
-    return []
+    return null
   }
-}
-
-function savePinnedSessions(ids: string[]): void {
-  localStorage.setItem(PINNED_SESSIONS_KEY, JSON.stringify(ids))
-}
-
-function loadCustomTitles(): Record<string, string> {
-  try {
-    const raw = localStorage.getItem(CUSTOM_TITLES_KEY)
-    return raw ? JSON.parse(raw) : {}
-  } catch {
-    return {}
-  }
-}
-
-function saveCustomTitles(titles: Record<string, string>): void {
-  localStorage.setItem(CUSTOM_TITLES_KEY, JSON.stringify(titles))
 }
 
 /** Remove a session from state if it has no messages (empty new session) */
@@ -267,6 +291,7 @@ export interface PerSessionState {
   needsAttention: boolean
   permissionMode: PermissionMode
   effort: 'low' | 'medium' | 'high'
+  statusLine: StatusLineData | null
   draftText: string
   selectedModel: string
 }
@@ -298,6 +323,7 @@ const EMPTY_SESSION_STATE: PerSessionState = {
   needsAttention: false,
   permissionMode: 'default',
   effort: 'medium',
+  statusLine: null,
   draftText: '',
   selectedModel: 'default'
 }
@@ -336,7 +362,7 @@ interface SessionState {
   showWelcome: () => void
   switchSession: (routingId: string) => void
   createNewSession: (routingId: string, cwd: string) => void
-  loadHistoricalSession: (routingId: string, messages: ChatMessage[], cwd: string, taskNotifications?: TaskNotification[], subagentMessages?: Record<string, ChatMessage[]>) => void
+  loadHistoricalSession: (routingId: string, messages: ChatMessage[], cwd: string, taskNotifications?: TaskNotification[], subagentMessages?: Record<string, ChatMessage[]>, statusLine?: StatusLineData | null) => void
   markSdkActive: (routingId: string) => void
   markSdkInactive: (routingId: string) => void
   setDirectories: (dirs: DirectoryGroup[]) => void
@@ -380,11 +406,15 @@ interface SessionState {
   setWatching: (routingId: string, watching: boolean) => void
   updateWatchedSession: (routingId: string, messages: ChatMessage[], taskNotifications: TaskNotification[]) => void
   updateSettings: (partial: Partial<AppSettings>) => void
+  applyExternalSettings: (settings: Record<string, unknown>) => void
+  applyExternalSessionConfig: (config: { recentSessions?: string[]; pinnedSessions?: string[]; customTitles?: Record<string, string> }) => void
   setPermissionMode: (mode: PermissionMode, routingId?: string) => void
   setEffort: (effort: 'low' | 'medium' | 'high', routingId?: string) => void
+  setStatusLine: (routingId: string, data: StatusLineData) => void
   setDraftText: (text: string) => void
   setSelectedModel: (model: string) => void
   setAvailableModels: (models: ModelInfo[]) => void
+  rekeySession: (oldId: string, newId: string) => void
   clearConversation: (routingId: string) => void
 }
 
@@ -392,23 +422,27 @@ export const useSessionStore = create<SessionState>((set) => ({
   activeSessionId: null,
   sessions: {},
   directories: [],
-  recentSessionIds: loadRecentSessions(),
-  pinnedSessionIds: loadPinnedSessions(),
-  customTitles: loadCustomTitles(),
-  settings: loadSettings(),
+  recentSessionIds: [],
+  pinnedSessionIds: [],
+  customTitles: {},
+  settings: DEFAULT_SETTINGS,
   availableModels: [],
 
   showWelcome: () =>
     set((state) => {
       const cleaned = cleanupEmptySession(state.sessions, state.recentSessionIds, state.activeSessionId)
-      if (cleaned.recentSessionIds !== state.recentSessionIds) saveRecentSessions(cleaned.recentSessionIds)
+      if (cleaned.recentSessionIds !== state.recentSessionIds) {
+        saveSessionConfig(cleaned.recentSessionIds, state.pinnedSessionIds, state.customTitles)
+      }
       return { activeSessionId: null, ...cleaned }
     }),
 
   switchSession: (routingId) =>
     set((state) => {
       const cleaned = cleanupEmptySession(state.sessions, state.recentSessionIds, state.activeSessionId)
-      if (cleaned.recentSessionIds !== state.recentSessionIds) saveRecentSessions(cleaned.recentSessionIds)
+      if (cleaned.recentSessionIds !== state.recentSessionIds) {
+        saveSessionConfig(cleaned.recentSessionIds, state.pinnedSessionIds, state.customTitles)
+      }
       return {
         activeSessionId: routingId,
         sessions: updateSession(cleaned.sessions, routingId, () => ({ needsAttention: false })),
@@ -419,7 +453,7 @@ export const useSessionStore = create<SessionState>((set) => ({
   createNewSession: (routingId, cwd) =>
     set((state) => {
       const recentSessionIds = [routingId, ...state.recentSessionIds.filter((id) => id !== routingId)].slice(0, state.settings.maxRecentSessions)
-      saveRecentSessions(recentSessionIds)
+      saveSessionConfig(recentSessionIds, state.pinnedSessionIds, state.customTitles)
       return {
         activeSessionId: routingId,
         sessions: { ...state.sessions, [routingId]: createEmptySession(cwd) },
@@ -427,7 +461,7 @@ export const useSessionStore = create<SessionState>((set) => ({
       }
     }),
 
-  loadHistoricalSession: (routingId, messages, cwd, taskNotifications?, subagentMessages?) =>
+  loadHistoricalSession: (routingId, messages, cwd, taskNotifications?, subagentMessages?, statusLine?) =>
     set((state) => ({
       sessions: {
         ...state.sessions,
@@ -436,7 +470,8 @@ export const useSessionStore = create<SessionState>((set) => ({
           messages,
           isHistorical: true,
           taskNotifications: taskNotifications || [],
-          subagentMessages: subagentMessages || {}
+          subagentMessages: subagentMessages || {},
+          statusLine: statusLine ?? null
         }
       }
     })),
@@ -458,14 +493,14 @@ export const useSessionStore = create<SessionState>((set) => ({
       // Don't add pinned sessions to recents — they have their own section
       if (state.pinnedSessionIds.includes(routingId)) return state
       const recentSessionIds = [routingId, ...state.recentSessionIds.filter((id) => id !== routingId)].slice(0, state.settings.maxRecentSessions)
-      saveRecentSessions(recentSessionIds)
+      saveSessionConfig(recentSessionIds, state.pinnedSessionIds, state.customTitles)
       return { recentSessionIds }
     }),
 
   removeRecentSession: (routingId) =>
     set((state) => {
       const recentSessionIds = state.recentSessionIds.filter((id) => id !== routingId)
-      saveRecentSessions(recentSessionIds)
+      saveSessionConfig(recentSessionIds, state.pinnedSessionIds, state.customTitles)
       return { recentSessionIds }
     }),
 
@@ -477,7 +512,7 @@ export const useSessionStore = create<SessionState>((set) => ({
       } else {
         delete customTitles[sessionId]
       }
-      saveCustomTitles(customTitles)
+      saveSessionConfig(state.recentSessionIds, state.pinnedSessionIds, customTitles)
       return { customTitles }
     }),
 
@@ -485,26 +520,22 @@ export const useSessionStore = create<SessionState>((set) => ({
     set((state) => {
       if (state.pinnedSessionIds.includes(routingId)) return state
       const pinnedSessionIds = [...state.pinnedSessionIds, routingId]
-      savePinnedSessions(pinnedSessionIds)
-      // Remove from recents to free the slot
       const recentSessionIds = state.recentSessionIds.filter((id) => id !== routingId)
-      saveRecentSessions(recentSessionIds)
+      saveSessionConfig(recentSessionIds, pinnedSessionIds, state.customTitles)
       return { pinnedSessionIds, recentSessionIds }
     }),
 
   unpinSession: (routingId) =>
     set((state) => {
       const pinnedSessionIds = state.pinnedSessionIds.filter((id) => id !== routingId)
-      savePinnedSessions(pinnedSessionIds)
-      // Add back to recents so it doesn't disappear
       const recentSessionIds = [routingId, ...state.recentSessionIds.filter((id) => id !== routingId)].slice(0, state.settings.maxRecentSessions)
-      saveRecentSessions(recentSessionIds)
+      saveSessionConfig(recentSessionIds, pinnedSessionIds, state.customTitles)
       return { pinnedSessionIds, recentSessionIds }
     }),
 
   reorderPinnedSessions: (ids) =>
-    set(() => {
-      savePinnedSessions(ids)
+    set((state) => {
+      saveSessionConfig(state.recentSessionIds, ids, state.customTitles)
       return { pinnedSessionIds: ids }
     }),
 
@@ -557,7 +588,7 @@ export const useSessionStore = create<SessionState>((set) => ({
       if (!session) return state
 
       const recentSessionIds = [routingId, ...state.recentSessionIds.filter((rid) => rid !== routingId)].slice(0, state.settings.maxRecentSessions)
-      saveRecentSessions(recentSessionIds)
+      saveSessionConfig(recentSessionIds, state.pinnedSessionIds, state.customTitles)
 
       return {
         sessions: {
@@ -927,6 +958,22 @@ export const useSessionStore = create<SessionState>((set) => ({
       return { settings }
     }),
 
+  // Apply settings from an external source (another instance) — no save back to disk
+  applyExternalSettings: (raw) =>
+    set(() => {
+      const settings = { ...DEFAULT_SETTINGS, ...(raw as Partial<AppSettings>) }
+      applyTheme(settings.theme)
+      return { settings }
+    }),
+
+  // Apply session config from an external source — no save back to disk
+  applyExternalSessionConfig: (config) =>
+    set(() => ({
+      recentSessionIds: config.recentSessions ?? [],
+      pinnedSessionIds: config.pinnedSessions ?? [],
+      customTitles: config.customTitles ?? {}
+    })),
+
   setPermissionMode: (mode, routingId) =>
     set((state) => {
       const id = routingId ?? state.activeSessionId
@@ -940,6 +987,11 @@ export const useSessionStore = create<SessionState>((set) => ({
       if (!id) return {}
       return { sessions: updateSession(state.sessions, id, () => ({ effort })) }
     }),
+
+  setStatusLine: (routingId, data) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, routingId, () => ({ statusLine: data }))
+    })),
 
   setDraftText: (text) =>
     set((state) => {
@@ -956,6 +1008,26 @@ export const useSessionStore = create<SessionState>((set) => ({
     }),
 
   setAvailableModels: (models) => set({ availableModels: models }),
+
+  rekeySession: (oldId, newId) => {
+    set((state) => {
+      if (oldId === newId) return state
+      const session = state.sessions[oldId]
+      if (!session) return state
+      const { [oldId]: _, ...rest } = state.sessions
+      const sessions = { ...rest, [newId]: session }
+      const activeSessionId = state.activeSessionId === oldId ? newId : state.activeSessionId
+      const recentSessionIds = state.recentSessionIds.map((id) => (id === oldId ? newId : id))
+      const pinnedSessionIds = state.pinnedSessionIds.map((id) => (id === oldId ? newId : id))
+      const customTitles = { ...state.customTitles }
+      if (customTitles[oldId]) {
+        customTitles[newId] = customTitles[oldId]
+        delete customTitles[oldId]
+      }
+      saveSessionConfig(recentSessionIds, pinnedSessionIds, customTitles)
+      return { sessions, activeSessionId, recentSessionIds, pinnedSessionIds, customTitles }
+    })
+  },
 
   clearConversation: (routingId) =>
     set((state) => {

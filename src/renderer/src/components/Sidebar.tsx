@@ -63,8 +63,8 @@ export function Sidebar({ style, onToggleCollapse }: {
         return undefined
       })()
       if (info?.projectKey) {
-        const { messages, taskNotifications } = await window.api.loadSessionHistory(sessionId, info.projectKey)
-        loadHistoricalSession(sessionId, messages, info.cwd, taskNotifications, {})
+        const { messages, taskNotifications, statusLine } = await window.api.loadSessionHistory(sessionId, info.projectKey)
+        loadHistoricalSession(sessionId, messages, info.cwd, taskNotifications, {}, statusLine)
         session = useSessionStore.getState().sessions[sessionId]
       }
     }
@@ -149,7 +149,7 @@ export function Sidebar({ style, onToggleCollapse }: {
       return
     }
     // Load from JSONL
-    const { messages, taskNotifications, customTitle, agentIdToToolUseId } = await window.api.loadSessionHistory(info.sessionId, info.projectKey)
+    const { messages, taskNotifications, customTitle, agentIdToToolUseId, statusLine } = await window.api.loadSessionHistory(info.sessionId, info.projectKey)
     // Load subagent histories in parallel
     const subagentMessages: Record<string, ChatMessage[]> = {}
     const entries = Object.entries(agentIdToToolUseId)
@@ -168,7 +168,7 @@ export function Sidebar({ style, onToggleCollapse }: {
         if (msgs.length > 0) subagentMessages[toolUseId] = msgs
       }
     }
-    loadHistoricalSession(routingId, messages, info.cwd, taskNotifications, subagentMessages)
+    loadHistoricalSession(routingId, messages, info.cwd, taskNotifications, subagentMessages, statusLine)
     if (customTitle) setCustomTitle(routingId, customTitle)
     // Rebuild todos from TaskCreate/TaskUpdate/TodoWrite tool calls
     const todos = buildTodosFromMessages(messages)
@@ -194,8 +194,8 @@ export function Sidebar({ style, onToggleCollapse }: {
     } else {
       // Need to load historical session first if not in memory
       if (!session) {
-        window.api.loadSessionHistory(info.sessionId, info.projectKey).then(({ messages, taskNotifications, customTitle: ct }) => {
-          loadHistoricalSession(routingId, messages, info.cwd, taskNotifications)
+        window.api.loadSessionHistory(info.sessionId, info.projectKey).then(({ messages, taskNotifications, customTitle: ct, statusLine: sl }) => {
+          loadHistoricalSession(routingId, messages, info.cwd, taskNotifications, {}, sl)
           if (ct) setCustomTitle(routingId, ct)
           window.api.watchSession(routingId, info.sessionId, info.projectKey)
           setWatching(routingId, true)
@@ -973,6 +973,35 @@ function SettingsPanel(): React.JSX.Element {
             checked={settings.expandThinking}
             onChange={(v) => updateSettings({ expandThinking: v })}
           />
+          {/* Status line alignment */}
+          <div className="px-3 pt-2 pb-1">
+            <div className="text-[11px] text-text-muted uppercase tracking-wider mb-1">Status line align</div>
+            <div className="flex items-center gap-1 mb-1">
+              {(['left', 'center', 'right'] as const).map((a) => (
+                <button
+                  key={a}
+                  onClick={() => updateSettings({ statusLineAlign: a })}
+                  className={`flex-1 text-[11px] py-0.5 rounded transition-colors capitalize ${settings.statusLineAlign === a ? 'bg-accent/20 text-accent' : 'text-text-muted hover:text-text-secondary'}`}
+                >
+                  {a}
+                </button>
+              ))}
+            </div>
+          </div>
+          {/* Status line template */}
+          <div className="px-3 pt-1 pb-1">
+            <div className="text-[11px] text-text-muted uppercase tracking-wider mb-1">Status line template</div>
+            <input
+              type="text"
+              value={settings.statusLineTemplate}
+              onChange={(e) => updateSettings({ statusLineTemplate: e.target.value })}
+              className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors"
+              placeholder="{in} / {out} / {total} · {used}%"
+            />
+            <div className="text-[9px] text-text-muted/60 mt-0.5">
+              Tokens: {'{in} {out} {total}'} · Cost: {'{cost}'} · Context: {'{used} {remaining}'} · Lines: {'{lines+} {lines-}'} · Time: {'{duration}'}
+            </div>
+          </div>
           {/* Chat width section */}
           <div className="px-3 pt-2 pb-1">
             <div className="text-[11px] text-text-muted uppercase tracking-wider mb-1">Chat width</div>

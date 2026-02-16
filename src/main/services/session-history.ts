@@ -2,7 +2,7 @@ import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
 import * as readline from 'readline'
-import type { ChatMessage, ContentBlock, DirectoryGroup, SessionInfo, TaskNotification } from '../../shared/types'
+import type { ChatMessage, ContentBlock, DirectoryGroup, SessionInfo, TaskNotification, StatusLineData } from '../../shared/types'
 import { getCachedSummary } from './session-summary-cache'
 
 const CLAUDE_PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects')
@@ -201,6 +201,7 @@ export interface SessionHistoryResult {
   messages: ChatMessage[]
   taskNotifications: TaskNotification[]
   customTitle: string | null
+  statusLine: StatusLineData | null
   /** Maps agentId → toolUseId for subagent JSONL lookup */
   agentIdToToolUseId: Record<string, string>
 }
@@ -291,12 +292,16 @@ export async function loadSessionHistory(
     let customTitle: string | null = null
     // Map agentId (from task-notification <task-id>) → toolUseId (from Task tool_use)
     const agentIdToToolUseId: Record<string, string> = {}
+    // Status line: prefer the last status_line event; fall back to JSONL file size
+    let lastStatusLine: StatusLineData | null = null
+    let fallbackCost = 0
+    let fallbackDurationMs = 0
 
     let stream: fs.ReadStream
     try {
       stream = fs.createReadStream(filePath, { encoding: 'utf-8' })
     } catch {
-      resolve({ messages: [], taskNotifications: [], customTitle: null, agentIdToToolUseId: {} })
+      resolve({ messages: [], taskNotifications: [], customTitle: null, agentIdToToolUseId: {}, statusLine: null })
       return
     }
 
@@ -554,6 +559,9 @@ export async function loadSessionHistory(
               })
             }
           }
+        } else if (type === 'result') {
+          fallbackCost += (obj.total_cost_usd as number) || 0
+          fallbackDurationMs += (obj.duration_ms as number) || 0
         } else if (type === 'system') {
           const subtype = obj.subtype as string | undefined
           if (subtype === 'compact_boundary') {
@@ -563,6 +571,21 @@ export async function loadSessionHistory(
               content: [{ type: 'compact_separator' }],
               timestamp: obj.timestamp ? new Date(obj.timestamp).getTime() : Date.now()
             })
+          } else if (subtype === 'status_line') {
+            const cost = obj.cost as Record<string, unknown> | undefined
+            const ctxWindow = obj.context_window as Record<string, unknown> | undefined
+            lastStatusLine = {
+              totalCostUsd: (cost?.total_cost_usd as number) ?? 0,
+              totalDurationMs: (cost?.total_duration_ms as number) ?? 0,
+              totalApiDurationMs: (cost?.total_api_duration_ms as number) ?? 0,
+              totalLinesAdded: (cost?.total_lines_added as number) ?? 0,
+              totalLinesRemoved: (cost?.total_lines_removed as number) ?? 0,
+              totalInputTokens: (ctxWindow?.total_input_tokens as number) ?? 0,
+              totalOutputTokens: (ctxWindow?.total_output_tokens as number) ?? 0,
+              contextWindowSize: (ctxWindow?.context_window_size as number) ?? 0,
+              usedPercentage: (ctxWindow?.used_percentage as number) ?? null,
+              remainingPercentage: (ctxWindow?.remaining_percentage as number) ?? null
+            }
           }
         }
       } catch {
@@ -570,8 +593,32 @@ export async function loadSessionHistory(
       }
     })
 
-    rl.on('close', () => resolve({ messages, taskNotifications, customTitle, agentIdToToolUseId }))
-    rl.on('error', () => resolve({ messages: [], taskNotifications: [], customTitle: null, agentIdToToolUseId: {} }))
+    rl.on('close', () => {
+      // Use the last status_line event if available; otherwise show JSONL file size
+      let statusLine: StatusLineData | null = lastStatusLine
+      if (!statusLine) {
+        try {
+          const fileSize = fs.statSync(filePath).size
+          statusLine = {
+            totalCostUsd: fallbackCost,
+            totalDurationMs: fallbackDurationMs,
+            totalApiDurationMs: 0,
+            totalLinesAdded: 0,
+            totalLinesRemoved: 0,
+            totalInputTokens: 0,
+            totalOutputTokens: 0,
+            contextWindowSize: 0,
+            usedPercentage: null,
+            remainingPercentage: null,
+            jsonlFileSize: fileSize
+          }
+        } catch {
+          // Can't stat file — leave statusLine null
+        }
+      }
+      resolve({ messages, taskNotifications, customTitle, agentIdToToolUseId, statusLine })
+    })
+    rl.on('error', () => resolve({ messages: [], taskNotifications: [], customTitle: null, agentIdToToolUseId: {}, statusLine: null }))
   })
 }
 

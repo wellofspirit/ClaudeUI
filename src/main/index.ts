@@ -1,8 +1,29 @@
 import { app, shell, BrowserWindow, ipcMain } from 'electron'
 import { join } from 'path'
+import { execFileSync } from 'child_process'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import { registerSessionIpc } from './ipc/session.ipc'
 import icon from '../../resources/icon.png?asset'
+
+// Prevent "nested session" error when launched from a Claude Code terminal
+delete process.env.CLAUDECODE
+
+// macOS GUI apps don't inherit the shell PATH, so node/bun aren't found.
+// Use a non-interactive login shell to get the real PATH.
+if (process.platform === 'darwin') {
+  try {
+    const shell = process.env.SHELL || '/bin/zsh'
+    const result = execFileSync(shell, ['-lc', 'echo $PATH'], {
+      encoding: 'utf-8',
+      timeout: 3000
+    }).trim()
+    if (result) process.env.PATH = result
+  } catch {
+    // Fallback: prepend common node locations
+    const extra = '/opt/homebrew/bin:/usr/local/bin:/usr/local/sbin'
+    process.env.PATH = `${extra}:${process.env.PATH ?? ''}`
+  }
+}
 
 function createWindow(): void {
   const isMac = process.platform === 'darwin'

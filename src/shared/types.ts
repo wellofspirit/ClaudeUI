@@ -156,6 +156,7 @@ export interface ClaudeAPI {
   platform: string
   pickFolder(): Promise<string | null>
   createSession(routingId: string, cwd: string, effort?: string, resumeSessionId?: string, permissionMode?: string): Promise<void>
+  rekeySession(oldId: string, newId: string): Promise<void>
   sendPrompt(routingId: string, prompt: string): Promise<void>
   cancelSession(routingId: string): Promise<void>
   respondApproval(routingId: string, requestId: string, decision: ApprovalDecision, answers?: Record<string, string>): Promise<void>
@@ -163,7 +164,7 @@ export interface ClaudeAPI {
   maximizeWindow(): Promise<void>
   closeWindow(): Promise<void>
   listDirectories(): Promise<DirectoryGroup[]>
-  loadSessionHistory(sessionId: string, projectKey: string): Promise<{ messages: ChatMessage[]; taskNotifications: TaskNotification[]; customTitle: string | null; agentIdToToolUseId: Record<string, string> }>
+  loadSessionHistory(sessionId: string, projectKey: string): Promise<{ messages: ChatMessage[]; taskNotifications: TaskNotification[]; customTitle: string | null; agentIdToToolUseId: Record<string, string>; statusLine: StatusLineData | null }>
   loadSubagentHistory(sessionId: string, projectKey: string, agentId: string): Promise<ChatMessage[]>
   loadBackgroundOutput(projectKey: string, taskId: string, outputFile?: string): Promise<{ content: string | null; purged: boolean }>
 
@@ -199,4 +200,32 @@ export interface ClaudeAPI {
   onWatchUpdate(cb: (data: WatchUpdate) => void): () => void
   onDirectoriesChanged(cb: () => void): () => void
   openInVSCode(cwd: string): Promise<void>
+  loadSettings(): Promise<Record<string, unknown>>
+  saveSettings(settings: Record<string, unknown>): Promise<void>
+  loadSessionConfig(): Promise<UISessionConfig>
+  saveSessionConfig(config: UISessionConfig): Promise<void>
+  onStatusLine(cb: (data: RoutedData<StatusLineData>) => void): () => void
+  onSettingsChanged(cb: (settings: Record<string, unknown>) => void): () => void
+  onSessionConfigChanged(cb: (config: UISessionConfig) => void): () => void
+}
+
+export interface StatusLineData {
+  totalCostUsd: number
+  totalDurationMs: number
+  totalApiDurationMs: number
+  totalLinesAdded: number
+  totalLinesRemoved: number
+  totalInputTokens: number
+  totalOutputTokens: number
+  contextWindowSize: number
+  usedPercentage: number | null
+  remainingPercentage: number | null
+  /** Present when status_line patch data is unavailable — shows JSONL file size instead */
+  jsonlFileSize?: number
+}
+
+export interface UISessionConfig {
+  recentSessions?: string[]
+  pinnedSessions?: string[]
+  customTitles?: Record<string, string>
 }

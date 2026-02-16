@@ -4,8 +4,11 @@ import * as os from 'os'
 import { ipcMain, dialog, BrowserWindow } from 'electron'
 import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk'
 import { SessionManager } from '../services/session-manager'
+import { getCliJsPath } from '../services/claude-session'
 import { listDirectories, loadSessionHistory, loadSubagentHistory, loadBackgroundOutput } from '../services/session-history'
 import { watchSession, unwatchSession } from '../services/session-watcher'
+import { loadSettings, saveSettings, loadSessionConfig, saveSessionConfig, startConfigWatcher } from '../services/ui-config'
+import type { UISettings, UISessionConfig } from '../services/ui-config'
 import type { ApprovalDecision, ModelInfo } from '../../shared/types'
 
 let cachedModels: ModelInfo[] | null = null
@@ -18,9 +21,11 @@ async function generateTitle(conversationText: string): Promise<string | null> {
   console.log('[generateTitle] request:', conversationText.length, 'chars:', conversationText.slice(0, 200))
 
   try {
+    const cliPath = getCliJsPath()
     const q = sdkQuery({
       prompt: conversationText,
       options: {
+        ...(cliPath ? { pathToClaudeCodeExecutable: cliPath } : {}),
         cwd: process.cwd(),
         abortController: abort,
         systemPrompt: TITLE_SYSTEM_PROMPT,
@@ -69,9 +74,11 @@ async function fetchModels(): Promise<ModelInfo[]> {
   if (cachedModels) return cachedModels
 
   const abort = new AbortController()
+  const cliPath = getCliJsPath()
   const q = sdkQuery({
     prompt: '',
     options: {
+      ...(cliPath ? { pathToClaudeCodeExecutable: cliPath } : {}),
       cwd: process.cwd(),
       abortController: abort
     }
@@ -103,6 +110,10 @@ export function registerSessionIpc(win: BrowserWindow): void {
       manager.create(routingId, win, cwd, effort, resumeSessionId, permissionMode)
     }
   )
+
+  ipcMain.handle('session:rekey', (_event, oldId: string, newId: string) => {
+    manager.rekey(oldId, newId)
+  })
 
   ipcMain.handle('session:send', (_event, routingId: string, prompt: string) => {
     const session = manager.get(routingId)
@@ -202,8 +213,17 @@ export function registerSessionIpc(win: BrowserWindow): void {
     unwatchSession(routingId)
   })
 
+  // UI config persistence (~/.claude/ui/)
+  ipcMain.handle('config:load-settings', () => loadSettings())
+  ipcMain.handle('config:save-settings', (_e, settings: UISettings) => saveSettings(settings))
+  ipcMain.handle('config:load-sessions', () => loadSessionConfig())
+  ipcMain.handle('config:save-sessions', (_e, config: UISessionConfig) => saveSessionConfig(config))
+
   // Watch ~/.claude/projects/ for JSONL changes and notify renderer to refresh
   startProjectsWatcher(win)
+
+  // Watch ~/.claude/ui/ config files for cross-instance sync
+  startConfigWatcher(win)
 }
 
 function startProjectsWatcher(win: BrowserWindow): void {

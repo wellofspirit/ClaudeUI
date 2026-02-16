@@ -6,6 +6,8 @@ const api: ClaudeAPI = {
   pickFolder: () => ipcRenderer.invoke('session:pick-folder'),
   createSession: (routingId: string, cwd: string, effort?: string, resumeSessionId?: string, permissionMode?: string) =>
     ipcRenderer.invoke('session:create', routingId, cwd, effort, resumeSessionId, permissionMode),
+  rekeySession: (oldId: string, newId: string) =>
+    ipcRenderer.invoke('session:rekey', oldId, newId),
   sendPrompt: (routingId: string, prompt: string) =>
     ipcRenderer.invoke('session:send', routingId, prompt),
   cancelSession: (routingId: string) =>
@@ -135,7 +137,26 @@ const api: ClaudeAPI = {
     ipcRenderer.on('session:directories-changed', handler)
     return () => ipcRenderer.removeListener('session:directories-changed', handler)
   },
-  openInVSCode: (cwd: string) => ipcRenderer.invoke('app:open-in-vscode', cwd)
+  openInVSCode: (cwd: string) => ipcRenderer.invoke('app:open-in-vscode', cwd),
+  loadSettings: () => ipcRenderer.invoke('config:load-settings'),
+  saveSettings: (settings) => ipcRenderer.invoke('config:save-settings', settings),
+  loadSessionConfig: () => ipcRenderer.invoke('config:load-sessions'),
+  saveSessionConfig: (config) => ipcRenderer.invoke('config:save-sessions', config),
+  onStatusLine: (cb) => {
+    const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as never)
+    ipcRenderer.on('session:status-line', handler)
+    return () => ipcRenderer.removeListener('session:status-line', handler)
+  },
+  onSettingsChanged: (cb) => {
+    const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as Record<string, unknown>)
+    ipcRenderer.on('config:settings-changed', handler)
+    return () => ipcRenderer.removeListener('config:settings-changed', handler)
+  },
+  onSessionConfigChanged: (cb) => {
+    const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as never)
+    ipcRenderer.on('config:sessions-changed', handler)
+    return () => ipcRenderer.removeListener('config:sessions-changed', handler)
+  }
 }
 
 if (process.contextIsolated) {

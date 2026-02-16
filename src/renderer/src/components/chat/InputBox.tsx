@@ -1,8 +1,71 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
+import type { StatusLineData } from '../../../../shared/types'
 import { v4 as uuid } from 'uuid'
 
 const EFFORT_LEVELS = ['low', 'medium', 'high'] as const
+
+function formatTokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`
+  return String(n)
+}
+
+function formatDuration(ms: number): string {
+  const totalSec = Math.floor(ms / 1000)
+  if (totalSec < 60) return `${totalSec}s`
+  const min = Math.floor(totalSec / 60)
+  const sec = totalSec % 60
+  return `${min}m ${sec}s`
+}
+
+function formatCost(usd: number): string {
+  if (usd < 0.01) return '$' + usd.toFixed(4)
+  return '$' + usd.toFixed(2)
+}
+
+function formatFileSize(bytes: number): string {
+  if (bytes >= 1_048_576) return `${(bytes / 1_048_576).toFixed(1)} MB`
+  if (bytes >= 1_024) return `${(bytes / 1_024).toFixed(1)} KB`
+  return `${bytes} B`
+}
+
+function interpolateTemplate(template: string, data: StatusLineData): string {
+  const total = data.totalInputTokens + data.totalOutputTokens
+  return template
+    .replace(/\{in\}/g, formatTokens(data.totalInputTokens))
+    .replace(/\{out\}/g, formatTokens(data.totalOutputTokens))
+    .replace(/\{total\}/g, formatTokens(total))
+    .replace(/\{cost\}/g, formatCost(data.totalCostUsd))
+    .replace(/\{used\}/g, data.usedPercentage !== null ? String(data.usedPercentage) : '–')
+    .replace(/\{remaining\}/g, data.usedPercentage !== null ? String(100 - data.usedPercentage) : '–')
+    .replace(/\{lines\+\}/g, String(data.totalLinesAdded))
+    .replace(/\{lines-\}/g, String(data.totalLinesRemoved))
+    .replace(/\{duration\}/g, formatDuration(data.totalDurationMs))
+}
+
+const ALIGN_CLASS = {
+  left: 'text-left px-4',
+  center: 'text-center',
+  right: 'text-right px-4'
+} as const
+
+function StatusLine({ data }: { data: StatusLineData }): React.JSX.Element {
+  const align = useSessionStore((s) => s.settings.statusLineAlign)
+  const template = useSessionStore((s) => s.settings.statusLineTemplate)
+
+  // Fallback: when patched status_line data is unavailable, show JSONL file size
+  const isFallback = data.jsonlFileSize != null && data.totalInputTokens === 0 && data.totalOutputTokens === 0
+  const text = isFallback
+    ? `Session: ${formatFileSize(data.jsonlFileSize!)}${data.totalCostUsd > 0 ? ` · ${formatCost(data.totalCostUsd)}` : ''}`
+    : interpolateTemplate(template, data)
+
+  return (
+    <div className={`text-[10px] text-text-muted ${ALIGN_CLASS[align]} pt-1.5 select-none truncate`}>
+      {text}
+    </div>
+  )
+}
 
 
 export function InputBox(): React.JSX.Element {
@@ -34,6 +97,7 @@ export function InputBox(): React.JSX.Element {
   const selectedModelValue = useActiveSession((s) => s.selectedModel)
   const setSelectedModel = useSessionStore((s) => s.setSelectedModel)
   const selectedModel = models.find((m) => m.value === selectedModelValue) || models[0] || { value: 'default', displayName: 'Default', shortName: 'Default' }
+  const statusLine = useActiveSession((s) => s.statusLine)
   const effort = useActiveSession((s) => s.effort)
   const setEffort = useSessionStore((s) => s.setEffort)
 
@@ -312,6 +376,7 @@ export function InputBox(): React.JSX.Element {
             </div>
           </div>
         </div>
+        {statusLine && <StatusLine data={statusLine} />}
       </div>
     </div>
   )

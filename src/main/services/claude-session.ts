@@ -3,7 +3,16 @@ import { v4 as uuid } from 'uuid'
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
+import { app } from 'electron'
 import type { BrowserWindow } from 'electron'
+
+/** In production, cli.js is unpacked from the asar — resolve its real path */
+export function getCliJsPath(): string | undefined {
+  const appPath = app.getAppPath()
+  if (!appPath.includes('app.asar')) return undefined // dev mode
+  const unpacked = appPath.replace('app.asar', 'app.asar.unpacked')
+  return path.join(unpacked, 'node_modules', '@anthropic-ai', 'claude-agent-sdk', 'cli.js')
+}
 import type {
   ChatMessage,
   ContentBlock,
@@ -91,7 +100,7 @@ export class ClaudeSession {
   private backgroundFilePaths = new Map<string, string>() // toolUseId → filePath (permanent)
   private backgroundPollers = new Map<string, BackgroundPoller>() // toolUseId → poller state
   private win: BrowserWindow
-  readonly routingId: string
+  routingId: string
   private cwd: string
   private totalCostUsd = 0
   private messageChannel: MessageChannel<unknown> | null = null
@@ -154,12 +163,15 @@ export class ClaudeSession {
     this.abortController = new AbortController()
 
     try {
+      const cliPath = getCliJsPath()
       const q = sdkQuery({
         prompt: channel as AsyncIterable<never>,
         options: {
+          ...(cliPath ? { pathToClaudeCodeExecutable: cliPath } : {}),
           cwd: this.cwd,
           model: this.model,
           permissionMode: this.permissionMode as 'default',
+          settingSources: ['user', 'project', 'local'],
           abortController: this.abortController,
           includePartialMessages: true,
           thinking: { type: 'enabled', budgetTokens: 10000 },
@@ -280,6 +292,21 @@ export class ClaudeSession {
               this.permissionMode = newMode
               this.send('session:permission-mode', newMode)
             }
+          } else if (subtype === 'status_line') {
+            const cost = msg.cost as Record<string, unknown> | undefined
+            const ctxWindow = msg.context_window as Record<string, unknown> | undefined
+            this.send('session:status-line', {
+              totalCostUsd: (cost?.total_cost_usd as number) ?? 0,
+              totalDurationMs: (cost?.total_duration_ms as number) ?? 0,
+              totalApiDurationMs: (cost?.total_api_duration_ms as number) ?? 0,
+              totalLinesAdded: (cost?.total_lines_added as number) ?? 0,
+              totalLinesRemoved: (cost?.total_lines_removed as number) ?? 0,
+              totalInputTokens: (ctxWindow?.total_input_tokens as number) ?? 0,
+              totalOutputTokens: (ctxWindow?.total_output_tokens as number) ?? 0,
+              contextWindowSize: (ctxWindow?.context_window_size as number) ?? 0,
+              usedPercentage: (ctxWindow?.used_percentage as number) ?? null,
+              remainingPercentage: (ctxWindow?.remaining_percentage as number) ?? null
+            })
           } else if (subtype === 'task_notification') {
             const taskId = (msg.task_id as string) || ''
             const outputFile = (msg.output_file as string) || ''
