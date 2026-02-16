@@ -115,6 +115,15 @@ export class ClaudeSession {
   private effort: string
   private model: string = 'default'
   private resumeSessionId: string | undefined
+  private statusLineTimer: ReturnType<typeof setTimeout> | null = null
+
+  // In-memory token accumulators — updated from each assistant message's usage
+  private accInputTokens = 0
+  private accOutputTokens = 0
+  private accCachedTokens = 0
+  private accTotalDurationMs = 0
+  private accTotalApiDurationMs = 0
+  private lastContextLength = 0
 
   constructor(routingId: string, win: BrowserWindow, cwd: string, effort?: string, resumeSessionId?: string, permissionMode?: string) {
     this.routingId = routingId
@@ -241,12 +250,21 @@ export class ClaudeSession {
 
         if (type === 'assistant') {
           const parentToolUseId = msg.parent_tool_use_id as string | undefined
+          const isSidechain = !!parentToolUseId
           const chatMsg = this.transformAssistantMessage(msg)
+
+          // Accumulate usage from every assistant message (main + sidechain)
+          const hadUsage = this.accumulateUsage(msg, isSidechain)
+
           if (chatMsg) {
             if (parentToolUseId) {
               this.send('session:subagent-message', { toolUseId: parentToolUseId, message: chatMsg })
             } else {
               this.send('session:message', chatMsg)
+              // Only update status line when usage actually changed (final message per API call)
+              if (hadUsage) {
+                this.scheduleStatusLineUpdate()
+              }
             }
           }
         } else if (type === 'user') {
@@ -344,21 +362,36 @@ export class ClaudeSession {
             }
           }
 
+          // Accumulate duration from result
+          const resultDurationMs = (msg.duration_ms as number) || 0
+          const resultApiDurationMs = (msg.duration_api_ms as number) || 0
+          this.accTotalDurationMs += resultDurationMs
+          this.accTotalApiDurationMs += resultApiDurationMs
+
           this.send('session:result', {
             totalCostUsd: this.totalCostUsd,
-            durationMs: (msg.duration_ms as number) || 0,
+            durationMs: resultDurationMs,
             result: (msg.result as string) || ''
           })
           this.sendStatus()
 
-          // Compute token metrics from JSONL transcript (same approach as ccstatusline)
+          // Cancel any pending debounced update, then reconcile from JSONL
+          if (this.statusLineTimer) {
+            clearTimeout(this.statusLineTimer)
+            this.statusLineTimer = null
+          }
           const logPath = this.getSessionLogPath()
           if (logPath) {
             computeTokenMetrics(logPath).then((metrics) => {
+              // Sync accumulators with authoritative JSONL values
+              this.accInputTokens = metrics.totalInputTokens
+              this.accOutputTokens = metrics.totalOutputTokens
+              this.accCachedTokens = metrics.cachedTokens
+              this.accTotalDurationMs = metrics.totalDurationMs
+              this.accTotalApiDurationMs = metrics.totalApiDurationMs
+              this.lastContextLength = metrics.contextWindowSize
               this.send('session:status-line', metrics)
-            }).catch(() => {
-              // Non-critical — status line just won't update
-            })
+            }).catch(() => {})
           }
         }
       }
@@ -399,6 +432,59 @@ export class ClaudeSession {
 
   setEffort(effort: string): void {
     this.effort = effort
+  }
+
+  /**
+   * Extract usage from an assistant message and accumulate in-memory counters.
+   * Returns true if usage was found and accumulated.
+   */
+  private accumulateUsage(msg: Record<string, unknown>, isSidechain: boolean): boolean {
+    const betaMessage = msg.message as Record<string, unknown> | undefined
+    if (!betaMessage) return false
+    const usage = betaMessage.usage as Record<string, number> | undefined
+    if (!usage) return false
+
+    const inputTokens = usage.input_tokens || 0
+    const outputTokens = usage.output_tokens || 0
+    const cacheRead = usage.cache_read_input_tokens || 0
+    const cacheCreation = usage.cache_creation_input_tokens || 0
+
+    this.accInputTokens += inputTokens
+    this.accOutputTokens += outputTokens
+    this.accCachedTokens += cacheRead + cacheCreation
+
+    // Context length from the most recent non-sidechain assistant message
+    if (!isSidechain) {
+      this.lastContextLength = inputTokens + cacheRead + cacheCreation
+    }
+
+    return true
+  }
+
+  /** Build StatusLineData from in-memory accumulators (zero I/O) */
+  private buildStatusLineFromAccumulators(): import('../../shared/types').StatusLineData {
+    const usedPct = this.lastContextLength > 0 ? Math.round((this.lastContextLength / 200000) * 100) : null
+    return {
+      totalCostUsd: this.totalCostUsd,
+      totalDurationMs: this.accTotalDurationMs,
+      totalApiDurationMs: this.accTotalApiDurationMs,
+      totalInputTokens: this.accInputTokens,
+      totalOutputTokens: this.accOutputTokens,
+      cachedTokens: this.accCachedTokens,
+      totalTokens: this.accInputTokens + this.accOutputTokens + this.accCachedTokens,
+      contextWindowSize: this.lastContextLength,
+      usedPercentage: usedPct,
+      remainingPercentage: usedPct !== null ? 100 - usedPct : null
+    }
+  }
+
+  /** Throttled status line update from in-memory accumulators (zero I/O) */
+  private scheduleStatusLineUpdate(): void {
+    if (this.statusLineTimer) return // already scheduled
+    this.statusLineTimer = setTimeout(() => {
+      this.statusLineTimer = null
+      this.send('session:status-line', this.buildStatusLineFromAccumulators())
+    }, 50)
   }
 
   getSessionLogPath(): string | null {
