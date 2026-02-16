@@ -5,6 +5,19 @@ import { v4 as uuid } from 'uuid'
 
 const EFFORT_LEVELS = ['low', 'medium', 'high'] as const
 
+const DEFAULT_STATUS_LINE: StatusLineData = {
+  totalCostUsd: 0,
+  totalDurationMs: 0,
+  totalApiDurationMs: 0,
+  totalInputTokens: 0,
+  totalOutputTokens: 0,
+  cachedTokens: 0,
+  totalTokens: 0,
+  contextWindowSize: 0,
+  usedPercentage: 0,
+  remainingPercentage: 100
+}
+
 function formatTokens(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`
@@ -362,7 +375,7 @@ export function InputBox(): React.JSX.Element {
             </div>
           </div>
         </div>
-        {statusLine && <StatusLine data={statusLine} />}
+        <StatusLine data={statusLine ?? DEFAULT_STATUS_LINE} />
       </div>
     </div>
   )

@@ -3,9 +3,44 @@ import * as path from 'path'
 import * as os from 'os'
 import * as readline from 'readline'
 import type { ChatMessage, ContentBlock, DirectoryGroup, SessionInfo, TaskNotification, StatusLineData } from '../../shared/types'
-import { getCachedSummary } from './session-summary-cache'
 
 const CLAUDE_PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects')
+const CACHE_DIR = path.join(os.homedir(), '.claude', 'ui')
+const CACHE_FILE = path.join(CACHE_DIR, 'directory-cache.json')
+
+// ─── Disk-based metadata cache ───────────────────────────────────────────────
+
+interface CachedSessionMeta {
+  mtime: number
+  title: string
+  cwd: string
+  timestamp: number
+  customTitle: string | null
+  summary: string | null
+  hasConversation: boolean
+}
+
+type DiskCache = Record<string, CachedSessionMeta>
+
+function loadDiskCache(): DiskCache {
+  try {
+    if (!fs.existsSync(CACHE_FILE)) return {}
+    return JSON.parse(fs.readFileSync(CACHE_FILE, 'utf-8')) as DiskCache
+  } catch {
+    return {}
+  }
+}
+
+function saveDiskCache(cache: DiskCache): void {
+  try {
+    if (!fs.existsSync(CACHE_DIR)) {
+      fs.mkdirSync(CACHE_DIR, { recursive: true, mode: 0o700 })
+    }
+    fs.writeFileSync(CACHE_FILE, JSON.stringify(cache), { mode: 0o600 })
+  } catch {
+    // Non-fatal — cache is purely a performance optimization
+  }
+}
 
 /**
  * Compute token metrics from a JSONL transcript file.
@@ -97,8 +132,8 @@ export async function computeTokenMetrics(filePath: string): Promise<StatusLineD
 
 /**
  * Scan ~/.claude/projects/ for session directories and build DirectoryGroup[].
- * For each JSONL, reads the first ~20 lines to extract the title (first user prompt)
- * and uses file mtime for lastActivityAt.
+ * Uses a disk-based metadata cache (~/.claude/ui/directory-cache.json) keyed by
+ * file path + mtime. Only re-parses files whose mtime has changed.
  */
 export async function listDirectories(): Promise<DirectoryGroup[]> {
   let projectDirs: string[]
@@ -110,6 +145,9 @@ export async function listDirectories(): Promise<DirectoryGroup[]> {
   } catch {
     return []
   }
+
+  const cache = loadDiskCache()
+  let cacheChanged = false
 
   const groups: DirectoryGroup[] = []
 
@@ -124,36 +162,77 @@ export async function listDirectories(): Promise<DirectoryGroup[]> {
 
     if (jsonlFiles.length === 0) continue
 
-    const sessions: SessionInfo[] = []
-    let groupCwd = ''
+    // Collect files that need re-parsing (cache miss or stale mtime)
+    const fileEntries: { file: string; filePath: string; mtime: number; sessionId: string }[] = []
+    const staleFiles: typeof fileEntries = []
 
     for (const file of jsonlFiles) {
-      const sessionId = file.replace('.jsonl', '')
       const filePath = path.join(projectDir, file)
-
       let mtime: number
       try {
         mtime = fs.statSync(filePath).mtimeMs
       } catch {
         continue
       }
+      const sessionId = file.replace('.jsonl', '')
+      const entry = { file, filePath, mtime, sessionId }
+      fileEntries.push(entry)
 
-      const info = await parseSessionHeader(filePath, sessionId, projectKey)
-      if (!info) continue
+      const cached = cache[filePath]
+      if (!cached || cached.mtime !== mtime) {
+        staleFiles.push(entry)
+      }
+    }
 
-      if (!groupCwd && info.cwd) groupCwd = info.cwd
+    // Parse stale files in parallel
+    if (staleFiles.length > 0) {
+      const results = await Promise.all(
+        staleFiles.map((f) => parseSessionMeta(f.filePath))
+      )
+      for (let i = 0; i < staleFiles.length; i++) {
+        const meta = results[i]
+        const f = staleFiles[i]
+        if (meta) {
+          cache[f.filePath] = { mtime: f.mtime, ...meta }
+        } else {
+          // File had no parseable content — cache minimal entry
+          cache[f.filePath] = {
+            mtime: f.mtime,
+            title: 'Untitled',
+            cwd: '',
+            timestamp: f.mtime,
+            customTitle: null,
+            summary: null,
+            hasConversation: false
+          }
+        }
+        cacheChanged = true
+      }
+    }
 
-      // Priority: custom-title from JSONL > cached summary > first user prompt
-      const customTitle = readLastCustomTitle(filePath)
-      const summary = getCachedSummary(filePath, mtime)
+    // Build sessions from cache
+    const sessions: SessionInfo[] = []
+    let groupCwd = ''
+
+    for (const f of fileEntries) {
+      const meta = cache[f.filePath]
+      if (!meta) continue
+
+      // Skip sessions with no user or assistant messages
+      if (meta.hasConversation === false) continue
+
+      if (!groupCwd && meta.cwd) groupCwd = meta.cwd
+
+      // Priority: custom-title > summary > first user prompt title
+      const displayTitle = meta.customTitle || meta.summary || meta.title || 'Untitled'
 
       sessions.push({
-        sessionId,
-        cwd: info.cwd || '',
+        sessionId: f.sessionId,
+        cwd: meta.cwd || '',
         projectKey,
-        title: customTitle || summary || info.title || 'Untitled',
-        timestamp: info.timestamp || mtime,
-        lastActivityAt: mtime
+        title: displayTitle,
+        timestamp: meta.timestamp || f.mtime,
+        lastActivityAt: f.mtime
       })
     }
 
@@ -161,7 +240,6 @@ export async function listDirectories(): Promise<DirectoryGroup[]> {
 
     sessions.sort((a, b) => b.lastActivityAt - a.lastActivityAt)
 
-    // Derive folder name from cwd or projectKey
     const folderName = groupCwd
       ? groupCwd.split(/[\\/]/).pop() || groupCwd
       : projectKey
@@ -174,7 +252,11 @@ export async function listDirectories(): Promise<DirectoryGroup[]> {
     })
   }
 
-  // Sort groups by most recent session activity
+  // Persist cache if anything changed
+  if (cacheChanged) {
+    saveDiskCache(cache)
+  }
+
   groups.sort((a, b) => {
     const aMax = a.sessions[0]?.lastActivityAt || 0
     const bMax = b.sessions[0]?.lastActivityAt || 0
@@ -184,40 +266,69 @@ export async function listDirectories(): Promise<DirectoryGroup[]> {
   return groups
 }
 
-interface SessionHeader {
+// ─── Unified single-pass JSONL metadata parser ───────────────────────────────
+
+interface SessionMeta {
   title: string
-  timestamp: number
   cwd: string
+  timestamp: number
+  customTitle: string | null
+  summary: string | null
+  hasConversation: boolean
 }
 
 /**
- * Read the first ~20 lines of a JSONL to extract title, timestamp, cwd
- * from the first external user message.
+ * Parse a JSONL file in a single streaming pass, extracting:
+ * - title: first external user prompt (first 80 chars)
+ * - cwd & timestamp from that first prompt
+ * - customTitle: last `type: "custom-title"` entry
+ * - summary: last `type: "summary"` entry
+ *
+ * Replaces the old parseSessionHeader + readLastCustomTitle + getCachedSummary.
  */
-async function parseSessionHeader(
-  filePath: string,
-  _sessionId: string,
-  _projectKey: string
-): Promise<SessionHeader | null> {
+function parseSessionMeta(filePath: string): Promise<SessionMeta | null> {
   return new Promise((resolve) => {
+    let title: string | null = null
+    let cwd = ''
+    let timestamp = 0
+    let customTitle: string | null = null
+    let summary: string | null = null
+    let foundHeader = false
+    let hasConversation = false
+
     const stream = fs.createReadStream(filePath, { encoding: 'utf-8' })
     const rl = readline.createInterface({ input: stream })
-    let lineCount = 0
-    let result: SessionHeader | null = null
 
     rl.on('line', (line) => {
-      lineCount++
-      if (lineCount > 30) {
-        rl.close()
-        stream.destroy()
-        return
-      }
+      // Quick-skip empty lines
+      if (!line) return
 
       try {
+        // Fast pre-checks to avoid JSON.parse on irrelevant lines
+        const hasCustomTitle = line.includes('"custom-title"')
+        const hasSummary = line.includes('"summary"')
+        const hasUser = !foundHeader && line.includes('"user"')
+        const hasAssistant = !hasConversation && line.includes('"assistant"')
+
+        if (!hasCustomTitle && !hasSummary && !hasUser && !hasAssistant) return
+
         const obj = JSON.parse(line)
 
-        // Look for external user messages
-        if (
+        // Track whether this session has any real user or assistant messages
+        if (!hasConversation) {
+          if (obj.type === 'assistant' && obj.message?.content) {
+            hasConversation = true
+          } else if (obj.type === 'user' && obj.userType === 'external' && obj.message?.content) {
+            hasConversation = true
+          }
+        }
+
+        if (obj.type === 'custom-title' && typeof obj.customTitle === 'string') {
+          customTitle = obj.customTitle
+        } else if (obj.type === 'summary' && typeof obj.summary === 'string' && obj.summary) {
+          summary = obj.summary
+        } else if (
+          !foundHeader &&
           obj.type === 'user' &&
           obj.userType === 'external' &&
           obj.message?.content
@@ -233,14 +344,11 @@ async function parseSessionHeader(
             if (textBlock) text = textBlock.text as string
           }
 
-          if (text && !result) {
-            result = {
-              title: text.slice(0, 80).replace(/\n/g, ' ').trim(),
-              timestamp: obj.timestamp ? new Date(obj.timestamp).getTime() : Date.now(),
-              cwd: obj.cwd || ''
-            }
-            rl.close()
-            stream.destroy()
+          if (text) {
+            title = text.slice(0, 80).replace(/\n/g, ' ').trim()
+            timestamp = obj.timestamp ? new Date(obj.timestamp).getTime() : Date.now()
+            cwd = obj.cwd || ''
+            foundHeader = true
           }
         }
       } catch {
@@ -248,41 +356,23 @@ async function parseSessionHeader(
       }
     })
 
-    rl.on('close', () => resolve(result))
+    rl.on('close', () => {
+      if (!title && !customTitle && !summary) {
+        resolve(null)
+        return
+      }
+      resolve({
+        title: title || 'Untitled',
+        cwd,
+        timestamp: timestamp || Date.now(),
+        customTitle,
+        summary,
+        hasConversation
+      })
+    })
+
     rl.on('error', () => resolve(null))
   })
-}
-
-/**
- * Read the last custom-title entry from a JSONL file.
- * Scans the tail of the file (last 8KB) for efficiency since titles are appended.
- */
-function readLastCustomTitle(filePath: string): string | null {
-  try {
-    const stat = fs.statSync(filePath)
-    const readSize = Math.min(stat.size, 8192)
-    const buf = Buffer.alloc(readSize)
-    const fd = fs.openSync(filePath, 'r')
-    fs.readSync(fd, buf, 0, readSize, stat.size - readSize)
-    fs.closeSync(fd)
-
-    const tail = buf.toString('utf-8')
-    let lastTitle: string | null = null
-    for (const line of tail.split('\n')) {
-      if (!line.includes('"custom-title"')) continue
-      try {
-        const obj = JSON.parse(line)
-        if (obj.type === 'custom-title' && typeof obj.customTitle === 'string') {
-          lastTitle = obj.customTitle
-        }
-      } catch {
-        // partial line at start of buffer, skip
-      }
-    }
-    return lastTitle
-  } catch {
-    return null
-  }
 }
 
 export interface SessionHistoryResult {
