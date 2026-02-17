@@ -389,23 +389,32 @@ export class ClaudeSession {
           })
           this.sendStatus()
 
-          // Cancel any pending debounced update, then reconcile from JSONL
+          // Cancel any pending debounced update — we'll send one immediately
           if (this.statusLineTimer) {
             clearTimeout(this.statusLineTimer)
             this.statusLineTimer = null
           }
+
+          // Send accumulator-based status line immediately so the UI updates
+          // without waiting for the JSONL read (which may not be fully flushed yet)
+          this.send('session:status-line', this.buildStatusLineFromAccumulators())
+
+          // Then try to reconcile from JSONL with a delay to let the SDK flush.
+          // Only overwrite accumulators if JSONL returns meaningful data.
           const logPath = this.getSessionLogPath()
           if (logPath) {
-            computeTokenMetrics(logPath).then((metrics) => {
-              // Sync accumulators with authoritative JSONL values
-              this.accInputTokens = metrics.totalInputTokens
-              this.accOutputTokens = metrics.totalOutputTokens
-              this.accCachedTokens = metrics.cachedTokens
-              this.accTotalDurationMs = metrics.totalDurationMs
-              this.accTotalApiDurationMs = metrics.totalApiDurationMs
-              this.lastContextLength = metrics.contextWindowSize
-              this.send('session:status-line', metrics)
-            }).catch(() => {})
+            setTimeout(() => {
+              computeTokenMetrics(logPath).then((metrics) => {
+                if (metrics.totalTokens === 0 && metrics.totalCostUsd === 0) return // JSONL not ready yet
+                this.accInputTokens = metrics.totalInputTokens
+                this.accOutputTokens = metrics.totalOutputTokens
+                this.accCachedTokens = metrics.cachedTokens
+                this.accTotalDurationMs = metrics.totalDurationMs
+                this.accTotalApiDurationMs = metrics.totalApiDurationMs
+                this.lastContextLength = metrics.contextWindowSize
+                this.send('session:status-line', metrics)
+              }).catch(() => {})
+            }, 500) // delay to let SDK flush JSONL to disk
           }
         }
       }
@@ -503,8 +512,8 @@ export class ClaudeSession {
 
   getSessionLogPath(): string | null {
     if (!this.sessionId) return null
-    // Project key is derived from cwd by replacing / with -
-    const projectKey = this.cwd.replace(/\//g, '-')
+    // Project key mirrors the SDK's derivation: replace / and . with -
+    const projectKey = this.cwd.replace(/[/.]/g, '-')
     return path.join(os.homedir(), '.claude', 'projects', projectKey, `${this.sessionId}.jsonl`)
   }
 

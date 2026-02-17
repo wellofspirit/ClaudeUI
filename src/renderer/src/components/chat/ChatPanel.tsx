@@ -24,10 +24,31 @@ export function ChatPanel(): React.JSX.Element {
   const scrollRef = useRef<HTMLDivElement>(null)
   const [isAtBottom, setIsAtBottom] = useState(true)
 
+  // Flag-based auto-scroll: tracks whether we should follow new content.
+  // Only goes false when the user explicitly scrolls up; goes true when
+  // they scroll back down near the bottom or we programmatically scroll.
+  const shouldAutoScroll = useRef(true)
+  const lastScrollTop = useRef(0)
+  const isAutoScrolling = useRef(false) // guards against our own scrollTo triggering the handler
+
   const checkAtBottom = useCallback(() => {
     const el = scrollRef.current
     if (!el) return
-    setIsAtBottom(el.scrollHeight - el.scrollTop - el.clientHeight < 100)
+    const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
+
+    // Detect user scrolling up vs. down / our own auto-scroll
+    if (!isAutoScrolling.current) {
+      if (el.scrollTop < lastScrollTop.current - 10) {
+        // User scrolled up — stop following
+        shouldAutoScroll.current = false
+      } else if (distFromBottom < 100) {
+        // User scrolled back to bottom — resume following
+        shouldAutoScroll.current = true
+      }
+    }
+    lastScrollTop.current = el.scrollTop
+
+    setIsAtBottom(distFromBottom < 100)
   }, [])
 
   // Track scroll position
@@ -38,27 +59,62 @@ export function ChatPanel(): React.JSX.Element {
     return () => el.removeEventListener('scroll', checkAtBottom)
   }, [checkAtBottom])
 
-  // Scroll to bottom when switching sessions
+  // Scroll to bottom when switching sessions.
+  // Components like ToolCallBlock/ThinkingBlock have their own useState for expand/collapse,
+  // which triggers a second render pass after the initial mount. A single immediate scroll
+  // measures scrollHeight before those expansions, landing at the wrong spot.
+  // We scroll multiple times across a few frames to catch layout shifts from child state init.
   useEffect(() => {
     const el = scrollRef.current
     if (!el) return
-    el.scrollTop = el.scrollHeight
+    shouldAutoScroll.current = true
     setIsAtBottom(true)
+
+    // Immediate scroll (covers the common case)
+    el.scrollTop = el.scrollHeight
+    lastScrollTop.current = el.scrollTop
+
+    // Retry after child components have had a chance to expand via their own useState
+    const timers = [
+      requestAnimationFrame(() => {
+        if (el) { el.scrollTop = el.scrollHeight; lastScrollTop.current = el.scrollTop }
+      }),
+      // One more attempt after a short delay for heavier re-layouts (diff viewers, large tool results)
+      setTimeout(() => {
+        requestAnimationFrame(() => {
+          if (el) { el.scrollTop = el.scrollHeight; lastScrollTop.current = el.scrollTop }
+        })
+      }, 80) as unknown as number
+    ]
+    return () => {
+      cancelAnimationFrame(timers[0])
+      clearTimeout(timers[1])
+    }
   }, [activeSessionId])
 
-  // Auto-scroll on new content if near bottom (throttled via rAF to avoid layout thrashing)
+  // Helper: scroll to bottom and mark as auto-scroll so the handler doesn't misread it
+  const doAutoScroll = useCallback((el: HTMLDivElement, smooth = false) => {
+    isAutoScrolling.current = true
+    if (smooth) {
+      el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
+    } else {
+      el.scrollTop = el.scrollHeight
+    }
+    lastScrollTop.current = el.scrollTop
+    // Reset the guard after the scroll event fires
+    requestAnimationFrame(() => { isAutoScrolling.current = false })
+  }, [])
+
+  // Auto-scroll on new content (messages, thinking, approvals) — uses flag, not distance
   const scrollRafRef = useRef(0)
   useEffect(() => {
     const el = scrollRef.current
-    if (!el) return
+    if (!el || !shouldAutoScroll.current) return
     cancelAnimationFrame(scrollRafRef.current)
     scrollRafRef.current = requestAnimationFrame(() => {
-      const isNearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 400
-      if (isNearBottom) {
-        el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
-      }
+      if (shouldAutoScroll.current) doAutoScroll(el, true)
     })
-  }, [messages, hasStreamingText, thinkingStartedAt, pendingApprovals])
+  }, [messages, hasStreamingText, thinkingStartedAt, pendingApprovals, doAutoScroll])
 
   // Auto-scroll during streaming without subscribing to full streamingText
   useEffect(() => {
@@ -68,15 +124,12 @@ export function ChatPanel(): React.JSX.Element {
       if (!id) return
       const cur = state.sessions[id]?.streamingText
       const prev = prevState.sessions[id]?.streamingText
-      if (cur !== prev) {
+      if (cur !== prev && shouldAutoScroll.current) {
         cancelAnimationFrame(rafId)
         rafId = requestAnimationFrame(() => {
           const el = scrollRef.current
-          if (!el) return
-          const isNearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 400
-          if (isNearBottom) {
-            el.scrollTop = el.scrollHeight
-          }
+          if (!el || !shouldAutoScroll.current) return
+          doAutoScroll(el)
         })
       }
     })
@@ -84,13 +137,36 @@ export function ChatPanel(): React.JSX.Element {
       unsub()
       cancelAnimationFrame(rafId)
     }
-  }, [])
+  }, [doAutoScroll])
+
+  // ResizeObserver: catch elements that grow in-place (tool results, images, collapsibles)
+  // This fires when any child of the scroll container changes size, even without React re-renders.
+  useEffect(() => {
+    const el = scrollRef.current
+    if (!el) return
+    let rafId = 0
+    const observer = new ResizeObserver(() => {
+      if (!shouldAutoScroll.current) return
+      cancelAnimationFrame(rafId)
+      rafId = requestAnimationFrame(() => {
+        if (shouldAutoScroll.current && el) doAutoScroll(el)
+      })
+    })
+    // Observe the scroll container's first child (the content wrapper)
+    const content = el.firstElementChild
+    if (content) observer.observe(content)
+    return () => {
+      observer.disconnect()
+      cancelAnimationFrame(rafId)
+    }
+  }, [doAutoScroll, messages, hasStreamingText])
 
   const scrollToBottom = useCallback(() => {
     const el = scrollRef.current
     if (!el) return
-    el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
-  }, [])
+    shouldAutoScroll.current = true
+    doAutoScroll(el, true)
+  }, [doAutoScroll])
 
   const chatFontScale = useSessionStore((s) => s.settings.chatFontScale)
   const uiFontScale = useSessionStore((s) => s.settings.uiFontScale)

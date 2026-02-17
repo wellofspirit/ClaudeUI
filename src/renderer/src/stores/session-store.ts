@@ -335,6 +335,14 @@ function createEmptySession(cwd: string): PerSessionState {
   return { ...EMPTY_SESSION_STATE, cwd }
 }
 
+/**
+ * Maps old (pre-rekey) routingIds → new (SDK session) IDs.
+ * When the store rekeys a session, the main process may still send events
+ * with the old routingId until it processes the rekey IPC round-trip.
+ * This map lets setStatusLine (and potentially other handlers) resolve them.
+ */
+const rekeyMap = new Map<string, string>()
+
 /** Helper to update a specific session's state */
 function updateSession(
   sessions: Record<string, PerSessionState>,
@@ -995,9 +1003,21 @@ export const useSessionStore = create<SessionState>((set) => ({
     }),
 
   setStatusLine: (routingId, data) =>
-    set((state) => ({
-      sessions: updateSession(state.sessions, routingId, () => ({ statusLine: data }))
-    })),
+    set((state) => {
+      // Direct match — fast path
+      if (state.sessions[routingId]) {
+        return { sessions: updateSession(state.sessions, routingId, () => ({ statusLine: data })) }
+      }
+      // Fallback: the routingId may be a pre-rekey client ID. After the store
+      // rekeys (session:status triggers rekeySession), subsequent events from
+      // the main process may still carry the old routingId until the main
+      // process processes the rekey IPC round-trip. Use the rekey map.
+      const newId = rekeyMap.get(routingId)
+      if (newId && state.sessions[newId]) {
+        return { sessions: updateSession(state.sessions, newId, () => ({ statusLine: data })) }
+      }
+      return {}
+    }),
 
   setDraftText: (text) =>
     set((state) => {
@@ -1018,6 +1038,8 @@ export const useSessionStore = create<SessionState>((set) => ({
   setAvailableModels: (models) => set({ availableModels: models }),
 
   rekeySession: (oldId, newId) => {
+    // Record the mapping so events arriving with the old routingId can be resolved
+    rekeyMap.set(oldId, newId)
     set((state) => {
       if (oldId === newId) return state
       const session = state.sessions[oldId]
