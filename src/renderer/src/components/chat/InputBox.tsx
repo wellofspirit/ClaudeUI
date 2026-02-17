@@ -79,8 +79,11 @@ export function InputBox(): React.JSX.Element {
   const sdkActive = useActiveSession((s) => s.sdkActive)
   const addUserMessage = useSessionStore((s) => s.addUserMessage)
   const markSdkActive = useSessionStore((s) => s.markSdkActive)
+  const queuedText = useActiveSession((s) => s.queuedText)
+  const appendQueuedText = useSessionStore((s) => s.appendQueuedText)
+  const clearQueuedText = useSessionStore((s) => s.clearQueuedText)
   const isRunning = status.state === 'running'
-  const isDisabled = !activeSessionId || !cwd || isRunning
+  const isDisabled = !activeSessionId || !cwd
 
   const permissionMode = useActiveSession((s) => s.permissionMode)
 
@@ -130,6 +133,36 @@ export function InputBox(): React.JSX.Element {
     return () => document.removeEventListener('click', handler)
   }, [])
 
+  /** Core send: add user message, ensure SDK, fire prompt */
+  const doSend = useCallback(async (prompt: string) => {
+    if (!activeSessionId) return
+
+    // Check historical state BEFORE adding user message, otherwise the
+    // newly added message makes messages.length > 0 and misidentifies
+    // a brand-new session as historical (causing "No conversation found" error).
+    let needsSdkCreate = false
+    let resumeId: string | undefined
+    if (!sdkActive) {
+      const { sessions } = useSessionStore.getState()
+      const session = sessions[activeSessionId]
+      const isHistorical = session && session.messages.length > 0 && !session.sdkActive
+      resumeId = isHistorical ? activeSessionId : undefined
+      needsSdkCreate = true
+    }
+
+    addUserMessage(activeSessionId, uuid(), prompt)
+
+    // Lazy SDK creation: create session on first message
+    if (needsSdkCreate) {
+      const { sessions } = useSessionStore.getState()
+      const session = sessions[activeSessionId]
+      await window.api.createSession(activeSessionId, session?.cwd || '', session?.effort ?? 'medium', resumeId, session?.permissionMode)
+      markSdkActive(activeSessionId)
+    }
+
+    await window.api.sendPrompt(activeSessionId, prompt)
+  }, [activeSessionId, addUserMessage, sdkActive, markSdkActive])
+
   const handleSend = useCallback(async () => {
     const prompt = text.trim()
     if (!prompt || isDisabled || !activeSessionId) return
@@ -147,33 +180,40 @@ export function InputBox(): React.JSX.Element {
       return
     }
 
-    // Check historical state BEFORE adding user message, otherwise the
-    // newly added message makes messages.length > 0 and misidentifies
-    // a brand-new session as historical (causing "No conversation found" error).
-    let needsSdkCreate = false
-    let resumeId: string | undefined
-    if (!sdkActive) {
-      const { sessions } = useSessionStore.getState()
-      const session = sessions[activeSessionId]
-      const isHistorical = session && session.messages.length > 0 && !session.sdkActive
-      resumeId = isHistorical ? activeSessionId : undefined
-      needsSdkCreate = true
-    }
-
-    addUserMessage(activeSessionId, uuid(), prompt)
     setText('')
     if (textareaRef.current) textareaRef.current.style.height = 'auto'
 
-    // Lazy SDK creation: create session on first message
-    if (needsSdkCreate) {
-      const { sessions } = useSessionStore.getState()
-      const session = sessions[activeSessionId]
-      await window.api.createSession(activeSessionId, session?.cwd || '', session?.effort ?? 'medium', resumeId, session?.permissionMode)
-      markSdkActive(activeSessionId)
+    if (isRunning) {
+      appendQueuedText(prompt)
+    } else {
+      await doSend(prompt)
     }
+  }, [text, isDisabled, activeSessionId, isRunning, appendQueuedText, doSend])
 
-    await window.api.sendPrompt(activeSessionId, prompt)
-  }, [text, isDisabled, activeSessionId, addUserMessage, sdkActive, markSdkActive])
+  // Auto-send queued text when agent transitions running → idle
+  const prevRunningRef = useRef(false)
+  useEffect(() => {
+    const wasRunning = prevRunningRef.current
+    prevRunningRef.current = isRunning
+    if (wasRunning && !isRunning && queuedText && status.state === 'idle' && sdkActive) {
+      const queued = queuedText
+      clearQueuedText()
+      doSend(queued)
+    }
+  }, [isRunning, queuedText, status.state, sdkActive, clearQueuedText, doSend])
+
+  const handleEditQueued = useCallback(() => {
+    setText(queuedText)
+    clearQueuedText()
+    requestAnimationFrame(() => {
+      const el = textareaRef.current
+      if (el) {
+        el.focus()
+        el.style.height = 'auto'
+        el.style.height = Math.min(el.scrollHeight, 200) + 'px'
+      }
+    })
+  }, [queuedText, clearQueuedText, setText])
 
   const handleCancel = useCallback(async () => {
     if (activeSessionId) {
@@ -204,6 +244,13 @@ export function InputBox(): React.JSX.Element {
         setSlashMenuOpen(false)
         return
       }
+    }
+
+    // Up-arrow on empty textarea: edit queued message
+    if (e.key === 'ArrowUp' && !text && queuedText) {
+      e.preventDefault()
+      handleEditQueued()
+      return
     }
 
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -291,7 +338,7 @@ export function InputBox(): React.JSX.Element {
               !activeSessionId || !cwd
                 ? 'Select a folder to get started'
                 : isRunning
-                  ? 'Claude is working...'
+                  ? 'Type to queue a message...'
                   : 'Ask Claude anything, / for commands'
             }
             disabled={isDisabled}
@@ -424,7 +471,7 @@ export function InputBox(): React.JSX.Element {
 
             {/* Right controls */}
             <div className="flex items-center gap-1.5">
-              {isRunning ? (
+              {isRunning && (
                 <button
                   onClick={handleCancel}
                   className="h-7 px-2.5 flex items-center gap-1.5 text-[11px] text-text-secondary rounded-lg border border-border hover:border-border-bright transition-colors cursor-pointer"
@@ -434,18 +481,18 @@ export function InputBox(): React.JSX.Element {
                   </svg>
                   Stop
                 </button>
-              ) : (
-                <button
-                  onClick={handleSend}
-                  disabled={!text.trim() || isDisabled}
-                  className="w-7 h-7 flex items-center justify-center rounded-full bg-text-primary text-bg-primary transition-opacity disabled:opacity-15 cursor-pointer disabled:cursor-default"
-                >
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                    <line x1="12" y1="19" x2="12" y2="5" />
-                    <polyline points="5 12 12 5 19 12" />
-                  </svg>
-                </button>
               )}
+              <button
+                onClick={handleSend}
+                disabled={!text.trim() || isDisabled}
+                title={isRunning ? 'Queue message' : 'Send message'}
+                className="w-7 h-7 flex items-center justify-center rounded-full bg-text-primary text-bg-primary transition-opacity disabled:opacity-15 cursor-pointer disabled:cursor-default"
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <line x1="12" y1="19" x2="12" y2="5" />
+                  <polyline points="5 12 12 5 19 12" />
+                </svg>
+              </button>
             </div>
           </div>
         </div>

@@ -295,6 +295,7 @@ export interface PerSessionState {
   permissionMode: PermissionMode
   effort: 'low' | 'medium' | 'high'
   statusLine: StatusLineData | null
+  queuedText: string
   draftText: string
   selectedModel: string
 }
@@ -327,6 +328,7 @@ const EMPTY_SESSION_STATE: PerSessionState = {
   permissionMode: 'default',
   effort: 'medium',
   statusLine: null,
+  queuedText: '',
   draftText: '',
   selectedModel: 'default'
 }
@@ -423,6 +425,8 @@ interface SessionState {
   setPermissionMode: (mode: PermissionMode, routingId?: string) => void
   setEffort: (effort: 'low' | 'medium' | 'high', routingId?: string) => void
   setStatusLine: (routingId: string, data: StatusLineData) => void
+  appendQueuedText: (text: string) => void
+  clearQueuedText: () => void
   setDraftText: (text: string) => void
   setSelectedModel: (model: string) => void
   setSlashCommands: (commands: SlashCommandInfo[]) => void
@@ -1017,6 +1021,24 @@ export const useSessionStore = create<SessionState>((set) => ({
         return { sessions: updateSession(state.sessions, newId, () => ({ statusLine: data })) }
       }
       return {}
+    }),
+
+  appendQueuedText: (text) =>
+    set((state) => {
+      const id = state.activeSessionId
+      if (!id) return {}
+      return {
+        sessions: updateSession(state.sessions, id, (s) => ({
+          queuedText: s.queuedText ? s.queuedText + '\n' + text : text
+        }))
+      }
+    }),
+
+  clearQueuedText: () =>
+    set((state) => {
+      const id = state.activeSessionId
+      if (!id) return {}
+      return { sessions: updateSession(state.sessions, id, () => ({ queuedText: '' })) }
     }),
 
   setDraftText: (text) =>
