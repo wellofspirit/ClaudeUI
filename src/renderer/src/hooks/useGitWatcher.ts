@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect } from 'react'
 import { useSessionStore, useActiveSession } from '../stores/session-store'
 
 /**
@@ -10,27 +10,20 @@ export function useGitWatcher(): void {
   const cwd = useActiveSession((s) => s.cwd)
   const isGitRepo = useActiveSession((s) => s.isGitRepo)
   const setIsGitRepo = useSessionStore((s) => s.setIsGitRepo)
-  const setGitStatus = useSessionStore((s) => s.setGitStatus)
-  const prevCwdRef = useRef<string | null>(null)
 
-  // Check if cwd is a git repo when it changes
+  // Check if cwd is a git repo when session or cwd changes
   useEffect(() => {
     if (!cwd || !activeSessionId) return
-    if (cwd === prevCwdRef.current) return
-    prevCwdRef.current = cwd
 
+    // Just check if it's a git repo — don't fetch status here.
+    // gitStartWatching does an initial poll immediately, so status
+    // will arrive via the git:status-update event without the extra call.
     window.api.gitCheckRepo(cwd).then((isRepo) => {
       setIsGitRepo(activeSessionId, isRepo)
-      if (isRepo) {
-        // Fetch initial status
-        window.api.gitGetStatus(cwd).then((status) => {
-          setGitStatus(activeSessionId, status)
-        }).catch(() => {})
-      }
     }).catch(() => {
       setIsGitRepo(activeSessionId, false)
     })
-  }, [cwd, activeSessionId, setIsGitRepo, setGitStatus])
+  }, [cwd, activeSessionId, setIsGitRepo])
 
   // Start/stop git polling when cwd changes
   useEffect(() => {

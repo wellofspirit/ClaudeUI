@@ -116,9 +116,11 @@
 .diff-scroll-container::-webkit-scrollbar-corner { background: transparent; }
 
 /* Shrink line-number cells — the plugin defaults to min-width:100px and 10px padding
-   which is too spacious. Override the plugin's utility classes with !important. */
+   which is too spacious. Override the plugin's utility classes with !important.
+   Keep a small min-width so super-long unwrapped lines can't squeeze the column to 0. */
 .diff-tailwindcss-wrapper td.diff-line-num {
-  min-width: 0 !important;
+  min-width: 40px !important;
+  white-space: nowrap !important;
   padding-left: 8px !important;
   padding-right: 8px !important;
 }

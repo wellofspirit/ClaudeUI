@@ -351,10 +351,19 @@ export function registerSessionIpc(win: BrowserWindow): void {
     }
   })
 
-  ipcMain.handle('git:file-diff', async (_e, cwd: string, filePath: string, staged: boolean) => {
+  ipcMain.handle('git:file-patch', async (_e, cwd: string, filePath: string, staged: boolean, ignoreWhitespace: boolean) => {
     const svc = gitServiceManager.get(cwd)
     try {
-      return await svc.getFileDiff(filePath, staged)
+      return await svc.getFilePatch(filePath, staged, ignoreWhitespace)
+    } finally {
+      gitServiceManager.release(cwd)
+    }
+  })
+
+  ipcMain.handle('git:file-contents', async (_e, cwd: string, filePath: string, staged: boolean) => {
+    const svc = gitServiceManager.get(cwd)
+    try {
+      return await svc.getFileContents(filePath, staged)
     } finally {
       gitServiceManager.release(cwd)
     }

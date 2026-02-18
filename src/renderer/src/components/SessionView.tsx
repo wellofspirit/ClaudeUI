@@ -64,7 +64,7 @@ export function SessionView(): React.JSX.Element {
   const rightPanel = useActiveSession((s) => s.rightPanel)
   const sidebar = useResizablePanel('sidebarWidth', 240, 180, 480)
   const taskPanel = useResizablePanel('taskPanelWidth', 400, 280, 700)
-  const gitPanel = useResizablePanel('gitPanelWidth', 450, 320, 800)
+  const gitPanel = useResizablePanel('gitPanelWidth', 450, 320, 9999)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem('sidebarCollapsed') === 'true')
 
   // Git repo detection and polling

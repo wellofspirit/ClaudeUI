@@ -82,49 +82,70 @@ export class GitService {
     await this.git.checkoutLocalBranch(name)
   }
 
-  async getFileDiff(
+  async getFilePatch(
+    filePath: string,
+    staged: boolean,
+    ignoreWhitespace: boolean = false
+  ): Promise<{ patch: string }> {
+    const args: string[] = ['diff']
+    if (staged) args.push('--cached')
+    if (ignoreWhitespace) args.push('-w')
+    args.push('--', filePath)
+
+    try {
+      const patch = await this.git.raw(args)
+      if (patch) return { patch }
+
+      // Empty patch — could be an untracked file.
+      // Generate a unified diff manually since `git diff --no-index` exits
+      // with code 1 when differences exist and simple-git treats that as error.
+      const absPath = path.resolve(this.cwd, filePath)
+      let content: string
+      try {
+        content = await fs.promises.readFile(absPath, 'utf-8')
+      } catch {
+        // File doesn't exist — no diff to show
+        return { patch: '' }
+      }
+      if (!content) return { patch: '' }
+
+      const lines = content.replace(/\r\n/g, '\n').split('\n')
+      // Remove trailing empty line from split (file ends with \n)
+      if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop()
+      const body = lines.map((l) => `+${l}`).join('\n')
+      const unified = [
+        `--- /dev/null`,
+        `+++ b/${filePath}`,
+        `@@ -0,0 +1,${lines.length} @@`,
+        body,
+      ].join('\n')
+      return { patch: unified }
+    } catch {
+      return { patch: '' }
+    }
+  }
+
+  async getFileContents(
     filePath: string,
     staged: boolean
   ): Promise<{ oldContent: string; newContent: string }> {
     const absPath = path.resolve(this.cwd, filePath)
-    // Normalize CRLF → LF so Windows working-tree reads match git's LF output
     const normEol = (s: string): string => s.replace(/\r\n/g, '\n')
 
     try {
       if (staged) {
-        // Staged: old = HEAD version, new = index version
         let oldContent = ''
-        try {
-          oldContent = await this.git.show([`HEAD:${filePath}`])
-        } catch {
-          // New file — no HEAD version
-        }
+        try { oldContent = await this.git.show([`HEAD:${filePath}`]) } catch { /* new file */ }
         let newContent = ''
-        try {
-          newContent = await this.git.show([`:${filePath}`])
-        } catch {
-          // Deleted from index
-        }
+        try { newContent = await this.git.show([`:${filePath}`]) } catch { /* deleted from index */ }
         return { oldContent: normEol(oldContent), newContent: normEol(newContent) }
       } else {
-        // Unstaged: old = index (or HEAD), new = working tree
         let oldContent = ''
-        try {
-          // Try index first, fall back to HEAD
-          oldContent = await this.git.show([`:${filePath}`])
-        } catch {
-          try {
-            oldContent = await this.git.show([`HEAD:${filePath}`])
-          } catch {
-            // Untracked file
-          }
+        try { oldContent = await this.git.show([`:${filePath}`]) } catch {
+          try { oldContent = await this.git.show([`HEAD:${filePath}`]) } catch { /* untracked */ }
         }
         let newContent = ''
-        try {
-          newContent = await fs.promises.readFile(absPath, 'utf-8')
-        } catch {
-          // File deleted from working tree
-        }
+        try { newContent = await fs.promises.readFile(absPath, 'utf-8') } catch { /* deleted */ }
         return { oldContent: normEol(oldContent), newContent: normEol(newContent) }
       }
     } catch {

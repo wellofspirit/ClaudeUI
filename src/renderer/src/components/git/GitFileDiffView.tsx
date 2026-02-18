@@ -13,7 +13,7 @@ export function GitFileDiffView(): React.JSX.Element {
   const diffWrapLines = useSessionStore((s) => s.settings.diffWrapLines)
   const updateSettings = useSessionStore((s) => s.updateSettings)
 
-  // Fetch diff when selected file changes
+  // Fetch patch when selected file or ignore-whitespace toggle changes
   useEffect(() => {
     if (!cwd || !gitSelectedFile || !activeSessionId || !gitStatus) {
       if (activeSessionId) setGitFileDiff(activeSessionId, null)
@@ -26,12 +26,34 @@ export function GitFileDiffView(): React.JSX.Element {
 
     const staged = fileStatus.index !== ' ' && fileStatus.index !== '?'
 
-    window.api.gitGetFileDiff(cwd, gitSelectedFile, staged).then((diff) => {
+    window.api.gitGetFilePatch(cwd, gitSelectedFile, staged, diffIgnoreWhitespace).then((diff) => {
       setGitFileDiff(activeSessionId, diff)
     }).catch(() => {
       setGitFileDiff(activeSessionId, null)
     })
-  }, [cwd, gitSelectedFile, activeSessionId, setGitFileDiff, gitStatus])
+  }, [cwd, gitSelectedFile, activeSessionId, setGitFileDiff, gitStatus, diffIgnoreWhitespace])
+
+  // Background-fetch full file content for hunk expansion after patch loads
+  useEffect(() => {
+    if (!cwd || !gitSelectedFile || !activeSessionId || !gitStatus || !gitFileDiff?.patch) return
+    // Already have content — skip
+    if (gitFileDiff.oldContent != null || gitFileDiff.newContent != null) return
+
+    const fileStatus = gitStatus.files.find((f) => f.path === gitSelectedFile)
+    if (!fileStatus) return
+
+    const staged = fileStatus.index !== ' ' && fileStatus.index !== '?'
+
+    window.api.gitGetFileContents(cwd, gitSelectedFile, staged).then(({ oldContent, newContent }) => {
+      // Merge content into existing diff (don't overwrite patch)
+      const current = useSessionStore.getState().sessions[activeSessionId]?.gitFileDiff
+      if (current?.patch) {
+        setGitFileDiff(activeSessionId, { ...current, oldContent, newContent })
+      }
+    }).catch(() => {
+      // Silently ignore — hunk expansion just won't be available
+    })
+  }, [cwd, gitSelectedFile, activeSessionId, gitStatus, gitFileDiff?.patch])
 
   if (!gitSelectedFile) {
     return (
@@ -49,7 +71,7 @@ export function GitFileDiffView(): React.JSX.Element {
     )
   }
 
-  if (gitFileDiff.oldContent === gitFileDiff.newContent) {
+  if (!gitFileDiff.patch) {
     return (
       <div className="flex-1 flex items-center justify-center text-[12px] text-text-muted">
         No changes in this view
@@ -91,10 +113,10 @@ export function GitFileDiffView(): React.JSX.Element {
       </div>
       {/* Diff fills remaining space and scrolls internally */}
       <DiffViewer
-        oldStr={gitFileDiff.oldContent}
-        newStr={gitFileDiff.newContent}
+        patch={gitFileDiff.patch}
+        oldContent={gitFileDiff.oldContent}
+        newContent={gitFileDiff.newContent}
         fileName={gitSelectedFile}
-        ignoreWhitespace={diffIgnoreWhitespace}
         className="flex-1 min-h-0"
       />
     </div>

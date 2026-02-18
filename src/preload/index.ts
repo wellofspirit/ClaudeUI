@@ -178,8 +178,10 @@ const api: ClaudeAPI = {
   gitGetBranches: (cwd: string) => ipcRenderer.invoke('git:branches', cwd),
   gitCheckout: (cwd: string, branch: string) => ipcRenderer.invoke('git:checkout', cwd, branch),
   gitCreateBranch: (cwd: string, name: string) => ipcRenderer.invoke('git:create-branch', cwd, name),
-  gitGetFileDiff: (cwd: string, filePath: string, staged: boolean) =>
-    ipcRenderer.invoke('git:file-diff', cwd, filePath, staged),
+  gitGetFilePatch: (cwd: string, filePath: string, staged: boolean, ignoreWhitespace: boolean) =>
+    ipcRenderer.invoke('git:file-patch', cwd, filePath, staged, ignoreWhitespace),
+  gitGetFileContents: (cwd: string, filePath: string, staged: boolean) =>
+    ipcRenderer.invoke('git:file-contents', cwd, filePath, staged),
   gitStageFile: (cwd: string, filePath: string) => ipcRenderer.invoke('git:stage-file', cwd, filePath),
   gitUnstageFile: (cwd: string, filePath: string) => ipcRenderer.invoke('git:unstage-file', cwd, filePath),
   gitStageAll: (cwd: string) => ipcRenderer.invoke('git:stage-all', cwd),

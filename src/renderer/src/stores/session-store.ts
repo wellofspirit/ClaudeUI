@@ -316,7 +316,7 @@ export interface PerSessionState {
   gitStatus: GitStatusData | null
   gitBranches: GitBranchData | null
   gitSelectedFile: string | null
-  gitFileDiff: { oldContent: string; newContent: string } | null
+  gitFileDiff: { patch: string; oldContent?: string; newContent?: string } | null
   gitCommitMessage: string
   gitFileFilter: 'staged' | 'unstaged' | 'all'
 }
@@ -365,7 +365,12 @@ const EMPTY_SESSION_STATE: PerSessionState = {
 }
 
 function createEmptySession(cwd: string): PerSessionState {
-  return { ...EMPTY_SESSION_STATE, cwd }
+  const cached = cwd ? gitStatusCache.get(cwd) : undefined
+  return {
+    ...EMPTY_SESSION_STATE,
+    cwd,
+    ...(cached ? { isGitRepo: true, gitStatus: cached } : {})
+  }
 }
 
 /**
@@ -375,6 +380,14 @@ function createEmptySession(cwd: string): PerSessionState {
  * This map lets setStatusLine (and potentially other handlers) resolve them.
  */
 const rekeyMap = new Map<string, string>()
+
+/**
+ * Global git status cache keyed by cwd.
+ * When polling updates arrive they're cached here so that newly-loaded
+ * or switched-to sessions with the same cwd get instant git status
+ * instead of waiting for the next poll cycle.
+ */
+const gitStatusCache = new Map<string, GitStatusData>()
 
 /** Helper to update a specific session's state */
 function updateSession(
@@ -490,7 +503,7 @@ interface SessionState {
   setGitStatus: (routingId: string, status: GitStatusData) => void
   setGitBranches: (routingId: string, branches: GitBranchData) => void
   setGitSelectedFile: (routingId: string, filePath: string | null) => void
-  setGitFileDiff: (routingId: string, diff: { oldContent: string; newContent: string } | null) => void
+  setGitFileDiff: (routingId: string, diff: { patch: string; oldContent?: string; newContent?: string } | null) => void
   setGitCommitMessage: (routingId: string, message: string) => void
   setGitFileFilter: (routingId: string, filter: 'staged' | 'unstaged' | 'all') => void
   openGitPanel: (routingId: string) => void
@@ -1284,9 +1297,11 @@ export const useSessionStore = create<SessionState>((set) => ({
     })),
 
   setGitStatus: (routingId, status) =>
-    set((state) => ({
-      sessions: updateSession(state.sessions, routingId, () => ({ gitStatus: status }))
-    })),
+    set((state) => {
+      const session = state.sessions[routingId]
+      if (session?.cwd) gitStatusCache.set(session.cwd, status)
+      return { sessions: updateSession(state.sessions, routingId, () => ({ gitStatus: status })) }
+    }),
 
   setGitBranches: (routingId, branches) =>
     set((state) => ({

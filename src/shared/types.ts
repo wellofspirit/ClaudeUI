@@ -251,7 +251,8 @@ export interface ClaudeAPI {
   gitGetBranches(cwd: string): Promise<GitBranchData>
   gitCheckout(cwd: string, branch: string): Promise<void>
   gitCreateBranch(cwd: string, name: string): Promise<void>
-  gitGetFileDiff(cwd: string, filePath: string, staged: boolean): Promise<{ oldContent: string; newContent: string }>
+  gitGetFilePatch(cwd: string, filePath: string, staged: boolean, ignoreWhitespace: boolean): Promise<{ patch: string }>
+  gitGetFileContents(cwd: string, filePath: string, staged: boolean): Promise<{ oldContent: string; newContent: string }>
   gitStageFile(cwd: string, filePath: string): Promise<void>
   gitUnstageFile(cwd: string, filePath: string): Promise<void>
   gitStageAll(cwd: string): Promise<void>

@@ -5,14 +5,30 @@ import { createPatch } from 'diff'
 import { useSessionStore, type ThemeId } from '../../stores/session-store'
 import '@git-diff-view/react/styles/diff-view.css'
 
-interface Props {
+/** Props when providing old/new strings (ToolCallBlock inline diffs) */
+interface ContentProps {
   oldStr: string
   newStr: string
+  patch?: undefined
   fileName?: string
   ignoreWhitespace?: boolean
-  /** Extra classes on the outer wrapper (e.g. "h-full" to fill a flex parent) */
   className?: string
 }
+
+/** Props when providing a pre-computed patch string (git panel) */
+interface PatchProps {
+  patch: string
+  /** Full file content for hunk expansion — loaded in background after patch */
+  oldContent?: string
+  newContent?: string
+  oldStr?: undefined
+  newStr?: undefined
+  fileName?: string
+  ignoreWhitespace?: never
+  className?: string
+}
+
+type Props = ContentProps | PatchProps
 
 function diffTheme(theme: ThemeId): 'light' | 'dark' {
   return theme === 'light' ? 'light' : 'dark'
@@ -32,20 +48,44 @@ function normalizeWs(s: string): string {
     .join('\n')
 }
 
-export function DiffViewer({ oldStr, newStr, fileName, ignoreWhitespace, className }: Props): React.JSX.Element {
+export function DiffViewer(props: Props): React.JSX.Element {
+  const { fileName, className } = props
   const diffViewSplit = useSessionStore((s) => s.settings.diffViewSplit)
   const diffWrapLines = useSessionStore((s) => s.settings.diffWrapLines)
   const theme = useSessionStore((s) => s.settings.theme)
 
-  // Pure addition (new file) or pure deletion — hide the empty line-number column
-  const isPureAdd = oldStr === ''
-  const isPureDel = newStr === ''
+  // Detect pure add/del for CSS class.
+  // Only check the diff header (before first @@), not the content — otherwise
+  // a file whose source code contains '/dev/null' as a string literal would
+  // false-positive (e.g. DiffViewer.tsx itself).
+  const patchHeader = props.patch != null ? props.patch.slice(0, props.patch.indexOf('\n@@')) : ''
+  const isPureAdd = props.patch != null
+    ? patchHeader.includes('--- /dev/null')
+    : props.oldStr === ''
+  const isPureDel = props.patch != null
+    ? patchHeader.includes('+++ /dev/null')
+    : props.newStr === ''
 
   const diffFile = useMemo(() => {
     const name = fileName || 'file'
-    // When ignoring whitespace, generate the patch from normalised content
-    // so that whitespace-only changes don't appear as diffs, but still feed
-    // the original content to the viewer for accurate display.
+
+    if (props.patch != null) {
+      // Fast path: pre-computed patch from git diff — no JS diffing needed.
+      // When oldContent/newContent are provided (background-loaded), pass them
+      // so the library can expand collapsed hunks to show full file context.
+      const instance = DiffFile.createInstance({
+        oldFile: { fileName: name, content: props.oldContent ?? null },
+        newFile: { fileName: name, content: props.newContent ?? null },
+        hunks: [props.patch],
+      })
+      instance.init()
+      instance.buildUnifiedDiffLines()
+      instance.buildSplitDiffLines()
+      return instance
+    }
+
+    // Slow path: compute patch from old/new strings (ToolCallBlock inline diffs)
+    const { oldStr, newStr, ignoreWhitespace } = props
     const patchOld = ignoreWhitespace ? normalizeWs(oldStr) : oldStr
     const patchNew = ignoreWhitespace ? normalizeWs(newStr) : newStr
     const patch = createPatch(name, patchOld, patchNew, '', '', { context: 3 })
@@ -58,7 +98,7 @@ export function DiffViewer({ oldStr, newStr, fileName, ignoreWhitespace, classNa
     instance.buildUnifiedDiffLines()
     instance.buildSplitDiffLines()
     return instance
-  }, [oldStr, newStr, fileName, ignoreWhitespace])
+  }, [props.patch, props.oldContent, props.newContent, props.oldStr, props.newStr, fileName, props.ignoreWhitespace])
 
   return (
     <div className={`diff-scroll-container rounded-md border border-border overflow-auto font-mono [&_.diff-tailwindcss-wrapper]:!text-[11px] [&_.leading-\\[1\\.6\\]]:!leading-[1.3] [&_.min-h-\\[28px\\]]:!min-h-0 [&_.py-\\[6px\\]]:!py-[2px]${isPureAdd ? ' diff-pure-add' : ''}${isPureDel ? ' diff-pure-del' : ''}${className ? ` ${className}` : ''}`} style={{ textShadow: '0 1px rgba(0, 0, 0, 0.3)' }}>
