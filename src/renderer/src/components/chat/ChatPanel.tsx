@@ -195,25 +195,43 @@ export function ChatPanel(): React.JSX.Element {
 
   // ResizeObserver: catch elements that grow in-place (tool results, images, collapsibles)
   // This fires when any child of the scroll container changes size, even without React re-renders.
+  // Uses a MutationObserver to track which element is the scroll content wrapper (it changes
+  // when transitioning between empty/loading/content states) and keeps the ResizeObserver
+  // attached without tearing down on every message or streaming state change.
   useEffect(() => {
     const el = scrollRef.current
     if (!el) return
     let rafId = 0
-    const observer = new ResizeObserver(() => {
+    const resizeObserver = new ResizeObserver(() => {
       if (!shouldAutoScroll.current) return
       cancelAnimationFrame(rafId)
       rafId = requestAnimationFrame(() => {
         if (shouldAutoScroll.current && el) doAutoScroll(el)
       })
     })
-    // Observe the scroll container's first child (the content wrapper)
-    const content = el.firstElementChild
-    if (content) observer.observe(content)
+
+    // Observe whichever element is the current first child of the scroll container
+    let observed: Element | null = null
+    const attach = (): void => {
+      const content = el.firstElementChild
+      if (content !== observed) {
+        if (observed) resizeObserver.unobserve(observed)
+        observed = content
+        if (content) resizeObserver.observe(content)
+      }
+    }
+    attach()
+
+    // Re-attach when the scroll container's direct children change (e.g. empty → content)
+    const mutationObserver = new MutationObserver(attach)
+    mutationObserver.observe(el, { childList: true })
+
     return () => {
-      observer.disconnect()
+      resizeObserver.disconnect()
+      mutationObserver.disconnect()
       cancelAnimationFrame(rafId)
     }
-  }, [doAutoScroll, messages, hasStreamingText])
+  }, [doAutoScroll])
 
   const scrollToBottom = useCallback(() => {
     const el = scrollRef.current
