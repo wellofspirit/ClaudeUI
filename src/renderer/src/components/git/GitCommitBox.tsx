@@ -17,6 +17,9 @@ export function GitCommitBox(): React.JSX.Element {
   const toastTimerRef = useRef<ReturnType<typeof setTimeout>>(null)
   const [dropdownOpen, setDropdownOpen] = useState(false)
   const dropdownRef = useRef<HTMLDivElement>(null)
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const [commitBoxHeight, setCommitBoxHeight] = useState(120)
+  const dragRef = useRef<{ startY: number; startH: number } | null>(null)
 
   const stagedCount = gitStatus?.staged.length ?? 0
   const totalChanges = gitStatus?.files.length ?? 0
@@ -53,6 +56,40 @@ export function GitCommitBox(): React.JSX.Element {
     document.addEventListener('mousedown', handler)
     return () => document.removeEventListener('mousedown', handler)
   }, [dropdownOpen])
+
+  // Auto-expand commit box to fit content (e.g. after AI generation)
+  useEffect(() => {
+    const el = textareaRef.current
+    if (!el) return
+    // Measure the scroll height the textarea needs
+    const saved = el.style.height
+    el.style.height = 'auto'
+    const scrollH = el.scrollHeight
+    el.style.height = saved
+    // Add space for padding + buttons (~48px)
+    const needed = scrollH + 48
+    if (needed > commitBoxHeight) {
+      setCommitBoxHeight(Math.min(600, needed))
+    }
+  }, [gitCommitMessage]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Drag-to-resize commit box
+  const onResizeMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault()
+    dragRef.current = { startY: e.clientY, startH: commitBoxHeight }
+    const onMove = (ev: MouseEvent): void => {
+      if (!dragRef.current) return
+      const delta = dragRef.current.startY - ev.clientY
+      setCommitBoxHeight(Math.max(80, Math.min(600, dragRef.current.startH + delta)))
+    }
+    const onUp = (): void => {
+      dragRef.current = null
+      document.removeEventListener('mousemove', onMove)
+      document.removeEventListener('mouseup', onUp)
+    }
+    document.addEventListener('mousemove', onMove)
+    document.addEventListener('mouseup', onUp)
+  }, [commitBoxHeight])
 
   const refreshStatus = useCallback(async () => {
     if (!cwd || !activeSessionId) return
@@ -177,10 +214,16 @@ export function GitCommitBox(): React.JSX.Element {
   const commitDisabled = loading || !gitCommitMessage.trim() || stagedCount === 0
 
   return (
-    <div className="shrink-0 border-t border-border p-2 space-y-2 relative">
+    <div className="shrink-0 border-t border-border relative flex flex-col" style={{ height: commitBoxHeight, maxHeight: '50%' }}>
+      {/* Resize handle */}
+      <div
+        onMouseDown={onResizeMouseDown}
+        className="absolute top-0 left-0 right-0 h-1.5 cursor-ns-resize z-10 hover:bg-accent/30 transition-colors"
+      />
       {/* Commit message */}
-      <div className="relative">
+      <div className="relative flex-1 min-h-0 p-2 pb-0">
         <textarea
+          ref={textareaRef}
           value={gitCommitMessage}
           onChange={(e) => activeSessionId && setGitCommitMessage(activeSessionId, e.target.value)}
           onKeyDown={(e) => {
@@ -190,43 +233,46 @@ export function GitCommitBox(): React.JSX.Element {
             }
           }}
           placeholder="Commit message..."
-          rows={2}
-          className="w-full bg-bg-tertiary text-text-primary text-[12px] px-2.5 py-2 pr-8 rounded-md outline-none placeholder:text-text-muted resize-none font-mono"
+          className="w-full h-full bg-bg-tertiary text-text-primary text-[12px] px-2.5 py-2 pr-8 rounded-md outline-none placeholder:text-text-muted resize-none font-mono"
         />
         <button
           onClick={handleGenerateMessage}
           disabled={generating || stagedCount === 0}
-          className="absolute top-1.5 right-1.5 w-5 h-5 flex items-center justify-center rounded text-text-muted/50 hover:text-accent hover:bg-bg-hover transition-colors cursor-default disabled:opacity-30 disabled:hover:text-text-muted/50 disabled:hover:bg-transparent"
+          className="absolute top-3.5 right-3.5 w-6 h-6 flex items-center justify-center rounded text-text-muted/50 hover:text-accent hover:bg-bg-hover transition-colors cursor-default disabled:opacity-30 disabled:hover:text-text-muted/50 disabled:hover:bg-transparent"
           title="Auto-generate commit message"
         >
           {generating ? (
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="animate-spin-slow">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" className="animate-spin-slow text-accent">
               <circle cx="12" cy="12" r="10" strokeDasharray="31.4 31.4" />
             </svg>
           ) : (
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
-              <path d="M12 2l2.09 6.26L20.18 10l-6.09 1.74L12 18l-2.09-6.26L3.82 10l6.09-1.74L12 2z" />
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M9.5 2l1.2 3.6L14.3 7l-3.6 1.2L9.5 12l-1.2-3.6L4.7 7l3.6-1.2z" />
+              <path d="M18 12l.9 2.7 2.7.9-2.7.9-.9 2.7-.9-2.7L14.4 15.6l2.7-.9z" />
+              <path d="M9 17l.6 1.8 1.8.6-1.8.6-.6 1.8-.6-1.8L6.6 19.4l1.8-.6z" />
             </svg>
           )}
         </button>
       </div>
 
-      {/* Error message */}
-      {error && (
-        <div className="text-[11px] text-red-400 px-1">{error}</div>
-      )}
+      {/* Bottom section: error + buttons */}
+      <div className="shrink-0 px-2 pb-2 pt-1.5 space-y-1.5">
+        {/* Error message */}
+        {error && (
+          <div className="text-[11px] text-red-400 px-1">{error}</div>
+        )}
 
-      {/* Floating toast — positioned above the commit box, centered */}
-      {toast && (
-        <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-3 z-50 pointer-events-none">
-          <div className={`px-4 py-2 rounded-lg bg-bg-tertiary border border-border shadow-lg text-[12px] text-green-400 font-mono whitespace-nowrap ${toastExiting ? 'animate-toast-out' : 'animate-toast-in'}`}>
-            {toast}
+        {/* Floating toast — positioned above the commit box, centered */}
+        {toast && (
+          <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-3 z-50 pointer-events-none">
+            <div className={`px-4 py-2 rounded-lg bg-bg-tertiary border border-border shadow-lg text-[12px] text-green-400 font-mono whitespace-nowrap ${toastExiting ? 'animate-toast-out' : 'animate-toast-in'}`}>
+              {toast}
+            </div>
           </div>
-        </div>
-      )}
+        )}
 
-      {/* Action buttons */}
-      <div className="flex items-center gap-1.5">
+        {/* Action buttons */}
+        <div className="flex items-center gap-1.5">
         <button
           onClick={handleToggleStageAll}
           disabled={loading || totalChanges === 0}
@@ -275,6 +321,7 @@ export function GitCommitBox(): React.JSX.Element {
             </div>
           )}
         </div>
+      </div>
       </div>
     </div>
   )
