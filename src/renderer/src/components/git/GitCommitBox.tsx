@@ -1,4 +1,5 @@
 import { useState, useCallback, useRef, useEffect } from 'react'
+import { createPortal } from 'react-dom'
 import { useActiveSession, useSessionStore } from '../../stores/session-store'
 
 export function GitCommitBox(): React.JSX.Element {
@@ -10,13 +11,35 @@ export function GitCommitBox(): React.JSX.Element {
   const setGitStatus = useSessionStore((s) => s.setGitStatus)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [success, setSuccess] = useState<string | null>(null)
+  const [toast, setToast] = useState<string | null>(null)
+  const [toastExiting, setToastExiting] = useState(false)
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout>>(null)
   const [dropdownOpen, setDropdownOpen] = useState(false)
   const dropdownRef = useRef<HTMLDivElement>(null)
 
   const stagedCount = gitStatus?.staged.length ?? 0
   const totalChanges = gitStatus?.files.length ?? 0
   const allStaged = totalChanges > 0 && stagedCount === totalChanges
+
+  const showToast = useCallback((msg: string) => {
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current)
+    setToast(msg)
+    setToastExiting(false)
+    toastTimerRef.current = setTimeout(() => {
+      setToastExiting(true)
+      setTimeout(() => {
+        setToast(null)
+        setToastExiting(false)
+      }, 200) // match toast-out duration
+    }, 2500)
+  }, [])
+
+  // Clean up toast timer on unmount
+  useEffect(() => {
+    return () => {
+      if (toastTimerRef.current) clearTimeout(toastTimerRef.current)
+    }
+  }, [])
 
   // Close dropdown on click outside
   useEffect(() => {
@@ -62,12 +85,12 @@ export function GitCommitBox(): React.JSX.Element {
     }
     setLoading(true)
     setError(null)
-    setSuccess(null)
+    setToast(null)
     try {
       const hash = await window.api.gitCommit(cwd, gitCommitMessage.trim())
       setGitCommitMessage(activeSessionId, '')
-      setSuccess(`Committed: ${hash.slice(0, 7)}`)
-      setTimeout(() => setSuccess(null), 3000)
+      showToast(`Committed: ${hash.slice(0, 7)}`)
+
       await refreshStatus()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Commit failed')
@@ -84,14 +107,14 @@ export function GitCommitBox(): React.JSX.Element {
     }
     setLoading(true)
     setError(null)
-    setSuccess(null)
+    setToast(null)
     setDropdownOpen(false)
     try {
       const hash = await window.api.gitCommit(cwd, gitCommitMessage.trim())
       setGitCommitMessage(activeSessionId, '')
       await window.api.gitPush(cwd)
-      setSuccess(`Committed & pushed: ${hash.slice(0, 7)}`)
-      setTimeout(() => setSuccess(null), 3000)
+      showToast(`Committed & pushed: ${hash.slice(0, 7)}`)
+
       await refreshStatus()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Commit & push failed')
@@ -107,8 +130,8 @@ export function GitCommitBox(): React.JSX.Element {
     setDropdownOpen(false)
     try {
       await window.api.gitPush(cwd)
-      setSuccess('Pushed!')
-      setTimeout(() => setSuccess(null), 3000)
+      showToast('Pushed!')
+
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Push failed')
     } finally {
@@ -135,12 +158,19 @@ export function GitCommitBox(): React.JSX.Element {
         className="w-full bg-bg-tertiary text-text-primary text-[12px] px-2.5 py-2 rounded-md outline-none placeholder:text-text-muted resize-none font-mono"
       />
 
-      {/* Status messages */}
+      {/* Error message */}
       {error && (
         <div className="text-[11px] text-red-400 px-1">{error}</div>
       )}
-      {success && (
-        <div className="text-[11px] text-green-400 px-1">{success}</div>
+
+      {/* Floating toast */}
+      {toast && createPortal(
+        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[9999] pointer-events-none">
+          <div className={`px-4 py-2 rounded-lg bg-bg-tertiary border border-border shadow-lg text-[12px] text-green-400 font-mono whitespace-nowrap ${toastExiting ? 'animate-toast-out' : 'animate-toast-in'}`}>
+            {toast}
+          </div>
+        </div>,
+        document.body
       )}
 
       {/* Action buttons */}

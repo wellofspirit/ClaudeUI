@@ -302,6 +302,17 @@ html, #root {
 .animate-spin-slow { animation: spin-slow 1.5s linear infinite; }
 .animate-thinking-wave { animation: thinking-wave 2s ease-in-out infinite; }
 
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes toast-out {
+  from { opacity: 1; transform: translateY(0); }
+  to { opacity: 0; transform: translateY(-8px); }
+}
+.animate-toast-in { animation: toast-in 0.2s ease-out forwards; }
+.animate-toast-out { animation: toast-out 0.2s ease-in forwards; }
+
 [data-theme="light"] .light-no-border {
   border-color: transparent;
 }
