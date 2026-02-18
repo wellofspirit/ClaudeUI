@@ -32,6 +32,41 @@ export class GitService {
       working: f.working_dir || ' '
     }))
 
+    // Compute lines added/removed across staged + unstaged changes
+    let linesAdded = 0
+    let linesRemoved = 0
+    try {
+      const parseNumstat = (raw: string): void => {
+        for (const line of raw.trim().split('\n')) {
+          if (!line) continue
+          const [added, removed] = line.split('\t')
+          // Binary files show '-' for both columns
+          if (added !== '-') linesAdded += parseInt(added, 10) || 0
+          if (removed !== '-') linesRemoved += parseInt(removed, 10) || 0
+        }
+      }
+      // Unstaged changes (including untracked via diff --no-index workaround)
+      const unstaged = await this.git.diff(['--numstat'])
+      parseNumstat(unstaged)
+      // Staged changes
+      const staged = await this.git.diff(['--cached', '--numstat'])
+      parseNumstat(staged)
+      // Untracked files — count all their lines as additions
+      for (const f of status.not_added) {
+        try {
+          const absPath = path.resolve(this.cwd, f)
+          const content = await fs.promises.readFile(absPath, 'utf-8')
+          const lineCount = content.split('\n').length
+          // If file ends with newline, split produces an extra empty string
+          linesAdded += content.endsWith('\n') ? lineCount - 1 : lineCount
+        } catch {
+          // Skip files we can't read
+        }
+      }
+    } catch {
+      // If diff fails, leave counts at 0
+    }
+
     return {
       branch: status.current || 'HEAD',
       ahead: status.ahead,
@@ -39,7 +74,9 @@ export class GitService {
       files,
       staged: status.staged,
       unstaged: status.modified.concat(status.deleted),
-      untracked: status.not_added
+      untracked: status.not_added,
+      linesAdded,
+      linesRemoved
     }
   }
 

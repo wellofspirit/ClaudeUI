@@ -318,6 +318,8 @@ export interface GitStatusData {
   staged: string[]
   unstaged: string[]
   untracked: string[]
+  linesAdded: number
+  linesRemoved: number
 }
 
 export interface GitBranchData {

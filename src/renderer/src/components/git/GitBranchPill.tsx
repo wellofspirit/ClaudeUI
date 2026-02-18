@@ -18,7 +18,7 @@ export function GitBranchPill(): React.JSX.Element | null {
       <button
         ref={buttonRef}
         onClick={() => setDropdownOpen(!dropdownOpen)}
-        className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[12px] text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
+        className="flex items-baseline gap-1.5 px-2 py-1 rounded-md text-[12px] text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
         title={`Branch: ${branchName}`}
       >
         {/* Git branch icon */}

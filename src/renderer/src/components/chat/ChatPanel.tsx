@@ -407,7 +407,7 @@ function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Element {
             </button>
           </div>
         )}
-        <div className="flex items-center gap-2 min-w-0 [-webkit-app-region:no-drag]">
+        <div className="flex items-baseline gap-2 min-w-0 [-webkit-app-region:no-drag]">
           <span className="text-[13px] text-text-secondary font-normal truncate">
             {!cwd ? 'New session' : hasContent ? (customTitle || 'Session') : 'New session'}
           </span>
@@ -431,7 +431,7 @@ function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Element {
         {cwd && (
           <button
             onClick={() => window.api.openInVSCode(cwd)}
-            className="group flex items-center gap-1.5 px-2 py-1 rounded-md text-[12px] text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
+            className="group flex items-baseline gap-1.5 px-2 py-1 rounded-md text-[12px] text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
             title="Open in VS Code"
           >
             <svg width="14" height="14" viewBox="0 0 100 100" fill="none" className="shrink-0 -mt-px transition-opacity">
