@@ -30,12 +30,9 @@ export function GitChangesPill(): React.JSX.Element | null {
         className={`flex items-baseline gap-1 px-2 py-1 rounded-md text-[12px] transition-colors cursor-default ${
           isActive ? 'bg-bg-hover text-text-primary' : 'text-text-muted hover:text-text-primary hover:bg-bg-hover'
         }`}
-        title="Working tree clean"
+        title="No changes"
       >
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-          <polyline points="20 6 9 17 4 12" />
-        </svg>
-        <span>Clean</span>
+        <span>No Changes</span>
       </button>
     )
   }
