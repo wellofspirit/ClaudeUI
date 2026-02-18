@@ -1026,6 +1026,21 @@ function SettingsPanel(): React.JSX.Element {
             checked={settings.expandThinking}
             onChange={(v) => updateSettings({ expandThinking: v })}
           />
+          {/* Default commit mode */}
+          <div className="px-3 pt-2 pb-1">
+            <div className="text-[11px] text-text-muted uppercase tracking-wider mb-1">Default commit</div>
+            <div className="flex items-center gap-1 mb-1">
+              {([['commit', 'Commit'], ['commit-push', 'Commit & Push']] as const).map(([val, label]) => (
+                <button
+                  key={val}
+                  onClick={() => updateSettings({ gitCommitMode: val })}
+                  className={`flex-1 text-[11px] py-0.5 rounded transition-colors ${settings.gitCommitMode === val ? 'bg-accent/20 text-accent' : 'text-text-muted hover:text-text-secondary'}`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
           {/* Status line alignment */}
           <div className="px-3 pt-2 pb-1">
             <div className="text-[11px] text-text-muted uppercase tracking-wider mb-1">Status line align</div>

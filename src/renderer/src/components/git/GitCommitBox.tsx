@@ -9,6 +9,7 @@ export function GitCommitBox(): React.JSX.Element {
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const setGitCommitMessage = useSessionStore((s) => s.setGitCommitMessage)
   const setGitStatus = useSessionStore((s) => s.setGitStatus)
+  const gitCommitMode = useSessionStore((s) => s.settings.gitCommitMode)
   const [loading, setLoading] = useState(false)
   const [generating, setGenerating] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -212,6 +213,8 @@ export function GitCommitBox(): React.JSX.Element {
   }, [cwd, activeSessionId, generating, gitStatus?.staged, setGitCommitMessage])
 
   const commitDisabled = loading || !gitCommitMessage.trim() || stagedCount === 0
+  const isPushMode = gitCommitMode === 'commit-push'
+  const handlePrimaryCommit = isPushMode ? handleCommitAndPush : handleCommit
 
   return (
     <div className="shrink-0 border-t border-border relative flex flex-col" style={{ height: commitBoxHeight, maxHeight: '50%' }}>
@@ -229,7 +232,7 @@ export function GitCommitBox(): React.JSX.Element {
           onKeyDown={(e) => {
             if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
               e.preventDefault()
-              handleCommit()
+              handlePrimaryCommit()
             }
           }}
           placeholder="Commit message..."
@@ -284,12 +287,12 @@ export function GitCommitBox(): React.JSX.Element {
         {/* Commit split button */}
         <div className="flex-1 flex relative" ref={dropdownRef}>
           <button
-            onClick={handleCommit}
+            onClick={handlePrimaryCommit}
             disabled={commitDisabled}
             className="flex-1 px-2.5 py-1.5 text-[11px] font-medium rounded-l-md bg-accent text-white hover:bg-accent-hover transition-colors cursor-default disabled:opacity-50"
-            title="Ctrl+Enter to commit"
+            title={`Ctrl+Enter to ${isPushMode ? 'commit & push' : 'commit'}`}
           >
-            Commit{stagedCount > 0 ? ` (${stagedCount})` : ''}
+            {isPushMode ? 'Commit & Push' : 'Commit'}{stagedCount > 0 ? ` (${stagedCount})` : ''}
           </button>
           <button
             onClick={() => setDropdownOpen(!dropdownOpen)}
@@ -305,11 +308,11 @@ export function GitCommitBox(): React.JSX.Element {
           {dropdownOpen && (
             <div className="absolute bottom-full left-0 right-0 mb-1 bg-bg-primary border border-border rounded-md shadow-lg overflow-hidden z-50">
               <button
-                onClick={handleCommitAndPush}
+                onClick={isPushMode ? handleCommit : handleCommitAndPush}
                 disabled={commitDisabled}
                 className="w-full text-left px-3 py-1.5 text-[11px] text-text-primary hover:bg-bg-hover transition-colors cursor-default disabled:opacity-50"
               >
-                Commit & Push
+                {isPushMode ? 'Commit' : 'Commit & Push'}
               </button>
               <button
                 onClick={handlePush}

@@ -149,6 +149,7 @@ export interface AppSettings {
   statusLineAlign: 'left' | 'center' | 'right'
   statusLineTemplate: string
   gitPanelLayout: 'single' | 'double'
+  gitCommitMode: 'commit' | 'commit-push'
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -168,7 +169,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   uiFontScale: 1,
   statusLineAlign: 'center',
   statusLineTemplate: 'In: {in} / Out: {out} / Total: {total} · {used}% context used',
-  gitPanelLayout: 'single'
+  gitPanelLayout: 'single',
+  gitCommitMode: 'commit' as const
 }
 
 export function applyTheme(theme: ThemeId): void {
