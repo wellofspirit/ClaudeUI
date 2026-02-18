@@ -215,8 +215,19 @@ export class ClaudeSession {
     channel.push(sdkMessage)
     this.abortController = new AbortController()
 
+    // Collect stderr chunks so we can include them in error messages
+    const stderrChunks: string[] = []
+
     try {
       const cliPath = getCliJsPath()
+      if (cliPath) {
+        const cliExists = fs.existsSync(cliPath)
+        console.log(`[ClaudeSession] CLI path: ${cliPath} (exists: ${cliExists})`)
+        if (!cliExists) {
+          this.send('session:error', `CLI not found at: ${cliPath}`)
+          return
+        }
+      }
       const q = sdkQuery({
         prompt: channel as AsyncIterable<never>,
         options: {
@@ -230,9 +241,11 @@ export class ClaudeSession {
           thinking: { type: 'enabled', budgetTokens: 10000 },
           effort: this.effort as 'low' | 'medium' | 'high',
           stderr: (chunk) => {
-            // Log SDK stderr to help debug issues
             const text = chunk.toString().trim()
-            if (text) console.error('[SDK stderr]', text)
+            if (text) {
+              console.error('[SDK stderr]', text)
+              stderrChunks.push(text)
+            }
           },
           ...(this.resumeSessionId ? { resume: this.resumeSessionId } : this.sessionId ? { resume: this.sessionId } : {}),
           canUseTool: async (toolName, input, opts) => {
@@ -407,7 +420,11 @@ export class ClaudeSession {
           if (response) {
             const subtype = response.subtype as string
             if (subtype === 'error') {
-              console.error('[ClaudeSession] Control response error:', response.error)
+              const errText = typeof response.error === 'string'
+                ? response.error
+                : JSON.stringify(response.error, null, 2)
+              console.error('[ClaudeSession] Control response error:', errText)
+              this.send('session:error', `SDK control error: ${errText}`)
             }
           }
         } else if (type === 'result') {
@@ -419,9 +436,16 @@ export class ClaudeSession {
           const subtype = msg.subtype as string | undefined
           if (subtype && subtype !== 'success') {
             const errors = (msg.errors as string[]) || []
+            const stderrContext = stderrChunks.length > 0
+              ? '\n\nCLI stderr:\n' + stderrChunks.slice(-20).join('\n')
+              : ''
             if (errors.length) {
               console.error('[ClaudeSession] Result error:', errors.join('; '))
-              this.send('session:error', errors.join('; '))
+              this.send('session:error', errors.join('; ') + stderrContext)
+            } else {
+              const fallback = `Session ended with status: ${subtype}`
+              console.error('[ClaudeSession] Result:', fallback)
+              this.send('session:error', fallback + stderrContext)
             }
           }
 
@@ -471,11 +495,30 @@ export class ClaudeSession {
       const errorMsg = err instanceof Error ? err.message : String(err)
       const stack = err instanceof Error ? err.stack : undefined
       console.error('[ClaudeSession] SDK error:', errorMsg)
-      if (stack) {
-        console.error('[ClaudeSession] Stack:', stack)
+      if (stack) console.error('[ClaudeSession] Stack:', stack)
+      if (stderrChunks.length > 0) {
+        console.error('[ClaudeSession] Collected stderr:', stderrChunks.join('\n'))
       }
       if (!errorMsg.includes('abort')) {
-        this.send('session:error', stack || errorMsg)
+        // Build a structured error message:
+        // Line 1: human-readable summary
+        // Rest: stack trace + CLI stderr (expandable in the UI)
+        const parts: string[] = []
+
+        // For CLI crashes, lead with a clear summary instead of the raw SDK error
+        if (errorMsg.includes('process exited with code')) {
+          const code = errorMsg.match(/code (\d+)/)?.[1] || '?'
+          parts.push(`CLI process crashed (exit code ${code})`)
+        } else {
+          parts.push(errorMsg)
+        }
+
+        if (stack) parts.push('\nStack trace:\n' + stack)
+        if (stderrChunks.length > 0) {
+          parts.push('\nCLI stderr:\n' + stderrChunks.slice(-30).join('\n'))
+        }
+
+        this.send('session:error', parts.join('\n'))
       }
     } finally {
       this.messageChannel?.end()

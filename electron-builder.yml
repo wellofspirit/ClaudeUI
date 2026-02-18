@@ -17,6 +17,7 @@ asarUnpack:
   - node_modules/@anthropic-ai/claude-agent-sdk/**
 win:
   executableName: claudui
+  signAndEditExecutable: false
 nsis:
   artifactName: ${name}-${version}-setup.${ext}
   shortcutName: ${productName}
