@@ -86,7 +86,10 @@ export function InputBox(): React.JSX.Element {
   const isDisabled = !activeSessionId || !cwd
 
   const permissionMode = useActiveSession((s) => s.permissionMode)
-
+  const focusedAgentId = useActiveSession((s) => s.focusedAgentId)
+  const teammates = useActiveSession((s) => s.teammates)
+  const teamName = useActiveSession((s) => s.teamName)
+  const addTeammateUserMessage = useSessionStore((s) => s.addTeammateUserMessage)
 
   const [modelOpen, setModelOpen] = useState(false)
   const [effortOpen, setEffortOpen] = useState(false)
@@ -183,12 +186,20 @@ export function InputBox(): React.JSX.Element {
     setText('')
     if (textareaRef.current) textareaRef.current.style.height = 'auto'
 
+    // If focused on a teammate, send to their inbox
+    if (focusedAgentId && teammates[focusedAgentId]) {
+      const teammate = teammates[focusedAgentId]
+      addTeammateUserMessage(activeSessionId, focusedAgentId, uuid(), prompt)
+      await window.api.sendToTeammate(activeSessionId, teammate.sanitizedTeamName, teammate.sanitizedName, prompt)
+      return
+    }
+
     if (isRunning) {
       appendQueuedText(prompt)
     } else {
       await doSend(prompt)
     }
-  }, [text, isDisabled, activeSessionId, isRunning, appendQueuedText, doSend])
+  }, [text, isDisabled, activeSessionId, isRunning, appendQueuedText, doSend, focusedAgentId, teammates, addTeammateUserMessage])
 
   // Auto-send queued text when agent transitions running → idle
   const prevRunningRef = useRef(false)
@@ -201,6 +212,30 @@ export function InputBox(): React.JSX.Element {
       doSend(queued)
     }
   }, [isRunning, queuedText, status.state, sdkActive, clearQueuedText, doSend])
+
+  const handleBroadcast = useCallback(async () => {
+    const prompt = text.trim()
+    if (!prompt || !activeSessionId || !teamName) return
+    setText('')
+    if (textareaRef.current) textareaRef.current.style.height = 'auto'
+
+    const teammateList = Object.values(teammates)
+    const sanitizedNames = teammateList
+      .filter((t) => t.status === 'running')
+      .map((t) => t.sanitizedName)
+    if (sanitizedNames.length === 0) return
+
+    // Add user message to each teammate's subagentMessages for UI display
+    const sanitizedTeamName = teammateList[0]?.sanitizedTeamName
+    if (!sanitizedTeamName) return
+
+    for (const t of teammateList) {
+      if (t.status === 'running') {
+        addTeammateUserMessage(activeSessionId, t.toolUseId, uuid(), prompt)
+      }
+    }
+    await window.api.broadcastToTeam(activeSessionId, sanitizedTeamName, sanitizedNames, prompt)
+  }, [text, activeSessionId, teamName, teammates, addTeammateUserMessage, setText])
 
   const handleEditQueued = useCallback(() => {
     setText(queuedText)
@@ -250,6 +285,13 @@ export function InputBox(): React.JSX.Element {
     if (e.key === 'ArrowUp' && !text && queuedText) {
       e.preventDefault()
       handleEditQueued()
+      return
+    }
+
+    // Broadcast to all teammates: Cmd/Ctrl+Shift+Enter
+    if (e.key === 'Enter' && e.shiftKey && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault()
+      handleBroadcast()
       return
     }
 
@@ -337,9 +379,11 @@ export function InputBox(): React.JSX.Element {
             placeholder={
               !activeSessionId || !cwd
                 ? 'Select a folder to get started'
-                : isRunning
-                  ? 'Type to queue a message...'
-                  : 'Ask Claude anything, / for commands'
+                : focusedAgentId && teammates[focusedAgentId]
+                  ? `Message ${teammates[focusedAgentId].name}...`
+                  : isRunning
+                    ? 'Type to queue a message...'
+                    : 'Ask Claude anything, / for commands'
             }
             disabled={isDisabled}
             rows={2}
@@ -482,10 +526,26 @@ export function InputBox(): React.JSX.Element {
                   Stop
                 </button>
               )}
+              {teamName && Object.values(teammates).some((t) => t.status === 'running') && (
+                <button
+                  onClick={handleBroadcast}
+                  disabled={!text.trim() || isDisabled}
+                  title="Broadcast to all agents (⌘⇧↵)"
+                  className="w-7 h-7 flex items-center justify-center rounded-lg text-text-muted hover:text-text-secondary hover:bg-bg-hover transition-colors disabled:opacity-15 cursor-pointer disabled:cursor-default"
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M4.9 19.1C1 15.2 1 8.8 4.9 4.9" />
+                    <path d="M7.8 16.2c-2.3-2.3-2.3-6.1 0-8.4" />
+                    <circle cx="12" cy="12" r="2" />
+                    <path d="M16.2 7.8c2.3 2.3 2.3 6.1 0 8.4" />
+                    <path d="M19.1 4.9C23 8.8 23 15.1 19.1 19" />
+                  </svg>
+                </button>
+              )}
               <button
                 onClick={handleSend}
                 disabled={!text.trim() || isDisabled}
-                title={isRunning ? 'Queue message' : 'Send message'}
+                title={focusedAgentId ? 'Send to agent' : isRunning ? 'Queue message' : 'Send message'}
                 className="w-7 h-7 flex items-center justify-center rounded-full bg-text-primary text-bg-primary transition-opacity disabled:opacity-15 cursor-pointer disabled:cursor-default"
               >
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">

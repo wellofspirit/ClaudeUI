@@ -1,6 +1,6 @@
 import { useRef, useEffect, useState, useMemo, useCallback } from 'react'
 import { v4 as uuid } from 'uuid'
-import { useActiveSession, useSessionStore } from '../../stores/session-store'
+import { useActiveSession, useSessionStore, useFocusedAgentData } from '../../stores/session-store'
 import { MessageBubble } from './MessageBubble'
 import { StreamingText } from './StreamingText'
 import { ThinkingBlock } from './ThinkingBlock'
@@ -10,6 +10,7 @@ import { FloatingApproval } from './FloatingApproval'
 import { FloatingError } from './FloatingError'
 import { WindowControls } from '../WindowControls'
 import { useSidebarCollapsed } from '../SessionView'
+import { AgentTabBar } from './AgentTabBar'
 
 function QueuedMessageCard(): React.JSX.Element | null {
   const queuedText = useActiveSession((s) => s.queuedText)
@@ -48,13 +49,16 @@ function QueuedMessageCard(): React.JSX.Element | null {
 }
 
 export function ChatPanel(): React.JSX.Element {
-  const messages = useActiveSession((s) => s.messages)
+  const focusedData = useFocusedAgentData()
+  const messages = focusedData.messages
   // Only subscribe to boolean flags — not the full streaming text
-  const hasStreamingText = useActiveSession((s) => !!s.streamingText)
-  const streamingThinking = useActiveSession((s) => s.streamingThinking)
-  const thinkingStartedAt = useActiveSession((s) => s.thinkingStartedAt)
+  const hasStreamingText = !!focusedData.streamingText
+  const streamingThinking = focusedData.streamingThinking
+  const thinkingStartedAt = focusedData.thinkingStartedAt
   const pendingApprovals = useActiveSession((s) => s.pendingApprovals)
   const status = useActiveSession((s) => s.status)
+  const teamName = useActiveSession((s) => s.teamName)
+  const focusedAgentId = useActiveSession((s) => s.focusedAgentId)
 
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -158,8 +162,20 @@ export function ChatPanel(): React.JSX.Element {
     const unsub = useSessionStore.subscribe((state, prevState) => {
       const id = state.activeSessionId
       if (!id) return
-      const cur = state.sessions[id]?.streamingText
-      const prev = prevState.sessions[id]?.streamingText
+      const session = state.sessions[id]
+      const prevSession = prevState.sessions[id]
+      if (!session || !prevSession) return
+
+      const focused = session.focusedAgentId
+      let cur: string | undefined
+      let prev: string | undefined
+      if (focused) {
+        cur = session.subagentStreamingText[focused]
+        prev = prevSession.subagentStreamingText[focused]
+      } else {
+        cur = session.streamingText
+        prev = prevSession.streamingText
+      }
       if (cur !== prev && shouldAutoScroll.current) {
         cancelAnimationFrame(rafId)
         rafId = requestAnimationFrame(() => {
@@ -238,6 +254,9 @@ export function ChatPanel(): React.JSX.Element {
       {/* Top bar */}
       <TopBar hasContent={hasContent} />
 
+      {/* Agent tab bar (shown when team is active) */}
+      {teamName && <AgentTabBar />}
+
       {/* Scroll + input wrapper */}
       <div className="flex-1 flex flex-col min-h-0 relative">
         {/* Gradient fade below top bar */}
@@ -267,7 +286,7 @@ export function ChatPanel(): React.JSX.Element {
               ))}
               {/* Tail items — always visible at bottom */}
               <div className="flex flex-col gap-5">
-                {hasStreamingText && <StreamingText />}
+                {hasStreamingText && <StreamingText textOverride={focusedData.isMain ? undefined : focusedData.streamingText} />}
                 {thinkingStartedAt && (
                   <ThinkingBlock text={streamingThinking} isActive />
                 )}
@@ -296,16 +315,16 @@ export function ChatPanel(): React.JSX.Element {
               </button>
             </div>
           )}
-          <QueuedMessageCard />
+          {focusedAgentId === null && <QueuedMessageCard />}
           <InputBox />
         </div>
       </div>
 
-      {/* Todo widget */}
-      <TodoWidget />
+      {/* Todo widget (main tab only) */}
+      {focusedAgentId === null && <TodoWidget />}
 
-      {/* Floating approval for sub-agent tool calls */}
-      <FloatingApproval />
+      {/* Floating approval for sub-agent tool calls (main tab only) */}
+      {focusedAgentId === null && <FloatingApproval />}
 
       {/* Floating error */}
       <FloatingError />

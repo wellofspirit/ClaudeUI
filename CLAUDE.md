@@ -135,6 +135,7 @@ Patches live in `patch/` and fix limitations in the bundled `cli.js`. Each patch
 | `subagent-streaming` | Forwards subagent stream events + messages to SDK consumer |
 | `task-notification-usage` | Extracts `<usage>` data from task-notification XML |
 | `taskstop-notification` | Sends task_notification on TaskStop + maps "killed" → "stopped" |
+| `team-dowhile-fix` | Excludes `in_process_teammate` from do-while loop so team inbox polling runs |
 
 ### Writing a new patch
 

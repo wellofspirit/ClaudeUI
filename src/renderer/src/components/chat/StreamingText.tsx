@@ -2,8 +2,9 @@ import { memo, useDeferredValue } from 'react'
 import { useActiveSession } from '../../stores/session-store'
 import { MarkdownRenderer } from './MarkdownRenderer'
 
-export const StreamingText = memo(function StreamingText(): React.JSX.Element | null {
-  const text = useActiveSession((s) => s.streamingText)
+export const StreamingText = memo(function StreamingText({ textOverride }: { textOverride?: string }): React.JSX.Element | null {
+  const storeText = useActiveSession((s) => s.streamingText)
+  const text = textOverride ?? storeText
   const deferred = useDeferredValue(text)
   if (!deferred) return null
 

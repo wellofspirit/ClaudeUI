@@ -5,7 +5,8 @@ import * as os from 'os'
 import * as path from 'path'
 import { app } from 'electron'
 import type { BrowserWindow } from 'electron'
-import { computeTokenMetrics } from './session-history'
+import { computeTokenMetrics, buildSubagentFileMap } from './session-history'
+import { watchSubagent, unwatchAllSubagents } from './subagent-watcher'
 import { saveSlashCommands } from './ui-config'
 
 /** In production, cli.js is unpacked from the asar — resolve its real path */
@@ -79,7 +80,7 @@ class MessageChannel<T> {
   }
 }
 
-const AGENT_ID_RE = /agentId:\s*(\S+)/
+const AGENT_ID_RE = /(?:agentId|agent_id):\s*(\S+)/
 const TASK_ID_RE = /task_id:\s*(\S+)/
 const BG_CMD_ID_RE = /Command running in background with ID:\s*([\w-]+)/
 const OUTPUT_FILE_RE = /Output is being written to:\s*(.+)/
@@ -94,11 +95,48 @@ interface BackgroundPoller {
 }
 
 export class ClaudeSession {
+  private static extraWindows = new Set<BrowserWindow>()
+  static addExtraWindow(win: BrowserWindow): void { this.extraWindows.add(win) }
+  static removeExtraWindow(win: BrowserWindow): void { this.extraWindows.delete(win) }
+
+  /** Return a snapshot of the current team state (pull-based, for TeamsView) */
+  getTeamInfo(): { routingId: string; teamName: string | null; sessionId: string | null; projectKey: string | null; teammates: Array<{ toolUseId: string; name: string; sanitizedName: string; teamName: string; sanitizedTeamName: string; agentId: string; fileId: string; status: 'running' | 'completed' | 'failed' | 'stopped' }> } {
+    const projectKey = this.cwd ? this.cwd.replace(/[/.]/g, '-') : null
+
+    // Resolve hex JSONL fileIds for team agents whose agentId doesn't match filenames
+    let fileMap: Record<string, string> = {}
+    if (this.sessionId && projectKey && this._detectedTeammates.length > 0) {
+      const taskPrompts: Record<string, string> = {}
+      for (const t of this._detectedTeammates) {
+        if (t.prompt) taskPrompts[t.toolUseId] = t.prompt
+      }
+      if (Object.keys(taskPrompts).length > 0) {
+        fileMap = buildSubagentFileMap(this.sessionId, projectKey, taskPrompts)
+      }
+    }
+
+    return {
+      routingId: this.routingId,
+      teamName: this._teamName,
+      sessionId: this.sessionId,
+      projectKey,
+      teammates: this._detectedTeammates.map((t) => ({
+        ...t,
+        fileId: fileMap[t.toolUseId] || t.agentId,
+        status: this._teammateStatuses.get(t.toolUseId) || 'running'
+      }))
+    }
+  }
+
   private sessionId: string | null = null
   private abortController: AbortController | null = null
   private isProcessing = false
   private pendingApprovals = new Map<string, PendingApprovalEntry>()
   private taskIdMap = new Map<string, string>() // agentId → toolUseId
+  private pendingTeammates = new Map<string, { name: string; teamName: string; prompt?: string }>() // toolUseId → { name, teamName, prompt }
+  private _teamName: string | null = null
+  private _detectedTeammates: Array<{ toolUseId: string; name: string; teamName: string; agentId: string; sanitizedName: string; sanitizedTeamName: string; prompt?: string }> = []
+  private _teammateStatuses = new Map<string, 'running' | 'completed' | 'failed' | 'stopped'>()
   private backgroundFilePaths = new Map<string, string>() // toolUseId → filePath (permanent)
   private backgroundPollers = new Map<string, BackgroundPoller>() // toolUseId → poller state
   private win: BrowserWindow
@@ -333,6 +371,9 @@ export class ClaudeSession {
             if (matchedToolUseId) {
               this.markBackgroundDone(matchedToolUseId)
               this.taskIdMap.delete(taskId)
+              const taskStatus = (msg.status as string) || 'completed'
+              const statusMap: Record<string, 'completed' | 'failed' | 'stopped'> = { completed: 'completed', failed: 'failed', stopped: 'stopped' }
+              this._teammateStatuses.set(matchedToolUseId, statusMap[taskStatus] || 'completed')
             }
 
             // Extract usage from the patched system message (task-notification-usage patch)
@@ -565,6 +606,7 @@ export class ClaudeSession {
     this.pendingApprovals.clear()
 
     this.stopAllBackgroundPollers()
+    unwatchAllSubagents()
 
     // End the message channel before aborting so the SDK's streamInput
     // loop can unblock and the CLI subprocess exits cleanly
@@ -641,6 +683,29 @@ export class ClaudeSession {
       }
       return { type: 'text' as const, text: JSON.stringify(block) }
     })
+
+    // Detect teammate Task tool_use blocks and TeamCreate
+    for (const block of blocks) {
+      if (block.type !== 'tool_use' || !block.toolUseId) continue
+      if (block.toolName === 'Task' && block.toolInput?.name && block.toolInput?.team_name) {
+        this.pendingTeammates.set(block.toolUseId, {
+          name: String(block.toolInput.name),
+          teamName: String(block.toolInput.team_name),
+          prompt: block.toolInput.prompt ? String(block.toolInput.prompt) : undefined
+        })
+      }
+      if (block.toolName === 'TeamCreate' && block.toolInput?.team_name) {
+        const newTeam = String(block.toolInput.team_name)
+        // Clear stale teammates and watchers from any previous team in this session
+        if (newTeam !== this._teamName) {
+          this._detectedTeammates = []
+          this.pendingTeammates.clear()
+          unwatchAllSubagents()
+        }
+        this._teamName = newTeam
+        this.send('session:team-created', { teamName: this._teamName })
+      }
+    }
 
     // Use the BetaMessage id for deduplication of partial messages
     const messageId = (betaMessage.id as string) || (msg.uuid as string) || uuid()
@@ -760,6 +825,8 @@ export class ClaudeSession {
       if (matchedToolUseId) {
         this.markBackgroundDone(matchedToolUseId)
         this.taskIdMap.delete(taskId)
+        const statusMap: Record<string, 'completed' | 'failed' | 'stopped'> = { completed: 'completed', failed: 'failed', stopped: 'stopped' }
+        this._teammateStatuses.set(matchedToolUseId, statusMap[status] || 'completed')
       }
 
       const notification = {
@@ -798,6 +865,38 @@ export class ClaudeSession {
 
     if (agentId) {
       this.taskIdMap.set(agentId, toolUseId)
+
+      // Check if this is a teammate we're tracking
+      const pending = this.pendingTeammates.get(toolUseId)
+      if (pending) {
+        const sanitize = (s: string): string => s.replace(/[^a-zA-Z0-9_-]/g, '-')
+        const teammateData = {
+          toolUseId,
+          name: pending.name,
+          teamName: pending.teamName,
+          agentId,
+          sanitizedName: sanitize(pending.name),
+          sanitizedTeamName: sanitize(pending.teamName),
+          prompt: pending.prompt
+        }
+        this._detectedTeammates.push(teammateData)
+        this.send('session:teammate-detected', teammateData)
+        this.pendingTeammates.delete(toolUseId)
+
+        // Start watching the subagent's JSONL file for live updates.
+        // In-process team agents don't stream via parent_tool_use_id — their
+        // messages only appear in the JSONL files on disk.
+        const projectKey = this.cwd ? this.cwd.replace(/[/.]/g, '-') : null
+        if (this.sessionId && projectKey) {
+          watchSubagent(
+            toolUseId,
+            this.sessionId,
+            projectKey,
+            pending.prompt,
+            (channel, data) => this.send(channel, data)
+          )
+        }
+      }
     }
 
     // Record output file path for background commands (permanent — survives completion).
@@ -926,8 +1025,12 @@ export class ClaudeSession {
   }
 
   private send(channel: string, data: unknown): void {
+    const payload = { routingId: this.routingId, data }
     if (!this.win.isDestroyed()) {
-      this.win.webContents.send(channel, { routingId: this.routingId, data })
+      this.win.webContents.send(channel, payload)
+    }
+    for (const w of ClaudeSession.extraWindows) {
+      if (!w.isDestroyed()) w.webContents.send(channel, payload)
     }
   }
 

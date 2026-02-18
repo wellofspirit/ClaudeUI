@@ -382,6 +382,12 @@ export interface SessionHistoryResult {
   statusLine: StatusLineData | null
   /** Maps agentId → toolUseId for subagent JSONL lookup */
   agentIdToToolUseId: Record<string, string>
+  /** Team name extracted from TeamCreate tool calls (null if not a team session) */
+  teamName: string | null
+  /** Pending teammate detection data: toolUseId → { name, teamName } from Task tool_use blocks */
+  pendingTeammates: Record<string, { name: string; teamName: string }>
+  /** Task tool prompt texts: toolUseId → prompt (for matching subagent JSONL files) */
+  taskPrompts: Record<string, string>
 }
 
 /**
@@ -470,12 +476,16 @@ export async function loadSessionHistory(
     let customTitle: string | null = null
     // Map agentId (from task-notification <task-id>) → toolUseId (from Task tool_use)
     const agentIdToToolUseId: Record<string, string> = {}
+    // Team info extracted from tool_use blocks
+    let teamName: string | null = null
+    const pendingTeammates: Record<string, { name: string; teamName: string }> = {}
+    const taskPrompts: Record<string, string> = {}
 
     let stream: fs.ReadStream
     try {
       stream = fs.createReadStream(filePath, { encoding: 'utf-8' })
     } catch {
-      resolve({ messages: [], taskNotifications: [], customTitle: null, agentIdToToolUseId: {}, statusLine: null })
+      resolve({ messages: [], taskNotifications: [], customTitle: null, agentIdToToolUseId: {}, statusLine: null, teamName: null, pendingTeammates: {}, taskPrompts: {} })
       return
     }
 
@@ -600,7 +610,7 @@ export async function loadSessionHistory(
                 }
 
                 // Extract agentId from Task tool results for mapping
-                const agentMatch = resultText.match(/agentId:\s*(\w+)/)
+                const agentMatch = resultText.match(/(?:agentId|agent_id):\s*(\S+)/)
                 if (agentMatch) {
                   agentIdToToolUseId[agentMatch[1]] = block.tool_use_id
                 }
@@ -689,6 +699,30 @@ export async function loadSessionHistory(
             }
           )
 
+          // Detect team-related tool_use blocks
+          for (const block of blocks) {
+            if (block.type !== 'tool_use' || !block.toolUseId) continue
+            if (block.toolName === 'TeamCreate' && block.toolInput?.team_name) {
+              const newTeam = String(block.toolInput.team_name)
+              // Clear stale teammates from any previous team in this session
+              if (newTeam !== teamName) {
+                for (const key of Object.keys(pendingTeammates)) delete pendingTeammates[key]
+                for (const key of Object.keys(taskPrompts)) delete taskPrompts[key]
+                for (const key of Object.keys(agentIdToToolUseId)) delete agentIdToToolUseId[key]
+              }
+              teamName = newTeam
+            }
+            if (block.toolName === 'Task' && block.toolInput?.name && block.toolInput?.team_name) {
+              pendingTeammates[block.toolUseId] = {
+                name: String(block.toolInput.name),
+                teamName: String(block.toolInput.team_name)
+              }
+              if (block.toolInput.prompt) {
+                taskPrompts[block.toolUseId] = String(block.toolInput.prompt)
+              }
+            }
+          }
+
           const messageId =
             (betaMessage.id as string) || (obj.uuid as string) || `assistant-${messages.length}`
 
@@ -751,9 +785,9 @@ export async function loadSessionHistory(
 
     rl.on('close', async () => {
       const statusLine = await computeTokenMetrics(filePath)
-      resolve({ messages, taskNotifications, customTitle, agentIdToToolUseId, statusLine })
+      resolve({ messages, taskNotifications, customTitle, agentIdToToolUseId, statusLine, teamName, pendingTeammates, taskPrompts })
     })
-    rl.on('error', () => resolve({ messages: [], taskNotifications: [], customTitle: null, agentIdToToolUseId: {}, statusLine: null }))
+    rl.on('error', () => resolve({ messages: [], taskNotifications: [], customTitle: null, agentIdToToolUseId: {}, statusLine: null, teamName: null, pendingTeammates: {}, taskPrompts: {} }))
   })
 }
 
@@ -776,6 +810,67 @@ export async function loadSubagentHistory(
 
   if (!fs.existsSync(filePath)) return []
   return parseJsonlFile(filePath)
+}
+
+/**
+ * Build a mapping from toolUseId → hex JSONL filename for team agents.
+ * Team agents' agent_ids (e.g. "historian@cny-v5") don't match their JSONL filenames
+ * (e.g. "agent-aaa6f53.jsonl"). This function scans all subagent files and matches
+ * them to toolUseIds by comparing the first user message content against known prompts.
+ * Returns toolUseId → hexId for files that matched, preferring the most recent file
+ * (highest hex ID) when multiple files match the same prompt.
+ */
+export function buildSubagentFileMap(
+  sessionId: string,
+  projectKey: string,
+  taskPrompts: Record<string, string>
+): Record<string, string> {
+  const subagentDir = path.join(CLAUDE_PROJECTS_DIR, projectKey, sessionId, 'subagents')
+  if (!fs.existsSync(subagentDir)) return {}
+
+  const files = fs.readdirSync(subagentDir)
+    .filter((f) => f.startsWith('agent-') && f.endsWith('.jsonl'))
+    .sort() // alphabetical = chronological for hex IDs
+
+  const promptEntries = Object.entries(taskPrompts)
+  if (promptEntries.length === 0) return {}
+
+  // For each file, read the first user message and try to match against known prompts
+  const result: Record<string, string> = {}
+  for (const fname of files) {
+    const hexId = fname.replace('agent-', '').replace('.jsonl', '')
+    try {
+      const filePath = path.join(subagentDir, fname)
+      const content = fs.readFileSync(filePath, 'utf-8')
+      const firstNewline = content.indexOf('\n')
+      const firstLine = firstNewline > 0 ? content.slice(0, firstNewline) : content
+      const obj = JSON.parse(firstLine)
+      const msg = obj.message as Record<string, unknown> | undefined
+      if (!msg) continue
+      const msgContent = msg.content
+      let text = ''
+      if (typeof msgContent === 'string') {
+        text = msgContent
+      } else if (Array.isArray(msgContent)) {
+        for (const b of msgContent) {
+          if (typeof b === 'object' && b && 'text' in b) text += (b as Record<string, unknown>).text
+        }
+      }
+      if (!text) continue
+
+      // Match against known prompts (use first 80 chars for matching to avoid false positives)
+      for (const [toolUseId, prompt] of promptEntries) {
+        const matchStr = prompt.slice(0, 80)
+        if (text.includes(matchStr)) {
+          // Later files (higher hex IDs) overwrite earlier ones — keeps the most recent
+          result[toolUseId] = hexId
+        }
+      }
+    } catch {
+      // Skip malformed files
+    }
+  }
+  return result
 }
 
 /**

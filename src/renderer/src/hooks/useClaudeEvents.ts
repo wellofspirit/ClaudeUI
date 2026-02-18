@@ -37,6 +37,7 @@ export function useClaudeEvents(): void {
   const updateTaskProgress = useSessionStore((s) => s.updateTaskProgress)
   const addTaskNotification = useSessionStore((s) => s.addTaskNotification)
   const addSubagentMessage = useSessionStore((s) => s.addSubagentMessage)
+  const appendSubagentMessageBatch = useSessionStore((s) => s.appendSubagentMessageBatch)
   const appendSubagentStreamingText = useSessionStore((s) => s.appendSubagentStreamingText)
   const appendSubagentStreamingThinking = useSessionStore((s) => s.appendSubagentStreamingThinking)
   const appendSubagentToolResult = useSessionStore((s) => s.appendSubagentToolResult)
@@ -134,6 +135,23 @@ export function useClaudeEvents(): void {
       }),
       window.api.onTaskNotification(({ routingId, data }) => {
         addTaskNotification(routingId, data)
+        // Update teammate status when a known teammate completes
+        if (data.toolUseId) {
+          const store = useSessionStore.getState()
+          const session = store.sessions[routingId]
+          if (session?.teammates[data.toolUseId]) {
+            const statusMap: Record<string, 'completed' | 'failed' | 'stopped'> = {
+              completed: 'completed', failed: 'failed', stopped: 'stopped'
+            }
+            store.updateTeammateStatus(routingId, data.toolUseId, statusMap[data.status] || 'completed')
+          }
+        }
+      }),
+      window.api.onTeamCreated(({ routingId, data }) => {
+        useSessionStore.getState().setTeamName(routingId, data.teamName)
+      }),
+      window.api.onTeammateDetected(({ routingId, data }) => {
+        useSessionStore.getState().addTeammate(routingId, { ...data, status: 'running' })
       }),
       window.api.onSubagentStream(({ routingId, data }) => {
         if (data.type === 'thinking') {
@@ -144,6 +162,9 @@ export function useClaudeEvents(): void {
       }),
       window.api.onSubagentMessage(({ routingId, data }) => {
         addSubagentMessage(routingId, data.toolUseId, data.message)
+      }),
+      window.api.onSubagentMessageBatch(({ routingId, data }) => {
+        appendSubagentMessageBatch(routingId, data.toolUseId, data.messages)
       }),
       window.api.onSubagentToolResult(({ routingId, data }) => {
         appendSubagentToolResult(routingId, data.toolUseId, data.toolResultToolUseId, data.result, data.isError)
@@ -182,5 +203,5 @@ export function useClaudeEvents(): void {
     ]
 
     return () => cleanups.forEach((fn) => fn())
-  }, [addMessage, appendStreamingText, appendStreamingThinking, addPendingApproval, clearPendingApprovals, setStatus, addError, appendToolResult, updateTaskProgress, addTaskNotification, addSubagentMessage, appendSubagentStreamingText, appendSubagentStreamingThinking, appendSubagentToolResult, setBackgroundOutput, setStatusLine, setPermissionMode, setSlashCommands])
+  }, [addMessage, appendStreamingText, appendStreamingThinking, addPendingApproval, clearPendingApprovals, setStatus, addError, appendToolResult, updateTaskProgress, addTaskNotification, addSubagentMessage, appendSubagentMessageBatch, appendSubagentStreamingText, appendSubagentStreamingThinking, appendSubagentToolResult, setBackgroundOutput, setStatusLine, setPermissionMode, setSlashCommands])
 }

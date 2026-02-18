@@ -50,4 +50,13 @@ export class SessionManager {
     this.sessions.forEach((session) => session.cancel())
     this.sessions.clear()
   }
+
+  getTeamInfo(routingId: string): ReturnType<ClaudeSession['getTeamInfo']> | null {
+    return this.sessions.get(routingId)?.getTeamInfo() ?? null
+  }
+
+  /** Iterate all active sessions */
+  forEach(fn: (session: ClaudeSession) => void): void {
+    this.sessions.forEach(fn)
+  }
 }

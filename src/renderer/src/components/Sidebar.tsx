@@ -149,15 +149,25 @@ export function Sidebar({ style, onToggleCollapse }: {
       return
     }
     // Load from JSONL
-    const { messages, taskNotifications, customTitle, agentIdToToolUseId, statusLine } = await window.api.loadSessionHistory(info.sessionId, info.projectKey)
+    const { messages, taskNotifications, customTitle, agentIdToToolUseId, statusLine, teamName, pendingTeammates, taskPrompts } = await window.api.loadSessionHistory(info.sessionId, info.projectKey)
+
+    // For team agents, agent_ids (e.g. "historian@cny-v5") don't match JSONL filenames.
+    // Build a mapping from toolUseId → hex filename by scanning subagent directory.
+    let teamFileMap: Record<string, string> = {}
+    if (teamName && Object.keys(taskPrompts).length > 0) {
+      teamFileMap = await window.api.buildSubagentFileMap(info.sessionId, info.projectKey, taskPrompts)
+    }
+
     // Load subagent histories in parallel
     const subagentMessages: Record<string, ChatMessage[]> = {}
     const entries = Object.entries(agentIdToToolUseId)
     if (entries.length > 0) {
       const results = await Promise.all(
         entries.map(async ([agentId, toolUseId]) => {
+          // For team agents, use the hex ID from the file map; for regular agents, use agentId directly
+          const fileId = teamFileMap[toolUseId] || agentId
           try {
-            const msgs = await window.api.loadSubagentHistory(info.sessionId, info.projectKey, agentId)
+            const msgs = await window.api.loadSubagentHistory(info.sessionId, info.projectKey, fileId)
             return { toolUseId, msgs }
           } catch {
             return { toolUseId, msgs: [] as ChatMessage[] }
@@ -170,6 +180,39 @@ export function Sidebar({ style, onToggleCollapse }: {
     }
     loadHistoricalSession(routingId, messages, info.cwd, taskNotifications, subagentMessages, statusLine)
     if (customTitle) setCustomTitle(routingId, customTitle)
+
+    // Reconstruct team info from JSONL data
+    if (teamName) {
+      const store = useSessionStore.getState()
+      store.setTeamName(routingId, teamName)
+      // Build TeammateInfo from pendingTeammates + agentIdToToolUseId
+      const sanitize = (s: string): string => s.replace(/[^a-zA-Z0-9_-]/g, '-')
+      // Reverse map: toolUseId → agentId
+      const toolUseIdToAgentId: Record<string, string> = {}
+      for (const [agentId, toolUseId] of Object.entries(agentIdToToolUseId)) {
+        toolUseIdToAgentId[toolUseId] = agentId
+      }
+      for (const [toolUseId, pending] of Object.entries(pendingTeammates)) {
+        // Only include teammates belonging to the current (last) team
+        if (pending.teamName !== teamName) continue
+        const agentId = toolUseIdToAgentId[toolUseId]
+        if (!agentId) continue
+        // Determine status from task notifications
+        const notif = taskNotifications.find((n) => n.toolUseId === toolUseId)
+        const statusMap: Record<string, 'completed' | 'failed' | 'stopped'> = { completed: 'completed', failed: 'failed', stopped: 'stopped' }
+        const status = notif ? (statusMap[notif.status] || 'completed') : 'completed'
+        store.addTeammate(routingId, {
+          toolUseId,
+          name: pending.name,
+          sanitizedName: sanitize(pending.name),
+          teamName: pending.teamName,
+          sanitizedTeamName: sanitize(pending.teamName),
+          agentId,
+          status
+        })
+      }
+    }
+
     // Rebuild todos from TaskCreate/TaskUpdate/TodoWrite tool calls
     const todos = buildTodosFromMessages(messages)
     if (todos) useSessionStore.getState().setTodos(routingId, todos)

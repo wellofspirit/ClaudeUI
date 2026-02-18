@@ -104,6 +104,42 @@ export interface SubagentMessageData {
   message: ChatMessage
 }
 
+export interface SubagentMessageBatchData {
+  toolUseId: string
+  messages: ChatMessage[]
+}
+
+export interface TeamInfoSnapshot {
+  routingId: string
+  teamName: string | null
+  teammates: TeammateInfo[]
+  /** Session ID for JSONL history loading */
+  sessionId: string | null
+  /** Project key for JSONL history loading */
+  projectKey: string | null
+}
+
+export interface TeammateInfo {
+  toolUseId: string
+  name: string
+  sanitizedName: string
+  teamName: string
+  sanitizedTeamName: string
+  agentId: string
+  /** Hex ID for subagent JSONL filename (may differ from agentId for team agents) */
+  fileId?: string
+  status: 'running' | 'completed' | 'failed' | 'stopped'
+}
+
+export interface TeammateDetectedData {
+  toolUseId: string
+  name: string
+  sanitizedName: string
+  teamName: string
+  sanitizedTeamName: string
+  agentId: string
+}
+
 export interface SubagentToolResultData {
   toolUseId: string
   toolResultToolUseId: string
@@ -165,8 +201,9 @@ export interface ClaudeAPI {
   maximizeWindow(): Promise<void>
   closeWindow(): Promise<void>
   listDirectories(): Promise<DirectoryGroup[]>
-  loadSessionHistory(sessionId: string, projectKey: string): Promise<{ messages: ChatMessage[]; taskNotifications: TaskNotification[]; customTitle: string | null; agentIdToToolUseId: Record<string, string>; statusLine: StatusLineData | null }>
+  loadSessionHistory(sessionId: string, projectKey: string): Promise<{ messages: ChatMessage[]; taskNotifications: TaskNotification[]; customTitle: string | null; agentIdToToolUseId: Record<string, string>; statusLine: StatusLineData | null; teamName: string | null; pendingTeammates: Record<string, { name: string; teamName: string }>; taskPrompts: Record<string, string> }>
   loadSubagentHistory(sessionId: string, projectKey: string, agentId: string): Promise<ChatMessage[]>
+  buildSubagentFileMap(sessionId: string, projectKey: string, taskPrompts: Record<string, string>): Promise<Record<string, string>>
   loadBackgroundOutput(projectKey: string, taskId: string, outputFile?: string): Promise<{ content: string | null; purged: boolean }>
 
   onMessage(cb: (data: RoutedData<ChatMessage>) => void): () => void
@@ -181,6 +218,7 @@ export interface ClaudeAPI {
   onTaskNotification(cb: (data: RoutedData<TaskNotification>) => void): () => void
   onSubagentStream(cb: (data: RoutedData<SubagentStreamDelta>) => void): () => void
   onSubagentMessage(cb: (data: RoutedData<SubagentMessageData>) => void): () => void
+  onSubagentMessageBatch(cb: (data: RoutedData<SubagentMessageBatchData>) => void): () => void
   onSubagentToolResult(cb: (data: RoutedData<SubagentToolResultData>) => void): () => void
   onPermissionMode(cb: (data: RoutedData<PermissionMode>) => void): () => void
   onBackgroundOutput(cb: (data: RoutedData<BackgroundOutput>) => void): () => void
@@ -200,6 +238,12 @@ export interface ClaudeAPI {
   unwatchSession(routingId: string): Promise<void>
   onWatchUpdate(cb: (data: WatchUpdate) => void): () => void
   onDirectoriesChanged(cb: () => void): () => void
+  sendToTeammate(routingId: string, sanitizedTeamName: string, sanitizedAgentName: string, message: string): Promise<void>
+  broadcastToTeam(routingId: string, sanitizedTeamName: string, sanitizedAgentNames: string[], message: string): Promise<void>
+  getTeamInfo(routingId: string): Promise<TeamInfoSnapshot | null>
+  openTeamsViewWindow(routingId: string): Promise<void>
+  onTeammateDetected(cb: (data: RoutedData<TeammateDetectedData>) => void): () => void
+  onTeamCreated(cb: (data: RoutedData<{ teamName: string }>) => void): () => void
   openInVSCode(cwd: string): Promise<void>
   loadSettings(): Promise<Record<string, unknown>>
   saveSettings(settings: Record<string, unknown>): Promise<void>

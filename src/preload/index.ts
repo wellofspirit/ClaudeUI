@@ -22,6 +22,8 @@ const api: ClaudeAPI = {
     ipcRenderer.invoke('session:load-history', sessionId, projectKey),
   loadSubagentHistory: (sessionId: string, projectKey: string, agentId: string) =>
     ipcRenderer.invoke('session:load-subagent-history', sessionId, projectKey, agentId),
+  buildSubagentFileMap: (sessionId: string, projectKey: string, taskPrompts: Record<string, string>) =>
+    ipcRenderer.invoke('session:build-subagent-file-map', sessionId, projectKey, taskPrompts),
   loadBackgroundOutput: (projectKey: string, taskId: string, outputFile?: string) =>
     ipcRenderer.invoke('session:load-background-output', projectKey, taskId, outputFile),
 
@@ -85,6 +87,11 @@ const api: ClaudeAPI = {
     ipcRenderer.on('session:subagent-message', handler)
     return () => ipcRenderer.removeListener('session:subagent-message', handler)
   },
+  onSubagentMessageBatch: (cb) => {
+    const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as never)
+    ipcRenderer.on('session:subagent-message-batch', handler)
+    return () => ipcRenderer.removeListener('session:subagent-message-batch', handler)
+  },
   onSubagentToolResult: (cb) => {
     const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as never)
     ipcRenderer.on('session:subagent-tool-result', handler)
@@ -141,6 +148,24 @@ const api: ClaudeAPI = {
     const handler = (): void => cb()
     ipcRenderer.on('session:directories-changed', handler)
     return () => ipcRenderer.removeListener('session:directories-changed', handler)
+  },
+  sendToTeammate: (routingId: string, sanitizedTeamName: string, sanitizedAgentName: string, message: string) =>
+    ipcRenderer.invoke('session:send-to-teammate', routingId, sanitizedTeamName, sanitizedAgentName, message),
+  broadcastToTeam: (routingId: string, sanitizedTeamName: string, sanitizedAgentNames: string[], message: string) =>
+    ipcRenderer.invoke('session:broadcast-to-team', routingId, sanitizedTeamName, sanitizedAgentNames, message),
+  getTeamInfo: (routingId: string) =>
+    ipcRenderer.invoke('session:get-team-info', routingId),
+  openTeamsViewWindow: (routingId: string) =>
+    ipcRenderer.invoke('session:open-teams-view', routingId),
+  onTeammateDetected: (cb) => {
+    const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as never)
+    ipcRenderer.on('session:teammate-detected', handler)
+    return () => ipcRenderer.removeListener('session:teammate-detected', handler)
+  },
+  onTeamCreated: (cb) => {
+    const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as never)
+    ipcRenderer.on('session:team-created', handler)
+    return () => ipcRenderer.removeListener('session:team-created', handler)
   },
   openInVSCode: (cwd: string) => ipcRenderer.invoke('app:open-in-vscode', cwd),
   loadSettings: () => ipcRenderer.invoke('config:load-settings'),

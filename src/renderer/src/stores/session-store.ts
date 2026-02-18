@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { useShallow } from 'zustand/react/shallow'
 import type {
   ChatMessage,
   SessionStatus,
@@ -11,7 +12,8 @@ import type {
   ModelInfo,
   DirectoryGroup,
   StatusLineData,
-  SlashCommandInfo
+  SlashCommandInfo,
+  TeammateInfo
 } from '../../../shared/types'
 
 /**
@@ -298,6 +300,9 @@ export interface PerSessionState {
   queuedText: string
   draftText: string
   selectedModel: string
+  teamName: string | null
+  teammates: Record<string, TeammateInfo>  // keyed by toolUseId
+  focusedAgentId: string | null            // null = main agent
 }
 
 const EMPTY_SESSION_STATE: PerSessionState = {
@@ -330,7 +335,10 @@ const EMPTY_SESSION_STATE: PerSessionState = {
   statusLine: null,
   queuedText: '',
   draftText: '',
-  selectedModel: 'default'
+  selectedModel: 'default',
+  teamName: null,
+  teammates: {},
+  focusedAgentId: null
 }
 
 function createEmptySession(cwd: string): PerSessionState {
@@ -354,6 +362,19 @@ function updateSession(
   const session = sessions[routingId]
   if (!session) return sessions
   return { ...sessions, [routingId]: { ...session, ...updater(session) } }
+}
+
+/**
+ * Ensure a session exists for this routingId, creating an empty one if needed.
+ * Used by team-related actions so the teams-view window (separate renderer with
+ * its own empty store) can bootstrap from incoming IPC events.
+ */
+function ensureSession(
+  sessions: Record<string, PerSessionState>,
+  routingId: string
+): Record<string, PerSessionState> {
+  if (sessions[routingId]) return sessions
+  return { ...sessions, [routingId]: createEmptySession('') }
 }
 
 interface SessionState {
@@ -404,7 +425,9 @@ interface SessionState {
   setTodos: (routingId: string, todos: TodoItem[]) => void
   updateTaskProgress: (routingId: string, progress: TaskProgress) => void
   addTaskNotification: (routingId: string, notification: TaskNotification) => void
+  bulkSetSubagentMessages: (routingId: string, subagentMessages: Record<string, ChatMessage[]>) => void
   addSubagentMessage: (routingId: string, toolUseId: string, message: ChatMessage) => void
+  appendSubagentMessageBatch: (routingId: string, toolUseId: string, messages: ChatMessage[]) => void
   appendSubagentStreamingText: (routingId: string, toolUseId: string, text: string) => void
   appendSubagentStreamingThinking: (routingId: string, toolUseId: string, text: string) => void
   appendSubagentToolResult: (routingId: string, toolUseId: string, toolResultToolUseId: string, result: string, isError: boolean) => void
@@ -433,6 +456,11 @@ interface SessionState {
   setAvailableModels: (models: ModelInfo[]) => void
   rekeySession: (oldId: string, newId: string) => void
   clearConversation: (routingId: string) => void
+  setTeamName: (routingId: string, teamName: string) => void
+  addTeammate: (routingId: string, info: TeammateInfo) => void
+  updateTeammateStatus: (routingId: string, toolUseId: string, status: TeammateInfo['status']) => void
+  setFocusedAgent: (routingId: string, toolUseId: string | null) => void
+  addTeammateUserMessage: (routingId: string, toolUseId: string, id: string, text: string) => void
 }
 
 export const useSessionStore = create<SessionState>((set) => ({
@@ -559,8 +587,8 @@ export const useSessionStore = create<SessionState>((set) => ({
 
   addMessage: (routingId, message) =>
     set((state) => {
-      const session = state.sessions[routingId]
-      if (!session) return state
+      const sessions = ensureSession(state.sessions, routingId)
+      const session = sessions[routingId]
 
       const idx = session.messages.findIndex((m) => m.id === message.id)
       const hasNonThinking = message.content.some(
@@ -589,7 +617,7 @@ export const useSessionStore = create<SessionState>((set) => ({
 
       return {
         sessions: {
-          ...state.sessions,
+          ...sessions,
           [routingId]: {
             ...session,
             messages: updatedMessages,
@@ -631,12 +659,12 @@ export const useSessionStore = create<SessionState>((set) => ({
 
   appendStreamingText: (routingId, text) =>
     set((state) => {
-      const session = state.sessions[routingId]
-      if (!session) return state
+      const sessions = ensureSession(state.sessions, routingId)
+      const session = sessions[routingId]
 
       if (session.thinkingStartedAt) {
         return {
-          sessions: updateSession(state.sessions, routingId, (s) => ({
+          sessions: updateSession(sessions, routingId, (s) => ({
             streamingText: s.streamingText + text,
             streamingThinking: '',
             thinkingDurationMs: Date.now() - s.thinkingStartedAt!,
@@ -645,7 +673,7 @@ export const useSessionStore = create<SessionState>((set) => ({
         }
       }
       return {
-        sessions: updateSession(state.sessions, routingId, (s) => ({
+        sessions: updateSession(sessions, routingId, (s) => ({
           streamingText: s.streamingText + text
         }))
       }
@@ -766,10 +794,20 @@ export const useSessionStore = create<SessionState>((set) => ({
       })
     })),
 
+  bulkSetSubagentMessages: (routingId, subagentMessages) =>
+    set((state) => {
+      const sessions = ensureSession(state.sessions, routingId)
+      return {
+        sessions: updateSession(sessions, routingId, (s) => ({
+          subagentMessages: { ...s.subagentMessages, ...subagentMessages }
+        }))
+      }
+    }),
+
   addSubagentMessage: (routingId, toolUseId, message) =>
     set((state) => {
-      const session = state.sessions[routingId]
-      if (!session) return state
+      const sessions = ensureSession(state.sessions, routingId)
+      const session = sessions[routingId]
 
       const existing = session.subagentMessages[toolUseId] || []
       const idx = existing.findIndex((m) => m.id === message.id)
@@ -785,7 +823,7 @@ export const useSessionStore = create<SessionState>((set) => ({
       }
       return {
         sessions: {
-          ...state.sessions,
+          ...sessions,
           [routingId]: {
             ...session,
             subagentMessages: { ...session.subagentMessages, [toolUseId]: updated },
@@ -796,29 +834,66 @@ export const useSessionStore = create<SessionState>((set) => ({
       }
     }),
 
-  appendSubagentStreamingText: (routingId, toolUseId, text) =>
-    set((state) => ({
-      sessions: updateSession(state.sessions, routingId, (s) => ({
-        subagentStreamingText: {
-          ...s.subagentStreamingText,
-          [toolUseId]: (s.subagentStreamingText[toolUseId] || '') + text
-        },
-        subagentStreamingThinking: {
-          ...s.subagentStreamingThinking,
-          [toolUseId]: ''
+  appendSubagentMessageBatch: (routingId, toolUseId, messages) =>
+    set((state) => {
+      const sessions = ensureSession(state.sessions, routingId)
+      const session = sessions[routingId]
+      let current = [...(session.subagentMessages[toolUseId] || [])]
+
+      for (const message of messages) {
+        const idx = current.findIndex((m) => m.id === message.id)
+        if (idx < 0) {
+          current.push(message)
+        } else {
+          current[idx] = {
+            ...message,
+            content: mergeContentBlocks(current[idx].content, message.content)
+          }
         }
-      }))
-    })),
+      }
+
+      return {
+        sessions: {
+          ...sessions,
+          [routingId]: {
+            ...session,
+            subagentMessages: { ...session.subagentMessages, [toolUseId]: current },
+            subagentStreamingText: { ...session.subagentStreamingText, [toolUseId]: '' },
+            subagentStreamingThinking: { ...session.subagentStreamingThinking, [toolUseId]: '' }
+          }
+        }
+      }
+    }),
+
+  appendSubagentStreamingText: (routingId, toolUseId, text) =>
+    set((state) => {
+      const sessions = ensureSession(state.sessions, routingId)
+      return {
+        sessions: updateSession(sessions, routingId, (s) => ({
+          subagentStreamingText: {
+            ...s.subagentStreamingText,
+            [toolUseId]: (s.subagentStreamingText[toolUseId] || '') + text
+          },
+          subagentStreamingThinking: {
+            ...s.subagentStreamingThinking,
+            [toolUseId]: ''
+          }
+        }))
+      }
+    }),
 
   appendSubagentStreamingThinking: (routingId, toolUseId, text) =>
-    set((state) => ({
-      sessions: updateSession(state.sessions, routingId, (s) => ({
-        subagentStreamingThinking: {
-          ...s.subagentStreamingThinking,
-          [toolUseId]: (s.subagentStreamingThinking[toolUseId] || '') + text
-        }
-      }))
-    })),
+    set((state) => {
+      const sessions = ensureSession(state.sessions, routingId)
+      return {
+        sessions: updateSession(sessions, routingId, (s) => ({
+          subagentStreamingThinking: {
+            ...s.subagentStreamingThinking,
+            [toolUseId]: (s.subagentStreamingThinking[toolUseId] || '') + text
+          }
+        }))
+      }
+    }),
 
   appendSubagentToolResult: (routingId, toolUseId, toolResultToolUseId, result, isError) =>
     set((state) => {
@@ -1091,6 +1166,69 @@ export const useSessionStore = create<SessionState>((set) => ({
           [routingId]: { ...createEmptySession(session.cwd), sdkActive: session.sdkActive }
         }
       }
+    }),
+
+  setTeamName: (routingId, teamName) =>
+    set((state) => {
+      const sessions = ensureSession(state.sessions, routingId)
+      return { sessions: updateSession(sessions, routingId, () => ({ teamName })) }
+    }),
+
+  addTeammate: (routingId, info) =>
+    set((state) => {
+      const sessions = ensureSession(state.sessions, routingId)
+      return {
+        sessions: updateSession(sessions, routingId, (s) => ({
+          teammates: { ...s.teammates, [info.toolUseId]: info }
+        }))
+      }
+    }),
+
+  updateTeammateStatus: (routingId, toolUseId, status) =>
+    set((state) => {
+      const session = state.sessions[routingId]
+      if (!session) return state
+      const teammate = session.teammates[toolUseId]
+      if (!teammate) return state
+      return {
+        sessions: {
+          ...state.sessions,
+          [routingId]: {
+            ...session,
+            teammates: {
+              ...session.teammates,
+              [toolUseId]: { ...teammate, status }
+            }
+          }
+        }
+      }
+    }),
+
+  setFocusedAgent: (routingId, toolUseId) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, routingId, () => ({ focusedAgentId: toolUseId }))
+    })),
+
+  addTeammateUserMessage: (routingId, toolUseId, id, text) =>
+    set((state) => {
+      const session = state.sessions[routingId]
+      if (!session) return state
+      const existing = session.subagentMessages[toolUseId] || []
+      const userMsg: ChatMessage = {
+        id,
+        role: 'user',
+        content: [{ type: 'text', text }],
+        timestamp: Date.now()
+      }
+      return {
+        sessions: {
+          ...state.sessions,
+          [routingId]: {
+            ...session,
+            subagentMessages: { ...session.subagentMessages, [toolUseId]: [...existing, userMsg] }
+          }
+        }
+      }
     })
 }))
 
@@ -1104,4 +1242,46 @@ export function useActiveSession<T>(selector: (s: PerSessionState) => T): T {
     if (!id || !state.sessions[id]) return selector(EMPTY_SESSION_STATE)
     return selector(state.sessions[id])
   })
+}
+
+export interface FocusedAgentData {
+  isMain: boolean
+  messages: ChatMessage[]
+  streamingText: string
+  streamingThinking: string
+  thinkingStartedAt: number | null
+}
+
+const EMPTY_MESSAGES: ChatMessage[] = []
+
+/**
+ * Returns the messages/streaming for whichever agent tab is focused.
+ * When focusedAgentId is null → main agent. Otherwise → subagent messages.
+ * Uses useShallow for shallow equality to avoid infinite re-render loops.
+ */
+export function useFocusedAgentData(): FocusedAgentData {
+  return useSessionStore(useShallow((state) => {
+    const id = state.activeSessionId
+    if (!id || !state.sessions[id]) {
+      return { isMain: true, messages: EMPTY_MESSAGES, streamingText: '', streamingThinking: '', thinkingStartedAt: null }
+    }
+    const session = state.sessions[id]
+    const focused = session.focusedAgentId
+    if (!focused) {
+      return {
+        isMain: true,
+        messages: session.messages,
+        streamingText: session.streamingText,
+        streamingThinking: session.streamingThinking,
+        thinkingStartedAt: session.thinkingStartedAt
+      }
+    }
+    return {
+      isMain: false,
+      messages: session.subagentMessages[focused] || EMPTY_MESSAGES,
+      streamingText: session.subagentStreamingText[focused] || '',
+      streamingThinking: session.subagentStreamingThinking[focused] || '',
+      thinkingStartedAt: null // subagent thinking tracked separately
+    }
+  }))
 }
