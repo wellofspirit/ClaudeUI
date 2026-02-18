@@ -245,6 +245,23 @@ export interface ClaudeAPI {
   onTeammateDetected(cb: (data: RoutedData<TeammateDetectedData>) => void): () => void
   onTeamCreated(cb: (data: RoutedData<{ teamName: string }>) => void): () => void
   onTeamDeleted(cb: (data: RoutedData<Record<string, never>>) => void): () => void
+  // Git operations
+  gitCheckRepo(cwd: string): Promise<boolean>
+  gitGetStatus(cwd: string): Promise<GitStatusData>
+  gitGetBranches(cwd: string): Promise<GitBranchData>
+  gitCheckout(cwd: string, branch: string): Promise<void>
+  gitCreateBranch(cwd: string, name: string): Promise<void>
+  gitGetFileDiff(cwd: string, filePath: string, staged: boolean): Promise<{ oldContent: string; newContent: string }>
+  gitStageFile(cwd: string, filePath: string): Promise<void>
+  gitUnstageFile(cwd: string, filePath: string): Promise<void>
+  gitStageAll(cwd: string): Promise<void>
+  gitUnstageAll(cwd: string): Promise<void>
+  gitCommit(cwd: string, message: string): Promise<string>
+  gitPush(cwd: string): Promise<void>
+  gitStartWatching(cwd: string): Promise<void>
+  gitStopWatching(cwd: string): Promise<void>
+  onGitStatusUpdate(cb: (data: { cwd: string; status: GitStatusData }) => void): () => void
+
   openInVSCode(cwd: string): Promise<void>
   loadSettings(): Promise<Record<string, unknown>>
   saveSettings(settings: Record<string, unknown>): Promise<void>
@@ -280,4 +297,31 @@ export interface UISessionConfig {
 export interface SlashCommandInfo {
   name: string
   description?: string
+}
+
+// ---------------------------------------------------------------------------
+// Git integration types
+// ---------------------------------------------------------------------------
+
+export interface GitFileStatus {
+  path: string
+  index: string       // staged status: ' '|'M'|'A'|'D'|'R'|'?'|'!'
+  working: string     // working tree status
+}
+
+export interface GitStatusData {
+  branch: string
+  ahead: number
+  behind: number
+  files: GitFileStatus[]
+  staged: string[]
+  unstaged: string[]
+  untracked: string[]
+}
+
+export interface GitBranchData {
+  current: string
+  local: string[]
+  remote: string[]
+  tracking: Record<string, string>
 }

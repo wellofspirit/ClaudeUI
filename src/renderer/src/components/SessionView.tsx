@@ -2,7 +2,9 @@ import { useState, useCallback, useRef, useEffect, createContext, useContext } f
 import { Sidebar } from './Sidebar'
 import { ChatPanel } from './chat/ChatPanel'
 import { TaskDetailPanel } from './TaskDetailPanel'
+import { GitPanel } from './git/GitPanel'
 import { useActiveSession, useSessionStore, applyTheme } from '../stores/session-store'
+import { useGitWatcher } from '../hooks/useGitWatcher'
 
 const PERMISSION_MODES = ['default', 'acceptEdits', 'plan'] as const
 
@@ -59,10 +61,14 @@ function ResizeHandle({ onMouseDown }: { onMouseDown: (e: React.MouseEvent) => v
 
 export function SessionView(): React.JSX.Element {
   const uiFontScale = useSessionStore((s) => s.settings.uiFontScale)
-  const taskPanelOpen = useActiveSession((s) => s.taskPanelOpen)
+  const rightPanel = useActiveSession((s) => s.rightPanel)
   const sidebar = useResizablePanel('sidebarWidth', 240, 180, 480)
   const taskPanel = useResizablePanel('taskPanelWidth', 400, 280, 700)
+  const gitPanel = useResizablePanel('gitPanelWidth', 450, 320, 800)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem('sidebarCollapsed') === 'true')
+
+  // Git repo detection and polling
+  useGitWatcher()
 
   const toggleSidebar = useCallback(() => {
     setSidebarCollapsed((prev) => {
@@ -94,6 +100,27 @@ export function SessionView(): React.JSX.Element {
     return () => document.removeEventListener('keydown', handler)
   }, [])
 
+  // Ctrl/Cmd+Shift+G to toggle git panel
+  useEffect(() => {
+    const handler = (e: KeyboardEvent): void => {
+      if (e.key === 'G' && e.shiftKey && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault()
+        const state = useSessionStore.getState()
+        const { activeSessionId, sessions } = state
+        if (!activeSessionId) return
+        const session = sessions[activeSessionId]
+        if (!session?.isGitRepo) return
+        if (session.rightPanel === 'git') {
+          state.closeGitPanel(activeSessionId)
+        } else {
+          state.openGitPanel(activeSessionId)
+        }
+      }
+    }
+    document.addEventListener('keydown', handler)
+    return () => document.removeEventListener('keydown', handler)
+  }, [])
+
   return (
     <SidebarContext.Provider value={{ collapsed: sidebarCollapsed, toggle: toggleSidebar }}>
       <div style={uiFontScale !== 1 ? { zoom: uiFontScale, height: `calc(100vh / ${uiFontScale})`, width: `calc(100vw / ${uiFontScale})` } : undefined} className={`h-screen flex ${import.meta.env.DEV ? 'border-2 border-orange-400 rounded-2xl overflow-hidden' : ''}`}>
@@ -107,10 +134,16 @@ export function SessionView(): React.JSX.Element {
           <div className={`flex-1 min-w-0 h-full flex flex-col bg-bg-primary overflow-hidden ${sidebarCollapsed ? '' : 'rounded-l-2xl shadow-[-1px_0_4px_rgba(0,0,0,0.15),-3px_0_12px_rgba(0,0,0,0.1)]'}`}>
             <ChatPanel />
           </div>
-          {taskPanelOpen && (
+          {rightPanel === 'task' && (
             <>
               <ResizeHandle onMouseDown={taskPanel.onMouseDown(-1)} />
               <TaskDetailPanel style={{ width: taskPanel.width }} />
+            </>
+          )}
+          {rightPanel === 'git' && (
+            <>
+              <ResizeHandle onMouseDown={gitPanel.onMouseDown(-1)} />
+              <GitPanel style={{ width: gitPanel.width }} />
             </>
           )}
         </div>

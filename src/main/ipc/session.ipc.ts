@@ -9,6 +9,7 @@ import { listDirectories, loadSessionHistory, loadSubagentHistory, buildSubagent
 import { watchSession, unwatchSession } from '../services/session-watcher'
 import { loadSettings, saveSettings, loadSessionConfig, saveSessionConfig, loadSlashCommands, saveSlashCommands, startConfigWatcher } from '../services/ui-config'
 import type { UISettings, UISessionConfig, SlashCommandCache } from '../services/ui-config'
+import { gitServiceManager } from '../services/git-service'
 import type { ApprovalDecision, ModelInfo } from '../../shared/types'
 
 let cachedModels: ModelInfo[] | null = null
@@ -298,6 +299,148 @@ export function registerSessionIpc(win: BrowserWindow): void {
       teamsViewWindow.loadURL(process.env['ELECTRON_RENDERER_URL'] + '?' + searchParams)
     } else {
       teamsViewWindow.loadFile(path.join(__dirname, '../renderer/index.html'), { search: searchParams })
+    }
+  })
+
+  // -------------------------------------------------------------------------
+  // Git integration IPC handlers
+  // -------------------------------------------------------------------------
+
+  ipcMain.handle('git:check-repo', async (_e, cwd: string) => {
+    const svc = gitServiceManager.get(cwd)
+    try {
+      return await svc.isGitRepo()
+    } finally {
+      gitServiceManager.release(cwd)
+    }
+  })
+
+  ipcMain.handle('git:status', async (_e, cwd: string) => {
+    const svc = gitServiceManager.get(cwd)
+    try {
+      return await svc.getStatus()
+    } finally {
+      gitServiceManager.release(cwd)
+    }
+  })
+
+  ipcMain.handle('git:branches', async (_e, cwd: string) => {
+    const svc = gitServiceManager.get(cwd)
+    try {
+      return await svc.getBranches()
+    } finally {
+      gitServiceManager.release(cwd)
+    }
+  })
+
+  ipcMain.handle('git:checkout', async (_e, cwd: string, branch: string) => {
+    const svc = gitServiceManager.get(cwd)
+    try {
+      await svc.checkout(branch)
+    } finally {
+      gitServiceManager.release(cwd)
+    }
+  })
+
+  ipcMain.handle('git:create-branch', async (_e, cwd: string, name: string) => {
+    const svc = gitServiceManager.get(cwd)
+    try {
+      await svc.createBranch(name)
+    } finally {
+      gitServiceManager.release(cwd)
+    }
+  })
+
+  ipcMain.handle('git:file-diff', async (_e, cwd: string, filePath: string, staged: boolean) => {
+    const svc = gitServiceManager.get(cwd)
+    try {
+      return await svc.getFileDiff(filePath, staged)
+    } finally {
+      gitServiceManager.release(cwd)
+    }
+  })
+
+  ipcMain.handle('git:stage-file', async (_e, cwd: string, filePath: string) => {
+    const svc = gitServiceManager.get(cwd)
+    try {
+      await svc.stageFile(filePath)
+    } finally {
+      gitServiceManager.release(cwd)
+    }
+  })
+
+  ipcMain.handle('git:unstage-file', async (_e, cwd: string, filePath: string) => {
+    const svc = gitServiceManager.get(cwd)
+    try {
+      await svc.unstageFile(filePath)
+    } finally {
+      gitServiceManager.release(cwd)
+    }
+  })
+
+  ipcMain.handle('git:stage-all', async (_e, cwd: string) => {
+    const svc = gitServiceManager.get(cwd)
+    try {
+      await svc.stageAll()
+    } finally {
+      gitServiceManager.release(cwd)
+    }
+  })
+
+  ipcMain.handle('git:unstage-all', async (_e, cwd: string) => {
+    const svc = gitServiceManager.get(cwd)
+    try {
+      await svc.unstageAll()
+    } finally {
+      gitServiceManager.release(cwd)
+    }
+  })
+
+  ipcMain.handle('git:commit', async (_e, cwd: string, message: string) => {
+    const svc = gitServiceManager.get(cwd)
+    try {
+      return await svc.commit(message)
+    } finally {
+      gitServiceManager.release(cwd)
+    }
+  })
+
+  ipcMain.handle('git:push', async (_e, cwd: string) => {
+    const svc = gitServiceManager.get(cwd)
+    try {
+      await svc.push()
+    } finally {
+      gitServiceManager.release(cwd)
+    }
+  })
+
+  // Git polling — persistent service per cwd
+  const gitWatchers = new Map<string, { refCount: number }>()
+
+  ipcMain.handle('git:start-watching', async (_e, cwd: string) => {
+    const existing = gitWatchers.get(cwd)
+    if (existing) {
+      existing.refCount++
+      return
+    }
+    gitWatchers.set(cwd, { refCount: 1 })
+    const svc = gitServiceManager.get(cwd)
+    svc.startPolling((status) => {
+      if (!win.isDestroyed()) {
+        win.webContents.send('git:status-update', { cwd, status })
+      }
+    }, 5000)
+  })
+
+  ipcMain.handle('git:stop-watching', async (_e, cwd: string) => {
+    const entry = gitWatchers.get(cwd)
+    if (!entry) return
+    entry.refCount--
+    if (entry.refCount <= 0) {
+      gitWatchers.delete(cwd)
+      const svc = gitServiceManager.getIfExists(cwd)
+      svc?.stopPolling()
+      gitServiceManager.release(cwd)
     }
   })
 

@@ -11,6 +11,8 @@ import { FloatingError } from './FloatingError'
 import { WindowControls } from '../WindowControls'
 import { useSidebarCollapsed } from '../SessionView'
 import { AgentTabBar } from './AgentTabBar'
+import { GitBranchPill } from '../git/GitBranchPill'
+import { GitChangesPill } from '../git/GitChangesPill'
 
 function QueuedMessageCard(): React.JSX.Element | null {
   const queuedText = useActiveSession((s) => s.queuedText)
@@ -445,6 +447,8 @@ function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Element {
             <span>VSCode</span>
           </button>
         )}
+        <GitBranchPill />
+        <GitChangesPill />
         {cost > 0 && (
           <span className="text-[11px] text-text-muted font-mono">
             {formatTopBarCost(cost)}{durationStr ? ` (${durationStr})` : ''}

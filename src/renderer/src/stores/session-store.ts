@@ -13,7 +13,9 @@ import type {
   DirectoryGroup,
   StatusLineData,
   SlashCommandInfo,
-  TeammateInfo
+  TeammateInfo,
+  GitStatusData,
+  GitBranchData
 } from '../../../shared/types'
 
 /**
@@ -136,6 +138,8 @@ export interface AppSettings {
   hideToolInput: boolean
   expandThinking: boolean
   diffViewSplit: boolean
+  diffIgnoreWhitespace: boolean
+  diffWrapLines: boolean
   chatWidthMode: 'px' | 'percent'
   chatWidthPx: number
   chatWidthPercent: number
@@ -144,6 +148,7 @@ export interface AppSettings {
   uiFontScale: number
   statusLineAlign: 'left' | 'center' | 'right'
   statusLineTemplate: string
+  gitPanelLayout: 'single' | 'double'
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -153,6 +158,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   hideToolInput: false,
   expandThinking: false,
   diffViewSplit: false,
+  diffIgnoreWhitespace: false,
+  diffWrapLines: false,
   chatWidthMode: 'percent',
   chatWidthPx: 740,
   chatWidthPercent: 80,
@@ -160,7 +167,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   chatFontScale: 1,
   uiFontScale: 1,
   statusLineAlign: 'center',
-  statusLineTemplate: 'In: {in} / Out: {out} / Total: {total} · {used}% context used'
+  statusLineTemplate: 'In: {in} / Out: {out} / Total: {total} · {used}% context used',
+  gitPanelLayout: 'single'
 }
 
 export function applyTheme(theme: ThemeId): void {
@@ -285,7 +293,7 @@ export interface PerSessionState {
   taskProgressMap: Record<string, TaskProgress>
   taskNotifications: TaskNotification[]
   openedTaskToolUseIds: string[]
-  taskPanelOpen: boolean
+  rightPanel: 'none' | 'task' | 'git'
   subagentMessages: Record<string, ChatMessage[]>
   subagentStreamingText: Record<string, string>
   subagentStreamingThinking: Record<string, string>
@@ -303,6 +311,14 @@ export interface PerSessionState {
   teamName: string | null
   teammates: Record<string, TeammateInfo>  // keyed by toolUseId
   focusedAgentId: string | null            // null = main agent
+  // Git state
+  isGitRepo: boolean
+  gitStatus: GitStatusData | null
+  gitBranches: GitBranchData | null
+  gitSelectedFile: string | null
+  gitFileDiff: { oldContent: string; newContent: string } | null
+  gitCommitMessage: string
+  gitFileFilter: 'staged' | 'unstaged' | 'all'
 }
 
 const EMPTY_SESSION_STATE: PerSessionState = {
@@ -321,7 +337,7 @@ const EMPTY_SESSION_STATE: PerSessionState = {
   taskProgressMap: {},
   taskNotifications: [],
   openedTaskToolUseIds: [],
-  taskPanelOpen: false,
+  rightPanel: 'none',
   subagentMessages: {},
   subagentStreamingText: {},
   subagentStreamingThinking: {},
@@ -338,7 +354,14 @@ const EMPTY_SESSION_STATE: PerSessionState = {
   selectedModel: 'default',
   teamName: null,
   teammates: {},
-  focusedAgentId: null
+  focusedAgentId: null,
+  isGitRepo: false,
+  gitStatus: null,
+  gitBranches: null,
+  gitSelectedFile: null,
+  gitFileDiff: null,
+  gitCommitMessage: '',
+  gitFileFilter: 'all'
 }
 
 function createEmptySession(cwd: string): PerSessionState {
@@ -462,6 +485,16 @@ interface SessionState {
   updateTeammateStatus: (routingId: string, toolUseId: string, status: TeammateInfo['status']) => void
   setFocusedAgent: (routingId: string, toolUseId: string | null) => void
   addTeammateUserMessage: (routingId: string, toolUseId: string, id: string, text: string) => void
+  // Git actions
+  setIsGitRepo: (routingId: string, value: boolean) => void
+  setGitStatus: (routingId: string, status: GitStatusData) => void
+  setGitBranches: (routingId: string, branches: GitBranchData) => void
+  setGitSelectedFile: (routingId: string, filePath: string | null) => void
+  setGitFileDiff: (routingId: string, diff: { oldContent: string; newContent: string } | null) => void
+  setGitCommitMessage: (routingId: string, message: string) => void
+  setGitFileFilter: (routingId: string, filter: 'staged' | 'unstaged' | 'all') => void
+  openGitPanel: (routingId: string) => void
+  closeGitPanel: (routingId: string) => void
 }
 
 export const useSessionStore = create<SessionState>((set) => ({
@@ -994,7 +1027,7 @@ export const useSessionStore = create<SessionState>((set) => ({
         openedTaskToolUseIds: s.openedTaskToolUseIds.includes(toolUseId)
           ? s.openedTaskToolUseIds
           : [...s.openedTaskToolUseIds, toolUseId],
-        taskPanelOpen: true
+        rightPanel: 'task' as const
       }))
     })),
 
@@ -1002,7 +1035,7 @@ export const useSessionStore = create<SessionState>((set) => ({
     set((state) => ({
       sessions: updateSession(state.sessions, routingId, () => ({
         openedTaskToolUseIds: [],
-        taskPanelOpen: false
+        rightPanel: 'none' as const
       }))
     })),
 
@@ -1010,7 +1043,7 @@ export const useSessionStore = create<SessionState>((set) => ({
     set((state) => ({
       sessions: updateSession(state.sessions, routingId, (s) => {
         const updated = s.openedTaskToolUseIds.filter((id) => id !== toolUseId)
-        return { openedTaskToolUseIds: updated, taskPanelOpen: updated.length > 0 }
+        return { openedTaskToolUseIds: updated, rightPanel: updated.length > 0 ? 'task' as const : 'none' as const }
       })
     })),
 
@@ -1242,7 +1275,60 @@ export const useSessionStore = create<SessionState>((set) => ({
           }
         }
       }
-    })
+    }),
+
+  // Git actions
+  setIsGitRepo: (routingId, value) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, routingId, () => ({ isGitRepo: value }))
+    })),
+
+  setGitStatus: (routingId, status) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, routingId, () => ({ gitStatus: status }))
+    })),
+
+  setGitBranches: (routingId, branches) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, routingId, () => ({ gitBranches: branches }))
+    })),
+
+  setGitSelectedFile: (routingId, filePath) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, routingId, () => ({
+        gitSelectedFile: filePath,
+        gitFileDiff: null
+      }))
+    })),
+
+  setGitFileDiff: (routingId, diff) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, routingId, () => ({ gitFileDiff: diff }))
+    })),
+
+  setGitCommitMessage: (routingId, message) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, routingId, () => ({ gitCommitMessage: message }))
+    })),
+
+  setGitFileFilter: (routingId, filter) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, routingId, () => ({ gitFileFilter: filter }))
+    })),
+
+  openGitPanel: (routingId) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, routingId, () => ({
+        rightPanel: 'git' as const
+      }))
+    })),
+
+  closeGitPanel: (routingId) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, routingId, () => ({
+        rightPanel: 'none' as const
+      }))
+    }))
 }))
 
 /**

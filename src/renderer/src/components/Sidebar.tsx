@@ -1012,6 +1012,16 @@ function SettingsPanel(): React.JSX.Element {
             onChange={(v) => updateSettings({ diffViewSplit: v })}
           />
           <SettingsToggle
+            label="Ignore whitespace in diffs"
+            checked={settings.diffIgnoreWhitespace}
+            onChange={(v) => updateSettings({ diffIgnoreWhitespace: v })}
+          />
+          <SettingsToggle
+            label="Wrap lines in diffs"
+            checked={settings.diffWrapLines}
+            onChange={(v) => updateSettings({ diffWrapLines: v })}
+          />
+          <SettingsToggle
             label="Expand thinking"
             checked={settings.expandThinking}
             onChange={(v) => updateSettings({ expandThinking: v })}

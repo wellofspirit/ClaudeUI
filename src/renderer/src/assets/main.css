@@ -96,6 +96,70 @@
   --color-mode-plan-dim: #7aa31e;
 }
 
+/*
+ * Disable the plugin's internal horizontal scroll container so that our outer
+ * wrapper (DiffViewer's div with overflow-auto) handles both scrollbars.
+ * This keeps the horizontal scrollbar pinned at the bottom of the visible
+ * viewport instead of buried at the content bottom.
+ * Both overflow axes must be set to visible — the CSS spec recomputes
+ * overflow-x to "auto" when overflow-y is "hidden" (and vice versa).
+ */
+.diff-tailwindcss-wrapper .diff-table-scroll-container {
+  overflow: visible !important;
+}
+
+/* Scrollbars inside the diff viewer */
+.diff-scroll-container::-webkit-scrollbar { width: 7px; height: 7px; }
+.diff-scroll-container::-webkit-scrollbar-track { background: transparent; }
+.diff-scroll-container::-webkit-scrollbar-thumb { background: var(--color-border); border-radius: 3.5px; }
+.diff-scroll-container::-webkit-scrollbar-thumb:hover { background: var(--color-border-bright); }
+.diff-scroll-container::-webkit-scrollbar-corner { background: transparent; }
+
+/* Shrink line-number cells — the plugin defaults to min-width:100px and 10px padding
+   which is too spacious. Override the plugin's utility classes with !important. */
+.diff-tailwindcss-wrapper td.diff-line-num {
+  min-width: 0 !important;
+  padding-left: 8px !important;
+  padding-right: 8px !important;
+}
+/* Tighten the 10px gap between old and new line numbers */
+.diff-tailwindcss-wrapper .diff-line-num .flex > :nth-child(2) {
+  width: 4px !important;
+}
+
+/*
+ * Pure addition (new file) / pure deletion: collapse to a single line-number
+ * column in unified mode.
+ *
+ * The plugin renders a flex row of 3 children inside .diff-line-num:
+ *   <span> old num (50%)  |  <span> separator (10px)  |  <span> new num (50%)
+ *
+ * For pure-add every line is an addition so old-num is always empty.
+ * We hide the first two children (old-num placeholder + separator) and let the
+ * last child (new-num) fill 100%. We also halve the cell's inline width.
+ * Mirrored for pure-del (hide last two, keep first).
+ */
+.diff-pure-add .diff-line-num,
+.diff-pure-del .diff-line-num {
+  width: 1% !important;
+  min-width: 0 !important;
+  max-width: none !important;
+}
+.diff-pure-add .diff-line-num .flex > :first-child,
+.diff-pure-add .diff-line-num .flex > :nth-child(2) {
+  display: none !important;
+}
+.diff-pure-add .diff-line-num .flex > :last-child {
+  width: 100% !important;
+}
+.diff-pure-del .diff-line-num .flex > :nth-child(2),
+.diff-pure-del .diff-line-num .flex > :last-child {
+  display: none !important;
+}
+.diff-pure-del .diff-line-num .flex > :first-child {
+  width: 100% !important;
+}
+
 /* Force diff view to use our mono font (library hardcodes Menlo/Consolas as inline styles) */
 .diff-tailwindcss-wrapper * {
   font-family: 'JetBrains Mono', 'SF Mono', Menlo, Consolas, monospace !important;
@@ -196,9 +260,9 @@ html, #root {
 ::-webkit-scrollbar-thumb { background: var(--color-border); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--color-border-bright); }
 
-.chat-scroll::-webkit-scrollbar { width: 10px; }
-.chat-scroll::-webkit-scrollbar-track { background: var(--color-bg-secondary); border-radius: 5px; }
-.chat-scroll::-webkit-scrollbar-thumb { background: var(--color-text-muted); border-radius: 5px; min-height: 48px; }
+.chat-scroll::-webkit-scrollbar { width: 7px; }
+.chat-scroll::-webkit-scrollbar-track { background: var(--color-bg-secondary); border-radius: 3.5px; }
+.chat-scroll::-webkit-scrollbar-thumb { background: var(--color-text-muted); border-radius: 3.5px; min-height: 48px; }
 .chat-scroll::-webkit-scrollbar-thumb:hover { background: var(--color-text-secondary); }
 
 @keyframes fade-in {

@@ -172,6 +172,28 @@ const api: ClaudeAPI = {
     ipcRenderer.on('session:team-deleted', handler)
     return () => ipcRenderer.removeListener('session:team-deleted', handler)
   },
+  // Git operations
+  gitCheckRepo: (cwd: string) => ipcRenderer.invoke('git:check-repo', cwd),
+  gitGetStatus: (cwd: string) => ipcRenderer.invoke('git:status', cwd),
+  gitGetBranches: (cwd: string) => ipcRenderer.invoke('git:branches', cwd),
+  gitCheckout: (cwd: string, branch: string) => ipcRenderer.invoke('git:checkout', cwd, branch),
+  gitCreateBranch: (cwd: string, name: string) => ipcRenderer.invoke('git:create-branch', cwd, name),
+  gitGetFileDiff: (cwd: string, filePath: string, staged: boolean) =>
+    ipcRenderer.invoke('git:file-diff', cwd, filePath, staged),
+  gitStageFile: (cwd: string, filePath: string) => ipcRenderer.invoke('git:stage-file', cwd, filePath),
+  gitUnstageFile: (cwd: string, filePath: string) => ipcRenderer.invoke('git:unstage-file', cwd, filePath),
+  gitStageAll: (cwd: string) => ipcRenderer.invoke('git:stage-all', cwd),
+  gitUnstageAll: (cwd: string) => ipcRenderer.invoke('git:unstage-all', cwd),
+  gitCommit: (cwd: string, message: string) => ipcRenderer.invoke('git:commit', cwd, message),
+  gitPush: (cwd: string) => ipcRenderer.invoke('git:push', cwd),
+  gitStartWatching: (cwd: string) => ipcRenderer.invoke('git:start-watching', cwd),
+  gitStopWatching: (cwd: string) => ipcRenderer.invoke('git:stop-watching', cwd),
+  onGitStatusUpdate: (cb) => {
+    const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as never)
+    ipcRenderer.on('git:status-update', handler)
+    return () => ipcRenderer.removeListener('git:status-update', handler)
+  },
+
   openInVSCode: (cwd: string) => ipcRenderer.invoke('app:open-in-vscode', cwd),
   loadSettings: () => ipcRenderer.invoke('config:load-settings'),
   saveSettings: (settings) => ipcRenderer.invoke('config:save-settings', settings),

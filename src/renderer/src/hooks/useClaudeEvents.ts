@@ -196,6 +196,16 @@ export function useClaudeEvents(): void {
           if (allDone) useSessionStore.getState().setTodos(routingId, [])
         }
       }),
+      // Git status updates from polling
+      window.api.onGitStatusUpdate(({ cwd, status }) => {
+        const store = useSessionStore.getState()
+        // Find all sessions with this cwd and update them
+        for (const [routingId, session] of Object.entries(store.sessions)) {
+          if (session.cwd === cwd) {
+            store.setGitStatus(routingId, status)
+          }
+        }
+      }),
       // Cross-instance config sync
       window.api.onSettingsChanged((settings) => {
         useSessionStore.getState().applyExternalSettings(settings)

@@ -450,7 +450,7 @@ function PanelEntry({ toolUseId }: { toolUseId: string }): React.JSX.Element | n
 
 export function TaskDetailPanel({ style }: { style?: React.CSSProperties }): React.JSX.Element | null {
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
-  const taskPanelOpen = useActiveSession((s) => s.taskPanelOpen)
+  const taskPanelOpen = useActiveSession((s) => s.rightPanel === 'task')
   const openedTaskToolUseIds = useActiveSession((s) => s.openedTaskToolUseIds)
   const closeTaskPanel = useSessionStore((s) => s.closeTaskPanel)
   const count = openedTaskToolUseIds.length
