@@ -129,6 +129,8 @@ const api: ClaudeAPI = {
   getModels: () => ipcRenderer.invoke('session:get-models'),
   generateTitle: (conversationText: string) =>
     ipcRenderer.invoke('session:generate-title', conversationText),
+  generateCommitMessage: (diff: string) =>
+    ipcRenderer.invoke('session:generate-commit-message', diff),
   writeCustomTitle: (sessionId: string, projectKey: string, title: string) =>
     ipcRenderer.invoke('session:write-custom-title', sessionId, projectKey, title),
   getPlanContent: (routingId: string) =>

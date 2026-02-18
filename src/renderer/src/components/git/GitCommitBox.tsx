@@ -10,6 +10,7 @@ export function GitCommitBox(): React.JSX.Element {
   const setGitCommitMessage = useSessionStore((s) => s.setGitCommitMessage)
   const setGitStatus = useSessionStore((s) => s.setGitStatus)
   const [loading, setLoading] = useState(false)
+  const [generating, setGenerating] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [toast, setToast] = useState<string | null>(null)
   const [toastExiting, setToastExiting] = useState(false)
@@ -139,24 +140,76 @@ export function GitCommitBox(): React.JSX.Element {
     }
   }, [cwd, loading, showToast])
 
+  const handleGenerateMessage = useCallback(async () => {
+    if (!cwd || !activeSessionId || generating) return
+    const files = gitStatus?.staged ?? []
+    if (files.length === 0) {
+      setError('Stage changes first to generate a message')
+      return
+    }
+    setGenerating(true)
+    setError(null)
+    try {
+      // Gather diffs for staged files (limit total to ~8000 chars to stay fast)
+      let diff = ''
+      for (const f of files) {
+        if (diff.length > 8000) break
+        const { patch } = await window.api.gitGetFilePatch(cwd, f, true, false)
+        if (patch) diff += patch + '\n'
+      }
+      if (!diff.trim()) {
+        setError('No diff content found')
+        return
+      }
+      const msg = await window.api.generateCommitMessage(diff)
+      if (msg) {
+        setGitCommitMessage(activeSessionId, msg)
+      } else {
+        setError('Failed to generate message')
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Generation failed')
+    } finally {
+      setGenerating(false)
+    }
+  }, [cwd, activeSessionId, generating, gitStatus?.staged, setGitCommitMessage])
+
   const commitDisabled = loading || !gitCommitMessage.trim() || stagedCount === 0
 
   return (
     <div className="shrink-0 border-t border-border p-2 space-y-2 relative">
       {/* Commit message */}
-      <textarea
-        value={gitCommitMessage}
-        onChange={(e) => activeSessionId && setGitCommitMessage(activeSessionId, e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
-            e.preventDefault()
-            handleCommit()
-          }
-        }}
-        placeholder="Commit message..."
-        rows={2}
-        className="w-full bg-bg-tertiary text-text-primary text-[12px] px-2.5 py-2 rounded-md outline-none placeholder:text-text-muted resize-none font-mono"
-      />
+      <div className="relative">
+        <textarea
+          value={gitCommitMessage}
+          onChange={(e) => activeSessionId && setGitCommitMessage(activeSessionId, e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+              e.preventDefault()
+              handleCommit()
+            }
+          }}
+          placeholder="Commit message..."
+          rows={2}
+          className="w-full bg-bg-tertiary text-text-primary text-[12px] px-2.5 py-2 pr-8 rounded-md outline-none placeholder:text-text-muted resize-none font-mono"
+        />
+        <button
+          onClick={handleGenerateMessage}
+          disabled={generating || stagedCount === 0}
+          className="absolute top-1.5 right-1.5 w-5 h-5 flex items-center justify-center rounded text-text-muted/50 hover:text-accent hover:bg-bg-hover transition-colors cursor-default disabled:opacity-30 disabled:hover:text-text-muted/50 disabled:hover:bg-transparent"
+          title="Auto-generate commit message"
+        >
+          {generating ? (
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="animate-spin-slow">
+              <circle cx="12" cy="12" r="10" strokeDasharray="31.4 31.4" />
+            </svg>
+          ) : (
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M12 2l2.09 6.26L20.18 10l-6.09 1.74L12 18l-2.09-6.26L3.82 10l6.09-1.74L12 2z" />
+            </svg>
+          )}
+        </button>
+      </div>
 
       {/* Error message */}
       {error && (

@@ -231,6 +231,7 @@ export interface ClaudeAPI {
   setEffort(routingId: string, effort: string): Promise<void>
   getModels(): Promise<ModelInfo[]>
   generateTitle(conversationText: string): Promise<string | null>
+  generateCommitMessage(diff: string): Promise<string | null>
   writeCustomTitle(sessionId: string, projectKey: string, title: string): Promise<void>
   getPlanContent(routingId: string): Promise<string | null>
   getSessionLogPath(routingId: string): Promise<string | null>

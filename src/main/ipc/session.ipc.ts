@@ -17,6 +17,9 @@ let cachedModels: ModelInfo[] | null = null
 const TITLE_SYSTEM_PROMPT =
   'Your task: output ONLY a short title (1-3 words) that captures the main topic of the user\'s conversation. No explanation, no quotes, no JSON, no markdown — just the title itself. Use title case. Examples: Fix Login Bug, Auth Feature, Refactor API, Debug Tests, Rename Sessions'
 
+const COMMIT_MSG_SYSTEM_PROMPT =
+  'You are a commit message generator. Given a git diff of staged changes, write a concise conventional commit message. Output ONLY the commit message — no explanation, no quotes, no markdown. Use imperative mood. First line should be a short summary (max 72 chars). If needed, add a blank line followed by bullet points for details. Focus on the "why" not the "what".'
+
 async function generateTitle(conversationText: string): Promise<string | null> {
   const abort = new AbortController()
   console.log('[generateTitle] request:', conversationText.length, 'chars:', conversationText.slice(0, 200))
@@ -65,6 +68,57 @@ async function generateTitle(conversationText: string): Promise<string | null> {
     return null
   } catch (err) {
     console.error('[generateTitle] error:', err)
+    return null
+  } finally {
+    abort.abort()
+  }
+}
+
+async function generateCommitMessage(diff: string): Promise<string | null> {
+  const abort = new AbortController()
+  console.log('[generateCommitMessage] request:', diff.length, 'chars')
+
+  try {
+    const cliPath = getCliJsPath()
+    const q = sdkQuery({
+      prompt: diff,
+      options: {
+        ...(cliPath ? { pathToClaudeCodeExecutable: cliPath } : {}),
+        cwd: process.cwd(),
+        abortController: abort,
+        systemPrompt: COMMIT_MSG_SYSTEM_PROMPT,
+        model: 'claude-haiku-4-5-20251001',
+        maxTurns: 1,
+        tools: [],
+        thinking: { type: 'disabled' },
+        persistSession: false
+      }
+    })
+
+    let result = ''
+    for await (const message of q) {
+      if (!message || typeof message !== 'object') continue
+      const msg = message as Record<string, unknown>
+      if (msg.type === 'assistant') {
+        const betaMessage = msg.message as { content?: Array<{ type: string; text?: string }> } | undefined
+        if (betaMessage?.content) {
+          for (const block of betaMessage.content) {
+            if (block.type === 'text' && block.text) result += block.text
+          }
+        }
+      }
+    }
+
+    console.log('[generateCommitMessage] response:', JSON.stringify(result))
+
+    const cleaned = result.trim()
+    if (cleaned.length >= 3) {
+      return cleaned
+    }
+    console.log('[generateCommitMessage] no usable message extracted')
+    return null
+  } catch (err) {
+    console.error('[generateCommitMessage] error:', err)
     return null
   } finally {
     abort.abort()
@@ -174,6 +228,10 @@ export function registerSessionIpc(win: BrowserWindow): void {
 
   ipcMain.handle('session:generate-title', async (_e, conversationText: string) => {
     return await generateTitle(conversationText)
+  })
+
+  ipcMain.handle('session:generate-commit-message', async (_e, diff: string) => {
+    return await generateCommitMessage(diff)
   })
 
   ipcMain.handle('session:write-custom-title', async (_e, sessionId: string, projectKey: string, title: string) => {
