@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef, useEffect } from 'react'
-import { createPortal } from 'react-dom'
+
 import { useActiveSession, useSessionStore } from '../../stores/session-store'
 
 export function GitCommitBox(): React.JSX.Element {
@@ -97,7 +97,7 @@ export function GitCommitBox(): React.JSX.Element {
     } finally {
       setLoading(false)
     }
-  }, [cwd, activeSessionId, gitCommitMessage, stagedCount, loading, setGitCommitMessage, refreshStatus])
+  }, [cwd, activeSessionId, gitCommitMessage, stagedCount, loading, setGitCommitMessage, refreshStatus, showToast])
 
   const handleCommitAndPush = useCallback(async () => {
     if (!cwd || !activeSessionId || !gitCommitMessage.trim() || loading) return
@@ -121,7 +121,7 @@ export function GitCommitBox(): React.JSX.Element {
     } finally {
       setLoading(false)
     }
-  }, [cwd, activeSessionId, gitCommitMessage, stagedCount, loading, setGitCommitMessage, refreshStatus])
+  }, [cwd, activeSessionId, gitCommitMessage, stagedCount, loading, setGitCommitMessage, refreshStatus, showToast])
 
   const handlePush = useCallback(async () => {
     if (!cwd || loading) return
@@ -137,12 +137,12 @@ export function GitCommitBox(): React.JSX.Element {
     } finally {
       setLoading(false)
     }
-  }, [cwd, loading])
+  }, [cwd, loading, showToast])
 
   const commitDisabled = loading || !gitCommitMessage.trim() || stagedCount === 0
 
   return (
-    <div className="shrink-0 border-t border-border p-2 space-y-2">
+    <div className="shrink-0 border-t border-border p-2 space-y-2 relative">
       {/* Commit message */}
       <textarea
         value={gitCommitMessage}
@@ -163,14 +163,13 @@ export function GitCommitBox(): React.JSX.Element {
         <div className="text-[11px] text-red-400 px-1">{error}</div>
       )}
 
-      {/* Floating toast */}
-      {toast && createPortal(
-        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[9999] pointer-events-none">
+      {/* Floating toast — positioned above the commit box, centered */}
+      {toast && (
+        <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-3 z-50 pointer-events-none">
           <div className={`px-4 py-2 rounded-lg bg-bg-tertiary border border-border shadow-lg text-[12px] text-green-400 font-mono whitespace-nowrap ${toastExiting ? 'animate-toast-out' : 'animate-toast-in'}`}>
             {toast}
           </div>
-        </div>,
-        document.body
+        </div>
       )}
 
       {/* Action buttons */}
