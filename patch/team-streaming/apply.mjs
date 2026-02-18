@@ -192,7 +192,7 @@ if (src.includes(patchBMarker)) {
   }
 
   const injectionB2 =
-    `if(_6.type==="assistant"||_6.type==="user")` +
+    `;if(_6.type==="assistant"||_6.type==="user")` +
     `process.stdout.write(JSON.stringify({` +
     `type:_6.type,message:_6.message,` +
     `teammate_id:q.agentId,` +

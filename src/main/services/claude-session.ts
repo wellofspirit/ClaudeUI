@@ -6,7 +6,7 @@ import * as path from 'path'
 import { app } from 'electron'
 import type { BrowserWindow } from 'electron'
 import { computeTokenMetrics, buildSubagentFileMap } from './session-history'
-import { watchSubagent, unwatchAllSubagents } from './subagent-watcher'
+import { unwatchAllSubagents } from './subagent-watcher'
 import { saveSlashCommands } from './ui-config'
 
 /** In production, cli.js is unpacked from the asar — resolve its real path */
@@ -103,7 +103,8 @@ export class ClaudeSession {
   getTeamInfo(): { routingId: string; teamName: string | null; sessionId: string | null; projectKey: string | null; teammates: Array<{ toolUseId: string; name: string; sanitizedName: string; teamName: string; sanitizedTeamName: string; agentId: string; fileId: string; status: 'running' | 'completed' | 'failed' | 'stopped' }> } {
     const projectKey = this.cwd ? this.cwd.replace(/[/.]/g, '-') : null
 
-    // Resolve hex JSONL fileIds for team agents whose agentId doesn't match filenames
+    // Resolve JSONL fileIds — use stable names (team-streaming patch) first,
+    // fall back to prompt-based search for unpatched sessions
     let fileMap: Record<string, string> = {}
     if (this.sessionId && projectKey && this._detectedTeammates.length > 0) {
       const taskPrompts: Record<string, string> = {}
@@ -122,7 +123,9 @@ export class ClaudeSession {
       projectKey,
       teammates: this._detectedTeammates.map((t) => ({
         ...t,
-        fileId: fileMap[t.toolUseId] || t.agentId,
+        // Stable filename from team-streaming patch: name--team
+        // Falls back to prompt-based fileMap, then raw agentId
+        fileId: (t.name && t.teamName) ? `${t.name}--${t.teamName}` : (fileMap[t.toolUseId] || t.agentId),
         status: this._teammateStatuses.get(t.toolUseId) || 'running'
       }))
     }
@@ -137,6 +140,7 @@ export class ClaudeSession {
   private _teamName: string | null = null
   private _detectedTeammates: Array<{ toolUseId: string; name: string; teamName: string; agentId: string; sanitizedName: string; sanitizedTeamName: string; prompt?: string }> = []
   private _teammateStatuses = new Map<string, 'running' | 'completed' | 'failed' | 'stopped'>()
+  private teammateIdToToolUse = new Map<string, string>() // teammate_id ("name@team") → toolUseId
   private backgroundFilePaths = new Map<string, string>() // toolUseId → filePath (permanent)
   private backgroundPollers = new Map<string, BackgroundPoller>() // toolUseId → poller state
   private win: BrowserWindow
@@ -302,15 +306,17 @@ export class ClaudeSession {
 
         if (type === 'assistant') {
           const parentToolUseId = msg.parent_tool_use_id as string | undefined
-          const isSidechain = !!parentToolUseId
+          const teammateToolUseId = this.resolveTeammateToolUseId(msg)
+          const routingId = parentToolUseId || teammateToolUseId
+          const isSidechain = !!routingId
           const chatMsg = this.transformAssistantMessage(msg)
 
           // Accumulate usage from every assistant message (main + sidechain)
           const hadUsage = this.accumulateUsage(msg, isSidechain)
 
           if (chatMsg) {
-            if (parentToolUseId) {
-              this.send('session:subagent-message', { toolUseId: parentToolUseId, message: chatMsg })
+            if (routingId) {
+              this.send('session:subagent-message', { toolUseId: routingId, message: chatMsg })
             } else {
               this.send('session:message', chatMsg)
               // Only update status line when usage actually changed (final message per API call)
@@ -323,6 +329,8 @@ export class ClaudeSession {
           await this.handleUserMessage(msg)
         } else if (type === 'stream_event') {
           const parentToolUseId = msg.parent_tool_use_id as string | undefined
+          const teammateToolUseId = this.resolveTeammateToolUseId(msg)
+          const routingId = parentToolUseId || teammateToolUseId
           const event = msg.event as Record<string, unknown> | undefined
           if (event) {
             const eventType = event.type as string
@@ -330,8 +338,8 @@ export class ClaudeSession {
               const delta = event.delta as Record<string, unknown> | undefined
               if (delta) {
                 if (delta.type === 'text_delta' && typeof delta.text === 'string') {
-                  if (parentToolUseId) {
-                    this.send('session:subagent-stream', { toolUseId: parentToolUseId, type: 'text', text: delta.text })
+                  if (routingId) {
+                    this.send('session:subagent-stream', { toolUseId: routingId, type: 'text', text: delta.text })
                   } else {
                     this.send('session:stream', { type: 'text', text: delta.text })
                   }
@@ -339,8 +347,8 @@ export class ClaudeSession {
                   delta.type === 'thinking_delta' &&
                   typeof delta.thinking === 'string'
                 ) {
-                  if (parentToolUseId) {
-                    this.send('session:subagent-stream', { toolUseId: parentToolUseId, type: 'thinking', text: delta.thinking })
+                  if (routingId) {
+                    this.send('session:subagent-stream', { toolUseId: routingId, type: 'thinking', text: delta.thinking })
                   } else {
                     this.send('session:stream', { type: 'thinking', text: delta.thinking })
                   }
@@ -700,6 +708,7 @@ export class ClaudeSession {
         if (newTeam !== this._teamName) {
           this._detectedTeammates = []
           this.pendingTeammates.clear()
+          this.teammateIdToToolUse.clear()
           unwatchAllSubagents()
         }
         this._teamName = newTeam
@@ -732,11 +741,13 @@ export class ClaudeSession {
     if (!messageParam) return
 
     const parentToolUseId = msg.parent_tool_use_id as string | undefined
+    const teammateToolUseId = this.resolveTeammateToolUseId(msg)
+    const routingId = parentToolUseId || teammateToolUseId
     const content = messageParam.content
 
     // Case 1: Array content — extract tool_result blocks
     if (Array.isArray(content)) {
-      this.extractToolResultsFromContent(content, parentToolUseId)
+      this.extractToolResultsFromContent(content, routingId)
       return
     }
 
@@ -851,6 +862,17 @@ export class ClaudeSession {
     this.send('session:message', chatMsg)
   }
 
+  /**
+   * Resolve a teammate_id from the team-streaming patch to a toolUseId.
+   * The patch sends messages with teammate_id = "name@team" (e.g., "ts-advocate@lang-debate").
+   * Returns the corresponding toolUseId, or undefined if this isn't a teammate message.
+   */
+  private resolveTeammateToolUseId(msg: Record<string, unknown>): string | undefined {
+    const teammateId = msg.teammate_id as string | undefined
+    if (!teammateId) return undefined
+    return this.teammateIdToToolUse.get(teammateId)
+  }
+
   private extractXmlTag(xml: string, tag: string): string | null {
     const re = new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`)
     const match = xml.match(re)
@@ -883,19 +905,10 @@ export class ClaudeSession {
         this.send('session:teammate-detected', teammateData)
         this.pendingTeammates.delete(toolUseId)
 
-        // Start watching the subagent's JSONL file for live updates.
-        // In-process team agents don't stream via parent_tool_use_id — their
-        // messages only appear in the JSONL files on disk.
-        const projectKey = this.cwd ? this.cwd.replace(/[/.]/g, '-') : null
-        if (this.sessionId && projectKey) {
-          watchSubagent(
-            toolUseId,
-            this.sessionId,
-            projectKey,
-            pending.prompt,
-            (channel, data) => this.send(channel, data)
-          )
-        }
+        // Register teammate_id → toolUseId mapping for the team-streaming patch.
+        // The patch forwards messages with teammate_id = "name@team".
+        const teammateId = `${pending.name}@${pending.teamName}`
+        this.teammateIdToToolUse.set(teammateId, toolUseId)
       }
     }
 

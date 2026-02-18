@@ -1,10 +1,12 @@
 /**
  * Subagent JSONL file watcher — provides live streaming for in-process team agents.
  *
- * In-process team agents (spawned with team_name in Task tool) don't emit
- * parent_tool_use_id messages through the SDK's streaming pipeline. Their messages
- * only appear in subagent JSONL files on disk. This watcher tails those files
- * and emits IPC events so the UI gets live updates.
+ * With the team-streaming patch, each teammate writes to a single stable JSONL file
+ * named `agent-<name>--<team>.jsonl`. This watcher tails that file and emits IPC
+ * events so the UI gets live updates. It also serves as the mechanism for loading
+ * teammate history on session reload.
+ *
+ * Falls back to prompt-based file matching for unpatched SDK sessions.
  */
 import * as fs from 'fs'
 import * as path from 'path'
@@ -27,39 +29,52 @@ interface WatchedSubagent {
 const watched = new Map<string, WatchedSubagent>()
 
 /**
- * Resolve the JSONL file path for a subagent.
- * Returns the path if the file exists, null otherwise.
+ * Build the stable JSONL filename for a teammate (team-streaming patch format).
+ * The patch sanitizes `name@team` → `name--team` for the agentId, producing
+ * filenames like `agent-ts-advocate--lang-debate.jsonl`.
  */
-function resolveSubagentFile(
+function stableTeammateFilename(name: string, teamName: string): string {
+  return `agent-${name}--${teamName}.jsonl`
+}
+
+/**
+ * Try to find the teammate's JSONL file by stable filename (patched SDK),
+ * then fall back to prompt-based search (unpatched SDK).
+ */
+function findSubagentFile(
   sessionId: string,
   projectKey: string,
-  hexId: string
+  teammateName?: string,
+  teammateTeamName?: string,
+  prompt?: string
 ): string | null {
-  const filePath = path.join(
-    CLAUDE_PROJECTS_DIR,
-    projectKey,
-    sessionId,
-    'subagents',
-    `agent-${hexId}.jsonl`
-  )
-  return fs.existsSync(filePath) ? filePath : null
+  const subagentDir = path.join(CLAUDE_PROJECTS_DIR, projectKey, sessionId, 'subagents')
+
+  // Try stable filename first (team-streaming patch)
+  if (teammateName && teammateTeamName) {
+    const stableName = stableTeammateFilename(teammateName, teammateTeamName)
+    const stablePath = path.join(subagentDir, stableName)
+    if (fs.existsSync(stablePath)) return stablePath
+  }
+
+  // Fall back to prompt-based search (unpatched SDK or non-team subagents)
+  if (prompt) {
+    return findSubagentFileByPrompt(subagentDir, prompt)
+  }
+
+  return null
 }
 
 /**
  * Scan the subagents directory for a file matching the given prompt.
- * Returns the hex ID if found, null otherwise.
+ * Used as fallback for unpatched SDK sessions.
  */
-function findSubagentFileByPrompt(
-  sessionId: string,
-  projectKey: string,
-  prompt: string
-): string | null {
-  const subagentDir = path.join(CLAUDE_PROJECTS_DIR, projectKey, sessionId, 'subagents')
+function findSubagentFileByPrompt(subagentDir: string, prompt: string): string | null {
   if (!fs.existsSync(subagentDir)) return null
 
   const files = fs.readdirSync(subagentDir)
     .filter((f) => f.startsWith('agent-') && f.endsWith('.jsonl'))
-    .sort() // alphabetical = chronological
+    .sort()
 
   const matchStr = prompt.slice(0, 80)
 
@@ -84,7 +99,7 @@ function findSubagentFileByPrompt(
         }
       }
       if (text && text.includes(matchStr)) {
-        return fname.replace('agent-', '').replace('.jsonl', '')
+        return filePath
       }
     } catch {
       // Skip malformed files
@@ -266,15 +281,19 @@ function readNewMessages(
  * @param toolUseId - The tool_use ID that launched this teammate
  * @param sessionId - The session ID
  * @param projectKey - The project key (cwd with slashes replaced)
- * @param prompt - The task prompt (for finding the JSONL file by content matching)
+ * @param prompt - The task prompt (fallback for finding the JSONL file by content matching)
  * @param sendFn - Function to send IPC events to the renderer
+ * @param teammateName - The teammate's name (e.g., "ts-advocate")
+ * @param teammateTeamName - The team name (e.g., "lang-debate")
  */
 export function watchSubagent(
   toolUseId: string,
   sessionId: string,
   projectKey: string,
   prompt: string | undefined,
-  sendFn: (channel: string, data: unknown) => void
+  sendFn: (channel: string, data: unknown) => void,
+  teammateName?: string,
+  teammateTeamName?: string
 ): void {
   // Already watching this toolUseId
   if (watched.has(toolUseId)) return
@@ -318,27 +337,21 @@ export function watchSubagent(
           if (newMsgs.length > 0) {
             sendFn('session:subagent-message-batch', { toolUseId, messages: newMsgs })
           }
-        }, 150) // Debounce slightly longer than session-watcher to avoid mid-write reads
+        }, 150)
       })
     } catch {
       // File may have been removed — ignore
     }
   }
 
-  // Try to find the file immediately
-  const hexId = prompt
-    ? findSubagentFileByPrompt(sessionId, projectKey, prompt)
-    : null
-
-  if (hexId) {
-    const filePath = resolveSubagentFile(sessionId, projectKey, hexId)
-    if (filePath) {
-      startWatching(filePath)
-      return
-    }
+  // Try to find the file immediately (stable name first, then prompt fallback)
+  const filePath = findSubagentFile(sessionId, projectKey, teammateName, teammateTeamName, prompt)
+  if (filePath) {
+    startWatching(filePath)
+    return
   }
 
-  // File doesn't exist yet — poll the subagents directory until it appears.
+  // File doesn't exist yet — poll until it appears.
   // Team agents take a moment to spin up and create their JSONL files.
   let attempts = 0
   const MAX_ATTEMPTS = 60 // 30 seconds at 500ms intervals
@@ -346,7 +359,6 @@ export function watchSubagent(
   entry.pollTimer = setInterval(() => {
     attempts++
     if (attempts > MAX_ATTEMPTS) {
-      // Give up — the file never appeared
       if (entry.pollTimer) {
         clearInterval(entry.pollTimer)
         entry.pollTimer = null
@@ -354,15 +366,9 @@ export function watchSubagent(
       return
     }
 
-    const foundHexId = prompt
-      ? findSubagentFileByPrompt(sessionId, projectKey, prompt)
-      : null
-
-    if (foundHexId) {
-      const filePath = resolveSubagentFile(sessionId, projectKey, foundHexId)
-      if (filePath) {
-        startWatching(filePath)
-      }
+    const foundPath = findSubagentFile(sessionId, projectKey, teammateName, teammateTeamName, prompt)
+    if (foundPath) {
+      startWatching(foundPath)
     }
   }, 500)
 }
