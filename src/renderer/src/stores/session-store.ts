@@ -457,6 +457,7 @@ interface SessionState {
   rekeySession: (oldId: string, newId: string) => void
   clearConversation: (routingId: string) => void
   setTeamName: (routingId: string, teamName: string) => void
+  clearTeam: (routingId: string) => void
   addTeammate: (routingId: string, info: TeammateInfo) => void
   updateTeammateStatus: (routingId: string, toolUseId: string, status: TeammateInfo['status']) => void
   setFocusedAgent: (routingId: string, toolUseId: string | null) => void
@@ -1172,6 +1173,18 @@ export const useSessionStore = create<SessionState>((set) => ({
     set((state) => {
       const sessions = ensureSession(state.sessions, routingId)
       return { sessions: updateSession(sessions, routingId, () => ({ teamName })) }
+    }),
+
+  clearTeam: (routingId) =>
+    set((state) => {
+      const sessions = ensureSession(state.sessions, routingId)
+      return {
+        sessions: updateSession(sessions, routingId, () => ({
+          teamName: null,
+          teammates: {},
+          focusedAgentId: null
+        }))
+      }
     }),
 
   addTeammate: (routingId, info) =>

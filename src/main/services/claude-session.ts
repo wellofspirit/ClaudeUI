@@ -714,6 +714,15 @@ export class ClaudeSession {
         this._teamName = newTeam
         this.send('session:team-created', { teamName: this._teamName })
       }
+      if (block.toolName === 'TeamDelete') {
+        this._teamName = null
+        this._detectedTeammates = []
+        this.pendingTeammates.clear()
+        this.teammateIdToToolUse.clear()
+        this._teammateStatuses.clear()
+        unwatchAllSubagents()
+        this.send('session:team-deleted', {})
+      }
     }
 
     // Use the BetaMessage id for deduplication of partial messages

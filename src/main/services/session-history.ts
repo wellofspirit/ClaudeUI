@@ -712,6 +712,12 @@ export async function loadSessionHistory(
               }
               teamName = newTeam
             }
+            if (block.toolName === 'TeamDelete' && teamName) {
+              teamName = null
+              for (const key of Object.keys(pendingTeammates)) delete pendingTeammates[key]
+              for (const key of Object.keys(taskPrompts)) delete taskPrompts[key]
+              for (const key of Object.keys(agentIdToToolUseId)) delete agentIdToToolUseId[key]
+            }
             if (block.toolName === 'Task' && block.toolInput?.name && block.toolInput?.team_name) {
               pendingTeammates[block.toolUseId] = {
                 name: String(block.toolInput.name),

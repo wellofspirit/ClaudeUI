@@ -167,6 +167,11 @@ const api: ClaudeAPI = {
     ipcRenderer.on('session:team-created', handler)
     return () => ipcRenderer.removeListener('session:team-created', handler)
   },
+  onTeamDeleted: (cb) => {
+    const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as never)
+    ipcRenderer.on('session:team-deleted', handler)
+    return () => ipcRenderer.removeListener('session:team-deleted', handler)
+  },
   openInVSCode: (cwd: string) => ipcRenderer.invoke('app:open-in-vscode', cwd),
   loadSettings: () => ipcRenderer.invoke('config:load-settings'),
   saveSettings: (settings) => ipcRenderer.invoke('config:save-settings', settings),

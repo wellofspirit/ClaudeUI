@@ -150,6 +150,9 @@ export function useClaudeEvents(): void {
       window.api.onTeamCreated(({ routingId, data }) => {
         useSessionStore.getState().setTeamName(routingId, data.teamName)
       }),
+      window.api.onTeamDeleted(({ routingId }) => {
+        useSessionStore.getState().clearTeam(routingId)
+      }),
       window.api.onTeammateDetected(({ routingId, data }) => {
         useSessionStore.getState().addTeammate(routingId, { ...data, status: 'running' })
       }),

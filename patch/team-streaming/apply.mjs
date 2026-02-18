@@ -208,6 +208,128 @@ if (src.includes(patchBMarker)) {
 }
 
 // ===========================================================================
+// Patch C: Emit task_notification on teammate completion/failure
+//
+// KfY updates appState via im() when a teammate completes or fails, but
+// never writes a task_notification to stdout. The SDK consumer never learns
+// the teammate stopped.
+//
+// We inject process.stdout.write after the im() calls in both the success
+// and failure paths, emitting a proper task_notification system message.
+//
+// Uses q.agentId as task_id — this matches what detectTaskMapping() stores
+// in taskIdMap (extracted from the Task tool result's agent_id field).
+//
+// Success path:
+//   return im(K,(T)=>({...T,status:"completed",endTime:Date.now()}),M),{success:!0,messages:N}
+//
+// Failure path:
+//   im(K,(B)=>({...B,status:"failed",error:R,...}),M),sm4(...)
+// ===========================================================================
+
+console.log('\n--- Patch C: Teammate completion/failure notifications ---')
+
+const patchCMarker = '/*PATCHED:team-streaming-C*/'
+
+if (src.includes(patchCMarker)) {
+  console.log('Already applied. Skipping.')
+} else {
+  // Re-extract session/UUID functions if Patch B was already applied (skipped extraction)
+  let sessFnC, uuidFnC
+  const sessFnReC = /session_id:([\w$]+)\(\).*?parent_tool_use_id/
+  const sessFnMatchC = src.match(sessFnReC)
+  if (!sessFnMatchC) {
+    console.error('ERROR: Cannot locate session ID function for Patch C.')
+    process.exit(1)
+  }
+  sessFnC = sessFnMatchC[1]
+
+  const uuidFnReC = /\{type:"progress",data:[\w$]+,toolUseID:[\w$]+,parentToolUseID:[\w$]+,uuid:([\w$]+)\(\),timestamp:new Date/
+  const uuidFnMatchC = src.match(uuidFnReC)
+  if (!uuidFnMatchC) {
+    console.error('ERROR: Cannot locate UUID generator function for Patch C.')
+    process.exit(1)
+  }
+  uuidFnC = uuidFnMatchC[1]
+  console.log(`Session ID: ${sessFnC}(), UUID: ${uuidFnC}()`)
+
+  // Helper: build the stdout.write notification snippet.
+  // NOTE: No trailing punctuation — caller adds , or ; as needed.
+  // Both success and failure paths are comma expressions (return A, B, C),
+  // so the caller must use , not ; to avoid breaking the return statement.
+  const notifySnippet = (status) =>
+    `process.stdout.write(JSON.stringify({` +
+    `type:"system",subtype:"task_notification",` +
+    `task_id:q.agentId,status:"${status}",` +
+    `output_file:"",summary:"",` +
+    `session_id:${sessFnC}(),uuid:${uuidFnC}()` +
+    `})+"\\n")`
+
+  // --- C1: Success path ---
+  // Anchor: status:"completed",endTime:Date.now()}),M),{success:!0,messages:N}
+  // We append the notification after the im() call completes (after ,M))
+  // and before {success:!0,messages:N}
+  const anchorC1 = 'status:"completed",endTime:Date.now()}),M),{success:!0,messages:N}'
+  const idxC1 = src.indexOf(anchorC1)
+  if (idxC1 === -1) {
+    console.error('ERROR: Cannot find Patch C1 anchor (success path).')
+    console.error('Expected:', JSON.stringify(anchorC1))
+    process.exit(1)
+  }
+
+  if (src.indexOf(anchorC1, idxC1 + 1) !== -1) {
+    console.error('ERROR: Multiple matches for Patch C1 anchor. Aborting.')
+    process.exit(1)
+  }
+
+  // Verify KfY context
+  const beforeC1 = src.slice(Math.max(0, idxC1 - 3000), idxC1)
+  if (!beforeC1.includes('inProcessRunner')) {
+    console.error('ERROR: C1 anchor not in expected KfY context.')
+    process.exit(1)
+  }
+
+  // Replace: return im(K,...,M),{success} → return im(K,...,M),notify(),{success}
+  // The original is a comma expression: return im(...), {success:!0,...}
+  // We insert our write as another comma-separated expression element.
+  const replacementC1 =
+    `${patchCMarker}status:"completed",endTime:Date.now()}),M),` +
+    `${notifySnippet('completed')},` +
+    `{success:!0,messages:N}`
+
+  src = src.slice(0, idxC1) + replacementC1 + src.slice(idxC1 + anchorC1.length)
+  console.log(`C1 applied at char ${idxC1}. Completion notification injected.`)
+
+  // --- C2: Failure path ---
+  // Anchor: status:"failed",error:R,isIdle:!0,endTime:Date.now(),onIdleCallbacks:[]}},M),sm4(
+  // We insert notification after ,M) and before sm4(
+  const anchorC2 = 'endTime:Date.now(),onIdleCallbacks:[]}},M),sm4('
+  const idxC2 = src.indexOf(anchorC2)
+  if (idxC2 === -1) {
+    console.error('ERROR: Cannot find Patch C2 anchor (failure path).')
+    console.error('Expected:', JSON.stringify(anchorC2))
+    process.exit(1)
+  }
+
+  if (src.indexOf(anchorC2, idxC2 + 1) !== -1) {
+    console.error('ERROR: Multiple matches for Patch C2 anchor. Aborting.')
+    process.exit(1)
+  }
+
+  // Insert after ,M) — replace anchor to inject between im() and sm4()
+  // This is also a comma expression: return ...,im(...),sm4(...),{success:!1,...}
+  const replacementC2 =
+    `endTime:Date.now(),onIdleCallbacks:[]}},M),` +
+    `${notifySnippet('failed')},` +
+    `sm4(`
+
+  src = src.slice(0, idxC2) + replacementC2 + src.slice(idxC2 + anchorC2.length)
+  console.log(`C2 applied at char ${idxC2}. Failure notification injected.`)
+
+  patchCount++
+}
+
+// ===========================================================================
 // Write and verify
 // ===========================================================================
 
@@ -222,7 +344,8 @@ console.log(`\nWrote patched file to ${cliPath}`)
 const verify = readFileSync(cliPath, 'utf-8')
 const markers = [
   ['A', patchAMarker, 'agentId fragmentation fix'],
-  ['B', patchBMarker, 'Teammate event forwarding to stdout']
+  ['B', patchBMarker, 'Teammate event forwarding to stdout'],
+  ['C', patchCMarker, 'Teammate completion/failure notifications']
 ]
 
 let allGood = true
@@ -245,8 +368,5 @@ console.log('  A — Stable agentId injected into OR() override. One JSONL per')
 console.log('      teammate across all turns (agent-<name>--<team>.jsonl).')
 console.log('  B — Stream events, assistant, and user messages forwarded to')
 console.log('      stdout as newline-delimited JSON with teammate_id for routing.')
-console.log('')
-console.log('Message format:')
-console.log('  {"type":"stream_event","event":{...},"teammate_id":"name@team","session_id":"...","uuid":"..."}')
-console.log('  {"type":"assistant","message":{...},"teammate_id":"name@team","session_id":"...","uuid":"..."}')
-console.log('  {"type":"user","message":{...},"teammate_id":"name@team","session_id":"...","uuid":"..."}')
+console.log('  C — task_notification emitted on teammate completion/failure.')
+console.log('      Uses q.agentId as task_id for correlation with taskIdMap.')

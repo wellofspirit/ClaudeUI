@@ -244,6 +244,7 @@ export interface ClaudeAPI {
   openTeamsViewWindow(routingId: string): Promise<void>
   onTeammateDetected(cb: (data: RoutedData<TeammateDetectedData>) => void): () => void
   onTeamCreated(cb: (data: RoutedData<{ teamName: string }>) => void): () => void
+  onTeamDeleted(cb: (data: RoutedData<Record<string, never>>) => void): () => void
   openInVSCode(cwd: string): Promise<void>
   loadSettings(): Promise<Record<string, unknown>>
   saveSettings(settings: Record<string, unknown>): Promise<void>
