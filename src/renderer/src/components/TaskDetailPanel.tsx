@@ -517,7 +517,7 @@ export function TaskDetailPanel({ style }: { style?: React.CSSProperties }): Rea
   return (
     <div style={style} className="shrink-0 border-l border-border bg-bg-secondary flex flex-col h-full">
       {/* Panel header */}
-      <div className="shrink-0 flex items-center px-4 h-10 border-b border-border">
+      <div className="shrink-0 flex items-center px-4 h-12 border-b border-border">
         <span className="text-[13px] text-text-secondary font-medium flex-1">Tasks</span>
         <button
           onClick={() => activeSessionId && closeTaskPanel(activeSessionId)}
