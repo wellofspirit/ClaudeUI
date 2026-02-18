@@ -363,18 +363,28 @@ function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Element {
   const showWelcome = useSessionStore((s) => s.showWelcome)
   const isMac = window.api.platform === 'darwin'
   const leftPadding = sidebarCollapsed && isMac ? 148 : 13
-  const [copied, setCopied] = useState(false)
+  const [copiedField, setCopiedField] = useState<string | null>(null)
+  const [infoHover, setInfoHover] = useState(false)
+  const infoLeaveTimer = useRef<ReturnType<typeof setTimeout>>(null)
+
+  const infoMouseEnter = useCallback(() => {
+    if (infoLeaveTimer.current) clearTimeout(infoLeaveTimer.current)
+    setInfoHover(true)
+  }, [])
+  const infoMouseLeave = useCallback(() => {
+    infoLeaveTimer.current = setTimeout(() => setInfoHover(false), 150)
+  }, [])
 
   const cost = statusLine ? statusLine.totalCostUsd : fallbackCost
   const durationStr = statusLine ? formatTopBarDuration(statusLine.totalDurationMs) : null
 
   const displaySessionId = sdkSessionId || activeSessionId
-  const handleCopySessionId = useCallback(() => {
-    if (!displaySessionId) return
-    navigator.clipboard.writeText(displaySessionId)
-    setCopied(true)
-    setTimeout(() => setCopied(false), 1500)
-  }, [displaySessionId])
+
+  const handleCopy = useCallback((text: string, field: string) => {
+    navigator.clipboard.writeText(text)
+    setCopiedField(field)
+    setTimeout(() => setCopiedField(null), 1500)
+  }, [])
 
   return (
     <div style={{ paddingLeft: leftPadding, paddingRight: 13 }} className="shrink-0 h-12 flex items-center justify-between [-webkit-app-region:drag] border-b border-border relative">
@@ -407,23 +417,54 @@ function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Element {
             </button>
           </div>
         )}
-        <div className="flex items-baseline gap-2 min-w-0 [-webkit-app-region:no-drag]">
-          <span className="text-[13px] text-text-secondary font-normal truncate">
+        <div
+          className="flex items-center min-w-0 [-webkit-app-region:no-drag] relative"
+          onMouseEnter={infoMouseEnter}
+          onMouseLeave={infoMouseLeave}
+        >
+          <span className="text-[13px] text-text-secondary font-normal truncate cursor-default">
             {!cwd ? 'New session' : hasContent ? (customTitle || 'Session') : 'New session'}
           </span>
-          {cwd && (
-            <span className="text-[11px] text-text-muted font-mono truncate shrink-0" title={cwd}>
-              {shortenHome(cwd)}
-            </span>
-          )}
-          {displaySessionId && (
-            <button
-              onClick={handleCopySessionId}
-              className="text-[10px] text-text-muted/60 hover:text-text-muted font-mono truncate max-w-[140px] transition-colors cursor-default shrink-0"
-              title={`Session: ${displaySessionId}\nClick to copy`}
-            >
-              {copied ? 'Copied!' : displaySessionId.slice(0, 8)}
-            </button>
+          {(cwd || displaySessionId) && (
+            <>
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0 ml-1 text-text-muted/40 relative top-px">
+                <circle cx="12" cy="12" r="10" />
+                <path d="M12 16v-4" />
+                <path d="M12 8h.01" />
+              </svg>
+              {infoHover && (
+                <div
+                  className="absolute top-full left-0 pt-1 z-50"
+                  onMouseEnter={infoMouseEnter}
+                  onMouseLeave={infoMouseLeave}
+                >
+                  <div className="bg-bg-primary border border-border rounded-lg shadow-lg py-2 px-3 space-y-2 min-w-[200px] max-w-[400px] animate-fade-in">
+                    {cwd && (
+                      <button
+                        onClick={() => handleCopy(cwd, 'cwd')}
+                        className="w-full text-left cursor-default group/row"
+                      >
+                        <div className="text-[10px] text-text-muted mb-0.5">Working Directory</div>
+                        <div className="text-[11px] text-text-secondary font-mono truncate group-hover/row:text-text-primary transition-colors">
+                          {copiedField === 'cwd' ? 'Copied!' : cwd}
+                        </div>
+                      </button>
+                    )}
+                    {displaySessionId && (
+                      <button
+                        onClick={() => handleCopy(displaySessionId, 'sid')}
+                        className="w-full text-left cursor-default group/row"
+                      >
+                        <div className="text-[10px] text-text-muted mb-0.5">Session ID</div>
+                        <div className="text-[11px] text-text-secondary font-mono truncate group-hover/row:text-text-primary transition-colors">
+                          {copiedField === 'sid' ? 'Copied!' : displaySessionId}
+                        </div>
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
+            </>
           )}
         </div>
       </div>
