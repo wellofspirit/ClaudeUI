@@ -115,6 +115,11 @@
 .diff-scroll-container::-webkit-scrollbar-thumb:hover { background: var(--color-border-bright); }
 .diff-scroll-container::-webkit-scrollbar-corner { background: transparent; }
 
+/* Compact diff: tighten line-height, min-height, and vertical padding */
+.diff-scroll-container .leading-\[1\.6\] { line-height: 1.3 !important; }
+.diff-scroll-container .min-h-\[28px\] { min-height: 0 !important; }
+.diff-scroll-container .py-\[6px\] { padding-top: 2px !important; padding-bottom: 2px !important; }
+
 /* Shrink line-number cells — the plugin defaults to min-width:100px and 10px padding
    which is too spacious. Override the plugin's utility classes with !important.
    Keep a small min-width so super-long unwrapped lines can't squeeze the column to 0. */

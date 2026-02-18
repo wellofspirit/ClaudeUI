@@ -101,7 +101,7 @@ export function DiffViewer(props: Props): React.JSX.Element {
   }, [props.patch, props.oldContent, props.newContent, props.oldStr, props.newStr, fileName, props.ignoreWhitespace])
 
   return (
-    <div className={`diff-scroll-container rounded-md border border-border overflow-auto font-mono [&_.diff-tailwindcss-wrapper]:!text-[11px] [&_.leading-\\[1\\.6\\]]:!leading-[1.3] [&_.min-h-\\[28px\\]]:!min-h-0 [&_.py-\\[6px\\]]:!py-[2px]${isPureAdd ? ' diff-pure-add' : ''}${isPureDel ? ' diff-pure-del' : ''}${className ? ` ${className}` : ''}`} style={{ textShadow: '0 1px rgba(0, 0, 0, 0.3)' }}>
+    <div className={`diff-scroll-container rounded-md border border-border overflow-auto font-mono [&_.diff-tailwindcss-wrapper]:!text-[11px]${isPureAdd ? ' diff-pure-add' : ''}${isPureDel ? ' diff-pure-del' : ''}${className ? ` ${className}` : ''}`} style={{ textShadow: '0 1px rgba(0, 0, 0, 0.3)' }}>
       <DiffView
         diffFile={diffFile}
         diffViewMode={diffViewSplit ? DiffModeEnum.Split : DiffModeEnum.Unified}
