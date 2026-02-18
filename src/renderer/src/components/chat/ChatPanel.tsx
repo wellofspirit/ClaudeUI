@@ -434,7 +434,7 @@ function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Element {
             className="group flex items-baseline gap-1.5 px-2 py-1 rounded-md text-[12px] text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
             title="Open in VS Code"
           >
-            <svg width="14" height="14" viewBox="0 0 100 100" fill="none" className="shrink-0 -mt-px transition-opacity">
+            <svg width="11" height="11" viewBox="0 0 100 100" fill="none" className="shrink-0 relative top-[1px] transition-opacity">
               <mask id="vsc" maskUnits="userSpaceOnUse" x="0" y="0" width="100" height="100">
                 <path fillRule="evenodd" clipRule="evenodd" d="M70.912 99.317a6.223 6.223 0 004.96-.19l20.589-9.907A6.25 6.25 0 00100 83.587V16.413a6.25 6.25 0 00-3.539-5.633L75.872.873a6.226 6.226 0 00-7.109 1.318L29.355 38.044 12.187 25.02a4.162 4.162 0 00-5.318.27L1.382 30.308a4.168 4.168 0 00-.005 6.146L16.674 50 1.377 63.546a4.168 4.168 0 00.005 6.146l5.487 5.018a4.162 4.162 0 005.318.27l17.168-13.024 39.408 35.853a6.213 6.213 0 002.149 1.508zM75.015 27.3L45.11 50l29.906 22.7V27.3z" fill="#fff"/>
               </mask>

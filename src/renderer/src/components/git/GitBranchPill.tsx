@@ -22,16 +22,13 @@ export function GitBranchPill(): React.JSX.Element | null {
         title={`Branch: ${branchName}`}
       >
         {/* Git branch icon */}
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0 relative top-[1.5px]">
           <line x1="6" y1="3" x2="6" y2="15" />
           <circle cx="18" cy="6" r="3" />
           <circle cx="6" cy="18" r="3" />
           <path d="M18 9a9 9 0 01-9 9" />
         </svg>
-        <span className="truncate max-w-[100px]">{displayName}</span>
-        <svg width="8" height="8" viewBox="0 0 12 12" fill="currentColor" className="shrink-0 opacity-50">
-          <path d="M3 5l3 3 3-3" />
-        </svg>
+        <span className="truncate max-w-[100px] font-mono">{displayName}</span>
       </button>
       {dropdownOpen && (
         <GitBranchDropdown
