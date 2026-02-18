@@ -50,6 +50,14 @@ function normalizeWs(s: string): string {
 
 export function DiffViewer(props: Props): React.JSX.Element {
   const { fileName, className } = props
+  // Pull all union fields into local variables so we can reference them in
+  // deps arrays without TS errors on discriminated-union property access.
+  const patch = 'patch' in props ? props.patch : undefined
+  const oldContent = 'oldContent' in props ? (props as PatchProps).oldContent : undefined
+  const newContent = 'newContent' in props ? (props as PatchProps).newContent : undefined
+  const oldStr = 'oldStr' in props ? props.oldStr : undefined
+  const newStr = 'newStr' in props ? props.newStr : undefined
+  const ignoreWhitespace = 'ignoreWhitespace' in props ? (props as ContentProps).ignoreWhitespace : undefined
   const diffViewSplit = useSessionStore((s) => s.settings.diffViewSplit)
   const diffWrapLines = useSessionStore((s) => s.settings.diffWrapLines)
   const theme = useSessionStore((s) => s.settings.theme)
@@ -58,25 +66,25 @@ export function DiffViewer(props: Props): React.JSX.Element {
   // Only check the diff header (before first @@), not the content — otherwise
   // a file whose source code contains '/dev/null' as a string literal would
   // false-positive (e.g. DiffViewer.tsx itself).
-  const patchHeader = props.patch != null ? props.patch.slice(0, props.patch.indexOf('\n@@')) : ''
-  const isPureAdd = props.patch != null
+  const patchHeader = patch != null ? patch.slice(0, patch.indexOf('\n@@')) : ''
+  const isPureAdd = patch != null
     ? patchHeader.includes('--- /dev/null')
-    : props.oldStr === ''
-  const isPureDel = props.patch != null
+    : oldStr === ''
+  const isPureDel = patch != null
     ? patchHeader.includes('+++ /dev/null')
-    : props.newStr === ''
+    : newStr === ''
 
   const diffFile = useMemo(() => {
     const name = fileName || 'file'
 
-    if (props.patch != null) {
+    if (patch != null) {
       // Fast path: pre-computed patch from git diff — no JS diffing needed.
       // When oldContent/newContent are provided (background-loaded), pass them
       // so the library can expand collapsed hunks to show full file context.
       const instance = DiffFile.createInstance({
-        oldFile: { fileName: name, content: props.oldContent ?? null },
-        newFile: { fileName: name, content: props.newContent ?? null },
-        hunks: [props.patch],
+        oldFile: { fileName: name, content: oldContent ?? null },
+        newFile: { fileName: name, content: newContent ?? null },
+        hunks: [patch],
       })
       instance.init()
       instance.buildUnifiedDiffLines()
@@ -85,20 +93,19 @@ export function DiffViewer(props: Props): React.JSX.Element {
     }
 
     // Slow path: compute patch from old/new strings (ToolCallBlock inline diffs)
-    const { oldStr, newStr, ignoreWhitespace } = props
-    const patchOld = ignoreWhitespace ? normalizeWs(oldStr) : oldStr
-    const patchNew = ignoreWhitespace ? normalizeWs(newStr) : newStr
-    const patch = createPatch(name, patchOld, patchNew, '', '', { context: 3 })
+    const patchOld = ignoreWhitespace ? normalizeWs(oldStr!) : oldStr!
+    const patchNew = ignoreWhitespace ? normalizeWs(newStr!) : newStr!
+    const computedPatch = createPatch(name, patchOld, patchNew, '', '', { context: 3 })
     const instance = DiffFile.createInstance({
-      oldFile: { fileName: name, content: ignoreWhitespace ? patchOld : oldStr },
-      newFile: { fileName: name, content: ignoreWhitespace ? patchNew : newStr },
-      hunks: [patch],
+      oldFile: { fileName: name, content: ignoreWhitespace ? patchOld : oldStr! },
+      newFile: { fileName: name, content: ignoreWhitespace ? patchNew : newStr! },
+      hunks: [computedPatch],
     })
     instance.init()
     instance.buildUnifiedDiffLines()
     instance.buildSplitDiffLines()
     return instance
-  }, [props.patch, props.oldContent, props.newContent, props.oldStr, props.newStr, fileName, props.ignoreWhitespace])
+  }, [patch, oldContent, newContent, oldStr, newStr, fileName, ignoreWhitespace])
 
   return (
     <div className={`diff-scroll-container rounded-md border border-border overflow-auto font-mono [&_.diff-tailwindcss-wrapper]:!text-[11px]${isPureAdd ? ' diff-pure-add' : ''}${isPureDel ? ' diff-pure-del' : ''}${className ? ` ${className}` : ''}`} style={{ textShadow: '0 1px rgba(0, 0, 0, 0.3)' }}>

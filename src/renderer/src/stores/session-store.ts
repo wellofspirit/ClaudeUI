@@ -508,6 +508,7 @@ interface SessionState {
   setGitFileDiff: (routingId: string, diff: { patch: string; oldContent?: string; newContent?: string } | null) => void
   setGitCommitMessage: (routingId: string, message: string) => void
   setGitFileFilter: (routingId: string, filter: 'staged' | 'unstaged' | 'all') => void
+  selectNextGitFile: (routingId: string) => void
   openGitPanel: (routingId: string) => void
   closeGitPanel: (routingId: string) => void
 }
@@ -1332,6 +1333,20 @@ export const useSessionStore = create<SessionState>((set) => ({
     set((state) => ({
       sessions: updateSession(state.sessions, routingId, () => ({ gitFileFilter: filter }))
     })),
+
+  selectNextGitFile: (routingId) =>
+    set((state) => {
+      const session = state.sessions[routingId]
+      if (!session?.gitStatus) {
+        return { sessions: updateSession(state.sessions, routingId, () => ({
+          gitSelectedFile: null, gitFileDiff: null
+        })) }
+      }
+      const next = session.gitStatus.files[0]?.path ?? null
+      return { sessions: updateSession(state.sessions, routingId, () => ({
+        gitSelectedFile: next, gitFileDiff: null
+      })) }
+    }),
 
   openGitPanel: (routingId) =>
     set((state) => ({

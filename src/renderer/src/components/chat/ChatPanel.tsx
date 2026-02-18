@@ -334,11 +334,6 @@ export function ChatPanel(): React.JSX.Element {
   )
 }
 
-function shortenHome(p: string): string {
-  const home = window.api.platform === 'win32' ? '' : '/Users/' + p.split('/')[2]
-  return home && p.startsWith(home) ? '~' + p.slice(home.length) : p
-}
-
 function formatTopBarCost(cost: number): string {
   if (cost < 0.01) return '$' + cost.toFixed(4)
   return '$' + cost.toFixed(2)

@@ -9,6 +9,7 @@ export function GitCommitBox(): React.JSX.Element {
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const setGitCommitMessage = useSessionStore((s) => s.setGitCommitMessage)
   const setGitStatus = useSessionStore((s) => s.setGitStatus)
+  const selectNextGitFile = useSessionStore((s) => s.selectNextGitFile)
   const gitCommitMode = useSessionStore((s) => s.settings.gitCommitMode)
   const [loading, setLoading] = useState(false)
   const [generating, setGenerating] = useState(false)
@@ -131,12 +132,13 @@ export function GitCommitBox(): React.JSX.Element {
       showToast(`Committed: ${hash.slice(0, 7)}`)
 
       await refreshStatus()
+      selectNextGitFile(activeSessionId)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Commit failed')
     } finally {
       setLoading(false)
     }
-  }, [cwd, activeSessionId, gitCommitMessage, stagedCount, loading, setGitCommitMessage, refreshStatus, showToast])
+  }, [cwd, activeSessionId, gitCommitMessage, stagedCount, loading, setGitCommitMessage, refreshStatus, showToast, selectNextGitFile])
 
   const handleCommitAndPush = useCallback(async () => {
     if (!cwd || !activeSessionId || !gitCommitMessage.trim() || loading) return
@@ -155,12 +157,13 @@ export function GitCommitBox(): React.JSX.Element {
       showToast(`Committed & pushed: ${hash.slice(0, 7)}`)
 
       await refreshStatus()
+      selectNextGitFile(activeSessionId)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Commit & push failed')
     } finally {
       setLoading(false)
     }
-  }, [cwd, activeSessionId, gitCommitMessage, stagedCount, loading, setGitCommitMessage, refreshStatus, showToast])
+  }, [cwd, activeSessionId, gitCommitMessage, stagedCount, loading, setGitCommitMessage, refreshStatus, showToast, selectNextGitFile])
 
   const handlePush = useCallback(async () => {
     if (!cwd || loading) return

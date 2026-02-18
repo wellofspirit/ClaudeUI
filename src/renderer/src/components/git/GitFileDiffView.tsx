@@ -56,9 +56,10 @@ export function GitFileDiffView(): React.JSX.Element {
   }, [cwd, gitSelectedFile, activeSessionId, gitStatus, gitFileDiff?.patch])
 
   if (!gitSelectedFile) {
+    const hasFiles = (gitStatus?.files.length ?? 0) > 0
     return (
       <div className="flex-1 flex items-center justify-center text-[12px] text-text-muted">
-        Select a file to view diff
+        {hasFiles ? 'Select a file to view diff' : '✨ All clean — nothing to diff!'}
       </div>
     )
   }

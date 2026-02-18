@@ -15,15 +15,21 @@ export function GitPanel({ style }: Props): React.JSX.Element | null {
   const gitPanelLayout = useSessionStore((s) => s.settings.gitPanelLayout)
   const closeGitPanel = useSessionStore((s) => s.closeGitPanel)
   const setGitStatus = useSessionStore((s) => s.setGitStatus)
+  const setGitSelectedFile = useSessionStore((s) => s.setGitSelectedFile)
   const updateSettings = useSessionStore((s) => s.updateSettings)
 
-  // Fetch initial status when panel opens
+  // Fetch initial status when panel opens and auto-select first file
   useEffect(() => {
     if (!cwd || !activeSessionId) return
     window.api.gitGetStatus(cwd).then((status) => {
       setGitStatus(activeSessionId, status)
+      // Auto-select first file if nothing is selected yet
+      const current = useSessionStore.getState().sessions[activeSessionId]?.gitSelectedFile
+      if (!current && status.files.length > 0) {
+        setGitSelectedFile(activeSessionId, status.files[0].path)
+      }
     }).catch(() => {})
-  }, [cwd, activeSessionId, setGitStatus])
+  }, [cwd, activeSessionId, setGitStatus, setGitSelectedFile])
 
   const handleClose = useCallback(() => {
     if (activeSessionId) closeGitPanel(activeSessionId)
