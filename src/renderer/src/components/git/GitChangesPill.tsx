@@ -27,7 +27,7 @@ export function GitChangesPill(): React.JSX.Element | null {
     return (
       <button
         onClick={handleClick}
-        className={`flex items-baseline gap-1 px-2 py-1 rounded-md text-[12px] transition-colors cursor-default ${
+        className={`flex items-baseline gap-1 px-2 py-1 rounded-md text-[12px] whitespace-nowrap transition-colors cursor-default ${
           isActive ? 'bg-bg-hover text-text-primary' : 'text-text-muted hover:text-text-primary hover:bg-bg-hover'
         }`}
         title="No changes"
@@ -40,7 +40,7 @@ export function GitChangesPill(): React.JSX.Element | null {
   return (
     <button
       onClick={handleClick}
-      className={`flex items-baseline gap-1.5 px-2 py-1 rounded-md text-[12px] transition-colors cursor-default ${
+      className={`flex items-baseline gap-1.5 px-2 py-1 rounded-md text-[12px] whitespace-nowrap transition-colors cursor-default ${
         isActive ? 'bg-bg-hover text-text-primary' : 'text-text-muted hover:text-text-primary hover:bg-bg-hover'
       }`}
       title={`${totalChanges} changed file${totalChanges > 1 ? 's' : ''} · +${linesAdded} -${linesRemoved}`}
