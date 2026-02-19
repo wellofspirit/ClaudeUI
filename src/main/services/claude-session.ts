@@ -188,16 +188,32 @@ export class ClaudeSession {
     }
   }
 
-  async run(prompt: string): Promise<void> {
+  async run(prompt: string, images?: Array<{ mediaType: string; base64Data: string }>): Promise<void> {
     this.isProcessing = true
     this.sendStatus()
+
+    // Build content: plain string when text-only, ContentBlockParam[] when images attached
+    let content: string | Array<Record<string, unknown>> = prompt
+    if (images && images.length > 0) {
+      const blocks: Array<Record<string, unknown>> = []
+      for (const img of images) {
+        blocks.push({
+          type: 'image',
+          source: { type: 'base64', media_type: img.mediaType, data: img.base64Data }
+        })
+      }
+      if (prompt) {
+        blocks.push({ type: 'text', text: prompt })
+      }
+      content = blocks
+    }
 
     // SDK streaming input format — must match SDKUserMessage type
     // (session_id and parent_tool_use_id are required by the CLI parser)
     const sdkMessage = {
       type: 'user' as const,
       session_id: this.sessionId || '',
-      message: { role: 'user' as const, content: prompt },
+      message: { role: 'user' as const, content },
       parent_tool_use_id: null
     }
 

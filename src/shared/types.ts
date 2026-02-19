@@ -1,5 +1,5 @@
 export interface ContentBlock {
-  type: 'text' | 'tool_use' | 'tool_result' | 'thinking' | 'cli_command' | 'api_error' | 'compact_separator'
+  type: 'text' | 'tool_use' | 'tool_result' | 'thinking' | 'cli_command' | 'api_error' | 'compact_separator' | 'image'
   text?: string
   toolName?: string
   toolInput?: Record<string, unknown>
@@ -13,6 +13,17 @@ export interface ContentBlock {
   // api_error fields
   errorType?: string
   errorMessage?: string
+  // image fields
+  mediaType?: 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp'
+  base64Data?: string
+}
+
+export interface ImageAttachment {
+  id: string
+  fileName: string
+  mediaType: 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp'
+  base64Data: string
+  previewUrl: string
 }
 
 export interface ChatMessage {
@@ -194,7 +205,7 @@ export interface ClaudeAPI {
   pickFolder(): Promise<string | null>
   createSession(routingId: string, cwd: string, effort?: string, resumeSessionId?: string, permissionMode?: string): Promise<void>
   rekeySession(oldId: string, newId: string): Promise<void>
-  sendPrompt(routingId: string, prompt: string): Promise<void>
+  sendPrompt(routingId: string, prompt: string, images?: Array<{ mediaType: string; base64Data: string }>): Promise<void>
   cancelSession(routingId: string): Promise<void>
   respondApproval(routingId: string, requestId: string, decision: ApprovalDecision, answers?: Record<string, string>): Promise<void>
   minimizeWindow(): Promise<void>

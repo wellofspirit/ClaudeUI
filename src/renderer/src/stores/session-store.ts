@@ -451,7 +451,7 @@ interface SessionState {
 
   // Per-session actions (all take routingId)
   addMessage: (routingId: string, message: ChatMessage) => void
-  addUserMessage: (routingId: string, id: string, text: string, planContent?: string) => void
+  addUserMessage: (routingId: string, id: string, text: string, planContent?: string, images?: Array<{ mediaType: string; base64Data: string }>) => void
   appendStreamingText: (routingId: string, text: string) => void
   appendStreamingThinking: (routingId: string, text: string) => void
   clearStreamingText: (routingId: string) => void
@@ -685,13 +685,23 @@ export const useSessionStore = create<SessionState>((set) => ({
       }
     }),
 
-  addUserMessage: (routingId, id, text, planContent?) =>
+  addUserMessage: (routingId, id, text, planContent?, images?) =>
     set((state) => {
       const session = state.sessions[routingId]
       if (!session) return state
 
       const recentSessionIds = [routingId, ...state.recentSessionIds.filter((rid) => rid !== routingId)].slice(0, state.settings.maxRecentSessions)
       saveSessionConfig(recentSessionIds, state.pinnedSessionIds, state.customTitles)
+
+      const content: ContentBlock[] = []
+      if (images && images.length > 0) {
+        for (const img of images) {
+          content.push({ type: 'image' as const, mediaType: img.mediaType as ContentBlock['mediaType'], base64Data: img.base64Data })
+        }
+      }
+      if (text) {
+        content.push({ type: 'text' as const, text })
+      }
 
       return {
         sessions: {
@@ -703,7 +713,7 @@ export const useSessionStore = create<SessionState>((set) => ({
               {
                 id,
                 role: 'user' as const,
-                content: [{ type: 'text' as const, text }],
+                content,
                 timestamp: Date.now(),
                 ...(planContent ? { planContent } : {})
               }

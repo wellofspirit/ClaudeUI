@@ -60,11 +60,26 @@ export const MessageBubble = memo(function MessageBubble({
       )
     }
 
+    const imageBlocks = message.content.filter((b) => b.type === 'image')
+    const textBlocks = message.content.filter((b) => b.type === 'text')
+
     return (
       <div className="flex justify-end animate-fade-in">
-        <div className="max-w-[85%] bg-bg-tertiary rounded-2xl px-4 py-2.5 text-[13px] text-text-primary leading-[1.6] whitespace-pre-wrap">
-          {message.content.map((block, i) => (
-            <span key={i}>{block.text}</span>
+        <div className="max-w-[85%] bg-bg-tertiary rounded-2xl px-4 py-2.5 text-[13px] text-text-primary leading-[1.6]">
+          {imageBlocks.length > 0 && (
+            <div className="flex gap-2 flex-wrap mb-2">
+              {imageBlocks.map((block, i) => (
+                <img
+                  key={i}
+                  src={`data:${block.mediaType};base64,${block.base64Data}`}
+                  alt="Attached"
+                  className="max-w-[200px] max-h-[200px] rounded-lg object-contain"
+                />
+              ))}
+            </div>
+          )}
+          {textBlocks.map((block, i) => (
+            <span key={i} className="whitespace-pre-wrap">{block.text}</span>
           ))}
         </div>
       </div>

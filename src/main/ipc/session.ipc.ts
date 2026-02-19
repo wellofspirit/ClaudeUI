@@ -170,10 +170,10 @@ export function registerSessionIpc(win: BrowserWindow): void {
     manager.rekey(oldId, newId)
   })
 
-  ipcMain.handle('session:send', (_event, routingId: string, prompt: string) => {
+  ipcMain.handle('session:send', (_event, routingId: string, prompt: string, images?: Array<{ mediaType: string; base64Data: string }>) => {
     const session = manager.get(routingId)
     if (!session) throw new Error(`No session for routingId: ${routingId}`)
-    session.run(prompt)
+    session.run(prompt, images)
   })
 
   ipcMain.handle('session:cancel', (_event, routingId: string) => {

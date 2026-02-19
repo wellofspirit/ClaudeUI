@@ -8,8 +8,8 @@ const api: ClaudeAPI = {
     ipcRenderer.invoke('session:create', routingId, cwd, effort, resumeSessionId, permissionMode),
   rekeySession: (oldId: string, newId: string) =>
     ipcRenderer.invoke('session:rekey', oldId, newId),
-  sendPrompt: (routingId: string, prompt: string) =>
-    ipcRenderer.invoke('session:send', routingId, prompt),
+  sendPrompt: (routingId: string, prompt: string, images?: Array<{ mediaType: string; base64Data: string }>) =>
+    ipcRenderer.invoke('session:send', routingId, prompt, images),
   cancelSession: (routingId: string) =>
     ipcRenderer.invoke('session:cancel', routingId),
   respondApproval: (routingId: string, requestId: string, decision: ApprovalDecision, answers?: Record<string, string>) =>
