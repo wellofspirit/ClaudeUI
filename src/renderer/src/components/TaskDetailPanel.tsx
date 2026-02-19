@@ -517,11 +517,11 @@ export function TaskDetailPanel({ style }: { style?: React.CSSProperties }): Rea
   return (
     <div style={style} className="shrink-0 border-l border-border bg-bg-secondary flex flex-col h-full">
       {/* Panel header */}
-      <div className="shrink-0 flex items-center px-4 h-12 border-b border-border">
+      <div className="shrink-0 flex items-center px-4 h-12 border-b border-border [-webkit-app-region:drag]">
         <span className="text-[13px] text-text-secondary font-medium flex-1">Tasks</span>
         <button
           onClick={() => activeSessionId && closeTaskPanel(activeSessionId)}
-          className="text-text-muted hover:text-text-primary transition-colors cursor-pointer"
+          className="[-webkit-app-region:no-drag] text-text-muted hover:text-text-primary transition-colors cursor-pointer"
         >
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <line x1="18" y1="6" x2="6" y2="18" />
