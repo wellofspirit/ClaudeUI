@@ -91,11 +91,19 @@ if (src.includes(patchFMarker)) {
   const rvyName = rvyMatch[1]
   console.log(`Found RVY function: ${rvyName}()`)
 
-  // Find: if(RVY(MSG))ARRAY.push(MSG),
-  const callRe = new RegExp(
+  // Find the RVY call site. Two known patterns:
+  //
+  // v2.1.45 (old): if(RVY(MSG))ARR.push(MSG),
+  // v2.1.47 (new): if(RVY(MSG))await TRANSCRIPT([MSG],...
+  //
+  // We try the new pattern first, then fall back to the old one.
+  const newCallRe = new RegExp(
+    `if\\(${rvyName}\\((${V})\\)\\)await `
+  )
+  const oldCallRe = new RegExp(
     `if\\(${rvyName}\\((${V})\\)\\)(${V})\\.push\\(\\1\\),`
   )
-  const callMatch = src.match(callRe)
+  const callMatch = src.match(newCallRe) || src.match(oldCallRe)
   if (!callMatch) {
     console.error('ERROR: Cannot locate RVY call site in cR.')
     process.exit(1)
@@ -103,10 +111,9 @@ if (src.includes(patchFMarker)) {
 
   const oldStr = callMatch[0]
   const msgVar = callMatch[1]
-  const arrVar = callMatch[2]
   const idx = src.indexOf(oldStr)
 
-  // Verify it's inside the sub-agent query generator (cR in v2.1.39, jy in v2.1.41)
+  // Verify it's inside the sub-agent query generator (cR in v2.1.39, WR in v2.1.47)
   const before = src.slice(Math.max(0, idx - 5000), idx)
   if (!/async function\*[\w$]+\(/.test(before)) {
     console.error('ERROR: RVY call site is not inside an async generator. Aborting.')
@@ -118,13 +125,15 @@ if (src.includes(patchFMarker)) {
     process.exit(1)
   }
 
+  // Inject stream_event bypass before the RVY gate.
+  // The original "if(RVY(MSG))..." is preserved unchanged after our "else".
   const newStr =
     `${patchFMarker}if(${msgVar}.type==="stream_event"){yield ${msgVar}}else ` +
-    `if(${rvyName}(${msgVar}))${arrVar}.push(${msgVar}),`
+    oldStr
 
   src = src.slice(0, idx) + newStr + src.slice(idx + oldStr.length)
   patchCount++
-  console.log(`Applied at char ${idx}. msg=${msgVar}, arr=${arrVar}`)
+  console.log(`Applied at char ${idx}. msg=${msgVar}`)
 }
 
 // ===========================================================================

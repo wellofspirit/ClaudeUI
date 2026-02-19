@@ -88,11 +88,14 @@ console.log(`  XML variable: ${xmlVar}`)
 
 // Step 3c: Find the P.enqueue block that follows
 // Pattern: VAR.enqueue({type:"system",subtype:"task_notification",...})
+// Note: SDK 0.2.47+ added tool_use_id between task_id and status, so we
+// capture it optionally to keep the patch working across versions.
 const afterSummary = src.slice(summaryIdx, summaryIdx + 600)
 const enqueueRe = new RegExp(
   `(${V})\\.enqueue\\(\\{` +
   `type:"system",subtype:"task_notification",` +
   `task_id:(${V})\\?\\.\\[1\\]\\?\\?"",` +
+  `(?:tool_use_id:(${V})\\?\\.\\[1\\],)?` +  // optional tool_use_id (added in 0.2.47)
   `status:(${V}),` +
   `output_file:(${V})\\?\\.\\[1\\]\\?\\?"",` +
   `summary:(${V})\\?\\.\\[1\\]\\?\\?"",` +
@@ -104,20 +107,21 @@ const enqueueRe = new RegExp(
 const enqueueMatch = afterSummary.match(enqueueRe)
 
 if (!enqueueMatch) {
-  console.error('ERROR: Cannot locate P.enqueue({type:"system",subtype:"task_notification",...}) after summary.')
+  console.error('ERROR: Cannot locate enqueue({type:"system",subtype:"task_notification",...}) after summary.')
   console.error('Nearby code:', afterSummary.slice(0, 300))
   process.exit(1)
 }
 
 const [
   enqueueFullMatch,
-  enqueueTarget,  // P
-  taskIdVar,      // w1
-  statusVar,      // G1
-  outputFileVar,  // P1
-  summaryVar,     // f1
-  sessionIdFn,    // p6
-  uuidFn          // SE
+  enqueueTarget,   // Z (0.2.47) / P (0.2.45)
+  taskIdVar,       // z6 / w1
+  toolUseIdVar,    // C6 (0.2.47+) or undefined (0.2.45)
+  statusVar,       // m6 / G1
+  outputFileVar,   // i6 / P1
+  summaryVar,      // z1 / f1
+  sessionIdFn,     // U1 / p6
+  uuidFn           // kZ / SE
 ] = enqueueMatch
 
 // Get absolute position of the enqueue call
@@ -126,7 +130,7 @@ const enqueueAbsIdx = summaryIdx + enqueueRelIdx
 
 console.log(`Found enqueue at char ${enqueueAbsIdx}`)
 console.log(`  Enqueue target: ${enqueueTarget}, Status: ${statusVar}`)
-console.log(`  TaskId: ${taskIdVar}, OutputFile: ${outputFileVar}, Summary: ${summaryVar}`)
+console.log(`  TaskId: ${taskIdVar}, ToolUseId: ${toolUseIdVar || '(none)'}, OutputFile: ${outputFileVar}, Summary: ${summaryVar}`)
 console.log(`  SessionId fn: ${sessionIdFn}(), UUID fn: ${uuidFn}()`)
 
 // Verify uniqueness
@@ -138,24 +142,20 @@ if (src.indexOf(enqueueFullMatch, enqueueAbsIdx + 1) !== -1) {
 // ---------------------------------------------------------------------------
 // Step 4: Build the patched replacement
 //
-// We inject <usage> extraction just before P.enqueue, and add a `usage`
-// field to the enqueued object.
+// We inject <usage> extraction just before the enqueue, and add a `usage`
+// field to the enqueued object. The tool_use_id field (added in 0.2.47)
+// is preserved when present.
 //
-// Before:
-//   P.enqueue({type:"system",subtype:"task_notification",
-//     task_id:w1?.[1]??"",status:G1,output_file:P1?.[1]??"",
-//     summary:f1?.[1]??"",session_id:p6(),uuid:SE()})
+// Before (0.2.47):
+//   Z.enqueue({type:"system",subtype:"task_notification",
+//     task_id:z6?.[1]??"",tool_use_id:C6?.[1],status:m6,
+//     output_file:i6?.[1]??"",summary:z1?.[1]??"",
+//     session_id:U1(),uuid:kZ()})
 //
 // After:
-//   var _ub=Y1.match(/<usage>([\s\S]*?)<\/usage>/),
-//   _udata=_ub?{
-//     total_tokens:+((_ub[1].match(/total_tokens:\s*(\d+)/)||[])[1]||0),
-//     tool_uses:+((_ub[1].match(/tool_uses:\s*(\d+)/)||[])[1]||0),
-//     duration_ms:+((_ub[1].match(/duration_ms:\s*(\d+)/)||[])[1]||0)
-//   }:null;
-//   P.enqueue({type:"system",subtype:"task_notification",
-//     task_id:w1?.[1]??"",status:G1,output_file:P1?.[1]??"",
-//     summary:f1?.[1]??"",usage:_udata,session_id:p6(),uuid:SE()})
+//   var _ub=E6.match(/<usage>([\s\S]*?)<\/usage>/),
+//   _udata=_ub?{...}:null;
+//   Z.enqueue({...,usage:_udata,...})
 // ---------------------------------------------------------------------------
 
 const usageExtraction =
@@ -167,10 +167,15 @@ const usageExtraction =
     `duration_ms:+((_ub[1].match(/duration_ms:\\s*(\\d+)/)||[])[1]||0)` +
   `}:null;`
 
+const toolUseIdField = toolUseIdVar
+  ? `tool_use_id:${toolUseIdVar}?.[1],`
+  : ''
+
 const newEnqueue =
   `${enqueueTarget}.enqueue({` +
   `type:"system",subtype:"task_notification",` +
   `task_id:${taskIdVar}?.[1]??"",` +
+  toolUseIdField +
   `status:${statusVar},` +
   `output_file:${outputFileVar}?.[1]??"",` +
   `summary:${summaryVar}?.[1]??"",` +

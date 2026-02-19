@@ -27,15 +27,23 @@ G1=y1(x1)?(x1==="killed"?"stopped":x1):"completed";
 
 ### Part B: Inject notification call
 
-Inserts a call to the notification sender (e.g. `cm1()`) before the `notified:true` flag is set:
+Inserts a call to the notification sender (e.g. `kxY()`) before the `notified:true` flag is set:
 
 ```js
 // Before:
-await O.kill(w,{...}),SET_STATE((S)=>{...notified:!0...});
+await _.kill(A,{...}),z((O)=>{...notified:!0...});
 
 // After:
-await O.kill(w,{...}),NOTIFY(w,$.cwd||"","killed",void 0,SET_STATE),SET_STATE((S)=>{...notified:!0...});
+await _.kill(A,{...}),NOTIFY(A,$.description||$.command||"","killed",z,void 0),z((O)=>{...notified:!0...});
 ```
+
+The notification sender signature is `NOTIFY(taskId, description, status, setState, toolUseId)`:
+- `setState` (4th param) is required — it calls `Xw(taskId, setState, cb)` internally
+  to set `notified:true` and gate against duplicate notifications
+- `toolUseId` (5th param) is optional — used for `<tool-use-id>` in the XML output;
+  TaskStop doesn't have it available, so we pass `void 0`
+- `description` uses `$.description||$.command||""` to handle both `local_agent`
+  (has `.description`) and `local_bash` (has `.command`) task types
 
 ## How It Finds the Code
 

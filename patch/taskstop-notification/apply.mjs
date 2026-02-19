@@ -125,7 +125,7 @@ if (src.includes(patchAMarker)) {
 //   await O.kill(w,{...}),SET_STATE((S)=>{...notified:!0...});
 //
 // After:
-//   await O.kill(w,{...}),NOTIFY(w,$.cwd||"","killed",void 0,SET_STATE),SET_STATE((S)=>{...notified:!0...});
+//   await O.kill(w,{...}),NOTIFY(w,$.description||"","killed",SET_STATE,void 0),SET_STATE((S)=>{...notified:!0...});
 // ===========================================================================
 
 console.log('\n--- Part B: Inject notification call into TaskStop ---')
@@ -220,8 +220,11 @@ if (src.includes(patchBMarker)) {
     process.exit(1)
   }
 
-  // Inject: NOTIFY(taskId, taskObj.cwd||"", "killed", void 0, setState),
-  const injection = `${patchBMarker}${notifySenderName}(${taskIdVarName},${taskObjVar}.cwd||"","killed",void 0,${setStateFnName}),`
+  // Inject: NOTIFY(taskId, description, "killed", setState, toolUseId),
+  // kxY signature: kxY(taskId, description, status, setState, toolUseId)
+  // - 4th param = setState (required for Xw to set notified:true)
+  // - 5th param = toolUseId (optional, used in XML <tool-use-id> element)
+  const injection = `${patchBMarker}${notifySenderName}(${taskIdVarName},${taskObjVar}.description||${taskObjVar}.command||"","killed",${setStateFnName},void 0),`
 
   src = src.slice(0, commaIdx + 1) + injection + src.slice(commaIdx + 1)
   patchCount++
