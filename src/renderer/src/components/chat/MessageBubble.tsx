@@ -61,20 +61,31 @@ export const MessageBubble = memo(function MessageBubble({
     }
 
     const imageBlocks = message.content.filter((b) => b.type === 'image')
+    const docBlocks = message.content.filter((b) => b.type === 'document')
     const textBlocks = message.content.filter((b) => b.type === 'text')
+    const hasAttachments = imageBlocks.length > 0 || docBlocks.length > 0
 
     return (
       <div className="flex justify-end animate-fade-in">
         <div className="max-w-[85%] bg-bg-tertiary rounded-2xl px-4 py-2.5 text-[13px] text-text-primary leading-[1.6]">
-          {imageBlocks.length > 0 && (
+          {hasAttachments && (
             <div className="flex gap-2 flex-wrap mb-2">
               {imageBlocks.map((block, i) => (
                 <img
-                  key={i}
+                  key={`img-${i}`}
                   src={`data:${block.mediaType};base64,${block.base64Data}`}
                   alt="Attached"
                   className="max-w-[200px] max-h-[200px] rounded-lg object-contain"
                 />
+              ))}
+              {docBlocks.map((block, i) => (
+                <div key={`doc-${i}`} className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-border bg-bg-hover">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="text-red-400 shrink-0">
+                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                    <polyline points="14 2 14 8 20 8" />
+                  </svg>
+                  <span className="text-[11px] text-text-secondary">{block.fileName || 'Document'}</span>
+                </div>
               ))}
             </div>
           )}

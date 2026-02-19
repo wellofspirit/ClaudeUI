@@ -188,19 +188,26 @@ export class ClaudeSession {
     }
   }
 
-  async run(prompt: string, images?: Array<{ mediaType: string; base64Data: string }>): Promise<void> {
+  async run(prompt: string, attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>): Promise<void> {
     this.isProcessing = true
     this.sendStatus()
 
-    // Build content: plain string when text-only, ContentBlockParam[] when images attached
+    // Build content: plain string when text-only, ContentBlockParam[] when attachments present
     let content: string | Array<Record<string, unknown>> = prompt
-    if (images && images.length > 0) {
+    if (attachments && attachments.length > 0) {
       const blocks: Array<Record<string, unknown>> = []
-      for (const img of images) {
-        blocks.push({
-          type: 'image',
-          source: { type: 'base64', media_type: img.mediaType, data: img.base64Data }
-        })
+      for (const att of attachments) {
+        if (att.mediaType === 'application/pdf') {
+          blocks.push({
+            type: 'document',
+            source: { type: 'base64', media_type: att.mediaType, data: att.base64Data }
+          })
+        } else {
+          blocks.push({
+            type: 'image',
+            source: { type: 'base64', media_type: att.mediaType, data: att.base64Data }
+          })
+        }
       }
       if (prompt) {
         blocks.push({ type: 'text', text: prompt })

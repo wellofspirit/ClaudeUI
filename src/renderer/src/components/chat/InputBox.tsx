@@ -1,10 +1,11 @@
 import { useState, useRef, useCallback, useEffect, useMemo } from 'react'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
-import type { ImageAttachment, StatusLineData } from '../../../../shared/types'
+import type { FileAttachment, StatusLineData } from '../../../../shared/types'
 import { v4 as uuid } from 'uuid'
 import { SlashCommandMenu, filterSlashCommands } from './SlashCommandMenu'
 
 const ACCEPTED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp']
+const ACCEPTED_FILE_TYPES = [...ACCEPTED_IMAGE_TYPES, 'application/pdf']
 const MAX_IMAGE_DIMENSION = 2048
 
 /** Compress an image file to fit within MAX_IMAGE_DIMENSION and return base64 + mediaType.
@@ -42,6 +43,21 @@ function processImageFile(file: File): Promise<{ mediaType: string; base64Data: 
       }
       img.onerror = (): void => reject(new Error('Failed to load image'))
       img.src = dataUrl // data: URL — CSP-safe
+    }
+    reader.readAsDataURL(file)
+  })
+}
+
+/** Read a non-image file (e.g. PDF) as base64 without any processing */
+function readFileAsBase64(file: File): Promise<{ mediaType: string; base64Data: string }> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onerror = reject
+    reader.onload = (): void => {
+      const dataUrl = reader.result as string
+      const [header, base64Data] = dataUrl.split(',')
+      const mediaType = header.match(/data:(.*?);/)?.[1] || file.type
+      resolve({ mediaType, base64Data })
     }
     reader.readAsDataURL(file)
   })
@@ -137,7 +153,7 @@ export function InputBox(): React.JSX.Element {
   const [modelOpen, setModelOpen] = useState(false)
   const [effortOpen, setEffortOpen] = useState(false)
   const [plusOpen, setPlusOpen] = useState(false)
-  const [attachedImages, setAttachedImages] = useState<ImageAttachment[]>([])
+  const [attachedFiles, setAttachedFiles] = useState<FileAttachment[]>([])
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   // Slash command autocomplete
@@ -182,7 +198,7 @@ export function InputBox(): React.JSX.Element {
   }, [])
 
   /** Core send: add user message, ensure SDK, fire prompt */
-  const doSend = useCallback(async (prompt: string, images?: Array<{ mediaType: string; base64Data: string }>) => {
+  const doSend = useCallback(async (prompt: string, attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>) => {
     if (!activeSessionId) return
 
     // Check historical state BEFORE adding user message, otherwise the
@@ -198,7 +214,7 @@ export function InputBox(): React.JSX.Element {
       needsSdkCreate = true
     }
 
-    addUserMessage(activeSessionId, uuid(), prompt, undefined, images)
+    addUserMessage(activeSessionId, uuid(), prompt, undefined, attachments)
 
     // Lazy SDK creation: create session on first message
     if (needsSdkCreate) {
@@ -208,13 +224,13 @@ export function InputBox(): React.JSX.Element {
       markSdkActive(activeSessionId)
     }
 
-    await window.api.sendPrompt(activeSessionId, prompt, images)
+    await window.api.sendPrompt(activeSessionId, prompt, attachments)
   }, [activeSessionId, addUserMessage, sdkActive, markSdkActive])
 
   const handleSend = useCallback(async () => {
     const prompt = text.trim()
-    const hasImages = attachedImages.length > 0
-    if ((!prompt && !hasImages) || isDisabled || !activeSessionId) return
+    const hasFiles = attachedFiles.length > 0
+    if ((!prompt && !hasFiles) || isDisabled || !activeSessionId) return
 
     // Handle /clear as a client-side command: start a new session with the same project
     if (prompt === '/clear') {
@@ -229,13 +245,13 @@ export function InputBox(): React.JSX.Element {
       return
     }
 
-    // Collect images before clearing state
-    const images = hasImages
-      ? attachedImages.map(({ mediaType, base64Data }) => ({ mediaType, base64Data }))
+    // Collect attachments before clearing state
+    const attachments = hasFiles
+      ? attachedFiles.map(({ mediaType, base64Data, fileName }) => ({ mediaType, base64Data, fileName }))
       : undefined
 
-    if (hasImages) {
-      setAttachedImages([])
+    if (hasFiles) {
+      setAttachedFiles([])
     }
 
     setText('')
@@ -252,9 +268,9 @@ export function InputBox(): React.JSX.Element {
     if (isRunning) {
       appendQueuedText(prompt)
     } else {
-      await doSend(prompt, images)
+      await doSend(prompt, attachments)
     }
-  }, [text, attachedImages, isDisabled, activeSessionId, isRunning, appendQueuedText, doSend, focusedAgentId, teammates, addTeammateUserMessage])
+  }, [text, attachedFiles, isDisabled, activeSessionId, isRunning, appendQueuedText, doSend, focusedAgentId, teammates, addTeammateUserMessage])
 
   // Auto-send queued text when agent transitions running → idle
   const prevRunningRef = useRef(false)
@@ -388,40 +404,44 @@ export function InputBox(): React.JSX.Element {
     textareaRef.current?.focus()
   }, [setText])
 
-  const addImageFiles = useCallback(async (files: File[]) => {
-    const imageFiles = files.filter((f) => ACCEPTED_IMAGE_TYPES.includes(f.type))
-    if (imageFiles.length === 0) return
-    const newAttachments: ImageAttachment[] = []
-    for (const file of imageFiles) {
+  const addFiles = useCallback(async (files: File[]) => {
+    const accepted = files.filter((f) => ACCEPTED_FILE_TYPES.includes(f.type))
+    if (accepted.length === 0) return
+    const newAttachments: FileAttachment[] = []
+    for (const file of accepted) {
       try {
-        const { mediaType, base64Data } = await processImageFile(file)
+        const isPdf = file.type === 'application/pdf'
+        const { mediaType, base64Data } = isPdf
+          ? await readFileAsBase64(file)
+          : await processImageFile(file)
         newAttachments.push({
           id: uuid(),
           fileName: file.name,
-          mediaType: mediaType as ImageAttachment['mediaType'],
+          fileType: isPdf ? 'pdf' : 'image',
+          mediaType: mediaType as FileAttachment['mediaType'],
           base64Data,
-          previewUrl: `data:${mediaType};base64,${base64Data}`
+          previewUrl: isPdf ? '' : `data:${mediaType};base64,${base64Data}`
         })
       } catch {
         // Skip files that fail to process
       }
     }
     if (newAttachments.length > 0) {
-      setAttachedImages((prev) => [...prev, ...newAttachments])
+      setAttachedFiles((prev) => [...prev, ...newAttachments])
     }
   }, [])
 
-  const handleAttachImage = useCallback((): void => {
+  const handleAttachFile = useCallback((): void => {
     setPlusOpen(false)
     fileInputRef.current?.click()
   }, [])
 
   const handleFileChange = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || [])
-    await addImageFiles(files)
+    await addFiles(files)
     // Reset so the same file can be selected again
     if (fileInputRef.current) fileInputRef.current.value = ''
-  }, [addImageFiles])
+  }, [addFiles])
 
   const handlePaste = useCallback(async (e: React.ClipboardEvent) => {
     const items = Array.from(e.clipboardData.items)
@@ -429,11 +449,11 @@ export function InputBox(): React.JSX.Element {
     if (imageItems.length === 0) return
     e.preventDefault()
     const files = imageItems.map((item) => item.getAsFile()).filter(Boolean) as File[]
-    await addImageFiles(files)
-  }, [addImageFiles])
+    await addFiles(files)
+  }, [addFiles])
 
-  const removeImage = useCallback((id: string) => {
-    setAttachedImages((prev) => prev.filter((i) => i.id !== id))
+  const removeFile = useCallback((id: string) => {
+    setAttachedFiles((prev) => prev.filter((i) => i.id !== id))
   }, [])
 
   return (
@@ -472,25 +492,35 @@ export function InputBox(): React.JSX.Element {
             />
           )}
 
-          {/* Hidden file input for image picker */}
+          {/* Hidden file input for file picker */}
           <input
             ref={fileInputRef}
             type="file"
-            accept="image/jpeg,image/png,image/gif,image/webp"
+            accept="image/jpeg,image/png,image/gif,image/webp,application/pdf"
             multiple
             className="hidden"
             onChange={handleFileChange}
           />
 
-          {/* Image preview row */}
-          {attachedImages.length > 0 && (
+          {/* File preview row */}
+          {attachedFiles.length > 0 && (
             <div className="flex gap-2 px-3 pt-2.5 pb-0.5 overflow-x-auto">
-              {attachedImages.map((img) => (
-                <div key={img.id} className="relative shrink-0 w-16 h-16 rounded-lg overflow-hidden border border-border group/img">
-                  <img src={img.previewUrl} alt={img.fileName} className="w-full h-full object-cover" />
+              {attachedFiles.map((file) => (
+                <div key={file.id} className={`relative shrink-0 rounded-lg overflow-hidden border border-border group/file ${file.fileType === 'pdf' ? 'flex items-center gap-1.5 px-2.5 h-10 bg-bg-hover' : 'w-16 h-16'}`}>
+                  {file.fileType === 'pdf' ? (
+                    <>
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="text-red-400 shrink-0">
+                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                        <polyline points="14 2 14 8 20 8" />
+                      </svg>
+                      <span className="text-[11px] text-text-secondary max-w-[100px] truncate">{file.fileName}</span>
+                    </>
+                  ) : (
+                    <img src={file.previewUrl} alt={file.fileName} className="w-full h-full object-cover" />
+                  )}
                   <button
-                    onClick={() => removeImage(img.id)}
-                    className="absolute top-0.5 right-0.5 w-4 h-4 bg-black/60 hover:bg-black/80 rounded-full flex items-center justify-center opacity-0 group-hover/img:opacity-100 transition-opacity cursor-pointer"
+                    onClick={() => removeFile(file.id)}
+                    className="absolute top-0.5 right-0.5 w-4 h-4 bg-black/60 hover:bg-black/80 rounded-full flex items-center justify-center opacity-0 group-hover/file:opacity-100 transition-opacity cursor-pointer"
                   >
                     <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="3" strokeLinecap="round">
                       <line x1="18" y1="6" x2="6" y2="18" />
@@ -547,15 +577,13 @@ export function InputBox(): React.JSX.Element {
                 {plusOpen && (
                   <div className="absolute bottom-full mb-1 left-0 w-48 bg-bg-tertiary border border-border rounded-lg overflow-hidden shadow-lg shadow-black/30 z-20">
                     <button
-                      onClick={handleAttachImage}
+                      onClick={handleAttachFile}
                       className="w-full flex items-center gap-2.5 px-3 h-9 text-[12px] text-text-secondary hover:bg-bg-hover hover:text-text-primary transition-colors cursor-pointer"
                     >
                       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="text-text-muted">
-                        <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
-                        <circle cx="8.5" cy="8.5" r="1.5" />
-                        <polyline points="21 15 16 10 5 21" />
+                        <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
                       </svg>
-                      Attach image
+                      Attach file
                     </button>
                   </div>
                 )}
@@ -681,7 +709,7 @@ export function InputBox(): React.JSX.Element {
               )}
               <button
                 onClick={handleSend}
-                disabled={(!text.trim() && attachedImages.length === 0) || isDisabled}
+                disabled={(!text.trim() && attachedFiles.length === 0) || isDisabled}
                 title={focusedAgentId ? 'Send to agent' : isRunning ? 'Queue message' : 'Send message'}
                 className="w-7 h-7 flex items-center justify-center rounded-full bg-text-primary text-bg-primary transition-opacity disabled:opacity-15 cursor-pointer disabled:cursor-default"
               >

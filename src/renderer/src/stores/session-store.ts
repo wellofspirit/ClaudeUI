@@ -451,7 +451,7 @@ interface SessionState {
 
   // Per-session actions (all take routingId)
   addMessage: (routingId: string, message: ChatMessage) => void
-  addUserMessage: (routingId: string, id: string, text: string, planContent?: string, images?: Array<{ mediaType: string; base64Data: string }>) => void
+  addUserMessage: (routingId: string, id: string, text: string, planContent?: string, attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>) => void
   appendStreamingText: (routingId: string, text: string) => void
   appendStreamingThinking: (routingId: string, text: string) => void
   clearStreamingText: (routingId: string) => void
@@ -685,7 +685,7 @@ export const useSessionStore = create<SessionState>((set) => ({
       }
     }),
 
-  addUserMessage: (routingId, id, text, planContent?, images?) =>
+  addUserMessage: (routingId, id, text, planContent?, attachments?) =>
     set((state) => {
       const session = state.sessions[routingId]
       if (!session) return state
@@ -694,9 +694,10 @@ export const useSessionStore = create<SessionState>((set) => ({
       saveSessionConfig(recentSessionIds, state.pinnedSessionIds, state.customTitles)
 
       const content: ContentBlock[] = []
-      if (images && images.length > 0) {
-        for (const img of images) {
-          content.push({ type: 'image' as const, mediaType: img.mediaType as ContentBlock['mediaType'], base64Data: img.base64Data })
+      if (attachments && attachments.length > 0) {
+        for (const att of attachments) {
+          const blockType = att.mediaType === 'application/pdf' ? 'document' as const : 'image' as const
+          content.push({ type: blockType, mediaType: att.mediaType as ContentBlock['mediaType'], base64Data: att.base64Data, fileName: att.fileName })
         }
       }
       if (text) {
