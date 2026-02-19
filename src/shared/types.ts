@@ -302,6 +302,22 @@ export interface SlashCommandInfo {
 }
 
 // ---------------------------------------------------------------------------
+// Diff review comment types
+// ---------------------------------------------------------------------------
+
+export interface DiffComment {
+  id: string
+  filePath: string
+  lineNumber: number
+  /** End line when a range is selected (inclusive). Equals lineNumber for single-line. */
+  endLineNumber: number
+  side: 'old' | 'new'
+  lineContent: string
+  comment: string
+  createdAt: number
+}
+
+// ---------------------------------------------------------------------------
 // Git integration types
 // ---------------------------------------------------------------------------
 

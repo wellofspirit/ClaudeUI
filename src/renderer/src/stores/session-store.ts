@@ -15,7 +15,8 @@ import type {
   SlashCommandInfo,
   TeammateInfo,
   GitStatusData,
-  GitBranchData
+  GitBranchData,
+  DiffComment
 } from '../../../shared/types'
 
 /**
@@ -321,6 +322,7 @@ export interface PerSessionState {
   gitFileDiff: { patch: string; oldContent?: string; newContent?: string } | null
   gitCommitMessage: string
   gitFileFilter: 'staged' | 'unstaged' | 'all'
+  gitReviewComments: DiffComment[]
 }
 
 const EMPTY_SESSION_STATE: PerSessionState = {
@@ -363,7 +365,8 @@ const EMPTY_SESSION_STATE: PerSessionState = {
   gitSelectedFile: null,
   gitFileDiff: null,
   gitCommitMessage: '',
-  gitFileFilter: 'all'
+  gitFileFilter: 'all',
+  gitReviewComments: []
 }
 
 function createEmptySession(cwd: string): PerSessionState {
@@ -511,6 +514,10 @@ interface SessionState {
   selectNextGitFile: (routingId: string) => void
   openGitPanel: (routingId: string) => void
   closeGitPanel: (routingId: string) => void
+  // Diff review comments
+  addDiffComment: (routingId: string, comment: DiffComment) => void
+  removeDiffComment: (routingId: string, commentId: string) => void
+  clearDiffComments: (routingId: string) => void
 }
 
 export const useSessionStore = create<SessionState>((set) => ({
@@ -1359,6 +1366,28 @@ export const useSessionStore = create<SessionState>((set) => ({
     set((state) => ({
       sessions: updateSession(state.sessions, routingId, () => ({
         rightPanel: 'none' as const
+      }))
+    })),
+
+  // Diff review comments
+  addDiffComment: (routingId, comment) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, routingId, (s) => ({
+        gitReviewComments: [...s.gitReviewComments, comment]
+      }))
+    })),
+
+  removeDiffComment: (routingId, commentId) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, routingId, (s) => ({
+        gitReviewComments: s.gitReviewComments.filter((c) => c.id !== commentId)
+      }))
+    })),
+
+  clearDiffComments: (routingId) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, routingId, () => ({
+        gitReviewComments: []
       }))
     }))
 }))

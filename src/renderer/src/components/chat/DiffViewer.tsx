@@ -1,8 +1,9 @@
-import { useMemo } from 'react'
-import { DiffView, DiffModeEnum } from '@git-diff-view/react'
+import { useMemo, type ReactNode } from 'react'
+import { DiffView, DiffModeEnum, SplitSide } from '@git-diff-view/react'
 import { DiffFile } from '@git-diff-view/core'
 import { createPatch } from 'diff'
 import { useSessionStore, type ThemeId } from '../../stores/session-store'
+import type { DiffComment } from '../../../../shared/types'
 import '@git-diff-view/react/styles/diff-view.css'
 
 /** Props when providing old/new strings (ToolCallBlock inline diffs) */
@@ -28,7 +29,44 @@ interface PatchProps {
   className?: string
 }
 
-type Props = ContentProps | PatchProps
+/** Active inline input state from gutter drag or "+" click */
+export interface ActiveCommentInput {
+  /** Line where the input widget renders (end of selection) */
+  lineNumber: number
+  side: 'old' | 'new'
+  /** Full range — startLine may differ from lineNumber for multi-line selections */
+  startLine: number
+  endLine: number
+  lineContent: string
+}
+
+/** Data payload for each extendData entry */
+export interface ExtendLineData {
+  comments: DiffComment[]
+  activeInput?: ActiveCommentInput
+}
+
+/** Optional comment support — only used from GitFileDiffView */
+interface CommentProps {
+  enableComments?: boolean
+  comments?: DiffComment[]
+  /** Active inline input (from gutter drag). Merged into extendData at the target line. */
+  activeInput?: ActiveCommentInput
+  renderCommentWidget?: (props: {
+    lineNumber: number
+    side: SplitSide
+    diffFile: DiffFile
+    onClose: () => void
+  }) => ReactNode
+  renderExtendContent?: (props: {
+    data: ExtendLineData
+    lineNumber: number
+    side: SplitSide
+    diffFile: DiffFile
+  }) => ReactNode
+}
+
+type Props = (ContentProps | PatchProps) & CommentProps
 
 function diffTheme(theme: ThemeId): 'light' | 'dark' {
   return theme === 'light' ? 'light' : 'dark'
@@ -49,7 +87,7 @@ function normalizeWs(s: string): string {
 }
 
 export function DiffViewer(props: Props): React.JSX.Element {
-  const { fileName, className } = props
+  const { fileName, className, enableComments, comments, activeInput, renderCommentWidget, renderExtendContent } = props
   // Pull all union fields into local variables so we can reference them in
   // deps arrays without TS errors on discriminated-union property access.
   const patch = 'patch' in props ? props.patch : undefined
@@ -107,6 +145,41 @@ export function DiffViewer(props: Props): React.JSX.Element {
     return instance
   }, [patch, oldContent, newContent, oldStr, newStr, fileName, ignoreWhitespace])
 
+  // Build extendData from persisted comments + active input, keyed by line number.
+  // Each entry's data is an ExtendLineData with both comments and optional active input.
+  const extendData = useMemo(() => {
+    if (!enableComments) return undefined
+    const hasComments = comments && comments.length > 0
+    const hasInput = !!activeInput
+    if (!hasComments && !hasInput) return undefined
+
+    const oldFile: Record<string, { data: ExtendLineData }> = {}
+    const newFile: Record<string, { data: ExtendLineData }> = {}
+
+    const ensureEntry = (target: Record<string, { data: ExtendLineData }>, key: string): ExtendLineData => {
+      if (!target[key]) target[key] = { data: { comments: [] } }
+      return target[key].data
+    }
+
+    // Add saved comments
+    if (comments) {
+      for (const c of comments) {
+        const target = c.side === 'old' ? oldFile : newFile
+        const entry = ensureEntry(target, String(c.lineNumber))
+        entry.comments.push(c)
+      }
+    }
+
+    // Add active input at the end line
+    if (activeInput) {
+      const target = activeInput.side === 'old' ? oldFile : newFile
+      const entry = ensureEntry(target, String(activeInput.lineNumber))
+      entry.activeInput = activeInput
+    }
+
+    return { oldFile, newFile }
+  }, [enableComments, comments, activeInput])
+
   return (
     <div className={`diff-scroll-container rounded-md border border-border overflow-auto font-mono [&_.diff-tailwindcss-wrapper]:!text-[11px]${isPureAdd ? ' diff-pure-add' : ''}${isPureDel ? ' diff-pure-del' : ''}${className ? ` ${className}` : ''}`} style={{ textShadow: '0 1px rgba(0, 0, 0, 0.3)' }}>
       <DiffView
@@ -116,6 +189,20 @@ export function DiffViewer(props: Props): React.JSX.Element {
         diffViewTheme={diffTheme(theme)}
         diffViewFontSize={11}
         diffViewHighlight={true}
+        {...(enableComments ? {
+          diffViewAddWidget: true,
+          renderWidgetLine: renderCommentWidget
+            ? ({ lineNumber, side, diffFile: df, onClose }) =>
+                renderCommentWidget({ lineNumber, side, diffFile: df, onClose })
+            : undefined,
+          extendData,
+          renderExtendLine: renderExtendContent
+            ? ({ data, lineNumber, side, diffFile: df }: { data: ExtendLineData; lineNumber: number; side: SplitSide; diffFile: DiffFile }) => {
+                if (!data) return null
+                return renderExtendContent({ data, lineNumber, side, diffFile: df })
+              }
+            : undefined,
+        } : {})}
       />
     </div>
   )

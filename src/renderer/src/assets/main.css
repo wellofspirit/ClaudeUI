@@ -326,3 +326,56 @@ html, #root {
   background: var(--color-accent);
   color: white;
 }
+
+/* Gutter drag selection highlight (during active drag) */
+.diff-gutter-selected > td {
+  background: color-mix(in srgb, var(--color-accent) 18%, transparent) !important;
+}
+
+/* Persistent highlight on rows with comments or active input */
+.diff-comment-highlight > td {
+  background: color-mix(in srgb, var(--color-accent) 10%, transparent) !important;
+}
+.diff-comment-highlight > td:first-child {
+  box-shadow: inset 2px 0 0 var(--color-accent);
+}
+
+/* Make gutter line numbers look selectable on hover */
+.diff-line-num,
+.diff-line-old-num,
+.diff-line-new-num {
+  cursor: pointer;
+}
+
+/* Diff comment widget & badge — match InputBox styling (bg-input + border).
+   The diff library sets `color: black/white` on .diff-style-root with high
+   specificity, which beats Tailwind's single-class text-* utilities.
+   We blanket-reset all descendants to inherit, then re-apply our theme colors
+   so Tailwind utilities like text-text-muted work correctly. */
+.diff-comment-widget,
+.diff-comment-badge {
+  background: var(--color-bg-input);
+  color: var(--color-text-primary) !important;
+}
+.diff-comment-widget *,
+.diff-comment-badge * {
+  color: inherit !important;
+}
+.diff-comment-widget .text-text-muted,
+.diff-comment-badge .text-text-muted {
+  color: var(--color-text-muted) !important;
+}
+.diff-comment-widget .text-text-secondary,
+.diff-comment-badge .text-text-secondary {
+  color: var(--color-text-secondary) !important;
+}
+.diff-comment-widget .text-text-primary,
+.diff-comment-badge .text-text-primary {
+  color: var(--color-text-primary) !important;
+}
+.diff-comment-widget .text-white {
+  color: #ffffff !important;
+}
+.diff-comment-widget-footer {
+  border-top: 1px solid var(--color-border);
+}
