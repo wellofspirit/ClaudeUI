@@ -161,11 +161,11 @@ export function DiffViewer(props: Props): React.JSX.Element {
       return target[key].data
     }
 
-    // Add saved comments
+    // Add saved comments — keyed by endLineNumber so the row renders after the last selected line
     if (comments) {
       for (const c of comments) {
         const target = c.side === 'old' ? oldFile : newFile
-        const entry = ensureEntry(target, String(c.lineNumber))
+        const entry = ensureEntry(target, String(c.endLineNumber))
         entry.comments.push(c)
       }
     }
