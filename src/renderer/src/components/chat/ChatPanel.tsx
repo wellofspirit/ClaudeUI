@@ -139,24 +139,36 @@ export function ChatPanel(): React.JSX.Element {
     isAutoScrolling.current = true
     if (smooth) {
       el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
+      // Smooth scroll takes many frames — keep the guard up until it settles
+      const clearGuard = (): void => {
+        const dist = el.scrollHeight - el.scrollTop - el.clientHeight
+        if (dist < 2) {
+          isAutoScrolling.current = false
+          lastScrollTop.current = el.scrollTop
+        } else {
+          requestAnimationFrame(clearGuard)
+        }
+      }
+      // Start checking after first frame
+      requestAnimationFrame(clearGuard)
     } else {
       el.scrollTop = el.scrollHeight
+      lastScrollTop.current = el.scrollTop
+      requestAnimationFrame(() => { isAutoScrolling.current = false })
     }
-    lastScrollTop.current = el.scrollTop
-    // Reset the guard after the scroll event fires
-    requestAnimationFrame(() => { isAutoScrolling.current = false })
   }, [])
 
-  // Auto-scroll on new content (messages, thinking, approvals) — uses flag, not distance
+  // Auto-scroll on new content (messages, thinking, approvals, status changes) — uses flag, not distance.
+  // Uses instant scroll (not smooth) so content that continues to grow doesn't outrun the animation.
   const scrollRafRef = useRef(0)
   useEffect(() => {
     const el = scrollRef.current
     if (!el || !shouldAutoScroll.current) return
     cancelAnimationFrame(scrollRafRef.current)
     scrollRafRef.current = requestAnimationFrame(() => {
-      if (shouldAutoScroll.current) doAutoScroll(el, true)
+      if (shouldAutoScroll.current) doAutoScroll(el)
     })
-  }, [messages, hasStreamingText, thinkingStartedAt, pendingApprovals, doAutoScroll])
+  }, [messages, hasStreamingText, thinkingStartedAt, pendingApprovals, status, doAutoScroll])
 
   // Auto-scroll during streaming without subscribing to full streamingText
   useEffect(() => {
@@ -193,24 +205,32 @@ export function ChatPanel(): React.JSX.Element {
     }
   }, [doAutoScroll])
 
-  // ResizeObserver: catch elements that grow in-place (tool results, images, collapsibles)
-  // This fires when any child of the scroll container changes size, even without React re-renders.
-  // Uses a MutationObserver to track which element is the scroll content wrapper (it changes
-  // when transitioning between empty/loading/content states) and keeps the ResizeObserver
-  // attached without tearing down on every message or streaming state change.
+  // ResizeObserver: catch elements that grow in-place (tool results, images, collapsibles).
+  // Observes both the scroll container (catches scrollHeight changes from any source, including
+  // content-visibility layout shifts) and the content wrapper (catches size changes from child
+  // elements growing). Uses a MutationObserver to re-attach when the content wrapper swaps
+  // (e.g. empty → loading → content state transitions).
   useEffect(() => {
     const el = scrollRef.current
     if (!el) return
     let rafId = 0
-    const resizeObserver = new ResizeObserver(() => {
+    let lastScrollHeight = el.scrollHeight
+    const handleResize = (): void => {
+      // Skip if scrollHeight hasn't actually changed (avoids needless work on horizontal resizes)
+      if (el.scrollHeight === lastScrollHeight) return
+      lastScrollHeight = el.scrollHeight
       if (!shouldAutoScroll.current) return
       cancelAnimationFrame(rafId)
       rafId = requestAnimationFrame(() => {
         if (shouldAutoScroll.current && el) doAutoScroll(el)
       })
-    })
+    }
+    const resizeObserver = new ResizeObserver(handleResize)
 
-    // Observe whichever element is the current first child of the scroll container
+    // Observe the scroll container itself (catches scrollHeight changes from any source)
+    resizeObserver.observe(el)
+
+    // Also observe whichever element is the current content wrapper child
     let observed: Element | null = null
     const attach = (): void => {
       const content = el.firstElementChild
