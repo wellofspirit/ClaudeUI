@@ -153,17 +153,19 @@ export const ToolCallBlock = memo(function ToolCallBlock({ block, result, approv
       {/* Expanded content */}
       {expanded && (
         <div className="border-t border-border">
-          {/* Input section */}
-          {!hideToolInput && (
+          {/* Input section — always show for Bash */}
+          {(!hideToolInput || block.toolName === 'Bash') && (
             <div className="px-3 py-2.5">
-              <div className="text-[11px] text-text-secondary uppercase tracking-wider mb-1.5">Input</div>
+              {!hideToolInput && (
+                <div className="text-[11px] text-text-secondary uppercase tracking-wider mb-1.5">Input</div>
+              )}
               <ToolInput block={block} />
             </div>
           )}
 
           {/* Result section (skip for background bash — live output shown separately) */}
           {hasResult && result.toolResult && !isBackgroundBash && (
-            <div className={`px-3 py-2.5 ${hideToolInput ? '' : 'border-t border-border'}`}>
+            <div className={`px-3 py-2.5 ${hideToolInput && block.toolName !== 'Bash' ? '' : 'border-t border-border'}`}>
               {!hideToolInput && (
                 <div className={`text-[11px] uppercase tracking-wider mb-1.5 ${isError ? 'text-danger' : 'text-success'}`}>
                   {isError ? 'Error' : 'Result'}
@@ -391,9 +393,9 @@ function getSummary(block: ContentBlock): string {
   if (block.toolName === 'Read' && input.file_path) return shorten(String(input.file_path))
   if (block.toolName === 'Write' && input.file_path) return shorten(String(input.file_path))
   if (block.toolName === 'Edit' && input.file_path) return shorten(String(input.file_path))
-  if (block.toolName === 'Bash' && input.command) return trunc(String(input.command), 50)
+  if (block.toolName === 'Bash' && input.command) return String(input.command)
   if (block.toolName === 'Glob' && input.pattern) return String(input.pattern)
-  if (block.toolName === 'Grep' && input.pattern) return trunc(String(input.pattern), 50)
+  if (block.toolName === 'Grep' && input.pattern) return String(input.pattern)
   if (block.toolName === 'AskUserQuestion' && Array.isArray(input.questions)) {
     const n = input.questions.length
     return `${n} question${n !== 1 ? 's' : ''}`
@@ -402,9 +404,9 @@ function getSummary(block: ContentBlock): string {
     const completed = input.todos.filter((t: Record<string, unknown>) => t.status === 'completed').length
     return `${completed}/${input.todos.length} tasks`
   }
-  if (block.toolName === 'Task' && input.description) return trunc(String(input.description), 60)
+  if (block.toolName === 'Task' && input.description) return String(input.description)
 
-  return trunc(JSON.stringify(input), 50)
+  return JSON.stringify(input)
 }
 
 function shorten(path: string): string {
