@@ -1,4 +1,9 @@
-# Patch: task-notification-usage
+# Patch: task-notification-usage (RETIRED)
+
+> **Upstreamed in SDK 0.2.49 (CLI 2.1.49).** This patch is no longer applied.
+> The SDK now natively extracts `<usage>` data (total_tokens, tool_uses,
+> duration_ms) from task-notification XML and includes `killed → stopped`
+> status mapping. Kept for historical reference.
 
 Adds `<usage>` extraction to the `{type:"system", subtype:"task_notification"}`
 message emitted by the SDK streaming loop. Without this patch, background agent
@@ -13,6 +18,7 @@ by `task-notification` and `subagent-streaming`).
 |---|---|
 | SDK package | 0.2.39 |
 | Bundled CLI (`cli.js`) | 2.1.39 |
+| Upstreamed in | SDK 0.2.49 / CLI 2.1.49 |
 
 ## The Bug
 

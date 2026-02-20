@@ -215,10 +215,14 @@ const patchBMarker = '/*PATCHED:subagent-B*/'
 if (src.includes(patchBMarker)) {
   console.log('Already applied. Skipping.')
 } else {
-  // Find the unique sync loop pattern: if(ARR.push(MSG),MSG.type==="progress"&&MSG.data.type==="bash_progress"
+  // Find the unique sync loop pattern: if(ARR.push(MSG),MSG.type==="progress"&&...bash_progress...
+  // v2.1.47: ...&&MSG.data.type==="bash_progress"
+  // v2.1.49: ...&&(MSG.data.type==="bash_progress"||MSG.data.type==="powershell_progress")
   // This pattern is unique to the Task tool's sync for-await loop body.
   const pushRe = new RegExp(
-    `if\\((${V})\\.push\\((${V})\\),\\2\\.type==="progress"&&\\2\\.data\\.type==="bash_progress"`
+    `if\\((${V})\\.push\\((${V})\\),\\2\\.type==="progress"&&` +
+    `(?:\\(\\2\\.data\\.type==="bash_progress"\\|\\|\\2\\.data\\.type==="powershell_progress"\\)|` +
+    `\\2\\.data\\.type==="bash_progress")`
   )
   const m = src.match(pushRe)
   if (!m) {
@@ -279,7 +283,11 @@ const patchCMarker = '/*PATCHED:subagent-C*/'
 if (src.includes(patchCMarker)) {
   console.log('Already applied. Skipping.')
 } else {
-  const anchor = 'else if(A.data.type==="bash_progress"){'
+  // v2.1.47: else if(A.data.type==="bash_progress"){
+  // v2.1.49: else if(A.data.type==="bash_progress"||A.data.type==="powershell_progress"){
+  const anchorNew = 'else if(A.data.type==="bash_progress"||A.data.type==="powershell_progress"){'
+  const anchorOld = 'else if(A.data.type==="bash_progress"){'
+  const anchor = src.includes(anchorNew) ? anchorNew : anchorOld
   const anchorIdx = src.indexOf(anchor)
   if (anchorIdx === -1) {
     console.error('ERROR: Cannot locate bash_progress handler in ZhA.')

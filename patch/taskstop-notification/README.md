@@ -7,11 +7,15 @@ Fixes TaskStop to properly notify SDK consumers when tasks are stopped.
 When a background task is stopped via TaskStop, the SDK consumer never receives a notification, and even if it did, the status would be wrong:
 
 1. **No notification sent** — TaskStop kills the task and sets `notified:true`, but never calls the notification sender. The task appears stuck in "running" state.
-2. **"killed" status rejected** — The CLI uses `"killed"` internally, but the XML parser's validator only accepts `completed|failed|stopped`. Unknown statuses default to `"completed"`, so stopped tasks would show as completed.
+2. **~~"killed" status rejected~~** — *(Fixed upstream in SDK 0.2.49)* The CLI uses `"killed"` internally, but the XML parser's validator only accepts `completed|failed|stopped`. Unknown statuses default to `"completed"`, so stopped tasks would show as completed.
 
 ## The Fix
 
-### Part A: killed → stopped mapping
+### Part A: killed → stopped mapping (upstreamed in SDK 0.2.49)
+
+> **This part is no longer needed on SDK 0.2.49+.** The CLI now natively
+> accepts `"killed"` in the validator and maps it to `"stopped"`. The patch
+> script detects this and skips Part A automatically.
 
 Extends the status validator to accept `"killed"` and maps it to the schema-compliant `"stopped"`:
 

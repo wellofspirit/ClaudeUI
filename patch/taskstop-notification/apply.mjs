@@ -68,51 +68,51 @@ const patchAMarker = '/*PATCHED:taskstop-notification-A*/'
 if (src.includes(patchAMarker)) {
   console.log('Already applied. Skipping.')
 } else {
-  // Find the validator by its unique pattern:
-  //   VALIDATOR=(STATUS)=>STATUS==="completed"||STATUS==="failed"||STATUS==="stopped",
-  //   EXTRACTED=XML_MATCH?.[1],
-  //   VALIDATED=VALIDATOR(EXTRACTED)?EXTRACTED:"completed";
-  const validatorRe = new RegExp(
-    `(${V})=\\((${V})\\)=>\\2==="completed"\\|\\|\\2==="failed"\\|\\|\\2==="stopped",` +
-    `(${V})=(${V})\\?\\.\\[1\\],` +
-    `(${V})=\\1\\(\\3\\)\\?\\3:"completed";`
+  // Check if the fix has been upstreamed (SDK 0.2.49+ includes "killed" natively)
+  const upstreamKilledRe = new RegExp(
+    `=\\((${V})\\)=>\\1==="completed"\\|\\|\\1==="failed"\\|\\|\\1==="stopped"\\|\\|\\1==="killed"`
   )
-
-  const validatorMatch = src.match(validatorRe)
-
-  if (!validatorMatch) {
-    console.error('ERROR: Cannot locate task_notification status validator.')
-    console.error('Expected: VALIDATOR=(S)=>S==="completed"||S==="failed"||S==="stopped",EXTRACTED=XML?.[1],VALIDATED=VALIDATOR(EXTRACTED)?EXTRACTED:"completed";')
-    process.exit(1)
-  }
-
-  const [fullMatch, validatorName, statusParam, extractedStatusName, xmlMatchName, validatedStatusName] = validatorMatch
-  console.log(`Found status validator: ${validatorName}(${statusParam})`)
-  console.log(`  extracted: ${extractedStatusName} = ${xmlMatchName}?.[1]`)
-  console.log(`  validated: ${validatedStatusName} = ${validatorName}(${extractedStatusName}) ? ${extractedStatusName} : "completed"`)
-
-  const matchIdx = src.indexOf(fullMatch)
-
-  // Ensure unique match
-  if (src.indexOf(fullMatch, matchIdx + 1) !== -1) {
-    console.error('ERROR: Found multiple matches for the validator pattern. Aborting.')
-    process.exit(1)
-  }
-
-  // Apply: add "killed" to validator, add killed→stopped mapping
-  const patched = fullMatch
-    .replace(
-      `${statusParam}==="stopped",`,
-      `${statusParam}==="stopped"||${statusParam}==="killed",`
-    )
-    .replace(
-      `${validatorName}(${extractedStatusName})?${extractedStatusName}:"completed";`,
-      `${validatorName}(${extractedStatusName})?(${extractedStatusName}==="killed"?"stopped":${extractedStatusName}):"completed";`
+  if (src.match(upstreamKilledRe)) {
+    console.log('Upstreamed in this SDK version. Skipping.')
+  } else {
+    // Legacy path for older SDK versions
+    const validatorRe = new RegExp(
+      `(${V})=\\((${V})\\)=>\\2==="completed"\\|\\|\\2==="failed"\\|\\|\\2==="stopped",` +
+      `(${V})=(${V})\\?\\.\\[1\\],` +
+      `(${V})=\\1\\(\\3\\)\\?\\3:"completed";`
     )
 
-  src = src.slice(0, matchIdx) + patchAMarker + patched + src.slice(matchIdx + fullMatch.length)
-  patchCount++
-  console.log('Applied.')
+    const validatorMatch = src.match(validatorRe)
+
+    if (!validatorMatch) {
+      console.error('ERROR: Cannot locate task_notification status validator.')
+      process.exit(1)
+    }
+
+    const [fullMatch, validatorName, statusParam, extractedStatusName] = validatorMatch
+    console.log(`Found status validator: ${validatorName}(${statusParam})`)
+
+    const matchIdx = src.indexOf(fullMatch)
+
+    if (src.indexOf(fullMatch, matchIdx + 1) !== -1) {
+      console.error('ERROR: Found multiple matches for the validator pattern. Aborting.')
+      process.exit(1)
+    }
+
+    const patched = fullMatch
+      .replace(
+        `${statusParam}==="stopped",`,
+        `${statusParam}==="stopped"||${statusParam}==="killed",`
+      )
+      .replace(
+        `${validatorName}(${extractedStatusName})?${extractedStatusName}:"completed";`,
+        `${validatorName}(${extractedStatusName})?(${extractedStatusName}==="killed"?"stopped":${extractedStatusName}):"completed";`
+      )
+
+    src = src.slice(0, matchIdx) + patchAMarker + patched + src.slice(matchIdx + fullMatch.length)
+    patchCount++
+    console.log('Applied.')
+  }
 }
 
 // ===========================================================================
@@ -244,19 +244,16 @@ writeFileSync(cliPath, src)
 console.log(`\nPatch applied to ${cliPath}`)
 
 const verify = readFileSync(cliPath, 'utf-8')
-const markers = [
-  ['A', patchAMarker, 'killed → stopped mapping in status validator'],
-  ['B', patchBMarker, 'TaskStop notification injection']
-]
 
-let allGood = true
-for (const [label, marker, desc] of markers) {
-  const ok = verify.includes(marker)
-  console.log(`  ${ok ? 'OK' : 'MISSING'} Part ${label}: ${desc}`)
-  if (!ok) allGood = false
-}
+// Part A is optional (upstreamed in SDK 0.2.49+)
+const partAOk = verify.includes(patchAMarker) ||
+  /=\([\w$]+\)=>[\w$]+===\s*"completed"\|\|[\w$]+===\s*"failed"\|\|[\w$]+===\s*"stopped"\|\|[\w$]+===\s*"killed"/.test(verify)
+const partBOk = verify.includes(patchBMarker)
 
-if (!allGood) {
+console.log(`  ${partAOk ? 'OK' : 'MISSING'} Part A: killed → stopped mapping ${verify.includes(patchAMarker) ? '(patched)' : '(upstreamed)'}`)
+console.log(`  ${partBOk ? 'OK' : 'MISSING'} Part B: TaskStop notification injection`)
+
+if (!partBOk) {
   console.error('\nVerification FAILED.')
   process.exit(1)
 }

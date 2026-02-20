@@ -16,8 +16,8 @@ your system, and may trail behind in version.
 
 | Component | Version at time of discovery |
 |---|---|
-| SDK package | 0.2.38 → 0.2.39 → 0.2.41 → 0.2.42 |
-| Bundled CLI (`cli.js`) | 2.1.38 → 2.1.39 → 2.1.41 → 2.1.42 |
+| SDK package | 0.2.38 → 0.2.39 → 0.2.41 → 0.2.42 → 0.2.49 |
+| Bundled CLI (`cli.js`) | 2.1.38 → 2.1.39 → 2.1.41 → 2.1.42 → 2.1.49 |
 
 All versions exhibit the same behavior. Function names change between
 versions but the architecture is identical.
@@ -625,8 +625,14 @@ line is never reached.
   automatically
 
 **How to find this code in a new version:**
-Search for the comma-expression pattern that pushes to an array and then
-checks for assistant/user type:
+Search for the comma-expression pattern that pushes to an array and checks
+for progress type with bash/powershell progress:
+
+```
+\.push\(.*\.type==="progress"&&.*bash_progress
+```
+
+Or the assistant/user type check that follows:
 
 ```
 \.push\(.*\.type!=="assistant"&&.*\.type!=="user"\)continue
@@ -640,7 +646,7 @@ output format. We add handling for the new `agent_stream_event` data type
 so it yields proper `{type: "stream_event", parent_tool_use_id}` SDK
 messages.
 
-Injected before the `bash_progress` handler:
+Injected before the `bash_progress`/`powershell_progress` handler:
 
 ```js
 else if (A.data.type === "agent_stream_event") {
@@ -654,26 +660,27 @@ else if (A.data.type === "agent_stream_event") {
 }
 ```
 
-**The full ZhA/ihA function structure (for reference):**
+**The full ZhA/ihA/if8 function structure (for reference):**
 
 ```js
 // v2.1.38: function*ZhA(A), char ~9069375
 // v2.1.39: function*ihA(A), char ~9085100
-function* ZhA(A) {
+// v2.1.49: function*if8(A), char ~5971430
+function* if8(A) {
     switch (A.type) {
         case "assistant":
             // Direct assistant messages (from parent model)
-            for (let q of iO([A])) {
-                if (!et(q)) continue;
+            for (let q of W_([A])) {
+                if (!Zt(q)) continue;
                 yield {type:"assistant", message:q.message,
-                       parent_tool_use_id:null, session_id:U6(), ...};
+                       parent_tool_use_id:null, session_id:U1(), ...};
             }
             return;
 
         case "progress":
             if (A.data.type === "agent_progress")
                 // Sub-agent messages (our Patch A sends more through here)
-                for (let q of iO([A.data.message]))
+                for (let q of W_([A.data.message]))
                     switch (q.type) {
                         case "assistant":
                             yield {type:"assistant", parent_tool_use_id:A.parentToolUseID, ...};
@@ -686,8 +693,8 @@ function* ZhA(A) {
             // ← Patch C injects here ←
             // else if (A.data.type === "agent_stream_event") { yield ... }
 
-            else if (A.data.type === "bash_progress")
-                // Bash tool progress (elapsed time)
+            else if (A.data.type === "bash_progress" || A.data.type === "powershell_progress")
+                // Bash/PowerShell tool progress (elapsed time)
                 yield {type:"tool_progress", ...};
             break;
 
@@ -707,8 +714,8 @@ function* ZhA(A) {
 - `U6()` is the session ID function (same one used by all other yields in
   this function)
 - The `else if` placement means it only triggers for the new
-  `agent_stream_event` type — existing `agent_progress` and `bash_progress`
-  paths are untouched
+  `agent_stream_event` type — existing `agent_progress` and
+  `bash_progress`/`powershell_progress` paths are untouched
 
 **How to find this code in a new version:**
 Search for a generator function that contains both `agent_progress` and
@@ -721,10 +728,10 @@ function\*.*agent_progress.*bash_progress
 Or search for the `bash_progress` anchor specifically:
 
 ```
-else if(A.data.type==="bash_progress"){
+else if(A.data.type==="bash_progress"||A.data.type==="powershell_progress"){
 ```
 
-This pattern is unique in the codebase (verified: only 1 occurrence).
+(Older versions may only have `bash_progress` without `powershell_progress`.)
 
 ### Patch D — .output file thinking inclusion
 
@@ -1063,7 +1070,7 @@ names, since function names change between versions. It will:
 2. Locate the cR yield filter function by type-check pattern (Patch F)
 3. Locate the content-block filter by nested for-loop pattern (Patch A)
 4. Locate the type filter by push+type-check pattern (Patch B)
-5. Locate the message converter by `bash_progress` anchor (Patch C)
+5. Locate the message converter by `bash_progress`/`powershell_progress` anchor (Patch C)
 6. Locate the text extraction function by "Execution completed" pattern (Patch D)
 7. Locate the background polling map by assistant/text/stringify pattern (Patch D)
 8. Locate the session ID function from ZhA/ihA yields (Patch E)
@@ -1117,19 +1124,19 @@ Where the message content includes `type:"thinking"` blocks.
 
 ## Key Functions Reference
 
-| Name (v2.1.38 → v2.1.39 → v2.1.41 → v2.1.42) | Purpose |
+| Name (v2.1.38 → v2.1.39 → v2.1.41 → v2.1.42 → v2.1.49) | Purpose |
 |---|---|
-| `RVY()` → `RVY()` → `BRY()` → `myY()` | cR/jy/Wy yield filter (gates what the generator yields to callers) |
+| `RVY()` → `RVY()` → `BRY()` → `myY()` → `T7z()` | cR/jy/Wy yield filter (gates what the generator yields to callers) |
 | `dR()` → `dR()` → ? → (merged into Wy) | Sub-agent execution generator |
-| `UEA()` → `UEA()` → `NR8()` → `uRA()` | Extract text-only result from agent messages |
-| `FM6()` → `sM6()` → `QW6()` → `tW6()` | Extract text from last assistant message |
-| `ZhA()` → `ihA()` → `mI8()` → ? | Convert internal messages to SDK output format |
+| `UEA()` → `UEA()` → `NR8()` → `uRA()` → `Mg8()` | Extract text-only result from agent messages |
+| `FM6()` → `sM6()` → `QW6()` → `tW6()` → `r_1()` | Extract text from last assistant message |
+| `ZhA()` → `ihA()` → `mI8()` → ? → `if8()` | Convert internal messages to SDK output format |
 | `U1q()` → `O6q()` → ? → ? | Wrap progress data into progress message format |
-| `iO()` → `rO()` → `lO()` → `j$()` | Normalize messages to individual content blocks |
-| `_f()` → `_f()` → `Gf()` → `Zf()` | UUID generator for message wrapping |
+| `iO()` → `rO()` → `lO()` → `j$()` → `W_()` | Normalize messages to individual content blocks |
+| `_f()` → `_f()` → `Gf()` → `Zf()` → `nk()` | UUID generator for message wrapping |
 | `cR()` → `cR()` → `jy()` → `Wy()` | Sub-agent query function (async generator) |
-| `s0A()` → `s0A()` → `XW8()` → `kWA()` | Task state updater (in async loops) |
-| `s01()` → `s01()` → `QM1()` → `tM1()` | Stats updater (in async loops) |
+| `s0A()` → `s0A()` → `XW8()` → `kWA()` → `zT8()` | Task state updater (in async loops) |
+| `s01()` → `s01()` → `QM1()` → `tM1()` → `GP6()` | Stats updater (in async loops) |
 
 **Note:** Names change between versions — always use content patterns, not
 names. Use `bundle-analyzer find` with string literals as anchors.

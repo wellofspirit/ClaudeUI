@@ -12,7 +12,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 
 const patches = [
   resolve(__dirname, 'subagent-streaming/apply.mjs'),
-  resolve(__dirname, 'task-notification-usage/apply.mjs'),
+  // task-notification-usage: upstreamed in SDK 0.2.49 (CLI 2.1.49)
   resolve(__dirname, 'taskstop-notification/apply.mjs'),
   resolve(__dirname, 'team-dowhile-fix/apply.mjs'),
   resolve(__dirname, 'team-streaming/apply.mjs')
