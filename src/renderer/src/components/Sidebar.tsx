@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { v4 as uuid } from 'uuid'
 import { useSessionStore, buildTodosFromMessages } from '../stores/session-store'
 import type { ChatMessage, DirectoryGroup, SessionInfo } from '../../../shared/types'
+import { SettingsDialog, SettingsToggle } from './SettingsDialog'
 
 export function Sidebar({ style, onToggleCollapse }: {
   style?: React.CSSProperties
@@ -952,11 +953,12 @@ function NavItem({ label, icon, active, onClick, onDoubleClick }: {
 
 function SettingsPanel(): React.JSX.Element {
   const [open, setOpen] = useState(false)
+  const [dialogOpen, setDialogOpen] = useState(false)
   const settings = useSessionStore((s) => s.settings)
   const updateSettings = useSessionStore((s) => s.updateSettings)
   const panelRef = useRef<HTMLDivElement>(null)
 
-  // Close on outside click
+  // Close popup on outside click
   useEffect(() => {
     if (!open) return
     const handler = (e: MouseEvent): void => {
@@ -975,18 +977,19 @@ function SettingsPanel(): React.JSX.Element {
           {/* Theme selector */}
           <div className="px-3 pt-2 pb-1">
             <div className="text-[11px] text-text-muted uppercase tracking-wider mb-1">Theme</div>
-            <div className="flex items-center gap-1 mb-1">
+            <div className="flex items-center gap-1 mb-1 bg-bg-primary/50 rounded-md p-0.5">
               {(['dark', 'light', 'monokai'] as const).map((t) => (
                 <button
                   key={t}
                   onClick={() => updateSettings({ theme: t })}
-                  className={`flex-1 text-[11px] py-0.5 rounded transition-colors capitalize ${settings.theme === t ? 'bg-accent/20 text-accent' : 'text-text-muted hover:text-text-secondary'}`}
+                  className={`flex-1 text-[11px] py-1 rounded transition-colors capitalize ${settings.theme === t ? 'bg-accent/20 text-accent' : 'text-text-muted hover:text-text-secondary hover:bg-white/5'}`}
                 >
                   {t === 'monokai' ? 'Monokai' : t.charAt(0).toUpperCase() + t.slice(1)}
                 </button>
               ))}
             </div>
           </div>
+          {/* Tool output toggles */}
           <SettingsToggle
             label="Expand tool calls"
             checked={settings.expandToolCalls}
@@ -1007,133 +1010,24 @@ function SettingsPanel(): React.JSX.Element {
             onChange={(v) => updateSettings({ hideToolInput: v })}
           />
           <SettingsToggle
-            label="Split diff view"
-            checked={settings.diffViewSplit}
-            onChange={(v) => updateSettings({ diffViewSplit: v })}
-          />
-          <SettingsToggle
-            label="Ignore whitespace in diffs"
-            checked={settings.diffIgnoreWhitespace}
-            onChange={(v) => updateSettings({ diffIgnoreWhitespace: v })}
-          />
-          <SettingsToggle
-            label="Wrap lines in diffs"
-            checked={settings.diffWrapLines}
-            onChange={(v) => updateSettings({ diffWrapLines: v })}
-          />
-          <SettingsToggle
             label="Expand thinking"
             checked={settings.expandThinking}
             onChange={(v) => updateSettings({ expandThinking: v })}
           />
-          {/* Default commit mode */}
-          <div className="px-3 pt-2 pb-1">
-            <div className="text-[11px] text-text-muted uppercase tracking-wider mb-1">Default commit</div>
-            <div className="flex items-center gap-1 mb-1">
-              {([['commit', 'Commit'], ['commit-push', 'Commit & Push']] as const).map(([val, label]) => (
-                <button
-                  key={val}
-                  onClick={() => updateSettings({ gitCommitMode: val })}
-                  className={`flex-1 text-[11px] py-0.5 rounded transition-colors ${settings.gitCommitMode === val ? 'bg-accent/20 text-accent' : 'text-text-muted hover:text-text-secondary'}`}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-          </div>
-          {/* Status line alignment */}
-          <div className="px-3 pt-2 pb-1">
-            <div className="text-[11px] text-text-muted uppercase tracking-wider mb-1">Status line align</div>
-            <div className="flex items-center gap-1 mb-1">
-              {(['left', 'center', 'right'] as const).map((a) => (
-                <button
-                  key={a}
-                  onClick={() => updateSettings({ statusLineAlign: a })}
-                  className={`flex-1 text-[11px] py-0.5 rounded transition-colors capitalize ${settings.statusLineAlign === a ? 'bg-accent/20 text-accent' : 'text-text-muted hover:text-text-secondary'}`}
-                >
-                  {a}
-                </button>
-              ))}
-            </div>
-          </div>
-          {/* Status line template */}
-          <div className="px-3 pt-1 pb-1">
-            <div className="text-[11px] text-text-muted uppercase tracking-wider mb-1">Status line template</div>
-            <input
-              type="text"
-              value={settings.statusLineTemplate}
-              onChange={(e) => updateSettings({ statusLineTemplate: e.target.value })}
-              className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors"
-              placeholder="{in} / {out} / {total} · {used}%"
-            />
-            <div className="text-[9px] text-text-muted/60 mt-0.5">
-              Tokens: {'{in} {out} {total}'} · Cost: {'{cost}'} · Context: {'{used} {remaining}'} · Lines: {'{lines+} {lines-}'} · Time: {'{duration}'}
-            </div>
-          </div>
-          {/* Chat width section */}
-          <div className="px-3 pt-2 pb-1">
-            <div className="text-[11px] text-text-muted uppercase tracking-wider mb-1">Chat width</div>
-            <div className="flex items-center gap-1 mb-1">
-              <button
-                onClick={() => updateSettings({ chatWidthMode: 'px' })}
-                className={`flex-1 text-[11px] py-0.5 rounded transition-colors ${settings.chatWidthMode === 'px' ? 'bg-accent/20 text-accent' : 'text-text-muted hover:text-text-secondary'}`}
-              >
-                Pixels
-              </button>
-              <button
-                onClick={() => updateSettings({ chatWidthMode: 'percent' })}
-                className={`flex-1 text-[11px] py-0.5 rounded transition-colors ${settings.chatWidthMode === 'percent' ? 'bg-accent/20 text-accent' : 'text-text-muted hover:text-text-secondary'}`}
-              >
-                Percent
-              </button>
-            </div>
-          </div>
-          {settings.chatWidthMode === 'px' ? (
-            <SettingsSlider
-              label="Width"
-              value={settings.chatWidthPx}
-              min={500}
-              max={3420}
-              step={10}
-              onChange={(v) => updateSettings({ chatWidthPx: v })}
-              formatValue={(v) => `${v}px`}
-            />
-          ) : (
-            <SettingsSlider
-              label="Width"
-              value={settings.chatWidthPercent}
-              min={60}
-              max={100}
-              step={1}
-              onChange={(v) => updateSettings({ chatWidthPercent: v })}
-              formatValue={(v) => `${v}%`}
-            />
-          )}
-          <SettingsSlider
-            label="UI font size"
-            value={settings.uiFontScale}
-            min={1}
-            max={1.5}
-            step={0.05}
-            onChange={(v) => updateSettings({ uiFontScale: v })}
-            formatValue={(v) => `${Math.round(v * 100)}%`}
-          />
-          <SettingsSlider
-            label="Chat font size"
-            value={settings.chatFontScale}
-            min={1}
-            max={1.5}
-            step={0.05}
-            onChange={(v) => updateSettings({ chatFontScale: v })}
-            formatValue={(v) => `${Math.round(v * 100)}%`}
-          />
-          <SettingsSlider
-            label="Recent sessions"
-            value={settings.maxRecentSessions}
-            min={1}
-            max={10}
-            onChange={(v) => updateSettings({ maxRecentSessions: v })}
-          />
+          {/* All Settings button */}
+          <button
+            onClick={() => {
+              setOpen(false)
+              setDialogOpen(true)
+            }}
+            className="w-full flex items-center justify-center gap-1.5 px-3 py-1.5 mt-1 mb-0.5 text-[12px] text-text-muted hover:text-accent transition-colors cursor-default border-t border-border/30 pt-2"
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="3" />
+              <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z" />
+            </svg>
+            All Settings…
+          </button>
         </div>
       )}
       <div style={{ padding: '12px 16px' }} className="border-t border-border/50 flex items-center gap-2 text-[11px] text-text-muted">
@@ -1153,54 +1047,7 @@ function SettingsPanel(): React.JSX.Element {
           </svg>
         </button>
       </div>
-    </div>
-  )
-}
-
-function SettingsToggle({ label, checked, onChange }: {
-  label: string
-  checked: boolean
-  onChange: (value: boolean) => void
-}): React.JSX.Element {
-  return (
-    <button
-      onClick={() => onChange(!checked)}
-      className="w-full flex items-center justify-between px-3 py-1.5 text-[13px] text-text-secondary hover:bg-bg-hover transition-colors cursor-default"
-    >
-      <span>{label}</span>
-      <span className={`w-7 h-4 rounded-full relative transition-colors ${checked ? 'bg-accent' : 'bg-text-muted/30'}`}>
-        <span className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform ${checked ? 'left-3.5' : 'left-0.5'}`} />
-      </span>
-    </button>
-  )
-}
-
-function SettingsSlider({ label, value, min, max, step, onChange, formatValue }: {
-  label: string
-  value: number
-  min: number
-  max: number
-  step?: number
-  onChange: (value: number) => void
-  formatValue?: (value: number) => string
-}): React.JSX.Element {
-  const pct = ((value - min) / (max - min)) * 100
-  return (
-    <div className="px-3 py-1.5 text-[13px] text-text-secondary">
-      <div className="flex items-center justify-between mb-1">
-        <span>{label}</span>
-        <span className="text-[11px] text-text-muted tabular-nums">{formatValue ? formatValue(value) : value}</span>
-      </div>
-      <input
-        type="range"
-        min={min}
-        max={max}
-        step={step}
-        value={value}
-        onChange={(e) => onChange(Number(e.target.value))}
-        style={{ background: `linear-gradient(to right, var(--color-accent) ${pct}%, var(--color-text-muted) ${pct}%)` }}
-        className="w-full h-1 appearance-none rounded-full opacity-30 [&]:hover:opacity-50 transition-opacity cursor-pointer [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:bg-accent [&::-webkit-slider-thumb]:opacity-100"
-      />
+      {dialogOpen && <SettingsDialog onClose={() => setDialogOpen(false)} />}
     </div>
   )
 }
