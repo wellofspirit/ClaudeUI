@@ -151,7 +151,33 @@ async function fetchModels(): Promise<ModelInfo[]> {
   }
 }
 
+const SESSION_IPC_CHANNELS = [
+  'session:pick-folder', 'session:create', 'session:rekey', 'session:send',
+  'session:cancel', 'session:approval-response', 'session:watch-background',
+  'session:unwatch-background', 'session:read-background-range', 'session:stop-task',
+  'session:set-permission-mode', 'session:set-model', 'session:set-effort',
+  'session:get-models', 'session:generate-title', 'session:generate-commit-message',
+  'session:write-custom-title', 'session:get-plan-content', 'session:get-session-log-path',
+  'session:list-directories', 'session:load-history', 'session:load-subagent-history',
+  'session:build-subagent-file-map', 'session:load-background-output',
+  'session:watch-session', 'session:unwatch-session',
+  'config:load-settings', 'config:save-settings', 'config:load-sessions',
+  'config:save-sessions', 'config:load-slash-commands', 'config:save-slash-commands',
+  'session:send-to-teammate', 'session:broadcast-to-team', 'session:get-team-info',
+  'session:open-teams-view',
+  'git:check-repo', 'git:status', 'git:branches', 'git:checkout', 'git:create-branch',
+  'git:file-patch', 'git:file-contents', 'git:stage-file', 'git:unstage-file',
+  'git:stage-all', 'git:unstage-all', 'git:commit', 'git:push',
+  'git:start-watching', 'git:stop-watching',
+  'usage:fetch', 'usage:fetch-block'
+]
+
 export function registerSessionIpc(win: BrowserWindow): void {
+  // Remove previous handlers to allow re-registration (e.g. macOS dock re-open)
+  for (const channel of SESSION_IPC_CHANNELS) {
+    ipcMain.removeHandler(channel)
+  }
+
   const manager = new SessionManager()
 
   ipcMain.handle('session:pick-folder', async () => {

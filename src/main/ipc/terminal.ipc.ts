@@ -1,7 +1,15 @@
 import { ipcMain, BrowserWindow } from 'electron'
 import { PtyManager } from '../services/pty-manager'
 
+const TERMINAL_IPC_CHANNELS = [
+  'terminal:create', 'terminal:write', 'terminal:resize', 'terminal:kill'
+]
+
 export function registerTerminalIpc(win: BrowserWindow): void {
+  for (const channel of TERMINAL_IPC_CHANNELS) {
+    ipcMain.removeHandler(channel)
+  }
+
   const manager = new PtyManager()
 
   ipcMain.handle('terminal:create', (_e, cwd: string) => {

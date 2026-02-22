@@ -62,11 +62,15 @@ function createWindow(): void {
   registerTerminalIpc(mainWindow)
 
   // Renderer error logging → main process log file
+  ipcMain.removeAllListeners('log:error')
   ipcMain.on('log:error', (_e, source: string, message: string) => {
     logger.error(`renderer/${source}`, message)
   })
 
   // Window control IPC handlers (for frameless windows on Windows/Linux)
+  for (const ch of ['window:minimize', 'window:maximize', 'window:close', 'app:open-in-vscode']) {
+    ipcMain.removeHandler(ch)
+  }
   ipcMain.handle('window:minimize', () => mainWindow.minimize())
   ipcMain.handle('window:maximize', () => {
     if (mainWindow.isMaximized()) {
