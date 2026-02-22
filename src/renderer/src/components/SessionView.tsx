@@ -4,6 +4,7 @@ import { ChatPanel } from './chat/ChatPanel'
 import { TaskDetailPanel } from './TaskDetailPanel'
 import { GitPanel } from './git/GitPanel'
 import { UsageView } from './usage/UsageView'
+import { TerminalPanel } from './terminal/TerminalPanel'
 import { useActiveSession, useSessionStore, applyTheme } from '../stores/session-store'
 import { useGitWatcher } from '../hooks/useGitWatcher'
 
@@ -60,6 +61,55 @@ function ResizeHandle({ onMouseDown }: { onMouseDown: (e: React.MouseEvent) => v
   )
 }
 
+function useResizableBottomPanel(_key: string, min: number, max: number) {
+  const store = useSessionStore
+  const [height, setHeight] = useState(() => store.getState().terminalPanelHeight)
+  const dragging = useRef(false)
+
+  const onMouseDown = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault()
+      dragging.current = true
+      const startY = e.clientY
+      const startH = height
+
+      const onMouseMove = (ev: MouseEvent): void => {
+        const newH = Math.min(max, Math.max(min, startH - (ev.clientY - startY)))
+        setHeight(newH)
+      }
+
+      const onMouseUp = (): void => {
+        dragging.current = false
+        document.removeEventListener('mousemove', onMouseMove)
+        document.removeEventListener('mouseup', onMouseUp)
+        document.body.style.cursor = ''
+        document.body.style.userSelect = ''
+      }
+
+      document.body.style.cursor = 'row-resize'
+      document.body.style.userSelect = 'none'
+      document.addEventListener('mousemove', onMouseMove)
+      document.addEventListener('mouseup', onMouseUp)
+    },
+    [height, min, max]
+  )
+
+  // Persist height changes (debounced via RAF to avoid thrashing)
+  useEffect(() => {
+    store.getState().setTerminalPanelHeight(height)
+  }, [height, store])
+
+  return { height, onMouseDown }
+}
+
+function HorizontalResizeHandle({ onMouseDown }: { onMouseDown: (e: React.MouseEvent) => void }) {
+  return (
+    <div onMouseDown={onMouseDown} className="h-0 shrink-0 cursor-row-resize relative z-10">
+      <div className="absolute inset-x-0 -top-1.5 h-3" />
+    </div>
+  )
+}
+
 export function SessionView(): React.JSX.Element {
   const uiFontScale = useSessionStore((s) => s.settings.uiFontScale)
   const showUsageView = useSessionStore((s) => s.showUsageView)
@@ -68,6 +118,8 @@ export function SessionView(): React.JSX.Element {
   const sidebar = useResizablePanel('sidebarWidth', 240, 180, 480)
   const taskPanel = useResizablePanel('taskPanelWidth', 400, 280, 700)
   const gitPanel = useResizablePanel('gitPanelWidth', 450, 320, 9999)
+  const terminalPanelOpen = useSessionStore((s) => s.terminalPanelOpen)
+  const bottomPanel = useResizableBottomPanel('terminalPanelHeight', 120, 600)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem('sidebarCollapsed') === 'true')
 
   // Git repo detection and polling
@@ -124,6 +176,30 @@ export function SessionView(): React.JSX.Element {
     return () => document.removeEventListener('keydown', handler)
   }, [])
 
+  // Ctrl+` to toggle terminal panel
+  useEffect(() => {
+    const handler = (e: KeyboardEvent): void => {
+      if (e.key === '`' && (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey) {
+        e.preventDefault()
+        const state = useSessionStore.getState()
+        const willOpen = !state.terminalPanelOpen
+        state.setTerminalPanelOpen(willOpen)
+
+        // Auto-create first terminal if opening and no tabs exist
+        if (willOpen && state.terminalTabs.length === 0) {
+          const cwd = state.activeSessionId
+            ? state.sessions[state.activeSessionId]?.cwd ?? '.'
+            : '.'
+          window.api.createTerminal(cwd || '.').then((terminalId) => {
+            state.addTerminalTab({ id: terminalId, title: 'Terminal', cwd: cwd || '.' })
+          })
+        }
+      }
+    }
+    document.addEventListener('keydown', handler)
+    return () => document.removeEventListener('keydown', handler)
+  }, [])
+
   return (
     <SidebarContext.Provider value={{ collapsed: sidebarCollapsed, toggle: toggleSidebar }}>
       <div style={uiFontScale !== 1 ? { zoom: uiFontScale, height: `calc(100vh / ${uiFontScale})`, width: `calc(100vw / ${uiFontScale})` } : undefined} className={`h-screen flex ${import.meta.env.DEV ? 'border-2 border-orange-400 rounded-2xl overflow-hidden' : ''}`}>
@@ -133,24 +209,34 @@ export function SessionView(): React.JSX.Element {
             <ResizeHandle onMouseDown={sidebar.onMouseDown(1)} />
           </>
         )}
-        <div className={`flex-1 min-w-0 flex ${window.api.platform === 'darwin' ? 'bg-bg-secondary/60' : 'bg-bg-secondary/80'}`}>
-          <div className={`flex-1 min-w-0 h-full flex flex-col bg-bg-primary overflow-hidden ${sidebarCollapsed ? '' : 'rounded-l-2xl shadow-[-1px_0_4px_rgba(0,0,0,0.15),-3px_0_12px_rgba(0,0,0,0.1)]'}`}>
-            {showUsageView ? (
-              <UsageView onClose={() => setShowUsageView(false)} />
-            ) : (
-              <ChatPanel />
+        <div className={`flex-1 min-w-0 flex flex-col ${window.api.platform === 'darwin' ? 'bg-bg-secondary/60' : 'bg-bg-secondary/80'}`}>
+          {/* Main content row: chat + optional right panels */}
+          <div className="flex-1 min-w-0 min-h-0 flex">
+            <div className={`flex-1 min-w-0 h-full flex flex-col bg-bg-primary overflow-hidden ${sidebarCollapsed ? '' : 'rounded-l-2xl shadow-[-1px_0_4px_rgba(0,0,0,0.15),-3px_0_12px_rgba(0,0,0,0.1)]'}`}>
+              {showUsageView ? (
+                <UsageView onClose={() => setShowUsageView(false)} />
+              ) : (
+                <ChatPanel />
+              )}
+            </div>
+            {rightPanel === 'task' && (
+              <>
+                <ResizeHandle onMouseDown={taskPanel.onMouseDown(-1)} />
+                <TaskDetailPanel style={{ width: taskPanel.width }} />
+              </>
+            )}
+            {rightPanel === 'git' && (
+              <>
+                <ResizeHandle onMouseDown={gitPanel.onMouseDown(-1)} />
+                <GitPanel style={{ width: gitPanel.width }} />
+              </>
             )}
           </div>
-          {rightPanel === 'task' && (
+          {/* Bottom terminal panel */}
+          {terminalPanelOpen && (
             <>
-              <ResizeHandle onMouseDown={taskPanel.onMouseDown(-1)} />
-              <TaskDetailPanel style={{ width: taskPanel.width }} />
-            </>
-          )}
-          {rightPanel === 'git' && (
-            <>
-              <ResizeHandle onMouseDown={gitPanel.onMouseDown(-1)} />
-              <GitPanel style={{ width: gitPanel.width }} />
+              <HorizontalResizeHandle onMouseDown={bottomPanel.onMouseDown} />
+              <TerminalPanel style={{ height: bottomPanel.height }} />
             </>
           )}
         </div>

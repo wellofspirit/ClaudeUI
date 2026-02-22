@@ -259,6 +259,14 @@ export interface ClaudeAPI {
   onTeammateDetected(cb: (data: RoutedData<TeammateDetectedData>) => void): () => void
   onTeamCreated(cb: (data: RoutedData<{ teamName: string }>) => void): () => void
   onTeamDeleted(cb: (data: RoutedData<Record<string, never>>) => void): () => void
+  // Terminal (PTY) operations
+  createTerminal(cwd: string): Promise<string>
+  writeTerminal(id: string, data: string): Promise<void>
+  resizeTerminal(id: string, cols: number, rows: number): Promise<void>
+  killTerminal(id: string): Promise<void>
+  onTerminalData(cb: (data: { terminalId: string; data: string }) => void): () => void
+  onTerminalExit(cb: (data: { terminalId: string; code: number }) => void): () => void
+
   // Git operations
   gitCheckRepo(cwd: string): Promise<boolean>
   gitGetStatus(cwd: string): Promise<GitStatusData>
@@ -431,6 +439,16 @@ export interface DiffComment {
   lineContent: string
   comment: string
   createdAt: number
+}
+
+// ---------------------------------------------------------------------------
+// Terminal types
+// ---------------------------------------------------------------------------
+
+export interface TerminalTab {
+  id: string
+  title: string
+  cwd: string
 }
 
 // ---------------------------------------------------------------------------

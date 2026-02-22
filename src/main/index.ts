@@ -3,6 +3,7 @@ import { join } from 'path'
 import { execFileSync } from 'child_process'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import { registerSessionIpc } from './ipc/session.ipc'
+import { registerTerminalIpc } from './ipc/terminal.ipc'
 import icon from '../../resources/icon.png?asset'
 
 // Prevent "nested session" error when launched from a Claude Code terminal
@@ -57,6 +58,7 @@ function createWindow(): void {
   })
 
   registerSessionIpc(mainWindow)
+  registerTerminalIpc(mainWindow)
 
   // Window control IPC handlers (for frameless windows on Windows/Linux)
   ipcMain.handle('window:minimize', () => mainWindow.minimize())

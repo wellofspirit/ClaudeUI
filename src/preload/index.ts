@@ -174,6 +174,23 @@ const api: ClaudeAPI = {
     ipcRenderer.on('session:team-deleted', handler)
     return () => ipcRenderer.removeListener('session:team-deleted', handler)
   },
+  // Terminal (PTY) operations
+  createTerminal: (cwd: string) => ipcRenderer.invoke('terminal:create', cwd),
+  writeTerminal: (id: string, data: string) => ipcRenderer.invoke('terminal:write', id, data),
+  resizeTerminal: (id: string, cols: number, rows: number) =>
+    ipcRenderer.invoke('terminal:resize', id, cols, rows),
+  killTerminal: (id: string) => ipcRenderer.invoke('terminal:kill', id),
+  onTerminalData: (cb) => {
+    const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as never)
+    ipcRenderer.on('terminal:data', handler)
+    return () => ipcRenderer.removeListener('terminal:data', handler)
+  },
+  onTerminalExit: (cb) => {
+    const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as never)
+    ipcRenderer.on('terminal:exit', handler)
+    return () => ipcRenderer.removeListener('terminal:exit', handler)
+  },
+
   // Git operations
   gitCheckRepo: (cwd: string) => ipcRenderer.invoke('git:check-repo', cwd),
   gitGetStatus: (cwd: string) => ipcRenderer.invoke('git:status', cwd),

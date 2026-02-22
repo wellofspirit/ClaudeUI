@@ -15,6 +15,7 @@ extraResources:
 asarUnpack:
   - resources/**
   - node_modules/@anthropic-ai/claude-agent-sdk/**
+  - node_modules/node-pty/**
 win:
   executableName: claudui
   signAndEditExecutable: false
@@ -40,7 +41,7 @@ linux:
   category: Utility
 appImage:
   artifactName: ${name}-${version}.${ext}
-npmRebuild: false
+npmRebuild: true
 publish:
   provider: generic
   url: https://example.com/auto-updates

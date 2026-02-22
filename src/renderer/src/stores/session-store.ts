@@ -18,7 +18,8 @@ import type {
   GitBranchData,
   DiffComment,
   AccountUsage,
-  BlockUsageData
+  BlockUsageData,
+  TerminalTab
 } from '../../../shared/types'
 
 /**
@@ -441,6 +442,12 @@ interface SessionState {
   blockUsage: BlockUsageData | null
   showUsageView: boolean
 
+  // Terminal panel (global, survives session switching)
+  terminalTabs: TerminalTab[]
+  activeTerminalId: string | null
+  terminalPanelOpen: boolean
+  terminalPanelHeight: number
+
   // Multi-session actions
   showWelcome: () => void
   switchSession: (routingId: string) => void
@@ -530,6 +537,13 @@ interface SessionState {
   addDiffComment: (routingId: string, comment: DiffComment) => void
   removeDiffComment: (routingId: string, commentId: string) => void
   clearDiffComments: (routingId: string) => void
+  // Terminal actions
+  addTerminalTab: (tab: TerminalTab) => void
+  closeTerminalTab: (id: string) => void
+  removeTerminalTab: (id: string) => void
+  setActiveTerminal: (id: string) => void
+  setTerminalPanelOpen: (open: boolean) => void
+  setTerminalPanelHeight: (height: number) => void
 }
 
 export const useSessionStore = create<SessionState>((set) => ({
@@ -545,6 +559,10 @@ export const useSessionStore = create<SessionState>((set) => ({
   accountUsage: null,
   blockUsage: null,
   showUsageView: false,
+  terminalTabs: [],
+  activeTerminalId: null,
+  terminalPanelOpen: false,
+  terminalPanelHeight: Number(localStorage.getItem('terminalPanelHeight')) || 280,
 
   showWelcome: () =>
     set((state) => {
@@ -1419,7 +1437,45 @@ export const useSessionStore = create<SessionState>((set) => ({
       sessions: updateSession(state.sessions, routingId, () => ({
         gitReviewComments: []
       }))
-    }))
+    })),
+
+  // Terminal actions
+  addTerminalTab: (tab) =>
+    set((state) => ({
+      terminalTabs: [...state.terminalTabs, tab],
+      activeTerminalId: tab.id
+    })),
+
+  closeTerminalTab: (id) => {
+    window.api.killTerminal(id)
+    set((state) => {
+      const tabs = state.terminalTabs.filter((t) => t.id !== id)
+      const activeTerminalId =
+        state.activeTerminalId === id
+          ? (tabs[tabs.length - 1]?.id ?? null)
+          : state.activeTerminalId
+      return { terminalTabs: tabs, activeTerminalId }
+    })
+  },
+
+  removeTerminalTab: (id) =>
+    set((state) => {
+      const tabs = state.terminalTabs.filter((t) => t.id !== id)
+      const activeTerminalId =
+        state.activeTerminalId === id
+          ? (tabs[tabs.length - 1]?.id ?? null)
+          : state.activeTerminalId
+      return { terminalTabs: tabs, activeTerminalId }
+    }),
+
+  setActiveTerminal: (id) => set({ activeTerminalId: id }),
+
+  setTerminalPanelOpen: (open) => set({ terminalPanelOpen: open }),
+
+  setTerminalPanelHeight: (height) => {
+    localStorage.setItem('terminalPanelHeight', String(height))
+    set({ terminalPanelHeight: height })
+  }
 }))
 
 /**
