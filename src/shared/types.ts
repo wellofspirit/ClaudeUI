@@ -304,6 +304,9 @@ export interface ClaudeAPI {
   // Block usage analytics
   fetchBlockUsage(): Promise<BlockUsageData>
   onBlockUsage(cb: (data: BlockUsageData) => void): () => void
+
+  // Logging
+  logError(source: string, message: string): void
 }
 
 // ---------------------------------------------------------------------------
@@ -383,6 +386,8 @@ export interface UsageSnapshot {
   /** Per-model cumulative totals for the active block */
   blockModels: ModelTokenBreakdown[]
   burnRate: { tokensPerMin: number; costPerHour: number } | null
+  /** Projected window capacity at this snapshot (from WLS regression) */
+  projectedUsage: { tokens: number; costUsd: number } | null
 }
 
 /** Daily file format: ~/.claude/ui/usage/YYYY-MM-DD.json */

@@ -128,7 +128,7 @@ function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Element | nu
     const result = await window.api.stopTask(activeSessionId, toolUseId)
 
     if (!result.success) {
-      console.error('Failed to stop task:', result.error)
+      window.api.logError('TaskDetailPanel', `Failed to stop task: ${result.error}`)
       clearTaskStopping(activeSessionId, toolUseId)
       return
     }
@@ -340,7 +340,7 @@ function BashBackgroundEntry({ toolUseId }: { toolUseId: string }): React.JSX.El
     const result = await window.api.stopTask(activeSessionId, toolUseId)
 
     if (!result.success) {
-      console.error('Failed to stop task:', result.error)
+      window.api.logError('TaskDetailPanel', `Failed to stop task: ${result.error}`)
       clearTaskStopping(activeSessionId, toolUseId)
       return
     }

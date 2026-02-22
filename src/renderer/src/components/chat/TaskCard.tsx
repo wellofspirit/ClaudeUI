@@ -122,7 +122,7 @@ export function TaskCard({ block, result }: Props): React.JSX.Element {
     const result = await window.api.stopTask(activeSessionId, toolUseId)
 
     if (!result.success) {
-      console.error('Failed to stop task:', result.error)
+      window.api.logError('TaskCard', `Failed to stop task: ${result.error}`)
       clearTaskStopping(activeSessionId, toolUseId)
       return
     }

@@ -1,6 +1,7 @@
 import * as os from 'os'
 import * as fs from 'fs'
 import { v4 as uuid } from 'uuid'
+import { logger } from './logger'
 
 /** On Windows, prefer pwsh (PowerShell 7+) over cmd.exe. */
 function resolveWindowsShell(): string {
@@ -18,8 +19,8 @@ function resolveWindowsShell(): string {
     const full = `${dir}\\pwsh.exe`
     try {
       if (fs.existsSync(full)) return full
-    } catch {
-      // skip invalid path entries
+    } catch (err) {
+      logger.warn('PtyManager', 'Skipping invalid PATH entry', { path: full, err })
     }
   }
   return process.env.COMSPEC || 'cmd.exe'
@@ -86,8 +87,8 @@ export class PtyManager {
     if (!entry) return
     try {
       entry.pty.kill()
-    } catch {
-      // PTY may already be dead
+    } catch (err) {
+      logger.warn('PtyManager', 'PTY may already be dead', { id, err })
     }
     this.ptys.delete(id)
   }

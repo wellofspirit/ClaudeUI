@@ -13,6 +13,7 @@ import { homedir } from 'node:os'
 import type { BrowserWindow } from 'electron'
 import type { AccountUsage, RateWindow } from '../../shared/types'
 import { blockUsageService } from './block-usage'
+import { logger } from './logger'
 
 // ---------------------------------------------------------------------------
 // Credential types
@@ -73,9 +74,9 @@ export class UsageFetcher {
   startPolling(): void {
     if (this.pollTimer) return
     // Fetch immediately, then every pollIntervalMs
-    this.fetch().catch(() => {})
+    this.fetch().catch((err) => { logger.warn('UsageFetcher', 'Initial fetch failed', err) })
     this.pollTimer = setInterval(() => {
-      this.fetch().catch(() => {})
+      this.fetch().catch((err) => { logger.warn('UsageFetcher', 'Poll fetch failed', err) })
     }, this.pollIntervalMs)
   }
 
@@ -107,7 +108,7 @@ export class UsageFetcher {
 
     // Trigger block usage recalculation (fire-and-forget)
     blockUsageService.recalculate().catch((err) => {
-      console.error('[BlockUsage] recalculation failed:', err)
+      logger.error('BlockUsage', 'Recalculation failed', err)
     })
 
     return this.lastUsage
@@ -225,7 +226,8 @@ export class UsageFetcher {
       const parsed = JSON.parse(raw) as CredentialsFile
       if (!parsed.claudeAiOauth?.accessToken) return null
       return parsed.claudeAiOauth
-    } catch {
+    } catch (err) {
+      logger.warn('UsageFetcher', 'Failed to read credentials', err)
       return null
     }
   }
@@ -264,8 +266,8 @@ export class UsageFetcher {
       const file = JSON.parse(raw) as CredentialsFile
       file.claudeAiOauth = newCreds
       await writeFile(CREDENTIALS_PATH, JSON.stringify(file, null, 2), 'utf-8')
-    } catch {
-      // Non-fatal — we still have the new token in memory
+    } catch (err) {
+      logger.warn('UsageFetcher', 'Failed to persist refreshed credentials', err)
     }
 
     return data.access_token

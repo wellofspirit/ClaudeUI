@@ -4,6 +4,7 @@ import { execFileSync } from 'child_process'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import { registerSessionIpc } from './ipc/session.ipc'
 import { registerTerminalIpc } from './ipc/terminal.ipc'
+import { logger } from './services/logger'
 import icon from '../../resources/icon.png?asset'
 
 // Prevent "nested session" error when launched from a Claude Code terminal
@@ -19,8 +20,8 @@ if (process.platform === 'darwin') {
       timeout: 3000
     }).trim()
     if (result) process.env.PATH = result
-  } catch {
-    // Fallback: prepend common node locations
+  } catch (err) {
+    logger.warn('main', 'Failed to read shell PATH, using fallback', err)
     const extra = '/opt/homebrew/bin:/usr/local/bin:/usr/local/sbin'
     process.env.PATH = `${extra}:${process.env.PATH ?? ''}`
   }
@@ -59,6 +60,11 @@ function createWindow(): void {
 
   registerSessionIpc(mainWindow)
   registerTerminalIpc(mainWindow)
+
+  // Renderer error logging → main process log file
+  ipcMain.on('log:error', (_e, source: string, message: string) => {
+    logger.error(`renderer/${source}`, message)
+  })
 
   // Window control IPC handlers (for frameless windows on Windows/Linux)
   ipcMain.handle('window:minimize', () => mainWindow.minimize())
@@ -132,5 +138,10 @@ app.on('window-all-closed', () => {
   }
 })
 
-// In this file you can include the rest of your app's specific main process
-// code. You can also put them in separate files and require them here.
+// Global error handlers — catch anything that slips through
+process.on('uncaughtException', (err) => {
+  logger.error('process', 'Uncaught exception', err)
+})
+process.on('unhandledRejection', (reason) => {
+  logger.error('process', 'Unhandled rejection', reason)
+})

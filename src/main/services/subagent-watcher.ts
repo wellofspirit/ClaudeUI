@@ -12,6 +12,7 @@ import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
 import type { ChatMessage, ContentBlock } from '../../shared/types'
+import { logger } from './logger'
 
 const CLAUDE_PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects')
 
@@ -101,8 +102,8 @@ function findSubagentFileByPrompt(subagentDir: string, prompt: string): string |
       if (text && text.includes(matchStr)) {
         return filePath
       }
-    } catch {
-      // Skip malformed files
+    } catch (err) {
+      logger.warn('SubagentWatcher', 'Skipping malformed subagent file', { fname, err })
     }
   }
   return null
@@ -220,7 +221,8 @@ function parseJsonlLine(line: string): ChatMessage | null {
     }
 
     return null
-  } catch {
+  } catch (err) {
+    logger.warn('SubagentWatcher', 'Failed to parse JSONL line', { err })
     return null
   }
 }
@@ -270,7 +272,8 @@ function readNewMessages(
     } finally {
       fs.closeSync(fd)
     }
-  } catch {
+  } catch (err) {
+    logger.warn('SubagentWatcher', 'Failed to read new messages from file', { filePath, err })
     return { messages: [], newOffset: fromByte }
   }
 }
@@ -339,8 +342,8 @@ export function watchSubagent(
           }
         }, 150)
       })
-    } catch {
-      // File may have been removed — ignore
+    } catch (err) {
+      logger.warn('SubagentWatcher', 'Failed to watch file, may have been removed', { filePath, err })
     }
   }
 

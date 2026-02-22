@@ -109,7 +109,7 @@ export function Sidebar({ style, onToggleCollapse }: {
         }
       }
     } catch (err) {
-      console.error('[handleRename] auto-generate failed for', sessionId, err)
+      window.api.logError('Sidebar', `Auto-generate title failed for ${sessionId}: ${err}`)
       setCustomTitle(sessionId, '') // clear stuck "generating..." title
     }
   }, [sessions, directories, setCustomTitle, applyTitle, loadHistoricalSession])

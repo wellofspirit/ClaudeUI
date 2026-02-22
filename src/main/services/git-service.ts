@@ -2,6 +2,7 @@ import simpleGit, { type SimpleGit } from 'simple-git'
 import * as fs from 'fs'
 import * as path from 'path'
 import type { GitStatusData, GitBranchData, GitFileStatus } from '../../shared/types'
+import { logger } from './logger'
 
 export class GitService {
   private git: SimpleGit
@@ -59,12 +60,12 @@ export class GitService {
           const lineCount = content.split('\n').length
           // If file ends with newline, split produces an extra empty string
           linesAdded += content.endsWith('\n') ? lineCount - 1 : lineCount
-        } catch {
-          // Skip files we can't read
+        } catch (err) {
+          logger.warn('GitService', `Failed to read untracked file for line count: ${f}`, err)
         }
       }
-    } catch {
-      // If diff fails, leave counts at 0
+    } catch (err) {
+      logger.warn('GitService', 'Failed to compute diff line counts', err)
     }
 
     return {
@@ -140,8 +141,8 @@ export class GitService {
       let content: string
       try {
         content = await fs.promises.readFile(absPath, 'utf-8')
-      } catch {
-        // File doesn't exist — no diff to show
+      } catch (err) {
+        logger.warn('GitService', `Failed to read untracked file for patch: ${filePath}`, err)
         return { patch: '' }
       }
       if (!content) return { patch: '' }
@@ -157,7 +158,8 @@ export class GitService {
         body,
       ].join('\n')
       return { patch: unified }
-    } catch {
+    } catch (err) {
+      logger.warn('GitService', `Failed to get file patch: ${filePath}`, err)
       return { patch: '' }
     }
   }
@@ -172,20 +174,22 @@ export class GitService {
     try {
       if (staged) {
         let oldContent = ''
-        try { oldContent = await this.git.show([`HEAD:${filePath}`]) } catch { /* new file */ }
+        try { oldContent = await this.git.show([`HEAD:${filePath}`]) } catch (err) { logger.warn('GitService', `Failed to get HEAD content for staged file: ${filePath}`, err) }
         let newContent = ''
-        try { newContent = await this.git.show([`:${filePath}`]) } catch { /* deleted from index */ }
+        try { newContent = await this.git.show([`:${filePath}`]) } catch (err) { logger.warn('GitService', `Failed to get index content for staged file: ${filePath}`, err) }
         return { oldContent: normEol(oldContent), newContent: normEol(newContent) }
       } else {
         let oldContent = ''
-        try { oldContent = await this.git.show([`:${filePath}`]) } catch {
-          try { oldContent = await this.git.show([`HEAD:${filePath}`]) } catch { /* untracked */ }
+        try { oldContent = await this.git.show([`:${filePath}`]) } catch (err) {
+          logger.warn('GitService', `Failed to get index content for unstaged file: ${filePath}`, err)
+          try { oldContent = await this.git.show([`HEAD:${filePath}`]) } catch (err2) { logger.warn('GitService', `Failed to get HEAD content for untracked file: ${filePath}`, err2) }
         }
         let newContent = ''
-        try { newContent = await fs.promises.readFile(absPath, 'utf-8') } catch { /* deleted */ }
+        try { newContent = await fs.promises.readFile(absPath, 'utf-8') } catch (err) { logger.warn('GitService', `Failed to read working tree file: ${filePath}`, err) }
         return { oldContent: normEol(oldContent), newContent: normEol(newContent) }
       }
-    } catch {
+    } catch (err) {
+      logger.warn('GitService', `Failed to get file contents: ${filePath}`, err)
       return { oldContent: '', newContent: '' }
     }
   }
@@ -225,8 +229,8 @@ export class GitService {
           this.lastStatusJson = json
           callback(status)
         }
-      } catch {
-        // Silently ignore polling errors
+      } catch (err) {
+        logger.warn('GitService', 'Polling error while fetching git status', err)
       }
     }
     // Initial poll

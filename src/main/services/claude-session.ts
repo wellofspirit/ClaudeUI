@@ -8,6 +8,7 @@ import type { BrowserWindow } from 'electron'
 import { computeTokenMetrics, buildSubagentFileMap } from './session-history'
 import { unwatchAllSubagents } from './subagent-watcher'
 import { saveSlashCommands } from './ui-config'
+import { logger } from './logger'
 
 /** In production, cli.js is unpacked from the asar — resolve its real path */
 export function getCliJsPath(): string | undefined {
@@ -245,7 +246,7 @@ export class ClaudeSession {
       const cliPath = getCliJsPath()
       if (cliPath) {
         const cliExists = fs.existsSync(cliPath)
-        console.log(`[ClaudeSession] CLI path: ${cliPath} (exists: ${cliExists})`)
+        logger.info('ClaudeSession', `CLI path: ${cliPath} (exists: ${cliExists})`)
         if (!cliExists) {
           this.send('session:error', `CLI not found at: ${cliPath}`)
           return
@@ -266,7 +267,7 @@ export class ClaudeSession {
           stderr: (chunk) => {
             const text = chunk.toString().trim()
             if (text) {
-              console.error('[SDK stderr]', text)
+              logger.error('SDK', `stderr: ${text}`)
               stderrChunks.push(text)
             }
           },
@@ -446,7 +447,7 @@ export class ClaudeSession {
               const errText = typeof response.error === 'string'
                 ? response.error
                 : JSON.stringify(response.error, null, 2)
-              console.error('[ClaudeSession] Control response error:', errText)
+              logger.error('ClaudeSession', `Control response error: ${errText}`)
               this.send('session:error', `SDK control error: ${errText}`)
             }
           }
@@ -463,11 +464,11 @@ export class ClaudeSession {
               ? '\n\nCLI stderr:\n' + stderrChunks.slice(-20).join('\n')
               : ''
             if (errors.length) {
-              console.error('[ClaudeSession] Result error:', errors.join('; '))
+              logger.error('ClaudeSession', `Result error: ${errors.join('; ')}`)
               this.send('session:error', errors.join('; ') + stderrContext)
             } else {
               const fallback = `Session ended with status: ${subtype}`
-              console.error('[ClaudeSession] Result:', fallback)
+              logger.error('ClaudeSession', fallback)
               this.send('session:error', fallback + stderrContext)
             }
           }
@@ -509,7 +510,7 @@ export class ClaudeSession {
                 this.accTotalApiDurationMs = metrics.totalApiDurationMs
                 this.lastContextLength = metrics.contextWindowSize
                 this.send('session:status-line', metrics)
-              }).catch(() => {})
+              }).catch((err) => { logger.warn('ClaudeSession', 'JSONL reconciliation failed', err) })
             }, 500) // delay to let SDK flush JSONL to disk
           }
         }
@@ -517,11 +518,8 @@ export class ClaudeSession {
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err)
       const stack = err instanceof Error ? err.stack : undefined
-      console.error('[ClaudeSession] SDK error:', errorMsg)
-      if (stack) console.error('[ClaudeSession] Stack:', stack)
-      if (stderrChunks.length > 0) {
-        console.error('[ClaudeSession] Collected stderr:', stderrChunks.join('\n'))
-      }
+      const stderrContext = stderrChunks.length > 0 ? `\nCollected stderr:\n${stderrChunks.join('\n')}` : ''
+      logger.error('ClaudeSession', `SDK error: ${errorMsg}${stderrContext}`, err)
       if (!errorMsg.includes('abort')) {
         // Build a structured error message:
         // Line 1: human-readable summary
@@ -640,8 +638,8 @@ export class ClaudeSession {
       const planPath = path.join(plansDir, `${this.slug}.md`)
       try {
         return fs.readFileSync(planPath, 'utf-8')
-      } catch {
-        // Fall through to mtime-based lookup
+      } catch (err) {
+        logger.warn('ClaudeSession', `Failed to read plan file: ${planPath}`, err)
       }
     }
 
@@ -658,8 +656,8 @@ export class ClaudeSession {
       if (files.length > 0) {
         return fs.readFileSync(files[0].path, 'utf-8')
       }
-    } catch {
-      // Plans directory doesn't exist or is unreadable
+    } catch (err) {
+      logger.warn('ClaudeSession', 'Plans directory unreadable', err)
     }
 
     return null
@@ -1017,7 +1015,8 @@ export class ClaudeSession {
       } finally {
         fs.closeSync(fd)
       }
-    } catch {
+    } catch (err) {
+      logger.warn('ClaudeSession', `readTail failed for ${filePath}`, err)
       return { tail: '', totalSize: 0 }
     }
   }
@@ -1068,7 +1067,8 @@ export class ClaudeSession {
       } finally {
         fs.closeSync(fd)
       }
-    } catch {
+    } catch (err) {
+      logger.warn('ClaudeSession', `readBackgroundRange failed for toolUseId=${toolUseId}`, err)
       return ''
     }
   }
@@ -1084,8 +1084,8 @@ export class ClaudeSession {
 
       const { tail, totalSize } = this.readTail(poller.filePath)
       this.send('session:background-output', { toolUseId, tail, totalSize, done: false })
-    } catch {
-      // File may not exist yet — ignore
+    } catch (err) {
+      logger.warn('ClaudeSession', `pollBackgroundFile failed for toolUseId=${toolUseId}`, err)
     }
   }
 

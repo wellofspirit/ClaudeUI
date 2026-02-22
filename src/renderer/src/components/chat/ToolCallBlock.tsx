@@ -104,7 +104,7 @@ export const ToolCallBlock = memo(function ToolCallBlock({ block, result, approv
     const result = await window.api.stopTask(activeSessionId, toolUseId)
 
     if (!result.success) {
-      console.error('Failed to stop task:', result.error)
+      window.api.logError('ToolCallBlock', `Failed to stop task: ${result.error}`)
       clearTaskStopping(activeSessionId, toolUseId)
       return
     }

@@ -3,6 +3,7 @@ import * as path from 'path'
 import * as os from 'os'
 import * as readline from 'readline'
 import type { ChatMessage, ContentBlock, DirectoryGroup, SessionInfo, TaskNotification, StatusLineData } from '../../shared/types'
+import { logger } from './logger'
 
 const CLAUDE_PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects')
 const CACHE_DIR = path.join(os.homedir(), '.claude', 'ui')
@@ -26,7 +27,8 @@ function loadDiskCache(): DiskCache {
   try {
     if (!fs.existsSync(CACHE_FILE)) return {}
     return JSON.parse(fs.readFileSync(CACHE_FILE, 'utf-8')) as DiskCache
-  } catch {
+  } catch (err) {
+    logger.warn('SessionHistory', 'Failed to load disk cache', err)
     return {}
   }
 }
@@ -37,8 +39,8 @@ function saveDiskCache(cache: DiskCache): void {
       fs.mkdirSync(CACHE_DIR, { recursive: true, mode: 0o700 })
     }
     fs.writeFileSync(CACHE_FILE, JSON.stringify(cache), { mode: 0o600 })
-  } catch {
-    // Non-fatal — cache is purely a performance optimization
+  } catch (err) {
+    logger.warn('SessionHistory', 'Failed to save disk cache', err)
   }
 }
 
@@ -95,8 +97,8 @@ export async function computeTokenMetrics(filePath: string): Promise<StatusLineD
           totalDurationMs += (data.duration_ms as number) || 0
           totalApiDurationMs += (data.duration_api_ms as number) || 0
         }
-      } catch {
-        // Skip malformed lines
+      } catch (err) {
+        logger.warn('SessionHistory', 'Failed to parse line in computeTokenMetrics', err)
       }
     })
 
@@ -142,7 +144,8 @@ export async function listDirectories(): Promise<DirectoryGroup[]> {
       const full = path.join(CLAUDE_PROJECTS_DIR, name)
       return fs.statSync(full).isDirectory()
     })
-  } catch {
+  } catch (err) {
+    logger.warn('SessionHistory', 'Failed to read projects directory', err)
     return []
   }
 
@@ -156,7 +159,8 @@ export async function listDirectories(): Promise<DirectoryGroup[]> {
     let jsonlFiles: string[]
     try {
       jsonlFiles = fs.readdirSync(projectDir).filter((f) => f.endsWith('.jsonl'))
-    } catch {
+    } catch (err) {
+      logger.warn('SessionHistory', 'Failed to read project directory', err)
       continue
     }
 
@@ -171,7 +175,8 @@ export async function listDirectories(): Promise<DirectoryGroup[]> {
       let mtime: number
       try {
         mtime = fs.statSync(filePath).mtimeMs
-      } catch {
+      } catch (err) {
+        logger.warn('SessionHistory', 'Failed to stat session file', err)
         continue
       }
       const sessionId = file.replace('.jsonl', '')
@@ -351,8 +356,8 @@ function parseSessionMeta(filePath: string): Promise<SessionMeta | null> {
             foundHeader = true
           }
         }
-      } catch {
-        // Skip malformed lines
+      } catch (err) {
+        logger.warn('SessionHistory', 'Failed to parse line in parseSessionMeta', err)
       }
     })
 
@@ -484,7 +489,8 @@ export async function loadSessionHistory(
     let stream: fs.ReadStream
     try {
       stream = fs.createReadStream(filePath, { encoding: 'utf-8' })
-    } catch {
+    } catch (err) {
+      logger.warn('SessionHistory', 'Failed to open session history file', err)
       resolve({ messages: [], taskNotifications: [], customTitle: null, agentIdToToolUseId: {}, statusLine: null, teamName: null, pendingTeammates: {}, taskPrompts: {} })
       return
     }
@@ -784,8 +790,8 @@ export async function loadSessionHistory(
             })
           }
         }
-      } catch {
-        // Skip malformed lines
+      } catch (err) {
+        logger.warn('SessionHistory', 'Failed to parse line in loadSessionHistory', err)
       }
     })
 
@@ -872,8 +878,8 @@ export function buildSubagentFileMap(
           result[toolUseId] = hexId
         }
       }
-    } catch {
-      // Skip malformed files
+    } catch (err) {
+      logger.warn('SessionHistory', 'Failed to parse subagent file in buildSubagentFileMap', err)
     }
   }
   return result
@@ -896,8 +902,8 @@ export function loadBackgroundOutput(
     try {
       const content = fs.readFileSync(outputFile, 'utf-8')
       return { content, purged: false }
-    } catch {
-      // Fall through to interpolated path
+    } catch (err) {
+      logger.warn('SessionHistory', 'Failed to read background output file', err)
     }
   }
 
@@ -912,7 +918,8 @@ export function loadBackgroundOutput(
   try {
     const content = fs.readFileSync(outputPath, 'utf-8')
     return { content, purged: false }
-  } catch {
+  } catch (err) {
+    logger.warn('SessionHistory', 'Failed to read interpolated background output file', err)
     return { content: null, purged: true }
   }
 }
@@ -927,7 +934,8 @@ async function parseJsonlFile(filePath: string): Promise<ChatMessage[]> {
     let stream: fs.ReadStream
     try {
       stream = fs.createReadStream(filePath, { encoding: 'utf-8' })
-    } catch {
+    } catch (err) {
+      logger.warn('SessionHistory', 'Failed to open JSONL file', err)
       resolve([])
       return
     }
@@ -1039,8 +1047,8 @@ async function parseJsonlFile(filePath: string): Promise<ChatMessage[]> {
             messages.push(chatMsg)
           }
         }
-      } catch {
-        // Skip malformed lines
+      } catch (err) {
+        logger.warn('SessionHistory', 'Failed to parse line in parseJsonlFile', err)
       }
     })
 

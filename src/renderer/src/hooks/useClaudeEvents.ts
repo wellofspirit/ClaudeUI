@@ -124,6 +124,7 @@ export function useClaudeEvents(): void {
       }),
       window.api.onError(({ routingId, data: error }) => {
         addError(routingId, error)
+        window.api.logError('session', `[routingId=${routingId}] ${error}`)
       }),
       window.api.onToolResult(({ routingId, data: { toolUseId, result, isError } }) => {
         appendToolResult(routingId, toolUseId, result, isError)
@@ -226,12 +227,12 @@ export function useClaudeEvents(): void {
     // Trigger initial usage fetch
     window.api.fetchAccountUsage().then((data) => {
       useSessionStore.getState().setAccountUsage(data)
-    }).catch(() => {})
+    }).catch((err) => { window.api.logError('useClaudeEvents', `Initial usage fetch failed: ${err}`) })
 
     // Trigger initial block usage fetch
     window.api.fetchBlockUsage().then((data) => {
       useSessionStore.getState().setBlockUsage(data)
-    }).catch(() => {})
+    }).catch((err) => { window.api.logError('useClaudeEvents', `Initial block usage fetch failed: ${err}`) })
 
     return () => cleanups.forEach((fn) => fn())
   }, [addMessage, appendStreamingText, appendStreamingThinking, addPendingApproval, clearPendingApprovals, setStatus, addError, appendToolResult, updateTaskProgress, addTaskNotification, addSubagentMessage, appendSubagentMessageBatch, appendSubagentStreamingText, appendSubagentStreamingThinking, appendSubagentToolResult, setBackgroundOutput, setStatusLine, setPermissionMode, setSlashCommands])

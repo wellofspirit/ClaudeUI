@@ -3,6 +3,7 @@ import * as path from 'path'
 import * as os from 'os'
 import type { BrowserWindow } from 'electron'
 import { loadSessionHistory } from './session-history'
+import { logger } from './logger'
 
 const CLAUDE_PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects')
 
@@ -44,8 +45,8 @@ export function watchSession(
         if (!win.isDestroyed()) {
           win.webContents.send('session:watch-update', { routingId, messages, taskNotifications, statusLine })
         }
-      } catch {
-        // Ignore parse errors during rapid writes
+      } catch (err) {
+        logger.warn('SessionWatcher', `Parse error during watch update for ${sessionId}`, err)
       }
     }, 100)
   })

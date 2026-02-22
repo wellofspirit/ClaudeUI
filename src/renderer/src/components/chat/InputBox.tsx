@@ -422,8 +422,8 @@ export function InputBox(): React.JSX.Element {
           base64Data,
           previewUrl: isPdf ? '' : `data:${mediaType};base64,${base64Data}`
         })
-      } catch {
-        // Skip files that fail to process
+      } catch (err) {
+        window.api.logError('InputBox', `Failed to process file ${file.name}: ${err}`)
       }
     }
     if (newAttachments.length > 0) {

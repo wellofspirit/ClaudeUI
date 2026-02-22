@@ -252,6 +252,10 @@ const api: ClaudeAPI = {
     const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as never)
     ipcRenderer.on('usage:block-data', handler)
     return () => ipcRenderer.removeListener('usage:block-data', handler)
+  },
+
+  logError: (source: string, message: string) => {
+    ipcRenderer.send('log:error', source, message)
   }
 }
 

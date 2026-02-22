@@ -298,28 +298,59 @@ function ApiUsageBar({ usage }: { usage: AccountUsage }): React.JSX.Element {
 
 function BlockRow({ block }: { block: UsageBlock }): React.JSX.Element {
   const total = sumTokens(block.tokens)
+  const proj = block.projectedUsage
+  const pct = proj
+    ? Math.min(100, Math.round((total / proj.tokens) * 100))
+    : null
 
   return (
-    <div className="flex items-center gap-3 text-[10px] py-1.5 px-1 rounded hover:bg-bg-hover/30 transition-colors">
+    <div className="flex items-center gap-2 text-[10px] py-1.5 px-1 rounded hover:bg-bg-hover/30 transition-colors">
+      {/* Time range */}
       <span className="text-text-muted w-[120px] shrink-0">
         {formatTime(block.startTime)} – {formatTime(block.actualEndTime)}
       </span>
-      <span className="text-text-primary font-mono w-[60px] text-right">
-        {formatTokenCount(total)}
+      {/* Tokens: used / projected */}
+      <span className="font-mono w-[140px] text-right shrink-0">
+        <span className="text-text-primary">{formatTokenCount(total)}</span>
+        {proj && (
+          <span className="text-text-muted"> / {formatTokenCount(proj.tokens)}</span>
+        )}
       </span>
-      <span className="text-text-muted font-mono w-[50px] text-right">
-        {formatCost(block.costUsd)}
+      {/* Cost: used / projected */}
+      <span className="font-mono w-[120px] text-right shrink-0">
+        <span className="text-text-muted">{formatCost(block.costUsd)}</span>
+        {proj && (
+          <span className="text-text-muted/50"> / {formatCost(proj.costUsd)}</span>
+        )}
       </span>
-      <div className="flex-1 flex items-center gap-1">
-        {block.models.map((m) => (
-          <span
-            key={m.model}
-            className="inline-block w-2 h-2 rounded-full"
-            style={{ backgroundColor: getModelColor(m.model) }}
-            title={`${shortModelName(m.model)}: ${formatTokenCount(sumTokens(m.tokens))}`}
-          />
-        ))}
-      </div>
+      {/* Utilization bar + percentage */}
+      {pct !== null ? (
+        <div
+          className="flex-1 flex items-center gap-1.5"
+          title={`Used ${pct}% of projected window capacity`}
+        >
+          <div className="flex-1 h-[5px] rounded-full bg-white/5 overflow-hidden">
+            <div
+              className={`h-full rounded-full transition-all ${
+                pct >= 80 ? 'bg-red-400/70' : pct >= 50 ? 'bg-yellow-400/60' : 'bg-green-400/50'
+              }`}
+              style={{ width: `${pct}%` }}
+            />
+          </div>
+          <span className="text-text-muted font-mono text-[9px] w-[28px] text-right">{pct}%</span>
+        </div>
+      ) : (
+        <div className="flex-1 flex items-center gap-1">
+          {block.models.map((m) => (
+            <span
+              key={m.model}
+              className="inline-block w-2 h-2 rounded-full"
+              style={{ backgroundColor: getModelColor(m.model) }}
+              title={`${shortModelName(m.model)}: ${formatTokenCount(sumTokens(m.tokens))}`}
+            />
+          ))}
+        </div>
+      )}
       {block.isActive && (
         <span className="text-[8px] px-1 py-0.5 rounded bg-green-500/15 text-green-400">active</span>
       )}

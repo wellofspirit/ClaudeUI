@@ -2,6 +2,7 @@ import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
 import type { BrowserWindow } from 'electron'
+import { logger } from './logger'
 
 const CONFIG_DIR = path.join(os.homedir(), '.claude', 'ui')
 const SETTINGS_FILE = path.join(CONFIG_DIR, 'settings.json')
@@ -37,7 +38,8 @@ function readJson<T>(filePath: string): T | null {
   try {
     if (!fs.existsSync(filePath)) return null
     return JSON.parse(fs.readFileSync(filePath, 'utf-8')) as T
-  } catch {
+  } catch (err) {
+    logger.warn('UIConfig', `Failed to read ${path.basename(filePath)}`, err)
     return null
   }
 }
@@ -78,8 +80,8 @@ function migrateLegacyConfig(): void {
   // Remove legacy file
   try {
     fs.unlinkSync(LEGACY_CONFIG_FILE)
-  } catch {
-    // ignore
+  } catch (err) {
+    logger.warn('UIConfig', 'Failed to remove legacy config file', err)
   }
 }
 
@@ -151,7 +153,8 @@ export function startConfigWatcher(win: BrowserWindow): () => void {
       let content: string
       try {
         content = fs.readFileSync(entry.filePath, 'utf-8')
-      } catch {
+      } catch (err) {
+        logger.warn('UIConfig', `Watcher failed to read ${path.basename(entry.filePath)}`, err)
         return
       }
 
@@ -163,8 +166,8 @@ export function startConfigWatcher(win: BrowserWindow): () => void {
         if (!win.isDestroyed()) {
           win.webContents.send(entry.channel, data)
         }
-      } catch {
-        // Malformed JSON — skip
+      } catch (err) {
+        logger.warn('UIConfig', `Malformed JSON in ${path.basename(entry.filePath)}`, err)
       }
     })
   }

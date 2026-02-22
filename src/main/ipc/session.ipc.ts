@@ -13,6 +13,7 @@ import { gitServiceManager } from '../services/git-service'
 import { usageFetcher } from '../services/usage-fetcher'
 import { blockUsageService } from '../services/block-usage'
 import type { ApprovalDecision, ModelInfo } from '../../shared/types'
+import { logger } from '../services/logger'
 
 let cachedModels: ModelInfo[] | null = null
 
@@ -24,7 +25,7 @@ const COMMIT_MSG_SYSTEM_PROMPT =
 
 async function generateTitle(conversationText: string): Promise<string | null> {
   const abort = new AbortController()
-  console.log('[generateTitle] request:', conversationText.length, 'chars:', conversationText.slice(0, 200))
+  logger.info('generateTitle', `request: ${conversationText.length} chars`)
 
   try {
     const cliPath = getCliJsPath()
@@ -57,19 +58,19 @@ async function generateTitle(conversationText: string): Promise<string | null> {
       }
     }
 
-    console.log('[generateTitle] response:', JSON.stringify(result))
+    logger.info('generateTitle', `response: ${JSON.stringify(result)}`)
 
     // Take the first line, strip quotes/punctuation, limit to 3 words
     const cleaned = result.trim().split('\n')[0].replace(/^["'`]+|["'`]+$/g, '').trim()
     const words = cleaned.split(/\s+/).slice(0, 3).join(' ')
     if (words.length >= 2) {
-      console.log('[generateTitle] title:', words)
+      logger.info('generateTitle', `title: ${words}`)
       return words
     }
-    console.log('[generateTitle] no usable title extracted')
+    logger.info('generateTitle', 'no usable title extracted')
     return null
   } catch (err) {
-    console.error('[generateTitle] error:', err)
+    logger.error('generateTitle', 'Failed to generate title', err)
     return null
   } finally {
     abort.abort()
@@ -78,7 +79,7 @@ async function generateTitle(conversationText: string): Promise<string | null> {
 
 async function generateCommitMessage(diff: string): Promise<string | null> {
   const abort = new AbortController()
-  console.log('[generateCommitMessage] request:', diff.length, 'chars')
+  logger.info('generateCommitMessage', `request: ${diff.length} chars`)
 
   try {
     const cliPath = getCliJsPath()
@@ -111,16 +112,16 @@ async function generateCommitMessage(diff: string): Promise<string | null> {
       }
     }
 
-    console.log('[generateCommitMessage] response:', JSON.stringify(result))
+    logger.info('generateCommitMessage', `response: ${JSON.stringify(result)}`)
 
     const cleaned = result.trim()
     if (cleaned.length >= 3) {
       return cleaned
     }
-    console.log('[generateCommitMessage] no usable message extracted')
+    logger.info('generateCommitMessage', 'no usable message extracted')
     return null
   } catch (err) {
-    console.error('[generateCommitMessage] error:', err)
+    logger.error('generateCommitMessage', 'Failed to generate commit message', err)
     return null
   } finally {
     abort.abort()
@@ -303,7 +304,7 @@ export function registerSessionIpc(win: BrowserWindow): void {
       try {
         const raw = await fs.promises.readFile(inboxPath, 'utf-8')
         items = JSON.parse(raw)
-      } catch { /* empty or missing */ }
+      } catch (err) { logger.warn('IPC', `Failed to read teammate inbox: ${inboxPath}`, err) }
       items.push({ from: 'user', text: message, timestamp: new Date().toISOString(), read: false })
       await fs.promises.writeFile(inboxPath, JSON.stringify(items, null, 2), { mode: 0o600 })
     }
@@ -321,7 +322,7 @@ export function registerSessionIpc(win: BrowserWindow): void {
         try {
           const raw = await fs.promises.readFile(inboxPath, 'utf-8')
           items = JSON.parse(raw)
-        } catch { /* empty or missing */ }
+        } catch (err) { logger.warn('IPC', `Failed to read teammate inbox: ${inboxPath}`, err) }
         items.push(entry)
         await fs.promises.writeFile(inboxPath, JSON.stringify(items, null, 2), { mode: 0o600 })
       }
@@ -540,7 +541,7 @@ export function registerSessionIpc(win: BrowserWindow): void {
 
   // Block usage analytics
   blockUsageService.setWindow(win)
-  blockUsageService.recalculate().catch(() => {})
+  blockUsageService.recalculate().catch((err) => { logger.error('BlockUsage', 'Initial recalculation failed', err) })
 
   ipcMain.handle('usage:fetch-block', async () => {
     return blockUsageService.getData() ?? (await blockUsageService.recalculate())
@@ -570,7 +571,7 @@ function startProjectsWatcher(win: BrowserWindow): void {
         notify()
       }
     })
-  } catch {
-    // Fallback: silently ignore if watching fails
+  } catch (err) {
+    logger.warn('ProjectsWatcher', 'Failed to watch projects directory', err)
   }
 }

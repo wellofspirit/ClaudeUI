@@ -22,6 +22,7 @@ import type {
   BlockUsageData
 } from '../../shared/types'
 import { usageFetcher } from './usage-fetcher'
+import { logger } from './logger'
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -318,6 +319,23 @@ export class BlockUsageService {
         currentBlock.projectedUsage = this.updateProjection(currentBlock, now)
       }
 
+      // Carry the last known projection to newly completed blocks.
+      // When a block was active, its projection was stored in the last snapshot
+      // via the projection sample buffer. Now that it's completed, transfer it.
+      if (newlyCompleted.length > 0) {
+        // The last projection from the regression buffer belongs to the block
+        // that just completed (projectionBlockId still matches).
+        for (const b of newlyCompleted) {
+          if (b.id === this.projectionBlockId && this.projectionSamples.length > 0) {
+            b.projectedUsage = this.computeProjectionWLS(b)
+          }
+        }
+        // Also backfill recent blocks from previously persisted daily data
+        this.backfillProjections(recentBlocks)
+      } else {
+        this.backfillProjections(recentBlocks)
+      }
+
       // Persist snapshot + completed blocks
       const snapshot = this.buildSnapshot(currentBlock)
       const todaySnapshots = await this.persistSnapshot(snapshot, newlyCompleted)
@@ -336,7 +354,7 @@ export class BlockUsageService {
       this.pushToRenderer(data)
       return data
     } catch (err) {
-      console.error('[BlockUsage] recalculation failed:', err)
+      logger.error('BlockUsage', 'Recalculation failed', err)
       return this.lastData ?? this.emptyData()
     } finally {
       this.recalculating = false
@@ -449,6 +467,155 @@ export class BlockUsageService {
     return {
       tokens: Math.round(maxTokens),
       costUsd: Math.round(maxTokens * costPerToken * 100) / 100
+    }
+  }
+
+  /**
+   * Backfill projectedUsage on recent (completed) blocks from persisted daily
+   * data. Three strategies, in priority order:
+   *
+   * 1. Stored projection on completedBlocks in the daily file (best — exact WLS
+   *    result captured when the block was active).
+   * 2. Stored projection on snapshots (same as above, per-poll granularity).
+   * 3. Retroactive WLS computation from historical snapshot (apiPercent,
+   *    blockTokens) pairs. This works even for old daily files that predate
+   *    the projectedUsage field.
+   *
+   * Note: matching uses time-range overlap rather than exact block ID, because
+   * the ID can differ between when the block was active (API-aligned start)
+   * and when it's reconstructed now (floorToHour for past windows).
+   */
+  private backfillProjections(recentBlocks: UsageBlock[]): void {
+    const needsFill = recentBlocks.filter((b) => !b.projectedUsage)
+    if (needsFill.length === 0) return
+
+    /**
+     * Find the block that a snapshot or completed block belongs to, matching
+     * by time overlap rather than exact ID (IDs can shift between API-aligned
+     * and floorToHour across restarts).
+     */
+    const findBlockForTimestamp = (ts: number): UsageBlock | undefined => {
+      return needsFill.find(
+        (b) => ts >= b.startTime && ts <= b.endTime
+      )
+    }
+
+    const findBlockById = (id: string): UsageBlock | undefined => {
+      return needsFill.find((b) => b.id === id)
+    }
+
+    // Collect snapshot pairs per block for retroactive computation (strategy 3)
+    const blockSnapPairs = new Map<
+      string,
+      Array<{ tokens: number; apiPercent: number; timestamp: number }>
+    >()
+
+    // Scan the last 3 days of daily files
+    const now = Date.now()
+    for (let i = 0; i < 3; i++) {
+      const date = dateStrFromTimestamp(now - i * 24 * MS_PER_HOUR)
+      const filePath = path.join(USAGE_DIR, `${date}.json`)
+      try {
+        if (!fs.existsSync(filePath)) continue
+        const daily = JSON.parse(
+          fs.readFileSync(filePath, 'utf-8')
+        ) as DailyUsageFile
+
+        // Strategy 1: stored projection on completedBlocks
+        for (const cb of daily.completedBlocks) {
+          if (!cb.projectedUsage) continue
+          // Try exact ID first, then time-range overlap
+          const block = findBlockById(cb.id) ?? findBlockForTimestamp(cb.startTime)
+          if (block && !block.projectedUsage) {
+            block.projectedUsage = cb.projectedUsage
+          }
+        }
+
+        // Scan snapshots for strategies 2 and 3
+        for (const snap of daily.snapshots) {
+          if (!snap.activeBlockId) continue
+
+          // Resolve snapshot to a block: try exact ID, then use snapshot
+          // timestamp to find which block's time range it falls in.
+          const block =
+            findBlockById(snap.activeBlockId) ??
+            findBlockForTimestamp(snap.timestamp)
+          if (!block) continue
+
+          // Strategy 2: stored projection on snapshot
+          if (!block.projectedUsage && snap.projectedUsage) {
+            block.projectedUsage = snap.projectedUsage
+          }
+
+          // Strategy 3: collect (apiPercent, blockTokens) pairs for later WLS
+          if (snap.blockTokens && snap.apiUsagePercent >= MIN_API_PERCENT_FOR_SAMPLE) {
+            const tok = totalTokens(snap.blockTokens)
+            if (tok > 0) {
+              let pairs = blockSnapPairs.get(block.id)
+              if (!pairs) {
+                pairs = []
+                blockSnapPairs.set(block.id, pairs)
+              }
+              pairs.push({
+                tokens: tok,
+                apiPercent: snap.apiUsagePercent,
+                timestamp: snap.timestamp
+              })
+            }
+          }
+        }
+      } catch {
+        // Skip corrupt files
+      }
+    }
+
+    // Strategy 3: retroactive WLS for blocks still without a projection
+    for (const [blockId, pairs] of blockSnapPairs) {
+      const block = needsFill.find((b) => b.id === blockId)
+      if (!block || block.projectedUsage) continue // already filled
+      if (pairs.length === 0) continue
+
+      const blockTok = totalTokens(block.tokens)
+      if (blockTok <= 0) continue
+      const costPerToken = block.costUsd / blockTok
+
+      if (pairs.length < MIN_REGRESSION_SAMPLES) {
+        // Single-point fallback using the last pair
+        const last = pairs[pairs.length - 1]
+        if (last.apiPercent > 0) {
+          const maxTokens = last.tokens / (last.apiPercent / 100)
+          if (maxTokens >= blockTok) {
+            block.projectedUsage = {
+              tokens: Math.round(maxTokens),
+              costUsd: Math.round(maxTokens * costPerToken * 100) / 100
+            }
+          }
+        }
+        continue
+      }
+
+      // WLS: tokens = k × percent, weighted by recency within the block
+      const lastTs = pairs[pairs.length - 1].timestamp
+      let sumWTP = 0
+      let sumWPP = 0
+      for (const s of pairs) {
+        if (s.apiPercent <= 0) continue
+        const age = lastTs - s.timestamp
+        const w = Math.exp((-age * Math.LN2) / PROJECTION_HALF_LIFE_MS)
+        sumWTP += w * s.tokens * s.apiPercent
+        sumWPP += w * s.apiPercent * s.apiPercent
+      }
+
+      if (sumWPP === 0) continue
+      const k = sumWTP / sumWPP
+      const maxTokens = k * 100
+
+      if (maxTokens >= blockTok) {
+        block.projectedUsage = {
+          tokens: Math.round(maxTokens),
+          costUsd: Math.round(maxTokens * costPerToken * 100) / 100
+        }
+      }
     }
   }
 
@@ -662,6 +829,18 @@ export class BlockUsageService {
       blocks.push(this.buildBlock(blockEntries, blockStart))
     }
 
+    // Clamp isActive = false for blocks that precede the current API window.
+    // When the API rolls to a new 5hr window, old blocks may still have
+    // endTime > now (due to floorToHour misalignment), but the API boundary
+    // is authoritative — those blocks are no longer active.
+    if (apiWindowStart !== null) {
+      for (const block of blocks) {
+        if (block.isActive && block.startTime < apiWindowStart) {
+          block.isActive = false
+        }
+      }
+    }
+
     return blocks
   }
 
@@ -769,7 +948,8 @@ export class BlockUsageService {
       blockCostUsd: currentBlock?.costUsd ?? 0,
       blockRequestCount: currentBlock?.requestCount ?? 0,
       blockModels: currentBlock?.models ?? [],
-      burnRate: currentBlock?.burnRate ?? null
+      burnRate: currentBlock?.burnRate ?? null,
+      projectedUsage: currentBlock?.projectedUsage ?? null
     }
   }
 
@@ -810,7 +990,7 @@ export class BlockUsageService {
       }
       fs.writeFileSync(filePath, JSON.stringify(daily), { mode: 0o600 })
     } catch (err) {
-      console.error('[BlockUsage] failed to persist daily file:', err)
+      logger.error('BlockUsage', 'Failed to persist daily file', err)
     }
 
     return daily.snapshots
