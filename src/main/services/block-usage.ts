@@ -246,12 +246,37 @@ function floorToHour(ts: number): number {
 // BlockUsageService
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Projection types & constants
+// ---------------------------------------------------------------------------
+
+/** A single (tokens, apiPercent) observation for projection regression. */
+interface ProjectionSample {
+  timestamp: number
+  tokens: number     // total local tokens at this snapshot
+  apiPercent: number  // API 5hr usage % at this snapshot
+}
+
+/** Exponential decay half-life for weighting projection samples. */
+const PROJECTION_HALF_LIFE_MS = 5 * MS_PER_MINUTE
+/** Max samples to keep in the ring buffer (~1hr at 2-min polling). */
+const MAX_PROJECTION_SAMPLES = 30
+/** Minimum samples before using regression (below this, use single-point). */
+const MIN_REGRESSION_SAMPLES = 3
+/** Don't include samples with apiPercent below this threshold (too noisy). */
+const MIN_API_PERCENT_FOR_SAMPLE = 0.5
+
 export class BlockUsageService {
   private window: BrowserWindow | null = null
   private fileCache: Map<string, FileCache> = new Map()
   private lastData: BlockUsageData | null = null
   private previousBlockIds: Set<string> = new Set()
   private recalculating = false
+
+  /** Ring buffer of (tokens, apiPercent) samples for the current active block. */
+  private projectionSamples: ProjectionSample[] = []
+  /** Block ID the projection samples belong to. Cleared on block change. */
+  private projectionBlockId: string | null = null
 
   setWindow(win: BrowserWindow): void {
     this.window = win
@@ -288,6 +313,11 @@ export class BlockUsageService {
         (b) => !b.isActive && now - b.endTime < 48 * MS_PER_HOUR
       )
 
+      // Compute projection for the active block using regression
+      if (currentBlock) {
+        currentBlock.projectedUsage = this.updateProjection(currentBlock, now)
+      }
+
       // Persist snapshot + completed blocks
       const snapshot = this.buildSnapshot(currentBlock)
       const todaySnapshots = await this.persistSnapshot(snapshot, newlyCompleted)
@@ -310,6 +340,115 @@ export class BlockUsageService {
       return this.lastData ?? this.emptyData()
     } finally {
       this.recalculating = false
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Projection — Weighted Least Squares Regression
+  // -------------------------------------------------------------------------
+
+  /**
+   * Add a new sample to the projection buffer and compute the projected
+   * window capacity using weighted least squares regression.
+   *
+   * Model:   tokens = k × apiPercent   (proportional, through origin)
+   * Solve:   k = Σ(wᵢ·tᵢ·pᵢ) / Σ(wᵢ·pᵢ²)   (weighted least squares)
+   * Result:  projectedMax = k × 100
+   *
+   * Weights use exponential decay (half-life 5 min) so recent observations
+   * dominate while older ones still smooth out noise. When fewer than 3
+   * samples exist, falls back to the single most recent point.
+   */
+  private updateProjection(
+    block: UsageBlock,
+    now: number
+  ): UsageBlock['projectedUsage'] {
+    const apiUsage = usageFetcher.getLastUsage()
+    if (!apiUsage || apiUsage.error) return null
+
+    const apiPercent = apiUsage.fiveHour.usedPercent
+    const apiAge = now - apiUsage.fetchedAt
+    const currentTok = totalTokens(block.tokens)
+
+    // Don't add a sample if API data is stale or values are too small
+    if (apiAge > 5 * MS_PER_MINUTE) return this.computeProjectionWLS(block)
+    if (apiPercent < MIN_API_PERCENT_FOR_SAMPLE || currentTok <= 0) return null
+
+    // Reset buffer if the active block changed (new window)
+    if (block.id !== this.projectionBlockId) {
+      this.projectionSamples = []
+      this.projectionBlockId = block.id
+    }
+
+    // Deduplicate: skip if the latest sample has the same tokens AND percent
+    // (no new information since last poll)
+    const last = this.projectionSamples[this.projectionSamples.length - 1]
+    if (!last || last.tokens !== currentTok || last.apiPercent !== apiPercent) {
+      this.projectionSamples.push({
+        timestamp: now,
+        tokens: currentTok,
+        apiPercent
+      })
+    }
+
+    // Cap ring buffer
+    if (this.projectionSamples.length > MAX_PROJECTION_SAMPLES) {
+      this.projectionSamples = this.projectionSamples.slice(-MAX_PROJECTION_SAMPLES)
+    }
+
+    return this.computeProjectionWLS(block)
+  }
+
+  /**
+   * Compute the projection from the sample buffer using WLS regression.
+   * Falls back to single-point estimate when not enough samples exist.
+   */
+  private computeProjectionWLS(block: UsageBlock): UsageBlock['projectedUsage'] {
+    const samples = this.projectionSamples
+    if (samples.length === 0) return null
+
+    const now = Date.now()
+    const currentTok = totalTokens(block.tokens)
+    if (currentTok <= 0) return null
+
+    // Compute cost-per-token ratio from current block (always fresh)
+    const costPerToken = block.costUsd / currentTok
+
+    // ---- Single-point fallback ----
+    if (samples.length < MIN_REGRESSION_SAMPLES) {
+      const latest = samples[samples.length - 1]
+      if (latest.apiPercent <= 0) return null
+      const maxTokens = latest.tokens / (latest.apiPercent / 100)
+      return {
+        tokens: Math.round(maxTokens),
+        costUsd: Math.round(maxTokens * costPerToken * 100) / 100
+      }
+    }
+
+    // ---- Weighted Least Squares: tokens = k × percent ----
+    // k = Σ(wᵢ · tᵢ · pᵢ) / Σ(wᵢ · pᵢ²)
+    let sumWTP = 0 // weighted tokens × percent
+    let sumWPP = 0 // weighted percent²
+
+    for (const s of samples) {
+      if (s.apiPercent <= 0) continue
+      const age = now - s.timestamp
+      const w = Math.exp((-age * Math.LN2) / PROJECTION_HALF_LIFE_MS)
+      sumWTP += w * s.tokens * s.apiPercent
+      sumWPP += w * s.apiPercent * s.apiPercent
+    }
+
+    if (sumWPP === 0) return null
+
+    const k = sumWTP / sumWPP // tokens per percent-point
+    const maxTokens = k * 100
+
+    // Sanity check: projection should be >= current tokens
+    if (maxTokens < currentTok) return null
+
+    return {
+      tokens: Math.round(maxTokens),
+      costUsd: Math.round(maxTokens * costPerToken * 100) / 100
     }
   }
 
@@ -596,26 +735,9 @@ export class BlockUsageService {
       }
     }
 
-    // Max theoretical usage for the 5hr window based on API usage %
-    // If API says 62% and we have 145K tokens, then 100% ≈ 145K / 0.62 = 234K
-    // Skip projection if API data is stale (>5 min old) — the ratio would be
-    // wrong because currentTok has grown while apiPercent hasn't updated.
-    const MAX_API_STALENESS_MS = 5 * MS_PER_MINUTE
-    let projectedUsage: UsageBlock['projectedUsage'] = null
-    if (isActive) {
-      const apiUsage = usageFetcher.getLastUsage()
-      const apiPercent = apiUsage?.fiveHour.usedPercent ?? 0
-      const apiAge = apiUsage ? now - apiUsage.fetchedAt : Infinity
-      const currentTok = totalTokens(tokens)
-      if (apiPercent > 0 && currentTok > 0 && apiAge < MAX_API_STALENESS_MS) {
-        const maxTokens = currentTok / (apiPercent / 100)
-        const maxCost = costUsd / (apiPercent / 100)
-        projectedUsage = {
-          tokens: Math.round(maxTokens),
-          costUsd: Math.round(maxCost * 100) / 100
-        }
-      }
-    }
+    // Projection is computed in recalculate() using regression over multiple
+    // samples — not here in buildBlock() which only sees a single point.
+    const projectedUsage: UsageBlock['projectedUsage'] = null
 
     return {
       id: new Date(blockStart).toISOString(),
