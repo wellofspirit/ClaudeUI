@@ -12,6 +12,7 @@ import { join } from 'node:path'
 import { homedir } from 'node:os'
 import type { BrowserWindow } from 'electron'
 import type { AccountUsage, RateWindow } from '../../shared/types'
+import { blockUsageService } from './block-usage'
 
 // ---------------------------------------------------------------------------
 // Credential types
@@ -105,11 +106,9 @@ export class UsageFetcher {
     this.pushToRenderer(this.lastUsage)
 
     // Trigger block usage recalculation (fire-and-forget)
-    import('./block-usage').then(({ blockUsageService }) => {
-      blockUsageService.recalculate().catch((err) => {
-        console.error('[BlockUsage] recalculation failed:', err)
-      })
-    }).catch(() => {})
+    blockUsageService.recalculate().catch((err) => {
+      console.error('[BlockUsage] recalculation failed:', err)
+    })
 
     return this.lastUsage
   }
