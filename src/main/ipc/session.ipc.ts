@@ -10,6 +10,7 @@ import { watchSession, unwatchSession } from '../services/session-watcher'
 import { loadSettings, saveSettings, loadSessionConfig, saveSessionConfig, loadSlashCommands, saveSlashCommands, startConfigWatcher } from '../services/ui-config'
 import type { UISettings, UISessionConfig, SlashCommandCache } from '../services/ui-config'
 import { gitServiceManager } from '../services/git-service'
+import { usageFetcher } from '../services/usage-fetcher'
 import type { ApprovalDecision, ModelInfo } from '../../shared/types'
 
 let cachedModels: ModelInfo[] | null = null
@@ -278,7 +279,13 @@ export function registerSessionIpc(win: BrowserWindow): void {
 
   // UI config persistence (~/.claude/ui/)
   ipcMain.handle('config:load-settings', () => loadSettings())
-  ipcMain.handle('config:save-settings', (_e, settings: UISettings) => saveSettings(settings))
+  ipcMain.handle('config:save-settings', (_e, settings: UISettings) => {
+    saveSettings(settings)
+    // Propagate usage refresh interval change
+    if (typeof (settings as Record<string, unknown>).usageRefreshSecs === 'number') {
+      usageFetcher.setIntervalSecs((settings as Record<string, unknown>).usageRefreshSecs as number)
+    }
+  })
   ipcMain.handle('config:load-sessions', () => loadSessionConfig())
   ipcMain.handle('config:save-sessions', (_e, config: UISessionConfig) => saveSessionConfig(config))
   ipcMain.handle('config:load-slash-commands', () => loadSlashCommands())
@@ -516,6 +523,19 @@ export function registerSessionIpc(win: BrowserWindow): void {
 
   // Watch ~/.claude/ui/ config files for cross-instance sync
   startConfigWatcher(win)
+
+  // Account usage polling (5hr / 7-day rate limits)
+  usageFetcher.setWindow(win)
+  // Apply saved refresh interval before starting
+  const savedSettings = loadSettings() as Record<string, unknown>
+  if (typeof savedSettings.usageRefreshSecs === 'number') {
+    usageFetcher.setIntervalSecs(savedSettings.usageRefreshSecs)
+  }
+  usageFetcher.startPolling()
+
+  ipcMain.handle('usage:fetch', async () => {
+    return usageFetcher.fetch()
+  })
 }
 
 function startProjectsWatcher(win: BrowserWindow): void {

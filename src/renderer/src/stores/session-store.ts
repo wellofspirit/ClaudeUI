@@ -16,7 +16,8 @@ import type {
   TeammateInfo,
   GitStatusData,
   GitBranchData,
-  DiffComment
+  DiffComment,
+  AccountUsage
 } from '../../../shared/types'
 
 /**
@@ -151,6 +152,7 @@ export interface AppSettings {
   statusLineTemplate: string
   gitPanelLayout: 'single' | 'double'
   gitCommitMode: 'commit' | 'commit-push'
+  usageRefreshSecs: number
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -171,7 +173,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   statusLineAlign: 'center',
   statusLineTemplate: 'In: {in} / Out: {out} / Total: {total} · {used}% context used',
   gitPanelLayout: 'single',
-  gitCommitMode: 'commit' as const
+  gitCommitMode: 'commit' as const,
+  usageRefreshSecs: 120
 }
 
 export function applyTheme(theme: ThemeId): void {
@@ -433,6 +436,7 @@ interface SessionState {
   settings: AppSettings
   availableModels: ModelInfo[]
   slashCommands: SlashCommandInfo[]
+  accountUsage: AccountUsage | null
 
   // Multi-session actions
   showWelcome: () => void
@@ -514,6 +518,8 @@ interface SessionState {
   selectNextGitFile: (routingId: string) => void
   openGitPanel: (routingId: string) => void
   closeGitPanel: (routingId: string) => void
+  // Account usage
+  setAccountUsage: (data: AccountUsage) => void
   // Diff review comments
   addDiffComment: (routingId: string, comment: DiffComment) => void
   removeDiffComment: (routingId: string, commentId: string) => void
@@ -530,6 +536,7 @@ export const useSessionStore = create<SessionState>((set) => ({
   settings: DEFAULT_SETTINGS,
   availableModels: [],
   slashCommands: [],
+  accountUsage: null,
 
   showWelcome: () =>
     set((state) => {
@@ -1201,6 +1208,8 @@ export const useSessionStore = create<SessionState>((set) => ({
   setSlashCommands: (commands) => set({ slashCommands: commands }),
 
   setAvailableModels: (models) => set({ availableModels: models }),
+
+  setAccountUsage: (data) => set({ accountUsage: data }),
 
   rekeySession: (oldId, newId) => {
     // Record the mapping so events arriving with the old routingId can be resolved

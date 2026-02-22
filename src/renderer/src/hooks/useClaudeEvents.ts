@@ -212,8 +212,17 @@ export function useClaudeEvents(): void {
       }),
       window.api.onSessionConfigChanged((config) => {
         useSessionStore.getState().applyExternalSessionConfig(config)
+      }),
+      // Account usage (5hr / 7-day rate limits)
+      window.api.onAccountUsage((data) => {
+        useSessionStore.getState().setAccountUsage(data)
       })
     ]
+
+    // Trigger initial usage fetch
+    window.api.fetchAccountUsage().then((data) => {
+      useSessionStore.getState().setAccountUsage(data)
+    }).catch(() => {})
 
     return () => cleanups.forEach((fn) => fn())
   }, [addMessage, appendStreamingText, appendStreamingThinking, addPendingApproval, clearPendingApprovals, setStatus, addError, appendToolResult, updateTaskProgress, addTaskNotification, addSubagentMessage, appendSubagentMessageBatch, appendSubagentStreamingText, appendSubagentStreamingThinking, appendSubagentToolResult, setBackgroundOutput, setStatusLine, setPermissionMode, setSlashCommands])

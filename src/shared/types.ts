@@ -288,6 +288,29 @@ export interface ClaudeAPI {
   onStatusLine(cb: (data: RoutedData<StatusLineData>) => void): () => void
   onSettingsChanged(cb: (settings: Record<string, unknown>) => void): () => void
   onSessionConfigChanged(cb: (config: UISessionConfig) => void): () => void
+
+  // Account usage (5hr / 7-day rate limits)
+  fetchAccountUsage(): Promise<AccountUsage>
+  onAccountUsage(cb: (data: AccountUsage) => void): () => void
+}
+
+// ---------------------------------------------------------------------------
+// Account usage types (5hr / 7-day rate windows)
+// ---------------------------------------------------------------------------
+
+export interface RateWindow {
+  usedPercent: number // 0-100
+  resetsAt: string | null // ISO8601 timestamp
+}
+
+export interface AccountUsage {
+  fiveHour: RateWindow
+  sevenDay: RateWindow | null
+  sevenDaySonnet: RateWindow | null
+  sevenDayOpus: RateWindow | null
+  planName: string | null // e.g. "claude_max_5x"
+  fetchedAt: number // Date.now()
+  error: string | null
 }
 
 export interface StatusLineData {

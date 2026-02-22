@@ -219,6 +219,14 @@ const api: ClaudeAPI = {
     const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as never)
     ipcRenderer.on('config:sessions-changed', handler)
     return () => ipcRenderer.removeListener('config:sessions-changed', handler)
+  },
+
+  // Account usage (5hr / 7-day rate limits)
+  fetchAccountUsage: () => ipcRenderer.invoke('usage:fetch'),
+  onAccountUsage: (cb) => {
+    const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as never)
+    ipcRenderer.on('usage:data', handler)
+    return () => ipcRenderer.removeListener('usage:data', handler)
   }
 }
 

@@ -522,6 +522,42 @@ const SECTIONS: Section[] = [
         )
       }
     ]
+  },
+  {
+    id: 'usage',
+    label: 'Usage',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <path d="M22 12h-4l-3 9L9 3l-3 9H2" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'usageRefreshSecs',
+        label: 'Usage refresh interval',
+        keywords: 'polling rate limit 5hr refresh update frequency',
+        render: (s, u) => (
+          <SettingsSlider
+            label="Refresh interval"
+            value={s.usageRefreshSecs}
+            min={30}
+            max={600}
+            step={30}
+            onChange={(v) => u({ usageRefreshSecs: v })}
+            formatValue={(v) => v >= 60 ? `${Math.floor(v / 60)}m${v % 60 ? ` ${v % 60}s` : ''}` : `${v}s`}
+          />
+        )
+      }
+    ]
   }
 ]
 
