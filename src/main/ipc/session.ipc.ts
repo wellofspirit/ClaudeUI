@@ -11,6 +11,7 @@ import { loadSettings, saveSettings, loadSessionConfig, saveSessionConfig, loadS
 import type { UISettings, UISessionConfig, SlashCommandCache } from '../services/ui-config'
 import { gitServiceManager } from '../services/git-service'
 import { usageFetcher } from '../services/usage-fetcher'
+import { blockUsageService } from '../services/block-usage'
 import type { ApprovalDecision, ModelInfo } from '../../shared/types'
 
 let cachedModels: ModelInfo[] | null = null
@@ -535,6 +536,14 @@ export function registerSessionIpc(win: BrowserWindow): void {
 
   ipcMain.handle('usage:fetch', async () => {
     return usageFetcher.fetch()
+  })
+
+  // Block usage analytics
+  blockUsageService.setWindow(win)
+  blockUsageService.recalculate().catch(() => {})
+
+  ipcMain.handle('usage:fetch-block', async () => {
+    return blockUsageService.getData() ?? (await blockUsageService.recalculate())
   })
 }
 

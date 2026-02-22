@@ -17,7 +17,8 @@ import type {
   GitStatusData,
   GitBranchData,
   DiffComment,
-  AccountUsage
+  AccountUsage,
+  BlockUsageData
 } from '../../../shared/types'
 
 /**
@@ -437,6 +438,8 @@ interface SessionState {
   availableModels: ModelInfo[]
   slashCommands: SlashCommandInfo[]
   accountUsage: AccountUsage | null
+  blockUsage: BlockUsageData | null
+  showUsageView: boolean
 
   // Multi-session actions
   showWelcome: () => void
@@ -520,6 +523,9 @@ interface SessionState {
   closeGitPanel: (routingId: string) => void
   // Account usage
   setAccountUsage: (data: AccountUsage) => void
+  // Block usage analytics
+  setBlockUsage: (data: BlockUsageData) => void
+  setShowUsageView: (show: boolean) => void
   // Diff review comments
   addDiffComment: (routingId: string, comment: DiffComment) => void
   removeDiffComment: (routingId: string, commentId: string) => void
@@ -537,6 +543,8 @@ export const useSessionStore = create<SessionState>((set) => ({
   availableModels: [],
   slashCommands: [],
   accountUsage: null,
+  blockUsage: null,
+  showUsageView: false,
 
   showWelcome: () =>
     set((state) => {
@@ -1210,6 +1218,8 @@ export const useSessionStore = create<SessionState>((set) => ({
   setAvailableModels: (models) => set({ availableModels: models }),
 
   setAccountUsage: (data) => set({ accountUsage: data }),
+  setBlockUsage: (data) => set({ blockUsage: data }),
+  setShowUsageView: (show) => set({ showUsageView: show }),
 
   rekeySession: (oldId, newId) => {
     // Record the mapping so events arriving with the old routingId can be resolved

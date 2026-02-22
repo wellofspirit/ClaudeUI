@@ -216,12 +216,21 @@ export function useClaudeEvents(): void {
       // Account usage (5hr / 7-day rate limits)
       window.api.onAccountUsage((data) => {
         useSessionStore.getState().setAccountUsage(data)
+      }),
+      // Block usage analytics
+      window.api.onBlockUsage((data) => {
+        useSessionStore.getState().setBlockUsage(data)
       })
     ]
 
     // Trigger initial usage fetch
     window.api.fetchAccountUsage().then((data) => {
       useSessionStore.getState().setAccountUsage(data)
+    }).catch(() => {})
+
+    // Trigger initial block usage fetch
+    window.api.fetchBlockUsage().then((data) => {
+      useSessionStore.getState().setBlockUsage(data)
     }).catch(() => {})
 
     return () => cleanups.forEach((fn) => fn())

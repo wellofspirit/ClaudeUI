@@ -1110,9 +1110,24 @@ function UsagePanel({ usage, onRefresh }: { usage: AccountUsage; onRefresh: () =
   const plan = formatPlanName(usage.planName)
   const ago = Math.round((Date.now() - usage.fetchedAt) / 1000)
   const agoStr = ago < 60 ? `${ago}s ago` : `${Math.floor(ago / 60)}m ago`
+  const blockUsage = useSessionStore((s) => s.blockUsage)
+  const setShowUsageView = useSessionStore((s) => s.setShowUsageView)
+
+  const currentBlock = blockUsage?.currentBlock
+
+  // Format block summary
+  let blockSummary: string | null = null
+  if (currentBlock) {
+    const total = currentBlock.tokens.inputTokens + currentBlock.tokens.outputTokens +
+      currentBlock.tokens.cacheCreationTokens + currentBlock.tokens.cacheReadTokens
+    const tokStr = total >= 1_000_000 ? `${(total / 1_000_000).toFixed(1)}M` : total >= 1_000 ? `${(total / 1_000).toFixed(1)}K` : String(total)
+    const costStr = currentBlock.costUsd >= 0.01 ? `$${currentBlock.costUsd.toFixed(2)}` : '$0.00'
+    const burnStr = currentBlock.burnRate ? `${currentBlock.burnRate.tokensPerMin} tok/min` : ''
+    blockSummary = `${tokStr} tok · ${costStr}${burnStr ? ` · ${burnStr}` : ''}`
+  }
 
   return (
-    <div className="absolute bottom-full left-0 mb-1 w-[200px] bg-bg-secondary border border-border rounded-lg shadow-lg p-3 z-50">
+    <div className="absolute bottom-full left-0 mb-1 w-[220px] bg-bg-secondary border border-border rounded-lg shadow-lg p-3 z-50">
       {usage.error ? (
         <div className="text-[10px] text-red-400">{usage.error}</div>
       ) : (
@@ -1123,6 +1138,13 @@ function UsagePanel({ usage, onRefresh }: { usage: AccountUsage; onRefresh: () =
           {usage.sevenDaySonnet && <UsageProgressBar label="7-Day Sonnet" window={usage.sevenDaySonnet} />}
         </>
       )}
+      {/* Block usage summary */}
+      {blockSummary && (
+        <div className="mt-2 pt-1.5 border-t border-border/30">
+          <div className="text-[9px] text-text-muted mb-0.5">Current block</div>
+          <div className="text-[10px] text-text-secondary font-mono">{blockSummary}</div>
+        </div>
+      )}
       <div className="flex items-center justify-between mt-2 pt-1.5 border-t border-border/30">
         <div className="flex items-center gap-1.5">
           {plan && (
@@ -1130,18 +1152,27 @@ function UsagePanel({ usage, onRefresh }: { usage: AccountUsage; onRefresh: () =
           )}
           <span className="text-[9px] text-text-muted">{agoStr}</span>
         </div>
-        <button
-          onClick={(e) => { e.stopPropagation(); onRefresh() }}
-          className="flex items-center justify-center w-5 h-5 rounded hover:bg-bg-hover transition-colors cursor-default"
-          title="Refresh usage"
-        >
-          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-text-muted">
-            <path d="M23 4v6h-6" />
-            <path d="M1 20v-6h6" />
-            <path d="M3.51 9a9 9 0 0114.85-3.36L23 10" />
-            <path d="M20.49 15a9 9 0 01-14.85 3.36L1 14" />
-          </svg>
-        </button>
+        <div className="flex items-center gap-1">
+          <button
+            onClick={(e) => { e.stopPropagation(); setShowUsageView(true) }}
+            className="text-[9px] text-accent hover:text-accent/80 cursor-default"
+            title="View usage analytics"
+          >
+            Details →
+          </button>
+          <button
+            onClick={(e) => { e.stopPropagation(); onRefresh() }}
+            className="flex items-center justify-center w-5 h-5 rounded hover:bg-bg-hover transition-colors cursor-default"
+            title="Refresh usage"
+          >
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-text-muted">
+              <path d="M23 4v6h-6" />
+              <path d="M1 20v-6h6" />
+              <path d="M3.51 9a9 9 0 0114.85-3.36L23 10" />
+              <path d="M20.49 15a9 9 0 01-14.85 3.36L1 14" />
+            </svg>
+          </button>
+        </div>
       </div>
     </div>
   )

@@ -39,6 +39,7 @@ const USAGE_API_URL = 'https://api.anthropic.com/api/oauth/usage'
 const TOKEN_REFRESH_URL = 'https://console.anthropic.com/v1/oauth/token'
 const DEFAULT_POLL_INTERVAL_MS = 2 * 60 * 1000 // 2 minutes
 const FETCH_TIMEOUT_MS = 15_000
+const MAX_RETRIES = 5
 
 // ---------------------------------------------------------------------------
 // UsageFetcher class
@@ -88,9 +89,29 @@ export class UsageFetcher {
   /** Fetch usage from the API and push to the renderer. Returns the result. */
   async fetch(): Promise<AccountUsage> {
     const usage = await this.fetchUsage()
-    this.lastUsage = usage
-    this.pushToRenderer(usage)
-    return usage
+
+    // Only overwrite lastUsage with successful results — don't let transient
+    // errors (timeout, network blip) replace good cached data with zeros.
+    if (!usage.error) {
+      this.lastUsage = usage
+    } else if (this.lastUsage) {
+      // Keep the last good data values and their original fetchedAt timestamp
+      // so consumers can detect staleness. Only propagate the error message.
+      this.lastUsage = { ...this.lastUsage, error: usage.error }
+    } else {
+      this.lastUsage = usage
+    }
+
+    this.pushToRenderer(this.lastUsage)
+
+    // Trigger block usage recalculation (fire-and-forget)
+    import('./block-usage').then(({ blockUsageService }) => {
+      blockUsageService.recalculate().catch((err) => {
+        console.error('[BlockUsage] recalculation failed:', err)
+      })
+    }).catch(() => {})
+
+    return this.lastUsage
   }
 
   /** Get the last cached result (may be null). */
@@ -113,23 +134,29 @@ export class UsageFetcher {
   }
 
   private async fetchUsage(): Promise<AccountUsage> {
-    try {
-      const creds = await this.readCredentials()
-      if (!creds) {
-        return this.errorResult('No OAuth credentials found. Run "claude login" first.')
+    const creds = await this.readCredentials()
+    if (!creds) {
+      return this.errorResult('No OAuth credentials found. Run "claude login" first.')
+    }
+
+    // Refresh token if expired (with 60s buffer)
+    let token = creds.accessToken
+    if (creds.expiresAt < Date.now() + 60_000) {
+      try {
+        token = await this.refreshToken(creds)
+      } catch (err) {
+        return this.errorResult(`Token refresh failed: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    }
+
+    let lastError = ''
+    let retriedAuth = false
+
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      if (attempt > 0) {
+        await new Promise((r) => setTimeout(r, attempt * 1000))
       }
 
-      // Refresh token if expired (with 60s buffer)
-      let token = creds.accessToken
-      if (creds.expiresAt < Date.now() + 60_000) {
-        try {
-          token = await this.refreshToken(creds)
-        } catch (err) {
-          return this.errorResult(`Token refresh failed: ${err instanceof Error ? err.message : String(err)}`)
-        }
-      }
-
-      // Fetch usage from API
       const controller = new AbortController()
       const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
 
@@ -146,27 +173,51 @@ export class UsageFetcher {
           signal: controller.signal
         })
 
+        if (resp.status === 401 && !retriedAuth) {
+          // Token may have expired despite expiresAt — force a refresh and retry
+          retriedAuth = true
+          try {
+            token = await this.refreshToken(creds)
+          } catch {
+            return this.errorResult('Unauthorized — token refresh failed. Try "claude login" again.')
+          }
+          lastError = 'Unauthorized (retrying with refreshed token)'
+          continue
+        }
+
         if (resp.status === 401) {
           return this.errorResult('Unauthorized — token may be invalid. Try "claude login" again.')
         }
         if (resp.status === 403) {
           return this.errorResult('Forbidden — token missing user:profile scope.')
         }
+
+        // Retry on server errors (5xx)
+        if (resp.status >= 500) {
+          lastError = `API error: ${resp.status} ${resp.statusText}`
+          continue
+        }
+
         if (!resp.ok) {
           return this.errorResult(`API error: ${resp.status} ${resp.statusText}`)
         }
 
         const data = (await resp.json()) as Record<string, unknown>
         return this.parseResponse(data, creds.rateLimitTier ?? null)
+      } catch (err) {
+        if (err instanceof DOMException && err.name === 'AbortError') {
+          lastError = 'Request timed out'
+        } else {
+          lastError = `Fetch failed: ${err instanceof Error ? err.message : String(err)}`
+        }
+        // Retry on network errors and timeouts
+        continue
       } finally {
         clearTimeout(timeout)
       }
-    } catch (err) {
-      if (err instanceof DOMException && err.name === 'AbortError') {
-        return this.errorResult('Request timed out')
-      }
-      return this.errorResult(`Fetch failed: ${err instanceof Error ? err.message : String(err)}`)
     }
+
+    return this.errorResult(`${lastError} (after ${MAX_RETRIES + 1} attempts)`)
   }
 
   private async readCredentials(): Promise<OAuthCredentials | null> {

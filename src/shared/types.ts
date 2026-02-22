@@ -292,6 +292,10 @@ export interface ClaudeAPI {
   // Account usage (5hr / 7-day rate limits)
   fetchAccountUsage(): Promise<AccountUsage>
   onAccountUsage(cb: (data: AccountUsage) => void): () => void
+
+  // Block usage analytics
+  fetchBlockUsage(): Promise<BlockUsageData>
+  onBlockUsage(cb: (data: BlockUsageData) => void): () => void
 }
 
 // ---------------------------------------------------------------------------
@@ -325,6 +329,82 @@ export interface StatusLineData {
   usedPercentage: number | null
   remainingPercentage: number | null
 }
+
+// ---------------------------------------------------------------------------
+// Block usage types (ccusage-inspired token tracking per 5hr window)
+// ---------------------------------------------------------------------------
+
+export interface TokenCounts {
+  inputTokens: number
+  outputTokens: number
+  cacheCreationTokens: number
+  cacheReadTokens: number
+}
+
+export interface ModelTokenBreakdown {
+  model: string
+  tokens: TokenCounts
+  costUsd: number
+  requestCount: number
+}
+
+export interface UsageBlock {
+  id: string // ISO string of floored start time
+  startTime: number // epoch ms, floored to hour
+  endTime: number // startTime + 5hrs
+  actualEndTime: number // timestamp of last entry
+  isActive: boolean
+  tokens: TokenCounts
+  costUsd: number
+  requestCount: number
+  models: ModelTokenBreakdown[]
+  burnRate: { tokensPerMin: number; costPerHour: number } | null
+  projectedUsage: { tokens: number; costUsd: number } | null
+}
+
+/** A single point-in-time snapshot, stored every poll cycle */
+export interface UsageSnapshot {
+  timestamp: number // when this snapshot was taken
+  apiUsagePercent: number // 5hr API usage % at this moment
+  apiResetAt: string | null // when the 5hr window resets
+  activeBlockId: string | null // which block is active
+  /** Cumulative totals for the active block at this point in time */
+  blockTokens: TokenCounts | null
+  blockCostUsd: number
+  blockRequestCount: number
+  /** Per-model cumulative totals for the active block */
+  blockModels: ModelTokenBreakdown[]
+  burnRate: { tokensPerMin: number; costPerHour: number } | null
+}
+
+/** Daily file format: ~/.claude/ui/usage/YYYY-MM-DD.json */
+export interface DailyUsageFile {
+  date: string // YYYY-MM-DD
+  snapshots: UsageSnapshot[] // time-series, one per poll cycle
+  /** Completed blocks that overlapped with this day */
+  completedBlocks: UsageBlock[]
+}
+
+/** Data pushed to renderer for display */
+export interface BlockUsageData {
+  currentBlock: UsageBlock | null
+  recentBlocks: UsageBlock[] // last 48hrs of completed blocks
+  /** Today's time-series snapshots for intra-block analysis */
+  todaySnapshots: UsageSnapshot[]
+  /** Daily aggregates for 30-day chart */
+  dailyHistory: Array<{
+    date: string
+    totalTokens: number // sum of all 4 token types
+    costUsd: number
+    models: Record<string, number> // model → totalTokens
+    peakApiPercent: number // highest API % seen that day
+    blockCount: number // number of blocks that day
+  }>
+}
+
+// ---------------------------------------------------------------------------
+// UI session config
+// ---------------------------------------------------------------------------
 
 export interface UISessionConfig {
   recentSessions?: string[]

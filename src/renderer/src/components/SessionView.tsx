@@ -3,6 +3,7 @@ import { Sidebar } from './Sidebar'
 import { ChatPanel } from './chat/ChatPanel'
 import { TaskDetailPanel } from './TaskDetailPanel'
 import { GitPanel } from './git/GitPanel'
+import { UsageView } from './usage/UsageView'
 import { useActiveSession, useSessionStore, applyTheme } from '../stores/session-store'
 import { useGitWatcher } from '../hooks/useGitWatcher'
 
@@ -61,6 +62,8 @@ function ResizeHandle({ onMouseDown }: { onMouseDown: (e: React.MouseEvent) => v
 
 export function SessionView(): React.JSX.Element {
   const uiFontScale = useSessionStore((s) => s.settings.uiFontScale)
+  const showUsageView = useSessionStore((s) => s.showUsageView)
+  const setShowUsageView = useSessionStore((s) => s.setShowUsageView)
   const rightPanel = useActiveSession((s) => s.rightPanel)
   const sidebar = useResizablePanel('sidebarWidth', 240, 180, 480)
   const taskPanel = useResizablePanel('taskPanelWidth', 400, 280, 700)
@@ -132,7 +135,11 @@ export function SessionView(): React.JSX.Element {
         )}
         <div className={`flex-1 min-w-0 flex ${window.api.platform === 'darwin' ? 'bg-bg-secondary/60' : 'bg-bg-secondary/80'}`}>
           <div className={`flex-1 min-w-0 h-full flex flex-col bg-bg-primary overflow-hidden ${sidebarCollapsed ? '' : 'rounded-l-2xl shadow-[-1px_0_4px_rgba(0,0,0,0.15),-3px_0_12px_rgba(0,0,0,0.1)]'}`}>
-            <ChatPanel />
+            {showUsageView ? (
+              <UsageView onClose={() => setShowUsageView(false)} />
+            ) : (
+              <ChatPanel />
+            )}
           </div>
           {rightPanel === 'task' && (
             <>

@@ -227,6 +227,14 @@ const api: ClaudeAPI = {
     const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as never)
     ipcRenderer.on('usage:data', handler)
     return () => ipcRenderer.removeListener('usage:data', handler)
+  },
+
+  // Block usage analytics
+  fetchBlockUsage: () => ipcRenderer.invoke('usage:fetch-block'),
+  onBlockUsage: (cb) => {
+    const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as never)
+    ipcRenderer.on('usage:block-data', handler)
+    return () => ipcRenderer.removeListener('usage:block-data', handler)
   }
 }
 
