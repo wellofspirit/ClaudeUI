@@ -151,15 +151,20 @@ export function ChatPanel(): React.JSX.Element {
   // Defaults to smooth. The guard stays up until the scroll animation settles (or a new
   // scroll call replaces it), so rapid smooth calls don't accidentally trip "user scrolled up".
   const smoothGuardRaf = useRef(0)
+  const smoothGuardTimeout = useRef<ReturnType<typeof setTimeout>>(null)
   const doAutoScroll = useCallback((el: HTMLDivElement, smooth = true) => {
     isAutoScrolling.current = true
     cancelAnimationFrame(smoothGuardRaf.current)
+    if (smoothGuardTimeout.current) clearTimeout(smoothGuardTimeout.current)
     if (smooth) {
       el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
-      // Keep the guard up until the scroll settles near the bottom
+      // Keep the guard up until the scroll settles near the bottom.
+      // Threshold of 10px tolerates subpixel rounding from CSS zoom.
+      // A 500ms timeout guarantees the guard clears even if the smooth
+      // scroll never converges (e.g. content-visibility layout shifts).
       const clearGuard = (): void => {
         const dist = el.scrollHeight - el.scrollTop - el.clientHeight
-        if (dist < 2) {
+        if (dist < 10) {
           isAutoScrolling.current = false
           lastScrollTop.current = el.scrollTop
         } else {
@@ -167,6 +172,11 @@ export function ChatPanel(): React.JSX.Element {
         }
       }
       smoothGuardRaf.current = requestAnimationFrame(clearGuard)
+      smoothGuardTimeout.current = setTimeout(() => {
+        cancelAnimationFrame(smoothGuardRaf.current)
+        isAutoScrolling.current = false
+        lastScrollTop.current = el.scrollTop
+      }, 500)
     } else {
       el.scrollTop = el.scrollHeight
       lastScrollTop.current = el.scrollTop
@@ -183,10 +193,25 @@ export function ChatPanel(): React.JSX.Element {
     if (!el) return
 
     const scheduleScroll = (): void => {
-      if (!shouldAutoScroll.current) return
       cancelAnimationFrame(scrollRafRef.current)
       scrollRafRef.current = requestAnimationFrame(() => {
-        if (shouldAutoScroll.current && el) doAutoScroll(el, true)
+        if (!el) return
+        const dist = el.scrollHeight - el.scrollTop - el.clientHeight
+
+        // Always keep isAtBottom fresh so the "scroll to bottom" button
+        // appears even when auto-scroll is disabled (fixes stale state
+        // when content grows without any user scroll events).
+        setIsAtBottom(dist < 100)
+
+        // Re-engage auto-scroll: if content just grew while we were
+        // near the bottom (< 100px away), resume following. This catches
+        // the case where shouldAutoScroll was false but the user had
+        // already scrolled back to the bottom.
+        if (!shouldAutoScroll.current && dist > 0 && dist < 100) {
+          shouldAutoScroll.current = true
+        }
+
+        if (shouldAutoScroll.current) doAutoScroll(el, true)
       })
     }
 
