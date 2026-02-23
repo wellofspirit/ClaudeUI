@@ -23,19 +23,19 @@ async function main() {
   console.log('  Starting SDK query (timeout: 90s)...')
   const { q, cleanup, ac } = createQuery(PROMPT, {}, TIMEOUT)
 
-  const timedOut = { value: false }
-  const onAbort = () => { timedOut.value = true }
-  ac.signal.addEventListener('abort', onAbort)
+  let timedOut = false
+  const timeoutTimer = setTimeout(() => { timedOut = true }, TIMEOUT - 1000)
 
   const messages = await collectMessages(q, { cleanup })
+  clearTimeout(timeoutTimer)
 
   dumpMessages(messages)
 
   // 1. Session completed (result message exists)
   t.assertSome('Session completed (result message)', messages, (m) => m.type === 'result')
 
-  // 2. Did not time out
-  t.assert('Did not time out (no deadlock)', !timedOut.value)
+  // 2. Did not time out (cleanup's abort doesn't count — only the timer firing does)
+  t.assert('Did not time out (no deadlock)', !timedOut)
 
   const ok = t.summarize()
   process.exit(ok ? 0 : 1)

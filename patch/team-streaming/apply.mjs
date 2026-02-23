@@ -264,11 +264,20 @@ if (src.includes(patchCMarker)) {
     `})+"\\n")`
 
   // --- C1: Success path ---
-  // Find: status:"completed",endTime:Date.now(),...}),<setAppState>),{success:!0,messages:<var>}
-  // The success path returns a comma expression ending with {success:!0,...}
-  // We need an anchor that includes the ),M) and the {success: part.
+  // The success return is a comma expression ending with {success:!0,messages:<var>}.
+  // Between the _g() state update and the return object there may be intermediate
+  // cleanup calls (e.g., dX(K), tK6(q.agentId) added in SDK 0.2.50).
+  //
+  // Strategy: match inProgressToolUseIDs:void 0}),<setState>), then allow any
+  // chain of calls before ,{success:!0,messages:<var>}. We inject our notification
+  // right before {success:!0.
+  //
+  // v2.1.49: ...void 0}),M),{success:!0,messages:G}
+  // v2.1.50: ...void 0}),M),dX(K),tK6(q.agentId),{success:!0,messages:G}
   const c1Re = new RegExp(
-    `(inProgressToolUseIDs:void 0\\}\\),(${V})\\)),\\{success:!0,messages:(${V})\\}`
+    `inProgressToolUseIDs:void 0\\}\\),${V}\\)` +  // ...void 0}),M)
+    `((?:,${V}\\([^)]*\\))*)` +                    // optional chain: ,fn(args),fn(args),...
+    `,\\{success:!0,messages:(${V})\\}`              // ,{success:!0,messages:G}
   )
   const c1Match = src.match(c1Re)
   if (!c1Match) {
@@ -278,8 +287,8 @@ if (src.includes(patchCMarker)) {
 
   const anchorC1 = c1Match[0]
   const idxC1 = src.indexOf(anchorC1)
-  const setAppStateC1 = c1Match[2]
-  const messagesVar = c1Match[3]
+  const trailingCallsC1 = c1Match[1] // e.g. ",dX(K),tK6(q.agentId)" or ""
+  const messagesVar = c1Match[2]
 
   if (src.indexOf(anchorC1, idxC1 + 1) !== -1) {
     console.error('ERROR: Multiple matches for Patch C1 anchor. Aborting.')
@@ -293,20 +302,28 @@ if (src.includes(patchCMarker)) {
     process.exit(1)
   }
 
-  // Replace: return _g(...),M),{success:!0} → return _g(...),M),notify(),{success:!0}
+  // Insert notification before {success:!0}. Keep everything else intact.
   const replacementC1 =
-    `${patchCMarker}inProgressToolUseIDs:void 0}),${setAppStateC1}),` +
-    `${notifySnippet('completed')},` +
-    `{success:!0,messages:${messagesVar}}`
+    `${patchCMarker}` + anchorC1.replace(
+      `,{success:!0,messages:${messagesVar}}`,
+      `,${notifySnippet('completed')},{success:!0,messages:${messagesVar}}`
+    )
 
   src = src.slice(0, idxC1) + replacementC1 + src.slice(idxC1 + anchorC1.length)
   console.log(`C1 applied at char ${idxC1}. Completion notification injected.`)
 
   // --- C2: Failure path ---
-  // Find: inProgressToolUseIDs:void 0}},<setAppState>),<idleNotifyFn>(
-  // The failure _g() uses {return ...{...}} (double braces: arrow fn body + object)
+  // The failure return ends with {success:!1,error:<var>,messages:<var>}} (the extra
+  // trailing } closes the catch block). We find this pattern and inject before it.
+  //
+  // The calls between _g()/lg() and {success:!1} may include nested parens
+  // (e.g., _$q(name,color,team,{idleReason:...})) which are hard to match with
+  // simple [^)]* patterns. Instead, we match the unique return object directly.
+  //
+  // v2.1.49: ...),{success:!1,error:y,messages:G}}}
+  // v2.1.50: ...),tK6(q.agentId),{success:!1,error:y,messages:G}}}
   const c2Re = new RegExp(
-    `(inProgressToolUseIDs:void 0\\}\\},(${V})\\)),(${V})\\(`
+    `,\\{success:!1,error:(${V}),messages:(${V})\\}\\}\\}`
   )
   const c2Match = src.match(c2Re)
   if (!c2Match) {
@@ -316,19 +333,23 @@ if (src.includes(patchCMarker)) {
 
   const anchorC2 = c2Match[0]
   const idxC2 = src.indexOf(anchorC2)
-  const setAppStateC2 = c2Match[2]
-  const idleNotifyFn = c2Match[3]
+  const errorVar = c2Match[1]
+  const msgsVarC2 = c2Match[2]
 
   if (src.indexOf(anchorC2, idxC2 + 1) !== -1) {
     console.error('ERROR: Multiple matches for Patch C2 anchor. Aborting.')
     process.exit(1)
   }
 
-  // Replace: ...}},M),vF4( → ...}},M),notify(),vF4(
-  const replacementC2 =
-    `inProgressToolUseIDs:void 0}},${setAppStateC2}),` +
-    `${notifySnippet('failed')},` +
-    `${idleNotifyFn}(`
+  // Verify in-process runner context
+  const beforeC2 = src.slice(Math.max(0, idxC2 - 3000), idxC2)
+  if (!beforeC2.includes('inProcessRunner')) {
+    console.error('ERROR: C2 anchor not in expected inProcessRunner context.')
+    process.exit(1)
+  }
+
+  // Insert notification before {success:!1}. Keep trailing }}} intact.
+  const replacementC2 = `,${notifySnippet('failed')},{success:!1,error:${errorVar},messages:${msgsVarC2}}}}`
 
   src = src.slice(0, idxC2) + replacementC2 + src.slice(idxC2 + anchorC2.length)
   console.log(`C2 applied at char ${idxC2}. Failure notification injected.`)
