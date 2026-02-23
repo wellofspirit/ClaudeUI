@@ -153,6 +153,8 @@ export class ClaudeSession {
     setPermissionMode(mode: string): Promise<void>
     setModel(model?: string): Promise<void>
     stopTask(taskId: string): Promise<void>
+    queueMessage(value: string, uuid: string): Promise<{ queued: boolean }>
+    dequeueMessage(uuid: string): Promise<{ removed: number }>
   } | null = null
   private slug: string | null = null
   private permissionMode: string = 'default'
@@ -302,6 +304,8 @@ export class ClaudeSession {
         setPermissionMode(mode: string): Promise<void>
         setModel(model?: string): Promise<void>
         stopTask(taskId: string): Promise<void>
+        queueMessage(value: string, uuid: string): Promise<{ queued: boolean }>
+        dequeueMessage(uuid: string): Promise<{ removed: number }>
       }
 
       for await (const message of q) {
@@ -568,6 +572,16 @@ export class ClaudeSession {
 
   setEffort(effort: string): void {
     this.effort = effort
+  }
+
+  async queueMessage(text: string, uuid: string): Promise<{ queued: boolean }> {
+    if (!this.activeQuery) return { queued: false }
+    return await this.activeQuery.queueMessage(text, uuid)
+  }
+
+  async dequeueMessage(uuid: string): Promise<{ removed: number }> {
+    if (!this.activeQuery) return { removed: 0 }
+    return await this.activeQuery.dequeueMessage(uuid)
   }
 
   /**

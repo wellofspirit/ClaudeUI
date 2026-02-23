@@ -120,6 +120,10 @@ const api: ClaudeAPI = {
     ipcRenderer.invoke('session:read-background-range', routingId, toolUseId, offset, length),
   stopTask: (routingId: string, toolUseId: string) =>
     ipcRenderer.invoke('session:stop-task', routingId, toolUseId),
+  queueMessage: (routingId: string, text: string, uuid: string) =>
+    ipcRenderer.invoke('session:queue-message', routingId, text, uuid),
+  dequeueMessage: (routingId: string, uuid: string) =>
+    ipcRenderer.invoke('session:dequeue-message', routingId, uuid),
   setPermissionMode: (routingId: string, mode: string) =>
     ipcRenderer.invoke('session:set-permission-mode', routingId, mode),
   setModel: (routingId: string, model: string) =>

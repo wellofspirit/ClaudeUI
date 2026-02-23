@@ -302,23 +302,27 @@ export function InputBox(): React.JSX.Element {
     }
 
     if (isRunning) {
-      appendQueuedText(prompt)
+      // Queue directly into the CLI's message loop — processed between sub-turns
+      const msgUuid = uuid()
+      const result = await window.api.queueMessage(activeSessionId, prompt, msgUuid)
+      if (result.queued) {
+        appendQueuedText(prompt, msgUuid)
+      }
     } else {
       await doSend(prompt, attachments)
     }
   }, [text, attachedFiles, isDisabled, activeSessionId, isRunning, appendQueuedText, doSend, focusedAgentId, teammates, addTeammateUserMessage])
 
-  // Auto-send queued text when agent transitions running → idle
+  // Clear queued text display when agent transitions running → idle
+  // (message was already picked up by the CLI mid-turn)
   const prevRunningRef = useRef(false)
   useEffect(() => {
     const wasRunning = prevRunningRef.current
     prevRunningRef.current = isRunning
-    if (wasRunning && !isRunning && queuedText && status.state === 'idle' && sdkActive) {
-      const queued = queuedText
+    if (wasRunning && !isRunning && queuedText) {
       clearQueuedText()
-      doSend(queued)
     }
-  }, [isRunning, queuedText, status.state, sdkActive, clearQueuedText, doSend])
+  }, [isRunning, queuedText, clearQueuedText])
 
   const handleBroadcast = useCallback(async () => {
     const prompt = text.trim()
@@ -344,18 +348,32 @@ export function InputBox(): React.JSX.Element {
     await window.api.broadcastToTeam(activeSessionId, sanitizedTeamName, sanitizedNames, prompt)
   }, [text, activeSessionId, teamName, teammates, addTeammateUserMessage, setText])
 
-  const handleEditQueued = useCallback(() => {
-    setText(queuedText)
-    clearQueuedText()
-    requestAnimationFrame(() => {
-      const el = textareaRef.current
-      if (el) {
-        el.focus()
-        el.style.height = 'auto'
-        el.style.height = Math.min(el.scrollHeight, 200) + 'px'
-      }
-    })
-  }, [queuedText, clearQueuedText, setText])
+  const queuedMessageUuid = useActiveSession((s) => s.queuedMessageUuid)
+  const handleEditQueued = useCallback(async () => {
+    if (!activeSessionId || !queuedMessageUuid) {
+      // No uuid — just move text back (fallback)
+      setText(queuedText)
+      clearQueuedText()
+      return
+    }
+    const result = await window.api.dequeueMessage(activeSessionId, queuedMessageUuid)
+    if (result.removed > 0) {
+      // Successfully withdrawn from CLI queue — edit in textarea
+      setText(queuedText)
+      clearQueuedText()
+      requestAnimationFrame(() => {
+        const el = textareaRef.current
+        if (el) {
+          el.focus()
+          el.style.height = 'auto'
+          el.style.height = Math.min(el.scrollHeight, 200) + 'px'
+        }
+      })
+    } else {
+      // Message already picked up by CLI — can't withdraw
+      clearQueuedText()
+    }
+  }, [activeSessionId, queuedText, queuedMessageUuid, clearQueuedText, setText])
 
   const handleCancel = useCallback(async () => {
     if (activeSessionId) {

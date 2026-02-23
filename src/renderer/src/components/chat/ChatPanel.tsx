@@ -16,14 +16,27 @@ import { GitChangesPill } from '../git/GitChangesPill'
 
 function QueuedMessageCard(): React.JSX.Element | null {
   const queuedText = useActiveSession((s) => s.queuedText)
+  const queuedMessageUuid = useActiveSession((s) => s.queuedMessageUuid)
   const clearQueuedText = useSessionStore((s) => s.clearQueuedText)
   const setDraftText = useSessionStore((s) => s.setDraftText)
+  const activeSessionId = useSessionStore((s) => s.activeSessionId)
 
   if (!queuedText) return null
 
-  const handleEdit = (): void => {
-    setDraftText(queuedText)
-    clearQueuedText()
+  const handleEdit = async (): Promise<void> => {
+    if (activeSessionId && queuedMessageUuid) {
+      const result = await window.api.dequeueMessage(activeSessionId, queuedMessageUuid)
+      if (result.removed > 0) {
+        setDraftText(queuedText)
+        clearQueuedText()
+      } else {
+        // Already picked up by CLI — just clear the card
+        clearQueuedText()
+      }
+    } else {
+      setDraftText(queuedText)
+      clearQueuedText()
+    }
   }
 
   return (

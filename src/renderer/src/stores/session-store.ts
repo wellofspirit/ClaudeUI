@@ -314,6 +314,7 @@ export interface PerSessionState {
   effort: 'low' | 'medium' | 'high'
   statusLine: StatusLineData | null
   queuedText: string
+  queuedMessageUuid: string
   draftText: string
   selectedModel: string
   teamName: string | null
@@ -359,6 +360,7 @@ const EMPTY_SESSION_STATE: PerSessionState = {
   effort: 'medium',
   statusLine: null,
   queuedText: '',
+  queuedMessageUuid: '',
   draftText: '',
   selectedModel: 'default',
   teamName: null,
@@ -503,7 +505,7 @@ interface SessionState {
   setPermissionMode: (mode: PermissionMode, routingId?: string) => void
   setEffort: (effort: 'low' | 'medium' | 'high', routingId?: string) => void
   setStatusLine: (routingId: string, data: StatusLineData) => void
-  appendQueuedText: (text: string) => void
+  appendQueuedText: (text: string, uuid: string) => void
   clearQueuedText: () => void
   setDraftText: (text: string) => void
   setSelectedModel: (model: string) => void
@@ -1199,13 +1201,14 @@ export const useSessionStore = create<SessionState>((set) => ({
       return {}
     }),
 
-  appendQueuedText: (text) =>
+  appendQueuedText: (text, uuid) =>
     set((state) => {
       const id = state.activeSessionId
       if (!id) return {}
       return {
-        sessions: updateSession(state.sessions, id, (s) => ({
-          queuedText: s.queuedText ? s.queuedText + '\n' + text : text
+        sessions: updateSession(state.sessions, id, () => ({
+          queuedText: text,
+          queuedMessageUuid: uuid
         }))
       }
     }),
@@ -1214,7 +1217,7 @@ export const useSessionStore = create<SessionState>((set) => ({
     set((state) => {
       const id = state.activeSessionId
       if (!id) return {}
-      return { sessions: updateSession(state.sessions, id, () => ({ queuedText: '' })) }
+      return { sessions: updateSession(state.sessions, id, () => ({ queuedText: '', queuedMessageUuid: '' })) }
     }),
 
   setDraftText: (text) =>

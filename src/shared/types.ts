@@ -244,6 +244,8 @@ export interface ClaudeAPI {
   unwatchBackground(routingId: string, toolUseId: string): Promise<void>
   readBackgroundRange(routingId: string, toolUseId: string, offset: number, length: number): Promise<string>
   stopTask(routingId: string, toolUseId: string): Promise<{ success: boolean; error?: string }>
+  queueMessage(routingId: string, text: string, uuid: string): Promise<{ queued: boolean }>
+  dequeueMessage(routingId: string, uuid: string): Promise<{ removed: number }>
   setPermissionMode(routingId: string, mode: string): Promise<void>
   setModel(routingId: string, model: string): Promise<void>
   setEffort(routingId: string, effort: string): Promise<void>
