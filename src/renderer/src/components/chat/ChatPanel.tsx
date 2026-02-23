@@ -85,6 +85,7 @@ export function ChatPanel(): React.JSX.Element {
   const shouldAutoScroll = useRef(true)
   const lastScrollTop = useRef(0)
   const isAutoScrolling = useRef(false) // guards against our own scrollTo triggering the handler
+  const wasNearBottom = useRef(true) // tracks whether user was near the bottom before content changed
 
   const checkAtBottom = useCallback(() => {
     const el = scrollRef.current
@@ -103,7 +104,9 @@ export function ChatPanel(): React.JSX.Element {
     }
     lastScrollTop.current = el.scrollTop
 
-    setIsAtBottom(distFromBottom < 100)
+    const nearBottom = distFromBottom < 100
+    wasNearBottom.current = nearBottom
+    setIsAtBottom(nearBottom)
   }, [])
 
   // Track scroll position
@@ -167,6 +170,7 @@ export function ChatPanel(): React.JSX.Element {
         if (dist < 10) {
           isAutoScrolling.current = false
           lastScrollTop.current = el.scrollTop
+          wasNearBottom.current = true
         } else {
           smoothGuardRaf.current = requestAnimationFrame(clearGuard)
         }
@@ -176,10 +180,12 @@ export function ChatPanel(): React.JSX.Element {
         cancelAnimationFrame(smoothGuardRaf.current)
         isAutoScrolling.current = false
         lastScrollTop.current = el.scrollTop
+        wasNearBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 100
       }, 500)
     } else {
       el.scrollTop = el.scrollHeight
       lastScrollTop.current = el.scrollTop
+      wasNearBottom.current = true
       requestAnimationFrame(() => { isAutoScrolling.current = false })
     }
   }, [])
@@ -203,11 +209,13 @@ export function ChatPanel(): React.JSX.Element {
         // when content grows without any user scroll events).
         setIsAtBottom(dist < 100)
 
-        // Re-engage auto-scroll: if content just grew while we were
-        // near the bottom (< 100px away), resume following. This catches
-        // the case where shouldAutoScroll was false but the user had
-        // already scrolled back to the bottom.
-        if (!shouldAutoScroll.current && dist > 0 && dist < 100) {
+        // Re-engage auto-scroll: if the user was near the bottom BEFORE
+        // this content change, resume following. We check wasNearBottom
+        // (set by scroll events and doAutoScroll) rather than current dist,
+        // because dist has already increased by the time we get here —
+        // a typing indicator or tool result can push dist well past 100px
+        // even though the user was at the very bottom moments ago.
+        if (!shouldAutoScroll.current && wasNearBottom.current) {
           shouldAutoScroll.current = true
         }
 
