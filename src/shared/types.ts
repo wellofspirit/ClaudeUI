@@ -60,6 +60,20 @@ export type ApprovalDecision = 'allow' | 'deny'
 
 export type PermissionMode = 'default' | 'acceptEdits' | 'plan'
 
+// ---------------------------------------------------------------------------
+// Claude permissions (allow/deny/ask rules from settings.json files)
+// ---------------------------------------------------------------------------
+
+export interface ClaudePermissions {
+  allow: string[]
+  deny: string[]
+  ask: string[]
+  additionalDirectories: string[]
+  defaultMode: string | undefined
+}
+
+export type PermissionScope = 'user' | 'project' | 'local'
+
 // AskUserQuestion tool types
 export interface AskUserQuestionOption {
   label: string
@@ -312,6 +326,10 @@ export interface ClaudeAPI {
   // Block usage analytics
   fetchBlockUsage(): Promise<BlockUsageData>
   onBlockUsage(cb: (data: BlockUsageData) => void): () => void
+
+  // Claude permissions (allow/deny/ask rule management)
+  loadClaudePermissions(scope: PermissionScope, cwd?: string): Promise<ClaudePermissions>
+  saveClaudePermissions(scope: PermissionScope, permissions: ClaudePermissions, cwd?: string): Promise<void>
 
   // Logging
   logError(source: string, message: string): void

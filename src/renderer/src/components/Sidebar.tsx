@@ -3,6 +3,7 @@ import { v4 as uuid } from 'uuid'
 import { useSessionStore, buildTodosFromMessages } from '../stores/session-store'
 import type { ChatMessage, DirectoryGroup, SessionInfo, AccountUsage, RateWindow } from '../../../shared/types'
 import { SettingsDialog, SettingsToggle } from './SettingsDialog'
+import { PermissionsDialog } from './PermissionsDialog'
 
 export function Sidebar({ style, onToggleCollapse }: {
   style?: React.CSSProperties
@@ -659,6 +660,7 @@ function SessionItem({
   const renameRef = useRef<HTMLInputElement>(null)
   const contextMenuRef = useRef<HTMLDivElement>(null)
   const renameCommittedRef = useRef(false)
+  const [permissionsOpen, setPermissionsOpen] = useState(false)
 
   const dotColor = needsAttention && !active
     ? 'bg-warning animate-pulse'
@@ -815,6 +817,15 @@ function SessionItem({
         >
           Auto rename
         </button>
+        <button
+          onClick={() => {
+            setContextMenu(null)
+            setPermissionsOpen(true)
+          }}
+          className="w-full text-left px-3 py-1.5 text-[13px] text-text-secondary hover:bg-bg-hover hover:text-text-primary transition-colors cursor-default"
+        >
+          Edit permissions
+        </button>
         {isSdkActive && (
           <button
             onClick={() => {
@@ -828,6 +839,11 @@ function SessionItem({
         )}
       </div>
     )}
+    <PermissionsDialog
+      open={permissionsOpen}
+      onClose={() => setPermissionsOpen(false)}
+      cwd={info.cwd}
+    />
   </>
   )
 }

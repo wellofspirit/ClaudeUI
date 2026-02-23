@@ -1,6 +1,8 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
-import { useSessionStore } from '../stores/session-store'
+import { useSessionStore, useActiveSession } from '../stores/session-store'
 import type { AppSettings } from '../stores/session-store'
+import { PermissionsDialog } from './PermissionsDialog'
+import type { ClaudePermissions } from '../../../shared/types'
 
 // ── Shared setting control components ────────────────────────────────
 
@@ -558,8 +560,77 @@ const SECTIONS: Section[] = [
         )
       }
     ]
+  },
+  {
+    id: 'permissions',
+    label: 'Permissions',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'globalPermissions',
+        label: 'Global permissions',
+        keywords: 'allow deny ask rules tools bash edit read write permissions security',
+        render: () => <GlobalPermissionsSummary />
+      }
+    ]
   }
 ]
+
+// ── Global Permissions summary (rendered inside SettingsDialog) ──────
+
+function GlobalPermissionsSummary(): React.JSX.Element {
+  const [perms, setPerms] = useState<ClaudePermissions | null>(null)
+  const [dialogOpen, setDialogOpen] = useState(false)
+  const cwd = useActiveSession((s) => s.cwd)
+
+  useEffect(() => {
+    window.api.loadClaudePermissions('user').then(setPerms).catch(() => {})
+  }, [dialogOpen]) // reload after dialog closes
+
+  const totalRules = perms ? perms.allow.length + perms.ask.length + perms.deny.length : 0
+
+  return (
+    <div className="px-3 py-1.5 text-[13px] text-text-secondary">
+      <div className="flex items-center justify-between">
+        <div>
+          <div className="text-text-secondary mb-0.5">Global permission rules</div>
+          {perms && (
+            <div className="text-[11px] text-text-muted">
+              {perms.allow.length} allow · {perms.ask.length} ask · {perms.deny.length} deny
+              {perms.additionalDirectories.length > 0 && ` · ${perms.additionalDirectories.length} dir${perms.additionalDirectories.length !== 1 ? 's' : ''}`}
+              {totalRules === 0 && 'No rules configured'}
+            </div>
+          )}
+        </div>
+        <button
+          onClick={() => setDialogOpen(true)}
+          className="px-2.5 py-1 text-[11px] font-medium text-accent hover:text-accent-hover bg-accent/10 hover:bg-accent/15 rounded-md transition-colors cursor-default"
+        >
+          Edit...
+        </button>
+      </div>
+      <PermissionsDialog
+        open={dialogOpen}
+        onClose={() => setDialogOpen(false)}
+        cwd={cwd}
+        initialTab="user"
+      />
+    </div>
+  )
+}
 
 // ── SettingsDialog component ─────────────────────────────────────────
 

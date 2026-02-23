@@ -262,6 +262,12 @@ const api: ClaudeAPI = {
     return () => ipcRenderer.removeListener('usage:block-data', handler)
   },
 
+  // Claude permissions (allow/deny/ask rule management)
+  loadClaudePermissions: (scope, cwd?) =>
+    ipcRenderer.invoke('claude:load-permissions', scope, cwd),
+  saveClaudePermissions: (scope, permissions, cwd?) =>
+    ipcRenderer.invoke('claude:save-permissions', scope, permissions, cwd),
+
   logError: (source: string, message: string) => {
     ipcRenderer.send('log:error', source, message)
   }

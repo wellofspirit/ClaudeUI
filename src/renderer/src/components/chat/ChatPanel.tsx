@@ -13,6 +13,7 @@ import { useSidebarCollapsed } from '../SessionView'
 import { AgentTabBar } from './AgentTabBar'
 import { GitBranchPill } from '../git/GitBranchPill'
 import { GitChangesPill } from '../git/GitChangesPill'
+import { PermissionsDialog } from '../PermissionsDialog'
 
 function QueuedMessageCard(): React.JSX.Element | null {
   const queuedText = useActiveSession((s) => s.queuedText)
@@ -392,6 +393,7 @@ function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Element {
   const [copiedField, setCopiedField] = useState<string | null>(null)
   const [infoHover, setInfoHover] = useState(false)
   const infoLeaveTimer = useRef<ReturnType<typeof setTimeout>>(null)
+  const [permissionsOpen, setPermissionsOpen] = useState(false)
 
   const infoMouseEnter = useCallback(() => {
     if (infoLeaveTimer.current) clearTimeout(infoLeaveTimer.current)
@@ -514,6 +516,17 @@ function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Element {
             <span>VSCode</span>
           </button>
         )}
+        {cwd && (
+          <button
+            onClick={() => setPermissionsOpen(true)}
+            className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[12px] text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
+            title="Project permissions"
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
+              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+            </svg>
+          </button>
+        )}
         <GitBranchPill />
         <GitChangesPill />
         {cost > 0 && (
@@ -523,6 +536,11 @@ function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Element {
         )}
         <WindowControls />
       </div>
+      <PermissionsDialog
+        open={permissionsOpen}
+        onClose={() => setPermissionsOpen(false)}
+        cwd={cwd}
+      />
     </div>
   )
 }
