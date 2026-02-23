@@ -1,8 +1,9 @@
 import { useState, useRef, useCallback, useEffect, useMemo } from 'react'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
-import type { FileAttachment, StatusLineData } from '../../../../shared/types'
+import type { DirEntry, FileAttachment, StatusLineData } from '../../../../shared/types'
 import { v4 as uuid } from 'uuid'
 import { SlashCommandMenu, filterSlashCommands } from './SlashCommandMenu'
+import { FileMentionMenu } from './FileMentionMenu'
 
 const ACCEPTED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp']
 const ACCEPTED_FILE_TYPES = [...ACCEPTED_IMAGE_TYPES, 'application/pdf']
@@ -165,6 +166,41 @@ export function InputBox(): React.JSX.Element {
     () => (slashMenuOpen ? filterSlashCommands(slashCommands, slashFilter) : []),
     [slashMenuOpen, slashCommands, slashFilter]
   )
+  // @ file mention autocomplete
+  const [fileMentionOpen, setFileMentionOpen] = useState(false)
+  const [fileMentionIndex, setFileMentionIndex] = useState(0)
+  const [fileMentionAnchor, setFileMentionAnchor] = useState(-1) // cursor position of '@'
+  const [fileMentionDir, setFileMentionDir] = useState('')        // relative dir being browsed
+  const [fileMentionEntries, setFileMentionEntries] = useState<DirEntry[]>([])
+
+  // Fetch directory entries when the browsing dir changes
+  useEffect(() => {
+    if (!fileMentionOpen || !cwd) return
+    const separator = cwd.includes('\\') ? '\\' : '/'
+    const fullDir = fileMentionDir ? cwd + separator + fileMentionDir.replace(/\//g, separator) : cwd
+    window.api.listDir(fullDir).then(setFileMentionEntries).catch(() => setFileMentionEntries([]))
+  }, [fileMentionOpen, fileMentionDir, cwd])
+
+  // Compute the filter text (last path segment after the last /) and whether we're at root
+  const fileMentionQuery = useMemo(() => {
+    if (!fileMentionOpen || fileMentionAnchor < 0) return ''
+    const afterAt = text.slice(fileMentionAnchor + 1)
+    const lastSlash = afterAt.lastIndexOf('/')
+    return lastSlash >= 0 ? afterAt.slice(lastSlash + 1) : afterAt
+  }, [fileMentionOpen, fileMentionAnchor, text])
+
+  const fileMentionIsRoot = fileMentionDir === ''
+
+  const filteredFileMentionEntries = useMemo(() => {
+    if (!fileMentionOpen) return []
+    const items: DirEntry[] = fileMentionIsRoot
+      ? fileMentionEntries
+      : [{ name: '..', isDirectory: true }, ...fileMentionEntries]
+    if (!fileMentionQuery) return items
+    const q = fileMentionQuery.toLowerCase()
+    return items.filter((e) => e.name.toLowerCase().includes(q))
+  }, [fileMentionOpen, fileMentionIsRoot, fileMentionEntries, fileMentionQuery])
+
   const availableModels = useSessionStore((s) => s.availableModels)
   const setAvailableModels = useSessionStore((s) => s.setAvailableModels)
   const models = availableModels.map((m) => {
@@ -328,6 +364,32 @@ export function InputBox(): React.JSX.Element {
   }, [activeSessionId])
 
   const handleKeyDown = (e: React.KeyboardEvent): void => {
+    // @ file mention menu keyboard navigation
+    if (fileMentionOpen && filteredFileMentionEntries.length > 0) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault()
+        setFileMentionIndex((i) => (i + 1) % filteredFileMentionEntries.length)
+        return
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault()
+        setFileMentionIndex((i) => (i - 1 + filteredFileMentionEntries.length) % filteredFileMentionEntries.length)
+        return
+      }
+      if (e.key === 'Tab' || e.key === 'Enter') {
+        e.preventDefault()
+        handleFileMentionSelect(filteredFileMentionEntries[fileMentionIndex])
+        return
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        setFileMentionOpen(false)
+        setFileMentionAnchor(-1)
+        setFileMentionDir('')
+        return
+      }
+    }
+
     // Slash command menu keyboard navigation
     if (slashMenuOpen && filteredSlashCommands.length > 0) {
       if (e.key === 'ArrowDown') {
@@ -395,6 +457,37 @@ export function InputBox(): React.JSX.Element {
     } else {
       setSlashMenuOpen(false)
     }
+
+    // @ file mention detection
+    const cursorPos = el.selectionStart ?? value.length
+    if (fileMentionOpen) {
+      // Check if user deleted back past the @ anchor
+      if (cursorPos <= fileMentionAnchor) {
+        setFileMentionOpen(false)
+        setFileMentionAnchor(-1)
+        setFileMentionDir('')
+      } else {
+        // Update dir from the text between anchor+1 and cursor
+        const afterAt = value.slice(fileMentionAnchor + 1, cursorPos)
+        const lastSlash = afterAt.lastIndexOf('/')
+        const newDir = lastSlash >= 0 ? afterAt.slice(0, lastSlash) : ''
+        if (newDir !== fileMentionDir) {
+          setFileMentionDir(newDir)
+          setFileMentionIndex(0)
+        }
+      }
+    } else {
+      // Detect a newly typed '@' preceded by whitespace or at start
+      if (cursorPos > 0 && value[cursorPos - 1] === '@') {
+        const charBefore = cursorPos >= 2 ? value[cursorPos - 2] : undefined
+        if (charBefore === undefined || /\s/.test(charBefore)) {
+          setFileMentionOpen(true)
+          setFileMentionAnchor(cursorPos - 1)
+          setFileMentionDir('')
+          setFileMentionIndex(0)
+        }
+      }
+    }
   }
 
   const handleSlashSelect = useCallback((name: string): void => {
@@ -403,6 +496,60 @@ export function InputBox(): React.JSX.Element {
     setSlashMenuIndex(0)
     textareaRef.current?.focus()
   }, [setText])
+
+  /** Handle selection of a file mention entry (directory or file) */
+  const handleFileMentionSelect = useCallback((entry: DirEntry): void => {
+    if (entry.isDirectory) {
+      // Navigate into directory (or parent with "..")
+      let newDir: string
+      if (entry.name === '..') {
+        const lastSlash = fileMentionDir.lastIndexOf('/')
+        newDir = lastSlash >= 0 ? fileMentionDir.slice(0, lastSlash) : ''
+      } else {
+        newDir = fileMentionDir ? fileMentionDir + '/' + entry.name : entry.name
+      }
+      // Update the text: replace everything after @ anchor with the new dir path + /
+      const before = text.slice(0, fileMentionAnchor + 1) // includes the @
+      const after = text.slice(fileMentionAnchor + 1 + (fileMentionDir ? fileMentionDir.length + 1 : 0) + fileMentionQuery.length)
+      const newPath = newDir ? newDir + '/' : ''
+      const newText = before + newPath + after
+      setText(newText)
+      setFileMentionDir(newDir)
+      setFileMentionIndex(0)
+      // Place cursor right after the path
+      requestAnimationFrame(() => {
+        const el = textareaRef.current
+        if (el) {
+          const cursorPos = fileMentionAnchor + 1 + newPath.length
+          el.selectionStart = cursorPos
+          el.selectionEnd = cursorPos
+          el.focus()
+        }
+      })
+    } else {
+      // File selected — insert full relative path + space, close menu
+      const fullPath = fileMentionDir ? fileMentionDir + '/' + entry.name : entry.name
+      const before = text.slice(0, fileMentionAnchor) // before the @
+      const cursorInText = fileMentionAnchor + 1 + (fileMentionDir ? fileMentionDir.length + 1 : 0) + fileMentionQuery.length
+      const after = text.slice(cursorInText)
+      const newText = before + fullPath + ' ' + after
+      setText(newText)
+      setFileMentionOpen(false)
+      setFileMentionAnchor(-1)
+      setFileMentionDir('')
+      setFileMentionIndex(0)
+      // Place cursor after the inserted path + space
+      requestAnimationFrame(() => {
+        const el = textareaRef.current
+        if (el) {
+          const cursorPos = before.length + fullPath.length + 1
+          el.selectionStart = cursorPos
+          el.selectionEnd = cursorPos
+          el.focus()
+        }
+      })
+    }
+  }, [text, fileMentionAnchor, fileMentionDir, fileMentionQuery, setText])
 
   const addFiles = useCallback(async (files: File[]) => {
     const accepted = files.filter((f) => ACCEPTED_FILE_TYPES.includes(f.type))
@@ -489,6 +636,15 @@ export function InputBox(): React.JSX.Element {
               filter={slashFilter}
               selectedIndex={slashMenuIndex}
               onSelect={handleSlashSelect}
+            />
+          )}
+
+          {/* @ file mention autocomplete */}
+          {fileMentionOpen && filteredFileMentionEntries.length > 0 && (
+            <FileMentionMenu
+              entries={filteredFileMentionEntries}
+              selectedIndex={fileMentionIndex}
+              onSelect={handleFileMentionSelect}
             />
           )}
 

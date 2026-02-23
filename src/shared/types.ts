@@ -189,6 +189,11 @@ export interface SessionInfo {
   lastActivityAt: number
 }
 
+export interface DirEntry {
+  name: string
+  isDirectory: boolean
+}
+
 export interface DirectoryGroup {
   cwd: string
   projectKey: string
@@ -285,6 +290,7 @@ export interface ClaudeAPI {
   gitStopWatching(cwd: string): Promise<void>
   onGitStatusUpdate(cb: (data: { cwd: string; status: GitStatusData }) => void): () => void
 
+  listDir(dirPath: string): Promise<DirEntry[]>
   openInVSCode(cwd: string): Promise<void>
   loadSettings(): Promise<Record<string, unknown>>
   saveSettings(settings: Record<string, unknown>): Promise<void>

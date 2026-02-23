@@ -215,6 +215,7 @@ const api: ClaudeAPI = {
     return () => ipcRenderer.removeListener('git:status-update', handler)
   },
 
+  listDir: (dirPath: string) => ipcRenderer.invoke('file:list-dir', dirPath),
   openInVSCode: (cwd: string) => ipcRenderer.invoke('app:open-in-vscode', cwd),
   loadSettings: () => ipcRenderer.invoke('config:load-settings'),
   saveSettings: (settings) => ipcRenderer.invoke('config:save-settings', settings),

@@ -169,6 +169,7 @@ const SESSION_IPC_CHANNELS = [
   'git:file-patch', 'git:file-contents', 'git:stage-file', 'git:unstage-file',
   'git:stage-all', 'git:unstage-all', 'git:commit', 'git:push',
   'git:start-watching', 'git:stop-watching',
+  'file:list-dir',
   'usage:fetch', 'usage:fetch-block'
 ]
 
@@ -279,6 +280,26 @@ export function registerSessionIpc(win: BrowserWindow): void {
 
   ipcMain.handle('session:list-directories', async () => {
     return await listDirectories()
+  })
+
+  ipcMain.handle('file:list-dir', async (_e, dirPath: string) => {
+    try {
+      const entries = await fs.promises.readdir(dirPath, { withFileTypes: true })
+      const HIDDEN_NAMES = new Set(['node_modules', '.git', '.DS_Store', '__pycache__', '.next', '.cache'])
+      const result: Array<{ name: string; isDirectory: boolean }> = []
+      for (const entry of entries) {
+        if (entry.name.startsWith('.') || HIDDEN_NAMES.has(entry.name)) continue
+        result.push({ name: entry.name, isDirectory: entry.isDirectory() || entry.isSymbolicLink() })
+      }
+      // Sort: directories first, then alphabetical within each group
+      result.sort((a, b) => {
+        if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1
+        return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })
+      })
+      return result
+    } catch {
+      return []
+    }
   })
 
   ipcMain.handle('session:load-history', async (_e, sessionId: string, projectKey: string) => {
