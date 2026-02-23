@@ -1,40 +1,48 @@
 # Patch: queue-control
 
-Adds control-request subtypes for managing the CLI's output queue mid-agent-turn.
+Manages the CLI's output queue mid-agent-turn: dequeue by value, and notification when a queued command is consumed.
 
-## The Problem
+## Background: Native Steer Mechanism
 
-When the user types a message while the agent is running, the SDK has no way to inject it between sub-turns. The current workaround holds the message in the renderer and sends it after `running → idle`, which means it waits for the **entire agent turn** (the do-while loop) to end — including all background task polling.
+The CLI natively supports mid-turn message injection via the steer mechanism (see `docs/cli-message-loop-internals.md`):
 
-The CLI's internal architecture actually supports mid-turn message injection: the loop dequeues from the queue array between sub-turn calls, and the do-while polls every 100ms. But there's no control-request API to push to or remove from the queue.
+```
+User types mid-turn → sendPrompt() → MessageChannel.push() → CLI stdin
+  → queuePush({mode:"prompt", value:..., uuid:...})
+  → do-while loop picks it up at next snapshotQueue() call
+  → processed as queued_command attachment in submitMessage
+```
+
+**`queue_message` is NOT needed** — the native steer path already handles injection. This patch only adds what's missing:
+
+1. **`dequeue_message`** — withdraw a queued item before it's consumed
+2. **`queued_command_consumed`** — notification when the CLI processes the steer
+
+## The Problems
+
+### 1. No way to withdraw a queued steer
+
+Once `sendPrompt` pushes a message into the CLI's queue, there's no way to remove it before processing. The user should be able to edit/cancel their queued message.
+
+### 2. No notification when a steer is consumed
+
+The CLI processes queued commands in `submitMessage`'s attachment handler, but only yields a replay user message when `replayUserMessages=true` (which is `false` by default). ClaudeUI gets zero notification that the steer was picked up — the QueuedMessageCard just vanishes silently when the turn ends.
 
 ## The Fix
 
-Two new control-request subtypes in the CLI's message loop:
+### Part A1: `dequeue_message` control request (cli.js)
 
-### `queue_message`
+Injected before the "Unsupported control request subtype" fallback:
 
-Push a user prompt into the output queue via the queue-push function, then kick the turn-loop starter so the do-while loop picks it up.
-
-```json
-{
-  "type": "control_request",
-  "request_id": "...",
-  "request": {
-    "subtype": "queue_message",
-    "value": "Fix the auth bug too",
-    "uuid": "msg-123"
-  }
+```js
+else if (c.request.subtype === "dequeue_message") {
+  let { value: Y6 } = c.request;
+  let O6 = removeFn((_6) => extractQueueText(_6.value) === Y6);
+  successFn(c, { removed: O6.length });
 }
 ```
 
-Response: `{ "queued": true }`
-
-The message gets processed at the next sub-turn gap — between sub-turn calls within the same agent turn. No need to wait for idle.
-
-### `dequeue_message`
-
-Remove a queued message by uuid before it's been processed. Allows the user to edit or cancel a queued message.
+**Value-based matching**: Queue items don't have stable UUIDs that survive the steer → attachment pipeline. The dequeue matches by text content extracted via the same helper the CLI uses internally.
 
 ```json
 {
@@ -42,56 +50,89 @@ Remove a queued message by uuid before it's been processed. Allows the user to e
   "request_id": "...",
   "request": {
     "subtype": "dequeue_message",
-    "uuid": "msg-123"
+    "value": "Fix the auth bug too"
   }
 }
 ```
 
-Response: `{ "removed": 1 }` (number of items removed, 0 if already processed)
+Response: `{ "removed": 1 }` (0 if already consumed)
+
+### Part A2: `queued_command_consumed` notification (cli.js)
+
+In `submitMessage`'s attachment handler, the `queued_command` case is modified from:
+
+```js
+// Before: only yields when G (replayUserMessages) is true
+else if (G && g6.attachment.type === "queued_command") yield { ...isReplay: true };
+```
+
+To:
+
+```js
+// After: always yields a system notification, replay only when G is true
+else if (g6.attachment.type === "queued_command") {
+  yield { type: "system", subtype: "queued_command_consumed",
+    prompt: g6.attachment.prompt, source_uuid: g6.attachment.source_uuid,
+    session_id: Q1(), uuid: Y16() };
+  if (G) yield { type: "user", ...isReplay: true };
+}
+```
+
+The `queued_command_consumed` system message tells ClaudeUI to:
+- Add the queued text as a visible user message in the chat
+- Clear the QueuedMessageCard
+
+### Part B: `dequeueMessage()` SDK method (sdk.mjs)
+
+Exposes `dequeueMessage(value)` on the query object, which sends a `dequeue_message` control request.
 
 ## How It Finds the Code (Pattern Matching)
 
-All minified function names are extracted **dynamically** from content patterns — no hardcoded names. This makes the patch resilient to SDK version bumps where minified identifiers change.
+All minified function names are extracted **dynamically** from content patterns.
 
 | What | Stable Anchor / Pattern |
 |---|---|
-| Injection point | `else <fn>(c,\`Unsupported control request subtype: ...\`);continue}else if(c.type==="control_response")` — regex captures the error helper name |
-| Success response helper | `),<fn>(c,{})}}catch` — found in the stop_task handler near the anchor |
-| Queue push + loop starter | `<fn>({mode:"prompt",value:<v>.message.content,uuid:<v>.uuid}),<fn>()` — the user-message handler near the anchor |
-| Queue remove-by-predicate | `function <fn>(<v>){let <v>=[];for(let <v>=<queue>.length-1` — found near the queue push function definition |
-| Queue array | Captured from the push function definition: `function <pushFn>(<v>){<queue>.push(` |
-| sdk.mjs stopTask | `async stopTask(<v>){await this.request({subtype:"stop_task",task_id:<v>})}` — regex with backreference |
+| Injection point (A1) | `else <fn>(c,\`Unsupported control request subtype: ...\`);continue}else if(c.type==="control_response")` |
+| Success response helper | `),<fn>(c,{})}}catch` — in the stop_task handler |
+| Queue push + loop starter | `<fn>({mode:"prompt",value:<v>.message.content,uuid:<v>.uuid}),<fn>()` |
+| Queue remove-by-predicate | `function <fn>(<v>){let <v>=[];for(let <v>=<queue>.length-1` |
+| Extract queue text | `<fn>(<var>.value)` — near popAllEditable |
+| queued_command handler (A2) | `else if(G&&<var>.attachment.type==="queued_command")yield{` |
+| Session ID / UUID generators | `session_id:<fn>(),uuid:<fn>()` within the yield |
+| sdk.mjs stopTask | `async stopTask(<v>){await this.request({subtype:"stop_task",task_id:<v>})}` |
 
-### Name mapping across versions
+## Race Condition Window
 
-| Role | 0.2.49 | 0.2.50 |
-|---|---|---|
-| Queue push | `Jk` | `jk` |
-| Queue remove | `KP6` | `fP6` |
-| Queue array | `VH` | `L$` |
-| Queue non-empty | `Id` | `Fd` |
-| Turn loop starter | `G6` | `G6` |
-| Success response | `t` | `e` |
-| Error response | `o` | `o` |
+There's a small window between `sendPrompt` and `snapshotQueue()` where:
+- The message is in the queue but not yet consumed
+- `dequeue_message` can still withdraw it
 
-## How the CLI Queue Works
+Once `snapshotQueue()` runs (at the start of the next sub-turn), the item is moved to the processing pipeline and dequeue returns `{ removed: 0 }`.
+
+## Desired Flow
 
 ```
-Agent turn (do-while loop)
-├── sub-turn #1: user prompt → model → tool calls → result
-│   ← 100ms poll gap — queue_message arrives here → queue
-├── sub-turn #2: queued message → model → result
-│   ← 100ms poll gap
-├── sub-turn #3: background task notification → model → result
-└── no running tasks, queue empty → do-while exits → idle
-```
+User types mid-turn → sendPrompt (native steer) + appendQueuedText (UI)
+  → QueuedMessageCard visible with Edit button
+  → CLI processes at next snapshotQueue → queued_command_consumed fires
+  → Handler: add user message to chat + clearQueuedText
+  → Message shows in chat as sent user message (no longer editable)
 
-The do-while loop keeps running as long as there are background tasks or queue items. Between sub-turn calls, items are dequeued from the queue — our `queue_message` items land right there.
+Edit before consumption:
+  → dequeueMessage(value) returns { removed: 1 }
+  → Text returns to input, no message added to chat
+
+Edit after consumption:
+  → Card already gone, message already in chat
+```
 
 ## Verification
 
-1. Start a session with a background task running
-2. Send a `queue_message` control request
-3. Observe the message is processed between sub-turns (not after idle)
-4. Send a `queue_message`, then immediately `dequeue_message` with the same uuid
-5. The message should be removed (response: `{removed: 1}`) and never processed
+1. `node patch/apply-all.mjs` — patches apply with markers
+2. `bun run typecheck` — no errors
+3. Manual test:
+   - Send a prompt that triggers a long tool call
+   - Type a steer message mid-turn
+   - QueuedMessageCard shows with Edit button
+   - When consumed: message appears in chat, card disappears
+   - Click Edit before consumption: text returns to input

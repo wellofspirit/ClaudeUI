@@ -16,7 +16,6 @@ import { GitChangesPill } from '../git/GitChangesPill'
 
 function QueuedMessageCard(): React.JSX.Element | null {
   const queuedText = useActiveSession((s) => s.queuedText)
-  const queuedMessageUuid = useActiveSession((s) => s.queuedMessageUuid)
   const clearQueuedText = useSessionStore((s) => s.clearQueuedText)
   const setDraftText = useSessionStore((s) => s.setDraftText)
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
@@ -24,17 +23,27 @@ function QueuedMessageCard(): React.JSX.Element | null {
   if (!queuedText) return null
 
   const handleEdit = async (): Promise<void> => {
-    if (activeSessionId && queuedMessageUuid) {
-      const result = await window.api.dequeueMessage(activeSessionId, queuedMessageUuid)
-      if (result.removed > 0) {
-        setDraftText(queuedText)
+    // Capture text before async call — steer-consumed may clear queuedText mid-await
+    const savedText = queuedText
+    console.log('[QueuedEdit] handleEdit called', { savedText, activeSessionId })
+    if (activeSessionId && savedText) {
+      const result = await window.api.dequeueMessage(activeSessionId, savedText)
+      console.log('[QueuedEdit] dequeueMessage result:', result)
+      const removed = (result as any)?.response?.removed ?? result?.removed ?? 0
+      if (removed > 0) {
+        // Successfully withdrawn from CLI queue — restore to input
+        console.log('[QueuedEdit] Setting draftText to:', savedText)
+        setDraftText(savedText)
         clearQueuedText()
       } else {
-        // Already picked up by CLI — just clear the card
+        // Already consumed by CLI — card will be cleared by steer-consumed event.
+        // Don't restore to input since the message is already in the conversation.
+        console.log('[QueuedEdit] removed === 0, only clearing card')
         clearQueuedText()
       }
     } else {
-      setDraftText(queuedText)
+      console.log('[QueuedEdit] No activeSessionId or savedText, fallback path')
+      setDraftText(savedText)
       clearQueuedText()
     }
   }

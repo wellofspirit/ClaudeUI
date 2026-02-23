@@ -134,6 +134,11 @@ export function InputBox(): React.JSX.Element {
   const text = useActiveSession((s) => s.draftText)
   const setDraftText = useSessionStore((s) => s.setDraftText)
   const setText = setDraftText
+
+  // DEBUG: log draftText changes
+  useEffect(() => {
+    console.log('[InputBox] text value changed to:', JSON.stringify(text))
+  }, [text])
   const cwd = useActiveSession((s) => s.cwd)
   const status = useActiveSession((s) => s.status)
   const sdkActive = useActiveSession((s) => s.sdkActive)
@@ -302,12 +307,9 @@ export function InputBox(): React.JSX.Element {
     }
 
     if (isRunning) {
-      // Queue directly into the CLI's message loop — processed between sub-turns
-      const msgUuid = uuid()
-      const result = await window.api.queueMessage(activeSessionId, prompt, msgUuid)
-      if (result.queued) {
-        appendQueuedText(prompt, msgUuid)
-      }
+      // Use native steer path: sendPrompt pushes into the CLI's queue via MessageChannel
+      appendQueuedText(prompt)
+      await window.api.sendPrompt(activeSessionId, prompt)
     } else {
       await doSend(prompt, attachments)
     }
@@ -348,18 +350,18 @@ export function InputBox(): React.JSX.Element {
     await window.api.broadcastToTeam(activeSessionId, sanitizedTeamName, sanitizedNames, prompt)
   }, [text, activeSessionId, teamName, teammates, addTeammateUserMessage, setText])
 
-  const queuedMessageUuid = useActiveSession((s) => s.queuedMessageUuid)
   const handleEditQueued = useCallback(async () => {
-    if (!activeSessionId || !queuedMessageUuid) {
-      // No uuid — just move text back (fallback)
-      setText(queuedText)
+    // Capture text before async call — steer-consumed may clear queuedText mid-await
+    const savedText = queuedText
+    if (!activeSessionId || !savedText) {
       clearQueuedText()
       return
     }
-    const result = await window.api.dequeueMessage(activeSessionId, queuedMessageUuid)
-    if (result.removed > 0) {
+    const result = await window.api.dequeueMessage(activeSessionId, savedText)
+    const removed = (result as any)?.response?.removed ?? result?.removed ?? 0
+    if (removed > 0) {
       // Successfully withdrawn from CLI queue — edit in textarea
-      setText(queuedText)
+      setText(savedText)
       clearQueuedText()
       requestAnimationFrame(() => {
         const el = textareaRef.current
@@ -370,10 +372,10 @@ export function InputBox(): React.JSX.Element {
         }
       })
     } else {
-      // Message already picked up by CLI — can't withdraw
+      // Already consumed by CLI — steer-consumed event handles cleanup
       clearQueuedText()
     }
-  }, [activeSessionId, queuedText, queuedMessageUuid, clearQueuedText, setText])
+  }, [activeSessionId, queuedText, clearQueuedText, setText])
 
   const handleCancel = useCallback(async () => {
     if (activeSessionId) {

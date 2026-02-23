@@ -186,6 +186,9 @@ export function useClaudeEvents(): void {
         setSlashCommands(commands)
         window.api.saveSlashCommands(commands)
       }),
+      window.api.onSteerConsumed(({ routingId }) => {
+        useSessionStore.getState().consumeQueuedText(routingId)
+      }),
       window.api.onWatchUpdate(({ routingId, messages, taskNotifications, statusLine }) => {
         useSessionStore.getState().updateWatchedSession(routingId, messages, taskNotifications)
         if (statusLine) setStatusLine(routingId, statusLine)

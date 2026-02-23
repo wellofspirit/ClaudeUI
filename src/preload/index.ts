@@ -120,10 +120,13 @@ const api: ClaudeAPI = {
     ipcRenderer.invoke('session:read-background-range', routingId, toolUseId, offset, length),
   stopTask: (routingId: string, toolUseId: string) =>
     ipcRenderer.invoke('session:stop-task', routingId, toolUseId),
-  queueMessage: (routingId: string, text: string, uuid: string) =>
-    ipcRenderer.invoke('session:queue-message', routingId, text, uuid),
-  dequeueMessage: (routingId: string, uuid: string) =>
-    ipcRenderer.invoke('session:dequeue-message', routingId, uuid),
+  dequeueMessage: (routingId: string, value: string) =>
+    ipcRenderer.invoke('session:dequeue-message', routingId, value),
+  onSteerConsumed: (cb) => {
+    const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as never)
+    ipcRenderer.on('session:steer-consumed', handler)
+    return () => ipcRenderer.removeListener('session:steer-consumed', handler)
+  },
   setPermissionMode: (routingId: string, mode: string) =>
     ipcRenderer.invoke('session:set-permission-mode', routingId, mode),
   setModel: (routingId: string, model: string) =>

@@ -314,7 +314,6 @@ export interface PerSessionState {
   effort: 'low' | 'medium' | 'high'
   statusLine: StatusLineData | null
   queuedText: string
-  queuedMessageUuid: string
   draftText: string
   selectedModel: string
   teamName: string | null
@@ -360,7 +359,6 @@ const EMPTY_SESSION_STATE: PerSessionState = {
   effort: 'medium',
   statusLine: null,
   queuedText: '',
-  queuedMessageUuid: '',
   draftText: '',
   selectedModel: 'default',
   teamName: null,
@@ -505,8 +503,9 @@ interface SessionState {
   setPermissionMode: (mode: PermissionMode, routingId?: string) => void
   setEffort: (effort: 'low' | 'medium' | 'high', routingId?: string) => void
   setStatusLine: (routingId: string, data: StatusLineData) => void
-  appendQueuedText: (text: string, uuid: string) => void
+  appendQueuedText: (text: string) => void
   clearQueuedText: () => void
+  consumeQueuedText: (routingId: string) => void
   setDraftText: (text: string) => void
   setSelectedModel: (model: string) => void
   setSlashCommands: (commands: SlashCommandInfo[]) => void
@@ -1201,14 +1200,13 @@ export const useSessionStore = create<SessionState>((set) => ({
       return {}
     }),
 
-  appendQueuedText: (text, uuid) =>
+  appendQueuedText: (text) =>
     set((state) => {
       const id = state.activeSessionId
       if (!id) return {}
       return {
         sessions: updateSession(state.sessions, id, () => ({
-          queuedText: text,
-          queuedMessageUuid: uuid
+          queuedText: text
         }))
       }
     }),
@@ -1217,12 +1215,35 @@ export const useSessionStore = create<SessionState>((set) => ({
     set((state) => {
       const id = state.activeSessionId
       if (!id) return {}
-      return { sessions: updateSession(state.sessions, id, () => ({ queuedText: '', queuedMessageUuid: '' })) }
+      return { sessions: updateSession(state.sessions, id, () => ({ queuedText: '' })) }
+    }),
+
+  consumeQueuedText: (routingId) =>
+    set((state) => {
+      const session = state.sessions[routingId]
+      if (!session || !session.queuedText) return state
+      const userMsg = {
+        id: `steer-${Date.now()}`,
+        role: 'user' as const,
+        content: [{ type: 'text' as const, text: session.queuedText }],
+        timestamp: Date.now()
+      }
+      return {
+        sessions: {
+          ...state.sessions,
+          [routingId]: {
+            ...session,
+            messages: [...session.messages, userMsg],
+            queuedText: ''
+          }
+        }
+      }
     }),
 
   setDraftText: (text) =>
     set((state) => {
       const id = state.activeSessionId
+      console.log('[setDraftText] called with:', { text, activeSessionId: id })
       if (!id) return {}
       return { sessions: updateSession(state.sessions, id, () => ({ draftText: text })) }
     }),
