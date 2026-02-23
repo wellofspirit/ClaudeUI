@@ -276,7 +276,7 @@ function cleanupEmptySession(
   const session = sessions[routingId]
   if (!session) return { sessions, recentSessionIds }
   // Only clean up sessions with no messages and no active SDK
-  if (session.messages.length > 0 || session.sdkActive) return { sessions, recentSessionIds }
+  if (session.messages.length > 0 || session.sdkActive || session.draftText) return { sessions, recentSessionIds }
   const { [routingId]: _, ...rest } = sessions
   return {
     sessions: rest,

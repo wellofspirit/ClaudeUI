@@ -2,14 +2,16 @@
  * Fetches Claude account usage (5hr session / 7-day rate windows)
  * via the Anthropic OAuth API.
  *
- * Reads credentials from ~/.claude/.credentials.json, calls
- * GET https://api.anthropic.com/api/oauth/usage, and pushes
+ * Reads credentials from ~/.claude/.credentials.json, with a fallback
+ * to the macOS Keychain (service "Claude Code-credentials") on Darwin.
+ * Calls GET https://api.anthropic.com/api/oauth/usage and pushes
  * updates to the renderer via BrowserWindow.webContents.
  */
 
 import { readFile, writeFile } from 'node:fs/promises'
+import { execFile } from 'node:child_process'
 import { join } from 'node:path'
-import { homedir } from 'node:os'
+import { homedir, platform } from 'node:os'
 import type { BrowserWindow } from 'electron'
 import type { AccountUsage, RateWindow } from '../../shared/types'
 import { blockUsageService } from './block-usage'
@@ -37,6 +39,8 @@ interface CredentialsFile {
 // ---------------------------------------------------------------------------
 
 const CREDENTIALS_PATH = join(homedir(), '.claude', '.credentials.json')
+const KEYCHAIN_SERVICE = 'Claude Code-credentials'
+const IS_MACOS = platform() === 'darwin'
 const USAGE_API_URL = 'https://api.anthropic.com/api/oauth/usage'
 const TOKEN_REFRESH_URL = 'https://console.anthropic.com/v1/oauth/token'
 const DEFAULT_POLL_INTERVAL_MS = 2 * 60 * 1000 // 2 minutes
@@ -221,13 +225,69 @@ export class UsageFetcher {
   }
 
   private async readCredentials(): Promise<OAuthCredentials | null> {
+    // Try the credentials file first (works on all platforms, fast)
+    const fileCreds = await this.readCredentialsFromFile()
+    if (fileCreds) return fileCreds
+
+    // On macOS, fall back to reading from the system Keychain
+    if (IS_MACOS) {
+      const keychainCreds = await this.readCredentialsFromKeychain()
+      if (keychainCreds) return keychainCreds
+    }
+
+    return null
+  }
+
+  private async readCredentialsFromFile(): Promise<OAuthCredentials | null> {
     try {
       const raw = await readFile(CREDENTIALS_PATH, 'utf-8')
       const parsed = JSON.parse(raw) as CredentialsFile
       if (!parsed.claudeAiOauth?.accessToken) return null
       return parsed.claudeAiOauth
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * Read OAuth credentials from the macOS Keychain.
+   *
+   * Claude Code stores credentials in a generic password item with
+   * service = "Claude Code-credentials". The password data is a JSON blob
+   * with the same structure as ~/.claude/.credentials.json.
+   *
+   * Uses `/usr/bin/security find-generic-password` to avoid needing native
+   * modules (Security.framework). The `-w` flag outputs only the password.
+   */
+  private async readCredentialsFromKeychain(): Promise<OAuthCredentials | null> {
+    try {
+      const raw = await new Promise<string>((resolve, reject) => {
+        execFile(
+          '/usr/bin/security',
+          ['find-generic-password', '-s', KEYCHAIN_SERVICE, '-w'],
+          { timeout: 5000 },
+          (err, stdout, stderr) => {
+            if (err) {
+              // Exit code 44 = item not found, not a real error
+              if ((err as NodeJS.ErrnoException).code === '44' || stderr?.includes('could not be found')) {
+                return resolve('')
+              }
+              return reject(err)
+            }
+            resolve(stdout.trim())
+          }
+        )
+      })
+
+      if (!raw) return null
+
+      const parsed = JSON.parse(raw) as CredentialsFile
+      if (!parsed.claudeAiOauth?.accessToken) return null
+
+      logger.info('UsageFetcher', 'Loaded credentials from macOS Keychain')
+      return parsed.claudeAiOauth
     } catch (err) {
-      logger.warn('UsageFetcher', 'Failed to read credentials', err)
+      logger.warn('UsageFetcher', 'Failed to read credentials from Keychain', err)
       return null
     }
   }

@@ -134,23 +134,26 @@ export function ChatPanel(): React.JSX.Element {
     }
   }, [activeSessionId])
 
-  // Helper: scroll to bottom and mark as auto-scroll so the handler doesn't misread it
-  const doAutoScroll = useCallback((el: HTMLDivElement, smooth = false) => {
+  // Helper: scroll to bottom and mark as auto-scroll so the handler doesn't misread it.
+  // Defaults to smooth. The guard stays up until the scroll animation settles (or a new
+  // scroll call replaces it), so rapid smooth calls don't accidentally trip "user scrolled up".
+  const smoothGuardRaf = useRef(0)
+  const doAutoScroll = useCallback((el: HTMLDivElement, smooth = true) => {
     isAutoScrolling.current = true
+    cancelAnimationFrame(smoothGuardRaf.current)
     if (smooth) {
       el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
-      // Smooth scroll takes many frames — keep the guard up until it settles
+      // Keep the guard up until the scroll settles near the bottom
       const clearGuard = (): void => {
         const dist = el.scrollHeight - el.scrollTop - el.clientHeight
         if (dist < 2) {
           isAutoScrolling.current = false
           lastScrollTop.current = el.scrollTop
         } else {
-          requestAnimationFrame(clearGuard)
+          smoothGuardRaf.current = requestAnimationFrame(clearGuard)
         }
       }
-      // Start checking after first frame
-      requestAnimationFrame(clearGuard)
+      smoothGuardRaf.current = requestAnimationFrame(clearGuard)
     } else {
       el.scrollTop = el.scrollHeight
       lastScrollTop.current = el.scrollTop
@@ -158,98 +161,43 @@ export function ChatPanel(): React.JSX.Element {
     }
   }, [])
 
-  // Auto-scroll on new content (messages, thinking, approvals, status changes) — uses flag, not distance.
-  // Uses instant scroll (not smooth) so content that continues to grow doesn't outrun the animation.
+  // Universal auto-scroll: a single MutationObserver on the scroll container catches ANY
+  // DOM change (new messages, tool call results expanding, streaming text, thinking blocks,
+  // approval cards, etc.). Smooth scroll for a polished feel; RAF-throttled to stay cheap.
   const scrollRafRef = useRef(0)
   useEffect(() => {
     const el = scrollRef.current
-    if (!el || !shouldAutoScroll.current) return
-    cancelAnimationFrame(scrollRafRef.current)
-    scrollRafRef.current = requestAnimationFrame(() => {
-      if (shouldAutoScroll.current) doAutoScroll(el)
-    })
-  }, [messages, hasStreamingText, thinkingStartedAt, pendingApprovals, status, doAutoScroll])
-
-  // Auto-scroll during streaming without subscribing to full streamingText
-  useEffect(() => {
-    let rafId = 0
-    const unsub = useSessionStore.subscribe((state, prevState) => {
-      const id = state.activeSessionId
-      if (!id) return
-      const session = state.sessions[id]
-      const prevSession = prevState.sessions[id]
-      if (!session || !prevSession) return
-
-      const focused = session.focusedAgentId
-      let cur: string | undefined
-      let prev: string | undefined
-      if (focused) {
-        cur = session.subagentStreamingText[focused]
-        prev = prevSession.subagentStreamingText[focused]
-      } else {
-        cur = session.streamingText
-        prev = prevSession.streamingText
-      }
-      if (cur !== prev && shouldAutoScroll.current) {
-        cancelAnimationFrame(rafId)
-        rafId = requestAnimationFrame(() => {
-          const el = scrollRef.current
-          if (!el || !shouldAutoScroll.current) return
-          doAutoScroll(el)
-        })
-      }
-    })
-    return () => {
-      unsub()
-      cancelAnimationFrame(rafId)
-    }
-  }, [doAutoScroll])
-
-  // ResizeObserver: catch elements that grow in-place (tool results, images, collapsibles).
-  // Observes both the scroll container (catches scrollHeight changes from any source, including
-  // content-visibility layout shifts) and the content wrapper (catches size changes from child
-  // elements growing). Uses a MutationObserver to re-attach when the content wrapper swaps
-  // (e.g. empty → loading → content state transitions).
-  useEffect(() => {
-    const el = scrollRef.current
     if (!el) return
-    let rafId = 0
-    let lastScrollHeight = el.scrollHeight
-    const handleResize = (): void => {
-      // Skip if scrollHeight hasn't actually changed (avoids needless work on horizontal resizes)
-      if (el.scrollHeight === lastScrollHeight) return
-      lastScrollHeight = el.scrollHeight
+
+    const scheduleScroll = (): void => {
       if (!shouldAutoScroll.current) return
-      cancelAnimationFrame(rafId)
-      rafId = requestAnimationFrame(() => {
-        if (shouldAutoScroll.current && el) doAutoScroll(el)
+      cancelAnimationFrame(scrollRafRef.current)
+      scrollRafRef.current = requestAnimationFrame(() => {
+        if (shouldAutoScroll.current && el) doAutoScroll(el, true)
       })
     }
-    const resizeObserver = new ResizeObserver(handleResize)
 
-    // Observe the scroll container itself (catches scrollHeight changes from any source)
+    // MutationObserver with subtree catches every content change:
+    // childList — new/removed nodes (messages, tool blocks, streaming chunks)
+    // characterData — text node changes (streaming text, thinking content)
+    // subtree — catches changes at any depth, not just direct children
+    const observer = new MutationObserver(scheduleScroll)
+    observer.observe(el, { childList: true, subtree: true, characterData: true })
+
+    // ResizeObserver as a safety net for layout shifts that don't mutate the DOM
+    // (e.g. images loading, content-visibility revealing, CSS transitions)
+    let lastScrollHeight = el.scrollHeight
+    const resizeObserver = new ResizeObserver(() => {
+      if (el.scrollHeight === lastScrollHeight) return
+      lastScrollHeight = el.scrollHeight
+      scheduleScroll()
+    })
     resizeObserver.observe(el)
 
-    // Also observe whichever element is the current content wrapper child
-    let observed: Element | null = null
-    const attach = (): void => {
-      const content = el.firstElementChild
-      if (content !== observed) {
-        if (observed) resizeObserver.unobserve(observed)
-        observed = content
-        if (content) resizeObserver.observe(content)
-      }
-    }
-    attach()
-
-    // Re-attach when the scroll container's direct children change (e.g. empty → content)
-    const mutationObserver = new MutationObserver(attach)
-    mutationObserver.observe(el, { childList: true })
-
     return () => {
+      observer.disconnect()
       resizeObserver.disconnect()
-      mutationObserver.disconnect()
-      cancelAnimationFrame(rafId)
+      cancelAnimationFrame(scrollRafRef.current)
     }
   }, [doAutoScroll])
 
@@ -259,16 +207,6 @@ export function ChatPanel(): React.JSX.Element {
     shouldAutoScroll.current = true
     doAutoScroll(el, true)
   }, [doAutoScroll])
-
-  // Auto-scroll when queued message card appears/grows (it shrinks the scroll area)
-  const queuedText = useActiveSession((s) => s.queuedText)
-  useEffect(() => {
-    if (!queuedText) return
-    const el = scrollRef.current
-    if (el && shouldAutoScroll.current) {
-      requestAnimationFrame(() => doAutoScroll(el))
-    }
-  }, [queuedText, doAutoScroll])
 
   const chatFontScale = useSessionStore((s) => s.settings.chatFontScale)
   const uiFontScale = useSessionStore((s) => s.settings.uiFontScale)
