@@ -709,6 +709,24 @@ export class ClaudeSession {
 
     try {
       await this.activeQuery.stopTask(taskId)
+
+      // The SDK's TaskStop calls the notification sender (HDY → VB), but VB
+      // enqueues to the CLI's output queue which is only consumed during model
+      // turns.  Since TaskStop runs inside a control-message handler (no active
+      // turn), the notification never reaches us.  Synthesize it directly.
+      this.markBackgroundDone(toolUseId)
+      this._teammateStatuses.set(toolUseId, 'stopped')
+      this.taskIdMap.delete(taskId)
+
+      this.send('session:task-notification', {
+        taskId,
+        toolUseId,
+        status: 'stopped',
+        outputFile: '',
+        summary: '',
+        usage: undefined
+      })
+
       return { success: true }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
