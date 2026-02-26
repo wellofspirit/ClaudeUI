@@ -331,6 +331,22 @@ export interface ClaudeAPI {
   loadClaudePermissions(scope: PermissionScope, cwd?: string): Promise<ClaudePermissions>
   saveClaudePermissions(scope: PermissionScope, permissions: ClaudePermissions, cwd?: string): Promise<void>
 
+  // Automation
+  listAutomations(): Promise<Automation[]>
+  saveAutomation(automation: Automation): Promise<void>
+  deleteAutomation(id: string): Promise<void>
+  runAutomationNow(id: string): Promise<void>
+  toggleAutomation(id: string, enabled: boolean): Promise<void>
+  listAutomationRuns(automationId: string): Promise<AutomationRun[]>
+  loadAutomationRunHistory(automationId: string, runId: string): Promise<ChatMessage[]>
+  cancelAutomationRun(automationId: string): Promise<void>
+  sendAutomationMessage(automationId: string, prompt: string): Promise<void>
+  onAutomationRunUpdate(cb: (data: { automationId: string; run: AutomationRun }) => void): () => void
+  onAutomationsChanged(cb: (automations: Automation[]) => void): () => void
+  onAutomationRunMessage(cb: (data: { automationId: string; message: ChatMessage }) => void): () => void
+  onAutomationStreamEvent(cb: (data: { automationId: string; type: string; text: string }) => void): () => void
+  onAutomationProcessing(cb: (data: { automationId: string; isProcessing: boolean }) => void): () => void
+
   // Logging
   logError(source: string, message: string): void
 }
@@ -439,6 +455,42 @@ export interface BlockUsageData {
     peakApiPercent: number // highest API % seen that day
     blockCount: number // number of blocks that day
   }>
+}
+
+// ---------------------------------------------------------------------------
+// Automation types (scheduled cron-job system)
+// ---------------------------------------------------------------------------
+
+export interface AutomationSchedule {
+  type: 'interval' | 'cron'
+  intervalMs?: number
+  cronExpression?: string
+}
+
+export interface Automation {
+  id: string
+  name: string
+  prompt: string
+  cwd: string
+  schedule: AutomationSchedule
+  permissions: { allow: string[]; deny: string[] }
+  model?: string
+  effort?: string
+  enabled: boolean
+  lastRunAt: number | null
+  lastRunStatus: 'success' | 'error' | null
+  createdAt: number
+}
+
+export interface AutomationRun {
+  id: string
+  automationId: string
+  startedAt: number
+  finishedAt: number | null
+  status: 'running' | 'success' | 'error'
+  totalCostUsd: number
+  error?: string
+  resultSummary?: string
 }
 
 // ---------------------------------------------------------------------------

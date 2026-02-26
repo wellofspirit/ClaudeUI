@@ -4,9 +4,12 @@ import { ChatPanel } from './chat/ChatPanel'
 import { TaskDetailPanel } from './TaskDetailPanel'
 import { GitPanel } from './git/GitPanel'
 import { UsageView } from './usage/UsageView'
+import { AutomationView } from './automation/AutomationView'
 import { TerminalPanel } from './terminal/TerminalPanel'
 import { useActiveSession, useSessionStore, applyTheme } from '../stores/session-store'
 import { useGitWatcher } from '../hooks/useGitWatcher'
+import { useAutomationEvents } from '../hooks/useAutomationEvents'
+import { NoisyMusicButton } from './NoisyMusicButton'
 
 const PERMISSION_MODES = ['default', 'acceptEdits', 'plan'] as const
 
@@ -114,6 +117,8 @@ export function SessionView(): React.JSX.Element {
   const uiFontScale = useSessionStore((s) => s.settings.uiFontScale)
   const showUsageView = useSessionStore((s) => s.showUsageView)
   const setShowUsageView = useSessionStore((s) => s.setShowUsageView)
+  const showAutomationView = useSessionStore((s) => s.showAutomationView)
+  const setShowAutomationView = useSessionStore((s) => s.setShowAutomationView)
   const rightPanel = useActiveSession((s) => s.rightPanel)
   const sidebar = useResizablePanel('sidebarWidth', 240, 180, 480)
   const taskPanel = useResizablePanel('taskPanelWidth', 400, 280, 700)
@@ -124,6 +129,9 @@ export function SessionView(): React.JSX.Element {
 
   // Git repo detection and polling
   useGitWatcher()
+
+  // Automation IPC event listeners
+  useAutomationEvents()
 
   const toggleSidebar = useCallback(() => {
     setSidebarCollapsed((prev) => {
@@ -215,6 +223,8 @@ export function SessionView(): React.JSX.Element {
             <div className={`flex-1 min-w-0 h-full flex flex-col bg-bg-primary overflow-hidden ${sidebarCollapsed ? '' : 'rounded-l-2xl shadow-[-1px_0_4px_rgba(0,0,0,0.15),-3px_0_12px_rgba(0,0,0,0.1)]'}`}>
               {showUsageView ? (
                 <UsageView onClose={() => setShowUsageView(false)} />
+              ) : showAutomationView ? (
+                <AutomationView onClose={() => setShowAutomationView(false)} />
               ) : (
                 <ChatPanel />
               )}
@@ -241,6 +251,7 @@ export function SessionView(): React.JSX.Element {
           )}
         </div>
       </div>
+      <NoisyMusicButton />
     </SidebarContext.Provider>
   )
 }

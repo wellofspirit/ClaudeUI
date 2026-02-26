@@ -4,6 +4,7 @@ import { useSessionStore, buildTodosFromMessages } from '../stores/session-store
 import type { ChatMessage, DirectoryGroup, SessionInfo, AccountUsage, RateWindow } from '../../../shared/types'
 import { SettingsDialog, SettingsToggle } from './SettingsDialog'
 import { PermissionsDialog } from './PermissionsDialog'
+import { useAutomationStore } from '../stores/automation-store'
 
 export function Sidebar({ style, onToggleCollapse }: {
   style?: React.CSSProperties
@@ -128,6 +129,10 @@ export function Sidebar({ style, onToggleCollapse }: {
   }, [setDirectories])
 
   const showWelcome = useSessionStore((s) => s.showWelcome)
+  const showAutomationView = useSessionStore((s) => s.showAutomationView)
+  const setShowAutomationView = useSessionStore((s) => s.setShowAutomationView)
+  const setShowUsageView = useSessionStore((s) => s.setShowUsageView)
+  const automationBadge = useAutomationStore((s) => s.notificationBadge)
 
   const handleNewSession = (): void => {
     showWelcome()
@@ -385,6 +390,22 @@ export function Sidebar({ style, onToggleCollapse }: {
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
               <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" />
               <path d="M18.5 2.5a2.12 2.12 0 013 3L12 15l-4 1 1-4z" />
+            </svg>
+          }
+        />
+        <NavItem
+          label="Automations"
+          active={showAutomationView}
+          onClick={() => {
+            const next = !showAutomationView
+            setShowAutomationView(next)
+            if (next) setShowUsageView(false)
+          }}
+          badge={automationBadge}
+          icon={
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="10" />
+              <polyline points="12 6 12 12 16 14" />
             </svg>
           }
         />
@@ -944,12 +965,13 @@ function PinnedSessionList({
   )
 }
 
-function NavItem({ label, icon, active, onClick, onDoubleClick }: {
+function NavItem({ label, icon, active, onClick, onDoubleClick, badge }: {
   label: string
   icon: React.ReactNode
   active?: boolean
   onClick?: () => void
   onDoubleClick?: () => void
+  badge?: number
 }): React.JSX.Element {
   return (
     <div
@@ -963,6 +985,11 @@ function NavItem({ label, icon, active, onClick, onDoubleClick }: {
     >
       <span className="shrink-0 text-text-muted">{icon}</span>
       <span className="truncate flex-1">{label}</span>
+      {badge != null && badge > 0 && (
+        <span className="shrink-0 min-w-[16px] h-4 px-1 flex items-center justify-center rounded-full bg-red-500 text-white text-[10px] font-semibold leading-none">
+          {badge > 99 ? '99+' : badge}
+        </span>
+      )}
     </div>
   )
 }

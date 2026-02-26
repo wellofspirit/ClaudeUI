@@ -268,6 +268,43 @@ const api: ClaudeAPI = {
   saveClaudePermissions: (scope, permissions, cwd?) =>
     ipcRenderer.invoke('claude:save-permissions', scope, permissions, cwd),
 
+  // Automation
+  listAutomations: () => ipcRenderer.invoke('automation:list'),
+  saveAutomation: (automation) => ipcRenderer.invoke('automation:save', automation),
+  deleteAutomation: (id: string) => ipcRenderer.invoke('automation:delete', id),
+  runAutomationNow: (id: string) => ipcRenderer.invoke('automation:run-now', id),
+  toggleAutomation: (id: string, enabled: boolean) => ipcRenderer.invoke('automation:toggle', id, enabled),
+  listAutomationRuns: (automationId: string) => ipcRenderer.invoke('automation:list-runs', automationId),
+  loadAutomationRunHistory: (automationId: string, runId: string) =>
+    ipcRenderer.invoke('automation:load-run-history', automationId, runId),
+  cancelAutomationRun: (id: string) => ipcRenderer.invoke('automation:cancel', id),
+  sendAutomationMessage: (id: string, prompt: string) => ipcRenderer.invoke('automation:send-message', id, prompt),
+  onAutomationRunUpdate: (cb) => {
+    const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as never)
+    ipcRenderer.on('automation:run-update', handler)
+    return () => ipcRenderer.removeListener('automation:run-update', handler)
+  },
+  onAutomationsChanged: (cb) => {
+    const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as never)
+    ipcRenderer.on('automation:changed', handler)
+    return () => ipcRenderer.removeListener('automation:changed', handler)
+  },
+  onAutomationRunMessage: (cb) => {
+    const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as never)
+    ipcRenderer.on('automation:run-message', handler)
+    return () => ipcRenderer.removeListener('automation:run-message', handler)
+  },
+  onAutomationStreamEvent: (cb) => {
+    const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as never)
+    ipcRenderer.on('automation:stream-event', handler)
+    return () => ipcRenderer.removeListener('automation:stream-event', handler)
+  },
+  onAutomationProcessing: (cb) => {
+    const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as never)
+    ipcRenderer.on('automation:processing', handler)
+    return () => ipcRenderer.removeListener('automation:processing', handler)
+  },
+
   logError: (source: string, message: string) => {
     ipcRenderer.send('log:error', source, message)
   }

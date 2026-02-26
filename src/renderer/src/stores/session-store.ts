@@ -441,6 +441,7 @@ interface SessionState {
   accountUsage: AccountUsage | null
   blockUsage: BlockUsageData | null
   showUsageView: boolean
+  showAutomationView: boolean
 
   // Terminal panel (global, survives session switching)
   terminalTabs: TerminalTab[]
@@ -534,6 +535,7 @@ interface SessionState {
   // Block usage analytics
   setBlockUsage: (data: BlockUsageData) => void
   setShowUsageView: (show: boolean) => void
+  setShowAutomationView: (show: boolean) => void
   // Diff review comments
   addDiffComment: (routingId: string, comment: DiffComment) => void
   removeDiffComment: (routingId: string, commentId: string) => void
@@ -560,6 +562,7 @@ export const useSessionStore = create<SessionState>((set) => ({
   accountUsage: null,
   blockUsage: null,
   showUsageView: false,
+  showAutomationView: false,
   terminalTabs: [],
   activeTerminalId: null,
   terminalPanelOpen: false,
@@ -1262,6 +1265,7 @@ export const useSessionStore = create<SessionState>((set) => ({
   setAccountUsage: (data) => set({ accountUsage: data }),
   setBlockUsage: (data) => set({ blockUsage: data }),
   setShowUsageView: (show) => set({ showUsageView: show }),
+  setShowAutomationView: (show) => set({ showAutomationView: show, ...(show ? { showUsageView: false } : {}) }),
 
   rekeySession: (oldId, newId) => {
     // Record the mapping so events arriving with the old routingId can be resolved

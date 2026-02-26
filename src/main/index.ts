@@ -4,6 +4,7 @@ import { execFileSync } from 'child_process'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import { registerSessionIpc } from './ipc/session.ipc'
 import { registerTerminalIpc } from './ipc/terminal.ipc'
+import { registerAutomationIpc } from './ipc/automation.ipc'
 import { logger } from './services/logger'
 import icon from '../../resources/icon.png?asset'
 
@@ -60,6 +61,11 @@ function createWindow(): void {
 
   registerSessionIpc(mainWindow)
   registerTerminalIpc(mainWindow)
+  const automationManager = registerAutomationIpc(mainWindow)
+
+  app.on('before-quit', () => {
+    automationManager.stopAll()
+  })
 
   // Renderer error logging → main process log file
   ipcMain.removeAllListeners('log:error')
