@@ -140,6 +140,7 @@ export class UsageFetcher {
   private async fetchUsage(): Promise<AccountUsage> {
     const creds = await this.readCredentials()
     if (!creds) {
+      logger.warn('UsageFetcher', 'No OAuth credentials found')
       return this.errorResult('No OAuth credentials found. Run "claude login" first.')
     }
 
@@ -149,6 +150,7 @@ export class UsageFetcher {
       try {
         token = await this.refreshToken(creds)
       } catch (err) {
+        logger.warn('UsageFetcher', 'Token refresh failed', err)
         return this.errorResult(`Token refresh failed: ${err instanceof Error ? err.message : String(err)}`)
       }
     }
@@ -190,19 +192,23 @@ export class UsageFetcher {
         }
 
         if (resp.status === 401) {
+          logger.warn('UsageFetcher', 'Unauthorized after retry — token invalid')
           return this.errorResult('Unauthorized — token may be invalid. Try "claude login" again.')
         }
         if (resp.status === 403) {
+          logger.warn('UsageFetcher', 'Forbidden — missing user:profile scope')
           return this.errorResult('Forbidden — token missing user:profile scope.')
         }
 
         // Retry on server errors (5xx)
         if (resp.status >= 500) {
           lastError = `API error: ${resp.status} ${resp.statusText}`
+          logger.warn('UsageFetcher', `Server error (attempt ${attempt + 1}/${MAX_RETRIES + 1})`, lastError)
           continue
         }
 
         if (!resp.ok) {
+          logger.warn('UsageFetcher', `Unexpected status: ${resp.status} ${resp.statusText}`)
           return this.errorResult(`API error: ${resp.status} ${resp.statusText}`)
         }
 
@@ -214,6 +220,7 @@ export class UsageFetcher {
         } else {
           lastError = `Fetch failed: ${err instanceof Error ? err.message : String(err)}`
         }
+        logger.warn('UsageFetcher', `Fetch error (attempt ${attempt + 1}/${MAX_RETRIES + 1})`, lastError)
         // Retry on network errors and timeouts
         continue
       } finally {
@@ -221,6 +228,7 @@ export class UsageFetcher {
       }
     }
 
+    logger.error('UsageFetcher', `All retries exhausted: ${lastError}`)
     return this.errorResult(`${lastError} (after ${MAX_RETRIES + 1} attempts)`)
   }
 
@@ -347,6 +355,14 @@ export class UsageFetcher {
     }
 
     const fiveHour = parseWindow('five_hour')
+
+    if (!fiveHour) {
+      logger.warn(
+        'UsageFetcher',
+        'API response missing five_hour utilization — defaulting to 0%',
+        { keys: Object.keys(data), five_hour: data['five_hour'] }
+      )
+    }
 
     return {
       fiveHour: fiveHour ?? { usedPercent: 0, resetsAt: null },
