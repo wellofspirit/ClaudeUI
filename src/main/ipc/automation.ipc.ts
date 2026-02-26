@@ -11,6 +11,7 @@ const AUTOMATION_IPC_CHANNELS = [
   'automation:list-runs',
   'automation:load-run-history',
   'automation:cancel',
+  'automation:dismiss-run',
   'automation:send-message'
 ]
 
@@ -53,6 +54,10 @@ export function registerAutomationIpc(win: BrowserWindow): AutomationManager {
 
   ipcMain.handle('automation:cancel', (_e, id: string) => {
     manager.cancelRun(id)
+  })
+
+  ipcMain.handle('automation:dismiss-run', (_e, automationId: string, runId: string) => {
+    manager.dismissRun(automationId, runId)
   })
 
   ipcMain.handle('automation:send-message', (_e, id: string, prompt: string) => {

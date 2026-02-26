@@ -340,6 +340,8 @@ export interface ClaudeAPI {
   listAutomationRuns(automationId: string): Promise<AutomationRun[]>
   loadAutomationRunHistory(automationId: string, runId: string): Promise<ChatMessage[]>
   cancelAutomationRun(automationId: string): Promise<void>
+  /** Mark a run as stopped (for runs not managed by this instance) */
+  dismissAutomationRun(automationId: string, runId: string): Promise<void>
   sendAutomationMessage(automationId: string, prompt: string): Promise<void>
   onAutomationRunUpdate(cb: (data: { automationId: string; run: AutomationRun }) => void): () => void
   onAutomationsChanged(cb: (automations: Automation[]) => void): () => void
@@ -491,6 +493,10 @@ export interface AutomationRun {
   totalCostUsd: number
   error?: string
   resultSummary?: string
+  /** SDK session ID — used to locate the project JSONL for message history */
+  sessionId?: string
+  /** SDK project key (cwd with /.\\ replaced by -) — used with sessionId to load history */
+  projectKey?: string
 }
 
 // ---------------------------------------------------------------------------

@@ -7,15 +7,23 @@ import { Notification, type BrowserWindow } from 'electron'
 import { CronExpressionParser } from 'cron-parser'
 import { getCliJsPath } from './claude-session'
 import { loadClaudePermissions } from './claude-settings'
+import { loadSessionHistory } from './session-history'
 import { logger } from './logger'
 import type { Automation, AutomationRun, ChatMessage, ContentBlock } from '../../shared/types'
+
+const CLAUDE_PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects')
 
 // ---------------------------------------------------------------------------
 // Paths
 // ---------------------------------------------------------------------------
 
 const AUTOMATION_DIR = path.join(os.homedir(), '.claude', 'ui', 'automation')
-const AUTOMATIONS_FILE = path.join(AUTOMATION_DIR, 'automations.json')
+/** @deprecated Legacy single-file storage — migrated to per-file on first load */
+const LEGACY_AUTOMATIONS_FILE = path.join(AUTOMATION_DIR, 'automations.json')
+
+function automationFile(id: string): string {
+  return path.join(AUTOMATION_DIR, `${id}.json`)
+}
 
 function runsDir(automationId: string): string {
   return path.join(AUTOMATION_DIR, 'runs', automationId)
@@ -23,10 +31,6 @@ function runsDir(automationId: string): string {
 
 function runsIndexFile(automationId: string): string {
   return path.join(runsDir(automationId), 'runs.json')
-}
-
-function runJsonlFile(automationId: string, runId: string): string {
-  return path.join(runsDir(automationId), `${runId}.jsonl`)
 }
 
 // ---------------------------------------------------------------------------
@@ -79,52 +83,6 @@ function formatToolStr(toolName: string, input: Record<string, unknown>): string
 }
 
 // ---------------------------------------------------------------------------
-// MessageChannel — push-based async iterable for SDK streaming input
-// ---------------------------------------------------------------------------
-
-class MessageChannel<T> {
-  private queue: T[] = []
-  private waiting: ((result: IteratorResult<T>) => void) | null = null
-  private isDone = false
-
-  push(msg: T): void {
-    if (this.isDone) return
-    if (this.waiting) {
-      const resolve = this.waiting
-      this.waiting = null
-      resolve({ value: msg, done: false })
-    } else {
-      this.queue.push(msg)
-    }
-  }
-
-  end(): void {
-    this.isDone = true
-    if (this.waiting) {
-      const resolve = this.waiting
-      this.waiting = null
-      resolve({ value: undefined as T, done: true })
-    }
-  }
-
-  [Symbol.asyncIterator](): AsyncIterator<T> {
-    return this
-  }
-
-  async next(): Promise<IteratorResult<T>> {
-    if (this.queue.length > 0) {
-      return { value: this.queue.shift()!, done: false }
-    }
-    if (this.isDone) {
-      return { value: undefined as T, done: true }
-    }
-    return new Promise((resolve) => {
-      this.waiting = resolve
-    })
-  }
-}
-
-// ---------------------------------------------------------------------------
 // AutomationManager
 // ---------------------------------------------------------------------------
 
@@ -133,10 +91,13 @@ export class AutomationManager {
   private automations: Automation[] = []
   private timers = new Map<string, ReturnType<typeof setTimeout>>()
   private activeRuns = new Map<string, AbortController>()
-  private channels = new Map<string, MessageChannel<unknown>>()
   private sessionIds = new Map<string, string>()
   private currentRunIds = new Map<string, string>()
   private processingAutomations = new Set<string>()
+  private fileWatcher: fs.FSWatcher | null = null
+  private watchDebounce: ReturnType<typeof setTimeout> | null = null
+  /** Flag to ignore file-change events triggered by our own writes */
+  private suppressWatch = false
 
   constructor(win: BrowserWindow) {
     this.win = win
@@ -146,11 +107,104 @@ export class AutomationManager {
 
   load(): void {
     ensureDir(AUTOMATION_DIR)
-    this.automations = readJson<Automation[]>(AUTOMATIONS_FILE) ?? []
+    this.migrateFromLegacy()
+    this.automations = this.readAllFromDisk()
+    this.startFileWatcher()
   }
 
-  private save(): void {
-    writeJson(AUTOMATIONS_FILE, this.automations)
+  /** Migrate from legacy single-file automations.json to per-file storage */
+  private migrateFromLegacy(): void {
+    if (!fs.existsSync(LEGACY_AUTOMATIONS_FILE)) return
+    const legacy = readJson<Automation[]>(LEGACY_AUTOMATIONS_FILE)
+    if (!legacy || legacy.length === 0) {
+      fs.unlinkSync(LEGACY_AUTOMATIONS_FILE)
+      return
+    }
+    this.suppressWatch = true
+    for (const auto of legacy) {
+      const file = automationFile(auto.id)
+      if (!fs.existsSync(file)) {
+        writeJson(file, auto)
+      }
+    }
+    fs.unlinkSync(LEGACY_AUTOMATIONS_FILE)
+    setTimeout(() => { this.suppressWatch = false }, 100)
+    logger.info('AutomationManager', `Migrated ${legacy.length} automation(s) from legacy automations.json`)
+  }
+
+  /** Read all {id}.json files from the automation directory */
+  private readAllFromDisk(): Automation[] {
+    const automations: Automation[] = []
+    try {
+      for (const entry of fs.readdirSync(AUTOMATION_DIR)) {
+        if (!entry.endsWith('.json') || entry === 'automations.json') continue
+        const auto = readJson<Automation>(path.join(AUTOMATION_DIR, entry))
+        if (auto && auto.id) automations.push(auto)
+      }
+    } catch (err) {
+      logger.warn('AutomationManager', 'Failed to read automation directory', err)
+    }
+    return automations
+  }
+
+  /** Watch the automation directory for external changes (e.g. another app instance) */
+  private startFileWatcher(): void {
+    if (this.fileWatcher) return
+
+    try {
+      this.fileWatcher = fs.watch(AUTOMATION_DIR, (_event, filename) => {
+        if (this.suppressWatch) return
+        if (!filename || !filename.endsWith('.json') || filename === 'automations.json') return
+        if (this.watchDebounce) clearTimeout(this.watchDebounce)
+        this.watchDebounce = setTimeout(() => this.reloadFromDisk(), 500)
+      })
+    } catch (err) {
+      logger.warn('AutomationManager', 'Failed to watch automation directory', err)
+    }
+  }
+
+  /** Reload automations from disk and reconcile with in-memory state */
+  private reloadFromDisk(): void {
+    const diskAutomations = this.readAllFromDisk()
+    const oldIds = new Set(this.automations.map((a) => a.id))
+    const newIds = new Set(diskAutomations.map((a) => a.id))
+
+    // Cancel schedules for removed automations
+    for (const id of oldIds) {
+      if (!newIds.has(id)) {
+        this.cancelSchedule(id)
+      }
+    }
+
+    // Reschedule changed/new automations
+    for (const auto of diskAutomations) {
+      const old = this.automations.find((a) => a.id === auto.id)
+      if (!old || old.enabled !== auto.enabled || old.schedule.cronExpression !== auto.schedule.cronExpression || old.schedule.intervalMs !== auto.schedule.intervalMs) {
+        this.cancelSchedule(auto.id)
+        if (auto.enabled && !this.activeRuns.has(auto.id)) {
+          this.scheduleNext(auto)
+        }
+      }
+    }
+
+    this.automations = diskAutomations
+    this.notifyAutomationsChanged()
+    logger.info('AutomationManager', `Reloaded ${diskAutomations.length} automation(s) from disk`)
+  }
+
+  /** Save a single automation to its own file */
+  private saveAutomation(automation: Automation): void {
+    this.suppressWatch = true
+    writeJson(automationFile(automation.id), automation)
+    setTimeout(() => { this.suppressWatch = false }, 100)
+  }
+
+  /** Delete a single automation file from disk */
+  private deleteAutomationFile(id: string): void {
+    this.suppressWatch = true
+    const file = automationFile(id)
+    if (fs.existsSync(file)) fs.unlinkSync(file)
+    setTimeout(() => { this.suppressWatch = false }, 100)
   }
 
   private loadRuns(automationId: string): AutomationRun[] {
@@ -159,12 +213,6 @@ export class AutomationManager {
 
   private saveRuns(automationId: string, runs: AutomationRun[]): void {
     writeJson(runsIndexFile(automationId), runs)
-  }
-
-  private appendMessageToLog(automationId: string, runId: string, msg: ChatMessage): void {
-    const logFile = runJsonlFile(automationId, runId)
-    ensureDir(path.dirname(logFile))
-    fs.appendFileSync(logFile, JSON.stringify(msg) + '\n')
   }
 
   // ---- CRUD ---------------------------------------------------------------
@@ -180,7 +228,7 @@ export class AutomationManager {
     } else {
       this.automations.push(automation)
     }
-    this.save()
+    this.saveAutomation(automation)
     // Reschedule if enabled
     this.cancelSchedule(automation.id)
     if (automation.enabled) {
@@ -194,7 +242,7 @@ export class AutomationManager {
     // Abort active run if any
     this.cancelRun(id)
     this.automations = this.automations.filter((a) => a.id !== id)
-    this.save()
+    this.deleteAutomationFile(id)
     // Clean up run history on disk
     const dir = runsDir(id)
     if (fs.existsSync(dir)) {
@@ -207,7 +255,7 @@ export class AutomationManager {
     const auto = this.automations.find((a) => a.id === id)
     if (!auto) return
     auto.enabled = enabled
-    this.save()
+    this.saveAutomation(auto)
     if (enabled) {
       this.scheduleNext(auto)
     } else {
@@ -216,9 +264,9 @@ export class AutomationManager {
     this.notifyAutomationsChanged()
   }
 
-  /** Check if an automation has an active channel (running session) */
+  /** Check if an automation has an active session (sessionId captured, can send follow-ups) */
   hasActiveSession(id: string): boolean {
-    return this.channels.has(id)
+    return this.sessionIds.has(id)
   }
 
   // ---- Scheduling ---------------------------------------------------------
@@ -233,6 +281,15 @@ export class AutomationManager {
   }
 
   stopAll(): void {
+    // Stop file watcher
+    if (this.fileWatcher) {
+      this.fileWatcher.close()
+      this.fileWatcher = null
+    }
+    if (this.watchDebounce) {
+      clearTimeout(this.watchDebounce)
+      this.watchDebounce = null
+    }
     for (const [id, timer] of this.timers) {
       clearTimeout(timer)
       this.timers.delete(id)
@@ -303,39 +360,46 @@ export class AutomationManager {
 
   cancelRun(id: string): void {
     this.activeRuns.get(id)?.abort()
-    this.channels.get(id)?.end()
-    this.channels.delete(id)
     this.sessionIds.delete(id)
     this.currentRunIds.delete(id)
     this.processingAutomations.delete(id)
   }
 
-  sendMessage(automationId: string, prompt: string): void {
-    const channel = this.channels.get(automationId)
-    if (!channel) throw new Error('No active session for this automation')
-    const sessionId = this.sessionIds.get(automationId) || ''
-    const sdkMessage = {
-      type: 'user' as const,
-      session_id: sessionId,
-      message: { role: 'user' as const, content: prompt },
-      parent_tool_use_id: null
-    }
-    channel.push(sdkMessage)
-    this.processingAutomations.add(automationId)
-    this.emitProcessing(automationId, true)
+  /** Mark a specific run as stopped — for runs not managed by this instance
+   *  (e.g. started by another app instance, or orphaned after app exit) */
+  dismissRun(automationId: string, runId: string): void {
+    const runs = this.loadRuns(automationId)
+    const run = runs.find((r) => r.id === runId)
+    if (!run || run.status !== 'running') return
+    run.status = 'error'
+    run.error = 'Manually stopped'
+    run.finishedAt = run.finishedAt || Date.now()
+    this.saveRuns(automationId, runs)
+    this.notifyRunUpdate(automationId, run)
+  }
 
-    // Log the user message to JSONL and emit to renderer
-    const runId = this.currentRunIds.get(automationId)
-    if (runId) {
-      const userMsg: ChatMessage = {
-        id: uuid(),
-        role: 'user',
-        content: [{ type: 'text', text: prompt }],
-        timestamp: Date.now()
-      }
-      this.appendMessageToLog(automationId, runId, userMsg)
-      this.emitRunMessage(automationId, userMsg)
+  /** Send a follow-up message to a running automation by resuming the SDK session */
+  sendMessage(automationId: string, prompt: string): void {
+    const sessionId = this.sessionIds.get(automationId)
+    if (!sessionId) throw new Error('No active session for this automation')
+    if (this.activeRuns.has(automationId)) throw new Error('A turn is already in progress')
+
+    const automation = this.automations.find((a) => a.id === automationId)
+    if (!automation) throw new Error(`Automation ${automationId} not found`)
+
+    // Emit user message to renderer for live display
+    const userMsg: ChatMessage = {
+      id: uuid(),
+      role: 'user',
+      content: [{ type: 'text', text: prompt }],
+      timestamp: Date.now()
     }
+    this.emitRunMessage(automationId, userMsg)
+
+    // Resume the session with a one-shot sdkQuery
+    this.runOneShotQuery(automation, prompt, sessionId).catch((err) => {
+      logger.error('AutomationManager', `sendMessage failed for ${automationId}: ${err}`)
+    })
   }
 
   private emitRunMessage(automationId: string, message: ChatMessage): void {
@@ -374,25 +438,63 @@ export class AutomationManager {
     runs.unshift(run)
     this.saveRuns(automation.id, runs)
     this.notifyRunUpdate(automation.id, run)
+    this.currentRunIds.set(automation.id, runId)
 
+    try {
+      const result = await this.runOneShotQuery(automation, automation.prompt)
+      run.totalCostUsd += result.costUsd
+      run.status = 'success'
+      run.resultSummary = result.lastText.slice(0, 200) || undefined
+    } catch (err) {
+      run.status = 'error'
+      run.error = err instanceof Error ? err.message : String(err)
+      logger.error('AutomationManager', `Automation "${automation.name}" run error: ${run.error}`)
+    } finally {
+      run.finishedAt = Date.now()
+      this.currentRunIds.delete(automation.id)
+      // Keep sessionId alive so user can send follow-up messages
+
+      // Update automation metadata
+      automation.lastRunAt = run.startedAt
+      automation.lastRunStatus = run.status === 'running' ? 'error' : run.status
+      this.saveAutomation(automation)
+
+      // Update run index — merge into the disk entry to preserve fields
+      // (like sessionId/projectKey) that were set during runOneShotQuery
+      const updatedRuns = this.loadRuns(automation.id)
+      const idx = updatedRuns.findIndex((r) => r.id === runId)
+      if (idx >= 0) {
+        updatedRuns[idx] = { ...updatedRuns[idx], ...run }
+      }
+      this.saveRuns(automation.id, updatedRuns)
+
+      // Notify renderer
+      this.notifyRunUpdate(automation.id, run)
+      this.notifyAutomationsChanged()
+
+      // Native notification
+      this.sendNativeNotification(automation, run)
+
+      // Schedule next run if still enabled
+      const current = this.automations.find((a) => a.id === automation.id)
+      if (current?.enabled) {
+        this.scheduleNext(current)
+      }
+    }
+  }
+
+  /** Run a single one-shot sdkQuery turn. Used for both initial runs and follow-up messages.
+   *  If resumeSessionId is provided, resumes an existing session instead of creating a new one. */
+  private async runOneShotQuery(
+    automation: Automation,
+    prompt: string,
+    resumeSessionId?: string
+  ): Promise<{ costUsd: number; lastText: string }> {
     const abortController = new AbortController()
     this.activeRuns.set(automation.id, abortController)
-    this.currentRunIds.set(automation.id, runId)
     this.processingAutomations.add(automation.id)
 
-    // Create MessageChannel for persistent session
-    const channel = new MessageChannel<unknown>()
-    this.channels.set(automation.id, channel)
-
-    // Push the initial prompt as an SDK user message
-    const sdkMessage = {
-      type: 'user' as const,
-      session_id: '',
-      message: { role: 'user' as const, content: automation.prompt },
-      parent_tool_use_id: null
-    }
-    channel.push(sdkMessage)
-
+    let totalCostUsd = 0
     let lastAssistantText = ''
     let lastAssistantMsg: ChatMessage | null = null
 
@@ -410,9 +512,10 @@ export class AutomationManager {
       const canUseTool = this.buildCanUseTool(automation, mergedPerms)
 
       const q = sdkQuery({
-        prompt: channel as AsyncIterable<never>,
+        prompt,
         options: {
           ...(cliPath ? { pathToClaudeCodeExecutable: cliPath } : {}),
+          ...(resumeSessionId ? { resume: resumeSessionId } : {}),
           cwd: automation.cwd,
           model: automation.model || 'default',
           permissionMode: 'default' as const,
@@ -430,30 +533,37 @@ export class AutomationManager {
         const msg = message as Record<string, unknown>
         const type = msg.type as string
 
-        // Capture session_id from first message
-        if ('session_id' in msg && msg.session_id && !this.sessionIds.has(automation.id)) {
-          this.sessionIds.set(automation.id, msg.session_id as string)
+        // Capture session_id from the SDK and persist to run metadata.
+        // Always update — each executeRun creates a fresh session with a new id.
+        if ('session_id' in msg && msg.session_id && msg.session_id !== this.sessionIds.get(automation.id)) {
+          const sid = msg.session_id as string
+          this.sessionIds.set(automation.id, sid)
+          // Update run metadata with sessionId
+          const runId = this.currentRunIds.get(automation.id)
+          if (runId) {
+            const runsForUpdate = this.loadRuns(automation.id)
+            const sidx = runsForUpdate.findIndex((r) => r.id === runId)
+            if (sidx >= 0) {
+              runsForUpdate[sidx].sessionId = sid
+              this.saveRuns(automation.id, runsForUpdate)
+            }
+          }
         }
 
         if (type === 'assistant') {
           const chatMsg = this.transformAssistantMessage(msg)
           if (chatMsg) {
-            this.appendMessageToLog(automation.id, runId, chatMsg)
             this.emitRunMessage(automation.id, chatMsg)
             lastAssistantMsg = chatMsg
-            // Track last assistant text for summary
             const textBlock = chatMsg.content.find((b) => b.type === 'text')
             if (textBlock?.text) lastAssistantText = textBlock.text
           }
         } else if (type === 'user') {
-          // Extract tool_result blocks from user messages and attach to last assistant message
           const messageParam = msg.message as Record<string, unknown> | undefined
           if (messageParam && Array.isArray(messageParam.content) && lastAssistantMsg) {
             const toolResults = this.extractToolResults(messageParam.content as Array<Record<string, unknown>>)
             if (toolResults.length > 0) {
               lastAssistantMsg.content.push(...toolResults)
-              // Re-emit the updated assistant message (renderer upserts by id)
-              this.appendMessageToLog(automation.id, runId, lastAssistantMsg)
               this.emitRunMessage(automation.id, lastAssistantMsg)
             }
           }
@@ -474,59 +584,28 @@ export class AutomationManager {
           }
         } else if (type === 'result') {
           const costUsd = (msg.cost_usd as number) || (msg.totalCostUsd as number) || 0
-          run.totalCostUsd += costUsd
+          totalCostUsd += costUsd
           this.processingAutomations.delete(automation.id)
-
-          // Update cost in run index
-          const updatedRuns = this.loadRuns(automation.id)
-          const idx = updatedRuns.findIndex((r) => r.id === runId)
-          if (idx >= 0) {
-            updatedRuns[idx] = { ...run }
-            this.saveRuns(automation.id, updatedRuns)
-          }
-          // Notify cost update and that this turn is done (processing = false)
           this.emitProcessing(automation.id, false)
-          this.notifyRunUpdate(automation.id, run)
+
+          // Update cost in run index and notify renderer with the real run object
+          const runId = this.currentRunIds.get(automation.id)
+          if (runId) {
+            const updatedRuns = this.loadRuns(automation.id)
+            const idx = updatedRuns.findIndex((r) => r.id === runId)
+            if (idx >= 0) {
+              updatedRuns[idx].totalCostUsd = (updatedRuns[idx].totalCostUsd || 0) + costUsd
+              this.saveRuns(automation.id, updatedRuns)
+              this.notifyRunUpdate(automation.id, updatedRuns[idx])
+            }
+          }
         }
       }
 
-      run.status = 'success'
-      run.resultSummary = lastAssistantText.slice(0, 200) || undefined
-    } catch (err) {
-      run.status = 'error'
-      run.error = err instanceof Error ? err.message : String(err)
-      logger.error('AutomationManager', `Automation "${automation.name}" run error: ${run.error}`)
+      return { costUsd: totalCostUsd, lastText: lastAssistantText }
     } finally {
-      run.finishedAt = Date.now()
       this.activeRuns.delete(automation.id)
-      this.channels.delete(automation.id)
-      this.sessionIds.delete(automation.id)
-      this.currentRunIds.delete(automation.id)
       this.processingAutomations.delete(automation.id)
-
-      // Update automation metadata
-      automation.lastRunAt = run.startedAt
-      automation.lastRunStatus = run.status === 'running' ? 'error' : run.status
-      this.save()
-
-      // Update run index
-      const updatedRuns = this.loadRuns(automation.id)
-      const idx = updatedRuns.findIndex((r) => r.id === runId)
-      if (idx >= 0) updatedRuns[idx] = run
-      this.saveRuns(automation.id, updatedRuns)
-
-      // Notify renderer
-      this.notifyRunUpdate(automation.id, run)
-      this.notifyAutomationsChanged()
-
-      // Native notification
-      this.sendNativeNotification(automation, run)
-
-      // Schedule next run if still enabled
-      const current = this.automations.find((a) => a.id === automation.id)
-      if (current?.enabled) {
-        this.scheduleNext(current)
-      }
     }
   }
 
@@ -623,10 +702,42 @@ export class AutomationManager {
     return this.loadRuns(automationId)
   }
 
-  loadRunMessages(automationId: string, runId: string): ChatMessage[] {
-    const logFile = runJsonlFile(automationId, runId)
-    if (!fs.existsSync(logFile)) return []
-    const lines = fs.readFileSync(logFile, 'utf-8').split('\n').filter(Boolean)
+  async loadRunMessages(automationId: string, runId: string): Promise<ChatMessage[]> {
+    // Find the run to get sessionId
+    const runs = this.loadRuns(automationId)
+    const run = runs.find((r) => r.id === runId)
+    if (!run) return []
+
+    // New runs have sessionId — find the SDK's project JSONL on disk
+    if (run.sessionId) {
+      // Always scan filesystem for the correct projectKey — cached values may be
+      // stale/wrong due to path normalization differences (e.g. POSIX vs Windows)
+      const discoveredKey = this.findProjectKeyForSession(run.sessionId)
+      const projectKey = discoveredKey || run.projectKey
+      if (projectKey) {
+        try {
+          const { messages } = await loadSessionHistory(run.sessionId, projectKey)
+          // Update cached projectKey if it was missing or wrong
+          if (discoveredKey && run.projectKey !== discoveredKey) {
+            run.projectKey = discoveredKey
+            const allRuns = this.loadRuns(automationId)
+            const idx = allRuns.findIndex((r) => r.id === runId)
+            if (idx >= 0) {
+              allRuns[idx] = { ...run }
+              this.saveRuns(automationId, allRuns)
+            }
+          }
+          return messages
+        } catch (err) {
+          logger.warn('AutomationManager', `Failed to load session history for run ${runId}: ${err}`)
+        }
+      }
+    }
+
+    // Legacy fallback: old runs may have a dedicated JSONL in the automation runs dir
+    const legacyFile = path.join(runsDir(automationId), `${runId}.jsonl`)
+    if (!fs.existsSync(legacyFile)) return []
+    const lines = fs.readFileSync(legacyFile, 'utf-8').split('\n').filter(Boolean)
     const messages: ChatMessage[] = []
     for (const line of lines) {
       try {
@@ -636,6 +747,23 @@ export class AutomationManager {
       }
     }
     return messages
+  }
+
+  /** Find the projectKey directory containing a given sessionId JSONL file.
+   *  Scans ~/.claude/projects/ since the SDK's path normalization (POSIX on Windows)
+   *  makes it unreliable to compute the projectKey from the cwd ourselves. */
+  private findProjectKeyForSession(sessionId: string): string | null {
+    try {
+      if (!fs.existsSync(CLAUDE_PROJECTS_DIR)) return null
+      const jsonlName = `${sessionId}.jsonl`
+      for (const dir of fs.readdirSync(CLAUDE_PROJECTS_DIR)) {
+        const candidate = path.join(CLAUDE_PROJECTS_DIR, dir, jsonlName)
+        if (fs.existsSync(candidate)) return dir
+      }
+    } catch {
+      // ignore scan errors
+    }
+    return null
   }
 
   // ---- Notifications ------------------------------------------------------

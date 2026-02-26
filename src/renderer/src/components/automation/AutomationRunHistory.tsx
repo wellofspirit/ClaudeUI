@@ -50,9 +50,11 @@ export function AutomationRunHistory(): React.JSX.Element {
   }
 
   const handleStop = (): void => {
-    if (selectedAutomationId) {
-      window.api.cancelAutomationRun(selectedAutomationId)
-    }
+    if (!selectedAutomationId || !selectedRunId) return
+    // Try to abort the local run (works if this instance owns it)
+    window.api.cancelAutomationRun(selectedAutomationId)
+    // Also mark the run as stopped in runs.json (works for foreign/stale runs)
+    window.api.dismissAutomationRun(selectedAutomationId, selectedRunId)
   }
 
   const statusIcon = run.status === 'success' ? '✅' : run.status === 'error' ? '❌' : '🔄'

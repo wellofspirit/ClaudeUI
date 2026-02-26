@@ -574,7 +574,7 @@ export const useSessionStore = create<SessionState>((set) => ({
       if (cleaned.recentSessionIds !== state.recentSessionIds) {
         saveSessionConfig(cleaned.recentSessionIds, state.pinnedSessionIds, state.customTitles)
       }
-      return { activeSessionId: null, ...cleaned }
+      return { activeSessionId: null, showAutomationView: false, showUsageView: false, ...cleaned }
     }),
 
   switchSession: (routingId) =>
@@ -585,6 +585,8 @@ export const useSessionStore = create<SessionState>((set) => ({
       }
       return {
         activeSessionId: routingId,
+        showAutomationView: false,
+        showUsageView: false,
         sessions: updateSession(cleaned.sessions, routingId, () => ({ needsAttention: false })),
         recentSessionIds: cleaned.recentSessionIds
       }
@@ -596,6 +598,8 @@ export const useSessionStore = create<SessionState>((set) => ({
       saveSessionConfig(recentSessionIds, state.pinnedSessionIds, state.customTitles)
       return {
         activeSessionId: routingId,
+        showAutomationView: false,
+        showUsageView: false,
         sessions: { ...state.sessions, [routingId]: createEmptySession(cwd) },
         recentSessionIds
       }

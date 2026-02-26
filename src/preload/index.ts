@@ -278,6 +278,8 @@ const api: ClaudeAPI = {
   loadAutomationRunHistory: (automationId: string, runId: string) =>
     ipcRenderer.invoke('automation:load-run-history', automationId, runId),
   cancelAutomationRun: (id: string) => ipcRenderer.invoke('automation:cancel', id),
+  dismissAutomationRun: (automationId: string, runId: string) =>
+    ipcRenderer.invoke('automation:dismiss-run', automationId, runId),
   sendAutomationMessage: (id: string, prompt: string) => ipcRenderer.invoke('automation:send-message', id, prompt),
   onAutomationRunUpdate: (cb) => {
     const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as never)

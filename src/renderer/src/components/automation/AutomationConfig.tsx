@@ -106,6 +106,11 @@ function AutomationConfigForm({ automation }: { automation: Automation }): React
   const handleRunNow = (): void => {
     if (hasRunningRun) {
       window.api.cancelAutomationRun(automation.id)
+      // Also dismiss the running run(s) in runs.json for foreign/stale runs
+      const runningRun = runs?.find((r) => r.status === 'running')
+      if (runningRun) {
+        window.api.dismissAutomationRun(automation.id, runningRun.id)
+      }
     } else {
       window.api.runAutomationNow(automation.id)
     }

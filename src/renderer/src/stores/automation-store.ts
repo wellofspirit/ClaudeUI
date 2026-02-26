@@ -1,5 +1,50 @@
 import { create } from 'zustand'
-import type { Automation, AutomationRun, ChatMessage } from '../../../shared/types'
+import type { Automation, AutomationRun, ChatMessage, ContentBlock } from '../../../shared/types'
+
+/**
+ * Merges content blocks when upserting an assistant message by ID.
+ * The SDK sends partial messages that may not include all previously accumulated
+ * content blocks. This function preserves tool_use and tool_result blocks from the
+ * old message that aren't present in the incoming update.
+ * (Mirrors the same logic in session-store.ts)
+ */
+function mergeContentBlocks(
+  oldBlocks: ContentBlock[],
+  newBlocks: ContentBlock[]
+): ContentBlock[] {
+  const newToolUseIds = new Set(
+    newBlocks.filter((b) => b.type === 'tool_use' && b.toolUseId).map((b) => b.toolUseId)
+  )
+  const newToolResultIds = new Set(
+    newBlocks.filter((b) => b.type === 'tool_result' && b.toolUseId).map((b) => b.toolUseId)
+  )
+  const newThinkingCount = newBlocks.filter((b) => b.type === 'thinking').length
+  const newHasText = newBlocks.some((b) => b.type === 'text')
+
+  const droppedThinkingCount = Math.max(
+    0,
+    oldBlocks.filter((b) => b.type === 'thinking').length - newThinkingCount
+  )
+  let thinkingsSeen = 0
+  const preserved: ContentBlock[] = []
+
+  for (const b of oldBlocks) {
+    if (b.type === 'tool_use' && b.toolUseId && !newToolUseIds.has(b.toolUseId)) {
+      preserved.push(b)
+    } else if (b.type === 'tool_result' && b.toolUseId && !newToolResultIds.has(b.toolUseId)) {
+      preserved.push(b)
+    } else if (b.type === 'thinking') {
+      if (thinkingsSeen < droppedThinkingCount) {
+        preserved.push(b)
+      }
+      thinkingsSeen++
+    } else if (b.type === 'text' && !newHasText) {
+      preserved.push(b)
+    }
+  }
+
+  return [...preserved, ...newBlocks]
+}
 
 interface AutomationState {
   automations: Automation[]
@@ -82,8 +127,13 @@ export const useAutomationStore = create<AutomationState>((set) => ({
       // Upsert by id (assistant partial messages share the same id)
       const idx = s.runMessages.findIndex((m) => m.id === message.id)
       if (idx >= 0) {
+        const existing = s.runMessages[idx]
+        const merged = {
+          ...message,
+          content: mergeContentBlocks(existing.content, message.content)
+        }
         const updated = [...s.runMessages]
-        updated[idx] = message
+        updated[idx] = merged
         return { runMessages: updated }
       }
       return { runMessages: [...s.runMessages, message] }
