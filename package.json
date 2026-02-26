@@ -16,7 +16,7 @@
     "build": "npm run typecheck && electron-vite build",
     "postinstall": "electron-builder install-app-deps && node patch/apply-all.mjs",
     "build:unpack": "npm run build && electron-builder --dir",
-    "build:win": "npm run build && electron-builder --win",
+    "build:win": "npm run build && electron-builder --win --dir",
     "build:mac": "electron-vite build && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac --dir && codesign --force --deep --sign - dist/mac-arm64/claudui.app && xattr -cr dist/mac-arm64/claudui.app",
     "build:linux": "electron-vite build && electron-builder --linux"
   },
