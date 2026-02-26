@@ -71,8 +71,10 @@ if (!skipA1) {
   // ---------------------------------------------------------------------------
   console.log('\n--- Locating control-request fallback ---')
 
+  // The message variable changed between versions (c in 0.2.50, e in 0.2.59).
+  // Use a captured group + backreference to handle any variable name.
   const anchorRe = new RegExp(
-    `else (${V})\\(c,\`Unsupported control request subtype: \\$\\{c\\.request\\.subtype\\}\`\\);continue\\}else if\\(c\\.type==="control_response"\\)`
+    `else (${V})\\((${V}),\`Unsupported control request subtype: \\$\\{\\2\\.request\\.subtype\\}\`\\);continue\\}else if\\(\\2\\.type==="control_response"\\)`
   )
 
   const anchorMatch = anchorRe.exec(src)
@@ -90,7 +92,8 @@ if (!skipA1) {
     process.exit(1)
   }
 
-  console.log(`Found fallback anchor at char ${anchorIdx}`)
+  const msgVar = anchorMatch[2]  // message variable (c in 0.2.50, e in 0.2.59)
+  console.log(`Found fallback anchor at char ${anchorIdx} (msgVar=${msgVar})`)
 
   // ---------------------------------------------------------------------------
   // Extract minified function names from content patterns
@@ -100,7 +103,7 @@ if (!skipA1) {
   const nearbyCtx = src.slice(Math.max(0, anchorIdx - 5000), anchorIdx + 2000)
 
   // --- Success response helper ---
-  const successRe = new RegExp(`\\),(${V})\\(c,\\{\\}\\)\\}catch`)
+  const successRe = new RegExp(`\\),(${V})\\(${msgVar.replace(/\$/g, '\\$')},\\{\\}\\)\\}catch`)
   const successMatch = successRe.exec(nearbyCtx)
   if (!successMatch) {
     console.error('ERROR: Cannot find success response helper pattern')
@@ -191,10 +194,10 @@ if (!skipA1) {
     : `(_6)=>typeof _6.value==="string"?_6.value===Y6:JSON.stringify(_6.value)===Y6`
 
   const injectionA1 = PATCH_A1_MARKER +
-    `else if(c.request.subtype==="dequeue_message"){` +
-      `let{value:Y6}=c.request;` +
+    `else if(${msgVar}.request.subtype==="dequeue_message"){` +
+      `let{value:Y6}=${msgVar}.request;` +
       `let O6=${removeFn}(${predicate});` +
-      `${successFn}(c,{removed:O6.length})` +
+      `${successFn}(${msgVar},{removed:O6.length})` +
     `}`
 
   src = src.slice(0, anchorIdx) + injectionA1 + src.slice(anchorIdx)
@@ -220,21 +223,23 @@ if (!skipA2) {
   //   1. Always yields a system notification (regardless of G)
   //   2. Only yields the user message replay when G is true
 
-  // Find the pattern: else if(G&&<var>.attachment.type==="queued_command")
-  // Capture: the variable name and the surrounding context to get session_id and uuid generators
+  // Find the pattern: else if(REPLAY_VAR&&<var>.attachment.type==="queued_command")
+  // Capture: the replayUserMessages var and the attachment var
+  // v2.1.50: G, v2.1.59: Z — generalize with ${V}
   const qcRe = new RegExp(
-    `else if\\(G&&(${V})\\.attachment\\.type==="queued_command"\\)yield\\{`
+    `else if\\((${V})&&(${V})\\.attachment\\.type==="queued_command"\\)yield\\{`
   )
   const qcMatch = qcRe.exec(src)
   if (!qcMatch) {
     console.error('ERROR: Cannot find queued_command attachment handler in submitMessage')
-    console.error('Pattern: else if(G&&<var>.attachment.type==="queued_command")yield{')
+    console.error('Pattern: else if(REPLAY&&<var>.attachment.type==="queued_command")yield{')
     process.exit(1)
   }
 
   const qcIdx = qcMatch.index
-  const attachVar = qcMatch[1]
-  console.log(`Found queued_command handler at char ${qcIdx}, attachment var: ${attachVar}`)
+  const replayVar = qcMatch[1]
+  const attachVar = qcMatch[2]
+  console.log(`Found queued_command handler at char ${qcIdx}, replay var: ${replayVar}, attachment var: ${attachVar}`)
 
   // Verify uniqueness
   const allQcMatches = [...src.matchAll(new RegExp(qcRe, 'g'))]
@@ -248,7 +253,7 @@ if (!skipA2) {
   // Instead, use [\s\S]*? (non-greedy any char) anchored to isReplay:!0}
   const afterQc = src.slice(qcIdx)
   const fullQcRe = new RegExp(
-    `else if\\(G&&${attachVar.replace(/\$/g, '\\$')}\\.attachment\\.type==="queued_command"\\)yield\\{[\\s\\S]*?isReplay:!0\\}`
+    `else if\\(${replayVar.replace(/\$/g, '\\$')}&&${attachVar.replace(/\$/g, '\\$')}\\.attachment\\.type==="queued_command"\\)yield\\{[\\s\\S]*?isReplay:!0\\}`
   )
   const fullQcMatch = fullQcRe.exec(afterQc)
   if (!fullQcMatch) {
@@ -290,7 +295,7 @@ if (!skipA2) {
       `yield{type:"system",subtype:"queued_command_consumed",` +
         `prompt:${attachVar}.attachment.prompt,source_uuid:${attachVar}.attachment.source_uuid,` +
         `session_id:${sessionIdFn}(),uuid:${uuidFn}()};` +
-      `if(G)yield{type:"user",message:{role:"user",content:${attachVar}.attachment.prompt},` +
+      `if(${replayVar})yield{type:"user",message:{role:"user",content:${attachVar}.attachment.prompt},` +
         `session_id:${sessionIdFn}(),parent_tool_use_id:null,` +
         `uuid:${attachVar}.attachment.source_uuid||${attachVar}.uuid,isReplay:!0}` +
     `}`
