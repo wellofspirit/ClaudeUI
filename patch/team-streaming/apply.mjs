@@ -186,10 +186,12 @@ if (src.includes(patchBMarker)) {
   src = src.slice(0, idxB1) + injectionB1 + src.slice(idxB1)
   console.log(`B1 applied. Stream events bypass collection.`)
 
-  // --- B2: Assistant/user forwarding (after _g() state update) ---
-  // Pattern: lastReportedTokenCount:<fn>(<var>)}},<setAppState>)
-  // This is the end of the _g() call inside the for-await loop body.
-  const b2Re = new RegExp(`lastReportedTokenCount:(${V})\\((${V})\\)\\}\\},(${V})\\)`)
+  // --- B2: Assistant/user forwarding (after KF() state update) ---
+  // Pattern: inProgressToolUseIDs:<var>}},<setAppState>)
+  // This is the closing of the KF() state update call inside the for-await loop.
+  // v2.1.50: lastReportedTokenCount:VP8(p)}},M)
+  // v2.1.59: inProgressToolUseIDs:L6}},M)  (refactored state update with progress snapshots)
+  const b2Re = new RegExp(`inProgressToolUseIDs:(${V})\\}\\},(${V})\\)`)
   const b2Match = src.match(b2Re)
   if (!b2Match) {
     console.error('ERROR: Cannot find Patch B2 anchor pattern.')
@@ -201,6 +203,13 @@ if (src.includes(patchBMarker)) {
 
   if (src.indexOf(anchorB2, idxB2 + 1) !== -1) {
     console.error('ERROR: Multiple matches for Patch B2 anchor. Aborting.')
+    process.exit(1)
+  }
+
+  // Verify we're inside the in-process runner's for-await loop
+  const beforeB2 = src.slice(Math.max(0, idxB2 - 5000), idxB2)
+  if (!beforeB2.includes('inProcessRunner')) {
+    console.error('ERROR: B2 anchor not in expected inProcessRunner context.')
     process.exit(1)
   }
 
@@ -264,20 +273,14 @@ if (src.includes(patchCMarker)) {
     `})+"\\n")`
 
   // --- C1: Success path ---
-  // The success return is a comma expression ending with {success:!0,messages:<var>}.
-  // Between the _g() state update and the return object there may be intermediate
-  // cleanup calls (e.g., dX(K), tK6(q.agentId) added in SDK 0.2.50).
+  // v2.1.49: return im(K,...,M),{success:!0,messages:G}  (comma expression)
+  // v2.1.50: return im(K,...,M),dX(K),tK6(q.agentId),{success:!0,messages:G}
+  // v2.1.59: return{success:!0,messages:x}  (standalone return after while loop)
   //
-  // Strategy: match inProgressToolUseIDs:void 0}),<setState>), then allow any
-  // chain of calls before ,{success:!0,messages:<var>}. We inject our notification
-  // right before {success:!0.
-  //
-  // v2.1.49: ...void 0}),M),{success:!0,messages:G}
-  // v2.1.50: ...void 0}),M),dX(K),tK6(q.agentId),{success:!0,messages:G}
+  // Strategy: match return{success:!0,messages:<var>} directly and inject
+  // the notification statement before the return.
   const c1Re = new RegExp(
-    `inProgressToolUseIDs:void 0\\}\\),${V}\\)` +  // ...void 0}),M)
-    `((?:,${V}\\([^)]*\\))*)` +                    // optional chain: ,fn(args),fn(args),...
-    `,\\{success:!0,messages:(${V})\\}`              // ,{success:!0,messages:G}
+    `return\\{success:!0,messages:(${V})\\}`
   )
   const c1Match = src.match(c1Re)
   if (!c1Match) {
@@ -287,27 +290,23 @@ if (src.includes(patchCMarker)) {
 
   const anchorC1 = c1Match[0]
   const idxC1 = src.indexOf(anchorC1)
-  const trailingCallsC1 = c1Match[1] // e.g. ",dX(K),tK6(q.agentId)" or ""
-  const messagesVar = c1Match[2]
+  const messagesVar = c1Match[1]
 
   if (src.indexOf(anchorC1, idxC1 + 1) !== -1) {
     console.error('ERROR: Multiple matches for Patch C1 anchor. Aborting.')
     process.exit(1)
   }
 
-  // Verify in-process runner context
-  const beforeC1 = src.slice(Math.max(0, idxC1 - 3000), idxC1)
+  // Verify in-process runner context (use 8000 char window since function is large)
+  const beforeC1 = src.slice(Math.max(0, idxC1 - 8000), idxC1)
   if (!beforeC1.includes('inProcessRunner')) {
     console.error('ERROR: C1 anchor not in expected context.')
     process.exit(1)
   }
 
-  // Insert notification before {success:!0}. Keep everything else intact.
+  // Insert notification as a statement before the return.
   const replacementC1 =
-    `${patchCMarker}` + anchorC1.replace(
-      `,{success:!0,messages:${messagesVar}}`,
-      `,${notifySnippet('completed')},{success:!0,messages:${messagesVar}}`
-    )
+    `${patchCMarker}${notifySnippet('completed')};return{success:!0,messages:${messagesVar}}`
 
   src = src.slice(0, idxC1) + replacementC1 + src.slice(idxC1 + anchorC1.length)
   console.log(`C1 applied at char ${idxC1}. Completion notification injected.`)

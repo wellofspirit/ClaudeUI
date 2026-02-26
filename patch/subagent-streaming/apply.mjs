@@ -457,11 +457,13 @@ if (src.includes(patchEMarker)) {
   // Pattern: ))ARR.push(MSG),STATS_FN(STATS,MSG,TOOLS,J.options.tools),STATE_FN(AGENTID,...);
   // v2.1.41: ))f1.push(W1),QM1(k1,W1,e,J.options.tools),XW8(t.agentId,Nm1(k1),J.setAppState);
   // v2.1.42: ))J1.push(q6),tM1(M1,q6,y1,J.options.tools),kWA(S1,pm1(M1),J.setAppState);
+  // v2.1.59: ))if(T6.push(r),_f6(s,r,o,j.options.tools),GI8(...),r.type==="assistant"&&...)Pa7(...);
+  //          The `if(` wrapper is optional — matches both old and new patterns.
   const asyncBodyRe = new RegExp(
-    `\\)\\)(${V})\\.push\\((${V})\\),` +             // ))ARR.push(MSG),
-    `(${V})\\((${V}),\\2,` +                         // tM1(STATS,MSG,
-    `(${V}),(${V})\\.options\\.tools\\),` +           // TOOLS,J.options.tools),
-    `(${V})\\([^;]+;`                                 // kWA(...);
+    `\\)\\)(?:if\\()?(${V})\\.push\\((${V})\\),` +  // ))ARR.push(MSG), or ))if(ARR.push(MSG),
+    `(${V})\\((${V}),\\2,` +                         // STATS(STATS,MSG,
+    `(${V}),(${V})\\.options\\.tools\\),` +           // TOOLS,j.options.tools),
+    `[^;]+;`                                          // ...rest until ;
   , 'g')
 
   let asyncMatch

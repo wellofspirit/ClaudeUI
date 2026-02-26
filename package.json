@@ -21,7 +21,7 @@
     "build:linux": "electron-vite build && electron-builder --linux"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "0.2.50",
+    "@anthropic-ai/claude-agent-sdk": "0.2.59",
     "@electron-toolkit/preload": "^3.0.2",
     "@electron-toolkit/utils": "^4.0.0",
     "@git-diff-view/core": "^0.0.39",
