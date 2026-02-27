@@ -9,6 +9,7 @@ import { listDirectories, loadSessionHistory, loadSubagentHistory, buildSubagent
 import { watchSession, unwatchSession } from '../services/session-watcher'
 import { loadSettings, saveSettings, loadSessionConfig, saveSessionConfig, loadSlashCommands, saveSlashCommands, startConfigWatcher } from '../services/ui-config'
 import { loadClaudePermissions, saveClaudePermissions } from '../services/claude-settings'
+import { scanSkills } from '../services/skill-scanner'
 import type { UISettings, UISessionConfig, SlashCommandCache } from '../services/ui-config'
 import { gitServiceManager } from '../services/git-service'
 import { usageFetcher } from '../services/usage-fetcher'
@@ -165,6 +166,7 @@ const SESSION_IPC_CHANNELS = [
   'session:watch-session', 'session:unwatch-session',
   'config:load-settings', 'config:save-settings', 'config:load-sessions',
   'config:save-sessions', 'config:load-slash-commands', 'config:save-slash-commands',
+  'config:load-skill-details',
   'session:send-to-teammate', 'session:broadcast-to-team', 'session:get-team-info',
   'session:open-teams-view',
   'git:check-repo', 'git:status', 'git:branches', 'git:checkout', 'git:create-branch',
@@ -353,6 +355,7 @@ export function registerSessionIpc(win: BrowserWindow): void {
   ipcMain.handle('config:save-sessions', (_e, config: UISessionConfig) => saveSessionConfig(config))
   ipcMain.handle('config:load-slash-commands', () => loadSlashCommands())
   ipcMain.handle('config:save-slash-commands', (_e, commands: SlashCommandCache[]) => saveSlashCommands(commands))
+  ipcMain.handle('config:load-skill-details', (_e, cwd: string) => scanSkills(cwd))
 
   // Claude permission settings (allow/deny/ask rules)
   ipcMain.handle('claude:load-permissions', (_e, scope: string, cwd?: string) =>

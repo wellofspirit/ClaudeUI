@@ -317,6 +317,8 @@ export interface ClaudeAPI {
   loadSlashCommands(): Promise<SlashCommandInfo[]>
   saveSlashCommands(commands: SlashCommandInfo[]): Promise<void>
   onSlashCommands(cb: (data: RoutedData<SlashCommandInfo[]>) => void): () => void
+  loadSkillDetails(cwd: string): Promise<SkillInfo[]>
+  onSkills(cb: (data: RoutedData<string[]>) => void): () => void
   onStatusLine(cb: (data: RoutedData<StatusLineData>) => void): () => void
   onSettingsChanged(cb: (settings: Record<string, unknown>) => void): () => void
   onSessionConfigChanged(cb: (config: UISessionConfig) => void): () => void
@@ -514,6 +516,22 @@ export interface UISessionConfig {
 export interface SlashCommandInfo {
   name: string
   description?: string
+}
+
+// ---------------------------------------------------------------------------
+// Skill types (skills management dialog)
+// ---------------------------------------------------------------------------
+
+export type SkillSource = 'project' | 'user' | 'plugin' | 'bundled'
+
+export interface SkillInfo {
+  name: string
+  displayName?: string
+  description: string
+  source: SkillSource
+  pluginName?: string
+  path: string       // filesystem path to SKILL.md (empty for bundled)
+  content: string    // markdown body (no frontmatter)
 }
 
 // ---------------------------------------------------------------------------

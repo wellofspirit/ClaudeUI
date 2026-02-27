@@ -14,6 +14,7 @@ import { AgentTabBar } from './AgentTabBar'
 import { GitBranchPill } from '../git/GitBranchPill'
 import { GitChangesPill } from '../git/GitChangesPill'
 import { PermissionsDialog } from '../PermissionsDialog'
+import { SkillsDialog } from '../SkillsDialog'
 
 function QueuedMessageCard(): React.JSX.Element | null {
   const queuedText = useActiveSession((s) => s.queuedText)
@@ -376,6 +377,7 @@ function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Element {
   const [infoHover, setInfoHover] = useState(false)
   const infoLeaveTimer = useRef<ReturnType<typeof setTimeout>>(null)
   const [permissionsOpen, setPermissionsOpen] = useState(false)
+  const [skillsOpen, setSkillsOpen] = useState(false)
 
   const infoMouseEnter = useCallback(() => {
     if (infoLeaveTimer.current) clearTimeout(infoLeaveTimer.current)
@@ -521,6 +523,17 @@ function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Element {
         )}
         {cwd && (
           <button
+            onClick={() => setSkillsOpen(true)}
+            className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[12px] text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
+            title="Skills"
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
+              <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+            </svg>
+          </button>
+        )}
+        {cwd && (
+          <button
             onClick={() => setPermissionsOpen(true)}
             className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[12px] text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
             title="Project permissions"
@@ -534,6 +547,11 @@ function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Element {
         <GitChangesPill />
         <WindowControls />
       </div>
+      <SkillsDialog
+        open={skillsOpen}
+        onClose={() => setSkillsOpen(false)}
+        cwd={cwd}
+      />
       <PermissionsDialog
         open={permissionsOpen}
         onClose={() => setPermissionsOpen(false)}

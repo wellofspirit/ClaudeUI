@@ -444,6 +444,7 @@ interface SessionState {
   settings: AppSettings
   availableModels: ModelInfo[]
   slashCommands: SlashCommandInfo[]
+  sdkSkillNames: string[]
   accountUsage: AccountUsage | null
   blockUsage: BlockUsageData | null
   showUsageView: boolean
@@ -516,6 +517,7 @@ interface SessionState {
   setDraftText: (text: string) => void
   setSelectedModel: (model: string) => void
   setSlashCommands: (commands: SlashCommandInfo[]) => void
+  setSdkSkillNames: (names: string[]) => void
   setAvailableModels: (models: ModelInfo[]) => void
   rekeySession: (oldId: string, newId: string) => void
   clearConversation: (routingId: string) => void
@@ -569,6 +571,7 @@ export const useSessionStore = create<SessionState>((set) => ({
   settings: DEFAULT_SETTINGS,
   availableModels: [],
   slashCommands: [],
+  sdkSkillNames: [],
   accountUsage: null,
   blockUsage: null,
   showUsageView: false,
@@ -1272,6 +1275,7 @@ export const useSessionStore = create<SessionState>((set) => ({
     }),
 
   setSlashCommands: (commands) => set({ slashCommands: commands }),
+  setSdkSkillNames: (names) => set({ sdkSkillNames: names }),
 
   setAvailableModels: (models) => set({ availableModels: models }),
 

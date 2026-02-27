@@ -326,6 +326,10 @@ export class ClaudeSession {
               .map((name) => ({ name: name.startsWith('/') ? name : '/' + name }))
             this.send('session:slash-commands', slashCommands)
             saveSlashCommands(slashCommands)
+
+            // Extract skill names from init
+            const skillNames = (msg.skills as string[]) || []
+            this.send('session:skills', skillNames)
           }
 
           this.sendStatus()

@@ -232,6 +232,12 @@ const api: ClaudeAPI = {
   saveSessionConfig: (config) => ipcRenderer.invoke('config:save-sessions', config),
   loadSlashCommands: () => ipcRenderer.invoke('config:load-slash-commands'),
   saveSlashCommands: (commands) => ipcRenderer.invoke('config:save-slash-commands', commands),
+  loadSkillDetails: (cwd: string) => ipcRenderer.invoke('config:load-skill-details', cwd),
+  onSkills: (cb) => {
+    const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as never)
+    ipcRenderer.on('session:skills', handler)
+    return () => ipcRenderer.removeListener('session:skills', handler)
+  },
   onStatusLine: (cb) => {
     const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as never)
     ipcRenderer.on('session:status-line', handler)
