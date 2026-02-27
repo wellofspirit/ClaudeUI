@@ -357,6 +357,18 @@ html, #root {
   background: var(--color-bg-input);
   color: var(--color-text-primary) !important;
 }
+/* The library's extend-wrapper already uses sticky + useDomWidth, but the
+   measurement targets .diff-table-scroll-container whose overflow we've set
+   to visible — so its getBoundingClientRect can report the scrollable content
+   width.  We establish .diff-scroll-container (our outer overflow:auto wrapper)
+   as a CSS container and cap widgets/badges to its inline size. */
+.diff-scroll-container {
+  container-type: inline-size;
+}
+.diff-comment-widget,
+.diff-comment-badges {
+  max-width: min(600px, calc(100cqi - 1rem));
+}
 .diff-comment-widget *,
 .diff-comment-badge * {
   color: inherit !important;

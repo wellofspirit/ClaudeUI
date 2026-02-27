@@ -7,7 +7,7 @@ interface Props {
 
 export function DiffCommentBadge({ comments, onRemove }: Props): React.JSX.Element {
   return (
-    <div className="mx-2 my-1 flex flex-col gap-1">
+    <div className="diff-comment-badges mx-2 my-1 flex flex-col gap-1">
       {comments.map((c) => (
         <div
           key={c.id}
