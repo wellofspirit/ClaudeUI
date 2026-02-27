@@ -292,7 +292,7 @@ export class UsageFetcher {
       const parsed = JSON.parse(raw) as CredentialsFile
       if (!parsed.claudeAiOauth?.accessToken) return null
 
-      logger.info('UsageFetcher', 'Loaded credentials from macOS Keychain')
+      logger.debug('UsageFetcher', 'Loaded credentials from macOS Keychain')
       return parsed.claudeAiOauth
     } catch (err) {
       logger.warn('UsageFetcher', 'Failed to read credentials from Keychain', err)

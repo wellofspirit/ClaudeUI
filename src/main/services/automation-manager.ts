@@ -129,7 +129,7 @@ export class AutomationManager {
     }
     fs.unlinkSync(LEGACY_AUTOMATIONS_FILE)
     setTimeout(() => { this.suppressWatch = false }, 100)
-    logger.info('AutomationManager', `Migrated ${legacy.length} automation(s) from legacy automations.json`)
+    logger.debug('AutomationManager', `Migrated ${legacy.length} automation(s) from legacy automations.json`)
   }
 
   /** Read all {id}.json files from the automation directory */
@@ -189,7 +189,7 @@ export class AutomationManager {
 
     this.automations = diskAutomations
     this.notifyAutomationsChanged()
-    logger.info('AutomationManager', `Reloaded ${diskAutomations.length} automation(s) from disk`)
+    logger.debug('AutomationManager', `Reloaded ${diskAutomations.length} automation(s) from disk`)
   }
 
   /** Save a single automation to its own file */
@@ -277,7 +277,7 @@ export class AutomationManager {
         this.scheduleNext(auto)
       }
     }
-    logger.info('AutomationManager', `Started ${this.automations.filter((a) => a.enabled).length} automation(s)`)
+    logger.debug('AutomationManager', `Started ${this.automations.filter((a) => a.enabled).length} automation(s)`)
   }
 
   stopAll(): void {
@@ -297,7 +297,7 @@ export class AutomationManager {
     for (const [id] of this.activeRuns) {
       this.cancelRun(id)
     }
-    logger.info('AutomationManager', 'Stopped all automations')
+    logger.debug('AutomationManager', 'Stopped all automations')
   }
 
   private scheduleNext(automation: Automation): void {
@@ -326,7 +326,7 @@ export class AutomationManager {
       this.timers.delete(automation.id)
       // Skip if a run is already active for this automation
       if (this.activeRuns.has(automation.id)) {
-        logger.info('AutomationManager', `Skipping ${automation.name}: previous run still active`)
+        logger.debug('AutomationManager', `Skipping ${automation.name}: previous run still active`)
         this.scheduleNext(automation)
         return
       }
@@ -352,7 +352,7 @@ export class AutomationManager {
     const auto = this.automations.find((a) => a.id === id)
     if (!auto) throw new Error(`Automation ${id} not found`)
     if (this.activeRuns.has(id)) {
-      logger.info('AutomationManager', `${auto.name} already running, skipping manual trigger`)
+      logger.debug('AutomationManager', `${auto.name} already running, skipping manual trigger`)
       return
     }
     await this.executeRun(auto)

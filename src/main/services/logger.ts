@@ -82,5 +82,12 @@ export const logger = {
     console.log(`[${source}]`, message)
     // Info is console-only by default; uncomment to persist:
     // writeToFile('INFO', source, message)
+  },
+
+  /** Debug-level logging — silent by default. Set `logger.debugEnabled = true` to activate. */
+  debugEnabled: false,
+  debug(source: string, message: string): void {
+    if (!logger.debugEnabled) return
+    console.log(`[DEBUG] [${source}]`, message)
   }
 }

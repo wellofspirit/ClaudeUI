@@ -247,7 +247,7 @@ export class ClaudeSession {
       const cliPath = getCliJsPath()
       if (cliPath) {
         const cliExists = fs.existsSync(cliPath)
-        logger.info('ClaudeSession', `CLI path: ${cliPath} (exists: ${cliExists})`)
+        logger.debug('ClaudeSession', `CLI path: ${cliPath} (exists: ${cliExists})`)
         if (!cliExists) {
           this.send('session:error', `CLI not found at: ${cliPath}`)
           return

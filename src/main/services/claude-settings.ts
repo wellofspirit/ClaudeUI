@@ -113,5 +113,5 @@ export function saveClaudePermissions(
   }
 
   fs.writeFileSync(filePath, JSON.stringify(data, null, 2) + '\n', { mode: 0o600 })
-  logger.info('ClaudeSettings', `Saved ${scope} permissions to ${filePath}`)
+  logger.debug('ClaudeSettings', `Saved ${scope} permissions to ${filePath}`)
 }

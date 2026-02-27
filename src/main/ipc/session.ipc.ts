@@ -26,7 +26,7 @@ const COMMIT_MSG_SYSTEM_PROMPT =
 
 async function generateTitle(conversationText: string): Promise<string | null> {
   const abort = new AbortController()
-  logger.info('generateTitle', `request: ${conversationText.length} chars`)
+  logger.debug('generateTitle', `request: ${conversationText.length} chars`)
 
   try {
     const cliPath = getCliJsPath()
@@ -59,16 +59,16 @@ async function generateTitle(conversationText: string): Promise<string | null> {
       }
     }
 
-    logger.info('generateTitle', `response: ${JSON.stringify(result)}`)
+    logger.debug('generateTitle', `response: ${JSON.stringify(result)}`)
 
     // Take the first line, strip quotes/punctuation, limit to 3 words
     const cleaned = result.trim().split('\n')[0].replace(/^["'`]+|["'`]+$/g, '').trim()
     const words = cleaned.split(/\s+/).slice(0, 3).join(' ')
     if (words.length >= 2) {
-      logger.info('generateTitle', `title: ${words}`)
+      logger.debug('generateTitle', `title: ${words}`)
       return words
     }
-    logger.info('generateTitle', 'no usable title extracted')
+    logger.debug('generateTitle', 'no usable title extracted')
     return null
   } catch (err) {
     logger.error('generateTitle', 'Failed to generate title', err)
@@ -80,7 +80,7 @@ async function generateTitle(conversationText: string): Promise<string | null> {
 
 async function generateCommitMessage(diff: string): Promise<string | null> {
   const abort = new AbortController()
-  logger.info('generateCommitMessage', `request: ${diff.length} chars`)
+  logger.debug('generateCommitMessage', `request: ${diff.length} chars`)
 
   try {
     const cliPath = getCliJsPath()
@@ -113,13 +113,13 @@ async function generateCommitMessage(diff: string): Promise<string | null> {
       }
     }
 
-    logger.info('generateCommitMessage', `response: ${JSON.stringify(result)}`)
+    logger.debug('generateCommitMessage', `response: ${JSON.stringify(result)}`)
 
     const cleaned = result.trim()
     if (cleaned.length >= 3) {
       return cleaned
     }
-    logger.info('generateCommitMessage', 'no usable message extracted')
+    logger.debug('generateCommitMessage', 'no usable message extracted')
     return null
   } catch (err) {
     logger.error('generateCommitMessage', 'Failed to generate commit message', err)
