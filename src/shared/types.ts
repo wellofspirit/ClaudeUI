@@ -308,7 +308,7 @@ export interface ClaudeAPI {
   gitStopWatching(cwd: string): Promise<void>
   onGitStatusUpdate(cb: (data: { cwd: string; status: GitStatusData }) => void): () => void
 
-  listDir(dirPath: string): Promise<DirEntry[]>
+  listDir(dirPath: string): Promise<{ entries: DirEntry[]; isRoot: boolean; resolvedPath: string }>
   openInVSCode(cwd: string): Promise<void>
   loadSettings(): Promise<Record<string, unknown>>
   saveSettings(settings: Record<string, unknown>): Promise<void>

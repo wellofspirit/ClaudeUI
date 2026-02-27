@@ -305,9 +305,14 @@ export function registerSessionIpc(win: BrowserWindow): void {
         if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1
         return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })
       })
-      return result
+      // Check if this directory is a filesystem root (parent resolves to itself)
+      // Return resolved path in POSIX format so renderer can rewrite relative dirs
+      const resolved = path.resolve(dirPath)
+      const isRoot = path.dirname(resolved) === resolved
+      const resolvedPosix = resolved.replace(/\\/g, '/').replace(/\/$/, '')
+      return { entries: result, isRoot, resolvedPath: resolvedPosix }
     } catch {
-      return []
+      return { entries: [], isRoot: false, resolvedPath: '' }
     }
   })
 

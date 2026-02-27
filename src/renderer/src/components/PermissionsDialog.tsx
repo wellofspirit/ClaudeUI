@@ -1,5 +1,6 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
-import type { ClaudePermissions, PermissionScope } from '../../../shared/types'
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
+import type { ClaudePermissions, PermissionScope, DirEntry } from '../../../shared/types'
+import { FileMentionMenu } from './chat/FileMentionMenu'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -130,14 +131,22 @@ function RulePill({
 
 function AddRuleInput({
   onAdd,
-  placeholder
+  placeholder,
+  dirAutocomplete
 }: {
   onAdd: (rule: string) => void
   placeholder: string
+  /** Enable directory autocomplete (for additional-directories input) */
+  dirAutocomplete?: boolean
 }): React.JSX.Element {
   const [value, setValue] = useState('')
   const [showTemplates, setShowTemplates] = useState(false)
   const wrapperRef = useRef<HTMLDivElement>(null)
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  // Directory autocomplete state
+  const [dirEntries, setDirEntries] = useState<DirEntry[]>([])
+  const [selectedIndex, setSelectedIndex] = useState(0)
 
   useEffect(() => {
     function handleClick(e: MouseEvent): void {
@@ -149,6 +158,88 @@ function AddRuleInput({
     return () => document.removeEventListener('mousedown', handleClick)
   }, [])
 
+  // Extract directory portion and query from the current value
+  const { dirPortion, query } = useMemo(() => {
+    if (!dirAutocomplete || !value) return { dirPortion: '', query: '' }
+    // Normalize to forward slashes for parsing
+    const normalized = value.replace(/\\/g, '/')
+    const lastSlash = normalized.lastIndexOf('/')
+    if (lastSlash < 0) return { dirPortion: '', query: normalized }
+    return {
+      dirPortion: value.slice(0, lastSlash) || '/',
+      query: value.slice(lastSlash + 1)
+    }
+  }, [dirAutocomplete, value])
+
+  // Check if the path looks absolute (starts with / or drive letter like D:\ or D:/)
+  const isAbsolutePath = /^(\/|[A-Za-z]:)/.test(value)
+
+  // Fetch directory entries when dirPortion changes
+  const [dirIsRoot, setDirIsRoot] = useState(false)
+  useEffect(() => {
+    if (!dirAutocomplete || !isAbsolutePath || !dirPortion) {
+      setDirEntries([])
+      setDirIsRoot(false)
+      return
+    }
+    // On Windows, bare "D:" means current dir on that drive — append \ for root
+    const listPath = /^[A-Za-z]:$/.test(dirPortion) ? dirPortion + '\\' : dirPortion
+    window.api.listDir(listPath)
+      .then(({ entries, isRoot }) => {
+        // Only show directories
+        setDirEntries(entries.filter((e) => e.isDirectory))
+        setDirIsRoot(isRoot)
+        setSelectedIndex(0)
+      })
+      .catch(() => {
+        setDirEntries([])
+        setDirIsRoot(false)
+      })
+  }, [dirAutocomplete, dirPortion, isAbsolutePath])
+
+  // Filter entries by query and prepend ".." for parent nav
+  const filteredEntries = useMemo(() => {
+    if (!dirAutocomplete || !isAbsolutePath || dirEntries.length === 0) return []
+    const items: DirEntry[] = dirIsRoot ? dirEntries : [{ name: '..', isDirectory: true }, ...dirEntries]
+    if (!query) return items
+    const q = query.toLowerCase()
+    return items.filter((e) => e.name.toLowerCase().includes(q))
+  }, [dirAutocomplete, isAbsolutePath, dirEntries, dirIsRoot, query])
+
+  const menuOpen = filteredEntries.length > 0
+
+  /** Navigate into a directory (Tab / ".." click) — updates input, keeps menu open */
+  const handleDirNavigate = useCallback((entry: DirEntry) => {
+    const sep = value.includes('\\') ? '\\' : '/'
+    let newValue: string
+    if (entry.name === '..') {
+      const normalized = dirPortion.replace(/\\/g, '/')
+      const lastSlash = normalized.lastIndexOf('/')
+      const parent = lastSlash > 0 ? dirPortion.slice(0, lastSlash) : dirPortion.slice(0, lastSlash + 1)
+      newValue = parent + sep
+    } else {
+      newValue = dirPortion + sep + entry.name + sep
+    }
+    newValue = newValue.replace(/[/\\]{2,}/g, sep)
+    setValue(newValue)
+    setSelectedIndex(0)
+    requestAnimationFrame(() => inputRef.current?.focus())
+  }, [value, dirPortion])
+
+  /** Confirm a directory selection (Enter / click) — commits and clears input */
+  const handleDirConfirm = useCallback((entry: DirEntry) => {
+    if (entry.name === '..') {
+      // ".." means "select the current directory I'm browsing"
+      const trimmed = dirPortion.replace(/[/\\]+$/, '')
+      if (trimmed) { onAdd(trimmed); setValue('') }
+    } else {
+      const sep = value.includes('\\') ? '\\' : '/'
+      const fullPath = (dirPortion + sep + entry.name).replace(/[/\\]{2,}/g, sep)
+      onAdd(fullPath)
+      setValue('')
+    }
+  }, [value, dirPortion, onAdd])
+
   const commit = (): void => {
     const trimmed = value.trim()
     if (trimmed) {
@@ -159,11 +250,50 @@ function AddRuleInput({
 
   return (
     <div ref={wrapperRef} className="relative flex items-center gap-1">
+      {/* Directory autocomplete dropdown — click confirms selection */}
+      {menuOpen && (
+        <FileMentionMenu
+          entries={filteredEntries}
+          selectedIndex={selectedIndex}
+          onSelect={handleDirConfirm}
+        />
+      )}
       <input
+        ref={inputRef}
         value={value}
         onChange={(e) => setValue(e.target.value)}
         onKeyDown={(e) => {
-          if (e.key === 'Enter') commit()
+          // Directory autocomplete: Tab drills into dir, Enter selects highlighted
+          if (menuOpen) {
+            if (e.key === 'ArrowDown') {
+              e.preventDefault()
+              setSelectedIndex((i) => (i + 1) % filteredEntries.length)
+              return
+            }
+            if (e.key === 'ArrowUp') {
+              e.preventDefault()
+              setSelectedIndex((i) => (i - 1 + filteredEntries.length) % filteredEntries.length)
+              return
+            }
+            if (e.key === 'Tab') {
+              e.preventDefault()
+              const entry = filteredEntries[selectedIndex]
+              if (entry) handleDirNavigate(entry)
+              return
+            }
+            if (e.key === 'Enter') {
+              e.preventDefault()
+              const entry = filteredEntries[selectedIndex]
+              if (entry) handleDirConfirm(entry)
+              return
+            }
+            if (e.key === 'Escape') {
+              e.preventDefault()
+              setValue('')
+              return
+            }
+          }
+          if (e.key === 'Enter') { e.preventDefault(); commit() }
           if (e.key === 'Escape') setValue('')
         }}
         placeholder={placeholder}
@@ -287,7 +417,7 @@ function DirectoriesSection({
           ))}
         </div>
       )}
-      <AddRuleInput onAdd={onAdd} placeholder="/absolute/path/to/directory" />
+      <AddRuleInput onAdd={onAdd} placeholder="/absolute/path/to/directory" dirAutocomplete />
     </div>
   )
 }

@@ -175,12 +175,52 @@ export function InputBox(): React.JSX.Element {
   const [fileMentionEntries, setFileMentionEntries] = useState<DirEntry[]>([])
 
   // Fetch directory entries when the browsing dir changes
+  const fileMentionIsAbsolute = /^(\/|[A-Za-z]:)/.test(fileMentionDir)
+  const [fileMentionIsRoot, setFileMentionIsRoot] = useState(false)
+  const [fileMentionResolvedPath, setFileMentionResolvedPath] = useState('')
   useEffect(() => {
-    if (!fileMentionOpen || !cwd) return
-    const separator = cwd.includes('\\') ? '\\' : '/'
-    const fullDir = fileMentionDir ? cwd + separator + fileMentionDir.replace(/\//g, separator) : cwd
-    window.api.listDir(fullDir).then(setFileMentionEntries).catch(() => setFileMentionEntries([]))
-  }, [fileMentionOpen, fileMentionDir, cwd])
+    if (!fileMentionOpen || (!cwd && !fileMentionIsAbsolute)) return
+    let fullDir: string
+    if (fileMentionIsAbsolute) {
+      // Absolute path — use directly (append \ for bare drive letters on Windows)
+      fullDir = /^[A-Za-z]:$/.test(fileMentionDir) ? fileMentionDir + '\\' : fileMentionDir
+    } else {
+      const separator = cwd.includes('\\') ? '\\' : '/'
+      fullDir = fileMentionDir ? cwd + separator + fileMentionDir.replace(/\//g, separator) : cwd
+    }
+    window.api.listDir(fullDir).then(({ entries, isRoot, resolvedPath }) => {
+      setFileMentionEntries(entries)
+      setFileMentionIsRoot(isRoot)
+      setFileMentionResolvedPath(resolvedPath)
+    }).catch(() => {
+      setFileMentionEntries([])
+      setFileMentionIsRoot(false)
+      setFileMentionResolvedPath('')
+    })
+  }, [fileMentionOpen, fileMentionDir, fileMentionIsAbsolute, cwd])
+
+  // When a relative path (../../..) resolves to filesystem root, rewrite to absolute
+  // so subsequent navigation produces clean paths (D:/build not ../../../build)
+  useEffect(() => {
+    if (!fileMentionIsRoot || fileMentionIsAbsolute || !fileMentionResolvedPath) return
+    const absDir = fileMentionResolvedPath
+    const oldDirWithSlash = fileMentionDir ? fileMentionDir + '/' : ''
+    const before = text.slice(0, fileMentionAnchor + 1)
+    const after = text.slice(fileMentionAnchor + 1 + oldDirWithSlash.length + fileMentionQuery.length)
+    const newPath = absDir + '/'
+    const newText = before + newPath + after
+    setText(newText)
+    setFileMentionDir(absDir)
+    requestAnimationFrame(() => {
+      const el = textareaRef.current
+      if (el) {
+        const pos = fileMentionAnchor + 1 + newPath.length
+        el.selectionStart = pos
+        el.selectionEnd = pos
+      }
+    })
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fileMentionIsRoot, fileMentionResolvedPath])
 
   // Compute the filter text (last path segment after the last /) and whether we're at root
   const fileMentionQuery = useMemo(() => {
@@ -189,8 +229,6 @@ export function InputBox(): React.JSX.Element {
     const lastSlash = afterAt.lastIndexOf('/')
     return lastSlash >= 0 ? afterAt.slice(lastSlash + 1) : afterAt
   }, [fileMentionOpen, fileMentionAnchor, text])
-
-  const fileMentionIsRoot = fileMentionDir === ''
 
   const filteredFileMentionEntries = useMemo(() => {
     if (!fileMentionOpen) return []
@@ -392,9 +430,16 @@ export function InputBox(): React.JSX.Element {
         setFileMentionIndex((i) => (i - 1 + filteredFileMentionEntries.length) % filteredFileMentionEntries.length)
         return
       }
-      if (e.key === 'Tab' || e.key === 'Enter') {
+      if (e.key === 'Tab') {
         e.preventDefault()
-        handleFileMentionSelect(filteredFileMentionEntries[fileMentionIndex])
+        const entry = filteredFileMentionEntries[fileMentionIndex]
+        if (entry.isDirectory) handleFileMentionNavigate(entry)
+        else handleFileMentionConfirm(entry)
+        return
+      }
+      if (e.key === 'Enter') {
+        e.preventDefault()
+        handleFileMentionConfirm(filteredFileMentionEntries[fileMentionIndex])
         return
       }
       if (e.key === 'Escape') {
@@ -483,10 +528,55 @@ export function InputBox(): React.JSX.Element {
         setFileMentionAnchor(-1)
         setFileMentionDir('')
       } else {
-        // Update dir from the text between anchor+1 and cursor
-        const afterAt = value.slice(fileMentionAnchor + 1, cursorPos)
+        // Update dir from the text between anchor+1 and cursor.
+        // Normalize backslashes → forward slashes so Windows paths (D:\foo) work.
+        const rawAfterAt = value.slice(fileMentionAnchor + 1, cursorPos)
+        const afterAt = rawAfterAt.replace(/\\/g, '/')
+
+        // If backslashes were present, rewrite the text to use forward slashes
+        if (afterAt !== rawAfterAt) {
+          const before = value.slice(0, fileMentionAnchor + 1)
+          const afterCursor = value.slice(cursorPos)
+          setText(before + afterAt + afterCursor)
+          // Cursor position doesn't change since length is the same
+        }
+
         const lastSlash = afterAt.lastIndexOf('/')
-        const newDir = lastSlash >= 0 ? afterAt.slice(0, lastSlash) : ''
+        let newDir = lastSlash >= 0 ? afterAt.slice(0, lastSlash) : ''
+
+        // For absolute paths, resolve .. segments that would go above filesystem root
+        const isAbs = /^(\/|[A-Za-z]:)/.test(newDir)
+        if (isAbs && newDir.includes('..')) {
+          const prefix = newDir.match(/^(\/|[A-Za-z]:)/)?.[0] ?? ''
+          const rest = newDir.slice(prefix.length).replace(/^\//, '')
+          const parts = rest.split('/').reduce<string[]>((acc, seg) => {
+            if (seg === '..' && acc.length > 0) acc.pop()
+            else if (seg !== '..' && seg !== '.' && seg !== '') acc.push(seg)
+            return acc
+          }, [])
+          const resolved = prefix + (parts.length ? '/' + parts.join('/') : '')
+          if (resolved !== newDir) {
+            newDir = resolved
+            // Rewrite text to match the resolved path
+            const query = afterAt.slice(lastSlash + 1)
+            const before = value.slice(0, fileMentionAnchor + 1)
+            const afterCursor = value.slice(cursorPos)
+            const rewritten = newDir ? newDir + '/' + query : query
+            const newText = before + rewritten + afterCursor
+            if (newText !== value) {
+              setText(newText)
+              requestAnimationFrame(() => {
+                const ta = textareaRef.current
+                if (ta) {
+                  const pos = fileMentionAnchor + 1 + rewritten.length
+                  ta.selectionStart = pos
+                  ta.selectionEnd = pos
+                }
+              })
+            }
+          }
+        }
+
         if (newDir !== fileMentionDir) {
           setFileMentionDir(newDir)
           setFileMentionIndex(0)
@@ -513,58 +603,79 @@ export function InputBox(): React.JSX.Element {
     textareaRef.current?.focus()
   }, [setText])
 
-  /** Handle selection of a file mention entry (directory or file) */
-  const handleFileMentionSelect = useCallback((entry: DirEntry): void => {
-    if (entry.isDirectory) {
-      // Navigate into directory (or parent with "..")
-      let newDir: string
-      if (entry.name === '..') {
-        const lastSlash = fileMentionDir.lastIndexOf('/')
-        newDir = lastSlash >= 0 ? fileMentionDir.slice(0, lastSlash) : ''
+  /** Navigate into a directory (Tab) — updates text, keeps menu open */
+  const handleFileMentionNavigate = useCallback((entry: DirEntry): void => {
+    if (!entry.isDirectory) return
+    const isAbsolute = /^(\/|[A-Za-z]:)/.test(fileMentionDir)
+    let newDir: string
+    if (entry.name === '..') {
+      const lastSlash = fileMentionDir.lastIndexOf('/')
+      if (isAbsolute) {
+        // For absolute paths, don't go above the filesystem root
+        // /usr → /, /usr/bin → /usr, D:/Users → D:, D: stays D:
+        if (lastSlash > 0) newDir = fileMentionDir.slice(0, lastSlash)
+        else newDir = fileMentionDir.slice(0, lastSlash + 1) || fileMentionDir
       } else {
-        newDir = fileMentionDir ? fileMentionDir + '/' + entry.name : entry.name
+        // Relative path: going up from "" (cwd) → "..", from "src" → "", from "../foo" → ".."
+        if (fileMentionDir === '') {
+          newDir = '..'
+        } else if (fileMentionDir === '..') {
+          newDir = '../..'
+        } else if (fileMentionDir.endsWith('/..')) {
+          newDir = fileMentionDir + '/..'
+        } else {
+          newDir = lastSlash >= 0 ? fileMentionDir.slice(0, lastSlash) : ''
+        }
       }
-      // Update the text: replace everything after @ anchor with the new dir path + /
-      const before = text.slice(0, fileMentionAnchor + 1) // includes the @
-      const after = text.slice(fileMentionAnchor + 1 + (fileMentionDir ? fileMentionDir.length + 1 : 0) + fileMentionQuery.length)
-      const newPath = newDir ? newDir + '/' : ''
-      const newText = before + newPath + after
-      setText(newText)
-      setFileMentionDir(newDir)
-      setFileMentionIndex(0)
-      // Place cursor right after the path
-      requestAnimationFrame(() => {
-        const el = textareaRef.current
-        if (el) {
-          const cursorPos = fileMentionAnchor + 1 + newPath.length
-          el.selectionStart = cursorPos
-          el.selectionEnd = cursorPos
-          el.focus()
-        }
-      })
     } else {
-      // File selected — insert full relative path + space, close menu
-      const fullPath = fileMentionDir ? fileMentionDir + '/' + entry.name : entry.name
-      const before = text.slice(0, fileMentionAnchor) // before the @
-      const cursorInText = fileMentionAnchor + 1 + (fileMentionDir ? fileMentionDir.length + 1 : 0) + fileMentionQuery.length
-      const after = text.slice(cursorInText)
-      const newText = before + fullPath + ' ' + after
-      setText(newText)
-      setFileMentionOpen(false)
-      setFileMentionAnchor(-1)
-      setFileMentionDir('')
-      setFileMentionIndex(0)
-      // Place cursor after the inserted path + space
-      requestAnimationFrame(() => {
-        const el = textareaRef.current
-        if (el) {
-          const cursorPos = before.length + fullPath.length + 1
-          el.selectionStart = cursorPos
-          el.selectionEnd = cursorPos
-          el.focus()
-        }
-      })
+      newDir = fileMentionDir ? fileMentionDir + '/' + entry.name : entry.name
     }
+    const before = text.slice(0, fileMentionAnchor + 1)
+    const after = text.slice(fileMentionAnchor + 1 + (fileMentionDir ? fileMentionDir.length + 1 : 0) + fileMentionQuery.length)
+    const newPath = newDir ? newDir + '/' : ''
+    const newText = before + newPath + after
+    setText(newText)
+    setFileMentionDir(newDir)
+    setFileMentionIndex(0)
+    requestAnimationFrame(() => {
+      const el = textareaRef.current
+      if (el) {
+        const cursorPos = fileMentionAnchor + 1 + newPath.length
+        el.selectionStart = cursorPos
+        el.selectionEnd = cursorPos
+        el.focus()
+      }
+    })
+  }, [text, fileMentionAnchor, fileMentionDir, fileMentionQuery, setText])
+
+  /** Confirm a mention selection (Enter / click) — inserts path + space, closes menu.
+   *  For directories: ".." selects the current dir being browsed. */
+  const handleFileMentionConfirm = useCallback((entry: DirEntry): void => {
+    let fullPath: string
+    if (entry.isDirectory && entry.name === '..') {
+      // ".." means "select the current directory I'm browsing"
+      fullPath = fileMentionDir || '.'
+    } else {
+      fullPath = fileMentionDir ? fileMentionDir + '/' + entry.name : entry.name
+    }
+    const before = text.slice(0, fileMentionAnchor)
+    const cursorInText = fileMentionAnchor + 1 + (fileMentionDir ? fileMentionDir.length + 1 : 0) + fileMentionQuery.length
+    const after = text.slice(cursorInText)
+    const newText = before + fullPath + ' ' + after
+    setText(newText)
+    setFileMentionOpen(false)
+    setFileMentionAnchor(-1)
+    setFileMentionDir('')
+    setFileMentionIndex(0)
+    requestAnimationFrame(() => {
+      const el = textareaRef.current
+      if (el) {
+        const cursorPos = before.length + fullPath.length + 1
+        el.selectionStart = cursorPos
+        el.selectionEnd = cursorPos
+        el.focus()
+      }
+    })
   }, [text, fileMentionAnchor, fileMentionDir, fileMentionQuery, setText])
 
   const addFiles = useCallback(async (files: File[]) => {
@@ -660,7 +771,7 @@ export function InputBox(): React.JSX.Element {
             <FileMentionMenu
               entries={filteredFileMentionEntries}
               selectedIndex={fileMentionIndex}
-              onSelect={handleFileMentionSelect}
+              onSelect={handleFileMentionConfirm}
             />
           )}
 
