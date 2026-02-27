@@ -135,10 +135,6 @@ export function InputBox(): React.JSX.Element {
   const setDraftText = useSessionStore((s) => s.setDraftText)
   const setText = setDraftText
 
-  // DEBUG: log draftText changes
-  useEffect(() => {
-    console.log('[InputBox] text value changed to:', JSON.stringify(text))
-  }, [text])
   const cwd = useActiveSession((s) => s.cwd)
   const status = useActiveSession((s) => s.status)
   const sdkActive = useActiveSession((s) => s.sdkActive)

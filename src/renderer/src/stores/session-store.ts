@@ -1250,7 +1250,6 @@ export const useSessionStore = create<SessionState>((set) => ({
   setDraftText: (text) =>
     set((state) => {
       const id = state.activeSessionId
-      console.log('[setDraftText] called with:', { text, activeSessionId: id })
       if (!id) return {}
       return { sessions: updateSession(state.sessions, id, () => ({ draftText: text })) }
     }),
