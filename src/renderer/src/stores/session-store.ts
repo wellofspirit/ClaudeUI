@@ -328,6 +328,9 @@ export interface PerSessionState {
   gitCommitMessage: string
   gitFileFilter: 'staged' | 'unstaged' | 'all'
   gitReviewComments: DiffComment[]
+  gitSyncOperation: 'idle' | 'fetching' | 'pulling' | 'pushing'
+  gitSyncError: string | null
+  gitLastFetchTime: number | null
 }
 
 const EMPTY_SESSION_STATE: PerSessionState = {
@@ -371,7 +374,10 @@ const EMPTY_SESSION_STATE: PerSessionState = {
   gitFileDiff: null,
   gitCommitMessage: '',
   gitFileFilter: 'all',
-  gitReviewComments: []
+  gitReviewComments: [],
+  gitSyncOperation: 'idle',
+  gitSyncError: null,
+  gitLastFetchTime: null
 }
 
 function createEmptySession(cwd: string): PerSessionState {
@@ -536,6 +542,10 @@ interface SessionState {
   setBlockUsage: (data: BlockUsageData) => void
   setShowUsageView: (show: boolean) => void
   setShowAutomationView: (show: boolean) => void
+  // Git sync operations
+  setGitSyncOperation: (routingId: string, op: 'idle' | 'fetching' | 'pulling' | 'pushing') => void
+  setGitSyncError: (routingId: string, error: string | null) => void
+  setGitLastFetchTime: (routingId: string, time: number | null) => void
   // Diff review comments
   addDiffComment: (routingId: string, comment: DiffComment) => void
   removeDiffComment: (routingId: string, commentId: string) => void
@@ -1446,6 +1456,22 @@ export const useSessionStore = create<SessionState>((set) => ({
       sessions: updateSession(state.sessions, routingId, () => ({
         rightPanel: 'none' as const
       }))
+    })),
+
+  // Git sync operations
+  setGitSyncOperation: (routingId, op) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, routingId, () => ({ gitSyncOperation: op }))
+    })),
+
+  setGitSyncError: (routingId, error) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, routingId, () => ({ gitSyncError: error }))
+    })),
+
+  setGitLastFetchTime: (routingId, time) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, routingId, () => ({ gitLastFetchTime: time }))
     })),
 
   // Diff review comments

@@ -72,6 +72,7 @@ export class GitService {
       branch: status.current || 'HEAD',
       ahead: status.ahead,
       behind: status.behind,
+      trackingBranch: status.tracking || null,
       files,
       staged: status.staged,
       unstaged: status.modified.concat(status.deleted),
@@ -217,6 +218,16 @@ export class GitService {
 
   async push(): Promise<void> {
     await this.git.push()
+  }
+
+  async pull(): Promise<{ summary: string }> {
+    const result = await this.git.pull()
+    const s = result.summary
+    return { summary: `${s.changes} changes, ${s.insertions} insertions, ${s.deletions} deletions` }
+  }
+
+  async fetch(): Promise<void> {
+    await this.git.fetch(['--all', '--prune'])
   }
 
   startPolling(callback: (status: GitStatusData) => void, intervalMs: number): void {

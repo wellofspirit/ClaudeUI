@@ -302,6 +302,8 @@ export interface ClaudeAPI {
   gitUnstageAll(cwd: string): Promise<void>
   gitCommit(cwd: string, message: string): Promise<string>
   gitPush(cwd: string): Promise<void>
+  gitPull(cwd: string): Promise<{ summary: string }>
+  gitFetch(cwd: string): Promise<void>
   gitStartWatching(cwd: string): Promise<void>
   gitStopWatching(cwd: string): Promise<void>
   onGitStatusUpdate(cb: (data: { cwd: string; status: GitStatusData }) => void): () => void
@@ -554,6 +556,7 @@ export interface GitStatusData {
   branch: string
   ahead: number
   behind: number
+  trackingBranch: string | null
   files: GitFileStatus[]
   staged: string[]
   unstaged: string[]

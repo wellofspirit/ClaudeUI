@@ -169,7 +169,7 @@ const SESSION_IPC_CHANNELS = [
   'session:open-teams-view',
   'git:check-repo', 'git:status', 'git:branches', 'git:checkout', 'git:create-branch',
   'git:file-patch', 'git:file-contents', 'git:stage-file', 'git:unstage-file',
-  'git:stage-all', 'git:unstage-all', 'git:commit', 'git:push',
+  'git:stage-all', 'git:unstage-all', 'git:commit', 'git:push', 'git:pull', 'git:fetch',
   'git:start-watching', 'git:stop-watching',
   'file:list-dir',
   'usage:fetch', 'usage:fetch-block',
@@ -547,6 +547,24 @@ export function registerSessionIpc(win: BrowserWindow): void {
     const svc = gitServiceManager.get(cwd)
     try {
       await svc.push()
+    } finally {
+      gitServiceManager.release(cwd)
+    }
+  })
+
+  ipcMain.handle('git:pull', async (_e, cwd: string) => {
+    const svc = gitServiceManager.get(cwd)
+    try {
+      return await svc.pull()
+    } finally {
+      gitServiceManager.release(cwd)
+    }
+  })
+
+  ipcMain.handle('git:fetch', async (_e, cwd: string) => {
+    const svc = gitServiceManager.get(cwd)
+    try {
+      await svc.fetch()
     } finally {
       gitServiceManager.release(cwd)
     }
