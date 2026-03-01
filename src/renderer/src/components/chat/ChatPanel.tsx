@@ -15,6 +15,7 @@ import { GitBranchPill } from '../git/GitBranchPill'
 import { GitChangesPill } from '../git/GitChangesPill'
 import { PermissionsDialog } from '../PermissionsDialog'
 import { SkillsDialog } from '../SkillsDialog'
+import { McpDialog } from '../McpDialog'
 
 function QueuedMessageCard(): React.JSX.Element | null {
   const queuedText = useActiveSession((s) => s.queuedText)
@@ -378,6 +379,7 @@ function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Element {
   const infoLeaveTimer = useRef<ReturnType<typeof setTimeout>>(null)
   const [permissionsOpen, setPermissionsOpen] = useState(false)
   const [skillsOpen, setSkillsOpen] = useState(false)
+  const [mcpOpen, setMcpOpen] = useState(false)
 
   const infoMouseEnter = useCallback(() => {
     if (infoLeaveTimer.current) clearTimeout(infoLeaveTimer.current)
@@ -534,6 +536,20 @@ function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Element {
         )}
         {cwd && (
           <button
+            onClick={() => setMcpOpen(true)}
+            className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[12px] text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
+            title="MCP Servers"
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
+              <path d="M12 22v-5" />
+              <path d="M9 8V2" />
+              <path d="M15 8V2" />
+              <path d="M18 8v5a6 6 0 0 1-6 6v0a6 6 0 0 1-6-6V8Z" />
+            </svg>
+          </button>
+        )}
+        {cwd && (
+          <button
             onClick={() => setPermissionsOpen(true)}
             className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[12px] text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
             title="Project permissions"
@@ -551,6 +567,12 @@ function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Element {
         open={skillsOpen}
         onClose={() => setSkillsOpen(false)}
         cwd={cwd}
+      />
+      <McpDialog
+        open={mcpOpen}
+        onClose={() => setMcpOpen(false)}
+        cwd={cwd}
+        routingId={activeSessionId}
       />
       <PermissionsDialog
         open={permissionsOpen}

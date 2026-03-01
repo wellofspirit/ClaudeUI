@@ -8,6 +8,7 @@ import type { BrowserWindow } from 'electron'
 import { computeTokenMetrics, buildSubagentFileMap } from './session-history'
 import { unwatchAllSubagents } from './subagent-watcher'
 import { saveSlashCommands } from './ui-config'
+import { loadMcpServers, readDisabledMcpServers } from './claude-mcp'
 import { logger } from './logger'
 
 /** In production, cli.js is unpacked from the asar — resolve its real path */
@@ -20,6 +21,7 @@ export function getCliJsPath(): string | undefined {
 import type {
   ChatMessage,
   ContentBlock,
+  McpServerConfig,
   SessionStatus,
   ApprovalDecision,
   PendingApproval
@@ -144,6 +146,9 @@ export class ClaudeSession {
   private teammateIdToToolUse = new Map<string, string>() // teammate_id ("name@team") → toolUseId
   private backgroundFilePaths = new Map<string, string>() // toolUseId → filePath (permanent)
   private backgroundPollers = new Map<string, BackgroundPoller>() // toolUseId → poller state
+  private _initMcpServers: Array<{ name: string; status: string }> = [] // cached from init message
+  private _mcpAllServers: Record<string, McpServerConfig> = {} // full config loaded at session start
+  private _mcpDisabledServers = new Set<string>() // servers disabled via toggle
   private win: BrowserWindow
   routingId: string
   private cwd: string
@@ -154,6 +159,11 @@ export class ClaudeSession {
     setModel(model?: string): Promise<void>
     stopTask(taskId: string): Promise<void>
     dequeueMessage(value: string): Promise<{ removed: number }>
+    // MCP methods
+    mcpServerStatus(): Promise<unknown[]>
+    toggleMcpServer(serverName: string, enabled: boolean): Promise<void>
+    reconnectMcpServer(serverName: string): Promise<void>
+    setMcpServers(servers: Record<string, unknown>): Promise<unknown>
   } | null = null
   private slug: string | null = null
   private permissionMode: string = 'default'
@@ -253,6 +263,44 @@ export class ClaudeSession {
           return
         }
       }
+      // Load MCP servers from config files and pass explicitly via mcpServers.
+      // This supplements the SDK's own settingSources config loading. While the
+      // mcp-status patch ensures plugin MCP servers are properly awaited before
+      // mcp_status responds, passing config-file servers via mcpServers ensures
+      // they're always available even if settingSources parsing differs.
+      // The SDK deduplicates by name, so there are no duplicate connections.
+      this._mcpAllServers = {}
+      this._mcpDisabledServers.clear()
+      for (const scope of ['user', 'project', 'local'] as const) {
+        try {
+          const servers = loadMcpServers(scope, this.cwd)
+          Object.assign(this._mcpAllServers, servers)
+        } catch {
+          // Scope may not apply (e.g., project/local without cwd)
+        }
+      }
+
+      // Read disabledMcpServers from ~/.claude.json's project entry for logging.
+      // The CLI persists disabled state here via the TR() check. The SDK reads
+      // this internally and marks servers as disabled.
+      //
+      // IMPORTANT: We pass ALL servers (including disabled) via mcpServers.
+      // The SDK's TR() function checks disabledMcpServers from ~/.claude.json
+      // and marks them as disabled (type: "disabled") in the client list.
+      // We must NOT remove them — they need to be in the client list for
+      // toggleMcpServer(name, true) to find them when re-enabling.
+      const disabledNames = readDisabledMcpServers(this.cwd)
+      for (const name of disabledNames) {
+        this._mcpDisabledServers.add(name)
+      }
+
+      if (Object.keys(this._mcpAllServers).length > 0) {
+        logger.debug('ClaudeSession', `Loaded ${Object.keys(this._mcpAllServers).length} MCP server(s): ${Object.keys(this._mcpAllServers).join(', ')}`)
+      }
+      if (this._mcpDisabledServers.size > 0) {
+        logger.debug('ClaudeSession', `Disabled MCP server(s) (from ~/.claude.json): ${[...this._mcpDisabledServers].join(', ')}`)
+      }
+
       const q = sdkQuery({
         prompt: channel as AsyncIterable<never>,
         options: {
@@ -261,6 +309,9 @@ export class ClaudeSession {
           model: this.model,
           permissionMode: this.permissionMode as 'default',
           settingSources: ['user', 'project', 'local'],
+          ...(Object.keys(this._mcpAllServers).length > 0
+            ? { mcpServers: this._mcpAllServers as Record<string, never> }
+            : {}),
           abortController: this.abortController,
           includePartialMessages: true,
           thinking: { type: 'enabled', budgetTokens: 10000 },
@@ -304,6 +355,10 @@ export class ClaudeSession {
         setModel(model?: string): Promise<void>
         stopTask(taskId: string): Promise<void>
         dequeueMessage(value: string): Promise<{ removed: number }>
+        mcpServerStatus(): Promise<unknown[]>
+        toggleMcpServer(serverName: string, enabled: boolean): Promise<void>
+        reconnectMcpServer(serverName: string): Promise<void>
+        setMcpServers(servers: Record<string, unknown>): Promise<unknown>
       }
 
       for await (const message of q) {
@@ -330,6 +385,14 @@ export class ClaudeSession {
             // Extract skill names from init
             const skillNames = (msg.skills as string[]) || []
             this.send('session:skills', skillNames)
+
+            // Extract MCP server statuses from init and cache for the dialog
+            const mcpServers = (msg.mcp_servers as Array<{ name: string; status: string }>) || []
+            this._initMcpServers = mcpServers
+            logger.debug('ClaudeSession', `init mcp_servers (${mcpServers.length}): ${JSON.stringify(mcpServers).slice(0, 500)}`)
+            if (mcpServers.length > 0) {
+              this.send('session:mcp-servers', mcpServers)
+            }
           }
 
           this.sendStatus()
@@ -582,6 +645,100 @@ export class ClaudeSession {
   async dequeueMessage(value: string): Promise<{ removed: number }> {
     if (!this.activeQuery) return { removed: 0 }
     return await this.activeQuery.dequeueMessage(value)
+  }
+
+  // ---------------------------------------------------------------------------
+  // MCP server management (delegated to SDK Query object)
+  // ---------------------------------------------------------------------------
+
+  async mcpServerStatus(): Promise<unknown[]> {
+    if (!this.activeQuery) {
+      logger.debug('ClaudeSession', 'mcpServerStatus: no activeQuery, returning cached init servers')
+      return this._initMcpServers
+    }
+    try {
+      const result = await this.activeQuery.mcpServerStatus()
+      // Log each server's name and status for debugging
+      const summary = Array.isArray(result)
+        ? (result as Array<Record<string, unknown>>).map(s => `${s.name}:${s.status}`).join(', ')
+        : 'not-array'
+      logger.debug('ClaudeSession', `mcpServerStatus: ${Array.isArray(result) ? result.length : 0} servers → [${summary}]`)
+      logger.debug('ClaudeSession', `mcpServerStatus raw: ${JSON.stringify(result).slice(0, 1000)}`)
+      return result
+    } catch (err) {
+      logger.error('ClaudeSession', 'mcpServerStatus failed, returning cached init servers', err)
+      return this._initMcpServers
+    }
+  }
+
+  async mcpToggleServer(serverName: string, enabled: boolean): Promise<void> {
+    if (!this.activeQuery) throw new Error('No active session')
+
+    // Use the SDK's native toggleMcpServer which:
+    // 1. Updates disabledMcpServers in ~/.claude.json (persists across restarts)
+    // 2. Actually disconnects/reconnects the MCP server process
+    // 3. Updates internal client state (type: "disabled" / "connected")
+    logger.debug('ClaudeSession', `mcpToggle: ${serverName} → ${enabled ? 'enable' : 'disable'}`)
+
+    // Log pre-toggle state from ~/.claude.json
+    const preDis = readDisabledMcpServers(this.cwd)
+    logger.debug('ClaudeSession', `mcpToggle PRE: disabledMcpServers=[${preDis.join(', ')}]`)
+
+    try {
+      await this.activeQuery.toggleMcpServer(serverName, enabled)
+      logger.debug('ClaudeSession', `mcpToggle: SDK toggleMcpServer completed successfully`)
+    } catch (err) {
+      logger.error('ClaudeSession', `mcpToggle: SDK toggleMcpServer FAILED`, err)
+      throw err
+    }
+
+    // Log post-toggle state
+    const postDis = readDisabledMcpServers(this.cwd)
+    logger.debug('ClaudeSession', `mcpToggle POST: disabledMcpServers=[${postDis.join(', ')}]`)
+
+    // Verify the toggle had the expected effect
+    if (enabled && postDis.includes(serverName)) {
+      logger.error('ClaudeSession', `mcpToggle BUG: enabled=${enabled} but ${serverName} is still in disabledMcpServers!`)
+    }
+    if (!enabled && !postDis.includes(serverName)) {
+      logger.error('ClaudeSession', `mcpToggle BUG: enabled=${enabled} but ${serverName} is NOT in disabledMcpServers!`)
+    }
+
+    // Also query status to see the SDK's view
+    try {
+      const status = await this.activeQuery.mcpServerStatus()
+      const summary = Array.isArray(status)
+        ? (status as Array<Record<string, unknown>>).map(s => `${s.name}:${s.status}`).join(', ')
+        : 'not-array'
+      logger.debug('ClaudeSession', `mcpToggle POST-STATUS: [${summary}]`)
+    } catch {
+      // Non-critical
+    }
+  }
+
+  async mcpReconnectServer(serverName: string): Promise<void> {
+    if (!this.activeQuery) throw new Error('No active session')
+    logger.debug('ClaudeSession', `mcpReconnect: ${serverName}`)
+    await this.activeQuery.reconnectMcpServer(serverName)
+
+    // Query status after reconnect
+    try {
+      const status = await this.activeQuery.mcpServerStatus()
+      const summary = Array.isArray(status)
+        ? (status as Array<Record<string, unknown>>).map(s => `${s.name}:${s.status}`).join(', ')
+        : 'not-array'
+      logger.debug('ClaudeSession', `mcpReconnect POST-STATUS: [${summary}]`)
+    } catch {
+      // Non-critical
+    }
+  }
+
+  async mcpSetServers(servers: Record<string, unknown>): Promise<unknown> {
+    if (!this.activeQuery) throw new Error('No active session')
+    logger.debug('ClaudeSession', `mcpSetServers: setting [${Object.keys(servers).join(', ')}]`)
+    const result = await this.activeQuery.setMcpServers(servers)
+    logger.debug('ClaudeSession', `mcpSetServers result: ${JSON.stringify(result).slice(0, 500)}`)
+    return result
   }
 
   /**

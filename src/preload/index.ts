@@ -276,6 +276,25 @@ const api: ClaudeAPI = {
   saveClaudePermissions: (scope, permissions, cwd?) =>
     ipcRenderer.invoke('claude:save-permissions', scope, permissions, cwd),
 
+  // MCP server management
+  mcpServerStatus: (routingId: string) =>
+    ipcRenderer.invoke('mcp:status', routingId),
+  mcpToggleServer: (routingId: string, serverName: string, enabled: boolean) =>
+    ipcRenderer.invoke('mcp:toggle', routingId, serverName, enabled),
+  mcpReconnectServer: (routingId: string, serverName: string) =>
+    ipcRenderer.invoke('mcp:reconnect', routingId, serverName),
+  mcpSetServers: (routingId: string, servers: Record<string, unknown>) =>
+    ipcRenderer.invoke('mcp:set-servers', routingId, servers),
+  loadMcpServers: (scope: string, cwd?: string) =>
+    ipcRenderer.invoke('mcp:load-servers', scope, cwd),
+  saveMcpServers: (scope: string, servers: Record<string, unknown>, cwd?: string) =>
+    ipcRenderer.invoke('mcp:save-servers', scope, servers, cwd),
+  onMcpServers: (cb) => {
+    const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as never)
+    ipcRenderer.on('session:mcp-servers', handler)
+    return () => ipcRenderer.removeListener('session:mcp-servers', handler)
+  },
+
   // Automation
   listAutomations: () => ipcRenderer.invoke('automation:list'),
   saveAutomation: (automation) => ipcRenderer.invoke('automation:save', automation),

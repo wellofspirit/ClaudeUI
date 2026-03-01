@@ -136,6 +136,7 @@ Patches live in `patch/` and fix limitations in the bundled `cli.js`. Each patch
 | `taskstop-notification` | Sends task_notification on TaskStop (Part A killed→stopped mapping upstreamed in 0.2.49) |
 | `team-streaming` | Forwards teammate stream events + messages to SDK consumer |
 | `queue-control` | Adds `dequeue_message` control request and `queued_command_consumed` notification |
+| `mcp-status` | Fixes `mcp_status` returning empty array by awaiting plugin MCP server refresh |
 
 **Upstreamed (removed):**
 - ~~`task-notification-usage`~~ — upstreamed in SDK 0.2.49

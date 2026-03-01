@@ -9,6 +9,7 @@ import { listDirectories, loadSessionHistory, loadSubagentHistory, buildSubagent
 import { watchSession, unwatchSession } from '../services/session-watcher'
 import { loadSettings, saveSettings, loadSessionConfig, saveSessionConfig, loadSlashCommands, saveSlashCommands, startConfigWatcher } from '../services/ui-config'
 import { loadClaudePermissions, saveClaudePermissions } from '../services/claude-settings'
+import { loadMcpServers, saveMcpServers } from '../services/claude-mcp'
 import { scanSkills } from '../services/skill-scanner'
 import type { UISettings, UISessionConfig, SlashCommandCache } from '../services/ui-config'
 import { gitServiceManager } from '../services/git-service'
@@ -175,7 +176,9 @@ const SESSION_IPC_CHANNELS = [
   'git:start-watching', 'git:stop-watching',
   'file:list-dir',
   'usage:fetch', 'usage:fetch-block',
-  'claude:load-permissions', 'claude:save-permissions'
+  'claude:load-permissions', 'claude:save-permissions',
+  'mcp:status', 'mcp:toggle', 'mcp:reconnect', 'mcp:set-servers',
+  'mcp:load-servers', 'mcp:save-servers'
 ]
 
 export function registerSessionIpc(win: BrowserWindow): void {
@@ -362,6 +365,37 @@ export function registerSessionIpc(win: BrowserWindow): void {
     loadClaudePermissions(scope as 'user' | 'project' | 'local', cwd))
   ipcMain.handle('claude:save-permissions', (_e, scope: string, permissions: unknown, cwd?: string) =>
     saveClaudePermissions(scope as 'user' | 'project' | 'local', permissions as never, cwd))
+
+  // MCP server management (via SDK Query object)
+  ipcMain.handle('mcp:status', async (_e, routingId: string) => {
+    const session = manager.get(routingId)
+    if (!session) return []
+    return await session.mcpServerStatus()
+  })
+
+  ipcMain.handle('mcp:toggle', async (_e, routingId: string, serverName: string, enabled: boolean) => {
+    const session = manager.get(routingId)
+    if (!session) throw new Error('No active session')
+    await session.mcpToggleServer(serverName, enabled)
+  })
+
+  ipcMain.handle('mcp:reconnect', async (_e, routingId: string, serverName: string) => {
+    const session = manager.get(routingId)
+    if (!session) throw new Error('No active session')
+    await session.mcpReconnectServer(serverName)
+  })
+
+  ipcMain.handle('mcp:set-servers', async (_e, routingId: string, servers: Record<string, unknown>) => {
+    const session = manager.get(routingId)
+    if (!session) throw new Error('No active session')
+    return await session.mcpSetServers(servers)
+  })
+
+  // MCP config file read/write (direct file access, no session needed)
+  ipcMain.handle('mcp:load-servers', (_e, scope: string, cwd?: string) =>
+    loadMcpServers(scope as 'user' | 'project' | 'local', cwd))
+  ipcMain.handle('mcp:save-servers', (_e, scope: string, servers: Record<string, unknown>, cwd?: string) =>
+    saveMcpServers(scope as 'user' | 'project' | 'local', servers as never, cwd))
 
   // Teammate inbox handlers
   ipcMain.handle(

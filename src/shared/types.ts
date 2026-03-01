@@ -335,6 +335,15 @@ export interface ClaudeAPI {
   loadClaudePermissions(scope: PermissionScope, cwd?: string): Promise<ClaudePermissions>
   saveClaudePermissions(scope: PermissionScope, permissions: ClaudePermissions, cwd?: string): Promise<void>
 
+  // MCP server management
+  mcpServerStatus(routingId: string): Promise<McpServerInfo[]>
+  mcpToggleServer(routingId: string, serverName: string, enabled: boolean): Promise<void>
+  mcpReconnectServer(routingId: string, serverName: string): Promise<void>
+  mcpSetServers(routingId: string, servers: Record<string, McpServerConfig>): Promise<McpSetServersResult>
+  loadMcpServers(scope: McpServerScope, cwd?: string): Promise<Record<string, McpServerConfig>>
+  saveMcpServers(scope: McpServerScope, servers: Record<string, McpServerConfig>, cwd?: string): Promise<void>
+  onMcpServers(cb: (data: RoutedData<Array<{ name: string; status: string }>>) => void): () => void
+
   // Automation
   listAutomations(): Promise<Automation[]>
   saveAutomation(automation: Automation): Promise<void>
@@ -532,6 +541,51 @@ export interface SkillInfo {
   pluginName?: string
   path: string       // filesystem path to SKILL.md (empty for bundled)
   content: string    // markdown body (no frontmatter)
+}
+
+// ---------------------------------------------------------------------------
+// MCP Server types (MCP server management dialog)
+// ---------------------------------------------------------------------------
+
+export type McpServerScope = 'user' | 'project' | 'local' | 'claudeai' | 'managed'
+export type McpServerConnectionStatus = 'connected' | 'failed' | 'needs-auth' | 'pending' | 'disabled' | 'not_started'
+export type McpServerTransport = 'stdio' | 'sse' | 'http'
+
+export interface McpServerToolInfo {
+  name: string
+  description?: string
+  annotations?: {
+    readOnly?: boolean
+    destructive?: boolean
+    openWorld?: boolean
+  }
+}
+
+export interface McpServerConfig {
+  type?: McpServerTransport
+  // stdio transport
+  command?: string
+  args?: string[]
+  env?: Record<string, string>
+  // sse/http transport
+  url?: string
+  headers?: Record<string, string>
+}
+
+export interface McpServerInfo {
+  name: string
+  status: McpServerConnectionStatus
+  serverInfo?: { name: string; version: string }
+  error?: string
+  config?: McpServerConfig
+  scope?: McpServerScope
+  tools?: McpServerToolInfo[]
+}
+
+export interface McpSetServersResult {
+  added: string[]
+  removed: string[]
+  errors: Record<string, string>
 }
 
 // ---------------------------------------------------------------------------
