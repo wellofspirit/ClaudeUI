@@ -388,14 +388,21 @@ function ServerDetail({
   }, [onRefresh])
 
   const handleToggle = async (): Promise<void> => {
-    if (!routingId) return
     setActionLoading(server.name)
     try {
       const enable = server.status === 'disabled' || server.status === 'not_started'
       console.log(`[McpDialog] toggle ${server.name}: status=${server.status} → enable=${enable}`)
-      await window.api.mcpToggleServer(routingId, server.name, enable)
-      console.log(`[McpDialog] toggle ${server.name}: IPC call completed`)
-      refreshAfterAction()
+      if (routingId) {
+        // Session active — use SDK path (updates config + restarts subprocess)
+        await window.api.mcpToggleServer(routingId, server.name, enable)
+        console.log(`[McpDialog] toggle ${server.name}: SDK IPC call completed`)
+        refreshAfterAction()
+      } else if (cwd) {
+        // No session — write directly to ~/.claude.json
+        await window.api.mcpToggleDisabled(cwd, server.name, enable)
+        console.log(`[McpDialog] toggle ${server.name}: config-only toggle completed`)
+        onRefresh()
+      }
     } catch (err) {
       console.error(`[McpDialog] toggle ${server.name} FAILED:`, err)
       setActionLoading(null)
@@ -497,9 +504,9 @@ function ServerDetail({
         )}
 
         {/* Action buttons */}
-        {isActionable && (
+        {(isActionable || cwd) && (
           <div className="flex items-center gap-2">
-            {server.status !== 'not_started' && server.status !== 'pending' && (
+            {isActionable && server.status !== 'not_started' && server.status !== 'pending' && (
               <button
                 onClick={handleReconnect}
                 disabled={isBusy}
@@ -626,6 +633,24 @@ export function McpDialog({ open, onClose, cwd, routingId }: McpDialogProps): Re
         // Scope may not exist — fine
       }
     }
+
+    // Read disabled list from ~/.claude.json and mark servers accordingly
+    if (cwd) {
+      try {
+        const disabledNames = await window.api.mcpReadDisabled(cwd)
+        if (disabledNames.length > 0) {
+          const disabledSet = new Set(disabledNames)
+          for (const server of results) {
+            if (disabledSet.has(server.name)) {
+              server.status = 'disabled'
+            }
+          }
+        }
+      } catch {
+        // Failed to read disabled list — leave all as not_started
+      }
+    }
+
     return results
   }, [cwd])
 

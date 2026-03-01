@@ -131,6 +131,31 @@ export function readDisabledMcpServers(cwd: string): string[] {
 }
 
 /**
+ * Write the disabledMcpServers list to ~/.claude.json's project entry.
+ *
+ * This is the inverse of readDisabledMcpServers — it allows toggling servers
+ * on/off without an active SDK session by directly updating the config file.
+ */
+export function writeDisabledMcpServers(cwd: string, disabledNames: string[]): void {
+  const configPath = path.join(os.homedir(), '.claude.json')
+  const data = readJsonSafe(configPath) ?? {}
+  const normalizedCwd = cwd.replace(/\\/g, '/')
+
+  if (!data.projects) data.projects = {}
+  const projects = data.projects as Record<string, Record<string, unknown>>
+  if (!projects[normalizedCwd]) projects[normalizedCwd] = {}
+
+  if (disabledNames.length === 0) {
+    delete projects[normalizedCwd].disabledMcpServers
+  } else {
+    projects[normalizedCwd].disabledMcpServers = disabledNames
+  }
+
+  fs.writeFileSync(configPath, JSON.stringify(data, null, 2) + '\n', { mode: 0o600 })
+  logger.debug('ClaudeMcp', `Wrote disabledMcpServers for ${normalizedCwd}: [${disabledNames.join(', ')}]`)
+}
+
+/**
  * Save MCP servers to the config file for the given scope.
  * For user/project scope, writes to .mcp.json (the standard location).
  * For local scope, writes to settings.local.json under mcpServers key.

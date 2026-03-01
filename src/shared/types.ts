@@ -342,6 +342,8 @@ export interface ClaudeAPI {
   mcpSetServers(routingId: string, servers: Record<string, McpServerConfig>): Promise<McpSetServersResult>
   loadMcpServers(scope: McpServerScope, cwd?: string): Promise<Record<string, McpServerConfig>>
   saveMcpServers(scope: McpServerScope, servers: Record<string, McpServerConfig>, cwd?: string): Promise<void>
+  mcpReadDisabled(cwd: string): Promise<string[]>
+  mcpToggleDisabled(cwd: string, serverName: string, enabled: boolean): Promise<void>
   onMcpServers(cb: (data: RoutedData<Array<{ name: string; status: string }>>) => void): () => void
 
   // Automation

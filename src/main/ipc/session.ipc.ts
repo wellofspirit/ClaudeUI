@@ -9,7 +9,7 @@ import { listDirectories, loadSessionHistory, loadSubagentHistory, buildSubagent
 import { watchSession, unwatchSession } from '../services/session-watcher'
 import { loadSettings, saveSettings, loadSessionConfig, saveSessionConfig, loadSlashCommands, saveSlashCommands, startConfigWatcher } from '../services/ui-config'
 import { loadClaudePermissions, saveClaudePermissions } from '../services/claude-settings'
-import { loadMcpServers, saveMcpServers } from '../services/claude-mcp'
+import { loadMcpServers, saveMcpServers, readDisabledMcpServers, writeDisabledMcpServers } from '../services/claude-mcp'
 import { scanSkills } from '../services/skill-scanner'
 import type { UISettings, UISessionConfig, SlashCommandCache } from '../services/ui-config'
 import { gitServiceManager } from '../services/git-service'
@@ -178,7 +178,8 @@ const SESSION_IPC_CHANNELS = [
   'usage:fetch', 'usage:fetch-block',
   'claude:load-permissions', 'claude:save-permissions',
   'mcp:status', 'mcp:toggle', 'mcp:reconnect', 'mcp:set-servers',
-  'mcp:load-servers', 'mcp:save-servers'
+  'mcp:load-servers', 'mcp:save-servers',
+  'mcp:read-disabled', 'mcp:toggle-disabled'
 ]
 
 export function registerSessionIpc(win: BrowserWindow): void {
@@ -396,6 +397,22 @@ export function registerSessionIpc(win: BrowserWindow): void {
     loadMcpServers(scope as 'user' | 'project' | 'local', cwd))
   ipcMain.handle('mcp:save-servers', (_e, scope: string, servers: Record<string, unknown>, cwd?: string) =>
     saveMcpServers(scope as 'user' | 'project' | 'local', servers as never, cwd))
+
+  // MCP disabled state (direct ~/.claude.json access, no session needed)
+  ipcMain.handle('mcp:read-disabled', (_e, cwd: string) => {
+    return readDisabledMcpServers(cwd)
+  })
+
+  ipcMain.handle('mcp:toggle-disabled', async (_e, cwd: string, serverName: string, enabled: boolean) => {
+    const disabled = readDisabledMcpServers(cwd)
+    let updated: string[]
+    if (enabled) {
+      updated = disabled.filter(n => n !== serverName)
+    } else {
+      updated = disabled.includes(serverName) ? disabled : [...disabled, serverName]
+    }
+    writeDisabledMcpServers(cwd, updated)
+  })
 
   // Teammate inbox handlers
   ipcMain.handle(

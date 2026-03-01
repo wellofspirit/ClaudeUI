@@ -289,6 +289,10 @@ const api: ClaudeAPI = {
     ipcRenderer.invoke('mcp:load-servers', scope, cwd),
   saveMcpServers: (scope: string, servers: Record<string, unknown>, cwd?: string) =>
     ipcRenderer.invoke('mcp:save-servers', scope, servers, cwd),
+  mcpReadDisabled: (cwd: string) =>
+    ipcRenderer.invoke('mcp:read-disabled', cwd),
+  mcpToggleDisabled: (cwd: string, serverName: string, enabled: boolean) =>
+    ipcRenderer.invoke('mcp:toggle-disabled', cwd, serverName, enabled),
   onMcpServers: (cb) => {
     const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as never)
     ipcRenderer.on('session:mcp-servers', handler)
