@@ -11,6 +11,7 @@ import { FloatingError } from './FloatingError'
 import { WindowControls } from '../WindowControls'
 import { useSidebarCollapsed } from '../SessionView'
 import { AgentTabBar } from './AgentTabBar'
+import { WorktreePill } from '../git/WorktreePill'
 import { GitBranchPill } from '../git/GitBranchPill'
 import { GitChangesPill } from '../git/GitChangesPill'
 import { PermissionsDialog } from '../PermissionsDialog'
@@ -372,8 +373,9 @@ function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Element {
   const customTitle = useSessionStore((s) => activeSessionId ? s.customTitles[activeSessionId] : undefined)
   const { collapsed: sidebarCollapsed, toggle: toggleSidebar } = useSidebarCollapsed()
   const showWelcome = useSessionStore((s) => s.showWelcome)
+  const uiFontScale = useSessionStore((s) => s.settings.uiFontScale)
   const isMac = window.api.platform === 'darwin'
-  const leftPadding = sidebarCollapsed && isMac ? 148 : 13
+  const leftPadding = sidebarCollapsed && isMac ? 148 / uiFontScale : 13
   const [copiedField, setCopiedField] = useState<string | null>(null)
   const [infoHover, setInfoHover] = useState(false)
   const infoLeaveTimer = useRef<ReturnType<typeof setTimeout>>(null)
@@ -404,7 +406,7 @@ function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Element {
       <div className="flex items-center min-w-0">
         {sidebarCollapsed && (
           <div
-            style={isMac ? { position: 'absolute', left: 82, top: '50%', transform: 'translateY(-50%)' } : { marginRight: 8 }}
+            style={isMac ? { position: 'absolute', left: 82 / uiFontScale, top: 22 / uiFontScale, transform: 'translateY(-50%)' } : { marginRight: 8 }}
             className="[-webkit-app-region:no-drag] flex items-center gap-1"
           >
             <button
@@ -559,6 +561,7 @@ function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Element {
             </svg>
           </button>
         )}
+        <WorktreePill />
         <GitBranchPill />
         <GitChangesPill />
         <WindowControls />
@@ -596,12 +599,25 @@ const WELCOME_PHRASES = [
   "Time to create",
 ]
 
+const ADJECTIVES = ['swift', 'calm', 'bold', 'keen', 'warm', 'cool', 'wild', 'soft', 'fair', 'deep', 'pure', 'dark', 'safe', 'firm', 'vast']
+const NOUNS = ['river', 'stone', 'cloud', 'flame', 'frost', 'ridge', 'creek', 'grove', 'bloom', 'cedar', 'maple', 'cliff', 'brook', 'trail', 'haven']
+
+function generateRandomName(): string {
+  const adj = ADJECTIVES[Math.floor(Math.random() * ADJECTIVES.length)]
+  const noun = NOUNS[Math.floor(Math.random() * NOUNS.length)]
+  return `${adj}-${noun}`
+}
+
 function WelcomeState(): React.JSX.Element {
   const cwd = useActiveSession((s) => s.cwd)
   const directories = useSessionStore((s) => s.directories)
   const createNewSession = useSessionStore((s) => s.createNewSession)
+  const setWorktreeInfo = useSessionStore((s) => s.setWorktreeInfo)
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const [dropdownOpen, setDropdownOpen] = useState(false)
+  const [worktreeEnabled, setWorktreeEnabled] = useState(false)
+  const [worktreeName, setWorktreeName] = useState(() => generateRandomName())
+  const [isCreatingWorktree, setIsCreatingWorktree] = useState(false)
 
   // Pick a random phrase each time welcome view appears
   const phrase = useMemo(
@@ -610,19 +626,39 @@ function WelcomeState(): React.JSX.Element {
     [activeSessionId]
   )
 
-  const handleSelectDir = (dirCwd: string): void => {
+  const startSession = useCallback(async (dirCwd: string): Promise<void> => {
     const routingId = uuid()
-    createNewSession(routingId, dirCwd)
+    if (worktreeEnabled && worktreeName.trim()) {
+      setIsCreatingWorktree(true)
+      try {
+        const info = await window.api.createWorktree(dirCwd, worktreeName.trim())
+        createNewSession(routingId, info.worktreePath)
+        setWorktreeInfo(routingId, info)
+      } catch (err) {
+        window.api.logError('WelcomeState', `Failed to create worktree: ${err}`)
+        // Fall back to normal session
+        createNewSession(routingId, dirCwd)
+      } finally {
+        setIsCreatingWorktree(false)
+      }
+    } else {
+      createNewSession(routingId, dirCwd)
+    }
+  }, [worktreeEnabled, worktreeName, createNewSession, setWorktreeInfo])
+
+  const handleSelectDir = (dirCwd: string): void => {
     setDropdownOpen(false)
+    startSession(dirCwd)
   }
 
   const handleBrowse = async (): Promise<void> => {
     setDropdownOpen(false)
     const folder = await window.api.pickFolder()
-    if (folder) {
-      const routingId = uuid()
-      createNewSession(routingId, folder)
-    }
+    if (folder) startSession(folder)
+  }
+
+  const sanitizeWorktreeName = (val: string): string => {
+    return val.toLowerCase().replace(/[^a-z0-9-]/g, '').slice(0, 30)
   }
 
   return (
@@ -639,14 +675,26 @@ function WelcomeState(): React.JSX.Element {
       {/* Title */}
       <p className="text-[22px] text-text-secondary font-light tracking-tight">{phrase}</p>
 
+      {/* Creating worktree indicator */}
+      {isCreatingWorktree && (
+        <div className="flex items-center gap-2 text-[12px] text-text-muted animate-fade-in">
+          <div className="flex gap-[3px]">
+            {[0, 200, 400].map((delay) => (
+              <span key={delay} className="w-[4px] h-[4px] rounded-full bg-mode-edit" style={{ animation: 'pulse-dot 1.4s infinite', animationDelay: `${delay}ms` }} />
+            ))}
+          </div>
+          <span>Creating worktree...</span>
+        </div>
+      )}
+
       {/* Directory dropdown */}
-      {!cwd && (
+      {!cwd && !isCreatingWorktree && (
         <div className="relative">
           <button
             onClick={() => setDropdownOpen(!dropdownOpen)}
             className="flex items-center gap-1 text-[14px] text-accent hover:text-accent/80 transition-colors cursor-default"
           >
-            <span>Select a project folder</span>
+            <span>Select a project directory</span>
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="mt-px">
               <path d="M6 9l6 6 6-6" />
             </svg>
@@ -689,6 +737,47 @@ function WelcomeState(): React.JSX.Element {
                 </button>
               </div>
             </>
+          )}
+        </div>
+      )}
+
+      {/* Worktree toggle */}
+      {!cwd && !isCreatingWorktree && (
+        <div className="flex flex-col items-center gap-2">
+          <label className="flex items-center gap-2 cursor-default select-none">
+            <button
+              onClick={() => setWorktreeEnabled(!worktreeEnabled)}
+              className={`relative w-8 h-[18px] rounded-full transition-colors ${worktreeEnabled ? 'bg-mode-edit' : 'bg-bg-hover border border-border'}`}
+            >
+              <span className={`absolute top-[2px] w-[14px] h-[14px] rounded-full bg-white shadow transition-transform ${worktreeEnabled ? 'left-[15px]' : 'left-[1px]'}`} />
+            </button>
+            <span className="text-[12px] text-text-muted">Start in worktree</span>
+          </label>
+
+          {worktreeEnabled && (
+            <div className="flex items-center gap-1.5 animate-fade-in">
+              <input
+                type="text"
+                value={worktreeName}
+                onChange={(e) => setWorktreeName(sanitizeWorktreeName(e.target.value))}
+                placeholder="worktree-name"
+                className="w-40 px-2 py-1 rounded-md bg-bg-tertiary border border-border text-[12px] text-text-primary font-mono focus:outline-none focus:border-accent"
+              />
+              <button
+                onClick={() => setWorktreeName(generateRandomName())}
+                className="w-6 h-6 flex items-center justify-center rounded-md text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
+                title="Randomize name"
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <rect x="1" y="1" width="22" height="22" rx="4" />
+                  <circle cx="8" cy="8" r="1.5" fill="currentColor" />
+                  <circle cx="16" cy="8" r="1.5" fill="currentColor" />
+                  <circle cx="8" cy="16" r="1.5" fill="currentColor" />
+                  <circle cx="16" cy="16" r="1.5" fill="currentColor" />
+                  <circle cx="12" cy="12" r="1.5" fill="currentColor" />
+                </svg>
+              </button>
+            </div>
           )}
         </div>
       )}

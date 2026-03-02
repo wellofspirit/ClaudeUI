@@ -198,6 +198,22 @@ const api: ClaudeAPI = {
     return () => ipcRenderer.removeListener('terminal:exit', handler)
   },
 
+  // Worktree operations
+  createWorktree: (cwd: string, name: string) => ipcRenderer.invoke('worktree:create', cwd, name),
+  getWorktreeStatus: (worktreePath: string, originalHead: string) =>
+    ipcRenderer.invoke('worktree:status', worktreePath, originalHead),
+  removeWorktree: (worktreePath: string, branch: string, gitRoot: string) =>
+    ipcRenderer.invoke('worktree:remove', worktreePath, branch, gitRoot),
+  listWorktrees: (cwd: string) => ipcRenderer.invoke('worktree:list', cwd),
+
+  // App lifecycle
+  onBeforeQuit: (cb: () => void) => {
+    const handler = (): void => cb()
+    ipcRenderer.on('app:before-quit', handler)
+    return () => ipcRenderer.removeListener('app:before-quit', handler)
+  },
+  confirmQuit: () => ipcRenderer.invoke('app:quit-confirm'),
+
   // Git operations
   gitCheckRepo: (cwd: string) => ipcRenderer.invoke('git:check-repo', cwd),
   gitGetStatus: (cwd: string) => ipcRenderer.invoke('git:status', cwd),

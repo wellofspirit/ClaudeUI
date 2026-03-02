@@ -56,6 +56,8 @@ export class GitService {
       for (const f of status.not_added) {
         try {
           const absPath = path.resolve(this.cwd, f)
+          const stat = await fs.promises.stat(absPath)
+          if (!stat.isFile()) continue
           const content = await fs.promises.readFile(absPath, 'utf-8')
           const lineCount = content.split('\n').length
           // If file ends with newline, split produces an extra empty string

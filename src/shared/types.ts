@@ -288,6 +288,16 @@ export interface ClaudeAPI {
   onTerminalData(cb: (data: { terminalId: string; data: string }) => void): () => void
   onTerminalExit(cb: (data: { terminalId: string; code: number }) => void): () => void
 
+  // Worktree operations
+  createWorktree(cwd: string, name: string): Promise<WorktreeInfo>
+  getWorktreeStatus(worktreePath: string, originalHead: string): Promise<WorktreeStatus>
+  removeWorktree(worktreePath: string, branch: string, gitRoot: string): Promise<void>
+  listWorktrees(cwd: string): Promise<WorktreeEntry[]>
+
+  // App lifecycle
+  onBeforeQuit(cb: () => void): () => void
+  confirmQuit(): Promise<void>
+
   // Git operations
   gitCheckRepo(cwd: string): Promise<boolean>
   gitGetStatus(cwd: string): Promise<GitStatusData>
@@ -516,6 +526,33 @@ export interface AutomationRun {
 }
 
 // ---------------------------------------------------------------------------
+// Worktree types
+// ---------------------------------------------------------------------------
+
+export interface WorktreeInfo {
+  worktreePath: string
+  worktreeBranch: string
+  worktreeName: string
+  originalCwd: string
+  gitRoot: string
+  originalHeadCommit: string
+  createdAt: number
+}
+
+export interface WorktreeStatus {
+  uncommittedFiles: number
+  commitsAhead: number
+  files: string[]
+}
+
+export interface WorktreeEntry {
+  name: string
+  path: string
+  branch: string
+  exists: boolean
+}
+
+// ---------------------------------------------------------------------------
 // UI session config
 // ---------------------------------------------------------------------------
 
@@ -523,6 +560,7 @@ export interface UISessionConfig {
   recentSessions?: string[]
   pinnedSessions?: string[]
   customTitles?: Record<string, string>
+  worktreeInfoMap?: Record<string, WorktreeInfo>
 }
 
 export interface SlashCommandInfo {

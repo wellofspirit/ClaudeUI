@@ -13,6 +13,7 @@ import { loadMcpServers, saveMcpServers, readDisabledMcpServers, writeDisabledMc
 import { scanSkills } from '../services/skill-scanner'
 import type { UISettings, UISessionConfig, SlashCommandCache } from '../services/ui-config'
 import { gitServiceManager } from '../services/git-service'
+import { createWorktree, getWorktreeStatus, removeWorktree, listWorktrees } from '../services/worktree'
 import { usageFetcher } from '../services/usage-fetcher'
 import { blockUsageService } from '../services/block-usage'
 import type { ApprovalDecision, ModelInfo } from '../../shared/types'
@@ -179,7 +180,9 @@ const SESSION_IPC_CHANNELS = [
   'claude:load-permissions', 'claude:save-permissions',
   'mcp:status', 'mcp:toggle', 'mcp:reconnect', 'mcp:set-servers',
   'mcp:load-servers', 'mcp:save-servers',
-  'mcp:read-disabled', 'mcp:toggle-disabled'
+  'mcp:read-disabled', 'mcp:toggle-disabled',
+  'worktree:create', 'worktree:status', 'worktree:remove', 'worktree:list',
+  'app:quit-confirm'
 ]
 
 export function registerSessionIpc(win: BrowserWindow): void {
@@ -666,6 +669,26 @@ export function registerSessionIpc(win: BrowserWindow): void {
       svc?.stopPolling()
       gitServiceManager.release(cwd)
     }
+  })
+
+  // -------------------------------------------------------------------------
+  // Worktree IPC handlers
+  // -------------------------------------------------------------------------
+
+  ipcMain.handle('worktree:create', async (_e, cwd: string, name: string) => {
+    return await createWorktree(cwd, name)
+  })
+
+  ipcMain.handle('worktree:status', async (_e, worktreePath: string, originalHead: string) => {
+    return await getWorktreeStatus(worktreePath, originalHead)
+  })
+
+  ipcMain.handle('worktree:remove', async (_e, worktreePath: string, branch: string, gitRoot: string) => {
+    await removeWorktree(worktreePath, branch, gitRoot)
+  })
+
+  ipcMain.handle('worktree:list', async (_e, cwd: string) => {
+    return await listWorktrees(cwd)
   })
 
   // Watch ~/.claude/projects/ for JSONL changes and notify renderer to refresh

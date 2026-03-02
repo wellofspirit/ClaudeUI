@@ -1,15 +1,24 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { v4 as uuid } from 'uuid'
 import { useSessionStore, buildTodosFromMessages } from '../stores/session-store'
-import type { ChatMessage, DirectoryGroup, SessionInfo, AccountUsage, RateWindow } from '../../../shared/types'
+import type { ChatMessage, DirectoryGroup, SessionInfo, AccountUsage, RateWindow, WorktreeInfo } from '../../../shared/types'
 import { SettingsDialog, SettingsToggle } from './SettingsDialog'
 import { PermissionsDialog } from './PermissionsDialog'
+import { WorktreesModal } from './WorktreesModal'
+import { WorktreeCleanupModal } from './WorktreeCleanupModal'
 import { useAutomationStore } from '../stores/automation-store'
+
+/** Convert mouse event coords to zoom-adjusted position for fixed-position menus */
+function contextMenuPosition(e: React.MouseEvent): { x: number; y: number } {
+  const zoom = useSessionStore.getState().settings.uiFontScale
+  return { x: e.clientX / zoom, y: e.clientY / zoom }
+}
 
 export function Sidebar({ style, onToggleCollapse }: {
   style?: React.CSSProperties
   onToggleCollapse?: () => void
 }): React.JSX.Element {
+  const uiFontScale = useSessionStore((s) => s.settings.uiFontScale)
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const directories = useSessionStore((s) => s.directories)
   const recentSessionIds = useSessionStore((s) => s.recentSessionIds)
@@ -27,8 +36,12 @@ export function Sidebar({ style, onToggleCollapse }: {
   const setCustomTitle = useSessionStore((s) => s.setCustomTitle)
   const customTitles = useSessionStore((s) => s.customTitles)
   const reorderPinnedSessions = useSessionStore((s) => s.reorderPinnedSessions)
+  const worktreeInfoMap = useSessionStore((s) => s.worktreeInfoMap)
+  const clearWorktreeInfo = useSessionStore((s) => s.clearWorktreeInfo)
 
   const [expandedDir, setExpandedDir] = useState<string | null>(null)
+  const [worktreesModalCwd, setWorktreesModalCwd] = useState<string | null>(null)
+  const [cleanupWorktree, setCleanupWorktree] = useState<{ sessionId: string; worktreeInfo: WorktreeInfo } | null>(null)
   const [renamingKey, setRenamingKey] = useState<string | null>(null)
 
   // Find the projectKey for a session from directories
@@ -368,7 +381,7 @@ export function Sidebar({ style, onToggleCollapse }: {
       <div className="h-12 shrink-0 [-webkit-app-region:drag] relative">
         <button
           onClick={onToggleCollapse}
-          style={{ position: 'absolute', left: window.api.platform === 'darwin' ? 82 : 8, top: '50%', transform: 'translateY(-50%)' }}
+          style={{ position: 'absolute', left: window.api.platform === 'darwin' ? 82 / uiFontScale : 8, top: 22 / uiFontScale, transform: 'translateY(-50%)' }}
           className="[-webkit-app-region:no-drag] w-[26px] h-[26px] flex items-center justify-center rounded-md text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
           title="Collapse sidebar"
         >
@@ -490,7 +503,13 @@ export function Sidebar({ style, onToggleCollapse }: {
                     onClick={() => handleClickSession(info)}
                     onToggleWatch={info.projectKey ? () => handleToggleWatch(info) : undefined}
                     onPin={() => pinSession(info.sessionId)}
-                    onRemove={() => removeRecentSession(info.sessionId)}
+                    onRemove={() => {
+                      if (worktreeInfoMap[info.sessionId]) {
+                        setCleanupWorktree({ sessionId: info.sessionId, worktreeInfo: worktreeInfoMap[info.sessionId] })
+                      } else {
+                        removeRecentSession(info.sessionId)
+                      }
+                    }}
                     isRenaming={renamingKey === `recent:${info.sessionId}`}
                     onStartRename={() => setRenamingKey(`recent:${info.sessionId}`)}
                     onFinishRename={(title) => handleRename(info.sessionId, title)}
@@ -522,6 +541,7 @@ export function Sidebar({ style, onToggleCollapse }: {
                   onSessionClick={handleClickSession}
                   onSessionDoubleClick={(info) => { if (!pinnedSessionIds.includes(info.sessionId)) addRecentSession(info.sessionId) }}
                   onToggleWatch={handleToggleWatch}
+                  onViewWorktrees={() => setWorktreesModalCwd(group.cwd)}
                   renamingKey={renamingKey}
                   renamePrefix={`project:${group.projectKey || group.cwd}`}
                   onStartRename={(key) => setRenamingKey(key)}
@@ -537,6 +557,28 @@ export function Sidebar({ style, onToggleCollapse }: {
 
       {/* Settings panel + Footer */}
       <SettingsPanel />
+
+      {/* Worktrees management modal */}
+      {worktreesModalCwd && (
+        <WorktreesModal cwd={worktreesModalCwd} onClose={() => setWorktreesModalCwd(null)} />
+      )}
+
+      {/* Worktree cleanup modal (on session removal) */}
+      {cleanupWorktree && (
+        <WorktreeCleanupModal
+          worktreeInfo={cleanupWorktree.worktreeInfo}
+          onKeep={() => {
+            removeRecentSession(cleanupWorktree.sessionId)
+            setCleanupWorktree(null)
+          }}
+          onRemove={() => {
+            clearWorktreeInfo(cleanupWorktree.sessionId)
+            removeRecentSession(cleanupWorktree.sessionId)
+            setCleanupWorktree(null)
+          }}
+          onCancel={() => setCleanupWorktree(null)}
+        />
+      )}
     </div>
   )
 }
@@ -551,6 +593,7 @@ function DirectoryItem({
   onSessionClick,
   onSessionDoubleClick,
   onToggleWatch,
+  onViewWorktrees,
   renamingKey,
   renamePrefix,
   onStartRename,
@@ -567,6 +610,7 @@ function DirectoryItem({
   onSessionClick: (info: SessionInfo) => void
   onSessionDoubleClick: (info: SessionInfo) => void
   onToggleWatch: (info: SessionInfo) => void
+  onViewWorktrees?: () => void
   renamingKey: string | null
   renamePrefix: string
   onStartRename: (key: string) => void
@@ -574,11 +618,31 @@ function DirectoryItem({
   onAutoRename: (id: string) => void
   onCancelRename: () => void
 }): React.JSX.Element {
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null)
+  const contextMenuRef = useRef<HTMLDivElement>(null)
+
+  const handleContextMenu = (e: React.MouseEvent): void => {
+    e.preventDefault()
+    setContextMenu(contextMenuPosition(e))
+  }
+
+  useEffect(() => {
+    if (!contextMenu) return
+    const handler = (e: MouseEvent): void => {
+      if (contextMenuRef.current && !contextMenuRef.current.contains(e.target as Node)) {
+        setContextMenu(null)
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [contextMenu])
+
   return (
     <div>
       <div
         onClick={onClick}
         onDoubleClick={onDoubleClick}
+        onContextMenu={handleContextMenu}
         style={{ padding: '0 5px' }}
         className="flex items-center gap-2.5 h-8 rounded-md text-[13px] cursor-default transition-colors text-text-secondary hover:text-text-primary hover:bg-bg-hover"
       >
@@ -623,6 +687,44 @@ function DirectoryItem({
               />
             )
           })}
+        </div>
+      )}
+
+      {/* Context menu */}
+      {contextMenu && (
+        <div
+          ref={contextMenuRef}
+          className="fixed z-50 min-w-[160px] py-1 rounded-lg bg-bg-tertiary border border-border shadow-lg"
+          style={{ left: contextMenu.x, top: contextMenu.y }}
+        >
+          {onViewWorktrees && (
+            <button
+              onClick={() => { setContextMenu(null); onViewWorktrees() }}
+              className="w-full flex items-center gap-2 px-3 py-1.5 text-[12px] text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-colors text-left cursor-default"
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0 text-text-muted">
+                <circle cx="12" cy="18" r="3" />
+                <circle cx="6" cy="6" r="3" />
+                <circle cx="18" cy="6" r="3" />
+                <path d="M18 9v2c0 .6-.4 1-1 1H7c-.6 0-1-.4-1-1V9" />
+                <path d="M12 12v3" />
+              </svg>
+              View worktrees
+            </button>
+          )}
+          <button
+            onClick={() => {
+              setContextMenu(null)
+              onDoubleClick()
+            }}
+            className="w-full flex items-center gap-2 px-3 py-1.5 text-[12px] text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-colors text-left cursor-default"
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" className="shrink-0 text-text-muted">
+              <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" />
+              <path d="M18.5 2.5a2.12 2.12 0 013 3L12 15l-4 1 1-4z" />
+            </svg>
+            New session here
+          </button>
         </div>
       )}
     </div>
@@ -676,6 +778,7 @@ function SessionItem({
   onDragEnd?: (e: React.DragEvent) => void
   onDrop?: (e: React.DragEvent) => void
 }): React.JSX.Element {
+  const isWorktree = useSessionStore((s) => !!s.worktreeInfoMap[info.sessionId])
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null)
   const [renameValue, setRenameValue] = useState('')
   const renameRef = useRef<HTMLInputElement>(null)
@@ -695,7 +798,7 @@ function SessionItem({
 
   const handleContextMenu = (e: React.MouseEvent): void => {
     e.preventDefault()
-    setContextMenu({ x: e.clientX, y: e.clientY })
+    setContextMenu(contextMenuPosition(e))
   }
 
   // Close context menu on outside click
@@ -774,6 +877,18 @@ function SessionItem({
         ) : (
           <span className="truncate flex-1">{info.title}</span>
         )}
+      {/* Worktree indicator */}
+      {isWorktree && (
+        <span className="shrink-0 text-mode-edit opacity-60" title="Worktree session">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="12" cy="18" r="3" />
+            <circle cx="6" cy="6" r="3" />
+            <circle cx="18" cy="6" r="3" />
+            <path d="M18 9v2c0 .6-.4 1-1 1H7c-.6 0-1-.4-1-1V9" />
+            <path d="M12 12v3" />
+          </svg>
+        </span>
+      )}
       {/* Pin/Unpin button */}
       {onPin && (
         <span

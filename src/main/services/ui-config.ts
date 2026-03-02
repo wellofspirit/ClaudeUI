@@ -18,6 +18,7 @@ export interface UISessionConfig {
   recentSessions?: string[]
   pinnedSessions?: string[]
   customTitles?: Record<string, string>
+  worktreeInfoMap?: Record<string, import('../../shared/types').WorktreeInfo>
 }
 
 // Legacy combined config — kept for migration only

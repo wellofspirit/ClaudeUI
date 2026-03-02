@@ -19,7 +19,8 @@ import type {
   DiffComment,
   AccountUsage,
   BlockUsageData,
-  TerminalTab
+  TerminalTab,
+  WorktreeInfo
 } from '../../../shared/types'
 
 /**
@@ -200,11 +201,12 @@ function saveSettings(settings: AppSettings): void {
   window.api.saveSettings(settings as unknown as Record<string, unknown>)
 }
 
-function saveSessionConfig(recentSessionIds: string[], pinnedSessionIds: string[], customTitles: Record<string, string>): void {
+function saveSessionConfig(recentSessionIds: string[], pinnedSessionIds: string[], customTitles: Record<string, string>, worktreeInfoMap?: Record<string, WorktreeInfo>): void {
   window.api.saveSessionConfig({
     recentSessions: recentSessionIds,
     pinnedSessions: pinnedSessionIds,
-    customTitles: customTitles
+    customTitles: customTitles,
+    ...(worktreeInfoMap !== undefined ? { worktreeInfoMap } : {})
   })
 }
 
@@ -253,6 +255,7 @@ export async function hydrateConfigFromDisk(): Promise<void> {
     recentSessionIds: sessionConfig.recentSessions ?? [],
     pinnedSessionIds: sessionConfig.pinnedSessions ?? [],
     customTitles: sessionConfig.customTitles ?? {},
+    worktreeInfoMap: sessionConfig.worktreeInfoMap ?? {},
     slashCommands: slashCommands ?? []
   })
 }
@@ -319,6 +322,8 @@ export interface PerSessionState {
   teamName: string | null
   teammates: Record<string, TeammateInfo>  // keyed by toolUseId
   focusedAgentId: string | null            // null = main agent
+  // Worktree state
+  worktreeInfo: WorktreeInfo | null
   // Git state
   isGitRepo: boolean
   gitStatus: GitStatusData | null
@@ -367,6 +372,7 @@ const EMPTY_SESSION_STATE: PerSessionState = {
   teamName: null,
   teammates: {},
   focusedAgentId: null,
+  worktreeInfo: null,
   isGitRepo: false,
   gitStatus: null,
   gitBranches: null,
@@ -450,6 +456,10 @@ interface SessionState {
   showUsageView: boolean
   showAutomationView: boolean
 
+  // Worktree (global)
+  worktreeInfoMap: Record<string, WorktreeInfo>
+  quitWorktrees: Array<{ routingId: string; worktreeInfo: WorktreeInfo }> | null
+
   // Terminal panel (global, survives session switching)
   terminalTabs: TerminalTab[]
   activeTerminalId: string | null
@@ -507,7 +517,7 @@ interface SessionState {
   updateWatchedSession: (routingId: string, messages: ChatMessage[], taskNotifications: TaskNotification[]) => void
   updateSettings: (partial: Partial<AppSettings>) => void
   applyExternalSettings: (settings: Record<string, unknown>) => void
-  applyExternalSessionConfig: (config: { recentSessions?: string[]; pinnedSessions?: string[]; customTitles?: Record<string, string> }) => void
+  applyExternalSessionConfig: (config: { recentSessions?: string[]; pinnedSessions?: string[]; customTitles?: Record<string, string>; worktreeInfoMap?: Record<string, WorktreeInfo> }) => void
   setPermissionMode: (mode: PermissionMode, routingId?: string) => void
   setEffort: (effort: 'low' | 'medium' | 'high', routingId?: string) => void
   setStatusLine: (routingId: string, data: StatusLineData) => void
@@ -527,6 +537,10 @@ interface SessionState {
   updateTeammateStatus: (routingId: string, toolUseId: string, status: TeammateInfo['status']) => void
   setFocusedAgent: (routingId: string, toolUseId: string | null) => void
   addTeammateUserMessage: (routingId: string, toolUseId: string, id: string, text: string) => void
+  // Worktree actions
+  setWorktreeInfo: (routingId: string, info: WorktreeInfo | null) => void
+  clearWorktreeInfo: (routingId: string) => void
+  setQuitWorktrees: (sessions: Array<{ routingId: string; worktreeInfo: WorktreeInfo }> | null) => void
   // Git actions
   setIsGitRepo: (routingId: string, value: boolean) => void
   setGitStatus: (routingId: string, status: GitStatusData) => void
@@ -576,6 +590,8 @@ export const useSessionStore = create<SessionState>((set) => ({
   blockUsage: null,
   showUsageView: false,
   showAutomationView: false,
+  worktreeInfoMap: {},
+  quitWorktrees: null,
   terminalTabs: [],
   activeTerminalId: null,
   terminalPanelOpen: false,
@@ -628,7 +644,8 @@ export const useSessionStore = create<SessionState>((set) => ({
           isHistorical: true,
           taskNotifications: taskNotifications || [],
           subagentMessages: subagentMessages || {},
-          statusLine: statusLine ?? null
+          statusLine: statusLine ?? null,
+          worktreeInfo: state.worktreeInfoMap[routingId] ?? null
         }
       }
     })),
@@ -821,7 +838,11 @@ export const useSessionStore = create<SessionState>((set) => ({
 
   setStatus: (routingId, status) =>
     set((state) => ({
-      sessions: updateSession(state.sessions, routingId, () => ({ status }))
+      sessions: updateSession(state.sessions, routingId, (s) => ({
+        status,
+        // Update top-level cwd when SDK reports a new working directory (e.g. worktree enter/exit)
+        ...(status.cwd && status.cwd !== s.cwd ? { cwd: status.cwd } : {})
+      }))
     })),
 
   addPendingApproval: (routingId, approval) =>
@@ -1186,7 +1207,8 @@ export const useSessionStore = create<SessionState>((set) => ({
     set(() => ({
       recentSessionIds: config.recentSessions ?? [],
       pinnedSessionIds: config.pinnedSessions ?? [],
-      customTitles: config.customTitles ?? {}
+      customTitles: config.customTitles ?? {},
+      worktreeInfoMap: config.worktreeInfoMap ?? {}
     })),
 
   setPermissionMode: (mode, routingId) =>
@@ -1301,8 +1323,13 @@ export const useSessionStore = create<SessionState>((set) => ({
         customTitles[newId] = customTitles[oldId]
         delete customTitles[oldId]
       }
-      saveSessionConfig(recentSessionIds, pinnedSessionIds, customTitles)
-      return { sessions, activeSessionId, recentSessionIds, pinnedSessionIds, customTitles }
+      const worktreeInfoMap = { ...state.worktreeInfoMap }
+      if (worktreeInfoMap[oldId]) {
+        worktreeInfoMap[newId] = worktreeInfoMap[oldId]
+        delete worktreeInfoMap[oldId]
+      }
+      saveSessionConfig(recentSessionIds, pinnedSessionIds, customTitles, worktreeInfoMap)
+      return { sessions, activeSessionId, recentSessionIds, pinnedSessionIds, customTitles, worktreeInfoMap }
     })
   },
 
@@ -1392,6 +1419,39 @@ export const useSessionStore = create<SessionState>((set) => ({
         }
       }
     }),
+
+  // Worktree actions
+  setWorktreeInfo: (routingId, info) =>
+    set((state) => {
+      const worktreeInfoMap = { ...state.worktreeInfoMap }
+      if (info) {
+        worktreeInfoMap[routingId] = info
+      } else {
+        delete worktreeInfoMap[routingId]
+      }
+      saveSessionConfig(state.recentSessionIds, state.pinnedSessionIds, state.customTitles, worktreeInfoMap)
+      return {
+        worktreeInfoMap,
+        sessions: updateSession(state.sessions, routingId, (s) => ({
+          worktreeInfo: info,
+          // Also update cwd to worktree path so git watcher restarts on the new directory
+          ...(info && info.worktreePath && s.cwd !== info.worktreePath ? { cwd: info.worktreePath } : {})
+        }))
+      }
+    }),
+
+  clearWorktreeInfo: (routingId) =>
+    set((state) => {
+      const worktreeInfoMap = { ...state.worktreeInfoMap }
+      delete worktreeInfoMap[routingId]
+      saveSessionConfig(state.recentSessionIds, state.pinnedSessionIds, state.customTitles, worktreeInfoMap)
+      return {
+        worktreeInfoMap,
+        sessions: updateSession(state.sessions, routingId, () => ({ worktreeInfo: null }))
+      }
+    }),
+
+  setQuitWorktrees: (sessions) => set({ quitWorktrees: sessions }),
 
   // Git actions
   setIsGitRepo: (routingId, value) =>

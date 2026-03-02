@@ -9,6 +9,7 @@ import { TerminalPanel } from './terminal/TerminalPanel'
 import { useActiveSession, useSessionStore, applyTheme } from '../stores/session-store'
 import { useGitWatcher } from '../hooks/useGitWatcher'
 import { useAutomationEvents } from '../hooks/useAutomationEvents'
+import { QuitWorktreeModal } from './QuitWorktreeModal'
 
 
 const PERMISSION_MODES = ['default', 'acceptEdits', 'plan'] as const
@@ -251,6 +252,7 @@ export function SessionView(): React.JSX.Element {
           )}
         </div>
       </div>
+      <QuitWorktreeModal />
     </SidebarContext.Provider>
   )
 }

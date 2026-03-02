@@ -63,8 +63,31 @@ function createWindow(): void {
   registerTerminalIpc(mainWindow)
   const automationManager = registerAutomationIpc(mainWindow)
 
-  app.on('before-quit', () => {
+  // Before-quit: give renderer a chance to prompt about active worktrees
+  let quitConfirmed = false
+  let quitTimeout: ReturnType<typeof setTimeout> | null = null
+
+  app.on('before-quit', (e) => {
     automationManager.stopAll()
+    if (quitConfirmed) return
+    e.preventDefault()
+    if (!mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('app:before-quit')
+    }
+    // Fallback: if renderer doesn't respond in 5 seconds, quit anyway
+    if (quitTimeout) clearTimeout(quitTimeout)
+    quitTimeout = setTimeout(() => {
+      quitConfirmed = true
+      app.quit()
+    }, 5000)
+  })
+
+  // Remove previous handler if re-registered (macOS dock re-open)
+  ipcMain.removeHandler('app:quit-confirm')
+  ipcMain.handle('app:quit-confirm', () => {
+    if (quitTimeout) clearTimeout(quitTimeout)
+    quitConfirmed = true
+    app.quit()
   })
 
   // Renderer error logging → main process log file

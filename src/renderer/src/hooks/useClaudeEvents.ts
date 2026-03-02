@@ -106,6 +106,14 @@ export function useClaudeEvents(): void {
         if (status.state === 'running') {
           useSessionStore.getState().setNeedsAttention(effectiveRoutingId, false)
         }
+        // Detect worktree exit: CWD changed back to originalCwd
+        if (status.cwd) {
+          const store = useSessionStore.getState()
+          const session = store.sessions[effectiveRoutingId]
+          if (session?.worktreeInfo && status.cwd === session.worktreeInfo.originalCwd) {
+            store.clearWorktreeInfo(effectiveRoutingId)
+          }
+        }
       }),
       window.api.onResult(({ routingId }) => {
         // Dismiss completed task list when turn ends
@@ -131,6 +139,43 @@ export function useClaudeEvents(): void {
         appendToolResult(routingId, toolUseId, result, isError)
         // Rebuild todos when a task tool result arrives (e.g. TaskCreate gets its ID)
         if (!isError) rebuildTodos(routingId)
+
+        // Detect worktree enter from EnterWorktree tool result
+        if (!isError && result) {
+          const store = useSessionStore.getState()
+          const session = store.sessions[routingId]
+          if (session && !session.worktreeInfo) {
+            // Find the matching tool_use block by toolUseId
+            for (const msg of session.messages) {
+              const toolBlock = msg.content.find(
+                (b) => b.type === 'tool_use' && b.toolUseId === toolUseId
+              )
+              if (toolBlock?.toolName && /worktree/i.test(toolBlock.toolName)) {
+                // SDK result format: "Created worktree at <path> on branch <branch>. ..."
+                const naturalMatch = result.match(/worktree at (.+?) on branch ([\w-]+)/)
+                // Also try structured formats: worktreePath: <path> or JSON "worktreePath": "<path>"
+                const pathMatch = naturalMatch?.[1] || result.match(/worktreePath:\s*(.+?)(?:\n|$)/i)?.[1] || result.match(/"worktreePath"\s*:\s*"([^"]+)"/i)?.[1]
+                const branchMatch = naturalMatch?.[2] || result.match(/worktreeBranch:\s*(.+?)(?:\n|$)/i)?.[1] || result.match(/"worktreeBranch"\s*:\s*"([^"]+)"/i)?.[1]
+                if (pathMatch && branchMatch) {
+                  const wtPath = pathMatch.trim()
+                  const wtBranch = branchMatch.trim()
+                  // Derive name from path (last segment) or branch (strip worktree- prefix)
+                  const wtName = wtPath.split('/').pop() || wtBranch.replace(/^worktree-/, '')
+                  store.setWorktreeInfo(routingId, {
+                    worktreePath: wtPath,
+                    worktreeBranch: wtBranch,
+                    worktreeName: wtName,
+                    originalCwd: session.cwd,
+                    gitRoot: session.cwd,
+                    originalHeadCommit: '',
+                    createdAt: Date.now()
+                  })
+                }
+                break
+              }
+            }
+          }
+        }
       }),
       window.api.onTaskProgress(({ routingId, data }) => {
         updateTaskProgress(routingId, data)
@@ -228,6 +273,17 @@ export function useClaudeEvents(): void {
       // Block usage analytics
       window.api.onBlockUsage((data) => {
         useSessionStore.getState().setBlockUsage(data)
+      }),
+      // Before-quit: check for active worktrees
+      window.api.onBeforeQuit(() => {
+        const store = useSessionStore.getState()
+        const activeWorktrees = Object.entries(store.worktreeInfoMap)
+          .map(([routingId, worktreeInfo]) => ({ routingId, worktreeInfo }))
+        if (activeWorktrees.length === 0) {
+          window.api.confirmQuit()
+        } else {
+          store.setQuitWorktrees(activeWorktrees)
+        }
       })
     ]
 
