@@ -302,6 +302,7 @@ export interface ClaudeAPI {
   gitUnstageAll(cwd: string): Promise<void>
   gitCommit(cwd: string, message: string): Promise<string>
   gitPush(cwd: string): Promise<void>
+  gitPushWithUpstream(cwd: string, branch: string): Promise<void>
   gitPull(cwd: string): Promise<{ summary: string }>
   gitFetch(cwd: string): Promise<void>
   gitStartWatching(cwd: string): Promise<void>

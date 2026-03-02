@@ -29,6 +29,7 @@ export function GitBranchDropdown({ onClose, anchorRef }: Props): React.JSX.Elem
   const [loading, setLoading] = useState(false)
   const [localError, setLocalError] = useState<string | null>(null)
   const [successMsg, setSuccessMsg] = useState<string | null>(null)
+  const [upstreamPrompt, setUpstreamPrompt] = useState<{ branch: string } | null>(null)
   const ref = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
 
@@ -138,22 +139,50 @@ export function GitBranchDropdown({ onClose, anchorRef }: Props): React.JSX.Elem
     }
   }, [cwd, activeSessionId, isSyncing, setSyncOp, setSyncError, refreshAll])
 
+  const isNoUpstreamError = (err: unknown): boolean => {
+    const msg = err instanceof Error ? err.message : String(err)
+    return msg.includes('no upstream branch') || msg.includes('set-upstream') || msg.includes('has no upstream')
+  }
+
   const handlePush = useCallback(async () => {
     if (!cwd || !activeSessionId || isSyncing) return
     setSyncOp(activeSessionId, 'pushing')
     setSyncError(activeSessionId, null)
     setSuccessMsg(null)
+    setUpstreamPrompt(null)
     try {
       await window.api.gitPush(cwd)
       await refreshAll()
       setSuccessMsg('Pushed to remote')
+    } catch (err) {
+      if (isNoUpstreamError(err)) {
+        const branch = gitStatus?.branch || 'HEAD'
+        setUpstreamPrompt({ branch })
+      } else {
+        const msg = err instanceof Error ? err.message : 'Push failed'
+        setSyncError(activeSessionId, msg)
+      }
+    } finally {
+      setSyncOp(activeSessionId, 'idle')
+    }
+  }, [cwd, activeSessionId, isSyncing, gitStatus?.branch, setSyncOp, setSyncError, refreshAll])
+
+  const handlePushWithUpstream = useCallback(async () => {
+    if (!cwd || !activeSessionId || !upstreamPrompt) return
+    setSyncOp(activeSessionId, 'pushing')
+    setSyncError(activeSessionId, null)
+    setUpstreamPrompt(null)
+    try {
+      await window.api.gitPushWithUpstream(cwd, upstreamPrompt.branch)
+      await refreshAll()
+      setSuccessMsg('Pushed to remote (upstream set)')
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Push failed'
       setSyncError(activeSessionId, msg)
     } finally {
       setSyncOp(activeSessionId, 'idle')
     }
-  }, [cwd, activeSessionId, isSyncing, setSyncOp, setSyncError, refreshAll])
+  }, [cwd, activeSessionId, upstreamPrompt, setSyncOp, setSyncError, refreshAll])
 
   const handleCheckout = useCallback(async (branch: string) => {
     if (!cwd || loading) return
@@ -225,10 +254,10 @@ export function GitBranchDropdown({ onClose, anchorRef }: Props): React.JSX.Elem
               icon="↑"
               label="Push"
               count={hasTracking ? ahead : 0}
-              disabled={isSyncing || !hasTracking || ahead === 0}
+              disabled={isSyncing || (hasTracking && ahead === 0)}
               active={syncOp === 'pushing'}
               onClick={handlePush}
-              title={!hasTracking ? 'No upstream branch' : ahead === 0 ? 'Nothing to push' : `Push ${ahead} commit${ahead !== 1 ? 's' : ''}`}
+              title={!hasTracking ? 'Push and set upstream' : ahead === 0 ? 'Nothing to push' : `Push ${ahead} commit${ahead !== 1 ? 's' : ''}`}
             />
           </div>
           <SyncButton
@@ -240,6 +269,30 @@ export function GitBranchDropdown({ onClose, anchorRef }: Props): React.JSX.Elem
             title="Fetch from all remotes"
             fullWidth
           />
+        </div>
+      )}
+
+      {/* Upstream prompt */}
+      {upstreamPrompt && (
+        <div className="px-3 py-2 border-b border-border bg-bg-tertiary/50">
+          <p className="text-[11px] text-text-primary mb-2">
+            No upstream for <span className="font-mono text-accent">{upstreamPrompt.branch}</span>. Set up tracking?
+          </p>
+          <div className="flex items-center justify-end gap-1.5">
+            <button
+              onClick={() => setUpstreamPrompt(null)}
+              className="px-2 py-1 text-[11px] rounded-md border border-border text-text-secondary hover:bg-bg-hover transition-colors cursor-default"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handlePushWithUpstream}
+              disabled={isSyncing}
+              className="px-2 py-1 text-[11px] rounded-md bg-accent text-white hover:bg-accent-hover transition-colors cursor-default disabled:opacity-50"
+            >
+              Push with -u
+            </button>
+          </div>
         </div>
       )}
 

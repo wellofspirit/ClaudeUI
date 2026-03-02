@@ -214,6 +214,7 @@ const api: ClaudeAPI = {
   gitUnstageAll: (cwd: string) => ipcRenderer.invoke('git:unstage-all', cwd),
   gitCommit: (cwd: string, message: string) => ipcRenderer.invoke('git:commit', cwd, message),
   gitPush: (cwd: string) => ipcRenderer.invoke('git:push', cwd),
+  gitPushWithUpstream: (cwd: string, branch: string) => ipcRenderer.invoke('git:push-with-upstream', cwd, branch),
   gitPull: (cwd: string) => ipcRenderer.invoke('git:pull', cwd),
   gitFetch: (cwd: string) => ipcRenderer.invoke('git:fetch', cwd),
   gitStartWatching: (cwd: string) => ipcRenderer.invoke('git:start-watching', cwd),

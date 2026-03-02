@@ -220,6 +220,10 @@ export class GitService {
     await this.git.push()
   }
 
+  async pushWithUpstream(branch: string): Promise<void> {
+    await this.git.push(['--set-upstream', 'origin', branch])
+  }
+
   async pull(): Promise<{ summary: string }> {
     const result = await this.git.pull()
     const s = result.summary

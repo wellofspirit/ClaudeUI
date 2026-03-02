@@ -13,10 +13,10 @@ export function GitCommitBox(): React.JSX.Element {
   const gitCommitMode = useSessionStore((s) => s.settings.gitCommitMode)
   const [loading, setLoading] = useState(false)
   const [generating, setGenerating] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const [toast, setToast] = useState<string | null>(null)
+  const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null)
   const [toastExiting, setToastExiting] = useState(false)
   const toastTimerRef = useRef<ReturnType<typeof setTimeout>>(null)
+  const [upstreamPrompt, setUpstreamPrompt] = useState<{ branch: string; afterCommitHash?: string } | null>(null)
   const [dropdownOpen, setDropdownOpen] = useState(false)
   const dropdownRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -27,9 +27,9 @@ export function GitCommitBox(): React.JSX.Element {
   const totalChanges = gitStatus?.files.length ?? 0
   const allStaged = totalChanges > 0 && stagedCount === totalChanges
 
-  const showToast = useCallback((msg: string) => {
+  const showToast = useCallback((msg: string, type: 'success' | 'error' = 'success') => {
     if (toastTimerRef.current) clearTimeout(toastTimerRef.current)
-    setToast(msg)
+    setToast({ message: msg, type })
     setToastExiting(false)
     toastTimerRef.current = setTimeout(() => {
       setToastExiting(true)
@@ -37,7 +37,7 @@ export function GitCommitBox(): React.JSX.Element {
         setToast(null)
         setToastExiting(false)
       }, 200) // match toast-out duration
-    }, 2500)
+    }, type === 'error' ? 5000 : 2500)
   }, [])
 
   // Clean up toast timer on unmount
@@ -93,16 +93,35 @@ export function GitCommitBox(): React.JSX.Element {
     document.addEventListener('mouseup', onUp)
   }, [commitBoxHeight])
 
+  const isNoUpstreamError = (err: unknown): boolean => {
+    const msg = err instanceof Error ? err.message : String(err)
+    return msg.includes('no upstream branch') || msg.includes('set-upstream') || msg.includes('has no upstream')
+  }
+
   const refreshStatus = useCallback(async () => {
     if (!cwd || !activeSessionId) return
     const status = await window.api.gitGetStatus(cwd)
     setGitStatus(activeSessionId, status)
   }, [cwd, activeSessionId, setGitStatus])
 
+  const handlePushWithUpstreamPrompt = useCallback(async (branch: string, afterCommitHash?: string) => {
+    if (!cwd) return
+    setLoading(true)
+    try {
+      await window.api.gitPushWithUpstream(cwd, branch)
+      showToast(afterCommitHash ? `Committed & pushed: ${afterCommitHash}` : 'Pushed!', 'success')
+      await refreshStatus()
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Push failed', 'error')
+    } finally {
+      setLoading(false)
+      setUpstreamPrompt(null)
+    }
+  }, [cwd, showToast, refreshStatus])
+
   const handleToggleStageAll = useCallback(async () => {
     if (!cwd || !activeSessionId || loading) return
     setLoading(true)
-    setError(null)
     try {
       if (allStaged) {
         await window.api.gitUnstageAll(cwd)
@@ -111,21 +130,19 @@ export function GitCommitBox(): React.JSX.Element {
       }
       await refreshStatus()
     } catch (err) {
-      setError(err instanceof Error ? err.message : allStaged ? 'Failed to unstage' : 'Failed to stage')
+      showToast(err instanceof Error ? err.message : allStaged ? 'Failed to unstage' : 'Failed to stage', 'error')
     } finally {
       setLoading(false)
     }
-  }, [cwd, activeSessionId, loading, allStaged, refreshStatus])
+  }, [cwd, activeSessionId, loading, allStaged, refreshStatus, showToast])
 
   const handleCommit = useCallback(async () => {
     if (!cwd || !activeSessionId || !gitCommitMessage.trim() || loading) return
     if (stagedCount === 0) {
-      setError('No staged changes to commit')
+      showToast('No staged changes to commit', 'error')
       return
     }
     setLoading(true)
-    setError(null)
-    setToast(null)
     try {
       const hash = await window.api.gitCommit(cwd, gitCommitMessage.trim())
       setGitCommitMessage(activeSessionId, '')
@@ -134,7 +151,7 @@ export function GitCommitBox(): React.JSX.Element {
       await refreshStatus()
       selectNextGitFile(activeSessionId)
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Commit failed')
+      showToast(err instanceof Error ? err.message : 'Commit failed', 'error')
     } finally {
       setLoading(false)
     }
@@ -143,53 +160,63 @@ export function GitCommitBox(): React.JSX.Element {
   const handleCommitAndPush = useCallback(async () => {
     if (!cwd || !activeSessionId || !gitCommitMessage.trim() || loading) return
     if (stagedCount === 0) {
-      setError('No staged changes to commit')
+      showToast('No staged changes to commit', 'error')
       return
     }
     setLoading(true)
-    setError(null)
-    setToast(null)
     setDropdownOpen(false)
     try {
       const hash = await window.api.gitCommit(cwd, gitCommitMessage.trim())
       setGitCommitMessage(activeSessionId, '')
-      await window.api.gitPush(cwd)
-      showToast(`Committed & pushed: ${hash.slice(0, 7)}`)
+      try {
+        await window.api.gitPush(cwd)
+        showToast(`Committed & pushed: ${hash.slice(0, 7)}`)
+      } catch (pushErr) {
+        if (isNoUpstreamError(pushErr)) {
+          const branch = gitStatus?.branch || 'HEAD'
+          setUpstreamPrompt({ branch, afterCommitHash: hash.slice(0, 7) })
+          showToast(`Committed: ${hash.slice(0, 7)} — no upstream branch configured`, 'error')
+        } else {
+          showToast(pushErr instanceof Error ? pushErr.message : 'Push failed', 'error')
+        }
+      }
 
       await refreshStatus()
       selectNextGitFile(activeSessionId)
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Commit & push failed')
+      showToast(err instanceof Error ? err.message : 'Commit failed', 'error')
     } finally {
       setLoading(false)
     }
-  }, [cwd, activeSessionId, gitCommitMessage, stagedCount, loading, setGitCommitMessage, refreshStatus, showToast, selectNextGitFile])
+  }, [cwd, activeSessionId, gitCommitMessage, stagedCount, loading, gitStatus?.branch, setGitCommitMessage, refreshStatus, showToast, selectNextGitFile])
 
   const handlePush = useCallback(async () => {
     if (!cwd || loading) return
     setLoading(true)
-    setError(null)
     setDropdownOpen(false)
     try {
       await window.api.gitPush(cwd)
       showToast('Pushed!')
-
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Push failed')
+      if (isNoUpstreamError(err)) {
+        const branch = gitStatus?.branch || 'HEAD'
+        setUpstreamPrompt({ branch })
+      } else {
+        showToast(err instanceof Error ? err.message : 'Push failed', 'error')
+      }
     } finally {
       setLoading(false)
     }
-  }, [cwd, loading, showToast])
+  }, [cwd, loading, gitStatus?.branch, showToast])
 
   const handleGenerateMessage = useCallback(async () => {
     if (!cwd || !activeSessionId || generating) return
     const files = gitStatus?.staged ?? []
     if (files.length === 0) {
-      setError('Stage changes first to generate a message')
+      showToast('Stage changes first to generate a message', 'error')
       return
     }
     setGenerating(true)
-    setError(null)
     try {
       // Gather diffs for staged files (limit total to ~8000 chars to stay fast)
       let diff = ''
@@ -199,21 +226,21 @@ export function GitCommitBox(): React.JSX.Element {
         if (patch) diff += patch + '\n'
       }
       if (!diff.trim()) {
-        setError('No diff content found')
+        showToast('No diff content found', 'error')
         return
       }
       const msg = await window.api.generateCommitMessage(diff)
       if (msg) {
         setGitCommitMessage(activeSessionId, msg)
       } else {
-        setError('Failed to generate message')
+        showToast('Failed to generate message', 'error')
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Generation failed')
+      showToast(err instanceof Error ? err.message : 'Generation failed', 'error')
     } finally {
       setGenerating(false)
     }
-  }, [cwd, activeSessionId, generating, gitStatus?.staged, setGitCommitMessage])
+  }, [cwd, activeSessionId, generating, gitStatus?.staged, setGitCommitMessage, showToast])
 
   const commitDisabled = loading || !gitCommitMessage.trim() || stagedCount === 0
   const isPushMode = gitCommitMode === 'commit-push'
@@ -261,18 +288,40 @@ export function GitCommitBox(): React.JSX.Element {
         </button>
       </div>
 
-      {/* Bottom section: error + buttons */}
+      {/* Bottom section: buttons */}
       <div className="shrink-0 px-2 pb-2 pt-1.5 space-y-1.5">
-        {/* Error message */}
-        {error && (
-          <div className="text-[11px] text-red-400 px-1">{error}</div>
-        )}
-
         {/* Floating toast — positioned above the commit box, centered */}
         {toast && (
           <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-3 z-50 pointer-events-none">
-            <div className={`px-4 py-2 rounded-lg bg-bg-tertiary border border-border shadow-lg text-[12px] text-green-400 font-mono whitespace-nowrap ${toastExiting ? 'animate-toast-out' : 'animate-toast-in'}`}>
-              {toast}
+            <div className={`px-4 py-2 rounded-lg shadow-lg text-[12px] font-mono whitespace-nowrap ${toast.type === 'error' ? 'bg-red-950 border border-red-800 text-red-300' : 'bg-bg-tertiary border border-border text-green-400'} ${toastExiting ? 'animate-toast-out' : 'animate-toast-in'}`}>
+              {toast.message}
+            </div>
+          </div>
+        )}
+
+        {/* Upstream prompt — asks user to set up remote tracking */}
+        {upstreamPrompt && (
+          <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-3 z-50 w-72">
+            <div className="px-4 py-3 rounded-lg bg-bg-primary border border-border shadow-lg text-[12px] animate-toast-in">
+              <p className="text-text-primary mb-2">
+                No upstream branch for <span className="font-mono text-accent">{upstreamPrompt.branch}</span>.
+                Set up tracking on remote?
+              </p>
+              <div className="flex items-center justify-end gap-2">
+                <button
+                  onClick={() => setUpstreamPrompt(null)}
+                  className="px-2.5 py-1 text-[11px] rounded-md border border-border text-text-secondary hover:bg-bg-hover transition-colors cursor-default"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={() => handlePushWithUpstreamPrompt(upstreamPrompt.branch, upstreamPrompt.afterCommitHash)}
+                  disabled={loading}
+                  className="px-2.5 py-1 text-[11px] rounded-md bg-accent text-white hover:bg-accent-hover transition-colors cursor-default disabled:opacity-50"
+                >
+                  Push with -u
+                </button>
+              </div>
             </div>
           </div>
         )}
