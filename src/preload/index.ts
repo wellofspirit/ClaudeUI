@@ -4,8 +4,8 @@ import type { ApprovalDecision, ClaudeAPI } from '../shared/types'
 const api: ClaudeAPI = {
   platform: process.platform,
   pickFolder: () => ipcRenderer.invoke('session:pick-folder'),
-  createSession: (routingId: string, cwd: string, effort?: string, resumeSessionId?: string, permissionMode?: string) =>
-    ipcRenderer.invoke('session:create', routingId, cwd, effort, resumeSessionId, permissionMode),
+  createSession: (routingId: string, cwd: string, effort?: string, resumeSessionId?: string, permissionMode?: string, model?: string) =>
+    ipcRenderer.invoke('session:create', routingId, cwd, effort, resumeSessionId, permissionMode, model),
   rekeySession: (oldId: string, newId: string) =>
     ipcRenderer.invoke('session:rekey', oldId, newId),
   sendPrompt: (routingId: string, prompt: string, attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>) =>

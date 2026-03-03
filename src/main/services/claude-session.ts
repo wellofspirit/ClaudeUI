@@ -182,13 +182,14 @@ export class ClaudeSession {
   private accTotalApiDurationMs = 0
   private lastContextLength = 0
 
-  constructor(routingId: string, win: BrowserWindow, cwd: string, effort?: string, resumeSessionId?: string, permissionMode?: string) {
+  constructor(routingId: string, win: BrowserWindow, cwd: string, effort?: string, resumeSessionId?: string, permissionMode?: string, model?: string) {
     this.routingId = routingId
     this.win = win
     this.cwd = cwd
     this.effort = effort || 'medium'
     this.resumeSessionId = resumeSessionId
     if (permissionMode) this.permissionMode = permissionMode
+    if (model) this.model = model
     this.sendStatus()
   }
 

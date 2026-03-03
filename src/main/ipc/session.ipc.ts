@@ -203,8 +203,8 @@ export function registerSessionIpc(win: BrowserWindow): void {
 
   ipcMain.handle(
     'session:create',
-    (_event, routingId: string, cwd: string, effort?: string, resumeSessionId?: string, permissionMode?: string) => {
-      manager.create(routingId, win, cwd, effort, resumeSessionId, permissionMode)
+    (_event, routingId: string, cwd: string, effort?: string, resumeSessionId?: string, permissionMode?: string, model?: string) => {
+      manager.create(routingId, win, cwd, effort, resumeSessionId, permissionMode, model)
     }
   )
 

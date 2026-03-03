@@ -224,7 +224,7 @@ export interface RoutedData<T> {
 export interface ClaudeAPI {
   platform: string
   pickFolder(): Promise<string | null>
-  createSession(routingId: string, cwd: string, effort?: string, resumeSessionId?: string, permissionMode?: string): Promise<void>
+  createSession(routingId: string, cwd: string, effort?: string, resumeSessionId?: string, permissionMode?: string, model?: string): Promise<void>
   rekeySession(oldId: string, newId: string): Promise<void>
   sendPrompt(routingId: string, prompt: string, attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>): Promise<void>
   cancelSession(routingId: string): Promise<void>

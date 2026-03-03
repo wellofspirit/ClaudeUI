@@ -295,7 +295,7 @@ export function InputBox(): React.JSX.Element {
     if (needsSdkCreate) {
       const { sessions } = useSessionStore.getState()
       const session = sessions[activeSessionId]
-      await window.api.createSession(activeSessionId, session?.cwd || '', session?.effort ?? 'medium', resumeId, session?.permissionMode)
+      await window.api.createSession(activeSessionId, session?.cwd || '', session?.effort ?? 'medium', resumeId, session?.permissionMode, session?.selectedModel)
       markSdkActive(activeSessionId)
     }
 
