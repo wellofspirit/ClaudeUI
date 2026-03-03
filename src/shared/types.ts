@@ -309,6 +309,7 @@ export interface ClaudeAPI {
   gitGetFileContents(cwd: string, filePath: string, staged: boolean): Promise<{ oldContent: string; newContent: string }>
   gitStageFile(cwd: string, filePath: string): Promise<void>
   gitUnstageFile(cwd: string, filePath: string): Promise<void>
+  gitDiscardFile(cwd: string, filePath: string): Promise<void>
   gitStageAll(cwd: string): Promise<void>
   gitUnstageAll(cwd: string): Promise<void>
   gitCommit(cwd: string, message: string): Promise<string>

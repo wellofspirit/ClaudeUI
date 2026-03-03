@@ -172,7 +172,7 @@ const SESSION_IPC_CHANNELS = [
   'session:send-to-teammate', 'session:broadcast-to-team', 'session:get-team-info',
   'session:open-teams-view',
   'git:check-repo', 'git:status', 'git:branches', 'git:checkout', 'git:create-branch',
-  'git:file-patch', 'git:file-contents', 'git:stage-file', 'git:unstage-file',
+  'git:file-patch', 'git:file-contents', 'git:stage-file', 'git:unstage-file', 'git:discard-file',
   'git:stage-all', 'git:unstage-all', 'git:commit', 'git:push', 'git:push-with-upstream', 'git:pull', 'git:fetch',
   'git:start-watching', 'git:stop-watching',
   'file:list-dir',
@@ -578,6 +578,15 @@ export function registerSessionIpc(win: BrowserWindow): void {
     const svc = gitServiceManager.get(cwd)
     try {
       await svc.unstageFile(filePath)
+    } finally {
+      gitServiceManager.release(cwd)
+    }
+  })
+
+  ipcMain.handle('git:discard-file', async (_e, cwd: string, filePath: string) => {
+    const svc = gitServiceManager.get(cwd)
+    try {
+      await svc.discardFile(filePath)
     } finally {
       gitServiceManager.release(cwd)
     }

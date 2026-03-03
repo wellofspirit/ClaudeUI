@@ -1,4 +1,5 @@
-import { useState, useCallback, useMemo } from 'react'
+import { useState, useCallback, useMemo, useEffect, useRef } from 'react'
+import { createPortal } from 'react-dom'
 import { useActiveSession, useSessionStore } from '../../stores/session-store'
 import type { GitFileStatus } from '../../../../shared/types'
 
@@ -65,10 +66,40 @@ function isStaged(file: GitFileStatus): boolean {
   return file.index !== ' ' && file.index !== '?'
 }
 
+function isUntracked(file: GitFileStatus): boolean {
+  return file.index === '?' && file.working === '?'
+}
+
 /** Collect all GitFileStatus leaves under a tree node */
 function collectFiles(node: TreeNode): GitFileStatus[] {
   if (node.file) return [node.file]
   return node.children.flatMap(collectFiles)
+}
+
+/** Raw screen coordinates — no zoom adjustment needed since we portal to document.body (outside the zoom container). */
+function contextMenuPosition(e: React.MouseEvent): { x: number; y: number } {
+  return { x: e.clientX, y: e.clientY }
+}
+
+// ── Context menu target types ──────────────────────────────────────
+
+interface FileContextTarget {
+  kind: 'file'
+  file: GitFileStatus
+}
+
+interface DirContextTarget {
+  kind: 'dir'
+  files: GitFileStatus[]
+  dirName: string
+}
+
+type ContextTarget = FileContextTarget | DirContextTarget
+
+interface ContextMenuState {
+  x: number
+  y: number
+  target: ContextTarget
 }
 
 export function GitFileTree(): React.JSX.Element {
@@ -79,6 +110,11 @@ export function GitFileTree(): React.JSX.Element {
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const setGitSelectedFile = useSessionStore((s) => s.setGitSelectedFile)
   const setGitStatus = useSessionStore((s) => s.setGitStatus)
+
+  // Context menu + confirmation dialog state
+  const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null)
+  const [confirmDiscard, setConfirmDiscard] = useState<ContextTarget | null>(null)
+  const contextMenuRef = useRef<HTMLDivElement>(null)
 
   const filteredFiles = useMemo(() => {
     if (!gitStatus) return []
@@ -138,12 +174,85 @@ export function GitFileTree(): React.JSX.Element {
     }
   }, [cwd, activeSessionId, setGitStatus])
 
+  // Right-click handler for files
+  const handleFileContextMenu = useCallback((file: GitFileStatus, e: React.MouseEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setContextMenu({ ...contextMenuPosition(e), target: { kind: 'file', file } })
+  }, [])
+
+  // Right-click handler for directories
+  const handleDirContextMenu = useCallback((files: GitFileStatus[], dirName: string, e: React.MouseEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setContextMenu({ ...contextMenuPosition(e), target: { kind: 'dir', files, dirName } })
+  }, [])
+
+  // Clamp context menu to viewport after render (coordinates are raw screen px since we portal to body)
+  useEffect(() => {
+    if (!contextMenu || !contextMenuRef.current) return
+    const el = contextMenuRef.current
+    const rect = el.getBoundingClientRect()
+    let { x, y } = contextMenu
+    if (x + rect.width > window.innerWidth) x = window.innerWidth - rect.width - 4
+    if (y + rect.height > window.innerHeight) y = window.innerHeight - rect.height - 4
+    if (x !== contextMenu.x || y !== contextMenu.y) {
+      el.style.left = `${x}px`
+      el.style.top = `${y}px`
+    }
+  }, [contextMenu])
+
+  // Close context menu on outside click
+  useEffect(() => {
+    if (!contextMenu) return
+    const handler = (e: MouseEvent): void => {
+      if (contextMenuRef.current && !contextMenuRef.current.contains(e.target as Node)) {
+        setContextMenu(null)
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [contextMenu])
+
+  // Execute discard
+  const executeDiscard = useCallback(async (target: ContextTarget) => {
+    if (!cwd || !activeSessionId) return
+    try {
+      const files = target.kind === 'file' ? [target.file] : target.files
+      for (const file of files) {
+        await window.api.gitDiscardFile(cwd, file.path)
+      }
+      const status = await window.api.gitGetStatus(cwd)
+      setGitStatus(activeSessionId, status)
+      // Clear selection if discarded file was selected
+      if (gitSelectedFile) {
+        const discardedPaths = new Set(files.map((f) => f.path))
+        if (discardedPaths.has(gitSelectedFile)) {
+          setGitSelectedFile(activeSessionId, null)
+        }
+      }
+    } catch {
+      // Silently ignore
+    }
+    setConfirmDiscard(null)
+  }, [cwd, activeSessionId, setGitStatus, gitSelectedFile, setGitSelectedFile])
+
   if (filteredFiles.length === 0) {
     return (
       <div className="p-4 text-[12px] text-text-muted text-center">
         No {gitFileFilter !== 'all' ? gitFileFilter : ''} changes
       </div>
     )
+  }
+
+  // Build discard label based on target
+  const discardLabel = (target: ContextTarget): string => {
+    if (target.kind === 'file') {
+      return isUntracked(target.file) ? 'Delete file' : 'Discard changes'
+    }
+    const allUntracked = target.files.every(isUntracked)
+    if (allUntracked) return `Delete ${target.files.length} files`
+    return `Discard changes (${target.files.length} files)`
   }
 
   return (
@@ -157,8 +266,112 @@ export function GitFileTree(): React.JSX.Element {
           onSelect={handleSelectFile}
           onToggleStage={handleToggleStage}
           onToggleStageDirFiles={handleToggleStageDirFiles}
+          onFileContextMenu={handleFileContextMenu}
+          onDirContextMenu={handleDirContextMenu}
         />
       ))}
+
+      {/* Context menu — portaled to body to escape overflow:hidden ancestors */}
+      {contextMenu && createPortal(
+        <div
+          ref={contextMenuRef}
+          className="fixed z-50 min-w-[160px] py-1 rounded-lg bg-bg-tertiary border border-border shadow-lg"
+          style={{ left: contextMenu.x, top: contextMenu.y }}
+        >
+          {/* Stage / Unstage */}
+          {contextMenu.target.kind === 'file' && (
+            <button
+              className="w-full text-left px-3 py-1.5 text-[12px] text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
+              onClick={() => {
+                const file = contextMenu.target.kind === 'file' ? contextMenu.target.file : null
+                setContextMenu(null)
+                if (file) {
+                  if (isStaged(file)) {
+                    window.api.gitUnstageFile(cwd!, file.path).then(() =>
+                      window.api.gitGetStatus(cwd!).then((s) => setGitStatus(activeSessionId!, s))
+                    )
+                  } else {
+                    window.api.gitStageFile(cwd!, file.path).then(() =>
+                      window.api.gitGetStatus(cwd!).then((s) => setGitStatus(activeSessionId!, s))
+                    )
+                  }
+                }
+              }}
+            >
+              {contextMenu.target.kind === 'file' && isStaged(contextMenu.target.file)
+                ? 'Unstage'
+                : 'Stage'}
+            </button>
+          )}
+          {/* Discard */}
+          <button
+            className="w-full text-left px-3 py-1.5 text-[12px] text-red-400 hover:text-red-300 hover:bg-bg-hover transition-colors cursor-default"
+            onClick={() => {
+              const target = contextMenu.target
+              setContextMenu(null)
+              setConfirmDiscard(target)
+            }}
+          >
+            {discardLabel(contextMenu.target)}
+          </button>
+        </div>,
+        document.body
+      )}
+
+      {/* Confirmation dialog — portaled to root */}
+      {confirmDiscard && createPortal(
+        <div className="fixed inset-0 z-[200] bg-black/50 backdrop-blur-sm flex items-center justify-center">
+          <div className="bg-bg-secondary border border-border rounded-xl w-[380px] flex flex-col shadow-2xl shadow-black/40 overflow-hidden">
+            {/* Header */}
+            <div className="px-4 pt-4 pb-2">
+              <h3 className="text-[14px] font-semibold text-text-primary">
+                {confirmDiscard.kind === 'file' && isUntracked(confirmDiscard.file)
+                  ? 'Delete untracked file?'
+                  : confirmDiscard.kind === 'dir' && confirmDiscard.files.every(isUntracked)
+                    ? 'Delete untracked files?'
+                    : 'Discard changes?'}
+              </h3>
+            </div>
+            {/* Body */}
+            <div className="px-4 py-2 text-[12px] text-text-secondary">
+              {confirmDiscard.kind === 'file' ? (
+                <p>
+                  {isUntracked(confirmDiscard.file)
+                    ? <>This will permanently delete <span className="font-mono text-text-primary">{confirmDiscard.file.path}</span>.</>
+                    : <>This will discard all changes to <span className="font-mono text-text-primary">{confirmDiscard.file.path}</span>, restoring it to the last committed state.</>}
+                </p>
+              ) : (
+                <p>
+                  This will {confirmDiscard.files.every(isUntracked) ? 'permanently delete' : 'discard all changes to'}{' '}
+                  <span className="font-mono text-text-primary">{confirmDiscard.files.length} files</span>{' '}
+                  in <span className="font-mono text-text-primary">{confirmDiscard.dirName}/</span>.
+                </p>
+              )}
+              <p className="mt-1.5 text-text-muted">This action cannot be undone.</p>
+            </div>
+            {/* Actions */}
+            <div className="flex justify-end gap-2 px-4 py-3">
+              <button
+                className="px-3 py-1.5 text-[12px] text-text-secondary hover:bg-bg-hover rounded-md transition-colors"
+                onClick={() => setConfirmDiscard(null)}
+              >
+                Cancel
+              </button>
+              <button
+                className="px-3 py-1.5 text-[12px] text-white bg-red-600 hover:bg-red-500 rounded-md transition-colors"
+                onClick={() => executeDiscard(confirmDiscard)}
+              >
+                {confirmDiscard.kind === 'file' && isUntracked(confirmDiscard.file)
+                  ? 'Delete'
+                  : confirmDiscard.kind === 'dir' && confirmDiscard.files.every(isUntracked)
+                    ? 'Delete'
+                    : 'Discard'}
+              </button>
+            </div>
+          </div>
+        </div>,
+        document.body
+      )}
     </div>
   )
 }
@@ -169,7 +382,9 @@ function TreeNodeItem({
   selectedFile,
   onSelect,
   onToggleStage,
-  onToggleStageDirFiles
+  onToggleStageDirFiles,
+  onFileContextMenu,
+  onDirContextMenu
 }: {
   node: TreeNode
   depth: number
@@ -177,6 +392,8 @@ function TreeNodeItem({
   onSelect: (path: string) => void
   onToggleStage: (file: GitFileStatus, e: React.MouseEvent) => void
   onToggleStageDirFiles: (files: GitFileStatus[], stage: boolean, e: React.MouseEvent) => void
+  onFileContextMenu: (file: GitFileStatus, e: React.MouseEvent) => void
+  onDirContextMenu: (files: GitFileStatus[], dirName: string, e: React.MouseEvent) => void
 }): React.JSX.Element {
   const [expanded, setExpanded] = useState(true)
 
@@ -188,6 +405,7 @@ function TreeNodeItem({
     return (
       <button
         onClick={() => onSelect(node.file!.path)}
+        onContextMenu={(e) => onFileContextMenu(node.file!, e)}
         className={`w-full text-left flex items-center gap-1 px-1.5 py-0 text-[11px] leading-[18px] transition-colors cursor-default group ${
           isSelected ? 'bg-accent/15 text-text-primary' : 'text-text-secondary hover:bg-bg-hover'
         }`}
@@ -225,6 +443,7 @@ function TreeNodeItem({
       <div
         className="w-full text-left flex items-center gap-1 px-1.5 py-0 text-[11px] leading-[18px] text-text-muted hover:bg-bg-hover transition-colors cursor-default"
         style={{ paddingLeft: 6 + depth * 12 }}
+        onContextMenu={(e) => onDirContextMenu(dirFiles, node.name, e)}
       >
         <button
           onClick={(e) => { e.stopPropagation(); onToggleStageDirFiles(dirFiles, !dirAllStaged, e) }}
@@ -270,6 +489,8 @@ function TreeNodeItem({
           onSelect={onSelect}
           onToggleStage={onToggleStage}
           onToggleStageDirFiles={onToggleStageDirFiles}
+          onFileContextMenu={onFileContextMenu}
+          onDirContextMenu={onDirContextMenu}
         />
       ))}
     </div>

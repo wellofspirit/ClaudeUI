@@ -236,6 +236,35 @@ export class GitService {
     await this.git.fetch(['--all', '--prune'])
   }
 
+  /**
+   * Discard all changes to a file, restoring it to HEAD state.
+   * For untracked files, deletes the file from disk.
+   */
+  async discardFile(filePath: string): Promise<void> {
+    // Check if file is tracked by trying to show it from HEAD
+    let tracked = true
+    try {
+      await this.git.show([`HEAD:${filePath}`])
+    } catch {
+      // Also check index — newly added files exist in index but not HEAD
+      try {
+        await this.git.show([`:${filePath}`])
+      } catch {
+        tracked = false
+      }
+    }
+
+    if (!tracked) {
+      // Untracked file — delete from disk
+      const absPath = path.resolve(this.cwd, filePath)
+      await fs.promises.unlink(absPath)
+    } else {
+      // Tracked file — unstage and restore working tree to HEAD
+      // git checkout HEAD -- <file> handles both staged and unstaged changes
+      await this.git.checkout(['HEAD', '--', filePath])
+    }
+  }
+
   startPolling(callback: (status: GitStatusData) => void, intervalMs: number): void {
     this.stopPolling()
     const poll = async (): Promise<void> => {

@@ -227,6 +227,7 @@ const api: ClaudeAPI = {
     ipcRenderer.invoke('git:file-contents', cwd, filePath, staged),
   gitStageFile: (cwd: string, filePath: string) => ipcRenderer.invoke('git:stage-file', cwd, filePath),
   gitUnstageFile: (cwd: string, filePath: string) => ipcRenderer.invoke('git:unstage-file', cwd, filePath),
+  gitDiscardFile: (cwd: string, filePath: string) => ipcRenderer.invoke('git:discard-file', cwd, filePath),
   gitStageAll: (cwd: string) => ipcRenderer.invoke('git:stage-all', cwd),
   gitUnstageAll: (cwd: string) => ipcRenderer.invoke('git:unstage-all', cwd),
   gitCommit: (cwd: string, message: string) => ipcRenderer.invoke('git:commit', cwd, message),
