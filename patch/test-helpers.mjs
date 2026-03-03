@@ -15,6 +15,12 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 export const PROJECT_ROOT = resolve(__dirname, '..')
 
 /**
+ * Unset CLAUDECODE env var to allow running SDK tests from within a Claude Code session.
+ * The SDK blocks nested sessions by checking this env var.
+ */
+delete process.env.CLAUDECODE
+
+/**
  * Create an SDK query with safe defaults for testing.
  *
  * @param {string} prompt - The prompt to send
@@ -127,6 +133,108 @@ export class TestRunner {
     console.log('')
     return this.failed === 0
   }
+}
+
+/**
+ * Async iterable channel for pushing messages to an SDK query mid-turn.
+ * Mirrors the MessageChannel pattern from src/main/services/claude-session.ts.
+ */
+export class MessageChannel {
+  constructor() {
+    this.queue = []
+    this.waiting = null
+    this.isDone = false
+  }
+
+  push(msg) {
+    if (this.isDone) return
+    if (this.waiting) {
+      const resolve = this.waiting
+      this.waiting = null
+      resolve({ value: msg, done: false })
+    } else {
+      this.queue.push(msg)
+    }
+  }
+
+  end() {
+    this.isDone = true
+    if (this.waiting) {
+      const resolve = this.waiting
+      this.waiting = null
+      resolve({ value: undefined, done: true })
+    }
+  }
+
+  [Symbol.asyncIterator]() {
+    return this
+  }
+
+  async next() {
+    if (this.queue.length > 0) {
+      return { value: this.queue.shift(), done: false }
+    }
+    if (this.isDone) {
+      return { value: undefined, done: true }
+    }
+    return new Promise((resolve) => {
+      this.waiting = resolve
+    })
+  }
+}
+
+/**
+ * Build an SDKUserMessage object from a plain text string.
+ */
+export function userMessage(text, sessionId = '') {
+  return {
+    type: 'user',
+    session_id: sessionId,
+    message: { role: 'user', content: text },
+    parent_tool_use_id: null,
+  }
+}
+
+/**
+ * Create an SDK query with streaming input (AsyncIterable) for tests
+ * that need to send messages mid-turn (e.g., queue steering, multi-turn MCP toggle).
+ *
+ * @param {string} initialPrompt - First message to send
+ * @param {object} [optsOverride] - Override any default option
+ * @param {number} [timeoutMs=120_000] - Abort timeout in milliseconds
+ * @returns {{ q: Query, channel: MessageChannel, cleanup: () => void, ac: AbortController }}
+ */
+export function createStreamingQuery(initialPrompt, optsOverride = {}, timeoutMs = 120_000) {
+  const ac = new AbortController()
+  const timer = setTimeout(() => ac.abort(), timeoutMs)
+  const channel = new MessageChannel()
+
+  // Push initial prompt as SDKUserMessage
+  channel.push(userMessage(initialPrompt))
+
+  const cleanup = () => {
+    clearTimeout(timer)
+    channel.end()
+    if (!ac.signal.aborted) ac.abort()
+  }
+
+  const q = query({
+    prompt: channel,
+    options: {
+      permissionMode: 'bypassPermissions',
+      allowDangerouslySkipPermissions: true,
+      persistSession: false,
+      settingSources: [],
+      thinking: { type: 'enabled', budgetTokens: 10_000 },
+      effort: 'low',
+      model: 'claude-sonnet-4-6',
+      cwd: PROJECT_ROOT,
+      abortController: ac,
+      ...optsOverride,
+    },
+  })
+
+  return { q, channel, cleanup, ac }
 }
 
 /**

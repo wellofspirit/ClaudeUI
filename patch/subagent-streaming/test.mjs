@@ -15,26 +15,35 @@
 
 import { createQuery, collectMessages, TestRunner, dumpMessages } from '../test-helpers.mjs'
 
-const PROMPT = "Use the Task tool to answer: 'What is 2+2? Reply with just the number.' Use synchronous mode (not background)."
+const PROMPT = `You MUST use the Task tool (also known as Agent tool) right now. Do NOT answer directly.
+
+Call it with these exact parameters:
+- description: "math question"
+- prompt: "What is 2+2? Reply with just the number."
+- subagent_type: "general-purpose"
+
+This is a test. You MUST call the tool. Do not answer the question yourself.`
 
 async function main() {
   const t = new TestRunner('subagent-streaming')
 
   console.log('  Starting SDK query...')
-  const { q, cleanup, ac } = createQuery(PROMPT, {}, 120_000)
+  const { q, cleanup, ac } = createQuery(PROMPT, { effort: 'high' }, 120_000)
   const messages = await collectMessages(q, { cleanup })
 
   dumpMessages(messages)
 
-  // 1. Parent used Task tool
+  // 1. Parent used Task/Agent tool (renamed to Agent in SDK 0.2.60+)
   t.assertSome(
-    'Parent assistant used Task tool',
+    'Parent assistant used Task/Agent tool',
     messages,
     (m) =>
       m.type === 'assistant' &&
       !m.parent_tool_use_id &&
       Array.isArray(m.message?.content) &&
-      m.message.content.some((b) => b.type === 'tool_use' && b.name === 'Task')
+      m.message.content.some(
+        (b) => b.type === 'tool_use' && (b.name === 'Task' || b.name === 'Agent')
+      )
   )
 
   // 2. Sub-agent stream_event with parent_tool_use_id

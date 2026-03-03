@@ -88,40 +88,44 @@ if (skipA) {
 if (!skipA) {
   console.log('\n--- Part A: Refresh tools before EVq ---')
 
-  // Step A1: Find the EVq call and extract the tools variable name
+  // Step A1: Find the query call and extract the tools variable name
+  // Pattern: `for await(let <V> of <queryFn>({commands:<V>,prompt:<V>,
+  //           promptUuid:<V>.uuid,cwd:<cwdFn>(),tools:<toolsVar>,`
+  // Function names (EVq, ml8, etc.) change between versions — match by content shape.
   const evqRe = new RegExp(
-    `for await\\(let (${V}) of EVq\\(\\{` +
+    `for await\\(let (${V}) of (${V})\\(\\{` +
     `commands:(${V}),prompt:(${V}),` +
-    `promptUuid:(${V})\\.uuid,cwd:ml8\\(\\),` +
+    `promptUuid:(${V})\\.uuid,cwd:(${V})\\(\\),` +
     `tools:(${V}),`
   )
 
   const evqMatch = evqRe.exec(src)
   if (!evqMatch) {
-    console.error('ERROR: Cannot locate EVq call site.')
+    console.error('ERROR: Cannot locate query call site (EVq/ckq equivalent).')
     console.error('Use bundle-analyzer to find it:')
-    console.error('  bundle-analyzer find cli.js "of EVq({" --compact')
+    console.error('  bundle-analyzer find cli.js "promptUuid" --compact')
     process.exit(1)
   }
 
   // Verify uniqueness
   const allEvqMatches = [...src.matchAll(new RegExp(evqRe, 'g'))]
   if (allEvqMatches.length > 1) {
-    console.error('ERROR: EVq call pattern matched multiple times. Aborting.')
+    console.error('ERROR: Query call pattern matched multiple times. Aborting.')
     process.exit(1)
   }
 
-  const toolsVar = evqMatch[5]  // w6
-  console.log(`Found EVq call at char ${evqMatch.index}`)
+  const queryFn = evqMatch[2]   // EVq / ckq
+  const toolsVar = evqMatch[7]  // w6 / Z6
+  console.log(`Found ${queryFn} call at char ${evqMatch.index}`)
   console.log(`  Tools variable: ${toolsVar}`)
 
-  // Step A2: Extract getAppState variable from the same EVq call
+  // Step A2: Extract getAppState variable from the same query call
   // Look forward from the match to find `getAppState:<$>,setAppState:`
-  const evqRegion = src.slice(evqMatch.index, evqMatch.index + 1000)
+  const evqRegion = src.slice(evqMatch.index, evqMatch.index + 1500)
   const gasRe = new RegExp(`getAppState:(${V}),setAppState:`)
   const gasMatch = gasRe.exec(evqRegion)
   if (!gasMatch) {
-    console.error('ERROR: Cannot find getAppState in EVq call.')
+    console.error(`ERROR: Cannot find getAppState in ${queryFn} call.`)
     process.exit(1)
   }
 
@@ -140,7 +144,7 @@ if (!skipA) {
   // Replace: inject refresh code before `for await`
   const forAwaitStr = evqMatch[0]
   src = src.replace(forAwaitStr, refreshCode + forAwaitStr)
-  console.log('Injected tool refresh before EVq call')
+  console.log(`Injected tool refresh before ${queryFn} call`)
 }
 
 

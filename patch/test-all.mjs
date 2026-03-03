@@ -18,6 +18,9 @@ const tests = [
   { name: 'subagent-streaming', script: resolve(__dirname, 'subagent-streaming/test.mjs') },
   { name: 'taskstop-notification', script: resolve(__dirname, 'taskstop-notification/test.mjs') },
   { name: 'team-streaming', script: resolve(__dirname, 'team-streaming/test.mjs') },
+  { name: 'queue-control', script: resolve(__dirname, 'queue-control/test.mjs') },
+  { name: 'mcp-status', script: resolve(__dirname, 'mcp-status/test.mjs') },
+  { name: 'mcp-tool-refresh', script: resolve(__dirname, 'mcp-tool-refresh/test.mjs') },
 ]
 
 console.log(`\nRunning ${tests.length} patch tests...\n`)
