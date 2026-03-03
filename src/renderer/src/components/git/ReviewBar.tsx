@@ -1,4 +1,4 @@
-import { useCallback } from 'react'
+import { useCallback, useEffect, useRef } from 'react'
 import { v4 as uuid } from 'uuid'
 import { useActiveSession, useSessionStore } from '../../stores/session-store'
 import type { DiffComment } from '../../../../shared/types'
@@ -77,6 +77,24 @@ export function ReviewBar({ comments }: Props): React.JSX.Element | null {
     clearDiffComments(activeSessionId)
   }, [activeSessionId, comments, sdkActive, sessions, addUserMessage, markSdkActive, clearDiffComments])
 
+  // Stable ref so the keydown handler always sees the latest handleSend
+  const sendRef = useRef(handleSend)
+  sendRef.current = handleSend
+
+  // ⌘⇧Enter / Ctrl+Shift+Enter to send all comments
+  useEffect(() => {
+    if (!comments.length) return
+
+    const handler = (e: KeyboardEvent): void => {
+      if (e.key === 'Enter' && e.shiftKey && (e.metaKey || e.ctrlKey)) {
+        e.preventDefault()
+        sendRef.current()
+      }
+    }
+    document.addEventListener('keydown', handler)
+    return () => document.removeEventListener('keydown', handler)
+  }, [comments.length])
+
   if (!comments.length) return null
 
   return (
@@ -91,6 +109,7 @@ export function ReviewBar({ comments }: Props): React.JSX.Element | null {
         className="text-[11px] px-3 py-1 rounded bg-accent text-white hover:bg-accent/90 transition-colors cursor-default"
       >
         Send to Chat
+        <span className="ml-1.5 text-[10px] opacity-60">{'\u2318\u21e7\u23ce'}</span>
       </button>
     </div>
   )

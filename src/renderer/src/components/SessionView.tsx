@@ -3,6 +3,7 @@ import { Sidebar } from './Sidebar'
 import { ChatPanel } from './chat/ChatPanel'
 import { TaskDetailPanel } from './TaskDetailPanel'
 import { GitPanel } from './git/GitPanel'
+import { PlanReviewPanel } from './plan/PlanReviewPanel'
 import { UsageView } from './usage/UsageView'
 import { AutomationView } from './automation/AutomationView'
 import { TerminalPanel } from './terminal/TerminalPanel'
@@ -125,6 +126,7 @@ export function SessionView(): React.JSX.Element {
   const sidebar = useResizablePanel('sidebarWidth', 240, 180, 480)
   const taskPanel = useResizablePanel('taskPanelWidth', 400, 280, 700)
   const gitPanel = useResizablePanel('gitPanelWidth', 450, 320, 9999)
+  const planPanel = useResizablePanel('planPanelWidth', 500, 350, 900)
   const terminalPanelOpen = useSessionStore((s) => s.terminalPanelOpen)
   const bottomPanel = useResizableBottomPanel('terminalPanelHeight', 120, 600)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem('sidebarCollapsed') === 'true')
@@ -248,6 +250,12 @@ export function SessionView(): React.JSX.Element {
               <>
                 <ResizeHandle onMouseDown={gitPanel.onMouseDown(-1)} />
                 <GitPanel style={{ width: gitPanel.width }} />
+              </>
+            )}
+            {rightPanel === 'plan' && (
+              <>
+                <ResizeHandle onMouseDown={planPanel.onMouseDown(-1)} />
+                <PlanReviewPanel style={{ width: planPanel.width }} />
               </>
             )}
           </div>

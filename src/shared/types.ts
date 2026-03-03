@@ -648,6 +648,30 @@ export interface DiffComment {
 }
 
 // ---------------------------------------------------------------------------
+// Plan review comment types
+// ---------------------------------------------------------------------------
+
+export interface PlanComment {
+  id: string
+  /** The exact text the user highlighted in the rendered plan */
+  selectedText: string
+  /** 1-based start line of the selection in the raw plan markdown */
+  lineNumber: number
+  /** 1-based end line (inclusive). Equals lineNumber for single-line selections. */
+  endLineNumber: number
+  /** Index of the plan section this comment belongs to (for UI placement) */
+  sectionIndex: number
+  comment: string
+  createdAt: number
+}
+
+export interface PlanReviewData {
+  planContent: string
+  approvalRequestId: string
+  comments: PlanComment[]
+}
+
+// ---------------------------------------------------------------------------
 // Terminal types
 // ---------------------------------------------------------------------------
 

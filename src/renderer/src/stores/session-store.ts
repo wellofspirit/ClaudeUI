@@ -17,6 +17,8 @@ import type {
   GitStatusData,
   GitBranchData,
   DiffComment,
+  PlanComment,
+  PlanReviewData,
   AccountUsage,
   BlockUsageData,
   TerminalTab,
@@ -312,7 +314,7 @@ export interface PerSessionState {
   taskProgressMap: Record<string, TaskProgress>
   taskNotifications: TaskNotification[]
   openedTaskToolUseIds: string[]
-  rightPanel: 'none' | 'task' | 'git'
+  rightPanel: 'none' | 'task' | 'git' | 'plan'
   subagentMessages: Record<string, ChatMessage[]>
   subagentStreamingText: Record<string, string>
   subagentStreamingThinking: Record<string, string>
@@ -344,6 +346,8 @@ export interface PerSessionState {
   gitSyncOperation: 'idle' | 'fetching' | 'pulling' | 'pushing'
   gitSyncError: string | null
   gitLastFetchTime: number | null
+  // Plan review state
+  planReview: PlanReviewData | null
 }
 
 const EMPTY_SESSION_STATE: PerSessionState = {
@@ -391,7 +395,8 @@ const EMPTY_SESSION_STATE: PerSessionState = {
   gitReviewComments: [],
   gitSyncOperation: 'idle',
   gitSyncError: null,
-  gitLastFetchTime: null
+  gitLastFetchTime: null,
+  planReview: null
 }
 
 function createEmptySession(cwd: string): PerSessionState {
@@ -573,6 +578,13 @@ interface SessionState {
   addDiffComment: (routingId: string, comment: DiffComment) => void
   removeDiffComment: (routingId: string, commentId: string) => void
   clearDiffComments: (routingId: string) => void
+  // Plan review actions
+  openPlanPanel: (routingId: string, planContent: string, approvalRequestId: string) => void
+  closePlanPanel: (routingId: string) => void
+  addPlanComment: (routingId: string, comment: PlanComment) => void
+  updatePlanComment: (routingId: string, commentId: string, text: string) => void
+  removePlanComment: (routingId: string, commentId: string) => void
+  clearPlanComments: (routingId: string) => void
   // Terminal actions
   addTerminalTab: (tab: TerminalTab) => void
   closeTerminalTab: (id: string) => void
@@ -1564,6 +1576,61 @@ export const useSessionStore = create<SessionState>((set) => ({
     set((state) => ({
       sessions: updateSession(state.sessions, routingId, () => ({
         gitReviewComments: []
+      }))
+    })),
+
+  // Plan review actions
+  openPlanPanel: (routingId, planContent, approvalRequestId) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, routingId, () => ({
+        rightPanel: 'plan' as const,
+        planReview: { planContent, approvalRequestId, comments: [] }
+      }))
+    })),
+
+  closePlanPanel: (routingId) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, routingId, () => ({
+        rightPanel: 'none' as const,
+        planReview: null
+      }))
+    })),
+
+  addPlanComment: (routingId, comment) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, routingId, (s) => ({
+        planReview: s.planReview
+          ? { ...s.planReview, comments: [...s.planReview.comments, comment] }
+          : null
+      }))
+    })),
+
+  updatePlanComment: (routingId, commentId, text) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, routingId, (s) => ({
+        planReview: s.planReview
+          ? { ...s.planReview, comments: s.planReview.comments.map((c) =>
+              c.id === commentId ? { ...c, comment: text } : c
+            ) }
+          : null
+      }))
+    })),
+
+  removePlanComment: (routingId, commentId) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, routingId, (s) => ({
+        planReview: s.planReview
+          ? { ...s.planReview, comments: s.planReview.comments.filter((c) => c.id !== commentId) }
+          : null
+      }))
+    })),
+
+  clearPlanComments: (routingId) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, routingId, (s) => ({
+        planReview: s.planReview
+          ? { ...s.planReview, comments: [] }
+          : null
       }))
     })),
 

@@ -41,6 +41,7 @@ export function ExitPlanModeCard({ block, approval }: ExitPlanModeCardProps): Re
   const setPermissionMode = useSessionStore((s) => s.setPermissionMode)
   const addUserMessage = useSessionStore((s) => s.addUserMessage)
   const markSdkActive = useSessionStore((s) => s.markSdkActive)
+  const openPlanPanel = useSessionStore((s) => s.openPlanPanel)
   const cwd = useActiveSession((s) => s.cwd)
 
   const [expanded, setExpanded] = useState(true)
@@ -119,7 +120,7 @@ export function ExitPlanModeCard({ block, approval }: ExitPlanModeCardProps): Re
   return (
     <div className="rounded-lg border border-accent/40 bg-bg-secondary overflow-hidden animate-fade-in">
       {/* Header — clickable to toggle */}
-      <button
+      <div
         onClick={() => setExpanded(!expanded)}
         className="w-full flex items-center gap-2 px-3 h-9 text-[13px] hover:bg-bg-hover transition-colors cursor-pointer"
       >
@@ -131,13 +132,31 @@ export function ExitPlanModeCard({ block, approval }: ExitPlanModeCardProps): Re
         </svg>
         <span className="font-mono font-medium text-accent">Plan</span>
         <span className="flex-1" />
+        {approval && planContent && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation()
+              if (activeSessionId && approval) {
+                openPlanPanel(activeSessionId, planContent, approval.requestId)
+              }
+            }}
+            className="text-[11px] px-2 py-0.5 rounded bg-accent/10 text-accent hover:bg-accent/20 transition-colors cursor-pointer shrink-0 flex items-center gap-1"
+          >
+            Review
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+              <polyline points="15 3 21 3 21 9" />
+              <line x1="10" y1="14" x2="21" y2="3" />
+            </svg>
+          </button>
+        )}
         <svg
           width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
           className={`text-text-secondary transition-transform shrink-0 ${expanded ? 'rotate-180' : ''}`}
         >
           <polyline points="6 9 12 15 18 9" />
         </svg>
-      </button>
+      </div>
 
       {/* Plan content — collapsible */}
       {expanded && (
@@ -187,6 +206,7 @@ export function ExitPlanModeCard({ block, approval }: ExitPlanModeCardProps): Re
               <span className="text-text-muted font-medium w-4 shrink-0">4</span>
               <span>Keep planning</span>
             </button>
+
           </div>
 
           {showFeedback && (
