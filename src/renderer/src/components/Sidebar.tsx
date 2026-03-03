@@ -932,7 +932,7 @@ function SessionItem({
     {contextMenu && (
       <div
         ref={contextMenuRef}
-        className="fixed z-[9999] min-w-[160px] rounded-lg bg-bg-tertiary border border-border shadow-lg overflow-hidden"
+        className="fixed z-[9999] py-1 rounded-lg bg-bg-tertiary border border-border shadow-lg grid"
         style={{ left: contextMenu.x, top: contextMenu.y }}
       >
         <button

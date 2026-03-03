@@ -275,7 +275,7 @@ export function GitFileTree(): React.JSX.Element {
       {contextMenu && createPortal(
         <div
           ref={contextMenuRef}
-          className="fixed z-50 min-w-[160px] py-1 rounded-lg bg-bg-tertiary border border-border shadow-lg"
+          className="fixed z-50 py-1 rounded-lg bg-bg-tertiary border border-border shadow-lg grid"
           style={{ left: contextMenu.x, top: contextMenu.y }}
         >
           {/* Stage / Unstage */}
