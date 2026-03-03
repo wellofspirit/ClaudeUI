@@ -93,6 +93,18 @@ export class PtyManager {
     this.ptys.delete(id)
   }
 
+  /** Kill all PTYs spawned with a given cwd. Returns the killed terminal IDs. */
+  killByCwd(cwd: string): string[] {
+    const killed: string[] = []
+    for (const [id, entry] of this.ptys) {
+      if (entry.cwd === cwd) {
+        this.kill(id)
+        killed.push(id)
+      }
+    }
+    return killed
+  }
+
   killAll(): void {
     for (const id of [...this.ptys.keys()]) {
       this.kill(id)

@@ -6,9 +6,10 @@ import { GitPanel } from './git/GitPanel'
 import { UsageView } from './usage/UsageView'
 import { AutomationView } from './automation/AutomationView'
 import { TerminalPanel } from './terminal/TerminalPanel'
-import { useActiveSession, useSessionStore, applyTheme } from '../stores/session-store'
+import { useActiveSession, useSessionStore, applyTheme, normalizeCwd } from '../stores/session-store'
 import { useGitWatcher } from '../hooks/useGitWatcher'
 import { useAutomationEvents } from '../hooks/useAutomationEvents'
+import { useTerminalColdCleanup } from '../hooks/useTerminalColdCleanup'
 import { QuitWorktreeModal } from './QuitWorktreeModal'
 
 
@@ -134,6 +135,9 @@ export function SessionView(): React.JSX.Element {
   // Automation IPC event listeners
   useAutomationEvents()
 
+  // Kill orphaned terminal groups after 10min cold
+  useTerminalColdCleanup()
+
   const toggleSidebar = useCallback(() => {
     setSidebarCollapsed((prev) => {
       localStorage.setItem('sidebarCollapsed', String(!prev))
@@ -194,14 +198,18 @@ export function SessionView(): React.JSX.Element {
         const willOpen = !state.terminalPanelOpen
         state.setTerminalPanelOpen(willOpen)
 
-        // Auto-create first terminal if opening and no tabs exist
-        if (willOpen && state.terminalTabs.length === 0) {
+        // Auto-create first terminal if opening and no tabs for this cwd
+        if (willOpen) {
           const cwd = state.activeSessionId
             ? state.sessions[state.activeSessionId]?.cwd ?? '.'
             : '.'
-          window.api.createTerminal(cwd || '.').then((terminalId) => {
-            state.addTerminalTab({ id: terminalId, title: 'Terminal', cwd: cwd || '.' })
-          })
+          const key = normalizeCwd(cwd || '.')
+          const group = state.terminalGroups[key]
+          if (!group || group.tabs.length === 0) {
+            window.api.createTerminal(cwd || '.').then((terminalId) => {
+              state.addTerminalTab({ id: terminalId, title: 'Terminal', cwd: cwd || '.' })
+            })
+          }
         }
       }
     }
@@ -243,13 +251,11 @@ export function SessionView(): React.JSX.Element {
               </>
             )}
           </div>
-          {/* Bottom terminal panel */}
-          {terminalPanelOpen && (
-            <>
-              <HorizontalResizeHandle onMouseDown={bottomPanel.onMouseDown} />
-              <TerminalPanel style={{ height: bottomPanel.height }} />
-            </>
-          )}
+          {/* Bottom terminal panel — always mounted to preserve xterm scrollback */}
+          <div style={{ display: terminalPanelOpen ? 'contents' : 'none' }}>
+            <HorizontalResizeHandle onMouseDown={bottomPanel.onMouseDown} />
+            <TerminalPanel style={{ height: bottomPanel.height }} />
+          </div>
         </div>
       </div>
       <QuitWorktreeModal />

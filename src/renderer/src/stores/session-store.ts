@@ -23,6 +23,12 @@ import type {
   WorktreeInfo
 } from '../../../shared/types'
 
+/** Normalize cwd for use as a terminal group key (strip trailing slash). */
+export function normalizeCwd(cwd: string): string {
+  if (cwd.length > 1 && cwd.endsWith('/')) return cwd.slice(0, -1)
+  return cwd || '.'
+}
+
 /**
  * Merges content blocks when upserting an assistant message by ID.
  * The SDK sends partial messages that may not include all previously accumulated
@@ -156,6 +162,7 @@ export interface AppSettings {
   gitPanelLayout: 'single' | 'double'
   gitCommitMode: 'commit' | 'commit-push'
   usageRefreshSecs: number
+  sessionTimeoutMins: number // 0 = never auto-disconnect
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -177,7 +184,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   statusLineTemplate: 'In: {in} / Out: {out} / Total: {total} · {used}% context used',
   gitPanelLayout: 'single',
   gitCommitMode: 'commit' as const,
-  usageRefreshSecs: 120
+  usageRefreshSecs: 120,
+  sessionTimeoutMins: 15
 }
 
 export function applyTheme(theme: ThemeId): void {
@@ -460,9 +468,8 @@ interface SessionState {
   worktreeInfoMap: Record<string, WorktreeInfo>
   quitWorktrees: Array<{ routingId: string; worktreeInfo: WorktreeInfo }> | null
 
-  // Terminal panel (global, survives session switching)
-  terminalTabs: TerminalTab[]
-  activeTerminalId: string | null
+  // Terminal panel (grouped by cwd, survives session switching)
+  terminalGroups: Record<string, { tabs: TerminalTab[]; activeTabId: string | null }>
   terminalPanelOpen: boolean
   terminalPanelHeight: number
 
@@ -570,9 +577,10 @@ interface SessionState {
   addTerminalTab: (tab: TerminalTab) => void
   closeTerminalTab: (id: string) => void
   removeTerminalTab: (id: string) => void
-  setActiveTerminal: (id: string) => void
+  setActiveTerminal: (id: string, cwd: string) => void
   setTerminalPanelOpen: (open: boolean) => void
   setTerminalPanelHeight: (height: number) => void
+  removeTerminalGroup: (cwd: string) => void
 }
 
 export const useSessionStore = create<SessionState>((set) => ({
@@ -592,8 +600,7 @@ export const useSessionStore = create<SessionState>((set) => ({
   showAutomationView: false,
   worktreeInfoMap: {},
   quitWorktrees: null,
-  terminalTabs: [],
-  activeTerminalId: null,
+  terminalGroups: {},
   terminalPanelOpen: false,
   terminalPanelHeight: Number(localStorage.getItem('terminalPanelHeight')) || 280,
 
@@ -1560,44 +1567,103 @@ export const useSessionStore = create<SessionState>((set) => ({
       }))
     })),
 
-  // Terminal actions
+  // Terminal actions (grouped by cwd)
   addTerminalTab: (tab) =>
-    set((state) => ({
-      terminalTabs: [...state.terminalTabs, tab],
-      activeTerminalId: tab.id
-    })),
+    set((state) => {
+      const key = normalizeCwd(tab.cwd)
+      const group = state.terminalGroups[key] ?? { tabs: [], activeTabId: null }
+      return {
+        terminalGroups: {
+          ...state.terminalGroups,
+          [key]: { tabs: [...group.tabs, tab], activeTabId: tab.id }
+        }
+      }
+    }),
 
   closeTerminalTab: (id) => {
     window.api.killTerminal(id)
     set((state) => {
-      const tabs = state.terminalTabs.filter((t) => t.id !== id)
-      const activeTerminalId =
-        state.activeTerminalId === id
-          ? (tabs[tabs.length - 1]?.id ?? null)
-          : state.activeTerminalId
-      return { terminalTabs: tabs, activeTerminalId }
+      const groups = { ...state.terminalGroups }
+      for (const [key, group] of Object.entries(groups)) {
+        const idx = group.tabs.findIndex((t) => t.id === id)
+        if (idx === -1) continue
+        const tabs = group.tabs.filter((t) => t.id !== id)
+        const activeTabId =
+          group.activeTabId === id ? (tabs[tabs.length - 1]?.id ?? null) : group.activeTabId
+        groups[key] = { tabs, activeTabId }
+        break
+      }
+      return { terminalGroups: groups }
     })
   },
 
   removeTerminalTab: (id) =>
     set((state) => {
-      const tabs = state.terminalTabs.filter((t) => t.id !== id)
-      const activeTerminalId =
-        state.activeTerminalId === id
-          ? (tabs[tabs.length - 1]?.id ?? null)
-          : state.activeTerminalId
-      return { terminalTabs: tabs, activeTerminalId }
+      const groups = { ...state.terminalGroups }
+      for (const [key, group] of Object.entries(groups)) {
+        const idx = group.tabs.findIndex((t) => t.id === id)
+        if (idx === -1) continue
+        const tabs = group.tabs.filter((t) => t.id !== id)
+        const activeTabId =
+          group.activeTabId === id ? (tabs[tabs.length - 1]?.id ?? null) : group.activeTabId
+        groups[key] = { tabs, activeTabId }
+        break
+      }
+      return { terminalGroups: groups }
     }),
 
-  setActiveTerminal: (id) => set({ activeTerminalId: id }),
+  setActiveTerminal: (id, cwd) =>
+    set((state) => {
+      const key = normalizeCwd(cwd)
+      const group = state.terminalGroups[key]
+      if (!group) return {}
+      return {
+        terminalGroups: { ...state.terminalGroups, [key]: { ...group, activeTabId: id } }
+      }
+    }),
 
   setTerminalPanelOpen: (open) => set({ terminalPanelOpen: open }),
 
   setTerminalPanelHeight: (height) => {
     localStorage.setItem('terminalPanelHeight', String(height))
     set({ terminalPanelHeight: height })
-  }
+  },
+
+  removeTerminalGroup: (cwd) =>
+    set((state) => {
+      const key = normalizeCwd(cwd)
+      const { [key]: _, ...rest } = state.terminalGroups
+      return { terminalGroups: rest }
+    })
 }))
+
+// ---------------------------------------------------------------------------
+// Terminal selectors (derive from active session's cwd)
+// ---------------------------------------------------------------------------
+
+function getActiveCwd(state: SessionState): string | null {
+  const id = state.activeSessionId
+  return id ? state.sessions[id]?.cwd ?? null : null
+}
+
+/** Terminal tabs for the active session's cwd. */
+export function selectVisibleTerminalTabs(state: SessionState): TerminalTab[] {
+  const cwd = getActiveCwd(state)
+  if (!cwd) return []
+  return state.terminalGroups[normalizeCwd(cwd)]?.tabs ?? []
+}
+
+/** Active terminal ID for the active session's cwd. */
+export function selectActiveTerminalId(state: SessionState): string | null {
+  const cwd = getActiveCwd(state)
+  if (!cwd) return null
+  return state.terminalGroups[normalizeCwd(cwd)]?.activeTabId ?? null
+}
+
+/** All terminal tabs across all cwd groups (for keeping xterm instances mounted). */
+export function selectAllTerminalTabs(state: SessionState): TerminalTab[] {
+  return Object.values(state.terminalGroups).flatMap((g) => g.tabs)
+}
 
 /**
  * Selector hook for the active session. Components use this to read per-session

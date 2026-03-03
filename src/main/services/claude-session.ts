@@ -171,6 +171,8 @@ export class ClaudeSession {
   private model: string = 'default'
   private resumeSessionId: string | undefined
   private statusLineTimer: ReturnType<typeof setTimeout> | null = null
+  private inactivityTimer: ReturnType<typeof setTimeout> | null = null
+  private inactivityTimeoutMs = 15 * 60 * 1000 // default 15 min, 0 = disabled
 
   // In-memory token accumulators — updated from each assistant message's usage
   private accInputTokens = 0
@@ -200,7 +202,32 @@ export class ClaudeSession {
     }
   }
 
+  /** Update the inactivity timeout. Pass 0 to disable. */
+  setInactivityTimeout(ms: number): void {
+    this.inactivityTimeoutMs = ms
+    // Re-evaluate: if idle, restart timer with new duration; if active, timer is already cleared
+    if (!this.isProcessing) this.resetInactivityTimer()
+  }
+
+  private resetInactivityTimer(): void {
+    this.clearInactivityTimer()
+    if (this.inactivityTimeoutMs > 0) {
+      this.inactivityTimer = setTimeout(() => {
+        logger.info('ClaudeSession', `Idle timeout (${this.inactivityTimeoutMs / 60000} min) — auto-disconnecting`)
+        this.cancel()
+      }, this.inactivityTimeoutMs)
+    }
+  }
+
+  private clearInactivityTimer(): void {
+    if (this.inactivityTimer) {
+      clearTimeout(this.inactivityTimer)
+      this.inactivityTimer = null
+    }
+  }
+
   async run(prompt: string, attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>): Promise<void> {
+    this.clearInactivityTimer()
     this.isProcessing = true
     this.sendStatus()
 
@@ -557,6 +584,7 @@ export class ClaudeSession {
             result: (msg.result as string) || ''
           })
           this.sendStatus()
+          this.resetInactivityTimer()
 
           // Cancel any pending debounced update — we'll send one immediately
           if (this.statusLineTimer) {
@@ -620,6 +648,7 @@ export class ClaudeSession {
       this.abortController = null
       this.isProcessing = false
       this.sendStatus()
+      this.resetInactivityTimer()
     }
   }
 
@@ -848,6 +877,7 @@ export class ClaudeSession {
     }
     this.pendingApprovals.clear()
 
+    this.clearInactivityTimer()
     this.stopAllBackgroundPollers()
     unwatchAllSubagents()
 

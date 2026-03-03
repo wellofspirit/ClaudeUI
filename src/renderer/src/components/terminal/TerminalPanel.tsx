@@ -1,5 +1,11 @@
 import { useEffect } from 'react'
-import { useSessionStore } from '../../stores/session-store'
+import { useShallow } from 'zustand/react/shallow'
+import {
+  useSessionStore,
+  selectVisibleTerminalTabs,
+  selectActiveTerminalId,
+  selectAllTerminalTabs
+} from '../../stores/session-store'
 import { XTermInstance } from './XTermInstance'
 
 interface Props {
@@ -7,8 +13,9 @@ interface Props {
 }
 
 export function TerminalPanel({ style }: Props): React.JSX.Element {
-  const tabs = useSessionStore((s) => s.terminalTabs)
-  const activeId = useSessionStore((s) => s.activeTerminalId)
+  const visibleTabs = useSessionStore(useShallow(selectVisibleTerminalTabs))
+  const activeId = useSessionStore(selectActiveTerminalId)
+  const allTabs = useSessionStore(useShallow(selectAllTerminalTabs))
   const addTerminalTab = useSessionStore((s) => s.addTerminalTab)
   const closeTerminalTab = useSessionStore((s) => s.closeTerminalTab)
   const removeTerminalTab = useSessionStore((s) => s.removeTerminalTab)
@@ -35,12 +42,12 @@ export function TerminalPanel({ style }: Props): React.JSX.Element {
 
   return (
     <div style={style} className="flex flex-col bg-bg-primary border-t border-border overflow-hidden">
-      {/* Tab bar */}
+      {/* Tab bar — only show tabs for the active session's cwd */}
       <div className="flex items-center gap-0.5 px-2 py-1 bg-bg-secondary border-b border-border shrink-0">
-        {tabs.map((tab) => (
+        {visibleTabs.map((tab) => (
           <div
             key={tab.id}
-            onClick={() => setActiveTerminal(tab.id)}
+            onClick={() => setActiveTerminal(tab.id, tab.cwd)}
             className={`group flex items-center gap-1 px-2.5 h-6 rounded text-[11px] cursor-default transition-colors select-none ${
               tab.id === activeId
                 ? 'bg-bg-primary text-text-primary'
@@ -77,9 +84,10 @@ export function TerminalPanel({ style }: Props): React.JSX.Element {
         </button>
       </div>
 
-      {/* Terminal instances — all mounted, only active one visible */}
+      {/* Terminal instances — ALL tabs across all cwd groups stay mounted (ADR-002),
+          but only the active cwd's active tab is visible */}
       <div className="flex-1 min-h-0 relative overflow-hidden">
-        {tabs.map((tab) => (
+        {allTabs.map((tab) => (
           <div
             key={tab.id}
             className="absolute inset-0"
@@ -88,7 +96,7 @@ export function TerminalPanel({ style }: Props): React.JSX.Element {
             <XTermInstance terminalId={tab.id} isActive={tab.id === activeId} />
           </div>
         ))}
-        {tabs.length === 0 && (
+        {visibleTabs.length === 0 && (
           <div className="h-full flex items-center justify-center text-text-muted text-xs">
             Press <span className="font-mono mx-1 px-1 py-0.5 bg-bg-tertiary rounded text-text-secondary">+</span> to open a terminal
           </div>

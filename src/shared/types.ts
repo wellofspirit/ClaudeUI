@@ -285,6 +285,7 @@ export interface ClaudeAPI {
   writeTerminal(id: string, data: string): Promise<void>
   resizeTerminal(id: string, cols: number, rows: number): Promise<void>
   killTerminal(id: string): Promise<void>
+  killTerminalsByCwd(cwd: string): Promise<string[]>
   onTerminalData(cb: (data: { terminalId: string; data: string }) => void): () => void
   onTerminalExit(cb: (data: { terminalId: string; code: number }) => void): () => void
 

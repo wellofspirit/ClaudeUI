@@ -2,7 +2,7 @@ import { ipcMain, BrowserWindow } from 'electron'
 import { PtyManager } from '../services/pty-manager'
 
 const TERMINAL_IPC_CHANNELS = [
-  'terminal:create', 'terminal:write', 'terminal:resize', 'terminal:kill'
+  'terminal:create', 'terminal:write', 'terminal:resize', 'terminal:kill', 'terminal:kill-by-cwd'
 ]
 
 export function registerTerminalIpc(win: BrowserWindow): void {
@@ -39,6 +39,10 @@ export function registerTerminalIpc(win: BrowserWindow): void {
 
   ipcMain.handle('terminal:kill', (_e, id: string) => {
     manager.kill(id)
+  })
+
+  ipcMain.handle('terminal:kill-by-cwd', (_e, cwd: string) => {
+    return manager.killByCwd(cwd)
   })
 
   win.on('closed', () => {

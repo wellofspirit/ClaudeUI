@@ -357,6 +357,11 @@ export function registerSessionIpc(win: BrowserWindow): void {
     if (typeof (settings as Record<string, unknown>).usageRefreshSecs === 'number') {
       usageFetcher.setIntervalSecs((settings as Record<string, unknown>).usageRefreshSecs as number)
     }
+    // Propagate session idle timeout change
+    const timeoutMins = (settings as Record<string, unknown>).sessionTimeoutMins
+    if (typeof timeoutMins === 'number') {
+      manager.setSessionTimeout(timeoutMins * 60 * 1000)
+    }
   })
   ipcMain.handle('config:load-sessions', () => loadSessionConfig())
   ipcMain.handle('config:save-sessions', (_e, config: UISessionConfig) => saveSessionConfig(config))
@@ -703,6 +708,10 @@ export function registerSessionIpc(win: BrowserWindow): void {
   const savedSettings = loadSettings() as Record<string, unknown>
   if (typeof savedSettings.usageRefreshSecs === 'number') {
     usageFetcher.setIntervalSecs(savedSettings.usageRefreshSecs)
+  }
+  // Apply saved session idle timeout
+  if (typeof savedSettings.sessionTimeoutMins === 'number') {
+    manager.setSessionTimeout(savedSettings.sessionTimeoutMins * 60 * 1000)
   }
   usageFetcher.startPolling()
 

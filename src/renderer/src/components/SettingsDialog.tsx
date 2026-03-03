@@ -279,6 +279,46 @@ const SECTIONS: Section[] = [
     ]
   },
   {
+    id: 'session',
+    label: 'Session',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <circle cx="12" cy="12" r="10" />
+        <polyline points="12 6 12 12 16 14" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'sessionTimeoutMins',
+        label: 'Idle timeout',
+        keywords: 'idle timeout disconnect inactive auto session',
+        render: (s, u) => (
+          <SettingsSelect
+            label="Idle timeout"
+            value={String(s.sessionTimeoutMins)}
+            options={[
+              { value: '5', label: '5 min' },
+              { value: '15', label: '15 min' },
+              { value: '30', label: '30 min' },
+              { value: '60', label: '1 hour' },
+              { value: '0', label: 'Never' }
+            ]}
+            onChange={(v) => u({ sessionTimeoutMins: Number(v) })}
+          />
+        )
+      }
+    ]
+  },
+  {
     id: 'tool-output',
     label: 'Tool Output',
     icon: (

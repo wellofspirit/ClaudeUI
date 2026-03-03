@@ -187,6 +187,7 @@ const api: ClaudeAPI = {
   resizeTerminal: (id: string, cols: number, rows: number) =>
     ipcRenderer.invoke('terminal:resize', id, cols, rows),
   killTerminal: (id: string) => ipcRenderer.invoke('terminal:kill', id),
+  killTerminalsByCwd: (cwd: string) => ipcRenderer.invoke('terminal:kill-by-cwd', cwd),
   onTerminalData: (cb) => {
     const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as never)
     ipcRenderer.on('terminal:data', handler)

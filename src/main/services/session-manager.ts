@@ -3,6 +3,13 @@ import { ClaudeSession } from './claude-session'
 
 export class SessionManager {
   private sessions = new Map<string, ClaudeSession>()
+  private _sessionTimeoutMs = 15 * 60 * 1000 // default 15 min, 0 = disabled
+
+  /** Update the idle timeout for all current and future sessions. */
+  setSessionTimeout(ms: number): void {
+    this._sessionTimeoutMs = ms
+    this.sessions.forEach((session) => session.setInactivityTimeout(ms))
+  }
 
   create(
     routingId: string,
@@ -19,6 +26,7 @@ export class SessionManager {
     }
 
     const session = new ClaudeSession(routingId, win, cwd, effort, resumeSessionId, permissionMode)
+    session.setInactivityTimeout(this._sessionTimeoutMs)
     this.sessions.set(routingId, session)
     return session
   }
