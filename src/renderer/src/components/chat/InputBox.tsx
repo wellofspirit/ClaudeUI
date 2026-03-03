@@ -661,7 +661,10 @@ export function InputBox(): React.JSX.Element {
     const before = text.slice(0, fileMentionAnchor)
     const cursorInText = fileMentionAnchor + 1 + (fileMentionDir ? fileMentionDir.length + 1 : 0) + fileMentionQuery.length
     const after = text.slice(cursorInText)
-    const newText = before + fullPath + ' ' + after
+    // SDK expects @"quoted path" for paths with spaces, @path for simple paths
+    const needsQuotes = fullPath.includes(' ')
+    const mention = needsQuotes ? `@"${fullPath}"` : `@${fullPath}`
+    const newText = before + mention + ' ' + after
     setText(newText)
     setFileMentionOpen(false)
     setFileMentionAnchor(-1)
@@ -670,7 +673,7 @@ export function InputBox(): React.JSX.Element {
     requestAnimationFrame(() => {
       const el = textareaRef.current
       if (el) {
-        const cursorPos = before.length + fullPath.length + 1
+        const cursorPos = before.length + mention.length + 1 // +1 for trailing space
         el.selectionStart = cursorPos
         el.selectionEnd = cursorPos
         el.focus()
