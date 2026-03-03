@@ -28,7 +28,7 @@ async function main() {
   const t = new TestRunner('subagent-streaming')
 
   console.log('  Starting SDK query...')
-  const { q, cleanup, ac } = createQuery(PROMPT, { effort: 'high' }, 120_000)
+  const { q, cleanup, ac } = createQuery(PROMPT, { effort: 'medium' }, 120_000)
   const messages = await collectMessages(q, { cleanup })
 
   dumpMessages(messages)
