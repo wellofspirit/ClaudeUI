@@ -16,7 +16,8 @@ const patches = [
   resolve(__dirname, 'team-streaming/apply.mjs'),
   resolve(__dirname, 'queue-control/apply.mjs'),
   resolve(__dirname, 'mcp-status/apply.mjs'),
-  resolve(__dirname, 'mcp-tool-refresh/apply.mjs')
+  resolve(__dirname, 'mcp-tool-refresh/apply.mjs'),
+  resolve(__dirname, 'network-unrestrict/apply.mjs')
 ]
 
 for (const patch of patches) {

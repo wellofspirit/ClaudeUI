@@ -347,18 +347,35 @@ export class ClaudeSession {
               autoAllowBashIfSandboxed: this.sandboxConfig.autoAllowBashIfSandboxed,
               allowUnsandboxedCommands: this.sandboxConfig.allowUnsandboxedCommands,
               excludedCommands: this.sandboxConfig.excludedCommands,
-              network: {
-                allowLocalBinding: this.sandboxConfig.network.allowLocalBinding,
-                ...(this.sandboxConfig.network.restrictNetwork
-                  ? { allowedDomains: this.sandboxConfig.network.allowedDomains }
-                  : { allowedDomains: ['*'] }),
-                ...(this.sandboxConfig.network.allowManagedDomainsOnly
-                  ? { allowManagedDomainsOnly: true } : {}),
-                ...(this.sandboxConfig.network.allowAllUnixSockets
-                  ? { allowAllUnixSockets: true } : {}),
-                ...(this.sandboxConfig.network.allowUnixSockets.length > 0
-                  ? { allowUnixSockets: this.sandboxConfig.network.allowUnixSockets } : {})
-              },
+              // Only pass network config when restrictions are needed.
+              // Omitting the network key entirely lets the SDK skip domain filtering,
+              // which is what "restrictNetwork: false" means.
+              ...(this.sandboxConfig.network.restrictNetwork ? {
+                network: {
+                  allowLocalBinding: this.sandboxConfig.network.allowLocalBinding,
+                  allowedDomains: this.sandboxConfig.network.allowedDomains,
+                  ...(this.sandboxConfig.network.allowManagedDomainsOnly
+                    ? { allowManagedDomainsOnly: true } : {}),
+                  ...(this.sandboxConfig.network.allowAllUnixSockets
+                    ? { allowAllUnixSockets: true } : {}),
+                  ...(this.sandboxConfig.network.allowUnixSockets.length > 0
+                    ? { allowUnixSockets: this.sandboxConfig.network.allowUnixSockets } : {})
+                }
+              } : {
+                // No network restrictions — only pass through binding/socket options if set
+                ...(this.sandboxConfig.network.allowLocalBinding ||
+                    this.sandboxConfig.network.allowAllUnixSockets ||
+                    this.sandboxConfig.network.allowUnixSockets.length > 0
+                  ? {
+                    network: {
+                      allowLocalBinding: this.sandboxConfig.network.allowLocalBinding,
+                      ...(this.sandboxConfig.network.allowAllUnixSockets
+                        ? { allowAllUnixSockets: true } : {}),
+                      ...(this.sandboxConfig.network.allowUnixSockets.length > 0
+                        ? { allowUnixSockets: this.sandboxConfig.network.allowUnixSockets } : {})
+                    }
+                  } : {})
+              }),
               filesystem: {
                 ...(this.sandboxConfig.filesystem.allowWrite.length > 0
                   ? { allowWrite: this.sandboxConfig.filesystem.allowWrite } : {}),
