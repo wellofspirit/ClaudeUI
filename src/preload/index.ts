@@ -13,6 +13,19 @@ function onEvent<T extends (...args: never[]) => void>(channel: string): (cb: T)
   }
 }
 
+/**
+ * Unwrap safeHandler's { ok, data, error } envelope.
+ * Throws on { ok: false } so callers can .catch() as expected.
+ */
+async function unwrap<T>(channel: string, ...args: unknown[]): Promise<T> {
+  const result = await ipcRenderer.invoke(channel, ...args)
+  if (result && typeof result === 'object' && 'ok' in result) {
+    if (!result.ok) throw new Error(result.error ?? `IPC ${channel} failed`)
+    return result.data as T
+  }
+  return result as T
+}
+
 const api: ClaudeAPI = {
   platform: process.platform,
   pickFolder: () => ipcRenderer.invoke('session:pick-folder'),
@@ -132,39 +145,39 @@ const api: ClaudeAPI = {
   killTerminal: (id: string) => ipcRenderer.invoke('terminal:kill', id),
   killTerminalsByCwd: (cwd: string) => ipcRenderer.invoke('terminal:kill-by-cwd', cwd),
 
-  // Worktree operations
-  createWorktree: (cwd: string, name: string) => ipcRenderer.invoke('worktree:create', cwd, name),
+  // Worktree operations — all use safeHandler
+  createWorktree: (cwd: string, name: string) => unwrap('worktree:create', cwd, name),
   getWorktreeStatus: (worktreePath: string, originalHead: string) =>
-    ipcRenderer.invoke('worktree:status', worktreePath, originalHead),
+    unwrap('worktree:status', worktreePath, originalHead),
   removeWorktree: (worktreePath: string, branch: string, gitRoot: string) =>
-    ipcRenderer.invoke('worktree:remove', worktreePath, branch, gitRoot),
-  listWorktrees: (cwd: string) => ipcRenderer.invoke('worktree:list', cwd),
+    unwrap('worktree:remove', worktreePath, branch, gitRoot),
+  listWorktrees: (cwd: string) => unwrap('worktree:list', cwd),
 
   // App lifecycle
   confirmQuit: () => ipcRenderer.invoke('app:quit-confirm'),
 
-  // Git operations
-  gitCheckRepo: (cwd: string) => ipcRenderer.invoke('git:check-repo', cwd),
-  gitGetStatus: (cwd: string) => ipcRenderer.invoke('git:status', cwd),
-  gitGetBranches: (cwd: string) => ipcRenderer.invoke('git:branches', cwd),
-  gitCheckout: (cwd: string, branch: string) => ipcRenderer.invoke('git:checkout', cwd, branch),
-  gitCreateBranch: (cwd: string, name: string) => ipcRenderer.invoke('git:create-branch', cwd, name),
+  // Git operations — all handlers use safeHandler, so unwrap the { ok, data } envelope
+  gitCheckRepo: (cwd: string) => unwrap<boolean>('git:check-repo', cwd),
+  gitGetStatus: (cwd: string) => unwrap('git:status', cwd),
+  gitGetBranches: (cwd: string) => unwrap('git:branches', cwd),
+  gitCheckout: (cwd: string, branch: string) => unwrap('git:checkout', cwd, branch),
+  gitCreateBranch: (cwd: string, name: string) => unwrap('git:create-branch', cwd, name),
   gitGetFilePatch: (cwd: string, filePath: string, staged: boolean, ignoreWhitespace: boolean) =>
-    ipcRenderer.invoke('git:file-patch', cwd, filePath, staged, ignoreWhitespace),
+    unwrap('git:file-patch', cwd, filePath, staged, ignoreWhitespace),
   gitGetFileContents: (cwd: string, filePath: string, staged: boolean) =>
-    ipcRenderer.invoke('git:file-contents', cwd, filePath, staged),
-  gitStageFile: (cwd: string, filePath: string) => ipcRenderer.invoke('git:stage-file', cwd, filePath),
-  gitUnstageFile: (cwd: string, filePath: string) => ipcRenderer.invoke('git:unstage-file', cwd, filePath),
-  gitDiscardFile: (cwd: string, filePath: string) => ipcRenderer.invoke('git:discard-file', cwd, filePath),
-  gitStageAll: (cwd: string) => ipcRenderer.invoke('git:stage-all', cwd),
-  gitUnstageAll: (cwd: string) => ipcRenderer.invoke('git:unstage-all', cwd),
-  gitCommit: (cwd: string, message: string) => ipcRenderer.invoke('git:commit', cwd, message),
-  gitPush: (cwd: string) => ipcRenderer.invoke('git:push', cwd),
-  gitPushWithUpstream: (cwd: string, branch: string) => ipcRenderer.invoke('git:push-with-upstream', cwd, branch),
-  gitPull: (cwd: string) => ipcRenderer.invoke('git:pull', cwd),
-  gitFetch: (cwd: string) => ipcRenderer.invoke('git:fetch', cwd),
-  gitStartWatching: (cwd: string) => ipcRenderer.invoke('git:start-watching', cwd),
-  gitStopWatching: (cwd: string) => ipcRenderer.invoke('git:stop-watching', cwd),
+    unwrap('git:file-contents', cwd, filePath, staged),
+  gitStageFile: (cwd: string, filePath: string) => unwrap('git:stage-file', cwd, filePath),
+  gitUnstageFile: (cwd: string, filePath: string) => unwrap('git:unstage-file', cwd, filePath),
+  gitDiscardFile: (cwd: string, filePath: string) => unwrap('git:discard-file', cwd, filePath),
+  gitStageAll: (cwd: string) => unwrap('git:stage-all', cwd),
+  gitUnstageAll: (cwd: string) => unwrap('git:unstage-all', cwd),
+  gitCommit: (cwd: string, message: string) => unwrap('git:commit', cwd, message),
+  gitPush: (cwd: string) => unwrap('git:push', cwd),
+  gitPushWithUpstream: (cwd: string, branch: string) => unwrap('git:push-with-upstream', cwd, branch),
+  gitPull: (cwd: string) => unwrap('git:pull', cwd),
+  gitFetch: (cwd: string) => unwrap('git:fetch', cwd),
+  gitStartWatching: (cwd: string) => unwrap('git:start-watching', cwd),
+  gitStopWatching: (cwd: string) => unwrap('git:stop-watching', cwd),
 
   listDir: (dirPath: string) => ipcRenderer.invoke('file:list-dir', dirPath),
   openInVSCode: (cwd: string) => ipcRenderer.invoke('app:open-in-vscode', cwd),
@@ -188,15 +201,15 @@ const api: ClaudeAPI = {
   saveClaudePermissions: (scope, permissions, cwd?) =>
     ipcRenderer.invoke('claude:save-permissions', scope, permissions, cwd),
 
-  // MCP server management
+  // MCP server management — toggle/reconnect/set-servers use safeHandler
   mcpServerStatus: (routingId: string) =>
     ipcRenderer.invoke('mcp:status', routingId),
   mcpToggleServer: (routingId: string, serverName: string, enabled: boolean) =>
-    ipcRenderer.invoke('mcp:toggle', routingId, serverName, enabled),
+    unwrap('mcp:toggle', routingId, serverName, enabled),
   mcpReconnectServer: (routingId: string, serverName: string) =>
-    ipcRenderer.invoke('mcp:reconnect', routingId, serverName),
+    unwrap('mcp:reconnect', routingId, serverName),
   mcpSetServers: (routingId: string, servers: Record<string, unknown>) =>
-    ipcRenderer.invoke('mcp:set-servers', routingId, servers),
+    unwrap('mcp:set-servers', routingId, servers),
   loadMcpServers: (scope: string, cwd?: string) =>
     ipcRenderer.invoke('mcp:load-servers', scope, cwd),
   saveMcpServers: (scope: string, servers: Record<string, unknown>, cwd?: string) =>
