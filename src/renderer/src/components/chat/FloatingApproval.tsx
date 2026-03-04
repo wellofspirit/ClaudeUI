@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
 import type { PendingApproval } from '../../../../shared/types'
 
@@ -31,9 +32,28 @@ function useUnmatchedApprovals(): PendingApproval[] {
 function ApprovalCard({ approval }: { approval: PendingApproval }): React.JSX.Element {
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const removePendingApproval = useSessionStore((s) => s.removePendingApproval)
+  const updateSettings = useSessionStore((s) => s.updateSettings)
+  const sandboxSettings = useSessionStore((s) => s.settings.sandbox)
+  const [alwaysAllow, setAlwaysAllow] = useState(false)
+
+  const isSandboxEscape = !!approval.input?.dangerouslyDisableSandbox
 
   const handleRespond = async (decision: 'allow' | 'deny'): Promise<void> => {
     if (!activeSessionId) return
+
+    // If allowing with "always allow" checked, add command to excluded list
+    if (decision === 'allow' && alwaysAllow && isSandboxEscape && approval.input?.command) {
+      const cmd = String(approval.input.command)
+      if (!sandboxSettings.excludedCommands.includes(cmd)) {
+        updateSettings({
+          sandbox: {
+            ...sandboxSettings,
+            excludedCommands: [...sandboxSettings.excludedCommands, cmd]
+          }
+        })
+      }
+    }
+
     await window.api.respondApproval(activeSessionId, approval.requestId, decision)
     removePendingApproval(activeSessionId, approval.requestId)
   }
@@ -61,28 +81,56 @@ function ApprovalCard({ approval }: { approval: PendingApproval }): React.JSX.El
     )
   }
 
+  const borderColor = isSandboxEscape ? 'border-danger/50' : 'border-warning/40'
+  const dividerColor = isSandboxEscape ? 'border-danger/20' : 'border-warning/20'
+  const labelColor = isSandboxEscape ? 'text-danger' : 'text-warning'
+  const labelText = isSandboxEscape ? 'Sandbox Escape' : 'Permission'
+
   return (
-    <div className="rounded-lg border border-warning/40 bg-bg-secondary overflow-hidden animate-fade-in">
+    <div className={`rounded-lg border ${borderColor} bg-bg-secondary overflow-hidden animate-fade-in`}>
       <div className="px-3 py-2">
         <div className="flex items-center gap-2 mb-2">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-warning shrink-0">
-            <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
-            <line x1="12" y1="9" x2="12" y2="13" />
-            <line x1="12" y1="17" x2="12.01" y2="17" />
-          </svg>
-          <span className="text-[11px] font-semibold text-warning uppercase tracking-wider">Permission</span>
+          {isSandboxEscape ? (
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-danger shrink-0">
+              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+              <line x1="4" y1="4" x2="20" y2="20" />
+            </svg>
+          ) : (
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-warning shrink-0">
+              <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
+              <line x1="12" y1="9" x2="12" y2="13" />
+              <line x1="12" y1="17" x2="12.01" y2="17" />
+            </svg>
+          )}
+          <span className={`text-[11px] font-semibold ${labelColor} uppercase tracking-wider`}>{labelText}</span>
           <span className="font-mono text-[12px] text-accent">{toolName}</span>
         </div>
+        {isSandboxEscape && (
+          <p className="text-[11px] text-danger/70 mb-2">
+            This command requests execution outside the sandbox.
+          </p>
+        )}
         {summary}
+        {isSandboxEscape && (
+          <label className="flex items-center gap-2 mt-2 cursor-default select-none">
+            <input
+              type="checkbox"
+              checked={alwaysAllow}
+              onChange={(e) => setAlwaysAllow(e.target.checked)}
+              className="w-3.5 h-3.5 rounded border-border accent-accent cursor-pointer"
+            />
+            <span className="text-[11px] text-text-muted">Always allow this command outside sandbox</span>
+          </label>
+        )}
       </div>
-      <div className="flex border-t border-warning/20">
+      <div className={`flex border-t ${dividerColor}`}>
         <button
           onClick={() => handleRespond('deny')}
           className="flex-1 h-8 text-[12px] font-medium text-danger hover:bg-danger/5 transition-colors cursor-pointer"
         >
           Deny
         </button>
-        <div className="w-px bg-warning/20" />
+        <div className={`w-px ${dividerColor.replace('border-', 'bg-')}`} />
         <button
           onClick={() => handleRespond('allow')}
           className="flex-1 h-8 text-[12px] font-medium text-success hover:bg-success/5 transition-colors cursor-pointer"

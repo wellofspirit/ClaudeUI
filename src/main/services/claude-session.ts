@@ -24,7 +24,8 @@ import type {
   McpServerConfig,
   SessionStatus,
   ApprovalDecision,
-  PendingApproval
+  PendingApproval,
+  SandboxSettings
 } from '../../shared/types'
 
 interface ApprovalResult {
@@ -173,6 +174,7 @@ export class ClaudeSession {
   private statusLineTimer: ReturnType<typeof setTimeout> | null = null
   private inactivityTimer: ReturnType<typeof setTimeout> | null = null
   private inactivityTimeoutMs = 15 * 60 * 1000 // default 15 min, 0 = disabled
+  private sandboxConfig: SandboxSettings | null = null
 
   // In-memory token accumulators — updated from each assistant message's usage
   private accInputTokens = 0
@@ -182,7 +184,7 @@ export class ClaudeSession {
   private accTotalApiDurationMs = 0
   private lastContextLength = 0
 
-  constructor(routingId: string, win: BrowserWindow, cwd: string, effort?: string, resumeSessionId?: string, permissionMode?: string, model?: string) {
+  constructor(routingId: string, win: BrowserWindow, cwd: string, effort?: string, resumeSessionId?: string, permissionMode?: string, model?: string, sandboxConfig?: SandboxSettings) {
     this.routingId = routingId
     this.win = win
     this.cwd = cwd
@@ -190,6 +192,7 @@ export class ClaudeSession {
     this.resumeSessionId = resumeSessionId
     if (permissionMode) this.permissionMode = permissionMode
     if (model) this.model = model
+    if (sandboxConfig) this.sandboxConfig = sandboxConfig
     this.sendStatus()
   }
 
@@ -336,6 +339,33 @@ export class ClaudeSession {
           cwd: this.cwd,
           model: this.model,
           permissionMode: this.permissionMode as 'default',
+          ...(this.sandboxConfig?.enabled ? {
+            sandbox: {
+              enabled: true,
+              autoAllowBashIfSandboxed: this.sandboxConfig.autoAllowBashIfSandboxed,
+              allowUnsandboxedCommands: this.sandboxConfig.allowUnsandboxedCommands,
+              excludedCommands: this.sandboxConfig.excludedCommands,
+              network: {
+                allowLocalBinding: this.sandboxConfig.network.allowLocalBinding,
+                ...(this.sandboxConfig.network.restrictNetwork
+                  ? { allowedDomains: this.sandboxConfig.network.allowedDomains } : {}),
+                ...(this.sandboxConfig.network.allowManagedDomainsOnly
+                  ? { allowManagedDomainsOnly: true } : {}),
+                ...(this.sandboxConfig.network.allowAllUnixSockets
+                  ? { allowAllUnixSockets: true } : {}),
+                ...(this.sandboxConfig.network.allowUnixSockets.length > 0
+                  ? { allowUnixSockets: this.sandboxConfig.network.allowUnixSockets } : {})
+              },
+              filesystem: {
+                ...(this.sandboxConfig.filesystem.allowWrite.length > 0
+                  ? { allowWrite: this.sandboxConfig.filesystem.allowWrite } : {}),
+                ...(this.sandboxConfig.filesystem.denyWrite.length > 0
+                  ? { denyWrite: this.sandboxConfig.filesystem.denyWrite } : {}),
+                ...(this.sandboxConfig.filesystem.denyRead.length > 0
+                  ? { denyRead: this.sandboxConfig.filesystem.denyRead } : {})
+              }
+            }
+          } : {}),
           settingSources: ['user', 'project', 'local'],
           ...(Object.keys(this._mcpAllServers).length > 0
             ? { mcpServers: this._mcpAllServers as Record<string, never> }
@@ -1090,6 +1120,17 @@ export class ClaudeSession {
           result: resultText,
           isError: !!(b.is_error)
         })
+      }
+
+      // Parse sandbox violations from tool results
+      if (resultText.includes('<sandbox_violations>')) {
+        const match = resultText.match(/<sandbox_violations>([\s\S]*?)<\/sandbox_violations>/)
+        if (match) {
+          const lines = match[1].trim().split('\n').filter(Boolean)
+          for (const line of lines) {
+            this.send('session:sandbox-violation', line.trim())
+          }
+        }
       }
     }
   }

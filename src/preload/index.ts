@@ -112,6 +112,11 @@ const api: ClaudeAPI = {
     ipcRenderer.on('session:background-output', handler)
     return () => ipcRenderer.removeListener('session:background-output', handler)
   },
+  onSandboxViolation: (cb) => {
+    const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as never)
+    ipcRenderer.on('session:sandbox-violation', handler)
+    return () => ipcRenderer.removeListener('session:sandbox-violation', handler)
+  },
   watchBackground: (routingId: string, toolUseId: string) =>
     ipcRenderer.invoke('session:watch-background', routingId, toolUseId),
   unwatchBackground: (routingId: string, toolUseId: string) =>

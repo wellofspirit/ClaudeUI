@@ -60,6 +60,26 @@ export type ApprovalDecision = 'allow' | 'deny'
 
 export type PermissionMode = 'default' | 'acceptEdits' | 'plan'
 
+export interface SandboxSettings {
+  enabled: boolean
+  autoAllowBashIfSandboxed: boolean
+  allowUnsandboxedCommands: boolean
+  network: {
+    restrictNetwork: boolean
+    allowLocalBinding: boolean
+    allowedDomains: string[]
+    allowManagedDomainsOnly: boolean
+    allowAllUnixSockets: boolean
+    allowUnixSockets: string[]
+  }
+  filesystem: {
+    allowWrite: string[]
+    denyWrite: string[]
+    denyRead: string[]
+  }
+  excludedCommands: string[]
+}
+
 // ---------------------------------------------------------------------------
 // Claude permissions (allow/deny/ask rules from settings.json files)
 // ---------------------------------------------------------------------------
@@ -253,6 +273,7 @@ export interface ClaudeAPI {
   onSubagentMessageBatch(cb: (data: RoutedData<SubagentMessageBatchData>) => void): () => void
   onSubagentToolResult(cb: (data: RoutedData<SubagentToolResultData>) => void): () => void
   onPermissionMode(cb: (data: RoutedData<PermissionMode>) => void): () => void
+  onSandboxViolation(cb: (data: RoutedData<string>) => void): () => void
   onBackgroundOutput(cb: (data: RoutedData<BackgroundOutput>) => void): () => void
   watchBackground(routingId: string, toolUseId: string): Promise<void>
   unwatchBackground(routingId: string, toolUseId: string): Promise<void>

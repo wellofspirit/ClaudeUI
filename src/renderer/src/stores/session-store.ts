@@ -22,7 +22,8 @@ import type {
   AccountUsage,
   BlockUsageData,
   TerminalTab,
-  WorktreeInfo
+  WorktreeInfo,
+  SandboxSettings
 } from '../../../shared/types'
 
 /** Normalize cwd for use as a terminal group key (strip trailing slash). */
@@ -165,6 +166,7 @@ export interface AppSettings {
   gitCommitMode: 'commit' | 'commit-push'
   usageRefreshSecs: number
   sessionTimeoutMins: number // 0 = never auto-disconnect
+  sandbox: SandboxSettings
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -187,7 +189,22 @@ const DEFAULT_SETTINGS: AppSettings = {
   gitPanelLayout: 'single',
   gitCommitMode: 'commit' as const,
   usageRefreshSecs: 120,
-  sessionTimeoutMins: 15
+  sessionTimeoutMins: 15,
+  sandbox: {
+    enabled: false,
+    autoAllowBashIfSandboxed: false,
+    allowUnsandboxedCommands: false,
+    network: {
+      restrictNetwork: false,
+      allowLocalBinding: false,
+      allowedDomains: [],
+      allowManagedDomainsOnly: false,
+      allowAllUnixSockets: false,
+      allowUnixSockets: []
+    },
+    filesystem: { allowWrite: [], denyWrite: [], denyRead: [] },
+    excludedCommands: []
+  }
 }
 
 export function applyTheme(theme: ThemeId): void {
@@ -254,8 +271,25 @@ export async function hydrateConfigFromDisk(): Promise<void> {
     localStorage.setItem(MIGRATION_FLAG, '1')
   }
 
-  const settings: AppSettings = Object.keys(savedSettings).length > 0
-    ? { ...DEFAULT_SETTINGS, ...(savedSettings as Partial<AppSettings>) }
+  const saved = savedSettings as Partial<AppSettings>
+  const settings: AppSettings = Object.keys(saved).length > 0
+    ? {
+        ...DEFAULT_SETTINGS,
+        ...saved,
+        // Deep-merge nested objects so new fields get defaults even if parent was persisted
+        sandbox: {
+          ...DEFAULT_SETTINGS.sandbox,
+          ...saved.sandbox,
+          filesystem: {
+            ...DEFAULT_SETTINGS.sandbox.filesystem,
+            ...saved.sandbox?.filesystem
+          },
+          network: {
+            ...DEFAULT_SETTINGS.sandbox.network,
+            ...saved.sandbox?.network
+          }
+        }
+      }
     : DEFAULT_SETTINGS
 
   applyTheme(settings.theme)
@@ -348,6 +382,8 @@ export interface PerSessionState {
   gitLastFetchTime: number | null
   // Plan review state
   planReview: PlanReviewData | null
+  // Sandbox violation messages
+  sandboxViolations: string[]
 }
 
 const EMPTY_SESSION_STATE: PerSessionState = {
@@ -396,7 +432,8 @@ const EMPTY_SESSION_STATE: PerSessionState = {
   gitSyncOperation: 'idle',
   gitSyncError: null,
   gitLastFetchTime: null,
-  planReview: null
+  planReview: null,
+  sandboxViolations: []
 }
 
 function createEmptySession(cwd: string): PerSessionState {
@@ -506,6 +543,8 @@ interface SessionState {
   addError: (routingId: string, error: string) => void
   removeError: (routingId: string, index: number) => void
   clearErrors: (routingId: string) => void
+  addSandboxViolation: (routingId: string, message: string) => void
+  removeSandboxViolation: (routingId: string, index: number) => void
   appendToolResult: (routingId: string, toolUseId: string, result: string, isError: boolean) => void
   setTodos: (routingId: string, todos: TodoItem[]) => void
   updateTaskProgress: (routingId: string, progress: TaskProgress) => void
@@ -900,6 +939,20 @@ export const useSessionStore = create<SessionState>((set) => ({
   clearErrors: (routingId) =>
     set((state) => ({
       sessions: updateSession(state.sessions, routingId, () => ({ errors: [] }))
+    })),
+
+  addSandboxViolation: (routingId, message) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, routingId, (s) => ({
+        sandboxViolations: [...s.sandboxViolations, message]
+      }))
+    })),
+
+  removeSandboxViolation: (routingId, index) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, routingId, (s) => ({
+        sandboxViolations: s.sandboxViolations.filter((_, i) => i !== index)
+      }))
     })),
 
   appendToolResult: (routingId, toolUseId, result, isError) =>

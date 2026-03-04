@@ -9,18 +9,20 @@ import type { ClaudePermissions } from '../../../shared/types'
 export function SettingsToggle({
   label,
   checked,
-  onChange
+  onChange,
+  tooltip
 }: {
   label: string
   checked: boolean
   onChange: (value: boolean) => void
+  tooltip?: string
 }): React.JSX.Element {
   return (
     <button
       onClick={() => onChange(!checked)}
       className="w-full flex items-center justify-between px-3 py-1.5 text-[13px] text-text-secondary hover:bg-bg-hover rounded transition-colors cursor-default"
     >
-      <span>{label}</span>
+      <span className="flex items-center gap-1">{label}{tooltip && <InfoTooltip text={tooltip} />}</span>
       <span
         className={`w-7 h-4 rounded-full relative transition-colors ${checked ? 'bg-accent' : 'bg-text-muted/30'}`}
       >
@@ -102,6 +104,101 @@ function SettingsSelect<T extends string>({
             {opt.label}
           </button>
         ))}
+      </div>
+    </div>
+  )
+}
+
+function InfoTooltip({ text }: { text: string }): React.JSX.Element {
+  const [hovered, setHovered] = useState(false)
+
+  return (
+    <span
+      className="relative inline-flex items-center"
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+    >
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-text-muted/40 hover:text-text-muted transition-colors cursor-default shrink-0">
+        <circle cx="12" cy="12" r="10" />
+        <path d="M12 16v-4" />
+        <path d="M12 8h.01" />
+      </svg>
+      {hovered && (
+        <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 pointer-events-none z-50">
+          <div className="bg-bg-tertiary border border-border rounded-md px-2.5 py-1.5 shadow-lg text-[10px] text-text-secondary leading-relaxed w-56">
+            {text}
+          </div>
+          <div className="flex justify-center -mt-px">
+            <div className="w-2 h-2 bg-bg-tertiary border-r border-b border-border rotate-45 -translate-y-1" />
+          </div>
+        </div>
+      )}
+    </span>
+  )
+}
+
+function SandboxListSetting({
+  label,
+  labelColor,
+  items,
+  placeholder,
+  onUpdate,
+  tooltip
+}: {
+  label: string
+  labelColor: string
+  items: string[]
+  placeholder: string
+  onUpdate: (items: string[]) => void
+  tooltip?: string
+}): React.JSX.Element {
+  const [inputVal, setInputVal] = useState('')
+
+  const handleAdd = (): void => {
+    const trimmed = inputVal.trim()
+    if (trimmed && !items.includes(trimmed)) {
+      onUpdate([...items, trimmed])
+      setInputVal('')
+    }
+  }
+
+  return (
+    <div className="px-3 py-1.5 text-[13px] text-text-secondary">
+      <div className={`mb-1.5 flex items-center gap-1 ${labelColor}`}>
+        {label}
+        {tooltip && <InfoTooltip text={tooltip} />}
+      </div>
+      {items.length > 0 && (
+        <div className="flex flex-wrap gap-1 mb-1.5">
+          {items.map((item, i) => (
+            <span key={i} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-bg-primary/50 border border-border/50 text-[11px] text-text-secondary">
+              {item}
+              <button
+                onClick={() => onUpdate(items.filter((_, idx) => idx !== i))}
+                className="text-text-muted hover:text-danger transition-colors cursor-default"
+              >
+                ×
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+      <div className="flex items-center gap-1.5">
+        <input
+          type="text"
+          value={inputVal}
+          onChange={(e) => setInputVal(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') handleAdd() }}
+          placeholder={placeholder}
+          className="flex-1 bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors"
+        />
+        <button
+          onClick={handleAdd}
+          disabled={!inputVal.trim()}
+          className="px-2 py-1 text-[11px] font-medium text-accent hover:text-accent-hover bg-accent/10 hover:bg-accent/15 rounded transition-colors cursor-default disabled:opacity-40"
+        >
+          Add
+        </button>
       </div>
     </div>
   )
@@ -624,6 +721,270 @@ const SECTIONS: Section[] = [
         label: 'Global permissions',
         keywords: 'allow deny ask rules tools bash edit read write permissions security',
         render: () => <GlobalPermissionsSummary />
+      }
+    ]
+  },
+  {
+    id: 'sandbox',
+    label: 'Sandbox',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+        <path d="M7 11V7a5 5 0 0110 0v4" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'sandboxEnabled',
+        label: 'Command sandbox',
+        keywords: 'sandbox isolate secure bash commands safety',
+        render: (s, u) => (
+          <div>
+            <SettingsToggle
+              label="Command sandbox"
+              checked={s.sandbox.enabled}
+              onChange={(v) => u({ sandbox: { ...s.sandbox, enabled: v } })}
+              tooltip="Uses macOS sandbox-exec (Seatbelt profiles) or Linux bubblewrap (bwrap) to restrict filesystem and process access. Commands run in a sandboxed shell with deny-by-default policies. Only macOS and Linux are supported — Windows is not."
+            />
+            <div className="text-[10px] text-text-muted/50 mt-0.5 pl-3">
+              Run bash commands in an isolated environment
+            </div>
+          </div>
+        )
+      },
+      {
+        key: 'sandboxAutoAllow',
+        label: 'Auto-approve sandboxed commands',
+        keywords: 'auto allow approve bash',
+        render: (s, u) => (
+          <div className={s.sandbox.enabled ? '' : 'opacity-40 pointer-events-none'}>
+            <div className="pl-4">
+              <SettingsToggle
+                label="Auto-approve sandboxed commands"
+                checked={s.sandbox.autoAllowBashIfSandboxed}
+                onChange={(v) => u({ sandbox: { ...s.sandbox, autoAllowBashIfSandboxed: v } })}
+                tooltip="When enabled, bash commands that run inside the sandbox are automatically approved without prompting. Commands matching deny or ask permission rules are still blocked. This is the main UX benefit of sandbox mode."
+              />
+              <div className="text-[10px] text-text-muted/50 mt-0.5 pl-3">
+                Skip permission prompts for sandboxed bash
+              </div>
+            </div>
+          </div>
+        )
+      },
+      {
+        key: 'sandboxAllowUnsandboxed',
+        label: 'Allow unsandboxed escape',
+        keywords: 'unsandboxed escape bypass',
+        render: (s, u) => (
+          <div className={s.sandbox.enabled ? '' : 'opacity-40 pointer-events-none'}>
+            <div className="pl-4">
+              <SettingsToggle
+                label="Allow unsandboxed escape"
+                checked={s.sandbox.allowUnsandboxedCommands}
+                onChange={(v) => u({ sandbox: { ...s.sandbox, allowUnsandboxedCommands: v } })}
+                tooltip="When a sandboxed command fails due to restrictions, the model can retry it outside the sandbox. You'll still be prompted to approve the unsandboxed execution. Disable this to enforce strict sandbox-only execution."
+              />
+              <div className="text-[10px] text-text-muted/50 mt-0.5 pl-3">
+                Let the model retry outside sandbox on failure
+              </div>
+            </div>
+          </div>
+        )
+      },
+      {
+        key: 'sandboxLocalBinding',
+        label: 'Allow local port binding',
+        keywords: 'network port listen bind',
+        render: (s, u) => (
+          <div className={s.sandbox.enabled ? '' : 'opacity-40 pointer-events-none'}>
+            <div className="pl-4">
+              <SettingsToggle
+                label="Allow local port binding"
+                checked={s.sandbox.network.allowLocalBinding}
+                onChange={(v) => u({ sandbox: { ...s.sandbox, network: { ...s.sandbox.network, allowLocalBinding: v } } })}
+                tooltip="Lets processes inside the sandbox listen on localhost ports (e.g. webpack-dev-server, vite, flask). Without this, dev servers started by the model will fail to bind."
+              />
+              <div className="text-[10px] text-text-muted/50 mt-0.5 pl-3">
+                Allow sandboxed processes to bind to local ports
+              </div>
+            </div>
+          </div>
+        )
+      },
+      {
+        key: 'sandboxRestrictNetwork',
+        label: 'Restrict network access',
+        keywords: 'network restrict domain whitelist proxy',
+        render: (s, u) => (
+          <div className={s.sandbox.enabled ? '' : 'opacity-40 pointer-events-none'}>
+            <div className="pl-4">
+              <SettingsToggle
+                label="Restrict network access"
+                checked={s.sandbox.network.restrictNetwork}
+                onChange={(v) => u({ sandbox: { ...s.sandbox, network: { ...s.sandbox.network, restrictNetwork: v } } })}
+                tooltip="When enabled, sandboxed commands can only reach explicitly whitelisted domains via a local proxy. All other network access is blocked. When disabled, sandboxed commands have unrestricted network access."
+              />
+              <div className="text-[10px] text-text-muted/50 mt-0.5 pl-3">
+                Only allow connections to whitelisted domains
+              </div>
+            </div>
+          </div>
+        )
+      },
+      {
+        key: 'sandboxAllowedDomains',
+        label: 'Allowed domains',
+        keywords: 'network domain whitelist url',
+        render: (s, u) => (
+          <div className={s.sandbox.enabled && s.sandbox.network.restrictNetwork ? '' : 'opacity-40 pointer-events-none'}>
+            <div className="pl-8">
+              <SandboxListSetting
+                label="Allowed domains"
+                labelColor="text-success"
+                items={s.sandbox.network.allowedDomains}
+                placeholder="e.g. registry.npmjs.org"
+                onUpdate={(items) => u({ sandbox: { ...s.sandbox, network: { ...s.sandbox.network, allowedDomains: items } } })}
+                tooltip="Domains that sandboxed commands can reach. Supports wildcards like *.npmjs.org. Traffic is routed through a local HTTP/SOCKS proxy. Leave empty to block all outbound network access."
+              />
+            </div>
+          </div>
+        )
+      },
+      {
+        key: 'sandboxManagedDomainsOnly',
+        label: 'Managed domains only',
+        keywords: 'enterprise managed policy domains',
+        render: (s, u) => (
+          <div className={s.sandbox.enabled && s.sandbox.network.restrictNetwork ? '' : 'opacity-40 pointer-events-none'}>
+            <div className="pl-8">
+              <SettingsToggle
+                label="Managed domains only"
+                checked={s.sandbox.network.allowManagedDomainsOnly}
+                onChange={(v) => u({ sandbox: { ...s.sandbox, network: { ...s.sandbox.network, allowManagedDomainsOnly: v } } })}
+                tooltip="Enterprise feature. When enabled, only allowedDomains from managed settings and WebFetch(domain:...) allow rules from managed settings are used. Domains from user, project, local, and flag settings are ignored. Denied domains are still respected from all sources."
+              />
+              <div className="text-[10px] text-text-muted/50 mt-0.5 pl-3">
+                Ignore user/project domain settings, only respect managed policy
+              </div>
+            </div>
+          </div>
+        )
+      },
+      {
+        key: 'sandboxAllowAllUnixSockets',
+        label: 'Allow all Unix sockets',
+        keywords: 'unix socket docker ipc',
+        render: (s, u) => (
+          <div className={s.sandbox.enabled ? '' : 'opacity-40 pointer-events-none'}>
+            <div className="pl-4">
+              <SettingsToggle
+                label="Allow all Unix sockets"
+                checked={s.sandbox.network.allowAllUnixSockets}
+                onChange={(v) => u({ sandbox: { ...s.sandbox, network: { ...s.sandbox.network, allowAllUnixSockets: v } } })}
+                tooltip="Disables Unix socket blocking on both macOS and Linux. This grants access to all Unix sockets including the Docker socket, which effectively gives full host access. Only enable if you trust the commands being run."
+              />
+              <div className="text-[10px] text-text-muted/50 mt-0.5 pl-3">
+                Disable Unix socket blocking (allows Docker, etc.)
+              </div>
+            </div>
+          </div>
+        )
+      },
+      {
+        key: 'sandboxUnixSockets',
+        label: 'Unix socket paths',
+        keywords: 'unix socket path docker',
+        render: (s, u) => (
+          <div className={s.sandbox.enabled && !s.sandbox.network.allowAllUnixSockets ? '' : 'opacity-40 pointer-events-none'}>
+            <div className="pl-8">
+              <SandboxListSetting
+                label="Unix socket paths"
+                labelColor="text-warning"
+                items={s.sandbox.network.allowUnixSockets}
+                placeholder="e.g. /var/run/docker.sock"
+                onUpdate={(items) => u({ sandbox: { ...s.sandbox, network: { ...s.sandbox.network, allowUnixSockets: items } } })}
+                tooltip="macOS only — specific Unix socket paths to allow. Linux uses seccomp which cannot filter by path. Allowing /var/run/docker.sock grants full host access through the Docker API."
+              />
+            </div>
+          </div>
+        )
+      },
+      {
+        key: 'sandboxAllowWrite',
+        label: 'Additional write paths',
+        keywords: 'filesystem write allow path writable',
+        render: (s, u) => (
+          <div className={s.sandbox.enabled ? '' : 'opacity-40 pointer-events-none'}>
+            <div className="pl-4">
+              <SandboxListSetting
+                label="Additional write paths"
+                labelColor="text-success"
+                items={s.sandbox.filesystem.allowWrite}
+                placeholder="e.g. /usr/local/bin"
+                onUpdate={(items) => u({ sandbox: { ...s.sandbox, filesystem: { ...s.sandbox.filesystem, allowWrite: items } } })}
+                tooltip="Paths outside the project directory where sandboxed commands can write files. The project directory and $TMPDIR are always writable."
+              />
+            </div>
+          </div>
+        )
+      },
+      {
+        key: 'sandboxDenyWrite',
+        label: 'Read-only paths',
+        keywords: 'filesystem deny write readonly protect',
+        render: (s, u) => (
+          <div className={s.sandbox.enabled ? '' : 'opacity-40 pointer-events-none'}>
+            <div className="pl-4">
+              <SandboxListSetting
+                label="Read-only paths"
+                labelColor="text-warning"
+                items={s.sandbox.filesystem.denyWrite}
+                placeholder="e.g. /etc"
+                onUpdate={(items) => u({ sandbox: { ...s.sandbox, filesystem: { ...s.sandbox.filesystem, denyWrite: items } } })}
+                tooltip="Paths that should be read-only even within writable areas. Useful for protecting config files or build artifacts from accidental modification."
+              />
+            </div>
+          </div>
+        )
+      },
+      {
+        key: 'sandboxDenyRead',
+        label: 'Hidden paths',
+        keywords: 'filesystem deny block read path hidden',
+        render: (s, u) => (
+          <div className={s.sandbox.enabled ? '' : 'opacity-40 pointer-events-none'}>
+            <div className="pl-4">
+              <SandboxListSetting
+                label="Hidden paths"
+                labelColor="text-danger"
+                items={s.sandbox.filesystem.denyRead}
+                placeholder="e.g. ~/.ssh"
+                onUpdate={(items) => u({ sandbox: { ...s.sandbox, filesystem: { ...s.sandbox.filesystem, denyRead: items } } })}
+                tooltip="Paths completely hidden from sandboxed commands — they cannot read or detect these files exist. Good for credentials, SSH keys, cloud configs."
+              />
+            </div>
+          </div>
+        )
+      },
+      {
+        key: 'sandboxFooter',
+        label: 'Sandbox info',
+        keywords: 'sandbox info macos linux bwrap',
+        render: () => (
+          <div className="px-3 py-1.5 text-[11px] text-text-muted/60">
+            Filesystem defaults: project dir + $TMPDIR writable. Changes take effect on next session start.
+          </div>
+        )
       }
     ]
   }

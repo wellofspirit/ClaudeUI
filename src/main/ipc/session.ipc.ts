@@ -16,7 +16,7 @@ import { gitServiceManager } from '../services/git-service'
 import { createWorktree, getWorktreeStatus, removeWorktree, listWorktrees } from '../services/worktree'
 import { usageFetcher } from '../services/usage-fetcher'
 import { blockUsageService } from '../services/block-usage'
-import type { ApprovalDecision, ModelInfo } from '../../shared/types'
+import type { ApprovalDecision, ModelInfo, SandboxSettings } from '../../shared/types'
 import { logger } from '../services/logger'
 
 let cachedModels: ModelInfo[] | null = null
@@ -182,7 +182,8 @@ const SESSION_IPC_CHANNELS = [
   'mcp:load-servers', 'mcp:save-servers',
   'mcp:read-disabled', 'mcp:toggle-disabled',
   'worktree:create', 'worktree:status', 'worktree:remove', 'worktree:list',
-  'app:quit-confirm'
+  'app:quit-confirm',
+  'session:sandbox-violation'
 ]
 
 export function registerSessionIpc(win: BrowserWindow): void {
@@ -204,7 +205,9 @@ export function registerSessionIpc(win: BrowserWindow): void {
   ipcMain.handle(
     'session:create',
     (_event, routingId: string, cwd: string, effort?: string, resumeSessionId?: string, permissionMode?: string, model?: string) => {
-      manager.create(routingId, win, cwd, effort, resumeSessionId, permissionMode, model)
+      const settings = loadSettings() as Record<string, unknown>
+      const sandboxConfig = (settings.sandbox as SandboxSettings) || undefined
+      manager.create(routingId, win, cwd, effort, resumeSessionId, permissionMode, model, sandboxConfig)
     }
   )
 

@@ -8,6 +8,7 @@ import { InputBox } from './InputBox'
 import { TodoWidget } from '../TodoWidget'
 import { FloatingApproval } from './FloatingApproval'
 import { FloatingError } from './FloatingError'
+import { SandboxViolationToast } from './SandboxViolationToast'
 import { WindowControls } from '../WindowControls'
 import { useSidebarCollapsed } from '../SessionView'
 import { AgentTabBar } from './AgentTabBar'
@@ -360,6 +361,9 @@ export function ChatPanel(): React.JSX.Element {
 
       {/* Floating error */}
       <FloatingError />
+
+      {/* Sandbox violation toasts */}
+      <SandboxViolationToast />
     </div>
   )
 }

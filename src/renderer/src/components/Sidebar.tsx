@@ -1116,6 +1116,13 @@ function SettingsPanel(): React.JSX.Element {
   const updateSettings = useSessionStore((s) => s.updateSettings)
   const panelRef = useRef<HTMLDivElement>(null)
 
+  // Listen for 'open-settings' custom events (e.g. from sandbox pill in InputBox)
+  useEffect(() => {
+    const handler = (): void => setDialogOpen(true)
+    window.addEventListener('open-settings', handler)
+    return () => window.removeEventListener('open-settings', handler)
+  }, [])
+
   // Close popup on outside click
   useEffect(() => {
     if (!open) return

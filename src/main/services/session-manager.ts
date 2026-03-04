@@ -1,5 +1,6 @@
 import type { BrowserWindow } from 'electron'
 import { ClaudeSession } from './claude-session'
+import type { SandboxSettings } from '../../shared/types'
 
 export class SessionManager {
   private sessions = new Map<string, ClaudeSession>()
@@ -18,7 +19,8 @@ export class SessionManager {
     effort?: string,
     resumeSessionId?: string,
     permissionMode?: string,
-    model?: string
+    model?: string,
+    sandboxConfig?: SandboxSettings
   ): ClaudeSession {
     // Clean up existing session with same routingId
     const existing = this.sessions.get(routingId)
@@ -26,7 +28,7 @@ export class SessionManager {
       existing.cancel()
     }
 
-    const session = new ClaudeSession(routingId, win, cwd, effort, resumeSessionId, permissionMode, model)
+    const session = new ClaudeSession(routingId, win, cwd, effort, resumeSessionId, permissionMode, model, sandboxConfig)
     session.setInactivityTimeout(this._sessionTimeoutMs)
     this.sessions.set(routingId, session)
     return session

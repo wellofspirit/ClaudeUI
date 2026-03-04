@@ -46,6 +46,7 @@ export function useClaudeEvents(): void {
   const setPermissionMode = useSessionStore((s) => s.setPermissionMode)
   const setSlashCommands = useSessionStore((s) => s.setSlashCommands)
   const setSdkSkillNames = useSessionStore((s) => s.setSdkSkillNames)
+  const addSandboxViolation = useSessionStore((s) => s.addSandboxViolation)
 
   // Request notification permission on mount
   useEffect(() => {
@@ -235,6 +236,9 @@ export function useClaudeEvents(): void {
       window.api.onSkills(({ data: names }) => {
         setSdkSkillNames(names)
       }),
+      window.api.onSandboxViolation(({ routingId, data: message }) => {
+        addSandboxViolation(routingId, message)
+      }),
       window.api.onSteerConsumed(({ routingId }) => {
         useSessionStore.getState().consumeQueuedText(routingId)
       }),
@@ -298,5 +302,5 @@ export function useClaudeEvents(): void {
     }).catch((err) => { window.api.logError('useClaudeEvents', `Initial block usage fetch failed: ${err}`) })
 
     return () => cleanups.forEach((fn) => fn())
-  }, [addMessage, appendStreamingText, appendStreamingThinking, addPendingApproval, clearPendingApprovals, setStatus, addError, appendToolResult, updateTaskProgress, addTaskNotification, addSubagentMessage, appendSubagentMessageBatch, appendSubagentStreamingText, appendSubagentStreamingThinking, appendSubagentToolResult, setBackgroundOutput, setStatusLine, setPermissionMode, setSlashCommands, setSdkSkillNames])
+  }, [addMessage, appendStreamingText, appendStreamingThinking, addPendingApproval, clearPendingApprovals, setStatus, addError, appendToolResult, updateTaskProgress, addTaskNotification, addSubagentMessage, appendSubagentMessageBatch, appendSubagentStreamingText, appendSubagentStreamingThinking, appendSubagentToolResult, setBackgroundOutput, setStatusLine, setPermissionMode, setSlashCommands, setSdkSkillNames, addSandboxViolation])
 }

@@ -252,6 +252,7 @@ export function InputBox(): React.JSX.Element {
   const statusLine = useActiveSession((s) => s.statusLine)
   const effort = useActiveSession((s) => s.effort)
   const setEffort = useSessionStore((s) => s.setEffort)
+  const sandboxEnabled = useSessionStore((s) => s.settings.sandbox.enabled)
 
   useEffect(() => {
     window.api.getModels().then(setAvailableModels)
@@ -962,6 +963,20 @@ export function InputBox(): React.JSX.Element {
                   </div>
                 )}
               </div>
+              {/* Sandbox status pill */}
+              {sandboxEnabled && (
+                <button
+                  onClick={() => window.dispatchEvent(new CustomEvent('open-settings', { detail: { section: 'sandbox' } }))}
+                  className="h-7 px-2 flex items-center gap-1 rounded-lg text-[11px] text-success/70 hover:text-success hover:bg-success/5 transition-colors cursor-pointer"
+                  title="Sandbox enabled — click to configure"
+                >
+                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+                    <path d="M7 11V7a5 5 0 0110 0v4" />
+                  </svg>
+                  <span>Sandboxed</span>
+                </button>
+              )}
             </div>
 
             {/* Right controls */}
