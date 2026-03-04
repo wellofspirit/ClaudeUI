@@ -60,9 +60,9 @@ export const MessageBubble = memo(function MessageBubble({
       )
     }
 
-    const imageBlocks = message.content.filter((b) => b.type === 'image')
-    const docBlocks = message.content.filter((b) => b.type === 'document')
-    const textBlocks = message.content.filter((b) => b.type === 'text')
+    const imageBlocks = message.content.filter((b): b is Extract<ContentBlock, { type: 'image' }> => b.type === 'image')
+    const docBlocks = message.content.filter((b): b is Extract<ContentBlock, { type: 'document' }> => b.type === 'document')
+    const textBlocks = message.content.filter((b): b is Extract<ContentBlock, { type: 'text' }> => b.type === 'text')
     const hasAttachments = imageBlocks.length > 0 || docBlocks.length > 0
 
     return (
@@ -97,10 +97,13 @@ export const MessageBubble = memo(function MessageBubble({
     )
   }
 
+  type ToolUseBlock = Extract<ContentBlock, { type: 'tool_use' }>
+  type ToolResultBlock = Extract<ContentBlock, { type: 'tool_result' }>
+
   // Pair tool_use blocks with their tool_result
-  const resultMap = new Map<string, ContentBlock>()
+  const resultMap = new Map<string, ToolResultBlock>()
   for (const block of message.content) {
-    if (block.type === 'tool_result' && block.toolUseId) {
+    if (block.type === 'tool_result') {
       resultMap.set(block.toolUseId, block)
     }
   }
@@ -109,7 +112,7 @@ export const MessageBubble = memo(function MessageBubble({
   const approvalMap = new Map<string, PendingApproval>()
   const matchedApprovalIds = new Set<string>()
   for (const block of message.content) {
-    if (block.type !== 'tool_use' || !block.toolUseId) continue
+    if (block.type !== 'tool_use') continue
     const match = pendingApprovals.find(
       (a) =>
         !matchedApprovalIds.has(a.requestId) &&
@@ -124,8 +127,8 @@ export const MessageBubble = memo(function MessageBubble({
 
   // Group consecutive tool_use blocks so we can wrap them in a bordered container
   type RenderItem =
-    | { kind: 'tool_group'; blocks: { block: ContentBlock; index: number }[] }
-    | { kind: 'thinking'; block: ContentBlock; index: number }
+    | { kind: 'tool_group'; blocks: { block: ToolUseBlock; index: number }[] }
+    | { kind: 'thinking'; block: Extract<ContentBlock, { type: 'thinking' }>; index: number }
     | { kind: 'other'; block: ContentBlock; index: number }
   const items: RenderItem[] = []
 
@@ -182,15 +185,15 @@ export const MessageBubble = memo(function MessageBubble({
         // Single tool call — render directly
         if (item.blocks.length === 1) {
           const { block, index } = item.blocks[0]
-          const result = block.toolUseId ? resultMap.get(block.toolUseId) : undefined
-          const approval = block.toolUseId ? approvalMap.get(block.toolUseId) : undefined
+          const result = resultMap.get(block.toolUseId)
+          const approval = approvalMap.get(block.toolUseId)
           if (block.toolName === 'ExitPlanMode') {
             return <ExitPlanModeCard key={index} block={block} approval={approval} />
           }
           if (block.toolName === 'AskUserQuestion') {
             return <AskUserQuestionBlock key={index} block={block} result={result} approval={approval} />
           }
-          if (block.toolName && TODO_TOOLS.has(block.toolName)) {
+          if (TODO_TOOLS.has(block.toolName)) {
             return <TodoToolBlock key={index} block={block} result={result} />
           }
           if (block.toolName === 'Task') {
@@ -210,7 +213,7 @@ export const MessageBubble = memo(function MessageBubble({
               if (block.toolName === 'AskUserQuestion') {
                 return <AskUserQuestionBlock key={index} block={block} result={result} approval={approval} />
               }
-              if (block.toolName && TODO_TOOLS.has(block.toolName)) {
+              if (TODO_TOOLS.has(block.toolName)) {
                 return <TodoToolBlock key={index} block={block} result={result} />
               }
               if (block.toolName === 'Task') {
@@ -280,8 +283,8 @@ function CompactSeparator({ summary }: { summary?: string }): React.JSX.Element 
   )
 }
 
-function CliCommandBlock({ block }: { block: ContentBlock }): React.JSX.Element {
-  const name = block.commandName || ''
+function CliCommandBlock({ block }: { block: Extract<ContentBlock, { type: 'cli_command' }> }): React.JSX.Element {
+  const name = block.commandName
   const args = block.commandArgs || ''
   const output = block.commandOutput || ''
 
@@ -308,10 +311,10 @@ function CliCommandBlock({ block }: { block: ContentBlock }): React.JSX.Element 
   )
 }
 
-function ApiErrorBlock({ block }: { block: ContentBlock }): React.JSX.Element {
+function ApiErrorBlock({ block }: { block: Extract<ContentBlock, { type: 'api_error' }> }): React.JSX.Element {
   const [expanded, setExpanded] = useState(false)
-  const errorType = block.errorType || 'unknown'
-  const errorMessage = block.errorMessage || ''
+  const errorType = block.errorType
+  const errorMessage = block.errorMessage
 
   const label = errorType === 'rate_limit'
     ? 'Rate Limited'

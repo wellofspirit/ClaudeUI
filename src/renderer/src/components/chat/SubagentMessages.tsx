@@ -1,4 +1,4 @@
-import { memo } from 'react'
+import { memo, useMemo } from 'react'
 import type { ChatMessage, ContentBlock } from '../../../../shared/types'
 import { MarkdownRenderer } from './MarkdownRenderer'
 import { ToolCallBlock } from './ToolCallBlock'
@@ -36,35 +36,37 @@ const ContentBlockView = memo(function ContentBlockView({ block }: { block: Cont
 })
 
 export const SubagentMessages = memo(function SubagentMessages({ messages, maxHeight = '400px' }: Props): React.JSX.Element {
+  const resultMap = useMemo(() => {
+    const map = new Map<string, Extract<ContentBlock, { type: 'tool_result' }>>()
+    for (const msg of messages) {
+      for (const b of msg.content) {
+        if (b.type === 'tool_result') {
+          map.set(b.toolUseId, b)
+        }
+      }
+    }
+    return map
+  }, [messages])
+
   return (
     <div className="flex flex-col gap-2 overflow-y-auto" style={{ maxHeight }}>
-      {messages.map((msg) => {
-        // Build a result map for tool_use → tool_result pairing
-        const resultMap = new Map<string, ContentBlock>()
-        for (const b of msg.content) {
-          if (b.type === 'tool_result' && b.toolUseId) {
-            resultMap.set(b.toolUseId, b)
-          }
-        }
-
-        return (
-          <div key={msg.id} className="flex flex-col gap-1.5">
-            {msg.content.map((block, i) => {
-              if (block.type === 'tool_result') return null
-              if (block.type === 'tool_use') {
-                return (
-                  <ToolCallBlock
-                    key={`${msg.id}-${i}`}
-                    block={block}
-                    result={resultMap.get(block.toolUseId!)}
-                  />
-                )
-              }
-              return <ContentBlockView key={`${msg.id}-${i}`} block={block} />
-            })}
-          </div>
-        )
-      })}
+      {messages.map((msg) => (
+        <div key={msg.id} className="flex flex-col gap-1.5">
+          {msg.content.map((block, i) => {
+            if (block.type === 'tool_result') return null
+            if (block.type === 'tool_use') {
+              return (
+                <ToolCallBlock
+                  key={`${msg.id}-${i}`}
+                  block={block}
+                  result={resultMap.get(block.toolUseId)}
+                />
+              )
+            }
+            return <ContentBlockView key={`${msg.id}-${i}`} block={block} />
+          })}
+        </div>
+      ))}
     </div>
   )
 })

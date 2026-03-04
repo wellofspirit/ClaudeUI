@@ -1409,12 +1409,11 @@ export class ClaudeSession {
   }
 
   private send(channel: string, data: unknown): void {
-    const payload = { routingId: this.routingId, data }
     if (!this.win.isDestroyed()) {
-      this.win.webContents.send(channel, payload)
+      this.win.webContents.send(channel, this.routingId, data)
     }
     for (const w of ClaudeSession.extraWindows) {
-      if (!w.isDestroyed()) w.webContents.send(channel, payload)
+      if (!w.isDestroyed()) w.webContents.send(channel, this.routingId, data)
     }
   }
 

@@ -4,9 +4,12 @@ import { useSessionStore, useActiveSession } from '../../stores/session-store'
 import { MarkdownRenderer } from './MarkdownRenderer'
 import { SubagentMessages } from './SubagentMessages'
 
+type ToolUseBlock = Extract<ContentBlock, { type: 'tool_use' }>
+type ToolResultBlock = Extract<ContentBlock, { type: 'tool_result' }>
+
 interface Props {
-  block: ContentBlock
-  result?: ContentBlock
+  block: ToolUseBlock
+  result?: ToolResultBlock
 }
 
 interface ParsedUsage {
@@ -73,7 +76,7 @@ export function TaskCard({ block, result }: Props): React.JSX.Element {
   const clearTaskStopping = useSessionStore((s) => s.clearTaskStopping)
   const [expanded, setExpanded] = useState(false)
 
-  const toolUseId = block.toolUseId || ''
+  const toolUseId = block.toolUseId
   const input = block.toolInput || {}
   const isHistorical = useActiveSession((s) => s.isHistorical)
   const hasResult = !!result

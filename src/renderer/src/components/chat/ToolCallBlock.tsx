@@ -6,9 +6,12 @@ import { DiffViewer } from './DiffViewer'
 import { TerminalView } from './TerminalView'
 import { AlwaysAllowSection } from './PermissionSuggestions'
 
+type ToolUseBlock = Extract<ContentBlock, { type: 'tool_use' }>
+type ToolResultBlock = Extract<ContentBlock, { type: 'tool_result' }>
+
 interface Props {
-  block: ContentBlock
-  result?: ContentBlock
+  block: ToolUseBlock
+  result?: ToolResultBlock
   approval?: PendingApproval
 }
 
@@ -338,7 +341,7 @@ function BackgroundBashOutput({ toolUseId }: { toolUseId: string }): React.JSX.E
   )
 }
 
-function ToolInput({ block }: { block: ContentBlock }): React.JSX.Element {
+function ToolInput({ block }: { block: ToolUseBlock }): React.JSX.Element {
   const input = block.toolInput
   const toolName = block.toolName
 
@@ -378,9 +381,9 @@ function ToolInput({ block }: { block: ContentBlock }): React.JSX.Element {
   )
 }
 
-function ToolResult({ block, result }: { block: ContentBlock; result: ContentBlock }): React.JSX.Element {
+function ToolResult({ block, result }: { block: ToolUseBlock; result: ToolResultBlock }): React.JSX.Element {
   const toolName = block.toolName
-  const text = result.toolResult || ''
+  const text = result.toolResult
   const isError = result.isError
 
   // Write tool: show the content that was written (from input)
@@ -425,7 +428,7 @@ function ToolResult({ block, result }: { block: ContentBlock; result: ContentBlo
 }
 
 
-function getSummary(block: ContentBlock): string {
+function getSummary(block: ToolUseBlock): string {
   const input = block.toolInput
   if (!input) return ''
 

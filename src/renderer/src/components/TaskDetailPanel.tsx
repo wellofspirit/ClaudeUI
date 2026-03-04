@@ -4,6 +4,9 @@ import { MarkdownRenderer } from './chat/MarkdownRenderer'
 import { SubagentMessages } from './chat/SubagentMessages'
 import type { ContentBlock } from '../../../shared/types'
 
+type ToolUseBlock = Extract<ContentBlock, { type: 'tool_use' }>
+type ToolResultBlock = Extract<ContentBlock, { type: 'tool_result' }>
+
 function formatElapsed(seconds: number): string {
   if (seconds < 60) return `${Math.round(seconds)}s`
   const m = Math.floor(seconds / 60)
@@ -14,9 +17,9 @@ function formatElapsed(seconds: number): string {
 function findTaskBlocks(
   messages: { role: string; content: ContentBlock[] }[],
   toolUseId: string
-): { taskBlock: ContentBlock | null; resultBlock: ContentBlock | null } {
-  let taskBlock: ContentBlock | null = null
-  let resultBlock: ContentBlock | null = null
+): { taskBlock: ToolUseBlock | null; resultBlock: ToolResultBlock | null } {
+  let taskBlock: ToolUseBlock | null = null
+  let resultBlock: ToolResultBlock | null = null
   for (const msg of messages) {
     if (msg.role !== 'assistant') continue
     for (const b of msg.content) {

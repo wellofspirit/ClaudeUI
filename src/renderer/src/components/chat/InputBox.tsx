@@ -1,9 +1,12 @@
-import { useState, useRef, useCallback, useEffect, useMemo } from 'react'
+import { useState, useRef, useCallback, useEffect } from 'react'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
-import type { DirEntry, FileAttachment, StatusLineData } from '../../../../shared/types'
+import type { FileAttachment, StatusLineData } from '../../../../shared/types'
 import { v4 as uuid } from 'uuid'
-import { SlashCommandMenu, filterSlashCommands } from './SlashCommandMenu'
+import { SlashCommandMenu } from './SlashCommandMenu'
 import { FileMentionMenu } from './FileMentionMenu'
+import { FileAttachmentBar } from './FileAttachmentBar'
+import { useSlashMenu } from '../../hooks/useSlashMenu'
+import { useFileMention } from '../../hooks/useFileMention'
 
 const ACCEPTED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp']
 const ACCEPTED_FILE_TYPES = [...ACCEPTED_IMAGE_TYPES, 'application/pdf']
@@ -160,85 +163,25 @@ export function InputBox(): React.JSX.Element {
 
   // Slash command autocomplete
   const slashCommands = useSessionStore((s) => s.slashCommands)
-  const [slashMenuOpen, setSlashMenuOpen] = useState(false)
-  const [slashMenuIndex, setSlashMenuIndex] = useState(0)
-  const slashFilter = slashMenuOpen && text.startsWith('/') ? text.slice(1).split(/\s/)[0] : ''
-  const filteredSlashCommands = useMemo(
-    () => (slashMenuOpen ? filterSlashCommands(slashCommands, slashFilter) : []),
-    [slashMenuOpen, slashCommands, slashFilter]
-  )
+  const {
+    slashMenuOpen,
+    slashMenuIndex,
+    slashFilter,
+    filteredCommands: filteredSlashCommands,
+    handleInputChange: slashHandleInput,
+    handleKeyDown: slashHandleKeyDown,
+    handleSelect: handleSlashSelect
+  } = useSlashMenu({ slashCommands, text, setText, textareaRef })
+
   // @ file mention autocomplete
-  const [fileMentionOpen, setFileMentionOpen] = useState(false)
-  const [fileMentionIndex, setFileMentionIndex] = useState(0)
-  const [fileMentionAnchor, setFileMentionAnchor] = useState(-1) // cursor position of '@'
-  const [fileMentionDir, setFileMentionDir] = useState('')        // relative dir being browsed
-  const [fileMentionEntries, setFileMentionEntries] = useState<DirEntry[]>([])
-
-  // Fetch directory entries when the browsing dir changes
-  const fileMentionIsAbsolute = /^(\/|[A-Za-z]:)/.test(fileMentionDir)
-  const [fileMentionIsRoot, setFileMentionIsRoot] = useState(false)
-  const [fileMentionResolvedPath, setFileMentionResolvedPath] = useState('')
-  useEffect(() => {
-    if (!fileMentionOpen || (!cwd && !fileMentionIsAbsolute)) return
-    let fullDir: string
-    if (fileMentionIsAbsolute) {
-      // Absolute path — use directly (append \ for bare drive letters on Windows)
-      fullDir = /^[A-Za-z]:$/.test(fileMentionDir) ? fileMentionDir + '\\' : fileMentionDir
-    } else {
-      const separator = cwd.includes('\\') ? '\\' : '/'
-      fullDir = fileMentionDir ? cwd + separator + fileMentionDir.replace(/\//g, separator) : cwd
-    }
-    window.api.listDir(fullDir).then(({ entries, isRoot, resolvedPath }) => {
-      setFileMentionEntries(entries)
-      setFileMentionIsRoot(isRoot)
-      setFileMentionResolvedPath(resolvedPath)
-    }).catch(() => {
-      setFileMentionEntries([])
-      setFileMentionIsRoot(false)
-      setFileMentionResolvedPath('')
-    })
-  }, [fileMentionOpen, fileMentionDir, fileMentionIsAbsolute, cwd])
-
-  // When a relative path (../../..) resolves to filesystem root, rewrite to absolute
-  // so subsequent navigation produces clean paths (D:/build not ../../../build)
-  useEffect(() => {
-    if (!fileMentionIsRoot || fileMentionIsAbsolute || !fileMentionResolvedPath) return
-    const absDir = fileMentionResolvedPath
-    const oldDirWithSlash = fileMentionDir ? fileMentionDir + '/' : ''
-    const before = text.slice(0, fileMentionAnchor + 1)
-    const after = text.slice(fileMentionAnchor + 1 + oldDirWithSlash.length + fileMentionQuery.length)
-    const newPath = absDir + '/'
-    const newText = before + newPath + after
-    setText(newText)
-    setFileMentionDir(absDir)
-    requestAnimationFrame(() => {
-      const el = textareaRef.current
-      if (el) {
-        const pos = fileMentionAnchor + 1 + newPath.length
-        el.selectionStart = pos
-        el.selectionEnd = pos
-      }
-    })
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fileMentionIsRoot, fileMentionResolvedPath])
-
-  // Compute the filter text (last path segment after the last /) and whether we're at root
-  const fileMentionQuery = useMemo(() => {
-    if (!fileMentionOpen || fileMentionAnchor < 0) return ''
-    const afterAt = text.slice(fileMentionAnchor + 1)
-    const lastSlash = afterAt.lastIndexOf('/')
-    return lastSlash >= 0 ? afterAt.slice(lastSlash + 1) : afterAt
-  }, [fileMentionOpen, fileMentionAnchor, text])
-
-  const filteredFileMentionEntries = useMemo(() => {
-    if (!fileMentionOpen) return []
-    const items: DirEntry[] = fileMentionIsRoot
-      ? fileMentionEntries
-      : [{ name: '..', isDirectory: true }, ...fileMentionEntries]
-    if (!fileMentionQuery) return items
-    const q = fileMentionQuery.toLowerCase()
-    return items.filter((e) => e.name.toLowerCase().includes(q))
-  }, [fileMentionOpen, fileMentionIsRoot, fileMentionEntries, fileMentionQuery])
+  const {
+    fileMentionOpen,
+    fileMentionIndex,
+    filteredEntries: filteredFileMentionEntries,
+    handleInputChange: fileMentionHandleInput,
+    handleKeyDown: fileMentionHandleKeyDown,
+    handleConfirm: handleFileMentionConfirm
+  } = useFileMention({ cwd, text, setText, textareaRef })
 
   const availableModels = useSessionStore((s) => s.availableModels)
   const setAvailableModels = useSessionStore((s) => s.setAvailableModels)
@@ -420,61 +363,10 @@ export function InputBox(): React.JSX.Element {
 
   const handleKeyDown = (e: React.KeyboardEvent): void => {
     // @ file mention menu keyboard navigation
-    if (fileMentionOpen && filteredFileMentionEntries.length > 0) {
-      if (e.key === 'ArrowDown') {
-        e.preventDefault()
-        setFileMentionIndex((i) => (i + 1) % filteredFileMentionEntries.length)
-        return
-      }
-      if (e.key === 'ArrowUp') {
-        e.preventDefault()
-        setFileMentionIndex((i) => (i - 1 + filteredFileMentionEntries.length) % filteredFileMentionEntries.length)
-        return
-      }
-      if (e.key === 'Tab') {
-        e.preventDefault()
-        const entry = filteredFileMentionEntries[fileMentionIndex]
-        if (entry.isDirectory) handleFileMentionNavigate(entry)
-        else handleFileMentionConfirm(entry)
-        return
-      }
-      if (e.key === 'Enter') {
-        e.preventDefault()
-        handleFileMentionConfirm(filteredFileMentionEntries[fileMentionIndex])
-        return
-      }
-      if (e.key === 'Escape') {
-        e.preventDefault()
-        setFileMentionOpen(false)
-        setFileMentionAnchor(-1)
-        setFileMentionDir('')
-        return
-      }
-    }
+    if (fileMentionHandleKeyDown(e)) return
 
     // Slash command menu keyboard navigation
-    if (slashMenuOpen && filteredSlashCommands.length > 0) {
-      if (e.key === 'ArrowDown') {
-        e.preventDefault()
-        setSlashMenuIndex((i) => (i + 1) % filteredSlashCommands.length)
-        return
-      }
-      if (e.key === 'ArrowUp') {
-        e.preventDefault()
-        setSlashMenuIndex((i) => (i - 1 + filteredSlashCommands.length) % filteredSlashCommands.length)
-        return
-      }
-      if (e.key === 'Enter' || e.key === 'Tab') {
-        e.preventDefault()
-        handleSlashSelect(filteredSlashCommands[slashMenuIndex].name)
-        return
-      }
-      if (e.key === 'Escape') {
-        e.preventDefault()
-        setSlashMenuOpen(false)
-        return
-      }
-    }
+    if (slashHandleKeyDown(e)) return
 
     // Up-arrow on empty textarea: edit queued message
     if (e.key === 'ArrowUp' && !text && queuedText) {
@@ -512,175 +404,13 @@ export function InputBox(): React.JSX.Element {
     el.style.height = 'auto'
     el.style.height = Math.min(el.scrollHeight, 200) + 'px'
 
-    // Show slash command menu when typing "/" at the start with no spaces yet
-    if (value.startsWith('/') && !value.includes(' ')) {
-      setSlashMenuOpen(true)
-      setSlashMenuIndex(0)
-    } else {
-      setSlashMenuOpen(false)
-    }
+    // Update slash menu state
+    slashHandleInput(value)
 
-    // @ file mention detection
+    // Update file mention state
     const cursorPos = el.selectionStart ?? value.length
-    if (fileMentionOpen) {
-      // Check if user deleted back past the @ anchor
-      if (cursorPos <= fileMentionAnchor) {
-        setFileMentionOpen(false)
-        setFileMentionAnchor(-1)
-        setFileMentionDir('')
-      } else {
-        // Update dir from the text between anchor+1 and cursor.
-        // Normalize backslashes → forward slashes so Windows paths (D:\foo) work.
-        const rawAfterAt = value.slice(fileMentionAnchor + 1, cursorPos)
-        const afterAt = rawAfterAt.replace(/\\/g, '/')
-
-        // If backslashes were present, rewrite the text to use forward slashes
-        if (afterAt !== rawAfterAt) {
-          const before = value.slice(0, fileMentionAnchor + 1)
-          const afterCursor = value.slice(cursorPos)
-          setText(before + afterAt + afterCursor)
-          // Cursor position doesn't change since length is the same
-        }
-
-        const lastSlash = afterAt.lastIndexOf('/')
-        let newDir = lastSlash >= 0 ? afterAt.slice(0, lastSlash) : ''
-
-        // For absolute paths, resolve .. segments that would go above filesystem root
-        const isAbs = /^(\/|[A-Za-z]:)/.test(newDir)
-        if (isAbs && newDir.includes('..')) {
-          const prefix = newDir.match(/^(\/|[A-Za-z]:)/)?.[0] ?? ''
-          const rest = newDir.slice(prefix.length).replace(/^\//, '')
-          const parts = rest.split('/').reduce<string[]>((acc, seg) => {
-            if (seg === '..' && acc.length > 0) acc.pop()
-            else if (seg !== '..' && seg !== '.' && seg !== '') acc.push(seg)
-            return acc
-          }, [])
-          const resolved = prefix + (parts.length ? '/' + parts.join('/') : '')
-          if (resolved !== newDir) {
-            newDir = resolved
-            // Rewrite text to match the resolved path
-            const query = afterAt.slice(lastSlash + 1)
-            const before = value.slice(0, fileMentionAnchor + 1)
-            const afterCursor = value.slice(cursorPos)
-            const rewritten = newDir ? newDir + '/' + query : query
-            const newText = before + rewritten + afterCursor
-            if (newText !== value) {
-              setText(newText)
-              requestAnimationFrame(() => {
-                const ta = textareaRef.current
-                if (ta) {
-                  const pos = fileMentionAnchor + 1 + rewritten.length
-                  ta.selectionStart = pos
-                  ta.selectionEnd = pos
-                }
-              })
-            }
-          }
-        }
-
-        if (newDir !== fileMentionDir) {
-          setFileMentionDir(newDir)
-          setFileMentionIndex(0)
-        }
-      }
-    } else {
-      // Detect a newly typed '@' preceded by whitespace or at start
-      if (cursorPos > 0 && value[cursorPos - 1] === '@') {
-        const charBefore = cursorPos >= 2 ? value[cursorPos - 2] : undefined
-        if (charBefore === undefined || /\s/.test(charBefore)) {
-          setFileMentionOpen(true)
-          setFileMentionAnchor(cursorPos - 1)
-          setFileMentionDir('')
-          setFileMentionIndex(0)
-        }
-      }
-    }
+    fileMentionHandleInput(value, cursorPos)
   }
-
-  const handleSlashSelect = useCallback((name: string): void => {
-    setText(name + ' ')
-    setSlashMenuOpen(false)
-    setSlashMenuIndex(0)
-    textareaRef.current?.focus()
-  }, [setText])
-
-  /** Navigate into a directory (Tab) — updates text, keeps menu open */
-  const handleFileMentionNavigate = useCallback((entry: DirEntry): void => {
-    if (!entry.isDirectory) return
-    const isAbsolute = /^(\/|[A-Za-z]:)/.test(fileMentionDir)
-    let newDir: string
-    if (entry.name === '..') {
-      const lastSlash = fileMentionDir.lastIndexOf('/')
-      if (isAbsolute) {
-        // For absolute paths, don't go above the filesystem root
-        // /usr → /, /usr/bin → /usr, D:/Users → D:, D: stays D:
-        if (lastSlash > 0) newDir = fileMentionDir.slice(0, lastSlash)
-        else newDir = fileMentionDir.slice(0, lastSlash + 1) || fileMentionDir
-      } else {
-        // Relative path: going up from "" (cwd) → "..", from "src" → "", from "../foo" → ".."
-        if (fileMentionDir === '') {
-          newDir = '..'
-        } else if (fileMentionDir === '..') {
-          newDir = '../..'
-        } else if (fileMentionDir.endsWith('/..')) {
-          newDir = fileMentionDir + '/..'
-        } else {
-          newDir = lastSlash >= 0 ? fileMentionDir.slice(0, lastSlash) : ''
-        }
-      }
-    } else {
-      newDir = fileMentionDir ? fileMentionDir + '/' + entry.name : entry.name
-    }
-    const before = text.slice(0, fileMentionAnchor + 1)
-    const after = text.slice(fileMentionAnchor + 1 + (fileMentionDir ? fileMentionDir.length + 1 : 0) + fileMentionQuery.length)
-    const newPath = newDir ? newDir + '/' : ''
-    const newText = before + newPath + after
-    setText(newText)
-    setFileMentionDir(newDir)
-    setFileMentionIndex(0)
-    requestAnimationFrame(() => {
-      const el = textareaRef.current
-      if (el) {
-        const cursorPos = fileMentionAnchor + 1 + newPath.length
-        el.selectionStart = cursorPos
-        el.selectionEnd = cursorPos
-        el.focus()
-      }
-    })
-  }, [text, fileMentionAnchor, fileMentionDir, fileMentionQuery, setText])
-
-  /** Confirm a mention selection (Enter / click) — inserts path + space, closes menu.
-   *  For directories: ".." selects the current dir being browsed. */
-  const handleFileMentionConfirm = useCallback((entry: DirEntry): void => {
-    let fullPath: string
-    if (entry.isDirectory && entry.name === '..') {
-      // ".." means "select the current directory I'm browsing"
-      fullPath = fileMentionDir || '.'
-    } else {
-      fullPath = fileMentionDir ? fileMentionDir + '/' + entry.name : entry.name
-    }
-    const before = text.slice(0, fileMentionAnchor)
-    const cursorInText = fileMentionAnchor + 1 + (fileMentionDir ? fileMentionDir.length + 1 : 0) + fileMentionQuery.length
-    const after = text.slice(cursorInText)
-    // SDK expects @"quoted path" for paths with spaces, @path for simple paths
-    const needsQuotes = fullPath.includes(' ')
-    const mention = needsQuotes ? `@"${fullPath}"` : `@${fullPath}`
-    const newText = before + mention + ' ' + after
-    setText(newText)
-    setFileMentionOpen(false)
-    setFileMentionAnchor(-1)
-    setFileMentionDir('')
-    setFileMentionIndex(0)
-    requestAnimationFrame(() => {
-      const el = textareaRef.current
-      if (el) {
-        const cursorPos = before.length + mention.length + 1 // +1 for trailing space
-        el.selectionStart = cursorPos
-        el.selectionEnd = cursorPos
-        el.focus()
-      }
-    })
-  }, [text, fileMentionAnchor, fileMentionDir, fileMentionQuery, setText])
 
   const addFiles = useCallback(async (files: File[]) => {
     const accepted = files.filter((f) => ACCEPTED_FILE_TYPES.includes(f.type))
@@ -790,34 +520,7 @@ export function InputBox(): React.JSX.Element {
           />
 
           {/* File preview row */}
-          {attachedFiles.length > 0 && (
-            <div className="flex gap-2 px-3 pt-2.5 pb-0.5 overflow-x-auto">
-              {attachedFiles.map((file) => (
-                <div key={file.id} className={`relative shrink-0 rounded-lg overflow-hidden border border-border group/file ${file.fileType === 'pdf' ? 'flex items-center gap-1.5 px-2.5 h-10 bg-bg-hover' : 'w-16 h-16'}`}>
-                  {file.fileType === 'pdf' ? (
-                    <>
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="text-red-400 shrink-0">
-                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-                        <polyline points="14 2 14 8 20 8" />
-                      </svg>
-                      <span className="text-[11px] text-text-secondary max-w-[100px] truncate">{file.fileName}</span>
-                    </>
-                  ) : (
-                    <img src={file.previewUrl} alt={file.fileName} className="w-full h-full object-cover" />
-                  )}
-                  <button
-                    onClick={() => removeFile(file.id)}
-                    className="absolute top-0.5 right-0.5 w-4 h-4 bg-black/60 hover:bg-black/80 rounded-full flex items-center justify-center opacity-0 group-hover/file:opacity-100 transition-opacity cursor-pointer"
-                  >
-                    <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="3" strokeLinecap="round">
-                      <line x1="18" y1="6" x2="6" y2="18" />
-                      <line x1="6" y1="6" x2="18" y2="18" />
-                    </svg>
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
+          <FileAttachmentBar attachments={attachedFiles} onRemove={removeFile} />
 
           {/* Top section — input area */}
           <textarea

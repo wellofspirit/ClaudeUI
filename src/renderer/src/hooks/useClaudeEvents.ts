@@ -56,24 +56,29 @@ export function useClaudeEvents(): void {
   }, [])
 
   useEffect(() => {
+    if (!window.api) {
+      console.error('IPC API not available')
+      return
+    }
+
     const cleanups = [
-      window.api.onMessage(({ routingId, data: msg }) => {
+      window.api.onMessage((routingId, msg) => {
         addMessage(routingId, msg)
 
         // Rebuild todos when task-related tool calls arrive
         const hasTaskTool = msg.content.some(
-          (b) => b.type === 'tool_use' && b.toolName && TASK_TOOLS.has(b.toolName)
+          (b) => b.type === 'tool_use' && TASK_TOOLS.has(b.toolName)
         )
         if (hasTaskTool) rebuildTodos(routingId)
       }),
-      window.api.onStreamEvent(({ routingId, data }) => {
+      window.api.onStreamEvent((routingId, data) => {
         if (data.type === 'thinking') {
           appendStreamingThinking(routingId, data.text)
         } else {
           appendStreamingText(routingId, data.text)
         }
       }),
-      window.api.onApprovalRequest(({ routingId, data: approval }) => {
+      window.api.onApprovalRequest((routingId, approval) => {
         addPendingApproval(routingId, approval)
         const state = useSessionStore.getState()
         if (state.activeSessionId !== routingId || !document.hasFocus()) {
@@ -81,7 +86,7 @@ export function useClaudeEvents(): void {
         }
         notifyIfNeeded(routingId, 'Permission required', `${approval.toolName || 'Tool'} needs approval`)
       }),
-      window.api.onStatus(({ routingId, data: status }) => {
+      window.api.onStatus((routingId, status) => {
         // Re-key session when SDK provides its stable session ID
         let effectiveRoutingId = routingId
         if (status.sessionId && status.sessionId !== routingId) {
@@ -116,7 +121,7 @@ export function useClaudeEvents(): void {
           }
         }
       }),
-      window.api.onResult(({ routingId }) => {
+      window.api.onResult((routingId) => {
         // Dismiss completed task list when turn ends
         const state = useSessionStore.getState()
         const session = state.sessions[routingId]
@@ -132,11 +137,11 @@ export function useClaudeEvents(): void {
           notifyIfNeeded(routingId, 'Ready for input', 'Claude has finished — your turn')
         }
       }),
-      window.api.onError(({ routingId, data: error }) => {
+      window.api.onError((routingId, error) => {
         addError(routingId, error)
         window.api.logError('session', `[routingId=${routingId}] ${error}`)
       }),
-      window.api.onToolResult(({ routingId, data: { toolUseId, result, isError } }) => {
+      window.api.onToolResult((routingId, { toolUseId, result, isError }) => {
         appendToolResult(routingId, toolUseId, result, isError)
         // Rebuild todos when a task tool result arrives (e.g. TaskCreate gets its ID)
         if (!isError) rebuildTodos(routingId)
@@ -151,7 +156,7 @@ export function useClaudeEvents(): void {
               const toolBlock = msg.content.find(
                 (b) => b.type === 'tool_use' && b.toolUseId === toolUseId
               )
-              if (toolBlock?.toolName && /worktree/i.test(toolBlock.toolName)) {
+              if (toolBlock && toolBlock.type === 'tool_use' && /worktree/i.test(toolBlock.toolName)) {
                 // SDK result format: "Created worktree at <path> on branch <branch>. ..."
                 const naturalMatch = result.match(/worktree at (.+?) on branch ([\w-]+)/)
                 // Also try structured formats: worktreePath: <path> or JSON "worktreePath": "<path>"
@@ -178,10 +183,10 @@ export function useClaudeEvents(): void {
           }
         }
       }),
-      window.api.onTaskProgress(({ routingId, data }) => {
+      window.api.onTaskProgress((routingId, data) => {
         updateTaskProgress(routingId, data)
       }),
-      window.api.onTaskNotification(({ routingId, data }) => {
+      window.api.onTaskNotification((routingId, data) => {
         addTaskNotification(routingId, data)
         // Update teammate status when a known teammate completes
         if (data.toolUseId) {
@@ -195,51 +200,51 @@ export function useClaudeEvents(): void {
           }
         }
       }),
-      window.api.onTeamCreated(({ routingId, data }) => {
+      window.api.onTeamCreated((routingId, data) => {
         useSessionStore.getState().setTeamName(routingId, data.teamName)
       }),
-      window.api.onTeamDeleted(({ routingId }) => {
+      window.api.onTeamDeleted((routingId) => {
         useSessionStore.getState().clearTeam(routingId)
       }),
-      window.api.onTeammateDetected(({ routingId, data }) => {
+      window.api.onTeammateDetected((routingId, data) => {
         useSessionStore.getState().addTeammate(routingId, { ...data, status: 'running' })
       }),
-      window.api.onSubagentStream(({ routingId, data }) => {
+      window.api.onSubagentStream((routingId, data) => {
         if (data.type === 'thinking') {
           appendSubagentStreamingThinking(routingId, data.toolUseId, data.text)
         } else {
           appendSubagentStreamingText(routingId, data.toolUseId, data.text)
         }
       }),
-      window.api.onSubagentMessage(({ routingId, data }) => {
+      window.api.onSubagentMessage((routingId, data) => {
         addSubagentMessage(routingId, data.toolUseId, data.message)
       }),
-      window.api.onSubagentMessageBatch(({ routingId, data }) => {
+      window.api.onSubagentMessageBatch((routingId, data) => {
         appendSubagentMessageBatch(routingId, data.toolUseId, data.messages)
       }),
-      window.api.onSubagentToolResult(({ routingId, data }) => {
+      window.api.onSubagentToolResult((routingId, data) => {
         appendSubagentToolResult(routingId, data.toolUseId, data.toolResultToolUseId, data.result, data.isError)
       }),
-      window.api.onBackgroundOutput(({ routingId, data }) => {
+      window.api.onBackgroundOutput((routingId, data) => {
         setBackgroundOutput(routingId, data.toolUseId, data.tail, data.totalSize)
       }),
-      window.api.onStatusLine(({ routingId, data }) => {
+      window.api.onStatusLine((routingId, data) => {
         setStatusLine(routingId, data)
       }),
-      window.api.onPermissionMode(({ routingId, data: mode }) => {
+      window.api.onPermissionMode((routingId, mode) => {
         setPermissionMode(mode, routingId)
       }),
-      window.api.onSlashCommands(({ data: commands }) => {
+      window.api.onSlashCommands((_routingId, commands) => {
         setSlashCommands(commands)
         window.api.saveSlashCommands(commands)
       }),
-      window.api.onSkills(({ data: names }) => {
+      window.api.onSkills((_routingId, names) => {
         setSdkSkillNames(names)
       }),
-      window.api.onSandboxViolation(({ routingId, data: message }) => {
+      window.api.onSandboxViolation((routingId, message) => {
         addSandboxViolation(routingId, message)
       }),
-      window.api.onSteerConsumed(({ routingId }) => {
+      window.api.onSteerConsumed((routingId) => {
         useSessionStore.getState().consumeQueuedText(routingId)
       }),
       window.api.onWatchUpdate(({ routingId, messages, taskNotifications, statusLine }) => {

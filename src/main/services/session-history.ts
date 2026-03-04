@@ -750,8 +750,8 @@ export async function loadSessionHistory(
           if (existingIdx >= 0) {
             // Merge: preserve old blocks not present in the new update
             const oldBlocks = messages[existingIdx].content
-            const newToolUseIds = new Set(blocks.filter(b => b.type === 'tool_use' && b.toolUseId).map(b => b.toolUseId))
-            const newToolResultIds = new Set(blocks.filter(b => b.type === 'tool_result' && b.toolUseId).map(b => b.toolUseId))
+            const newToolUseIds = new Set(blocks.filter((b): b is Extract<ContentBlock, { type: 'tool_use' }> => b.type === 'tool_use').map(b => b.toolUseId))
+            const newToolResultIds = new Set(blocks.filter((b): b is Extract<ContentBlock, { type: 'tool_result' }> => b.type === 'tool_result').map(b => b.toolUseId))
             const newHasText = blocks.some(b => b.type === 'text')
             const newHasThinking = blocks.some(b => b.type === 'thinking')
             const preserved = oldBlocks.filter(b => {
@@ -1031,8 +1031,8 @@ async function parseJsonlFile(filePath: string): Promise<ChatMessage[]> {
           const chatMsg: ChatMessage = { id: messageId, role: 'assistant', content: blocks, timestamp: obj.timestamp ? new Date(obj.timestamp).getTime() : Date.now() }
           if (existingIdx >= 0) {
             const oldBlocks = messages[existingIdx].content
-            const newToolUseIds = new Set(blocks.filter(b => b.type === 'tool_use' && b.toolUseId).map(b => b.toolUseId))
-            const newToolResultIds = new Set(blocks.filter(b => b.type === 'tool_result' && b.toolUseId).map(b => b.toolUseId))
+            const newToolUseIds = new Set(blocks.filter((b): b is Extract<ContentBlock, { type: 'tool_use' }> => b.type === 'tool_use').map(b => b.toolUseId))
+            const newToolResultIds = new Set(blocks.filter((b): b is Extract<ContentBlock, { type: 'tool_result' }> => b.type === 'tool_result').map(b => b.toolUseId))
             const newHasText = blocks.some(b => b.type === 'text')
             const newHasThinking = blocks.some(b => b.type === 'thinking')
             const preserved = oldBlocks.filter(b => {

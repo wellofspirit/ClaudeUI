@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useSessionStore } from '../stores/session-store'
-import type { ChatMessage, TeammateInfo } from '../../../shared/types'
+import type { ChatMessage, ContentBlock, TeammateInfo } from '../../../shared/types'
 import { MarkdownRenderer } from './chat/MarkdownRenderer'
 
 export function TeamsView(): React.JSX.Element {
@@ -162,8 +162,8 @@ function AgentCard({
 
 function MessageLine({ message }: { message: ChatMessage }): React.JSX.Element {
   const isUser = message.role === 'user'
-  const textBlocks = message.content.filter((b) => b.type === 'text' && b.text)
-  const toolBlocks = message.content.filter((b) => b.type === 'tool_use')
+  const textBlocks = message.content.filter((b): b is Extract<ContentBlock, { type: 'text' }> => b.type === 'text' && !!b.text)
+  const toolBlocks = message.content.filter((b): b is Extract<ContentBlock, { type: 'tool_use' }> => b.type === 'tool_use')
 
   return (
     <div className={`leading-relaxed ${isUser ? 'text-accent' : 'text-text-primary'}`}>

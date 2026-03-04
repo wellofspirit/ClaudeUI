@@ -16,8 +16,28 @@ import { gitServiceManager } from '../services/git-service'
 import { createWorktree, getWorktreeStatus, removeWorktree, listWorktrees } from '../services/worktree'
 import { usageFetcher } from '../services/usage-fetcher'
 import { blockUsageService } from '../services/block-usage'
-import type { ApprovalDecision, ModelInfo, SandboxSettings, PermissionSuggestion } from '../../shared/types'
+import type { ApprovalDecision, ModelInfo, SandboxSettings, PermissionSuggestion, IpcResult } from '../../shared/types'
 import { logger } from '../services/logger'
+
+/**
+ * Wraps an async IPC handler with try-catch, returning a standardized IpcResult envelope.
+ * Use this for handlers that can throw (git, MCP, worktree, file operations) but NOT for
+ * fire-and-forget handlers (session:send) or those that already have proper error handling.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function safeHandler<T>(handler: (...args: any[]) => Promise<T>) {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return async (...args: any[]): Promise<IpcResult<T>> => {
+    try {
+      const data = await handler(...args)
+      return { ok: true, data }
+    } catch (err) {
+      const error = err instanceof Error ? err.message : String(err)
+      logger.error('IPC', error)
+      return { ok: false, error }
+    }
+  }
+}
 
 let cachedModels: ModelInfo[] | null = null
 
@@ -385,23 +405,23 @@ export function registerSessionIpc(win: BrowserWindow): void {
     return await session.mcpServerStatus()
   })
 
-  ipcMain.handle('mcp:toggle', async (_e, routingId: string, serverName: string, enabled: boolean) => {
+  ipcMain.handle('mcp:toggle', safeHandler(async (_e: unknown, routingId: string, serverName: string, enabled: boolean) => {
     const session = manager.get(routingId)
     if (!session) throw new Error('No active session')
     await session.mcpToggleServer(serverName, enabled)
-  })
+  }))
 
-  ipcMain.handle('mcp:reconnect', async (_e, routingId: string, serverName: string) => {
+  ipcMain.handle('mcp:reconnect', safeHandler(async (_e: unknown, routingId: string, serverName: string) => {
     const session = manager.get(routingId)
     if (!session) throw new Error('No active session')
     await session.mcpReconnectServer(serverName)
-  })
+  }))
 
-  ipcMain.handle('mcp:set-servers', async (_e, routingId: string, servers: Record<string, unknown>) => {
+  ipcMain.handle('mcp:set-servers', safeHandler(async (_e: unknown, routingId: string, servers: Record<string, unknown>) => {
     const session = manager.get(routingId)
     if (!session) throw new Error('No active session')
     return await session.mcpSetServers(servers)
-  })
+  }))
 
   // MCP config file read/write (direct file access, no session needed)
   ipcMain.handle('mcp:load-servers', (_e, scope: string, cwd?: string) =>
@@ -505,158 +525,158 @@ export function registerSessionIpc(win: BrowserWindow): void {
   // Git integration IPC handlers
   // -------------------------------------------------------------------------
 
-  ipcMain.handle('git:check-repo', async (_e, cwd: string) => {
+  ipcMain.handle('git:check-repo', safeHandler(async (_e: unknown, cwd: string) => {
     const svc = gitServiceManager.get(cwd)
     try {
       return await svc.isGitRepo()
     } finally {
       gitServiceManager.release(cwd)
     }
-  })
+  }))
 
-  ipcMain.handle('git:status', async (_e, cwd: string) => {
+  ipcMain.handle('git:status', safeHandler(async (_e: unknown, cwd: string) => {
     const svc = gitServiceManager.get(cwd)
     try {
       return await svc.getStatus()
     } finally {
       gitServiceManager.release(cwd)
     }
-  })
+  }))
 
-  ipcMain.handle('git:branches', async (_e, cwd: string) => {
+  ipcMain.handle('git:branches', safeHandler(async (_e: unknown, cwd: string) => {
     const svc = gitServiceManager.get(cwd)
     try {
       return await svc.getBranches()
     } finally {
       gitServiceManager.release(cwd)
     }
-  })
+  }))
 
-  ipcMain.handle('git:checkout', async (_e, cwd: string, branch: string) => {
+  ipcMain.handle('git:checkout', safeHandler(async (_e: unknown, cwd: string, branch: string) => {
     const svc = gitServiceManager.get(cwd)
     try {
       await svc.checkout(branch)
     } finally {
       gitServiceManager.release(cwd)
     }
-  })
+  }))
 
-  ipcMain.handle('git:create-branch', async (_e, cwd: string, name: string) => {
+  ipcMain.handle('git:create-branch', safeHandler(async (_e: unknown, cwd: string, name: string) => {
     const svc = gitServiceManager.get(cwd)
     try {
       await svc.createBranch(name)
     } finally {
       gitServiceManager.release(cwd)
     }
-  })
+  }))
 
-  ipcMain.handle('git:file-patch', async (_e, cwd: string, filePath: string, staged: boolean, ignoreWhitespace: boolean) => {
+  ipcMain.handle('git:file-patch', safeHandler(async (_e: unknown, cwd: string, filePath: string, staged: boolean, ignoreWhitespace: boolean) => {
     const svc = gitServiceManager.get(cwd)
     try {
       return await svc.getFilePatch(filePath, staged, ignoreWhitespace)
     } finally {
       gitServiceManager.release(cwd)
     }
-  })
+  }))
 
-  ipcMain.handle('git:file-contents', async (_e, cwd: string, filePath: string, staged: boolean) => {
+  ipcMain.handle('git:file-contents', safeHandler(async (_e: unknown, cwd: string, filePath: string, staged: boolean) => {
     const svc = gitServiceManager.get(cwd)
     try {
       return await svc.getFileContents(filePath, staged)
     } finally {
       gitServiceManager.release(cwd)
     }
-  })
+  }))
 
-  ipcMain.handle('git:stage-file', async (_e, cwd: string, filePath: string) => {
+  ipcMain.handle('git:stage-file', safeHandler(async (_e: unknown, cwd: string, filePath: string) => {
     const svc = gitServiceManager.get(cwd)
     try {
       await svc.stageFile(filePath)
     } finally {
       gitServiceManager.release(cwd)
     }
-  })
+  }))
 
-  ipcMain.handle('git:unstage-file', async (_e, cwd: string, filePath: string) => {
+  ipcMain.handle('git:unstage-file', safeHandler(async (_e: unknown, cwd: string, filePath: string) => {
     const svc = gitServiceManager.get(cwd)
     try {
       await svc.unstageFile(filePath)
     } finally {
       gitServiceManager.release(cwd)
     }
-  })
+  }))
 
-  ipcMain.handle('git:discard-file', async (_e, cwd: string, filePath: string) => {
+  ipcMain.handle('git:discard-file', safeHandler(async (_e: unknown, cwd: string, filePath: string) => {
     const svc = gitServiceManager.get(cwd)
     try {
       await svc.discardFile(filePath)
     } finally {
       gitServiceManager.release(cwd)
     }
-  })
+  }))
 
-  ipcMain.handle('git:stage-all', async (_e, cwd: string) => {
+  ipcMain.handle('git:stage-all', safeHandler(async (_e: unknown, cwd: string) => {
     const svc = gitServiceManager.get(cwd)
     try {
       await svc.stageAll()
     } finally {
       gitServiceManager.release(cwd)
     }
-  })
+  }))
 
-  ipcMain.handle('git:unstage-all', async (_e, cwd: string) => {
+  ipcMain.handle('git:unstage-all', safeHandler(async (_e: unknown, cwd: string) => {
     const svc = gitServiceManager.get(cwd)
     try {
       await svc.unstageAll()
     } finally {
       gitServiceManager.release(cwd)
     }
-  })
+  }))
 
-  ipcMain.handle('git:commit', async (_e, cwd: string, message: string) => {
+  ipcMain.handle('git:commit', safeHandler(async (_e: unknown, cwd: string, message: string) => {
     const svc = gitServiceManager.get(cwd)
     try {
       return await svc.commit(message)
     } finally {
       gitServiceManager.release(cwd)
     }
-  })
+  }))
 
-  ipcMain.handle('git:push', async (_e, cwd: string) => {
+  ipcMain.handle('git:push', safeHandler(async (_e: unknown, cwd: string) => {
     const svc = gitServiceManager.get(cwd)
     try {
       await svc.push()
     } finally {
       gitServiceManager.release(cwd)
     }
-  })
+  }))
 
-  ipcMain.handle('git:push-with-upstream', async (_e, cwd: string, branch: string) => {
+  ipcMain.handle('git:push-with-upstream', safeHandler(async (_e: unknown, cwd: string, branch: string) => {
     const svc = gitServiceManager.get(cwd)
     try {
       await svc.pushWithUpstream(branch)
     } finally {
       gitServiceManager.release(cwd)
     }
-  })
+  }))
 
-  ipcMain.handle('git:pull', async (_e, cwd: string) => {
+  ipcMain.handle('git:pull', safeHandler(async (_e: unknown, cwd: string) => {
     const svc = gitServiceManager.get(cwd)
     try {
       return await svc.pull()
     } finally {
       gitServiceManager.release(cwd)
     }
-  })
+  }))
 
-  ipcMain.handle('git:fetch', async (_e, cwd: string) => {
+  ipcMain.handle('git:fetch', safeHandler(async (_e: unknown, cwd: string) => {
     const svc = gitServiceManager.get(cwd)
     try {
       await svc.fetch()
     } finally {
       gitServiceManager.release(cwd)
     }
-  })
+  }))
 
   // Git polling — persistent service per cwd
   const gitWatchers = new Map<string, { refCount: number }>()
@@ -692,21 +712,21 @@ export function registerSessionIpc(win: BrowserWindow): void {
   // Worktree IPC handlers
   // -------------------------------------------------------------------------
 
-  ipcMain.handle('worktree:create', async (_e, cwd: string, name: string) => {
+  ipcMain.handle('worktree:create', safeHandler(async (_e: unknown, cwd: string, name: string) => {
     return await createWorktree(cwd, name)
-  })
+  }))
 
-  ipcMain.handle('worktree:status', async (_e, worktreePath: string, originalHead: string) => {
+  ipcMain.handle('worktree:status', safeHandler(async (_e: unknown, worktreePath: string, originalHead: string) => {
     return await getWorktreeStatus(worktreePath, originalHead)
-  })
+  }))
 
-  ipcMain.handle('worktree:remove', async (_e, worktreePath: string, branch: string, gitRoot: string) => {
+  ipcMain.handle('worktree:remove', safeHandler(async (_e: unknown, worktreePath: string, branch: string, gitRoot: string) => {
     await removeWorktree(worktreePath, branch, gitRoot)
-  })
+  }))
 
-  ipcMain.handle('worktree:list', async (_e, cwd: string) => {
+  ipcMain.handle('worktree:list', safeHandler(async (_e: unknown, cwd: string) => {
     return await listWorktrees(cwd)
-  })
+  }))
 
   // Watch ~/.claude/projects/ for JSONL changes and notify renderer to refresh
   startProjectsWatcher(win)

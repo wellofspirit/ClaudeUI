@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { useShallow } from 'zustand/react/shallow'
+import { mergeContentBlocks } from '../utils/content-blocks'
 import type {
   ChatMessage,
   SessionStatus,
@@ -30,50 +31,6 @@ import type {
 export function normalizeCwd(cwd: string): string {
   if (cwd.length > 1 && cwd.endsWith('/')) return cwd.slice(0, -1)
   return cwd || '.'
-}
-
-/**
- * Merges content blocks when upserting an assistant message by ID.
- * The SDK sends partial messages that may not include all previously accumulated
- * content blocks. This function preserves tool_use and tool_result blocks from the
- * old message that aren't present in the incoming update.
- */
-function mergeContentBlocks(
-  oldBlocks: ContentBlock[],
-  newBlocks: ContentBlock[]
-): ContentBlock[] {
-  const newToolUseIds = new Set(
-    newBlocks.filter((b) => b.type === 'tool_use' && b.toolUseId).map((b) => b.toolUseId)
-  )
-  const newToolResultIds = new Set(
-    newBlocks.filter((b) => b.type === 'tool_result' && b.toolUseId).map((b) => b.toolUseId)
-  )
-  const newThinkingCount = newBlocks.filter((b) => b.type === 'thinking').length
-  const newHasText = newBlocks.some((b) => b.type === 'text')
-
-  const droppedThinkingCount = Math.max(
-    0,
-    oldBlocks.filter((b) => b.type === 'thinking').length - newThinkingCount
-  )
-  let thinkingsSeen = 0
-  const preserved: ContentBlock[] = []
-
-  for (const b of oldBlocks) {
-    if (b.type === 'tool_use' && b.toolUseId && !newToolUseIds.has(b.toolUseId)) {
-      preserved.push(b)
-    } else if (b.type === 'tool_result' && b.toolUseId && !newToolResultIds.has(b.toolUseId)) {
-      preserved.push(b)
-    } else if (b.type === 'thinking') {
-      if (thinkingsSeen < droppedThinkingCount) {
-        preserved.push(b)
-      }
-      thinkingsSeen++
-    } else if (b.type === 'text' && !newHasText) {
-      preserved.push(b)
-    }
-  }
-
-  return [...preserved, ...newBlocks]
 }
 
 const TASK_TOOL_NAMES = new Set(['TaskCreate', 'TaskUpdate', 'TodoWrite'])
@@ -115,7 +72,7 @@ export function buildTodosFromMessages(messages: ChatMessage[]): TodoItem[] | nu
         const resultBlock = msg.content.find(
           (b) => b.type === 'tool_result' && b.toolUseId === block.toolUseId
         )
-        const idMatch = resultBlock?.toolResult?.match(/Task #(\w+)/)
+        const idMatch = resultBlock?.type === 'tool_result' ? resultBlock.toolResult.match(/Task #(\w+)/) : null
         const id = idMatch ? idMatch[1] : block.toolUseId || String(tasks.size)
         tasks.set(id, {
           content: String(input.subject || ''),
@@ -825,8 +782,11 @@ export const useSessionStore = create<SessionState>((set) => ({
       const content: ContentBlock[] = []
       if (attachments && attachments.length > 0) {
         for (const att of attachments) {
-          const blockType = att.mediaType === 'application/pdf' ? 'document' as const : 'image' as const
-          content.push({ type: blockType, mediaType: att.mediaType as ContentBlock['mediaType'], base64Data: att.base64Data, fileName: att.fileName })
+          if (att.mediaType === 'application/pdf') {
+            content.push({ type: 'document', mediaType: 'application/pdf', base64Data: att.base64Data, fileName: att.fileName })
+          } else {
+            content.push({ type: 'image', mediaType: att.mediaType as 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp', base64Data: att.base64Data, fileName: att.fileName })
+          }
         }
       }
       if (text) {
@@ -965,7 +925,7 @@ export const useSessionStore = create<SessionState>((set) => ({
         const msg = messages[i]
         if (msg.role === 'assistant') {
           const hasToolUse = msg.content.some(
-            (b: ContentBlock) => b.type === 'tool_use' && b.toolUseId === toolUseId
+            (b) => b.type === 'tool_use' && b.toolUseId === toolUseId
           )
           if (hasToolUse) {
             messages[i] = {
@@ -1121,7 +1081,7 @@ export const useSessionStore = create<SessionState>((set) => ({
         const msg = updated[i]
         if (msg.role !== 'assistant') continue
         const hasToolUse = msg.content.some(
-          (b: ContentBlock) => b.type === 'tool_use' && b.toolUseId === toolResultToolUseId
+          (b) => b.type === 'tool_use' && b.toolUseId === toolResultToolUseId
         )
         if (hasToolUse) {
           updated[i] = {

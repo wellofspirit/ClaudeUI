@@ -1,8 +1,11 @@
 import type { ContentBlock } from '../../../../shared/types'
 
+type ToolUseBlock = Extract<ContentBlock, { type: 'tool_use' }>
+type ToolResultBlock = Extract<ContentBlock, { type: 'tool_result' }>
+
 interface Props {
-  block: ContentBlock
-  result?: ContentBlock
+  block: ToolUseBlock
+  result?: ToolResultBlock
 }
 
 export function TodoToolBlock({ block, result }: Props): React.JSX.Element {

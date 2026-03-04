@@ -1,6 +1,18 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type { ApprovalDecision, ClaudeAPI, PermissionSuggestion } from '../shared/types'
 
+/**
+ * Factory for IPC event handler registration.
+ * Forwards all arguments from ipcRenderer.on (after the IpcRendererEvent) to the callback.
+ */
+function onEvent<T extends (...args: never[]) => void>(channel: string): (cb: T) => () => void {
+  return (cb: T) => {
+    const handler = (_: Electron.IpcRendererEvent, ...args: unknown[]): void => (cb as Function)(...args)
+    ipcRenderer.on(channel, handler)
+    return () => ipcRenderer.removeListener(channel, handler)
+  }
+}
+
 const api: ClaudeAPI = {
   platform: process.platform,
   pickFolder: () => ipcRenderer.invoke('session:pick-folder'),
@@ -27,96 +39,50 @@ const api: ClaudeAPI = {
   loadBackgroundOutput: (projectKey: string, taskId: string, outputFile?: string) =>
     ipcRenderer.invoke('session:load-background-output', projectKey, taskId, outputFile),
 
-  onMessage: (cb) => {
-    const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as never)
-    ipcRenderer.on('session:message', handler)
-    return () => ipcRenderer.removeListener('session:message', handler)
-  },
-  onStreamEvent: (cb) => {
-    const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as never)
-    ipcRenderer.on('session:stream', handler)
-    return () => ipcRenderer.removeListener('session:stream', handler)
-  },
-  onApprovalRequest: (cb) => {
-    const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as never)
-    ipcRenderer.on('session:approval-request', handler)
-    return () => ipcRenderer.removeListener('session:approval-request', handler)
-  },
-  onStatus: (cb) => {
-    const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as never)
-    ipcRenderer.on('session:status', handler)
-    return () => ipcRenderer.removeListener('session:status', handler)
-  },
-  onResult: (cb) => {
-    const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as never)
-    ipcRenderer.on('session:result', handler)
-    return () => ipcRenderer.removeListener('session:result', handler)
-  },
-  onError: (cb) => {
-    const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as never)
-    ipcRenderer.on('session:error', handler)
-    return () => ipcRenderer.removeListener('session:error', handler)
-  },
-  onToolResult: (cb) => {
-    const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as never)
-    ipcRenderer.on('session:tool-result', handler)
-    return () => ipcRenderer.removeListener('session:tool-result', handler)
-  },
-  onTaskProgress: (cb) => {
-    const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as never)
-    ipcRenderer.on('session:task-progress', handler)
-    return () => ipcRenderer.removeListener('session:task-progress', handler)
-  },
-  onMaximizeChange: (cb) => {
-    const handler = (_: Electron.IpcRendererEvent, isMaximized: boolean): void => cb(isMaximized)
-    ipcRenderer.on('window:maximized-change', handler)
-    return () => ipcRenderer.removeListener('window:maximized-change', handler)
-  },
-  onTaskNotification: (cb) => {
-    const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as never)
-    ipcRenderer.on('session:task-notification', handler)
-    return () => ipcRenderer.removeListener('session:task-notification', handler)
-  },
-  onSubagentStream: (cb) => {
-    const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as never)
-    ipcRenderer.on('session:subagent-stream', handler)
-    return () => ipcRenderer.removeListener('session:subagent-stream', handler)
-  },
-  onSubagentMessage: (cb) => {
-    const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as never)
-    ipcRenderer.on('session:subagent-message', handler)
-    return () => ipcRenderer.removeListener('session:subagent-message', handler)
-  },
-  onSubagentMessageBatch: (cb) => {
-    const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as never)
-    ipcRenderer.on('session:subagent-message-batch', handler)
-    return () => ipcRenderer.removeListener('session:subagent-message-batch', handler)
-  },
-  onSubagentToolResult: (cb) => {
-    const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as never)
-    ipcRenderer.on('session:subagent-tool-result', handler)
-    return () => ipcRenderer.removeListener('session:subagent-tool-result', handler)
-  },
-  onSlashCommands: (cb) => {
-    const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as never)
-    ipcRenderer.on('session:slash-commands', handler)
-    return () => ipcRenderer.removeListener('session:slash-commands', handler)
-  },
-  onPermissionMode: (cb) => {
-    const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as never)
-    ipcRenderer.on('session:permission-mode', handler)
-    return () => ipcRenderer.removeListener('session:permission-mode', handler)
-  },
-  onBackgroundOutput: (cb) => {
-    const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as never)
-    ipcRenderer.on('session:background-output', handler)
-    return () => ipcRenderer.removeListener('session:background-output', handler)
-  },
-  onSandboxViolation: (cb) => {
-    const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as never)
-    ipcRenderer.on('session:sandbox-violation', handler)
-    return () => ipcRenderer.removeListener('session:sandbox-violation', handler)
-  },
+  // Routed session events — each passes (routingId, data) as separate args
+  onMessage: onEvent('session:message'),
+  onStreamEvent: onEvent('session:stream'),
+  onApprovalRequest: onEvent('session:approval-request'),
+  onStatus: onEvent('session:status'),
+  onResult: onEvent('session:result'),
+  onError: onEvent('session:error'),
+  onToolResult: onEvent('session:tool-result'),
+  onTaskProgress: onEvent('session:task-progress'),
+  onTaskNotification: onEvent('session:task-notification'),
+  onSubagentStream: onEvent('session:subagent-stream'),
+  onSubagentMessage: onEvent('session:subagent-message'),
+  onSubagentMessageBatch: onEvent('session:subagent-message-batch'),
+  onSubagentToolResult: onEvent('session:subagent-tool-result'),
+  onSlashCommands: onEvent('session:slash-commands'),
+  onPermissionMode: onEvent('session:permission-mode'),
+  onBackgroundOutput: onEvent('session:background-output'),
+  onSandboxViolation: onEvent('session:sandbox-violation'),
+  onSteerConsumed: onEvent('session:steer-consumed'),
+  onTeammateDetected: onEvent('session:teammate-detected'),
+  onTeamCreated: onEvent('session:team-created'),
+  onTeamDeleted: onEvent('session:team-deleted'),
+  onSkills: onEvent('session:skills'),
+  onStatusLine: onEvent('session:status-line'),
+  onMcpServers: onEvent('session:mcp-servers'),
+
+  // Non-routed events (no routingId prefix)
+  onMaximizeChange: onEvent('window:maximized-change'),
+  onWatchUpdate: onEvent('session:watch-update'),
+  onDirectoriesChanged: onEvent('session:directories-changed'),
+  onGitStatusUpdate: onEvent('git:status-update'),
+  onSettingsChanged: onEvent('config:settings-changed'),
+  onSessionConfigChanged: onEvent('config:sessions-changed'),
+  onAccountUsage: onEvent('usage:data'),
+  onBlockUsage: onEvent('usage:block-data'),
+  onTerminalData: onEvent('terminal:data'),
+  onTerminalExit: onEvent('terminal:exit'),
+  onAutomationRunUpdate: onEvent('automation:run-update'),
+  onAutomationsChanged: onEvent('automation:changed'),
+  onAutomationRunMessage: onEvent('automation:run-message'),
+  onAutomationStreamEvent: onEvent('automation:stream-event'),
+  onAutomationProcessing: onEvent('automation:processing'),
+  onBeforeQuit: onEvent('app:before-quit'),
+
   watchBackground: (routingId: string, toolUseId: string) =>
     ipcRenderer.invoke('session:watch-background', routingId, toolUseId),
   unwatchBackground: (routingId: string, toolUseId: string) =>
@@ -127,11 +93,6 @@ const api: ClaudeAPI = {
     ipcRenderer.invoke('session:stop-task', routingId, toolUseId),
   dequeueMessage: (routingId: string, value: string) =>
     ipcRenderer.invoke('session:dequeue-message', routingId, value),
-  onSteerConsumed: (cb) => {
-    const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as never)
-    ipcRenderer.on('session:steer-consumed', handler)
-    return () => ipcRenderer.removeListener('session:steer-consumed', handler)
-  },
   setPermissionMode: (routingId: string, mode: string) =>
     ipcRenderer.invoke('session:set-permission-mode', routingId, mode),
   setModel: (routingId: string, model: string) =>
@@ -153,16 +114,6 @@ const api: ClaudeAPI = {
     ipcRenderer.invoke('session:watch-session', routingId, sessionId, projectKey),
   unwatchSession: (routingId: string) =>
     ipcRenderer.invoke('session:unwatch-session', routingId),
-  onWatchUpdate: (cb) => {
-    const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as never)
-    ipcRenderer.on('session:watch-update', handler)
-    return () => ipcRenderer.removeListener('session:watch-update', handler)
-  },
-  onDirectoriesChanged: (cb) => {
-    const handler = (): void => cb()
-    ipcRenderer.on('session:directories-changed', handler)
-    return () => ipcRenderer.removeListener('session:directories-changed', handler)
-  },
   sendToTeammate: (routingId: string, sanitizedTeamName: string, sanitizedAgentName: string, message: string) =>
     ipcRenderer.invoke('session:send-to-teammate', routingId, sanitizedTeamName, sanitizedAgentName, message),
   broadcastToTeam: (routingId: string, sanitizedTeamName: string, sanitizedAgentNames: string[], message: string) =>
@@ -171,21 +122,6 @@ const api: ClaudeAPI = {
     ipcRenderer.invoke('session:get-team-info', routingId),
   openTeamsViewWindow: (routingId: string) =>
     ipcRenderer.invoke('session:open-teams-view', routingId),
-  onTeammateDetected: (cb) => {
-    const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as never)
-    ipcRenderer.on('session:teammate-detected', handler)
-    return () => ipcRenderer.removeListener('session:teammate-detected', handler)
-  },
-  onTeamCreated: (cb) => {
-    const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as never)
-    ipcRenderer.on('session:team-created', handler)
-    return () => ipcRenderer.removeListener('session:team-created', handler)
-  },
-  onTeamDeleted: (cb) => {
-    const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as never)
-    ipcRenderer.on('session:team-deleted', handler)
-    return () => ipcRenderer.removeListener('session:team-deleted', handler)
-  },
   // Terminal (PTY) operations
   createTerminal: (cwd: string) => ipcRenderer.invoke('terminal:create', cwd),
   writeTerminal: (id: string, data: string) => ipcRenderer.invoke('terminal:write', id, data),
@@ -193,16 +129,6 @@ const api: ClaudeAPI = {
     ipcRenderer.invoke('terminal:resize', id, cols, rows),
   killTerminal: (id: string) => ipcRenderer.invoke('terminal:kill', id),
   killTerminalsByCwd: (cwd: string) => ipcRenderer.invoke('terminal:kill-by-cwd', cwd),
-  onTerminalData: (cb) => {
-    const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as never)
-    ipcRenderer.on('terminal:data', handler)
-    return () => ipcRenderer.removeListener('terminal:data', handler)
-  },
-  onTerminalExit: (cb) => {
-    const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as never)
-    ipcRenderer.on('terminal:exit', handler)
-    return () => ipcRenderer.removeListener('terminal:exit', handler)
-  },
 
   // Worktree operations
   createWorktree: (cwd: string, name: string) => ipcRenderer.invoke('worktree:create', cwd, name),
@@ -213,11 +139,6 @@ const api: ClaudeAPI = {
   listWorktrees: (cwd: string) => ipcRenderer.invoke('worktree:list', cwd),
 
   // App lifecycle
-  onBeforeQuit: (cb: () => void) => {
-    const handler = (): void => cb()
-    ipcRenderer.on('app:before-quit', handler)
-    return () => ipcRenderer.removeListener('app:before-quit', handler)
-  },
   confirmQuit: () => ipcRenderer.invoke('app:quit-confirm'),
 
   // Git operations
@@ -242,11 +163,6 @@ const api: ClaudeAPI = {
   gitFetch: (cwd: string) => ipcRenderer.invoke('git:fetch', cwd),
   gitStartWatching: (cwd: string) => ipcRenderer.invoke('git:start-watching', cwd),
   gitStopWatching: (cwd: string) => ipcRenderer.invoke('git:stop-watching', cwd),
-  onGitStatusUpdate: (cb) => {
-    const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as never)
-    ipcRenderer.on('git:status-update', handler)
-    return () => ipcRenderer.removeListener('git:status-update', handler)
-  },
 
   listDir: (dirPath: string) => ipcRenderer.invoke('file:list-dir', dirPath),
   openInVSCode: (cwd: string) => ipcRenderer.invoke('app:open-in-vscode', cwd),
@@ -257,42 +173,12 @@ const api: ClaudeAPI = {
   loadSlashCommands: () => ipcRenderer.invoke('config:load-slash-commands'),
   saveSlashCommands: (commands) => ipcRenderer.invoke('config:save-slash-commands', commands),
   loadSkillDetails: (cwd: string) => ipcRenderer.invoke('config:load-skill-details', cwd),
-  onSkills: (cb) => {
-    const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as never)
-    ipcRenderer.on('session:skills', handler)
-    return () => ipcRenderer.removeListener('session:skills', handler)
-  },
-  onStatusLine: (cb) => {
-    const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as never)
-    ipcRenderer.on('session:status-line', handler)
-    return () => ipcRenderer.removeListener('session:status-line', handler)
-  },
-  onSettingsChanged: (cb) => {
-    const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as Record<string, unknown>)
-    ipcRenderer.on('config:settings-changed', handler)
-    return () => ipcRenderer.removeListener('config:settings-changed', handler)
-  },
-  onSessionConfigChanged: (cb) => {
-    const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as never)
-    ipcRenderer.on('config:sessions-changed', handler)
-    return () => ipcRenderer.removeListener('config:sessions-changed', handler)
-  },
 
   // Account usage (5hr / 7-day rate limits)
   fetchAccountUsage: () => ipcRenderer.invoke('usage:fetch'),
-  onAccountUsage: (cb) => {
-    const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as never)
-    ipcRenderer.on('usage:data', handler)
-    return () => ipcRenderer.removeListener('usage:data', handler)
-  },
 
   // Block usage analytics
   fetchBlockUsage: () => ipcRenderer.invoke('usage:fetch-block'),
-  onBlockUsage: (cb) => {
-    const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as never)
-    ipcRenderer.on('usage:block-data', handler)
-    return () => ipcRenderer.removeListener('usage:block-data', handler)
-  },
 
   // Claude permissions (allow/deny/ask rule management)
   loadClaudePermissions: (scope, cwd?) =>
@@ -317,11 +203,6 @@ const api: ClaudeAPI = {
     ipcRenderer.invoke('mcp:read-disabled', cwd),
   mcpToggleDisabled: (cwd: string, serverName: string, enabled: boolean) =>
     ipcRenderer.invoke('mcp:toggle-disabled', cwd, serverName, enabled),
-  onMcpServers: (cb) => {
-    const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as never)
-    ipcRenderer.on('session:mcp-servers', handler)
-    return () => ipcRenderer.removeListener('session:mcp-servers', handler)
-  },
 
   // Automation
   listAutomations: () => ipcRenderer.invoke('automation:list'),
@@ -336,31 +217,6 @@ const api: ClaudeAPI = {
   dismissAutomationRun: (automationId: string, runId: string) =>
     ipcRenderer.invoke('automation:dismiss-run', automationId, runId),
   sendAutomationMessage: (id: string, prompt: string) => ipcRenderer.invoke('automation:send-message', id, prompt),
-  onAutomationRunUpdate: (cb) => {
-    const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as never)
-    ipcRenderer.on('automation:run-update', handler)
-    return () => ipcRenderer.removeListener('automation:run-update', handler)
-  },
-  onAutomationsChanged: (cb) => {
-    const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as never)
-    ipcRenderer.on('automation:changed', handler)
-    return () => ipcRenderer.removeListener('automation:changed', handler)
-  },
-  onAutomationRunMessage: (cb) => {
-    const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as never)
-    ipcRenderer.on('automation:run-message', handler)
-    return () => ipcRenderer.removeListener('automation:run-message', handler)
-  },
-  onAutomationStreamEvent: (cb) => {
-    const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as never)
-    ipcRenderer.on('automation:stream-event', handler)
-    return () => ipcRenderer.removeListener('automation:stream-event', handler)
-  },
-  onAutomationProcessing: (cb) => {
-    const handler = (_: Electron.IpcRendererEvent, payload: unknown): void => cb(payload as never)
-    ipcRenderer.on('automation:processing', handler)
-    return () => ipcRenderer.removeListener('automation:processing', handler)
-  },
 
   logError: (source: string, message: string) => {
     ipcRenderer.send('log:error', source, message)

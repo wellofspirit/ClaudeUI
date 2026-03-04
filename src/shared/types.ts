@@ -1,23 +1,17 @@
-export interface ContentBlock {
-  type: 'text' | 'tool_use' | 'tool_result' | 'thinking' | 'cli_command' | 'api_error' | 'compact_separator' | 'image' | 'document'
-  text?: string
-  toolName?: string
-  toolInput?: Record<string, unknown>
-  toolUseId?: string
-  toolResult?: string
-  isError?: boolean
-  // cli_command fields
-  commandName?: string
-  commandArgs?: string
-  commandOutput?: string
-  // api_error fields
-  errorType?: string
-  errorMessage?: string
-  // image/document fields
-  mediaType?: 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp' | 'application/pdf'
-  base64Data?: string
-  fileName?: string
-}
+export type IpcResult<T> =
+  | { ok: true; data: T }
+  | { ok: false; error: string; code?: string }
+
+export type ContentBlock =
+  | { type: 'text'; text: string }
+  | { type: 'tool_use'; toolUseId: string; toolName: string; toolInput?: Record<string, unknown> }
+  | { type: 'tool_result'; toolUseId: string; toolResult: string; isError?: boolean }
+  | { type: 'thinking'; text: string }
+  | { type: 'cli_command'; commandName: string; commandArgs?: string; commandOutput?: string }
+  | { type: 'api_error'; errorType: string; errorMessage: string }
+  | { type: 'compact_separator'; text?: string }
+  | { type: 'image'; mediaType: 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp'; base64Data: string; fileName?: string }
+  | { type: 'document'; mediaType: 'application/pdf'; base64Data: string; fileName?: string }
 
 export interface FileAttachment {
   id: string
@@ -247,13 +241,11 @@ export interface DirectoryGroup {
   sessions: SessionInfo[]
 }
 
-/** Wrapper for routed event data — all session events include routingId */
-export interface RoutedData<T> {
-  routingId: string
-  data: T
-}
+// ---------------------------------------------------------------------------
+// Domain-specific API interfaces (composed into ClaudeAPI)
+// ---------------------------------------------------------------------------
 
-export interface ClaudeAPI {
+interface SessionAPI {
   platform: string
   pickFolder(): Promise<string | null>
   createSession(routingId: string, cwd: string, effort?: string, resumeSessionId?: string, permissionMode?: string, model?: string): Promise<void>
@@ -269,30 +261,29 @@ export interface ClaudeAPI {
   loadSubagentHistory(sessionId: string, projectKey: string, agentId: string): Promise<ChatMessage[]>
   buildSubagentFileMap(sessionId: string, projectKey: string, taskPrompts: Record<string, string>): Promise<Record<string, string>>
   loadBackgroundOutput(projectKey: string, taskId: string, outputFile?: string): Promise<{ content: string | null; purged: boolean }>
-
-  onMessage(cb: (data: RoutedData<ChatMessage>) => void): () => void
-  onStreamEvent(cb: (data: RoutedData<StreamDelta>) => void): () => void
-  onApprovalRequest(cb: (data: RoutedData<PendingApproval>) => void): () => void
-  onStatus(cb: (data: RoutedData<SessionStatus>) => void): () => void
-  onResult(cb: (data: RoutedData<SessionResult>) => void): () => void
-  onError(cb: (data: RoutedData<string>) => void): () => void
-  onToolResult(cb: (data: RoutedData<{ toolUseId: string; result: string; isError: boolean }>) => void): () => void
+  onMessage(cb: (routingId: string, msg: ChatMessage) => void): () => void
+  onStreamEvent(cb: (routingId: string, delta: StreamDelta) => void): () => void
+  onApprovalRequest(cb: (routingId: string, approval: PendingApproval) => void): () => void
+  onStatus(cb: (routingId: string, status: SessionStatus) => void): () => void
+  onResult(cb: (routingId: string, result: SessionResult) => void): () => void
+  onError(cb: (routingId: string, error: string) => void): () => void
+  onToolResult(cb: (routingId: string, data: { toolUseId: string; result: string; isError: boolean }) => void): () => void
   onMaximizeChange(cb: (isMaximized: boolean) => void): () => void
-  onTaskProgress(cb: (data: RoutedData<TaskProgress>) => void): () => void
-  onTaskNotification(cb: (data: RoutedData<TaskNotification>) => void): () => void
-  onSubagentStream(cb: (data: RoutedData<SubagentStreamDelta>) => void): () => void
-  onSubagentMessage(cb: (data: RoutedData<SubagentMessageData>) => void): () => void
-  onSubagentMessageBatch(cb: (data: RoutedData<SubagentMessageBatchData>) => void): () => void
-  onSubagentToolResult(cb: (data: RoutedData<SubagentToolResultData>) => void): () => void
-  onPermissionMode(cb: (data: RoutedData<PermissionMode>) => void): () => void
-  onSandboxViolation(cb: (data: RoutedData<string>) => void): () => void
-  onBackgroundOutput(cb: (data: RoutedData<BackgroundOutput>) => void): () => void
+  onTaskProgress(cb: (routingId: string, data: TaskProgress) => void): () => void
+  onTaskNotification(cb: (routingId: string, data: TaskNotification) => void): () => void
+  onSubagentStream(cb: (routingId: string, data: SubagentStreamDelta) => void): () => void
+  onSubagentMessage(cb: (routingId: string, data: SubagentMessageData) => void): () => void
+  onSubagentMessageBatch(cb: (routingId: string, data: SubagentMessageBatchData) => void): () => void
+  onSubagentToolResult(cb: (routingId: string, data: SubagentToolResultData) => void): () => void
+  onPermissionMode(cb: (routingId: string, mode: PermissionMode) => void): () => void
+  onSandboxViolation(cb: (routingId: string, message: string) => void): () => void
+  onBackgroundOutput(cb: (routingId: string, data: BackgroundOutput) => void): () => void
   watchBackground(routingId: string, toolUseId: string): Promise<void>
   unwatchBackground(routingId: string, toolUseId: string): Promise<void>
   readBackgroundRange(routingId: string, toolUseId: string, offset: number, length: number): Promise<string>
   stopTask(routingId: string, toolUseId: string): Promise<{ success: boolean; error?: string }>
   dequeueMessage(routingId: string, value: string): Promise<{ removed: number }>
-  onSteerConsumed(cb: (data: RoutedData<{ prompt: string }>) => void): () => void
+  onSteerConsumed(cb: (routingId: string, data: { prompt: string }) => void): () => void
   setPermissionMode(routingId: string, mode: string): Promise<void>
   setModel(routingId: string, model: string): Promise<void>
   setEffort(routingId: string, effort: string): Promise<void>
@@ -310,29 +301,27 @@ export interface ClaudeAPI {
   broadcastToTeam(routingId: string, sanitizedTeamName: string, sanitizedAgentNames: string[], message: string): Promise<void>
   getTeamInfo(routingId: string): Promise<TeamInfoSnapshot | null>
   openTeamsViewWindow(routingId: string): Promise<void>
-  onTeammateDetected(cb: (data: RoutedData<TeammateDetectedData>) => void): () => void
-  onTeamCreated(cb: (data: RoutedData<{ teamName: string }>) => void): () => void
-  onTeamDeleted(cb: (data: RoutedData<Record<string, never>>) => void): () => void
-  // Terminal (PTY) operations
-  createTerminal(cwd: string): Promise<string>
-  writeTerminal(id: string, data: string): Promise<void>
-  resizeTerminal(id: string, cols: number, rows: number): Promise<void>
-  killTerminal(id: string): Promise<void>
-  killTerminalsByCwd(cwd: string): Promise<string[]>
-  onTerminalData(cb: (data: { terminalId: string; data: string }) => void): () => void
-  onTerminalExit(cb: (data: { terminalId: string; code: number }) => void): () => void
-
-  // Worktree operations
-  createWorktree(cwd: string, name: string): Promise<WorktreeInfo>
-  getWorktreeStatus(worktreePath: string, originalHead: string): Promise<WorktreeStatus>
-  removeWorktree(worktreePath: string, branch: string, gitRoot: string): Promise<void>
-  listWorktrees(cwd: string): Promise<WorktreeEntry[]>
-
-  // App lifecycle
+  onTeammateDetected(cb: (routingId: string, data: TeammateDetectedData) => void): () => void
+  onTeamCreated(cb: (routingId: string, data: { teamName: string }) => void): () => void
+  onTeamDeleted(cb: (routingId: string, data: Record<string, never>) => void): () => void
+  onSlashCommands(cb: (routingId: string, commands: SlashCommandInfo[]) => void): () => void
+  onSkills(cb: (routingId: string, names: string[]) => void): () => void
+  onStatusLine(cb: (routingId: string, data: StatusLineData) => void): () => void
+  onSettingsChanged(cb: (settings: Record<string, unknown>) => void): () => void
+  onSessionConfigChanged(cb: (config: UISessionConfig) => void): () => void
+  loadSettings(): Promise<Record<string, unknown>>
+  saveSettings(settings: Record<string, unknown>): Promise<void>
+  loadSessionConfig(): Promise<UISessionConfig>
+  saveSessionConfig(config: UISessionConfig): Promise<void>
+  loadSlashCommands(): Promise<SlashCommandInfo[]>
+  saveSlashCommands(commands: SlashCommandInfo[]): Promise<void>
+  loadSkillDetails(cwd: string): Promise<SkillInfo[]>
   onBeforeQuit(cb: () => void): () => void
   confirmQuit(): Promise<void>
+  logError(source: string, message: string): void
+}
 
-  // Git operations
+interface GitAPI {
   gitCheckRepo(cwd: string): Promise<boolean>
   gitGetStatus(cwd: string): Promise<GitStatusData>
   gitGetBranches(cwd: string): Promise<GitBranchData>
@@ -353,35 +342,9 @@ export interface ClaudeAPI {
   gitStartWatching(cwd: string): Promise<void>
   gitStopWatching(cwd: string): Promise<void>
   onGitStatusUpdate(cb: (data: { cwd: string; status: GitStatusData }) => void): () => void
+}
 
-  listDir(dirPath: string): Promise<{ entries: DirEntry[]; isRoot: boolean; resolvedPath: string }>
-  openInVSCode(cwd: string): Promise<void>
-  loadSettings(): Promise<Record<string, unknown>>
-  saveSettings(settings: Record<string, unknown>): Promise<void>
-  loadSessionConfig(): Promise<UISessionConfig>
-  saveSessionConfig(config: UISessionConfig): Promise<void>
-  loadSlashCommands(): Promise<SlashCommandInfo[]>
-  saveSlashCommands(commands: SlashCommandInfo[]): Promise<void>
-  onSlashCommands(cb: (data: RoutedData<SlashCommandInfo[]>) => void): () => void
-  loadSkillDetails(cwd: string): Promise<SkillInfo[]>
-  onSkills(cb: (data: RoutedData<string[]>) => void): () => void
-  onStatusLine(cb: (data: RoutedData<StatusLineData>) => void): () => void
-  onSettingsChanged(cb: (settings: Record<string, unknown>) => void): () => void
-  onSessionConfigChanged(cb: (config: UISessionConfig) => void): () => void
-
-  // Account usage (5hr / 7-day rate limits)
-  fetchAccountUsage(): Promise<AccountUsage>
-  onAccountUsage(cb: (data: AccountUsage) => void): () => void
-
-  // Block usage analytics
-  fetchBlockUsage(): Promise<BlockUsageData>
-  onBlockUsage(cb: (data: BlockUsageData) => void): () => void
-
-  // Claude permissions (allow/deny/ask rule management)
-  loadClaudePermissions(scope: PermissionScope, cwd?: string): Promise<ClaudePermissions>
-  saveClaudePermissions(scope: PermissionScope, permissions: ClaudePermissions, cwd?: string): Promise<void>
-
-  // MCP server management
+interface McpAPI {
   mcpServerStatus(routingId: string): Promise<McpServerInfo[]>
   mcpToggleServer(routingId: string, serverName: string, enabled: boolean): Promise<void>
   mcpReconnectServer(routingId: string, serverName: string): Promise<void>
@@ -390,9 +353,22 @@ export interface ClaudeAPI {
   saveMcpServers(scope: McpServerScope, servers: Record<string, McpServerConfig>, cwd?: string): Promise<void>
   mcpReadDisabled(cwd: string): Promise<string[]>
   mcpToggleDisabled(cwd: string, serverName: string, enabled: boolean): Promise<void>
-  onMcpServers(cb: (data: RoutedData<Array<{ name: string; status: string }>>) => void): () => void
+  onMcpServers(cb: (routingId: string, servers: Array<{ name: string; status: string }>) => void): () => void
+  loadClaudePermissions(scope: PermissionScope, cwd?: string): Promise<ClaudePermissions>
+  saveClaudePermissions(scope: PermissionScope, permissions: ClaudePermissions, cwd?: string): Promise<void>
+}
 
-  // Automation
+interface TerminalAPI {
+  createTerminal(cwd: string): Promise<string>
+  writeTerminal(id: string, data: string): Promise<void>
+  resizeTerminal(id: string, cols: number, rows: number): Promise<void>
+  killTerminal(id: string): Promise<void>
+  killTerminalsByCwd(cwd: string): Promise<string[]>
+  onTerminalData(cb: (data: { terminalId: string; data: string }) => void): () => void
+  onTerminalExit(cb: (data: { terminalId: string; code: number }) => void): () => void
+}
+
+interface AutomationAPI {
   listAutomations(): Promise<Automation[]>
   saveAutomation(automation: Automation): Promise<void>
   deleteAutomation(id: string): Promise<void>
@@ -401,7 +377,6 @@ export interface ClaudeAPI {
   listAutomationRuns(automationId: string): Promise<AutomationRun[]>
   loadAutomationRunHistory(automationId: string, runId: string): Promise<ChatMessage[]>
   cancelAutomationRun(automationId: string): Promise<void>
-  /** Mark a run as stopped (for runs not managed by this instance) */
   dismissAutomationRun(automationId: string, runId: string): Promise<void>
   sendAutomationMessage(automationId: string, prompt: string): Promise<void>
   onAutomationRunUpdate(cb: (data: { automationId: string; run: AutomationRun }) => void): () => void
@@ -409,10 +384,25 @@ export interface ClaudeAPI {
   onAutomationRunMessage(cb: (data: { automationId: string; message: ChatMessage }) => void): () => void
   onAutomationStreamEvent(cb: (data: { automationId: string; type: string; text: string }) => void): () => void
   onAutomationProcessing(cb: (data: { automationId: string; isProcessing: boolean }) => void): () => void
-
-  // Logging
-  logError(source: string, message: string): void
 }
+
+interface FileAPI {
+  listDir(dirPath: string): Promise<{ entries: DirEntry[]; isRoot: boolean; resolvedPath: string }>
+  openInVSCode(cwd: string): Promise<void>
+  createWorktree(cwd: string, name: string): Promise<WorktreeInfo>
+  getWorktreeStatus(worktreePath: string, originalHead: string): Promise<WorktreeStatus>
+  removeWorktree(worktreePath: string, branch: string, gitRoot: string): Promise<void>
+  listWorktrees(cwd: string): Promise<WorktreeEntry[]>
+}
+
+interface AccountAPI {
+  fetchAccountUsage(): Promise<AccountUsage>
+  onAccountUsage(cb: (data: AccountUsage) => void): () => void
+  fetchBlockUsage(): Promise<BlockUsageData>
+  onBlockUsage(cb: (data: BlockUsageData) => void): () => void
+}
+
+export interface ClaudeAPI extends SessionAPI, GitAPI, McpAPI, TerminalAPI, AutomationAPI, FileAPI, AccountAPI {}
 
 // ---------------------------------------------------------------------------
 // Account usage types (5hr / 7-day rate windows)

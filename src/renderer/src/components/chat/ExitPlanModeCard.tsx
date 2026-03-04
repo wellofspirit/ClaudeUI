@@ -1,7 +1,9 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
 import { v4 as uuid } from 'uuid'
-import type { PendingApproval, ContentBlock } from '../../../../shared/types'
+import type { PendingApproval, ContentBlock as _ContentBlock } from '../../../../shared/types'
+
+type ToolUseBlock = Extract<_ContentBlock, { type: 'tool_use' }>
 import { MarkdownRenderer } from './MarkdownRenderer'
 
 /**
@@ -30,7 +32,7 @@ function waitForModeChange(): Promise<void> {
 }
 
 interface ExitPlanModeCardProps {
-  block: ContentBlock
+  block: ToolUseBlock
   approval?: PendingApproval
 }
 

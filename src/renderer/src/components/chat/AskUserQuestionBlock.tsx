@@ -2,13 +2,16 @@ import { useState } from 'react'
 import type { ContentBlock, PendingApproval, AskUserQuestion, AskUserQuestionInput } from '../../../../shared/types'
 import { useSessionStore } from '../../stores/session-store'
 
+type ToolUseBlock = Extract<ContentBlock, { type: 'tool_use' }>
+type ToolResultBlock = Extract<ContentBlock, { type: 'tool_result' }>
+
 function useRoutingId(): string | null {
   return useSessionStore((s) => s.activeSessionId)
 }
 
 interface Props {
-  block: ContentBlock
-  result?: ContentBlock
+  block: ToolUseBlock
+  result?: ToolResultBlock
   approval?: PendingApproval
 }
 
