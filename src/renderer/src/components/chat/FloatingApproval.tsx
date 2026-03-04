@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
 import type { PendingApproval } from '../../../../shared/types'
+import { AlwaysAllowSection } from './PermissionSuggestions'
 
 /**
  * Finds pending approvals that aren't matched to any visible tool_use block
@@ -34,14 +35,19 @@ function ApprovalCard({ approval }: { approval: PendingApproval }): React.JSX.El
   const removePendingApproval = useSessionStore((s) => s.removePendingApproval)
   const updateSettings = useSessionStore((s) => s.updateSettings)
   const sandboxSettings = useSessionStore((s) => s.settings.sandbox)
+  const permissionMode = useActiveSession((s) => s.permissionMode)
   const [alwaysAllow, setAlwaysAllow] = useState(false)
+  const [checkedSuggestions, setCheckedSuggestions] = useState<boolean[]>(
+    () => (approval.suggestions || []).map(() => false)
+  )
 
   const isSandboxEscape = !!approval.input?.dangerouslyDisableSandbox
+  const hasSuggestions = (approval.suggestions?.length ?? 0) > 0
 
   const handleRespond = async (decision: 'allow' | 'deny'): Promise<void> => {
     if (!activeSessionId) return
 
-    // If allowing with "always allow" checked, add command to excluded list
+    // If allowing with "always allow" checked, add command to excluded list (sandbox escape)
     if (decision === 'allow' && alwaysAllow && isSandboxEscape && approval.input?.command) {
       const cmd = String(approval.input.command)
       if (!sandboxSettings.excludedCommands.includes(cmd)) {
@@ -54,7 +60,15 @@ function ApprovalCard({ approval }: { approval: PendingApproval }): React.JSX.El
       }
     }
 
-    await window.api.respondApproval(activeSessionId, approval.requestId, decision)
+    // On allow, include any checked permission suggestions
+    const selected = decision === 'allow' && approval.suggestions
+      ? approval.suggestions.filter((_, i) => checkedSuggestions[i])
+      : undefined
+
+    await window.api.respondApproval(
+      activeSessionId, approval.requestId, decision, undefined,
+      selected?.length ? selected : undefined
+    )
     removePendingApproval(activeSessionId, approval.requestId)
   }
 
@@ -105,6 +119,11 @@ function ApprovalCard({ approval }: { approval: PendingApproval }): React.JSX.El
           <span className={`text-[11px] font-semibold ${labelColor} uppercase tracking-wider`}>{labelText}</span>
           <span className="font-mono text-[12px] text-accent">{toolName}</span>
         </div>
+        {approval.decisionReason && (
+          <p className="text-[11px] text-text-muted/70 mb-2 leading-relaxed">
+            {approval.decisionReason}
+          </p>
+        )}
         {isSandboxEscape && (
           <p className="text-[11px] text-danger/70 mb-2">
             This command requests execution outside the sandbox.
@@ -121,6 +140,14 @@ function ApprovalCard({ approval }: { approval: PendingApproval }): React.JSX.El
             />
             <span className="text-[11px] text-text-muted">Always allow this command outside sandbox</span>
           </label>
+        )}
+        {hasSuggestions && (
+          <AlwaysAllowSection
+            suggestions={approval.suggestions!}
+            checkedSuggestions={checkedSuggestions}
+            onToggle={(i) => setCheckedSuggestions((prev) => prev.map((v, j) => j === i ? !v : v))}
+            currentMode={permissionMode}
+          />
         )}
       </div>
       <div className={`flex border-t ${dividerColor}`}>

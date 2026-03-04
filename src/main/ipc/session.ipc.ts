@@ -16,7 +16,7 @@ import { gitServiceManager } from '../services/git-service'
 import { createWorktree, getWorktreeStatus, removeWorktree, listWorktrees } from '../services/worktree'
 import { usageFetcher } from '../services/usage-fetcher'
 import { blockUsageService } from '../services/block-usage'
-import type { ApprovalDecision, ModelInfo, SandboxSettings } from '../../shared/types'
+import type { ApprovalDecision, ModelInfo, SandboxSettings, PermissionSuggestion } from '../../shared/types'
 import { logger } from '../services/logger'
 
 let cachedModels: ModelInfo[] | null = null
@@ -227,8 +227,8 @@ export function registerSessionIpc(win: BrowserWindow): void {
 
   ipcMain.handle(
     'session:approval-response',
-    (_event, routingId: string, requestId: string, decision: ApprovalDecision, answers?: Record<string, string>) => {
-      manager.get(routingId)?.resolveApproval(requestId, decision, answers)
+    (_event, routingId: string, requestId: string, decision: ApprovalDecision, answers?: Record<string, string>, updatedPermissions?: PermissionSuggestion[]) => {
+      manager.get(routingId)?.resolveApproval(requestId, decision, answers, updatedPermissions)
     }
   )
 

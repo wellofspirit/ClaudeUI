@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import type { ApprovalDecision, ClaudeAPI } from '../shared/types'
+import type { ApprovalDecision, ClaudeAPI, PermissionSuggestion } from '../shared/types'
 
 const api: ClaudeAPI = {
   platform: process.platform,
@@ -12,8 +12,8 @@ const api: ClaudeAPI = {
     ipcRenderer.invoke('session:send', routingId, prompt, attachments),
   cancelSession: (routingId: string) =>
     ipcRenderer.invoke('session:cancel', routingId),
-  respondApproval: (routingId: string, requestId: string, decision: ApprovalDecision, answers?: Record<string, string>) =>
-    ipcRenderer.invoke('session:approval-response', routingId, requestId, decision, answers),
+  respondApproval: (routingId: string, requestId: string, decision: ApprovalDecision, answers?: Record<string, string>, updatedPermissions?: PermissionSuggestion[]) =>
+    ipcRenderer.invoke('session:approval-response', routingId, requestId, decision, answers, updatedPermissions),
   minimizeWindow: () => ipcRenderer.invoke('window:minimize'),
   maximizeWindow: () => ipcRenderer.invoke('window:maximize'),
   closeWindow: () => ipcRenderer.invoke('window:close'),

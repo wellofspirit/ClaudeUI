@@ -4,6 +4,7 @@ import { useSessionStore, useActiveSession } from '../../stores/session-store'
 import { CodeView } from './CodeView'
 import { DiffViewer } from './DiffViewer'
 import { TerminalView } from './TerminalView'
+import { AlwaysAllowSection } from './PermissionSuggestions'
 
 interface Props {
   block: ContentBlock
@@ -19,12 +20,23 @@ export const ToolCallBlock = memo(function ToolCallBlock({ block, result, approv
   const setTaskStopping = useSessionStore((s) => s.setTaskStopping)
   const clearTaskStopping = useSessionStore((s) => s.clearTaskStopping)
   const isHistorical = useActiveSession((s) => s.isHistorical)
+  const permissionMode = useActiveSession((s) => s.permissionMode)
   const expandToolCalls = useSessionStore((s) => s.settings.expandToolCalls)
   const expandReadResults = useSessionStore((s) => s.settings.expandReadResults)
   const hideToolInput = useSessionStore((s) => s.settings.hideToolInput)
   const [expanded, setExpanded] = useState(
     block.toolName === 'Read' ? expandToolCalls && expandReadResults : expandToolCalls
   )
+  const [checkedSuggestions, setCheckedSuggestions] = useState<boolean[]>(
+    () => (approval?.suggestions || []).map(() => false)
+  )
+
+  // Re-initialize checked state when suggestions arrive (approval may arrive after mount)
+  useEffect(() => {
+    if (approval?.suggestions?.length) {
+      setCheckedSuggestions(approval.suggestions.map(() => false))
+    }
+  }, [approval?.suggestions])
 
   useEffect(() => {
     if (block.toolName === 'Read') {
@@ -40,6 +52,7 @@ export const ToolCallBlock = memo(function ToolCallBlock({ block, result, approv
   const summary = getSummary(block)
   const hasResult = !!result
   const isPendingApproval = !isHistorical && !!approval
+  const hasSuggestions = isPendingApproval && (approval?.suggestions?.length ?? 0) > 0
 
   // For background bash, "done" means we got a task_notification, not just a tool_result
   const bgNotification = isBackgroundBash ? taskNotifications.find((n) => n.toolUseId === toolUseId) : null
@@ -52,7 +65,14 @@ export const ToolCallBlock = memo(function ToolCallBlock({ block, result, approv
 
   const handleApproval = async (decision: 'allow' | 'deny'): Promise<void> => {
     if (!approval || !activeSessionId) return
-    await window.api.respondApproval(activeSessionId, approval.requestId, decision)
+    // On allow, include any checked permission suggestions
+    const selected = decision === 'allow' && approval.suggestions
+      ? approval.suggestions.filter((_, i) => checkedSuggestions[i])
+      : undefined
+    await window.api.respondApproval(
+      activeSessionId, approval.requestId, decision, undefined,
+      selected?.length ? selected : undefined
+    )
     removePendingApproval(activeSessionId, approval.requestId)
   }
 
@@ -182,23 +202,42 @@ export const ToolCallBlock = memo(function ToolCallBlock({ block, result, approv
         <BackgroundBashOutput toolUseId={toolUseId} />
       )}
 
-      {/* Approval buttons */}
+      {/* Approval: decision reason + suggestions + buttons */}
       {isPendingApproval && (
-        <div className="flex border-t border-warning/20">
-          <button
-            onClick={() => handleApproval('deny')}
-            className="flex-1 h-8 text-[12px] font-medium text-danger hover:bg-danger/5 transition-colors cursor-pointer"
-          >
-            Deny
-          </button>
-          <div className="w-px bg-warning/20" />
-          <button
-            onClick={() => handleApproval('allow')}
-            className="flex-1 h-8 text-[12px] font-medium text-success hover:bg-success/5 transition-colors cursor-pointer"
-          >
-            Allow
-          </button>
-        </div>
+        <>
+          {(approval!.decisionReason || hasSuggestions) && (
+            <div className="border-t border-warning/20 px-3 py-2">
+              {approval!.decisionReason && (
+                <p className="text-[11px] text-text-muted/70 leading-relaxed">
+                  {approval!.decisionReason}
+                </p>
+              )}
+              {hasSuggestions && (
+                <AlwaysAllowSection
+                  suggestions={approval!.suggestions!}
+                  checkedSuggestions={checkedSuggestions}
+                  onToggle={(i) => setCheckedSuggestions((prev) => prev.map((v, j) => j === i ? !v : v))}
+                  currentMode={permissionMode}
+                />
+              )}
+            </div>
+          )}
+          <div className="flex border-t border-warning/20">
+            <button
+              onClick={() => handleApproval('deny')}
+              className="flex-1 h-8 text-[12px] font-medium text-danger hover:bg-danger/5 transition-colors cursor-pointer"
+            >
+              Deny
+            </button>
+            <div className="w-px bg-warning/20" />
+            <button
+              onClick={() => handleApproval('allow')}
+              className="flex-1 h-8 text-[12px] font-medium text-success hover:bg-success/5 transition-colors cursor-pointer"
+            >
+              Allow
+            </button>
+          </div>
+        </>
       )}
 
       {/* Footer for background bash */}

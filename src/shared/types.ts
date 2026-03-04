@@ -44,10 +44,22 @@ export interface SessionStatus {
   totalCostUsd: number
 }
 
+export interface PermissionSuggestion {
+  type: string // 'addRules' | 'replaceRules' | 'removeRules' | 'setMode' | 'addDirectories' | 'removeDirectories'
+  rules?: { toolName: string; ruleContent?: string }[]
+  behavior?: string // 'allow' | 'deny' | 'ask'
+  destination: string // 'userSettings' | 'projectSettings' | 'localSettings' | 'session' | 'cliArg'
+  mode?: string
+  directories?: string[]
+}
+
 export interface PendingApproval {
   requestId: string
   toolName: string
   input: Record<string, unknown>
+  suggestions?: PermissionSuggestion[]
+  decisionReason?: string
+  blockedPath?: string
 }
 
 export interface SessionResult {
@@ -248,7 +260,7 @@ export interface ClaudeAPI {
   rekeySession(oldId: string, newId: string): Promise<void>
   sendPrompt(routingId: string, prompt: string, attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>): Promise<void>
   cancelSession(routingId: string): Promise<void>
-  respondApproval(routingId: string, requestId: string, decision: ApprovalDecision, answers?: Record<string, string>): Promise<void>
+  respondApproval(routingId: string, requestId: string, decision: ApprovalDecision, answers?: Record<string, string>, updatedPermissions?: PermissionSuggestion[]): Promise<void>
   minimizeWindow(): Promise<void>
   maximizeWindow(): Promise<void>
   closeWindow(): Promise<void>

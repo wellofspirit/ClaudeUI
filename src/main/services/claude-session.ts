@@ -25,12 +25,14 @@ import type {
   SessionStatus,
   ApprovalDecision,
   PendingApproval,
-  SandboxSettings
+  SandboxSettings,
+  PermissionSuggestion
 } from '../../shared/types'
 
 interface ApprovalResult {
   decision: ApprovalDecision
   answers?: Record<string, string>
+  updatedPermissions?: PermissionSuggestion[]
 }
 
 interface PendingApprovalEntry {
@@ -348,7 +350,8 @@ export class ClaudeSession {
               network: {
                 allowLocalBinding: this.sandboxConfig.network.allowLocalBinding,
                 ...(this.sandboxConfig.network.restrictNetwork
-                  ? { allowedDomains: this.sandboxConfig.network.allowedDomains } : {}),
+                  ? { allowedDomains: this.sandboxConfig.network.allowedDomains }
+                  : { allowedDomains: ['*'] }),
                 ...(this.sandboxConfig.network.allowManagedDomainsOnly
                   ? { allowManagedDomainsOnly: true } : {}),
                 ...(this.sandboxConfig.network.allowAllUnixSockets
@@ -384,10 +387,17 @@ export class ClaudeSession {
           ...(this.resumeSessionId ? { resume: this.resumeSessionId } : this.sessionId ? { resume: this.sessionId } : {}),
           canUseTool: async (toolName, input, opts) => {
             const requestId = uuid()
-            const approval: PendingApproval = { requestId, toolName, input }
+            const approval: PendingApproval = {
+              requestId,
+              toolName,
+              input,
+              suggestions: opts.suggestions as PendingApproval['suggestions'],
+              decisionReason: opts.decisionReason,
+              blockedPath: opts.blockedPath,
+            }
             this.send('session:approval-request', approval)
 
-            const { decision, answers } = await new Promise<ApprovalResult>((resolve) => {
+            const { decision, answers, updatedPermissions } = await new Promise<ApprovalResult>((resolve) => {
               this.pendingApprovals.set(requestId, { resolve })
 
               opts.signal.addEventListener('abort', () => {
@@ -400,7 +410,15 @@ export class ClaudeSession {
 
             if (decision === 'allow') {
               const updatedInput = answers ? { ...input, answers } : input
-              return { behavior: 'allow' as const, updatedInput }
+              // updatedPermissions originates from SDK suggestions and round-trips
+              // through IPC with loose string types — cast back to SDK's union types
+              return {
+                behavior: 'allow' as const,
+                updatedInput,
+                ...(updatedPermissions?.length
+                  ? { updatedPermissions: updatedPermissions as unknown as import('@anthropic-ai/claude-agent-sdk').PermissionUpdate[] }
+                  : {})
+              }
             }
             const message = answers?.feedback || 'User denied'
             return { behavior: 'deny' as const, message }
@@ -894,10 +912,10 @@ export class ClaudeSession {
     return null
   }
 
-  resolveApproval(requestId: string, decision: ApprovalDecision, answers?: Record<string, string>): void {
+  resolveApproval(requestId: string, decision: ApprovalDecision, answers?: Record<string, string>, updatedPermissions?: PermissionSuggestion[]): void {
     const entry = this.pendingApprovals.get(requestId)
     if (entry) {
-      entry.resolve({ decision, answers })
+      entry.resolve({ decision, answers, updatedPermissions })
     }
   }
 
