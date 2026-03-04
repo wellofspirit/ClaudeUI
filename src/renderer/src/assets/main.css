@@ -1,6 +1,13 @@
 @import "tailwindcss";
 @source "../../";
 
+/* Prism's markdown tokenizer adds "table" as a token class (e.g. "token table
+   table-data-rows"). Tailwind's `table` utility sets `display: table`, which
+   breaks inline text flow inside code blocks. Force these back to inline. */
+pre .token.table {
+  display: inline !important;
+}
+
 /* Native browser virtualization — skips rendering off-screen items while
    keeping them in normal document flow (no position calculation issues).
    `auto` for contain-intrinsic-size means the browser remembers the real

@@ -5,6 +5,7 @@ import { useSessionStore, useActiveSession } from '../../stores/session-store'
 import { CodeView } from './CodeView'
 import { DiffViewer } from './DiffViewer'
 import { TerminalView } from './TerminalView'
+import { MarkdownRenderer } from './MarkdownRenderer'
 import { AlwaysAllowSection } from './PermissionSuggestions'
 
 type ToolUseBlock = Extract<ContentBlock, { type: 'tool_use' }>
@@ -416,7 +417,9 @@ function ToolResult({ block, result }: { block: ToolUseBlock; result: ToolResult
 
   // Write tool: show the content that was written (from input)
   if (toolName === 'Write' && block.toolInput?.content) {
-    return <CodeView code={trunc(String(block.toolInput.content), 5000)} filePath={block.toolInput?.file_path ? String(block.toolInput.file_path) : undefined} />
+    const content = trunc(String(block.toolInput.content), 5000)
+    const filePath = block.toolInput?.file_path ? String(block.toolInput.file_path) : undefined
+    return <WriteResult content={content} filePath={filePath} />
   }
 
   // Edit tool: show diff with @git-diff-view
@@ -455,6 +458,42 @@ function ToolResult({ block, result }: { block: ToolUseBlock; result: ToolResult
   return <TerminalView text={text} />
 }
 
+
+function WriteResult({ content, filePath }: { content: string; filePath?: string }): React.JSX.Element {
+  const isMarkdown = !!filePath && /\.(md|markdown)$/i.test(filePath)
+  const [tab, setTab] = useState<'preview' | 'code'>(isMarkdown ? 'preview' : 'code')
+
+  if (!isMarkdown) {
+    return <CodeView code={content} filePath={filePath} />
+  }
+
+  return (
+    <div>
+      <div className="flex gap-1 mb-2">
+        {(['preview', 'code'] as const).map((t) => (
+          <button
+            key={t}
+            onClick={() => setTab(t)}
+            className={`text-[11px] h-6 px-2 rounded transition-colors cursor-pointer capitalize ${
+              tab === t
+                ? 'bg-bg-hover text-text-primary'
+                : 'text-text-muted hover:text-text-secondary'
+            }`}
+          >
+            {t}
+          </button>
+        ))}
+      </div>
+      {tab === 'preview' ? (
+        <div className="text-[13px] text-text-primary leading-[1.6]">
+          <MarkdownRenderer content={content} />
+        </div>
+      ) : (
+        <CodeView code={content} filePath={filePath} />
+      )}
+    </div>
+  )
+}
 
 function getSummary(block: ToolUseBlock): string {
   const input = block.toolInput
