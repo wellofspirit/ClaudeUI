@@ -4,6 +4,80 @@ All notable changes to ClaudeUI are documented in this file. Entries are grouped
 
 ---
 
+## 2026-03-04
+
+### fix: pass model parameter through session creation flow (`db4e59d`)
+- Added optional `model` parameter to `createSession()` across the full chain: `ClaudeAPI` interface → preload → IPC handler → `SessionManager.create()` → `ClaudeSession` constructor
+- `InputBox.handleSend()` now passes `session.selectedModel` so the first query uses the correct model instead of defaulting then switching via `setModel()`
+
+### chore: upgrade @anthropic-ai/claude-agent-sdk to 0.2.63 and add test harnesses (`bd63b97`)
+- Bumped SDK from 0.2.59 to 0.2.63 (CLI 2.1.63)
+- Created `patch/test-helpers.mjs` (108 lines) — shared test infrastructure for spawning SDK sessions, waiting for events, asserting results
+- Created `patch/mcp-test-server.mjs` (107 lines) — mock MCP server for testing MCP patches
+- Added test harnesses for `mcp-status`, `mcp-tool-refresh`, and `queue-control` patches
+- Updated `subagent-streaming/test.mjs` with improved assertions
+- Fixed `mcp-tool-refresh/apply.mjs` regex patterns for 0.2.63 minified names
+
+### feat: add patch-test-harness skill documentation (`c83abdf`)
+- Created `.claude/skills/patch-test-harness/SKILL.md` (294 lines) — guides agents through writing behavioral tests for SDK patches
+
+### feat: add patch-readme skill documentation (`7c7dc46`)
+- Created `.claude/skills/patch-readme/SKILL.md` (404 lines) — guides agents through writing reverse-engineering READMEs for SDK patches
+
+### feat: add sandbox configuration support with violation reporting (`867ad3e`)
+- Created sandbox settings UI in `SettingsDialog.tsx` — enable/disable toggle, auto-allow bash, excluded commands list, network settings (restrict domains, allow local binding, unix sockets), filesystem settings (allow-write, deny-write, deny-read paths)
+- Created `InfoTooltip` component and `SandboxListSetting` component for managing configurable string lists
+- Added `SandboxSettings` type and `sandboxConfig` to `ClaudeSession` — passes full sandbox config to SDK `sdkQuery()` options
+- Added sandbox violation detection: parses `<sandbox_violations>` XML from tool results, sends `session:sandbox-violation` IPC events
+- Created `SandboxViolationToast.tsx` — ephemeral floating toast for violation notifications
+- Added `sandboxSettings`, `sandboxViolations` to session store with related actions
+
+### feat: support permission suggestions in approval workflow (`42064cf`)
+- Created `PermissionSuggestions.tsx` (94 lines) — `AlwaysAllowSection` checkbox list with `formatSuggestionLabel()` producing human-readable labels for rule types (setMode, addRules, removeRules, addDirectories, etc.) and redundancy detection
+- `FloatingApproval.tsx` and `ToolCallBlock.tsx` both show permission suggestion checkboxes above Allow/Deny buttons
+- Selected suggestions sent back via `respondApproval()` and applied by `claude-session.ts` via `applyPermissionSuggestion()`
+- Extended `PendingApproval` type with `suggestions` field; extended `ClaudeAPI.respondApproval()` with optional suggestions parameter
+
+### feat: add sandbox-network-fix patch (`17adb59`, `8d5c1d3`)
+- Created `patch/sandbox-network-fix/` — fixes SDK sandbox network proxy always starting even when no domain restrictions configured, blocking all traffic through an unnecessary proxy
+- Patch modifies proxy startup check to skip initialization when `allowedDomains` includes `"*"` (unrestricted)
+- Session-side fix: when `restrictNetwork` is false, omits `network` key entirely from sandbox config so SDK doesn't start domain filtering
+- Initially named `network-unrestrict`, renamed to `sandbox-network-fix` with test harness and updated CLAUDE.md patch table
+
+### feat: big refactor to improve code quality (`6a7b1dc`)
+- Extracted `hooks/useFileMention.ts` (300 lines) — @ mention autocomplete logic with directory navigation, filtering, keyboard handling, and text insertion pulled out of InputBox
+- Extracted `hooks/useSlashMenu.ts` (94 lines) — slash command popup state, filtering, keyboard navigation pulled out of InputBox
+- Extracted `utils/content-blocks.ts` (45 lines) — `mergeContentBlocks()` for SDK partial message upsert, preserving tool_use/tool_result blocks across updates, pulled out of session store
+- Extracted `utils/ipc-timeout.ts` (21 lines) — `withTimeout()` helper racing IPC calls against configurable timeouts
+- Extracted `components/chat/FileAttachmentBar.tsx` (42 lines) — attachment preview bar pulled out of InputBox
+- Simplified `preload/index.ts` from ~256 to ~100 lines by extracting IPC event registration into typed helpers
+- Restructured `session.ipc.ts` handler registration with consistent error handling
+- Reorganized `shared/types.ts` — reordered and grouped related interfaces
+- `InputBox.tsx` shrunk dramatically; `SubagentMessages.tsx` simplified rendering; `MessageBubble.tsx` improved tool_use block grouping
+
+### refactor: use isAgentTool helper for Task→Agent tool rename (`a828c16`)
+- SDK 0.2.63 renamed `Task` tool to `Agent` (with `Task` as backward-compat alias); model may send either name
+- Added `isAgentTool(toolName)` helper in `shared/types.ts` returning true for both `'Agent'` and `'Task'`
+- Updated `MessageBubble.tsx` to route both tool names to `<TaskCard>` instead of only `'Task'`
+- Updated `ToolCallBlock.tsx` `getSummary()` — handles `Agent`/`Task` → description; added `TaskOutput` → task ID, `TaskStop` → task ID
+- Updated teammate detection in `claude-session.ts` and `session-history.ts` to match both tool names
+- Updated `PermissionsDialog.tsx` template from `'Task'` to `'Agent'`; updated `AutomationConfig.tsx` default permission
+
+### feat: expose background task feature via SDK control message API (`27cb695`)
+- Created `patch/background-task/` — exposes the CLI's `ctrl+b` "send to background" feature via the SDK control message protocol
+- **Part A** (`cli.js`): Added `background_task` control request handler accepting `tool_use_id`, searching tasks by `.toolUseId` property. For bash: calls `shellCommand.background()` (spills stdout to disk), sets `isBackgrounded`. For agents: sets `isBackgrounded`, resolves `backgroundSignal` Promise from `Ff6` Map
+- **Part B** (`sdk.mjs`): Added `backgroundTask(toolUseId)` method on the Query class
+- Six minified symbols (`errorFn`, `msgVar`, `successFn`, `getAppStateFn`/`setAppStateFn`, `wiFn`, `yiFn`, `bgSignalMap`) extracted dynamically from content patterns
+- Added `backgroundTask()` to `ClaudeAPI` interface, preload bridge, IPC handler, and `ClaudeSession`
+- `ToolCallBlock.tsx` shows "Send to background" button for foreground running Bash commands with accent border
+- `TaskCard.tsx` shows "Send to background" button for foreground running Agent tasks
+- Uses `tool_use_id` lookup (not `task_id`) because foreground tasks haven't returned results yet — `taskIdMap` is only populated by `detectTaskMapping()` on tool results
+
+### refactor: improve clarity of background task UI labels (`0167d23`)
+- Changed button text from "Background" to "Send to background" and spinner text from "backgrounding…" to "sending to background…" in `ToolCallBlock.tsx` and `TaskCard.tsx`
+
+---
+
 ## 2026-03-03
 
 ### feat: add plan review panel with inline commenting (`6e73522`)
