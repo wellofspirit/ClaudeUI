@@ -287,6 +287,7 @@ interface SessionAPI {
   unwatchBackground(routingId: string, toolUseId: string): Promise<void>
   readBackgroundRange(routingId: string, toolUseId: string, offset: number, length: number): Promise<string>
   stopTask(routingId: string, toolUseId: string): Promise<{ success: boolean; error?: string }>
+  backgroundTask(routingId: string, toolUseId: string): Promise<{ success: boolean; error?: string }>
   dequeueMessage(routingId: string, value: string): Promise<{ removed: number }>
   onSteerConsumed(cb: (routingId: string, data: { prompt: string }) => void): () => void
   setPermissionMode(routingId: string, mode: string): Promise<void>

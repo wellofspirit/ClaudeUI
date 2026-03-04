@@ -162,6 +162,7 @@ export class ClaudeSession {
     setPermissionMode(mode: string): Promise<void>
     setModel(model?: string): Promise<void>
     stopTask(taskId: string): Promise<void>
+    backgroundTask(taskId: string): Promise<unknown>
     dequeueMessage(value: string): Promise<{ removed: number }>
     // MCP methods
     mcpServerStatus(): Promise<unknown[]>
@@ -448,6 +449,7 @@ export class ClaudeSession {
         setPermissionMode(mode: string): Promise<void>
         setModel(model?: string): Promise<void>
         stopTask(taskId: string): Promise<void>
+        backgroundTask(taskId: string): Promise<unknown>
         dequeueMessage(value: string): Promise<{ removed: number }>
         mcpServerStatus(): Promise<unknown[]>
         toggleMcpServer(serverName: string, enabled: boolean): Promise<void>
@@ -995,6 +997,23 @@ export class ClaudeSession {
         usage: undefined
       })
 
+      return { success: true }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      return { success: false, error: msg }
+    }
+  }
+
+  async backgroundTask(toolUseId: string): Promise<{ success: boolean; error?: string }> {
+    // Pass toolUseId directly — the CLI handler searches tasks by toolUseId property.
+    // We don't use taskIdMap here because foreground tasks may not have a mapping yet
+    // (detectTaskMapping runs on tool results, which haven't arrived for running tasks).
+    if (!this.activeQuery) {
+      return { success: false, error: 'No active session' }
+    }
+
+    try {
+      await this.activeQuery.backgroundTask(toolUseId)
       return { success: true }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)

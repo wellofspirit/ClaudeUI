@@ -66,6 +66,8 @@ export const ToolCallBlock = memo(function ToolCallBlock({ block, result, approv
   const isSuccess = isBackgroundBash ? (!!bgNotification && !bgError) : (hasResult && !isError)
   // In historical mode, tools without results show as "loaded" (neutral state)
   const isLoaded = isHistorical && !hasResult && !isSuccess && !isError
+  // Foreground Bash: still running (no result), not background, not historical
+  const isForegroundBashRunning = block.toolName === 'Bash' && !isBackgroundBash && !hasResult && !isPendingApproval && !isHistorical
 
   const handleApproval = async (decision: 'allow' | 'deny'): Promise<void> => {
     if (!approval || !activeSessionId) return
@@ -85,7 +87,7 @@ export const ToolCallBlock = memo(function ToolCallBlock({ block, result, approv
     ? 'border-warning/40'
     : isError
       ? 'border-danger/30'
-      : bgRunning
+      : bgRunning || isForegroundBashRunning
         ? 'border-accent/30'
         : isSuccess
           ? 'border-success/30'
@@ -120,6 +122,18 @@ export const ToolCallBlock = memo(function ToolCallBlock({ block, result, approv
   )
 
   const isStopping = stoppingTaskIds.includes(toolUseId)
+  const [isBackgrounding, setIsBackgrounding] = useState(false)
+
+  const handleBackgroundTask = async (e: React.MouseEvent): Promise<void> => {
+    e.stopPropagation()
+    if (!activeSessionId) return
+    setIsBackgrounding(true)
+    const bgResult = await window.api.backgroundTask(activeSessionId, toolUseId)
+    if (!bgResult.success) {
+      window.api.logError('ToolCallBlock', `Failed to background task: ${bgResult.error}`)
+      setIsBackgrounding(false)
+    }
+  }
 
   const handleStopTask = async (e: React.MouseEvent): Promise<void> => {
     e.stopPropagation()
@@ -155,6 +169,19 @@ export const ToolCallBlock = memo(function ToolCallBlock({ block, result, approv
         )}
         {isLoaded && (
           <span className="text-[10px] text-text-muted shrink-0">loaded</span>
+        )}
+        {isForegroundBashRunning && !isBackgrounding && (
+          <button
+            onClick={handleBackgroundTask}
+            className="text-[11px] px-2 py-0.5 rounded bg-accent/10 text-accent hover:bg-accent/20 transition-colors shrink-0"
+          >
+            Background
+          </button>
+        )}
+        {isBackgrounding && (
+          <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-accent/10 text-accent shrink-0">
+            backgrounding…
+          </span>
         )}
         {bgRunning && !isStopping && !isHistorical && (
           <button

@@ -179,7 +179,7 @@ const SESSION_IPC_CHANNELS = [
   'session:pick-folder', 'session:create', 'session:rekey', 'session:send',
   'session:cancel', 'session:approval-response', 'session:watch-background',
   'session:unwatch-background', 'session:read-background-range', 'session:stop-task',
-  'session:dequeue-message',
+  'session:background-task', 'session:dequeue-message',
   'session:set-permission-mode', 'session:set-model', 'session:set-effort',
   'session:get-models', 'session:generate-title', 'session:generate-commit-message',
   'session:write-custom-title', 'session:get-plan-content', 'session:get-session-log-path',
@@ -273,6 +273,14 @@ export function registerSessionIpc(win: BrowserWindow): void {
       return { success: false, error: 'No active session' }
     }
     return await session.stopTask(toolUseId)
+  })
+
+  ipcMain.handle('session:background-task', async (_e, routingId: string, toolUseId: string) => {
+    const session = manager.get(routingId)
+    if (!session) {
+      return { success: false, error: 'No active session' }
+    }
+    return await session.backgroundTask(toolUseId)
   })
 
   ipcMain.handle('session:dequeue-message', async (_e, routingId: string, value: string) => {

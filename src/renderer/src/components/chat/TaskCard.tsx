@@ -118,6 +118,18 @@ export function TaskCard({ block, result }: Props): React.JSX.Element {
 
   const isCompleted = !isRunning && !isError
   const isStopping = stoppingTaskIds.includes(toolUseId)
+  const canBackground = isRunning && !isBackground && !isStopping
+  const [isBackgrounding, setIsBackgrounding] = useState(false)
+
+  const handleBackgroundTask = async (): Promise<void> => {
+    if (!activeSessionId) return
+    setIsBackgrounding(true)
+    const bgResult = await window.api.backgroundTask(activeSessionId, toolUseId)
+    if (!bgResult.success) {
+      window.api.logError('TaskCard', `Failed to background task: ${bgResult.error}`)
+      setIsBackgrounding(false)
+    }
+  }
 
   const handleStopTask = async (): Promise<void> => {
     if (!activeSessionId) return
@@ -172,6 +184,19 @@ export function TaskCard({ block, result }: Props): React.JSX.Element {
         )}
         {isLoaded && (
           <span className="text-[10px] text-text-muted shrink-0">loaded</span>
+        )}
+        {canBackground && !isBackgrounding && !isHistorical && (
+          <button
+            onClick={(e) => { e.stopPropagation(); handleBackgroundTask() }}
+            className="text-[11px] px-2 py-0.5 rounded bg-accent/10 text-accent hover:bg-accent/20 transition-colors shrink-0"
+          >
+            Background
+          </button>
+        )}
+        {isBackgrounding && (
+          <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-accent/10 text-accent shrink-0">
+            backgrounding…
+          </span>
         )}
         {isRunning && !isStopping && !isHistorical && (
           <button
