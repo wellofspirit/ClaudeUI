@@ -175,12 +175,12 @@ export const ToolCallBlock = memo(function ToolCallBlock({ block, result, approv
             onClick={handleBackgroundTask}
             className="text-[11px] px-2 py-0.5 rounded bg-accent/10 text-accent hover:bg-accent/20 transition-colors shrink-0"
           >
-            Background
+            Send to background
           </button>
         )}
         {isBackgrounding && (
           <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-accent/10 text-accent shrink-0">
-            backgrounding…
+            sending to background…
           </span>
         )}
         {bgRunning && !isStopping && !isHistorical && (
