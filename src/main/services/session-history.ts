@@ -3,6 +3,7 @@ import * as path from 'path'
 import * as os from 'os'
 import * as readline from 'readline'
 import type { ChatMessage, ContentBlock, DirectoryGroup, SessionInfo, TaskNotification, StatusLineData } from '../../shared/types'
+import { isAgentTool } from '../../shared/types'
 import { logger } from './logger'
 
 const CLAUDE_PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects')
@@ -724,7 +725,7 @@ export async function loadSessionHistory(
               for (const key of Object.keys(taskPrompts)) delete taskPrompts[key]
               for (const key of Object.keys(agentIdToToolUseId)) delete agentIdToToolUseId[key]
             }
-            if (block.toolName === 'Task' && block.toolInput?.name && block.toolInput?.team_name) {
+            if (isAgentTool(block.toolName) && block.toolInput?.name && block.toolInput?.team_name) {
               pendingTeammates[block.toolUseId] = {
                 name: String(block.toolInput.name),
                 teamName: String(block.toolInput.team_name)

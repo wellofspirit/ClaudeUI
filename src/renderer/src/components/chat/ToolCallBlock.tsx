@@ -1,5 +1,6 @@
 import { memo, useState, useEffect, useRef, useCallback } from 'react'
 import type { ContentBlock, PendingApproval } from '../../../../shared/types'
+import { isAgentTool } from '../../../../shared/types'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
 import { CodeView } from './CodeView'
 import { DiffViewer } from './DiffViewer'
@@ -446,7 +447,9 @@ function getSummary(block: ToolUseBlock): string {
     const completed = input.todos.filter((t: Record<string, unknown>) => t.status === 'completed').length
     return `${completed}/${input.todos.length} tasks`
   }
-  if (block.toolName === 'Task' && input.description) return String(input.description)
+  if (isAgentTool(block.toolName) && input.description) return String(input.description)
+  if (block.toolName === 'TaskOutput' && input.task_id) return `task ${String(input.task_id).slice(0, 8)}…`
+  if (block.toolName === 'TaskStop' && input.task_id) return `stop ${String(input.task_id).slice(0, 8)}…`
 
   return JSON.stringify(input)
 }

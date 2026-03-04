@@ -2,6 +2,11 @@ export type IpcResult<T> =
   | { ok: true; data: T }
   | { ok: false; error: string; code?: string }
 
+/** SDK sends "Agent" (canonical, v0.2.63+) or "Task" (alias for backward compat) */
+export function isAgentTool(toolName: string): boolean {
+  return toolName === 'Agent' || toolName === 'Task'
+}
+
 export type ContentBlock =
   | { type: 'text'; text: string }
   | { type: 'tool_use'; toolUseId: string; toolName: string; toolInput?: Record<string, unknown> }

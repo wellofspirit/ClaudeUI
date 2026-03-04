@@ -46,7 +46,7 @@ const RULE_TEMPLATES = [
   { label: 'WebFetch domain', template: 'WebFetch(domain:example.com)' },
   { label: 'WebSearch', template: 'WebSearch' },
   { label: 'MCP server', template: 'mcp__server__*' },
-  { label: 'Task (subagent)', template: 'Task' }
+  { label: 'Agent (subagent)', template: 'Agent' }
 ]
 
 // ---------------------------------------------------------------------------

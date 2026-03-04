@@ -24,7 +24,7 @@ const PERMISSION_TEMPLATES = [
   'Edit',
   'Write',
   'Bash(command:git*)',
-  'Task'
+  'Agent'
 ]
 
 export function AutomationConfig(): React.JSX.Element {

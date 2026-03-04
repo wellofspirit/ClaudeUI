@@ -1,5 +1,6 @@
 import { memo, useState } from 'react'
 import type { ChatMessage, ContentBlock, PendingApproval } from '../../../../shared/types'
+import { isAgentTool } from '../../../../shared/types'
 import { MarkdownRenderer } from './MarkdownRenderer'
 import { ToolCallBlock } from './ToolCallBlock'
 import { ExitPlanModeCard } from './ExitPlanModeCard'
@@ -196,7 +197,7 @@ export const MessageBubble = memo(function MessageBubble({
           if (TODO_TOOLS.has(block.toolName)) {
             return <TodoToolBlock key={index} block={block} result={result} />
           }
-          if (block.toolName === 'Task') {
+          if (isAgentTool(block.toolName)) {
             return <TaskCard key={index} block={block} result={result} />
           }
           return <ToolCallBlock key={index} block={block} result={result} approval={approval} />
@@ -216,7 +217,7 @@ export const MessageBubble = memo(function MessageBubble({
               if (TODO_TOOLS.has(block.toolName)) {
                 return <TodoToolBlock key={index} block={block} result={result} />
               }
-              if (block.toolName === 'Task') {
+              if (isAgentTool(block.toolName)) {
                 return <TaskCard key={index} block={block} result={result} />
               }
               return <ToolCallBlock key={index} block={block} result={result} approval={approval} />

@@ -6,6 +6,7 @@ import * as path from 'path'
 import { app } from 'electron'
 import type { BrowserWindow } from 'electron'
 import { computeTokenMetrics, buildSubagentFileMap } from './session-history'
+import { isAgentTool } from '../../shared/types'
 import { unwatchAllSubagents } from './subagent-watcher'
 import { saveSlashCommands } from './ui-config'
 import { loadMcpServers, readDisabledMcpServers } from './claude-mcp'
@@ -1044,7 +1045,7 @@ export class ClaudeSession {
     // Detect teammate Task tool_use blocks and TeamCreate
     for (const block of blocks) {
       if (block.type !== 'tool_use' || !block.toolUseId) continue
-      if (block.toolName === 'Task' && block.toolInput?.name && block.toolInput?.team_name) {
+      if (isAgentTool(block.toolName) && block.toolInput?.name && block.toolInput?.team_name) {
         this.pendingTeammates.set(block.toolUseId, {
           name: String(block.toolInput.name),
           teamName: String(block.toolInput.team_name),
