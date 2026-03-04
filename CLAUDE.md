@@ -137,6 +137,8 @@ Patches live in `patch/` and fix limitations in the bundled `cli.js`. Each patch
 | `team-streaming` | Forwards teammate stream events + messages to SDK consumer |
 | `queue-control` | Adds `dequeue_message` control request and `queued_command_consumed` notification |
 | `mcp-status` | Fixes `mcp_status` returning empty array by awaiting plugin MCP server refresh |
+| `mcp-tool-refresh` | Refreshes MCP tool list after server reconnection |
+| `sandbox-network-fix` | Fixes sandbox network proxy always starting even when no domain restrictions are configured |
 
 **Upstreamed (removed):**
 - ~~`task-notification-usage`~~ — upstreamed in SDK 0.2.49

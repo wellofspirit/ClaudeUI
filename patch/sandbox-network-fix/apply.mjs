@@ -1,5 +1,5 @@
 /**
- * Patch: network-unrestrict
+ * Patch: sandbox-network-fix
  *
  * Fixes sandbox network proxy always starting even when no domains are configured.
  *
@@ -14,7 +14,7 @@
  * entries?" by checking .length > 0 instead of !== void 0. Also check
  * deniedDomains so the proxy still starts when deny rules are configured.
  *
- * Usage: node patch/network-unrestrict/apply.mjs
+ * Usage: node patch/sandbox-network-fix/apply.mjs
  */
 
 import { readFileSync, writeFileSync } from 'node:fs'
@@ -40,7 +40,7 @@ const ver = src.match(/VERSION:"([^"]+)"/)?.[1] ?? 'unknown'
 console.log(`Read ${cliPath} (${(src.length / 1024 / 1024).toFixed(1)} MB)`)
 console.log(`CLI version: ${ver}`)
 
-const MARKER = '/*PATCHED:network-unrestrict*/'
+const MARKER = '/*PATCHED:sandbox-network-fix*/'
 
 if (src.includes(MARKER)) {
   console.log('\nPatch already applied. Nothing to do.')

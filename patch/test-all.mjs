@@ -21,6 +21,7 @@ const tests = [
   { name: 'queue-control', script: resolve(__dirname, 'queue-control/test.mjs') },
   { name: 'mcp-status', script: resolve(__dirname, 'mcp-status/test.mjs') },
   { name: 'mcp-tool-refresh', script: resolve(__dirname, 'mcp-tool-refresh/test.mjs') },
+  { name: 'sandbox-network-fix', script: resolve(__dirname, 'sandbox-network-fix/test.mjs') },
 ]
 
 console.log(`\nRunning ${tests.length} patch tests...\n`)

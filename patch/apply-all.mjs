@@ -17,7 +17,7 @@ const patches = [
   resolve(__dirname, 'queue-control/apply.mjs'),
   resolve(__dirname, 'mcp-status/apply.mjs'),
   resolve(__dirname, 'mcp-tool-refresh/apply.mjs'),
-  resolve(__dirname, 'network-unrestrict/apply.mjs')
+  resolve(__dirname, 'sandbox-network-fix/apply.mjs')
 ]
 
 for (const patch of patches) {

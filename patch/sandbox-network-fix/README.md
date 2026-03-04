@@ -1,4 +1,4 @@
-# Patch: network-unrestrict
+# Patch: sandbox-network-fix
 
 The sandbox network proxy always starts even when no domain restrictions are configured, making it impossible to run sandboxed commands with unrestricted network access.
 
@@ -130,7 +130,7 @@ return {
 
 ### Marker
 
-`/*PATCHED:network-unrestrict*/`
+`/*PATCHED:sandbox-network-fix*/`
 
 ### Anchor (unique, 1 match)
 
@@ -151,7 +151,7 @@ The check: "does `allowedDomains` exist as a property?" — always true because 
 ### After
 
 ```js
-/*PATCHED:network-unrestrict*/{denyOnly:H},J=K?.network?.allowedDomains?.length>0||Q3?.network?.allowedDomains?.length>0||Q3?.network?.deniedDomains?.length>0,D=J,X=J
+/*PATCHED:sandbox-network-fix*/{denyOnly:H},J=K?.network?.allowedDomains?.length>0||Q3?.network?.allowedDomains?.length>0||Q3?.network?.deniedDomains?.length>0,D=J,X=J
 ```
 
 The check: "do any domain rules actually have entries?" Three conditions:
@@ -166,7 +166,7 @@ If all three are empty, `J = false` → proxy infrastructure is skipped → unre
 - **No behavioral change when domains are configured**: If any `allowedDomains` or `deniedDomains` exist, the proxy starts exactly as before.
 - **Only affects the empty case**: When zero domains are configured (no `WebFetch(domain:*)` rules, no `sandbox.network.allowedDomains` in settings, no API options), the proxy is now skipped instead of starting with an empty allowlist.
 - **Platform sandbox still active**: The filesystem sandbox (`writeConfig`, `readConfig`) is independent of the network proxy. Skipping the proxy only affects network isolation.
-- **macOS early-exit preserved**: `LZ7()` has `if (!K && !M && H === undefined) return q` — when network isn't needed AND no read denies AND no write config, it skips `sandbox-exec` entirely. Our patch makes this path reachable for network-unrestricted cases.
+- **macOS early-exit preserved**: `LZ7()` has `if (!K && !M && H === undefined) return q` — when network isn't needed AND no read denies AND no write config, it skips `sandbox-exec` entirely. Our patch makes this path reachable for sandbox-network-fixed cases.
 
 ### Dynamic variable extraction
 
@@ -289,7 +289,7 @@ The key: when `restrictNetwork` is false, `allowedDomains` is NOT passed in the 
 
 ## Verification
 
-1. `node patch/network-unrestrict/apply.mjs` — should apply patch
+1. `node patch/sandbox-network-fix/apply.mjs` — should apply patch
 2. Run again — should report "already applied"
 3. `node --check node_modules/@anthropic-ai/claude-agent-sdk/cli.js` — no syntax errors
 4. `node patch/apply-all.mjs` — all patches pass
