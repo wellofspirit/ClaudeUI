@@ -15,6 +15,7 @@ import type { UISettings, UISessionConfig, SlashCommandCache } from '../services
 import { gitServiceManager } from '../services/git-service'
 import { createWorktree, getWorktreeStatus, removeWorktree, listWorktrees } from '../services/worktree'
 import { usageFetcher } from '../services/usage-fetcher'
+import { serviceSession } from '../services/service-session'
 import { blockUsageService } from '../services/block-usage'
 import type { ApprovalDecision, ModelInfo, SandboxSettings, PermissionSuggestion, IpcResult } from '../../shared/types'
 import { logger } from '../services/logger'
@@ -744,6 +745,23 @@ export function registerSessionIpc(win: BrowserWindow): void {
 
   // Account usage polling (5hr / 7-day rate limits)
   usageFetcher.setWindow(win)
+  // Wire up SDK usage relay — tries active user sessions first, then
+  // the always-on service session as fallback.
+  usageFetcher.setSessionGetter(async () => {
+    // Try active user sessions first (they're already running)
+    const sessions: import('../services/claude-session').ClaudeSession[] = []
+    manager.forEach((s) => sessions.push(s))
+    for (const session of sessions) {
+      try {
+        const data = await session.getUsage()
+        if (data !== null) return data
+      } catch { /* try next session */ }
+    }
+    // Fall back to the always-on service session
+    return serviceSession.getUsage()
+  })
+  // Start the service session for always-on control message access
+  serviceSession.start()
   // Apply saved refresh interval before starting
   const savedSettings = loadSettings() as Record<string, unknown>
   if (typeof savedSettings.usageRefreshSecs === 'number') {

@@ -164,6 +164,7 @@ export class ClaudeSession {
     stopTask(taskId: string): Promise<void>
     backgroundTask(taskId: string): Promise<unknown>
     dequeueMessage(value: string): Promise<{ removed: number }>
+    getUsage(): Promise<Record<string, unknown>>
     // MCP methods
     mcpServerStatus(): Promise<unknown[]>
     toggleMcpServer(serverName: string, enabled: boolean): Promise<void>
@@ -451,6 +452,7 @@ export class ClaudeSession {
         stopTask(taskId: string): Promise<void>
         backgroundTask(taskId: string): Promise<unknown>
         dequeueMessage(value: string): Promise<{ removed: number }>
+        getUsage(): Promise<Record<string, unknown>>
         mcpServerStatus(): Promise<unknown[]>
         toggleMcpServer(serverName: string, enabled: boolean): Promise<void>
         reconnectMcpServer(serverName: string): Promise<void>
@@ -743,6 +745,21 @@ export class ClaudeSession {
   async dequeueMessage(value: string): Promise<{ removed: number }> {
     if (!this.activeQuery) return { removed: 0 }
     return await this.activeQuery.dequeueMessage(value)
+  }
+
+  /**
+   * Fetch account usage via the CLI's internal OAuth usage API.
+   * Returns the raw API response (e.g., { five_hour, seven_day, ... })
+   * or null if no active query.
+   */
+  async getUsage(): Promise<Record<string, unknown> | null> {
+    if (!this.activeQuery) return null
+    try {
+      return await this.activeQuery.getUsage()
+    } catch (err) {
+      logger.warn('ClaudeSession', 'getUsage failed', err)
+      return null
+    }
   }
 
   // ---------------------------------------------------------------------------

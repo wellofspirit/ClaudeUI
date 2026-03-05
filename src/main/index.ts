@@ -69,6 +69,8 @@ function createWindow(): void {
 
   app.on('before-quit', (e) => {
     automationManager.stopAll()
+    // Stop the service session (lightweight CLI subprocess for usage polling)
+    import('./services/service-session').then(({ serviceSession }) => serviceSession.stop()).catch(() => {})
     if (quitConfirmed) return
     e.preventDefault()
     if (!mainWindow.isDestroyed()) {

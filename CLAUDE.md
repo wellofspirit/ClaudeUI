@@ -139,6 +139,7 @@ Patches live in `patch/` and fix limitations in the bundled `cli.js`. Each patch
 | `mcp-status` | Fixes `mcp_status` returning empty array by awaiting plugin MCP server refresh |
 | `mcp-tool-refresh` | Refreshes MCP tool list after server reconnection |
 | `sandbox-network-fix` | Fixes sandbox network proxy always starting even when no domain restrictions are configured |
+| `usage-relay` | Relays CLI's internal `/usage` API through SDK control messages (avoids 429s) |
 
 **Upstreamed (removed):**
 - ~~`task-notification-usage`~~ — upstreamed in SDK 0.2.49

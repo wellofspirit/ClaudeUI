@@ -419,11 +419,19 @@ export interface RateWindow {
   resetsAt: string | null // ISO8601 timestamp
 }
 
+export interface ExtraUsage {
+  isEnabled: boolean
+  monthlyLimit: number | null // null = unlimited, otherwise in cents (divide by 100 for dollars)
+  usedCredits: number // in cents (divide by 100 for dollars)
+  utilization: number // percentage 0-100
+}
+
 export interface AccountUsage {
   fiveHour: RateWindow
   sevenDay: RateWindow | null
   sevenDaySonnet: RateWindow | null
   sevenDayOpus: RateWindow | null
+  extraUsage: ExtraUsage | null
   planName: string | null // e.g. "claude_max_5x"
   fetchedAt: number // Date.now()
   error: string | null

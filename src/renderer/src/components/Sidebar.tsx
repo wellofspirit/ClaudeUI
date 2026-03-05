@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { v4 as uuid } from 'uuid'
 import { useSessionStore, buildTodosFromMessages } from '../stores/session-store'
-import type { ChatMessage, DirectoryGroup, SessionInfo, AccountUsage, RateWindow, WorktreeInfo } from '../../../shared/types'
+import type { ChatMessage, DirectoryGroup, SessionInfo, AccountUsage, ExtraUsage, RateWindow, WorktreeInfo } from '../../../shared/types'
 import { SettingsDialog, SettingsToggle } from './SettingsDialog'
 import { PermissionsDialog } from './PermissionsDialog'
 import { WorktreesModal } from './WorktreesModal'
@@ -1271,6 +1271,36 @@ function UsageProgressBar({ label, window: w }: { label: string; window: RateWin
   )
 }
 
+function ExtraUsageBar({ extra }: { extra: ExtraUsage }): React.JSX.Element | null {
+  if (!extra.isEnabled) return null
+
+  const pct = Math.round(extra.utilization)
+  const color = getUsageColor(pct)
+  const usedDollars = (extra.usedCredits / 100).toFixed(2)
+
+  // unlimited vs capped
+  const limitStr = extra.monthlyLimit !== null
+    ? `$${usedDollars} / $${(extra.monthlyLimit / 100).toFixed(2)}`
+    : `$${usedDollars} used`
+
+  return (
+    <div className="mb-2 last:mb-0">
+      <div className="flex items-center justify-between mb-0.5">
+        <span className="text-[10px] text-text-secondary font-medium">Extra Usage</span>
+        <span className="text-[10px] text-text-muted font-mono">{limitStr}</span>
+      </div>
+      {extra.monthlyLimit !== null && (
+        <div className="h-1.5 rounded-full bg-white/10 overflow-hidden">
+          <div
+            className="h-full rounded-full transition-all duration-500"
+            style={{ width: `${Math.min(100, pct)}%`, backgroundColor: color }}
+          />
+        </div>
+      )}
+    </div>
+  )
+}
+
 function UsagePanel({ usage, onRefresh }: { usage: AccountUsage; onRefresh: () => void }): React.JSX.Element {
   const plan = formatPlanName(usage.planName)
   const ago = Math.round((Date.now() - usage.fetchedAt) / 1000)
@@ -1301,6 +1331,7 @@ function UsagePanel({ usage, onRefresh }: { usage: AccountUsage; onRefresh: () =
           {usage.sevenDay && <UsageProgressBar label="7-Day (all models)" window={usage.sevenDay} />}
           {usage.sevenDayOpus && <UsageProgressBar label="7-Day Opus" window={usage.sevenDayOpus} />}
           {usage.sevenDaySonnet && <UsageProgressBar label="7-Day Sonnet" window={usage.sevenDaySonnet} />}
+          {usage.extraUsage && <ExtraUsageBar extra={usage.extraUsage} />}
         </>
       )}
       {/* Block usage summary */}
