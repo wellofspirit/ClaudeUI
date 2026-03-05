@@ -773,45 +773,58 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
   // Watch ~/.claude/ui/ config files for cross-instance sync
   startConfigWatcher(win, () => ClaudeSession.getExtraWindows())
 
-  // Account usage polling (5hr / 7-day rate limits)
-  usageFetcher.setWindow(win)
-  // Wire up SDK usage relay — tries active user sessions first, then
-  // the always-on service session as fallback.
-  usageFetcher.setSessionGetter(async () => {
-    // Try active user sessions first (they're already running)
-    const sessions: import('../services/claude-session').ClaudeSession[] = []
-    manager.forEach((s) => sessions.push(s))
-    for (const session of sessions) {
-      try {
-        const data = await session.getUsage()
-        if (data !== null) return data
-      } catch { /* try next session */ }
-    }
-    // Fall back to the always-on service session
-    return serviceSession.getUsage()
-  })
-  // Start the service session for always-on control message access
-  serviceSession.start()
-  // Apply saved refresh interval before starting
   const savedSettings = loadSettings() as Record<string, unknown>
-  if (typeof savedSettings.usageRefreshSecs === 'number') {
-    usageFetcher.setIntervalSecs(savedSettings.usageRefreshSecs)
-  }
+
   // Apply saved session idle timeout
   if (typeof savedSettings.sessionTimeoutMins === 'number') {
     manager.setSessionTimeout(savedSettings.sessionTimeoutMins * 60 * 1000)
   }
-  usageFetcher.startPolling()
 
+  // Skip usage fetcher + service session in dev mode — they spawn extra
+  // SDK subprocesses and hit the API, which is unnecessary during development.
+  const { is } = require('@electron-toolkit/utils')
+  if (!is.dev) {
+    // Account usage polling (5hr / 7-day rate limits)
+    usageFetcher.setWindow(win)
+    // Wire up SDK usage relay — tries active user sessions first, then
+    // the always-on service session as fallback.
+    usageFetcher.setSessionGetter(async () => {
+      // Try active user sessions first (they're already running)
+      const sessions: import('../services/claude-session').ClaudeSession[] = []
+      manager.forEach((s) => sessions.push(s))
+      for (const session of sessions) {
+        try {
+          const data = await session.getUsage()
+          if (data !== null) return data
+        } catch { /* try next session */ }
+      }
+      // Fall back to the always-on service session
+      return serviceSession.getUsage()
+    })
+    // Start the service session for always-on control message access
+    serviceSession.start()
+    // Apply saved refresh interval before starting
+    if (typeof savedSettings.usageRefreshSecs === 'number') {
+      usageFetcher.setIntervalSecs(savedSettings.usageRefreshSecs)
+    }
+    usageFetcher.startPolling()
+
+    // Block usage analytics
+    blockUsageService.setWindow(win)
+    blockUsageService.recalculate().catch((err) => { logger.error('BlockUsage', 'Initial recalculation failed', err) })
+  } else {
+    logger.info('IPC', 'Dev mode — skipping usage fetcher, service session, and block usage')
+  }
+
+  // IPC handlers are always registered so the renderer never gets "no handler" errors.
+  // In dev mode they return null (usage UI gracefully handles missing data).
   ipcMain.handle('usage:fetch', async () => {
+    if (is.dev) return null
     return usageFetcher.fetch()
   })
 
-  // Block usage analytics
-  blockUsageService.setWindow(win)
-  blockUsageService.recalculate().catch((err) => { logger.error('BlockUsage', 'Initial recalculation failed', err) })
-
   ipcMain.handle('usage:fetch-block', async () => {
+    if (is.dev) return null
     return blockUsageService.getData() ?? (await blockUsageService.recalculate())
   })
 
