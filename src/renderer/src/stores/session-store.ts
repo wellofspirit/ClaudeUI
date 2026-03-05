@@ -123,6 +123,7 @@ export interface AppSettings {
   gitCommitMode: 'commit' | 'commit-push'
   usageRefreshSecs: number
   sessionTimeoutMins: number // 0 = never auto-disconnect
+  remoteFollowActions: boolean // follow remote client's session switches & messages
   sandbox: SandboxSettings
 }
 
@@ -147,6 +148,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   gitCommitMode: 'commit' as const,
   usageRefreshSecs: 120,
   sessionTimeoutMins: 15,
+  remoteFollowActions: true,
   sandbox: {
     enabled: false,
     autoAllowBashIfSandboxed: false,
@@ -475,7 +477,7 @@ interface SessionState {
   // Multi-session actions
   showWelcome: () => void
   switchSession: (routingId: string) => void
-  createNewSession: (routingId: string, cwd: string) => void
+  createNewSession: (routingId: string, cwd: string, switchTo?: boolean) => void
   loadHistoricalSession: (routingId: string, messages: ChatMessage[], cwd: string, taskNotifications?: TaskNotification[], subagentMessages?: Record<string, ChatMessage[]>, statusLine?: StatusLineData | null) => void
   markSdkActive: (routingId: string) => void
   markSdkInactive: (routingId: string) => void
@@ -526,6 +528,7 @@ interface SessionState {
   updateSettings: (partial: Partial<AppSettings>) => void
   applyExternalSettings: (settings: Record<string, unknown>) => void
   applyExternalSessionConfig: (config: { recentSessions?: string[]; pinnedSessions?: string[]; customTitles?: Record<string, string>; worktreeInfoMap?: Record<string, WorktreeInfo> }) => void
+  applyRemoteSnapshot: (snapshot: import('../../../shared/remote-protocol').FullStateSnapshot) => void
   setPermissionMode: (mode: PermissionMode, routingId?: string) => void
   setEffort: (effort: 'low' | 'medium' | 'high', routingId?: string) => void
   setStatusLine: (routingId: string, data: StatusLineData) => void
@@ -636,14 +639,12 @@ export const useSessionStore = create<SessionState>((set) => ({
       }
     }),
 
-  createNewSession: (routingId, cwd) =>
+  createNewSession: (routingId, cwd, switchTo = true) =>
     set((state) => {
       const recentSessionIds = [routingId, ...state.recentSessionIds.filter((id) => id !== routingId)].slice(0, state.settings.maxRecentSessions)
       saveSessionConfig(recentSessionIds, state.pinnedSessionIds, state.customTitles)
       return {
-        activeSessionId: routingId,
-        showAutomationView: false,
-        showUsageView: false,
+        ...(switchTo ? { activeSessionId: routingId, showAutomationView: false, showUsageView: false } : {}),
         sessions: { ...state.sessions, [routingId]: createEmptySession(cwd) },
         recentSessionIds
       }
@@ -1243,6 +1244,51 @@ export const useSessionStore = create<SessionState>((set) => ({
       worktreeInfoMap: config.worktreeInfoMap ?? {}
     })),
 
+  // Apply a full state snapshot from the remote server (initial sync)
+  applyRemoteSnapshot: (snapshot) =>
+    set(() => {
+      // Rebuild per-session state from the snapshot
+      const sessions: Record<string, PerSessionState> = {}
+      for (const [id, snap] of Object.entries(snapshot.sessions)) {
+        sessions[id] = {
+          ...EMPTY_SESSION_STATE,
+          cwd: snap.cwd,
+          messages: snap.messages,
+          streamingText: snap.streamingText,
+          streamingThinking: snap.streamingThinking,
+          status: snap.status,
+          pendingApprovals: snap.pendingApprovals,
+          todos: snap.todos,
+          taskNotifications: snap.taskNotifications,
+          taskProgressMap: snap.taskProgressMap,
+          subagentMessages: snap.subagentMessages,
+          subagentStreamingText: snap.subagentStreamingText,
+          subagentStreamingThinking: snap.subagentStreamingThinking,
+          permissionMode: snap.permissionMode as PermissionMode,
+          effort: snap.effort as 'low' | 'medium' | 'high',
+          statusLine: snap.statusLine,
+          teamName: snap.teamName,
+          teammates: snap.teammates,
+          focusedAgentId: snap.focusedAgentId
+        }
+      }
+
+      // Apply settings + theme
+      const settings = { ...DEFAULT_SETTINGS, ...(snapshot.settings as Partial<AppSettings>) }
+      applyTheme(settings.theme)
+
+      return {
+        sessions,
+        directories: snapshot.directories,
+        activeSessionId: snapshot.activeSessionId,
+        settings,
+        recentSessionIds: snapshot.recentSessionIds ?? [],
+        pinnedSessionIds: snapshot.pinnedSessionIds ?? [],
+        customTitles: snapshot.customTitles ?? {},
+        worktreeInfoMap: snapshot.worktreeInfoMap ?? {}
+      }
+    }),
+
   setPermissionMode: (mode, routingId) =>
     set((state) => {
       const id = routingId ?? state.activeSessionId
@@ -1797,4 +1843,85 @@ export function useFocusedAgentData(): FocusedAgentData {
       thinkingStartedAt: null // subagent thinking tracked separately
     }
   }))
+}
+
+// ---------------------------------------------------------------------------
+// Remote state snapshot (called from main process via executeJavaScript)
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a serializable snapshot of the current Zustand state for remote clients.
+ * Strips UI-only fields (draft text, git diffs, etc.) to keep the payload lean.
+ */
+export function getRemoteStateSnapshot(): {
+  sessions: Record<string, {
+    routingId: string
+    cwd: string
+    messages: ChatMessage[]
+    streamingText: string
+    streamingThinking: string
+    status: SessionStatus
+    pendingApprovals: PendingApproval[]
+    todos: TodoItem[]
+    taskNotifications: TaskNotification[]
+    taskProgressMap: Record<string, TaskProgress>
+    subagentMessages: Record<string, ChatMessage[]>
+    subagentStreamingText: Record<string, string>
+    subagentStreamingThinking: Record<string, string>
+    permissionMode: string
+    effort: string
+    statusLine: StatusLineData | null
+    teamName: string | null
+    teammates: Record<string, TeammateInfo>
+    focusedAgentId: string | null
+    slashCommands: SlashCommandInfo[]
+    sdkSkillNames: string[]
+  }>
+  directories: DirectoryGroup[]
+  activeSessionId: string | null
+  settings: Record<string, unknown>
+  recentSessionIds: string[]
+  pinnedSessionIds: string[]
+  customTitles: Record<string, string>
+  worktreeInfoMap: Record<string, WorktreeInfo>
+} {
+  const state = useSessionStore.getState()
+  const sessions: Record<string, unknown> = {}
+
+  for (const [id, s] of Object.entries(state.sessions)) {
+    sessions[id] = {
+      routingId: id,
+      cwd: s.cwd,
+      messages: s.messages,
+      streamingText: s.streamingText,
+      streamingThinking: s.streamingThinking,
+      status: s.status,
+      pendingApprovals: s.pendingApprovals,
+      todos: s.todos,
+      taskNotifications: s.taskNotifications,
+      taskProgressMap: s.taskProgressMap,
+      subagentMessages: s.subagentMessages,
+      subagentStreamingText: s.subagentStreamingText,
+      subagentStreamingThinking: s.subagentStreamingThinking,
+      permissionMode: s.permissionMode,
+      effort: s.effort,
+      statusLine: s.statusLine,
+      teamName: s.teamName,
+      teammates: s.teammates,
+      focusedAgentId: s.focusedAgentId,
+      slashCommands: state.slashCommands,
+      sdkSkillNames: state.sdkSkillNames
+    }
+  }
+
+  return {
+    sessions: sessions as ReturnType<typeof getRemoteStateSnapshot>['sessions'],
+    directories: state.directories,
+    activeSessionId: state.activeSessionId,
+    settings: state.settings as unknown as Record<string, unknown>,
+    recentSessionIds: state.recentSessionIds,
+    pinnedSessionIds: state.pinnedSessionIds,
+    customTitles: state.customTitles,
+    worktreeInfoMap: state.worktreeInfoMap
+  }
 }

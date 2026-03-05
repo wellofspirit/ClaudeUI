@@ -141,7 +141,6 @@ export function InputBox(): React.JSX.Element {
   const cwd = useActiveSession((s) => s.cwd)
   const status = useActiveSession((s) => s.status)
   const sdkActive = useActiveSession((s) => s.sdkActive)
-  const addUserMessage = useSessionStore((s) => s.addUserMessage)
   const markSdkActive = useSessionStore((s) => s.markSdkActive)
   const queuedText = useActiveSession((s) => s.queuedText)
   const appendQueuedText = useSessionStore((s) => s.appendQueuedText)
@@ -233,8 +232,6 @@ export function InputBox(): React.JSX.Element {
       needsSdkCreate = true
     }
 
-    addUserMessage(activeSessionId, uuid(), prompt, undefined, attachments)
-
     // Lazy SDK creation: create session on first message
     if (needsSdkCreate) {
       const { sessions } = useSessionStore.getState()
@@ -243,8 +240,9 @@ export function InputBox(): React.JSX.Element {
       markSdkActive(activeSessionId)
     }
 
+    // User message is added by the server-relayed session:user-message event
     await window.api.sendPrompt(activeSessionId, prompt, attachments)
-  }, [activeSessionId, addUserMessage, sdkActive, markSdkActive])
+  }, [activeSessionId, sdkActive, markSdkActive])
 
   const handleSend = useCallback(async () => {
     const prompt = text.trim()

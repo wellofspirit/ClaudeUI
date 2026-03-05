@@ -6,6 +6,7 @@ import { SettingsDialog, SettingsToggle } from './SettingsDialog'
 import { PermissionsDialog } from './PermissionsDialog'
 import { WorktreesModal } from './WorktreesModal'
 import { WorktreeCleanupModal } from './WorktreeCleanupModal'
+import { RemoteAccessModal } from './RemoteAccessModal'
 import { useAutomationStore } from '../stores/automation-store'
 
 /** Convert mouse event coords to zoom-adjusted position for fixed-position menus */
@@ -1112,9 +1113,30 @@ function NavItem({ label, icon, active, onClick, onDoubleClick, badge }: {
 function SettingsPanel(): React.JSX.Element {
   const [open, setOpen] = useState(false)
   const [dialogOpen, setDialogOpen] = useState(false)
+  const [remoteModalOpen, setRemoteModalOpen] = useState(false)
+  const [remoteRunning, setRemoteRunning] = useState(false)
+  const [remoteClients, setRemoteClients] = useState(0)
   const settings = useSessionStore((s) => s.settings)
   const updateSettings = useSessionStore((s) => s.updateSettings)
   const panelRef = useRef<HTMLDivElement>(null)
+
+  // Track remote server status
+  useEffect(() => {
+    if (window.api.platform === 'web') return
+    window.api.getRemoteStatus().then((s) => {
+      if (s) {
+        setRemoteRunning(s.running)
+        setRemoteClients(s.connectedClients)
+      }
+    })
+    const cleanup = window.api.onRemoteStatus((s) => {
+      if (s) {
+        setRemoteRunning(s.running)
+        setRemoteClients(s.connectedClients)
+      }
+    })
+    return cleanup
+  }, [])
 
   // Listen for 'open-settings' custom events (e.g. from sandbox pill in InputBox)
   useEffect(() => {
@@ -1197,9 +1219,26 @@ function SettingsPanel(): React.JSX.Element {
       )}
       <div style={{ padding: '8px 16px' }} className="border-t border-border/50 flex items-center gap-2.5 text-[11px] text-text-muted">
         <UsageRing />
+        {window.api.platform !== 'web' && (
+          <button
+            onClick={() => setRemoteModalOpen(true)}
+            className="flex items-center gap-1 h-6 rounded-md hover:bg-bg-hover transition-colors cursor-default ml-auto px-1"
+            title="Remote Access"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className={remoteRunning ? 'text-accent' : 'text-text-muted'}>
+              <path d="M5 12.55a11 11 0 0114.08 0" />
+              <path d="M1.42 9a16 16 0 0121.16 0" />
+              <path d="M8.53 16.11a6 6 0 016.95 0" />
+              <circle cx="12" cy="20" r="1" />
+            </svg>
+            {remoteRunning && remoteClients > 0 && (
+              <span className="text-accent text-[11px] font-medium leading-none">{remoteClients}</span>
+            )}
+          </button>
+        )}
         <button
           onClick={() => setOpen(!open)}
-          className="flex items-center justify-center w-6 h-6 rounded-md hover:bg-bg-hover transition-colors cursor-default ml-auto"
+          className={`flex items-center justify-center w-6 h-6 rounded-md hover:bg-bg-hover transition-colors cursor-default ${window.api.platform === 'web' ? 'ml-auto' : ''}`}
           title="Settings"
         >
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="text-text-muted">
@@ -1209,6 +1248,7 @@ function SettingsPanel(): React.JSX.Element {
         </button>
       </div>
       {dialogOpen && <SettingsDialog onClose={() => setDialogOpen(false)} />}
+      {remoteModalOpen && <RemoteAccessModal onClose={() => setRemoteModalOpen(false)} />}
     </div>
   )
 }

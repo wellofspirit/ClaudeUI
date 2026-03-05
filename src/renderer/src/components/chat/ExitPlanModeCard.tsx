@@ -1,6 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
-import { v4 as uuid } from 'uuid'
 import type { PendingApproval, ContentBlock as _ContentBlock } from '../../../../shared/types'
 
 type ToolUseBlock = Extract<_ContentBlock, { type: 'tool_use' }>
@@ -41,7 +40,6 @@ export function ExitPlanModeCard({ block, approval }: ExitPlanModeCardProps): Re
   const removePendingApproval = useSessionStore((s) => s.removePendingApproval)
   const clearConversation = useSessionStore((s) => s.clearConversation)
   const setPermissionMode = useSessionStore((s) => s.setPermissionMode)
-  const addUserMessage = useSessionStore((s) => s.addUserMessage)
   const markSdkActive = useSessionStore((s) => s.markSdkActive)
   const openPlanPanel = useSessionStore((s) => s.openPlanPanel)
   const cwd = useActiveSession((s) => s.cwd)
@@ -82,9 +80,9 @@ export function ExitPlanModeCard({ block, approval }: ExitPlanModeCardProps): Re
     if (sessionLogPath) {
       prompt += `\n\nIf you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: ${sessionLogPath}`
     }
-    addUserMessage(activeSessionId, uuid(), prompt, planContent)
+    // User message is added by the server-relayed session:user-message event
     await window.api.sendPrompt(activeSessionId, prompt)
-  }, [planContent, approval, cwd, activeSessionId, removePendingApproval, clearConversation, setPermissionMode, addUserMessage, markSdkActive])
+  }, [planContent, approval, cwd, activeSessionId, removePendingApproval, clearConversation, setPermissionMode, markSdkActive])
 
   // Option 2: Continue, auto-accept edits
   const handleContinueAutoEdit = useCallback(async () => {

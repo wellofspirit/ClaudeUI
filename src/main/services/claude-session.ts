@@ -105,6 +105,7 @@ export class ClaudeSession {
   private static extraWindows = new Set<BrowserWindow>()
   static addExtraWindow(win: BrowserWindow): void { this.extraWindows.add(win) }
   static removeExtraWindow(win: BrowserWindow): void { this.extraWindows.delete(win) }
+  static getExtraWindows(): Set<BrowserWindow> { return this.extraWindows }
 
   /** Return a snapshot of the current team state (pull-based, for TeamsView) */
   getTeamInfo(): { routingId: string; teamName: string | null; sessionId: string | null; projectKey: string | null; teammates: Array<{ toolUseId: string; name: string; sanitizedName: string; teamName: string; sanitizedTeamName: string; agentId: string; fileId: string; status: 'running' | 'completed' | 'failed' | 'stopped' }> } {

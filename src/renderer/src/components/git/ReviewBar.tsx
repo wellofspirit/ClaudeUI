@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useRef } from 'react'
-import { v4 as uuid } from 'uuid'
 import { useActiveSession, useSessionStore } from '../../stores/session-store'
 import type { DiffComment } from '../../../../shared/types'
 
@@ -43,7 +42,6 @@ export function ReviewBar({ comments }: Props): React.JSX.Element | null {
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const sdkActive = useActiveSession((s) => s.sdkActive)
   const sessions = useSessionStore((s) => s.sessions)
-  const addUserMessage = useSessionStore((s) => s.addUserMessage)
   const markSdkActive = useSessionStore((s) => s.markSdkActive)
   const clearDiffComments = useSessionStore((s) => s.clearDiffComments)
 
@@ -53,9 +51,6 @@ export function ReviewBar({ comments }: Props): React.JSX.Element | null {
     if (!activeSessionId || !comments.length) return
 
     const prompt = composeReviewPrompt(comments)
-
-    // Optimistic store update — message appears in chat immediately
-    addUserMessage(activeSessionId, uuid(), prompt)
 
     // Lazy SDK create if not yet active (same pattern as InputBox.doSend)
     if (!sdkActive) {
@@ -72,10 +67,10 @@ export function ReviewBar({ comments }: Props): React.JSX.Element | null {
       markSdkActive(activeSessionId)
     }
 
-    // Fire-and-forget — responses stream back via IPC events
+    // User message is added by the server-relayed session:user-message event
     await window.api.sendPrompt(activeSessionId, prompt)
     clearDiffComments(activeSessionId)
-  }, [activeSessionId, comments, sdkActive, sessions, addUserMessage, markSdkActive, clearDiffComments])
+  }, [activeSessionId, comments, sdkActive, sessions, markSdkActive, clearDiffComments])
 
   // Stable ref so the keydown handler always sees the latest handleSend
   const sendRef = useRef(handleSend)

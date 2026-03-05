@@ -13,6 +13,7 @@ import { execFile } from 'node:child_process'
 import { join } from 'node:path'
 import { homedir, platform } from 'node:os'
 import type { BrowserWindow } from 'electron'
+import { ClaudeSession } from './claude-session'
 import type { AccountUsage, ExtraUsage, RateWindow } from '../../shared/types'
 import { blockUsageService } from './block-usage'
 import { logger } from './logger'
@@ -159,6 +160,9 @@ export class UsageFetcher {
       if (this.window && !this.window.isDestroyed()) {
         this.window.webContents.send('usage:data', usage)
       }
+      for (const w of ClaudeSession.getExtraWindows()) {
+        if (!w.isDestroyed()) w.webContents.send('usage:data', usage)
+      }
     } catch { /* Window may have been closed */ }
   }
 
@@ -241,6 +245,12 @@ export class UsageFetcher {
         if (!retry.ok) return null
         const data = (await retry.json()) as Record<string, unknown>
         return this.parseResponse(data)
+      }
+
+      if (resp.status === 429) {
+        // Rate-limited — don't retry or fall back, just wait for the next poll cycle
+        logger.debug('UsageFetcher', 'Direct API returned 429 (rate limited), skipping until next poll')
+        return this.errorResult('Rate limited')
       }
 
       if (!resp.ok) {

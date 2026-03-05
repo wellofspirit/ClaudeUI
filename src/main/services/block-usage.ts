@@ -21,6 +21,7 @@ import type {
   DailyUsageFile,
   BlockUsageData
 } from '../../shared/types'
+import { ClaudeSession } from './claude-session'
 import { usageFetcher } from './usage-fetcher'
 import { logger } from './logger'
 
@@ -1076,6 +1077,9 @@ export class BlockUsageService {
     try {
       if (this.window && !this.window.isDestroyed()) {
         this.window.webContents.send('usage:block-data', data)
+      }
+      for (const w of ClaudeSession.getExtraWindows()) {
+        if (!w.isDestroyed()) w.webContents.send('usage:block-data', data)
       }
     } catch {
       // Window may have been closed

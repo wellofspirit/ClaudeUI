@@ -2,6 +2,7 @@ import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
 import type { BrowserWindow } from 'electron'
+import { ClaudeSession } from './claude-session'
 import { loadSessionHistory } from './session-history'
 import { logger } from './logger'
 
@@ -44,6 +45,9 @@ export function watchSession(
         const { messages, taskNotifications, statusLine } = await loadSessionHistory(sessionId, projectKey)
         if (!win.isDestroyed()) {
           win.webContents.send('session:watch-update', { routingId, messages, taskNotifications, statusLine })
+        }
+        for (const w of ClaudeSession.getExtraWindows()) {
+          if (!w.isDestroyed()) w.webContents.send('session:watch-update', { routingId, messages, taskNotifications, statusLine })
         }
       } catch (err) {
         logger.warn('SessionWatcher', `Parse error during watch update for ${sessionId}`, err)

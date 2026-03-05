@@ -62,6 +62,46 @@ export function useClaudeEvents(): void {
     }
 
     const cleanups = [
+      // Session lifecycle: another client (local or remote) created a session
+      window.api.onSessionCreated((routingId, data) => {
+        const store = useSessionStore.getState()
+        // Only act if this session doesn't already exist in our store
+        // (the initiating client already called createNewSession locally)
+        if (!store.sessions[routingId]) {
+          const follow = store.settings.remoteFollowActions
+          store.createNewSession(routingId, data.cwd, follow)
+          if (!follow) {
+            // Mark the session as needing attention so the sidebar shows activity
+            store.setNeedsAttention(routingId, true)
+          }
+          // If resuming an existing session, load its history from disk
+          if (data.resumeSessionId) {
+            const projectKey = store.directories
+              .find((g) => g.sessions.some((s) => s.sessionId === data.resumeSessionId))?.projectKey
+            if (projectKey) {
+              window.api.loadSessionHistory(data.resumeSessionId, projectKey).then(({ messages, taskNotifications, customTitle, statusLine }) => {
+                const s = useSessionStore.getState()
+                // Only populate if the session still exists and is still empty
+                if (s.sessions[routingId] && s.sessions[routingId].messages.length === 0) {
+                  s.loadHistoricalSession(routingId, messages, data.cwd, taskNotifications, {}, statusLine)
+                  if (customTitle) s.setCustomTitle(routingId, customTitle)
+                  // Re-mark active since loadHistoricalSession sets isHistorical
+                  s.markSdkActive(routingId)
+                }
+              })
+            }
+          }
+        }
+        // An SDK session was created — mark it active
+        store.markSdkActive(routingId)
+      }),
+      // User message relayed by the server (the single source of truth for user messages)
+      window.api.onUserMessage((routingId, data) => {
+        const store = useSessionStore.getState()
+        if (store.sessions[routingId]) {
+          store.addUserMessage(routingId, `msg-${Date.now()}`, data.prompt, undefined, data.attachments)
+        }
+      }),
       window.api.onMessage((routingId, msg) => {
         addMessage(routingId, msg)
 

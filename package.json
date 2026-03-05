@@ -18,7 +18,8 @@
     "build:unpack": "npm run build && electron-builder --dir",
     "build:win": "npm run build && electron-builder --win --dir",
     "build:mac": "electron-vite build && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac --dir && codesign --force --deep --sign - dist/mac-arm64/claudui.app && xattr -cr dist/mac-arm64/claudui.app",
-    "build:linux": "electron-vite build && electron-builder --linux"
+    "build:linux": "electron-vite build && electron-builder --linux",
+    "build:web": "vite build --config vite.web.config.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.2.63",
@@ -27,6 +28,7 @@
     "@git-diff-view/core": "^0.0.39",
     "@git-diff-view/react": "^0.0.39",
     "@tanstack/react-virtual": "^3.13.18",
+    "@types/qrcode": "^1.5.6",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
     "ansi_up": "^6.0.6",
@@ -34,10 +36,12 @@
     "diff": "^8.0.3",
     "node-pty": "^1.1.0",
     "prism-react-renderer": "^2.4.1",
+    "qrcode": "^1.5.4",
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1",
     "simple-git": "^3.31.1",
     "uuid": "^13.0.0",
+    "ws": "^8.19.0",
     "zustand": "^5.0.11"
   },
   "devDependencies": {
@@ -50,6 +54,7 @@
     "@types/react": "^19.2.7",
     "@types/react-dom": "^19.2.3",
     "@types/uuid": "^11.0.0",
+    "@types/ws": "^8.18.1",
     "@vitejs/plugin-react": "^5.1.1",
     "electron": "^39.2.6",
     "electron-builder": "^26.0.12",

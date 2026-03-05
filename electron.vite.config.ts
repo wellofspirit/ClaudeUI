@@ -7,7 +7,7 @@ export default defineConfig({
   main: {
     build: {
       rollupOptions: {
-        external: ['@anthropic-ai/claude-agent-sdk', 'node-pty']
+        external: ['@anthropic-ai/claude-agent-sdk', 'node-pty', 'ws']
       }
     }
   },

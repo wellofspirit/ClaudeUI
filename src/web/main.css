@@ -1,0 +1,195 @@
+@import "tailwindcss";
+@source "../renderer/src";
+@source ".";
+
+/* Prism's markdown tokenizer adds "table" as a token class. */
+pre .token.table {
+  display: inline !important;
+}
+
+.cv-auto {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 100px;
+}
+
+/* Import fonts from the renderer's assets directory */
+@font-face {
+  font-family: 'JetBrains Mono';
+  src: url('../renderer/src/assets/fonts/JetBrainsMono-Regular.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'JetBrains Mono';
+  src: url('../renderer/src/assets/fonts/JetBrainsMono-Bold.woff2') format('woff2');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+@theme {
+  --color-bg-primary: #0d1117;
+  --color-bg-secondary: #111318;
+  --color-bg-tertiary: #1a1d24;
+  --color-bg-hover: #22262e;
+  --color-bg-input: #161921;
+  --color-border: #23272f;
+  --color-border-bright: #343a46;
+  --color-text-primary: #d1d5db;
+  --color-text-secondary: #8b929e;
+  --color-text-muted: #4b5261;
+  --color-accent: #6c9eff;
+  --color-accent-hover: #8bb4ff;
+  --color-success: #4ade80;
+  --color-danger: #f87171;
+  --color-warning: #fbbf24;
+  --color-mode-edit: #8b5fcc;
+  --color-mode-edit-dim: #6b3fa0;
+  --color-mode-plan: #2a8a7a;
+  --color-mode-plan-dim: #1a5c52;
+
+  --font-mono: 'JetBrains Mono', 'SF Mono', Menlo, Consolas, monospace;
+}
+
+/* Light theme */
+[data-theme="light"] {
+  --color-bg-primary: #f0f0f0;
+  --color-bg-secondary: #dddfe3;
+  --color-bg-tertiary: #c5c8cf;
+  --color-bg-hover: #b8bbc3;
+  --color-bg-input: #d0d2d8;
+  --color-border: #9a9ea8;
+  --color-border-bright: #6b7080;
+  --color-text-primary: #000000;
+  --color-text-secondary: #1a1d24;
+  --color-text-muted: #4b5060;
+  --color-accent: #3a6fd8;
+  --color-accent-hover: #5284e0;
+  --color-success: #15803d;
+  --color-danger: #b91c1c;
+  --color-warning: #a16207;
+  --color-mode-edit: #6d35c7;
+  --color-mode-edit-dim: #9571d4;
+  --color-mode-plan: #1a7a6e;
+  --color-mode-plan-dim: #4bbcac;
+}
+
+/* Monokai theme */
+[data-theme="monokai"] {
+  --color-bg-primary: #272822;
+  --color-bg-secondary: #1e1f1a;
+  --color-bg-tertiary: #3e3d32;
+  --color-bg-hover: #4a493c;
+  --color-bg-input: #2d2e27;
+  --color-border: #49483e;
+  --color-border-bright: #75715e;
+  --color-text-primary: #f8f8f2;
+  --color-text-secondary: #a6a69c;
+  --color-text-muted: #75715e;
+  --color-accent: #66d9ef;
+  --color-accent-hover: #89e3f4;
+  --color-success: #a6e22e;
+  --color-danger: #f92672;
+  --color-warning: #e6db74;
+  --color-mode-edit: #ae81ff;
+  --color-mode-edit-dim: #8c6bc8;
+  --color-mode-plan: #a6e22e;
+  --color-mode-plan-dim: #7aa31e;
+}
+
+body {
+  min-height: 100vh;
+  /* Solid background for web (no Electron transparency) */
+  background: var(--color-bg-primary);
+  color: var(--color-text-primary);
+  font-family:
+    -apple-system,
+    BlinkMacSystemFont,
+    'Segoe UI',
+    'Noto Sans',
+    Helvetica,
+    Arial,
+    sans-serif;
+  font-size: 13px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow: hidden;
+  /* Prevent iOS rubber-banding */
+  overscroll-behavior: none;
+  /* Prevent text selection on mobile */
+  -webkit-tap-highlight-color: transparent;
+}
+
+html, #root {
+  height: 100vh;
+  height: 100dvh; /* Dynamic viewport height for mobile browsers */
+  background: var(--color-bg-primary);
+}
+
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--color-border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--color-border-bright); }
+
+.chat-scroll::-webkit-scrollbar { width: 7px; }
+.chat-scroll::-webkit-scrollbar-track { background: var(--color-bg-secondary); border-radius: 3.5px; }
+.chat-scroll::-webkit-scrollbar-thumb { background: var(--color-text-muted); border-radius: 3.5px; min-height: 48px; }
+.chat-scroll::-webkit-scrollbar-thumb:hover { background: var(--color-text-secondary); }
+
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+@keyframes cursor-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+@keyframes spin-slow {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+@keyframes typing-bounce {
+  0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
+  30% { transform: translateY(-4px); opacity: 1; }
+}
+
+@keyframes thinking-wave {
+  0%, 100% { color: var(--color-text-secondary); }
+  40%, 60% { color: var(--color-text-primary); }
+}
+
+.animate-fade-in { animation: fade-in 0.15s ease-out; }
+.animate-cursor-blink { animation: cursor-blink 1s step-end infinite; }
+.animate-spin-slow { animation: spin-slow 1.5s linear infinite; }
+.animate-thinking-wave { animation: thinking-wave 2s ease-in-out infinite; }
+
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes toast-out {
+  from { opacity: 1; transform: translateY(0); }
+  to { opacity: 0; transform: translateY(-8px); }
+}
+.animate-toast-in { animation: toast-in 0.2s ease-out forwards; }
+.animate-toast-out { animation: toast-out 0.2s ease-in forwards; }
+
+[data-theme="light"] .light-no-border {
+  border-color: transparent;
+}
+
+::selection {
+  background: var(--color-accent);
+  color: white;
+}

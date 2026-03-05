@@ -208,13 +208,18 @@ const SESSION_IPC_CHANNELS = [
   'session:sandbox-violation'
 ]
 
-export function registerSessionIpc(win: BrowserWindow): void {
+/** Shared SessionManager — created once, used by both IPC and remote handlers. */
+let sharedManager: SessionManager | null = null
+export function getSessionManager(): SessionManager | null { return sharedManager }
+
+export function registerSessionIpc(win: BrowserWindow): SessionManager {
   // Remove previous handlers to allow re-registration (e.g. macOS dock re-open)
   for (const channel of SESSION_IPC_CHANNELS) {
     ipcMain.removeHandler(channel)
   }
 
   const manager = new SessionManager()
+  sharedManager = manager
 
   ipcMain.handle('session:pick-folder', async () => {
     const result = await dialog.showOpenDialog(win, {
@@ -230,6 +235,10 @@ export function registerSessionIpc(win: BrowserWindow): void {
       const settings = loadSettings() as Record<string, unknown>
       const sandboxConfig = (settings.sandbox as SandboxSettings) || undefined
       manager.create(routingId, win, cwd, effort, resumeSessionId, permissionMode, model, sandboxConfig)
+      // Notify all extra windows (remote bridge) that a session was created
+      for (const w of ClaudeSession.getExtraWindows()) {
+        if (!w.isDestroyed()) w.webContents.send('session:created', routingId, { cwd, resumeSessionId })
+      }
     }
   )
 
@@ -241,6 +250,13 @@ export function registerSessionIpc(win: BrowserWindow): void {
     const session = manager.get(routingId)
     if (!session) throw new Error(`No session for routingId: ${routingId}`)
     session.run(prompt, attachments)
+    // Relay user message back to all renderers (local + remote) as the single source of truth
+    if (!win.isDestroyed()) {
+      win.webContents.send('session:user-message', routingId, { prompt, attachments })
+    }
+    for (const w of ClaudeSession.getExtraWindows()) {
+      if (!w.isDestroyed()) w.webContents.send('session:user-message', routingId, { prompt, attachments })
+    }
   })
 
   ipcMain.handle('session:cancel', (_event, routingId: string) => {
@@ -395,9 +411,19 @@ export function registerSessionIpc(win: BrowserWindow): void {
     if (typeof timeoutMins === 'number') {
       manager.setSessionTimeout(timeoutMins * 60 * 1000)
     }
+    // Notify remote clients of settings change
+    for (const w of ClaudeSession.getExtraWindows()) {
+      if (!w.isDestroyed()) w.webContents.send('config:settings-changed', settings)
+    }
   })
   ipcMain.handle('config:load-sessions', () => loadSessionConfig())
-  ipcMain.handle('config:save-sessions', (_e, config: UISessionConfig) => saveSessionConfig(config))
+  ipcMain.handle('config:save-sessions', (_e, config: UISessionConfig) => {
+    saveSessionConfig(config)
+    // Notify remote clients of session config change
+    for (const w of ClaudeSession.getExtraWindows()) {
+      if (!w.isDestroyed()) w.webContents.send('config:sessions-changed', config)
+    }
+  })
   ipcMain.handle('config:load-slash-commands', () => loadSlashCommands())
   ipcMain.handle('config:save-slash-commands', (_e, commands: SlashCommandCache[]) => saveSlashCommands(commands))
   ipcMain.handle('config:load-skill-details', (_e, cwd: string) => scanSkills(cwd))
@@ -703,6 +729,9 @@ export function registerSessionIpc(win: BrowserWindow): void {
       if (!win.isDestroyed()) {
         win.webContents.send('git:status-update', { cwd, status })
       }
+      for (const w of ClaudeSession.getExtraWindows()) {
+        if (!w.isDestroyed()) w.webContents.send('git:status-update', { cwd, status })
+      }
     }, 5000)
   })
 
@@ -742,7 +771,7 @@ export function registerSessionIpc(win: BrowserWindow): void {
   startProjectsWatcher(win)
 
   // Watch ~/.claude/ui/ config files for cross-instance sync
-  startConfigWatcher(win)
+  startConfigWatcher(win, () => ClaudeSession.getExtraWindows())
 
   // Account usage polling (5hr / 7-day rate limits)
   usageFetcher.setWindow(win)
@@ -785,6 +814,8 @@ export function registerSessionIpc(win: BrowserWindow): void {
   ipcMain.handle('usage:fetch-block', async () => {
     return blockUsageService.getData() ?? (await blockUsageService.recalculate())
   })
+
+  return manager
 }
 
 function startProjectsWatcher(win: BrowserWindow): void {
@@ -798,6 +829,9 @@ function startProjectsWatcher(win: BrowserWindow): void {
     debounceTimer = setTimeout(() => {
       if (!win.isDestroyed()) {
         win.webContents.send('session:directories-changed')
+      }
+      for (const w of ClaudeSession.getExtraWindows()) {
+        if (!w.isDestroyed()) w.webContents.send('session:directories-changed')
       }
     }, 500)
   }

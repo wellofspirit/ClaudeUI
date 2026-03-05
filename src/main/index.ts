@@ -5,6 +5,9 @@ import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import { registerSessionIpc } from './ipc/session.ipc'
 import { registerTerminalIpc } from './ipc/terminal.ipc'
 import { registerAutomationIpc } from './ipc/automation.ipc'
+import { registerRemoteHandlers } from './ipc/remote-handlers'
+import { RemoteServer, getNetworkInterfaces } from './services/remote-server'
+import { RemoteDispatcher } from './services/remote-dispatcher'
 import { serviceSession } from './services/service-session'
 import { logger } from './services/logger'
 import icon from '../../resources/icon.png?asset'
@@ -60,9 +63,32 @@ function createWindow(): void {
     }
   })
 
-  registerSessionIpc(mainWindow)
+  const sessionManager = registerSessionIpc(mainWindow)
   registerTerminalIpc(mainWindow)
   const automationManager = registerAutomationIpc(mainWindow)
+
+  // Remote access server
+  const remoteDispatcher = new RemoteDispatcher()
+  const remoteServer = new RemoteServer(remoteDispatcher)
+  remoteServer.setWindow(mainWindow)
+  registerRemoteHandlers(remoteDispatcher, sessionManager, mainWindow)
+
+  // Remote access IPC handlers
+  for (const ch of ['remote:interfaces', 'remote:start', 'remote:stop', 'remote:status']) {
+    ipcMain.removeHandler(ch)
+  }
+  ipcMain.handle('remote:interfaces', () => {
+    return getNetworkInterfaces()
+  })
+  ipcMain.handle('remote:start', async (_e, opts?: { port?: number; host?: string }) => {
+    return await remoteServer.start(opts?.port ?? 0, opts?.host)
+  })
+  ipcMain.handle('remote:stop', () => {
+    remoteServer.stop()
+  })
+  ipcMain.handle('remote:status', () => {
+    return remoteServer.getStatus()
+  })
 
   // Before-quit: give renderer a chance to prompt about active worktrees
   let quitConfirmed = false
@@ -70,6 +96,7 @@ function createWindow(): void {
 
   app.on('before-quit', (e) => {
     automationManager.stopAll()
+    remoteServer.stop()
     // Stop the service session (lightweight CLI subprocess for usage polling)
     serviceSession.stop()
     if (quitConfirmed) return

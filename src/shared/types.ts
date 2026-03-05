@@ -266,6 +266,8 @@ interface SessionAPI {
   loadSubagentHistory(sessionId: string, projectKey: string, agentId: string): Promise<ChatMessage[]>
   buildSubagentFileMap(sessionId: string, projectKey: string, taskPrompts: Record<string, string>): Promise<Record<string, string>>
   loadBackgroundOutput(projectKey: string, taskId: string, outputFile?: string): Promise<{ content: string | null; purged: boolean }>
+  onSessionCreated(cb: (routingId: string, data: { cwd: string; resumeSessionId?: string }) => void): () => void
+  onUserMessage(cb: (routingId: string, data: { prompt: string; attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }> }) => void): () => void
   onMessage(cb: (routingId: string, msg: ChatMessage) => void): () => void
   onStreamEvent(cb: (routingId: string, delta: StreamDelta) => void): () => void
   onApprovalRequest(cb: (routingId: string, approval: PendingApproval) => void): () => void
@@ -408,7 +410,31 @@ interface AccountAPI {
   onBlockUsage(cb: (data: BlockUsageData) => void): () => void
 }
 
-export interface ClaudeAPI extends SessionAPI, GitAPI, McpAPI, TerminalAPI, AutomationAPI, FileAPI, AccountAPI {}
+export interface NetworkInterfaceInfo {
+  name: string // e.g. "Wi-Fi", "Ethernet", "Tailscale"
+  address: string // e.g. "192.168.1.100"
+  priority: number // lower = more preferred (1 = LAN, 9 = CGNAT/VPN)
+}
+
+interface RemoteAPI {
+  getNetworkInterfaces(): Promise<NetworkInterfaceInfo[]>
+  startRemoteServer(opts?: { port?: number; host?: string }): Promise<{ port: number; token: string; lanUrl: string }>
+  stopRemoteServer(): Promise<void>
+  getRemoteStatus(): Promise<RemoteStatus>
+  onRemoteStatus(cb: (status: RemoteStatus) => void): () => void
+}
+
+export interface RemoteStatus {
+  running: boolean
+  port: number | null
+  token: string | null
+  lanUrl: string | null
+  tunnelUrl: string | null
+  connectedClients: number
+  clientIps: string[]
+}
+
+export interface ClaudeAPI extends SessionAPI, GitAPI, McpAPI, TerminalAPI, AutomationAPI, FileAPI, AccountAPI, RemoteAPI {}
 
 // ---------------------------------------------------------------------------
 // Account usage types (5hr / 7-day rate windows)

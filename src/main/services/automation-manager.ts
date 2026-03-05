@@ -5,7 +5,7 @@ import * as path from 'path'
 import * as os from 'os'
 import { Notification, type BrowserWindow } from 'electron'
 import { CronExpressionParser } from 'cron-parser'
-import { getCliJsPath } from './claude-session'
+import { getCliJsPath, ClaudeSession } from './claude-session'
 import { loadClaudePermissions } from './claude-settings'
 import { loadSessionHistory } from './session-history'
 import { logger } from './logger'
@@ -406,17 +406,26 @@ export class AutomationManager {
     if (!this.win.isDestroyed()) {
       this.win.webContents.send('automation:run-message', { automationId, message })
     }
+    for (const w of ClaudeSession.getExtraWindows()) {
+      if (!w.isDestroyed()) w.webContents.send('automation:run-message', { automationId, message })
+    }
   }
 
   private emitStreamEvent(automationId: string, type: string, text: string): void {
     if (!this.win.isDestroyed()) {
       this.win.webContents.send('automation:stream-event', { automationId, type, text })
     }
+    for (const w of ClaudeSession.getExtraWindows()) {
+      if (!w.isDestroyed()) w.webContents.send('automation:stream-event', { automationId, type, text })
+    }
   }
 
   private emitProcessing(automationId: string, isProcessing: boolean): void {
     if (!this.win.isDestroyed()) {
       this.win.webContents.send('automation:processing', { automationId, isProcessing })
+    }
+    for (const w of ClaudeSession.getExtraWindows()) {
+      if (!w.isDestroyed()) w.webContents.send('automation:processing', { automationId, isProcessing })
     }
   }
 
@@ -772,11 +781,17 @@ export class AutomationManager {
     if (!this.win.isDestroyed()) {
       this.win.webContents.send('automation:run-update', { automationId, run })
     }
+    for (const w of ClaudeSession.getExtraWindows()) {
+      if (!w.isDestroyed()) w.webContents.send('automation:run-update', { automationId, run })
+    }
   }
 
   private notifyAutomationsChanged(): void {
     if (!this.win.isDestroyed()) {
       this.win.webContents.send('automation:changed', this.automations)
+    }
+    for (const w of ClaudeSession.getExtraWindows()) {
+      if (!w.isDestroyed()) w.webContents.send('automation:changed', this.automations)
     }
   }
 

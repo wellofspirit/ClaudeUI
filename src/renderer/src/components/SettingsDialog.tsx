@@ -699,6 +699,42 @@ const SECTIONS: Section[] = [
     ]
   },
   {
+    id: 'remote',
+    label: 'Remote',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <path d="M5 12.55a11 11 0 0114.08 0" />
+        <path d="M1.42 9a16 16 0 0121.16 0" />
+        <path d="M8.53 16.11a6 6 0 016.95 0" />
+        <circle cx="12" cy="20" r="1" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'remoteFollowActions',
+        label: 'Follow remote actions',
+        keywords: 'remote phone sync follow mirror switch session',
+        render: (s, u) => (
+          <SettingsToggle
+            label="Follow remote actions"
+            checked={s.remoteFollowActions}
+            onChange={(v) => u({ remoteFollowActions: v })}
+            tooltip="When on, the local view auto-switches to sessions created or used by the remote client. When off, remote sessions still run in the background but the local view stays put."
+          />
+        )
+      }
+    ]
+  },
+  {
     id: 'permissions',
     label: 'Permissions',
     icon: (

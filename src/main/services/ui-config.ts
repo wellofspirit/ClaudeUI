@@ -136,7 +136,7 @@ export function saveSlashCommands(commands: SlashCommandCache[]): void {
  * Polling interval is 500ms — a good balance between responsiveness and CPU.
  * For just 2 small config files, the stat overhead is negligible.
  */
-export function startConfigWatcher(win: BrowserWindow): () => void {
+export function startConfigWatcher(win: BrowserWindow, getExtraWindows?: () => Set<BrowserWindow>): () => void {
   ensureDir()
 
   const watched = [
@@ -166,6 +166,12 @@ export function startConfigWatcher(win: BrowserWindow): () => void {
         const data = JSON.parse(content)
         if (!win.isDestroyed()) {
           win.webContents.send(entry.channel, data)
+        }
+        // Also forward to extra windows (remote bridge, teams-view, etc.)
+        if (getExtraWindows) {
+          for (const w of getExtraWindows()) {
+            if (!w.isDestroyed()) w.webContents.send(entry.channel, data)
+          }
         }
       } catch (err) {
         logger.warn('UIConfig', `Malformed JSON in ${path.basename(entry.filePath)}`, err)

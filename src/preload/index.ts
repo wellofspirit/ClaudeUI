@@ -53,6 +53,8 @@ const api: ClaudeAPI = {
     ipcRenderer.invoke('session:load-background-output', projectKey, taskId, outputFile),
 
   // Routed session events — each passes (routingId, data) as separate args
+  onSessionCreated: onEvent('session:created'),
+  onUserMessage: onEvent('session:user-message'),
   onMessage: onEvent('session:message'),
   onStreamEvent: onEvent('session:stream'),
   onApprovalRequest: onEvent('session:approval-request'),
@@ -235,7 +237,14 @@ const api: ClaudeAPI = {
 
   logError: (source: string, message: string) => {
     ipcRenderer.send('log:error', source, message)
-  }
+  },
+
+  // Remote access
+  getNetworkInterfaces: () => ipcRenderer.invoke('remote:interfaces'),
+  startRemoteServer: (opts?: { port?: number; host?: string }) => ipcRenderer.invoke('remote:start', opts),
+  stopRemoteServer: () => ipcRenderer.invoke('remote:stop'),
+  getRemoteStatus: () => ipcRenderer.invoke('remote:status'),
+  onRemoteStatus: onEvent('remote:status')
 }
 
 if (process.contextIsolated) {
