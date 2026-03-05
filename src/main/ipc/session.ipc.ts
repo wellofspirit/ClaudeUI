@@ -3,6 +3,7 @@ import * as path from 'path'
 import * as os from 'os'
 import { ipcMain, dialog, BrowserWindow } from 'electron'
 import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk'
+import { PERSISTED_SESSIONS_DIR } from '../services/persisted-sessions-dir'
 import { SessionManager } from '../services/session-manager'
 import { getCliJsPath, ClaudeSession } from '../services/claude-session'
 import { listDirectories, loadSessionHistory, loadSubagentHistory, buildSubagentFileMap, loadBackgroundOutput } from '../services/session-history'
@@ -58,7 +59,7 @@ async function generateTitle(conversationText: string): Promise<string | null> {
       prompt: conversationText,
       options: {
         ...(cliPath ? { pathToClaudeCodeExecutable: cliPath } : {}),
-        cwd: process.cwd(),
+        cwd: PERSISTED_SESSIONS_DIR,
         abortController: abort,
         systemPrompt: TITLE_SYSTEM_PROMPT,
         model: 'claude-haiku-4-5-20251001',
@@ -112,7 +113,7 @@ async function generateCommitMessage(diff: string): Promise<string | null> {
       prompt: diff,
       options: {
         ...(cliPath ? { pathToClaudeCodeExecutable: cliPath } : {}),
-        cwd: process.cwd(),
+        cwd: PERSISTED_SESSIONS_DIR,
         abortController: abort,
         systemPrompt: COMMIT_MSG_SYSTEM_PROMPT,
         model: 'claude-haiku-4-5-20251001',
@@ -162,7 +163,7 @@ async function fetchModels(): Promise<ModelInfo[]> {
     prompt: '',
     options: {
       ...(cliPath ? { pathToClaudeCodeExecutable: cliPath } : {}),
-      cwd: process.cwd(),
+      cwd: PERSISTED_SESSIONS_DIR,
       abortController: abort
     }
   })

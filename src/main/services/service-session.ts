@@ -13,6 +13,7 @@
 
 import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk'
 import { getCliJsPath } from './claude-session'
+import { PERSISTED_SESSIONS_DIR } from './persisted-sessions-dir'
 import { logger } from './logger'
 
 class ServiceSession {
@@ -82,7 +83,7 @@ class ServiceSession {
       prompt: 'Reply with OK',
       options: {
         ...(cliPath ? { pathToClaudeCodeExecutable: cliPath } : {}),
-        cwd: process.cwd(),
+        cwd: PERSISTED_SESSIONS_DIR,
         model: 'claude-haiku-4-5',
         effort: 'low',
         thinking: { type: 'disabled' },

@@ -5,6 +5,7 @@ import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import { registerSessionIpc } from './ipc/session.ipc'
 import { registerTerminalIpc } from './ipc/terminal.ipc'
 import { registerAutomationIpc } from './ipc/automation.ipc'
+import { serviceSession } from './services/service-session'
 import { logger } from './services/logger'
 import icon from '../../resources/icon.png?asset'
 
@@ -70,7 +71,7 @@ function createWindow(): void {
   app.on('before-quit', (e) => {
     automationManager.stopAll()
     // Stop the service session (lightweight CLI subprocess for usage polling)
-    import('./services/service-session').then(({ serviceSession }) => serviceSession.stop()).catch(() => {})
+    serviceSession.stop()
     if (quitConfirmed) return
     e.preventDefault()
     if (!mainWindow.isDestroyed()) {
