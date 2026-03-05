@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
+import { useIsMobile } from '../../hooks/useIsMobile'
 
 function ErrorCard({ error, onDismiss }: { error: string; onDismiss: () => void }): React.JSX.Element {
   const [expanded, setExpanded] = useState(false)
@@ -77,6 +78,7 @@ function ErrorCard({ error, onDismiss }: { error: string; onDismiss: () => void 
 }
 
 export function FloatingError(): React.JSX.Element | null {
+  const isMobile = useIsMobile()
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const errors = useActiveSession((s) => s.errors)
   const removeError = useSessionStore((s) => s.removeError)
@@ -86,7 +88,7 @@ export function FloatingError(): React.JSX.Element | null {
   return (
     <div className="absolute top-12 left-0 right-0 z-20 pointer-events-none">
       <div className="pointer-events-auto px-4 pt-2">
-        <div className="max-w-[740px] mx-auto flex flex-col gap-2">
+        <div className={`${isMobile ? 'max-w-full' : 'max-w-[740px]'} mx-auto flex flex-col gap-2`}>
           {errors.map((error, index) => (
             <ErrorCard key={index} error={error} onDismiss={() => activeSessionId && removeError(activeSessionId, index)} />
           ))}

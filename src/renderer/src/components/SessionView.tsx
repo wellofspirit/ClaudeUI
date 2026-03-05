@@ -11,12 +11,13 @@ import { useActiveSession, useSessionStore, applyTheme, normalizeCwd } from '../
 import { useGitWatcher } from '../hooks/useGitWatcher'
 import { useAutomationEvents } from '../hooks/useAutomationEvents'
 import { useTerminalColdCleanup } from '../hooks/useTerminalColdCleanup'
+import { useIsMobile, useVisualViewportHeight } from '../hooks/useIsMobile'
 import { QuitWorktreeModal } from './QuitWorktreeModal'
 
 
 const PERMISSION_MODES = ['default', 'acceptEdits', 'plan'] as const
 
-const SidebarContext = createContext<{ collapsed: boolean; toggle: () => void }>({ collapsed: false, toggle: () => {} })
+const SidebarContext = createContext<{ collapsed: boolean; toggle: () => void; isMobile: boolean }>({ collapsed: false, toggle: () => {}, isMobile: false })
 export const useSidebarCollapsed = () => useContext(SidebarContext)
 
 function useResizablePanel(key: string, defaultW: number, min: number, max: number) {
@@ -117,6 +118,8 @@ function HorizontalResizeHandle({ onMouseDown }: { onMouseDown: (e: React.MouseE
 }
 
 export function SessionView(): React.JSX.Element {
+  const isMobile = useIsMobile()
+  const visualHeight = useVisualViewportHeight(isMobile)
   const uiFontScale = useSessionStore((s) => s.settings.uiFontScale)
   const showUsageView = useSessionStore((s) => s.showUsageView)
   const setShowUsageView = useSessionStore((s) => s.setShowUsageView)
@@ -129,7 +132,7 @@ export function SessionView(): React.JSX.Element {
   const planPanel = useResizablePanel('planPanelWidth', 500, 350, 900)
   const terminalPanelOpen = useSessionStore((s) => s.terminalPanelOpen)
   const bottomPanel = useResizableBottomPanel('terminalPanelHeight', 120, 600)
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem('sidebarCollapsed') === 'true')
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => isMobile ? true : localStorage.getItem('sidebarCollapsed') === 'true')
 
   // Git repo detection and polling
   useGitWatcher()
@@ -220,9 +223,25 @@ export function SessionView(): React.JSX.Element {
   }, [])
 
   return (
-    <SidebarContext.Provider value={{ collapsed: sidebarCollapsed, toggle: toggleSidebar }}>
-      <div style={uiFontScale !== 1 ? { zoom: uiFontScale, height: `calc(100vh / ${uiFontScale})`, width: `calc(100vw / ${uiFontScale})` } : undefined} className={`h-screen flex ${import.meta.env.DEV ? 'border-2 border-orange-400 rounded-2xl overflow-hidden' : ''}`}>
-        {!sidebarCollapsed && (
+    <SidebarContext.Provider value={{ collapsed: sidebarCollapsed, toggle: toggleSidebar, isMobile }}>
+      <div
+        style={{
+          height: visualHeight ? `${visualHeight / uiFontScale}px` : (uiFontScale !== 1 ? `calc(100dvh / ${uiFontScale})` : undefined),
+          ...(uiFontScale !== 1 ? { zoom: uiFontScale, width: `calc(100vw / ${uiFontScale})` } : {}),
+        }}
+        className={`${visualHeight ? '' : 'h-screen'} flex ${import.meta.env.DEV ? 'border-2 border-orange-400 rounded-2xl overflow-hidden' : ''}`}
+      >
+        {/* Mobile sidebar drawer */}
+        {isMobile && !sidebarCollapsed && (
+          <>
+            <div className="fixed inset-0 bg-black/40 z-40" onClick={toggleSidebar} />
+            <div className="fixed inset-y-0 left-0 z-50 w-[280px] animate-slide-in-left overflow-y-auto">
+              <Sidebar style={{ width: 280, height: '100%' }} onToggleCollapse={toggleSidebar} />
+            </div>
+          </>
+        )}
+        {/* Desktop sidebar */}
+        {!isMobile && !sidebarCollapsed && (
           <>
             <Sidebar style={{ width: sidebar.width }} onToggleCollapse={toggleSidebar} />
             <ResizeHandle onMouseDown={sidebar.onMouseDown(1)} />
@@ -231,7 +250,7 @@ export function SessionView(): React.JSX.Element {
         <div className={`flex-1 min-w-0 flex flex-col ${window.api.platform === 'darwin' ? 'bg-bg-secondary/60' : 'bg-bg-secondary/80'}`}>
           {/* Main content row: chat + optional right panels */}
           <div className="flex-1 min-w-0 min-h-0 flex">
-            <div className={`flex-1 min-w-0 h-full flex flex-col bg-bg-primary overflow-hidden ${sidebarCollapsed ? '' : 'rounded-l-2xl shadow-[-1px_0_4px_rgba(0,0,0,0.15),-3px_0_12px_rgba(0,0,0,0.1)]'}`}>
+            <div className={`flex-1 min-w-0 h-full flex flex-col bg-bg-primary overflow-hidden ${sidebarCollapsed || isMobile ? '' : 'rounded-l-2xl shadow-[-1px_0_4px_rgba(0,0,0,0.15),-3px_0_12px_rgba(0,0,0,0.1)]'}`}>
               {showUsageView ? (
                 <UsageView onClose={() => setShowUsageView(false)} />
               ) : showAutomationView ? (
@@ -240,19 +259,19 @@ export function SessionView(): React.JSX.Element {
                 <ChatPanel />
               )}
             </div>
-            {rightPanel === 'task' && (
+            {!isMobile && rightPanel === 'task' && (
               <>
                 <ResizeHandle onMouseDown={taskPanel.onMouseDown(-1)} />
                 <TaskDetailPanel style={{ width: taskPanel.width }} />
               </>
             )}
-            {rightPanel === 'git' && (
+            {!isMobile && rightPanel === 'git' && (
               <>
                 <ResizeHandle onMouseDown={gitPanel.onMouseDown(-1)} />
                 <GitPanel style={{ width: gitPanel.width }} />
               </>
             )}
-            {rightPanel === 'plan' && (
+            {!isMobile && rightPanel === 'plan' && (
               <>
                 <ResizeHandle onMouseDown={planPanel.onMouseDown(-1)} />
                 <PlanReviewPanel style={{ width: planPanel.width }} />
@@ -260,10 +279,12 @@ export function SessionView(): React.JSX.Element {
             )}
           </div>
           {/* Bottom terminal panel — always mounted to preserve xterm scrollback */}
-          <div style={{ display: terminalPanelOpen ? 'contents' : 'none' }}>
-            <HorizontalResizeHandle onMouseDown={bottomPanel.onMouseDown} />
-            <TerminalPanel style={{ height: bottomPanel.height }} />
-          </div>
+          {!isMobile && (
+            <div style={{ display: terminalPanelOpen ? 'contents' : 'none' }}>
+              <HorizontalResizeHandle onMouseDown={bottomPanel.onMouseDown} />
+              <TerminalPanel style={{ height: bottomPanel.height }} />
+            </div>
+          )}
         </div>
       </div>
       <QuitWorktreeModal />

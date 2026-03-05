@@ -1,5 +1,6 @@
 import { useEffect } from 'react'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
+import { useIsMobile } from '../../hooks/useIsMobile'
 
 function ViolationCard({ message, onDismiss }: { message: string; onDismiss: () => void }): React.JSX.Element {
   useEffect(() => {
@@ -44,6 +45,7 @@ function ViolationCard({ message, onDismiss }: { message: string; onDismiss: () 
 }
 
 export function SandboxViolationToast(): React.JSX.Element | null {
+  const isMobile = useIsMobile()
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const violations = useActiveSession((s) => s.sandboxViolations)
   const removeSandboxViolation = useSessionStore((s) => s.removeSandboxViolation)
@@ -53,7 +55,7 @@ export function SandboxViolationToast(): React.JSX.Element | null {
   return (
     <div className="absolute top-12 left-0 right-0 z-20 pointer-events-none">
       <div className="pointer-events-auto px-4 pt-2">
-        <div className="max-w-[740px] mx-auto flex flex-col gap-2">
+        <div className={`${isMobile ? 'max-w-full' : 'max-w-[740px]'} mx-auto flex flex-col gap-2`}>
           {violations.map((message, index) => (
             <ViolationCard
               key={`${index}-${message}`}

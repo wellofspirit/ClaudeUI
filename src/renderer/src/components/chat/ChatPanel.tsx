@@ -12,6 +12,7 @@ import { SandboxViolationToast } from './SandboxViolationToast'
 import { WindowControls } from '../WindowControls'
 import { useSidebarCollapsed } from '../SessionView'
 import { AgentTabBar } from './AgentTabBar'
+import { useIsMobile } from '../../hooks/useIsMobile'
 import { WorktreePill } from '../git/WorktreePill'
 import { GitBranchPill } from '../git/GitBranchPill'
 import { GitChangesPill } from '../git/GitChangesPill'
@@ -19,7 +20,7 @@ import { PermissionsDialog } from '../PermissionsDialog'
 import { SkillsDialog } from '../SkillsDialog'
 import { McpDialog } from '../McpDialog'
 
-function QueuedMessageCard(): React.JSX.Element | null {
+function QueuedMessageCard({ isMobile }: { isMobile: boolean }): React.JSX.Element | null {
   const queuedText = useActiveSession((s) => s.queuedText)
   const clearQueuedText = useSessionStore((s) => s.clearQueuedText)
   const setDraftText = useSessionStore((s) => s.setDraftText)
@@ -50,7 +51,7 @@ function QueuedMessageCard(): React.JSX.Element | null {
 
   return (
     <div style={{ padding: '0 13px 4px' }}>
-      <div className="max-w-[740px] mx-auto">
+      <div className={`${isMobile ? 'max-w-full' : 'max-w-[740px]'} mx-auto`}>
         <div className="px-2.5 py-1.5 rounded-lg bg-bg-hover/60 border border-border/50 flex items-start gap-2">
           <div className="flex-1 min-w-0">
             <span className="text-[10px] font-medium text-text-muted uppercase tracking-wide">Queued</span>
@@ -268,7 +269,8 @@ export function ChatPanel(): React.JSX.Element {
   const chatWidthMode = useSessionStore((s) => s.settings.chatWidthMode)
   const chatWidthPx = useSessionStore((s) => s.settings.chatWidthPx)
   const chatWidthPercent = useSessionStore((s) => s.settings.chatWidthPercent)
-  const chatMaxWidth = chatWidthMode === 'px' ? `${chatWidthPx}px` : `${chatWidthPercent}%`
+  const isMobile = useIsMobile()
+  const chatMaxWidth = isMobile ? '100%' : (chatWidthMode === 'px' ? `${chatWidthPx}px` : `${chatWidthPercent}%`)
   // Chat area lives inside the UI-zoomed root, so compensate: divide out uiFontScale, apply chatFontScale
   const chatZoom = chatFontScale / uiFontScale
   const hasContent = messages.length > 0 || hasStreamingText || !!thinkingStartedAt
@@ -306,7 +308,7 @@ export function ChatPanel(): React.JSX.Element {
               <LoadingState />
             </div>
           ) : (
-            <div style={{ ...(chatZoom !== 1 ? { zoom: chatZoom } : {}), maxWidth: chatMaxWidth }} className="mx-auto px-8 pt-5 pb-6 flex flex-col gap-5">
+            <div style={{ ...(chatZoom !== 1 ? { zoom: chatZoom } : {}), maxWidth: chatMaxWidth }} className={`mx-auto pt-5 pb-6 flex flex-col gap-5 ${isMobile ? 'px-3' : 'px-8'}`}>
               {messages.map((msg) => (
                 <div key={msg.id} className="cv-auto">
                   <MessageBubble
@@ -348,7 +350,7 @@ export function ChatPanel(): React.JSX.Element {
               </button>
             </div>
           )}
-          {focusedAgentId === null && <QueuedMessageCard />}
+          {focusedAgentId === null && <QueuedMessageCard isMobile={isMobile} />}
           <InputBox />
         </div>
       </div>
@@ -375,11 +377,11 @@ function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Element {
   const fallbackCost = useActiveSession((s) => s.status.totalCostUsd)
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const customTitle = useSessionStore((s) => activeSessionId ? s.customTitles[activeSessionId] : undefined)
-  const { collapsed: sidebarCollapsed, toggle: toggleSidebar } = useSidebarCollapsed()
+  const { collapsed: sidebarCollapsed, toggle: toggleSidebar, isMobile: isMobileCtx } = useSidebarCollapsed()
   const showWelcome = useSessionStore((s) => s.showWelcome)
   const uiFontScale = useSessionStore((s) => s.settings.uiFontScale)
   const isMac = window.api.platform === 'darwin'
-  const leftPadding = sidebarCollapsed && isMac ? 148 / uiFontScale : 13
+  const leftPadding = isMobileCtx ? 8 : (sidebarCollapsed && isMac ? 148 / uiFontScale : 13)
   const [copiedField, setCopiedField] = useState<string | null>(null)
   const [infoHover, setInfoHover] = useState(false)
   const infoLeaveTimer = useRef<ReturnType<typeof setTimeout>>(null)
@@ -406,9 +408,36 @@ function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Element {
   }, [])
 
   return (
-    <div style={{ paddingLeft: leftPadding, paddingRight: 13 }} className="shrink-0 h-12 flex items-center justify-between [-webkit-app-region:drag] border-b border-border relative">
+    <div style={{ paddingLeft: leftPadding, paddingRight: isMobileCtx ? 8 : 13, paddingTop: isMobileCtx ? 'env(safe-area-inset-top)' : undefined }} className="shrink-0 h-12 flex items-center justify-between [-webkit-app-region:drag] border-b border-border relative">
       <div className="flex items-center min-w-0">
-        {sidebarCollapsed && (
+        {/* Mobile: always show hamburger + new session */}
+        {isMobileCtx && (
+          <div className="[-webkit-app-region:no-drag] flex items-center gap-1 mr-2">
+            <button
+              onClick={toggleSidebar}
+              className="w-[30px] h-[30px] flex items-center justify-center rounded-md text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
+              title="Menu"
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                <path d="M3 12h18" />
+                <path d="M3 6h18" />
+                <path d="M3 18h18" />
+              </svg>
+            </button>
+            <button
+              onClick={showWelcome}
+              className="w-[30px] h-[30px] flex items-center justify-center rounded-md text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
+              title="New session"
+            >
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+                <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" />
+                <path d="M18.5 2.5a2.12 2.12 0 013 3L12 15l-4 1 1-4z" />
+              </svg>
+            </button>
+          </div>
+        )}
+        {/* Desktop: show sidebar toggle when collapsed */}
+        {!isMobileCtx && sidebarCollapsed && (
           <div
             style={isMac ? { position: 'absolute', left: 82 / uiFontScale, top: 22 / uiFontScale, transform: 'translateY(-50%)' } : { marginRight: 8 }}
             className="[-webkit-app-region:no-drag] flex items-center gap-1"
@@ -510,7 +539,7 @@ function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Element {
         </div>
       </div>
       <div className="flex items-center gap-3 [-webkit-app-region:no-drag]">
-        {cwd && (
+        {!isMobileCtx && cwd && (
           <button
             onClick={() => window.api.openInVSCode(cwd)}
             className="group flex items-baseline gap-1.5 px-2 py-1 rounded-md text-[12px] text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
@@ -529,7 +558,7 @@ function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Element {
             <span>VSCode</span>
           </button>
         )}
-        {cwd && (
+        {!isMobileCtx && cwd && (
           <button
             onClick={() => setSkillsOpen(true)}
             className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[12px] text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
@@ -540,7 +569,7 @@ function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Element {
             </svg>
           </button>
         )}
-        {cwd && (
+        {!isMobileCtx && cwd && (
           <button
             onClick={() => setMcpOpen(true)}
             className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[12px] text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
@@ -554,7 +583,7 @@ function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Element {
             </svg>
           </button>
         )}
-        {cwd && (
+        {!isMobileCtx && cwd && (
           <button
             onClick={() => setPermissionsOpen(true)}
             className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[12px] text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
@@ -565,10 +594,10 @@ function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Element {
             </svg>
           </button>
         )}
-        <WorktreePill />
-        <GitBranchPill />
-        <GitChangesPill />
-        <WindowControls />
+        {!isMobileCtx && <WorktreePill />}
+        {!isMobileCtx && <GitBranchPill />}
+        {!isMobileCtx && <GitChangesPill />}
+        {!isMobileCtx && <WindowControls />}
       </div>
       <SkillsDialog
         open={skillsOpen}

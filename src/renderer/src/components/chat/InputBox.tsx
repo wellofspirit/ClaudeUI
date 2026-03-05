@@ -7,6 +7,7 @@ import { FileMentionMenu } from './FileMentionMenu'
 import { FileAttachmentBar } from './FileAttachmentBar'
 import { useSlashMenu } from '../../hooks/useSlashMenu'
 import { useFileMention } from '../../hooks/useFileMention'
+import { useIsMobile } from '../../hooks/useIsMobile'
 
 const ACCEPTED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp']
 const ACCEPTED_FILE_TYPES = [...ACCEPTED_IMAGE_TYPES, 'application/pdf']
@@ -132,6 +133,7 @@ function StatusLine({ data }: { data: StatusLineData }): React.JSX.Element {
 
 
 export function InputBox(): React.JSX.Element {
+  const isMobile = useIsMobile()
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const text = useActiveSession((s) => s.draftText)
@@ -463,8 +465,8 @@ export function InputBox(): React.JSX.Element {
   }, [])
 
   return (
-    <div style={{ padding: '8px 13px 16px' }} className="shrink-0">
-      <div className="max-w-[740px] mx-auto">
+    <div style={{ padding: isMobile ? '8px 8px 16px' : '8px 13px 16px', paddingBottom: isMobile ? 'max(16px, env(safe-area-inset-bottom))' : '16px' }} className="shrink-0">
+      <div className={`${isMobile ? 'max-w-full' : 'max-w-[740px]'} mx-auto`}>
         <div
           onClick={() => { setModelOpen(false); setEffortOpen(false); setPlusOpen(false); }}
           className={`group relative rounded-2xl bg-bg-input transition-colors ${

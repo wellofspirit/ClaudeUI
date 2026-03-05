@@ -247,6 +247,7 @@ pre .token.table {
 
 body {
   min-height: 100vh;
+  min-height: 100dvh;
   background: transparent;
   color: var(--color-text-primary);
   font-family:
@@ -266,8 +267,13 @@ body {
 
 html, #root {
   height: 100vh;
+  height: 100dvh; /* override: excludes mobile browser chrome when supported */
   background: transparent;
 }
+
+/* On mobile, the root layout div gets its height from visualViewport.height
+   via React state (useVisualViewportHeight hook), so html/root just need to
+   not constrain it. The h-screen class is conditionally removed on mobile. */
 
 ::-webkit-scrollbar { width: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
@@ -309,7 +315,13 @@ html, #root {
   40%, 60% { color: var(--color-text-primary); }
 }
 
+@keyframes slide-in-left {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(0); }
+}
+
 .animate-fade-in { animation: fade-in 0.15s ease-out; }
+.animate-slide-in-left { animation: slide-in-left 0.2s ease-out; }
 .animate-cursor-blink { animation: cursor-blink 1s step-end infinite; }
 .animate-spin-slow { animation: spin-slow 1.5s linear infinite; }
 .animate-thinking-wave { animation: thinking-wave 2s ease-in-out infinite; }

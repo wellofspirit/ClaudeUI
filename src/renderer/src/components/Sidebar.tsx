@@ -8,6 +8,7 @@ import { WorktreesModal } from './WorktreesModal'
 import { WorktreeCleanupModal } from './WorktreeCleanupModal'
 import { RemoteAccessModal } from './RemoteAccessModal'
 import { useAutomationStore } from '../stores/automation-store'
+import { useIsMobile } from '../hooks/useIsMobile'
 
 /** Convert mouse event coords to zoom-adjusted position for fixed-position menus */
 function contextMenuPosition(e: React.MouseEvent): { x: number; y: number } {
@@ -40,6 +41,7 @@ export function Sidebar({ style, onToggleCollapse }: {
   const worktreeInfoMap = useSessionStore((s) => s.worktreeInfoMap)
   const clearWorktreeInfo = useSessionStore((s) => s.clearWorktreeInfo)
 
+  const isMobile = useIsMobile()
   const [expandedDir, setExpandedDir] = useState<string | null>(null)
   const [worktreesModalCwd, setWorktreesModalCwd] = useState<string | null>(null)
   const [cleanupWorktree, setCleanupWorktree] = useState<{ sessionId: string; worktreeInfo: WorktreeInfo } | null>(null)
@@ -150,6 +152,7 @@ export function Sidebar({ style, onToggleCollapse }: {
 
   const handleNewSession = (): void => {
     showWelcome()
+    if (isMobile && onToggleCollapse) onToggleCollapse()
   }
 
   const handleNewSessionDblClick = async (): Promise<void> => {
@@ -238,6 +241,8 @@ export function Sidebar({ style, onToggleCollapse }: {
     const todos = buildTodosFromMessages(messages)
     if (todos) useSessionStore.getState().setTodos(routingId, todos)
     switchSession(routingId)
+    // Close drawer on mobile after selecting a session
+    if (isMobile && onToggleCollapse) onToggleCollapse()
   }
 
   const handleDirClick = (projectKey: string): void => {
@@ -377,7 +382,7 @@ export function Sidebar({ style, onToggleCollapse }: {
   }
 
   return (
-    <div style={style} className={`shrink-0 flex flex-col select-none ${window.api.platform === 'darwin' ? 'bg-bg-secondary/60' : 'bg-bg-secondary/85'}`}>
+    <div style={style} className={`shrink-0 h-full flex flex-col select-none ${window.api.platform === 'darwin' ? 'bg-bg-secondary/60' : 'bg-bg-secondary/85'}`}>
       {/* Traffic light clearance + collapse toggle */}
       <div className="h-12 shrink-0 [-webkit-app-region:drag] relative">
         <button
