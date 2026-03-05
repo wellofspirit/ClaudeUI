@@ -13,7 +13,9 @@ import { usageFetcher } from '../services/usage-fetcher'
 import { blockUsageService } from '../services/block-usage'
 import type { ApprovalDecision, SandboxSettings, PermissionSuggestion } from '../../shared/types'
 import type { BrowserWindow } from 'electron'
-import { ClaudeSession } from '../services/claude-session'
+import { ClaudeSession, getCliJsPath } from '../services/claude-session'
+import { PERSISTED_SESSIONS_DIR } from '../services/persisted-sessions-dir'
+import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk'
 import { logger } from '../services/logger'
 
 /**
@@ -120,9 +122,6 @@ export function registerRemoteHandlers(
   // -------------------------------------------------------------------------
 
   dispatcher.register('session:get-models', async () => {
-    const { query: sdkQuery } = await import('@anthropic-ai/claude-agent-sdk')
-    const { getCliJsPath } = await import('../services/claude-session')
-    const { PERSISTED_SESSIONS_DIR } = await import('../services/persisted-sessions-dir')
     const abort = new AbortController()
     const cliPath = getCliJsPath()
     const q = sdkQuery({
