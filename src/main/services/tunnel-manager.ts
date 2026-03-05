@@ -1,8 +1,8 @@
-import { spawn, type ChildProcess } from 'node:child_process'
+import { spawn, execFileSync, type ChildProcess } from 'node:child_process'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
+import * as os from 'node:os'
 import * as https from 'node:https'
-import { app } from 'electron'
 import { logger } from './logger'
 
 // ---------------------------------------------------------------------------
@@ -21,7 +21,7 @@ export interface TunnelStatus {
 // Constants
 // ---------------------------------------------------------------------------
 
-const CLOUDFLARED_VERSION = '2025.2.1'
+const CLOUDFLARED_VERSION = '2026.2.0'
 
 /** Platform-specific download URLs from GitHub releases. */
 const DOWNLOAD_URLS: Record<string, string> = {
@@ -113,30 +113,43 @@ export class TunnelManager {
     logger.info('tunnel-manager', `Downloading cloudflared from ${url}`)
     fs.mkdirSync(binDir, { recursive: true })
 
-    const tmpPath = binaryPath + '.tmp'
+    const isTgz = url.endsWith('.tgz')
+    const tmpPath = isTgz ? path.join(binDir, 'cloudflared.tgz') : binaryPath + '.tmp'
     await this.download(url, tmpPath)
 
-    // Atomic rename
-    fs.renameSync(tmpPath, binaryPath)
+    if (isTgz) {
+      // macOS: extract the binary from the tarball
+      execFileSync('tar', ['-xzf', tmpPath, '-C', binDir])
+      fs.unlinkSync(tmpPath)
+      if (!fs.existsSync(binaryPath)) {
+        throw new Error('cloudflared binary not found after extracting .tgz')
+      }
+    } else {
+      // Linux/Windows: downloaded file is the binary itself
+      fs.renameSync(tmpPath, binaryPath)
+    }
 
     // Make executable on Unix
     if (process.platform !== 'win32') {
       fs.chmodSync(binaryPath, 0o755)
     }
 
+    // macOS: remove quarantine attribute so Gatekeeper doesn't block execution
+    if (process.platform === 'darwin') {
+      try {
+        execFileSync('xattr', ['-d', 'com.apple.quarantine', binaryPath])
+      } catch {
+        // Attribute may not exist if downloaded via certain methods — safe to ignore
+      }
+    }
+
     logger.info('tunnel-manager', `cloudflared downloaded to ${binaryPath}`)
     return binaryPath
   }
 
-  /** Get the directory for the cloudflared binary. */
+  /** Get the directory for the cloudflared binary — ~/.claude/ui/cloudflared/ */
   private getBinDir(): string {
-    const appPath = app.getAppPath()
-    if (appPath.includes('app.asar')) {
-      // Production: next to resources/, writable outside asar
-      return path.join(path.dirname(appPath), 'bin')
-    }
-    // Development: project root
-    return path.join(appPath, 'bin')
+    return path.join(os.homedir(), '.claude', 'ui', 'cloudflared')
   }
 
   /** Download a URL to a local file path. Follows redirects. */
