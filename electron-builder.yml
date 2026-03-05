@@ -12,6 +12,8 @@ files:
 extraResources:
   - from: node_modules/@anthropic-ai/claude-agent-sdk
     to: claude-agent-sdk
+  - from: out/web
+    to: web
 asarUnpack:
   - resources/**
   - node_modules/@anthropic-ai/claude-agent-sdk/**
