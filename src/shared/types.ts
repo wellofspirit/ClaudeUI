@@ -418,11 +418,13 @@ export interface NetworkInterfaceInfo {
 
 interface RemoteAPI {
   getNetworkInterfaces(): Promise<NetworkInterfaceInfo[]>
-  startRemoteServer(opts?: { port?: number; host?: string }): Promise<{ port: number; token: string; lanUrl: string }>
+  startRemoteServer(opts?: { port?: number; host?: string; tunnel?: boolean }): Promise<{ port: number; token: string; lanUrl: string }>
   stopRemoteServer(): Promise<void>
   getRemoteStatus(): Promise<RemoteStatus>
   onRemoteStatus(cb: (status: RemoteStatus) => void): () => void
 }
+
+export type TunnelState = 'stopped' | 'starting' | 'downloading' | 'connected' | 'error' | 'restarting'
 
 export interface RemoteStatus {
   running: boolean
@@ -430,6 +432,8 @@ export interface RemoteStatus {
   token: string | null
   lanUrl: string | null
   tunnelUrl: string | null
+  tunnelState: TunnelState | null
+  tunnelError: string | null
   connectedClients: number
   clientIps: string[]
 }

@@ -68,8 +68,18 @@ export interface WsPong {
   timestamp: number
 }
 
-export type WsClientMessage = WsAuthRequest | WsInvokeRequest | WsSyncRequest | WsPing | WsPong
-export type WsServerMessage = WsAuthResponse | WsInvokeResponse | WsEvent | WsSyncCatchup | WsSyncFull | WsPing | WsPong
+/** Client → Server: activate E2E encryption (key is NOT sent — both sides already have it) */
+export interface WsE2EActivate {
+  type: 'e2e-activate'
+}
+
+/** Server → Client: E2E acknowledged, all subsequent messages are encrypted */
+export interface WsE2EAck {
+  type: 'e2e-ack'
+}
+
+export type WsClientMessage = WsAuthRequest | WsInvokeRequest | WsSyncRequest | WsPing | WsPong | WsE2EActivate
+export type WsServerMessage = WsAuthResponse | WsInvokeResponse | WsEvent | WsSyncCatchup | WsSyncFull | WsPing | WsPong | WsE2EAck
 
 // ---------------------------------------------------------------------------
 // Event Log

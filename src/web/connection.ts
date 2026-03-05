@@ -1,3 +1,4 @@
+import { E2ECrypto } from '../shared/e2e-crypto'
 import type {
   WsClientMessage,
   WsServerMessage,
@@ -8,7 +9,7 @@ import type {
   FullStateSnapshot
 } from '../shared/remote-protocol'
 
-export type ConnectionState = 'connecting' | 'authenticating' | 'syncing' | 'connected' | 'reconnecting' | 'failed'
+export type ConnectionState = 'connecting' | 'authenticating' | 'e2e-activating' | 'syncing' | 'connected' | 'reconnecting' | 'failed'
 
 type EventCallback = (channel: string, ...args: unknown[]) => void
 type StateCallback = (state: ConnectionState, error?: string) => void
@@ -47,16 +48,21 @@ export class RemoteConnection {
   private pingTimer?: ReturnType<typeof setInterval>
   private destroyed = false
 
+  // E2E encryption
+  private e2eKeyHex?: string
+  private e2e: E2ECrypto | null = null
+
   // Callbacks
   private onEvent: EventCallback | null = null
   private onStateChange: StateCallback | null = null
   private onFullState: FullStateCallback | null = null
   private onCatchup: CatchupCallback | null = null
 
-  constructor(url: string, token: string) {
-    // Convert http(s) URL to ws(s)
+  constructor(url: string, token: string, e2eKeyHex?: string) {
+    // Convert http(s) URL to ws(s), strip path and fragment
     this.url = url.replace(/^http/, 'ws').replace(/\/remote.*$/, '')
     this.token = token
+    this.e2eKeyHex = e2eKeyHex
   }
 
   /** Set callback for incoming events. */
@@ -129,13 +135,19 @@ export class RemoteConnection {
     this.ws.onopen = (): void => {
       this.reconnectAttempt = 0
       this.setState('authenticating')
-      this.send({ type: 'auth', token: this.token })
+      this.sendRaw({ type: 'auth', token: this.token })
     }
 
-    this.ws.onmessage = (ev): void => {
+    this.ws.onmessage = async (ev): Promise<void> => {
       let msg: WsServerMessage
+      const rawData = ev.data as string
       try {
-        msg = JSON.parse(ev.data as string)
+        if (this.e2e?.isReady && !rawData.startsWith('{')) {
+          // Encrypted message — decrypt first
+          msg = (await this.e2e.decrypt(rawData)) as WsServerMessage
+        } else {
+          msg = JSON.parse(rawData)
+        }
       } catch {
         return
       }
@@ -158,14 +170,25 @@ export class RemoteConnection {
     switch (msg.type) {
       case 'auth-response':
         if (msg.ok) {
-          this.setState('syncing')
-          // Request state sync
-          this.send({ type: 'sync', lastSeq: this.lastSeq })
+          if (this.e2eKeyHex) {
+            // Activate E2E encryption before syncing
+            this.setState('e2e-activating')
+            this.initE2E()
+          } else {
+            this.setState('syncing')
+            this.sendRaw({ type: 'sync', lastSeq: this.lastSeq })
+          }
         } else {
           this.setState('failed', msg.error || 'Authentication failed')
           this.destroyed = true // Don't reconnect on auth failure
           this.ws?.close()
         }
+        break
+
+      case 'e2e-ack':
+        // E2E is now active — proceed to sync (all subsequent messages are encrypted)
+        this.setState('syncing')
+        this.send({ type: 'sync', lastSeq: this.lastSeq })
         break
 
       case 'sync-full':
@@ -226,10 +249,36 @@ export class RemoteConnection {
     }
   }
 
+  /** Send a message, encrypting if E2E is active. */
   private send(msg: WsClientMessage): void {
+    if (this.ws?.readyState !== WebSocket.OPEN) return
+
+    if (this.e2e?.isReady) {
+      this.e2e.encrypt(msg).then((payload) => {
+        if (this.ws?.readyState === WebSocket.OPEN) {
+          this.ws.send(payload)
+        }
+      })
+    } else {
+      this.ws.send(JSON.stringify(msg))
+    }
+  }
+
+  /** Send a plaintext message (used for auth and e2e-activate before encryption is active). */
+  private sendRaw(msg: WsClientMessage): void {
     if (this.ws?.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify(msg))
     }
+  }
+
+  /** Initialize E2E encryption and send activation request. */
+  private async initE2E(): Promise<void> {
+    if (!this.e2eKeyHex) return
+
+    this.e2e = new E2ECrypto()
+    await this.e2e.init(this.e2eKeyHex)
+    // Send activation request plaintext (key is NOT included)
+    this.sendRaw({ type: 'e2e-activate' })
   }
 
   private setState(state: ConnectionState, error?: string): void {

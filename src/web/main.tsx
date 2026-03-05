@@ -11,6 +11,11 @@ import type { FullStateSnapshot } from '../shared/remote-protocol'
 const params = new URLSearchParams(window.location.search)
 const token = params.get('t') || ''
 
+// E2E key is in the URL fragment — browsers never send fragments to servers,
+// so this key never traverses the network (only scanned via QR code)
+const hash = window.location.hash
+const e2eKeyHex = hash.startsWith('#k=') ? hash.slice(3) : undefined
+
 if (!token) {
   document.body.innerHTML = `
     <div style="display:flex;align-items:center;justify-content:center;height:100vh;color:#d1d5db;font-family:system-ui">
@@ -22,7 +27,7 @@ if (!token) {
   `
 } else {
   // Initialize connection
-  const connection = new RemoteConnection(window.location.href, token)
+  const connection = new RemoteConnection(window.location.href, token, e2eKeyHex)
   const api = createWebSocketApi(connection)
 
   // Install as window.api (same as Electron's contextBridge)

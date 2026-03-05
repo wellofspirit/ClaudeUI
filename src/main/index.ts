@@ -80,8 +80,8 @@ function createWindow(): void {
   ipcMain.handle('remote:interfaces', () => {
     return getNetworkInterfaces()
   })
-  ipcMain.handle('remote:start', async (_e, opts?: { port?: number; host?: string }) => {
-    return await remoteServer.start(opts?.port ?? 0, opts?.host)
+  ipcMain.handle('remote:start', async (_e, opts?: { port?: number; host?: string; tunnel?: boolean }) => {
+    return await remoteServer.start(opts?.port ?? 0, opts?.host, { tunnel: opts?.tunnel })
   })
   ipcMain.handle('remote:stop', () => {
     remoteServer.stop()

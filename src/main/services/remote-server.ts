@@ -11,6 +11,8 @@ import { RemoteDispatcher } from './remote-dispatcher'
 import { RemoteBridge } from './remote-bridge'
 import { ClaudeSession } from './claude-session'
 import { logger } from './logger'
+import { TunnelManager } from './tunnel-manager'
+import { E2ECrypto } from '../../shared/e2e-crypto'
 import type {
   WsClientMessage,
   WsServerMessage,
@@ -27,6 +29,9 @@ interface AuthenticatedClient {
   ip: string
   lastActivity: number
   pingTimer?: ReturnType<typeof setInterval>
+  e2e: E2ECrypto | null
+  /** Promise chain to preserve message ordering with async encryption. */
+  sendQueue: Promise<void>
 }
 
 export class RemoteServer {
@@ -41,6 +46,8 @@ export class RemoteServer {
   private bridge: RemoteBridge
   private win: BrowserWindow | null = null
   private idleTimer?: ReturnType<typeof setInterval>
+  private tunnel: TunnelManager
+  private e2eKey: string | null = null
 
   /** Callback to notify the desktop renderer of status changes. */
   private statusCallback: ((status: RemoteStatus) => void) | null = null
@@ -49,6 +56,10 @@ export class RemoteServer {
     this.eventLog = new EventLog()
     this.dispatcher = dispatcher
     this.bridge = new RemoteBridge()
+    this.tunnel = new TunnelManager()
+
+    // Wire tunnel status changes to notify the desktop renderer
+    this.tunnel.setStatusHandler(() => this.notifyStatus())
 
     // Wire the bridge to forward events to the event log and all clients
     this.bridge.onEvent((channel: string, ...args: unknown[]) => {
@@ -79,12 +90,21 @@ export class RemoteServer {
   }
 
   /** Start the HTTP + WebSocket server. */
-  async start(requestedPort = 0, host?: string): Promise<{ port: number; token: string; lanUrl: string }> {
+  async start(
+    requestedPort = 0,
+    host?: string,
+    opts?: { tunnel?: boolean }
+  ): Promise<{ port: number; token: string; lanUrl: string }> {
     if (this.httpServer) {
       throw new Error('Remote server already running')
     }
 
     this.token = crypto.randomBytes(32).toString('hex')
+
+    // Generate E2E key when tunnel mode is requested
+    if (opts?.tunnel) {
+      this.e2eKey = crypto.randomBytes(32).toString('hex')
+    }
 
     // Determine bind address: if a specific host IP is given, bind to that;
     // otherwise bind to 0.0.0.0 (all interfaces)
@@ -124,11 +144,23 @@ export class RemoteServer {
     logger.info('remote-server', `Remote server started on ${bindAddr}:${this.port} (URL host: ${this.boundHost})`)
     this.notifyStatus()
 
+    // Start tunnel if requested (async — URL arrives via status callback)
+    if (opts?.tunnel) {
+      this.tunnel.start(this.port).catch((err) => {
+        logger.error('remote-server', `Tunnel start failed: ${err instanceof Error ? err.message : String(err)}`)
+        // Status is already updated by TunnelManager's status callback
+      })
+    }
+
     return { port: this.port, token: this.token, lanUrl }
   }
 
   /** Stop the server and disconnect all clients. */
   stop(): void {
+    // Stop tunnel first
+    this.tunnel.stop()
+    this.e2eKey = null
+
     if (this.idleTimer) {
       clearInterval(this.idleTimer)
       this.idleTimer = undefined
@@ -164,12 +196,25 @@ export class RemoteServer {
 
   /** Get current server status. */
   getStatus(): RemoteStatus {
+    const tunnelStatus = this.tunnel.getStatus()
+    let tunnelUrl: string | null = null
+
+    if (tunnelStatus.url && this.token) {
+      // Build tunnel URL with token in query and E2E key in fragment
+      tunnelUrl = `${tunnelStatus.url}/remote?t=${this.token}`
+      if (this.e2eKey) {
+        tunnelUrl += `#k=${this.e2eKey}`
+      }
+    }
+
     return {
       running: this.httpServer !== null,
       port: this.port || null,
       token: this.token || null,
       lanUrl: this.port ? `http://${this.boundHost}:${this.port}/remote?t=${this.token}` : null,
-      tunnelUrl: null, // Phase 4
+      tunnelUrl,
+      tunnelState: this.e2eKey !== null ? tunnelStatus.state : null,
+      tunnelError: tunnelStatus.error,
       connectedClients: this.clients.size,
       clientIps: Array.from(this.clients.values()).map((c) => c.ip)
     }
@@ -265,6 +310,7 @@ export class RemoteServer {
   private handleConnection(ws: WebSocket, req: http.IncomingMessage): void {
     const ip = req.socket.remoteAddress || 'unknown'
     let authenticated = false
+    let awaitingE2E = false
 
     // Auth timeout — must authenticate within 10 seconds
     const authTimeout = setTimeout(() => {
@@ -274,11 +320,26 @@ export class RemoteServer {
     }, 10_000)
 
     ws.on('message', async (raw) => {
+      const rawStr = raw.toString()
+
+      // Determine if this message is encrypted (base64 blob, not JSON)
       let msg: WsClientMessage
+      const client = this.clients.get(ws)
+
       try {
-        msg = JSON.parse(raw.toString())
+        if (client?.e2e?.isReady && !rawStr.startsWith('{')) {
+          // Encrypted message — decrypt first
+          msg = (await client.e2e.decrypt(rawStr)) as WsClientMessage
+        } else {
+          msg = JSON.parse(rawStr)
+        }
       } catch {
-        ws.close(4002, 'Invalid message format')
+        if (client?.e2e?.isReady) {
+          logger.error('remote-server', `E2E decryption failed from ${ip}, closing`)
+          ws.close(4002, 'Decryption failed')
+        } else {
+          ws.close(4002, 'Invalid message format')
+        }
         return
       }
 
@@ -287,20 +348,27 @@ export class RemoteServer {
           clearTimeout(authTimeout)
           if (this.verifyToken(msg.token)) {
             authenticated = true
-            const client: AuthenticatedClient = {
+            const newClient: AuthenticatedClient = {
               ws,
               ip,
               lastActivity: Date.now(),
               pingTimer: setInterval(() => {
                 this.sendTo(ws, { type: 'ping', timestamp: Date.now() })
-              }, PING_INTERVAL_MS)
+              }, PING_INTERVAL_MS),
+              e2e: null,
+              sendQueue: Promise.resolve()
             }
-            this.clients.set(ws, client)
-            this.sendTo(ws, { type: 'auth-response', ok: true })
+            this.clients.set(ws, newClient)
+            // Send auth response plaintext
+            ws.send(JSON.stringify({ type: 'auth-response', ok: true }))
             logger.info('remote-server', `Client authenticated from ${ip} (${this.clients.size} total)`)
             this.notifyStatus()
+            // If server has an E2E key, expect e2e-activate as the next message
+            if (this.e2eKey) {
+              awaitingE2E = true
+            }
           } else {
-            this.sendTo(ws, { type: 'auth-response', ok: false, error: 'Invalid token' })
+            ws.send(JSON.stringify({ type: 'auth-response', ok: false, error: 'Invalid token' }))
             ws.close(4001, 'Invalid token')
           }
         } else {
@@ -309,8 +377,23 @@ export class RemoteServer {
         return
       }
 
+      // Handle E2E activation (right after auth, before any encrypted messages)
+      if (awaitingE2E && msg.type === 'e2e-activate') {
+        const c = this.clients.get(ws)
+        if (c && this.e2eKey) {
+          const e2e = new E2ECrypto()
+          await e2e.init(this.e2eKey)
+          c.e2e = e2e
+          // Send ack plaintext (last plaintext message)
+          ws.send(JSON.stringify({ type: 'e2e-ack' }))
+          logger.info('remote-server', `E2E encryption activated for client ${ip}`)
+        }
+        awaitingE2E = false
+        return
+      }
+      awaitingE2E = false
+
       // Update activity timestamp
-      const client = this.clients.get(ws)
       if (client) client.lastActivity = Date.now()
 
       switch (msg.type) {
@@ -389,19 +472,46 @@ export class RemoteServer {
     }
   }
 
-  /** Send a message to a specific client. */
+  /** Send a message to a specific client (encrypts if E2E is active). */
   private sendTo(ws: WebSocket, msg: WsServerMessage): void {
-    if (ws.readyState === WebSocket.OPEN) {
+    if (ws.readyState !== WebSocket.OPEN) return
+
+    const client = this.clients.get(ws)
+    if (client?.e2e?.isReady) {
+      // Queue encrypted send to preserve message ordering
+      client.sendQueue = client.sendQueue.then(async () => {
+        if (ws.readyState === WebSocket.OPEN) {
+          try {
+            ws.send(await client.e2e!.encrypt(msg))
+          } catch (err) {
+            logger.error('remote-server', `E2E encrypt failed: ${err instanceof Error ? err.message : String(err)}`)
+          }
+        }
+      })
+    } else {
       ws.send(JSON.stringify(msg))
     }
   }
 
   /** Broadcast a message to all authenticated clients. */
   private broadcast(msg: WsServerMessage): void {
-    const payload = JSON.stringify(msg)
-    for (const [ws] of this.clients) {
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(payload)
+    const plainPayload = JSON.stringify(msg)
+    for (const [ws, client] of this.clients) {
+      if (ws.readyState !== WebSocket.OPEN) continue
+
+      if (client.e2e?.isReady) {
+        // Queue encrypted send per-client
+        client.sendQueue = client.sendQueue.then(async () => {
+          if (ws.readyState === WebSocket.OPEN) {
+            try {
+              ws.send(await client.e2e!.encrypt(msg))
+            } catch (err) {
+              logger.error('remote-server', `E2E broadcast encrypt failed: ${err instanceof Error ? err.message : String(err)}`)
+            }
+          }
+        })
+      } else {
+        ws.send(plainPayload)
       }
     }
   }

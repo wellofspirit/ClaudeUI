@@ -300,7 +300,7 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     getNetworkInterfaces: async () => [],
     startRemoteServer: async () => { throw new Error('Not available in remote mode') },
     stopRemoteServer: async () => {},
-    getRemoteStatus: async () => ({ running: false, port: null, token: null, lanUrl: null, tunnelUrl: null, connectedClients: 0, clientIps: [] }),
+    getRemoteStatus: async () => ({ running: false, port: null, token: null, lanUrl: null, tunnelUrl: null, tunnelState: null, tunnelError: null, connectedClients: 0, clientIps: [] }),
     onRemoteStatus: () => () => {},
 
     // Error logging — send to server

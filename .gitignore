@@ -7,3 +7,4 @@ out
 test-prompt.txt
 .claude/settings.local.json
 *.tsbuildinfo
+bin/

@@ -9,6 +9,7 @@ interface ConnectionOverlayProps {
 const STATE_LABELS: Record<ConnectionState, string> = {
   connecting: 'Connecting...',
   authenticating: 'Authenticating...',
+  'e2e-activating': 'Securing connection...',
   syncing: 'Syncing state...',
   connected: 'Connected',
   reconnecting: 'Reconnecting...',

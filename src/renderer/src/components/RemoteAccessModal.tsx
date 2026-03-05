@@ -14,36 +14,43 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps): React.JS
   const overlayRef = useRef<HTMLDivElement>(null)
   const [interfaces, setInterfaces] = useState<NetworkInterfaceInfo[]>([])
   const [selectedHost, setSelectedHost] = useState<string>('') // '' = auto (0.0.0.0)
+  const [tunnelMode, setTunnelMode] = useState(false)
+
+  // The URL to show in QR code and copy button — prefer tunnel URL when available
+  const shareUrl = status?.tunnelUrl ?? status?.lanUrl ?? null
+  // Display URL strips the fragment (e2e key) for cleaner display
+  const displayUrl = shareUrl ? shareUrl.replace(/#.*$/, '') : null
 
   // Fetch initial status + network interfaces
   useEffect(() => {
     window.api.getRemoteStatus().then(setStatus)
     window.api.getNetworkInterfaces().then((ifaces) => {
       setInterfaces(ifaces)
-      // Default selection is empty (auto = all interfaces)
     })
     const cleanup = window.api.onRemoteStatus(setStatus)
     return cleanup
   }, [])
 
-  // Generate QR code when URL changes
+  // Generate QR code when share URL changes
   useEffect(() => {
-    const url = status?.lanUrl
-    if (!url) {
+    if (!shareUrl) {
       setQrDataUrl(null)
       return
     }
-    QRCode.toDataURL(url, {
+    QRCode.toDataURL(shareUrl, {
       width: 256,
       margin: 2,
       color: { dark: '#d1d5db', light: '#00000000' }
     }).then(setQrDataUrl).catch(() => setQrDataUrl(null))
-  }, [status?.lanUrl])
+  }, [shareUrl])
 
   const handleStart = useCallback(async () => {
     setStarting(true)
     try {
-      await window.api.startRemoteServer(selectedHost ? { host: selectedHost } : undefined)
+      const opts: { host?: string; tunnel?: boolean } = {}
+      if (selectedHost) opts.host = selectedHost
+      if (tunnelMode) opts.tunnel = true
+      await window.api.startRemoteServer(Object.keys(opts).length > 0 ? opts : undefined)
       const s = await window.api.getRemoteStatus()
       setStatus(s)
     } catch (err) {
@@ -51,7 +58,7 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps): React.JS
     } finally {
       setStarting(false)
     }
-  }, [selectedHost])
+  }, [selectedHost, tunnelMode])
 
   const handleStop = useCallback(async () => {
     await window.api.stopRemoteServer()
@@ -60,12 +67,12 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps): React.JS
   }, [])
 
   const handleCopy = useCallback(() => {
-    if (status?.lanUrl) {
-      navigator.clipboard.writeText(status.lanUrl)
+    if (shareUrl) {
+      navigator.clipboard.writeText(shareUrl)
       setCopied(true)
       setTimeout(() => setCopied(false), 2000)
     }
-  }, [status?.lanUrl])
+  }, [shareUrl])
 
   // Close on overlay click
   const handleOverlayClick = useCallback((e: React.MouseEvent) => {
@@ -82,6 +89,10 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps): React.JS
   }, [onClose])
 
   const isRunning = status?.running ?? false
+  const isTunnelActive = status?.tunnelState != null && status.tunnelState !== 'stopped'
+  const isTunnelConnected = status?.tunnelState === 'connected'
+  const isTunnelLoading = status?.tunnelState === 'starting' || status?.tunnelState === 'downloading' || status?.tunnelState === 'restarting'
+  const isTunnelError = status?.tunnelState === 'error'
 
   return (
     <div
@@ -129,8 +140,44 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps): React.JS
                 </div>
               </div>
 
-              {/* Network interface picker */}
-              {interfaces.length > 0 && (
+              {/* Mode toggle */}
+              <div className="w-full">
+                <label className="block text-[11px] text-text-muted mb-1.5 px-0.5">Connection Mode</label>
+                <div className="flex rounded-lg border border-border overflow-hidden">
+                  <button
+                    onClick={() => setTunnelMode(false)}
+                    className={`flex-1 px-3 py-2 text-[12px] font-medium transition-colors ${
+                      !tunnelMode
+                        ? 'bg-accent/15 text-accent border-r border-border'
+                        : 'bg-bg-primary text-text-muted hover:text-text-secondary border-r border-border'
+                    }`}
+                  >
+                    LAN Only
+                  </button>
+                  <button
+                    onClick={() => setTunnelMode(true)}
+                    className={`flex-1 px-3 py-2 text-[12px] font-medium transition-colors ${
+                      tunnelMode
+                        ? 'bg-accent/15 text-accent'
+                        : 'bg-bg-primary text-text-muted hover:text-text-secondary'
+                    }`}
+                  >
+                    Internet (Tunnel)
+                  </button>
+                </div>
+                {tunnelMode && (
+                  <div className="mt-1.5 text-[11px] text-text-muted px-0.5 flex items-center gap-1">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+                      <path d="M7 11V7a5 5 0 0110 0v4" />
+                    </svg>
+                    E2E encrypted via Cloudflare Tunnel
+                  </div>
+                )}
+              </div>
+
+              {/* Network interface picker (only for LAN mode) */}
+              {!tunnelMode && interfaces.length > 0 && (
                 <div className="w-full">
                   <label className="block text-[11px] text-text-muted mb-1.5 px-0.5">Network Interface</label>
                   <select
@@ -172,11 +219,49 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps): React.JS
                 )}
               </div>
 
+              {/* Tunnel status */}
+              {isTunnelActive && (
+                <div className="w-full">
+                  <div className="flex items-center gap-1.5 text-[12px] px-1">
+                    {isTunnelLoading && (
+                      <>
+                        <div className="w-2 h-2 rounded-full bg-warning animate-pulse" />
+                        <span className="text-text-secondary">
+                          {status.tunnelState === 'downloading' ? 'Downloading tunnel binary...' :
+                           status.tunnelState === 'restarting' ? 'Tunnel reconnecting...' :
+                           'Tunnel starting...'}
+                        </span>
+                      </>
+                    )}
+                    {isTunnelConnected && (
+                      <>
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-success">
+                          <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+                          <path d="M7 11V7a5 5 0 0110 0v4" />
+                        </svg>
+                        <span className="text-success text-[11px]">E2E Encrypted</span>
+                      </>
+                    )}
+                    {isTunnelError && (
+                      <>
+                        <div className="w-2 h-2 rounded-full bg-danger" />
+                        <span className="text-danger text-[11px] truncate">{status.tunnelError || 'Tunnel error'}</span>
+                      </>
+                    )}
+                  </div>
+                  {(isTunnelConnected || isTunnelLoading) && status.tunnelState === 'restarting' && (
+                    <div className="text-[10px] text-text-muted mt-1 px-1">
+                      URL may change — re-scan QR if needed
+                    </div>
+                  )}
+                </div>
+              )}
+
               {/* URL */}
               <div className="w-full">
                 <div className="flex items-center gap-2 bg-bg-primary rounded-lg px-3 py-2 border border-border">
                   <code className="flex-1 text-[11px] text-text-secondary truncate font-mono">
-                    {status.lanUrl}
+                    {displayUrl}
                   </code>
                   <button
                     onClick={handleCopy}
