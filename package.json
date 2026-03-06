@@ -3,8 +3,9 @@
   "version": "1.0.0",
   "description": "An Electron application with React and TypeScript",
   "main": "./out/main/index.js",
-  "author": "example.com",
-  "homepage": "https://electron-vite.org",
+  "author": "Daniel Liu <wellofspirit@gmail.com>",
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/wellofspirit/ClaudeUI",
   "scripts": {
     "format": "prettier --write .",
     "lint": "eslint --cache .",
