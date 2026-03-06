@@ -1,0 +1,144 @@
+name: Build & Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.bump.outputs.version }}
+      tag: ${{ steps.bump.outputs.tag }}
+      changelog: ${{ steps.changelog.outputs.changelog }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine next version
+        id: bump
+        run: |
+          LATEST_TAG=$(git tag -l 'v*' --sort=-v:refname | head -1)
+          if [ -z "$LATEST_TAG" ]; then
+            NEXT="1.0.0"
+          else
+            # Strip leading 'v'
+            CURRENT="${LATEST_TAG#v}"
+            MAJOR=$(echo "$CURRENT" | cut -d. -f1)
+            MINOR=$(echo "$CURRENT" | cut -d. -f2)
+            PATCH=$(echo "$CURRENT" | cut -d. -f3)
+            NEXT="${MAJOR}.${MINOR}.$((PATCH + 1))"
+          fi
+          echo "version=$NEXT" >> "$GITHUB_OUTPUT"
+          echo "tag=v$NEXT" >> "$GITHUB_OUTPUT"
+          echo "Next version: $NEXT"
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          LATEST_TAG=$(git tag -l 'v*' --sort=-v:refname | head -1)
+          if [ -z "$LATEST_TAG" ]; then
+            LOG=$(git log --pretty=format:'- %s (%h)' --no-merges)
+          else
+            LOG=$(git log "${LATEST_TAG}..HEAD" --pretty=format:'- %s (%h)' --no-merges)
+          fi
+          # Write to file to preserve newlines, then encode for output
+          echo "$LOG" > /tmp/changelog.txt
+          {
+            echo 'changelog<<CHANGELOG_EOF'
+            cat /tmp/changelog.txt
+            echo ''
+            echo 'CHANGELOG_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: version
+    strategy:
+      matrix:
+        include:
+          - os: macos-latest
+            platform: mac
+            zip_name: ClaudeUI-${{ needs.version.outputs.version }}-mac-arm64.zip
+            build_dir: dist/mac-arm64
+          - os: windows-latest
+            platform: win
+            zip_name: ClaudeUI-${{ needs.version.outputs.version }}-win-x64.zip
+            build_dir: dist/win-unpacked
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Build app
+        run: |
+          bun run typecheck
+          bunx electron-vite build
+          bunx vite build --config vite.web.config.ts
+
+      - name: Package (macOS)
+        if: matrix.platform == 'mac'
+        run: |
+          bunx electron-builder --mac --dir
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+
+      - name: Package (Windows)
+        if: matrix.platform == 'win'
+        run: |
+          bunx electron-builder --win --dir
+
+      - name: Zip build output (macOS)
+        if: matrix.platform == 'mac'
+        run: |
+          cd "${{ matrix.build_dir }}"
+          zip -r -y "../../${{ matrix.zip_name }}" .
+
+      - name: Zip build output (Windows)
+        if: matrix.platform == 'win'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "${{ matrix.build_dir }}/*" -DestinationPath "${{ matrix.zip_name }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.zip_name }}
+          path: ${{ matrix.zip_name }}
+
+  release:
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.version.outputs.tag }}
+          name: ClaudeUI ${{ needs.version.outputs.tag }}
+          body: |
+            ## Changes
+
+            ${{ needs.version.outputs.changelog }}
+          files: artifacts/*
+          generate_release_notes: false
