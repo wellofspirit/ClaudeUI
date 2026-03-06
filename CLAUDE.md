@@ -160,6 +160,6 @@ Register new patches in the `patches` array in `patch/apply-all.mjs`.
 
 ## Architectural Decision Records
 
-ADRs live in `doc/`. See `doc/adr.md` for the index.
+ADRs live in `docs/adr/`. See `docs/adr/adr.md` for the index.
 
 When a design or implementation decision is made during a conversation, prompt the user about whether it should be recorded as a new ADR entry. When adding a new ADR, proactively scan existing ADRs to check if the new decision supersedes or conflicts with a previous one — if so, update the old ADR's status to "Superseded by ADR-XXX" and note it in the new ADR.
