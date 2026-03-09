@@ -3,6 +3,13 @@ name: Build & Release
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '.vscode/**'
+      - '.prettierrc.yaml'
+      - '.prettierignore'
+      - 'LICENSE'
 
 permissions:
   contents: write
