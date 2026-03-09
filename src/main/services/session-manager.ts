@@ -57,6 +57,13 @@ export class SessionManager {
     }
   }
 
+  async interrupt(routingId: string): Promise<void> {
+    const session = this.sessions.get(routingId)
+    if (session) {
+      await session.interrupt()
+    }
+  }
+
   cancelAll(): void {
     this.sessions.forEach((session) => session.cancel())
     this.sessions.clear()

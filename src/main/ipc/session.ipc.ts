@@ -179,7 +179,7 @@ async function fetchModels(): Promise<ModelInfo[]> {
 
 const SESSION_IPC_CHANNELS = [
   'session:pick-folder', 'session:create', 'session:rekey', 'session:send',
-  'session:cancel', 'session:approval-response', 'session:watch-background',
+  'session:cancel', 'session:interrupt', 'session:approval-response', 'session:watch-background',
   'session:unwatch-background', 'session:read-background-range', 'session:stop-task',
   'session:background-task', 'session:dequeue-message',
   'session:set-permission-mode', 'session:set-model', 'session:set-effort',
@@ -261,6 +261,10 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
 
   ipcMain.handle('session:cancel', (_event, routingId: string) => {
     manager.cancel(routingId)
+  })
+
+  ipcMain.handle('session:interrupt', async (_event, routingId: string) => {
+    await manager.interrupt(routingId)
   })
 
   ipcMain.handle(

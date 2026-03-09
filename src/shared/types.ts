@@ -257,6 +257,7 @@ interface SessionAPI {
   rekeySession(oldId: string, newId: string): Promise<void>
   sendPrompt(routingId: string, prompt: string, attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>): Promise<void>
   cancelSession(routingId: string): Promise<void>
+  interruptSession(routingId: string): Promise<void>
   respondApproval(routingId: string, requestId: string, decision: ApprovalDecision, answers?: Record<string, string>, updatedPermissions?: PermissionSuggestion[]): Promise<void>
   minimizeWindow(): Promise<void>
   maximizeWindow(): Promise<void>

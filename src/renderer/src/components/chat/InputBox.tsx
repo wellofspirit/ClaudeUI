@@ -357,7 +357,7 @@ export function InputBox(): React.JSX.Element {
 
   const handleCancel = useCallback(async () => {
     if (activeSessionId) {
-      await window.api.cancelSession(activeSessionId)
+      await window.api.interruptSession(activeSessionId)
     }
   }, [activeSessionId])
 

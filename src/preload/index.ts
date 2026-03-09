@@ -37,6 +37,8 @@ const api: ClaudeAPI = {
     ipcRenderer.invoke('session:send', routingId, prompt, attachments),
   cancelSession: (routingId: string) =>
     ipcRenderer.invoke('session:cancel', routingId),
+  interruptSession: (routingId: string) =>
+    ipcRenderer.invoke('session:interrupt', routingId),
   respondApproval: (routingId: string, requestId: string, decision: ApprovalDecision, answers?: Record<string, string>, updatedPermissions?: PermissionSuggestion[]) =>
     ipcRenderer.invoke('session:approval-response', routingId, requestId, decision, answers, updatedPermissions),
   minimizeWindow: () => ipcRenderer.invoke('window:minimize'),

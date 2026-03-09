@@ -160,6 +160,7 @@ export class ClaudeSession {
   private totalCostUsd = 0
   private messageChannel: MessageChannel<unknown> | null = null
   private activeQuery: {
+    interrupt(): Promise<void>
     setPermissionMode(mode: string): Promise<void>
     setModel(model?: string): Promise<void>
     stopTask(taskId: string): Promise<void>
@@ -448,6 +449,7 @@ export class ClaudeSession {
       })
 
       this.activeQuery = q as unknown as {
+        interrupt(): Promise<void>
         setPermissionMode(mode: string): Promise<void>
         setModel(model?: string): Promise<void>
         stopTask(taskId: string): Promise<void>
@@ -977,6 +979,21 @@ export class ClaudeSession {
     this.send('session:status', { ...this.status, state: 'disconnected' })
   }
 
+  /** Interrupt the current turn without killing the session.
+   *  Mirrors pressing Escape in the real CLI — the CLI aborts the active
+   *  API call / tool execution, yields tombstone messages, and returns to idle. */
+  async interrupt(): Promise<void> {
+    if (this.activeQuery) {
+      // Deny pending approvals so the SDK's canUseTool callbacks unblock
+      for (const [, entry] of this.pendingApprovals) {
+        entry.resolve({ decision: 'deny' })
+      }
+      this.pendingApprovals.clear()
+
+      await this.activeQuery.interrupt()
+    }
+  }
+
   async stopTask(toolUseId: string): Promise<{ success: boolean; error?: string }> {
     // Reverse lookup: toolUseId → task_id
     let taskId: string | null = null
@@ -988,7 +1005,22 @@ export class ClaudeSession {
     }
 
     if (!taskId) {
-      return { success: false, error: 'Task ID not found. Task may not be a background task.' }
+      // Foreground tasks don't have a taskIdMap entry yet (detectTaskMapping runs
+      // on tool results, which haven't arrived for running foreground tasks).
+      // Use interrupt() to cancel the current turn — this mirrors pressing Escape
+      // in the real CLI: the CLI aborts the active API call/tool execution, yields
+      // tombstone messages (tool_result with is_error + "[Request interrupted by
+      // user for tool use]"), and returns to idle. The session stays alive.
+      if (!this.activeQuery) {
+        return { success: false, error: 'No active session' }
+      }
+      try {
+        await this.activeQuery.interrupt()
+        return { success: true }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        return { success: false, error: msg }
+      }
     }
 
     if (!this.activeQuery) {
