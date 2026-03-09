@@ -113,7 +113,8 @@ if (!skipA1) {
   console.log(`  Success response helper: ${successFn}`)
 
   // --- Queue push function (needed to find the queue module) ---
-  const pushLoopRe = new RegExp(`(${V})\\(\\{mode:"prompt",value:${V}\\.message\\.content,uuid:${V}\\.uuid\\}\\),(${V})\\(\\)`)
+  // v2.1.71+ adds priority field: pushFn({mode:"prompt",value:...,uuid:...,priority:...})
+  const pushLoopRe = new RegExp(`(${V})\\(\\{mode:"prompt",value:${V}\\.message\\.content,uuid:${V}\\.uuid(?:,priority:${V}\\.priority)?\\}\\),(${V})\\(\\)`)
   const pushLoopMatch = pushLoopRe.exec(nearbyCtx)
   if (!pushLoopMatch) {
     console.error('ERROR: Cannot find queue-push + loop-starter pattern')

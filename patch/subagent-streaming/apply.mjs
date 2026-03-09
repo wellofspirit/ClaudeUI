@@ -215,24 +215,46 @@ const patchBMarker = '/*PATCHED:subagent-B*/'
 if (src.includes(patchBMarker)) {
   console.log('Already applied. Skipping.')
 } else {
-  // Find the unique sync loop pattern: if(ARR.push(MSG),MSG.type==="progress"&&...bash_progress...
-  // v2.1.47: ...&&MSG.data.type==="bash_progress"
-  // v2.1.49: ...&&(MSG.data.type==="bash_progress"||MSG.data.type==="powershell_progress")
-  // This pattern is unique to the Task tool's sync for-await loop body.
-  const pushRe = new RegExp(
+  // Find the unique sync loop pattern.
+  //
+  // v2.1.47–v2.1.63 (old): push and bash_progress in the same if:
+  //   if(ARR.push(MSG),MSG.type==="progress"&&(MSG.data.type==="bash_progress"||...)
+  //
+  // v2.1.71+ (new): push+stats in one if, bash_progress check is a separate if:
+  //   =VAL.value;if(ARR.push(MSG),STATS(VARS,MSG,TOOLS,j.options.tools),...)
+  //   followed by: if(MSG.type==="progress"&&(bash_progress||...))
+  //
+  // Try old pattern first, fall back to new.
+  const oldPushRe = new RegExp(
     `if\\((${V})\\.push\\((${V})\\),\\2\\.type==="progress"&&` +
     `(?:\\(\\2\\.data\\.type==="bash_progress"\\|\\|\\2\\.data\\.type==="powershell_progress"\\)|` +
     `\\2\\.data\\.type==="bash_progress")`
   )
-  const m = src.match(pushRe)
-  if (!m) {
-    console.error('ERROR: Cannot locate sub-agent sync loop push+bash_progress pattern.')
-    process.exit(1)
+  const newPushRe = new RegExp(
+    `=(${V})\\.value;if\\((${V})\\.push\\((${V})\\),` +
+    `(${V})\\(${V},\\3,${V},${V}\\.options\\.tools\\)`
+  )
+  let m = src.match(oldPushRe)
+  let matchStr, msgVar, idx
+  if (m) {
+    matchStr = m[0]
+    msgVar = m[2]
+    idx = src.indexOf(matchStr)
+    console.log(`Found sync loop body (old pattern) at char ${idx} (arr=${m[1]}, msg=${msgVar})`)
+  } else {
+    m = src.match(newPushRe)
+    if (!m) {
+      console.error('ERROR: Cannot locate sub-agent sync loop push+bash_progress pattern.')
+      process.exit(1)
+    }
+    // For new pattern, matchStr starts at "if(" — skip the "=VAL.value;" prefix
+    const fullMatch = m[0]
+    const ifStart = fullMatch.indexOf('if(')
+    matchStr = fullMatch.slice(ifStart)
+    msgVar = m[3]
+    idx = src.indexOf(fullMatch) + ifStart
+    console.log(`Found sync loop body (new pattern) at char ${idx} (arr=${m[2]}, msg=${msgVar})`)
   }
-
-  const [matchStr, arrVar, msgVar] = m
-  const idx = src.indexOf(matchStr)
-  console.log(`Found sync loop body at char ${idx} (arr=${arrVar}, msg=${msgVar})`)
 
   // Extract callback var (D), parent msg var (j), agent ID var (r) from nearby code
   const nearby = src.slice(idx, idx + 1200)

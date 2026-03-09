@@ -192,7 +192,7 @@ if (src.includes(patchBMarker)) {
     process.exit(1)
   }
 
-  // Find the task object variable: VAR=(await ...).tasks?.[TASK_ID]
+  // Find the task object variable: VAR=(await ...).tasks?.[TASK_ID] or VAR=FUNC().tasks?.[TASK_ID]
   const searchStart = Math.max(0, fullSetterIdx - 2000)
   const searchContext = src.slice(searchStart, fullSetterIdx)
   const taskVarRe1 = new RegExp(
@@ -201,7 +201,15 @@ if (src.includes(patchBMarker)) {
   const taskVarRe2 = new RegExp(
     `(${V})=\\(await (${V})\\(\\)\\)\\.tasks\\?\\.\\[${taskIdVarName}\\]`
   )
-  const taskVarMatch = searchContext.match(taskVarRe1) || searchContext.match(taskVarRe2)
+  // v2.1.71+: refactored into JS1() — no await, just Y().tasks?.[A]
+  const taskVarRe3 = new RegExp(
+    `let (${V})=(${V})\\(\\)\\.tasks\\?\\.\\[${taskIdVarName}\\];`
+  )
+  // v2.1.71+: comma-separated let — let{...}=q,VAR=FUNC().tasks?.[TASKID];
+  const taskVarRe4 = new RegExp(
+    `,(${V})=(${V})\\(\\)\\.tasks\\?\\.\\[${taskIdVarName}\\];`
+  )
+  const taskVarMatch = searchContext.match(taskVarRe1) || searchContext.match(taskVarRe2) || searchContext.match(taskVarRe3) || searchContext.match(taskVarRe4)
 
   if (!taskVarMatch) {
     console.error(`ERROR: Cannot locate task variable for tasks?.[${taskIdVarName}]`)
