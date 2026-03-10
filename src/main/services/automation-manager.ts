@@ -6,7 +6,6 @@ import * as os from 'os'
 import { Notification, type BrowserWindow } from 'electron'
 import { CronExpressionParser } from 'cron-parser'
 import { getCliJsPath, ClaudeSession } from './claude-session'
-import { loadClaudePermissions } from './claude-settings'
 import { loadSessionHistory } from './session-history'
 import { logger } from './logger'
 import type { Automation, AutomationRun, ChatMessage, ContentBlock } from '../../shared/types'
@@ -58,29 +57,6 @@ function writeJson(filePath: string, data: unknown): void {
   fs.writeFileSync(filePath, JSON.stringify(data, null, 2), { mode: 0o600 })
 }
 
-/**
- * Simple glob-style pattern matching for permission rules.
- * Supports trailing * wildcards (e.g., "Bash(command:git*)", "Read", "Edit(src/**)").
- */
-function matchesPattern(pattern: string, toolStr: string): boolean {
-  // Exact match
-  if (pattern === toolStr) return true
-  // Trailing wildcard: "Bash(command:git*)" matches "Bash(command:git status)"
-  if (pattern.endsWith('*')) {
-    return toolStr.startsWith(pattern.slice(0, -1))
-  }
-  // Tool-name-only pattern: "Bash" matches "Bash(command:...)"
-  if (!pattern.includes('(') && toolStr.startsWith(pattern + '(')) return true
-  return false
-}
-
-function formatToolStr(toolName: string, input: Record<string, unknown>): string {
-  // Format like "Bash(command:git status)" or "Read(file_path:/foo/bar)"
-  const entries = Object.entries(input)
-  if (entries.length === 0) return toolName
-  const firstEntry = entries[0]
-  return `${toolName}(${firstEntry[0]}:${String(firstEntry[1])})`
-}
 
 // ---------------------------------------------------------------------------
 // AutomationManager
@@ -510,15 +486,13 @@ export class AutomationManager {
     try {
       const cliPath = getCliJsPath()
 
-      // Build canUseTool from merged permissions (user + project + local, same as main chat)
-      const userPerms = loadClaudePermissions('user')
-      const projectPerms = automation.cwd ? loadClaudePermissions('project', automation.cwd) : { allow: [], deny: [] }
-      const localPerms = automation.cwd ? loadClaudePermissions('local', automation.cwd) : { allow: [], deny: [] }
-      const mergedPerms = {
-        allow: [...userPerms.allow, ...projectPerms.allow, ...localPerms.allow],
-        deny: [...userPerms.deny, ...projectPerms.deny, ...localPerms.deny]
+      // The CLI evaluates its own allow/deny rules from settingSources before
+      // calling canUseTool. It only calls us for tools that need a human decision
+      // ("ask" rules, or tools not covered by any rule). Since automations are
+      // headless with no user to ask, deny anything the CLI didn't pre-approve.
+      const canUseTool = async (_toolName: string, _input: Record<string, unknown>) => {
+        return { behavior: 'deny' as const, message: 'Automation: tool requires approval but no user is present' }
       }
-      const canUseTool = this.buildCanUseTool(automation, mergedPerms)
 
       const q = sdkQuery({
         prompt,
@@ -618,35 +592,7 @@ export class AutomationManager {
     }
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private buildCanUseTool(
-    automation: Automation,
-    globalPerms: { allow: string[]; deny: string[] }
-  ): any {
-    const allowPatterns = [...globalPerms.allow, ...automation.permissions.allow]
-    const denyPatterns = [...globalPerms.deny, ...automation.permissions.deny]
 
-    return async (toolName: string, input: Record<string, unknown>) => {
-      const toolStr = formatToolStr(toolName, input)
-
-      // Check deny first (higher priority)
-      for (const pattern of denyPatterns) {
-        if (matchesPattern(pattern, toolStr) || matchesPattern(pattern, toolName)) {
-          return { behavior: 'deny', message: `Denied by automation rule: ${pattern}` }
-        }
-      }
-
-      // Check allow
-      for (const pattern of allowPatterns) {
-        if (matchesPattern(pattern, toolStr) || matchesPattern(pattern, toolName)) {
-          return { behavior: 'allow', updatedInput: input }
-        }
-      }
-
-      // Default: deny (headless — no user to ask)
-      return { behavior: 'deny', message: 'Tool not in automation allow list' }
-    }
-  }
 
   // ---- Message Transform --------------------------------------------------
 
