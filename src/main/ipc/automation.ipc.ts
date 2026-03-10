@@ -1,5 +1,7 @@
 import { ipcMain, type BrowserWindow } from 'electron'
+import { is } from '@electron-toolkit/utils'
 import { AutomationManager } from '../services/automation-manager'
+import { logger } from '../services/logger'
 import type { Automation } from '../../shared/types'
 
 const AUTOMATION_IPC_CHANNELS = [
@@ -23,7 +25,14 @@ export function registerAutomationIpc(win: BrowserWindow): AutomationManager {
 
   const manager = new AutomationManager(win)
   manager.load()
-  manager.startAll()
+
+  // Skip automatic scheduling in dev mode — avoids spawning SDK subprocesses
+  // and hitting the API during development. Manual "Run Now" still works.
+  if (!is.dev) {
+    manager.startAll()
+  } else {
+    logger.info('AutomationIpc', 'Dev mode — skipping automatic automation scheduling')
+  }
 
   ipcMain.handle('automation:list', () => manager.list())
 
