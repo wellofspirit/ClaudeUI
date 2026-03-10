@@ -435,8 +435,21 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
   // Claude permission settings (allow/deny/ask rules)
   ipcMain.handle('claude:load-permissions', (_e, scope: string, cwd?: string) =>
     loadClaudePermissions(scope as 'user' | 'project' | 'local', cwd))
-  ipcMain.handle('claude:save-permissions', (_e, scope: string, permissions: unknown, cwd?: string) =>
-    saveClaudePermissions(scope as 'user' | 'project' | 'local', permissions as never, cwd))
+  ipcMain.handle('claude:save-permissions', async (_e, scope: string, permissions: unknown, cwd?: string) => {
+    saveClaudePermissions(scope as 'user' | 'project' | 'local', permissions as never, cwd)
+
+    // Hot-reload: tell running CLI sessions to re-read settings from disk.
+    // The CLI's file watcher is disabled in SDK mode, so writing to disk
+    // alone doesn't propagate.  notifySettingsChanged() sends an empty
+    // apply_flag_settings({}) which triggers the CLI's settings-change
+    // subscriber to invalidate its cache and re-read all sources from disk,
+    // respecting managed policies and the normal priority hierarchy.
+    manager.forEach((session) => {
+      if (!cwd || session.cwd === cwd || scope === 'user') {
+        session.notifySettingsChanged().catch(() => {})
+      }
+    })
+  })
 
   // MCP server management (via SDK Query object)
   ipcMain.handle('mcp:status', async (_e, routingId: string) => {

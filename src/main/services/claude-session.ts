@@ -156,7 +156,7 @@ export class ClaudeSession {
   private _mcpDisabledServers = new Set<string>() // servers disabled via toggle
   private win: BrowserWindow
   routingId: string
-  private cwd: string
+  readonly cwd: string
   private totalCostUsd = 0
   private messageChannel: MessageChannel<unknown> | null = null
   private activeQuery: {
@@ -172,6 +172,8 @@ export class ClaudeSession {
     toggleMcpServer(serverName: string, enabled: boolean): Promise<void>
     reconnectMcpServer(serverName: string): Promise<void>
     setMcpServers(servers: Record<string, unknown>): Promise<unknown>
+    // Permission hot-reload
+    applyFlagSettings(settings: Record<string, unknown>): Promise<void>
   } | null = null
   private slug: string | null = null
   private permissionMode: string = 'default'
@@ -460,6 +462,7 @@ export class ClaudeSession {
         toggleMcpServer(serverName: string, enabled: boolean): Promise<void>
         reconnectMcpServer(serverName: string): Promise<void>
         setMcpServers(servers: Record<string, unknown>): Promise<unknown>
+        applyFlagSettings(settings: Record<string, unknown>): Promise<void>
       }
 
       for await (const message of q) {
@@ -762,6 +765,39 @@ export class ClaudeSession {
     } catch (err) {
       logger.warn('ClaudeSession', 'getUsage failed', err)
       return null
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Permission rules hot-reload
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Notify the running CLI session that settings files changed on disk so it
+   * re-reads them and rebuilds its internal `toolPermissionContext`.
+   *
+   * The CLI's file watcher is disabled in SDK mode (`isRemoteMode`), so
+   * writing to settings.json alone doesn't propagate.  We work around this
+   * by sending an empty `apply_flag_settings({})` control message — the merge
+   * is a no-op (nothing injected into the flag layer) but the CLI still fires
+   * `notifyChange("flagSettings")`, which invalidates its settings cache and
+   * triggers the subscriber to re-read all sources from disk.
+   *
+   * This approach is safe for managed/enterprise policies because we don't
+   * inject any rules into the flag layer — the CLI re-evaluates its own
+   * setting sources, respecting `allowManagedPermissionRulesOnly` and the
+   * normal priority hierarchy.
+   */
+  async notifySettingsChanged(): Promise<void> {
+    if (!this.activeQuery) {
+      logger.debug('ClaudeSession', 'notifySettingsChanged: no active query, skipping')
+      return
+    }
+    try {
+      await this.activeQuery.applyFlagSettings({})
+      logger.debug('ClaudeSession', 'notifySettingsChanged: CLI notified')
+    } catch (err) {
+      logger.warn('ClaudeSession', 'notifySettingsChanged failed', err)
     }
   }
 
