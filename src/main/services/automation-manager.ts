@@ -592,7 +592,7 @@ export class AutomationManager {
             }
           }
         } else if (type === 'result') {
-          const costUsd = (msg.cost_usd as number) || (msg.totalCostUsd as number) || 0
+          const costUsd = (msg.total_cost_usd as number) || (msg.cost_usd as number) || 0
           totalCostUsd += costUsd
           this.processingAutomations.delete(automation.id)
           this.emitProcessing(automation.id, false)
