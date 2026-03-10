@@ -182,18 +182,40 @@ function RunHistoryItem({
     minute: '2-digit'
   })
 
+  const duration = run.finishedAt
+    ? formatDuration(run.finishedAt - run.startedAt)
+    : 'running'
+
+  const cost = run.totalCostUsd > 0
+    ? `$${run.totalCostUsd.toFixed(4)}`
+    : null
+
   return (
     <button
       onClick={onClick}
-      className={`w-full text-left px-3 py-1 text-xs flex items-center gap-1.5 transition-colors ${
+      className={`w-full text-left px-3 py-1.5 text-xs flex items-center gap-1.5 transition-colors ${
         isSelected ? 'bg-bg-hover text-text-primary' : 'text-text-muted hover:bg-bg-hover/50 hover:text-text-secondary'
       }`}
     >
       <span className="shrink-0">{statusIcon}</span>
-      <span className="truncate">{time}</span>
-      {run.resultSummary && (
-        <span className="truncate text-text-muted">— {run.resultSummary}</span>
-      )}
+      <span className="shrink-0">{time}</span>
+      <span className="shrink-0 text-text-muted/60">{duration}</span>
+      {cost && <span className="shrink-0 text-text-muted/60">{cost}</span>}
     </button>
   )
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function formatDuration(ms: number): string {
+  const seconds = Math.floor(ms / 1000)
+  if (seconds < 60) return `${seconds}s`
+  const minutes = Math.floor(seconds / 60)
+  const remainingSec = seconds % 60
+  if (minutes < 60) return `${minutes}m${remainingSec > 0 ? ` ${remainingSec}s` : ''}`
+  const hours = Math.floor(minutes / 60)
+  const remainingMin = minutes % 60
+  return `${hours}h${remainingMin > 0 ? ` ${remainingMin}m` : ''}`
 }

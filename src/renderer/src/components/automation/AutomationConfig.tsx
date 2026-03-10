@@ -1,6 +1,6 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { useAutomationStore } from '../../stores/automation-store'
-import type { Automation, AutomationSchedule } from '../../../../shared/types'
+import type { Automation, AutomationSchedule, ClaudePermissions } from '../../../../shared/types'
 
 const EFFORT_LEVELS = ['low', 'medium', 'high'] as const
 
@@ -56,38 +56,64 @@ function AutomationConfigForm({ automation }: { automation: Automation }): React
   const [models, setModels] = useState<Array<{ value: string; displayName: string }>>([])
   const [newRule, setNewRule] = useState('')
   const [ruleType, setRuleType] = useState<'allow' | 'deny'>('allow')
+  const [permsExpanded, setPermsExpanded] = useState(false)
+  const [globalPerms, setGlobalPerms] = useState<{ allow: string[]; deny: string[] } | null>(null)
+  const [dirPerms, setDirPerms] = useState<{ allow: string[]; deny: string[] } | null>(null)
 
-  const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // Track dirty state for explicit save
+  const isDirty = useMemo(() => {
+    return (
+      name !== automation.name ||
+      prompt !== automation.prompt ||
+      cwd !== automation.cwd ||
+      JSON.stringify(schedule) !== JSON.stringify(automation.schedule) ||
+      (model || '') !== (automation.model || '') ||
+      (effort || 'medium') !== (automation.effort || 'medium') ||
+      JSON.stringify(allowRules) !== JSON.stringify(automation.permissions.allow) ||
+      JSON.stringify(denyRules) !== JSON.stringify(automation.permissions.deny)
+    )
+  }, [name, prompt, cwd, schedule, model, effort, allowRules, denyRules, automation])
 
-  // Load available models
+  // Load available models + global (user-scope) permissions
   useEffect(() => {
     window.api.getModels().then(setModels)
+    window.api.loadClaudePermissions('user').then((user: ClaudePermissions) => {
+      setGlobalPerms(user.allow.length > 0 || user.deny.length > 0 ? { allow: user.allow, deny: user.deny } : null)
+    }).catch(() => setGlobalPerms(null))
   }, [])
 
-  // Auto-save with debounce
-  const save = useCallback(() => {
-    if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current)
-    saveTimeoutRef.current = setTimeout(() => {
-      const updated: Automation = {
-        ...automation,
-        name,
-        prompt,
-        cwd,
-        schedule,
-        model: model || undefined,
-        effort: effort || undefined,
-        enabled,
-        permissions: { allow: allowRules, deny: denyRules }
-      }
-      window.api.saveAutomation(updated)
-    }, 500)
-  }, [automation, name, prompt, cwd, schedule, model, effort, enabled, allowRules, denyRules])
-
-  // Trigger save on any change
+  // Load directory (project + local scope) permissions when cwd changes
   useEffect(() => {
-    save()
-    return () => { if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current) }
-  }, [save])
+    if (!cwd) { setDirPerms(null); return }
+    let cancelled = false
+    Promise.all([
+      window.api.loadClaudePermissions('project', cwd),
+      window.api.loadClaudePermissions('local', cwd)
+    ]).then(([project, local]: [ClaudePermissions, ClaudePermissions]) => {
+      if (cancelled) return
+      const merged = {
+        allow: [...project.allow, ...local.allow],
+        deny: [...project.deny, ...local.deny]
+      }
+      setDirPerms(merged.allow.length > 0 || merged.deny.length > 0 ? merged : null)
+    }).catch(() => { if (!cancelled) setDirPerms(null) })
+    return () => { cancelled = true }
+  }, [cwd])
+
+  const handleSave = (): void => {
+    const updated: Automation = {
+      ...automation,
+      name,
+      prompt,
+      cwd,
+      schedule,
+      model: model || undefined,
+      effort: effort || undefined,
+      enabled,
+      permissions: { allow: allowRules, deny: denyRules }
+    }
+    window.api.saveAutomation(updated)
+  }
 
   const handlePickFolder = async (): Promise<void> => {
     const folder = await window.api.pickFolder()
@@ -269,82 +295,128 @@ function AutomationConfigForm({ automation }: { automation: Automation }): React
         </Field>
       </div>
 
-      {/* Permissions */}
-      <Field label="Permissions">
-        <div className="space-y-2">
-          {/* Allow rules */}
-          <div>
-            <span className="text-[10px] text-green-400 uppercase font-semibold">Allow</span>
+      {/* Permissions — collapsible */}
+      <div>
+        <button
+          onClick={() => setPermsExpanded(!permsExpanded)}
+          className="flex items-center gap-1.5 text-xs font-medium text-text-muted mb-1 hover:text-text-secondary transition-colors"
+        >
+          <svg
+            width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
+            className={`transition-transform ${permsExpanded ? 'rotate-90' : ''}`}
+          >
+            <polyline points="9 18 15 12 9 6" />
+          </svg>
+          Permissions
+          <span className="text-text-muted/60 font-normal">
+            ({allowRules.length} allow, {denyRules.length} deny)
+          </span>
+        </button>
+
+        {permsExpanded && (
+          <div className="space-y-2 pl-4 border-l border-border/20">
+            {/* Inherited global (user-scope) permissions (read-only) */}
+            {globalPerms && (
+              <InheritedPermissions label="Inherited from global settings" perms={globalPerms} />
+            )}
+
+            {/* Inherited directory (project + local scope) permissions (read-only) */}
+            {dirPerms && (
+              <InheritedPermissions label="Inherited from directory" perms={dirPerms} />
+            )}
+
+            {/* Allow rules */}
+            <div>
+              <span className="text-[10px] text-green-400 uppercase font-semibold">Allow</span>
+              <div className="flex flex-wrap gap-1 mt-1">
+                {allowRules.map((rule, idx) => (
+                  <PermissionPill key={idx} rule={rule} variant="allow" onRemove={() => removeAllowRule(idx)} />
+                ))}
+                {allowRules.length === 0 && <span className="text-xs text-text-muted italic">None</span>}
+              </div>
+            </div>
+
+            {/* Deny rules */}
+            <div>
+              <span className="text-[10px] text-red-400 uppercase font-semibold">Deny</span>
+              <div className="flex flex-wrap gap-1 mt-1">
+                {denyRules.map((rule, idx) => (
+                  <PermissionPill key={idx} rule={rule} variant="deny" onRemove={() => removeDenyRule(idx)} />
+                ))}
+                {denyRules.length === 0 && <span className="text-xs text-text-muted italic">None</span>}
+              </div>
+            </div>
+
+            {/* Add rule */}
+            <div className="flex gap-2 items-center mt-2">
+              <select
+                value={ruleType}
+                onChange={(e) => setRuleType(e.target.value as 'allow' | 'deny')}
+                className="bg-bg-tertiary border border-border/40 rounded-lg px-2 py-1 text-xs text-text-primary"
+              >
+                <option value="allow">Allow</option>
+                <option value="deny">Deny</option>
+              </select>
+              <input
+                value={newRule}
+                onChange={(e) => setNewRule(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && addRule()}
+                className="flex-1 bg-bg-tertiary border border-border/40 rounded-lg px-2 py-1 text-xs text-text-primary outline-none focus:border-text-accent"
+                placeholder="e.g., Bash(command:*)"
+                list="permission-templates"
+              />
+              <datalist id="permission-templates">
+                {PERMISSION_TEMPLATES.map((t) => <option key={t} value={t} />)}
+              </datalist>
+              <button
+                onClick={addRule}
+                className="px-2 py-1 text-xs bg-bg-tertiary border border-border/40 rounded-lg hover:bg-bg-hover transition-colors text-text-secondary"
+              >
+                Add
+              </button>
+            </div>
+
+            {/* Quick-add templates */}
             <div className="flex flex-wrap gap-1 mt-1">
-              {allowRules.map((rule, idx) => (
-                <PermissionPill key={idx} rule={rule} variant="allow" onRemove={() => removeAllowRule(idx)} />
-              ))}
-              {allowRules.length === 0 && <span className="text-xs text-text-muted italic">None</span>}
+              {PERMISSION_TEMPLATES.slice(0, 6).map((t) => {
+                const isAllowed = allowRules.includes(t)
+                const isDenied = denyRules.includes(t)
+                if (isAllowed || isDenied) return null
+                return (
+                  <button
+                    key={t}
+                    onClick={() => setAllowRules([...allowRules, t])}
+                    className="px-1.5 py-0.5 text-[10px] rounded border border-border/30 text-text-muted hover:bg-bg-hover hover:text-text-secondary transition-colors"
+                  >
+                    + {t}
+                  </button>
+                )
+              })}
             </div>
           </div>
-
-          {/* Deny rules */}
-          <div>
-            <span className="text-[10px] text-red-400 uppercase font-semibold">Deny</span>
-            <div className="flex flex-wrap gap-1 mt-1">
-              {denyRules.map((rule, idx) => (
-                <PermissionPill key={idx} rule={rule} variant="deny" onRemove={() => removeDenyRule(idx)} />
-              ))}
-              {denyRules.length === 0 && <span className="text-xs text-text-muted italic">None</span>}
-            </div>
-          </div>
-
-          {/* Add rule */}
-          <div className="flex gap-2 items-center mt-2">
-            <select
-              value={ruleType}
-              onChange={(e) => setRuleType(e.target.value as 'allow' | 'deny')}
-              className="bg-bg-tertiary border border-border/40 rounded-lg px-2 py-1 text-xs text-text-primary"
-            >
-              <option value="allow">Allow</option>
-              <option value="deny">Deny</option>
-            </select>
-            <input
-              value={newRule}
-              onChange={(e) => setNewRule(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && addRule()}
-              className="flex-1 bg-bg-tertiary border border-border/40 rounded-lg px-2 py-1 text-xs text-text-primary outline-none focus:border-text-accent"
-              placeholder="e.g., Bash(command:*)"
-              list="permission-templates"
-            />
-            <datalist id="permission-templates">
-              {PERMISSION_TEMPLATES.map((t) => <option key={t} value={t} />)}
-            </datalist>
-            <button
-              onClick={addRule}
-              className="px-2 py-1 text-xs bg-bg-tertiary border border-border/40 rounded-lg hover:bg-bg-hover transition-colors text-text-secondary"
-            >
-              Add
-            </button>
-          </div>
-
-          {/* Quick-add templates */}
-          <div className="flex flex-wrap gap-1 mt-1">
-            {PERMISSION_TEMPLATES.slice(0, 6).map((t) => {
-              const isAllowed = allowRules.includes(t)
-              const isDenied = denyRules.includes(t)
-              if (isAllowed || isDenied) return null
-              return (
-                <button
-                  key={t}
-                  onClick={() => setAllowRules([...allowRules, t])}
-                  className="px-1.5 py-0.5 text-[10px] rounded border border-border/30 text-text-muted hover:bg-bg-hover hover:text-text-secondary transition-colors"
-                >
-                  + {t}
-                </button>
-              )
-            })}
-          </div>
-        </div>
-      </Field>
+        )}
+      </div>
 
       {/* Actions */}
       <div className="flex items-center gap-3 pt-2 border-t border-border/20">
+        {/* Save button */}
+        <button
+          onClick={handleSave}
+          disabled={!isDirty}
+          className={`flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg border transition-colors ${
+            isDirty
+              ? 'bg-text-accent/15 border-text-accent/40 text-text-accent hover:bg-text-accent/25'
+              : 'bg-bg-tertiary border-border/40 text-text-muted cursor-not-allowed opacity-50'
+          }`}
+        >
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" />
+            <polyline points="17 21 17 13 7 13 7 21" />
+            <polyline points="7 3 7 8 15 8" />
+          </svg>
+          {isDirty ? 'Save' : 'Saved'}
+        </button>
+
         {/* Enable toggle */}
         <button
           onClick={handleToggleEnabled}
@@ -405,6 +477,32 @@ function Field({ label, children, className }: { label: string; children: React.
     <div className={className}>
       <label className="block text-xs font-medium text-text-muted mb-1">{label}</label>
       {children}
+    </div>
+  )
+}
+
+function InheritedPermissions({ label, perms }: { label: string; perms: { allow: string[]; deny: string[] } }): React.JSX.Element {
+  return (
+    <div className="bg-bg-tertiary/50 rounded-lg px-3 py-2 space-y-1.5">
+      <span className="text-[10px] text-text-muted uppercase font-semibold">{label}</span>
+      {perms.allow.length > 0 && (
+        <div className="flex flex-wrap gap-1">
+          {perms.allow.map((rule, idx) => (
+            <span key={idx} className="inline-flex items-center px-2 py-0.5 text-[10px] rounded-full border bg-green-500/5 border-green-500/15 text-green-400/70">
+              {rule}
+            </span>
+          ))}
+        </div>
+      )}
+      {perms.deny.length > 0 && (
+        <div className="flex flex-wrap gap-1">
+          {perms.deny.map((rule, idx) => (
+            <span key={idx} className="inline-flex items-center px-2 py-0.5 text-[10px] rounded-full border bg-red-500/5 border-red-500/15 text-red-400/70">
+              {rule}
+            </span>
+          ))}
+        </div>
+      )}
     </div>
   )
 }
