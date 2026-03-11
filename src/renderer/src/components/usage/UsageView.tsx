@@ -298,10 +298,21 @@ function ApiUsageBar({ usage }: { usage: AccountUsage }): React.JSX.Element {
 
 function BlockRow({ block }: { block: UsageBlock }): React.JSX.Element {
   const total = sumTokens(block.tokens)
-  const proj = block.projectedUsage
-  const pct = proj
-    ? Math.min(100, Math.round((total / proj.tokens) * 100))
-    : null
+
+  // Prefer finalApiPercent (actual API %) over computing from projectedUsage.
+  // For the projected total, derive from apiPercent to ensure consistency
+  // (projected is always >= actual when apiPercent <= 100).
+  const apiPct = block.finalApiPercent
+  const pct = apiPct != null && apiPct > 0 ? Math.min(100, Math.round(apiPct)) : null
+
+  // Derive projected total from API %: if we used `total` tokens at `apiPct`%,
+  // the window capacity is `total / (apiPct / 100)`.
+  const projTokens =
+    apiPct != null && apiPct > 0 ? Math.round(total / (apiPct / 100)) : null
+  const projCost =
+    apiPct != null && apiPct > 0 && total > 0
+      ? Math.round((block.costUsd / (apiPct / 100)) * 100) / 100
+      : null
 
   return (
     <div className="flex items-center gap-2 text-[10px] py-1.5 px-1 rounded hover:bg-bg-hover/30 transition-colors">
@@ -312,22 +323,22 @@ function BlockRow({ block }: { block: UsageBlock }): React.JSX.Element {
       {/* Tokens: used / projected */}
       <span className="font-mono w-[140px] text-right shrink-0">
         <span className="text-text-primary">{formatTokenCount(total)}</span>
-        {proj && (
-          <span className="text-text-muted"> / {formatTokenCount(proj.tokens)}</span>
+        {projTokens != null && (
+          <span className="text-text-muted"> / {formatTokenCount(projTokens)}</span>
         )}
       </span>
       {/* Cost: used / projected */}
       <span className="font-mono w-[120px] text-right shrink-0">
         <span className="text-text-muted">{formatCost(block.costUsd)}</span>
-        {proj && (
-          <span className="text-text-muted/50"> / {formatCost(proj.costUsd)}</span>
+        {projCost != null && (
+          <span className="text-text-muted/50"> / {formatCost(projCost)}</span>
         )}
       </span>
       {/* Utilization bar + percentage */}
       {pct !== null ? (
         <div
           className="flex-1 flex items-center gap-1.5"
-          title={`Used ${pct}% of projected window capacity`}
+          title={`Used ${pct}% of 5hr window capacity`}
         >
           <div className="flex-1 h-[5px] rounded-full bg-white/5 overflow-hidden">
             <div

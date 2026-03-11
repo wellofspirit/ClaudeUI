@@ -511,6 +511,8 @@ export interface UsageBlock {
   models: ModelTokenBreakdown[]
   burnRate: { tokensPerMin: number; costPerHour: number } | null
   projectedUsage: { tokens: number; costUsd: number } | null
+  /** Final API usage % when this block ended (from last snapshot). Used for accurate display. */
+  finalApiPercent: number | null
 }
 
 /** A single point-in-time snapshot, stored every poll cycle */

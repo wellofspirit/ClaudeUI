@@ -323,19 +323,21 @@ export class BlockUsageService {
       // Carry the last known projection to newly completed blocks.
       // When a block was active, its projection was stored in the last snapshot
       // via the projection sample buffer. Now that it's completed, transfer it.
+      // NOTE: We do NOT capture finalApiPercent here — by the time we detect
+      // completion (next poll cycle), the 5hr window has rotated and the current
+      // API % belongs to the NEW window. The correct finalApiPercent comes from
+      // the last snapshot persisted while the block was still active.
       if (newlyCompleted.length > 0) {
-        // The last projection from the regression buffer belongs to the block
-        // that just completed (projectionBlockId still matches).
         for (const b of newlyCompleted) {
           if (b.id === this.projectionBlockId && this.projectionSamples.length > 0) {
             b.projectedUsage = this.computeProjectionWLS(b)
           }
         }
-        // Also backfill recent blocks from previously persisted daily data
-        this.backfillProjections(recentBlocks)
-      } else {
-        this.backfillProjections(recentBlocks)
       }
+      // Restore projectedUsage and finalApiPercent from persisted daily data.
+      // This is the primary source for finalApiPercent — it comes from the last
+      // snapshot recorded while each block was still active.
+      this.backfillProjections(recentBlocks)
 
       // Persist snapshot + completed blocks
       const snapshot = this.buildSnapshot(currentBlock)
@@ -487,33 +489,41 @@ export class BlockUsageService {
    * and when it's reconstructed now (floorToHour for past windows).
    */
   private backfillProjections(recentBlocks: UsageBlock[]): void {
-    const needsFill = recentBlocks.filter((b) => !b.projectedUsage)
-    if (needsFill.length === 0) return
+    // Blocks are rebuilt from JSONL each recalculate(), so metadata like
+    // projectedUsage and finalApiPercent need to be restored from persisted
+    // daily files. For blocks that completed while the app was running,
+    // these are set directly in recalculate() — this backfill handles
+    // blocks from previous sessions or before finalApiPercent existed.
+    const needsProjection = recentBlocks.filter((b) => !b.projectedUsage)
+    const needsApiPercent = recentBlocks.filter((b) => b.finalApiPercent == null)
+    if (needsProjection.length === 0 && needsApiPercent.length === 0) return
 
-    /**
-     * Find the block that a snapshot or completed block belongs to, matching
-     * by time overlap rather than exact ID (IDs can shift between API-aligned
-     * and floorToHour across restarts).
-     */
+    // All blocks that still need something filled
+    const needsFill = recentBlocks.filter(
+      (b) => !b.projectedUsage || b.finalApiPercent == null
+    )
+
     const findBlockForTimestamp = (ts: number): UsageBlock | undefined => {
-      return needsFill.find(
-        (b) => ts >= b.startTime && ts <= b.endTime
-      )
+      return needsFill.find((b) => ts >= b.startTime && ts <= b.endTime)
     }
 
     const findBlockById = (id: string): UsageBlock | undefined => {
       return needsFill.find((b) => b.id === id)
     }
 
-    // Collect snapshot pairs per block for retroactive computation (strategy 3)
+    // Track the last (most recent) apiPercent seen per block (for legacy fallback)
+    const lastApiPercent = new Map<string, number>()
+
+    // Collect snapshot pairs per block for retroactive WLS (strategy 3)
     const blockSnapPairs = new Map<
       string,
       Array<{ tokens: number; apiPercent: number; timestamp: number }>
     >()
 
-    // Scan the last 3 days of daily files
+    // Scan the last 3 days of daily files (oldest first so later snapshots
+    // overwrite earlier ones — we want the most recent data for each block)
     const now = Date.now()
-    for (let i = 0; i < 3; i++) {
+    for (let i = 2; i >= 0; i--) {
       const date = dateStrFromTimestamp(now - i * 24 * MS_PER_HOUR)
       const filePath = path.join(USAGE_DIR, `${date}.json`)
       try {
@@ -522,29 +532,32 @@ export class BlockUsageService {
           fs.readFileSync(filePath, 'utf-8')
         ) as DailyUsageFile
 
-        // Strategy 1: stored projection on completedBlocks
+        // Strategy 1: restore metadata from stored completedBlocks
         for (const cb of daily.completedBlocks) {
-          if (!cb.projectedUsage) continue
-          // Try exact ID first, then time-range overlap
           const block = findBlockById(cb.id) ?? findBlockForTimestamp(cb.startTime)
-          if (block && !block.projectedUsage) {
+          if (!block) continue
+          if (!block.projectedUsage && cb.projectedUsage) {
             block.projectedUsage = cb.projectedUsage
+          }
+          if (block.finalApiPercent == null && cb.finalApiPercent != null) {
+            block.finalApiPercent = cb.finalApiPercent
           }
         }
 
-        // Scan snapshots for strategies 2 and 3
+        // Scan snapshots for projection fill (strategy 2+3) and legacy apiPercent
         for (const snap of daily.snapshots) {
           if (!snap.activeBlockId) continue
 
-          // Resolve snapshot to a block: try exact ID, then use snapshot
-          // timestamp to find which block's time range it falls in.
           const block =
             findBlockById(snap.activeBlockId) ??
             findBlockForTimestamp(snap.timestamp)
           if (!block) continue
 
-          // Strategy 2: stored projection on snapshot
+          // Strategy 2: use the LAST snapshot's projection (overwrite, not first-wins)
           if (!block.projectedUsage && snap.projectedUsage) {
+            block.projectedUsage = snap.projectedUsage
+          } else if (snap.projectedUsage) {
+            // Overwrite with later (more accurate) projection
             block.projectedUsage = snap.projectedUsage
           }
 
@@ -564,15 +577,41 @@ export class BlockUsageService {
               })
             }
           }
+
+          // Track last apiPercent for legacy blocks missing finalApiPercent
+          if (block.finalApiPercent == null && snap.apiUsagePercent > 0) {
+            lastApiPercent.set(block.id, snap.apiUsagePercent)
+          }
         }
       } catch {
         // Skip corrupt files
       }
     }
 
+    // Apply finalApiPercent from snapshots (legacy fallback for blocks
+    // that were persisted before finalApiPercent existed)
+    for (const block of needsApiPercent) {
+      if (block.finalApiPercent != null) continue // already filled by strategy 1
+      const pct = lastApiPercent.get(block.id)
+      if (pct != null) {
+        block.finalApiPercent = pct
+      }
+    }
+
+    // Sanity-check projections: if projectedUsage.tokens < actual, discard it
+    // (can happen when a stale snapshot's projection was stored early in the block)
+    for (const block of needsProjection) {
+      if (block.projectedUsage) {
+        const blockTok = totalTokens(block.tokens)
+        if (block.projectedUsage.tokens < blockTok) {
+          block.projectedUsage = null // discard bad projection, let strategy 3 try
+        }
+      }
+    }
+
     // Strategy 3: retroactive WLS for blocks still without a projection
     for (const [blockId, pairs] of blockSnapPairs) {
-      const block = needsFill.find((b) => b.id === blockId)
+      const block = needsProjection.find((b) => b.id === blockId)
       if (!block || block.projectedUsage) continue // already filled
       if (pairs.length === 0) continue
 
@@ -767,8 +806,13 @@ export class BlockUsageService {
     if (apiResetAt) {
       const resetMs = new Date(apiResetAt).getTime()
       if (!isNaN(resetMs)) {
-        apiWindowEnd = resetMs
-        apiWindowStart = resetMs - SESSION_DURATION_MS
+        // Round to the nearest second to eliminate sub-second jitter in the
+        // API's resets_at value. Without this, each poll gets a slightly
+        // different millisecond, producing dozens of unique block IDs for
+        // the same 5-hour window — breaking snapshot-to-block matching.
+        const resetRounded = Math.round(resetMs / 1000) * 1000
+        apiWindowEnd = resetRounded
+        apiWindowStart = resetRounded - SESSION_DURATION_MS
       }
     }
 
@@ -930,7 +974,8 @@ export class BlockUsageService {
       requestCount: entries.length,
       models,
       burnRate,
-      projectedUsage
+      projectedUsage,
+      finalApiPercent: null
     }
   }
 

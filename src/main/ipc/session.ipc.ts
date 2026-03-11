@@ -797,8 +797,9 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     manager.setSessionTimeout(savedSettings.sessionTimeoutMins * 60 * 1000)
   }
 
-  // Skip usage fetcher + service session in dev mode — they spawn extra
-  // SDK subprocesses and hit the API, which is unnecessary during development.
+  // In dev mode, skip auto-polling and service session (they spawn extra SDK
+  // subprocesses and hit the API), but still initialize block usage so the
+  // usage view works with local data.
   const { is } = require('@electron-toolkit/utils')
   if (!is.dev) {
     // Account usage polling (5hr / 7-day rate limits)
@@ -825,23 +826,21 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
       usageFetcher.setIntervalSecs(savedSettings.usageRefreshSecs)
     }
     usageFetcher.startPolling()
-
-    // Block usage analytics
-    blockUsageService.setWindow(win)
-    blockUsageService.recalculate().catch((err) => { logger.error('BlockUsage', 'Initial recalculation failed', err) })
   } else {
-    logger.info('IPC', 'Dev mode — skipping usage fetcher, service session, and block usage')
+    logger.info('IPC', 'Dev mode — skipping usage fetcher auto-polling and service session')
   }
 
-  // IPC handlers are always registered so the renderer never gets "no handler" errors.
-  // In dev mode they return null (usage UI gracefully handles missing data).
+  // Block usage analytics — always initialize (reads local JSONL files, no API calls)
+  blockUsageService.setWindow(win)
+  blockUsageService.recalculate().catch((err) => { logger.error('BlockUsage', 'Initial recalculation failed', err) })
+
+  // IPC handlers — always registered so the renderer never gets "no handler" errors.
   ipcMain.handle('usage:fetch', async () => {
-    if (is.dev) return null
+    if (is.dev) return null // no live API data in dev mode
     return usageFetcher.fetch()
   })
 
   ipcMain.handle('usage:fetch-block', async () => {
-    if (is.dev) return null
     return blockUsageService.getData() ?? (await blockUsageService.recalculate())
   })
 

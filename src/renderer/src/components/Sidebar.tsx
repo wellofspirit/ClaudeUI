@@ -1346,10 +1346,11 @@ function ExtraUsageBar({ extra }: { extra: ExtraUsage }): React.JSX.Element | nu
   )
 }
 
-function UsagePanel({ usage, onRefresh }: { usage: AccountUsage; onRefresh: () => void }): React.JSX.Element {
-  const plan = formatPlanName(usage.planName)
-  const ago = Math.round((Date.now() - usage.fetchedAt) / 1000)
-  const agoStr = ago < 60 ? `${ago}s ago` : `${Math.floor(ago / 60)}m ago`
+function UsagePanel({ usage, onRefresh }: { usage: AccountUsage | null; onRefresh: () => void }): React.JSX.Element {
+  const plan = usage ? formatPlanName(usage.planName) : null
+  const agoStr = usage
+    ? (() => { const ago = Math.round((Date.now() - usage.fetchedAt) / 1000); return ago < 60 ? `${ago}s ago` : `${Math.floor(ago / 60)}m ago` })()
+    : null
   const blockUsage = useSessionStore((s) => s.blockUsage)
   const setShowUsageView = useSessionStore((s) => s.setShowUsageView)
 
@@ -1368,9 +1369,9 @@ function UsagePanel({ usage, onRefresh }: { usage: AccountUsage; onRefresh: () =
 
   return (
     <div className="absolute bottom-full left-0 mb-1 w-[220px] bg-bg-secondary border border-border rounded-lg shadow-lg p-3 z-50">
-      {usage.error ? (
+      {usage?.error ? (
         <div className="text-[10px] text-red-400">{usage.error}</div>
-      ) : (
+      ) : usage ? (
         <>
           <UsageProgressBar label="5-Hour Session" window={usage.fiveHour} />
           {usage.sevenDay && <UsageProgressBar label="7-Day (all models)" window={usage.sevenDay} />}
@@ -1378,6 +1379,8 @@ function UsagePanel({ usage, onRefresh }: { usage: AccountUsage; onRefresh: () =
           {usage.sevenDaySonnet && <UsageProgressBar label="7-Day Sonnet" window={usage.sevenDaySonnet} />}
           {usage.extraUsage && <ExtraUsageBar extra={usage.extraUsage} />}
         </>
+      ) : (
+        <div className="text-[10px] text-text-muted">No live API data</div>
       )}
       {/* Block usage summary */}
       {blockSummary && (
@@ -1391,7 +1394,7 @@ function UsagePanel({ usage, onRefresh }: { usage: AccountUsage; onRefresh: () =
           {plan && (
             <span className="text-[9px] px-1.5 py-0.5 rounded bg-accent/15 text-accent font-medium">{plan}</span>
           )}
-          <span className="text-[9px] text-text-muted">{agoStr}</span>
+          {agoStr && <span className="text-[9px] text-text-muted">{agoStr}</span>}
         </div>
         <div className="flex items-center gap-1">
           <button
@@ -1401,18 +1404,20 @@ function UsagePanel({ usage, onRefresh }: { usage: AccountUsage; onRefresh: () =
           >
             Details →
           </button>
-          <button
-            onClick={(e) => { e.stopPropagation(); onRefresh() }}
-            className="flex items-center justify-center w-5 h-5 rounded hover:bg-bg-hover transition-colors cursor-default"
-            title="Refresh usage"
-          >
-            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-text-muted">
-              <path d="M23 4v6h-6" />
-              <path d="M1 20v-6h6" />
-              <path d="M3.51 9a9 9 0 0114.85-3.36L23 10" />
-              <path d="M20.49 15a9 9 0 01-14.85 3.36L1 14" />
-            </svg>
-          </button>
+          {usage && (
+            <button
+              onClick={(e) => { e.stopPropagation(); onRefresh() }}
+              className="flex items-center justify-center w-5 h-5 rounded hover:bg-bg-hover transition-colors cursor-default"
+              title="Refresh usage"
+            >
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-text-muted">
+                <path d="M23 4v6h-6" />
+                <path d="M1 20v-6h6" />
+                <path d="M3.51 9a9 9 0 0114.85-3.36L23 10" />
+                <path d="M20.49 15a9 9 0 01-14.85 3.36L1 14" />
+              </svg>
+            </button>
+          )}
         </div>
       </div>
     </div>
@@ -1501,7 +1506,7 @@ function UsageRing(): React.JSX.Element {
           ? formatResetTime(usage.fiveHour.resetsAt)
           : 'Usage'}
       </span>
-      {showPanel && usage && <UsagePanel usage={usage} onRefresh={handleRefresh} />}
+      {showPanel && <UsagePanel usage={usage} onRefresh={handleRefresh} />}
     </div>
   )
 }
