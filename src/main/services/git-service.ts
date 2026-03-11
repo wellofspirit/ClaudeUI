@@ -7,12 +7,34 @@ import { logger } from './logger'
 export class GitService {
   private git: SimpleGit
   private cwd: string
+  /** Resolved git repo root (may differ from cwd when session starts in a subdirectory) */
+  private repoRoot: string | null = null
   private pollTimer: ReturnType<typeof setInterval> | null = null
   private lastStatusJson = ''
 
   constructor(cwd: string) {
     this.cwd = cwd
     this.git = simpleGit(cwd)
+  }
+
+  /**
+   * Ensure we know the repo root. If the session cwd is a subdirectory of a
+   * git repo, we re-initialize simple-git with the repo root so that all
+   * paths from `git status` (which are repo-root-relative) resolve correctly
+   * for `git diff`, `git show`, `fs.readFile`, etc.
+   */
+  private async ensureRepoRoot(): Promise<void> {
+    if (this.repoRoot !== null) return
+    try {
+      const toplevel = (await this.git.revparse(['--show-toplevel'])).trim()
+      this.repoRoot = toplevel
+      if (path.resolve(toplevel) !== path.resolve(this.cwd)) {
+        // Re-init simple-git at the repo root so paths align
+        this.git = simpleGit(toplevel)
+      }
+    } catch {
+      this.repoRoot = this.cwd
+    }
   }
 
   async isGitRepo(): Promise<boolean> {
@@ -25,6 +47,7 @@ export class GitService {
   }
 
   async getStatus(): Promise<GitStatusData> {
+    await this.ensureRepoRoot()
     const status = await this.git.status()
 
     const files: GitFileStatus[] = status.files.map((f) => ({
@@ -55,7 +78,7 @@ export class GitService {
       // Untracked files — count all their lines as additions
       for (const f of status.not_added) {
         try {
-          const absPath = path.resolve(this.cwd, f)
+          const absPath = path.resolve(this.repoRoot!, f)
           const stat = await fs.promises.stat(absPath)
           if (!stat.isFile()) continue
           const content = await fs.promises.readFile(absPath, 'utf-8')
@@ -128,6 +151,7 @@ export class GitService {
     staged: boolean,
     ignoreWhitespace: boolean = false
   ): Promise<{ patch: string }> {
+    await this.ensureRepoRoot()
     const args: string[] = ['diff']
     if (staged) args.push('--cached')
     if (ignoreWhitespace) args.push('-w')
@@ -140,7 +164,7 @@ export class GitService {
       // Empty patch — could be an untracked file.
       // Generate a unified diff manually since `git diff --no-index` exits
       // with code 1 when differences exist and simple-git treats that as error.
-      const absPath = path.resolve(this.cwd, filePath)
+      const absPath = path.resolve(this.repoRoot!, filePath)
       let content: string
       try {
         content = await fs.promises.readFile(absPath, 'utf-8')
@@ -171,7 +195,8 @@ export class GitService {
     filePath: string,
     staged: boolean
   ): Promise<{ oldContent: string; newContent: string }> {
-    const absPath = path.resolve(this.cwd, filePath)
+    await this.ensureRepoRoot()
+    const absPath = path.resolve(this.repoRoot!, filePath)
     const normEol = (s: string): string => s.replace(/\r\n/g, '\n')
 
     try {
@@ -241,6 +266,7 @@ export class GitService {
    * For untracked files, deletes the file from disk.
    */
   async discardFile(filePath: string): Promise<void> {
+    await this.ensureRepoRoot()
     // Check if file is tracked by trying to show it from HEAD
     let tracked = true
     try {
@@ -256,7 +282,7 @@ export class GitService {
 
     if (!tracked) {
       // Untracked file — delete from disk
-      const absPath = path.resolve(this.cwd, filePath)
+      const absPath = path.resolve(this.repoRoot!, filePath)
       await fs.promises.unlink(absPath)
     } else {
       // Tracked file — unstage and restore working tree to HEAD
