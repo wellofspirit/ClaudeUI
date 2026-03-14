@@ -43,6 +43,21 @@ function safeHandler<T>(handler: (...args: any[]) => Promise<T>) {
 
 let cachedModels: ModelInfo[] | null = null
 
+const CONTEXT_WINDOW_1M = 1_000_000
+const CONTEXT_WINDOW_DEFAULT = 200_000
+
+/**
+ * Returns the context window size for a given model value.
+ * Checks the cached model list — if the model's description contains "1m" (case-insensitive),
+ * it's a 1M-context model. Falls back to 200K.
+ */
+export function getContextWindowSize(modelValue: string): number {
+  if (!cachedModels) return CONTEXT_WINDOW_DEFAULT
+  const info = cachedModels.find((m) => m.value === modelValue)
+  if (info && /1m/i.test(info.description)) return CONTEXT_WINDOW_1M
+  return CONTEXT_WINDOW_DEFAULT
+}
+
 const TITLE_SYSTEM_PROMPT =
   'Your task: output ONLY a short title (1-3 words) that captures the main topic of the user\'s conversation. No explanation, no quotes, no JSON, no markdown — just the title itself. Use title case. Examples: Fix Login Bug, Auth Feature, Refactor API, Debug Tests, Rename Sessions'
 

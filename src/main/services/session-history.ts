@@ -5,6 +5,7 @@ import * as readline from 'readline'
 import type { ChatMessage, ContentBlock, DirectoryGroup, SessionInfo, TaskNotification, StatusLineData } from '../../shared/types'
 import { isAgentTool } from '../../shared/types'
 import { logger } from './logger'
+import { getContextWindowSize } from '../ipc/session.ipc'
 
 const CLAUDE_PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects')
 const CACHE_DIR = path.join(os.homedir(), '.claude', 'ui')
@@ -49,7 +50,7 @@ function saveDiskCache(cache: DiskCache): void {
  * Compute token metrics from a JSONL transcript file.
  * Mirrors ccstatusline's approach: sums message.usage from every assistant entry.
  */
-export async function computeTokenMetrics(filePath: string): Promise<StatusLineData> {
+export async function computeTokenMetrics(filePath: string, model?: string): Promise<StatusLineData> {
   const empty: StatusLineData = {
     totalCostUsd: 0,
     totalDurationMs: 0,
@@ -112,7 +113,8 @@ export async function computeTokenMetrics(filePath: string): Promise<StatusLineD
       }
 
       const totalTokens = inputTokens + outputTokens + cachedTokens
-      const usedPercentage = contextLength > 0 ? Math.round((contextLength / 200000) * 100) : null
+      const ctxWindow = model ? getContextWindowSize(model) : 200_000
+      const usedPercentage = contextLength > 0 ? Math.round((contextLength / ctxWindow) * 100) : null
       const remainingPercentage = usedPercentage !== null ? 100 - usedPercentage : null
 
       resolve({

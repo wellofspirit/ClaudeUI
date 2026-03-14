@@ -11,6 +11,7 @@ import { unwatchAllSubagents } from './subagent-watcher'
 import { saveSlashCommands } from './ui-config'
 import { loadMcpServers, readDisabledMcpServers } from './claude-mcp'
 import { logger } from './logger'
+import { getContextWindowSize } from '../ipc/session.ipc'
 
 /** In production, cli.js is unpacked from the asar — resolve its real path */
 export function getCliJsPath(): string | undefined {
@@ -497,6 +498,7 @@ export class ClaudeSession {
             if (mcpServers.length > 0) {
               this.send('session:mcp-servers', mcpServers)
             }
+
           }
 
           this.sendStatus()
@@ -678,7 +680,7 @@ export class ClaudeSession {
           const logPath = this.getSessionLogPath()
           if (logPath) {
             setTimeout(() => {
-              computeTokenMetrics(logPath).then((metrics) => {
+              computeTokenMetrics(logPath, this.model).then((metrics) => {
                 if (metrics.totalTokens === 0 && metrics.totalCostUsd === 0) return // JSONL not ready yet
                 this.accInputTokens = metrics.totalInputTokens
                 this.accOutputTokens = metrics.totalOutputTokens
@@ -742,6 +744,8 @@ export class ClaudeSession {
     if (this.activeQuery) {
       await this.activeQuery.setModel(model)
     }
+    // Recalculate status line with new context window size
+    this.send('session:status-line', this.buildStatusLineFromAccumulators())
   }
 
   setEffort(effort: string): void {
@@ -922,9 +926,15 @@ export class ClaudeSession {
     return true
   }
 
+  /** Context window size based on the currently selected model. */
+  private get contextWindowSize(): number {
+    return getContextWindowSize(this.model)
+  }
+
   /** Build StatusLineData from in-memory accumulators (zero I/O) */
   private buildStatusLineFromAccumulators(): import('../../shared/types').StatusLineData {
-    const usedPct = this.lastContextLength > 0 ? Math.round((this.lastContextLength / 200000) * 100) : null
+    const ctxWindow = this.contextWindowSize
+    const usedPct = this.lastContextLength > 0 ? Math.round((this.lastContextLength / ctxWindow) * 100) : null
     return {
       totalCostUsd: this.totalCostUsd,
       totalDurationMs: this.accTotalDurationMs,

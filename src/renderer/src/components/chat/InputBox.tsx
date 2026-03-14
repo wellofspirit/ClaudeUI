@@ -120,13 +120,29 @@ const ALIGN_CLASS = {
   right: 'text-right px-4'
 } as const
 
+/** Derive context window size from the selected model's description. */
+function useContextWindowSize(): number {
+  const models = useSessionStore((s) => s.availableModels)
+  const selectedModel = useActiveSession((s) => s.selectedModel)
+  const info = models.find((m) => m.value === selectedModel)
+  return info && /1m/i.test(info.description) ? 1_000_000 : 200_000
+}
+
 function StatusLine({ data }: { data: StatusLineData }): React.JSX.Element {
   const align = useSessionStore((s) => s.settings.statusLineAlign)
   const template = useSessionStore((s) => s.settings.statusLineTemplate)
+  const ctxWindow = useContextWindowSize()
+
+  // Recalculate usedPercentage from raw context length and the current model's window size
+  const adjusted: StatusLineData = {
+    ...data,
+    usedPercentage: data.contextWindowSize > 0 ? Math.round((data.contextWindowSize / ctxWindow) * 100) : null,
+    remainingPercentage: data.contextWindowSize > 0 ? 100 - Math.round((data.contextWindowSize / ctxWindow) * 100) : null
+  }
 
   return (
     <div className={`text-[10px] text-text-muted ${ALIGN_CLASS[align]} pt-1.5 select-none truncate`}>
-      {interpolateTemplate(template, data)}
+      {interpolateTemplate(template, adjusted)}
     </div>
   )
 }
