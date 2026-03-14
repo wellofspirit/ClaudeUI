@@ -23,7 +23,7 @@
     "build:web": "vite build --config vite.web.config.ts"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "0.2.72",
+    "@anthropic-ai/claude-agent-sdk": "0.2.76",
     "@electron-toolkit/preload": "^3.0.2",
     "@electron-toolkit/utils": "^4.0.0",
     "@git-diff-view/core": "^0.0.39",

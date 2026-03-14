@@ -481,27 +481,39 @@ if (src.includes(patchEMarker)) {
   // v2.1.42: ))J1.push(q6),tM1(M1,q6,y1,J.options.tools),kWA(S1,pm1(M1),J.setAppState);
   // v2.1.59: ))if(T6.push(r),_f6(s,r,o,j.options.tools),GI8(...),r.type==="assistant"&&...)Pa7(...);
   //          The `if(` wrapper is optional — matches both old and new patterns.
-  const asyncBodyRe = new RegExp(
-    `\\)\\)(?:if\\()?(${V})\\.push\\((${V})\\),` +  // ))ARR.push(MSG), or ))if(ARR.push(MSG),
-    `(${V})\\((${V}),\\2,` +                         // STATS(STATS,MSG,
-    `(${V}),(${V})\\.options\\.tools\\),` +           // TOOLS,j.options.tools),
-    `[^;]+;`                                          // ...rest until ;
+  // v2.1.76: )){ARR.push(MSG),STATS(STATS,MSG,TOOLS,J.options.tools),STATE(...);let V=wm8(MSG);if(V)Om8(...)}
+  //          Loop body now uses braces with additional output-file statements.
+  //
+  // Try braced pattern first (v2.1.76+), fall back to old single-statement pattern.
+  const bracedAsyncBodyRe = new RegExp(
+    `\\)\\)\\{(${V})\\.push\\((${V})\\),` +          // )){ARR.push(MSG),
+    `(${V})\\((${V}),\\2,` +                          // STATS(STATS,MSG,
+    `(${V}),(${V})\\.options\\.tools\\),[^}]+\\}`      // TOOLS,j.options.tools),...}
+  , 'g')
+  const unbracedAsyncBodyRe = new RegExp(
+    `\\)\\)(?:if\\()?(${V})\\.push\\((${V})\\),` +   // ))ARR.push(MSG), or ))if(ARR.push(MSG),
+    `(${V})\\((${V}),\\2,` +                          // STATS(STATS,MSG,
+    `(${V}),(${V})\\.options\\.tools\\),` +            // TOOLS,j.options.tools),
+    `[^;]+;`                                           // ...rest until ;
   , 'g')
 
   let asyncMatch
   let asyncPatchCount = 0
 
   const matches = []
-  while ((asyncMatch = asyncBodyRe.exec(src)) !== null) {
-    // v2.1.42: the initial async path spreads isAsync from a variable via ...n,
-    // and it can be up to ~800 chars before the loop body. Use a 1000-char window.
-    const before = src.slice(Math.max(0, asyncMatch.index - 1000), asyncMatch.index)
-    if (!before.includes('for await')) continue
-    matches.push({
-      fullMatch: asyncMatch[0],
-      msgVar: asyncMatch[2],
-      index: asyncMatch.index
-    })
+  // Try braced pattern first, fall back to unbraced
+  for (const re of [bracedAsyncBodyRe, unbracedAsyncBodyRe]) {
+    re.lastIndex = 0
+    while ((asyncMatch = re.exec(src)) !== null) {
+      const before = src.slice(Math.max(0, asyncMatch.index - 1000), asyncMatch.index)
+      if (!before.includes('for await')) continue
+      matches.push({
+        fullMatch: asyncMatch[0],
+        msgVar: asyncMatch[2],
+        index: asyncMatch.index
+      })
+    }
+    if (matches.length > 0) break
   }
 
   if (matches.length === 0) {
