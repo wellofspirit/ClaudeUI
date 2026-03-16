@@ -268,7 +268,7 @@ interface SessionAPI {
   buildSubagentFileMap(sessionId: string, projectKey: string, taskPrompts: Record<string, string>): Promise<Record<string, string>>
   loadBackgroundOutput(projectKey: string, taskId: string, outputFile?: string): Promise<{ content: string | null; purged: boolean }>
   onSessionCreated(cb: (routingId: string, data: { cwd: string; resumeSessionId?: string }) => void): () => void
-  onUserMessage(cb: (routingId: string, data: { prompt: string; attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }> }) => void): () => void
+  onUserMessage(cb: (routingId: string, data: { prompt: string; attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>; queued?: boolean }) => void): () => void
   onMessage(cb: (routingId: string, msg: ChatMessage) => void): () => void
   onStreamEvent(cb: (routingId: string, delta: StreamDelta) => void): () => void
   onApprovalRequest(cb: (routingId: string, approval: PendingApproval) => void): () => void

@@ -240,6 +240,11 @@ export class ClaudeSession {
     }
   }
 
+  /** Whether a prompt sent now will be queued (session actively processing a turn) */
+  get willQueue(): boolean {
+    return this.isProcessing
+  }
+
   async run(prompt: string, attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>): Promise<void> {
     this.clearInactivityTimer()
     this.isProcessing = true

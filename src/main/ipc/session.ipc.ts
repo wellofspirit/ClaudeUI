@@ -264,13 +264,17 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
   ipcMain.handle('session:send', (_event, routingId: string, prompt: string, attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>) => {
     const session = manager.get(routingId)
     if (!session) throw new Error(`No session for routingId: ${routingId}`)
+    // Check before run() — if session already active, the message will be queued
+    const queued = session.willQueue
     session.run(prompt, attachments)
-    // Relay user message back to all renderers (local + remote) as the single source of truth
+    // Relay user message back to all renderers (local + remote) as the single source of truth.
+    // Include queued flag so renderers show it as pending (not in chat) until consumed.
+    const payload = { prompt, attachments, queued }
     if (!win.isDestroyed()) {
-      win.webContents.send('session:user-message', routingId, { prompt, attachments })
+      win.webContents.send('session:user-message', routingId, payload)
     }
     for (const w of ClaudeSession.getExtraWindows()) {
-      if (!w.isDestroyed()) w.webContents.send('session:user-message', routingId, { prompt, attachments })
+      if (!w.isDestroyed()) w.webContents.send('session:user-message', routingId, payload)
     }
   })
 

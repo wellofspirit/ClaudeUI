@@ -53,13 +53,16 @@ export function registerRemoteHandlers(
   dispatcher.register('session:send', async (routingId: string, prompt: string, attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>) => {
     const session = manager.get(routingId)
     if (!session) throw new Error(`No session for routingId: ${routingId}`)
+    // Check before run() — if session already active, the message will be queued
+    const queued = session.willQueue
     session.run(prompt, attachments)
     // Notify local desktop + all extra windows (remote bridge → other remote clients)
+    const payload = { prompt, attachments, queued }
     if (!win.isDestroyed()) {
-      win.webContents.send('session:user-message', routingId, { prompt, attachments })
+      win.webContents.send('session:user-message', routingId, payload)
     }
     for (const w of ClaudeSession.getExtraWindows()) {
-      if (!w.isDestroyed()) w.webContents.send('session:user-message', routingId, { prompt, attachments })
+      if (!w.isDestroyed()) w.webContents.send('session:user-message', routingId, payload)
     }
   })
 

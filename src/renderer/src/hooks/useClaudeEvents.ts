@@ -95,10 +95,15 @@ export function useClaudeEvents(): void {
         // An SDK session was created — mark it active
         store.markSdkActive(routingId)
       }),
-      // User message relayed by the server (the single source of truth for user messages)
+      // User message relayed by the server (the single source of truth for user messages).
+      // When queued (sent while session is running), store as queuedText instead of adding
+      // to the chat stream — the message will appear in chat when actually consumed by cli.js.
       window.api.onUserMessage((routingId, data) => {
         const store = useSessionStore.getState()
-        if (store.sessions[routingId]) {
+        if (!store.sessions[routingId]) return
+        if (data.queued) {
+          store.setQueuedText(routingId, data.prompt)
+        } else {
           store.addUserMessage(routingId, `msg-${Date.now()}`, data.prompt, undefined, data.attachments)
         }
       }),

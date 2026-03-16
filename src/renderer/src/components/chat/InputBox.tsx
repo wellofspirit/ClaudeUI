@@ -161,8 +161,8 @@ export function InputBox(): React.JSX.Element {
   const sdkActive = useActiveSession((s) => s.sdkActive)
   const markSdkActive = useSessionStore((s) => s.markSdkActive)
   const queuedText = useActiveSession((s) => s.queuedText)
-  const appendQueuedText = useSessionStore((s) => s.appendQueuedText)
   const clearQueuedText = useSessionStore((s) => s.clearQueuedText)
+  const consumeQueuedText = useSessionStore((s) => s.consumeQueuedText)
   const isRunning = status.state === 'running'
   const isDisabled = !activeSessionId || !cwd
 
@@ -301,24 +301,25 @@ export function InputBox(): React.JSX.Element {
     }
 
     if (isRunning) {
-      // Use native steer path: sendPrompt pushes into the CLI's queue via MessageChannel
-      appendQueuedText(prompt)
+      // Use native steer path: sendPrompt pushes into the CLI's queue via MessageChannel.
+      // The server broadcasts session:user-message with queued=true, which sets queuedText
+      // on all renderers (local + remote) — no local appendQueuedText needed.
       await window.api.sendPrompt(activeSessionId, prompt)
     } else {
       await doSend(prompt, attachments)
     }
-  }, [text, attachedFiles, isDisabled, activeSessionId, isRunning, appendQueuedText, doSend, focusedAgentId, teammates, addTeammateUserMessage])
+  }, [text, attachedFiles, isDisabled, activeSessionId, isRunning, doSend, focusedAgentId, teammates, addTeammateUserMessage])
 
-  // Clear queued text display when agent transitions running → idle
-  // (message was already picked up by the CLI mid-turn)
+  // When agent transitions running → idle with queuedText still pending,
+  // consume it (add to chat + clear) as a fallback in case steer-consumed didn't fire.
   const prevRunningRef = useRef(false)
   useEffect(() => {
     const wasRunning = prevRunningRef.current
     prevRunningRef.current = isRunning
     if (wasRunning && !isRunning && queuedText) {
-      clearQueuedText()
+      consumeQueuedText(activeSessionId!)
     }
-  }, [isRunning, queuedText, clearQueuedText])
+  }, [isRunning, queuedText, activeSessionId, consumeQueuedText])
 
   const handleBroadcast = useCallback(async () => {
     const prompt = text.trim()

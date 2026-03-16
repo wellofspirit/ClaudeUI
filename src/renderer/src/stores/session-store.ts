@@ -533,6 +533,7 @@ interface SessionState {
   setEffort: (effort: 'low' | 'medium' | 'high', routingId?: string) => void
   setStatusLine: (routingId: string, data: StatusLineData) => void
   appendQueuedText: (text: string) => void
+  setQueuedText: (routingId: string, text: string) => void
   clearQueuedText: () => void
   consumeQueuedText: (routingId: string) => void
   setDraftText: (text: string) => void
@@ -1325,10 +1326,18 @@ export const useSessionStore = create<SessionState>((set) => ({
       const id = state.activeSessionId
       if (!id) return {}
       return {
-        sessions: updateSession(state.sessions, id, () => ({
-          queuedText: text
+        sessions: updateSession(state.sessions, id, (s) => ({
+          queuedText: s.queuedText ? s.queuedText + '\n' + text : text
         }))
       }
+    }),
+
+  setQueuedText: (routingId, text) =>
+    set((state) => {
+      if (!state.sessions[routingId]) return state
+      return { sessions: updateSession(state.sessions, routingId, (s) => ({
+        queuedText: s.queuedText ? s.queuedText + '\n' + text : text
+      })) }
     }),
 
   clearQueuedText: () =>
