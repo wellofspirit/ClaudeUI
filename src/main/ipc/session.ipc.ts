@@ -5,7 +5,7 @@ import { ipcMain, dialog, BrowserWindow } from 'electron'
 import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk'
 import { PERSISTED_SESSIONS_DIR } from '../services/persisted-sessions-dir'
 import { SessionManager } from '../services/session-manager'
-import { getCliJsPath, ClaudeSession } from '../services/claude-session'
+import { getSdkExecutableOpts, ClaudeSession } from '../services/claude-session'
 import { listDirectories, loadSessionHistory, loadSubagentHistory, buildSubagentFileMap, loadBackgroundOutput } from '../services/session-history'
 import { watchSession, unwatchSession } from '../services/session-watcher'
 import { loadSettings, saveSettings, loadSessionConfig, saveSessionConfig, loadSlashCommands, saveSlashCommands, startConfigWatcher } from '../services/ui-config'
@@ -69,11 +69,10 @@ async function generateTitle(conversationText: string): Promise<string | null> {
   logger.debug('generateTitle', `request: ${conversationText.length} chars`)
 
   try {
-    const cliPath = getCliJsPath()
     const q = sdkQuery({
       prompt: conversationText,
       options: {
-        ...(cliPath ? { pathToClaudeCodeExecutable: cliPath } : {}),
+        ...getSdkExecutableOpts(),
         cwd: PERSISTED_SESSIONS_DIR,
         abortController: abort,
         systemPrompt: TITLE_SYSTEM_PROMPT,
@@ -123,11 +122,10 @@ async function generateCommitMessage(diff: string): Promise<string | null> {
   logger.debug('generateCommitMessage', `request: ${diff.length} chars`)
 
   try {
-    const cliPath = getCliJsPath()
     const q = sdkQuery({
       prompt: diff,
       options: {
-        ...(cliPath ? { pathToClaudeCodeExecutable: cliPath } : {}),
+        ...getSdkExecutableOpts(),
         cwd: PERSISTED_SESSIONS_DIR,
         abortController: abort,
         systemPrompt: COMMIT_MSG_SYSTEM_PROMPT,
@@ -173,11 +171,10 @@ async function fetchModels(): Promise<ModelInfo[]> {
   if (cachedModels) return cachedModels
 
   const abort = new AbortController()
-  const cliPath = getCliJsPath()
   const q = sdkQuery({
     prompt: '',
     options: {
-      ...(cliPath ? { pathToClaudeCodeExecutable: cliPath } : {}),
+      ...getSdkExecutableOpts(),
       cwd: PERSISTED_SESSIONS_DIR,
       abortController: abort
     }

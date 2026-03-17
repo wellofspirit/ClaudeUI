@@ -20,6 +20,25 @@ export function getCliJsPath(): string | undefined {
   const unpacked = appPath.replace('app.asar', 'app.asar.unpacked')
   return path.join(unpacked, 'node_modules', '@anthropic-ai', 'claude-agent-sdk', 'cli.js')
 }
+
+/**
+ * SDK options for resolving the CLI executable in production.
+ *
+ * The SDK spawns `cli.js` via `spawn("node", [cliPath, ...])` by default,
+ * but macOS GUI apps don't have a system `node` in PATH (especially on fresh
+ * machines). We use Electron's own Node.js runtime (process.execPath) with
+ * ELECTRON_RUN_AS_NODE=1 so the spawn is self-contained.
+ */
+export function getSdkExecutableOpts(): Record<string, unknown> {
+  const cliPath = getCliJsPath()
+  if (!cliPath) return {} // dev mode — let SDK use default resolution
+  return {
+    pathToClaudeCodeExecutable: cliPath,
+    executable: process.execPath,
+    executableArgs: [],
+    env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }
+  }
+}
 import type {
   ChatMessage,
   ContentBlock,
@@ -300,7 +319,8 @@ export class ClaudeSession {
     const stderrChunks: string[] = []
 
     try {
-      const cliPath = getCliJsPath()
+      const execOpts = getSdkExecutableOpts()
+      const cliPath = execOpts.pathToClaudeCodeExecutable as string | undefined
       if (cliPath) {
         const cliExists = fs.existsSync(cliPath)
         logger.debug('ClaudeSession', `CLI path: ${cliPath} (exists: ${cliExists})`)
@@ -350,7 +370,7 @@ export class ClaudeSession {
       const q = sdkQuery({
         prompt: channel as AsyncIterable<never>,
         options: {
-          ...(cliPath ? { pathToClaudeCodeExecutable: cliPath } : {}),
+          ...execOpts,
           cwd: this.cwd,
           model: this.model,
           permissionMode: this.permissionMode as 'default',

@@ -12,7 +12,7 @@
  */
 
 import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk'
-import { getCliJsPath } from './claude-session'
+import { getSdkExecutableOpts } from './claude-session'
 import { PERSISTED_SESSIONS_DIR } from './persisted-sessions-dir'
 import { logger } from './logger'
 
@@ -75,14 +75,12 @@ class ServiceSession {
     const ac = new AbortController()
     this.abortController = ac
 
-    const cliPath = getCliJsPath()
-
     // Use a streaming input so the CLI stays alive waiting for input.
     // We send a no-op initial prompt that completes immediately.
     const q = sdkQuery({
       prompt: 'Reply with OK',
       options: {
-        ...(cliPath ? { pathToClaudeCodeExecutable: cliPath } : {}),
+        ...getSdkExecutableOpts(),
         cwd: PERSISTED_SESSIONS_DIR,
         model: 'claude-haiku-4-5',
         effort: 'low',

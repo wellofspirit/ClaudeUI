@@ -13,7 +13,7 @@ import { usageFetcher } from '../services/usage-fetcher'
 import { blockUsageService } from '../services/block-usage'
 import type { ApprovalDecision, SandboxSettings, PermissionSuggestion } from '../../shared/types'
 import type { BrowserWindow } from 'electron'
-import { ClaudeSession, getCliJsPath } from '../services/claude-session'
+import { ClaudeSession, getSdkExecutableOpts } from '../services/claude-session'
 import { PERSISTED_SESSIONS_DIR } from '../services/persisted-sessions-dir'
 import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk'
 import { logger } from '../services/logger'
@@ -126,11 +126,10 @@ export function registerRemoteHandlers(
 
   dispatcher.register('session:get-models', async () => {
     const abort = new AbortController()
-    const cliPath = getCliJsPath()
     const q = sdkQuery({
       prompt: '',
       options: {
-        ...(cliPath ? { pathToClaudeCodeExecutable: cliPath } : {}),
+        ...getSdkExecutableOpts(),
         cwd: PERSISTED_SESSIONS_DIR,
         abortController: abort
       }

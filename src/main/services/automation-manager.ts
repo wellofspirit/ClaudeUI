@@ -5,7 +5,7 @@ import * as path from 'path'
 import * as os from 'os'
 import { Notification, type BrowserWindow } from 'electron'
 import { CronExpressionParser } from 'cron-parser'
-import { getCliJsPath, ClaudeSession } from './claude-session'
+import { getSdkExecutableOpts, ClaudeSession } from './claude-session'
 import { loadSessionHistory } from './session-history'
 import { logger } from './logger'
 import type { Automation, AutomationRun, ChatMessage, ContentBlock } from '../../shared/types'
@@ -484,8 +484,6 @@ export class AutomationManager {
     let lastAssistantMsg: ChatMessage | null = null
 
     try {
-      const cliPath = getCliJsPath()
-
       // The CLI evaluates its own allow/deny rules from settingSources before
       // calling canUseTool. It only calls us for tools that need a human decision
       // ("ask" rules, or tools not covered by any rule). Since automations are
@@ -497,7 +495,7 @@ export class AutomationManager {
       const q = sdkQuery({
         prompt,
         options: {
-          ...(cliPath ? { pathToClaudeCodeExecutable: cliPath } : {}),
+          ...getSdkExecutableOpts(),
           ...(resumeSessionId ? { resume: resumeSessionId } : {}),
           cwd: automation.cwd,
           model: automation.model || 'default',
