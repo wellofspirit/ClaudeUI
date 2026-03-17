@@ -4,6 +4,215 @@ All notable changes to ClaudeUI are documented in this file. Entries are grouped
 
 ---
 
+## 2026-03-18
+
+### fix: remove external Node.js dependency, use Electron's bundled Node.js runtime (`8b3b1f3`)
+- Created `getSdkExecutableOpts()` helper in `claude-session.ts` that returns `executable: process.execPath` with `ELECTRON_RUN_AS_NODE=1` so the SDK spawns `cli.js` using Electron's own Node.js binary instead of requiring a system `node` in PATH
+- Replaced all `getCliJsPath()` + spread patterns across `session.ipc.ts`, `remote-handlers.ts`, `automation-manager.ts`, and `service-session.ts` with the unified `getSdkExecutableOpts()` call
+- Fixes macOS GUI apps (launched from Finder) failing to start sessions because no `node` binary is available in PATH
+
+### fix: fix incorrect historical usage tracking and add historical data backfill (`bdc3417`)
+- Rewrote `loadDailyHistory()` to compute daily totals directly from deduplicated JSONL entries (authoritative) instead of from persisted `completedBlocks` which can overlap and double-count across app restarts
+- Added `dailySummary` field to `DailyUsageFile` — entry-derived totals are persisted so correct data survives past the 7-day JSONL scan window
+- Added `backfillHistoricalSummaries()` that scans all JSONL files once on first recalculation to populate summaries for days beyond the scan window
+- Fixed `persistSnapshot()` to route completed blocks to their actual day's file (by `actualEndTime`) instead of dumping all into today's file
+- Extended daily chart from 7-day to 30-day history; scans all available daily files instead of a fixed window
+
+---
+
+## 2026-03-16
+
+### fix: fix queued message display and multiple steer message merging (`65d9c9e`)
+- Added `willQueue` getter on `ClaudeSession` to check if the session is actively processing before `run()` is called
+- IPC `session:send` and remote handler now include `queued` flag in the `session:user-message` broadcast so renderers display the message as pending (not in chat) until consumed
+- Added `setQueuedText()` store action for routing-id-specific queue updates; `appendQueuedText()` now merges multiple queued messages with newline separator
+- `useClaudeEvents` now routes `session:user-message` with `queued=true` to `setQueuedText()` instead of `addUserMessage()`
+- `InputBox` no longer calls `appendQueuedText` locally — the server broadcast is the single source of truth for all renderers (local + remote)
+- Added `consumeQueuedText()` fallback when agent transitions running→idle with text still pending
+
+---
+
+## 2026-03-15
+
+### feat: add incomplete-session-resume-fix patch (`a9f4ab3`)
+- Created `patch/incomplete-session-resume-fix/` — fixes a bug where resuming sessions with `bash_progress`/`powershell_progress`/`mcp_progress` entries breaks the `parentUuid` chain, causing all messages before the filtered progress entry to be lost
+- Part A captures a redirect map (`uuid → parentUuid`) when progress messages are filtered during JSONL loading
+- Part B rewires `parentUuid` references through the redirect map after loading, with cycle detection via `_seen` Set
+- Includes comprehensive README documenting the root cause (chain walker `Ao6()` gets `undefined` when parent is filtered) and the redirect strategy
+
+---
+
+## 2026-03-14
+
+### chore: upgrade @anthropic-ai/claude-agent-sdk to 0.2.76 (`0ac54a8`)
+- Bumped SDK from 0.2.72 to 0.2.76
+- Updated `subagent-streaming/apply.mjs` regex patterns for v2.1.76 minified names — added new pattern for refactored sync loop body where push+stats are in a separate `if` from the `bash_progress` check
+
+### feat: support context window size detection for 1M models (`c5e59c0`)
+- Added `getContextWindowSize()` function that checks the cached model list for "1m" in the description, returning 1,000,000 or 200,000 as appropriate
+- `ClaudeSession.buildStatusLineFromAccumulators()` now uses model-aware context window size for `usedPct` calculation
+- `computeTokenMetrics()` in session-history accepts optional `model` parameter for accurate context percentage
+- Added `useContextWindowSize()` hook in `InputBox` that derives context window from the selected model's description
+- `StatusLine` component recalculates `usedPercentage` from raw `contextWindowSize` and the current model's window size
+
+---
+
+## 2026-03-11
+
+### fix: resolve git paths relative to repo root instead of session cwd (`541682c`)
+- Added `repoRoot` field and `ensureRepoRoot()` method to `GitService` — calls `git rev-parse --show-toplevel` and re-initializes `simple-git` at the repo root when the session cwd is a subdirectory
+- Fixed `getStatus()`, `getFilePatch()`, `getFileContents()`, and `discardFile()` to resolve paths relative to `repoRoot` instead of `cwd`, fixing broken diffs and file operations for sessions started in subdirectories
+
+### feat: fix incorrect usage block calculation and projection display (`cc837d9`)
+- Fixed API reset timestamp jitter: round `resets_at` to nearest second before computing block IDs, preventing dozens of unique block IDs for the same 5-hour window
+- Fixed `backfillProjections()` to overwrite with later (more accurate) projections instead of first-wins
+- Added `finalApiPercent` field to `UsageBlock` — restored from persisted daily data (the last snapshot recorded while each block was still active)
+- Added sanity check: discard projections where `projectedUsage.tokens < actual` block tokens
+- Usage panel now gracefully handles `null` usage data (shows "No live API data" instead of crashing)
+- Block usage service now always initialized (even in dev mode) since it only reads local JSONL files
+
+---
+
+## 2026-03-10
+
+### feat: notify CLI of permission settings changes for hot-reload (`357f63c`)
+- Added `notifySettingsChanged()` method on `ClaudeSession` — sends empty `applyFlagSettings({})` control message to trigger the CLI's settings-change subscriber to re-read all sources from disk
+- `claude:save-permissions` IPC handler now calls `notifySettingsChanged()` on all relevant sessions after writing permissions, with scope-aware targeting (user-scope notifies all sessions, project/local-scope only matching cwd)
+- Added `applyFlagSettings()` to the `activeQuery` interface; made `cwd` property `readonly` and publicly accessible
+- Safe for managed/enterprise policies — no rules injected into the flag layer, the CLI re-evaluates its own setting sources
+
+### feat: skip automation scheduling in dev mode (`f8bde63`)
+- Added dev mode check to automation IPC registration, skipping scheduler initialization and returning empty arrays for list/run queries
+
+### fix: adjust cost field lookup order in automation result processing (`87f3c4c`)
+- Changed cost extraction from `cost_usd || totalCostUsd` to `total_cost_usd || cost_usd` to match the SDK's actual result message field name
+
+### feat: replace auto-save with explicit save and add inherited permissions display (`c8f6969`)
+- Replaced debounced auto-save with explicit Save button that tracks dirty state via `useMemo` comparison against original automation values
+- Added `InheritedPermissions` component showing read-only global (user-scope) and directory (project+local scope) permission rules loaded via `loadClaudePermissions()`
+- Made permissions section collapsible with chevron toggle and rule count summary
+- Added duration formatting (`formatDuration()`) and cost display to automation run history items
+
+### refactor: simplify automation tool permissions to rely on CLI evaluation (`cf925b3`)
+- Removed custom `buildCanUseTool()`, `matchesPattern()`, and `formatToolStr()` from `AutomationManager` (60 lines deleted)
+- `canUseTool` now simply denies anything the CLI didn't pre-approve — the CLI evaluates its own allow/deny rules from `settingSources` before calling the callback, so only tools needing human approval reach us
+- Eliminates redundant permission evaluation that could conflict with the CLI's own rule hierarchy
+
+### chore: upgrade @anthropic-ai/claude-agent-sdk to 0.2.72 (`61674c3`)
+- Bumped SDK from 0.2.71 to 0.2.72
+
+---
+
+## 2026-03-09
+
+### chore: upgrade @anthropic-ai/claude-agent-sdk to 0.2.71 (`f642f9f`, `68c4364`)
+- Bumped SDK from 0.2.63 to 0.2.71
+- Updated `queue-control/apply.mjs` regex to handle v2.1.71+ `priority` field in queue-push pattern
+- Updated `subagent-streaming/apply.mjs` with dual-pattern matching: old pattern (push+bash_progress in same `if`) and new v2.1.71+ pattern (push+stats separated from bash_progress check)
+- Updated `taskstop-notification/apply.mjs` with two additional regex patterns (`taskVarRe3`, `taskVarRe4`) for v2.1.71+ refactored task variable lookup (no `await`, comma-separated `let`)
+
+### feat: add interrupt capability to gracefully abort active session turns (`d58c3f2`)
+- Added `interrupt()` method to `ClaudeSession` that denies all pending approvals and calls `activeQuery.interrupt()`, mirroring pressing Escape in the real CLI
+- Changed `InputBox` cancel button from `cancelSession` (kills session) to `interruptSession` (graceful abort, session stays alive)
+- `stopTask()` now falls back to `interrupt()` for foreground tasks that don't have a `taskIdMap` entry yet
+- Added `interruptSession()` to `ClaudeAPI` interface, preload bridge, IPC handler, and `SessionManager`
+
+### feat: add ad-hoc code signing for macOS builds (`039b2d7`)
+- Added ad-hoc signing step to GitHub Actions release workflow for macOS builds
+
+### ci: skip release workflow for documentation and config-only changes (`92cefc2`)
+- Added path filter to release workflow to skip runs when only docs, configs, or markdown files change
+
+---
+
+## 2026-03-06
+
+### feat: skip usage fetcher in dev mode to avoid rate limit (`0e6e819`)
+- Wrapped usage fetcher, service session, and block usage service initialization in dev mode check with early return guards on IPC handlers
+- Logs when dev mode skips these subsystems
+
+### fix: build warnings — replace dynamic imports with static imports in remote handlers (`6766ebb`)
+- Replaced dynamic `import()` calls for SDK, claude-session, and persisted-sessions-dir with static imports at the top of `remote-handlers.ts`
+
+### fix: bundle web build as extra resource in electron app (`bffffae`)
+- Added `out/web` to electron-builder `extraResources` so web assets are packaged in the distribution
+- Added `build:web` step to all platform-specific build scripts
+
+### chore: add Apache 2.0 license and update package metadata (`c0bf5c7`)
+- Added `LICENSE` file with Apache 2.0 license text
+- Updated `package.json` with license field and author metadata
+
+### chore: add README, move ADRs to docs/adr, remove planning docs (`5f80d38`)
+- Created comprehensive `README.md` with feature overview and screenshots
+- Moved ADR files from `doc/` to `docs/adr/`
+- Deleted `PLAN.md` (393 lines) and `phase1.md` (279 lines) planning documents
+
+### feat: add GitHub Actions release pipeline for Windows and macOS builds (`03a48c4`)
+- Created `.github/workflows/release.yml` (144 lines) — triggered on version tags, builds macOS (arm64 + x64) and Windows (x64) distributables, uploads as GitHub release assets
+
+### fix: disable code signing for macOS builds and correct app name casing (`db283cd`)
+- Set `identity: null` in electron-builder config to skip code signing
+- Updated `build:mac` script to use correct `ClaudeUI` app name casing
+
+---
+
+## 2026-03-05
+
+### refactor: unwrap safeHandler error envelopes in preload API (`28f5de6`)
+- Created `unwrap<T>()` helper in preload that normalizes `{ ok, data, error }` response envelopes — throws on `{ ok: false }` so callers can `.catch()` as expected
+- Applied to all worktree, git (18 operations), and MCP operations that use `safeHandler`, fixing crashes where renderer code expected direct values but received envelope objects
+
+### fix: prevent Tailwind table utility from breaking code block text flow (`a43a1d2`)
+- Added CSS rule `pre .token.table { display: inline !important; }` to override Prism's markdown tokenizer adding "table" as a token class, which caused Tailwind's `table` utility (`display: table`) to break inline text
+- Created `WriteResult` component with preview/code tab switcher for Write tool results — markdown files default to preview tab, other files to code tab
+
+### feat: add usage-relay patch to relay usage API through control messages (`e6e05b7`)
+- Created `patch/usage-relay/` — adds `get_usage` control request handler in `cli.js` that calls the CLI's internal `k9q()` usage fetcher, and `getUsage()` method on the SDK query class
+- Eliminates 429 rate-limit errors by routing through the CLI's managed OAuth session instead of independent UI requests with separate credentials
+- Created `ServiceSession` class (141 lines) — keeps a lightweight CLI subprocess alive for usage polling via control messages
+- Rewrote `UsageFetcher` to use SDK relay path, removing direct credential reading, token refresh, and HTTP fetch logic
+- Includes README (360 lines), apply script, and test harness
+
+### refactor: use dedicated directory for SDK session working paths (`3147714`)
+- Created `persisted-sessions-dir.ts` — stable `~/.claude/ui/persisted-sessions/` directory for SDK sessions (title gen, commit msg, model fetch, service session)
+- Fixes macOS TCC privacy prompts caused by SDK scanning the entire home directory when `process.cwd()` returns `~` for Finder-launched apps
+- Eagerly imports `service-session` to avoid dynamic import in quit handler
+
+### feat: add remote control feature for mobile and browser access (`f04517a`)
+- Created `RemoteServer` (476 lines) — HTTP + WebSocket server with token-based authentication, 10-second auth timeout, 5-minute idle disconnect with ping/pong keepalive
+- Created `RemoteDispatcher` (60 lines) — routes WebSocket RPC calls to registered handlers with a blocklist for desktop-only channels
+- Created `RemoteBridge` (39 lines) — forwards Electron `webContents.send` events to all connected WebSocket clients
+- Created `remote-handlers.ts` (293 lines) — registers session lifecycle, control, query, team, config, file listing, and usage handlers on the dispatcher
+- Created `EventLog` service (91 lines) — ring buffer of recent IPC events for client catch-up on connect
+- Created `remote-protocol.ts` (149 lines) — typed WebSocket message protocol with `WsClientMessage`/`WsServerMessage` discriminated unions
+- Created `RemoteAccessModal.tsx` (235 lines) — start/stop server, QR code display, LAN URL with token, network interface picker
+- Created web client: `connection.ts` (WebSocket management), `api-adapter.ts` (313 lines, maps `ClaudeAPI` interface to WebSocket RPC), `ConnectionOverlay.tsx`, `main.tsx`, `main.css`, `index.html`
+- Added Vite web build config (`vite.web.config.ts`) and `build:web` script
+- Settings dialog gained remote access toggle section
+
+### feat: add end-to-end encryption and tunnel support for remote server (`cafb56a`)
+- Created `E2ECrypto` class (151 lines) in `shared/e2e-crypto.ts` — AES-256-GCM encryption/decryption with key derivation from hex string via HKDF
+- Created `TunnelManager` (315 lines) — downloads and manages `cloudflared` binary, spawns quick tunnel process, auto-restarts on failure with exponential backoff
+- `RemoteServer` now supports tunnel mode: generates E2E key on start, activates encryption after auth handshake via `e2e-activate`/`e2e-ack` messages
+- Message ordering preserved with per-client `sendQueue` Promise chain for async encryption
+- Tunnel URLs include token in query param and E2E key in URL fragment (never sent to server)
+- Web client `connection.ts` extended with E2E encryption initialization from URL fragment key
+
+### feat: upgrade cloudflared to 2026.2.0 and improve binary handling (`1e7da2d`)
+- Updated cloudflared version to 2026.2.0 with `.tgz` extraction support for macOS (upstream changed packaging format)
+- Removes macOS Gatekeeper quarantine attribute after download
+- Moved binary storage to `~/.claude/ui/cloudflared/` for better portability across dev/prod environments
+
+### feat: optimise mobile view (`5423fca`)
+- Created `useIsMobile` hook (55 lines) with media query detection and `useVisualViewportHeight` for dynamic viewport height tracking (handles mobile keyboard)
+- Sidebar renders as a drawer overlay on mobile with slide-in animation and backdrop blur, auto-closes on session select
+- Right panels (task detail, git, plan review) and terminal panel hidden on mobile
+- Chat panel uses full width, reduced horizontal padding, and respects `safe-area-inset-top` for notch devices
+- Added `viewport` meta tag with `viewport-fit=cover` and `100dvh` height overrides for mobile browser chrome
+- TopBar shows hamburger menu + new session button instead of sidebar collapse toggle on mobile
+
+---
+
 ## 2026-03-04
 
 ### fix: pass model parameter through session creation flow (`db4e59d`)
