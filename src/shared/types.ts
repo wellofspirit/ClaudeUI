@@ -532,12 +532,25 @@ export interface UsageSnapshot {
   projectedUsage: { tokens: number; costUsd: number } | null
 }
 
+/** Entry-derived daily summary — computed from deduplicated JSONL entries. */
+export interface DailySummary {
+  totalTokens: number
+  costUsd: number
+  models: Record<string, number> // model → total tokens
+  blockCount: number
+  requestCount: number
+}
+
 /** Daily file format: ~/.claude/ui/usage/YYYY-MM-DD.json */
 export interface DailyUsageFile {
   date: string // YYYY-MM-DD
   snapshots: UsageSnapshot[] // time-series, one per poll cycle
   /** Completed blocks that overlapped with this day */
   completedBlocks: UsageBlock[]
+  /** Authoritative daily totals computed from deduplicated JSONL entries.
+   *  Added to fix overlapping-block double-counting — once persisted, this
+   *  is used instead of summing completedBlocks. */
+  dailySummary?: DailySummary
 }
 
 /** Data pushed to renderer for display */

@@ -33,6 +33,7 @@ const CLAUDE_PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects')
 const USAGE_DIR = path.join(os.homedir(), '.claude', 'ui', 'usage')
 const SESSION_DURATION_MS = 5 * 60 * 60 * 1000 // 5 hours
 const SCAN_WINDOW_MS = 7 * 24 * 60 * 60 * 1000 // only scan entries from last 7 days
+const HISTORY_DAYS = 30 // how many days to show in daily chart
 const MS_PER_HOUR = 3600_000
 const MS_PER_MINUTE = 60_000
 
@@ -274,6 +275,7 @@ export class BlockUsageService {
   private lastData: BlockUsageData | null = null
   private previousBlockIds: Set<string> = new Set()
   private recalculating = false
+  private backfillDone = false
 
   /** Ring buffer of (tokens, apiPercent) samples for the current active block. */
   private projectionSamples: ProjectionSample[] = []
@@ -343,8 +345,19 @@ export class BlockUsageService {
       const snapshot = this.buildSnapshot(currentBlock)
       const todaySnapshots = await this.persistSnapshot(snapshot, newlyCompleted)
 
-      // Load 30-day history
-      const dailyHistory = await this.loadDailyHistory(30)
+      // On first run, backfill daily summaries for days beyond the 7-day scan
+      // window. This is async and doesn't block the current recalculation.
+      if (!this.backfillDone) {
+        this.backfillDone = true
+        this.backfillHistoricalSummaries().catch((err) =>
+          logger.error('BlockUsage', 'Historical backfill failed', err)
+        )
+      }
+
+      // Load 30-day history. Pass scanned entries so recent days are computed
+      // directly from deduplicated JSONL (authoritative), not from persisted
+      // completedBlocks which may contain overlapping re-grouped blocks.
+      const dailyHistory = await this.loadDailyHistory(HISTORY_DAYS, entries)
 
       const data: BlockUsageData = {
         currentBlock,
@@ -1021,15 +1034,30 @@ export class BlockUsageService {
     // Append snapshot
     daily.snapshots.push(snapshot)
 
-    // Add newly completed blocks (deduplicate by id)
+    // Add newly completed blocks, routing each to the correct day's file.
+    // On app restart, previousBlockIds is empty, so ALL completed blocks from
+    // the 7-day scan window appear as "newly completed" — we must attribute
+    // each to its actual day (by actualEndTime), not dump them all into today.
     const existingIds = new Set(daily.completedBlocks.map((b) => b.id))
+    const otherDayBlocks = new Map<string, UsageBlock[]>() // date → blocks
     for (const block of newlyCompleted) {
-      if (!existingIds.has(block.id)) {
-        daily.completedBlocks.push(block)
+      const blockDay = dateStrFromTimestamp(block.actualEndTime)
+      if (blockDay === today) {
+        if (!existingIds.has(block.id)) {
+          daily.completedBlocks.push(block)
+        }
+      } else {
+        // Route to the correct day's file
+        let arr = otherDayBlocks.get(blockDay)
+        if (!arr) {
+          arr = []
+          otherDayBlocks.set(blockDay, arr)
+        }
+        arr.push(block)
       }
     }
 
-    // Write
+    // Write today's file
     try {
       if (!fs.existsSync(USAGE_DIR)) {
         fs.mkdirSync(USAGE_DIR, { recursive: true })
@@ -1039,79 +1067,351 @@ export class BlockUsageService {
       logger.error('BlockUsage', 'Failed to persist daily file', err)
     }
 
-    return daily.snapshots
-  }
-
-  private async loadDailyHistory(
-    days: number
-  ): Promise<BlockUsageData['dailyHistory']> {
-    const history: BlockUsageData['dailyHistory'] = []
-    const now = Date.now()
-
-    for (let i = days - 1; i >= 0; i--) {
-      const date = dateStrFromTimestamp(now - i * 24 * MS_PER_HOUR)
-      const filePath = path.join(USAGE_DIR, `${date}.json`)
-
+    // Persist blocks that belong to other days into their respective files
+    for (const [otherDate, blocks] of otherDayBlocks) {
       try {
-        if (!fs.existsSync(filePath)) continue
-        const daily = JSON.parse(
-          fs.readFileSync(filePath, 'utf-8')
-        ) as DailyUsageFile
-
-        // Aggregate completed blocks for this day
-        let dayTokens = 0
-        let dayCost = 0
-        const modelTokens: Record<string, number> = {}
-        let peakApi = 0
-
-        for (const block of daily.completedBlocks) {
-          dayTokens += totalTokens(block.tokens)
-          dayCost += block.costUsd
-          for (const m of block.models) {
-            modelTokens[m.model] = (modelTokens[m.model] || 0) + totalTokens(m.tokens)
+        const otherPath = path.join(USAGE_DIR, `${otherDate}.json`)
+        let otherDaily: DailyUsageFile
+        if (fs.existsSync(otherPath)) {
+          otherDaily = JSON.parse(fs.readFileSync(otherPath, 'utf-8')) as DailyUsageFile
+        } else {
+          otherDaily = { date: otherDate, snapshots: [], completedBlocks: [] }
+        }
+        const otherIds = new Set(otherDaily.completedBlocks.map((b) => b.id))
+        for (const block of blocks) {
+          if (!otherIds.has(block.id)) {
+            otherDaily.completedBlocks.push(block)
           }
         }
-
-        // Also include active block tokens from latest snapshot
-        if (daily.snapshots.length > 0) {
-          const lastSnap = daily.snapshots[daily.snapshots.length - 1]
-          if (lastSnap.blockTokens && lastSnap.activeBlockId) {
-            // Check if this active block is already in completedBlocks
-            const alreadyCounted = daily.completedBlocks.some(
-              (b) => b.id === lastSnap.activeBlockId
-            )
-            if (!alreadyCounted) {
-              dayTokens += totalTokens(lastSnap.blockTokens)
-              dayCost += lastSnap.blockCostUsd
-              for (const m of lastSnap.blockModels) {
-                modelTokens[m.model] =
-                  (modelTokens[m.model] || 0) + totalTokens(m.tokens)
-              }
-            }
-          }
-
-          // Peak API %
-          for (const snap of daily.snapshots) {
-            if (snap.apiUsagePercent > peakApi) peakApi = snap.apiUsagePercent
-          }
-        }
-
-        if (dayTokens > 0 || daily.completedBlocks.length > 0) {
-          history.push({
-            date,
-            totalTokens: dayTokens,
-            costUsd: Math.round(dayCost * 100) / 100,
-            models: modelTokens,
-            peakApiPercent: peakApi,
-            blockCount: daily.completedBlocks.length
-          })
-        }
-      } catch {
-        // Skip corrupt files
+        fs.writeFileSync(otherPath, JSON.stringify(otherDaily), { mode: 0o600 })
+      } catch (err) {
+        logger.error('BlockUsage', `Failed to persist blocks to ${otherDate}`, err)
       }
     }
 
+    return daily.snapshots
+  }
+
+  /**
+   * Build daily usage history for the chart.
+   *
+   * For days covered by the JSONL scan window (last 7 days), totals are
+   * computed directly from deduplicated entries — this is authoritative and
+   * immune to the overlapping-blocks problem where app restarts re-group
+   * the same entries into differently-aligned blocks.
+   *
+   * For older days (beyond the JSONL window), we fall back to persisted
+   * daily summaries stored in `dailySummary` (entry-derived, not block-derived).
+   * Legacy daily files that only have `completedBlocks` are skipped for cost
+   * aggregation since those blocks may overlap and double-count.
+   */
+  private async loadDailyHistory(
+    _days: number,
+    entries: ParsedEntry[]
+  ): Promise<BlockUsageData['dailyHistory']> {
+
+    // Phase 1: Compute daily totals from JSONL entries (authoritative).
+    // Entries are already deduplicated by messageId in scanAllJsonl().
+    const entryBuckets = new Map<
+      string,
+      { tokens: number; cost: number; models: Record<string, number>; requestCount: number }
+    >()
+
+    for (const entry of entries) {
+      const day = dateStrFromTimestamp(entry.timestamp)
+      let bucket = entryBuckets.get(day)
+      if (!bucket) {
+        bucket = { tokens: 0, cost: 0, models: {}, requestCount: 0 }
+        entryBuckets.set(day, bucket)
+      }
+      const tok =
+        entry.inputTokens + entry.outputTokens +
+        entry.cacheCreationTokens + entry.cacheReadTokens
+      bucket.tokens += tok
+      bucket.cost += entry.costUsd
+      bucket.requestCount += 1
+
+      const normalized = normalizeModelName(entry.model)
+      if (normalized) {
+        bucket.models[normalized] = (bucket.models[normalized] || 0) + tok
+      }
+    }
+
+    // Merge model families in entry buckets (same logic as block building)
+    for (const bucket of entryBuckets.values()) {
+      const modelMap = new Map<string, number>()
+      for (const [model, tok] of Object.entries(bucket.models)) {
+        const lower = model.toLowerCase()
+        let family = model
+        if (lower.includes('opus')) family = 'opus'
+        else if (lower.includes('sonnet')) family = 'sonnet'
+        else if (lower.includes('haiku')) family = 'haiku'
+        modelMap.set(family, (modelMap.get(family) || 0) + tok)
+      }
+      // Resolve family keys back to the most specific model name
+      const resolved: Record<string, number> = {}
+      for (const [family, tok] of modelMap) {
+        // Find the original model name that contributed most tokens
+        let bestModel = family
+        let bestTok = 0
+        for (const [model, mTok] of Object.entries(bucket.models)) {
+          const lower = model.toLowerCase()
+          const mFamily =
+            lower.includes('opus') ? 'opus' :
+            lower.includes('sonnet') ? 'sonnet' :
+            lower.includes('haiku') ? 'haiku' : model
+          if (mFamily === family && mTok > bestTok) {
+            bestModel = model
+            bestTok = mTok
+          }
+        }
+        resolved[bestModel] = tok
+      }
+      bucket.models = resolved
+    }
+
+    // Phase 2: Load ALL daily files for peak API % and older-day summaries.
+    // Scan the usage directory directly to find all available files, not just
+    // the last N days — backfilled data may go back further.
+    const dailyFiles = new Map<string, DailyUsageFile>()
+    try {
+      if (fs.existsSync(USAGE_DIR)) {
+        const files = fs.readdirSync(USAGE_DIR)
+        for (const file of files) {
+          if (!file.endsWith('.json')) continue
+          const date = file.replace('.json', '')
+          try {
+            dailyFiles.set(
+              date,
+              JSON.parse(
+                fs.readFileSync(path.join(USAGE_DIR, file), 'utf-8')
+              ) as DailyUsageFile
+            )
+          } catch {
+            // Skip corrupt files
+          }
+        }
+      }
+    } catch {
+      // Usage dir may not exist yet
+    }
+
+    // Phase 2b: Persist entry-derived summaries so correct data survives past
+    // the JSONL scan window. Only write today's each poll; older days once.
+    const todayStr = todayDateStr()
+    for (const [date, bucket] of entryBuckets) {
+      if (date === todayStr) {
+        this.persistDailySummary(date, bucket)
+      } else if (!dailyFiles.get(date)?.dailySummary) {
+        this.persistDailySummary(date, bucket)
+      }
+    }
+
+    // Phase 3: Build history array from all available dates.
+    // Collect all dates that have either entry data or a daily file.
+    const allDates = new Set<string>([...entryBuckets.keys(), ...dailyFiles.keys()])
+    const history: BlockUsageData['dailyHistory'] = []
+
+    for (const date of [...allDates].sort()) {
+      const entryBucket = entryBuckets.get(date)
+      const daily = dailyFiles.get(date)
+
+      let dayTokens = 0
+      let dayCost = 0
+      let dayModels: Record<string, number> = {}
+      let blockCount = 0
+
+      if (entryBucket) {
+        // Use authoritative entry-derived data
+        dayTokens = entryBucket.tokens
+        dayCost = entryBucket.cost
+        dayModels = entryBucket.models
+        blockCount = 0 // not meaningful for entry-based aggregation
+      } else if (daily?.dailySummary) {
+        // Fall back to persisted entry-derived summary (for days past JSONL window)
+        dayTokens = daily.dailySummary.totalTokens
+        dayCost = daily.dailySummary.costUsd
+        dayModels = daily.dailySummary.models
+        blockCount = daily.dailySummary.blockCount ?? 0
+      }
+
+      if (dayTokens === 0 && dayCost === 0) continue
+
+      // Peak API % from snapshots
+      let peakApi = 0
+      if (daily) {
+        for (const snap of daily.snapshots) {
+          if (snap.apiUsagePercent > peakApi) peakApi = snap.apiUsagePercent
+        }
+      }
+
+      history.push({
+        date,
+        totalTokens: dayTokens,
+        costUsd: Math.round(dayCost * 100) / 100,
+        models: dayModels,
+        peakApiPercent: peakApi,
+        blockCount
+      })
+    }
+
     return history
+  }
+
+  /**
+   * Persist an entry-derived daily summary into the daily file.
+   * This is stored alongside (not replacing) completedBlocks/snapshots,
+   * so older code paths aren't broken. Once the JSONL ages past the scan
+   * window, this summary becomes the authoritative source.
+   */
+  private persistDailySummary(
+    date: string,
+    bucket: { tokens: number; cost: number; models: Record<string, number>; requestCount: number }
+  ): void {
+    const filePath = path.join(USAGE_DIR, `${date}.json`)
+    try {
+      let daily: DailyUsageFile
+      if (fs.existsSync(filePath)) {
+        daily = JSON.parse(fs.readFileSync(filePath, 'utf-8')) as DailyUsageFile
+      } else {
+        daily = { date, snapshots: [], completedBlocks: [] }
+      }
+      // Always overwrite with latest computation (entries may have grown)
+      daily.dailySummary = {
+        totalTokens: bucket.tokens,
+        costUsd: Math.round(bucket.cost * 100) / 100,
+        models: bucket.models,
+        blockCount: 0,
+        requestCount: bucket.requestCount
+      }
+      if (!fs.existsSync(USAGE_DIR)) {
+        fs.mkdirSync(USAGE_DIR, { recursive: true })
+      }
+      fs.writeFileSync(filePath, JSON.stringify(daily), { mode: 0o600 })
+    } catch (err) {
+      logger.error('BlockUsage', `Failed to persist daily summary for ${date}`, err)
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Historical Backfill
+  // -------------------------------------------------------------------------
+
+  /**
+   * One-time scan of JSONL files beyond the normal 7-day window to compute
+   * and persist `dailySummary` for days that don't have one yet.
+   *
+   * Runs asynchronously on first recalculate() — doesn't block the UI.
+   * Once summaries are persisted, subsequent app sessions skip the backfill
+   * (the daily files already have `dailySummary`).
+   */
+  private async backfillHistoricalSummaries(): Promise<void> {
+    const now = Date.now()
+    const normalCutoff = now - SCAN_WINDOW_MS
+
+    // Scan ALL available JSONL files (no cutoff — grab everything)
+    const entries = await this.scanJsonlWithCutoff(0)
+    if (entries.length === 0) return
+
+    // Group entries older than the normal 7-day window by day
+    const dayBuckets = new Map<
+      string,
+      { tokens: number; cost: number; models: Record<string, number>; requestCount: number }
+    >()
+    for (const entry of entries) {
+      // Skip entries in the normal scan window (already handled by recalculate)
+      if (entry.timestamp >= normalCutoff) continue
+
+      const day = dateStrFromTimestamp(entry.timestamp)
+      let bucket = dayBuckets.get(day)
+      if (!bucket) {
+        bucket = { tokens: 0, cost: 0, models: {}, requestCount: 0 }
+        dayBuckets.set(day, bucket)
+      }
+      const tok =
+        entry.inputTokens + entry.outputTokens +
+        entry.cacheCreationTokens + entry.cacheReadTokens
+      bucket.tokens += tok
+      bucket.cost += entry.costUsd
+      bucket.requestCount += 1
+
+      const normalized = normalizeModelName(entry.model)
+      if (normalized) {
+        bucket.models[normalized] = (bucket.models[normalized] || 0) + tok
+      }
+    }
+
+    if (dayBuckets.size === 0) return
+
+    // Check which days already have a dailySummary (skip those)
+    let backfilled = 0
+    for (const [date, bucket] of dayBuckets) {
+      const filePath = path.join(USAGE_DIR, `${date}.json`)
+      try {
+        if (fs.existsSync(filePath)) {
+          const daily = JSON.parse(
+            fs.readFileSync(filePath, 'utf-8')
+          ) as DailyUsageFile
+          if (daily.dailySummary) continue // already has correct summary
+        }
+      } catch {
+        // File corrupt or missing — will be created by persistDailySummary
+      }
+      this.persistDailySummary(date, bucket)
+      backfilled++
+    }
+
+    logger.info(
+      'BlockUsage',
+      `Backfilled daily summaries for ${backfilled} days (${dayBuckets.size} total with data)`
+    )
+
+    // Trigger a re-render so the chart updates with the backfilled data
+    if (backfilled > 0 && this.lastData) {
+      const entries7d = await this.scanAllJsonl()
+      const dailyHistory = await this.loadDailyHistory(HISTORY_DAYS, entries7d)
+      this.lastData = { ...this.lastData, dailyHistory }
+      this.pushToRenderer(this.lastData)
+    }
+  }
+
+  /**
+   * Scan JSONL files with a custom cutoff (used by backfill for wider window).
+   * Reuses the same parsing logic and file cache as scanAllJsonl.
+   */
+  private async scanJsonlWithCutoff(cutoff: number): Promise<ParsedEntry[]> {
+    const jsonlFiles = this.collectJsonlFiles(CLAUDE_PROJECTS_DIR)
+    const allEntries: ParsedEntry[] = []
+    const seenIds = new Set<string>()
+
+    for (const filePath of jsonlFiles) {
+      let mtime: number
+      try {
+        mtime = fs.statSync(filePath).mtimeMs
+      } catch {
+        continue
+      }
+      if (mtime < cutoff) continue
+
+      const cached = this.fileCache.get(filePath)
+      let entries: ParsedEntry[]
+      if (cached && cached.mtime === mtime) {
+        entries = cached.entries
+      } else {
+        entries = await this.parseJsonlFile(filePath, cutoff)
+        this.fileCache.set(filePath, { mtime, entries })
+      }
+
+      for (const entry of entries) {
+        if (entry.timestamp < cutoff) continue
+        if (entry.messageId && seenIds.has(entry.messageId)) continue
+        if (entry.messageId) seenIds.add(entry.messageId)
+        allEntries.push(entry)
+      }
+    }
+
+    allEntries.sort((a, b) => a.timestamp - b.timestamp)
+    return allEntries
   }
 
   // -------------------------------------------------------------------------
