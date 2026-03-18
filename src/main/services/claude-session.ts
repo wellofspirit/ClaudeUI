@@ -22,19 +22,49 @@ export function getCliJsPath(): string | undefined {
 }
 
 /**
+ * Resolve the Electron Helper binary for spawning child processes.
+ *
+ * On macOS, spawning `process.execPath` (the main Electron binary) causes a
+ * dock icon flash. The Electron Helper binary has `LSUIElement=1` in its
+ * Info.plist, so macOS treats it as a background process — no dock icon.
+ *
+ * Path: ClaudeUI.app/Contents/Frameworks/ClaudeUI Helper.app/Contents/MacOS/ClaudeUI Helper
+ */
+function getElectronHelperPath(): string {
+  if (process.platform !== 'darwin') return process.execPath
+
+  // process.execPath = .../ClaudeUI.app/Contents/MacOS/ClaudeUI
+  const contentsDir = path.dirname(path.dirname(process.execPath))
+  const appName = path.basename(process.execPath) // "ClaudeUI"
+  const helperPath = path.join(
+    contentsDir,
+    'Frameworks',
+    `${appName} Helper.app`,
+    'Contents',
+    'MacOS',
+    `${appName} Helper`
+  )
+
+  // Fall back to main binary if helper doesn't exist (e.g., dev mode)
+  if (!fs.existsSync(helperPath)) return process.execPath
+  return helperPath
+}
+
+/**
  * SDK options for resolving the CLI executable in production.
  *
  * The SDK spawns `cli.js` via `spawn("node", [cliPath, ...])` by default,
  * but macOS GUI apps don't have a system `node` in PATH (especially on fresh
- * machines). We use Electron's own Node.js runtime (process.execPath) with
- * ELECTRON_RUN_AS_NODE=1 so the spawn is self-contained.
+ * machines). We use Electron's own Node.js runtime with ELECTRON_RUN_AS_NODE=1
+ * so the spawn is self-contained. On macOS we use the Helper binary to avoid
+ * dock icon flashes.
  */
 export function getSdkExecutableOpts(): Record<string, unknown> {
   const cliPath = getCliJsPath()
   if (!cliPath) return {} // dev mode — let SDK use default resolution
   return {
     pathToClaudeCodeExecutable: cliPath,
-    executable: process.execPath,
+    executable: getElectronHelperPath(),
     executableArgs: [],
     env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }
   }
