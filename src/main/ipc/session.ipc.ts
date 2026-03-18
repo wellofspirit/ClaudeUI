@@ -832,11 +832,9 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
           if (data !== null) return data
         } catch { /* try next session */ }
       }
-      // Fall back to the always-on service session
+      // Fall back to the service session (spawns lazily on first call)
       return serviceSession.getUsage()
     })
-    // Start the service session for always-on control message access
-    serviceSession.start()
     // Apply saved refresh interval before starting
     if (typeof savedSettings.usageRefreshSecs === 'number') {
       usageFetcher.setIntervalSecs(savedSettings.usageRefreshSecs)
