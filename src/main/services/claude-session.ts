@@ -62,11 +62,15 @@ function getElectronHelperPath(): string {
 export function getSdkExecutableOpts(): Record<string, unknown> {
   const cliPath = getCliJsPath()
   if (!cliPath) return {} // dev mode — let SDK use default resolution
+  // Set ELECTRON_RUN_AS_NODE on process.env rather than passing an explicit
+  // `env` to the SDK. When the SDK receives an explicit `env`, it propagates
+  // it to all child processes (including the Bash tool), which prevents the
+  // CLI's login-shell env inheritance from working.
+  process.env.ELECTRON_RUN_AS_NODE = '1'
   return {
     pathToClaudeCodeExecutable: cliPath,
     executable: getElectronHelperPath(),
-    executableArgs: [],
-    env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }
+    executableArgs: []
   }
 }
 import type {
