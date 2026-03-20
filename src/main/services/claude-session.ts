@@ -192,6 +192,7 @@ export class ClaudeSession {
   private sessionId: string | null = null
   private abortController: AbortController | null = null
   private isProcessing = false
+  private wasInterrupted = false
   private pendingApprovals = new Map<string, PendingApprovalEntry>()
   private taskIdMap = new Map<string, string>() // agentId → toolUseId
   private pendingTeammates = new Map<string, { name: string; teamName: string; prompt?: string }>() // toolUseId → { name, teamName, prompt }
@@ -297,6 +298,7 @@ export class ClaudeSession {
   async run(prompt: string, attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>): Promise<void> {
     this.clearInactivityTimer()
     this.isProcessing = true
+    this.wasInterrupted = false
     this.sendStatus()
 
     // Build content: plain string when text-only, ContentBlockParam[] when attachments present
@@ -692,17 +694,22 @@ export class ClaudeSession {
           // Handle error results
           const subtype = msg.subtype as string | undefined
           if (subtype && subtype !== 'success') {
-            const errors = (msg.errors as string[]) || []
-            const stderrContext = stderrChunks.length > 0
-              ? '\n\nCLI stderr:\n' + stderrChunks.slice(-20).join('\n')
-              : ''
-            if (errors.length) {
-              logger.error('ClaudeSession', `Result error: ${errors.join('; ')}`)
-              this.send('session:error', errors.join('; ') + stderrContext)
-            } else {
-              const fallback = `Session ended with status: ${subtype}`
-              logger.error('ClaudeSession', fallback)
-              this.send('session:error', fallback + stderrContext)
+            // When the user clicked Stop, the SDK sends error results as it
+            // tears down the interrupted turn.  These are not real failures —
+            // suppress them entirely.
+            if (!this.wasInterrupted) {
+              const errors = (msg.errors as string[]) || []
+              const stderrContext = stderrChunks.length > 0
+                ? '\n\nCLI stderr:\n' + stderrChunks.slice(-20).join('\n')
+                : ''
+              if (errors.length) {
+                logger.error('ClaudeSession', `Result error: ${errors.join('; ')}`)
+                this.send('session:error', errors.join('; ') + stderrContext)
+              } else {
+                const fallback = `Session ended with status: ${subtype}`
+                logger.error('ClaudeSession', fallback)
+                this.send('session:error', fallback + stderrContext)
+              }
             }
           }
 
@@ -754,7 +761,7 @@ export class ClaudeSession {
       const stack = err instanceof Error ? err.stack : undefined
       const stderrContext = stderrChunks.length > 0 ? `\nCollected stderr:\n${stderrChunks.join('\n')}` : ''
       logger.error('ClaudeSession', `SDK error: ${errorMsg}${stderrContext}`, err)
-      if (!errorMsg.includes('abort')) {
+      if (!errorMsg.includes('abort') && errorMsg !== '') {
         // Build a structured error message:
         // Line 1: human-readable summary
         // Rest: stack trace + CLI stderr (expandable in the UI)
@@ -1067,6 +1074,7 @@ export class ClaudeSession {
     }
     this.pendingApprovals.clear()
 
+    this.wasInterrupted = true
     this.clearInactivityTimer()
     this.stopAllBackgroundPollers()
     unwatchAllSubagents()
@@ -1085,6 +1093,8 @@ export class ClaudeSession {
    *  API call / tool execution, yields tombstone messages, and returns to idle. */
   async interrupt(): Promise<void> {
     if (this.activeQuery) {
+      this.wasInterrupted = true
+
       // Deny pending approvals so the SDK's canUseTool callbacks unblock
       for (const [, entry] of this.pendingApprovals) {
         entry.resolve({ decision: 'deny' })
@@ -1116,6 +1126,7 @@ export class ClaudeSession {
         return { success: false, error: 'No active session' }
       }
       try {
+        this.wasInterrupted = true
         await this.activeQuery.interrupt()
         return { success: true }
       } catch (err) {
