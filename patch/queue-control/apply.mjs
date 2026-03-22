@@ -112,30 +112,30 @@ if (!skipA1) {
   const successFn = successMatch[1]
   console.log(`  Success response helper: ${successFn}`)
 
-  // --- Queue push function (needed to find the queue module) ---
-  // v2.1.71+ adds priority field: pushFn({mode:"prompt",value:...,uuid:...,priority:...})
-  const pushLoopRe = new RegExp(`(${V})\\(\\{mode:"prompt",value:${V}\\.message\\.content,uuid:${V}\\.uuid(?:,priority:${V}\\.priority)?\\}\\),(${V})\\(\\)`)
-  const pushLoopMatch = pushLoopRe.exec(nearbyCtx)
-  if (!pushLoopMatch) {
-    console.error('ERROR: Cannot find queue-push + loop-starter pattern')
-    process.exit(1)
-  }
-  const pushFn = pushLoopMatch[1]
-  console.log(`  Queue push function: ${pushFn}`)
-
-  // --- Queue remove-by-predicate function ---
-  const pushDefRe = new RegExp(`function ${pushFn.replace(/\$/g, '\\$')}\\((${V})\\)\\{(${V})\\.push\\(`)
+  // --- Queue push function (found by structural content pattern) ---
+  // The push function pushes to an array with priority??"next":
+  //   function <pushFn>(<A>){<arr>.push({...<A>,priority:<A>.priority??"next"}),...}
+  // We search for the priority??"next" literal and extract the surrounding function.
+  const pushDefRe = new RegExp(
+    `function (${V})\\((${V})\\)\\{(${V})\\.push\\(\\{\\.\\.\\.(${V}),priority:\\4\\.priority\\?\\?"next"\\}\\)`
+  )
   const pushDefMatch = pushDefRe.exec(src)
   if (!pushDefMatch) {
-    console.error(`ERROR: Cannot find definition of queue push function: function ${pushFn}(...)`)
+    console.error('ERROR: Cannot find queue push function by priority??"next" pattern')
     process.exit(1)
   }
+  const pushFn = pushDefMatch[1]
   const pushDefIdx = pushDefMatch.index
-  const queueArr = pushDefMatch[2]
+  const queueArr = pushDefMatch[3]
+  console.log(`  Queue push function: ${pushFn}`)
   console.log(`  Queue array: ${queueArr}`)
 
-  const queueModule = src.slice(pushDefIdx, pushDefIdx + 1500)
-  const removeFnRe = new RegExp(`function (${V})\\(${V}\\)\\{let ${V}=\\[\\];for\\(let ${V}=${queueArr.replace(/\$/g, '\\$')}\\.length-1`)
+  // --- Queue remove-by-predicate function ---
+  // Found near the push function: function <removeFn>(<A>){let <q>=[],<K>=[];for(let <_> of <arr>)...
+  const queueModule = src.slice(pushDefIdx, pushDefIdx + 2000)
+  const removeFnRe = new RegExp(
+    `function (${V})\\(${V}\\)\\{let ${V}=\\[\\],${V}=\\[\\];for\\(let ${V} of ${queueArr.replace(/\$/g, '\\$')}\\)`
+  )
   const removeFnMatch = removeFnRe.exec(queueModule)
   if (!removeFnMatch) {
     console.error('ERROR: Cannot find queue remove-by-predicate function near queue push definition')

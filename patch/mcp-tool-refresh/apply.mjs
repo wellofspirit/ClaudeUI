@@ -89,14 +89,18 @@ if (!skipA) {
   console.log('\n--- Part A: Refresh tools before EVq ---')
 
   // Step A1: Find the query call and extract the tools variable name
-  // Pattern: `for await(let <V> of <queryFn>({commands:<V>,prompt:<V>,
-  //           promptUuid:<V>.uuid,cwd:<cwdFn>(),tools:<toolsVar>,`
+  // Pattern: `for await(let <V> of <queryFn>({...promptUuid:<V>.uuid,...cwd:<cwdFn>(),tools:<toolsVar>,`
   // Function names (EVq, ml8, etc.) change between versions — match by content shape.
+  // The commands: value may be a complex expression (not just a variable), and
+  // optional fields (e.g. isMeta) may appear between promptUuid and cwd.
+  // We use non-greedy skips to bridge these variable regions.
   const evqRe = new RegExp(
     `for await\\(let (${V}) of (${V})\\(\\{` +
-    `commands:(${V}),prompt:(${V}),` +
-    `promptUuid:(${V})\\.uuid,cwd:(${V})\\(\\),` +
-    `tools:(${V}),`
+    `.+?` +                           // skip commands:...,prompt:..., etc.
+    `promptUuid:(${V})\\.uuid,` +     // stable anchor
+    `.*?` +                           // skip optional fields (isMeta, etc.) — may be empty
+    `cwd:(${V})\\(\\),` +            // stable anchor
+    `tools:(${V}),`                   // target: tools variable
   )
 
   const evqMatch = evqRe.exec(src)
@@ -114,8 +118,8 @@ if (!skipA) {
     process.exit(1)
   }
 
-  const queryFn = evqMatch[2]   // EVq / ckq
-  const toolsVar = evqMatch[7]  // w6 / Z6
+  const queryFn = evqMatch[2]   // EVq / ckq / LQq
+  const toolsVar = evqMatch[5]  // w6 / Z6 / L6
   console.log(`Found ${queryFn} call at char ${evqMatch.index}`)
   console.log(`  Tools variable: ${toolsVar}`)
 
@@ -248,15 +252,22 @@ if (!skipA || !skipB) {
     process.exit(1)
   }
 
-  // Verify syntax with node --check
+  // Verify syntax with node --check (skip if node unavailable or bun shim)
   try {
-    const { execSync } = await import('node:child_process')
-    execSync(`node --check "${cliPath}"`, { stdio: 'pipe' })
+    const { execFileSync } = await import('node:child_process')
+    execFileSync('node', ['--check', cliPath], { stdio: 'pipe' })
     console.log('  OK Syntax check passed')
   } catch (err) {
-    console.error('  FAIL Syntax check failed!')
-    console.error(err.stderr?.toString() || err.message)
-    process.exit(1)
+    if (err.code === 'ENOENT') {
+      console.log('  SKIP Syntax check (node not in PATH)')
+    } else if (err.status === 1 && (err.stderr?.toString() || '').includes('Input must be provided')) {
+      // bun's node shim doesn't support --check
+      console.log('  SKIP Syntax check (bun runtime, node --check unsupported)')
+    } else {
+      console.error('  FAIL Syntax check failed!')
+      console.error(err.stderr?.toString() || err.message)
+      process.exit(1)
+    }
   }
 
   console.log('\ncli.js verified.')

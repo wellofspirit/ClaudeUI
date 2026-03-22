@@ -50,19 +50,22 @@ if (src.includes(MARKER)) {
 // ---------------------------------------------------------------------------
 // Find the network restriction check in dg5()
 // ---------------------------------------------------------------------------
-// Pattern: J=K?.network?.allowedDomains!==void 0||Q3?.network?.allowedDomains!==void 0,D=J,X=J
+// Pattern (old):  {denyOnly:H},J=K?.network?.allowedDomains!==void 0||Q3?.network?.allowedDomains!==void 0,D=J,X=J
+// Pattern (0.2.81): {denyOnly:H,allowWithinDeny:J},X=K?.network?.allowedDomains!==void 0||N5?.network?.allowedDomains!==void 0,D=X,P=X
 //
-// Anchored by the unique surrounding context:
-//   {denyOnly:H},<J>=<K>?.network?.allowedDomains!==void 0||<Q3>?.network?.allowedDomains!==void 0,<D>=<J>,<X>=<J>
+// The object before the check may contain extra keys (allowWithinDeny was added).
+// We anchor on `denyOnly:` inside the object, allow any content until `},`, then
+// capture the check expression and trailing alias assignments.
 
+// Core regex: skips object internals via [^}]+, captures checkVar, apiOpts, mergedCfg, trailing aliases
 const re = new RegExp(
-  `\\{denyOnly:(${V})\\},(${V})=(${V})\\?\\.network\\?\\.allowedDomains!==void 0\\|\\|(${V})\\?\\.network\\?\\.allowedDomains!==void 0,(${V})=(${V}),(${V})=(${V})`
+  `(\\{denyOnly:[^}]+\\}),(${V})=(${V})\\?\\.network\\?\\.allowedDomains!==void 0\\|\\|(${V})\\?\\.network\\?\\.allowedDomains!==void 0((?:,${V}=${V})+)`
 )
 
 const match = re.exec(src)
 if (!match) {
   console.error('ERROR: Cannot locate network restriction check in dg5().')
-  console.error('Expected pattern: {denyOnly:<H>},<J>=<K>?.network?.allowedDomains!==void 0||<Q3>?.network?.allowedDomains!==void 0,<D>=<J>,<X>=<J>')
+  console.error('Expected pattern: {denyOnly:...},<J>=<K>?.network?.allowedDomains!==void 0||<Q3>?.network?.allowedDomains!==void 0,<alias>=<J>[,...]')
   process.exit(1)
 }
 
@@ -73,22 +76,19 @@ if (allMatches.length > 1) {
   process.exit(1)
 }
 
-const hVar = match[1]   // H (denyOnly array)
-const jVar = match[2]   // J (needsNetworkRestriction flag)
-const kVar = match[3]   // K (API options)
-const q3Var = match[4]  // Q3 (merged config)
-const dVar = match[5]   // D (alias for J, should == jVar)
-const dVal = match[6]   // value assigned to D (should == jVar)
-const xVar = match[7]   // X (alias for J, should == jVar)
-const xVal = match[8]   // value assigned to X (should == jVar)
+const objLiteral = match[1]  // full object e.g. {denyOnly:H} or {denyOnly:H,allowWithinDeny:J}
+const checkVar = match[2]   // needsNetworkRestriction flag (was J, now X)
+const apiOpts = match[3]    // API options (K)
+const mergedCfg = match[4]  // merged config (was Q3, now N5)
+const aliasSuffix = match[5] // trailing aliases e.g. ",D=J,X=J" or ",D=X,P=X"
 
 console.log(`Found network check at char ${match.index}`)
-console.log(`  J=${jVar}, K=${kVar}, Q3=${q3Var}, D=${dVar}=${dVal}, X=${xVar}=${xVal}`)
+console.log(`  object=${objLiteral}, checkVar=${checkVar}, apiOpts=${apiOpts}, mergedCfg=${mergedCfg}, aliases=${aliasSuffix}`)
 
 // Replace: check .length > 0 instead of !== void 0, also check deniedDomains
 const oldCode = match[0]
 const newCode = MARKER +
-  `{denyOnly:${hVar}},${jVar}=${kVar}?.network?.allowedDomains?.length>0||${q3Var}?.network?.allowedDomains?.length>0||${q3Var}?.network?.deniedDomains?.length>0,${dVar}=${dVal},${xVar}=${xVal}`
+  `${objLiteral},${checkVar}=${apiOpts}?.network?.allowedDomains?.length>0||${mergedCfg}?.network?.allowedDomains?.length>0||${mergedCfg}?.network?.deniedDomains?.length>0${aliasSuffix}`
 
 src = src.replace(oldCode, newCode)
 console.log('Replaced !== void 0 checks with .length > 0')

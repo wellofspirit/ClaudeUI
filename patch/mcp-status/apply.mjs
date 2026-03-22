@@ -66,15 +66,17 @@ if (!skipA) {
   console.log('\n--- Part A: Store J6 promise ---')
 
   // Find the pattern where J6() is conditionally stored based on env var
-  // X6=null;if(_1(process.env.CLAUDE_CODE_SYNC_PLUGIN_INSTALL))X6=J6();else J6()
+  // Old: X6=null;if(_1(process.env.CLAUDE_CODE_SYNC_PLUGIN_INSTALL))X6=J6();else J6()
+  // New (0.2.81+): A6=null;if(!zY())if(a6(process.env.CLAUDE_CODE_SYNC_PLUGIN_INSTALL))A6=Y6();else Y6()
+  // The optional if(!<guardFn>()) between =null; and the SYNC check is captured in group 2.
   const anchorRe = new RegExp(
-    `(${V})=null;if\\((${V})\\(process\\.env\\.CLAUDE_CODE_SYNC_PLUGIN_INSTALL\\)\\)\\1=(${V})\\(\\);else \\3\\(\\)`
+    `(${V})=null;(if\\(!${V}\\(\\)\\))?if\\((${V})\\(process\\.env\\.CLAUDE_CODE_SYNC_PLUGIN_INSTALL\\)\\)\\1=(${V})\\(\\);else \\4\\(\\)`
   )
 
   const match = anchorRe.exec(src)
   if (!match) {
     console.error('ERROR: Cannot locate J6 fire-and-forget pattern.')
-    console.error('Pattern: <X6>=null;if(<_1>(process.env.CLAUDE_CODE_SYNC_PLUGIN_INSTALL))<X6>=<J6>();else <J6>()')
+    console.error('Pattern: <X6>=null;[if(!<zY>())]if(<_1>(process.env.CLAUDE_CODE_SYNC_PLUGIN_INSTALL))<X6>=<J6>();else <J6>()')
     process.exit(1)
   }
 
@@ -85,15 +87,19 @@ if (!skipA) {
     process.exit(1)
   }
 
-  const x6Var = match[1]  // X6 (the promise storage variable)
-  const j6Fn = match[3]   // J6 (the headless MCP refresh function)
+  const x6Var = match[1]      // X6 (the promise storage variable)
+  const guard = match[2] ?? '' // optional if(!zY()) guard, empty string if absent
+  const j6Fn = match[4]       // J6 (the headless MCP refresh function)
   console.log(`Found J6 pattern at char ${match.index}`)
   console.log(`  Promise variable: ${x6Var}`)
+  console.log(`  Guard clause: ${guard || '(none)'}`)
   console.log(`  Refresh function: ${j6Fn}`)
 
-  // Replace: always store the promise
+  // Replace: always store the promise, preserving the optional guard
+  // Old: X6=null;[if(!zY())]if(sync_check)X6=J6();else J6()
+  // New: X6=null;[if(!zY())]X6=J6()
   const oldCode = match[0]
-  const newCode = PATCH_A_MARKER + `${x6Var}=${j6Fn}()`
+  const newCode = PATCH_A_MARKER + `${x6Var}=null;${guard}${x6Var}=${j6Fn}()`
 
   src = src.replace(oldCode, newCode)
   console.log(`Replaced fire-and-forget with always-stored promise`)
@@ -120,14 +126,17 @@ if (!skipB) {
   // After Part A, the code has: <X6>=<J6>()
   // We already know X6 from Part A, but if Part A was already applied, extract it.
   let x6Var
-  const markerRe = new RegExp(`\\/\\*PATCHED:mcp-status-store-promise\\*\\/(${V})=(${V})\\(\\)`)
+  // After Part A, code is either:
+  //   /*PATCHED:...*/<X6>=<J6>()                         (no guard, old SDK)
+  //   /*PATCHED:...*/<X6>=null;if(!<zY>())<X6>=<J6>()   (with guard, 0.2.81+)
+  const markerRe = new RegExp(`\\/\\*PATCHED:mcp-status-store-promise\\*\\/(${V})=(?:null;(?:if\\(!${V}\\(\\)\\))\\1=)?(?:${V})\\(\\)`)
   const markerMatch = markerRe.exec(src)
   if (markerMatch) {
     x6Var = markerMatch[1]
     console.log(`  X6 from Part A marker: ${x6Var}`)
   } else {
     // Part A was already applied in a previous run with a different marker? Try extracting.
-    const envRe = new RegExp(`(${V})=null;if\\((${V})\\(process\\.env\\.CLAUDE_CODE_SYNC_PLUGIN_INSTALL\\)\\)`)
+    const envRe = new RegExp(`(${V})=null;(?:if\\(!${V}\\(\\)\\))?if\\((${V})\\(process\\.env\\.CLAUDE_CODE_SYNC_PLUGIN_INSTALL\\)\\)`)
     const envMatch = envRe.exec(src)
     if (envMatch) {
       x6Var = envMatch[1]
@@ -153,9 +162,10 @@ if (!skipB) {
   }
 
   // Find the mcp_status handler pattern
-  // Pattern: e.request.subtype==="mcp_status"){await d();let
+  // Old SDK: e.request.subtype==="mcp_status"){await d();let
+  // 0.2.81+:  W6.request.subtype==="mcp_status"){let
   const mcpRe = new RegExp(
-    `(${V})\\.request\\.subtype==="mcp_status"\\)\\{await (${V})\\(\\);let`
+    `(${V})\\.request\\.subtype==="mcp_status"\\)\\{(await (${V})\\(\\);)?let`
   )
   const mcpMatch = mcpRe.exec(src)
   if (!mcpMatch) {
@@ -172,15 +182,18 @@ if (!skipB) {
 
   const mcpIdx = mcpMatch.index
   const msgVar = mcpMatch[1]
-  const dFn = mcpMatch[2]
+  const hasAwaitD = !!mcpMatch[2]
+  const dFn = mcpMatch[3] // may be undefined if no await d()
   console.log(`Found mcp_status handler at char ${mcpIdx}`)
   console.log(`  Message variable: ${msgVar}`)
-  console.log(`  Deferred fn: ${dFn}`)
+  console.log(`  Has await d(): ${hasAwaitD}${hasAwaitD ? ` (fn: ${dFn})` : ''}`)
 
-  // Replace: add X6 await after d() call
+  // Replace: inject "if(X6)await X6;" before the let statement
+  // Preserve the existing "await d();" if present
   const oldMcp = mcpMatch[0]
+  const awaitPart = hasAwaitD ? `await ${dFn}();` : ''
   const newMcp = PATCH_B_MARKER +
-    `${msgVar}.request.subtype==="mcp_status"){await ${dFn}();if(${x6Var})await ${x6Var};let`
+    `${msgVar}.request.subtype==="mcp_status"){${awaitPart}if(${x6Var})await ${x6Var};let`
 
   src = src.replace(oldMcp, newMcp)
   console.log(`Injected await ${x6Var} in mcp_status handler`)
