@@ -252,24 +252,6 @@ if (!skipA || !skipB) {
     process.exit(1)
   }
 
-  // Verify syntax with node --check (skip if node unavailable or bun shim)
-  try {
-    const { execFileSync } = await import('node:child_process')
-    execFileSync('node', ['--check', cliPath], { stdio: 'pipe' })
-    console.log('  OK Syntax check passed')
-  } catch (err) {
-    if (err.code === 'ENOENT') {
-      console.log('  SKIP Syntax check (node not in PATH)')
-    } else if (err.status === 1 && (err.stderr?.toString() || '').includes('Input must be provided')) {
-      // bun's node shim doesn't support --check
-      console.log('  SKIP Syntax check (bun runtime, node --check unsupported)')
-    } else {
-      console.error('  FAIL Syntax check failed!')
-      console.error(err.stderr?.toString() || err.message)
-      process.exit(1)
-    }
-  }
-
   console.log('\ncli.js verified.')
 } else {
   console.log('\nAll patches already applied. Nothing to do.')

@@ -1,5 +1,5 @@
 /**
- * Master patch runner — applies all patches in order.
+ * Master patch runner — applies all patches in order, then verifies syntax.
  *
  * Usage: node patch/apply-all.mjs
  */
@@ -29,3 +29,68 @@ for (const patch of patches) {
 }
 
 console.log('\nAll patches applied.')
+
+// ---------------------------------------------------------------------------
+// Syntax check — verify patched cli.js parses without errors.
+//
+// Uses `bun build --no-bundle` (fast, native parser) with esbuild fallback.
+// Both parse the full file and exit non-zero on syntax errors.
+// ---------------------------------------------------------------------------
+
+const cliPath = resolve(
+  __dirname,
+  '..',
+  'node_modules',
+  '@anthropic-ai',
+  'claude-agent-sdk',
+  'cli.js'
+)
+
+console.log('\n>>> Syntax check: %s\n', cliPath)
+
+const checkers = [
+  {
+    name: 'node --check',
+    run: () => execFileSync('node', ['--check', cliPath], { stdio: 'pipe' })
+  },
+  {
+    name: 'bun build',
+    run: () =>
+      execFileSync('bun', ['build', '--no-bundle', '--outfile', '/dev/null', cliPath], {
+        stdio: 'pipe'
+      })
+  },
+  {
+    name: 'esbuild',
+    run: () =>
+      execFileSync(resolve(__dirname, '..', 'node_modules', '.bin', 'esbuild'), [
+        '--bundle=false',
+        cliPath
+      ], { stdio: 'pipe' })
+  }
+]
+
+let checked = false
+for (const checker of checkers) {
+  try {
+    checker.run()
+    console.log('  OK Syntax check passed (%s)', checker.name)
+    checked = true
+    break
+  } catch (err) {
+    if (err.code === 'ENOENT') continue // tool not installed, try next
+    const stderr = err.stderr?.toString() || ''
+    // bun's node shim doesn't support --check — skip to next checker
+    if (checker.name === 'node --check' && stderr.includes('Input must be provided')) continue
+    // Tool exists but syntax check failed
+    console.error('  FAIL Syntax check failed! (%s)', checker.name)
+    console.error(stderr || err.message)
+    process.exit(1)
+  }
+}
+
+if (!checked) {
+  console.warn('  SKIP Syntax check — none of node, bun, esbuild found in PATH')
+}
+
+console.log('\nDone.')
