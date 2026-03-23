@@ -482,7 +482,16 @@ export class ClaudeSession {
           stderr: (chunk) => {
             const text = chunk.toString().trim()
             if (text) {
-              logger.error('SDK', `stderr: ${text}`)
+              // Route Voice:Patch logs to debug instead of error
+              for (const line of text.split('\n')) {
+                const trimmed = line.trim()
+                if (!trimmed) continue
+                if (trimmed.includes('[Voice:Patch]')) {
+                  logger.debug('Voice', trimmed)
+                } else {
+                  logger.error('SDK', `stderr: ${trimmed}`)
+                }
+              }
               stderrChunks.push(text)
             }
           },

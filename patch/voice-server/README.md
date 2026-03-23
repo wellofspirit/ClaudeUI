@@ -150,6 +150,11 @@ else ([\w$]+)\(([\w$]+),`Unsupported control request subtype: \$\{\2\.request\.s
 const hb8Re = /async function ([\w$]+)\(([\w$]+),([\w$]+)\)\{[^}]{0,200}\[voice_stream\] No OAuth token available/
 ```
 
+**us1** (bs1 lazy module initializer) — `hb8`'s `finalize()` method reads `bs1.safety` and `bs1.noData` for timeout values. `bs1` is initialized inside a lazy module wrapper `L(()=>{...bs1={safety:5000,noData:1500}})`. If not triggered before `hb8()` is called, `finalize()` throws `TypeError: Cannot read properties of undefined (reading 'safety')`. Found by the literal timeout values:
+```js
+const bs1Re = /var ([\w$]+)=L\(\(\)=>[\s\S]{0,500}?bs1=\{safety:5000,noData:1500\}/
+```
+
 **successFn** (control response helper) — found by the pattern `,SUCCESS(MSG,{})` in a try/catch block near the control request handler:
 ```js
 const successRe = /\),([\w$]+)\(MSG,\{\}\)\}catch/   // MSG escaped for regex
@@ -177,6 +182,7 @@ else WARN(W6,`Unsupported control request subtype: ${W6.request.subtype}`);conti
         let m;try{m=JSON.parse(l)}catch{return}
         if(m.type==="voice_start"){
           let lang=m.language||"en";
+          us1();  // trigger lazy init of bs1 (finalize timeouts)
           hb8({
             onTranscript:(text,isFinal)=>{__send({type:"transcript",text,isFinal})},
             onError:(msg)=>{__send({type:"error",message:String(msg)})},
@@ -193,8 +199,8 @@ else WARN(W6,`Unsupported control request subtype: ${W6.request.subtype}`);conti
         }else if(m.type==="audio"){
           let b=Buffer.from(m.data,"base64");
           if(__st)__st.send(b);else __buf.push(b)
-        }else if(m.type==="voice_stop"&&__st){
-          __st.finalize().then(()=>{__st&&__st.close();__st=null})
+        }else if(m.type==="voice_stop"){
+          if(__st)__st.finalize().then(()=>{if(__st){__st.close();__st=null}}).catch(()=>{})
         }
       });
       __c.on("close",()=>{if(__st){__st.close();__st=null}__buf=[]});
@@ -246,6 +252,13 @@ Note: The `.response` unwrap is critical. `this.request()` returns the full cont
 ```bash
 bundle-analyzer find cli.js "[voice_stream] No OAuth token available" --compact
 bundle-analyzer strings cli.js --filter "voice_stream"
+```
+
+### us1 / bs1 — Lazy module for finalize timeouts
+
+```bash
+bundle-analyzer find cli.js "safety:5000,noData:1500" --compact
+bundle-analyzer slice cli.js <offset> --before 50 --after 50 --beautify
 ```
 
 ### Control request handler (injection site)
@@ -312,6 +325,20 @@ const net = require('net')  // might fail in bundled cli.js
 const {createServer} = await import('node:net')
 ```
 
+### Pitfall: Lazy module initialization for bs1 (finalize timeouts)
+
+```js
+// WRONG — hb8's finalize() reads bs1.safety which is undefined
+hb8({onTranscript:..., ...},{language:"en"})
+// TypeError: Cannot read properties of undefined (reading 'safety')
+
+// CORRECT — trigger the lazy module that initializes bs1 first
+us1();  // var us1=L(()=>{...bs1={safety:5000,noData:1500}})
+hb8({onTranscript:..., ...},{language:"en"})
+```
+
+The CLI's own `/voice` code triggers `us1` implicitly through its module dependency chain. Our patch bypasses that chain and calls `hb8` directly, so we must explicitly call `us1()` first. The `L()` wrapper is idempotent — calling `us1()` multiple times is safe.
+
 ### Pitfall: `globalThis` vs module-level variables
 
 ```js
@@ -377,6 +404,8 @@ globalThis.__vs = server
 | Name (v0.2.81) | Purpose                                           | Char offset |
 | --------------- | ------------------------------------------------- | ----------- |
 | `hb8`           | Voice stream function (Deepgram WS client)        | ~10804673   |
+| `us1`           | Lazy module initializer for bs1 (finalize timeouts)| ~10808957   |
+| `bs1`           | `{safety:5000, noData:1500}` — finalize timeouts  | ~10809023   |
 | `n`             | Success response helper (control_response)        | nearby      |
 | `W6`            | Message variable in control request handler       | nearby      |
 | `sVq`           | startRecording (native/sox/arecord — NOT patched) | ~10814663   |

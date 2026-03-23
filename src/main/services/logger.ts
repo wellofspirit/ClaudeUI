@@ -86,8 +86,12 @@ export const logger = {
 
   /** Debug-level logging — silent by default. Set `logger.debugEnabled = true` to activate. */
   debugEnabled: false,
+  /** Sources that always get debug output regardless of debugEnabled */
+  debugSources: new Set<string>(['Voice', 'VoiceClient', 'VoiceCapture']),
   debug(source: string, message: string): void {
-    if (!logger.debugEnabled) return
-    console.log(`[DEBUG] [${source}]`, message)
+    if (!logger.debugEnabled && !logger.debugSources.has(source)) return
+    const line = `[${timestamp()}] [DEBUG] [${source}] ${message}`
+    console.log(line)
+    writeToFile('DEBUG', source, message)
   }
 }

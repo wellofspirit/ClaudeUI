@@ -288,7 +288,7 @@ export function InputBox(): React.JSX.Element {
       await ensureSession()
       await window.api.voiceStartRecording(activeSessionId, voiceLanguage)
     } catch (err) {
-      console.error('Voice start failed:', err)
+      window.api.logRelay('error', 'Voice:InputBox', `voiceStartRecording failed: ${err}`)
     }
   }, [activeSessionId, isDisabled, voiceState, ensureSession, voiceLanguage])
 

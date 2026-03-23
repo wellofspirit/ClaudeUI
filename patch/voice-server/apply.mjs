@@ -87,7 +87,27 @@ if (src.includes(PATCH_A_MARKER)) {
   }
 
   // -------------------------------------------------------------------------
-  // Step 2: Find the control request anchor
+  // Step 2: Find the bs1 lazy module initializer (us1)
+  // -------------------------------------------------------------------------
+  console.log('\n--- Locating bs1 lazy module (us1) ---')
+
+  // bs1 holds finalize timeout values { safety: 5000, noData: 1500 }.
+  // It's initialized inside a lazy module: var <us1>=L(()=>{...bs1={safety:5000,noData:1500}})
+  // hb8's finalize() reads bs1.safety, so we must trigger the lazy init before calling hb8.
+  // The lazy module body contains function calls with parens, so use [\s\S]*? (non-greedy any)
+  const bs1Re = new RegExp(
+    `var (${V})=L\\(\\(\\)=>[\\s\\S]{0,500}?bs1=\\{safety:5000,noData:1500\\}`
+  )
+  const bs1Match = bs1Re.exec(src)
+  if (!bs1Match) {
+    console.error('ERROR: Cannot locate bs1 lazy module (us1)')
+    process.exit(1)
+  }
+  const us1Name = bs1Match[1]
+  console.log(`  bs1 lazy module initializer: ${us1Name}`)
+
+  // -------------------------------------------------------------------------
+  // Step 3: Find the control request anchor
   // -------------------------------------------------------------------------
   console.log('\n--- Locating control-request fallback ---')
 
@@ -112,7 +132,7 @@ if (src.includes(PATCH_A_MARKER)) {
   }
 
   // -------------------------------------------------------------------------
-  // Step 3: Find the success response function
+  // Step 4: Find the success response function
   // -------------------------------------------------------------------------
   console.log('\n--- Extracting success response function ---')
 
@@ -129,7 +149,7 @@ if (src.includes(PATCH_A_MARKER)) {
   console.log(`  Success response function: ${successFn}`)
 
   // -------------------------------------------------------------------------
-  // Step 4: Inject voice_server_start and voice_server_stop handlers
+  // Step 5: Inject voice_server_start and voice_server_stop handlers
   // -------------------------------------------------------------------------
   console.log('\n--- Injecting voice server handlers ---')
 
@@ -151,11 +171,12 @@ if (src.includes(PATCH_A_MARKER)) {
     `let __s=__cs((__c)=>{` +
       `let __st=null,__buf=[];` +
       `let __rl=__ci({input:__c});` +
-      `let __send=(o)=>{try{__c.write(JSON.stringify(o)+"\\n")}catch(e){}};` +
+      `let __send=(o)=>{try{__c.write(JSON.stringify(o)+"\\n")}catch{}};` +
       `__rl.on("line",(l)=>{` +
         `let m;try{m=JSON.parse(l)}catch{return}` +
         `if(m.type==="voice_start"){` +
           `let lang=m.language||"en";` +
+          `${us1Name}();` +  // trigger lazy init of bs1 (finalize timeouts)
           `${hb8Name}({` +
             `onTranscript:(text,isFinal)=>{__send({type:"transcript",text,isFinal})},` +
             `onError:(msg)=>{__send({type:"error",message:String(msg)})},` +
@@ -172,8 +193,8 @@ if (src.includes(PATCH_A_MARKER)) {
         `}else if(m.type==="audio"){` +
           `let b=Buffer.from(m.data,"base64");` +
           `if(__st)__st.send(b);else __buf.push(b)` +
-        `}else if(m.type==="voice_stop"&&__st){` +
-          `__st.finalize().then(()=>{__st&&__st.close();__st=null})` +
+        `}else if(m.type==="voice_stop"){` +
+          `if(__st)__st.finalize().then(()=>{if(__st){__st.close();__st=null}}).catch(()=>{})` +
         `}` +
       `});` +
       `__c.on("close",()=>{if(__st){__st.close();__st=null}__buf=[]});` +

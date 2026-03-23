@@ -255,7 +255,10 @@ const api: ClaudeAPI = {
   voiceStopRecording: (routingId: string) => unwrap('voice:stop-recording', routingId),
   onVoiceTranscript: onEvent('voice:transcript'),
   onVoiceState: onEvent('voice:state'),
-  onVoiceError: onEvent('voice:error')
+  onVoiceError: onEvent('voice:error'),
+
+  // Renderer → main process log relay
+  logRelay: (level: string, source: string, message: string) => ipcRenderer.send('log:relay', level, source, message)
 }
 
 if (process.contextIsolated) {

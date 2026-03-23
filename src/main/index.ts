@@ -86,6 +86,14 @@ function createWindow(): void {
     }
   })
 
+  // Renderer → main process log relay (so all logs go to one terminal)
+  ipcMain.on('log:relay', (_e, level: string, source: string, message: string) => {
+    const ts = new Date().toLocaleTimeString('en-GB', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit', fractionalSecondDigits: 3 })
+    const line = `[${ts}] [${level.toUpperCase()}] [${source}] ${message}`
+    if (level === 'error') console.error(line)
+    else console.log(line)
+  })
+
   const sessionManager = registerSessionIpc(mainWindow)
   registerTerminalIpc(mainWindow)
   const automationManager = registerAutomationIpc(mainWindow)

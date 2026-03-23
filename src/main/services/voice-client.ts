@@ -119,8 +119,16 @@ export class VoiceClient {
 
     if (this.conn && this.streamReady) {
       this.setState('processing')
-      // Tell the voice server to finalize the transcription
       this.sendToServer({ type: 'voice_stop' })
+
+      // Safety: if cli.js doesn't send 'closed' within 8s, force cleanup.
+      // hb8's safety timeout is 5s, so 8s gives plenty of margin.
+      setTimeout(() => {
+        if (this.state === 'processing') {
+          logger.warn('VoiceClient', 'Finalization timeout — forcing cleanup')
+          this.cleanup()
+        }
+      }, 8000)
       // The server will send remaining transcripts, then 'closed'
     } else {
       this.cleanup()
@@ -140,19 +148,23 @@ export class VoiceClient {
       const socket = net.connect(this.port, '127.0.0.1')
       const rl = readline.createInterface({ input: socket })
 
+      // Connection timeout — only for the initial handshake
+      const connectTimer = setTimeout(() => {
+        socket.destroy()
+        reject(new Error('Connection timeout'))
+      }, 5000)
+
       socket.on('connect', () => {
-        logger.debug('VoiceClient', `Connected to voice server on port ${this.port}`)
+        clearTimeout(connectTimer)
+        // Disable idle timeout — the socket may be idle for seconds during
+        // voice finalization (Deepgram safety timeout is 5s)
+        socket.setTimeout(0)
         resolve({ socket, rl })
       })
 
       socket.on('error', (err) => {
+        clearTimeout(connectTimer)
         reject(err)
-      })
-
-      // Timeout after 5 seconds
-      socket.setTimeout(5000, () => {
-        socket.destroy()
-        reject(new Error('Connection timeout'))
       })
     })
   }
@@ -168,7 +180,6 @@ export class VoiceClient {
 
     switch (msg.type) {
       case 'ready':
-        logger.debug('VoiceClient', 'Voice stream ready')
         this.streamReady = true
         this.setState('recording')
         // Flush buffered audio
@@ -195,20 +206,16 @@ export class VoiceClient {
         break
 
       case 'closed':
-        logger.debug('VoiceClient', 'Voice stream closed by server')
         this.cleanup()
         break
 
       default:
-        logger.debug('VoiceClient', `Unknown message type: ${msg.type}`)
+        break
     }
   }
 
   private handleDisconnect(): void {
-    if (this.state !== 'idle') {
-      logger.debug('VoiceClient', 'Disconnected from voice server')
-      this.cleanup()
-    }
+    if (this.state !== 'idle') this.cleanup()
   }
 
   private sendToServer(msg: Record<string, unknown>): void {

@@ -492,7 +492,10 @@ interface VoiceAPI {
   onVoiceError(cb: (routingId: string, error: string) => void): () => void
 }
 
-export interface ClaudeAPI extends SessionAPI, GitAPI, McpAPI, TerminalAPI, AutomationAPI, FileAPI, AccountAPI, RemoteAPI, VoiceAPI {}
+export interface ClaudeAPI extends SessionAPI, GitAPI, McpAPI, TerminalAPI, AutomationAPI, FileAPI, AccountAPI, RemoteAPI, VoiceAPI {
+  /** Relay a log message from the renderer to the main process logger */
+  logRelay(level: string, source: string, message: string): void
+}
 
 // ---------------------------------------------------------------------------
 // Account usage types (5hr / 7-day rate windows)
