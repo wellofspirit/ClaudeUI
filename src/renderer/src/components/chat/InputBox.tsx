@@ -451,15 +451,31 @@ export function InputBox(): React.JSX.Element {
       handleSend()
     }
     if (e.key === 'Escape' && isRunning) handleCancel()
+
+    // Tab: always suppress default focus-cycling from the textarea.
+    // When voice is enabled and no autocomplete menu is open, start push-to-talk.
+    if (e.key === 'Tab') {
+      e.preventDefault()
+      if (voiceEnabled && voiceState === 'idle' && !slashMenuOpen && !fileMentionOpen) {
+        handleVoiceStart()
+      }
+    }
   }
 
-  // Resize textarea when switching sessions (draft text changes)
+  const handleKeyUp = (e: React.KeyboardEvent): void => {
+    if (e.key === 'Tab' && (voiceState === 'recording' || voiceState === 'connecting')) {
+      e.preventDefault()
+      handleVoiceStop()
+    }
+  }
+
+  // Resize textarea when text or voice interim transcript changes
   useEffect(() => {
     const el = textareaRef.current
     if (!el) return
     el.style.height = 'auto'
     el.style.height = Math.min(el.scrollHeight, 200) + 'px'
-  }, [text])
+  }, [text, voiceInterimTranscript])
 
   const handleInput = (e: React.ChangeEvent<HTMLTextAreaElement>): void => {
     const value = e.target.value
@@ -565,12 +581,18 @@ export function InputBox(): React.JSX.Element {
           )}
 
           {/* @ file mention autocomplete */}
-          {fileMentionOpen && filteredFileMentionEntries.length > 0 && (
-            <FileMentionMenu
-              entries={filteredFileMentionEntries}
-              selectedIndex={fileMentionIndex}
-              onSelect={handleFileMentionConfirm}
-            />
+          {fileMentionOpen && (
+            filteredFileMentionEntries.length > 0 ? (
+              <FileMentionMenu
+                entries={filteredFileMentionEntries}
+                selectedIndex={fileMentionIndex}
+                onSelect={handleFileMentionConfirm}
+              />
+            ) : (
+              <div className="absolute bottom-full left-0 mb-1 w-72 rounded-lg border border-[var(--border-primary)] bg-[var(--bg-secondary)] px-3 py-2 text-xs text-[var(--text-tertiary)] shadow-lg">
+                No matching files
+              </div>
+            )
           )}
 
           {/* Hidden file input for file picker */}
@@ -589,14 +611,22 @@ export function InputBox(): React.JSX.Element {
           {/* Top section — input area */}
           <textarea
             ref={textareaRef}
-            value={text}
+            value={
+              voiceState === 'recording' || voiceState === 'connecting' || voiceState === 'processing'
+                ? text + (voiceInterimTranscript
+                    ? (text && !text.endsWith(' ') ? ' ' : '') + voiceInterimTranscript
+                    : '')
+                : text
+            }
             onChange={handleInput}
             onKeyDown={handleKeyDown}
+            onKeyUp={handleKeyUp}
             onPaste={handlePaste}
             onMouseDown={() => { setModelOpen(false); setEffortOpen(false); setPlusOpen(false); }}
+            readOnly={voiceState === 'recording' || voiceState === 'connecting' || voiceState === 'processing'}
             placeholder={
               voiceState === 'recording' || voiceState === 'connecting'
-                ? voiceInterimTranscript || 'Listening...'
+                ? 'Listening...'
                 : voiceState === 'processing'
                   ? 'Finishing transcription...'
                   : !activeSessionId || !cwd
@@ -609,7 +639,11 @@ export function InputBox(): React.JSX.Element {
             }
             disabled={isDisabled}
             rows={2}
-            className="w-full bg-transparent text-[13px] text-text-primary placeholder:text-text-muted pt-2 pl-3 pr-2 pb-1 resize-none outline-none disabled:opacity-30 leading-relaxed"
+            className={`w-full bg-transparent text-[13px] placeholder:text-text-muted pt-2 pl-3 pr-2 pb-1 resize-none outline-none disabled:opacity-30 leading-relaxed ${
+              (voiceState === 'recording' || voiceState === 'connecting' || voiceState === 'processing') && voiceInterimTranscript
+                ? 'text-[var(--text-secondary)] italic'
+                : 'text-text-primary'
+            }`}
           />
 
           {/* Bottom section — controls bar */}

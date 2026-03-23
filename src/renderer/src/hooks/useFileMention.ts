@@ -255,7 +255,24 @@ export function useFileMention({
 
   /** Keyboard handler — returns true if the event was consumed */
   const handleKeyDown = useCallback((e: React.KeyboardEvent): boolean => {
-    if (!fileMentionOpen || filteredEntries.length === 0) return false
+    if (!fileMentionOpen) return false
+
+    // Allow Escape to close even when no results match the filter
+    if (e.key === 'Escape') {
+      e.preventDefault()
+      close()
+      return true
+    }
+
+    // When no results match, Enter and Tab dismiss the menu instead of falling through
+    if (filteredEntries.length === 0) {
+      if (e.key === 'Enter' || e.key === 'Tab') {
+        e.preventDefault()
+        close()
+        return true
+      }
+      return false
+    }
 
     if (e.key === 'ArrowDown') {
       e.preventDefault()
@@ -277,11 +294,6 @@ export function useFileMention({
     if (e.key === 'Enter') {
       e.preventDefault()
       handleConfirm(filteredEntries[fileMentionIndex])
-      return true
-    }
-    if (e.key === 'Escape') {
-      e.preventDefault()
-      close()
       return true
     }
     return false
