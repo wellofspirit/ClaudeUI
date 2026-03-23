@@ -7,6 +7,8 @@ import { app } from 'electron'
 import type { BrowserWindow } from 'electron'
 import { computeTokenMetrics, buildSubagentFileMap } from './session-history'
 import { isAgentTool } from '../../shared/types'
+import { VoiceClient } from './voice-client'
+import { startRecording, stopRecording } from './voice-capture'
 import { unwatchAllSubagents } from './subagent-watcher'
 import { saveSlashCommands } from './ui-config'
 import { loadMcpServers, readDisabledMcpServers } from './claude-mcp'
@@ -229,6 +231,9 @@ export class ClaudeSession {
     setMcpServers(servers: Record<string, unknown>): Promise<unknown>
     // Permission hot-reload
     applyFlagSettings(settings: Record<string, unknown>): Promise<void>
+    // Voice server (added by voice-server patch)
+    voiceServerStart(): Promise<{ port: number }>
+    voiceServerStop(): Promise<{ stopped: boolean }>
   } | null = null
   private slug: string | null = null
   private permissionMode: string = 'default'
@@ -239,6 +244,8 @@ export class ClaudeSession {
   private inactivityTimer: ReturnType<typeof setTimeout> | null = null
   private inactivityTimeoutMs = 15 * 60 * 1000 // default 15 min, 0 = disabled
   private sandboxConfig: SandboxSettings | null = null
+  private voiceClient: VoiceClient | null = null
+  private voiceServerPort: number | null = null
 
   // In-memory token accumulators — updated from each assistant message's usage
   private accInputTokens = 0
@@ -299,47 +306,56 @@ export class ClaudeSession {
     return this.isProcessing
   }
 
-  async run(prompt: string, attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>): Promise<void> {
+  async run(prompt: string | null, attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>): Promise<void> {
     this.clearInactivityTimer()
-    this.isProcessing = true
-    this.wasInterrupted = false
-    this.sendStatus()
 
-    // Build content: plain string when text-only, ContentBlockParam[] when attachments present
-    let content: string | Array<Record<string, unknown>> = prompt
-    if (attachments && attachments.length > 0) {
-      const blocks: Array<Record<string, unknown>> = []
-      for (const att of attachments) {
-        if (att.mediaType === 'application/pdf') {
-          blocks.push({
-            type: 'document',
-            source: { type: 'base64', media_type: att.mediaType, data: att.base64Data }
-          })
-        } else {
-          blocks.push({
-            type: 'image',
-            source: { type: 'base64', media_type: att.mediaType, data: att.base64Data }
-          })
-        }
-      }
-      if (prompt) {
-        blocks.push({ type: 'text', text: prompt })
-      }
-      content = blocks
+    // null prompt = spawn-only mode (for voice server, etc.)
+    // Just ensure the SDK process is running without sending a message.
+    const spawnOnly = prompt === null
+
+    if (!spawnOnly) {
+      this.isProcessing = true
+      this.wasInterrupted = false
+      this.sendStatus()
     }
 
-    // SDK streaming input format — must match SDKUserMessage type
-    // (session_id and parent_tool_use_id are required by the CLI parser)
-    const sdkMessage = {
-      type: 'user' as const,
-      session_id: this.sessionId || '',
-      message: { role: 'user' as const, content },
-      parent_tool_use_id: null
+    // Build SDK message (skip if spawn-only)
+    let sdkMessage: Record<string, unknown> | null = null
+    if (!spawnOnly) {
+      // Build content: plain string when text-only, ContentBlockParam[] when attachments present
+      let content: string | Array<Record<string, unknown>> = prompt
+      if (attachments && attachments.length > 0) {
+        const blocks: Array<Record<string, unknown>> = []
+        for (const att of attachments) {
+          if (att.mediaType === 'application/pdf') {
+            blocks.push({
+              type: 'document',
+              source: { type: 'base64', media_type: att.mediaType, data: att.base64Data }
+            })
+          } else {
+            blocks.push({
+              type: 'image',
+              source: { type: 'base64', media_type: att.mediaType, data: att.base64Data }
+            })
+          }
+        }
+        if (prompt) {
+          blocks.push({ type: 'text', text: prompt })
+        }
+        content = blocks
+      }
+
+      sdkMessage = {
+        type: 'user' as const,
+        session_id: this.sessionId || '',
+        message: { role: 'user' as const, content },
+        parent_tool_use_id: null
+      }
     }
 
     if (this.messageChannel) {
-      // Session already active — push to existing channel
-      this.messageChannel.push(sdkMessage)
+      // Session already active — push message (or no-op for spawn-only)
+      if (sdkMessage) this.messageChannel.push(sdkMessage)
       return
     }
 
@@ -348,7 +364,7 @@ export class ClaudeSession {
     // alive so background agents can report back via task_notification.
     const channel = new MessageChannel<unknown>()
     this.messageChannel = channel
-    channel.push(sdkMessage)
+    if (sdkMessage) channel.push(sdkMessage)
     this.abortController = new AbortController()
 
     // Collect stderr chunks so we can include them in error messages
@@ -525,6 +541,8 @@ export class ClaudeSession {
         reconnectMcpServer(serverName: string): Promise<void>
         setMcpServers(servers: Record<string, unknown>): Promise<unknown>
         applyFlagSettings(settings: Record<string, unknown>): Promise<void>
+        voiceServerStart(): Promise<{ port: number }>
+        voiceServerStop(): Promise<{ stopped: boolean }>
       }
 
       for await (const message of q) {
@@ -823,6 +841,115 @@ export class ClaudeSession {
     return await this.activeQuery.dequeueMessage(value)
   }
 
+  // ---------------------------------------------------------------------------
+  // Voice input
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Ensure the SDK process is running so control messages can be sent.
+   * Calls run(null) which spawns the CLI without sending any prompt —
+   * zero API tokens consumed. The CLI loads settings/MCP and waits for
+   * input. When a real message is sent later, run() finds the existing
+   * channel and just pushes into it.
+   */
+  private async ensureActiveQuery(): Promise<void> {
+    if (this.activeQuery) return
+    // Fire-and-forget — run(null) spawns the SDK and drains in background
+    this.run(null)
+    // Wait for activeQuery to become available (SDK needs to spawn + initialize)
+    const deadline = Date.now() + 15000
+    while (!this.activeQuery && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 100))
+    }
+    if (!this.activeQuery) {
+      throw new Error('Timed out waiting for SDK session to start')
+    }
+  }
+
+  /**
+   * Start the voice server inside cli.js. Returns the TCP port for audio streaming.
+   */
+  async voiceStartServer(): Promise<{ port: number }> {
+    if (this.voiceServerPort) {
+      return { port: this.voiceServerPort }
+    }
+    await this.ensureActiveQuery()
+    const result = await this.activeQuery!.voiceServerStart()
+    this.voiceServerPort = result.port
+    logger.info('ClaudeSession', `Voice server started on port ${result.port}`)
+    return result
+  }
+
+  /** Stop the voice server inside cli.js. */
+  async voiceStopServer(): Promise<void> {
+    if (!this.activeQuery || !this.voiceServerPort) return
+    try {
+      await this.activeQuery.voiceServerStop()
+    } catch (err) {
+      logger.warn('ClaudeSession', 'voiceServerStop failed', err)
+    }
+    if (this.voiceClient) {
+      this.voiceClient.destroy()
+      this.voiceClient = null
+    }
+    this.voiceServerPort = null
+    logger.info('ClaudeSession', 'Voice server stopped')
+  }
+
+  /** Start a voice recording session. */
+  async voiceStartRecording(language: string): Promise<void> {
+    // Start native audio capture IMMEDIATELY so we don't lose the first
+    // seconds of speech while the SDK spawns and the voice server starts.
+    const earlyBuffer: Buffer[] = []
+    let earlyCaptureStopped = false
+    const captureStarted = startRecording((chunk) => {
+      if (!earlyCaptureStopped) earlyBuffer.push(chunk)
+    })
+    if (!captureStarted) {
+      this.send('voice:error', 'Failed to start audio capture. Check microphone access.')
+      return
+    }
+    // Notify renderer we're connecting (audio is flowing, just buffering)
+    this.win.webContents.send('voice:state', this.routingId, 'connecting')
+
+    try {
+      // Ensure voice server is running (may spawn SDK + create TCP server)
+      if (!this.voiceServerPort) {
+        const result = await this.voiceStartServer()
+        if (!result.port) {
+          throw new Error('Voice server failed to return a port')
+        }
+      }
+
+      const port = this.voiceServerPort!
+      if (!this.voiceClient) {
+        this.voiceClient = new VoiceClient(port, this.win, this.routingId)
+      } else {
+        this.voiceClient.updatePort(port)
+      }
+
+      // Hand off early buffer and start streaming through VoiceClient
+      earlyCaptureStopped = true
+      await this.voiceClient.startRecording(language, earlyBuffer)
+    } catch (err) {
+      earlyCaptureStopped = true
+      stopRecording()
+      this.win.webContents.send('voice:state', this.routingId, 'idle')
+      throw err
+    }
+  }
+
+  /** Stop the current voice recording session. */
+  async voiceStopRecording(): Promise<void> {
+    if (!this.voiceClient) {
+      // If voiceClient never started (still in early capture), just stop recording
+      stopRecording()
+      this.win.webContents.send('voice:state', this.routingId, 'idle')
+      return
+    }
+    await this.voiceClient.stopRecording()
+  }
+
   /**
    * Fetch account usage via the CLI's internal OAuth usage API.
    * Returns the raw API response (e.g., { five_hour, seven_day, ... })
@@ -1082,6 +1209,13 @@ export class ClaudeSession {
     this.clearInactivityTimer()
     this.stopAllBackgroundPollers()
     unwatchAllSubagents()
+
+    // Clean up voice resources
+    if (this.voiceClient) {
+      this.voiceClient.destroy()
+      this.voiceClient = null
+    }
+    this.voiceServerPort = null
 
     // End the message channel before aborting so the SDK's streamInput
     // loop can unblock and the CLI subprocess exits cleanly

@@ -246,7 +246,16 @@ const api: ClaudeAPI = {
   startRemoteServer: (opts?: { port?: number; host?: string }) => ipcRenderer.invoke('remote:start', opts),
   stopRemoteServer: () => ipcRenderer.invoke('remote:stop'),
   getRemoteStatus: () => ipcRenderer.invoke('remote:status'),
-  onRemoteStatus: onEvent('remote:status')
+  onRemoteStatus: onEvent('remote:status'),
+
+  // Voice input
+  voiceStartServer: (routingId: string) => unwrap('voice:start-server', routingId),
+  voiceStopServer: (routingId: string) => unwrap('voice:stop-server', routingId),
+  voiceStartRecording: (routingId: string, language: string) => unwrap('voice:start-recording', routingId, language),
+  voiceStopRecording: (routingId: string) => unwrap('voice:stop-recording', routingId),
+  onVoiceTranscript: onEvent('voice:transcript'),
+  onVoiceState: onEvent('voice:state'),
+  onVoiceError: onEvent('voice:error')
 }
 
 if (process.contextIsolated) {

@@ -1,5 +1,6 @@
 import { ipcMain, type BrowserWindow } from 'electron'
-import { is } from '@electron-toolkit/utils'
+import { app } from 'electron'
+const is = { dev: !app.isPackaged }
 import { AutomationManager } from '../services/automation-manager'
 import { logger } from '../services/logger'
 import type { Automation } from '../../shared/types'

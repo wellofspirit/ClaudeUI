@@ -47,6 +47,8 @@ export function useClaudeEvents(): void {
   const setSlashCommands = useSessionStore((s) => s.setSlashCommands)
   const setSdkSkillNames = useSessionStore((s) => s.setSdkSkillNames)
   const addSandboxViolation = useSessionStore((s) => s.addSandboxViolation)
+  const setVoiceState = useSessionStore((s) => s.setVoiceState)
+  const appendVoiceTranscript = useSessionStore((s) => s.appendVoiceTranscript)
 
   // Request notification permission on mount
   useEffect(() => {
@@ -338,6 +340,16 @@ export function useClaudeEvents(): void {
         } else {
           store.setQuitWorktrees(activeWorktrees)
         }
+      }),
+      // Voice input events
+      window.api.onVoiceTranscript((routingId, data) => {
+        appendVoiceTranscript(routingId, data.text, data.isFinal)
+      }),
+      window.api.onVoiceState((routingId, state) => {
+        setVoiceState(routingId, state)
+      }),
+      window.api.onVoiceError((routingId, error) => {
+        addError(routingId, error)
       })
     ]
 
@@ -352,5 +364,5 @@ export function useClaudeEvents(): void {
     }).catch((err) => { window.api.logError('useClaudeEvents', `Initial block usage fetch failed: ${err}`) })
 
     return () => cleanups.forEach((fn) => fn())
-  }, [addMessage, appendStreamingText, appendStreamingThinking, addPendingApproval, clearPendingApprovals, setStatus, addError, appendToolResult, updateTaskProgress, addTaskNotification, addSubagentMessage, appendSubagentMessageBatch, appendSubagentStreamingText, appendSubagentStreamingThinking, appendSubagentToolResult, setBackgroundOutput, setStatusLine, setPermissionMode, setSlashCommands, setSdkSkillNames, addSandboxViolation])
+  }, [addMessage, appendStreamingText, appendStreamingThinking, addPendingApproval, clearPendingApprovals, setStatus, addError, appendToolResult, updateTaskProgress, addTaskNotification, addSubagentMessage, appendSubagentMessageBatch, appendSubagentStreamingText, appendSubagentStreamingThinking, appendSubagentToolResult, setBackgroundOutput, setStatusLine, setPermissionMode, setSlashCommands, setSdkSkillNames, addSandboxViolation, setVoiceState, appendVoiceTranscript])
 }

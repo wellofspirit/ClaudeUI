@@ -24,7 +24,9 @@ import type {
   BlockUsageData,
   TerminalTab,
   WorktreeInfo,
-  SandboxSettings
+  SandboxSettings,
+  VoiceState,
+  VoiceLanguageCode
 } from '../../../shared/types'
 
 /** Normalize cwd for use as a terminal group key (strip trailing slash). */
@@ -124,6 +126,8 @@ export interface AppSettings {
   usageRefreshSecs: number
   sessionTimeoutMins: number // 0 = never auto-disconnect
   remoteFollowActions: boolean // follow remote client's session switches & messages
+  voiceEnabled: boolean
+  voiceLanguage: VoiceLanguageCode
   sandbox: SandboxSettings
 }
 
@@ -148,6 +152,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   gitCommitMode: 'commit' as const,
   usageRefreshSecs: 120,
   sessionTimeoutMins: 15,
+  voiceEnabled: false,
+  voiceLanguage: 'en' as VoiceLanguageCode,
   remoteFollowActions: true,
   sandbox: {
     enabled: false,
@@ -343,6 +349,9 @@ export interface PerSessionState {
   planReview: PlanReviewData | null
   // Sandbox violation messages
   sandboxViolations: string[]
+  // Voice input
+  voiceState: VoiceState
+  voiceInterimTranscript: string
 }
 
 const EMPTY_SESSION_STATE: PerSessionState = {
@@ -392,7 +401,9 @@ const EMPTY_SESSION_STATE: PerSessionState = {
   gitSyncError: null,
   gitLastFetchTime: null,
   planReview: null,
-  sandboxViolations: []
+  sandboxViolations: [],
+  voiceState: 'idle' as VoiceState,
+  voiceInterimTranscript: ''
 }
 
 function createEmptySession(cwd: string): PerSessionState {
@@ -593,6 +604,11 @@ interface SessionState {
   setTerminalPanelOpen: (open: boolean) => void
   setTerminalPanelHeight: (height: number) => void
   removeTerminalGroup: (cwd: string) => void
+  // Voice actions
+  setVoiceState: (routingId: string, state: VoiceState) => void
+  setVoiceInterimTranscript: (routingId: string, text: string) => void
+  appendVoiceTranscript: (routingId: string, text: string, isFinal: boolean) => void
+  clearVoiceTranscript: (routingId: string) => void
 }
 
 export const useSessionStore = create<SessionState>((set) => ({
@@ -1769,7 +1785,39 @@ export const useSessionStore = create<SessionState>((set) => ({
       const key = normalizeCwd(cwd)
       const { [key]: _, ...rest } = state.terminalGroups
       return { terminalGroups: rest }
-    })
+    }),
+
+  // Voice actions
+  setVoiceState: (routingId, state) =>
+    set((s) => ({
+      sessions: updateSession(s.sessions, routingId, () => ({ voiceState: state }))
+    })),
+
+  setVoiceInterimTranscript: (routingId, text) =>
+    set((s) => ({
+      sessions: updateSession(s.sessions, routingId, () => ({ voiceInterimTranscript: text }))
+    })),
+
+  appendVoiceTranscript: (routingId, text, isFinal) =>
+    set((s) => ({
+      sessions: updateSession(s.sessions, routingId, (session) => {
+        if (isFinal) {
+          // Final transcript: append to draft text, clear interim
+          const sep = session.draftText && !session.draftText.endsWith(' ') ? ' ' : ''
+          return {
+            draftText: session.draftText + sep + text,
+            voiceInterimTranscript: ''
+          }
+        }
+        // Interim transcript: just update the preview
+        return { voiceInterimTranscript: text }
+      })
+    })),
+
+  clearVoiceTranscript: (routingId) =>
+    set((s) => ({
+      sessions: updateSession(s.sessions, routingId, () => ({ voiceInterimTranscript: '' }))
+    }))
 }))
 
 // ---------------------------------------------------------------------------

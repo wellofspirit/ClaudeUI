@@ -217,7 +217,8 @@ const SESSION_IPC_CHANNELS = [
   'mcp:read-disabled', 'mcp:toggle-disabled',
   'worktree:create', 'worktree:status', 'worktree:remove', 'worktree:list',
   'app:quit-confirm',
-  'session:sandbox-violation'
+  'session:sandbox-violation',
+  'voice:start-server', 'voice:stop-server', 'voice:start-recording', 'voice:stop-recording'
 ]
 
 /** Shared SessionManager — created once, used by both IPC and remote handlers. */
@@ -330,6 +331,31 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
   ipcMain.handle('session:set-permission-mode', async (_e, routingId: string, mode: string) => {
     await manager.get(routingId)?.setPermissionMode(mode)
   })
+
+  // Voice input handlers
+  ipcMain.handle('voice:start-server', safeHandler(async (_e: unknown, routingId: string) => {
+    const session = manager.get(routingId)
+    if (!session) throw new Error('No active session')
+    await session.voiceStartServer()
+  }))
+
+  ipcMain.handle('voice:stop-server', safeHandler(async (_e: unknown, routingId: string) => {
+    const session = manager.get(routingId)
+    if (!session) throw new Error('No active session')
+    await session.voiceStopServer()
+  }))
+
+  ipcMain.handle('voice:start-recording', safeHandler(async (_e: unknown, routingId: string, language: string) => {
+    const session = manager.get(routingId)
+    if (!session) throw new Error('No active session')
+    await session.voiceStartRecording(language)
+  }))
+
+  ipcMain.handle('voice:stop-recording', safeHandler(async (_e: unknown, routingId: string) => {
+    const session = manager.get(routingId)
+    if (!session) throw new Error('No active session')
+    await session.voiceStopRecording()
+  }))
 
   ipcMain.handle('session:set-model', async (_e, routingId: string, model: string) => {
     await manager.get(routingId)?.setModel(model)

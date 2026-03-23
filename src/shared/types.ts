@@ -439,7 +439,60 @@ export interface RemoteStatus {
   clientIps: string[]
 }
 
-export interface ClaudeAPI extends SessionAPI, GitAPI, McpAPI, TerminalAPI, AutomationAPI, FileAPI, AccountAPI, RemoteAPI {}
+// ---------------------------------------------------------------------------
+// Voice input types
+// ---------------------------------------------------------------------------
+
+export type VoiceLanguageCode =
+  | 'en' | 'zh' | 'ja' | 'ko' | 'es' | 'fr' | 'de' | 'pt' | 'ru' | 'it'
+  | 'nl' | 'pl' | 'sv' | 'da' | 'no' | 'fi' | 'tr' | 'ar' | 'hi' | 'th'
+
+export interface VoiceLanguageOption {
+  code: VoiceLanguageCode
+  label: string
+}
+
+export const VOICE_LANGUAGES: VoiceLanguageOption[] = [
+  { code: 'en', label: 'English' },
+  { code: 'zh', label: 'Chinese' },
+  { code: 'ja', label: 'Japanese' },
+  { code: 'ko', label: 'Korean' },
+  { code: 'es', label: 'Spanish' },
+  { code: 'fr', label: 'French' },
+  { code: 'de', label: 'German' },
+  { code: 'pt', label: 'Portuguese' },
+  { code: 'ru', label: 'Russian' },
+  { code: 'it', label: 'Italian' },
+  { code: 'nl', label: 'Dutch' },
+  { code: 'pl', label: 'Polish' },
+  { code: 'sv', label: 'Swedish' },
+  { code: 'da', label: 'Danish' },
+  { code: 'no', label: 'Norwegian' },
+  { code: 'fi', label: 'Finnish' },
+  { code: 'tr', label: 'Turkish' },
+  { code: 'ar', label: 'Arabic' },
+  { code: 'hi', label: 'Hindi' },
+  { code: 'th', label: 'Thai' }
+]
+
+export interface VoiceTranscript {
+  text: string
+  isFinal: boolean
+}
+
+export type VoiceState = 'idle' | 'connecting' | 'recording' | 'processing'
+
+interface VoiceAPI {
+  voiceStartServer(routingId: string): Promise<void>
+  voiceStopServer(routingId: string): Promise<void>
+  voiceStartRecording(routingId: string, language: string): Promise<void>
+  voiceStopRecording(routingId: string): Promise<void>
+  onVoiceTranscript(cb: (routingId: string, data: VoiceTranscript) => void): () => void
+  onVoiceState(cb: (routingId: string, state: VoiceState) => void): () => void
+  onVoiceError(cb: (routingId: string, error: string) => void): () => void
+}
+
+export interface ClaudeAPI extends SessionAPI, GitAPI, McpAPI, TerminalAPI, AutomationAPI, FileAPI, AccountAPI, RemoteAPI, VoiceAPI {}
 
 // ---------------------------------------------------------------------------
 // Account usage types (5hr / 7-day rate windows)

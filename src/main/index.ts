@@ -1,7 +1,30 @@
 import { app, shell, BrowserWindow, ipcMain } from 'electron'
 import { join } from 'path'
 import { execFileSync } from 'child_process'
-import { electronApp, optimizer, is } from '@electron-toolkit/utils'
+
+// Inline @electron-toolkit/utils to avoid its top-level electron.app.isPackaged
+// access which fails when Node resolves require('electron') to node_modules/electron
+// (which exports a path string) instead of Electron's built-in module.
+const is = { dev: !app.isPackaged }
+const electronApp = {
+  setAppUserModelId(id: string): void {
+    if (process.platform === 'win32') app.setAppUserModelId(is.dev ? process.execPath : id)
+  }
+}
+const optimizer = {
+  watchWindowShortcuts(window: BrowserWindow): void {
+    window.webContents.on('before-input-event', (event, input) => {
+      if (input.type !== 'keyDown') return
+      if (!is.dev) {
+        if (input.code === 'KeyR' && (input.control || input.meta)) event.preventDefault()
+        if (input.code === 'KeyI' && (input.alt && input.meta || input.control && input.shift)) event.preventDefault()
+      } else if (input.code === 'F12') {
+        if (window.webContents.isDevToolsOpened()) window.webContents.closeDevTools()
+        else window.webContents.openDevTools({ mode: 'undocked' })
+      }
+    })
+  }
+}
 import { registerSessionIpc } from './ipc/session.ipc'
 import { registerTerminalIpc } from './ipc/terminal.ipc'
 import { registerAutomationIpc } from './ipc/automation.ipc'
@@ -80,9 +103,12 @@ function createWindow(): void {
   ipcMain.handle('remote:interfaces', () => {
     return getNetworkInterfaces()
   })
-  ipcMain.handle('remote:start', async (_e, opts?: { port?: number; host?: string; tunnel?: boolean }) => {
-    return await remoteServer.start(opts?.port ?? 0, opts?.host, { tunnel: opts?.tunnel })
-  })
+  ipcMain.handle(
+    'remote:start',
+    async (_e, opts?: { port?: number; host?: string; tunnel?: boolean }) => {
+      return await remoteServer.start(opts?.port ?? 0, opts?.host, { tunnel: opts?.tunnel })
+    }
+  )
   ipcMain.handle('remote:stop', () => {
     remoteServer.stop()
   })

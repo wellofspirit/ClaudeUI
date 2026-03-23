@@ -2,7 +2,8 @@ import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import { useSessionStore, useActiveSession } from '../stores/session-store'
 import type { AppSettings } from '../stores/session-store'
 import { PermissionsDialog } from './PermissionsDialog'
-import type { ClaudePermissions } from '../../../shared/types'
+import type { ClaudePermissions, VoiceLanguageCode } from '../../../shared/types'
+import { VOICE_LANGUAGES } from '../../../shared/types'
 
 // ── Shared setting control components ────────────────────────────────
 
@@ -694,6 +695,70 @@ const SECTIONS: Section[] = [
             onChange={(v) => u({ usageRefreshSecs: v })}
             formatValue={(v) => v >= 60 ? `${Math.floor(v / 60)}m${v % 60 ? ` ${v % 60}s` : ''}` : `${v}s`}
           />
+        )
+      }
+    ]
+  },
+  {
+    id: 'voice',
+    label: 'Voice Input',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z" />
+        <path d="M19 10v2a7 7 0 01-14 0v-2" />
+        <line x1="12" y1="19" x2="12" y2="23" />
+        <line x1="8" y1="23" x2="16" y2="23" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'voiceEnabled',
+        label: 'Enable voice input',
+        keywords: 'voice microphone speech dictation audio',
+        render: (s, u) => (
+          <div>
+            <SettingsToggle
+              label="Enable voice input"
+              checked={s.voiceEnabled}
+              onChange={(v) => u({ voiceEnabled: v })}
+              tooltip="Show a microphone button in the input box. Hold to record, release to transcribe."
+            />
+            <div className="text-[10px] text-text-muted/50 mt-0.5 pl-3">
+              Hold the mic button to dictate messages
+            </div>
+          </div>
+        )
+      },
+      {
+        key: 'voiceLanguage',
+        label: 'Voice language',
+        keywords: 'voice language speech locale',
+        render: (s, u) => (
+          <div className={s.voiceEnabled ? '' : 'opacity-40 pointer-events-none'}>
+            <div className="px-3 py-1.5 text-[13px] text-text-secondary">
+              <div className="mb-1">Language</div>
+              <select
+                value={s.voiceLanguage}
+                onChange={(e) => u({ voiceLanguage: e.target.value as VoiceLanguageCode })}
+                className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors cursor-pointer"
+              >
+                {VOICE_LANGUAGES.map((lang) => (
+                  <option key={lang.code} value={lang.code}>
+                    {lang.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
         )
       }
     ]

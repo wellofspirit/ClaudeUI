@@ -20,7 +20,8 @@ const patches = [
   resolve(__dirname, 'sandbox-network-fix/apply.mjs'),
   resolve(__dirname, 'background-task/apply.mjs'),
   resolve(__dirname, 'usage-relay/apply.mjs'),
-  resolve(__dirname, 'incomplete-session-resume-fix/apply.mjs')
+  resolve(__dirname, 'incomplete-session-resume-fix/apply.mjs'),
+  resolve(__dirname, 'voice-server/apply.mjs')
 ]
 
 for (const patch of patches) {
@@ -63,10 +64,11 @@ const checkers = [
   {
     name: 'esbuild',
     run: () =>
-      execFileSync(resolve(__dirname, '..', 'node_modules', '.bin', 'esbuild'), [
-        '--bundle=false',
-        cliPath
-      ], { stdio: 'pipe' })
+      execFileSync(
+        resolve(__dirname, '..', 'node_modules', '.bin', 'esbuild'),
+        ['--bundle=false', cliPath],
+        { stdio: 'pipe' }
+      )
   }
 ]
 

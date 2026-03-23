@@ -1,6 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
-import type { FileAttachment, StatusLineData } from '../../../../shared/types'
+import type { FileAttachment, StatusLineData, VoiceState as VoiceStateType } from '../../../../shared/types'
 import { v4 as uuid } from 'uuid'
 import { SlashCommandMenu } from './SlashCommandMenu'
 import { FileMentionMenu } from './FileMentionMenu'
@@ -214,6 +214,13 @@ export function InputBox(): React.JSX.Element {
   const setEffort = useSessionStore((s) => s.setEffort)
   const sandboxEnabled = useSessionStore((s) => s.settings.sandbox.enabled)
 
+  // Voice input
+  const voiceEnabled = useSessionStore((s) => s.settings.voiceEnabled)
+  const voiceLanguage = useSessionStore((s) => s.settings.voiceLanguage)
+  const voiceState = useActiveSession((s) => s.voiceState) as VoiceStateType
+  const voiceInterimTranscript = useActiveSession((s) => s.voiceInterimTranscript)
+  const clearVoiceTranscript = useSessionStore((s) => s.clearVoiceTranscript)
+
   useEffect(() => {
     window.api.getModels().then(setAvailableModels)
   }, [setAvailableModels])
@@ -261,6 +268,46 @@ export function InputBox(): React.JSX.Element {
     // User message is added by the server-relayed session:user-message event
     await window.api.sendPrompt(activeSessionId, prompt, attachments)
   }, [activeSessionId, sdkActive, markSdkActive])
+
+  /** Ensure an SDK session exists, creating one lazily if needed. */
+  const ensureSession = useCallback(async () => {
+    if (!activeSessionId) return
+    if (!sdkActive) {
+      const { sessions } = useSessionStore.getState()
+      const session = sessions[activeSessionId]
+      const isHistorical = session && session.messages.length > 0 && !session.sdkActive
+      const resumeId = isHistorical ? activeSessionId : undefined
+      await window.api.createSession(activeSessionId, session?.cwd || '', session?.effort ?? 'medium', resumeId, session?.permissionMode, session?.selectedModel)
+      markSdkActive(activeSessionId)
+    }
+  }, [activeSessionId, sdkActive, markSdkActive])
+
+  const handleVoiceStart = useCallback(async () => {
+    if (!activeSessionId || isDisabled || voiceState !== 'idle') return
+    try {
+      await ensureSession()
+      await window.api.voiceStartRecording(activeSessionId, voiceLanguage)
+    } catch (err) {
+      console.error('Voice start failed:', err)
+    }
+  }, [activeSessionId, isDisabled, voiceState, ensureSession, voiceLanguage])
+
+  const handleVoiceStop = useCallback(async () => {
+    if (!activeSessionId) return
+    await window.api.voiceStopRecording(activeSessionId)
+  }, [activeSessionId])
+
+  // When voice recording finishes and returns to idle, move any remaining
+  // interim transcript into the draft text (as a fallback in case final
+  // transcript didn't arrive, or as the primary path if only interims came)
+  useEffect(() => {
+    if (voiceInterimTranscript && voiceState === 'idle' && activeSessionId) {
+      const existing = text.trimEnd()
+      setText(existing ? existing + ' ' + voiceInterimTranscript : voiceInterimTranscript)
+      clearVoiceTranscript(activeSessionId)
+      textareaRef.current?.focus()
+    }
+  }, [voiceState, voiceInterimTranscript, activeSessionId, clearVoiceTranscript, text, setText])
 
   const handleSend = useCallback(async () => {
     const prompt = text.trim()
@@ -548,13 +595,17 @@ export function InputBox(): React.JSX.Element {
             onPaste={handlePaste}
             onMouseDown={() => { setModelOpen(false); setEffortOpen(false); setPlusOpen(false); }}
             placeholder={
-              !activeSessionId || !cwd
-                ? 'Select a folder to get started'
-                : focusedAgentId && teammates[focusedAgentId]
-                  ? `Message ${teammates[focusedAgentId].name}...`
-                  : isRunning
-                    ? 'Type to queue a message...'
-                    : 'Ask Claude anything, / for commands'
+              voiceState === 'recording' || voiceState === 'connecting'
+                ? voiceInterimTranscript || 'Listening...'
+                : voiceState === 'processing'
+                  ? 'Finishing transcription...'
+                  : !activeSessionId || !cwd
+                    ? 'Select a folder to get started'
+                    : focusedAgentId && teammates[focusedAgentId]
+                      ? `Message ${teammates[focusedAgentId].name}...`
+                      : isRunning
+                        ? 'Type to queue a message...'
+                        : 'Ask Claude anything, / for commands'
             }
             disabled={isDisabled}
             rows={2}
@@ -725,6 +776,34 @@ export function InputBox(): React.JSX.Element {
                     <circle cx="12" cy="12" r="2" />
                     <path d="M16.2 7.8c2.3 2.3 2.3 6.1 0 8.4" />
                     <path d="M19.1 4.9C23 8.8 23 15.1 19.1 19" />
+                  </svg>
+                </button>
+              )}
+              {voiceEnabled && (
+                <button
+                  onMouseDown={(e) => {
+                    e.preventDefault()
+                    handleVoiceStart()
+                  }}
+                  onMouseUp={handleVoiceStop}
+                  onMouseLeave={() => {
+                    if (voiceState === 'recording' || voiceState === 'connecting') handleVoiceStop()
+                  }}
+                  disabled={isDisabled || voiceState === 'processing'}
+                  title="Hold to record"
+                  className={`w-7 h-7 flex items-center justify-center rounded-lg transition-colors cursor-pointer disabled:cursor-default disabled:opacity-15 ${
+                    voiceState === 'recording' || voiceState === 'connecting'
+                      ? 'text-danger bg-danger/15 animate-pulse'
+                      : voiceState === 'processing'
+                        ? 'text-warning bg-warning/10'
+                        : 'text-text-muted hover:text-text-secondary hover:bg-bg-hover'
+                  }`}
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z" />
+                    <path d="M19 10v2a7 7 0 01-14 0v-2" />
+                    <line x1="12" y1="19" x2="12" y2="23" />
+                    <line x1="8" y1="23" x2="16" y2="23" />
                   </svg>
                 </button>
               )}
