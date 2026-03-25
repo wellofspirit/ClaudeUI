@@ -38,20 +38,46 @@ import icon from '../../resources/icon.png?asset'
 // Prevent "nested session" error when launched from a Claude Code terminal
 delete process.env.CLAUDECODE
 
-// macOS GUI apps don't inherit the shell PATH, so node/bun aren't found.
-// Use a non-interactive login shell to get the real PATH.
+// macOS GUI apps don't inherit login shell environment variables, so tools
+// like node/bun aren't found and user-defined vars from .zprofile are missing.
+// Spawn a login shell to capture the full environment.
 if (process.platform === 'darwin') {
   try {
-    const shell = process.env.SHELL || '/bin/zsh'
-    const result = execFileSync(shell, ['-lc', 'echo $PATH'], {
+    const loginShell = process.env.SHELL || '/bin/zsh'
+    // Use null-delimited output to handle values containing newlines
+    const raw = execFileSync(loginShell, ['-lc', 'env -0'], {
       encoding: 'utf-8',
-      timeout: 3000
-    }).trim()
-    if (result) process.env.PATH = result
+      timeout: 5000,
+      maxBuffer: 10 * 1024 * 1024
+    })
+    // Keys we must never import from the login shell:
+    // - DYLD_*: macOS SIP strips these from GUI apps for security. Re-injecting
+    //   them breaks Electron's dylib loading and can prevent the app from starting.
+    // - ELECTRON_RUN_AS_NODE, CLAUDECODE: managed by us at specific lifecycle points
+    // - _, SHLVL, PWD, OLDPWD: shell-session artifacts, not meaningful here
+    const skip = new Set(['_', 'SHLVL', 'PWD', 'OLDPWD', 'ELECTRON_RUN_AS_NODE', 'CLAUDECODE'])
+    for (const entry of raw.split('\0')) {
+      if (!entry) continue
+      const eq = entry.indexOf('=')
+      if (eq <= 0) continue
+      const key = entry.slice(0, eq)
+      if (skip.has(key) || key.startsWith('DYLD_')) continue
+      process.env[key] = entry.slice(eq + 1)
+    }
   } catch (err) {
-    logger.warn('main', 'Failed to read shell PATH, using fallback', err)
-    const extra = '/opt/homebrew/bin:/usr/local/bin:/usr/local/sbin'
-    process.env.PATH = `${extra}:${process.env.PATH ?? ''}`
+    logger.warn('main', 'Failed to read login shell env, falling back to PATH only', err)
+    // Fallback: at least fix PATH so node/bun are findable
+    try {
+      const loginShell = process.env.SHELL || '/bin/zsh'
+      const pathResult = execFileSync(loginShell, ['-lc', 'echo $PATH'], {
+        encoding: 'utf-8',
+        timeout: 3000
+      }).trim()
+      if (pathResult) process.env.PATH = pathResult
+    } catch {
+      const extra = '/opt/homebrew/bin:/usr/local/bin:/usr/local/sbin'
+      process.env.PATH = `${extra}:${process.env.PATH ?? ''}`
+    }
   }
 }
 
