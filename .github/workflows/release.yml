@@ -7,8 +7,10 @@ on:
       - '**.md'
       - 'docs/**'
       - '.vscode/**'
+      - '.claude/**'
       - '.prettierrc.yaml'
       - '.prettierignore'
+      - '.gitignore'
       - 'LICENSE'
 
 permissions:

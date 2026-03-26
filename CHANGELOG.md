@@ -4,6 +4,74 @@ All notable changes to ClaudeUI are documented in this file. Entries are grouped
 
 ---
 
+## 2026-03-26
+
+### feat: real-time rate limits from inference headers (`efaf77f`)
+- Added `rate-limit-relay` patch — the SDK's message adapter was silently dropping `rate_limit_event` messages (`case "rate_limit_event": return {type:"ignored"}`). The patch duplicates the message to stdout alongside the existing TUI queue enqueue, so it reaches the SDK consumer
+- `UsageFetcher.updateFromRateLimitEvent()` converts the SDK's `SDKRateLimitInfo` (status, utilization, resetsAt) into the existing `AccountUsage` shape and pushes to the renderer immediately — zero API calls
+- Reduced background `/api/oauth/usage` polling from every 2 minutes to every 30 minutes (supplementary data only: per-model 7-day breakdowns, extra_usage/overage info)
+- Added disk cache at `~/.claude/ui/usage-cache.json` — cold starts display cached data instantly, skip initial API call if cache is under 10 minutes old
+
+### feat: incremental JSONL analytics (`efaf77f`)
+- Block usage analytics now performs a full JSONL scan only on first load; subsequent updates only reparse files that actually changed (tracked by the `changedFiles` Set from `fs.watch`)
+- Extracted shared `rebuildFromEntries()` method — block grouping, projection, snapshot persistence, and history loading are shared between full and incremental paths
+- Increased recalculation debounce from 3s to 30s (configurable via new `analyticsRefreshSecs` setting)
+- Fixed block boundary jitter by flooring window start times to the hour — the API's `resets_at` has sub-minute precision that differs between instances, causing snapshots to flip between slightly different block IDs
+- Dev mode (`is.dev`) now skips block-usage snapshot writes to avoid corrupting production data when running both instances; override with `CLAUDE_UI_DEV_USAGE=1`
+
+### feat: configurable logging system (`efaf77f`)
+- Structured log filtering: global level floor + per-source overrides, merged on top of `CLAUDE_UI_LOG` env var
+- New Logging section in Settings dialog with log level dropdown (Debug / Info / Warn / Error) and per-source filter text input (e.g. `UsageFetcher,BlockUsage:debug`)
+- `logger.applyFilter()` accepts both global level and filter string; changes take effect immediately without restart
+- Exported `LogLevel` type from logger for use in IPC handlers
+
+---
+
+## 2026-03-25
+
+### fix: capture full login shell environment on macOS (`7615d43`)
+- Replaced the `$PATH`-only capture (`shell -lc 'echo $PATH'`) with a full environment capture using `env -0` (null-delimited output to handle values containing newlines)
+- Imports all env vars from the login shell except a blocklist: `DYLD_*` (macOS SIP strips these from GUI apps for security — re-injecting breaks Electron's dylib loading), `ELECTRON_RUN_AS_NODE`, `CLAUDECODE`, and shell artifacts (`_`, `SHLVL`, `PWD`, `OLDPWD`)
+- Fixes tools like `mise`, `pyenv`, `nvm` whose env vars (not just PATH) are needed for correct operation when the app is launched from Finder/Spotlight
+- Falls back to PATH-only capture if full env capture fails, then to hardcoded `/opt/homebrew/bin:/usr/local/bin` as last resort
+
+---
+
+## 2026-03-23
+
+### chore: upgrade @anthropic-ai/claude-agent-sdk to 0.2.81 (`b1d9b64`)
+- Bumped SDK from 0.2.76 to 0.2.81
+- Updated patch regex patterns for the new bundle: `incomplete-session-resume-fix`, `mcp-status`, `mcp-tool-refresh`, `queue-control`, `sandbox-network-fix`
+
+### feat: add syntax checking to patch runner (`8b76454`)
+- `patch/apply-all.mjs` now verifies the patched `cli.js` parses without syntax errors after all patches are applied
+- Tries `node --check`, then `bun build --no-bundle`, then `esbuild --bundle=false` — uses whichever tool is available
+- Catches the class of bugs where a missing semicolon or broken comma expression in injected code only manifests at runtime
+
+### feat: add voice input (`40e16f6`)
+- Added `voice-server` patch — exposes the CLI's built-in Deepgram Nova 3 transcription pipeline (via Anthropic's WebSocket proxy) through a localhost TCP server with newline-delimited JSON protocol
+- Created `VoiceClient` service — manages TCP connection lifecycle, streams base64-encoded PCM audio to the voice server, receives interim/final transcripts
+- Created `VoiceCapture` service — records microphone audio using the SDK's bundled native NAPI module (`anthropic_audio_napi.node`), forwards PCM chunks to VoiceClient
+- Added voice UI to InputBox: microphone button, recording indicator with pulsing animation, interim transcript overlay in the textarea
+- Settings: voice enable toggle and language selector (en, es, fr, de, ja, ko, zh, pt, it, nl, ru, pl, sv, da, no, fi)
+- IPC bridge: `voiceStartRecording`, `voiceStopRecording` handlers with per-session voice state tracking
+- SDK patch Part A: `voice_server_start` control request handler that starts the TCP server and returns the port
+- SDK patch Part B: `voiceServerStart()` method on the query object
+
+### fix: improve voice initialization and finalization (`e1962d0`)
+- Added lazy initialization trigger for the CLI's `bs1` audio module — the voice server now sends a brief silence packet on first connection to ensure the Deepgram WebSocket is fully established before real audio arrives
+- Improved `VoiceClient` finalization: sends `voice_stop` before closing the socket to ensure the server flushes the final transcript
+- Added `voice:finalized` IPC event so the renderer knows when the final transcript has been committed to the textarea
+- Logger now supports `debugSources` Set for always-on debug output from specific sources (Voice, VoiceClient, VoiceCapture)
+
+### feat: add push-to-talk Tab key support (`625f20d`)
+- Tab key starts voice recording on keydown, stops on keyup (push-to-talk) when voice is enabled and no autocomplete menu is open
+- Textarea value now shows interim transcript appended to draft text during recording/processing states
+- `handleKeyUp` handler added to InputBox for Tab release detection
+- File mention menu now shows "No matching files" placeholder when the filter returns empty results (previously the menu just disappeared)
+
+---
+
 ## 2026-03-18
 
 ### fix: remove external Node.js dependency, use Electron's bundled Node.js runtime (`8b3b1f3`)
