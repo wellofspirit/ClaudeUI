@@ -1,7 +1,7 @@
 import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
-import { ipcMain, dialog, BrowserWindow } from 'electron'
+import { app, ipcMain, dialog, BrowserWindow } from 'electron'
 import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk'
 import { PERSISTED_SESSIONS_DIR } from '../services/persisted-sessions-dir'
 import { SessionManager } from '../services/session-manager'
@@ -452,6 +452,19 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     if (typeof (settings as Record<string, unknown>).usageRefreshSecs === 'number') {
       usageFetcher.setIntervalSecs((settings as Record<string, unknown>).usageRefreshSecs as number)
     }
+    // Propagate analytics refresh interval change
+    if (typeof (settings as Record<string, unknown>).analyticsRefreshSecs === 'number') {
+      blockUsageService.setDebounceSecs((settings as Record<string, unknown>).analyticsRefreshSecs as number)
+    }
+    // Apply log level + filter changes immediately
+    {
+      const raw = settings as Record<string, unknown>
+      const level = typeof raw.logLevel === 'string' ? raw.logLevel : undefined
+      const filter = typeof raw.logFilter === 'string' ? raw.logFilter : undefined
+      if (level !== undefined || filter !== undefined) {
+        logger.applyFilter(filter ?? '', level as 'debug' | 'info' | 'warn' | 'error' | undefined)
+      }
+    }
     // Propagate session idle timeout change
     const timeoutMins = (settings as Record<string, unknown>).sessionTimeoutMins
     if (typeof timeoutMins === 'number') {
@@ -838,45 +851,61 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
   if (typeof savedSettings.sessionTimeoutMins === 'number') {
     manager.setSessionTimeout(savedSettings.sessionTimeoutMins * 60 * 1000)
   }
-
-  // In dev mode, skip auto-polling and service session (they spawn extra SDK
-  // subprocesses and hit the API), but still initialize block usage so the
-  // usage view works with local data.
-  const { is } = require('@electron-toolkit/utils')
-  if (!is.dev) {
-    // Account usage polling (5hr / 7-day rate limits)
-    usageFetcher.setWindow(win)
-    // Wire up SDK usage relay — tries active user sessions first, then
-    // the always-on service session as fallback.
-    usageFetcher.setSessionGetter(async () => {
-      // Try active user sessions first (they're already running)
-      const sessions: import('../services/claude-session').ClaudeSession[] = []
-      manager.forEach((s) => sessions.push(s))
-      for (const session of sessions) {
-        try {
-          const data = await session.getUsage()
-          if (data !== null) return data
-        } catch { /* try next session */ }
-      }
-      // Fall back to the service session (spawns lazily on first call)
-      return serviceSession.getUsage()
-    })
-    // Apply saved refresh interval before starting
-    if (typeof savedSettings.usageRefreshSecs === 'number') {
-      usageFetcher.setIntervalSecs(savedSettings.usageRefreshSecs)
+  // Apply saved log level + filter (merged with CLAUDE_UI_LOG env var)
+  {
+    const level = typeof savedSettings.logLevel === 'string' ? savedSettings.logLevel as 'debug' | 'info' | 'warn' | 'error' : undefined
+    const filter = typeof savedSettings.logFilter === 'string' ? savedSettings.logFilter : ''
+    if (level || filter) {
+      logger.applyFilter(filter, level)
     }
-    usageFetcher.startPolling()
-  } else {
-    logger.info('IPC', 'Dev mode — skipping usage fetcher auto-polling and service session')
+  }
+  // Apply saved analytics refresh interval
+  if (typeof savedSettings.analyticsRefreshSecs === 'number') {
+    blockUsageService.setDebounceSecs(savedSettings.analyticsRefreshSecs)
   }
 
-  // Block usage analytics — always initialize (reads local JSONL files, no API calls)
+  // Account usage polling (5hr / 7-day rate limits).
+  // Real-time updates come from SDK rate_limit_event messages (free, from
+  // inference headers). Background polling (every 30 min) fetches supplementary
+  // data (per-model breakdowns, extra_usage). Disk cache avoids API calls on
+  // every launch.
+  usageFetcher.setWindow(win)
+  // Wire up SDK usage relay — tries active user sessions first, then
+  // the always-on service session as fallback.
+  usageFetcher.setSessionGetter(async () => {
+    // Try active user sessions first (they're already running)
+    const sessions: import('../services/claude-session').ClaudeSession[] = []
+    manager.forEach((s) => sessions.push(s))
+    for (const session of sessions) {
+      try {
+        const data = await session.getUsage()
+        if (data !== null) return data
+      } catch { /* try next session */ }
+    }
+    // Fall back to the service session (spawns lazily on first call)
+    return serviceSession.getUsage()
+  })
+  // Apply saved refresh interval before starting
+  if (typeof savedSettings.usageRefreshSecs === 'number') {
+    usageFetcher.setIntervalSecs(savedSettings.usageRefreshSecs)
+  }
+  usageFetcher.startPolling()
+
+  // Block usage analytics — watches JSONL files for changes (no polling).
+  // Full scan on startup, then event-driven recalculation on file changes.
+  // Disabled in dev builds to avoid snapshot write conflicts with the prod
+  // instance. Set CLAUDE_UI_DEV_USAGE=1 to enable for testing.
+  const skipUsageInDev = !app.isPackaged && !process.env.CLAUDE_UI_DEV_USAGE
   blockUsageService.setWindow(win)
-  blockUsageService.recalculate().catch((err) => { logger.error('BlockUsage', 'Initial recalculation failed', err) })
+  if (!skipUsageInDev) {
+    blockUsageService.recalculate().catch((err) => { logger.error('BlockUsage', 'Initial recalculation failed', err) })
+    blockUsageService.startWatching()
+  } else {
+    logger.info('IPC', 'Dev mode — skipping block usage writes (set CLAUDE_UI_DEV_USAGE=1 to enable)')
+  }
 
   // IPC handlers — always registered so the renderer never gets "no handler" errors.
   ipcMain.handle('usage:fetch', async () => {
-    if (is.dev) return null // no live API data in dev mode
     return usageFetcher.fetch()
   })
 

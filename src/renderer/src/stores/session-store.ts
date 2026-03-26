@@ -123,12 +123,15 @@ export interface AppSettings {
   statusLineTemplate: string
   gitPanelLayout: 'single' | 'double'
   gitCommitMode: 'commit' | 'commit-push'
-  usageRefreshSecs: number
+  usageRefreshSecs: number   // how often to call the /usage API (background poll)
+  analyticsRefreshSecs: number // how often to recalculate token analytics from JSONL changes
   sessionTimeoutMins: number // 0 = never auto-disconnect
   remoteFollowActions: boolean // follow remote client's session switches & messages
   voiceEnabled: boolean
   voiceLanguage: VoiceLanguageCode
   sandbox: SandboxSettings
+  logLevel: 'debug' | 'info' | 'warn' | 'error' // global log level
+  logFilter: string // per-source overrides: "UsageFetcher:debug,BlockUsage:debug"
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -151,6 +154,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   gitPanelLayout: 'single',
   gitCommitMode: 'commit' as const,
   usageRefreshSecs: 120,
+  analyticsRefreshSecs: 30,
   sessionTimeoutMins: 15,
   voiceEnabled: false,
   voiceLanguage: 'en' as VoiceLanguageCode,
@@ -169,7 +173,9 @@ const DEFAULT_SETTINGS: AppSettings = {
     },
     filesystem: { allowWrite: [], denyWrite: [], denyRead: [] },
     excludedCommands: []
-  }
+  },
+  logLevel: 'warn',
+  logFilter: ''
 }
 
 export function applyTheme(theme: ThemeId): void {

@@ -12,6 +12,7 @@ import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
 import * as readline from 'readline'
+import { watch, type FSWatcher } from 'node:fs'
 import type { BrowserWindow } from 'electron'
 import type {
   TokenCounts,
@@ -36,6 +37,7 @@ const SCAN_WINDOW_MS = 7 * 24 * 60 * 60 * 1000 // only scan entries from last 7 
 const HISTORY_DAYS = 30 // how many days to show in daily chart
 const MS_PER_HOUR = 3600_000
 const MS_PER_MINUTE = 60_000
+const RECALC_DEBOUNCE_MS = 30_000 // 30 seconds — debounce after file change events
 
 // ---------------------------------------------------------------------------
 // Token-based cost calculation (per million tokens)
@@ -276,6 +278,21 @@ export class BlockUsageService {
   private previousBlockIds: Set<string> = new Set()
   private recalculating = false
   private backfillDone = false
+  /** Whether the initial full scan has completed. */
+  private initialScanDone = false
+  /** Cached merged entries from all JSONL files (populated after first full scan). */
+  private cachedEntries: ParsedEntry[] = []
+  /** Set of message IDs already in cachedEntries (for dedup). */
+  private cachedMessageIds: Set<string> = new Set()
+
+  /** File system watcher for the projects directory. */
+  private watcher: FSWatcher | null = null
+  /** Debounce timer for recalculation after file changes. */
+  private recalcDebounceTimer: ReturnType<typeof setTimeout> | null = null
+  /** Configurable debounce interval (ms) — set via settings. */
+  private recalcDebounceMs: number = RECALC_DEBOUNCE_MS
+  /** Set of file paths that changed since last recalculation. */
+  private changedFiles: Set<string> = new Set()
 
   /** Ring buffer of (tokens, apiPercent) samples for the current active block. */
   private projectionSamples: ProjectionSample[] = []
@@ -286,11 +303,196 @@ export class BlockUsageService {
     this.window = win
   }
 
+  /** Update the debounce interval for incremental recalculations. */
+  setDebounceSecs(secs: number): void {
+    this.recalcDebounceMs = Math.max(5, secs) * 1000
+    logger.debug('BlockUsage', `Debounce interval set to ${this.recalcDebounceMs}ms`)
+  }
+
   getData(): BlockUsageData | null {
     return this.lastData
   }
 
-  /** Main entry point — called after each usage-fetcher poll cycle. */
+  /**
+   * Start watching the JSONL projects directory for changes.
+   * Does a full scan on first call, then reacts to file change events.
+   * Safe to call multiple times.
+   */
+  startWatching(): void {
+    if (this.watcher) return
+
+    try {
+      // recursive: true watches all subdirectories — catches new session files
+      // and subagent files without needing to manage per-directory watchers.
+      this.watcher = watch(CLAUDE_PROJECTS_DIR, { recursive: true }, (_eventType, filename) => {
+        if (!filename || !filename.endsWith('.jsonl')) return
+        const fullPath = path.join(CLAUDE_PROJECTS_DIR, filename)
+        this.changedFiles.add(fullPath)
+        this.scheduleRecalc()
+      })
+      this.watcher.on('error', (err) => {
+        logger.debug('BlockUsage', `Watcher error: ${err}`)
+      })
+      logger.debug('BlockUsage', 'Started watching JSONL directory')
+    } catch (err) {
+      logger.debug('BlockUsage', `Failed to start watcher: ${err}`)
+    }
+  }
+
+  /** Stop watching. */
+  stopWatching(): void {
+    if (this.watcher) {
+      this.watcher.close()
+      this.watcher = null
+    }
+    if (this.recalcDebounceTimer) {
+      clearTimeout(this.recalcDebounceTimer)
+      this.recalcDebounceTimer = null
+    }
+  }
+
+  /** Schedule a debounced recalculation after file change events. */
+  private scheduleRecalc(): void {
+    if (this.recalcDebounceTimer) return // already scheduled
+    this.recalcDebounceTimer = setTimeout(() => {
+      this.recalcDebounceTimer = null
+      const filesToUpdate = new Set(this.changedFiles)
+      this.changedFiles.clear()
+      if (!this.initialScanDone) {
+        // First scan hasn't completed yet — skip incremental, it'll come
+        logger.debug('BlockUsage', `Watcher: ${filesToUpdate.size} file(s) changed, but initial scan pending — skipping`)
+        return
+      }
+      logger.debug('BlockUsage', `Watcher: ${filesToUpdate.size} file(s) changed, incremental update`)
+      this.incrementalUpdate(filesToUpdate).catch((err) => {
+        logger.debug('BlockUsage', `Watch-triggered incremental update failed: ${err}`)
+      })
+    }, this.recalcDebounceMs)
+  }
+
+  /**
+   * Incremental update — only reparse the files that changed, merge new entries
+   * into the cached entry list, then rebuild blocks and push to renderer.
+   * Much cheaper than a full recalculate: no directory walk, no stat of unchanged files.
+   */
+  private async incrementalUpdate(changedFiles: Set<string>): Promise<void> {
+    if (this.recalculating) return
+    this.recalculating = true
+
+    try {
+      const cutoff = Date.now() - SCAN_WINDOW_MS
+      let newEntryCount = 0
+
+      for (const filePath of changedFiles) {
+        let mtime: number
+        try {
+          mtime = fs.statSync(filePath).mtimeMs
+        } catch {
+          continue
+        }
+        if (mtime < cutoff) continue
+
+        // Reparse only this file
+        const entries = await this.parseJsonlFile(filePath, cutoff)
+        this.fileCache.set(filePath, { mtime, entries })
+
+        // Merge new (unseen) entries into the cache
+        for (const entry of entries) {
+          if (entry.timestamp < cutoff) continue
+          if (entry.messageId && this.cachedMessageIds.has(entry.messageId)) continue
+          if (entry.messageId) this.cachedMessageIds.add(entry.messageId)
+          this.cachedEntries.push(entry)
+          newEntryCount++
+        }
+      }
+
+      if (newEntryCount === 0) {
+        logger.debug('BlockUsage', 'Incremental update: no new entries')
+        return
+      }
+
+      logger.debug('BlockUsage', `Incremental update: ${newEntryCount} new entries from ${changedFiles.size} file(s)`)
+
+      // Re-sort (new entries appended at end, but may not be chronological)
+      this.cachedEntries.sort((a, b) => a.timestamp - b.timestamp)
+
+      // Prune entries older than scan window
+      const pruneIdx = this.cachedEntries.findIndex((e) => e.timestamp >= cutoff)
+      if (pruneIdx > 0) {
+        const pruned = this.cachedEntries.splice(0, pruneIdx)
+        for (const e of pruned) {
+          if (e.messageId) this.cachedMessageIds.delete(e.messageId)
+        }
+      }
+
+      // Rebuild blocks from the full cached entries and push update
+      await this.rebuildFromEntries(this.cachedEntries)
+    } catch (err) {
+      logger.error('BlockUsage', 'Incremental update failed', err)
+    } finally {
+      this.recalculating = false
+    }
+  }
+
+  /**
+   * Rebuild blocks, projections, snapshots from a set of entries and push to renderer.
+   * Shared between the full recalculate path (after first scan) and incremental updates.
+   */
+  private async rebuildFromEntries(entries: ParsedEntry[]): Promise<BlockUsageData> {
+    const blocks = this.groupIntoBlocks(entries)
+
+    // Detect newly completed blocks
+    const currentBlockIds = new Set(blocks.map((b) => b.id))
+    const newlyCompleted: UsageBlock[] = []
+    for (const b of blocks) {
+      if (!b.isActive && !this.previousBlockIds.has(b.id)) {
+        newlyCompleted.push(b)
+      }
+    }
+    this.previousBlockIds = currentBlockIds
+
+    // Build current + recent
+    const now = Date.now()
+    const currentBlock = blocks.find((b) => b.isActive) ?? null
+    const recentBlocks = blocks.filter(
+      (b) => !b.isActive && now - b.endTime < 48 * MS_PER_HOUR
+    )
+
+    // Compute projection for the active block
+    if (currentBlock) {
+      currentBlock.projectedUsage = this.updateProjection(currentBlock, now)
+    }
+
+    // Carry projections to newly completed blocks
+    if (newlyCompleted.length > 0) {
+      for (const b of newlyCompleted) {
+        if (b.id === this.projectionBlockId && this.projectionSamples.length > 0) {
+          b.projectedUsage = this.computeProjectionWLS(b)
+        }
+      }
+    }
+    this.backfillProjections(recentBlocks)
+
+    // Persist snapshot + completed blocks
+    const snapshot = this.buildSnapshot(currentBlock)
+    const todaySnapshots = await this.persistSnapshot(snapshot, newlyCompleted)
+
+    // Load history — pass entries for authoritative recent-day computation
+    const dailyHistory = await this.loadDailyHistory(HISTORY_DAYS, entries)
+
+    const data: BlockUsageData = {
+      currentBlock,
+      recentBlocks,
+      todaySnapshots,
+      dailyHistory
+    }
+
+    this.lastData = data
+    this.pushToRenderer(data)
+    return data
+  }
+
+  /** Main entry point — full scan on first call, incremental thereafter. */
   async recalculate(): Promise<BlockUsageData> {
     // Prevent concurrent recalculations
     if (this.recalculating) return this.lastData ?? this.emptyData()
@@ -298,52 +500,16 @@ export class BlockUsageService {
 
     try {
       const entries = await this.scanAllJsonl()
-      const blocks = this.groupIntoBlocks(entries)
 
-      // Detect newly completed blocks
-      const currentBlockIds = new Set(blocks.map((b) => b.id))
-      const newlyCompleted: UsageBlock[] = []
-      for (const b of blocks) {
-        if (!b.isActive && !this.previousBlockIds.has(b.id)) {
-          newlyCompleted.push(b)
-        }
+      // Populate the entry cache after the first full scan
+      if (!this.initialScanDone) {
+        this.cachedEntries = entries
+        this.cachedMessageIds = new Set(
+          entries.filter((e) => e.messageId).map((e) => e.messageId)
+        )
+        this.initialScanDone = true
+        logger.debug('BlockUsage', `Initial scan complete: ${entries.length} entries cached`)
       }
-      this.previousBlockIds = currentBlockIds
-
-      // Build current + recent
-      const now = Date.now()
-      const currentBlock = blocks.find((b) => b.isActive) ?? null
-      const recentBlocks = blocks.filter(
-        (b) => !b.isActive && now - b.endTime < 48 * MS_PER_HOUR
-      )
-
-      // Compute projection for the active block using regression
-      if (currentBlock) {
-        currentBlock.projectedUsage = this.updateProjection(currentBlock, now)
-      }
-
-      // Carry the last known projection to newly completed blocks.
-      // When a block was active, its projection was stored in the last snapshot
-      // via the projection sample buffer. Now that it's completed, transfer it.
-      // NOTE: We do NOT capture finalApiPercent here — by the time we detect
-      // completion (next poll cycle), the 5hr window has rotated and the current
-      // API % belongs to the NEW window. The correct finalApiPercent comes from
-      // the last snapshot persisted while the block was still active.
-      if (newlyCompleted.length > 0) {
-        for (const b of newlyCompleted) {
-          if (b.id === this.projectionBlockId && this.projectionSamples.length > 0) {
-            b.projectedUsage = this.computeProjectionWLS(b)
-          }
-        }
-      }
-      // Restore projectedUsage and finalApiPercent from persisted daily data.
-      // This is the primary source for finalApiPercent — it comes from the last
-      // snapshot recorded while each block was still active.
-      this.backfillProjections(recentBlocks)
-
-      // Persist snapshot + completed blocks
-      const snapshot = this.buildSnapshot(currentBlock)
-      const todaySnapshots = await this.persistSnapshot(snapshot, newlyCompleted)
 
       // On first run, backfill daily summaries for days beyond the 7-day scan
       // window. This is async and doesn't block the current recalculation.
@@ -354,21 +520,7 @@ export class BlockUsageService {
         )
       }
 
-      // Load 30-day history. Pass scanned entries so recent days are computed
-      // directly from deduplicated JSONL (authoritative), not from persisted
-      // completedBlocks which may contain overlapping re-grouped blocks.
-      const dailyHistory = await this.loadDailyHistory(HISTORY_DAYS, entries)
-
-      const data: BlockUsageData = {
-        currentBlock,
-        recentBlocks,
-        todaySnapshots,
-        dailyHistory
-      }
-
-      this.lastData = data
-      this.pushToRenderer(data)
-      return data
+      return await this.rebuildFromEntries(entries)
     } catch (err) {
       logger.error('BlockUsage', 'Recalculation failed', err)
       return this.lastData ?? this.emptyData()
@@ -819,11 +971,12 @@ export class BlockUsageService {
     if (apiResetAt) {
       const resetMs = new Date(apiResetAt).getTime()
       if (!isNaN(resetMs)) {
-        // Round to the nearest second to eliminate sub-second jitter in the
-        // API's resets_at value. Without this, each poll gets a slightly
-        // different millisecond, producing dozens of unique block IDs for
-        // the same 5-hour window — breaking snapshot-to-block matching.
-        const resetRounded = Math.round(resetMs / 1000) * 1000
+        // Round to the nearest HOUR. Block boundaries are always on exact
+        // hour marks (e.g. 15:00:00.000), but the API's resets_at can have
+        // jitter in minutes/seconds (e.g. 15:00:01.234 or 14:59:58.567).
+        // Without this, different poll cycles produce different block IDs
+        // for the same 5-hour window — breaking snapshot-to-block matching.
+        const resetRounded = Math.round(resetMs / MS_PER_HOUR) * MS_PER_HOUR
         apiWindowEnd = resetRounded
         apiWindowStart = resetRounded - SESSION_DURATION_MS
       }

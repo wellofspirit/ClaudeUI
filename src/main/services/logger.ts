@@ -59,8 +59,101 @@ function writeToFile(level: string, source: string, message: string, err?: unkno
   }
 }
 
-export const logger = {
+// ---------------------------------------------------------------------------
+// Log levels (lower = more verbose)
+// ---------------------------------------------------------------------------
+
+export type LogLevel = 'debug' | 'info' | 'warn' | 'error' | 'silent'
+
+const LEVEL_ORDER: Record<LogLevel, number> = {
+  debug: 0,
+  info: 1,
+  warn: 2,
+  error: 3,
+  silent: 4
+}
+
+/**
+ * Check whether a message at `msgLevel` should be emitted given the
+ * effective minimum level for this source.
+ */
+function shouldLog(source: string, msgLevel: LogLevel): boolean {
+  // Per-source override takes priority over the global default
+  const effective = logger.sourceLevels.get(source) ?? logger.globalLevel
+  return LEVEL_ORDER[msgLevel] >= LEVEL_ORDER[effective]
+}
+
+// ---------------------------------------------------------------------------
+// Initialise from environment
+//
+//   CLAUDE_UI_LOG=debug                 — set global level
+//   CLAUDE_UI_LOG=debug,UsageFetcher    — set global + one source
+//   CLAUDE_UI_LOG=info,BlockUsage:debug,UsageFetcher:debug
+//
+// Format: [globalLevel,] source:level [, source:level …]
+//
+// When only a bare word is given it's treated as a source at debug level
+// (e.g. "BlockUsage" → BlockUsage:debug) for quick toggling.
+// ---------------------------------------------------------------------------
+
+function parseFilter(raw: string): { global: LogLevel; sources: Map<string, LogLevel> } {
+  const defaultLevel: LogLevel = 'warn' // default: only warn and above
+  const sources = new Map<string, LogLevel>()
+
+  if (!raw) return { global: defaultLevel, sources }
+
+  const parts = raw.split(',').map((s) => s.trim()).filter(Boolean)
+  let resolvedGlobal: LogLevel = defaultLevel
+
+  for (const part of parts) {
+    if (part.includes(':')) {
+      const [src, lvl] = part.split(':', 2)
+      if (lvl in LEVEL_ORDER) sources.set(src, lvl as LogLevel)
+    } else if (part in LEVEL_ORDER) {
+      resolvedGlobal = part as LogLevel
+    } else {
+      // Bare word → treat as source:debug
+      sources.set(part, 'debug')
+    }
+  }
+
+  return { global: resolvedGlobal, sources }
+}
+
+// Merge env var and settings — env var takes precedence (always applied first,
+// settings are additive on top).
+const envConfig = parseFilter(process.env.CLAUDE_UI_LOG ?? '')
+
+// ---------------------------------------------------------------------------
+// Logger
+// ---------------------------------------------------------------------------
+
+export const logger: {
+  globalLevel: LogLevel
+  sourceLevels: Map<string, LogLevel>
+  error(source: string, message: string, err?: unknown): void
+  warn(source: string, message: string, err?: unknown): void
+  info(source: string, message: string): void
+  debug(source: string, message: string): void
+  applyFilter(filter: string, globalLevel?: LogLevel): void
+} = {
+  /**
+   * Global minimum log level.  Messages below this level are suppressed
+   * unless the source has a per-source override in `sourceLevels`.
+   * Default: 'warn' (only warn + error shown).
+   */
+  globalLevel: envConfig.global,
+
+  /**
+   * Per-source level overrides.  A source listed here is logged at (at least)
+   * the specified level, regardless of globalLevel.
+   *
+   * Example: `logger.sourceLevels.set('UsageFetcher', 'debug')`
+   */
+  sourceLevels: envConfig.sources,
+
   error(source: string, message: string, err?: unknown): void {
+    if (!shouldLog(source, 'error')) return
     if (err !== undefined) {
       console.error(`[${source}]`, message, err)
     } else {
@@ -70,6 +163,7 @@ export const logger = {
   },
 
   warn(source: string, message: string, err?: unknown): void {
+    if (!shouldLog(source, 'warn')) return
     if (err !== undefined) {
       console.warn(`[${source}]`, message, err)
     } else {
@@ -79,19 +173,53 @@ export const logger = {
   },
 
   info(source: string, message: string): void {
+    if (!shouldLog(source, 'info')) return
     console.log(`[${source}]`, message)
     // Info is console-only by default; uncomment to persist:
     // writeToFile('INFO', source, message)
   },
 
-  /** Debug-level logging — silent by default. Set `logger.debugEnabled = true` to activate. */
-  debugEnabled: false,
-  /** Sources that always get debug output regardless of debugEnabled */
-  debugSources: new Set<string>(['Voice', 'VoiceClient', 'VoiceCapture']),
   debug(source: string, message: string): void {
-    if (!logger.debugEnabled && !logger.debugSources.has(source)) return
+    if (!shouldLog(source, 'debug')) return
     const line = `[${timestamp()}] [DEBUG] [${source}] ${message}`
     console.log(line)
     writeToFile('DEBUG', source, message)
+  },
+
+  /**
+   * Apply a global level and per-source filter from the UI settings.
+   * Settings are merged on top of the env var config —
+   * env var entries are never removed, only supplemented.
+   *
+   * @param filter - Per-source overrides: "UsageFetcher,BlockUsage:debug"
+   * @param globalLevel - Explicit global level from the UI dropdown
+   */
+  applyFilter(filter: string, globalLevel?: LogLevel): void {
+    const settings = parseFilter(filter)
+
+    // Start from env config as the base
+    logger.globalLevel = envConfig.global
+    logger.sourceLevels = new Map(envConfig.sources)
+
+    // Apply explicit global level from the UI dropdown — use the most
+    // verbose of env var and UI setting
+    if (globalLevel && LEVEL_ORDER[globalLevel] < LEVEL_ORDER[logger.globalLevel]) {
+      logger.globalLevel = globalLevel
+    }
+
+    // Apply per-source overrides from the filter string
+    if (filter) {
+      // If the filter string also contains a bare level word, apply it too
+      if (LEVEL_ORDER[settings.global] < LEVEL_ORDER[logger.globalLevel]) {
+        logger.globalLevel = settings.global
+      }
+      // Merge per-source levels — most verbose wins
+      for (const [src, lvl] of settings.sources) {
+        const existing = logger.sourceLevels.get(src)
+        if (!existing || LEVEL_ORDER[lvl] < LEVEL_ORDER[existing]) {
+          logger.sourceLevels.set(src, lvl)
+        }
+      }
+    }
   }
 }

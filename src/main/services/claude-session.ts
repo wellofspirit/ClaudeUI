@@ -14,6 +14,7 @@ import { saveSlashCommands } from './ui-config'
 import { loadMcpServers, readDisabledMcpServers } from './claude-mcp'
 import { logger } from './logger'
 import { getContextWindowSize } from '../ipc/session.ipc'
+import { usageFetcher } from './usage-fetcher'
 
 /** In production, cli.js is unpacked from the asar — resolve its real path */
 export function getCliJsPath(): string | undefined {
@@ -716,6 +717,21 @@ export class ClaudeSession {
               logger.error('ClaudeSession', `Control response error: ${errText}`)
               this.send('session:error', `SDK control error: ${errText}`)
             }
+          }
+        } else if (type === 'rate_limit_event') {
+          // Real-time rate limit data from inference response headers —
+          // no extra API call needed, arrives after every inference response.
+          // The standard rate_limit_info only has utilization when status is
+          // "allowed_warning". The enriched header_utilization (from our
+          // rate-limit-relay patch) carries per-window utilization from the
+          // parsed response headers (hD4/pf8) — always present.
+          const info = msg.rate_limit_info as Record<string, unknown> | undefined
+          const headerUtil = msg.header_utilization as Record<string, { utilization: number; resets_at: number }> | undefined
+          logger.debug('ClaudeSession', `rate_limit_event: info=${JSON.stringify(info)}, header_util=${JSON.stringify(headerUtil)}`)
+          if (headerUtil) {
+            usageFetcher.updateFromHeaderUtilization(headerUtil)
+          } else if (info) {
+            usageFetcher.updateFromRateLimitEvent(info)
           }
         } else if (type === 'result') {
           const cost = (msg.total_cost_usd as number) || 0

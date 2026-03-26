@@ -23,6 +23,7 @@ const tests = [
   { name: 'mcp-tool-refresh', script: resolve(__dirname, 'mcp-tool-refresh/test.mjs') },
   { name: 'sandbox-network-fix', script: resolve(__dirname, 'sandbox-network-fix/test.mjs') },
   { name: 'usage-relay', script: resolve(__dirname, 'usage-relay/test.mjs') },
+  { name: 'rate-limit-relay', script: resolve(__dirname, 'rate-limit-relay/test.mjs') },
 ]
 
 console.log(`\nRunning ${tests.length} patch tests...\n`)

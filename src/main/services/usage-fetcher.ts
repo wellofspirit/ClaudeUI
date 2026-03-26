@@ -1,21 +1,29 @@
 /**
  * Fetches Claude account usage (5hr session / 7-day rate windows).
  *
- * Primary path: Direct HTTP call to GET /api/oauth/usage using the exact
- * same headers as Claude Code's internal CLI (User-Agent, anthropic-beta).
+ * Primary path (real-time): The SDK emits `rate_limit_event` messages after
+ * every inference call, containing utilization and reset data parsed from
+ * `anthropic-ratelimit-unified-*` response headers.  ClaudeSession forwards
+ * these via `updateFromRateLimitEvent()` — zero extra API calls.
+ *
+ * Secondary path (background poll every 30 min): Direct HTTP call to
+ * GET /api/oauth/usage for supplementary data not in the headers
+ * (per-model 7-day breakdowns, extra_usage/overage info).
  *
  * Fallback: SDK service session relay (getUsage control message) when the
  * direct call fails (e.g., no credentials, auth error).
+ *
+ * Disk cache (`~/.claude/ui/usage-cache.json`): Persists lastUsage so cold
+ * starts can display data immediately without an API call.
  */
 
-import { readFile, writeFile } from 'node:fs/promises'
+import { readFile, writeFile, mkdir } from 'node:fs/promises'
 import { execFile } from 'node:child_process'
 import { join } from 'node:path'
 import { homedir, platform } from 'node:os'
 import type { BrowserWindow } from 'electron'
 import { ClaudeSession } from './claude-session'
 import type { AccountUsage, ExtraUsage, RateWindow } from '../../shared/types'
-import { blockUsageService } from './block-usage'
 import { logger } from './logger'
 
 // ---------------------------------------------------------------------------
@@ -45,8 +53,12 @@ const IS_MACOS = platform() === 'darwin'
 const USAGE_API_URL = 'https://api.anthropic.com/api/oauth/usage'
 const TOKEN_REFRESH_URL = 'https://console.anthropic.com/v1/oauth/token'
 
-const DEFAULT_POLL_INTERVAL_MS = 2 * 60 * 1000 // 2 minutes
+const DEFAULT_POLL_INTERVAL_MS = 30 * 60 * 1000 // 30 minutes (supplementary data only)
 const FETCH_TIMEOUT_MS = 5_000 // same as CLI's k9q (5s)
+const CACHE_STALE_MS = 10 * 60 * 1000 // 10 minutes — skip API call on startup if cache is fresher
+const CACHE_WRITE_DEBOUNCE_MS = 30_000 // 30s — match block-usage recalc cadence
+const CACHE_DIR = join(homedir(), '.claude', 'ui')
+const CACHE_PATH = join(CACHE_DIR, 'usage-cache.json')
 
 /**
  * Construct the User-Agent header matching the CLI's jO() function.
@@ -86,6 +98,7 @@ export class UsageFetcher {
   private pollIntervalMs: number = DEFAULT_POLL_INTERVAL_MS
   private sessionGetter: SessionUsageGetter | null = null
   private userAgent = getCliUserAgent()
+  private cacheWriteTimer: ReturnType<typeof setTimeout> | null = null
 
   /** Attach the main BrowserWindow so we can push events to the renderer. */
   setWindow(win: BrowserWindow): void {
@@ -108,10 +121,25 @@ export class UsageFetcher {
     }
   }
 
-  /** Start background polling. Safe to call multiple times. */
+  /** Start background polling. Uses disk cache to avoid API calls on every launch. */
   startPolling(): void {
     if (this.pollTimer) return
-    this.fetch().catch((err) => { logger.warn('UsageFetcher', 'Initial fetch failed', err) })
+
+    // Try disk cache first — if fresh, push to renderer and skip the initial API fetch
+    this.loadCache().then((cached) => {
+      if (cached) {
+        this.lastUsage = cached
+        this.pushToRenderer(cached)
+        logger.debug('UsageFetcher', `Loaded cache (age ${Math.round((Date.now() - cached.fetchedAt) / 1000)}s)`)
+      } else {
+        // Cache stale or missing — fetch immediately
+        this.fetch().catch((err) => { logger.warn('UsageFetcher', 'Initial fetch failed', err) })
+      }
+    }).catch(() => {
+      // Cache read failed — fetch immediately
+      this.fetch().catch((err) => { logger.warn('UsageFetcher', 'Initial fetch failed', err) })
+    })
+
     this.pollTimer = setInterval(() => {
       this.fetch().catch((err) => { logger.warn('UsageFetcher', 'Poll fetch failed', err) })
     }, this.pollIntervalMs)
@@ -138,10 +166,7 @@ export class UsageFetcher {
     }
 
     this.pushToRenderer(this.lastUsage)
-
-    blockUsageService.recalculate().catch((err) => {
-      logger.error('BlockUsage', 'Recalculation failed', err)
-    })
+    this.scheduleCacheWrite()
 
     return this.lastUsage
   }
@@ -149,6 +174,156 @@ export class UsageFetcher {
   /** Get the last cached result (may be null). */
   getLastUsage(): AccountUsage | null {
     return this.lastUsage
+  }
+
+  // -------------------------------------------------------------------------
+  // Real-time rate limit updates from inference headers
+  // -------------------------------------------------------------------------
+
+  /**
+   * Merge rate limit data from an SDK `rate_limit_event` into lastUsage.
+   * Called by ClaudeSession when it receives a rate_limit_event message.
+   *
+   * The event's `utilization` is 0–1 fractional (from HTTP headers), while
+   * `AccountUsage.RateWindow.usedPercent` is 0–100, so we multiply by 100.
+   * `resetsAt` is epoch seconds — convert to ISO string for consistency
+   * with the `/api/oauth/usage` API response format.
+   */
+  updateFromRateLimitEvent(info: Record<string, unknown>): void {
+    const utilization = info.utilization as number | undefined
+    const rateLimitType = info.rateLimitType as string | undefined
+    const resetsAt = info.resetsAt as number | undefined
+
+    // Skip events without utilization data (e.g. status-only events)
+    if (typeof utilization !== 'number') return
+
+    const window: RateWindow = {
+      usedPercent: utilization * 100,
+      resetsAt: typeof resetsAt === 'number'
+        ? new Date(resetsAt * 1000).toISOString()
+        : null
+    }
+
+    // Map rateLimitType to the AccountUsage field
+    const fieldMap: Record<string, keyof AccountUsage> = {
+      five_hour: 'fiveHour',
+      seven_day: 'sevenDay',
+      seven_day_sonnet: 'sevenDaySonnet',
+      seven_day_opus: 'sevenDayOpus'
+    }
+
+    const field = rateLimitType ? fieldMap[rateLimitType] : undefined
+    if (!field) {
+      logger.debug('UsageFetcher', `rate_limit_event: unknown rateLimitType=${rateLimitType}`)
+      return
+    }
+
+    logger.debug(
+      'UsageFetcher',
+      `rate_limit_event: ${rateLimitType} → ${window.usedPercent.toFixed(1)}% (resets ${window.resetsAt ?? 'unknown'})`
+    )
+
+    // Build updated usage, preserving other windows from the last full API response
+    const base = this.lastUsage ?? this.defaultUsage()
+    this.lastUsage = {
+      ...base,
+      [field]: window,
+      fetchedAt: Date.now(),
+      error: null
+    }
+
+    this.pushToRenderer(this.lastUsage)
+    this.scheduleCacheWrite()
+  }
+
+  /**
+   * Update from the enriched header_utilization field (from our rate-limit-relay
+   * patch). This carries per-window utilization from the parsed response headers
+   * (hD4/pf8) — always present, unlike rate_limit_info.utilization which is
+   * only set when status is "allowed_warning".
+   *
+   * Shape: { five_hour?: { utilization: number, resets_at: number }, seven_day?: { ... } }
+   */
+  updateFromHeaderUtilization(headerUtil: Record<string, { utilization: number; resets_at: number }>): void {
+    const base = this.lastUsage ?? this.defaultUsage()
+    let updated = false
+
+    const windowMap: Record<string, keyof AccountUsage> = {
+      five_hour: 'fiveHour',
+      seven_day: 'sevenDay'
+    }
+
+    for (const [key, field] of Object.entries(windowMap)) {
+      const data = headerUtil[key]
+      if (!data || typeof data.utilization !== 'number') continue
+
+      const window: RateWindow = {
+        usedPercent: data.utilization * 100,
+        resetsAt: typeof data.resets_at === 'number'
+          ? new Date(data.resets_at * 1000).toISOString()
+          : null
+      }
+
+      ;(base as unknown as Record<string, unknown>)[field] = window
+      updated = true
+
+      logger.debug(
+        'UsageFetcher',
+        `header_utilization: ${key} → ${window.usedPercent.toFixed(1)}% (resets ${window.resetsAt ?? 'unknown'})`
+      )
+    }
+
+    if (!updated) return
+
+    this.lastUsage = {
+      ...base,
+      fetchedAt: Date.now(),
+      error: null
+    }
+
+    this.pushToRenderer(this.lastUsage)
+    this.scheduleCacheWrite()
+  }
+
+  // -------------------------------------------------------------------------
+  // Disk cache
+  // -------------------------------------------------------------------------
+
+  /** Load cached usage from disk. Returns null if missing or stale. */
+  async loadCache(): Promise<AccountUsage | null> {
+    try {
+      const raw = await readFile(CACHE_PATH, 'utf-8')
+      const data = JSON.parse(raw) as AccountUsage
+      if (!data.fetchedAt || Date.now() - data.fetchedAt > CACHE_STALE_MS) return null
+      return data
+    } catch {
+      return null
+    }
+  }
+
+  /** Debounced write of lastUsage to disk. */
+  private scheduleCacheWrite(): void {
+    if (this.cacheWriteTimer) clearTimeout(this.cacheWriteTimer)
+    this.cacheWriteTimer = setTimeout(() => {
+      this.cacheWriteTimer = null
+      if (!this.lastUsage) return
+      mkdir(CACHE_DIR, { recursive: true })
+        .then(() => writeFile(CACHE_PATH, JSON.stringify(this.lastUsage), 'utf-8'))
+        .catch((err) => { logger.debug('UsageFetcher', `Cache write failed: ${err}`) })
+    }, CACHE_WRITE_DEBOUNCE_MS)
+  }
+
+  private defaultUsage(): AccountUsage {
+    return {
+      fiveHour: { usedPercent: 0, resetsAt: null },
+      sevenDay: null,
+      sevenDaySonnet: null,
+      sevenDayOpus: null,
+      extraUsage: null,
+      planName: null,
+      fetchedAt: Date.now(),
+      error: null
+    }
   }
 
   // -------------------------------------------------------------------------

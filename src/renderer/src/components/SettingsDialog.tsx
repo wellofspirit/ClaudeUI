@@ -683,18 +683,109 @@ const SECTIONS: Section[] = [
     items: [
       {
         key: 'usageRefreshSecs',
-        label: 'Usage refresh interval',
-        keywords: 'polling rate limit 5hr refresh update frequency',
+        label: 'API polling interval',
+        keywords: 'polling rate limit 5hr refresh update frequency api',
         render: (s, u) => (
-          <SettingsSlider
-            label="Refresh interval"
-            value={s.usageRefreshSecs}
-            min={30}
-            max={600}
-            step={30}
-            onChange={(v) => u({ usageRefreshSecs: v })}
-            formatValue={(v) => v >= 60 ? `${Math.floor(v / 60)}m${v % 60 ? ` ${v % 60}s` : ''}` : `${v}s`}
+          <div>
+            <SettingsSlider
+              label="API polling interval"
+              value={s.usageRefreshSecs}
+              min={60}
+              max={3600}
+              step={60}
+              onChange={(v) => u({ usageRefreshSecs: v })}
+              formatValue={(v) => v >= 60 ? `${Math.floor(v / 60)}m${v % 60 ? ` ${v % 60}s` : ''}` : `${v}s`}
+            />
+            <div className="text-[10px] text-text-muted/50 mt-0.5 pl-3">
+              How often to call the usage API for detailed plan data. Rate limits update in real-time from inference headers.
+            </div>
+          </div>
+        )
+      },
+      {
+        key: 'analyticsRefreshSecs',
+        label: 'Analytics refresh interval',
+        keywords: 'analytics token recalculate jsonl refresh block usage',
+        render: (s, u) => (
+          <div>
+            <SettingsSlider
+              label="Analytics refresh interval"
+              value={s.analyticsRefreshSecs}
+              min={10}
+              max={120}
+              step={5}
+              onChange={(v) => u({ analyticsRefreshSecs: v })}
+              formatValue={(v) => `${v}s`}
+            />
+            <div className="text-[10px] text-text-muted/50 mt-0.5 pl-3">
+              How often to recalculate token analytics from session transcripts.
+            </div>
+          </div>
+        )
+      }
+    ]
+  },
+  {
+    id: 'logging',
+    label: 'Logging',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" />
+        <polyline points="14 2 14 8 20 8" />
+        <line x1="16" y1="13" x2="8" y2="13" />
+        <line x1="16" y1="17" x2="8" y2="17" />
+        <polyline points="10 9 9 9 8 9" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'logLevel',
+        label: 'Log level',
+        keywords: 'debug info warn error log level verbosity',
+        render: (s, u) => (
+          <SettingsSelect
+            label="Log level"
+            value={s.logLevel}
+            options={[
+              { value: 'debug' as const, label: 'Debug' },
+              { value: 'info' as const, label: 'Info' },
+              { value: 'warn' as const, label: 'Warn' },
+              { value: 'error' as const, label: 'Error' }
+            ]}
+            onChange={(v) => u({ logLevel: v })}
           />
+        )
+      },
+      {
+        key: 'logFilter',
+        label: 'Source filter',
+        keywords: 'debug log filter sources verbose',
+        render: (s, u) => (
+          <div className="px-3 py-1.5">
+            <div className="text-[13px] text-text-secondary mb-1.5">Per-source overrides</div>
+            <input
+              type="text"
+              value={s.logFilter}
+              onChange={(e) => u({ logFilter: e.target.value })}
+              className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[12px] font-mono text-text-secondary outline-none focus:border-accent/50 transition-colors"
+              placeholder="UsageFetcher,BlockUsage:debug"
+              spellCheck={false}
+            />
+            <div className="text-[10px] text-text-muted/60 mt-1.5 space-y-0.5">
+              <div>Comma-separated. Bare names enable debug for that source.</div>
+              <div>Use <span className="font-mono">source:level</span> for explicit levels.</div>
+              <div>Logs are written to <span className="font-mono">~/.claude/ui/logs/</span></div>
+            </div>
+          </div>
         )
       }
     ]
