@@ -3,7 +3,7 @@ import type { ContentBlock, PendingApproval } from '../../../../shared/types'
 import { isAgentTool } from '../../../../shared/types'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
 import { CodeView } from './CodeView'
-import { DiffViewer } from './DiffViewer'
+import { DiffViewer } from '../../lib/diff'
 import { TerminalView } from './TerminalView'
 import { MarkdownRenderer } from './MarkdownRenderer'
 import { AlwaysAllowSection } from './PermissionSuggestions'
@@ -422,7 +422,7 @@ function ToolResult({ block, result }: { block: ToolUseBlock; result: ToolResult
     return <WriteResult content={content} filePath={filePath} />
   }
 
-  // Edit tool: show diff with @git-diff-view
+  // Edit tool: show diff
   if (toolName === 'Edit' && block.toolInput?.old_string != null && block.toolInput?.new_string != null) {
     return (
       <div className="overflow-y-auto">

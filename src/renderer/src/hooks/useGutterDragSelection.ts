@@ -13,16 +13,17 @@ const HIGHLIGHT_CLASS = 'diff-gutter-selected'
 
 /**
  * Extracts line number and side from a gutter-area DOM element.
- * Works for both unified and split diff views.
+ * Works with the custom diff viewer's div-based rows.
  *
+ * Gutter cells have data-line-old-num or data-line-new-num attributes.
  * If the click lands on an empty gutter slot (e.g. blank old-side on a pure
- * addition), falls back to whichever sibling span has a number.
+ * addition), falls back to whichever sibling has a number.
  */
 function getLineInfo(target: HTMLElement): { lineNumber: number; side: 'old' | 'new' } | null {
   let el: HTMLElement | null = target
 
   while (el) {
-    // Unified view: span[data-line-old-num] or span[data-line-new-num]
+    // Custom diff viewer: div[data-line-old-num] or div[data-line-new-num]
     if (el.dataset.lineOldNum) {
       return { lineNumber: parseInt(el.dataset.lineOldNum, 10), side: 'old' }
     }
@@ -30,33 +31,21 @@ function getLineInfo(target: HTMLElement): { lineNumber: number; side: 'old' | '
       return { lineNumber: parseInt(el.dataset.lineNewNum, 10), side: 'new' }
     }
 
-    // Split view: span[data-line-num] inside td.diff-line-old-num or td.diff-line-new-num
-    if (el.dataset.lineNum) {
-      const td = el.closest('td')
-      if (td?.classList.contains('diff-line-old-num')) {
-        return { lineNumber: parseInt(el.dataset.lineNum, 10), side: 'old' }
-      }
-      if (td?.classList.contains('diff-line-new-num')) {
-        return { lineNumber: parseInt(el.dataset.lineNum, 10), side: 'new' }
-      }
-    }
-
-    // Don't walk beyond the table row
-    if (el.tagName === 'TR') break
+    // Don't walk beyond the row
+    if (el.getAttribute('role') === 'row') break
     el = el.parentElement
   }
 
-  // Fallback: clicked on an empty gutter slot in unified view.
-  // Search the parent <td> for any sibling span with a line number.
-  const td = target.closest('td')
-  if (td?.classList.contains('diff-line-num')) {
-    const oldSpan = td.querySelector<HTMLElement>('[data-line-old-num]')
-    if (oldSpan?.dataset.lineOldNum) {
-      return { lineNumber: parseInt(oldSpan.dataset.lineOldNum, 10), side: 'old' }
+  // Fallback: clicked on an empty gutter slot — search siblings
+  const row = target.closest('[role="row"]')
+  if (row) {
+    const oldGutter = row.querySelector<HTMLElement>('[data-line-old-num]')
+    if (oldGutter?.dataset.lineOldNum) {
+      return { lineNumber: parseInt(oldGutter.dataset.lineOldNum, 10), side: 'old' }
     }
-    const newSpan = td.querySelector<HTMLElement>('[data-line-new-num]')
-    if (newSpan?.dataset.lineNewNum) {
-      return { lineNumber: parseInt(newSpan.dataset.lineNewNum, 10), side: 'new' }
+    const newGutter = row.querySelector<HTMLElement>('[data-line-new-num]')
+    if (newGutter?.dataset.lineNewNum) {
+      return { lineNumber: parseInt(newGutter.dataset.lineNewNum, 10), side: 'new' }
     }
   }
 
@@ -64,7 +53,7 @@ function getLineInfo(target: HTMLElement): { lineNumber: number; side: 'old' | '
 }
 
 /**
- * Extracts line number and side from any element within a <tr> row.
+ * Extracts line number and side from any element within a row.
  * Used during mousemove so dragging over the code content area (not just
  * the gutter) still extends the selection.
  *
@@ -72,28 +61,18 @@ function getLineInfo(target: HTMLElement): { lineNumber: number; side: 'old' | '
  * the opposite side's line number.
  */
 function getLineInfoFromRow(target: HTMLElement, side: 'old' | 'new'): { lineNumber: number } | null {
-  const row = target.closest('tr')
+  const row = target.closest('[role="row"]')
   if (!row) return null
 
   if (side === 'old') {
-    // Unified: span[data-line-old-num]
-    const span = row.querySelector<HTMLElement>('[data-line-old-num]')
-    if (span?.dataset.lineOldNum) {
-      return { lineNumber: parseInt(span.dataset.lineOldNum, 10) }
-    }
-    // Split: td.diff-line-old-num span[data-line-num]
-    const splitSpan = row.querySelector<HTMLElement>('td.diff-line-old-num [data-line-num]')
-    if (splitSpan?.dataset.lineNum) {
-      return { lineNumber: parseInt(splitSpan.dataset.lineNum, 10) }
+    const el = row.querySelector<HTMLElement>('[data-line-old-num]')
+    if (el?.dataset.lineOldNum) {
+      return { lineNumber: parseInt(el.dataset.lineOldNum, 10) }
     }
   } else {
-    const span = row.querySelector<HTMLElement>('[data-line-new-num]')
-    if (span?.dataset.lineNewNum) {
-      return { lineNumber: parseInt(span.dataset.lineNewNum, 10) }
-    }
-    const splitSpan = row.querySelector<HTMLElement>('td.diff-line-new-num [data-line-num]')
-    if (splitSpan?.dataset.lineNum) {
-      return { lineNumber: parseInt(splitSpan.dataset.lineNum, 10) }
+    const el = row.querySelector<HTMLElement>('[data-line-new-num]')
+    if (el?.dataset.lineNewNum) {
+      return { lineNumber: parseInt(el.dataset.lineNewNum, 10) }
     }
   }
 
@@ -101,7 +80,7 @@ function getLineInfoFromRow(target: HTMLElement, side: 'old' | 'new'): { lineNum
 }
 
 /**
- * Finds all <tr> rows in the container that contain a line number
+ * Finds all rows in the container that contain a line number
  * in the given range and side, and toggles a highlight class.
  */
 function highlightRange(
@@ -118,23 +97,16 @@ function highlightRange(
   const lo = Math.min(startLine, endLine)
   const hi = Math.max(startLine, endLine)
 
-  const attrSelectors = side === 'old'
-    ? ['[data-line-old-num]', 'td.diff-line-old-num [data-line-num]']
-    : ['[data-line-new-num]', 'td.diff-line-new-num [data-line-num]']
-
-  for (const selector of attrSelectors) {
-    container.querySelectorAll(selector).forEach((span) => {
-      const attr = (span as HTMLElement).dataset.lineOldNum
-        ?? (span as HTMLElement).dataset.lineNewNum
-        ?? (span as HTMLElement).dataset.lineNum
-      if (!attr) return
-      const num = parseInt(attr, 10)
-      if (num >= lo && num <= hi) {
-        const row = span.closest('tr')
-        if (row) row.classList.add(HIGHLIGHT_CLASS)
-      }
-    })
-  }
+  const attr = side === 'old' ? 'data-line-old-num' : 'data-line-new-num'
+  container.querySelectorAll(`[${attr}]`).forEach((el) => {
+    const val = (el as HTMLElement).dataset[side === 'old' ? 'lineOldNum' : 'lineNewNum']
+    if (!val) return
+    const num = parseInt(val, 10)
+    if (num >= lo && num <= hi) {
+      const row = el.closest('[role="row"]')
+      if (row) row.classList.add(HIGHLIGHT_CLASS)
+    }
+  })
 }
 
 /**
@@ -150,28 +122,20 @@ function extractLineContent(
   const hi = Math.max(startLine, endLine)
   const lines: string[] = []
 
-  const attrSelectors = side === 'old'
-    ? ['[data-line-old-num]', 'td.diff-line-old-num [data-line-num]']
-    : ['[data-line-new-num]', 'td.diff-line-new-num [data-line-num]']
-
-  for (const selector of attrSelectors) {
-    container.querySelectorAll(selector).forEach((span) => {
-      const attr = (span as HTMLElement).dataset.lineOldNum
-        ?? (span as HTMLElement).dataset.lineNewNum
-        ?? (span as HTMLElement).dataset.lineNum
-      if (!attr) return
-      const num = parseInt(attr, 10)
-      if (num >= lo && num <= hi) {
-        const row = span.closest('tr')
-        if (!row) return
-        const contentCell = row.querySelector('td.diff-line-content-raw')
-          ?? row.querySelector('td:last-child')
-        if (contentCell) {
-          lines.push(contentCell.textContent?.trimEnd() ?? '')
-        }
+  const attr = side === 'old' ? 'data-line-old-num' : 'data-line-new-num'
+  container.querySelectorAll(`[${attr}]`).forEach((el) => {
+    const val = (el as HTMLElement).dataset[side === 'old' ? 'lineOldNum' : 'lineNewNum']
+    if (!val) return
+    const num = parseInt(val, 10)
+    if (num >= lo && num <= hi) {
+      const row = el.closest('[role="row"]')
+      if (!row) return
+      const contentCell = row.querySelector('.diff-content')
+      if (contentCell) {
+        lines.push(contentCell.textContent?.trimEnd() ?? '')
       }
-    })
-  }
+    }
+  })
 
   return lines.join('\n')
 }
@@ -208,13 +172,9 @@ export function useGutterDragSelection(
     const handleMouseDown = (e: MouseEvent) => {
       const target = e.target as HTMLElement
 
-      // Only intercept clicks on gutter cells
-      const td = target.closest('td')
-      if (!td) return
-      const isGutter = td.classList.contains('diff-line-num')
-        || td.classList.contains('diff-line-old-num')
-        || td.classList.contains('diff-line-new-num')
-      if (!isGutter) return
+      // Only intercept clicks on gutter cells (elements with diff-gutter class)
+      const gutter = target.closest('.diff-gutter')
+      if (!gutter) return
 
       const info = getLineInfo(target)
       if (!info) return

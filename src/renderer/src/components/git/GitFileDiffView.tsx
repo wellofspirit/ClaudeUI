@@ -1,13 +1,22 @@
 import { useEffect, useCallback, useMemo, useRef, useState } from 'react'
 import { useActiveSession, useSessionStore } from '../../stores/session-store'
-import { DiffViewer, type ActiveCommentInput, type ExtendLineData } from '../chat/DiffViewer'
+import { DiffViewer, type DiffLine } from '../../lib/diff'
 import { DiffCommentWidget } from './DiffCommentWidget'
 import { DiffCommentBadge } from './DiffCommentBadge'
 import { ReviewBar } from './ReviewBar'
 import { useGutterDragSelection, type GutterSelection } from '../../hooks/useGutterDragSelection'
 import type { DiffComment } from '../../../../shared/types'
-import type { DiffFile } from '@git-diff-view/core'
-import { SplitSide } from '@git-diff-view/react'
+
+/** Active inline input state from gutter drag */
+interface ActiveCommentInput {
+  lineNumber: number
+  side: 'old' | 'new'
+  startLine: number
+  endLine: number
+  lineContent: string
+  /** Pre-filled text when editing an existing comment */
+  editText?: string
+}
 
 export function GitFileDiffView(): React.JSX.Element {
   const cwd = useActiveSession((s) => s.cwd)
@@ -21,23 +30,16 @@ export function GitFileDiffView(): React.JSX.Element {
   const removeDiffComment = useSessionStore((s) => s.removeDiffComment)
   const diffIgnoreWhitespace = useSessionStore((s) => s.settings.diffIgnoreWhitespace)
   const diffWrapLines = useSessionStore((s) => s.settings.diffWrapLines)
+  const diffViewSplit = useSessionStore((s) => s.settings.diffViewSplit)
   const updateSettings = useSessionStore((s) => s.updateSettings)
 
-  // Active inline input from gutter drag — rendered via extendData at the end line
+  // Active inline input from gutter drag
   const [activeInput, setActiveInput] = useState<ActiveCommentInput | null>(null)
 
   // Comments for the currently selected file only
   const fileComments = useMemo(
     () => gitReviewComments.filter((c) => c.filePath === gitSelectedFile),
     [gitReviewComments, gitSelectedFile]
-  )
-
-  // Key to force DiffView remount when extendData changes. The library's internal
-  // reactivity store doesn't pick up extendData prop changes, so we derive a key
-  // from both saved comment IDs and active input state.
-  const extendDataKey = useMemo(
-    () => fileComments.map((c) => c.id).join(',') + (activeInput ? `|${activeInput.lineNumber}` : ''),
-    [fileComments, activeInput]
   )
 
   // Gutter drag selection → open inline input at the end line
@@ -102,51 +104,21 @@ export function GitFileDiffView(): React.JSX.Element {
     }).catch(() => {})
   }, [cwd, gitSelectedFile, activeSessionId, gitStatus, gitFileDiff?.patch])
 
-  // Highlight rows that have comments or an active input selection.
-  // Runs after DiffViewer (re)mounts (keyed by extendDataKey), with a short
-  // delay so the library has time to render the table rows.
-  useEffect(() => {
-    const container = containerNodeRef.current
-    if (!container) return
-
-    const timer = setTimeout(() => {
-      // Clear previous highlights
-      container.querySelectorAll('.diff-comment-highlight').forEach((el) => {
-        el.classList.remove('diff-comment-highlight')
-      })
-
-      // Collect all line ranges to highlight
-      const ranges: Array<{ start: number; end: number; side: 'old' | 'new' }> = []
-      for (const c of fileComments) {
-        ranges.push({ start: c.lineNumber, end: c.endLineNumber, side: c.side })
+  // Build highlighted lines set from comments + active input
+  const highlightedLines = useMemo(() => {
+    const set = new Set<string>()
+    for (const c of fileComments) {
+      for (let i = c.lineNumber; i <= c.endLineNumber; i++) {
+        set.add(`${c.side}:${i}`)
       }
-      if (activeInput) {
-        ranges.push({ start: activeInput.startLine, end: activeInput.endLine, side: activeInput.side })
+    }
+    if (activeInput) {
+      for (let i = activeInput.startLine; i <= activeInput.endLine; i++) {
+        set.add(`${activeInput.side}:${i}`)
       }
-
-      for (const range of ranges) {
-        const selectors = range.side === 'old'
-          ? ['[data-line-old-num]', 'td.diff-line-old-num [data-line-num]']
-          : ['[data-line-new-num]', 'td.diff-line-new-num [data-line-num]']
-
-        for (const selector of selectors) {
-          container.querySelectorAll(selector).forEach((span) => {
-            const attr = (span as HTMLElement).dataset.lineOldNum
-              ?? (span as HTMLElement).dataset.lineNewNum
-              ?? (span as HTMLElement).dataset.lineNum
-            if (!attr) return
-            const num = parseInt(attr, 10)
-            if (num >= range.start && num <= range.end) {
-              const row = span.closest('tr')
-              if (row) row.classList.add('diff-comment-highlight')
-            }
-          })
-        }
-      }
-    }, 50)
-
-    return () => clearTimeout(timer)
-  }, [extendDataKey, fileComments, activeInput])
+    }
+    return set.size > 0 ? set : undefined
+  }, [fileComments, activeInput])
 
   const handleAddComment = useCallback((comment: DiffComment) => {
     if (activeSessionId) addDiffComment(activeSessionId, comment)
@@ -156,44 +128,48 @@ export function GitFileDiffView(): React.JSX.Element {
     if (activeSessionId) removeDiffComment(activeSessionId, commentId)
   }, [activeSessionId, removeDiffComment])
 
-  // Library's "+" button widget — single line only
-  const renderCommentWidget = useCallback(({ lineNumber, side, diffFile, onClose }: {
-    lineNumber: number
-    side: SplitSide
-    diffFile: DiffFile
-    onClose: () => void
-  }) => (
-    <DiffCommentWidget
-      lineNumber={lineNumber}
-      side={side}
-      diffFile={diffFile}
-      filePath={gitSelectedFile!}
-      onClose={onClose}
-      onSave={handleAddComment}
-    />
-  ), [gitSelectedFile, handleAddComment])
+  const handleEditComment = useCallback((comment: DiffComment) => {
+    // Remove the old comment and open the input pre-filled at the same location
+    if (activeSessionId) removeDiffComment(activeSessionId, comment.id)
+    setActiveInput({
+      lineNumber: comment.endLineNumber,
+      side: comment.side,
+      startLine: comment.lineNumber,
+      endLine: comment.endLineNumber,
+      lineContent: comment.lineContent,
+      editText: comment.comment,
+    })
+  }, [activeSessionId, removeDiffComment])
 
-  // Renders both saved comment badges AND the active input form via extendData
-  const renderExtendContent = useCallback(({ data, diffFile }: {
-    data: ExtendLineData
-    lineNumber: number
-    side: SplitSide
-    diffFile: DiffFile
-  }) => {
-    const { comments: lineComments, activeInput: input } = data
+  // Render comment badges and active input widget after specific lines
+  const renderAfterLine = useCallback((line: DiffLine) => {
+    const lineNum = line.newLineNumber ?? line.oldLineNumber
+    if (lineNum == null) return null
+
+    // Check for saved comments on this line (keyed by endLineNumber)
+    const lineSide = line.type === 'del' ? 'old' : 'new'
+    const lineComments = fileComments.filter(
+      (c) => c.endLineNumber === lineNum && c.side === lineSide
+    )
+
+    // Check for active input on this line
+    const hasInput = activeInput && activeInput.lineNumber === lineNum && activeInput.side === lineSide
+
+    if (lineComments.length === 0 && !hasInput) return null
+
     return (
       <>
         {lineComments.length > 0 && (
-          <DiffCommentBadge comments={lineComments} onRemove={handleRemoveComment} />
+          <DiffCommentBadge comments={lineComments} onEdit={handleEditComment} onRemove={handleRemoveComment} />
         )}
-        {input && (
+        {hasInput && (
           <DiffCommentWidget
-            lineNumber={input.startLine}
-            endLineNumber={input.endLine}
-            side={input.side === 'old' ? SplitSide.old : SplitSide.new}
-            diffFile={diffFile}
+            lineNumber={activeInput.startLine}
+            endLineNumber={activeInput.endLine}
+            side={activeInput.side}
             filePath={gitSelectedFile!}
-            lineContent={input.lineContent}
+            lineContent={activeInput.lineContent}
+            initialText={activeInput.editText}
             onClose={() => setActiveInput(null)}
             onSave={(comment) => {
               handleAddComment(comment)
@@ -203,7 +179,7 @@ export function GitFileDiffView(): React.JSX.Element {
         )}
       </>
     )
-  }, [gitSelectedFile, handleAddComment, handleRemoveComment])
+  }, [fileComments, activeInput, gitSelectedFile, handleAddComment, handleEditComment, handleRemoveComment])
 
   if (!gitSelectedFile) {
     const hasFiles = (gitStatus?.files.length ?? 0) > 0
@@ -266,17 +242,16 @@ export function GitFileDiffView(): React.JSX.Element {
       {/* Diff container — wraps the DiffViewer so gutter drag hook can attach */}
       <div ref={containerRef} className="flex-1 min-h-0 flex flex-col">
         <DiffViewer
-          key={extendDataKey}
           patch={gitFileDiff.patch}
           oldContent={gitFileDiff.oldContent}
           newContent={gitFileDiff.newContent}
           fileName={gitSelectedFile}
           className="flex-1 min-h-0"
-          enableComments={true}
-          comments={fileComments}
-          activeInput={activeInput ?? undefined}
-          renderCommentWidget={renderCommentWidget}
-          renderExtendContent={renderExtendContent}
+          viewMode={diffViewSplit ? 'split' : 'unified'}
+          wrapLines={diffWrapLines}
+          highlightedLines={highlightedLines}
+          renderAfterLine={renderAfterLine}
+          virtualize
         />
       </div>
 

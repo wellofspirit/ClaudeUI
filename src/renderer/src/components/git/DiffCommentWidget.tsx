@@ -1,41 +1,23 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { v4 as uuid } from 'uuid'
-import { SplitSide } from '@git-diff-view/react'
-import type { DiffFile } from '@git-diff-view/core'
 import type { DiffComment } from '../../../../shared/types'
 
 interface Props {
   lineNumber: number
   /** End line for range selection. Defaults to lineNumber (single line). */
   endLineNumber?: number
-  side: SplitSide
-  diffFile: DiffFile
+  side: 'old' | 'new'
   filePath: string
-  /** Pre-captured line content (from gutter drag). Overrides DiffFile extraction. */
+  /** Pre-captured line content (from gutter drag). */
   lineContent?: string
+  /** Pre-fill text when editing an existing comment */
+  initialText?: string
   onClose: () => void
   onSave: (comment: DiffComment) => void
 }
 
-function getLineContent(diffFile: DiffFile, startLine: number, endLine: number, side: SplitSide): string {
-  const getter = side === SplitSide.old
-    ? diffFile.getOldPlainLine.bind(diffFile)
-    : diffFile.getNewPlainLine.bind(diffFile)
-
-  const lines: string[] = []
-  for (let i = startLine; i <= endLine; i++) {
-    try {
-      const line = getter(i)
-      if (line?.value != null) lines.push(line.value)
-    } catch {
-      // Line might not exist — skip
-    }
-  }
-  return lines.join('\n')
-}
-
-export function DiffCommentWidget({ lineNumber, endLineNumber, side, diffFile, filePath, lineContent: preCapturedContent, onClose, onSave }: Props): React.JSX.Element {
-  const [text, setText] = useState('')
+export function DiffCommentWidget({ lineNumber, endLineNumber, side, filePath, lineContent, initialText, onClose, onSave }: Props): React.JSX.Element {
+  const [text, setText] = useState(initialText ?? '')
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const startLine = Math.min(lineNumber, endLineNumber ?? lineNumber)
   const endLine = Math.max(lineNumber, endLineNumber ?? lineNumber)
@@ -54,15 +36,15 @@ export function DiffCommentWidget({ lineNumber, endLineNumber, side, diffFile, f
       filePath,
       lineNumber: startLine,
       endLineNumber: endLine,
-      side: side === SplitSide.old ? 'old' : 'new',
-      lineContent: preCapturedContent ?? getLineContent(diffFile, startLine, endLine, side),
+      side,
+      lineContent: lineContent ?? '',
       comment: trimmed,
       createdAt: Date.now()
     }
 
     onSave(comment)
     onClose()
-  }, [text, filePath, startLine, endLine, side, diffFile, onSave, onClose])
+  }, [text, filePath, startLine, endLine, side, lineContent, onSave, onClose])
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (e.key === 'Escape') {

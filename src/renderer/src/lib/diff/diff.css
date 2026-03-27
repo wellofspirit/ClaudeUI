@@ -1,0 +1,249 @@
+/* ── Diff viewer custom properties ──────────────────────────────────── */
+
+.diff-viewer {
+  --diff-bg: var(--color-bg-primary);
+  --diff-add-bg: #18271f;
+  --diff-add-gutter-bg: #284228;
+  --diff-add-indicator: #3fb950;
+  --diff-del-bg: #23191c;
+  --diff-del-gutter-bg: #4f2828;
+  --diff-del-indicator: #f85149;
+  --diff-hunk-bg: #131d2e;
+  --diff-hunk-text: var(--color-text-muted);
+  --diff-gutter-text: var(--color-text-muted);
+  --diff-gutter-width: 4ch; /* overridden inline based on max line number */
+  --diff-indicator-width: 20px;
+  --diff-font-size: 11px;
+  --diff-line-height: 16px;
+
+  background: var(--diff-bg);
+  font-family: var(--font-mono, 'JetBrains Mono', 'SF Mono', Menlo, Consolas, monospace);
+  font-size: var(--diff-font-size);
+  line-height: var(--diff-line-height);
+}
+
+/* ── Table layout (StaticDiffTable) ────────────────────────────────── */
+
+.diff-table {
+  width: 100%;
+  border-spacing: 0;
+  border-collapse: collapse;
+}
+
+.diff-table td {
+  padding: 0;
+  border: none;
+}
+
+/* Div-based rows (virtualized tables) */
+.diff-row {
+  display: flex;
+}
+
+/* ── Scrollbar styling ─────────────────────────────────────────────── */
+
+.diff-viewer::-webkit-scrollbar { width: 7px; height: 7px; }
+.diff-viewer::-webkit-scrollbar-track { background: transparent; }
+.diff-viewer::-webkit-scrollbar-thumb { background: var(--color-border); border-radius: 3.5px; }
+.diff-viewer::-webkit-scrollbar-thumb:hover { background: var(--color-border-bright); }
+.diff-viewer::-webkit-scrollbar-corner { background: transparent; }
+
+/* ── Row backgrounds ───────────────────────────────────────────────── */
+
+.diff-row-add { background: var(--diff-add-bg); }
+.diff-row-del { background: var(--diff-del-bg); }
+
+.diff-row-add .diff-gutter { background: var(--diff-add-gutter-bg); color: rgba(255, 255, 255, 0.8); --gutter-hover-bg: #2f5732; }
+.diff-row-del .diff-gutter { background: var(--diff-del-gutter-bg); color: rgba(255, 255, 255, 0.8); --gutter-hover-bg: #713431; }
+
+/* ── Gutter cells ──────────────────────────────────────────────────── */
+
+.diff-gutter {
+  width: var(--diff-gutter-width);
+  min-width: var(--diff-gutter-width);
+  text-align: center;
+  padding-left: 4px;
+  padding-right: 4px;
+  color: color-mix(in srgb, var(--diff-gutter-text) 65%, transparent);
+  user-select: none;
+  white-space: nowrap;
+}
+
+.diff-gutter:hover {
+  color: var(--color-text-primary);
+  background: var(--gutter-hover-bg, var(--color-bg-hover));
+  cursor: pointer;
+}
+
+/* ── Indicator column (+/-) ────────────────────────────────────────── */
+
+.diff-indicator {
+  width: var(--diff-indicator-width);
+  min-width: var(--diff-indicator-width);
+  text-align: center;
+  user-select: none;
+}
+
+.diff-indicator-add { color: var(--diff-add-indicator); }
+.diff-indicator-del { color: var(--diff-del-indicator); }
+
+/* ── Content cell ──────────────────────────────────────────────────── */
+
+.diff-content {
+  padding-left: 4px;
+  padding-right: 8px;
+}
+
+.diff-content-wrap {
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.diff-content-nowrap {
+  white-space: pre;
+}
+
+/* ── Hunk header (GitHub-style) ─────────────────────────────────────── */
+
+.diff-hunk-header {
+  display: flex;
+  align-items: stretch;
+  background: var(--diff-hunk-bg);
+  color: var(--diff-hunk-text);
+  user-select: none;
+  min-height: 0;
+}
+
+.diff-hunk-label {
+  display: flex;
+  align-items: center;
+  padding: 0 8px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--color-text-muted);
+}
+
+/* ── Expand button ─────────────────────────────────────────────────── */
+
+.diff-expand-btn,
+.diff-expand-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: calc(var(--diff-gutter-width) * 2);
+  min-width: calc(var(--diff-gutter-width) * 2);
+  border: none;
+  background: color-mix(in srgb, #6c9eff 10%, var(--diff-hunk-bg));
+  color: var(--color-accent);
+  cursor: pointer;
+  transition: background 0.12s;
+  padding: 0;
+}
+
+.diff-expand-placeholder {
+  cursor: default;
+}
+
+.diff-expand-btn:hover {
+  background: var(--color-accent);
+  color: white;
+}
+
+/* ── Gap / expand row ──────────────────────────────────────────────── */
+
+.diff-gap {
+  cursor: pointer;
+}
+
+.diff-gap:hover {
+  background: #182640;
+}
+
+.diff-gap-text {
+  color: var(--color-text-muted);
+}
+
+/* ── Pure add/del: hide irrelevant gutter column ───────────────────── */
+
+.diff-pure-add .diff-gutter-old,
+.diff-pure-del .diff-gutter-new {
+  display: none;
+}
+
+/* ── Comment highlight ─────────────────────────────────────────────── */
+
+.diff-row-highlighted {
+  --highlight-tint: color-mix(in srgb, var(--color-accent) 20%, transparent);
+  background-image: linear-gradient(var(--highlight-tint), var(--highlight-tint)) !important;
+}
+
+.diff-row-highlighted .diff-gutter {
+  background-image: linear-gradient(var(--highlight-tint), var(--highlight-tint)) !important;
+}
+
+.diff-row-highlighted .diff-gutter:first-child {
+  box-shadow: inset 2px 0 0 var(--color-accent);
+}
+
+/* ── Split view specifics ──────────────────────────────────────────── */
+
+.diff-split-side {
+  width: 50%;
+  min-width: 0;
+}
+
+.diff-split-divider {
+  width: 1px;
+  min-width: 1px;
+  background: var(--color-border);
+}
+
+/* Empty side in split view */
+.diff-row-empty {
+  background: repeating-linear-gradient(
+    -45deg,
+    transparent,
+    transparent 4px,
+    rgba(255, 255, 255, 0.02) 4px,
+    rgba(255, 255, 255, 0.02) 8px
+  );
+}
+
+/* ── Gutter drag selection ─────────────────────────────────────────── */
+
+.diff-gutter-selected {
+  --highlight-tint: color-mix(in srgb, var(--color-accent) 20%, transparent);
+  background-image: linear-gradient(var(--highlight-tint), var(--highlight-tint)) !important;
+}
+
+.diff-gutter-selected .diff-gutter {
+  background-image: linear-gradient(var(--highlight-tint), var(--highlight-tint)) !important;
+}
+
+.diff-gutter-selected .diff-gutter:first-child {
+  box-shadow: inset 2px 0 0 var(--color-accent);
+}
+
+/* ── Comment widget ────────────────────────────────────────────────── */
+
+.diff-after-row td {
+  padding: 4px 8px;
+}
+
+.diff-comment-widget {
+  background: var(--color-bg-input);
+  border: 1px solid var(--color-border-bright);
+  border-radius: 6px;
+}
+
+.diff-comment-widget-footer {
+  background: var(--color-bg-tertiary);
+  border-top: 1px solid var(--color-border);
+}
+
+/* ── Comment badge ─────────────────────────────────────────────────── */
+
+.diff-comment-badge {
+  background: var(--color-bg-input);
+}
