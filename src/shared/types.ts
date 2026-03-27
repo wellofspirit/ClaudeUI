@@ -69,7 +69,7 @@ export interface SessionResult {
 
 export type ApprovalDecision = 'allow' | 'deny'
 
-export type PermissionMode = 'default' | 'acceptEdits' | 'plan'
+export type PermissionMode = 'default' | 'acceptEdits' | 'plan' | 'auto'
 
 export interface SandboxSettings {
   enabled: boolean

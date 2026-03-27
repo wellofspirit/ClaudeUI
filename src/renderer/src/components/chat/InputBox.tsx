@@ -554,7 +554,9 @@ export function InputBox(): React.JSX.Element {
               ? 'border border-mode-edit-dim focus-within:border-mode-edit'
               : permissionMode === 'plan'
                 ? 'border border-mode-plan-dim focus-within:border-mode-plan'
-                : 'shadow-[0_1px_6px_rgba(0,0,0,0.12),0_2px_16px_rgba(0,0,0,0.08)] focus-within:shadow-[0_1px_8px_rgba(0,0,0,0.18),0_4px_20px_rgba(0,0,0,0.12)]'
+                : permissionMode === 'auto'
+                  ? 'border border-mode-auto-dim focus-within:border-mode-auto'
+                  : 'shadow-[0_1px_6px_rgba(0,0,0,0.12),0_2px_16px_rgba(0,0,0,0.08)] focus-within:shadow-[0_1px_8px_rgba(0,0,0,0.18),0_4px_20px_rgba(0,0,0,0.12)]'
           }`}
         >
           {/* Mode tab */}
@@ -563,10 +565,12 @@ export function InputBox(): React.JSX.Element {
               className={`absolute bottom-full left-3 px-1.5 pt-0.5 pb-px rounded-t text-[9px] font-semibold tracking-wider uppercase text-text-primary border border-b-0 transition-colors ${
                 permissionMode === 'acceptEdits'
                   ? 'border-mode-edit-dim group-focus-within:border-mode-edit bg-mode-edit-dim group-focus-within:bg-mode-edit'
-                  : 'border-mode-plan-dim group-focus-within:border-mode-plan bg-mode-plan-dim group-focus-within:bg-mode-plan'
+                  : permissionMode === 'auto'
+                    ? 'border-mode-auto-dim group-focus-within:border-mode-auto bg-mode-auto-dim group-focus-within:bg-mode-auto'
+                    : 'border-mode-plan-dim group-focus-within:border-mode-plan bg-mode-plan-dim group-focus-within:bg-mode-plan'
               }`}
             >
-              {permissionMode === 'acceptEdits' ? 'Accept Edits' : 'Plan'}
+              {permissionMode === 'acceptEdits' ? 'Accept Edits' : permissionMode === 'auto' ? 'Auto ⏵⏵' : 'Plan'}
             </div>
           )}
 

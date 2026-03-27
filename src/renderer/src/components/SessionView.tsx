@@ -15,7 +15,7 @@ import { useIsMobile, useVisualViewportHeight } from '../hooks/useIsMobile'
 import { QuitWorktreeModal } from './QuitWorktreeModal'
 
 
-const PERMISSION_MODES = ['default', 'acceptEdits', 'plan'] as const
+const PERMISSION_MODES = ['default', 'acceptEdits', 'plan', 'auto'] as const
 
 const SidebarContext = createContext<{ collapsed: boolean; toggle: () => void; isMobile: boolean }>({ collapsed: false, toggle: () => {}, isMobile: false })
 export const useSidebarCollapsed = () => useContext(SidebarContext)
