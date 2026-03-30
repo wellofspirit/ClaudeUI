@@ -53,6 +53,16 @@ if (versionMatch) {
 
 let patchCount = 0
 
+// ---------------------------------------------------------------------------
+// Detect agentId access pattern: in older versions it's q.agentId (flat param),
+// in 0.2.87+ it's K.agentId (destructured from q.identity).
+// We detect this once and use it across all patches.
+// ---------------------------------------------------------------------------
+const agentIdExpr = src.includes('{identity:') && src.includes('K.agentId') && src.includes('inProcessRunner')
+  ? 'K.agentId'
+  : 'q.agentId'
+console.log(`Detected agentId expression: ${agentIdExpr}`)
+
 // ===========================================================================
 // Patch A: Fix agentId fragmentation
 //
@@ -92,14 +102,14 @@ if (src.includes(patchAMarker)) {
     process.exit(1)
   }
 
-  // Verify we're inside the in-process teammate runner
-  const before = src.slice(Math.max(0, idx - 5000), idx)
-  if (!before.includes('teammateContext') || !before.includes('q.agentId')) {
+  // Verify we're inside the in-process teammate runner (use 8000 char window — function grew in 0.2.87)
+  const before = src.slice(Math.max(0, idx - 8000), idx)
+  if (!before.includes('teammateContext') || !before.includes(agentIdExpr)) {
     console.error('ERROR: Anchor not in expected in-process runner context.')
     process.exit(1)
   }
 
-  const replacement = `${patchAMarker}override:{abortController:${abortVar},agentId:q.agentId.replace(/@/g,"--")}`
+  const replacement = `${patchAMarker}override:{abortController:${abortVar},agentId:${agentIdExpr}.replace(/@/g,"--")}`
 
   src = src.slice(0, idx) + replacement + src.slice(idx + anchor.length)
   patchCount++
@@ -179,7 +189,7 @@ if (src.includes(patchBMarker)) {
     `${patchBMarker}if(${msgVar}.type==="stream_event"){` +
     `process.stdout.write(JSON.stringify({` +
     `type:"stream_event",event:${msgVar}.event,` +
-    `teammate_id:q.agentId,` +
+    `teammate_id:${agentIdExpr},` +
     `session_id:${sessFn}(),uuid:${uuidFn}()` +
     `})+"\\n");continue}`
 
@@ -213,13 +223,19 @@ if (src.includes(patchBMarker)) {
     process.exit(1)
   }
 
+  // Track last emitted uuid per teammate invocation so messages chain via parentUuid.
+  // Using `var` so the variable hoists to function scope and persists across loop iterations.
+  // First message gets parentUuid: undefined (omitted from JSON), subsequent messages chain.
   const injectionB2 =
-    `;if(${msgVar}.type==="assistant"||${msgVar}.type==="user")` +
+    `;if(${msgVar}.type==="assistant"||${msgVar}.type==="user"){` +
+    `var _tm_u=${msgVar}.uuid||${uuidFn}();` +
     `process.stdout.write(JSON.stringify({` +
     `type:${msgVar}.type,message:${msgVar}.message,` +
-    `teammate_id:q.agentId,` +
-    `session_id:${sessFn}(),uuid:${uuidFn}()` +
-    `})+"\\n");`
+    `teammate_id:${agentIdExpr},` +
+    `session_id:${sessFn}(),uuid:_tm_u,` +
+    `parentUuid:typeof _tm_prev==="string"?_tm_prev:void 0` +
+    `})+"\\n");` +
+    `var _tm_prev=_tm_u;}`
 
   // Append after the anchor (end of the _g() call)
   const insertPos = idxB2 + anchorB2.length
@@ -245,42 +261,38 @@ const patchCMarker = '/*PATCHED:team-streaming-C*/'
 if (src.includes(patchCMarker)) {
   console.log('Already applied. Skipping.')
 } else {
-  // Re-extract session/UUID functions
-  let sessFnC, uuidFnC
-  const sessFnReC = /session_id:([\w$]+)\(\).*?parent_tool_use_id/
-  const sessFnMatchC = src.match(sessFnReC)
-  if (!sessFnMatchC) {
-    console.error('ERROR: Cannot locate session ID function for Patch C.')
+  // --- Extract cN (task notification emitter) function name ---
+  // The native code calls cN(_, "completed", {toolUseId:h, summary:K.agentId})
+  // We extract the function name from this pattern.
+  const cNRe = new RegExp(`(${V})\\(${V},"completed",\\{toolUseId:${V},summary:${agentIdExpr}\\}\\)`)
+  const cNMatch = src.match(cNRe)
+  if (!cNMatch) {
+    console.error('ERROR: Cannot locate cN (task notification emitter) function.')
     process.exit(1)
   }
-  sessFnC = sessFnMatchC[1]
+  const cNFn = cNMatch[1]
+  console.log(`Task notification function: ${cNFn}()`)
 
-  const uuidFnReC = /\{type:"progress",data:[\w$]+,toolUseID:[\w$]+,parentToolUseID:[\w$]+,uuid:([\w$]+)\(\),timestamp:new Date/
-  const uuidFnMatchC = src.match(uuidFnReC)
-  if (!uuidFnMatchC) {
-    console.error('ERROR: Cannot locate UUID generator function for Patch C.')
-    process.exit(1)
-  }
-  uuidFnC = uuidFnMatchC[1]
-  console.log(`Session ID: ${sessFnC}(), UUID: ${uuidFnC}()`)
-
+  // Use cN() to queue the notification through the native an() queue.
+  // This ensures it's drained by ln6() BEFORE the result message is emitted,
+  // regardless of whether the in-process runner finishes before or after the
+  // main session. process.stdout.write was unreliable because the notification
+  // could arrive after the SDK consumer had already stopped iterating at "result".
   const notifySnippet = (status) =>
-    `process.stdout.write(JSON.stringify({` +
-    `type:"system",subtype:"task_notification",` +
-    `task_id:q.agentId,status:"${status}",` +
-    `output_file:"",summary:"",` +
-    `session_id:${sessFnC}(),uuid:${uuidFnC}()` +
-    `})+"\\n")`
+    `${cNFn}(${agentIdExpr},"${status}")`
 
   // --- C1: Success path ---
   // v2.1.49: return im(K,...,M),{success:!0,messages:G}  (comma expression)
   // v2.1.50: return im(K,...,M),dX(K),tK6(q.agentId),{success:!0,messages:G}
   // v2.1.59: return{success:!0,messages:x}  (standalone return after while loop)
+  // v2.1.87: return f$6(K.agentId),{success:!0,messages:G}}catch  (comma expr + cleanup fn)
   //
-  // Strategy: match return{success:!0,messages:<var>} directly and inject
-  // the notification statement before the return.
+  // Strategy: match {success:!0,messages:<var>}}catch — the trailing }}catch is
+  // unique to the function-level return (inner callback returns are followed by
+  // })}),Mm instead). We inject the notification as a comma expression element
+  // right before the success object.
   const c1Re = new RegExp(
-    `return\\{success:!0,messages:(${V})\\}`
+    `\\{success:!0,messages:(${V})\\}\\}catch`
   )
   const c1Match = src.match(c1Re)
   if (!c1Match) {
@@ -304,12 +316,18 @@ if (src.includes(patchCMarker)) {
     process.exit(1)
   }
 
-  // Insert notification as a statement before the return.
-  const replacementC1 =
-    `${patchCMarker}${notifySnippet('completed')};return{success:!0,messages:${messagesVar}}`
+  // Insert notification as a comma expression element before {success:!0,...}.
+  // The return statement may be: return{success:!0,...} or return fn(),{success:!0,...}
+  // In both cases, prepending our call with a comma works: ...,notify(),{success:!0,...}
+  // But if the return is directly return{...}, we need a semicolon form instead.
+  const charBefore = src[idxC1 - 1]
+  const isCommaExpr = charBefore === ','
+  const injectionC1 = isCommaExpr
+    ? `${patchCMarker}${notifySnippet('completed')},`  // append to existing comma expression
+    : `${patchCMarker}${notifySnippet('completed')};`  // separate statement before return{...}
 
-  src = src.slice(0, idxC1) + replacementC1 + src.slice(idxC1 + anchorC1.length)
-  console.log(`C1 applied at char ${idxC1}. Completion notification injected.`)
+  src = src.slice(0, idxC1) + injectionC1 + src.slice(idxC1)
+  console.log(`C1 applied at char ${idxC1}. Completion notification injected (${isCommaExpr ? 'comma expr' : 'statement'}).`)
 
   // --- C2: Failure path ---
   // The failure return ends with {success:!1,error:<var>,messages:<var>}} (the extra

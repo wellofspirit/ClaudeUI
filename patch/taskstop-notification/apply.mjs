@@ -135,108 +135,131 @@ const patchBMarker = '/*PATCHED:taskstop-notification-B*/'
 if (src.includes(patchBMarker)) {
   console.log('Already applied. Skipping.')
 } else {
-  // Find the notification sender by its unique structure:
-  //   function NAME(A,q,K,Y,z){...K==="completed"?...:K==="failed"?...:"was stopped"...}
-  const notifySenderRe = new RegExp(
-    `function (${V})\\((${V}),(${V}),(${V}),(${V}),(${V})\\)\\{` +
-    `[\\s\\S]{1,500}?` +
-    `\\4==="completed"\\?[\\s\\S]{1,200}?` +
-    `\\4==="failed"\\?[\\s\\S]{1,200}?` +
-    `:"was stopped"`
-  )
-
-  const notifySenderMatch = src.match(notifySenderRe)
-
-  if (!notifySenderMatch) {
-    console.error('ERROR: Cannot locate notification sender function.')
-    console.error('Search pattern: function NAME(taskId,cwd,status,summary,setState){..."was stopped"}')
-    process.exit(1)
-  }
-
-  const [, notifySenderName] = notifySenderMatch
-  console.log(`Found notification sender: ${notifySenderName}()`)
-
-  // Find TaskStop by its unique return message
+  // Check if the fix has been upstreamed (SDK 0.2.87+):
+  // rx8() now calls cN(taskId,"stopped",{...}) after setting notified:true,
+  // and cN() pushes to the internal queue which is drained into the SDK output stream.
+  // Detect by finding the notified setter + cN call pattern near "Successfully stopped task:".
   const taskStopAnchor = 'Successfully stopped task:'
   const anchorIdx = src.indexOf(taskStopAnchor)
+
   if (anchorIdx === -1) {
     console.error('ERROR: Cannot locate TaskStop call method.')
     process.exit(1)
   }
 
-  console.log(`Found TaskStop at char ${anchorIdx}`)
+  // In 0.2.87+, TaskStop.call() delegates to rx8() which contains both the
+  // notified setter and the cN() notification call. Look for the pattern:
+  //   notified:!0...cN(TASKID,"stopped"
+  // within the function that contains the TaskStop anchor (or its callees).
+  // We search a wide window around the anchor since rx8 is defined nearby.
+  const wideStart = Math.max(0, anchorIdx - 5000)
+  const wideEnd = Math.min(src.length, anchorIdx + 1000)
+  const wideContext = src.slice(wideStart, wideEnd)
 
-  // Find the notified setter pattern near TaskStop:
-  //   SET_STATE((S)=>{let T=S.tasks[ID];if(!T||T.notified)return S;return{...S,tasks:{...S.tasks,[ID]:{...T,notified:!0}}}})
-  const contextStart = Math.max(0, anchorIdx - 3000)
-  const contextEnd = Math.min(src.length, anchorIdx + 500)
-  const context = src.slice(contextStart, contextEnd)
-
-  const notifiedSetterRe = new RegExp(
-    `(${V})\\(\\((${V})\\)=>\\{let (${V})=\\2\\.tasks\\[(${V})\\];if\\(!\\3\\|\\|\\3\\.notified\\)return \\2;return\\{\\.\\.\\.\\2,tasks:\\{\\.\\.\\.\\2\\.tasks,\\[\\4\\]:\\{\\.\\.\\.\\3,notified:!0\\}\\}\\}\\}\\)`
+  const upstreamNotifyRe = new RegExp(
+    `notified:!0[\\s\\S]{1,300}?` +
+    `(${V})\\(${V},"stopped",\\{toolUseId:`
   )
-  const notifiedSetterMatch = context.match(notifiedSetterRe)
 
-  if (!notifiedSetterMatch) {
-    console.error('ERROR: Cannot locate notified setter in TaskStop.')
-    process.exit(1)
+  if (wideContext.match(upstreamNotifyRe)) {
+    console.log('Upstreamed in this SDK version (rx8 calls cN with "stopped"). Skipping.')
+  } else {
+    // Legacy path for older SDK versions
+    // Find the notification sender by its unique structure:
+    //   function NAME(A,q,K,Y,z){...K==="completed"?...:K==="failed"?...:"was stopped"...}
+    const notifySenderRe = new RegExp(
+      `function (${V})\\((${V}),(${V}),(${V}),(${V}),(${V})\\)\\{` +
+      `[\\s\\S]{1,500}?` +
+      `\\4==="completed"\\?[\\s\\S]{1,200}?` +
+      `\\4==="failed"\\?[\\s\\S]{1,200}?` +
+      `:"was stopped"`
+    )
+
+    const notifySenderMatch = src.match(notifySenderRe)
+
+    if (!notifySenderMatch) {
+      console.error('ERROR: Cannot locate notification sender function.')
+      console.error('Search pattern: function NAME(taskId,cwd,status,summary,setState){..."was stopped"}')
+      process.exit(1)
+    }
+
+    const [, notifySenderName] = notifySenderMatch
+    console.log(`Found notification sender: ${notifySenderName}()`)
+
+    console.log(`Found TaskStop at char ${anchorIdx}`)
+
+    // Find the notified setter pattern near TaskStop:
+    //   SET_STATE((S)=>{let T=S.tasks[ID];if(!T||T.notified)return S;return{...S,tasks:{...S.tasks,[ID]:{...T,notified:!0}}}})
+    const contextStart = Math.max(0, anchorIdx - 3000)
+    const contextEnd = Math.min(src.length, anchorIdx + 500)
+    const context = src.slice(contextStart, contextEnd)
+
+    const notifiedSetterRe = new RegExp(
+      `(${V})\\(\\((${V})\\)=>\\{let (${V})=\\2\\.tasks\\[(${V})\\];if\\(!\\3\\|\\|\\3\\.notified\\)return \\2;return\\{\\.\\.\\.\\2,tasks:\\{\\.\\.\\.\\2\\.tasks,\\[\\4\\]:\\{\\.\\.\\.\\3,notified:!0\\}\\}\\}\\}\\)`
+    )
+    const notifiedSetterMatch = context.match(notifiedSetterRe)
+
+    if (!notifiedSetterMatch) {
+      console.error('ERROR: Cannot locate notified setter in TaskStop.')
+      process.exit(1)
+    }
+
+    const [notifiedSetterFull, setStateFnName, , , taskIdVarName] = notifiedSetterMatch
+    console.log(`  setState: ${setStateFnName}(), taskId var: ${taskIdVarName}`)
+
+    // Find the full pattern in original source
+    const fullSetterIdx = src.indexOf(notifiedSetterFull, contextStart)
+    if (fullSetterIdx === -1) {
+      console.error('ERROR: Cannot find notified setter at expected location.')
+      process.exit(1)
+    }
+
+    // Find the task object variable: VAR=(await ...).tasks?.[TASK_ID] or VAR=FUNC().tasks?.[TASK_ID]
+    const searchStart = Math.max(0, fullSetterIdx - 2000)
+    const searchContext = src.slice(searchStart, fullSetterIdx)
+    const taskVarRe1 = new RegExp(
+      `let (${V})=\\(await [^)]+\\(\\)\\)\\.tasks\\?\\.\\[${taskIdVarName}\\];`
+    )
+    const taskVarRe2 = new RegExp(
+      `(${V})=\\(await (${V})\\(\\)\\)\\.tasks\\?\\.\\[${taskIdVarName}\\]`
+    )
+    // v2.1.71+: refactored into JS1() — no await, just Y().tasks?.[A]
+    const taskVarRe3 = new RegExp(
+      `let (${V})=(${V})\\(\\)\\.tasks\\?\\.\\[${taskIdVarName}\\];`
+    )
+    // v2.1.71+: comma-separated let — let{...}=q,VAR=FUNC().tasks?.[TASKID];
+    const taskVarRe4 = new RegExp(
+      `,(${V})=(${V})\\(\\)\\.tasks\\?\\.\\[${taskIdVarName}\\];`
+    )
+    const taskVarMatch = searchContext.match(taskVarRe1) || searchContext.match(taskVarRe2) || searchContext.match(taskVarRe3) || searchContext.match(taskVarRe4)
+
+    if (!taskVarMatch) {
+      console.error(`ERROR: Cannot locate task variable for tasks?.[${taskIdVarName}]`)
+      process.exit(1)
+    }
+
+    const taskObjVar = taskVarMatch[1]
+    console.log(`  task object var: ${taskObjVar}`)
+
+    // Find comma before the notified setter (injection point)
+    let commaIdx = fullSetterIdx - 1
+    while (commaIdx > 0 && src[commaIdx] !== ',') commaIdx--
+
+    if (src[commaIdx] !== ',') {
+      console.error('ERROR: Cannot find comma before notified setter.')
+      process.exit(1)
+    }
+
+    // Inject: NOTIFY(taskId, description, "killed", setState, toolUseId),
+    // kxY signature: kxY(taskId, description, status, setState, toolUseId)
+    // - 4th param = setState (required for Xw to set notified:true)
+    // - 5th param = toolUseId (optional, used in XML <tool-use-id> element)
+    const injection = `${patchBMarker}${notifySenderName}(${taskIdVarName},${taskObjVar}.description||${taskObjVar}.command||"","killed",${setStateFnName},void 0),`
+
+    src = src.slice(0, commaIdx + 1) + injection + src.slice(commaIdx + 1)
+    patchCount++
+    console.log('Applied.')
   }
-
-  const [notifiedSetterFull, setStateFnName, , , taskIdVarName] = notifiedSetterMatch
-  console.log(`  setState: ${setStateFnName}(), taskId var: ${taskIdVarName}`)
-
-  // Find the full pattern in original source
-  const fullSetterIdx = src.indexOf(notifiedSetterFull, contextStart)
-  if (fullSetterIdx === -1) {
-    console.error('ERROR: Cannot find notified setter at expected location.')
-    process.exit(1)
-  }
-
-  // Find the task object variable: VAR=(await ...).tasks?.[TASK_ID] or VAR=FUNC().tasks?.[TASK_ID]
-  const searchStart = Math.max(0, fullSetterIdx - 2000)
-  const searchContext = src.slice(searchStart, fullSetterIdx)
-  const taskVarRe1 = new RegExp(
-    `let (${V})=\\(await [^)]+\\(\\)\\)\\.tasks\\?\\.\\[${taskIdVarName}\\];`
-  )
-  const taskVarRe2 = new RegExp(
-    `(${V})=\\(await (${V})\\(\\)\\)\\.tasks\\?\\.\\[${taskIdVarName}\\]`
-  )
-  // v2.1.71+: refactored into JS1() — no await, just Y().tasks?.[A]
-  const taskVarRe3 = new RegExp(
-    `let (${V})=(${V})\\(\\)\\.tasks\\?\\.\\[${taskIdVarName}\\];`
-  )
-  // v2.1.71+: comma-separated let — let{...}=q,VAR=FUNC().tasks?.[TASKID];
-  const taskVarRe4 = new RegExp(
-    `,(${V})=(${V})\\(\\)\\.tasks\\?\\.\\[${taskIdVarName}\\];`
-  )
-  const taskVarMatch = searchContext.match(taskVarRe1) || searchContext.match(taskVarRe2) || searchContext.match(taskVarRe3) || searchContext.match(taskVarRe4)
-
-  if (!taskVarMatch) {
-    console.error(`ERROR: Cannot locate task variable for tasks?.[${taskIdVarName}]`)
-    process.exit(1)
-  }
-
-  const taskObjVar = taskVarMatch[1]
-  console.log(`  task object var: ${taskObjVar}`)
-
-  // Find comma before the notified setter (injection point)
-  let commaIdx = fullSetterIdx - 1
-  while (commaIdx > 0 && src[commaIdx] !== ',') commaIdx--
-
-  if (src[commaIdx] !== ',') {
-    console.error('ERROR: Cannot find comma before notified setter.')
-    process.exit(1)
-  }
-
-  // Inject: NOTIFY(taskId, description, "killed", setState, toolUseId),
-  // kxY signature: kxY(taskId, description, status, setState, toolUseId)
-  // - 4th param = setState (required for Xw to set notified:true)
-  // - 5th param = toolUseId (optional, used in XML <tool-use-id> element)
-  const injection = `${patchBMarker}${notifySenderName}(${taskIdVarName},${taskObjVar}.description||${taskObjVar}.command||"","killed",${setStateFnName},void 0),`
-
-  src = src.slice(0, commaIdx + 1) + injection + src.slice(commaIdx + 1)
-  patchCount++
-  console.log('Applied.')
 }
 
 // ===========================================================================
@@ -256,10 +279,15 @@ const verify = readFileSync(cliPath, 'utf-8')
 // Part A is optional (upstreamed in SDK 0.2.49+)
 const partAOk = verify.includes(patchAMarker) ||
   /=\([\w$]+\)=>[\w$]+===\s*"completed"\|\|[\w$]+===\s*"failed"\|\|[\w$]+===\s*"stopped"\|\|[\w$]+===\s*"killed"/.test(verify)
-const partBOk = verify.includes(patchBMarker)
+// Part B is optional (upstreamed in SDK 0.2.87+ — rx8() calls cN() with "stopped")
+const partBUpstreamed = new RegExp(
+  `notified:!0[\\s\\S]{1,300}?` +
+  `[\\w$]+\\([\\w$]+,"stopped",\\{toolUseId:`
+).test(verify)
+const partBOk = verify.includes(patchBMarker) || partBUpstreamed
 
 console.log(`  ${partAOk ? 'OK' : 'MISSING'} Part A: killed → stopped mapping ${verify.includes(patchAMarker) ? '(patched)' : '(upstreamed)'}`)
-console.log(`  ${partBOk ? 'OK' : 'MISSING'} Part B: TaskStop notification injection`)
+console.log(`  ${partBOk ? 'OK' : 'MISSING'} Part B: TaskStop notification injection ${verify.includes(patchBMarker) ? '(patched)' : '(upstreamed)'}`)
 
 if (!partBOk) {
   console.error('\nVerification FAILED.')

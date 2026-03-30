@@ -39,6 +39,11 @@ async function main() {
           args: [resolve(__dirname, '../mcp-test-server.mjs')],
         },
       },
+      // Enterprise-managed environments may have an allowedMcpServers policy
+      // that blocks dynamic MCP servers. Explicitly allow our test server.
+      settings: JSON.stringify({
+        allowedMcpServers: [{ serverName: MCP_SERVER_NAME }],
+      }),
     },
     60_000
   )
@@ -84,13 +89,13 @@ async function main() {
   // 4. Our test server is in the list
   const testServer = Array.isArray(mcpStatus)
     ? mcpStatus.find((s) => s.name === MCP_SERVER_NAME)
-    : null
-  t.assert(`Server "${MCP_SERVER_NAME}" found in status`, testServer !== null)
+    : undefined
+  t.assert(`Server "${MCP_SERVER_NAME}" found in status`, testServer != null)
 
   // 5. Test server is connected
   t.assert(
     `Server "${MCP_SERVER_NAME}" is connected`,
-    testServer !== null && testServer.status === 'connected'
+    testServer != null && testServer.status === 'connected'
   )
 
   // 6. Test server has tools

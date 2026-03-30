@@ -91,12 +91,12 @@ if (src.includes(PATCH_A_MARKER)) {
   // -------------------------------------------------------------------------
   console.log('\n--- Locating bs1 lazy module (us1) ---')
 
-  // bs1 holds finalize timeout values { safety: 5000, noData: 1500 }.
-  // It's initialized inside a lazy module: var <us1>=L(()=>{...bs1={safety:5000,noData:1500}})
-  // hb8's finalize() reads bs1.safety, so we must trigger the lazy init before calling hb8.
-  // The lazy module body contains function calls with parens, so use [\s\S]*? (non-greedy any)
+  // bs1/dK7 holds finalize timeout values { safety: 5000, noData: 1500 }.
+  // It's initialized inside a lazy module: var <us1>=<lazyFn>(()=>{...<bs1>={safety:5000,noData:1500}})
+  // hb8's finalize() reads the timeout var's .safety, so we must trigger the lazy init before calling hb8.
+  // The lazy function name (L, y, etc.) and variable names change between versions, so match generically.
   const bs1Re = new RegExp(
-    `var (${V})=L\\(\\(\\)=>[\\s\\S]{0,500}?bs1=\\{safety:5000,noData:1500\\}`
+    `var (${V})=${V}\\(\\(\\)=>[\\s\\S]{0,500}?${V}=\\{safety:5000,noData:1500\\}`
   )
   const bs1Match = bs1Re.exec(src)
   if (!bs1Match) {

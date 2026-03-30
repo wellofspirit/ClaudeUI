@@ -16,10 +16,14 @@
  * mapping. After loading all messages, walk each message's parentUuid through
  * the redirect map to skip over any chain of filtered messages.
  *
+ * Status: UPSTREAMED in SDK 0.2.87. The bo() JSONL loader now natively builds
+ * a redirect map for filtered progress messages and applies it to subsequent
+ * messages' parentUuid. This patch detects the upstream fix and exits as a no-op.
+ *
  * Usage: bun patch/incomplete-session-resume-fix/apply.mjs
  */
 
-import { readFileSync, writeFileSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -47,16 +51,49 @@ if (src.includes(MARKER)) {
   process.exit(0)
 }
 
+// ---------------------------------------------------------------------------
+// Detect upstream fix (SDK >= 0.2.87)
+// ---------------------------------------------------------------------------
+// In 0.2.87+, the bo() JSONL loader uses a dedicated function to detect
+// progress messages and natively builds a parentUuid redirect map:
+//
+//   if(FUNC(C)){let F=C.parentUuid;B.set(C.uuid,F&&B.has(F)?B.get(F)??null:F);continue}
+//   if(xo(C)){if(C.parentUuid&&B.has(C.parentUuid))C.parentUuid=B.get(C.parentUuid)??null;
+//
+// We detect this by looking for the redirect map pattern: .set(VAR.uuid, ...
+// combined with .parentUuid and .get() in the JSONL loader context.
+
 const V = '[\\w$]+'
 
+// Pattern: VAR.set(VAR.uuid,VAR&&VAR.has(VAR)?VAR.get(VAR)??null:VAR);continue
+// This is the redirect map build + continue in the progress filter branch.
+const upstreamRedirectRe = new RegExp(
+  `(${V})\\.set\\((${V})\\.uuid,(${V})&&\\1\\.has\\(\\3\\)\\?\\1\\.get\\(\\3\\)\\?\\?null:\\3\\);continue`
+)
+
+// Pattern: VAR.parentUuid&&VAR.has(VAR.parentUuid))VAR.parentUuid=VAR.get(VAR.parentUuid)??null
+// This is the redirect map application for non-progress messages.
+const upstreamApplyRe = new RegExp(
+  `(${V})\\.parentUuid&&(${V})\\.has\\(\\1\\.parentUuid\\)\\)\\1\\.parentUuid=\\2\\.get\\(\\1\\.parentUuid\\)\\?\\?null`
+)
+
+const hasRedirectBuild = upstreamRedirectRe.test(src)
+const hasRedirectApply = upstreamApplyRe.test(src)
+
+if (hasRedirectBuild && hasRedirectApply) {
+  console.log('\nUpstream fix detected (SDK >= 0.2.87). Patch is a no-op.')
+  console.log('  - Progress message redirect map: found')
+  console.log('  - parentUuid redirect application: found')
+  process.exit(0)
+}
+
 // ---------------------------------------------------------------------------
+// Legacy path: apply the patch for older SDK versions (< 0.2.87)
+// ---------------------------------------------------------------------------
+
 // Part A: Capture filtered progress UUIDs during the filter loop
-// ---------------------------------------------------------------------------
-// The progress filter pattern in the JSONL loader looks like:
+// The progress filter pattern in older SDKs looks like:
 //   if(VAR.type==="progress"&&VAR.data&&typeof VAR.data==="object"&&"type"in VAR.data&&FUNC(VAR.data.type))continue;
-//
-// We match dynamically to capture the minified variable (VAR) and function (FUNC)
-// names, then replace the `continue` with code that records uuid → parentUuid.
 
 const filterRe = new RegExp(
   `if\\((${V})\\.type==="progress"&&\\1\\.data&&typeof \\1\\.data==="object"&&"type"\\s*in\\s*\\1\\.data&&(${V})\\(\\1\\.data\\.type\\)\\)continue;`
@@ -66,6 +103,7 @@ const filterMatch = filterRe.exec(src)
 if (!filterMatch) {
   console.error('ERROR: Cannot find progress filter pattern in JSONL loader.')
   console.error('Expected pattern like: if(VAR.type==="progress"&&VAR.data&&typeof VAR.data==="object"&&"type" in VAR.data&&FUNC(VAR.data.type))continue;')
+  console.error('And upstream fix was not detected either. Cannot patch this SDK version.')
   process.exit(1)
 }
 
@@ -97,14 +135,6 @@ console.log('Part A: Injected redirect map capture at progress filter.')
 // ---------------------------------------------------------------------------
 // Part B: After all messages are loaded, fix parentUuid references
 // ---------------------------------------------------------------------------
-// Right after the message loading loop closes, a function is called on the
-// messages Map variable, like: wHY(K);
-// We find it dynamically by looking for a FUNC(VAR); call near the Part A
-// injection site. The messages Map is the variable passed to .set() calls
-// in the surrounding code.
-//
-// Strategy: Find a FUNC(VAR); pattern within ~2000 chars after the marker.
-// The messages Map variable appears in patterns like VAR.set( near the marker.
 
 const markerIdx = src.indexOf(MARKER)
 if (markerIdx === -1) {
@@ -113,7 +143,6 @@ if (markerIdx === -1) {
 }
 
 // Find the messages Map variable by looking for .set( calls near the marker.
-// In the JSONL loader, the pattern is: MAPVAR.set(VAR.uuid, VAR)
 const mapSetRe = new RegExp(`(${V})\\.set\\(${msgVar}\\.uuid,\\s*${msgVar}\\)`)
 const nearbySlice = src.slice(markerIdx, markerIdx + 3000)
 const mapSetMatch = mapSetRe.exec(nearbySlice)
@@ -121,12 +150,10 @@ if (!mapSetMatch) {
   console.error('ERROR: Cannot find messages Map .set() call near marker.')
   process.exit(1)
 }
-const mapVar = mapSetMatch[1] // e.g. "K"
+const mapVar = mapSetMatch[1]
 console.log(`  Messages Map variable: ${mapVar}`)
 
-// Now find the FUNC(MAPVAR); call after the loading loop.
-// Search for a pattern like: FUNC(MAPVAR); where FUNC is a simple identifier call
-// This should be the first such call after the loop body ends.
+// Find the FUNC(MAPVAR); call after the loading loop.
 const postLoopRe = new RegExp(`(${V})\\(${mapVar.replace(/\$/g, '\\$')}\\);`)
 const postLoopSlice = src.slice(markerIdx, markerIdx + 5000)
 const postLoopMatch = postLoopRe.exec(postLoopSlice)
@@ -134,7 +161,7 @@ if (!postLoopMatch) {
   console.error(`ERROR: Cannot find post-loop function call on ${mapVar} near marker.`)
   process.exit(1)
 }
-const postLoopFn = postLoopMatch[1] // e.g. "wHY"
+const postLoopFn = postLoopMatch[1]
 const postLoopLiteral = `${postLoopFn}(${mapVar});`
 const postLoopAbsIdx = markerIdx + postLoopMatch.index
 
@@ -170,6 +197,7 @@ console.log(`Part B: Injected parentUuid fixup before ${postLoopLiteral}`)
 // Write and verify
 // ---------------------------------------------------------------------------
 
+const { writeFileSync } = await import('node:fs')
 writeFileSync(cliPath, src)
 console.log(`\nPatch applied to ${cliPath}`)
 

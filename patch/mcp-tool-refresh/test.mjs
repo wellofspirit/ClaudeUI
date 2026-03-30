@@ -49,6 +49,11 @@ async function main() {
           args: [resolve(__dirname, '../mcp-test-server.mjs')],
         },
       },
+      // Enterprise-managed environments may have an allowedMcpServers policy
+      // that blocks dynamic MCP servers. Explicitly allow our test server.
+      settings: JSON.stringify({
+        allowedMcpServers: [{ serverName: MCP_SERVER_NAME }],
+      }),
     },
     180_000
   )

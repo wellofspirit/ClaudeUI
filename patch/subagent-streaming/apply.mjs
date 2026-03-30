@@ -91,19 +91,23 @@ if (src.includes(patchFMarker)) {
   const rvyName = rvyMatch[1]
   console.log(`Found RVY function: ${rvyName}()`)
 
-  // Find the RVY call site. Two known patterns:
+  // Find the RVY call site. Known patterns:
   //
   // v2.1.45 (old): if(RVY(MSG))ARR.push(MSG),
-  // v2.1.47 (new): if(RVY(MSG))await TRANSCRIPT([MSG],...
+  // v2.1.47:       if(RVY(MSG))await TRANSCRIPT([MSG],...
+  // v2.1.87:       if(RVY(MSG)){if(await TRANSCRIPT([MSG],...
   //
-  // We try the new pattern first, then fall back to the old one.
-  const newCallRe = new RegExp(
+  // We try patterns newest first.
+  const bracedCallRe = new RegExp(
+    `if\\(${rvyName}\\((${V})\\)\\)\\{`
+  )
+  const awaitCallRe = new RegExp(
     `if\\(${rvyName}\\((${V})\\)\\)await `
   )
   const oldCallRe = new RegExp(
     `if\\(${rvyName}\\((${V})\\)\\)(${V})\\.push\\(\\1\\),`
   )
-  const callMatch = src.match(newCallRe) || src.match(oldCallRe)
+  const callMatch = src.match(bracedCallRe) || src.match(awaitCallRe) || src.match(oldCallRe)
   if (!callMatch) {
     console.error('ERROR: Cannot locate RVY call site in cR.')
     process.exit(1)
@@ -217,43 +221,56 @@ if (src.includes(patchBMarker)) {
 } else {
   // Find the unique sync loop pattern.
   //
-  // v2.1.47–v2.1.63 (old): push and bash_progress in the same if:
+  // v2.1.47–v2.1.63: push and bash_progress in the same if:
   //   if(ARR.push(MSG),MSG.type==="progress"&&(MSG.data.type==="bash_progress"||...)
   //
-  // v2.1.71+ (new): push+stats in one if, bash_progress check is a separate if:
+  // v2.1.71–v2.1.81: push+stats in one if, bash_progress check is a separate if:
   //   =VAL.value;if(ARR.push(MSG),STATS(VARS,MSG,TOOLS,j.options.tools),...)
-  //   followed by: if(MSG.type==="progress"&&(bash_progress||...))
   //
-  // Try old pattern first, fall back to new.
+  // v2.1.87+: push+stats+bool in one if, bash_progress is a separate if:
+  //   =VAL.value;if(ARR.push(MSG),STATS(STATS,MSG,TOOLS,H.options.tools),BOOL){...}
+  //   if(MSG.type==="progress"&&(bash_progress||...))
+  //
+  // Try patterns newest first.
+  const v87PushRe = new RegExp(
+    `=(${V})\\.value;if\\((${V})\\.push\\((${V})\\),` +
+    `(${V})\\((${V}),\\3,(${V}),(${V})\\.options\\.tools\\),` +
+    `(${V})\\)`
+  )
+  const v71PushRe = new RegExp(
+    `=(${V})\\.value;if\\((${V})\\.push\\((${V})\\),` +
+    `(${V})\\(${V},\\3,${V},${V}\\.options\\.tools\\)`
+  )
   const oldPushRe = new RegExp(
     `if\\((${V})\\.push\\((${V})\\),\\2\\.type==="progress"&&` +
     `(?:\\(\\2\\.data\\.type==="bash_progress"\\|\\|\\2\\.data\\.type==="powershell_progress"\\)|` +
     `\\2\\.data\\.type==="bash_progress")`
   )
-  const newPushRe = new RegExp(
-    `=(${V})\\.value;if\\((${V})\\.push\\((${V})\\),` +
-    `(${V})\\(${V},\\3,${V},${V}\\.options\\.tools\\)`
-  )
-  let m = src.match(oldPushRe)
+  let m = src.match(v87PushRe)
   let matchStr, msgVar, idx
   if (m) {
-    matchStr = m[0]
-    msgVar = m[2]
-    idx = src.indexOf(matchStr)
-    console.log(`Found sync loop body (old pattern) at char ${idx} (arr=${m[1]}, msg=${msgVar})`)
-  } else {
-    m = src.match(newPushRe)
-    if (!m) {
-      console.error('ERROR: Cannot locate sub-agent sync loop push+bash_progress pattern.')
-      process.exit(1)
-    }
-    // For new pattern, matchStr starts at "if(" — skip the "=VAL.value;" prefix
+    // v2.1.87: matchStr starts at "if(" — skip "=VAL.value;"
     const fullMatch = m[0]
     const ifStart = fullMatch.indexOf('if(')
     matchStr = fullMatch.slice(ifStart)
     msgVar = m[3]
     idx = src.indexOf(fullMatch) + ifStart
-    console.log(`Found sync loop body (new pattern) at char ${idx} (arr=${m[2]}, msg=${msgVar})`)
+    console.log(`Found sync loop body (v87 pattern) at char ${idx} (arr=${m[2]}, msg=${msgVar})`)
+  } else if ((m = src.match(v71PushRe))) {
+    const fullMatch = m[0]
+    const ifStart = fullMatch.indexOf('if(')
+    matchStr = fullMatch.slice(ifStart)
+    msgVar = m[3]
+    idx = src.indexOf(fullMatch) + ifStart
+    console.log(`Found sync loop body (v71 pattern) at char ${idx} (arr=${m[2]}, msg=${msgVar})`)
+  } else if ((m = src.match(oldPushRe))) {
+    matchStr = m[0]
+    msgVar = m[2]
+    idx = src.indexOf(matchStr)
+    console.log(`Found sync loop body (old pattern) at char ${idx} (arr=${m[1]}, msg=${msgVar})`)
+  } else {
+    console.error('ERROR: Cannot locate sub-agent sync loop push+bash_progress pattern.')
+    process.exit(1)
   }
 
   // Extract callback var (D), parent msg var (j), agent ID var (r) from nearby code
@@ -305,16 +322,24 @@ const patchCMarker = '/*PATCHED:subagent-C*/'
 if (src.includes(patchCMarker)) {
   console.log('Already applied. Skipping.')
 } else {
+  // The bash_progress handler anchor uses a variable name that changes between
+  // versions (A in v2.1.47, q in v2.1.87). Use regex to find it dynamically.
+  //
   // v2.1.47: else if(A.data.type==="bash_progress"){
   // v2.1.49: else if(A.data.type==="bash_progress"||A.data.type==="powershell_progress"){
-  const anchorNew = 'else if(A.data.type==="bash_progress"||A.data.type==="powershell_progress"){'
-  const anchorOld = 'else if(A.data.type==="bash_progress"){'
-  const anchor = src.includes(anchorNew) ? anchorNew : anchorOld
-  const anchorIdx = src.indexOf(anchor)
-  if (anchorIdx === -1) {
+  // v2.1.87: else if(q.data.type==="bash_progress"||q.data.type==="powershell_progress"){
+  const anchorRe = new RegExp(
+    `else if\\((${V})\\.data\\.type==="bash_progress"` +
+    `(?:\\|\\|\\1\\.data\\.type==="powershell_progress")?\\)\\{`
+  )
+  const anchorMatch = src.match(anchorRe)
+  if (!anchorMatch) {
     console.error('ERROR: Cannot locate bash_progress handler in ZhA.')
     process.exit(1)
   }
+  const anchor = anchorMatch[0]
+  const anchorIdx = src.indexOf(anchor)
+  const progressVar = anchorMatch[1]
 
   // Extract session_id function name from nearby ZhA code
   const ctx = src.slice(anchorIdx - 800, anchorIdx)
@@ -331,9 +356,9 @@ if (src.includes(patchCMarker)) {
   const sessFn = sessFnMatch[1]
 
   const injection =
-    `${patchCMarker}else if(A.data.type==="agent_stream_event"){` +
-    `yield{type:"stream_event",event:A.data.event,` +
-    `parent_tool_use_id:A.parentToolUseID,session_id:${sessFn}(),uuid:A.uuid}` +
+    `${patchCMarker}else if(${progressVar}.data.type==="agent_stream_event"){` +
+    `yield{type:"stream_event",event:${progressVar}.data.event,` +
+    `parent_tool_use_id:${progressVar}.parentToolUseID,session_id:${sessFn}(),uuid:${progressVar}.uuid}` +
     `}`
 
   src = src.slice(0, anchorIdx) + injection + src.slice(anchorIdx)
@@ -354,16 +379,29 @@ const patchDMarker = '/*PATCHED:subagent-D*/'
 if (src.includes(patchDMarker)) {
   console.log('Already applied. Skipping.')
 } else {
-  // --- Text extraction function (FM6/sM6 equivalent) ---
-  // Find by structure: function NAME(A,q="Execution completed"){let K=GN(A);if(!K)return q;return K.message.content.filter(...)
-  const textFnRe = new RegExp(
+  // --- Text extraction function (FM6/sM6/BI8 equivalent) ---
+  //
+  // v2.1.47–v2.1.81: function NAME(A,q="Execution completed"){let K=GN(A);if(!K)return q;return K.message.content.filter(...)
+  // v2.1.87+: function NAME(q,K="Execution completed"){let _=x0(q);if(!_)return K;return S3(_.message.content,...)}
+  //
+  // In v2.1.87, the inline filter/map was extracted into a helper S3().
+  // We can't modify S3 (used globally). Instead we replace S3(...) with
+  // inline filter+map that includes thinking blocks.
+  //
+  // Try new pattern first (uses helper), then old (inline filter).
+  const newTextFnRe = new RegExp(
+    `function (${V})\\((${V}),(${V})="Execution completed"\\)\\{` +
+    `let (${V})=(${V})\\(\\2\\);if\\(!\\4\\)return \\3;` +
+    `return (${V})\\(\\4\\.message\\.content,\`\\n\`\\)\\|\\|\\3\\}`
+  )
+  const oldTextFnRe = new RegExp(
     `function (${V})\\((${V}),(${V})="Execution completed"\\)\\{` +
     `let (${V})=(${V})\\(\\2\\);if\\(!\\4\\)return \\3;` +
     `return \\4\\.message\\.content\\.filter`
   )
-  const textFnMatch = src.match(textFnRe)
+  const textFnMatch = src.match(newTextFnRe) || src.match(oldTextFnRe)
   if (!textFnMatch) {
-    console.error('ERROR: Cannot locate text extraction function (FM6/sM6 equivalent).')
+    console.error('ERROR: Cannot locate text extraction function.')
     process.exit(1)
   }
 
@@ -371,36 +409,59 @@ if (src.includes(patchDMarker)) {
   const textFnIdx = src.indexOf(textFnMatch[0])
   console.log(`Found text extraction function: ${textFnName}() at char ${textFnIdx}`)
 
-  const fm6Area = src.slice(textFnIdx, textFnIdx + 300)
-  const fm6FilterRe = new RegExp(`\\.filter\\(\\((${V})\\)=>\\1\\.type==="text"\\)`)
-  const fm6m = fm6Area.match(fm6FilterRe)
-  if (!fm6m) {
-    console.error('ERROR: Cannot find text filter in text extraction function.')
-    process.exit(1)
-  }
-
-  const fm6Var = fm6m[1]
-
-  // Patch filter: type==="text" → type==="text"||VAR.type==="thinking"
-  const oldFilter = `${fm6Var}.type==="text")`
-  const newFilter = `${fm6Var}.type==="text"||${fm6Var}.type==="thinking")`
-  const filterAbsIdx = src.indexOf(oldFilter, textFnIdx)
-  if (filterAbsIdx === -1 || filterAbsIdx > textFnIdx + 300) {
-    console.error('ERROR: Cannot find filter at expected location.')
-    process.exit(1)
-  }
-
-  src = src.slice(0, filterAbsIdx) + patchDMarker + newFilter + src.slice(filterAbsIdx + oldFilter.length)
-
-  // Patch map: ("text"in V)?V.text:"" → ("text"in V)?V.text:("thinking"in V)?V.thinking:""
-  const oldMap = `("text"in ${fm6Var})?${fm6Var}.text:""`
-  const newMap = `("text"in ${fm6Var})?${fm6Var}.text:("thinking"in ${fm6Var})?${fm6Var}.thinking:""`
-  const mapIdx = src.indexOf(oldMap, filterAbsIdx)
-  if (mapIdx !== -1 && mapIdx < filterAbsIdx + 200) {
-    src = src.slice(0, mapIdx) + newMap + src.slice(mapIdx + oldMap.length)
-    console.log('Patched FM6 (filter + map).')
+  if (textFnMatch[6]) {
+    // New pattern (v2.1.87+): uses S3() helper
+    // Replace: return S3(_.message.content,`\n`)||K}
+    // With: return _.message.content.filter(X=>X.type==="text"||X.type==="thinking").map(X=>("text"in X)?X.text:("thinking"in X)?X.thinking:"").join(`\n`)||K}
+    const resultVar = textFnMatch[4]
+    const defaultVar = textFnMatch[3]
+    const helperName = textFnMatch[6]
+    const oldReturn = `return ${helperName}(${resultVar}.message.content,\`\n\`)||${defaultVar}}`
+    const newReturn =
+      `return ${patchDMarker}${resultVar}.message.content` +
+      `.filter(_p=>_p.type==="text"||_p.type==="thinking")` +
+      `.map(_p=>("text"in _p)?_p.text:("thinking"in _p)?_p.thinking:"")` +
+      `.join(\`\n\`)||${defaultVar}}`
+    const returnIdx = src.indexOf(oldReturn, textFnIdx)
+    if (returnIdx === -1 || returnIdx > textFnIdx + 300) {
+      console.error('ERROR: Cannot find S3 return in text extraction function.')
+      process.exit(1)
+    }
+    src = src.slice(0, returnIdx) + newReturn + src.slice(returnIdx + oldReturn.length)
+    console.log(`Patched ${textFnName} (replaced ${helperName}() with inline filter+map including thinking).`)
   } else {
-    console.log('Patched FM6 (filter only).')
+    // Old pattern (v2.1.47–v2.1.81): inline filter/map
+    const fm6Area = src.slice(textFnIdx, textFnIdx + 300)
+    const fm6FilterRe = new RegExp(`\\.filter\\(\\((${V})\\)=>\\1\\.type==="text"\\)`)
+    const fm6m = fm6Area.match(fm6FilterRe)
+    if (!fm6m) {
+      console.error('ERROR: Cannot find text filter in text extraction function.')
+      process.exit(1)
+    }
+
+    const fm6Var = fm6m[1]
+
+    // Patch filter: type==="text" → type==="text"||VAR.type==="thinking"
+    const oldFilter = `${fm6Var}.type==="text")`
+    const newFilter = `${fm6Var}.type==="text"||${fm6Var}.type==="thinking")`
+    const filterAbsIdx = src.indexOf(oldFilter, textFnIdx)
+    if (filterAbsIdx === -1 || filterAbsIdx > textFnIdx + 300) {
+      console.error('ERROR: Cannot find filter at expected location.')
+      process.exit(1)
+    }
+
+    src = src.slice(0, filterAbsIdx) + patchDMarker + newFilter + src.slice(filterAbsIdx + oldFilter.length)
+
+    // Patch map: ("text"in V)?V.text:"" → ("text"in V)?V.text:("thinking"in V)?V.thinking:""
+    const oldMap = `("text"in ${fm6Var})?${fm6Var}.text:""`
+    const newMap = `("text"in ${fm6Var})?${fm6Var}.text:("thinking"in ${fm6Var})?${fm6Var}.thinking:""`
+    const mapIdx = src.indexOf(oldMap, filterAbsIdx)
+    if (mapIdx !== -1 && mapIdx < filterAbsIdx + 200) {
+      src = src.slice(0, mapIdx) + newMap + src.slice(mapIdx + oldMap.length)
+      console.log('Patched (filter + map).')
+    } else {
+      console.log('Patched (filter only).')
+    }
   }
 
   // --- Background agent polling map ---

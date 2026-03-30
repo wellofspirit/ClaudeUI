@@ -129,10 +129,13 @@ if (src.includes(PATCH_MARKER)) {
   }
 
   // --- Yi (local_agent type check): same pattern but type==="local_agent" ---
-  const yiRe = new RegExp(`function (${V})\\(${V}\\)\\{return typeof ${V}==="object"&&${V}!==null&&"type"in ${V}&&${V}\\.type==="local_agent"\\}`)
+  // In 0.2.87+ this function is duplicated (once in task-management, once in TUI).
+  // Disambiguate by requiring the next function to reference the captured name
+  // with agentType!=="main-session" (only the task-management copy has this).
+  const yiRe = new RegExp(`function (${V})\\(${V}\\)\\{return typeof ${V}==="object"&&${V}!==null&&"type"in ${V}&&${V}\\.type==="local_agent"\\}function ${V}\\(${V}\\)\\{return \\1\\(${V}\\)&&${V}\\.agentType!=="main-session"\\}`)
   const yiMatch = yiRe.exec(src)
   if (!yiMatch) {
-    console.error('ERROR: Cannot find local_agent type check function (Yi)')
+    console.error('ERROR: Cannot find local_agent type check function (Yi) with agentType disambiguation')
     process.exit(1)
   }
   const yiFn = yiMatch[1]
