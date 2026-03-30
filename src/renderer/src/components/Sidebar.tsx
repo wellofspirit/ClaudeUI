@@ -8,6 +8,7 @@ import { WorktreesModal } from './WorktreesModal'
 import { WorktreeCleanupModal } from './WorktreeCleanupModal'
 import { RemoteAccessModal } from './RemoteAccessModal'
 import { useAutomationStore } from '../stores/automation-store'
+import { formatTokenCount } from './usage/usage-utils'
 import { useIsMobile } from '../hooks/useIsMobile'
 
 /** Convert mouse event coords to zoom-adjusted position for fixed-position menus */
@@ -1361,10 +1362,10 @@ function UsagePanel({ usage, onRefresh }: { usage: AccountUsage | null; onRefres
   if (currentBlock) {
     const total = currentBlock.tokens.inputTokens + currentBlock.tokens.outputTokens +
       currentBlock.tokens.cacheCreationTokens + currentBlock.tokens.cacheReadTokens
-    const tokStr = total >= 1_000_000 ? `${(total / 1_000_000).toFixed(1)}M` : total >= 1_000 ? `${(total / 1_000).toFixed(1)}K` : String(total)
+    const tokStr = formatTokenCount(total)
     const costStr = currentBlock.costUsd >= 0.01 ? `$${currentBlock.costUsd.toFixed(2)}` : '$0.00'
-    const burnStr = currentBlock.burnRate ? `${currentBlock.burnRate.tokensPerMin} tok/min` : ''
-    blockSummary = `${tokStr} tok · ${costStr}${burnStr ? ` · ${burnStr}` : ''}`
+    const burnStr = currentBlock.burnRate ? `${formatTokenCount(currentBlock.burnRate.tokensPerMin)} tok/min` : ''
+    blockSummary = `${tokStr} tok\u2009·\u2009${costStr}${burnStr ? `\u2009·\u2009${burnStr}` : ''}`
   }
 
   return (

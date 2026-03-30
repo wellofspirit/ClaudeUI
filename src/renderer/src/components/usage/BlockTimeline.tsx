@@ -763,7 +763,7 @@ function SnapTooltip({
       ))}
       {snap.burnRate && (
         <div className="text-text-muted">
-          Burn: <span className="font-mono">{snap.burnRate.tokensPerMin} tok/min</span>
+          Burn: <span className="font-mono">{formatTokenCount(snap.burnRate.tokensPerMin)} tok/min</span>
         </div>
       )}
     </div>
