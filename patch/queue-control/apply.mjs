@@ -219,43 +219,58 @@ if (!skipA2) {
   console.log('\n=== Part A2: queued_command_consumed notification ===')
 
   // Find the queued_command attachment handler in submitMessage.
-  // Pattern: else if(G&&<var>.attachment.type==="queued_command")yield{...isReplay:!0}
-  // We need to replace it so it:
-  //   1. Always yields a system notification (regardless of G)
-  //   2. Only yields the user message replay when G is true
+  // SDK ≤0.2.87: else if(Z&&q8.attachment.type==="queued_command")yield{...isReplay:!0}
+  // SDK ≥0.2.89: else if(Z&&q8.attachment.type==="queued_command"){let W6=q8.attachment;yield{...}}
+  // We replace it so it:
+  //   1. Always yields a system notification (regardless of replay var)
+  //   2. Only yields the user message replay when replay var is true
 
-  // Find the pattern: else if(REPLAY_VAR&&<var>.attachment.type==="queued_command")
-  // Capture: the replayUserMessages var and the attachment var
-  // v2.1.50: G, v2.1.59: Z — generalize with ${V}
-  const qcRe = new RegExp(
+  // Try new pattern first (≥0.2.89): has `let` extraction + braces wrapping + fileAttachments spread
+  // Then fall back to old pattern (≤0.2.87): inline yield
+  const qcReNew = new RegExp(
+    `else if\\((${V})&&(${V})\\.attachment\\.type==="queued_command"\\)\\{let (${V})=\\2\\.attachment;yield\\{`
+  )
+  const qcReOld = new RegExp(
     `else if\\((${V})&&(${V})\\.attachment\\.type==="queued_command"\\)yield\\{`
   )
-  const qcMatch = qcRe.exec(src)
+
+  let qcMatch = qcReNew.exec(src)
+  let isNewPattern = !!qcMatch
+  if (!qcMatch) qcMatch = qcReOld.exec(src)
   if (!qcMatch) {
     console.error('ERROR: Cannot find queued_command attachment handler in submitMessage')
-    console.error('Pattern: else if(REPLAY&&<var>.attachment.type==="queued_command")yield{')
     process.exit(1)
   }
 
   const qcIdx = qcMatch.index
   const replayVar = qcMatch[1]
   const attachVar = qcMatch[2]
-  console.log(`Found queued_command handler at char ${qcIdx}, replay var: ${replayVar}, attachment var: ${attachVar}`)
+  const extractedVar = isNewPattern ? qcMatch[3] : null
+  console.log(`Found queued_command handler at char ${qcIdx}, replay var: ${replayVar}, attachment var: ${attachVar}${isNewPattern ? `, extracted var: ${extractedVar}` : ''} (${isNewPattern ? 'new' : 'old'} pattern)`)
 
   // Verify uniqueness
-  const allQcMatches = [...src.matchAll(new RegExp(qcRe, 'g'))]
+  const qcReUsed = isNewPattern ? qcReNew : qcReOld
+  const allQcMatches = [...src.matchAll(new RegExp(qcReUsed, 'g'))]
   if (allQcMatches.length > 1) {
     console.error('ERROR: queued_command handler matched multiple times. Aborting.')
     process.exit(1)
   }
 
-  // Find the full extent of the yield statement. It ends with "isReplay:!0}"
-  // The yield object contains nested braces (message:{...}), so we can't use [^}]*
-  // Instead, use [\s\S]*? (non-greedy any char) anchored to isReplay:!0}
+  // Find the full extent of the handler.
+  // New pattern (≥0.2.89): ends with `...fileAttachments}:{}}}` (double-close for let-block + yield)
+  // Old pattern (≤0.2.87): ends with `isReplay:!0}`
   const afterQc = src.slice(qcIdx)
-  const fullQcRe = new RegExp(
-    `else if\\(${replayVar.replace(/\$/g, '\\$')}&&${attachVar.replace(/\$/g, '\\$')}\\.attachment\\.type==="queued_command"\\)yield\\{[\\s\\S]*?isReplay:!0\\}`
-  )
+  let fullQcRe
+  if (isNewPattern) {
+    // Match up to the `break;case"` that follows the handler block
+    fullQcRe = new RegExp(
+      `else if\\(${replayVar.replace(/\$/g, '\\$')}&&${attachVar.replace(/\$/g, '\\$')}\\.attachment\\.type==="queued_command"\\)\\{[\\s\\S]*?\\}\\}(?=break;case")`
+    )
+  } else {
+    fullQcRe = new RegExp(
+      `else if\\(${replayVar.replace(/\$/g, '\\$')}&&${attachVar.replace(/\$/g, '\\$')}\\.attachment\\.type==="queued_command"\\)yield\\{[\\s\\S]*?isReplay:!0\\}`
+    )
+  }
   const fullQcMatch = fullQcRe.exec(afterQc)
   if (!fullQcMatch) {
     console.error('ERROR: Cannot extract full queued_command yield statement')
@@ -291,14 +306,25 @@ if (!skipA2) {
   console.log(`  UUID generator: ${uuidFn}`)
 
   // Build the replacement code
+  // For the new pattern (≥0.2.89), preserve timestamp and fileAttachments spread
+  const att = isNewPattern ? extractedVar : `${attachVar}.attachment`
+  const promptExpr = `${att}.prompt`
+  const srcUuidExpr = `${att}.source_uuid`
+  const fileAttachExpr = isNewPattern
+    ? `,...${att}.fileAttachments?.length?{file_attachments:${att}.fileAttachments}:{}`
+    : ''
+  const timestampExpr = isNewPattern ? `,timestamp:${attachVar}.timestamp` : ''
+  const letPrefix = isNewPattern ? `let ${extractedVar}=${attachVar}.attachment;` : ''
+
   const newCode = PATCH_A2_MARKER +
     `else if(${attachVar}.attachment.type==="queued_command"){` +
+      letPrefix +
       `yield{type:"system",subtype:"queued_command_consumed",` +
-        `prompt:${attachVar}.attachment.prompt,source_uuid:${attachVar}.attachment.source_uuid,` +
+        `prompt:${promptExpr},source_uuid:${srcUuidExpr},` +
         `session_id:${sessionIdFn}(),uuid:${uuidFn}()};` +
-      `if(${replayVar})yield{type:"user",message:{role:"user",content:${attachVar}.attachment.prompt},` +
+      `if(${replayVar})yield{type:"user",message:{role:"user",content:${promptExpr}},` +
         `session_id:${sessionIdFn}(),parent_tool_use_id:null,` +
-        `uuid:${attachVar}.attachment.source_uuid||${attachVar}.uuid,isReplay:!0}` +
+        `uuid:${srcUuidExpr}||${attachVar}.uuid${timestampExpr},isReplay:!0${fileAttachExpr}}` +
     `}`
 
   src = src.slice(0, qcIdx) + newCode + src.slice(qcIdx + oldCode.length)
