@@ -1,4 +1,4 @@
-import { app, shell, BrowserWindow, ipcMain } from 'electron'
+import { app, shell, BrowserWindow, ipcMain, Menu } from 'electron'
 import { join } from 'path'
 import { execFileSync } from 'child_process'
 
@@ -33,6 +33,7 @@ import { RemoteServer, getNetworkInterfaces } from './services/remote-server'
 import { RemoteDispatcher } from './services/remote-dispatcher'
 import { serviceSession } from './services/service-session'
 import { logger } from './services/logger'
+import { getSdkVersion } from './services/claude-session'
 import icon from '../../resources/icon.png?asset'
 
 // Prevent "nested session" error when launched from a Claude Code terminal
@@ -235,6 +236,64 @@ function createWindow(): void {
 app.whenReady().then(() => {
   // Set app user model id for windows
   electronApp.setAppUserModelId('com.electron')
+
+  // ── About panel ────────────────────────────────────────────────────
+  const rawVersion = app.getVersion() // from package.json "version"
+  const appVersion = is.dev || rawVersion === '1.0.0' ? 'Local Build' : rawVersion
+  const sdkVersion = getSdkVersion()
+  const cliVersion = sdkVersion !== 'unknown' ? sdkVersion.replace(/^0\./, '2.') : 'unknown'
+
+  app.setAboutPanelOptions({
+    applicationName: 'ClaudeUI',
+    applicationVersion: appVersion,
+    version: `SDK ${sdkVersion} · CLI ${cliVersion}`,
+    copyright: '© 2025 Daniel Liu',
+    website: 'https://github.com/wellofspirit/ClaudeUI'
+  })
+
+  // ── Version info IPC (for Settings dialog) ─────────────────────────
+  ipcMain.handle('app:version-info', () => ({
+    appVersion,
+    sdkVersion,
+    cliVersion
+  }))
+
+  // ── App menu (About panel + standard shortcuts) ────────────────────
+  const isMac = process.platform === 'darwin'
+  Menu.setApplicationMenu(
+    Menu.buildFromTemplate([
+      // macOS app menu (About, Hide, Quit, etc.)
+      ...(isMac
+        ? [
+            {
+              label: app.name,
+              submenu: [
+                { role: 'about' as const },
+                { type: 'separator' as const },
+                { role: 'services' as const },
+                { type: 'separator' as const },
+                { role: 'hide' as const },
+                { role: 'hideOthers' as const },
+                { role: 'unhide' as const },
+                { type: 'separator' as const },
+                { role: 'quit' as const }
+              ]
+            }
+          ]
+        : []),
+      { role: 'editMenu' },
+      { role: 'viewMenu' },
+      { role: 'windowMenu' },
+      {
+        role: 'help',
+        submenu: [
+          // On Windows/Linux, About lives here; on macOS it's in the app menu
+          // but having it in Help too doesn't hurt.
+          { role: 'about' }
+        ]
+      }
+    ])
+  )
 
   // Default open or close DevTools by F12 in development
   // and ignore CommandOrControl + R in production.

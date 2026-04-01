@@ -22,7 +22,7 @@ import { execFile } from 'node:child_process'
 import { join } from 'node:path'
 import { homedir, platform } from 'node:os'
 import type { BrowserWindow } from 'electron'
-import { ClaudeSession } from './claude-session'
+import { ClaudeSession, getSdkVersion } from './claude-session'
 import type { AccountUsage, ExtraUsage, RateWindow } from '../../shared/types'
 import { logger } from './logger'
 
@@ -68,8 +68,7 @@ const CACHE_PATH = join(CACHE_DIR, 'usage-cache.json')
 function getCliUserAgent(): string {
   try {
     // SDK version 0.2.X corresponds to CLI version 2.1.X
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const sdkVersion: string = require('@anthropic-ai/claude-agent-sdk/package.json').version
+    const sdkVersion = getSdkVersion()
     const cliVersion = sdkVersion.replace(/^0\./, '2.')
     return `claude-code/${cliVersion}`
   } catch {

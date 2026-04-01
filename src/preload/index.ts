@@ -260,7 +260,10 @@ const api: ClaudeAPI = {
   onVoiceError: onEvent('voice:error'),
 
   // Renderer → main process log relay
-  logRelay: (level: string, source: string, message: string) => ipcRenderer.send('log:relay', level, source, message)
+  logRelay: (level: string, source: string, message: string) => ipcRenderer.send('log:relay', level, source, message),
+
+  // Version info
+  getVersionInfo: () => ipcRenderer.invoke('app:version-info')
 }
 
 if (process.contextIsolated) {

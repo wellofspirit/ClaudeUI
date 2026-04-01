@@ -25,6 +25,42 @@ export function getCliJsPath(): string | undefined {
 }
 
 /**
+ * Read the SDK version from its package.json.
+ * Works both in dev (node_modules) and production (extraResources / asar.unpacked).
+ */
+export function getSdkVersion(): string {
+  // In production, the SDK is copied to extraResources and also asar.unpacked.
+  // require() won't resolve it since it's externalized — read from disk instead.
+  const appPath = app.getAppPath()
+  const sdkPkgRelative = path.join('node_modules', '@anthropic-ai', 'claude-agent-sdk', 'package.json')
+  const sdkPkgPaths = appPath.includes('app.asar')
+    ? [
+        // asar.unpacked (asarUnpack config)
+        path.join(appPath.replace('app.asar', 'app.asar.unpacked'), sdkPkgRelative),
+        // extraResources
+        path.join(path.dirname(appPath), 'claude-agent-sdk', 'package.json')
+      ]
+    : [
+        // Dev mode — resolve from project root (appPath points to project dir)
+        path.join(appPath, sdkPkgRelative)
+      ]
+  for (const p of sdkPkgPaths) {
+    try {
+      return JSON.parse(fs.readFileSync(p, 'utf-8')).version
+    } catch {
+      /* try next */
+    }
+  }
+  // Dev mode fallback — require() works fine when node_modules exists
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    return require('@anthropic-ai/claude-agent-sdk/package.json').version
+  } catch {
+    return 'unknown'
+  }
+}
+
+/**
  * Resolve the Electron Helper binary for spawning child processes.
  *
  * On macOS, spawning `process.execPath` (the main Electron binary) causes a

@@ -92,6 +92,10 @@ jobs:
       - name: Install dependencies
         run: bun install
 
+      - name: Stamp version into package.json
+        run: |
+          node -e "const p=require('./package.json'); p.version='${{ needs.version.outputs.version }}'; require('fs').writeFileSync('package.json', JSON.stringify(p, null, 2)+'\n')"
+
       - name: Build app
         run: |
           bun run typecheck

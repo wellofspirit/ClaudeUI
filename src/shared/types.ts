@@ -505,6 +505,8 @@ interface VoiceAPI {
 export interface ClaudeAPI extends SessionAPI, GitAPI, McpAPI, TerminalAPI, AutomationAPI, FileAPI, AccountAPI, RemoteAPI, VoiceAPI {
   /** Relay a log message from the renderer to the main process logger */
   logRelay(level: string, source: string, message: string): void
+  /** App + SDK version info for display in Settings */
+  getVersionInfo(): Promise<{ appVersion: string; sdkVersion: string; cliVersion: string }>
 }
 
 // ---------------------------------------------------------------------------

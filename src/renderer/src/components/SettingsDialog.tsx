@@ -1452,10 +1452,16 @@ export function SettingsDialog({ onClose }: { onClose: () => void }): React.JSX.
   const updateSettings = useSessionStore((s) => s.updateSettings)
   const [search, setSearch] = useState('')
   const [activeSection, setActiveSection] = useState(SECTIONS[0].id)
+  const [versionInfo, setVersionInfo] = useState<{ appVersion: string; sdkVersion: string; cliVersion: string } | null>(null)
   const contentRef = useRef<HTMLDivElement>(null)
   const sectionRefs = useRef<Record<string, HTMLDivElement | null>>({})
   const overlayRef = useRef<HTMLDivElement>(null)
   const isScrollingFromClick = useRef(false)
+
+  // Fetch version info on mount
+  useEffect(() => {
+    window.api.getVersionInfo().then(setVersionInfo).catch(() => {})
+  }, [])
 
   // Close on Escape
   useEffect(() => {
@@ -1640,6 +1646,13 @@ export function SettingsDialog({ onClose }: { onClose: () => void }): React.JSX.
                 ))
               )}
             </div>
+
+            {/* Version info footer */}
+            {versionInfo && (
+              <div className="px-4 py-1.5 text-[11px] text-text-muted/50 text-right border-t border-border/30">
+                {/^\d/.test(versionInfo.appVersion) ? `v${versionInfo.appVersion}` : versionInfo.appVersion} · SDK {versionInfo.sdkVersion} · CLI {versionInfo.cliVersion}
+              </div>
+            )}
           </div>
         </div>
       </div>
