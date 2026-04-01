@@ -452,9 +452,9 @@ export function InputBox(): React.JSX.Element {
     }
     if (e.key === 'Escape' && isRunning) handleCancel()
 
-    // Tab: always suppress default focus-cycling from the textarea.
-    // When voice is enabled and no autocomplete menu is open, start push-to-talk.
-    if (e.key === 'Tab') {
+    // Tab alone (no modifiers): suppress default focus-cycling and start push-to-talk.
+    // Tab combos (Shift+Tab, Ctrl+Tab, etc.) are ignored to avoid accidental activation.
+    if (e.key === 'Tab' && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
       e.preventDefault()
       if (voiceEnabled && voiceState === 'idle' && !slashMenuOpen && !fileMentionOpen) {
         handleVoiceStart()
