@@ -25,6 +25,7 @@ import type {
   TerminalTab,
   WorktreeInfo,
   SandboxSettings,
+  ProxySettings,
   VoiceState,
   VoiceLanguageCode
 } from '../../../shared/types'
@@ -130,6 +131,7 @@ export interface AppSettings {
   voiceEnabled: boolean
   voiceLanguage: VoiceLanguageCode
   sandbox: SandboxSettings
+  proxy: ProxySettings
   logLevel: 'debug' | 'info' | 'warn' | 'error' // global log level
   logFilter: string // per-source overrides: "UsageFetcher:debug,BlockUsage:debug"
 }
@@ -173,6 +175,14 @@ const DEFAULT_SETTINGS: AppSettings = {
     },
     filesystem: { allowWrite: [], denyWrite: [], denyRead: [] },
     excludedCommands: []
+  },
+  proxy: {
+    enabled: false,
+    type: 'http',
+    hostname: '',
+    port: 8080,
+    username: '',
+    password: ''
   },
   logLevel: 'warn',
   logFilter: ''
@@ -259,6 +269,10 @@ export async function hydrateConfigFromDisk(): Promise<void> {
             ...DEFAULT_SETTINGS.sandbox.network,
             ...saved.sandbox?.network
           }
+        },
+        proxy: {
+          ...DEFAULT_SETTINGS.proxy,
+          ...saved.proxy
         }
       }
     : DEFAULT_SETTINGS

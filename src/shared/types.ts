@@ -71,6 +71,15 @@ export type ApprovalDecision = 'allow' | 'deny'
 
 export type PermissionMode = 'default' | 'acceptEdits' | 'plan' | 'auto'
 
+export interface ProxySettings {
+  enabled: boolean
+  type: 'http' | 'socks5'
+  hostname: string
+  port: number
+  username: string
+  password: string
+}
+
 export interface SandboxSettings {
   enabled: boolean
   autoAllowBashIfSandboxed: boolean
@@ -327,6 +336,7 @@ interface SessionAPI {
   loadSkillDetails(cwd: string): Promise<SkillInfo[]>
   onBeforeQuit(cb: () => void): () => void
   confirmQuit(): Promise<void>
+  testProxyConnection(proxy: ProxySettings): Promise<{ ok: boolean; latencyMs: number; error?: string }>
   logError(source: string, message: string): void
 }
 

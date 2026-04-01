@@ -18,8 +18,9 @@ import { createWorktree, getWorktreeStatus, removeWorktree, listWorktrees } from
 import { usageFetcher } from '../services/usage-fetcher'
 import { serviceSession } from '../services/service-session'
 import { blockUsageService } from '../services/block-usage'
-import type { ApprovalDecision, ModelInfo, SandboxSettings, PermissionSuggestion, IpcResult } from '../../shared/types'
+import type { ApprovalDecision, ModelInfo, SandboxSettings, ProxySettings, PermissionSuggestion, IpcResult } from '../../shared/types'
 import { logger } from '../services/logger'
+import { startSocksBridge, stopSocksBridge } from '../services/socks-bridge'
 
 /**
  * Wraps an async IPC handler with try-catch, returning a standardized IpcResult envelope.
@@ -218,8 +219,263 @@ const SESSION_IPC_CHANNELS = [
   'worktree:create', 'worktree:status', 'worktree:remove', 'worktree:list',
   'app:quit-confirm',
   'session:sandbox-violation',
-  'voice:start-server', 'voice:stop-server', 'voice:start-recording', 'voice:stop-recording'
+  'voice:start-server', 'voice:stop-server', 'voice:start-recording', 'voice:stop-recording',
+  'proxy:test-connection'
 ]
+
+// ---------------------------------------------------------------------------
+// Proxy helpers
+// ---------------------------------------------------------------------------
+
+/** Build a proxy URL from proxy settings. */
+function buildProxyUrl(proxy: ProxySettings): string {
+  const auth = proxy.username ? `${encodeURIComponent(proxy.username)}:${encodeURIComponent(proxy.password)}@` : ''
+  const scheme = proxy.type === 'socks5' ? 'socks5' : 'http'
+  return `${scheme}://${auth}${proxy.hostname}:${proxy.port}`
+}
+
+/**
+ * Apply or clear proxy environment variables based on settings.
+ *
+ * - HTTP proxy: sets HTTP_PROXY directly (CLI's bundled https-proxy-agent handles it)
+ * - SOCKS5 proxy: starts a local HTTP CONNECT bridge that tunnels through SOCKS5,
+ *   because the CLI has no native SOCKS5 support
+ */
+export async function applyProxyEnv(proxy: ProxySettings | undefined): Promise<void> {
+  if (proxy?.enabled && proxy.hostname) {
+    if (proxy.type === 'socks5') {
+      // Start local HTTP bridge → SOCKS5
+      try {
+        const port = await startSocksBridge({
+          socksHost: proxy.hostname,
+          socksPort: proxy.port,
+          username: proxy.username || undefined,
+          password: proxy.password || undefined
+        })
+        const bridgeUrl = `http://127.0.0.1:${port}`
+        process.env.HTTP_PROXY = bridgeUrl
+        process.env.HTTPS_PROXY = bridgeUrl
+        process.env.ALL_PROXY = bridgeUrl
+        logger.info('Proxy', `SOCKS5 proxy via bridge: socks5://${proxy.hostname}:${proxy.port} → ${bridgeUrl}`)
+      } catch (err) {
+        logger.error('Proxy', `Failed to start SOCKS5 bridge: ${err instanceof Error ? err.message : err}`)
+        // Clear env vars so we don't leave stale config
+        delete process.env.HTTP_PROXY
+        delete process.env.HTTPS_PROXY
+        delete process.env.ALL_PROXY
+      }
+    } else {
+      // HTTP proxy: direct
+      await stopSocksBridge()
+      const url = buildProxyUrl(proxy)
+      process.env.HTTP_PROXY = url
+      process.env.HTTPS_PROXY = url
+      process.env.ALL_PROXY = url
+      logger.info('Proxy', `HTTP proxy enabled: ${proxy.hostname}:${proxy.port}`)
+    }
+  } else {
+    await stopSocksBridge()
+    delete process.env.HTTP_PROXY
+    delete process.env.HTTPS_PROXY
+    delete process.env.ALL_PROXY
+  }
+}
+
+/**
+ * Test proxy connectivity by making a real HTTPS request through the proxy
+ * to api.anthropic.com. A 401 (Unauthorized) proves the proxy works — we're
+ * testing the tunnel, not the API key.
+ */
+async function testProxyConnection(proxy: ProxySettings): Promise<{ ok: boolean; latencyMs: number; error?: string }> {
+  const http = await import('node:http')
+  const tls = await import('node:tls')
+  const net = await import('node:net')
+
+  const start = Date.now()
+  const TARGET_HOST = 'api.anthropic.com'
+  const TARGET_PORT = 443
+  const TIMEOUT_MS = 10_000
+
+  /** Upgrade a raw socket to TLS, send a GET, and check the HTTP status. */
+  function verifyThroughTls(rawSocket: import('node:net').Socket): Promise<{ ok: boolean; latencyMs: number; error?: string }> {
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        tlsSocket.destroy()
+        resolve({ ok: false, latencyMs: Date.now() - start, error: 'TLS handshake timed out' })
+      }, TIMEOUT_MS)
+
+      const tlsSocket = tls.connect({ socket: rawSocket, servername: TARGET_HOST }, () => {
+        // TLS established — send a minimal HTTP request
+        tlsSocket.write(
+          `GET /v1/models HTTP/1.1\r\nHost: ${TARGET_HOST}\r\nConnection: close\r\n\r\n`
+        )
+      })
+
+      tlsSocket.once('data', (chunk: Buffer) => {
+        clearTimeout(timer)
+        tlsSocket.destroy()
+        const head = chunk.toString('utf8', 0, Math.min(chunk.length, 128))
+        const statusMatch = head.match(/^HTTP\/\d\.\d (\d{3})/)
+        if (statusMatch) {
+          // Any HTTP response (even 401) means the proxy routed traffic successfully
+          resolve({ ok: true, latencyMs: Date.now() - start })
+        } else {
+          resolve({ ok: false, latencyMs: Date.now() - start, error: 'Unexpected response from server' })
+        }
+      })
+
+      tlsSocket.on('error', (err) => {
+        clearTimeout(timer)
+        resolve({ ok: false, latencyMs: Date.now() - start, error: `TLS error: ${err.message}` })
+      })
+    })
+  }
+
+  if (proxy.type === 'socks5') {
+    // SOCKS5 handshake (RFC 1928) → connect to target → TLS verify
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        socket.destroy()
+        resolve({ ok: false, latencyMs: Date.now() - start, error: 'Connection timed out (10s)' })
+      }, TIMEOUT_MS)
+
+      const socket = net.connect({ host: proxy.hostname, port: proxy.port })
+
+      socket.on('error', (err) => {
+        clearTimeout(timer)
+        resolve({ ok: false, latencyMs: Date.now() - start, error: err.message })
+      })
+
+      socket.once('connect', () => {
+        // Step 1: greeting — offer no-auth (0x00) and user/pass (0x02)
+        const methods = proxy.username ? Buffer.from([0x05, 0x02, 0x00, 0x02]) : Buffer.from([0x05, 0x01, 0x00])
+        socket.write(methods)
+      })
+
+      let phase: 'greeting' | 'auth' | 'connect' = 'greeting'
+
+      socket.on('data', async (data: Buffer) => {
+        if (phase === 'greeting') {
+          if (data.length < 2 || data[0] !== 0x05) {
+            clearTimeout(timer)
+            socket.destroy()
+            resolve({ ok: false, latencyMs: Date.now() - start, error: 'Invalid SOCKS5 greeting response' })
+            return
+          }
+          const method = data[1]
+          if (method === 0x02 && proxy.username) {
+            // Step 2: username/password auth (RFC 1929)
+            phase = 'auth'
+            const uBuf = Buffer.from(proxy.username, 'utf8')
+            const pBuf = Buffer.from(proxy.password, 'utf8')
+            const authBuf = Buffer.alloc(3 + uBuf.length + pBuf.length)
+            authBuf[0] = 0x01 // version
+            authBuf[1] = uBuf.length
+            uBuf.copy(authBuf, 2)
+            authBuf[2 + uBuf.length] = pBuf.length
+            pBuf.copy(authBuf, 3 + uBuf.length)
+            socket.write(authBuf)
+          } else if (method === 0x00) {
+            // No auth required — send connect request
+            phase = 'connect'
+            socket.write(buildSocks5ConnectRequest(TARGET_HOST, TARGET_PORT))
+          } else if (method === 0xff) {
+            clearTimeout(timer)
+            socket.destroy()
+            resolve({ ok: false, latencyMs: Date.now() - start, error: 'SOCKS5 proxy rejected authentication methods' })
+          }
+        } else if (phase === 'auth') {
+          if (data.length < 2 || data[1] !== 0x00) {
+            clearTimeout(timer)
+            socket.destroy()
+            resolve({ ok: false, latencyMs: Date.now() - start, error: 'SOCKS5 authentication failed' })
+            return
+          }
+          // Auth succeeded — send connect request
+          phase = 'connect'
+          socket.write(buildSocks5ConnectRequest(TARGET_HOST, TARGET_PORT))
+        } else if (phase === 'connect') {
+          if (data.length < 2 || data[0] !== 0x05) {
+            clearTimeout(timer)
+            socket.destroy()
+            resolve({ ok: false, latencyMs: Date.now() - start, error: 'Invalid SOCKS5 connect response' })
+            return
+          }
+          if (data[1] !== 0x00) {
+            const errors: Record<number, string> = {
+              0x01: 'general failure', 0x02: 'connection not allowed',
+              0x03: 'network unreachable', 0x04: 'host unreachable',
+              0x05: 'connection refused', 0x06: 'TTL expired',
+              0x07: 'command not supported', 0x08: 'address type not supported'
+            }
+            clearTimeout(timer)
+            socket.destroy()
+            resolve({ ok: false, latencyMs: Date.now() - start, error: `SOCKS5: ${errors[data[1]] || `error 0x${data[1].toString(16)}`}` })
+            return
+          }
+          // Tunnel established — remove listeners, verify with TLS
+          clearTimeout(timer)
+          socket.removeAllListeners('data')
+          const result = await verifyThroughTls(socket)
+          resolve(result)
+        }
+      })
+    })
+  }
+
+  // HTTP proxy: CONNECT tunnel → TLS verify
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      req.destroy()
+      resolve({ ok: false, latencyMs: Date.now() - start, error: 'Connection timed out (10s)' })
+    }, TIMEOUT_MS)
+
+    const authHeader = proxy.username
+      ? { 'Proxy-Authorization': 'Basic ' + Buffer.from(`${proxy.username}:${proxy.password}`).toString('base64') }
+      : {}
+
+    const req = http.request({
+      host: proxy.hostname,
+      port: proxy.port || 8080,
+      method: 'CONNECT',
+      path: `${TARGET_HOST}:${TARGET_PORT}`,
+      headers: authHeader
+    })
+
+    req.on('connect', async (res, socket) => {
+      clearTimeout(timer)
+      if (res.statusCode !== 200) {
+        socket.destroy()
+        resolve({ ok: false, latencyMs: Date.now() - start, error: `Proxy returned HTTP ${res.statusCode}` })
+        return
+      }
+      // Tunnel open — verify with TLS
+      const result = await verifyThroughTls(socket)
+      resolve(result)
+    })
+
+    req.on('error', (err) => {
+      clearTimeout(timer)
+      resolve({ ok: false, latencyMs: Date.now() - start, error: err.message })
+    })
+
+    req.end()
+  })
+}
+
+/** Build a SOCKS5 connect request for a domain:port target. */
+function buildSocks5ConnectRequest(host: string, port: number): Buffer {
+  const hostBuf = Buffer.from(host, 'utf8')
+  const buf = Buffer.alloc(7 + hostBuf.length)
+  buf[0] = 0x05 // SOCKS version
+  buf[1] = 0x01 // CONNECT
+  buf[2] = 0x00 // reserved
+  buf[3] = 0x03 // domain name
+  buf[4] = hostBuf.length
+  hostBuf.copy(buf, 5)
+  buf.writeUInt16BE(port, 5 + hostBuf.length)
+  return buf
+}
 
 /** Shared SessionManager — created once, used by both IPC and remote handlers. */
 let sharedManager: SessionManager | null = null
@@ -244,9 +500,10 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
 
   ipcMain.handle(
     'session:create',
-    (_event, routingId: string, cwd: string, effort?: string, resumeSessionId?: string, permissionMode?: string, model?: string) => {
+    async (_event, routingId: string, cwd: string, effort?: string, resumeSessionId?: string, permissionMode?: string, model?: string) => {
       const settings = loadSettings() as Record<string, unknown>
       const sandboxConfig = (settings.sandbox as SandboxSettings) || undefined
+      await applyProxyEnv((settings.proxy as ProxySettings) || undefined)
       manager.create(routingId, win, cwd, effort, resumeSessionId, permissionMode, model, sandboxConfig)
       // Notify all extra windows (remote bridge) that a session was created
       for (const w of ClaudeSession.getExtraWindows()) {
@@ -357,6 +614,11 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     await session.voiceStopRecording()
   }))
 
+  // Proxy test connection
+  ipcMain.handle('proxy:test-connection', safeHandler(async (_e: unknown, proxy: ProxySettings) => {
+    return await testProxyConnection(proxy)
+  }))
+
   ipcMain.handle('session:set-model', async (_e, routingId: string, model: string) => {
     await manager.get(routingId)?.setModel(model)
   })
@@ -465,6 +727,10 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
         logger.applyFilter(filter ?? '', level as 'debug' | 'info' | 'warn' | 'error' | undefined)
       }
     }
+    // Apply proxy env var changes immediately (async — bridge start/stop)
+    applyProxyEnv((settings as Record<string, unknown>).proxy as ProxySettings | undefined).catch(
+      (err) => logger.error('Proxy', `Failed to apply proxy settings: ${err}`)
+    )
     // Propagate session idle timeout change
     const timeoutMins = (settings as Record<string, unknown>).sessionTimeoutMins
     if (typeof timeoutMins === 'number') {

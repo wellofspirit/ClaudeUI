@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import type { ApprovalDecision, ClaudeAPI, PermissionSuggestion } from '../shared/types'
+import type { ApprovalDecision, ClaudeAPI, PermissionSuggestion, ProxySettings } from '../shared/types'
 
 /**
  * Factory for IPC event handler registration.
@@ -236,6 +236,8 @@ const api: ClaudeAPI = {
   dismissAutomationRun: (automationId: string, runId: string) =>
     ipcRenderer.invoke('automation:dismiss-run', automationId, runId),
   sendAutomationMessage: (id: string, prompt: string) => ipcRenderer.invoke('automation:send-message', id, prompt),
+
+  testProxyConnection: (proxy: ProxySettings) => unwrap('proxy:test-connection', proxy),
 
   logError: (source: string, message: string) => {
     ipcRenderer.send('log:error', source, message)
