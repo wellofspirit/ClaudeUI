@@ -303,6 +303,15 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     getRemoteStatus: async () => ({ running: false, port: null, token: null, lanUrl: null, tunnelUrl: null, tunnelState: null, tunnelError: null, connectedClients: 0, clientIps: [] }),
     onRemoteStatus: () => () => {},
 
+    // Voice input — not available on web (audio hardware is on the server)
+    voiceStartServer: async () => {},
+    voiceStopServer: async () => {},
+    voiceStartRecording: async () => {},
+    voiceStopRecording: async () => {},
+    onVoiceTranscript: on('voice:transcript') as ClaudeAPI['onVoiceTranscript'],
+    onVoiceState: on('voice:state') as ClaudeAPI['onVoiceState'],
+    onVoiceError: on('voice:error') as ClaudeAPI['onVoiceError'],
+
     // Error logging — send to server
     logError: (source, message) => {
       console.error(`[${source}]`, message)

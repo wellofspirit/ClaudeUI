@@ -754,6 +754,10 @@ export class ClaudeSession {
               this.send('session:error', `SDK control error: ${errText}`)
             }
           }
+        } else if (type === 'request_usage') {
+          // Per-request token usage from the request-usage patch.
+          // Log to a dedicated JSONL file for cache effectiveness analysis.
+          this.logRequestUsage(msg)
         } else if (type === 'rate_limit_event') {
           // Real-time rate limit data from inference response headers —
           // no extra API call needed, arrives after every inference response.
@@ -1151,6 +1155,34 @@ export class ClaudeSession {
     const result = await this.activeQuery.setMcpServers(servers)
     logger.debug('ClaudeSession', `mcpSetServers result: ${JSON.stringify(result).slice(0, 500)}`)
     return result
+  }
+
+  /**
+   * Log per-request usage data from the request-usage patch to a JSONL file.
+   * Each line captures the token breakdown for a single API call, enabling
+   * analysis of cache effectiveness and rate-limit cost drivers.
+   */
+  private logRequestUsage(msg: Record<string, unknown>): void {
+    try {
+      const logDir = path.join(os.homedir(), '.claude', 'ui', 'usage')
+      if (!fs.existsSync(logDir)) fs.mkdirSync(logDir, { recursive: true })
+      const logPath = path.join(logDir, 'request-usage.jsonl')
+
+      const usage = msg.usage as Record<string, unknown> | undefined
+      if (!usage) return
+
+      const entry = {
+        timestamp: new Date().toISOString(),
+        sessionId: this.sessionId,
+        model: (msg.model as string) || this.model || 'unknown',
+        usage,
+        cwd: this.cwd,
+      }
+
+      fs.appendFileSync(logPath, JSON.stringify(entry) + '\n', { mode: 0o600 })
+    } catch (err) {
+      logger.warn('ClaudeSession', `Failed to log request_usage: ${err}`)
+    }
   }
 
   /**
