@@ -112,6 +112,8 @@ const api: ClaudeAPI = {
     ipcRenderer.invoke('session:background-task', routingId, toolUseId),
   dequeueMessage: (routingId: string, value: string) =>
     ipcRenderer.invoke('session:dequeue-message', routingId, value),
+  askSideQuestion: (routingId: string, question: string) =>
+    ipcRenderer.invoke('session:ask-side-question', routingId, question),
   setPermissionMode: (routingId: string, mode: string) =>
     ipcRenderer.invoke('session:set-permission-mode', routingId, mode),
   setModel: (routingId: string, model: string) =>

@@ -585,6 +585,12 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     return await session.dequeueMessage(value)
   })
 
+  ipcMain.handle('session:ask-side-question', async (_e, routingId: string, question: string) => {
+    const session = manager.get(routingId)
+    if (!session) return null
+    return await session.askSideQuestion(question)
+  })
+
   ipcMain.handle('session:set-permission-mode', async (_e, routingId: string, mode: string) => {
     await manager.get(routingId)?.setPermissionMode(mode)
   })

@@ -372,6 +372,10 @@ export interface PerSessionState {
   // Voice input
   voiceState: VoiceState
   voiceInterimTranscript: string
+  // BTW side question
+  btwQuestion: string | null
+  btwResponse: string | null
+  btwLoading: boolean
 }
 
 const EMPTY_SESSION_STATE: PerSessionState = {
@@ -423,7 +427,10 @@ const EMPTY_SESSION_STATE: PerSessionState = {
   planReview: null,
   sandboxViolations: [],
   voiceState: 'idle' as VoiceState,
-  voiceInterimTranscript: ''
+  voiceInterimTranscript: '',
+  btwQuestion: null,
+  btwResponse: null,
+  btwLoading: false
 }
 
 function createEmptySession(cwd: string): PerSessionState {
@@ -629,6 +636,10 @@ interface SessionState {
   setVoiceInterimTranscript: (routingId: string, text: string) => void
   appendVoiceTranscript: (routingId: string, text: string, isFinal: boolean) => void
   clearVoiceTranscript: (routingId: string) => void
+  // BTW side question actions
+  setBtwQuestion: (routingId: string, question: string) => void
+  setBtwResponse: (routingId: string, response: string | null) => void
+  clearBtw: (routingId: string) => void
 }
 
 export const useSessionStore = create<SessionState>((set) => ({
@@ -1837,6 +1848,33 @@ export const useSessionStore = create<SessionState>((set) => ({
   clearVoiceTranscript: (routingId) =>
     set((s) => ({
       sessions: updateSession(s.sessions, routingId, () => ({ voiceInterimTranscript: '' }))
+    })),
+
+  // BTW side question actions
+  setBtwQuestion: (routingId, question) =>
+    set((s) => ({
+      sessions: updateSession(s.sessions, routingId, () => ({
+        btwQuestion: question,
+        btwResponse: null,
+        btwLoading: true
+      }))
+    })),
+
+  setBtwResponse: (routingId, response) =>
+    set((s) => ({
+      sessions: updateSession(s.sessions, routingId, () => ({
+        btwResponse: response,
+        btwLoading: false
+      }))
+    })),
+
+  clearBtw: (routingId) =>
+    set((s) => ({
+      sessions: updateSession(s.sessions, routingId, () => ({
+        btwQuestion: null,
+        btwResponse: null,
+        btwLoading: false
+      }))
     }))
 }))
 

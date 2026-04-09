@@ -314,6 +314,23 @@ export function InputBox(): React.JSX.Element {
     const hasFiles = attachedFiles.length > 0
     if ((!prompt && !hasFiles) || isDisabled || !activeSessionId) return
 
+    // Handle /btw side question
+    if (prompt.startsWith('/btw ')) {
+      const question = prompt.slice(5).trim()
+      if (question) {
+        const { setBtwQuestion, setBtwResponse } = useSessionStore.getState()
+        setBtwQuestion(activeSessionId, question)
+        setText('')
+        if (textareaRef.current) textareaRef.current.style.height = 'auto'
+        window.api.askSideQuestion(activeSessionId, question).then((response) => {
+          setBtwResponse(activeSessionId, response)
+        }).catch(() => {
+          setBtwResponse(activeSessionId, null)
+        })
+        return
+      }
+    }
+
     // Handle /clear as a client-side command: start a new session with the same project
     if (prompt === '/clear') {
       const { sessions, createNewSession } = useSessionStore.getState()

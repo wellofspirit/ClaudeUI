@@ -301,6 +301,7 @@ interface SessionAPI {
   stopTask(routingId: string, toolUseId: string): Promise<{ success: boolean; error?: string }>
   backgroundTask(routingId: string, toolUseId: string): Promise<{ success: boolean; error?: string }>
   dequeueMessage(routingId: string, value: string): Promise<{ removed: number }>
+  askSideQuestion(routingId: string, question: string): Promise<string | null>
   onSteerConsumed(cb: (routingId: string, data: { prompt: string }) => void): () => void
   setPermissionMode(routingId: string, mode: string): Promise<void>
   setModel(routingId: string, model: string): Promise<void>

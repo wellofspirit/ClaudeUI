@@ -7,6 +7,7 @@ import { ThinkingBlock } from './ThinkingBlock'
 import { InputBox } from './InputBox'
 import { TodoWidget } from '../TodoWidget'
 import { FloatingApproval } from './FloatingApproval'
+import { BtwCard } from './BtwCard'
 import { FloatingError } from './FloatingError'
 import { SandboxViolationToast } from './SandboxViolationToast'
 import { WindowControls } from '../WindowControls'
@@ -351,6 +352,7 @@ export function ChatPanel(): React.JSX.Element {
             </div>
           )}
           {focusedAgentId === null && <QueuedMessageCard isMobile={isMobile} />}
+          {focusedAgentId === null && <BtwCard isMobile={isMobile} />}
           <InputBox />
         </div>
       </div>
@@ -360,6 +362,7 @@ export function ChatPanel(): React.JSX.Element {
 
       {/* Floating approval for sub-agent tool calls (main tab only) */}
       {focusedAgentId === null && <FloatingApproval />}
+
 
       {/* Floating error */}
       <FloatingError />

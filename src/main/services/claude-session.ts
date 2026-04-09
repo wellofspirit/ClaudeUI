@@ -260,6 +260,7 @@ export class ClaudeSession {
     stopTask(taskId: string): Promise<void>
     backgroundTask(taskId: string): Promise<unknown>
     dequeueMessage(value: string): Promise<{ removed: number }>
+    askSideQuestion(question: string): Promise<string | null>
     getUsage(): Promise<Record<string, unknown>>
     // MCP methods
     mcpServerStatus(): Promise<unknown[]>
@@ -581,6 +582,7 @@ export class ClaudeSession {
         stopTask(taskId: string): Promise<void>
         backgroundTask(taskId: string): Promise<unknown>
         dequeueMessage(value: string): Promise<{ removed: number }>
+        askSideQuestion(question: string): Promise<string | null>
         getUsage(): Promise<Record<string, unknown>>
         mcpServerStatus(): Promise<unknown[]>
         toggleMcpServer(serverName: string, enabled: boolean): Promise<void>
@@ -904,6 +906,11 @@ export class ClaudeSession {
   async dequeueMessage(value: string): Promise<{ removed: number }> {
     if (!this.activeQuery) return { removed: 0 }
     return await this.activeQuery.dequeueMessage(value)
+  }
+
+  async askSideQuestion(question: string): Promise<string | null> {
+    if (!this.activeQuery) return null
+    return await this.activeQuery.askSideQuestion(question)
   }
 
   // ---------------------------------------------------------------------------
