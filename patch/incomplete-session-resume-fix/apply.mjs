@@ -65,10 +65,12 @@ if (src.includes(MARKER)) {
 
 const V = '[\\w$]+'
 
-// Pattern: VAR.set(VAR.uuid,VAR&&VAR.has(VAR)?VAR.get(VAR)??null:VAR);continue
-// This is the redirect map build + continue in the progress filter branch.
+// Pattern: VAR.set(VAR.uuid,VAR&&VAR.has(VAR)?VAR.get(VAR)??null:VAR);continue|return
+// This is the redirect map build + continue/return in the progress filter branch.
+// SDK 0.2.87–0.2.89 used a for-loop with `continue`; 0.2.97+ uses an arrow
+// callback with `return`.
 const upstreamRedirectRe = new RegExp(
-  `(${V})\\.set\\((${V})\\.uuid,(${V})&&\\1\\.has\\(\\3\\)\\?\\1\\.get\\(\\3\\)\\?\\?null:\\3\\);continue`
+  `(${V})\\.set\\((${V})\\.uuid,(${V})&&\\1\\.has\\(\\3\\)\\?\\1\\.get\\(\\3\\)\\?\\?null:\\3\\);(?:continue|return)`
 )
 
 // Pattern: VAR.parentUuid&&VAR.has(VAR.parentUuid))VAR.parentUuid=VAR.get(VAR.parentUuid)??null

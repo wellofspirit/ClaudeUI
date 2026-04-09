@@ -20,6 +20,7 @@ const patches = [
   resolve(__dirname, 'sandbox-network-fix/apply.mjs'),
   resolve(__dirname, 'background-task/apply.mjs'),
   resolve(__dirname, 'usage-relay/apply.mjs'),
+  resolve(__dirname, 'request-usage/apply.mjs'),
   resolve(__dirname, 'rate-limit-relay/apply.mjs'),
   resolve(__dirname, 'incomplete-session-resume-fix/apply.mjs'),
   resolve(__dirname, 'voice-server/apply.mjs')
