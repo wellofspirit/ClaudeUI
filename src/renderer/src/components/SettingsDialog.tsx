@@ -296,6 +296,25 @@ const SECTIONS: Section[] = [
             formatValue={(v) => `${Math.round(v * 100)}%`}
           />
         )
+      },
+      {
+        key: 'mermaidTheme',
+        label: 'Mermaid diagram theme',
+        keywords: 'diagram chart mermaid flowchart sequence',
+        render: (s, u) => (
+          <SettingsSelect
+            label="Mermaid diagram theme"
+            value={s.mermaidTheme}
+            options={[
+              { value: 'auto' as const, label: 'Auto' },
+              { value: 'dark' as const, label: 'Dark' },
+              { value: 'default' as const, label: 'Light' },
+              { value: 'neutral' as const, label: 'Neutral' },
+              { value: 'forest' as const, label: 'Forest' }
+            ]}
+            onChange={(v) => u({ mermaidTheme: v })}
+          />
+        )
       }
     ]
   },

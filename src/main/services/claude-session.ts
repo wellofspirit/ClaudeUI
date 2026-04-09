@@ -15,6 +15,7 @@ import { loadMcpServers, readDisabledMcpServers } from './claude-mcp'
 import { logger } from './logger'
 import { getContextWindowSize } from '../ipc/session.ipc'
 import { usageFetcher } from './usage-fetcher'
+import { createMermaidServer } from './mermaid-tool'
 
 /** In production, cli.js is unpacked from the asar — resolve its real path */
 export function getCliJsPath(): string | undefined {
@@ -457,6 +458,9 @@ export class ClaudeSession {
         logger.debug('ClaudeSession', `Disabled MCP server(s) (from ~/.claude.json): ${[...this._mcpDisabledServers].join(', ')}`)
       }
 
+      // Create in-process MCP server for UI tools (mermaid rendering, etc.)
+      const uiMcpServer = createMermaidServer()
+
       const q = sdkQuery({
         prompt: channel as AsyncIterable<never>,
         options: {
@@ -464,6 +468,19 @@ export class ClaudeSession {
           cwd: this.cwd,
           model: this.model,
           permissionMode: this.permissionMode as 'default',
+          systemPrompt: {
+            type: 'preset' as const,
+            preset: 'claude_code' as const,
+            append: `
+## Mermaid Diagram Rendering
+You have a \`mcp__claude-ui__render_mermaid\` tool that renders Mermaid.js diagrams as interactive SVGs in the chat UI. Use it when a visual diagram would help explain architecture, data flow, state machines, sequences, class relationships, or any visual concept. The tool validates syntax and returns errors if the diagram is malformed — fix the syntax and retry if that happens.
+
+Parameters:
+- \`source\` (required): Complete Mermaid diagram syntax
+- \`title\` (optional): Caption shown on the diagram card
+
+The diagram appears inline as a dedicated card with rendered SVG and source tabs.`
+          },
           ...(this.sandboxConfig?.enabled ? {
             sandbox: {
               enabled: true,
@@ -510,9 +527,11 @@ export class ClaudeSession {
             }
           } : {}),
           settingSources: ['user', 'project', 'local'],
-          ...(Object.keys(this._mcpAllServers).length > 0
-            ? { mcpServers: this._mcpAllServers as Record<string, never> }
-            : {}),
+          mcpServers: {
+            ...(this._mcpAllServers as Record<string, never>),
+            'claude-ui': uiMcpServer as never
+          },
+          allowedTools: ['mcp__claude-ui__*'],
           abortController: this.abortController,
           includePartialMessages: true,
           thinking: { type: 'enabled', budgetTokens: 10000 },
@@ -535,6 +554,11 @@ export class ClaudeSession {
           },
           ...(this.resumeSessionId ? { resume: this.resumeSessionId } : this.sessionId ? { resume: this.sessionId } : {}),
           canUseTool: async (toolName, input, opts) => {
+            // Auto-allow our in-process UI tools (mermaid, etc.) — no user approval needed
+            if (toolName.startsWith('mcp__claude-ui__')) {
+              return { behavior: 'allow' as const, updatedInput: input }
+            }
+
             const requestId = uuid()
             const approval: PendingApproval = {
               requestId,

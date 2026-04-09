@@ -132,6 +132,7 @@ export interface AppSettings {
   voiceLanguage: VoiceLanguageCode
   sandbox: SandboxSettings
   proxy: ProxySettings
+  mermaidTheme: 'auto' | 'dark' | 'default' | 'neutral' | 'forest' // mermaid diagram theme
   logLevel: 'debug' | 'info' | 'warn' | 'error' // global log level
   logFilter: string // per-source overrides: "UsageFetcher:debug,BlockUsage:debug"
 }
@@ -184,6 +185,7 @@ const DEFAULT_SETTINGS: AppSettings = {
     username: '',
     password: ''
   },
+  mermaidTheme: 'auto',
   logLevel: 'warn',
   logFilter: ''
 }

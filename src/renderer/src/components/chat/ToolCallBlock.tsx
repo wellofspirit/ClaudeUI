@@ -7,6 +7,7 @@ import { DiffViewer } from '../../lib/diff'
 import { TerminalView } from './TerminalView'
 import { MarkdownRenderer } from './MarkdownRenderer'
 import { AlwaysAllowSection } from './PermissionSuggestions'
+import { MermaidDiagram } from './MermaidDiagram'
 
 type ToolUseBlock = Extract<ContentBlock, { type: 'tool_use' }>
 type ToolResultBlock = Extract<ContentBlock, { type: 'tool_result' }>
@@ -122,6 +123,9 @@ export const ToolCallBlock = memo(function ToolCallBlock({ block, result, approv
     <span className="w-3 h-3 rounded-full border-2 border-text-muted border-t-transparent shrink-0 animate-spin-slow" />
   )
 
+  // Mermaid diagram tool — render as a dedicated card
+  const isMermaid = block.toolName === 'mcp__claude-ui__render_mermaid'
+
   const isStopping = stoppingTaskIds.includes(toolUseId)
   const [isBackgrounding, setIsBackgrounding] = useState(false)
 
@@ -153,6 +157,61 @@ export const ToolCallBlock = memo(function ToolCallBlock({ block, result, approv
       const rid = useSessionStore.getState().activeSessionId
       if (rid) clearTaskStopping(rid, toolUseId)
     }, 10000)
+  }
+
+  // ---------------------------------------------------------------------------
+  // Mermaid: dedicated diagram card (no generic input/output sections)
+  // ---------------------------------------------------------------------------
+  if (isMermaid && block.toolInput?.source) {
+    const mermaidTitle = block.toolInput.title ? String(block.toolInput.title) : undefined
+    return (
+      <div className={`rounded-lg ${borderColor === 'border-border' ? 'border' : 'border-2'} ${borderColor} bg-bg-secondary overflow-hidden`}>
+        {/* Header */}
+        <div className="flex items-center gap-2 px-3 h-9 text-[13px]">
+          {statusIcon}
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" className="text-accent shrink-0">
+            <rect x="3" y="3" width="7" height="7" rx="1" />
+            <rect x="14" y="3" width="7" height="7" rx="1" />
+            <rect x="8.5" y="14" width="7" height="7" rx="1" />
+            <line x1="6.5" y1="10" x2="6.5" y2="14" />
+            <line x1="17.5" y1="10" x2="17.5" y2="14" />
+            <line x1="6.5" y1="14" x2="12" y2="14" />
+            <line x1="17.5" y1="14" x2="12" y2="14" />
+          </svg>
+          <span className="font-medium text-text-primary">
+            {mermaidTitle || 'Mermaid Diagram'}
+          </span>
+          <div className="flex-1" />
+          {result?.isError && (
+            <span className="text-[11px] text-danger">Validation failed</span>
+          )}
+        </div>
+
+        {/* Diagram body */}
+        <div className="border-t border-border px-3 py-2.5">
+          <MermaidDiagram source={String(block.toolInput.source)} title={mermaidTitle} />
+        </div>
+
+        {/* Approval buttons (unlikely for auto-allowed tool, but kept for completeness) */}
+        {isPendingApproval && (
+          <div className="flex border-t border-warning/20">
+            <button
+              onClick={() => handleApproval('deny')}
+              className="flex-1 h-8 text-[12px] font-medium text-danger hover:bg-danger/5 transition-colors cursor-pointer"
+            >
+              Deny
+            </button>
+            <div className="w-px bg-warning/20" />
+            <button
+              onClick={() => handleApproval('allow')}
+              className="flex-1 h-8 text-[12px] font-medium text-success hover:bg-success/5 transition-colors cursor-pointer"
+            >
+              Allow
+            </button>
+          </div>
+        )}
+      </div>
+    )
   }
 
   return (
@@ -512,6 +571,9 @@ function getSummary(block: ToolUseBlock): string {
   if (block.toolName === 'TodoWrite' && Array.isArray(input.todos)) {
     const completed = input.todos.filter((t: Record<string, unknown>) => t.status === 'completed').length
     return `${completed}/${input.todos.length} tasks`
+  }
+  if (block.toolName === 'mcp__claude-ui__render_mermaid') {
+    return input.title ? String(input.title) : 'diagram'
   }
   if (isAgentTool(block.toolName) && input.description) return String(input.description)
   if (block.toolName === 'TaskOutput' && input.task_id) return `task ${String(input.task_id).slice(0, 8)}…`
