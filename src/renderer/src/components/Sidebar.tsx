@@ -627,6 +627,25 @@ function DirectoryItem({
 }): React.JSX.Element {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null)
   const contextMenuRef = useRef<HTMLDivElement>(null)
+  const clickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const handleClick = useCallback(() => {
+    // Delay single-click to distinguish from double-click
+    if (clickTimerRef.current) clearTimeout(clickTimerRef.current)
+    clickTimerRef.current = setTimeout(() => {
+      clickTimerRef.current = null
+      onClick()
+    }, 250)
+  }, [onClick])
+
+  const handleDoubleClick = useCallback(() => {
+    // Cancel pending single-click so the directory doesn't toggle
+    if (clickTimerRef.current) {
+      clearTimeout(clickTimerRef.current)
+      clickTimerRef.current = null
+    }
+    onDoubleClick()
+  }, [onDoubleClick])
 
   const handleContextMenu = (e: React.MouseEvent): void => {
     e.preventDefault()
@@ -644,11 +663,18 @@ function DirectoryItem({
     return () => document.removeEventListener('mousedown', handler)
   }, [contextMenu])
 
+  // Cleanup timer on unmount
+  useEffect(() => {
+    return () => {
+      if (clickTimerRef.current) clearTimeout(clickTimerRef.current)
+    }
+  }, [])
+
   return (
     <div>
       <div
-        onClick={onClick}
-        onDoubleClick={onDoubleClick}
+        onClick={handleClick}
+        onDoubleClick={handleDoubleClick}
         onContextMenu={handleContextMenu}
         style={{ padding: '0 5px' }}
         className="flex items-center gap-2.5 h-8 rounded-md text-[13px] cursor-default transition-colors text-text-secondary hover:text-text-primary hover:bg-bg-hover"
