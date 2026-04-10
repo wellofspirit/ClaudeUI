@@ -1,24 +1,28 @@
 /**
  * Patch: rate-limit-relay
  *
- * Forwards rate_limit_event messages to the SDK consumer via stdout,
- * enriched with per-window utilization data from parsed response headers.
+ * Forwards per-window rate limit utilization data to the SDK consumer via
+ * stdout after every inference API call.
  *
- * The CLI already emits rate_limit_event internally (into its TUI message
- * queue), but the SDK message adapter (`r26` / `sdkMessageAdapter`) explicitly
- * drops them with `{type:"ignored"}`. They never reach stdout — so SDK
- * consumers like ClaudeUI never see them.
+ * The CLI parses `anthropic-ratelimit-unified-*` headers from each API
+ * response into a per-window utilization store (`kh8`, accessed via `LR4()`).
+ * However, this data is only used internally for the TUI status line — it
+ * never reaches SDK consumers.
  *
- * Additionally, the `QL1` broadcast only includes `utilization` when the
- * status is `allowed_warning` (approaching limit). For normal `allowed`
- * status, utilization is missing from the event. But `SD4` parses per-window
- * utilization from headers and stores it in `pf8` (accessed via `hD4()`).
+ * The CLI does broadcast rate_limit_event messages via `d46` (a listener Set),
+ * but only when the rate limit **status** changes (allowed → warning →
+ * rejected). For normal usage that stays "allowed", the broadcast fires at
+ * most once (on the first request). This means piggybacking on `d46` doesn't
+ * give us per-turn updates.
  *
- * This patch:
- * 1. Adds `process.stdout.write(JSON + "\n")` alongside the existing
- *    `f.enqueue(...)` call so the event reaches the SDK transport
- * 2. Enriches the stdout message with `header_utilization` from `hD4()` —
- *    the parsed per-window utilization data (five_hour, seven_day)
+ * This patch injects a `process.stdout.write(...)` call right after
+ * `pF1(U1.headers)` in the stream loop (`XiK`), which runs after every
+ * successful streaming API call. The message includes:
+ *   - `header_utilization`: from `LR4()` — the parsed per-window utilization
+ *     data (five_hour, seven_day) with fractional utilization and reset epoch
+ *
+ * All minified function/variable names are extracted dynamically from content
+ * patterns so the patch survives SDK version bumps.
  *
  * Usage: node patch/rate-limit-relay/apply.mjs
  */
@@ -57,91 +61,92 @@ if (src.includes(PATCH_MARKER)) {
 }
 
 // ---------------------------------------------------------------------------
-// Step 2: Find the hD4 function (returns pf8 — parsed header utilization)
+// Step 2: Find the LR4 function (returns kh8 — parsed header utilization)
 // ---------------------------------------------------------------------------
-// hD4 is a tiny getter: function <name>(){return <pf8>}
-// It's called in the status line builder with pattern: <var>=hD4(),<var>={...<var>.five_hour
-// We find it by searching for that usage pattern.
+// LR4 is a tiny getter: function <name>(){return <kh8>}
+// We find it by its nearby context: it's defined right before hR4 which
+// parses "anthropic-ratelimit-unified-" headers.
 // ---------------------------------------------------------------------------
 
-console.log('\n--- Locating header utilization getter (hD4) ---')
+console.log('\n--- Locating header utilization getter (LR4) ---')
 
-// Pattern: <P>=<hD4>(),<W>={...<P>.five_hour
-const hd4Re = new RegExp(`(${V})=(${V})\\(\\),(${V})=\\{\\.\\.\\.(\\1)\\.five_hour`)
-const hd4Match = hd4Re.exec(src)
-if (!hd4Match) {
-  console.error('ERROR: Cannot locate hD4 (header utilization getter) via status line pattern.')
+// Pattern: function <LR4>(){return <kh8>}function <hR4>
+const lr4Re = new RegExp(`function (${V})\\(\\)\\{return (${V})\\}function (${V})\\(${V}\\)\\{let ${V}=\\{\\};for\\(let\\[${V},${V}\\]of\\[\\["five_hour","5h"\\],\\["seven_day","7d"\\]\\]\\)`)
+const lr4Match = lr4Re.exec(src)
+if (!lr4Match) {
+  console.error('ERROR: Cannot locate LR4 (header utilization getter) via hR4 context.')
   process.exit(1)
 }
 
-const hd4Fn = hd4Match[2]
-console.log(`  Header utilization getter: ${hd4Fn}`)
+const lr4Fn = lr4Match[1]
+const kh8Var = lr4Match[2]
+console.log(`  Header utilization getter: ${lr4Fn} (returns ${kh8Var})`)
 
-// Verify it's a simple getter: function <name>(){return <var>}
-const hd4DefRe = new RegExp(`function ${hd4Fn.replace(/\$/g, '\\$')}\\(\\)\\{return (${V})\\}`)
-const hd4DefMatch = hd4DefRe.exec(src)
-if (!hd4DefMatch) {
-  console.error(`ERROR: ${hd4Fn} doesn't match expected getter pattern.`)
+// ---------------------------------------------------------------------------
+// Step 3: Find the pF1(U1.headers) call site in the stream loop
+// ---------------------------------------------------------------------------
+// After successful streaming, the code does:
+//   let U1 = l; if (U1) pF1(U1.headers), k8 = U1.headers
+// We need to find this pattern dynamically — pF1, U1, l, k8 are all minified.
+// Stable anchor: the pattern `pF1(<var>.headers),<var>=<var>.headers` right
+// after an `if(<var>)` guard. The pF1 function name we can find from its
+// unique definition that calls hR4 and SR4.
+// ---------------------------------------------------------------------------
+
+console.log('\n--- Locating pF1 call in stream loop ---')
+
+// Find pF1 function name dynamically: it's the function that calls hR4 and
+// contains "anthropic-ratelimit-unified-status" via SR4.
+// Pattern: function <pF1>(<q>){let <K>=<I7>();if(!<mN6>(<K>))
+const pf1DefRe = new RegExp(`function (${V})\\(${V}\\)\\{let ${V}=(${V})\\(\\);if\\(!${V}\\(${V}\\)\\)\\{if\\(${kh8Var.replace(/\$/g, '\\$')}=\\{\\}`)
+const pf1DefMatch = pf1DefRe.exec(src)
+if (!pf1DefMatch) {
+  console.error('ERROR: Cannot locate pF1 function definition.')
   process.exit(1)
 }
-console.log(`  Confirmed getter pattern: function ${hd4Fn}(){return ${hd4DefMatch[1]}}`)
+const pf1Fn = pf1DefMatch[1]
+console.log(`  pF1 function name: ${pf1Fn}`)
 
-// ---------------------------------------------------------------------------
-// Step 3: Find the rate_limit_event enqueue pattern
-// ---------------------------------------------------------------------------
-
-console.log('\n--- Locating rate_limit_event enqueue ---')
-
-const enqueueRe = new RegExp(
-  `if\\((${V})\\)(${V})\\.enqueue\\(\\{type:"rate_limit_event",rate_limit_info:\\1,uuid:(${V})\\(\\),session_id:(${V})\\(\\)\\}\\)`
+// Now find the call site: if(<var>)<pF1>(<var>.headers),<var>=<var>.headers
+const callSiteRe = new RegExp(
+  `if\\((${V})\\)${pf1Fn.replace(/\$/g, '\\$')}\\(\\1\\.headers\\),(${V})=\\1\\.headers`
 )
-
-const match = enqueueRe.exec(src)
-if (!match) {
-  console.error('ERROR: Cannot locate rate_limit_event enqueue pattern.')
+const callSiteMatch = callSiteRe.exec(src)
+if (!callSiteMatch) {
+  console.error('ERROR: Cannot locate pF1 call site in stream loop.')
   process.exit(1)
 }
 
 // Verify uniqueness
-const allMatches = [...src.matchAll(new RegExp(enqueueRe, 'g'))]
-if (allMatches.length > 1) {
-  console.error(`ERROR: Pattern matched ${allMatches.length} times (expected 1). Aborting.`)
+const allCallSiteMatches = [...src.matchAll(new RegExp(callSiteRe, 'g'))]
+if (allCallSiteMatches.length > 1) {
+  console.error(`ERROR: pF1 call site matched ${allCallSiteMatches.length} times (expected 1). Aborting.`)
   process.exit(1)
 }
 
-const infoVar = match[1]    // the rate_limit_info object (W6)
-const queueVar = match[2]   // the message queue (f)
-const uuidFn = match[3]     // uuid generator (pX)
-const sessionFn = match[4]  // session_id getter (E8)
-
-console.log(`Found at char ${match.index}`)
-console.log(`  rate_limit_info var: ${infoVar}`)
-console.log(`  message queue var:   ${queueVar}`)
-console.log(`  uuid function:       ${uuidFn}`)
-console.log(`  session_id function: ${sessionFn}`)
+console.log(`  Found call site at char ${callSiteMatch.index}`)
+console.log(`  Response var: ${callSiteMatch[1]}, headers var: ${callSiteMatch[2]}`)
 
 // ---------------------------------------------------------------------------
-// Step 4: Inject stdout write after the enqueue
+// Step 4: Inject stdout write after pF1(U1.headers),k8=U1.headers
 // ---------------------------------------------------------------------------
-// The stdout message includes:
-// - rate_limit_info: the standard SDKRateLimitInfo (status, rateLimitType, etc.)
-// - header_utilization: from hD4() — { five_hour: { utilization, resets_at }, seven_day: { ... } }
-//   This contains the actual utilization percentages that are MISSING from
-//   the standard event when status is just "allowed".
+// We append our stdout write after the existing comma-separated statements.
+// The injected code:
+//   ,process.stdout.write(JSON.stringify({
+//     type: "rate_limit_event",
+//     header_utilization: LR4()
+//   }) + "\n")
 // ---------------------------------------------------------------------------
 
-console.log('\n--- Injecting stdout write ---')
+console.log('\n--- Injecting stdout write after pF1 call ---')
 
-const original = match[0]
+const original = callSiteMatch[0]
 const replacement =
   original +
   PATCH_MARKER +
   `,process.stdout.write(JSON.stringify({` +
     `type:"rate_limit_event",` +
-    `rate_limit_info:${infoVar},` +
-    `header_utilization:${hd4Fn}(),` +
-    `uuid:${uuidFn}(),` +
-    `session_id:${sessionFn}()` +
+    `header_utilization:${lr4Fn}()` +
   `})+"\\n")`
 
 src = src.replace(original, replacement)
@@ -165,5 +170,5 @@ if (!ok) {
 console.log('\nVerified.')
 console.log('')
 console.log('What this does:')
-console.log('  Forwards rate_limit_event messages to SDK stdout transport')
-console.log('  Enriches with header_utilization from parsed response headers')
+console.log('  Writes rate_limit_event with header_utilization to stdout after every API call')
+console.log('  header_utilization contains per-window utilization from parsed response headers')

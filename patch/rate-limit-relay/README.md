@@ -1,6 +1,6 @@
 # Patch: rate-limit-relay
 
-Forwards real-time rate limit utilization data (from inference response headers) to the SDK consumer — the CLI emits these events internally but never writes them to the SDK stdout transport.
+Forwards real-time per-window rate limit utilization data (from inference response headers) to the SDK consumer after every API call — enabling live usage bar updates without polling.
 
 ## Affected Component
 
@@ -8,8 +8,8 @@ Forwards real-time rate limit utilization data (from inference response headers)
 
 | Component | Version at time of discovery |
 |---|---|
-| SDK package | 0.2.81 |
-| Bundled CLI (`cli.js`) | 2.1.81 |
+| SDK package | 0.2.97 |
+| Bundled CLI (`cli.js`) | 2.1.97 |
 
 The SDK bundles its own `cli.js`, independent of the native `claude` binary.
 
@@ -17,22 +17,38 @@ The SDK bundles its own `cli.js`, independent of the native `claude` binary.
 
 ### User-visible symptom
 
-ClaudeUI cannot display real-time rate limit utilization (5-hour session %, 7-day %) after each inference call. The only way to get this data is polling the `/api/oauth/usage` endpoint, which is rate-limited (429s) and adds latency.
+The 5-hour rate limit utilization bar in ClaudeUI's sidebar stays at 0% and only updates when the background `/api/oauth/usage` poll runs (every 30 minutes). It should update in real time after every inference call.
 
 ### Root cause
 
-The CLI already parses `anthropic-ratelimit-unified-*` response headers after every inference call and emits `rate_limit_event` messages internally. However, the message never reaches the SDK consumer because:
+The CLI already parses `anthropic-ratelimit-unified-*` response headers after every inference call and stores per-window utilization in a module-level variable (`kh8`, accessed via getter `LR4()`). However, this data never reaches SDK consumers because:
 
-1. **TUI path**: The event is enqueued into the internal message queue (`f.enqueue(...)`) which feeds the React TUI — but the `sdkMessageAdapter` function (`r26`) explicitly drops it:
+1. **Dedup gate blocks broadcasts**: The CLI has a `d46` listener Set and a broadcaster function (`BF1`). But `BF1` is only called when the rate limit **status changes** — guarded by a deep-equality check (`NJ(aV, z)`). For normal usage where status stays `"allowed"`, the initial `aV` value `{status:"allowed", unifiedRateLimitFallbackAvailable:false, isUsingOverage:false}` matches the parsed state (once `resetsAt` stabilizes), so `BF1` stops firing after the first request or two.
+
+2. **SDK adapter drops events anyway**: Even when `BF1` does fire, the `sdkMessageAdapter` function explicitly drops `rate_limit_event` messages:
    ```js
    case "rate_limit_event":
-     return V("[sdkMessageAdapter] Ignoring rate_limit_event message"),
+     return N("[sdkMessageAdapter] Ignoring rate_limit_event message"),
        {type: "ignored"};
    ```
 
-2. **SDK stdout path**: Nobody writes the event to `process.stdout` — the newline-delimited JSON transport that SDK consumers read from. The event only exists in the TUI's internal queue.
+3. **No direct stdout write**: Nobody writes the per-window utilization to `process.stdout` — the newline-delimited JSON transport that SDK consumers read from.
 
-Despite the SDK TypeScript types (`SDKRateLimitEvent`, `SDKRateLimitInfo`) being fully defined in `sdk.d.ts`, and the CLI having complete infrastructure to generate these events, the last-mile delivery to stdout is simply missing.
+The header utilization data (`kh8`) IS updated on every request via `hR4(headers)` inside `pF1(headers)`. The problem is purely last-mile delivery — the data exists but is trapped inside the CLI process.
+
+### Previous approach (v1 of this patch, broken in v0.2.97)
+
+The v1 patch piggybacked on the `d46` listener inside `B3A` (the per-session task runner):
+
+```js
+let E = (p6) => {
+  let k6 = RpK(p6);
+  if (k6) v.enqueue({...})/*PATCHED*/,process.stdout.write(...)
+};
+d46.add(E);
+```
+
+This worked when `BF1` fired on every request (older SDK versions where `resetsAt` changed each time, making `NJ` always return false). In v0.2.97+, `SR4` returns a stable state for consecutive `"allowed"` requests, so `NJ(aV, z)` returns true and `BF1` never fires — our listener never executes.
 
 ## Architecture Overview
 
@@ -48,325 +64,313 @@ Anthropic API response
   │     anthropic-ratelimit-unified-7d-reset: 1712100000
   │     anthropic-ratelimit-unified-status: allowed
   │
-  ├── SD4(headers) — parses unified headers into:
-  │     { five_hour: { utilization, resets_at }, seven_day: { utilization, resets_at } }
-  │     Stored in global `pf8`
-  │
-  ├── ID4(headers) — parses full status into:
-  │     { status, resetsAt, rateLimitType, utilization, isUsingOverage, ... }
-  │
-  └── dL1(headers) — main handler, called after each inference response:
-        1. Calls SD4() → stores in pf8
-        2. Calls ID4() → gets full status
-        3. Calls QL1(status) → broadcasts to y66 listener Set
-                │
-                ├── TUI listener: v = (E6) => {
-                │     let W6 = TZq(E6);      // transform to clean shape
-                │     if (W6) f.enqueue({     // TUI internal queue
-                │       type: "rate_limit_event",
-                │       rate_limit_info: W6,
-                │       uuid: pX(), session_id: E8()
-                │     })
-                │   }
-                │   └── r26() adapter: case "rate_limit_event" → {type:"ignored"} ← DROPPED
-                │
-                └── [PATCH] process.stdout.write(JSON + "\n")  ← SDK transport
-                      │
-                      └── sdk.mjs → ClaudeSession → usageFetcher.updateFromRateLimitEvent()
+  └── XiK() stream loop completes, calls:
+        │
+        ├── pF1(U1.headers) — main rate limit handler:
+        │     1. I7() → checks OAuth + user:inference scope
+        │     2. hR4(headers) → parses 5h/7d utilization → stores in kh8
+        │     3. SR4(headers) → parses full status object
+        │     4. NJ(aV, z) → deep-equal check (blocks most broadcasts)
+        │     5. BF1(z) → only if state changed (rarely fires)
+        │           └── d46.forEach(cb => cb(z))  ← rate limit listeners
+        │
+        ├── k8 = U1.headers  (stores headers locally)
+        │
+        └── [PATCH] process.stdout.write(JSON + "\n")  ← always runs
+              │     Emits: { type: "rate_limit_event", header_utilization: LR4() }
+              │     LR4() returns kh8 (freshly set by hR4 inside pF1 above)
+              │
+              └── sdk.mjs reads line → yields to consumer
+                    → ClaudeSession handler → usageFetcher.updateFromHeaderUtilization()
+                      → IPC: 'usage:data' → renderer sidebar bar update
 ```
 
 ### Key functions
 
-| Function (v2.1.81) | Char offset | Purpose |
+| Function (v2.1.97) | Char offset | Purpose |
 |---|---|---|
-| `SD4(A)` | ~6608884 | Parses `anthropic-ratelimit-unified-*` headers → `{ five_hour, seven_day }` |
-| `ID4(A)` | ~6610816 | Full unified rate limit status parser → `SDKRateLimitInfo` shape |
-| `dL1(A)` | ~6611785 | Main handler: calls SD4 + ID4 + QL1 after each inference response |
-| `QL1(A)` | ~6609103 | Broadcasts rate limit state change to `y66` listener Set |
-| `TZq(A)` | ~10389157 | Transforms internal state → clean `SDKRateLimitInfo` (strips undefined fields) |
-| `hD4()` | ~6608807 | Getter for `pf8` (cached parsed headers for status line) |
-| `r26(A,q)` | ~11565365 | `sdkMessageAdapter` — converts CLI messages for TUI, drops `rate_limit_event` |
+| `LR4()` | ~6485791 | Getter for `kh8` (cached parsed header utilization) |
+| `hR4(q)` | ~6485817 | Parses `anthropic-ratelimit-unified-*-utilization/reset` headers → `{ five_hour, seven_day }` |
+| `pF1(q)` | ~6488865 | Main handler: calls `hR4` + `SR4` + conditionally `BF1` |
+| `SR4(q)` | ~6487750 | Full unified rate limit status parser → status object |
+| `BF1(q)` | ~6486087 | Broadcaster: updates `aV`, calls `d46.forEach(cb => cb(q))`, fires telemetry |
+| `NJ` | (lodash isEqual) | Deep equality — `NJ(aV, z)` gates `BF1` |
+| `XiK(...)` | ~11714504 | Async generator stream loop — calls `pF1` after streaming completes |
+
+### Why `d46` piggybacking doesn't work
+
+```
+                 pF1(headers) called on EVERY request
+                        │
+                    hR4(headers)
+                    kh8 = { five_hour: {...}, seven_day: {...} }  ← ALWAYS updated
+                        │
+                    SR4(headers)
+                    z = { status: "allowed", resetsAt: 1711500000, ... }
+                        │
+                    NJ(aV, z) === true?  ───── YES (usual) ──→  return (no broadcast)
+                        │                                         kh8 has fresh data
+                        NO (first request                         but nobody reads it
+                         or status change)
+                        │
+                    BF1(z) → d46 listeners fire
+                    aV = z  (stored for next comparison)
+```
+
+The `kh8` store is updated unconditionally by `hR4`, but the `d46` broadcast is gated by `NJ`. Our v2 patch reads `LR4()` (= `kh8`) directly from the stream loop, bypassing the broadcast entirely.
 
 ### Variable mapping at injection site
 
 | Variable | Source | Value |
 |---|---|---|
-| `v` | local arrow function | Rate limit listener, added to `y66` Set |
-| `E6` | `QL1()` callback param | Full rate limit state (internal `_v` shape) |
-| `W6` | `TZq(E6)` return | Cleaned `SDKRateLimitInfo` (undefined fields stripped) |
-| `f` | enclosing scope | TUI message queue (`{ enqueue(msg) }`) |
-| `pX` | enclosing scope | UUID generator function |
-| `E8` | enclosing scope | Session ID getter function |
-| `y66` | module-level `Set` | Rate limit change listeners |
+| `U1` | `let U1 = l` | Raw `Response` object from `fetch()` in the API client |
+| `l` | set in `xE8` callback | Response stored for post-streaming header access |
+| `k8` | local to `XiK` | Cached headers (used elsewhere in the function) |
+| `pF1` | module-level function | Rate limit handler (calls `hR4` → stores in `kh8`) |
+| `LR4` | module-level function | Getter: `function LR4(){return kh8}` |
+| `kh8` | module-level var | `{ five_hour: { utilization, resets_at }, seven_day: { ... } }` |
 
-### TZq transform (rate limit info → clean shape)
+### `hR4` — header parser (what `kh8` / `LR4()` contains)
 
 ```js
-function TZq(A) {
-  if (!A) return;
-  return {
-    status: A.status,
-    ...A.resetsAt !== void 0 && { resetsAt: A.resetsAt },
-    ...A.rateLimitType !== void 0 && { rateLimitType: A.rateLimitType },
-    ...A.utilization !== void 0 && { utilization: A.utilization },
-    ...A.overageStatus !== void 0 && { overageStatus: A.overageStatus },
-    ...A.overageResetsAt !== void 0 && { overageResetsAt: A.overageResetsAt },
-    ...A.overageDisabledReason !== void 0 && { overageDisabledReason: A.overageDisabledReason },
-    ...A.isUsingOverage !== void 0 && { isUsingOverage: A.isUsingOverage },
-    ...A.surpassedThreshold !== void 0 && { surpassedThreshold: A.surpassedThreshold }
+function hR4(q) {
+  let K = {};
+  for (let [_, z] of [["five_hour", "5h"], ["seven_day", "7d"]]) {
+    let Y = q.get(`anthropic-ratelimit-unified-${z}-utilization`),
+        A = q.get(`anthropic-ratelimit-unified-${z}-reset`);
+    if (Y !== null && A !== null)
+      K[_] = { utilization: Number(Y), resets_at: Number(A) }
   }
+  return K
 }
 ```
 
-This runs *before* both the `f.enqueue()` and our injected `process.stdout.write()`, so the data is already in the correct shape.
+Utilization values are **fractional** (0.0–1.0), not percentages. The consumer (`updateFromHeaderUtilization`) multiplies by 100.
 
 ## The Patch
 
-Single patch — adds a `process.stdout.write` alongside the existing TUI enqueue.
+Single injection — writes `rate_limit_event` to stdout after every streaming API call.
 
 **Marker**: `/*PATCHED:rate-limit-relay*/`
 
 ### Anchor (unique, 1 match)
 
-```
-if(<W6>)<f>.enqueue({type:"rate_limit_event",rate_limit_info:<W6>,uuid:<pX>(),session_id:<E8>()})
-```
-
-Content pattern (stable across versions — the `type:"rate_limit_event"` string literal is the anchor):
+The `pF1` call site in the stream loop, after streaming completes:
 
 ```
-if(%V%)%V%.enqueue({type:"rate_limit_event",rate_limit_info:%V%,uuid:%V%(),session_id:%V%()})
+if(<U1>)<pF1>(<U1>.headers),<k8>=<U1>.headers
+```
+
+Content pattern (stable — uses the `pF1` function name extracted dynamically):
+
+```
+if(%V%)<pF1>(%V%.headers),%V%=%V%.headers
+```
+
+The `pF1` function name itself is found via its unique definition pattern:
+
+```
+function %V%(%V%){let %V%=%V%();if(!%V%(%V%)){if(<kh8>={} ...
+```
+
+where `<kh8>` is extracted from the `LR4` getter found by:
+
+```
+function %V%(){return %V%}function %V%(%V%){let %V%={};for(let[%V%,%V%]of[["five_hour","5h"],["seven_day","7d"]])
 ```
 
 ### Before
 
 ```js
-if(W6)f.enqueue({type:"rate_limit_event",rate_limit_info:W6,uuid:pX(),session_id:E8()})
+let U1=l;if(U1)pF1(U1.headers),k8=U1.headers
 ```
 
 ### After
 
 ```js
-if(W6)f.enqueue({type:"rate_limit_event",rate_limit_info:W6,uuid:pX(),session_id:E8()})/*PATCHED:rate-limit-relay*/,process.stdout.write(JSON.stringify({type:"rate_limit_event",rate_limit_info:W6,uuid:pX(),session_id:E8()})+"\n")
+let U1=l;if(U1)pF1(U1.headers),k8=U1.headers/*PATCHED:rate-limit-relay*/,process.stdout.write(JSON.stringify({type:"rate_limit_event",header_utilization:LR4()})+"\n")
 ```
 
 ### Dynamic function extraction
 
-All four minified names are extracted from the single anchor pattern:
+Two minified names are extracted at apply time:
 
-```js
-const enqueueRe = new RegExp(
-  `if\\((${V})\\)(${V})\\.enqueue\\(\\{type:"rate_limit_event",rate_limit_info:\\1,uuid:(${V})\\(\\),session_id:(${V})\\(\\)\\}\\)`
-)
-// Captures: [1]=infoVar(W6), [2]=queueVar(f), [3]=uuidFn(pX), [4]=sessionFn(E8)
-```
+1. **`LR4`** (header utilization getter) — found by matching the getter adjacent to `hR4`:
+   ```js
+   const lr4Re = /function (%V%)(){return (%V%)}function %V%(%V%){let %V%={};for(...["five_hour","5h"]...)/
+   // Captures: [1]=LR4 fn name, [2]=kh8 var name
+   ```
 
-The backreference `\\1` ensures the `rate_limit_info` value matches the same variable as the `if()` guard — a strong structural constraint.
+2. **`pF1`** (rate limit handler) — found by matching its definition that resets `kh8`:
+   ```js
+   const pf1DefRe = /function (%V%)(%V%){let %V%=(%V%)();if(!%V%(%V%)){if(<kh8>={}/
+   // Captures: [1]=pF1 fn name
+   ```
+
+The call site is then located by searching for `pF1` with the `.headers` access pattern.
 
 ### Why it's safe
 
-1. **Comma expression**: The injected code uses `,` (not `;`) after the `enqueue()` call, making it part of the same expression inside the existing `if(W6)` guard. If `W6` is falsy, neither the enqueue nor the stdout write executes.
+1. **Comma expression**: The injected code uses `,` (not `;`) after `k8=U1.headers`, making it part of the same expression inside the `if(U1)` guard. If `U1` is falsy (no response), none of it executes.
 
-2. **Identical message shape**: The stdout write emits the exact same JSON object as the TUI enqueue — `{type, rate_limit_info, uuid, session_id}`. This matches the `SDKRateLimitEvent` Zod schema already defined in the CLI.
+2. **`LR4()` is always fresh**: `pF1(U1.headers)` runs immediately before our injection. Inside `pF1`, `hR4(headers)` unconditionally updates `kh8`. So when we call `LR4()` (which returns `kh8`), it always contains the just-parsed data from the current response.
 
-3. **Single-threaded execution**: The `y66` listener fires synchronously from `QL1()` inside the event loop. No concurrent stdout writes are possible. The JSON payload is ~150 bytes — well under the atomic write threshold.
+3. **Lightweight message**: The JSON payload is ~120 bytes (`{type, header_utilization: {five_hour: {utilization, resets_at}, seven_day: {...}}}`). Well under the atomic write threshold.
 
-4. **No TUI interference**: In TUI mode, the `f.enqueue()` feeds the React render loop. The extra `process.stdout.write()` goes to stdout, which Ink redirects to the alternate screen buffer — it's invisible. In SDK mode, stdout is the transport, which is exactly where we want the message.
+4. **No TUI interference**: In SDK mode, stdout is the transport — exactly where we want it. In TUI mode, Ink redirects stdout to the alternate screen buffer; the write is invisible.
 
-5. **Schema-validated**: The message shape matches the Zod schema `sq_` (see below) — if the CLI ever adds validation to outbound SDK messages, this will pass.
+5. **One write per API call**: The injection site is inside the streaming try-catch, after `for await(let d1 of q6)` completes. It runs exactly once per successful streaming API call.
 
 ## Message Format
 
 ```json
 {
   "type": "rate_limit_event",
-  "rate_limit_info": {
-    "status": "allowed",
-    "rateLimitType": "five_hour",
-    "utilization": 0.35,
-    "resetsAt": 1711500000
-  },
-  "uuid": "msg_...",
-  "session_id": "..."
+  "header_utilization": {
+    "five_hour": {
+      "utilization": 0.35,
+      "resets_at": 1711500000
+    },
+    "seven_day": {
+      "utilization": 0.12,
+      "resets_at": 1712100000
+    }
+  }
 }
 ```
 
-### Zod schema (CLI internal, `aq_` / `sq_`)
+- `utilization` is fractional (0.0–1.0), from `anthropic-ratelimit-unified-5h-utilization` header
+- `resets_at` is Unix epoch seconds, from `anthropic-ratelimit-unified-5h-reset` header
+- Either window may be absent if the corresponding headers are missing from the response
 
-```js
-// aq_ — SDKRateLimitInfo
-h.object({
-  status: h.enum(["allowed", "allowed_warning", "rejected"]),
-  resetsAt: h.number().optional(),
-  rateLimitType: h.enum(["five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet", "overage"]).optional(),
-  utilization: h.number().optional(),
-  overageStatus: h.enum(["allowed", "allowed_warning", "rejected"]).optional(),
-  overageResetsAt: h.number().optional(),
-  overageDisabledReason: h.enum([
-    "overage_not_provisioned", "org_level_disabled", "org_level_disabled_until",
-    "out_of_credits", "seat_tier_level_disabled", "member_level_disabled",
-    "seat_tier_zero_credit_limit", "group_zero_credit_limit", "member_zero_credit_limit",
-    "org_service_level_disabled", "org_service_zero_credit_limit",
-    "no_limits_configured", "unknown"
-  ]).optional(),
-  isUsingOverage: h.boolean().optional(),
-  surpassedThreshold: h.number().optional()
-})
-
-// sq_ — SDKRateLimitEvent
-h.object({
-  type: h.literal("rate_limit_event"),
-  rate_limit_info: aq_(),
-  uuid: ww(),
-  session_id: h.string()
-})
-```
-
-### SDK TypeScript types (sdk.d.ts)
-
-```typescript
-export declare type SDKRateLimitEvent = {
-  type: 'rate_limit_event';
-  rate_limit_info: SDKRateLimitInfo;
-  uuid: UUID;
-  session_id: string;
-};
-
-export declare type SDKRateLimitInfo = {
-  status: 'allowed' | 'allowed_warning' | 'rejected';
-  resetsAt?: number;
-  rateLimitType?: 'five_hour' | 'seven_day' | 'seven_day_opus' | 'seven_day_sonnet' | 'overage';
-  utilization?: number;
-  overageStatus?: 'allowed' | 'allowed_warning' | 'rejected';
-  overageResetsAt?: number;
-  overageDisabledReason?: string; // 13 enum values
-  isUsingOverage?: boolean;
-  surpassedThreshold?: number;
-};
-```
+**Note:** This message intentionally omits `uuid` and `session_id` (present in the CLI's internal `rate_limit_event` schema) since the consumer doesn't need them. The SDK's `readMessages()` in `iX` class yields all parsed JSON from stdout without schema validation — unknown fields or missing fields are fine.
 
 ## How to Find This Code
 
-### Rate limit event enqueue (injection site)
+### Header utilization getter (`LR4`) and parser (`hR4`)
 
 ```bash
-bundle-analyzer find cli.js "rate_limit_event" --compact
+bundle-analyzer find cli.js '"five_hour","5h"' --compact
 ```
 
-Look for the match inside a `let v=(<var>)=>{` arrow function near `y66.add(v)`.
+Look for the function with the `[["five_hour","5h"],["seven_day","7d"]]` iteration. The getter is the tiny function immediately before it: `function <name>(){return <var>}`.
 
-### sdkMessageAdapter (the drop site — not patched, just context)
+### Rate limit handler (`pF1`)
 
 ```bash
-bundle-analyzer find cli.js "sdkMessageAdapter" --compact
+bundle-analyzer find cli.js "anthropic-ratelimit-unified-status" --compact
 ```
 
-The `case "rate_limit_event"` branch returns `{type:"ignored"}`.
+Look for the function that reads this header via `.get(...)`. Its caller `pF1` is the function that calls `hR4` and the status parser, and conditionally calls `BF1`.
 
-### Rate limit header parser (SD4)
-
-```bash
-bundle-analyzer find cli.js "ratelimit-unified" --compact
-```
-
-Look for the function that iterates over `["five_hour","5h"],["seven_day","7d"]`.
-
-### Rate limit broadcaster (QL1)
+### Rate limit broadcaster (`BF1`)
 
 ```bash
 bundle-analyzer find cli.js "tengu_claudeai_limits_status_changed" --compact
 ```
 
-The function that calls `y66.forEach((K)=>K(A))` right before the telemetry event.
+The function that calls `d46.forEach(...)` right before this telemetry event.
 
-### Rate limit info transformer (TZq)
-
-```bash
-bundle-analyzer find cli.js "surpassedThreshold" --compact
-```
-
-Look for the function with the chain of `...A.field !== void 0 && { field: A.field }` spreads.
-
-### Main inference handler (dL1 caller)
+### Stream loop injection site (`XiK`)
 
 ```bash
-bundle-analyzer find cli.js "dL1" --compact
-# Or find by the pattern where headers are passed:
-bundle-analyzer find cli.js "W8.headers" --compact
+bundle-analyzer find cli.js "pF1" --compact
+# Or search for the surrounding context:
+bundle-analyzer find cli.js "tengu_streaming_stall_summary" --compact
 ```
 
-In the stream loop function (`ayq`), look for `if(W8)dL1(W8.headers)` after streaming completes.
+The `pF1(<var>.headers)` call is near the end of the streaming try block in `XiK`, after the stall summary telemetry.
+
+### sdkMessageAdapter (context — not patched)
+
+```bash
+bundle-analyzer find cli.js "sdkMessageAdapter" --compact
+```
+
+The `case "rate_limit_event"` branch returns `{type:"ignored"}`. This is why the `d46` → TUI queue path never reaches SDK consumers.
+
+### `NJ` (deep equality — the dedup gate)
+
+```bash
+bundle-analyzer find cli.js ";NJ=" --compact
+# Resolves to lodash isEqual: NJ = SC5 = eP6 = $X7
+```
+
+### Initial `aV` value
+
+```bash
+bundle-analyzer find cli.js 'status:"allowed",unifiedRateLimitFallbackAvailable:!1,isUsingOverage:!1}' --compact
+```
+
+Look for the `var rQ=L(()=>{...})` lazy initializer block that sets `aV`, `kh8`, and `d46`.
 
 ## Syntax Pitfalls
 
 ### Pitfall: Comma expression inside `if()` body
 
-The injected code appends to the `if(W6)` body using a comma expression:
-
 ```js
-// CORRECT — comma expression, both sides execute under the if() guard
-if(W6)f.enqueue({...}),process.stdout.write(...)
+// CORRECT — comma expression, all three sides execute under the if() guard
+if(U1)pF1(U1.headers),k8=U1.headers,process.stdout.write(...)
 
 // WRONG — semicolon terminates the if, stdout always executes
-if(W6)f.enqueue({...});process.stdout.write(...)
+if(U1)pF1(U1.headers),k8=U1.headers;process.stdout.write(...)
 ```
 
-The comma expression is required because the `if(W6)` has no braces — it's a single-statement body. Adding `;` would make the `stdout.write` unconditional.
+The `if(U1)` has no braces — it's a single-statement body. The comma operator keeps all expressions inside the guard. A semicolon would make the `process.stdout.write` unconditional and execute it even when `U1` is null.
 
 **Always run `node --check cli.js` after applying patches.**
 
 ## What's NOT Changed
 
-**sdkMessageAdapter (`r26`)** — The TUI adapter still drops `rate_limit_event` with `{type:"ignored"}`. This is intentional — the TUI doesn't need rate limit events through the adapter pathway (it uses React hooks on `y66` directly). We bypass it entirely via stdout.
+**`d46` listener Set** — The internal rate limit change listener mechanism is untouched. We don't inject into it anymore — the dedup behavior that blocked v1 remains as-is.
 
-**`pf8` / `hD4()`** — The parsed header cache used by the status line hook is untouched. The status line data (`KZY`) reads `hD4()` directly for the `rate_limits` field in the hook JSON.
+**`BF1` broadcaster** — Still only fires when `NJ(aV, z)` detects a status change. The TUI status line and telemetry continue to work normally.
 
-**`/api/oauth/usage` endpoint** — The `sHq()` function still exists and is used by the `/usage` command UI and our `usage-relay` patch. This patch provides real-time updates *between* API polls, not a replacement.
+**`sdkMessageAdapter`** — Still drops `rate_limit_event` with `{type:"ignored"}`. This is irrelevant since our stdout write bypasses the adapter entirely.
 
-**QL1 listener registration** — The `y66.add(v)` call is unchanged. Our stdout write piggybacks on the same listener callback.
+**`pF1` internals** — The handler itself is not modified. We only add code after it runs, reading its side effect (`kh8` update via `hR4`).
+
+**`/api/oauth/usage` endpoint** — The `usage-relay` patch's background poll still works independently. This patch provides real-time updates *between* polls, using data that arrives for free with inference responses.
 
 ## Consumer-Side Integration
 
 ### ClaudeSession (main process)
 
-In `src/main/services/claude-session.ts`, the message handler checks for `rate_limit_event`:
+In `src/main/services/claude-session.ts`, the SDK message handler routes `rate_limit_event`:
 
 ```typescript
 } else if (type === 'rate_limit_event') {
-  const info = msg.rate_limit_info as Record<string, unknown> | undefined
-  logger.debug('ClaudeSession', `rate_limit_event received: ${JSON.stringify(info)}`)
-  if (info) {
-    usageFetcher.updateFromRateLimitEvent(info)
+  const headerUtil = msg.header_utilization as Record<string, { utilization: number; resets_at: number }> | undefined
+  if (headerUtil) {
+    usageFetcher.updateFromHeaderUtilization(headerUtil)
   }
 }
 ```
 
 ### UsageFetcher (main process)
 
-In `src/main/services/usage-fetcher.ts`, `updateFromRateLimitEvent()`:
+In `src/main/services/usage-fetcher.ts`, `updateFromHeaderUtilization()`:
 
-1. Extracts `utilization`, `rateLimitType`, `resetsAt` from the info object
-2. Maps `rateLimitType` to `AccountUsage` fields (`five_hour` → `fiveHour`, etc.)
-3. Merges into `lastUsage` (preserving other windows from the last full API response)
-4. Pushes to renderer via IPC (`usage:data` event)
-5. Schedules a debounced disk cache write
-
-### Renderer (Zustand store → Sidebar)
-
-The `usage:data` event triggers `setAccountUsage()` in the session store, which updates the sidebar's 5-hour rate limit progress bar in real time.
+1. Maps `five_hour` → `fiveHour`, `seven_day` → `sevenDay`
+2. Converts fractional utilization (0–1) → percentage (0–100)
+3. Converts `resets_at` (epoch seconds) → ISO string
+4. Merges into `lastUsage` (preserving other windows from the last full API response)
+5. Pushes to renderer via IPC (`usage:data` event)
+6. Schedules a debounced disk cache write
 
 ### Full round-trip
 
 ```
 Inference response headers
-  → cli.js: SD4() parses → QL1() broadcasts → y66 listener
-    → [PATCH] process.stdout.write(JSON + "\n")
-      → sdk.mjs reads line from stdout → yields to consumer
-        → ClaudeSession message handler: type === 'rate_limit_event'
-          → usageFetcher.updateFromRateLimitEvent(info)
-            → IPC: window.webContents.send('usage:data', usage)
-              → useClaudeEvents hook → setAccountUsage()
-                → Sidebar re-renders with updated progress bar
+  → cli.js: pF1(headers) → hR4() updates kh8
+    → [PATCH] process.stdout.write({ header_utilization: LR4() })
+      → sdk.mjs ProcessTransport reads line → JSON.parse → yields
+        → iX.readMessages() → inputStream.enqueue() → consumer iterates
+          → ClaudeSession: type === 'rate_limit_event'
+            → usageFetcher.updateFromHeaderUtilization(headerUtil)
+              → IPC: window.webContents.send('usage:data', usage)
+                → useClaudeEvents hook → setAccountUsage()
+                  → Sidebar re-renders with updated progress bar
 ```
 
 ## Verification
@@ -375,58 +379,50 @@ Inference response headers
 2. Run again — should report "Patch already applied. Skipping."
 3. `node --check node_modules/@anthropic-ai/claude-agent-sdk/cli.js` — no syntax errors
 4. `node patch/apply-all.mjs` — all patches pass
-5. Set log filter to `ClaudeSession,UsageFetcher` in Settings → Logging
-6. Send a message in a session
-7. Check dev console / `~/.claude/ui/logs/` for:
-   - `[DEBUG] [ClaudeSession] rate_limit_event received: {...}`
-   - `[DEBUG] [UsageFetcher] rate_limit_event: five_hour → XX.X% (resets ...)`
-8. Observe the sidebar's 5-hour usage bar updating after each assistant response
+5. Send a message in a session
+6. Check `~/.claude/ui/logs/` for:
+   - `[DEBUG] [ClaudeSession] rate_limit_event: header_util={"five_hour":{"utilization":...},...}`
+   - `[DEBUG] [UsageFetcher] header_utilization: five_hour → XX.X% (resets ...)`
+7. Observe the sidebar's 5-hour usage bar updating after each assistant response
 
 ## Discovery Method
 
-1. **User noticed** the CLI status line shows usage data and suspected it comes from inference response headers (free, no API call needed).
+1. **User reported** the usage bar was stuck at 0% and only updated from the background API poll.
 
-2. **Searched for `status_line`** and `utilization` in cli.js. Found the `KZY` function that builds the status line JSON, which reads `hD4()` (returns `pf8`, the parsed header cache).
+2. **Verified patches applied**: Both `PATCHED:rate-limit-relay` (cli.js) and `PATCHED:usage-relay-sdk` (sdk.mjs) markers were present. OAuth credentials had `user:inference` scope.
 
-3. **Traced the header parsing chain**: `SD4(headers)` parses `anthropic-ratelimit-unified-*-utilization/reset` headers → stored in `pf8`. Called by `dL1(headers)` which is invoked from the stream loop after each inference response.
+3. **Checked logs**: Zero `rate_limit_event` entries in `~/.claude/ui/logs/`, meaning events never reached our handler in `claude-session.ts`.
 
-4. **Found `QL1`** — the broadcaster that fires `y66.forEach((K)=>K(A))` when rate limit state changes. This is the notification mechanism.
+4. **Traced the old patch's injection site**: The v1 patch was inside a `d46` listener callback (`E`), which only fires when `BF1` is called.
 
-5. **Found the TUI listener** at char ~12224520 — an arrow function `v` that calls `TZq(state)` (cleans the object) and enqueues a `{type:"rate_limit_event"}` message into the TUI queue `f`.
+5. **Found the dedup gate**: `pF1` calls `BF1(z)` guarded by `!NJ(aV, z)` — a lodash deep-equality check. The initial `aV` is `{status:"allowed", unifiedRateLimitFallbackAvailable:false, isUsingOverage:false}`. After the first request updates `aV` with `resetsAt`, subsequent requests with the same `resetsAt` produce identical state objects → `NJ` returns true → `BF1` never fires → our `d46` listener is dead.
 
-6. **Checked the SDK message adapter** (`r26` / `sdkMessageAdapter`) — found that `rate_limit_event` is explicitly in the ignore list, returning `{type:"ignored"}`.
+6. **Identified the fix**: `kh8` (the per-window utilization store) IS updated unconditionally by `hR4` inside `pF1`. The data is always fresh — the problem is that nobody reads it when `BF1` is suppressed. The fix: inject a stdout write right after `pF1(U1.headers)` in the stream loop (`XiK`), reading `LR4()` (= `kh8`) directly.
 
-7. **Verified SDK TypeScript types** — `SDKRateLimitEvent` and `SDKRateLimitInfo` are fully defined in `sdk.d.ts`, proving the SDK authors intended this to be a consumer-visible event but never wired the stdout transport.
-
-8. **Confirmed no stdout write exists** — searched all `process.stdout.write` sites. No existing code writes `rate_limit_event` to stdout. The TUI queue is the only destination.
-
-9. **Chose injection strategy**: Add `process.stdout.write(JSON + "\n")` as a comma expression after the existing `f.enqueue()`, inside the same `if(W6)` guard. This mirrors how `subagent-streaming` and `team-streaming` patches forward messages.
-
-10. **Verified** with `node --check` and manual testing with debug log filter.
+7. **Verified the injection point**: `if(U1)pF1(U1.headers),k8=U1.headers` appears exactly once in cli.js and runs after every successful streaming API call.
 
 ## Key Functions Reference
 
-| Name (v2.1.81) | Purpose | Char offset |
+| Name (v2.1.97) | Purpose | Char offset |
 |---|---|---|
-| `SD4(A)` | Parse unified rate limit headers → `{five_hour, seven_day}` | ~6608884 |
-| `ID4(A)` | Full rate limit status from headers → `SDKRateLimitInfo` shape | ~6610816 |
-| `dL1(A)` | Main handler: SD4 + ID4 + QL1, called after inference | ~6611785 |
-| `QL1(A)` | Broadcast rate limit change to `y66` Set | ~6609103 |
-| `TZq(A)` | Clean rate limit state → strip undefined fields | ~10389157 |
-| `hD4()` | Getter for `pf8` (cached parsed headers) | ~6608807 |
-| `r26(A,q)` | `sdkMessageAdapter` — drops `rate_limit_event` for TUI | ~11565365 |
-| `pX()` | UUID generator | (extracted dynamically) |
-| `E8()` | Session ID getter | (extracted dynamically) |
+| `LR4()` | Getter for `kh8` (parsed header utilization) | ~6485791 |
+| `hR4(q)` | Header parser → `{ five_hour: {utilization, resets_at}, seven_day: {...} }` | ~6485817 |
+| `pF1(q)` | Main rate limit handler (calls `hR4`, `SR4`, conditionally `BF1`) | ~6488865 |
+| `SR4(q)` | Unified status parser → `{ status, resetsAt, rateLimitType, ... }` | ~6487750 |
+| `BF1(q)` | Broadcaster: `aV=q, d46.forEach(cb => cb(q))` + telemetry | ~6486087 |
+| `NJ` | Deep equality (lodash `isEqual`) — gates `BF1` | (lazy var) |
+| `XiK(q,K,_,z,Y,A)` | Async generator stream loop — injection site | ~11714504 |
+| `I7()` | OAuth + `user:inference` scope check | ~3493920 |
 
 **Note:** All minified names will change in future SDK versions. Use content patterns (string literals, structural shapes) to relocate code.
 
 ## Related Patches
 
-- **`patch/usage-relay/`** — Relays the CLI's `/api/oauth/usage` endpoint through SDK control messages. Provides the full usage breakdown (5hr, 7-day, 7-day-sonnet, extra_usage) but requires an API call. This `rate-limit-relay` patch provides real-time updates *between* those API polls, using data that arrives for free with inference responses.
+- **`patch/usage-relay/`** — Relays the CLI's `/api/oauth/usage` endpoint through SDK control messages. Provides the full usage breakdown (5hr, 7-day, 7-day-sonnet, extra_usage) but requires an API call. This `rate-limit-relay` patch provides real-time updates *between* those API polls, using data that arrives for free with inference response headers.
 
 ## Files
 
 | File | Purpose |
 |---|---|
 | `README.md` | This document |
-| `apply.mjs` | Patch script — single injection, extracts 4 minified names dynamically |
+| `apply.mjs` | Patch script — single injection, extracts 2 minified names dynamically |

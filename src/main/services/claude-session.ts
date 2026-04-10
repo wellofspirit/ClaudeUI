@@ -787,17 +787,13 @@ The diagram appears inline as a dedicated card with rendered SVG and source tabs
         } else if (type === 'rate_limit_event') {
           // Real-time rate limit data from inference response headers —
           // no extra API call needed, arrives after every inference response.
-          // The standard rate_limit_info only has utilization when status is
-          // "allowed_warning". The enriched header_utilization (from our
-          // rate-limit-relay patch) carries per-window utilization from the
-          // parsed response headers (hD4/pf8) — always present.
-          const info = msg.rate_limit_info as Record<string, unknown> | undefined
+          // The rate-limit-relay patch injects a stdout write after every
+          // streaming API call with header_utilization from the CLI's parsed
+          // response headers (per-window utilization + reset epoch).
           const headerUtil = msg.header_utilization as Record<string, { utilization: number; resets_at: number }> | undefined
-          logger.debug('ClaudeSession', `rate_limit_event: info=${JSON.stringify(info)}, header_util=${JSON.stringify(headerUtil)}`)
+          logger.debug('ClaudeSession', `rate_limit_event: header_util=${JSON.stringify(headerUtil)}`)
           if (headerUtil) {
             usageFetcher.updateFromHeaderUtilization(headerUtil)
-          } else if (info) {
-            usageFetcher.updateFromRateLimitEvent(info)
           }
         } else if (type === 'result') {
           const cost = (msg.total_cost_usd as number) || 0
