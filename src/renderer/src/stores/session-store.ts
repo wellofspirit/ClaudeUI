@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { useShallow } from 'zustand/react/shallow'
 import { mergeContentBlocks } from '../utils/content-blocks'
+import { VOICE_LANGUAGES } from '../../../shared/types'
 import type {
   ChatMessage,
   SessionStatus,
@@ -27,8 +28,7 @@ import type {
   SandboxSettings,
   ProxySettings,
   VoiceState,
-  VoiceLanguageCode,
-  VOICE_LANGUAGES
+  VoiceLanguageCode
 } from '../../../shared/types'
 
 /** Normalize cwd for use as a terminal group key (strip trailing slash). */
