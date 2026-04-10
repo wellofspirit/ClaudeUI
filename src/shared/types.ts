@@ -455,35 +455,37 @@ export interface RemoteStatus {
 // ---------------------------------------------------------------------------
 
 export type VoiceLanguageCode =
-  | 'en' | 'zh' | 'ja' | 'ko' | 'es' | 'fr' | 'de' | 'pt' | 'ru' | 'it'
-  | 'nl' | 'pl' | 'sv' | 'da' | 'no' | 'fi' | 'tr' | 'ar' | 'hi' | 'th'
+  | 'en' | 'es' | 'fr' | 'ja' | 'de' | 'pt' | 'it' | 'ko' | 'hi' | 'id'
+  | 'ru' | 'pl' | 'tr' | 'nl' | 'uk' | 'el' | 'cs' | 'da' | 'sv' | 'no'
 
 export interface VoiceLanguageOption {
   code: VoiceLanguageCode
   label: string
 }
 
+// Supported languages match the SDK's normalizeLanguageForSTT valid code set.
+// Deepgram silently fails (connects but never transcribes) for unsupported codes.
 export const VOICE_LANGUAGES: VoiceLanguageOption[] = [
   { code: 'en', label: 'English' },
-  { code: 'zh', label: 'Chinese' },
-  { code: 'ja', label: 'Japanese' },
-  { code: 'ko', label: 'Korean' },
   { code: 'es', label: 'Spanish' },
   { code: 'fr', label: 'French' },
+  { code: 'ja', label: 'Japanese' },
   { code: 'de', label: 'German' },
   { code: 'pt', label: 'Portuguese' },
-  { code: 'ru', label: 'Russian' },
   { code: 'it', label: 'Italian' },
-  { code: 'nl', label: 'Dutch' },
-  { code: 'pl', label: 'Polish' },
-  { code: 'sv', label: 'Swedish' },
-  { code: 'da', label: 'Danish' },
-  { code: 'no', label: 'Norwegian' },
-  { code: 'fi', label: 'Finnish' },
-  { code: 'tr', label: 'Turkish' },
-  { code: 'ar', label: 'Arabic' },
+  { code: 'ko', label: 'Korean' },
   { code: 'hi', label: 'Hindi' },
-  { code: 'th', label: 'Thai' }
+  { code: 'id', label: 'Indonesian' },
+  { code: 'ru', label: 'Russian' },
+  { code: 'pl', label: 'Polish' },
+  { code: 'tr', label: 'Turkish' },
+  { code: 'nl', label: 'Dutch' },
+  { code: 'uk', label: 'Ukrainian' },
+  { code: 'el', label: 'Greek' },
+  { code: 'cs', label: 'Czech' },
+  { code: 'da', label: 'Danish' },
+  { code: 'sv', label: 'Swedish' },
+  { code: 'no', label: 'Norwegian' }
 ]
 
 export interface VoiceTranscript {

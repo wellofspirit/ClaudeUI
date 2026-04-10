@@ -27,7 +27,8 @@ import type {
   SandboxSettings,
   ProxySettings,
   VoiceState,
-  VoiceLanguageCode
+  VoiceLanguageCode,
+  VOICE_LANGUAGES
 } from '../../../shared/types'
 
 /** Normalize cwd for use as a terminal group key (strip trailing slash). */
@@ -278,6 +279,11 @@ export async function hydrateConfigFromDisk(): Promise<void> {
         }
       }
     : DEFAULT_SETTINGS
+
+  // Validate voiceLanguage — unsupported codes (e.g. 'zh' removed in v0.2.97) fall back to 'en'
+  if (settings.voiceLanguage && !VOICE_LANGUAGES.some((l) => l.code === settings.voiceLanguage)) {
+    settings.voiceLanguage = 'en'
+  }
 
   applyTheme(settings.theme)
 
