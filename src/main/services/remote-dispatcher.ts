@@ -53,6 +53,11 @@ export class RemoteDispatcher {
     }
   }
 
+  /** Unregister a handler for a channel. */
+  unregister(channel: string): void {
+    this.handlers.delete(channel)
+  }
+
   /** List all registered channels (for debugging). */
   channels(): string[] {
     return Array.from(this.handlers.keys())

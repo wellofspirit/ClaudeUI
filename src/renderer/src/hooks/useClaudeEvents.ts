@@ -350,8 +350,17 @@ export function useClaudeEvents(): void {
       }),
       window.api.onVoiceError((routingId, error) => {
         addError(routingId, error)
+      }),
+      // Plugin views
+      window.api.onPluginViewsChanged((views) => {
+        useSessionStore.getState().setPluginViews(views)
       })
     ]
+
+    // Trigger initial plugin views fetch
+    window.api.getPluginViews().then((views) => {
+      useSessionStore.getState().setPluginViews(views)
+    }).catch(() => { /* plugins may not be loaded yet */ })
 
     // Trigger initial usage fetch
     window.api.fetchAccountUsage().then((data) => {

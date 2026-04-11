@@ -65,6 +65,32 @@ function writeToFile(level: string, source: string, message: string, err?: unkno
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error' | 'silent'
 
+export interface LogEntry {
+  timestamp: string
+  level: LogLevel
+  source: string
+  message: string
+  error?: string
+}
+
+export type LogSubscriber = (entry: LogEntry) => void
+
+const subscribers = new Set<LogSubscriber>()
+
+function notify(level: LogLevel, source: string, message: string, err?: unknown): void {
+  if (subscribers.size === 0) return
+  const entry: LogEntry = {
+    timestamp: timestamp(),
+    level,
+    source,
+    message,
+    ...(err !== undefined ? { error: formatError(err) } : {})
+  }
+  for (const fn of subscribers) {
+    try { fn(entry) } catch { /* don't let subscriber errors break logging */ }
+  }
+}
+
 const LEVEL_ORDER: Record<LogLevel, number> = {
   debug: 0,
   info: 1,
@@ -135,6 +161,7 @@ export const logger: {
   warn(source: string, message: string, err?: unknown): void
   info(source: string, message: string): void
   debug(source: string, message: string): void
+  subscribe(fn: LogSubscriber): () => void
   applyFilter(filter: string, globalLevel?: LogLevel): void
 } = {
   /**
@@ -153,6 +180,7 @@ export const logger: {
   sourceLevels: envConfig.sources,
 
   error(source: string, message: string, err?: unknown): void {
+    notify('error', source, message, err)
     if (!shouldLog(source, 'error')) return
     if (err !== undefined) {
       console.error(`[${source}]`, message, err)
@@ -163,6 +191,7 @@ export const logger: {
   },
 
   warn(source: string, message: string, err?: unknown): void {
+    notify('warn', source, message, err)
     if (!shouldLog(source, 'warn')) return
     if (err !== undefined) {
       console.warn(`[${source}]`, message, err)
@@ -173,6 +202,7 @@ export const logger: {
   },
 
   info(source: string, message: string): void {
+    notify('info', source, message)
     if (!shouldLog(source, 'info')) return
     console.log(`[${source}]`, message)
     // Info is console-only by default; uncomment to persist:
@@ -180,10 +210,20 @@ export const logger: {
   },
 
   debug(source: string, message: string): void {
+    notify('debug', source, message)
     if (!shouldLog(source, 'debug')) return
     const line = `[${timestamp()}] [DEBUG] [${source}] ${message}`
     console.log(line)
     writeToFile('DEBUG', source, message)
+  },
+
+  /**
+   * Subscribe to all log entries (regardless of log level filtering).
+   * Returns an unsubscribe function.
+   */
+  subscribe(fn: LogSubscriber): () => void {
+    subscribers.add(fn)
+    return () => subscribers.delete(fn)
   },
 
   /**

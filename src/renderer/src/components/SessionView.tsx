@@ -6,6 +6,7 @@ import { GitPanel } from './git/GitPanel'
 import { PlanReviewPanel } from './plan/PlanReviewPanel'
 import { UsageView } from './usage/UsageView'
 import { AutomationView } from './automation/AutomationView'
+import { PluginWebView } from './plugin/PluginWebView'
 import { TerminalPanel } from './terminal/TerminalPanel'
 import { useActiveSession, useSessionStore, applyTheme, normalizeCwd } from '../stores/session-store'
 import { useGitWatcher } from '../hooks/useGitWatcher'
@@ -121,10 +122,8 @@ export function SessionView(): React.JSX.Element {
   const isMobile = useIsMobile()
   const visualHeight = useVisualViewportHeight(isMobile)
   const uiFontScale = useSessionStore((s) => s.settings.uiFontScale)
-  const showUsageView = useSessionStore((s) => s.showUsageView)
-  const setShowUsageView = useSessionStore((s) => s.setShowUsageView)
-  const showAutomationView = useSessionStore((s) => s.showAutomationView)
-  const setShowAutomationView = useSessionStore((s) => s.setShowAutomationView)
+  const activeView = useSessionStore((s) => s.activeView)
+  const setActiveView = useSessionStore((s) => s.setActiveView)
   const rightPanel = useActiveSession((s) => s.rightPanel)
   const sidebar = useResizablePanel('sidebarWidth', 240, 180, 480)
   const taskPanel = useResizablePanel('taskPanelWidth', 400, 280, 700)
@@ -251,10 +250,12 @@ export function SessionView(): React.JSX.Element {
           {/* Main content row: chat + optional right panels */}
           <div className="flex-1 min-w-0 min-h-0 flex">
             <div className={`flex-1 min-w-0 h-full flex flex-col bg-bg-primary overflow-hidden ${sidebarCollapsed || isMobile ? '' : 'rounded-l-2xl shadow-[-1px_0_4px_rgba(0,0,0,0.15),-3px_0_12px_rgba(0,0,0,0.1)]'}`}>
-              {showUsageView ? (
-                <UsageView onClose={() => setShowUsageView(false)} />
-              ) : showAutomationView ? (
-                <AutomationView onClose={() => setShowAutomationView(false)} />
+              {activeView.type === 'usage' ? (
+                <UsageView onClose={() => setActiveView({ type: 'chat' })} />
+              ) : activeView.type === 'automations' ? (
+                <AutomationView onClose={() => setActiveView({ type: 'chat' })} />
+              ) : activeView.type === 'plugin' ? (
+                <PluginWebView pluginId={activeView.pluginId} onClose={() => setActiveView({ type: 'chat' })} />
               ) : (
                 <ChatPanel />
               )}

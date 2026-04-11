@@ -10,6 +10,7 @@ import { RemoteAccessModal } from './RemoteAccessModal'
 import { useAutomationStore } from '../stores/automation-store'
 import { formatTokenCount } from './usage/usage-utils'
 import { useIsMobile } from '../hooks/useIsMobile'
+import { sanitizeSvg } from '../utils/sanitize-svg'
 
 /** Convert mouse event coords to zoom-adjusted position for fixed-position menus */
 function contextMenuPosition(e: React.MouseEvent): { x: number; y: number } {
@@ -146,9 +147,9 @@ export function Sidebar({ style, onToggleCollapse }: {
   }, [setDirectories])
 
   const showWelcome = useSessionStore((s) => s.showWelcome)
-  const showAutomationView = useSessionStore((s) => s.showAutomationView)
-  const setShowAutomationView = useSessionStore((s) => s.setShowAutomationView)
-  const setShowUsageView = useSessionStore((s) => s.setShowUsageView)
+  const activeView = useSessionStore((s) => s.activeView)
+  const setActiveView = useSessionStore((s) => s.setActiveView)
+  const pluginViews = useSessionStore((s) => s.pluginViews)
   const automationBadge = useAutomationStore((s) => s.notificationBadge)
 
   const handleNewSession = (): void => {
@@ -415,11 +416,9 @@ export function Sidebar({ style, onToggleCollapse }: {
         />
         <NavItem
           label="Automations"
-          active={showAutomationView}
+          active={activeView.type === 'automations'}
           onClick={() => {
-            const next = !showAutomationView
-            setShowAutomationView(next)
-            if (next) setShowUsageView(false)
+            setActiveView(activeView.type === 'automations' ? { type: 'chat' } : { type: 'automations' })
           }}
           badge={automationBadge}
           icon={
@@ -429,6 +428,31 @@ export function Sidebar({ style, onToggleCollapse }: {
             </svg>
           }
         />
+        {pluginViews.map((view) => (
+          <NavItem
+            key={`plugin:${view.pluginId}:${view.id}`}
+            label={view.label}
+            active={activeView.type === 'plugin' && activeView.pluginId === view.pluginId}
+            onClick={() => {
+              if (activeView.type === 'plugin' && activeView.pluginId === view.pluginId) {
+                setActiveView({ type: 'chat' })
+              } else {
+                setActiveView({ type: 'plugin', pluginId: view.pluginId })
+              }
+            }}
+            icon={
+              view.icon ? (
+                <SafeSvgIcon svg={view.icon} />
+              ) : (
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M12 2L2 7l10 5 10-5-10-5z" />
+                  <path d="M2 17l10 5 10-5" />
+                  <path d="M2 12l10 5 10-5" />
+                </svg>
+              )
+            }
+          />
+        ))}
       </nav>
 
       {/* Scrollable sidebar content */}
@@ -1113,6 +1137,24 @@ function PinnedSessionList({
   )
 }
 
+/** Render a plugin-supplied SVG icon string safely (strips event handlers and non-SVG elements) */
+function SafeSvgIcon({ svg }: { svg: string }): React.JSX.Element {
+  const sanitized = sanitizeSvg(svg)
+  if (!sanitized) {
+    // Fallback: default plugin icon if SVG is invalid
+    return (
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M12 2L2 7l10 5 10-5-10-5z" />
+        <path d="M2 17l10 5 10-5" />
+        <path d="M2 12l10 5 10-5" />
+      </svg>
+    )
+  }
+  // Safe: sanitizeSvg has stripped all event handlers and disallowed elements
+  // eslint-disable-next-line react/no-danger
+  return <span dangerouslySetInnerHTML={{ __html: sanitized }} />
+}
+
 function NavItem({ label, icon, active, onClick, onDoubleClick, badge }: {
   label: string
   icon: React.ReactNode
@@ -1379,7 +1421,7 @@ function UsagePanel({ usage, onRefresh }: { usage: AccountUsage | null; onRefres
     ? (() => { const ago = Math.round((Date.now() - usage.fetchedAt) / 1000); return ago < 60 ? `${ago}s ago` : `${Math.floor(ago / 60)}m ago` })()
     : null
   const blockUsage = useSessionStore((s) => s.blockUsage)
-  const setShowUsageView = useSessionStore((s) => s.setShowUsageView)
+  const setActiveView = useSessionStore((s) => s.setActiveView)
 
   const currentBlock = blockUsage?.currentBlock
 
@@ -1425,7 +1467,7 @@ function UsagePanel({ usage, onRefresh }: { usage: AccountUsage | null; onRefres
         </div>
         <div className="flex items-center gap-1">
           <button
-            onClick={(e) => { e.stopPropagation(); setShowUsageView(true) }}
+            onClick={(e) => { e.stopPropagation(); setActiveView({ type: 'usage' }) }}
             className="text-[9px] text-accent hover:text-accent/80 cursor-default"
             title="View usage analytics"
           >

@@ -505,11 +505,13 @@ interface VoiceAPI {
   onVoiceError(cb: (routingId: string, error: string) => void): () => void
 }
 
-export interface ClaudeAPI extends SessionAPI, GitAPI, McpAPI, TerminalAPI, AutomationAPI, FileAPI, AccountAPI, RemoteAPI, VoiceAPI {
+export interface ClaudeAPI extends SessionAPI, GitAPI, McpAPI, TerminalAPI, AutomationAPI, FileAPI, AccountAPI, RemoteAPI, VoiceAPI, PluginAPI {
   /** Relay a log message from the renderer to the main process logger */
   logRelay(level: string, source: string, message: string): void
   /** App + SDK version info for display in Settings */
   getVersionInfo(): Promise<{ appVersion: string; sdkVersion: string; cliVersion: string }>
+  /** Open the standalone log viewer window */
+  openLogViewer(): Promise<void>
 }
 
 // ---------------------------------------------------------------------------
@@ -863,4 +865,105 @@ export interface GitBranchData {
   local: string[]
   remote: string[]
   tracking: Record<string, string>
+}
+
+// ---------------------------------------------------------------------------
+// View switching
+// ---------------------------------------------------------------------------
+
+export type ActiveView =
+  | { type: 'chat' }
+  | { type: 'usage' }
+  | { type: 'automations' }
+  | { type: 'plugin'; pluginId: string }
+
+// ---------------------------------------------------------------------------
+// Plugin system types
+// ---------------------------------------------------------------------------
+
+export interface Disposable {
+  dispose(): void
+}
+
+export interface PluginViewConfig {
+  /** Unique view ID (defaults to plugin ID if only one view) */
+  id: string
+  /** Label shown in sidebar */
+  label: string
+  /** SVG icon string for sidebar NavItem */
+  icon?: string
+  /** Absolute path to HTML file for the webview */
+  htmlFile: string
+}
+
+export interface PluginInfo {
+  id: string
+  name: string
+  version: string
+  enabled: boolean
+  views: PluginViewConfig[]
+  error?: string
+}
+
+export interface ClaudeUIPlugin {
+  activate(ctx: PluginContext): void | Promise<void>
+  deactivate?(): void | Promise<void>
+}
+
+export interface PluginContext {
+  /** Plugin ID */
+  id: string
+  /** Filesystem path to plugin directory */
+  pluginDir: string
+  /** Data directory for plugin persistence (~/.claude/ui/plugins/<id>/data/) */
+  dataDir: string
+  /** Config directory (~/.claude/ui/plugins/<id>/) */
+  configDir: string
+  /** Debug mode (CLAUDEUI_PLUGIN_DEBUG=1) */
+  debug: boolean
+  /** Namespaced logger */
+  logger: {
+    info(message: string): void
+    warn(message: string, err?: unknown): void
+    error(message: string, err?: unknown): void
+    debug(message: string): void
+  }
+  // Core services — typed as `any` here since main-process classes
+  // are not importable from shared types. Actual implementations
+  // provide the real SessionManager / AutomationManager instances.
+  /** Session manager — create/get/cancel sessions */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  sessions: any
+  /** Automation manager */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  automations: any
+  /** Main window reference */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  window: any
+  /** Raw ipcMain for advanced use cases */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ipcMain: any
+  /** SDK query escape hatch */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  sdkQuery: any
+  /** Subscribe to session/app events (same payloads as IPC events) */
+  on(event: string, handler: (...args: unknown[]) => void): Disposable
+  /** Emit custom events (auto-namespaced to plugin:<id>:<event>) */
+  emit(event: string, ...args: unknown[]): void
+  /** Register an IPC handler (auto-namespaced to plugin:<id>:<channel>) */
+  registerIpcHandler(channel: string, handler: (...args: unknown[]) => unknown): Disposable
+  /** Register a remote handler (auto-namespaced to plugin:<id>:<channel>) */
+  registerRemoteHandler(channel: string, handler: (...args: unknown[]) => unknown): Disposable
+  /** Register a UI view that replaces the chat panel */
+  registerView(config: Omit<PluginViewConfig, 'id'> & { id?: string }): Disposable
+}
+
+export type PluginViewWithOwner = PluginViewConfig & { pluginId: string }
+
+interface PluginAPI {
+  listPlugins(): Promise<PluginInfo[]>
+  reloadPlugin(id: string): Promise<void>
+  getPluginViews(): Promise<PluginViewWithOwner[]>
+  getPluginPreloadPath(): Promise<string>
+  onPluginViewsChanged(cb: (views: PluginViewWithOwner[]) => void): () => void
 }

@@ -28,7 +28,9 @@ import type {
   SandboxSettings,
   ProxySettings,
   VoiceState,
-  VoiceLanguageCode
+  VoiceLanguageCode,
+  ActiveView,
+  PluginViewWithOwner
 } from '../../../shared/types'
 
 /** Normalize cwd for use as a terminal group key (strip trailing slash). */
@@ -508,8 +510,8 @@ interface SessionState {
   sdkSkillNames: string[]
   accountUsage: AccountUsage | null
   blockUsage: BlockUsageData | null
-  showUsageView: boolean
-  showAutomationView: boolean
+  activeView: ActiveView
+  pluginViews: PluginViewWithOwner[]
 
   // Worktree (global)
   worktreeInfoMap: Record<string, WorktreeInfo>
@@ -614,8 +616,8 @@ interface SessionState {
   setAccountUsage: (data: AccountUsage) => void
   // Block usage analytics
   setBlockUsage: (data: BlockUsageData) => void
-  setShowUsageView: (show: boolean) => void
-  setShowAutomationView: (show: boolean) => void
+  setActiveView: (view: ActiveView) => void
+  setPluginViews: (views: PluginViewWithOwner[]) => void
   // Git sync operations
   setGitSyncOperation: (routingId: string, op: 'idle' | 'fetching' | 'pulling' | 'pushing') => void
   setGitSyncError: (routingId: string, error: string | null) => void
@@ -663,8 +665,8 @@ export const useSessionStore = create<SessionState>((set) => ({
   sdkSkillNames: [],
   accountUsage: null,
   blockUsage: null,
-  showUsageView: false,
-  showAutomationView: false,
+  activeView: { type: 'chat' } as ActiveView,
+  pluginViews: [],
   worktreeInfoMap: {},
   quitWorktrees: null,
   terminalGroups: {},
@@ -677,7 +679,7 @@ export const useSessionStore = create<SessionState>((set) => ({
       if (cleaned.recentSessionIds !== state.recentSessionIds) {
         saveSessionConfig(cleaned.recentSessionIds, state.pinnedSessionIds, state.customTitles)
       }
-      return { activeSessionId: null, showAutomationView: false, showUsageView: false, ...cleaned }
+      return { activeSessionId: null, activeView: { type: 'chat' } as ActiveView, ...cleaned }
     }),
 
   switchSession: (routingId) =>
@@ -688,8 +690,7 @@ export const useSessionStore = create<SessionState>((set) => ({
       }
       return {
         activeSessionId: routingId,
-        showAutomationView: false,
-        showUsageView: false,
+        activeView: { type: 'chat' } as ActiveView,
         sessions: updateSession(cleaned.sessions, routingId, () => ({ needsAttention: false })),
         recentSessionIds: cleaned.recentSessionIds
       }
@@ -700,7 +701,7 @@ export const useSessionStore = create<SessionState>((set) => ({
       const recentSessionIds = [routingId, ...state.recentSessionIds.filter((id) => id !== routingId)].slice(0, state.settings.maxRecentSessions)
       saveSessionConfig(recentSessionIds, state.pinnedSessionIds, state.customTitles)
       return {
-        ...(switchTo ? { activeSessionId: routingId, showAutomationView: false, showUsageView: false } : {}),
+        ...(switchTo ? { activeSessionId: routingId, activeView: { type: 'chat' } as ActiveView } : {}),
         sessions: { ...state.sessions, [routingId]: createEmptySession(cwd) },
         recentSessionIds
       }
@@ -1445,8 +1446,8 @@ export const useSessionStore = create<SessionState>((set) => ({
 
   setAccountUsage: (data) => set({ accountUsage: data }),
   setBlockUsage: (data) => set({ blockUsage: data }),
-  setShowUsageView: (show) => set({ showUsageView: show }),
-  setShowAutomationView: (show) => set({ showAutomationView: show, ...(show ? { showUsageView: false } : {}) }),
+  setActiveView: (view) => set({ activeView: view }),
+  setPluginViews: (views) => set({ pluginViews: views }),
 
   rekeySession: (oldId, newId) => {
     // Record the mapping so events arriving with the old routingId can be resolved

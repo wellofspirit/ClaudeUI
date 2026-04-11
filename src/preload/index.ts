@@ -265,7 +265,17 @@ const api: ClaudeAPI = {
   logRelay: (level: string, source: string, message: string) => ipcRenderer.send('log:relay', level, source, message),
 
   // Version info
-  getVersionInfo: () => ipcRenderer.invoke('app:version-info')
+  getVersionInfo: () => ipcRenderer.invoke('app:version-info'),
+
+  // Log viewer
+  openLogViewer: () => ipcRenderer.invoke('log-viewer:open'),
+
+  // Plugin system
+  listPlugins: () => ipcRenderer.invoke('plugin:list'),
+  reloadPlugin: (id: string) => ipcRenderer.invoke('plugin:reload', id),
+  getPluginViews: () => ipcRenderer.invoke('plugin:views'),
+  getPluginPreloadPath: () => ipcRenderer.invoke('plugin:preload-path') as Promise<string>,
+  onPluginViewsChanged: onEvent('plugin:views-changed')
 }
 
 if (process.contextIsolated) {

@@ -1,4 +1,4 @@
-import { app, shell, BrowserWindow, ipcMain, Menu } from 'electron'
+import { app, shell, BrowserWindow, ipcMain, Menu, protocol } from 'electron'
 import { join } from 'path'
 import { execFileSync } from 'child_process'
 
@@ -32,6 +32,8 @@ import { registerRemoteHandlers } from './ipc/remote-handlers'
 import { RemoteServer, getNetworkInterfaces } from './services/remote-server'
 import { RemoteDispatcher } from './services/remote-dispatcher'
 import { serviceSession } from './services/service-session'
+import { PluginManager } from './services/plugin-manager'
+import { LogViewer } from './services/log-viewer'
 import { logger } from './services/logger'
 import { getSdkVersion } from './services/claude-session'
 import icon from '../../resources/icon.png?asset'
@@ -82,6 +84,8 @@ if (process.platform === 'darwin') {
   }
 }
 
+let logViewer: LogViewer
+
 function createWindow(): void {
   const isMac = process.platform === 'darwin'
 
@@ -109,16 +113,35 @@ function createWindow(): void {
     ...(process.platform === 'linux' ? { icon } : {}),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
-      sandbox: false
+      sandbox: false,
+      webviewTag: true
     }
   })
 
-  // Renderer → main process log relay (so all logs go to one terminal)
+  // Guard webview creation: only allow plugin views with the correct preload.
+  // This prevents any XSS in the renderer from spawning arbitrary webviews.
+  const pluginPreloadPath = join(__dirname, '../preload/plugin-preload.js')
+  mainWindow.webContents.on('will-attach-webview', (_event, webPreferences, params) => {
+    // Force security settings on all webviews
+    webPreferences.nodeIntegration = false
+    webPreferences.contextIsolation = true
+
+    // Only allow our plugin preload
+    webPreferences.preload = pluginPreloadPath
+
+    // Only allow file:// URLs (plugin HTML files)
+    if (params.src && !params.src.startsWith('file://')) {
+      _event.preventDefault()
+    }
+  })
+
+  // Renderer → main process log relay (so all logs go to one terminal + log viewer)
   ipcMain.on('log:relay', (_e, level: string, source: string, message: string) => {
-    const ts = new Date().toLocaleTimeString('en-GB', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit', fractionalSecondDigits: 3 })
-    const line = `[${ts}] [${level.toUpperCase()}] [${source}] ${message}`
-    if (level === 'error') console.error(line)
-    else console.log(line)
+    const logLevel = level as 'debug' | 'info' | 'warn' | 'error'
+    if (logLevel === 'error') logger.error(source, message)
+    else if (logLevel === 'warn') logger.warn(source, message)
+    else if (logLevel === 'debug') logger.debug(source, message)
+    else logger.info(source, message)
   })
 
   const sessionManager = registerSessionIpc(mainWindow)
@@ -130,6 +153,28 @@ function createWindow(): void {
   const remoteServer = new RemoteServer(remoteDispatcher)
   remoteServer.setWindow(mainWindow)
   registerRemoteHandlers(remoteDispatcher, sessionManager, mainWindow)
+
+  // Plugin system
+  const pluginManager = new PluginManager({
+    win: mainWindow,
+    sessionManager,
+    automationManager,
+    remoteDispatcher
+  })
+  pluginManager.loadAll().catch((err) => {
+    logger.error('main', `Plugin system load error: ${err}`)
+  })
+
+  // Log viewer (standalone debug window)
+  logViewer = new LogViewer(mainWindow)
+
+  for (const ch of ['plugin:list', 'plugin:reload', 'plugin:views', 'plugin:preload-path']) {
+    ipcMain.removeHandler(ch)
+  }
+  ipcMain.handle('plugin:list', () => pluginManager.listPlugins())
+  ipcMain.handle('plugin:reload', (_e, id: string) => pluginManager.reloadPlugin(id))
+  ipcMain.handle('plugin:views', () => pluginManager.getViews())
+  ipcMain.handle('plugin:preload-path', () => join(__dirname, '../preload/plugin-preload.js'))
 
   // Remote access IPC handlers
   for (const ch of ['remote:interfaces', 'remote:start', 'remote:stop', 'remote:status']) {
@@ -156,6 +201,8 @@ function createWindow(): void {
   let quitTimeout: ReturnType<typeof setTimeout> | null = null
 
   app.on('before-quit', (e) => {
+    logViewer.destroy()
+    pluginManager.stopAll()
     automationManager.stopAll()
     remoteServer.stop()
     // Stop the service session (lightweight CLI subprocess for usage polling)
@@ -216,6 +263,11 @@ function createWindow(): void {
     mainWindow.show()
   })
 
+  // Close log viewer (and any other child windows) when the main window closes
+  mainWindow.on('closed', () => {
+    logViewer.close()
+  })
+
   mainWindow.webContents.setWindowOpenHandler((details) => {
     shell.openExternal(details.url)
     return { action: 'deny' }
@@ -229,6 +281,11 @@ function createWindow(): void {
     mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
   }
 }
+
+// Register custom protocol schemes (must be before app.whenReady)
+protocol.registerSchemesAsPrivileged([
+  { scheme: 'log-viewer', privileges: { standard: true, secure: true, supportFetchAPI: true } }
+])
 
 // This method will be called when Electron has finished
 // initialization and is ready to create browser windows.
@@ -287,6 +344,12 @@ app.whenReady().then(() => {
       {
         role: 'help',
         submenu: [
+          {
+            label: 'Open Log Viewer',
+            accelerator: isMac ? 'Cmd+Shift+L' : 'Ctrl+Shift+L',
+            click: () => logViewer.open()
+          },
+          { type: 'separator' as const },
           // On Windows/Linux, About lives here; on macOS it's in the app menu
           // but having it in Help too doesn't hurt.
           { role: 'about' }

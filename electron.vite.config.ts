@@ -11,7 +11,17 @@ export default defineConfig({
       }
     }
   },
-  preload: {},
+  preload: {
+    build: {
+      rollupOptions: {
+        input: {
+          index: resolve('src/preload/index.ts'),
+          'plugin-preload': resolve('src/preload/plugin-preload.ts'),
+          'log-viewer-preload': resolve('src/preload/log-viewer-preload.ts')
+        }
+      }
+    }
+  },
   renderer: {
     resolve: {
       alias: {
