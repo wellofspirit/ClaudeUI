@@ -154,6 +154,11 @@ function createWindow(): void {
   remoteServer.setWindow(mainWindow)
   registerRemoteHandlers(remoteDispatcher, sessionManager, mainWindow)
 
+  // Log viewer (standalone debug window) — init early so renderer console
+  // capture starts before plugins load. Backend logs are captured from
+  // process start via logRing in logger.ts.
+  logViewer = new LogViewer(mainWindow)
+
   // Plugin system
   const pluginManager = new PluginManager({
     win: mainWindow,
@@ -164,9 +169,6 @@ function createWindow(): void {
   pluginManager.loadAll().catch((err) => {
     logger.error('main', `Plugin system load error: ${err}`)
   })
-
-  // Log viewer (standalone debug window)
-  logViewer = new LogViewer(mainWindow)
 
   for (const ch of ['plugin:list', 'plugin:reload', 'plugin:views', 'plugin:preload-path']) {
     ipcMain.removeHandler(ch)

@@ -77,8 +77,34 @@ export type LogSubscriber = (entry: LogEntry) => void
 
 const subscribers = new Set<LogSubscriber>()
 
+// ---------------------------------------------------------------------------
+// Ring buffer — captures ALL log entries from the moment the logger module
+// loads, so the log viewer can display entries that occurred before it opened.
+// ---------------------------------------------------------------------------
+
+const LOG_RING_SIZE = 5000
+
+class LogRingBuffer {
+  private buf: LogEntry[] = new Array(LOG_RING_SIZE)
+  private head = 0
+  private full = false
+
+  push(item: LogEntry): void {
+    this.buf[this.head] = item
+    this.head = (this.head + 1) % LOG_RING_SIZE
+    if (!this.full && this.head === 0) this.full = true
+  }
+
+  toArray(): LogEntry[] {
+    if (!this.full) return this.buf.slice(0, this.head)
+    return [...this.buf.slice(this.head), ...this.buf.slice(0, this.head)]
+  }
+}
+
+/** Global ring buffer — starts capturing at module load time (before app.whenReady). */
+export const logRing = new LogRingBuffer()
+
 function notify(level: LogLevel, source: string, message: string, err?: unknown): void {
-  if (subscribers.size === 0) return
   const entry: LogEntry = {
     timestamp: timestamp(),
     level,
@@ -86,6 +112,7 @@ function notify(level: LogLevel, source: string, message: string, err?: unknown)
     message,
     ...(err !== undefined ? { error: formatError(err) } : {})
   }
+  logRing.push(entry)
   for (const fn of subscribers) {
     try { fn(entry) } catch { /* don't let subscriber errors break logging */ }
   }

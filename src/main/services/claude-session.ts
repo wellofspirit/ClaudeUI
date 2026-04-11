@@ -234,6 +234,7 @@ export class ClaudeSession {
   }
 
   private sessionId: string | null = null
+  private messageHistory: ChatMessage[] = []
   private abortController: AbortController | null = null
   private isProcessing = false
   private wasInterrupted = false
@@ -314,6 +315,16 @@ export class ClaudeSession {
       cwd: this.cwd,
       totalCostUsd: this.totalCostUsd
     }
+  }
+
+  /** Get the SDK session UUID (available after first message exchange). */
+  getSessionId(): string | null {
+    return this.sessionId
+  }
+
+  /** Get all main-thread messages exchanged in this session. */
+  getMessages(): ChatMessage[] {
+    return this.messageHistory
   }
 
   /** Update the inactivity timeout. Pass 0 to disable. */
@@ -681,6 +692,7 @@ The diagram appears inline as a dedicated card with rendered SVG and source tabs
             if (routingId) {
               this.send('session:subagent-message', { toolUseId: routingId, message: chatMsg })
             } else {
+              this.upsertMessage(chatMsg)
               this.send('session:message', chatMsg)
               // Only update status line when usage actually changed (final message per API call)
               if (hadUsage) {
@@ -831,7 +843,8 @@ The diagram appears inline as a dedicated card with rendered SVG and source tabs
           this.send('session:result', {
             totalCostUsd: this.totalCostUsd,
             durationMs: resultDurationMs,
-            result: (msg.result as string) || ''
+            result: (msg.result as string) || '',
+            sessionId: this.sessionId
           })
           this.sendStatus()
           this.resetInactivityTimer()
@@ -1668,6 +1681,7 @@ The diagram appears inline as a dedicated card with rendered SVG and source tabs
       content: [{ type: 'text', text: content }],
       timestamp: Date.now()
     }
+    this.upsertMessage(chatMsg)
     this.send('session:message', chatMsg)
   }
 
@@ -1846,6 +1860,16 @@ The diagram appears inline as a dedicated card with rendered SVG and source tabs
     })
     this.backgroundPollers.clear()
     this.backgroundFilePaths.clear()
+  }
+
+  /** Upsert a message into the in-memory history (same dedup as the renderer). */
+  private upsertMessage(msg: ChatMessage): void {
+    const idx = this.messageHistory.findIndex((m) => m.id === msg.id)
+    if (idx >= 0) {
+      this.messageHistory[idx] = msg
+    } else {
+      this.messageHistory.push(msg)
+    }
   }
 
   private send(channel: string, data: unknown): void {

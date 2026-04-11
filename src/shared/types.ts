@@ -65,6 +65,40 @@ export interface SessionResult {
   totalCostUsd: number
   durationMs: number
   result: string
+  sessionId?: string | null
+}
+
+// ---------------------------------------------------------------------------
+// Plugin session event types (ADR-005)
+// All session events forwarded to plugins are wrapped in this shape.
+// ---------------------------------------------------------------------------
+
+/** Base envelope for all session events forwarded to plugins. */
+export interface PluginSessionEvent {
+  routingId: string
+  sessionId: string | null
+}
+
+/** session:message event as seen by plugins. */
+export interface PluginMessageEvent extends PluginSessionEvent {
+  id: string
+  role: 'user' | 'assistant' | 'system'
+  content: ContentBlock[]
+  timestamp: number
+  planContent?: string
+}
+
+/** session:result event as seen by plugins. */
+export interface PluginResultEvent extends PluginSessionEvent {
+  totalCostUsd: number
+  durationMs: number
+  result: string
+}
+
+/** session:stream event as seen by plugins. */
+export interface PluginStreamEvent extends PluginSessionEvent {
+  type: 'text' | 'thinking'
+  text: string
 }
 
 export type ApprovalDecision = 'allow' | 'deny'

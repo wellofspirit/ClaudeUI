@@ -243,8 +243,8 @@ Subscribe to events from sessions, automations, and other plugins:
 
 ```typescript
 // Subscribe to an event — returns a Disposable
-const disposable = ctx.on('session:message', (routingId, data) => {
-  ctx.logger.info(`Message in ${routingId}: ${data.role}`)
+const disposable = ctx.on('session:message', (event) => {
+  ctx.logger.info(`Message in session ${event.sessionId}: ${event.role}`)
 })
 
 // Unsubscribe manually (optional — auto-cleaned on deactivate)
@@ -256,7 +256,7 @@ ctx.emit('status-changed', { connected: true })
 
 **Key semantics:**
 
-- `ctx.on(event, handler)` subscribes to events. The handler receives the same arguments as the IPC event (typically `(routingId, data)` for session events).
+- `ctx.on(event, handler)` subscribes to events. Session events receive a single object with `{ routingId, sessionId, ...eventData }` (see [Session Events](#session-events) and ADR-005).
 - Every `on()` call returns a `Disposable`. You can call `dispose()` to unsubscribe, but you don't have to — **all subscriptions are automatically cleaned up when the plugin is deactivated or reloaded**.
 - `ctx.emit(event, ...args)` emits a custom event. The event name is automatically prefixed to `plugin:<id>:<event>`. The event fires on:
   1. The internal event bus (other plugins can listen via `ctx.on('plugin:<id>:<event>', ...)`)
@@ -460,7 +460,7 @@ During app shutdown (`before-quit`):
 
 ### Session Events
 
-These events fire for every active Claude session. All handlers receive `(routingId: string, data: T)`.
+These events fire for every active Claude session. All handlers receive a single object with `{ routingId: string, sessionId: string | null, ...eventData }` (see ADR-005).
 
 | Event | Data | Description |
 |-------|------|-------------|
@@ -491,15 +491,26 @@ These events fire for every active Claude session. All handlers receive `(routin
 **Example — listening to all assistant messages:**
 
 ```js
-ctx.on('session:message', (routingId, message) => {
-  if (message.role === 'assistant') {
-    for (const block of message.content) {
+ctx.on('session:message', (event) => {
+  if (event.role === 'assistant') {
+    const label = event.sessionId ?? event.routingId
+    for (const block of event.content) {
       if (block.type === 'text') {
-        ctx.logger.info(`[${routingId}] Assistant: ${block.text.slice(0, 100)}`)
+        ctx.logger.info(`[${label}] Assistant: ${block.text.slice(0, 100)}`)
       }
     }
   }
 })
+```
+
+**Example — querying session history:**
+
+```js
+// Backfill messages when opening a plugin view for an existing session
+const messages = ctx.sessions.getMessages(sessionId)
+for (const msg of messages) {
+  renderMessage(msg)
+}
 ```
 
 ### Automation Events
@@ -761,9 +772,9 @@ activate(ctx) {
 Your plugin should never crash the app. The plugin manager wraps activation in try/catch, but runtime errors in event handlers or IPC handlers are your responsibility:
 
 ```js
-ctx.on('session:message', (routingId, data) => {
+ctx.on('session:message', (event) => {
   try {
-    processMessage(data)
+    processMessage(event)
   } catch (err) {
     ctx.logger.error('Failed to process message', err)
   }
@@ -817,13 +828,14 @@ module.exports = {
     ctx.logger.info(`Logging messages to ${logPath}`)
 
     // Listen to all session messages
-    ctx.on('session:message', (routingId, message) => {
+    ctx.on('session:message', (event) => {
       messageCount++
       const entry = {
         timestamp: new Date().toISOString(),
-        routingId,
-        role: message.role,
-        contentLength: JSON.stringify(message.content).length
+        sessionId: event.sessionId,
+        routingId: event.routingId,
+        role: event.role,
+        contentLength: JSON.stringify(event.content).length
       }
       logStream.write(JSON.stringify(entry) + '\n')
 

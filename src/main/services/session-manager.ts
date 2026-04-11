@@ -1,6 +1,7 @@
 import type { BrowserWindow } from 'electron'
 import { ClaudeSession } from './claude-session'
-import type { SandboxSettings } from '../../shared/types'
+import { loadSessionHistory } from './session-history'
+import type { ChatMessage, SandboxSettings } from '../../shared/types'
 
 export class SessionManager {
   private sessions = new Map<string, ClaudeSession>()
@@ -71,6 +72,37 @@ export class SessionManager {
 
   getTeamInfo(routingId: string): ReturnType<ClaudeSession['getTeamInfo']> | null {
     return this.sessions.get(routingId)?.getTeamInfo() ?? null
+  }
+
+  /** Update the idle timeout for a specific session by routingId. Pass 0 to disable. */
+  setInactivityTimeout(routingId: string, ms: number): void {
+    const session = this.sessions.get(routingId)
+    if (session) {
+      session.setInactivityTimeout(ms)
+    }
+  }
+
+  /** Get the SDK session UUID for a session identified by routingId. */
+  getSessionId(routingId: string): string | null {
+    return this.sessions.get(routingId)?.getSessionId() ?? null
+  }
+
+  /**
+   * Get message history for a session by sessionId.
+   * Returns in-memory messages if the session is active, otherwise loads from disk.
+   * The plugin provides `cwd` (same value used in `create()`) to locate the JSONL file.
+   */
+  async getMessages(sessionId: string, cwd: string): Promise<ChatMessage[]> {
+    // Try in-memory first
+    for (const session of this.sessions.values()) {
+      if (session.getSessionId() === sessionId) {
+        return session.getMessages()
+      }
+    }
+    // Fall back to disk
+    const projectKey = cwd.replace(/[/.]/g, '-')
+    const result = await loadSessionHistory(sessionId, projectKey)
+    return result.messages
   }
 
   /** Iterate all active sessions */

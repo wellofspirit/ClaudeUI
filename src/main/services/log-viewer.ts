@@ -1,40 +1,8 @@
 import { BrowserWindow, protocol, ipcMain } from 'electron'
 import { join } from 'path'
-import { logger, type LogEntry } from './logger'
+import { logger, logRing, type LogEntry } from './logger'
 
-const RING_SIZE = 5000
 const LOG_VIEWER_SCHEME = 'log-viewer'
-
-// ---------------------------------------------------------------------------
-// Ring buffer — keeps the last N entries so the viewer can catch up on open
-// ---------------------------------------------------------------------------
-
-class RingBuffer<T> {
-  private buf: T[] = []
-  private head = 0
-  private full = false
-
-  constructor(private capacity: number) {
-    this.buf = new Array(capacity)
-  }
-
-  push(item: T): void {
-    this.buf[this.head] = item
-    this.head = (this.head + 1) % this.capacity
-    if (this.head === 0) this.full = true
-  }
-
-  toArray(): T[] {
-    if (!this.full) return this.buf.slice(0, this.head)
-    return [...this.buf.slice(this.head), ...this.buf.slice(0, this.head)]
-  }
-
-  clear(): void {
-    this.buf = new Array(this.capacity)
-    this.head = 0
-    this.full = false
-  }
-}
 
 // ---------------------------------------------------------------------------
 // HTML template for the log viewer
@@ -309,15 +277,15 @@ function getLogViewerHTML(): string {
 
 export class LogViewer {
   private win: BrowserWindow | null = null
-  private ring = new RingBuffer<LogEntry>(RING_SIZE)
   private unsubLogger: (() => void) | null = null
   private static protocolRegistered = false
 
   constructor(mainWindow: BrowserWindow) {
 
-    // Subscribe to all backend log entries (regardless of level)
+    // Forward live log entries to the viewer window (if open).
+    // logRing (in logger.ts) captures ALL entries from process start,
+    // so the viewer can catch up even for entries before this point.
     this.unsubLogger = logger.subscribe((entry) => {
-      this.ring.push(entry)
       if (this.win && !this.win.isDestroyed()) {
         this.win.webContents.send('log-viewer:entry', entry)
       }
@@ -333,7 +301,7 @@ export class LogViewer {
         source: level === 'error' ? 'renderer:error' : 'renderer',
         message: sourceId ? `${message}  (${sourceId}:${lineNumber})` : message
       }
-      this.ring.push(entry)
+      logRing.push(entry)
       if (this.win && !this.win.isDestroyed()) {
         this.win.webContents.send('log-viewer:entry', entry)
       }
@@ -357,7 +325,7 @@ export class LogViewer {
     ipcMain.handle('log-viewer:ready', () => {
       // Viewer opened — send buffered entries
       if (this.win && !this.win.isDestroyed()) {
-        this.win.webContents.send('log-viewer:batch', this.ring.toArray())
+        this.win.webContents.send('log-viewer:batch', logRing.toArray())
       }
     })
   }

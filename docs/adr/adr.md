@@ -6,3 +6,4 @@
 | [002](adr-002_always-mount-terminal-panel.md) | Always mount TerminalPanel to preserve xterm scrollback buffers |
 | [003](adr-003_per-cwd-terminal-grouping.md) | Group terminal tabs by session cwd with 10-minute cold cleanup |
 | [004](adr-004_plugin-system.md) | VS Code-style plugin system for extensibility |
+| [005](adr-005_plugin-session-api.md) | Plugin session API — sessionId-based events and history |

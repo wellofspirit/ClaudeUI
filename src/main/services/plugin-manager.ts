@@ -94,13 +94,23 @@ export class PluginManager {
     this.automationManager = opts.automationManager
     this.remoteDispatcher = opts.remoteDispatcher
 
-    // Create bridge and wire it to the event bus
+    // Create bridge and wire it to the event bus.
+    // Session events arrive as (channel, routingId, data) from ClaudeSession.send().
+    // We wrap them into an object with { routingId, sessionId, ...data } so plugins
+    // get a stable, self-documenting event shape (see ADR-005).
     this.bridge = new PluginBridge()
     this.bridge.onEvent((channel, ...args) => {
       if (this.tracing) {
         logger.debug(LOG_SOURCE, `[trace] ${channel} ${JSON.stringify(args).slice(0, 200)}`)
       }
-      this.fireEvent(channel, ...args)
+      if (channel.startsWith('session:') && args.length >= 2) {
+        const routingId = args[0] as string
+        const data = args[1]
+        const sessionId = this.sessionManager.getSessionId(routingId)
+        this.fireEvent(channel, { routingId, sessionId, ...(data && typeof data === 'object' ? data as Record<string, unknown> : { data }) })
+      } else {
+        this.fireEvent(channel, ...args)
+      }
     })
     ClaudeSession.addExtraWindow(this.bridge as unknown as BrowserWindow)
   }
@@ -116,7 +126,7 @@ export class PluginManager {
     }
 
     const entries = fs.readdirSync(PLUGINS_DIR, { withFileTypes: true })
-      .filter((e) => e.isDirectory())
+      .filter((e) => e.isDirectory() || e.isSymbolicLink())
       .map((e) => e.name)
       .sort()
 
