@@ -1,4 +1,4 @@
-import { app, shell, BrowserWindow, ipcMain, Menu, protocol } from 'electron'
+import { app, shell, BrowserWindow, ipcMain, Menu } from 'electron'
 import { join } from 'path'
 import { execFileSync } from 'child_process'
 
@@ -17,8 +17,12 @@ const optimizer = {
       if (input.type !== 'keyDown') return
       if (!is.dev) {
         if (input.code === 'KeyR' && (input.control || input.meta)) event.preventDefault()
-        if (input.code === 'KeyI' && (input.alt && input.meta || input.control && input.shift)) event.preventDefault()
-      } else if (input.code === 'F12') {
+      }
+      // F12 or Cmd/Ctrl+Shift+I — toggle DevTools (allowed in prod too)
+      if (
+        input.code === 'F12' ||
+        (input.code === 'KeyI' && input.shift && (input.control || input.meta))
+      ) {
         if (window.webContents.isDevToolsOpened()) window.webContents.closeDevTools()
         else window.webContents.openDevTools({ mode: 'undocked' })
       }
@@ -283,11 +287,6 @@ function createWindow(): void {
     mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
   }
 }
-
-// Register custom protocol schemes (must be before app.whenReady)
-protocol.registerSchemesAsPrivileged([
-  { scheme: 'log-viewer', privileges: { standard: true, secure: true, supportFetchAPI: true } }
-])
 
 // This method will be called when Electron has finished
 // initialization and is ready to create browser windows.

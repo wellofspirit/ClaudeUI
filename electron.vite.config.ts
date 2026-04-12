@@ -28,6 +28,14 @@ export default defineConfig({
         '@renderer': resolve('src/renderer/src')
       }
     },
-    plugins: [react(), tailwindcss()]
+    plugins: [react(), tailwindcss()],
+    build: {
+      rollupOptions: {
+        input: {
+          index: resolve('src/renderer/index.html'),
+          'log-viewer': resolve('src/renderer/log-viewer.html')
+        }
+      }
+    }
   }
 })
