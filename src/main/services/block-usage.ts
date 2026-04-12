@@ -143,8 +143,21 @@ function normalizeModelName(model: string): string | null {
 }
 
 /**
- * Merge model entries with the same family together.
- * e.g. "claude-sonnet-4-6" and "claude-sonnet" both become the dominant variant.
+ * A generic model name has no version digits after the family.
+ * e.g. "claude-opus", "claude-sonnet" are generic; "claude-opus-4-6" is specific.
+ */
+function isGenericModelName(model: string): boolean {
+  return /^claude-(opus|sonnet|haiku)$/i.test(model)
+}
+
+/**
+ * Merge generic model names (e.g. "claude-sonnet") into their specific versioned
+ * counterparts (e.g. "claude-sonnet-4-6"), but keep distinct versions separate.
+ *
+ * Generic names appear when the SDK uses short forms in JSONL entries. They should
+ * be folded into the specific variant with the most requests. Distinct versioned
+ * models (e.g. "claude-opus-4-5" vs "claude-opus-4-6") are kept separate because
+ * they have different pricing and the user should see the breakdown.
  */
 function mergeModelFamilies(
   modelMap: Map<string, { tokens: TokenCounts; costUsd: number; requestCount: number }>
@@ -162,32 +175,54 @@ function mergeModelFamilies(
     families.set(family, existing)
   }
 
-  // For each family, merge all variants into the one with the most requests
   const merged = new Map<string, { tokens: TokenCounts; costUsd: number; requestCount: number }>()
   for (const [, models] of families) {
     if (models.length === 1) {
       merged.set(models[0], modelMap.get(models[0])!)
       continue
     }
-    // Pick the model with most requests as the canonical name
-    let canonical = models[0]
-    let maxReqs = 0
-    for (const m of models) {
-      const data = modelMap.get(m)!
-      if (data.requestCount > maxReqs) {
-        maxReqs = data.requestCount
-        canonical = m
+
+    // Split into generic ("claude-sonnet") and specific ("claude-sonnet-4-6")
+    const generic = models.filter(isGenericModelName)
+    const specific = models.filter((m) => !isGenericModelName(m))
+
+    // Keep each specific version as its own entry
+    for (const m of specific) {
+      merged.set(m, { ...modelMap.get(m)! })
+    }
+
+    // Merge generic counts into the most-requested specific variant,
+    // or keep the generic entry if there are no specific variants.
+    if (generic.length > 0) {
+      // Sum all generic entries
+      const genericData = { tokens: emptyTokenCounts(), costUsd: 0, requestCount: 0 }
+      for (const m of generic) {
+        const data = modelMap.get(m)!
+        genericData.tokens = addTokens(genericData.tokens, data.tokens)
+        genericData.costUsd += data.costUsd
+        genericData.requestCount += data.requestCount
+      }
+
+      if (specific.length > 0) {
+        // Find the specific variant with the most requests and merge generic into it
+        let target = specific[0]
+        let maxReqs = 0
+        for (const m of specific) {
+          const data = merged.get(m)!
+          if (data.requestCount > maxReqs) {
+            maxReqs = data.requestCount
+            target = m
+          }
+        }
+        const existing = merged.get(target)!
+        existing.tokens = addTokens(existing.tokens, genericData.tokens)
+        existing.costUsd += genericData.costUsd
+        existing.requestCount += genericData.requestCount
+      } else {
+        // Only generic entries — keep as-is
+        merged.set(generic[0], genericData)
       }
     }
-    // Merge all into canonical
-    const mergedData = { tokens: emptyTokenCounts(), costUsd: 0, requestCount: 0 }
-    for (const m of models) {
-      const data = modelMap.get(m)!
-      mergedData.tokens = addTokens(mergedData.tokens, data.tokens)
-      mergedData.costUsd += data.costUsd
-      mergedData.requestCount += data.requestCount
-    }
-    merged.set(canonical, mergedData)
   }
   return merged
 }

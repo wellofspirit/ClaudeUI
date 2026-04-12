@@ -10,7 +10,15 @@ const MODEL_COLORS: Array<{ match: string; color: string }> = [
 const FALLBACK_COLORS = ['#f97316', '#ec4899', '#06b6d4', '#eab308', '#a855f7', '#14b8a6']
 
 const colorCache = new Map<string, string>()
-let fallbackIdx = 0
+
+/** Simple string hash → deterministic index into the fallback palette */
+function hashString(s: string): number {
+  let hash = 0
+  for (let i = 0; i < s.length; i++) {
+    hash = ((hash << 5) - hash + s.charCodeAt(i)) | 0
+  }
+  return Math.abs(hash)
+}
 
 export function getModelColor(model: string): string {
   const cached = colorCache.get(model)
@@ -24,8 +32,7 @@ export function getModelColor(model: string): string {
     }
   }
 
-  const color = FALLBACK_COLORS[fallbackIdx % FALLBACK_COLORS.length]
-  fallbackIdx++
+  const color = FALLBACK_COLORS[hashString(model) % FALLBACK_COLORS.length]
   colorCache.set(model, color)
   return color
 }
@@ -39,7 +46,6 @@ export function formatTokenCount(n: number): string {
 
 /** Format cost in USD */
 export function formatCost(usd: number): string {
-  if (usd >= 1) return `$${usd.toFixed(2)}`
   if (usd >= 0.01) return `$${usd.toFixed(2)}`
   if (usd > 0) return `$${usd.toFixed(4)}`
   return '$0.00'
@@ -50,22 +56,28 @@ export function sumTokens(t: TokenCounts): number {
   return t.inputTokens + t.outputTokens + t.cacheCreationTokens + t.cacheReadTokens
 }
 
-/** Format a short model name from full model string */
+/**
+ * Format a model string into a marketing-style display name.
+ * e.g., "claude-opus-4-6-20250514" → "Opus 4.6"
+ *        "claude-sonnet-4-20250514" → "Sonnet 4"
+ *        "claude-haiku-3-5-20240101" → "Haiku 3.5"
+ *        "opus" → "Opus"
+ */
 export function shortModelName(model: string): string {
-  // e.g., "claude-sonnet-4-20250514" → "sonnet-4"
   const m = model.toLowerCase()
-  if (m.includes('opus')) {
-    const ver = m.match(/opus[- ]?(\d+)/)?.[1]
-    return ver ? `opus-${ver}` : 'opus'
+
+  // Match family name, then optional major.minor version.
+  // Minor is a single digit (to avoid matching the 8-digit date suffix).
+  const match = m.match(/(opus|sonnet|haiku)(?:[- ](\d{1,2})(?:[- ](\d)(?!\d))?)?/)
+  if (match) {
+    const family = match[1].charAt(0).toUpperCase() + match[1].slice(1)
+    const major = match[2]
+    const minor = match[3]
+    if (major && minor) return `${family} ${major}.${minor}`
+    if (major) return `${family} ${major}`
+    return family
   }
-  if (m.includes('sonnet')) {
-    const ver = m.match(/sonnet[- ]?(\d+)/)?.[1]
-    return ver ? `sonnet-${ver}` : 'sonnet'
-  }
-  if (m.includes('haiku')) {
-    const ver = m.match(/haiku[- ]?(\d+)/)?.[1]
-    return ver ? `haiku-${ver}` : 'haiku'
-  }
+
   // Fallback: last segment
   const parts = model.split('-')
   return parts.length > 2 ? parts.slice(1, 3).join('-') : model
@@ -90,7 +102,9 @@ export function formatShortDate(dateStr: string): string {
 
 /** Format duration in ms as human-readable */
 export function formatDuration(ms: number): string {
-  const totalMin = Math.floor(ms / 60_000)
+  const totalSec = Math.floor(ms / 1_000)
+  if (totalSec < 60) return `${totalSec}s`
+  const totalMin = Math.floor(totalSec / 60)
   const h = Math.floor(totalMin / 60)
   const m = totalMin % 60
   if (h > 0) return `${h}h ${m}m`

@@ -80,6 +80,24 @@ function getCliUserAgent(): string {
 const ANTHROPIC_BETA = 'oauth-2025-04-20'
 
 // ---------------------------------------------------------------------------
+// Utilization normalization
+// ---------------------------------------------------------------------------
+
+/**
+ * Convert a utilization value to a 0–100 percentage.
+ *
+ * Two sources provide utilization in different scales:
+ *   - API (`/api/oauth/usage`): already 0–100 (percentage)
+ *   - Rate limit headers / events: 0–1 (fraction)
+ *
+ * This helper makes the conversion explicit so callers can't accidentally
+ * store a fraction where a percentage is expected (or vice versa).
+ */
+function toUsedPercent(value: number, scale: 'fraction' | 'percent'): number {
+  return scale === 'fraction' ? value * 100 : value
+}
+
+// ---------------------------------------------------------------------------
 // Session getter type (for SDK fallback)
 // ---------------------------------------------------------------------------
 
@@ -183,8 +201,6 @@ export class UsageFetcher {
    * Merge rate limit data from an SDK `rate_limit_event` into lastUsage.
    * Called by ClaudeSession when it receives a rate_limit_event message.
    *
-   * The event's `utilization` is 0–1 fractional (from HTTP headers), while
-   * `AccountUsage.RateWindow.usedPercent` is 0–100, so we multiply by 100.
    * `resetsAt` is epoch seconds — convert to ISO string for consistency
    * with the `/api/oauth/usage` API response format.
    */
@@ -197,7 +213,7 @@ export class UsageFetcher {
     if (typeof utilization !== 'number') return
 
     const window: RateWindow = {
-      usedPercent: utilization * 100,
+      usedPercent: toUsedPercent(utilization, 'fraction'),
       resetsAt: typeof resetsAt === 'number'
         ? new Date(resetsAt * 1000).toISOString()
         : null
@@ -257,7 +273,7 @@ export class UsageFetcher {
       if (!data || typeof data.utilization !== 'number') continue
 
       const window: RateWindow = {
-        usedPercent: data.utilization * 100,
+        usedPercent: toUsedPercent(data.utilization, 'fraction'),
         resetsAt: typeof data.resets_at === 'number'
           ? new Date(data.resets_at * 1000).toISOString()
           : null
@@ -542,6 +558,9 @@ export class UsageFetcher {
       const w = data[key] as { utilization?: number; resets_at?: string } | undefined
       if (!w || typeof w.utilization !== 'number') return null
       return {
+        // API returns utilization as 0–100 (percentage), not 0–1 (fraction).
+        // This differs from rate_limit_event headers which use 0–1 — see
+        // toUsedPercent() in updateFromRateLimitEvent for the conversion.
         usedPercent: w.utilization,
         resetsAt: w.resets_at ?? null
       }
