@@ -483,7 +483,7 @@ export class ClaudeSession {
           ...execOpts,
           cwd: this.cwd,
           model: this.model,
-          permissionMode: this.permissionMode as 'default',
+          permissionMode: this.permissionMode as import('@anthropic-ai/claude-agent-sdk').PermissionMode,
           systemPrompt: {
             type: 'preset' as const,
             preset: 'claude_code' as const,
@@ -664,6 +664,14 @@ The diagram appears inline as a dedicated card with rendered SVG and source tabs
             logger.debug('ClaudeSession', `init mcp_servers (${mcpServers.length}): ${JSON.stringify(mcpServers).slice(0, 500)}`)
             if (mcpServers.length > 0) {
               this.send('session:mcp-servers', mcpServers)
+            }
+
+            // Sync permission mode from init — the CLI may have rejected the requested
+            // mode (e.g. auto mode gate/model check failed) and fallen back to default
+            const initMode = msg.permissionMode as string | undefined
+            if (initMode && initMode !== this.permissionMode) {
+              this.permissionMode = initMode
+              this.send('session:permission-mode', initMode)
             }
 
           }
@@ -921,10 +929,18 @@ The diagram appears inline as a dedicated card with rendered SVG and source tabs
   }
 
   async setPermissionMode(mode: string): Promise<void> {
+    const previousMode = this.permissionMode
     this.permissionMode = mode
     this.send('session:permission-mode', mode)
     if (this.activeQuery) {
-      await this.activeQuery.setPermissionMode(mode)
+      try {
+        await this.activeQuery.setPermissionMode(mode)
+      } catch (err) {
+        // SDK rejected the mode change (e.g. auto mode gate/model check failed) — revert
+        this.permissionMode = previousMode
+        this.send('session:permission-mode', previousMode)
+        throw err
+      }
     }
   }
 

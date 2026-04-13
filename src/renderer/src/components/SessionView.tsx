@@ -165,7 +165,11 @@ export function SessionView(): React.JSX.Element {
         const permissionMode = sessions[activeSessionId]?.permissionMode ?? 'default'
         const next = PERMISSION_MODES[(PERMISSION_MODES.indexOf(permissionMode) + 1) % PERMISSION_MODES.length]
         setPermissionMode(next, activeSessionId)
-        window.api.setPermissionMode(activeSessionId, next)
+        window.api.setPermissionMode(activeSessionId, next).catch(() => {
+          // SDK rejected the mode change — revert to previous mode
+          // (the main process already sent the reverted mode via session:permission-mode)
+          setPermissionMode(permissionMode, activeSessionId)
+        })
       }
     }
     document.addEventListener('keydown', handler)
