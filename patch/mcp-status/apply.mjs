@@ -103,18 +103,20 @@ if (!skipA) {
 }
 
 // =====================================================================
-// Part B: Make mcp_status call s() to load all configured servers
+// Part B: Make mcp_status call the headless refresh function to load
+//         all configured servers before returning status
 // =====================================================================
-// The headless MCP refresh function s() loads servers from all config
-// sources (--mcp-config, user/project/local config, plugins) and
-// connects them via the serialized X6() updater. Calling s() ensures
-// all configured servers are in the appState before J6() reads them.
+// The headless MCP refresh function (previously named s(), now
+// dynamically extracted) loads servers from all config sources
+// (--mcp-config, user/project/local config, plugins) and connects
+// them via the serialized updater. Calling it ensures all configured
+// servers are in the appState before reading status.
+//
+// The function is found by the "Headless MCP refresh" string anchor
+// inside its body. Its name changes between SDK versions.
 //
 // Original (0.2.87+):  h6.request.subtype==="mcp_status")E6(h6,{mcpServers:J6()});
-// Changed:             h6.request.subtype==="mcp_status"){await s();if(z6)await z6;E6(h6,{mcpServers:J6()})}
-//
-// The s() call also handles SDK-configured servers (via O merge in s()),
-// so we don't need a separate await for i().
+// Changed:             h6.request.subtype==="mcp_status"){await <refresh>();if(<pluginVar>)await <pluginVar>;E6(h6,{mcpServers:J6()})}
 
 const skipB = src.includes(PATCH_B_MARKER)
 if (skipB) {
@@ -125,7 +127,7 @@ if (skipB) {
 if (!skipB) {
   console.log('\n--- Part B: mcp_status await refresh ---')
 
-  // We need the plugin refresh variable name (z6) from Part A.
+  // We need the plugin refresh variable name from Part A.
   let x6Var
   const markerRe = new RegExp(`\\/\\*PATCHED:mcp-status-store-promise\\*\\/(${V})=(?:null;(?:if\\(!${V}\\(\\)\\))\\1=)?(?:${V})\\(\\)`)
   const markerMatch = markerRe.exec(src)
@@ -146,6 +148,45 @@ if (!skipB) {
     console.error('ERROR: Cannot determine plugin refresh variable name.')
     console.error('Ensure Part A was applied first.')
     process.exit(1)
+  }
+
+  // ---------------------------------------------------------------
+  // Dynamically extract the headless MCP refresh function name.
+  // It's an async function containing the "Headless MCP refresh"
+  // string literal. Pattern: `async function <name>(){...Headless MCP refresh...}`
+  // ---------------------------------------------------------------
+  // Find the "Headless MCP refresh" string, then search backward for the
+  // nearest `async function <name>()` — that's the refresh function.
+  const anchorStr = 'Headless MCP refresh'
+  const anchorIdx = src.indexOf(anchorStr)
+  let refreshFn
+  if (anchorIdx === -1) {
+    console.error('ERROR: Cannot locate "Headless MCP refresh" string in cli.js.')
+    process.exit(1)
+  }
+  {
+    const before = src.slice(Math.max(0, anchorIdx - 500), anchorIdx)
+    const fnRe = new RegExp(`async function (${V})\\(\\)\\{`, 'g')
+    let m, last
+    while ((m = fnRe.exec(before)) !== null) last = m
+    if (last) {
+      refreshFn = last[1]
+      const fnGlobalOffset = Math.max(0, anchorIdx - 500) + last.index
+      console.log(`  Headless MCP refresh function: ${refreshFn} (at char ${fnGlobalOffset})`)
+    } else {
+      console.error('ERROR: Cannot find async function before "Headless MCP refresh" string.')
+      process.exit(1)
+    }
+  }
+
+  // Verify the refresh function is in scope at the mcp_status handler.
+  // Both should be inside the same parent function (the main run loop).
+  const refreshFnIdx = Math.max(0, anchorIdx - 500) + (src.slice(Math.max(0, anchorIdx - 500), anchorIdx).lastIndexOf(`async function ${refreshFn}`))
+  const mcpHandlerIdx = src.indexOf('"mcp_status"', refreshFnIdx)
+  if (mcpHandlerIdx === -1 || mcpHandlerIdx - refreshFnIdx > 50000) {
+    console.warn(`  WARNING: Refresh function at ${refreshFnIdx}, mcp_status at ${mcpHandlerIdx} — may not share scope`)
+  } else {
+    console.log(`  Scope check OK: refresh fn and mcp_status handler are ${mcpHandlerIdx - refreshFnIdx} chars apart`)
   }
 
   // Try new pattern first (0.2.87+): inline call without block
@@ -176,13 +217,13 @@ if (!skipB) {
     console.log(`  Respond function: ${respondFn}`)
     console.log(`  getMcp function: ${getMcpFn}`)
 
-    // Replace: wrap in block, call s() to load servers, then await z6 for plugins
+    // Replace: wrap in block, call refresh fn to load servers, then await plugin refresh
     const oldMcp = mcpInlineMatch[0]
     const newMcp = PATCH_B_MARKER +
-      `${msgVar}.request.subtype==="mcp_status"){await s();if(${x6Var})await ${x6Var};${respondFn}(${msgVar},{mcpServers:${getMcpFn}()})}`
+      `${msgVar}.request.subtype==="mcp_status"){await ${refreshFn}();if(${x6Var})await ${x6Var};${respondFn}(${msgVar},{mcpServers:${getMcpFn}()})}`
 
     src = src.replace(oldMcp, newMcp)
-    console.log(`Injected await s() + await ${x6Var} in mcp_status handler (inline->block)`)
+    console.log(`Injected await ${refreshFn}() + await ${x6Var} in mcp_status handler (inline->block)`)
   } else if (mcpBlockMatch) {
     // Verify uniqueness
     const allMatches = [...src.matchAll(new RegExp(mcpBlockRe, 'g'))]
@@ -201,10 +242,10 @@ if (!skipB) {
     const oldMcp = mcpBlockMatch[0]
     const awaitPart = hasAwaitD ? `await ${dFn}();` : ''
     const newMcp = PATCH_B_MARKER +
-      `${msgVar}.request.subtype==="mcp_status"){${awaitPart}await s();if(${x6Var})await ${x6Var};let`
+      `${msgVar}.request.subtype==="mcp_status"){${awaitPart}await ${refreshFn}();if(${x6Var})await ${x6Var};let`
 
     src = src.replace(oldMcp, newMcp)
-    console.log(`Injected await s() + await ${x6Var} in mcp_status handler (block form)`)
+    console.log(`Injected await ${refreshFn}() + await ${x6Var} in mcp_status handler (block form)`)
   } else {
     console.error('ERROR: Cannot locate mcp_status handler pattern.')
     console.error('Tried inline pattern: <msg>.request.subtype==="mcp_status")<respondFn>(<msg>,{mcpServers:<fn>()});')

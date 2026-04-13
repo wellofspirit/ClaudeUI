@@ -36,16 +36,16 @@ z6 = null;
 if (!Y9()) z6 = V6()  // always stored
 ```
 
-### Part B: mcp_status handler calls s() to load servers
+### Part B: mcp_status handler calls the headless refresh function to load servers
 
-Instead of just reading the current state, the handler now calls `await s()` to ensure all configured MCP servers (from `--mcp-config`, user/project config, plugins) are loaded before reading status. The `s()` function:
+Instead of just reading the current state, the handler now calls the headless MCP refresh function (dynamically extracted by searching for the `"Headless MCP refresh"` string anchor) to ensure all configured MCP servers are loaded before reading status. The refresh function:
 
 1. Calls `j46()` to read all MCP server configs from all sources
 2. Filters by supported types (stdio, sse, http, sdk)
 3. Calls `X6()` (serialized updater) to connect new servers and update appState
 4. Is safe to call concurrently — `X6()` uses a promise chain for serialization
 
-Also awaits the plugin refresh promise `z6` if available (non-bare mode).
+Also awaits the plugin refresh promise if available (non-bare mode).
 
 **Before:**
 ```js
@@ -56,11 +56,17 @@ if (h6.request.subtype === "mcp_status")
 **After:**
 ```js
 if (h6.request.subtype === "mcp_status") {
-  await s();                    // load all configured servers
-  if (z6) await z6;             // wait for plugin refresh (non-bare)
+  await <refreshFn>();          // load all configured servers (name extracted dynamically)
+  if (<pluginVar>) await <pluginVar>;  // wait for plugin refresh (non-bare)
   E6(h6, { mcpServers: J6() });
 }
 ```
+
+> **Important:** The refresh function name is minified and changes between SDK versions
+> (e.g., `s` in 0.2.87, `R6` in 0.2.97). The patch dynamically extracts it by finding
+> the `"Headless MCP refresh"` string literal and searching backward for the nearest
+> `async function <name>()` definition. Hardcoding the function name causes the handler
+> to call undefined, which silently breaks the control response and hangs the UI.
 
 ## How to find the code
 
@@ -71,7 +77,7 @@ bundle-analyzer find cli.js "CLAUDE_CODE_SYNC_PLUGIN_INSTALL" --compact
 # Part B: mcp_status handler
 bundle-analyzer find cli.js "mcp_status" --compact
 
-# s() function (headless MCP refresh)
+# Headless MCP refresh function (name changes between versions)
 bundle-analyzer find cli.js "Headless MCP refresh" --compact
 ```
 
@@ -79,8 +85,10 @@ bundle-analyzer find cli.js "Headless MCP refresh" --compact
 
 - Part A: `process.env.CLAUDE_CODE_SYNC_PLUGIN_INSTALL` string literal
 - Part B: `"mcp_status"` string literal in the control request handler
-- `s()`: `"Headless MCP refresh"` log message
-- `j46()`: async function that reads MCP server configs from all sources
+- Headless refresh fn: `"Headless MCP refresh"` log message inside the function body
+  (the function name is minified and changes between SDK versions — the patch
+  finds it by searching backward from this string anchor)
+- Config reader: async function that reads MCP server configs from all sources
 
 ## MCP lifecycle events reference
 
