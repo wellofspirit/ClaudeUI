@@ -23,7 +23,8 @@ const patches = [
   resolve(__dirname, 'request-usage/apply.mjs'),
   resolve(__dirname, 'rate-limit-relay/apply.mjs'),
   resolve(__dirname, 'incomplete-session-resume-fix/apply.mjs'),
-  resolve(__dirname, 'voice-server/apply.mjs')
+  resolve(__dirname, 'voice-server/apply.mjs'),
+  resolve(__dirname, 'bash-output-streaming/apply.mjs')
 ]
 
 for (const patch of patches) {

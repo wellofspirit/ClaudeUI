@@ -150,9 +150,11 @@ if (src.includes(PATCH_MARKER)) {
 
   // --- Ff6 (backgroundSignal resolver Map) ---
   // Found by looking for the pattern in the agent task factory:
-  //   <MAP>.set(A, <resolveVar>), <registerFn>(<taskState>, <setAppState>);
+  //   <MAP>.set(A, <resolveVar>), <registerFn>(...);
   // Near "backgroundSignal" which appears in the return statement
-  const bgSignalRe = new RegExp(`(${V})\\.set\\(${V},${V}\\),${V}\\(${V},${V}\\);let ${V};if\\(${V}!==void 0&&${V}>0\\)`)
+  // v0.2.97: MAP.set(A,B),FN(C,D);let E;if(F!==void 0&&F>0)
+  // v0.2.105: MAP.set(q,J),Y.register(H);let M;if(A!==void 0&&A>0)
+  const bgSignalRe = new RegExp(`(${V})\\.set\\(${V},${V}\\),${V}(?:\\.${V})?\\(${V}(?:,${V})?\\);let ${V};if\\(${V}!==void 0&&${V}>0\\)`)
   const bgSignalMatch = bgSignalRe.exec(src)
   if (!bgSignalMatch) {
     console.error('ERROR: Cannot find backgroundSignal resolver Map (Ff6-like)')

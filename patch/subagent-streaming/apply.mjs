@@ -118,7 +118,7 @@ if (src.includes(patchFMarker)) {
   const idx = src.indexOf(oldStr)
 
   // Verify it's inside the sub-agent query generator (cR in v2.1.39, WR in v2.1.47)
-  const before = src.slice(Math.max(0, idx - 5000), idx)
+  const before = src.slice(Math.max(0, idx - 10000), idx)
   if (!/async function\*[\w$]+\(/.test(before)) {
     console.error('ERROR: RVY call site is not inside an async generator. Aborting.')
     process.exit(1)

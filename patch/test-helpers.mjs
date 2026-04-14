@@ -14,6 +14,10 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 /** Project root — used as cwd so the SDK has real files to work with */
 export const PROJECT_ROOT = resolve(__dirname, '..')
 
+/** Path to the patched cli.js — forces the SDK to use our patched bundle
+ *  instead of a native binary on the system. */
+export const CLI_JS_PATH = resolve(__dirname, '..', 'node_modules', '@anthropic-ai', 'claude-agent-sdk', 'cli.js')
+
 /**
  * Unset CLAUDECODE env var to allow running SDK tests from within a Claude Code session.
  * The SDK blocks nested sessions by checking this env var.
@@ -49,6 +53,7 @@ export function createQuery(prompt, optsOverride = {}, timeoutMs = 120_000) {
       model: 'claude-sonnet-4-6',
       cwd: PROJECT_ROOT,
       abortController: ac,
+      pathToClaudeCodeExecutable: CLI_JS_PATH,
       ...optsOverride,
     },
   })
@@ -230,6 +235,7 @@ export function createStreamingQuery(initialPrompt, optsOverride = {}, timeoutMs
       model: 'claude-sonnet-4-6',
       cwd: PROJECT_ROOT,
       abortController: ac,
+      pathToClaudeCodeExecutable: CLI_JS_PATH,
       ...optsOverride,
     },
   })

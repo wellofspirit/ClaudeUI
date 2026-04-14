@@ -179,17 +179,17 @@ if (skipB) {
 if (!skipB) {
   console.log('\n--- Part B: iR refreshTools fallback ---')
 
-  const refreshRe = new RegExp(
+  // Match the opening of the refreshTools if-block:
+  //   VAR.options.refreshTools){let S=VAR.options.refreshTools();if(S!==VAR.options.tools){
+  // The inner block may contain telemetry code (v0.2.105+), so we match the
+  // opening and then find the matching closing braces programmatically.
+  const refreshOpenRe = new RegExp(
     `(${V})\\.options\\.refreshTools\\)\\{` +
     `let (${V})=\\1\\.options\\.refreshTools\\(\\);` +
-    `if\\(\\2!==\\1\\.options\\.tools\\)` +
-    `\\1=\\{` +
-    `\\.\\.\\.\\1,options:\\{` +
-    `\\.\\.\\.\\1\\.options,tools:\\2` +
-    `\\}\\}\\}`
+    `if\\(\\2!==\\1\\.options\\.tools\\)\\{`
   )
 
-  const match = refreshRe.exec(src)
+  const match = refreshOpenRe.exec(src)
   if (!match) {
     console.error('ERROR: Cannot locate refreshTools check pattern.')
     console.error('Use bundle-analyzer to find it:')
@@ -198,18 +198,31 @@ if (!skipB) {
   }
 
   // Verify uniqueness
-  const allMatches = [...src.matchAll(new RegExp(refreshRe, 'g'))]
+  const allMatches = [...src.matchAll(new RegExp(refreshOpenRe, 'g'))]
   if (allMatches.length > 1) {
     console.error('ERROR: refreshTools pattern matched multiple times. Aborting.')
     process.exit(1)
   }
 
-  const ctxVar = match[1]  // X6 (toolUseContext)
+  const ctxVar = match[1]  // X6 / y6 (toolUseContext)
   console.log(`Found refreshTools check at char ${match.index}`)
   console.log(`  Context variable: ${ctxVar}`)
 
-  // Build else branch
-  const oldCode = match[0]
+  // Find the full block by counting braces from the opening `{` of the if-block.
+  // We start after the `VAR.options.refreshTools){` part — that's 2 open braces deep.
+  const blockStart = match.index
+  let depth = 2  // two opening braces already matched: `){` and `){`
+  let pos = match.index + match[0].length
+  while (pos < src.length && depth > 0) {
+    if (src[pos] === '{') depth++
+    else if (src[pos] === '}') depth--
+    pos++
+  }
+  if (depth !== 0) {
+    console.error('ERROR: Brace matching failed for refreshTools block.')
+    process.exit(1)
+  }
+  const oldCode = src.slice(blockStart, pos)
   const newCode = oldCode +
     `else ${PATCH_B_MARKER}` +
     `{let _st=await ${ctxVar}.getAppState();` +
