@@ -1,4 +1,4 @@
-import { memo, useState, useEffect, useRef, useCallback } from 'react'
+import { memo, useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import type { ContentBlock, PendingApproval } from '../../../../shared/types'
 import { isAgentTool } from '../../../../shared/types'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
@@ -54,7 +54,13 @@ export const ToolCallBlock = memo(function ToolCallBlock({ block, result, approv
 
   const toolUseId = block.toolUseId || ''
   const isBackgroundBash = block.toolName === 'Bash' && !!block.toolInput?.run_in_background
+  const bashOutput = useActiveSession((s) => s.bashOutputs[toolUseId])
   const taskNotifications = useActiveSession((s) => s.taskNotifications)
+
+  // Auto-expand when live bash output starts streaming
+  useEffect(() => {
+    if (bashOutput && !expanded) setExpanded(true)
+  }, [bashOutput]) // eslint-disable-line react-hooks/exhaustive-deps
   const summary = getSummary(block)
   const hasResult = !!result
   const isPendingApproval = !isHistorical && !!approval
@@ -274,6 +280,13 @@ export const ToolCallBlock = memo(function ToolCallBlock({ block, result, approv
             </div>
           )}
 
+          {/* Live streaming bash output (foreground) */}
+          {isForegroundBashRunning && bashOutput && (
+            <div className="border-t border-border">
+              <LiveBashOutput output={bashOutput.output} totalLines={bashOutput.totalLines} totalBytes={bashOutput.totalBytes} />
+            </div>
+          )}
+
           {/* Result section (skip for background bash — live output shown separately) */}
           {hasResult && result.toolResult && !isBackgroundBash && (
             <div className={`px-3 py-2.5 ${hideToolInput && block.toolName !== 'Bash' ? '' : 'border-t border-border'}`}>
@@ -331,6 +344,20 @@ export const ToolCallBlock = memo(function ToolCallBlock({ block, result, approv
         </>
       )}
 
+      {/* Footer for foreground bash with live output */}
+      {isForegroundBashRunning && bashOutput && !isPendingApproval && (
+        <div className="border-t border-border px-3 py-1.5 flex items-center gap-1.5">
+          <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-accent/10 text-accent">streaming</span>
+          <div className="flex-1" />
+          <button
+            onClick={() => activeSessionId && openTaskPanel(activeSessionId, toolUseId)}
+            className="text-[11px] text-accent hover:underline cursor-pointer"
+          >
+            Open in panel
+          </button>
+        </div>
+      )}
+
       {/* Footer for background bash */}
       {isBackgroundBash && !isPendingApproval && (
         <div className="border-t border-border px-3 py-1.5 flex items-center gap-1.5">
@@ -347,6 +374,45 @@ export const ToolCallBlock = memo(function ToolCallBlock({ block, result, approv
     </div>
   )
 })
+
+import { AnsiUp } from 'ansi_up'
+const liveAnsiUp = new AnsiUp()
+liveAnsiUp.use_classes = false
+liveAnsiUp.escape_html = true
+
+function LiveBashOutput({ output, totalLines, totalBytes }: { output: string; totalLines: number; totalBytes: number }): React.JSX.Element {
+  const preRef = useRef<HTMLPreElement>(null)
+  const theme = useSessionStore((s) => s.settings.theme)
+  const bg = theme === 'light' ? '#e8eaed' : theme === 'monokai' ? '#272822' : '#0d1117'
+  const fg = theme === 'light' ? '#1a1d24' : theme === 'monokai' ? '#f8f8f2' : '#d1d5db'
+
+  const html = useMemo(() => liveAnsiUp.ansi_to_html(output), [output])
+
+  // Auto-scroll to bottom as new output arrives
+  useEffect(() => {
+    const el = preRef.current
+    if (!el) return
+    el.scrollTop = el.scrollHeight
+  }, [html])
+
+  return (
+    <div className="px-3 py-2.5">
+      <div className="flex items-center gap-2 mb-1.5">
+        <div className="text-[11px] text-text-secondary uppercase tracking-wider">Live Output</div>
+        <span className="text-[10px] font-mono text-text-muted">
+          {totalLines} lines · {totalBytes > 1024 ? `${(totalBytes / 1024).toFixed(1)}KB` : `${totalBytes}B`}
+        </span>
+        <div className="w-1.5 h-1.5 rounded-full bg-accent animate-pulse" />
+      </div>
+      <pre
+        ref={preRef}
+        className="text-[12px] font-mono whitespace-pre-wrap break-words leading-[1.3] rounded-md p-2 border border-border overflow-y-auto"
+        style={{ background: bg, color: fg, maxHeight: 300 }}
+        dangerouslySetInnerHTML={{ __html: html }}
+      />
+    </div>
+  )
+}
 
 function BackgroundBashOutput({ toolUseId }: { toolUseId: string }): React.JSX.Element | null {
   const activeSessionId = useSessionStore((s) => s.activeSessionId)

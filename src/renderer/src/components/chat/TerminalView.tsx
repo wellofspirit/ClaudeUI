@@ -4,6 +4,8 @@ import { useSessionStore, type ThemeId } from '../../stores/session-store'
 
 interface Props {
   text: string
+  /** Override the default max height. Use "none" to fill available space. */
+  maxHeight?: number | string
 }
 
 // 10 rows * 12px fontSize * 1.3 lineHeight + 16px padding
@@ -19,7 +21,7 @@ const ansi = new AnsiUp()
 ansi.use_classes = false
 ansi.escape_html = true
 
-export function TerminalView({ text }: Props): React.JSX.Element {
+export function TerminalView({ text, maxHeight }: Props): React.JSX.Element {
   const theme = useSessionStore((s) => s.settings.theme)
   const { bg, fg } = terminalColors(theme)
   const preRef = useRef<HTMLPreElement>(null)
@@ -36,7 +38,7 @@ export function TerminalView({ text }: Props): React.JSX.Element {
     <pre
       ref={preRef}
       className="text-[12px] font-mono whitespace-pre-wrap break-words leading-[1.3] rounded-md p-2 border border-border overflow-y-auto"
-      style={{ background: bg, color: fg, maxHeight: MAX_VISIBLE_HEIGHT }}
+      style={{ background: bg, color: fg, maxHeight: maxHeight ?? MAX_VISIBLE_HEIGHT, flex: maxHeight === 'none' ? 1 : undefined, minHeight: maxHeight === 'none' ? 0 : undefined }}
       dangerouslySetInnerHTML={{ __html: html }}
     />
   )

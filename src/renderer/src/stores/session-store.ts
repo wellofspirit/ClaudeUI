@@ -347,6 +347,7 @@ export interface PerSessionState {
   subagentMessages: Record<string, ChatMessage[]>
   subagentStreamingText: Record<string, string>
   subagentStreamingThinking: Record<string, string>
+  bashOutputs: Record<string, { output: string; totalLines: number; totalBytes: number }>
   backgroundOutputs: Record<string, { tail: string; totalSize: number }>
   backgroundWatcherCounts: Record<string, number>
   stoppingTaskIds: string[]
@@ -408,6 +409,7 @@ const EMPTY_SESSION_STATE: PerSessionState = {
   subagentMessages: {},
   subagentStreamingText: {},
   subagentStreamingThinking: {},
+  bashOutputs: {},
   backgroundOutputs: {},
   backgroundWatcherCounts: {},
   stoppingTaskIds: [],
@@ -562,6 +564,8 @@ interface SessionState {
   appendSubagentStreamingText: (routingId: string, toolUseId: string, text: string) => void
   appendSubagentStreamingThinking: (routingId: string, toolUseId: string, text: string) => void
   appendSubagentToolResult: (routingId: string, toolUseId: string, toolResultToolUseId: string, result: string, isError: boolean) => void
+  setBashOutput: (routingId: string, toolUseId: string, output: string, totalLines: number, totalBytes: number) => void
+  clearBashOutput: (routingId: string, toolUseId: string) => void
   setBackgroundOutput: (routingId: string, toolUseId: string, tail: string, totalSize: number) => void
   watchBackgroundOutput: (routingId: string, toolUseId: string) => void
   unwatchBackgroundOutput: (routingId: string, toolUseId: string) => void
@@ -997,8 +1001,10 @@ export const useSessionStore = create<SessionState>((set) => ({
           }
         }
       }
+      // Clear live bash output now that the final result has arrived
+      const { [toolUseId]: _, ...restBashOutputs } = session.bashOutputs
       return {
-        sessions: { ...state.sessions, [routingId]: { ...session, messages } }
+        sessions: { ...state.sessions, [routingId]: { ...session, messages, bashOutputs: restBashOutputs } }
       }
     }),
 
@@ -1162,6 +1168,21 @@ export const useSessionStore = create<SessionState>((set) => ({
         }
       }
     }),
+
+  setBashOutput: (routingId, toolUseId, output, totalLines, totalBytes) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, routingId, (s) => ({
+        bashOutputs: { ...s.bashOutputs, [toolUseId]: { output, totalLines, totalBytes } }
+      }))
+    })),
+
+  clearBashOutput: (routingId, toolUseId) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, routingId, (s) => {
+        const { [toolUseId]: _, ...rest } = s.bashOutputs
+        return { bashOutputs: rest }
+      })
+    })),
 
   setBackgroundOutput: (routingId, toolUseId, tail, totalSize) =>
     set((state) => ({

@@ -121,6 +121,7 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     onSubagentToolResult: on('session:subagent-tool-result') as ClaudeAPI['onSubagentToolResult'],
     onSlashCommands: on('session:slash-commands') as ClaudeAPI['onSlashCommands'],
     onPermissionMode: on('session:permission-mode') as ClaudeAPI['onPermissionMode'],
+    onBashOutput: on('session:bash-output') as ClaudeAPI['onBashOutput'],
     onBackgroundOutput: on('session:background-output') as ClaudeAPI['onBackgroundOutput'],
     onSandboxViolation: on('session:sandbox-violation') as ClaudeAPI['onSandboxViolation'],
     onSteerConsumed: on('session:steer-consumed') as ClaudeAPI['onSteerConsumed'],

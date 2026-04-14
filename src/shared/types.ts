@@ -255,6 +255,13 @@ export interface BackgroundOutput {
   done: boolean
 }
 
+export interface BashOutputData {
+  toolUseId: string
+  output: string
+  totalLines: number
+  totalBytes: number
+}
+
 export interface WatchUpdate {
   routingId: string
   messages: ChatMessage[]
@@ -328,6 +335,7 @@ interface SessionAPI {
   onSubagentToolResult(cb: (routingId: string, data: SubagentToolResultData) => void): () => void
   onPermissionMode(cb: (routingId: string, mode: PermissionMode) => void): () => void
   onSandboxViolation(cb: (routingId: string, message: string) => void): () => void
+  onBashOutput(cb: (routingId: string, data: BashOutputData) => void): () => void
   onBackgroundOutput(cb: (routingId: string, data: BackgroundOutput) => void): () => void
   watchBackground(routingId: string, toolUseId: string): Promise<void>
   unwatchBackground(routingId: string, toolUseId: string): Promise<void>

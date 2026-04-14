@@ -820,6 +820,18 @@ The diagram appears inline as a dedicated card with rendered SVG and source tabs
           if (headerUtil) {
             usageFetcher.updateFromHeaderUtilization(headerUtil)
           }
+        } else if (type === 'bash_output') {
+          // Live bash output from the bash-output-streaming patch.
+          // Fires every ~200ms while a foreground Bash command is running.
+          const toolUseId = (msg.tool_use_id as string) || ''
+          if (toolUseId) {
+            this.send('session:bash-output', {
+              toolUseId,
+              output: (msg.output as string) || '',
+              totalLines: (msg.total_lines as number) || 0,
+              totalBytes: (msg.total_bytes as number) || 0
+            })
+          }
         } else if (type === 'result') {
           const cost = (msg.total_cost_usd as number) || 0
           this.totalCostUsd += cost

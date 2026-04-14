@@ -72,6 +72,7 @@ const api: ClaudeAPI = {
   onSubagentToolResult: onEvent('session:subagent-tool-result'),
   onSlashCommands: onEvent('session:slash-commands'),
   onPermissionMode: onEvent('session:permission-mode'),
+  onBashOutput: onEvent('session:bash-output'),
   onBackgroundOutput: onEvent('session:background-output'),
   onSandboxViolation: onEvent('session:sandbox-violation'),
   onSteerConsumed: onEvent('session:steer-consumed'),

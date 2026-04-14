@@ -41,6 +41,7 @@ export function useClaudeEvents(): void {
   const appendSubagentStreamingText = useSessionStore((s) => s.appendSubagentStreamingText)
   const appendSubagentStreamingThinking = useSessionStore((s) => s.appendSubagentStreamingThinking)
   const appendSubagentToolResult = useSessionStore((s) => s.appendSubagentToolResult)
+  const setBashOutput = useSessionStore((s) => s.setBashOutput)
   const setBackgroundOutput = useSessionStore((s) => s.setBackgroundOutput)
   const setStatusLine = useSessionStore((s) => s.setStatusLine)
   const setPermissionMode = useSessionStore((s) => s.setPermissionMode)
@@ -272,6 +273,9 @@ export function useClaudeEvents(): void {
       window.api.onSubagentToolResult((routingId, data) => {
         appendSubagentToolResult(routingId, data.toolUseId, data.toolResultToolUseId, data.result, data.isError)
       }),
+      window.api.onBashOutput((routingId, data) => {
+        setBashOutput(routingId, data.toolUseId, data.output, data.totalLines, data.totalBytes)
+      }),
       window.api.onBackgroundOutput((routingId, data) => {
         setBackgroundOutput(routingId, data.toolUseId, data.tail, data.totalSize)
       }),
@@ -373,5 +377,5 @@ export function useClaudeEvents(): void {
     }).catch((err) => { window.api.logError('useClaudeEvents', `Initial block usage fetch failed: ${err}`) })
 
     return () => cleanups.forEach((fn) => fn())
-  }, [addMessage, appendStreamingText, appendStreamingThinking, addPendingApproval, clearPendingApprovals, setStatus, addError, appendToolResult, updateTaskProgress, addTaskNotification, addSubagentMessage, appendSubagentMessageBatch, appendSubagentStreamingText, appendSubagentStreamingThinking, appendSubagentToolResult, setBackgroundOutput, setStatusLine, setPermissionMode, setSlashCommands, setSdkSkillNames, addSandboxViolation, setVoiceState, appendVoiceTranscript])
+  }, [addMessage, appendStreamingText, appendStreamingThinking, addPendingApproval, clearPendingApprovals, setStatus, addError, appendToolResult, updateTaskProgress, addTaskNotification, addSubagentMessage, appendSubagentMessageBatch, appendSubagentStreamingText, appendSubagentStreamingThinking, appendSubagentToolResult, setBashOutput, setBackgroundOutput, setStatusLine, setPermissionMode, setSlashCommands, setSdkSkillNames, addSandboxViolation, setVoiceState, appendVoiceTranscript])
 }
