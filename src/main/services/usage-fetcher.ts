@@ -228,15 +228,7 @@ export class UsageFetcher {
     }
 
     const field = rateLimitType ? fieldMap[rateLimitType] : undefined
-    if (!field) {
-      logger.debug('UsageFetcher', `rate_limit_event: unknown rateLimitType=${rateLimitType}`)
-      return
-    }
-
-    logger.debug(
-      'UsageFetcher',
-      `rate_limit_event: ${rateLimitType} → ${window.usedPercent.toFixed(1)}% (resets ${window.resetsAt ?? 'unknown'})`
-    )
+    if (!field) return
 
     // Build updated usage, preserving other windows from the last full API response
     const base = this.lastUsage ?? this.defaultUsage()
@@ -282,10 +274,6 @@ export class UsageFetcher {
       ;(base as unknown as Record<string, unknown>)[field] = window
       updated = true
 
-      logger.debug(
-        'UsageFetcher',
-        `header_utilization: ${key} → ${window.usedPercent.toFixed(1)}% (resets ${window.resetsAt ?? 'unknown'})`
-      )
     }
 
     if (!updated) return

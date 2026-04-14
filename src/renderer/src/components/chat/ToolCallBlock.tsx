@@ -55,12 +55,13 @@ export const ToolCallBlock = memo(function ToolCallBlock({ block, result, approv
   const toolUseId = block.toolUseId || ''
   const isBackgroundBash = block.toolName === 'Bash' && !!block.toolInput?.run_in_background
   const bashOutput = useActiveSession((s) => s.bashOutputs[toolUseId])
+  const bgOutput = useActiveSession((s) => s.backgroundOutputs[toolUseId])
   const taskNotifications = useActiveSession((s) => s.taskNotifications)
 
-  // Auto-expand when live bash output starts streaming
+  // Auto-expand when live bash output starts streaming (foreground or background)
   useEffect(() => {
-    if (bashOutput && !expanded) setExpanded(true)
-  }, [bashOutput]) // eslint-disable-line react-hooks/exhaustive-deps
+    if ((bashOutput || bgOutput) && !expanded) setExpanded(true)
+  }, [bashOutput, bgOutput]) // eslint-disable-line react-hooks/exhaustive-deps
   const summary = getSummary(block)
   const hasResult = !!result
   const isPendingApproval = !isHistorical && !!approval
@@ -280,8 +281,8 @@ export const ToolCallBlock = memo(function ToolCallBlock({ block, result, approv
             </div>
           )}
 
-          {/* Live streaming bash output (foreground) */}
-          {isForegroundBashRunning && bashOutput && (
+          {/* Live streaming bash output (foreground, from onProgress patch — fallback if no file polling) */}
+          {isForegroundBashRunning && bashOutput && !bgOutput && (
             <div className="border-t border-border">
               <LiveBashOutput output={bashOutput.output} totalLines={bashOutput.totalLines} totalBytes={bashOutput.totalBytes} />
             </div>
@@ -301,8 +302,8 @@ export const ToolCallBlock = memo(function ToolCallBlock({ block, result, approv
         </div>
       )}
 
-      {/* Background bash output */}
-      {expanded && isBackgroundBash && (
+      {/* Bash output from file polling (foreground + background) */}
+      {expanded && block.toolName === 'Bash' && (isBackgroundBash || isForegroundBashRunning) && (
         <BackgroundBashOutput toolUseId={toolUseId} />
       )}
 
@@ -488,6 +489,7 @@ function BackgroundBashOutput({ toolUseId }: { toolUseId: string }): React.JSX.E
         ref={preRef}
         onScroll={handleScroll}
         className="text-[12px] font-mono text-text-primary/70 bg-bg-primary rounded-md p-2 border border-border overflow-y-auto whitespace-pre-wrap break-words leading-[1.3]"
+        style={{ maxHeight: 10 * 12 * 1.3 + 16 }}
       >
         {prependedContent}{bgOutput.tail}
       </pre>

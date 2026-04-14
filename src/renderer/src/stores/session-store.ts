@@ -1001,10 +1001,8 @@ export const useSessionStore = create<SessionState>((set) => ({
           }
         }
       }
-      // Clear live bash output now that the final result has arrived
-      const { [toolUseId]: _, ...restBashOutputs } = session.bashOutputs
       return {
-        sessions: { ...state.sessions, [routingId]: { ...session, messages, bashOutputs: restBashOutputs } }
+        sessions: { ...state.sessions, [routingId]: { ...session, messages } }
       }
     }),
 
@@ -1026,9 +1024,14 @@ export const useSessionStore = create<SessionState>((set) => ({
         const stoppingTaskIds = notification.toolUseId
           ? s.stoppingTaskIds.filter((id) => id !== notification.toolUseId)
           : s.stoppingTaskIds
+        // Clear live bash output for this tool now that it's done
+        const bashOutputs = notification.toolUseId
+          ? (({ [notification.toolUseId]: _, ...rest }) => rest)(s.bashOutputs)
+          : s.bashOutputs
         return {
           taskNotifications: [...s.taskNotifications, notification],
-          stoppingTaskIds
+          stoppingTaskIds,
+          bashOutputs
         }
       })
     })),
