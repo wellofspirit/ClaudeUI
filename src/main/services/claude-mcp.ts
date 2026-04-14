@@ -156,6 +156,54 @@ export function writeDisabledMcpServers(cwd: string, disabledNames: string[]): v
 }
 
 /**
+ * Remove a single MCP server by name from ALL config files for the given scope.
+ *
+ * Unlike saveMcpServers (which writes to a single target file), this removes the
+ * server key from both .mcp.json and settings.json so it doesn't reappear on reload.
+ */
+export function removeMcpServer(
+  scope: McpScope,
+  serverName: string,
+  cwd?: string
+): void {
+  const paths = configFilePaths(scope, cwd)
+
+  // Remove from .mcp.json
+  if (paths.mcpJson) {
+    const data = readJsonSafe(paths.mcpJson)
+    if (data) {
+      const servers = extractMcpServers(data)
+      if (serverName in servers) {
+        delete servers[serverName]
+        if (Object.keys(servers).length === 0) {
+          delete data.mcpServers
+        } else {
+          data.mcpServers = servers
+        }
+        fs.writeFileSync(paths.mcpJson, JSON.stringify(data, null, 2) + '\n', { mode: 0o600 })
+        logger.debug('ClaudeMcp', `Removed "${serverName}" from ${paths.mcpJson}`)
+      }
+    }
+  }
+
+  // Remove from settings.json / settings.local.json
+  const settingsData = readJsonSafe(paths.settingsJson)
+  if (settingsData) {
+    const servers = extractMcpServers(settingsData)
+    if (serverName in servers) {
+      delete servers[serverName]
+      if (Object.keys(servers).length === 0) {
+        delete settingsData.mcpServers
+      } else {
+        settingsData.mcpServers = servers
+      }
+      fs.writeFileSync(paths.settingsJson, JSON.stringify(settingsData, null, 2) + '\n', { mode: 0o600 })
+      logger.debug('ClaudeMcp', `Removed "${serverName}" from ${paths.settingsJson}`)
+    }
+  }
+}
+
+/**
  * Save MCP servers to the config file for the given scope.
  * For user/project scope, writes to .mcp.json (the standard location).
  * For local scope, writes to settings.local.json under mcpServers key.

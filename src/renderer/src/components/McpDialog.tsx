@@ -367,6 +367,7 @@ function ServerDetail({
   routingId,
   cwd,
   onRefresh,
+  onDeleted,
   actionLoading,
   setActionLoading
 }: {
@@ -374,9 +375,11 @@ function ServerDetail({
   routingId: string | null
   cwd: string | null
   onRefresh: () => void
+  onDeleted: () => void
   actionLoading: string | null
   setActionLoading: (name: string | null) => void
 }): React.JSX.Element {
+  const [confirmingDelete, setConfirmingDelete] = useState(false)
   const isActionable = routingId !== null
   const isEditable = server.scope && ['user', 'project', 'local'].includes(server.scope)
   const isBusy = actionLoading === server.name
@@ -424,20 +427,29 @@ function ServerDetail({
 
   const handleDelete = async (): Promise<void> => {
     if (!server.scope || !isEditable) return
+    setActionLoading(server.name)
     try {
-      const existing = await window.api.loadMcpServers(
-        server.scope as 'user' | 'project' | 'local',
-        cwd ?? undefined
-      )
-      delete existing[server.name]
-      await window.api.saveMcpServers(
-        server.scope as 'user' | 'project' | 'local',
-        existing,
-        cwd ?? undefined
-      )
-      onRefresh()
+      const scope = server.scope as 'user' | 'project' | 'local'
+
+      // Remove from ALL config files for this scope (.mcp.json + settings.json)
+      await window.api.removeMcpServer(scope, server.name, cwd ?? undefined)
+
+      // Notify SDK if session is active so it stops the server process
+      if (routingId) {
+        try {
+          const remaining = await window.api.loadMcpServers(scope, cwd ?? undefined)
+          await window.api.mcpSetServers(routingId, remaining)
+        } catch {
+          // SDK may not be ready — server is removed from config regardless
+        }
+      }
+
+      setConfirmingDelete(false)
+      onDeleted()
     } catch (err) {
       console.error('Delete failed:', err)
+      setActionLoading(null)
+      setConfirmingDelete(false)
     }
   }
 
@@ -445,7 +457,7 @@ function ServerDetail({
   const tools = server.tools ?? []
 
   return (
-    <div className="flex-1 flex flex-col min-w-0">
+    <div className="flex-1 flex flex-col min-w-0 relative">
       {/* Header */}
       <div className="shrink-0 px-5 py-3 border-b border-border">
         <div className="flex items-center gap-2.5 mb-1.5">
@@ -526,9 +538,9 @@ function ServerDetail({
             >
               {server.status === 'disabled' || server.status === 'not_started' ? 'Enable' : 'Disable'}
             </button>
-            {isEditable && (
+            {isEditable && !confirmingDelete && (
               <button
-                onClick={handleDelete}
+                onClick={() => setConfirmingDelete(true)}
                 disabled={isBusy}
                 className="px-2.5 py-1.5 rounded-md bg-red-500/10 hover:bg-red-500/20 border border-red-500/20 text-[11px] text-red-400 font-medium transition-colors cursor-default disabled:opacity-40"
               >
@@ -572,6 +584,44 @@ function ServerDetail({
           <div className="text-[11px] text-text-muted/60">No tools exposed by this server</div>
         )}
       </div>
+
+      {/* Delete confirmation popup */}
+      {confirmingDelete && (
+        <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/40 backdrop-blur-[2px] rounded-r-xl">
+          <div className="bg-bg-primary border border-red-500/30 rounded-xl shadow-2xl px-5 py-4 mx-6 max-w-[320px]">
+            <div className="flex items-center gap-2 mb-2">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-red-400 shrink-0">
+                <path d="M3 6h18" />
+                <path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" />
+                <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
+              </svg>
+              <h3 className="text-[13px] font-semibold text-text-primary">Delete Server</h3>
+            </div>
+            <p className="text-[12px] text-text-secondary mb-1">
+              Are you sure you want to delete <span className="font-semibold text-text-primary">{server.name}</span>?
+            </p>
+            <p className="text-[11px] text-text-muted mb-4">
+              This will remove it from your {server.scope} config. This cannot be undone.
+            </p>
+            <div className="flex items-center justify-end gap-2">
+              <button
+                onClick={() => setConfirmingDelete(false)}
+                disabled={isBusy}
+                className="px-3 py-1.5 rounded-md bg-bg-secondary hover:bg-bg-hover border border-border text-[12px] text-text-secondary hover:text-text-primary transition-colors cursor-default disabled:opacity-40"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleDelete}
+                disabled={isBusy}
+                className="px-3 py-1.5 rounded-md bg-red-500/20 hover:bg-red-500/30 border border-red-500/30 text-[12px] text-red-400 font-medium transition-colors cursor-default disabled:opacity-40"
+              >
+                {isBusy ? 'Deleting...' : 'Delete'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -917,6 +967,7 @@ export function McpDialog({ open, onClose, cwd, routingId }: McpDialogProps): Re
               routingId={routingId}
               cwd={cwd}
               onRefresh={refreshServers}
+              onDeleted={() => { setSelected(null); refreshServers() }}
               actionLoading={actionLoading}
               setActionLoading={setActionLoading}
             />

@@ -10,7 +10,7 @@ import { listDirectories, loadSessionHistory, loadSubagentHistory, buildSubagent
 import { watchSession, unwatchSession } from '../services/session-watcher'
 import { loadSettings, saveSettings, loadSessionConfig, saveSessionConfig, loadSlashCommands, saveSlashCommands, startConfigWatcher } from '../services/ui-config'
 import { loadClaudePermissions, saveClaudePermissions } from '../services/claude-settings'
-import { loadMcpServers, saveMcpServers, readDisabledMcpServers, writeDisabledMcpServers } from '../services/claude-mcp'
+import { loadMcpServers, saveMcpServers, removeMcpServer, readDisabledMcpServers, writeDisabledMcpServers } from '../services/claude-mcp'
 import { scanSkills } from '../services/skill-scanner'
 import type { UISettings, UISessionConfig, SlashCommandCache } from '../services/ui-config'
 import { gitServiceManager } from '../services/git-service'
@@ -214,7 +214,7 @@ const SESSION_IPC_CHANNELS = [
   'usage:fetch', 'usage:fetch-block',
   'claude:load-permissions', 'claude:save-permissions',
   'mcp:status', 'mcp:toggle', 'mcp:reconnect', 'mcp:set-servers',
-  'mcp:load-servers', 'mcp:save-servers',
+  'mcp:load-servers', 'mcp:save-servers', 'mcp:remove-server',
   'mcp:read-disabled', 'mcp:toggle-disabled',
   'worktree:create', 'worktree:status', 'worktree:remove', 'worktree:list',
   'app:quit-confirm',
@@ -808,6 +808,8 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     loadMcpServers(scope as 'user' | 'project' | 'local', cwd))
   ipcMain.handle('mcp:save-servers', (_e, scope: string, servers: Record<string, unknown>, cwd?: string) =>
     saveMcpServers(scope as 'user' | 'project' | 'local', servers as never, cwd))
+  ipcMain.handle('mcp:remove-server', (_e, scope: string, serverName: string, cwd?: string) =>
+    removeMcpServer(scope as 'user' | 'project' | 'local', serverName, cwd))
 
   // MCP disabled state (direct ~/.claude.json access, no session needed)
   ipcMain.handle('mcp:read-disabled', (_e, cwd: string) => {
