@@ -38,10 +38,9 @@ try {
 console.log(`Read ${cliPath} (${(src.length / 1024 / 1024).toFixed(1)} MB)`)
 
 const PATCH_MARKER = '/*PATCHED:bash-output-streaming*/'
+const EARLY_POLL_MARKER = '/*PATCHED:bash-early-poll*/'
 
-const INIT_MARKER = '/*PATCHED:bash-output-init*/'
-
-if (src.includes(PATCH_MARKER) && src.includes(INIT_MARKER)) {
+if (src.includes(PATCH_MARKER) && src.includes(EARLY_POLL_MARKER)) {
   console.log('Already applied (both parts). Skipping.')
   process.exit(0)
 }
@@ -144,25 +143,28 @@ if (src.includes(PATCH_MARKER)) {
 }
 
 // ---------------------------------------------------------------------------
-// Part B: Emit bash_output_init with output file path right after Bc() returns
+// Part B: Start Nw file polling immediately after Bc() returns
 // ---------------------------------------------------------------------------
 //
-// After the Bc() call completes, the shell command object has .taskOutput.path
-// (the output file where stdout is being written). We emit this path immediately
-// so the GUI can start polling the file without waiting for the 2s HEK timeout.
+// For normal bash execution, stdout goes to a file (not piped), so the inline
+// writeStdout→onProgress path never fires. The CLI's own Nw.startPolling is
+// deferred behind a 2s HEK timeout + 1s polling interval = 3s delay.
+//
+// We inject an early Nw.startPolling() call right after Bc() returns (process
+// spawned), before the HEK timeout race. This eliminates the 2s wait.
 //
 // Pattern: ),<resultVar>=<bcVar>.result;
-// We find this right after the onProgress callback closure.
+// We inject right after this, before function F() definition.
+
+const INIT_MARKER = '/*PATCHED:bash-early-poll*/'
 
 if (src.includes(INIT_MARKER)) {
-  console.log('\nPart B (bash_output_init) already applied. Skipping.')
+  console.log('\nPart B (early poll) already applied. Skipping.')
 } else {
-  console.log('\n--- Part B: bash_output_init after Bc() ---')
+  console.log('\n--- Part B: early Nw.startPolling after Bc() ---')
 
-  // Find the Bc result assignment after the onProgress we just patched.
-  // Pattern: ),<var>=<bcVar>.result;
-  // The Bc call variable is right before .result
-  const afterPatch = src.slice(anchorMatch.index, anchorMatch.index + 2000)
+  // Find the Bc result assignment: ),<var>=<bcVar>.result;
+  const afterPatch = src.slice(anchorMatch.index, anchorMatch.index + 3000)
   const resultRe = new RegExp(`\\),(${V})=(${V})\\.result;`)
   const resultMatch = resultRe.exec(afterPatch)
   if (!resultMatch) {
@@ -170,26 +172,39 @@ if (src.includes(INIT_MARKER)) {
     process.exit(1)
   }
 
-  const bcVar = resultMatch[2]  // k — the shell command (DH7) instance
+  const bcVar = resultMatch[2]  // b — the DH7 shell command instance
   const resultAbsIdx = anchorMatch.index + afterPatch.indexOf(resultMatch[0]) + resultMatch[0].length
   console.log(`  Found .result assignment: ${resultMatch[0]} (bcVar=${bcVar})`)
 
   // Verify uniqueness near the patch
-  const searchArea = src.slice(anchorMatch.index, anchorMatch.index + 2000)
+  const searchArea = src.slice(anchorMatch.index, anchorMatch.index + 3000)
   const allResultMatches = [...searchArea.matchAll(new RegExp(resultRe, 'g'))]
   if (allResultMatches.length > 1) {
     console.error('ERROR: Multiple .result assignments found nearby. Aborting.')
     process.exit(1)
   }
 
+  // Find Nw class name by looking for Nw.startPolling in this function
+  // The existing call is: Nw.startPolling(b.taskOutput.taskId)
+  const nwRe = new RegExp(`(${V})\\.startPolling\\(${bcVar}\\.taskOutput\\.taskId\\)`)
+  const nwMatch = nwRe.exec(searchArea)
+  if (!nwMatch) {
+    console.error('ERROR: Cannot find Nw.startPolling call to determine class name.')
+    process.exit(1)
+  }
+  const nwClass = nwMatch[1]
+  console.log(`  Nw class name: ${nwClass}`)
+
   const initInjection = INIT_MARKER +
-    `try{process.stdout.write(JSON.stringify({type:"bash_output_init",` +
-      `tool_use_id:${toolUseIdVar},` +
-      `output_file:${bcVar}.taskOutput.path` +
-    `})+"\\n")}catch(_bi_e){}`
+    `${nwClass}.startPolling(${bcVar}.taskOutput.taskId);`
 
   src = src.slice(0, resultAbsIdx) + initInjection + src.slice(resultAbsIdx)
-  console.log('  Injected bash_output_init emit.')
+
+  if (!src.includes(INIT_MARKER)) {
+    console.error('ERROR: Part B injection failed.')
+    process.exit(1)
+  }
+  console.log('  Applied.')
 }
 
 // ---------------------------------------------------------------------------
@@ -201,17 +216,14 @@ console.log(`\nPatch applied to ${cliPath}`)
 
 const verify = readFileSync(cliPath, 'utf-8')
 console.log(`  ${verify.includes(PATCH_MARKER) ? 'OK' : 'MISSING'} Part A marker`)
-console.log(`  ${verify.includes(INIT_MARKER) ? 'OK' : 'MISSING'} Part B marker`)
+console.log(`  ${verify.includes(EARLY_POLL_MARKER) ? 'OK' : 'MISSING'} Part B marker`)
 
 console.log('\ncli.js verified.')
 console.log('')
 console.log('What this does:')
 console.log('  Part A: Writes bash_output messages to stdout on every Bash output chunk.')
-console.log('    Fires from the onProgress callback of the command runner,')
-console.log('    which runs from file polling (every ~1s).')
+console.log('    Fires from the onProgress callback of the command runner.')
 console.log('    Rate-limited to 1 message per 200ms per tool_use.')
 console.log('    Fields: tool_use_id, output, full_output, total_lines, total_bytes.')
-console.log('  Part B: Writes bash_output_init with the output file path immediately')
-console.log('    after the command runner spawns the process, so the GUI can start')
-console.log('    polling the file without waiting for the 2s progress-loop timeout.')
-console.log('    Fields: tool_use_id, output_file.')
+console.log('  Part B: Starts Nw file polling immediately after Bc() spawns the process,')
+console.log('    eliminating the 2s HEK timeout delay before output streaming begins.')

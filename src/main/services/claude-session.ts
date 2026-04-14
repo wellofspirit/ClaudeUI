@@ -819,23 +819,8 @@ The diagram appears inline as a dedicated card with rendered SVG and source tabs
           if (headerUtil) {
             usageFetcher.updateFromHeaderUtilization(headerUtil)
           }
-        } else if (type === 'bash_output_init') {
-          // Early notification from the bash-output-streaming patch (Part B).
-          // Sent immediately after the command runner spawns the process,
-          // before the 2s progress-loop timeout. Start polling the output
-          // file now so live output appears without delay.
-          const toolUseId = (msg.tool_use_id as string) || ''
-          const outputFile = (msg.output_file as string) || ''
-          if (toolUseId && outputFile) {
-            this.backgroundFilePaths.set(toolUseId, outputFile)
-            if (!this.backgroundPollers.has(toolUseId)) {
-              this.backgroundPollers.set(toolUseId, { filePath: outputFile, lastSize: 0, done: false })
-              this.watchBackground(toolUseId)
-            }
-          }
         } else if (type === 'bash_output') {
-          // Live bash output from the bash-output-streaming patch (Part A).
-          // Fires from the onProgress callback (~1s intervals from file polling).
+          // Live bash output from the bash-output-streaming patch.
           const toolUseId = (msg.tool_use_id as string) || ''
           if (toolUseId) {
             this.send('session:bash-output', {
@@ -1787,11 +1772,11 @@ The diagram appears inline as a dedicated card with rendered SVG and source tabs
     if (outputMatch) {
       const filePath = outputMatch[1].trim()
       this.backgroundFilePaths.set(toolUseId, filePath)
-      // Create poller entry and start polling immediately so output streams
-      // to the renderer without waiting for the user to open the detail panel.
+      // Create dormant poller entry (no interval until watched).
+      // Bash polling is started earlier by bash_output_init; Agent task output
+      // files are JSONL transcripts handled by the subagent-streaming patch.
       if (!this.backgroundPollers.has(toolUseId)) {
         this.backgroundPollers.set(toolUseId, { filePath, lastSize: 0, done: false })
-        this.watchBackground(toolUseId)
       }
     }
   }
