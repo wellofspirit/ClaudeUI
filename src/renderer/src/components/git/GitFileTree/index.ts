@@ -1,0 +1,1 @@
+export { GitFileTree } from './GitFileTree'

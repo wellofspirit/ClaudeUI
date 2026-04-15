@@ -1,8 +1,8 @@
-name: Build & Release
+name: Build & Pre-Release
 
 on:
   push:
-    branches: [main]
+    branches: [pre-release]
     paths-ignore:
       - '**.md'
       - 'docs/**'
@@ -15,7 +15,7 @@ on:
       - 'LICENSE'
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: pre-release-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -33,35 +33,45 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Determine next version
+      - name: Determine next pre-release version
         id: bump
         run: |
-          # Only consider stable tags (no hyphen = no pre-release suffix)
-          LATEST_TAG=$(git tag -l 'v*' --sort=-v:refname | grep -v '-' | head -1)
-          if [ -z "$LATEST_TAG" ]; then
-            NEXT="1.0.0"
+          # Find the latest stable tag (no hyphen = no pre-release suffix)
+          LATEST_STABLE=$(git tag -l 'v*' --sort=-v:refname | grep -v '-' | head -1)
+          if [ -z "$LATEST_STABLE" ]; then
+            NEXT_BASE="1.0.0"
           else
-            # Strip leading 'v'
-            CURRENT="${LATEST_TAG#v}"
+            CURRENT="${LATEST_STABLE#v}"
             MAJOR=$(echo "$CURRENT" | cut -d. -f1)
             MINOR=$(echo "$CURRENT" | cut -d. -f2)
             PATCH=$(echo "$CURRENT" | cut -d. -f3)
-            NEXT="${MAJOR}.${MINOR}.$((PATCH + 1))"
+            NEXT_BASE="${MAJOR}.${MINOR}.$((PATCH + 1))"
           fi
+
+          # Find the latest pre-release tag for this base version and increment
+          LATEST_PRE=$(git tag -l "v${NEXT_BASE}-pre.*" --sort=-v:refname | head -1)
+          if [ -z "$LATEST_PRE" ]; then
+            PRE_NUM=1
+          else
+            PRE_NUM=$(echo "$LATEST_PRE" | sed 's/.*-pre\.//')
+            PRE_NUM=$((PRE_NUM + 1))
+          fi
+
+          NEXT="${NEXT_BASE}-pre.${PRE_NUM}"
           echo "version=$NEXT" >> "$GITHUB_OUTPUT"
           echo "tag=v$NEXT" >> "$GITHUB_OUTPUT"
-          echo "Next version: $NEXT"
+          echo "Next pre-release version: $NEXT (base: $NEXT_BASE, pre: $PRE_NUM)"
 
       - name: Generate changelog
         id: changelog
         run: |
-          LATEST_TAG=$(git tag -l 'v*' --sort=-v:refname | grep -v '-' | head -1)
+          # Changelog since last stable OR last pre-release tag, whichever is newer
+          LATEST_TAG=$(git tag -l 'v*' --sort=-v:refname | head -1)
           if [ -z "$LATEST_TAG" ]; then
             LOG=$(git log --pretty=format:'- %s (%h)' --no-merges)
           else
             LOG=$(git log "${LATEST_TAG}..HEAD" --pretty=format:'- %s (%h)' --no-merges)
           fi
-          # Write to file to preserve newlines, then encode for output
           echo "$LOG" > /tmp/changelog.txt
           {
             echo 'changelog<<CHANGELOG_EOF'
@@ -158,13 +168,18 @@ jobs:
           path: artifacts
           merge-multiple: true
 
-      - name: Create release
+      - name: Create pre-release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.version.outputs.tag }}
-          name: ClaudeUI ${{ needs.version.outputs.tag }}
+          name: ClaudeUI ${{ needs.version.outputs.tag }} (Pre-release)
+          prerelease: true
           body: |
-            ## Changes
+            ## Pre-release
+
+            ⚠️ This is a pre-release build for testing. Not recommended for general use.
+
+            ## Changes since last release
 
             ${{ needs.version.outputs.changelog }}
           files: artifacts/*
