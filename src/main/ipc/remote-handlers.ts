@@ -9,6 +9,7 @@ import type { UISettings, UISessionConfig } from '../services/ui-config'
 import { loadClaudePermissions } from '../services/claude-settings'
 import { loadMcpServers, readDisabledMcpServers } from '../services/claude-mcp'
 import { scanSkills } from '../services/skill-scanner'
+import { scanCustomCommands } from '../services/custom-command-scanner'
 import { usageFetcher } from '../services/usage-fetcher'
 import { blockUsageService } from '../services/block-usage'
 import type { ApprovalDecision, SandboxSettings, PermissionSuggestion } from '../../shared/types'
@@ -233,6 +234,7 @@ export function registerRemoteHandlers(
     }
   })
   dispatcher.register('config:load-slash-commands', async () => loadSlashCommands())
+  dispatcher.register('config:scan-custom-commands', async (cwd: string) => scanCustomCommands(cwd))
   dispatcher.register('config:load-skill-details', async (cwd: string) => scanSkills(cwd))
 
   // Claude permissions (read-only)

@@ -258,6 +258,8 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     loadSlashCommands: () =>
       connection.invoke('config:load-slash-commands') as Promise<ReturnType<ClaudeAPI['loadSlashCommands']>>,
     saveSlashCommands: async () => {}, // Read-only
+    scanCustomCommands: (cwd) =>
+      connection.invoke('config:scan-custom-commands', cwd) as Promise<ReturnType<ClaudeAPI['scanCustomCommands']>>,
     loadSkillDetails: (cwd) =>
       connection.invoke('config:load-skill-details', cwd) as Promise<ReturnType<ClaudeAPI['loadSkillDetails']>>,
 

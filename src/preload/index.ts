@@ -194,6 +194,7 @@ const api: ClaudeAPI = {
   saveSessionConfig: (config) => ipcRenderer.invoke('config:save-sessions', config),
   loadSlashCommands: () => ipcRenderer.invoke('config:load-slash-commands'),
   saveSlashCommands: (commands) => ipcRenderer.invoke('config:save-slash-commands', commands),
+  scanCustomCommands: (cwd: string) => ipcRenderer.invoke('config:scan-custom-commands', cwd),
   loadSkillDetails: (cwd: string) => ipcRenderer.invoke('config:load-skill-details', cwd),
 
   // Account usage (5hr / 7-day rate limits)

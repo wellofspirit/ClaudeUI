@@ -204,6 +204,7 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     saveSessionConfig: (config) => ipcRenderer.invoke('config:save-sessions', config),
     loadSlashCommands: () => ipcRenderer.invoke('config:load-slash-commands'),
     saveSlashCommands: (commands) => ipcRenderer.invoke('config:save-slash-commands', commands),
+    scanCustomCommands: (cwd) => ipcRenderer.invoke('config:scan-custom-commands', cwd),
     loadSkillDetails: (cwd) => ipcRenderer.invoke('config:load-skill-details', cwd),
 
     fetchAccountUsage: () => ipcRenderer.invoke('usage:fetch'),
@@ -305,6 +306,7 @@ export async function bootTestApp(): Promise<TestApp> {
     'config:load-sessions',
     'config:save-slash-commands',
     'config:load-slash-commands',
+    'config:scan-custom-commands',
     'usage:fetch',
     'usage:fetch-block',
     'plugin:views',

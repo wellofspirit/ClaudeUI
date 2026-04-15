@@ -509,6 +509,7 @@ interface SessionState {
   settings: AppSettings
   availableModels: ModelInfo[]
   slashCommands: SlashCommandInfo[]
+  customCommands: SlashCommandInfo[]
   sdkSkillNames: string[]
   accountUsage: AccountUsage | null
   blockUsage: BlockUsageData | null
@@ -591,6 +592,7 @@ interface SessionState {
   setDraftText: (text: string) => void
   setSelectedModel: (model: string) => void
   setSlashCommands: (commands: SlashCommandInfo[]) => void
+  setCustomCommands: (commands: SlashCommandInfo[]) => void
   setSdkSkillNames: (names: string[]) => void
   setAvailableModels: (models: ModelInfo[]) => void
   rekeySession: (oldId: string, newId: string) => void
@@ -666,6 +668,7 @@ export const useSessionStore = create<SessionState>((set) => ({
   settings: DEFAULT_SETTINGS,
   availableModels: [],
   slashCommands: [],
+  customCommands: [],
   sdkSkillNames: [],
   accountUsage: null,
   blockUsage: null,
@@ -1464,6 +1467,7 @@ export const useSessionStore = create<SessionState>((set) => ({
     }),
 
   setSlashCommands: (commands) => set({ slashCommands: commands }),
+  setCustomCommands: (commands) => set({ customCommands: commands }),
   setSdkSkillNames: (names) => set({ sdkSkillNames: names }),
 
   setAvailableModels: (models) => set({ availableModels: models }),
@@ -2023,6 +2027,7 @@ export function getRemoteStateSnapshot(): {
     teammates: Record<string, TeammateInfo>
     focusedAgentId: string | null
     slashCommands: SlashCommandInfo[]
+    customCommands: SlashCommandInfo[]
     sdkSkillNames: string[]
   }>
   directories: DirectoryGroup[]
@@ -2058,6 +2063,7 @@ export function getRemoteStateSnapshot(): {
       teammates: s.teammates,
       focusedAgentId: s.focusedAgentId,
       slashCommands: state.slashCommands,
+      customCommands: state.customCommands,
       sdkSkillNames: state.sdkSkillNames
     }
   }
