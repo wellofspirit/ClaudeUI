@@ -1,11 +1,14 @@
 /**
- * Layer 2: Component tests for ReviewBar's composeReviewPrompt utility.
+ * Layer 2: Component tests for ReviewBar.
  *
- * Tests the pure business logic for composing a review prompt from DiffComment
- * objects. No React rendering required — the function is exported from utils.ts.
+ * Part 1 — composeReviewPrompt: Pure business logic tests. No React rendering.
+ *
+ * Part 2 — ReviewBar FC (rendered): Renders the FC, captures the View props it
+ * passes to <ReviewBarView />, and calls prop callbacks to assert IPC + store
+ * effects. The View is mocked so no real DOM is rendered.
  */
 
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import type { DiffComment } from '../../../../../../shared/types'
 import { composeReviewPrompt } from '../utils'
 
@@ -139,5 +142,158 @@ describe('composeReviewPrompt', () => {
   it('returns only the header when given an empty array', () => {
     const result = composeReviewPrompt([])
     expect(result).toBe(HEADER)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// FC rendering tests — exercises View prop callbacks via IPC + store
+// ---------------------------------------------------------------------------
+
+import React from 'react'
+import { render, act } from '@testing-library/react'
+import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
+import { useSessionStore } from '../../../../stores/session-store'
+import { resetFactoryCounter } from '@test/factories/messages'
+import type { ReviewBarViewProps } from '../View'
+import { ReviewBar } from '../ReviewBar'
+
+let viewProps: ReviewBarViewProps
+
+vi.mock('../View', () => ({
+  ReviewBarView: (props: ReviewBarViewProps) => {
+    viewProps = props
+    return null
+  },
+}))
+
+function makeDiffComment(overrides: Partial<DiffComment> = {}): DiffComment {
+  return {
+    id: 'c1',
+    filePath: 'src/main.ts',
+    lineNumber: 10,
+    endLineNumber: 10,
+    side: 'new' as const,
+    lineContent: 'const x = 1',
+    comment: 'Fix this',
+    createdAt: Date.now(),
+    ...overrides,
+  }
+}
+
+const FC_ROUTE = 'route-reviewbar-fc'
+const FC_CWD = '/repo-reviewbar'
+
+describe('ReviewBar FC — rendered', () => {
+  let app: TestApp
+  let createCalls: Array<unknown[]> = []
+  let sendCalls: Array<[string, string]> = []
+
+  beforeEach(async () => {
+    resetFactoryCounter()
+    createCalls = []
+    sendCalls = []
+
+    app = await bootTestApp()
+    const { bridge } = app
+
+    bridge.ipcMain.handle('session:create', (_e, ...args: unknown[]) => {
+      createCalls.push(args)
+      return null
+    })
+    bridge.ipcMain.handle('session:send', (_e, routingId: string, prompt: string) => {
+      sendCalls.push([routingId, prompt])
+      return null
+    })
+
+    // Seed the store: create session, set it active
+    useSessionStore.getState().createNewSession(FC_ROUTE, FC_CWD)
+    useSessionStore.setState({ activeSessionId: FC_ROUTE })
+  })
+
+  afterEach(() => {
+    app.teardown()
+    useSessionStore.setState({
+      activeSessionId: null,
+      sessions: {},
+      directories: [],
+      recentSessionIds: [],
+      pinnedSessionIds: [],
+      customTitles: {},
+    })
+  })
+
+  it('onSend creates session when not active and sends prompt', async () => {
+    // sdkActive defaults to false in a freshly created session
+    const comments = [makeDiffComment()]
+    render(React.createElement(ReviewBar, { comments }))
+
+    await act(async () => {
+      await viewProps.onSend()
+    })
+
+    // session:create was called before session:send
+    expect(createCalls).toHaveLength(1)
+    expect(sendCalls).toHaveLength(1)
+    expect(sendCalls[0][0]).toBe(FC_ROUTE)
+    // Prompt should be the composed review prompt
+    expect(sendCalls[0][1]).toMatch(/^Please address these review comments/)
+    expect(sendCalls[0][1]).toContain('src/main.ts')
+
+    // markSdkActive should have been called: sdkActive is now true in store
+    expect(useSessionStore.getState().sessions[FC_ROUTE].sdkActive).toBe(true)
+
+    // clearDiffComments should have been called: gitReviewComments is empty
+    expect(useSessionStore.getState().sessions[FC_ROUTE].gitReviewComments).toEqual([])
+  })
+
+  it('onSend skips session creation when already active', async () => {
+    // Mark SDK as already active
+    useSessionStore.getState().markSdkActive(FC_ROUTE)
+
+    const comments = [makeDiffComment()]
+    render(React.createElement(ReviewBar, { comments }))
+
+    await act(async () => {
+      await viewProps.onSend()
+    })
+
+    // session:create must NOT have been called
+    expect(createCalls).toHaveLength(0)
+    // session:send should still be called
+    expect(sendCalls).toHaveLength(1)
+    expect(sendCalls[0][0]).toBe(FC_ROUTE)
+  })
+
+  it('onSend clears diff comments from store', async () => {
+    const comments = [
+      makeDiffComment({ id: 'c1', comment: 'First comment' }),
+      makeDiffComment({ id: 'c2', filePath: 'src/other.ts', comment: 'Second comment' }),
+    ]
+
+    // Pre-populate gitReviewComments in store
+    useSessionStore.getState().addDiffComment(FC_ROUTE, comments[0])
+    useSessionStore.getState().addDiffComment(FC_ROUTE, comments[1])
+    expect(useSessionStore.getState().sessions[FC_ROUTE].gitReviewComments).toHaveLength(2)
+
+    render(React.createElement(ReviewBar, { comments }))
+
+    await act(async () => {
+      await viewProps.onSend()
+    })
+
+    expect(useSessionStore.getState().sessions[FC_ROUTE].gitReviewComments).toEqual([])
+  })
+
+  it('passes correct fileCount from comments spanning two different files', () => {
+    const comments = [
+      makeDiffComment({ id: 'c1', filePath: 'src/alpha.ts' }),
+      makeDiffComment({ id: 'c2', filePath: 'src/beta.ts' }),
+      makeDiffComment({ id: 'c3', filePath: 'src/alpha.ts' }),
+    ]
+
+    render(React.createElement(ReviewBar, { comments }))
+
+    // 2 unique files: alpha.ts and beta.ts
+    expect(viewProps.fileCount).toBe(2)
   })
 })
