@@ -79,7 +79,7 @@ function makePullResult(): { summary: string } {
 
 describe('GitBranchDropdown FC — rendered', () => {
   let app: TestApp
-  const onClose = vi.fn() as unknown as () => void
+  let onClose: ReturnType<typeof vi.fn>
   let anchorRef: React.RefObject<HTMLButtonElement | null>
 
   // Track IPC calls per-channel
@@ -92,6 +92,7 @@ describe('GitBranchDropdown FC — rendered', () => {
 
   beforeEach(async () => {
     resetFactoryCounter()
+    onClose = vi.fn()
     anchorRef = { current: null }
 
     // Clear IPC call tracking
@@ -134,12 +135,12 @@ describe('GitBranchDropdown FC — rendered', () => {
       return { ok: true, data: makeGitBranches() }
     })
 
-    // Seed the store: create session, activate it, set git status + last fetch time
+    // Seed the store: create session, activate it, set git status
+    // Keep gitLastFetchTime null so the mount auto-fetch is not suppressed
+    // (null means no prior fetch -> cooldown does not apply)
     useSessionStore.getState().createNewSession(ROUTE, CWD)
     useSessionStore.setState({ activeSessionId: ROUTE })
     useSessionStore.getState().setGitStatus(ROUTE, makeGitStatus())
-    // Keep gitLastFetchTime null so the mount auto-fetch is not suppressed
-    // (null means no prior fetch → cooldown does not apply)
   })
 
   afterEach(() => {
@@ -155,6 +156,7 @@ describe('GitBranchDropdown FC — rendered', () => {
     })
   })
 
+  /** Render the FC and flush all mount-time async effects. */
   async function renderFC(): Promise<void> {
     await act(async () => {
       render(React.createElement(GitBranchDropdown, { onClose, anchorRef }))
@@ -212,19 +214,20 @@ describe('GitBranchDropdown FC — rendered', () => {
 
     await renderFC()
 
-    // Start fetch — do not await
+    // Start fetch without awaiting it
     let fetchDone = false
     act(() => {
-      ;(viewProps.onFetch() as unknown as Promise<void>).then(() => { fetchDone = true })
+      viewProps.onFetch().then(() => {
+        fetchDone = true
+      })
     })
 
-    // At this point the FC should have set syncOp = 'fetching'
+    // The FC should have synchronously set syncOp = 'fetching'
     expect(useSessionStore.getState().sessions[ROUTE].gitSyncOperation).toBe('fetching')
 
-    // Resolve the pending fetch
+    // Resolve the pending IPC and flush the promise chain
     await act(async () => {
       resolveFetch()
-      // Give the promise chain a tick to run
       await new Promise((r) => setTimeout(r, 0))
     })
 
@@ -288,11 +291,11 @@ describe('GitBranchDropdown FC — rendered', () => {
     expect(ipcCalls['git:push']).toBeDefined()
     expect(ipcCalls['git:push'][0][0]).toBe(CWD)
 
-    // status/branches refreshed
+    // status/branches refreshed after successful push
     expect(ipcCalls['git:status']).toBeDefined()
   })
 
-  it('onPush shows upstreamPrompt when push fails with "no upstream branch" error', async () => {
+  it('onPush shows upstreamPrompt when push fails with no upstream branch error', async () => {
     // Override push to return a no-upstream error
     app.bridge.ipcMain.handle('git:push', () => ({
       ok: false,
@@ -316,7 +319,7 @@ describe('GitBranchDropdown FC — rendered', () => {
   it('onPush sets syncError for generic push failures (not upstream errors)', async () => {
     app.bridge.ipcMain.handle('git:push', () => ({
       ok: false,
-      error: 'error: remote rejected — permission denied',
+      error: 'error: remote rejected - permission denied',
     }))
 
     await renderFC()
@@ -466,11 +469,7 @@ describe('GitBranchDropdown FC — rendered', () => {
   // -------------------------------------------------------------------------
 
   it('loads branches from gitGetBranches on mount', async () => {
-    await act(async () => {
-      renderFC()
-      // Allow the useEffect promise to resolve
-      await new Promise((r) => setTimeout(r, 0))
-    })
+    await renderFC()
 
     // gitGetBranches is called on mount to populate the branch list
     expect(ipcCalls['git:branches']).toBeDefined()
@@ -478,22 +477,16 @@ describe('GitBranchDropdown FC — rendered', () => {
 
   it('auto-fetches on mount when hasTracking=true and no prior fetch', async () => {
     // gitStatus already has trackingBranch set; gitLastFetchTime is null
-    await act(async () => {
-      renderFC()
-      await new Promise((r) => setTimeout(r, 0))
-    })
+    await renderFC()
 
     expect(ipcCalls['git:fetch']).toBeDefined()
   })
 
   it('does NOT auto-fetch when cooldown has not expired', async () => {
-    // Set lastFetchTime to now — within the 30s cooldown
+    // Set lastFetchTime to now - within the 30s cooldown
     useSessionStore.getState().setGitLastFetchTime(ROUTE, Date.now())
 
-    await act(async () => {
-      renderFC()
-      await new Promise((r) => setTimeout(r, 0))
-    })
+    await renderFC()
 
     // Auto-fetch should be suppressed
     expect(ipcCalls['git:fetch']).toBeUndefined()
