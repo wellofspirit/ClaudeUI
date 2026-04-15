@@ -97,7 +97,7 @@ jobs:
           node -e "const p=require('./package.json'); p.version='${{ needs.version.outputs.version }}'; require('fs').writeFileSync('package.json', JSON.stringify(p, null, 2)+'\n')"
 
       - name: Run tests
-        run: bun run vitest run
+        run: bun run test:ci
 
       - name: Build app
         run: |

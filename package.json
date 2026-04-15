@@ -22,7 +22,12 @@
     "build:linux": "electron-vite build && vite build --config vite.web.config.ts && electron-builder --linux",
     "build:web": "vite build --config vite.web.config.ts",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:unit": "vitest run --project unit",
+    "test:component": "vitest run --project component",
+    "test:e2e": "vitest run --project e2e",
+    "test:integration": "vitest run --project integration",
+    "test:ci": "vitest run --project unit --project component --project e2e",
+    "test:watch": "vitest --project unit"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.2.105",
