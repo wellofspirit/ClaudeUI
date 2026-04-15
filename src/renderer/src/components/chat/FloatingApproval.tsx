@@ -3,77 +3,33 @@ import { useSessionStore, useActiveSession } from '../../stores/session-store'
 import type { PendingApproval } from '../../../../shared/types'
 import { AlwaysAllowSection } from './PermissionSuggestions'
 
-/**
- * Finds pending approvals that aren't matched to any visible tool_use block
- * in the messages (e.g. approvals from sub-agents whose tool calls aren't
- * in the parent's message stream).
- */
-function useUnmatchedApprovals(): PendingApproval[] {
-  const pendingApprovals = useActiveSession((s) => s.pendingApprovals)
-  const messages = useActiveSession((s) => s.messages)
+// ---------------------------------------------------------------------------
+// View layer — pure render, zero business logic
+// ---------------------------------------------------------------------------
 
-  if (pendingApprovals.length === 0) return []
-
-  // Collect all tool_use signatures from messages
-  const toolUseSignatures = new Set<string>()
-  for (const msg of messages) {
-    if (msg.role !== 'assistant') continue
-    for (const b of msg.content) {
-      if (b.type === 'tool_use' && b.toolName && b.toolInput) {
-        toolUseSignatures.add(`${b.toolName}:${JSON.stringify(b.toolInput)}`)
-      }
-    }
-  }
-
-  return pendingApprovals.filter(
-    (a) => !toolUseSignatures.has(`${a.toolName}:${JSON.stringify(a.input)}`)
-  )
+export interface ApprovalCardViewProps {
+  approval: PendingApproval
+  permissionMode: string | undefined
+  alwaysAllow: boolean
+  onAlwaysAllowChange: (checked: boolean) => void
+  checkedSuggestions: boolean[]
+  onToggleSuggestion: (index: number) => void
+  onRespond: (decision: 'allow' | 'deny') => void
 }
 
-function ApprovalCard({ approval }: { approval: PendingApproval }): React.JSX.Element {
-  const activeSessionId = useSessionStore((s) => s.activeSessionId)
-  const removePendingApproval = useSessionStore((s) => s.removePendingApproval)
-  const updateSettings = useSessionStore((s) => s.updateSettings)
-  const sandboxSettings = useSessionStore((s) => s.settings.sandbox)
-  const permissionMode = useActiveSession((s) => s.permissionMode)
-  const [alwaysAllow, setAlwaysAllow] = useState(false)
-  const [checkedSuggestions, setCheckedSuggestions] = useState<boolean[]>(
-    () => (approval.suggestions || []).map(() => false)
-  )
-
-  const isSandboxEscape = !!approval.input?.dangerouslyDisableSandbox
-  const hasSuggestions = (approval.suggestions?.length ?? 0) > 0
-
-  const handleRespond = async (decision: 'allow' | 'deny'): Promise<void> => {
-    if (!activeSessionId) return
-
-    // If allowing with "always allow" checked, add command to excluded list (sandbox escape)
-    if (decision === 'allow' && alwaysAllow && isSandboxEscape && approval.input?.command) {
-      const cmd = String(approval.input.command)
-      if (!sandboxSettings.excludedCommands.includes(cmd)) {
-        updateSettings({
-          sandbox: {
-            ...sandboxSettings,
-            excludedCommands: [...sandboxSettings.excludedCommands, cmd]
-          }
-        })
-      }
-    }
-
-    // On allow, include any checked permission suggestions
-    const selected = decision === 'allow' && approval.suggestions
-      ? approval.suggestions.filter((_, i) => checkedSuggestions[i])
-      : undefined
-
-    await window.api.respondApproval(
-      activeSessionId, approval.requestId, decision, undefined,
-      selected?.length ? selected : undefined
-    )
-    removePendingApproval(activeSessionId, approval.requestId)
-  }
-
+export function ApprovalCardView({
+  approval,
+  permissionMode,
+  alwaysAllow,
+  onAlwaysAllowChange,
+  checkedSuggestions,
+  onToggleSuggestion,
+  onRespond,
+}: ApprovalCardViewProps): React.JSX.Element {
   const input = approval.input
   const toolName = approval.toolName
+  const isSandboxEscape = !!input?.dangerouslyDisableSandbox
+  const hasSuggestions = (approval.suggestions?.length ?? 0) > 0
 
   // Render a useful summary based on tool type
   let summary: React.JSX.Element
@@ -135,7 +91,7 @@ function ApprovalCard({ approval }: { approval: PendingApproval }): React.JSX.El
             <input
               type="checkbox"
               checked={alwaysAllow}
-              onChange={(e) => setAlwaysAllow(e.target.checked)}
+              onChange={(e) => onAlwaysAllowChange(e.target.checked)}
               className="w-3.5 h-3.5 rounded border-border accent-accent cursor-pointer"
             />
             <span className="text-[11px] text-text-muted">Always allow this command outside sandbox</span>
@@ -145,27 +101,107 @@ function ApprovalCard({ approval }: { approval: PendingApproval }): React.JSX.El
           <AlwaysAllowSection
             suggestions={approval.suggestions!}
             checkedSuggestions={checkedSuggestions}
-            onToggle={(i) => setCheckedSuggestions((prev) => prev.map((v, j) => j === i ? !v : v))}
+            onToggle={onToggleSuggestion}
             currentMode={permissionMode}
           />
         )}
       </div>
       <div className={`flex border-t ${dividerColor}`}>
         <button
-          onClick={() => handleRespond('deny')}
+          onClick={() => onRespond('deny')}
           className="flex-1 h-8 text-[12px] font-medium text-danger hover:bg-danger/5 transition-colors cursor-pointer"
         >
           Deny
         </button>
         <div className={`w-px ${dividerColor.replace('border-', 'bg-')}`} />
         <button
-          onClick={() => handleRespond('allow')}
+          onClick={() => onRespond('allow')}
           className="flex-1 h-8 text-[12px] font-medium text-success hover:bg-success/5 transition-colors cursor-pointer"
         >
           Allow
         </button>
       </div>
     </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Logic layer — hooks, store access, IPC calls
+// ---------------------------------------------------------------------------
+
+function useUnmatchedApprovals(): PendingApproval[] {
+  const pendingApprovals = useActiveSession((s) => s.pendingApprovals)
+  const messages = useActiveSession((s) => s.messages)
+
+  if (pendingApprovals.length === 0) return []
+
+  // Collect all tool_use signatures from messages
+  const toolUseSignatures = new Set<string>()
+  for (const msg of messages) {
+    if (msg.role !== 'assistant') continue
+    for (const b of msg.content) {
+      if (b.type === 'tool_use' && b.toolName && b.toolInput) {
+        toolUseSignatures.add(`${b.toolName}:${JSON.stringify(b.toolInput)}`)
+      }
+    }
+  }
+
+  return pendingApprovals.filter(
+    (a) => !toolUseSignatures.has(`${a.toolName}:${JSON.stringify(a.input)}`)
+  )
+}
+
+function ApprovalCard({ approval }: { approval: PendingApproval }): React.JSX.Element {
+  const activeSessionId = useSessionStore((s) => s.activeSessionId)
+  const removePendingApproval = useSessionStore((s) => s.removePendingApproval)
+  const updateSettings = useSessionStore((s) => s.updateSettings)
+  const sandboxSettings = useSessionStore((s) => s.settings.sandbox)
+  const permissionMode = useActiveSession((s) => s.permissionMode)
+  const [alwaysAllow, setAlwaysAllow] = useState(false)
+  const [checkedSuggestions, setCheckedSuggestions] = useState<boolean[]>(
+    () => (approval.suggestions || []).map(() => false)
+  )
+
+  const handleRespond = async (decision: 'allow' | 'deny'): Promise<void> => {
+    if (!activeSessionId) return
+
+    const isSandboxEscape = !!approval.input?.dangerouslyDisableSandbox
+
+    // If allowing with "always allow" checked, add command to excluded list
+    if (decision === 'allow' && alwaysAllow && isSandboxEscape && approval.input?.command) {
+      const cmd = String(approval.input.command)
+      if (!sandboxSettings.excludedCommands.includes(cmd)) {
+        updateSettings({
+          sandbox: {
+            ...sandboxSettings,
+            excludedCommands: [...sandboxSettings.excludedCommands, cmd]
+          }
+        })
+      }
+    }
+
+    // On allow, include any checked permission suggestions
+    const selected = decision === 'allow' && approval.suggestions
+      ? approval.suggestions.filter((_, i) => checkedSuggestions[i])
+      : undefined
+
+    await window.api.respondApproval(
+      activeSessionId, approval.requestId, decision, undefined,
+      selected?.length ? selected : undefined
+    )
+    removePendingApproval(activeSessionId, approval.requestId)
+  }
+
+  return (
+    <ApprovalCardView
+      approval={approval}
+      permissionMode={permissionMode}
+      alwaysAllow={alwaysAllow}
+      onAlwaysAllowChange={setAlwaysAllow}
+      checkedSuggestions={checkedSuggestions}
+      onToggleSuggestion={(i) => setCheckedSuggestions((prev) => prev.map((v, j) => j === i ? !v : v))}
+      onRespond={handleRespond}
+    />
   )
 }
 

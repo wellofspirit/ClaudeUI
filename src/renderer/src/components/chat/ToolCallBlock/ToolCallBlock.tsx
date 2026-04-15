@@ -1,13 +1,13 @@
 import { memo, useState, useEffect, useRef, useCallback, useMemo } from 'react'
-import type { ContentBlock, PendingApproval } from '../../../../shared/types'
-import { isAgentTool } from '../../../../shared/types'
-import { useSessionStore, useActiveSession } from '../../stores/session-store'
-import { CodeView } from './CodeView'
-import { DiffViewer } from '../../lib/diff'
-import { TerminalView } from './TerminalView'
-import { MarkdownRenderer } from './MarkdownRenderer'
-import { AlwaysAllowSection } from './PermissionSuggestions'
-import { MermaidDiagram } from './MermaidDiagram'
+import type { ContentBlock, PendingApproval } from '../../../../../shared/types'
+import { useSessionStore, useActiveSession } from '../../../stores/session-store'
+import { resolveToolVisualState, TOOL_BORDER_CLASSES, getSummary, shorten, trunc } from './utils'
+import { CodeView } from '../CodeView'
+import { DiffViewer } from '../../../lib/diff'
+import { TerminalView } from '../TerminalView'
+import { MarkdownRenderer } from '../MarkdownRenderer'
+import { AlwaysAllowSection } from '../PermissionSuggestions'
+import { MermaidDiagram } from '../MermaidDiagram'
 
 type ToolUseBlock = Extract<ContentBlock, { type: 'tool_use' }>
 type ToolResultBlock = Extract<ContentBlock, { type: 'tool_result' }>
@@ -70,37 +70,37 @@ export const ToolCallBlock = memo(function ToolCallBlock({ block, result, approv
   // For background bash, "done" means we got a task_notification, not just a tool_result
   const bgNotification = isBackgroundBash ? taskNotifications.find((n) => n.toolUseId === toolUseId) : null
   const bgRunning = isBackgroundBash && !bgNotification && !isHistorical
-  const bgError = isBackgroundBash && bgNotification?.status === 'failed'
-  const isError = isBackgroundBash ? bgError : (result?.isError ?? false)
-  const isSuccess = isBackgroundBash ? (!!bgNotification && !bgError) : (hasResult && !isError)
-  // In historical mode, tools without results show as "loaded" (neutral state)
-  const isLoaded = isHistorical && !hasResult && !isSuccess && !isError
-  // Foreground Bash: still running (no result), not background, not historical
-  const isForegroundBashRunning = block.toolName === 'Bash' && !isBackgroundBash && !hasResult && !isPendingApproval && !isHistorical
+
+  // Use extracted state machine for visual state + border color
+  const visualState = resolveToolVisualState({
+    toolName: block.toolName,
+    hasResult,
+    isHistorical,
+    hasApproval: !!approval,
+    isBackgroundBash,
+    bgNotificationStatus: bgNotification?.status ?? null,
+    resultIsError: result?.isError ?? false,
+  })
+  const borderColor = TOOL_BORDER_CLASSES[visualState]
+  const isError = visualState === 'error'
+  const isSuccess = visualState === 'success'
+  const isLoaded = visualState === 'loaded'
+  const isForegroundBashRunning = visualState === 'running' && !isBackgroundBash
 
   const handleApproval = async (decision: 'allow' | 'deny'): Promise<void> => {
     if (!approval || !activeSessionId) return
+
     // On allow, include any checked permission suggestions
     const selected = decision === 'allow' && approval.suggestions
       ? approval.suggestions.filter((_, i) => checkedSuggestions[i])
       : undefined
+
     await window.api.respondApproval(
       activeSessionId, approval.requestId, decision, undefined,
       selected?.length ? selected : undefined
     )
     removePendingApproval(activeSessionId, approval.requestId)
   }
-
-  // Determine border color based on state
-  const borderColor = isPendingApproval
-    ? 'border-warning/40'
-    : isError
-      ? 'border-danger/30'
-      : bgRunning || isForegroundBashRunning
-        ? 'border-accent/30'
-        : isSuccess
-          ? 'border-success/30'
-          : 'border-border'
 
   const statusIcon = isPendingApproval ? (
     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-warning shrink-0">
@@ -151,10 +151,10 @@ export const ToolCallBlock = memo(function ToolCallBlock({ block, result, approv
     e.stopPropagation()
     if (!activeSessionId) return
     setTaskStopping(activeSessionId, toolUseId)
-    const result = await window.api.stopTask(activeSessionId, toolUseId)
+    const stopResult = await window.api.stopTask(activeSessionId, toolUseId)
 
-    if (!result.success) {
-      window.api.logError('ToolCallBlock', `Failed to stop task: ${result.error}`)
+    if (!stopResult.success) {
+      window.api.logError('ToolCallBlock', `Failed to stop task: ${stopResult.error}`)
       clearTaskStopping(activeSessionId, toolUseId)
       return
     }
@@ -622,39 +622,3 @@ function WriteResult({ content, filePath }: { content: string; filePath?: string
   )
 }
 
-function getSummary(block: ToolUseBlock): string {
-  const input = block.toolInput
-  if (!input) return ''
-
-  if (block.toolName === 'Read' && input.file_path) return shorten(String(input.file_path))
-  if (block.toolName === 'Write' && input.file_path) return shorten(String(input.file_path))
-  if (block.toolName === 'Edit' && input.file_path) return shorten(String(input.file_path))
-  if (block.toolName === 'Bash' && input.command) return String(input.command)
-  if (block.toolName === 'Glob' && input.pattern) return String(input.pattern)
-  if (block.toolName === 'Grep' && input.pattern) return String(input.pattern)
-  if (block.toolName === 'AskUserQuestion' && Array.isArray(input.questions)) {
-    const n = input.questions.length
-    return `${n} question${n !== 1 ? 's' : ''}`
-  }
-  if (block.toolName === 'TodoWrite' && Array.isArray(input.todos)) {
-    const completed = input.todos.filter((t: Record<string, unknown>) => t.status === 'completed').length
-    return `${completed}/${input.todos.length} tasks`
-  }
-  if (block.toolName === 'mcp__claude-ui__render_mermaid') {
-    return input.title ? String(input.title) : 'diagram'
-  }
-  if (isAgentTool(block.toolName) && input.description) return String(input.description)
-  if (block.toolName === 'TaskOutput' && input.task_id) return `task ${String(input.task_id).slice(0, 8)}…`
-  if (block.toolName === 'TaskStop' && input.task_id) return `stop ${String(input.task_id).slice(0, 8)}…`
-
-  return JSON.stringify(input)
-}
-
-function shorten(path: string): string {
-  const parts = path.split('/')
-  return parts.length <= 3 ? path : '.../' + parts.slice(-2).join('/')
-}
-
-function trunc(s: string, n: number): string {
-  return s.length > n ? s.slice(0, n) + '...' : s
-}
