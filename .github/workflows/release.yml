@@ -10,8 +10,13 @@ on:
       - '.claude/**'
       - '.prettierrc.yaml'
       - '.prettierignore'
+      - '.eslintrc.*'
       - '.gitignore'
       - 'LICENSE'
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: write

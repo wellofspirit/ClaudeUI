@@ -111,6 +111,14 @@ src/
   renderer/log-viewer/     — Standalone log viewer window (LogViewer.tsx + filtering)
   web/                     — Remote access web client (WebSocket + E2E encryption)
     main.tsx, connection.ts, api-adapter.ts, components/ConnectionOverlay.tsx
+  test/                      — Shared test infrastructure
+    bridges/                 — TestIpcBridge (Electron IPC replacement)
+    stubs/                   — electron-shim, sdk-stub
+    factories/               — messages.ts, sdk-events.ts (test data builders)
+    helpers/                 — boot-test-app.ts, wait-for-store.ts, render-with-store.ts
+    setup/                   — jsdom.setup.ts, node.setup.ts
+  e2e/flows/                 — Layer 3 E2E tests
+  integration/               — Layer 4 integration tests
 patch/                     — SDK monkey-patches (applied via postinstall)
 docs/adr/                  — Architectural Decision Records
 ```
@@ -201,10 +209,20 @@ The app has four main views switchable via sidebar:
 
 ## Testing
 
-- **Framework:** Vitest with jsdom environment (node override via `@vitest-environment node` comment)
-- **Config:** `vitest.config.ts` — globals enabled, setup file loads `@testing-library/jest-dom`
-- **Pattern:** `src/**/__tests__/**/*.test.{ts,tsx}`
-- **Coverage areas:** Logger, diff library (parse/build/highlight), content block merging, todo building, usage formatting, block-usage pricing/grouping, e2e-crypto, automation store, session-store, session-manager, skill-scanner, usage-fetcher, session-history, preload unwrap, IPC timeout
+Four-layer testing architecture. Full details in **[docs/testing-strategy.md](docs/testing-strategy.md)**.
+
+| Layer | Command | What it tests | File pattern |
+|-------|---------|---------------|--------------|
+| **Unit** | `bun run test:unit` | Pure rendering, pure functions | `*.test.ts`, `*.unit.test.tsx` |
+| **Component** | `bun run test:component` | Business logic (events → store state) | `*.component.test.ts` |
+| **E2E** | `bun run test:e2e` | Full pipeline (bridge events → store) | `*.e2e.test.ts` |
+| **Integration** | `bun run test:integration` | Real SDK event contracts | `*.integration.test.ts` |
+
+- **CI runs:** `bun run test:ci` (unit + component + e2e, no integration)
+- **All layers:** `bun run test`
+- **Watch mode:** `bun run test:watch` (unit only)
+- **Framework:** Vitest 4.x with jsdom, `@testing-library/react`, workspace projects in `vitest.config.ts`
+- **Test infra:** `src/test/` — TestIpcBridge, electron shim, SDK stub, factories, helpers
 
 ## Windows Path Format in Bash Commands
 
