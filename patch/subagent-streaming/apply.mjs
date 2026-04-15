@@ -651,6 +651,102 @@ if (src.includes(patchEMarker)) {
 }
 
 // ===========================================================================
+// Patch G: iu8() — async background agent direct stdout streaming
+//
+// iu8() is the function that runs agents launched with run_in_background=true.
+// Unlike the re-background loop (Patch E), iu8 never had stdout forwarding.
+// Its `for await` loop just collects messages — we inject forwarding logic
+// identical to Patch E.
+//
+// Anchor: the unique function signature of iu8 plus its for-await body:
+//   for await(let MSG of _(CACHE_PARAM)){ARR.push(MSG),REGISTRY.update(...)
+// ===========================================================================
+
+console.log('\n--- Patch G: iu8() background agent stdout streaming ---')
+
+const patchGMarker = '/*PATCHED:subagent-G*/'
+
+if (src.includes(patchGMarker)) {
+  console.log('Already applied. Skipping.')
+} else {
+  // Find iu8 by its unique signature pattern:
+  // async function FUNC({taskId:VAR,abortController:VAR,makeStream:VAR,metadata:VAR,description:VAR,toolUseContext:VAR,taskRegistry:VAR,...})
+  const iu8SigRe = new RegExp(
+    `async function (${V})\\(\\{taskId:(${V}),abortController:(${V}),makeStream:(${V}),` +
+    `metadata:(${V}),description:(${V}),toolUseContext:(${V}),taskRegistry:(${V}),` +
+    `agentIdForCleanup:(${V}),enableSummarization:(${V}),getWorktreeResult:(${V})\\}\\)`
+  )
+  const iu8Match = iu8SigRe.exec(src)
+  if (!iu8Match) {
+    console.error('ERROR: Cannot locate iu8() function signature.')
+    process.exit(1)
+  }
+  // Re-discover session ID and UUID functions (same as Patch E but in Patch G scope)
+  const sessFnReG = /session_id:([\w$]+)\(\).*?parent_tool_use_id/
+  const sessFnMatchG = src.match(sessFnReG)
+  if (!sessFnMatchG) { console.error('ERROR: Cannot locate session ID function for Patch G.'); process.exit(1) }
+  const sessFnG = sessFnMatchG[1]
+
+  const uuidFnReG = /\{type:"progress",data:[\w$]+,toolUseID:[\w$]+,parentToolUseID:[\w$]+,uuid:([\w$]+)\(\),timestamp:new Date/
+  const uuidFnMatchG = src.match(uuidFnReG)
+  if (!uuidFnMatchG) { console.error('ERROR: Cannot locate UUID function for Patch G.'); process.exit(1) }
+  const uuidFnG = uuidFnMatchG[1]
+
+  const iu8Name = iu8Match[1]
+  const taskIdVar = iu8Match[2]        // q
+  const makeStreamVar = iu8Match[4]    // _
+  const descVar_g = iu8Match[6]        // Y — description
+  const toolUseCtxVar = iu8Match[7]    // A — toolUseContext (has .toolUseId)
+  console.log(`  Found ${iu8Name}() at char ${iu8Match.index}`)
+  console.log(`    taskId=${taskIdVar}, makeStream=${makeStreamVar}, desc=${descVar_g}, toolUseCtx=${toolUseCtxVar}`)
+
+  // Find the for-await loop body inside iu8:
+  // for await(let MSG of MAKESTREAM(CACHE)){ARR.push(MSG),REGISTRY.update(TASKID,...
+  const iu8Body = src.slice(iu8Match.index, iu8Match.index + 2000)
+  const forAwaitRe = new RegExp(
+    `for await\\(let (${V}) of ${makeStreamVar}\\((${V})\\)\\)\\{(${V})\\.push\\(\\1\\),`
+  )
+  const forAwaitMatch = forAwaitRe.exec(iu8Body)
+  if (!forAwaitMatch) {
+    console.error('ERROR: Cannot find for-await loop in iu8().')
+    process.exit(1)
+  }
+  const msgVar_g = forAwaitMatch[1]   // G — the loop variable
+  const arrVar_g = forAwaitMatch[3]   // J — the collection array
+  console.log(`    Loop: msg=${msgVar_g}, arr=${arrVar_g}`)
+
+  // The injection point is right after the opening `{` of the for-await body
+  const forAwaitAbsIdx = iu8Match.index + iu8Body.indexOf(forAwaitMatch[0])
+  const braceIdx = forAwaitAbsIdx + forAwaitMatch[0].indexOf('{') + 1
+
+  // toolUseId for parent_tool_use_id comes from toolUseContext
+  const ptuExpr = `${toolUseCtxVar}.toolUseId`
+
+  // Single injection at the start of the loop body — handles all three types.
+  // stream_event: forward + continue (skip collection).
+  // assistant/user: forward + fall through to existing body (push, stats, etc).
+  const gInjection = patchGMarker +
+    `if(${msgVar_g}.type==="stream_event"){` +
+      `try{process.stdout.write(JSON.stringify({type:"stream_event",event:${msgVar_g}.event,` +
+      `parent_tool_use_id:${ptuExpr},session_id:${sessFnG}(),uuid:${uuidFnG}()})+"\\n")}catch(_ge){}` +
+      `continue` +
+    `}` +
+    `if(${msgVar_g}.type==="assistant"||${msgVar_g}.type==="user")` +
+      `try{process.stdout.write(JSON.stringify({type:${msgVar_g}.type,message:${msgVar_g}.message,` +
+      `parent_tool_use_id:${ptuExpr},session_id:${sessFnG}(),uuid:${uuidFnG}()})+"\\n")}catch(_ge){}`
+
+  src = src.slice(0, braceIdx) + gInjection + src.slice(braceIdx)
+
+  if (!src.includes(patchGMarker)) {
+    console.error('ERROR: Patch G injection failed.')
+    process.exit(1)
+  }
+
+  patchCount++
+  console.log('  Applied.')
+}
+
+// ===========================================================================
 // Write and verify
 // ===========================================================================
 
@@ -669,7 +765,8 @@ const markers = [
   ['B', patchBMarker, 'Stream_event forwarding (before O1.push)'],
   ['C', patchCMarker, 'ZhA agent_stream_event handler'],
   ['D', patchDMarker, '.output file thinking inclusion'],
-  ['E', patchEMarker, 'Background agent stdout streaming']
+  ['E', patchEMarker, 'Background agent stdout streaming (re-background)'],
+  ['G', patchGMarker, 'Background agent stdout streaming (iu8 — run_in_background)']
 ]
 
 let allGood = true

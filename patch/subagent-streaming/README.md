@@ -991,6 +991,82 @@ Fix: Changed the filter to use a 1000-char window and only require
 `))ARR.push(MSG),STATS(...)` pattern is specific enough to only match
 the two background agent loops.
 
+### Patch G — iu8() background agent stdout streaming (run_in_background)
+
+**Covers agents launched with `run_in_background: true` from the start.**
+
+Patch E targets the *re-background* path — where a foreground agent is
+backgrounded mid-execution via the `backgroundSignal` race. However,
+agents launched directly as background (`run_in_background: true` in the
+Agent tool input) take a completely different path: the Tool's `call()`
+returns `{ isAsync: true, status: "async_launched" }` immediately and
+delegates execution to `iu8()`.
+
+`iu8()` is a standalone async function that runs the background agent's
+full conversation loop. Its `for await` loop collects messages into an
+array and updates task state, but **never forwards anything to stdout**.
+The progress callback is dead (same as Patch E's scenario), and no other
+forwarding mechanism exists.
+
+**Marker**: `/*PATCHED:subagent-G*/`
+
+**Anchor**: The `iu8` function signature is unique:
+```
+async function iu8({taskId:VAR,abortController:VAR,makeStream:VAR,metadata:VAR,description:VAR,toolUseContext:VAR,taskRegistry:VAR,agentIdForCleanup:VAR,enableSummarization:VAR,getWorktreeResult:VAR})
+```
+
+Find it with:
+```bash
+bundle-analyzer find cli.js "taskId:.*abortController:.*makeStream:.*metadata:.*description:.*toolUseContext:.*taskRegistry:.*agentIdForCleanup" --regex --compact
+```
+
+**Before** (loop body just collects):
+```js
+for await (let G of _(P)) {
+    J.push(G), O.update(q, ...), G36(X, G, M, A.options.tools), q78(q, ...);
+    let f = cu8(G); if (f) lu8(X, q, A.toolUseId, Y, z.startTime, f)
+}
+```
+
+**After** (stream_event forwarded + continue, assistant/user forwarded then fall through):
+```js
+for await (let G of _(P)) {
+    /*PATCHED:subagent-G*/
+    if (G.type === "stream_event") {
+        try { process.stdout.write(JSON.stringify({
+            type: "stream_event", event: G.event,
+            parent_tool_use_id: A.toolUseId,
+            session_id: E8(), uuid: yf()
+        }) + "\n") } catch(_ge) {}
+        continue
+    }
+    if (G.type === "assistant" || G.type === "user")
+        try { process.stdout.write(JSON.stringify({
+            type: G.type, message: G.message,
+            parent_tool_use_id: A.toolUseId,
+            session_id: E8(), uuid: yf()
+        }) + "\n") } catch(_ge) {}
+
+    // Original body follows (push, stats, state update)
+    J.push(G), O.update(q, ...), G36(X, G, M, A.options.tools), ...
+}
+```
+
+**Key differences from Patch E:**
+
+| Aspect | Patch E | Patch G |
+|---|---|---|
+| Code path | Re-background loop (after `backgroundSignal`) | `iu8()` (agents launched as background) |
+| `parent_tool_use_id` source | Looked up from parent message content by matching description | Direct: `toolUseContext.toolUseId` (available as parameter) |
+| Loop pattern | `for await` with `isAsync:!0` in override | `for await(let G of _(P))` in standalone function |
+
+Patch G is simpler than Patch E because `iu8()` receives `toolUseContext`
+as a parameter, which contains `.toolUseId` — the parent Agent tool's ID.
+No parent message lookup is needed.
+
+**Dynamic function extraction**: Session ID (`E8`) and UUID (`yf`) functions
+are re-discovered using the same patterns as Patch E (not shared variables).
+
 ## What's NOT Changed
 
 **UEA (task result)** — The final result returned to the parent model from
@@ -1184,11 +1260,16 @@ executes, the tool executor has returned the `async_launched` result and
 the progress callback `j()` is dead (its output queue is closed).
 
 Patches A–C (progress callback based) therefore do **not** work for
-background agents. Instead, **Patch E** writes messages directly to
+background agents. Instead, **Patches E and G** write messages directly to
 stdout using `process.stdout.write(JSON + "\n")`, bypassing the progress
-callback / `O6q()` / ZhA pipeline entirely. Like Patch B, Patch E
-intercepts stream_events before the collection array push to prevent
+callback / `O6q()` / ZhA pipeline entirely. Like Patch B, these patches
+intercept stream_events before the collection array push to prevent
 downstream crashes.
+
+- **Patch E** covers agents that start foreground and are *re-backgrounded*
+  mid-execution (via the `backgroundSignal` race in the sync path).
+- **Patch G** covers agents launched directly with `run_in_background: true`
+  (the `iu8()` function, a separate async execution path).
 
 Patch D handles the `.output` file writer (used by background agents for
 the `Read` tool to tail output).
