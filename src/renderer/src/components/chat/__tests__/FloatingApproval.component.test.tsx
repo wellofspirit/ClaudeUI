@@ -2,22 +2,32 @@
  * Layer 2: Component tests for FloatingApproval approval response flow.
  *
  * Tests the business logic: user responds to approval → IPC call → store update.
- * Uses TestIpcBridge as Electron transport shim — no React rendering.
+ * Uses TestIpcBridge as Electron transport shim.
+ *
+ * Two describe blocks:
+ *
+ * 1. "FloatingApproval approval response flow" — store-only tests using
+ *    simulateApprovalResponse (no rendering). Covers all decision variants,
+ *    sandbox exclusion logic, and suggestion filtering.
+ *
+ * 2. "FloatingApproval rendered component" — renders <FloatingApproval /> and
+ *    clicks Allow/Deny via DOM to exercise the full component path (hooks →
+ *    handleRespond → IPC → store).
  *
  * The FloatingApproval component:
  * 1. Reads pending approvals from the store (populated by session:approval-request events)
  * 2. When user responds: calls window.api.respondApproval() → IPC → main process
  * 3. Then removes the approval from the store
  * 4. Optionally updates sandbox exclusions and forwards permission suggestions
- *
- * We test the full cycle: event arrives → store populated → response sent → store cleaned up.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { render, screen, fireEvent, act } from '@testing-library/react'
 import { TestIpcBridge } from '@test/bridges/test-ipc-bridge'
 import { useSessionStore } from '../../../stores/session-store'
 import { makePendingApproval, resetFactoryCounter } from '@test/factories/messages'
 import type { PendingApproval, PermissionSuggestion } from '../../../../../shared/types'
+import { FloatingApproval } from '../FloatingApproval'
 
 let bridge: TestIpcBridge
 
@@ -128,7 +138,7 @@ async function simulateApprovalResponse(
 }
 
 // ---------------------------------------------------------------------------
-// Tests
+// Store-logic tests (no rendering)
 // ---------------------------------------------------------------------------
 
 describe('FloatingApproval approval response flow', () => {
@@ -297,6 +307,165 @@ describe('FloatingApproval approval response flow', () => {
 
     // Respond to first only
     await simulateApprovalResponse('allow')
+
+    const remaining = useSessionStore.getState().sessions[ROUTE].pendingApprovals
+    expect(remaining).toHaveLength(1)
+    expect(remaining[0].requestId).toBe(approval2.requestId)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Rendered component tests — exercises the real component DOM path
+// ---------------------------------------------------------------------------
+
+describe('FloatingApproval rendered component', () => {
+  const ROUTE = 'route-render'
+
+  function setup(approvalOverrides?: Partial<PendingApproval>): PendingApproval {
+    useSessionStore.getState().createNewSession(ROUTE, '/test')
+    useSessionStore.setState({ activeSessionId: ROUTE })
+
+    const approval = makePendingApproval(approvalOverrides)
+    useSessionStore.getState().addPendingApproval(ROUTE, approval)
+    return approval
+  }
+
+  it('renders Allow and Deny buttons for a pending approval', () => {
+    setup({ toolName: 'Bash', input: { command: 'echo hello' } })
+
+    render(<FloatingApproval />)
+
+    expect(screen.getByText('Allow')).toBeInTheDocument()
+    expect(screen.getByText('Deny')).toBeInTheDocument()
+  })
+
+  it('renders nothing when there are no pending approvals', () => {
+    useSessionStore.getState().createNewSession(ROUTE, '/test')
+    useSessionStore.setState({ activeSessionId: ROUTE })
+
+    const { container } = render(<FloatingApproval />)
+
+    expect(container.firstChild).toBeNull()
+  })
+
+  it('clicking Allow calls respondApproval IPC and removes approval from store', async () => {
+    const approval = setup({ toolName: 'Bash', input: { command: 'echo hello' } })
+
+    render(<FloatingApproval />)
+
+    await act(async () => {
+      fireEvent.click(screen.getByText('Allow'))
+    })
+
+    expect(lastApprovalResponse).toEqual({
+      routingId: ROUTE,
+      requestId: approval.requestId,
+      decision: 'allow',
+      answers: undefined,
+      suggestions: undefined,
+    })
+
+    expect(useSessionStore.getState().sessions[ROUTE].pendingApprovals).toHaveLength(0)
+  })
+
+  it('clicking Deny calls respondApproval IPC and removes approval from store', async () => {
+    const approval = setup({ toolName: 'Read', input: { file_path: '/etc/passwd' } })
+
+    render(<FloatingApproval />)
+
+    await act(async () => {
+      fireEvent.click(screen.getByText('Deny'))
+    })
+
+    expect(lastApprovalResponse).toEqual({
+      routingId: ROUTE,
+      requestId: approval.requestId,
+      decision: 'deny',
+      answers: undefined,
+      suggestions: undefined,
+    })
+
+    expect(useSessionStore.getState().sessions[ROUTE].pendingApprovals).toHaveLength(0)
+  })
+
+  it('clicking Allow with checked suggestions forwards them via IPC', async () => {
+    const suggestions: PermissionSuggestion[] = [
+      { type: 'addRules', destination: 'projectSettings', rules: [{ toolName: 'Bash', ruleContent: 'echo *' }] },
+      { type: 'addRules', destination: 'userSettings', rules: [{ toolName: 'Read', ruleContent: '/tmp/*' }] },
+    ]
+    setup({ toolName: 'Bash', input: { command: 'echo test' }, suggestions })
+
+    render(<FloatingApproval />)
+
+    // Check the second suggestion checkbox (index 1)
+    const checkboxes = screen.getAllByRole('checkbox')
+    await act(async () => {
+      fireEvent.click(checkboxes[1])
+    })
+
+    await act(async () => {
+      fireEvent.click(screen.getByText('Allow'))
+    })
+
+    expect(lastApprovalResponse!.suggestions).toEqual([suggestions[1]])
+  })
+
+  it('clicking Deny omits suggestions even when checkboxes are checked', async () => {
+    const suggestions: PermissionSuggestion[] = [
+      { type: 'addRules', destination: 'projectSettings', rules: [{ toolName: 'Bash', ruleContent: 'echo *' }] },
+    ]
+    setup({ toolName: 'Bash', input: { command: 'echo test' }, suggestions })
+
+    render(<FloatingApproval />)
+
+    const checkboxes = screen.getAllByRole('checkbox')
+    await act(async () => {
+      fireEvent.click(checkboxes[0])
+    })
+
+    await act(async () => {
+      fireEvent.click(screen.getByText('Deny'))
+    })
+
+    expect(lastApprovalResponse!.suggestions).toBeUndefined()
+  })
+
+  it('renders both cards when two approvals are pending', () => {
+    useSessionStore.getState().createNewSession(ROUTE, '/test')
+    useSessionStore.setState({ activeSessionId: ROUTE })
+
+    const approval1 = makePendingApproval({ toolName: 'Bash', input: { command: 'ls' } })
+    const approval2 = makePendingApproval({ toolName: 'Read', input: { file_path: '/foo' } })
+    useSessionStore.getState().addPendingApproval(ROUTE, approval1)
+    useSessionStore.getState().addPendingApproval(ROUTE, approval2)
+
+    render(<FloatingApproval />)
+
+    // Two Allow and two Deny buttons
+    expect(screen.getAllByText('Allow')).toHaveLength(2)
+    expect(screen.getAllByText('Deny')).toHaveLength(2)
+  })
+
+  it('clicking Allow on first card leaves the second card visible', async () => {
+    useSessionStore.getState().createNewSession(ROUTE, '/test')
+    useSessionStore.setState({ activeSessionId: ROUTE })
+
+    const approval1 = makePendingApproval({ toolName: 'Bash', input: { command: 'ls' } })
+    const approval2 = makePendingApproval({ toolName: 'Read', input: { file_path: '/foo' } })
+    useSessionStore.getState().addPendingApproval(ROUTE, approval1)
+    useSessionStore.getState().addPendingApproval(ROUTE, approval2)
+
+    render(<FloatingApproval />)
+
+    // Click Allow on the first card
+    const allowButtons = screen.getAllByText('Allow')
+    await act(async () => {
+      fireEvent.click(allowButtons[0])
+    })
+
+    // One card remains
+    expect(screen.getAllByText('Allow')).toHaveLength(1)
+    expect(screen.getAllByText('Deny')).toHaveLength(1)
 
     const remaining = useSessionStore.getState().sessions[ROUTE].pendingApprovals
     expect(remaining).toHaveLength(1)

@@ -11,12 +11,32 @@
  *
  * These actions collectively determine whether the commit button is enabled
  * and what happens to the UI state after a successful commit.
+ *
+ * The second half of this file (describe 'GitCommitBox FC — rendered') renders
+ * the actual FC via @testing-library/react, captures the View props it passes
+ * to <GitCommitBoxView />, and calls the prop callbacks to assert IPC + store
+ * effects. The View is mocked out so no real DOM rendering is needed.
  */
 
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { useSessionStore } from '../../../stores/session-store'
 import { resetFactoryCounter } from '@test/factories/messages'
 import type { GitStatusData } from '../../../../../shared/types'
+
+// ---------------------------------------------------------------------------
+// Mock the View — capture props without rendering any DOM
+// ---------------------------------------------------------------------------
+
+import type { GitCommitBoxViewProps } from '../GitCommitBox/View'
+
+let viewProps: GitCommitBoxViewProps
+
+vi.mock('../GitCommitBox/View', () => ({
+  GitCommitBoxView: (props: GitCommitBoxViewProps) => {
+    viewProps = props
+    return null
+  },
+}))
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -264,5 +284,322 @@ describe('GitCommitBox commit enablement conditions', () => {
     // Component derives: allStaged = totalChanges > 0 && stagedCount === totalChanges
     expect(totalChanges).toBeGreaterThan(0)
     expect(stagedCount).toBe(totalChanges)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// FC rendering tests — exercises View prop callbacks via IPC + store
+// ---------------------------------------------------------------------------
+
+import React from 'react'
+import { render, act } from '@testing-library/react'
+import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
+import { GitCommitBox } from '../GitCommitBox/GitCommitBox'
+
+const FC_ROUTE = 'route-fc-render'
+const FC_CWD = '/repo-fc'
+
+/** Minimal GitStatusData with staged files. */
+function makeStagedStatus(staged: string[] = ['src/a.ts']): GitStatusData {
+  return {
+    branch: 'main',
+    ahead: 0,
+    behind: 0,
+    trackingBranch: 'origin/main',
+    files: staged.map((p) => ({ path: p, index: 'M', working: ' ' })),
+    staged,
+    unstaged: [],
+    untracked: [],
+    linesAdded: 1,
+    linesRemoved: 0,
+  }
+}
+
+describe('GitCommitBox FC — rendered', () => {
+  let app: TestApp
+
+  // Captured IPC args
+  let commitCalls: Array<[string, string]> = []
+  let statusCalls: string[] = []
+  let stageAllCalls: string[] = []
+  let unstageAllCalls: string[] = []
+  let pushCalls: string[] = []
+  let pushUpstreamCalls: Array<[string, string]> = []
+  let filePatchCalls: Array<[string, string, boolean, boolean]> = []
+  let generateMsgCalls: string[] = []
+
+  beforeEach(async () => {
+    resetFactoryCounter()
+    commitCalls = []
+    statusCalls = []
+    stageAllCalls = []
+    unstageAllCalls = []
+    pushCalls = []
+    pushUpstreamCalls = []
+    filePatchCalls = []
+    generateMsgCalls = []
+
+    app = await bootTestApp()
+    const { bridge } = app
+
+    // Register git IPC handlers
+    bridge.ipcMain.handle('git:commit', (_e, cwd: string, msg: string) => {
+      commitCalls.push([cwd, msg])
+      return { ok: true, data: 'abc1234567890' }
+    })
+    bridge.ipcMain.handle('git:status', (_e, cwd: string) => {
+      statusCalls.push(cwd)
+      return { ok: true, data: makeStagedStatus() }
+    })
+    bridge.ipcMain.handle('git:stage-all', (_e, cwd: string) => {
+      stageAllCalls.push(cwd)
+      return { ok: true, data: null }
+    })
+    bridge.ipcMain.handle('git:unstage-all', (_e, cwd: string) => {
+      unstageAllCalls.push(cwd)
+      return { ok: true, data: null }
+    })
+    bridge.ipcMain.handle('git:push', (_e, cwd: string) => {
+      pushCalls.push(cwd)
+      return { ok: true, data: null }
+    })
+    bridge.ipcMain.handle('git:push-with-upstream', (_e, cwd: string, branch: string) => {
+      pushUpstreamCalls.push([cwd, branch])
+      return { ok: true, data: null }
+    })
+    bridge.ipcMain.handle('git:file-patch', (_e, cwd: string, filePath: string, staged: boolean, ignoreWs: boolean) => {
+      filePatchCalls.push([cwd, filePath, staged, ignoreWs])
+      return { ok: true, data: { patch: `diff --git a/${filePath} b/${filePath}\n+new line` } }
+    })
+    bridge.ipcMain.handle('session:generate-commit-message', (_e, diff: string) => {
+      generateMsgCalls.push(diff)
+      return 'feat: generated message'
+    })
+
+    // Seed the store: create session, set it active, populate git status + message
+    useSessionStore.getState().createNewSession(FC_ROUTE, FC_CWD)
+    useSessionStore.setState({ activeSessionId: FC_ROUTE })
+    useSessionStore.getState().setGitStatus(FC_ROUTE, makeStagedStatus())
+    useSessionStore.getState().setGitCommitMessage(FC_ROUTE, 'feat: my commit')
+  })
+
+  afterEach(() => {
+    app.teardown()
+    useSessionStore.setState({
+      activeSessionId: null,
+      sessions: {},
+      directories: [],
+      recentSessionIds: [],
+      pinnedSessionIds: [],
+      customTitles: {},
+    })
+  })
+
+  it('renders without crashing and passes correct initial props to View', () => {
+    render(React.createElement(GitCommitBox))
+
+    expect(viewProps).toBeDefined()
+    expect(viewProps.gitCommitMessage).toBe('feat: my commit')
+    expect(viewProps.stagedCount).toBe(1)
+    expect(viewProps.commitDisabled).toBe(false)
+  })
+
+  it('onCommitMessageChange updates store commit message', () => {
+    render(React.createElement(GitCommitBox))
+
+    act(() => {
+      viewProps.onCommitMessageChange('fix: updated message')
+    })
+
+    expect(useSessionStore.getState().sessions[FC_ROUTE].gitCommitMessage).toBe('fix: updated message')
+  })
+
+  it('onPrimaryCommit (commit-only mode) calls gitCommit, clears message, refreshes status, selects next file', async () => {
+    // Ensure commit-only mode (default)
+    useSessionStore.setState((s) => ({
+      settings: { ...s.settings, gitCommitMode: 'commit' },
+    }))
+
+    render(React.createElement(GitCommitBox))
+
+    await act(async () => {
+      await viewProps.onPrimaryCommit()
+    })
+
+    expect(commitCalls).toHaveLength(1)
+    expect(commitCalls[0]).toEqual([FC_CWD, 'feat: my commit'])
+
+    // Message cleared
+    expect(useSessionStore.getState().sessions[FC_ROUTE].gitCommitMessage).toBe('')
+
+    // Status refreshed
+    expect(statusCalls).toHaveLength(1)
+    expect(statusCalls[0]).toBe(FC_CWD)
+  })
+
+  it('onToggleStageAll calls gitStageAll when not all staged', async () => {
+    // Only 1 of 2 files staged → allStaged = false → should call stageAll
+    useSessionStore.getState().setGitStatus(FC_ROUTE, {
+      ...makeStagedStatus(['src/a.ts']),
+      files: [
+        { path: 'src/a.ts', index: 'M', working: ' ' },
+        { path: 'src/b.ts', index: ' ', working: 'M' },
+      ],
+    })
+
+    render(React.createElement(GitCommitBox))
+
+    await act(async () => {
+      await viewProps.onToggleStageAll()
+    })
+
+    expect(stageAllCalls).toHaveLength(1)
+    expect(stageAllCalls[0]).toBe(FC_CWD)
+    expect(unstageAllCalls).toHaveLength(0)
+    expect(statusCalls).toHaveLength(1)
+  })
+
+  it('onToggleStageAll calls gitUnstageAll when all staged', async () => {
+    // Set all files staged
+    useSessionStore.getState().setGitStatus(FC_ROUTE, makeStagedStatus(['src/a.ts']))
+
+    render(React.createElement(GitCommitBox))
+
+    await act(async () => {
+      await viewProps.onToggleStageAll()
+    })
+
+    expect(unstageAllCalls).toHaveLength(1)
+    expect(unstageAllCalls[0]).toBe(FC_CWD)
+    expect(stageAllCalls).toHaveLength(0)
+  })
+
+  it('onPush calls gitPush and refreshes status on success', async () => {
+    render(React.createElement(GitCommitBox))
+
+    await act(async () => {
+      await viewProps.onPush()
+    })
+
+    expect(pushCalls).toHaveLength(1)
+    expect(pushCalls[0]).toBe(FC_CWD)
+  })
+
+  it('onPush sets upstreamPrompt when push fails with no-upstream error', async () => {
+    // Override push handler to simulate no-upstream error
+    app.bridge.ipcMain.handle('git:push', () => {
+      return { ok: false, error: 'error: The current branch has no upstream branch.' }
+    })
+
+    render(React.createElement(GitCommitBox))
+
+    await act(async () => {
+      await viewProps.onPush()
+    })
+
+    // upstreamPrompt should be set — the View receives it as a prop
+    expect(viewProps.upstreamPrompt).not.toBeNull()
+    expect(viewProps.upstreamPrompt?.branch).toBe('main')
+  })
+
+  it('onPushWithUpstream calls gitPushWithUpstream and clears upstreamPrompt', async () => {
+    // First trigger a push that sets upstreamPrompt
+    app.bridge.ipcMain.handle('git:push', () => {
+      return { ok: false, error: 'error: The current branch has no upstream branch.' }
+    })
+
+    render(React.createElement(GitCommitBox))
+
+    await act(async () => {
+      await viewProps.onPush()
+    })
+
+    // upstreamPrompt is set
+    expect(viewProps.upstreamPrompt).not.toBeNull()
+
+    // Re-register push handler for status refresh after upstream push
+    app.bridge.ipcMain.handle('git:push', () => ({ ok: true, data: null }))
+
+    await act(async () => {
+      await viewProps.onPushWithUpstream()
+    })
+
+    expect(pushUpstreamCalls).toHaveLength(1)
+    expect(pushUpstreamCalls[0][0]).toBe(FC_CWD)
+    expect(pushUpstreamCalls[0][1]).toBe('main')
+    // upstreamPrompt cleared
+    expect(viewProps.upstreamPrompt).toBeNull()
+  })
+
+  it('onGenerateMessage calls gitGetFilePatch + generateCommitMessage and sets message in store', async () => {
+    render(React.createElement(GitCommitBox))
+
+    await act(async () => {
+      await viewProps.onGenerateMessage()
+    })
+
+    expect(filePatchCalls).toHaveLength(1)
+    expect(filePatchCalls[0][0]).toBe(FC_CWD)
+    expect(filePatchCalls[0][1]).toBe('src/a.ts')
+    expect(filePatchCalls[0][2]).toBe(true)   // staged=true
+    expect(filePatchCalls[0][3]).toBe(false)  // ignoreWhitespace=false
+
+    expect(generateMsgCalls).toHaveLength(1)
+    expect(generateMsgCalls[0]).toContain('new line')
+
+    expect(useSessionStore.getState().sessions[FC_ROUTE].gitCommitMessage).toBe('feat: generated message')
+  })
+
+  it('onGenerateMessage shows error toast when no staged files', async () => {
+    // Remove staged files
+    useSessionStore.getState().setGitStatus(FC_ROUTE, makeStagedStatus([]))
+
+    render(React.createElement(GitCommitBox))
+
+    await act(async () => {
+      await viewProps.onGenerateMessage()
+    })
+
+    // No IPC calls made
+    expect(filePatchCalls).toHaveLength(0)
+    expect(generateMsgCalls).toHaveLength(0)
+
+    // Toast shown with error
+    expect(viewProps.toast).not.toBeNull()
+    expect(viewProps.toast?.type).toBe('error')
+  })
+
+  it('commitDisabled is true when stagedCount is 0', () => {
+    useSessionStore.getState().setGitStatus(FC_ROUTE, makeStagedStatus([]))
+
+    render(React.createElement(GitCommitBox))
+
+    expect(viewProps.commitDisabled).toBe(true)
+  })
+
+  it('commitDisabled is true when message is blank', () => {
+    useSessionStore.getState().setGitCommitMessage(FC_ROUTE, '   ')
+
+    render(React.createElement(GitCommitBox))
+
+    expect(viewProps.commitDisabled).toBe(true)
+  })
+
+  it('onSecondaryCommit in commit-only mode triggers commitAndPush', async () => {
+    // In commit-only mode, primary=commit, secondary=commitAndPush
+    useSessionStore.setState((s) => ({
+      settings: { ...s.settings, gitCommitMode: 'commit' },
+    }))
+
+    render(React.createElement(GitCommitBox))
+
+    await act(async () => {
+      await viewProps.onSecondaryCommit()
+    })
+
+    // Commit was called
+    expect(commitCalls).toHaveLength(1)
+    // Push was attempted (commitAndPush path)
+    expect(pushCalls).toHaveLength(1)
   })
 })

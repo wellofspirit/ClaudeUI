@@ -10,13 +10,61 @@
  *   - appendVoiceTranscript (final vs interim)
  *   - setBtwQuestion / setBtwResponse BTW side-question flow
  *
- * No React rendering — we drive the Zustand store directly, matching the
- * same patterns InputBox would execute at runtime.
+ * The second half (describe 'InputBox FC — rendered') renders <InputBox />
+ * with a View mock to capture prop callbacks and assert IPC + store effects.
  */
 
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { render } from '@testing-library/react'
+import { createElement } from 'react'
 import { useSessionStore } from '../../../../stores/session-store'
 import { resetFactoryCounter } from '@test/factories/messages'
+import type { InputBoxViewProps } from '../View'
+import { InputBox } from '../InputBox'
+
+// ---------------------------------------------------------------------------
+// View mock — captures whatever props the FC passes to InputBoxView
+// ---------------------------------------------------------------------------
+
+let viewProps: InputBoxViewProps
+
+vi.mock('../View', () => ({
+  InputBoxView: (props: InputBoxViewProps) => {
+    viewProps = props
+    return null
+  },
+}))
+
+// ---------------------------------------------------------------------------
+// Hook mocks — avoid useSlashMenu/useFileMention/useIsMobile IPC deps
+// ---------------------------------------------------------------------------
+
+vi.mock('../../../../hooks/useSlashMenu', () => ({
+  useSlashMenu: () => ({
+    slashMenuOpen: false,
+    slashMenuIndex: 0,
+    slashFilter: '',
+    filteredCommands: [],
+    handleInputChange: () => {},
+    handleKeyDown: () => false,
+    handleSelect: () => {},
+  }),
+}))
+
+vi.mock('../../../../hooks/useFileMention', () => ({
+  useFileMention: () => ({
+    fileMentionOpen: false,
+    fileMentionIndex: 0,
+    filteredEntries: [],
+    handleInputChange: () => {},
+    handleKeyDown: () => false,
+    handleConfirm: () => {},
+  }),
+}))
+
+vi.mock('../../../../hooks/useIsMobile', () => ({
+  useIsMobile: () => false,
+}))
 
 const ROUTE = 'r-input-1'
 
@@ -282,5 +330,209 @@ describe('setBtwQuestion + setBtwResponse — BTW side-question flow', () => {
     expect(session.btwQuestion).toBeNull()
     expect(session.btwResponse).toBeNull()
     expect(session.btwLoading).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// InputBox FC — rendered
+//
+// Renders <InputBox />, captures View props, and asserts IPC + store effects.
+// ---------------------------------------------------------------------------
+
+describe('InputBox FC — rendered', () => {
+  const FC_ROUTE = 'fc-route-1'
+
+  // Track IPC calls
+  const ipcCalls: Record<string, unknown[][]> = {}
+
+  let app: Awaited<ReturnType<typeof import('@test/helpers/boot-test-app').bootTestApp>>
+
+  beforeEach(async () => {
+    const { bootTestApp } = await import('@test/helpers/boot-test-app')
+    app = await bootTestApp()
+
+    // Reset call tracking
+    for (const key of Object.keys(ipcCalls)) delete ipcCalls[key]
+
+    function record(channel: string, ...args: unknown[]): void {
+      if (!ipcCalls[channel]) ipcCalls[channel] = []
+      ipcCalls[channel].push(args)
+    }
+
+    // Register IPC handlers for channels the FC exercises
+    app.bridge.ipcMain.handle('session:create', (_e: unknown, ...args: unknown[]) => {
+      record('session:create', ...args)
+      return null
+    })
+    app.bridge.ipcMain.handle('session:send', (_e: unknown, ...args: unknown[]) => {
+      record('session:send', ...args)
+      return null
+    })
+    app.bridge.ipcMain.handle('session:interrupt', (_e: unknown, ...args: unknown[]) => {
+      record('session:interrupt', ...args)
+      return null
+    })
+    app.bridge.ipcMain.handle('session:ask-side-question', (_e: unknown, ...args: unknown[]) => {
+      record('session:ask-side-question', ...args)
+      return 'side-answer'
+    })
+    app.bridge.ipcMain.handle('session:set-model', (_e: unknown, ...args: unknown[]) => {
+      record('session:set-model', ...args)
+      return null
+    })
+    app.bridge.ipcMain.handle('session:get-models', () => [])
+    app.bridge.ipcMain.handle('voice:start-recording', (_e: unknown, ...args: unknown[]) => {
+      record('voice:start-recording', ...args)
+      return null
+    })
+    app.bridge.ipcMain.handle('voice:stop-recording', (_e: unknown, ...args: unknown[]) => {
+      record('voice:stop-recording', ...args)
+      return null
+    })
+    app.bridge.ipcMain.handle('file:list-dir', () => [])
+
+    // Prepare store: create a session and make it active
+    useSessionStore.setState({
+      activeSessionId: null,
+      sessions: {},
+      recentSessionIds: [],
+    })
+    useSessionStore.getState().createNewSession(FC_ROUTE, '/test/cwd')
+    useSessionStore.setState({ activeSessionId: FC_ROUTE })
+  })
+
+  afterEach(() => {
+    app.teardown()
+    vi.clearAllMocks()
+  })
+
+  function renderFC(): void {
+    render(createElement(InputBox))
+  }
+
+  it('renders and passes props to View', () => {
+    renderFC()
+    expect(viewProps).toBeDefined()
+    expect(typeof viewProps.onSend).toBe('function')
+    expect(typeof viewProps.onCancel).toBe('function')
+  })
+
+  it('onSend with draft text: calls createSession + sendPrompt IPC, sets sdkActive in store', async () => {
+    // Set draft text before rendering so the FC reads it on mount
+    useSessionStore.getState().setDraftText('hello world')
+
+    renderFC()
+
+    // Verify the FC read the draft text
+    expect(viewProps.text).toBe('hello world')
+
+    // Trigger send
+    await viewProps.onSend()
+
+    // createSession called because sdkActive=false on a new session
+    expect(ipcCalls['session:create']).toHaveLength(1)
+    expect(ipcCalls['session:create'][0][0]).toBe(FC_ROUTE)
+
+    // sendPrompt called with routingId + prompt
+    expect(ipcCalls['session:send']).toHaveLength(1)
+    expect(ipcCalls['session:send'][0][0]).toBe(FC_ROUTE)
+    expect(ipcCalls['session:send'][0][1]).toBe('hello world')
+
+    // markSdkActive called — sdkActive is now true in store
+    expect(useSessionStore.getState().sessions[FC_ROUTE].sdkActive).toBe(true)
+  })
+
+  it('onSend with /btw prefix: calls askSideQuestion IPC and setBtwQuestion in store', async () => {
+    useSessionStore.getState().setDraftText('/btw What does this function do?')
+
+    renderFC()
+
+    await viewProps.onSend()
+
+    expect(ipcCalls['session:ask-side-question']).toHaveLength(1)
+    expect(ipcCalls['session:ask-side-question'][0][0]).toBe(FC_ROUTE)
+    expect(ipcCalls['session:ask-side-question'][0][1]).toBe('What does this function do?')
+
+    // createSession / sendPrompt should NOT be called for a side question
+    expect(ipcCalls['session:create']).toBeUndefined()
+    expect(ipcCalls['session:send']).toBeUndefined()
+
+    // Store has btwQuestion set (the stub returns 'side-answer' synchronously,
+    // so by the time we assert, setBtwResponse has already resolved the promise)
+    const session = useSessionStore.getState().sessions[FC_ROUTE]
+    expect(session.btwQuestion).toBe('What does this function do?')
+    // The stub resolves synchronously so btwResponse is already populated
+    expect(session.btwResponse).toBe('side-answer')
+    expect(session.btwLoading).toBe(false)
+  })
+
+  it('onSend with /clear: calls createNewSession in store and does not call sendPrompt', async () => {
+    useSessionStore.getState().setDraftText('/clear')
+
+    renderFC()
+
+    const sessionsBefore = Object.keys(useSessionStore.getState().sessions)
+
+    await viewProps.onSend()
+
+    // A new session should have been created (uuid-based key, different from FC_ROUTE)
+    const sessionsAfter = Object.keys(useSessionStore.getState().sessions)
+    expect(sessionsAfter.length).toBeGreaterThan(sessionsBefore.length)
+
+    // No IPC send should happen
+    expect(ipcCalls['session:send']).toBeUndefined()
+  })
+
+  it('onCancel: calls interruptSession IPC with active session id', async () => {
+    renderFC()
+
+    await viewProps.onCancel()
+
+    expect(ipcCalls['session:interrupt']).toHaveLength(1)
+    expect(ipcCalls['session:interrupt'][0][0]).toBe(FC_ROUTE)
+  })
+
+  it('onSelectModel: calls setModel IPC and updates selectedModel in store', async () => {
+    renderFC()
+
+    viewProps.onSelectModel('claude-opus-4-5')
+
+    expect(ipcCalls['session:set-model']).toHaveLength(1)
+    expect(ipcCalls['session:set-model'][0][0]).toBe(FC_ROUTE)
+    expect(ipcCalls['session:set-model'][0][1]).toBe('claude-opus-4-5')
+
+    // Store updated
+    expect(useSessionStore.getState().sessions[FC_ROUTE].selectedModel).toBe('claude-opus-4-5')
+  })
+
+  it('onVoiceStop: calls voiceStopRecording IPC with active session id', async () => {
+    renderFC()
+
+    await viewProps.onVoiceStop()
+
+    expect(ipcCalls['voice:stop-recording']).toHaveLength(1)
+    expect(ipcCalls['voice:stop-recording'][0][0]).toBe(FC_ROUTE)
+  })
+
+  it('onSend does nothing when text is empty (noop)', async () => {
+    // draftText defaults to '' for a fresh session
+    renderFC()
+
+    expect(viewProps.text).toBe('')
+
+    await viewProps.onSend()
+
+    expect(ipcCalls['session:create']).toBeUndefined()
+    expect(ipcCalls['session:send']).toBeUndefined()
+  })
+
+  it('clears draft text from store after a successful send', async () => {
+    useSessionStore.getState().setDraftText('some prompt')
+
+    renderFC()
+    await viewProps.onSend()
+
+    // The FC calls setText('') after routing — draftText should be cleared
+    expect(useSessionStore.getState().sessions[FC_ROUTE].draftText).toBe('')
   })
 })
