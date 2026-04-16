@@ -1,11 +1,10 @@
-import { useRef, useCallback } from 'react'
+import { useRef, useCallback, memo } from 'react'
 import type { SessionInfo } from '../../../../shared/types'
 import { SessionItem } from './SessionItem'
 
-export function PinnedSessionList({
+export const PinnedSessionList = memo(function PinnedSessionList({
   pinnedSessions,
   activeSessionId,
-  sessions,
   onClickSession,
   onToggleWatch,
   onUnpin,
@@ -19,7 +18,6 @@ export function PinnedSessionList({
 }: {
   pinnedSessions: SessionInfo[]
   activeSessionId: string | null
-  sessions: Record<string, { status?: { state: string }; sdkActive?: boolean; isWatching?: boolean; needsAttention?: boolean }>
   onClickSession: (info: SessionInfo) => void
   onToggleWatch: (info: SessionInfo) => void
   onUnpin: (routingId: string) => void
@@ -67,33 +65,26 @@ export function PinnedSessionList({
 
   return (
     <nav className="flex flex-col gap-px">
-      {pinnedSessions.map((info, idx) => {
-        const s = sessions[info.sessionId]
-        return (
-          <SessionItem
-            key={info.sessionId}
-            info={info}
-            active={info.sessionId === activeSessionId}
-            isRunning={s?.status?.state === 'running'}
-            isSdkActive={s?.sdkActive}
-            isWatching={s?.isWatching}
-            needsAttention={s?.needsAttention}
-            onClick={() => onClickSession(info)}
-            onToggleWatch={info.projectKey ? () => onToggleWatch(info) : undefined}
-            onUnpin={() => onUnpin(info.sessionId)}
-            isRenaming={renamingKey === `${renamePrefix}:${info.sessionId}`}
-            onStartRename={() => onStartRename(`${renamePrefix}:${info.sessionId}`)}
-            onFinishRename={(title) => onFinishRename(info.sessionId, title)}
-            onAutoRename={() => onAutoRename(info.sessionId)}
-            onCancelRename={onCancelRename}
-            draggable
-            onDragStart={handleDragStart(idx)}
-            onDragOver={handleDragOver(idx)}
-            onDrop={handleDrop}
-            onDragEnd={handleDragEnd}
-          />
-        )
-      })}
+      {pinnedSessions.map((info, idx) => (
+        <SessionItem
+          key={info.sessionId}
+          info={info}
+          active={info.sessionId === activeSessionId}
+          onClick={() => onClickSession(info)}
+          onToggleWatch={info.projectKey ? () => onToggleWatch(info) : undefined}
+          onUnpin={() => onUnpin(info.sessionId)}
+          isRenaming={renamingKey === `${renamePrefix}:${info.sessionId}`}
+          onStartRename={() => onStartRename(`${renamePrefix}:${info.sessionId}`)}
+          onFinishRename={(title) => onFinishRename(info.sessionId, title)}
+          onAutoRename={() => onAutoRename(info.sessionId)}
+          onCancelRename={onCancelRename}
+          draggable
+          onDragStart={handleDragStart(idx)}
+          onDragOver={handleDragOver(idx)}
+          onDrop={handleDrop}
+          onDragEnd={handleDragEnd}
+        />
+      ))}
     </nav>
   )
-}
+})

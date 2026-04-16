@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, memo } from 'react'
 import { useSessionStore } from '../../stores/session-store'
 import type { DirectoryGroup, SessionInfo } from '../../../../shared/types'
 import { SessionItem } from './SessionItem'
@@ -9,11 +9,10 @@ function contextMenuPosition(e: React.MouseEvent): { x: number; y: number } {
   return { x: e.clientX / zoom, y: e.clientY / zoom }
 }
 
-export function DirectoryItem({
+export const DirectoryItem = memo(function DirectoryItem({
   group,
   expanded,
   activeSessionId,
-  sessions,
   onClick,
   onDoubleClick,
   onSessionClick,
@@ -30,7 +29,6 @@ export function DirectoryItem({
   group: DirectoryGroup
   expanded: boolean
   activeSessionId: string | null
-  sessions: Record<string, { status?: { state: string }; sdkActive?: boolean; isWatching?: boolean; needsAttention?: boolean }>
   onClick: () => void
   onDoubleClick: () => void
   onSessionClick: (info: SessionInfo) => void
@@ -54,7 +52,7 @@ export function DirectoryItem({
     clickTimerRef.current = setTimeout(() => {
       clickTimerRef.current = null
       onClick()
-    }, 250)
+    }, 150)
   }, [onClick])
 
   const handleDoubleClick = useCallback(() => {
@@ -117,28 +115,21 @@ export function DirectoryItem({
       </div>
       {expanded && (
         <div className="ml-3">
-          {group.sessions.map((info) => {
-            const s = sessions[info.sessionId]
-            return (
-              <SessionItem
-                key={info.sessionId}
-                info={info}
-                active={info.sessionId === activeSessionId}
-                isRunning={s?.status?.state === 'running'}
-                isSdkActive={s?.sdkActive}
-                isWatching={s?.isWatching}
-                needsAttention={s?.needsAttention}
-                onClick={() => onSessionClick(info)}
-                onDoubleClick={() => onSessionDoubleClick(info)}
-                onToggleWatch={() => onToggleWatch(info)}
-                isRenaming={renamingKey === `${renamePrefix}:${info.sessionId}`}
-                onStartRename={() => onStartRename(`${renamePrefix}:${info.sessionId}`)}
-                onFinishRename={(title) => onFinishRename(info.sessionId, title)}
-                onAutoRename={() => onAutoRename(info.sessionId)}
-                onCancelRename={onCancelRename}
-              />
-            )
-          })}
+          {group.sessions.map((info) => (
+            <SessionItem
+              key={info.sessionId}
+              info={info}
+              active={info.sessionId === activeSessionId}
+              onClick={() => onSessionClick(info)}
+              onDoubleClick={() => onSessionDoubleClick(info)}
+              onToggleWatch={() => onToggleWatch(info)}
+              isRenaming={renamingKey === `${renamePrefix}:${info.sessionId}`}
+              onStartRename={() => onStartRename(`${renamePrefix}:${info.sessionId}`)}
+              onFinishRename={(title) => onFinishRename(info.sessionId, title)}
+              onAutoRename={() => onAutoRename(info.sessionId)}
+              onCancelRename={onCancelRename}
+            />
+          ))}
         </div>
       )}
 
@@ -181,4 +172,4 @@ export function DirectoryItem({
       )}
     </div>
   )
-}
+})

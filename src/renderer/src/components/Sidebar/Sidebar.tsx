@@ -1,7 +1,14 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { v4 as uuid } from 'uuid'
 import { useSessionStore, buildTodosFromMessages } from '../../stores/session-store'
 import type { ChatMessage, DirectoryGroup, SessionInfo, WorktreeInfo } from '../../../../shared/types'
+
+/** Lightweight projection of session data needed by the sidebar for structural/display decisions */
+type SidebarSessionData = {
+  cwd: string
+  isWatching: boolean
+  firstUserText?: string
+}
 import { WorktreesModal } from '../WorktreesModal'
 import { WorktreeCleanupModal } from '../WorktreeCleanupModal'
 import { useAutomationStore } from '../../stores/automation-store'
@@ -11,6 +18,19 @@ import { DirectoryItem } from './DirectoryItem'
 import { SessionItem } from './SessionItem'
 import { PinnedSessionList } from './PinnedSessionList'
 import { SettingsPanel } from './SettingsPanel'
+
+/** Structural equality for the sidebar session projection — avoids re-renders from unrelated session changes */
+function sidebarSessionsEqual(a: Record<string, SidebarSessionData>, b: Record<string, SidebarSessionData>): boolean {
+  const aKeys = Object.keys(a)
+  const bKeys = Object.keys(b)
+  if (aKeys.length !== bKeys.length) return false
+  for (const key of aKeys) {
+    const av = a[key], bv = b[key]
+    if (!bv) return false
+    if (av.cwd !== bv.cwd || av.isWatching !== bv.isWatching || av.firstUserText !== bv.firstUserText) return false
+  }
+  return true
+}
 
 export function Sidebar({ style, onToggleCollapse }: {
   style?: React.CSSProperties
@@ -22,7 +42,26 @@ export function Sidebar({ style, onToggleCollapse }: {
   const recentSessionIds = useSessionStore((s) => s.recentSessionIds)
   const pinnedSessionIds = useSessionStore((s) => s.pinnedSessionIds)
   const maxRecentSessions = useSessionStore((s) => s.settings.maxRecentSessions)
-  const sessions = useSessionStore((s) => s.sessions)
+  // Narrow projection: only extract fields the sidebar needs for structure/display.
+  // Uses ref-based caching to prevent re-renders from streaming text, message updates, etc.
+  const sidebarSessionsRef = useRef<Record<string, SidebarSessionData>>({})
+  const sidebarSessions = useSessionStore((s) => {
+    const result: Record<string, SidebarSessionData> = {}
+    for (const [id, sess] of Object.entries(s.sessions)) {
+      const firstUser = sess.messages.find((m) => m.role === 'user')
+      result[id] = {
+        cwd: sess.cwd,
+        isWatching: !!sess.isWatching,
+        firstUserText: firstUser?.content.find((b) => b.type === 'text')?.text?.slice(0, 80)?.replace(/\n/g, ' ')?.trim()
+      }
+    }
+    // Return cached ref if structurally equal — prevents unnecessary re-renders
+    if (sidebarSessionsEqual(sidebarSessionsRef.current, result)) {
+      return sidebarSessionsRef.current
+    }
+    sidebarSessionsRef.current = result
+    return result
+  })
   const setDirectories = useSessionStore((s) => s.setDirectories)
   const createNewSession = useSessionStore((s) => s.createNewSession)
   const switchSession = useSessionStore((s) => s.switchSession)
@@ -67,7 +106,7 @@ export function Sidebar({ style, onToggleCollapse }: {
       return
     }
     // Auto-generate: collect text from session messages
-    let session = sessions[sessionId]
+    let session = useSessionStore.getState().sessions[sessionId]
     // If session not loaded in memory, try loading from disk
     if (!session) {
       const info = (() => {
@@ -126,7 +165,7 @@ export function Sidebar({ style, onToggleCollapse }: {
       window.api.logError('Sidebar', `Auto-generate title failed for ${sessionId}: ${err}`)
       setCustomTitle(sessionId, '') // clear stuck "generating..." title
     }
-  }, [sessions, directories, setCustomTitle, applyTitle, loadHistoricalSession])
+  }, [directories, setCustomTitle, applyTitle, loadHistoricalSession])
 
   const handleAutoRename = useCallback((sessionId: string) => {
     handleRename(sessionId, '')
@@ -164,7 +203,7 @@ export function Sidebar({ style, onToggleCollapse }: {
   const handleClickSession = async (info: SessionInfo): Promise<void> => {
     const routingId = info.sessionId
     // Already loaded?
-    if (sessions[routingId]) {
+    if (useSessionStore.getState().sessions[routingId]) {
       switchSession(routingId)
       return
     }
@@ -252,7 +291,7 @@ export function Sidebar({ style, onToggleCollapse }: {
 
   const handleToggleWatch = (info: SessionInfo): void => {
     const routingId = info.sessionId
-    const session = sessions[routingId]
+    const session = useSessionStore.getState().sessions[routingId]
     if (session?.isWatching) {
       window.api.unwatchSession(routingId)
       setWatching(routingId, false)
@@ -273,22 +312,20 @@ export function Sidebar({ style, onToggleCollapse }: {
   }
 
   // Helper to resolve a session ID to a SessionInfo
-  const resolveSessionInfo = (rid: string): SessionInfo | undefined => {
+  const resolveSessionInfo = useCallback((rid: string): SessionInfo | undefined => {
     let info: SessionInfo | undefined
     for (const group of directories) {
       info = group.sessions.find((s) => s.sessionId === rid)
       if (info) break
     }
     if (!info) {
-      const memSession = sessions[rid]
-      if (memSession) {
-        const firstUserMsg = memSession.messages.find((m) => m.role === 'user')
-        const titleText = firstUserMsg?.content.find((b) => b.type === 'text')?.text
+      const data = sidebarSessions[rid]
+      if (data) {
         info = {
           sessionId: rid,
-          cwd: memSession.cwd,
+          cwd: data.cwd,
           projectKey: '',
-          title: titleText ? titleText.slice(0, 80).replace(/\n/g, ' ').trim() : 'New session',
+          title: data.firstUserText || 'New session',
           timestamp: Date.now(),
           lastActivityAt: Date.now()
         }
@@ -299,83 +336,92 @@ export function Sidebar({ style, onToggleCollapse }: {
       info = { ...info, title: customTitles[rid] }
     }
     return info
-  }
+  }, [directories, sidebarSessions, customTitles])
 
-  // Build pinned sessions list
-  const pinnedSet = new Set(pinnedSessionIds)
-  const pinnedSessions: SessionInfo[] = []
-  for (const rid of pinnedSessionIds) {
-    const info = resolveSessionInfo(rid)
-    if (info) pinnedSessions.push(info)
-  }
+  // Memoize derived lists — only recompute when their inputs change
+  const pinnedSet = useMemo(() => new Set(pinnedSessionIds), [pinnedSessionIds])
 
-  // Build recent sessions list (exclude pinned, capped at 5)
-  const recentSessions: SessionInfo[] = []
-  for (const rid of recentSessionIds) {
-    if (recentSessions.length >= maxRecentSessions) break
-    if (pinnedSet.has(rid)) continue
-    const info = resolveSessionInfo(rid)
-    if (info) recentSessions.push(info)
-  }
-
-  // Build watching sessions list (exclude pinned and recent)
-  const recentSet = new Set(recentSessionIds)
-  const watchingSessions: SessionInfo[] = []
-  for (const [rid, session] of Object.entries(sessions)) {
-    if (!session.isWatching) continue
-    if (pinnedSet.has(rid) || recentSet.has(rid)) continue
-    const info = resolveSessionInfo(rid)
-    if (info) watchingSessions.push(info)
-  }
-
-  // Build augmented directories: inject in-memory sessions into matching project groups
-  const dirSessionIds = new Set<string>()
-  for (const group of directories) {
-    for (const s of group.sessions) dirSessionIds.add(s.sessionId)
-  }
-
-  // Collect in-memory sessions not yet on disk
-  const inMemoryByDir: Record<string, SessionInfo[]> = {}
-  for (const [rid, memSession] of Object.entries(sessions)) {
-    if (dirSessionIds.has(rid) || !memSession.cwd) continue
-    const firstUserMsg = memSession.messages.find((m) => m.role === 'user')
-    const titleText = firstUserMsg?.content.find((b) => b.type === 'text')?.text
-    const info: SessionInfo = {
-      sessionId: rid,
-      cwd: memSession.cwd,
-      projectKey: '',
-      title: titleText ? titleText.slice(0, 80).replace(/\n/g, ' ').trim() : 'New session',
-      timestamp: Date.now(),
-      lastActivityAt: Date.now()
+  const pinnedSessions = useMemo(() => {
+    const result: SessionInfo[] = []
+    for (const rid of pinnedSessionIds) {
+      const info = resolveSessionInfo(rid)
+      if (info) result.push(info)
     }
-    const key = memSession.cwd
-    if (!inMemoryByDir[key]) inMemoryByDir[key] = []
-    inMemoryByDir[key].push(info)
-  }
+    return result
+  }, [pinnedSessionIds, resolveSessionInfo])
 
-  // Merge in-memory sessions into existing groups or create new groups,
-  // and apply custom titles to all sessions
-  const applyCustomTitles = (sessions: SessionInfo[]): SessionInfo[] =>
-    sessions.map((s) => customTitles[s.sessionId] ? { ...s, title: customTitles[s.sessionId] } : s)
-
-  const augmentedDirs: DirectoryGroup[] = directories.map((group) => {
-    const extra = inMemoryByDir[group.cwd]
-    if (!extra) {
-      return { ...group, sessions: applyCustomTitles(group.sessions) }
+  const recentSessions = useMemo(() => {
+    const result: SessionInfo[] = []
+    for (const rid of recentSessionIds) {
+      if (result.length >= maxRecentSessions) break
+      if (pinnedSet.has(rid)) continue
+      const info = resolveSessionInfo(rid)
+      if (info) result.push(info)
     }
-    delete inMemoryByDir[group.cwd]
-    return { ...group, sessions: applyCustomTitles([...extra, ...group.sessions]) }
-  })
-  // Create new groups for cwds not matching any existing directory
-  for (const [cwd, extraSessions] of Object.entries(inMemoryByDir)) {
-    const folderName = cwd.split(/[\\/]/).pop() || cwd
-    augmentedDirs.unshift({
-      cwd,
-      projectKey: '',
-      folderName,
-      sessions: applyCustomTitles(extraSessions)
+    return result
+  }, [recentSessionIds, maxRecentSessions, pinnedSet, resolveSessionInfo])
+
+  const watchingSessions = useMemo(() => {
+    const recentSet = new Set(recentSessionIds)
+    const result: SessionInfo[] = []
+    for (const [rid, data] of Object.entries(sidebarSessions)) {
+      if (!data.isWatching) continue
+      if (pinnedSet.has(rid) || recentSet.has(rid)) continue
+      const info = resolveSessionInfo(rid)
+      if (info) result.push(info)
+    }
+    return result
+  }, [sidebarSessions, recentSessionIds, pinnedSet, resolveSessionInfo])
+
+  const augmentedDirs = useMemo(() => {
+    // Build set of session IDs already on disk
+    const dirSessionIds = new Set<string>()
+    for (const group of directories) {
+      for (const s of group.sessions) dirSessionIds.add(s.sessionId)
+    }
+
+    // Collect in-memory sessions not yet on disk
+    const inMemoryByDir: Record<string, SessionInfo[]> = {}
+    for (const [rid, data] of Object.entries(sidebarSessions)) {
+      if (dirSessionIds.has(rid) || !data.cwd) continue
+      const info: SessionInfo = {
+        sessionId: rid,
+        cwd: data.cwd,
+        projectKey: '',
+        title: data.firstUserText || 'New session',
+        timestamp: Date.now(),
+        lastActivityAt: Date.now()
+      }
+      const key = data.cwd
+      if (!inMemoryByDir[key]) inMemoryByDir[key] = []
+      inMemoryByDir[key].push(info)
+    }
+
+    // Apply custom titles to a session list
+    const applyCustomTitles = (sessions: SessionInfo[]): SessionInfo[] =>
+      sessions.map((s) => customTitles[s.sessionId] ? { ...s, title: customTitles[s.sessionId] } : s)
+
+    // Merge in-memory sessions into existing groups or create new groups
+    const result: DirectoryGroup[] = directories.map((group) => {
+      const extra = inMemoryByDir[group.cwd]
+      if (!extra) {
+        return { ...group, sessions: applyCustomTitles(group.sessions) }
+      }
+      delete inMemoryByDir[group.cwd]
+      return { ...group, sessions: applyCustomTitles([...extra, ...group.sessions]) }
     })
-  }
+    // Create new groups for cwds not matching any existing directory
+    for (const [cwd, extraSessions] of Object.entries(inMemoryByDir)) {
+      const folderName = cwd.split(/[\\/]/).pop() || cwd
+      result.unshift({
+        cwd,
+        projectKey: '',
+        folderName,
+        sessions: applyCustomTitles(extraSessions)
+      })
+    }
+    return result
+  }, [directories, sidebarSessions, customTitles])
 
   return (
     <div style={style} className={`shrink-0 h-full flex flex-col select-none ${window.api.platform === 'darwin' ? 'bg-bg-secondary/60' : 'bg-bg-secondary/85'}`}>
@@ -460,7 +506,6 @@ export function Sidebar({ style, onToggleCollapse }: {
             <PinnedSessionList
               pinnedSessions={pinnedSessions}
               activeSessionId={activeSessionId}
-              sessions={sessions}
               onClickSession={handleClickSession}
               onToggleWatch={handleToggleWatch}
               onUnpin={unpinSession}
@@ -482,27 +527,20 @@ export function Sidebar({ style, onToggleCollapse }: {
               <span className="text-[10px] font-semibold text-text-muted uppercase tracking-[0.08em]">Watching</span>
             </div>
             <nav className="flex flex-col gap-px">
-              {watchingSessions.map((info) => {
-                const s = sessions[info.sessionId]
-                return (
-                  <SessionItem
-                    key={info.sessionId}
-                    info={info}
-                    active={info.sessionId === activeSessionId}
-                    isRunning={s?.status?.state === 'running'}
-                    isSdkActive={s?.sdkActive}
-                    isWatching={s?.isWatching}
-                    needsAttention={s?.needsAttention}
-                    onClick={() => handleClickSession(info)}
-                    onToggleWatch={() => handleToggleWatch(info)}
-                    isRenaming={renamingKey === `watching:${info.sessionId}`}
-                    onStartRename={() => setRenamingKey(`watching:${info.sessionId}`)}
-                    onFinishRename={(title) => handleRename(info.sessionId, title)}
-                    onAutoRename={() => handleAutoRename(info.sessionId)}
-                    onCancelRename={() => setRenamingKey(null)}
-                  />
-                )
-              })}
+              {watchingSessions.map((info) => (
+                <SessionItem
+                  key={info.sessionId}
+                  info={info}
+                  active={info.sessionId === activeSessionId}
+                  onClick={() => handleClickSession(info)}
+                  onToggleWatch={() => handleToggleWatch(info)}
+                  isRenaming={renamingKey === `watching:${info.sessionId}`}
+                  onStartRename={() => setRenamingKey(`watching:${info.sessionId}`)}
+                  onFinishRename={(title) => handleRename(info.sessionId, title)}
+                  onAutoRename={() => handleAutoRename(info.sessionId)}
+                  onCancelRename={() => setRenamingKey(null)}
+                />
+              ))}
             </nav>
           </div>
         )}
@@ -514,35 +552,28 @@ export function Sidebar({ style, onToggleCollapse }: {
               <span className="text-[10px] font-semibold text-text-muted uppercase tracking-[0.08em]">Recent</span>
             </div>
             <nav className="flex flex-col gap-px">
-              {recentSessions.map((info) => {
-                const s = sessions[info.sessionId]
-                return (
-                  <SessionItem
-                    key={info.sessionId}
-                    info={info}
-                    active={info.sessionId === activeSessionId}
-                    isRunning={s?.status?.state === 'running'}
-                    isSdkActive={s?.sdkActive}
-                    isWatching={s?.isWatching}
-                    needsAttention={s?.needsAttention}
-                    onClick={() => handleClickSession(info)}
-                    onToggleWatch={info.projectKey ? () => handleToggleWatch(info) : undefined}
-                    onPin={() => pinSession(info.sessionId)}
-                    onRemove={() => {
-                      if (worktreeInfoMap[info.sessionId]) {
-                        setCleanupWorktree({ sessionId: info.sessionId, worktreeInfo: worktreeInfoMap[info.sessionId] })
-                      } else {
-                        removeRecentSession(info.sessionId)
-                      }
-                    }}
-                    isRenaming={renamingKey === `recent:${info.sessionId}`}
-                    onStartRename={() => setRenamingKey(`recent:${info.sessionId}`)}
-                    onFinishRename={(title) => handleRename(info.sessionId, title)}
-                    onAutoRename={() => handleAutoRename(info.sessionId)}
-                    onCancelRename={() => setRenamingKey(null)}
-                  />
-                )
-              })}
+              {recentSessions.map((info) => (
+                <SessionItem
+                  key={info.sessionId}
+                  info={info}
+                  active={info.sessionId === activeSessionId}
+                  onClick={() => handleClickSession(info)}
+                  onToggleWatch={info.projectKey ? () => handleToggleWatch(info) : undefined}
+                  onPin={() => pinSession(info.sessionId)}
+                  onRemove={() => {
+                    if (worktreeInfoMap[info.sessionId]) {
+                      setCleanupWorktree({ sessionId: info.sessionId, worktreeInfo: worktreeInfoMap[info.sessionId] })
+                    } else {
+                      removeRecentSession(info.sessionId)
+                    }
+                  }}
+                  isRenaming={renamingKey === `recent:${info.sessionId}`}
+                  onStartRename={() => setRenamingKey(`recent:${info.sessionId}`)}
+                  onFinishRename={(title) => handleRename(info.sessionId, title)}
+                  onAutoRename={() => handleAutoRename(info.sessionId)}
+                  onCancelRename={() => setRenamingKey(null)}
+                />
+              ))}
             </nav>
           </div>
         )}
@@ -560,7 +591,6 @@ export function Sidebar({ style, onToggleCollapse }: {
                   group={group}
                   expanded={expandedDir === (group.projectKey || group.cwd)}
                   activeSessionId={activeSessionId}
-                  sessions={sessions}
                   onClick={() => handleDirClick(group.projectKey || group.cwd)}
                   onDoubleClick={() => handleDirDoubleClick(group)}
                   onSessionClick={handleClickSession}

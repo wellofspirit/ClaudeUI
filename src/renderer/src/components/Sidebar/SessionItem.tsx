@@ -1,5 +1,6 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, memo } from 'react'
 import { useSessionStore } from '../../stores/session-store'
+import { useShallow } from 'zustand/react/shallow'
 import type { SessionInfo } from '../../../../shared/types'
 import { PermissionsDialog } from '../PermissionsDialog'
 
@@ -9,13 +10,9 @@ function contextMenuPosition(e: React.MouseEvent): { x: number; y: number } {
   return { x: e.clientX / zoom, y: e.clientY / zoom }
 }
 
-export function SessionItem({
+export const SessionItem = memo(function SessionItem({
   info,
   active,
-  isRunning,
-  isSdkActive,
-  isWatching,
-  needsAttention,
   onClick,
   onDoubleClick,
   onToggleWatch,
@@ -35,10 +32,6 @@ export function SessionItem({
 }: {
   info: SessionInfo
   active: boolean
-  isRunning?: boolean
-  isSdkActive?: boolean
-  isWatching?: boolean
-  needsAttention?: boolean
   onClick: () => void
   onDoubleClick?: () => void
   onToggleWatch?: () => void
@@ -56,6 +49,18 @@ export function SessionItem({
   onDragEnd?: (e: React.DragEvent) => void
   onDrop?: (e: React.DragEvent) => void
 }): React.JSX.Element {
+  // Self-subscribe to session status fields — avoids parent needing the full sessions map
+  const { isRunning, isSdkActive, isWatching, needsAttention } = useSessionStore(
+    useShallow((s) => {
+      const sess = s.sessions[info.sessionId]
+      return {
+        isRunning: sess?.status?.state === 'running',
+        isSdkActive: !!sess?.sdkActive,
+        isWatching: !!sess?.isWatching,
+        needsAttention: !!sess?.needsAttention
+      }
+    })
+  )
   const isWorktree = useSessionStore((s) => !!s.worktreeInfoMap[info.sessionId])
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null)
   const [renameValue, setRenameValue] = useState('')
@@ -260,4 +265,4 @@ export function SessionItem({
     />
   </>
   )
-}
+})
