@@ -103,7 +103,7 @@ export interface PluginStreamEvent extends PluginSessionEvent {
 
 export type ApprovalDecision = 'allow' | 'deny'
 
-export type PermissionMode = 'default' | 'acceptEdits' | 'plan' | 'auto'
+export type PermissionMode = 'default' | 'acceptEdits' | 'plan' | 'auto' | 'localAuto'
 
 export interface ProxySettings {
   enabled: boolean

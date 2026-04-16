@@ -16,6 +16,7 @@ import { logger } from './logger'
 import { getContextWindowSize } from '../ipc/session.ipc'
 import { usageFetcher } from './usage-fetcher'
 import { createMermaidServer } from './mermaid-tool'
+import { getClassifier, stopClassifier, isSafeTool, buildTranscript, type TranscriptMessage } from './auto-classifier'
 
 /** In production, cli.js is unpacked from the asar — resolve its real path */
 export function getCliJsPath(): string | undefined {
@@ -575,6 +576,46 @@ The diagram appears inline as a dedicated card with rendered SVG and source tabs
               return { behavior: 'allow' as const, updatedInput: input }
             }
 
+            // --- Local auto mode: classify tool calls instead of prompting user ---
+            if (this.permissionMode === 'localAuto') {
+              // Fast path: safe tools are always allowed
+              if (isSafeTool(toolName)) {
+                logger.debug('AutoClassifier', `Fast-path allow: ${toolName}`)
+                return { behavior: 'allow' as const, updatedInput: input }
+              }
+
+              const tCanUseTool = Date.now()
+              try {
+                const transcriptMsgs: TranscriptMessage[] = this.messageHistory.map((m) => ({
+                  role: m.role,
+                  content: m.content.map((b) => ({
+                    type: b.type,
+                    ...('text' in b ? { text: b.text } : {}),
+                    ...('toolName' in b ? { toolName: b.toolName, toolInput: b.toolInput } : {}),
+                    ...('toolResult' in b ? { toolResult: b.toolResult } : {})
+                  }))
+                }))
+                const transcript = buildTranscript(transcriptMsgs)
+
+                const classifier = getClassifier(this.routingId)
+                const result = await classifier.classify(toolName, input, transcript)
+
+                const elapsed = Date.now() - tCanUseTool
+                logger.info('AutoClassifier', `[timing] canUseTool → callback: ${elapsed}ms | ${result.shouldBlock ? 'BLOCK' : 'ALLOW'} ${toolName}: ${result.reason}`)
+
+                if (!result.shouldBlock) {
+                  return { behavior: 'allow' as const, updatedInput: input }
+                }
+
+                // Blocked — notify UI and deny
+                return { behavior: 'deny' as const, message: `Auto mode blocked: ${result.reason}` }
+              } catch (err) {
+                const elapsed = Date.now() - tCanUseTool
+                // Classifier failed — fall through to manual approval
+                logger.warn('AutoClassifier', `Classifier failed for ${toolName} after ${elapsed}ms, falling back to manual approval: ${err}`)
+              }
+            }
+
             const requestId = uuid()
             const approval: PendingApproval = {
               requestId,
@@ -667,9 +708,10 @@ The diagram appears inline as a dedicated card with rendered SVG and source tabs
             }
 
             // Sync permission mode from init — the CLI may have rejected the requested
-            // mode (e.g. auto mode gate/model check failed) and fallen back to default
+            // mode (e.g. auto mode gate/model check failed) and fallen back to default.
+            // Don't overwrite localAuto — SDK runs as acceptEdits underneath.
             const initMode = msg.permissionMode as string | undefined
-            if (initMode && initMode !== this.permissionMode) {
+            if (initMode && initMode !== this.permissionMode && this.permissionMode !== 'localAuto') {
               this.permissionMode = initMode
               this.send('session:permission-mode', initMode)
             }
@@ -754,8 +796,9 @@ The diagram appears inline as a dedicated card with rendered SVG and source tabs
         } else if (type === 'system') {
           const subtype = msg.subtype as string | undefined
           if (subtype === 'status') {
+            // Don't overwrite localAuto — SDK runs as acceptEdits underneath
             const newMode = msg.permissionMode as string | undefined
-            if (newMode && newMode !== this.permissionMode) {
+            if (newMode && newMode !== this.permissionMode && this.permissionMode !== 'localAuto') {
               this.permissionMode = newMode
               this.send('session:permission-mode', newMode)
             }
@@ -940,13 +983,43 @@ The diagram appears inline as a dedicated card with rendered SVG and source tabs
 
   async setPermissionMode(mode: string): Promise<void> {
     const previousMode = this.permissionMode
+
+    // localAuto is our own mode — SDK runs as acceptEdits underneath
+    if (mode === 'localAuto') {
+      this.permissionMode = mode
+      this.send('session:permission-mode', mode)
+      if (this.activeQuery) {
+        await this.activeQuery.setPermissionMode('acceptEdits')
+      }
+      return
+    }
+
+    // TEMPORARY: Force localAuto for testing — remove when done
+    if (mode === 'auto') {
+      logger.info('ClaudeSession', '[TEST] Forcing localAuto (SDK auto disabled for testing)')
+      this.permissionMode = 'localAuto'
+      this.send('session:permission-mode', 'localAuto')
+      if (this.activeQuery) {
+        await this.activeQuery.setPermissionMode('acceptEdits')
+      }
+      return
+    }
+
     this.permissionMode = mode
     this.send('session:permission-mode', mode)
     if (this.activeQuery) {
       try {
         await this.activeQuery.setPermissionMode(mode)
       } catch (err) {
-        // SDK rejected the mode change (e.g. auto mode gate/model check failed) — revert
+        if (mode === 'auto') {
+          // SDK rejected auto mode (feature gate / model check) — fall back to local auto
+          logger.info('ClaudeSession', 'SDK rejected auto mode, falling back to localAuto')
+          this.permissionMode = 'localAuto'
+          this.send('session:permission-mode', 'localAuto')
+          await this.activeQuery.setPermissionMode('acceptEdits')
+          return
+        }
+        // Other mode changes that fail — revert to previous
         this.permissionMode = previousMode
         this.send('session:permission-mode', previousMode)
         throw err
@@ -1380,6 +1453,9 @@ The diagram appears inline as a dedicated card with rendered SVG and source tabs
       this.voiceClient = null
     }
     this.voiceServerPort = null
+
+    // Stop the auto-mode classifier session (if any)
+    stopClassifier(this.routingId)
 
     // End the message channel before aborting so the SDK's streamInput
     // loop can unblock and the CLI subprocess exits cleanly

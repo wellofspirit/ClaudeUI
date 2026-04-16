@@ -409,7 +409,9 @@ export function InputBoxView(props: InputBoxViewProps): React.JSX.Element {
                 ? 'border border-mode-plan-dim focus-within:border-mode-plan'
                 : permissionMode === 'auto'
                   ? 'border border-mode-auto-dim focus-within:border-mode-auto'
-                  : 'shadow-[0_1px_6px_rgba(0,0,0,0.12),0_2px_16px_rgba(0,0,0,0.08)] focus-within:shadow-[0_1px_8px_rgba(0,0,0,0.18),0_4px_20px_rgba(0,0,0,0.12)]'
+                  : permissionMode === 'localAuto'
+                    ? 'border border-mode-local-auto-dim focus-within:border-mode-local-auto'
+                    : 'shadow-[0_1px_6px_rgba(0,0,0,0.12),0_2px_16px_rgba(0,0,0,0.08)] focus-within:shadow-[0_1px_8px_rgba(0,0,0,0.18),0_4px_20px_rgba(0,0,0,0.12)]'
           }`}
         >
           {/* Mode tab */}
@@ -420,10 +422,12 @@ export function InputBoxView(props: InputBoxViewProps): React.JSX.Element {
                   ? 'border-mode-edit-dim group-focus-within:border-mode-edit bg-mode-edit-dim group-focus-within:bg-mode-edit'
                   : permissionMode === 'auto'
                     ? 'border-mode-auto-dim group-focus-within:border-mode-auto bg-mode-auto-dim group-focus-within:bg-mode-auto'
-                    : 'border-mode-plan-dim group-focus-within:border-mode-plan bg-mode-plan-dim group-focus-within:bg-mode-plan'
+                    : permissionMode === 'localAuto'
+                      ? 'border-mode-local-auto-dim group-focus-within:border-mode-local-auto bg-mode-local-auto-dim group-focus-within:bg-mode-local-auto'
+                      : 'border-mode-plan-dim group-focus-within:border-mode-plan bg-mode-plan-dim group-focus-within:bg-mode-plan'
               }`}
             >
-              {permissionMode === 'acceptEdits' ? 'Accept Edits' : permissionMode === 'auto' ? 'Auto ⏵⏵' : 'Plan'}
+              {permissionMode === 'acceptEdits' ? 'Accept Edits' : permissionMode === 'auto' ? 'Auto ⏵⏵' : permissionMode === 'localAuto' ? 'Local Auto' : 'Plan'}
             </div>
           )}
 
