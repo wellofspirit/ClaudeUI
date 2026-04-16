@@ -105,8 +105,6 @@ class ClassifierSession {
     toolInput: Record<string, unknown>,
     transcript: string
   ): Promise<ClassifyResult> {
-    const t0 = Date.now()
-
     // Restart if context is getting large
     if (this.messageCount >= ClassifierSession.MAX_MESSAGES) {
       logger.debug(
@@ -118,10 +116,6 @@ class ClassifierSession {
 
     if (!this.running) {
       await this.start()
-      logger.info(
-        'AutoClassifier',
-        `[timing] session create: ${Date.now() - t0}ms`
-      )
     }
 
     // Serialize — one classification at a time
@@ -129,7 +123,6 @@ class ClassifierSession {
       throw new Error('Classifier busy — concurrent classification not supported')
     }
 
-    const tSend = Date.now()
     const userMessage = buildClassificationMessage(toolName, toolInput, transcript)
     this.channel!.push({
       type: 'user',
@@ -138,7 +131,6 @@ class ClassifierSession {
       parent_tool_use_id: null
     })
     this.messageCount++
-    logger.info('AutoClassifier', `[timing] message sent: +${tSend - t0}ms (tool: ${toolName})`)
 
     return new Promise<ClassifyResult>((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -146,18 +138,7 @@ class ClassifierSession {
         reject(new Error('Classifier timeout'))
       }, ClassifierSession.TIMEOUT_MS)
 
-      this.pending = {
-        resolve: (result) => {
-          const tResult = Date.now()
-          logger.info(
-            'AutoClassifier',
-            `[timing] MCP result received: +${tResult - t0}ms (total from classify call)`
-          )
-          resolve(result)
-        },
-        reject,
-        timer
-      }
+      this.pending = { resolve, reject, timer }
     })
   }
 
@@ -207,7 +188,7 @@ class ClassifierSession {
     })
 
     this.running = true
-    logger.info('AutoClassifier', `Started classifier session for ${this.sessionId}`)
+    logger.debug('AutoClassifier', `Started classifier session for ${this.sessionId}`)
 
     // Consume the event stream in the background — we don't need most events,
     // the MCP tool handler is our signal channel
@@ -232,7 +213,7 @@ class ClassifierSession {
         logger.error('AutoClassifier', `Classifier stream error: ${err}`)
       } finally {
         this.running = false
-        logger.info('AutoClassifier', `Classifier session ended for ${this.sessionId}`)
+        logger.debug('AutoClassifier', `Classifier session ended for ${this.sessionId}`)
         // Reject any pending classification
         if (this.pending) {
           clearTimeout(this.pending.timer)

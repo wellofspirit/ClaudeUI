@@ -584,7 +584,6 @@ The diagram appears inline as a dedicated card with rendered SVG and source tabs
                 return { behavior: 'allow' as const, updatedInput: input }
               }
 
-              const tCanUseTool = Date.now()
               try {
                 const transcriptMsgs: TranscriptMessage[] = this.messageHistory.map((m) => ({
                   role: m.role,
@@ -600,8 +599,7 @@ The diagram appears inline as a dedicated card with rendered SVG and source tabs
                 const classifier = getClassifier(this.routingId)
                 const result = await classifier.classify(toolName, input, transcript)
 
-                const elapsed = Date.now() - tCanUseTool
-                logger.info('AutoClassifier', `[timing] canUseTool → callback: ${elapsed}ms | ${result.shouldBlock ? 'BLOCK' : 'ALLOW'} ${toolName}: ${result.reason}`)
+                logger.debug('AutoClassifier', `${result.shouldBlock ? 'BLOCK' : 'ALLOW'} ${toolName}: ${result.reason}`)
 
                 if (!result.shouldBlock) {
                   return { behavior: 'allow' as const, updatedInput: input }
@@ -610,9 +608,8 @@ The diagram appears inline as a dedicated card with rendered SVG and source tabs
                 // Blocked — notify UI and deny
                 return { behavior: 'deny' as const, message: `Auto mode blocked: ${result.reason}` }
               } catch (err) {
-                const elapsed = Date.now() - tCanUseTool
                 // Classifier failed — fall through to manual approval
-                logger.warn('AutoClassifier', `Classifier failed for ${toolName} after ${elapsed}ms, falling back to manual approval: ${err}`)
+                logger.warn('AutoClassifier', `Classifier failed for ${toolName}, falling back to manual approval: ${err}`)
               }
             }
 
@@ -994,18 +991,7 @@ The diagram appears inline as a dedicated card with rendered SVG and source tabs
       return
     }
 
-    // TEMPORARY: Force localAuto for testing — remove when done
-    if (mode === 'auto') {
-      logger.info('ClaudeSession', '[TEST] Forcing localAuto (SDK auto disabled for testing)')
-      this.permissionMode = 'localAuto'
-      this.send('session:permission-mode', 'localAuto')
-      if (this.activeQuery) {
-        await this.activeQuery.setPermissionMode('acceptEdits')
-      }
-      return
-    }
-
-    this.permissionMode = mode
+this.permissionMode = mode
     this.send('session:permission-mode', mode)
     if (this.activeQuery) {
       try {
@@ -1013,7 +999,7 @@ The diagram appears inline as a dedicated card with rendered SVG and source tabs
       } catch (err) {
         if (mode === 'auto') {
           // SDK rejected auto mode (feature gate / model check) — fall back to local auto
-          logger.info('ClaudeSession', 'SDK rejected auto mode, falling back to localAuto')
+          logger.debug('ClaudeSession', 'SDK rejected auto mode, falling back to localAuto')
           this.permissionMode = 'localAuto'
           this.send('session:permission-mode', 'localAuto')
           await this.activeQuery.setPermissionMode('acceptEdits')
