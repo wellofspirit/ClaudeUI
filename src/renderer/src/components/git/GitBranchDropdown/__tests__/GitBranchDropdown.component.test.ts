@@ -79,7 +79,7 @@ function makePullResult(): { summary: string } {
 
 describe('GitBranchDropdown FC — rendered', () => {
   let app: TestApp
-  let onClose: ReturnType<typeof vi.fn>
+  let onClose: ReturnType<typeof vi.fn<() => void>>
   let anchorRef: React.RefObject<HTMLButtonElement | null>
 
   // Track IPC calls per-channel
@@ -217,9 +217,9 @@ describe('GitBranchDropdown FC — rendered', () => {
     // Start fetch without awaiting it
     let fetchDone = false
     act(() => {
-      viewProps.onFetch().then(() => {
-        fetchDone = true
-      })
+      // onFetch is typed as () => void but the FC binds an async handler
+      const p = (viewProps.onFetch as () => Promise<void>)()
+      p.then(() => { fetchDone = true })
     })
 
     // The FC should have synchronously set syncOp = 'fetching'
