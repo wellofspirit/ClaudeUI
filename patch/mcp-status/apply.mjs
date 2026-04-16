@@ -56,9 +56,16 @@ const PATCH_B_MARKER = '/*PATCHED:mcp-status-await-refresh*/'
 // =====================================================================
 // Part A: Always store the plugin refresh promise (V6)
 // =====================================================================
-// Original:  X6=null;if(!Y9())if(_1(process.env.CLAUDE_CODE_SYNC_PLUGIN_INSTALL))X6=J6();else J6()
-// Changed:   X6=null;if(!Y9())X6=J6()
-// This ensures the headless MCP refresh promise is stored so it can be awaited.
+// In older SDKs: X6=null;if(!Y9())if(_1(SYNC_PLUGIN_INSTALL))X6=J6();else J6()
+// Fixed to:      X6=null;if(!Y9())X6=J6()
+//
+// In newer SDKs (0.2.112+): The SYNC_PLUGIN_INSTALL block is more complex
+// with callback setup and separate sync/async branches. The sync branch
+// already stores the promise in V6. The else branch stores a non-awaitable
+// wrapper in f6.
+//
+// We now handle both patterns. For the new pattern, we modify the else
+// branch to also store the raw promise in V6 for awaiting.
 
 const skipA = src.includes(PATCH_A_MARKER)
 if (skipA) {
@@ -69,37 +76,86 @@ if (skipA) {
 if (!skipA) {
   console.log('\n--- Part A: Store plugin refresh promise ---')
 
-  const anchorRe = new RegExp(
+  // Try old pattern first (<=0.2.105):
+  //   X6=null;[if(!Y9())]if(S6(SYNC_PLUGIN_INSTALL))X6=J6();else J6()
+  const oldAnchorRe = new RegExp(
     `(${V})=null;(if\\(!${V}\\(\\)\\))?if\\((${V})\\(process\\.env\\.CLAUDE_CODE_SYNC_PLUGIN_INSTALL\\)\\)\\1=(${V})\\(\\);else \\4\\(\\)`
   )
+  const oldMatch = oldAnchorRe.exec(src)
 
-  const match = anchorRe.exec(src)
-  if (!match) {
-    console.error('ERROR: Cannot locate J6 fire-and-forget pattern.')
-    console.error('Pattern: <X6>=null;[if(!<zY>())]if(<_1>(process.env.CLAUDE_CODE_SYNC_PLUGIN_INSTALL))<X6>=<J6>();else <J6>()')
+  // Try new pattern (0.2.112+):
+  //   The sync branch has: ,V6=W6(callback);else f6=$X5(W6);
+  //   V6 is the promise var, f6 is a non-awaitable wrapper.
+  //   We need to also set V6 in the else branch.
+  //
+  //   Strategy: find f6=$X5(W6) by its unique position (right before "let k6=")
+  //   and extract V6/W6 from the sync branch nearby.
+  const newElseRe = new RegExp(
+    `(${V})=(${V})\\((${V})\\);let ${V}=${V}\\(\\(\\)=>!${V}\\)`
+  )
+  const newElseMatch = newElseRe.exec(src)
+
+  if (oldMatch) {
+    // Verify uniqueness
+    const allMatches = [...src.matchAll(new RegExp(oldAnchorRe, 'g'))]
+    if (allMatches.length > 1) {
+      console.error('ERROR: Old J6 pattern matched multiple times. Aborting.')
+      process.exit(1)
+    }
+
+    const x6Var = oldMatch[1]
+    const guard = oldMatch[2] ?? ''
+    const j6Fn = oldMatch[4]
+    console.log(`Found old pattern at char ${oldMatch.index}`)
+    console.log(`  Promise variable: ${x6Var}`)
+    console.log(`  Guard clause: ${guard || '(none)'}`)
+    console.log(`  Refresh function: ${j6Fn}`)
+
+    const oldCode = oldMatch[0]
+    const newCode = PATCH_A_MARKER + `${x6Var}=null;${guard}${x6Var}=${j6Fn}()`
+
+    src = src.replace(oldCode, newCode)
+    console.log(`Replaced fire-and-forget with always-stored promise`)
+  } else if (newElseMatch) {
+    const fireForgetVar = newElseMatch[1]  // f6
+    const wrapperFn = newElseMatch[2]      // $X5
+    const refreshFn = newElseMatch[3]      // W6
+
+    // Extract V6 from the sync branch: ,V6=W6(...);else f6=
+    const syncRe = new RegExp(
+      `,(${V})=${refreshFn}\\([^;]*\\);else ${fireForgetVar}=`
+    )
+    const syncMatch = syncRe.exec(src)
+    if (!syncMatch) {
+      console.error('ERROR: Cannot find sync branch V6=W6(...) before else.')
+      process.exit(1)
+    }
+    const promiseVar = syncMatch[1]  // V6
+
+    console.log(`Found new pattern at char ${newElseMatch.index}`)
+    console.log(`  Promise variable: ${promiseVar}`)
+    console.log(`  Fire-forget variable: ${fireForgetVar}`)
+    console.log(`  Refresh function: ${refreshFn}`)
+    console.log(`  Wrapper function: ${wrapperFn}`)
+
+    // Replace: else f6=$X5(W6);
+    // With:    else{V6=W6();f6=$X5(W6);}
+    // W6 is called twice but the underlying serializer dedupes concurrent calls.
+    const oldElse = `else ${fireForgetVar}=${wrapperFn}(${refreshFn});`
+    const newElse = PATCH_A_MARKER + `else{${promiseVar}=${refreshFn}();${fireForgetVar}=${wrapperFn}(${refreshFn});}`
+
+    const elseIdx = src.indexOf(oldElse)
+    if (elseIdx === -1) {
+      console.error('ERROR: Cannot find else branch to patch.')
+      process.exit(1)
+    }
+
+    src = src.slice(0, elseIdx) + newElse + src.slice(elseIdx + oldElse.length)
+    console.log(`Patched else branch: added ${promiseVar}=${refreshFn}() before wrapper`)
+  } else {
+    console.error('ERROR: Cannot locate SYNC_PLUGIN_INSTALL pattern (tried old and new).')
     process.exit(1)
   }
-
-  // Verify uniqueness
-  const allMatches = [...src.matchAll(new RegExp(anchorRe, 'g'))]
-  if (allMatches.length > 1) {
-    console.error('ERROR: J6 pattern matched multiple times. Aborting.')
-    process.exit(1)
-  }
-
-  const x6Var = match[1]
-  const guard = match[2] ?? ''
-  const j6Fn = match[4]
-  console.log(`Found J6 pattern at char ${match.index}`)
-  console.log(`  Promise variable: ${x6Var}`)
-  console.log(`  Guard clause: ${guard || '(none)'}`)
-  console.log(`  Refresh function: ${j6Fn}`)
-
-  const oldCode = match[0]
-  const newCode = PATCH_A_MARKER + `${x6Var}=null;${guard}${x6Var}=${j6Fn}()`
-
-  src = src.replace(oldCode, newCode)
-  console.log(`Replaced fire-and-forget with always-stored promise`)
 }
 
 // =====================================================================
@@ -128,15 +184,30 @@ if (!skipB) {
   console.log('\n--- Part B: mcp_status await refresh ---')
 
   // We need the plugin refresh variable name from Part A.
+  // It's the promise variable (V6) that stores the plugin refresh promise.
   let x6Var
+
+  // Try 1: old Part A marker pattern (<=0.2.105): /*PATCHED:...*/V6=null;...V6=J6()
   const markerRe = new RegExp(`\\/\\*PATCHED:mcp-status-store-promise\\*\\/(${V})=(?:null;(?:if\\(!${V}\\(\\)\\))\\1=)?(?:${V})\\(\\)`)
   const markerMatch = markerRe.exec(src)
   if (markerMatch) {
     x6Var = markerMatch[1]
-    console.log(`  Plugin refresh var from Part A marker: ${x6Var}`)
-  } else {
-    // Fallback: try extracting from the unpatched env pattern
-    const envRe = new RegExp(`(${V})=null;(?:if\\(!${V}\\(\\)\\))?if\\((${V})\\(process\\.env\\.CLAUDE_CODE_SYNC_PLUGIN_INSTALL\\)\\)`)
+    console.log(`  Plugin refresh var from Part A marker (old): ${x6Var}`)
+  }
+
+  // Try 2: new Part A marker pattern (0.2.112+): /*PATCHED:...*/else{V6=W6();...}
+  if (!x6Var) {
+    const newMarkerRe = new RegExp(`\\/\\*PATCHED:mcp-status-store-promise\\*\\/else\\{(${V})=`)
+    const newMarkerMatch = newMarkerRe.exec(src)
+    if (newMarkerMatch) {
+      x6Var = newMarkerMatch[1]
+      console.log(`  Plugin refresh var from Part A marker (new): ${x6Var}`)
+    }
+  }
+
+  // Try 3: unpatched env pattern (fallback)
+  if (!x6Var) {
+    const envRe = new RegExp(`(${V})=null,(?:${V})=null[^;]*;if\\(!${V}\\(\\)\\)if\\(${V}\\(process\\.env\\.CLAUDE_CODE_SYNC_PLUGIN_INSTALL\\)\\)`)
     const envMatch = envRe.exec(src)
     if (envMatch) {
       x6Var = envMatch[1]

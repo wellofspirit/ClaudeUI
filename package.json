@@ -30,7 +30,7 @@
     "test:watch": "vitest --project unit"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "0.2.105",
+    "@anthropic-ai/claude-agent-sdk": "0.2.112",
     "@electron-toolkit/preload": "^3.0.2",
     "@electron-toolkit/utils": "^4.0.0",
     "@mermaid-js/parser": "^1.1.0",

@@ -342,7 +342,7 @@ if (src.includes(patchCMarker)) {
   const progressVar = anchorMatch[1]
 
   // Extract session_id function name from nearby ZhA code
-  const ctx = src.slice(anchorIdx - 800, anchorIdx)
+  const ctx = src.slice(anchorIdx - 1500, anchorIdx)
   if (!ctx.includes('agent_progress')) {
     console.error('ERROR: bash_progress found but not in expected ZhA context.')
     process.exit(1)
