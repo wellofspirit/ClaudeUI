@@ -209,10 +209,11 @@ export const logger: {
   error(source: string, message: string, err?: unknown): void {
     notify('error', source, message, err)
     if (!shouldLog(source, 'error')) return
+    const line = `[${timestamp()}] [ERROR] [${source}] ${message}`
     if (err !== undefined) {
-      console.error(`[${source}]`, message, err)
+      console.error(line, err)
     } else {
-      console.error(`[${source}]`, message)
+      console.error(line)
     }
     writeToFile('ERROR', source, message, err)
   },
@@ -220,10 +221,11 @@ export const logger: {
   warn(source: string, message: string, err?: unknown): void {
     notify('warn', source, message, err)
     if (!shouldLog(source, 'warn')) return
+    const line = `[${timestamp()}] [WARN] [${source}] ${message}`
     if (err !== undefined) {
-      console.warn(`[${source}]`, message, err)
+      console.warn(line, err)
     } else {
-      console.warn(`[${source}]`, message)
+      console.warn(line)
     }
     writeToFile('WARN', source, message, err)
   },
@@ -231,7 +233,7 @@ export const logger: {
   info(source: string, message: string): void {
     notify('info', source, message)
     if (!shouldLog(source, 'info')) return
-    console.log(`[${source}]`, message)
+    console.log(`[${timestamp()}] [INFO] [${source}] ${message}`)
     // Info is console-only by default; uncomment to persist:
     // writeToFile('INFO', source, message)
   },

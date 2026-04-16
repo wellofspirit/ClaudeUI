@@ -46,6 +46,7 @@ export function useClaudeEvents(): void {
   const setStatusLine = useSessionStore((s) => s.setStatusLine)
   const setPermissionMode = useSessionStore((s) => s.setPermissionMode)
   const setSlashCommands = useSessionStore((s) => s.setSlashCommands)
+  const setCustomCommands = useSessionStore((s) => s.setCustomCommands)
   const setSdkSkillNames = useSessionStore((s) => s.setSdkSkillNames)
   const addSandboxViolation = useSessionStore((s) => s.addSandboxViolation)
   const setVoiceState = useSessionStore((s) => s.setVoiceState)
@@ -287,6 +288,7 @@ export function useClaudeEvents(): void {
       }),
       window.api.onSlashCommands((_routingId, commands) => {
         setSlashCommands(commands)
+        setCustomCommands([]) // SDK list is authoritative — clear filesystem-scanned commands
         window.api.saveSlashCommands(commands)
       }),
       window.api.onSkills((_routingId, names) => {

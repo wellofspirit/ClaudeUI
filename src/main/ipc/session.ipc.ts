@@ -12,6 +12,7 @@ import { loadSettings, saveSettings, loadSessionConfig, saveSessionConfig, loadS
 import { loadClaudePermissions, saveClaudePermissions } from '../services/claude-settings'
 import { loadMcpServers, saveMcpServers, removeMcpServer, readDisabledMcpServers, writeDisabledMcpServers } from '../services/claude-mcp'
 import { scanSkills } from '../services/skill-scanner'
+import { scanCustomCommands } from '../services/custom-command-scanner'
 import type { UISettings, UISessionConfig, SlashCommandCache } from '../services/ui-config'
 import { gitServiceManager } from '../services/git-service'
 import { createWorktree, getWorktreeStatus, removeWorktree, listWorktrees } from '../services/worktree'
@@ -203,7 +204,7 @@ const SESSION_IPC_CHANNELS = [
   'session:watch-session', 'session:unwatch-session',
   'config:load-settings', 'config:save-settings', 'config:load-sessions',
   'config:save-sessions', 'config:load-slash-commands', 'config:save-slash-commands',
-  'config:load-skill-details',
+  'config:scan-custom-commands', 'config:load-skill-details',
   'session:send-to-teammate', 'session:broadcast-to-team', 'session:get-team-info',
   'session:open-teams-view',
   'git:check-repo', 'git:status', 'git:branches', 'git:checkout', 'git:create-branch',
@@ -757,6 +758,7 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
   })
   ipcMain.handle('config:load-slash-commands', () => loadSlashCommands())
   ipcMain.handle('config:save-slash-commands', (_e, commands: SlashCommandCache[]) => saveSlashCommands(commands))
+  ipcMain.handle('config:scan-custom-commands', (_e, cwd: string) => scanCustomCommands(cwd))
   ipcMain.handle('config:load-skill-details', (_e, cwd: string) => scanSkills(cwd))
 
   // Claude permission settings (allow/deny/ask rules)

@@ -1,0 +1,1 @@
+export { GitFileDiffView } from './GitFileDiffView'

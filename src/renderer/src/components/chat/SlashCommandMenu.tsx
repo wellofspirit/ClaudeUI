@@ -66,3 +66,15 @@ export function filterSlashCommands(
     cmd.name.toLowerCase().startsWith('/' + filter.toLowerCase())
   )
 }
+
+/**
+ * Merge SDK-sourced slash commands with filesystem-scanned custom commands.
+ * SDK commands take precedence — custom commands only fill gaps before SDK init.
+ */
+export function mergeSlashCommands(
+  sdkCommands: SlashCommandInfo[],
+  customCommands: SlashCommandInfo[]
+): SlashCommandInfo[] {
+  const seen = new Set(sdkCommands.map((c) => c.name))
+  return [...sdkCommands, ...customCommands.filter((c) => !seen.has(c.name))]
+}

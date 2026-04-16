@@ -14,7 +14,7 @@ export interface TextSelection {
  * Normalize text for fuzzy matching between rendered HTML and raw markdown.
  * Strips common markdown syntax so rendered text can match against source.
  */
-function normalizeForMatching(s: string): string {
+export function normalizeForMatching(s: string): string {
   return s
     .replace(/\*\*(.+?)\*\*/g, '$1')   // **bold**
     .replace(/\*(.+?)\*/g, '$1')        // *italic*
@@ -34,7 +34,7 @@ function normalizeForMatching(s: string): string {
  * Given selected text and the raw plan markdown, deduce the line number range
  * where the selection lives. Returns 1-based line numbers.
  */
-function deduceLineNumbers(
+export function deduceLineNumbers(
   selectedText: string,
   planContent: string
 ): { lineNumber: number; endLineNumber: number } {

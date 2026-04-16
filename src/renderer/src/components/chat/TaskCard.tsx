@@ -12,7 +12,7 @@ interface Props {
   result?: ToolResultBlock
 }
 
-interface ParsedUsage {
+export interface ParsedUsage {
   totalTokens: number | null
   toolUses: number | null
   durationMs: number | null
@@ -20,7 +20,7 @@ interface ParsedUsage {
 
 const USAGE_RE = /<usage>\s*([\s\S]*?)\s*<\/usage>/
 
-function parseUsage(text: string): { body: string; usage: ParsedUsage | null } {
+export function parseUsage(text: string): { body: string; usage: ParsedUsage | null } {
   const match = text.match(USAGE_RE)
   if (!match) return { body: text, usage: null }
 
@@ -42,7 +42,7 @@ function parseUsage(text: string): { body: string; usage: ParsedUsage | null } {
   }
 }
 
-function formatDuration(ms: number): string {
+export function formatDuration(ms: number): string {
   if (ms < 1000) return `${ms}ms`
   const s = ms / 1000
   if (s < 60) return `${s.toFixed(1)}s`
@@ -51,14 +51,14 @@ function formatDuration(ms: number): string {
   return `${m}m ${rem}s`
 }
 
-function formatElapsed(seconds: number): string {
+export function formatElapsed(seconds: number): string {
   if (seconds < 60) return `${Math.round(seconds)}s`
   const m = Math.floor(seconds / 60)
   const s = Math.round(seconds % 60)
   return `${m}m ${s}s`
 }
 
-function formatTokens(n: number): string {
+export function formatTokens(n: number): string {
   if (n >= 1000) return `${(n / 1000).toFixed(1)}k`
   return String(n)
 }

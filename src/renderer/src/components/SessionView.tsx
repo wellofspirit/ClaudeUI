@@ -162,9 +162,17 @@ export function SessionView(): React.JSX.Element {
         const state = useSessionStore.getState()
         const { activeSessionId, sessions, setPermissionMode } = state
         if (!activeSessionId) return
-        const permissionMode = sessions[activeSessionId]?.permissionMode ?? 'default'
-        const next = PERMISSION_MODES[(PERMISSION_MODES.indexOf(permissionMode) + 1) % PERMISSION_MODES.length]
-        setPermissionMode(next, activeSessionId)
+        const session = sessions[activeSessionId]
+        const permissionMode = session?.permissionMode ?? 'default'
+        // localAuto is not in the cycle — treat it as 'auto' for cycling purposes
+        const cycleMode = permissionMode === 'localAuto' ? 'auto' : permissionMode as typeof PERMISSION_MODES[number]
+        let next = PERMISSION_MODES[(PERMISSION_MODES.indexOf(cycleMode) + 1) % PERMISSION_MODES.length]
+        // Auto mode requires an active SDK session — skip to next mode if session not started
+        if (next === 'auto' && !session?.sdkActive) {
+          next = PERMISSION_MODES[(PERMISSION_MODES.indexOf('auto') + 1) % PERMISSION_MODES.length]
+        }
+        // Don't optimistically update for 'auto' — main process may redirect to 'localAuto'
+        if (next !== 'auto') setPermissionMode(next, activeSessionId)
         window.api.setPermissionMode(activeSessionId, next).catch(() => {
           // SDK rejected the mode change — revert to previous mode
           // (the main process already sent the reverted mode via session:permission-mode)

@@ -1,0 +1,538 @@
+/**
+ * Layer 2: Component tests for InputBox store integration patterns.
+ *
+ * resolveSendAction unit tests live in utils.test.ts. This file covers
+ * the store-side behaviors that InputBox depends on:
+ *
+ *   - createNewSession + markSdkActive lifecycle
+ *   - setQueuedText accumulation and consumeQueuedText flush
+ *   - setDraftText / clearance semantics
+ *   - appendVoiceTranscript (final vs interim)
+ *   - setBtwQuestion / setBtwResponse BTW side-question flow
+ *
+ * The second half (describe 'InputBox FC — rendered') renders <InputBox />
+ * with a View mock to capture prop callbacks and assert IPC + store effects.
+ */
+
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { render } from '@testing-library/react'
+import { createElement } from 'react'
+import { useSessionStore } from '../../../../stores/session-store'
+import { resetFactoryCounter } from '@test/factories/messages'
+import type { InputBoxViewProps } from '../View'
+import { InputBox } from '../InputBox'
+
+// ---------------------------------------------------------------------------
+// View mock — captures whatever props the FC passes to InputBoxView
+// ---------------------------------------------------------------------------
+
+let viewProps: InputBoxViewProps
+
+vi.mock('../View', () => ({
+  InputBoxView: (props: InputBoxViewProps) => {
+    viewProps = props
+    return null
+  },
+}))
+
+// ---------------------------------------------------------------------------
+// Hook mocks — avoid useSlashMenu/useFileMention/useIsMobile IPC deps
+// ---------------------------------------------------------------------------
+
+vi.mock('../../../../hooks/useSlashMenu', () => ({
+  useSlashMenu: () => ({
+    slashMenuOpen: false,
+    slashMenuIndex: 0,
+    slashFilter: '',
+    filteredCommands: [],
+    handleInputChange: () => {},
+    handleKeyDown: () => false,
+    handleSelect: () => {},
+  }),
+}))
+
+vi.mock('../../../../hooks/useFileMention', () => ({
+  useFileMention: () => ({
+    fileMentionOpen: false,
+    fileMentionIndex: 0,
+    filteredEntries: [],
+    handleInputChange: () => {},
+    handleKeyDown: () => false,
+    handleConfirm: () => {},
+  }),
+}))
+
+vi.mock('../../../../hooks/useIsMobile', () => ({
+  useIsMobile: () => false,
+}))
+
+const ROUTE = 'r-input-1'
+
+function setupSession(routingId = ROUTE, cwd = '/test'): void {
+  useSessionStore.getState().createNewSession(routingId, cwd)
+  useSessionStore.setState({ activeSessionId: routingId })
+}
+
+beforeEach(() => {
+  resetFactoryCounter()
+  ;(globalThis as any).window = globalThis.window || {}
+  ;(globalThis as any).window.api = {
+    saveSessionConfig: () => {},
+    saveSettings: () => {},
+    logError: () => {},
+  } as any
+
+  useSessionStore.setState({
+    activeSessionId: null,
+    sessions: {},
+    recentSessionIds: [],
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Session lifecycle — what InputBox does for 'send-prompt' when sdkActive=false
+// ---------------------------------------------------------------------------
+
+describe('session lifecycle — createNewSession + markSdkActive', () => {
+  it('createNewSession initialises sdkActive as false', () => {
+    setupSession()
+    const session = useSessionStore.getState().sessions[ROUTE]
+    expect(session).toBeDefined()
+    expect(session.sdkActive).toBe(false)
+  })
+
+  it('markSdkActive sets sdkActive to true', () => {
+    setupSession()
+    useSessionStore.getState().markSdkActive(ROUTE)
+    expect(useSessionStore.getState().sessions[ROUTE].sdkActive).toBe(true)
+  })
+
+  it('markSdkInactive sets sdkActive back to false', () => {
+    setupSession()
+    useSessionStore.getState().markSdkActive(ROUTE)
+    useSessionStore.getState().markSdkInactive(ROUTE)
+    expect(useSessionStore.getState().sessions[ROUTE].sdkActive).toBe(false)
+  })
+
+  it('showWelcome clears the activeSessionId', () => {
+    setupSession()
+    useSessionStore.getState().showWelcome()
+    expect(useSessionStore.getState().activeSessionId).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Queue text — what InputBox does for 'queue-prompt'
+// ---------------------------------------------------------------------------
+
+describe('setQueuedText — queue-prompt accumulation', () => {
+  it('sets queued text for an idle session', () => {
+    setupSession()
+    useSessionStore.getState().setQueuedText(ROUTE, 'first message')
+    expect(useSessionStore.getState().sessions[ROUTE].queuedText).toBe('first message')
+  })
+
+  it('appends with newline separator when called a second time', () => {
+    setupSession()
+    useSessionStore.getState().setQueuedText(ROUTE, 'first')
+    useSessionStore.getState().setQueuedText(ROUTE, 'second')
+    expect(useSessionStore.getState().sessions[ROUTE].queuedText).toBe('first\nsecond')
+  })
+
+  it('appends further messages correctly', () => {
+    setupSession()
+    useSessionStore.getState().setQueuedText(ROUTE, 'a')
+    useSessionStore.getState().setQueuedText(ROUTE, 'b')
+    useSessionStore.getState().setQueuedText(ROUTE, 'c')
+    expect(useSessionStore.getState().sessions[ROUTE].queuedText).toBe('a\nb\nc')
+  })
+
+  it('does nothing when the routingId session does not exist', () => {
+    // No session created — should not throw
+    useSessionStore.getState().setQueuedText('nonexistent', 'oops')
+    expect(useSessionStore.getState().sessions['nonexistent']).toBeUndefined()
+  })
+})
+
+describe('consumeQueuedText — flush to messages on turn end', () => {
+  it('adds a user message with queued text and clears queuedText', () => {
+    setupSession()
+    useSessionStore.getState().setQueuedText(ROUTE, 'queued prompt')
+    useSessionStore.getState().consumeQueuedText(ROUTE)
+
+    const session = useSessionStore.getState().sessions[ROUTE]
+    expect(session.queuedText).toBe('')
+    const lastMsg = session.messages[session.messages.length - 1]
+    expect(lastMsg.role).toBe('user')
+    expect(lastMsg.content[0]).toMatchObject({ type: 'text', text: 'queued prompt' })
+  })
+
+  it('does nothing when queuedText is empty', () => {
+    setupSession()
+    const before = useSessionStore.getState().sessions[ROUTE].messages.length
+    useSessionStore.getState().consumeQueuedText(ROUTE)
+    const after = useSessionStore.getState().sessions[ROUTE].messages.length
+    expect(after).toBe(before)
+  })
+
+  it('clears queuedText even when multiple entries were accumulated', () => {
+    setupSession()
+    useSessionStore.getState().setQueuedText(ROUTE, 'first')
+    useSessionStore.getState().setQueuedText(ROUTE, 'second')
+    useSessionStore.getState().consumeQueuedText(ROUTE)
+
+    const session = useSessionStore.getState().sessions[ROUTE]
+    expect(session.queuedText).toBe('')
+    const lastMsg = session.messages[session.messages.length - 1]
+    expect(lastMsg.content[0]).toMatchObject({ type: 'text', text: 'first\nsecond' })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Draft text — InputBox reads/writes draftText for textarea content
+// ---------------------------------------------------------------------------
+
+describe('setDraftText — draft text management', () => {
+  it('stores draft text on the active session', () => {
+    setupSession()
+    useSessionStore.getState().setDraftText('work in progress')
+    expect(useSessionStore.getState().sessions[ROUTE].draftText).toBe('work in progress')
+  })
+
+  it('overwrites previous draft text', () => {
+    setupSession()
+    useSessionStore.getState().setDraftText('old draft')
+    useSessionStore.getState().setDraftText('new draft')
+    expect(useSessionStore.getState().sessions[ROUTE].draftText).toBe('new draft')
+  })
+
+  it('does nothing when there is no active session', () => {
+    // No session active — should not throw
+    useSessionStore.getState().setDraftText('orphan text')
+    // No session was created so nothing to assert on
+    expect(useSessionStore.getState().activeSessionId).toBeNull()
+  })
+
+  it('clears draft by setting empty string', () => {
+    setupSession()
+    useSessionStore.getState().setDraftText('something')
+    useSessionStore.getState().setDraftText('')
+    expect(useSessionStore.getState().sessions[ROUTE].draftText).toBe('')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Voice transcript — appendVoiceTranscript (isFinal=true/false)
+// ---------------------------------------------------------------------------
+
+describe('appendVoiceTranscript — voice input integration', () => {
+  it('isFinal=true appends to draftText and clears voiceInterimTranscript', () => {
+    setupSession()
+    useSessionStore.getState().setDraftText('hello ')
+    useSessionStore.getState().appendVoiceTranscript(ROUTE, 'world', true)
+
+    const session = useSessionStore.getState().sessions[ROUTE]
+    expect(session.draftText).toBe('hello world')
+    expect(session.voiceInterimTranscript).toBe('')
+  })
+
+  it('isFinal=true inserts a space separator when draft does not end with space', () => {
+    setupSession()
+    useSessionStore.getState().setDraftText('hello')
+    useSessionStore.getState().appendVoiceTranscript(ROUTE, 'world', true)
+
+    expect(useSessionStore.getState().sessions[ROUTE].draftText).toBe('hello world')
+  })
+
+  it('isFinal=true does not double-space when draft already ends with space', () => {
+    setupSession()
+    useSessionStore.getState().setDraftText('hello ')
+    useSessionStore.getState().appendVoiceTranscript(ROUTE, 'world', true)
+
+    expect(useSessionStore.getState().sessions[ROUTE].draftText).toBe('hello world')
+  })
+
+  it('isFinal=true with empty draft just sets the transcript text', () => {
+    setupSession()
+    useSessionStore.getState().appendVoiceTranscript(ROUTE, 'first words', true)
+
+    expect(useSessionStore.getState().sessions[ROUTE].draftText).toBe('first words')
+  })
+
+  it('isFinal=false updates voiceInterimTranscript only, draft unchanged', () => {
+    setupSession()
+    useSessionStore.getState().setDraftText('existing draft')
+    useSessionStore.getState().appendVoiceTranscript(ROUTE, 'partial words...', false)
+
+    const session = useSessionStore.getState().sessions[ROUTE]
+    expect(session.draftText).toBe('existing draft')
+    expect(session.voiceInterimTranscript).toBe('partial words...')
+  })
+
+  it('subsequent interim updates replace previous interim text', () => {
+    setupSession()
+    useSessionStore.getState().appendVoiceTranscript(ROUTE, 'first partial', false)
+    useSessionStore.getState().appendVoiceTranscript(ROUTE, 'second partial', false)
+
+    expect(useSessionStore.getState().sessions[ROUTE].voiceInterimTranscript).toBe('second partial')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// BTW side question — setBtwQuestion / setBtwResponse
+// ---------------------------------------------------------------------------
+
+describe('setBtwQuestion + setBtwResponse — BTW side-question flow', () => {
+  it('setBtwQuestion stores the question and sets btwLoading=true', () => {
+    setupSession()
+    useSessionStore.getState().setBtwQuestion(ROUTE, 'What does this function do?')
+
+    const session = useSessionStore.getState().sessions[ROUTE]
+    expect(session.btwQuestion).toBe('What does this function do?')
+    expect(session.btwLoading).toBe(true)
+    expect(session.btwResponse).toBeNull()
+  })
+
+  it('setBtwQuestion clears any prior response', () => {
+    setupSession()
+    useSessionStore.getState().setBtwQuestion(ROUTE, 'first question')
+    useSessionStore.getState().setBtwResponse(ROUTE, 'first answer')
+    useSessionStore.getState().setBtwQuestion(ROUTE, 'second question')
+
+    const session = useSessionStore.getState().sessions[ROUTE]
+    expect(session.btwResponse).toBeNull()
+    expect(session.btwLoading).toBe(true)
+  })
+
+  it('setBtwResponse stores the response and clears btwLoading', () => {
+    setupSession()
+    useSessionStore.getState().setBtwQuestion(ROUTE, 'What is 2+2?')
+    useSessionStore.getState().setBtwResponse(ROUTE, '4')
+
+    const session = useSessionStore.getState().sessions[ROUTE]
+    expect(session.btwResponse).toBe('4')
+    expect(session.btwLoading).toBe(false)
+  })
+
+  it('setBtwResponse(null) clears response and sets btwLoading=false', () => {
+    setupSession()
+    useSessionStore.getState().setBtwQuestion(ROUTE, 'something')
+    useSessionStore.getState().setBtwResponse(ROUTE, null)
+
+    const session = useSessionStore.getState().sessions[ROUTE]
+    expect(session.btwResponse).toBeNull()
+    expect(session.btwLoading).toBe(false)
+  })
+
+  it('initial BTW state is clean', () => {
+    setupSession()
+    const session = useSessionStore.getState().sessions[ROUTE]
+    expect(session.btwQuestion).toBeNull()
+    expect(session.btwResponse).toBeNull()
+    expect(session.btwLoading).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// InputBox FC — rendered
+//
+// Renders <InputBox />, captures View props, and asserts IPC + store effects.
+// ---------------------------------------------------------------------------
+
+describe('InputBox FC — rendered', () => {
+  const FC_ROUTE = 'fc-route-1'
+
+  // Track IPC calls
+  const ipcCalls: Record<string, unknown[][]> = {}
+
+  let app: Awaited<ReturnType<typeof import('@test/helpers/boot-test-app').bootTestApp>>
+
+  beforeEach(async () => {
+    const { bootTestApp } = await import('@test/helpers/boot-test-app')
+    app = await bootTestApp()
+
+    // Reset call tracking
+    for (const key of Object.keys(ipcCalls)) delete ipcCalls[key]
+
+    function record(channel: string, ...args: unknown[]): void {
+      if (!ipcCalls[channel]) ipcCalls[channel] = []
+      ipcCalls[channel].push(args)
+    }
+
+    // Register IPC handlers for channels the FC exercises
+    app.bridge.ipcMain.handle('session:create', (_e: unknown, ...args: unknown[]) => {
+      record('session:create', ...args)
+      return null
+    })
+    app.bridge.ipcMain.handle('session:send', (_e: unknown, ...args: unknown[]) => {
+      record('session:send', ...args)
+      return null
+    })
+    app.bridge.ipcMain.handle('session:interrupt', (_e: unknown, ...args: unknown[]) => {
+      record('session:interrupt', ...args)
+      return null
+    })
+    app.bridge.ipcMain.handle('session:ask-side-question', (_e: unknown, ...args: unknown[]) => {
+      record('session:ask-side-question', ...args)
+      return 'side-answer'
+    })
+    app.bridge.ipcMain.handle('session:set-model', (_e: unknown, ...args: unknown[]) => {
+      record('session:set-model', ...args)
+      return null
+    })
+    app.bridge.ipcMain.handle('session:get-models', () => [])
+    app.bridge.ipcMain.handle('voice:start-recording', (_e: unknown, ...args: unknown[]) => {
+      record('voice:start-recording', ...args)
+      return null
+    })
+    app.bridge.ipcMain.handle('voice:stop-recording', (_e: unknown, ...args: unknown[]) => {
+      record('voice:stop-recording', ...args)
+      return null
+    })
+    app.bridge.ipcMain.handle('file:list-dir', () => [])
+
+    // Prepare store: create a session and make it active
+    useSessionStore.setState({
+      activeSessionId: null,
+      sessions: {},
+      recentSessionIds: [],
+    })
+    useSessionStore.getState().createNewSession(FC_ROUTE, '/test/cwd')
+    useSessionStore.setState({ activeSessionId: FC_ROUTE })
+  })
+
+  afterEach(() => {
+    app.teardown()
+    vi.clearAllMocks()
+  })
+
+  function renderFC(): void {
+    render(createElement(InputBox))
+  }
+
+  it('renders and passes props to View', () => {
+    renderFC()
+    expect(viewProps).toBeDefined()
+    expect(typeof viewProps.onSend).toBe('function')
+    expect(typeof viewProps.onCancel).toBe('function')
+  })
+
+  it('onSend with draft text: calls createSession + sendPrompt IPC, sets sdkActive in store', async () => {
+    // Set draft text before rendering so the FC reads it on mount
+    useSessionStore.getState().setDraftText('hello world')
+
+    renderFC()
+
+    // Verify the FC read the draft text
+    expect(viewProps.text).toBe('hello world')
+
+    // Trigger send
+    await viewProps.onSend()
+
+    // createSession called because sdkActive=false on a new session
+    expect(ipcCalls['session:create']).toHaveLength(1)
+    expect(ipcCalls['session:create'][0][0]).toBe(FC_ROUTE)
+
+    // sendPrompt called with routingId + prompt
+    expect(ipcCalls['session:send']).toHaveLength(1)
+    expect(ipcCalls['session:send'][0][0]).toBe(FC_ROUTE)
+    expect(ipcCalls['session:send'][0][1]).toBe('hello world')
+
+    // markSdkActive called — sdkActive is now true in store
+    expect(useSessionStore.getState().sessions[FC_ROUTE].sdkActive).toBe(true)
+  })
+
+  it('onSend with /btw prefix: calls askSideQuestion IPC and setBtwQuestion in store', async () => {
+    useSessionStore.getState().setDraftText('/btw What does this function do?')
+
+    renderFC()
+
+    await viewProps.onSend()
+
+    expect(ipcCalls['session:ask-side-question']).toHaveLength(1)
+    expect(ipcCalls['session:ask-side-question'][0][0]).toBe(FC_ROUTE)
+    expect(ipcCalls['session:ask-side-question'][0][1]).toBe('What does this function do?')
+
+    // createSession / sendPrompt should NOT be called for a side question
+    expect(ipcCalls['session:create']).toBeUndefined()
+    expect(ipcCalls['session:send']).toBeUndefined()
+
+    // Store has btwQuestion set (the stub returns 'side-answer' synchronously,
+    // so by the time we assert, setBtwResponse has already resolved the promise)
+    const session = useSessionStore.getState().sessions[FC_ROUTE]
+    expect(session.btwQuestion).toBe('What does this function do?')
+    // The stub resolves synchronously so btwResponse is already populated
+    expect(session.btwResponse).toBe('side-answer')
+    expect(session.btwLoading).toBe(false)
+  })
+
+  it('onSend with /clear: calls createNewSession in store and does not call sendPrompt', async () => {
+    useSessionStore.getState().setDraftText('/clear')
+
+    renderFC()
+
+    const sessionsBefore = Object.keys(useSessionStore.getState().sessions)
+
+    await viewProps.onSend()
+
+    // A new session should have been created (uuid-based key, different from FC_ROUTE)
+    const sessionsAfter = Object.keys(useSessionStore.getState().sessions)
+    expect(sessionsAfter.length).toBeGreaterThan(sessionsBefore.length)
+
+    // No IPC send should happen
+    expect(ipcCalls['session:send']).toBeUndefined()
+  })
+
+  it('onCancel: calls interruptSession IPC with active session id', async () => {
+    renderFC()
+
+    await viewProps.onCancel()
+
+    expect(ipcCalls['session:interrupt']).toHaveLength(1)
+    expect(ipcCalls['session:interrupt'][0][0]).toBe(FC_ROUTE)
+  })
+
+  it('onSelectModel: calls setModel IPC and updates selectedModel in store', async () => {
+    renderFC()
+
+    viewProps.onSelectModel('claude-opus-4-5')
+
+    expect(ipcCalls['session:set-model']).toHaveLength(1)
+    expect(ipcCalls['session:set-model'][0][0]).toBe(FC_ROUTE)
+    expect(ipcCalls['session:set-model'][0][1]).toBe('claude-opus-4-5')
+
+    // Store updated
+    expect(useSessionStore.getState().sessions[FC_ROUTE].selectedModel).toBe('claude-opus-4-5')
+  })
+
+  it('onVoiceStop: calls voiceStopRecording IPC with active session id', async () => {
+    renderFC()
+
+    await viewProps.onVoiceStop()
+
+    expect(ipcCalls['voice:stop-recording']).toHaveLength(1)
+    expect(ipcCalls['voice:stop-recording'][0][0]).toBe(FC_ROUTE)
+  })
+
+  it('onSend does nothing when text is empty (noop)', async () => {
+    // draftText defaults to '' for a fresh session
+    renderFC()
+
+    expect(viewProps.text).toBe('')
+
+    await viewProps.onSend()
+
+    expect(ipcCalls['session:create']).toBeUndefined()
+    expect(ipcCalls['session:send']).toBeUndefined()
+  })
+
+  it('clears draft text from store after a successful send', async () => {
+    useSessionStore.getState().setDraftText('some prompt')
+
+    renderFC()
+    await viewProps.onSend()
+
+    // The FC calls setText('') after routing — draftText should be cleared
+    expect(useSessionStore.getState().sessions[FC_ROUTE].draftText).toBe('')
+  })
+})

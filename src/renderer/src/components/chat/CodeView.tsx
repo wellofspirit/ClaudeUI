@@ -1,7 +1,7 @@
 import { useMemo } from 'react'
 import { Highlight, themes } from 'prism-react-renderer'
 
-const EXT_TO_LANG: Record<string, string> = {
+export const EXT_TO_LANG: Record<string, string> = {
   ts: 'typescript', tsx: 'tsx', js: 'javascript', jsx: 'jsx', mjs: 'javascript', cjs: 'javascript', mts: 'typescript', cts: 'typescript',
   py: 'python', rb: 'ruby', rs: 'rust', go: 'go',
   java: 'java', kt: 'kotlin', c: 'c', cpp: 'cpp', h: 'c', hpp: 'cpp',
@@ -22,12 +22,12 @@ function getLang(filePath?: string): string {
 }
 
 /** Strip `cat -n` style line-number prefixes (e.g. "     1→content") */
-function stripLineNumbers(s: string): string {
+export function stripLineNumbers(s: string): string {
   return s.replace(/^ *\d+→/gm, '')
 }
 
 /** Extract the starting line number from cat -n output, defaulting to 1 */
-function getStartLine(s: string): number {
+export function getStartLine(s: string): number {
   const match = s.match(/^ *(\d+)→/)
   return match ? parseInt(match[1], 10) : 1
 }

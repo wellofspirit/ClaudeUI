@@ -36,7 +36,8 @@ jobs:
       - name: Determine next version
         id: bump
         run: |
-          LATEST_TAG=$(git tag -l 'v*' --sort=-v:refname | head -1)
+          # Only consider stable tags (no hyphen = no pre-release suffix)
+          LATEST_TAG=$(git tag -l 'v*' --sort=-v:refname | grep -v '-' | head -1)
           if [ -z "$LATEST_TAG" ]; then
             NEXT="1.0.0"
           else
@@ -54,7 +55,7 @@ jobs:
       - name: Generate changelog
         id: changelog
         run: |
-          LATEST_TAG=$(git tag -l 'v*' --sort=-v:refname | head -1)
+          LATEST_TAG=$(git tag -l 'v*' --sort=-v:refname | grep -v '-' | head -1)
           if [ -z "$LATEST_TAG" ]; then
             LOG=$(git log --pretty=format:'- %s (%h)' --no-merges)
           else

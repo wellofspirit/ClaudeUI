@@ -1,0 +1,186 @@
+name: Build & Pre-Release
+
+on:
+  push:
+    branches: [pre-release]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '.vscode/**'
+      - '.claude/**'
+      - '.prettierrc.yaml'
+      - '.prettierignore'
+      - '.eslintrc.*'
+      - '.gitignore'
+      - 'LICENSE'
+
+concurrency:
+  group: pre-release-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.bump.outputs.version }}
+      tag: ${{ steps.bump.outputs.tag }}
+      changelog: ${{ steps.changelog.outputs.changelog }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine next pre-release version
+        id: bump
+        run: |
+          # Find the latest stable tag (no hyphen = no pre-release suffix)
+          LATEST_STABLE=$(git tag -l 'v*' --sort=-v:refname | grep -v '-' | head -1)
+          if [ -z "$LATEST_STABLE" ]; then
+            NEXT_BASE="1.0.0"
+          else
+            CURRENT="${LATEST_STABLE#v}"
+            MAJOR=$(echo "$CURRENT" | cut -d. -f1)
+            MINOR=$(echo "$CURRENT" | cut -d. -f2)
+            PATCH=$(echo "$CURRENT" | cut -d. -f3)
+            NEXT_BASE="${MAJOR}.${MINOR}.$((PATCH + 1))"
+          fi
+
+          # Find the latest pre-release tag for this base version and increment
+          LATEST_PRE=$(git tag -l "v${NEXT_BASE}-pre.*" --sort=-v:refname | head -1)
+          if [ -z "$LATEST_PRE" ]; then
+            PRE_NUM=1
+          else
+            PRE_NUM=$(echo "$LATEST_PRE" | sed 's/.*-pre\.//')
+            PRE_NUM=$((PRE_NUM + 1))
+          fi
+
+          NEXT="${NEXT_BASE}-pre.${PRE_NUM}"
+          echo "version=$NEXT" >> "$GITHUB_OUTPUT"
+          echo "tag=v$NEXT" >> "$GITHUB_OUTPUT"
+          echo "Next pre-release version: $NEXT (base: $NEXT_BASE, pre: $PRE_NUM)"
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          # Changelog since last stable OR last pre-release tag, whichever is newer
+          LATEST_TAG=$(git tag -l 'v*' --sort=-v:refname | head -1)
+          if [ -z "$LATEST_TAG" ]; then
+            LOG=$(git log --pretty=format:'- %s (%h)' --no-merges)
+          else
+            LOG=$(git log "${LATEST_TAG}..HEAD" --pretty=format:'- %s (%h)' --no-merges)
+          fi
+          echo "$LOG" > /tmp/changelog.txt
+          {
+            echo 'changelog<<CHANGELOG_EOF'
+            cat /tmp/changelog.txt
+            echo ''
+            echo 'CHANGELOG_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: version
+    strategy:
+      matrix:
+        include:
+          - os: macos-latest
+            platform: mac
+            zip_name: ClaudeUI-${{ needs.version.outputs.version }}-mac-arm64.zip
+            build_dir: dist/mac-arm64
+          - os: windows-latest
+            platform: win
+            zip_name: ClaudeUI-${{ needs.version.outputs.version }}-win-x64.zip
+            build_dir: dist/win-unpacked
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Stamp version into package.json
+        run: |
+          node -e "const p=require('./package.json'); p.version='${{ needs.version.outputs.version }}'; require('fs').writeFileSync('package.json', JSON.stringify(p, null, 2)+'\n')"
+
+      - name: Run tests
+        run: bun run test:ci
+
+      - name: Build app
+        run: |
+          bun run typecheck
+          bunx electron-vite build
+          bunx vite build --config vite.web.config.ts
+
+      - name: Package (macOS)
+        if: matrix.platform == 'mac'
+        run: |
+          bunx electron-builder --mac --dir
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+
+      - name: Ad-hoc sign (macOS)
+        if: matrix.platform == 'mac'
+        run: |
+          codesign --force --deep --sign - "${{ matrix.build_dir }}/ClaudeUI.app"
+
+      - name: Package (Windows)
+        if: matrix.platform == 'win'
+        run: |
+          bunx electron-builder --win --dir
+
+      - name: Zip build output (macOS)
+        if: matrix.platform == 'mac'
+        run: |
+          cd "${{ matrix.build_dir }}"
+          zip -r -y "../../${{ matrix.zip_name }}" .
+
+      - name: Zip build output (Windows)
+        if: matrix.platform == 'win'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "${{ matrix.build_dir }}/*" -DestinationPath "${{ matrix.zip_name }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.zip_name }}
+          path: ${{ matrix.zip_name }}
+
+  release:
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create pre-release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.version.outputs.tag }}
+          name: ClaudeUI ${{ needs.version.outputs.tag }} (Pre-release)
+          prerelease: true
+          body: |
+            ## Pre-release
+
+            ⚠️ This is a pre-release build for testing. Not recommended for general use.
+
+            ## Changes since last release
+
+            ${{ needs.version.outputs.changelog }}
+          files: artifacts/*
+          generate_release_notes: false

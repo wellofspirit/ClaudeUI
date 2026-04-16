@@ -39,6 +39,7 @@ import { serviceSession } from './services/service-session'
 import { PluginManager } from './services/plugin-manager'
 import { LogViewer } from './services/log-viewer'
 import { logger } from './services/logger'
+import { stopAllClassifiers } from './services/auto-classifier'
 import { getSdkVersion } from './services/claude-session'
 import icon from '../../resources/icon.png?asset'
 
@@ -211,6 +212,7 @@ function createWindow(): void {
     pluginManager.stopAll()
     automationManager.stopAll()
     remoteServer.stop()
+    stopAllClassifiers()
     // Stop the service session (lightweight CLI subprocess for usage polling)
     serviceSession.stop()
     if (quitConfirmed) return

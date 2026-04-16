@@ -4,6 +4,7 @@ import type { FileAttachment, VoiceState as VoiceStateType } from '../../../../.
 import { v4 as uuid } from 'uuid'
 import { resolveSendAction } from './utils'
 import { useSlashMenu } from '../../../hooks/useSlashMenu'
+import { mergeSlashCommands } from '../SlashCommandMenu'
 import { useFileMention } from '../../../hooks/useFileMention'
 import { useIsMobile } from '../../../hooks/useIsMobile'
 import { InputBoxView } from './View'
@@ -90,8 +91,23 @@ export function InputBox(): React.JSX.Element {
 
   const [attachedFiles, setAttachedFiles] = useState<FileAttachment[]>([])
 
-  // Slash command autocomplete
+  // Slash command autocomplete — merge SDK commands with filesystem-scanned custom commands
   const slashCommands = useSessionStore((s) => s.slashCommands)
+  const customCommands = useSessionStore((s) => s.customCommands)
+  const setCustomCommands = useSessionStore((s) => s.setCustomCommands)
+  const mergedSlashCommands = useMemo(
+    () => mergeSlashCommands(slashCommands, customCommands),
+    [slashCommands, customCommands]
+  )
+
+  // Eagerly scan custom commands when cwd changes
+  useEffect(() => {
+    if (!cwd) return
+    window.api.scanCustomCommands(cwd).then((names) => {
+      setCustomCommands(names.map((name) => ({ name })))
+    }).catch(() => { /* scanner failed — keep existing commands */ })
+  }, [cwd, setCustomCommands])
+
   const {
     slashMenuOpen,
     slashMenuIndex,
@@ -100,7 +116,7 @@ export function InputBox(): React.JSX.Element {
     handleInputChange: slashHandleInput,
     handleKeyDown: slashHandleKeyDown,
     handleSelect: handleSlashSelect
-  } = useSlashMenu({ slashCommands, text, setText, textareaRef })
+  } = useSlashMenu({ slashCommands: mergedSlashCommands, text, setText, textareaRef })
 
   // @ file mention autocomplete
   const {

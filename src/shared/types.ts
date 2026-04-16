@@ -103,7 +103,7 @@ export interface PluginStreamEvent extends PluginSessionEvent {
 
 export type ApprovalDecision = 'allow' | 'deny'
 
-export type PermissionMode = 'default' | 'acceptEdits' | 'plan' | 'auto'
+export type PermissionMode = 'default' | 'acceptEdits' | 'plan' | 'auto' | 'localAuto'
 
 export interface ProxySettings {
   enabled: boolean
@@ -376,6 +376,7 @@ interface SessionAPI {
   saveSessionConfig(config: UISessionConfig): Promise<void>
   loadSlashCommands(): Promise<SlashCommandInfo[]>
   saveSlashCommands(commands: SlashCommandInfo[]): Promise<void>
+  scanCustomCommands(cwd: string): Promise<string[]>
   loadSkillDetails(cwd: string): Promise<SkillInfo[]>
   onBeforeQuit(cb: () => void): () => void
   confirmQuit(): Promise<void>
