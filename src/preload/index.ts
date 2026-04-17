@@ -29,8 +29,8 @@ async function unwrap<T>(channel: string, ...args: unknown[]): Promise<T> {
 const api: ClaudeAPI = {
   platform: process.platform,
   pickFolder: () => ipcRenderer.invoke('session:pick-folder'),
-  createSession: (routingId: string, cwd: string, effort?: string, resumeSessionId?: string, permissionMode?: string, model?: string) =>
-    ipcRenderer.invoke('session:create', routingId, cwd, effort, resumeSessionId, permissionMode, model),
+  createSession: (routingId: string, cwd: string, effort?: string, resumeSessionId?: string, permissionMode?: string, model?: string, thinkingMode?: string) =>
+    ipcRenderer.invoke('session:create', routingId, cwd, effort, resumeSessionId, permissionMode, model, thinkingMode),
   rekeySession: (oldId: string, newId: string) =>
     ipcRenderer.invoke('session:rekey', oldId, newId),
   sendPrompt: (routingId: string, prompt: string, attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>) =>
@@ -121,6 +121,8 @@ const api: ClaudeAPI = {
     ipcRenderer.invoke('session:set-model', routingId, model),
   setEffort: (routingId: string, effort: string) =>
     ipcRenderer.invoke('session:set-effort', routingId, effort),
+  setThinkingMode: (routingId: string, mode: string) =>
+    ipcRenderer.invoke('session:set-thinking-mode', routingId, mode),
   getModels: () => ipcRenderer.invoke('session:get-models'),
   generateTitle: (conversationText: string) =>
     ipcRenderer.invoke('session:generate-title', conversationText),

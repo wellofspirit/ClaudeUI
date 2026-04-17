@@ -70,6 +70,7 @@ beforeEach(() => {
         needsAttention: false,
         permissionMode: 'default',
         effort: 'medium',
+        thinkingMode: 'adaptive',
         statusLine: null,
         queuedText: '',
         draftText: '',

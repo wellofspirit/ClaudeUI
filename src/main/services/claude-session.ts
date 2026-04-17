@@ -18,6 +18,7 @@ import { usageFetcher } from './usage-fetcher'
 import { createMermaidServer } from './mermaid-tool'
 import { createMockupServer } from './mockup-tool'
 import { getClassifier, stopClassifier, isSafeTool, buildTranscript, type TranscriptMessage } from './auto-classifier'
+import { resolveThinkingMode, type ThinkingMode } from '../../shared/model-capabilities'
 
 /** In production, cli.js is unpacked from the asar — resolve its real path */
 export function getCliJsPath(): string | undefined {
@@ -285,6 +286,7 @@ export class ClaudeSession {
   private slug: string | null = null
   private permissionMode: string = 'default'
   private effort: string
+  private thinkingMode: 'adaptive' | 'enabled' | 'disabled'
   private model: string = 'default'
   private resumeSessionId: string | undefined
   private statusLineTimer: ReturnType<typeof setTimeout> | null = null
@@ -302,11 +304,14 @@ export class ClaudeSession {
   private accTotalApiDurationMs = 0
   private lastContextLength = 0
 
-  constructor(routingId: string, win: BrowserWindow, cwd: string, effort?: string, resumeSessionId?: string, permissionMode?: string, model?: string, sandboxConfig?: SandboxSettings) {
+  constructor(routingId: string, win: BrowserWindow, cwd: string, effort?: string, resumeSessionId?: string, permissionMode?: string, model?: string, sandboxConfig?: SandboxSettings, thinkingMode?: string) {
     this.routingId = routingId
     this.win = win
     this.cwd = cwd
     this.effort = effort || 'medium'
+    this.thinkingMode = (thinkingMode === 'adaptive' || thinkingMode === 'enabled' || thinkingMode === 'disabled')
+      ? thinkingMode
+      : 'adaptive'
     this.resumeSessionId = resumeSessionId
     if (permissionMode) this.permissionMode = permissionMode
     if (model) this.model = model
@@ -576,7 +581,7 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
           allowedTools: ['mcp__claude-ui__*', 'mcp__claude-ui-mockup__*'],
           abortController: this.abortController,
           includePartialMessages: true,
-          thinking: { type: 'enabled', budgetTokens: 10000 },
+          thinking: this.buildThinkingConfig(),
           effort: this.effort as 'low' | 'medium' | 'high',
           stderr: (chunk) => {
             const text = chunk.toString().trim()
@@ -1049,6 +1054,29 @@ this.permissionMode = mode
 
   setEffort(effort: string): void {
     this.effort = effort
+  }
+
+  setThinkingMode(mode: string): void {
+    if (mode === 'adaptive' || mode === 'enabled' || mode === 'disabled') {
+      this.thinkingMode = mode
+    }
+  }
+
+  /**
+   * Build the SDK `thinking` option from the session's mode and current model.
+   * Always requests `display: 'summarized'` so Opus 4.7+ surfaces reasoning text;
+   * the field is silently ignored on models that don't honour it.
+   *
+   * `adaptive` is auto-coerced to `enabled` when the model lacks adaptive support
+   * (older models would otherwise reject the request).
+   */
+  private buildThinkingConfig(): { type: 'adaptive'; display: 'summarized' }
+    | { type: 'enabled'; display: 'summarized' }
+    | { type: 'disabled' } {
+    const resolved: ThinkingMode = resolveThinkingMode(this.model, this.thinkingMode)
+    if (resolved === 'disabled') return { type: 'disabled' }
+    if (resolved === 'adaptive') return { type: 'adaptive', display: 'summarized' }
+    return { type: 'enabled', display: 'summarized' }
   }
 
   async dequeueMessage(value: string): Promise<{ removed: number }> {

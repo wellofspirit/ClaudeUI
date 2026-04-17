@@ -373,7 +373,10 @@ export interface PerSessionState {
   isWatching: boolean
   needsAttention: boolean
   permissionMode: PermissionMode
-  effort: 'low' | 'medium' | 'high'
+  /** null = use model default; non-null = user explicitly chose this tier */
+  effort: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null
+  /** null = use model default; non-null = user explicitly chose this mode */
+  thinkingMode: 'adaptive' | 'enabled' | 'disabled' | null
   statusLine: StatusLineData | null
   queuedText: string
   draftText: string
@@ -438,7 +441,8 @@ const EMPTY_SESSION_STATE: PerSessionState = {
   isWatching: false,
   needsAttention: false,
   permissionMode: 'default',
-  effort: 'medium',
+  effort: null,
+  thinkingMode: null,
   statusLine: null,
   queuedText: '',
   draftText: '',
@@ -617,7 +621,8 @@ interface SessionState {
   applyExternalSessionConfig: (config: { recentSessions?: string[]; pinnedSessions?: string[]; customTitles?: Record<string, string>; worktreeInfoMap?: Record<string, WorktreeInfo>; hiddenSessions?: string[]; hiddenProjects?: string[] }) => void
   applyRemoteSnapshot: (snapshot: import('../../../shared/remote-protocol').FullStateSnapshot) => void
   setPermissionMode: (mode: PermissionMode, routingId?: string) => void
-  setEffort: (effort: 'low' | 'medium' | 'high', routingId?: string) => void
+  setEffort: (effort: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null, routingId?: string) => void
+  setThinkingMode: (mode: 'adaptive' | 'enabled' | 'disabled' | null, routingId?: string) => void
   setStatusLine: (routingId: string, data: StatusLineData) => void
   appendQueuedText: (text: string) => void
   setQueuedText: (routingId: string, text: string) => void
@@ -1459,7 +1464,8 @@ export const useSessionStore = create<SessionState>((set) => ({
           subagentStreamingText: snap.subagentStreamingText,
           subagentStreamingThinking: snap.subagentStreamingThinking,
           permissionMode: snap.permissionMode as PermissionMode,
-          effort: snap.effort as 'low' | 'medium' | 'high',
+          effort: (snap.effort ?? null) as 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null,
+          thinkingMode: (snap.thinkingMode ?? null) as 'adaptive' | 'enabled' | 'disabled' | null,
           statusLine: snap.statusLine,
           teamName: snap.teamName,
           teammates: snap.teammates,
@@ -1495,6 +1501,13 @@ export const useSessionStore = create<SessionState>((set) => ({
       const id = routingId ?? state.activeSessionId
       if (!id) return {}
       return { sessions: updateSession(state.sessions, id, () => ({ effort })) }
+    }),
+
+  setThinkingMode: (mode, routingId) =>
+    set((state) => {
+      const id = routingId ?? state.activeSessionId
+      if (!id) return {}
+      return { sessions: updateSession(state.sessions, id, () => ({ thinkingMode: mode })) }
     }),
 
   setStatusLine: (routingId, data) =>
@@ -2152,6 +2165,7 @@ export function getRemoteStateSnapshot(): {
     subagentStreamingThinking: Record<string, string>
     permissionMode: string
     effort: string
+    thinkingMode: string
     statusLine: StatusLineData | null
     teamName: string | null
     teammates: Record<string, TeammateInfo>
@@ -2188,6 +2202,7 @@ export function getRemoteStateSnapshot(): {
       subagentStreamingThinking: s.subagentStreamingThinking,
       permissionMode: s.permissionMode,
       effort: s.effort,
+      thinkingMode: s.thinkingMode,
       statusLine: s.statusLine,
       teamName: s.teamName,
       teammates: s.teammates,

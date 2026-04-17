@@ -273,6 +273,10 @@ export interface ModelInfo {
   value: string
   displayName: string
   description: string
+  /** Capability flags surfaced by the SDK's `supportedModels()`. Authoritative. */
+  supportsEffort?: boolean
+  supportedEffortLevels?: ('low' | 'medium' | 'high' | 'xhigh' | 'max')[]
+  supportsAdaptiveThinking?: boolean
 }
 
 export interface SessionInfo {
@@ -303,7 +307,7 @@ export interface DirectoryGroup {
 interface SessionAPI {
   platform: string
   pickFolder(): Promise<string | null>
-  createSession(routingId: string, cwd: string, effort?: string, resumeSessionId?: string, permissionMode?: string, model?: string): Promise<void>
+  createSession(routingId: string, cwd: string, effort?: string, resumeSessionId?: string, permissionMode?: string, model?: string, thinkingMode?: string): Promise<void>
   rekeySession(oldId: string, newId: string): Promise<void>
   sendPrompt(routingId: string, prompt: string, attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>): Promise<void>
   cancelSession(routingId: string): Promise<void>
@@ -348,6 +352,7 @@ interface SessionAPI {
   setPermissionMode(routingId: string, mode: string): Promise<void>
   setModel(routingId: string, model: string): Promise<void>
   setEffort(routingId: string, effort: string): Promise<void>
+  setThinkingMode(routingId: string, mode: string): Promise<void>
   getModels(): Promise<ModelInfo[]>
   generateTitle(conversationText: string): Promise<string | null>
   generateCommitMessage(diff: string): Promise<string | null>

@@ -126,6 +126,7 @@ export interface PerSessionSnapshot {
   subagentStreamingThinking: Record<string, string>
   permissionMode: string
   effort: string
+  thinkingMode?: string
   statusLine: StatusLineData | null
   teamName: string | null
   teammates: Record<string, TeammateInfo>

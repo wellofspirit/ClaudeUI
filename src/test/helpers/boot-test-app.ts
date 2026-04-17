@@ -46,8 +46,8 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
   return {
     platform: process.platform,
     pickFolder: () => ipcRenderer.invoke('session:pick-folder'),
-    createSession: (routingId, cwd, effort?, resumeSessionId?, permissionMode?, model?) =>
-      ipcRenderer.invoke('session:create', routingId, cwd, effort, resumeSessionId, permissionMode, model),
+    createSession: (routingId, cwd, effort?, resumeSessionId?, permissionMode?, model?, thinkingMode?) =>
+      ipcRenderer.invoke('session:create', routingId, cwd, effort, resumeSessionId, permissionMode, model, thinkingMode),
     rekeySession: (oldId, newId) => ipcRenderer.invoke('session:rekey', oldId, newId),
     sendPrompt: (routingId, prompt, attachments?) =>
       ipcRenderer.invoke('session:send', routingId, prompt, attachments),
@@ -135,6 +135,8 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
       ipcRenderer.invoke('session:set-model', routingId, model),
     setEffort: (routingId, effort) =>
       ipcRenderer.invoke('session:set-effort', routingId, effort),
+    setThinkingMode: (routingId, mode) =>
+      ipcRenderer.invoke('session:set-thinking-mode', routingId, mode),
     getModels: () => ipcRenderer.invoke('session:get-models'),
     generateTitle: (conversationText) =>
       ipcRenderer.invoke('session:generate-title', conversationText),

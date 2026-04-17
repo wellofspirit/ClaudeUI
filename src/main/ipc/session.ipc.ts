@@ -503,11 +503,11 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
 
   ipcMain.handle(
     'session:create',
-    async (_event, routingId: string, cwd: string, effort?: string, resumeSessionId?: string, permissionMode?: string, model?: string) => {
+    async (_event, routingId: string, cwd: string, effort?: string, resumeSessionId?: string, permissionMode?: string, model?: string, thinkingMode?: string) => {
       const settings = loadSettings() as Record<string, unknown>
       const sandboxConfig = (settings.sandbox as SandboxSettings) || undefined
       await applyProxyEnv((settings.proxy as ProxySettings) || undefined)
-      manager.create(routingId, win, cwd, effort, resumeSessionId, permissionMode, model, sandboxConfig)
+      manager.create(routingId, win, cwd, effort, resumeSessionId, permissionMode, model, sandboxConfig, thinkingMode)
       // Notify all extra windows (remote bridge) that a session was created
       for (const w of ClaudeSession.getExtraWindows()) {
         if (!w.isDestroyed()) w.webContents.send('session:created', routingId, { cwd, resumeSessionId })
@@ -634,6 +634,10 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
 
   ipcMain.handle('session:set-effort', (_e, routingId: string, effort: string) => {
     manager.get(routingId)?.setEffort(effort)
+  })
+
+  ipcMain.handle('session:set-thinking-mode', (_e, routingId: string, mode: string) => {
+    manager.get(routingId)?.setThinkingMode(mode)
   })
 
   ipcMain.handle('session:get-models', async () => {
