@@ -21,7 +21,14 @@ export function createMockupServer(cwd: string) {
         'Create a new UI mockup. Scaffolds a directory on disk and writes the initial HTML. ' +
           'The mockup renders inline in the chat as a preview card. ' +
           'Returns the directory ID for future reference — use the standard Edit tool to modify the HTML file for incremental changes, ' +
-          'then call show_mockup to re-display the updated result.',
+          'then call show_mockup to re-display the updated result.\n\n' +
+          'Sibling assets: You may drop additional files (images, custom CSS, fonts) into the mockup directory ' +
+          'alongside index.html and reference them with relative paths, e.g. `<img src="./logo.png">`, ' +
+          '`<link rel="stylesheet" href="./extra.css">`. Supported extensions: png, jpg, jpeg, gif, webp, ' +
+          'avif, svg, ico, woff, woff2, ttf, otf, css, json, txt, mp3, mp4, webm.\n\n' +
+          'JavaScript is NOT executed in mockups (the iframe is sandboxed and the CSP blocks scripts). ' +
+          'For interactivity, use CSS-only patterns: `:hover`, `:focus-within`, `:checked + label` for toggles, ' +
+          '`<details>/<summary>` for disclosures, `:target` for tabbed panels.',
         {
           html: z.string().describe(
             'The HTML body content for the mockup. Write only the content that goes inside <body> — ' +
@@ -93,8 +100,8 @@ export function createMockupServer(cwd: string) {
 
 /**
  * Wraps body HTML in a full document template.
- * The Tailwind CSS link is a placeholder — the renderer injects the bundled CSS at render time.
- * We store a reference comment so the renderer knows to inject it.
+ * The Tailwind stylesheet is referenced via the `mockup-asset://` custom
+ * protocol so the iframe's HTTP cache serves it across every reload.
  */
 function wrapHtml(bodyHtml: string, title?: string): string {
   return `<!DOCTYPE html>
@@ -103,7 +110,7 @@ function wrapHtml(bodyHtml: string, title?: string): string {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>${escapeHtml(title || 'Mockup')}</title>
-  <!-- tailwind:inject -->
+  <link rel="stylesheet" href="mockup-asset://tailwind.css">
 </head>
 <body>
 ${bodyHtml}

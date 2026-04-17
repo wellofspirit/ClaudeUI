@@ -1,6 +1,6 @@
 import React, { memo, useCallback, useEffect, useState } from 'react'
 import { useSessionStore } from '../../../stores/session-store'
-import { buildSrcdoc } from '../../../lib/mockup-utils'
+import { buildMockupUrl } from '../../../../../shared/mockup-url'
 import { MockupPreviewCardView } from './View'
 
 interface MockupPreviewCardProps {
@@ -10,8 +10,10 @@ interface MockupPreviewCardProps {
 
 /**
  * FC for the inline mockup preview card.
- * Handles IPC (read HTML, watch/unwatch), store access (cwd, openMockupPanel),
- * and delegates rendering to MockupPreviewCardView.
+ * The iframe loads directly from the `mockup-asset://` protocol, so we never
+ * pass HTML through srcdoc. HTML is still read via IPC for the Code tab and
+ * the Copy button. File changes bump a version counter → new src URL → iframe
+ * reloads (and bypasses HTTP cache for that one reload).
  */
 export const MockupPreviewCard = memo(function MockupPreviewCard({
   directory,
@@ -19,6 +21,7 @@ export const MockupPreviewCard = memo(function MockupPreviewCard({
 }: MockupPreviewCardProps): React.JSX.Element {
   const [html, setHtml] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [version, setVersion] = useState(1)
 
   const cwd = useSessionStore((s) => {
     const rid = s.activeSessionId
@@ -27,7 +30,7 @@ export const MockupPreviewCard = memo(function MockupPreviewCard({
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const openMockupPanel = useSessionStore((s) => s.openMockupPanel)
 
-  // Load HTML from disk
+  // HTML source is only needed for the Code tab + Copy button.
   const loadHtml = useCallback(() => {
     if (!cwd || !directory) return
     window.api.readMockupHtml(cwd, directory).then((content) => {
@@ -38,19 +41,21 @@ export const MockupPreviewCard = memo(function MockupPreviewCard({
     })
   }, [cwd, directory])
 
-  // Initial load
   useEffect(() => {
     loadHtml()
   }, [loadHtml])
 
-  // Watch for file changes and auto-reload
+  // Watch for file changes: refresh the source, bump iframe version.
   useEffect(() => {
     if (!cwd || !directory) return
 
     window.api.watchMockup(cwd, directory)
 
     const unsub = window.api.onMockupFileChanged((changedDir: string) => {
-      if (changedDir === directory) loadHtml()
+      if (changedDir === directory) {
+        loadHtml()
+        setVersion((v) => v + 1)
+      }
     })
 
     return () => {
@@ -59,7 +64,7 @@ export const MockupPreviewCard = memo(function MockupPreviewCard({
     }
   }, [cwd, directory, loadHtml])
 
-  const srcdoc = html ? buildSrcdoc(html) : null
+  const iframeSrc = cwd && directory ? buildMockupUrl(cwd, directory, { version }) : null
 
   const handleExpand = (): void => {
     if (activeSessionId) {
@@ -79,7 +84,7 @@ export const MockupPreviewCard = memo(function MockupPreviewCard({
       title={title}
       html={html}
       error={error}
-      srcdoc={srcdoc}
+      src={iframeSrc}
       onExpand={handleExpand}
       onCopyHtml={handleCopyHtml}
     />

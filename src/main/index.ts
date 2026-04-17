@@ -41,7 +41,11 @@ import { LogViewer } from './services/log-viewer'
 import { logger } from './services/logger'
 import { stopAllClassifiers } from './services/auto-classifier'
 import { getSdkVersion } from './services/claude-session'
+import { registerMockupAssetScheme, registerMockupAssetHandler } from './services/mockup-protocol'
 import icon from '../../resources/icon.png?asset'
+
+// Privileged scheme registration MUST happen before app.whenReady fires.
+registerMockupAssetScheme()
 
 // Prevent "nested session" error when launched from a Claude Code terminal
 delete process.env.CLAUDECODE
@@ -296,6 +300,9 @@ function createWindow(): void {
 app.whenReady().then(() => {
   // Set app user model id for windows
   electronApp.setAppUserModelId('com.electron')
+
+  // Serve tailwind-full.css to mockup iframes via mockup-asset:// — cached across reloads.
+  registerMockupAssetHandler()
 
   // ── About panel ────────────────────────────────────────────────────
   const rawVersion = app.getVersion() // from package.json "version"
