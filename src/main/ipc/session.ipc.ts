@@ -1192,6 +1192,47 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     return blockUsageService.getData() ?? (await blockUsageService.recalculate())
   })
 
+  // Mockup preview — read HTML from mockup directory
+  ipcMain.handle('mockup:read-html', safeHandler(async (_e: unknown, cwd: string, directory: string) => {
+    const htmlPath = path.join(cwd, '.claude', 'ui', 'mockups', directory, 'index.html')
+    return fs.promises.readFile(htmlPath, 'utf-8')
+  }))
+
+  // Mockup file watcher — watches a mockup directory for changes
+  const mockupWatchers = new Map<string, { watcher: fs.FSWatcher; debounceTimer: ReturnType<typeof setTimeout> | null }>()
+
+  ipcMain.handle('mockup:watch', (_e: unknown, cwd: string, directory: string) => {
+    const key = `${cwd}:${directory}`
+    if (mockupWatchers.has(key)) return // already watching
+
+    const dirPath = path.join(cwd, '.claude', 'ui', 'mockups', directory)
+    if (!fs.existsSync(dirPath)) return
+
+    const entry = { watcher: null! as fs.FSWatcher, debounceTimer: null as ReturnType<typeof setTimeout> | null }
+
+    entry.watcher = fs.watch(dirPath, { recursive: false }, (_event, filename) => {
+      if (!filename) return
+      if (entry.debounceTimer) clearTimeout(entry.debounceTimer)
+      entry.debounceTimer = setTimeout(() => {
+        if (!win.isDestroyed()) {
+          win.webContents.send('mockup:file-changed', directory)
+        }
+      }, 200)
+    })
+
+    mockupWatchers.set(key, entry)
+  })
+
+  ipcMain.handle('mockup:unwatch', (_e: unknown, cwd: string, directory: string) => {
+    const key = `${cwd}:${directory}`
+    const entry = mockupWatchers.get(key)
+    if (entry) {
+      entry.watcher.close()
+      if (entry.debounceTimer) clearTimeout(entry.debounceTimer)
+      mockupWatchers.delete(key)
+    }
+  })
+
   return manager
 }
 

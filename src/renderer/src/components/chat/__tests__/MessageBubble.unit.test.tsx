@@ -90,6 +90,8 @@ beforeEach(() => {
         gitSyncError: null,
         gitLastFetchTime: null,
         planReview: null,
+        mockupDir: null,
+        mockupTitle: null,
         sandboxViolations: [],
         voiceState: 'idle' as const,
         voiceInterimTranscript: '',

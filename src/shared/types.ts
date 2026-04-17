@@ -1011,4 +1011,10 @@ interface PluginAPI {
   getPluginViews(): Promise<PluginViewWithOwner[]>
   getPluginPreloadPath(): Promise<string>
   onPluginViewsChanged(cb: (views: PluginViewWithOwner[]) => void): () => void
+
+  // Mockup preview
+  readMockupHtml(cwd: string, directory: string): Promise<string>
+  watchMockup(cwd: string, directory: string): Promise<void>
+  unwatchMockup(cwd: string, directory: string): Promise<void>
+  onMockupFileChanged(cb: (directory: string) => void): () => void
 }

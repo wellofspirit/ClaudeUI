@@ -6,5 +6,6 @@ out
 *.log*
 test-prompt.txt
 .claude/settings.local.json
+.claude/ui/mockups
 *.tsbuildinfo
 bin/

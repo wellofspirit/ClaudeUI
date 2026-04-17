@@ -343,7 +343,7 @@ export interface PerSessionState {
   taskProgressMap: Record<string, TaskProgress>
   taskNotifications: TaskNotification[]
   openedTaskToolUseIds: string[]
-  rightPanel: 'none' | 'task' | 'git' | 'plan'
+  rightPanel: 'none' | 'task' | 'git' | 'plan' | 'mockup'
   subagentMessages: Record<string, ChatMessage[]>
   subagentStreamingText: Record<string, string>
   subagentStreamingThinking: Record<string, string>
@@ -378,6 +378,9 @@ export interface PerSessionState {
   gitLastFetchTime: number | null
   // Plan review state
   planReview: PlanReviewData | null
+  // Mockup preview state
+  mockupDir: string | null
+  mockupTitle: string | null
   // Sandbox violation messages
   sandboxViolations: string[]
   // Voice input
@@ -437,6 +440,8 @@ const EMPTY_SESSION_STATE: PerSessionState = {
   gitSyncError: null,
   gitLastFetchTime: null,
   planReview: null,
+  mockupDir: null,
+  mockupTitle: null,
   sandboxViolations: [],
   voiceState: 'idle' as VoiceState,
   voiceInterimTranscript: '',
@@ -639,6 +644,9 @@ interface SessionState {
   updatePlanComment: (routingId: string, commentId: string, text: string) => void
   removePlanComment: (routingId: string, commentId: string) => void
   clearPlanComments: (routingId: string) => void
+  // Mockup preview actions
+  openMockupPanel: (routingId: string, directory: string, title?: string) => void
+  closeMockupPanel: (routingId: string) => void
   // Terminal actions
   addTerminalTab: (tab: TerminalTab) => void
   closeTerminalTab: (id: string) => void
@@ -1745,6 +1753,25 @@ export const useSessionStore = create<SessionState>((set) => ({
       sessions: updateSession(state.sessions, routingId, () => ({
         rightPanel: 'none' as const,
         planReview: null
+      }))
+    })),
+
+  // Mockup preview actions
+  openMockupPanel: (routingId, directory, title) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, routingId, () => ({
+        rightPanel: 'mockup' as const,
+        mockupDir: directory,
+        mockupTitle: title || null
+      }))
+    })),
+
+  closeMockupPanel: (routingId) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, routingId, () => ({
+        rightPanel: 'none' as const,
+        mockupDir: null,
+        mockupTitle: null
       }))
     })),
 

@@ -1123,3 +1123,53 @@ describe('applyExternalSessionConfig', () => {
     expect((window.api as any).saveSessionConfig).not.toHaveBeenCalled()
   })
 })
+
+// ---------------------------------------------------------------------------
+// Mockup panel actions
+// ---------------------------------------------------------------------------
+
+describe('openMockupPanel / closeMockupPanel', () => {
+  beforeEach(() => {
+    store().createNewSession('r1', '/test')
+    useSessionStore.setState({ activeSessionId: 'r1' })
+  })
+
+  it('opens mockup panel with directory and title', () => {
+    store().openMockupPanel('r1', 'abc12345', 'Settings Page')
+    const session = store().sessions['r1']
+    expect(session.rightPanel).toBe('mockup')
+    expect(session.mockupDir).toBe('abc12345')
+    expect(session.mockupTitle).toBe('Settings Page')
+  })
+
+  it('opens mockup panel without title', () => {
+    store().openMockupPanel('r1', 'abc12345')
+    const session = store().sessions['r1']
+    expect(session.rightPanel).toBe('mockup')
+    expect(session.mockupDir).toBe('abc12345')
+    expect(session.mockupTitle).toBeNull()
+  })
+
+  it('closes mockup panel and clears state', () => {
+    store().openMockupPanel('r1', 'abc12345', 'My Mockup')
+    store().closeMockupPanel('r1')
+    const session = store().sessions['r1']
+    expect(session.rightPanel).toBe('none')
+    expect(session.mockupDir).toBeNull()
+    expect(session.mockupTitle).toBeNull()
+  })
+
+  it('replaces previous right panel when opening mockup', () => {
+    store().openGitPanel('r1')
+    expect(store().sessions['r1'].rightPanel).toBe('git')
+    store().openMockupPanel('r1', 'abc12345')
+    expect(store().sessions['r1'].rightPanel).toBe('mockup')
+  })
+
+  it('does not affect other sessions', () => {
+    store().createNewSession('r2', '/test2')
+    store().openMockupPanel('r1', 'abc12345', 'Page A')
+    expect(store().sessions['r2'].rightPanel).toBe('none')
+    expect(store().sessions['r2'].mockupDir).toBeNull()
+  })
+})

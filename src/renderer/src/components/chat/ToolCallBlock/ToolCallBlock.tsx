@@ -8,6 +8,7 @@ import { TerminalView } from '../TerminalView'
 import { MarkdownRenderer } from '../MarkdownRenderer'
 import { AlwaysAllowSection } from '../PermissionSuggestions'
 import { MermaidDiagram } from '../MermaidDiagram'
+import { MockupPreviewCard } from '../MockupPreviewCard'
 
 type ToolUseBlock = Extract<ContentBlock, { type: 'tool_use' }>
 type ToolResultBlock = Extract<ContentBlock, { type: 'tool_result' }>
@@ -133,6 +134,9 @@ export const ToolCallBlock = memo(function ToolCallBlock({ block, result, approv
   // Mermaid diagram tool — render as a dedicated card
   const isMermaid = block.toolName === 'mcp__claude-ui__render_mermaid'
 
+  // Mockup preview tool — render as a preview card
+  const isMockup = block.toolName === 'mcp__claude-ui-mockup__create_mockup' || block.toolName === 'mcp__claude-ui-mockup__show_mockup'
+
   const isStopping = stoppingTaskIds.includes(toolUseId)
   const [isBackgrounding, setIsBackgrounding] = useState(false)
 
@@ -200,6 +204,71 @@ export const ToolCallBlock = memo(function ToolCallBlock({ block, result, approv
         </div>
 
         {/* Approval buttons (unlikely for auto-allowed tool, but kept for completeness) */}
+        {isPendingApproval && (
+          <div className="flex border-t border-warning/20">
+            <button
+              onClick={() => handleApproval('deny')}
+              className="flex-1 h-8 text-[12px] font-medium text-danger hover:bg-danger/5 transition-colors cursor-pointer"
+            >
+              Deny
+            </button>
+            <div className="w-px bg-warning/20" />
+            <button
+              onClick={() => handleApproval('allow')}
+              className="flex-1 h-8 text-[12px] font-medium text-success hover:bg-success/5 transition-colors cursor-pointer"
+            >
+              Allow
+            </button>
+          </div>
+        )}
+      </div>
+    )
+  }
+
+  // ---------------------------------------------------------------------------
+  // Mockup: dedicated preview card
+  // ---------------------------------------------------------------------------
+  if (isMockup) {
+    // Extract directory ID from tool input or result text
+    const mockupDirectory = block.toolInput?.directory
+      ? String(block.toolInput.directory)
+      : extractMockupDirectory(result)
+    const mockupTitle = block.toolInput?.title ? String(block.toolInput.title) : undefined
+
+    return (
+      <div className={`rounded-lg ${borderColor === 'border-border' ? 'border' : 'border-2'} ${borderColor} bg-bg-secondary overflow-hidden`}>
+        {/* Header */}
+        <div className="flex items-center gap-2 px-3 h-9 text-[13px]">
+          {statusIcon}
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" className="text-accent shrink-0">
+            <rect x="3" y="3" width="18" height="18" rx="2" />
+            <line x1="3" y1="9" x2="21" y2="9" />
+            <line x1="9" y1="9" x2="9" y2="21" />
+          </svg>
+          <span className="font-medium text-text-primary">
+            {mockupTitle || 'UI Mockup'}
+          </span>
+          <div className="flex-1" />
+          {result?.isError && (
+            <span className="text-[11px] text-danger">Failed</span>
+          )}
+        </div>
+
+        {/* Preview body */}
+        {mockupDirectory && !result?.isError && (
+          <div className="border-t border-border px-3 py-2.5">
+            <MockupPreviewCard directory={mockupDirectory} title={mockupTitle} />
+          </div>
+        )}
+
+        {/* Error display */}
+        {result?.isError && result.toolResult && (
+          <div className="border-t border-border px-3 py-2 text-[12px] text-danger whitespace-pre-wrap">
+            {result.toolResult}
+          </div>
+        )}
+
+        {/* Approval buttons */}
         {isPendingApproval && (
           <div className="flex border-t border-warning/20">
             <button
@@ -620,5 +689,15 @@ function WriteResult({ content, filePath }: { content: string; filePath?: string
       )}
     </div>
   )
+}
+
+/**
+ * Extract the mockup directory ID from a create_mockup tool result.
+ * The result text contains "Directory: <id>" on its own line.
+ */
+function extractMockupDirectory(result?: ToolResultBlock): string | undefined {
+  if (!result?.toolResult) return undefined
+  const match = result.toolResult.match(/Directory:\s*(\S+)/)
+  return match ? match[1] : undefined
 }
 

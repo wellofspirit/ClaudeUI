@@ -16,6 +16,7 @@ import { logger } from './logger'
 import { getContextWindowSize } from '../ipc/session.ipc'
 import { usageFetcher } from './usage-fetcher'
 import { createMermaidServer } from './mermaid-tool'
+import { createMockupServer } from './mockup-tool'
 import { getClassifier, stopClassifier, isSafeTool, buildTranscript, type TranscriptMessage } from './auto-classifier'
 
 /** In production, cli.js is unpacked from the asar — resolve its real path */
@@ -475,8 +476,9 @@ export class ClaudeSession {
         logger.debug('ClaudeSession', `Disabled MCP server(s) (from ~/.claude.json): ${[...this._mcpDisabledServers].join(', ')}`)
       }
 
-      // Create in-process MCP server for UI tools (mermaid rendering, etc.)
+      // Create in-process MCP servers for UI tools
       const uiMcpServer = createMermaidServer()
+      const mockupMcpServer = createMockupServer(this.cwd)
 
       const q = sdkQuery({
         prompt: channel as AsyncIterable<never>,
@@ -496,7 +498,21 @@ Parameters:
 - \`source\` (required): Complete Mermaid diagram syntax
 - \`title\` (optional): Caption shown on the diagram card
 
-The diagram appears inline as a dedicated card with rendered SVG and source tabs.`
+The diagram appears inline as a dedicated card with rendered SVG and source tabs.
+
+## UI Mockup Preview
+You have mockup tools for creating visual UI prototypes that render inline in the chat:
+
+\`mcp__claude-ui-mockup__create_mockup\` — Create a new mockup. Writes HTML to a persistent directory on disk.
+- \`html\` (required): HTML body content. Tailwind CSS is automatically available — use utility classes for all styling.
+- \`title\` (optional): Title shown on the preview card.
+- Returns a directory ID. Use the standard Edit tool on the returned file path for incremental changes.
+
+\`mcp__claude-ui-mockup__show_mockup\` — Display a mockup from disk (useful to show a mockup created in a previous conversation).
+- \`directory\` (required): The directory ID from create_mockup.
+
+Workflow: create_mockup → Edit the HTML file for changes (the preview auto-refreshes on file change — no need to call show_mockup after edits).
+The mockup appears as an interactive preview card with preview/code tabs and expand-to-panel support.`
           },
           ...(this.sandboxConfig?.enabled ? {
             sandbox: {
@@ -544,11 +560,20 @@ The diagram appears inline as a dedicated card with rendered SVG and source tabs
             }
           } : {}),
           settingSources: ['user', 'project', 'local'],
+          settings: {
+            permissions: {
+              allow: [
+                `Edit(${this.cwd}/.claude/ui/**)`,
+                `Write(${this.cwd}/.claude/ui/**)`,
+              ]
+            }
+          },
           mcpServers: {
             ...(this._mcpAllServers as Record<string, never>),
-            'claude-ui': uiMcpServer as never
+            'claude-ui': uiMcpServer as never,
+            'claude-ui-mockup': mockupMcpServer as never
           },
-          allowedTools: ['mcp__claude-ui__*'],
+          allowedTools: ['mcp__claude-ui__*', 'mcp__claude-ui-mockup__*'],
           abortController: this.abortController,
           includePartialMessages: true,
           thinking: { type: 'enabled', budgetTokens: 10000 },

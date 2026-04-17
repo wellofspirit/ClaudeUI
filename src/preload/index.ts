@@ -279,7 +279,13 @@ const api: ClaudeAPI = {
   reloadPlugin: (id: string) => ipcRenderer.invoke('plugin:reload', id),
   getPluginViews: () => ipcRenderer.invoke('plugin:views'),
   getPluginPreloadPath: () => ipcRenderer.invoke('plugin:preload-path') as Promise<string>,
-  onPluginViewsChanged: onEvent('plugin:views-changed')
+  onPluginViewsChanged: onEvent('plugin:views-changed'),
+
+  // Mockup preview
+  readMockupHtml: (cwd: string, directory: string) => unwrap('mockup:read-html', cwd, directory),
+  watchMockup: (cwd: string, directory: string) => ipcRenderer.invoke('mockup:watch', cwd, directory),
+  unwatchMockup: (cwd: string, directory: string) => ipcRenderer.invoke('mockup:unwatch', cwd, directory),
+  onMockupFileChanged: onEvent('mockup:file-changed')
 }
 
 if (process.contextIsolated) {
