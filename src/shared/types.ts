@@ -374,6 +374,10 @@ interface SessionAPI {
   saveSettings(settings: Record<string, unknown>): Promise<void>
   loadSessionConfig(): Promise<UISessionConfig>
   saveSessionConfig(config: UISessionConfig): Promise<void>
+  /** Permanently delete a session's JSONL + subagent directory from disk */
+  deleteSession(sessionId: string, projectKey: string): Promise<void>
+  /** Permanently delete an entire project directory (all sessions) from disk */
+  deleteProject(projectKey: string): Promise<void>
   loadSlashCommands(): Promise<SlashCommandInfo[]>
   saveSlashCommands(commands: SlashCommandInfo[]): Promise<void>
   scanCustomCommands(cwd: string): Promise<string[]>
@@ -764,6 +768,10 @@ export interface UISessionConfig {
   pinnedSessions?: string[]
   customTitles?: Record<string, string>
   worktreeInfoMap?: Record<string, WorktreeInfo>
+  /** Session IDs the user has chosen to hide from the sidebar */
+  hiddenSessions?: string[]
+  /** Project keys the user has chosen to hide from the sidebar */
+  hiddenProjects?: string[]
 }
 
 export interface SlashCommandInfo {

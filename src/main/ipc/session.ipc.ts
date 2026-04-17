@@ -21,6 +21,7 @@ import { serviceSession } from '../services/service-session'
 import { blockUsageService } from '../services/block-usage'
 import type { ApprovalDecision, ModelInfo, SandboxSettings, ProxySettings, PermissionSuggestion, IpcResult } from '../../shared/types'
 import { logger } from '../services/logger'
+import { deleteSessionFiles, deleteProjectFiles } from '../services/delete-session-files'
 import { startSocksBridge, stopSocksBridge } from '../services/socks-bridge'
 
 /**
@@ -199,6 +200,7 @@ const SESSION_IPC_CHANNELS = [
   'session:set-permission-mode', 'session:set-model', 'session:set-effort',
   'session:get-models', 'session:generate-title', 'session:generate-commit-message',
   'session:write-custom-title', 'session:get-plan-content', 'session:get-session-log-path',
+  'session:delete-session', 'session:delete-project',
   'session:list-directories', 'session:load-history', 'session:load-subagent-history',
   'session:build-subagent-file-map', 'session:load-background-output',
   'session:watch-session', 'session:unwatch-session',
@@ -651,6 +653,14 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     const entry = JSON.stringify({ type: 'custom-title', customTitle: title, sessionId })
     await fs.promises.appendFile(filePath, entry + '\n', { mode: 0o600 })
   })
+
+  ipcMain.handle('session:delete-session', safeHandler(async (_e: unknown, sessionId: string, projectKey: string) => {
+    await deleteSessionFiles(sessionId, projectKey)
+  }))
+
+  ipcMain.handle('session:delete-project', safeHandler(async (_e: unknown, projectKey: string) => {
+    await deleteProjectFiles(projectKey)
+  }))
 
   ipcMain.handle('session:get-plan-content', (_e, routingId: string) => {
     return manager.get(routingId)?.getPlanContent() ?? null

@@ -3,12 +3,7 @@ import { useSessionStore } from '../../stores/session-store'
 import { useShallow } from 'zustand/react/shallow'
 import type { SessionInfo } from '../../../../shared/types'
 import { PermissionsDialog } from '../PermissionsDialog'
-
-/** Convert mouse event coords to zoom-adjusted position for fixed-position menus */
-function contextMenuPosition(e: React.MouseEvent): { x: number; y: number } {
-  const zoom = useSessionStore.getState().settings.uiFontScale
-  return { x: e.clientX / zoom, y: e.clientY / zoom }
-}
+import { useContextMenu } from '../../hooks/useContextMenu'
 
 export const SessionItem = memo(function SessionItem({
   info,
@@ -24,6 +19,10 @@ export const SessionItem = memo(function SessionItem({
   onFinishRename,
   onCancelRename,
   onAutoRename,
+  onHide,
+  onUnhide,
+  onDelete,
+  hidden,
   draggable,
   onDragStart,
   onDragOver,
@@ -43,6 +42,14 @@ export const SessionItem = memo(function SessionItem({
   onFinishRename?: (title: string) => void
   onCancelRename?: () => void
   onAutoRename?: () => void
+  /** Hide this session from the sidebar (persists to config) */
+  onHide?: () => void
+  /** Restore a previously hidden session */
+  onUnhide?: () => void
+  /** Permanently delete the session from disk (opens confirm modal upstream) */
+  onDelete?: () => void
+  /** When true, renders in a dimmed/italic style */
+  hidden?: boolean
   draggable?: boolean
   onDragStart?: (e: React.DragEvent) => void
   onDragOver?: (e: React.DragEvent) => void
@@ -62,10 +69,9 @@ export const SessionItem = memo(function SessionItem({
     })
   )
   const isWorktree = useSessionStore((s) => !!s.worktreeInfoMap[info.sessionId])
-  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null)
+  const menu = useContextMenu()
   const [renameValue, setRenameValue] = useState('')
   const renameRef = useRef<HTMLInputElement>(null)
-  const contextMenuRef = useRef<HTMLDivElement>(null)
   const renameCommittedRef = useRef(false)
   const [permissionsOpen, setPermissionsOpen] = useState(false)
 
@@ -78,23 +84,6 @@ export const SessionItem = memo(function SessionItem({
         : isWatching
           ? 'bg-blue-400'
           : 'bg-text-muted/30'
-
-  const handleContextMenu = (e: React.MouseEvent): void => {
-    e.preventDefault()
-    setContextMenu(contextMenuPosition(e))
-  }
-
-  // Close context menu on outside click
-  useEffect(() => {
-    if (!contextMenu) return
-    const handler = (e: MouseEvent): void => {
-      if (contextMenuRef.current && !contextMenuRef.current.contains(e.target as Node)) {
-        setContextMenu(null)
-      }
-    }
-    document.addEventListener('mousedown', handler)
-    return () => document.removeEventListener('mousedown', handler)
-  }, [contextMenu])
 
   // Focus rename input when entering rename mode
   useEffect(() => {
@@ -120,7 +109,7 @@ export const SessionItem = memo(function SessionItem({
       <div
         onClick={onClick}
         onDoubleClick={onDoubleClick}
-        onContextMenu={handleContextMenu}
+        onContextMenu={menu.open}
         draggable={draggable}
         onDragStart={onDragStart}
         onDragOver={onDragOver}
@@ -130,6 +119,7 @@ export const SessionItem = memo(function SessionItem({
         className={`
           group flex items-center gap-2.5 h-8 rounded-md text-[13px] cursor-default transition-colors
           ${active ? 'text-text-primary bg-bg-tertiary' : 'text-text-secondary hover:text-text-primary hover:bg-bg-hover'}
+          ${hidden ? 'opacity-45 italic' : ''}
         `}
       >
         <span className="shrink-0 w-[14px] h-[14px] flex items-center justify-center">
@@ -212,15 +202,15 @@ export const SessionItem = memo(function SessionItem({
         </span>
       )}
     </div>
-    {contextMenu && (
+    {menu.isOpen && (
       <div
-        ref={contextMenuRef}
+        ref={menu.ref}
         className="fixed z-[9999] py-1 rounded-lg bg-bg-tertiary border border-border shadow-lg grid"
-        style={{ left: contextMenu.x, top: contextMenu.y }}
+        style={menu.style}
       >
         <button
           onClick={() => {
-            setContextMenu(null)
+            menu.close()
             onStartRename?.()
           }}
           className="w-full text-left px-3 py-1.5 text-[13px] text-text-secondary hover:bg-bg-hover hover:text-text-primary transition-colors cursor-default"
@@ -229,7 +219,7 @@ export const SessionItem = memo(function SessionItem({
         </button>
         <button
           onClick={() => {
-            setContextMenu(null)
+            menu.close()
             onAutoRename?.()
           }}
           className="w-full text-left px-3 py-1.5 text-[13px] text-text-secondary hover:bg-bg-hover hover:text-text-primary transition-colors cursor-default"
@@ -238,7 +228,7 @@ export const SessionItem = memo(function SessionItem({
         </button>
         <button
           onClick={() => {
-            setContextMenu(null)
+            menu.close()
             setPermissionsOpen(true)
           }}
           className="w-full text-left px-3 py-1.5 text-[13px] text-text-secondary hover:bg-bg-hover hover:text-text-primary transition-colors cursor-default"
@@ -248,12 +238,39 @@ export const SessionItem = memo(function SessionItem({
         {isSdkActive && (
           <button
             onClick={() => {
-              setContextMenu(null)
+              menu.close()
               window.api.cancelSession(info.sessionId)
             }}
             className="w-full text-left px-3 py-1.5 text-[13px] text-red-400 hover:bg-bg-hover hover:text-red-300 transition-colors cursor-default"
           >
             Disconnect
+          </button>
+        )}
+        {(onHide || onUnhide || onDelete) && (
+          <div className="h-px bg-border my-1" />
+        )}
+        {onHide && !hidden && (
+          <button
+            onClick={() => { menu.close(); onHide() }}
+            className="w-full text-left px-3 py-1.5 text-[13px] text-text-secondary hover:bg-bg-hover hover:text-text-primary transition-colors cursor-default"
+          >
+            Hide session
+          </button>
+        )}
+        {onUnhide && hidden && (
+          <button
+            onClick={() => { menu.close(); onUnhide() }}
+            className="w-full text-left px-3 py-1.5 text-[13px] text-text-secondary hover:bg-bg-hover hover:text-text-primary transition-colors cursor-default"
+          >
+            Unhide session
+          </button>
+        )}
+        {onDelete && (
+          <button
+            onClick={() => { menu.close(); onDelete() }}
+            className="w-full text-left px-3 py-1.5 text-[13px] text-red-400 hover:bg-red-500/15 hover:text-red-300 transition-colors cursor-default"
+          >
+            Delete session...
           </button>
         )}
       </div>

@@ -214,12 +214,29 @@ function saveSettings(settings: AppSettings): void {
   window.api.saveSettings(settings as unknown as Record<string, unknown>)
 }
 
-function saveSessionConfig(recentSessionIds: string[], pinnedSessionIds: string[], customTitles: Record<string, string>, worktreeInfoMap?: Record<string, WorktreeInfo>): void {
+type PersistedSessionFields = {
+  recentSessionIds: string[]
+  pinnedSessionIds: string[]
+  customTitles: Record<string, string>
+  worktreeInfoMap: Record<string, WorktreeInfo>
+  hiddenSessionIds: string[]
+  hiddenProjectKeys: string[]
+}
+
+/**
+ * Persist the sidebar/session config to disk.
+ * Pass the pre-change state + a patch of just the fields that changed — the helper
+ * merges them so unrelated fields are never dropped from the saved file.
+ */
+function saveSessionConfig(state: PersistedSessionFields, patch?: Partial<PersistedSessionFields>): void {
+  const merged: PersistedSessionFields = { ...state, ...patch }
   window.api.saveSessionConfig({
-    recentSessions: recentSessionIds,
-    pinnedSessions: pinnedSessionIds,
-    customTitles: customTitles,
-    ...(worktreeInfoMap !== undefined ? { worktreeInfoMap } : {})
+    recentSessions: merged.recentSessionIds,
+    pinnedSessions: merged.pinnedSessionIds,
+    customTitles: merged.customTitles,
+    worktreeInfoMap: merged.worktreeInfoMap,
+    hiddenSessions: merged.hiddenSessionIds,
+    hiddenProjects: merged.hiddenProjectKeys
   })
 }
 
@@ -295,6 +312,8 @@ export async function hydrateConfigFromDisk(): Promise<void> {
     pinnedSessionIds: sessionConfig.pinnedSessions ?? [],
     customTitles: sessionConfig.customTitles ?? {},
     worktreeInfoMap: sessionConfig.worktreeInfoMap ?? {},
+    hiddenSessionIds: sessionConfig.hiddenSessions ?? [],
+    hiddenProjectKeys: sessionConfig.hiddenProjects ?? [],
     slashCommands: slashCommands ?? []
   })
 }
@@ -509,6 +528,10 @@ interface SessionState {
   recentSessionIds: string[]
   pinnedSessionIds: string[]
   customTitles: Record<string, string>
+  /** Session IDs hidden from the sidebar (user can reveal via Show hidden toggle) */
+  hiddenSessionIds: string[]
+  /** Project keys hidden from the sidebar */
+  hiddenProjectKeys: string[]
 
   // Global (not per-session)
   settings: AppSettings
@@ -544,6 +567,12 @@ interface SessionState {
   pinSession: (routingId: string) => void
   unpinSession: (routingId: string) => void
   reorderPinnedSessions: (ids: string[]) => void
+  hideSession: (sessionId: string) => void
+  unhideSession: (sessionId: string) => void
+  hideProject: (projectKey: string) => void
+  unhideProject: (projectKey: string) => void
+  deleteSession: (sessionId: string, projectKey: string) => Promise<void>
+  deleteProject: (projectKey: string) => Promise<void>
 
   // Per-session actions (all take routingId)
   addMessage: (routingId: string, message: ChatMessage) => void
@@ -585,7 +614,7 @@ interface SessionState {
   updateWatchedSession: (routingId: string, messages: ChatMessage[], taskNotifications: TaskNotification[]) => void
   updateSettings: (partial: Partial<AppSettings>) => void
   applyExternalSettings: (settings: Record<string, unknown>) => void
-  applyExternalSessionConfig: (config: { recentSessions?: string[]; pinnedSessions?: string[]; customTitles?: Record<string, string>; worktreeInfoMap?: Record<string, WorktreeInfo> }) => void
+  applyExternalSessionConfig: (config: { recentSessions?: string[]; pinnedSessions?: string[]; customTitles?: Record<string, string>; worktreeInfoMap?: Record<string, WorktreeInfo>; hiddenSessions?: string[]; hiddenProjects?: string[] }) => void
   applyRemoteSnapshot: (snapshot: import('../../../shared/remote-protocol').FullStateSnapshot) => void
   setPermissionMode: (mode: PermissionMode, routingId?: string) => void
   setEffort: (effort: 'low' | 'medium' | 'high', routingId?: string) => void
@@ -673,6 +702,8 @@ export const useSessionStore = create<SessionState>((set) => ({
   recentSessionIds: [],
   pinnedSessionIds: [],
   customTitles: {},
+  hiddenSessionIds: [],
+  hiddenProjectKeys: [],
   settings: DEFAULT_SETTINGS,
   availableModels: [],
   slashCommands: [],
@@ -692,7 +723,7 @@ export const useSessionStore = create<SessionState>((set) => ({
     set((state) => {
       const cleaned = cleanupEmptySession(state.sessions, state.recentSessionIds, state.activeSessionId)
       if (cleaned.recentSessionIds !== state.recentSessionIds) {
-        saveSessionConfig(cleaned.recentSessionIds, state.pinnedSessionIds, state.customTitles)
+        saveSessionConfig(state, { recentSessionIds: cleaned.recentSessionIds })
       }
       return { activeSessionId: null, activeView: { type: 'chat' } as ActiveView, ...cleaned }
     }),
@@ -701,7 +732,7 @@ export const useSessionStore = create<SessionState>((set) => ({
     set((state) => {
       const cleaned = cleanupEmptySession(state.sessions, state.recentSessionIds, state.activeSessionId)
       if (cleaned.recentSessionIds !== state.recentSessionIds) {
-        saveSessionConfig(cleaned.recentSessionIds, state.pinnedSessionIds, state.customTitles)
+        saveSessionConfig(state, { recentSessionIds: cleaned.recentSessionIds })
       }
       return {
         activeSessionId: routingId,
@@ -714,7 +745,7 @@ export const useSessionStore = create<SessionState>((set) => ({
   createNewSession: (routingId, cwd, switchTo = true) =>
     set((state) => {
       const recentSessionIds = [routingId, ...state.recentSessionIds.filter((id) => id !== routingId)].slice(0, state.settings.maxRecentSessions)
-      saveSessionConfig(recentSessionIds, state.pinnedSessionIds, state.customTitles)
+      saveSessionConfig(state, { recentSessionIds })
       return {
         ...(switchTo ? { activeSessionId: routingId, activeView: { type: 'chat' } as ActiveView } : {}),
         sessions: { ...state.sessions, [routingId]: createEmptySession(cwd) },
@@ -755,14 +786,14 @@ export const useSessionStore = create<SessionState>((set) => ({
       // Don't add pinned sessions to recents — they have their own section
       if (state.pinnedSessionIds.includes(routingId)) return state
       const recentSessionIds = [routingId, ...state.recentSessionIds.filter((id) => id !== routingId)].slice(0, state.settings.maxRecentSessions)
-      saveSessionConfig(recentSessionIds, state.pinnedSessionIds, state.customTitles)
+      saveSessionConfig(state, { recentSessionIds })
       return { recentSessionIds }
     }),
 
   removeRecentSession: (routingId) =>
     set((state) => {
       const recentSessionIds = state.recentSessionIds.filter((id) => id !== routingId)
-      saveSessionConfig(recentSessionIds, state.pinnedSessionIds, state.customTitles)
+      saveSessionConfig(state, { recentSessionIds })
       return { recentSessionIds }
     }),
 
@@ -774,7 +805,7 @@ export const useSessionStore = create<SessionState>((set) => ({
       } else {
         delete customTitles[sessionId]
       }
-      saveSessionConfig(state.recentSessionIds, state.pinnedSessionIds, customTitles)
+      saveSessionConfig(state, { customTitles })
       return { customTitles }
     }),
 
@@ -783,7 +814,7 @@ export const useSessionStore = create<SessionState>((set) => ({
       if (state.pinnedSessionIds.includes(routingId)) return state
       const pinnedSessionIds = [...state.pinnedSessionIds, routingId]
       const recentSessionIds = state.recentSessionIds.filter((id) => id !== routingId)
-      saveSessionConfig(recentSessionIds, pinnedSessionIds, state.customTitles)
+      saveSessionConfig(state, { pinnedSessionIds, recentSessionIds })
       return { pinnedSessionIds, recentSessionIds }
     }),
 
@@ -791,15 +822,84 @@ export const useSessionStore = create<SessionState>((set) => ({
     set((state) => {
       const pinnedSessionIds = state.pinnedSessionIds.filter((id) => id !== routingId)
       const recentSessionIds = [routingId, ...state.recentSessionIds.filter((id) => id !== routingId)].slice(0, state.settings.maxRecentSessions)
-      saveSessionConfig(recentSessionIds, pinnedSessionIds, state.customTitles)
+      saveSessionConfig(state, { pinnedSessionIds, recentSessionIds })
       return { pinnedSessionIds, recentSessionIds }
     }),
 
   reorderPinnedSessions: (ids) =>
     set((state) => {
-      saveSessionConfig(state.recentSessionIds, ids, state.customTitles)
+      saveSessionConfig(state, { pinnedSessionIds: ids })
       return { pinnedSessionIds: ids }
     }),
+
+  hideSession: (sessionId) =>
+    set((state) => {
+      if (state.hiddenSessionIds.includes(sessionId)) return state
+      const hiddenSessionIds = [...state.hiddenSessionIds, sessionId]
+      saveSessionConfig(state, { hiddenSessionIds })
+      return { hiddenSessionIds }
+    }),
+
+  unhideSession: (sessionId) =>
+    set((state) => {
+      if (!state.hiddenSessionIds.includes(sessionId)) return state
+      const hiddenSessionIds = state.hiddenSessionIds.filter((id) => id !== sessionId)
+      saveSessionConfig(state, { hiddenSessionIds })
+      return { hiddenSessionIds }
+    }),
+
+  hideProject: (projectKey) =>
+    set((state) => {
+      if (!projectKey || state.hiddenProjectKeys.includes(projectKey)) return state
+      const hiddenProjectKeys = [...state.hiddenProjectKeys, projectKey]
+      saveSessionConfig(state, { hiddenProjectKeys })
+      return { hiddenProjectKeys }
+    }),
+
+  unhideProject: (projectKey) =>
+    set((state) => {
+      if (!state.hiddenProjectKeys.includes(projectKey)) return state
+      const hiddenProjectKeys = state.hiddenProjectKeys.filter((k) => k !== projectKey)
+      saveSessionConfig(state, { hiddenProjectKeys })
+      return { hiddenProjectKeys }
+    }),
+
+  deleteSession: async (sessionId, projectKey) => {
+    await window.api.deleteSession(sessionId, projectKey)
+    // Also scrub any references to this session from persisted config
+    useSessionStore.setState((state) => {
+      const recentSessionIds = state.recentSessionIds.filter((id) => id !== sessionId)
+      const pinnedSessionIds = state.pinnedSessionIds.filter((id) => id !== sessionId)
+      const hiddenSessionIds = state.hiddenSessionIds.filter((id) => id !== sessionId)
+      const customTitles = { ...state.customTitles }
+      delete customTitles[sessionId]
+      const worktreeInfoMap = { ...state.worktreeInfoMap }
+      delete worktreeInfoMap[sessionId]
+      saveSessionConfig(state, { recentSessionIds, pinnedSessionIds, hiddenSessionIds, customTitles, worktreeInfoMap })
+      return { recentSessionIds, pinnedSessionIds, hiddenSessionIds, customTitles, worktreeInfoMap }
+    })
+  },
+
+  deleteProject: async (projectKey) => {
+    await window.api.deleteProject(projectKey)
+    // Collect all session IDs in this project to scrub from config
+    useSessionStore.setState((state) => {
+      const group = state.directories.find((g) => g.projectKey === projectKey)
+      const projectSessionIds = new Set(group?.sessions.map((s) => s.sessionId) ?? [])
+      const recentSessionIds = state.recentSessionIds.filter((id) => !projectSessionIds.has(id))
+      const pinnedSessionIds = state.pinnedSessionIds.filter((id) => !projectSessionIds.has(id))
+      const hiddenSessionIds = state.hiddenSessionIds.filter((id) => !projectSessionIds.has(id))
+      const hiddenProjectKeys = state.hiddenProjectKeys.filter((k) => k !== projectKey)
+      const customTitles = { ...state.customTitles }
+      const worktreeInfoMap = { ...state.worktreeInfoMap }
+      for (const id of projectSessionIds) {
+        delete customTitles[id]
+        delete worktreeInfoMap[id]
+      }
+      saveSessionConfig(state, { recentSessionIds, pinnedSessionIds, hiddenSessionIds, hiddenProjectKeys, customTitles, worktreeInfoMap })
+      return { recentSessionIds, pinnedSessionIds, hiddenSessionIds, hiddenProjectKeys, customTitles, worktreeInfoMap }
+    })
+  },
 
   addMessage: (routingId, message) =>
     set((state) => {
@@ -850,7 +950,7 @@ export const useSessionStore = create<SessionState>((set) => ({
       if (!session) return state
 
       const recentSessionIds = [routingId, ...state.recentSessionIds.filter((rid) => rid !== routingId)].slice(0, state.settings.maxRecentSessions)
-      saveSessionConfig(recentSessionIds, state.pinnedSessionIds, state.customTitles)
+      saveSessionConfig(state, { recentSessionIds })
 
       const content: ContentBlock[] = []
       if (attachments && attachments.length > 0) {
@@ -1333,7 +1433,9 @@ export const useSessionStore = create<SessionState>((set) => ({
       recentSessionIds: config.recentSessions ?? [],
       pinnedSessionIds: config.pinnedSessions ?? [],
       customTitles: config.customTitles ?? {},
-      worktreeInfoMap: config.worktreeInfoMap ?? {}
+      worktreeInfoMap: config.worktreeInfoMap ?? {},
+      hiddenSessionIds: config.hiddenSessions ?? [],
+      hiddenProjectKeys: config.hiddenProjects ?? []
     })),
 
   // Apply a full state snapshot from the remote server (initial sync)
@@ -1497,6 +1599,7 @@ export const useSessionStore = create<SessionState>((set) => ({
       const activeSessionId = state.activeSessionId === oldId ? newId : state.activeSessionId
       const recentSessionIds = state.recentSessionIds.map((id) => (id === oldId ? newId : id))
       const pinnedSessionIds = state.pinnedSessionIds.map((id) => (id === oldId ? newId : id))
+      const hiddenSessionIds = state.hiddenSessionIds.map((id) => (id === oldId ? newId : id))
       const customTitles = { ...state.customTitles }
       if (customTitles[oldId]) {
         customTitles[newId] = customTitles[oldId]
@@ -1507,8 +1610,8 @@ export const useSessionStore = create<SessionState>((set) => ({
         worktreeInfoMap[newId] = worktreeInfoMap[oldId]
         delete worktreeInfoMap[oldId]
       }
-      saveSessionConfig(recentSessionIds, pinnedSessionIds, customTitles, worktreeInfoMap)
-      return { sessions, activeSessionId, recentSessionIds, pinnedSessionIds, customTitles, worktreeInfoMap }
+      saveSessionConfig(state, { recentSessionIds, pinnedSessionIds, hiddenSessionIds, customTitles, worktreeInfoMap })
+      return { sessions, activeSessionId, recentSessionIds, pinnedSessionIds, hiddenSessionIds, customTitles, worktreeInfoMap }
     })
   },
 
@@ -1608,7 +1711,7 @@ export const useSessionStore = create<SessionState>((set) => ({
       } else {
         delete worktreeInfoMap[routingId]
       }
-      saveSessionConfig(state.recentSessionIds, state.pinnedSessionIds, state.customTitles, worktreeInfoMap)
+      saveSessionConfig(state, { worktreeInfoMap })
       return {
         worktreeInfoMap,
         sessions: updateSession(state.sessions, routingId, (s) => ({
@@ -1623,7 +1726,7 @@ export const useSessionStore = create<SessionState>((set) => ({
     set((state) => {
       const worktreeInfoMap = { ...state.worktreeInfoMap }
       delete worktreeInfoMap[routingId]
-      saveSessionConfig(state.recentSessionIds, state.pinnedSessionIds, state.customTitles, worktreeInfoMap)
+      saveSessionConfig(state, { worktreeInfoMap })
       return {
         worktreeInfoMap,
         sessions: updateSession(state.sessions, routingId, () => ({ worktreeInfo: null }))

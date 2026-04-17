@@ -1,13 +1,7 @@
-import { useState, useEffect, useRef, useCallback, memo } from 'react'
-import { useSessionStore } from '../../stores/session-store'
+import { useEffect, useRef, useCallback, memo } from 'react'
 import type { DirectoryGroup, SessionInfo } from '../../../../shared/types'
 import { SessionItem } from './SessionItem'
-
-/** Convert mouse event coords to zoom-adjusted position for fixed-position menus */
-function contextMenuPosition(e: React.MouseEvent): { x: number; y: number } {
-  const zoom = useSessionStore.getState().settings.uiFontScale
-  return { x: e.clientX / zoom, y: e.clientY / zoom }
-}
+import { useContextMenu } from '../../hooks/useContextMenu'
 
 export const DirectoryItem = memo(function DirectoryItem({
   group,
@@ -24,7 +18,16 @@ export const DirectoryItem = memo(function DirectoryItem({
   onStartRename,
   onFinishRename,
   onAutoRename,
-  onCancelRename
+  onCancelRename,
+  onHide,
+  onUnhide,
+  onDelete,
+  hidden,
+  hiddenSessionIds,
+  showHidden,
+  onHideSession,
+  onUnhideSession,
+  onDeleteSession
 }: {
   group: DirectoryGroup
   expanded: boolean
@@ -41,9 +44,23 @@ export const DirectoryItem = memo(function DirectoryItem({
   onFinishRename: (id: string, title: string) => void
   onAutoRename: (id: string) => void
   onCancelRename: () => void
+  /** Hide this project from the sidebar */
+  onHide?: () => void
+  /** Unhide a previously hidden project */
+  onUnhide?: () => void
+  /** Permanently delete the project directory */
+  onDelete?: () => void
+  /** Project is currently hidden — rendered dimmed */
+  hidden?: boolean
+  /** Hidden session IDs (for per-row styling) */
+  hiddenSessionIds?: Set<string>
+  /** When true, hidden sessions still render (dimmed) */
+  showHidden?: boolean
+  onHideSession?: (info: SessionInfo) => void
+  onUnhideSession?: (info: SessionInfo) => void
+  onDeleteSession?: (info: SessionInfo) => void
 }): React.JSX.Element {
-  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null)
-  const contextMenuRef = useRef<HTMLDivElement>(null)
+  const menu = useContextMenu()
   const clickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const handleClick = useCallback(() => {
@@ -64,22 +81,6 @@ export const DirectoryItem = memo(function DirectoryItem({
     onDoubleClick()
   }, [onDoubleClick])
 
-  const handleContextMenu = (e: React.MouseEvent): void => {
-    e.preventDefault()
-    setContextMenu(contextMenuPosition(e))
-  }
-
-  useEffect(() => {
-    if (!contextMenu) return
-    const handler = (e: MouseEvent): void => {
-      if (contextMenuRef.current && !contextMenuRef.current.contains(e.target as Node)) {
-        setContextMenu(null)
-      }
-    }
-    document.addEventListener('mousedown', handler)
-    return () => document.removeEventListener('mousedown', handler)
-  }, [contextMenu])
-
   // Cleanup timer on unmount
   useEffect(() => {
     return () => {
@@ -92,9 +93,9 @@ export const DirectoryItem = memo(function DirectoryItem({
       <div
         onClick={handleClick}
         onDoubleClick={handleDoubleClick}
-        onContextMenu={handleContextMenu}
+        onContextMenu={menu.open}
         style={{ padding: '0 5px' }}
-        className="flex items-center gap-2.5 h-8 rounded-md text-[13px] cursor-default transition-colors text-text-secondary hover:text-text-primary hover:bg-bg-hover"
+        className={`flex items-center gap-2.5 h-8 rounded-md text-[13px] cursor-default transition-colors text-text-secondary hover:text-text-primary hover:bg-bg-hover ${hidden ? 'opacity-45 italic' : ''}`}
       >
         <span className="shrink-0 text-text-muted">
           <svg
@@ -115,34 +116,43 @@ export const DirectoryItem = memo(function DirectoryItem({
       </div>
       {expanded && (
         <div className="ml-3">
-          {group.sessions.map((info) => (
-            <SessionItem
-              key={info.sessionId}
-              info={info}
-              active={info.sessionId === activeSessionId}
-              onClick={() => onSessionClick(info)}
-              onDoubleClick={() => onSessionDoubleClick(info)}
-              onToggleWatch={() => onToggleWatch(info)}
-              isRenaming={renamingKey === `${renamePrefix}:${info.sessionId}`}
-              onStartRename={() => onStartRename(`${renamePrefix}:${info.sessionId}`)}
-              onFinishRename={(title) => onFinishRename(info.sessionId, title)}
-              onAutoRename={() => onAutoRename(info.sessionId)}
-              onCancelRename={onCancelRename}
-            />
-          ))}
+          {group.sessions
+            .filter((info) => showHidden || !hiddenSessionIds?.has(info.sessionId))
+            .map((info) => {
+              const sessionHidden = !!hiddenSessionIds?.has(info.sessionId)
+              return (
+                <SessionItem
+                  key={info.sessionId}
+                  info={info}
+                  active={info.sessionId === activeSessionId}
+                  onClick={() => onSessionClick(info)}
+                  onDoubleClick={() => onSessionDoubleClick(info)}
+                  onToggleWatch={() => onToggleWatch(info)}
+                  isRenaming={renamingKey === `${renamePrefix}:${info.sessionId}`}
+                  onStartRename={() => onStartRename(`${renamePrefix}:${info.sessionId}`)}
+                  onFinishRename={(title) => onFinishRename(info.sessionId, title)}
+                  onAutoRename={() => onAutoRename(info.sessionId)}
+                  onCancelRename={onCancelRename}
+                  hidden={sessionHidden}
+                  onHide={!sessionHidden && onHideSession && info.projectKey ? () => onHideSession(info) : undefined}
+                  onUnhide={sessionHidden && onUnhideSession ? () => onUnhideSession(info) : undefined}
+                  onDelete={onDeleteSession && info.projectKey ? () => onDeleteSession(info) : undefined}
+                />
+              )
+            })}
         </div>
       )}
 
       {/* Context menu */}
-      {contextMenu && (
+      {menu.isOpen && (
         <div
-          ref={contextMenuRef}
+          ref={menu.ref}
           className="fixed z-50 min-w-[160px] py-1 rounded-lg bg-bg-tertiary border border-border shadow-lg"
-          style={{ left: contextMenu.x, top: contextMenu.y }}
+          style={menu.style}
         >
           {onViewWorktrees && (
             <button
-              onClick={() => { setContextMenu(null); onViewWorktrees() }}
+              onClick={() => { menu.close(); onViewWorktrees() }}
               className="w-full flex items-center gap-2 px-3 py-1.5 text-[12px] text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-colors text-left cursor-default"
             >
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0 text-text-muted">
@@ -157,7 +167,7 @@ export const DirectoryItem = memo(function DirectoryItem({
           )}
           <button
             onClick={() => {
-              setContextMenu(null)
+              menu.close()
               onDoubleClick()
             }}
             className="w-full flex items-center gap-2 px-3 py-1.5 text-[12px] text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-colors text-left cursor-default"
@@ -168,6 +178,31 @@ export const DirectoryItem = memo(function DirectoryItem({
             </svg>
             New session here
           </button>
+          {(onHide || onUnhide || onDelete) && <div className="h-px bg-border my-1" />}
+          {onHide && !hidden && (
+            <button
+              onClick={() => { menu.close(); onHide() }}
+              className="w-full text-left px-3 py-1.5 text-[12px] text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
+            >
+              Hide project
+            </button>
+          )}
+          {onUnhide && hidden && (
+            <button
+              onClick={() => { menu.close(); onUnhide() }}
+              className="w-full text-left px-3 py-1.5 text-[12px] text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
+            >
+              Unhide project
+            </button>
+          )}
+          {onDelete && (
+            <button
+              onClick={() => { menu.close(); onDelete() }}
+              className="w-full text-left px-3 py-1.5 text-[12px] text-red-400 hover:bg-red-500/15 hover:text-red-300 transition-colors cursor-default"
+            >
+              Delete project...
+            </button>
+          )}
         </div>
       )}
     </div>
