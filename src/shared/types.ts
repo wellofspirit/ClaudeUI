@@ -273,6 +273,10 @@ export interface ModelInfo {
   value: string
   displayName: string
   description: string
+  /** Capability flags surfaced by the SDK's `supportedModels()`. Authoritative. */
+  supportsEffort?: boolean
+  supportedEffortLevels?: ('low' | 'medium' | 'high' | 'xhigh' | 'max')[]
+  supportsAdaptiveThinking?: boolean
 }
 
 export interface SessionInfo {
@@ -303,7 +307,7 @@ export interface DirectoryGroup {
 interface SessionAPI {
   platform: string
   pickFolder(): Promise<string | null>
-  createSession(routingId: string, cwd: string, effort?: string, resumeSessionId?: string, permissionMode?: string, model?: string): Promise<void>
+  createSession(routingId: string, cwd: string, effort?: string, resumeSessionId?: string, permissionMode?: string, model?: string, thinkingMode?: string): Promise<void>
   rekeySession(oldId: string, newId: string): Promise<void>
   sendPrompt(routingId: string, prompt: string, attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>): Promise<void>
   cancelSession(routingId: string): Promise<void>
@@ -348,6 +352,7 @@ interface SessionAPI {
   setPermissionMode(routingId: string, mode: string): Promise<void>
   setModel(routingId: string, model: string): Promise<void>
   setEffort(routingId: string, effort: string): Promise<void>
+  setThinkingMode(routingId: string, mode: string): Promise<void>
   getModels(): Promise<ModelInfo[]>
   generateTitle(conversationText: string): Promise<string | null>
   generateCommitMessage(diff: string): Promise<string | null>
@@ -374,6 +379,10 @@ interface SessionAPI {
   saveSettings(settings: Record<string, unknown>): Promise<void>
   loadSessionConfig(): Promise<UISessionConfig>
   saveSessionConfig(config: UISessionConfig): Promise<void>
+  /** Permanently delete a session's JSONL + subagent directory from disk */
+  deleteSession(sessionId: string, projectKey: string): Promise<void>
+  /** Permanently delete an entire project directory (all sessions) from disk */
+  deleteProject(projectKey: string): Promise<void>
   loadSlashCommands(): Promise<SlashCommandInfo[]>
   saveSlashCommands(commands: SlashCommandInfo[]): Promise<void>
   scanCustomCommands(cwd: string): Promise<string[]>
@@ -706,6 +715,7 @@ export interface Automation {
   permissions: { allow: string[]; deny: string[] }
   model?: string
   effort?: string
+  permissionMode?: 'default' | 'auto'
   enabled: boolean
   lastRunAt: number | null
   lastRunStatus: 'success' | 'error' | null
@@ -763,6 +773,10 @@ export interface UISessionConfig {
   pinnedSessions?: string[]
   customTitles?: Record<string, string>
   worktreeInfoMap?: Record<string, WorktreeInfo>
+  /** Session IDs the user has chosen to hide from the sidebar */
+  hiddenSessions?: string[]
+  /** Project keys the user has chosen to hide from the sidebar */
+  hiddenProjects?: string[]
 }
 
 export interface SlashCommandInfo {
@@ -1010,4 +1024,10 @@ interface PluginAPI {
   getPluginViews(): Promise<PluginViewWithOwner[]>
   getPluginPreloadPath(): Promise<string>
   onPluginViewsChanged(cb: (views: PluginViewWithOwner[]) => void): () => void
+
+  // Mockup preview
+  readMockupHtml(cwd: string, directory: string): Promise<string>
+  watchMockup(cwd: string, directory: string): Promise<void>
+  unwatchMockup(cwd: string, directory: string): Promise<void>
+  onMockupFileChanged(cb: (directory: string) => void): () => void
 }

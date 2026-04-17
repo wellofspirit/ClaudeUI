@@ -76,7 +76,7 @@ console.log(`  Query class: ${queryClass}`)
 console.log('\n--- Locating session_id function ---')
 
 const sessionIdRe = new RegExp(
-  `yield\\{type:"stream_event",event:(${V})\\.event,session_id:(${V})\\(\\),parent_tool_use_id:null,uuid:${uuidFn.replace(/\$/g, '\\$')}\\(\\)\\}`
+  `yield\\{type:"stream_event",event:(${V})\\.event,session_id:(${V})\\(\\),parent_tool_use_id:null,uuid:${uuidFn.replace(/\$/g, '\\$')}\\(\\)`
 )
 const sessionMatch = sessionIdRe.exec(src)
 if (!sessionMatch) {

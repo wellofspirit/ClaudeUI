@@ -394,16 +394,13 @@ function ServerDetail({
     setActionLoading(server.name)
     try {
       const enable = server.status === 'disabled' || server.status === 'not_started'
-      console.log(`[McpDialog] toggle ${server.name}: status=${server.status} → enable=${enable}`)
       if (routingId) {
         // Session active — use SDK path (updates config + restarts subprocess)
         await window.api.mcpToggleServer(routingId, server.name, enable)
-        console.log(`[McpDialog] toggle ${server.name}: SDK IPC call completed`)
         refreshAfterAction()
       } else if (cwd) {
         // No session — write directly to ~/.claude.json
         await window.api.mcpToggleDisabled(cwd, server.name, enable)
-        console.log(`[McpDialog] toggle ${server.name}: config-only toggle completed`)
         onRefresh()
       }
     } catch (err) {
@@ -416,7 +413,6 @@ function ServerDetail({
     if (!routingId) return
     setActionLoading(server.name)
     try {
-      console.log(`[McpDialog] reconnect ${server.name}`)
       await window.api.mcpReconnectServer(routingId, server.name)
       refreshAfterAction()
     } catch (err) {
@@ -651,7 +647,6 @@ function EmptyDetail(): React.JSX.Element {
 // ---------------------------------------------------------------------------
 
 export function McpDialog({ open, onClose, cwd, routingId }: McpDialogProps): React.JSX.Element | null {
-  console.log('[McpDialog] render', { open, cwd, routingId })
   const [servers, setServers] = useState<McpServerInfo[]>([])
   const [loading, setLoading] = useState(false)
   const [selected, setSelected] = useState<string | null>(null)
@@ -709,7 +704,6 @@ export function McpDialog({ open, onClose, cwd, routingId }: McpDialogProps): Re
     if (!routingId) return null
     try {
       const raw = await window.api.mcpServerStatus(routingId)
-      console.log('[McpDialog] SDK mcpServerStatus raw:', JSON.stringify(raw, null, 2))
       if (!raw || !Array.isArray(raw) || raw.length === 0) return null
       // Normalize SDK response — the SDK may return objects with different field names
       // or shapes than our McpServerInfo. Map them defensively.
@@ -722,7 +716,6 @@ export function McpDialog({ open, onClose, cwd, routingId }: McpDialogProps): Re
         scope: entry.scope as McpServerScope | undefined,
         tools: (entry.tools ?? []) as McpServerInfo['tools'],
       })).filter((s) => s.name) // drop entries without a name
-      console.log('[McpDialog] SDK normalized:', JSON.stringify(result.map(s => ({ name: s.name, status: s.status, tools: s.tools?.length })), null, 2))
       return result.length > 0 ? result : null
     } catch (err) {
       console.error('[McpDialog] SDK mcpServerStatus error:', err)
@@ -736,11 +729,9 @@ export function McpDialog({ open, onClose, cwd, routingId }: McpDialogProps): Re
 
     // Step 1: Load static config from files
     const fromConfig = await loadFromConfig()
-    console.log('[McpDialog] fromConfig:', fromConfig.map(s => s.name))
 
     // Step 2: Try to get live status from SDK
     const fromSdk = await loadFromSdk()
-    console.log('[McpDialog] fromSdk:', fromSdk?.map(s => ({ name: s.name, status: s.status })) ?? null)
 
     if (fromSdk && fromSdk.length > 0) {
       // SDK returned live data — merge with config for scope/config info
@@ -768,9 +759,7 @@ export function McpDialog({ open, onClose, cwd, routingId }: McpDialogProps): Re
 
   // Load on open
   useEffect(() => {
-    console.log('[McpDialog] useEffect fired', { open, routingId })
     if (!open) return
-    console.log('[McpDialog] calling refreshServers...')
     setLoading(true)
     refreshServers().catch(err => console.error('[McpDialog] refreshServers error:', err)).finally(() => setLoading(false))
   // eslint-disable-next-line react-hooks/exhaustive-deps

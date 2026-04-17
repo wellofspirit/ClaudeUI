@@ -29,8 +29,8 @@ async function unwrap<T>(channel: string, ...args: unknown[]): Promise<T> {
 const api: ClaudeAPI = {
   platform: process.platform,
   pickFolder: () => ipcRenderer.invoke('session:pick-folder'),
-  createSession: (routingId: string, cwd: string, effort?: string, resumeSessionId?: string, permissionMode?: string, model?: string) =>
-    ipcRenderer.invoke('session:create', routingId, cwd, effort, resumeSessionId, permissionMode, model),
+  createSession: (routingId: string, cwd: string, effort?: string, resumeSessionId?: string, permissionMode?: string, model?: string, thinkingMode?: string) =>
+    ipcRenderer.invoke('session:create', routingId, cwd, effort, resumeSessionId, permissionMode, model, thinkingMode),
   rekeySession: (oldId: string, newId: string) =>
     ipcRenderer.invoke('session:rekey', oldId, newId),
   sendPrompt: (routingId: string, prompt: string, attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>) =>
@@ -121,6 +121,8 @@ const api: ClaudeAPI = {
     ipcRenderer.invoke('session:set-model', routingId, model),
   setEffort: (routingId: string, effort: string) =>
     ipcRenderer.invoke('session:set-effort', routingId, effort),
+  setThinkingMode: (routingId: string, mode: string) =>
+    ipcRenderer.invoke('session:set-thinking-mode', routingId, mode),
   getModels: () => ipcRenderer.invoke('session:get-models'),
   generateTitle: (conversationText: string) =>
     ipcRenderer.invoke('session:generate-title', conversationText),
@@ -192,6 +194,10 @@ const api: ClaudeAPI = {
   saveSettings: (settings) => ipcRenderer.invoke('config:save-settings', settings),
   loadSessionConfig: () => ipcRenderer.invoke('config:load-sessions'),
   saveSessionConfig: (config) => ipcRenderer.invoke('config:save-sessions', config),
+  deleteSession: (sessionId: string, projectKey: string) =>
+    unwrap<void>('session:delete-session', sessionId, projectKey),
+  deleteProject: (projectKey: string) =>
+    unwrap<void>('session:delete-project', projectKey),
   loadSlashCommands: () => ipcRenderer.invoke('config:load-slash-commands'),
   saveSlashCommands: (commands) => ipcRenderer.invoke('config:save-slash-commands', commands),
   scanCustomCommands: (cwd: string) => ipcRenderer.invoke('config:scan-custom-commands', cwd),
@@ -279,7 +285,13 @@ const api: ClaudeAPI = {
   reloadPlugin: (id: string) => ipcRenderer.invoke('plugin:reload', id),
   getPluginViews: () => ipcRenderer.invoke('plugin:views'),
   getPluginPreloadPath: () => ipcRenderer.invoke('plugin:preload-path') as Promise<string>,
-  onPluginViewsChanged: onEvent('plugin:views-changed')
+  onPluginViewsChanged: onEvent('plugin:views-changed'),
+
+  // Mockup preview
+  readMockupHtml: (cwd: string, directory: string) => unwrap('mockup:read-html', cwd, directory),
+  watchMockup: (cwd: string, directory: string) => ipcRenderer.invoke('mockup:watch', cwd, directory),
+  unwatchMockup: (cwd: string, directory: string) => ipcRenderer.invoke('mockup:unwatch', cwd, directory),
+  onMockupFileChanged: onEvent('mockup:file-changed')
 }
 
 if (process.contextIsolated) {

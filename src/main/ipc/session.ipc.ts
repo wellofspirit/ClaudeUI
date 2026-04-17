@@ -21,6 +21,7 @@ import { serviceSession } from '../services/service-session'
 import { blockUsageService } from '../services/block-usage'
 import type { ApprovalDecision, ModelInfo, SandboxSettings, ProxySettings, PermissionSuggestion, IpcResult } from '../../shared/types'
 import { logger } from '../services/logger'
+import { deleteSessionFiles, deleteProjectFiles } from '../services/delete-session-files'
 import { startSocksBridge, stopSocksBridge } from '../services/socks-bridge'
 
 /**
@@ -199,6 +200,7 @@ const SESSION_IPC_CHANNELS = [
   'session:set-permission-mode', 'session:set-model', 'session:set-effort',
   'session:get-models', 'session:generate-title', 'session:generate-commit-message',
   'session:write-custom-title', 'session:get-plan-content', 'session:get-session-log-path',
+  'session:delete-session', 'session:delete-project',
   'session:list-directories', 'session:load-history', 'session:load-subagent-history',
   'session:build-subagent-file-map', 'session:load-background-output',
   'session:watch-session', 'session:unwatch-session',
@@ -501,11 +503,11 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
 
   ipcMain.handle(
     'session:create',
-    async (_event, routingId: string, cwd: string, effort?: string, resumeSessionId?: string, permissionMode?: string, model?: string) => {
+    async (_event, routingId: string, cwd: string, effort?: string, resumeSessionId?: string, permissionMode?: string, model?: string, thinkingMode?: string) => {
       const settings = loadSettings() as Record<string, unknown>
       const sandboxConfig = (settings.sandbox as SandboxSettings) || undefined
       await applyProxyEnv((settings.proxy as ProxySettings) || undefined)
-      manager.create(routingId, win, cwd, effort, resumeSessionId, permissionMode, model, sandboxConfig)
+      manager.create(routingId, win, cwd, effort, resumeSessionId, permissionMode, model, sandboxConfig, thinkingMode)
       // Notify all extra windows (remote bridge) that a session was created
       for (const w of ClaudeSession.getExtraWindows()) {
         if (!w.isDestroyed()) w.webContents.send('session:created', routingId, { cwd, resumeSessionId })
@@ -634,6 +636,10 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     manager.get(routingId)?.setEffort(effort)
   })
 
+  ipcMain.handle('session:set-thinking-mode', (_e, routingId: string, mode: string) => {
+    manager.get(routingId)?.setThinkingMode(mode)
+  })
+
   ipcMain.handle('session:get-models', async () => {
     return await fetchModels()
   })
@@ -651,6 +657,14 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     const entry = JSON.stringify({ type: 'custom-title', customTitle: title, sessionId })
     await fs.promises.appendFile(filePath, entry + '\n', { mode: 0o600 })
   })
+
+  ipcMain.handle('session:delete-session', safeHandler(async (_e: unknown, sessionId: string, projectKey: string) => {
+    await deleteSessionFiles(sessionId, projectKey)
+  }))
+
+  ipcMain.handle('session:delete-project', safeHandler(async (_e: unknown, projectKey: string) => {
+    await deleteProjectFiles(projectKey)
+  }))
 
   ipcMain.handle('session:get-plan-content', (_e, routingId: string) => {
     return manager.get(routingId)?.getPlanContent() ?? null
@@ -1190,6 +1204,47 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
 
   ipcMain.handle('usage:fetch-block', async () => {
     return blockUsageService.getData() ?? (await blockUsageService.recalculate())
+  })
+
+  // Mockup preview — read HTML from mockup directory
+  ipcMain.handle('mockup:read-html', safeHandler(async (_e: unknown, cwd: string, directory: string) => {
+    const htmlPath = path.join(cwd, '.claude', 'ui', 'mockups', directory, 'index.html')
+    return fs.promises.readFile(htmlPath, 'utf-8')
+  }))
+
+  // Mockup file watcher — watches a mockup directory for changes
+  const mockupWatchers = new Map<string, { watcher: fs.FSWatcher; debounceTimer: ReturnType<typeof setTimeout> | null }>()
+
+  ipcMain.handle('mockup:watch', (_e: unknown, cwd: string, directory: string) => {
+    const key = `${cwd}:${directory}`
+    if (mockupWatchers.has(key)) return // already watching
+
+    const dirPath = path.join(cwd, '.claude', 'ui', 'mockups', directory)
+    if (!fs.existsSync(dirPath)) return
+
+    const entry = { watcher: null! as fs.FSWatcher, debounceTimer: null as ReturnType<typeof setTimeout> | null }
+
+    entry.watcher = fs.watch(dirPath, { recursive: false }, (_event, filename) => {
+      if (!filename) return
+      if (entry.debounceTimer) clearTimeout(entry.debounceTimer)
+      entry.debounceTimer = setTimeout(() => {
+        if (!win.isDestroyed()) {
+          win.webContents.send('mockup:file-changed', directory)
+        }
+      }, 200)
+    })
+
+    mockupWatchers.set(key, entry)
+  })
+
+  ipcMain.handle('mockup:unwatch', (_e: unknown, cwd: string, directory: string) => {
+    const key = `${cwd}:${directory}`
+    const entry = mockupWatchers.get(key)
+    if (entry) {
+      entry.watcher.close()
+      if (entry.debounceTimer) clearTimeout(entry.debounceTimer)
+      mockupWatchers.delete(key)
+    }
   })
 
   return manager

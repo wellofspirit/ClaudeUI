@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { isAutomationDirty, SCHEDULE_PRESETS, EFFORT_LEVELS, PERMISSION_TEMPLATES } from '../utils'
+import { isAutomationDirty, SCHEDULE_PRESETS, EFFORT_LEVELS, PERMISSION_TEMPLATES, PERMISSION_MODES } from '../utils'
 import type { Automation } from '../../../../../../shared/types'
 
 function baseAutomation(): Automation {
@@ -25,6 +25,7 @@ describe('isAutomationDirty', () => {
     expect(isAutomationDirty({
       name: auto.name, prompt: auto.prompt, cwd: auto.cwd,
       schedule: auto.schedule, model: auto.model || '', effort: auto.effort || 'medium',
+      permissionMode: auto.permissionMode || 'auto',
       allowRules: auto.permissions.allow, denyRules: auto.permissions.deny
     }, auto)).toBe(false)
   })
@@ -34,6 +35,7 @@ describe('isAutomationDirty', () => {
     expect(isAutomationDirty({
       name: 'Changed', prompt: auto.prompt, cwd: auto.cwd,
       schedule: auto.schedule, model: auto.model || '', effort: auto.effort || 'medium',
+      permissionMode: auto.permissionMode || 'auto',
       allowRules: auto.permissions.allow, denyRules: auto.permissions.deny
     }, auto)).toBe(true)
   })
@@ -44,6 +46,7 @@ describe('isAutomationDirty', () => {
       name: auto.name, prompt: auto.prompt, cwd: auto.cwd,
       schedule: { type: 'cron', cronExpression: '0 * * * *' },
       model: auto.model || '', effort: auto.effort || 'medium',
+      permissionMode: auto.permissionMode || 'auto',
       allowRules: auto.permissions.allow, denyRules: auto.permissions.deny
     }, auto)).toBe(true)
   })
@@ -53,6 +56,7 @@ describe('isAutomationDirty', () => {
     expect(isAutomationDirty({
       name: auto.name, prompt: auto.prompt, cwd: auto.cwd,
       schedule: auto.schedule, model: auto.model || '', effort: auto.effort || 'medium',
+      permissionMode: auto.permissionMode || 'auto',
       allowRules: ['Read', 'Write'], denyRules: auto.permissions.deny
     }, auto)).toBe(true)
   })
@@ -62,6 +66,27 @@ describe('isAutomationDirty', () => {
     expect(isAutomationDirty({
       name: auto.name, prompt: auto.prompt, cwd: auto.cwd,
       schedule: auto.schedule, model: '', effort: auto.effort || 'medium',
+      permissionMode: auto.permissionMode || 'auto',
+      allowRules: auto.permissions.allow, denyRules: auto.permissions.deny
+    }, auto)).toBe(false)
+  })
+
+  it('detects permissionMode change', () => {
+    const auto = { ...baseAutomation(), permissionMode: 'auto' as const }
+    expect(isAutomationDirty({
+      name: auto.name, prompt: auto.prompt, cwd: auto.cwd,
+      schedule: auto.schedule, model: auto.model || '', effort: auto.effort || 'medium',
+      permissionMode: 'default',
+      allowRules: auto.permissions.allow, denyRules: auto.permissions.deny
+    }, auto)).toBe(true)
+  })
+
+  it('treats undefined permissionMode and auto as equal', () => {
+    const auto = baseAutomation() // permissionMode is undefined
+    expect(isAutomationDirty({
+      name: auto.name, prompt: auto.prompt, cwd: auto.cwd,
+      schedule: auto.schedule, model: auto.model || '', effort: auto.effort || 'medium',
+      permissionMode: 'auto',
       allowRules: auto.permissions.allow, denyRules: auto.permissions.deny
     }, auto)).toBe(false)
   })
@@ -82,5 +107,11 @@ describe('constants', () => {
     expect(PERMISSION_TEMPLATES).toContain('Read')
     expect(PERMISSION_TEMPLATES).toContain('Edit')
     expect(PERMISSION_TEMPLATES).toContain('Write')
+  })
+
+  it('PERMISSION_MODES has default and auto', () => {
+    const values = PERMISSION_MODES.map((m) => m.value)
+    expect(values).toContain('default')
+    expect(values).toContain('auto')
   })
 })

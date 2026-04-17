@@ -1,0 +1,214 @@
+/**
+ * Model capability matrix, authoritative via SDK-provided `ModelInfo` fields
+ * (`supportsEffort`, `supportedEffortLevels`, `supportsAdaptiveThinking`)
+ * with a model-id heuristic fallback for cases where the SDK omits them.
+ *
+ * SDK fields are preferred because ClaudeUI model values are aliases
+ * (`default`, `sonnet`, `sonnet[1m]`, `haiku`) rather than canonical ids —
+ * regex-based id matching cannot answer capability questions about an alias.
+ *
+ * See docs/model-capabilities.md for the customer-facing reference and the
+ * appendix on how to re-derive the heuristic from cli.js when the SDK ships
+ * a new model but omits the capability fields.
+ */
+
+export type ThinkingMode = 'adaptive' | 'enabled' | 'disabled'
+export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+
+/**
+ * Minimal ModelInfo shape this module needs. Intentionally structural so
+ * callers can pass either the shared `ModelInfo` or the renderer's
+ * `ModelDisplay` (which extends it).
+ */
+export interface ModelCapabilityInput {
+  value: string
+  supportsEffort?: boolean
+  supportedEffortLevels?: readonly EffortLevel[]
+  supportsAdaptiveThinking?: boolean
+}
+
+export const THINKING_MODES: readonly ThinkingMode[] = ['adaptive', 'enabled', 'disabled'] as const
+export const EFFORT_LEVELS: readonly EffortLevel[] = ['low', 'medium', 'high', 'xhigh', 'max'] as const
+
+/**
+ * Normalise a model identifier the same way cli.js does: strip date suffixes
+ * (`-20250805`), version suffixes (`-v1`, `-v1:0`), and lowercase.
+ */
+function normaliseModelId(model: string | undefined | null): string {
+  if (!model) return ''
+  const lower = model.toLowerCase()
+  const match = lower.match(/claude-[a-z0-9-]+/)
+  let id = match ? match[0] : lower
+  id = id.replace(/-v\d+(:\d+)?$/, '')
+  id = id.replace(/-\d{8}$/, '')
+  return id
+}
+
+/**
+ * Models known NOT to support `effort: 'max'`. Mirrors cli.js `c8z` set.
+ * Note: haiku is excluded by name elsewhere (it never supports `max`).
+ */
+const NO_MAX_EFFORT = new Set([
+  'claude-3-opus',
+  'claude-3-sonnet',
+  'claude-3-5-sonnet',
+  'claude-3-7-sonnet',
+  'claude-sonnet-4',
+  'claude-sonnet-4-0',
+  'claude-sonnet-4-5',
+  'claude-opus-4',
+  'claude-opus-4-0',
+  'claude-opus-4-1',
+  'claude-opus-4-5',
+])
+
+// ---------------------------------------------------------------------------
+// SDK-aware accessors — these are the preferred entry points. They take a
+// full ModelInfo (or any object with the capability fields) and return SDK
+// values directly; the id-based heuristics below are the fallback.
+// ---------------------------------------------------------------------------
+
+export function modelSupportsAdaptiveThinking(model: ModelCapabilityInput | undefined | null): boolean {
+  if (!model) return false
+  if (typeof model.supportsAdaptiveThinking === 'boolean') return model.supportsAdaptiveThinking
+  return supportsAdaptiveThinking(model.value)
+}
+
+export function modelSupportsEffort(model: ModelCapabilityInput | undefined | null): boolean {
+  if (!model) return false
+  if (typeof model.supportsEffort === 'boolean') return model.supportsEffort
+  return supportsEffort(model.value)
+}
+
+export function modelSupportedEffortLevels(
+  model: ModelCapabilityInput | undefined | null,
+): EffortLevel[] {
+  if (!model) return []
+  if (model.supportedEffortLevels && model.supportedEffortLevels.length > 0) {
+    return [...model.supportedEffortLevels]
+  }
+  if (model.supportsEffort === false) return []
+  return supportedEffortLevels(model.value)
+}
+
+export function modelDefaultEffort(model: ModelCapabilityInput | undefined | null): EffortLevel {
+  const allowed = modelSupportedEffortLevels(model)
+  // xhigh in the allowed list implies Opus 4.7-class (per cli.js `bt6` / `IF1`),
+  // so treat it as the default — this is what Claude Code does too. Catches
+  // alias values like `default` where the id heuristic can't tell us the tier.
+  if (allowed.includes('xhigh')) return 'xhigh'
+  const fallback = defaultEffort(model?.value)
+  if (allowed.includes(fallback)) return fallback
+  if (allowed.includes('high')) return 'high'
+  return allowed[allowed.length - 1] ?? 'high'
+}
+
+export function modelDefaultThinkingMode(model: ModelCapabilityInput | undefined | null): ThinkingMode {
+  return modelSupportsAdaptiveThinking(model) ? 'adaptive' : 'enabled'
+}
+
+export function modelResolveThinkingMode(
+  model: ModelCapabilityInput | undefined | null,
+  desired: ThinkingMode,
+): ThinkingMode {
+  if (desired === 'disabled') return 'disabled'
+  if (desired === 'adaptive' && !modelSupportsAdaptiveThinking(model)) return 'enabled'
+  return desired
+}
+
+export function modelResolveEffort(
+  model: ModelCapabilityInput | undefined | null,
+  desired: EffortLevel,
+): EffortLevel | null {
+  if (!modelSupportsEffort(model)) return null
+  const allowed = modelSupportedEffortLevels(model)
+  if (allowed.includes(desired)) return desired
+  return modelDefaultEffort(model)
+}
+
+// ---------------------------------------------------------------------------
+// Id-based heuristics — used when SDK capability fields are absent.
+// Kept exported for tests and for future models the SDK hasn't labelled yet.
+// ---------------------------------------------------------------------------
+
+/** Mirrors cli.js `kh8`. */
+export function supportsAdaptiveThinking(model: string | undefined | null): boolean {
+  const id = normaliseModelId(model)
+  if (id.includes('opus-4-7') || id.includes('opus-4-6') || id.includes('sonnet-4-6')) return true
+  if (id.includes('opus') || id.includes('sonnet') || id.includes('haiku')) return false
+  // Unknown family — assume modern, allow adaptive.
+  return true
+}
+
+/** Mirrors cli.js `QI`. */
+export function supportsEffort(model: string | undefined | null): boolean {
+  const id = normaliseModelId(model)
+  if (id.includes('opus-4-7') || id.includes('opus-4-6') || id.includes('sonnet-4-6')) return true
+  if (id.includes('opus') || id.includes('sonnet') || id.includes('haiku')) return false
+  return true
+}
+
+/** Mirrors cli.js `bt6` — `xhigh` is opus-4-7 only today. */
+export function supportsXhighEffort(model: string | undefined | null): boolean {
+  return normaliseModelId(model).includes('opus-4-7')
+}
+
+/** Mirrors cli.js `Ct6`. Haiku never supports max; legacy models in NO_MAX_EFFORT don't either. */
+export function supportsMaxEffort(model: string | undefined | null): boolean {
+  const id = normaliseModelId(model)
+  if (id.includes('haiku')) return false
+  return !NO_MAX_EFFORT.has(id)
+}
+
+/** Returns the set of effort levels this model accepts. Empty array means no picker. */
+export function supportedEffortLevels(model: string | undefined | null): EffortLevel[] {
+  if (!supportsEffort(model)) return []
+  return EFFORT_LEVELS.filter((level) => {
+    if (level === 'xhigh') return supportsXhighEffort(model)
+    if (level === 'max') return supportsMaxEffort(model)
+    return true
+  })
+}
+
+/** Mirrors cli.js `IF1`. */
+export function defaultEffort(model: string | undefined | null): EffortLevel {
+  const id = normaliseModelId(model)
+  if (id.includes('opus-4-7')) return 'xhigh'
+  return 'high'
+}
+
+/**
+ * Default thinking mode for a model: adaptive when supported, otherwise enabled.
+ * Falls back to `disabled` only if the caller explicitly chooses it later.
+ */
+export function defaultThinkingMode(model: string | undefined | null): ThinkingMode {
+  return supportsAdaptiveThinking(model) ? 'adaptive' : 'enabled'
+}
+
+/**
+ * Coerce a user-chosen thinking mode into one the current model accepts.
+ * `adaptive` falls back to `enabled` on legacy models. `disabled` is universal.
+ */
+export function resolveThinkingMode(
+  model: string | undefined | null,
+  desired: ThinkingMode,
+): ThinkingMode {
+  if (desired === 'disabled') return 'disabled'
+  if (desired === 'adaptive' && !supportsAdaptiveThinking(model)) return 'enabled'
+  return desired
+}
+
+/**
+ * Coerce a user-chosen effort into one the current model accepts. Unsupported
+ * tiers fall back to the model's default. Returns `null` if the model has no
+ * effort control at all.
+ */
+export function resolveEffort(
+  model: string | undefined | null,
+  desired: EffortLevel,
+): EffortLevel | null {
+  if (!supportsEffort(model)) return null
+  const allowed = supportedEffortLevels(model)
+  if (allowed.includes(desired)) return desired
+  return defaultEffort(model)
+}

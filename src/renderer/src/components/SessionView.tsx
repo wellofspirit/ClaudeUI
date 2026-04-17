@@ -1,9 +1,10 @@
-import { useState, useCallback, useRef, useEffect, createContext, useContext } from 'react'
+import { useState, useCallback, useEffect, createContext, useContext } from 'react'
 import { Sidebar } from './Sidebar'
 import { ChatPanel } from './chat/ChatPanel'
 import { TaskDetailPanel } from './TaskDetailPanel'
 import { GitPanel } from './git/GitPanel'
 import { PlanReviewPanel } from './plan/PlanReviewPanel'
+import { MockupPanel } from './MockupPanel'
 import { UsageView } from './usage/UsageView'
 import { AutomationView } from './automation/AutomationView'
 import { PluginWebView } from './plugin/PluginWebView'
@@ -26,43 +27,49 @@ function useResizablePanel(key: string, defaultW: number, min: number, max: numb
     const saved = localStorage.getItem(key)
     return saved ? Math.min(max, Math.max(min, Number(saved))) : defaultW
   })
-  const dragging = useRef(false)
 
-  const onMouseDown = useCallback((dir: 1 | -1) => (e: React.MouseEvent) => {
+  const onPointerDown = useCallback((dir: 1 | -1) => (e: React.PointerEvent<HTMLDivElement>) => {
     e.preventDefault()
-    dragging.current = true
+    const target = e.currentTarget
+    const pointerId = e.pointerId
     const startX = e.clientX
     const startW = width
 
-    const onMouseMove = (ev: MouseEvent): void => {
+    // Pointer capture keeps events firing on `target` even when the cursor
+    // crosses over iframes/webviews, so mouseup never goes missing.
+    target.setPointerCapture(pointerId)
+
+    const onPointerMove = (ev: PointerEvent): void => {
       const newW = Math.min(max, Math.max(min, startW + (ev.clientX - startX) * dir))
       setWidth(newW)
     }
 
-    const onMouseUp = (ev: MouseEvent): void => {
-      dragging.current = false
+    const onPointerUp = (ev: PointerEvent): void => {
       const finalW = Math.min(max, Math.max(min, startW + (ev.clientX - startX) * dir))
       localStorage.setItem(key, String(finalW))
-      document.removeEventListener('mousemove', onMouseMove)
-      document.removeEventListener('mouseup', onMouseUp)
+      target.removeEventListener('pointermove', onPointerMove)
+      target.removeEventListener('pointerup', onPointerUp)
+      target.removeEventListener('pointercancel', onPointerUp)
+      try { target.releasePointerCapture(pointerId) } catch { /* already released */ }
       document.body.style.cursor = ''
       document.body.style.userSelect = ''
     }
 
     document.body.style.cursor = 'col-resize'
     document.body.style.userSelect = 'none'
-    document.addEventListener('mousemove', onMouseMove)
-    document.addEventListener('mouseup', onMouseUp)
+    target.addEventListener('pointermove', onPointerMove)
+    target.addEventListener('pointerup', onPointerUp)
+    target.addEventListener('pointercancel', onPointerUp)
   }, [width, key, min, max])
 
-  return { width, onMouseDown }
+  return { width, onPointerDown }
 }
 
-function ResizeHandle({ onMouseDown }: { onMouseDown: (e: React.MouseEvent) => void }) {
+function ResizeHandle({ onPointerDown }: { onPointerDown: (e: React.PointerEvent<HTMLDivElement>) => void }) {
   return (
     <div
-      onMouseDown={onMouseDown}
-      className="w-0 shrink-0 cursor-col-resize relative z-10"
+      onPointerDown={onPointerDown}
+      className="w-0 shrink-0 cursor-col-resize relative z-10 touch-none"
     >
       <div className="absolute inset-y-0 -left-1.5 w-3" />
     </div>
@@ -72,32 +79,36 @@ function ResizeHandle({ onMouseDown }: { onMouseDown: (e: React.MouseEvent) => v
 function useResizableBottomPanel(_key: string, min: number, max: number) {
   const store = useSessionStore
   const [height, setHeight] = useState(() => store.getState().terminalPanelHeight)
-  const dragging = useRef(false)
 
-  const onMouseDown = useCallback(
-    (e: React.MouseEvent) => {
+  const onPointerDown = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
       e.preventDefault()
-      dragging.current = true
+      const target = e.currentTarget
+      const pointerId = e.pointerId
       const startY = e.clientY
       const startH = height
 
-      const onMouseMove = (ev: MouseEvent): void => {
+      target.setPointerCapture(pointerId)
+
+      const onPointerMove = (ev: PointerEvent): void => {
         const newH = Math.min(max, Math.max(min, startH - (ev.clientY - startY)))
         setHeight(newH)
       }
 
-      const onMouseUp = (): void => {
-        dragging.current = false
-        document.removeEventListener('mousemove', onMouseMove)
-        document.removeEventListener('mouseup', onMouseUp)
+      const onPointerUp = (): void => {
+        target.removeEventListener('pointermove', onPointerMove)
+        target.removeEventListener('pointerup', onPointerUp)
+        target.removeEventListener('pointercancel', onPointerUp)
+        try { target.releasePointerCapture(pointerId) } catch { /* already released */ }
         document.body.style.cursor = ''
         document.body.style.userSelect = ''
       }
 
       document.body.style.cursor = 'row-resize'
       document.body.style.userSelect = 'none'
-      document.addEventListener('mousemove', onMouseMove)
-      document.addEventListener('mouseup', onMouseUp)
+      target.addEventListener('pointermove', onPointerMove)
+      target.addEventListener('pointerup', onPointerUp)
+      target.addEventListener('pointercancel', onPointerUp)
     },
     [height, min, max]
   )
@@ -107,12 +118,12 @@ function useResizableBottomPanel(_key: string, min: number, max: number) {
     store.getState().setTerminalPanelHeight(height)
   }, [height, store])
 
-  return { height, onMouseDown }
+  return { height, onPointerDown }
 }
 
-function HorizontalResizeHandle({ onMouseDown }: { onMouseDown: (e: React.MouseEvent) => void }) {
+function HorizontalResizeHandle({ onPointerDown }: { onPointerDown: (e: React.PointerEvent<HTMLDivElement>) => void }) {
   return (
-    <div onMouseDown={onMouseDown} className="h-0 shrink-0 cursor-row-resize relative z-10">
+    <div onPointerDown={onPointerDown} className="h-0 shrink-0 cursor-row-resize relative z-10 touch-none">
       <div className="absolute inset-x-0 -top-1.5 h-3" />
     </div>
   )
@@ -129,6 +140,7 @@ export function SessionView(): React.JSX.Element {
   const taskPanel = useResizablePanel('taskPanelWidth', 400, 280, 700)
   const gitPanel = useResizablePanel('gitPanelWidth', 450, 320, 9999)
   const planPanel = useResizablePanel('planPanelWidth', 500, 350, 900)
+  const mockupPanel = useResizablePanel('mockupPanelWidth', 500, 350, 9999)
   const terminalPanelOpen = useSessionStore((s) => s.terminalPanelOpen)
   const bottomPanel = useResizableBottomPanel('terminalPanelHeight', 120, 600)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => isMobile ? true : localStorage.getItem('sidebarCollapsed') === 'true')
@@ -255,7 +267,7 @@ export function SessionView(): React.JSX.Element {
         {!isMobile && !sidebarCollapsed && (
           <>
             <Sidebar style={{ width: sidebar.width }} onToggleCollapse={toggleSidebar} />
-            <ResizeHandle onMouseDown={sidebar.onMouseDown(1)} />
+            <ResizeHandle onPointerDown={sidebar.onPointerDown(1)} />
           </>
         )}
         <div className={`flex-1 min-w-0 flex flex-col ${window.api.platform === 'darwin' ? 'bg-bg-secondary/60' : 'bg-bg-secondary/80'}`}>
@@ -274,27 +286,33 @@ export function SessionView(): React.JSX.Element {
             </div>
             {!isMobile && rightPanel === 'task' && (
               <>
-                <ResizeHandle onMouseDown={taskPanel.onMouseDown(-1)} />
+                <ResizeHandle onPointerDown={taskPanel.onPointerDown(-1)} />
                 <TaskDetailPanel style={{ width: taskPanel.width }} />
               </>
             )}
             {!isMobile && rightPanel === 'git' && (
               <>
-                <ResizeHandle onMouseDown={gitPanel.onMouseDown(-1)} />
+                <ResizeHandle onPointerDown={gitPanel.onPointerDown(-1)} />
                 <GitPanel style={{ width: gitPanel.width }} />
               </>
             )}
             {!isMobile && rightPanel === 'plan' && (
               <>
-                <ResizeHandle onMouseDown={planPanel.onMouseDown(-1)} />
+                <ResizeHandle onPointerDown={planPanel.onPointerDown(-1)} />
                 <PlanReviewPanel style={{ width: planPanel.width }} />
+              </>
+            )}
+            {!isMobile && rightPanel === 'mockup' && (
+              <>
+                <ResizeHandle onPointerDown={mockupPanel.onPointerDown(-1)} />
+                <MockupPanel style={{ width: mockupPanel.width }} />
               </>
             )}
           </div>
           {/* Bottom terminal panel — always mounted to preserve xterm scrollback */}
           {!isMobile && (
             <div style={{ display: terminalPanelOpen ? 'contents' : 'none' }}>
-              <HorizontalResizeHandle onMouseDown={bottomPanel.onMouseDown} />
+              <HorizontalResizeHandle onPointerDown={bottomPanel.onPointerDown} />
               <TerminalPanel style={{ height: bottomPanel.height }} />
             </div>
           )}

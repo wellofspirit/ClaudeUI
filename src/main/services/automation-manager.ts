@@ -7,10 +7,59 @@ import { Notification, type BrowserWindow } from 'electron'
 import { CronExpressionParser } from 'cron-parser'
 import { getSdkExecutableOpts, ClaudeSession } from './claude-session'
 import { loadSessionHistory } from './session-history'
+import { getClassifier, stopClassifier, isSafeTool, buildTranscript, type TranscriptMessage } from './auto-classifier'
 import { logger } from './logger'
 import type { Automation, AutomationRun, ChatMessage, ContentBlock } from '../../shared/types'
 
 const CLAUDE_PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects')
+
+// ---------------------------------------------------------------------------
+// canUseTool builder — extracted for testability
+// ---------------------------------------------------------------------------
+
+export type CanUseToolResult = { behavior: 'allow'; updatedInput: Record<string, unknown> } | { behavior: 'deny'; message: string }
+export type CanUseToolFn = (toolName: string, input: Record<string, unknown>) => Promise<CanUseToolResult>
+
+/**
+ * Build the canUseTool callback for an automation run.
+ *
+ * - **auto**: safe tools are fast-path allowed, everything else goes through the
+ *   Haiku-based security classifier. On classifier failure, deny for safety.
+ * - **default**: blanket deny — no user is present to approve.
+ */
+export function buildCanUseTool(
+  mode: 'auto' | 'default',
+  collectedMessages: TranscriptMessage[],
+  classifierId: string
+): CanUseToolFn {
+  if (mode === 'auto') {
+    return async (toolName: string, input: Record<string, unknown>) => {
+      if (toolName.startsWith('mcp__claude-ui__')) {
+        return { behavior: 'allow' as const, updatedInput: input }
+      }
+      if (isSafeTool(toolName)) {
+        return { behavior: 'allow' as const, updatedInput: input }
+      }
+      try {
+        const transcript = buildTranscript(collectedMessages)
+        const classifier = getClassifier(classifierId)
+        const result = await classifier.classify(toolName, input, transcript)
+        logger.debug('AutomationManager', `Classifier ${result.shouldBlock ? 'BLOCK' : 'ALLOW'} ${toolName}: ${result.reason}`)
+        if (!result.shouldBlock) {
+          return { behavior: 'allow' as const, updatedInput: input }
+        }
+        return { behavior: 'deny' as const, message: `Automation auto mode blocked: ${result.reason}` }
+      } catch (err) {
+        logger.warn('AutomationManager', `Classifier failed for ${toolName}, denying for safety: ${err}`)
+        return { behavior: 'deny' as const, message: 'Automation: classifier unavailable, denied for safety' }
+      }
+    }
+  }
+
+  return async (_toolName: string, _input: Record<string, unknown>) => {
+    return { behavior: 'deny' as const, message: 'Automation: tool requires approval but no user is present' }
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Paths
@@ -482,16 +531,22 @@ export class AutomationManager {
     let totalCostUsd = 0
     let lastAssistantText = ''
     let lastAssistantMsg: ChatMessage | null = null
+    // Collect messages for the local auto classifier's transcript context
+    const collectedMessages: TranscriptMessage[] = []
+    const useAutoMode = (automation.permissionMode ?? 'auto') === 'auto'
+    const classifierId = `automation:${automation.id}`
 
     try {
-      // The CLI evaluates its own allow/deny rules from settingSources before
-      // calling canUseTool. It only calls us for tools that need a human decision
-      // ("ask" rules, or tools not covered by any rule). Since automations are
-      // headless with no user to ask, deny anything the CLI didn't pre-approve.
-      const canUseTool = async (_toolName: string, _input: Record<string, unknown>) => {
-        return { behavior: 'deny' as const, message: 'Automation: tool requires approval but no user is present' }
-      }
+      const canUseTool = buildCanUseTool(useAutoMode ? 'auto' : 'default', collectedMessages, classifierId)
 
+      // Seed transcript with user prompt for classifier context
+      collectedMessages.push({
+        role: 'user',
+        content: [{ type: 'text', text: prompt }]
+      })
+
+      // Start with acceptEdits (auto mode) or default. The acceptEdits base ensures
+      // the SDK always accepts the mode; we attempt to upgrade to native auto below.
       const q = sdkQuery({
         prompt,
         options: {
@@ -499,7 +554,7 @@ export class AutomationManager {
           ...(resumeSessionId ? { resume: resumeSessionId } : {}),
           cwd: automation.cwd,
           model: automation.model || 'default',
-          permissionMode: 'default' as const,
+          permissionMode: useAutoMode ? 'acceptEdits' as const : 'default' as const,
           settingSources: ['user', 'project', 'local'],
           abortController,
           includePartialMessages: true,
@@ -508,6 +563,8 @@ export class AutomationManager {
           canUseTool
         }
       })
+
+      let autoModeUpgraded = false
 
       for await (const message of q) {
         if (!message || typeof message !== 'object') continue
@@ -529,6 +586,20 @@ export class AutomationManager {
               this.saveRuns(automation.id, runsForUpdate)
             }
           }
+
+          // Try upgrading to native SDK auto mode once session is established.
+          // If the SDK accepts it (Teams/Enterprise), it handles tool approvals natively
+          // and our canUseTool classifier becomes a backup. If rejected (non-Team plan),
+          // we stay on acceptEdits + local classifier — no functionality lost.
+          if (useAutoMode && !autoModeUpgraded) {
+            autoModeUpgraded = true
+            try {
+              await (q as unknown as { setPermissionMode: (m: string) => Promise<void> }).setPermissionMode('auto')
+              logger.debug('AutomationManager', `Native auto mode accepted for "${automation.name}"`)
+            } catch {
+              logger.debug('AutomationManager', `SDK rejected auto mode for "${automation.name}", using local classifier`)
+            }
+          }
         }
 
         if (type === 'assistant') {
@@ -538,6 +609,17 @@ export class AutomationManager {
             lastAssistantMsg = chatMsg
             const textBlock = chatMsg.content.find((b) => b.type === 'text')
             if (textBlock?.text) lastAssistantText = textBlock.text
+
+            // Collect for classifier transcript
+            collectedMessages.push({
+              role: 'assistant',
+              content: chatMsg.content.map((b) => ({
+                type: b.type,
+                ...('text' in b ? { text: b.text } : {}),
+                ...('toolName' in b ? { toolName: b.toolName, toolInput: b.toolInput } : {}),
+                ...('toolResult' in b ? { toolResult: b.toolResult } : {})
+              }))
+            })
           }
         } else if (type === 'user') {
           const messageParam = msg.message as Record<string, unknown> | undefined
@@ -546,6 +628,15 @@ export class AutomationManager {
             if (toolResults.length > 0) {
               lastAssistantMsg.content.push(...toolResults)
               this.emitRunMessage(automation.id, lastAssistantMsg)
+
+              // Collect tool results for classifier transcript
+              collectedMessages.push({
+                role: 'user',
+                content: toolResults.map((b) => ({
+                  type: b.type,
+                  ...('toolResult' in b ? { toolResult: b.toolResult } : {})
+                }))
+              })
             }
           }
         } else if (type === 'stream_event') {
@@ -587,6 +678,7 @@ export class AutomationManager {
     } finally {
       this.activeRuns.delete(automation.id)
       this.processingAutomations.delete(automation.id)
+      stopClassifier(classifierId)
     }
   }
 

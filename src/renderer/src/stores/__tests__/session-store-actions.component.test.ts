@@ -106,6 +106,8 @@ beforeEach(() => {
     killTerminal: vi.fn(),
     watchBackground: vi.fn(),
     unwatchBackground: vi.fn(),
+    deleteSession: vi.fn().mockResolvedValue(undefined),
+    deleteProject: vi.fn().mockResolvedValue(undefined),
   } as any
 
   useSessionStore.setState({
@@ -116,6 +118,8 @@ beforeEach(() => {
     pinnedSessionIds: [],
     customTitles: {},
     worktreeInfoMap: {},
+    hiddenSessionIds: [],
+    hiddenProjectKeys: [],
     terminalGroups: {},
   })
 })
@@ -364,6 +368,181 @@ describe('unpinSession', () => {
     store().pinSession('r1')
     store().unpinSession('r1')
     expect(store().recentSessionIds[0]).toBe('r1')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Hide / unhide
+// ---------------------------------------------------------------------------
+
+describe('hideSession', () => {
+  it('adds sessionId to hiddenSessionIds', () => {
+    store().hideSession('s1')
+    expect(store().hiddenSessionIds).toEqual(['s1'])
+  })
+
+  it('is a no-op when session is already hidden', () => {
+    store().hideSession('s1')
+    store().hideSession('s1')
+    expect(store().hiddenSessionIds).toEqual(['s1'])
+  })
+
+  it('persists hidden set via saveSessionConfig', () => {
+    const save = window.api.saveSessionConfig as any
+    store().hideSession('s1')
+    expect(save).toHaveBeenCalled()
+    const lastCall = save.mock.calls.at(-1)![0]
+    expect(lastCall.hiddenSessions).toEqual(['s1'])
+  })
+})
+
+describe('unhideSession', () => {
+  it('removes sessionId from hiddenSessionIds', () => {
+    store().hideSession('s1')
+    store().hideSession('s2')
+    store().unhideSession('s1')
+    expect(store().hiddenSessionIds).toEqual(['s2'])
+  })
+
+  it('is a no-op when session is not hidden', () => {
+    store().hideSession('s1')
+    const before = store().hiddenSessionIds
+    store().unhideSession('ghost')
+    expect(store().hiddenSessionIds).toBe(before)
+  })
+})
+
+describe('hideProject / unhideProject', () => {
+  it('adds and removes projectKey', () => {
+    store().hideProject('proj-a')
+    store().hideProject('proj-b')
+    expect(store().hiddenProjectKeys).toEqual(['proj-a', 'proj-b'])
+    store().unhideProject('proj-a')
+    expect(store().hiddenProjectKeys).toEqual(['proj-b'])
+  })
+
+  it('ignores empty projectKey', () => {
+    store().hideProject('')
+    expect(store().hiddenProjectKeys).toEqual([])
+  })
+
+  it('is a no-op on duplicate hide', () => {
+    store().hideProject('proj-a')
+    store().hideProject('proj-a')
+    expect(store().hiddenProjectKeys).toEqual(['proj-a'])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Delete
+// ---------------------------------------------------------------------------
+
+describe('deleteSession', () => {
+  it('invokes window.api.deleteSession with sessionId + projectKey', async () => {
+    const spy = window.api.deleteSession as any
+    await store().deleteSession('s1', 'proj-key')
+    expect(spy).toHaveBeenCalledWith('s1', 'proj-key')
+  })
+
+  it('scrubs session from recent, pinned, hidden, customTitles, worktreeInfoMap', async () => {
+    store().createNewSession('s1', '/test') // adds to recent
+    store().pinSession('s1')                 // moves to pinned
+    store().setCustomTitle('s1', 'My Title')
+    store().hideSession('s1')
+    const wt = makeWorktreeInfo()
+    store().setWorktreeInfo('s1', wt)
+
+    await store().deleteSession('s1', 'proj-key')
+
+    expect(store().pinnedSessionIds).not.toContain('s1')
+    expect(store().recentSessionIds).not.toContain('s1')
+    expect(store().hiddenSessionIds).not.toContain('s1')
+    expect(store().customTitles['s1']).toBeUndefined()
+    expect(store().worktreeInfoMap['s1']).toBeUndefined()
+  })
+
+  it('leaves other sessions untouched', async () => {
+    store().createNewSession('s1', '/a')
+    store().createNewSession('s2', '/b')
+    await store().deleteSession('s1', 'proj-key')
+    expect(store().sessions['s2']).toBeDefined()
+    expect(store().recentSessionIds).toContain('s2')
+  })
+
+  it('does not mutate store when the IPC call rejects', async () => {
+    ;(window.api.deleteSession as any).mockRejectedValueOnce(new Error('EBUSY'))
+    store().createNewSession('s1', '/a')
+    store().pinSession('s1')
+    const pinnedBefore = [...store().pinnedSessionIds]
+
+    await expect(store().deleteSession('s1', 'proj-key')).rejects.toThrow('EBUSY')
+    expect(store().pinnedSessionIds).toEqual(pinnedBefore)
+  })
+})
+
+describe('deleteProject', () => {
+  it('invokes window.api.deleteProject with projectKey', async () => {
+    const spy = window.api.deleteProject as any
+    await store().deleteProject('proj-key')
+    expect(spy).toHaveBeenCalledWith('proj-key')
+  })
+
+  it('scrubs all project sessions from recent/pinned/hidden/customTitles and removes the project from hiddenProjects', async () => {
+    // Seed directories so the store knows which sessions belong to this project
+    useSessionStore.setState({
+      directories: [
+        {
+          cwd: '/test',
+          projectKey: 'proj-key',
+          folderName: 'test',
+          sessions: [
+            { sessionId: 's1', cwd: '/test', projectKey: 'proj-key', title: 'a', timestamp: 0, lastActivityAt: 0 },
+            { sessionId: 's2', cwd: '/test', projectKey: 'proj-key', title: 'b', timestamp: 0, lastActivityAt: 0 },
+          ],
+        },
+        {
+          cwd: '/other',
+          projectKey: 'other-key',
+          folderName: 'other',
+          sessions: [
+            { sessionId: 's3', cwd: '/other', projectKey: 'other-key', title: 'c', timestamp: 0, lastActivityAt: 0 },
+          ],
+        },
+      ],
+    })
+    store().createNewSession('s1', '/test')
+    store().createNewSession('s2', '/test')
+    store().createNewSession('s3', '/other')
+    store().pinSession('s1')
+    store().setCustomTitle('s2', 'Title')
+    store().hideSession('s2')
+    store().hideProject('proj-key')
+
+    await store().deleteProject('proj-key')
+
+    expect(store().pinnedSessionIds).not.toContain('s1')
+    expect(store().recentSessionIds).not.toContain('s1')
+    expect(store().recentSessionIds).not.toContain('s2')
+    expect(store().hiddenSessionIds).not.toContain('s2')
+    expect(store().customTitles['s2']).toBeUndefined()
+    expect(store().hiddenProjectKeys).not.toContain('proj-key')
+    // Unrelated project untouched
+    expect(store().recentSessionIds).toContain('s3')
+  })
+
+  it('does not mutate store when the IPC call rejects', async () => {
+    ;(window.api.deleteProject as any).mockRejectedValueOnce(new Error('EACCES'))
+    useSessionStore.setState({
+      directories: [{
+        cwd: '/test', projectKey: 'proj-key', folderName: 'test',
+        sessions: [{ sessionId: 's1', cwd: '/test', projectKey: 'proj-key', title: 'a', timestamp: 0, lastActivityAt: 0 }],
+      }],
+    })
+    store().createNewSession('s1', '/test')
+    const recentBefore = [...store().recentSessionIds]
+
+    await expect(store().deleteProject('proj-key')).rejects.toThrow('EACCES')
+    expect(store().recentSessionIds).toEqual(recentBefore)
   })
 })
 
@@ -1121,5 +1300,55 @@ describe('applyExternalSessionConfig', () => {
   it('does not call saveSessionConfig (no disk write)', () => {
     store().applyExternalSessionConfig({ recentSessions: ['r1'] })
     expect((window.api as any).saveSessionConfig).not.toHaveBeenCalled()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Mockup panel actions
+// ---------------------------------------------------------------------------
+
+describe('openMockupPanel / closeMockupPanel', () => {
+  beforeEach(() => {
+    store().createNewSession('r1', '/test')
+    useSessionStore.setState({ activeSessionId: 'r1' })
+  })
+
+  it('opens mockup panel with directory and title', () => {
+    store().openMockupPanel('r1', 'abc12345', 'Settings Page')
+    const session = store().sessions['r1']
+    expect(session.rightPanel).toBe('mockup')
+    expect(session.mockupDir).toBe('abc12345')
+    expect(session.mockupTitle).toBe('Settings Page')
+  })
+
+  it('opens mockup panel without title', () => {
+    store().openMockupPanel('r1', 'abc12345')
+    const session = store().sessions['r1']
+    expect(session.rightPanel).toBe('mockup')
+    expect(session.mockupDir).toBe('abc12345')
+    expect(session.mockupTitle).toBeNull()
+  })
+
+  it('closes mockup panel and clears state', () => {
+    store().openMockupPanel('r1', 'abc12345', 'My Mockup')
+    store().closeMockupPanel('r1')
+    const session = store().sessions['r1']
+    expect(session.rightPanel).toBe('none')
+    expect(session.mockupDir).toBeNull()
+    expect(session.mockupTitle).toBeNull()
+  })
+
+  it('replaces previous right panel when opening mockup', () => {
+    store().openGitPanel('r1')
+    expect(store().sessions['r1'].rightPanel).toBe('git')
+    store().openMockupPanel('r1', 'abc12345')
+    expect(store().sessions['r1'].rightPanel).toBe('mockup')
+  })
+
+  it('does not affect other sessions', () => {
+    store().createNewSession('r2', '/test2')
+    store().openMockupPanel('r1', 'abc12345', 'Page A')
+    expect(store().sessions['r2'].rightPanel).toBe('none')
+    expect(store().sessions['r2'].mockupDir).toBeNull()
   })
 })

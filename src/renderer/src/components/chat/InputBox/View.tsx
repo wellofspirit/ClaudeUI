@@ -1,11 +1,15 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import type { FileAttachment, StatusLineData, SlashCommandInfo, DirEntry, VoiceState } from '../../../../../shared/types'
 import { useSessionStore, useActiveSession } from '../../../stores/session-store'
 import { SlashCommandMenu } from '../SlashCommandMenu'
 import { FileMentionMenu } from '../FileMentionMenu'
 import { FileAttachmentBar } from '../FileAttachmentBar'
-
-const EFFORT_LEVELS = ['low', 'medium', 'high'] as const
+import {
+  EFFORT_LEVELS,
+  THINKING_MODES,
+  type EffortLevel,
+  type ThinkingMode,
+} from '../../../../../shared/model-capabilities'
 
 const DEFAULT_STATUS_LINE: StatusLineData = {
   totalCostUsd: 0,
@@ -29,6 +33,10 @@ export interface ModelDisplay {
   displayName: string
   description?: string
   shortName: string
+  /** Capability flags surfaced by the SDK's `supportedModels()`. Authoritative. */
+  supportsEffort?: boolean
+  supportedEffortLevels?: EffortLevel[]
+  supportsAdaptiveThinking?: boolean
 }
 
 export interface InputBoxViewProps {
@@ -68,6 +76,10 @@ export interface InputBoxViewProps {
   models: ModelDisplay[]
   selectedModel: ModelDisplay
   effort: string
+  effortSupported: boolean
+  allowedEffortLevels: readonly EffortLevel[]
+  thinkingMode: ThinkingMode
+  adaptiveSupported: boolean
   sandboxEnabled: boolean
   voiceEnabled: boolean
   voiceState: VoiceState
@@ -88,7 +100,8 @@ export interface InputBoxViewProps {
   onSlashSelect: (name: string) => void
   onFileMentionConfirm: (entry: DirEntry) => void
   onSelectModel: (value: string) => void
-  onSelectEffort: (level: string) => void
+  onSelectEffort: (level: EffortLevel) => void
+  onSelectThinking: (mode: ThinkingMode) => void
   onOpenSandboxSettings: () => void
   onVoiceStart: () => void
   onVoiceStop: () => void
@@ -181,9 +194,11 @@ function ModelPicker({ models, selectedModel, onSelectModel }: {
   onSelectModel: (value: string) => void
 }): React.JSX.Element {
   const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement | null>(null)
+  useClickOutside(ref, open, () => setOpen(false))
 
   return (
-    <div className="relative">
+    <div className="relative" ref={ref}>
       <button
         onClick={(e) => { e.stopPropagation(); setOpen(!open) }}
         className="h-7 px-2 flex items-center gap-1 rounded-lg text-[11px] text-text-muted hover:text-text-secondary hover:bg-bg-hover transition-colors cursor-pointer"
@@ -217,17 +232,47 @@ function ModelPicker({ models, selectedModel, onSelectModel }: {
   )
 }
 
-function EffortPicker({ effort, onSelectEffort }: {
+/**
+ * Close the dropdown whenever the user clicks or mouses down outside the
+ * picker container — avoids a stale-popup when switching sessions, toggling
+ * other pickers, or clicking the textarea.
+ */
+function useClickOutside(ref: React.RefObject<HTMLElement | null>, open: boolean, close: () => void): void {
+  useEffect(() => {
+    if (!open) return
+    function onDown(e: MouseEvent): void {
+      const node = ref.current
+      if (node && e.target instanceof Node && !node.contains(e.target)) close()
+    }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [ref, open, close])
+}
+
+function unsupportedTooltip(level: EffortLevel): string {
+  if (level === 'xhigh') return 'xhigh effort is only available on Opus 4.7'
+  if (level === 'max') return 'max effort is not supported on this model'
+  return 'Not supported on this model'
+}
+
+function EffortPicker({ effort, allowedEffortLevels, supported, onSelectEffort }: {
   effort: string
-  onSelectEffort: (level: string) => void
-}): React.JSX.Element {
+  allowedEffortLevels: readonly EffortLevel[]
+  supported: boolean
+  onSelectEffort: (level: EffortLevel) => void
+}): React.JSX.Element | null {
   const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement | null>(null)
+  useClickOutside(ref, open, () => setOpen(false))
+  if (!supported) return null
+  const allowed = new Set<EffortLevel>(allowedEffortLevels)
 
   return (
-    <div className="relative">
+    <div className="relative" ref={ref}>
       <button
         onClick={(e) => { e.stopPropagation(); setOpen(!open) }}
         className="h-7 px-2 flex items-center gap-1 rounded-lg text-[11px] text-text-muted hover:text-text-secondary hover:bg-bg-hover transition-colors cursor-pointer capitalize"
+        title="Effort level"
       >
         <span>{effort}</span>
         <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
@@ -236,19 +281,75 @@ function EffortPicker({ effort, onSelectEffort }: {
       </button>
       {open && (
         <div className="absolute bottom-full mb-1 left-0 w-28 bg-bg-tertiary border border-border rounded-lg overflow-hidden shadow-lg shadow-black/30 z-20">
-          {EFFORT_LEVELS.map((level) => (
-            <button
-              key={level}
-              onClick={() => { onSelectEffort(level); setOpen(false) }}
-              className={`w-full flex items-center px-3 h-8 text-[12px] transition-colors cursor-pointer text-left capitalize ${
-                level === effort
-                  ? 'text-text-primary bg-bg-hover'
-                  : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary'
-              }`}
-            >
-              {level}
-            </button>
-          ))}
+          {EFFORT_LEVELS.map((level) => {
+            const enabled = allowed.has(level)
+            return (
+              <button
+                key={level}
+                disabled={!enabled}
+                title={enabled ? undefined : unsupportedTooltip(level)}
+                onClick={() => { if (enabled) { onSelectEffort(level); setOpen(false) } }}
+                className={`w-full flex items-center px-3 h-8 text-[12px] transition-colors text-left capitalize ${
+                  !enabled
+                    ? 'text-text-muted opacity-40 cursor-not-allowed'
+                    : level === effort
+                      ? 'text-text-primary bg-bg-hover cursor-pointer'
+                      : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary cursor-pointer'
+                }`}
+              >
+                {level}
+              </button>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function ThinkingPicker({ thinkingMode, adaptiveSupported, onSelectThinking }: {
+  thinkingMode: ThinkingMode
+  adaptiveSupported: boolean
+  onSelectThinking: (mode: ThinkingMode) => void
+}): React.JSX.Element {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement | null>(null)
+  useClickOutside(ref, open, () => setOpen(false))
+
+  return (
+    <div className="relative" ref={ref}>
+      <button
+        onClick={(e) => { e.stopPropagation(); setOpen(!open) }}
+        className="h-7 px-2 flex items-center gap-1 rounded-lg text-[11px] text-text-muted hover:text-text-secondary hover:bg-bg-hover transition-colors cursor-pointer capitalize"
+        title="Thinking mode"
+      >
+        <span>{thinkingMode}</span>
+        <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+          <polyline points="6 9 12 15 18 9" />
+        </svg>
+      </button>
+      {open && (
+        <div className="absolute bottom-full mb-1 left-0 w-32 bg-bg-tertiary border border-border rounded-lg overflow-hidden shadow-lg shadow-black/30 z-20">
+          {THINKING_MODES.map((mode) => {
+            const enabled = mode !== 'adaptive' || adaptiveSupported
+            return (
+              <button
+                key={mode}
+                disabled={!enabled}
+                title={enabled ? undefined : 'Adaptive thinking is only supported on Opus 4.6+, Opus 4.7, and Sonnet 4.6'}
+                onClick={() => { if (enabled) { onSelectThinking(mode); setOpen(false) } }}
+                className={`w-full flex items-center px-3 h-8 text-[12px] transition-colors text-left capitalize ${
+                  !enabled
+                    ? 'text-text-muted opacity-40 cursor-not-allowed'
+                    : mode === thinkingMode
+                      ? 'text-text-primary bg-bg-hover cursor-pointer'
+                      : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary cursor-pointer'
+                }`}
+              >
+                {mode}
+              </button>
+            )
+          })}
         </div>
       )}
     </div>
@@ -480,7 +581,8 @@ export function InputBoxView(props: InputBoxViewProps): React.JSX.Element {
             <div className="flex items-center gap-1">
               <AttachMenu fileInputRef={props.fileInputRef} onFileChange={props.onFileChange} />
               <ModelPicker models={props.models} selectedModel={props.selectedModel} onSelectModel={props.onSelectModel} />
-              <EffortPicker effort={props.effort} onSelectEffort={props.onSelectEffort} />
+              <ThinkingPicker thinkingMode={props.thinkingMode} adaptiveSupported={props.adaptiveSupported} onSelectThinking={props.onSelectThinking} />
+              <EffortPicker effort={props.effort} allowedEffortLevels={props.allowedEffortLevels} supported={props.effortSupported} onSelectEffort={props.onSelectEffort} />
               <SandboxPill sandboxEnabled={props.sandboxEnabled} onOpenSandboxSettings={props.onOpenSandboxSettings} />
             </div>
 

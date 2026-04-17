@@ -25,6 +25,11 @@ export const PERMISSION_TEMPLATES = [
   'Agent'
 ]
 
+export const PERMISSION_MODES = [
+  { value: 'default', label: 'Default', description: 'Deny tools that require approval' },
+  { value: 'auto', label: 'Auto', description: 'Classify tool calls with Haiku' }
+] as const
+
 export interface DirtyCheckInput {
   name: string
   prompt: string
@@ -32,6 +37,7 @@ export interface DirtyCheckInput {
   schedule: unknown
   model: string
   effort: string
+  permissionMode: string
   allowRules: string[]
   denyRules: string[]
 }
@@ -44,6 +50,7 @@ export function isAutomationDirty(current: DirtyCheckInput, original: Automation
     JSON.stringify(current.schedule) !== JSON.stringify(original.schedule) ||
     (current.model || '') !== (original.model || '') ||
     (current.effort || 'medium') !== (original.effort || 'medium') ||
+    (current.permissionMode || 'auto') !== (original.permissionMode || 'auto') ||
     JSON.stringify(current.allowRules) !== JSON.stringify(original.permissions.allow) ||
     JSON.stringify(current.denyRules) !== JSON.stringify(original.permissions.deny)
   )

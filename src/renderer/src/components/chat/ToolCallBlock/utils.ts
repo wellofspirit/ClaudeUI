@@ -97,6 +97,12 @@ export function getSummary(block: ToolUseBlock): string {
   if (block.toolName === 'mcp__claude-ui__render_mermaid') {
     return input.title ? String(input.title) : 'diagram'
   }
+  if (block.toolName === 'mcp__claude-ui-mockup__create_mockup') {
+    return input.title ? String(input.title) : 'new mockup'
+  }
+  if (block.toolName === 'mcp__claude-ui-mockup__show_mockup') {
+    return input.directory ? `show ${String(input.directory).slice(0, 8)}` : 'show mockup'
+  }
   if (isAgentTool(block.toolName) && input.description) return String(input.description)
   if (block.toolName === 'TaskOutput' && input.task_id) return `task ${String(input.task_id).slice(0, 8)}…`
   if (block.toolName === 'TaskStop' && input.task_id) return `stop ${String(input.task_id).slice(0, 8)}…`

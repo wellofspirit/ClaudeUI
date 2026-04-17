@@ -380,6 +380,18 @@ describe('InputBox FC — rendered', () => {
       record('session:set-model', ...args)
       return null
     })
+    app.bridge.ipcMain.handle('session:set-effort', (_e: unknown, ...args: unknown[]) => {
+      record('session:set-effort', ...args)
+      return null
+    })
+    app.bridge.ipcMain.handle('session:set-thinking-mode', (_e: unknown, ...args: unknown[]) => {
+      record('session:set-thinking-mode', ...args)
+      return null
+    })
+    app.bridge.ipcMain.handle('session:cancel', (_e: unknown, ...args: unknown[]) => {
+      record('session:cancel', ...args)
+      return null
+    })
     app.bridge.ipcMain.handle('session:get-models', () => [])
     app.bridge.ipcMain.handle('voice:start-recording', (_e: unknown, ...args: unknown[]) => {
       record('voice:start-recording', ...args)
@@ -534,5 +546,258 @@ describe('InputBox FC — rendered', () => {
 
     // The FC calls setText('') after routing — draftText should be cleared
     expect(useSessionStore.getState().sessions[FC_ROUTE].draftText).toBe('')
+  })
+
+  // -------------------------------------------------------------------------
+  // Thinking mode + effort: capability props derived from selectedModel,
+  // pickers update store, and changing them mid-session restarts the SDK.
+  // -------------------------------------------------------------------------
+
+  it('derives capability props from SDK-supplied fields on the "default" alias', () => {
+    // Real shape from supportedModels() for a Max-plan user: value is the
+    // alias "default", capability flags are set directly on the ModelInfo.
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [FC_ROUTE]: { ...state.sessions[FC_ROUTE], selectedModel: 'default' },
+      },
+      availableModels: [{
+        value: 'default',
+        displayName: 'Default (recommended)',
+        description: 'Opus 4.7 with 1M context · Most capable for complex work',
+        supportsEffort: true,
+        supportedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max'],
+        supportsAdaptiveThinking: true,
+      }],
+    }))
+
+    renderFC()
+
+    expect(viewProps.adaptiveSupported).toBe(true)
+    expect(viewProps.effortSupported).toBe(true)
+    expect(viewProps.allowedEffortLevels).toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
+  })
+
+  it('null store effort/thinkingMode → View receives model defaults', () => {
+    // Fresh session: store has effort=null, thinkingMode=null (never user-set).
+    // FC must resolve these to the current model's defaults (xhigh for Opus 4.7).
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [FC_ROUTE]: {
+          ...state.sessions[FC_ROUTE],
+          selectedModel: 'default',
+          effort: null,
+          thinkingMode: null,
+        },
+      },
+      availableModels: [{
+        value: 'default', displayName: 'Default', description: 'Opus 4.7',
+        supportsEffort: true,
+        supportedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max'],
+        supportsAdaptiveThinking: true,
+      }],
+    }))
+
+    renderFC()
+
+    expect(viewProps.effort).toBe('xhigh')          // Opus 4.7 default
+    expect(viewProps.thinkingMode).toBe('adaptive') // adaptive when supported
+  })
+
+  it('explicit user pick takes precedence over model default', () => {
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [FC_ROUTE]: {
+          ...state.sessions[FC_ROUTE],
+          selectedModel: 'default',
+          effort: 'medium',       // user explicitly chose medium
+          thinkingMode: 'disabled', // user explicitly chose disabled
+        },
+      },
+      availableModels: [{
+        value: 'default', displayName: 'Default', description: 'Opus 4.7',
+        supportsEffort: true,
+        supportedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max'],
+        supportsAdaptiveThinking: true,
+      }],
+    }))
+
+    renderFC()
+
+    expect(viewProps.effort).toBe('medium')
+    expect(viewProps.thinkingMode).toBe('disabled')
+  })
+
+  it('derives capability props from selectedModel: opus-4-7 → adaptive + xhigh + max', () => {
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [FC_ROUTE]: { ...state.sessions[FC_ROUTE], selectedModel: 'claude-opus-4-7' },
+      },
+      availableModels: [{ value: 'claude-opus-4-7', displayName: 'Opus 4.7', description: 'Opus 4.7' }],
+    }))
+
+    renderFC()
+
+    expect(viewProps.adaptiveSupported).toBe(true)
+    expect(viewProps.effortSupported).toBe(true)
+    expect(viewProps.allowedEffortLevels).toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
+  })
+
+  it('derives capability props from selectedModel: sonnet-4-5 → no adaptive, no effort', () => {
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [FC_ROUTE]: { ...state.sessions[FC_ROUTE], selectedModel: 'claude-sonnet-4-5' },
+      },
+      availableModels: [{ value: 'claude-sonnet-4-5', displayName: 'Sonnet 4.5', description: 'Sonnet 4.5' }],
+    }))
+
+    renderFC()
+
+    expect(viewProps.adaptiveSupported).toBe(false)
+    expect(viewProps.effortSupported).toBe(false)
+    expect(viewProps.allowedEffortLevels).toEqual([])
+  })
+
+  it('derives capability props from selectedModel: sonnet-4-6 → adaptive + max but no xhigh', () => {
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [FC_ROUTE]: { ...state.sessions[FC_ROUTE], selectedModel: 'claude-sonnet-4-6' },
+      },
+      availableModels: [{ value: 'claude-sonnet-4-6', displayName: 'Sonnet 4.6', description: 'Sonnet 4.6' }],
+    }))
+
+    renderFC()
+
+    expect(viewProps.adaptiveSupported).toBe(true)
+    expect(viewProps.effortSupported).toBe(true)
+    expect(viewProps.allowedEffortLevels).toEqual(['low', 'medium', 'high', 'max'])
+  })
+
+  it('onSelectThinking: updates store; no IPC restart when sdkActive=false', async () => {
+    renderFC()
+
+    await viewProps.onSelectThinking('disabled')
+
+    expect(useSessionStore.getState().sessions[FC_ROUTE].thinkingMode).toBe('disabled')
+    // No active SDK → no cancel/recreate
+    expect(ipcCalls['session:cancel']).toBeUndefined()
+    expect(ipcCalls['session:create']).toBeUndefined()
+  })
+
+  it('onSelectThinking: when sdkActive, cancels + recreates session with new thinkingMode', async () => {
+    useSessionStore.getState().markSdkActive(FC_ROUTE)
+    renderFC()
+
+    await viewProps.onSelectThinking('enabled')
+
+    expect(useSessionStore.getState().sessions[FC_ROUTE].thinkingMode).toBe('enabled')
+    expect(ipcCalls['session:cancel']).toHaveLength(1)
+    expect(ipcCalls['session:cancel'][0][0]).toBe(FC_ROUTE)
+    expect(ipcCalls['session:create']).toHaveLength(1)
+    // createSession args: routingId, cwd, effort, resumeId, permissionMode, model, thinkingMode
+    const createArgs = ipcCalls['session:create'][0]
+    expect(createArgs[0]).toBe(FC_ROUTE)
+    expect(createArgs[6]).toBe('enabled')
+  })
+
+  it('onSelectEffort: updates store; no IPC restart when sdkActive=false', async () => {
+    renderFC()
+
+    await viewProps.onSelectEffort('high')
+
+    expect(useSessionStore.getState().sessions[FC_ROUTE].effort).toBe('high')
+    expect(ipcCalls['session:cancel']).toBeUndefined()
+    expect(ipcCalls['session:create']).toBeUndefined()
+  })
+
+  it('onSelectEffort: when sdkActive, cancels + recreates session with new effort', async () => {
+    useSessionStore.getState().markSdkActive(FC_ROUTE)
+    renderFC()
+
+    await viewProps.onSelectEffort('xhigh')
+
+    expect(useSessionStore.getState().sessions[FC_ROUTE].effort).toBe('xhigh')
+    expect(ipcCalls['session:cancel']).toHaveLength(1)
+    expect(ipcCalls['session:create']).toHaveLength(1)
+    const createArgs = ipcCalls['session:create'][0]
+    expect(createArgs[2]).toBe('xhigh') // effort
+  })
+
+  it('onSelectModel: switching to a model without effort clears the explicit effort pick', () => {
+    // Start with explicit picks on a full-featured model. The SDK-provided
+    // capability fields are the source of truth.
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [FC_ROUTE]: {
+          ...state.sessions[FC_ROUTE],
+          selectedModel: 'default',
+          thinkingMode: 'adaptive',
+          effort: 'xhigh',
+        },
+      },
+      availableModels: [
+        {
+          value: 'default', displayName: 'Default', description: 'Opus 4.7',
+          supportsEffort: true,
+          supportedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max'],
+          supportsAdaptiveThinking: true,
+        },
+        {
+          value: 'haiku', displayName: 'Haiku', description: 'Haiku 4.5',
+          // No capability fields — haiku has neither effort nor adaptive.
+        },
+      ],
+    }))
+
+    renderFC()
+
+    viewProps.onSelectModel('haiku')
+
+    const session = useSessionStore.getState().sessions[FC_ROUTE]
+    expect(session.selectedModel).toBe('haiku')
+    expect(session.thinkingMode).toBe('enabled') // adaptive coerced (id fallback: haiku)
+    expect(session.effort).toBeNull()             // effort unsupported → explicit pick cleared
+  })
+
+  it('onSelectModel: switching to a model with adaptive but no xhigh coerces xhigh → high', () => {
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [FC_ROUTE]: {
+          ...state.sessions[FC_ROUTE],
+          selectedModel: 'default',
+          thinkingMode: 'adaptive',
+          effort: 'xhigh',
+        },
+      },
+      availableModels: [
+        {
+          value: 'default', displayName: 'Default', description: 'Opus 4.7',
+          supportsEffort: true,
+          supportedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max'],
+          supportsAdaptiveThinking: true,
+        },
+        {
+          value: 'sonnet', displayName: 'Sonnet', description: 'Sonnet 4.6',
+          supportsEffort: true,
+          supportedEffortLevels: ['low', 'medium', 'high', 'max'],
+          supportsAdaptiveThinking: true,
+        },
+      ],
+    }))
+
+    renderFC()
+
+    viewProps.onSelectModel('sonnet')
+
+    const session = useSessionStore.getState().sessions[FC_ROUTE]
+    expect(session.thinkingMode).toBe('adaptive') // both support adaptive
+    expect(session.effort).toBe('high')           // xhigh coerced to model's default
   })
 })

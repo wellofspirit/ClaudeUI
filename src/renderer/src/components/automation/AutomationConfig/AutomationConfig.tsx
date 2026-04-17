@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo } from 'react'
 import { useAutomationStore } from '../../../stores/automation-store'
 import type { Automation, AutomationSchedule, ClaudePermissions } from '../../../../../shared/types'
-import { EFFORT_LEVELS, SCHEDULE_PRESETS, PERMISSION_TEMPLATES, isAutomationDirty } from './utils'
+import { EFFORT_LEVELS, SCHEDULE_PRESETS, PERMISSION_TEMPLATES, PERMISSION_MODES, isAutomationDirty } from './utils'
 
 export function AutomationConfig(): React.JSX.Element {
   const selectedId = useAutomationStore((s) => s.selectedAutomationId)
@@ -22,6 +22,7 @@ function AutomationConfigForm({ automation }: { automation: Automation }): React
   const [schedule, setSchedule] = useState<AutomationSchedule>(automation.schedule)
   const [model, setModel] = useState(automation.model || '')
   const [effort, setEffort] = useState(automation.effort || 'medium')
+  const [permissionMode, setPermissionMode] = useState(automation.permissionMode || 'auto')
   const [enabled, setEnabled] = useState(automation.enabled)
   const [allowRules, setAllowRules] = useState<string[]>(automation.permissions.allow)
   const [denyRules, setDenyRules] = useState<string[]>(automation.permissions.deny)
@@ -33,8 +34,8 @@ function AutomationConfigForm({ automation }: { automation: Automation }): React
   const [dirPerms, setDirPerms] = useState<{ allow: string[]; deny: string[] } | null>(null)
 
   const isDirty = useMemo(
-    () => isAutomationDirty({ name, prompt, cwd, schedule, model, effort, allowRules, denyRules }, automation),
-    [name, prompt, cwd, schedule, model, effort, allowRules, denyRules, automation]
+    () => isAutomationDirty({ name, prompt, cwd, schedule, model, effort, permissionMode, allowRules, denyRules }, automation),
+    [name, prompt, cwd, schedule, model, effort, permissionMode, allowRules, denyRules, automation]
   )
 
   useEffect(() => {
@@ -70,6 +71,7 @@ function AutomationConfigForm({ automation }: { automation: Automation }): React
       schedule,
       model: model || undefined,
       effort: effort || undefined,
+      permissionMode: permissionMode as 'default' | 'auto',
       enabled,
       permissions: { allow: allowRules, deny: denyRules }
     }
@@ -244,6 +246,24 @@ function AutomationConfigForm({ automation }: { automation: Automation }): React
                 }`}
               >
                 {level}
+              </button>
+            ))}
+          </div>
+        </Field>
+        <Field label="Permission Mode" className="flex-1">
+          <div className="flex gap-1.5">
+            {PERMISSION_MODES.map((mode) => (
+              <button
+                key={mode.value}
+                onClick={() => setPermissionMode(mode.value)}
+                title={mode.description}
+                className={`flex-1 px-2 py-1 text-xs rounded-lg border transition-colors ${
+                  permissionMode === mode.value
+                    ? 'bg-bg-hover border-text-accent text-text-primary'
+                    : 'border-border/40 text-text-muted hover:bg-bg-hover'
+                }`}
+              >
+                {mode.label}
               </button>
             ))}
           </div>
