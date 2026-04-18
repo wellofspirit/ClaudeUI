@@ -1,11 +1,12 @@
 import React, { useEffect, useRef, useState } from 'react'
+import { CodeView } from '../CodeView'
 
 export interface MockupPreviewCardViewProps {
   directory: string
   title?: string
   html: string | null
   error: string | null
-  srcdoc: string | null
+  src: string | null
   onExpand: () => void
   onCopyHtml: () => void
 }
@@ -15,7 +16,7 @@ export function MockupPreviewCardView({
   title,
   html,
   error,
-  srcdoc,
+  src,
   onExpand,
   onCopyHtml
 }: MockupPreviewCardViewProps): React.JSX.Element {
@@ -23,9 +24,11 @@ export function MockupPreviewCardView({
   const [tab, setTab] = useState<'preview' | 'code'>('preview')
   const iframeRef = useRef<HTMLIFrameElement>(null)
 
-  // Auto-resize iframe to content height
+  // Auto-resize iframe to content height. Opaque-origin iframes block
+  // contentDocument access — treat that case as a soft failure and keep
+  // the default height.
   useEffect(() => {
-    if (!iframeRef.current || !srcdoc) return
+    if (!iframeRef.current || !src) return
 
     const iframe = iframeRef.current
     const onLoad = (): void => {
@@ -42,7 +45,7 @@ export function MockupPreviewCardView({
 
     iframe.addEventListener('load', onLoad)
     return () => iframe.removeEventListener('load', onLoad)
-  }, [srcdoc])
+  }, [src])
 
   return (
     <div className="mt-1">
@@ -98,33 +101,36 @@ export function MockupPreviewCardView({
         ))}
       </div>
 
-      {/* Content */}
+      {/* Content — keep both panes mounted so tab switches don't remount the iframe (which causes a white flash on reload) */}
       {error ? (
         <div className="text-[12px] text-danger bg-danger/5 rounded-md px-3 py-2">
           {error}
         </div>
-      ) : tab === 'preview' ? (
-        srcdoc ? (
-          <div className="rounded-md border border-border overflow-hidden bg-white">
-            <iframe
-              ref={iframeRef}
-              srcDoc={srcdoc}
-              sandbox=""
-              style={{ width: '100%', height: iframeHeight, border: 'none', display: 'block' }}
-              title={title || 'Mockup preview'}
-            />
-          </div>
-        ) : (
-          <div className="h-[100px] rounded-md border border-border flex items-center justify-center">
-            <span className="text-[12px] text-text-muted">Loading mockup...</span>
-          </div>
-        )
       ) : (
-        <div className="rounded-md border border-border overflow-hidden">
-          <pre className="text-[12px] leading-relaxed p-3 overflow-auto max-h-[500px] bg-bg-secondary text-text-primary font-mono whitespace-pre-wrap break-words">
-            {html || 'Loading...'}
-          </pre>
-        </div>
+        <>
+          <div style={{ display: tab === 'preview' ? 'block' : 'none' }}>
+            {src ? (
+              <div className="rounded-md border border-border overflow-hidden bg-white">
+                <iframe
+                  ref={iframeRef}
+                  src={src}
+                  sandbox=""
+                  style={{ width: '100%', height: iframeHeight, border: 'none', display: 'block' }}
+                  title={title || 'Mockup preview'}
+                />
+              </div>
+            ) : (
+              <div className="h-[100px] rounded-md border border-border flex items-center justify-center">
+                <span className="text-[12px] text-text-muted">Loading mockup...</span>
+              </div>
+            )}
+          </div>
+          <div style={{ display: tab === 'code' ? 'block' : 'none' }}>
+            <div className="max-h-[500px] overflow-auto">
+              <CodeView code={html || 'Loading...'} filePath="index.html" />
+            </div>
+          </div>
+        </>
       )}
     </div>
   )

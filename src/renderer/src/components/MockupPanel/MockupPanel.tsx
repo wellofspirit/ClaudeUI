@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
-import { buildSrcdoc } from '../../lib/mockup-utils'
+import { buildMockupUrl } from '../../../../shared/mockup-url'
 import { MockupPanelView } from './View'
 
 interface Props {
@@ -9,8 +9,9 @@ interface Props {
 
 /**
  * FC for the right-panel mockup preview.
- * Handles IPC (read HTML, watch/unwatch), store access,
- * and delegates rendering to MockupPanelView.
+ * Iframe loads directly from `mockup-asset://` — dark mode is a URL query
+ * param so the handler can rewrite the `<html>` tag server-side (scripts are
+ * blocked by sandbox=""). File changes bump a version counter for cache bust.
  */
 export function MockupPanel({ style }: Props): React.JSX.Element {
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
@@ -22,8 +23,9 @@ export function MockupPanel({ style }: Props): React.JSX.Element {
   const [html, setHtml] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [darkMode, setDarkMode] = useState(false)
+  const [version, setVersion] = useState(1)
 
-  // Load HTML from disk
+  // HTML source is only used for the Code tab + Copy button.
   const loadHtml = useCallback(() => {
     if (!cwd || !mockupDir) return
     window.api.readMockupHtml(cwd, mockupDir).then((content) => {
@@ -34,19 +36,20 @@ export function MockupPanel({ style }: Props): React.JSX.Element {
     })
   }, [cwd, mockupDir])
 
-  // Initial load
   useEffect(() => {
     loadHtml()
   }, [loadHtml])
 
-  // Watch for file changes and auto-reload
   useEffect(() => {
     if (!cwd || !mockupDir) return
 
     window.api.watchMockup(cwd, mockupDir)
 
     const unsub = window.api.onMockupFileChanged((changedDir: string) => {
-      if (changedDir === mockupDir) loadHtml()
+      if (changedDir === mockupDir) {
+        loadHtml()
+        setVersion((v) => v + 1)
+      }
     })
 
     return () => {
@@ -55,7 +58,8 @@ export function MockupPanel({ style }: Props): React.JSX.Element {
     }
   }, [cwd, mockupDir, loadHtml])
 
-  const srcdoc = html ? buildSrcdoc(html, darkMode) : null
+  const iframeSrc =
+    cwd && mockupDir ? buildMockupUrl(cwd, mockupDir, { dark: darkMode, version }) : null
 
   const handleClose = (): void => {
     if (activeSessionId) closeMockupPanel(activeSessionId)
@@ -72,7 +76,7 @@ export function MockupPanel({ style }: Props): React.JSX.Element {
       mockupDir={mockupDir}
       html={html}
       error={error}
-      srcdoc={srcdoc}
+      src={iframeSrc}
       onClose={handleClose}
       onCopyHtml={handleCopyHtml}
       onDarkModeChange={setDarkMode}

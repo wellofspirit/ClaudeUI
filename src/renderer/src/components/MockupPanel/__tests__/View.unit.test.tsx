@@ -15,7 +15,7 @@ function renderView(overrides: Partial<MockupPanelViewProps> = {}) {
     mockupDir: 'f0f0f0f0',
     html: '<div>Content</div>',
     error: null,
-    srcdoc: '<html><body><div>Content</div></body></html>',
+    src: 'mockup-asset://m/Zm9v/f0f0f0f0/?v=1',
     onClose: vi.fn(),
     onCopyHtml: vi.fn(),
     onDarkModeChange: vi.fn(),
@@ -45,19 +45,21 @@ describe('MockupPanelView', () => {
   })
 
   it('renders error state', () => {
-    renderView({ error: 'Failed to load', srcdoc: null })
+    renderView({ error: 'Failed to load', src: null })
     expect(screen.getByText('Failed to load')).toBeInTheDocument()
   })
 
-  it('renders loading state when srcdoc is null', () => {
-    renderView({ srcdoc: null })
+  it('renders loading state when src is null', () => {
+    renderView({ src: null })
     expect(screen.getByText('Loading mockup...')).toBeInTheDocument()
   })
 
   it('switches to code tab', () => {
-    renderView()
+    const { container } = renderView()
     fireEvent.click(screen.getByText('code'))
-    expect(screen.getByText('<div>Content</div>')).toBeInTheDocument()
+    // CodeView tokenizes into multiple spans; assert via combined textContent.
+    const pre = container.querySelector('pre')
+    expect(pre?.textContent).toContain('<div>Content</div>')
   })
 
   it('calls onClose when close button clicked', () => {

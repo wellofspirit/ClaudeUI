@@ -1,4 +1,5 @@
 import { useState, useRef } from 'react'
+import { CodeView } from '../chat/CodeView'
 
 type DeviceFrame = 'mobile' | 'tablet' | 'desktop'
 
@@ -14,7 +15,7 @@ export interface MockupPanelViewProps {
   mockupDir: string | null
   html: string | null
   error: string | null
-  srcdoc: string | null
+  src: string | null
   onClose: () => void
   onCopyHtml: () => void
   onDarkModeChange: (dark: boolean) => void
@@ -27,7 +28,7 @@ export function MockupPanelView({
   mockupDir,
   html,
   error,
-  srcdoc,
+  src,
   onClose,
   onCopyHtml,
   onDarkModeChange,
@@ -144,43 +145,44 @@ export function MockupPanelView({
         </button>
       </div>
 
-      {/* Content area */}
-      {tab === 'preview' ? (
-        <div className="flex-1 min-h-0 overflow-auto flex justify-center p-4 bg-[#f5f5f5] dark:bg-[#1a1a1a]">
-          {error ? (
-            <div className="text-[12px] text-danger self-start bg-danger/5 rounded-md px-3 py-2">
-              {error}
-            </div>
-          ) : srcdoc ? (
-            <div
-              className="bg-white shadow-lg rounded-lg overflow-hidden transition-all duration-200"
-              style={{
-                width: iframeWidth === '100%' ? '100%' : iframeWidth,
-                maxWidth: '100%',
-                height: '100%'
-              }}
-            >
-              <iframe
-                ref={iframeRef}
-                srcDoc={srcdoc}
-                sandbox=""
-                style={{ width: '100%', height: '100%', border: 'none', display: 'block' }}
-                title={mockupTitle || 'Mockup preview'}
-              />
-            </div>
-          ) : (
-            <div className="flex items-center justify-center h-full">
-              <span className="text-[12px] text-text-muted">Loading mockup...</span>
-            </div>
-          )}
-        </div>
-      ) : (
-        <div className="flex-1 min-h-0 overflow-auto">
-          <pre className="text-[12px] leading-relaxed p-4 text-text-primary font-mono whitespace-pre-wrap break-words">
-            {html || 'Loading...'}
-          </pre>
-        </div>
-      )}
+      {/* Content area — keep both panes mounted so tab switches don't remount the iframe (avoids white flash on reload) */}
+      <div
+        className="flex-1 min-h-0 overflow-auto justify-center p-4 bg-[#f5f5f5] dark:bg-[#1a1a1a]"
+        style={{ display: tab === 'preview' ? 'flex' : 'none' }}
+      >
+        {error ? (
+          <div className="text-[12px] text-danger self-start bg-danger/5 rounded-md px-3 py-2">
+            {error}
+          </div>
+        ) : src ? (
+          <div
+            className="bg-white shadow-lg rounded-lg overflow-hidden transition-all duration-200"
+            style={{
+              width: iframeWidth === '100%' ? '100%' : iframeWidth,
+              maxWidth: '100%',
+              height: '100%'
+            }}
+          >
+            <iframe
+              ref={iframeRef}
+              src={src}
+              sandbox=""
+              style={{ width: '100%', height: '100%', border: 'none', display: 'block' }}
+              title={mockupTitle || 'Mockup preview'}
+            />
+          </div>
+        ) : (
+          <div className="flex items-center justify-center h-full">
+            <span className="text-[12px] text-text-muted">Loading mockup...</span>
+          </div>
+        )}
+      </div>
+      <div
+        className="flex-1 min-h-0 overflow-auto p-4"
+        style={{ display: tab === 'code' ? 'block' : 'none' }}
+      >
+        <CodeView code={html || 'Loading...'} filePath="index.html" />
+      </div>
     </div>
   )
 }

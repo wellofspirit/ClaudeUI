@@ -22,6 +22,7 @@ interface ModelPricing {
 const MODEL_PRICING: Array<{ match: string; pricing: ModelPricing }> = [
   { match: 'opus-4-5', pricing: { inputPerMTok: 5, outputPerMTok: 25, cacheWritePerMTok: 6.25, cacheReadPerMTok: 0.5 } },
   { match: 'opus-4-6', pricing: { inputPerMTok: 5, outputPerMTok: 25, cacheWritePerMTok: 6.25, cacheReadPerMTok: 0.5 } },
+  { match: 'opus-4-7', pricing: { inputPerMTok: 5, outputPerMTok: 25, cacheWritePerMTok: 6.25, cacheReadPerMTok: 0.5 } },
   { match: 'opus-4', pricing: { inputPerMTok: 15, outputPerMTok: 75, cacheWritePerMTok: 18.75, cacheReadPerMTok: 1.5 } },
   { match: 'opus', pricing: { inputPerMTok: 5, outputPerMTok: 25, cacheWritePerMTok: 6.25, cacheReadPerMTok: 0.5 } },
   { match: 'sonnet', pricing: { inputPerMTok: 3, outputPerMTok: 15, cacheWritePerMTok: 3.75, cacheReadPerMTok: 0.3 } },
@@ -176,6 +177,12 @@ describe('getPricing', () => {
   it('matches opus-4-6', () => {
     const p = getPricing('claude-opus-4-6')
     expect(p.inputPerMTok).toBe(5)
+  })
+
+  it('matches opus-4-7 before opus-4', () => {
+    const p = getPricing('claude-opus-4-7')
+    expect(p.inputPerMTok).toBe(5)
+    expect(p.outputPerMTok).toBe(25)
   })
 
   it('matches older opus-4 (more expensive)', () => {

@@ -15,7 +15,7 @@ function renderView(overrides: Partial<MockupPreviewCardViewProps> = {}) {
     title: 'Test Mockup',
     html: '<div>Hello</div>',
     error: null,
-    srcdoc: '<html><body><div>Hello</div></body></html>',
+    src: 'mockup-asset://m/Zm9v/abc12345/?v=1',
     onExpand: vi.fn(),
     onCopyHtml: vi.fn(),
     ...overrides
@@ -43,20 +43,22 @@ describe('MockupPreviewCardView', () => {
     expect(iframe?.title).toBe('Test Mockup')
   })
 
-  it('renders loading state when srcdoc is null', () => {
-    renderView({ srcdoc: null })
+  it('renders loading state when src is null', () => {
+    renderView({ src: null })
     expect(screen.getByText('Loading mockup...')).toBeInTheDocument()
   })
 
   it('renders error state', () => {
-    renderView({ error: 'File not found', srcdoc: null })
+    renderView({ error: 'File not found', src: null })
     expect(screen.getByText('File not found')).toBeInTheDocument()
   })
 
   it('switches to code tab and shows HTML source', () => {
-    renderView()
+    const { container } = renderView()
     fireEvent.click(screen.getByText('code'))
-    expect(screen.getByText('<div>Hello</div>')).toBeInTheDocument()
+    // CodeView tokenizes into multiple spans; assert via combined textContent.
+    const pre = container.querySelector('pre')
+    expect(pre?.textContent).toContain('<div>Hello</div>')
   })
 
   it('shows Loading... in code tab when html is null', () => {
