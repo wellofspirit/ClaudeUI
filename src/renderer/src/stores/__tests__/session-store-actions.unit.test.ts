@@ -304,6 +304,37 @@ describe('addPendingApproval / clearPendingApprovals', () => {
     expect(store().sessions['r1'].pendingApprovals).toEqual([])
     expect(store().sessions['r2'].pendingApprovals).toHaveLength(1)
   })
+
+  it('removePendingApprovalByToolUse removes only the approval with the matching tool_use_id', () => {
+    store().createNewSession('r1', '/p')
+    store().addPendingApproval(
+      'r1',
+      makePendingApproval({ requestId: 'req-1', toolUseId: 'toolu_a' }),
+    )
+    store().addPendingApproval(
+      'r1',
+      makePendingApproval({ requestId: 'req-2', toolUseId: 'toolu_b' }),
+    )
+    // An older-style approval with no toolUseId should be unaffected.
+    store().addPendingApproval(
+      'r1',
+      makePendingApproval({ requestId: 'req-3' }),
+    )
+
+    store().removePendingApprovalByToolUse('r1', 'toolu_a')
+    const remaining = store().sessions['r1'].pendingApprovals.map((a) => a.requestId)
+    expect(remaining).toEqual(['req-2', 'req-3'])
+  })
+
+  it('removePendingApprovalByToolUse is a no-op when no approval carries that id', () => {
+    store().createNewSession('r1', '/p')
+    store().addPendingApproval(
+      'r1',
+      makePendingApproval({ requestId: 'req-1', toolUseId: 'toolu_a' }),
+    )
+    store().removePendingApprovalByToolUse('r1', 'toolu_unknown')
+    expect(store().sessions['r1'].pendingApprovals.map((a) => a.requestId)).toEqual(['req-1'])
+  })
 })
 
 // ---------------------------------------------------------------------------

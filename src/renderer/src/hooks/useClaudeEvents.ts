@@ -31,6 +31,7 @@ export function useClaudeEvents(): void {
   const appendStreamingThinking = useSessionStore((s) => s.appendStreamingThinking)
   const addPendingApproval = useSessionStore((s) => s.addPendingApproval)
   const clearPendingApprovals = useSessionStore((s) => s.clearPendingApprovals)
+  const removePendingApprovalByToolUse = useSessionStore((s) => s.removePendingApprovalByToolUse)
   const setStatus = useSessionStore((s) => s.setStatus)
   const addError = useSessionStore((s) => s.addError)
   const appendToolResult = useSessionStore((s) => s.appendToolResult)
@@ -192,6 +193,11 @@ export function useClaudeEvents(): void {
       }),
       window.api.onToolResult((routingId, { toolUseId, result, isError }) => {
         appendToolResult(routingId, toolUseId, result, isError)
+        // Belt-and-suspenders: when cli.js has produced a result for this
+        // tool_use, any approval still sitting in the store for it is
+        // necessarily stale (resolver already ran). Clear it so late
+        // cleanup races can't re-decorate a finished card.
+        if (toolUseId) removePendingApprovalByToolUse(routingId, toolUseId)
         // Rebuild todos when a task tool result arrives (e.g. TaskCreate gets its ID)
         if (!isError) rebuildTodos(routingId)
 
@@ -379,5 +385,5 @@ export function useClaudeEvents(): void {
     }).catch((err) => { window.api.logError('useClaudeEvents', `Initial block usage fetch failed: ${err}`) })
 
     return () => cleanups.forEach((fn) => fn())
-  }, [addMessage, appendStreamingText, appendStreamingThinking, addPendingApproval, clearPendingApprovals, setStatus, addError, appendToolResult, updateTaskProgress, addTaskNotification, addSubagentMessage, appendSubagentMessageBatch, appendSubagentStreamingText, appendSubagentStreamingThinking, appendSubagentToolResult, setBashOutput, setBackgroundOutput, setStatusLine, setPermissionMode, setSlashCommands, setSdkSkillNames, addSandboxViolation, setVoiceState, appendVoiceTranscript])
+  }, [addMessage, appendStreamingText, appendStreamingThinking, addPendingApproval, clearPendingApprovals, removePendingApprovalByToolUse, setStatus, addError, appendToolResult, updateTaskProgress, addTaskNotification, addSubagentMessage, appendSubagentMessageBatch, appendSubagentStreamingText, appendSubagentStreamingThinking, appendSubagentToolResult, setBashOutput, setBackgroundOutput, setStatusLine, setPermissionMode, setSlashCommands, setSdkSkillNames, addSandboxViolation, setVoiceState, appendVoiceTranscript])
 }

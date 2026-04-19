@@ -135,20 +135,27 @@ function useUnmatchedApprovals(): PendingApproval[] {
 
   if (pendingApprovals.length === 0) return []
 
-  // Collect all tool_use signatures from messages
+  // Collect tool_use ids AND (toolName, input) signatures. The id is the
+  // authoritative binding key (mirrors MessageBubble's matcher) and the
+  // signature is a legacy fallback for older main-process payloads that
+  // haven't yet started forwarding toolUseId.
+  const toolUseIds = new Set<string>()
   const toolUseSignatures = new Set<string>()
   for (const msg of messages) {
     if (msg.role !== 'assistant') continue
     for (const b of msg.content) {
-      if (b.type === 'tool_use' && b.toolName && b.toolInput) {
+      if (b.type !== 'tool_use') continue
+      if (b.toolUseId) toolUseIds.add(b.toolUseId)
+      if (b.toolName && b.toolInput) {
         toolUseSignatures.add(`${b.toolName}:${JSON.stringify(b.toolInput)}`)
       }
     }
   }
 
-  return pendingApprovals.filter(
-    (a) => !toolUseSignatures.has(`${a.toolName}:${JSON.stringify(a.input)}`)
-  )
+  return pendingApprovals.filter((a) => {
+    if (a.toolUseId) return !toolUseIds.has(a.toolUseId)
+    return !toolUseSignatures.has(`${a.toolName}:${JSON.stringify(a.input)}`)
+  })
 }
 
 function ApprovalCard({ approval }: { approval: PendingApproval }): React.JSX.Element {

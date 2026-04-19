@@ -621,6 +621,11 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
             const requestId = uuid()
             const approval: PendingApproval = {
               requestId,
+              // Forward cli.js's tool_use_id so the renderer can bind this
+              // approval to a specific tool_use block rather than matching
+              // by toolName+input signature (which collapses repeated
+              // identical calls and shows the prompt on every old card).
+              toolUseId: opts.toolUseId,
               toolName,
               input,
               suggestions: opts.suggestions as PendingApproval['suggestions'],

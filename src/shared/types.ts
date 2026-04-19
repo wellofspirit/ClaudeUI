@@ -54,6 +54,14 @@ export interface PermissionSuggestion {
 
 export interface PendingApproval {
   requestId: string
+  /**
+   * cli.js-assigned tool_use id for the invocation being prompted. The
+   * correct binding key between an approval and its tool_use block —
+   * matching on toolName+input alone is lossy (repeated identical calls
+   * all collapse to the same approval and get the UI shown on every
+   * historical card).
+   */
+  toolUseId?: string
   toolName: string
   input: Record<string, unknown>
   suggestions?: PermissionSuggestion[]
