@@ -41,11 +41,39 @@ export function buildArgs(options: QueryOptions): string[] {
     'stream-json',
   ]
 
+  // Thinking mode — translate {type, budgetTokens, display} the same way
+  // the SDK's arg builder does:
+  //   enabled + no budget   → --thinking adaptive
+  //   enabled + budget      → --max-thinking-tokens N   (no --thinking flag)
+  //   disabled              → --thinking disabled
+  //   adaptive              → --thinking adaptive
+  //   + display (!disabled) → --thinking-display <display>
+  // Passing --thinking enabled literally makes cli.js silently drop the flag
+  // so thinking deltas never stream.
   if (options.thinking) {
     const t = options.thinking
-    args.push('--thinking', t.type)
-    if (typeof t.budgetTokens === 'number') {
-      args.push('--max-thinking-tokens', String(t.budgetTokens))
+    switch (t.type) {
+      case 'enabled':
+        if (t.budgetTokens === undefined) args.push('--thinking', 'adaptive')
+        else args.push('--max-thinking-tokens', String(t.budgetTokens))
+        break
+      case 'disabled':
+        args.push('--thinking', 'disabled')
+        break
+      case 'adaptive':
+        args.push('--thinking', 'adaptive')
+        if (typeof t.budgetTokens === 'number') {
+          args.push('--max-thinking-tokens', String(t.budgetTokens))
+        }
+        break
+      default:
+        args.push('--thinking', t.type)
+        if (typeof t.budgetTokens === 'number') {
+          args.push('--max-thinking-tokens', String(t.budgetTokens))
+        }
+    }
+    if (t.type !== 'disabled' && t.display) {
+      args.push('--thinking-display', t.display)
     }
   }
 
@@ -67,6 +95,7 @@ export function buildArgs(options: QueryOptions): string[] {
     args.push('--disallowedTools', options.disallowedTools.join(','))
   }
   if (Array.isArray(options.tools)) {
+    // `[]` → `--tools ""` (no tools at all), undefined → omit (default set).
     args.push('--tools', options.tools.length ? options.tools.join(',') : '')
   }
 
@@ -75,12 +104,18 @@ export function buildArgs(options: QueryOptions): string[] {
     args.push('--mcp-config', JSON.stringify({ mcpServers: cliServers }))
   }
 
-  if (options.settingSources && options.settingSources.length) {
-    args.push('--setting-sources', options.settingSources.join(','))
+  // SDK emits this as a single `--setting-sources=csv` arg (not two args).
+  // cli.js's parser tolerates both on most versions but match SDK exactly.
+  if (options.settingSources !== undefined) {
+    args.push(`--setting-sources=${options.settingSources.join(',')}`)
   }
 
   if (options.permissionMode) {
     args.push('--permission-mode', options.permissionMode)
+  }
+
+  if (options.allowDangerouslySkipPermissions) {
+    args.push('--allow-dangerously-skip-permissions')
   }
 
   if (options.includeHookEvents) args.push('--include-hook-events')

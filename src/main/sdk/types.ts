@@ -45,6 +45,11 @@ export type CanUseTool = (
 export interface ThinkingConfig {
   type: 'disabled' | 'enabled' | 'adaptive' | string
   budgetTokens?: number
+  /**
+   * Streaming display hint for thinking blocks. Forwarded as
+   * --thinking-display; ignored when type is 'disabled'.
+   */
+  display?: 'streaming' | 'summarized' | string
 }
 
 export interface SystemPromptPreset {
