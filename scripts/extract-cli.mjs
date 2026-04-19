@@ -431,15 +431,53 @@ async function main() {
   log(`transformed cli.js: ${transformed.length.toLocaleString()} bytes`)
 
   // Syntax check — catches IIFE-unwrap mistakes before we commit.
+  // Try node → bun → esbuild; skip whichever isn't installed. Same pattern
+  // as patch/apply-all.mjs: bun's node-compat shim doesn't implement --check
+  // and bails with "Input must be provided", which we treat as "try next".
   const tmp = join(ROOT, '.cache', 'cli-check.js')
   mkdirSync(dirname(tmp), { recursive: true })
   writeFileSync(tmp, transformed)
-  try {
-    execFileSync('node', ['--check', tmp], { stdio: 'pipe' })
-    log(`syntax check passed`)
-  } catch (err) {
-    const stderr = err.stderr?.toString() || err.message
-    throw new Error(`Transformed cli.js failed syntax check:\n${stderr}`)
+
+  const checkers = [
+    {
+      name: 'node --check',
+      run: () => execFileSync('node', ['--check', tmp], { stdio: 'pipe' }),
+    },
+    {
+      name: 'bun build --no-bundle',
+      run: () =>
+        execFileSync('bun', ['build', '--no-bundle', '--outfile', '/dev/null', tmp], {
+          stdio: 'pipe',
+        }),
+    },
+    {
+      name: 'esbuild',
+      run: () =>
+        execFileSync(
+          resolve(ROOT, 'node_modules', '.bin', 'esbuild'),
+          ['--bundle=false', tmp],
+          { stdio: 'pipe' },
+        ),
+    },
+  ]
+
+  let checked = false
+  for (const checker of checkers) {
+    try {
+      checker.run()
+      log(`syntax check passed (${checker.name})`)
+      checked = true
+      break
+    } catch (err) {
+      if (err.code === 'ENOENT') continue // tool not installed; try next
+      const stderr = err.stderr?.toString() || ''
+      // bun's node shim rejects --check — advance to the next checker.
+      if (checker.name === 'node --check' && stderr.includes('Input must be provided')) continue
+      throw new Error(`Transformed cli.js failed syntax check (${checker.name}):\n${stderr || err.message}`)
+    }
+  }
+  if (!checked) {
+    log('WARN: no syntax checker available (node/bun/esbuild all absent) — skipping')
   }
 
   // Clean vendor/ dir before rebuilding (don't leak stale ripgrep/etc).
