@@ -505,8 +505,19 @@ async function handleCanUseTool(
   callback: CanUseTool | undefined,
   signal: AbortSignal,
 ): Promise<Record<string, unknown>> {
+  // cli.js validates the response with a Zod discriminated union over
+  // `behavior`:
+  //   { behavior: 'allow', updatedInput?, updatedPermissions?, toolUseID? }
+  //   { behavior: 'deny', message: string, interrupt?, toolUseID? }
+  // `message` is REQUIRED on the deny branch. An earlier revision of this
+  // function shipped `{ permitted: boolean, ... }` (the legacy stdin-tool
+  // shape, not the control-channel shape) which cli.js rejects with a
+  // ZodError — the failure only shows up when the consumer has
+  // canUseTool configured AND a tool actually triggers a prompt.
+  const toolUseID = request.tool_use_id as string | undefined
+
   if (!callback) {
-    return { permitted: true, toolUseID: request.tool_use_id as string }
+    return { behavior: 'allow', toolUseID }
   }
   const toolName = (request.tool_name as string) ?? ''
   const input = (request.input as Record<string, unknown>) ?? {}
@@ -526,18 +537,27 @@ async function handleCanUseTool(
   }
   const result: CanUseToolResult = await callback(toolName, input, context)
   if (result.behavior === 'allow') {
-    return {
-      permitted: true,
+    const response: Record<string, unknown> = {
+      behavior: 'allow',
       updatedInput: result.updatedInput ?? input,
-      updatedPermissions: result.updatedPermissions,
-      toolUseID: request.tool_use_id as string,
+      toolUseID,
     }
+    if (result.updatedPermissions !== undefined) {
+      response.updatedPermissions = result.updatedPermissions
+    }
+    return response
   }
-  return {
-    permitted: false,
-    message: result.message,
-    toolUseID: request.tool_use_id as string,
+  // Deny: `message` is required by cli.js's schema. Callers that omit it
+  // would trigger a ZodError and the tool call would hang — coerce to a
+  // sensible default so the channel stays consistent even on sloppy
+  // consumer code.
+  const response: Record<string, unknown> = {
+    behavior: 'deny',
+    message: result.message ?? 'Denied',
+    toolUseID,
   }
+  if (result.interrupt !== undefined) response.interrupt = result.interrupt
+  return response
 }
 
 function makeHandle(

@@ -230,10 +230,12 @@ Every QueryHandle method maps to one control_request. 31 total. Grouped for read
 cli.js sends these to us. Every subtype must be handled or cli.js may stall waiting for our response.
 
 ### `can_use_tool`
-Permission prompt for a tool invocation. Dispatched to `options.canUseTool(name, input, { signal, suggestions, blockedPath, decisionReason, title, displayName, description, toolUseId, agentId })`. Response shape:
+Permission prompt for a tool invocation. Dispatched to `options.canUseTool(name, input, { signal, suggestions, blockedPath, decisionReason, title, displayName, description, toolUseId, agentId })`. Response shape is a discriminated union keyed on `behavior` (cli.js Zod schema `iC5` at ~char 4957497 — strict parse, a non-matching shape ZodErrors and the tool call hangs):
 ```
-{ permitted: boolean, updatedInput?, updatedPermissions?, message?, toolUseID }
+{ behavior: 'allow', updatedInput?, updatedPermissions?, toolUseID? }
+{ behavior: 'deny',  message: string (required), interrupt?, toolUseID? }
 ```
+`message` is required on the deny branch. A `CanUseToolResult` with `behavior: 'deny'` but no `message` is coerced to a default string to keep the channel moving. The earlier `{permitted: boolean, ...}` shape (legacy stdin-tool permission format) was wrong — kept around accidentally after the move off the official SDK and only surfaced when a consumer actually exercised a permission prompt.
 
 ### `mcp_message`
 JSON-RPC message destined for an in-process SDK MCP server. Routed to `McpHost.dispatch(server_name, message)`. Response MUST be wrapped:
