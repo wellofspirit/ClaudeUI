@@ -79,7 +79,7 @@ vi.mock('../../services/claude-session', () => {
   }
 })
 
-vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
+vi.mock('../../sdk', () => ({
   query: vi.fn(() => {
     async function* empty(): AsyncGenerator<unknown> { /* */ }
     const gen: any = empty()

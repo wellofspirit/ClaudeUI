@@ -23,7 +23,7 @@ import { fileURLToPath } from 'node:url'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const projectRoot = resolve(__dirname, '../..')
-const cliPath = resolve(projectRoot, 'node_modules/@anthropic-ai/claude-agent-sdk/cli.js')
+const cliPath = resolve(projectRoot, 'vendor/claude-cli/cli.js')
 
 const V = '[\\w$]+'
 
@@ -32,7 +32,7 @@ try {
   src = readFileSync(cliPath, 'utf-8')
 } catch (err) {
   console.error(`ERROR: Cannot read ${cliPath}`)
-  console.error('Is @anthropic-ai/claude-agent-sdk installed?')
+  console.error('Did you run: node scripts/extract-cli.mjs ?')
   process.exit(1)
 }
 

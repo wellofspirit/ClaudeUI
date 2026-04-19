@@ -9,3 +9,9 @@ test-prompt.txt
 .claude/ui/mockups
 *.tsbuildinfo
 bin/
+
+# Vendored CLI bundle — regenerated from the upstream Bun binary via
+# scripts/extract-cli.mjs. Cached locally, rebuilt when claudeCliVersion
+# bumps in package.json.
+/vendor/claude-cli/
+/.cache/

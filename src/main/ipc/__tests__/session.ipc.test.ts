@@ -215,7 +215,7 @@ vi.mock('../../services/claude-session', () => {
   }
 })
 
-vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
+vi.mock('../../sdk', () => ({
   query: vi.fn(() => {
     // Return an async iterable shaped like the SDK Query.
     async function* empty(): AsyncGenerator<unknown> { /* noop */ }

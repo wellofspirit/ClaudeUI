@@ -28,8 +28,9 @@ let nativeModule: NativeAudioCapture | null = null
 let loadAttempted = false
 
 /**
- * Attempt to load the native audio capture module from the SDK vendor directory.
- * Returns null if the module is not available for this platform/arch.
+ * Attempt to load the native audio capture module from the vendored CLI
+ * directory. Returns null if the module is not available for this
+ * platform/arch.
  */
 function loadNativeModule(): NativeAudioCapture | null {
   if (loadAttempted) return nativeModule
@@ -45,29 +46,24 @@ function loadNativeModule(): NativeAudioCapture | null {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { app } = require('electron') as typeof import('electron')
 
-  // In production, the SDK is in app.asar.unpacked
+  // Production: vendor/claude-cli is shipped as extraResources → <Resources>/claude-cli.
+  // Dev mode: vendor/claude-cli/ at project root (populated by scripts/extract-cli.mjs).
   const appPath = app.getAppPath()
-  const basePath = appPath.includes('app.asar')
-    ? appPath.replace('app.asar', 'app.asar.unpacked')
-    : appPath
-
   const candidates = [
+    // Production extraResources
     path.join(
-      basePath,
-      'node_modules',
-      '@anthropic-ai',
-      'claude-agent-sdk',
+      path.dirname(appPath),
+      'claude-cli',
       'vendor',
       'audio-capture',
       triple,
       'audio-capture.node'
     ),
-    // Dev mode — resolve from project root
+    // Dev
     path.join(
       process.cwd(),
-      'node_modules',
-      '@anthropic-ai',
-      'claude-agent-sdk',
+      'vendor',
+      'claude-cli',
       'vendor',
       'audio-capture',
       triple,

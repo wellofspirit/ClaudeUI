@@ -28,7 +28,7 @@ import { fileURLToPath } from 'node:url'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const projectRoot = resolve(__dirname, '../..')
-const cliPath = resolve(projectRoot, 'node_modules/@anthropic-ai/claude-agent-sdk/cli.js')
+const cliPath = resolve(projectRoot, 'vendor/claude-cli/cli.js')
 
 // Regex shorthand for minified identifier
 const V = '[\\w$]+'
@@ -42,7 +42,7 @@ try {
   src = readFileSync(cliPath, 'utf-8')
 } catch (err) {
   console.error(`ERROR: Cannot read ${cliPath}`)
-  console.error('Is @anthropic-ai/claude-agent-sdk installed?')
+  console.error('Did you run: node scripts/extract-cli.mjs ?')
   process.exit(1)
 }
 
@@ -237,7 +237,8 @@ if (!skipB) {
   }
   {
     const before = src.slice(Math.max(0, anchorIdx - 500), anchorIdx)
-    const fnRe = new RegExp(`async function (${V})\\(\\)\\{`, 'g')
+    // Accept zero-or-more args: older versions had `()`, 2.1.114 has `(param)`.
+    const fnRe = new RegExp(`async function (${V})\\([^)]*\\)\\{`, 'g')
     let m, last
     while ((m = fnRe.exec(before)) !== null) last = m
     if (last) {

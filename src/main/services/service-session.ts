@@ -11,7 +11,7 @@
  * or process crash. Consumes zero API tokens.
  */
 
-import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk'
+import { query as sdkQuery } from '../sdk'
 import { getSdkExecutableOpts } from './claude-session'
 import { PERSISTED_SESSIONS_DIR } from './persisted-sessions-dir'
 import { logger } from './logger'

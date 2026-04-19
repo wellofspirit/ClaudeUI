@@ -22,9 +22,8 @@ import { execFileSync } from 'node:child_process'
 
 export const CLI_JS_PATH = path.resolve(
   process.cwd(),
-  'node_modules',
-  '@anthropic-ai',
-  'claude-agent-sdk',
+  'vendor',
+  'claude-cli',
   'cli.js',
 )
 
@@ -87,7 +86,8 @@ export function applyPatchOnCopy(patchDir: string): {
   post: string
   postAgain: string
 } {
-  const sdkDir = path.dirname(CLI_JS_PATH)
+  // project root — vendor/claude-cli/cli.js lives two levels above vendor/.
+  const projectRoot = path.resolve(path.dirname(CLI_JS_PATH), '..', '..')
   const backup = fs.readFileSync(CLI_JS_PATH, 'utf-8')
   const applyJs = path.resolve(patchDir, 'apply.mjs')
   if (!fs.existsSync(applyJs)) {
@@ -95,10 +95,10 @@ export function applyPatchOnCopy(patchDir: string): {
   }
 
   try {
-    // Run apply.mjs against the real cli.js — it edits in place.
-    execFileSync('node', [applyJs], { stdio: 'pipe', cwd: path.resolve(sdkDir, '..', '..', '..') })
+    // Run apply.mjs against the vendored cli.js — it edits in place.
+    execFileSync('node', [applyJs], { stdio: 'pipe', cwd: projectRoot })
     const post = fs.readFileSync(CLI_JS_PATH, 'utf-8')
-    execFileSync('node', [applyJs], { stdio: 'pipe', cwd: path.resolve(sdkDir, '..', '..', '..') })
+    execFileSync('node', [applyJs], { stdio: 'pipe', cwd: projectRoot })
     const postAgain = fs.readFileSync(CLI_JS_PATH, 'utf-8')
     return { pre: backup, post, postAgain }
   } finally {

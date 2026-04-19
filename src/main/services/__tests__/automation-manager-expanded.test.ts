@@ -56,7 +56,7 @@ type SdkMode =
 let sdkMode: SdkMode = { kind: 'events', events: [] }
 let lastAbortObserved = false
 
-vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
+vi.mock('../../sdk', () => ({
   query: (params: any) => {
     const ac: AbortController | undefined = params?.options?.abortController
     const mode = sdkMode

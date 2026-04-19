@@ -1,9 +1,8 @@
-import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk'
+import { query as sdkQuery } from '../sdk'
 import { v4 as uuid } from 'uuid'
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
-import { app } from 'electron'
 import type { BrowserWindow } from 'electron'
 import { computeTokenMetrics, buildSubagentFileMap } from './session-history'
 import { isAgentTool } from '../../shared/types'
@@ -20,48 +19,16 @@ import { createMockupServer } from './mockup-tool'
 import { getClassifier, stopClassifier, isSafeTool, buildTranscript, type TranscriptMessage } from './auto-classifier'
 import { resolveThinkingMode, type ThinkingMode } from '../../shared/model-capabilities'
 
-/** In production, cli.js is unpacked from the asar — resolve its real path */
-export function getCliJsPath(): string | undefined {
-  const appPath = app.getAppPath()
-  if (!appPath.includes('app.asar')) return undefined // dev mode
-  const unpacked = appPath.replace('app.asar', 'app.asar.unpacked')
-  return path.join(unpacked, 'node_modules', '@anthropic-ai', 'claude-agent-sdk', 'cli.js')
+import { locateCliJs, getCliVersion } from '../sdk'
+
+/** cli.js path — vendored at vendor/claude-cli/cli.js (extracted from upstream). */
+export function getCliJsPath(): string {
+  return locateCliJs()
 }
 
-/**
- * Read the SDK version from its package.json.
- * Works both in dev (node_modules) and production (extraResources / asar.unpacked).
- */
+/** Vendored CLI version, read from vendor/claude-cli/version.json. */
 export function getSdkVersion(): string {
-  // In production, the SDK is copied to extraResources and also asar.unpacked.
-  // require() won't resolve it since it's externalized — read from disk instead.
-  const appPath = app.getAppPath()
-  const sdkPkgRelative = path.join('node_modules', '@anthropic-ai', 'claude-agent-sdk', 'package.json')
-  const sdkPkgPaths = appPath.includes('app.asar')
-    ? [
-        // asar.unpacked (asarUnpack config)
-        path.join(appPath.replace('app.asar', 'app.asar.unpacked'), sdkPkgRelative),
-        // extraResources
-        path.join(path.dirname(appPath), 'claude-agent-sdk', 'package.json')
-      ]
-    : [
-        // Dev mode — resolve from project root (appPath points to project dir)
-        path.join(appPath, sdkPkgRelative)
-      ]
-  for (const p of sdkPkgPaths) {
-    try {
-      return JSON.parse(fs.readFileSync(p, 'utf-8')).version
-    } catch {
-      /* try next */
-    }
-  }
-  // Dev mode fallback — require() works fine when node_modules exists
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    return require('@anthropic-ai/claude-agent-sdk/package.json').version
-  } catch {
-    return 'unknown'
-  }
+  return getCliVersion()
 }
 
 /**
@@ -104,11 +71,10 @@ function getElectronHelperPath(): string {
  */
 export function getSdkExecutableOpts(): Record<string, unknown> {
   const cliPath = getCliJsPath()
-  if (!cliPath) return {} // dev mode — let SDK use default resolution
-  // Set ELECTRON_RUN_AS_NODE on process.env so the SDK inherits it at spawn
-  // time. We don't pass an explicit `env` to the SDK because it propagates it
-  // to all child processes (including the Bash tool), which breaks login-shell
-  // env inheritance.
+  // Set ELECTRON_RUN_AS_NODE on process.env so any downstream spawn inherits it.
+  // We don't pass an explicit `env` through because it would propagate to all
+  // child processes (including the Bash tool), breaking login-shell env
+  // inheritance.
   //
   // IMPORTANT: This poisons process.env for any BrowserWindow created after
   // this point — Electron re-invokes the exe for renderer processes, and
@@ -491,7 +457,7 @@ export class ClaudeSession {
           ...execOpts,
           cwd: this.cwd,
           model: this.model,
-          permissionMode: this.permissionMode as import('@anthropic-ai/claude-agent-sdk').PermissionMode,
+          permissionMode: this.permissionMode as import('../sdk').PermissionMode,
           systemPrompt: {
             type: 'preset' as const,
             preset: 'claude_code' as const,
@@ -673,7 +639,7 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
                 behavior: 'allow' as const,
                 updatedInput,
                 ...(updatedPermissions?.length
-                  ? { updatedPermissions: updatedPermissions as unknown as import('@anthropic-ai/claude-agent-sdk').PermissionUpdate[] }
+                  ? { updatedPermissions: updatedPermissions as unknown as import('../sdk').PermissionUpdate[] }
                   : {})
               }
             }

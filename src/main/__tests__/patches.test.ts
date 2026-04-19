@@ -3,7 +3,7 @@
  *
  * Layer 1 patch regression tests.
  *
- * Verifies the post-apply state of `node_modules/@anthropic-ai/claude-agent-sdk/cli.js`:
+ * Verifies the post-apply state of `vendor/claude-cli/cli.js`:
  * every expected `/*PATCHED:<name>*\/` marker is present and unique. These tests run
  * on every CI invocation (no auth or network required) so a failed/silently-no-op
  * patch caused by an SDK upgrade is caught before shipping.
@@ -47,6 +47,12 @@ const RESUME_FIX_UPSTREAM_BUILD =
 const RESUME_FIX_UPSTREAM_APPLY =
   /([\w$]+)\.parentUuid&&([\w$]+)\.has\(\1\.parentUuid\)\)\1\.parentUuid=\2\.get\(\1\.parentUuid\)\?\?null/
 
+/** Upstream detection for mcp-tool-refresh (CLI 2.1.114+). The CLI now
+ *  calls refreshTools() before each API call natively — our patches are a
+ *  no-op when this pattern is present. */
+const MCP_TOOL_REFRESH_UPSTREAM =
+  /\.options\.refreshTools\)\{[^}]*\.options\.refreshTools\(\)/
+
 describe.skipIf(!cliJsExists())('patches', () => {
   it('cli.js is readable and non-empty', () => {
     expect(src.length).toBeGreaterThan(1_000_000) // ~11MB; sanity lower bound
@@ -72,8 +78,7 @@ describe.skipIf(!cliJsExists())('patches', () => {
         '/*PATCHED:queue-control-consumed*/',
         '/*PATCHED:mcp-status-store-promise*/',
         '/*PATCHED:mcp-status-await-refresh*/',
-        '/*PATCHED:mcp-tool-refresh-A*/',
-        '/*PATCHED:mcp-tool-refresh-B*/',
+        // mcp-tool-refresh — upstreamed in CLI 2.1.114; tested below.
         '/*PATCHED:sandbox-network-fix*/',
         '/*PATCHED:background-task*/',
         '/*PATCHED:usage-relay*/',
@@ -175,17 +180,17 @@ describe.skipIf(!cliJsExists())('patches', () => {
   })
 
   // ---------------------------------------------------------------------------
-  // mcp-tool-refresh — 2 markers
+  // mcp-tool-refresh — upstreamed in CLI 2.1.114
+  // When upstreamed, markers are absent and the patch is a no-op. Assert the
+  // native `refreshTools()` pattern instead.
   // ---------------------------------------------------------------------------
   describe('mcp-tool-refresh', () => {
-    for (const name of ['mcp-tool-refresh-A', 'mcp-tool-refresh-B']) {
-      it(`marker ${name} present in cli.js`, () => {
-        expect(hasMarker(src, name)).toBe(true)
-      })
-      it(`marker ${name} appears exactly once`, () => {
-        expect(countOccurrences(src, `/*PATCHED:${name}*/`)).toBe(1)
-      })
-    }
+    it('marker or upstream pattern present', () => {
+      const markerA = hasMarker(src, 'mcp-tool-refresh-A')
+      const markerB = hasMarker(src, 'mcp-tool-refresh-B')
+      const upstream = MCP_TOOL_REFRESH_UPSTREAM.test(src)
+      expect(markerA || markerB || upstream).toBe(true)
+    })
   })
 
   // ---------------------------------------------------------------------------

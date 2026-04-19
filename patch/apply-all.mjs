@@ -41,14 +41,7 @@ console.log('\nAll patches applied.')
 // Both parse the full file and exit non-zero on syntax errors.
 // ---------------------------------------------------------------------------
 
-const cliPath = resolve(
-  __dirname,
-  '..',
-  'node_modules',
-  '@anthropic-ai',
-  'claude-agent-sdk',
-  'cli.js'
-)
+const cliPath = resolve(__dirname, '..', 'vendor', 'claude-cli', 'cli.js')
 
 console.log('\n>>> Syntax check: %s\n', cliPath)
 

@@ -5,7 +5,7 @@
  *
  * Strategy:
  *  - Mock `electron` with the standard shim.
- *  - Mock `@anthropic-ai/claude-agent-sdk` and `./claude-session` so we don't
+ *  - Mock `../../sdk` and `./claude-session` so we don't
  *    pull the 11MB bundled CLI into the worker.
  *  - Override `os.homedir()` to point at a tmp dir so `PLUGINS_DIR` resolves
  *    to a scratch location we own. The override MUST happen before the module
@@ -54,7 +54,7 @@ vi.mock('os', async () => {
 vi.mock('electron', async () => await import('../../../test/stubs/electron-shim'))
 
 // Don't pull the real SDK bundle — we only need the named export to exist.
-vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
+vi.mock('../../sdk', () => ({
   query: vi.fn(),
 }))
 

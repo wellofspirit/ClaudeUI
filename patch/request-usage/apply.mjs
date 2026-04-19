@@ -18,7 +18,7 @@ import { fileURLToPath } from 'node:url'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const projectRoot = resolve(__dirname, '../..')
-const cliPath = resolve(projectRoot, 'node_modules/@anthropic-ai/claude-agent-sdk/cli.js')
+const cliPath = resolve(projectRoot, 'vendor/claude-cli/cli.js')
 
 // Regex shorthand for minified identifier
 const V = '[\\w$]+'
@@ -32,7 +32,7 @@ try {
   src = readFileSync(cliPath, 'utf-8')
 } catch (err) {
   console.error(`ERROR: Cannot read ${cliPath}`)
-  console.error('Is @anthropic-ai/claude-agent-sdk installed?')
+  console.error('Did you run: node scripts/extract-cli.mjs ?')
   process.exit(1)
 }
 
@@ -53,17 +53,36 @@ if (src.includes(PATCH_MARKER)) {
 
 console.log('\n--- Locating uuid function (randomUUID import) ---')
 
-const uuidImportRe = new RegExp(
+// SDK cli.js (<=0.2.112) used: import{randomUUID as <V>}from"crypto";class <V>{config;mutableMessages
+// Bun-extracted (2.1.113+) uses:  <V>=require("crypto")    (method call: <V>.randomUUID())
+// Fall back to either form.
+let uuidFn, queryClass
+const oldImportRe = new RegExp(
   `import\\{randomUUID as (${V})\\}from"crypto";class (${V})\\{config;mutableMessages`
 )
-const uuidMatch = uuidImportRe.exec(src)
-if (!uuidMatch) {
-  console.error('ERROR: Cannot locate randomUUID import near sdkQuery class.')
-  process.exit(1)
+const oldMatch = oldImportRe.exec(src)
+if (oldMatch) {
+  uuidFn = `${oldMatch[1]}`
+  queryClass = oldMatch[2]
+} else {
+  // 2.1.113+: find the class, then walk backwards for the crypto require binding.
+  const classRe = new RegExp(`class (${V})\\{config;mutableMessages`)
+  const classMatch = classRe.exec(src)
+  if (!classMatch) {
+    console.error('ERROR: Cannot locate sdkQuery class.')
+    process.exit(1)
+  }
+  queryClass = classMatch[1]
+  // Scan a reasonable window after for `<V>=require("crypto")` used in randomUUID() calls.
+  const searchWindow = src.slice(classMatch.index, classMatch.index + 50000)
+  const bindRe = new RegExp(`(${V})=require\\("crypto"\\)`)
+  const bindMatch = bindRe.exec(searchWindow)
+  if (!bindMatch) {
+    console.error('ERROR: Cannot locate crypto require binding near sdkQuery class.')
+    process.exit(1)
+  }
+  uuidFn = `${bindMatch[1]}.randomUUID`
 }
-
-const uuidFn = uuidMatch[1]
-const queryClass = uuidMatch[2]
 console.log(`  UUID function: ${uuidFn}`)
 console.log(`  Query class: ${queryClass}`)
 
