@@ -98,15 +98,44 @@ export function query(input: QueryInput): QueryHandle {
   const control = new ControlChannel(writer)
   const queue = new MessageQueue()
 
+  // Optional startup-timing logs — toggle with DEBUG_SDK=1. Prints to stderr.
+  const t0 = Date.now()
+  const stamp = (label: string): void => {
+    if (process.env.DEBUG_SDK) {
+      // eslint-disable-next-line no-console
+      console.error(`[sdk] +${Date.now() - t0}ms ${label}`)
+    }
+  }
+  stamp('spawn')
+
   // stderr pass-through (for logger/debug)
   child.stderr.on('data', (chunk: Buffer) => {
     options.stderr?.(chunk)
   })
 
+  // Track first-byte / first-event timestamps for startup diagnostics.
+  let sawFirstByte = false
+  let sawFirstAssistant = false
+  child.stdout.on('data', () => {
+    if (!sawFirstByte) {
+      sawFirstByte = true
+      stamp('first cli.js stdout byte')
+    }
+  })
+
   // Main protocol loop
   const reader = new NdjsonReader(
     child.stdout,
-    (line) => handleInbound(line, { control, mcpHost, queue, options }),
+    (line) => {
+      const t = line.type
+      if (t === 'system' && (line as { subtype?: string }).subtype === 'init') {
+        stamp('init system event')
+      } else if (!sawFirstAssistant && t === 'assistant') {
+        sawFirstAssistant = true
+        stamp('first assistant message')
+      }
+      handleInbound(line, { control, mcpHost, queue, options })
+    },
     (err) => {
       queue.finish(new Error(`Failed to parse CLI stream-json: ${err.message}`))
     },
@@ -133,18 +162,24 @@ export function query(input: QueryInput): QueryHandle {
   }
   const initPromise: Promise<Record<string, unknown>> = control
     .request(initPayload)
-    .then((r) => (r ?? {}) as Record<string, unknown>)
+    .then((r) => {
+      stamp('initialize response')
+      return (r ?? {}) as Record<string, unknown>
+    })
     .catch(() => ({}))
 
-  // Forward initial prompt(s)
+  // Forward initial prompt(s) — do NOT await initPromise. cli.js queues
+  // incoming messages and processes them in order after initialize completes,
+  // so blocking on the response just adds user-visible latency to the first
+  // turn.
   void (async () => {
     try {
-      await initPromise
       if (typeof input.prompt === 'string') {
         writer.write({
           type: 'user',
           message: { role: 'user', content: input.prompt },
         })
+        stamp('first user message sent (string)')
       } else {
         for await (const msg of input.prompt) {
           writer.write(msg as Record<string, unknown>)
