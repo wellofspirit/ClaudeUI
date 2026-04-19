@@ -71,20 +71,19 @@ function getElectronHelperPath(): string {
  */
 export function getSdkExecutableOpts(): Record<string, unknown> {
   const cliPath = getCliJsPath()
-  // Set ELECTRON_RUN_AS_NODE on process.env so any downstream spawn inherits it.
-  // We don't pass an explicit `env` through because it would propagate to all
-  // child processes (including the Bash tool), breaking login-shell env
-  // inheritance.
+  // Pass ELECTRON_RUN_AS_NODE to cli.js's env via the spawn call — NOT by
+  // mutating process.env. Mutating process.env would poison every subsequent
+  // child process spawned by Electron itself (GPU, renderer, utility) and
+  // cause them to start in Node mode, rejecting Chromium's args with
+  // "bad option: --type=gpu-process" etc.
   //
-  // IMPORTANT: This poisons process.env for any BrowserWindow created after
-  // this point — Electron re-invokes the exe for renderer processes, and
-  // ELECTRON_RUN_AS_NODE makes it run as plain Node. Any code that creates a
-  // new BrowserWindow must `delete process.env.ELECTRON_RUN_AS_NODE` first.
-  process.env.ELECTRON_RUN_AS_NODE = '1'
+  // The additive `env` overlay is merged on top of process.env by the SDK
+  // layer's buildEnv(), so PATH / HOME / shell-inherited vars are preserved.
   return {
     pathToClaudeCodeExecutable: cliPath,
     executable: getElectronHelperPath(),
-    executableArgs: []
+    executableArgs: [],
+    env: { ELECTRON_RUN_AS_NODE: '1' }
   }
 }
 import type {

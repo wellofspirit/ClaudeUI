@@ -108,11 +108,6 @@ export class LogViewer {
       return
     }
 
-    // ELECTRON_RUN_AS_NODE is set globally by getSdkExecutableOpts() for the SDK
-    // spawn. It must be cleared before creating a BrowserWindow, otherwise Electron
-    // runs the renderer as a plain Node process (crashing with "bad option" errors).
-    delete process.env.ELECTRON_RUN_AS_NODE
-
     const isMac = process.platform === 'darwin'
     this.win = new BrowserWindow({
       width: 1100,

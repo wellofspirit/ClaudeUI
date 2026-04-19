@@ -78,7 +78,11 @@ export function query(input: QueryInput): QueryHandle {
   const executableArgs = options.executableArgs ?? []
 
   const args = [...executableArgs, cliPath, ...buildArgs(options)]
-  const env = buildEnv(process.env)
+  // Merge options.env on top of process.env for the cli.js child ONLY.
+  // Callers (e.g. getSdkExecutableOpts) use this to pass ELECTRON_RUN_AS_NODE
+  // without mutating the main-process env — otherwise Electron's GPU /
+  // renderer children would inherit it and fail to start.
+  const env = buildEnv({ ...process.env, ...(options.env ?? {}) })
 
   const { sdkServers } = splitMcpServers(options.mcpServers)
   const mcpHost = new McpHost(sdkServers)

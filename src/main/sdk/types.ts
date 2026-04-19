@@ -208,6 +208,12 @@ export interface QueryOptions {
   pathToClaudeCodeExecutable?: string
   executable?: string
   executableArgs?: string[]
+  /**
+   * Env overlay merged on top of process.env for the cli.js child.
+   *   { ELECTRON_RUN_AS_NODE: '1' }  — isolated to the cli.js spawn, does
+   *   NOT leak into Electron's GPU/renderer children.
+   */
+  env?: Record<string, string | undefined>
   /** Forwarded to CLI as-is (escape hatch). */
   extraArgs?: string[]
   /** Emit hook_event control requests to this handler. */

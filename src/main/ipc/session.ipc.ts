@@ -891,9 +891,6 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
       teamsViewWindow.focus()
       return
     }
-    // See claude-session.ts getSdkExecutableOpts() — ELECTRON_RUN_AS_NODE
-    // must be cleared before spawning a renderer process.
-    delete process.env.ELECTRON_RUN_AS_NODE
     teamsViewWindow = new BrowserWindow({
       width: 1200,
       height: 800,
