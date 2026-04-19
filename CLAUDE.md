@@ -211,18 +211,22 @@ The app has four main views switchable via sidebar:
 
 Four-layer testing architecture. Full details in **[docs/testing-strategy.md](docs/testing-strategy.md)**.
 
-| Layer | Command | What it tests | File pattern |
+| Project | Command | What it tests | File pattern |
 |-------|---------|---------------|--------------|
-| **Unit** | `bun run test:unit` | Pure rendering, pure functions | `*.test.ts`, `*.unit.test.tsx` |
-| **Component** | `bun run test:component` | Business logic (events → store state) | `*.component.test.ts` |
-| **E2E** | `bun run test:e2e` | Full pipeline (bridge events → store) | `*.e2e.test.ts` |
-| **Integration** | `bun run test:integration` | Real SDK event contracts | `*.integration.test.ts` |
+| **unit** | `bun run test:unit` | Pure rendering, pure functions | `*.test.ts`, `*.unit.test.tsx` |
+| **component** | `bun run test:component` | Business logic (events → store state) | `*.component.test.ts` |
+| **e2e** | `bun run test:e2e` | Full pipeline (bridge events → store) | `*.e2e.test.ts` |
+| **git** | `bun run test:git` | Real simple-git / filesystem (slow) | `git-service*.test.ts`, `worktree.test.ts` |
+| **integration** | `bun run test:integration` | Real SDK event contracts (gated) | `*.integration.test.ts` |
 
-- **CI runs:** `bun run test:ci` (unit + component + e2e, no integration)
-- **All layers:** `bun run test`
+- **Default local run:** `bun run test` — unit + component + e2e (no git, no integration). Snappy — ~14s.
+- **After editing git-service.ts / worktree.ts / simple-git helpers:** `bun run test:git:changed` — uses vitest `--changed` to run only git tests whose import graph includes a modified file. `bun run test:git` always runs the whole git project.
+- **CI runs:** `bun run test:ci` — unit + component + e2e + git (no integration). ~38s.
 - **Watch mode:** `bun run test:watch` (unit only)
 - **Framework:** Vitest 4.x with jsdom, `@testing-library/react`, workspace projects in `vitest.config.ts`
 - **Test infra:** `src/test/` — TestIpcBridge, electron shim, SDK stub, factories, helpers
+
+**Why `git` is its own project:** On Windows each `simple-git` subprocess call costs ~150-200ms. The 48 git-backed tests add ~23s to a default run and dominate cumulative time. Excluding them from `test` keeps iteration fast while still guaranteeing coverage in CI and when developers touch git-adjacent code.
 
 ## Windows Path Format in Bash Commands
 
