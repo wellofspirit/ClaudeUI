@@ -363,17 +363,50 @@ function makeHandle(
         },
       }
     },
+    // --- Turn / session control -------------------------------------------
     interrupt: () => control.request({ subtype: 'interrupt' }),
     setPermissionMode: (mode: PermissionMode) =>
       control.request({ subtype: 'set_permission_mode', mode }),
     setModel: (model?: string) => control.request({ subtype: 'set_model', model }),
+    setMaxThinkingTokens: (max_thinking_tokens: number | null) =>
+      control.request({ subtype: 'set_max_thinking_tokens', max_thinking_tokens }),
+    applyFlagSettings: (settings: Record<string, unknown>) =>
+      control.request({ subtype: 'apply_flag_settings', settings }),
+    getSettings: () => control.request({ subtype: 'get_settings' }),
+    rewindFiles: (user_message_id: string, opts?: { dryRun?: boolean }) =>
+      control.request({
+        subtype: 'rewind_files',
+        user_message_id,
+        dry_run: opts?.dryRun,
+      }),
+    cancelAsyncMessage: (message_uuid: string) =>
+      control
+        .request({ subtype: 'cancel_async_message', message_uuid })
+        .then((r) => (r ?? {}) as { cancelled: boolean }),
+    seedReadState: (path: string, mtime: number) =>
+      control.request({ subtype: 'seed_read_state', path, mtime }),
+    enableRemoteControl: (enabled: boolean, opts?: { name?: string }) =>
+      control.request({ subtype: 'remote_control', enabled, name: opts?.name }),
+    generateSessionTitle: (description: string, opts?: { persist?: boolean }) =>
+      control.request({
+        subtype: 'generate_session_title',
+        description,
+        persist: opts?.persist,
+      }),
+    askSideQuestion: (question: string) =>
+      control.request({ subtype: 'side_question', question }),
+    launchUltrareview: (args: unknown, opts?: { confirm?: boolean }) =>
+      control.request({ subtype: 'ultrareview_launch', args, confirm: opts?.confirm }),
     stopTask: (task_id: string) => control.request({ subtype: 'stop_task', task_id }),
     backgroundTask: (tool_use_id: string) =>
       control.request({ subtype: 'background_task', tool_use_id }),
     dequeueMessage: (value: string) => control.request({ subtype: 'dequeue_message', value }),
-    askSideQuestion: (question: string) =>
-      control.request({ subtype: 'side_question', question }),
+    voiceServerStart: () => control.request({ subtype: 'voice_server_start' }),
+    voiceServerStop: () => control.request({ subtype: 'voice_server_stop' }),
     getUsage: () => control.request({ subtype: 'get_usage' }),
+    getContextUsage: () => control.request({ subtype: 'get_context_usage' }),
+
+    // --- MCP servers ------------------------------------------------------
     mcpServerStatus: () =>
       control.request({ subtype: 'mcp_status' }).then((r) => {
         const resp = (r ?? {}) as { mcpServers?: unknown }
@@ -386,20 +419,35 @@ function makeHandle(
     setMcpServers: (servers: Record<string, McpServerConfig>) => {
       const { cliServers, sdkServers } = splitMcpServers(servers)
       return control.request({
-        subtype: 'set_mcp_servers',
-        mcpServers: cliServers,
-        sdkMcpServers: Object.values(sdkServers).map((s) => ({
-          name: s.name,
-          tools: s.tools.map((t) => ({ name: t.name, description: t.description })),
-        })),
+        subtype: 'mcp_set_servers',
+        servers: cliServers,
+        sdkMcpServers: Object.keys(sdkServers),
       })
     },
-    applyFlagSettings: (settings: Record<string, unknown>) =>
-      control.request({ subtype: 'apply_flag_settings', settings }),
-    voiceServerStart: () => control.request({ subtype: 'voice_server_start' }),
-    voiceServerStop: () => control.request({ subtype: 'voice_server_stop' }),
-    // cli.js doesn't expose these as control_request subtypes — the values
-    // come bundled inside the `initialize` response (SDK behavior).
+    enableChannel: (serverName: string) =>
+      control.request({ subtype: 'channel_enable', serverName }),
+    mcpAuthenticate: (serverName: string) =>
+      control.request({ subtype: 'mcp_authenticate', serverName }),
+    mcpClearAuth: (serverName: string) =>
+      control.request({ subtype: 'mcp_clear_auth', serverName }),
+    mcpSubmitOAuthCallbackUrl: (serverName: string, callbackUrl: string) =>
+      control.request({ subtype: 'mcp_oauth_callback_url', serverName, callbackUrl }),
+
+    // --- Claude OAuth -----------------------------------------------------
+    claudeAuthenticate: (loginWithClaudeAi: boolean) =>
+      control.request({ subtype: 'claude_authenticate', loginWithClaudeAi }),
+    claudeOAuthCallback: (authorizationCode: string, state: string) =>
+      control.request({ subtype: 'claude_oauth_callback', authorizationCode, state }),
+    claudeOAuthWaitForCompletion: () =>
+      control.request({ subtype: 'claude_oauth_wait_for_completion' }),
+
+    // --- Plugins ----------------------------------------------------------
+    reloadPlugins: () => control.request({ subtype: 'reload_plugins' }),
+
+    // --- Initialization accessors (cached from initialize response) ------
+    // cli.js doesn't expose these as dedicated control_request subtypes —
+    // the values come bundled inside the `initialize` response.
+    initializationResult: () => initResponse,
     supportedModels: () => pickInit<unknown>('models'),
     supportedCommands: () => pickInit<unknown>('commands'),
     supportedAgents: () => pickInit<unknown>('agents'),

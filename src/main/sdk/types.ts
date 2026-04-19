@@ -214,8 +214,16 @@ export interface QueryOptions {
    *   NOT leak into Electron's GPU/renderer children.
    */
   env?: Record<string, string | undefined>
-  /** Forwarded to CLI as-is (escape hatch). */
-  extraArgs?: string[]
+  /**
+   * Extra CLI args as a flag-bag. Keys become `--<key>`; value `null` means
+   * boolean flag, string means `--<key> <value>`. SDK-compatible shape.
+   */
+  extraArgs?: Record<string, string | null>
+  /**
+   * Sandbox config blob — merged into the `--settings` JSON at spawn time.
+   * Shape is app-defined; cli.js reads it from the settings.sandbox key.
+   */
+  sandbox?: Record<string, unknown>
   /** Emit hook_event control requests to this handler. */
   includeHookEvents?: boolean
   /** Single agent name — forwarded as --agent. */
@@ -256,22 +264,52 @@ export interface QueryInput {
  * Matches the shape `for await (const msg of q) { ... }` + `q.interrupt()`.
  */
 export interface QueryHandle extends AsyncIterable<SDKMessage> {
-  /** Cancel the currently executing turn. */
+  // --- Turn / session control ---------------------------------------------
   interrupt(): Promise<unknown>
   setPermissionMode(mode: PermissionMode): Promise<unknown>
   setModel(model?: string): Promise<unknown>
+  setMaxThinkingTokens(tokens: number | null): Promise<unknown>
+  applyFlagSettings(settings: Record<string, unknown>): Promise<unknown>
+  getSettings(): Promise<unknown>
+  rewindFiles(userMessageId: string, opts?: { dryRun?: boolean }): Promise<unknown>
+  cancelAsyncMessage(messageUuid: string): Promise<{ cancelled: boolean } | unknown>
+  seedReadState(path: string, mtime: number): Promise<unknown>
+  enableRemoteControl(enabled: boolean, opts?: { name?: string }): Promise<unknown>
+  generateSessionTitle(
+    description: string,
+    opts?: { persist?: boolean },
+  ): Promise<{ title?: string } | unknown>
+  askSideQuestion(question: string): Promise<unknown>
+  launchUltrareview(args: unknown, opts?: { confirm?: boolean }): Promise<unknown>
   stopTask(taskId: string): Promise<unknown>
   backgroundTask(toolUseId: string): Promise<unknown>
   dequeueMessage(value: string): Promise<unknown>
-  askSideQuestion(question: string): Promise<unknown>
+  voiceServerStart(): Promise<unknown>
+  voiceServerStop(): Promise<unknown>
   getUsage(): Promise<unknown>
+  getContextUsage(): Promise<unknown>
+
+  // --- MCP servers --------------------------------------------------------
   mcpServerStatus(): Promise<unknown>
   toggleMcpServer(serverName: string, enabled: boolean): Promise<unknown>
   reconnectMcpServer(serverName: string): Promise<unknown>
   setMcpServers(servers: Record<string, McpServerConfig>): Promise<unknown>
-  applyFlagSettings(settings: Record<string, unknown>): Promise<unknown>
-  voiceServerStart(): Promise<unknown>
-  voiceServerStop(): Promise<unknown>
+  enableChannel(serverName: string): Promise<unknown>
+  mcpAuthenticate(serverName: string): Promise<unknown>
+  mcpClearAuth(serverName: string): Promise<unknown>
+  mcpSubmitOAuthCallbackUrl(serverName: string, callbackUrl: string): Promise<unknown>
+
+  // --- Claude OAuth -------------------------------------------------------
+  claudeAuthenticate(loginWithClaudeAi: boolean): Promise<unknown>
+  claudeOAuthCallback(authorizationCode: string, state: string): Promise<unknown>
+  claudeOAuthWaitForCompletion(): Promise<unknown>
+
+  // --- Plugins ------------------------------------------------------------
+  reloadPlugins(): Promise<unknown>
+
+  // --- Initialization accessors (cached from initialize response) ---------
+  /** Full initialize response (models, commands, agents, skills, plugins, ...). */
+  initializationResult(): Promise<Record<string, unknown>>
   supportedModels(): Promise<unknown[]>
   supportedCommands(): Promise<unknown[]>
   supportedAgents(): Promise<unknown[]>

@@ -192,12 +192,51 @@ export function buildArgs(options: QueryOptions): string[] {
   // String systemPrompt is sent via the `initialize` control request, not as
   // a CLI flag. Preset/append variants are handled the same way. No-op here.
 
-  // --- Escape hatch --------------------------------------------------------
-  if (Array.isArray(options.extraArgs) && options.extraArgs.length > 0) {
-    args.push(...options.extraArgs)
+  // --- Settings + sandbox + extraArgs flag-bag -----------------------------
+  // Mirrors sdk.mjs QV() — sandbox merges into `settings`, settings may be
+  // a JSON object (emitted as --settings <json>) or path string (--settings
+  // <path>). extraArgs is a {flag: value|null} bag flattened to --<flag> args.
+  const flagBag = mergeSettingsAndSandbox(options)
+  for (const [k, v] of Object.entries(flagBag)) {
+    if (v === null || v === undefined) args.push(`--${k}`)
+    else args.push(`--${k}`, v)
   }
 
   return args
+}
+
+/**
+ * Port of the SDK's QV() helper. Folds `sandbox` into `settings`, then
+ * returns a flat flag-bag ready for --<flag> <value> emission.
+ */
+function mergeSettingsAndSandbox(options: QueryOptions): Record<string, string | null> {
+  const bag: Record<string, string | null> = { ...(options.extraArgs ?? {}) }
+
+  const hasSandbox = options.sandbox && Object.keys(options.sandbox).length > 0
+  const hasSettings = options.settings !== undefined
+
+  if (hasSandbox) {
+    // SDK defaults failIfUnavailable=true when enabled and not explicitly set.
+    const sb = options.sandbox as Record<string, unknown>
+    const sandbox =
+      sb.enabled === true && sb.failIfUnavailable === undefined
+        ? { ...sb, failIfUnavailable: true }
+        : sb
+
+    const existing = options.settings
+    if (typeof existing === 'string') {
+      throw new Error(
+        'Cannot use both a settings file path and the sandbox option. Include the sandbox configuration in your settings file instead.',
+      )
+    }
+    const merged = { ...(existing ?? {}), sandbox }
+    bag.settings = JSON.stringify(merged)
+  } else if (hasSettings) {
+    const s = options.settings
+    bag.settings = typeof s === 'string' ? s : JSON.stringify(s)
+  }
+
+  return bag
 }
 
 /**
