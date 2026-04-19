@@ -16,10 +16,29 @@ export interface PendingRequest {
   reject: (err: Error) => void
 }
 
+/**
+ * Hooks supplied by the caller so the channel can (a) re-dispatch pending
+ * permission requests that cli.js bundled inside an error response, and
+ * (b) cancel in-flight inbound handlers when cli.js sends a
+ * control_cancel_request.
+ */
+export interface ControlChannelHooks {
+  onPendingPermissionRequests?: (requests: JsonLine[]) => void
+}
+
 export class ControlChannel {
   private readonly pending = new Map<string, PendingRequest>()
+  /**
+   * Per-inbound-request AbortControllers. Keyed by the cli.js-supplied
+   * request_id so we can abort exactly that handler when cli.js sends a
+   * control_cancel_request, and so cleanup() can fire them all.
+   */
+  private readonly inbound = new Map<string, AbortController>()
 
-  constructor(private readonly writer: NdjsonWriter) {}
+  constructor(
+    private readonly writer: NdjsonWriter,
+    private readonly hooks: ControlChannelHooks = {},
+  ) {}
 
   /**
    * Send a control_request and await its response. Returns the outer
@@ -68,6 +87,7 @@ export class ControlChannel {
       request_id?: string
       response?: unknown
       error?: string
+      pending_permission_requests?: JsonLine[]
     }
     const id = resp.request_id
     if (!id) return false
@@ -76,10 +96,62 @@ export class ControlChannel {
     this.pending.delete(id)
     if (resp.subtype === 'error') {
       pending.reject(new Error(resp.error ?? 'control request failed'))
+      // cli.js may ride pending can_use_tool requests on top of an error
+      // response when they were blocked by whatever we tried to change.
+      // Hand them to the caller so the user's canUseTool callback still
+      // fires for each — otherwise the prompts are silently dropped and
+      // the tool call hangs forever.
+      if (Array.isArray(resp.pending_permission_requests)) {
+        try {
+          this.hooks.onPendingPermissionRequests?.(resp.pending_permission_requests)
+        } catch {
+          /* ignore; we don't want hook errors to poison the channel */
+        }
+      }
     } else {
       pending.resolve(resp.response ?? null)
     }
     return true
+  }
+
+  // ---------------------------------------------------------------------
+  // Inbound request lifecycle — cancel support
+  // ---------------------------------------------------------------------
+
+  /**
+   * Register an AbortController for an inbound control_request so that a
+   * subsequent control_cancel_request with the same id can abort its
+   * handler. Must be paired with `endInbound(request_id)` in a finally.
+   */
+  beginInbound(request_id: string): AbortController {
+    const ac = new AbortController()
+    this.inbound.set(request_id, ac)
+    return ac
+  }
+
+  endInbound(request_id: string): void {
+    this.inbound.delete(request_id)
+  }
+
+  /** Abort the handler for a given inbound request. Silent no-op if done. */
+  cancelInbound(request_id: string): void {
+    const ac = this.inbound.get(request_id)
+    if (ac) {
+      this.inbound.delete(request_id)
+      ac.abort()
+    }
+  }
+
+  /** Abort every outstanding inbound handler. */
+  abortAllInbound(): void {
+    for (const ac of this.inbound.values()) {
+      try {
+        ac.abort()
+      } catch {
+        /* ignore */
+      }
+    }
+    this.inbound.clear()
   }
 
   /** Send a control_response (host → child) correlating to an inbound request. */
@@ -97,10 +169,11 @@ export class ControlChannel {
     })
   }
 
-  /** Reject all outstanding requests on shutdown. */
+  /** Reject all outstanding requests + abort all inbound handlers on shutdown. */
   rejectAll(reason: string): void {
     for (const [, p] of this.pending) p.reject(new Error(reason))
     this.pending.clear()
+    this.abortAllInbound()
   }
 
   private newId(): string {

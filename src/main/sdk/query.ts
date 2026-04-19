@@ -110,7 +110,6 @@ export function query(input: QueryInput): QueryHandle {
   }
 
   const writer = new NdjsonWriter(child.stdin)
-  const control = new ControlChannel(writer)
   const queue = new MessageQueue()
 
   // Optional startup-timing logs — toggle with DEBUG_SDK=1. Prints to stderr.
@@ -126,6 +125,26 @@ export function query(input: QueryInput): QueryHandle {
   // stderr pass-through (for logger/debug)
   child.stderr.on('data', (chunk: Buffer) => {
     options.stderr?.(chunk)
+  })
+
+  // ---- Control channel with pending-permission re-dispatch hook --------
+  // When cli.js rejects a control_request and rides along
+  // pending_permission_requests (can_use_tool prompts that were waiting
+  // for the change), each bundled request is fed back through
+  // handleControlRequest so the user's canUseTool callback still fires.
+  // Otherwise those prompts are silently dropped and the tool calls hang.
+  const control = new ControlChannel(writer, {
+    onPendingPermissionRequests: (requests) => {
+      for (const req of requests) {
+        void handleControlRequest(req, {
+          control,
+          mcpHost,
+          queue,
+          options,
+          hookCallbacks,
+        })
+      }
+    },
   })
 
   // ---- Hook callback registry ------------------------------------------
@@ -308,7 +327,11 @@ async function handleInbound(line: Record<string, unknown>, ctx: InboundCtx): Pr
     return
   }
   if (type === 'control_cancel_request') {
-    // We don't currently track cancellable side-requests; drop silently.
+    // cli.js cancelled an inbound request it previously sent us. Fire the
+    // AbortController for that request_id so our callback (canUseTool,
+    // hook, elicitation, oauth) can observe .signal.aborted and bail.
+    const rid = line.request_id as string | undefined
+    if (rid) ctx.control.cancelInbound(rid)
     return
   }
   // Everything else flows up to the consumer.
@@ -320,9 +343,14 @@ async function handleControlRequest(line: Record<string, unknown>, ctx: InboundC
   const request = (line.request ?? {}) as { subtype?: string; [k: string]: unknown }
   const subtype = request.subtype
 
+  // Register a per-request AbortController. cli.js can cancel this handler
+  // by sending a control_cancel_request with the same request_id. Its
+  // .signal is threaded into every callback context so user code can
+  // short-circuit when the prompt is no longer relevant.
+  const ac = ctx.control.beginInbound(request_id)
   try {
     if (subtype === 'can_use_tool') {
-      const result = await handleCanUseTool(request, ctx.options.canUseTool)
+      const result = await handleCanUseTool(request, ctx.options.canUseTool, ac.signal)
       ctx.control.respondSuccess(request_id, result)
       return
     }
@@ -354,11 +382,10 @@ async function handleControlRequest(line: Record<string, unknown>, ctx: InboundC
         ctx.control.respondError(request_id, `No hook callback for id: ${callback_id}`)
         return
       }
-      const abortCtrl = new AbortController()
       const result = await cb(
         (request.input as Record<string, unknown>) ?? {},
         request.tool_use_id as string | undefined,
-        { signal: abortCtrl.signal },
+        { signal: ac.signal },
       )
       ctx.control.respondSuccess(request_id, (result as Record<string, unknown>) ?? {})
       return
@@ -370,7 +397,6 @@ async function handleControlRequest(line: Record<string, unknown>, ctx: InboundC
         ctx.control.respondSuccess(request_id, { action: 'decline' })
         return
       }
-      const abortCtrl = new AbortController()
       const result = await ctx.options.onElicitation(
         {
           serverName: request.mcp_server_name as string,
@@ -383,7 +409,7 @@ async function handleControlRequest(line: Record<string, unknown>, ctx: InboundC
           displayName: request.display_name as string | undefined,
           description: request.description as string | undefined,
         },
-        { signal: abortCtrl.signal },
+        { signal: ac.signal },
       )
       ctx.control.respondSuccess(request_id, (result as Record<string, unknown>) ?? {})
       return
@@ -394,8 +420,7 @@ async function handleControlRequest(line: Record<string, unknown>, ctx: InboundC
         ctx.control.respondError(request_id, 'getOAuthToken callback is not provided.')
         return
       }
-      const abortCtrl = new AbortController()
-      const token = await ctx.options.getOAuthToken({ signal: abortCtrl.signal })
+      const token = await ctx.options.getOAuthToken({ signal: ac.signal })
       ctx.control.respondSuccess(request_id, { accessToken: token ?? null })
       return
     }
@@ -404,25 +429,26 @@ async function handleControlRequest(line: Record<string, unknown>, ctx: InboundC
     ctx.control.respondSuccess(request_id, {})
   } catch (err) {
     ctx.control.respondError(request_id, (err as Error)?.message ?? 'handler failed')
+  } finally {
+    ctx.control.endInbound(request_id)
   }
 }
 
 async function handleCanUseTool(
   request: Record<string, unknown>,
   callback: CanUseTool | undefined,
+  signal: AbortSignal,
 ): Promise<Record<string, unknown>> {
   if (!callback) {
     return { permitted: true, toolUseID: request.tool_use_id as string }
   }
   const toolName = (request.tool_name as string) ?? ''
   const input = (request.input as Record<string, unknown>) ?? {}
-  // Per-request abort signal. We don't currently track CLI-side cancellation
-  // of pending permission prompts — if the CLI cancels, we'll simply drop the
-  // eventual response. A never-firing signal is safe for the callback's usage
-  // (it's used to clean up UI state on interrupt).
-  const controller = new AbortController()
   const context = {
-    signal: controller.signal,
+    // cli.js-scoped abort: fires if cli.js sends control_cancel_request for
+    // this request_id, or if the query is torn down. Callers can observe
+    // signal.aborted to dismiss UI prompts that are no longer wanted.
+    signal,
     suggestions: request.permission_suggestions as CanUseToolResult['updatedPermissions'],
     blockedPath: request.blocked_path as string | undefined,
     decisionReason: request.decision_reason as string | undefined,
