@@ -35,6 +35,7 @@ patch/apply-all.mjs                ← 14 patches, idempotent
 | `scripts/extract-cli.mjs` | Downloads binary, parses Bun format, transforms cli.js, downloads ripgrep. Cache-hit skip when version.json matches `package.json#claudeCliVersion`. |
 | `patch/` | 14 content-regex patches against cli.js. Idempotent, run after every extraction. |
 | `src/main/sdk/` | The in-house TypeScript harness. |
+| `src/main/sdk/wire-log.ts` | Per-query ring buffer of every ndjson line. Snapshot via `queryHandle.wireLog()`. |
 
 ## `src/main/sdk/` files
 
@@ -146,10 +147,15 @@ Both directions are newline-delimited JSON. Every line is exactly `{...}\n`.
 ### Inbound (cli.js → we)
 
 Message types we handle:
-- `assistant`, `user`, `stream_event`, `system`, `result`, `tool_progress`, `request_usage`, `rate_limit_event`, `task_notification`, `queued_command_consumed` — forwarded to the consumer's async iterator.
+- `assistant`, `user`, `stream_event`, `system`, `result`, `tool_progress`, `request_usage`, `rate_limit_event`, `task_notification`, `queued_command_consumed`, `bash_output` — forwarded to the consumer's async iterator.
+- `auth_status` — only emitted when `options.enableAuthStatus: true` is set in the initialize payload. Forwarded to the consumer as-is. Fields: `isAuthenticating`, `output`, `error`, `uuid`, `session_id`. Off by default — opt in only if the consumer knows what to do with it.
 - `control_response` — correlated by `request_id` to resolve a pending outbound request.
 - `control_request` — dispatched to our inbound handler (see below).
 - `control_cancel_request` — fires `AbortController` for the matching request_id (see "Cancellation" below).
+
+`system` subtype values that appear on stdout: `init`, `status`, `task_notification`, `queued_command_consumed`, `compact_boundary` (emitted when conversation compaction crosses a boundary on long sessions — fields include `compact_metadata`). Dev-only / feature-gated subtypes we don't consume: `hook_started`/`hook_progress`/`hook_response` (print-mode + verbose only), `bridge_state` (only when `remote_control` is active), `session_state_changed` (gated on `CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS`).
+
+cli.js also *accepts* two inbound stdin types we don't currently send: `keep_alive` (no-op heartbeat) and `update_environment_variables` (`{variables: Record<string,string>}` mutates `process.env` inside cli.js — deliberately left unused; flagged as a capability to be aware of if the stdin channel is ever exposed to third parties).
 
 ## CLI argv flags
 
@@ -203,7 +209,9 @@ Flags emitted by `args.ts/buildArgs()`, in SDK-matching order. Everything reflec
 Every QueryHandle method maps to one control_request. 31 total. Grouped for readability:
 
 ### Session control
-`interrupt`, `set_permission_mode`, `set_model`, `set_max_thinking_tokens`, `apply_flag_settings`, `get_settings`, `rewind_files`, `cancel_async_message`, `seed_read_state`, `remote_control`, `generate_session_title`, `side_question`, `ultrareview_launch`, `stop_task`, `background_task`, `dequeue_message`, `voice_server_start`, `voice_server_stop`, `get_usage`, `get_context_usage`
+`interrupt`, `end_session`, `set_permission_mode`, `set_model`, `set_max_thinking_tokens`, `apply_flag_settings`, `get_settings`, `rewind_files`, `cancel_async_message`, `seed_read_state`, `remote_control`, `generate_session_title`, `side_question`, `ultrareview_launch`, `stop_task`, `background_task`, `dequeue_message`, `voice_server_start`, `voice_server_stop`, `get_usage`, `get_context_usage`
+
+`end_session` (added 2026-04-19) is a graceful counterpart to `interrupt` — cli.js `break`s its main read loop after flushing pending output, then exits on its own. Prefer it over SIGTERM on clean shutdown paths; SIGTERM still works as a fallback.
 
 ### MCP servers
 `mcp_status`, `mcp_toggle`, `mcp_reconnect`, `mcp_set_servers`, `channel_enable`, `mcp_authenticate`, `mcp_clear_auth`, `mcp_oauth_callback_url`
@@ -243,8 +251,11 @@ MCP server asking the user for input. Dispatched to `options.onElicitation(param
 ### `oauth_token_refresh`
 cli.js needs a fresh token. Dispatched to `options.getOAuthToken({ signal })`. Response `{ accessToken: string|null }`. Throws (matching SDK) when no callback provided.
 
+### `request_user_dialog`
+Generic user-facing dialog prompt (e.g. tool-use disambiguation). Dispatched to `options.onUserDialog({dialogKind, payload, toolUseId}, {signal})`. When no handler is registered we auto-respond `{behavior: 'cancelled'}` immediately so cli.js doesn't hang waiting for a timeout. Added 2026-04-19 after RE-finding it in cli.js's bridge class.
+
 ### Unknown subtypes
-Respond with benign `{ subtype: 'success', response: {} }` so cli.js doesn't stall. Add explicit handlers as new subtypes appear in cli.js.
+Respond with benign `{ subtype: 'success', response: {} }` so cli.js doesn't stall. Under `DEBUG_SDK=1` we also log the unknown subtype + request_id to stderr so new upstream subtypes surface quickly during development. Add explicit handlers as new subtypes appear in cli.js.
 
 ## Initialize control request
 
@@ -332,6 +343,51 @@ These are `can_use_tool` prompts that were queued waiting for whatever we tried 
 
 `ControlChannel`'s `onPendingPermissionRequests` hook, wired in `query.ts`, feeds each one back through `handleControlRequest` exactly as if cli.js had sent it fresh. Port of SDK's `processPendingPermissionRequests`.
 
+## Typed message surface
+
+`SDKMessage` is a discriminated union over `type`, exported from `src/main/sdk/types.ts`. Each variant describes the fields ClaudeUI reads off that shape; an index signature (`[k: string]: unknown`) keeps every variant forward-compatible with fields cli.js may add at a version bump.
+
+```ts
+import type { SDKMessage, AssistantMessage } from 'src/main/sdk'
+
+function onMessage(msg: SDKMessage) {
+  switch (msg.type) {
+    case 'assistant':
+      // msg is AssistantMessage — msg.message, msg.parent_tool_use_id typed
+      break
+    case 'result':
+      // msg.total_cost_usd, msg.subtype, msg.errors typed
+      break
+  }
+}
+```
+
+Variants exported alongside the union: `AssistantMessage`, `UserMessage`, `StreamEventMessage`, `SystemMessage`, `ResultMessage`, `ToolProgressMessage`, `RequestUsageMessage`, `RateLimitEventMessage`, `BashOutputMessage`, `AuthStatusMessage`, `ControlRequestMessage`, `ControlResponseMessage`, `ControlCancelRequestMessage`. `UnknownSDKMessage` is exported but NOT part of `SDKMessage` — it's for raw stream-json parsing (wire log, tests) where unknown types may appear.
+
+## Wire log
+
+Every query owns a bounded ring buffer (`WireLog`, `src/main/sdk/wire-log.ts`) that captures every ndjson line read from / written to cli.js. Access via `queryHandle.wireLog()`:
+
+```ts
+const q = query({...})
+// ...later, during a bad-state investigation:
+const entries = q.wireLog()  // WireEntry[] — seq, t (ms since query start), dir ('in'|'out'), line
+fs.writeFileSync('debug.jsonl', entries.map(e => JSON.stringify(e)).join('\n'))
+```
+
+Capacity defaults to 1000 entries; override with `options.wireLogCapacity` when a debug dump genuinely needs longer history (stream_event deltas are the dominant line rate). No CPU cost beyond one Map-shift-and-push per line.
+
+## Robustness guarantees
+
+A few things the harness is careful about — written down so they don't regress:
+
+- **Per-request timeouts.** `ControlChannel.request(payload, {timeoutMs})` defaults to 30 s. Long-lived subtypes — `mcp_authenticate`, `claude_authenticate`, `claude_oauth_callback`, `claude_oauth_wait_for_completion` — opt out with `{timeoutMs: 0}`. `initialize` runs with a 60 s bound. Without the timeout a stuck cli.js silently hangs the UI.
+- **MCP start race.** `McpHost.ensureStarted()` gates both callers on a shared Promise so a second concurrent `dispatch()` can't slip past the guard before `transport.onmessage` is wired by the MCP SDK.
+- **AbortController listener cleanup.** `query.ts` adds the abort listener with `{once: true}` and explicitly removes it on `child.exit`/`child.error`. Callers can reuse a single AbortController across multiple `query()` calls without leaking.
+- **Child-teardown races.** A `childClosed` flag short-circuits the streaming-input `for await` loop and suppresses the inevitable EPIPE from a write into a closed stdin. Those aren't user-facing failures.
+- **Initialize errors surface.** If cli.js rejects the init payload we log to stderr (+ consumer's `options.stderr`) instead of returning empty arrays for `supportedModels/Commands/Agents` with no clue why.
+- **Session-ended rejection for waiters.** `ClaudeSession.ensureActiveQuery()` awaits a Promise that run()'s teardown rejects, instead of polling with a 15 s deadline.
+
 ## Debugging
 
 Two stderr-logging env vars:
@@ -375,8 +431,8 @@ When the SDK minifier changes variable names between versions, patches fail with
 | Public API surface (`query`, `tool`, `createSdkMcpServer`) | Drop-in compatible |
 | CLI argv flags | All SDK-emitted flags, exact order and syntax |
 | Initialize payload | All fields |
-| Control request subtypes (outbound) | 25 methods + 6 initialize-backed accessors = 31 |
-| Control request subtypes (inbound) | can_use_tool, mcp_message, hook_callback, elicitation, oauth_token_refresh, control_cancel_request |
+| Control request subtypes (outbound) | 26 methods (incl. `endSession`) + 6 initialize-backed accessors = 32 |
+| Control request subtypes (inbound) | can_use_tool, mcp_message, hook_callback, elicitation, oauth_token_refresh, request_user_dialog, control_cancel_request |
 | Three-tier cancellation | Full |
 | `pending_permission_requests` re-dispatch | Full |
 | MCP hosting | Full (via `@modelcontextprotocol/sdk`) |

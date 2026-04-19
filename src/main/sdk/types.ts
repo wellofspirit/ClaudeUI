@@ -6,7 +6,199 @@
  * the codebase treats them — we never trust a Zod schema at this boundary.
  */
 
-export type SDKMessage = Record<string, unknown>
+/**
+ * Stream-json messages emitted by cli.js, discriminated on `type`. This is
+ * a tagged union with a permissive index signature:
+ *
+ *   - The `type` field enables narrowing in consumer switches so the
+ *     compiler knows `msg.event` exists on a `stream_event` branch but not
+ *     on `result`.
+ *   - `[k: string]: unknown` keeps the union forward-compatible: cli.js may
+ *     add new top-level fields at any version bump, and the consumer can
+ *     still read them with a cast (same semantics as the old
+ *     `Record<string, unknown>` shape).
+ *
+ * Variants cover what ClaudeUI actually reads. If a cli.js message has a
+ * `type` we haven't listed, `UnknownSDKMessage` absorbs it.
+ */
+export type SDKMessage =
+  | AssistantMessage
+  | UserMessage
+  | StreamEventMessage
+  | SystemMessage
+  | ResultMessage
+  | ToolProgressMessage
+  | RequestUsageMessage
+  | RateLimitEventMessage
+  | BashOutputMessage
+  | AuthStatusMessage
+  | ControlRequestMessage
+  | ControlResponseMessage
+  | ControlCancelRequestMessage
+
+/** Fields every stream-json message may carry. `session_id` lands on the
+ *  first message; `slug` flows with session-scoped messages. */
+interface BaseSDKMessage {
+  session_id?: string
+  slug?: string
+  [k: string]: unknown
+}
+
+export interface AssistantMessage extends BaseSDKMessage {
+  type: 'assistant'
+  /** The Anthropic-API `message` block. `id` is shared across partial
+   *  updates so consumers can upsert by it. */
+  message?: {
+    id?: string
+    role?: string
+    content?: unknown
+    usage?: Record<string, unknown>
+    [k: string]: unknown
+  }
+  parent_tool_use_id?: string | null
+}
+
+export interface UserMessage extends BaseSDKMessage {
+  type: 'user'
+  message?: {
+    role?: string
+    content?: unknown
+    [k: string]: unknown
+  }
+  parent_tool_use_id?: string | null
+}
+
+export interface StreamEventMessage extends BaseSDKMessage {
+  type: 'stream_event'
+  event?: {
+    type?: string
+    delta?: {
+      type?: string
+      text?: string
+      thinking?: string
+      [k: string]: unknown
+    }
+    [k: string]: unknown
+  }
+  parent_tool_use_id?: string | null
+}
+
+export interface SystemMessage extends BaseSDKMessage {
+  type: 'system'
+  subtype?:
+    | 'init'
+    | 'status'
+    | 'task_notification'
+    | 'queued_command_consumed'
+    | 'compact_boundary'
+    | string
+  permissionMode?: string
+  /** init-only fields */
+  slash_commands?: string[]
+  skills?: string[]
+  mcp_servers?: Array<{ name: string; status: string }>
+  /** task_notification-only fields */
+  task_id?: string
+  output_file?: string
+  status?: string
+  summary?: string
+  usage?: {
+    total_tokens?: number
+    tool_uses?: number
+    duration_ms?: number
+  } | null
+  /** queued_command_consumed-only field */
+  prompt?: string
+}
+
+export interface ResultMessage extends BaseSDKMessage {
+  type: 'result'
+  subtype?: string
+  total_cost_usd?: number
+  duration_ms?: number
+  duration_api_ms?: number
+  result?: string
+  errors?: string[]
+}
+
+export interface ToolProgressMessage extends BaseSDKMessage {
+  type: 'tool_progress'
+  tool_use_id?: string
+  tool_name?: string
+  parent_tool_use_id?: string | null
+  elapsed_time_seconds?: number
+}
+
+export interface RequestUsageMessage extends BaseSDKMessage {
+  type: 'request_usage'
+  usage?: Record<string, unknown>
+}
+
+export interface RateLimitEventMessage extends BaseSDKMessage {
+  type: 'rate_limit_event'
+  header_utilization?: Record<string, { utilization: number; resets_at: number }>
+}
+
+export interface BashOutputMessage extends BaseSDKMessage {
+  type: 'bash_output'
+  tool_use_id?: string
+  output?: string
+  total_lines?: number
+  total_bytes?: number
+}
+
+export interface AuthStatusMessage extends BaseSDKMessage {
+  type: 'auth_status'
+  isAuthenticating?: boolean
+  output?: string
+  error?: string
+  uuid?: string
+}
+
+/** Raised by cli.js; handled internally by ControlChannel — never reaches
+ *  consumer iterators today, but typed here so the union is closed on
+ *  the actual wire set. */
+export interface ControlRequestMessage extends BaseSDKMessage {
+  type: 'control_request'
+  request_id?: string
+  request?: { subtype?: string;[k: string]: unknown }
+}
+
+export interface ControlResponseMessage extends BaseSDKMessage {
+  type: 'control_response'
+  response?: {
+    subtype?: 'success' | 'error' | string
+    request_id?: string
+    response?: unknown
+    error?: unknown
+    pending_permission_requests?: unknown[]
+  }
+}
+
+export interface ControlCancelRequestMessage extends BaseSDKMessage {
+  type: 'control_cancel_request'
+  request_id?: string
+}
+
+/** Helper for cli.js messages whose `type` is outside the union we've
+ *  codified. Not part of `SDKMessage` itself — keeping it out of the union
+ *  lets consumer `switch (msg.type)` narrow exhaustively to known
+ *  variants. Use this shape when you're parsing raw stream-json output
+ *  (wire log, tests) where any top-level type could legitimately appear. */
+export interface UnknownSDKMessage extends BaseSDKMessage {
+  type: string
+}
+
+/** Direction of a wire-log entry — 'in' = cli.js → us; 'out' = us → cli.js. */
+export type WireDirection = 'in' | 'out'
+
+/** One captured stream-json line. See sdk/wire-log.ts. */
+export interface WireEntry {
+  seq: number
+  t: number
+  dir: WireDirection
+  line: Record<string, unknown>
+}
 
 export type PermissionMode =
   | 'default'
@@ -104,6 +296,33 @@ export type ElicitationCallback = (
 export type GetOAuthTokenCallback = (opts: {
   signal: AbortSignal
 }) => Promise<string | null>
+
+/**
+ * Generic user-dialog prompt initiated by cli.js
+ * (`control_request { subtype: 'request_user_dialog' }`).
+ *
+ * Fields come straight from cli.js's `requestUserDialog` bridge method
+ * (see vendor/claude-cli/cli.js ~char 11933210). `dialog_kind` discriminates
+ * the UX (for example: a choice between candidate tool uses). When no
+ * handler is registered we default to `{ behavior: 'cancelled' }` so cli.js
+ * stops waiting — blocking on an unhandled dialog stalls the feature that
+ * opened it.
+ */
+export interface UserDialogRequest {
+  dialogKind?: string
+  payload?: unknown
+  toolUseId?: string
+}
+
+export interface UserDialogResult {
+  behavior?: 'cancelled' | 'accepted' | string
+  [k: string]: unknown
+}
+
+export type UserDialogCallback = (
+  request: UserDialogRequest,
+  opts: { signal: AbortSignal },
+) => Promise<UserDialogResult>
 
 export type SpawnClaudeCodeProcess = (opts: {
   command: string
@@ -285,6 +504,11 @@ export interface QueryOptions {
   allowDangerouslySkipPermissions?: boolean
   /** Initial permission settings baked into the session (forwarded via initialize). */
   settings?: Record<string, unknown>
+  /** Ring-buffer capacity for the wire log accessible via queryHandle.wireLog().
+   *  Default 1000 entries. Each entry is tiny (sequence + timestamp + line
+   *  reference), but stream_event deltas can arrive at 100+ per turn, so
+   *  bump this only when a debug dump actually needs the history. */
+  wireLogCapacity?: number
 
   // --- Initialize-payload fields (not CLI flags) --------------------------
   /** Hook callbacks, registered at initialize and fired via hook_callback. */
@@ -307,6 +531,19 @@ export interface QueryOptions {
   onElicitation?: ElicitationCallback
   /** OAuth token refresh provider. */
   getOAuthToken?: GetOAuthTokenCallback
+  /**
+   * Handler for cli.js's generic `request_user_dialog` control_request.
+   * When omitted we auto-respond `{ behavior: 'cancelled' }` so cli.js
+   * doesn't hang on dialogs no consumer has wired up.
+   */
+  onUserDialog?: UserDialogCallback
+  /**
+   * Opt into cli.js's `auth_status` stream events. When true, the child
+   * emits `{ type: 'auth_status', ... }` lines on auth-state changes
+   * (authenticate start/finish, errors). Off by default — existing
+   * consumers don't expect the extra line type.
+   */
+  enableAuthStatus?: boolean
   /** Override the default child_process.spawn with a custom launcher. */
   spawnClaudeCodeProcess?: SpawnClaudeCodeProcess
 
@@ -342,6 +579,14 @@ export interface QueryInput {
 export interface QueryHandle extends AsyncIterable<SDKMessage> {
   // --- Turn / session control ---------------------------------------------
   interrupt(): Promise<unknown>
+  /**
+   * Send cli.js's `end_session` control subtype. Graceful counterpart to
+   * `interrupt()` — the CLI main loop breaks out of its read loop after
+   * draining pending output. Consumers should still observe the child
+   * exit after calling this; don't assume the Promise resolution means
+   * the subprocess is fully gone.
+   */
+  endSession(): Promise<unknown>
   setPermissionMode(mode: PermissionMode): Promise<unknown>
   setModel(model?: string): Promise<unknown>
   setMaxThinkingTokens(tokens: number | null): Promise<unknown>
@@ -355,18 +600,18 @@ export interface QueryHandle extends AsyncIterable<SDKMessage> {
     description: string,
     opts?: { persist?: boolean },
   ): Promise<{ title?: string } | unknown>
-  askSideQuestion(question: string): Promise<unknown>
+  askSideQuestion(question: string): Promise<string | null>
   launchUltrareview(args: unknown, opts?: { confirm?: boolean }): Promise<unknown>
   stopTask(taskId: string): Promise<unknown>
   backgroundTask(toolUseId: string): Promise<unknown>
-  dequeueMessage(value: string): Promise<unknown>
-  voiceServerStart(): Promise<unknown>
-  voiceServerStop(): Promise<unknown>
-  getUsage(): Promise<unknown>
-  getContextUsage(): Promise<unknown>
+  dequeueMessage(value: string): Promise<{ removed: number }>
+  voiceServerStart(): Promise<{ port: number }>
+  voiceServerStop(): Promise<{ stopped: boolean }>
+  getUsage(): Promise<Record<string, unknown>>
+  getContextUsage(): Promise<Record<string, unknown>>
 
   // --- MCP servers --------------------------------------------------------
-  mcpServerStatus(): Promise<unknown>
+  mcpServerStatus(): Promise<unknown[]>
   toggleMcpServer(serverName: string, enabled: boolean): Promise<unknown>
   reconnectMcpServer(serverName: string): Promise<unknown>
   setMcpServers(servers: Record<string, McpServerConfig>): Promise<unknown>
@@ -389,4 +634,10 @@ export interface QueryHandle extends AsyncIterable<SDKMessage> {
   supportedModels(): Promise<unknown[]>
   supportedCommands(): Promise<unknown[]>
   supportedAgents(): Promise<unknown[]>
+
+  // --- Diagnostics --------------------------------------------------------
+  /** Snapshot of every ndjson line that's crossed the stdio pipe for this
+   *  query. Shallow copy — safe to mutate. Ring-buffered (see
+   *  `wireLogCapacity`), so very long sessions only retain the tail. */
+  wireLog(): WireEntry[]
 }

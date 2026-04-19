@@ -14,6 +14,8 @@ import type { NdjsonWriter, JsonLine } from './protocol'
 export interface PendingRequest {
   resolve: (value: unknown) => void
   reject: (err: Error) => void
+  /** Cancels the timeout timer when the response arrives. */
+  clearTimer?: () => void
 }
 
 /**
@@ -25,6 +27,23 @@ export interface PendingRequest {
 export interface ControlChannelHooks {
   onPendingPermissionRequests?: (requests: JsonLine[]) => void
 }
+
+/** Per-request options. `timeoutMs: 0` disables the timeout (use for
+ * inherently long-lived operations like oauth_wait_for_completion). */
+export interface RequestOptions {
+  timeoutMs?: number
+}
+
+/**
+ * Default timeout for control_requests. Most cli.js subtypes should respond
+ * within a few hundred ms; anything blocked for 30s is almost certainly a
+ * hang — surface it as an error rather than leaking a pending promise.
+ *
+ * Long-lived subtypes (mcp_authenticate, claude_oauth_wait_for_completion,
+ * interrupt while a long tool is running) should override via
+ * `request(payload, { timeoutMs: 0 })`.
+ */
+const DEFAULT_REQUEST_TIMEOUT_MS = 30_000
 
 export class ControlChannel {
   private readonly pending = new Map<string, PendingRequest>()
@@ -44,8 +63,16 @@ export class ControlChannel {
    * Send a control_request and await its response. Returns the outer
    * `response` object so callers can pick fields like `.mcpServers` or
    * `.title` off it.
+   *
+   * Generic `T` is a convenience so callers can say
+   *   `request<{ mcpServers: unknown[] }>({...})`
+   * and skip the cast at the call site. No runtime validation — cli.js's
+   * response shape is still a trust-the-peer deal.
    */
-  request(request: Record<string, unknown>): Promise<unknown> {
+  request<T = unknown>(
+    request: Record<string, unknown>,
+    opts: RequestOptions = {},
+  ): Promise<T> {
     const request_id = this.newId()
     if (process.env.DEBUG_SDK) {
       // eslint-disable-next-line no-console
@@ -53,25 +80,50 @@ export class ControlChannel {
         `[sdk] → control_request ${request_id} ${JSON.stringify(request).slice(0, 200)}`,
       )
     }
-    return new Promise((resolve, reject) => {
+    const timeoutMs = opts.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS
+    return new Promise<T>((resolve, reject) => {
+      let timer: ReturnType<typeof setTimeout> | null = null
+      const clearTimer = (): void => {
+        if (timer !== null) {
+          clearTimeout(timer)
+          timer = null
+        }
+      }
       this.pending.set(request_id, {
         resolve: (value) => {
+          clearTimer()
           if (process.env.DEBUG_SDK) {
             // eslint-disable-next-line no-console
             console.error(
               `[sdk] ← control_response ${request_id} ${JSON.stringify(value).slice(0, 200)}`,
             )
           }
-          resolve(value)
+          resolve(value as T)
         },
         reject: (err) => {
+          clearTimer()
           if (process.env.DEBUG_SDK) {
             // eslint-disable-next-line no-console
             console.error(`[sdk] ← control_error ${request_id} ${err.message}`)
           }
           reject(err)
         },
+        clearTimer,
       })
+      if (timeoutMs > 0) {
+        timer = setTimeout(() => {
+          const pending = this.pending.get(request_id)
+          if (!pending) return
+          this.pending.delete(request_id)
+          const subtype =
+            (request as { subtype?: string }).subtype ?? '<unknown>'
+          pending.reject(
+            new Error(
+              `control_request ${subtype} (${request_id}) timed out after ${timeoutMs}ms`,
+            ),
+          )
+        }, timeoutMs)
+      }
       this.writer.write({ type: 'control_request', request_id, request })
     })
   }
@@ -171,7 +223,10 @@ export class ControlChannel {
 
   /** Reject all outstanding requests + abort all inbound handlers on shutdown. */
   rejectAll(reason: string): void {
-    for (const [, p] of this.pending) p.reject(new Error(reason))
+    for (const [, p] of this.pending) {
+      p.clearTimer?.()
+      p.reject(new Error(reason))
+    }
     this.pending.clear()
     this.abortAllInbound()
   }

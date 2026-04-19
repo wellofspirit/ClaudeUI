@@ -72,7 +72,7 @@ class PairedTransport implements Transport {
 export class McpHost {
   private readonly servers: Map<string, { server: SdkMcpServer; transport: PairedTransport }> =
     new Map()
-  private started = false
+  private startPromise: Promise<void> | null = null
 
   constructor(servers: Record<string, SdkMcpServer>) {
     for (const [name, spec] of Object.entries(servers)) {
@@ -84,15 +84,20 @@ export class McpHost {
    * Lazy-initialize: `McpServer.connect(transport)` actually dispatches tool
    * registration handlers, so we defer it until first use. This keeps
    * construction cheap for sessions that never invoke any SDK MCP tool.
+   *
+   * Gated on a shared Promise so concurrent first-dispatches don't race —
+   * a boolean flag would let the second call see `started=true` while the
+   * first `connect()` is still resolving, and its `transport.inject()` would
+   * fire before `transport.onmessage` was wired by the MCP SDK.
    */
-  async ensureStarted(): Promise<void> {
-    if (this.started) return
-    this.started = true
+  ensureStarted(): Promise<void> {
+    if (this.startPromise) return this.startPromise
     const promises: Promise<void>[] = []
     for (const { server, transport } of this.servers.values()) {
       if (server.instance) promises.push(server.instance.connect(transport))
     }
-    await Promise.all(promises)
+    this.startPromise = Promise.all(promises).then(() => undefined)
+    return this.startPromise
   }
 
   has(name: string): boolean {

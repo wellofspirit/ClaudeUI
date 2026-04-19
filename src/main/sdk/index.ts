@@ -11,6 +11,20 @@ export { createSdkMcpServer, tool } from './create-sdk-mcp'
 export { locateCliJs, getCliVersion } from './locate'
 export type {
   SDKMessage,
+  AssistantMessage,
+  UserMessage,
+  StreamEventMessage,
+  SystemMessage,
+  ResultMessage,
+  ToolProgressMessage,
+  RequestUsageMessage,
+  RateLimitEventMessage,
+  BashOutputMessage,
+  AuthStatusMessage,
+  ControlRequestMessage,
+  ControlResponseMessage,
+  ControlCancelRequestMessage,
+  UnknownSDKMessage,
   PermissionMode,
   CanUseTool,
   CanUseToolResult,
@@ -31,4 +45,6 @@ export type {
   PermissionRuleValue,
   PermissionBehavior,
   PermissionUpdateDestination,
+  WireDirection,
+  WireEntry,
 } from './types'

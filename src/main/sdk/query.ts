@@ -19,6 +19,7 @@ import { buildArgs, buildEnv, splitMcpServers } from './args'
 import { NdjsonReader, NdjsonWriter } from './protocol'
 import { ControlChannel } from './control'
 import { McpHost } from './mcp-host'
+import { WireLog } from './wire-log'
 
 interface MessageQueueItem {
   value: SDKMessage | undefined
@@ -109,7 +110,16 @@ export function query(input: QueryInput): QueryHandle {
     throw new Error('Failed to attach stdio to cli.js subprocess')
   }
 
-  const writer = new NdjsonWriter(child.stdin)
+  const wireLog = new WireLog({ capacity: options.wireLogCapacity ?? 1000 })
+  // Tap the writer so every outbound line is captured before it crosses
+  // the pipe. Cheap — one record per control_request / user message.
+  const rawWriter = new NdjsonWriter(child.stdin)
+  const origWrite = rawWriter.write.bind(rawWriter)
+  rawWriter.write = (obj): void => {
+    wireLog.record('out', obj)
+    origWrite(obj)
+  }
+  const writer = rawWriter
   const queue = new MessageQueue()
 
   // Optional startup-timing logs — toggle with DEBUG_SDK=1. Prints to stderr.
@@ -189,6 +199,7 @@ export function query(input: QueryInput): QueryHandle {
   const reader = new NdjsonReader(
     child.stdout,
     (line) => {
+      wireLog.record('in', line)
       const t = line.type
       if (t === 'system' && (line as { subtype?: string }).subtype === 'init') {
         stamp('init system event')
@@ -232,6 +243,13 @@ export function query(input: QueryInput): QueryHandle {
   if (options.agentProgressSummaries !== undefined) {
     initPayload.agentProgressSummaries = options.agentProgressSummaries
   }
+  if (options.enableAuthStatus) {
+    // cli.js's initialize handler checks `O.enableAuthStatus` and, when
+    // truthy, starts emitting `{type:'auth_status', ...}` lines on auth
+    // state changes. Off by default — existing consumers don't expect
+    // the extra stream type.
+    initPayload.enableAuthStatus = true
+  }
 
   const sp = options.systemPrompt
   if (typeof sp === 'string') {
@@ -244,13 +262,28 @@ export function query(input: QueryInput): QueryHandle {
     // we only need to forward the append string.
     if (sp.append) initPayload.appendSystemPrompt = sp.append
   }
+  // Initialize can stall indefinitely on pathological cli.js states; bound
+  // it with a generous timeout so consumers don't hang forever on spawn.
   const initPromise: Promise<Record<string, unknown>> = control
-    .request(initPayload)
+    .request(initPayload, { timeoutMs: 60_000 })
     .then((r) => {
       stamp('initialize response')
       return (r ?? {}) as Record<string, unknown>
     })
-    .catch(() => ({}))
+    .catch((err: Error) => {
+      // Swallowing the error entirely used to mask real problems (bad init
+      // payload, upstream version mismatch) as empty supportedModels/etc.
+      // Log it so the failure is at least visible during debugging.
+      // eslint-disable-next-line no-console
+      console.error(`[sdk] initialize failed: ${err?.message ?? err}`)
+      options.stderr?.(Buffer.from(`[sdk] initialize failed: ${err?.message ?? err}\n`))
+      return {}
+    })
+
+  // Flag set once the child is no longer accepting input — used to suppress
+  // the inevitable EPIPE / "write after end" that occurs when the streaming
+  // input iterator races child teardown. Those aren't user-facing failures.
+  let childClosed = false
 
   // Forward initial prompt(s) — do NOT await initPromise. cli.js queues
   // incoming messages and processes them in order after initialize completes,
@@ -266,26 +299,34 @@ export function query(input: QueryInput): QueryHandle {
         stamp('first user message sent (string)')
       } else {
         for await (const msg of input.prompt) {
+          if (childClosed) break
           writer.write(msg as Record<string, unknown>)
         }
       }
     } catch (err) {
-      queue.finish(err as Error)
+      // Child teardown races the iterator — a write to a closed stdin is
+      // expected and not a session failure. Everything else still surfaces.
+      if (!childClosed) queue.finish(err as Error)
     }
   })()
 
-  // Abort propagation
+  // Abort propagation. `{once:true}` + explicit removal on child exit so the
+  // listener doesn't outlive the query — important for callers that reuse
+  // the same AbortController across multiple query() calls.
+  const onAbort = (): void => {
+    try {
+      child.kill('SIGTERM')
+    } catch {
+      /* ignore */
+    }
+  }
   if (options.abortController) {
-    options.abortController.signal.addEventListener('abort', () => {
-      try {
-        child.kill('SIGTERM')
-      } catch {
-        /* ignore */
-      }
-    })
+    options.abortController.signal.addEventListener('abort', onAbort, { once: true })
   }
 
   child.on('exit', (code, signal) => {
+    childClosed = true
+    options.abortController?.signal.removeEventListener('abort', onAbort)
     control.rejectAll('cli.js exited')
     writer.end()
     if (code === 0 || signal === 'SIGTERM') {
@@ -296,16 +337,13 @@ export function query(input: QueryInput): QueryHandle {
   })
 
   child.on('error', (err) => {
+    childClosed = true
+    options.abortController?.signal.removeEventListener('abort', onAbort)
     control.rejectAll(err.message)
     queue.finish(err)
   })
 
-  // canUseTool handler: if set, wire up the inbound can_use_tool branch.
-  if (options.canUseTool) {
-    void options.canUseTool // captured in closure via handleInbound ctx
-  }
-
-  return makeHandle(queue, control, child, options, initPromise, hookCallbacks)
+  return makeHandle(queue, control, child, options, initPromise, wireLog)
 }
 
 interface InboundCtx {
@@ -425,7 +463,35 @@ async function handleControlRequest(line: Record<string, unknown>, ctx: InboundC
       return
     }
 
-    // Unknown subtype — benign success so cli.js doesn't stall.
+    if (subtype === 'request_user_dialog') {
+      // Generic user-dialog prompt. cli.js's default on no response is a
+      // multi-second hang; always reply promptly. When the consumer hasn't
+      // wired a handler we auto-cancel so the feature at the other end
+      // (e.g. tool-use disambiguation) unblocks immediately.
+      if (!ctx.options.onUserDialog) {
+        ctx.control.respondSuccess(request_id, { behavior: 'cancelled' })
+        return
+      }
+      const result = await ctx.options.onUserDialog(
+        {
+          dialogKind: request.dialog_kind as string | undefined,
+          payload: request.payload,
+          toolUseId: request.tool_use_id as string | undefined,
+        },
+        { signal: ac.signal },
+      )
+      ctx.control.respondSuccess(request_id, (result as Record<string, unknown>) ?? {})
+      return
+    }
+
+    // Unknown subtype — benign success so cli.js doesn't stall. Gated log
+    // so we catch new subtypes that appear upstream without grepping diffs.
+    if (process.env.DEBUG_SDK) {
+      // eslint-disable-next-line no-console
+      console.error(
+        `[sdk] unknown inbound control subtype: ${subtype} (request_id=${request_id})`,
+      )
+    }
     ctx.control.respondSuccess(request_id, {})
   } catch (err) {
     ctx.control.respondError(request_id, (err as Error)?.message ?? 'handler failed')
@@ -480,9 +546,8 @@ function makeHandle(
   child: ChildProcess,
   options: QueryOptions,
   initResponse: Promise<Record<string, unknown>>,
-  _hookCallbacks: Map<string, HookCallback>,
+  wireLog: WireLog,
 ): QueryHandle {
-  void _hookCallbacks // captured by closures in handleControlRequest's ctx
   const pickInit = async <T>(field: string): Promise<T[]> => {
     const r = await initResponse
     const v = r[field]
@@ -504,6 +569,11 @@ function makeHandle(
     },
     // --- Turn / session control -------------------------------------------
     interrupt: () => control.request({ subtype: 'interrupt' }),
+    endSession: () =>
+      // cli.js's `end_session` subtype is a cleaner shutdown than SIGTERM —
+      // the main loop `break`s out gracefully after completing any final
+      // flush. Host should still observe the child's exit event afterwards.
+      control.request({ subtype: 'end_session' }, { timeoutMs: 5_000 }),
     setPermissionMode: (mode: PermissionMode) =>
       control.request({ subtype: 'set_permission_mode', mode }),
     setModel: (model?: string) => control.request({ subtype: 'set_model', model }),
@@ -533,24 +603,44 @@ function makeHandle(
         persist: opts?.persist,
       }),
     askSideQuestion: (question: string) =>
-      control.request({ subtype: 'side_question', question }),
+      control
+        .request<{ answer?: string } | null>({ subtype: 'side_question', question })
+        .then((r) => r?.answer ?? null),
     launchUltrareview: (args: unknown, opts?: { confirm?: boolean }) =>
       control.request({ subtype: 'ultrareview_launch', args, confirm: opts?.confirm }),
     stopTask: (task_id: string) => control.request({ subtype: 'stop_task', task_id }),
     backgroundTask: (tool_use_id: string) =>
       control.request({ subtype: 'background_task', tool_use_id }),
-    dequeueMessage: (value: string) => control.request({ subtype: 'dequeue_message', value }),
-    voiceServerStart: () => control.request({ subtype: 'voice_server_start' }),
-    voiceServerStop: () => control.request({ subtype: 'voice_server_stop' }),
-    getUsage: () => control.request({ subtype: 'get_usage' }),
-    getContextUsage: () => control.request({ subtype: 'get_context_usage' }),
+    dequeueMessage: (value: string) =>
+      control
+        .request<{ removed?: number } | null>({ subtype: 'dequeue_message', value })
+        .then((r) => ({ removed: r?.removed ?? 0 })),
+    voiceServerStart: () =>
+      control
+        .request<{ port?: number } | null>({ subtype: 'voice_server_start' })
+        .then((r) => ({ port: r?.port ?? 0 })),
+    voiceServerStop: () =>
+      control
+        .request<{ stopped?: boolean } | null>({ subtype: 'voice_server_stop' })
+        .then((r) => ({ stopped: r?.stopped ?? true })),
+    getUsage: () =>
+      control
+        .request<Record<string, unknown> | null>({ subtype: 'get_usage' })
+        .then((r) => r ?? {}),
+    getContextUsage: () =>
+      control
+        .request<Record<string, unknown> | null>({ subtype: 'get_context_usage' })
+        .then((r) => r ?? {}),
 
     // --- MCP servers ------------------------------------------------------
     mcpServerStatus: () =>
-      control.request({ subtype: 'mcp_status' }).then((r) => {
-        const resp = (r ?? {}) as { mcpServers?: unknown }
-        return resp.mcpServers ?? r
-      }),
+      control
+        .request<{ mcpServers?: unknown[] } | unknown[] | null>({ subtype: 'mcp_status' })
+        .then((r) => {
+          if (Array.isArray(r)) return r
+          const resp = (r ?? {}) as { mcpServers?: unknown[] }
+          return resp.mcpServers ?? []
+        }),
     toggleMcpServer: (serverName: string, enabled: boolean) =>
       control.request({ subtype: 'mcp_toggle', serverName, enabled }),
     reconnectMcpServer: (serverName: string) =>
@@ -566,19 +656,27 @@ function makeHandle(
     enableChannel: (serverName: string) =>
       control.request({ subtype: 'channel_enable', serverName }),
     mcpAuthenticate: (serverName: string) =>
-      control.request({ subtype: 'mcp_authenticate', serverName }),
+      // Long-lived: blocks on user completing OAuth flow in a browser.
+      control.request({ subtype: 'mcp_authenticate', serverName }, { timeoutMs: 0 }),
     mcpClearAuth: (serverName: string) =>
       control.request({ subtype: 'mcp_clear_auth', serverName }),
     mcpSubmitOAuthCallbackUrl: (serverName: string, callbackUrl: string) =>
       control.request({ subtype: 'mcp_oauth_callback_url', serverName, callbackUrl }),
 
     // --- Claude OAuth -----------------------------------------------------
+    // All three are user-driven and can take minutes; never timeout.
     claudeAuthenticate: (loginWithClaudeAi: boolean) =>
-      control.request({ subtype: 'claude_authenticate', loginWithClaudeAi }),
+      control.request(
+        { subtype: 'claude_authenticate', loginWithClaudeAi },
+        { timeoutMs: 0 },
+      ),
     claudeOAuthCallback: (authorizationCode: string, state: string) =>
-      control.request({ subtype: 'claude_oauth_callback', authorizationCode, state }),
+      control.request(
+        { subtype: 'claude_oauth_callback', authorizationCode, state },
+        { timeoutMs: 0 },
+      ),
     claudeOAuthWaitForCompletion: () =>
-      control.request({ subtype: 'claude_oauth_wait_for_completion' }),
+      control.request({ subtype: 'claude_oauth_wait_for_completion' }, { timeoutMs: 0 }),
 
     // --- Plugins ----------------------------------------------------------
     reloadPlugins: () => control.request({ subtype: 'reload_plugins' }),
@@ -590,6 +688,12 @@ function makeHandle(
     supportedModels: () => pickInit<unknown>('models'),
     supportedCommands: () => pickInit<unknown>('commands'),
     supportedAgents: () => pickInit<unknown>('agents'),
+
+    // --- Diagnostics ------------------------------------------------------
+    /** Snapshot the per-query wire-log ring buffer (every ndjson line the
+     *  harness has read from or written to cli.js). Shallow copy — callers
+     *  may mutate. Intended for debug dumps on unexpected session state. */
+    wireLog: () => wireLog.snapshot(),
   }
   void options
   return handle
