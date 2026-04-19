@@ -28,8 +28,31 @@ export class ControlChannel {
    */
   request(request: Record<string, unknown>): Promise<unknown> {
     const request_id = this.newId()
+    if (process.env.DEBUG_SDK) {
+      // eslint-disable-next-line no-console
+      console.error(
+        `[sdk] → control_request ${request_id} ${JSON.stringify(request).slice(0, 200)}`,
+      )
+    }
     return new Promise((resolve, reject) => {
-      this.pending.set(request_id, { resolve, reject })
+      this.pending.set(request_id, {
+        resolve: (value) => {
+          if (process.env.DEBUG_SDK) {
+            // eslint-disable-next-line no-console
+            console.error(
+              `[sdk] ← control_response ${request_id} ${JSON.stringify(value).slice(0, 200)}`,
+            )
+          }
+          resolve(value)
+        },
+        reject: (err) => {
+          if (process.env.DEBUG_SDK) {
+            // eslint-disable-next-line no-console
+            console.error(`[sdk] ← control_error ${request_id} ${err.message}`)
+          }
+          reject(err)
+        },
+      })
       this.writer.write({ type: 'control_request', request_id, request })
     })
   }
