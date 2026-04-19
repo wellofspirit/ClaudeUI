@@ -6,6 +6,7 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import type {
   CanUseTool,
   CanUseToolResult,
+  HookCallback,
   PermissionMode,
   QueryHandle,
   QueryInput,
@@ -87,12 +88,22 @@ export function query(input: QueryInput): QueryHandle {
   const { sdkServers } = splitMcpServers(options.mcpServers)
   const mcpHost = new McpHost(sdkServers)
 
-  const child: ChildProcess = spawn(executable, args, {
-    cwd: options.cwd,
-    env,
-    stdio: ['pipe', 'pipe', 'pipe'],
-    windowsHide: true,
-  })
+  // Custom spawn hook override — SDK parity. Lets embedders swap the default
+  // child_process.spawn (e.g. for containerized launches).
+  const child: ChildProcess = options.spawnClaudeCodeProcess
+    ? options.spawnClaudeCodeProcess({
+        command: executable,
+        args,
+        cwd: options.cwd,
+        env,
+        signal: options.abortController?.signal,
+      })
+    : spawn(executable, args, {
+        cwd: options.cwd,
+        env,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        windowsHide: true,
+      })
 
   if (!child.stdin || !child.stdout || !child.stderr) {
     throw new Error('Failed to attach stdio to cli.js subprocess')
@@ -117,6 +128,34 @@ export function query(input: QueryInput): QueryHandle {
     options.stderr?.(chunk)
   })
 
+  // ---- Hook callback registry ------------------------------------------
+  // Transform user-provided hooks config into { matcher, hookCallbackIds }
+  // and keep a map callbackId → callback so we can dispatch when cli.js
+  // fires a hook_callback control_request.
+  const hookCallbacks = new Map<string, HookCallback>()
+  let nextHookId = 0
+  let initHooks:
+    | Record<
+        string,
+        Array<{ matcher?: string; hookCallbackIds: string[]; timeout?: number }>
+      >
+    | undefined
+  if (options.hooks) {
+    initHooks = {}
+    for (const [event, matchers] of Object.entries(options.hooks)) {
+      if (!matchers.length) continue
+      initHooks[event] = matchers.map((m) => {
+        const ids: string[] = []
+        for (const cb of m.hooks) {
+          const id = `hook_${nextHookId++}`
+          hookCallbacks.set(id, cb)
+          ids.push(id)
+        }
+        return { matcher: m.matcher, hookCallbackIds: ids, timeout: m.timeout }
+      })
+    }
+  }
+
   // Track first-byte / first-event timestamps for startup diagnostics.
   let sawFirstByte = false
   let sawFirstAssistant = false
@@ -138,7 +177,7 @@ export function query(input: QueryInput): QueryHandle {
         sawFirstAssistant = true
         stamp('first assistant message')
       }
-      handleInbound(line, { control, mcpHost, queue, options })
+      handleInbound(line, { control, mcpHost, queue, options, hookCallbacks })
     },
     (err) => {
       queue.finish(new Error(`Failed to parse CLI stream-json: ${err.message}`))
@@ -156,13 +195,30 @@ export function query(input: QueryInput): QueryHandle {
   // queryHandle methods `supportedModels/Commands/Agents`.
   const initPayload: Record<string, unknown> = { subtype: 'initialize' }
   // cli.js expects sdkMcpServers as an ARRAY OF NAMES (strings), not
-  // descriptor objects. Passing objects caused cli.js to coerce them with
-  // String() → "[object Object]" and hang for ~60s waiting for an MCP
-  // server by that name to respond. Source: sdk.mjs builds the payload as
+  // descriptor objects. Source: sdk.mjs builds the payload as
   //   sdkMcpServers: Array.from(this.sdkMcpTransports.keys())
   if (mcpHost.names().length) initPayload.sdkMcpServers = mcpHost.names()
+  if (initHooks) initPayload.hooks = initHooks
+  if (options.jsonSchema !== undefined) initPayload.jsonSchema = options.jsonSchema
+  if (options.appendSubagentSystemPrompt !== undefined) {
+    initPayload.appendSubagentSystemPrompt = options.appendSubagentSystemPrompt
+  }
+  if (options.excludeDynamicSections !== undefined) {
+    initPayload.excludeDynamicSections = options.excludeDynamicSections
+  }
+  if (options.agents !== undefined) initPayload.agents = options.agents
+  if (options.promptSuggestions !== undefined) {
+    initPayload.promptSuggestions = options.promptSuggestions
+  }
+  if (options.agentProgressSummaries !== undefined) {
+    initPayload.agentProgressSummaries = options.agentProgressSummaries
+  }
+
   const sp = options.systemPrompt
   if (typeof sp === 'string') {
+    // SDK wraps bare strings into a single-element array in the init payload.
+    initPayload.systemPrompt = [sp]
+  } else if (Array.isArray(sp)) {
     initPayload.systemPrompt = sp
   } else if (sp && typeof sp === 'object' && sp.type === 'preset') {
     // preset:'claude_code' + optional `append` — CLI uses its preset by default,
@@ -230,7 +286,7 @@ export function query(input: QueryInput): QueryHandle {
     void options.canUseTool // captured in closure via handleInbound ctx
   }
 
-  return makeHandle(queue, control, child, options, initPromise)
+  return makeHandle(queue, control, child, options, initPromise, hookCallbacks)
 }
 
 interface InboundCtx {
@@ -238,6 +294,7 @@ interface InboundCtx {
   mcpHost: McpHost
   queue: MessageQueue
   options: QueryOptions
+  hookCallbacks: Map<string, HookCallback>
 }
 
 async function handleInbound(line: Record<string, unknown>, ctx: InboundCtx): Promise<void> {
@@ -288,8 +345,62 @@ async function handleControlRequest(line: Record<string, unknown>, ctx: InboundC
       ctx.control.respondSuccess(request_id, { mcp_response })
       return
     }
-    // Hook events and other control requests we don't implement yet —
-    // respond with a benign success so the CLI continues.
+
+    if (subtype === 'hook_callback') {
+      // cli.js fires this when a matcher-registered hook triggers.
+      const callback_id = request.callback_id as string
+      const cb = ctx.hookCallbacks.get(callback_id)
+      if (!cb) {
+        ctx.control.respondError(request_id, `No hook callback for id: ${callback_id}`)
+        return
+      }
+      const abortCtrl = new AbortController()
+      const result = await cb(
+        (request.input as Record<string, unknown>) ?? {},
+        request.tool_use_id as string | undefined,
+        { signal: abortCtrl.signal },
+      )
+      ctx.control.respondSuccess(request_id, (result as Record<string, unknown>) ?? {})
+      return
+    }
+
+    if (subtype === 'elicitation') {
+      // MCP server is asking the user for input.
+      if (!ctx.options.onElicitation) {
+        ctx.control.respondSuccess(request_id, { action: 'decline' })
+        return
+      }
+      const abortCtrl = new AbortController()
+      const result = await ctx.options.onElicitation(
+        {
+          serverName: request.mcp_server_name as string,
+          message: request.message,
+          mode: request.mode as string | undefined,
+          url: request.url as string | undefined,
+          elicitationId: request.elicitation_id as string | undefined,
+          requestedSchema: request.requested_schema,
+          title: request.title as string | undefined,
+          displayName: request.display_name as string | undefined,
+          description: request.description as string | undefined,
+        },
+        { signal: abortCtrl.signal },
+      )
+      ctx.control.respondSuccess(request_id, (result as Record<string, unknown>) ?? {})
+      return
+    }
+
+    if (subtype === 'oauth_token_refresh') {
+      if (!ctx.options.getOAuthToken) {
+        ctx.control.respondError(request_id, 'getOAuthToken callback is not provided.')
+        return
+      }
+      const abortCtrl = new AbortController()
+      const token = await ctx.options.getOAuthToken({ signal: abortCtrl.signal })
+      ctx.control.respondSuccess(request_id, { accessToken: token ?? null })
+      return
+    }
+
+    // Unknown subtype — benign success so cli.js doesn't stall.
     ctx.control.respondSuccess(request_id, {})
   } catch (err) {
     ctx.control.respondError(request_id, (err as Error)?.message ?? 'handler failed')
@@ -343,7 +454,9 @@ function makeHandle(
   child: ChildProcess,
   options: QueryOptions,
   initResponse: Promise<Record<string, unknown>>,
+  _hookCallbacks: Map<string, HookCallback>,
 ): QueryHandle {
+  void _hookCallbacks // captured by closures in handleControlRequest's ctx
   const pickInit = async <T>(field: string): Promise<T[]> => {
     const r = await initResponse
     const v = r[field]

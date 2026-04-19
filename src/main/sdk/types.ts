@@ -58,7 +58,60 @@ export interface SystemPromptPreset {
   append?: string
 }
 
-export type SystemPrompt = string | SystemPromptPreset
+export type SystemPrompt = string | string[] | SystemPromptPreset
+
+/**
+ * Hook event callback. Fires when cli.js dispatches a hook_callback
+ * control_request for a matcher-group this callback is registered under.
+ */
+export type HookCallback = (
+  input: Record<string, unknown>,
+  toolUseId: string | undefined,
+  context: { signal: AbortSignal },
+) => Promise<unknown> | unknown
+
+export interface HookMatcher {
+  matcher?: string
+  hooks: HookCallback[]
+  timeout?: number
+}
+
+/**
+ * Keys are hook event names: 'PreToolUse', 'PostToolUse', 'Notification',
+ * 'UserPromptSubmit', 'SessionStart', 'SessionEnd', 'Stop', 'SubagentStop',
+ * 'PreCompact', 'PostCompact', ...
+ */
+export type HooksConfig = Record<string, HookMatcher[]>
+
+/** MCP elicitation request — user-input prompt initiated by an MCP server. */
+export interface ElicitationContext {
+  serverName: string
+  message?: unknown
+  mode?: string
+  url?: string
+  elicitationId?: string
+  requestedSchema?: unknown
+  title?: string
+  displayName?: string
+  description?: string
+}
+
+export type ElicitationCallback = (
+  params: ElicitationContext,
+  opts: { signal: AbortSignal },
+) => Promise<unknown>
+
+export type GetOAuthTokenCallback = (opts: {
+  signal: AbortSignal
+}) => Promise<string | null>
+
+export type SpawnClaudeCodeProcess = (opts: {
+  command: string
+  args: string[]
+  cwd?: string
+  env?: NodeJS.ProcessEnv
+  signal?: AbortSignal
+}) => import('node:child_process').ChildProcess
 
 /** Stdio MCP server (`type: 'stdio'`) — child process with JSON-RPC over stdio. */
 export interface McpServerStdio {
@@ -233,6 +286,30 @@ export interface QueryOptions {
   /** Initial permission settings baked into the session (forwarded via initialize). */
   settings?: Record<string, unknown>
 
+  // --- Initialize-payload fields (not CLI flags) --------------------------
+  /** Hook callbacks, registered at initialize and fired via hook_callback. */
+  hooks?: HooksConfig
+  /** JSON schema for structured outputs. Forwarded via initialize. */
+  jsonSchema?: unknown
+  /** Appended to the subagent system prompt (not CLI flag). */
+  appendSubagentSystemPrompt?: string
+  /** Strip dynamic (per-user) sections from the system prompt. */
+  excludeDynamicSections?: boolean
+  /** Custom agent definitions for this session. */
+  agents?: Record<string, unknown>
+  /** Enable prompt suggestions. */
+  promptSuggestions?: boolean
+  /** Enable agent-progress summaries. */
+  agentProgressSummaries?: boolean
+
+  // --- Callbacks ---------------------------------------------------------
+  /** MCP elicitation prompt handler. */
+  onElicitation?: ElicitationCallback
+  /** OAuth token refresh provider. */
+  getOAuthToken?: GetOAuthTokenCallback
+  /** Override the default child_process.spawn with a custom launcher. */
+  spawnClaudeCodeProcess?: SpawnClaudeCodeProcess
+
   // --- Additional pass-through flags mirroring the upstream SDK ---
   additionalDirectories?: string[]
   assistant?: boolean
@@ -243,7 +320,6 @@ export interface QueryOptions {
   debugFile?: string
   fallbackModel?: string
   forkSession?: boolean
-  jsonSchema?: unknown
   maxBudgetUsd?: number
   permissionPromptToolName?: string
   plugins?: Array<{ type: 'local'; path: string }>
