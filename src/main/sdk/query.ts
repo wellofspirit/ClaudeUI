@@ -151,7 +151,12 @@ export function query(input: QueryInput): QueryHandle {
   // control_request subtypes. We cache the promise and hand it to the
   // queryHandle methods `supportedModels/Commands/Agents`.
   const initPayload: Record<string, unknown> = { subtype: 'initialize' }
-  if (mcpHost.names().length) initPayload.sdkMcpServers = mcpHost.descriptors()
+  // cli.js expects sdkMcpServers as an ARRAY OF NAMES (strings), not
+  // descriptor objects. Passing objects caused cli.js to coerce them with
+  // String() → "[object Object]" and hang for ~60s waiting for an MCP
+  // server by that name to respond. Source: sdk.mjs builds the payload as
+  //   sdkMcpServers: Array.from(this.sdkMcpTransports.keys())
+  if (mcpHost.names().length) initPayload.sdkMcpServers = mcpHost.names()
   const sp = options.systemPrompt
   if (typeof sp === 'string') {
     initPayload.systemPrompt = sp
