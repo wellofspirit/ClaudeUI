@@ -5,6 +5,8 @@
  * options we actually use — the CLI accepts many more, but they're gated
  * behind feature paths that aren't exercised here.
  */
+import * as fs from 'node:fs'
+import * as path from 'node:path'
 import type { QueryOptions, McpServerConfig, SdkMcpServer } from './types'
 
 /** Strip in-process `type: 'sdk'` servers from an mcpServers map — those are
@@ -100,10 +102,49 @@ export function buildArgs(options: QueryOptions): string[] {
   return args
 }
 
+/**
+ * Find the app's node_modules directory so cli.js's require() calls can
+ * resolve external deps (`ws`, `undici`, `yaml`, `node-fetch`, `ajv`, etc.).
+ *
+ * Under Bun, cli.js's compiled binary has these as runtime built-ins. Under
+ * Node, it needs filesystem resolution — but cli.js sits at
+ * vendor/claude-cli/cli.js (dev) or Resources/claude-cli/cli.js (prod),
+ * neither of which is inside a node_modules tree for Node's walk-up to work.
+ *
+ * We resolve the correct node_modules path at spawn time and inject it via
+ * NODE_PATH. The search order covers dev (project root) and production
+ * (app.asar where electron-builder places deps).
+ */
+function resolveAppNodeModules(): string | null {
+  const candidates: string[] = []
+  // Dev: walk up from this module's location looking for a node_modules dir.
+  // In a built app, __dirname is inside out/main or app.asar.
+  let cur = __dirname
+  for (let i = 0; i < 8; i++) {
+    const nm = path.join(cur, 'node_modules')
+    if (fs.existsSync(nm)) candidates.push(nm)
+    const parent = path.dirname(cur)
+    if (parent === cur) break
+    cur = parent
+  }
+  return candidates[0] ?? null
+}
+
+let cachedNodeModules: string | null | undefined
+
 export function buildEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const env = { ...base }
   if (!env.CLAUDE_CODE_ENTRYPOINT) env.CLAUDE_CODE_ENTRYPOINT = 'sdk-ts'
   if (env.DEBUG_CLAUDE_AGENT_SDK) env.DEBUG = '1'
   delete env.NODE_OPTIONS
+
+  // Inject our app's node_modules into NODE_PATH so cli.js can resolve
+  // `ws`, `undici`, etc. even though it lives outside any node_modules tree.
+  if (cachedNodeModules === undefined) cachedNodeModules = resolveAppNodeModules()
+  if (cachedNodeModules) {
+    const sep = process.platform === 'win32' ? ';' : ':'
+    const existing = env.NODE_PATH ? env.NODE_PATH + sep : ''
+    env.NODE_PATH = existing + cachedNodeModules
+  }
   return env
 }
