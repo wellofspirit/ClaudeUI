@@ -116,12 +116,13 @@ export function query(input: QueryInput): QueryHandle {
   // Initialize: tell CLI about our in-process MCP servers + systemPrompt +
   // other runtime-only options. Must happen AFTER the stream reader is wired
   // so we see the response.
-  const initPayload: Record<string, unknown> = {
-    subtype: 'initialize',
-  }
-  if (mcpHost.names().length) {
-    initPayload.sdkMcpServers = mcpHost.descriptors()
-  }
+  //
+  // The response payload is the authoritative source for `models`,
+  // `commands`, `agents` — cli.js does NOT expose these via dedicated
+  // control_request subtypes. We cache the promise and hand it to the
+  // queryHandle methods `supportedModels/Commands/Agents`.
+  const initPayload: Record<string, unknown> = { subtype: 'initialize' }
+  if (mcpHost.names().length) initPayload.sdkMcpServers = mcpHost.descriptors()
   const sp = options.systemPrompt
   if (typeof sp === 'string') {
     initPayload.systemPrompt = sp
@@ -130,15 +131,10 @@ export function query(input: QueryInput): QueryHandle {
     // we only need to forward the append string.
     if (sp.append) initPayload.appendSystemPrompt = sp.append
   }
-
-  const needsInit =
-    Object.keys(initPayload).length > 1 /* more than just 'subtype' */
-  const initPromise = needsInit
-    ? control.request(initPayload).catch(() => {
-        /* initialize response failures are non-fatal — cli.js will still
-           operate, it just won't see our SDK MCP servers / systemPrompt */
-      })
-    : Promise.resolve()
+  const initPromise: Promise<Record<string, unknown>> = control
+    .request(initPayload)
+    .then((r) => (r ?? {}) as Record<string, unknown>)
+    .catch(() => ({}))
 
   // Forward initial prompt(s)
   void (async () => {
@@ -190,7 +186,7 @@ export function query(input: QueryInput): QueryHandle {
     void options.canUseTool // captured in closure via handleInbound ctx
   }
 
-  return makeHandle(queue, control, child, options)
+  return makeHandle(queue, control, child, options, initPromise)
 }
 
 interface InboundCtx {
@@ -294,7 +290,13 @@ function makeHandle(
   control: ControlChannel,
   child: ChildProcess,
   options: QueryOptions,
+  initResponse: Promise<Record<string, unknown>>,
 ): QueryHandle {
+  const pickInit = async <T>(field: string): Promise<T[]> => {
+    const r = await initResponse
+    const v = r[field]
+    return Array.isArray(v) ? (v as T[]) : []
+  }
   const handle: QueryHandle = {
     [Symbol.asyncIterator](): AsyncIterator<SDKMessage> {
       return {
@@ -344,10 +346,11 @@ function makeHandle(
       control.request({ subtype: 'apply_flag_settings', settings }),
     voiceServerStart: () => control.request({ subtype: 'voice_server_start' }),
     voiceServerStop: () => control.request({ subtype: 'voice_server_stop' }),
-    supportedModels: () => control.request({ subtype: 'supported_models' }) as Promise<unknown[]>,
-    supportedCommands: () =>
-      control.request({ subtype: 'supported_commands' }) as Promise<unknown[]>,
-    supportedAgents: () => control.request({ subtype: 'supported_agents' }) as Promise<unknown[]>,
+    // cli.js doesn't expose these as control_request subtypes — the values
+    // come bundled inside the `initialize` response (SDK behavior).
+    supportedModels: () => pickInit<unknown>('models'),
+    supportedCommands: () => pickInit<unknown>('commands'),
+    supportedAgents: () => pickInit<unknown>('agents'),
   }
   void options
   return handle
