@@ -32,6 +32,11 @@ export function splitMcpServers(
   return { cliServers, sdkServers }
 }
 
+/**
+ * Build the CLI argv list. Order and semantics mirror the upstream SDK's
+ * arg-builder at sdk.mjs ~char 222824 — some options only take effect if
+ * emitted in exactly the shape cli.js expects.
+ */
 export function buildArgs(options: QueryOptions): string[] {
   const args: string[] = [
     '--output-format',
@@ -41,8 +46,7 @@ export function buildArgs(options: QueryOptions): string[] {
     'stream-json',
   ]
 
-  // Thinking mode — translate {type, budgetTokens, display} the same way
-  // the SDK's arg builder does:
+  // --- Thinking ------------------------------------------------------------
   //   enabled + no budget   → --thinking adaptive
   //   enabled + budget      → --max-thinking-tokens N   (no --thinking flag)
   //   disabled              → --thinking disabled
@@ -77,60 +81,119 @@ export function buildArgs(options: QueryOptions): string[] {
     }
   }
 
+  // --- Turn / budget limits ------------------------------------------------
   if (options.effort) args.push('--effort', options.effort)
   if (typeof options.maxTurns === 'number') args.push('--max-turns', String(options.maxTurns))
-  if (options.model) args.push('--model', options.model)
-  if (options.agents) args.push('--agent', options.agents)
+  if (typeof options.maxBudgetUsd === 'number') {
+    args.push('--max-budget-usd', String(options.maxBudgetUsd))
+  }
+  if (options.taskBudget) args.push('--task-budget', String(options.taskBudget.total))
 
-  if (options.canUseTool) {
-    args.push('--permission-prompt-tool', 'stdio')
+  // --- Model / agent / betas ----------------------------------------------
+  if (options.model) args.push('--model', options.model)
+  if (options.agent) args.push('--agent', options.agent)
+  if (Array.isArray(options.betas) && options.betas.length > 0) {
+    args.push('--betas', options.betas.join(','))
   }
 
-  if (options.resume) args.push('--resume', options.resume)
+  // --- JSON schema ---------------------------------------------------------
+  if (options.jsonSchema !== undefined) {
+    args.push('--json-schema', JSON.stringify(options.jsonSchema))
+  }
 
+  // --- Debug flags ---------------------------------------------------------
+  if (options.debugFile) args.push('--debug-file', options.debugFile)
+  else if (options.debug) args.push('--debug')
+  if (process.env.DEBUG_CLAUDE_AGENT_SDK) args.push('--debug-to-stderr')
+
+  // --- Permission prompt tool ---------------------------------------------
+  if (options.canUseTool) {
+    if (options.permissionPromptToolName) {
+      throw new Error(
+        'canUseTool callback cannot be used with permissionPromptToolName. Use one or the other.',
+      )
+    }
+    args.push('--permission-prompt-tool', 'stdio')
+  } else if (options.permissionPromptToolName) {
+    args.push('--permission-prompt-tool', options.permissionPromptToolName)
+  }
+
+  // --- Session control -----------------------------------------------------
+  if (options.continueConversation) args.push('--continue')
+  if (options.resume) args.push('--resume', options.resume)
+  if (options.assistant) args.push('--assistant')
+  if (Array.isArray(options.channels) && options.channels.length > 0) {
+    args.push('--channels', ...options.channels)
+  }
+
+  // --- Tool lists ----------------------------------------------------------
   if (Array.isArray(options.allowedTools) && options.allowedTools.length) {
     args.push('--allowedTools', options.allowedTools.join(','))
   }
   if (Array.isArray(options.disallowedTools) && options.disallowedTools.length) {
     args.push('--disallowedTools', options.disallowedTools.join(','))
   }
-  if (Array.isArray(options.tools)) {
-    // `[]` → `--tools ""` (no tools at all), undefined → omit (default set).
-    args.push('--tools', options.tools.length ? options.tools.join(',') : '')
+  if (options.tools !== undefined) {
+    if (Array.isArray(options.tools)) {
+      // `[]` → `--tools ""` (no tools at all); populated → csv.
+      args.push('--tools', options.tools.length ? options.tools.join(',') : '')
+    } else {
+      // Non-array truthy value (e.g. 'default') → --tools default
+      args.push('--tools', 'default')
+    }
   }
 
+  // --- MCP servers + settings ---------------------------------------------
   const { cliServers } = splitMcpServers(options.mcpServers)
-  if (Object.keys(cliServers).length) {
+  if (Object.keys(cliServers).length > 0) {
     args.push('--mcp-config', JSON.stringify({ mcpServers: cliServers }))
   }
-
-  // SDK emits this as a single `--setting-sources=csv` arg (not two args).
-  // cli.js's parser tolerates both on most versions but match SDK exactly.
+  // SDK emits setting-sources as a single `--setting-sources=csv` arg.
   if (options.settingSources !== undefined) {
     args.push(`--setting-sources=${options.settingSources.join(',')}`)
   }
+  if (options.strictMcpConfig) args.push('--strict-mcp-config')
 
-  if (options.permissionMode) {
-    args.push('--permission-mode', options.permissionMode)
-  }
-
+  // --- Permissions & fallback ---------------------------------------------
+  if (options.permissionMode) args.push('--permission-mode', options.permissionMode)
   if (options.allowDangerouslySkipPermissions) {
     args.push('--allow-dangerously-skip-permissions')
   }
-
-  if (options.includeHookEvents) args.push('--include-hook-events')
-  if (options.includePartialMessages) args.push('--include-partial-messages')
-
-  if (options.persistSession === false) args.push('--no-session-persistence')
-
-  if (options.systemPrompt && typeof options.systemPrompt === 'string') {
-    // String systemPrompt is sent via the `initialize` control request, not
-    // as a CLI flag — the CLI doesn't have a `--system-prompt` string flag.
-    // Preset/append variants are handled the same way. This branch is a
-    // no-op; keep for clarity in case the CLI adds a flag later.
+  if (options.fallbackModel) {
+    if (options.model && options.fallbackModel === options.model) {
+      throw new Error(
+        'fallbackModel cannot be the same as model. Please specify a different model for fallbackModel.',
+      )
+    }
+    args.push('--fallback-model', options.fallbackModel)
   }
 
-  if (Array.isArray(options.extraArgs) && options.extraArgs.length) {
+  // --- Hook / stream / session flags --------------------------------------
+  if (options.includeHookEvents) args.push('--include-hook-events')
+  if (options.includePartialMessages) args.push('--include-partial-messages')
+  if (options.sessionMirror) args.push('--session-mirror')
+
+  // --- Additional dirs & plugins ------------------------------------------
+  for (const dir of options.additionalDirectories ?? []) args.push('--add-dir', dir)
+  for (const plugin of options.plugins ?? []) {
+    if (plugin.type !== 'local') {
+      throw new Error(`Unsupported plugin type: ${(plugin as { type: string }).type}`)
+    }
+    args.push('--plugin-dir', plugin.path)
+  }
+
+  // --- Session-id / resume-at / fork --------------------------------------
+  if (options.forkSession) args.push('--fork-session')
+  if (options.resumeSessionAt) args.push('--resume-session-at', options.resumeSessionAt)
+  if (options.sessionId) args.push('--session-id', options.sessionId)
+  if (options.persistSession === false) args.push('--no-session-persistence')
+
+  // --- systemPrompt --------------------------------------------------------
+  // String systemPrompt is sent via the `initialize` control request, not as
+  // a CLI flag. Preset/append variants are handled the same way. No-op here.
+
+  // --- Escape hatch --------------------------------------------------------
+  if (Array.isArray(options.extraArgs) && options.extraArgs.length > 0) {
     args.push(...options.extraArgs)
   }
 

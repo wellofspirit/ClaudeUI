@@ -190,7 +190,8 @@ export interface QueryOptions {
   permissionMode?: PermissionMode
   systemPrompt?: SystemPrompt
   maxTurns?: number
-  tools?: string[]
+  /** Tool-allowlist shape: array (possibly empty) or `'default'`. undefined = omit. */
+  tools?: string[] | 'default'
   allowedTools?: string[]
   disallowedTools?: string[]
   thinking?: ThinkingConfig
@@ -200,7 +201,7 @@ export interface QueryOptions {
   canUseTool?: CanUseTool
   settingSources?: SettingSource[]
   includePartialMessages?: boolean
-  effort?: 'low' | 'medium' | 'high'
+  effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | string
   resume?: string
   stderr?: (chunk: Buffer) => void
   /** Executable overrides (for Electron's ELECTRON_RUN_AS_NODE=1 setup). */
@@ -211,12 +212,32 @@ export interface QueryOptions {
   extraArgs?: string[]
   /** Emit hook_event control requests to this handler. */
   includeHookEvents?: boolean
-  /** Agents config. */
-  agents?: string
+  /** Single agent name — forwarded as --agent. */
+  agent?: string
   /** When true, skip permission prompts entirely (maps to --allow-dangerously-skip-permissions). */
   allowDangerouslySkipPermissions?: boolean
   /** Initial permission settings baked into the session (forwarded via initialize). */
   settings?: Record<string, unknown>
+
+  // --- Additional pass-through flags mirroring the upstream SDK ---
+  additionalDirectories?: string[]
+  assistant?: boolean
+  betas?: string[]
+  channels?: string[]
+  continueConversation?: boolean
+  debug?: boolean
+  debugFile?: string
+  fallbackModel?: string
+  forkSession?: boolean
+  jsonSchema?: unknown
+  maxBudgetUsd?: number
+  permissionPromptToolName?: string
+  plugins?: Array<{ type: 'local'; path: string }>
+  resumeSessionAt?: string
+  sessionId?: string
+  sessionMirror?: boolean
+  strictMcpConfig?: boolean
+  taskBudget?: { total: number }
 }
 
 export interface QueryInput {
