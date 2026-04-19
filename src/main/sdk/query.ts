@@ -270,10 +270,18 @@ async function handleControlRequest(line: Record<string, unknown>, ctx: InboundC
       const message = request.message as Parameters<
         McpHost['dispatch']
       >[1]
+      const innerMsg = message as { method?: string; id?: string | number | null }
+      const isRequest =
+        innerMsg && 'method' in innerMsg && 'id' in innerMsg && innerMsg.id != null
       const result = await ctx.mcpHost.dispatch(serverName, message)
-      // If the inner message was a notification (no id), result is null;
-      // still respond with success so the CLI doesn't stall.
-      ctx.control.respondSuccess(request_id, result ?? {})
+      // cli.js expects the response wrapped as `{ mcp_response: <jsonrpc> }`.
+      // For notifications (no id) the SDK synthesizes a dummy RPC result so
+      // cli.js sees a well-formed reply.
+      const mcp_response =
+        isRequest && result
+          ? result
+          : { jsonrpc: '2.0' as const, result: {}, id: 0 }
+      ctx.control.respondSuccess(request_id, { mcp_response })
       return
     }
     // Hook events and other control requests we don't implement yet —
