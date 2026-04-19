@@ -26,7 +26,33 @@ export default defineConfig({
             'src/**/__tests__/**/*.test.{ts,tsx}',
             'src/**/__tests__/**/*.unit.test.{ts,tsx}',
           ],
+          // Git-backed filesystem tests are slow (real simple-git subprocess
+          // calls on Windows cost ~150-200ms each). They live in their own
+          // `git` project so the default `bun run test` can stay snappy; they
+          // still run in CI and on-demand via `bun run test:git` /
+          // `bun run test:git:changed`.
+          exclude: [
+            '**/node_modules/**',
+            '**/dist/**',
+            '**/.{idea,git,cache,output,temp}/**',
+            'src/main/services/__tests__/git-service*.test.ts',
+            'src/main/services/__tests__/worktree.test.ts',
+          ],
           testTimeout: 5000,
+        },
+      },
+      {
+        resolve: { alias: sharedAlias },
+        test: {
+          name: 'git',
+          environment: 'node',
+          globals: true,
+          setupFiles: ['./src/test/setup/node.setup.ts'],
+          include: [
+            'src/main/services/__tests__/git-service*.test.ts',
+            'src/main/services/__tests__/worktree.test.ts',
+          ],
+          testTimeout: 30000,
         },
       },
       {
