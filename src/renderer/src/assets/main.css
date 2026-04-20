@@ -212,6 +212,14 @@ html, #root {
   border-color: transparent;
 }
 
+/* Sidebar session-item icon backdrop — theme-aware tint that contrasts with icon color. */
+.session-icon-backdrop {
+  background-color: rgba(0, 0, 0, 0.5);
+}
+[data-theme="light"] .session-icon-backdrop {
+  background-color: rgba(255, 255, 255, 0.5);
+}
+
 ::selection {
   background: var(--color-accent);
   color: white;

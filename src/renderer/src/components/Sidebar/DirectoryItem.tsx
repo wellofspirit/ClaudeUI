@@ -111,7 +111,7 @@ export const DirectoryItem = memo(function DirectoryItem({
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="shrink-0 text-text-muted">
           <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" />
         </svg>
-        <span className="truncate flex-1">{group.folderName}</span>
+        <span className="truncate flex-1" title={group.cwd || group.folderName}>{group.folderName}</span>
         <span className="text-[10px] text-text-muted">{group.sessions.length}</span>
       </div>
       {expanded && (
