@@ -31,11 +31,15 @@ import { createMockupServer } from './mockup-tool'
 import { getClassifier, stopClassifier, isSafeTool, buildTranscript, type TranscriptMessage } from './auto-classifier'
 import { resolveThinkingMode, type ThinkingMode } from '../../shared/model-capabilities'
 
-import { locateCliJs, getCliVersion } from '../sdk'
+import { locateBunClaude, getCliVersion } from '../sdk'
 
-/** cli.js path — vendored at vendor/claude-cli/cli.js (extracted from upstream). */
+/**
+ * Path to the rebundled Bun standalone binary (has cli.js embedded).
+ * Vendored at `vendor/claude-cli/bun-claude[.exe]` — built by
+ * `scripts/rebundle-cli.mjs` during `bun run ensure-cli`.
+ */
 export function getCliJsPath(): string {
-  return locateCliJs()
+  return locateBunClaude()
 }
 
 /** Vendored CLI version, read from vendor/claude-cli/version.json. */
@@ -44,58 +48,19 @@ export function getSdkVersion(): string {
 }
 
 /**
- * Resolve the Electron Helper binary for spawning child processes.
- *
- * On macOS, spawning `process.execPath` (the main Electron binary) causes a
- * dock icon flash. The Electron Helper binary has `LSUIElement=1` in its
- * Info.plist, so macOS treats it as a background process — no dock icon.
- *
- * Path: ClaudeUI.app/Contents/Frameworks/ClaudeUI Helper.app/Contents/MacOS/ClaudeUI Helper
- */
-function getElectronHelperPath(): string {
-  if (process.platform !== 'darwin') return process.execPath
-
-  // process.execPath = .../ClaudeUI.app/Contents/MacOS/ClaudeUI
-  const contentsDir = path.dirname(path.dirname(process.execPath))
-  const appName = path.basename(process.execPath) // "ClaudeUI"
-  const helperPath = path.join(
-    contentsDir,
-    'Frameworks',
-    `${appName} Helper.app`,
-    'Contents',
-    'MacOS',
-    `${appName} Helper`
-  )
-
-  // Fall back to main binary if helper doesn't exist (e.g., dev mode)
-  if (!fs.existsSync(helperPath)) return process.execPath
-  return helperPath
-}
-
-/**
- * SDK options for resolving the CLI executable in production.
- *
- * The SDK spawns `cli.js` via `spawn("node", [cliPath, ...])` by default,
- * but macOS GUI apps don't have a system `node` in PATH (especially on fresh
- * machines). We use Electron's own Node.js runtime with ELECTRON_RUN_AS_NODE=1
- * so the spawn is self-contained. On macOS we use the Helper binary to avoid
- * dock icon flashes.
+ * SDK options for the CLI spawn. The executable is our rebundled Bun binary;
+ * it runs natively, carries all of Anthropic's bundled assets (ripgrep,
+ * native addons, helper scripts), and does not need `ELECTRON_RUN_AS_NODE`
+ * or a `NODE_PATH` injection.
  */
 export function getSdkExecutableOpts(): Record<string, unknown> {
-  const cliPath = getCliJsPath()
-  // Pass ELECTRON_RUN_AS_NODE to cli.js's env via the spawn call — NOT by
-  // mutating process.env. Mutating process.env would poison every subsequent
-  // child process spawned by Electron itself (GPU, renderer, utility) and
-  // cause them to start in Node mode, rejecting Chromium's args with
-  // "bad option: --type=gpu-process" etc.
-  //
-  // The additive `env` overlay is merged on top of process.env by the SDK
-  // layer's buildEnv(), so PATH / HOME / shell-inherited vars are preserved.
+  const bunClaude = locateBunClaude()
   return {
-    pathToClaudeCodeExecutable: cliPath,
-    executable: getElectronHelperPath(),
+    pathToClaudeCodeExecutable: bunClaude,
+    executable: bunClaude,
     executableArgs: [],
-    env: { ELECTRON_RUN_AS_NODE: '1' }
+    standaloneExecutable: true,
+    env: {},
   }
 }
 import type {

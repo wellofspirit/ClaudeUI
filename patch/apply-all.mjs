@@ -24,8 +24,10 @@ const patches = [
   resolve(__dirname, 'rate-limit-relay/apply.mjs'),
   resolve(__dirname, 'incomplete-session-resume-fix/apply.mjs'),
   resolve(__dirname, 'voice-server/apply.mjs'),
-  resolve(__dirname, 'bash-output-streaming/apply.mjs'),
-  resolve(__dirname, 'ci-path-remap/apply.mjs')
+  resolve(__dirname, 'bash-output-streaming/apply.mjs')
+  // ci-path-remap retired: cli.js now runs inside a rebundled Bun binary,
+  // which resolves baked file:// URLs natively via its module graph. The
+  // Node-compatibility shim is no longer needed.
 ]
 
 for (const patch of patches) {

@@ -13,7 +13,7 @@ A desktop GUI for Claude Code sessions, built with Electron. Features include mu
 - **Tailwind CSS v4** via `@tailwindcss/vite` plugin (no postcss/tailwind config files)
 - **Zustand** for state management
 - **react-markdown** + **remark-gfm** for rendering
-- **Claude Code CLI** integrated directly — `cli.js` extracted from the official claude-code Bun binary at build time, spawned via our in-house harness (`src/main/sdk/`). No `@anthropic-ai/claude-agent-sdk` dependency. See **[docs/sdk-layer.md](docs/sdk-layer.md)**.
+- **Claude Code CLI** integrated directly — we rebundle Anthropic's official Bun standalone binary with our patched cli.js, producing `vendor/claude-cli/bun-claude[.exe]` at build time. Handles PE (Windows `.bun` section) and Mach-O (macOS `__BUN,__bun` section + ad-hoc codesign); ELF (Linux) is a follow-up. Spawned natively (no `ELECTRON_RUN_AS_NODE`, no cli.js arg injection). No `@anthropic-ai/claude-agent-sdk` dependency. See **[docs/sdk-layer.md](docs/sdk-layer.md)**.
 - **@modelcontextprotocol/sdk** for in-process MCP server hosting
 - **simple-git** for git operations
 - **node-pty** + **@xterm/xterm** for terminal emulator
@@ -28,8 +28,8 @@ A desktop GUI for Claude Code sessions, built with Electron. Features include mu
 - `bun run build` — typecheck + build
 - `bun run build:mac` — build macOS distributable
 - `bun run build:win` — build Windows distributable
-- `bun run ensure-cli` — extract cli.js + apply patches (cache-hit skip on matching version)
-- `bun run update-cli` — force re-extract and re-patch (use after bumping `claudeCliVersion`)
+- `bun run ensure-cli` — extract wrapped cli.js, apply patches, rebundle into `bun-claude[.exe]` (cache-hit skip on matching version)
+- `bun run update-cli` — force re-extract, re-patch, and re-rebundle (use after bumping `claudeCliVersion`)
 - `bun run test` — run Vitest tests
 - `bun run test:watch` — run tests in watch mode
 - `bun run typecheck` — run TypeScript checks (node + web)
@@ -126,9 +126,9 @@ src/
     setup/                   — jsdom.setup.ts, node.setup.ts
   e2e/flows/                 — Layer 3 E2E tests
   integration/               — Layer 4 integration tests
-vendor/claude-cli/         — Extracted + patched cli.js (not checked in; regenerated per build)
-scripts/                   — Build-time helpers (extract-cli.mjs, repath-patches.mjs, ...)
-patch/                     — cli.js content-regex patches (applied via ensure-cli)
+vendor/claude-cli/         — Rebundled bun-claude[.exe] + wrapped cli.js source (not checked in)
+scripts/                   — Build-time helpers (extract-cli.mjs, rebundle-cli.mjs, ...)
+patch/                     — cli.js content-regex patches applied before rebundle
 docs/adr/                  — Architectural Decision Records
 docs/sdk-layer.md          — Reference for the in-house cli.js harness
 ```
@@ -197,7 +197,7 @@ User types prompt → InputBox.handleSend()
 - **Message upsert by ID** — cli.js sends partial messages with the same `betaMessage.id`; updates replace in place rather than duplicating
 - **Approval Promise** — `canUseTool` callback creates a Promise stored in `pendingApprovals` Map, resolved when user clicks Allow/Deny
 - **Tool result extraction** — Tool results arrive via synthetic `type: 'user'` messages (not assistant), extracted by `extractToolResults()`
-- **Scoped child env** — `ELECTRON_RUN_AS_NODE=1` rides in the spawn `env` overlay only; never mutate `process.env` for this var or Electron's GPU/renderer children inherit it and fail
+- **Scoped child env** — historically `ELECTRON_RUN_AS_NODE=1` rode in the spawn `env` overlay only to avoid poisoning Electron's GPU/renderer children. Retired when cli.js moved into the rebundled Bun binary; the `env` overlay mechanism in `query.ts` remains for any future per-spawn env isolation
 - **Multi-session routing** — Each session has a `routingId`; IPC events are routed by this ID so multiple sessions can coexist
 - **Session rekey** — When the cli.js session starts, the temporary routingId is rekeyed to the session UUID from the first `system/init` event
 - **Git status polling** — `useGitWatcher` starts/stops `GitService.startPolling()` based on active session's cwd

@@ -14,7 +14,7 @@ import type {
   SDKMessage,
   McpServerConfig,
 } from './types'
-import { locateCliJs } from './locate'
+import { locateBunClaude } from './locate'
 import { buildArgs, buildEnv, splitMcpServers } from './args'
 import { NdjsonReader, NdjsonWriter } from './protocol'
 import { ControlChannel } from './control'
@@ -75,15 +75,22 @@ class MessageQueue {
 
 export function query(input: QueryInput): QueryHandle {
   const options: QueryOptions = input.options ?? {}
-  const cliPath = options.pathToClaudeCodeExecutable ?? locateCliJs()
-  const executable = options.executable ?? process.execPath
+  // Default executable is the rebundled Bun binary; `pathToClaudeCodeExecutable`
+  // lets tests/alt-runtimes override. When `standaloneExecutable` (default for
+  // the Bun binary pipeline) is true, the executable is self-contained and we
+  // don't inject its path as an argv entry.
+  const bunClaude = options.pathToClaudeCodeExecutable ?? locateBunClaude()
+  const standalone = options.standaloneExecutable ?? true
+  const executable = options.executable ?? bunClaude
   const executableArgs = options.executableArgs ?? []
 
-  const args = [...executableArgs, cliPath, ...buildArgs(options)]
-  // Merge options.env on top of process.env for the cli.js child ONLY.
-  // Callers (e.g. getSdkExecutableOpts) use this to pass ELECTRON_RUN_AS_NODE
-  // without mutating the main-process env — otherwise Electron's GPU /
-  // renderer children would inherit it and fail to start.
+  const args = [
+    ...executableArgs,
+    ...(standalone ? [] : [bunClaude]),
+    ...buildArgs(options),
+  ]
+  // Env overlay for the CLI child ONLY — keeps any temporary env changes from
+  // poisoning Electron's GPU/renderer children.
   const env = buildEnv({ ...process.env, ...(options.env ?? {}) })
 
   const { sdkServers } = splitMcpServers(options.mcpServers)

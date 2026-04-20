@@ -476,14 +476,25 @@ export interface QueryOptions {
   effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | string
   resume?: string
   stderr?: (chunk: Buffer) => void
-  /** Executable overrides (for Electron's ELECTRON_RUN_AS_NODE=1 setup). */
+  /**
+   * Executable overrides. Default spawn target is the rebundled Bun binary
+   * (`bun-claude[.exe]`) resolved by `locateBunClaude()`. Callers can swap
+   * in a different executable for tests or alternative runtimes.
+   */
   pathToClaudeCodeExecutable?: string
   executable?: string
   executableArgs?: string[]
   /**
-   * Env overlay merged on top of process.env for the cli.js child.
-   *   { ELECTRON_RUN_AS_NODE: '1' }  — isolated to the cli.js spawn, does
-   *   NOT leak into Electron's GPU/renderer children.
+   * When true, `pathToClaudeCodeExecutable` is NOT injected as an argv entry
+   * before `buildArgs(options)` — the executable is already self-contained
+   * (e.g. our rebundled Bun binary with cli.js embedded). When false/unset,
+   * legacy Node-spawn behavior: `[executable, cliPath, ...buildArgs()]`.
+   */
+  standaloneExecutable?: boolean
+  /**
+   * Env overlay merged on top of process.env for the CLI child.
+   * Historically used for `{ ELECTRON_RUN_AS_NODE: '1' }` under the old
+   * Node-spawn pipeline; unnecessary with the standalone Bun binary.
    */
   env?: Record<string, string | undefined>
   /**

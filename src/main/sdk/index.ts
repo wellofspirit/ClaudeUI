@@ -8,7 +8,7 @@
  */
 export { query } from './query'
 export { createSdkMcpServer, tool } from './create-sdk-mcp'
-export { locateCliJs, getCliVersion } from './locate'
+export { locateBunClaude, locateCliJs, getCliVersion } from './locate'
 export type {
   SDKMessage,
   AssistantMessage,
