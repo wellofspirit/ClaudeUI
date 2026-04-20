@@ -553,26 +553,37 @@ function ripgrepAssetFor(archPlat) {
   return m
 }
 
+// Ripgrep version is pinned in package.json#ripgrepVersion to match the build
+// embedded in the upstream Bun claude binary (determined by running
+// `<bun-claude> --no-config --version` with argv0="rg"). Downloading a fixed
+// version from the releases CDN avoids the api.github.com rate limit (60/hr
+// unauthenticated, routinely hit on shared CI runners) and keeps builds
+// reproducible. Bump this when the Claude CLI updates its embedded rg.
+function readRipgrepVersion() {
+  try {
+    const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'))
+    if (typeof pkg.ripgrepVersion === 'string' && pkg.ripgrepVersion) {
+      return pkg.ripgrepVersion
+    }
+  } catch {
+    /* fall through */
+  }
+  throw new Error('package.json#ripgrepVersion is required (e.g. "14.1.1")')
+}
+
 async function downloadRipgrep(archPlat) {
-  log(`resolving ripgrep release for ${archPlat}…`)
-  const meta = JSON.parse(
-    await fetchText('https://api.github.com/repos/BurntSushi/ripgrep/releases/latest'),
-  )
-  const version = meta.tag_name
+  const version = readRipgrepVersion()
   const { triple, ext, bin } = ripgrepAssetFor(archPlat)
   const assetName = `ripgrep-${version}-${triple}.${ext}`
-  const asset = meta.assets.find((a) => a.name === assetName)
-  if (!asset) {
-    throw new Error(`ripgrep asset not found: ${assetName}. Available: ${meta.assets.map((a) => a.name).join(', ')}`)
-  }
-  log(`ripgrep ${version}: ${assetName} (${mb(asset.size)})`)
+  const assetUrl = `https://github.com/BurntSushi/ripgrep/releases/download/${version}/${assetName}`
+  log(`ripgrep ${version} (${archPlat}): ${assetName}`)
 
   const cacheDir = join(ROOT, '.cache', 'ripgrep')
   mkdirSync(cacheDir, { recursive: true })
   const archivePath = join(cacheDir, assetName)
   if (!existsSync(archivePath)) {
-    log(`downloading ${asset.browser_download_url}`)
-    await fetchBinary(asset.browser_download_url, archivePath)
+    log(`downloading ${assetUrl}`)
+    await fetchBinary(assetUrl, archivePath)
   } else {
     log(`cache hit: ${archivePath}`)
   }
