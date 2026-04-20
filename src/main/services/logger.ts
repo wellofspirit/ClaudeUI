@@ -234,8 +234,7 @@ export const logger: {
     notify('info', source, message)
     if (!shouldLog(source, 'info')) return
     console.log(`[${timestamp()}] [INFO] [${source}] ${message}`)
-    // Info is console-only by default; uncomment to persist:
-    // writeToFile('INFO', source, message)
+    writeToFile('INFO', source, message)
   },
 
   debug(source: string, message: string): void {

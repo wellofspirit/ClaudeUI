@@ -58,7 +58,7 @@
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1",
     "simple-git": "^3.33.0",
-    "undici": "^8.1.0",
+    "undici": "^6",
     "uuid": "^13.0.0",
     "ws": "^8.20.0",
     "yaml": "^2.8.3",
