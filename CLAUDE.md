@@ -271,7 +271,7 @@ The `/api/oauth/usage` API returns utilization as 0–100 (percentage), while ra
 
 ## cli.js Integration
 
-Everything about how ClaudeUI talks to cli.js — the Bun binary extraction pipeline, the stream-json wire protocol, control request subtypes, MCP hosting, cancellation tiers, the 14 patches — lives in **[docs/sdk-layer.md](docs/sdk-layer.md)**. Read that before touching anything under `src/main/sdk/`, `scripts/extract-cli.mjs`, or `patch/`.
+Everything about how ClaudeUI talks to cli.js — the Bun binary extraction pipeline, the stream-json wire protocol, control request subtypes, MCP hosting, cancellation tiers, the 16 patches — lives in **[docs/sdk-layer.md](docs/sdk-layer.md)**. Read that before touching anything under `src/main/sdk/`, `scripts/extract-cli.mjs`, or `patch/`.
 
 ### Analyzing cli.js
 
@@ -279,7 +279,7 @@ cli.js is ~13MB minified. Use the `/bundle-analyzer` skill to navigate it — st
 
 ### Patches
 
-14 content-regex patches under `patch/`, applied by `bun run ensure-cli`. Three of them auto-detect upstream fixes and no-op (`taskstop-notification`, `incomplete-session-resume-fix`, `mcp-tool-refresh`). The active 11 add stream forwarding, control subtypes, and small bug fixes — full table in `docs/sdk-layer.md#patches`.
+15 content-regex patches under `patch/`, applied by `bun run ensure-cli`. Three auto-detect upstream fixes and no-op (`taskstop-notification`, `incomplete-session-resume-fix`, `mcp-tool-refresh`). The active 12 add stream forwarding, control subtypes, and small bug fixes — full table in `docs/sdk-layer.md#patches`. One of them (`ci-path-remap`) exists only because ClaudeUI extracts cli.js from the Bun standalone binary and runs it under Node/Electron, which breaks Bun's virtual-path resolution.
 
 Skills for patch work:
 - `/bundle-analyzer` — locate patch targets in minified cli.js.

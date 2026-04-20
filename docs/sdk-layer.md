@@ -408,7 +408,7 @@ DEBUG_SDK=1 DEBUG_CLAUDE_AGENT_SDK=1 bun run dev
 
 Patches apply to `vendor/claude-cli/cli.js` (post-transform). All use content-regex anchors — never char offsets or minified names. `patch/apply-all.mjs` is idempotent; safe to re-run.
 
-14 patches. 3 auto-detect upstream fixes and no-op on recent cli.js versions (`taskstop-notification`, `incomplete-session-resume-fix`, `mcp-tool-refresh`). The other 11 actively add capabilities:
+16 patches. 3 auto-detect upstream fixes and no-op on recent cli.js versions (`taskstop-notification`, `incomplete-session-resume-fix`, `mcp-tool-refresh`). The other 13 actively add capabilities or fix extraction-specific regressions:
 
 | Patch | What it adds to cli.js |
 |---|---|
@@ -423,6 +423,7 @@ Patches apply to `vendor/claude-cli/cli.js` (post-transform). All use content-re
 | `rate-limit-relay` | Emits rate limit headers after each API call |
 | `voice-server` | Adds internal TCP voice-transcription server, control subtypes `voice_server_start`/`stop` |
 | `bash-output-streaming` | Pushes Bash output to stream_event immediately instead of buffering 2s |
+| `ci-path-remap` | Runtime `url.fileURLToPath` interceptor — redirects all `file:///home/runner/.../` URLs leaking from the Bun build to paths under the extracted cli.js dir. Fixes Grep (ripgrep path resolution) plus 5 other latent leaks (modifiers-napi, open, seccomp, claudeInChrome, computerUse) for ClaudeUI's extract-and-run-under-Node deployment |
 
 When the SDK minifier changes variable names between versions, patches fail with "cannot locate anchor". Symptoms: `apply-all.mjs` errors out at a specific patch; that patch's regex needs updating for the new minifier output. See individual patch READMEs for bundle-analyzer anchors.
 
