@@ -185,7 +185,7 @@ User types prompt → InputBox.handleSend()
   → addUserMessage() (Zustand)
   → window.api.sendPrompt(prompt, attachments?) (IPC)
   → session.run(prompt) (main process)
-  → sdkQuery() from src/main/sdk — spawns cli.js, speaks stream-json over stdio
+  → sdkQuery() from src/main/sdk — spawns bun-claude[.exe] (Bun runtime with cli.js embedded), speaks stream-json over stdio
     → stream_event → session:stream → appendStreamingText()
     → assistant    → session:message → addMessage() (upserts by ID)
     → user (tool_result) → session:tool-result → appendToolResult()
@@ -279,7 +279,7 @@ cli.js is ~13MB minified. Use the `/bundle-analyzer` skill to navigate it — st
 
 ### Patches
 
-15 content-regex patches under `patch/`, applied by `bun run ensure-cli`. Three auto-detect upstream fixes and no-op (`taskstop-notification`, `incomplete-session-resume-fix`, `mcp-tool-refresh`). The active 12 add stream forwarding, control subtypes, and small bug fixes — full table in `docs/sdk-layer.md#patches`. One of them (`ci-path-remap`) exists only because ClaudeUI extracts cli.js from the Bun standalone binary and runs it under Node/Electron, which breaks Bun's virtual-path resolution.
+14 content-regex patches under `patch/`, applied by `bun run ensure-cli` between the extract and rebundle steps. Three auto-detect upstream fixes and no-op (`taskstop-notification`, `incomplete-session-resume-fix`, `mcp-tool-refresh`). The active 11 add stream forwarding, control subtypes, and small bug fixes — full table in `docs/sdk-layer.md#patches`. Patches operate on the wrapped Bun CJS IIFE bytes at `vendor/claude-cli/cli.js`; they run identically on the wrapped form since every anchor targets content inside the IIFE body. See **[ADR-006](docs/adr/adr-006_rebundle-bun-binary.md)** for why the pipeline now rebundles instead of unwrapping.
 
 Skills for patch work:
 - `/bundle-analyzer` — locate patch targets in minified cli.js.
@@ -306,5 +306,6 @@ ADRs live in `docs/adr/`. See `docs/adr/adr.md` for the index.
 | 003 | Group terminal tabs by session cwd with 10-minute cold cleanup | Accepted |
 | 004 | VS Code-style plugin system for extensibility | Accepted |
 | 005 | Plugin session API — sessionId-based events and history | Accepted |
+| 006 | Rebundle Bun standalone binary instead of running cli.js under Node | Accepted |
 
 When a design or implementation decision is made during a conversation, prompt the user about whether it should be recorded as a new ADR entry. When adding a new ADR, proactively scan existing ADRs to check if the new decision supersedes or conflicts with a previous one — if so, update the old ADR's status to "Superseded by ADR-XXX" and note it in the new ADR.
