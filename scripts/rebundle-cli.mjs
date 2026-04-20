@@ -82,7 +82,10 @@ function resolvePipelineArgs() {
   if (!meta.sourceBinary || typeof meta.sourceBinary !== 'string') {
     die(`pipeline mode: ${versionPath} missing "sourceBinary" field`)
   }
-  const input = meta.sourceBinary
+  // `sourceBinary` is typically relative to ROOT (e.g. `.cache/claude-cli/claude-...`);
+  // absolute paths are preserved when passed via `extract-cli --binary`. `resolve()`
+  // handles both: absolute input → returned as-is, relative → joined onto ROOT.
+  const input = resolve(ROOT, meta.sourceBinary)
   const newCli = join(ROOT, 'vendor', 'claude-cli', 'cli.js')
   const ext = process.platform === 'win32' ? '.exe' : ''
   const output = join(ROOT, 'vendor', 'claude-cli', `bun-claude${ext}`)
