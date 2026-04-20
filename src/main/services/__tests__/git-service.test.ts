@@ -656,24 +656,32 @@ describe('GitService polling', () => {
       calls.push(Date.now())
     }, 50)
 
-    // Wait for initial poll + a couple of noop polls.
-    await new Promise((r) => setTimeout(r, 250))
+    // Wait for the initial poll to fire. On Windows CI, each simple-git
+    // subprocess call costs ~150-200ms, so a fixed timeout is flaky.
+    const waitFor = async (pred: () => boolean, timeoutMs: number): Promise<void> => {
+      const start = Date.now()
+      while (!pred()) {
+        if (Date.now() - start > timeoutMs) return
+        await new Promise((r) => setTimeout(r, 25))
+      }
+    }
+
+    await waitFor(() => calls.length >= 1, 5000)
     const initialCalls = calls.length
-    // Initial poll should have fired at least once (state was empty, transitioned to JSON form).
     expect(initialCalls).toBeGreaterThanOrEqual(1)
 
-    // Hold steady — no more new calls
-    await new Promise((r) => setTimeout(r, 200))
+    // Hold steady — no more new calls while repo state is unchanged.
+    await new Promise((r) => setTimeout(r, 300))
     expect(calls.length).toBe(initialCalls)
 
-    // Now change the repo state — next poll should fire the callback
+    // Now change the repo state — next poll should fire the callback.
     await repo.writeFile('change.txt', 'new\n')
-    await new Promise((r) => setTimeout(r, 250))
+    await waitFor(() => calls.length > initialCalls, 5000)
     expect(calls.length).toBeGreaterThan(initialCalls)
 
     svc.stopPolling()
     const afterStop = calls.length
-    await new Promise((r) => setTimeout(r, 200))
+    await new Promise((r) => setTimeout(r, 300))
     expect(calls.length).toBe(afterStop)
   })
 })
