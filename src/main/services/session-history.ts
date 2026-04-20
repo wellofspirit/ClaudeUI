@@ -19,8 +19,17 @@ interface CachedSessionMeta {
   cwd: string
   timestamp: number
   customTitle: string | null
+  aiTitle: string | null
   summary: string | null
   hasConversation: boolean
+}
+
+// Bumped whenever CachedSessionMeta shape changes — forces a full re-parse on upgrade.
+const CACHE_SCHEMA_VERSION = 2
+
+interface DiskCacheFile {
+  version: number
+  entries: Record<string, CachedSessionMeta>
 }
 
 type DiskCache = Record<string, CachedSessionMeta>
@@ -28,7 +37,13 @@ type DiskCache = Record<string, CachedSessionMeta>
 function loadDiskCache(): DiskCache {
   try {
     if (!fs.existsSync(CACHE_FILE)) return {}
-    return JSON.parse(fs.readFileSync(CACHE_FILE, 'utf-8')) as DiskCache
+    const raw = JSON.parse(fs.readFileSync(CACHE_FILE, 'utf-8')) as DiskCacheFile | DiskCache
+    if (typeof raw === 'object' && raw !== null && 'version' in raw && 'entries' in raw) {
+      const file = raw as DiskCacheFile
+      return file.version === CACHE_SCHEMA_VERSION ? file.entries : {}
+    }
+    // Legacy unversioned cache — discard (forces re-parse with new fields).
+    return {}
   } catch (err) {
     logger.warn('SessionHistory', 'Failed to load disk cache', err)
     return {}
@@ -40,7 +55,8 @@ function saveDiskCache(cache: DiskCache): void {
     if (!fs.existsSync(CACHE_DIR)) {
       fs.mkdirSync(CACHE_DIR, { recursive: true, mode: 0o700 })
     }
-    fs.writeFileSync(CACHE_FILE, JSON.stringify(cache), { mode: 0o600 })
+    const file: DiskCacheFile = { version: CACHE_SCHEMA_VERSION, entries: cache }
+    fs.writeFileSync(CACHE_FILE, JSON.stringify(file), { mode: 0o600 })
   } catch (err) {
     logger.warn('SessionHistory', 'Failed to save disk cache', err)
   }
@@ -210,6 +226,7 @@ export async function listDirectories(): Promise<DirectoryGroup[]> {
             cwd: '',
             timestamp: f.mtime,
             customTitle: null,
+            aiTitle: null,
             summary: null,
             hasConversation: false
           }
@@ -231,8 +248,8 @@ export async function listDirectories(): Promise<DirectoryGroup[]> {
 
       if (!groupCwd && meta.cwd) groupCwd = meta.cwd
 
-      // Priority: custom-title > summary > first user prompt title
-      const displayTitle = meta.customTitle || meta.summary || meta.title || 'Untitled'
+      // Priority: custom-title (user override) > ai-title (cli.js auto) > summary (compact) > first user prompt title
+      const displayTitle = meta.customTitle || meta.aiTitle || meta.summary || meta.title || 'Untitled'
 
       sessions.push({
         sessionId: f.sessionId,
@@ -240,7 +257,8 @@ export async function listDirectories(): Promise<DirectoryGroup[]> {
         projectKey,
         title: displayTitle,
         timestamp: meta.timestamp || f.mtime,
-        lastActivityAt: f.mtime
+        lastActivityAt: f.mtime,
+        aiTitle: meta.aiTitle || null
       })
     }
 
@@ -281,6 +299,7 @@ interface SessionMeta {
   cwd: string
   timestamp: number
   customTitle: string | null
+  aiTitle: string | null
   summary: string | null
   hasConversation: boolean
 }
@@ -290,9 +309,8 @@ interface SessionMeta {
  * - title: first external user prompt (first 80 chars)
  * - cwd & timestamp from that first prompt
  * - customTitle: last `type: "custom-title"` entry
+ * - aiTitle: last `type: "ai-title"` entry (cli.js auto-generated)
  * - summary: last `type: "summary"` entry
- *
- * Replaces the old parseSessionHeader + readLastCustomTitle + getCachedSummary.
  */
 function parseSessionMeta(filePath: string): Promise<SessionMeta | null> {
   return new Promise((resolve) => {
@@ -300,6 +318,7 @@ function parseSessionMeta(filePath: string): Promise<SessionMeta | null> {
     let cwd = ''
     let timestamp = 0
     let customTitle: string | null = null
+    let aiTitle: string | null = null
     let summary: string | null = null
     let foundHeader = false
     let hasConversation = false
@@ -314,31 +333,35 @@ function parseSessionMeta(filePath: string): Promise<SessionMeta | null> {
       try {
         // Fast pre-checks to avoid JSON.parse on irrelevant lines
         const hasCustomTitle = line.includes('"custom-title"')
+        const hasAiTitle = line.includes('"ai-title"')
         const hasSummary = line.includes('"summary"')
         const hasUser = !foundHeader && line.includes('"user"')
         const hasAssistant = !hasConversation && line.includes('"assistant"')
 
-        if (!hasCustomTitle && !hasSummary && !hasUser && !hasAssistant) return
+        if (!hasCustomTitle && !hasAiTitle && !hasSummary && !hasUser && !hasAssistant) return
 
         const obj = JSON.parse(line)
 
         // Track whether this session has any real user or assistant messages
         if (!hasConversation) {
-          if (obj.type === 'assistant' && obj.message?.content) {
+          if (obj.type === 'assistant' && obj.message?.content && !obj.isMeta) {
             hasConversation = true
-          } else if (obj.type === 'user' && obj.userType === 'external' && obj.message?.content) {
+          } else if (obj.type === 'user' && obj.userType === 'external' && obj.message?.content && !obj.isMeta) {
             hasConversation = true
           }
         }
 
         if (obj.type === 'custom-title' && typeof obj.customTitle === 'string') {
           customTitle = obj.customTitle
+        } else if (obj.type === 'ai-title' && typeof obj.aiTitle === 'string' && obj.aiTitle) {
+          aiTitle = obj.aiTitle
         } else if (obj.type === 'summary' && typeof obj.summary === 'string' && obj.summary) {
           summary = obj.summary
         } else if (
           !foundHeader &&
           obj.type === 'user' &&
           obj.userType === 'external' &&
+          !obj.isMeta &&
           obj.message?.content
         ) {
           const content = obj.message.content
@@ -365,7 +388,7 @@ function parseSessionMeta(filePath: string): Promise<SessionMeta | null> {
     })
 
     rl.on('close', () => {
-      if (!title && !customTitle && !summary) {
+      if (!title && !customTitle && !aiTitle && !summary) {
         resolve(null)
         return
       }
@@ -374,6 +397,7 @@ function parseSessionMeta(filePath: string): Promise<SessionMeta | null> {
         cwd,
         timestamp: timestamp || Date.now(),
         customTitle,
+        aiTitle,
         summary,
         hasConversation
       })
@@ -513,6 +537,12 @@ export async function loadSessionHistory(
         if (type === 'user') {
           const content = obj.message?.content
           if (!content) return
+
+          // Meta messages (skill context injections, system reminders) are not human input.
+          // Drop unless they carry tool_result blocks, which are real conversation data.
+          const hasMetaToolResult = Array.isArray(content)
+            && content.some((b: Record<string, unknown>) => b.type === 'tool_result')
+          if (obj.isMeta && !hasMetaToolResult) return
 
           // Compact summary — attach text to the preceding compact_separator
           if (obj.isCompactSummary) {
