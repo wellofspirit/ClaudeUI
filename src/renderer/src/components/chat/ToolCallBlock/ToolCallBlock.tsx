@@ -1,4 +1,4 @@
-import { memo, useState } from 'react'
+import { memo, useEffect, useState } from 'react'
 import type { ContentBlock, PendingApproval, PermissionSuggestion } from '../../../../../shared/types'
 import { useSessionStore, useActiveSession } from '../../../stores/session-store'
 import { ToolCallBlockView } from './View'
@@ -31,11 +31,22 @@ export const ToolCallBlock = memo(function ToolCallBlock({ block, result, approv
   const bashOutput = useActiveSession((s) => s.bashOutputs[toolUseId])
   const bgOutput = useActiveSession((s) => s.backgroundOutputs[toolUseId])
   const taskNotifications = useActiveSession((s) => s.taskNotifications)
+  const watchBackgroundOutput = useSessionStore((s) => s.watchBackgroundOutput)
+  const unwatchBackgroundOutput = useSessionStore((s) => s.unwatchBackgroundOutput)
 
   const bgNotification = isBackgroundBash ? taskNotifications.find((n) => n.toolUseId === toolUseId) ?? null : null
 
   const isStopping = stoppingTaskIds.includes(toolUseId)
   const [isBackgrounding, setIsBackgrounding] = useState(false)
+
+  // Start file polling as soon as a background bash tool_use renders, independent of
+  // expanded state. BackgroundBashOutput only mounts when expanded, but auto-expand
+  // waits for bgOutput to populate — moving the watch up here breaks that deadlock.
+  useEffect(() => {
+    if (!isBackgroundBash || isHistorical || !activeSessionId || !toolUseId) return
+    watchBackgroundOutput(activeSessionId, toolUseId)
+    return () => { unwatchBackgroundOutput(activeSessionId, toolUseId) }
+  }, [isBackgroundBash, isHistorical, activeSessionId, toolUseId, watchBackgroundOutput, unwatchBackgroundOutput])
 
   const handleApproval = async (decision: 'allow' | 'deny', selectedSuggestions?: PermissionSuggestion[]): Promise<void> => {
     if (!approval || !activeSessionId) return
