@@ -273,6 +273,12 @@ The `/api/oauth/usage` API returns utilization as 0–100 (percentage), while ra
 
 Everything about how ClaudeUI talks to cli.js — the Bun binary extraction pipeline, the stream-json wire protocol, control request subtypes, MCP hosting, cancellation tiers, the 16 patches — lives in **[docs/sdk-layer.md](docs/sdk-layer.md)**. Read that before touching anything under `src/main/sdk/`, `scripts/extract-cli.mjs`, or `patch/`.
 
+### Wire protocol reference — read this before theorizing
+
+Authoritative, version-pinned catalog of every stream-json message cli.js emits and accepts lives in **[docs/protocol/](docs/protocol/)**. When asking "does cli.js emit X?", "what's the shape of Y?", or "what triggers Z?", start here — it's cheaper than grep and more reliable than reading minified cli.js. Especially **[04-system-subtypes.md](docs/protocol/04-system-subtypes.md)** for `{type:'system', subtype:X}` variants: every subtype (including the `task_started` / `task_updated` / `task_progress` lifecycle) has shape, gate, and recommended consumer behavior in §4.19. If ClaudeUI isn't following the consumer guidance there, the gap is in `src/main/services/claude-session.ts`, not the docs.
+
+Keep in sync via **[12-maintenance.md](docs/protocol/12-maintenance.md)** when bumping `claudeCliVersion`. If observed wire traffic disagrees with the docs, the docs are stale — update them.
+
 ### Analyzing cli.js
 
 cli.js is ~13MB minified. Use the `/bundle-analyzer` skill to navigate it — standard grep/read tools are ineffective. Workflow: `find` by string literals → `extract-fn` → `strings --near` → `refs` → `decompile` → `patch-check` for uniqueness. Never search by minified variable names — they change between versions.
