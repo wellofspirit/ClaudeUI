@@ -89,11 +89,50 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Exclude workspace from Windows Defender
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Add-MpPreference -ExclusionPath "${{ github.workspace }}"
+          Add-MpPreference -ExclusionPath "$env:USERPROFILE\.bun"
+          Add-MpPreference -ExclusionPath "$env:LOCALAPPDATA\electron"
+          Add-MpPreference -ExclusionPath "$env:LOCALAPPDATA\electron-builder"
+          Add-MpPreference -ExclusionProcess "bun.exe"
+          Add-MpPreference -ExclusionProcess "node.exe"
+
       - uses: actions/setup-node@v4
         with:
           node-version: 20
 
       - uses: oven-sh/setup-bun@v2
+
+      - name: Cache bun install
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
+      - name: Cache vendor/claude-cli
+        uses: actions/cache@v4
+        with:
+          path: vendor/claude-cli
+          key: ${{ runner.os }}-claude-cli-${{ hashFiles('package.json', 'patch/**', 'scripts/extract-cli.mjs') }}
+
+      - name: Cache Electron binaries
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/electron
+            ~/.cache/electron-builder
+            ~/Library/Caches/electron
+            ~/Library/Caches/electron-builder
+            ~/AppData/Local/electron/Cache
+            ~/AppData/Local/electron-builder/Cache
+          key: ${{ runner.os }}-electron-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-electron-
 
       - name: Install dependencies
         run: bun install
