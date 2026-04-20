@@ -318,7 +318,14 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     // Error logging — send to server
     logError: (source, message) => {
       console.error(`[${source}]`, message)
-    }
+    },
+
+    // Plugin system — desktop-only, stubbed out on web
+    listPlugins: async () => [],
+    reloadPlugin: async () => {},
+    getPluginViews: async () => [],
+    getPluginPreloadPath: async () => '',
+    onPluginViewsChanged: () => () => {}
   }
 
   return api
