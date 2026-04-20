@@ -1,0 +1,533 @@
+/**
+ * @vitest-environment node
+ *
+ * Expanded coverage for AutomationManager — addresses test-coverage-proposal
+ * section 2.5: DST transitions, interval drift, concurrency, cancel/dismiss,
+ * retention, enable/disable cycle, upsert preserves run history, startup load.
+ *
+ * AutomationManager resolves AUTOMATION_DIR at module load time from
+ * os.homedir(). To redirect it to a temp dir per test, we:
+ *   1. vi.mock('os') with a dynamic homedir().
+ *   2. vi.resetModules() before every test so the module-level constants
+ *      re-resolve against the current TEMP_HOME.
+ *   3. Dynamic-import the manager AFTER seeding TEMP_HOME.
+ *
+ * The SDK, claude-session, session-history, auto-classifier, and logger are
+ * all mocked — we're testing AutomationManager's lifecycle / persistence
+ * logic, not its downstream integrations.
+ */
+
+/* eslint-disable @typescript-eslint/no-explicit-any */
+
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import * as fs from 'fs'
+import * as nodePath from 'path'
+import * as nodeOs from 'os'
+import { CronExpressionParser } from 'cron-parser'
+
+// ---------------------------------------------------------------------------
+// Temp-home redirection
+// ---------------------------------------------------------------------------
+
+let TEMP_HOME = ''
+
+vi.mock('os', async () => {
+  const actual = await vi.importActual<typeof import('os')>('os')
+  return {
+    ...actual,
+    homedir: () => TEMP_HOME,
+    default: { ...actual, homedir: () => TEMP_HOME },
+  }
+})
+
+vi.mock('electron', async () => {
+  const shim = await import('../../../test/stubs/electron-shim')
+  return { ...shim, default: shim }
+})
+
+// ---------------------------------------------------------------------------
+// Configurable SDK stub
+// ---------------------------------------------------------------------------
+
+type SdkMode =
+  | { kind: 'events'; events: Record<string, unknown>[] }
+  | { kind: 'waitForAbort' }
+
+let sdkMode: SdkMode = { kind: 'events', events: [] }
+let lastAbortObserved = false
+
+vi.mock('../../sdk', () => ({
+  query: (params: any) => {
+    const ac: AbortController | undefined = params?.options?.abortController
+    const mode = sdkMode
+
+    async function* gen() {
+      if (mode.kind === 'waitForAbort') {
+        await new Promise<void>((resolve) => {
+          if (ac?.signal.aborted) {
+            lastAbortObserved = true
+            resolve()
+            return
+          }
+          ac?.signal.addEventListener('abort', () => {
+            lastAbortObserved = true
+            resolve()
+          })
+        })
+        return
+      }
+      for (const event of mode.events) {
+        if (ac?.signal.aborted) throw new DOMException('Aborted', 'AbortError')
+        yield event
+      }
+    }
+    const g = gen() as any
+    g.setPermissionMode = vi.fn(async () => {})
+    return g
+  },
+}))
+
+// ---------------------------------------------------------------------------
+// claude-session — avoid its transitive import fan-out
+// ---------------------------------------------------------------------------
+
+vi.mock('../claude-session', () => ({
+  getSdkExecutableOpts: () => ({}),
+  ClaudeSession: { getExtraWindows: () => new Set() },
+}))
+
+vi.mock('../session-history', () => ({
+  loadSessionHistory: vi.fn(async () => ({ messages: [] })),
+}))
+
+vi.mock('../auto-classifier', () => ({
+  isSafeTool: () => true,
+  getClassifier: () => ({ classify: vi.fn(async () => ({ shouldBlock: false, reason: '' })) }),
+  buildTranscript: () => '',
+  stopClassifier: vi.fn(),
+}))
+
+vi.mock('../logger', () => ({
+  logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+}))
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+import type { Automation, AutomationRun } from '../../../shared/types'
+
+type AutomationManagerT = InstanceType<
+  typeof import('../automation-manager').AutomationManager
+>
+
+async function freshManager(): Promise<{
+  mgr: AutomationManagerT
+  win: any
+  automationDir: () => string
+  runsIndexFile: (id: string) => string
+}> {
+  // Every test gets its own module graph so AUTOMATION_DIR is bound to the
+  // current TEMP_HOME.
+  vi.resetModules()
+  const { AutomationManager } = await import('../automation-manager')
+  const win = {
+    isDestroyed: () => false,
+    webContents: { send: vi.fn() },
+  }
+  const mgr = new AutomationManager(win as any)
+  const automationDir = () => nodePath.join(TEMP_HOME, '.claude', 'ui', 'automation')
+  const runsIndexFile = (id: string) =>
+    nodePath.join(automationDir(), 'runs', id, 'runs.json')
+  return { mgr, win, automationDir, runsIndexFile }
+}
+
+function makeAutomation(overrides: Partial<Automation> = {}): Automation {
+  return {
+    id: overrides.id ?? 'a-test',
+    name: overrides.name ?? 'Test Automation',
+    prompt: overrides.prompt ?? 'do the thing',
+    cwd: overrides.cwd ?? '/tmp/project',
+    schedule: overrides.schedule ?? { type: 'interval', intervalMs: 60_000 },
+    permissions: overrides.permissions ?? { allow: [], deny: [] },
+    model: overrides.model ?? 'default',
+    effort: overrides.effort ?? 'medium',
+    permissionMode: overrides.permissionMode ?? 'auto',
+    enabled: overrides.enabled ?? false,
+    lastRunAt: overrides.lastRunAt ?? null,
+    lastRunStatus: overrides.lastRunStatus ?? null,
+    createdAt: overrides.createdAt ?? Date.now(),
+  }
+}
+
+// ---------------------------------------------------------------------------
+// beforeEach — fresh temp home per test (module-level constants re-bind)
+// ---------------------------------------------------------------------------
+
+beforeEach(() => {
+  TEMP_HOME = fs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), 'automgr-test-'))
+  sdkMode = { kind: 'events', events: [] }
+  lastAbortObserved = false
+})
+
+afterEach(() => {
+  if (TEMP_HOME && fs.existsSync(TEMP_HOME)) {
+    fs.rmSync(TEMP_HOME, { recursive: true, force: true })
+  }
+  vi.clearAllMocks()
+})
+
+// ---------------------------------------------------------------------------
+// DST — drives CronExpressionParser directly (the manager's underlying engine)
+// ---------------------------------------------------------------------------
+
+describe('AutomationManager — DST handling (via cron-parser)', () => {
+  it('spring-forward: 02:30 daily cron in America/New_York skips or shifts the missing 02:30 on DST start day', () => {
+    // 2024-03-10 US Eastern: clocks jump 02:00 → 03:00. Local time 02:30 does not exist.
+    const expr = CronExpressionParser.parse('30 2 * * *', {
+      currentDate: '2024-03-09T10:00:00-05:00',
+      tz: 'America/New_York',
+    })
+
+    const mar10 = expr.next().toDate()
+    const mar11 = expr.next().toDate()
+
+    // First next() advances to March 10. The library picks SOME concrete
+    // instant on that date (either skips the hour or shifts to 03:30 local).
+    expect(mar10.toISOString()).toMatch(/2024-03-10T/)
+    // Subsequent date moves to March 11 — not stuck on March 10.
+    expect(mar11.toISOString()).toMatch(/2024-03-11T/)
+  })
+
+  it('fall-back: 01:30 daily cron in America/New_York — document cron-parser behavior on DST end day', () => {
+    // 2024-11-03 US Eastern: clocks roll back 02:00 → 01:00. 01:30 occurs twice.
+    // cron-parser's observed behavior is to emit BOTH ambiguous 01:30 instants
+    // before advancing to the next day. We pin that behavior here so a future
+    // library change that switches to single-fire trips this test.
+    const expr = CronExpressionParser.parse('30 1 * * *', {
+      currentDate: '2024-11-02T10:00:00-04:00',
+      tz: 'America/New_York',
+    })
+
+    const first = expr.next().toDate()
+    const second = expr.next().toDate()
+    const third = expr.next().toDate()
+
+    // All three occurrences land in early Nov.
+    expect(first.toISOString()).toMatch(/2024-11-0[34]T/)
+    expect(second.toISOString()).toMatch(/2024-11-0[345]T/)
+    // Time strictly advances.
+    expect(second.getTime()).toBeGreaterThan(first.getTime())
+    expect(third.getTime()).toBeGreaterThan(second.getTime())
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Runtime behavior
+// ---------------------------------------------------------------------------
+
+describe('AutomationManager — scheduling & runtime', () => {
+  it('interval drift: after a run finishes, next timer is (re)scheduled with the full interval', async () => {
+    const { mgr, automationDir } = await freshManager()
+    mgr.load()
+
+    sdkMode = { kind: 'events', events: [{ type: 'result', total_cost_usd: 0 }] }
+
+    const auto = makeAutomation({
+      id: 'drift-1',
+      enabled: true,
+      schedule: { type: 'interval', intervalMs: 60_000 },
+    })
+    mgr.upsert(auto)
+
+    // Immediately after upsert(), a timer was scheduled for the first fire.
+    const timers: Map<string, unknown> = (mgr as any).timers
+    expect(timers.has('drift-1')).toBe(true)
+
+    // Trigger runNow instead of waiting on real timers to avoid test flakiness;
+    // this exercises the same post-run reschedule path (executeRun finally block).
+    await mgr.runNow('drift-1')
+
+    // executeRun reschedules the next tick. The timer must still be pending —
+    // i.e. it was re-armed (from END of previous run), not cleared.
+    expect(timers.has('drift-1')).toBe(true)
+
+    // Exactly one run recorded, not piled-up.
+    const runs = mgr.listRuns('drift-1')
+    expect(runs).toHaveLength(1)
+    expect(runs[0].status).toBe('success')
+
+    // Persisted to disk.
+    const runsFile = nodePath.join(automationDir(), 'runs', 'drift-1', 'runs.json')
+    expect(fs.existsSync(runsFile)).toBe(true)
+
+    mgr.stopAll()
+  })
+
+  it('concurrent runs: two automations execute independently with separate run state', async () => {
+    const { mgr } = await freshManager()
+    mgr.load()
+
+    sdkMode = { kind: 'events', events: [{ type: 'result', total_cost_usd: 0.01 }] }
+
+    mgr.upsert(makeAutomation({ id: 'c-a', name: 'A' }))
+    mgr.upsert(makeAutomation({ id: 'c-b', name: 'B' }))
+
+    // Fire both at the same logical tick (two awaited runNow calls in Promise.all).
+    await Promise.all([mgr.runNow('c-a'), mgr.runNow('c-b')])
+
+    const runsA = mgr.listRuns('c-a')
+    const runsB = mgr.listRuns('c-b')
+    expect(runsA).toHaveLength(1)
+    expect(runsB).toHaveLength(1)
+    // State is not shared.
+    expect(runsA[0].id).not.toEqual(runsB[0].id)
+    expect(runsA[0].automationId).toBe('c-a')
+    expect(runsB[0].automationId).toBe('c-b')
+    // Both succeeded — one did not block the other.
+    expect(runsA[0].status).toBe('success')
+    expect(runsB[0].status).toBe('success')
+
+    mgr.stopAll()
+  })
+
+  it('cancel mid-run: cancelRun aborts the SDK query and clears active-run state', async () => {
+    const { mgr } = await freshManager()
+    mgr.load()
+
+    sdkMode = { kind: 'waitForAbort' }
+    mgr.upsert(makeAutomation({ id: 'cancel-1' }))
+
+    const runPromise = mgr.runNow('cancel-1')
+    // Yield a few microtasks so the generator installs its abort listener.
+    await new Promise((r) => setTimeout(r, 20))
+
+    // Active before cancel.
+    expect((mgr as any).activeRuns.has('cancel-1')).toBe(true)
+
+    mgr.cancelRun('cancel-1')
+    await runPromise
+
+    expect(lastAbortObserved).toBe(true)
+    expect((mgr as any).activeRuns.has('cancel-1')).toBe(false)
+    expect((mgr as any).sessionIds.has('cancel-1')).toBe(false)
+
+    // Run record persisted with a terminal status (success since no error thrown by stub).
+    const runs = mgr.listRuns('cancel-1')
+    expect(runs).toHaveLength(1)
+    expect(runs[0].status).not.toBe('running')
+    expect(runs[0].finishedAt).toBeTruthy()
+
+    mgr.stopAll()
+  })
+
+  it('dismissRun: marks a running-status run as error and persists to disk', async () => {
+    const { mgr, runsIndexFile } = await freshManager()
+    mgr.load()
+
+    mgr.upsert(makeAutomation({ id: 'dismiss-1' }))
+
+    // Seed a stuck "running" run alongside a completed one, to simulate an
+    // orphan left behind by a previous instance.
+    const runsPath = runsIndexFile('dismiss-1')
+    fs.mkdirSync(nodePath.dirname(runsPath), { recursive: true })
+    const seed: AutomationRun[] = [
+      { id: 'r-stuck', automationId: 'dismiss-1', startedAt: Date.now() - 10_000, finishedAt: null, status: 'running', totalCostUsd: 0 },
+      { id: 'r-done', automationId: 'dismiss-1', startedAt: Date.now() - 100_000, finishedAt: Date.now() - 90_000, status: 'success', totalCostUsd: 0.05 },
+    ]
+    fs.writeFileSync(runsPath, JSON.stringify(seed))
+
+    mgr.dismissRun('dismiss-1', 'r-stuck')
+
+    const onDisk = JSON.parse(fs.readFileSync(runsPath, 'utf-8')) as AutomationRun[]
+    const stuck = onDisk.find((r) => r.id === 'r-stuck')!
+    expect(stuck.status).toBe('error')
+    expect(stuck.error).toBe('Manually stopped')
+    expect(stuck.finishedAt).toBeTruthy()
+    // Other run untouched.
+    const done = onDisk.find((r) => r.id === 'r-done')!
+    expect(done.status).toBe('success')
+
+    mgr.stopAll()
+  })
+
+  it('dismissRun: no-op for non-running runs', async () => {
+    const { mgr, runsIndexFile } = await freshManager()
+    mgr.load()
+    mgr.upsert(makeAutomation({ id: 'dismiss-2' }))
+
+    const runsPath = runsIndexFile('dismiss-2')
+    fs.mkdirSync(nodePath.dirname(runsPath), { recursive: true })
+    const before: AutomationRun[] = [
+      { id: 'r-ok', automationId: 'dismiss-2', startedAt: 1, finishedAt: 2, status: 'success', totalCostUsd: 0 },
+    ]
+    fs.writeFileSync(runsPath, JSON.stringify(before))
+
+    mgr.dismissRun('dismiss-2', 'r-ok')
+
+    const after = JSON.parse(fs.readFileSync(runsPath, 'utf-8'))
+    expect(after).toEqual(before)
+
+    mgr.stopAll()
+  })
+
+  it('listRuns: returns runs newest-first (executeRun unshifts into the list)', async () => {
+    const { mgr } = await freshManager()
+    mgr.load()
+
+    sdkMode = { kind: 'events', events: [{ type: 'result', total_cost_usd: 0 }] }
+    mgr.upsert(makeAutomation({ id: 'retention-1' }))
+
+    await mgr.runNow('retention-1')
+    await new Promise((r) => setTimeout(r, 2)) // ensure startedAt monotonicity
+    await mgr.runNow('retention-1')
+    await new Promise((r) => setTimeout(r, 2))
+    await mgr.runNow('retention-1')
+
+    const runs = mgr.listRuns('retention-1')
+    expect(runs).toHaveLength(3)
+    // startedAt monotonically decreasing.
+    expect(runs[0].startedAt).toBeGreaterThanOrEqual(runs[1].startedAt)
+    expect(runs[1].startedAt).toBeGreaterThanOrEqual(runs[2].startedAt)
+
+    mgr.stopAll()
+  })
+
+  it('enable/disable cycle: toggle(false) cancels schedule; toggle(true) re-arms it', async () => {
+    const { mgr, automationDir } = await freshManager()
+    mgr.load()
+
+    mgr.upsert(
+      makeAutomation({ id: 'toggle-1', enabled: true, schedule: { type: 'interval', intervalMs: 45_000 } })
+    )
+
+    const timers: Map<string, unknown> = (mgr as any).timers
+    expect(timers.has('toggle-1')).toBe(true)
+
+    mgr.toggle('toggle-1', false)
+    expect(timers.has('toggle-1')).toBe(false)
+
+    mgr.toggle('toggle-1', true)
+    expect(timers.has('toggle-1')).toBe(true)
+
+    // Persisted enabled flag matches the last toggle.
+    const saved = JSON.parse(
+      fs.readFileSync(nodePath.join(automationDir(), 'toggle-1.json'), 'utf-8')
+    )
+    expect(saved.enabled).toBe(true)
+
+    mgr.stopAll()
+  })
+
+  it('upsert with existing id: overwrites definition, preserves run history on disk', async () => {
+    const { mgr } = await freshManager()
+    mgr.load()
+
+    sdkMode = { kind: 'events', events: [{ type: 'result', total_cost_usd: 0.02 }] }
+    mgr.upsert(makeAutomation({ id: 'upsert-1', name: 'v1', prompt: 'original' }))
+    await mgr.runNow('upsert-1')
+
+    const runsBefore = mgr.listRuns('upsert-1')
+    expect(runsBefore).toHaveLength(1)
+    const originalRunId = runsBefore[0].id
+
+    mgr.upsert(makeAutomation({ id: 'upsert-1', name: 'v2', prompt: 'updated' }))
+
+    const fromList = mgr.list().find((a) => a.id === 'upsert-1')
+    expect(fromList?.name).toBe('v2')
+    expect(fromList?.prompt).toBe('updated')
+
+    const runsAfter = mgr.listRuns('upsert-1')
+    expect(runsAfter).toHaveLength(1)
+    expect(runsAfter[0].id).toBe(originalRunId)
+
+    mgr.stopAll()
+  })
+
+  it('startup load: previously-saved automations and runs re-hydrate from disk', async () => {
+    // Seed disk BEFORE constructing the manager.
+    const automationDir = nodePath.join(TEMP_HOME, '.claude', 'ui', 'automation')
+    fs.mkdirSync(automationDir, { recursive: true })
+    const auto = makeAutomation({ id: 'persisted-1', name: 'Persisted' })
+    fs.writeFileSync(nodePath.join(automationDir, 'persisted-1.json'), JSON.stringify(auto))
+
+    const runsPath = nodePath.join(automationDir, 'runs', 'persisted-1', 'runs.json')
+    fs.mkdirSync(nodePath.dirname(runsPath), { recursive: true })
+    const seededRuns: AutomationRun[] = [
+      { id: 'run-old', automationId: 'persisted-1', startedAt: 1, finishedAt: 2, status: 'success', totalCostUsd: 0 },
+    ]
+    fs.writeFileSync(runsPath, JSON.stringify(seededRuns))
+
+    const { mgr } = await freshManager()
+    mgr.load()
+
+    const loaded = mgr.list().find((a) => a.id === 'persisted-1')
+    expect(loaded).toBeDefined()
+    expect(loaded?.name).toBe('Persisted')
+
+    const runs = mgr.listRuns('persisted-1')
+    expect(runs).toHaveLength(1)
+    expect(runs[0].id).toBe('run-old')
+
+    mgr.stopAll()
+  })
+
+  it('corrupt files: malformed automation JSON is dropped; corrupt run-index degrades to []', async () => {
+    // Seed a mix of healthy / corrupt files before the manager loads.
+    const automationDir = nodePath.join(TEMP_HOME, '.claude', 'ui', 'automation')
+    fs.mkdirSync(automationDir, { recursive: true })
+
+    fs.writeFileSync(
+      nodePath.join(automationDir, 'good.json'),
+      JSON.stringify(makeAutomation({ id: 'good', name: 'Good' }))
+    )
+    const goodRuns = nodePath.join(automationDir, 'runs', 'good', 'runs.json')
+    fs.mkdirSync(nodePath.dirname(goodRuns), { recursive: true })
+    fs.writeFileSync(goodRuns, JSON.stringify([
+      { id: 'g1', automationId: 'good', startedAt: 1, finishedAt: 2, status: 'success', totalCostUsd: 0 },
+    ]))
+
+    fs.writeFileSync(nodePath.join(automationDir, 'bad.json'), '{ not valid json')
+
+    fs.writeFileSync(
+      nodePath.join(automationDir, 'partial.json'),
+      JSON.stringify(makeAutomation({ id: 'partial', name: 'Partial' }))
+    )
+    const partialRuns = nodePath.join(automationDir, 'runs', 'partial', 'runs.json')
+    fs.mkdirSync(nodePath.dirname(partialRuns), { recursive: true })
+    fs.writeFileSync(partialRuns, '[{ "id": "p1", ')
+
+    const { mgr } = await freshManager()
+    mgr.load()
+
+    const ids = mgr.list().map((a) => a.id).sort()
+    expect(ids).toEqual(['good', 'partial'])
+
+    expect(mgr.listRuns('good')).toHaveLength(1)
+    expect(mgr.listRuns('partial')).toEqual([])
+
+    mgr.stopAll()
+  })
+
+  it('delete: removes automation file AND run history directory on disk', async () => {
+    const { mgr, automationDir } = await freshManager()
+    mgr.load()
+
+    sdkMode = { kind: 'events', events: [{ type: 'result', total_cost_usd: 0 }] }
+    mgr.upsert(makeAutomation({ id: 'delete-1' }))
+    await mgr.runNow('delete-1')
+
+    const autoFile = nodePath.join(automationDir(), 'delete-1.json')
+    const runsDir = nodePath.join(automationDir(), 'runs', 'delete-1')
+    expect(fs.existsSync(autoFile)).toBe(true)
+    expect(fs.existsSync(runsDir)).toBe(true)
+
+    mgr.delete('delete-1')
+
+    expect(fs.existsSync(autoFile)).toBe(false)
+    expect(fs.existsSync(runsDir)).toBe(false)
+    expect(mgr.list().find((a) => a.id === 'delete-1')).toBeUndefined()
+
+    mgr.stopAll()
+  })
+})

@@ -2,6 +2,9 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { v4 as uuid } from 'uuid'
 import { useSessionStore, buildTodosFromMessages } from '../../stores/session-store'
 import type { ChatMessage, DirectoryGroup, SessionInfo, WorktreeInfo } from '../../../../shared/types'
+import { useAutomationStore } from '../../stores/automation-store'
+import { useIsMobile } from '../../hooks/useIsMobile'
+import { SidebarView, type DeleteTarget } from './View'
 
 /** Lightweight projection of session data needed by the sidebar for structural/display decisions */
 type SidebarSessionData = {
@@ -9,16 +12,6 @@ type SidebarSessionData = {
   isWatching: boolean
   firstUserText?: string
 }
-import { WorktreesModal } from '../WorktreesModal'
-import { WorktreeCleanupModal } from '../WorktreeCleanupModal'
-import { useAutomationStore } from '../../stores/automation-store'
-import { useIsMobile } from '../../hooks/useIsMobile'
-import { NavItem, SafeSvgIcon } from './NavItem'
-import { DirectoryItem } from './DirectoryItem'
-import { SessionItem } from './SessionItem'
-import { PinnedSessionList } from './PinnedSessionList'
-import { SettingsPanel } from './SettingsPanel'
-import { DeleteConfirmModal } from './DeleteConfirmModal'
 
 /** Structural equality for the sidebar session projection — avoids re-renders from unrelated session changes */
 function sidebarSessionsEqual(a: Record<string, SidebarSessionData>, b: Record<string, SidebarSessionData>): boolean {
@@ -84,6 +77,12 @@ export function Sidebar({ style, onToggleCollapse }: {
   const unhideProject = useSessionStore((s) => s.unhideProject)
   const deleteSessionAction = useSessionStore((s) => s.deleteSession)
   const deleteProjectAction = useSessionStore((s) => s.deleteProject)
+  const showWelcome = useSessionStore((s) => s.showWelcome)
+  const activeView = useSessionStore((s) => s.activeView)
+  const setActiveView = useSessionStore((s) => s.setActiveView)
+  const pluginViews = useSessionStore((s) => s.pluginViews)
+  const addRecentSession = useSessionStore((s) => s.addRecentSession)
+  const automationBadge = useAutomationStore((s) => s.notificationBadge)
 
   const isMobile = useIsMobile()
   const [expandedDir, setExpandedDir] = useState<string | null>(null)
@@ -91,11 +90,7 @@ export function Sidebar({ style, onToggleCollapse }: {
   const [cleanupWorktree, setCleanupWorktree] = useState<{ sessionId: string; worktreeInfo: WorktreeInfo } | null>(null)
   const [renamingKey, setRenamingKey] = useState<string | null>(null)
   const [showHidden, setShowHidden] = useState(false)
-  const [deleteTarget, setDeleteTarget] = useState<
-    | { kind: 'session'; sessionId: string; projectKey: string; title: string }
-    | { kind: 'project'; projectKey: string; folderName: string; sessionCount: number }
-    | null
-  >(null)
+  const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null)
 
   const hiddenSessionSet = useMemo(() => new Set(hiddenSessionIds), [hiddenSessionIds])
   const hiddenProjectSet = useMemo(() => new Set(hiddenProjectKeys), [hiddenProjectKeys])
@@ -198,12 +193,6 @@ export function Sidebar({ style, onToggleCollapse }: {
     return cleanup
   }, [setDirectories])
 
-  const showWelcome = useSessionStore((s) => s.showWelcome)
-  const activeView = useSessionStore((s) => s.activeView)
-  const setActiveView = useSessionStore((s) => s.setActiveView)
-  const pluginViews = useSessionStore((s) => s.pluginViews)
-  const automationBadge = useAutomationStore((s) => s.notificationBadge)
-
   const handleNewSession = (): void => {
     showWelcome()
     if (isMobile && onToggleCollapse) onToggleCollapse()
@@ -216,8 +205,6 @@ export function Sidebar({ style, onToggleCollapse }: {
       createNewSession(routingId, folder)
     }
   }
-
-  const addRecentSession = useSessionStore((s) => s.addRecentSession)
 
   const handleClickSession = async (info: SessionInfo): Promise<void> => {
     const routingId = info.sessionId
@@ -329,6 +316,14 @@ export function Sidebar({ style, onToggleCollapse }: {
       }
     }
   }
+
+  const handleRemoveRecent = useCallback((info: SessionInfo) => {
+    if (worktreeInfoMap[info.sessionId]) {
+      setCleanupWorktree({ sessionId: info.sessionId, worktreeInfo: worktreeInfoMap[info.sessionId] })
+    } else {
+      removeRecentSession(info.sessionId)
+    }
+  }, [worktreeInfoMap, removeRecentSession])
 
   // Helper to resolve a session ID to a SessionInfo
   const resolveSessionInfo = useCallback((rid: string): SessionInfo | undefined => {
@@ -486,272 +481,69 @@ export function Sidebar({ style, onToggleCollapse }: {
   }, [directories, sidebarSessions, customTitles])
 
   return (
-    <div style={style} className={`shrink-0 h-full flex flex-col select-none ${window.api.platform === 'darwin' ? 'bg-bg-secondary/60' : 'bg-bg-secondary/85'}`}>
-      {/* Traffic light clearance + collapse toggle */}
-      <div className="h-12 shrink-0 [-webkit-app-region:drag] relative">
-        <button
-          onClick={onToggleCollapse}
-          style={{ position: 'absolute', left: window.api.platform === 'darwin' ? 82 / uiFontScale : 8, top: 22 / uiFontScale, transform: 'translateY(-50%)' }}
-          className="[-webkit-app-region:no-drag] w-[26px] h-[26px] flex items-center justify-center rounded-md text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
-          title="Collapse sidebar"
-        >
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-            <rect x="3" y="3" width="18" height="18" rx="2" />
-            <path d="M9 3v18" />
-            <path d="M16 15l-3-3 3-3" />
-          </svg>
-        </button>
-      </div>
-
-      {/* Top nav */}
-      <nav style={{ margin: '0 8px' }} className="flex flex-col gap-px">
-        <NavItem
-          label="New session"
-          onClick={handleNewSession}
-          onDoubleClick={handleNewSessionDblClick}
-          icon={
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
-              <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" />
-              <path d="M18.5 2.5a2.12 2.12 0 013 3L12 15l-4 1 1-4z" />
-            </svg>
-          }
-        />
-        <NavItem
-          label="Automations"
-          active={activeView.type === 'automations'}
-          onClick={() => {
-            setActiveView(activeView.type === 'automations' ? { type: 'chat' } : { type: 'automations' })
-          }}
-          badge={automationBadge}
-          icon={
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-              <circle cx="12" cy="12" r="10" />
-              <polyline points="12 6 12 12 16 14" />
-            </svg>
-          }
-        />
-        {pluginViews.map((view) => (
-          <NavItem
-            key={`plugin:${view.pluginId}:${view.id}`}
-            label={view.label}
-            active={activeView.type === 'plugin' && activeView.pluginId === view.pluginId}
-            onClick={() => {
-              if (activeView.type === 'plugin' && activeView.pluginId === view.pluginId) {
-                setActiveView({ type: 'chat' })
-              } else {
-                setActiveView({ type: 'plugin', pluginId: view.pluginId })
-              }
-            }}
-            icon={
-              view.icon ? (
-                <SafeSvgIcon svg={view.icon} />
-              ) : (
-                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M12 2L2 7l10 5 10-5-10-5z" />
-                  <path d="M2 17l10 5 10-5" />
-                  <path d="M2 12l10 5 10-5" />
-                </svg>
-              )
-            }
-          />
-        ))}
-      </nav>
-
-      {/* Scrollable sidebar content */}
-      <div className="flex-1 overflow-y-auto min-h-0">
-        {/* Pinned sessions */}
-        {pinnedSessions.length > 0 && (
-          <div style={{ margin: '20px 8px 0' }}>
-            <div style={{ paddingLeft: 5, marginBottom: 3 }}>
-              <span className="text-[10px] font-semibold text-text-muted uppercase tracking-[0.08em]">Pinned</span>
-            </div>
-            <PinnedSessionList
-              pinnedSessions={pinnedSessions}
-              activeSessionId={activeSessionId}
-              onClickSession={handleClickSession}
-              onToggleWatch={handleToggleWatch}
-              onUnpin={unpinSession}
-              onReorder={reorderPinnedSessions}
-              renamingKey={renamingKey}
-              renamePrefix="pinned"
-              onStartRename={(key) => setRenamingKey(key)}
-              onFinishRename={handleRename}
-              onAutoRename={handleAutoRename}
-              onCancelRename={() => setRenamingKey(null)}
-              hiddenSessionIds={hiddenSessionSet}
-              onHideSession={handleHideSession}
-              onUnhideSession={handleUnhideSession}
-              onDeleteSession={handleDeleteSessionRequest}
-            />
-          </div>
-        )}
-
-        {/* Watching sessions */}
-        {watchingSessions.length > 0 && (
-          <div style={{ margin: '20px 8px 0' }}>
-            <div style={{ paddingLeft: 5, marginBottom: 3 }}>
-              <span className="text-[10px] font-semibold text-text-muted uppercase tracking-[0.08em]">Watching</span>
-            </div>
-            <nav className="flex flex-col gap-px">
-              {watchingSessions.map((info) => {
-                const sessionHidden = hiddenSessionSet.has(info.sessionId)
-                return (
-                  <SessionItem
-                    key={info.sessionId}
-                    info={info}
-                    active={info.sessionId === activeSessionId}
-                    onClick={() => handleClickSession(info)}
-                    onToggleWatch={() => handleToggleWatch(info)}
-                    isRenaming={renamingKey === `watching:${info.sessionId}`}
-                    onStartRename={() => setRenamingKey(`watching:${info.sessionId}`)}
-                    onFinishRename={(title) => handleRename(info.sessionId, title)}
-                    onAutoRename={() => handleAutoRename(info.sessionId)}
-                    onCancelRename={() => setRenamingKey(null)}
-                    hidden={sessionHidden}
-                    onHide={!sessionHidden ? () => handleHideSession(info) : undefined}
-                    onUnhide={sessionHidden ? () => handleUnhideSession(info) : undefined}
-                    onDelete={info.projectKey ? () => handleDeleteSessionRequest(info) : undefined}
-                  />
-                )
-              })}
-            </nav>
-          </div>
-        )}
-
-        {/* Recent sessions */}
-        {recentSessions.length > 0 && (
-          <div style={{ margin: '20px 8px 0' }}>
-            <div style={{ paddingLeft: 5, marginBottom: 3 }}>
-              <span className="text-[10px] font-semibold text-text-muted uppercase tracking-[0.08em]">Recent</span>
-            </div>
-            <nav className="flex flex-col gap-px">
-              {recentSessions.map((info) => {
-                const sessionHidden = hiddenSessionSet.has(info.sessionId)
-                return (
-                  <SessionItem
-                    key={info.sessionId}
-                    info={info}
-                    active={info.sessionId === activeSessionId}
-                    onClick={() => handleClickSession(info)}
-                    onToggleWatch={info.projectKey ? () => handleToggleWatch(info) : undefined}
-                    onPin={() => pinSession(info.sessionId)}
-                    onRemove={() => {
-                      if (worktreeInfoMap[info.sessionId]) {
-                        setCleanupWorktree({ sessionId: info.sessionId, worktreeInfo: worktreeInfoMap[info.sessionId] })
-                      } else {
-                        removeRecentSession(info.sessionId)
-                      }
-                    }}
-                    isRenaming={renamingKey === `recent:${info.sessionId}`}
-                    onStartRename={() => setRenamingKey(`recent:${info.sessionId}`)}
-                    onFinishRename={(title) => handleRename(info.sessionId, title)}
-                    onAutoRename={() => handleAutoRename(info.sessionId)}
-                    onCancelRename={() => setRenamingKey(null)}
-                    hidden={sessionHidden}
-                    onHide={!sessionHidden ? () => handleHideSession(info) : undefined}
-                    onUnhide={sessionHidden ? () => handleUnhideSession(info) : undefined}
-                    onDelete={info.projectKey ? () => handleDeleteSessionRequest(info) : undefined}
-                  />
-                )
-              })}
-            </nav>
-          </div>
-        )}
-
-        {/* Projects accordion */}
-        {augmentedDirs.length > 0 && (
-          <div style={{ margin: '20px 8px 0' }}>
-            <div style={{ paddingLeft: 5, marginBottom: 3 }} className="flex items-center justify-between pr-1">
-              <span className="text-[10px] font-semibold text-text-muted uppercase tracking-[0.08em]">Projects</span>
-              {hasAnyHidden && (
-                <button
-                  onClick={() => setShowHidden((v) => !v)}
-                  className="text-[10px] text-text-muted hover:text-text-primary transition-colors cursor-default"
-                  title={showHidden ? 'Hide dimmed items' : 'Show hidden items'}
-                >
-                  {showHidden ? 'Hide hidden' : 'Show hidden'}
-                </button>
-              )}
-            </div>
-            <nav className="flex flex-col gap-px">
-              {augmentedDirs
-                .filter((group) => showHidden || !hiddenProjectSet.has(group.projectKey))
-                .map((group) => {
-                  const projectHidden = !!group.projectKey && hiddenProjectSet.has(group.projectKey)
-                  return (
-                    <DirectoryItem
-                      key={group.projectKey || group.cwd}
-                      group={group}
-                      expanded={expandedDir === (group.projectKey || group.cwd)}
-                      activeSessionId={activeSessionId}
-                      onClick={() => handleDirClick(group.projectKey || group.cwd)}
-                      onDoubleClick={() => handleDirDoubleClick(group)}
-                      onSessionClick={handleClickSession}
-                      onSessionDoubleClick={(info) => { if (!pinnedSessionIds.includes(info.sessionId)) addRecentSession(info.sessionId) }}
-                      onToggleWatch={handleToggleWatch}
-                      onViewWorktrees={() => setWorktreesModalCwd(group.cwd)}
-                      renamingKey={renamingKey}
-                      renamePrefix={`project:${group.projectKey || group.cwd}`}
-                      onStartRename={(key) => setRenamingKey(key)}
-                      onFinishRename={handleRename}
-                      onAutoRename={handleAutoRename}
-                      onCancelRename={() => setRenamingKey(null)}
-                      hidden={projectHidden}
-                      onHide={group.projectKey && !projectHidden ? () => hideProject(group.projectKey) : undefined}
-                      onUnhide={group.projectKey && projectHidden ? () => unhideProject(group.projectKey) : undefined}
-                      onDelete={group.projectKey ? () => handleDeleteProjectRequest(group) : undefined}
-                      hiddenSessionIds={hiddenSessionSet}
-                      showHidden={showHidden}
-                      onHideSession={handleHideSession}
-                      onUnhideSession={handleUnhideSession}
-                      onDeleteSession={handleDeleteSessionRequest}
-                    />
-                  )
-                })}
-            </nav>
-          </div>
-        )}
-      </div>
-
-      {/* Settings panel + Footer */}
-      <SettingsPanel />
-
-      {/* Worktrees management modal */}
-      {worktreesModalCwd && (
-        <WorktreesModal cwd={worktreesModalCwd} onClose={() => setWorktreesModalCwd(null)} />
-      )}
-
-      {/* Delete confirmation modal (session or project) */}
-      {deleteTarget && (
-        <DeleteConfirmModal
-          kind={deleteTarget.kind}
-          name={deleteTarget.kind === 'session' ? deleteTarget.title : deleteTarget.folderName}
-          path={deleteTarget.kind === 'session'
-            ? `~/.claude/projects/${deleteTarget.projectKey}/${deleteTarget.sessionId}.jsonl`
-            : `~/.claude/projects/${deleteTarget.projectKey}/`
-          }
-          sessionCount={deleteTarget.kind === 'project' ? deleteTarget.sessionCount : undefined}
-          onConfirm={confirmDelete}
-          onCancel={() => setDeleteTarget(null)}
-        />
-      )}
-
-      {/* Worktree cleanup modal (on session removal) */}
-      {cleanupWorktree && (
-        <WorktreeCleanupModal
-          worktreeInfo={cleanupWorktree.worktreeInfo}
-          onKeep={() => {
-            removeRecentSession(cleanupWorktree.sessionId)
-            setCleanupWorktree(null)
-          }}
-          onRemove={() => {
-            clearWorktreeInfo(cleanupWorktree.sessionId)
-            removeRecentSession(cleanupWorktree.sessionId)
-            setCleanupWorktree(null)
-          }}
-          onCancel={() => setCleanupWorktree(null)}
-        />
-      )}
-    </div>
+    <SidebarView
+      style={style}
+      platform={window.api.platform}
+      uiFontScale={uiFontScale}
+      activeSessionId={activeSessionId}
+      activeView={activeView}
+      pluginViews={pluginViews}
+      automationBadge={automationBadge}
+      pinnedSessionIds={pinnedSessionIds}
+      pinnedSessions={pinnedSessions}
+      watchingSessions={watchingSessions}
+      recentSessions={recentSessions}
+      augmentedDirs={augmentedDirs}
+      hiddenSessionSet={hiddenSessionSet}
+      hiddenProjectSet={hiddenProjectSet}
+      hasAnyHidden={hasAnyHidden}
+      showHidden={showHidden}
+      expandedDir={expandedDir}
+      renamingKey={renamingKey}
+      worktreesModalCwd={worktreesModalCwd}
+      deleteTarget={deleteTarget}
+      cleanupWorktree={cleanupWorktree}
+      onToggleCollapse={onToggleCollapse}
+      onNewSession={handleNewSession}
+      onNewSessionDblClick={handleNewSessionDblClick}
+      onSetActiveView={setActiveView}
+      onShowHiddenToggle={() => setShowHidden((v) => !v)}
+      onSetRenamingKey={setRenamingKey}
+      onClickSession={handleClickSession}
+      onToggleWatch={handleToggleWatch}
+      onPin={pinSession}
+      onUnpin={unpinSession}
+      onReorderPinned={reorderPinnedSessions}
+      onFinishRename={handleRename}
+      onAutoRename={handleAutoRename}
+      onRemoveRecent={handleRemoveRecent}
+      onDirClick={handleDirClick}
+      onDirDoubleClick={handleDirDoubleClick}
+      onSessionDoubleClick={(info) => addRecentSession(info.sessionId)}
+      onViewWorktrees={(cwd) => setWorktreesModalCwd(cwd)}
+      onCloseWorktreesModal={() => setWorktreesModalCwd(null)}
+      onHideSession={handleHideSession}
+      onUnhideSession={handleUnhideSession}
+      onDeleteSession={handleDeleteSessionRequest}
+      onHideProject={hideProject}
+      onUnhideProject={unhideProject}
+      onDeleteProject={handleDeleteProjectRequest}
+      onConfirmDelete={confirmDelete}
+      onCancelDelete={() => setDeleteTarget(null)}
+      onWorktreeCleanupKeep={() => {
+        if (cleanupWorktree) {
+          removeRecentSession(cleanupWorktree.sessionId)
+          setCleanupWorktree(null)
+        }
+      }}
+      onWorktreeCleanupRemove={() => {
+        if (cleanupWorktree) {
+          clearWorktreeInfo(cleanupWorktree.sessionId)
+          removeRecentSession(cleanupWorktree.sessionId)
+          setCleanupWorktree(null)
+        }
+      }}
+      onWorktreeCleanupCancel={() => setCleanupWorktree(null)}
+    />
   )
 }

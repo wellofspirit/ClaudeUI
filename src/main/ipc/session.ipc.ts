@@ -2,7 +2,7 @@ import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
 import { app, ipcMain, dialog, BrowserWindow } from 'electron'
-import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk'
+import { query as sdkQuery } from '../sdk'
 import { PERSISTED_SESSIONS_DIR } from '../services/persisted-sessions-dir'
 import { SessionManager } from '../services/session-manager'
 import { getSdkExecutableOpts, ClaudeSession } from '../services/claude-session'
@@ -891,9 +891,6 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
       teamsViewWindow.focus()
       return
     }
-    // See claude-session.ts getSdkExecutableOpts() — ELECTRON_RUN_AS_NODE
-    // must be cleared before spawning a renderer process.
-    delete process.env.ELECTRON_RUN_AS_NODE
     teamsViewWindow = new BrowserWindow({
       width: 1200,
       height: 800,

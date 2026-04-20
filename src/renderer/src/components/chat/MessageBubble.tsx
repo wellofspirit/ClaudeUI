@@ -109,20 +109,38 @@ export const MessageBubble = memo(function MessageBubble({
     }
   }
 
-  // Match pending approvals to tool_use blocks by toolName + input
+  // Match pending approvals to tool_use blocks by tool_use_id — the
+  // authoritative id cli.js assigns to each invocation. Previously this
+  // used (toolName + input) signature, which collapses repeated identical
+  // calls onto the same approval and shows the prompt on every prior
+  // tool_use card when the latest one needs approval.
+  //
+  // Older main-process builds may not include toolUseId on PendingApproval
+  // (field was added alongside this fix). Fall back to signature match
+  // only for approvals that lack the id, so a mixed-version setup still
+  // renders a prompt somewhere instead of dropping it.
   const approvalMap = new Map<string, PendingApproval>()
   const matchedApprovalIds = new Set<string>()
   for (const block of message.content) {
     if (block.type !== 'tool_use') continue
-    const match = pendingApprovals.find(
+    const byId = pendingApprovals.find(
+      (a) => a.toolUseId && a.toolUseId === block.toolUseId,
+    )
+    if (byId) {
+      approvalMap.set(block.toolUseId, byId)
+      matchedApprovalIds.add(byId.requestId)
+      continue
+    }
+    const legacy = pendingApprovals.find(
       (a) =>
+        !a.toolUseId &&
         !matchedApprovalIds.has(a.requestId) &&
         a.toolName === block.toolName &&
-        JSON.stringify(a.input) === JSON.stringify(block.toolInput)
+        JSON.stringify(a.input) === JSON.stringify(block.toolInput),
     )
-    if (match) {
-      approvalMap.set(block.toolUseId, match)
-      matchedApprovalIds.add(match.requestId)
+    if (legacy) {
+      approvalMap.set(block.toolUseId, legacy)
+      matchedApprovalIds.add(legacy.requestId)
     }
   }
 

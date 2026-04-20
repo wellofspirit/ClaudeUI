@@ -16,6 +16,7 @@ import {
   makeToolUseBlock,
   makeToolResultBlock,
   makeThinkingBlock,
+  makePendingApproval,
   resetFactoryCounter,
 } from '@test/factories/messages'
 
@@ -233,6 +234,66 @@ describe('MessageBubble', () => {
         <MessageBubble message={msg} pendingApprovals={[]} isLastAssistant={true} thinkingStartedAt={null} />
       )
       expect(screen.getByText(/Search codebase/)).toBeInTheDocument()
+    })
+  })
+
+  describe('approval → tool_use binding', () => {
+    // Regression guard for the bug where two tool_use blocks with the
+    // same toolName+input signature would both display the permission
+    // prompt because the matcher keyed on (toolName, input) instead of
+    // tool_use_id. After the fix the approval binds only to the block
+    // whose toolUseId matches.
+    it('binds approval only to the tool_use block whose toolUseId matches', () => {
+      const completedBlock = makeToolUseBlock('Bash', { command: 'ls' }, 'toolu_old')
+      const pendingBlock = makeToolUseBlock('Bash', { command: 'ls' }, 'toolu_new')
+      const msg = makeChatMessage({
+        role: 'assistant',
+        content: [
+          completedBlock,
+          // The old call has a tool_result, proving it already finished.
+          makeToolResultBlock('toolu_old', 'total 0'),
+          pendingBlock,
+        ],
+      })
+      const approval = makePendingApproval({
+        requestId: 'req-x',
+        toolUseId: 'toolu_new',
+        toolName: 'Bash',
+        input: { command: 'ls' },
+      })
+      render(
+        <MessageBubble
+          message={msg}
+          pendingApprovals={[approval]}
+          isLastAssistant={true}
+          thinkingStartedAt={null}
+        />,
+      )
+      // Exactly one approval prompt visible — not one per matching
+      // tool_use block. ToolCallBlockView renders an "Allow" button when
+      // isPendingApproval is true; duplicated cards would yield two.
+      const allowButtons = screen.getAllByRole('button', { name: /^Allow$/ })
+      expect(allowButtons).toHaveLength(1)
+    })
+
+    it('falls back to (toolName,input) matching when the approval lacks toolUseId (legacy main-process payload)', () => {
+      const block = makeToolUseBlock('Bash', { command: 'pwd' }, 'toolu_xyz')
+      const msg = makeChatMessage({ role: 'assistant', content: [block] })
+      const approvalWithoutId = makePendingApproval({
+        requestId: 'req-legacy',
+        // intentionally omit toolUseId
+        toolName: 'Bash',
+        input: { command: 'pwd' },
+      })
+      render(
+        <MessageBubble
+          message={msg}
+          pendingApprovals={[approvalWithoutId]}
+          isLastAssistant={true}
+          thinkingStartedAt={null}
+        />,
+      )
+      expect(screen.getAllByRole('button', { name: /^Allow$/ })).toHaveLength(1)
     })
   })
 

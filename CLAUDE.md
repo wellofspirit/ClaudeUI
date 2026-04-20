@@ -13,7 +13,8 @@ A desktop GUI for Claude Code sessions, built with Electron. Features include mu
 - **Tailwind CSS v4** via `@tailwindcss/vite` plugin (no postcss/tailwind config files)
 - **Zustand** for state management
 - **react-markdown** + **remark-gfm** for rendering
-- **@anthropic-ai/claude-agent-sdk** (0.2.97) for Claude integration
+- **Claude Code CLI** integrated directly — we rebundle Anthropic's official Bun standalone binary with our patched cli.js, producing `vendor/claude-cli/bun-claude[.exe]` at build time. Handles PE (Windows `.bun` section) and Mach-O (macOS `__BUN,__bun` section + ad-hoc codesign); ELF (Linux) is a follow-up. Spawned natively (no `ELECTRON_RUN_AS_NODE`, no cli.js arg injection). No `@anthropic-ai/claude-agent-sdk` dependency. See **[docs/sdk-layer.md](docs/sdk-layer.md)**.
+- **@modelcontextprotocol/sdk** for in-process MCP server hosting
 - **simple-git** for git operations
 - **node-pty** + **@xterm/xterm** for terminal emulator
 - **mermaid** for diagram rendering
@@ -23,16 +24,19 @@ A desktop GUI for Claude Code sessions, built with Electron. Features include mu
 
 ## Commands
 
-- `bun run dev` — start in development mode with hot reload
+- `bun run dev` — start in development mode with hot reload (runs `ensure-cli` first)
 - `bun run build` — typecheck + build
 - `bun run build:mac` — build macOS distributable
 - `bun run build:win` — build Windows distributable
+- `bun run ensure-cli` — extract wrapped cli.js, apply patches, rebundle into `bun-claude[.exe]` (cache-hit skip on matching version)
+- `bun run update-cli` — force re-extract, re-patch, and re-rebundle (use after bumping `claudeCliVersion`)
 - `bun run test` — run Vitest tests
 - `bun run test:watch` — run tests in watch mode
 - `bun run typecheck` — run TypeScript checks (node + web)
 - `bun run lint` — ESLint
 - `bun run format` — Prettier
-- `bun patch/apply-all.mjs` — apply SDK patches (also runs automatically via `postinstall`)
+
+The upstream CLI version is pinned via `package.json#claudeCliVersion`. `ensure-cli` is wired into `postinstall`, `dev`, and every `build:*` script.
 
 ## Project Structure
 
@@ -44,6 +48,9 @@ src/
     e2e-crypto.ts          — AES-256-GCM E2E encryption (isomorphic Node + browser)
   main/
     index.ts               — Electron BrowserWindow setup, app lifecycle, service wiring
+    sdk/                   — In-house cli.js harness, replaces @anthropic-ai/claude-agent-sdk
+                             query(), tool(), createSdkMcpServer() + 9 modules
+                             Full details: docs/sdk-layer.md
     ipc/
       session.ipc.ts       — Core IPC: sessions, git, config, MCP, usage, worktrees, voice, proxy
       terminal.ipc.ts      — PTY create/write/resize/kill
@@ -119,8 +126,11 @@ src/
     setup/                   — jsdom.setup.ts, node.setup.ts
   e2e/flows/                 — Layer 3 E2E tests
   integration/               — Layer 4 integration tests
-patch/                     — SDK monkey-patches (applied via postinstall)
+vendor/claude-cli/         — Rebundled bun-claude[.exe] + wrapped cli.js source (not checked in)
+scripts/                   — Build-time helpers (extract-cli.mjs, rebundle-cli.mjs, ...)
+patch/                     — cli.js content-regex patches applied before rebundle
 docs/adr/                  — Architectural Decision Records
+docs/sdk-layer.md          — Reference for the in-house cli.js harness
 ```
 
 ## Services
@@ -129,12 +139,12 @@ All services live in `src/main/services/`. Key modules:
 
 | Service | Purpose |
 |---------|---------|
-| `claude-session.ts` | Core SDK wrapper — spawns `sdkQuery()`, handles streaming, approvals, tool results |
+| `claude-session.ts` | Core cli.js wrapper — spawns `sdkQuery()` from `src/main/sdk`, handles streaming, approvals, tool results |
 | `session-manager.ts` | Maps routingId → ClaudeSession, manages lifecycle, rekey, timeouts |
 | `session-history.ts` | Parses JSONL transcripts, loads message history, computes token metrics |
 | `session-watcher.ts` | Watches session JSONL files for live updates |
 | `service-session.ts` | Lightweight CLI subprocess for background usage polling |
-| `automation-manager.ts` | Cron/interval scheduling, per-file storage, run history, SDK execution |
+| `automation-manager.ts` | Cron/interval scheduling, per-file storage, run history, cli.js execution |
 | `git-service.ts` | Wraps simple-git: status, branches, stage/unstage, commit, push/pull, diff |
 | `worktree.ts` | Git worktree create/remove/list |
 | `pty-manager.ts` | Spawns shell PTYs (pwsh/cmd on Windows, bash/zsh on Unix) |
@@ -175,24 +185,25 @@ User types prompt → InputBox.handleSend()
   → addUserMessage() (Zustand)
   → window.api.sendPrompt(prompt, attachments?) (IPC)
   → session.run(prompt) (main process)
-  → sdkQuery() async generator
+  → sdkQuery() from src/main/sdk — spawns cli.js, speaks stream-json over stdio
     → stream_event → session:stream → appendStreamingText()
     → assistant    → session:message → addMessage() (upserts by ID)
     → user (tool_result) → session:tool-result → appendToolResult()
-    → canUseTool   → session:approval-request → setPendingApproval()
+    → can_use_tool control_request → session:approval-request → setPendingApproval()
     → result       → session:result (cost tracking)
 ```
 
 ### Key Patterns
-- **Message upsert by ID** — SDK sends partial messages with the same `betaMessage.id`; updates replace in place rather than duplicating
+- **Message upsert by ID** — cli.js sends partial messages with the same `betaMessage.id`; updates replace in place rather than duplicating
 - **Approval Promise** — `canUseTool` callback creates a Promise stored in `pendingApprovals` Map, resolved when user clicks Allow/Deny
 - **Tool result extraction** — Tool results arrive via synthetic `type: 'user'` messages (not assistant), extracted by `extractToolResults()`
-- **SDK externalization** — `claude-agent-sdk` is externalized in Vite build (`rollupOptions.external`), bundled via `extraResources` in electron-builder
+- **Scoped child env** — historically `ELECTRON_RUN_AS_NODE=1` rode in the spawn `env` overlay only to avoid poisoning Electron's GPU/renderer children. Retired when cli.js moved into the rebundled Bun binary; the `env` overlay mechanism in `query.ts` remains for any future per-spawn env isolation
 - **Multi-session routing** — Each session has a `routingId`; IPC events are routed by this ID so multiple sessions can coexist
-- **Session rekey** — When the SDK session starts, the temporary routingId is rekeyed to the SDK's session UUID
+- **Session rekey** — When the cli.js session starts, the temporary routingId is rekeyed to the session UUID from the first `system/init` event
 - **Git status polling** — `useGitWatcher` starts/stops `GitService.startPolling()` based on active session's cwd
 - **Terminal grouping** — Terminals are grouped by normalized cwd, survive session switching, cleaned up after 10 min inactivity (ADR-003)
 - **Remote dual-mode** — Same handlers serve both Electron IPC and WebSocket clients (remote-handlers.ts mirrors session.ipc.ts)
+- **cli.js integration details** — see **[docs/sdk-layer.md](docs/sdk-layer.md)** for wire protocol, control subtypes, MCP hosting, cancellation tiers, and extraction pipeline
 
 ### Views
 The app has four main views switchable via sidebar:
@@ -211,25 +222,29 @@ The app has four main views switchable via sidebar:
 
 Four-layer testing architecture. Full details in **[docs/testing-strategy.md](docs/testing-strategy.md)**.
 
-| Layer | Command | What it tests | File pattern |
+| Project | Command | What it tests | File pattern |
 |-------|---------|---------------|--------------|
-| **Unit** | `bun run test:unit` | Pure rendering, pure functions | `*.test.ts`, `*.unit.test.tsx` |
-| **Component** | `bun run test:component` | Business logic (events → store state) | `*.component.test.ts` |
-| **E2E** | `bun run test:e2e` | Full pipeline (bridge events → store) | `*.e2e.test.ts` |
-| **Integration** | `bun run test:integration` | Real SDK event contracts | `*.integration.test.ts` |
+| **unit** | `bun run test:unit` | Pure rendering, pure functions | `*.test.ts`, `*.unit.test.tsx` |
+| **component** | `bun run test:component` | Business logic (events → store state) | `*.component.test.ts` |
+| **e2e** | `bun run test:e2e` | Full pipeline (bridge events → store) | `*.e2e.test.ts` |
+| **git** | `bun run test:git` | Real simple-git / filesystem (slow) | `git-service*.test.ts`, `worktree.test.ts` |
+| **integration** | `bun run test:integration` | Real cli.js event contracts (gated) | `*.integration.test.ts` |
 
-- **CI runs:** `bun run test:ci` (unit + component + e2e, no integration)
-- **All layers:** `bun run test`
+- **Default local run:** `bun run test` — unit + component + e2e (no git, no integration). Snappy — ~14s.
+- **After editing git-service.ts / worktree.ts / simple-git helpers:** `bun run test:git:changed` — uses vitest `--changed` to run only git tests whose import graph includes a modified file. `bun run test:git` always runs the whole git project.
+- **CI runs:** `bun run test:ci` — unit + component + e2e + git (no integration). ~38s.
 - **Watch mode:** `bun run test:watch` (unit only)
 - **Framework:** Vitest 4.x with jsdom, `@testing-library/react`, workspace projects in `vitest.config.ts`
 - **Test infra:** `src/test/` — TestIpcBridge, electron shim, SDK stub, factories, helpers
 
+**Why `git` is its own project:** On Windows each `simple-git` subprocess call costs ~150-200ms. The 48 git-backed tests add ~23s to a default run and dominate cumulative time. Excluding them from `test` keeps iteration fast while still guaranteeing coverage in CI and when developers touch git-adjacent code.
+
 ## Windows Path Format in Bash Commands
 
-On Windows (Git Bash), the SDK's working directory uses POSIX format (`/d/WorkPlace/ClaudeUI`), not Windows format (`D:\WorkPlace\ClaudeUI` or `D:/WorkPlace/ClaudeUI`). This matters for permission checks:
+On Windows (Git Bash), cli.js's working directory uses POSIX format (`/d/WorkPlace/ClaudeUI`), not Windows format (`D:\WorkPlace\ClaudeUI` or `D:/WorkPlace/ClaudeUI`). This matters for permission checks:
 
-- **Never prefix Bash commands with `cd D:/...`** — it's redundant (already in the working dir) and causes permission prompts because the SDK filters `cd <cwd>` by exact string match, and `D:/WorkPlace/ClaudeUI` ≠ `/d/WorkPlace/ClaudeUI`.
-- When a path **must** be specified in a command argument, use POSIX format: `/d/WorkPlace/ClaudeUI` not `D:\WorkPlace\ClaudeUI`. This matches what the SDK sees as the working directory and ensures `cd` auto-filtering and permission rules work correctly.
+- **Never prefix Bash commands with `cd D:/...`** — it's redundant (already in the working dir) and causes permission prompts because cli.js filters `cd <cwd>` by exact string match, and `D:/WorkPlace/ClaudeUI` ≠ `/d/WorkPlace/ClaudeUI`.
+- When a path **must** be specified in a command argument, use POSIX format: `/d/WorkPlace/ClaudeUI` not `D:\WorkPlace\ClaudeUI`. This matches what cli.js sees as the working directory and ensures `cd` auto-filtering and permission rules work correctly.
 
 ## Known Gotchas
 
@@ -242,10 +257,10 @@ The `@source "../../";` directive in main.css is required so the Tailwind scanne
 ### Electron Transparency
 Requires `transparent: true` + `vibrancy` on BrowserWindow, plus `background: transparent` on html, body, and #root. Any opaque background in the component tree blocks the effect.
 
-### SDK canUseTool Return Value
-Must return `{ behavior: 'allow', updatedInput: input }` (passing back the original input). The SDK's Zod schema requires `updatedInput` despite TypeScript marking it optional — omitting it causes a ZodError. For deny: `{ behavior: 'deny', message: '...' }`.
+### canUseTool Return Value
+Must return `{ behavior: 'allow', updatedInput: input }` (passing back the original input). For deny: `{ behavior: 'deny', message: '...' }`. The `context.signal` is a real AbortSignal now — observe `.aborted` to dismiss the UI when cli.js sends a `control_cancel_request` for the pending prompt.
 
-### SDK Message Flow
+### cli.js Message Flow
 With `includePartialMessages: true`, messages arrive in order: `assistant` (partial updates) → `user` (synthetic tool_result) → `assistant` (response) → `result` (cost). Assistant messages share the same `betaMessage.id` across partial updates.
 
 ### Terminal Panel Always Mounted
@@ -254,56 +269,29 @@ The terminal panel uses `display: none` (closed) / `display: contents` (open) in
 ### Usage Utilization Scales
 The `/api/oauth/usage` API returns utilization as 0–100 (percentage), while rate-limit HTTP headers return 0–1 (fraction). Both are stored as 0–100 in `RateWindow.usedPercent`. The `toUsedPercent()` helper in `usage-fetcher.ts` makes this conversion explicit.
 
-## Analyzing the SDK Bundle
+## cli.js Integration
 
-The SDK ships a minified `cli.js` (~11 MB) at `node_modules/@anthropic-ai/claude-agent-sdk/cli.js`. **Always use the `bundle-analyzer` skill** (invoke via `/bundle-analyzer`) to navigate this code. Standard grep/read tools are ineffective on minified bundles.
+Everything about how ClaudeUI talks to cli.js — the Bun binary extraction pipeline, the stream-json wire protocol, control request subtypes, MCP hosting, cancellation tiers, the 16 patches — lives in **[docs/sdk-layer.md](docs/sdk-layer.md)**. Read that before touching anything under `src/main/sdk/`, `scripts/extract-cli.mjs`, or `patch/`.
 
-Typical workflow: `find` by string literals → `extract-fn` → `strings --near` → `refs` → `decompile` → `patch-check` for uniqueness. Never search by minified variable names — they change between versions.
+### Analyzing cli.js
 
-## SDK Patches
+cli.js is ~13MB minified. Use the `/bundle-analyzer` skill to navigate it — standard grep/read tools are ineffective. Workflow: `find` by string literals → `extract-fn` → `strings --near` → `refs` → `decompile` → `patch-check` for uniqueness. Never search by minified variable names — they change between versions.
 
-Patches live in `patch/` and fix limitations in the bundled `cli.js`. Each patch is a directory with `apply.mjs` + `README.md`.
+### Patches
 
-**Current patches (13 registered in `apply-all.mjs`):**
+15 content-regex patches under `patch/`, applied by `bun run ensure-cli`. Three auto-detect upstream fixes and no-op (`taskstop-notification`, `incomplete-session-resume-fix`, `mcp-tool-refresh`). The active 12 add stream forwarding, control subtypes, and small bug fixes — full table in `docs/sdk-layer.md#patches`. One of them (`ci-path-remap`) exists only because ClaudeUI extracts cli.js from the Bun standalone binary and runs it under Node/Electron, which breaks Bun's virtual-path resolution.
 
-| Patch | Purpose |
-|---|---|
-| `subagent-streaming` | Forwards subagent stream events + messages to SDK consumer |
-| `taskstop-notification` | Sends task_notification on TaskStop (Part A killed→stopped mapping upstreamed in 0.2.49) |
-| `team-streaming` | Forwards teammate stream events + messages to SDK consumer; emits task_notification on completion |
-| `queue-control` | Adds `dequeue_message` control request and `queued_command_consumed` notification |
-| `mcp-status` | Fixes `mcp_status` returning empty array by awaiting headless MCP server refresh |
-| `mcp-tool-refresh` | Refreshes MCP tool list after server reconnection before each API call |
-| `sandbox-network-fix` | Fixes sandbox network proxy always starting even when no domain restrictions are configured |
-| `background-task` | Exposes CLI's background task feature via SDK control message API |
-| `usage-relay` | Relays CLI's internal `/usage` API through SDK control messages (avoids 429s) |
-| `request-usage` | Emits per-request token usage data from cli.js after message_stop event |
-| `rate-limit-relay` | Forwards per-window rate limit utilization data to SDK stdout after inference calls |
-| `incomplete-session-resume-fix` | Fixes broken parentUuid chain when resuming with filtered progress messages |
-| `voice-server` | Adds lightweight TCP voice server for streaming audio transcription |
-
-**Not registered (on disk only):**
-- `webfetch-headers` — exists in `patch/` but not in `apply-all.mjs`
-
-**Upstreamed (removed):**
-- ~~`task-notification-usage`~~ — upstreamed in SDK 0.2.49
-- ~~`team-dowhile-fix`~~ — upstreamed in SDK 0.2.59
-
-### Writing a new patch
-
-**Skills for patch work:**
-- `/bundle-analyzer` — Navigate the minified `cli.js`. Find code by string literals, extract functions, trace references, decompile to readable output. Essential for locating patch targets.
-- `/patch-readme` — Generate or update a patch's `README.md` as a reverse-engineering guide that enables rebuilding the patch from scratch when the SDK updates.
-- `/patch-test-harness` — Write and run behavioral tests that verify a patch is functioning correctly.
+Skills for patch work:
+- `/bundle-analyzer` — locate patch targets in minified cli.js.
+- `/patch-readme` — generate/update per-patch README with anchors.
+- `/patch-test-harness` — behavioral tests for a patch.
 
 `apply.mjs` conventions:
-1. Read `cli.js`, check for `/*PATCHED:<name>*/` marker (idempotency)
-2. Find code by **content patterns/string literals** — never char offsets or minified names directly
-3. Extract minified variable names dynamically from regex captures
-4. Use `const V = '[\\w$]+'` for matching minified identifiers
-5. Verify pattern matches exactly once, apply replacement with marker, write back and verify
-
-`README.md` should document: the bug, the fix (before/after), which `bundle-analyzer` commands find the code, and stable anchors for future versions.
+1. Read `vendor/claude-cli/cli.js`, check for `/*PATCHED:<name>*/` marker (idempotency).
+2. Find code by **content patterns/string literals** — never char offsets or minified names.
+3. Extract minified variable names dynamically from regex captures.
+4. Use `const V = '[\\w$]+'` for matching minified identifiers.
+5. Verify pattern matches exactly once, apply replacement with marker, write back.
 
 Register new patches in the `patches` array in `patch/apply-all.mjs`.
 

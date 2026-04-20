@@ -23,8 +23,7 @@ import { fileURLToPath } from 'node:url'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const projectRoot = resolve(__dirname, '../..')
-const cliPath = resolve(projectRoot, 'node_modules/@anthropic-ai/claude-agent-sdk/cli.js')
-const sdkPath = resolve(projectRoot, 'node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs')
+const cliPath = resolve(projectRoot, 'vendor/claude-cli/cli.js')
 
 // Regex shorthand for minified identifier
 const V = '[\\w$]+'
@@ -38,7 +37,7 @@ try {
   src = readFileSync(cliPath, 'utf-8')
 } catch (err) {
   console.error(`ERROR: Cannot read ${cliPath}`)
-  console.error('Is @anthropic-ai/claude-agent-sdk installed?')
+  console.error('Did you run: node scripts/extract-cli.mjs ?')
   process.exit(1)
 }
 
@@ -225,67 +224,7 @@ if (src.includes(PATCH_MARKER)) {
   console.log('\ncli.js verified.')
 }
 
-// ===========================================================================
-// Part B: Patch sdk.mjs — expose backgroundTask on the query
-// ===========================================================================
-
-console.log('\n\n=== Part B: Patching sdk.mjs ===')
-
-const SDK_MARKER = '/*PATCHED:background-task-sdk*/'
-
-let sdkSrc
-try {
-  sdkSrc = readFileSync(sdkPath, 'utf-8')
-} catch (err) {
-  console.error(`ERROR: Cannot read ${sdkPath}`)
-  process.exit(1)
-}
-
-console.log(`Read ${sdkPath} (${(sdkSrc.length / 1024).toFixed(0)} KB)`)
-
-if (sdkSrc.includes(SDK_MARKER)) {
-  console.log('Part B already applied. Skipping.')
-} else {
-  // Anchor: async stopTask(<var>){await this.request({subtype:"stop_task",task_id:<var>})}
-  const sdkAnchorRe = new RegExp(
-    `async stopTask\\((${V})\\)\\{await this\\.request\\(\\{subtype:"stop_task",task_id:\\1\\}\\)\\}`
-  )
-  const sdkMatch = sdkAnchorRe.exec(sdkSrc)
-  if (!sdkMatch) {
-    console.error('ERROR: Cannot locate stopTask anchor in sdk.mjs')
-    process.exit(1)
-  }
-
-  const sdkIdx = sdkMatch.index
-
-  // Verify uniqueness
-  const allSdkMatches = [...sdkSrc.matchAll(new RegExp(sdkAnchorRe, 'g'))]
-  if (allSdkMatches.length > 1) {
-    console.error('ERROR: stopTask anchor matched multiple times in sdk.mjs')
-    process.exit(1)
-  }
-  console.log(`Found stopTask anchor at char ${sdkIdx}`)
-
-  // Inject after the closing } of stopTask
-  const insertAt = sdkIdx + sdkMatch[0].length
-  const sdkInjection = SDK_MARKER +
-    `async backgroundTask(Q){return await this.request({subtype:"background_task",tool_use_id:Q})}`
-
-  sdkSrc = sdkSrc.slice(0, insertAt) + sdkInjection + sdkSrc.slice(insertAt)
-  writeFileSync(sdkPath, sdkSrc)
-  console.log(`Patch applied to ${sdkPath}`)
-
-  const sdkVerify = readFileSync(sdkPath, 'utf-8')
-  const sdkOk = sdkVerify.includes(SDK_MARKER)
-  console.log(`  ${sdkOk ? 'OK' : 'MISSING'} SDK patch marker`)
-  if (!sdkOk) {
-    console.error('\nPart B verification FAILED.')
-    process.exit(1)
-  }
-  console.log('\nPart B verified (sdk.mjs).')
-}
-
 console.log('')
 console.log('What this does:')
-console.log('  cli.js: background_task control-request handler (backgrounds running bash/agent tasks)')
-console.log('  sdk.mjs: backgroundTask() method on the query object')
+console.log('  Part A (cli.js): background_task control-request handler (backgrounds running bash/agent tasks).')
+console.log('  Part B (sdk.mjs) was removed — backgroundTask() lives in src/main/sdk/.')

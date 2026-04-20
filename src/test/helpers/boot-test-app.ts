@@ -198,6 +198,11 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     gitStartWatching: (cwd) => unwrap('git:start-watching', cwd),
     gitStopWatching: (cwd) => unwrap('git:stop-watching', cwd),
 
+    deleteSession: (sessionId, projectKey) =>
+      ipcRenderer.invoke('session:delete-session', sessionId, projectKey),
+    deleteProject: (projectKey) =>
+      ipcRenderer.invoke('session:delete-project', projectKey),
+
     listDir: (dirPath) => ipcRenderer.invoke('file:list-dir', dirPath),
     openInVSCode: (cwd) => ipcRenderer.invoke('app:open-in-vscode', cwd),
     loadSettings: () => ipcRenderer.invoke('config:load-settings'),

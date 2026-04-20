@@ -26,7 +26,7 @@ import { fileURLToPath } from 'node:url'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const projectRoot = resolve(__dirname, '../..')
-const cliPath = resolve(projectRoot, 'node_modules/@anthropic-ai/claude-agent-sdk/cli.js')
+const cliPath = resolve(projectRoot, 'vendor/claude-cli/cli.js')
 
 // Minified variable names can contain $ — use [\w$] instead of \w
 const V = '[\\w$]+'
@@ -40,7 +40,7 @@ try {
   src = readFileSync(cliPath, 'utf-8')
 } catch (err) {
   console.error(`ERROR: Cannot read ${cliPath}`)
-  console.error('Is @anthropic-ai/claude-agent-sdk installed?')
+  console.error('Did you run: node scripts/extract-cli.mjs ?')
   process.exit(1)
 }
 
@@ -58,9 +58,23 @@ let patchCount = 0
 // in 0.2.87+ it's K.agentId (destructured from q.identity).
 // We detect this once and use it across all patches.
 // ---------------------------------------------------------------------------
-const agentIdExpr = src.includes('{identity:') && src.includes('K.agentId') && src.includes('inProcessRunner')
-  ? 'K.agentId'
-  : 'q.agentId'
+// Find the agentId variable used inside the in-process runner. The function
+// parameter changes between versions: `q`, `K`, `$`. We resolve it by scanning
+// the 5000 chars before the override anchor (which is inside the runner) for
+// the nearest `<var>.agentId` reference — that's our local identifier.
+function detectAgentIdExpr() {
+  const anchorRe = /override:\{abortController:[\w$]+\}/
+  const anchorMatch = src.match(anchorRe)
+  if (!anchorMatch) return 'q.agentId' // legacy default
+  const before = src.slice(Math.max(0, anchorMatch.index - 5000), anchorMatch.index)
+  // Preserve the nearest var.agentId — walk backwards to the last match.
+  const re = /([\w$]+)\.agentId/g
+  let last = null
+  let m
+  while ((m = re.exec(before)) !== null) last = m
+  return last ? `${last[1]}.agentId` : 'q.agentId'
+}
+const agentIdExpr = detectAgentIdExpr()
 console.log(`Detected agentId expression: ${agentIdExpr}`)
 
 // ===========================================================================
@@ -102,9 +116,16 @@ if (src.includes(patchAMarker)) {
     process.exit(1)
   }
 
-  // Verify we're inside the in-process teammate runner (use 8000 char window — function grew in 0.2.87)
+  // Verify we're inside the in-process teammate runner. Marker strings in
+  // this context changed over versions:
+  //   <=0.2.86:   `teammateContext`
+  //   0.2.87+:    `toolUseContext` + `querySource:"agent:custom"` (v2.1.114)
+  // Accept either; also require agentIdExpr nearby.
   const before = src.slice(Math.max(0, idx - 8000), idx)
-  if (!before.includes('teammateContext') || !before.includes(agentIdExpr)) {
+  const hasRunnerMarker =
+    before.includes('teammateContext') ||
+    (before.includes('toolUseContext') && before.includes('querySource:"agent:custom"'))
+  if (!hasRunnerMarker || !before.includes(agentIdExpr)) {
     console.error('ERROR: Anchor not in expected in-process runner context.')
     process.exit(1)
   }
@@ -142,7 +163,8 @@ if (src.includes(patchBMarker)) {
   const sessFn = sessFnMatch[1]
   console.log(`Session ID function: ${sessFn}()`)
 
-  const uuidFnRe = /\{type:"progress",data:[\w$]+,toolUseID:[\w$]+,parentToolUseID:[\w$]+,uuid:([\w$]+)\(\),timestamp:new Date/
+  // Accepts bare fn `FUNC()` and method call `OBJ.randomUUID()` (2.1.113+).
+  const uuidFnRe = /\{type:"progress",data:[\w$]+,toolUseID:[\w$]+,parentToolUseID:[\w$]+,uuid:([\w$]+(?:\.[\w$]+)?)\(\),timestamp:new Date/
   const uuidFnMatch = src.match(uuidFnRe)
   if (!uuidFnMatch) {
     console.error('ERROR: Cannot locate UUID generator function.')
@@ -263,8 +285,10 @@ if (src.includes(patchCMarker)) {
 } else {
   // --- Extract cN (task notification emitter) function name ---
   // The native code calls cN(_, "completed", {toolUseId:h, summary:K.agentId})
-  // We extract the function name from this pattern.
-  const cNRe = new RegExp(`(${V})\\(${V},"completed",\\{toolUseId:${V},summary:${agentIdExpr}\\}\\)`)
+  // We extract the function name from this pattern. Escape agentIdExpr for
+  // regex (it may contain `.` and, in newer versions, `$`).
+  const agentIdExprRe = agentIdExpr.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const cNRe = new RegExp(`(${V})\\(${V},"completed",\\{toolUseId:${V},summary:${agentIdExprRe}\\}\\)`)
   const cNMatch = src.match(cNRe)
   if (!cNMatch) {
     console.error('ERROR: Cannot locate cN (task notification emitter) function.')

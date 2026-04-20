@@ -1,4 +1,4 @@
-import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk'
+import { query as sdkQuery } from '../sdk'
 import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
@@ -167,7 +167,7 @@ class ClassifierSession {
         ...execOpts,
         cwd: getClassifierDir(),
         model: 'claude-haiku-4-5',
-        permissionMode: 'dontAsk' as import('@anthropic-ai/claude-agent-sdk').PermissionMode,
+        permissionMode: 'dontAsk' as import('../sdk').PermissionMode,
         allowedTools: ['mcp__auto-classifier__classify_result'],
         mcpServers: {
           'auto-classifier': classifierMcp as never

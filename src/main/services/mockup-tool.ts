@@ -1,4 +1,4 @@
-import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk'
+import { createSdkMcpServer, tool } from '../sdk'
 import { z } from 'zod'
 import { randomBytes } from 'crypto'
 import { mkdir, writeFile, readFile, access } from 'fs/promises'

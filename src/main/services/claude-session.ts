@@ -1,9 +1,20 @@
-import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk'
+import { query as sdkQuery } from '../sdk'
+import type {
+  QueryHandle,
+  SDKMessage,
+  AssistantMessage,
+  StreamEventMessage,
+  SystemMessage,
+  ResultMessage,
+  ToolProgressMessage,
+  RateLimitEventMessage,
+  BashOutputMessage,
+  ControlResponseMessage,
+} from '../sdk'
 import { v4 as uuid } from 'uuid'
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
-import { app } from 'electron'
 import type { BrowserWindow } from 'electron'
 import { computeTokenMetrics, buildSubagentFileMap } from './session-history'
 import { isAgentTool } from '../../shared/types'
@@ -20,105 +31,36 @@ import { createMockupServer } from './mockup-tool'
 import { getClassifier, stopClassifier, isSafeTool, buildTranscript, type TranscriptMessage } from './auto-classifier'
 import { resolveThinkingMode, type ThinkingMode } from '../../shared/model-capabilities'
 
-/** In production, cli.js is unpacked from the asar — resolve its real path */
-export function getCliJsPath(): string | undefined {
-  const appPath = app.getAppPath()
-  if (!appPath.includes('app.asar')) return undefined // dev mode
-  const unpacked = appPath.replace('app.asar', 'app.asar.unpacked')
-  return path.join(unpacked, 'node_modules', '@anthropic-ai', 'claude-agent-sdk', 'cli.js')
-}
+import { locateBunClaude, getCliVersion } from '../sdk'
 
 /**
- * Read the SDK version from its package.json.
- * Works both in dev (node_modules) and production (extraResources / asar.unpacked).
+ * Path to the rebundled Bun standalone binary (has cli.js embedded).
+ * Vendored at `vendor/claude-cli/bun-claude[.exe]` — built by
+ * `scripts/rebundle-cli.mjs` during `bun run ensure-cli`.
  */
+export function getCliJsPath(): string {
+  return locateBunClaude()
+}
+
+/** Vendored CLI version, read from vendor/claude-cli/version.json. */
 export function getSdkVersion(): string {
-  // In production, the SDK is copied to extraResources and also asar.unpacked.
-  // require() won't resolve it since it's externalized — read from disk instead.
-  const appPath = app.getAppPath()
-  const sdkPkgRelative = path.join('node_modules', '@anthropic-ai', 'claude-agent-sdk', 'package.json')
-  const sdkPkgPaths = appPath.includes('app.asar')
-    ? [
-        // asar.unpacked (asarUnpack config)
-        path.join(appPath.replace('app.asar', 'app.asar.unpacked'), sdkPkgRelative),
-        // extraResources
-        path.join(path.dirname(appPath), 'claude-agent-sdk', 'package.json')
-      ]
-    : [
-        // Dev mode — resolve from project root (appPath points to project dir)
-        path.join(appPath, sdkPkgRelative)
-      ]
-  for (const p of sdkPkgPaths) {
-    try {
-      return JSON.parse(fs.readFileSync(p, 'utf-8')).version
-    } catch {
-      /* try next */
-    }
-  }
-  // Dev mode fallback — require() works fine when node_modules exists
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    return require('@anthropic-ai/claude-agent-sdk/package.json').version
-  } catch {
-    return 'unknown'
-  }
+  return getCliVersion()
 }
 
 /**
- * Resolve the Electron Helper binary for spawning child processes.
- *
- * On macOS, spawning `process.execPath` (the main Electron binary) causes a
- * dock icon flash. The Electron Helper binary has `LSUIElement=1` in its
- * Info.plist, so macOS treats it as a background process — no dock icon.
- *
- * Path: ClaudeUI.app/Contents/Frameworks/ClaudeUI Helper.app/Contents/MacOS/ClaudeUI Helper
- */
-function getElectronHelperPath(): string {
-  if (process.platform !== 'darwin') return process.execPath
-
-  // process.execPath = .../ClaudeUI.app/Contents/MacOS/ClaudeUI
-  const contentsDir = path.dirname(path.dirname(process.execPath))
-  const appName = path.basename(process.execPath) // "ClaudeUI"
-  const helperPath = path.join(
-    contentsDir,
-    'Frameworks',
-    `${appName} Helper.app`,
-    'Contents',
-    'MacOS',
-    `${appName} Helper`
-  )
-
-  // Fall back to main binary if helper doesn't exist (e.g., dev mode)
-  if (!fs.existsSync(helperPath)) return process.execPath
-  return helperPath
-}
-
-/**
- * SDK options for resolving the CLI executable in production.
- *
- * The SDK spawns `cli.js` via `spawn("node", [cliPath, ...])` by default,
- * but macOS GUI apps don't have a system `node` in PATH (especially on fresh
- * machines). We use Electron's own Node.js runtime with ELECTRON_RUN_AS_NODE=1
- * so the spawn is self-contained. On macOS we use the Helper binary to avoid
- * dock icon flashes.
+ * SDK options for the CLI spawn. The executable is our rebundled Bun binary;
+ * it runs natively, carries all of Anthropic's bundled assets (ripgrep,
+ * native addons, helper scripts), and does not need `ELECTRON_RUN_AS_NODE`
+ * or a `NODE_PATH` injection.
  */
 export function getSdkExecutableOpts(): Record<string, unknown> {
-  const cliPath = getCliJsPath()
-  if (!cliPath) return {} // dev mode — let SDK use default resolution
-  // Set ELECTRON_RUN_AS_NODE on process.env so the SDK inherits it at spawn
-  // time. We don't pass an explicit `env` to the SDK because it propagates it
-  // to all child processes (including the Bash tool), which breaks login-shell
-  // env inheritance.
-  //
-  // IMPORTANT: This poisons process.env for any BrowserWindow created after
-  // this point — Electron re-invokes the exe for renderer processes, and
-  // ELECTRON_RUN_AS_NODE makes it run as plain Node. Any code that creates a
-  // new BrowserWindow must `delete process.env.ELECTRON_RUN_AS_NODE` first.
-  process.env.ELECTRON_RUN_AS_NODE = '1'
+  const bunClaude = locateBunClaude()
   return {
-    pathToClaudeCodeExecutable: cliPath,
-    executable: getElectronHelperPath(),
-    executableArgs: []
+    pathToClaudeCodeExecutable: bunClaude,
+    executable: bunClaude,
+    executableArgs: [],
+    standaloneExecutable: true,
+    env: {},
   }
 }
 import type {
@@ -263,26 +205,16 @@ export class ClaudeSession {
   readonly cwd: string
   private totalCostUsd = 0
   private messageChannel: MessageChannel<unknown> | null = null
-  private activeQuery: {
-    interrupt(): Promise<void>
-    setPermissionMode(mode: string): Promise<void>
-    setModel(model?: string): Promise<void>
-    stopTask(taskId: string): Promise<void>
-    backgroundTask(taskId: string): Promise<unknown>
-    dequeueMessage(value: string): Promise<{ removed: number }>
-    askSideQuestion(question: string): Promise<string | null>
-    getUsage(): Promise<Record<string, unknown>>
-    // MCP methods
-    mcpServerStatus(): Promise<unknown[]>
-    toggleMcpServer(serverName: string, enabled: boolean): Promise<void>
-    reconnectMcpServer(serverName: string): Promise<void>
-    setMcpServers(servers: Record<string, unknown>): Promise<unknown>
-    // Permission hot-reload
-    applyFlagSettings(settings: Record<string, unknown>): Promise<void>
-    // Voice server (added by voice-server patch)
-    voiceServerStart(): Promise<{ port: number }>
-    voiceServerStop(): Promise<{ stopped: boolean }>
-  } | null = null
+  /** Single source of truth for query method signatures: the SDK layer's
+   *  QueryHandle. Previously duplicated here as an inline interface; drift
+   *  between the two kept biting us when new methods shipped. */
+  private activeQuery: QueryHandle | null = null
+  /** Resolved once the query handle is available to callers that want to
+   *  drive control methods without spawning a polling loop. Replaces the
+   *  old 100ms-poll + 15s-deadline dance in ensureActiveQuery(). */
+  private activeQueryPromise: Promise<QueryHandle> | null = null
+  private resolveActiveQuery: ((handle: QueryHandle) => void) | null = null
+  private rejectActiveQuery: ((err: Error) => void) | null = null
   private slug: string | null = null
   private permissionMode: string = 'default'
   private effort: string
@@ -429,6 +361,14 @@ export class ClaudeSession {
     if (sdkMessage) channel.push(sdkMessage)
     this.abortController = new AbortController()
 
+    // Reset the active-query promise for this run. ensureActiveQuery() awaits
+    // it instead of polling. Rejection path fires on any failure before
+    // sdkQuery() returns (e.g. missing cli.js).
+    this.activeQueryPromise = new Promise<QueryHandle>((resolve, reject) => {
+      this.resolveActiveQuery = resolve
+      this.rejectActiveQuery = reject
+    })
+
     // Collect stderr chunks so we can include them in error messages
     const stderrChunks: string[] = []
 
@@ -491,7 +431,7 @@ export class ClaudeSession {
           ...execOpts,
           cwd: this.cwd,
           model: this.model,
-          permissionMode: this.permissionMode as import('@anthropic-ai/claude-agent-sdk').PermissionMode,
+          permissionMode: this.permissionMode as import('../sdk').PermissionMode,
           systemPrompt: {
             type: 'preset' as const,
             preset: 'claude_code' as const,
@@ -646,6 +586,11 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
             const requestId = uuid()
             const approval: PendingApproval = {
               requestId,
+              // Forward cli.js's tool_use_id so the renderer can bind this
+              // approval to a specific tool_use block rather than matching
+              // by toolName+input signature (which collapses repeated
+              // identical calls and shows the prompt on every old card).
+              toolUseId: opts.toolUseId,
               toolName,
               input,
               suggestions: opts.suggestions as PendingApproval['suggestions'],
@@ -673,7 +618,7 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
                 behavior: 'allow' as const,
                 updatedInput,
                 ...(updatedPermissions?.length
-                  ? { updatedPermissions: updatedPermissions as unknown as import('@anthropic-ai/claude-agent-sdk').PermissionUpdate[] }
+                  ? { updatedPermissions: updatedPermissions as unknown as import('../sdk').PermissionUpdate[] }
                   : {})
               }
             }
@@ -683,293 +628,14 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
         }
       })
 
-      this.activeQuery = q as unknown as {
-        interrupt(): Promise<void>
-        setPermissionMode(mode: string): Promise<void>
-        setModel(model?: string): Promise<void>
-        stopTask(taskId: string): Promise<void>
-        backgroundTask(taskId: string): Promise<unknown>
-        dequeueMessage(value: string): Promise<{ removed: number }>
-        askSideQuestion(question: string): Promise<string | null>
-        getUsage(): Promise<Record<string, unknown>>
-        mcpServerStatus(): Promise<unknown[]>
-        toggleMcpServer(serverName: string, enabled: boolean): Promise<void>
-        reconnectMcpServer(serverName: string): Promise<void>
-        setMcpServers(servers: Record<string, unknown>): Promise<unknown>
-        applyFlagSettings(settings: Record<string, unknown>): Promise<void>
-        voiceServerStart(): Promise<{ port: number }>
-        voiceServerStop(): Promise<{ stopped: boolean }>
-      }
+      this.activeQuery = q
+      this.resolveActiveQuery?.(q)
+      this.resolveActiveQuery = null
+      this.rejectActiveQuery = null
 
       for await (const message of q) {
         if (!message || typeof message !== 'object') continue
-
-        const msg = message as Record<string, unknown>
-        const type = msg.type as string
-
-        // Capture session_id from first message
-        if ('session_id' in msg && msg.session_id && !this.sessionId) {
-          this.sessionId = msg.session_id as string
-
-          // Extract slash commands from init before sendStatus triggers a rekey
-          if (type === 'system' && (msg.subtype as string) === 'init') {
-            // CLI-only commands that produce no output through the SDK
-            const CLI_ONLY = new Set(['context', 'cost', 'login', 'logout', 'release-notes', 'doctor'])
-            const raw = (msg.slash_commands as string[]) || []
-            const slashCommands = raw
-              .filter((name) => !CLI_ONLY.has(name))
-              .map((name) => ({ name: name.startsWith('/') ? name : '/' + name }))
-            this.send('session:slash-commands', slashCommands)
-            saveSlashCommands(slashCommands)
-
-            // Extract skill names from init
-            const skillNames = (msg.skills as string[]) || []
-            this.send('session:skills', skillNames)
-
-            // Extract MCP server statuses from init and cache for the dialog
-            const mcpServers = (msg.mcp_servers as Array<{ name: string; status: string }>) || []
-            this._initMcpServers = mcpServers
-            logger.debug('ClaudeSession', `init mcp_servers (${mcpServers.length}): ${JSON.stringify(mcpServers).slice(0, 500)}`)
-            if (mcpServers.length > 0) {
-              this.send('session:mcp-servers', mcpServers)
-            }
-
-            // Sync permission mode from init — the CLI may have rejected the requested
-            // mode (e.g. auto mode gate/model check failed) and fallen back to default.
-            // Don't overwrite localAuto — SDK runs as acceptEdits underneath.
-            const initMode = msg.permissionMode as string | undefined
-            if (initMode && initMode !== this.permissionMode && this.permissionMode !== 'localAuto') {
-              this.permissionMode = initMode
-              this.send('session:permission-mode', initMode)
-            }
-
-          }
-
-          this.sendStatus()
-        }
-
-        // Capture slug for plan file resolution
-        if ('slug' in msg && msg.slug && !this.slug) {
-          this.slug = msg.slug as string
-        }
-
-
-        // Any assistant or stream content means we're processing
-        if ((type === 'assistant' || type === 'stream_event') && !this.isProcessing) {
-          this.isProcessing = true
-          this.sendStatus()
-        }
-
-        if (type === 'assistant') {
-          const parentToolUseId = msg.parent_tool_use_id as string | undefined
-          const teammateToolUseId = this.resolveTeammateToolUseId(msg)
-          const routingId = parentToolUseId || teammateToolUseId
-          const isSidechain = !!routingId
-          const chatMsg = this.transformAssistantMessage(msg)
-
-          // Accumulate usage from every assistant message (main + sidechain)
-          const hadUsage = this.accumulateUsage(msg, isSidechain)
-
-          if (chatMsg) {
-            if (routingId) {
-              this.send('session:subagent-message', { toolUseId: routingId, message: chatMsg })
-            } else {
-              this.upsertMessage(chatMsg)
-              this.send('session:message', chatMsg)
-              // Only update status line when usage actually changed (final message per API call)
-              if (hadUsage) {
-                this.scheduleStatusLineUpdate()
-              }
-            }
-          }
-        } else if (type === 'user') {
-          await this.handleUserMessage(msg)
-        } else if (type === 'stream_event') {
-          const parentToolUseId = msg.parent_tool_use_id as string | undefined
-          const teammateToolUseId = this.resolveTeammateToolUseId(msg)
-          const routingId = parentToolUseId || teammateToolUseId
-          const event = msg.event as Record<string, unknown> | undefined
-          if (event) {
-            const eventType = event.type as string
-            if (eventType === 'content_block_delta') {
-              const delta = event.delta as Record<string, unknown> | undefined
-              if (delta) {
-                if (delta.type === 'text_delta' && typeof delta.text === 'string') {
-                  if (routingId) {
-                    this.send('session:subagent-stream', { toolUseId: routingId, type: 'text', text: delta.text })
-                  } else {
-                    this.send('session:stream', { type: 'text', text: delta.text })
-                  }
-                } else if (
-                  delta.type === 'thinking_delta' &&
-                  typeof delta.thinking === 'string'
-                ) {
-                  if (routingId) {
-                    this.send('session:subagent-stream', { toolUseId: routingId, type: 'thinking', text: delta.thinking })
-                  } else {
-                    this.send('session:stream', { type: 'thinking', text: delta.thinking })
-                  }
-                }
-              }
-            }
-          }
-        } else if (type === 'tool_progress') {
-          this.send('session:task-progress', {
-            toolUseId: (msg.tool_use_id as string) || '',
-            toolName: (msg.tool_name as string) || '',
-            parentToolUseId: (msg.parent_tool_use_id as string) || null,
-            elapsedTimeSeconds: (msg.elapsed_time_seconds as number) || 0
-          })
-        } else if (type === 'system') {
-          const subtype = msg.subtype as string | undefined
-          if (subtype === 'status') {
-            // Don't overwrite localAuto — SDK runs as acceptEdits underneath
-            const newMode = msg.permissionMode as string | undefined
-            if (newMode && newMode !== this.permissionMode && this.permissionMode !== 'localAuto') {
-              this.permissionMode = newMode
-              this.send('session:permission-mode', newMode)
-            }
-          } else if (subtype === 'task_notification') {
-            const taskId = (msg.task_id as string) || ''
-            const outputFile = (msg.output_file as string) || ''
-            // Correlate with task by agentId
-            const matchedToolUseId = this.taskIdMap.get(taskId) || null
-            if (matchedToolUseId) {
-              this.markBackgroundDone(matchedToolUseId)
-              this.taskIdMap.delete(taskId)
-              const taskStatus = (msg.status as string) || 'completed'
-              const statusMap: Record<string, 'completed' | 'failed' | 'stopped'> = { completed: 'completed', failed: 'failed', stopped: 'stopped' }
-              this._teammateStatuses.set(matchedToolUseId, statusMap[taskStatus] || 'completed')
-            }
-
-            // Extract usage from the patched system message (task-notification-usage patch)
-            const rawUsage = msg.usage as { total_tokens?: number; tool_uses?: number; duration_ms?: number } | null
-            const usage = rawUsage ? {
-              totalTokens: rawUsage.total_tokens || 0,
-              toolUses: rawUsage.tool_uses || 0,
-              durationMs: rawUsage.duration_ms || 0
-            } : undefined
-
-            const sysNotification = {
-              taskId,
-              toolUseId: matchedToolUseId,
-              status: (msg.status as string) || 'completed',
-              outputFile,
-              summary: (msg.summary as string) || '',
-              usage
-            }
-            this.send('session:task-notification', sysNotification)
-          } else if (subtype === 'queued_command_consumed') {
-            const prompt = (msg.prompt as string) || ''
-            this.send('session:steer-consumed', { prompt })
-          }
-        } else if (type === 'control_response') {
-          const response = msg.response as Record<string, unknown> | undefined
-          if (response) {
-            const subtype = response.subtype as string
-            if (subtype === 'error') {
-              const errText = typeof response.error === 'string'
-                ? response.error
-                : JSON.stringify(response.error, null, 2)
-              logger.error('ClaudeSession', `Control response error: ${errText}`)
-              this.send('session:error', `SDK control error: ${errText}`)
-            }
-          }
-        } else if (type === 'request_usage') {
-          // Per-request token usage from the request-usage patch.
-          // Log to a dedicated JSONL file for cache effectiveness analysis.
-          this.logRequestUsage(msg)
-        } else if (type === 'rate_limit_event') {
-          // Real-time rate limit data from inference response headers —
-          // no extra API call needed, arrives after every inference response.
-          // The rate-limit-relay patch injects a stdout write after every
-          // streaming API call with header_utilization from the CLI's parsed
-          // response headers (per-window utilization + reset epoch).
-          const headerUtil = msg.header_utilization as Record<string, { utilization: number; resets_at: number }> | undefined
-          if (headerUtil) {
-            usageFetcher.updateFromHeaderUtilization(headerUtil)
-          }
-        } else if (type === 'bash_output') {
-          // Live bash output from the bash-output-streaming patch.
-          const toolUseId = (msg.tool_use_id as string) || ''
-          if (toolUseId) {
-            this.send('session:bash-output', {
-              toolUseId,
-              output: (msg.output as string) || '',
-              totalLines: (msg.total_lines as number) || 0,
-              totalBytes: (msg.total_bytes as number) || 0
-            })
-          }
-        } else if (type === 'result') {
-          const cost = (msg.total_cost_usd as number) || 0
-          this.totalCostUsd += cost
-          this.isProcessing = false
-
-          // Handle error results
-          const subtype = msg.subtype as string | undefined
-          if (subtype && subtype !== 'success') {
-            // When the user clicked Stop, the SDK sends error results as it
-            // tears down the interrupted turn.  These are not real failures —
-            // suppress them entirely.
-            if (!this.wasInterrupted) {
-              const errors = (msg.errors as string[]) || []
-              const stderrContext = stderrChunks.length > 0
-                ? '\n\nCLI stderr:\n' + stderrChunks.slice(-20).join('\n')
-                : ''
-              if (errors.length) {
-                logger.error('ClaudeSession', `Result error: ${errors.join('; ')}`)
-                this.send('session:error', errors.join('; ') + stderrContext)
-              } else {
-                const fallback = `Session ended with status: ${subtype}`
-                logger.error('ClaudeSession', fallback)
-                this.send('session:error', fallback + stderrContext)
-              }
-            }
-          }
-
-          // Accumulate duration from result
-          const resultDurationMs = (msg.duration_ms as number) || 0
-          const resultApiDurationMs = (msg.duration_api_ms as number) || 0
-          this.accTotalDurationMs += resultDurationMs
-          this.accTotalApiDurationMs += resultApiDurationMs
-
-          this.send('session:result', {
-            totalCostUsd: this.totalCostUsd,
-            durationMs: resultDurationMs,
-            result: (msg.result as string) || '',
-            sessionId: this.sessionId
-          })
-          this.sendStatus()
-          this.resetInactivityTimer()
-
-          // Cancel any pending debounced update — we'll send one immediately
-          if (this.statusLineTimer) {
-            clearTimeout(this.statusLineTimer)
-            this.statusLineTimer = null
-          }
-
-          // Send accumulator-based status line immediately so the UI updates
-          // without waiting for the JSONL read (which may not be fully flushed yet)
-          this.send('session:status-line', this.buildStatusLineFromAccumulators())
-
-          // Then try to reconcile from JSONL with a delay to let the SDK flush.
-          // Only overwrite accumulators if JSONL returns meaningful data.
-          const logPath = this.getSessionLogPath()
-          if (logPath) {
-            setTimeout(() => {
-              computeTokenMetrics(logPath, this.model).then((metrics) => {
-                if (metrics.totalTokens === 0 && metrics.totalCostUsd === 0) return // JSONL not ready yet
-                this.accInputTokens = metrics.totalInputTokens
-                this.accOutputTokens = metrics.totalOutputTokens
-                this.accCachedTokens = metrics.cachedTokens
-                this.accTotalDurationMs = metrics.totalDurationMs
-                this.accTotalApiDurationMs = metrics.totalApiDurationMs
-                this.lastContextLength = metrics.contextWindowSize
-                this.send('session:status-line', metrics)
-              }).catch((err) => { logger.warn('ClaudeSession', 'JSONL reconciliation failed', err) })
-            }, 500) // delay to let SDK flush JSONL to disk
-          }
-        }
+        await this.dispatchMessage(message as SDKMessage, stderrChunks)
       }
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err)
@@ -1000,11 +666,357 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
     } finally {
       this.messageChannel?.end()
       this.messageChannel = null
+      // Reject any in-flight ensureActiveQuery() awaits so callers don't
+      // hang forever on a session that never produced a handle.
+      this.rejectActiveQuery?.(new Error('Session ended before query handle was produced'))
+      this.resolveActiveQuery = null
+      this.rejectActiveQuery = null
+      this.activeQueryPromise = null
       this.activeQuery = null
       this.abortController = null
       this.isProcessing = false
       this.sendStatus()
       this.resetInactivityTimer()
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Inbound message dispatch
+  //
+  // Split out from the giant for-await switch so each inbound message
+  // `type` has a dedicated named method. Behavior is intentionally identical
+  // to the inline switch it replaced — nothing here introduces new logic.
+  // The dispatch is unmistakably transport-level (message `type`) so every
+  // branch stays small and focused on a single wire event.
+  // ---------------------------------------------------------------------------
+
+  /** Route a single CLI stream-json message to the appropriate handler.
+   *  The `SDKMessage` union is keyed on `type`, so each `case` below
+   *  narrows the branch to the matching variant without hand-casting. */
+  private async dispatchMessage(msg: SDKMessage, stderrChunks: string[]): Promise<void> {
+    const type = msg.type
+
+    // Session-wide bootstrap: capture session_id / slug / init payload.
+    // These run regardless of the per-type handler because the first message
+    // can arrive under any `type` that includes session_id.
+    this.captureSessionBootstrap(msg, type)
+
+    // Any assistant or stream content means we're processing a turn.
+    if ((type === 'assistant' || type === 'stream_event') && !this.isProcessing) {
+      this.isProcessing = true
+      this.sendStatus()
+    }
+
+    switch (msg.type) {
+      case 'assistant':
+        this.handleAssistantMessage(msg)
+        return
+      case 'user':
+        await this.handleUserMessage(msg)
+        return
+      case 'stream_event':
+        this.handleStreamEvent(msg)
+        return
+      case 'tool_progress':
+        this.handleToolProgress(msg)
+        return
+      case 'system':
+        this.handleSystemMessage(msg)
+        return
+      case 'control_response':
+        this.handleControlResponse(msg)
+        return
+      case 'request_usage':
+        this.logRequestUsage(msg)
+        return
+      case 'rate_limit_event':
+        this.handleRateLimitEvent(msg)
+        return
+      case 'bash_output':
+        this.handleBashOutput(msg)
+        return
+      case 'result':
+        this.handleResultMessage(msg, stderrChunks)
+        return
+      default:
+        // Unknown top-level type. Swallow — forward-compat; if it matters the
+        // wire log has it. Logging here would spam on newly-added stream
+        // types; use DEBUG_SDK=1 on the SDK side to surface those.
+        return
+    }
+  }
+
+  /**
+   * Extract session_id, init metadata (slash commands, skills, mcp_servers,
+   * permissionMode), and slug from whichever message carries them first.
+   * cli.js always includes session_id on the first system/init, but other
+   * messages may arrive with it too depending on the flow.
+   */
+  private captureSessionBootstrap(msg: SDKMessage, type: string): void {
+    if (msg.session_id && !this.sessionId) {
+      this.sessionId = msg.session_id
+
+      if (type === 'system' && (msg as SystemMessage).subtype === 'init') {
+        const sys = msg as SystemMessage
+        // CLI-only commands that produce no output through the SDK
+        const CLI_ONLY = new Set(['context', 'cost', 'login', 'logout', 'release-notes', 'doctor'])
+        const raw = sys.slash_commands || []
+        const slashCommands = raw
+          .filter((name) => !CLI_ONLY.has(name))
+          .map((name) => ({ name: name.startsWith('/') ? name : '/' + name }))
+        this.send('session:slash-commands', slashCommands)
+        saveSlashCommands(slashCommands)
+
+        const skillNames = sys.skills || []
+        this.send('session:skills', skillNames)
+
+        const mcpServers = sys.mcp_servers || []
+        this._initMcpServers = mcpServers
+        logger.debug('ClaudeSession', `init mcp_servers (${mcpServers.length}): ${JSON.stringify(mcpServers).slice(0, 500)}`)
+        if (mcpServers.length > 0) {
+          this.send('session:mcp-servers', mcpServers)
+        }
+
+        // Sync permission mode from init — the CLI may have rejected the
+        // requested mode (e.g. auto-mode gate/model check failed) and fallen
+        // back to default. Don't overwrite localAuto — SDK runs as acceptEdits
+        // underneath.
+        const initMode = sys.permissionMode
+        if (initMode && initMode !== this.permissionMode && this.permissionMode !== 'localAuto') {
+          this.permissionMode = initMode
+          this.send('session:permission-mode', initMode)
+        }
+      }
+
+      this.sendStatus()
+    }
+
+    if (msg.slug && !this.slug) {
+      this.slug = msg.slug
+    }
+  }
+
+  private handleAssistantMessage(msg: AssistantMessage): void {
+    const parentToolUseId = msg.parent_tool_use_id ?? undefined
+    const teammateToolUseId = this.resolveTeammateToolUseId(msg)
+    const routingId = parentToolUseId || teammateToolUseId
+    const isSidechain = !!routingId
+    const chatMsg = this.transformAssistantMessage(msg)
+
+    // Accumulate usage from every assistant message (main + sidechain)
+    const hadUsage = this.accumulateUsage(msg, isSidechain)
+
+    if (chatMsg) {
+      if (routingId) {
+        this.send('session:subagent-message', { toolUseId: routingId, message: chatMsg })
+      } else {
+        this.upsertMessage(chatMsg)
+        this.send('session:message', chatMsg)
+        // Only update status line when usage actually changed (final message per API call)
+        if (hadUsage) this.scheduleStatusLineUpdate()
+      }
+    }
+  }
+
+  private handleStreamEvent(msg: StreamEventMessage): void {
+    const parentToolUseId = msg.parent_tool_use_id ?? undefined
+    const teammateToolUseId = this.resolveTeammateToolUseId(msg)
+    const routingId = parentToolUseId || teammateToolUseId
+    const event = msg.event
+    if (!event || event.type !== 'content_block_delta') return
+
+    const delta = event.delta
+    if (!delta) return
+
+    if (delta.type === 'text_delta' && typeof delta.text === 'string') {
+      if (routingId) {
+        this.send('session:subagent-stream', { toolUseId: routingId, type: 'text', text: delta.text })
+      } else {
+        this.send('session:stream', { type: 'text', text: delta.text })
+      }
+      return
+    }
+    if (delta.type === 'thinking_delta' && typeof delta.thinking === 'string') {
+      if (routingId) {
+        this.send('session:subagent-stream', { toolUseId: routingId, type: 'thinking', text: delta.thinking })
+      } else {
+        this.send('session:stream', { type: 'thinking', text: delta.thinking })
+      }
+    }
+  }
+
+  private handleToolProgress(msg: ToolProgressMessage): void {
+    this.send('session:task-progress', {
+      toolUseId: msg.tool_use_id || '',
+      toolName: msg.tool_name || '',
+      parentToolUseId: msg.parent_tool_use_id ?? null,
+      elapsedTimeSeconds: msg.elapsed_time_seconds || 0,
+    })
+  }
+
+  private handleSystemMessage(msg: SystemMessage): void {
+    if (msg.subtype === 'status') {
+      // Don't overwrite localAuto — SDK runs as acceptEdits underneath.
+      const newMode = msg.permissionMode
+      if (newMode && newMode !== this.permissionMode && this.permissionMode !== 'localAuto') {
+        this.permissionMode = newMode
+        this.send('session:permission-mode', newMode)
+      }
+      return
+    }
+    if (msg.subtype === 'task_notification') {
+      this.handleTaskNotification(msg)
+      return
+    }
+    if (msg.subtype === 'queued_command_consumed') {
+      this.send('session:steer-consumed', { prompt: msg.prompt || '' })
+      return
+    }
+    // Unknown / init / compact_boundary — init is already consumed in
+    // captureSessionBootstrap; compact_boundary is informational and not
+    // currently surfaced. Fall through silently.
+  }
+
+  private handleTaskNotification(msg: SystemMessage): void {
+    const taskId = msg.task_id || ''
+    const outputFile = msg.output_file || ''
+    const matchedToolUseId = this.taskIdMap.get(taskId) || null
+    if (matchedToolUseId) {
+      this.markBackgroundDone(matchedToolUseId)
+      this.taskIdMap.delete(taskId)
+      const taskStatus = msg.status || 'completed'
+      const statusMap: Record<string, 'completed' | 'failed' | 'stopped'> = {
+        completed: 'completed',
+        failed: 'failed',
+        stopped: 'stopped',
+      }
+      this._teammateStatuses.set(matchedToolUseId, statusMap[taskStatus] || 'completed')
+    }
+
+    // Extract usage from the patched system message (task-notification-usage patch)
+    const rawUsage = msg.usage
+    const usage = rawUsage
+      ? {
+          totalTokens: rawUsage.total_tokens || 0,
+          toolUses: rawUsage.tool_uses || 0,
+          durationMs: rawUsage.duration_ms || 0,
+        }
+      : undefined
+
+    this.send('session:task-notification', {
+      taskId,
+      toolUseId: matchedToolUseId,
+      status: msg.status || 'completed',
+      outputFile,
+      summary: msg.summary || '',
+      usage,
+    })
+  }
+
+  private handleControlResponse(msg: ControlResponseMessage): void {
+    const response = msg.response
+    if (!response || response.subtype !== 'error') return
+    const errText =
+      typeof response.error === 'string'
+        ? response.error
+        : JSON.stringify(response.error, null, 2)
+    logger.error('ClaudeSession', `Control response error: ${errText}`)
+    this.send('session:error', `SDK control error: ${errText}`)
+  }
+
+  private handleRateLimitEvent(msg: RateLimitEventMessage): void {
+    // Real-time rate limit data from inference response headers — no extra
+    // API call needed. The rate-limit-relay patch injects these after every
+    // streaming API call.
+    if (msg.header_utilization) {
+      usageFetcher.updateFromHeaderUtilization(msg.header_utilization)
+    }
+  }
+
+  private handleBashOutput(msg: BashOutputMessage): void {
+    // Live bash output from the bash-output-streaming patch.
+    const toolUseId = msg.tool_use_id || ''
+    if (!toolUseId) return
+    this.send('session:bash-output', {
+      toolUseId,
+      output: msg.output || '',
+      totalLines: msg.total_lines || 0,
+      totalBytes: msg.total_bytes || 0,
+    })
+  }
+
+  private handleResultMessage(msg: ResultMessage, stderrChunks: string[]): void {
+    const cost = msg.total_cost_usd || 0
+    this.totalCostUsd += cost
+    this.isProcessing = false
+
+    // Handle error results
+    const subtype = msg.subtype
+    if (subtype && subtype !== 'success') {
+      // When the user clicked Stop, the SDK sends error results as it tears
+      // down the interrupted turn. These aren't real failures — suppress.
+      if (!this.wasInterrupted) {
+        const errors = msg.errors || []
+        const stderrContext =
+          stderrChunks.length > 0
+            ? '\n\nCLI stderr:\n' + stderrChunks.slice(-20).join('\n')
+            : ''
+        if (errors.length) {
+          logger.error('ClaudeSession', `Result error: ${errors.join('; ')}`)
+          this.send('session:error', errors.join('; ') + stderrContext)
+        } else {
+          const fallback = `Session ended with status: ${subtype}`
+          logger.error('ClaudeSession', fallback)
+          this.send('session:error', fallback + stderrContext)
+        }
+      }
+    }
+
+    // Accumulate duration from result
+    const resultDurationMs = msg.duration_ms || 0
+    const resultApiDurationMs = msg.duration_api_ms || 0
+    this.accTotalDurationMs += resultDurationMs
+    this.accTotalApiDurationMs += resultApiDurationMs
+
+    this.send('session:result', {
+      totalCostUsd: this.totalCostUsd,
+      durationMs: resultDurationMs,
+      result: msg.result || '',
+      sessionId: this.sessionId,
+    })
+    this.sendStatus()
+    this.resetInactivityTimer()
+
+    // Cancel any pending debounced update — we'll send one immediately.
+    if (this.statusLineTimer) {
+      clearTimeout(this.statusLineTimer)
+      this.statusLineTimer = null
+    }
+
+    // Send accumulator-based status line immediately so the UI updates
+    // without waiting for the JSONL read (which may not be fully flushed yet).
+    this.send('session:status-line', this.buildStatusLineFromAccumulators())
+
+    // Then reconcile from JSONL with a delay to let the SDK flush. Only
+    // overwrite accumulators if JSONL returns meaningful data.
+    const logPath = this.getSessionLogPath()
+    if (logPath) {
+      setTimeout(() => {
+        computeTokenMetrics(logPath, this.model)
+          .then((metrics) => {
+            if (metrics.totalTokens === 0 && metrics.totalCostUsd === 0) return
+            this.accInputTokens = metrics.totalInputTokens
+            this.accOutputTokens = metrics.totalOutputTokens
+            this.accCachedTokens = metrics.cachedTokens
+            this.accTotalDurationMs = metrics.totalDurationMs
+            this.accTotalApiDurationMs = metrics.totalApiDurationMs
+            this.lastContextLength = metrics.contextWindowSize
+            this.send('session:status-line', metrics)
+          })
+          .catch((err) => {
+            logger.warn('ClaudeSession', 'JSONL reconciliation failed', err)
+          })
+      }, 500) // delay to let SDK flush JSONL to disk
     }
   }
 
@@ -1025,7 +1037,9 @@ this.permissionMode = mode
     this.send('session:permission-mode', mode)
     if (this.activeQuery) {
       try {
-        await this.activeQuery.setPermissionMode(mode)
+        // Caller (IPC boundary) ships mode as a plain string; trust the SDK
+        // layer to validate against cli.js's permitted set.
+        await this.activeQuery.setPermissionMode(mode as import('../sdk').PermissionMode)
       } catch (err) {
         if (mode === 'auto') {
           // SDK rejected auto mode (feature gate / model check) — fall back to local auto
@@ -1102,16 +1116,16 @@ this.permissionMode = mode
    */
   private async ensureActiveQuery(): Promise<void> {
     if (this.activeQuery) return
-    // Fire-and-forget — run(null) spawns the SDK and drains in background
+    // Fire-and-forget — run(null) spawns the SDK and drains in background.
+    // The run() bootstrap creates activeQueryPromise synchronously before
+    // awaiting anything, so we can grab it right after the call.
     this.run(null)
-    // Wait for activeQuery to become available (SDK needs to spawn + initialize)
-    const deadline = Date.now() + 15000
-    while (!this.activeQuery && Date.now() < deadline) {
-      await new Promise((r) => setTimeout(r, 100))
-    }
-    if (!this.activeQuery) {
-      throw new Error('Timed out waiting for SDK session to start')
-    }
+    const pending = this.activeQueryPromise
+    if (!pending) throw new Error('SDK session did not initialize a query promise')
+    const deadline = new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error('Timed out waiting for SDK session to start')), 15_000),
+    )
+    await Promise.race([pending, deadline])
   }
 
   /**
@@ -1335,7 +1349,12 @@ this.permissionMode = mode
   async mcpSetServers(servers: Record<string, unknown>): Promise<unknown> {
     if (!this.activeQuery) throw new Error('No active session')
     logger.debug('ClaudeSession', `mcpSetServers: setting [${Object.keys(servers).join(', ')}]`)
-    const result = await this.activeQuery.setMcpServers(servers)
+    // IPC-bounded caller hands us a permissive Record — the shared
+    // McpServerConfig is a loose bag, the SDK layer uses a discriminated
+    // union. Trust the SDK's splitMcpServers() + cli.js to validate.
+    const result = await this.activeQuery.setMcpServers(
+      servers as unknown as Parameters<QueryHandle['setMcpServers']>[0],
+    )
     logger.debug('ClaudeSession', `mcpSetServers result: ${JSON.stringify(result).slice(0, 500)}`)
     return result
   }

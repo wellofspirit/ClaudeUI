@@ -56,11 +56,26 @@ describe('findTaskBlocks', () => {
     expect(result.resultBlock).toBeNull()
   })
 
-  it('skips user messages', () => {
+  it('ignores tool_use blocks in user messages (only assistant tool_use is valid)', () => {
     const messages = [
       { role: 'user', content: [toolUseBlock] }
     ]
     const result = findTaskBlocks(messages, 'tu-1')
     expect(result.taskBlock).toBeNull()
+  })
+
+  // Regression: the store stores tool_result blocks inside synthetic
+  // role:'user' messages (see session-store addToolResult). A prior
+  // implementation of findTaskBlocks filtered out user messages entirely,
+  // so the result block was never found and TaskEntry's "completed" state
+  // never rendered.
+  it('finds tool_result blocks that live in role:user messages', () => {
+    const messages = [
+      { role: 'assistant', content: [toolUseBlock] },
+      { role: 'user', content: [toolResultBlock] },
+    ]
+    const result = findTaskBlocks(messages, 'tu-1')
+    expect(result.taskBlock?.toolUseId).toBe('tu-1')
+    expect(result.resultBlock?.toolResult).toBe('done')
   })
 })

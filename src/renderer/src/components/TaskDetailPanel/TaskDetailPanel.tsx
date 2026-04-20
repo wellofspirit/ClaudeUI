@@ -1,121 +1,33 @@
-import { useState, useRef, useEffect, useCallback } from 'react'
+import { useMemo } from 'react'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
 import { findTaskBlocks } from './utils'
-import { TaskEntry } from './TaskEntry'
-import { BashBackgroundEntry } from './BashBackgroundEntry'
-
-function HResizeHandle({ onMouseDown }: { onMouseDown: (e: React.MouseEvent) => void }) {
-  return (
-    <div
-      onMouseDown={onMouseDown}
-      className="h-0 shrink-0 cursor-row-resize relative z-10"
-    >
-      <div className="absolute -top-1.5 left-0 right-0 h-3" />
-      <div className="absolute top-0 left-4 right-4 border-t border-border" />
-    </div>
-  )
-}
-
-function PanelEntry({ toolUseId }: { toolUseId: string }): React.JSX.Element | null {
-  const messages = useActiveSession((s) => s.messages)
-  const { taskBlock } = findTaskBlocks(messages, toolUseId)
-  if (!taskBlock) return null
-
-  if (taskBlock.toolName === 'Bash' && taskBlock.toolInput?.run_in_background) {
-    return <BashBackgroundEntry toolUseId={toolUseId} />
-  }
-  return <TaskEntry toolUseId={toolUseId} />
-}
+import { TaskDetailPanelView, type TaskEntryDescriptor } from './View'
 
 export function TaskDetailPanel({ style }: { style?: React.CSSProperties }): React.JSX.Element | null {
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const taskPanelOpen = useActiveSession((s) => s.rightPanel === 'task')
   const openedTaskToolUseIds = useActiveSession((s) => s.openedTaskToolUseIds)
+  const messages = useActiveSession((s) => s.messages)
   const closeTaskPanel = useSessionStore((s) => s.closeTaskPanel)
-  const count = openedTaskToolUseIds.length
 
-  const [ratios, setRatios] = useState<number[]>(() => Array(count).fill(1 / Math.max(count, 1)))
-  const prevCount = useRef(count)
-  useEffect(() => {
-    if (count !== prevCount.current) {
-      prevCount.current = count
-      setRatios(Array(count).fill(1 / Math.max(count, 1)))
-    }
-  }, [count])
-
-  const containerRef = useRef<HTMLDivElement>(null)
-
-  const handleResizeMouseDown = useCallback((index: number) => (e: React.MouseEvent) => {
-    e.preventDefault()
-    const container = containerRef.current
-    if (!container) return
-    const containerH = container.clientHeight
-    if (containerH === 0) return
-
-    const startY = e.clientY
-    const startRatios = [...ratios]
-    const MIN_RATIO = 0.08
-
-    const onMouseMove = (ev: MouseEvent): void => {
-      const deltaRatio = (ev.clientY - startY) / containerH
-      let newAbove = startRatios[index] + deltaRatio
-      let newBelow = startRatios[index + 1] - deltaRatio
-
-      if (newAbove < MIN_RATIO) {
-        newBelow += newAbove - MIN_RATIO
-        newAbove = MIN_RATIO
+  const entries = useMemo<TaskEntryDescriptor[]>(() => {
+    return openedTaskToolUseIds.map((toolUseId) => {
+      const { taskBlock } = findTaskBlocks(messages, toolUseId)
+      if (!taskBlock) return { toolUseId, kind: 'missing' as const }
+      if (taskBlock.toolName === 'Bash' && taskBlock.toolInput?.run_in_background) {
+        return { toolUseId, kind: 'bash-background' as const }
       }
-      if (newBelow < MIN_RATIO) {
-        newAbove += newBelow - MIN_RATIO
-        newBelow = MIN_RATIO
-      }
+      return { toolUseId, kind: 'task' as const }
+    })
+  }, [openedTaskToolUseIds, messages])
 
-      const next = [...startRatios]
-      next[index] = newAbove
-      next[index + 1] = newBelow
-      setRatios(next)
-    }
-
-    const onMouseUp = (): void => {
-      document.removeEventListener('mousemove', onMouseMove)
-      document.removeEventListener('mouseup', onMouseUp)
-      document.body.style.cursor = ''
-      document.body.style.userSelect = ''
-    }
-
-    document.body.style.cursor = 'row-resize'
-    document.body.style.userSelect = 'none'
-    document.addEventListener('mousemove', onMouseMove)
-    document.addEventListener('mouseup', onMouseUp)
-  }, [ratios])
-
-  if (!taskPanelOpen || count === 0) return null
+  if (!taskPanelOpen || openedTaskToolUseIds.length === 0) return null
 
   return (
-    <div style={style} className="shrink-0 border-l border-border bg-bg-secondary flex flex-col h-full">
-      <div className="shrink-0 flex items-center px-4 h-12 border-b border-border [-webkit-app-region:drag]">
-        <span className="text-[13px] text-text-secondary font-medium flex-1">Tasks</span>
-        <button
-          onClick={() => activeSessionId && closeTaskPanel(activeSessionId)}
-          className="[-webkit-app-region:no-drag] text-text-muted hover:text-text-primary transition-colors cursor-pointer"
-        >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <line x1="18" y1="6" x2="6" y2="18" />
-            <line x1="6" y1="6" x2="18" y2="18" />
-          </svg>
-        </button>
-      </div>
-
-      <div ref={containerRef} className="flex-1 min-h-0 flex flex-col">
-        {openedTaskToolUseIds.map((id, i) => (
-          <div key={id} className="contents">
-            {i > 0 && <HResizeHandle onMouseDown={handleResizeMouseDown(i - 1)} />}
-            <div style={{ flex: `${ratios[i] ?? 1} 0 0%` }} className="min-h-0 overflow-hidden">
-              <PanelEntry toolUseId={id} />
-            </div>
-          </div>
-        ))}
-      </div>
-    </div>
+    <TaskDetailPanelView
+      style={style}
+      entries={entries}
+      onClose={() => activeSessionId && closeTaskPanel(activeSessionId)}
+    />
   )
 }

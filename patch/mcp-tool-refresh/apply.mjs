@@ -23,7 +23,7 @@ import { fileURLToPath } from 'node:url'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const projectRoot = resolve(__dirname, '../..')
-const cliPath = resolve(projectRoot, 'node_modules/@anthropic-ai/claude-agent-sdk/cli.js')
+const cliPath = resolve(projectRoot, 'vendor/claude-cli/cli.js')
 
 // Regex shorthand for minified identifier
 const V = '[\\w$]+'
@@ -37,7 +37,7 @@ try {
   src = readFileSync(cliPath, 'utf-8')
 } catch (err) {
   console.error(`ERROR: Cannot read ${cliPath}`)
-  console.error('Is @anthropic-ai/claude-agent-sdk installed?')
+  console.error('Did you run: node scripts/extract-cli.mjs ?')
   process.exit(1)
 }
 
@@ -47,6 +47,15 @@ console.log(`CLI version: ${ver}`)
 
 const PATCH_A_MARKER = '/*PATCHED:mcp-tool-refresh-A*/'
 const PATCH_B_MARKER = '/*PATCHED:mcp-tool-refresh-B*/'
+
+// Upstream detection (2.1.114+): cli.js now calls refreshTools() natively before
+// each API call. Pattern: `bH.options.refreshTools){let f8=bH.options.refreshTools()`
+// When present, our patch is redundant — exit early.
+const UPSTREAM_RE = /\.options\.refreshTools\)\{[^}]*\.options\.refreshTools\(\)/
+if (UPSTREAM_RE.test(src)) {
+  console.log('refreshTools() is upstreamed (2.1.114+). Patch is a no-op.')
+  process.exit(0)
+}
 
 // Helper: deduplicate-by-name code snippet (reused in both parts)
 function deduplicateCode(toolsExpr, mcpToolsExpr, assignTarget) {

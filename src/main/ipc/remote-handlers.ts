@@ -16,7 +16,7 @@ import type { ApprovalDecision, SandboxSettings, PermissionSuggestion } from '..
 import type { BrowserWindow } from 'electron'
 import { ClaudeSession, getSdkExecutableOpts } from '../services/claude-session'
 import { PERSISTED_SESSIONS_DIR } from '../services/persisted-sessions-dir'
-import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk'
+import { query as sdkQuery } from '../sdk'
 import { logger } from '../services/logger'
 
 /**

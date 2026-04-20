@@ -1,48 +1,174 @@
 /**
- * Shared test utilities for SDK patch verification.
+ * Shared test utilities for patch verification.
+ *
+ * Drives the vendored cli.js directly (no SDK dependency). Implements just
+ * enough of the stream-json protocol to send a prompt, collect messages,
+ * and return.
  *
  * Usage:
- *   import { createQuery, collectMessages, TestRunner, dumpMessages } from '../test-helpers.mjs'
+ *   import { createQuery, collectMessages, TestRunner, dumpMessages,
+ *            createStreamingQuery, MessageChannel, userMessage } from '../test-helpers.mjs'
  */
 
-import { query } from '@anthropic-ai/claude-agent-sdk'
+import { spawn } from 'node:child_process'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { randomUUID } from 'node:crypto'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
-/** Project root — used as cwd so the SDK has real files to work with */
+/** Project root — used as cwd so the CLI has real files to work with */
 export const PROJECT_ROOT = resolve(__dirname, '..')
 
-/** Path to the patched cli.js — forces the SDK to use our patched bundle
- *  instead of a native binary on the system. */
-export const CLI_JS_PATH = resolve(__dirname, '..', 'node_modules', '@anthropic-ai', 'claude-agent-sdk', 'cli.js')
+/** Path to the vendored, patched cli.js. */
+export const CLI_JS_PATH = resolve(PROJECT_ROOT, 'vendor', 'claude-cli', 'cli.js')
 
 /**
- * Unset CLAUDECODE env var to allow running SDK tests from within a Claude Code session.
- * The SDK blocks nested sessions by checking this env var.
+ * Unset CLAUDECODE env var to allow running tests from within a Claude Code session.
+ * The CLI blocks nested sessions by checking this env var.
  */
 delete process.env.CLAUDECODE
 
+// ---------------------------------------------------------------------------
+// Minimal stream-json driver
+// ---------------------------------------------------------------------------
+
+function buildArgs(options) {
+  const args = [
+    '--output-format', 'stream-json',
+    '--verbose',
+    '--input-format', 'stream-json',
+  ]
+  if (options.thinking) {
+    args.push('--thinking', options.thinking.type)
+    if (options.thinking.budgetTokens) {
+      args.push('--max-thinking-tokens', String(options.thinking.budgetTokens))
+    }
+  }
+  if (options.effort) args.push('--effort', options.effort)
+  if (options.maxTurns != null) args.push('--max-turns', String(options.maxTurns))
+  if (options.model) args.push('--model', options.model)
+  if (options.permissionMode) args.push('--permission-mode', options.permissionMode)
+  if (options.allowDangerouslySkipPermissions) args.push('--allow-dangerously-skip-permissions')
+  if (options.persistSession === false) args.push('--no-session-persistence')
+  if (options.resume) args.push('--resume', options.resume)
+  if (Array.isArray(options.settingSources) && options.settingSources.length) {
+    args.push('--setting-sources', options.settingSources.join(','))
+  }
+  if (Array.isArray(options.allowedTools) && options.allowedTools.length) {
+    args.push('--allowedTools', options.allowedTools.join(','))
+  }
+  if (Array.isArray(options.tools)) {
+    args.push('--tools', options.tools.length ? options.tools.join(',') : '')
+  }
+  return args
+}
+
 /**
- * Create an SDK query with safe defaults for testing.
+ * Spawn cli.js and return a Query object compatible with the tests' expected
+ * shape: an async-iterable over parsed stream-json messages + an interrupt()
+ * method that sends SIGTERM.
  *
- * @param {string} prompt - The prompt to send
- * @param {object} [optsOverride] - Override any default option
- * @param {number} [timeoutMs=120_000] - Abort timeout in milliseconds
- * @returns {{ q: import('@anthropic-ai/claude-agent-sdk').Query, cleanup: () => void, ac: AbortController }}
+ * The query object also maintains an input writer so streaming queries
+ * (createStreamingQuery) can push additional messages mid-turn.
+ */
+function spawnQuery({ prompt, options, ac }) {
+  const args = [CLI_JS_PATH, ...buildArgs(options)]
+  const child = spawn(process.execPath, args, {
+    cwd: options.cwd ?? PROJECT_ROOT,
+    env: { ...process.env, CLAUDE_CODE_ENTRYPOINT: 'sdk-ts' },
+    stdio: ['pipe', 'pipe', 'pipe'],
+    windowsHide: true,
+  })
+
+  const writer = (obj) => {
+    if (child.stdin.writable) child.stdin.write(JSON.stringify(obj) + '\n')
+  }
+
+  // Feed the initial prompt(s).
+  if (typeof prompt === 'string') {
+    writer({ type: 'user', message: { role: 'user', content: prompt } })
+  } else if (prompt && typeof prompt[Symbol.asyncIterator] === 'function') {
+    ;(async () => {
+      for await (const msg of prompt) writer(msg)
+    })().catch(() => {})
+  }
+
+  // Abort propagation
+  if (ac) {
+    ac.signal.addEventListener('abort', () => {
+      try { child.kill('SIGTERM') } catch {}
+    })
+  }
+
+  // Stream parser
+  const queue = []
+  let waiter = null
+  let done = false
+  let error = null
+
+  let buf = ''
+  child.stdout.setEncoding('utf8')
+  child.stdout.on('data', (chunk) => {
+    buf += chunk
+    let i
+    while ((i = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, i).trim()
+      buf = buf.slice(i + 1)
+      if (!line) continue
+      try {
+        const obj = JSON.parse(line)
+        if (waiter) { const w = waiter; waiter = null; w({ value: obj, done: false }) }
+        else queue.push(obj)
+      } catch { /* skip non-JSON lines (shouldn't happen in stream-json mode) */ }
+    }
+  })
+
+  child.stderr.on('data', () => { /* swallow */ })
+  child.on('exit', () => {
+    done = true
+    if (waiter) { const w = waiter; waiter = null; w({ value: undefined, done: true }) }
+  })
+  child.on('error', (err) => {
+    error = err
+    done = true
+    if (waiter) { const w = waiter; waiter = null; w({ value: undefined, done: true }) }
+  })
+
+  return {
+    [Symbol.asyncIterator]() { return this },
+    async next() {
+      if (queue.length) return { value: queue.shift(), done: false }
+      if (done) {
+        if (error) throw error
+        return { value: undefined, done: true }
+      }
+      return new Promise((resolve) => { waiter = resolve })
+    },
+    async interrupt() { try { child.kill('SIGTERM') } catch {} },
+    _writer: writer,
+    _child: child,
+  }
+}
+
+/**
+ * Create a query with safe test defaults.
+ *
+ * @param {string} prompt
+ * @param {object} [optsOverride]
+ * @param {number} [timeoutMs=120_000]
+ * @returns {{ q, cleanup, ac }}
  */
 export function createQuery(prompt, optsOverride = {}, timeoutMs = 120_000) {
   const ac = new AbortController()
   const timer = setTimeout(() => ac.abort(), timeoutMs)
-
   const cleanup = () => {
     clearTimeout(timer)
     if (!ac.signal.aborted) ac.abort()
   }
-
-  const q = query({
+  const q = spawnQuery({
     prompt,
+    ac,
     options: {
       permissionMode: 'bypassPermissions',
       allowDangerouslySkipPermissions: true,
@@ -52,25 +178,13 @@ export function createQuery(prompt, optsOverride = {}, timeoutMs = 120_000) {
       effort: 'low',
       model: 'claude-sonnet-4-6',
       cwd: PROJECT_ROOT,
-      abortController: ac,
-      pathToClaudeCodeExecutable: CLI_JS_PATH,
       ...optsOverride,
     },
   })
-
   return { q, cleanup, ac }
 }
 
-/**
- * Iterate a query and collect all messages.
- *
- * @param {AsyncGenerator} q - The SDK query generator
- * @param {object} opts
- * @param {(msg: object) => void} [opts.onMessage] - Optional per-message callback (for interactive tests)
- * @param {() => void} opts.cleanup - Cleanup function from createQuery
- * @returns {Promise<object[]>} All collected messages
- */
-export async function collectMessages(q, { onMessage, cleanup }) {
+export async function collectMessages(q, { onMessage, cleanup } = {}) {
   const messages = []
   try {
     for await (const msg of q) {
@@ -79,19 +193,19 @@ export async function collectMessages(q, { onMessage, cleanup }) {
       if (onMessage) onMessage(msg)
     }
   } catch (err) {
-    // AbortError is expected when we intentionally stop
     if (err.name !== 'AbortError' && !String(err).includes('abort')) {
       console.error('[collectMessages] Error:', err.message || err)
     }
   } finally {
-    cleanup()
+    cleanup?.()
   }
   return messages
 }
 
-/**
- * Simple test runner with per-assertion tracking.
- */
+// ---------------------------------------------------------------------------
+// TestRunner
+// ---------------------------------------------------------------------------
+
 export class TestRunner {
   constructor(name) {
     this.name = name
@@ -102,7 +216,6 @@ export class TestRunner {
     console.log(`  TEST: ${name}`)
     console.log(`${'='.repeat(60)}\n`)
   }
-
   assert(label, bool) {
     if (bool) {
       this.passed++
@@ -114,83 +227,43 @@ export class TestRunner {
       console.log(`  \x1b[31mFAIL\x1b[0m  ${label}`)
     }
   }
-
-  /**
-   * Assert that at least one message in the array matches the predicate.
-   */
   assertSome(label, messages, predicateFn) {
-    const found = messages.some(predicateFn)
-    this.assert(label, found)
+    this.assert(label, messages.some(predicateFn))
   }
-
-  /**
-   * Print summary and return true if all passed.
-   */
   summarize() {
     const total = this.passed + this.failed
     console.log('')
     console.log(`  ${this.name}: ${this.passed}/${total} passed`)
-    if (this.failed > 0) {
-      console.log(`  \x1b[31m${this.failed} FAILED\x1b[0m`)
-    } else {
-      console.log(`  \x1b[32mALL PASSED\x1b[0m`)
-    }
+    if (this.failed > 0) console.log(`  \x1b[31m${this.failed} FAILED\x1b[0m`)
+    else console.log(`  \x1b[32mALL PASSED\x1b[0m`)
     console.log('')
     return this.failed === 0
   }
 }
 
-/**
- * Async iterable channel for pushing messages to an SDK query mid-turn.
- * Mirrors the MessageChannel pattern from src/main/services/claude-session.ts.
- */
-export class MessageChannel {
-  constructor() {
-    this.queue = []
-    this.waiting = null
-    this.isDone = false
-  }
+// ---------------------------------------------------------------------------
+// Streaming input channel (for tests that push messages mid-turn)
+// ---------------------------------------------------------------------------
 
+export class MessageChannel {
+  constructor() { this.queue = []; this.waiting = null; this.isDone = false }
   push(msg) {
     if (this.isDone) return
-    if (this.waiting) {
-      const resolve = this.waiting
-      this.waiting = null
-      resolve({ value: msg, done: false })
-    } else {
-      this.queue.push(msg)
-    }
+    if (this.waiting) { const r = this.waiting; this.waiting = null; r({ value: msg, done: false }) }
+    else this.queue.push(msg)
   }
-
   end() {
     this.isDone = true
-    if (this.waiting) {
-      const resolve = this.waiting
-      this.waiting = null
-      resolve({ value: undefined, done: true })
-    }
+    if (this.waiting) { const r = this.waiting; this.waiting = null; r({ value: undefined, done: true }) }
   }
-
-  [Symbol.asyncIterator]() {
-    return this
-  }
-
+  [Symbol.asyncIterator]() { return this }
   async next() {
-    if (this.queue.length > 0) {
-      return { value: this.queue.shift(), done: false }
-    }
-    if (this.isDone) {
-      return { value: undefined, done: true }
-    }
-    return new Promise((resolve) => {
-      this.waiting = resolve
-    })
+    if (this.queue.length) return { value: this.queue.shift(), done: false }
+    if (this.isDone) return { value: undefined, done: true }
+    return new Promise((resolve) => { this.waiting = resolve })
   }
 }
 
-/**
- * Build an SDKUserMessage object from a plain text string.
- */
 export function userMessage(text, sessionId = '') {
   return {
     type: 'user',
@@ -200,31 +273,19 @@ export function userMessage(text, sessionId = '') {
   }
 }
 
-/**
- * Create an SDK query with streaming input (AsyncIterable) for tests
- * that need to send messages mid-turn (e.g., queue steering, multi-turn MCP toggle).
- *
- * @param {string} initialPrompt - First message to send
- * @param {object} [optsOverride] - Override any default option
- * @param {number} [timeoutMs=120_000] - Abort timeout in milliseconds
- * @returns {{ q: Query, channel: MessageChannel, cleanup: () => void, ac: AbortController }}
- */
 export function createStreamingQuery(initialPrompt, optsOverride = {}, timeoutMs = 120_000) {
   const ac = new AbortController()
   const timer = setTimeout(() => ac.abort(), timeoutMs)
   const channel = new MessageChannel()
-
-  // Push initial prompt as SDKUserMessage
   channel.push(userMessage(initialPrompt))
-
   const cleanup = () => {
     clearTimeout(timer)
     channel.end()
     if (!ac.signal.aborted) ac.abort()
   }
-
-  const q = query({
+  const q = spawnQuery({
     prompt: channel,
+    ac,
     options: {
       permissionMode: 'bypassPermissions',
       allowDangerouslySkipPermissions: true,
@@ -234,18 +295,16 @@ export function createStreamingQuery(initialPrompt, optsOverride = {}, timeoutMs
       effort: 'low',
       model: 'claude-sonnet-4-6',
       cwd: PROJECT_ROOT,
-      abortController: ac,
-      pathToClaudeCodeExecutable: CLI_JS_PATH,
       ...optsOverride,
     },
   })
-
   return { q, channel, cleanup, ac }
 }
 
-/**
- * Debug dump of collected messages for diagnosing test failures.
- */
+// ---------------------------------------------------------------------------
+// Debug dump
+// ---------------------------------------------------------------------------
+
 export function dumpMessages(messages) {
   console.log(`\n--- Collected ${messages.length} messages ---`)
   for (let i = 0; i < messages.length; i++) {
@@ -255,34 +314,24 @@ export function dumpMessages(messages) {
     const parentId = m.parent_tool_use_id ?? null
     const teammateId = m.teammate_id ?? null
     const taskId = m.task_id ?? null
-
     const parts = [`[${i}] type=${type}`]
     if (subtype) parts.push(`subtype=${subtype}`)
     if (parentId !== null) parts.push(`parent_tool_use_id=${parentId || 'null'}`)
     if (teammateId) parts.push(`teammate_id=${teammateId}`)
     if (taskId) parts.push(`task_id=${taskId}`)
-
-    // For assistant messages, show content block types
     if (type === 'assistant' && m.message?.content) {
       const blockTypes = m.message.content.map((b) => b.type || '?')
       parts.push(`blocks=[${blockTypes.join(',')}]`)
-      // Show tool names
       for (const b of m.message.content) {
         if (b.type === 'tool_use') parts.push(`tool=${b.name}`)
       }
     }
-
-    // For stream_event, show event type
-    if (type === 'stream_event' && m.event) {
-      parts.push(`event_type=${m.event.type}`)
-    }
-
-    // For system messages with status
-    if (type === 'system' && m.status) {
-      parts.push(`status=${m.status}`)
-    }
-
+    if (type === 'stream_event' && m.event) parts.push(`event_type=${m.event.type}`)
+    if (type === 'system' && m.status) parts.push(`status=${m.status}`)
     console.log(`  ${parts.join('  ')}`)
   }
   console.log('--- End dump ---\n')
 }
+
+// Not actually used (randomUUID is imported) but kept for legacy imports.
+export { randomUUID as _randomUUID }

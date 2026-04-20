@@ -17,7 +17,7 @@ import { fileURLToPath } from 'node:url'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const projectRoot = resolve(__dirname, '../..')
-const cliPath = resolve(projectRoot, 'node_modules/@anthropic-ai/claude-agent-sdk/cli.js')
+const cliPath = resolve(projectRoot, 'vendor/claude-cli/cli.js')
 
 // Minified variable names can contain $ — use [\\w$] instead of \\w
 const V = '[\\w$]+'
@@ -31,7 +31,7 @@ try {
   src = readFileSync(cliPath, 'utf-8')
 } catch (err) {
   console.error(`ERROR: Cannot read ${cliPath}`)
-  console.error('Is @anthropic-ai/claude-agent-sdk installed?')
+  console.error('Did you run: node scripts/extract-cli.mjs ?')
   process.exit(1)
 }
 
@@ -525,9 +525,10 @@ if (src.includes(patchEMarker)) {
   const sessFn = sessFnMatch[1]
   console.log(`Session ID function: ${sessFn}()`)
 
-  // Find the UUID generator from the progress wrapping function
-  // Pattern: {type:"progress",data:...,uuid:FUNC(),timestamp:new Date
-  const uuidFnRe = /\{type:"progress",data:[\w$]+,toolUseID:[\w$]+,parentToolUseID:[\w$]+,uuid:([\w$]+)\(\),timestamp:new Date/
+  // Find the UUID generator in the progress wrapping function.
+  // Accepts bare fn `FUNC()` (older SDK-built cli.js, <=2.1.112) and
+  // method call `OBJ.randomUUID()` (Bun-extracted cli.js in 2.1.113+).
+  const uuidFnRe = /\{type:"progress",data:[\w$]+,toolUseID:[\w$]+,parentToolUseID:[\w$]+,uuid:([\w$]+(?:\.[\w$]+)?)\(\),timestamp:new Date/
   const uuidFnMatch = src.match(uuidFnRe)
   if (!uuidFnMatch) {
     console.error('ERROR: Cannot locate UUID generator function.')
@@ -687,7 +688,8 @@ if (src.includes(patchGMarker)) {
   if (!sessFnMatchG) { console.error('ERROR: Cannot locate session ID function for Patch G.'); process.exit(1) }
   const sessFnG = sessFnMatchG[1]
 
-  const uuidFnReG = /\{type:"progress",data:[\w$]+,toolUseID:[\w$]+,parentToolUseID:[\w$]+,uuid:([\w$]+)\(\),timestamp:new Date/
+  // Accepts bare fn `FUNC()` and method call `OBJ.randomUUID()` (2.1.113+).
+  const uuidFnReG = /\{type:"progress",data:[\w$]+,toolUseID:[\w$]+,parentToolUseID:[\w$]+,uuid:([\w$]+(?:\.[\w$]+)?)\(\),timestamp:new Date/
   const uuidFnMatchG = src.match(uuidFnReG)
   if (!uuidFnMatchG) { console.error('ERROR: Cannot locate UUID function for Patch G.'); process.exit(1) }
   const uuidFnG = uuidFnMatchG[1]
@@ -701,18 +703,23 @@ if (src.includes(patchGMarker)) {
   console.log(`    taskId=${taskIdVar}, makeStream=${makeStreamVar}, desc=${descVar_g}, toolUseCtx=${toolUseCtxVar}`)
 
   // Find the for-await loop body inside iu8:
-  // for await(let MSG of MAKESTREAM(CACHE)){ARR.push(MSG),REGISTRY.update(TASKID,...
-  const iu8Body = src.slice(iu8Match.index, iu8Match.index + 2000)
+  // v2.1.76: for await(let MSG of MAKESTREAM(CACHE)){ARR.push(MSG),REGISTRY.update(...
+  // v2.1.114: for await(let MSG of MAKESTREAM(CACHE)){PROGRESS=MSG.type,WATCHDOG(),ARR.push(MSG),...
+  //           (leading statements before .push were added for a stall watchdog)
+  // We don't care what's between `{` and `.push()` — only need the loop var
+  // + array var so we can build the stream-event injection. Allow any
+  // non-brace prefix.
+  const iu8Body = src.slice(iu8Match.index, iu8Match.index + 2500)
   const forAwaitRe = new RegExp(
-    `for await\\(let (${V}) of ${makeStreamVar}\\((${V})\\)\\)\\{(${V})\\.push\\(\\1\\),`
+    `for await\\(let (${V}) of ${makeStreamVar}\\((${V})\\)\\)\\{([^{}]*?)(${V})\\.push\\(\\1\\)`
   )
   const forAwaitMatch = forAwaitRe.exec(iu8Body)
   if (!forAwaitMatch) {
     console.error('ERROR: Cannot find for-await loop in iu8().')
     process.exit(1)
   }
-  const msgVar_g = forAwaitMatch[1]   // G — the loop variable
-  const arrVar_g = forAwaitMatch[3]   // J — the collection array
+  const msgVar_g = forAwaitMatch[1]   // loop variable
+  const arrVar_g = forAwaitMatch[4]   // collection array
   console.log(`    Loop: msg=${msgVar_g}, arr=${arrVar_g}`)
 
   // The injection point is right after the opening `{` of the for-await body

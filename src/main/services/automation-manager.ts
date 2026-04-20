@@ -1,4 +1,4 @@
-import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk'
+import { query as sdkQuery } from '../sdk'
 import { v4 as uuid } from 'uuid'
 import * as fs from 'fs'
 import * as path from 'path'

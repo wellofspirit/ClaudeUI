@@ -587,6 +587,14 @@ interface SessionState {
   setStatus: (routingId: string, status: SessionStatus) => void
   addPendingApproval: (routingId: string, approval: PendingApproval) => void
   removePendingApproval: (routingId: string, requestId: string) => void
+  /**
+   * Clear any approval whose `toolUseId` matches. Called when a tool_result
+   * arrives so stale approvals — say, a backend race where the resolver
+   * already fired but the store cleanup got lost — don't keep bleeding into
+   * future cards. Distinct from removePendingApproval(requestId) because
+   * consumers see tool_use_id first on tool_result events.
+   */
+  removePendingApprovalByToolUse: (routingId: string, toolUseId: string) => void
   clearPendingApprovals: (routingId: string) => void
   addError: (routingId: string, error: string) => void
   removeError: (routingId: string, index: number) => void
@@ -1052,6 +1060,13 @@ export const useSessionStore = create<SessionState>((set) => ({
     set((state) => ({
       sessions: updateSession(state.sessions, routingId, (s) => ({
         pendingApprovals: s.pendingApprovals.filter((a) => a.requestId !== requestId)
+      }))
+    })),
+
+  removePendingApprovalByToolUse: (routingId, toolUseId) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, routingId, (s) => ({
+        pendingApprovals: s.pendingApprovals.filter((a) => a.toolUseId !== toolUseId)
       }))
     })),
 
