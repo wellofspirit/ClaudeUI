@@ -1,0 +1,26 @@
+# Enforce LF line endings for all text files across every platform.
+# Without this, Windows checkouts with `core.autocrlf=true` can present
+# files as CRLF on disk, which makes Prettier's `prettier/prettier` rule
+# flag every line — even though the file in the repo index is LF.
+#
+# `text=auto` lets Git detect text vs binary; `eol=lf` forces LF on both
+# checkout and commit for detected text files.
+* text=auto eol=lf
+
+# Explicitly mark binaries so Git doesn't try to normalize them.
+*.woff2 binary
+*.ttf binary
+*.otf binary
+*.eot binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.icns binary
+*.pdf binary
+*.node binary
+*.exe binary
+*.dll binary
+*.so binary
+*.dylib binary
