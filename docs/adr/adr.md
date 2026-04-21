@@ -7,3 +7,4 @@
 | [003](adr-003_per-cwd-terminal-grouping.md) | Group terminal tabs by session cwd with 10-minute cold cleanup |
 | [004](adr-004_plugin-system.md) | VS Code-style plugin system for extensibility |
 | [005](adr-005_plugin-session-api.md) | Plugin session API — sessionId-based events and history |
+| [006](adr-006_rebundle-bun-binary.md) | Rebundle Bun standalone binary instead of running cli.js under Node |

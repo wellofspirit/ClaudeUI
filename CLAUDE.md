@@ -185,7 +185,7 @@ User types prompt → InputBox.handleSend()
   → addUserMessage() (Zustand)
   → window.api.sendPrompt(prompt, attachments?) (IPC)
   → session.run(prompt) (main process)
-  → sdkQuery() from src/main/sdk — spawns cli.js, speaks stream-json over stdio
+  → sdkQuery() from src/main/sdk — spawns bun-claude[.exe] (Bun runtime with cli.js embedded), speaks stream-json over stdio
     → stream_event → session:stream → appendStreamingText()
     → assistant    → session:message → addMessage() (upserts by ID)
     → user (tool_result) → session:tool-result → appendToolResult()
@@ -273,13 +273,19 @@ The `/api/oauth/usage` API returns utilization as 0–100 (percentage), while ra
 
 Everything about how ClaudeUI talks to cli.js — the Bun binary extraction pipeline, the stream-json wire protocol, control request subtypes, MCP hosting, cancellation tiers, the 16 patches — lives in **[docs/sdk-layer.md](docs/sdk-layer.md)**. Read that before touching anything under `src/main/sdk/`, `scripts/extract-cli.mjs`, or `patch/`.
 
+### Wire protocol reference — read this before theorizing
+
+Authoritative, version-pinned catalog of every stream-json message cli.js emits and accepts lives in **[docs/protocol/](docs/protocol/)**. When asking "does cli.js emit X?", "what's the shape of Y?", or "what triggers Z?", start here — it's cheaper than grep and more reliable than reading minified cli.js. Especially **[04-system-subtypes.md](docs/protocol/04-system-subtypes.md)** for `{type:'system', subtype:X}` variants: every subtype (including the `task_started` / `task_updated` / `task_progress` lifecycle) has shape, gate, and recommended consumer behavior in §4.19. If ClaudeUI isn't following the consumer guidance there, the gap is in `src/main/services/claude-session.ts`, not the docs.
+
+Keep in sync via **[12-maintenance.md](docs/protocol/12-maintenance.md)** when bumping `claudeCliVersion`. If observed wire traffic disagrees with the docs, the docs are stale — update them.
+
 ### Analyzing cli.js
 
 cli.js is ~13MB minified. Use the `/bundle-analyzer` skill to navigate it — standard grep/read tools are ineffective. Workflow: `find` by string literals → `extract-fn` → `strings --near` → `refs` → `decompile` → `patch-check` for uniqueness. Never search by minified variable names — they change between versions.
 
 ### Patches
 
-15 content-regex patches under `patch/`, applied by `bun run ensure-cli`. Three auto-detect upstream fixes and no-op (`taskstop-notification`, `incomplete-session-resume-fix`, `mcp-tool-refresh`). The active 12 add stream forwarding, control subtypes, and small bug fixes — full table in `docs/sdk-layer.md#patches`. One of them (`ci-path-remap`) exists only because ClaudeUI extracts cli.js from the Bun standalone binary and runs it under Node/Electron, which breaks Bun's virtual-path resolution.
+14 content-regex patches under `patch/`, applied by `bun run ensure-cli` between the extract and rebundle steps. Three auto-detect upstream fixes and no-op (`taskstop-notification`, `incomplete-session-resume-fix`, `mcp-tool-refresh`). The active 11 add stream forwarding, control subtypes, and small bug fixes — full table in `docs/sdk-layer.md#patches`. Patches operate on the wrapped Bun CJS IIFE bytes at `vendor/claude-cli/cli.js`; they run identically on the wrapped form since every anchor targets content inside the IIFE body. See **[ADR-006](docs/adr/adr-006_rebundle-bun-binary.md)** for why the pipeline now rebundles instead of unwrapping.
 
 Skills for patch work:
 - `/bundle-analyzer` — locate patch targets in minified cli.js.
@@ -306,5 +312,6 @@ ADRs live in `docs/adr/`. See `docs/adr/adr.md` for the index.
 | 003 | Group terminal tabs by session cwd with 10-minute cold cleanup | Accepted |
 | 004 | VS Code-style plugin system for extensibility | Accepted |
 | 005 | Plugin session API — sessionId-based events and history | Accepted |
+| 006 | Rebundle Bun standalone binary instead of running cli.js under Node | Accepted |
 
 When a design or implementation decision is made during a conversation, prompt the user about whether it should be recorded as a new ADR entry. When adding a new ADR, proactively scan existing ADRs to check if the new decision supersedes or conflicts with a previous one — if so, update the old ADR's status to "Superseded by ADR-XXX" and note it in the new ADR.

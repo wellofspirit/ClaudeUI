@@ -32,29 +32,29 @@ cli.js is not an interactive binary in this mode — it is a JSON-RPC-like proto
 
 ### The executable
 
-cli.js is CJS JavaScript, not a binary. We run it through a Node runtime. In development and Electron production, the runtime is Electron's helper binary with `ELECTRON_RUN_AS_NODE=1` set in the environment overlay:
+`cli.js` runs inside a rebundled Bun standalone binary — `bun-claude[.exe]` — produced by `scripts/rebundle-cli.mjs`. We spawn it directly; no Node wrapper, no argv injection of a JS path:
 
 ```
-<Electron helper> --no-deprecation <cliPath> <flags>...
+<bun-claude> <flags>...
 ```
 
-The scoped env overlay is critical. `ELECTRON_RUN_AS_NODE=1` MUST only ride in the `spawn()`'s `env` option for this child — if you ever set it on `process.env`, Electron's GPU/renderer children inherit it at their own spawn time and fail to initialize their GUI. See `src/main/sdk/args.ts::buildEnv()` and the call site in `src/main/sdk/query.ts` (`const env = buildEnv({ ...process.env, ...(options.env ?? {}) })`).
+Because `cli.js` is embedded in the binary and Bun's loader resolves its own baked `file:///` URLs natively, we ship no separate Node shims, no vendored ripgrep, no separate `.node` addons — they all ride along inside the Bun binary.
 
-### Where cli.js lives on disk
+Rationale: **[ADR-006](../adr/adr-006_rebundle-bun-binary.md)**. The previous pipeline unwrapped `cli.js` and spawned it under Electron-as-Node (`ELECTRON_RUN_AS_NODE=1`) with a `Module._resolveFilename` shim redirecting Bun's virtual paths to our vendored locations — fragile against CI-baked absolute paths that the shim didn't cover.
+
+### Where the binary lives on disk
 
 | Mode | Path |
 |---|---|
-| Dev (`bun run dev`) | `<projectRoot>/vendor/claude-cli/cli.js` |
-| Production (installed app) | `<Resources>/claude-cli/cli.js` (extraResources) |
-| Production fallback | `<app.asar.unpacked>/vendor/claude-cli/cli.js` |
+| Dev (`bun run dev`) | `<projectRoot>/vendor/claude-cli/bun-claude[.exe]` |
+| Production (installed app) | `<Resources>/claude-cli/bun-claude[.exe]` (extraResources) |
+| Production fallback | `<app.asar.unpacked>/vendor/claude-cli/bun-claude[.exe]` |
 
-Resolved by `locateCliJs()` in `src/main/sdk/locate.ts`.
+Resolved by `locateBunClaude()` in `src/main/sdk/locate.ts`. `locateCliJs()` is kept as a deprecated alias returning the same path — lingering external callers.
 
-The companion native addons (`audio-capture`, `image-processor`) and `ripgrep` live in `<cliDir>/vendor/<name>/<arch-platform>/`. cli.js resolves them via an injected `Module._resolveFilename` shim that rewrites Bun's virtual paths (`B:/~BUN/root/<name>.node`) to filesystem paths. The shim is prepended to cli.js during extraction — see `scripts/extract-cli.mjs`.
+### How the binary gets there
 
-### How cli.js gets there
-
-`bun run ensure-cli` downloads the upstream Bun binary, parses the Bun embed format, extracts `cli.js`, applies the 14 content-regex patches, and writes everything to `vendor/claude-cli/`. Cache key: `package.json#claudeCliVersion`. See `docs/sdk-layer.md` for the extraction pipeline details.
+`bun run ensure-cli` is the chained pipeline: `extract-cli.mjs` (download upstream Bun binary, pull wrapped `cli.js` out of its `__BUN`/`.bun` section) → `patch/apply-all.mjs` (14 content-regex patches) → `rebundle-cli.mjs` (re-inject the patched `cli.js` into the Bun binary + ad-hoc codesign + clear quarantine on macOS). Cache key: `package.json#claudeCliVersion`. Full details in `docs/sdk-layer.md`.
 
 ---
 
@@ -142,11 +142,11 @@ Everything else is optional. See `docs/protocol/02-cli-flags.md` for the complet
 
 | Var | Source | Effect |
 |---|---|---|
-| `ELECTRON_RUN_AS_NODE=1` | Caller's `options.env` overlay | Tells Electron's helper binary to run cli.js as plain Node. **Scoped to the child only.** |
 | `CLAUDE_CODE_ENTRYPOINT=sdk-ts` | `buildEnv()` default | cli.js telemetry tag. Distinguishes our harness from the upstream SDK (`sdk-mjs`) and the interactive CLI. Doesn't affect behavior. |
 | `DEBUG=1` | `buildEnv()` when `DEBUG_CLAUDE_AGENT_SDK` is set | Enables cli.js's internal debug trace. |
-| `NODE_PATH` | `buildEnv()` appends app's `node_modules` | cli.js requires `ws`, `undici`, `yaml`, `ajv`, `node-fetch`, etc. at runtime. Under Node (not Bun), these need filesystem resolution. The harness walks up from `__dirname` to find the nearest `node_modules` and appends it. |
-| `NODE_OPTIONS` | Deleted | Prevents cli.js from inheriting debug attach / ESM loader flags that confuse its CJS startup. |
+| `NODE_OPTIONS` | Deleted | Prevents the child from inheriting debug attach / loader flags that would confuse startup. Harmless under Bun but kept for defensive consistency. |
+
+Historically the table also carried `ELECTRON_RUN_AS_NODE=1` (when we spawned cli.js under Electron-as-Node) and `NODE_PATH` (pointing the unwrapped cli.js at our `node_modules` for `ws`/`undici`/`ajv`/etc.). Both retired with ADR-006 — the rebundled Bun binary is self-contained. `buildEnv()` still exists and still supports the `options.env` overlay so callers can pass per-spawn env without mutating `process.env`; that machinery is useful independently of the retired vars.
 
 ### Env vars cli.js itself reads (non-exhaustive — full list in `02-cli-flags.md`)
 
@@ -273,8 +273,9 @@ const handle = query({
   options: {
     cwd: '/path/to/repo',
     model: 'claude-opus-4-7-1m',
-    env: { ELECTRON_RUN_AS_NODE: '1' },
-    executable: process.execPath,           // Electron helper
+    // The defaults already resolve `bun-claude[.exe]` via locateBunClaude()
+    // and set standaloneExecutable: true, so no executable/env overrides
+    // needed for the normal path. Override only for tests or alt runtimes.
     canUseTool: async (name, input, ctx) => {
       return { behavior: 'allow', updatedInput: input }
     },

@@ -114,11 +114,16 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-bun-
 
-      - name: Cache vendor/claude-cli
+      - name: Read claude CLI version
+        id: cli-version
+        shell: bash
+        run: echo "version=$(node -p "require('./package.json').claudeCliVersion")" >> "$GITHUB_OUTPUT"
+
+      - name: Cache claude CLI source binary
         uses: actions/cache@v4
         with:
-          path: vendor/claude-cli
-          key: ${{ runner.os }}-claude-cli-${{ hashFiles('package.json', 'patch/**', 'scripts/extract-cli.mjs') }}
+          path: .cache/claude-cli
+          key: ${{ runner.os }}-claude-cli-src-${{ steps.cli-version.outputs.version }}
 
       - name: Cache Electron binaries
         uses: actions/cache@v4

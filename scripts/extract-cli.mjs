@@ -15,29 +15,28 @@
  * Pipeline:
  *   1. Resolve upstream version (pin via package.json#claudeCliVersion).
  *   2. Download claude-<version>-<platform>.exe from downloads.claude.ai
- *      (verifies SHA256 against manifest; cached under .cache/claude-cli/).
+ *      (verifies SHA256 against manifest; cached under .cache/claude-cli/ —
+ *      CI caches this directory keyed on the pinned version).
  *   3. Parse Bun's standalone trailer, locate the cli.js module in the
  *      `.bun` section, extract its raw contents bytes verbatim.
  *   4. Write to vendor/claude-cli/cli.js + version.json.
  *
+ * Runs unconditionally — the full extract + patch + rebundle pipeline costs
+ * a few seconds once the source binary is cached, and patches can change
+ * independently of claudeCliVersion, so there's nothing to gain from
+ * short-circuiting on a vendor/ cache.
+ *
  * Usage:
- *   node scripts/extract-cli.mjs              # pinned version, cache-aware
+ *   node scripts/extract-cli.mjs              # pinned version
  *   node scripts/extract-cli.mjs 2.1.114      # specific version
- *   node scripts/extract-cli.mjs --force      # ignore cache, re-download
+ *   node scripts/extract-cli.mjs --force      # re-download even if .cache/ has it
  *   node scripts/extract-cli.mjs --binary P   # use pre-downloaded binary P
  */
 
 import { createHash } from 'node:crypto'
-import {
-  createWriteStream,
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs'
+import { createWriteStream, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { get as httpsGet } from 'node:https'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -84,27 +83,9 @@ function mb(n) {
 }
 
 // ---------------------------------------------------------------------------
-// Cache-hit check: skip work if vendor/ already has the target version.
-// ---------------------------------------------------------------------------
-
-function readCachedVersion() {
-  try {
-    const v = JSON.parse(readFileSync(OUT_VERSION, 'utf8'))
-    // `form` was added when we switched from unwrapped (Node-run) to wrapped
-    // (Bun-rebundled) cli.js. Older caches are treated as misses so the
-    // migration isn't silent.
-    if (v.form !== 'wrapped') return null
-    if (existsSync(OUT_CLI)) {
-      return typeof v.version === 'string' ? v.version : null
-    }
-  } catch {
-    /* no cache */
-  }
-  return null
-}
-
-// ---------------------------------------------------------------------------
-// Download
+// Download — the source binary lives in .cache/claude-cli/ keyed by version;
+// re-extracting + re-patching + re-rebundling is cheap (~2s) so we always
+// run the full pipeline and only cache the 200MB download.
 // ---------------------------------------------------------------------------
 
 function detectPlatform() {
@@ -188,13 +169,15 @@ async function resolveBinary(arg) {
     `claude-${version}-${key}${binName.endsWith('.exe') ? '.exe' : ''}`,
   )
 
-  if (existsSync(binPath)) {
+  if (existsSync(binPath) && !arg.force) {
     const have = sha256File(binPath)
     if (have === entry.checksum) {
       log(`cache hit: ${binPath}`)
       return { binPath, version }
     }
     log(`cache stale (sha mismatch), re-downloading`)
+  } else if (existsSync(binPath) && arg.force) {
+    log(`--force: ignoring cached ${binPath}`)
   }
 
   const url = `${DL_BASE}/${version}/${key}/${binName}`
@@ -283,21 +266,6 @@ function extractWrappedCliBytes(buf) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2))
-
-  if (!args.force && !args.binaryPath && args.version !== 'latest' && args.version !== 'stable') {
-    const cached = readCachedVersion()
-    if (cached === args.version) {
-      log(`cache hit: vendor/claude-cli/ already at ${cached} — skipping extraction`)
-      log('(run with --force to re-extract)')
-      return
-    }
-    if (cached) {
-      log(`cache version (${cached}) != target (${args.version}) — re-extracting`)
-    } else {
-      log(`no cache — extracting ${args.version}`)
-    }
-  }
-
   const { binPath, version } = await resolveBinary(args)
 
   log(`reading ${binPath}`)
@@ -313,13 +281,21 @@ async function main() {
   writeFileSync(OUT_CLI, bytes)
   log(`wrote ${OUT_CLI}`)
 
+  // Store `sourceBinary` relative to ROOT when the binary lives inside the
+  // project (the usual .cache/claude-cli/ path); fall back to the absolute
+  // path for `--binary <external-path>` overrides. Relative paths survive
+  // project relocation and are meaningful across machines with the same
+  // checkout layout — unlike the hardcoded absolute path we stored before.
+  const rel = relative(ROOT, binPath)
+  const sourceBinary = rel === '' || rel.startsWith('..') || isAbsolute(rel) ? binPath : rel
+
   writeFileSync(
     OUT_VERSION,
     JSON.stringify(
       {
         version: version ?? 'unknown',
         source: '@anthropic-ai/claude-code (Bun standalone binary)',
-        sourceBinary: binPath,
+        sourceBinary,
         extractedAt: new Date().toISOString(),
         cliSize: bytes.length,
         cliSha256: createHash('sha256').update(bytes).digest('hex'),

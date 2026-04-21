@@ -197,6 +197,7 @@ export class ClaudeSession {
   private teammateIdToToolUse = new Map<string, string>() // teammate_id ("name@team") → toolUseId
   private backgroundFilePaths = new Map<string, string>() // toolUseId → filePath (permanent)
   private backgroundPollers = new Map<string, BackgroundPoller>() // toolUseId → poller state
+  private pendingBackgroundWatches = new Set<string>() // toolUseId waiting for poller registration
   private _initMcpServers: Array<{ name: string; status: string }> = [] // cached from init message
   private _mcpAllServers: Record<string, McpServerConfig> = {} // full config loaded at session start
   private _mcpDisabledServers = new Set<string>() // servers disabled via toggle
@@ -868,6 +869,14 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
       this.handleTaskNotification(msg)
       return
     }
+    if (msg.subtype === 'task_started') {
+      this.handleTaskStarted(msg)
+      return
+    }
+    if (msg.subtype === 'task_updated') {
+      this.handleTaskUpdated(msg)
+      return
+    }
     if (msg.subtype === 'queued_command_consumed') {
       this.send('session:steer-consumed', { prompt: msg.prompt || '' })
       return
@@ -875,6 +884,60 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
     // Unknown / init / compact_boundary — init is already consumed in
     // captureSessionBootstrap; compact_boundary is informational and not
     // currently surfaced. Fall through silently.
+  }
+
+  /**
+   * `task_started` is emitted the moment cli.js spawns a background Bash or
+   * Agent task — BEFORE the corresponding tool_result arrives. It carries
+   * task_id ↔ tool_use_id directly, so we can register the mapping early and
+   * stop depending on the regex-extraction inside detectTaskMapping for the
+   * notification plumbing. (We still need detectTaskMapping for the output
+   * file path, which only ships in tool_result.)
+   */
+  private handleTaskStarted(msg: SystemMessage): void {
+    const taskId = msg.task_id || ''
+    const toolUseId = msg.tool_use_id || ''
+    if (!taskId || !toolUseId) return
+    this.taskIdMap.set(taskId, toolUseId)
+  }
+
+  /**
+   * `task_updated` is the proactive completion signal for background Bash
+   * and Agent tasks. cli.js emits it when the task's status transitions
+   * (running → completed/killed/failed), and it arrives via `patch.status`.
+   * Without handling this, the tool card stays stuck on "running" forever
+   * even though the assistant can see the completed status via BashOutput.
+   */
+  private handleTaskUpdated(msg: SystemMessage): void {
+    const taskId = msg.task_id || ''
+    const patch = msg.patch
+    if (!taskId || !patch || typeof patch.status !== 'string') return
+
+    const status = patch.status
+    // Only act on terminal states. Intermediate transitions (e.g. running →
+    // backgrounded) don't imply completion and would wrongly dismiss the UI.
+    if (status !== 'completed' && status !== 'killed' && status !== 'failed') return
+
+    const toolUseId = this.taskIdMap.get(taskId) || null
+    if (!toolUseId) return
+
+    this.markBackgroundDone(toolUseId)
+    this.taskIdMap.delete(taskId)
+
+    // Normalize cli.js's "killed" to the SDK's "stopped" vocabulary so the
+    // renderer's resolveToolVisualState treats it uniformly.
+    const normalized: 'completed' | 'failed' | 'stopped' =
+      status === 'killed' ? 'stopped' : (status as 'completed' | 'failed')
+    this._teammateStatuses.set(toolUseId, normalized)
+
+    this.send('session:task-notification', {
+      taskId,
+      toolUseId,
+      status: normalized,
+      outputFile: this.backgroundFilePaths.get(toolUseId) || '',
+      summary: '',
+      usage: undefined,
+    })
   }
 
   private handleTaskNotification(msg: SystemMessage): void {
@@ -1906,11 +1969,15 @@ this.permissionMode = mode
     if (outputMatch) {
       const filePath = outputMatch[1].trim()
       this.backgroundFilePaths.set(toolUseId, filePath)
-      // Create dormant poller entry (no interval until watched).
-      // Bash polling is started earlier by bash_output_init; Agent task output
-      // files are JSONL transcripts handled by the subagent-streaming patch.
+      // Create dormant poller entry (no interval until the renderer calls
+      // watchBackground). Agent task output files are JSONL transcripts
+      // handled by the subagent-streaming patch, not polled here.
       if (!this.backgroundPollers.has(toolUseId)) {
         this.backgroundPollers.set(toolUseId, { filePath, lastSize: 0, done: false })
+        // Drain any watch request that raced ahead of the tool_result.
+        if (this.pendingBackgroundWatches.delete(toolUseId)) {
+          this.watchBackground(toolUseId)
+        }
       }
     }
   }
@@ -1940,7 +2007,15 @@ this.permissionMode = mode
 
   watchBackground(toolUseId: string): void {
     const poller = this.backgroundPollers.get(toolUseId)
-    if (!poller) return
+    if (!poller) {
+      // The tool_result carrying the output file path hasn't arrived yet
+      // (detectTaskMapping runs on tool_result). Remember the request so
+      // polling auto-starts the moment the poller is registered. Without
+      // this, a watchBackground call from the renderer that races ahead of
+      // tool_result is silently dropped.
+      this.pendingBackgroundWatches.add(toolUseId)
+      return
+    }
 
     if (poller.done) {
       // Task already finished — single tail read, send with done: true
@@ -1964,10 +2039,10 @@ this.permissionMode = mode
   }
 
   unwatchBackground(_toolUseId: string): void {
-    // No-op on the main process side. Polling is managed by the auto-start
-    // (from bash_output_init / detectTaskMapping) and auto-stop (markBackgroundDone).
-    // The renderer's ref-counted watch/unwatch only controls store cleanup;
-    // the main process keeps polling so data is ready when the UI reconnects.
+    // No-op on the main process side. Polling starts on the first
+    // watchBackground call and stops via markBackgroundDone. The renderer's
+    // ref-counted watch/unwatch only controls store cleanup; the main process
+    // keeps polling so data is ready when the UI reconnects.
   }
 
   readBackgroundRange(toolUseId: string, offset: number, length: number): string {

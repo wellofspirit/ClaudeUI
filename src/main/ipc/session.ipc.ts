@@ -61,56 +61,46 @@ export function getContextWindowSize(modelValue: string): number {
   return CONTEXT_WINDOW_DEFAULT
 }
 
-const TITLE_SYSTEM_PROMPT =
-  'Your task: output ONLY a short title (1-3 words) that captures the main topic of the user\'s conversation. No explanation, no quotes, no JSON, no markdown — just the title itself. Use title case. Examples: Fix Login Bug, Auth Feature, Refactor API, Debug Tests, Rename Sessions'
-
 const COMMIT_MSG_SYSTEM_PROMPT =
   'You are a commit message generator. Given a git diff of staged changes, write a concise conventional commit message. Output ONLY the commit message — no explanation, no quotes, no markdown. Use imperative mood. First line should be a short summary (max 72 chars). If needed, add a blank line followed by bullet points for details. Focus on the "why" not the "what".'
 
+/**
+ * Ask cli.js to generate a session title for the given conversation text.
+ *
+ * Delegates to the `generate_session_title` control request (anchor ~12854900
+ * in cli.js), which runs the model with cli.js's own sentence-case 3-7 word
+ * prompt and returns a JSON-schema validated `{title: string | null}`.
+ *
+ * `persist:false` — we track our manual regenerations through the custom-title
+ * file path; letting cli.js also persist would create two sources of truth.
+ */
 async function generateTitle(conversationText: string): Promise<string | null> {
   const abort = new AbortController()
   logger.debug('generateTitle', `request: ${conversationText.length} chars`)
 
+  const q = sdkQuery({
+    prompt: '',
+    options: {
+      ...getSdkExecutableOpts(),
+      cwd: PERSISTED_SESSIONS_DIR,
+      abortController: abort
+    }
+  })
+
   try {
-    const q = sdkQuery({
-      prompt: conversationText,
-      options: {
-        ...getSdkExecutableOpts(),
-        cwd: PERSISTED_SESSIONS_DIR,
-        abortController: abort,
-        systemPrompt: TITLE_SYSTEM_PROMPT,
-        model: 'claude-haiku-4-5-20251001',
-        maxTurns: 1,
-        tools: [],
-        thinking: { type: 'disabled' },
-        persistSession: false
-      }
-    })
-
-    let result = ''
-    for await (const message of q) {
-      if (!message || typeof message !== 'object') continue
-      const msg = message as Record<string, unknown>
-      if (msg.type === 'assistant') {
-        const betaMessage = msg.message as { content?: Array<{ type: string; text?: string }> } | undefined
-        if (betaMessage?.content) {
-          for (const block of betaMessage.content) {
-            if (block.type === 'text' && block.text) result += block.text
-          }
-        }
-      }
+    const handle = q as unknown as {
+      generateSessionTitle(desc: string, opts?: { persist?: boolean }): Promise<{ title?: string | null } | unknown>
     }
-
-    logger.debug('generateTitle', `response: ${JSON.stringify(result)}`)
-
-    // Take the first line, strip quotes/punctuation, limit to 3 words
-    const cleaned = result.trim().split('\n')[0].replace(/^["'`]+|["'`]+$/g, '').trim()
-    const words = cleaned.split(/\s+/).slice(0, 3).join(' ')
-    if (words.length >= 2) {
-      logger.debug('generateTitle', `title: ${words}`)
-      return words
+    const result = await handle.generateSessionTitle(conversationText, { persist: false })
+    const title = result && typeof result === 'object' && 'title' in result
+      ? (result as { title?: string | null }).title
+      : null
+    const trimmed = typeof title === 'string' ? title.trim() : ''
+    if (trimmed.length >= 2) {
+      logger.debug('generateTitle', `title: ${trimmed}`)
+      return trimmed
     }
-    logger.debug('generateTitle', 'no usable title extracted')
+    logger.debug('generateTitle', 'cli.js returned no usable title')
     return null
   } catch (err) {
     logger.error('generateTitle', 'Failed to generate title', err)

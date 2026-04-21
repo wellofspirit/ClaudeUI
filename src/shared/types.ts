@@ -294,6 +294,8 @@ export interface SessionInfo {
   title: string
   timestamp: number
   lastActivityAt: number
+  /** cli.js-generated session title (from `{type:"ai-title"}` JSONL records). */
+  aiTitle?: string | null
 }
 
 export interface DirEntry {

@@ -88,6 +88,8 @@ export interface SystemMessage extends BaseSDKMessage {
   subtype?:
     | 'init'
     | 'status'
+    | 'task_started'
+    | 'task_updated'
     | 'task_notification'
     | 'queued_command_consumed'
     | 'compact_boundary'
@@ -97,8 +99,18 @@ export interface SystemMessage extends BaseSDKMessage {
   slash_commands?: string[]
   skills?: string[]
   mcp_servers?: Array<{ name: string; status: string }>
-  /** task_notification-only fields */
+  /** task_started / task_updated / task_notification shared fields */
   task_id?: string
+  tool_use_id?: string
+  description?: string
+  task_type?: string
+  /** task_updated patch — partial update to the task's state record */
+  patch?: {
+    status?: string
+    end_time?: number
+    [k: string]: unknown
+  }
+  /** task_notification-only fields */
   output_file?: string
   status?: string
   summary?: string

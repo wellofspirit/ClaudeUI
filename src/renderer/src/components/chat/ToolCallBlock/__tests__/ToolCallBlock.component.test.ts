@@ -52,12 +52,16 @@ describe('ToolCallBlock FC', () => {
   let respondCalls: Array<{ routingId: string; requestId: string; decision: string; answers: unknown; permissions: unknown }>
   let backgroundCalls: Array<{ routingId: string; toolUseId: string }>
   let stopCalls: Array<{ routingId: string; toolUseId: string }>
+  let watchCalls: Array<{ routingId: string; toolUseId: string }>
+  let unwatchCalls: Array<{ routingId: string; toolUseId: string }>
 
   beforeEach(async () => {
     app = await bootTestApp()
     respondCalls = []
     backgroundCalls = []
     stopCalls = []
+    watchCalls = []
+    unwatchCalls = []
 
     app.bridge.ipcMain.handle('session:approval-response', async (_e, routingId: string, requestId: string, decision: string, answers: unknown, permissions: unknown) => {
       respondCalls.push({ routingId, requestId, decision, answers, permissions })
@@ -71,6 +75,12 @@ describe('ToolCallBlock FC', () => {
       return { success: true }
     })
     app.bridge.ipcMain.handle('log:error' as any, async () => {})
+    app.bridge.ipcMain.handle('session:watch-background', async (_e, routingId: string, toolUseId: string) => {
+      watchCalls.push({ routingId, toolUseId })
+    })
+    app.bridge.ipcMain.handle('session:unwatch-background', async (_e, routingId: string, toolUseId: string) => {
+      unwatchCalls.push({ routingId, toolUseId })
+    })
 
     useSessionStore.getState().createNewSession(ROUTE, '/d/repo')
     useSessionStore.setState({ activeSessionId: ROUTE })
@@ -216,6 +226,62 @@ describe('ToolCallBlock FC', () => {
 
     // Rollback after failure
     expect(viewProps.isBackgrounding).toBe(false)
+  })
+
+  // Regression: background bash watchBackground used to be gated behind
+  // BackgroundBashOutput's mount, which only happens when the tool card is
+  // expanded — but auto-expand depends on bgOutput, which depends on the
+  // poll starting. Deadlock. The FC must start the watch itself so polling
+  // begins as soon as the tool_use block renders, regardless of expanded state.
+  // The View is mocked here — so if watchBg still fires, it's from the FC.
+  it('starts watchBackground for background bash without waiting for the View to expand', async () => {
+    const block = makeToolUseBlock({
+      toolInput: { command: 'sleep 10', run_in_background: true },
+      toolUseId: 'tu-bg-1',
+    })
+    await renderFC({ block })
+
+    expect(watchCalls).toEqual([{ routingId: ROUTE, toolUseId: 'tu-bg-1' }])
+  })
+
+  it('does not start watchBackground for foreground bash (stream_output drives bashOutputs)', async () => {
+    const block = makeToolUseBlock({ toolInput: { command: 'ls', run_in_background: false } })
+    await renderFC({ block })
+
+    expect(watchCalls).toEqual([])
+  })
+
+  it('unwatchBackground fires when the background bash tool_use unmounts', async () => {
+    const { ToolCallBlock } = await import('../ToolCallBlock')
+    const block = makeToolUseBlock({
+      toolInput: { command: 'sleep 10', run_in_background: true },
+      toolUseId: 'tu-bg-cleanup',
+    })
+    let result!: ReturnType<typeof render>
+    await act(async () => {
+      result = render(React.createElement(ToolCallBlock, { block } as any))
+    })
+    expect(watchCalls).toEqual([{ routingId: ROUTE, toolUseId: 'tu-bg-cleanup' }])
+
+    await act(async () => { result.unmount() })
+    expect(unwatchCalls).toEqual([{ routingId: ROUTE, toolUseId: 'tu-bg-cleanup' }])
+  })
+
+  it('does not start watchBackground for historical background bash', async () => {
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [ROUTE]: { ...state.sessions[ROUTE], isHistorical: true },
+      },
+    }))
+
+    const block = makeToolUseBlock({
+      toolInput: { command: 'sleep 10', run_in_background: true },
+      toolUseId: 'tu-bg-hist',
+    })
+    await renderFC({ block })
+
+    expect(watchCalls).toEqual([])
   })
 
   it('onStopTask sets stopping flag with a 10s cleanup timer', async () => {
