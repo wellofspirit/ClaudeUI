@@ -18,7 +18,10 @@ export function SettingsToggle({
       onClick={() => onChange(!checked)}
       className="w-full flex items-center justify-between px-3 py-1.5 text-[13px] text-text-secondary hover:bg-bg-hover rounded transition-colors cursor-default"
     >
-      <span className="flex items-center gap-1">{label}{tooltip && <InfoTooltip text={tooltip} />}</span>
+      <span className="flex items-center gap-1">
+        {label}
+        {tooltip && <InfoTooltip text={tooltip} />}
+      </span>
       <span
         className={`w-7 h-4 rounded-full relative transition-colors ${checked ? 'bg-accent' : 'bg-text-muted/30'}`}
       >
@@ -114,7 +117,15 @@ export function InfoTooltip({ text }: { text: string }): React.JSX.Element {
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
     >
-      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-text-muted/40 hover:text-text-muted transition-colors cursor-default shrink-0">
+      <svg
+        width="12"
+        height="12"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+        className="text-text-muted/40 hover:text-text-muted transition-colors cursor-default shrink-0"
+      >
         <circle cx="12" cy="12" r="10" />
         <path d="M12 16v-4" />
         <path d="M12 8h.01" />
@@ -130,6 +141,48 @@ export function InfoTooltip({ text }: { text: string }): React.JSX.Element {
         </div>
       )}
     </span>
+  )
+}
+
+export function SettingsTextarea({
+  label,
+  value,
+  placeholder,
+  rows = 4,
+  onChange,
+  tooltip,
+  description,
+  monospace = false
+}: {
+  label: string
+  value: string
+  placeholder?: string
+  rows?: number
+  onChange: (value: string) => void
+  tooltip?: string
+  description?: string
+  monospace?: boolean
+}): React.JSX.Element {
+  return (
+    <div className="px-3 py-1.5 text-[13px] text-text-secondary">
+      <div className="mb-1 flex items-center gap-1">
+        {label}
+        {tooltip && <InfoTooltip text={tooltip} />}
+      </div>
+      <textarea
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        rows={rows}
+        spellCheck={false}
+        className={`w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors resize-y ${
+          monospace ? 'font-mono' : ''
+        }`}
+      />
+      {description && (
+        <div className="text-[10px] text-text-muted/60 mt-1 leading-relaxed">{description}</div>
+      )}
+    </div>
   )
 }
 
@@ -167,7 +220,10 @@ export function SandboxListSetting({
       {items.length > 0 && (
         <div className="flex flex-wrap gap-1 mb-1.5">
           {items.map((item, i) => (
-            <span key={i} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-bg-primary/50 border border-border/50 text-[11px] text-text-secondary">
+            <span
+              key={i}
+              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-bg-primary/50 border border-border/50 text-[11px] text-text-secondary"
+            >
               {item}
               <button
                 onClick={() => onUpdate(items.filter((_, idx) => idx !== i))}
@@ -184,7 +240,9 @@ export function SandboxListSetting({
           type="text"
           value={inputVal}
           onChange={(e) => setInputVal(e.target.value)}
-          onKeyDown={(e) => { if (e.key === 'Enter') handleAdd() }}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') handleAdd()
+          }}
           placeholder={placeholder}
           className="flex-1 bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors"
         />

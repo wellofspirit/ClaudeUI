@@ -10,18 +10,19 @@ files:
   - '!{.env,.env.*,.npmrc,pnpm-lock.yaml}'
   - '!{tsconfig.json,tsconfig.node.json,tsconfig.web.json}'
 extraResources:
-  # Ship only the rebundled Bun binary + version metadata. The source cli.js
-  # also present in vendor/claude-cli/ is a debug artifact (already baked into
-  # bun-claude.exe by scripts/rebundle-cli.mjs), no need to duplicate ~13 MB.
+  # Ship the rebundled Bun binary + version metadata + native addons that
+  # the Electron main process loads directly (audio-capture.node etc. — see
+  # src/main/services/voice-capture.ts). The source cli.js also present in
+  # vendor/claude-cli/ is a debug artifact (already baked into bun-claude.exe
+  # by scripts/rebundle-cli.mjs), no need to duplicate ~13 MB.
   - from: vendor/claude-cli
     to: claude-cli
     filter:
       - bun-claude*
       - version.json
+      - vendor/**/*.node
   - from: out/web
     to: web
-  - from: resources/tailwind-full.css
-    to: tailwind-full.css
 asarUnpack:
   - resources/**
   - node_modules/node-pty/**

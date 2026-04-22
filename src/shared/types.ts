@@ -725,6 +725,7 @@ export interface Automation {
   permissions: { allow: string[]; deny: string[] }
   model?: string
   effort?: string
+  thinkingMode?: 'adaptive' | 'enabled' | 'disabled'
   permissionMode?: 'default' | 'auto'
   enabled: boolean
   lastRunAt: number | null

@@ -52,33 +52,53 @@ vi.mock('electron', async () => {
 type SdkMode =
   | { kind: 'events'; events: Record<string, unknown>[] }
   | { kind: 'waitForAbort' }
+  /** Yield events, then idle — mirrors cli.js staying alive after a turn. */
+  | { kind: 'eventsThenWait'; events: Record<string, unknown>[] }
 
 let sdkMode: SdkMode = { kind: 'events', events: [] }
 let lastAbortObserved = false
+let lastSdkParams: any = null
+let lastGeneratorReturned = false
 
 vi.mock('../../sdk', () => ({
   query: (params: any) => {
+    lastSdkParams = params
     const ac: AbortController | undefined = params?.options?.abortController
     const mode = sdkMode
 
     async function* gen() {
-      if (mode.kind === 'waitForAbort') {
-        await new Promise<void>((resolve) => {
-          if (ac?.signal.aborted) {
-            lastAbortObserved = true
-            resolve()
-            return
-          }
-          ac?.signal.addEventListener('abort', () => {
-            lastAbortObserved = true
-            resolve()
+      try {
+        if (mode.kind === 'waitForAbort') {
+          await new Promise<void>((resolve) => {
+            if (ac?.signal.aborted) {
+              lastAbortObserved = true
+              resolve()
+              return
+            }
+            ac?.signal.addEventListener('abort', () => {
+              lastAbortObserved = true
+              resolve()
+            })
           })
-        })
-        return
-      }
-      for (const event of mode.events) {
-        if (ac?.signal.aborted) throw new DOMException('Aborted', 'AbortError')
-        yield event
+          return
+        }
+        if (mode.kind === 'eventsThenWait') {
+          for (const event of mode.events) {
+            if (ac?.signal.aborted) throw new DOMException('Aborted', 'AbortError')
+            yield event
+          }
+          // Idle indefinitely — consumer's for-await must break/return to exit.
+          await new Promise<void>((resolve) => {
+            ac?.signal.addEventListener('abort', () => resolve())
+          })
+          return
+        }
+        for (const event of mode.events) {
+          if (ac?.signal.aborted) throw new DOMException('Aborted', 'AbortError')
+          yield event
+        }
+      } finally {
+        lastGeneratorReturned = true
       }
     }
     const g = gen() as any
@@ -144,19 +164,20 @@ async function freshManager(): Promise<{
 
 function makeAutomation(overrides: Partial<Automation> = {}): Automation {
   return {
-    id: overrides.id ?? 'a-test',
-    name: overrides.name ?? 'Test Automation',
-    prompt: overrides.prompt ?? 'do the thing',
-    cwd: overrides.cwd ?? '/tmp/project',
-    schedule: overrides.schedule ?? { type: 'interval', intervalMs: 60_000 },
-    permissions: overrides.permissions ?? { allow: [], deny: [] },
-    model: overrides.model ?? 'default',
-    effort: overrides.effort ?? 'medium',
-    permissionMode: overrides.permissionMode ?? 'auto',
-    enabled: overrides.enabled ?? false,
-    lastRunAt: overrides.lastRunAt ?? null,
-    lastRunStatus: overrides.lastRunStatus ?? null,
-    createdAt: overrides.createdAt ?? Date.now(),
+    id: 'a-test',
+    name: 'Test Automation',
+    prompt: 'do the thing',
+    cwd: '/tmp/project',
+    schedule: { type: 'interval', intervalMs: 60_000 },
+    permissions: { allow: [], deny: [] },
+    model: 'default',
+    effort: 'medium',
+    permissionMode: 'auto',
+    enabled: false,
+    lastRunAt: null,
+    lastRunStatus: null,
+    createdAt: Date.now(),
+    ...overrides,
   }
 }
 
@@ -168,6 +189,8 @@ beforeEach(() => {
   TEMP_HOME = fs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), 'automgr-test-'))
   sdkMode = { kind: 'events', events: [] }
   lastAbortObserved = false
+  lastSdkParams = null
+  lastGeneratorReturned = false
 })
 
 afterEach(() => {
@@ -527,6 +550,101 @@ describe('AutomationManager — scheduling & runtime', () => {
     expect(fs.existsSync(autoFile)).toBe(false)
     expect(fs.existsSync(runsDir)).toBe(false)
     expect(mgr.list().find((a) => a.id === 'delete-1')).toBeUndefined()
+
+    mgr.stopAll()
+  })
+
+  it('stops the SDK stream after receiving a result — non-interactive runs must not idle forever', async () => {
+    const { mgr } = await freshManager()
+    mgr.load()
+
+    // cli.js stays alive between turns in interactive mode. Automations are
+    // single-shot: once `result` arrives the consumer must break out of the
+    // for-await loop so the generator's `return()` fires. Without it the run
+    // hangs indefinitely even though the agent is done.
+    sdkMode = {
+      kind: 'eventsThenWait',
+      events: [
+        { type: 'assistant', message: { id: 'm1', content: [{ type: 'text', text: 'done' }] }, session_id: 's1' },
+        { type: 'result', total_cost_usd: 0.01 },
+      ],
+    }
+    mgr.upsert(makeAutomation({ id: 'eager-exit-1' }))
+
+    // Race runNow against a short timeout. Pre-fix this would time out.
+    await Promise.race([
+      mgr.runNow('eager-exit-1'),
+      new Promise((_resolve, reject) => setTimeout(() => reject(new Error('run did not exit after result')), 500)),
+    ])
+
+    expect(lastGeneratorReturned).toBe(true)
+    const runs = mgr.listRuns('eager-exit-1')
+    expect(runs).toHaveLength(1)
+    expect(runs[0].status).toBe('success')
+    expect((mgr as any).activeRuns.has('eager-exit-1')).toBe(false)
+
+    mgr.stopAll()
+  })
+
+  it('passes thinking config + effort derived from automation.thinkingMode / automation.effort', async () => {
+    const { mgr } = await freshManager()
+    mgr.load()
+
+    sdkMode = { kind: 'events', events: [{ type: 'result', total_cost_usd: 0 }] }
+    mgr.upsert(makeAutomation({
+      id: 'thinking-1',
+      model: 'claude-opus-4-7',
+      effort: 'xhigh',
+      thinkingMode: 'adaptive',
+    }))
+    await mgr.runNow('thinking-1')
+
+    expect(lastSdkParams?.options?.thinking).toEqual({ type: 'adaptive', display: 'summarized' })
+    expect(lastSdkParams?.options?.effort).toBe('xhigh')
+
+    mgr.stopAll()
+  })
+
+  it('coerces unsupported thinkingMode / effort against the selected model', async () => {
+    const { mgr } = await freshManager()
+    mgr.load()
+
+    sdkMode = { kind: 'events', events: [{ type: 'result', total_cost_usd: 0 }] }
+    // Legacy model: no adaptive thinking and no effort picker at all — old
+    // saved automations with adaptive/xhigh must not leak through to cli.js.
+    mgr.upsert(makeAutomation({
+      id: 'coerce-1',
+      model: 'claude-3-5-sonnet',
+      effort: 'xhigh',
+      thinkingMode: 'adaptive',
+    }))
+    await mgr.runNow('coerce-1')
+
+    expect(lastSdkParams?.options?.thinking).toEqual({
+      type: 'enabled', display: 'summarized', budgetTokens: 10000,
+    })
+    expect(lastSdkParams?.options?.effort).toBeUndefined()
+
+    mgr.stopAll()
+  })
+
+  it('defaults to enabled thinking + model default effort when automation has neither', async () => {
+    const { mgr } = await freshManager()
+    mgr.load()
+
+    sdkMode = { kind: 'events', events: [{ type: 'result', total_cost_usd: 0 }] }
+    // Bypass makeAutomation's default-medium-effort so we exercise the
+    // capability-aware default path (xhigh on opus-4-7).
+    const base = makeAutomation({ id: 'defaults-1', model: 'claude-opus-4-7' })
+    const { effort: _e, thinkingMode: _t, ...rest } = base
+    mgr.upsert(rest as any)
+    await mgr.runNow('defaults-1')
+
+    expect(lastSdkParams?.options?.thinking).toEqual({
+      type: 'enabled', display: 'summarized', budgetTokens: 10000,
+    })
+    // defaultEffort for opus-4-7 is xhigh per model-capabilities heuristic.
+    expect(lastSdkParams?.options?.effort).toBe('xhigh')
 
     mgr.stopAll()
   })

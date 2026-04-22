@@ -8,6 +8,7 @@ import {
   SettingsToggle,
   SettingsSlider,
   SettingsSelect,
+  SettingsTextarea,
   SandboxListSetting
 } from './settings-controls'
 
@@ -832,6 +833,74 @@ export const SECTIONS: Section[] = [
         label: 'Global permissions',
         keywords: 'allow deny ask rules tools bash edit read write permissions security',
         render: () => <GlobalPermissionsSummary />
+      }
+    ]
+  },
+  {
+    id: 'mockup',
+    label: 'Mockups',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <rect x="3" y="3" width="18" height="18" rx="2" />
+        <line x1="3" y1="9" x2="21" y2="9" />
+        <line x1="9" y1="9" x2="9" y2="21" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'mockupConnectAllowlist',
+        label: 'Network allowlist',
+        keywords: 'mockup network fetch connect allowlist csp origin api',
+        render: (s, u) => (
+          <SettingsTextarea
+            label="Network allowlist"
+            value={s.mockupConnectAllowlist}
+            onChange={(v) => u({ mockupConnectAllowlist: v })}
+            placeholder={'api.openweathermap.org\n*.my-startup.com'}
+            rows={4}
+            monospace
+            tooltip="Extends the mockup iframe's CSP connect-src directive. By default mockups can only talk to the pinned CDN allowlist (jsDelivr, cdnjs, Tailwind Play, unpkg, jQuery) plus their own origin. Add one origin per line to permit additional fetch/XHR/WebSocket targets."
+            description="One origin per line (no scheme prefix needed, no quotes). Only turn this on for endpoints you trust — a compromised or prompt-injected mockup could exfiltrate to entries on this list."
+          />
+        )
+      },
+      {
+        key: 'mockupAllowHttp',
+        label: 'Allow plaintext (http://) connections',
+        keywords: 'mockup http plaintext insecure localhost',
+        render: (s, u) => (
+          <div>
+            <SettingsToggle
+              label="Allow plaintext (http:// & ws://) connections"
+              checked={s.mockupAllowHttp}
+              onChange={(v) => u({ mockupAllowHttp: v })}
+              tooltip="When on, mockups may fetch from http:// and ws:// URLs in addition to https:// / wss://. Useful for demoing local APIs (http://localhost:8080) or legacy internal services without TLS. Off by default."
+            />
+            <div className="text-[10px] text-text-muted/50 mt-0.5 pl-3">
+              Needed for localhost APIs and legacy non-TLS services
+            </div>
+          </div>
+        )
+      },
+      {
+        key: 'mockupFooter',
+        label: 'Mockup security info',
+        keywords: 'mockup info csp security',
+        render: () => (
+          <div className="px-3 py-1.5 text-[11px] text-text-muted/60 leading-relaxed">
+            Mockups render in a sandboxed iframe on a per-mockup origin. Changes apply when the mockup
+            is next loaded or reloaded — open mockups keep the CSP they were served with.
+          </div>
+        )
       }
     ]
   },

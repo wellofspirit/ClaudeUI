@@ -42,6 +42,7 @@ describe('useAutomationStore', () => {
       automations: [],
       selectedAutomationId: null,
       selectedRunId: null,
+      detailTab: 'configure',
       runs: {},
       runMessages: null,
       notificationBadge: 0,
@@ -72,6 +73,12 @@ describe('useAutomationStore', () => {
     it('allows null to deselect', () => {
       useAutomationStore.getState().selectAutomation(null)
       expect(useAutomationStore.getState().selectedAutomationId).toBeNull()
+    })
+
+    it('resets detailTab to configure on selection change', () => {
+      useAutomationStore.setState({ detailTab: 'runs' })
+      useAutomationStore.getState().selectAutomation('a1')
+      expect(useAutomationStore.getState().detailTab).toBe('configure')
     })
   })
 
@@ -220,6 +227,21 @@ describe('useAutomationStore', () => {
       const state = useAutomationStore.getState()
       expect(state.selectedRunId).toBeNull()
       expect(state.runMessages).toBeNull()
+    })
+
+    it('lands on the Runs tab so the user returns to the list that launched them', () => {
+      useAutomationStore.setState({ selectedRunId: 'r1', detailTab: 'configure' })
+      useAutomationStore.getState().clearRunSelection()
+      expect(useAutomationStore.getState().detailTab).toBe('runs')
+    })
+  })
+
+  describe('setDetailTab', () => {
+    it('swaps the active detail tab', () => {
+      useAutomationStore.getState().setDetailTab('runs')
+      expect(useAutomationStore.getState().detailTab).toBe('runs')
+      useAutomationStore.getState().setDetailTab('permissions')
+      expect(useAutomationStore.getState().detailTab).toBe('permissions')
     })
   })
 })

@@ -23,6 +23,7 @@ import type { ApprovalDecision, ModelInfo, SandboxSettings, ProxySettings, Permi
 import { logger } from '../services/logger'
 import { deleteSessionFiles, deleteProjectFiles } from '../services/delete-session-files'
 import { startSocksBridge, stopSocksBridge } from '../services/socks-bridge'
+import { invalidateMockupSecuritySettings } from '../services/mockup-settings'
 
 /**
  * Wraps an async IPC handler with try-catch, returning a standardized IpcResult envelope.
@@ -721,6 +722,8 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
   ipcMain.handle('config:load-settings', () => loadSettings())
   ipcMain.handle('config:save-settings', (_e, settings: UISettings) => {
     saveSettings(settings)
+    // Next mockup request re-reads settings to pick up CSP changes.
+    invalidateMockupSecuritySettings()
     // Propagate usage refresh interval change
     if (typeof (settings as Record<string, unknown>).usageRefreshSecs === 'number') {
       usageFetcher.setIntervalSecs((settings as Record<string, unknown>).usageRefreshSecs as number)
@@ -1211,7 +1214,10 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
 
     const entry = { watcher: null! as fs.FSWatcher, debounceTimer: null as ReturnType<typeof setTimeout> | null }
 
-    entry.watcher = fs.watch(dirPath, { recursive: false }, (_event, filename) => {
+    // Recursive so edits to sibling subdirs (e.g. `images/hero.png`,
+    // `components/card.css`) also trigger reloads. Debounced so editors
+    // that atomic-write via temp-file + rename don't fire multiple times.
+    entry.watcher = fs.watch(dirPath, { recursive: true }, (_event, filename) => {
       if (!filename) return
       if (entry.debounceTimer) clearTimeout(entry.debounceTimer)
       entry.debounceTimer = setTimeout(() => {

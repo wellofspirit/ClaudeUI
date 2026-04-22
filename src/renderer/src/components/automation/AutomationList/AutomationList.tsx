@@ -1,7 +1,7 @@
-import { useState, useCallback } from 'react'
+import { useCallback, useEffect } from 'react'
 import { v4 as uuid } from 'uuid'
 import { useAutomationStore } from '../../../stores/automation-store'
-import type { Automation } from '../../../../../shared/types'
+import type { Automation, AutomationRun } from '../../../../../shared/types'
 import { AutomationListView } from './View'
 
 interface AutomationListProps {
@@ -11,12 +11,21 @@ interface AutomationListProps {
 export function AutomationList({ className }: AutomationListProps): React.JSX.Element {
   const automations = useAutomationStore((s) => s.automations)
   const selectedAutomationId = useAutomationStore((s) => s.selectedAutomationId)
-  const selectedRunId = useAutomationStore((s) => s.selectedRunId)
   const runs = useAutomationStore((s) => s.runs)
+  const setRuns = useAutomationStore((s) => s.setRuns)
   const selectAutomation = useAutomationStore((s) => s.selectAutomation)
-  const selectRun = useAutomationStore((s) => s.selectRun)
 
-  const [expandedId, setExpandedId] = useState<string | null>(null)
+  // Fetch runs for any automation we haven't loaded yet so the list can render
+  // sparklines + cost totals. Live updates arrive via useAutomationEvents →
+  // updateRun, so we only need to backfill the initial state.
+  useEffect(() => {
+    automations.forEach((a) => {
+      if (runs[a.id] !== undefined) return
+      window.api.listAutomationRuns(a.id)
+        .then((r: AutomationRun[]) => setRuns(a.id, r))
+        .catch(() => setRuns(a.id, []))
+    })
+  }, [automations, runs, setRuns])
 
   const handleCreate = useCallback((): void => {
     const newAutomation: Automation = {
@@ -35,35 +44,14 @@ export function AutomationList({ className }: AutomationListProps): React.JSX.El
     selectAutomation(newAutomation.id)
   }, [selectAutomation])
 
-  const handleToggleExpand = useCallback((id: string) => {
-    setExpandedId((prev) => (prev === id ? null : id))
-  }, [])
-
-  const handleLoadRuns = useCallback((automationId: string) => {
-    window.api.listAutomationRuns(automationId)
-      .then((r) => {
-        useAutomationStore.getState().setRuns(automationId, r)
-      })
-      .catch((err) => {
-        window.api.logError('AutomationList', `Failed to list runs for ${automationId}: ${err}`)
-        // Set empty runs so the UI shows "No runs yet" instead of staying blank
-        useAutomationStore.getState().setRuns(automationId, [])
-      })
-  }, [])
-
   return (
     <AutomationListView
       className={className}
       automations={automations}
       selectedAutomationId={selectedAutomationId}
-      selectedRunId={selectedRunId}
       runs={runs}
-      expandedId={expandedId}
-      onToggleExpand={handleToggleExpand}
       onCreate={handleCreate}
       onSelect={selectAutomation}
-      onSelectRun={selectRun}
-      onLoadRuns={handleLoadRuns}
     />
   )
 }

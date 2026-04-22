@@ -5,6 +5,7 @@ import { RemoteDispatcher } from '../services/remote-dispatcher'
 import { SessionManager } from '../services/session-manager'
 import { listDirectories, loadSessionHistory, loadSubagentHistory, buildSubagentFileMap, loadBackgroundOutput } from '../services/session-history'
 import { loadSettings, saveSettings, loadSessionConfig, saveSessionConfig, loadSlashCommands } from '../services/ui-config'
+import { invalidateMockupSecuritySettings } from '../services/mockup-settings'
 import type { UISettings, UISessionConfig } from '../services/ui-config'
 import { loadClaudePermissions } from '../services/claude-settings'
 import { loadMcpServers, readDisabledMcpServers } from '../services/claude-mcp'
@@ -214,6 +215,7 @@ export function registerRemoteHandlers(
   dispatcher.register('config:load-settings', async () => loadSettings())
   dispatcher.register('config:save-settings', async (settings: UISettings) => {
     saveSettings(settings)
+    invalidateMockupSecuritySettings()
     // Notify local desktop + all extra windows (remote bridge → other remote clients)
     if (!win.isDestroyed()) {
       win.webContents.send('config:settings-changed', settings)

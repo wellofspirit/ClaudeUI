@@ -9,6 +9,13 @@ import { getSdkExecutableOpts, ClaudeSession } from './claude-session'
 import { loadSessionHistory } from './session-history'
 import { getClassifier, stopClassifier, isSafeTool, buildTranscript, type TranscriptMessage } from './auto-classifier'
 import { logger } from './logger'
+import {
+  resolveThinkingMode,
+  resolveEffort,
+  defaultEffort,
+  type EffortLevel,
+  type ThinkingMode,
+} from '../../shared/model-capabilities'
 import type { Automation, AutomationRun, ChatMessage, ContentBlock } from '../../shared/types'
 
 const CLAUDE_PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects')
@@ -545,6 +552,18 @@ export class AutomationManager {
         content: [{ type: 'text', text: prompt }]
       })
 
+      const modelValue = automation.model || 'default'
+      const desiredThinking: ThinkingMode = (automation.thinkingMode as ThinkingMode | undefined)
+        ?? 'enabled'
+      const thinkingMode = resolveThinkingMode(modelValue, desiredThinking)
+      const thinkingConfig = thinkingMode === 'disabled'
+        ? { type: 'disabled' as const }
+        : thinkingMode === 'adaptive'
+          ? { type: 'adaptive' as const, display: 'summarized' as const }
+          : { type: 'enabled' as const, display: 'summarized' as const, budgetTokens: 10000 }
+      const desiredEffort = (automation.effort as EffortLevel | undefined) ?? defaultEffort(modelValue)
+      const resolvedEffort = resolveEffort(modelValue, desiredEffort) ?? undefined
+
       // Start with acceptEdits (auto mode) or default. The acceptEdits base ensures
       // the SDK always accepts the mode; we attempt to upgrade to native auto below.
       const q = sdkQuery({
@@ -553,13 +572,13 @@ export class AutomationManager {
           ...getSdkExecutableOpts(),
           ...(resumeSessionId ? { resume: resumeSessionId } : {}),
           cwd: automation.cwd,
-          model: automation.model || 'default',
+          model: modelValue,
           permissionMode: useAutoMode ? 'acceptEdits' as const : 'default' as const,
           settingSources: ['user', 'project', 'local'],
           abortController,
           includePartialMessages: true,
-          thinking: { type: 'enabled', budgetTokens: 10000 },
-          effort: (automation.effort as 'low' | 'medium' | 'high') || 'medium',
+          thinking: thinkingConfig,
+          ...(resolvedEffort ? { effort: resolvedEffort } : {}),
           canUseTool
         }
       })
@@ -671,6 +690,12 @@ export class AutomationManager {
               this.notifyRunUpdate(automation.id, updatedRuns[idx])
             }
           }
+
+          // Automation is non-interactive — the turn ends at `result`. Break the
+          // loop so the iterator's `return()` SIGTERMs cli.js; otherwise the child
+          // sits idle forever waiting for a user prompt that never comes.
+          // Follow-ups via sendMessage() start a fresh process with `resume:`.
+          break
         }
       }
 

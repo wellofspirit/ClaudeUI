@@ -469,6 +469,42 @@ describe('deleteSession', () => {
     expect(store().recentSessionIds).toContain('s2')
   })
 
+  it('purges the session from in-memory sessions, directories, and activeSessionId', async () => {
+    store().createNewSession('s1', '/a')
+    store().createNewSession('s2', '/a')
+    // Set state after createNewSession to avoid cleanupEmptySession side-effects from switchSession
+    useSessionStore.setState({
+      activeSessionId: 's1',
+      directories: [{
+        cwd: '/a', projectKey: 'proj-key', folderName: 'a',
+        sessions: [
+          { sessionId: 's1', cwd: '/a', projectKey: 'proj-key', title: 'x', timestamp: 0, lastActivityAt: 0 },
+          { sessionId: 's2', cwd: '/a', projectKey: 'proj-key', title: 'y', timestamp: 0, lastActivityAt: 0 },
+        ],
+      }],
+    })
+
+    await store().deleteSession('s1', 'proj-key')
+
+    expect(store().sessions['s1']).toBeUndefined()
+    expect(store().sessions['s2']).toBeDefined()
+    expect(store().activeSessionId).toBeNull()
+    expect(store().directories[0].sessions.map((s) => s.sessionId)).toEqual(['s2'])
+  })
+
+  it('drops an empty directory group after deleting its last session', async () => {
+    useSessionStore.setState({
+      directories: [{
+        cwd: '/a', projectKey: 'proj-key', folderName: 'a',
+        sessions: [{ sessionId: 's1', cwd: '/a', projectKey: 'proj-key', title: 'x', timestamp: 0, lastActivityAt: 0 }],
+      }],
+    })
+
+    await store().deleteSession('s1', 'proj-key')
+
+    expect(store().directories).toEqual([])
+  })
+
   it('does not mutate store when the IPC call rejects', async () => {
     ;(window.api.deleteSession as any).mockRejectedValueOnce(new Error('EBUSY'))
     store().createNewSession('s1', '/a')
@@ -528,6 +564,53 @@ describe('deleteProject', () => {
     expect(store().hiddenProjectKeys).not.toContain('proj-key')
     // Unrelated project untouched
     expect(store().recentSessionIds).toContain('s3')
+  })
+
+  it('removes the project directory group and in-memory sessions so the sidebar purges', async () => {
+    store().createNewSession('s1', '/test')
+    store().createNewSession('s2', '/test')  // in-memory-only session in same cwd
+    store().createNewSession('s3', '/other')
+    useSessionStore.setState({
+      activeSessionId: 's1',
+      directories: [
+        {
+          cwd: '/test', projectKey: 'proj-key', folderName: 'test',
+          sessions: [{ sessionId: 's1', cwd: '/test', projectKey: 'proj-key', title: 'a', timestamp: 0, lastActivityAt: 0 }],
+        },
+        {
+          cwd: '/other', projectKey: 'other-key', folderName: 'other',
+          sessions: [{ sessionId: 's3', cwd: '/other', projectKey: 'other-key', title: 'c', timestamp: 0, lastActivityAt: 0 }],
+        },
+      ],
+    })
+
+    await store().deleteProject('proj-key')
+
+    // Directory group gone
+    expect(store().directories.map((g) => g.projectKey)).toEqual(['other-key'])
+    // Both on-disk and in-memory-only sessions for that cwd purged
+    expect(store().sessions['s1']).toBeUndefined()
+    expect(store().sessions['s2']).toBeUndefined()
+    // Unrelated session preserved
+    expect(store().sessions['s3']).toBeDefined()
+    // Active session cleared since it was inside the deleted project
+    expect(store().activeSessionId).toBeNull()
+  })
+
+  it('keeps activeSessionId when the active session is not inside the deleted project', async () => {
+    store().createNewSession('s1', '/test')
+    store().createNewSession('s3', '/other')
+    useSessionStore.setState({
+      activeSessionId: 's3',
+      directories: [{
+        cwd: '/test', projectKey: 'proj-key', folderName: 'test',
+        sessions: [{ sessionId: 's1', cwd: '/test', projectKey: 'proj-key', title: 'a', timestamp: 0, lastActivityAt: 0 }],
+      }],
+    })
+
+    await store().deleteProject('proj-key')
+
+    expect(store().activeSessionId).toBe('s3')
   })
 
   it('does not mutate store when the IPC call rejects', async () => {

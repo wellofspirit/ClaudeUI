@@ -1,25 +1,76 @@
-import { protocol, net, app } from 'electron'
+import { protocol, net } from 'electron'
 import { join, resolve, extname, sep } from 'path'
 import { pathToFileURL } from 'url'
 import { MOCKUP_ASSET_SCHEME } from '../../shared/mockup-url'
+import { getMockupSecuritySettings, type MockupSecuritySettings } from './mockup-settings'
 
 export { MOCKUP_ASSET_SCHEME }
 
 const MOCKUP_ID_RE = /^[a-f0-9]{8}$/
+const HOST_SUFFIX = '.m'
 
 /**
- * Response CSP for the mockup HTML document. The sandboxed iframe has an
- * opaque origin, but CSP is belt-and-braces: block scripts & nested frames,
- * scope styles to our protocol + inline, allow images/fonts broadly so mockups
- * can pull in stock images and data URIs.
+ * CDN allowlist for external scripts/styles/fonts. Intentionally narrow —
+ * matches the set Anthropic's own artifact sandbox uses, minus the ones
+ * ClaudeUI has no need for. See docs/mockup-sandbox-research.md §2 for
+ * rationale.
  */
-export const MOCKUP_HTML_CSP =
-  "default-src 'none'; " +
-  'style-src mockup-asset: \'unsafe-inline\'; ' +
-  'img-src * data:; ' +
-  'font-src * data:; ' +
-  "script-src 'none'; " +
-  "frame-src 'none'"
+const CDN_SCRIPT = [
+  'https://cdn.tailwindcss.com',
+  'https://cdn.jsdelivr.net',
+  'https://cdnjs.cloudflare.com',
+  'https://unpkg.com',
+  'https://code.jquery.com'
+]
+const CDN_STYLE = [
+  'https://cdn.tailwindcss.com',
+  'https://cdn.jsdelivr.net',
+  'https://cdnjs.cloudflare.com',
+  'https://fonts.googleapis.com',
+  'https://code.jquery.com'
+]
+const CDN_FONT = [
+  'https://fonts.gstatic.com',
+  'https://cdn.jsdelivr.net',
+  'https://cdnjs.cloudflare.com'
+]
+
+/**
+ * Build the Content-Security-Policy for the mockup HTML document.
+ *
+ * Layered posture: the iframe sandbox (allow-scripts allow-same-origin)
+ * pairs with this CSP. The sub-origin wall is the real isolation boundary;
+ * CSP is defense-in-depth.
+ *
+ * `connect-src` is dynamic — the user can extend it via settings. `http:`
+ * is gated behind a separate toggle (HTTPS-only by default).
+ */
+export function buildMockupCsp(settings: MockupSecuritySettings): string {
+  const scheme = `${MOCKUP_ASSET_SCHEME}:`
+  const connectExtras: string[] = []
+  for (const origin of settings.connectAllowlist) {
+    // The textarea stores bare origins or wildcards; trust already-validated entries.
+    connectExtras.push(origin)
+  }
+  const httpFallback = settings.allowHttp ? ' http: ws:' : ''
+
+  return [
+    `default-src 'none'`,
+    // Scripts: inline + eval for Tailwind Play CDN's runtime JIT. `'self'`
+    // is redundant with the scheme but harmless.
+    `script-src 'self' ${scheme} 'unsafe-inline' 'unsafe-eval' ${CDN_SCRIPT.join(' ')}`,
+    `style-src 'self' ${scheme} 'unsafe-inline' ${CDN_STYLE.join(' ')}`,
+    `font-src 'self' ${scheme} data: ${CDN_FONT.join(' ')}`,
+    `img-src 'self' ${scheme} data: blob: https:`,
+    `media-src 'self' ${scheme} data: blob: https:`,
+    `connect-src 'self' ${scheme} https: wss:${httpFallback}${connectExtras.length ? ' ' + connectExtras.join(' ') : ''}`,
+    `worker-src 'self' ${scheme} blob:`,
+    `frame-src 'none'`,
+    `object-src 'none'`,
+    `base-uri 'none'`,
+    `form-action 'none'`
+  ].join('; ')
+}
 
 /**
  * Allow-list of extensions we'll serve as sibling assets.
@@ -28,6 +79,8 @@ export const MOCKUP_HTML_CSP =
  */
 export const ASSET_EXT_MIME: Record<string, string> = {
   '.css': 'text/css; charset=utf-8',
+  '.js': 'application/javascript; charset=utf-8',
+  '.mjs': 'application/javascript; charset=utf-8',
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
   '.jpeg': 'image/jpeg',
@@ -48,9 +101,8 @@ export const ASSET_EXT_MIME: Record<string, string> = {
 }
 
 export type RouteDecision =
-  | { kind: 'tailwind' }
-  | { kind: 'html'; mockupDir: string; dark: boolean }
-  | { kind: 'asset'; path: string; mime: string }
+  | { kind: 'html'; id: string; mockupDir: string; dark: boolean }
+  | { kind: 'asset'; id: string; path: string; mime: string }
   | { kind: 'error'; status: number; reason: string }
 
 /**
@@ -59,23 +111,21 @@ export type RouteDecision =
  * can be unit-tested without Electron.
  */
 export function routeAndValidate(url: URL): RouteDecision {
-  if (url.hostname === 'tailwind.css') {
-    return { kind: 'tailwind' }
-  }
-
-  if (url.hostname !== 'm') {
+  const host = url.hostname
+  if (!host.endsWith(HOST_SUFFIX)) {
     return { kind: 'error', status: 404, reason: 'unknown hostname' }
   }
-
-  const segments = url.pathname.split('/').filter(Boolean)
-  if (segments.length < 2) {
-    return { kind: 'error', status: 400, reason: 'missing segments' }
-  }
-
-  const [b64cwd, id, ...rest] = segments
+  const id = host.slice(0, -HOST_SUFFIX.length)
   if (!MOCKUP_ID_RE.test(id)) {
     return { kind: 'error', status: 400, reason: 'invalid id' }
   }
+
+  const segments = url.pathname.split('/').filter(Boolean)
+  if (segments.length < 1) {
+    return { kind: 'error', status: 400, reason: 'missing segments' }
+  }
+
+  const [b64cwd, ...rest] = segments
 
   let cwd: string
   try {
@@ -93,6 +143,7 @@ export function routeAndValidate(url: URL): RouteDecision {
   if (!relPath || relPath === 'index.html') {
     return {
       kind: 'html',
+      id,
       mockupDir,
       dark: url.searchParams.get('dark') === '1'
     }
@@ -109,7 +160,7 @@ export function routeAndValidate(url: URL): RouteDecision {
     return { kind: 'error', status: 403, reason: 'file type not allowed' }
   }
 
-  return { kind: 'asset', path: targetPath, mime }
+  return { kind: 'asset', id, path: targetPath, mime }
 }
 
 /**
@@ -132,37 +183,21 @@ export function registerMockupAssetScheme(): void {
 /**
  * Registers the handler that serves assets to the mockup iframe.
  *
- * URL layout:
- *   mockup-asset://tailwind.css/                  → bundled Tailwind CSS
- *   mockup-asset://m/<b64cwd>/<id>/               → mockup HTML (index.html)
- *   mockup-asset://m/<b64cwd>/<id>/<sub/path>     → sibling asset (img/font/css)
- *     ?dark=1   — rewrite <html> to <html class="dark"> (HTML only)
- *     ?v=<n>    — cache-bust on file change
+ * URL layout (per-mockup sub-origin):
+ *   mockup-asset://<id>.m/<b64cwd>/              → mockup HTML (index.html)
+ *   mockup-asset://<id>.m/<b64cwd>/<sub/path>    → sibling asset
+ *     ?dark=1           rewrite <html> to <html class="dark"> (HTML only)
+ *     ?v=<n>            cache-bust on file change
+ *     ?parent=<origin>  parent window origin for postMessage targeting
  */
 export function registerMockupAssetHandler(): void {
-  const isDev = !app.isPackaged
-  const cssPath = isDev
-    ? join(__dirname, '../../resources/tailwind-full.css')
-    : join(process.resourcesPath, 'tailwind-full.css')
-
   protocol.handle(MOCKUP_ASSET_SCHEME, async (request) => {
     try {
-      const decision = routeAndValidate(new URL(request.url))
+      const parsed = new URL(request.url)
+      const decision = routeAndValidate(parsed)
 
       if (decision.kind === 'error') {
         return new Response(decision.reason, { status: decision.status })
-      }
-
-      if (decision.kind === 'tailwind') {
-        const response = await net.fetch(pathToFileURL(cssPath).toString())
-        if (!response.ok) return new Response('Not found', { status: 404 })
-        const body = await response.arrayBuffer()
-        return new Response(body, {
-          headers: {
-            'Content-Type': 'text/css; charset=utf-8',
-            'Cache-Control': 'public, max-age=31536000, immutable'
-          }
-        })
       }
 
       if (decision.kind === 'html') {
@@ -175,7 +210,12 @@ export function registerMockupAssetHandler(): void {
       return new Response(body, {
         headers: {
           'Content-Type': decision.mime,
-          'Cache-Control': 'public, max-age=3600',
+          // `no-store` so sibling asset edits (images, CSS, JS) show up on
+          // the next iframe reload. `location.reload()` in Chromium still
+          // respects cache headers — if we said `max-age=3600` here, a
+          // changed asset wouldn't be re-fetched until the entry expired.
+          // Mockups are dev artifacts; the refetch overhead is fine.
+          'Cache-Control': 'no-store',
           'X-Content-Type-Options': 'nosniff'
         }
       })
@@ -193,27 +233,209 @@ async function serveHtml(mockupDir: string, dark: boolean): Promise<Response> {
   let html = await fileResponse.text()
   html = rewriteHtml(html, dark)
 
+  const csp = buildMockupCsp(getMockupSecuritySettings())
+
   return new Response(html, {
     headers: {
       'Content-Type': 'text/html; charset=utf-8',
-      'Cache-Control': 'public, max-age=3600',
-      'Content-Security-Policy': MOCKUP_HTML_CSP,
+      'Cache-Control': 'no-store',
+      'Content-Security-Policy': csp,
       'X-Content-Type-Options': 'nosniff'
     }
   })
 }
 
 /**
- * Applies server-side HTML transforms: dark-mode class and the back-compat
- * Tailwind placeholder rewrite. Exported for unit tests.
+ * Bridge/"omelette" script injected at serve time. Forwards console calls
+ * plus uncaught errors + resource-load failures to the parent window,
+ * reports height for auto-resize, and listens for parent-triggered reloads.
+ *
+ * Lives here (in the protocol handler, not in `wrapHtml`) so bug fixes and
+ * new bridge features apply to every stored mockup file the next time it's
+ * served — no rewrite needed.
+ *
+ * The `data-omelette="1"` attribute is a sentinel: any legacy files that
+ * had a previous copy of the bootstrap baked in get that copy stripped
+ * before we inject the fresh one, so the bridge never runs twice.
+ *
+ * Exported for tests.
+ */
+export const OMELETTE_BOOTSTRAP = `<script data-omelette="1">
+(function(){
+  try {
+    var p = new URLSearchParams(location.search).get('parent');
+    if (!p) return;
+    var target = p;
+    var MAX_LEN = 4000;
+    function snip(s){ s = String(s); return s.length > MAX_LEN ? s.slice(0, MAX_LEN) + '…' : s; }
+    function formatValue(v){
+      if (v instanceof Error) {
+        var head = (v.name || 'Error') + ': ' + (v.message || '');
+        return v.stack ? String(v.stack) : head;
+      }
+      if (v && typeof v === 'object') {
+        try {
+          return JSON.stringify(v, function(_k, val){
+            if (val instanceof Error) return { name: val.name, message: val.message, stack: val.stack };
+            return val;
+          });
+        } catch (e) { return String(v); }
+      }
+      return String(v);
+    }
+    function safeArgs(args){
+      var out = [];
+      for (var i = 0; i < args.length; i++) out.push(snip(formatValue(args[i])));
+      return out;
+    }
+    var levels = ['log','info','warn','error','debug'];
+    for (var i = 0; i < levels.length; i++) {
+      (function(level){
+        var orig = console[level];
+        console[level] = function(){
+          try { parent.postMessage({type:'mockup:log', level: level, args: safeArgs(arguments)}, target); } catch (e) {}
+          if (orig) orig.apply(console, arguments);
+        };
+      })(levels[i]);
+    }
+    // ErrorEvent fires for BOTH uncaught JS errors AND resource-load failures
+    // (e.g. <img src="missing.png">). The two cases look completely different
+    // on the event — split them up so the user sees useful details for each.
+    window.addEventListener('error', function(e){
+      try {
+        var t = e && e.target;
+        // Resource-load failure: e.target is an element with a src/href attr,
+        // not the window. e.message + e.error are both empty.
+        if (t && t !== window && t.nodeType === 1 && (t.src || t.href)) {
+          var url = t.src || t.href;
+          var tag = (t.tagName || 'resource').toLowerCase();
+          parent.postMessage({
+            type: 'mockup:error',
+            message: snip('Failed to load <' + tag + '>: ' + url),
+            stack: '',
+            filename: snip(url),
+            lineno: 0
+          }, target);
+          return;
+        }
+        // Uncaught JS error. e.error holds the real Error object for
+        // same-origin scripts; it's null for cross-origin scripts loaded
+        // without CORS (e.message is the sanitized "Script error." string).
+        var err = e && e.error;
+        var name = err && err.name ? err.name : '';
+        var msg = err && err.message ? err.message : (e.message || '');
+        var fullMsg = name && msg ? (name + ': ' + msg) : (name || msg || 'Uncaught error (details suppressed by browser — likely a cross-origin script without CORS)');
+        parent.postMessage({
+          type: 'mockup:error',
+          message: snip(fullMsg),
+          stack: err && err.stack ? snip(err.stack) : '',
+          filename: snip(e.filename || ''),
+          lineno: e.lineno || 0
+        }, target);
+      } catch (err) {}
+    }, true);
+    window.addEventListener('unhandledrejection', function(e){
+      try {
+        var reason = e && e.reason;
+        var isErr = reason instanceof Error;
+        var name = isErr && reason.name ? reason.name : '';
+        var msg = isErr && reason.message ? reason.message : String(reason);
+        var fullMsg = name && msg ? (name + ': ' + msg) : msg;
+        parent.postMessage({
+          type: 'mockup:error',
+          message: snip('Unhandled rejection: ' + fullMsg),
+          stack: isErr && reason.stack ? snip(reason.stack) : '',
+          filename: '',
+          lineno: 0
+        }, target);
+      } catch (err) {}
+    });
+    function postHeight(){
+      try {
+        var h = document.documentElement.scrollHeight;
+        parent.postMessage({type:'mockup:height', height: h}, target);
+      } catch (e) {}
+    }
+    function wireHeight(){
+      postHeight();
+      try {
+        var ro = new ResizeObserver(postHeight);
+        ro.observe(document.documentElement);
+        if (document.body) ro.observe(document.body);
+      } catch (e) {}
+      window.addEventListener('load', postHeight);
+    }
+    // Tag <script type="text/babel"|"text/jsx"> blocks with data-plugins +
+    // data-filename BEFORE @babel/standalone scans them on DOMContentLoaded.
+    // This makes JSX error stack traces readable (filename + line number)
+    // instead of pointing at anonymous runtime-compiled blobs. Matches the
+    // claude.ai/design runtime behavior. No-op when no Babel scripts are
+    // present — cost is a single querySelectorAll per page load.
+    function tagBabelScripts(){
+      try {
+        var scripts = document.querySelectorAll(
+          'script[type="text/babel"], script[type="text/jsx"]'
+        );
+        var n = 0;
+        for (var i = 0; i < scripts.length; i++) {
+          var s = scripts[i];
+          if (!s.hasAttribute('data-plugins')) {
+            s.setAttribute('data-plugins', 'transform-react-jsx-source');
+          }
+          if (!s.hasAttribute('data-filename')) {
+            var src = s.getAttribute('src');
+            s.setAttribute('data-filename', src || 'inline-' + (++n));
+          }
+        }
+      } catch (e) {}
+    }
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', function(){
+        tagBabelScripts();
+        wireHeight();
+      });
+    } else {
+      tagBabelScripts();
+      wireHeight();
+    }
+    // Parent-triggered in-place reload. Avoids mutating the iframe's src
+    // attribute — which in Chromium causes the iframe to steal focus on the
+    // new load, scrolling the parent container to the iframe. location.reload()
+    // keeps focus on the outer page while still refetching the HTML (no-store).
+    window.addEventListener('message', function(ev){
+      try {
+        if (ev.source !== window.parent) return;
+        if (ev.origin !== target) return;
+        var d = ev.data;
+        if (d && d.type === 'mockup:reload') { location.reload(); }
+      } catch (err) {}
+    });
+  } catch (e) {}
+})();
+</script>`
+
+/**
+ * Strips any `<script data-omelette="1">...</script>` blocks from the HTML.
+ * Legacy mockup files may have an older copy of the bridge baked in by a
+ * previous `wrapHtml`; stripping guarantees only the serve-time injected
+ * copy runs. Case-insensitive match, `s` flag so `.` crosses newlines.
+ */
+const OMELETTE_STRIP_RE =
+  /<script\b[^>]*\bdata-omelette\s*=\s*["']?1["']?[^>]*>[\s\S]*?<\/script>/gi
+
+/**
+ * Applies server-side HTML transforms: dark-mode class + bridge script
+ * injection. Exported for unit tests.
  */
 export function rewriteHtml(html: string, dark: boolean): string {
-  let out = html
-  if (out.includes('<!-- tailwind:inject -->')) {
-    out = out.replace(
-      '<!-- tailwind:inject -->',
-      '<link rel="stylesheet" href="mockup-asset://tailwind.css">'
-    )
+  let out = html.replace(OMELETTE_STRIP_RE, '')
+  // Inject the bridge right before `</head>`. If the HTML has no </head>
+  // (malformed / user-edited), fall back to prepending — the script still
+  // runs, just later than ideal.
+  if (out.includes('</head>')) {
+    out = out.replace('</head>', `${OMELETTE_BOOTSTRAP}\n</head>`)
+  } else {
+    out = OMELETTE_BOOTSTRAP + out
   }
   if (dark) {
     out = out.replace('<html', '<html class="dark"')
