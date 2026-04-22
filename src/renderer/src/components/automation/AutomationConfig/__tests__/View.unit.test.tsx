@@ -51,6 +51,8 @@ function makeProps(overrides: Partial<AutomationConfigViewProps> = {}): Automati
     models: [opus47, legacySonnet],
     globalPerms: null,
     hasRunningRun: false,
+    runs: [],
+    detailTab: 'configure',
     loadDirPerms: vi.fn(async () => null),
     onSave: vi.fn(),
     onToggleEnabled: vi.fn(),
@@ -58,6 +60,8 @@ function makeProps(overrides: Partial<AutomationConfigViewProps> = {}): Automati
     onRunNow: vi.fn(),
     onStopRun: vi.fn(),
     onPickFolder: vi.fn(async () => null),
+    onSelectRun: vi.fn(),
+    onSetDetailTab: vi.fn(),
     ...overrides,
   }
 }

@@ -2,10 +2,13 @@ import { create } from 'zustand'
 import type { Automation, AutomationRun, ChatMessage } from '../../../shared/types'
 import { mergeContentBlocks } from '../utils/content-blocks'
 
+export type DetailTab = 'configure' | 'runs' | 'permissions'
+
 interface AutomationState {
   automations: Automation[]
   selectedAutomationId: string | null
   selectedRunId: string | null
+  detailTab: DetailTab
   runs: Record<string, AutomationRun[]> // automationId → runs
   runMessages: ChatMessage[] | null // loaded for selected run
   notificationBadge: number
@@ -17,6 +20,7 @@ interface AutomationState {
   selectAutomation: (id: string | null) => void
   selectRun: (automationId: string, runId: string) => void
   clearRunSelection: () => void
+  setDetailTab: (tab: DetailTab) => void
   setRuns: (automationId: string, runs: AutomationRun[]) => void
   updateRun: (automationId: string, run: AutomationRun) => void
   setRunMessages: (messages: ChatMessage[] | null) => void
@@ -32,6 +36,7 @@ export const useAutomationStore = create<AutomationState>((set) => ({
   automations: [],
   selectedAutomationId: null,
   selectedRunId: null,
+  detailTab: 'configure',
   runs: {},
   runMessages: null,
   notificationBadge: 0,
@@ -41,13 +46,16 @@ export const useAutomationStore = create<AutomationState>((set) => ({
   setAutomations: (automations) => set({ automations }),
 
   selectAutomation: (id) =>
-    set({ selectedAutomationId: id, selectedRunId: null, runMessages: null }),
+    set({ selectedAutomationId: id, selectedRunId: null, runMessages: null, detailTab: 'configure' }),
 
   selectRun: (automationId, runId) =>
     set({ selectedAutomationId: automationId, selectedRunId: runId }),
 
+  // Back from a run detail → return to Runs tab so the context stays intact.
   clearRunSelection: () =>
-    set({ selectedRunId: null, runMessages: null }),
+    set({ selectedRunId: null, runMessages: null, detailTab: 'runs' }),
+
+  setDetailTab: (tab) => set({ detailTab: tab }),
 
   setRuns: (automationId, runs) =>
     set((s) => ({ runs: { ...s.runs, [automationId]: runs } })),

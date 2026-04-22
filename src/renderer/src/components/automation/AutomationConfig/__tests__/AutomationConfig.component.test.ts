@@ -13,6 +13,12 @@
  *   5. onStopRun calls cancelAutomationRun + dismissAutomationRun
  *   6. onDelete calls deleteAutomation + clears selection
  *   7. loadDirPerms merges project + local permissions
+ *   8. On mount, backfills runs via listAutomationRuns when not cached
+ *      (the Runs tab depends on this initial fetch)
+ *   9. onSelectRun delegates to store.selectRun, which flips the detail
+ *      panel over to the run history view
+ *  10. onSetDetailTab updates the store's detailTab so tab switching
+ *      survives re-renders
  */
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -23,7 +29,7 @@ import { render, act } from '@testing-library/react'
 import { useAutomationStore } from '../../../../stores/automation-store'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
 import type { AutomationConfigViewProps } from '../View'
-import type { Automation, ClaudePermissions } from '../../../../../../shared/types'
+import type { Automation, AutomationRun, ClaudePermissions } from '../../../../../../shared/types'
 
 let viewProps: AutomationConfigViewProps | null = null
 vi.mock('../View', () => ({
@@ -65,6 +71,7 @@ describe('AutomationConfig FC', () => {
   let runCalls: string[]
   let cancelCalls: string[]
   let dismissCalls: Array<{ automationId: string; runId: string }>
+  let listRunsCalls: string[]
 
   beforeEach(async () => {
     app = await bootTestApp()
@@ -74,6 +81,7 @@ describe('AutomationConfig FC', () => {
     runCalls = []
     cancelCalls = []
     dismissCalls = []
+    listRunsCalls = []
     viewProps = null
 
     // Suppress window.confirm — always accept
@@ -93,10 +101,16 @@ describe('AutomationConfig FC', () => {
     app.bridge.ipcMain.handle('automation:dismiss-run', async (_e, automationId: string, runId: string) => {
       dismissCalls.push({ automationId, runId })
     })
+    app.bridge.ipcMain.handle('automation:list-runs', async (_e, id: string): Promise<AutomationRun[]> => {
+      listRunsCalls.push(id)
+      return [{ id: `run-${id}`, automationId: id, status: 'success', startedAt: 1, finishedAt: 2, totalCostUsd: 0 }]
+    })
 
     useAutomationStore.setState({
       automations: [],
       selectedAutomationId: null,
+      selectedRunId: null,
+      detailTab: 'configure',
       runs: {},
     })
   })
@@ -197,5 +211,48 @@ describe('AutomationConfig FC', () => {
 
     const perms = await viewProps!.loadDirPerms('/d/repo')
     expect(perms).toEqual({ allow: ['ProjectAllow'], deny: ['LocalDeny'] })
+  })
+
+  it('backfills runs via listAutomationRuns on mount when runs not cached', async () => {
+    await selectAutomation(makeAutomation())
+    await act(async () => { await renderFC() })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+
+    expect(listRunsCalls).toEqual(['auto-1'])
+    expect(useAutomationStore.getState().runs['auto-1']).toHaveLength(1)
+  })
+
+  it('does not refetch runs when the store already has them', async () => {
+    await selectAutomation(makeAutomation())
+    useAutomationStore.setState({
+      runs: { 'auto-1': [{ id: 'cached', automationId: 'auto-1', status: 'success', startedAt: 0, finishedAt: 0, totalCostUsd: 0 }] },
+    })
+    await act(async () => { await renderFC() })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+
+    expect(listRunsCalls).toEqual([])
+  })
+
+  it('onSelectRun flips selectedRunId so the detail panel shows run history', async () => {
+    await selectAutomation(makeAutomation())
+    await act(async () => { await renderFC() })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+
+    act(() => { viewProps!.onSelectRun('run-xyz') })
+
+    expect(useAutomationStore.getState().selectedRunId).toBe('run-xyz')
+    expect(useAutomationStore.getState().selectedAutomationId).toBe('auto-1')
+  })
+
+  it('onSetDetailTab updates the store so tab choice persists across re-renders', async () => {
+    await selectAutomation(makeAutomation())
+    await act(async () => { await renderFC() })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+
+    act(() => { viewProps!.onSetDetailTab('runs') })
+    expect(useAutomationStore.getState().detailTab).toBe('runs')
+
+    act(() => { viewProps!.onSetDetailTab('permissions') })
+    expect(useAutomationStore.getState().detailTab).toBe('permissions')
   })
 })

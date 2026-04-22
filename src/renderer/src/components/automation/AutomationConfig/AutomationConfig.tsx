@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useAutomationStore } from '../../../stores/automation-store'
-import type { Automation, ClaudePermissions, ModelInfo } from '../../../../../shared/types'
+import type { Automation, AutomationRun, ClaudePermissions, ModelInfo } from '../../../../../shared/types'
 import { AutomationConfigView, type ModelOption, type InheritedPerms } from './View'
 
 export function AutomationConfig(): React.JSX.Element {
@@ -20,6 +20,10 @@ function AutomationConfigController({ automation }: { automation: Automation }):
   const [globalPerms, setGlobalPerms] = useState<InheritedPerms | null>(null)
 
   const runs = useAutomationStore((s) => s.runs[automation.id])
+  const detailTab = useAutomationStore((s) => s.detailTab)
+  const setDetailTab = useAutomationStore((s) => s.setDetailTab)
+  const setRuns = useAutomationStore((s) => s.setRuns)
+  const selectRun = useAutomationStore((s) => s.selectRun)
   const hasRunningRun = runs?.some((r) => r.status === 'running') ?? false
 
   useEffect(() => {
@@ -33,6 +37,16 @@ function AutomationConfigController({ automation }: { automation: Automation }):
       setGlobalPerms(user.allow.length > 0 || user.deny.length > 0 ? { allow: user.allow, deny: user.deny } : null)
     }).catch(() => setGlobalPerms(null))
   }, [])
+
+  // Load runs on mount if not already in the store, so the Runs tab is populated.
+  useEffect(() => {
+    if (runs !== undefined) return
+    let cancelled = false
+    window.api.listAutomationRuns(automation.id)
+      .then((r: AutomationRun[]) => { if (!cancelled) setRuns(automation.id, r) })
+      .catch(() => { if (!cancelled) setRuns(automation.id, []) })
+    return () => { cancelled = true }
+  }, [automation.id, runs, setRuns])
 
   const loadDirPerms = useCallback(async (cwd: string): Promise<InheritedPerms | null> => {
     if (!cwd) return null
@@ -82,12 +96,18 @@ function AutomationConfigController({ automation }: { automation: Automation }):
     return window.api.pickFolder()
   }, [])
 
+  const handleSelectRun = useCallback((runId: string) => {
+    selectRun(automation.id, runId)
+  }, [automation.id, selectRun])
+
   return (
     <AutomationConfigView
       automation={automation}
       models={models}
       globalPerms={globalPerms}
       hasRunningRun={hasRunningRun}
+      runs={runs}
+      detailTab={detailTab}
       loadDirPerms={loadDirPerms}
       onSave={handleSave}
       onToggleEnabled={handleToggleEnabled}
@@ -95,6 +115,8 @@ function AutomationConfigController({ automation }: { automation: Automation }):
       onRunNow={handleRunNow}
       onStopRun={handleStopRun}
       onPickFolder={handlePickFolder}
+      onSelectRun={handleSelectRun}
+      onSetDetailTab={setDetailTab}
     />
   )
 }

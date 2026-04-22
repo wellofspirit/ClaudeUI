@@ -1,34 +1,30 @@
-import { useEffect } from 'react'
 import type { Automation, AutomationRun } from '../../../../../shared/types'
-import { formatDuration } from './utils'
+import {
+  computeNextRuns,
+  formatScheduleHint,
+  formatTimeDelta,
+} from '../AutomationConfig/utils'
 
 export interface AutomationListViewProps {
   className?: string
   automations: Automation[]
   selectedAutomationId: string | null
-  selectedRunId: string | null
   runs: Record<string, AutomationRun[] | undefined>
-  expandedId: string | null
-  onToggleExpand: (id: string) => void
   onCreate: () => void
   onSelect: (id: string) => void
-  onSelectRun: (automationId: string, runId: string) => void
-  onLoadRuns: (automationId: string) => void
 }
 
 export function AutomationListView({
   className,
   automations,
   selectedAutomationId,
-  selectedRunId,
   runs,
-  expandedId,
-  onToggleExpand,
   onCreate,
   onSelect,
-  onSelectRun,
-  onLoadRuns,
 }: AutomationListViewProps): React.JSX.Element {
+  const active = automations.filter((a) => a.enabled)
+  const paused = automations.filter((a) => !a.enabled)
+
   return (
     <div className={className}>
       <div className="flex items-center justify-between px-3 py-2.5 border-b border-border/20">
@@ -44,7 +40,7 @@ export function AutomationListView({
         </button>
       </div>
 
-      <div className="py-1">
+      <div className="py-2">
         {automations.length === 0 && (
           <div className="px-3 py-8 text-center text-text-muted text-xs">
             No automations yet.
@@ -52,147 +48,125 @@ export function AutomationListView({
             Click <b>+ New</b> to create one.
           </div>
         )}
-        {automations.map((auto) => (
-          <AutomationListItem
-            key={auto.id}
-            automation={auto}
-            isSelected={auto.id === selectedAutomationId}
-            expanded={expandedId === auto.id}
-            runs={runs[auto.id]}
-            selectedRunId={selectedRunId}
-            onSelect={() => onSelect(auto.id)}
-            onToggleExpand={() => onToggleExpand(auto.id)}
-            onSelectRun={(runId) => onSelectRun(auto.id, runId)}
-            onLoadRuns={() => onLoadRuns(auto.id)}
-          />
-        ))}
+
+        {active.length > 0 && (
+          <Group title={`Active · ${active.length}`}>
+            {active.map((a) => (
+              <ListItem
+                key={a.id}
+                automation={a}
+                runs={runs[a.id]}
+                isSelected={a.id === selectedAutomationId}
+                onSelect={() => onSelect(a.id)}
+              />
+            ))}
+          </Group>
+        )}
+
+        {paused.length > 0 && (
+          <Group title={`Paused · ${paused.length}`}>
+            {paused.map((a) => (
+              <ListItem
+                key={a.id}
+                automation={a}
+                runs={runs[a.id]}
+                isSelected={a.id === selectedAutomationId}
+                onSelect={() => onSelect(a.id)}
+              />
+            ))}
+          </Group>
+        )}
       </div>
     </div>
   )
 }
 
-function AutomationListItem({
+function Group({ title, children }: { title: string; children: React.ReactNode }): React.JSX.Element {
+  return (
+    <div className="mb-3 last:mb-0">
+      <div className="px-3 py-1 text-[10px] font-semibold text-text-muted uppercase tracking-wider">{title}</div>
+      {children}
+    </div>
+  )
+}
+
+function ListItem({
   automation,
-  isSelected,
-  expanded,
   runs,
-  selectedRunId,
+  isSelected,
   onSelect,
-  onToggleExpand,
-  onSelectRun,
-  onLoadRuns,
 }: {
   automation: Automation
-  isSelected: boolean
-  expanded: boolean
   runs: AutomationRun[] | undefined
-  selectedRunId: string | null
+  isSelected: boolean
   onSelect: () => void
-  onToggleExpand: () => void
-  onSelectRun: (runId: string) => void
-  onLoadRuns: () => void
 }): React.JSX.Element {
-  // Escape valve: the View triggers a side-effect (onLoadRuns) when the
-  // user expands a row. The IPC call itself lives in the FC — the View
-  // only signals the trigger — but this is still a behavioral effect in
-  // the View. Compare with BackgroundBashOutput: same pattern, same reason
-  // (the trigger is bound to local UI state, not FC-owned state).
-  useEffect(() => {
-    if (expanded && !runs) {
-      onLoadRuns()
-    }
-  }, [expanded, runs, onLoadRuns])
+  const dot = automation.enabled
+    ? automation.lastRunStatus === 'error'
+      ? 'bg-red-400'
+      : 'bg-green-400'
+    : 'bg-gray-500'
+  const scheduleHint = formatScheduleHint(automation.schedule)
+  const nextRun = computeNextRuns(automation.schedule, automation.lastRunAt, 1)[0]
+  const nextIn = nextRun ? formatTimeDelta(nextRun.getTime() - Date.now()) : null
 
-  const statusDot = automation.enabled ? 'bg-green-400' : 'bg-gray-400'
-  const lastRunIcon = automation.lastRunStatus === 'success'
-    ? '✅'
-    : automation.lastRunStatus === 'error'
-      ? '❌'
-      : null
-
-  return (
-    <div>
-      <div
-        onClick={onSelect}
-        className={`flex items-center gap-2 px-3 py-1.5 cursor-pointer transition-colors text-sm ${
-          isSelected ? 'bg-bg-hover text-text-primary' : 'text-text-secondary hover:bg-bg-hover/50'
-        }`}
-      >
-        <button
-          onClick={(e) => { e.stopPropagation(); onToggleExpand() }}
-          className="p-0.5 hover:bg-bg-hover rounded shrink-0"
-        >
-          <svg
-            width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
-            className={`transition-transform ${expanded ? 'rotate-90' : ''}`}
-          >
-            <polyline points="9 18 15 12 9 6" />
-          </svg>
-        </button>
-        <div className={`w-2 h-2 rounded-full shrink-0 ${statusDot}`} />
-        <span className="truncate flex-1 text-[13px]">{automation.name}</span>
-        {lastRunIcon && <span className="text-xs shrink-0">{lastRunIcon}</span>}
-      </div>
-
-      {expanded && (
-        <div className="ml-7 border-l border-border/20">
-          {!runs || runs.length === 0 ? (
-            <div className="px-3 py-2 text-xs text-text-muted">No runs yet</div>
-          ) : (
-            runs.slice(0, 20).map((run) => (
-              <RunHistoryItem
-                key={run.id}
-                run={run}
-                selected={selectedRunId === run.id}
-                onClick={() => onSelectRun(run.id)}
-              />
-            ))
-          )}
-        </div>
-      )}
-    </div>
-  )
-}
-
-function RunHistoryItem({
-  run,
-  selected,
-  onClick
-}: {
-  run: AutomationRun
-  selected: boolean
-  onClick: () => void
-}): React.JSX.Element {
-  const statusIcon = run.status === 'success' ? '✅'
-    : run.status === 'error' ? '❌'
-    : '🔄'
-
-  const time = new Date(run.startedAt).toLocaleString(undefined, {
-    month: 'short',
-    day: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit'
-  })
-
-  const duration = run.finishedAt
-    ? formatDuration(run.finishedAt - run.startedAt)
-    : 'running'
-
-  const cost = run.totalCostUsd > 0
-    ? `$${run.totalCostUsd.toFixed(4)}`
-    : null
+  const recent = (runs ?? []).slice(0, 12)
+  const totalCost = (runs ?? []).reduce((sum, r) => sum + (r.totalCostUsd || 0), 0)
+  const runCount = runs?.length ?? 0
 
   return (
     <button
-      onClick={onClick}
-      className={`w-full text-left px-3 py-1.5 text-xs flex items-center gap-1.5 transition-colors ${
-        selected ? 'bg-bg-hover text-text-primary' : 'text-text-muted hover:bg-bg-hover/50 hover:text-text-secondary'
+      onClick={onSelect}
+      className={`w-full text-left flex items-start gap-2.5 px-3 py-2 rounded-md border transition-colors ${
+        isSelected
+          ? 'bg-bg-hover/60 border-text-accent/30'
+          : 'border-transparent text-text-secondary hover:bg-bg-hover/40'
       }`}
     >
-      <span className="shrink-0">{statusIcon}</span>
-      <span className="shrink-0">{time}</span>
-      <span className="shrink-0 text-text-muted/60">{duration}</span>
-      {cost && <span className="shrink-0 text-text-muted/60">{cost}</span>}
+      <span className={`mt-1.5 w-1.5 h-1.5 rounded-full shrink-0 ${dot}`} />
+      <div className="flex-1 min-w-0">
+        <div className="text-[13px] font-medium truncate text-text-primary">{automation.name}</div>
+        <div className="text-[11px] text-text-muted font-mono truncate">
+          {scheduleHint}
+          {nextIn && <> · {automation.enabled ? 'next in ' : 'in '}{nextIn}</>}
+        </div>
+        {recent.length > 0 && (
+          <div className="flex items-center gap-2 mt-2">
+            <Sparkline runs={recent} />
+            <span className="text-[11px] text-text-muted">
+              {runCount} run{runCount === 1 ? '' : 's'}
+              {totalCost > 0 && <> · ${totalCost.toFixed(2)}</>}
+            </span>
+          </div>
+        )}
+      </div>
     </button>
   )
 }
+
+function Sparkline({ runs }: { runs: AutomationRun[] }): React.JSX.Element {
+  // Most recent on the right: reverse the newest-first slice.
+  const ordered = [...runs].reverse()
+  const durations = ordered.map((r) => (r.finishedAt ?? Date.now()) - r.startedAt)
+  const maxDur = Math.max(...durations, 1)
+
+  return (
+    <div className="flex items-end gap-[2px] h-3.5" aria-hidden>
+      {ordered.map((r, i) => {
+        const color =
+          r.status === 'success' ? 'bg-green-400'
+          : r.status === 'error' ? 'bg-red-400'
+          : 'bg-blue-400'
+        const h = 4 + Math.round(10 * (durations[i] / maxDur))
+        return (
+          <span
+            key={r.id}
+            className={`w-[3px] rounded-sm ${color}`}
+            style={{ height: `${h}px` }}
+          />
+        )
+      })}
+    </div>
+  )
+}
+

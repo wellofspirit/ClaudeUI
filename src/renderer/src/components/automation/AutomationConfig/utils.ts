@@ -1,4 +1,5 @@
-import type { Automation } from '../../../../../shared/types'
+import { CronExpressionParser } from 'cron-parser'
+import type { Automation, AutomationSchedule } from '../../../../../shared/types'
 
 export const SCHEDULE_PRESETS = [
   { label: 'Every 15 min', ms: 15 * 60 * 1000 },
@@ -25,7 +26,7 @@ export const PERMISSION_TEMPLATES = [
 
 export const PERMISSION_MODES = [
   { value: 'default', label: 'Default', description: 'Deny tools that require approval' },
-  { value: 'auto', label: 'Auto', description: 'Classify tool calls with Haiku' }
+  { value: 'auto', label: 'Auto', description: 'Auto-classify tool calls and reject dangerous ones' }
 ] as const
 
 export interface DirtyCheckInput {
@@ -54,4 +55,93 @@ export function isAutomationDirty(current: DirtyCheckInput, original: Automation
     JSON.stringify(current.allowRules) !== JSON.stringify(original.permissions.allow) ||
     JSON.stringify(current.denyRules) !== JSON.stringify(original.permissions.deny)
   )
+}
+
+// ── Schedule helpers ────────────────────────────────────────────────
+
+export type IntervalUnit = 'minutes' | 'hours' | 'days'
+
+const MS_PER_MINUTE = 60_000
+const MS_PER_HOUR = 3_600_000
+const MS_PER_DAY = 86_400_000
+
+export function unitMultiplier(u: IntervalUnit): number {
+  if (u === 'days') return MS_PER_DAY
+  if (u === 'hours') return MS_PER_HOUR
+  return MS_PER_MINUTE
+}
+
+/** Pick the largest unit that divides `ms` cleanly; falls back to minutes. */
+export function naturalUnit(ms: number): IntervalUnit {
+  if (ms > 0 && ms % MS_PER_DAY === 0) return 'days'
+  if (ms > 0 && ms % MS_PER_HOUR === 0) return 'hours'
+  return 'minutes'
+}
+
+/** Compute the upcoming run times for a schedule, N runs ahead. */
+export function computeNextRuns(schedule: AutomationSchedule, lastRunAt: number | null, count: number, now: number = Date.now()): Date[] {
+  try {
+    if (schedule.type === 'cron') {
+      if (!schedule.cronExpression) return []
+      const it = CronExpressionParser.parse(schedule.cronExpression, { currentDate: new Date(now) })
+      const out: Date[] = []
+      for (let i = 0; i < count; i++) out.push(it.next().toDate())
+      return out
+    }
+    const ms = schedule.intervalMs ?? 0
+    if (ms === 0) return []
+    // Anchor to lastRunAt when the next tick is still in the future; else start from now.
+    const anchor = lastRunAt && lastRunAt + ms > now ? lastRunAt : now
+    const out: Date[] = []
+    for (let i = 1; i <= count; i++) out.push(new Date(anchor + i * ms))
+    return out
+  } catch {
+    return []
+  }
+}
+
+/** Short "every 15m" / "every 3h" / "every 2d" / cron expression readback. */
+export function formatScheduleSummary(schedule: AutomationSchedule): string {
+  if (schedule.type === 'cron') return `cron · ${schedule.cronExpression || '(unset)'}`
+  const ms = schedule.intervalMs ?? 0
+  if (ms === 0) return 'no interval'
+  const mins = Math.round(ms / MS_PER_MINUTE)
+  if (mins < 60) return `every ${mins}m`
+  const hours = Math.round(mins / 60)
+  if (hours < 24) return `every ${hours}h`
+  const days = Math.round(hours / 24)
+  return `every ${days}d`
+}
+
+/** Even shorter form used in the list sidebar (no "cron ·" prefix). */
+export function formatScheduleHint(schedule: AutomationSchedule): string {
+  if (schedule.type === 'cron') return schedule.cronExpression || 'cron'
+  const ms = schedule.intervalMs ?? 0
+  if (ms === 0) return ''
+  const mins = Math.round(ms / MS_PER_MINUTE)
+  if (mins < 60) return `every ${mins}m`
+  const hours = Math.round(mins / 60)
+  if (hours < 24) return `every ${hours}h`
+  const days = Math.round(hours / 24)
+  return `every ${days}d`
+}
+
+/** Compact "3m" / "12h" / "2d" delta for countdowns. */
+export function formatTimeDelta(ms: number): string {
+  if (ms <= 0) return 'soon'
+  if (ms < MS_PER_MINUTE) return '<1m'
+  if (ms < MS_PER_HOUR) return `${Math.round(ms / MS_PER_MINUTE)}m`
+  if (ms < MS_PER_DAY) return `${Math.round(ms / MS_PER_HOUR)}h`
+  return `${Math.round(ms / MS_PER_DAY)}d`
+}
+
+// ── Status derivation ──────────────────────────────────────────────
+
+export type StatusKind = 'running' | 'active' | 'disabled' | 'failed'
+
+export function deriveStatus(input: { enabled: boolean; hasRunningRun: boolean; lastRunStatus: Automation['lastRunStatus'] }): StatusKind {
+  if (input.hasRunningRun) return 'running'
+  if (!input.enabled) return 'disabled'
+  if (input.lastRunStatus === 'error') return 'failed'
+  return 'active'
 }
