@@ -20,8 +20,6 @@ extraResources:
       - version.json
   - from: out/web
     to: web
-  - from: resources/tailwind-full.css
-    to: tailwind-full.css
 asarUnpack:
   - resources/**
   - node_modules/node-pty/**

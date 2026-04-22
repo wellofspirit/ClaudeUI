@@ -138,6 +138,8 @@ export interface AppSettings {
   mermaidTheme: 'auto' | 'dark' | 'default' | 'neutral' | 'forest' // mermaid diagram theme
   logLevel: 'debug' | 'info' | 'warn' | 'error' // global log level
   logFilter: string // per-source overrides: "UsageFetcher:debug,BlockUsage:debug"
+  mockupConnectAllowlist: string // newline-separated origin allowlist for mockup iframe `connect-src`
+  mockupAllowHttp: boolean // when true, mockup iframes may connect over plaintext http:/ws:
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -190,7 +192,9 @@ const DEFAULT_SETTINGS: AppSettings = {
   },
   mermaidTheme: 'auto',
   logLevel: 'warn',
-  logFilter: ''
+  logFilter: '',
+  mockupConnectAllowlist: '',
+  mockupAllowHttp: false
 }
 
 export function applyTheme(theme: ThemeId): void {

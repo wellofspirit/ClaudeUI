@@ -1,6 +1,7 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
-import { buildMockupUrl } from '../../../../shared/mockup-url'
+import { buildMockupUrl, mockupOriginFor } from '../../../../shared/mockup-url'
+import { useMockupBridge } from '../../hooks/useMockupBridge'
 import { MockupPanelView } from './View'
 
 interface Props {
@@ -10,8 +11,9 @@ interface Props {
 /**
  * FC for the right-panel mockup preview.
  * Iframe loads directly from `mockup-asset://` — dark mode is a URL query
- * param so the handler can rewrite the `<html>` tag server-side (scripts are
- * blocked by sandbox=""). File changes bump a version counter for cache bust.
+ * param so the handler can rewrite the `<html>` tag server-side (scripts
+ * can also do it, but the query param is cheaper). File changes bump a
+ * version counter for cache bust.
  */
 export function MockupPanel({ style }: Props): React.JSX.Element {
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
@@ -24,16 +26,20 @@ export function MockupPanel({ style }: Props): React.JSX.Element {
   const [error, setError] = useState<string | null>(null)
   const [darkMode, setDarkMode] = useState(false)
   const [version, setVersion] = useState(1)
+  const [consoleOpen, setConsoleOpen] = useState(false)
+  const iframeRef = useRef<HTMLIFrameElement | null>(null)
 
-  // HTML source is only used for the Code tab + Copy button.
   const loadHtml = useCallback(() => {
     if (!cwd || !mockupDir) return
-    window.api.readMockupHtml(cwd, mockupDir).then((content) => {
-      setHtml(content)
-      setError(null)
-    }).catch((err: Error) => {
-      setError(err.message || 'Failed to load mockup')
-    })
+    window.api
+      .readMockupHtml(cwd, mockupDir)
+      .then((content) => {
+        setHtml(content)
+        setError(null)
+      })
+      .catch((err: Error) => {
+        setError(err.message || 'Failed to load mockup')
+      })
   }, [cwd, mockupDir])
 
   useEffect(() => {
@@ -58,8 +64,44 @@ export function MockupPanel({ style }: Props): React.JSX.Element {
     }
   }, [cwd, mockupDir, loadHtml])
 
+  // `version` intentionally omitted from the URL — mutating iframe.src on
+  // file change makes Chromium focus the iframe and scroll-anchor to it.
+  // We trigger in-place reloads via postMessage instead (see effect below).
+  // `dark` stays in the URL because dark mode needs a server-side HTML
+  // rewrite to add `class="dark"` to <html>.
   const iframeSrc =
-    cwd && mockupDir ? buildMockupUrl(cwd, mockupDir, { dark: darkMode, version }) : null
+    cwd && mockupDir
+      ? buildMockupUrl(cwd, mockupDir, {
+          dark: darkMode,
+          parentOrigin: window.location.origin
+        })
+      : null
+
+  const { logs, errors, clearLogs } = useMockupBridge(iframeRef, mockupDir, version)
+
+  // Trigger an in-place iframe reload on version bump — after the initial
+  // load. First render uses the src attribute; subsequent file changes
+  // postMessage-trigger a `location.reload()` inside the iframe.
+  const prevVersionRef = useRef(version)
+  useEffect(() => {
+    if (prevVersionRef.current === version) return
+    prevVersionRef.current = version
+    if (!mockupDir) return
+    const iframe = iframeRef.current
+    if (!iframe?.contentWindow) return
+    iframe.contentWindow.postMessage({ type: 'mockup:reload' }, mockupOriginFor(mockupDir))
+  }, [version, mockupDir])
+
+  // Auto-pop the drawer when the error count grows (e.g. 0 → 1) so users
+  // notice. Render-time setState guarded by equality on the previous count
+  // — the sanctioned pattern for reacting to state changes without useEffect
+  // cascades. See react.dev §"Storing information from previous renders".
+  const [prevErrorCount, setPrevErrorCount] = useState(0)
+  if (errors.length !== prevErrorCount) {
+    const grew = errors.length > prevErrorCount
+    setPrevErrorCount(errors.length)
+    if (grew && !consoleOpen) setConsoleOpen(true)
+  }
 
   const handleClose = (): void => {
     if (activeSessionId) closeMockupPanel(activeSessionId)
@@ -69,8 +111,16 @@ export function MockupPanel({ style }: Props): React.JSX.Element {
     if (html) navigator.clipboard.writeText(html).catch(() => {})
   }
 
+  // Manual refresh — also reloads the HTML source so the Code tab stays in
+  // sync. Bumping `version` drives the postMessage-reload effect above.
+  const handleRefresh = (): void => {
+    loadHtml()
+    setVersion((v) => v + 1)
+  }
+
   return (
     <MockupPanelView
+      ref={iframeRef}
       style={style}
       mockupTitle={mockupTitle}
       mockupDir={mockupDir}
@@ -79,8 +129,14 @@ export function MockupPanel({ style }: Props): React.JSX.Element {
       src={iframeSrc}
       onClose={handleClose}
       onCopyHtml={handleCopyHtml}
+      onRefresh={handleRefresh}
       onDarkModeChange={setDarkMode}
       darkMode={darkMode}
+      consoleLogs={logs}
+      consoleErrors={errors}
+      consoleOpen={consoleOpen}
+      onToggleConsole={() => setConsoleOpen((v) => !v)}
+      onClearConsole={clearLogs}
     />
   )
 }

@@ -301,7 +301,7 @@ app.whenReady().then(() => {
   // Set app user model id for windows
   electronApp.setAppUserModelId('com.electron')
 
-  // Serve tailwind-full.css to mockup iframes via mockup-asset:// — cached across reloads.
+  // Serve mockup HTML + sibling assets via mockup-asset:// (per-mockup sub-origin).
   registerMockupAssetHandler()
 
   // ── About panel ────────────────────────────────────────────────────

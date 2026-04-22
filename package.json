@@ -15,7 +15,7 @@
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json --composite false",
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
     "start": "electron-vite preview",
-    "dev": "npm run ensure-cli && electron-vite dev",
+    "dev": "electron-vite dev",
     "build": "npm run typecheck && npm run ensure-cli && electron-vite build",
     "ensure-cli": "node scripts/extract-cli.mjs && node patch/apply-all.mjs && node scripts/rebundle-cli.mjs",
     "update-cli": "node scripts/extract-cli.mjs --force && node patch/apply-all.mjs && node scripts/rebundle-cli.mjs",

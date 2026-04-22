@@ -1,6 +1,7 @@
-import React, { memo, useCallback, useEffect, useState } from 'react'
+import React, { memo, useCallback, useEffect, useRef, useState } from 'react'
 import { useSessionStore } from '../../../stores/session-store'
-import { buildMockupUrl } from '../../../../../shared/mockup-url'
+import { buildMockupUrl, mockupOriginFor } from '../../../../../shared/mockup-url'
+import { useMockupBridge } from '../../../hooks/useMockupBridge'
 import { MockupPreviewCardView } from './View'
 
 interface MockupPreviewCardProps {
@@ -10,10 +11,10 @@ interface MockupPreviewCardProps {
 
 /**
  * FC for the inline mockup preview card.
- * The iframe loads directly from the `mockup-asset://` protocol, so we never
- * pass HTML through srcdoc. HTML is still read via IPC for the Code tab and
- * the Copy button. File changes bump a version counter → new src URL → iframe
- * reloads (and bypasses HTTP cache for that one reload).
+ * The iframe loads directly from the `mockup-asset://` protocol at a
+ * per-mockup sub-origin. Scripts run inside that origin — the postMessage
+ * bridge (useMockupBridge) drives auto-resize and collects console/errors
+ * if the user opens the full panel.
  */
 export const MockupPreviewCard = memo(function MockupPreviewCard({
   directory,
@@ -22,6 +23,7 @@ export const MockupPreviewCard = memo(function MockupPreviewCard({
   const [html, setHtml] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [version, setVersion] = useState(1)
+  const iframeRef = useRef<HTMLIFrameElement | null>(null)
 
   const cwd = useSessionStore((s) => {
     const rid = s.activeSessionId
@@ -30,22 +32,23 @@ export const MockupPreviewCard = memo(function MockupPreviewCard({
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const openMockupPanel = useSessionStore((s) => s.openMockupPanel)
 
-  // HTML source is only needed for the Code tab + Copy button.
   const loadHtml = useCallback(() => {
     if (!cwd || !directory) return
-    window.api.readMockupHtml(cwd, directory).then((content) => {
-      setHtml(content)
-      setError(null)
-    }).catch((err: Error) => {
-      setError(err.message || 'Failed to load mockup')
-    })
+    window.api
+      .readMockupHtml(cwd, directory)
+      .then((content) => {
+        setHtml(content)
+        setError(null)
+      })
+      .catch((err: Error) => {
+        setError(err.message || 'Failed to load mockup')
+      })
   }, [cwd, directory])
 
   useEffect(() => {
     loadHtml()
   }, [loadHtml])
 
-  // Watch for file changes: refresh the source, bump iframe version.
   useEffect(() => {
     if (!cwd || !directory) return
 
@@ -64,7 +67,32 @@ export const MockupPreviewCard = memo(function MockupPreviewCard({
     }
   }, [cwd, directory, loadHtml])
 
-  const iframeSrc = cwd && directory ? buildMockupUrl(cwd, directory, { version }) : null
+  // Intentionally omit `version` from the URL. Mutating the iframe's `src`
+  // attribute causes Chromium to reload the iframe and focus it, scrolling
+  // the chat container to bring it into view. Instead we keep `src` stable
+  // and ask the iframe to reload itself via postMessage (see below).
+  const iframeSrc =
+    cwd && directory
+      ? buildMockupUrl(cwd, directory, { parentOrigin: window.location.origin })
+      : null
+
+  // Keeps the bridge alive for console/error forwarding into the panel when
+  // it's opened. The card itself uses a fixed 16:9 aspect ratio (see View),
+  // so the reported height is intentionally ignored here.
+  useMockupBridge(iframeRef, directory || null, version)
+
+  // Trigger an in-place iframe reload on version bump — after the initial
+  // load. First render uses the src attribute; subsequent file changes
+  // postMessage-trigger a `location.reload()` inside the iframe.
+  const prevVersionRef = useRef(version)
+  useEffect(() => {
+    if (prevVersionRef.current === version) return
+    prevVersionRef.current = version
+    if (!directory) return
+    const iframe = iframeRef.current
+    if (!iframe?.contentWindow) return
+    iframe.contentWindow.postMessage({ type: 'mockup:reload' }, mockupOriginFor(directory))
+  }, [version, directory])
 
   const handleExpand = (): void => {
     if (activeSessionId) {
@@ -78,15 +106,23 @@ export const MockupPreviewCard = memo(function MockupPreviewCard({
     }
   }
 
+  // Manual refresh — mirrors the file-change path: reload HTML source for
+  // the Code tab and bump version, which drives the postMessage reload.
+  const handleRefresh = (): void => {
+    loadHtml()
+    setVersion((v) => v + 1)
+  }
+
   return (
     <MockupPreviewCardView
-      directory={directory}
+      ref={iframeRef}
       title={title}
       html={html}
       error={error}
       src={iframeSrc}
       onExpand={handleExpand}
       onCopyHtml={handleCopyHtml}
+      onRefresh={handleRefresh}
     />
   )
 })
