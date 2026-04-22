@@ -316,6 +316,31 @@ describe('OMELETTE_BOOTSTRAP', () => {
   it('no-ops when the parent param is missing (portable file:// exports)', () => {
     expect(OMELETTE_BOOTSTRAP).toMatch(/if \(!p\) return/)
   })
+
+  it('tags <script type="text/babel"|"text/jsx"> with data-plugins + data-filename', () => {
+    // Required so Babel Standalone emits useful sourcemaps/filenames in
+    // errors — matches claude.ai/design's runtime. Runs on DOMContentLoaded
+    // before Babel's own scan.
+    expect(OMELETTE_BOOTSTRAP).toMatch(/script\[type="text\/babel"\]/)
+    expect(OMELETTE_BOOTSTRAP).toMatch(/script\[type="text\/jsx"\]/)
+    expect(OMELETTE_BOOTSTRAP).toContain('transform-react-jsx-source')
+    expect(OMELETTE_BOOTSTRAP).toContain('data-plugins')
+    expect(OMELETTE_BOOTSTRAP).toContain('data-filename')
+  })
+
+  it('the Babel tagger preserves existing data-plugins / data-filename attrs', () => {
+    // `hasAttribute` guard means user-set values survive. This matters if a
+    // mockup author wants custom Babel plugins per script.
+    expect(OMELETTE_BOOTSTRAP).toMatch(/hasAttribute\(\s*'data-plugins'\s*\)/)
+    expect(OMELETTE_BOOTSTRAP).toMatch(/hasAttribute\(\s*'data-filename'\s*\)/)
+  })
+
+  it('executes the Babel tagger as part of the DOMContentLoaded handler', () => {
+    // Order matters: our bootstrap sits at the top of <head>, so its DCL
+    // handler registers before any body-loaded <script src=".../babel.min.js">
+    // registers its own. That lets us tag before Babel scans.
+    expect(OMELETTE_BOOTSTRAP).toMatch(/tagBabelScripts\(\)/)
+  })
 })
 
 describe('buildMockupCsp', () => {

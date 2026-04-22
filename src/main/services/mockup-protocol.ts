@@ -365,9 +365,37 @@ export const OMELETTE_BOOTSTRAP = `<script data-omelette="1">
       } catch (e) {}
       window.addEventListener('load', postHeight);
     }
+    // Tag <script type="text/babel"|"text/jsx"> blocks with data-plugins +
+    // data-filename BEFORE @babel/standalone scans them on DOMContentLoaded.
+    // This makes JSX error stack traces readable (filename + line number)
+    // instead of pointing at anonymous runtime-compiled blobs. Matches the
+    // claude.ai/design runtime behavior. No-op when no Babel scripts are
+    // present — cost is a single querySelectorAll per page load.
+    function tagBabelScripts(){
+      try {
+        var scripts = document.querySelectorAll(
+          'script[type="text/babel"], script[type="text/jsx"]'
+        );
+        var n = 0;
+        for (var i = 0; i < scripts.length; i++) {
+          var s = scripts[i];
+          if (!s.hasAttribute('data-plugins')) {
+            s.setAttribute('data-plugins', 'transform-react-jsx-source');
+          }
+          if (!s.hasAttribute('data-filename')) {
+            var src = s.getAttribute('src');
+            s.setAttribute('data-filename', src || 'inline-' + (++n));
+          }
+        }
+      } catch (e) {}
+    }
     if (document.readyState === 'loading') {
-      document.addEventListener('DOMContentLoaded', wireHeight);
+      document.addEventListener('DOMContentLoaded', function(){
+        tagBabelScripts();
+        wireHeight();
+      });
     } else {
+      tagBabelScripts();
       wireHeight();
     }
     // Parent-triggered in-place reload. Avoids mutating the iframe's src

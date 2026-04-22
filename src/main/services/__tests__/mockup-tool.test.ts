@@ -8,7 +8,7 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import { wrapHtml } from '../mockup-tool'
+import { wrapHtml, CREATE_MOCKUP_DESCRIPTION } from '../mockup-tool'
 
 describe('wrapHtml', () => {
   it('produces a valid HTML5 document with title', () => {
@@ -54,5 +54,44 @@ describe('wrapHtml', () => {
     const html = wrapHtml('<div></div>')
     expect(html).not.toContain('data-omelette')
     expect(html).not.toContain('mockup:log')
+  })
+})
+
+describe('CREATE_MOCKUP_DESCRIPTION', () => {
+  // These assertions pin the intent of the tool description — the
+  // "default to vanilla, ask before JSX" policy. If someone edits the
+  // description in a way that drops the guidance, tests will fail.
+
+  it('tells the model to default to vanilla HTML + Tailwind + inline <script>', () => {
+    expect(CREATE_MOCKUP_DESCRIPTION).toMatch(/Default stack/i)
+    expect(CREATE_MOCKUP_DESCRIPTION).toMatch(/vanilla|plain HTML/i)
+  })
+
+  it('requires explicit user confirmation before using React/JSX', () => {
+    // MUST / ASK FIRST are the load-bearing words — they turn "JSX is
+    // available" into "JSX is opt-in on a case-by-case basis".
+    expect(CREATE_MOCKUP_DESCRIPTION).toMatch(/ASK FIRST/i)
+    expect(CREATE_MOCKUP_DESCRIPTION).toMatch(/MUST ask the user/i)
+    expect(CREATE_MOCKUP_DESCRIPTION).toMatch(/Do not silently introduce React/i)
+  })
+
+  it('names the CDN scripts for the React + Babel scaffold', () => {
+    expect(CREATE_MOCKUP_DESCRIPTION).toContain('react@18/umd/react.development.js')
+    expect(CREATE_MOCKUP_DESCRIPTION).toContain('react-dom@18/umd/react-dom.development.js')
+    expect(CREATE_MOCKUP_DESCRIPTION).toContain('@babel/standalone/babel.min.js')
+    expect(CREATE_MOCKUP_DESCRIPTION).toContain('type="text/babel"')
+  })
+
+  it('flags the concrete cost of JSX so the model knows the tradeoff', () => {
+    // If these numbers drift, update them — but the cost statement must
+    // remain so the model can honestly explain it to the user.
+    expect(CREATE_MOCKUP_DESCRIPTION).toMatch(/~1MB/)
+    expect(CREATE_MOCKUP_DESCRIPTION).toMatch(/compile/i)
+  })
+
+  it('enumerates the anti-pattern cases (where JSX is overkill)', () => {
+    // Guards against "JSX for every interactivity" drift.
+    expect(CREATE_MOCKUP_DESCRIPTION).toMatch(/DO NOT use JSX for/i)
+    expect(CREATE_MOCKUP_DESCRIPTION).toMatch(/toggle|form|list|tab/i)
   })
 })
