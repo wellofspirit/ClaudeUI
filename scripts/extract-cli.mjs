@@ -3,23 +3,25 @@
  * Download the official @anthropic-ai/claude-code Bun standalone binary and
  * extract the wrapped cli.js module from its `.bun` section for patching.
  *
- * Output: `vendor/claude-cli/cli.js` — the wrapped CJS IIFE bytes as Bun
- * stored them, ready for text patching by `patch/apply-all.mjs` and
- * re-injection by `scripts/rebundle-cli.mjs`.
- *
- * The old pipeline also unwrapped the CJS IIFE, injected a Bun-path shim
- * for native addons, and vendored ripgrep + .node addons separately — all
- * needed because cli.js was run under Node. The new pipeline ships a
- * rebundled Bun binary that runs natively, so none of that is necessary.
+ * Output:
+ *   - `vendor/claude-cli/cli.js` — wrapped CJS IIFE bytes ready for text
+ *     patching by `patch/apply-all.mjs` and re-injection by
+ *     `scripts/rebundle-cli.mjs`.
+ *   - `vendor/claude-cli/vendor/<addon>/<arch>-<platform>/<addon>.node` —
+ *     native NAPI addons (e.g. `audio-capture.node`) for the Electron
+ *     main process to load directly. cli.js itself resolves these from
+ *     the rebundled Bun binary's own module graph, but `voice-capture.ts`
+ *     in the Electron main process needs a loose copy on disk.
  *
  * Pipeline:
  *   1. Resolve upstream version (pin via package.json#claudeCliVersion).
  *   2. Download claude-<version>-<platform>.exe from downloads.claude.ai
  *      (verifies SHA256 against manifest; cached under .cache/claude-cli/ —
  *      CI caches this directory keyed on the pinned version).
- *   3. Parse Bun's standalone trailer, locate the cli.js module in the
- *      `.bun` section, extract its raw contents bytes verbatim.
- *   4. Write to vendor/claude-cli/cli.js + version.json.
+ *   3. Parse Bun's standalone trailer, walk the modules table, extract
+ *      cli.js and every `.node` addon verbatim.
+ *   4. Write to vendor/claude-cli/cli.js + per-triple addon paths +
+ *      version.json.
  *
  * Runs unconditionally — the full extract + patch + rebundle pipeline costs
  * a few seconds once the source binary is cached, and patches can change
@@ -214,10 +216,11 @@ function findBunSectionRawOff(buf) {
 }
 
 /**
- * Extract cli.js bytes from a Bun standalone binary. Walks the trailer at the
- * end of the `.bun` section (PE) or the file (overlay formats on mac/linux).
+ * Extract cli.js and all `.node` native addons from a Bun standalone binary.
+ * Walks the trailer at the end of the `.bun` section (PE) or the file
+ * (overlay formats on mac/linux).
  */
-function extractWrappedCliBytes(buf) {
+function extractWrappedAssets(buf) {
   let blob
   if (buf.readUInt16LE(0) === 0x5a4d) {
     // Windows PE — `.bun` section holds [u64 blobLen][blob][padding]
@@ -243,21 +246,27 @@ function extractWrappedCliBytes(buf) {
   const n = mod_len / 52
   const base = data_start + mod_off
 
+  const assets = { cliName: null, cliBytes: null, addons: [] }
   for (let i = 0; i < n; i++) {
     const e = base + i * 52
     const nameOff = blob.readUInt32LE(e)
     const nameLen = blob.readUInt32LE(e + 4)
     const name = blob.subarray(data_start + nameOff, data_start + nameOff + nameLen).toString('utf8')
+    const cOff = blob.readUInt32LE(e + 8)
+    const cLen = blob.readUInt32LE(e + 12)
+    const bytes = Buffer.from(blob.subarray(data_start + cOff, data_start + cOff + cLen))
+
     if (name.endsWith('/cli.js') || name.endsWith('\\cli.js')) {
-      const cOff = blob.readUInt32LE(e + 8)
-      const cLen = blob.readUInt32LE(e + 12)
-      return {
-        name,
-        bytes: Buffer.from(blob.subarray(data_start + cOff, data_start + cOff + cLen)),
-      }
+      assets.cliName = name
+      assets.cliBytes = bytes
+    } else if (name.endsWith('.node')) {
+      const leaf = name.split(/[\\/]/).pop()
+      const addonName = leaf.replace(/\.node$/, '')
+      assets.addons.push({ name, addonName, bytes })
     }
   }
-  throw new Error('cli.js module not found in modules table')
+  if (!assets.cliBytes) throw new Error('cli.js module not found in modules table')
+  return assets
 }
 
 // ---------------------------------------------------------------------------
@@ -270,16 +279,30 @@ async function main() {
 
   log(`reading ${binPath}`)
   const buf = readFileSync(binPath)
-  const { name, bytes } = extractWrappedCliBytes(buf)
-  log(`extracted cli.js: ${bytes.length.toLocaleString()} bytes (from "${name}")`)
+  const { cliName, cliBytes, addons } = extractWrappedAssets(buf)
+  log(`extracted cli.js: ${cliBytes.length.toLocaleString()} bytes (from "${cliName}")`)
 
-  // Wipe the vendor dir so stale artifacts from the old pipeline
-  // (vendored ripgrep, .node addons, unwrapped cli.js with Bun-path shim)
-  // don't leak into the build. Safe — rebundle regenerates what's needed.
+  // Wipe the vendor dir so stale artifacts (old pipeline's unwrapped cli.js
+  // with Bun-path shim, stale addon copies, vendored ripgrep) don't leak
+  // into the build. Safe — rebundle + addon writes below regenerate
+  // what's needed.
   if (existsSync(VENDOR_DIR)) rmSync(VENDOR_DIR, { recursive: true, force: true })
   mkdirSync(VENDOR_DIR, { recursive: true })
-  writeFileSync(OUT_CLI, bytes)
+  writeFileSync(OUT_CLI, cliBytes)
   log(`wrote ${OUT_CLI}`)
+
+  // Native addons — extracted for the host triple (Bun binary is
+  // host-specific, so cross-platform packaging is already host-bound).
+  // Layout matches what voice-capture.ts expects:
+  //   vendor/claude-cli/vendor/<addonName>/<arch>-<platform>/<addonName>.node
+  const triple = `${process.arch}-${process.platform}`
+  for (const addon of addons) {
+    const outDir = join(VENDOR_DIR, 'vendor', addon.addonName, triple)
+    mkdirSync(outDir, { recursive: true })
+    const outPath = join(outDir, `${addon.addonName}.node`)
+    writeFileSync(outPath, addon.bytes)
+    log(`wrote ${outPath} (${addon.bytes.length.toLocaleString()} bytes)`)
+  }
 
   // Store `sourceBinary` relative to ROOT when the binary lives inside the
   // project (the usual .cache/claude-cli/ path); fall back to the absolute
@@ -297,8 +320,8 @@ async function main() {
         source: '@anthropic-ai/claude-code (Bun standalone binary)',
         sourceBinary,
         extractedAt: new Date().toISOString(),
-        cliSize: bytes.length,
-        cliSha256: createHash('sha256').update(bytes).digest('hex'),
+        cliSize: cliBytes.length,
+        cliSha256: createHash('sha256').update(cliBytes).digest('hex'),
         form: 'wrapped',
       },
       null,
