@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useAutomationStore } from '../../../stores/automation-store'
-import type { Automation, ClaudePermissions } from '../../../../../shared/types'
+import type { Automation, ClaudePermissions, ModelInfo } from '../../../../../shared/types'
 import { AutomationConfigView, type ModelOption, type InheritedPerms } from './View'
 
 export function AutomationConfig(): React.JSX.Element {
@@ -23,7 +23,12 @@ function AutomationConfigController({ automation }: { automation: Automation }):
   const hasRunningRun = runs?.some((r) => r.status === 'running') ?? false
 
   useEffect(() => {
-    window.api.getModels().then(setModels)
+    window.api.getModels().then((infos: ModelInfo[]) => {
+      setModels(infos.map((m) => ({
+        ...m,
+        shortName: m.description?.split('·')[0]?.trim() || m.displayName,
+      })))
+    })
     window.api.loadClaudePermissions('user').then((user: ClaudePermissions) => {
       setGlobalPerms(user.allow.length > 0 || user.deny.length > 0 ? { allow: user.allow, deny: user.deny } : null)
     }).catch(() => setGlobalPerms(null))

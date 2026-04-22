@@ -1,11 +1,25 @@
 import { useState, useEffect, useMemo } from 'react'
 import type { Automation, AutomationSchedule, ClaudePermissions } from '../../../../../shared/types'
-import { EFFORT_LEVELS, SCHEDULE_PRESETS, PERMISSION_TEMPLATES, PERMISSION_MODES, isAutomationDirty } from './utils'
+import { SCHEDULE_PRESETS, PERMISSION_TEMPLATES, PERMISSION_MODES, isAutomationDirty } from './utils'
+import {
+  ModelPicker,
+  EffortPicker,
+  ThinkingPicker,
+  type ModelDisplay,
+} from '../../shared/InlinePickers'
+import {
+  modelSupportsAdaptiveThinking,
+  modelSupportsEffort,
+  modelSupportedEffortLevels,
+  modelDefaultEffort,
+  modelDefaultThinkingMode,
+  modelResolveThinkingMode,
+  modelResolveEffort,
+  type EffortLevel,
+  type ThinkingMode,
+} from '../../../../../shared/model-capabilities'
 
-export interface ModelOption {
-  value: string
-  displayName: string
-}
+export type ModelOption = ModelDisplay
 
 export interface InheritedPerms {
   allow: string[]
@@ -34,7 +48,8 @@ export function AutomationConfigView(props: AutomationConfigViewProps): React.JS
   const [cwd, setCwd] = useState(automation.cwd)
   const [schedule, setSchedule] = useState<AutomationSchedule>(automation.schedule)
   const [model, setModel] = useState(automation.model || '')
-  const [effort, setEffort] = useState(automation.effort || 'medium')
+  const [effort, setEffort] = useState<EffortLevel | ''>((automation.effort as EffortLevel | undefined) ?? '')
+  const [thinkingMode, setThinkingModeState] = useState<ThinkingMode | ''>(automation.thinkingMode ?? '')
   const [permissionMode, setPermissionMode] = useState(automation.permissionMode || 'auto')
   const [enabled, setEnabled] = useState(automation.enabled)
   const [allowRules, setAllowRules] = useState<string[]>(automation.permissions.allow)
@@ -44,9 +59,31 @@ export function AutomationConfigView(props: AutomationConfigViewProps): React.JS
   const [permsExpanded, setPermsExpanded] = useState(false)
   const [dirPerms, setDirPerms] = useState<InheritedPerms | null>(null)
 
+  // Fall back to models[0] (typically 'default') when no model has been picked
+  // yet, so the picker trigger always shows a meaningful label instead of a
+  // blank select.
+  const selectedModel = useMemo<ModelDisplay>(() => {
+    const match = models.find((m) => m.value === model)
+    if (match) return match
+    if (models.length > 0) return models[0]
+    return { value: '', displayName: 'Default', shortName: 'Default' }
+  }, [models, model])
+
+  const adaptiveSupported = useMemo(() => modelSupportsAdaptiveThinking(selectedModel), [selectedModel])
+  const effortSupported = useMemo(() => modelSupportsEffort(selectedModel), [selectedModel])
+  const allowedEffortLevels = useMemo(() => modelSupportedEffortLevels(selectedModel), [selectedModel])
+  const effectiveEffort = useMemo<EffortLevel>(
+    () => (effort || modelDefaultEffort(selectedModel)),
+    [effort, selectedModel],
+  )
+  const effectiveThinking = useMemo<ThinkingMode>(
+    () => (thinkingMode || modelDefaultThinkingMode(selectedModel)),
+    [thinkingMode, selectedModel],
+  )
+
   const isDirty = useMemo(
-    () => isAutomationDirty({ name, prompt, cwd, schedule, model, effort, permissionMode, allowRules, denyRules }, automation),
-    [name, prompt, cwd, schedule, model, effort, permissionMode, allowRules, denyRules, automation]
+    () => isAutomationDirty({ name, prompt, cwd, schedule, model, effort, thinkingMode, permissionMode, allowRules, denyRules }, automation),
+    [name, prompt, cwd, schedule, model, effort, thinkingMode, permissionMode, allowRules, denyRules, automation]
   )
 
   useEffect(() => {
@@ -65,11 +102,27 @@ export function AutomationConfigView(props: AutomationConfigViewProps): React.JS
       schedule,
       model: model || undefined,
       effort: effort || undefined,
+      thinkingMode: thinkingMode || undefined,
       permissionMode: permissionMode as 'default' | 'auto',
       enabled,
       permissions: { allow: allowRules, deny: denyRules },
     }
     onSave(updated)
+  }
+
+  const handleSelectModel = (value: string): void => {
+    setModel(value)
+    const nextModel = models.find((m) => m.value === value)
+    if (!nextModel) return
+    if (effort) {
+      const coerced = modelResolveEffort(nextModel, effort as EffortLevel)
+      if (coerced === null) setEffort('')
+      else if (coerced !== effort) setEffort(coerced)
+    }
+    if (thinkingMode) {
+      const coerced = modelResolveThinkingMode(nextModel, thinkingMode as ThinkingMode)
+      if (coerced !== thinkingMode) setThinkingModeState(coerced)
+    }
   }
 
   const handlePickFolder = async (): Promise<void> => {
@@ -193,33 +246,24 @@ export function AutomationConfigView(props: AutomationConfigViewProps): React.JS
       </Field>
 
       <div className="flex gap-4">
-        <Field label="Model" className="flex-1">
-          <select
-            value={model}
-            onChange={(e) => setModel(e.target.value)}
-            className="w-full bg-bg-tertiary border border-border/40 rounded-lg px-3 py-1.5 text-sm text-text-primary outline-none focus:border-text-accent transition-colors"
-          >
-            <option value="">Default</option>
-            {models.map((m) => (
-              <option key={m.value} value={m.value}>{m.displayName}</option>
-            ))}
-          </select>
-        </Field>
-        <Field label="Effort" className="flex-1">
-          <div className="flex gap-1.5">
-            {EFFORT_LEVELS.map((level) => (
-              <button
-                key={level}
-                onClick={() => setEffort(level)}
-                className={`flex-1 px-2 py-1 text-xs rounded-lg border transition-colors capitalize ${
-                  effort === level
-                    ? 'bg-bg-hover border-text-accent text-text-primary'
-                    : 'border-border/40 text-text-muted hover:bg-bg-hover'
-                }`}
-              >
-                {level}
-              </button>
-            ))}
+        <Field label="Model & Thinking" className="flex-1">
+          <div className="flex items-center flex-wrap gap-1 bg-bg-tertiary border border-border/40 rounded-lg px-1 py-1 min-h-[34px]">
+            <ModelPicker
+              models={models}
+              selectedModel={selectedModel}
+              onSelectModel={handleSelectModel}
+            />
+            <ThinkingPicker
+              thinkingMode={effectiveThinking}
+              adaptiveSupported={adaptiveSupported}
+              onSelectThinking={(mode) => setThinkingModeState(mode)}
+            />
+            <EffortPicker
+              effort={effectiveEffort}
+              allowedEffortLevels={allowedEffortLevels}
+              supported={effortSupported}
+              onSelectEffort={(level) => setEffort(level)}
+            />
           </div>
         </Field>
         <Field label="Permission Mode" className="flex-1">

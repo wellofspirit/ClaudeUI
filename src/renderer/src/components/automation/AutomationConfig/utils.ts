@@ -1,7 +1,5 @@
 import type { Automation } from '../../../../../shared/types'
 
-export const EFFORT_LEVELS = ['low', 'medium', 'high'] as const
-
 export const SCHEDULE_PRESETS = [
   { label: 'Every 15 min', ms: 15 * 60 * 1000 },
   { label: 'Every 30 min', ms: 30 * 60 * 1000 },
@@ -37,6 +35,7 @@ export interface DirtyCheckInput {
   schedule: unknown
   model: string
   effort: string
+  thinkingMode: string
   permissionMode: string
   allowRules: string[]
   denyRules: string[]
@@ -49,7 +48,8 @@ export function isAutomationDirty(current: DirtyCheckInput, original: Automation
     current.cwd !== original.cwd ||
     JSON.stringify(current.schedule) !== JSON.stringify(original.schedule) ||
     (current.model || '') !== (original.model || '') ||
-    (current.effort || 'medium') !== (original.effort || 'medium') ||
+    (current.effort || '') !== (original.effort || '') ||
+    (current.thinkingMode || '') !== (original.thinkingMode || '') ||
     (current.permissionMode || 'auto') !== (original.permissionMode || 'auto') ||
     JSON.stringify(current.allowRules) !== JSON.stringify(original.permissions.allow) ||
     JSON.stringify(current.denyRules) !== JSON.stringify(original.permissions.deny)
