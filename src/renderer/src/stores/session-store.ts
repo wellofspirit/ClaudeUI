@@ -883,7 +883,7 @@ export const useSessionStore = create<SessionState>((set) => ({
 
   deleteSession: async (sessionId, projectKey) => {
     await window.api.deleteSession(sessionId, projectKey)
-    // Also scrub any references to this session from persisted config
+    // Also scrub any references to this session from persisted config + in-memory state
     useSessionStore.setState((state) => {
       const recentSessionIds = state.recentSessionIds.filter((id) => id !== sessionId)
       const pinnedSessionIds = state.pinnedSessionIds.filter((id) => id !== sessionId)
@@ -892,29 +892,51 @@ export const useSessionStore = create<SessionState>((set) => ({
       delete customTitles[sessionId]
       const worktreeInfoMap = { ...state.worktreeInfoMap }
       delete worktreeInfoMap[sessionId]
+      const sessions = { ...state.sessions }
+      delete sessions[sessionId]
+      // Drop the session from its directory group; drop the group itself if now empty
+      const directories = state.directories
+        .map((g) => g.sessions.some((s) => s.sessionId === sessionId)
+          ? { ...g, sessions: g.sessions.filter((s) => s.sessionId !== sessionId) }
+          : g)
+        .filter((g) => g.sessions.length > 0)
+      const activeSessionId = state.activeSessionId === sessionId ? null : state.activeSessionId
       saveSessionConfig(state, { recentSessionIds, pinnedSessionIds, hiddenSessionIds, customTitles, worktreeInfoMap })
-      return { recentSessionIds, pinnedSessionIds, hiddenSessionIds, customTitles, worktreeInfoMap }
+      return { recentSessionIds, pinnedSessionIds, hiddenSessionIds, customTitles, worktreeInfoMap, sessions, directories, activeSessionId }
     })
   },
 
   deleteProject: async (projectKey) => {
     await window.api.deleteProject(projectKey)
-    // Collect all session IDs in this project to scrub from config
+    // Collect all session IDs in this project (both on-disk group members and live in-memory
+    // sessions sharing the project's cwd) so we can purge them from every piece of state.
     useSessionStore.setState((state) => {
       const group = state.directories.find((g) => g.projectKey === projectKey)
+      const projectCwd = group?.cwd
       const projectSessionIds = new Set(group?.sessions.map((s) => s.sessionId) ?? [])
+      if (projectCwd) {
+        for (const [id, sess] of Object.entries(state.sessions)) {
+          if (sess.cwd === projectCwd) projectSessionIds.add(id)
+        }
+      }
       const recentSessionIds = state.recentSessionIds.filter((id) => !projectSessionIds.has(id))
       const pinnedSessionIds = state.pinnedSessionIds.filter((id) => !projectSessionIds.has(id))
       const hiddenSessionIds = state.hiddenSessionIds.filter((id) => !projectSessionIds.has(id))
       const hiddenProjectKeys = state.hiddenProjectKeys.filter((k) => k !== projectKey)
       const customTitles = { ...state.customTitles }
       const worktreeInfoMap = { ...state.worktreeInfoMap }
+      const sessions = { ...state.sessions }
       for (const id of projectSessionIds) {
         delete customTitles[id]
         delete worktreeInfoMap[id]
+        delete sessions[id]
       }
+      const directories = state.directories.filter((g) => g.projectKey !== projectKey)
+      const activeSessionId = state.activeSessionId && projectSessionIds.has(state.activeSessionId)
+        ? null
+        : state.activeSessionId
       saveSessionConfig(state, { recentSessionIds, pinnedSessionIds, hiddenSessionIds, hiddenProjectKeys, customTitles, worktreeInfoMap })
-      return { recentSessionIds, pinnedSessionIds, hiddenSessionIds, hiddenProjectKeys, customTitles, worktreeInfoMap }
+      return { recentSessionIds, pinnedSessionIds, hiddenSessionIds, hiddenProjectKeys, customTitles, worktreeInfoMap, sessions, directories, activeSessionId }
     })
   },
 
