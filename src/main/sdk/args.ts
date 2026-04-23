@@ -8,6 +8,7 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import type { QueryOptions, McpServerConfig, SdkMcpServer } from './types'
+import { getProxyEnv, getProxyAllSubprocesses } from './proxy'
 
 /** Strip in-process `type: 'sdk'` servers from an mcpServers map — those are
  *  hosted locally and are NOT written to --mcp-config (the CLI treats them
@@ -271,9 +272,28 @@ let cachedNodeModules: string | null | undefined
 
 export function buildEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const env = { ...base }
-  if (!env.CLAUDE_CODE_ENTRYPOINT) env.CLAUDE_CODE_ENTRYPOINT = 'sdk-ts'
   if (env.DEBUG_CLAUDE_AGENT_SDK) env.DEBUG = '1'
+  if (!env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC)
+    env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = '1'
   delete env.NODE_OPTIONS
+
+  // Scoped proxy: overlay proxy env vars only onto this spawn, not the main
+  // Electron process. If `proxyAllSubprocesses` is off (default), the
+  // subprocess-proxy-strip patch in cli.js removes these from Bash/MCP/LSP
+  // child env so only cli.js's own API traffic is proxied.
+  const proxy = getProxyEnv()
+  if (proxy) {
+    env.HTTP_PROXY = proxy.HTTP_PROXY
+    env.HTTPS_PROXY = proxy.HTTPS_PROXY
+    env.ALL_PROXY = proxy.ALL_PROXY
+    if (getProxyAllSubprocesses()) env.CLAUDEUI_PROXY_SUBPROCESSES = '1'
+    else delete env.CLAUDEUI_PROXY_SUBPROCESSES
+  } else {
+    delete env.HTTP_PROXY
+    delete env.HTTPS_PROXY
+    delete env.ALL_PROXY
+    delete env.CLAUDEUI_PROXY_SUBPROCESSES
+  }
 
   // Inject our app's node_modules into NODE_PATH so cli.js can resolve
   // `ws`, `undici`, etc. even though it lives outside any node_modules tree.
