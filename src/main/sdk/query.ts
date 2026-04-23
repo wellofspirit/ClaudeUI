@@ -320,13 +320,22 @@ export function query(input: QueryInput): QueryHandle {
   // Abort propagation. `{once:true}` + explicit removal on child exit so the
   // listener doesn't outlive the query — important for callers that reuse
   // the same AbortController across multiple query() calls.
-  const onAbort = (): void => {
+  //
+  // `killedByUs` distinguishes caller-initiated shutdowns (abort / iterator
+  // return / handle.kill) from crashes. When cli.js handles SIGTERM
+  // gracefully, Node reports `code=143, signal=null` rather than
+  // `signal=SIGTERM`, so the signal alone isn't a reliable indicator — we
+  // track intent explicitly.
+  let killedByUs = false
+  const killChild = (): void => {
+    killedByUs = true
     try {
       child.kill('SIGTERM')
     } catch {
       /* ignore */
     }
   }
+  const onAbort = (): void => killChild()
   if (options.abortController) {
     options.abortController.signal.addEventListener('abort', onAbort, { once: true })
   }
@@ -336,7 +345,7 @@ export function query(input: QueryInput): QueryHandle {
     options.abortController?.signal.removeEventListener('abort', onAbort)
     control.rejectAll('cli.js exited')
     writer.end()
-    if (code === 0 || signal === 'SIGTERM') {
+    if (isCleanExit(code, signal, killedByUs)) {
       queue.finish()
     } else {
       queue.finish(new Error(`cli.js exited with code=${code} signal=${signal}`))
@@ -350,7 +359,7 @@ export function query(input: QueryInput): QueryHandle {
     queue.finish(err)
   })
 
-  return makeHandle(queue, control, child, options, initPromise, wireLog)
+  return makeHandle(queue, control, child, options, initPromise, wireLog, killChild)
 }
 
 interface InboundCtx {
@@ -567,13 +576,33 @@ async function handleCanUseTool(
   return response
 }
 
+/**
+ * Decide whether cli.js's exit should be surfaced as an error.
+ *
+ * Clean: exit 0 (normal), exit 143 (SIGTERM caught by cli.js then cleaned up —
+ * Node reports 128+15 rather than signal name), signal=SIGTERM (direct kill),
+ * or we initiated the shutdown ourselves (abort / iterator return / idle
+ * timeout — the signal may be lost in translation but intent is clear).
+ *
+ * Anything else (segfault, syntax error, unhandled throw) is a real crash and
+ * gets reported to the user as a session error.
+ */
+export function isCleanExit(
+  code: number | null,
+  signal: NodeJS.Signals | null,
+  killedByUs: boolean,
+): boolean {
+  return code === 0 || code === 143 || signal === 'SIGTERM' || killedByUs
+}
+
 function makeHandle(
   queue: MessageQueue,
   control: ControlChannel,
-  child: ChildProcess,
+  _child: ChildProcess,
   options: QueryOptions,
   initResponse: Promise<Record<string, unknown>>,
   wireLog: WireLog,
+  killChild: () => void,
 ): QueryHandle {
   const pickInit = async <T>(field: string): Promise<T[]> => {
     const r = await initResponse
@@ -585,11 +614,7 @@ function makeHandle(
       return {
         next: () => queue.next(),
         return: async () => {
-          try {
-            child.kill('SIGTERM')
-          } catch {
-            /* ignore */
-          }
+          killChild()
           return { value: undefined, done: true }
         },
       }
