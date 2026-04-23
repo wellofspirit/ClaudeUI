@@ -1328,6 +1328,24 @@ export const SECTIONS: Section[] = [
         )
       },
       {
+        key: 'proxySubprocesses',
+        label: 'Proxy shell commands',
+        keywords: 'proxy bash subprocess shell git curl npm everything all',
+        render: (s, u) => (
+          <div className={s.proxy.enabled ? '' : 'opacity-40 pointer-events-none'}>
+            <SettingsToggle
+              label="Also proxy shell commands"
+              checked={s.proxy.proxySubprocesses === true}
+              onChange={(v) => u({ proxy: { ...s.proxy, proxySubprocesses: v } })}
+              tooltip="When on, git/curl/npm and other commands Claude runs in the shell also route through the proxy. When off (default), only Claude's API traffic is proxied."
+            />
+            <div className="text-[10px] text-text-muted/50 mt-0.5 pl-3">
+              Off by default — shell commands stay direct
+            </div>
+          </div>
+        )
+      },
+      {
         key: 'proxyFooter',
         label: 'Proxy info',
         keywords: 'proxy info env environment variable',

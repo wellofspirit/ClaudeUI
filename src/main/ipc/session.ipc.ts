@@ -23,6 +23,7 @@ import type { ApprovalDecision, ModelInfo, SandboxSettings, ProxySettings, Permi
 import { logger } from '../services/logger'
 import { deleteSessionFiles, deleteProjectFiles } from '../services/delete-session-files'
 import { startSocksBridge, stopSocksBridge } from '../services/socks-bridge'
+import { setProxyEnv, setProxyAllSubprocesses } from '../sdk/proxy'
 import { invalidateMockupSecuritySettings } from '../services/mockup-settings'
 
 /**
@@ -229,11 +230,21 @@ function buildProxyUrl(proxy: ProxySettings): string {
 }
 
 /**
- * Apply or clear proxy environment variables based on settings.
+ * Apply or clear proxy settings for cli.js spawns.
  *
- * - HTTP proxy: sets HTTP_PROXY directly (CLI's bundled https-proxy-agent handles it)
+ * The proxy env vars are stored in an in-memory slot and overlaid by
+ * `buildEnv()` onto each cli.js spawn's env — they are NOT written to the
+ * Electron main process's `process.env`. That avoids leaking the proxy into
+ * node-pty terminals, git-service subprocesses, plugin hosts, and our own
+ * fetch() calls.
+ *
+ * - HTTP proxy: sets HTTP_PROXY directly (cli.js's bundled https-proxy-agent handles it)
  * - SOCKS5 proxy: starts a local HTTP CONNECT bridge that tunnels through SOCKS5,
- *   because the CLI has no native SOCKS5 support
+ *   because cli.js has no native SOCKS5 support
+ *
+ * cli.js subprocess inheritance (Bash tool, MCP, LSP, shell-snapshot) is
+ * controlled by `proxy.proxySubprocesses` — see `src/main/sdk/proxy.ts` and
+ * `patch/subprocess-proxy-strip/`.
  */
 export async function applyProxyEnv(proxy: ProxySettings | undefined): Promise<void> {
   if (proxy?.enabled && proxy.hostname) {
@@ -247,31 +258,24 @@ export async function applyProxyEnv(proxy: ProxySettings | undefined): Promise<v
           password: proxy.password || undefined
         })
         const bridgeUrl = `http://127.0.0.1:${port}`
-        process.env.HTTP_PROXY = bridgeUrl
-        process.env.HTTPS_PROXY = bridgeUrl
-        process.env.ALL_PROXY = bridgeUrl
+        setProxyEnv({ HTTP_PROXY: bridgeUrl, HTTPS_PROXY: bridgeUrl, ALL_PROXY: bridgeUrl })
         logger.info('Proxy', `SOCKS5 proxy via bridge: socks5://${proxy.hostname}:${proxy.port} → ${bridgeUrl}`)
       } catch (err) {
         logger.error('Proxy', `Failed to start SOCKS5 bridge: ${err instanceof Error ? err.message : err}`)
-        // Clear env vars so we don't leave stale config
-        delete process.env.HTTP_PROXY
-        delete process.env.HTTPS_PROXY
-        delete process.env.ALL_PROXY
+        setProxyEnv(null)
       }
     } else {
       // HTTP proxy: direct
       await stopSocksBridge()
       const url = buildProxyUrl(proxy)
-      process.env.HTTP_PROXY = url
-      process.env.HTTPS_PROXY = url
-      process.env.ALL_PROXY = url
+      setProxyEnv({ HTTP_PROXY: url, HTTPS_PROXY: url, ALL_PROXY: url })
       logger.info('Proxy', `HTTP proxy enabled: ${proxy.hostname}:${proxy.port}`)
     }
+    setProxyAllSubprocesses(proxy.proxySubprocesses === true)
   } else {
     await stopSocksBridge()
-    delete process.env.HTTP_PROXY
-    delete process.env.HTTPS_PROXY
-    delete process.env.ALL_PROXY
+    setProxyEnv(null)
+    setProxyAllSubprocesses(false)
   }
 }
 

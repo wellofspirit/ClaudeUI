@@ -120,6 +120,12 @@ export interface ProxySettings {
   port: number
   username: string
   password: string
+  /**
+   * When true, cli.js's subprocesses (Bash tool, MCP, LSP, shell-snapshot) also
+   * route through the proxy. When false (default), only cli.js's own Anthropic
+   * API calls are proxied — git/curl/npm/etc. spawned by Claude stay direct.
+   */
+  proxySubprocesses?: boolean
 }
 
 export interface SandboxSettings {

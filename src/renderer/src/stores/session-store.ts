@@ -188,7 +188,8 @@ const DEFAULT_SETTINGS: AppSettings = {
     hostname: '',
     port: 8080,
     username: '',
-    password: ''
+    password: '',
+    proxySubprocesses: false
   },
   mermaidTheme: 'auto',
   logLevel: 'warn',
