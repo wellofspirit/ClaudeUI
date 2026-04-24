@@ -703,23 +703,33 @@ if (src.includes(patchGMarker)) {
   console.log(`    taskId=${taskIdVar}, makeStream=${makeStreamVar}, desc=${descVar_g}, toolUseCtx=${toolUseCtxVar}`)
 
   // Find the for-await loop body inside iu8:
-  // v2.1.76: for await(let MSG of MAKESTREAM(CACHE)){ARR.push(MSG),REGISTRY.update(...
+  // v2.1.76:  for await(let MSG of MAKESTREAM(CACHE)){ARR.push(MSG),REGISTRY.update(...
   // v2.1.114: for await(let MSG of MAKESTREAM(CACHE)){PROGRESS=MSG.type,WATCHDOG(),ARR.push(MSG),...
-  //           (leading statements before .push were added for a stall watchdog)
-  // We don't care what's between `{` and `.push()` — only need the loop var
-  // + array var so we can build the stream-event injection. Allow any
-  // non-brace prefix.
-  const iu8Body = src.slice(iu8Match.index, iu8Match.index + 2500)
+  // v2.1.118: for await(let MSG of MAKESTREAM(SUMFN,POKEFN)){PROGRESS=...,if(MSG.type==="assistant"){...}else if(MSG.type==="user"){...},...ARR.push(MSG),...
+  //           MAKESTREAM now takes 2 args (summarization fn + watchdog poke) and
+  //           the loop body contains nested { } for last-seen tracking, so a
+  //           non-nested prefix won't reach .push(). We only need the loop
+  //           variable — arr is never referenced in the injection. Match just
+  //           the for-await opening, then find .push(msgVar) separately.
+  const iu8Body = src.slice(iu8Match.index, iu8Match.index + 3000)
   const forAwaitRe = new RegExp(
-    `for await\\(let (${V}) of ${makeStreamVar}\\((${V})\\)\\)\\{([^{}]*?)(${V})\\.push\\(\\1\\)`
+    `for await\\(let (${V}) of ${makeStreamVar}\\([^)]*\\)\\)\\{`
   )
   const forAwaitMatch = forAwaitRe.exec(iu8Body)
   if (!forAwaitMatch) {
     console.error('ERROR: Cannot find for-await loop in iu8().')
     process.exit(1)
   }
-  const msgVar_g = forAwaitMatch[1]   // loop variable
-  const arrVar_g = forAwaitMatch[4]   // collection array
+  const msgVar_g = forAwaitMatch[1]
+  // Sanity check: confirm `.push(msgVar)` exists in the body (proves we're in
+  // the collection-building loop, not some other for-await).
+  const pushRe = new RegExp(`(${V})\\.push\\(${msgVar_g}\\)`)
+  const pushMatch = pushRe.exec(iu8Body.slice(forAwaitMatch.index + forAwaitMatch[0].length))
+  if (!pushMatch) {
+    console.error(`ERROR: Cannot find .push(${msgVar_g}) after iu8() for-await loop.`)
+    process.exit(1)
+  }
+  const arrVar_g = pushMatch[1]
   console.log(`    Loop: msg=${msgVar_g}, arr=${arrVar_g}`)
 
   // The injection point is right after the opening `{` of the for-await body

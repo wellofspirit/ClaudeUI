@@ -5,7 +5,7 @@ description: Write and run behavioral tests for SDK patches. Use when creating, 
 
 # Patch Test Harness
 
-Write behavioral tests that verify SDK patches work correctly by launching real SDK sessions and asserting on the message stream.
+Write behavioral tests that verify cli.js patches work correctly by launching real sessions against the rebundled Bun binary (`vendor/claude-cli/bun-claude`) and asserting on the message stream.
 
 ## Test Infrastructure
 
@@ -15,10 +15,14 @@ All test code lives in `patch/` alongside the patch apply scripts.
 
 | File | Purpose |
 |---|---|
-| `patch/test-helpers.mjs` | Shared utilities: `createQuery()`, `createStreamingQuery()`, `collectMessages()`, `TestRunner`, `dumpMessages()`, `MessageChannel`, `userMessage()` |
+| `patch/test-helpers.mjs` | Shared utilities: spawns `bun-claude` directly, exposes stream-json iterator + control channel (`stopTask`, `mcpServerStatus`, `dequeueMessage`, `toggleMcpServer`, `getUsage`, `close`). Factories: `createQuery()`, `createStreamingQuery()`, helpers: `collectMessages()`, `TestRunner`, `dumpMessages()`, `MessageChannel`, `userMessage()`. |
 | `patch/test-all.mjs` | Sequential runner for all patch tests |
 | `patch/mcp-test-server.mjs` | Minimal stdio MCP server for MCP-related tests |
 | `patch/<name>/test.mjs` | Individual patch test (one per patch) |
+
+**Prerequisite:** `vendor/claude-cli/bun-claude` must exist. Run `bun run ensure-cli` (or `bun run update-cli` after bumping `claudeCliVersion`). Tests auto-fail with a clear error if the binary is missing.
+
+**Debug stderr:** set `DEBUG_HARNESS=1` to forward cli.js stderr to the terminal — useful when a test returns 0 messages.
 
 ### Running Tests
 
@@ -276,8 +280,9 @@ const tests = [
 7. **Timing issues with streaming tests?** The `onMessage` callback is not awaited, but this is OK because the SDK blocks on channel.next() between turns. If issues persist, add `await new Promise(r => setTimeout(r, N))` after toggle operations.
 8. **Verify patch marker in cli.js:**
    ```bash
-   bundle-analyzer find node_modules/@anthropic-ai/claude-agent-sdk/cli.js "PATCHED:patch-name" --compact
+   grep -c "PATCHED:patch-name" vendor/claude-cli/cli.js
    ```
+   (cli.js is the extracted source; `bun-claude` embeds its patched form. Run `bun run ensure-cli` after any patch edits.)
 
 ## SDK Message Type Reference
 
