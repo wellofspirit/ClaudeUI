@@ -748,8 +748,11 @@ if (src.includes(patchGMarker)) {
   //           variable — arr is never referenced in the injection. Match just
   //           the for-await opening, then find .push(msgVar) separately.
   const iu8Body = src.slice(iu8Match.index, iu8Match.index + 3000)
+  // Minified identifiers can be `$`, which is a regex metachar (end-of-input)
+  // when used outside a character class. Escape before interpolating.
+  const reEsc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
   const forAwaitRe = new RegExp(
-    `for await\\(let (${V}) of ${makeStreamVar}\\([^)]*\\)\\)\\{`
+    `for await\\(let (${V}) of ${reEsc(makeStreamVar)}\\([^)]*\\)\\)\\{`
   )
   const forAwaitMatch = forAwaitRe.exec(iu8Body)
   if (!forAwaitMatch) {
@@ -759,7 +762,7 @@ if (src.includes(patchGMarker)) {
   const msgVar_g = forAwaitMatch[1]
   // Sanity check: confirm `.push(msgVar)` exists in the body (proves we're in
   // the collection-building loop, not some other for-await).
-  const pushRe = new RegExp(`(${V})\\.push\\(${msgVar_g}\\)`)
+  const pushRe = new RegExp(`(${V})\\.push\\(${reEsc(msgVar_g)}\\)`)
   const pushMatch = pushRe.exec(iu8Body.slice(forAwaitMatch.index + forAwaitMatch[0].length))
   if (!pushMatch) {
     console.error(`ERROR: Cannot find .push(${msgVar_g}) after iu8() for-await loop.`)
