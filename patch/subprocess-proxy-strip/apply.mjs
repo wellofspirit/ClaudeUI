@@ -54,7 +54,7 @@ if (src.includes(MARKER)) {
 }
 
 // ---------------------------------------------------------------------------
-// Anchor the env-builder function (Qk() in 2.1.114, uv() in 2.1.118).
+// Anchor the env-builder function (Qk() in 2.1.114, uv() in 2.1.118, PV() in 2.1.119).
 //
 // Shape (cli.js 2.1.114):
 //   function Qk(){
@@ -80,9 +80,63 @@ if (src.includes(MARKER)) {
 //     return $
 //   }
 //
+// Shape (cli.js 2.1.119 — adds CLAUDE_BG_* / CLAUDE_CODE_SESSION_KIND scrub):
+//   function PV(){
+//     let H=Nd_(),
+//         _=Object.keys(H).length>0,
+//         q=EH(process.env.CLAUDE_CODE_REMOTE)?d09(_?{...process.env,...H}:process.env):{},
+//         K=Object.keys(q).length>0,
+//         O=mR1(),
+//         T=!1;
+//     if(T=process.env.CLAUDE_CODE_SESSION_KIND!==void 0||
+//          process.env.CLAUDE_BG_SOURCE!==void 0||
+//          process.env.CLAUDE_BG_ISOLATION!==void 0||
+//          process.env.CLAUDE_BG_BACKEND!==void 0||
+//          process.env.CLAUDE_CODE_SESSION_NAME!==void 0,
+//          !_&&!K&&!O&&!T)return process.env;
+//     let $={...process.env,...H,...q};
+//     if(delete $.CLAUDE_CODE_SESSION_KIND,
+//        delete $.CLAUDE_BG_SOURCE,
+//        delete $.CLAUDE_BG_ISOLATION,
+//        delete $.CLAUDE_BG_BACKEND,
+//        delete $.CLAUDE_CODE_SESSION_NAME,
+//        !O)return $;
+//     for(let A of gR1)delete $[A],delete $[`INPUT_${A}`];
+//     return $
+//   }
+//
 // We capture the name + minified locals so the rebuilt body type-checks
 // against whatever variables cli.js renamed them to across versions.
 // ---------------------------------------------------------------------------
+
+// v2.1.119 shape — adds CLAUDE_BG_*/SESSION_KIND scrub on top of v2.1.118
+const fnReV119 = new RegExp(
+  `function (${V})\\(\\)\\{` +
+    `let (${V})=(${V})\\(\\),` +
+    `(${V})=Object\\.keys\\(\\2\\)\\.length>0,` +
+    `(${V})=(${V})\\(process\\.env\\.CLAUDE_CODE_REMOTE\\)\\?(${V})\\(\\4\\?\\{\\.\\.\\.process\\.env,\\.\\.\\.\\2\\}:process\\.env\\):\\{\\},` +
+    `(${V})=Object\\.keys\\(\\5\\)\\.length>0,` +
+    `(${V})=(${V})\\(\\),` +
+    `(${V})=!1;` +
+    `if\\(\\11=` +
+      `process\\.env\\.CLAUDE_CODE_SESSION_KIND!==void 0\\|\\|` +
+      `process\\.env\\.CLAUDE_BG_SOURCE!==void 0\\|\\|` +
+      `process\\.env\\.CLAUDE_BG_ISOLATION!==void 0\\|\\|` +
+      `process\\.env\\.CLAUDE_BG_BACKEND!==void 0\\|\\|` +
+      `process\\.env\\.CLAUDE_CODE_SESSION_NAME!==void 0,` +
+      `!\\4&&!\\8&&!\\9&&!\\11\\)return process\\.env;` +
+    `let (${V})=\\{\\.\\.\\.process\\.env,\\.\\.\\.\\2,\\.\\.\\.\\5\\};` +
+    `if\\(` +
+      `delete \\12\\.CLAUDE_CODE_SESSION_KIND,` +
+      `delete \\12\\.CLAUDE_BG_SOURCE,` +
+      `delete \\12\\.CLAUDE_BG_ISOLATION,` +
+      `delete \\12\\.CLAUDE_BG_BACKEND,` +
+      `delete \\12\\.CLAUDE_CODE_SESSION_NAME,` +
+      `!\\9\\)return \\12;` +
+    `for\\(let (${V}) of (${V})\\)delete \\12\\[\\13\\],delete \\12\\[\`INPUT_\\$\\{\\13\\}\`\\];` +
+    `return \\12` +
+    `\\}`
+)
 
 // v2.1.118 shape — 3-source merge (process.env + user env + remote env)
 const fnReV118 = new RegExp(
@@ -124,8 +178,67 @@ const stripHelperDecl =
 
 let match, full, newFn, shape
 
-match = fnReV118.exec(src)
+match = fnReV119.exec(src)
 if (match) {
+  shape = 'v119'
+  const duplicates = [...src.matchAll(new RegExp(fnReV119.source, 'g'))]
+  if (duplicates.length > 1) {
+    console.error(`ERROR: v119 pattern matched ${duplicates.length} times. Aborting.`)
+    process.exit(1)
+  }
+  const [
+    ,
+    fnName,
+    H,
+    Nd_,
+    flagUserNotEmpty,
+    qRemote,
+    EH_,
+    d09_,
+    flagRemoteNotEmpty,
+    flagScrub,
+    mR1_,
+    flagBg,
+    merged,
+    T,
+    gR1_
+  ] = match
+  full = match[0]
+  console.log(`Found ${fnName}() [v119 shape] at char ${match.index}`)
+  console.log(
+    `  locals: H=${H} Nd_=${Nd_} _=${flagUserNotEmpty} q=${qRemote} EH=${EH_} d09=${d09_} ` +
+    `K=${flagRemoteNotEmpty} O=${flagScrub} mR1=${mR1_} T=${flagBg} $=${merged} A=${T} gR1=${gR1_}`
+  )
+
+  newFn =
+    MARKER +
+    `function ${fnName}(){` +
+      stripHelperDecl +
+      `let ${H}=${Nd_}(),` +
+          `${flagUserNotEmpty}=Object.keys(${H}).length>0,` +
+          `${qRemote}=${EH_}(process.env.CLAUDE_CODE_REMOTE)?${d09_}(${flagUserNotEmpty}?{...process.env,...${H}}:process.env):{},` +
+          `${flagRemoteNotEmpty}=Object.keys(${qRemote}).length>0,` +
+          `${flagScrub}=${mR1_}(),` +
+          `${flagBg}=!1;` +
+      `if(${flagBg}=` +
+        `process.env.CLAUDE_CODE_SESSION_KIND!==void 0||` +
+        `process.env.CLAUDE_BG_SOURCE!==void 0||` +
+        `process.env.CLAUDE_BG_ISOLATION!==void 0||` +
+        `process.env.CLAUDE_BG_BACKEND!==void 0||` +
+        `process.env.CLAUDE_CODE_SESSION_NAME!==void 0,` +
+        `!${flagUserNotEmpty}&&!${flagRemoteNotEmpty}&&!${flagScrub}&&!${flagBg})return ${stripHelperName}(process.env);` +
+      `let ${merged}={...process.env,...${H},...${qRemote}};` +
+      `if(` +
+        `delete ${merged}.CLAUDE_CODE_SESSION_KIND,` +
+        `delete ${merged}.CLAUDE_BG_SOURCE,` +
+        `delete ${merged}.CLAUDE_BG_ISOLATION,` +
+        `delete ${merged}.CLAUDE_BG_BACKEND,` +
+        `delete ${merged}.CLAUDE_CODE_SESSION_NAME,` +
+        `!${flagScrub})return ${stripHelperName}(${merged});` +
+      `for(let ${T} of ${gR1_})delete ${merged}[${T}],delete ${merged}[\`INPUT_\${${T}}\`];` +
+      `return ${stripHelperName}(${merged})` +
+    `}`
+} else if ((match = fnReV118.exec(src))) {
   shape = 'v118'
   const duplicates = [...src.matchAll(new RegExp(fnReV118.source, 'g'))]
   if (duplicates.length > 1) {
@@ -176,7 +289,7 @@ if (match) {
       `return ${stripHelperName}(${O})` +
     `}`
 } else {
-  console.error('ERROR: Cannot locate env-builder function by v114 or v118 structural shape.')
+  console.error('ERROR: Cannot locate env-builder function by v114, v118, or v119 structural shape.')
   console.error('The function may have been refactored by upstream. Re-run bundle-analyzer.')
   process.exit(1)
 }
