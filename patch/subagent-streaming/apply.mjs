@@ -143,16 +143,26 @@ if (src.includes(patchFMarker)) {
 // ===========================================================================
 // Patch A: Remove content-block filter from sub-agent progress callback
 //
-// Before:
-//   for(let $1 of _1)for(let G1 of $1.message.content){
-//     if(G1.type!=="tool_use"&&G1.type!=="tool_result")continue;
-//     if(j)j({toolUseID:..., data:{message:$1,...}})
+// v2.1.118 and earlier (nested for-loop, no forwardSubagentText option):
+//   for(let MSG of MSGS)for(let BLK of MSG.message.content){
+//     if(BLK.type!=="tool_use"&&BLK.type!=="tool_result")continue;
+//     if(j)j({toolUseID:..., data:{message:MSG,...}})
 //   }
 //
-// After:
-//   for(let $1 of _1){
-//     if(j)j({toolUseID:..., data:{message:$1,...}})
+// v2.1.119+ (upstream introduced ZX([msg]) flattener + forwardSubagentText
+// option that, when true, forwards every content block):
+//   let xH=ZX([LH]),FH=w.options.forwardSubagentText;
+//   for(let H_ of xH){
+//     if(!f)continue;
+//     let iH=H_.message.content[0];
+//     if(!FH&&iH.type!=="tool_use"&&iH.type!=="tool_result")continue;
+//     f({toolUseID:`agent_${j.message.id}`,data:{message:H_,type:"agent_progress",...}})
 //   }
+//
+// Goal in both shapes: forward every content block (text, thinking, tool_use,
+// tool_result) regardless of upstream gating. Achieved by collapsing the inner
+// for-loop (old) or by dropping the `if(...)continue;` guard (new). Once the
+// guard is gone, ZX-split messages flow unconditionally.
 // ===========================================================================
 
 console.log('\n--- Patch A: Sub-agent progress callback filter ---')
@@ -162,29 +172,49 @@ const patchAMarker = '/*PATCHED:subagent-A*/'
 if (src.includes(patchAMarker)) {
   console.log('Already applied. Skipping.')
 } else {
-  const filterRe = new RegExp(
+  // v2.1.119+ shape: single content[0] check gated by forwardSubagentText flag.
+  const newFilterRe = new RegExp(
+    `let (${V})=(${V})\\.message\\.content\\[0\\];` +
+    `if\\(!(${V})&&\\1\\.type!=="tool_use"&&\\1\\.type!=="tool_result"\\)continue;`
+  )
+  // Legacy shape: nested for-loops over message.content.
+  const oldFilterRe = new RegExp(
     `for\\(let (${V}) of (${V})\\)` +
     `for\\(let (${V}) of \\1\\.message\\.content\\)\\{` +
     `if\\(\\3\\.type!=="tool_use"&&\\3\\.type!=="tool_result"\\)continue;`
   )
-  const m = src.match(filterRe)
-  if (!m) {
-    console.error('ERROR: Cannot locate sub-agent progress callback filter.')
+
+  const newM = src.match(newFilterRe)
+  const oldM = src.match(oldFilterRe)
+
+  if (newM) {
+    const oldStr = newM[0]
+    const idx = src.indexOf(oldStr)
+    if (src.indexOf(oldStr, idx + 1) !== -1) {
+      console.error('ERROR: Multiple matches for Patch A (v119 shape). Aborting.')
+      process.exit(1)
+    }
+    // Keep the `let iH=H_.message.content[0];` declaration (harmless, no
+    // downstream reads), just drop the gating `if(...)continue;`.
+    const newStr = `${patchAMarker}let ${newM[1]}=${newM[2]}.message.content[0];`
+    src = src.slice(0, idx) + newStr + src.slice(idx + oldStr.length)
+    patchCount++
+    console.log(`Applied (v119 shape) at char ${idx}. Vars: blk=${newM[1]}, msg=${newM[2]}, fwdFlag=${newM[3]}`)
+  } else if (oldM) {
+    const oldStr = oldM[0]
+    const newStr = `${patchAMarker}for(let ${oldM[1]} of ${oldM[2]}){`
+    const idx = src.indexOf(oldStr)
+    if (src.indexOf(oldStr, idx + 1) !== -1) {
+      console.error('ERROR: Multiple matches for Patch A (legacy shape). Aborting.')
+      process.exit(1)
+    }
+    src = src.slice(0, idx) + newStr + src.slice(idx + oldStr.length)
+    patchCount++
+    console.log(`Applied (legacy shape) at char ${idx}. Vars: msg=${oldM[1]}, msgs=${oldM[2]}, inner=${oldM[3]}`)
+  } else {
+    console.error('ERROR: Cannot locate sub-agent progress callback filter (tried v119 + legacy shapes).')
     process.exit(1)
   }
-
-  const oldStr = m[0]
-  const newStr = `${patchAMarker}for(let ${m[1]} of ${m[2]}){`
-  const idx = src.indexOf(oldStr)
-
-  if (src.indexOf(oldStr, idx + 1) !== -1) {
-    console.error('ERROR: Multiple matches for Patch A. Aborting.')
-    process.exit(1)
-  }
-
-  src = src.slice(0, idx) + newStr + src.slice(idx + oldStr.length)
-  patchCount++
-  console.log(`Applied at char ${idx}. Vars: msg=${m[1]}, msgs=${m[2]}, inner=${m[3]}`)
 }
 
 // ===========================================================================
@@ -273,12 +303,18 @@ if (src.includes(patchBMarker)) {
     process.exit(1)
   }
 
-  // Extract callback var (D), parent msg var (j), agent ID var (r) from nearby code
+  // Extract callback var (D), parent msg var (j), agent ID var (r) from nearby code.
+  // v2.1.118 and earlier: gated `if(D)D({toolUseID:`agent_${j.message.id}`...agentId:r}`.
+  // v2.1.119+: upstream replaced the per-call gate with `if(!f)continue;` then an
+  //   unconditional `f({toolUseID:`agent_${j.message.id}`...agentId:DH})`.
   const nearby = src.slice(idx, idx + 1200)
-  const cbRe = new RegExp(
+  const cbReGated = new RegExp(
     `if\\((${V})\\)\\1\\(\\{toolUseID:\`agent_\\$\\{(${V})\\.message\\.id\\}\`.*?agentId:(${V})\\}`
   )
-  const cbm = nearby.match(cbRe)
+  const cbReUnconditional = new RegExp(
+    `(${V})\\(\\{toolUseID:\`agent_\\$\\{(${V})\\.message\\.id\\}\`.*?agentId:(${V})\\}`
+  )
+  const cbm = nearby.match(cbReGated) || nearby.match(cbReUnconditional)
   if (!cbm) {
     console.error('ERROR: Cannot extract callback var names from nearby code.')
     process.exit(1)
@@ -703,23 +739,36 @@ if (src.includes(patchGMarker)) {
   console.log(`    taskId=${taskIdVar}, makeStream=${makeStreamVar}, desc=${descVar_g}, toolUseCtx=${toolUseCtxVar}`)
 
   // Find the for-await loop body inside iu8:
-  // v2.1.76: for await(let MSG of MAKESTREAM(CACHE)){ARR.push(MSG),REGISTRY.update(...
+  // v2.1.76:  for await(let MSG of MAKESTREAM(CACHE)){ARR.push(MSG),REGISTRY.update(...
   // v2.1.114: for await(let MSG of MAKESTREAM(CACHE)){PROGRESS=MSG.type,WATCHDOG(),ARR.push(MSG),...
-  //           (leading statements before .push were added for a stall watchdog)
-  // We don't care what's between `{` and `.push()` — only need the loop var
-  // + array var so we can build the stream-event injection. Allow any
-  // non-brace prefix.
-  const iu8Body = src.slice(iu8Match.index, iu8Match.index + 2500)
+  // v2.1.118: for await(let MSG of MAKESTREAM(SUMFN,POKEFN)){PROGRESS=...,if(MSG.type==="assistant"){...}else if(MSG.type==="user"){...},...ARR.push(MSG),...
+  //           MAKESTREAM now takes 2 args (summarization fn + watchdog poke) and
+  //           the loop body contains nested { } for last-seen tracking, so a
+  //           non-nested prefix won't reach .push(). We only need the loop
+  //           variable — arr is never referenced in the injection. Match just
+  //           the for-await opening, then find .push(msgVar) separately.
+  const iu8Body = src.slice(iu8Match.index, iu8Match.index + 3000)
+  // Minified identifiers can be `$`, which is a regex metachar (end-of-input)
+  // when used outside a character class. Escape before interpolating.
+  const reEsc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
   const forAwaitRe = new RegExp(
-    `for await\\(let (${V}) of ${makeStreamVar}\\((${V})\\)\\)\\{([^{}]*?)(${V})\\.push\\(\\1\\)`
+    `for await\\(let (${V}) of ${reEsc(makeStreamVar)}\\([^)]*\\)\\)\\{`
   )
   const forAwaitMatch = forAwaitRe.exec(iu8Body)
   if (!forAwaitMatch) {
     console.error('ERROR: Cannot find for-await loop in iu8().')
     process.exit(1)
   }
-  const msgVar_g = forAwaitMatch[1]   // loop variable
-  const arrVar_g = forAwaitMatch[4]   // collection array
+  const msgVar_g = forAwaitMatch[1]
+  // Sanity check: confirm `.push(msgVar)` exists in the body (proves we're in
+  // the collection-building loop, not some other for-await).
+  const pushRe = new RegExp(`(${V})\\.push\\(${reEsc(msgVar_g)}\\)`)
+  const pushMatch = pushRe.exec(iu8Body.slice(forAwaitMatch.index + forAwaitMatch[0].length))
+  if (!pushMatch) {
+    console.error(`ERROR: Cannot find .push(${msgVar_g}) after iu8() for-await loop.`)
+    process.exit(1)
+  }
+  const arrVar_g = pushMatch[1]
   console.log(`    Loop: msg=${msgVar_g}, arr=${arrVar_g}`)
 
   // The injection point is right after the opening `{` of the for-await body

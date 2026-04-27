@@ -71,7 +71,9 @@ if (src.includes(PATCH_MARKER)) {
 console.log('\n--- Locating header utilization getter (LR4) ---')
 
 // Pattern: function <LR4>(){return <kh8>}function <hR4>
-const lr4Re = new RegExp(`function (${V})\\(\\)\\{return (${V})\\}function (${V})\\(${V}\\)\\{let ${V}=\\{\\};for\\(let\\[${V},${V}\\]of\\[\\["five_hour","5h"\\],\\["seven_day","7d"\\]\\]\\)`)
+// v2.1.119+ appended ["overage","overage"] (and may add further bucket pairs)
+// to the for-loop array. Allow any number of trailing ["str","str"] entries.
+const lr4Re = new RegExp(`function (${V})\\(\\)\\{return (${V})\\}function (${V})\\(${V}\\)\\{let ${V}=\\{\\};for\\(let\\[${V},${V}\\]of\\[\\["five_hour","5h"\\],\\["seven_day","7d"\\](?:,\\["[\\w_]+","[\\w_]+"\\])*\\]\\)`)
 const lr4Match = lr4Re.exec(src)
 if (!lr4Match) {
   console.error('ERROR: Cannot locate LR4 (header utilization getter) via hR4 context.')
