@@ -396,7 +396,7 @@ export interface PerSessionState {
   gitStatus: GitStatusData | null
   gitBranches: GitBranchData | null
   gitSelectedFile: string | null
-  gitFileDiff: { patch: string; oldContent?: string; newContent?: string } | null
+  gitFileDiff: { patch: string; isBinary?: boolean; oldContent?: string; newContent?: string } | null
   gitCommitMessage: string
   gitFileFilter: 'staged' | 'unstaged' | 'all'
   gitReviewComments: DiffComment[]
@@ -664,7 +664,7 @@ interface SessionState {
   setGitStatus: (routingId: string, status: GitStatusData) => void
   setGitBranches: (routingId: string, branches: GitBranchData) => void
   setGitSelectedFile: (routingId: string, filePath: string | null) => void
-  setGitFileDiff: (routingId: string, diff: { patch: string; oldContent?: string; newContent?: string } | null) => void
+  setGitFileDiff: (routingId: string, diff: { patch: string; isBinary?: boolean; oldContent?: string; newContent?: string } | null) => void
   setGitCommitMessage: (routingId: string, message: string) => void
   setGitFileFilter: (routingId: string, filter: 'staged' | 'unstaged' | 'all') => void
   selectNextGitFile: (routingId: string) => void

@@ -161,6 +161,37 @@ describe('GitService.getStatus', () => {
     // The file content has 2 \n characters (from \r\n pairs) → split yields 3 pieces
     expect(status.linesAdded).toBe(3)
   })
+
+  it('skips untracked files larger than the size cap to avoid V8 string-length crashes', async () => {
+    // A small countable untracked file
+    await repo.writeFile('small.txt', 'a\nb\nc\n')
+    // An "oversized" untracked blob — just over 10 MiB. We don't actually need
+    // to exceed V8's kMaxLength; the guard skips anything above the cap. This
+    // protects against the real-world case (multi-GB DuckDB / sqlite files in
+    // the working tree) which previously crashed the main process via
+    // fs.readFile(path, 'utf-8').
+    const big = Buffer.alloc(10 * 1024 * 1024 + 1, 0x61) // 'a' bytes, no newlines
+    await fs.promises.writeFile(path.join(repo.path, 'huge.bin'), big)
+
+    const status = await svc.getStatus()
+    expect(status.untracked).toEqual(expect.arrayContaining(['small.txt', 'huge.bin']))
+    // Only small.txt's 3 lines should be counted; huge.bin is skipped.
+    expect(status.linesAdded).toBe(3)
+  })
+
+  it('skips line counting for untracked binary files (NUL byte sniff)', async () => {
+    // Small text file that should be counted
+    await repo.writeFile('readme.txt', 'one\ntwo\n')
+    // Small binary file: contains a NUL byte in the first 8 KB sniff window.
+    // Simulates a sqlite/duckdb-style header with embedded NULs.
+    const bin = Buffer.from([0x53, 0x51, 0x4c, 0x69, 0x74, 0x65, 0x00, 0x42, 0x4c, 0x4f, 0x42])
+    await fs.promises.writeFile(path.join(repo.path, 'data.db'), bin)
+
+    const status = await svc.getStatus()
+    expect(status.untracked).toEqual(expect.arrayContaining(['readme.txt', 'data.db']))
+    // Only readme.txt's 2 lines should count; data.db is detected as binary.
+    expect(status.linesAdded).toBe(2)
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -555,6 +586,57 @@ describe('GitService.getFilePatch', () => {
     expect(normalized).toMatch(/^\+b$/m)
     expect(normalized).toMatch(/^\+c$/m)
     expect(normalized).toMatch(/^@@ -0,0 \+1,3 @@/m)
+  })
+
+  it('returns isBinary placeholder for an untracked binary file (no file content leaked)', async () => {
+    // SQLite-like header — NUL byte in the first 8 KB triggers the binary sniff.
+    // Include a string that would be visible if we mistakenly fell back to the
+    // text-patch synthesis, so we can assert it never surfaces in the patch.
+    const sentinel = 'SECRET-DO-NOT-LEAK'
+    const bin = Buffer.concat([
+      Buffer.from('SQLite format 3'),
+      Buffer.from([0x00]),
+      Buffer.from(sentinel)
+    ])
+    await fs.promises.writeFile(path.join(repo.path, 'data.db'), bin)
+
+    const { patch, isBinary } = await svc.getFilePatch('data.db', false)
+    expect(isBinary).toBe(true)
+    const normalized = norm(patch)
+    expect(normalized).toMatch(/^diff --git a\/data\.db b\/data\.db/m)
+    expect(normalized).toMatch(/^Binary files \/dev\/null and b\/data\.db differ$/m)
+    // Critical: the actual file bytes must not appear in the patch.
+    expect(patch.includes(sentinel)).toBe(false)
+    expect(patch.includes('@@')).toBe(false)
+  })
+
+  it('returns isBinary placeholder for an untracked oversize file (size cap)', async () => {
+    // Just over the 10 MiB cap. Filled with a printable byte so the binary
+    // sniff would NOT classify it as binary — this exercises the size-cap
+    // path independently of the NUL-byte heuristic.
+    const big = Buffer.alloc(10 * 1024 * 1024 + 1, 0x61)
+    await fs.promises.writeFile(path.join(repo.path, 'huge.log'), big)
+
+    const { patch, isBinary } = await svc.getFilePatch('huge.log', false)
+    expect(isBinary).toBe(true)
+    const normalized = norm(patch)
+    expect(normalized).toMatch(/^Binary files \/dev\/null and b\/huge\.log differ$/m)
+    // The huge buffer must not appear in the patch.
+    expect(patch.length).toBeLessThan(1024)
+  })
+
+  it('marks tracked binary diffs as isBinary (git emits its own placeholder)', async () => {
+    // Tracked binary — commit one binary blob, then mutate it.
+    const v1 = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x01])
+    const v2 = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x02])
+    await fs.promises.writeFile(path.join(repo.path, 'icon.png'), v1)
+    await repo.git.add('icon.png')
+    await repo.commit('add icon')
+    await fs.promises.writeFile(path.join(repo.path, 'icon.png'), v2)
+
+    const { patch, isBinary } = await svc.getFilePatch('icon.png', false)
+    expect(isBinary).toBe(true)
+    expect(patch).toMatch(/Binary files .* differ/)
   })
 })
 
