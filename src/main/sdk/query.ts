@@ -31,7 +31,7 @@ interface MessageQueueItem {
  * Buffered message channel — push from the protocol reader, pull from the
  * caller's `for await` loop.
  */
-class MessageQueue {
+export class MessageQueue {
   private items: MessageQueueItem[] = []
   private waiter: ((item: MessageQueueItem) => void) | null = null
   private finished = false
@@ -595,7 +595,7 @@ export function isCleanExit(
   return code === 0 || code === 143 || signal === 'SIGTERM' || killedByUs
 }
 
-function makeHandle(
+export function makeHandle(
   queue: MessageQueue,
   control: ControlChannel,
   _child: ChildProcess,
@@ -656,8 +656,11 @@ function makeHandle(
       }),
     askSideQuestion: (question: string) =>
       control
-        .request<{ answer?: string } | null>({ subtype: 'side_question', question })
-        .then((r) => r?.answer ?? null),
+        .request<{ response?: string | null; synthetic?: boolean } | null>({
+          subtype: 'side_question',
+          question,
+        })
+        .then((r) => r?.response ?? null),
     launchUltrareview: (args: unknown, opts?: { confirm?: boolean }) =>
       control.request({ subtype: 'ultrareview_launch', args, confirm: opts?.confirm }),
     stopTask: (task_id: string) => control.request({ subtype: 'stop_task', task_id }),

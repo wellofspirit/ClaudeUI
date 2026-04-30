@@ -477,7 +477,7 @@ Ask a side question that doesn't modify session history and can't use tools.
 
 **Timing:** slow (LLM call).
 
-**QueryHandle:** `q.askSideQuestion(question)` (returns `response.answer`).
+**QueryHandle:** `q.askSideQuestion(question)` (returns `response.response`, the answer text — `null` when cli.js produces no usable answer).
 
 ---
 
