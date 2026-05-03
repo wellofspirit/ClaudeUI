@@ -27,6 +27,8 @@ import type {
   WorktreeInfo,
   SandboxSettings,
   ProxySettings,
+  AnthropicEndpointSettings,
+  ModelOverrideSettings,
   VoiceState,
   VoiceLanguageCode,
   ActiveView,
@@ -135,6 +137,8 @@ export interface AppSettings {
   voiceLanguage: VoiceLanguageCode
   sandbox: SandboxSettings
   proxy: ProxySettings
+  anthropicEndpoint: AnthropicEndpointSettings
+  modelOverride: ModelOverrideSettings
   mermaidTheme: 'auto' | 'dark' | 'default' | 'neutral' | 'forest' // mermaid diagram theme
   logLevel: 'debug' | 'info' | 'warn' | 'error' // global log level
   logFilter: string // per-source overrides: "UsageFetcher:debug,BlockUsage:debug"
@@ -190,6 +194,18 @@ const DEFAULT_SETTINGS: AppSettings = {
     username: '',
     password: '',
     proxySubprocesses: false
+  },
+  anthropicEndpoint: {
+    enabled: false,
+    baseUrl: '',
+    authToken: ''
+  },
+  modelOverride: {
+    enabled: false,
+    model: '',
+    sonnetModel: '',
+    opusModel: '',
+    haikuModel: ''
   },
   mermaidTheme: 'auto',
   logLevel: 'warn',
@@ -300,6 +316,14 @@ export async function hydrateConfigFromDisk(): Promise<void> {
         proxy: {
           ...DEFAULT_SETTINGS.proxy,
           ...saved.proxy
+        },
+        anthropicEndpoint: {
+          ...DEFAULT_SETTINGS.anthropicEndpoint,
+          ...saved.anthropicEndpoint
+        },
+        modelOverride: {
+          ...DEFAULT_SETTINGS.modelOverride,
+          ...saved.modelOverride
         }
       }
     : DEFAULT_SETTINGS

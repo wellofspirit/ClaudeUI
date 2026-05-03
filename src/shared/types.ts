@@ -128,6 +128,38 @@ export interface ProxySettings {
   proxySubprocesses?: boolean
 }
 
+/**
+ * Custom Anthropic API endpoint config. When `enabled`, `baseUrl` is exposed to
+ * cli.js spawns as `ANTHROPIC_BASE_URL` and `authToken` as `ANTHROPIC_AUTH_TOKEN`,
+ * letting users redirect traffic to a self-hosted gateway, LM Studio, or any
+ * Anthropic-compatible endpoint.
+ */
+export interface AnthropicEndpointSettings {
+  enabled: boolean
+  baseUrl: string
+  authToken: string
+}
+
+/**
+ * Model override config. When `enabled`, the user-supplied model names are
+ * exposed to cli.js spawns as the matching Anthropic env vars:
+ *   - `model`       → ANTHROPIC_MODEL              (primary model selection)
+ *   - `sonnetModel` → ANTHROPIC_DEFAULT_SONNET_MODEL
+ *   - `opusModel`   → ANTHROPIC_DEFAULT_OPUS_MODEL
+ *   - `haikuModel`  → ANTHROPIC_DEFAULT_HAIKU_MODEL
+ * Empty fields are skipped, so partial overrides leave cli.js's defaults
+ * intact for the unset families. Useful when pointing cli.js at a custom
+ * gateway whose model identifiers differ from Anthropic's canonical ones
+ * (e.g. LM Studio, OpenRouter).
+ */
+export interface ModelOverrideSettings {
+  enabled: boolean
+  model: string
+  sonnetModel: string
+  opusModel: string
+  haikuModel: string
+}
+
 export interface SandboxSettings {
   enabled: boolean
   autoAllowBashIfSandboxed: boolean

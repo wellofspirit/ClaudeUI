@@ -9,6 +9,8 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import type { QueryOptions, McpServerConfig, SdkMcpServer } from './types'
 import { getProxyEnv, getProxyAllSubprocesses } from './proxy'
+import { getEndpointEnv } from './endpoint-env'
+import { getModelEnv } from './model-env'
 
 /** Strip in-process `type: 'sdk'` servers from an mcpServers map — those are
  *  hosted locally and are NOT written to --mcp-config (the CLI treats them
@@ -293,6 +295,40 @@ export function buildEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessE
     delete env.HTTPS_PROXY
     delete env.ALL_PROXY
     delete env.CLAUDEUI_PROXY_SUBPROCESSES
+  }
+
+  // Scoped Anthropic endpoint: overlay base URL + auth token only onto this
+  // spawn so user-supplied gateway credentials never leak into PTYs, simple-git
+  // subprocesses, or plugin hosts.
+  const endpoint = getEndpointEnv()
+  if (endpoint) {
+    env.ANTHROPIC_BASE_URL = endpoint.ANTHROPIC_BASE_URL
+    env.ANTHROPIC_AUTH_TOKEN = endpoint.ANTHROPIC_AUTH_TOKEN
+  } else {
+    delete env.ANTHROPIC_BASE_URL
+    delete env.ANTHROPIC_AUTH_TOKEN
+  }
+
+  // Scoped model override: each field is set only when non-empty so partial
+  // overrides leave cli.js's defaults intact for the unset families.
+  const model = getModelEnv()
+  if (model) {
+    if (model.ANTHROPIC_MODEL) env.ANTHROPIC_MODEL = model.ANTHROPIC_MODEL
+    else delete env.ANTHROPIC_MODEL
+    if (model.ANTHROPIC_DEFAULT_SONNET_MODEL)
+      env.ANTHROPIC_DEFAULT_SONNET_MODEL = model.ANTHROPIC_DEFAULT_SONNET_MODEL
+    else delete env.ANTHROPIC_DEFAULT_SONNET_MODEL
+    if (model.ANTHROPIC_DEFAULT_OPUS_MODEL)
+      env.ANTHROPIC_DEFAULT_OPUS_MODEL = model.ANTHROPIC_DEFAULT_OPUS_MODEL
+    else delete env.ANTHROPIC_DEFAULT_OPUS_MODEL
+    if (model.ANTHROPIC_DEFAULT_HAIKU_MODEL)
+      env.ANTHROPIC_DEFAULT_HAIKU_MODEL = model.ANTHROPIC_DEFAULT_HAIKU_MODEL
+    else delete env.ANTHROPIC_DEFAULT_HAIKU_MODEL
+  } else {
+    delete env.ANTHROPIC_MODEL
+    delete env.ANTHROPIC_DEFAULT_SONNET_MODEL
+    delete env.ANTHROPIC_DEFAULT_OPUS_MODEL
+    delete env.ANTHROPIC_DEFAULT_HAIKU_MODEL
   }
 
   // Inject our app's node_modules into NODE_PATH so cli.js can resolve

@@ -19,11 +19,13 @@ import { createWorktree, getWorktreeStatus, removeWorktree, listWorktrees } from
 import { usageFetcher } from '../services/usage-fetcher'
 import { serviceSession } from '../services/service-session'
 import { blockUsageService } from '../services/block-usage'
-import type { ApprovalDecision, ModelInfo, SandboxSettings, ProxySettings, PermissionSuggestion, IpcResult } from '../../shared/types'
+import type { ApprovalDecision, ModelInfo, SandboxSettings, ProxySettings, AnthropicEndpointSettings, ModelOverrideSettings, PermissionSuggestion, IpcResult } from '../../shared/types'
 import { logger } from '../services/logger'
 import { deleteSessionFiles, deleteProjectFiles } from '../services/delete-session-files'
 import { startSocksBridge, stopSocksBridge } from '../services/socks-bridge'
 import { setProxyEnv, setProxyAllSubprocesses } from '../sdk/proxy'
+import { setEndpointEnv } from '../sdk/endpoint-env'
+import { setModelEnv } from '../sdk/model-env'
 import { invalidateMockupSecuritySettings } from '../services/mockup-settings'
 
 /**
@@ -246,6 +248,51 @@ function buildProxyUrl(proxy: ProxySettings): string {
  * controlled by `proxy.proxySubprocesses` — see `src/main/sdk/proxy.ts` and
  * `patch/subprocess-proxy-strip/`.
  */
+/**
+ * Apply custom Anthropic endpoint settings into the cli.js spawn env. Stores
+ * `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` in module-scoped state that
+ * `buildEnv()` overlays onto each spawn — never mutates the Electron main
+ * process env, so PTYs / git / MCP / plugins stay clean.
+ */
+export function applyEndpointEnv(endpoint: AnthropicEndpointSettings | undefined): void {
+  if (endpoint?.enabled && endpoint.baseUrl) {
+    setEndpointEnv({
+      ANTHROPIC_BASE_URL: endpoint.baseUrl,
+      ANTHROPIC_AUTH_TOKEN: endpoint.authToken ?? ''
+    })
+    logger.info('Endpoint', `Custom Anthropic endpoint enabled: ${endpoint.baseUrl}`)
+  } else {
+    setEndpointEnv(null)
+  }
+}
+
+/**
+ * Apply model-override settings into the cli.js spawn env. Each field maps to
+ * an Anthropic env var (`ANTHROPIC_MODEL`, `ANTHROPIC_DEFAULT_{SONNET,OPUS,HAIKU}_MODEL`).
+ * Empty fields stay unset so cli.js's defaults apply to the unset families.
+ */
+export function applyModelEnv(model: ModelOverrideSettings | undefined): void {
+  const anyValue =
+    model?.enabled &&
+    (model.model || model.sonnetModel || model.opusModel || model.haikuModel)
+  if (anyValue) {
+    setModelEnv({
+      ANTHROPIC_MODEL: model.model ?? '',
+      ANTHROPIC_DEFAULT_SONNET_MODEL: model.sonnetModel ?? '',
+      ANTHROPIC_DEFAULT_OPUS_MODEL: model.opusModel ?? '',
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: model.haikuModel ?? ''
+    })
+    const parts: string[] = []
+    if (model.model) parts.push(`model=${model.model}`)
+    if (model.sonnetModel) parts.push(`sonnet=${model.sonnetModel}`)
+    if (model.opusModel) parts.push(`opus=${model.opusModel}`)
+    if (model.haikuModel) parts.push(`haiku=${model.haikuModel}`)
+    logger.info('Model', `Model override enabled: ${parts.join(', ')}`)
+  } else {
+    setModelEnv(null)
+  }
+}
+
 export async function applyProxyEnv(proxy: ProxySettings | undefined): Promise<void> {
   if (proxy?.enabled && proxy.hostname) {
     if (proxy.type === 'socks5') {
@@ -502,6 +549,8 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
       const settings = loadSettings() as Record<string, unknown>
       const sandboxConfig = (settings.sandbox as SandboxSettings) || undefined
       await applyProxyEnv((settings.proxy as ProxySettings) || undefined)
+      applyEndpointEnv((settings.anthropicEndpoint as AnthropicEndpointSettings) || undefined)
+      applyModelEnv((settings.modelOverride as ModelOverrideSettings) || undefined)
       manager.create(routingId, win, cwd, effort, resumeSessionId, permissionMode, model, sandboxConfig, thinkingMode)
       // Notify all extra windows (remote bridge) that a session was created
       for (const w of ClaudeSession.getExtraWindows()) {
@@ -748,6 +797,14 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     // Apply proxy env var changes immediately (async — bridge start/stop)
     applyProxyEnv((settings as Record<string, unknown>).proxy as ProxySettings | undefined).catch(
       (err) => logger.error('Proxy', `Failed to apply proxy settings: ${err}`)
+    )
+    // Apply custom Anthropic endpoint env vars immediately
+    applyEndpointEnv(
+      (settings as Record<string, unknown>).anthropicEndpoint as AnthropicEndpointSettings | undefined
+    )
+    // Apply model override env vars immediately
+    applyModelEnv(
+      (settings as Record<string, unknown>).modelOverride as ModelOverrideSettings | undefined
     )
     // Propagate session idle timeout change
     const timeoutMins = (settings as Record<string, unknown>).sessionTimeoutMins
