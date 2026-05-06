@@ -79,7 +79,6 @@ describe.skipIf(!cliJsExists())('patches', () => {
         '/*PATCHED:mcp-status-store-promise*/',
         '/*PATCHED:mcp-status-await-refresh*/',
         // mcp-tool-refresh — upstreamed in CLI 2.1.114; tested below.
-        '/*PATCHED:sandbox-network-fix*/',
         '/*PATCHED:background-task*/',
         '/*PATCHED:usage-relay*/',
         '/*PATCHED:request-usage*/',
@@ -190,18 +189,6 @@ describe.skipIf(!cliJsExists())('patches', () => {
       const markerB = hasMarker(src, 'mcp-tool-refresh-B')
       const upstream = MCP_TOOL_REFRESH_UPSTREAM.test(src)
       expect(markerA || markerB || upstream).toBe(true)
-    })
-  })
-
-  // ---------------------------------------------------------------------------
-  // sandbox-network-fix — single marker
-  // ---------------------------------------------------------------------------
-  describe('sandbox-network-fix', () => {
-    it('marker sandbox-network-fix present in cli.js', () => {
-      expect(hasMarker(src, 'sandbox-network-fix')).toBe(true)
-    })
-    it('marker sandbox-network-fix appears exactly once', () => {
-      expect(countOccurrences(src, '/*PATCHED:sandbox-network-fix*/')).toBe(1)
     })
   })
 

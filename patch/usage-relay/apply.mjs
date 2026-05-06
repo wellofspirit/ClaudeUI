@@ -92,18 +92,28 @@ if (src.includes(PATCH_MARKER)) {
 
   // ---------------------------------------------------------------------------
   // Extract the success response helper
+  //
+  // NOTE: Search globally rather than within a window around the anchor.
+  // The pattern is globally unique (verified below), and a windowed search
+  // breaks when prior patches (e.g. background-task) shift the anchor and
+  // push the original `,X(MH,{})}catch` site out of the window.
   // ---------------------------------------------------------------------------
   console.log('\n--- Extracting function names from content patterns ---')
 
-  const nearbyCtx = src.slice(Math.max(0, anchorIdx - 5000), anchorIdx + 2000)
-
-  const successRe = new RegExp(`\\),(${V})\\(${msgVar.replace(/\$/g, '\\$')},\\{\\}\\)\\}catch`)
-  const successMatch = successRe.exec(nearbyCtx)
-  if (!successMatch) {
+  const successRe = new RegExp(
+    `\\),(${V})\\(${msgVar.replace(/\$/g, '\\$')},\\{\\}\\)\\}catch`,
+    'g'
+  )
+  const successMatches = [...src.matchAll(successRe)]
+  if (successMatches.length === 0) {
     console.error('ERROR: Cannot find success response helper pattern')
     process.exit(1)
   }
-  const successFn = successMatch[1]
+  if (successMatches.length > 1) {
+    console.error(`ERROR: Success response helper pattern matched ${successMatches.length} times (expected 1)`)
+    process.exit(1)
+  }
+  const successFn = successMatches[0][1]
   console.log(`  Success response helper: ${successFn}`)
 
   // ---------------------------------------------------------------------------

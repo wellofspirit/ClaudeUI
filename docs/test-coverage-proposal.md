@@ -121,7 +121,6 @@ Tiers are ordered by **blast radius × probability of breakage**. Tier 1 is non-
   - `queue-control` → `dequeue_message` request succeeds; `queued_command_consumed` notification fires
   - `mcp-status` → returns non-empty after MCP server init
   - `mcp-tool-refresh` → tool list refreshes after reconnect
-  - `sandbox-network-fix` → proxy does not start with no allowlist
   - `background-task` → control message round-trip
   - `usage-relay` → usage events reach SDK stdout
   - `request-usage` → per-request token counts emitted after `message_stop`

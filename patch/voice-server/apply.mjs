@@ -132,19 +132,26 @@ if (src.includes(PATCH_A_MARKER)) {
 
   // -------------------------------------------------------------------------
   // Step 4: Find the success response function
+  //
+  // Search globally — the pattern `,X(MH,{})}catch` is unique across cli.js,
+  // and a windowed search around the anchor breaks once prior patches
+  // (background-task / usage-relay / etc.) shift the anchor and push the
+  // original site out of the lookback window.
   // -------------------------------------------------------------------------
   console.log('\n--- Extracting success response function ---')
 
-  const nearbyCtx = src.slice(Math.max(0, anchorIdx - 5000), anchorIdx + 2000)
-  // Success function is called as: SUCCESS_FN(msgVar, {}) in a try/catch block
   const escMsg = msgVar.replace(/\$/g, '\\$')
-  const successRe = new RegExp(`\\),(${V})\\(${escMsg},\\{\\}\\)\\}catch`)
-  const successMatch = successRe.exec(nearbyCtx)
-  if (!successMatch) {
+  const successRe = new RegExp(`\\),(${V})\\(${escMsg},\\{\\}\\)\\}catch`, 'g')
+  const successMatches = [...src.matchAll(successRe)]
+  if (successMatches.length === 0) {
     console.error('ERROR: Cannot find success response helper')
     process.exit(1)
   }
-  const successFn = successMatch[1]
+  if (successMatches.length > 1) {
+    console.error(`ERROR: Success response helper pattern matched ${successMatches.length} times (expected 1)`)
+    process.exit(1)
+  }
+  const successFn = successMatches[0][1]
   console.log(`  Success response function: ${successFn}`)
 
   // -------------------------------------------------------------------------

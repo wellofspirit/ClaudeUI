@@ -171,7 +171,6 @@ ClaudeUI applies several patches to the bundled `@anthropic-ai/claude-agent-sdk`
 | `queue-control` | Expose message dequeue control |
 | `mcp-status` | Fix MCP status returning empty arrays |
 | `mcp-tool-refresh` | Refresh MCP tools after reconnection |
-| `sandbox-network-fix` | Skip proxy when no network restrictions |
 | `usage-relay` | Relay usage API through control messages |
 
 Patches are applied automatically via `postinstall`. See each patch's `README.md` for details.
