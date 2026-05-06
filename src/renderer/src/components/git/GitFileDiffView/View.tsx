@@ -6,6 +6,7 @@ import type { DiffComment, GitStatusData } from '../../../../../shared/types'
 
 interface GitFileDiffData {
   patch: string
+  isBinary?: boolean
   oldContent?: string
   newContent?: string
 }
@@ -79,6 +80,21 @@ export function GitFileDiffViewView({
     return (
       <div className="flex-1 flex items-center justify-center text-[12px] text-text-muted">
         No changes in this view
+      </div>
+    )
+  }
+
+  if (gitFileDiff.isBinary) {
+    return (
+      <div className="flex-1 flex flex-col min-h-0 p-2">
+        <div className="shrink-0 flex items-center mb-2 px-1">
+          <div className="text-[11px] text-text-muted font-mono truncate" title={gitSelectedFile}>
+            {gitSelectedFile}
+          </div>
+        </div>
+        <div className="flex-1 flex items-center justify-center text-[12px] text-text-muted">
+          Binary file &mdash; preview not shown
+        </div>
       </div>
     )
   }

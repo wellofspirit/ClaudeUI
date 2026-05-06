@@ -4,6 +4,52 @@ import * as path from 'path'
 import type { GitStatusData, GitBranchData, GitFileStatus } from '../../shared/types'
 import { logger } from './logger'
 
+/**
+ * Skip line counting / diff content for files larger than this. A multi-GB
+ * blob (DuckDB / sqlite / video) would crash the main process via V8's
+ * String::kMaxLength when read as utf-8, and even merely-large files produce
+ * unusable diffs.
+ */
+const MAX_TEXT_FILE_BYTES = 10 * 1024 * 1024
+
+/** Bytes to sniff when classifying a file as binary. Matches git's heuristic. */
+const BINARY_SNIFF_BYTES = 8000
+
+/**
+ * Heuristic binary detection: open the file and scan the first 8 KB for a
+ * NUL byte. This is the same heuristic git uses in `convert.c is_binary()`
+ * and is what `git diff` falls back to when no `.gitattributes` rule applies.
+ *
+ * Returns false on I/O errors so callers can let the downstream readFile
+ * surface a more specific error.
+ */
+async function isBinaryFile(absPath: string): Promise<boolean> {
+  let fh: fs.promises.FileHandle | null = null
+  try {
+    fh = await fs.promises.open(absPath, 'r')
+    const buf = Buffer.alloc(BINARY_SNIFF_BYTES)
+    const { bytesRead } = await fh.read(buf, 0, BINARY_SNIFF_BYTES, 0)
+    for (let i = 0; i < bytesRead; i++) {
+      if (buf[i] === 0) return true
+    }
+    return false
+  } catch {
+    return false
+  } finally {
+    if (fh) await fh.close().catch(() => { /* ignore */ })
+  }
+}
+
+/** Render a git-style placeholder patch for a new untracked binary file. */
+function binaryAddedPatch(filePath: string): string {
+  return [
+    `diff --git a/${filePath} b/${filePath}`,
+    `new file mode 100644`,
+    `Binary files /dev/null and b/${filePath} differ`,
+    ''
+  ].join('\n')
+}
+
 export class GitService {
   private git: SimpleGit
   private cwd: string
@@ -75,12 +121,16 @@ export class GitService {
       // Staged changes
       const staged = await this.git.diff(['--cached', '--numstat'])
       parseNumstat(staged)
-      // Untracked files — count all their lines as additions
+      // Untracked files — count all their lines as additions, but skip
+      // anything that's too large (V8 string-length crash) or binary (line
+      // count is meaningless and reading wastes I/O).
       for (const f of status.not_added) {
         try {
           const absPath = path.resolve(this.repoRoot!, f)
           const stat = await fs.promises.stat(absPath)
           if (!stat.isFile()) continue
+          if (stat.size > MAX_TEXT_FILE_BYTES) continue
+          if (await isBinaryFile(absPath)) continue
           const content = await fs.promises.readFile(absPath, 'utf-8')
           const lineCount = content.split('\n').length
           // If file ends with newline, split produces an extra empty string
@@ -150,7 +200,7 @@ export class GitService {
     filePath: string,
     staged: boolean,
     ignoreWhitespace: boolean = false
-  ): Promise<{ patch: string }> {
+  ): Promise<{ patch: string; isBinary?: boolean }> {
     await this.ensureRepoRoot()
     const args: string[] = ['diff']
     if (staged) args.push('--cached')
@@ -159,12 +209,34 @@ export class GitService {
 
     try {
       const patch = await this.git.raw(args)
-      if (patch) return { patch }
+      if (patch) {
+        // Tracked-file path: git itself emits "Binary files ... differ" for
+        // binary content. Surface that to the renderer so it can show a
+        // proper notice instead of "No changes".
+        const isBinary = /^Binary files .+ differ$/m.test(patch)
+        return isBinary ? { patch, isBinary: true } : { patch }
+      }
 
       // Empty patch — could be an untracked file.
       // Generate a unified diff manually since `git diff --no-index` exits
       // with code 1 when differences exist and simple-git treats that as error.
       const absPath = path.resolve(this.repoRoot!, filePath)
+      let stat: fs.Stats
+      try {
+        stat = await fs.promises.stat(absPath)
+      } catch (err) {
+        logger.warn('GitService', `Failed to stat untracked file for patch: ${filePath}`, err)
+        return { patch: '' }
+      }
+      if (!stat.isFile()) return { patch: '' }
+
+      // Treat oversized or binary untracked files as binary — never read
+      // their content into a JS string (multi-GB files crash V8) and never
+      // dump arbitrary bytes into the diff view.
+      if (stat.size > MAX_TEXT_FILE_BYTES || await isBinaryFile(absPath)) {
+        return { patch: binaryAddedPatch(filePath), isBinary: true }
+      }
+
       let content: string
       try {
         content = await fs.promises.readFile(absPath, 'utf-8')

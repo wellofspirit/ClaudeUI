@@ -456,15 +456,17 @@ Patches apply to the wrapped `vendor/claude-cli/cli.js` (the Bun CJS IIFE bytes 
 | `team-streaming` (A-C) | Same for teammates + emits task_notification on completion |
 | `queue-control` | `dequeue_message` control subtype + `queued_command_consumed` notification |
 | `mcp-status` | Awaits MCP refresh before responding so mcpServerStatus() returns full list |
-| `sandbox-network-fix` | Skips proxy startup when no domain restrictions configured |
 | `background-task` | `background_task` control subtype — convert foreground task to background |
 | `usage-relay` | `get_usage` control subtype — exposes cli.js's internal /usage API |
 | `request-usage` | Emits per-request token usage events after each API call |
 | `rate-limit-relay` | Emits rate limit headers after each API call |
 | `voice-server` | Adds internal TCP voice-transcription server, control subtypes `voice_server_start`/`stop` |
 | `bash-output-streaming` | Pushes Bash output to stream_event immediately instead of buffering 2s |
+| `subprocess-proxy-strip` | Strips `HTTP(S)_PROXY` / `ALL_PROXY` / `NO_PROXY` from env handed to bash/MCP/LSP/etc. subprocesses so the cli.js's own proxy doesn't leak into shell tools (gated off via `CLAUDEUI_PROXY_SUBPROCESSES=1`) |
 
-**Retired**: `ci-path-remap` (2026-04-20) — was a runtime `url.fileURLToPath` interceptor that redirected CI-baked `file:///` URLs to paths under our extracted `cli.js` directory. Obsolete once `cli.js` runs inside its native Bun runtime (the Bun loader resolves those URLs via its module graph). See **[ADR-006](adr/adr-006_rebundle-bun-binary.md)**.
+**Retired**:
+- `ci-path-remap` (2026-04-20) — was a runtime `url.fileURLToPath` interceptor that redirected CI-baked `file:///` URLs to paths under our extracted `cli.js` directory. Obsolete once `cli.js` runs inside its native Bun runtime (the Bun loader resolves those URLs via its module graph). See **[ADR-006](adr/adr-006_rebundle-bun-binary.md)**.
+- `sandbox-network-fix` (2026-05-06) — flipped the proxy-startup gate from `allowedDomains !== void 0` to `.length > 0` so that omitting domain rules left the network unrestricted. Removed: upstream's literal "no allowed = no allowed" semantics is the principled behavior, even if it surprises users who only want process/file isolation. Document the explicit allowlist requirement instead of papering over it.
 
 When the SDK minifier changes variable names between versions, patches fail with "cannot locate anchor". Symptoms: `apply-all.mjs` errors out at a specific patch; that patch's regex needs updating for the new minifier output. See individual patch READMEs for bundle-analyzer anchors.
 

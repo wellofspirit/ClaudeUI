@@ -340,18 +340,20 @@ if (src.includes(patchCMarker)) {
     process.exit(1)
   }
 
-  // Insert notification as a comma expression element before {success:!0,...}.
-  // The return statement may be: return{success:!0,...} or return fn(),{success:!0,...}
-  // In both cases, prepending our call with a comma works: ...,notify(),{success:!0,...}
-  // But if the return is directly return{...}, we need a semicolon form instead.
-  const charBefore = src[idxC1 - 1]
-  const isCommaExpr = charBefore === ','
-  const injectionC1 = isCommaExpr
-    ? `${patchCMarker}${notifySnippet('completed')},`  // append to existing comma expression
-    : `${patchCMarker}${notifySnippet('completed')};`  // separate statement before return{...}
+  // Insert notification as a comma-expression element right before {success:!0,...}.
+  //
+  // Two upstream shapes occur:
+  //   prefix,{success:!0,...}     → prefix,/*marker*/notify(),{success:!0,...}
+  //   return{success:!0,...}      → return/*marker*/notify(),{success:!0,...}
+  //
+  // The statement form (`;`) is wrong for `return{...}` — it orphans the success
+  // object as a labeled-block after the function has already returned, producing
+  // a SyntaxError. The comma-expression form works in both shapes because the
+  // marker comment acts as token separator after `return`.
+  const injectionC1 = `${patchCMarker}${notifySnippet('completed')},`
 
   src = src.slice(0, idxC1) + injectionC1 + src.slice(idxC1)
-  console.log(`C1 applied at char ${idxC1}. Completion notification injected (${isCommaExpr ? 'comma expr' : 'statement'}).`)
+  console.log(`C1 applied at char ${idxC1}. Completion notification injected (comma expr).`)
 
   // --- C2: Failure path ---
   // The failure return ends with {success:!1,error:<var>,messages:<var>}} (the extra

@@ -82,6 +82,7 @@ export function GitFileDiffView(): React.JSX.Element {
   // Background-fetch full file content for hunk expansion
   useEffect(() => {
     if (!cwd || !gitSelectedFile || !activeSessionId || !gitStatus || !gitFileDiff?.patch) return
+    if (gitFileDiff.isBinary) return
     if (gitFileDiff.oldContent != null || gitFileDiff.newContent != null) return
 
     const fileStatus = gitStatus.files.find((f) => f.path === gitSelectedFile)

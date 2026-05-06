@@ -4,6 +4,21 @@ All notable changes to ClaudeUI are documented in this file. Entries are grouped
 
 ---
 
+## 2026-05-06
+
+### chore(cli): bump to 2.1.129, adapt broken patches
+- `claudeCliVersion` 2.1.119 → 2.1.129
+- `usage-relay` and `voice-server`: switched the success-helper anchor from a windowed search around the control-request fallback to a global match. Once `background-task` was applied first it shifted the fallback by ~1 KB and pushed the original `,X(MH,{})}catch` site outside the lookback window. The pattern is globally unique so a windowed search bought us nothing
+- `subprocess-proxy-strip`: 2.1.129 refactored the env-builder (`sy()`) — added an OAuth-token branch (`T` flag), an `OTEL_*` scrub branch (`z` flag plus `Object.keys(process.env).some()` predicate and a follow-up `for…of Object.keys($)` deletion loop), and an unconditional `delete $.CLAUDE_CODE_RESUME_INTERRUPTED_TURN`. Added a v129 shape matcher with proper backreferences (numbered up to `\17`) and a rebuilt body that wraps every `return` through `__cuPS`. v114/v118/v119 shapes preserved
+- `team-streaming` Patch C1: upstream switched from `return fn(),{success:!0,…}` (comma expression) to `return{success:!0,…}` (bare object literal). The previous statement-form injection (`notify();`) was producing `return notify();{success:…}`, which parses the orphaned object as a labeled-block statement and produces a `SyntaxError: Unexpected token ':'`. Switched to always emit comma-expression form (`notify(),`); the marker comment doubles as a token separator after `return`
+
+### chore(patches): retire `sandbox-network-fix`
+- Removed the patch that flipped the proxy-startup gate from `K?.network?.allowedDomains !== void 0` to `.length > 0`
+- Reasoning: upstream's literal "no `allowedDomains` configured = no domain allowed" semantics matches the field name and is the principled secure default. The patch was a UX shim — it made `sandbox.enabled:true` with no other settings mean "process/file isolation but full network", which surprised users in a different direction (they'd expect `enabled:true` to also restrict network)
+- Note for users: `sandbox.enabled:true` now blocks all bash network access until `network.allowedDomains` is populated. macOS HTTPS via `/usr/bin/curl` or Go binaries additionally needs `enableWeakerNetworkIsolation:true` to allow `trustd.agent` lookups for cert validation
+
+---
+
 ## 2026-03-26
 
 ### feat: real-time rate limits from inference headers (`efaf77f`)
