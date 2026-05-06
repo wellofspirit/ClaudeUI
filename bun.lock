@@ -20,7 +20,7 @@
         "cron-parser": "^5.5.0",
         "diff": "^8.0.3",
         "dompurify": "^3.3.3",
-        "electron-context-menu": "^4.1.2",
+        "electron-context-menu": "^4",
         "mermaid": "^11.14.0",
         "node-fetch": "^3.3.2",
         "node-pty": "^1.1.0",
