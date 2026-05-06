@@ -1,6 +1,7 @@
-import { app, shell, BrowserWindow, ipcMain, Menu } from 'electron'
+import { app, shell, BrowserWindow, ipcMain, Menu, clipboard } from 'electron'
 import { join } from 'path'
 import { execFileSync } from 'child_process'
+import contextMenu from 'electron-context-menu'
 
 // Inline @electron-toolkit/utils to avoid its top-level electron.app.isPackaged
 // access which fails when Node resolves require('electron') to node_modules/electron
@@ -94,6 +95,34 @@ if (process.platform === 'darwin') {
 }
 
 let logViewer: LogViewer
+
+// Right-click context menu — provides spell-check suggestions in editable
+// fields, standard cut/copy/paste/select-all, and a "Copy as Markdown"
+// item for chat messages. The renderer's preload script primes
+// `lastContextMarkdown` synchronously on every `contextmenu` event so the
+// `prepend` callback below knows whether the cursor is over a message
+// with a stashed markdown source.
+let lastContextMarkdown: string | null = null
+ipcMain.on('context-menu:set-markdown', (e, source: string | null) => {
+  lastContextMarkdown = typeof source === 'string' ? source : null
+  e.returnValue = true
+})
+
+contextMenu({
+  showSearchWithGoogle: false,
+  showInspectElement: is.dev,
+  showLookUpSelection: true,
+  showCopyImage: true,
+  prepend: () => [
+    {
+      label: 'Copy as Markdown',
+      visible: lastContextMarkdown !== null && lastContextMarkdown.length > 0,
+      click: () => {
+        if (lastContextMarkdown) clipboard.writeText(lastContextMarkdown)
+      }
+    }
+  ]
+})
 
 function createWindow(): void {
   const isMac = process.platform === 'darwin'

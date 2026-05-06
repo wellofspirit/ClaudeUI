@@ -300,3 +300,23 @@ if (process.contextIsolated) {
   // @ts-expect-error global augmentation
   window.api = api
 }
+
+// Prime the main process with the markdown source of whatever was right-
+// clicked (if any) before Electron emits its `context-menu` event.
+// Synchronous IPC guarantees the value is in place by the time the native
+// menu is built. Capture phase ensures we run before any in-renderer
+// listener that might preventDefault.
+window.addEventListener(
+  'contextmenu',
+  (event) => {
+    const target = event.target as Element | null
+    const el = target?.closest?.('[data-markdown-source]') as HTMLElement | null
+    const source = el?.dataset.markdownSource ?? null
+    try {
+      ipcRenderer.sendSync('context-menu:set-markdown', source)
+    } catch {
+      // Main may not have registered yet (very early in startup) — ignore.
+    }
+  },
+  { capture: true }
+)
