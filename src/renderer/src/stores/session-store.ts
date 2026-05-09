@@ -1093,11 +1093,66 @@ export const useSessionStore = create<SessionState>((set) => ({
 
   setStatus: (routingId, status) =>
     set((state) => ({
-      sessions: updateSession(state.sessions, routingId, (s) => ({
-        status,
-        // Update top-level cwd when SDK reports a new working directory (e.g. worktree enter/exit)
-        ...(status.cwd && status.cwd !== s.cwd ? { cwd: status.cwd } : {})
-      }))
+      sessions: updateSession(state.sessions, routingId, (s) => {
+        const updates: Partial<PerSessionState> = {
+          status,
+          // Update top-level cwd when SDK reports a new working directory (e.g. worktree enter/exit)
+          ...(status.cwd && status.cwd !== s.cwd ? { cwd: status.cwd } : {})
+        }
+
+        // When the turn ends (interrupt, error, natural completion), seal any
+        // in-flight thinking state. Natural completions usually finalize via
+        // appendStreamingText / addMessage before this point — this is the
+        // safety net for paths (interrupt, abrupt termination) that never send
+        // a closing message.
+        if (status.state === 'idle') {
+          if (s.thinkingStartedAt) {
+            updates.streamingThinking = ''
+            updates.thinkingDurationMs = Date.now() - s.thinkingStartedAt
+            updates.thinkingStartedAt = null
+          }
+
+          // Foreground subagent buffers: if a Task tool is foreground (not
+          // run_in_background) and still has a streaming buffer, the parent
+          // going idle means the subagent is done (interrupted or finished).
+          // Background tasks keep streaming after the parent idles, so leave
+          // them alone.
+          const subThinking = s.subagentStreamingThinking
+          const subText = s.subagentStreamingText
+          const toolUseIds = new Set([...Object.keys(subThinking), ...Object.keys(subText)])
+          if (toolUseIds.size > 0) {
+            const bgToolUseIds = new Set<string>()
+            for (const msg of s.messages) {
+              for (const block of msg.content) {
+                if (
+                  block.type === 'tool_use' &&
+                  toolUseIds.has(block.toolUseId) &&
+                  block.toolInput?.run_in_background
+                ) {
+                  bgToolUseIds.add(block.toolUseId)
+                }
+              }
+            }
+            let nextThinking = subThinking
+            let nextText = subText
+            for (const toolUseId of toolUseIds) {
+              if (bgToolUseIds.has(toolUseId)) continue
+              if (subThinking[toolUseId]) {
+                if (nextThinking === subThinking) nextThinking = { ...subThinking }
+                nextThinking[toolUseId] = ''
+              }
+              if (subText[toolUseId]) {
+                if (nextText === subText) nextText = { ...subText }
+                nextText[toolUseId] = ''
+              }
+            }
+            if (nextThinking !== subThinking) updates.subagentStreamingThinking = nextThinking
+            if (nextText !== subText) updates.subagentStreamingText = nextText
+          }
+        }
+
+        return updates
+      })
     })),
 
   addPendingApproval: (routingId, approval) =>

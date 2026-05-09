@@ -12,6 +12,7 @@ import {
   makeAssistantMessage,
   makeToolUseBlock,
   makeTaskNotification,
+  makeSessionStatus,
   resetFactoryCounter,
 } from '@test/factories/messages'
 import type { DiffComment, PlanComment, WorktreeInfo, TeammateInfo, GitStatusData } from '../../../../shared/types'
@@ -760,6 +761,140 @@ describe('addTaskNotification', () => {
     store().setTaskStopping('r1', 'tool-1')
     store().addTaskNotification('r1', makeTaskNotification({ toolUseId: null }))
     expect(store().sessions['r1'].stoppingTaskIds).toContain('tool-1')
+  })
+})
+
+describe('setStatus', () => {
+  it('updates status fields', () => {
+    store().createNewSession('r1', '/test')
+    store().setStatus('r1', makeSessionStatus({ state: 'running', model: 'claude-opus-4-7' }))
+    expect(store().sessions['r1'].status.state).toBe('running')
+    expect(store().sessions['r1'].status.model).toBe('claude-opus-4-7')
+  })
+
+  it('mirrors a new cwd into the top-level session cwd', () => {
+    store().createNewSession('r1', '/test/old')
+    store().setStatus('r1', makeSessionStatus({ state: 'running', cwd: '/test/new' }))
+    expect(store().sessions['r1'].cwd).toBe('/test/new')
+  })
+
+  it('finalizes in-flight thinking when transitioning to idle (interrupt path)', () => {
+    store().createNewSession('r1', '/test')
+    const startedAt = Date.now() - 1500
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        r1: {
+          ...state.sessions.r1,
+          streamingThinking: 'half-finished thought...',
+          thinkingStartedAt: startedAt,
+        },
+      },
+    }))
+    expect(store().sessions['r1'].thinkingStartedAt).toBe(startedAt)
+
+    store().setStatus('r1', makeSessionStatus({ state: 'idle' }))
+
+    const s = store().sessions['r1']
+    expect(s.thinkingStartedAt).toBeNull()
+    expect(s.streamingThinking).toBe('')
+    expect(s.thinkingDurationMs).not.toBeNull()
+    expect(s.thinkingDurationMs!).toBeGreaterThanOrEqual(1500)
+  })
+
+  it('does not touch thinking state when transitioning to running', () => {
+    store().createNewSession('r1', '/test')
+    const startedAt = Date.now() - 200
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        r1: {
+          ...state.sessions.r1,
+          streamingThinking: 'mid-thought...',
+          thinkingStartedAt: startedAt,
+        },
+      },
+    }))
+
+    store().setStatus('r1', makeSessionStatus({ state: 'running' }))
+
+    const s = store().sessions['r1']
+    expect(s.thinkingStartedAt).toBe(startedAt)
+    expect(s.streamingThinking).toBe('mid-thought...')
+    expect(s.thinkingDurationMs).toBeNull()
+  })
+
+  it('is a no-op for thinking state on idle when nothing is in-flight', () => {
+    store().createNewSession('r1', '/test')
+    store().setStatus('r1', makeSessionStatus({ state: 'idle' }))
+    const s = store().sessions['r1']
+    expect(s.thinkingStartedAt).toBeNull()
+    expect(s.streamingThinking).toBe('')
+    expect(s.thinkingDurationMs).toBeNull()
+  })
+
+  it('clears foreground subagent streaming buffers on idle', () => {
+    store().createNewSession('r1', '/test')
+    store().addMessage('r1', makeChatMessage({
+      id: 'asst-1',
+      role: 'assistant',
+      content: [makeToolUseBlock('Task', { description: 'do work' }, 'tool-fg')],
+    }))
+    store().appendSubagentStreamingThinking('r1', 'tool-fg', 'subagent thinking...')
+    store().appendSubagentStreamingText('r1', 'tool-fg', 'subagent answering...')
+
+    store().setStatus('r1', makeSessionStatus({ state: 'idle' }))
+
+    const s = store().sessions['r1']
+    expect(s.subagentStreamingThinking['tool-fg']).toBe('')
+    expect(s.subagentStreamingText['tool-fg']).toBe('')
+  })
+
+  it('preserves background subagent streaming buffers on idle', () => {
+    store().createNewSession('r1', '/test')
+    store().addMessage('r1', makeChatMessage({
+      id: 'asst-1',
+      role: 'assistant',
+      content: [makeToolUseBlock('Task', { description: 'bg work', run_in_background: true }, 'tool-bg')],
+    }))
+    // appendSubagentStreamingText clears thinking by design (text supersedes
+    // thinking in the live preview), so seed both buffers directly.
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        r1: {
+          ...state.sessions.r1,
+          subagentStreamingThinking: { 'tool-bg': 'still thinking...' },
+          subagentStreamingText: { 'tool-bg': 'still answering...' },
+        },
+      },
+    }))
+
+    store().setStatus('r1', makeSessionStatus({ state: 'idle' }))
+
+    const s = store().sessions['r1']
+    expect(s.subagentStreamingThinking['tool-bg']).toBe('still thinking...')
+    expect(s.subagentStreamingText['tool-bg']).toBe('still answering...')
+  })
+
+  it('clears foreground but not background subagent buffers when both are present', () => {
+    store().createNewSession('r1', '/test')
+    store().addMessage('r1', makeChatMessage({
+      id: 'asst-1',
+      role: 'assistant',
+      content: [
+        makeToolUseBlock('Task', { description: 'fg' }, 'tool-fg'),
+        makeToolUseBlock('Task', { description: 'bg', run_in_background: true }, 'tool-bg'),
+      ],
+    }))
+    store().appendSubagentStreamingThinking('r1', 'tool-fg', 'fg thinking')
+    store().appendSubagentStreamingThinking('r1', 'tool-bg', 'bg thinking')
+
+    store().setStatus('r1', makeSessionStatus({ state: 'idle' }))
+
+    const s = store().sessions['r1']
+    expect(s.subagentStreamingThinking['tool-fg']).toBe('')
+    expect(s.subagentStreamingThinking['tool-bg']).toBe('bg thinking')
   })
 })
 
