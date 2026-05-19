@@ -116,6 +116,7 @@ export interface AppSettings {
   expandReadResults: boolean
   hideToolInput: boolean
   expandThinking: boolean
+  searchCaseSensitive: boolean
   diffViewSplit: boolean
   diffIgnoreWhitespace: boolean
   diffWrapLines: boolean
@@ -152,6 +153,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   expandReadResults: false,
   hideToolInput: false,
   expandThinking: false,
+  searchCaseSensitive: false,
   diffViewSplit: false,
   diffIgnoreWhitespace: false,
   diffWrapLines: false,

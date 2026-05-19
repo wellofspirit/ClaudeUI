@@ -225,3 +225,15 @@ html, #root {
   color: white;
 }
 
+/* Find-in-chat highlights (CSS Custom Highlight API).
+   Applied at runtime via CSS.highlights.set('chat-search', ...). */
+::highlight(chat-search) {
+  background-color: rgba(255, 213, 0, 0.35);
+  color: inherit;
+}
+
+::highlight(chat-search-current) {
+  background-color: var(--color-accent);
+  color: var(--color-bg-primary);
+}
+
