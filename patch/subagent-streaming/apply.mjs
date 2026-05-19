@@ -22,6 +22,11 @@ const cliPath = resolve(projectRoot, 'vendor/claude-cli/cli.js')
 // Minified variable names can contain $ — use [\\w$] instead of \\w
 const V = '[\\w$]+'
 
+// Escape captured minified identifiers before interpolating into regex
+// templates. They may contain `$` (regex end-of-input anchor) or other
+// metachars that silently break pattern matching.
+const reEsc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
 // ---------------------------------------------------------------------------
 // Step 1: Read cli.js
 // ---------------------------------------------------------------------------
@@ -98,14 +103,15 @@ if (src.includes(patchFMarker)) {
   // v2.1.87:       if(RVY(MSG)){if(await TRANSCRIPT([MSG],...
   //
   // We try patterns newest first.
+  const rvyNameRe = reEsc(rvyName)
   const bracedCallRe = new RegExp(
-    `if\\(${rvyName}\\((${V})\\)\\)\\{`
+    `if\\(${rvyNameRe}\\((${V})\\)\\)\\{`
   )
   const awaitCallRe = new RegExp(
-    `if\\(${rvyName}\\((${V})\\)\\)await `
+    `if\\(${rvyNameRe}\\((${V})\\)\\)await `
   )
   const oldCallRe = new RegExp(
-    `if\\(${rvyName}\\((${V})\\)\\)(${V})\\.push\\(\\1\\),`
+    `if\\(${rvyNameRe}\\((${V})\\)\\)(${V})\\.push\\(\\1\\),`
   )
   const callMatch = src.match(bracedCallRe) || src.match(awaitCallRe) || src.match(oldCallRe)
   if (!callMatch) {
@@ -261,7 +267,18 @@ if (src.includes(patchBMarker)) {
   //   =VAL.value;if(ARR.push(MSG),STATS(STATS,MSG,TOOLS,H.options.tools),BOOL){...}
   //   if(MSG.type==="progress"&&(bash_progress||...))
   //
+  // v2.1.144+: an api_metrics early-exit was inserted between =VAL.value and
+  // the push-and-stats `if(...)`:
+  //   =VAL.value;if(MSG.type==="api_metrics"){CB?.(MSG);continue}
+  //   if(ARR.push(MSG),STATS(STATS,MSG,TOOLS,H.options.tools),BOOL){...}
+  //
   // Try patterns newest first.
+  const v144PushRe = new RegExp(
+    `=(${V})\\.value;if\\((${V})\\.type==="api_metrics"\\)\\{(${V})\\?\\.\\(\\2\\);continue\\}` +
+    `if\\((${V})\\.push\\(\\2\\),` +
+    `(${V})\\((${V}),\\2,(${V}),(${V})\\.options\\.tools\\),` +
+    `(${V})\\)`
+  )
   const v87PushRe = new RegExp(
     `=(${V})\\.value;if\\((${V})\\.push\\((${V})\\),` +
     `(${V})\\((${V}),\\3,(${V}),(${V})\\.options\\.tools\\),` +
@@ -276,9 +293,20 @@ if (src.includes(patchBMarker)) {
     `(?:\\(\\2\\.data\\.type==="bash_progress"\\|\\|\\2\\.data\\.type==="powershell_progress"\\)|` +
     `\\2\\.data\\.type==="bash_progress")`
   )
-  let m = src.match(v87PushRe)
+  let m = src.match(v144PushRe)
   let matchStr, msgVar, idx
   if (m) {
+    // v2.1.144: matchStr starts at the SECOND "if(" (the push gate) — skip
+    // the `=VAL.value;` prefix and the api_metrics guard.
+    const fullMatch = m[0]
+    // Find the SECOND `if(` occurrence — first is the api_metrics check
+    const firstIf = fullMatch.indexOf('if(')
+    const ifStart = fullMatch.indexOf('if(', firstIf + 1)
+    matchStr = fullMatch.slice(ifStart)
+    msgVar = m[2]   // the message variable used in api_metrics check + push
+    idx = src.indexOf(fullMatch) + ifStart
+    console.log(`Found sync loop body (v144 pattern) at char ${idx} (arr=${m[4]}, msg=${msgVar})`)
+  } else if ((m = src.match(v87PushRe))) {
     // v2.1.87: matchStr starts at "if(" — skip "=VAL.value;"
     const fullMatch = m[0]
     const ifStart = fullMatch.indexOf('if(')
@@ -307,12 +335,15 @@ if (src.includes(patchBMarker)) {
   // v2.1.118 and earlier: gated `if(D)D({toolUseID:`agent_${j.message.id}`...agentId:r}`.
   // v2.1.119+: upstream replaced the per-call gate with `if(!f)continue;` then an
   //   unconditional `f({toolUseID:`agent_${j.message.id}`...agentId:DH})`.
+  // v2.1.143+: upstream added outer `type:"progress",` and moved agentId inside
+  //   `data:{...,agentId:VAR,agentType,description}`. Allow agentId to be
+  //   followed by either `,` or `}`.
   const nearby = src.slice(idx, idx + 1200)
   const cbReGated = new RegExp(
-    `if\\((${V})\\)\\1\\(\\{toolUseID:\`agent_\\$\\{(${V})\\.message\\.id\\}\`.*?agentId:(${V})\\}`
+    `if\\((${V})\\)\\1\\(\\{(?:type:"progress",)?toolUseID:\`agent_\\$\\{(${V})\\.message\\.id\\}\`.*?agentId:(${V})[,}]`
   )
   const cbReUnconditional = new RegExp(
-    `(${V})\\(\\{toolUseID:\`agent_\\$\\{(${V})\\.message\\.id\\}\`.*?agentId:(${V})\\}`
+    `(${V})\\(\\{(?:type:"progress",)?toolUseID:\`agent_\\$\\{(${V})\\.message\\.id\\}\`.*?agentId:(${V})[,}]`
   )
   const cbm = nearby.match(cbReGated) || nearby.match(cbReUnconditional)
   if (!cbm) {
@@ -321,7 +352,10 @@ if (src.includes(patchBMarker)) {
   }
 
   const [, cbVar, parentVar, agentVar] = cbm
-  console.log(`  Callback=${cbVar}, ParentMsg=${parentVar}, AgentId=${agentVar}`)
+  // Detect whether we're patching a v2.1.143+ cli.js — the callback wraps args
+  // with `type:"progress",` and ZhA's switch dispatches on the outer type.
+  const hasProgressWrap = cbm[0].includes('type:"progress",')
+  console.log(`  Callback=${cbVar}, ParentMsg=${parentVar}, AgentId=${agentVar}, wrap=${hasProgressWrap ? 'v143+' : 'legacy'}`)
 
   if (src.indexOf(matchStr, idx + 1) !== -1) {
     console.error('ERROR: Multiple matches for Patch B. Aborting.')
@@ -330,9 +364,11 @@ if (src.includes(patchBMarker)) {
 
   // Inject stream_event check BEFORE the if(ARR.push(...)) statement.
   // The full "if(" is part of the match, so we prepend our check.
+  // v2.1.143+ requires outer `type:"progress",` so ZhA's switch dispatches it.
+  const wrapPrefix = hasProgressWrap ? `type:"progress",` : ``
   const injection =
     `${patchBMarker}if(${msgVar}.type==="stream_event"){` +
-    `if(${cbVar})${cbVar}({toolUseID:\`agent_\${${parentVar}.message.id}\`,` +
+    `if(${cbVar})${cbVar}({${wrapPrefix}toolUseID:\`agent_\${${parentVar}.message.id}\`,` +
     `data:{type:"agent_stream_event",event:${msgVar}.event,agentId:${agentVar}}});continue}`
 
   // Insert before the matched "if(ARR.push(..." — don't remove anything
@@ -561,17 +597,16 @@ if (src.includes(patchEMarker)) {
   const sessFn = sessFnMatch[1]
   console.log(`Session ID function: ${sessFn}()`)
 
-  // Find the UUID generator in the progress wrapping function.
-  // Accepts bare fn `FUNC()` (older SDK-built cli.js, <=2.1.112) and
-  // method call `OBJ.randomUUID()` (Bun-extracted cli.js in 2.1.113+).
-  const uuidFnRe = /\{type:"progress",data:[\w$]+,toolUseID:[\w$]+,parentToolUseID:[\w$]+,uuid:([\w$]+(?:\.[\w$]+)?)\(\),timestamp:new Date/
-  const uuidFnMatch = src.match(uuidFnRe)
-  if (!uuidFnMatch) {
-    console.error('ERROR: Cannot locate UUID generator function.')
-    process.exit(1)
-  }
-  const uuidFn = uuidFnMatch[1]
-  console.log(`UUID function: ${uuidFn}()`)
+  // We used to extract whatever UUID generator cli.js used in the progress
+  // wrapper (XW8.randomUUID(), V6H.randomUUID(), etc.). Those identifiers are
+  // module-local bindings populated by Bun's lazy CJS init (`var X = V(()=>{ X
+  // = require("crypto") })`). When the for-await injection runs inside iu8
+  // BEFORE its initializer fires, the binding is still `undefined` and the
+  // JSON.stringify call throws inside our `try`, silently swallowing the line.
+  // The Web Crypto global is set up before any user code runs in Bun and
+  // Node ≥19, so use it directly — no dynamic extraction needed.
+  const uuidFn = 'globalThis.crypto.randomUUID'
+  console.log(`UUID function: ${uuidFn}() (web crypto global)`)
 
   // Find async for-await+jy loops by matching the body pattern after )).
   // Pattern: ))ARR.push(MSG),STATS_FN(STATS,MSG,TOOLS,J.options.tools),STATE_FN(AGENTID,...);
@@ -582,11 +617,16 @@ if (src.includes(patchEMarker)) {
   // v2.1.76: )){ARR.push(MSG),STATS(STATS,MSG,TOOLS,J.options.tools),STATE(...);let V=wm8(MSG);if(V)Om8(...)}
   //          Loop body now uses braces with additional output-file statements.
   //
+  // v2.1.144: an early `if(MSG.type==="api_metrics")continue;` was inserted at
+  //           the top of the loop body before the push. The check is optional
+  //           in our regex so older versions still match.
+  //
   // Try braced pattern first (v2.1.76+), fall back to old single-statement pattern.
   const bracedAsyncBodyRe = new RegExp(
-    `\\)\\)\\{(${V})\\.push\\((${V})\\),` +          // )){ARR.push(MSG),
-    `(${V})\\((${V}),\\2,` +                          // STATS(STATS,MSG,
-    `(${V}),(${V})\\.options\\.tools\\),[^}]+\\}`      // TOOLS,j.options.tools),...}
+    `\\)\\)\\{(?:if\\([\\w$]+\\.type==="api_metrics"\\)continue;)?` + // )){ [if(MSG.type==="api_metrics")continue;]
+    `(${V})\\.push\\((${V})\\),` +                                    // ARR.push(MSG),
+    `(${V})\\((${V}),\\2,` +                                          // STATS(STATS,MSG,
+    `(${V}),(${V})\\.options\\.tools\\),[^}]+\\}`                     // TOOLS,j.options.tools),...}
   , 'g')
   const unbracedAsyncBodyRe = new RegExp(
     `\\)\\)(?:if\\()?(${V})\\.push\\((${V})\\),` +   // ))ARR.push(MSG), or ))if(ARR.push(MSG),
@@ -724,11 +764,8 @@ if (src.includes(patchGMarker)) {
   if (!sessFnMatchG) { console.error('ERROR: Cannot locate session ID function for Patch G.'); process.exit(1) }
   const sessFnG = sessFnMatchG[1]
 
-  // Accepts bare fn `FUNC()` and method call `OBJ.randomUUID()` (2.1.113+).
-  const uuidFnReG = /\{type:"progress",data:[\w$]+,toolUseID:[\w$]+,parentToolUseID:[\w$]+,uuid:([\w$]+(?:\.[\w$]+)?)\(\),timestamp:new Date/
-  const uuidFnMatchG = src.match(uuidFnReG)
-  if (!uuidFnMatchG) { console.error('ERROR: Cannot locate UUID function for Patch G.'); process.exit(1) }
-  const uuidFnG = uuidFnMatchG[1]
+  // Same rationale as Patch E — use the web crypto global, not a module-local.
+  const uuidFnG = 'globalThis.crypto.randomUUID'
 
   const iu8Name = iu8Match[1]
   const taskIdVar = iu8Match[2]        // q

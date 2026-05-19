@@ -163,15 +163,12 @@ if (src.includes(patchBMarker)) {
   const sessFn = sessFnMatch[1]
   console.log(`Session ID function: ${sessFn}()`)
 
-  // Accepts bare fn `FUNC()` and method call `OBJ.randomUUID()` (2.1.113+).
-  const uuidFnRe = /\{type:"progress",data:[\w$]+,toolUseID:[\w$]+,parentToolUseID:[\w$]+,uuid:([\w$]+(?:\.[\w$]+)?)\(\),timestamp:new Date/
-  const uuidFnMatch = src.match(uuidFnRe)
-  if (!uuidFnMatch) {
-    console.error('ERROR: Cannot locate UUID generator function.')
-    process.exit(1)
-  }
-  const uuidFn = uuidFnMatch[1]
-  console.log(`UUID function: ${uuidFn}()`)
+  // Use the web crypto global rather than a module-local UUID generator.
+  // Lazy-init bindings (e.g. XW8) are undefined when this injection runs
+  // outside their initializing closure — globalThis.crypto.randomUUID is
+  // always available in Bun and Node ≥19.
+  const uuidFn = 'globalThis.crypto.randomUUID'
+  console.log(`UUID function: ${uuidFn}() (web crypto global)`)
 
   // --- B1: Stream event bypass (before collection arrays) ---
   // Pattern: <arr1>.push(<msg>),<arr2>.push(<msg>),<stats>(<var>,<msg>,<var>,<toolUseContext>.options.tools)

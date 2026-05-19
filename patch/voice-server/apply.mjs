@@ -147,12 +147,14 @@ if (src.includes(PATCH_A_MARKER)) {
     console.error('ERROR: Cannot find success response helper')
     process.exit(1)
   }
-  if (successMatches.length > 1) {
-    console.error(`ERROR: Success response helper pattern matched ${successMatches.length} times (expected 1)`)
+  // Multiple match sites are fine as long as they all reference the same helper.
+  const successNames = new Set(successMatches.map((m) => m[1]))
+  if (successNames.size > 1) {
+    console.error(`ERROR: Success response helper pattern resolved to multiple names: ${[...successNames].join(', ')}`)
     process.exit(1)
   }
   const successFn = successMatches[0][1]
-  console.log(`  Success response function: ${successFn}`)
+  console.log(`  Success response function: ${successFn} (${successMatches.length} call sites)`)
 
   // -------------------------------------------------------------------------
   // Step 5: Inject voice_server_start and voice_server_stop handlers
