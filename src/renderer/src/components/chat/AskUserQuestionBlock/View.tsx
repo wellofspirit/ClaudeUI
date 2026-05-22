@@ -23,8 +23,15 @@ export function AskUserQuestionBlockView({ block, isCompleted, isPending, onSubm
 
   const totalSteps = questions.length
 
+  // cli.js's AskUserQuestion tool keys both `answers` and `annotations` by
+  // the full question text (see Bu5 output schema in cli.js: "question text ->
+  // answer string"). Using header (or any other key) makes cli.js look up
+  // answers[questionText] → undefined and the agent sees a blank result.
+  const keyOf = (questionIdx: number, question: AskUserQuestion): string =>
+    question.question || `q${questionIdx}`
+
   const handleSelect = (questionIdx: number, question: AskUserQuestion, optionLabel: string): void => {
-    const key = question.header || `q${questionIdx}`
+    const key = keyOf(questionIdx, question)
     if (question.multiSelect) {
       const current = answers[key] || ''
       const selected = current ? current.split(', ') : []
@@ -43,7 +50,7 @@ export function AskUserQuestionBlockView({ block, isCompleted, isPending, onSubm
   }
 
   const handleOtherActivate = (questionIdx: number, question: AskUserQuestion): void => {
-    const key = question.header || `q${questionIdx}`
+    const key = keyOf(questionIdx, question)
     setOtherActive({ ...otherActive, [key]: true })
     if (!question.multiSelect) {
       setAnswers({ ...answers, [key]: otherText[key] || '' })
@@ -51,18 +58,18 @@ export function AskUserQuestionBlockView({ block, isCompleted, isPending, onSubm
   }
 
   const handleOtherChange = (questionIdx: number, question: AskUserQuestion, text: string): void => {
-    const key = question.header || `q${questionIdx}`
+    const key = keyOf(questionIdx, question)
     setOtherText({ ...otherText, [key]: text })
     setAnswers({ ...answers, [key]: text })
   }
 
   const isOtherMode = (questionIdx: number, question: AskUserQuestion): boolean => {
-    const key = question.header || `q${questionIdx}`
+    const key = keyOf(questionIdx, question)
     return !!otherActive[key]
   }
 
   const isSelected = (questionIdx: number, question: AskUserQuestion, optionLabel: string): boolean => {
-    const key = question.header || `q${questionIdx}`
+    const key = keyOf(questionIdx, question)
     if (otherActive[key] && !question.multiSelect) return false
     const answer = answers[key] || ''
     if (question.multiSelect) {
@@ -74,15 +81,11 @@ export function AskUserQuestionBlockView({ block, isCompleted, isPending, onSubm
   const canProceed = (): boolean => {
     if (totalSteps === 0) return false
     const q = questions[currentStep]
-    const key = q.header || `q${currentStep}`
-    return !!answers[key]
+    return !!answers[keyOf(currentStep, q)]
   }
 
   const allAnswered = (): boolean => {
-    return questions.every((q, i) => {
-      const key = q.header || `q${i}`
-      return !!answers[key]
-    })
+    return questions.every((q, i) => !!answers[keyOf(i, q)])
   }
 
   if (isCompleted) {
@@ -106,15 +109,12 @@ export function AskUserQuestionBlockView({ block, isCompleted, isPending, onSubm
         </button>
         {summaryExpanded && (
           <div className="border-t border-border px-3 py-2.5 flex flex-col gap-2">
-            {questions.map((q, i) => {
-              const key = q.header || `q${i}`
-              return (
-                <div key={i} className="flex flex-col gap-0.5">
-                  <span className="text-[11px] text-text-secondary uppercase tracking-wider">{q.header}</span>
-                  <span className="text-[13px] text-text-primary">{answers[key] || '—'}</span>
-                </div>
-              )
-            })}
+            {questions.map((q, i) => (
+              <div key={i} className="flex flex-col gap-0.5">
+                <span className="text-[11px] text-text-secondary uppercase tracking-wider">{q.header}</span>
+                <span className="text-[13px] text-text-primary">{answers[keyOf(i, q)] || '—'}</span>
+              </div>
+            ))}
           </div>
         )}
       </div>
@@ -134,7 +134,7 @@ export function AskUserQuestionBlockView({ block, isCompleted, isPending, onSubm
   }
 
   const question = questions[currentStep]
-  const questionKey = question.header || `q${currentStep}`
+  const questionKey = keyOf(currentStep, question)
 
   const handleSubmit = async (): Promise<void> => {
     if (!allAnswered()) return
