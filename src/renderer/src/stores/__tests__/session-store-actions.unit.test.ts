@@ -130,7 +130,7 @@ describe('addMessage', () => {
     expect(store().sessions['r1'].streamingText).toBe('')
   })
 
-  it('bootstraps a session when routingId is unknown (team-view scenario)', () => {
+  it('bootstraps a session when routingId is unknown (cross-window IPC scenario)', () => {
     store().addMessage('ghost-session', makeAssistantMessage('hello'))
     expect(store().sessions['ghost-session']).toBeDefined()
     expect(store().sessions['ghost-session'].messages).toHaveLength(1)
@@ -564,7 +564,6 @@ describe('createNewSession defaults', () => {
     expect(s.streamingThinking).toBe('')
     expect(s.rightPanel).toBe('none')
     expect(s.permissionMode).toBe('default')
-    expect(s.teammates).toEqual({})
   })
 })
 

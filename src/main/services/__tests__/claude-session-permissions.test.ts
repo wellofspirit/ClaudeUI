@@ -190,7 +190,7 @@ describe('ClaudeSession permission mode', () => {
       ])
     })
 
-    it('auto mode succeeds when SDK accepts it (Teams/Enterprise)', async () => {
+    it('auto mode succeeds when SDK accepts it (paid Anthropic plans)', async () => {
       const setMode = vi.fn().mockResolvedValue(undefined)
       session.activeQuery = { setPermissionMode: setMode }
 

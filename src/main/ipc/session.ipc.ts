@@ -201,8 +201,6 @@ const SESSION_IPC_CHANNELS = [
   'config:load-settings', 'config:save-settings', 'config:load-sessions',
   'config:save-sessions', 'config:load-slash-commands', 'config:save-slash-commands',
   'config:scan-custom-commands', 'config:load-skill-details',
-  'session:send-to-teammate', 'session:broadcast-to-team', 'session:get-team-info',
-  'session:open-teams-view',
   'git:check-repo', 'git:status', 'git:branches', 'git:checkout', 'git:create-branch',
   'git:file-patch', 'git:file-contents', 'git:stage-file', 'git:unstage-file', 'git:discard-file',
   'git:stage-all', 'git:unstage-all', 'git:commit', 'git:push', 'git:push-with-upstream', 'git:pull', 'git:fetch',
@@ -895,82 +893,6 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
       updated = disabled.includes(serverName) ? disabled : [...disabled, serverName]
     }
     writeDisabledMcpServers(cwd, updated)
-  })
-
-  // Teammate inbox handlers
-  ipcMain.handle(
-    'session:send-to-teammate',
-    async (_e, _routingId: string, sanitizedTeamName: string, sanitizedAgentName: string, message: string) => {
-      const inboxDir = path.join(os.homedir(), '.claude', 'teams', sanitizedTeamName, 'inboxes')
-      await fs.promises.mkdir(inboxDir, { recursive: true })
-      const inboxPath = path.join(inboxDir, `${sanitizedAgentName}.json`)
-      let items: unknown[] = []
-      try {
-        const raw = await fs.promises.readFile(inboxPath, 'utf-8')
-        items = JSON.parse(raw)
-      } catch (err) { logger.warn('IPC', `Failed to read teammate inbox: ${inboxPath}`, err) }
-      items.push({ from: 'user', text: message, timestamp: new Date().toISOString(), read: false })
-      await fs.promises.writeFile(inboxPath, JSON.stringify(items, null, 2), { mode: 0o600 })
-    }
-  )
-
-  ipcMain.handle(
-    'session:broadcast-to-team',
-    async (_e, _routingId: string, sanitizedTeamName: string, sanitizedAgentNames: string[], message: string) => {
-      const inboxDir = path.join(os.homedir(), '.claude', 'teams', sanitizedTeamName, 'inboxes')
-      await fs.promises.mkdir(inboxDir, { recursive: true })
-      const entry = { from: 'user', text: message, timestamp: new Date().toISOString(), read: false }
-      for (const name of sanitizedAgentNames) {
-        const inboxPath = path.join(inboxDir, `${name}.json`)
-        let items: unknown[] = []
-        try {
-          const raw = await fs.promises.readFile(inboxPath, 'utf-8')
-          items = JSON.parse(raw)
-        } catch (err) { logger.warn('IPC', `Failed to read teammate inbox: ${inboxPath}`, err) }
-        items.push(entry)
-        await fs.promises.writeFile(inboxPath, JSON.stringify(items, null, 2), { mode: 0o600 })
-      }
-    }
-  )
-
-  // Team info query (pull-based)
-  ipcMain.handle('session:get-team-info', (_e, routingId: string) => {
-    return manager.getTeamInfo(routingId)
-  })
-
-  // Teams-view window
-  let teamsViewWindow: BrowserWindow | null = null
-  ipcMain.handle('session:open-teams-view', (_e, _routingId: string) => {
-    if (teamsViewWindow && !teamsViewWindow.isDestroyed()) {
-      teamsViewWindow.focus()
-      return
-    }
-    teamsViewWindow = new BrowserWindow({
-      width: 1200,
-      height: 800,
-      minWidth: 600,
-      minHeight: 400,
-      title: 'Agent Monitor',
-      autoHideMenuBar: true,
-      webPreferences: {
-        preload: path.join(__dirname, '../preload/index.js'),
-        sandbox: false
-      }
-    })
-    ClaudeSession.addExtraWindow(teamsViewWindow)
-    teamsViewWindow.on('closed', () => {
-      if (teamsViewWindow) ClaudeSession.removeExtraWindow(teamsViewWindow)
-      teamsViewWindow = null
-    })
-
-    // Load with ?view=teams-view&routingId=<id> query params
-    const { is } = require('@electron-toolkit/utils')
-    const searchParams = `view=teams-view&routingId=${encodeURIComponent(_routingId)}`
-    if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
-      teamsViewWindow.loadURL(process.env['ELECTRON_RENDERER_URL'] + '?' + searchParams)
-    } else {
-      teamsViewWindow.loadFile(path.join(__dirname, '../renderer/index.html'), { search: searchParams })
-    }
   })
 
   // -------------------------------------------------------------------------

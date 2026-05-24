@@ -1,1 +1,0 @@
-export { TeamsView } from './TeamsView'

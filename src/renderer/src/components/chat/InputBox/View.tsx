@@ -78,14 +78,11 @@ export interface InputBoxViewProps {
   sandboxEnabled: boolean
   voiceEnabled: boolean
   voiceState: VoiceState
-  focusedAgentId: string | null
-  showBroadcast: boolean
   statusLine: StatusLineData | null
 
   // Callbacks
   onSend: () => void
   onCancel: () => void
-  onBroadcast: () => void
   onInput: (e: React.ChangeEvent<HTMLTextAreaElement>) => void
   onKeyDown: (e: React.KeyboardEvent) => void
   onKeyUp: (e: React.KeyboardEvent) => void
@@ -300,12 +297,9 @@ export function InputBoxView(props: InputBoxViewProps): React.JSX.Element {
     fileMentionIndex,
     filteredFileMentionEntries,
     attachedFiles,
-    focusedAgentId,
-    showBroadcast,
     statusLine,
     onSend,
     onCancel,
-    onBroadcast,
     onInput,
     onKeyDown,
     onKeyUp,
@@ -426,22 +420,6 @@ export function InputBoxView(props: InputBoxViewProps): React.JSX.Element {
                   Stop
                 </button>
               )}
-              {showBroadcast && (
-                <button
-                  onClick={onBroadcast}
-                  disabled={!text.trim() || isDisabled}
-                  title="Broadcast to all agents (⌘⇧↵)"
-                  className="w-7 h-7 flex items-center justify-center rounded-lg text-text-muted hover:text-text-secondary hover:bg-bg-hover transition-colors disabled:opacity-15 cursor-pointer disabled:cursor-default"
-                >
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M4.9 19.1C1 15.2 1 8.8 4.9 4.9" />
-                    <path d="M7.8 16.2c-2.3-2.3-2.3-6.1 0-8.4" />
-                    <circle cx="12" cy="12" r="2" />
-                    <path d="M16.2 7.8c2.3 2.3 2.3 6.1 0 8.4" />
-                    <path d="M19.1 4.9C23 8.8 23 15.1 19.1 19" />
-                  </svg>
-                </button>
-              )}
               <VoiceButton
                 voiceEnabled={props.voiceEnabled}
                 voiceState={props.voiceState}
@@ -452,7 +430,7 @@ export function InputBoxView(props: InputBoxViewProps): React.JSX.Element {
               <button
                 onClick={onSend}
                 disabled={(!text.trim() && attachedFiles.length === 0) || isDisabled}
-                title={focusedAgentId ? 'Send to agent' : isRunning ? 'Queue message' : 'Send message'}
+                title={isRunning ? 'Queue message' : 'Send message'}
                 className="w-7 h-7 flex items-center justify-center rounded-full bg-text-primary text-bg-primary transition-opacity disabled:opacity-15 cursor-pointer disabled:cursor-default"
               >
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">

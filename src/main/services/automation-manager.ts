@@ -607,8 +607,8 @@ export class AutomationManager {
           }
 
           // Try upgrading to native SDK auto mode once session is established.
-          // If the SDK accepts it (Teams/Enterprise), it handles tool approvals natively
-          // and our canUseTool classifier becomes a backup. If rejected (non-Team plan),
+          // If the SDK accepts it (paid Anthropic plans), it handles tool approvals
+          // natively and our canUseTool classifier becomes a backup. If rejected,
           // we stay on acceptEdits + local classifier — no functionality lost.
           if (useAutoMode && !autoModeUpgraded) {
             autoModeUpgraded = true

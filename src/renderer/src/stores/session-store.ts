@@ -15,7 +15,6 @@ import type {
   DirectoryGroup,
   StatusLineData,
   SlashCommandInfo,
-  TeammateInfo,
   GitStatusData,
   GitBranchData,
   DiffComment,
@@ -412,9 +411,6 @@ export interface PerSessionState {
   queuedText: string
   draftText: string
   selectedModel: string
-  teamName: string | null
-  teammates: Record<string, TeammateInfo>  // keyed by toolUseId
-  focusedAgentId: string | null            // null = main agent
   // Worktree state
   worktreeInfo: WorktreeInfo | null
   // Git state
@@ -478,9 +474,6 @@ const EMPTY_SESSION_STATE: PerSessionState = {
   queuedText: '',
   draftText: '',
   selectedModel: 'default',
-  teamName: null,
-  teammates: {},
-  focusedAgentId: null,
   worktreeInfo: null,
   isGitRepo: false,
   gitStatus: null,
@@ -542,8 +535,9 @@ function updateSession(
 
 /**
  * Ensure a session exists for this routingId, creating an empty one if needed.
- * Used by team-related actions so the teams-view window (separate renderer with
- * its own empty store) can bootstrap from incoming IPC events.
+ * Lets actions on routingIds that haven't been created yet (e.g. cross-window
+ * IPC arriving before this renderer's createNewSession) bootstrap from incoming
+ * events instead of dropping them on the floor.
  */
 function ensureSession(
   sessions: Record<string, PerSessionState>,
@@ -675,12 +669,6 @@ interface SessionState {
   setAvailableModels: (models: ModelInfo[]) => void
   rekeySession: (oldId: string, newId: string) => void
   clearConversation: (routingId: string) => void
-  setTeamName: (routingId: string, teamName: string) => void
-  clearTeam: (routingId: string) => void
-  addTeammate: (routingId: string, info: TeammateInfo) => void
-  updateTeammateStatus: (routingId: string, toolUseId: string, status: TeammateInfo['status']) => void
-  setFocusedAgent: (routingId: string, toolUseId: string | null) => void
-  addTeammateUserMessage: (routingId: string, toolUseId: string, id: string, text: string) => void
   // Worktree actions
   setWorktreeInfo: (routingId: string, info: WorktreeInfo | null) => void
   clearWorktreeInfo: (routingId: string) => void
@@ -1589,10 +1577,7 @@ export const useSessionStore = create<SessionState>((set) => ({
           permissionMode: snap.permissionMode as PermissionMode,
           effort: (snap.effort ?? null) as 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null,
           thinkingMode: (snap.thinkingMode ?? null) as 'adaptive' | 'enabled' | 'disabled' | null,
-          statusLine: snap.statusLine,
-          teamName: snap.teamName,
-          teammates: snap.teammates,
-          focusedAgentId: snap.focusedAgentId
+          statusLine: snap.statusLine
         }
       }
 
@@ -1763,80 +1748,6 @@ export const useSessionStore = create<SessionState>((set) => ({
       }
     }),
 
-  setTeamName: (routingId, teamName) =>
-    set((state) => {
-      const sessions = ensureSession(state.sessions, routingId)
-      return { sessions: updateSession(sessions, routingId, () => ({ teamName })) }
-    }),
-
-  clearTeam: (routingId) =>
-    set((state) => {
-      const sessions = ensureSession(state.sessions, routingId)
-      return {
-        sessions: updateSession(sessions, routingId, () => ({
-          teamName: null,
-          teammates: {},
-          focusedAgentId: null
-        }))
-      }
-    }),
-
-  addTeammate: (routingId, info) =>
-    set((state) => {
-      const sessions = ensureSession(state.sessions, routingId)
-      return {
-        sessions: updateSession(sessions, routingId, (s) => ({
-          teammates: { ...s.teammates, [info.toolUseId]: info }
-        }))
-      }
-    }),
-
-  updateTeammateStatus: (routingId, toolUseId, status) =>
-    set((state) => {
-      const session = state.sessions[routingId]
-      if (!session) return state
-      const teammate = session.teammates[toolUseId]
-      if (!teammate) return state
-      return {
-        sessions: {
-          ...state.sessions,
-          [routingId]: {
-            ...session,
-            teammates: {
-              ...session.teammates,
-              [toolUseId]: { ...teammate, status }
-            }
-          }
-        }
-      }
-    }),
-
-  setFocusedAgent: (routingId, toolUseId) =>
-    set((state) => ({
-      sessions: updateSession(state.sessions, routingId, () => ({ focusedAgentId: toolUseId }))
-    })),
-
-  addTeammateUserMessage: (routingId, toolUseId, id, text) =>
-    set((state) => {
-      const session = state.sessions[routingId]
-      if (!session) return state
-      const existing = session.subagentMessages[toolUseId] || []
-      const userMsg: ChatMessage = {
-        id,
-        role: 'user',
-        content: [{ type: 'text', text }],
-        timestamp: Date.now()
-      }
-      return {
-        sessions: {
-          ...state.sessions,
-          [routingId]: {
-            ...session,
-            subagentMessages: { ...session.subagentMessages, [toolUseId]: [...existing, userMsg] }
-          }
-        }
-      }
-    }),
 
   // Worktree actions
   setWorktreeInfo: (routingId, info) =>
@@ -2232,8 +2143,7 @@ export interface FocusedAgentData {
 const EMPTY_MESSAGES: ChatMessage[] = []
 
 /**
- * Returns the messages/streaming for whichever agent tab is focused.
- * When focusedAgentId is null → main agent. Otherwise → subagent messages.
+ * Returns the messages/streaming for the active session's main agent.
  * Uses useShallow for shallow equality to avoid infinite re-render loops.
  */
 export function useFocusedAgentData(): FocusedAgentData {
@@ -2243,22 +2153,12 @@ export function useFocusedAgentData(): FocusedAgentData {
       return { isMain: true, messages: EMPTY_MESSAGES, streamingText: '', streamingThinking: '', thinkingStartedAt: null }
     }
     const session = state.sessions[id]
-    const focused = session.focusedAgentId
-    if (!focused) {
-      return {
-        isMain: true,
-        messages: session.messages,
-        streamingText: session.streamingText,
-        streamingThinking: session.streamingThinking,
-        thinkingStartedAt: session.thinkingStartedAt
-      }
-    }
     return {
-      isMain: false,
-      messages: session.subagentMessages[focused] || EMPTY_MESSAGES,
-      streamingText: session.subagentStreamingText[focused] || '',
-      streamingThinking: session.subagentStreamingThinking[focused] || '',
-      thinkingStartedAt: null // subagent thinking tracked separately
+      isMain: true,
+      messages: session.messages,
+      streamingText: session.streamingText,
+      streamingThinking: session.streamingThinking,
+      thinkingStartedAt: session.thinkingStartedAt
     }
   }))
 }
@@ -2290,9 +2190,6 @@ export function getRemoteStateSnapshot(): {
     effort: string
     thinkingMode: string
     statusLine: StatusLineData | null
-    teamName: string | null
-    teammates: Record<string, TeammateInfo>
-    focusedAgentId: string | null
     slashCommands: SlashCommandInfo[]
     customCommands: SlashCommandInfo[]
     sdkSkillNames: string[]
@@ -2327,9 +2224,6 @@ export function getRemoteStateSnapshot(): {
       effort: s.effort,
       thinkingMode: s.thinkingMode,
       statusLine: s.statusLine,
-      teamName: s.teamName,
-      teammates: s.teammates,
-      focusedAgentId: s.focusedAgentId,
       slashCommands: state.slashCommands,
       customCommands: state.customCommands,
       sdkSkillNames: state.sdkSkillNames

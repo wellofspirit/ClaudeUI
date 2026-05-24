@@ -9,7 +9,6 @@ import { FloatingApproval } from '../FloatingApproval'
 import { BtwCard } from '../BtwCard'
 import { FloatingError } from '../FloatingError'
 import { SandboxViolationToast } from '../SandboxViolationToast'
-import { AgentTabBar } from '../AgentTabBar'
 import { useIsMobile } from '../../../hooks/useIsMobile'
 import { TopBar } from './TopBar'
 import { WelcomeState } from './WelcomeState'
@@ -24,8 +23,6 @@ export function ChatPanel(): React.JSX.Element {
   const thinkingStartedAt = focusedData.thinkingStartedAt
   const pendingApprovals = useActiveSession((s) => s.pendingApprovals)
   const status = useActiveSession((s) => s.status)
-  const teamName = useActiveSession((s) => s.teamName)
-  const focusedAgentId = useActiveSession((s) => s.focusedAgentId)
 
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -212,8 +209,6 @@ export function ChatPanel(): React.JSX.Element {
     <div className="flex-1 flex flex-col min-h-0 min-w-0 relative">
       <TopBar hasContent={hasContent} />
 
-      {teamName && <AgentTabBar />}
-
       <div className="flex-1 flex flex-col min-h-0 relative">
         <ChatSearchOverlay
           scrollRef={scrollRef}
@@ -246,7 +241,7 @@ export function ChatPanel(): React.JSX.Element {
                 </div>
               ))}
               <div className="flex flex-col gap-5">
-                {hasStreamingText && <StreamingText textOverride={focusedData.isMain ? undefined : focusedData.streamingText} />}
+                {hasStreamingText && <StreamingText />}
                 {thinkingStartedAt && (
                   <ThinkingBlock text={streamingThinking} isActive />
                 )}
@@ -272,14 +267,14 @@ export function ChatPanel(): React.JSX.Element {
               </button>
             </div>
           )}
-          {focusedAgentId === null && <QueuedMessageCard isMobile={isMobile} />}
-          {focusedAgentId === null && <BtwCard isMobile={isMobile} />}
+          <QueuedMessageCard isMobile={isMobile} />
+          <BtwCard isMobile={isMobile} />
           <InputBox />
         </div>
       </div>
 
-      {focusedAgentId === null && <TodoWidget />}
-      {focusedAgentId === null && <FloatingApproval />}
+      <TodoWidget />
+      <FloatingApproval />
       <FloatingError />
       <SandboxViolationToast />
     </div>

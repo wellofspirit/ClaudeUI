@@ -16,8 +16,7 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 import type { BrowserWindow } from 'electron'
-import { computeTokenMetrics, buildSubagentFileMap } from './session-history'
-import { isAgentTool } from '../../shared/types'
+import { computeTokenMetrics } from './session-history'
 import { VoiceClient } from './voice-client'
 import { startRecording, stopRecording } from './voice-capture'
 import { unwatchAllSubagents } from './subagent-watcher'
@@ -151,38 +150,6 @@ export class ClaudeSession {
   static removeExtraWindow(win: BrowserWindow): void { this.extraWindows.delete(win) }
   static getExtraWindows(): Set<BrowserWindow> { return this.extraWindows }
 
-  /** Return a snapshot of the current team state (pull-based, for TeamsView) */
-  getTeamInfo(): { routingId: string; teamName: string | null; sessionId: string | null; projectKey: string | null; teammates: Array<{ toolUseId: string; name: string; sanitizedName: string; teamName: string; sanitizedTeamName: string; agentId: string; fileId: string; status: 'running' | 'completed' | 'failed' | 'stopped' }> } {
-    const projectKey = this.cwd ? this.cwd.replace(/[/.]/g, '-') : null
-
-    // Resolve JSONL fileIds — use stable names (team-streaming patch) first,
-    // fall back to prompt-based search for unpatched sessions
-    let fileMap: Record<string, string> = {}
-    if (this.sessionId && projectKey && this._detectedTeammates.length > 0) {
-      const taskPrompts: Record<string, string> = {}
-      for (const t of this._detectedTeammates) {
-        if (t.prompt) taskPrompts[t.toolUseId] = t.prompt
-      }
-      if (Object.keys(taskPrompts).length > 0) {
-        fileMap = buildSubagentFileMap(this.sessionId, projectKey, taskPrompts)
-      }
-    }
-
-    return {
-      routingId: this.routingId,
-      teamName: this._teamName,
-      sessionId: this.sessionId,
-      projectKey,
-      teammates: this._detectedTeammates.map((t) => ({
-        ...t,
-        // Stable filename from team-streaming patch: name--team
-        // Falls back to prompt-based fileMap, then raw agentId
-        fileId: (t.name && t.teamName) ? `${t.name}--${t.teamName}` : (fileMap[t.toolUseId] || t.agentId),
-        status: this._teammateStatuses.get(t.toolUseId) || 'running'
-      }))
-    }
-  }
-
   private sessionId: string | null = null
   private messageHistory: ChatMessage[] = []
   private abortController: AbortController | null = null
@@ -190,11 +157,6 @@ export class ClaudeSession {
   private wasInterrupted = false
   private pendingApprovals = new Map<string, PendingApprovalEntry>()
   private taskIdMap = new Map<string, string>() // agentId → toolUseId
-  private pendingTeammates = new Map<string, { name: string; teamName: string; prompt?: string }>() // toolUseId → { name, teamName, prompt }
-  private _teamName: string | null = null
-  private _detectedTeammates: Array<{ toolUseId: string; name: string; teamName: string; agentId: string; sanitizedName: string; sanitizedTeamName: string; prompt?: string }> = []
-  private _teammateStatuses = new Map<string, 'running' | 'completed' | 'failed' | 'stopped'>()
-  private teammateIdToToolUse = new Map<string, string>() // teammate_id ("name@team") → toolUseId
   private backgroundFilePaths = new Map<string, string>() // toolUseId → filePath (permanent)
   private backgroundPollers = new Map<string, BackgroundPoller>() // toolUseId → poller state
   private pendingBackgroundWatches = new Set<string>() // toolUseId waiting for poller registration
@@ -799,17 +761,15 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
 
   private handleAssistantMessage(msg: AssistantMessage): void {
     const parentToolUseId = msg.parent_tool_use_id ?? undefined
-    const teammateToolUseId = this.resolveTeammateToolUseId(msg)
-    const routingId = parentToolUseId || teammateToolUseId
-    const isSidechain = !!routingId
+    const isSidechain = !!parentToolUseId
     const chatMsg = this.transformAssistantMessage(msg)
 
     // Accumulate usage from every assistant message (main + sidechain)
     const hadUsage = this.accumulateUsage(msg, isSidechain)
 
     if (chatMsg) {
-      if (routingId) {
-        this.send('session:subagent-message', { toolUseId: routingId, message: chatMsg })
+      if (parentToolUseId) {
+        this.send('session:subagent-message', { toolUseId: parentToolUseId, message: chatMsg })
       } else {
         this.upsertMessage(chatMsg)
         this.send('session:message', chatMsg)
@@ -820,9 +780,7 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
   }
 
   private handleStreamEvent(msg: StreamEventMessage): void {
-    const parentToolUseId = msg.parent_tool_use_id ?? undefined
-    const teammateToolUseId = this.resolveTeammateToolUseId(msg)
-    const routingId = parentToolUseId || teammateToolUseId
+    const routingId = msg.parent_tool_use_id ?? undefined
     const event = msg.event
     if (!event || event.type !== 'content_block_delta') return
 
@@ -928,7 +886,6 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
     // renderer's resolveToolVisualState treats it uniformly.
     const normalized: 'completed' | 'failed' | 'stopped' =
       status === 'killed' ? 'stopped' : (status as 'completed' | 'failed')
-    this._teammateStatuses.set(toolUseId, normalized)
 
     this.send('session:task-notification', {
       taskId,
@@ -947,13 +904,6 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
     if (matchedToolUseId) {
       this.markBackgroundDone(matchedToolUseId)
       this.taskIdMap.delete(taskId)
-      const taskStatus = msg.status || 'completed'
-      const statusMap: Record<string, 'completed' | 'failed' | 'stopped'> = {
-        completed: 'completed',
-        failed: 'failed',
-        stopped: 'stopped',
-      }
-      this._teammateStatuses.set(matchedToolUseId, statusMap[taskStatus] || 'completed')
     }
 
     // Extract usage from the patched system message (task-notification-usage patch)
@@ -1646,7 +1596,6 @@ this.permissionMode = mode
       // turns.  Since TaskStop runs inside a control-message handler (no active
       // turn), the notification never reaches us.  Synthesize it directly.
       this.markBackgroundDone(toolUseId)
-      this._teammateStatuses.set(toolUseId, 'stopped')
       this.taskIdMap.delete(taskId)
 
       this.send('session:task-notification', {
@@ -1722,39 +1671,6 @@ this.permissionMode = mode
       return { type: 'text' as const, text: JSON.stringify(block) }
     })
 
-    // Detect teammate Task tool_use blocks and TeamCreate
-    for (const block of blocks) {
-      if (block.type !== 'tool_use' || !block.toolUseId) continue
-      if (isAgentTool(block.toolName) && block.toolInput?.name && block.toolInput?.team_name) {
-        this.pendingTeammates.set(block.toolUseId, {
-          name: String(block.toolInput.name),
-          teamName: String(block.toolInput.team_name),
-          prompt: block.toolInput.prompt ? String(block.toolInput.prompt) : undefined
-        })
-      }
-      if (block.toolName === 'TeamCreate' && block.toolInput?.team_name) {
-        const newTeam = String(block.toolInput.team_name)
-        // Clear stale teammates and watchers from any previous team in this session
-        if (newTeam !== this._teamName) {
-          this._detectedTeammates = []
-          this.pendingTeammates.clear()
-          this.teammateIdToToolUse.clear()
-          unwatchAllSubagents()
-        }
-        this._teamName = newTeam
-        this.send('session:team-created', { teamName: this._teamName })
-      }
-      if (block.toolName === 'TeamDelete') {
-        this._teamName = null
-        this._detectedTeammates = []
-        this.pendingTeammates.clear()
-        this.teammateIdToToolUse.clear()
-        this._teammateStatuses.clear()
-        unwatchAllSubagents()
-        this.send('session:team-deleted', {})
-      }
-    }
-
     // Use the BetaMessage id for deduplication of partial messages
     const messageId = (betaMessage.id as string) || (msg.uuid as string) || uuid()
 
@@ -1779,9 +1695,7 @@ this.permissionMode = mode
     const messageParam = msg.message as Record<string, unknown> | undefined
     if (!messageParam) return
 
-    const parentToolUseId = msg.parent_tool_use_id as string | undefined
-    const teammateToolUseId = this.resolveTeammateToolUseId(msg)
-    const routingId = parentToolUseId || teammateToolUseId
+    const routingId = msg.parent_tool_use_id as string | undefined
     const content = messageParam.content
 
     // Case 1: Array content — extract tool_result blocks
@@ -1886,8 +1800,6 @@ this.permissionMode = mode
       if (matchedToolUseId) {
         this.markBackgroundDone(matchedToolUseId)
         this.taskIdMap.delete(taskId)
-        const statusMap: Record<string, 'completed' | 'failed' | 'stopped'> = { completed: 'completed', failed: 'failed', stopped: 'stopped' }
-        this._teammateStatuses.set(matchedToolUseId, statusMap[status] || 'completed')
       }
 
       const notification = {
@@ -1913,17 +1825,6 @@ this.permissionMode = mode
     this.send('session:message', chatMsg)
   }
 
-  /**
-   * Resolve a teammate_id from the team-streaming patch to a toolUseId.
-   * The patch sends messages with teammate_id = "name@team" (e.g., "ts-advocate@lang-debate").
-   * Returns the corresponding toolUseId, or undefined if this isn't a teammate message.
-   */
-  private resolveTeammateToolUseId(msg: Record<string, unknown>): string | undefined {
-    const teammateId = msg.teammate_id as string | undefined
-    if (!teammateId) return undefined
-    return this.teammateIdToToolUse.get(teammateId)
-  }
-
   private extractXmlTag(xml: string, tag: string): string | null {
     const re = new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`)
     const match = xml.match(re)
@@ -1938,29 +1839,6 @@ this.permissionMode = mode
 
     if (agentId) {
       this.taskIdMap.set(agentId, toolUseId)
-
-      // Check if this is a teammate we're tracking
-      const pending = this.pendingTeammates.get(toolUseId)
-      if (pending) {
-        const sanitize = (s: string): string => s.replace(/[^a-zA-Z0-9_-]/g, '-')
-        const teammateData = {
-          toolUseId,
-          name: pending.name,
-          teamName: pending.teamName,
-          agentId,
-          sanitizedName: sanitize(pending.name),
-          sanitizedTeamName: sanitize(pending.teamName),
-          prompt: pending.prompt
-        }
-        this._detectedTeammates.push(teammateData)
-        this.send('session:teammate-detected', teammateData)
-        this.pendingTeammates.delete(toolUseId)
-
-        // Register teammate_id → toolUseId mapping for the team-streaming patch.
-        // The patch forwards messages with teammate_id = "name@team".
-        const teammateId = `${pending.name}@${pending.teamName}`
-        this.teammateIdToToolUse.set(teammateId, toolUseId)
-      }
     }
 
     // Record output file path for background commands (permanent — survives completion).

@@ -71,10 +71,6 @@ export class SessionManager {
     this.sessions.clear()
   }
 
-  getTeamInfo(routingId: string): ReturnType<ClaudeSession['getTeamInfo']> | null {
-    return this.sessions.get(routingId)?.getTeamInfo() ?? null
-  }
-
   /** Update the idle timeout for a specific session by routingId. Pass 0 to disable. */
   setInactivityTimeout(routingId: string, ms: number): void {
     const session = this.sessions.get(routingId)

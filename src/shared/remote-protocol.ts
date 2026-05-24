@@ -105,7 +105,6 @@ import type {
   TaskProgress,
   StatusLineData,
   DirectoryGroup,
-  TeammateInfo,
   SlashCommandInfo,
   WorktreeInfo
 } from './types'
@@ -128,9 +127,6 @@ export interface PerSessionSnapshot {
   effort: string
   thinkingMode?: string
   statusLine: StatusLineData | null
-  teamName: string | null
-  teammates: Record<string, TeammateInfo>
-  focusedAgentId: string | null
   slashCommands: SlashCommandInfo[]
   sdkSkillNames: string[]
 }

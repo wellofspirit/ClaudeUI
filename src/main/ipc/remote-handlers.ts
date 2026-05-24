@@ -1,6 +1,5 @@
 import * as fs from 'fs'
 import * as path from 'path'
-import * as os from 'os'
 import { RemoteDispatcher } from '../services/remote-dispatcher'
 import { SessionManager } from '../services/session-manager'
 import { listDirectories, loadSessionHistory, loadSubagentHistory, buildSubagentFileMap, loadBackgroundOutput } from '../services/session-history'
@@ -169,43 +168,6 @@ export function registerRemoteHandlers(
 
   dispatcher.register('session:load-background-output', async (projectKey: string, taskId: string, outputFile?: string) => {
     return loadBackgroundOutput(projectKey, taskId, outputFile)
-  })
-
-  // -------------------------------------------------------------------------
-  // Team
-  // -------------------------------------------------------------------------
-
-  dispatcher.register('session:get-team-info', async (routingId: string) => {
-    return manager.getTeamInfo(routingId)
-  })
-
-  dispatcher.register('session:send-to-teammate', async (_routingId: string, sanitizedTeamName: string, sanitizedAgentName: string, message: string) => {
-    const inboxDir = path.join(os.homedir(), '.claude', 'teams', sanitizedTeamName, 'inboxes')
-    await fs.promises.mkdir(inboxDir, { recursive: true })
-    const inboxPath = path.join(inboxDir, `${sanitizedAgentName}.json`)
-    let items: unknown[] = []
-    try {
-      const raw = await fs.promises.readFile(inboxPath, 'utf-8')
-      items = JSON.parse(raw)
-    } catch { /* empty */ }
-    items.push({ from: 'user', text: message, timestamp: new Date().toISOString(), read: false })
-    await fs.promises.writeFile(inboxPath, JSON.stringify(items, null, 2), { mode: 0o600 })
-  })
-
-  dispatcher.register('session:broadcast-to-team', async (_routingId: string, sanitizedTeamName: string, sanitizedAgentNames: string[], message: string) => {
-    const inboxDir = path.join(os.homedir(), '.claude', 'teams', sanitizedTeamName, 'inboxes')
-    await fs.promises.mkdir(inboxDir, { recursive: true })
-    const entry = { from: 'user', text: message, timestamp: new Date().toISOString(), read: false }
-    for (const name of sanitizedAgentNames) {
-      const inboxPath = path.join(inboxDir, `${name}.json`)
-      let items: unknown[] = []
-      try {
-        const raw = await fs.promises.readFile(inboxPath, 'utf-8')
-        items = JSON.parse(raw)
-      } catch { /* empty */ }
-      items.push(entry)
-      await fs.promises.writeFile(inboxPath, JSON.stringify(items, null, 2), { mode: 0o600 })
-    }
   })
 
   // -------------------------------------------------------------------------

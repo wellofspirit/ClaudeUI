@@ -139,7 +139,6 @@ const sessionManagerStub: any = {
   rekey: vi.fn(),
   get: vi.fn(() => sessionStub),
   cancel: vi.fn(),
-  getTeamInfo: vi.fn(() => null),
 }
 
 describe('RemoteDispatcher', () => {
@@ -171,7 +170,6 @@ describe('RemoteDispatcher', () => {
     'window:maximize',
     'window:close',
     'session:pick-folder',
-    'session:open-teams-view',
     'app:quit-confirm',
     'app:open-in-vscode',
     'terminal:create',
@@ -231,7 +229,6 @@ describe('registerRemoteHandlers', () => {
   it('does NOT register blocklisted channels', () => {
     const channels = dispatcher.channels()
     expect(channels).not.toContain('session:pick-folder')
-    expect(channels).not.toContain('session:open-teams-view')
     expect(channels).not.toContain('app:quit-confirm')
     expect(channels).not.toContain('window:minimize')
   })

@@ -96,9 +96,6 @@ describe('Sidebar FC', () => {
       customTitle: null,
       agentIdToToolUseId: {},
       statusLine: null,
-      teamName: null,
-      pendingTeammates: {},
-      taskPrompts: {},
     }))
     app.bridge.ipcMain.handle('session:load-subagent-history', async () => [])
     app.bridge.ipcMain.handle('session:build-subagent-file-map', async () => ({}))
@@ -176,8 +173,7 @@ describe('Sidebar FC', () => {
       loadHistoryCalls++
       return {
         messages: [], taskNotifications: [], customTitle: null,
-        agentIdToToolUseId: {}, statusLine: null, teamName: null,
-        pendingTeammates: {}, taskPrompts: {},
+        agentIdToToolUseId: {}, statusLine: null,
       }
     })
 
@@ -201,8 +197,7 @@ describe('Sidebar FC', () => {
       historyCalls.push(args)
       return {
         messages: [], taskNotifications: [], customTitle: 'From disk',
-        agentIdToToolUseId: {}, statusLine: null, teamName: null,
-        pendingTeammates: {}, taskPrompts: {},
+        agentIdToToolUseId: {}, statusLine: null,
       }
     })
 
@@ -370,40 +365,7 @@ describe('Sidebar FC', () => {
   })
 
   // -------------------------------------------------------------------------
-  // 11. Team session branch — loadSessionHistory returns teamName + teammates
-  // -------------------------------------------------------------------------
-
-  it('reconstructs team state when loading a team session from disk', async () => {
-    app.bridge.ipcMain.handle('session:load-history', async () => ({
-      messages: [],
-      taskNotifications: [],
-      customTitle: null,
-      agentIdToToolUseId: { 'coder@team-v1': 'tu-coder' },
-      statusLine: null,
-      teamName: 'team-v1',
-      pendingTeammates: {
-        'tu-coder': { name: 'Coder', teamName: 'team-v1' },
-      },
-      taskPrompts: { 'tu-coder': 'coder prompt' },
-    }))
-    app.bridge.ipcMain.handle('session:build-subagent-file-map', async () => ({ 'tu-coder': 'hexfile-1' }))
-    app.bridge.ipcMain.handle('session:load-subagent-history', async () => [])
-
-    await act(async () => { await renderFC() })
-    await act(async () => {
-      await viewProps.onClickSession(makeSessionInfo('team-sess'))
-    })
-
-    const session = useSessionStore.getState().sessions['team-sess']
-    expect(session.teamName).toBe('team-v1')
-    expect(Object.values(session.teammates)).toHaveLength(1)
-    const teammate = Object.values(session.teammates)[0]
-    expect(teammate.name).toBe('Coder')
-    expect(teammate.agentId).toBe('coder@team-v1')
-  })
-
-  // -------------------------------------------------------------------------
-  // 12. onToggleWatch async load-then-watch — session not in memory
+  // 11. onToggleWatch async load-then-watch — session not in memory
   // -------------------------------------------------------------------------
 
   it('loads history from disk before watching a session not in memory', async () => {
@@ -413,9 +375,6 @@ describe('Sidebar FC', () => {
       customTitle: 'Disk Title',
       agentIdToToolUseId: {},
       statusLine: null,
-      teamName: null,
-      pendingTeammates: {},
-      taskPrompts: {},
     }))
 
     const watchCalls: unknown[][] = []

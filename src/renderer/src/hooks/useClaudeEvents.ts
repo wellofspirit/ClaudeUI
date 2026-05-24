@@ -243,26 +243,6 @@ export function useClaudeEvents(): void {
       }),
       window.api.onTaskNotification((routingId, data) => {
         addTaskNotification(routingId, data)
-        // Update teammate status when a known teammate completes
-        if (data.toolUseId) {
-          const store = useSessionStore.getState()
-          const session = store.sessions[routingId]
-          if (session?.teammates[data.toolUseId]) {
-            const statusMap: Record<string, 'completed' | 'failed' | 'stopped'> = {
-              completed: 'completed', failed: 'failed', stopped: 'stopped'
-            }
-            store.updateTeammateStatus(routingId, data.toolUseId, statusMap[data.status] || 'completed')
-          }
-        }
-      }),
-      window.api.onTeamCreated((routingId, data) => {
-        useSessionStore.getState().setTeamName(routingId, data.teamName)
-      }),
-      window.api.onTeamDeleted((routingId) => {
-        useSessionStore.getState().clearTeam(routingId)
-      }),
-      window.api.onTeammateDetected((routingId, data) => {
-        useSessionStore.getState().addTeammate(routingId, { ...data, status: 'running' })
       }),
       window.api.onSubagentStream((routingId, data) => {
         if (data.type === 'thinking') {

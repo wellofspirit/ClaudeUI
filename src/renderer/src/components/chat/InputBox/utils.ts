@@ -11,7 +11,6 @@ import type { FileAttachment } from '../../../../../shared/types'
 export type SendAction =
   | { type: 'side-question'; question: string }
   | { type: 'clear-session' }
-  | { type: 'teammate-message'; prompt: string; sanitizedTeamName: string; sanitizedName: string }
   | { type: 'queue-prompt'; prompt: string }
   | { type: 'send-prompt'; prompt: string; attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }> }
   | { type: 'noop' }
@@ -22,8 +21,6 @@ export interface SendContext {
   isDisabled: boolean
   activeSessionId: string | null
   isRunning: boolean
-  focusedAgentId: string | null
-  teammates: Record<string, { sanitizedTeamName: string; sanitizedName: string }>
 }
 
 /**
@@ -49,17 +46,6 @@ export function resolveSendAction(ctx: SendContext): SendAction {
     return { type: 'clear-session' }
   }
 
-  // Teammate routing
-  if (ctx.focusedAgentId && ctx.teammates[ctx.focusedAgentId]) {
-    const teammate = ctx.teammates[ctx.focusedAgentId]
-    return {
-      type: 'teammate-message',
-      prompt,
-      sanitizedTeamName: teammate.sanitizedTeamName,
-      sanitizedName: teammate.sanitizedName,
-    }
-  }
-
   // Queue vs direct send
   const attachments = hasFiles
     ? ctx.attachedFiles.map(({ mediaType, base64Data, fileName }) => ({ mediaType, base64Data, fileName }))
@@ -71,4 +57,3 @@ export function resolveSendAction(ctx: SendContext): SendAction {
 
   return { type: 'send-prompt', prompt, attachments }
 }
-

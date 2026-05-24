@@ -95,10 +95,6 @@ export function InputBox(): React.JSX.Element {
   const isDisabled = !activeSessionId || !cwd
 
   const permissionMode = useActiveSession((s) => s.permissionMode)
-  const focusedAgentId = useActiveSession((s) => s.focusedAgentId)
-  const teammates = useActiveSession((s) => s.teammates)
-  const teamName = useActiveSession((s) => s.teamName)
-  const addTeammateUserMessage = useSessionStore((s) => s.addTeammateUserMessage)
 
   const [attachedFiles, setAttachedFiles] = useState<FileAttachment[]>([])
 
@@ -248,7 +244,7 @@ export function InputBox(): React.JSX.Element {
   // keystroke, so memoization gives no benefit. View is unmemoized too.
   const handleSend = async (): Promise<void> => {
     const action = resolveSendAction({
-      text, attachedFiles, isDisabled, activeSessionId, isRunning, focusedAgentId, teammates,
+      text, attachedFiles, isDisabled, activeSessionId, isRunning,
     })
     if (action.type === 'noop') return
 
@@ -273,11 +269,6 @@ export function InputBox(): React.JSX.Element {
         if (session) createNewSession(uuid(), session.cwd)
         return
       }
-      case 'teammate-message': {
-        addTeammateUserMessage(activeSessionId!, focusedAgentId!, uuid(), action.prompt)
-        await window.api.sendToTeammate(activeSessionId!, action.sanitizedTeamName, action.sanitizedName, action.prompt)
-        return
-      }
       case 'queue-prompt': {
         await window.api.sendPrompt(activeSessionId!, action.prompt)
         return
@@ -297,24 +288,6 @@ export function InputBox(): React.JSX.Element {
       consumeQueuedText(activeSessionId!)
     }
   }, [isRunning, queuedText, activeSessionId, consumeQueuedText])
-
-  const handleBroadcast = useCallback(async () => {
-    const prompt = text.trim()
-    if (!prompt || !activeSessionId || !teamName) return
-    setText('')
-    if (textareaRef.current) textareaRef.current.style.height = 'auto'
-
-    const teammateList = Object.values(teammates)
-    const sanitizedNames = teammateList.filter((t) => t.status === 'running').map((t) => t.sanitizedName)
-    if (sanitizedNames.length === 0) return
-    const sanitizedTeamName = teammateList[0]?.sanitizedTeamName
-    if (!sanitizedTeamName) return
-
-    for (const t of teammateList) {
-      if (t.status === 'running') addTeammateUserMessage(activeSessionId, t.toolUseId, uuid(), prompt)
-    }
-    await window.api.broadcastToTeam(activeSessionId, sanitizedTeamName, sanitizedNames, prompt)
-  }, [text, activeSessionId, teamName, teammates, addTeammateUserMessage, setText])
 
   const handleEditQueued = useCallback(async () => {
     const savedText = queuedText
@@ -348,7 +321,6 @@ export function InputBox(): React.JSX.Element {
     if (fileMentionHandleKeyDown(e)) return
     if (slashHandleKeyDown(e)) return
     if (e.key === 'ArrowUp' && !text && queuedText) { e.preventDefault(); handleEditQueued(); return }
-    if (e.key === 'Enter' && e.shiftKey && (e.metaKey || e.ctrlKey)) { e.preventDefault(); handleBroadcast(); return }
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend() }
     if (e.key === 'Escape' && isRunning) handleCancel()
     if (e.key === 'Tab' && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
@@ -484,17 +456,13 @@ export function InputBox(): React.JSX.Element {
       ? 'Finishing transcription...'
       : !activeSessionId || !cwd
         ? 'Select a folder to get started'
-        : focusedAgentId && teammates[focusedAgentId]
-          ? `Message ${teammates[focusedAgentId].name}...`
-          : isRunning
-            ? 'Type to queue a message...'
-            : 'Ask Claude anything, / for commands'
+        : isRunning
+          ? 'Type to queue a message...'
+          : 'Ask Claude anything, / for commands'
 
   const textClassName = isVoiceActive && voiceInterimTranscript
     ? 'text-[var(--text-secondary)] italic'
     : 'text-text-primary'
-
-  const showBroadcast = !!teamName && Object.values(teammates).some((t) => t.status === 'running')
 
   const adaptiveSupported = useMemo(() => modelSupportsAdaptiveThinking(selectedModel), [selectedModel])
   const effortSupported = useMemo(() => modelSupportsEffort(selectedModel), [selectedModel])
@@ -527,8 +495,8 @@ export function InputBox(): React.JSX.Element {
       effortSupported={effortSupported} allowedEffortLevels={allowedEffortLevels}
       thinkingMode={effectiveThinking} adaptiveSupported={adaptiveSupported}
       sandboxEnabled={sandboxEnabled} voiceEnabled={voiceEnabled} voiceState={voiceState}
-      focusedAgentId={focusedAgentId} showBroadcast={showBroadcast} statusLine={statusLine}
-      onSend={handleSend} onCancel={handleCancel} onBroadcast={handleBroadcast}
+      statusLine={statusLine}
+      onSend={handleSend} onCancel={handleCancel}
       onInput={handleInput} onKeyDown={handleKeyDown} onKeyUp={handleKeyUp} onPaste={handlePaste}
       onFileChange={handleFileChange} onRemoveFile={removeFile}
       onSlashSelect={handleSlashSelect} onFileMentionConfirm={handleFileMentionConfirm}

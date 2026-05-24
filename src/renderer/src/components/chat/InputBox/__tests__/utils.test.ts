@@ -19,8 +19,6 @@ describe('resolveSendAction', () => {
     isDisabled: false,
     activeSessionId: 'session-1',
     isRunning: false,
-    focusedAgentId: null,
-    teammates: {},
   }
 
   it('returns noop when text is empty and no files', () => {
@@ -54,33 +52,6 @@ describe('resolveSendAction', () => {
   it('does not treat /clearfoo as clear command', () => {
     const result = resolveSendAction({ ...baseCtx, text: '/clearfoo' })
     expect(result.type).not.toBe('clear-session')
-  })
-
-  it('routes to teammate when focused on one', () => {
-    const ctx: SendContext = {
-      ...baseCtx,
-      focusedAgentId: 'agent-1',
-      teammates: {
-        'agent-1': { sanitizedTeamName: 'team-x', sanitizedName: 'bob' },
-      },
-    }
-    const result = resolveSendAction(ctx)
-    expect(result).toEqual({
-      type: 'teammate-message',
-      prompt: 'Hello Claude',
-      sanitizedTeamName: 'team-x',
-      sanitizedName: 'bob',
-    })
-  })
-
-  it('ignores focusedAgentId if not in teammates map', () => {
-    const ctx: SendContext = {
-      ...baseCtx,
-      focusedAgentId: 'unknown-agent',
-      teammates: {},
-    }
-    const result = resolveSendAction(ctx)
-    expect(result.type).toBe('send-prompt')
   })
 
   it('queues prompt when session is running', () => {

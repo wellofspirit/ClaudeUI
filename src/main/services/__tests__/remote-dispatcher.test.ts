@@ -62,7 +62,6 @@ describe('RemoteDispatcher', () => {
       'window:maximize',
       'window:close',
       'session:pick-folder',
-      'session:open-teams-view',
       'app:quit-confirm',
       'app:open-in-vscode',
       'terminal:create',

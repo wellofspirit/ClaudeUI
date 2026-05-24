@@ -125,9 +125,6 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     onBackgroundOutput: on('session:background-output') as ClaudeAPI['onBackgroundOutput'],
     onSandboxViolation: on('session:sandbox-violation') as ClaudeAPI['onSandboxViolation'],
     onSteerConsumed: on('session:steer-consumed') as ClaudeAPI['onSteerConsumed'],
-    onTeammateDetected: on('session:teammate-detected') as ClaudeAPI['onTeammateDetected'],
-    onTeamCreated: on('session:team-created') as ClaudeAPI['onTeamCreated'],
-    onTeamDeleted: on('session:team-deleted') as ClaudeAPI['onTeamDeleted'],
     onSkills: on('session:skills') as ClaudeAPI['onSkills'],
     onStatusLine: on('session:status-line') as ClaudeAPI['onStatusLine'],
     onMcpServers: on('session:mcp-servers') as ClaudeAPI['onMcpServers'],
@@ -194,15 +191,6 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       connection.invoke('session:watch-session', routingId, sessionId, projectKey) as Promise<void>,
     unwatchSession: (routingId) =>
       connection.invoke('session:unwatch-session', routingId) as Promise<void>,
-
-    // Team
-    sendToTeammate: (routingId, sanitizedTeamName, sanitizedAgentName, message) =>
-      connection.invoke('session:send-to-teammate', routingId, sanitizedTeamName, sanitizedAgentName, message) as Promise<void>,
-    broadcastToTeam: (routingId, sanitizedTeamName, sanitizedAgentNames, message) =>
-      connection.invoke('session:broadcast-to-team', routingId, sanitizedTeamName, sanitizedAgentNames, message) as Promise<void>,
-    getTeamInfo: (routingId) =>
-      connection.invoke('session:get-team-info', routingId) as Promise<ReturnType<ClaudeAPI['getTeamInfo']>>,
-    openTeamsViewWindow: async () => {}, // No-op on web
 
     // Terminal — not available on web, return no-ops/empty
     createTerminal: async () => '',
