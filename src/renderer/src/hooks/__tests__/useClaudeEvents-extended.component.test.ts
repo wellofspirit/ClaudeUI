@@ -21,7 +21,6 @@ import type {
   PluginViewWithOwner,
   VoiceState,
   WorktreeInfo,
-  TeammateInfo,
 } from '../../../../shared/types'
 
 let bridge: TestIpcBridge
@@ -46,20 +45,6 @@ function wireEventHandlers(): void {
 
   onEvent<(routingId: string, data: TaskNotification) => void>('session:task-notification')((routingId, data) => {
     store().addTaskNotification(routingId, data)
-    if (data.toolUseId) {
-      const s = store()
-      const session = s.sessions[routingId]
-      if (session?.teammates[data.toolUseId]) {
-        const statusMap: Record<string, 'completed' | 'failed' | 'stopped'> = {
-          completed: 'completed', failed: 'failed', stopped: 'stopped'
-        }
-        s.updateTeammateStatus(routingId, data.toolUseId, statusMap[data.status] || 'completed')
-      }
-    }
-  })
-
-  onEvent<(routingId: string, data: Omit<TeammateInfo, 'status'>) => void>('session:teammate-detected')((routingId, data) => {
-    store().addTeammate(routingId, { ...data, status: 'running' })
   })
 
   onEvent<(routingId: string, data: { toolUseId: string; message: ChatMessage }) => void>('session:subagent-message')((routingId, data) => {
@@ -339,66 +324,6 @@ describe('useClaudeEvents extended component tests', () => {
       expect(session.taskNotifications[0].taskId).toBe(notification.taskId)
     })
 
-    it('updates teammate status to completed when toolUseId matches a teammate', () => {
-      const routingId = 'route-1'
-      useSessionStore.getState().createNewSession(routingId, '/test')
-      useSessionStore.getState().addTeammate(routingId, {
-        toolUseId: 'agent-tool-1',
-        name: 'Worker',
-        sanitizedName: 'Worker',
-        teamName: 'my-team',
-        sanitizedTeamName: 'my-team',
-        agentId: 'agent-1',
-        status: 'running',
-      })
-
-      const notification = makeTaskNotification({ toolUseId: 'agent-tool-1', status: 'completed' })
-      bridge.webContents.send('session:task-notification', routingId, notification)
-
-      const session = useSessionStore.getState().sessions[routingId]
-      expect(session.teammates['agent-tool-1'].status).toBe('completed')
-    })
-
-    it('maps failed status to failed on teammate', () => {
-      const routingId = 'route-1'
-      useSessionStore.getState().createNewSession(routingId, '/test')
-      useSessionStore.getState().addTeammate(routingId, {
-        toolUseId: 'agent-tool-2',
-        name: 'Worker',
-        sanitizedName: 'Worker',
-        teamName: 'team',
-        sanitizedTeamName: 'team',
-        agentId: 'agent-2',
-        status: 'running',
-      })
-
-      bridge.webContents.send('session:task-notification', routingId, makeTaskNotification({
-        toolUseId: 'agent-tool-2', status: 'failed',
-      }))
-
-      expect(useSessionStore.getState().sessions[routingId].teammates['agent-tool-2'].status).toBe('failed')
-    })
-
-    it('maps stopped status to stopped on teammate', () => {
-      const routingId = 'route-1'
-      useSessionStore.getState().createNewSession(routingId, '/test')
-      useSessionStore.getState().addTeammate(routingId, {
-        toolUseId: 'agent-tool-3',
-        name: 'Worker',
-        sanitizedName: 'Worker',
-        teamName: 'team',
-        sanitizedTeamName: 'team',
-        agentId: 'agent-3',
-        status: 'running',
-      })
-
-      bridge.webContents.send('session:task-notification', routingId, makeTaskNotification({
-        toolUseId: 'agent-tool-3', status: 'stopped',
-      }))
-
-      expect(useSessionStore.getState().sessions[routingId].teammates['agent-tool-3'].status).toBe('stopped')
-    })
-
     it('does not crash when toolUseId is null', () => {
       const routingId = 'route-1'
       useSessionStore.getState().createNewSession(routingId, '/test')
@@ -407,80 +332,6 @@ describe('useClaudeEvents extended component tests', () => {
 
       const session = useSessionStore.getState().sessions[routingId]
       expect(session.taskNotifications).toHaveLength(1)
-    })
-
-    it('does not update teammate status when toolUseId does not match any teammate', () => {
-      const routingId = 'route-1'
-      useSessionStore.getState().createNewSession(routingId, '/test')
-      useSessionStore.getState().addTeammate(routingId, {
-        toolUseId: 'different-id',
-        name: 'Worker',
-        sanitizedName: 'Worker',
-        teamName: 'team',
-        sanitizedTeamName: 'team',
-        agentId: 'agent-x',
-        status: 'running',
-      })
-
-      bridge.webContents.send('session:task-notification', routingId, makeTaskNotification({
-        toolUseId: 'no-match-id', status: 'completed',
-      }))
-
-      expect(useSessionStore.getState().sessions[routingId].teammates['different-id'].status).toBe('running')
-    })
-  })
-
-  describe('session:teammate-detected', () => {
-    it('adds teammate with running status', () => {
-      const routingId = 'route-1'
-      useSessionStore.getState().createNewSession(routingId, '/test')
-
-      bridge.webContents.send('session:teammate-detected', routingId, {
-        toolUseId: 'agent-tool-1',
-        name: 'SubAgent',
-        sanitizedName: 'SubAgent',
-        teamName: 'alpha-team',
-        sanitizedTeamName: 'alpha-team',
-        agentId: 'agent-abc',
-      })
-
-      const session = useSessionStore.getState().sessions[routingId]
-      expect(session.teammates['agent-tool-1']).toBeDefined()
-      expect(session.teammates['agent-tool-1'].status).toBe('running')
-      expect(session.teammates['agent-tool-1'].name).toBe('SubAgent')
-    })
-
-    it('always sets status to running regardless of source data', () => {
-      const routingId = 'route-1'
-      useSessionStore.getState().createNewSession(routingId, '/test')
-
-      bridge.webContents.send('session:teammate-detected', routingId, {
-        toolUseId: 'agent-tool-5',
-        name: 'AnotherAgent',
-        sanitizedName: 'AnotherAgent',
-        teamName: 'beta-team',
-        sanitizedTeamName: 'beta-team',
-        agentId: 'agent-xyz',
-      })
-
-      expect(useSessionStore.getState().sessions[routingId].teammates['agent-tool-5'].status).toBe('running')
-    })
-
-    it('adds multiple teammates independently', () => {
-      const routingId = 'route-1'
-      useSessionStore.getState().createNewSession(routingId, '/test')
-
-      bridge.webContents.send('session:teammate-detected', routingId, {
-        toolUseId: 'tool-1', name: 'Agent1', sanitizedName: 'Agent1',
-        teamName: 'team', sanitizedTeamName: 'team', agentId: 'a1',
-      })
-      bridge.webContents.send('session:teammate-detected', routingId, {
-        toolUseId: 'tool-2', name: 'Agent2', sanitizedName: 'Agent2',
-        teamName: 'team', sanitizedTeamName: 'team', agentId: 'a2',
-      })
-
-      const session = useSessionStore.getState().sessions[routingId]
-      expect(Object.keys(session.teammates)).toHaveLength(2)
     })
   })
 

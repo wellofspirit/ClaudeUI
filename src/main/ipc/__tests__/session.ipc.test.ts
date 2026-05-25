@@ -81,7 +81,6 @@ const { gitSvcSpies, sessionManagerSpies, sessionStub } = vi.hoisted(() => {
     interrupt: vi.fn(async () => {}),
     forEach: vi.fn((cb: (s: any) => void) => cb(sessionStub)),
     setSessionTimeout: vi.fn(),
-    getTeamInfo: vi.fn(() => null),
   }
   return { gitSvcSpies, sessionManagerSpies, sessionStub }
 })
@@ -199,7 +198,6 @@ vi.mock('../../services/session-manager', () => ({
     interrupt = sessionManagerSpies.interrupt
     forEach = sessionManagerSpies.forEach
     setSessionTimeout = sessionManagerSpies.setSessionTimeout
-    getTeamInfo = sessionManagerSpies.getTeamInfo
   },
 }))
 

@@ -63,7 +63,7 @@ export function ThinkingBlock({ text, isActive }: Props): React.JSX.Element {
       : 'Thought'
 
   return (
-    <div>
+    <div data-search="skip">
       <button
         onClick={() => setExpanded(!expanded)}
         className="flex items-center gap-1.5 text-[13px] text-text-secondary hover:text-text-primary transition-colors cursor-pointer"

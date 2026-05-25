@@ -12,9 +12,10 @@ import {
   makeAssistantMessage,
   makeToolUseBlock,
   makeTaskNotification,
+  makeSessionStatus,
   resetFactoryCounter,
 } from '@test/factories/messages'
-import type { DiffComment, PlanComment, WorktreeInfo, TeammateInfo, GitStatusData } from '../../../../shared/types'
+import type { DiffComment, PlanComment, WorktreeInfo, GitStatusData } from '../../../../shared/types'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -74,19 +75,6 @@ function makeWorktreeInfo(overrides?: Partial<WorktreeInfo>): WorktreeInfo {
     gitRoot: '/test',
     originalHeadCommit: 'abc123',
     createdAt: Date.now(),
-    ...overrides,
-  }
-}
-
-function makeTeammateInfo(overrides?: Partial<TeammateInfo>): TeammateInfo {
-  return {
-    toolUseId: `teammate-${Date.now()}-${Math.random()}`,
-    name: 'Agent-1',
-    sanitizedName: 'agent-1',
-    teamName: 'TestTeam',
-    sanitizedTeamName: 'testteam',
-    agentId: 'agent-abc123',
-    status: 'running',
     ...overrides,
   }
 }
@@ -763,6 +751,140 @@ describe('addTaskNotification', () => {
   })
 })
 
+describe('setStatus', () => {
+  it('updates status fields', () => {
+    store().createNewSession('r1', '/test')
+    store().setStatus('r1', makeSessionStatus({ state: 'running', model: 'claude-opus-4-7' }))
+    expect(store().sessions['r1'].status.state).toBe('running')
+    expect(store().sessions['r1'].status.model).toBe('claude-opus-4-7')
+  })
+
+  it('mirrors a new cwd into the top-level session cwd', () => {
+    store().createNewSession('r1', '/test/old')
+    store().setStatus('r1', makeSessionStatus({ state: 'running', cwd: '/test/new' }))
+    expect(store().sessions['r1'].cwd).toBe('/test/new')
+  })
+
+  it('finalizes in-flight thinking when transitioning to idle (interrupt path)', () => {
+    store().createNewSession('r1', '/test')
+    const startedAt = Date.now() - 1500
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        r1: {
+          ...state.sessions.r1,
+          streamingThinking: 'half-finished thought...',
+          thinkingStartedAt: startedAt,
+        },
+      },
+    }))
+    expect(store().sessions['r1'].thinkingStartedAt).toBe(startedAt)
+
+    store().setStatus('r1', makeSessionStatus({ state: 'idle' }))
+
+    const s = store().sessions['r1']
+    expect(s.thinkingStartedAt).toBeNull()
+    expect(s.streamingThinking).toBe('')
+    expect(s.thinkingDurationMs).not.toBeNull()
+    expect(s.thinkingDurationMs!).toBeGreaterThanOrEqual(1500)
+  })
+
+  it('does not touch thinking state when transitioning to running', () => {
+    store().createNewSession('r1', '/test')
+    const startedAt = Date.now() - 200
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        r1: {
+          ...state.sessions.r1,
+          streamingThinking: 'mid-thought...',
+          thinkingStartedAt: startedAt,
+        },
+      },
+    }))
+
+    store().setStatus('r1', makeSessionStatus({ state: 'running' }))
+
+    const s = store().sessions['r1']
+    expect(s.thinkingStartedAt).toBe(startedAt)
+    expect(s.streamingThinking).toBe('mid-thought...')
+    expect(s.thinkingDurationMs).toBeNull()
+  })
+
+  it('is a no-op for thinking state on idle when nothing is in-flight', () => {
+    store().createNewSession('r1', '/test')
+    store().setStatus('r1', makeSessionStatus({ state: 'idle' }))
+    const s = store().sessions['r1']
+    expect(s.thinkingStartedAt).toBeNull()
+    expect(s.streamingThinking).toBe('')
+    expect(s.thinkingDurationMs).toBeNull()
+  })
+
+  it('clears foreground subagent streaming buffers on idle', () => {
+    store().createNewSession('r1', '/test')
+    store().addMessage('r1', makeChatMessage({
+      id: 'asst-1',
+      role: 'assistant',
+      content: [makeToolUseBlock('Task', { description: 'do work' }, 'tool-fg')],
+    }))
+    store().appendSubagentStreamingThinking('r1', 'tool-fg', 'subagent thinking...')
+    store().appendSubagentStreamingText('r1', 'tool-fg', 'subagent answering...')
+
+    store().setStatus('r1', makeSessionStatus({ state: 'idle' }))
+
+    const s = store().sessions['r1']
+    expect(s.subagentStreamingThinking['tool-fg']).toBe('')
+    expect(s.subagentStreamingText['tool-fg']).toBe('')
+  })
+
+  it('preserves background subagent streaming buffers on idle', () => {
+    store().createNewSession('r1', '/test')
+    store().addMessage('r1', makeChatMessage({
+      id: 'asst-1',
+      role: 'assistant',
+      content: [makeToolUseBlock('Task', { description: 'bg work', run_in_background: true }, 'tool-bg')],
+    }))
+    // appendSubagentStreamingText clears thinking by design (text supersedes
+    // thinking in the live preview), so seed both buffers directly.
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        r1: {
+          ...state.sessions.r1,
+          subagentStreamingThinking: { 'tool-bg': 'still thinking...' },
+          subagentStreamingText: { 'tool-bg': 'still answering...' },
+        },
+      },
+    }))
+
+    store().setStatus('r1', makeSessionStatus({ state: 'idle' }))
+
+    const s = store().sessions['r1']
+    expect(s.subagentStreamingThinking['tool-bg']).toBe('still thinking...')
+    expect(s.subagentStreamingText['tool-bg']).toBe('still answering...')
+  })
+
+  it('clears foreground but not background subagent buffers when both are present', () => {
+    store().createNewSession('r1', '/test')
+    store().addMessage('r1', makeChatMessage({
+      id: 'asst-1',
+      role: 'assistant',
+      content: [
+        makeToolUseBlock('Task', { description: 'fg' }, 'tool-fg'),
+        makeToolUseBlock('Task', { description: 'bg', run_in_background: true }, 'tool-bg'),
+      ],
+    }))
+    store().appendSubagentStreamingThinking('r1', 'tool-fg', 'fg thinking')
+    store().appendSubagentStreamingThinking('r1', 'tool-bg', 'bg thinking')
+
+    store().setStatus('r1', makeSessionStatus({ state: 'idle' }))
+
+    const s = store().sessions['r1']
+    expect(s.subagentStreamingThinking['tool-fg']).toBe('')
+    expect(s.subagentStreamingThinking['tool-bg']).toBe('bg thinking')
+  })
+})
+
 describe('updateTaskProgress', () => {
   it('inserts progress entry by toolUseId', () => {
     store().createNewSession('r1', '/test')
@@ -811,7 +933,7 @@ describe('addSubagentMessage', () => {
     expect(store().sessions['r1'].subagentStreamingThinking['tool-1']).toBe('')
   })
 
-  it('bootstraps session if it does not exist (team scenario)', () => {
+  it('bootstraps session if it does not exist', () => {
     store().addSubagentMessage('ghost', 'tool-1', makeAssistantMessage('hi'))
     expect(store().sessions['ghost']).toBeDefined()
   })
@@ -876,76 +998,6 @@ describe('appendSubagentToolResult', () => {
 
   it('is a no-op when session does not exist', () => {
     expect(() => store().appendSubagentToolResult('ghost', 'tool-1', 'tu-1', 'result', false)).not.toThrow()
-  })
-})
-
-// ---------------------------------------------------------------------------
-// Team actions
-// ---------------------------------------------------------------------------
-
-describe('addTeammate', () => {
-  it('adds a teammate keyed by toolUseId', () => {
-    store().createNewSession('r1', '/test')
-    const teammate = makeTeammateInfo({ toolUseId: 'tm-1' })
-    store().addTeammate('r1', teammate)
-    expect(store().sessions['r1'].teammates['tm-1']).toEqual(teammate)
-  })
-
-  it('overwrites existing teammate with same toolUseId', () => {
-    store().createNewSession('r1', '/test')
-    const tm1 = makeTeammateInfo({ toolUseId: 'tm-1', status: 'running' })
-    store().addTeammate('r1', tm1)
-    const tm2 = makeTeammateInfo({ toolUseId: 'tm-1', status: 'completed' })
-    store().addTeammate('r1', tm2)
-    expect(store().sessions['r1'].teammates['tm-1'].status).toBe('completed')
-  })
-
-  it('bootstraps session if needed', () => {
-    store().addTeammate('new-session', makeTeammateInfo())
-    expect(store().sessions['new-session']).toBeDefined()
-  })
-})
-
-describe('updateTeammateStatus', () => {
-  it('updates the status field of an existing teammate', () => {
-    store().createNewSession('r1', '/test')
-    store().addTeammate('r1', makeTeammateInfo({ toolUseId: 'tm-1', status: 'running' }))
-    store().updateTeammateStatus('r1', 'tm-1', 'completed')
-    expect(store().sessions['r1'].teammates['tm-1'].status).toBe('completed')
-  })
-
-  it('is a no-op when teammate does not exist', () => {
-    store().createNewSession('r1', '/test')
-    expect(() => store().updateTeammateStatus('r1', 'ghost-tm', 'completed')).not.toThrow()
-  })
-
-  it('is a no-op when session does not exist', () => {
-    expect(() => store().updateTeammateStatus('ghost', 'tm-1', 'completed')).not.toThrow()
-  })
-})
-
-describe('addTeammateUserMessage', () => {
-  it('appends a user message to subagentMessages[toolUseId]', () => {
-    store().createNewSession('r1', '/test')
-    store().addTeammateUserMessage('r1', 'tm-1', 'um-1', 'send this to agent')
-    const msgs = store().sessions['r1'].subagentMessages['tm-1']
-    expect(msgs).toHaveLength(1)
-    expect(msgs[0]).toMatchObject({
-      id: 'um-1',
-      role: 'user',
-      content: [{ type: 'text', text: 'send this to agent' }],
-    })
-  })
-
-  it('appends to existing messages without replacing', () => {
-    store().createNewSession('r1', '/test')
-    store().addSubagentMessage('r1', 'tm-1', makeAssistantMessage('agent response'))
-    store().addTeammateUserMessage('r1', 'tm-1', 'um-1', 'follow-up')
-    expect(store().sessions['r1'].subagentMessages['tm-1']).toHaveLength(2)
-  })
-
-  it('is a no-op when session does not exist', () => {
-    expect(() => store().addTeammateUserMessage('ghost', 'tm-1', 'um-1', 'hi')).not.toThrow()
   })
 })
 

@@ -167,7 +167,7 @@ export function startConfigWatcher(win: BrowserWindow, getExtraWindows?: () => S
         if (!win.isDestroyed()) {
           win.webContents.send(entry.channel, data)
         }
-        // Also forward to extra windows (remote bridge, teams-view, etc.)
+        // Also forward to extra windows (remote bridge, etc.)
         if (getExtraWindows) {
           for (const w of getExtraWindows()) {
             if (!w.isDestroyed()) w.webContents.send(entry.channel, data)

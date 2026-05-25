@@ -129,19 +129,24 @@ if (!skipA1) {
   console.log(`  Queue push function: ${pushFn}`)
   console.log(`  Queue array: ${queueArr}`)
 
-  // --- Queue remove-by-predicate function ---
-  // Found near the push function: function <removeFn>(<A>){let <q>=[],<K>=[];for(let <_> of <arr>)...
-  const queueModule = src.slice(pushDefIdx, pushDefIdx + 2000)
+  // --- Queue remove-by-predicate function (module-level binding) ---
+  // The actual function is defined inside a factory closure (closure-local names
+  // like `Z` are NOT visible outside it). After the factory returns, the host
+  // module binds each closure-export to a top-level identifier via an
+  // assignment chain at module init: `MODLOCAL = FACTORY_RETURN.dequeueAllMatching`.
+  // We need that MODLOCAL — the control-request handler runs in a scope where
+  // the closure-locals are not in lexical scope. Using `Z` would shadow with
+  // whatever happens to be named `Z` at the handler site (e.g. a string).
   const removeFnRe = new RegExp(
-    `function (${V})\\(${V}\\)\\{let ${V}=\\[\\],${V}=\\[\\];for\\(let ${V} of ${queueArr.replace(/\$/g, '\\$')}\\)`
+    `(${V})=(${V})\\.dequeueAllMatching\\b`
   )
-  const removeFnMatch = removeFnRe.exec(queueModule)
+  const removeFnMatch = removeFnRe.exec(src)
   if (!removeFnMatch) {
-    console.error('ERROR: Cannot find queue remove-by-predicate function near queue push definition')
+    console.error('ERROR: Cannot find module-level binding for queue.dequeueAllMatching')
     process.exit(1)
   }
   const removeFn = removeFnMatch[1]
-  console.log(`  Queue remove-by-predicate: ${removeFn}`)
+  console.log(`  Queue remove-by-predicate: ${removeFn} (= ${removeFnMatch[2]}.dequeueAllMatching)`)
 
   // --- Find extractQueueText function (Ha9-like) ---
   // This function extracts the text from a queue item's value.

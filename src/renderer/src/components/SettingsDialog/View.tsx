@@ -110,7 +110,7 @@ export function SettingsDialogView({
         {/* Body */}
         <div className="flex flex-1 overflow-hidden">
           {/* Left nav */}
-          <nav className="w-[180px] border-r border-border/50 py-2 px-2 shrink-0">
+          <nav className="w-[180px] border-r border-border/50 py-2 px-2 shrink-0 overflow-y-auto">
             {SECTIONS.map((section) => {
               const hasMatches =
                 !search.trim() || filteredSections.some((s) => s.id === section.id)

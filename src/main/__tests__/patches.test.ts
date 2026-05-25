@@ -71,9 +71,6 @@ describe.skipIf(!cliJsExists())('patches', () => {
         '/*PATCHED:subagent-E*/',
         '/*PATCHED:subagent-F*/',
         '/*PATCHED:subagent-G*/',
-        '/*PATCHED:team-streaming-A*/',
-        '/*PATCHED:team-streaming-B*/',
-        '/*PATCHED:team-streaming-C*/',
         '/*PATCHED:queue-control-dequeue*/',
         '/*PATCHED:queue-control-consumed*/',
         '/*PATCHED:mcp-status-store-promise*/',
@@ -133,21 +130,6 @@ describe.skipIf(!cliJsExists())('patches', () => {
       const count = countOccurrences(src, '/*PATCHED:taskstop-notification-B*/')
       expect(count).toBeLessThanOrEqual(1)
     })
-  })
-
-  // ---------------------------------------------------------------------------
-  // team-streaming — 3 markers A..C
-  // ---------------------------------------------------------------------------
-  describe('team-streaming', () => {
-    for (const letter of ['A', 'B', 'C']) {
-      const name = `team-streaming-${letter}`
-      it(`marker ${name} present in cli.js`, () => {
-        expect(hasMarker(src, name)).toBe(true)
-      })
-      it(`marker ${name} appears exactly once`, () => {
-        expect(countOccurrences(src, `/*PATCHED:${name}*/`)).toBe(1)
-      })
-    }
   })
 
   // ---------------------------------------------------------------------------

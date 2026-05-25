@@ -19,11 +19,13 @@ import { createWorktree, getWorktreeStatus, removeWorktree, listWorktrees } from
 import { usageFetcher } from '../services/usage-fetcher'
 import { serviceSession } from '../services/service-session'
 import { blockUsageService } from '../services/block-usage'
-import type { ApprovalDecision, ModelInfo, SandboxSettings, ProxySettings, PermissionSuggestion, IpcResult } from '../../shared/types'
+import type { ApprovalDecision, ModelInfo, SandboxSettings, ProxySettings, AnthropicEndpointSettings, ModelOverrideSettings, PermissionSuggestion, IpcResult } from '../../shared/types'
 import { logger } from '../services/logger'
 import { deleteSessionFiles, deleteProjectFiles } from '../services/delete-session-files'
 import { startSocksBridge, stopSocksBridge } from '../services/socks-bridge'
 import { setProxyEnv, setProxyAllSubprocesses } from '../sdk/proxy'
+import { setEndpointEnv } from '../sdk/endpoint-env'
+import { setModelEnv } from '../sdk/model-env'
 import { invalidateMockupSecuritySettings } from '../services/mockup-settings'
 
 /**
@@ -199,8 +201,6 @@ const SESSION_IPC_CHANNELS = [
   'config:load-settings', 'config:save-settings', 'config:load-sessions',
   'config:save-sessions', 'config:load-slash-commands', 'config:save-slash-commands',
   'config:scan-custom-commands', 'config:load-skill-details',
-  'session:send-to-teammate', 'session:broadcast-to-team', 'session:get-team-info',
-  'session:open-teams-view',
   'git:check-repo', 'git:status', 'git:branches', 'git:checkout', 'git:create-branch',
   'git:file-patch', 'git:file-contents', 'git:stage-file', 'git:unstage-file', 'git:discard-file',
   'git:stage-all', 'git:unstage-all', 'git:commit', 'git:push', 'git:push-with-upstream', 'git:pull', 'git:fetch',
@@ -246,6 +246,51 @@ function buildProxyUrl(proxy: ProxySettings): string {
  * controlled by `proxy.proxySubprocesses` — see `src/main/sdk/proxy.ts` and
  * `patch/subprocess-proxy-strip/`.
  */
+/**
+ * Apply custom Anthropic endpoint settings into the cli.js spawn env. Stores
+ * `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` in module-scoped state that
+ * `buildEnv()` overlays onto each spawn — never mutates the Electron main
+ * process env, so PTYs / git / MCP / plugins stay clean.
+ */
+export function applyEndpointEnv(endpoint: AnthropicEndpointSettings | undefined): void {
+  if (endpoint?.enabled && endpoint.baseUrl) {
+    setEndpointEnv({
+      ANTHROPIC_BASE_URL: endpoint.baseUrl,
+      ANTHROPIC_AUTH_TOKEN: endpoint.authToken ?? ''
+    })
+    logger.info('Endpoint', `Custom Anthropic endpoint enabled: ${endpoint.baseUrl}`)
+  } else {
+    setEndpointEnv(null)
+  }
+}
+
+/**
+ * Apply model-override settings into the cli.js spawn env. Each field maps to
+ * an Anthropic env var (`ANTHROPIC_MODEL`, `ANTHROPIC_DEFAULT_{SONNET,OPUS,HAIKU}_MODEL`).
+ * Empty fields stay unset so cli.js's defaults apply to the unset families.
+ */
+export function applyModelEnv(model: ModelOverrideSettings | undefined): void {
+  const anyValue =
+    model?.enabled &&
+    (model.model || model.sonnetModel || model.opusModel || model.haikuModel)
+  if (anyValue) {
+    setModelEnv({
+      ANTHROPIC_MODEL: model.model ?? '',
+      ANTHROPIC_DEFAULT_SONNET_MODEL: model.sonnetModel ?? '',
+      ANTHROPIC_DEFAULT_OPUS_MODEL: model.opusModel ?? '',
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: model.haikuModel ?? ''
+    })
+    const parts: string[] = []
+    if (model.model) parts.push(`model=${model.model}`)
+    if (model.sonnetModel) parts.push(`sonnet=${model.sonnetModel}`)
+    if (model.opusModel) parts.push(`opus=${model.opusModel}`)
+    if (model.haikuModel) parts.push(`haiku=${model.haikuModel}`)
+    logger.info('Model', `Model override enabled: ${parts.join(', ')}`)
+  } else {
+    setModelEnv(null)
+  }
+}
+
 export async function applyProxyEnv(proxy: ProxySettings | undefined): Promise<void> {
   if (proxy?.enabled && proxy.hostname) {
     if (proxy.type === 'socks5') {
@@ -502,6 +547,8 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
       const settings = loadSettings() as Record<string, unknown>
       const sandboxConfig = (settings.sandbox as SandboxSettings) || undefined
       await applyProxyEnv((settings.proxy as ProxySettings) || undefined)
+      applyEndpointEnv((settings.anthropicEndpoint as AnthropicEndpointSettings) || undefined)
+      applyModelEnv((settings.modelOverride as ModelOverrideSettings) || undefined)
       manager.create(routingId, win, cwd, effort, resumeSessionId, permissionMode, model, sandboxConfig, thinkingMode)
       // Notify all extra windows (remote bridge) that a session was created
       for (const w of ClaudeSession.getExtraWindows()) {
@@ -749,6 +796,14 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     applyProxyEnv((settings as Record<string, unknown>).proxy as ProxySettings | undefined).catch(
       (err) => logger.error('Proxy', `Failed to apply proxy settings: ${err}`)
     )
+    // Apply custom Anthropic endpoint env vars immediately
+    applyEndpointEnv(
+      (settings as Record<string, unknown>).anthropicEndpoint as AnthropicEndpointSettings | undefined
+    )
+    // Apply model override env vars immediately
+    applyModelEnv(
+      (settings as Record<string, unknown>).modelOverride as ModelOverrideSettings | undefined
+    )
     // Propagate session idle timeout change
     const timeoutMins = (settings as Record<string, unknown>).sessionTimeoutMins
     if (typeof timeoutMins === 'number') {
@@ -838,82 +893,6 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
       updated = disabled.includes(serverName) ? disabled : [...disabled, serverName]
     }
     writeDisabledMcpServers(cwd, updated)
-  })
-
-  // Teammate inbox handlers
-  ipcMain.handle(
-    'session:send-to-teammate',
-    async (_e, _routingId: string, sanitizedTeamName: string, sanitizedAgentName: string, message: string) => {
-      const inboxDir = path.join(os.homedir(), '.claude', 'teams', sanitizedTeamName, 'inboxes')
-      await fs.promises.mkdir(inboxDir, { recursive: true })
-      const inboxPath = path.join(inboxDir, `${sanitizedAgentName}.json`)
-      let items: unknown[] = []
-      try {
-        const raw = await fs.promises.readFile(inboxPath, 'utf-8')
-        items = JSON.parse(raw)
-      } catch (err) { logger.warn('IPC', `Failed to read teammate inbox: ${inboxPath}`, err) }
-      items.push({ from: 'user', text: message, timestamp: new Date().toISOString(), read: false })
-      await fs.promises.writeFile(inboxPath, JSON.stringify(items, null, 2), { mode: 0o600 })
-    }
-  )
-
-  ipcMain.handle(
-    'session:broadcast-to-team',
-    async (_e, _routingId: string, sanitizedTeamName: string, sanitizedAgentNames: string[], message: string) => {
-      const inboxDir = path.join(os.homedir(), '.claude', 'teams', sanitizedTeamName, 'inboxes')
-      await fs.promises.mkdir(inboxDir, { recursive: true })
-      const entry = { from: 'user', text: message, timestamp: new Date().toISOString(), read: false }
-      for (const name of sanitizedAgentNames) {
-        const inboxPath = path.join(inboxDir, `${name}.json`)
-        let items: unknown[] = []
-        try {
-          const raw = await fs.promises.readFile(inboxPath, 'utf-8')
-          items = JSON.parse(raw)
-        } catch (err) { logger.warn('IPC', `Failed to read teammate inbox: ${inboxPath}`, err) }
-        items.push(entry)
-        await fs.promises.writeFile(inboxPath, JSON.stringify(items, null, 2), { mode: 0o600 })
-      }
-    }
-  )
-
-  // Team info query (pull-based)
-  ipcMain.handle('session:get-team-info', (_e, routingId: string) => {
-    return manager.getTeamInfo(routingId)
-  })
-
-  // Teams-view window
-  let teamsViewWindow: BrowserWindow | null = null
-  ipcMain.handle('session:open-teams-view', (_e, _routingId: string) => {
-    if (teamsViewWindow && !teamsViewWindow.isDestroyed()) {
-      teamsViewWindow.focus()
-      return
-    }
-    teamsViewWindow = new BrowserWindow({
-      width: 1200,
-      height: 800,
-      minWidth: 600,
-      minHeight: 400,
-      title: 'Agent Monitor',
-      autoHideMenuBar: true,
-      webPreferences: {
-        preload: path.join(__dirname, '../preload/index.js'),
-        sandbox: false
-      }
-    })
-    ClaudeSession.addExtraWindow(teamsViewWindow)
-    teamsViewWindow.on('closed', () => {
-      if (teamsViewWindow) ClaudeSession.removeExtraWindow(teamsViewWindow)
-      teamsViewWindow = null
-    })
-
-    // Load with ?view=teams-view&routingId=<id> query params
-    const { is } = require('@electron-toolkit/utils')
-    const searchParams = `view=teams-view&routingId=${encodeURIComponent(_routingId)}`
-    if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
-      teamsViewWindow.loadURL(process.env['ELECTRON_RENDERER_URL'] + '?' + searchParams)
-    } else {
-      teamsViewWindow.loadFile(path.join(__dirname, '../renderer/index.html'), { search: searchParams })
-    }
   })
 
   // -------------------------------------------------------------------------

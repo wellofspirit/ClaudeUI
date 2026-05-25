@@ -148,8 +148,6 @@ describe('subagent-watcher', () => {
       ctx.projectKey,
       initialPrompt,
       sendFn,
-      teammateName,
-      teamName,
     )
 
     // Initial read should have already been flushed (startWatching calls it
@@ -206,8 +204,6 @@ describe('subagent-watcher', () => {
       ctx.projectKey,
       prompt,
       sendFn,
-      teammateName,
-      teamName,
     )
 
     // Initial batch should include the two valid messages and drop the
@@ -240,8 +236,6 @@ describe('subagent-watcher', () => {
       ctx.projectKey,
       prompt,
       sendFn,
-      teammateName,
-      teamName,
     )
 
     // Wait for initial batch.
@@ -268,8 +262,8 @@ describe('subagent-watcher', () => {
 
     const sendA = vi.fn()
     const sendB = vi.fn()
-    watchSubagent('use-A', ctx.sessionId, ctx.projectKey, 'Task A description here', sendA, teamA.name, teamA.team)
-    watchSubagent('use-B', ctx.sessionId, ctx.projectKey, 'Task B description here', sendB, teamB.name, teamB.team)
+    watchSubagent('use-A', ctx.sessionId, ctx.projectKey, 'Task A description here', sendA)
+    watchSubagent('use-B', ctx.sessionId, ctx.projectKey, 'Task B description here', sendB)
 
     // Wait for both initial reads.
     await vi.waitFor(
@@ -318,8 +312,6 @@ describe('subagent-watcher', () => {
       ctx.projectKey,
       'A cleanup prompt',
       sendFn,
-      teammateName,
-      teamName,
     )
 
     await vi.waitFor(() => expect(sendFn).toHaveBeenCalled(), { timeout: 2000 })
@@ -342,8 +334,6 @@ describe('subagent-watcher', () => {
       ctx.projectKey,
       'A cleanup prompt',
       s2,
-      teammateName,
-      teamName,
     )
     await vi.waitFor(() => expect(s2).toHaveBeenCalled(), { timeout: 2000 })
     const beforeAll = s2.mock.calls.length

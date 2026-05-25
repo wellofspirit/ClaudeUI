@@ -65,10 +65,14 @@ export const MessageBubble = memo(function MessageBubble({
     const docBlocks = message.content.filter((b): b is Extract<ContentBlock, { type: 'document' }> => b.type === 'document')
     const textBlocks = message.content.filter((b): b is Extract<ContentBlock, { type: 'text' }> => b.type === 'text')
     const hasAttachments = imageBlocks.length > 0 || docBlocks.length > 0
+    const userMarkdown = textBlocks.map((b) => b.text).join('\n\n')
 
     return (
       <div className="flex justify-end animate-fade-in">
-        <div className="max-w-[85%] bg-bg-tertiary rounded-2xl px-4 py-2.5 text-[13px] text-text-primary leading-[1.6]">
+        <div
+          className="max-w-[85%] bg-bg-tertiary rounded-2xl px-4 py-2.5 text-[13px] text-text-primary leading-[1.6]"
+          data-markdown-source={userMarkdown || undefined}
+        >
           {hasAttachments && (
             <div className="flex gap-2 flex-wrap mb-2">
               {imageBlocks.map((block, i) => (
@@ -250,7 +254,10 @@ export const MessageBubble = memo(function MessageBubble({
 const ContentBlockView = memo(function ContentBlockView({ block }: { block: ContentBlock }): React.JSX.Element | null {
   if (block.type === 'text' && block.text) {
     return (
-      <div className="text-[13px] text-text-primary leading-[1.6]">
+      <div
+        className="text-[13px] text-text-primary leading-[1.6]"
+        data-markdown-source={block.text}
+      >
         <MarkdownRenderer content={block.text} />
       </div>
     )

@@ -132,13 +132,6 @@ function wireEventHandlers(): void {
     }
   )
 
-  onEvent<(routingId: string, data: { teamName: string }) => void>('session:team-created')((routingId, data) => {
-    store().setTeamName(routingId, data.teamName)
-  })
-
-  onEvent<(routingId: string) => void>('session:team-deleted')((routingId) => {
-    store().clearTeam(routingId)
-  })
 }
 
 // ---------------------------------------------------------------------------
@@ -443,27 +436,6 @@ describe('useClaudeEvents component tests', () => {
       bridge.webContents.send('session:permission-mode', routingId, 'auto')
 
       expect(useSessionStore.getState().sessions[routingId].permissionMode).toBe('auto')
-    })
-  })
-
-  describe('team events', () => {
-    it('sets team name on team-created event', () => {
-      const routingId = 'route-1'
-      useSessionStore.getState().createNewSession(routingId, '/test')
-
-      bridge.webContents.send('session:team-created', routingId, { teamName: 'my-team' })
-
-      expect(useSessionStore.getState().sessions[routingId].teamName).toBe('my-team')
-    })
-
-    it('clears team on team-deleted event', () => {
-      const routingId = 'route-1'
-      useSessionStore.getState().createNewSession(routingId, '/test')
-      useSessionStore.getState().setTeamName(routingId, 'my-team')
-
-      bridge.webContents.send('session:team-deleted', routingId, {})
-
-      expect(useSessionStore.getState().sessions[routingId].teamName).toBeNull()
     })
   })
 

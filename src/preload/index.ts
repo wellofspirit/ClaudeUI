@@ -76,9 +76,6 @@ const api: ClaudeAPI = {
   onBackgroundOutput: onEvent('session:background-output'),
   onSandboxViolation: onEvent('session:sandbox-violation'),
   onSteerConsumed: onEvent('session:steer-consumed'),
-  onTeammateDetected: onEvent('session:teammate-detected'),
-  onTeamCreated: onEvent('session:team-created'),
-  onTeamDeleted: onEvent('session:team-deleted'),
   onSkills: onEvent('session:skills'),
   onStatusLine: onEvent('session:status-line'),
   onMcpServers: onEvent('session:mcp-servers'),
@@ -138,14 +135,6 @@ const api: ClaudeAPI = {
     ipcRenderer.invoke('session:watch-session', routingId, sessionId, projectKey),
   unwatchSession: (routingId: string) =>
     ipcRenderer.invoke('session:unwatch-session', routingId),
-  sendToTeammate: (routingId: string, sanitizedTeamName: string, sanitizedAgentName: string, message: string) =>
-    ipcRenderer.invoke('session:send-to-teammate', routingId, sanitizedTeamName, sanitizedAgentName, message),
-  broadcastToTeam: (routingId: string, sanitizedTeamName: string, sanitizedAgentNames: string[], message: string) =>
-    ipcRenderer.invoke('session:broadcast-to-team', routingId, sanitizedTeamName, sanitizedAgentNames, message),
-  getTeamInfo: (routingId: string) =>
-    ipcRenderer.invoke('session:get-team-info', routingId),
-  openTeamsViewWindow: (routingId: string) =>
-    ipcRenderer.invoke('session:open-teams-view', routingId),
   // Terminal (PTY) operations
   createTerminal: (cwd: string) => ipcRenderer.invoke('terminal:create', cwd),
   writeTerminal: (id: string, data: string) => ipcRenderer.invoke('terminal:write', id, data),
@@ -300,3 +289,23 @@ if (process.contextIsolated) {
   // @ts-expect-error global augmentation
   window.api = api
 }
+
+// Prime the main process with the markdown source of whatever was right-
+// clicked (if any) before Electron emits its `context-menu` event.
+// Synchronous IPC guarantees the value is in place by the time the native
+// menu is built. Capture phase ensures we run before any in-renderer
+// listener that might preventDefault.
+window.addEventListener(
+  'contextmenu',
+  (event) => {
+    const target = event.target as Element | null
+    const el = target?.closest?.('[data-markdown-source]') as HTMLElement | null
+    const source = el?.dataset.markdownSource ?? null
+    try {
+      ipcRenderer.sendSync('context-menu:set-markdown', source)
+    } catch {
+      // Main may not have registered yet (very early in startup) — ignore.
+    }
+  },
+  { capture: true }
+)

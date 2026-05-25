@@ -1,10 +1,15 @@
 import { resolve } from 'path'
-import { defineConfig } from 'electron-vite'
+import { defineConfig, externalizeDepsPlugin } from 'electron-vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 
 export default defineConfig({
   main: {
+    // electron-context-menu v4 is ESM-only; Node's `require(esm)` returns a
+    // namespace object so the default-import call site fails. Inline-bundle
+    // it so rollup converts the ESM default export into a callable for our
+    // CJS main process output.
+    plugins: [externalizeDepsPlugin({ exclude: ['electron-context-menu'] })],
     build: {
       rollupOptions: {
         external: ['node-pty', 'ws']

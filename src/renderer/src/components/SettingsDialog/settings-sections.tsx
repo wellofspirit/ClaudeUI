@@ -1356,5 +1356,242 @@ export const SECTIONS: Section[] = [
         )
       }
     ]
+  },
+  {
+    id: 'apiEndpoint',
+    label: 'API Endpoint',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <path d="M4 17l6-6-6-6" />
+        <line x1="12" y1="19" x2="20" y2="19" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'anthropicEndpointEnabled',
+        label: 'Use custom Anthropic endpoint',
+        keywords: 'anthropic api base url endpoint custom gateway lmstudio openrouter relay',
+        render: (s, u) => (
+          <div>
+            <SettingsToggle
+              label="Use custom Anthropic endpoint"
+              checked={s.anthropicEndpoint.enabled}
+              onChange={(v) => u({ anthropicEndpoint: { ...s.anthropicEndpoint, enabled: v } })}
+              tooltip="Override the Anthropic API base URL for cli.js spawns. Useful for self-hosted gateways, LM Studio, or any Anthropic-compatible endpoint."
+            />
+            <div className="text-[10px] text-text-muted/50 mt-0.5 pl-3">
+              Sets ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN on the cli.js spawn env
+            </div>
+          </div>
+        )
+      },
+      {
+        key: 'anthropicBaseUrl',
+        label: 'Base URL',
+        keywords: 'anthropic api base url endpoint host',
+        render: (s, u) => (
+          <div className={s.anthropicEndpoint.enabled ? '' : 'opacity-40 pointer-events-none'}>
+            <div className="pl-4 px-3 py-1.5 text-[13px] text-text-secondary">
+              <div className="mb-1">Base URL</div>
+              <input
+                type="text"
+                value={s.anthropicEndpoint.baseUrl}
+                onChange={(e) => u({ anthropicEndpoint: { ...s.anthropicEndpoint, baseUrl: e.target.value } })}
+                className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors"
+                placeholder="e.g. http://localhost:1234"
+                spellCheck={false}
+                autoComplete="off"
+              />
+            </div>
+          </div>
+        )
+      },
+      {
+        key: 'anthropicAuthToken',
+        label: 'Auth token',
+        keywords: 'anthropic api token auth key bearer credential secret',
+        render: (s, u) => (
+          <div className={s.anthropicEndpoint.enabled ? '' : 'opacity-40 pointer-events-none'}>
+            <div className="pl-4 px-3 py-1.5 text-[13px] text-text-secondary">
+              <div className="mb-1">Auth token</div>
+              <input
+                type="password"
+                value={s.anthropicEndpoint.authToken}
+                onChange={(e) => u({ anthropicEndpoint: { ...s.anthropicEndpoint, authToken: e.target.value } })}
+                className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors"
+                placeholder="e.g. lmstudio"
+                spellCheck={false}
+                autoComplete="off"
+              />
+            </div>
+          </div>
+        )
+      },
+      {
+        key: 'anthropicEndpointFooter',
+        label: 'Endpoint info',
+        keywords: 'anthropic endpoint info env environment variable',
+        render: () => (
+          <div className="px-3 py-1.5 text-[11px] text-text-muted/60">
+            Overrides cli.js&apos;s API target. Changes apply to new sessions. Leave the auth token empty if your gateway doesn&apos;t require one.
+          </div>
+        )
+      }
+    ]
+  },
+  {
+    id: 'modelOverride',
+    label: 'Model',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <path d="M12 2L4 6v12l8 4 8-4V6z" />
+        <path d="M4 6l8 4 8-4" />
+        <line x1="12" y1="22" x2="12" y2="10" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'modelOverrideEnabled',
+        label: 'Override model',
+        keywords: 'model override anthropic_model alias sonnet opus haiku custom gateway',
+        render: (s, u) => (
+          <div>
+            <SettingsToggle
+              label="Override model"
+              checked={s.modelOverride.enabled}
+              onChange={(v) => u({ modelOverride: { ...s.modelOverride, enabled: v } })}
+              tooltip="Pin which model cli.js uses by setting ANTHROPIC_MODEL and the per-alias ANTHROPIC_DEFAULT_*_MODEL env vars on the spawn."
+            />
+            <div className="text-[10px] text-text-muted/50 mt-0.5 pl-3">
+              Useful when a custom endpoint expects different model identifiers
+            </div>
+          </div>
+        )
+      },
+      {
+        key: 'modelOverrideModel',
+        label: 'Model (ANTHROPIC_MODEL)',
+        keywords: 'anthropic_model alias sonnet opus haiku default best opusplan',
+        render: (s, u) => (
+          <div className={s.modelOverride.enabled ? '' : 'opacity-40 pointer-events-none'}>
+            <div className="pl-4 px-3 py-1.5 text-[13px] text-text-secondary">
+              <div className="mb-1">
+                <span>Initial model</span>
+                <span className="text-[10px] text-text-muted/50 ml-1.5">ANTHROPIC_MODEL</span>
+              </div>
+              <input
+                type="text"
+                value={s.modelOverride.model}
+                onChange={(e) => u({ modelOverride: { ...s.modelOverride, model: e.target.value } })}
+                className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors"
+                placeholder="alias (sonnet/opus/haiku/opusplan) or full model name"
+                spellCheck={false}
+                autoComplete="off"
+              />
+            </div>
+          </div>
+        )
+      },
+      {
+        key: 'modelOverrideSonnet',
+        label: 'Sonnet alias (ANTHROPIC_DEFAULT_SONNET_MODEL)',
+        keywords: 'anthropic_default_sonnet_model sonnet alias',
+        render: (s, u) => (
+          <div className={s.modelOverride.enabled ? '' : 'opacity-40 pointer-events-none'}>
+            <div className="pl-4 px-3 py-1.5 text-[13px] text-text-secondary">
+              <div className="mb-1">
+                <span>Sonnet → resolves to</span>
+                <span className="text-[10px] text-text-muted/50 ml-1.5">ANTHROPIC_DEFAULT_SONNET_MODEL</span>
+              </div>
+              <input
+                type="text"
+                value={s.modelOverride.sonnetModel}
+                onChange={(e) => u({ modelOverride: { ...s.modelOverride, sonnetModel: e.target.value } })}
+                className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors"
+                placeholder="e.g. claude-sonnet-4-6 or my-gateway/sonnet"
+                spellCheck={false}
+                autoComplete="off"
+              />
+            </div>
+          </div>
+        )
+      },
+      {
+        key: 'modelOverrideOpus',
+        label: 'Opus alias (ANTHROPIC_DEFAULT_OPUS_MODEL)',
+        keywords: 'anthropic_default_opus_model opus alias',
+        render: (s, u) => (
+          <div className={s.modelOverride.enabled ? '' : 'opacity-40 pointer-events-none'}>
+            <div className="pl-4 px-3 py-1.5 text-[13px] text-text-secondary">
+              <div className="mb-1">
+                <span>Opus → resolves to</span>
+                <span className="text-[10px] text-text-muted/50 ml-1.5">ANTHROPIC_DEFAULT_OPUS_MODEL</span>
+              </div>
+              <input
+                type="text"
+                value={s.modelOverride.opusModel}
+                onChange={(e) => u({ modelOverride: { ...s.modelOverride, opusModel: e.target.value } })}
+                className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors"
+                placeholder="e.g. claude-opus-4-7 or my-gateway/opus"
+                spellCheck={false}
+                autoComplete="off"
+              />
+            </div>
+          </div>
+        )
+      },
+      {
+        key: 'modelOverrideHaiku',
+        label: 'Haiku alias (ANTHROPIC_DEFAULT_HAIKU_MODEL)',
+        keywords: 'anthropic_default_haiku_model haiku alias background small fast deprecated anthropic_small_fast_model',
+        render: (s, u) => (
+          <div className={s.modelOverride.enabled ? '' : 'opacity-40 pointer-events-none'}>
+            <div className="pl-4 px-3 py-1.5 text-[13px] text-text-secondary">
+              <div className="mb-1">
+                <span>Haiku → resolves to</span>
+                <span className="text-[10px] text-text-muted/50 ml-1.5">ANTHROPIC_DEFAULT_HAIKU_MODEL</span>
+              </div>
+              <input
+                type="text"
+                value={s.modelOverride.haikuModel}
+                onChange={(e) => u({ modelOverride: { ...s.modelOverride, haikuModel: e.target.value } })}
+                className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors"
+                placeholder="e.g. claude-haiku-4-5 or my-gateway/haiku"
+                spellCheck={false}
+                autoComplete="off"
+              />
+            </div>
+          </div>
+        )
+      },
+      {
+        key: 'modelOverrideFooter',
+        label: 'Model override info',
+        keywords: 'model override info env environment variable',
+        render: () => (
+          <div className="px-3 py-1.5 text-[11px] text-text-muted/60">
+            Each field maps to an Anthropic env var. Empty fields keep cli.js&apos;s defaults for that family. Changes apply to new sessions.
+          </div>
+        )
+      }
+    ]
   }
 ]

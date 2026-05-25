@@ -15,7 +15,6 @@ import type {
   DirectoryGroup,
   StatusLineData,
   SlashCommandInfo,
-  TeammateInfo,
   GitStatusData,
   GitBranchData,
   DiffComment,
@@ -27,6 +26,8 @@ import type {
   WorktreeInfo,
   SandboxSettings,
   ProxySettings,
+  AnthropicEndpointSettings,
+  ModelOverrideSettings,
   VoiceState,
   VoiceLanguageCode,
   ActiveView,
@@ -114,6 +115,7 @@ export interface AppSettings {
   expandReadResults: boolean
   hideToolInput: boolean
   expandThinking: boolean
+  searchCaseSensitive: boolean
   diffViewSplit: boolean
   diffIgnoreWhitespace: boolean
   diffWrapLines: boolean
@@ -135,6 +137,8 @@ export interface AppSettings {
   voiceLanguage: VoiceLanguageCode
   sandbox: SandboxSettings
   proxy: ProxySettings
+  anthropicEndpoint: AnthropicEndpointSettings
+  modelOverride: ModelOverrideSettings
   mermaidTheme: 'auto' | 'dark' | 'default' | 'neutral' | 'forest' // mermaid diagram theme
   logLevel: 'debug' | 'info' | 'warn' | 'error' // global log level
   logFilter: string // per-source overrides: "UsageFetcher:debug,BlockUsage:debug"
@@ -148,6 +152,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   expandReadResults: false,
   hideToolInput: false,
   expandThinking: false,
+  searchCaseSensitive: false,
   diffViewSplit: false,
   diffIgnoreWhitespace: false,
   diffWrapLines: false,
@@ -190,6 +195,18 @@ const DEFAULT_SETTINGS: AppSettings = {
     username: '',
     password: '',
     proxySubprocesses: false
+  },
+  anthropicEndpoint: {
+    enabled: false,
+    baseUrl: '',
+    authToken: ''
+  },
+  modelOverride: {
+    enabled: false,
+    model: '',
+    sonnetModel: '',
+    opusModel: '',
+    haikuModel: ''
   },
   mermaidTheme: 'auto',
   logLevel: 'warn',
@@ -300,6 +317,14 @@ export async function hydrateConfigFromDisk(): Promise<void> {
         proxy: {
           ...DEFAULT_SETTINGS.proxy,
           ...saved.proxy
+        },
+        anthropicEndpoint: {
+          ...DEFAULT_SETTINGS.anthropicEndpoint,
+          ...saved.anthropicEndpoint
+        },
+        modelOverride: {
+          ...DEFAULT_SETTINGS.modelOverride,
+          ...saved.modelOverride
         }
       }
     : DEFAULT_SETTINGS
@@ -386,9 +411,6 @@ export interface PerSessionState {
   queuedText: string
   draftText: string
   selectedModel: string
-  teamName: string | null
-  teammates: Record<string, TeammateInfo>  // keyed by toolUseId
-  focusedAgentId: string | null            // null = main agent
   // Worktree state
   worktreeInfo: WorktreeInfo | null
   // Git state
@@ -452,9 +474,6 @@ const EMPTY_SESSION_STATE: PerSessionState = {
   queuedText: '',
   draftText: '',
   selectedModel: 'default',
-  teamName: null,
-  teammates: {},
-  focusedAgentId: null,
   worktreeInfo: null,
   isGitRepo: false,
   gitStatus: null,
@@ -516,8 +535,9 @@ function updateSession(
 
 /**
  * Ensure a session exists for this routingId, creating an empty one if needed.
- * Used by team-related actions so the teams-view window (separate renderer with
- * its own empty store) can bootstrap from incoming IPC events.
+ * Lets actions on routingIds that haven't been created yet (e.g. cross-window
+ * IPC arriving before this renderer's createNewSession) bootstrap from incoming
+ * events instead of dropping them on the floor.
  */
 function ensureSession(
   sessions: Record<string, PerSessionState>,
@@ -649,12 +669,6 @@ interface SessionState {
   setAvailableModels: (models: ModelInfo[]) => void
   rekeySession: (oldId: string, newId: string) => void
   clearConversation: (routingId: string) => void
-  setTeamName: (routingId: string, teamName: string) => void
-  clearTeam: (routingId: string) => void
-  addTeammate: (routingId: string, info: TeammateInfo) => void
-  updateTeammateStatus: (routingId: string, toolUseId: string, status: TeammateInfo['status']) => void
-  setFocusedAgent: (routingId: string, toolUseId: string | null) => void
-  addTeammateUserMessage: (routingId: string, toolUseId: string, id: string, text: string) => void
   // Worktree actions
   setWorktreeInfo: (routingId: string, info: WorktreeInfo | null) => void
   clearWorktreeInfo: (routingId: string) => void
@@ -1069,11 +1083,66 @@ export const useSessionStore = create<SessionState>((set) => ({
 
   setStatus: (routingId, status) =>
     set((state) => ({
-      sessions: updateSession(state.sessions, routingId, (s) => ({
-        status,
-        // Update top-level cwd when SDK reports a new working directory (e.g. worktree enter/exit)
-        ...(status.cwd && status.cwd !== s.cwd ? { cwd: status.cwd } : {})
-      }))
+      sessions: updateSession(state.sessions, routingId, (s) => {
+        const updates: Partial<PerSessionState> = {
+          status,
+          // Update top-level cwd when SDK reports a new working directory (e.g. worktree enter/exit)
+          ...(status.cwd && status.cwd !== s.cwd ? { cwd: status.cwd } : {})
+        }
+
+        // When the turn ends (interrupt, error, natural completion), seal any
+        // in-flight thinking state. Natural completions usually finalize via
+        // appendStreamingText / addMessage before this point — this is the
+        // safety net for paths (interrupt, abrupt termination) that never send
+        // a closing message.
+        if (status.state === 'idle') {
+          if (s.thinkingStartedAt) {
+            updates.streamingThinking = ''
+            updates.thinkingDurationMs = Date.now() - s.thinkingStartedAt
+            updates.thinkingStartedAt = null
+          }
+
+          // Foreground subagent buffers: if a Task tool is foreground (not
+          // run_in_background) and still has a streaming buffer, the parent
+          // going idle means the subagent is done (interrupted or finished).
+          // Background tasks keep streaming after the parent idles, so leave
+          // them alone.
+          const subThinking = s.subagentStreamingThinking
+          const subText = s.subagentStreamingText
+          const toolUseIds = new Set([...Object.keys(subThinking), ...Object.keys(subText)])
+          if (toolUseIds.size > 0) {
+            const bgToolUseIds = new Set<string>()
+            for (const msg of s.messages) {
+              for (const block of msg.content) {
+                if (
+                  block.type === 'tool_use' &&
+                  toolUseIds.has(block.toolUseId) &&
+                  block.toolInput?.run_in_background
+                ) {
+                  bgToolUseIds.add(block.toolUseId)
+                }
+              }
+            }
+            let nextThinking = subThinking
+            let nextText = subText
+            for (const toolUseId of toolUseIds) {
+              if (bgToolUseIds.has(toolUseId)) continue
+              if (subThinking[toolUseId]) {
+                if (nextThinking === subThinking) nextThinking = { ...subThinking }
+                nextThinking[toolUseId] = ''
+              }
+              if (subText[toolUseId]) {
+                if (nextText === subText) nextText = { ...subText }
+                nextText[toolUseId] = ''
+              }
+            }
+            if (nextThinking !== subThinking) updates.subagentStreamingThinking = nextThinking
+            if (nextText !== subText) updates.subagentStreamingText = nextText
+          }
+        }
+
+        return updates
+      })
     })),
 
   addPendingApproval: (routingId, approval) =>
@@ -1508,10 +1577,7 @@ export const useSessionStore = create<SessionState>((set) => ({
           permissionMode: snap.permissionMode as PermissionMode,
           effort: (snap.effort ?? null) as 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null,
           thinkingMode: (snap.thinkingMode ?? null) as 'adaptive' | 'enabled' | 'disabled' | null,
-          statusLine: snap.statusLine,
-          teamName: snap.teamName,
-          teammates: snap.teammates,
-          focusedAgentId: snap.focusedAgentId
+          statusLine: snap.statusLine
         }
       }
 
@@ -1682,80 +1748,6 @@ export const useSessionStore = create<SessionState>((set) => ({
       }
     }),
 
-  setTeamName: (routingId, teamName) =>
-    set((state) => {
-      const sessions = ensureSession(state.sessions, routingId)
-      return { sessions: updateSession(sessions, routingId, () => ({ teamName })) }
-    }),
-
-  clearTeam: (routingId) =>
-    set((state) => {
-      const sessions = ensureSession(state.sessions, routingId)
-      return {
-        sessions: updateSession(sessions, routingId, () => ({
-          teamName: null,
-          teammates: {},
-          focusedAgentId: null
-        }))
-      }
-    }),
-
-  addTeammate: (routingId, info) =>
-    set((state) => {
-      const sessions = ensureSession(state.sessions, routingId)
-      return {
-        sessions: updateSession(sessions, routingId, (s) => ({
-          teammates: { ...s.teammates, [info.toolUseId]: info }
-        }))
-      }
-    }),
-
-  updateTeammateStatus: (routingId, toolUseId, status) =>
-    set((state) => {
-      const session = state.sessions[routingId]
-      if (!session) return state
-      const teammate = session.teammates[toolUseId]
-      if (!teammate) return state
-      return {
-        sessions: {
-          ...state.sessions,
-          [routingId]: {
-            ...session,
-            teammates: {
-              ...session.teammates,
-              [toolUseId]: { ...teammate, status }
-            }
-          }
-        }
-      }
-    }),
-
-  setFocusedAgent: (routingId, toolUseId) =>
-    set((state) => ({
-      sessions: updateSession(state.sessions, routingId, () => ({ focusedAgentId: toolUseId }))
-    })),
-
-  addTeammateUserMessage: (routingId, toolUseId, id, text) =>
-    set((state) => {
-      const session = state.sessions[routingId]
-      if (!session) return state
-      const existing = session.subagentMessages[toolUseId] || []
-      const userMsg: ChatMessage = {
-        id,
-        role: 'user',
-        content: [{ type: 'text', text }],
-        timestamp: Date.now()
-      }
-      return {
-        sessions: {
-          ...state.sessions,
-          [routingId]: {
-            ...session,
-            subagentMessages: { ...session.subagentMessages, [toolUseId]: [...existing, userMsg] }
-          }
-        }
-      }
-    }),
 
   // Worktree actions
   setWorktreeInfo: (routingId, info) =>
@@ -2151,8 +2143,7 @@ export interface FocusedAgentData {
 const EMPTY_MESSAGES: ChatMessage[] = []
 
 /**
- * Returns the messages/streaming for whichever agent tab is focused.
- * When focusedAgentId is null → main agent. Otherwise → subagent messages.
+ * Returns the messages/streaming for the active session's main agent.
  * Uses useShallow for shallow equality to avoid infinite re-render loops.
  */
 export function useFocusedAgentData(): FocusedAgentData {
@@ -2162,22 +2153,12 @@ export function useFocusedAgentData(): FocusedAgentData {
       return { isMain: true, messages: EMPTY_MESSAGES, streamingText: '', streamingThinking: '', thinkingStartedAt: null }
     }
     const session = state.sessions[id]
-    const focused = session.focusedAgentId
-    if (!focused) {
-      return {
-        isMain: true,
-        messages: session.messages,
-        streamingText: session.streamingText,
-        streamingThinking: session.streamingThinking,
-        thinkingStartedAt: session.thinkingStartedAt
-      }
-    }
     return {
-      isMain: false,
-      messages: session.subagentMessages[focused] || EMPTY_MESSAGES,
-      streamingText: session.subagentStreamingText[focused] || '',
-      streamingThinking: session.subagentStreamingThinking[focused] || '',
-      thinkingStartedAt: null // subagent thinking tracked separately
+      isMain: true,
+      messages: session.messages,
+      streamingText: session.streamingText,
+      streamingThinking: session.streamingThinking,
+      thinkingStartedAt: session.thinkingStartedAt
     }
   }))
 }
@@ -2209,9 +2190,6 @@ export function getRemoteStateSnapshot(): {
     effort: string
     thinkingMode: string
     statusLine: StatusLineData | null
-    teamName: string | null
-    teammates: Record<string, TeammateInfo>
-    focusedAgentId: string | null
     slashCommands: SlashCommandInfo[]
     customCommands: SlashCommandInfo[]
     sdkSkillNames: string[]
@@ -2246,9 +2224,6 @@ export function getRemoteStateSnapshot(): {
       effort: s.effort,
       thinkingMode: s.thinkingMode,
       statusLine: s.statusLine,
-      teamName: s.teamName,
-      teammates: s.teammates,
-      focusedAgentId: s.focusedAgentId,
       slashCommands: state.slashCommands,
       customCommands: state.customCommands,
       sdkSkillNames: state.sdkSkillNames

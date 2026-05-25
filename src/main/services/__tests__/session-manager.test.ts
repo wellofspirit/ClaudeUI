@@ -23,7 +23,6 @@ class MockSession {
   setInactivityTimeout(ms: number): void { this.timeoutMs = ms }
   getSessionId(): string | null { return this.sessionId }
   getMessages(): Array<{ id: string }> { return this.messages }
-  getTeamInfo(): null { return null }
 }
 
 // Replicate SessionManager's core logic

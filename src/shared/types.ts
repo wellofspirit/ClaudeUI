@@ -128,6 +128,38 @@ export interface ProxySettings {
   proxySubprocesses?: boolean
 }
 
+/**
+ * Custom Anthropic API endpoint config. When `enabled`, `baseUrl` is exposed to
+ * cli.js spawns as `ANTHROPIC_BASE_URL` and `authToken` as `ANTHROPIC_AUTH_TOKEN`,
+ * letting users redirect traffic to a self-hosted gateway, LM Studio, or any
+ * Anthropic-compatible endpoint.
+ */
+export interface AnthropicEndpointSettings {
+  enabled: boolean
+  baseUrl: string
+  authToken: string
+}
+
+/**
+ * Model override config. When `enabled`, the user-supplied model names are
+ * exposed to cli.js spawns as the matching Anthropic env vars:
+ *   - `model`       → ANTHROPIC_MODEL              (primary model selection)
+ *   - `sonnetModel` → ANTHROPIC_DEFAULT_SONNET_MODEL
+ *   - `opusModel`   → ANTHROPIC_DEFAULT_OPUS_MODEL
+ *   - `haikuModel`  → ANTHROPIC_DEFAULT_HAIKU_MODEL
+ * Empty fields are skipped, so partial overrides leave cli.js's defaults
+ * intact for the unset families. Useful when pointing cli.js at a custom
+ * gateway whose model identifiers differ from Anthropic's canonical ones
+ * (e.g. LM Studio, OpenRouter).
+ */
+export interface ModelOverrideSettings {
+  enabled: boolean
+  model: string
+  sonnetModel: string
+  opusModel: string
+  haikuModel: string
+}
+
 export interface SandboxSettings {
   enabled: boolean
   autoAllowBashIfSandboxed: boolean
@@ -224,37 +256,6 @@ export interface SubagentMessageBatchData {
   messages: ChatMessage[]
 }
 
-export interface TeamInfoSnapshot {
-  routingId: string
-  teamName: string | null
-  teammates: TeammateInfo[]
-  /** Session ID for JSONL history loading */
-  sessionId: string | null
-  /** Project key for JSONL history loading */
-  projectKey: string | null
-}
-
-export interface TeammateInfo {
-  toolUseId: string
-  name: string
-  sanitizedName: string
-  teamName: string
-  sanitizedTeamName: string
-  agentId: string
-  /** Hex ID for subagent JSONL filename (may differ from agentId for team agents) */
-  fileId?: string
-  status: 'running' | 'completed' | 'failed' | 'stopped'
-}
-
-export interface TeammateDetectedData {
-  toolUseId: string
-  name: string
-  sanitizedName: string
-  teamName: string
-  sanitizedTeamName: string
-  agentId: string
-}
-
 export interface SubagentToolResultData {
   toolUseId: string
   toolResultToolUseId: string
@@ -333,7 +334,7 @@ interface SessionAPI {
   maximizeWindow(): Promise<void>
   closeWindow(): Promise<void>
   listDirectories(): Promise<DirectoryGroup[]>
-  loadSessionHistory(sessionId: string, projectKey: string): Promise<{ messages: ChatMessage[]; taskNotifications: TaskNotification[]; customTitle: string | null; agentIdToToolUseId: Record<string, string>; statusLine: StatusLineData | null; teamName: string | null; pendingTeammates: Record<string, { name: string; teamName: string }>; taskPrompts: Record<string, string> }>
+  loadSessionHistory(sessionId: string, projectKey: string): Promise<{ messages: ChatMessage[]; taskNotifications: TaskNotification[]; customTitle: string | null; agentIdToToolUseId: Record<string, string>; statusLine: StatusLineData | null; taskPrompts: Record<string, string> }>
   loadSubagentHistory(sessionId: string, projectKey: string, agentId: string): Promise<ChatMessage[]>
   buildSubagentFileMap(sessionId: string, projectKey: string, taskPrompts: Record<string, string>): Promise<Record<string, string>>
   loadBackgroundOutput(projectKey: string, taskId: string, outputFile?: string): Promise<{ content: string | null; purged: boolean }>
@@ -379,13 +380,6 @@ interface SessionAPI {
   unwatchSession(routingId: string): Promise<void>
   onWatchUpdate(cb: (data: WatchUpdate) => void): () => void
   onDirectoriesChanged(cb: () => void): () => void
-  sendToTeammate(routingId: string, sanitizedTeamName: string, sanitizedAgentName: string, message: string): Promise<void>
-  broadcastToTeam(routingId: string, sanitizedTeamName: string, sanitizedAgentNames: string[], message: string): Promise<void>
-  getTeamInfo(routingId: string): Promise<TeamInfoSnapshot | null>
-  openTeamsViewWindow(routingId: string): Promise<void>
-  onTeammateDetected(cb: (routingId: string, data: TeammateDetectedData) => void): () => void
-  onTeamCreated(cb: (routingId: string, data: { teamName: string }) => void): () => void
-  onTeamDeleted(cb: (routingId: string, data: Record<string, never>) => void): () => void
   onSlashCommands(cb: (routingId: string, commands: SlashCommandInfo[]) => void): () => void
   onSkills(cb: (routingId: string, names: string[]) => void): () => void
   onStatusLine(cb: (routingId: string, data: StatusLineData) => void): () => void

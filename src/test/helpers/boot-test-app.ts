@@ -90,9 +90,6 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     onBackgroundOutput: onEvent('session:background-output'),
     onSandboxViolation: onEvent('session:sandbox-violation'),
     onSteerConsumed: onEvent('session:steer-consumed'),
-    onTeammateDetected: onEvent('session:teammate-detected'),
-    onTeamCreated: onEvent('session:team-created'),
-    onTeamDeleted: onEvent('session:team-deleted'),
     onSkills: onEvent('session:skills'),
     onStatusLine: onEvent('session:status-line'),
     onMcpServers: onEvent('session:mcp-servers'),
@@ -152,12 +149,6 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
       ipcRenderer.invoke('session:watch-session', routingId, sessionId, projectKey),
     unwatchSession: (routingId) =>
       ipcRenderer.invoke('session:unwatch-session', routingId),
-    sendToTeammate: (routingId, sanitizedTeamName, sanitizedAgentName, message) =>
-      ipcRenderer.invoke('session:send-to-teammate', routingId, sanitizedTeamName, sanitizedAgentName, message),
-    broadcastToTeam: (routingId, sanitizedTeamName, sanitizedAgentNames, message) =>
-      ipcRenderer.invoke('session:broadcast-to-team', routingId, sanitizedTeamName, sanitizedAgentNames, message),
-    getTeamInfo: (routingId) => ipcRenderer.invoke('session:get-team-info', routingId),
-    openTeamsViewWindow: (routingId) => ipcRenderer.invoke('session:open-teams-view', routingId),
 
     // Terminal
     createTerminal: (cwd) => ipcRenderer.invoke('terminal:create', cwd),
@@ -279,6 +270,12 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     getPluginViews: () => ipcRenderer.invoke('plugin:views'),
     getPluginPreloadPath: () => ipcRenderer.invoke('plugin:preload-path') as Promise<string>,
     onPluginViewsChanged: onEvent('plugin:views-changed'),
+
+    // Mockup preview
+    readMockupHtml: (cwd, directory) => unwrap('mockup:read-html', cwd, directory),
+    watchMockup: (cwd, directory) => ipcRenderer.invoke('mockup:watch', cwd, directory),
+    unwatchMockup: (cwd, directory) => ipcRenderer.invoke('mockup:unwatch', cwd, directory),
+    onMockupFileChanged: onEvent('mockup:file-changed'),
   } as ClaudeAPI
 }
 

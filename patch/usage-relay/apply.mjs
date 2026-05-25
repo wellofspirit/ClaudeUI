@@ -109,12 +109,16 @@ if (src.includes(PATCH_MARKER)) {
     console.error('ERROR: Cannot find success response helper pattern')
     process.exit(1)
   }
-  if (successMatches.length > 1) {
-    console.error(`ERROR: Success response helper pattern matched ${successMatches.length} times (expected 1)`)
+  // Multiple match sites are fine as long as they all reference the same helper.
+  // v2.1.143 added a stop_task handler that also uses `P8(JH,{})}catch`, so the
+  // shape is no longer globally unique — but every site calls the same function.
+  const successNames = new Set(successMatches.map((m) => m[1]))
+  if (successNames.size > 1) {
+    console.error(`ERROR: Success response helper pattern resolved to multiple names: ${[...successNames].join(', ')}`)
     process.exit(1)
   }
   const successFn = successMatches[0][1]
-  console.log(`  Success response helper: ${successFn}`)
+  console.log(`  Success response helper: ${successFn} (${successMatches.length} call sites)`)
 
   // ---------------------------------------------------------------------------
   // Find the usage fetcher function by its unique string: /api/oauth/usage
@@ -144,26 +148,41 @@ if (src.includes(PATCH_MARKER)) {
   }
   console.log(`  Usage fetcher function: ${usageFetcherFn}`)
 
-  // Verify uniqueness of the string
-  const usageUrlCount = [...src.matchAll(/api\/oauth\/usage/g)].length
-  if (usageUrlCount !== 1) {
-    console.error(`ERROR: "api/oauth/usage" found ${usageUrlCount} times (expected 1). Aborting.`)
+  // Verify that all `api/oauth/usage` occurrences are inside the same function
+  // body. v2.1.143 added a debug log line (`GET /api/oauth/usage (attempt N)`)
+  // alongside the existing `k4.get("/api/oauth/usage", ...)` call — both inside
+  // the same fetcher function. As long as they cluster within a small window,
+  // we're confident the lookback correctly identified the enclosing function.
+  const usageUrlPositions = [...src.matchAll(/api\/oauth\/usage/g)].map((m) => m.index)
+  const usageUrlSpan = usageUrlPositions[usageUrlPositions.length - 1] - usageUrlPositions[0]
+  if (usageUrlPositions.length === 0 || usageUrlSpan > 500) {
+    console.error(`ERROR: "api/oauth/usage" occurrences (${usageUrlPositions.length}) span ${usageUrlSpan} chars — not co-located. Aborting.`)
     process.exit(1)
   }
-  console.log(`  Verified: "api/oauth/usage" appears exactly once`)
+  console.log(`  Verified: "api/oauth/usage" appears ${usageUrlPositions.length}× within ${usageUrlSpan} chars (same function)`)
 
   // ---------------------------------------------------------------------------
   // Inject the get_usage handler before the "Unsupported" fallback
   // ---------------------------------------------------------------------------
   console.log('\n--- Injecting get_usage handler ---')
 
+  // Auth-state errors (essential-traffic-only / no-auth / data-residency) are
+  // not real failures — they just mean usage data is not available for this
+  // account. Return an empty object so consumers can branch on `Object.keys()`
+  // without try/catch. Real fetcher failures (network, malformed) still bubble
+  // up via the error path so callers see them.
   const injection = PATCH_MARKER +
     `else if(${msgVar}.request.subtype==="get_usage"){` +
       `try{` +
         `let Z6=await ${usageFetcherFn}();` +
         `${successFn}(${msgVar},Z6??{})` +
       `}catch(S6){` +
-        `${errorFn}(${msgVar},S6 instanceof Error?S6.message:String(S6))` +
+        `let X6=S6 instanceof Error?S6.message:String(S6);` +
+        `if(typeof X6==="string"&&X6.indexOf("Auth error:")===0){` +
+          `${successFn}(${msgVar},{})` +
+        `}else{` +
+          `${errorFn}(${msgVar},X6)` +
+        `}` +
       `}` +
     `}`
 

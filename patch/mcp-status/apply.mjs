@@ -95,6 +95,24 @@ if (!skipA) {
   )
   const newElseMatch = newElseRe.exec(src)
 
+  // Try v2.1.144 pattern:
+  //   if(xH(process.env.CLAUDE_CODE_SYNC_PLUGIN_INSTALL))
+  //     BH=j.outputFormat==="stream-json"?(pH)=>void H.write({...big-callback-obj...}):void 0,
+  //     BH?.({status:"started"}),
+  //     TH=A8((pH)=>BH?.(pH));
+  //   else mH=Mq4(A8);
+  // The trailing `let` no longer leads with the fire-forget assignment so the
+  // v0.2.112 anchor doesn't fire. Anchor on the SYNC_PLUGIN_INSTALL check, but
+  // the branch body now spans ~500 chars (complex JSON write callback). Use
+  // multiline-dotall to skip over commas without committing to char counts.
+  // We capture the LAST `(VAR)=(VAR)(...);` before the matching `else`.
+  const v144AnchorRe = new RegExp(
+    `process\\.env\\.CLAUDE_CODE_SYNC_PLUGIN_INSTALL\\)\\)[\\s\\S]*?` +
+    `(${V})=(${V})\\([^;]+\\);` +
+    `else (${V})=(${V})\\(\\2\\);`
+  )
+  const v144Match = v144AnchorRe.exec(src)
+
   if (oldMatch) {
     // Verify uniqueness
     const allMatches = [...src.matchAll(new RegExp(oldAnchorRe, 'g'))]
@@ -116,6 +134,35 @@ if (!skipA) {
 
     src = src.replace(oldCode, newCode)
     console.log(`Replaced fire-and-forget with always-stored promise`)
+  } else if (v144Match) {
+    const promiseVar = v144Match[1]    // TH
+    const refreshFn = v144Match[2]     // A8
+    const fireForgetVar = v144Match[3] // mH
+    const wrapperFn = v144Match[4]     // Mq4
+
+    console.log(`Found v144 pattern at char ${v144Match.index}`)
+    console.log(`  Promise variable: ${promiseVar}`)
+    console.log(`  Fire-forget variable: ${fireForgetVar}`)
+    console.log(`  Refresh function: ${refreshFn}`)
+    console.log(`  Wrapper function: ${wrapperFn}`)
+
+    const oldElse = `else ${fireForgetVar}=${wrapperFn}(${refreshFn});`
+    // Set promiseVar in the else branch too (refresh fn is called once; the
+    // serializer dedupes concurrent calls).
+    const newElse = PATCH_A_MARKER + `else{${promiseVar}=${refreshFn}();${fireForgetVar}=${wrapperFn}(${refreshFn});}`
+
+    const elseIdx = src.indexOf(oldElse)
+    if (elseIdx === -1) {
+      console.error(`ERROR: Cannot find else branch to patch — looking for "${oldElse}".`)
+      process.exit(1)
+    }
+    if (src.indexOf(oldElse, elseIdx + 1) !== -1) {
+      console.error(`ERROR: else branch "${oldElse}" matched multiple times. Aborting.`)
+      process.exit(1)
+    }
+
+    src = src.slice(0, elseIdx) + newElse + src.slice(elseIdx + oldElse.length)
+    console.log(`Patched else branch: added ${promiseVar}=${refreshFn}() before wrapper`)
   } else if (newElseMatch) {
     const fireForgetVar = newElseMatch[1]  // f6
     const wrapperFn = newElseMatch[2]      // $X5

@@ -3,7 +3,6 @@ import * as path from 'path'
 import * as os from 'os'
 import * as readline from 'readline'
 import type { ChatMessage, ContentBlock, DirectoryGroup, SessionInfo, TaskNotification, StatusLineData } from '../../shared/types'
-import { isAgentTool } from '../../shared/types'
 import { logger } from './logger'
 import { getContextWindowSize } from '../ipc/session.ipc'
 
@@ -414,12 +413,6 @@ export interface SessionHistoryResult {
   statusLine: StatusLineData | null
   /** Maps agentId → toolUseId for subagent JSONL lookup */
   agentIdToToolUseId: Record<string, string>
-  /** Team name extracted from TeamCreate tool calls (null if not a team session) */
-  teamName: string | null
-  /** Pending teammate detection data: toolUseId → { name, teamName } from Task tool_use blocks */
-  pendingTeammates: Record<string, { name: string; teamName: string }>
-  /** Task tool prompt texts: toolUseId → prompt (for matching subagent JSONL files) */
-  taskPrompts: Record<string, string>
 }
 
 /**
@@ -508,17 +501,13 @@ export async function loadSessionHistory(
     let customTitle: string | null = null
     // Map agentId (from task-notification <task-id>) → toolUseId (from Task tool_use)
     const agentIdToToolUseId: Record<string, string> = {}
-    // Team info extracted from tool_use blocks
-    let teamName: string | null = null
-    const pendingTeammates: Record<string, { name: string; teamName: string }> = {}
-    const taskPrompts: Record<string, string> = {}
 
     let stream: fs.ReadStream
     try {
       stream = fs.createReadStream(filePath, { encoding: 'utf-8' })
     } catch (err) {
       logger.warn('SessionHistory', 'Failed to open session history file', err)
-      resolve({ messages: [], taskNotifications: [], customTitle: null, agentIdToToolUseId: {}, statusLine: null, teamName: null, pendingTeammates: {}, taskPrompts: {} })
+      resolve({ messages: [], taskNotifications: [], customTitle: null, agentIdToToolUseId: {}, statusLine: null })
       return
     }
 
@@ -738,36 +727,6 @@ export async function loadSessionHistory(
             }
           )
 
-          // Detect team-related tool_use blocks
-          for (const block of blocks) {
-            if (block.type !== 'tool_use' || !block.toolUseId) continue
-            if (block.toolName === 'TeamCreate' && block.toolInput?.team_name) {
-              const newTeam = String(block.toolInput.team_name)
-              // Clear stale teammates from any previous team in this session
-              if (newTeam !== teamName) {
-                for (const key of Object.keys(pendingTeammates)) delete pendingTeammates[key]
-                for (const key of Object.keys(taskPrompts)) delete taskPrompts[key]
-                for (const key of Object.keys(agentIdToToolUseId)) delete agentIdToToolUseId[key]
-              }
-              teamName = newTeam
-            }
-            if (block.toolName === 'TeamDelete' && teamName) {
-              teamName = null
-              for (const key of Object.keys(pendingTeammates)) delete pendingTeammates[key]
-              for (const key of Object.keys(taskPrompts)) delete taskPrompts[key]
-              for (const key of Object.keys(agentIdToToolUseId)) delete agentIdToToolUseId[key]
-            }
-            if (isAgentTool(block.toolName) && block.toolInput?.name && block.toolInput?.team_name) {
-              pendingTeammates[block.toolUseId] = {
-                name: String(block.toolInput.name),
-                teamName: String(block.toolInput.team_name)
-              }
-              if (block.toolInput.prompt) {
-                taskPrompts[block.toolUseId] = String(block.toolInput.prompt)
-              }
-            }
-          }
-
           const messageId =
             (betaMessage.id as string) || (obj.uuid as string) || `assistant-${messages.length}`
 
@@ -830,9 +789,9 @@ export async function loadSessionHistory(
 
     rl.on('close', async () => {
       const statusLine = await computeTokenMetrics(filePath)
-      resolve({ messages, taskNotifications, customTitle, agentIdToToolUseId, statusLine, teamName, pendingTeammates, taskPrompts })
+      resolve({ messages, taskNotifications, customTitle, agentIdToToolUseId, statusLine })
     })
-    rl.on('error', () => resolve({ messages: [], taskNotifications: [], customTitle: null, agentIdToToolUseId: {}, statusLine: null, teamName: null, pendingTeammates: {}, taskPrompts: {} }))
+    rl.on('error', () => resolve({ messages: [], taskNotifications: [], customTitle: null, agentIdToToolUseId: {}, statusLine: null }))
   })
 }
 
@@ -858,12 +817,11 @@ export async function loadSubagentHistory(
 }
 
 /**
- * Build a mapping from toolUseId → hex JSONL filename for team agents.
- * Team agents' agent_ids (e.g. "historian@cny-v5") don't match their JSONL filenames
- * (e.g. "agent-aaa6f53.jsonl"). This function scans all subagent files and matches
- * them to toolUseIds by comparing the first user message content against known prompts.
- * Returns toolUseId → hexId for files that matched, preferring the most recent file
- * (highest hex ID) when multiple files match the same prompt.
+ * Build a mapping from toolUseId → hex JSONL filename for subagents.
+ * Scans all subagent files and matches them to toolUseIds by comparing the
+ * first user message content against known task prompts.
+ * Returns toolUseId → hexId for files that matched, preferring the most recent
+ * file (highest hex ID) when multiple files match the same prompt.
  */
 export function buildSubagentFileMap(
   sessionId: string,

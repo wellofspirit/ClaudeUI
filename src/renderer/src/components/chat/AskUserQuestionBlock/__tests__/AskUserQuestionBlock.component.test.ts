@@ -79,12 +79,12 @@ describe('AskUserQuestionBlock FC', () => {
     await renderFC()
 
     await act(async () => {
-      await viewProps.onSubmit({ Color: 'red' })
+      await viewProps.onSubmit({ 'Pick a color': 'red' })
     })
 
     expect(respondCalls).toHaveLength(1)
     expect(respondCalls[0].decision).toBe('allow')
-    expect(respondCalls[0].answers).toEqual({ Color: 'red' })
+    expect(respondCalls[0].answers).toEqual({ 'Pick a color': 'red' })
     expect(useSessionStore.getState().sessions[ROUTE].pendingApprovals).toHaveLength(0)
   })
 
@@ -105,7 +105,7 @@ describe('AskUserQuestionBlock FC', () => {
     expect(viewProps.isCompleted).toBe(false)
 
     await act(async () => {
-      await viewProps.onSubmit({ Color: 'blue' })
+      await viewProps.onSubmit({ 'Pick a color': 'blue' })
     })
 
     expect(viewProps.isCompleted).toBe(true)
