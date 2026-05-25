@@ -279,6 +279,11 @@ export function buildEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessE
     env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = '1'
   delete env.NODE_OPTIONS
 
+  // Override so that a developer running `bun run dev` from inside a Claude
+  // Code session doesn't inherit the parent's `sdk-cli` entrypoint, which
+  // would re-tier the spawned cli.js as Agent SDK usage.
+  env.CLAUDE_CODE_ENTRYPOINT = 'claude-desktop'
+
   // Scoped proxy: overlay proxy env vars only onto this spawn, not the main
   // Electron process. If `proxyAllSubprocesses` is off (default), the
   // subprocess-proxy-strip patch in cli.js removes these from Bash/MCP/LSP
