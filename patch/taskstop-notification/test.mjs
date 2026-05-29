@@ -14,7 +14,13 @@
 
 import { createQuery, collectMessages, TestRunner, dumpMessages } from '../test-helpers.mjs'
 
-const PROMPT = "Use the Task tool to run 'sleep 300' in Bash. Set run_in_background to true."
+// Force a background bash invocation. Avoid mentioning "Task" — newer CLI
+// versions defer the TaskCreate tool, and the model interprets "Task tool"
+// as that UI helper, leading to ambiguous ToolSearch detours.
+const PROMPT =
+  "Run the shell command 'sleep 300' as a background process by invoking " +
+  'the Bash tool with run_in_background set to true. Do not run it in the ' +
+  'foreground.'
 
 async function main() {
   const t = new TestRunner('taskstop-notification')
