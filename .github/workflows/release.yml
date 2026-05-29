@@ -105,7 +105,12 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 24
+          # Pinned to 24.15.0: Node 24.16.0 ships a libuv that aborts on Windows
+          # (Assertion failed: !_wcsnicmp(filename, dir, dirlen), src/win/fs-event.c:72)
+          # when fs.watch() targets a single file, crashing vitest workers and
+          # cascading unrelated suites to "failed". 24.15.0 is the last good runner
+          # Node. Revisit once a Node 24.x lands with the libuv fix.
+          node-version: 24.15.0
 
       - uses: oven-sh/setup-bun@v2
 
