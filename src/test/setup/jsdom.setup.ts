@@ -5,9 +5,15 @@
 
 import '@testing-library/jest-dom/vitest'
 
-// Node 25+ ships a native `localStorage` getter that shadows jsdom's mock.
-// Override with in-memory implementation.
-if (typeof globalThis.localStorage === 'object' && typeof globalThis.localStorage?.getItem !== 'function') {
+// Provide an in-memory `localStorage` whenever the runtime doesn't give us a
+// working one. Two cases this covers:
+//   - Node 25+ ships a native `localStorage` getter that shadows jsdom's mock
+//     (present as an object, but `getItem` isn't callable).
+//   - Some bun versions expose no `localStorage` at all unless launched with
+//     `--localstorage-file`, leaving it `undefined`.
+// When the runtime DOES provide a working localStorage (e.g. CI), `getItem`
+// is already a function and this block is skipped.
+if (typeof globalThis.localStorage?.getItem !== 'function') {
   const store = new Map<string, string>()
   Object.defineProperty(globalThis, 'localStorage', {
     configurable: true,
