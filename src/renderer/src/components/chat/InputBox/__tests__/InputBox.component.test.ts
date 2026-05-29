@@ -580,7 +580,10 @@ describe('InputBox FC — rendered', () => {
 
   it('null store effort/thinkingMode → View receives model defaults', () => {
     // Fresh session: store has effort=null, thinkingMode=null (never user-set).
-    // FC must resolve these to the current model's defaults (xhigh for Opus 4.7).
+    // FC must resolve these to the current model's defaults. The `default`
+    // alias resolves to Opus 4.8, whose cli.js default effort (YK6) is 'high'
+    // even though it supports xhigh — so xhigh being in supportedEffortLevels
+    // must NOT make it the default.
     useSessionStore.setState((state) => ({
       sessions: {
         ...state.sessions,
@@ -592,7 +595,33 @@ describe('InputBox FC — rendered', () => {
         },
       },
       availableModels: [{
-        value: 'default', displayName: 'Default', description: 'Opus 4.7',
+        value: 'default', displayName: 'Default', description: 'Opus 4.8',
+        supportsEffort: true,
+        supportedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max'],
+        supportsAdaptiveThinking: true,
+      }],
+    }))
+
+    renderFC()
+
+    expect(viewProps.effort).toBe('high')           // Opus 4.8 default (not xhigh)
+    expect(viewProps.thinkingMode).toBe('adaptive') // adaptive when supported
+  })
+
+  it('null store effort on explicit opus-4-7 → xhigh default', () => {
+    // Opus 4.7 (selected by canonical id, not the alias) still defaults to xhigh.
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [FC_ROUTE]: {
+          ...state.sessions[FC_ROUTE],
+          selectedModel: 'claude-opus-4-7',
+          effort: null,
+          thinkingMode: null,
+        },
+      },
+      availableModels: [{
+        value: 'claude-opus-4-7', displayName: 'Opus 4.7', description: 'Opus 4.7',
         supportsEffort: true,
         supportedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max'],
         supportsAdaptiveThinking: true,
@@ -602,7 +631,7 @@ describe('InputBox FC — rendered', () => {
     renderFC()
 
     expect(viewProps.effort).toBe('xhigh')          // Opus 4.7 default
-    expect(viewProps.thinkingMode).toBe('adaptive') // adaptive when supported
+    expect(viewProps.thinkingMode).toBe('adaptive')
   })
 
   it('explicit user pick takes precedence over model default', () => {

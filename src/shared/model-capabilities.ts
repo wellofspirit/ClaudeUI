@@ -45,6 +45,34 @@ function normaliseModelId(model: string | undefined | null): string {
 }
 
 /**
+ * Map a model picker value to its canonical id. Mirrors cli.js's `i8_`
+ * alias table at the time of writing (2.1.154):
+ *   `opus` → `claude-opus-4-8`, `sonnet` → `claude-sonnet-4-6`,
+ *   `haiku` → `claude-haiku-4-5`.
+ *
+ * The `default` alias intentionally has no mapping — it resolves at the cli.js
+ * layer to whatever the user (or environment) has configured. Returns the
+ * input unchanged for canonical ids that don't need translation.
+ */
+export function canonicalizeModelValue(value: string | undefined | null): string {
+  if (!value) return ''
+  switch (value) {
+    case 'opus':
+      return 'claude-opus-4-8'
+    case 'opus[1m]':
+      return 'claude-opus-4-8'
+    case 'sonnet':
+      return 'claude-sonnet-4-6'
+    case 'sonnet[1m]':
+      return 'claude-sonnet-4-6'
+    case 'haiku':
+      return 'claude-haiku-4-5'
+    default:
+      return normaliseModelId(value) || value
+  }
+}
+
+/**
  * Models known NOT to support `effort: 'max'`. Mirrors cli.js `c8z` set.
  * Note: haiku is excluded by name elsewhere (it never supports `max`).
  */
@@ -93,10 +121,11 @@ export function modelSupportedEffortLevels(
 
 export function modelDefaultEffort(model: ModelCapabilityInput | undefined | null): EffortLevel {
   const allowed = modelSupportedEffortLevels(model)
-  // xhigh in the allowed list implies Opus 4.7-class (per cli.js `bt6` / `IF1`),
-  // so treat it as the default — this is what Claude Code does too. Catches
-  // alias values like `default` where the id heuristic can't tell us the tier.
-  if (allowed.includes('xhigh')) return 'xhigh'
+  // Use the id-based default first. Mirrors cli.js `YK6`, which since 2.1.154
+  // returns 'xhigh' only for opus-4-7 — opus-4-8 supports xhigh but defaults
+  // to 'high' (4.8-high is roughly 4.7-xhigh quality). A blanket
+  // "xhigh allowed ⇒ xhigh default" rule would now over-select for 4.8 and
+  // for the `default`/`opus` aliases that resolve to it.
   const fallback = defaultEffort(model?.value)
   if (allowed.includes(fallback)) return fallback
   if (allowed.includes('high')) return 'high'
@@ -134,7 +163,7 @@ export function modelResolveEffort(
 /** Mirrors cli.js `kh8`. */
 export function supportsAdaptiveThinking(model: string | undefined | null): boolean {
   const id = normaliseModelId(model)
-  if (id.includes('opus-4-7') || id.includes('opus-4-6') || id.includes('sonnet-4-6')) return true
+  if (id.includes('opus-4-8') || id.includes('opus-4-7') || id.includes('opus-4-6') || id.includes('sonnet-4-6')) return true
   if (id.includes('opus') || id.includes('sonnet') || id.includes('haiku')) return false
   // Unknown family — assume modern, allow adaptive.
   return true
@@ -143,14 +172,15 @@ export function supportsAdaptiveThinking(model: string | undefined | null): bool
 /** Mirrors cli.js `QI`. */
 export function supportsEffort(model: string | undefined | null): boolean {
   const id = normaliseModelId(model)
-  if (id.includes('opus-4-7') || id.includes('opus-4-6') || id.includes('sonnet-4-6')) return true
+  if (id.includes('opus-4-8') || id.includes('opus-4-7') || id.includes('opus-4-6') || id.includes('sonnet-4-6')) return true
   if (id.includes('opus') || id.includes('sonnet') || id.includes('haiku')) return false
   return true
 }
 
-/** Mirrors cli.js `bt6` — `xhigh` is opus-4-7 only today. */
+/** Mirrors cli.js `bt6` — `xhigh` is opus-4-7 and opus-4-8 today. */
 export function supportsXhighEffort(model: string | undefined | null): boolean {
-  return normaliseModelId(model).includes('opus-4-7')
+  const id = normaliseModelId(model)
+  return id.includes('opus-4-7') || id.includes('opus-4-8')
 }
 
 /** Mirrors cli.js `Ct6`. Haiku never supports max; legacy models in NO_MAX_EFFORT don't either. */
@@ -170,7 +200,7 @@ export function supportedEffortLevels(model: string | undefined | null): EffortL
   })
 }
 
-/** Mirrors cli.js `IF1`. */
+/** Mirrors cli.js `YK6`. Opus 4.7 is the only model that defaults to xhigh. */
 export function defaultEffort(model: string | undefined | null): EffortLevel {
   const id = normaliseModelId(model)
   if (id.includes('opus-4-7')) return 'xhigh'

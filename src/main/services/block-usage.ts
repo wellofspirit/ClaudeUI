@@ -65,6 +65,10 @@ const MODEL_PRICING: Array<{ match: string; pricing: ModelPricing }> = [
     match: 'opus-4-7',
     pricing: { inputPerMTok: 5, outputPerMTok: 25, cacheWritePerMTok: 6.25, cacheReadPerMTok: 0.5 }
   },
+  {
+    match: 'opus-4-8',
+    pricing: { inputPerMTok: 5, outputPerMTok: 25, cacheWritePerMTok: 6.25, cacheReadPerMTok: 0.5 }
+  },
   // Opus 4.0 / 4.1 (older, more expensive)
   {
     match: 'opus-4',

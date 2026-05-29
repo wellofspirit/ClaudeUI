@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import { useShallow } from 'zustand/react/shallow'
 import { mergeContentBlocks } from '../utils/content-blocks'
 import { VOICE_LANGUAGES } from '../../../shared/types'
+import type { EffortLevel } from '../../../shared/model-capabilities'
 import type {
   ChatMessage,
   SessionStatus,
@@ -139,6 +140,13 @@ export interface AppSettings {
   proxy: ProxySettings
   anthropicEndpoint: AnthropicEndpointSettings
   modelOverride: ModelOverrideSettings
+  /**
+   * Per-model default effort overrides. Keyed by canonical model id
+   * (`claude-sonnet-4-6`, `claude-opus-4-7`, `claude-opus-4-8`). When set,
+   * overrides the cli.js-derived default for that model; a per-session
+   * explicit pick still wins.
+   */
+  modelEffortDefaults: Partial<Record<string, EffortLevel>>
   mermaidTheme: 'auto' | 'dark' | 'default' | 'neutral' | 'forest' // mermaid diagram theme
   logLevel: 'debug' | 'info' | 'warn' | 'error' // global log level
   logFilter: string // per-source overrides: "UsageFetcher:debug,BlockUsage:debug"
@@ -208,6 +216,7 @@ const DEFAULT_SETTINGS: AppSettings = {
     opusModel: '',
     haikuModel: ''
   },
+  modelEffortDefaults: {},
   mermaidTheme: 'auto',
   logLevel: 'warn',
   logFilter: '',
