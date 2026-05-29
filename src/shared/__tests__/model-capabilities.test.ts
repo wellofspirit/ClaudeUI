@@ -18,7 +18,8 @@ import {
 } from '../model-capabilities'
 
 describe('supportsAdaptiveThinking', () => {
-  it('is true for opus-4-7 / opus-4-6 / sonnet-4-6', () => {
+  it('is true for opus-4-8 / opus-4-7 / opus-4-6 / sonnet-4-6', () => {
+    expect(supportsAdaptiveThinking('claude-opus-4-8')).toBe(true)
     expect(supportsAdaptiveThinking('claude-opus-4-7')).toBe(true)
     expect(supportsAdaptiveThinking('claude-opus-4-6')).toBe(true)
     expect(supportsAdaptiveThinking('claude-sonnet-4-6')).toBe(true)
@@ -40,6 +41,7 @@ describe('supportsAdaptiveThinking', () => {
 
 describe('supportsEffort', () => {
   it('matches the adaptive-thinking model set', () => {
+    expect(supportsEffort('claude-opus-4-8')).toBe(true)
     expect(supportsEffort('claude-opus-4-7')).toBe(true)
     expect(supportsEffort('claude-sonnet-4-6')).toBe(true)
     expect(supportsEffort('claude-opus-4-5')).toBe(false)
@@ -48,15 +50,17 @@ describe('supportsEffort', () => {
 })
 
 describe('supportsXhighEffort', () => {
-  it('is opus-4-7 only', () => {
+  it('is opus-4-7 and opus-4-8', () => {
     expect(supportsXhighEffort('claude-opus-4-7')).toBe(true)
+    expect(supportsXhighEffort('claude-opus-4-8')).toBe(true)
     expect(supportsXhighEffort('claude-opus-4-6')).toBe(false)
     expect(supportsXhighEffort('claude-sonnet-4-6')).toBe(false)
   })
 })
 
 describe('supportsMaxEffort', () => {
-  it('is true for opus-4-6 / opus-4-7 / sonnet-4-6', () => {
+  it('is true for opus-4-6 / opus-4-7 / opus-4-8 / sonnet-4-6', () => {
+    expect(supportsMaxEffort('claude-opus-4-8')).toBe(true)
     expect(supportsMaxEffort('claude-opus-4-7')).toBe(true)
     expect(supportsMaxEffort('claude-opus-4-6')).toBe(true)
     expect(supportsMaxEffort('claude-sonnet-4-6')).toBe(true)
@@ -70,8 +74,9 @@ describe('supportsMaxEffort', () => {
 })
 
 describe('supportedEffortLevels', () => {
-  it('returns full set with xhigh for opus-4-7', () => {
+  it('returns full set with xhigh for opus-4-7 and opus-4-8', () => {
     expect(supportedEffortLevels('claude-opus-4-7')).toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
+    expect(supportedEffortLevels('claude-opus-4-8')).toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
   })
   it('drops xhigh for opus-4-6 / sonnet-4-6', () => {
     expect(supportedEffortLevels('claude-opus-4-6')).toEqual(['low', 'medium', 'high', 'max'])
@@ -84,8 +89,9 @@ describe('supportedEffortLevels', () => {
 })
 
 describe('defaultEffort', () => {
-  it('xhigh for opus-4-7, high for everyone else', () => {
+  it('xhigh for opus-4-7, high for everyone else (incl. opus-4-8)', () => {
     expect(defaultEffort('claude-opus-4-7')).toBe('xhigh')
+    expect(defaultEffort('claude-opus-4-8')).toBe('high')
     expect(defaultEffort('claude-opus-4-6')).toBe('high')
     expect(defaultEffort('claude-sonnet-4-5')).toBe('high')
   })
@@ -196,8 +202,26 @@ describe('modelDefaultEffort', () => {
     }
     expect(modelDefaultEffort(sonnet)).toBe('high')
   })
-  it('returns xhigh when supported (Opus 4.7 via id heuristic default)', () => {
+  it('returns xhigh for opus-4-7 (via id heuristic)', () => {
     expect(modelDefaultEffort({ value: 'claude-opus-4-7' })).toBe('xhigh')
+  })
+  it('returns high for opus-4-8 even though it supports xhigh', () => {
+    // 4.8 supports xhigh but defaults to high — mirrors cli.js YK6.
+    expect(modelDefaultEffort({ value: 'claude-opus-4-8' })).toBe('high')
+    expect(modelDefaultEffort({
+      value: 'claude-opus-4-8',
+      supportsEffort: true,
+      supportedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max'],
+    })).toBe('high')
+  })
+  it('does not blanket-pick xhigh just because SDK lists it as allowed', () => {
+    // The `default`/`opus` alias resolves to opus-4-8 today; xhigh in the
+    // allowed list must not be auto-selected when the id heuristic says high.
+    expect(modelDefaultEffort({
+      value: 'default',
+      supportsEffort: true,
+      supportedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max'],
+    })).toBe('high')
   })
   it('skips id-heuristic default when not in SDK-provided list', () => {
     // Id heuristic says xhigh for opus-4-7, but here the SDK claims only

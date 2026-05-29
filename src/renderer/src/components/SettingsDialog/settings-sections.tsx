@@ -1550,7 +1550,7 @@ export const SECTIONS: Section[] = [
                 value={s.modelOverride.opusModel}
                 onChange={(e) => u({ modelOverride: { ...s.modelOverride, opusModel: e.target.value } })}
                 className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors"
-                placeholder="e.g. claude-opus-4-7 or my-gateway/opus"
+                placeholder="e.g. claude-opus-4-8 or my-gateway/opus"
                 spellCheck={false}
                 autoComplete="off"
               />
