@@ -12,6 +12,9 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import WebSocket from 'ws'
 import * as http from 'node:http'
+import * as fs from 'node:fs'
+import * as os from 'node:os'
+import * as path from 'node:path'
 import { connectRemoteClient, ephemeralPort } from '../../../test/helpers/ws-test-client'
 
 // ---------------------------------------------------------------------------
@@ -228,5 +231,74 @@ describe('RemoteServer', () => {
     }
     // getStatus after stop() should reflect zero clients.
     expect(server.getStatus().connectedClients).toBe(0)
+  })
+})
+
+describe('RemoteServer — mockup HTTP route', () => {
+  let server: RemoteServer
+  let port: number
+  let cwd: string
+  let b64: string
+  const ID = 'abcdef12'
+
+  beforeEach(async () => {
+    server = new RemoteServer(new RemoteDispatcher())
+    port = await ephemeralPort()
+    cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'mockup-rs-'))
+    b64 = Buffer.from(cwd, 'utf-8').toString('base64url')
+    const dir = path.join(cwd, '.claude', 'ui', 'mockups', ID)
+    fs.mkdirSync(dir, { recursive: true })
+    fs.writeFileSync(path.join(dir, 'index.html'), '<html><head></head><body>remote mockup</body></html>')
+  })
+
+  afterEach(() => {
+    try { server.stop() } catch { /* already stopped */ }
+    fs.rmSync(cwd, { recursive: true, force: true })
+  })
+
+  /** Pull the injected mockup token out of the served web-client HTML. */
+  function extractMockupToken(html: string): string | null {
+    const m = html.match(/window\.__MOCKUP_TOKEN__="([a-f0-9]{64})"/)
+    return m ? m[1] : null
+  }
+
+  it('injects a mockup token into /remote only when the WS token matches', async () => {
+    const res = await server.start(port, '127.0.0.1')
+
+    const authed = await httpGet(`http://127.0.0.1:${port}/remote?t=${res.token}`)
+    const token = extractMockupToken(authed.body)
+    expect(token).toMatch(/^[a-f0-9]{64}$/)
+    // The mockup token must NOT be the WS token.
+    expect(token).not.toBe(res.token)
+
+    const anon = await httpGet(`http://127.0.0.1:${port}/remote`)
+    expect(extractMockupToken(anon.body)).toBeNull()
+
+    const wrong = await httpGet(`http://127.0.0.1:${port}/remote?t=${'0'.repeat(64)}`)
+    expect(extractMockupToken(wrong.body)).toBeNull()
+  })
+
+  it('rejects /mockup requests without the mockup token', async () => {
+    await server.start(port, '127.0.0.1')
+    const got = await httpGet(`http://127.0.0.1:${port}/mockup/${ID}/${b64}/`)
+    expect(got.status).toBe(403)
+  })
+
+  it('rejects /mockup requests with a wrong token', async () => {
+    await server.start(port, '127.0.0.1')
+    const got = await httpGet(`http://127.0.0.1:${port}/mockup/${ID}/${b64}/?token=${'a'.repeat(64)}`)
+    expect(got.status).toBe(403)
+  })
+
+  it('serves the mockup HTML with a valid mockup token (end-to-end)', async () => {
+    const res = await server.start(port, '127.0.0.1')
+    const page = await httpGet(`http://127.0.0.1:${port}/remote?t=${res.token}`)
+    const token = extractMockupToken(page.body)!
+
+    const got = await httpGet(`http://127.0.0.1:${port}/mockup/${ID}/${b64}/?token=${token}`)
+    expect(got.status).toBe(200)
+    expect(got.body).toContain('remote mockup')
+    // The serve-time bridge must be injected.
+    expect(got.body).toContain('data-omelette="1"')
   })
 })

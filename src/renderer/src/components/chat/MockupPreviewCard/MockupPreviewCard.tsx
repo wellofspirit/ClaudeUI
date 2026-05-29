@@ -1,7 +1,11 @@
 import React, { memo, useCallback, useEffect, useRef, useState } from 'react'
 import { useSessionStore } from '../../../stores/session-store'
-import { buildMockupUrl, mockupOriginFor } from '../../../../../shared/mockup-url'
 import { useMockupBridge } from '../../../hooks/useMockupBridge'
+import {
+  MOCKUP_IFRAME_SANDBOX,
+  mockupExpectedOrigin,
+  mockupReloadTarget
+} from '../../mockup-transport'
 import { MockupPreviewCardView } from './View'
 
 interface MockupPreviewCardProps {
@@ -71,15 +75,12 @@ export const MockupPreviewCard = memo(function MockupPreviewCard({
   // attribute causes Chromium to reload the iframe and focus it, scrolling
   // the chat container to bring it into view. Instead we keep `src` stable
   // and ask the iframe to reload itself via postMessage (see below).
-  const iframeSrc =
-    cwd && directory
-      ? buildMockupUrl(cwd, directory, { parentOrigin: window.location.origin })
-      : null
+  const iframeSrc = cwd && directory ? window.api.getMockupPreviewUrl(cwd, directory) : null
 
   // Keeps the bridge alive for console/error forwarding into the panel when
   // it's opened. The card itself uses a fixed 16:9 aspect ratio (see View),
   // so the reported height is intentionally ignored here.
-  useMockupBridge(iframeRef, directory || null, version)
+  useMockupBridge(iframeRef, directory || null, version, mockupExpectedOrigin(directory))
 
   // Trigger an in-place iframe reload on version bump — after the initial
   // load. First render uses the src attribute; subsequent file changes
@@ -91,7 +92,7 @@ export const MockupPreviewCard = memo(function MockupPreviewCard({
     if (!directory) return
     const iframe = iframeRef.current
     if (!iframe?.contentWindow) return
-    iframe.contentWindow.postMessage({ type: 'mockup:reload' }, mockupOriginFor(directory))
+    iframe.contentWindow.postMessage({ type: 'mockup:reload' }, mockupReloadTarget(directory))
   }, [version, directory])
 
   const handleExpand = (): void => {
@@ -120,6 +121,7 @@ export const MockupPreviewCard = memo(function MockupPreviewCard({
       html={html}
       error={error}
       src={iframeSrc}
+      sandbox={MOCKUP_IFRAME_SANDBOX}
       onExpand={handleExpand}
       onCopyHtml={handleCopyHtml}
       onRefresh={handleRefresh}

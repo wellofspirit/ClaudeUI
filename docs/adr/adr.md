@@ -8,3 +8,5 @@
 | [004](adr-004_plugin-system.md) | VS Code-style plugin system for extensibility |
 | [005](adr-005_plugin-session-api.md) | Plugin session API — sessionId-based events and history |
 | [006](adr-006_rebundle-bun-binary.md) | Rebundle Bun standalone binary instead of running cli.js under Node |
+| [007](adr-007_remote-mockup-http-transport.md) | Serve mockup previews over HTTP with a sandboxed iframe for the remote web client |
+| [008](adr-008_typecheck-remote-web-client.md) | Type-check the remote web client (`src/web`) against `ClaudeAPI` |

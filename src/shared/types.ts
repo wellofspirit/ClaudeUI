@@ -1041,4 +1041,11 @@ interface PluginAPI {
   watchMockup(cwd: string, directory: string): Promise<void>
   unwatchMockup(cwd: string, directory: string): Promise<void>
   onMockupFileChanged(cb: (directory: string) => void): () => void
+  /**
+   * The iframe `src` for a mockup preview. Platform-specific transport:
+   * desktop returns a `mockup-asset://` URL (privileged Electron protocol);
+   * the web client returns an HTTP URL on the remote server. Synchronous —
+   * it's a pure URL builder.
+   */
+  getMockupPreviewUrl(cwd: string, directory: string, opts?: { dark?: boolean }): string
 }

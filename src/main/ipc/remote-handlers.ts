@@ -3,6 +3,7 @@ import * as path from 'path'
 import { RemoteDispatcher } from '../services/remote-dispatcher'
 import { SessionManager } from '../services/session-manager'
 import { listDirectories, loadSessionHistory, loadSubagentHistory, buildSubagentFileMap, loadBackgroundOutput } from '../services/session-history'
+import { deleteSessionFiles, deleteProjectFiles } from '../services/delete-session-files'
 import { loadSettings, saveSettings, loadSessionConfig, saveSessionConfig, loadSlashCommands } from '../services/ui-config'
 import { invalidateMockupSecuritySettings } from '../services/mockup-settings'
 import type { UISettings, UISessionConfig } from '../services/ui-config'
@@ -25,11 +26,33 @@ import { logger } from '../services/logger'
  * server instead of ipcMain.handle. The dispatcher's built-in blocklist
  * prevents desktop-only channels from being registered.
  */
+/**
+ * The dispatcher registered via registerRemoteHandlers. Captured so that
+ * version info — computed later in the app bootstrap, after this runs — can
+ * still be registered against the live dispatcher.
+ */
+let activeDispatcher: RemoteDispatcher | null = null
+
+/**
+ * Register the `app:version-info` channel on the remote dispatcher. Called
+ * from the main bootstrap once the build versions are known (they're computed
+ * after registerRemoteHandlers runs). No-op if remote handlers aren't set up.
+ */
+export function registerRemoteVersionInfo(versionInfo: {
+  appVersion: string
+  sdkVersion: string
+  cliVersion: string
+}): void {
+  activeDispatcher?.register('app:version-info', async () => versionInfo)
+}
+
 export function registerRemoteHandlers(
   dispatcher: RemoteDispatcher,
   manager: SessionManager,
   win: BrowserWindow
 ): void {
+  activeDispatcher = dispatcher
+
   // -------------------------------------------------------------------------
   // Session lifecycle
   // -------------------------------------------------------------------------
@@ -69,6 +92,10 @@ export function registerRemoteHandlers(
 
   dispatcher.register('session:cancel', async (routingId: string) => {
     manager.cancel(routingId)
+  })
+
+  dispatcher.register('session:interrupt', async (routingId: string) => {
+    await manager.interrupt(routingId)
   })
 
   dispatcher.register('session:approval-response', async (routingId: string, requestId: string, decision: ApprovalDecision, answers?: Record<string, string>, updatedPermissions?: PermissionSuggestion[]) => {
@@ -121,6 +148,16 @@ export function registerRemoteHandlers(
     manager.get(routingId)?.setEffort(effort)
   })
 
+  dispatcher.register('session:set-thinking-mode', async (routingId: string, mode: string) => {
+    manager.get(routingId)?.setThinkingMode(mode)
+  })
+
+  dispatcher.register('session:ask-side-question', async (routingId: string, question: string) => {
+    const session = manager.get(routingId)
+    if (!session) return null
+    return await session.askSideQuestion(question)
+  })
+
   // -------------------------------------------------------------------------
   // Session queries
   // -------------------------------------------------------------------------
@@ -168,6 +205,14 @@ export function registerRemoteHandlers(
 
   dispatcher.register('session:load-background-output', async (projectKey: string, taskId: string, outputFile?: string) => {
     return loadBackgroundOutput(projectKey, taskId, outputFile)
+  })
+
+  dispatcher.register('session:delete-session', async (sessionId: string, projectKey: string) => {
+    await deleteSessionFiles(sessionId, projectKey)
+  })
+
+  dispatcher.register('session:delete-project', async (projectKey: string) => {
+    await deleteProjectFiles(projectKey)
   })
 
   // -------------------------------------------------------------------------
@@ -254,6 +299,53 @@ export function registerRemoteHandlers(
 
   dispatcher.register('usage:fetch-block', async () => {
     return blockUsageService.getData() ?? (await blockUsageService.recalculate())
+  })
+
+  // -------------------------------------------------------------------------
+  // Mockup preview — read HTML + watch the mockup directory for live reloads
+  // -------------------------------------------------------------------------
+
+  dispatcher.register('mockup:read-html', async (cwd: string, directory: string) => {
+    const htmlPath = path.join(cwd, '.claude', 'ui', 'mockups', directory, 'index.html')
+    return fs.promises.readFile(htmlPath, 'utf-8')
+  })
+
+  const mockupWatchers = new Map<string, { watcher: fs.FSWatcher; debounceTimer: ReturnType<typeof setTimeout> | null }>()
+
+  dispatcher.register('mockup:watch', async (cwd: string, directory: string) => {
+    const key = `${cwd}:${directory}`
+    if (mockupWatchers.has(key)) return // already watching
+
+    const dirPath = path.join(cwd, '.claude', 'ui', 'mockups', directory)
+    if (!fs.existsSync(dirPath)) return
+
+    const entry = { watcher: null! as fs.FSWatcher, debounceTimer: null as ReturnType<typeof setTimeout> | null }
+
+    // Recursive + debounced, matching the desktop IPC watcher in session.ipc.ts.
+    // Broadcast to the local desktop window AND all extra windows (remote bridge
+    // → connected web clients) so a mockup open remotely live-reloads on edit.
+    entry.watcher = fs.watch(dirPath, { recursive: true }, (_event, filename) => {
+      if (!filename) return
+      if (entry.debounceTimer) clearTimeout(entry.debounceTimer)
+      entry.debounceTimer = setTimeout(() => {
+        if (!win.isDestroyed()) win.webContents.send('mockup:file-changed', directory)
+        for (const w of ClaudeSession.getExtraWindows()) {
+          if (!w.isDestroyed()) w.webContents.send('mockup:file-changed', directory)
+        }
+      }, 200)
+    })
+
+    mockupWatchers.set(key, entry)
+  })
+
+  dispatcher.register('mockup:unwatch', async (cwd: string, directory: string) => {
+    const key = `${cwd}:${directory}`
+    const entry = mockupWatchers.get(key)
+    if (entry) {
+      entry.watcher.close()
+      if (entry.debounceTimer) clearTimeout(entry.debounceTimer)
+      mockupWatchers.delete(key)
+    }
   })
 
   logger.info('remote-handlers', `Registered ${dispatcher.channels().length} remote handlers`)

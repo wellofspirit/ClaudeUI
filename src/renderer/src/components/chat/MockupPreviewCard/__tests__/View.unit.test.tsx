@@ -21,6 +21,7 @@ function renderView(overrides: Partial<MockupPreviewCardViewProps> = {}): Return
     html: '<div>Hello</div>',
     error: null,
     src: 'mockup-asset://abc12345.m/Zm9v/?v=1',
+    sandbox: 'allow-scripts allow-same-origin',
     onExpand: vi.fn(),
     onCopyHtml: vi.fn(),
     onRefresh: vi.fn(),

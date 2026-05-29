@@ -45,7 +45,15 @@ export function useMockupBridge(
   iframeRef: RefObject<HTMLIFrameElement | null>,
   mockupId: string | null,
   /** Bumped on source reload so we reset logs + height. */
-  version: number
+  version: number,
+  /**
+   * Origin to validate incoming `event.origin` against. Defaults to the
+   * desktop `mockup-asset://` sub-origin. The web client serves mockups in a
+   * sandboxed (no `allow-same-origin`) iframe whose origin is the opaque
+   * string `"null"`, so it passes that instead. `event.source` identity
+   * remains the primary trust check either way.
+   */
+  expectedOrigin?: string
 ): MockupBridgeState & { clearLogs: () => void } {
   const [height, setHeight] = useState<number | null>(null)
   const [logs, setLogs] = useState<MockupLogEntry[]>([])
@@ -79,12 +87,12 @@ export function useMockupBridge(
   useEffect(() => {
     if (!mockupId) return
 
-    const expectedOrigin = mockupOriginFor(mockupId)
+    const originToMatch = expectedOrigin ?? mockupOriginFor(mockupId)
 
     const handler = (event: MessageEvent): void => {
       const iframe = iframeRef.current
       if (!iframe || event.source !== iframe.contentWindow) return
-      if (event.origin !== expectedOrigin) return
+      if (event.origin !== originToMatch) return
 
       const data = event.data
       if (!data || typeof data !== 'object') return
@@ -149,7 +157,7 @@ export function useMockupBridge(
 
     window.addEventListener('message', handler)
     return () => window.removeEventListener('message', handler)
-  }, [iframeRef, mockupId])
+  }, [iframeRef, mockupId, expectedOrigin])
 
   const clearLogs = useCallback(() => {
     setLogs([])

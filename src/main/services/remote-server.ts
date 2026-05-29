@@ -13,6 +13,8 @@ import { ClaudeSession } from './claude-session'
 import { logger } from './logger'
 import { TunnelManager } from './tunnel-manager'
 import { E2ECrypto } from '../../shared/e2e-crypto'
+import { MOCKUP_HTTP_PREFIX } from '../../shared/mockup-url'
+import { routeHttpMockup, serveMockup } from './mockup-protocol'
 import type {
   WsClientMessage,
   WsServerMessage,
@@ -38,6 +40,14 @@ export class RemoteServer {
   private httpServer: http.Server | null = null
   private wss: WebSocketServer | null = null
   private token = ''
+  /**
+   * Separate, low-privilege token for the `/mockup` HTTP route. It travels in
+   * the mockup iframe URL and is therefore readable by the mockup's own
+   * scripts — so it must NOT be the WS `token`. Its only power is reading
+   * extension-allow-listed files under `.claude/ui/mockups/` for a given cwd;
+   * it grants nothing on the WS / Claude control plane.
+   */
+  private mockupToken = ''
   private port = 0
   private boundHost = '' // the IP the server is bound to (for URL generation)
   private clients = new Map<WebSocket, AuthenticatedClient>()
@@ -100,6 +110,7 @@ export class RemoteServer {
     }
 
     this.token = crypto.randomBytes(32).toString('hex')
+    this.mockupToken = crypto.randomBytes(32).toString('hex')
 
     // Generate E2E key when tunnel mode is requested
     if (opts?.tunnel) {
@@ -229,7 +240,10 @@ export class RemoteServer {
 
     if (url.pathname === '/remote' || url.pathname === '/') {
       // Serve the web client
-      this.serveWebClient(res)
+      this.serveWebClient(url, res)
+    } else if (url.pathname.startsWith(`/${MOCKUP_HTTP_PREFIX}/`)) {
+      // Serve mockup HTML + sibling assets (web client preview iframe)
+      void this.serveMockupHttp(url, req, res)
     } else if (url.pathname.startsWith('/assets/') || url.pathname.endsWith('.js') || url.pathname.endsWith('.css')) {
       // Serve static assets
       this.serveStatic(url.pathname, res)
@@ -239,13 +253,51 @@ export class RemoteServer {
     }
   }
 
-  private serveWebClient(res: http.ServerResponse): void {
+  /**
+   * Serves a mockup's HTML or a sibling asset over HTTP, reusing the same
+   * routing/validation/serving logic as the Electron `mockup-asset://`
+   * protocol handler. Gated by the dedicated {@link mockupToken}.
+   *
+   * Security: the web client renders this in an iframe sandboxed WITHOUT
+   * `allow-same-origin`, so the mockup runs in an opaque origin and cannot
+   * reach the web client's window/storage (where the WS token lives).
+   */
+  private async serveMockupHttp(
+    url: URL,
+    req: http.IncomingMessage,
+    res: http.ServerResponse
+  ): Promise<void> {
+    if (!this.mockupToken || url.searchParams.get('token') !== this.mockupToken) {
+      res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' })
+      res.end('Forbidden')
+      return
+    }
+    // Origin the browser sees — used for the CSP `self`-source. Behind the
+    // tunnel the proxy terminates TLS and forwards over http, so trust
+    // x-forwarded-proto for the scheme.
+    const proto = (req.headers['x-forwarded-proto'] as string | undefined)?.split(',')[0] || 'http'
+    const selfSource = `${proto}://${req.headers.host}`
+    const served = await serveMockup(routeHttpMockup(url.pathname, url.searchParams), selfSource)
+    res.writeHead(served.status, served.headers)
+    res.end(served.body)
+  }
+
+  private serveWebClient(url: URL, res: http.ServerResponse): void {
     const webDir = this.getWebClientDir()
     const indexPath = path.join(webDir, 'index.html')
 
     if (fs.existsSync(indexPath)) {
+      let html = fs.readFileSync(indexPath, 'utf-8')
+      // Hand the mockup-scoped token to the (authenticated) web client so it
+      // can build mockup iframe URLs. Gated on the WS token so an unauthorized
+      // visitor who reaches the port can't obtain it. Never exposes the WS
+      // token itself. JSON.stringify-escaping is safe for a hex string.
+      if (url.searchParams.get('t') === this.token) {
+        const inject = `<script>window.__MOCKUP_TOKEN__=${JSON.stringify(this.mockupToken)}</script>`
+        html = html.includes('</head>') ? html.replace('</head>', `${inject}</head>`) : inject + html
+      }
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
-      res.end(fs.readFileSync(indexPath, 'utf-8'))
+      res.end(html)
     } else {
       // Web client not built yet — serve a placeholder
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })

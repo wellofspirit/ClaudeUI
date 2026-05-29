@@ -276,6 +276,7 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     watchMockup: (cwd, directory) => ipcRenderer.invoke('mockup:watch', cwd, directory),
     unwatchMockup: (cwd, directory) => ipcRenderer.invoke('mockup:unwatch', cwd, directory),
     onMockupFileChanged: onEvent('mockup:file-changed'),
+    getMockupPreviewUrl: (cwd, directory) => `mockup-asset://test.m/${cwd}/${directory}`,
   } as ClaudeAPI
 }
 

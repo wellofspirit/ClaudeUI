@@ -20,6 +20,7 @@ function renderView(overrides: Partial<MockupPanelViewProps> = {}): ReturnType<t
     html: '<div>Content</div>',
     error: null,
     src: 'mockup-asset://f0f0f0f0.m/Zm9v/?v=1',
+    sandbox: 'allow-scripts allow-same-origin',
     onClose: vi.fn(),
     onCopyHtml: vi.fn(),
     onRefresh: vi.fn(),

@@ -20,12 +20,13 @@ export function ConnectionOverlay({ state, error }: ConnectionOverlayProps): Rea
   const [visible, setVisible] = useState(true)
 
   useEffect(() => {
-    if (state === 'connected') {
-      // Fade out after a short delay
-      const timer = setTimeout(() => setVisible(false), 800)
-      return () => clearTimeout(timer)
+    if (state !== 'connected') {
+      setVisible(true)
+      return
     }
-    setVisible(true)
+    // Fade out after a short delay
+    const timer = setTimeout(() => setVisible(false), 800)
+    return () => clearTimeout(timer)
   }, [state])
 
   if (!visible) return null

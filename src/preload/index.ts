@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type { ApprovalDecision, ClaudeAPI, PermissionSuggestion, ProxySettings } from '../shared/types'
+import { buildMockupUrl } from '../shared/mockup-url'
 
 /**
  * Factory for IPC event handler registration.
@@ -280,7 +281,9 @@ const api: ClaudeAPI = {
   readMockupHtml: (cwd: string, directory: string) => unwrap('mockup:read-html', cwd, directory),
   watchMockup: (cwd: string, directory: string) => ipcRenderer.invoke('mockup:watch', cwd, directory),
   unwatchMockup: (cwd: string, directory: string) => ipcRenderer.invoke('mockup:unwatch', cwd, directory),
-  onMockupFileChanged: onEvent('mockup:file-changed')
+  onMockupFileChanged: onEvent('mockup:file-changed'),
+  getMockupPreviewUrl: (cwd: string, directory: string, opts?: { dark?: boolean }) =>
+    buildMockupUrl(cwd, directory, { dark: opts?.dark, parentOrigin: window.location.origin })
 }
 
 if (process.contextIsolated) {

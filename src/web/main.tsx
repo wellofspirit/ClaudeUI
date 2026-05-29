@@ -53,12 +53,10 @@ if (!token) {
     }, [])
 
     const handleCatchup = useCallback((events: Array<{ seq: number; channel: string; args: unknown[] }>) => {
-      // Replay catchup events through the event system
-      for (const event of events) {
-        // The api-adapter's event handler is already wired up
-        // Events will flow through the normal onMessage/onStreamEvent/etc. paths
-      }
-      void events // consumed by the event handler in api-adapter
+      // Catchup events are replayed by the api-adapter's event handler, which is
+      // already wired up — they flow through the normal onMessage/onStreamEvent/etc.
+      // paths. Nothing to do here beyond acknowledging receipt.
+      void events
     }, [])
 
     useEffect(() => {

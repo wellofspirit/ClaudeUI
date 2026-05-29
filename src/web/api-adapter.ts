@@ -8,7 +8,16 @@
  */
 
 import type { ApprovalDecision, ClaudeAPI, PermissionSuggestion } from '../shared/types'
+import { buildMockupHttpUrl } from '../shared/mockup-url'
 import type { RemoteConnection } from './connection'
+
+declare global {
+  interface Window {
+    /** Mockup-scoped auth token injected by the remote server into the served
+     *  web-client HTML (only when the WS token in the URL is valid). */
+    __MOCKUP_TOKEN__?: string
+  }
+}
 
 type Listener = (...args: unknown[]) => void
 
@@ -80,6 +89,9 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     cancelSession: (routingId) =>
       connection.invoke('session:cancel', routingId) as Promise<void>,
 
+    interruptSession: (routingId) =>
+      connection.invoke('session:interrupt', routingId) as Promise<void>,
+
     respondApproval: (routingId: string, requestId: string, decision: ApprovalDecision, answers?: Record<string, string>, updatedPermissions?: PermissionSuggestion[]) =>
       connection.invoke('session:approval-response', routingId, requestId, decision, answers, updatedPermissions) as Promise<void>,
 
@@ -89,19 +101,25 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     closeWindow: async () => {},
 
     listDirectories: () =>
-      connection.invoke('session:list-directories') as Promise<ReturnType<ClaudeAPI['listDirectories']>>,
+      connection.invoke('session:list-directories') as ReturnType<ClaudeAPI['listDirectories']>,
 
     loadSessionHistory: (sessionId, projectKey) =>
-      connection.invoke('session:load-history', sessionId, projectKey) as Promise<ReturnType<ClaudeAPI['loadSessionHistory']>>,
+      connection.invoke('session:load-history', sessionId, projectKey) as ReturnType<ClaudeAPI['loadSessionHistory']>,
 
     loadSubagentHistory: (sessionId, projectKey, agentId) =>
-      connection.invoke('session:load-subagent-history', sessionId, projectKey, agentId) as Promise<ReturnType<ClaudeAPI['loadSubagentHistory']>>,
+      connection.invoke('session:load-subagent-history', sessionId, projectKey, agentId) as ReturnType<ClaudeAPI['loadSubagentHistory']>,
 
     buildSubagentFileMap: (sessionId, projectKey, taskPrompts) =>
-      connection.invoke('session:build-subagent-file-map', sessionId, projectKey, taskPrompts) as Promise<ReturnType<ClaudeAPI['buildSubagentFileMap']>>,
+      connection.invoke('session:build-subagent-file-map', sessionId, projectKey, taskPrompts) as ReturnType<ClaudeAPI['buildSubagentFileMap']>,
 
     loadBackgroundOutput: (projectKey, taskId, outputFile?) =>
-      connection.invoke('session:load-background-output', projectKey, taskId, outputFile) as Promise<ReturnType<ClaudeAPI['loadBackgroundOutput']>>,
+      connection.invoke('session:load-background-output', projectKey, taskId, outputFile) as ReturnType<ClaudeAPI['loadBackgroundOutput']>,
+
+    askSideQuestion: (routingId, question) =>
+      connection.invoke('session:ask-side-question', routingId, question) as ReturnType<ClaudeAPI['askSideQuestion']>,
+
+    deleteSession: (sessionId, projectKey) => unwrap('session:delete-session', sessionId, projectKey),
+    deleteProject: (projectKey) => unwrap('session:delete-project', projectKey),
 
     // Routed session events
     onSessionCreated: on('session:created') as ClaudeAPI['onSessionCreated'],
@@ -170,8 +188,10 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       connection.invoke('session:set-model', routingId, model) as Promise<void>,
     setEffort: (routingId, effort) =>
       connection.invoke('session:set-effort', routingId, effort) as Promise<void>,
+    setThinkingMode: (routingId, mode) =>
+      connection.invoke('session:set-thinking-mode', routingId, mode) as Promise<void>,
     getModels: () =>
-      connection.invoke('session:get-models') as Promise<ReturnType<ClaudeAPI['getModels']>>,
+      connection.invoke('session:get-models') as ReturnType<ClaudeAPI['getModels']>,
 
     // Generation
     generateTitle: (conversationText) =>
@@ -233,46 +253,59 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
 
     // File ops
     listDir: (dirPath) =>
-      connection.invoke('file:list-dir', dirPath) as Promise<ReturnType<ClaudeAPI['listDir']>>,
+      connection.invoke('file:list-dir', dirPath) as ReturnType<ClaudeAPI['listDir']>,
     openInVSCode: async () => {}, // No-op on web
+
+    // Mockup preview — HTML is read from the server's filesystem and rendered client-side
+    readMockupHtml: (cwd, directory) => unwrap('mockup:read-html', cwd, directory),
+    watchMockup: (cwd, directory) => connection.invoke('mockup:watch', cwd, directory) as Promise<void>,
+    unwatchMockup: (cwd, directory) => connection.invoke('mockup:unwatch', cwd, directory) as Promise<void>,
+    onMockupFileChanged: on('mockup:file-changed') as ClaudeAPI['onMockupFileChanged'],
+    getMockupPreviewUrl: (cwd, directory, opts) =>
+      buildMockupHttpUrl(window.location.origin, cwd, directory, {
+        token: window.__MOCKUP_TOKEN__ ?? '',
+        dark: opts?.dark,
+        parentOrigin: window.location.origin
+      }),
 
     // Config
     loadSettings: () =>
-      connection.invoke('config:load-settings') as Promise<ReturnType<ClaudeAPI['loadSettings']>>,
-    saveSettings: (settings) => connection.invoke('config:save-settings', settings),
+      connection.invoke('config:load-settings') as ReturnType<ClaudeAPI['loadSettings']>,
+    saveSettings: (settings) => connection.invoke('config:save-settings', settings) as Promise<void>,
     loadSessionConfig: () =>
-      connection.invoke('config:load-sessions') as Promise<ReturnType<ClaudeAPI['loadSessionConfig']>>,
-    saveSessionConfig: (config) => connection.invoke('config:save-sessions', config),
+      connection.invoke('config:load-sessions') as ReturnType<ClaudeAPI['loadSessionConfig']>,
+    saveSessionConfig: (config) => connection.invoke('config:save-sessions', config) as Promise<void>,
     loadSlashCommands: () =>
-      connection.invoke('config:load-slash-commands') as Promise<ReturnType<ClaudeAPI['loadSlashCommands']>>,
+      connection.invoke('config:load-slash-commands') as ReturnType<ClaudeAPI['loadSlashCommands']>,
     saveSlashCommands: async () => {}, // Read-only
     scanCustomCommands: (cwd) =>
-      connection.invoke('config:scan-custom-commands', cwd) as Promise<ReturnType<ClaudeAPI['scanCustomCommands']>>,
+      connection.invoke('config:scan-custom-commands', cwd) as ReturnType<ClaudeAPI['scanCustomCommands']>,
     loadSkillDetails: (cwd) =>
-      connection.invoke('config:load-skill-details', cwd) as Promise<ReturnType<ClaudeAPI['loadSkillDetails']>>,
+      connection.invoke('config:load-skill-details', cwd) as ReturnType<ClaudeAPI['loadSkillDetails']>,
 
     // Usage
     fetchAccountUsage: () =>
-      connection.invoke('usage:fetch') as Promise<ReturnType<ClaudeAPI['fetchAccountUsage']>>,
+      connection.invoke('usage:fetch') as ReturnType<ClaudeAPI['fetchAccountUsage']>,
     fetchBlockUsage: () =>
-      connection.invoke('usage:fetch-block') as Promise<ReturnType<ClaudeAPI['fetchBlockUsage']>>,
+      connection.invoke('usage:fetch-block') as ReturnType<ClaudeAPI['fetchBlockUsage']>,
 
     // Claude permissions (read-only)
     loadClaudePermissions: (scope, cwd?) =>
-      connection.invoke('claude:load-permissions', scope, cwd) as Promise<ReturnType<ClaudeAPI['loadClaudePermissions']>>,
+      connection.invoke('claude:load-permissions', scope, cwd) as ReturnType<ClaudeAPI['loadClaudePermissions']>,
     saveClaudePermissions: async () => {}, // Read-only
 
     // MCP
     mcpServerStatus: (routingId) =>
-      connection.invoke('mcp:status', routingId) as Promise<ReturnType<ClaudeAPI['mcpServerStatus']>>,
+      connection.invoke('mcp:status', routingId) as ReturnType<ClaudeAPI['mcpServerStatus']>,
     mcpToggleServer: async () => {}, // Not available in remote
     mcpReconnectServer: async () => {},
     mcpSetServers: async () => ({ added: [], removed: [], errors: {} }),
     loadMcpServers: (scope, cwd?) =>
-      connection.invoke('mcp:load-servers', scope, cwd) as Promise<ReturnType<ClaudeAPI['loadMcpServers']>>,
+      connection.invoke('mcp:load-servers', scope, cwd) as ReturnType<ClaudeAPI['loadMcpServers']>,
     saveMcpServers: async () => {},
+    removeMcpServer: async () => {}, // Read-only on web
     mcpReadDisabled: (cwd) =>
-      connection.invoke('mcp:read-disabled', cwd) as Promise<ReturnType<ClaudeAPI['mcpReadDisabled']>>,
+      connection.invoke('mcp:read-disabled', cwd) as ReturnType<ClaudeAPI['mcpReadDisabled']>,
     mcpToggleDisabled: async () => {},
 
     // Automation — not available on web
@@ -307,6 +340,18 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     logError: (source, message) => {
       console.error(`[${source}]`, message)
     },
+    logRelay: (level, source, message) => {
+      // Fire-and-forget; on web there's no main-process log file, so mirror to console.
+      console.log(`[${source}] ${level}: ${message}`)
+    },
+
+    // Version info — reflects the remote server's build
+    getVersionInfo: () =>
+      connection.invoke('app:version-info') as ReturnType<ClaudeAPI['getVersionInfo']>,
+
+    // Desktop-only — no native debug window / proxy stack on the web client
+    openLogViewer: async () => {},
+    testProxyConnection: async () => ({ ok: false, latencyMs: 0, error: 'Not available in remote mode' }),
 
     // Plugin system — desktop-only, stubbed out on web
     listPlugins: async () => [],

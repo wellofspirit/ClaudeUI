@@ -47,3 +47,43 @@ export function buildMockupUrl(cwd: string, id: string, opts?: BuildMockupUrlOpt
 export function mockupOriginFor(id: string): string {
   return `${MOCKUP_ASSET_SCHEME}://${id}.m`
 }
+
+/**
+ * Path prefix for the remote server's HTTP mockup route. The web client can't
+ * use the privileged `mockup-asset://` scheme (it only exists in Electron), so
+ * the remote server serves the same HTML + sibling assets over HTTP at
+ * `/{MOCKUP_HTTP_PREFIX}/<id>/<b64cwd>/[<subpath>]`.
+ */
+export const MOCKUP_HTTP_PREFIX = 'mockup'
+
+export interface BuildMockupHttpUrlOpts extends BuildMockupUrlOpts {
+  /**
+   * Mockup-scoped auth token (NOT the WebSocket token). It lives in the URL
+   * and is therefore readable by the mockup's own scripts, so it must be a
+   * dedicated low-privilege token — see the security note on the remote
+   * server's mockup route.
+   */
+  token: string
+}
+
+/**
+ * Build the HTTP URL the web client points its preview iframe at. Layout:
+ *   <origin>/mockup/<id>/<b64cwd>/?token=<t>&parent=<origin>&dark=1&v=<n>
+ *
+ * `b64cwd` stays in the path (mirrors the protocol scheme) so the server can
+ * reuse the same routing/validation logic for both transports.
+ */
+export function buildMockupHttpUrl(
+  baseOrigin: string,
+  cwd: string,
+  id: string,
+  opts: BuildMockupHttpUrlOpts
+): string {
+  const b64 = toBase64Url(cwd)
+  const params = new URLSearchParams()
+  params.set('token', opts.token)
+  if (opts.dark) params.set('dark', '1')
+  if (opts.version !== undefined) params.set('v', String(opts.version))
+  if (opts.parentOrigin) params.set('parent', opts.parentOrigin)
+  return `${baseOrigin.replace(/\/$/, '')}/${MOCKUP_HTTP_PREFIX}/${id}/${b64}/?${params.toString()}`
+}

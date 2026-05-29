@@ -1,7 +1,7 @@
-import { protocol, net } from 'electron'
+import { protocol } from 'electron'
+import * as fs from 'fs'
 import { join, resolve, extname, sep } from 'path'
-import { pathToFileURL } from 'url'
-import { MOCKUP_ASSET_SCHEME } from '../../shared/mockup-url'
+import { MOCKUP_ASSET_SCHEME, MOCKUP_HTTP_PREFIX } from '../../shared/mockup-url'
 import { getMockupSecuritySettings, type MockupSecuritySettings } from './mockup-settings'
 
 export { MOCKUP_ASSET_SCHEME }
@@ -45,8 +45,18 @@ const CDN_FONT = [
  * `connect-src` is dynamic — the user can extend it via settings. `http:`
  * is gated behind a separate toggle (HTTPS-only by default).
  */
-export function buildMockupCsp(settings: MockupSecuritySettings): string {
-  const scheme = `${MOCKUP_ASSET_SCHEME}:`
+export function buildMockupCsp(
+  settings: MockupSecuritySettings,
+  /**
+   * The "own origin" source token for the served document. For the Electron
+   * protocol it's the `mockup-asset:` scheme; for the remote HTTP transport
+   * it's the server's concrete origin (e.g. `https://host:port`) — needed
+   * because the web iframe runs in a sandboxed opaque origin where CSP `'self'`
+   * matches nothing, so assets must be allowed by explicit origin.
+   */
+  selfSource: string = `${MOCKUP_ASSET_SCHEME}:`
+): string {
+  const scheme = selfSource
   const connectExtras: string[] = []
   for (const origin of settings.connectAllowlist) {
     // The textarea stores bare origins or wildcards; trust already-validated entries.
@@ -116,11 +126,38 @@ export function routeAndValidate(url: URL): RouteDecision {
     return { kind: 'error', status: 404, reason: 'unknown hostname' }
   }
   const id = host.slice(0, -HOST_SUFFIX.length)
+  const segments = url.pathname.split('/').filter(Boolean)
+  return routeMockupParts(id, segments, url.searchParams)
+}
+
+/**
+ * HTTP-transport variant. URL layout: `/mockup/<id>/<b64cwd>/[<subpath>]`.
+ * Reuses the same validation as the protocol scheme — only the id/segment
+ * extraction differs (id from path, not hostname).
+ */
+export function routeHttpMockup(pathname: string, searchParams: URLSearchParams): RouteDecision {
+  const segments = pathname.split('/').filter(Boolean)
+  if (segments[0] !== MOCKUP_HTTP_PREFIX) {
+    return { kind: 'error', status: 404, reason: 'unknown route' }
+  }
+  const id = segments[1] ?? ''
+  return routeMockupParts(id, segments.slice(2), searchParams)
+}
+
+/**
+ * Transport-agnostic core: validates the mockup id, decodes the cwd, resolves
+ * the target path, and enforces the path-traversal + extension allow-lists.
+ * `segments` is `[<b64cwd>, ...<subpath>]`.
+ */
+export function routeMockupParts(
+  id: string,
+  segments: string[],
+  searchParams: URLSearchParams
+): RouteDecision {
   if (!MOCKUP_ID_RE.test(id)) {
     return { kind: 'error', status: 400, reason: 'invalid id' }
   }
 
-  const segments = url.pathname.split('/').filter(Boolean)
   if (segments.length < 1) {
     return { kind: 'error', status: 400, reason: 'missing segments' }
   }
@@ -145,7 +182,7 @@ export function routeAndValidate(url: URL): RouteDecision {
       kind: 'html',
       id,
       mockupDir,
-      dark: url.searchParams.get('dark') === '1'
+      dark: searchParams.get('dark') === '1'
     }
   }
 
@@ -192,57 +229,80 @@ export function registerMockupAssetScheme(): void {
  */
 export function registerMockupAssetHandler(): void {
   protocol.handle(MOCKUP_ASSET_SCHEME, async (request) => {
-    try {
-      const parsed = new URL(request.url)
-      const decision = routeAndValidate(parsed)
-
-      if (decision.kind === 'error') {
-        return new Response(decision.reason, { status: decision.status })
-      }
-
-      if (decision.kind === 'html') {
-        return serveHtml(decision.mockupDir, decision.dark)
-      }
-
-      const fileResponse = await net.fetch(pathToFileURL(decision.path).toString())
-      if (!fileResponse.ok) return new Response('Not found', { status: 404 })
-      const body = await fileResponse.arrayBuffer()
-      return new Response(body, {
-        headers: {
-          'Content-Type': decision.mime,
-          // `no-store` so sibling asset edits (images, CSS, JS) show up on
-          // the next iframe reload. `location.reload()` in Chromium still
-          // respects cache headers — if we said `max-age=3600` here, a
-          // changed asset wouldn't be re-fetched until the entry expired.
-          // Mockups are dev artifacts; the refetch overhead is fine.
-          'Cache-Control': 'no-store',
-          'X-Content-Type-Options': 'nosniff'
-        }
-      })
-    } catch {
-      return new Response('Server error', { status: 500 })
-    }
+    const decision = routeAndValidate(new URL(request.url))
+    const served = await serveMockup(decision, `${MOCKUP_ASSET_SCHEME}:`)
+    // Buffer is a Uint8Array at runtime (valid BodyInit); the cast just
+    // satisfies the DOM lib's narrower BodyInit type.
+    return new Response(served.body as BodyInit, { status: served.status, headers: served.headers })
   })
 }
 
-async function serveHtml(mockupDir: string, dark: boolean): Promise<Response> {
-  const htmlPath = join(mockupDir, 'index.html')
-  const fileResponse = await net.fetch(pathToFileURL(htmlPath).toString())
-  if (!fileResponse.ok) return new Response('Not found', { status: 404 })
+/** Normalized serve result, consumable by both the Electron `Response` API
+ *  (protocol handler) and Node's `http.ServerResponse` (remote server). */
+export interface ServedMockup {
+  status: number
+  headers: Record<string, string>
+  body: Buffer | string
+}
 
-  let html = await fileResponse.text()
-  html = rewriteHtml(html, dark)
-
-  const csp = buildMockupCsp(getMockupSecuritySettings())
-
-  return new Response(html, {
-    headers: {
-      'Content-Type': 'text/html; charset=utf-8',
-      'Cache-Control': 'no-store',
-      'Content-Security-Policy': csp,
-      'X-Content-Type-Options': 'nosniff'
+/**
+ * Transport-agnostic serving: turns a {@link RouteDecision} into bytes +
+ * headers. Reads from the filesystem directly (no Electron `net`) so the
+ * remote HTTP server can reuse it.
+ *
+ * `selfSource` is threaded into the CSP — `mockup-asset:` for the protocol,
+ * the server origin for HTTP. Asset responses carry `Access-Control-Allow-Origin: *`
+ * because the web client's sandboxed iframe loads them from an opaque origin.
+ */
+export async function serveMockup(decision: RouteDecision, selfSource: string): Promise<ServedMockup> {
+  try {
+    if (decision.kind === 'error') {
+      return { status: decision.status, headers: { 'Content-Type': 'text/plain; charset=utf-8' }, body: decision.reason }
     }
-  })
+
+    if (decision.kind === 'html') {
+      let html: string
+      try {
+        html = await fs.promises.readFile(join(decision.mockupDir, 'index.html'), 'utf-8')
+      } catch {
+        return { status: 404, headers: { 'Content-Type': 'text/plain; charset=utf-8' }, body: 'Not found' }
+      }
+      html = rewriteHtml(html, decision.dark)
+      return {
+        status: 200,
+        headers: {
+          'Content-Type': 'text/html; charset=utf-8',
+          'Cache-Control': 'no-store',
+          'Content-Security-Policy': buildMockupCsp(getMockupSecuritySettings(), selfSource),
+          'X-Content-Type-Options': 'nosniff'
+        },
+        body: html
+      }
+    }
+
+    let body: Buffer
+    try {
+      body = await fs.promises.readFile(decision.path)
+    } catch {
+      return { status: 404, headers: { 'Content-Type': 'text/plain; charset=utf-8' }, body: 'Not found' }
+    }
+    return {
+      status: 200,
+      headers: {
+        'Content-Type': decision.mime,
+        // `no-store` so sibling asset edits (images, CSS, JS) show up on the
+        // next iframe reload. `location.reload()` in Chromium still respects
+        // cache headers — `max-age` here would pin a stale asset until expiry.
+        // Mockups are dev artifacts; the refetch overhead is fine.
+        'Cache-Control': 'no-store',
+        'X-Content-Type-Options': 'nosniff',
+        'Access-Control-Allow-Origin': '*'
+      },
+      body
+    }
+  } catch {
+    return { status: 500, headers: { 'Content-Type': 'text/plain; charset=utf-8' }, body: 'Server error' }
+  }
 }
 
 /**
