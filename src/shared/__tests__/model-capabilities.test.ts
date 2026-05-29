@@ -15,6 +15,7 @@ import {
   modelDefaultEffort,
   modelDefaultThinkingMode,
   modelResolveEffort,
+  canonicalizeModelValue,
 } from '../model-capabilities'
 
 describe('supportsAdaptiveThinking', () => {
@@ -241,6 +242,28 @@ describe('modelDefaultThinkingMode', () => {
   it('enabled when SDK says no adaptive', () => {
     expect(modelDefaultThinkingMode({ value: 'haiku', supportsAdaptiveThinking: false })).toBe('enabled')
     expect(modelDefaultThinkingMode({ value: 'haiku' })).toBe('enabled') // id-fallback
+  })
+})
+
+describe('canonicalizeModelValue', () => {
+  it('maps known aliases to current canonical ids (mirrors cli.js i8_)', () => {
+    expect(canonicalizeModelValue('opus')).toBe('claude-opus-4-8')
+    expect(canonicalizeModelValue('opus[1m]')).toBe('claude-opus-4-8')
+    expect(canonicalizeModelValue('sonnet')).toBe('claude-sonnet-4-6')
+    expect(canonicalizeModelValue('sonnet[1m]')).toBe('claude-sonnet-4-6')
+    expect(canonicalizeModelValue('haiku')).toBe('claude-haiku-4-5')
+  })
+  it('passes canonical ids through (normalised, date stripped)', () => {
+    expect(canonicalizeModelValue('claude-opus-4-8')).toBe('claude-opus-4-8')
+    expect(canonicalizeModelValue('claude-opus-4-7-20260101')).toBe('claude-opus-4-7')
+  })
+  it('leaves the `default` alias unmapped — its target depends on user config', () => {
+    expect(canonicalizeModelValue('default')).toBe('default')
+  })
+  it('handles empty / null input', () => {
+    expect(canonicalizeModelValue('')).toBe('')
+    expect(canonicalizeModelValue(undefined)).toBe('')
+    expect(canonicalizeModelValue(null)).toBe('')
   })
 })
 

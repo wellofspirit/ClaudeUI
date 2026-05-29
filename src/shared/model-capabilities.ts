@@ -45,6 +45,34 @@ function normaliseModelId(model: string | undefined | null): string {
 }
 
 /**
+ * Map a model picker value to its canonical id. Mirrors cli.js's `i8_`
+ * alias table at the time of writing (2.1.154):
+ *   `opus` → `claude-opus-4-8`, `sonnet` → `claude-sonnet-4-6`,
+ *   `haiku` → `claude-haiku-4-5`.
+ *
+ * The `default` alias intentionally has no mapping — it resolves at the cli.js
+ * layer to whatever the user (or environment) has configured. Returns the
+ * input unchanged for canonical ids that don't need translation.
+ */
+export function canonicalizeModelValue(value: string | undefined | null): string {
+  if (!value) return ''
+  switch (value) {
+    case 'opus':
+      return 'claude-opus-4-8'
+    case 'opus[1m]':
+      return 'claude-opus-4-8'
+    case 'sonnet':
+      return 'claude-sonnet-4-6'
+    case 'sonnet[1m]':
+      return 'claude-sonnet-4-6'
+    case 'haiku':
+      return 'claude-haiku-4-5'
+    default:
+      return normaliseModelId(value) || value
+  }
+}
+
+/**
  * Models known NOT to support `effort: 'max'`. Mirrors cli.js `c8z` set.
  * Note: haiku is excluded by name elsewhere (it never supports `max`).
  */

@@ -16,6 +16,7 @@ import {
   modelResolveEffort,
   modelDefaultEffort,
   modelDefaultThinkingMode,
+  canonicalizeModelValue,
   type EffortLevel,
   type ThinkingMode,
 } from '../../../../../shared/model-capabilities'
@@ -182,7 +183,10 @@ export function InputBox(): React.JSX.Element {
     const session = state.sessions[routingId]
     const modelInfo = state.availableModels.find((m) => m.value === session?.selectedModel)
     const desiredThinking: ThinkingMode = session?.thinkingMode ?? modelDefaultThinkingMode(modelInfo)
-    const desiredEffort: EffortLevel = session?.effort ?? modelDefaultEffort(modelInfo)
+    // Effort precedence: explicit per-session pick > per-model user default > cli.js heuristic.
+    const userDefault = state.settings.modelEffortDefaults?.[canonicalizeModelValue(modelInfo?.value)]
+    const desiredEffort: EffortLevel =
+      session?.effort ?? userDefault ?? modelDefaultEffort(modelInfo)
     return {
       effort: modelResolveEffort(modelInfo, desiredEffort) ?? desiredEffort,
       thinkingMode: modelResolveThinkingMode(modelInfo, desiredThinking),

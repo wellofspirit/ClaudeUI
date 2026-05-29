@@ -5,6 +5,11 @@ import { PermissionsDialog } from '../PermissionsDialog'
 import type { ClaudePermissions, ProxySettings, VoiceLanguageCode } from '../../../../shared/types'
 import { VOICE_LANGUAGES } from '../../../../shared/types'
 import {
+  supportedEffortLevels,
+  defaultEffort,
+  type EffortLevel,
+} from '../../../../shared/model-capabilities'
+import {
   SettingsToggle,
   SettingsSlider,
   SettingsSelect,
@@ -116,6 +121,60 @@ function GlobalPermissionsSummary(): React.JSX.Element {
         cwd={cwd}
         initialTab="user"
       />
+    </div>
+  )
+}
+
+// ── Per-model effort default config ──────────────────────────────────
+
+const EFFORT_LEVEL_LABEL: Record<EffortLevel, string> = {
+  low: 'Low',
+  medium: 'Medium',
+  high: 'High',
+  xhigh: 'Extra high',
+  max: 'Max',
+}
+
+const EFFORT_MODELS: ReadonlyArray<{ id: string; label: string }> = [
+  { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6' },
+  { id: 'claude-opus-4-7', label: 'Opus 4.7' },
+  { id: 'claude-opus-4-8', label: 'Opus 4.8' },
+]
+
+function ModelEffortRow({
+  modelId,
+  modelLabel,
+  current,
+  onChange,
+}: {
+  modelId: string
+  modelLabel: string
+  current: EffortLevel | undefined
+  onChange: (next: EffortLevel | undefined) => void
+}): React.JSX.Element {
+  const levels = supportedEffortLevels(modelId)
+  const fallback = defaultEffort(modelId)
+  return (
+    <div className="pl-4 px-3 py-1.5 text-[13px] text-text-secondary">
+      <div className="mb-1 flex items-baseline justify-between gap-2">
+        <span>{modelLabel}</span>
+        <span className="text-[10px] text-text-muted/50">{modelId}</span>
+      </div>
+      <select
+        value={current ?? ''}
+        onChange={(e) => {
+          const v = e.target.value
+          onChange(v === '' ? undefined : (v as EffortLevel))
+        }}
+        className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors cursor-pointer"
+      >
+        <option value="">{`Default (${EFFORT_LEVEL_LABEL[fallback]})`}</option>
+        {levels.map((lvl) => (
+          <option key={lvl} value={lvl}>
+            {EFFORT_LEVEL_LABEL[lvl]}
+          </option>
+        ))}
+      </select>
     </div>
   )
 }
@@ -1593,5 +1652,55 @@ export const SECTIONS: Section[] = [
         )
       }
     ]
-  }
+  },
+  {
+    id: 'effortDefaults',
+    label: 'Default effort',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <path d="M13 2L3 14h7l-1 8 10-12h-7l1-8z" />
+      </svg>
+    ),
+    items: [
+      ...EFFORT_MODELS.map((m) => ({
+        key: `effortDefault_${m.id}`,
+        label: `Default effort · ${m.label}`,
+        keywords: `effort default ${m.label} ${m.id} reasoning thinking`,
+        render: (s: AppSettings, u: (p: Partial<AppSettings>) => void) => (
+          <ModelEffortRow
+            modelId={m.id}
+            modelLabel={m.label}
+            current={s.modelEffortDefaults?.[m.id]}
+            onChange={(next) => {
+              const map = { ...(s.modelEffortDefaults ?? {}) }
+              if (next === undefined) delete map[m.id]
+              else map[m.id] = next
+              u({ modelEffortDefaults: map })
+            }}
+          />
+        ),
+      })),
+      {
+        key: 'effortDefaultsFooter',
+        label: 'Effort defaults info',
+        keywords: 'effort default fallback per-session',
+        render: () => (
+          <div className="px-3 py-1.5 text-[11px] text-text-muted/60">
+            Picked here when starting a new session with the matching model. A per-session effort
+            choice (chip next to the input) always wins. Applies to the canonical model and its
+            aliases (e.g. selecting <code>opus</code> in the picker uses your Opus 4.8 default).
+          </div>
+        ),
+      },
+    ],
+  },
 ]
