@@ -90,11 +90,10 @@ export function loadClaudePermissions(scope: PermissionScope, cwd?: string): Cla
 // cli.js reads via settingSources:['user',...] — so it's the single source of
 // truth honored by both ClaudeUI and the native CLI.
 //
-// Values: integer >= 1 = retention window; 0 = disable the cleanup sweep.
-// Upstream marks 0 as schema-invalid (min 1), but cli.js's pkO() gate skips
-// cleanup entirely when an explicitly-set cleanupPeriodDays has a validation
-// error — so 0 reliably disables the sweep on both the bundled and native
-// CLIs (at the cost of a startup validation warning). See ADR-009.
+// Stored as an integer >= 1 (upstream schema minimum). The UI writes a large
+// window (3650 ≈ 10 years) to mean "never clean up" rather than 0, which
+// upstream marks invalid and which trips a startup validation warning. See
+// ADR-009.
 
 export function loadCleanupPeriodDays(): number | undefined {
   const data = readJsonSafe(settingsFilePath('user'))
@@ -106,8 +105,8 @@ export function saveCleanupPeriodDays(days: number): void {
   const filePath = settingsFilePath('user')
   const data = readJsonSafe(filePath) ?? {}
 
-  // Round to an integer; floor at 0 (the disable sentinel).
-  data.cleanupPeriodDays = Math.max(0, Math.round(days))
+  // Clamp to the upstream-valid range: integer >= 1.
+  data.cleanupPeriodDays = Math.max(1, Math.round(days))
 
   const dir = path.dirname(filePath)
   if (!fs.existsSync(dir)) {

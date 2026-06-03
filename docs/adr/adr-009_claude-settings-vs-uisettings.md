@@ -69,17 +69,15 @@ UISettings remains the home for purely cosmetic/behavioral ClaudeUI state that
   The cleanup *sweep* itself still only fires on `cli.js` startup (throttled to
   once / 24h via `.last-cleanup`), so a changed retention takes effect on the
   next launch — acceptable and non-surprising.
-- **Auto-delete OFF writes `0`.** Upstream marks `cleanupPeriodDays: 0` as
-  schema-invalid (min 1) and steers users toward a large window (3650) or
-  `--no-session-persistence`. We deliberately use `0` anyway because it's the
-  clearest "off" sentinel and it *reliably* disables the sweep: cli.js's
-  `pkO()` gate returns false ("Skipping cleanup: settings have validation
-  errors but cleanupPeriodDays was explicitly set") whenever an explicitly-set
-  `cleanupPeriodDays` carries a validation error — so `FO4()` early-returns on
-  both the bundled and native CLIs. Trade-off: cli.js logs that validation
-  warning on every startup and `settings.json` is technically schema-invalid
-  (the value never reaches `rs()`). `3650` is the warning-free alternative if
-  that becomes annoying.
+- **Auto-delete OFF writes `3650` (≈ 10 years), not `0`.** Upstream marks
+  `cleanupPeriodDays: 0` as schema-invalid (min 1) and steers users toward a
+  large window or `--no-session-persistence`. `0` *would* disable the sweep
+  (cli.js's `pkO()` gate skips cleanup when an explicitly-set value carries a
+  validation error), but at the cost of a startup validation warning on every
+  launch and a schema-invalid `settings.json`. We use `3650` instead: it keeps
+  `settings.json` valid, produces no warning, and is effectively "never" for
+  any real session. The control treats `0` (and any value ≥ 3650) as OFF on
+  load, so hand-edited or legacy `0` values still render correctly.
 - **Self-contained controls are a sanctioned pattern.** SettingsDialog items
   may ignore `(settings, updateSettings)` and own their IPC state when the
   underlying value is not part of `AppSettings` (precedent: `ProxyTestButton`).

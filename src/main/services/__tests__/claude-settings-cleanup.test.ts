@@ -89,13 +89,13 @@ describe('cleanupPeriodDays helpers', () => {
       expect(readSettings().cleanupPeriodDays).toBe(3650)
     })
 
-    it('persists 0 as the disable sentinel', () => {
-      // 0 turns auto-cleanup off; cli.js's pkO() gate skips the sweep on the
-      // resulting validation error. Negatives floor to 0.
+    it('clamps values below 1 up to the upstream minimum', () => {
+      // Upstream schema requires >= 1; the UI uses a large window (not 0) for
+      // "never", so we never persist 0.
       saveCleanupPeriodDays(0)
-      expect(readSettings().cleanupPeriodDays).toBe(0)
+      expect(readSettings().cleanupPeriodDays).toBe(1)
       saveCleanupPeriodDays(-5)
-      expect(readSettings().cleanupPeriodDays).toBe(0)
+      expect(readSettings().cleanupPeriodDays).toBe(1)
     })
 
     it('rounds fractional days to an integer', () => {
