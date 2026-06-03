@@ -80,6 +80,44 @@ export function loadClaudePermissions(scope: PermissionScope, cwd?: string): Cla
   return normalizePermissions(data.permissions)
 }
 
+// ---------------------------------------------------------------------------
+// cleanupPeriodDays — transcript retention window
+// ---------------------------------------------------------------------------
+//
+// Claude Code's startup sweep deletes chat transcripts under ~/.claude/projects
+// whose mtime is older than `cleanupPeriodDays` (default 30). This lives as a
+// top-level key in the user-scope settings.json — the same file the bundled
+// cli.js reads via settingSources:['user',...] — so it's the single source of
+// truth honored by both ClaudeUI and the native CLI.
+//
+// Values: integer >= 1 = retention window; 0 = disable the cleanup sweep.
+// Upstream marks 0 as schema-invalid (min 1), but cli.js's pkO() gate skips
+// cleanup entirely when an explicitly-set cleanupPeriodDays has a validation
+// error — so 0 reliably disables the sweep on both the bundled and native
+// CLIs (at the cost of a startup validation warning). See ADR-009.
+
+export function loadCleanupPeriodDays(): number | undefined {
+  const data = readJsonSafe(settingsFilePath('user'))
+  const v = data?.cleanupPeriodDays
+  return typeof v === 'number' && Number.isFinite(v) ? v : undefined
+}
+
+export function saveCleanupPeriodDays(days: number): void {
+  const filePath = settingsFilePath('user')
+  const data = readJsonSafe(filePath) ?? {}
+
+  // Round to an integer; floor at 0 (the disable sentinel).
+  data.cleanupPeriodDays = Math.max(0, Math.round(days))
+
+  const dir = path.dirname(filePath)
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
+  }
+
+  fs.writeFileSync(filePath, JSON.stringify(data, null, 2) + '\n', { mode: 0o600 })
+  logger.debug('ClaudeSettings', `Saved cleanupPeriodDays=${data.cleanupPeriodDays} to ${filePath}`)
+}
+
 export function saveClaudePermissions(
   scope: PermissionScope,
   permissions: ClaudePermissions,

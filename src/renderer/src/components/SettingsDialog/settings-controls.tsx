@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 
 // ── Shared setting control components ────────────────────────────────
 
@@ -104,6 +104,84 @@ export function SettingsSelect<T extends string>({
           </button>
         ))}
       </div>
+    </div>
+  )
+}
+
+// 0 = auto-delete OFF (disable the cleanup sweep). Upstream marks 0 as
+// schema-invalid (min 1), but cli.js's pkO() gate skips cleanup when an
+// explicitly-set cleanupPeriodDays has a validation error — so 0 reliably
+// disables the sweep on both bundled and native CLIs. See ADR-009.
+const OFF_DAYS = 0
+// Default retention the CLI applies when cleanupPeriodDays is unset.
+const DEFAULT_DAYS = 30
+
+/**
+ * Controls Claude Code's transcript retention (`cleanupPeriodDays` in
+ * ~/.claude/settings.json). Self-contained: reads/writes via window.api rather
+ * than the UISettings store, since this setting lives in Claude's own file.
+ *
+ * OFF → writes 0 (disable cleanup, keep history indefinitely).
+ * ON  → writes a finite day count (min 1) entered in the number field.
+ */
+export function ChatRetentionSetting(): React.JSX.Element {
+  const [days, setDays] = useState<number | null>(null) // null = still loading
+  const [lastFinite, setLastFinite] = useState(DEFAULT_DAYS)
+
+  useEffect(() => {
+    let cancelled = false
+    window.api
+      .getCleanupPeriodDays()
+      .then((v) => {
+        if (cancelled) return
+        // undefined = key unset → CLI default of 30 (cleanup on).
+        const val = typeof v === 'number' ? v : DEFAULT_DAYS
+        setDays(val)
+        if (val > OFF_DAYS) setLastFinite(val)
+      })
+      .catch(() => {
+        if (!cancelled) setDays(DEFAULT_DAYS)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  if (days === null) {
+    return <div className="px-3 py-1.5 text-[13px] text-text-muted">Loading…</div>
+  }
+
+  const autoDelete = days > OFF_DAYS
+
+  const persist = (v: number): void => {
+    setDays(v)
+    if (v > OFF_DAYS) setLastFinite(v)
+    window.api.setCleanupPeriodDays(v).catch(() => {})
+  }
+
+  return (
+    <div>
+      <SettingsToggle
+        label="Auto-delete old chats"
+        checked={autoDelete}
+        onChange={(on) => persist(on ? lastFinite : OFF_DAYS)}
+        tooltip="Claude Code deletes chat transcripts under ~/.claude/projects once they pass the retention window, on startup. Turn off to keep history indefinitely. Deletion is by file modified-time, so resuming an old session resets its clock."
+      />
+      {autoDelete && (
+        <div className="px-3 py-1.5 text-[13px] text-text-secondary flex items-center justify-between">
+          <span>Delete after</span>
+          <span className="flex items-center gap-1.5">
+            <input
+              type="number"
+              min={1}
+              value={days}
+              onChange={(e) => persist(Math.max(1, Math.round(Number(e.target.value) || 1)))}
+              className="w-16 bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors tabular-nums text-right"
+            />
+            <span className="text-[11px] text-text-muted">days</span>
+          </span>
+        </div>
+      )}
     </div>
   )
 }

@@ -439,6 +439,9 @@ interface McpAPI {
   onMcpServers(cb: (routingId: string, servers: Array<{ name: string; status: string }>) => void): () => void
   loadClaudePermissions(scope: PermissionScope, cwd?: string): Promise<ClaudePermissions>
   saveClaudePermissions(scope: PermissionScope, permissions: ClaudePermissions, cwd?: string): Promise<void>
+  /** Transcript retention window (cleanupPeriodDays). undefined = not set (CLI default of 30). */
+  getCleanupPeriodDays(): Promise<number | undefined>
+  setCleanupPeriodDays(days: number): Promise<void>
 }
 
 interface TerminalAPI {

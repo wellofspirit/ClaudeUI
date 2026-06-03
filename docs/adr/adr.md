@@ -10,3 +10,4 @@
 | [006](adr-006_rebundle-bun-binary.md) | Rebundle Bun standalone binary instead of running cli.js under Node |
 | [007](adr-007_remote-mockup-http-transport.md) | Serve mockup previews over HTTP with a sandboxed iframe for the remote web client |
 | [008](adr-008_typecheck-remote-web-client.md) | Type-check the remote web client (`src/web`) against `ClaudeAPI` |
+| [009](adr-009_claude-settings-vs-uisettings.md) | Store cli.js-consumed settings in Claude's settings.json, not UISettings |

@@ -7,7 +7,7 @@ import { deleteSessionFiles, deleteProjectFiles } from '../services/delete-sessi
 import { loadSettings, saveSettings, loadSessionConfig, saveSessionConfig, loadSlashCommands } from '../services/ui-config'
 import { invalidateMockupSecuritySettings } from '../services/mockup-settings'
 import type { UISettings, UISessionConfig } from '../services/ui-config'
-import { loadClaudePermissions } from '../services/claude-settings'
+import { loadClaudePermissions, loadCleanupPeriodDays, saveCleanupPeriodDays } from '../services/claude-settings'
 import { loadMcpServers, readDisabledMcpServers } from '../services/claude-mcp'
 import { scanSkills } from '../services/skill-scanner'
 import { scanCustomCommands } from '../services/custom-command-scanner'
@@ -249,6 +249,13 @@ export function registerRemoteHandlers(
   // Claude permissions (read-only)
   dispatcher.register('claude:load-permissions', async (scope: string, cwd?: string) =>
     loadClaudePermissions(scope as 'user' | 'project' | 'local', cwd))
+
+  // Transcript retention window (~/.claude/settings.json#cleanupPeriodDays)
+  dispatcher.register('claude:get-cleanup-period', async () => loadCleanupPeriodDays())
+  dispatcher.register('claude:set-cleanup-period', async (days: number) => {
+    saveCleanupPeriodDays(days)
+    manager.forEach((session) => session.notifySettingsChanged().catch(() => {}))
+  })
 
   // MCP config (read-only)
   dispatcher.register('mcp:load-servers', async (scope: string, cwd?: string) =>

@@ -205,6 +205,10 @@ const api: ClaudeAPI = {
   saveClaudePermissions: (scope, permissions, cwd?) =>
     ipcRenderer.invoke('claude:save-permissions', scope, permissions, cwd),
 
+  // Transcript retention window (cleanupPeriodDays in ~/.claude/settings.json)
+  getCleanupPeriodDays: () => ipcRenderer.invoke('claude:get-cleanup-period'),
+  setCleanupPeriodDays: (days) => ipcRenderer.invoke('claude:set-cleanup-period', days),
+
   // MCP server management — toggle/reconnect/set-servers use safeHandler
   mcpServerStatus: (routingId: string) =>
     ipcRenderer.invoke('mcp:status', routingId),

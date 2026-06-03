@@ -14,7 +14,8 @@ import {
   SettingsSlider,
   SettingsSelect,
   SettingsTextarea,
-  SandboxListSetting
+  SandboxListSetting,
+  ChatRetentionSetting
 } from './settings-controls'
 
 // ── Section definitions ──────────────────────────────────────────────
@@ -392,6 +393,12 @@ export const SECTIONS: Section[] = [
             onChange={(v) => u({ sessionTimeoutMins: Number(v) })}
           />
         )
+      },
+      {
+        key: 'cleanupPeriodDays',
+        label: 'Chat history retention',
+        keywords: 'cleanup retention delete history transcripts privacy purge old chats days forever',
+        render: () => <ChatRetentionSetting />
       }
     ]
   },

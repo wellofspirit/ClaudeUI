@@ -294,6 +294,12 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       connection.invoke('claude:load-permissions', scope, cwd) as ReturnType<ClaudeAPI['loadClaudePermissions']>,
     saveClaudePermissions: async () => {}, // Read-only
 
+    // Transcript retention window (cleanupPeriodDays)
+    getCleanupPeriodDays: () =>
+      connection.invoke('claude:get-cleanup-period') as ReturnType<ClaudeAPI['getCleanupPeriodDays']>,
+    setCleanupPeriodDays: (days) =>
+      connection.invoke('claude:set-cleanup-period', days) as Promise<void>,
+
     // MCP
     mcpServerStatus: (routingId) =>
       connection.invoke('mcp:status', routingId) as ReturnType<ClaudeAPI['mcpServerStatus']>,

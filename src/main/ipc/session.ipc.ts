@@ -9,7 +9,12 @@ import { getSdkExecutableOpts, ClaudeSession } from '../services/claude-session'
 import { listDirectories, loadSessionHistory, loadSubagentHistory, buildSubagentFileMap, loadBackgroundOutput } from '../services/session-history'
 import { watchSession, unwatchSession } from '../services/session-watcher'
 import { loadSettings, saveSettings, loadSessionConfig, saveSessionConfig, loadSlashCommands, saveSlashCommands, startConfigWatcher } from '../services/ui-config'
-import { loadClaudePermissions, saveClaudePermissions } from '../services/claude-settings'
+import {
+  loadClaudePermissions,
+  saveClaudePermissions,
+  loadCleanupPeriodDays,
+  saveCleanupPeriodDays
+} from '../services/claude-settings'
 import { loadMcpServers, saveMcpServers, removeMcpServer, readDisabledMcpServers, writeDisabledMcpServers } from '../services/claude-mcp'
 import { scanSkills } from '../services/skill-scanner'
 import { scanCustomCommands } from '../services/custom-command-scanner'
@@ -208,6 +213,7 @@ const SESSION_IPC_CHANNELS = [
   'file:list-dir',
   'usage:fetch', 'usage:fetch-block',
   'claude:load-permissions', 'claude:save-permissions',
+  'claude:get-cleanup-period', 'claude:set-cleanup-period',
   'mcp:status', 'mcp:toggle', 'mcp:reconnect', 'mcp:set-servers',
   'mcp:load-servers', 'mcp:save-servers', 'mcp:remove-server',
   'mcp:read-disabled', 'mcp:toggle-disabled',
@@ -843,6 +849,16 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
       if (!cwd || session.cwd === cwd || scope === 'user') {
         session.notifySettingsChanged().catch(() => {})
       }
+    })
+  })
+
+  // Transcript retention window (~/.claude/settings.json#cleanupPeriodDays)
+  ipcMain.handle('claude:get-cleanup-period', () => loadCleanupPeriodDays())
+  ipcMain.handle('claude:set-cleanup-period', async (_e, days: number) => {
+    saveCleanupPeriodDays(days)
+    // Hot-reload running CLI sessions so the new retention applies immediately.
+    manager.forEach((session) => {
+      session.notifySettingsChanged().catch(() => {})
     })
   })
 
