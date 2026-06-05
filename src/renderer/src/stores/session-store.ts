@@ -389,6 +389,11 @@ export interface PerSessionState {
   cwd: string
   sdkActive: boolean
   isHistorical: boolean
+  /** Set on a freshly-forked ("branched off") session before its first send.
+   *  Tells InputBox to spawn cli.js with `--resume <source> --resume-session-at
+   *  <anchor> --fork-session`, minting a new branch seeded with messages 1..N.
+   *  Read only while `!sdkActive`; the fork materializes lazily on first prompt. */
+  forkOrigin: { sourceSessionId: string; anchorUuid: string } | null
   messages: ChatMessage[]
   streamingText: string
   streamingThinking: string
@@ -454,6 +459,7 @@ const EMPTY_SESSION_STATE: PerSessionState = {
   cwd: '',
   sdkActive: false,
   isHistorical: false,
+  forkOrigin: null,
   messages: [],
   streamingText: '',
   streamingThinking: '',
@@ -596,6 +602,11 @@ interface SessionState {
   switchSession: (routingId: string) => void
   createNewSession: (routingId: string, cwd: string, switchTo?: boolean) => void
   loadHistoricalSession: (routingId: string, messages: ChatMessage[], cwd: string, taskNotifications?: TaskNotification[], subagentMessages?: Record<string, ChatMessage[]>, statusLine?: StatusLineData | null) => void
+  /** Fork ("branch off") a new session from an assistant message in `sourceRoutingId`.
+   *  Resolves the disk anchor, seeds the new session with messages 1..N, and
+   *  switches to it. The branch materializes on cli.js on first prompt send.
+   *  Returns the new routingId, or null if the anchor could not be resolved. */
+  forkFromMessage: (sourceRoutingId: string, messageId: string) => Promise<string | null>
   markSdkActive: (routingId: string) => void
   markSdkInactive: (routingId: string) => void
   setDirectories: (dirs: DirectoryGroup[]) => void
@@ -809,6 +820,66 @@ export const useSessionStore = create<SessionState>((set) => ({
         }
       }
     })),
+
+  forkFromMessage: async (sourceRoutingId, messageId) => {
+    const src = useSessionStore.getState().sessions[sourceRoutingId]
+    if (!src) return null
+    // The on-disk session id: a rekeyed live session or a historical load both
+    // carry it as the routingId; a still-streaming session exposes it on status.
+    const sourceSessionId = src.status.sessionId ?? sourceRoutingId
+
+    const result = await window.api.resolveForkAnchor(sourceSessionId, src.cwd, messageId)
+    if (!result?.anchorUuid) {
+      // The message isn't flushed to the transcript yet (or vanished). Surface
+      // it on the source session rather than silently doing nothing.
+      useSessionStore.getState().addError(
+        sourceRoutingId,
+        'Cannot branch from this message yet — it has not been saved to the transcript.'
+      )
+      return null
+    }
+    const anchorUuid: string = result.anchorUuid
+
+    // Optimistically seed the branch with messages 1..N (deep-ish copy so edits
+    // to one session never mutate the other). cli.js performs the same slice by
+    // uuid when it materializes the fork, so the displayed history will match.
+    const idx = src.messages.findIndex((m) => m.id === messageId)
+    const sliced = (idx >= 0 ? src.messages.slice(0, idx + 1) : src.messages).map((m) => ({
+      ...m,
+      content: m.content.map((b) => ({ ...b }))
+    }))
+
+    const newRoutingId = crypto.randomUUID()
+    set((s) => {
+      const recentSessionIds = [
+        newRoutingId,
+        ...s.recentSessionIds.filter((id) => id !== newRoutingId)
+      ].slice(0, s.settings.maxRecentSessions)
+      saveSessionConfig(s, { recentSessionIds })
+      return {
+        sessions: {
+          ...s.sessions,
+          [newRoutingId]: {
+            ...createEmptySession(src.cwd),
+            messages: sliced,
+            // Render the seeded history immediately; the fork-spawn path in
+            // InputBox (gated on forkOrigin) overrides the resume target.
+            isHistorical: true,
+            forkOrigin: { sourceSessionId, anchorUuid },
+            // Inherit the source's model/permission/effort/thinking choices.
+            selectedModel: src.selectedModel,
+            permissionMode: src.permissionMode,
+            effort: src.effort,
+            thinkingMode: src.thinkingMode
+          }
+        },
+        activeSessionId: newRoutingId,
+        activeView: { type: 'chat' } as ActiveView,
+        recentSessionIds
+      }
+    })
+    return newRoutingId
+  },
 
   markSdkActive: (routingId) =>
     set((state) => ({

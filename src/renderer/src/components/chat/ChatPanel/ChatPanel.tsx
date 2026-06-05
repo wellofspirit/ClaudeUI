@@ -229,7 +229,7 @@ export function ChatPanel(): React.JSX.Element {
               <LoadingState />
             </div>
           ) : (
-            <div style={{ ...(chatZoom !== 1 ? { zoom: chatZoom } : {}), maxWidth: chatMaxWidth }} className={`mx-auto pt-5 pb-6 flex flex-col gap-5 ${isMobile ? 'px-3' : 'px-8'}`}>
+            <div style={{ ...(chatZoom !== 1 ? { zoom: chatZoom } : {}), maxWidth: chatMaxWidth }} className={`mx-auto pt-5 pb-6 flex flex-col gap-3 ${isMobile ? 'px-3' : 'px-8'}`}>
               {messages.map((msg) => (
                 <div key={msg.id} className="cv-auto">
                   <MessageBubble

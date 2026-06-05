@@ -184,6 +184,13 @@ export class ClaudeSession {
   private thinkingMode: 'adaptive' | 'enabled' | 'disabled'
   private model: string = 'default'
   private resumeSessionId: string | undefined
+  /** Fork ("branch off") seeding: when set on creation, the FIRST run resumes
+   *  `resumeSessionId` truncated to this line uuid with `--fork-session`, so a
+   *  brand-new session UUID is minted carrying messages 1..N. Cleared once the
+   *  fork has materialized (sessionId established) so later turns resume the
+   *  new session normally. See resolveForkAnchor() in session-history.ts. */
+  private resumeSessionAt: string | undefined
+  private forkSession = false
   private statusLineTimer: ReturnType<typeof setTimeout> | null = null
   private inactivityTimer: ReturnType<typeof setTimeout> | null = null
   private inactivityTimeoutMs = 15 * 60 * 1000 // default 15 min, 0 = disabled
@@ -199,7 +206,7 @@ export class ClaudeSession {
   private accTotalApiDurationMs = 0
   private lastContextLength = 0
 
-  constructor(routingId: string, win: BrowserWindow, cwd: string, effort?: string, resumeSessionId?: string, permissionMode?: string, model?: string, sandboxConfig?: SandboxSettings, thinkingMode?: string) {
+  constructor(routingId: string, win: BrowserWindow, cwd: string, effort?: string, resumeSessionId?: string, permissionMode?: string, model?: string, sandboxConfig?: SandboxSettings, thinkingMode?: string, resumeSessionAt?: string, forkSession?: boolean) {
     this.routingId = routingId
     this.win = win
     this.cwd = cwd
@@ -208,6 +215,8 @@ export class ClaudeSession {
       ? thinkingMode
       : 'adaptive'
     this.resumeSessionId = resumeSessionId
+    this.resumeSessionAt = resumeSessionAt
+    this.forkSession = !!forkSession && !!resumeSessionAt
     if (permissionMode) this.permissionMode = permissionMode
     if (model) this.model = model
     if (sandboxConfig) this.sandboxConfig = sandboxConfig
@@ -502,7 +511,18 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
               stderrChunks.push(text)
             }
           },
-          ...(this.resumeSessionId ? { resume: this.resumeSessionId } : this.sessionId ? { resume: this.sessionId } : {}),
+          // Resume precedence: once cli.js has minted a stable sessionId
+          // (post-init), always resume THAT — critical for forks, where the
+          // new branch's id differs from the source we resumed/truncated from.
+          // Before init, fall back to the requested resume target (the source
+          // session for a fork, or self for a plain historical resume).
+          ...(this.sessionId ? { resume: this.sessionId } : this.resumeSessionId ? { resume: this.resumeSessionId } : {}),
+          // Fork truncation applies only on the FIRST run, against the source
+          // transcript. After init, sessionId is set and we resume the new
+          // branch in place — no re-fork, no re-truncate.
+          ...(this.forkSession && this.resumeSessionAt && !this.sessionId
+            ? { resumeSessionAt: this.resumeSessionAt, forkSession: true }
+            : {}),
           canUseTool: async (toolName, input, opts) => {
             // Auto-allow our in-process UI tools (mermaid, etc.) — no user approval needed
             if (toolName.startsWith('mcp__claude-ui__')) {

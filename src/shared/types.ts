@@ -321,11 +321,21 @@ export interface DirectoryGroup {
 // Domain-specific API interfaces (composed into ClaudeAPI)
 // ---------------------------------------------------------------------------
 
+export interface ForkAnchorResult {
+  /** JSONL line uuid to pass to cli.js `--resume-session-at`, or null if the
+   *  message could not be resolved on disk (e.g. not yet flushed). */
+  anchorUuid: string | null
+  reason?: string
+}
+
 interface SessionAPI {
   platform: string
   pickFolder(): Promise<string | null>
-  createSession(routingId: string, cwd: string, effort?: string, resumeSessionId?: string, permissionMode?: string, model?: string, thinkingMode?: string): Promise<void>
+  createSession(routingId: string, cwd: string, effort?: string, resumeSessionId?: string, permissionMode?: string, model?: string, thinkingMode?: string, resumeSessionAt?: string, forkSession?: boolean): Promise<void>
   rekeySession(oldId: string, newId: string): Promise<void>
+  /** Resolve the balanced JSONL line uuid to fork ("branch off") from, given
+   *  an assistant message id. Returns { anchorUuid: null, reason } on failure. */
+  resolveForkAnchor(sessionId: string, cwd: string, messageId: string): Promise<ForkAnchorResult>
   sendPrompt(routingId: string, prompt: string, attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>): Promise<void>
   cancelSession(routingId: string): Promise<void>
   interruptSession(routingId: string): Promise<void>

@@ -11,3 +11,4 @@
 | [007](adr-007_remote-mockup-http-transport.md) | Serve mockup previews over HTTP with a sandboxed iframe for the remote web client |
 | [008](adr-008_typecheck-remote-web-client.md) | Type-check the remote web client (`src/web`) against `ClaudeAPI` |
 | [009](adr-009_claude-settings-vs-uisettings.md) | Store cli.js-consumed settings in Claude's settings.json, not UISettings |
+| [010](adr-010_fork-session-via-native-cli-flags.md) | Fork ("branch off") sessions via cli.js's native `--resume-session-at` + `--fork-session` |

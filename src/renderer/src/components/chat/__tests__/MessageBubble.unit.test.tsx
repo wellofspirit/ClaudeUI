@@ -47,6 +47,7 @@ beforeEach(() => {
         cwd: '/test',
         sdkActive: false,
         isHistorical: false,
+        forkOrigin: null,
         messages: [],
         streamingText: '',
         streamingThinking: '',

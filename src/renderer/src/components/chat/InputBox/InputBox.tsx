@@ -198,10 +198,17 @@ export function InputBox(): React.JSX.Element {
     if (!sdkActive) {
       const { sessions } = useSessionStore.getState()
       const session = sessions[activeSessionId]
-      const isHistorical = session && session.messages.length > 0
-      const resumeId = isHistorical ? activeSessionId : undefined
       const opts = resolveSessionSdkOptions(activeSessionId)
-      await window.api.createSession(activeSessionId, session?.cwd || '', opts.effort, resumeId, session?.permissionMode, session?.selectedModel, opts.thinkingMode)
+      const fork = session?.forkOrigin
+      if (fork) {
+        // Branch: resume the SOURCE session, truncated to the anchor, forked into
+        // a fresh UUID. cli.js mints the new id and we rekey to it on first init.
+        await window.api.createSession(activeSessionId, session?.cwd || '', opts.effort, fork.sourceSessionId, session?.permissionMode, session?.selectedModel, opts.thinkingMode, fork.anchorUuid, true)
+      } else {
+        const isHistorical = session && session.messages.length > 0
+        const resumeId = isHistorical ? activeSessionId : undefined
+        await window.api.createSession(activeSessionId, session?.cwd || '', opts.effort, resumeId, session?.permissionMode, session?.selectedModel, opts.thinkingMode)
+      }
       markSdkActive(activeSessionId)
     }
     await window.api.sendPrompt(activeSessionId, prompt, attachments)
@@ -212,10 +219,15 @@ export function InputBox(): React.JSX.Element {
     if (!sdkActive) {
       const { sessions } = useSessionStore.getState()
       const session = sessions[activeSessionId]
-      const isHistorical = session && session.messages.length > 0 && !session.sdkActive
-      const resumeId = isHistorical ? activeSessionId : undefined
       const opts = resolveSessionSdkOptions(activeSessionId)
-      await window.api.createSession(activeSessionId, session?.cwd || '', opts.effort, resumeId, session?.permissionMode, session?.selectedModel, opts.thinkingMode)
+      const fork = session?.forkOrigin
+      if (fork) {
+        await window.api.createSession(activeSessionId, session?.cwd || '', opts.effort, fork.sourceSessionId, session?.permissionMode, session?.selectedModel, opts.thinkingMode, fork.anchorUuid, true)
+      } else {
+        const isHistorical = session && session.messages.length > 0 && !session.sdkActive
+        const resumeId = isHistorical ? activeSessionId : undefined
+        await window.api.createSession(activeSessionId, session?.cwd || '', opts.effort, resumeId, session?.permissionMode, session?.selectedModel, opts.thinkingMode)
+      }
       markSdkActive(activeSessionId)
     }
   }, [activeSessionId, sdkActive, markSdkActive])

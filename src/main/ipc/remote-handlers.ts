@@ -2,7 +2,7 @@ import * as fs from 'fs'
 import * as path from 'path'
 import { RemoteDispatcher } from '../services/remote-dispatcher'
 import { SessionManager } from '../services/session-manager'
-import { listDirectories, loadSessionHistory, loadSubagentHistory, buildSubagentFileMap, loadBackgroundOutput } from '../services/session-history'
+import { listDirectories, loadSessionHistory, loadSubagentHistory, buildSubagentFileMap, loadBackgroundOutput, resolveForkAnchor } from '../services/session-history'
 import { deleteSessionFiles, deleteProjectFiles } from '../services/delete-session-files'
 import { loadSettings, saveSettings, loadSessionConfig, saveSessionConfig, loadSlashCommands } from '../services/ui-config'
 import { invalidateMockupSecuritySettings } from '../services/mockup-settings'
@@ -57,10 +57,10 @@ export function registerRemoteHandlers(
   // Session lifecycle
   // -------------------------------------------------------------------------
 
-  dispatcher.register('session:create', async (routingId: string, cwd: string, effort?: string, resumeSessionId?: string, permissionMode?: string, model?: string) => {
+  dispatcher.register('session:create', async (routingId: string, cwd: string, effort?: string, resumeSessionId?: string, permissionMode?: string, model?: string, thinkingMode?: string, resumeSessionAt?: string, forkSession?: boolean) => {
     const settings = loadSettings() as Record<string, unknown>
     const sandboxConfig = (settings.sandbox as SandboxSettings) || undefined
-    manager.create(routingId, win, cwd, effort, resumeSessionId, permissionMode, model, sandboxConfig)
+    manager.create(routingId, win, cwd, effort, resumeSessionId, permissionMode, model, sandboxConfig, thinkingMode, resumeSessionAt, forkSession)
     // Notify local desktop + all extra windows (remote bridge → other remote clients)
     if (!win.isDestroyed()) {
       win.webContents.send('session:created', routingId, { cwd, resumeSessionId })
@@ -72,6 +72,10 @@ export function registerRemoteHandlers(
 
   dispatcher.register('session:rekey', async (oldId: string, newId: string) => {
     manager.rekey(oldId, newId)
+  })
+
+  dispatcher.register('session:resolve-fork-anchor', async (sessionId: string, cwd: string, messageId: string) => {
+    return await resolveForkAnchor(sessionId, cwd, messageId)
   })
 
   dispatcher.register('session:send', async (routingId: string, prompt: string, attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>) => {

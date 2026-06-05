@@ -30,10 +30,12 @@ async function unwrap<T>(channel: string, ...args: unknown[]): Promise<T> {
 const api: ClaudeAPI = {
   platform: process.platform,
   pickFolder: () => ipcRenderer.invoke('session:pick-folder'),
-  createSession: (routingId: string, cwd: string, effort?: string, resumeSessionId?: string, permissionMode?: string, model?: string, thinkingMode?: string) =>
-    ipcRenderer.invoke('session:create', routingId, cwd, effort, resumeSessionId, permissionMode, model, thinkingMode),
+  createSession: (routingId: string, cwd: string, effort?: string, resumeSessionId?: string, permissionMode?: string, model?: string, thinkingMode?: string, resumeSessionAt?: string, forkSession?: boolean) =>
+    ipcRenderer.invoke('session:create', routingId, cwd, effort, resumeSessionId, permissionMode, model, thinkingMode, resumeSessionAt, forkSession),
   rekeySession: (oldId: string, newId: string) =>
     ipcRenderer.invoke('session:rekey', oldId, newId),
+  resolveForkAnchor: (sessionId: string, cwd: string, messageId: string) =>
+    ipcRenderer.invoke('session:resolve-fork-anchor', sessionId, cwd, messageId),
   sendPrompt: (routingId: string, prompt: string, attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>) =>
     ipcRenderer.invoke('session:send', routingId, prompt, attachments),
   cancelSession: (routingId: string) =>

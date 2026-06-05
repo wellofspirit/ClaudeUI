@@ -1,6 +1,7 @@
 import { memo, useState } from 'react'
 import type { ChatMessage, ContentBlock, PendingApproval } from '../../../../shared/types'
 import { isAgentTool } from '../../../../shared/types'
+import { useSessionStore } from '../../stores/session-store'
 import { MarkdownRenderer } from './MarkdownRenderer'
 import { ToolCallBlock } from './ToolCallBlock'
 import { ExitPlanModeCard } from './ExitPlanModeCard'
@@ -25,6 +26,21 @@ export const MessageBubble = memo(function MessageBubble({
   isLastAssistant,
   thinkingStartedAt
 }: MessageBubbleProps): React.JSX.Element {
+  // Hooks must run unconditionally — declared before the role-based early returns.
+  const activeSessionId = useSessionStore((s) => s.activeSessionId)
+  const forkFromMessage = useSessionStore((s) => s.forkFromMessage)
+  const [forking, setForking] = useState(false)
+
+  const handleFork = async (): Promise<void> => {
+    if (!activeSessionId || forking) return
+    setForking(true)
+    try {
+      await forkFromMessage(activeSessionId, message.id)
+    } finally {
+      setForking(false)
+    }
+  }
+
   // System messages (compact separators, CLI commands, API errors)
   if (message.role === 'system') {
     return (
@@ -181,7 +197,7 @@ export const MessageBubble = memo(function MessageBubble({
   )
 
   return (
-    <div className="flex flex-col gap-2 animate-fade-in">
+    <div className="group/msg flex flex-col gap-2 animate-fade-in">
       {items.map((item, gi) => {
         if (item.kind === 'thinking') {
           const isLast = gi === lastThinkingGi
@@ -247,6 +263,26 @@ export const MessageBubble = memo(function MessageBubble({
           </div>
         )
       })}
+      {/* Branch off: hidden until the message is hovered. Spins a new session
+          seeded with everything up to and including this assistant turn. */}
+      {activeSessionId && (
+        <div className="opacity-0 group-hover/msg:opacity-100 focus-within:opacity-100 transition-opacity">
+          <button
+            onClick={handleFork}
+            disabled={forking}
+            title="Fork a new session from this point"
+            className="flex items-center gap-1 text-[10px] text-text-muted hover:text-text-primary transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-default"
+          >
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <line x1="6" y1="3" x2="6" y2="15" />
+              <circle cx="18" cy="6" r="3" />
+              <circle cx="6" cy="18" r="3" />
+              <path d="M18 9a9 9 0 0 1-9 9" />
+            </svg>
+            <span>Fork</span>
+          </button>
+        </div>
+      )}
     </div>
   )
 })

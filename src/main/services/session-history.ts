@@ -2,9 +2,10 @@ import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
 import * as readline from 'readline'
-import type { ChatMessage, ContentBlock, DirectoryGroup, SessionInfo, TaskNotification, StatusLineData } from '../../shared/types'
+import type { ChatMessage, ContentBlock, DirectoryGroup, SessionInfo, TaskNotification, StatusLineData, ForkAnchorResult } from '../../shared/types'
 import { logger } from './logger'
 import { getContextWindowSize } from '../ipc/session.ipc'
+import { findForkAnchorUuid } from './fork-anchor'
 
 const CLAUDE_PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects')
 const CACHE_DIR = path.join(os.homedir(), '.claude', 'ui')
@@ -483,6 +484,57 @@ function parseCliCommand(text: string): { commandName: string; commandArgs?: str
 function extractOutputFile(text: string): string {
   const m = text.match(/<output-file>([\s\S]*?)<\/output-file>/)
   return m ? m[1].trim() : ''
+}
+
+/**
+ * Resolve the JSONL line `uuid` to pass to cli.js `--resume-session-at` when
+ * forking ("branching") a new session from an assistant message.
+ *
+ * cli.js truncates the resumed transcript to `messages.slice(0, w + 1)` where
+ * `w` is the index of the line whose `uuid === <anchor>` — everything after is
+ * dropped (no summarization). If we anchored on the bare assistant line and it
+ * had issued tool calls, the following `tool_result` lines would be sliced off,
+ * leaving a dangling `tool_use` → the API rejects the next turn with a 400.
+ *
+ * So we anchor at the LAST line of the target assistant turn: the assistant
+ * line itself when it issued no tools, otherwise the last trailing
+ * `tool_result` user-line that resolves its tool_uses (stopping at the next
+ * assistant turn). The resulting prefix is always tool-cycle balanced.
+ *
+ * `messageId` is the renderer's `ChatMessage.id`, which for assistant messages
+ * is the `betaMessage.id` (`msg_xxx`); we also accept a raw line uuid as a
+ * fallback. The matching itself is against the JSONL line `uuid`, never the
+ * `msg_xxx` id (verified against cli.js's truncation: `j.uuid === resumeSessionAt`).
+ */
+export async function resolveForkAnchor(
+  sessionId: string,
+  cwd: string,
+  messageId: string
+): Promise<ForkAnchorResult> {
+  const projectKey = cwd.replace(/[/.]/g, '-')
+  const filePath = path.join(CLAUDE_PROJECTS_DIR, projectKey, `${sessionId}.jsonl`)
+  if (!fs.existsSync(filePath)) return { anchorUuid: null, reason: 'transcript-not-found' }
+
+  let raw: string
+  try {
+    raw = fs.readFileSync(filePath, 'utf8')
+  } catch {
+    return { anchorUuid: null, reason: 'read-failed' }
+  }
+
+  const lines: Array<Record<string, unknown>> = []
+  for (const line of raw.split('\n')) {
+    const t = line.trim()
+    if (!t) continue
+    try {
+      lines.push(JSON.parse(t))
+    } catch {
+      /* skip malformed lines */
+    }
+  }
+
+  const anchorUuid = findForkAnchorUuid(lines, messageId)
+  return anchorUuid ? { anchorUuid } : { anchorUuid: null, reason: 'message-not-found' }
 }
 
 /**

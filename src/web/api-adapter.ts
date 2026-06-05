@@ -77,11 +77,14 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       return null
     },
 
-    createSession: (routingId, cwd, effort?, resumeSessionId?, permissionMode?, model?) =>
-      connection.invoke('session:create', routingId, cwd, effort, resumeSessionId, permissionMode, model) as Promise<void>,
+    createSession: (routingId, cwd, effort?, resumeSessionId?, permissionMode?, model?, thinkingMode?, resumeSessionAt?, forkSession?) =>
+      connection.invoke('session:create', routingId, cwd, effort, resumeSessionId, permissionMode, model, thinkingMode, resumeSessionAt, forkSession) as Promise<void>,
 
     rekeySession: (oldId, newId) =>
       connection.invoke('session:rekey', oldId, newId) as Promise<void>,
+
+    resolveForkAnchor: (sessionId, cwd, messageId) =>
+      unwrap('session:resolve-fork-anchor', sessionId, cwd, messageId),
 
     sendPrompt: (routingId, prompt, attachments?) =>
       connection.invoke('session:send', routingId, prompt, attachments) as Promise<void>,

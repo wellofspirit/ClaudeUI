@@ -6,7 +6,7 @@ import { query as sdkQuery } from '../sdk'
 import { PERSISTED_SESSIONS_DIR } from '../services/persisted-sessions-dir'
 import { SessionManager } from '../services/session-manager'
 import { getSdkExecutableOpts, ClaudeSession } from '../services/claude-session'
-import { listDirectories, loadSessionHistory, loadSubagentHistory, buildSubagentFileMap, loadBackgroundOutput } from '../services/session-history'
+import { listDirectories, loadSessionHistory, loadSubagentHistory, buildSubagentFileMap, loadBackgroundOutput, resolveForkAnchor } from '../services/session-history'
 import { watchSession, unwatchSession } from '../services/session-watcher'
 import { loadSettings, saveSettings, loadSessionConfig, saveSessionConfig, loadSlashCommands, saveSlashCommands, startConfigWatcher } from '../services/ui-config'
 import {
@@ -192,7 +192,7 @@ async function fetchModels(): Promise<ModelInfo[]> {
 }
 
 const SESSION_IPC_CHANNELS = [
-  'session:pick-folder', 'session:create', 'session:rekey', 'session:send',
+  'session:pick-folder', 'session:create', 'session:rekey', 'session:resolve-fork-anchor', 'session:send',
   'session:cancel', 'session:interrupt', 'session:approval-response', 'session:watch-background',
   'session:unwatch-background', 'session:read-background-range', 'session:stop-task',
   'session:background-task', 'session:dequeue-message',
@@ -549,13 +549,13 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
 
   ipcMain.handle(
     'session:create',
-    async (_event, routingId: string, cwd: string, effort?: string, resumeSessionId?: string, permissionMode?: string, model?: string, thinkingMode?: string) => {
+    async (_event, routingId: string, cwd: string, effort?: string, resumeSessionId?: string, permissionMode?: string, model?: string, thinkingMode?: string, resumeSessionAt?: string, forkSession?: boolean) => {
       const settings = loadSettings() as Record<string, unknown>
       const sandboxConfig = (settings.sandbox as SandboxSettings) || undefined
       await applyProxyEnv((settings.proxy as ProxySettings) || undefined)
       applyEndpointEnv((settings.anthropicEndpoint as AnthropicEndpointSettings) || undefined)
       applyModelEnv((settings.modelOverride as ModelOverrideSettings) || undefined)
-      manager.create(routingId, win, cwd, effort, resumeSessionId, permissionMode, model, sandboxConfig, thinkingMode)
+      manager.create(routingId, win, cwd, effort, resumeSessionId, permissionMode, model, sandboxConfig, thinkingMode, resumeSessionAt, forkSession)
       // Notify all extra windows (remote bridge) that a session was created
       for (const w of ClaudeSession.getExtraWindows()) {
         if (!w.isDestroyed()) w.webContents.send('session:created', routingId, { cwd, resumeSessionId })
@@ -566,6 +566,15 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
   ipcMain.handle('session:rekey', (_event, oldId: string, newId: string) => {
     manager.rekey(oldId, newId)
   })
+
+  // Resolve the balanced JSONL line uuid to fork ("branch off") from, given an
+  // assistant ChatMessage id. Used by the renderer before creating the branch.
+  ipcMain.handle(
+    'session:resolve-fork-anchor',
+    async (_event, sessionId: string, cwd: string, messageId: string) => {
+      return await resolveForkAnchor(sessionId, cwd, messageId)
+    }
+  )
 
   ipcMain.handle('session:send', (_event, routingId: string, prompt: string, attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>) => {
     const session = manager.get(routingId)

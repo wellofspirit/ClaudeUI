@@ -262,6 +262,78 @@ describe('loadHistoricalSession', () => {
   })
 })
 
+describe('forkFromMessage', () => {
+  it('seeds a branch with messages 1..N, sets forkOrigin, and switches to it', async () => {
+    const messages = [
+      makeChatMessage({ id: 'u1' }),
+      makeAssistantMessage('first', { id: 'msg_1' }),
+      makeChatMessage({ id: 'u2' }),
+      makeAssistantMessage('second', { id: 'msg_2' }),
+    ]
+    store().loadHistoricalSession('src-session', messages, '/proj')
+    ;(window.api as any).resolveForkAnchor = vi.fn().mockResolvedValue({ anchorUuid: 'anchor-1' })
+
+    const newId = await store().forkFromMessage('src-session', 'msg_1')
+
+    expect(newId).toBeTruthy()
+    expect(window.api.resolveForkAnchor).toHaveBeenCalledWith('src-session', '/proj', 'msg_1')
+    const branch = store().sessions[newId!]
+    expect(branch.messages.map((m) => m.id)).toEqual(['u1', 'msg_1'])
+    expect(branch.forkOrigin).toEqual({ sourceSessionId: 'src-session', anchorUuid: 'anchor-1' })
+    expect(branch.cwd).toBe('/proj')
+    expect(store().activeSessionId).toBe(newId)
+    // Source session is left untouched.
+    expect(store().sessions['src-session'].messages).toHaveLength(4)
+  })
+
+  it('deep-copies sliced messages so the branch and source do not alias', async () => {
+    const messages = [makeAssistantMessage('only', { id: 'msg_1' })]
+    store().loadHistoricalSession('src-session', messages, '/proj')
+    ;(window.api as any).resolveForkAnchor = vi.fn().mockResolvedValue({ anchorUuid: 'a1' })
+
+    const newId = await store().forkFromMessage('src-session', 'msg_1')
+    const branch = store().sessions[newId!]
+    expect(branch.messages[0]).not.toBe(store().sessions['src-session'].messages[0])
+    expect(branch.messages[0].content).not.toBe(store().sessions['src-session'].messages[0].content)
+  })
+
+  it('returns null and records an error when the anchor cannot be resolved', async () => {
+    store().loadHistoricalSession('src-session', [makeAssistantMessage('x', { id: 'msg_1' })], '/proj')
+    ;(window.api as any).resolveForkAnchor = vi
+      .fn()
+      .mockResolvedValue({ anchorUuid: null, reason: 'message-not-found' })
+
+    const newId = await store().forkFromMessage('src-session', 'msg_1')
+
+    expect(newId).toBeNull()
+    expect(store().sessions['src-session'].errors.length).toBeGreaterThan(0)
+    // No branch was created or switched to.
+    expect(store().activeSessionId).toBeNull()
+  })
+
+  it('uses status.sessionId as the source id for a rekeyed live session', async () => {
+    store().loadHistoricalSession('routing-temp', [makeAssistantMessage('x', { id: 'msg_1' })], '/proj')
+    useSessionStore.setState((s) => ({
+      sessions: {
+        ...s.sessions,
+        'routing-temp': {
+          ...s.sessions['routing-temp'],
+          status: makeSessionStatus({ sessionId: 'real-sid' }),
+        },
+      },
+    }))
+    ;(window.api as any).resolveForkAnchor = vi.fn().mockResolvedValue({ anchorUuid: 'a1' })
+
+    await store().forkFromMessage('routing-temp', 'msg_1')
+    expect(window.api.resolveForkAnchor).toHaveBeenCalledWith('real-sid', '/proj', 'msg_1')
+  })
+
+  it('returns null when the source session does not exist', async () => {
+    const newId = await store().forkFromMessage('nope', 'msg_1')
+    expect(newId).toBeNull()
+  })
+})
+
 describe('rekeySession', () => {
   it('renames the session key in sessions', () => {
     store().createNewSession('old-id', '/test')
