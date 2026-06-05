@@ -113,7 +113,64 @@ if (!skipA) {
   )
   const v144Match = v144AnchorRe.exec(src)
 
-  if (oldMatch) {
+  // v2.1.163 pattern:
+  //   The env access moved from process.env.CLAUDE_CODE_SYNC_PLUGIN_INSTALL to
+  //   a cached env ref (<R>.CLAUDE_CODE_SYNC_PLUGIN_INSTALL). The conditional is
+  //   now `if(<R>.CLAUDE_CODE_SYNC_PLUGIN_INSTALL){...sync block...<M>=(async()=>{
+  //   ...})()}else <k>=<wrap>(<refresh>);`. The sync branch's awaitable
+  //   orchestration promise lives in <M>; the else branch only stores a
+  //   non-awaitable wrapper result in <k>. We rewrite the else branch to start
+  //   the refresh ONCE and store its promise in <M> too (the same var Part B
+  //   awaits and the existing `if(<M>){await <M>;<M>=null}` join consumes),
+  //   reusing the started promise via a thunk so the wrapper doesn't re-invoke.
+  //
+  //   `INSTALL)\{` (closing-if-paren + block-open) is unique to this site;
+  //   other SYNC_PLUGIN_INSTALL hits are `_TIMEOUT_MS`, `)return`, `||`,
+  //   `)L_=`, `)TT()`. Lazy spans skip the ~700-char JSON-write callback
+  //   without committing to char counts; the first `})()}else X=Y(Z);` after
+  //   the `<M>=(async()=>{` IIFE is the matching else.
+  const v163AnchorRe = new RegExp(
+    `(?:${V})\\.CLAUDE_CODE_SYNC_PLUGIN_INSTALL\\)\\{` +
+    `[\\s\\S]*?` +
+    `(${V})=\\(async\\(\\)=>\\{` +
+    `[\\s\\S]*?` +
+    `\\}\\)\\(\\)\\}else (${V})=(${V})\\((${V})\\);`
+  )
+  const v163Match = v163AnchorRe.exec(src)
+
+  if (v163Match) {
+    const promiseVar = v163Match[1]    // M_ — awaitable orchestration promise (sync branch)
+    const fireForgetVar = v163Match[2] // k_ — non-awaitable wrapper result (else branch)
+    const wrapperFn = v163Match[3]     // ux4 — fire-and-forget wrapper
+    const refreshFn = v163Match[4]     // T_ — plugin refresh function
+
+    console.log(`Found v163 pattern at char ${v163Match.index}`)
+    console.log(`  Promise variable: ${promiseVar}`)
+    console.log(`  Fire-forget variable: ${fireForgetVar}`)
+    console.log(`  Wrapper function: ${wrapperFn}`)
+    console.log(`  Refresh function: ${refreshFn}`)
+
+    const tmp = '_cuMcpRef'
+    const oldElse = `else ${fireForgetVar}=${wrapperFn}(${refreshFn});`
+    // Start the refresh once (tmp), expose it as the awaitable promiseVar, and
+    // hand the wrapper a thunk returning the same promise (no double-invoke).
+    const newElse =
+      PATCH_A_MARKER +
+      `else{let ${tmp}=${refreshFn}();${promiseVar}=${tmp};${fireForgetVar}=${wrapperFn}(()=>${tmp});}`
+
+    const elseIdx = src.indexOf(oldElse)
+    if (elseIdx === -1) {
+      console.error(`ERROR: Cannot find else branch to patch — looking for "${oldElse}".`)
+      process.exit(1)
+    }
+    if (src.indexOf(oldElse, elseIdx + 1) !== -1) {
+      console.error(`ERROR: else branch "${oldElse}" matched multiple times. Aborting.`)
+      process.exit(1)
+    }
+
+    src = src.slice(0, elseIdx) + newElse + src.slice(elseIdx + oldElse.length)
+    console.log(`Patched else branch: store awaitable ${promiseVar} (refresh started once, wrapper reuses it)`)
+  } else if (oldMatch) {
     // Verify uniqueness
     const allMatches = [...src.matchAll(new RegExp(oldAnchorRe, 'g'))]
     if (allMatches.length > 1) {
@@ -252,6 +309,18 @@ if (!skipB) {
     }
   }
 
+  // Try 2b: v163 Part A marker pattern: /*PATCHED:...*/else{let <tmp>=<refresh>();<M>=<tmp>;...}
+  if (!x6Var) {
+    const v163MarkerRe = new RegExp(
+      `\\/\\*PATCHED:mcp-status-store-promise\\*\\/else\\{let (${V})=(${V})\\(\\);(${V})=\\1;`
+    )
+    const v163MarkerMatch = v163MarkerRe.exec(src)
+    if (v163MarkerMatch) {
+      x6Var = v163MarkerMatch[3]
+      console.log(`  Plugin refresh var from Part A marker (v163): ${x6Var}`)
+    }
+  }
+
   // Try 3: unpatched env pattern (fallback)
   if (!x6Var) {
     const envRe = new RegExp(`(${V})=null,(?:${V})=null[^;]*;if\\(!${V}\\(\\)\\)if\\(${V}\\(process\\.env\\.CLAUDE_CODE_SYNC_PLUGIN_INSTALL\\)\\)`)
@@ -282,15 +351,20 @@ if (!skipB) {
     console.error('ERROR: Cannot locate "Headless MCP refresh" string in cli.js.')
     process.exit(1)
   }
+  // Backward window: in 2.1.163 the enclosing `async function OH(...)` sits
+  // ~540 chars before the "Headless MCP refresh" string (its body grew), so a
+  // 500-char window misses it. 2000 comfortably spans the body while the
+  // last-match logic still resolves to the function containing the string.
+  const BACK = 2000
   {
-    const before = src.slice(Math.max(0, anchorIdx - 500), anchorIdx)
-    // Accept zero-or-more args: older versions had `()`, 2.1.114 has `(param)`.
+    const before = src.slice(Math.max(0, anchorIdx - BACK), anchorIdx)
+    // Accept zero-or-more args: older versions had `()`, 2.1.114+ has `(param)`.
     const fnRe = new RegExp(`async function (${V})\\([^)]*\\)\\{`, 'g')
     let m, last
     while ((m = fnRe.exec(before)) !== null) last = m
     if (last) {
       refreshFn = last[1]
-      const fnGlobalOffset = Math.max(0, anchorIdx - 500) + last.index
+      const fnGlobalOffset = Math.max(0, anchorIdx - BACK) + last.index
       console.log(`  Headless MCP refresh function: ${refreshFn} (at char ${fnGlobalOffset})`)
     } else {
       console.error('ERROR: Cannot find async function before "Headless MCP refresh" string.')
@@ -300,7 +374,7 @@ if (!skipB) {
 
   // Verify the refresh function is in scope at the mcp_status handler.
   // Both should be inside the same parent function (the main run loop).
-  const refreshFnIdx = Math.max(0, anchorIdx - 500) + (src.slice(Math.max(0, anchorIdx - 500), anchorIdx).lastIndexOf(`async function ${refreshFn}`))
+  const refreshFnIdx = Math.max(0, anchorIdx - BACK) + (src.slice(Math.max(0, anchorIdx - BACK), anchorIdx).lastIndexOf(`async function ${refreshFn}`))
   const mcpHandlerIdx = src.indexOf('"mcp_status"', refreshFnIdx)
   if (mcpHandlerIdx === -1 || mcpHandlerIdx - refreshFnIdx > 50000) {
     console.warn(`  WARNING: Refresh function at ${refreshFnIdx}, mcp_status at ${mcpHandlerIdx} — may not share scope`)
