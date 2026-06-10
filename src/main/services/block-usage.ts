@@ -47,72 +47,75 @@ const RECALC_DEBOUNCE_MS = 30_000 // 30 seconds — debounce after file change e
 interface ModelPricing {
   inputPerMTok: number
   outputPerMTok: number
+  /** 5-minute TTL cache write rate (1.25× input) */
   cacheWritePerMTok: number
+  /** 1-hour TTL cache write rate (2× input) */
+  cacheWrite1hPerMTok: number
   cacheReadPerMTok: number
 }
 
 const MODEL_PRICING: Array<{ match: string; pricing: ModelPricing }> = [
-  // Fable 5 / Mythos 5 — 2× Opus 4.8 ($10/$50; cache write is the 5m rate, 1h is $20)
+  // Fable 5 / Mythos 5 — 2× Opus 4.8 ($10/$50)
   {
     match: 'fable',
-    pricing: { inputPerMTok: 10, outputPerMTok: 50, cacheWritePerMTok: 12.5, cacheReadPerMTok: 1 }
+    pricing: { inputPerMTok: 10, outputPerMTok: 50, cacheWritePerMTok: 12.5, cacheWrite1hPerMTok: 20, cacheReadPerMTok: 1 }
   },
   {
     match: 'mythos',
-    pricing: { inputPerMTok: 10, outputPerMTok: 50, cacheWritePerMTok: 12.5, cacheReadPerMTok: 1 }
+    pricing: { inputPerMTok: 10, outputPerMTok: 50, cacheWritePerMTok: 12.5, cacheWrite1hPerMTok: 20, cacheReadPerMTok: 1 }
   },
   // Opus 4.5+ (cheaper — match these first before the older opus-4 variants)
   {
     match: 'opus-4-5',
-    pricing: { inputPerMTok: 5, outputPerMTok: 25, cacheWritePerMTok: 6.25, cacheReadPerMTok: 0.5 }
+    pricing: { inputPerMTok: 5, outputPerMTok: 25, cacheWritePerMTok: 6.25, cacheWrite1hPerMTok: 10, cacheReadPerMTok: 0.5 }
   },
   {
     match: 'opus-4-6',
-    pricing: { inputPerMTok: 5, outputPerMTok: 25, cacheWritePerMTok: 6.25, cacheReadPerMTok: 0.5 }
+    pricing: { inputPerMTok: 5, outputPerMTok: 25, cacheWritePerMTok: 6.25, cacheWrite1hPerMTok: 10, cacheReadPerMTok: 0.5 }
   },
   {
     match: 'opus-4-7',
-    pricing: { inputPerMTok: 5, outputPerMTok: 25, cacheWritePerMTok: 6.25, cacheReadPerMTok: 0.5 }
+    pricing: { inputPerMTok: 5, outputPerMTok: 25, cacheWritePerMTok: 6.25, cacheWrite1hPerMTok: 10, cacheReadPerMTok: 0.5 }
   },
   {
     match: 'opus-4-8',
-    pricing: { inputPerMTok: 5, outputPerMTok: 25, cacheWritePerMTok: 6.25, cacheReadPerMTok: 0.5 }
+    pricing: { inputPerMTok: 5, outputPerMTok: 25, cacheWritePerMTok: 6.25, cacheWrite1hPerMTok: 10, cacheReadPerMTok: 0.5 }
   },
   // Opus 4.0 / 4.1 (older, more expensive)
   {
     match: 'opus-4',
-    pricing: { inputPerMTok: 15, outputPerMTok: 75, cacheWritePerMTok: 18.75, cacheReadPerMTok: 1.5 }
+    pricing: { inputPerMTok: 15, outputPerMTok: 75, cacheWritePerMTok: 18.75, cacheWrite1hPerMTok: 30, cacheReadPerMTok: 1.5 }
   },
   // Opus fallback (assume newer pricing)
   {
     match: 'opus',
-    pricing: { inputPerMTok: 5, outputPerMTok: 25, cacheWritePerMTok: 6.25, cacheReadPerMTok: 0.5 }
+    pricing: { inputPerMTok: 5, outputPerMTok: 25, cacheWritePerMTok: 6.25, cacheWrite1hPerMTok: 10, cacheReadPerMTok: 0.5 }
   },
   // Sonnet (all versions: 3.7, 4, 4.5, 4.6)
   {
     match: 'sonnet',
-    pricing: { inputPerMTok: 3, outputPerMTok: 15, cacheWritePerMTok: 3.75, cacheReadPerMTok: 0.3 }
+    pricing: { inputPerMTok: 3, outputPerMTok: 15, cacheWritePerMTok: 3.75, cacheWrite1hPerMTok: 6, cacheReadPerMTok: 0.3 }
   },
   // Haiku 4.5
   {
     match: 'haiku-4',
-    pricing: { inputPerMTok: 1, outputPerMTok: 5, cacheWritePerMTok: 1.25, cacheReadPerMTok: 0.1 }
+    pricing: { inputPerMTok: 1, outputPerMTok: 5, cacheWritePerMTok: 1.25, cacheWrite1hPerMTok: 2, cacheReadPerMTok: 0.1 }
   },
   // Haiku 3.5
   {
     match: 'haiku-3',
-    pricing: { inputPerMTok: 0.8, outputPerMTok: 4, cacheWritePerMTok: 1, cacheReadPerMTok: 0.08 }
+    pricing: { inputPerMTok: 0.8, outputPerMTok: 4, cacheWritePerMTok: 1, cacheWrite1hPerMTok: 1.6, cacheReadPerMTok: 0.08 }
   },
   // Haiku (fallback)
   {
     match: 'haiku',
-    pricing: { inputPerMTok: 1, outputPerMTok: 5, cacheWritePerMTok: 1.25, cacheReadPerMTok: 0.1 }
+    pricing: { inputPerMTok: 1, outputPerMTok: 5, cacheWritePerMTok: 1.25, cacheWrite1hPerMTok: 2, cacheReadPerMTok: 0.1 }
   }
 ]
 
 // Default pricing (sonnet-tier) for unknown models
 const DEFAULT_PRICING: ModelPricing = {
-  inputPerMTok: 3, outputPerMTok: 15, cacheWritePerMTok: 3.75, cacheReadPerMTok: 0.3
+  inputPerMTok: 3, outputPerMTok: 15, cacheWritePerMTok: 3.75, cacheWrite1hPerMTok: 6, cacheReadPerMTok: 0.3
 }
 
 function getPricing(model: string): ModelPricing {
@@ -123,19 +126,31 @@ function getPricing(model: string): ModelPricing {
   return DEFAULT_PRICING
 }
 
-/** Calculate cost in USD from token counts and model */
+/**
+ * Calculate cost in USD from token counts and model.
+ *
+ * `cacheCreation1hTokens` is the subset of `cacheCreationTokens` written with
+ * the 1-hour TTL (billed at 2× input vs 1.25× for the 5-minute TTL). When the
+ * JSONL usage lacks the `cache_creation` breakdown, pass 0 — everything is
+ * billed at the 5m rate, matching the pre-split behavior.
+ */
 function calculateCostFromTokens(
   model: string,
   inputTokens: number,
   outputTokens: number,
   cacheCreationTokens: number,
+  cacheCreation1hTokens: number,
   cacheReadTokens: number
 ): number {
   const p = getPricing(model)
+  // Clamp: the 1h subset can never exceed the total (guards malformed usage)
+  const cache1h = Math.min(Math.max(cacheCreation1hTokens, 0), cacheCreationTokens)
+  const cache5m = cacheCreationTokens - cache1h
   return (
     (inputTokens / 1_000_000) * p.inputPerMTok +
     (outputTokens / 1_000_000) * p.outputPerMTok +
-    (cacheCreationTokens / 1_000_000) * p.cacheWritePerMTok +
+    (cache5m / 1_000_000) * p.cacheWritePerMTok +
+    (cache1h / 1_000_000) * p.cacheWrite1hPerMTok +
     (cacheReadTokens / 1_000_000) * p.cacheReadPerMTok
   )
 }
@@ -649,7 +664,10 @@ export class BlockUsageService {
     const currentTok = totalTokens(block.tokens)
     if (currentTok <= 0) return null
 
-    // Compute cost-per-token ratio from current block (always fresh)
+    // Compute cost-per-token ratio from current block (always fresh). This is
+    // a blended rate over the block's actual model + cache-TTL mix — per-entry
+    // costs already price 5m vs 1h cache writes separately, so the projection
+    // inherits the split without modeling TTLs itself.
     const costPerToken = block.costUsd / currentTok
 
     // ---- Single-point fallback ----
@@ -982,9 +1000,16 @@ export class BlockUsageService {
           const outTok = (usage.output_tokens as number) || 0
           const cacheCreate = (usage.cache_creation_input_tokens as number) || 0
           const cacheRead = (usage.cache_read_input_tokens as number) || 0
+          // TTL breakdown of cache writes (cli.js sessions use the 1h cache,
+          // billed at 2× input). Older transcripts may lack the breakdown —
+          // treated as all-5m, matching the pre-split behavior.
+          const cacheBreakdown = usage.cache_creation as
+            | { ephemeral_5m_input_tokens?: number; ephemeral_1h_input_tokens?: number }
+            | undefined
+          const cache1h = (cacheBreakdown?.ephemeral_1h_input_tokens as number) || 0
 
           // Calculate cost from tokens using model pricing (not from JSONL costUSD)
-          const costUsd = calculateCostFromTokens(model, inTok, outTok, cacheCreate, cacheRead)
+          const costUsd = calculateCostFromTokens(model, inTok, outTok, cacheCreate, cache1h, cacheRead)
 
           entries.push({
             timestamp,
