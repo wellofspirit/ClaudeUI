@@ -205,12 +205,12 @@ describe('getModelColor', () => {
     expect(getModelColor('claude-fable-5[1m]')).toBe('#d97757')
   })
 
-  it('returns blue for sonnet models', () => {
-    expect(getModelColor('claude-sonnet-4-6')).toBe('#6c9eff')
+  it('returns amber for sonnet models', () => {
+    expect(getModelColor('claude-sonnet-4-6')).toBe('#e8a728')
   })
 
-  it('returns green for haiku models', () => {
-    expect(getModelColor('claude-haiku-4-5')).toBe('#4ade80')
+  it('returns cyan for haiku models', () => {
+    expect(getModelColor('claude-haiku-4-5')).toBe('#06b6d4')
   })
 
   it('returns a fallback color for unknown models', () => {
