@@ -12,3 +12,4 @@
 | [008](adr-008_typecheck-remote-web-client.md) | Type-check the remote web client (`src/web`) against `ClaudeAPI` |
 | [009](adr-009_claude-settings-vs-uisettings.md) | Store cli.js-consumed settings in Claude's settings.json, not UISettings |
 | [010](adr-010_fork-session-via-native-cli-flags.md) | Fork ("branch off") sessions via cli.js's native `--resume-session-at` + `--fork-session` |
+| [011](adr-011_canonical-usage-windows-and-account-attribution.md) | Canonical 5h-window identity from `resets_at` + time-based account attribution for usage analytics |

@@ -85,6 +85,10 @@ vi.mock('node:fs/promises', () => ({
   writeFile: vi.fn(async (p: string | URL, data: string) => {
     vfs.files.set(basenameOf(p), data)
   }),
+  appendFile: vi.fn(async (p: string | URL, data: string) => {
+    const name = basenameOf(p)
+    vfs.files.set(name, (vfs.files.get(name) ?? '') + data)
+  }),
   mkdir: vi.fn(async () => undefined),
 }))
 
@@ -401,7 +405,34 @@ describe('UsageFetcher — cache TTL short-circuits startPolling() network call'
     vi.unstubAllGlobals()
   })
 
-  it('skips the initial API fetch when disk cache is fresh (within TTL)', async () => {
+  it('skips the initial API fetch when disk cache is fresh AND its window is unexpired', async () => {
+    const thirtySecAgo = Date.now() - 30 * 1000
+    const futureReset = new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString()
+    vfs.files.set(
+      'usage-cache.json',
+      JSON.stringify({
+        fiveHour: { usedPercent: 12, resetsAt: futureReset },
+        sevenDay: null,
+        sevenDaySonnet: null,
+        sevenDayOpus: null,
+        extraUsage: null,
+        planName: null,
+        fetchedAt: thirtySecAgo,
+        error: null,
+      }),
+    )
+
+    fetcher.startPolling()
+
+    // startPolling() kicks off an async loadCache() → pushToRenderer chain.
+    // Drain the microtask queue generously.
+    for (let i = 0; i < 20; i++) await Promise.resolve()
+
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(fetcher.getLastUsage()?.fiveHour.usedPercent).toBe(12)
+  })
+
+  it('fetches at launch when the cached window is not indicative (no resetsAt)', async () => {
     const thirtySecAgo = Date.now() - 30 * 1000
     vfs.files.set(
       'usage-cache.json',
@@ -417,17 +448,18 @@ describe('UsageFetcher — cache TTL short-circuits startPolling() network call'
       }),
     )
 
+    fetchMock.mockResolvedValueOnce(
+      makeFetchResponse(200, {
+        five_hour: { utilization: 33, resets_at: '2025-01-15T20:00:00Z' },
+      }),
+    )
+
     fetcher.startPolling()
 
-    // startPolling() kicks off an async loadCache() → pushToRenderer chain.
-    // Drain the microtask queue by awaiting a resolved promise twice: once
-    // for the loadCache() .then, once for any chained handlers.
-    await Promise.resolve()
-    await Promise.resolve()
-    await Promise.resolve()
-
-    expect(fetchMock).not.toHaveBeenCalled()
-    expect(fetcher.getLastUsage()?.fiveHour.usedPercent).toBe(12)
+    await vi.waitFor(() => {
+      expect(fetcher.getLastUsage()?.fiveHour.usedPercent).toBe(33)
+    })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
   it('falls through to fetchUsage when cache is stale', async () => {
@@ -454,11 +486,14 @@ describe('UsageFetcher — cache TTL short-circuits startPolling() network call'
 
     fetcher.startPolling()
 
-    // Wait for loadCache() → fetch() chain to settle.
-    for (let i = 0; i < 10; i++) await Promise.resolve()
-
-    expect(fetchMock).toHaveBeenCalledTimes(1)
+    // Wait for loadCache() → fetch() chain to settle (the chain now includes
+    // account tracking reads before the network call).
+    await vi.waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+    })
     expect(fetchMock.mock.calls[0][0]).toBe('https://api.anthropic.com/api/oauth/usage')
-    expect(fetcher.getLastUsage()?.fiveHour.usedPercent).toBe(33)
+    await vi.waitFor(() => {
+      expect(fetcher.getLastUsage()?.fiveHour.usedPercent).toBe(33)
+    })
   })
 })

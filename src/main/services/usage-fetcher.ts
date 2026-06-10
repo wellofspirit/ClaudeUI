@@ -17,7 +17,7 @@
  * starts can display data immediately without an API call.
  */
 
-import { readFile, writeFile, mkdir } from 'node:fs/promises'
+import { readFile, writeFile, mkdir, appendFile } from 'node:fs/promises'
 import { execFile } from 'node:child_process'
 import { join } from 'node:path'
 import { homedir, platform } from 'node:os'
@@ -25,6 +25,12 @@ import type { BrowserWindow } from 'electron'
 import { ClaudeSession, getSdkVersion } from './claude-session'
 import type { AccountUsage, ExtraUsage, RateWindow } from '../../shared/types'
 import { logger } from './logger'
+
+/** The currently authenticated Claude account (from ~/.claude.json). */
+export interface ActiveAccount {
+  uuid: string
+  email: string
+}
 
 // ---------------------------------------------------------------------------
 // Credential types
@@ -59,6 +65,14 @@ const CACHE_STALE_MS = 10 * 60 * 1000 // 10 minutes — skip API call on startup
 const CACHE_WRITE_DEBOUNCE_MS = 30_000 // 30s — match block-usage recalc cadence
 const CACHE_DIR = join(homedir(), '.claude', 'ui')
 const CACHE_PATH = join(CACHE_DIR, 'usage-cache.json')
+const CLAUDE_JSON_PATH = join(homedir(), '.claude.json')
+const ACCOUNT_LOG_DIR = join(CACHE_DIR, 'usage')
+const ACCOUNT_LOG_PATH = join(ACCOUNT_LOG_DIR, 'account-log.jsonl')
+
+/** Delay after the 5h window expires before proactively re-fetching usage. */
+const WINDOW_EXPIRY_FETCH_DELAY_MS = 10_000
+/** Throttle for fetchIfWindowUnknown() — avoid hammering on bursty JSONL updates. */
+const UNKNOWN_WINDOW_FETCH_THROTTLE_MS = 30_000
 
 /**
  * Construct the User-Agent header matching the CLI's jO() function.
@@ -116,6 +130,13 @@ export class UsageFetcher {
   private sessionGetter: SessionUsageGetter | null = null
   private userAgent = getCliUserAgent()
   private cacheWriteTimer: ReturnType<typeof setTimeout> | null = null
+  private activeAccount: ActiveAccount | null = null
+  /** Last account written to the account log (avoid duplicate records). */
+  private lastLoggedAccountUuid: string | null = null
+  private accountLogSeeded = false
+  /** One-shot timer firing shortly after the 5h window expires. */
+  private expiryTimer: ReturnType<typeof setTimeout> | null = null
+  private lastFetchStartedAt = 0
 
   /** Attach the main BrowserWindow so we can push events to the renderer. */
   setWindow(win: BrowserWindow): void {
@@ -142,14 +163,21 @@ export class UsageFetcher {
   startPolling(): void {
     if (this.pollTimer) return
 
-    // Try disk cache first — if fresh, push to renderer and skip the initial API fetch
+    // Try disk cache first — if fresh AND it carries an unexpired 5h window,
+    // push to renderer and skip the initial API fetch. A cache without an
+    // indicative window (no resetsAt, or already expired) can't anchor block
+    // grouping, so fetch immediately in that case.
     this.loadCache().then((cached) => {
+      const windowIndicative =
+        cached?.fiveHour.resetsAt != null &&
+        new Date(cached.fiveHour.resetsAt).getTime() > Date.now()
       if (cached) {
         this.lastUsage = cached
         this.pushToRenderer(cached)
+        this.scheduleExpiryFetch()
         logger.debug('UsageFetcher', `Loaded cache (age ${Math.round((Date.now() - cached.fetchedAt) / 1000)}s)`)
-      } else {
-        // Cache stale or missing — fetch immediately
+      }
+      if (!cached || !windowIndicative) {
         this.fetch().catch((err) => { logger.warn('UsageFetcher', 'Initial fetch failed', err) })
       }
     }).catch(() => {
@@ -168,10 +196,18 @@ export class UsageFetcher {
       clearInterval(this.pollTimer)
       this.pollTimer = null
     }
+    if (this.expiryTimer) {
+      clearTimeout(this.expiryTimer)
+      this.expiryTimer = null
+    }
   }
 
   /** Fetch usage and push to the renderer. Returns the result. */
   async fetch(): Promise<AccountUsage> {
+    this.lastFetchStartedAt = Date.now()
+    // Track the authenticated account alongside usage (cheap local read)
+    await this.trackActiveAccount()
+
     const usage = await this.fetchUsage()
 
     if (!usage.error) {
@@ -184,13 +220,105 @@ export class UsageFetcher {
 
     this.pushToRenderer(this.lastUsage)
     this.scheduleCacheWrite()
+    this.scheduleExpiryFetch()
 
     return this.lastUsage
+  }
+
+  /**
+   * Fetch promptly when local activity is observed while no (or an expired)
+   * 5h window is known — a new window has likely just started and we want
+   * its resets_at without waiting for the regular poll. Throttled.
+   */
+  fetchIfWindowUnknown(): void {
+    const resetsAt = this.lastUsage?.fiveHour.resetsAt
+    const windowKnown = resetsAt != null && new Date(resetsAt).getTime() > Date.now()
+    if (windowKnown) return
+    if (Date.now() - this.lastFetchStartedAt < UNKNOWN_WINDOW_FETCH_THROTTLE_MS) return
+    logger.debug('UsageFetcher', 'Activity with no known 5h window — fetching usage')
+    this.fetch().catch((err) => { logger.warn('UsageFetcher', 'Unknown-window fetch failed', err) })
   }
 
   /** Get the last cached result (may be null). */
   getLastUsage(): AccountUsage | null {
     return this.lastUsage
+  }
+
+  /** The currently authenticated account, if known. */
+  getActiveAccount(): ActiveAccount | null {
+    return this.activeAccount
+  }
+
+  // -------------------------------------------------------------------------
+  // Account tracking
+  // -------------------------------------------------------------------------
+
+  /**
+   * Read the authenticated account from ~/.claude.json and append a record to
+   * the account log when it changes. The log lets block-usage attribute JSONL
+   * entries to the account active at their timestamp.
+   */
+  private async trackActiveAccount(): Promise<void> {
+    try {
+      const raw = await readFile(CLAUDE_JSON_PATH, 'utf-8')
+      const parsed = JSON.parse(raw) as {
+        oauthAccount?: { accountUuid?: string; emailAddress?: string }
+      }
+      const uuid = parsed.oauthAccount?.accountUuid
+      const email = parsed.oauthAccount?.emailAddress
+      if (!uuid || !email) return
+      this.activeAccount = { uuid, email }
+
+      // Initialize dedup state from the log's last record (once per launch)
+      if (!this.accountLogSeeded) {
+        this.accountLogSeeded = true
+        try {
+          const log = await readFile(ACCOUNT_LOG_PATH, 'utf-8')
+          const lines = log.trim().split('\n')
+          const last = JSON.parse(lines[lines.length - 1]) as { accountUuid?: string }
+          this.lastLoggedAccountUuid = last.accountUuid ?? null
+        } catch {
+          this.lastLoggedAccountUuid = null
+        }
+      }
+
+      if (uuid !== this.lastLoggedAccountUuid) {
+        this.lastLoggedAccountUuid = uuid
+        const record = JSON.stringify({ ts: Date.now(), accountUuid: uuid, email })
+        await mkdir(ACCOUNT_LOG_DIR, { recursive: true })
+        await appendFile(ACCOUNT_LOG_PATH, record + '\n', 'utf-8')
+        logger.info('UsageFetcher', `Active account changed → ${email}`)
+      }
+    } catch (err) {
+      logger.debug('UsageFetcher', `Account tracking failed: ${err}`)
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Proactive window-expiry fetch
+  // -------------------------------------------------------------------------
+
+  /**
+   * Schedule a one-shot fetch shortly after the current 5h window expires,
+   * so the UI learns about the roll promptly instead of waiting up to a full
+   * poll interval. Rescheduled on every usage update.
+   */
+  private scheduleExpiryFetch(): void {
+    if (this.expiryTimer) {
+      clearTimeout(this.expiryTimer)
+      this.expiryTimer = null
+    }
+    const resetsAt = this.lastUsage?.fiveHour.resetsAt
+    if (!resetsAt) return
+    const resetMs = new Date(resetsAt).getTime()
+    if (isNaN(resetMs)) return
+    const delay = resetMs - Date.now() + WINDOW_EXPIRY_FETCH_DELAY_MS
+    if (delay <= 0) return // already expired — fetchIfWindowUnknown covers it
+    this.expiryTimer = setTimeout(() => {
+      this.expiryTimer = null
+      logger.debug('UsageFetcher', '5h window expired — proactive usage fetch')
+      this.fetch().catch((err) => { logger.warn('UsageFetcher', 'Expiry fetch failed', err) })
+    }, delay)
   }
 
   // -------------------------------------------------------------------------
@@ -241,6 +369,7 @@ export class UsageFetcher {
 
     this.pushToRenderer(this.lastUsage)
     this.scheduleCacheWrite()
+    this.scheduleExpiryFetch()
   }
 
   /**
@@ -286,6 +415,7 @@ export class UsageFetcher {
 
     this.pushToRenderer(this.lastUsage)
     this.scheduleCacheWrite()
+    this.scheduleExpiryFetch()
   }
 
   // -------------------------------------------------------------------------

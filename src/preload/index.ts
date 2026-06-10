@@ -200,6 +200,8 @@ const api: ClaudeAPI = {
 
   // Block usage analytics
   fetchBlockUsage: () => ipcRenderer.invoke('usage:fetch-block'),
+  setUsageAccountFilter: (account: string | null) =>
+    ipcRenderer.invoke('usage:set-account-filter', account),
 
   // Claude permissions (allow/deny/ask rule management)
   loadClaudePermissions: (scope, cwd?) =>

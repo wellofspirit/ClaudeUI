@@ -1189,6 +1189,10 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     return blockUsageService.getData() ?? (await blockUsageService.recalculate())
   })
 
+  ipcMain.handle('usage:set-account-filter', async (_e, account: string | null) => {
+    blockUsageService.setAccountFilter(account)
+  })
+
   // Mockup preview — read HTML from mockup directory
   ipcMain.handle('mockup:read-html', safeHandler(async (_e: unknown, cwd: string, directory: string) => {
     const htmlPath = path.join(cwd, '.claude', 'ui', 'mockups', directory, 'index.html')

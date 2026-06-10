@@ -291,6 +291,8 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       connection.invoke('usage:fetch') as ReturnType<ClaudeAPI['fetchAccountUsage']>,
     fetchBlockUsage: () =>
       connection.invoke('usage:fetch-block') as ReturnType<ClaudeAPI['fetchBlockUsage']>,
+    setUsageAccountFilter: (account) =>
+      connection.invoke('usage:set-account-filter', account) as ReturnType<ClaudeAPI['setUsageAccountFilter']>,
 
     // Claude permissions (read-only)
     loadClaudePermissions: (scope, cwd?) =>

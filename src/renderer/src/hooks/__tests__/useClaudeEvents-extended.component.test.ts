@@ -920,6 +920,8 @@ describe('useClaudeEvents extended component tests', () => {
         recentBlocks: [],
         todaySnapshots: [],
         dailyHistory: [],
+        accounts: [],
+        accountFilter: null,
       }
 
       bridge.webContents.send('usage:block-data', blockData)
@@ -930,10 +932,12 @@ describe('useClaudeEvents extended component tests', () => {
     it('replaces previous block usage on update', () => {
       const first: BlockUsageData = {
         currentBlock: null, recentBlocks: [], todaySnapshots: [], dailyHistory: [],
+        accounts: [], accountFilter: null,
       }
       const second: BlockUsageData = {
         currentBlock: null, recentBlocks: [], todaySnapshots: [],
         dailyHistory: [{ date: '2026-04-15', totalTokens: 5000, costUsd: 0.5, models: {}, peakApiPercent: 30, blockCount: 1 }],
+        accounts: [], accountFilter: null,
       }
 
       bridge.webContents.send('usage:block-data', first)

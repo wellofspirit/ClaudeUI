@@ -32,12 +32,16 @@ export function UsageView({ onClose }: UsageViewProps): React.JSX.Element {
     )
   }
 
-  const { currentBlock, recentBlocks, todaySnapshots, dailyHistory } = blockUsage
+  const { currentBlock, recentBlocks, todaySnapshots, dailyHistory, accounts, accountFilter } = blockUsage
 
   return (
     <div className="flex flex-col h-full bg-bg-primary overflow-y-auto">
       <div className="sticky top-0 z-10 bg-bg-primary/95 backdrop-blur-sm border-b border-border/30">
-        <Header onClose={onClose} />
+        <Header onClose={onClose}>
+          {accounts.length > 1 && (
+            <AccountSelector accounts={accounts} accountFilter={accountFilter} />
+          )}
+        </Header>
       </div>
 
       <div className="p-4 space-y-4">
@@ -84,7 +88,13 @@ export function UsageView({ onClose }: UsageViewProps): React.JSX.Element {
 // Sub-components
 // ---------------------------------------------------------------------------
 
-function Header({ onClose }: { onClose: () => void }): React.JSX.Element {
+function Header({
+  onClose,
+  children
+}: {
+  onClose: () => void
+  children?: React.ReactNode
+}): React.JSX.Element {
   return (
     <div className="flex items-center justify-between px-4 h-12 [-webkit-app-region:drag]">
       <div className="flex items-center gap-2">
@@ -92,6 +102,7 @@ function Header({ onClose }: { onClose: () => void }): React.JSX.Element {
           <path d="M18 20V10" /><path d="M12 20V4" /><path d="M6 20v-6" />
         </svg>
         <h2 className="text-sm font-semibold text-text-primary">Usage Analytics</h2>
+        {children}
       </div>
       <button
         onClick={onClose}
@@ -103,6 +114,33 @@ function Header({ onClose }: { onClose: () => void }): React.JSX.Element {
         </svg>
       </button>
     </div>
+  )
+}
+
+function AccountSelector({
+  accounts,
+  accountFilter
+}: {
+  accounts: string[]
+  accountFilter: string | null
+}): React.JSX.Element {
+  return (
+    <select
+      value={accountFilter ?? 'all'}
+      onChange={(e) => {
+        const v = e.target.value
+        window.api.setUsageAccountFilter(v === 'all' ? null : v).catch(() => {})
+      }}
+      className="[-webkit-app-region:no-drag] text-[10px] bg-bg-secondary border border-border/50 rounded-md px-1.5 py-0.5 text-text-secondary outline-none cursor-default"
+      title="Filter usage by account"
+    >
+      <option value="all">All accounts</option>
+      {accounts.map((email) => (
+        <option key={email} value={email}>
+          {email}
+        </option>
+      ))}
+    </select>
   )
 }
 

@@ -496,6 +496,8 @@ interface AccountAPI {
   onAccountUsage(cb: (data: AccountUsage) => void): () => void
   fetchBlockUsage(): Promise<BlockUsageData>
   onBlockUsage(cb: (data: BlockUsageData) => void): () => void
+  /** Filter usage analytics to one account email (null = all accounts) */
+  setUsageAccountFilter(account: string | null): Promise<void>
 }
 
 export interface NetworkInterfaceInfo {
@@ -662,6 +664,9 @@ export interface UsageBlock {
   projectedUsage: { tokens: number; costUsd: number } | null
   /** Final API usage % when this block ended (from last snapshot). Used for accurate display. */
   finalApiPercent: number | null
+  /** Whether the block boundary came from an observed API window (resets_at)
+   *  rather than the floorToHour fallback. */
+  windowAligned?: boolean
 }
 
 /** A single point-in-time snapshot, stored every poll cycle */
@@ -717,6 +722,10 @@ export interface BlockUsageData {
     peakApiPercent: number // highest API % seen that day
     blockCount: number // number of blocks that day
   }>
+  /** Distinct account emails seen in the account log (for the filter UI) */
+  accounts: string[]
+  /** Active account filter (email), or null for all accounts */
+  accountFilter: string | null
 }
 
 // ---------------------------------------------------------------------------

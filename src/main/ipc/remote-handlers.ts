@@ -312,6 +312,10 @@ export function registerRemoteHandlers(
     return blockUsageService.getData() ?? (await blockUsageService.recalculate())
   })
 
+  dispatcher.register('usage:set-account-filter', async (account: string | null) => {
+    blockUsageService.setAccountFilter(account)
+  })
+
   // -------------------------------------------------------------------------
   // Mockup preview — read HTML + watch the mockup directory for live reloads
   // -------------------------------------------------------------------------
