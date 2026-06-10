@@ -52,6 +52,15 @@ interface ModelPricing {
 }
 
 const MODEL_PRICING: Array<{ match: string; pricing: ModelPricing }> = [
+  // Fable 5 / Mythos 5 — 2× Opus 4.8 ($10/$50; cache write is the 5m rate, 1h is $20)
+  {
+    match: 'fable',
+    pricing: { inputPerMTok: 10, outputPerMTok: 50, cacheWritePerMTok: 12.5, cacheReadPerMTok: 1 }
+  },
+  {
+    match: 'mythos',
+    pricing: { inputPerMTok: 10, outputPerMTok: 50, cacheWritePerMTok: 12.5, cacheReadPerMTok: 1 }
+  },
   // Opus 4.5+ (cheaper — match these first before the older opus-4 variants)
   {
     match: 'opus-4-5',

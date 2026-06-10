@@ -177,10 +177,24 @@ export function supportsEffort(model: string | undefined | null): boolean {
   return true
 }
 
-/** Mirrors cli.js `bt6` — `xhigh` is opus-4-7 and opus-4-8 today. */
+/**
+ * Mirrors cli.js's xhigh gate (2.1.170): explicit true for fable-5, mythos-5,
+ * opus-4-8, opus-4-7; explicit false for sonnet-4-6 / haiku-4-5 (covered here
+ * by the legacy-family branch). Unknown families are assumed modern and
+ * allowed, consistent with `supportsEffort`.
+ */
 export function supportsXhighEffort(model: string | undefined | null): boolean {
   const id = normaliseModelId(model)
-  return id.includes('opus-4-7') || id.includes('opus-4-8')
+  if (
+    id.includes('opus-4-7') ||
+    id.includes('opus-4-8') ||
+    id.includes('fable-5') ||
+    id.includes('mythos-5')
+  ) {
+    return true
+  }
+  if (id.includes('opus') || id.includes('sonnet') || id.includes('haiku')) return false
+  return true
 }
 
 /** Mirrors cli.js `Ct6`. Haiku never supports max; legacy models in NO_MAX_EFFORT don't either. */

@@ -91,6 +91,11 @@ describe('shortModelName', () => {
     expect(shortModelName('claude-haiku-4-5-20251001')).toBe('Haiku 4.5')
   })
 
+  it('formats fable, including the [1m] context suffix', () => {
+    expect(shortModelName('claude-fable-5')).toBe('Fable 5')
+    expect(shortModelName('claude-fable-5[1m]')).toBe('Fable 5')
+  })
+
   it('formats opus 4.5 distinctly from 4.6', () => {
     expect(shortModelName('claude-opus-4-5-20250101')).toBe('Opus 4.5')
   })
@@ -193,6 +198,11 @@ describe('getModelColor', () => {
 
   it('returns purple for opus models', () => {
     expect(getModelColor('claude-opus-4-6')).toBe('#8b5fcc')
+  })
+
+  it('returns amber for fable models', () => {
+    expect(getModelColor('claude-fable-5')).toBe('#f5a623')
+    expect(getModelColor('claude-fable-5[1m]')).toBe('#f5a623')
   })
 
   it('returns blue for sonnet models', () => {

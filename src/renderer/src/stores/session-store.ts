@@ -142,7 +142,8 @@ export interface AppSettings {
   modelOverride: ModelOverrideSettings
   /**
    * Per-model default effort overrides. Keyed by canonical model id
-   * (`claude-sonnet-4-6`, `claude-opus-4-7`, `claude-opus-4-8`). When set,
+   * (`claude-sonnet-4-6`, `claude-opus-4-7`, `claude-opus-4-8`,
+   * `claude-fable-5`). When set,
    * overrides the cli.js-derived default for that model; a per-session
    * explicit pick still wins.
    */

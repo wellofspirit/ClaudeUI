@@ -20,6 +20,8 @@ interface ModelPricing {
 }
 
 const MODEL_PRICING: Array<{ match: string; pricing: ModelPricing }> = [
+  { match: 'fable', pricing: { inputPerMTok: 10, outputPerMTok: 50, cacheWritePerMTok: 12.5, cacheReadPerMTok: 1 } },
+  { match: 'mythos', pricing: { inputPerMTok: 10, outputPerMTok: 50, cacheWritePerMTok: 12.5, cacheReadPerMTok: 1 } },
   { match: 'opus-4-5', pricing: { inputPerMTok: 5, outputPerMTok: 25, cacheWritePerMTok: 6.25, cacheReadPerMTok: 0.5 } },
   { match: 'opus-4-6', pricing: { inputPerMTok: 5, outputPerMTok: 25, cacheWritePerMTok: 6.25, cacheReadPerMTok: 0.5 } },
   { match: 'opus-4-7', pricing: { inputPerMTok: 5, outputPerMTok: 25, cacheWritePerMTok: 6.25, cacheReadPerMTok: 0.5 } },
@@ -169,6 +171,22 @@ function mergeModelFamilies(
 // ---------------------------------------------------------------------------
 
 describe('getPricing', () => {
+  it('matches fable (incl. [1m] picker value) at $10/$50', () => {
+    for (const id of ['claude-fable-5', 'claude-fable-5[1m]']) {
+      const p = getPricing(id)
+      expect(p.inputPerMTok).toBe(10)
+      expect(p.outputPerMTok).toBe(50)
+      expect(p.cacheWritePerMTok).toBe(12.5)
+      expect(p.cacheReadPerMTok).toBe(1)
+    }
+  })
+
+  it('matches mythos at $10/$50', () => {
+    const p = getPricing('claude-mythos-5')
+    expect(p.inputPerMTok).toBe(10)
+    expect(p.outputPerMTok).toBe(50)
+  })
+
   it('matches opus-4-5 before opus-4', () => {
     const p = getPricing('claude-opus-4-5-20250101')
     expect(p.inputPerMTok).toBe(5)
@@ -245,6 +263,15 @@ describe('calculateCostFromTokens', () => {
 
   it('returns 0 for zero tokens', () => {
     expect(calculateCostFromTokens('claude-sonnet-4-6', 0, 0, 0, 0)).toBe(0)
+  })
+
+  it('calculates cost for fable at 2× opus rates', () => {
+    // 1M input + 1M output = $10 + $50 = $60
+    const cost = calculateCostFromTokens('claude-fable-5[1m]', 1_000_000, 1_000_000, 0, 0)
+    expect(cost).toBeCloseTo(60, 2)
+    // 1M cache write + 1M cache read = $12.50 + $1 = $13.50
+    const cacheCost = calculateCostFromTokens('claude-fable-5[1m]', 0, 0, 1_000_000, 1_000_000)
+    expect(cacheCost).toBeCloseTo(13.5, 2)
   })
 
   it('calculates correctly for opus-4 (expensive)', () => {
