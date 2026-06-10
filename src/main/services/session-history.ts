@@ -4,7 +4,7 @@ import * as os from 'os'
 import * as readline from 'readline'
 import type { ChatMessage, ContentBlock, DirectoryGroup, SessionInfo, TaskNotification, StatusLineData, ForkAnchorResult } from '../../shared/types'
 import { logger } from './logger'
-import { getContextWindowSize } from '../ipc/session.ipc'
+import { getContextWindowSize } from './context-window'
 import { findForkAnchorUuid } from './fork-anchor'
 
 const CLAUDE_PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects')

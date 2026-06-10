@@ -55,21 +55,6 @@ function safeHandler<T>(handler: (...args: any[]) => Promise<T>) {
 
 let cachedModels: ModelInfo[] | null = null
 
-const CONTEXT_WINDOW_1M = 1_000_000
-const CONTEXT_WINDOW_DEFAULT = 200_000
-
-/**
- * Returns the context window size for a given model value.
- * Checks the cached model list — if the model's description contains "1m" (case-insensitive),
- * it's a 1M-context model. Falls back to 200K.
- */
-export function getContextWindowSize(modelValue: string): number {
-  if (!cachedModels) return CONTEXT_WINDOW_DEFAULT
-  const info = cachedModels.find((m) => m.value === modelValue)
-  if (info && /1m/i.test(info.description)) return CONTEXT_WINDOW_1M
-  return CONTEXT_WINDOW_DEFAULT
-}
-
 const COMMIT_MSG_SYSTEM_PROMPT =
   'You are a commit message generator. Given a git diff of staged changes, write a concise conventional commit message. Output ONLY the commit message — no explanation, no quotes, no markdown. Use imperative mood. First line should be a short summary (max 72 chars). If needed, add a blank line followed by bullet points for details. Focus on the "why" not the "what".'
 

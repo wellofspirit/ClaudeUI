@@ -66,7 +66,15 @@ Trigger: `package.json#claudeCliVersion` changes. This invalidates our assumptio
 
    The integration project is the one that catches real-world wire drift.
 
-7. **Re-issue the session on the master protocol document**
+7. **Re-verify the context-window mirror**
+
+   New model generations and alias remaps land in cli.js's context-window
+   resolver before anywhere else. Follow the drift check in
+   `docs/protocol/13-context-window.md` §13.5 and update
+   `src/main/services/context-window.ts` if the implicit-1M model list or
+   the `fable`/`opus` alias targets changed.
+
+8. **Re-issue the session on the master protocol document**
 
    Update `docs/protocol/README.md`'s version banner to the new cli.js version. Update any "verified against cli.js X.Y.Z" annotations in sub-docs.
 

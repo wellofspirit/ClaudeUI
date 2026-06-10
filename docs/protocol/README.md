@@ -35,6 +35,7 @@ The doc should be re-verified each time `package.json#claudeCliVersion` bumps. S
 | 10 | [MCP hosting](10-mcp-hosting.md) | `mcp_message` wire protocol + server lifecycle |
 | 11 | [Cancellation](11-cancellation.md) | Three-tier cancellation + timeouts |
 | 12 | [Maintenance](12-maintenance.md) | How to keep the manual and harness in sync |
+| 13 | [Context window](13-context-window.md) | How cli.js resolves model context windows + ClaudeUI's mirror |
 
 ---
 
