@@ -9,7 +9,7 @@ Strip proxy env vars from the env handed to cli.js subprocesses (Bash tool, MCP 
 | Component | Version |
 |---|---|
 | At time of discovery | bundled CLI `2.1.114` |
-| Last re-anchored | bundled CLI `2.1.163` |
+| Last re-anchored | bundled CLI `2.1.170` |
 
 ## The Problem
 
@@ -80,9 +80,10 @@ The body grows roughly every few releases. `apply.mjs` carries one regex+rebuild
 | v129 | `sy` | + OAuth-token scrub flag, + `OTEL_*` strip loop, + unconditional `CLAUDE_CODE_RESUME_INTERRUPTED_TURN` delete |
 | v143 | `VS` | + extra global env source (`ifq`), + `CLAUDE_BG_AUTH_SNAPSHOT_PATH` |
 | v150 | `dT` | + `CLAUDE_BG_SESSION_PERMISSION_RULES`, `CLAUDE_BG_MEMORY_TOGGLED_OFF` |
-| **v163** | **`wN`** | **+ one unconditional `delete <merged>.CLAUDE_CODE_RESUME_PROMPT`** (inserted after `CLAUDE_CODE_RESUME_INTERRUPTED_TURN`; no matching `!==void 0` detection check, not in the early-return guard) |
+| v163 | `wN` | + one unconditional `delete <merged>.CLAUDE_CODE_RESUME_PROMPT` (inserted after `CLAUDE_CODE_RESUME_INTERRUPTED_TURN`; no matching `!==void 0` detection check, not in the early-return guard) |
+| **v170** | **`ek`** | **+ 3 background-session auth vars (`CLAUDE_BG_SOCKET_TOKENS_PATH`, `CLAUDE_BG_RV_AUTH`, `CLAUDE_BG_PTY_AUTH`)** — appended to the OAuth detection flag and to the unconditional delete chain after `CLAUDE_BG_AUTH_SNAPSHOT_PATH` |
 
-The v163 delta vs v150 is exactly one extra line in the delete chain — see the inline header comment in `apply.mjs` for the full v163 verbatim shape.
+**v170 gotcha:** the three new detection terms read off a **module-level env-snapshot global** (`$_` in 2.1.170: `$_.CLAUDE_BG_SOCKET_TOKENS_PATH!==void 0||...`), NOT `process.env` like every other term in the flag. The regex captures this global as its own group and the rebuild re-emits it by captured name. See the inline header comment in `apply.mjs` for the full v170 verbatim shape.
 
 ## Locating the function in a new CLI version
 
@@ -99,7 +100,7 @@ bundle-analyzer find cli.js "CLAUDE_CODE_RESUME_PROMPT" --compact
 # The combo of CLAUDE_CODE_REMOTE + startsWith("OTEL_") + INPUT_${ is unique to this fn.
 ```
 
-When the body changes again: extract the verbatim `function <name>(){...}` (from `function` to the `return <merged>}`), diff it against the v163 shape in `apply.mjs`, add a new `fnReV<NNN>` regex + rebuild block, and register it as the first branch in the `if/else` chain. Keep older shapes as fallbacks.
+When the body changes again: extract the verbatim `function <name>(){...}` (from `function` to the `return <merged>}`), diff it against the v170 shape in `apply.mjs`, add a new `fnReV<NNN>` regex + rebuild block, and register it as the first branch in the `if/else` chain. Keep older shapes as fallbacks. Watch the group numbering: any new capture inserted mid-pattern shifts every later backreference (`\\14`, `\\15`, …) — renumber both the regex backrefs and the destructuring.
 
 ## Gate env vars
 
@@ -122,7 +123,7 @@ When the body changes again: extract the verbatim `function <name>(){...}` (from
 
 ## Verification
 
-1. `node patch/subprocess-proxy-strip/apply.mjs` — reports `Found <fn>() [v163 shape]` and wraps every return.
+1. `node patch/subprocess-proxy-strip/apply.mjs` — reports `Found <fn>() [v170 shape]` and wraps every return.
 2. Run again — reports "Patch already applied. Nothing to do."
 3. `node patch/apply-all.mjs` — `node --check` passes.
 4. `node patch/subagent-streaming/test.mjs` / `bash-output-streaming/test.mjs` — confirm subprocesses still spawn (indirect coverage; there is no dedicated proxy-strip behavioral harness yet).
@@ -137,9 +138,17 @@ Always run `node --check cli.js` after applying.
 4. **Added `fnReV163`** (clone of v150 + the inserted delete in both regex and rebuild), placed first in the branch chain.
 5. **Applied cleanly**, `node --check` passed, full rebundle + codesign succeeded.
 
+## Discovery Method (2.1.170 re-anchor)
+
+1. **Apply failed:** `Cannot locate env-builder function by ... structural shape`.
+2. **Located via `CLAUDE_BG_MEMORY_TOGGLED_OFF`** (4 occurrences; first two are this function's flag line + delete chain) → `function ek(){...}`.
+3. **Diffed against v163:** three new vars (`CLAUDE_BG_SOCKET_TOKENS_PATH`, `CLAUDE_BG_RV_AUTH`, `CLAUDE_BG_PTY_AUTH`) in the OAuth flag and the delete chain. The flag terms read off a module global `$_` instead of `process.env` — required a new capture group (14), shifting all later backrefs by one vs the v163 pattern.
+4. **Added `fnReV170`** as the first branch; v163 kept as fallback.
+5. **Applied cleanly** (`Found ek() [v170 shape]`), `node --check` passed, rebundle + codesign succeeded.
+
 ## Files
 
 | File | Purpose |
 |---|---|
 | `README.md` | This document |
-| `apply.mjs` | Patch script (per-version shapes v114→v163, newest-first) |
+| `apply.mjs` | Patch script (per-version shapes v114→v170, newest-first) |

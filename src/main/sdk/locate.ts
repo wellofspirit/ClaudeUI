@@ -18,7 +18,9 @@ const BIN_NAME = process.platform === 'win32' ? 'bun-claude.exe' : 'bun-claude'
 
 /** Resolve the path to the rebundled Bun standalone binary. */
 export function locateBunClaude(): string {
-  const appPath = app.getAppPath()
+  // Outside Electron (vitest integration project, harness scripts) `app` is
+  // undefined — fall back to cwd, which is the project root in those contexts.
+  const appPath = app?.getAppPath ? app.getAppPath() : process.cwd()
 
   if (!appPath.includes('app.asar')) {
     // Dev — appPath is the project root.

@@ -9,7 +9,8 @@ Emits a `request_usage` JSON message to stdout after each API response completes
 | Component | Version |
 |---|---|
 | At time of discovery | bundled CLI `2.1.4x` (flat `if`-chain era) |
-| Last re-anchored / redesigned | bundled CLI `2.1.163` |
+| Redesigned | bundled CLI `2.1.163` |
+| Last re-anchored | bundled CLI `2.1.170` (message_stop case gained a telemetry call) |
 
 ## The Problem
 
@@ -76,17 +77,25 @@ case"message_start":{(sH)=(p_).message,(xH)=Math.max(0,Math.round(performance.no
 
 ### Step 2 — inject the emit at `message_stop`
 
-The `message_stop` case is `case"message_stop":break}` (the trailing `}` closes the switch). Statements are legal in a bare case body, so we prepend the stdout write before `break` — **no extra braces**, the switch-closing `}` is preserved.
+The `message_stop` case is a **bare** (brace-free) case body ending in `break}` (the trailing `}` closes the switch). It was `case"message_stop":break}` in 2.1.163; **2.1.170 added a telemetry statement**: `case"message_stop":eH("stream_completed",jH??null,r_);break}` (where `r_` is the same per-request usage accumulator Step 1 captures, and `jH` the TTFT timing var). The anchor is now a generalized regex that tolerates brace-free statements before the break and **preserves them**:
 
-**Before:**
 ```js
-case"message_stop":break}
+/case"message_stop":((?:[^{}]*;)?)break\}/g
+```
+
+The `[^{}]` restriction keeps it out of the two block-bodied `case"message_stop":{this._addMessageParam(...)` sites in the Anthropic SDK MessageStream classes and the two `case"message_stop":return q;...` accumulator sites (no `break`). Verified to match exactly once. Our stdout write is appended **after** the preserved statements, before `break`.
+
+**Before (2.1.170):**
+```js
+case"message_stop":eH("stream_completed",jH??null,r_);break}
 ```
 
 **After:**
 ```js
-case"message_stop":/*PATCHED:request-usage*/process.stdout.write(JSON.stringify({type:"request_usage",usage:QH,model:sH?.model||""})+"\n");break}
+case"message_stop":eH("stream_completed",jH??null,r_);/*PATCHED:request-usage*/process.stdout.write(JSON.stringify({type:"request_usage",usage:r_,model:W_?.model||""})+"\n");break}
 ```
+
+(2.1.163 names: `usage:QH,model:sH?.model` — same shape, empty preserved-statements group.)
 
 ### Why it's safe
 
@@ -98,8 +107,9 @@ case"message_stop":/*PATCHED:request-usage*/process.stdout.write(JSON.stringify(
 ## How to Find This Code
 
 ```bash
-# The message_stop case is unique:
-bundle-analyzer find cli.js 'case"message_stop":break}' --compact
+# The message_stop case (bare body; had a telemetry stmt added in 2.1.170 —
+# search by the case label, not the full literal):
+bundle-analyzer find cli.js 'case"message_stop"' --compact   # pick the brace-free body ending in break}
 
 # The accumulator line (model + usage capture):
 bundle-analyzer find cli.js "sH=p_.message" --compact     # name will change
@@ -113,7 +123,8 @@ bundle-analyzer find cli.js "QH=O7H(ZM," --compact         # name will change
 
 ## Syntax Pitfalls
 
-- **Don't add a block at `message_stop`.** `case"message_stop":break}` — the `}` is the *switch* close. Replacing it with `{...break}` would consume the switch's closing brace. Inject as bare statements: `case"message_stop":<stmt>;break}` (the existing `}` still closes the switch).
+- **Don't add a block at `message_stop`.** The case body ends `break}` — the `}` is the *switch* close. Replacing it with `{...break}` would consume the switch's closing brace. Inject as bare statements: `case"message_stop":<existing stmts><stmt>;break}` (the existing `}` still closes the switch).
+- **Preserve upstream statements in the case body.** 2.1.170 added `eH("stream_completed",jH??null,r_);` before the break — dropping it would silently kill upstream telemetry. The apply script captures and re-emits whatever brace-free statements precede `break`.
 - **`p_.type`, not `p_.event.type`.** In 2.1.163 the event is the switch scrutinee directly; there is no `.event` wrapper at this layer (that wrapping happens at the later `yield{type:"stream_event",event:p_,...}`).
 - **No `this`.** This is a standalone generator. Any injected code referencing `this` is a bug — read off the captured locals (`sH`, `QH`) instead.
 
@@ -153,6 +164,12 @@ Type: `RequestUsageMessage` in `src/main/sdk/types.ts` (`{ type:'request_usage',
 5. **Got the model** from `sH=p_.message` (`sH.model`) instead of the now-impossible `this._patchModel`.
 6. **Dropped `uuid`/`session_id`** after checking the consumer ignores them.
 7. **Live-verified:** `type=request_usage` appears at every `message_stop` across multiple test runs.
+
+## Re-anchor (2.1.170)
+
+1. **Apply failed:** `message_stop case matched 0 times` — the exact literal `case"message_stop":break}` was gone.
+2. **Grepped all `case"message_stop"` occurrences** (5 total): two block-bodied SDK MessageStream sites, two `return q;` accumulator sites, and ours — now `case"message_stop":eH("stream_completed",jH??null,r_);break}`. Upstream added a `stream_completed` telemetry call passing the same usage accumulator (`r_`) Step 1 captures; same generator (Step 1 still matched: `W_`/`y8`/`r_`/`fKH`).
+3. **Generalized the anchor** to `/case"message_stop":((?:[^{}]*;)?)break\}/` — tolerates and preserves brace-free statements before `break`, still excludes the other four sites via `[^{}]`/missing `break`. Uniqueness check retained.
 
 ## Key Functions Reference
 

@@ -37,6 +37,11 @@ describe('SDK event contract', () => {
 
       for await (const msg of q) {
         events.push(msg as Record<string, unknown>)
+        // In-house harness contract: a string prompt does NOT auto-terminate
+        // the session — cli.js stays alive awaiting further input. Consumers
+        // break on `result`, which triggers the iterator's return() → SIGTERM.
+        // (Same pattern as automation-manager.executeRun.)
+        if ((msg as Record<string, unknown>).type === 'result') break
       }
 
       // Verify event ordering matches our stubs

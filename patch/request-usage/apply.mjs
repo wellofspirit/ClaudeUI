@@ -94,25 +94,36 @@ console.log(`  Merge fn: ${mergeFn}`)
 // ---------------------------------------------------------------------------
 // Step 3: Inject request_usage emission at the message_stop case
 // ---------------------------------------------------------------------------
-// The message_stop case is reduced to `case"message_stop":break}` (the trailing
-// `}` closes the switch). We prepend a stdout write of the per-request usage
-// before the break — statements are legal in a bare case body, no extra braces
-// needed. The consumer (claude-session.ts logRequestUsage) reads only `usage`
-// and `model`; session_id is supplied from its own session state, so we omit it.
-// No `this` is available here (standalone generator), so we read the model off
-// the captured message var instead of the old `this._patchModel`.
+// 2.1.163: the case was reduced to `case"message_stop":break}`. 2.1.170 added a
+// telemetry call: `case"message_stop":eH("stream_completed",jH??null,r_);break}`.
+// We match a bare case body (zero or more brace-free statements ending in `;`)
+// followed by `break}` (the trailing `}` closes the switch), preserve whatever
+// statements are there, and append our stdout write just before the break —
+// statements are legal in a bare case body, no extra braces needed. The `[^{}]`
+// restriction keeps us out of the block-bodied message_stop cases in the
+// Anthropic SDK MessageStream classes. The consumer (claude-session.ts
+// logRequestUsage) reads only `usage` and `model`; session_id is supplied from
+// its own session state, so we omit it. No `this` is available here (standalone
+// generator), so we read the model off the captured message var instead of the
+// old `this._patchModel`.
 
 console.log('\n--- Injecting request_usage emission at message_stop ---')
 
-const messageStopOld = `case"message_stop":break}`
-const allStop = [...src.matchAll(new RegExp(messageStopOld.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'))]
+const stopRe = /case"message_stop":((?:[^{}]*;)?)break\}/g
+const allStop = [...src.matchAll(stopRe)]
 if (allStop.length !== 1) {
   console.error(`ERROR: message_stop case matched ${allStop.length} times (expected 1). Aborting.`)
   process.exit(1)
 }
 
+const stopMatch = allStop[0]
+const existingStmts = stopMatch[1] // e.g. `eH("stream_completed",jH??null,r_);` in 2.1.170; empty in 2.1.163
+console.log(`Found message_stop case at char ${stopMatch.index}` +
+  (existingStmts ? ` (preserving existing statements: ${existingStmts})` : ''))
+
 const messageStopNew =
   `case"message_stop":` +
+  existingStmts +
   PATCH_MARKER +
   `process.stdout.write(JSON.stringify({` +
     `type:"request_usage",` +
@@ -120,7 +131,7 @@ const messageStopNew =
     `model:${msgVar}?.model||""` +
   `})+"\\n");break}`
 
-src = src.replace(messageStopOld, messageStopNew)
+src = src.replace(stopMatch[0], messageStopNew)
 
 // ---------------------------------------------------------------------------
 // Step 6: Write and verify
