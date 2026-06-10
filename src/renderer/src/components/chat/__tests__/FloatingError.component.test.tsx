@@ -52,4 +52,27 @@ describe('FloatingError', () => {
 
     expect(useSessionStore.getState().sessions[ROUTE].errors).toHaveLength(0)
   })
+
+  it('renders warnings and dismiss removes from warnings, not errors', () => {
+    useSessionStore.getState().addError(ROUTE, 'real error')
+    useSessionStore.getState().addWarning(ROUTE, 'Fable 5 refused — switched to Opus 4.8')
+
+    const { container, getAllByRole } = render(<FloatingError />)
+    expect(container.textContent).toContain('real error')
+    expect(container.textContent).toContain('switched to Opus 4.8')
+
+    // Cards render errors first, warnings after; last button = warning dismiss
+    const buttons = getAllByRole('button')
+    fireEvent.click(buttons[buttons.length - 1])
+
+    expect(useSessionStore.getState().sessions[ROUTE].warnings).toHaveLength(0)
+    expect(useSessionStore.getState().sessions[ROUTE].errors).toEqual(['real error'])
+  })
+
+  it('renders a warning alone (no errors present)', () => {
+    useSessionStore.getState().addWarning(ROUTE, 'model fallback warning')
+
+    const { container } = render(<FloatingError />)
+    expect(container.textContent).toContain('model fallback warning')
+  })
 })

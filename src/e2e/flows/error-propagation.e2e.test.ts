@@ -7,7 +7,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
 import { useSessionStore } from '../../renderer/src/stores/session-store'
-import { resetFactoryCounter } from '@test/factories/messages'
+import { makeChatMessage, resetFactoryCounter } from '@test/factories/messages'
 import type { ChatMessage, SessionStatus, StreamDelta } from '../../shared/types'
 
 let app: TestApp
@@ -51,6 +51,12 @@ function wireEventHandlers(app: TestApp): Array<() => void> {
   })
   onEvent<(routingId: string, error: string) => void>('session:error')((routingId, error) => {
     store().addError(routingId, error)
+  })
+  onEvent<(routingId: string, warning: string) => void>('session:warning')((routingId, warning) => {
+    store().addWarning(routingId, warning)
+  })
+  onEvent<(routingId: string, data: { messageIds: string[] }) => void>('session:messages-retracted')((routingId, data) => {
+    store().retractMessages(routingId, data.messageIds)
   })
 
   return cleanups
@@ -121,5 +127,45 @@ describe('E2E: error propagation', () => {
       state: 'idle', sessionId: routingId, model: null, cwd: null, totalCostUsd: 0,
     })
     expect(useSessionStore.getState().sessions[routingId].errors).toEqual(['persistent error'])
+  })
+})
+
+describe('E2E: warning propagation (model_refusal_fallback / model_fallback)', () => {
+  it('session:warning event populates session warnings[] and leaves errors[] empty', () => {
+    const routingId = 'r1'
+    useSessionStore.getState().createNewSession(routingId, '/test')
+
+    app.emit('session:warning', routingId, 'Fable 5 refused this request — switched to Opus 4.8.')
+
+    const session = useSessionStore.getState().sessions[routingId]
+    expect(session.warnings).toEqual(['Fable 5 refused this request — switched to Opus 4.8.'])
+    expect(session.errors).toEqual([])
+  })
+
+  it('warnings are scoped per session', () => {
+    useSessionStore.getState().createNewSession('A', '/a')
+    useSessionStore.getState().createNewSession('B', '/b')
+
+    app.emit('session:warning', 'A', 'warning for A')
+    app.emit('session:warning', 'B', 'warning for B')
+
+    const state = useSessionStore.getState()
+    expect(state.sessions['A'].warnings).toEqual(['warning for A'])
+    expect(state.sessions['B'].warnings).toEqual(['warning for B'])
+  })
+
+  it('session:messages-retracted removes the refused partial and clears streaming', () => {
+    const routingId = 'r1'
+    const store = useSessionStore.getState()
+    store.createNewSession(routingId, '/test')
+    store.addMessage(routingId, makeChatMessage({ id: 'msg_refused', content: [{ type: 'text', text: 'partial' }] }))
+    store.addMessage(routingId, makeChatMessage({ id: 'msg_keep', content: [{ type: 'text', text: 'keep' }] }))
+    store.appendStreamingText(routingId, 'refused partial stream')
+
+    app.emit('session:messages-retracted', routingId, { messageIds: ['msg_refused'] })
+
+    const session = useSessionStore.getState().sessions[routingId]
+    expect(session.messages.map((m) => m.id)).toEqual(['msg_keep'])
+    expect(session.streamingText).toBe('')
   })
 })

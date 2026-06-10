@@ -131,8 +131,8 @@ export function Sidebar({ style, onToggleCollapse }: {
         return undefined
       })()
       if (info?.projectKey) {
-        const { messages, taskNotifications, statusLine } = await window.api.loadSessionHistory(sessionId, info.projectKey)
-        loadHistoricalSession(sessionId, messages, info.cwd, taskNotifications, {}, statusLine)
+        const { messages, taskNotifications, statusLine, warnings } = await window.api.loadSessionHistory(sessionId, info.projectKey)
+        loadHistoricalSession(sessionId, messages, info.cwd, taskNotifications, {}, statusLine, warnings)
         session = useSessionStore.getState().sessions[sessionId]
       }
     }
@@ -214,7 +214,7 @@ export function Sidebar({ style, onToggleCollapse }: {
       return
     }
     // Load from JSONL
-    const { messages, taskNotifications, customTitle, agentIdToToolUseId, statusLine } = await window.api.loadSessionHistory(info.sessionId, info.projectKey)
+    const { messages, taskNotifications, customTitle, agentIdToToolUseId, statusLine, warnings } = await window.api.loadSessionHistory(info.sessionId, info.projectKey)
 
     // Load subagent histories in parallel
     const subagentMessages: Record<string, ChatMessage[]> = {}
@@ -234,7 +234,7 @@ export function Sidebar({ style, onToggleCollapse }: {
         if (msgs.length > 0) subagentMessages[toolUseId] = msgs
       }
     }
-    loadHistoricalSession(routingId, messages, info.cwd, taskNotifications, subagentMessages, statusLine)
+    loadHistoricalSession(routingId, messages, info.cwd, taskNotifications, subagentMessages, statusLine, warnings)
     if (customTitle) setCustomTitle(routingId, customTitle)
 
     // Rebuild todos from TaskCreate/TaskUpdate/TodoWrite tool calls
@@ -263,8 +263,8 @@ export function Sidebar({ style, onToggleCollapse }: {
     } else {
       // Need to load historical session first if not in memory
       if (!session) {
-        window.api.loadSessionHistory(info.sessionId, info.projectKey).then(({ messages, taskNotifications, customTitle: ct, statusLine: sl }) => {
-          loadHistoricalSession(routingId, messages, info.cwd, taskNotifications, {}, sl)
+        window.api.loadSessionHistory(info.sessionId, info.projectKey).then(({ messages, taskNotifications, customTitle: ct, statusLine: sl, warnings }) => {
+          loadHistoricalSession(routingId, messages, info.cwd, taskNotifications, {}, sl, warnings)
           if (ct) setCustomTitle(routingId, ct)
           window.api.watchSession(routingId, info.sessionId, info.projectKey)
           setWatching(routingId, true)

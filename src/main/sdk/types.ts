@@ -93,6 +93,8 @@ export interface SystemMessage extends BaseSDKMessage {
     | 'task_notification'
     | 'queued_command_consumed'
     | 'compact_boundary'
+    | 'model_refusal_fallback'
+    | 'model_fallback'
     | string
   permissionMode?: string
   /** init-only fields */
@@ -121,6 +123,13 @@ export interface SystemMessage extends BaseSDKMessage {
   } | null
   /** queued_command_consumed-only field */
   prompt?: string
+  /** model_refusal_fallback / model_fallback fields (docs/protocol/04-system-subtypes.md §4.20–4.21) */
+  trigger?: string
+  direction?: 'retry' | 'revert' | 'sticky'
+  original_model?: string
+  fallback_model?: string
+  content?: string
+  retracted_message_uuids?: string[]
 }
 
 export interface ResultMessage extends BaseSDKMessage {

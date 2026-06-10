@@ -403,6 +403,7 @@ export interface PerSessionState {
   status: SessionStatus
   pendingApprovals: PendingApproval[]
   errors: string[]
+  warnings: string[]
   todos: TodoItem[]
   taskProgressMap: Record<string, TaskProgress>
   taskNotifications: TaskNotification[]
@@ -469,6 +470,7 @@ const EMPTY_SESSION_STATE: PerSessionState = {
   status: { state: 'idle', sessionId: null, model: null, cwd: null, totalCostUsd: 0 },
   pendingApprovals: [],
   errors: [],
+  warnings: [],
   todos: [],
   taskProgressMap: {},
   taskNotifications: [],
@@ -602,7 +604,7 @@ interface SessionState {
   showWelcome: () => void
   switchSession: (routingId: string) => void
   createNewSession: (routingId: string, cwd: string, switchTo?: boolean) => void
-  loadHistoricalSession: (routingId: string, messages: ChatMessage[], cwd: string, taskNotifications?: TaskNotification[], subagentMessages?: Record<string, ChatMessage[]>, statusLine?: StatusLineData | null) => void
+  loadHistoricalSession: (routingId: string, messages: ChatMessage[], cwd: string, taskNotifications?: TaskNotification[], subagentMessages?: Record<string, ChatMessage[]>, statusLine?: StatusLineData | null, warnings?: string[]) => void
   /** Fork ("branch off") a new session from an assistant message in `sourceRoutingId`.
    *  Resolves the disk anchor, seeds the new session with messages 1..N, and
    *  switches to it. The branch materializes on cli.js on first prompt send.
@@ -643,6 +645,14 @@ interface SessionState {
   removePendingApprovalByToolUse: (routingId: string, toolUseId: string) => void
   clearPendingApprovals: (routingId: string) => void
   addError: (routingId: string, error: string) => void
+  addWarning: (routingId: string, warning: string) => void
+  removeWarning: (routingId: string, index: number) => void
+  clearWarnings: (routingId: string) => void
+  /**
+   * Refusal-fallback retraction: remove the refused partial's messages and
+   * clear any streamed text it left behind. Unknown ids are a no-op.
+   */
+  retractMessages: (routingId: string, messageIds: string[]) => void
   removeError: (routingId: string, index: number) => void
   clearErrors: (routingId: string) => void
   addSandboxViolation: (routingId: string, message: string) => void
@@ -806,7 +816,7 @@ export const useSessionStore = create<SessionState>((set) => ({
       }
     }),
 
-  loadHistoricalSession: (routingId, messages, cwd, taskNotifications?, subagentMessages?, statusLine?) =>
+  loadHistoricalSession: (routingId, messages, cwd, taskNotifications?, subagentMessages?, statusLine?, warnings?) =>
     set((state) => ({
       sessions: {
         ...state.sessions,
@@ -817,6 +827,7 @@ export const useSessionStore = create<SessionState>((set) => ({
           taskNotifications: taskNotifications || [],
           subagentMessages: subagentMessages || {},
           statusLine: statusLine ?? null,
+          warnings: warnings || [],
           worktreeInfo: state.worktreeInfoMap[routingId] ?? null
         }
       }
@@ -1269,6 +1280,35 @@ export const useSessionStore = create<SessionState>((set) => ({
   clearErrors: (routingId) =>
     set((state) => ({
       sessions: updateSession(state.sessions, routingId, () => ({ errors: [] }))
+    })),
+
+  addWarning: (routingId, warning) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, routingId, (s) => ({
+        warnings: [...s.warnings, warning]
+      }))
+    })),
+
+  removeWarning: (routingId, index) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, routingId, (s) => ({
+        warnings: s.warnings.filter((_, i) => i !== index)
+      }))
+    })),
+
+  clearWarnings: (routingId) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, routingId, () => ({ warnings: [] }))
+    })),
+
+  retractMessages: (routingId, messageIds) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, routingId, (s) => ({
+        messages: messageIds.length > 0 ? s.messages.filter((m) => !messageIds.includes(m.id)) : s.messages,
+        streamingText: '',
+        streamingThinking: '',
+        thinkingStartedAt: null
+      }))
     })),
 
   addSandboxViolation: (routingId, message) =>

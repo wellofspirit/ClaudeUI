@@ -414,6 +414,25 @@ export interface SessionHistoryResult {
   statusLine: StatusLineData | null
   /** Maps agentId → toolUseId for subagent JSONL lookup */
   agentIdToToolUseId: Record<string, string>
+  /**
+   * Warnings worth resurfacing when the session is reopened — currently the
+   * model_refusal_fallback / model_fallback system entries (the model swap is
+   * sticky for the session, so the user should know which model answered).
+   */
+  warnings: string[]
+}
+
+/**
+ * Render text for a `fallback` content block — the canonical-replacement frame
+ * cli.js emits when a refused partial is retracted and the turn retried on a
+ * fallback model (docs/protocol/04-system-subtypes.md §4.20). Live sessions
+ * normally evict the whole message via retracted_message_uuids; this text is
+ * the fallback rendering when the frame survives (history, older CLIs).
+ */
+export function fallbackBlockText(block: Record<string, unknown>): string {
+  const from = (block.from as Record<string, unknown> | undefined)?.model
+  const to = (block.to as Record<string, unknown> | undefined)?.model
+  return `Switched models${from ? ` from ${from}` : ''}${to ? ` to ${to}` : ''}.`
 }
 
 /**
@@ -550,6 +569,7 @@ export async function loadSessionHistory(
   return new Promise((resolve) => {
     const messages: ChatMessage[] = []
     const taskNotifications: TaskNotification[] = []
+    const warnings: string[] = []
     let customTitle: string | null = null
     // Map agentId (from task-notification <task-id>) → toolUseId (from Task tool_use)
     const agentIdToToolUseId: Record<string, string> = {}
@@ -559,7 +579,7 @@ export async function loadSessionHistory(
       stream = fs.createReadStream(filePath, { encoding: 'utf-8' })
     } catch (err) {
       logger.warn('SessionHistory', 'Failed to open session history file', err)
-      resolve({ messages: [], taskNotifications: [], customTitle: null, agentIdToToolUseId: {}, statusLine: null })
+      resolve({ messages: [], taskNotifications: [], customTitle: null, agentIdToToolUseId: {}, statusLine: null, warnings: [] })
       return
     }
 
@@ -774,6 +794,8 @@ export async function loadSessionHistory(
                 }
               } else if (blockType === 'thinking') {
                 return { type: 'thinking' as const, text: block.thinking as string }
+              } else if (blockType === 'fallback') {
+                return { type: 'text' as const, text: fallbackBlockText(block) }
               }
               return { type: 'text' as const, text: JSON.stringify(block) }
             }
@@ -832,6 +854,14 @@ export async function loadSessionHistory(
               content: [{ type: 'compact_separator' }],
               timestamp: obj.timestamp ? new Date(obj.timestamp).getTime() : Date.now()
             })
+          } else if (subtype === 'model_refusal_fallback' || subtype === 'model_fallback') {
+            // Transcript form uses camelCase (originalModel/fallbackModel) and
+            // carries the CLI's human-readable content. Resurface as a warning
+            // since the refusal swap is sticky for the session.
+            const text =
+              (obj.content as string) ||
+              `Switched models${obj.originalModel ? ` from ${obj.originalModel}` : ''}${obj.fallbackModel ? ` to ${obj.fallbackModel}` : ''}.`
+            warnings.push(text)
           }
         }
       } catch (err) {
@@ -841,9 +871,9 @@ export async function loadSessionHistory(
 
     rl.on('close', async () => {
       const statusLine = await computeTokenMetrics(filePath)
-      resolve({ messages, taskNotifications, customTitle, agentIdToToolUseId, statusLine })
+      resolve({ messages, taskNotifications, customTitle, agentIdToToolUseId, statusLine, warnings })
     })
-    rl.on('error', () => resolve({ messages: [], taskNotifications: [], customTitle: null, agentIdToToolUseId: {}, statusLine: null }))
+    rl.on('error', () => resolve({ messages: [], taskNotifications: [], customTitle: null, agentIdToToolUseId: {}, statusLine: null, warnings: [] }))
   })
 }
 

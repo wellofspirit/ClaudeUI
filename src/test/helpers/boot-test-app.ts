@@ -77,6 +77,8 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     onStatus: onEvent('session:status'),
     onResult: onEvent('session:result'),
     onError: onEvent('session:error'),
+    onWarning: onEvent('session:warning'),
+    onMessagesRetracted: onEvent('session:messages-retracted'),
     onToolResult: onEvent('session:tool-result'),
     onTaskProgress: onEvent('session:task-progress'),
     onTaskNotification: onEvent('session:task-notification'),

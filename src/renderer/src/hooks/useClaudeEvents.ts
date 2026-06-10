@@ -34,6 +34,8 @@ export function useClaudeEvents(): void {
   const removePendingApprovalByToolUse = useSessionStore((s) => s.removePendingApprovalByToolUse)
   const setStatus = useSessionStore((s) => s.setStatus)
   const addError = useSessionStore((s) => s.addError)
+  const addWarning = useSessionStore((s) => s.addWarning)
+  const retractMessages = useSessionStore((s) => s.retractMessages)
   const appendToolResult = useSessionStore((s) => s.appendToolResult)
   const updateTaskProgress = useSessionStore((s) => s.updateTaskProgress)
   const addTaskNotification = useSessionStore((s) => s.addTaskNotification)
@@ -84,11 +86,11 @@ export function useClaudeEvents(): void {
             const projectKey = store.directories
               .find((g) => g.sessions.some((s) => s.sessionId === data.resumeSessionId))?.projectKey
             if (projectKey) {
-              window.api.loadSessionHistory(data.resumeSessionId, projectKey).then(({ messages, taskNotifications, customTitle, statusLine }) => {
+              window.api.loadSessionHistory(data.resumeSessionId, projectKey).then(({ messages, taskNotifications, customTitle, statusLine, warnings }) => {
                 const s = useSessionStore.getState()
                 // Only populate if the session still exists and is still empty
                 if (s.sessions[routingId] && s.sessions[routingId].messages.length === 0) {
-                  s.loadHistoricalSession(routingId, messages, data.cwd, taskNotifications, {}, statusLine)
+                  s.loadHistoricalSession(routingId, messages, data.cwd, taskNotifications, {}, statusLine, warnings)
                   if (customTitle) s.setCustomTitle(routingId, customTitle)
                   // Re-mark active since loadHistoricalSession sets isHistorical
                   s.markSdkActive(routingId)
@@ -190,6 +192,12 @@ export function useClaudeEvents(): void {
       window.api.onError((routingId, error) => {
         addError(routingId, error)
         window.api.logError('session', `[routingId=${routingId}] ${error}`)
+      }),
+      window.api.onWarning((routingId, warning) => {
+        addWarning(routingId, warning)
+      }),
+      window.api.onMessagesRetracted((routingId, { messageIds }) => {
+        retractMessages(routingId, messageIds)
       }),
       window.api.onToolResult((routingId, { toolUseId, result, isError }) => {
         appendToolResult(routingId, toolUseId, result, isError)
@@ -365,5 +373,5 @@ export function useClaudeEvents(): void {
     }).catch((err) => { window.api.logError('useClaudeEvents', `Initial block usage fetch failed: ${err}`) })
 
     return () => cleanups.forEach((fn) => fn())
-  }, [addMessage, appendStreamingText, appendStreamingThinking, addPendingApproval, clearPendingApprovals, removePendingApprovalByToolUse, setStatus, addError, appendToolResult, updateTaskProgress, addTaskNotification, addSubagentMessage, appendSubagentMessageBatch, appendSubagentStreamingText, appendSubagentStreamingThinking, appendSubagentToolResult, setBashOutput, setBackgroundOutput, setStatusLine, setPermissionMode, setSlashCommands, setSdkSkillNames, addSandboxViolation, setVoiceState, appendVoiceTranscript])
+  }, [addMessage, appendStreamingText, appendStreamingThinking, addPendingApproval, clearPendingApprovals, removePendingApprovalByToolUse, setStatus, addError, addWarning, retractMessages, appendToolResult, updateTaskProgress, addTaskNotification, addSubagentMessage, appendSubagentMessageBatch, appendSubagentStreamingText, appendSubagentStreamingThinking, appendSubagentToolResult, setBashOutput, setBackgroundOutput, setStatusLine, setPermissionMode, setSlashCommands, setSdkSkillNames, addSandboxViolation, setVoiceState, appendVoiceTranscript])
 }

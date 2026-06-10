@@ -56,6 +56,7 @@ beforeEach(() => {
         status: { state: 'idle', sessionId: null, model: null, cwd: null, totalCostUsd: 0 },
         pendingApprovals: [],
         errors: [],
+        warnings: [],
         todos: [],
         taskProgressMap: {},
         taskNotifications: [],

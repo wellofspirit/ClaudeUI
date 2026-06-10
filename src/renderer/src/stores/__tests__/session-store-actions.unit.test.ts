@@ -487,6 +487,75 @@ describe('error lifecycle', () => {
 })
 
 // ---------------------------------------------------------------------------
+// 17b. Warnings — lifecycle (mirrors errors; fed by session:warning, e.g.
+// model_refusal_fallback / model_fallback system messages)
+// ---------------------------------------------------------------------------
+
+describe('warning lifecycle', () => {
+  it('addWarning appends to warnings[] without touching errors[]', () => {
+    store().createNewSession('r1', '/p')
+    store().addWarning('r1', 'model fell back')
+    store().addWarning('r1', 'again')
+    expect(store().sessions['r1'].warnings).toEqual(['model fell back', 'again'])
+    expect(store().sessions['r1'].errors).toEqual([])
+  })
+
+  it('removeWarning removes exactly the indexed entry and preserves order', () => {
+    store().createNewSession('r1', '/p')
+    store().addWarning('r1', 'first')
+    store().addWarning('r1', 'middle')
+    store().addWarning('r1', 'last')
+    store().removeWarning('r1', 1)
+    expect(store().sessions['r1'].warnings).toEqual(['first', 'last'])
+  })
+
+  it('clearWarnings empties the array for that session only', () => {
+    store().createNewSession('r1', '/p')
+    store().createNewSession('r2', '/p2', false)
+    store().addWarning('r1', 'x')
+    store().addWarning('r2', 'y')
+    store().clearWarnings('r1')
+    expect(store().sessions['r1'].warnings).toEqual([])
+    expect(store().sessions['r2'].warnings).toEqual(['y'])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 17c. retractMessages — refusal-fallback retraction (model_refusal_fallback)
+// ---------------------------------------------------------------------------
+
+describe('retractMessages', () => {
+  const msg = (id: string) =>
+    makeChatMessage({ id, content: [{ type: 'text', text: `body of ${id}` }] })
+
+  it('removes exactly the listed messages and clears streaming state', () => {
+    store().createNewSession('r1', '/p')
+    store().addMessage('r1', msg('m1'))
+    store().addMessage('r1', msg('m2'))
+    store().appendStreamingText('r1', 'refused partial text')
+
+    store().retractMessages('r1', ['m1'])
+
+    const s = store().sessions['r1']
+    expect(s.messages.map((m) => m.id)).toEqual(['m2'])
+    expect(s.streamingText).toBe('')
+    expect(s.streamingThinking).toBe('')
+  })
+
+  it('unknown ids are a no-op for messages but still clear streaming', () => {
+    store().createNewSession('r1', '/p')
+    store().addMessage('r1', msg('m1'))
+    store().appendStreamingText('r1', 'stale partial')
+
+    store().retractMessages('r1', [])
+
+    const s = store().sessions['r1']
+    expect(s.messages.map((m) => m.id)).toEqual(['m1'])
+    expect(s.streamingText).toBe('')
+  })
+})
+
+// ---------------------------------------------------------------------------
 // 18. setActiveView / switchSession — the store has switchSession (not setActiveSession)
 // ---------------------------------------------------------------------------
 

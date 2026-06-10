@@ -16,7 +16,7 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 import type { BrowserWindow } from 'electron'
-import { computeTokenMetrics } from './session-history'
+import { computeTokenMetrics, fallbackBlockText } from './session-history'
 import { VoiceClient } from './voice-client'
 import { startRecording, stopRecording } from './voice-capture'
 import { unwatchAllSubagents } from './subagent-watcher'
@@ -45,6 +45,13 @@ export function getCliJsPath(): string {
 export function getSdkVersion(): string {
   return getCliVersion()
 }
+
+/**
+ * cli.js compares retracted_message_uuids against frame uuids truncated to 24
+ * chars (its `JWK` constant) so per-block derived uuids resolve to their base
+ * frame. Mirror that here. See docs/protocol/04-system-subtypes.md §4.20.
+ */
+const RETRACTION_UUID_PREFIX_LEN = 24
 
 /**
  * SDK options for the CLI spawn. The executable is our rebundled Bun binary;
@@ -152,6 +159,13 @@ export class ClaudeSession {
 
   private sessionId: string | null = null
   private messageHistory: ChatMessage[] = []
+  /**
+   * Wire-frame uuid → ChatMessage id, keyed by the first 24 chars of the uuid
+   * (cli.js's own retraction matching truncates to 24 so per-block derived
+   * uuids resolve to their base frame). Used to evict refused partials when a
+   * model_refusal_fallback arrives with retracted_message_uuids.
+   */
+  private wireUuidToMessageId = new Map<string, string>()
   private abortController: AbortController | null = null
   private isProcessing = false
   private wasInterrupted = false
@@ -791,6 +805,9 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
       if (parentToolUseId) {
         this.send('session:subagent-message', { toolUseId: parentToolUseId, message: chatMsg })
       } else {
+        if (typeof msg.uuid === 'string') {
+          this.wireUuidToMessageId.set(msg.uuid.slice(0, RETRACTION_UUID_PREFIX_LEN), chatMsg.id)
+        }
         this.upsertMessage(chatMsg)
         this.send('session:message', chatMsg)
         // Only update status line when usage actually changed (final message per API call)
@@ -859,9 +876,50 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
       this.send('session:steer-consumed', { prompt: msg.prompt || '' })
       return
     }
+    if (msg.subtype === 'model_refusal_fallback' || msg.subtype === 'model_fallback') {
+      this.handleModelFallback(msg)
+      return
+    }
     // Unknown / init / compact_boundary — init is already consumed in
     // captureSessionBootstrap; compact_boundary is informational and not
     // currently surfaced. Fall through silently.
+  }
+
+  /**
+   * The CLI silently swapped models mid-session: `model_refusal_fallback`
+   * (safety refusal → permanent swap for the session) or `model_fallback`
+   * (availability error → swap for this turn only). Surface it as a warning
+   * banner so the user knows which model is actually answering — without this,
+   * the only trace is the `model` field on subsequent assistant messages.
+   * Shapes in docs/protocol/04-system-subtypes.md §4.20–4.21.
+   */
+  private handleModelFallback(msg: SystemMessage): void {
+    const fallbackText =
+      msg.subtype === 'model_refusal_fallback'
+        ? `${msg.original_model || 'The model'} refused this request — switched to ${msg.fallback_model || 'a fallback model'} for the rest of the session.`
+        : `${msg.original_model || 'The model'} is unavailable — using ${msg.fallback_model || 'a fallback model'} for this turn.`
+    const text = msg.content || fallbackText
+    logger.warn('ClaudeSession', `${msg.subtype}: ${msg.original_model} -> ${msg.fallback_model} (trigger=${msg.trigger})`)
+    this.send('session:warning', text)
+
+    // Refusal retraction: evict the refused partial (and its tombstoned tool
+    // results) from transcript state. Unknown uuids are a no-op per protocol.
+    // Sent even when nothing resolves — the renderer also clears any streamed
+    // partial text the retracted message left behind.
+    if (msg.subtype === 'model_refusal_fallback') {
+      const retracted = msg.retracted_message_uuids ?? []
+      const messageIds = [
+        ...new Set(
+          retracted
+            .map((u) => this.wireUuidToMessageId.get(u.slice(0, RETRACTION_UUID_PREFIX_LEN)))
+            .filter((id): id is string => !!id)
+        )
+      ]
+      if (messageIds.length > 0) {
+        this.messageHistory = this.messageHistory.filter((m) => !messageIds.includes(m.id))
+      }
+      this.send('session:messages-retracted', { messageIds })
+    }
   }
 
   /**
@@ -1687,6 +1745,11 @@ this.permissionMode = mode
         }
       } else if (blockType === 'thinking') {
         return { type: 'thinking' as const, text: block.thinking as string }
+      } else if (blockType === 'fallback') {
+        // Canonical-replacement frame for a refusal-retracted partial. The
+        // whole message is normally evicted right after via
+        // retracted_message_uuids; render a readable note in case it survives.
+        return { type: 'text' as const, text: fallbackBlockText(block) }
       }
       return { type: 'text' as const, text: JSON.stringify(block) }
     })

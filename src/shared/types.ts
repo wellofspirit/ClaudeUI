@@ -344,7 +344,7 @@ interface SessionAPI {
   maximizeWindow(): Promise<void>
   closeWindow(): Promise<void>
   listDirectories(): Promise<DirectoryGroup[]>
-  loadSessionHistory(sessionId: string, projectKey: string): Promise<{ messages: ChatMessage[]; taskNotifications: TaskNotification[]; customTitle: string | null; agentIdToToolUseId: Record<string, string>; statusLine: StatusLineData | null; taskPrompts: Record<string, string> }>
+  loadSessionHistory(sessionId: string, projectKey: string): Promise<{ messages: ChatMessage[]; taskNotifications: TaskNotification[]; customTitle: string | null; agentIdToToolUseId: Record<string, string>; statusLine: StatusLineData | null; taskPrompts: Record<string, string>; warnings: string[] }>
   loadSubagentHistory(sessionId: string, projectKey: string, agentId: string): Promise<ChatMessage[]>
   buildSubagentFileMap(sessionId: string, projectKey: string, taskPrompts: Record<string, string>): Promise<Record<string, string>>
   loadBackgroundOutput(projectKey: string, taskId: string, outputFile?: string): Promise<{ content: string | null; purged: boolean }>
@@ -356,6 +356,9 @@ interface SessionAPI {
   onStatus(cb: (routingId: string, status: SessionStatus) => void): () => void
   onResult(cb: (routingId: string, result: SessionResult) => void): () => void
   onError(cb: (routingId: string, error: string) => void): () => void
+  onWarning(cb: (routingId: string, warning: string) => void): () => void
+  /** Refusal-fallback retraction — remove these messages from the transcript (docs/protocol/04-system-subtypes.md §4.20) */
+  onMessagesRetracted(cb: (routingId: string, data: { messageIds: string[] }) => void): () => void
   onToolResult(cb: (routingId: string, data: { toolUseId: string; result: string; isError: boolean }) => void): () => void
   onMaximizeChange(cb: (isMaximized: boolean) => void): () => void
   onTaskProgress(cb: (routingId: string, data: TaskProgress) => void): () => void
