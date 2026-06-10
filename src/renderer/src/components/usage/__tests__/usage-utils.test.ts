@@ -196,8 +196,8 @@ describe('getModelColor', () => {
     // The first call sets the cache. This is intentional and tests the caching.
   })
 
-  it('returns purple for opus models', () => {
-    expect(getModelColor('claude-opus-4-6')).toBe('#8b5fcc')
+  it('returns electric indigo for opus models', () => {
+    expect(getModelColor('claude-opus-4-6')).toBe('#7c5cff')
   })
 
   it('returns terracotta coral for fable models', () => {
