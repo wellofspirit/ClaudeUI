@@ -200,9 +200,9 @@ describe('getModelColor', () => {
     expect(getModelColor('claude-opus-4-6')).toBe('#8b5fcc')
   })
 
-  it('returns amber for fable models', () => {
-    expect(getModelColor('claude-fable-5')).toBe('#f5a623')
-    expect(getModelColor('claude-fable-5[1m]')).toBe('#f5a623')
+  it('returns terracotta coral for fable models', () => {
+    expect(getModelColor('claude-fable-5')).toBe('#d97757')
+    expect(getModelColor('claude-fable-5[1m]')).toBe('#d97757')
   })
 
   it('returns blue for sonnet models', () => {

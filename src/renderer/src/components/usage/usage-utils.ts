@@ -2,7 +2,7 @@ import type { TokenCounts } from '../../../../shared/types'
 
 /** Model color palette — match by substring */
 const MODEL_COLORS: Array<{ match: string; color: string }> = [
-  { match: 'fable', color: '#f5a623' },
+  { match: 'fable', color: '#d97757' },
   { match: 'opus', color: '#8b5fcc' },
   { match: 'sonnet', color: '#6c9eff' },
   { match: 'haiku', color: '#4ade80' }
