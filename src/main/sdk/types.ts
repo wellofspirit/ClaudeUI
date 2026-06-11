@@ -98,6 +98,9 @@ export interface SystemMessage extends BaseSDKMessage {
     | string
   permissionMode?: string
   /** init-only fields */
+  /** Resolved canonical model id (e.g. "claude-opus-4-8") — what the `default`
+   *  alias and other server-resolved aliases actually map to this session. */
+  model?: string
   slash_commands?: string[]
   skills?: string[]
   mcp_servers?: Array<{ name: string; status: string }>

@@ -16,6 +16,7 @@ import {
   modelDefaultThinkingMode,
   modelResolveEffort,
   canonicalizeModelValue,
+  resolveContextWindow,
 } from '../model-capabilities'
 
 describe('supportsAdaptiveThinking', () => {
@@ -294,5 +295,39 @@ describe('modelResolveEffort', () => {
     }
     expect(modelResolveEffort(sonnet, 'xhigh')).toBe('high') // not in list → default
     expect(modelResolveEffort(sonnet, 'max')).toBe('max')    // allowed
+  })
+})
+
+describe('resolveContextWindow', () => {
+  const ONE_M = 1_000_000
+  const DEFAULT = 200_000
+
+  it('resolves the [1m] suffix to 1M, case-insensitively', () => {
+    expect(resolveContextWindow('sonnet[1m]')).toBe(ONE_M)
+    expect(resolveContextWindow('SONNET[1M]')).toBe(ONE_M)
+  })
+
+  it('resolves implicit-1M picker aliases (the regression: no "1m" marker)', () => {
+    expect(resolveContextWindow('fable')).toBe(ONE_M)
+    expect(resolveContextWindow('opus')).toBe(ONE_M)
+  })
+
+  it('resolves implicit-1M full ids by substring (dated / Bedrock)', () => {
+    expect(resolveContextWindow('claude-fable-5')).toBe(ONE_M)
+    expect(resolveContextWindow('claude-opus-4-8-20251201')).toBe(ONE_M)
+    expect(resolveContextWindow('us.anthropic.claude-opus-4-8-20251201-v1:0')).toBe(ONE_M)
+  })
+
+  it('keeps 200K models and aliases at the default', () => {
+    expect(resolveContextWindow('sonnet')).toBe(DEFAULT)
+    expect(resolveContextWindow('haiku')).toBe(DEFAULT)
+    expect(resolveContextWindow('claude-opus-4-6')).toBe(DEFAULT)
+  })
+
+  it('falls back to the default for unknown / empty values', () => {
+    expect(resolveContextWindow('some-future-model')).toBe(DEFAULT)
+    expect(resolveContextWindow('')).toBe(DEFAULT)
+    expect(resolveContextWindow(undefined)).toBe(DEFAULT)
+    expect(resolveContextWindow(null)).toBe(DEFAULT)
   })
 })

@@ -93,6 +93,10 @@ export async function computeTokenMetrics(filePath: string, model?: string): Pro
 
     // Track the most recent non-sidechain assistant for context length
     let mostRecentMainChainUsage: Record<string, number> | null = null
+    // Authoritative model id for window sizing: the transcript records the
+    // *resolved* id (e.g. "claude-opus-4-8"), so it disambiguates aliases like
+    // "default" that the caller can't resolve. Latest main-chain wins.
+    let transcriptModel: string | undefined
 
     const stream = fs.createReadStream(filePath, { encoding: 'utf-8' })
     const rl = readline.createInterface({ input: stream })
@@ -109,6 +113,7 @@ export async function computeTokenMetrics(filePath: string, model?: string): Pro
 
           if (data.isSidechain !== true && !data.isApiErrorMessage) {
             mostRecentMainChainUsage = usage
+            if (typeof data.message.model === 'string') transcriptModel = data.message.model
           }
         } else if (data.type === 'result') {
           totalCostUsd += (data.total_cost_usd as number) || 0
@@ -129,7 +134,9 @@ export async function computeTokenMetrics(filePath: string, model?: string): Pro
       }
 
       const totalTokens = inputTokens + outputTokens + cachedTokens
-      const ctxWindow = model ? getContextWindowSize(model) : 200_000
+      // Prefer the transcript's resolved id over the caller-supplied alias.
+      const effectiveModel = transcriptModel ?? model
+      const ctxWindow = effectiveModel ? getContextWindowSize(effectiveModel) : 200_000
       const usedPercentage = contextLength > 0 ? Math.round((contextLength / ctxWindow) * 100) : null
       const remainingPercentage = usedPercentage !== null ? 100 - usedPercentage : null
 

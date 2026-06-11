@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import type { FileAttachment, StatusLineData, SlashCommandInfo, DirEntry, VoiceState } from '../../../../../shared/types'
-import { useSessionStore, useActiveSession } from '../../../stores/session-store'
+import { useSessionStore } from '../../../stores/session-store'
 import { SlashCommandMenu } from '../SlashCommandMenu'
 import { FileMentionMenu } from '../FileMentionMenu'
 import { FileAttachmentBar } from '../FileAttachmentBar'
@@ -103,27 +103,18 @@ export interface InputBoxViewProps {
 // StatusLine (reads its own store slices — not part of InputBox props)
 // ---------------------------------------------------------------------------
 
-function useContextWindowSize(): number {
-  const models = useSessionStore((s) => s.availableModels)
-  const selectedModel = useActiveSession((s) => s.selectedModel)
-  const info = models.find((m) => m.value === selectedModel)
-  return info && /1m/i.test(info.description) ? 1_000_000 : 200_000
-}
-
 function StatusLine({ data }: { data: StatusLineData }): React.JSX.Element {
   const align = useSessionStore((s) => s.settings.statusLineAlign)
   const template = useSessionStore((s) => s.settings.statusLineTemplate)
-  const ctxWindow = useContextWindowSize()
 
-  const adjusted: StatusLineData = {
-    ...data,
-    usedPercentage: data.contextWindowSize > 0 ? Math.round((data.contextWindowSize / ctxWindow) * 100) : null,
-    remainingPercentage: data.contextWindowSize > 0 ? 100 - Math.round((data.contextWindowSize / ctxWindow) * 100) : null
-  }
-
+  // usedPercentage/remainingPercentage are computed in the main process (live:
+  // claude-session, history: session-history), keyed on the *resolved* model id
+  // so the `default` alias and implicit-1M models (Fable 5, Opus 4.8) resolve
+  // correctly. setModel re-emits the status line on a model switch, so trusting
+  // the main-computed value stays reactive without duplicating window logic here.
   return (
     <div className={`text-[10px] text-text-muted ${ALIGN_CLASS[align]} pt-1.5 select-none truncate`}>
-      {interpolateTemplate(template, adjusted)}
+      {interpolateTemplate(template, data)}
     </div>
   )
 }

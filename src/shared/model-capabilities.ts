@@ -256,3 +256,49 @@ export function resolveEffort(
   if (allowed.includes(desired)) return desired
   return defaultEffort(model)
 }
+
+// ---------------------------------------------------------------------------
+// Context window
+// ---------------------------------------------------------------------------
+
+export const CONTEXT_WINDOW_1M = 1_000_000
+export const CONTEXT_WINDOW_DEFAULT = 200_000
+
+/**
+ * Base models that get a 1M window without a "[1m]" suffix — cli.js `UE()`.
+ * Matched by substring like cli.js's normaliser, so dated ids and
+ * provider-prefixed ids (Bedrock) resolve too.
+ */
+const IMPLICIT_1M_BASE_MODELS = [
+  'claude-fable-5',
+  'claude-mythos-5',
+  'claude-opus-4-7',
+  'claude-opus-4-8'
+]
+
+/**
+ * Picker aliases that cli.js currently resolves to an implicit-1M base model:
+ * "fable" → claude-fable-5, "opus" → claude-opus-4-8. Aliases track the latest
+ * model generation, so re-verify this set on claudeCliVersion bumps.
+ */
+const IMPLICIT_1M_ALIASES = new Set(['fable', 'opus'])
+
+/**
+ * Resolve a model value (picker alias or full id) to its context-window size,
+ * mirroring cli.js's `DR(model, betas)`. Does NOT honour the
+ * `CLAUDE_CODE_DISABLE_1M_CONTEXT` env override — that's a main-process concern
+ * applied by `getContextWindowSize` in services/context-window.ts. The renderer
+ * has no access to that env var, so it calls this directly.
+ *
+ * Crucially, resolution is keyed on the model VALUE, not the SDK-provided
+ * description: implicit-1M models (Fable 5, Opus 4.8) carry no "1m" marker in
+ * their description, so a description heuristic silently caps them at 200K.
+ */
+export function resolveContextWindow(modelValue: string | undefined | null): number {
+  if (!modelValue) return CONTEXT_WINDOW_DEFAULT
+  const value = modelValue.toLowerCase().trim()
+  if (value.includes('[1m]')) return CONTEXT_WINDOW_1M
+  if (IMPLICIT_1M_BASE_MODELS.some((base) => value.includes(base))) return CONTEXT_WINDOW_1M
+  if (IMPLICIT_1M_ALIASES.has(value)) return CONTEXT_WINDOW_1M
+  return CONTEXT_WINDOW_DEFAULT
+}

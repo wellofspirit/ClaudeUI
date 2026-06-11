@@ -2,6 +2,10 @@
  * @vitest-environment node
  */
 import { describe, it, expect } from 'vitest'
+import * as fs from 'fs'
+import * as os from 'os'
+import * as path from 'path'
+import { computeTokenMetrics } from '../session-history'
 
 // ---------------------------------------------------------------------------
 // Replicate private parser functions from session-history.ts for testing
@@ -254,5 +258,45 @@ describe('extractOutputFile', () => {
   it('extracts from within larger text', () => {
     const text = `prefix <output-file>/path/to/file</output-file> suffix`
     expect(extractOutputFile(text)).toBe('/path/to/file')
+  })
+})
+
+describe('computeTokenMetrics — context window from transcript model', () => {
+  let seq = 0
+  function writeTranscript(lines: object[]): string {
+    const file = path.join(os.tmpdir(), `claudeui-history-${process.pid}-${seq++}.jsonl`)
+    fs.writeFileSync(file, lines.map((l) => JSON.stringify(l)).join('\n'))
+    return file
+  }
+  function assistant(model: string, contextLen: number): object {
+    return {
+      type: 'assistant',
+      message: { model, usage: { input_tokens: contextLen, output_tokens: 0 } }
+    }
+  }
+
+  it('sizes the window from the transcript model, ignoring the caller alias', async () => {
+    // A 1M-context model used 300k tokens → 30%. The caller passes the
+    // ambiguous "default" alias, which alone would resolve to 200K (→ 150%).
+    const file = writeTranscript([assistant('claude-opus-4-8', 300_000)])
+    const m = await computeTokenMetrics(file, 'default')
+    fs.unlinkSync(file)
+    expect(m.usedPercentage).toBe(30)
+  })
+
+  it('falls back to the caller model when the transcript has no model', async () => {
+    const file = writeTranscript([
+      { type: 'assistant', message: { usage: { input_tokens: 100_000, output_tokens: 0 } } }
+    ])
+    const m = await computeTokenMetrics(file, 'opus')
+    fs.unlinkSync(file)
+    expect(m.usedPercentage).toBe(10) // 100k / 1M
+  })
+
+  it('keeps a 200K model at its true window', async () => {
+    const file = writeTranscript([assistant('claude-sonnet-4-6', 100_000)])
+    const m = await computeTokenMetrics(file, 'default')
+    fs.unlinkSync(file)
+    expect(m.usedPercentage).toBe(50) // 100k / 200k
   })
 })

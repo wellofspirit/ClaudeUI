@@ -60,11 +60,36 @@ ever sees them:
 
 ## 13.4 ClaudeUI's mirror
 
-`getContextWindowSize()` in `src/main/services/context-window.ts`. Consumers:
-`claude-session.ts` (status line) and `session-history.ts`
-(`computeTokenMetrics`). It replicates rows 1, 3, 5 plus the
-`CLAUDE_CODE_DISABLE_1M_CONTEXT` kill switch, and resolves the `fable`/`opus`
-aliases itself (we store the picker alias, not the resolved id).
+Core resolver: `resolveContextWindow(modelValue)` in
+`src/shared/model-capabilities.ts`. It replicates rows 1, 3, 5 and resolves the
+`fable`/`opus` aliases itself. `getContextWindowSize()` in
+`src/main/services/context-window.ts` wraps it, layering on the
+main-process-only `CLAUDE_CODE_DISABLE_1M_CONTEXT` kill switch (the renderer has
+no access to that env var, so it calls the shared resolver directly).
+
+The window is computed **once, in the main process**, and the resulting
+`usedPercentage` / `remainingPercentage` ride along in `StatusLineData`:
+
+- **Live** — `claude-session.ts` `buildStatusLineFromAccumulators()` /
+  reconciliation via `computeTokenMetrics`. `setModel` re-emits the status line
+  on a model switch, so the percentage stays reactive.
+- **History** — `session-history.ts` `computeTokenMetrics`.
+
+The renderer's `StatusLine` (`InputBox/View.tsx`) just renders the
+main-computed value — it no longer recomputes the window. A prior renderer-side
+recompute was the source of two bugs (see history below).
+
+**`default` and other server-resolved aliases.** We store the picker alias, not
+the resolved id, so `default` alone can't be sized (it could be Opus → 1M or
+Sonnet → 200K depending on account/config). The resolved canonical id is
+recovered from the wire instead:
+
+- Live: the `model` field on `system/init` (4.2) → `claude-session.ts`
+  `resolvedModelId`, used by the `contextWindowSize` getter when `this.model`
+  is `default`.
+- History: the `message.model` on the latest main-chain assistant line in the
+  transcript → `computeTokenMetrics` `transcriptModel`, which takes precedence
+  over the caller-supplied alias (the transcript records the resolved id).
 
 Known divergences (accepted):
 
@@ -75,10 +100,13 @@ Known divergences (accepted):
   even if the server-side experiment raises it.
 - **No `CLAUDE_CODE_MAX_CONTEXT_TOKENS` override** (13.1 row 0).
 
-History: before 2026-06 this was a `/1m/i` test against the model picker
-*description*, which missed every implicit-1M model (Fable 5's description
-contains no "1m") and would also miss `sonnet[1m]` for account types whose
-description reads "Sonnet 4.6 for long sessions".
+History: before 2026-06 the renderer did its own `/1m/i` test against the model
+picker *description*, which (a) missed every implicit-1M model (Fable 5 / Opus
+4.8 carry no "1m" marker) so they were capped at 200K, and (b) clobbered the
+correct main-computed value for loaded historical sessions, sizing them off the
+store's `selectedModel` (often `default`) rather than the model that actually
+ran. Both fixed by deleting the renderer recompute and resolving `default` from
+the init / transcript model id.
 
 ## 13.5 Drift check on version bump
 

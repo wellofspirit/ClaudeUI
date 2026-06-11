@@ -197,6 +197,10 @@ export class ClaudeSession {
   private effort: string
   private thinkingMode: 'adaptive' | 'enabled' | 'disabled'
   private model: string = 'default'
+  /** Canonical model id reported by system/init — what the `default` alias
+   *  (and other server-resolved aliases) actually map to. Used to resolve the
+   *  context window when `this.model` is an ambiguous alias. */
+  private resolvedModelId: string | null = null
   private resumeSessionId: string | undefined
   /** Fork ("branch off") seeding: when set on creation, the FIRST run resumes
    *  `resumeSessionId` truncated to this line uuid with `--fork-session`, so a
@@ -755,6 +759,9 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
 
       if (type === 'system' && (msg as SystemMessage).subtype === 'init') {
         const sys = msg as SystemMessage
+        // Resolved canonical model id (e.g. "default" → "claude-opus-4-8"),
+        // used to size the context window when this.model is an alias.
+        if (sys.model) this.resolvedModelId = sys.model
         // CLI-only commands that produce no output through the SDK
         const CLI_ONLY = new Set(['context', 'cost', 'login', 'logout', 'release-notes', 'doctor'])
         const raw = sys.slash_commands || []
@@ -1505,9 +1512,13 @@ this.permissionMode = mode
     return true
   }
 
-  /** Context window size based on the currently selected model. */
+  /** Context window size based on the currently selected model. The `default`
+   *  alias is resolved server-side by cli.js, so its real window is only known
+   *  from the canonical id reported in system/init — prefer that when present. */
   private get contextWindowSize(): number {
-    return getContextWindowSize(this.model)
+    const effectiveModel =
+      this.model === 'default' && this.resolvedModelId ? this.resolvedModelId : this.model
+    return getContextWindowSize(effectiveModel)
   }
 
   /** Build StatusLineData from in-memory accumulators (zero I/O) */
