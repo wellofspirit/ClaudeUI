@@ -21,9 +21,17 @@ import { connectRemoteClient, ephemeralPort } from '../../../test/helpers/ws-tes
 // Mocks — must be declared before importing remote-server.
 // ---------------------------------------------------------------------------
 
+// `getAppPath()` drives where the server looks for the built web client
+// (`<appPath>/out/web/index.html`). Tests that need the real web-client HTML
+// served (mockup-token injection) must NOT depend on the repo's `out/web`
+// build artifact — in CI, tests run before the build, so it doesn't exist.
+// Expose a mutable ref so individual suites can point it at a temp dir they
+// populate themselves. Defaults to cwd to preserve prior behavior.
+const { appPathRef } = vi.hoisted(() => ({ appPathRef: { current: '' } }))
+
 vi.mock('electron', () => ({
   app: {
-    getAppPath: () => process.cwd(),
+    getAppPath: () => appPathRef.current || process.cwd(),
     isPackaged: false,
   },
 }))
@@ -238,6 +246,7 @@ describe('RemoteServer — mockup HTTP route', () => {
   let server: RemoteServer
   let port: number
   let cwd: string
+  let appDir: string
   let b64: string
   const ID = 'abcdef12'
 
@@ -249,11 +258,23 @@ describe('RemoteServer — mockup HTTP route', () => {
     const dir = path.join(cwd, '.claude', 'ui', 'mockups', ID)
     fs.mkdirSync(dir, { recursive: true })
     fs.writeFileSync(path.join(dir, 'index.html'), '<html><head></head><body>remote mockup</body></html>')
+
+    // Provide a self-contained web-client build so the server serves the real
+    // index.html (and injects the mockup token) instead of the placeholder.
+    // The repo's `out/web` is gitignored and absent in CI, where tests run
+    // before the build — relying on it makes these tests non-hermetic.
+    appDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mockup-app-'))
+    appPathRef.current = appDir
+    const webDir = path.join(appDir, 'out', 'web')
+    fs.mkdirSync(webDir, { recursive: true })
+    fs.writeFileSync(path.join(webDir, 'index.html'), '<html><head></head><body>web client</body></html>')
   })
 
   afterEach(() => {
     try { server.stop() } catch { /* already stopped */ }
     fs.rmSync(cwd, { recursive: true, force: true })
+    fs.rmSync(appDir, { recursive: true, force: true })
+    appPathRef.current = ''
   })
 
   /** Pull the injected mockup token out of the served web-client HTML. */
