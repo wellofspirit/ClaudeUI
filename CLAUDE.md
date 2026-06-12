@@ -318,5 +318,6 @@ ADRs live in `docs/adr/`. See `docs/adr/adr.md` for the index.
 | 009 | Store cli.js-consumed settings in Claude's settings.json, not UISettings | Accepted |
 | 010 | Fork ("branch off") sessions via cli.js's native `--resume-session-at` + `--fork-session` | Accepted |
 | 011 | Canonical 5h-window identity from `resets_at` + time-based account attribution for usage analytics | Accepted |
+| 012 | Mermaid HTML labels (`antiscript` + DOMPurify `html` profile) and dark-theme ER contrast | Accepted |
 
 When a design or implementation decision is made during a conversation, prompt the user about whether it should be recorded as a new ADR entry. When adding a new ADR, proactively scan existing ADRs to check if the new decision supersedes or conflicts with a previous one — if so, update the old ADR's status to "Superseded by ADR-XXX" and note it in the new ADR.

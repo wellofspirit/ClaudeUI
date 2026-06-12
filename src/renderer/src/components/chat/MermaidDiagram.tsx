@@ -72,7 +72,12 @@ const THEME_CONFIGS: Record<ThemeId, MermaidThemeConfig> = {
       doneTaskBkgColor: '#0f2a20',
       doneTaskBorderColor: '#4ade80',
       critBkgColor: '#2a1015',
-      critBorderColor: '#f87171'
+      critBorderColor: '#f87171',
+      // ER diagrams — mermaid's 'dark' base hardcodes attribute-row fills to
+      // #ffffff / #f2f2f2 (white) regardless of dark mode, which leaves the
+      // theme's light text unreadable. Override to dark fills.
+      attributeBackgroundColorEven: '#152540',
+      attributeBackgroundColorOdd: '#0d1117'
     }
   },
 
@@ -151,7 +156,11 @@ const THEME_CONFIGS: Record<ThemeId, MermaidThemeConfig> = {
       doneTaskBkgColor: '#1a3020',
       doneTaskBorderColor: '#a6e22e',
       critBkgColor: '#3a1525',            // pink tint
-      critBorderColor: '#f92672'
+      critBorderColor: '#f92672',
+      // ER diagrams — override mermaid's white (#ffffff / #f2f2f2) attribute-row
+      // fills (the cause of white-text-on-light-box) with dark Monokai tints.
+      attributeBackgroundColorEven: '#1a3a42',  // cyan tint, matches nodes
+      attributeBackgroundColorOdd: '#1e1f1a'    // canvas tint
     }
   }
 }
@@ -168,6 +177,33 @@ function resolveThemeConfig(setting: MermaidTheme | 'auto', appTheme: ThemeId): 
 }
 
 // ---------------------------------------------------------------------------
+// SVG sanitization
+// ---------------------------------------------------------------------------
+
+/**
+ * Sanitize Mermaid's rendered SVG before it goes through dangerouslySetInnerHTML.
+ *
+ * With htmlLabels enabled, Mermaid emits labels as
+ * `<foreignObject><div xmlns="…/xhtml">…<br/></div></foreignObject>`. Preserving
+ * that inner HTML (while still stripping scripts) requires three things together:
+ *  - the `html` profile, so div/span/p/br/b/i are in the allow-list;
+ *  - `foreignObject` added as a tag;
+ *  - `HTML_INTEGRATION_POINTS: { foreignobject }` — DOMPurify 3.x only treats
+ *    `annotation-xml` as an HTML integration point by default, so XHTML children
+ *    of `<foreignObject>` otherwise fail its SVG→HTML namespace check and are
+ *    dropped (labels render empty). See ADR-012.
+ *
+ * Scripts, on* handlers, and javascript: hrefs are still removed.
+ */
+export function sanitizeMermaidSvg(svg: string): string {
+  return DOMPurify.sanitize(svg, {
+    USE_PROFILES: { svg: true, svgFilters: true, html: true },
+    ADD_TAGS: ['foreignObject'],
+    HTML_INTEGRATION_POINTS: { foreignobject: true, 'annotation-xml': true }
+  })
+}
+
+// ---------------------------------------------------------------------------
 // Unique ID generator for mermaid.render()
 // ---------------------------------------------------------------------------
 
@@ -177,13 +213,43 @@ function nextMermaidId(): string {
 }
 
 // ---------------------------------------------------------------------------
+// SVG parsing / serialization helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse a (possibly HTML-serialized) Mermaid SVG into its <svg> element.
+ *
+ * Always uses the HTML parser, never image/svg+xml: with htmlLabels enabled,
+ * labels are <foreignObject> HTML and DOMPurify serializes void tags as bare
+ * <br> (not <br/>). The strict XML parser errors on that — and Chromium then
+ * truncates the SVG at the first <br>, silently dropping every node/label after
+ * it. The HTML parser tolerates <br> and handles SVG foreign content. ADR-012.
+ */
+export function parseSvgElement(svgString: string): SVGSVGElement | null {
+  const doc = new DOMParser().parseFromString(svgString, 'text/html')
+  return doc.querySelector('svg')
+}
+
+/**
+ * Serialize an <svg> element to XML-well-formed markup (void tags self-closed,
+ * e.g. <br/>). Required for rasterizing via <img src="data:image/svg+xml">,
+ * which always parses as strict XML. Strips redundant literal xmlns attributes
+ * (Mermaid emits xmlns on the foreignObject's <div>) that would otherwise
+ * collide with XMLSerializer's own namespace declarations and produce invalid
+ * XML. The element's real namespaces are preserved by the DOM and re-emitted.
+ */
+export function svgElementToXml(svgEl: SVGSVGElement): string {
+  const clone = svgEl.cloneNode(true) as SVGSVGElement
+  clone.querySelectorAll('[xmlns]').forEach((el) => el.removeAttribute('xmlns'))
+  return new XMLSerializer().serializeToString(clone)
+}
+
+// ---------------------------------------------------------------------------
 // SVG → PNG conversion (used by both export and copy)
 // ---------------------------------------------------------------------------
 
 async function svgToPngBlob(svgString: string): Promise<Blob | null> {
-  const parser = new DOMParser()
-  const doc = parser.parseFromString(svgString, 'image/svg+xml')
-  const svgEl = doc.querySelector('svg')
+  const svgEl = parseSvgElement(svgString)
   if (!svgEl) return null
 
   const viewBox = svgEl.getAttribute('viewBox')
@@ -214,7 +280,9 @@ async function svgToPngBlob(svgString: string): Promise<Blob | null> {
 
   // Use a data URI instead of blob URL — blob URLs taint the canvas in Electron,
   // preventing toBlob() from working. Data URIs are always same-origin.
-  const encoded = btoa(unescape(encodeURIComponent(svgString)))
+  // Serialize to XML-well-formed markup so the <img> SVG (parsed as strict XML)
+  // doesn't choke on htmlLabels' bare <br> tags. See ADR-012.
+  const encoded = btoa(unescape(encodeURIComponent(svgElementToXml(svgEl))))
   const dataUri = `data:image/svg+xml;base64,${encoded}`
 
   return new Promise<Blob | null>((resolve) => {
@@ -370,9 +438,7 @@ function DiagramViewport({ svgString }: DiagramViewportProps): React.JSX.Element
   // Normalize SVG: ensure it has a viewBox so it scales properly,
   // then remove fixed width/height so it fills the container at zoom=1.
   const normalizedSvg = useMemo(() => {
-    const parser = new DOMParser()
-    const doc = parser.parseFromString(svgString, 'image/svg+xml')
-    const svg = doc.querySelector('svg')
+    const svg = parseSvgElement(svgString)
     if (!svg) return svgString
 
     // If no viewBox, create one from width/height attributes
@@ -510,8 +576,18 @@ export const MermaidDiagram = memo(function MermaidDiagram({ source }: MermaidDi
       try {
         mermaid.initialize({
           startOnLoad: false,
-          securityLevel: 'strict',
+          // 'antiscript' (not 'strict') so HTML labels render: <br/> line breaks,
+          // <b>/<i>/<span style> inline styling. It still strips <script> tags and
+          // click handlers; the DOMPurify pass below is the second line of defence.
+          securityLevel: 'antiscript',
           theme: themeConfig.base,
+          // Render labels as HTML (foreignObject) instead of flat SVG <text>, so
+          // <br/> and inline markup in node/edge labels are honoured.
+          htmlLabels: true,
+          // LLM-generated diagrams can be large; lift the default caps (50000 chars
+          // / 500 edges) so big diagrams render instead of failing silently.
+          maxTextSize: 90000,
+          maxEdges: 2000,
           fontFamily: 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace',
           themeVariables: themeConfig.variables
         })
@@ -519,11 +595,8 @@ export const MermaidDiagram = memo(function MermaidDiagram({ source }: MermaidDi
         const { svg } = await mermaid.render(renderIdRef.current, source)
         if (cancelled) return
 
-        // Sanitize SVG output (belt-and-suspenders with securityLevel: 'strict')
-        const clean = DOMPurify.sanitize(svg, {
-          USE_PROFILES: { svg: true, svgFilters: true },
-          ADD_TAGS: ['foreignObject']
-        })
+        // Sanitize SVG output (belt-and-suspenders with securityLevel: 'antiscript').
+        const clean = sanitizeMermaidSvg(svg)
 
         setSvgString(clean)
         setError(null)

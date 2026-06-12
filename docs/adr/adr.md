@@ -13,3 +13,4 @@
 | [009](adr-009_claude-settings-vs-uisettings.md) | Store cli.js-consumed settings in Claude's settings.json, not UISettings |
 | [010](adr-010_fork-session-via-native-cli-flags.md) | Fork ("branch off") sessions via cli.js's native `--resume-session-at` + `--fork-session` |
 | [011](adr-011_canonical-usage-windows-and-account-attribution.md) | Canonical 5h-window identity from `resets_at` + time-based account attribution for usage analytics |
+| [012](adr-012_mermaid-html-labels-and-theming.md) | Mermaid HTML labels (`antiscript` + DOMPurify `html` profile) and dark-theme ER contrast |
