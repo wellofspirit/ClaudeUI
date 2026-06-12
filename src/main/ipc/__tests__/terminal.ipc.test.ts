@@ -7,7 +7,7 @@
  * event pushes via webContents.send().
  */
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
+ 
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import Module from 'module'

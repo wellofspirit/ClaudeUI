@@ -26,7 +26,7 @@ async function main() {
   const t = new TestRunner('taskstop-notification')
 
   console.log('  Starting SDK query...')
-  const { q, cleanup, ac } = createQuery(PROMPT, {}, 120_000)
+  const { q, cleanup } = createQuery(PROMPT, {}, 120_000)
 
   let startedTaskId = null
   let notificationReceived = false

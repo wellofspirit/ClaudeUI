@@ -4,7 +4,7 @@
  * Tests the openGitPanel / closeGitPanel toggle via store.
  */
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
+ 
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { render, fireEvent } from '@testing-library/react'

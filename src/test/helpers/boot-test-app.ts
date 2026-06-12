@@ -15,7 +15,7 @@
  *   // ... use app.api, app.store, app.bridge
  */
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
+ 
 
 import { TestIpcBridge } from '../bridges/test-ipc-bridge'
 import { setIpcBridge } from '../stubs/electron-shim'

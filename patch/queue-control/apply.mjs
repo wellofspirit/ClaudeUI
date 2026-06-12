@@ -57,7 +57,7 @@ const PATCH_A2_MARKER = '/*PATCHED:queue-control-consumed*/'
 // Part A1: dequeue_message control request (value-based matching)
 // =====================================================================
 
-let skipA1 = src.includes(PATCH_A1_MARKER)
+const skipA1 = src.includes(PATCH_A1_MARKER)
 if (skipA1) {
   console.log('Part A1 already applied. Skipping.')
 }
@@ -214,7 +214,7 @@ if (!skipA1) {
 // Part A2: queued_command_consumed notification in submitMessage
 // =====================================================================
 
-let skipA2 = src.includes(PATCH_A2_MARKER)
+const skipA2 = src.includes(PATCH_A2_MARKER)
 if (skipA2) {
   console.log('Part A2 already applied. Skipping.')
 }
@@ -239,7 +239,7 @@ if (!skipA2) {
   )
 
   let qcMatch = qcReNew.exec(src)
-  let isNewPattern = !!qcMatch
+  const isNewPattern = !!qcMatch
   if (!qcMatch) qcMatch = qcReOld.exec(src)
   if (!qcMatch) {
     console.error('ERROR: Cannot find queued_command attachment handler in submitMessage')

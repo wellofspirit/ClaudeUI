@@ -29,7 +29,7 @@ function Harness({ html }: { html: string }) {
 }
 
 beforeEach(() => {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+   
   ;(globalThis as any).window.api = {
     saveSettings: vi.fn(),
   }

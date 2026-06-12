@@ -131,7 +131,7 @@ describe('E2E: interrupt', () => {
     await (gen as unknown as { interrupt(): Promise<void> }).interrupt()
 
     // Drain — should immediately be done due to interrupt flag
-    // eslint-disable-next-line no-constant-condition
+     
     while (true) {
       const next = await iter.next()
       if (next.done) break

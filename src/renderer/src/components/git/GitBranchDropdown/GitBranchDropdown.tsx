@@ -72,7 +72,7 @@ export function GitBranchDropdown({ onClose, anchorRef }: Props): React.JSX.Elem
       setLastFetchTime(activeSessionId, Date.now())
       await refreshAll()
     }).catch(() => {})
-  }, []) // eslint-disable-line react-hooks/exhaustive-deps — only on mount
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps -- only on mount
 
   // Click-outside to close
   useEffect(() => {

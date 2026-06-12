@@ -502,7 +502,7 @@ function DiagramViewport({ svgString }: DiagramViewportProps): React.JSX.Element
 
     el.addEventListener('wheel', handler, { passive: false })
     return () => el.removeEventListener('wheel', handler)
-  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [])  
 
   return (
     <div className="relative">

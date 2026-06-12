@@ -45,7 +45,7 @@ export function DeleteConfirmModal({
         <h3 className="text-[15px] font-medium text-text-primary mb-2">{title}</h3>
         <p className="text-[13px] text-text-secondary mb-3 leading-relaxed">
           {kind === 'session' ? (
-            <>This will permanently delete <span className="font-medium text-text-primary">"{name}"</span> and its subagent data from disk. This cannot be undone.</>
+            <>This will permanently delete <span className="font-medium text-text-primary">&quot;{name}&quot;</span> and its subagent data from disk. This cannot be undone.</>
           ) : (
             <>This will permanently delete <span className="font-medium text-text-primary">{name}</span>{sessionCount ? <> and all <span className="font-medium text-text-primary">{sessionCount} session{sessionCount === 1 ? '' : 's'}</span> inside it</> : ''}. This cannot be undone.</>
           )}

@@ -19,7 +19,7 @@ import { render, screen, fireEvent, within } from '@testing-library/react'
  * query scope. Avoids ambiguity with the trigger button (which displays the
  * currently-selected value and would otherwise collide with same-named options).
  */
-// eslint-disable-next-line @typescript-eslint/explicit-function-return-type
+ 
 function openPickerDropdown(triggerTitle: string) {
   const trigger = screen.getByTitle(triggerTitle)
   fireEvent.click(trigger)

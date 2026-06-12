@@ -16,18 +16,11 @@ export function BashBackgroundEntry({ toolUseId }: { toolUseId: string }): React
   const [expanded, setExpanded] = useState(true)
   const [prependedContent, setPrependedContent] = useState('')
   const [loadingMore, setLoadingMore] = useState(false)
-
-  const { taskBlock } = findTaskBlocks(messages, toolUseId)
-  if (!taskBlock) return null
-
-  const command = String(taskBlock.toolInput?.command || '')
-  const bgNotification = taskNotifications.find((n) => n.toolUseId === toolUseId)
-  const isRunning = !bgNotification
-  const isError = bgNotification?.status === 'failed'
-
   const bodyRef = useRef<HTMLDivElement>(null)
   const [following, setFollowing] = useState(true)
   const isAutoScrolling = useRef(false)
+
+  const { taskBlock } = findTaskBlocks(messages, toolUseId)
 
   // Watch on mount/expand, unwatch on unmount/collapse
   useEffect(() => {
@@ -79,6 +72,15 @@ export function BashBackgroundEntry({ toolUseId }: { toolUseId: string }): React
     setPrependedContent((prev) => chunk + prev)
     setLoadingMore(false)
   }, [bgOutput, prependedContent, loadingMore, toolUseId, activeSessionId])
+
+  // All hooks above run unconditionally (rules-of-hooks); bail out only after
+  // them when the task block isn't present in the message stream yet.
+  if (!taskBlock) return null
+
+  const command = String(taskBlock.toolInput?.command || '')
+  const bgNotification = taskNotifications.find((n) => n.toolUseId === toolUseId)
+  const isRunning = !bgNotification
+  const isError = bgNotification?.status === 'failed'
 
   const statusBadge = isError ? (
     <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-danger/10 text-danger shrink-0">failed</span>

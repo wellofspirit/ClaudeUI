@@ -14,7 +14,7 @@ export function SafeSvgIcon({ svg }: { svg: string }): React.JSX.Element {
     )
   }
   // Safe: sanitizeSvg has stripped all event handlers and disallowed elements
-  // eslint-disable-next-line react/no-danger
+   
   return <span dangerouslySetInnerHTML={{ __html: sanitized }} />
 }
 

@@ -10,7 +10,7 @@
  *  - the dispatcher propagates handler errors so remote clients see them
  */
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
+ 
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import * as fs from 'fs'

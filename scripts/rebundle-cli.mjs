@@ -509,7 +509,7 @@ function main() {
   const format = detectFormat(buf)
   log(`format: ${format}`)
 
-  let sectionOff, sectionSize, origBlobLen
+  let sectionOff, sectionSize
   let container // parser-specific metadata used by the rewriter
 
   if (format === 'pe') {
@@ -532,7 +532,7 @@ function main() {
     )
   }
 
-  origBlobLen = Number(buf.readBigUInt64LE(sectionOff))
+  const origBlobLen = Number(buf.readBigUInt64LE(sectionOff))
 
   const graph = readBlobAtSection(buf, sectionOff, sectionSize)
   log(`${graph.modules.length} modules, ${graph.argv.length} argv bytes, flags=0x${graph.flags.toString(16)}`)

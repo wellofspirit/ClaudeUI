@@ -133,7 +133,7 @@ export function query(input: QueryInput): QueryHandle {
   const t0 = Date.now()
   const stamp = (label: string): void => {
     if (process.env.DEBUG_SDK) {
-      // eslint-disable-next-line no-console
+       
       console.error(`[sdk] +${Date.now() - t0}ms ${label}`)
     }
   }
@@ -281,7 +281,7 @@ export function query(input: QueryInput): QueryHandle {
       // Swallowing the error entirely used to mask real problems (bad init
       // payload, upstream version mismatch) as empty supportedModels/etc.
       // Log it so the failure is at least visible during debugging.
-      // eslint-disable-next-line no-console
+       
       console.error(`[sdk] initialize failed: ${err?.message ?? err}`)
       options.stderr?.(Buffer.from(`[sdk] initialize failed: ${err?.message ?? err}\n`))
       return {}
@@ -503,7 +503,7 @@ async function handleControlRequest(line: Record<string, unknown>, ctx: InboundC
     // Unknown subtype — benign success so cli.js doesn't stall. Gated log
     // so we catch new subtypes that appear upstream without grepping diffs.
     if (process.env.DEBUG_SDK) {
-      // eslint-disable-next-line no-console
+       
       console.error(
         `[sdk] unknown inbound control subtype: ${subtype} (request_id=${request_id})`,
       )

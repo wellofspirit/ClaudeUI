@@ -19,7 +19,7 @@ async function main() {
 
   const { q, cleanup } = createQuery(PROMPT, {}, 60_000)
 
-  let rateLimitEvents = []
+  const rateLimitEvents = []
 
   const messages = await collectMessages(q, {
     cleanup,

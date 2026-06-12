@@ -6,7 +6,7 @@
  * — the component has no IPC, just a single clearBtw store action.
  */
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
+ 
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { render, fireEvent } from '@testing-library/react'

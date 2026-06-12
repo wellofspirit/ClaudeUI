@@ -125,7 +125,7 @@ export function saveClaudePermissions(
   const filePath = settingsFilePath(scope, cwd)
 
   // Read existing file to preserve non-permission keys
-  let data = readJsonSafe(filePath) ?? {}
+  const data = readJsonSafe(filePath) ?? {}
 
   // Build the permissions object, omitting empty arrays to keep file tidy
   const permsObj: Record<string, unknown> = {}

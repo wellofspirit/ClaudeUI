@@ -8,7 +8,7 @@
  *   4. Ctrl/Cmd+Shift+Enter triggers onSend
  */
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
+ 
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import React from 'react'

@@ -69,7 +69,7 @@ function makeProps(overrides: Partial<AutomationConfigViewProps> = {}): Automati
 // The pickers share the same dropdown structure as InputBox — trigger has a
 // title, dropdown is an absolutely-positioned sibling. Mirror the helper so
 // we don't collide with same-named option buttons elsewhere in the form.
-// eslint-disable-next-line @typescript-eslint/explicit-function-return-type
+ 
 function openPickerDropdown(triggerTitle: string) {
   const trigger = screen.getByTitle(triggerTitle)
   fireEvent.click(trigger)

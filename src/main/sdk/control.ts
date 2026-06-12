@@ -75,7 +75,7 @@ export class ControlChannel {
   ): Promise<T> {
     const request_id = this.newId()
     if (process.env.DEBUG_SDK) {
-      // eslint-disable-next-line no-console
+       
       console.error(
         `[sdk] → control_request ${request_id} ${JSON.stringify(request).slice(0, 200)}`,
       )
@@ -93,7 +93,7 @@ export class ControlChannel {
         resolve: (value) => {
           clearTimer()
           if (process.env.DEBUG_SDK) {
-            // eslint-disable-next-line no-console
+             
             console.error(
               `[sdk] ← control_response ${request_id} ${JSON.stringify(value).slice(0, 200)}`,
             )
@@ -103,7 +103,7 @@ export class ControlChannel {
         reject: (err) => {
           clearTimer()
           if (process.env.DEBUG_SDK) {
-            // eslint-disable-next-line no-console
+             
             console.error(`[sdk] ← control_error ${request_id} ${err.message}`)
           }
           reject(err)

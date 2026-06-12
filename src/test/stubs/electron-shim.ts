@@ -6,7 +6,7 @@
  * via setIpcBridge().
  */
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
+ 
 
 import type { TestIpcBridge } from '../bridges/test-ipc-bridge'
 

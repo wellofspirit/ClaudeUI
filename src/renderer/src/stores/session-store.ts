@@ -1428,7 +1428,7 @@ export const useSessionStore = create<SessionState>((set) => ({
     set((state) => {
       const sessions = ensureSession(state.sessions, routingId)
       const session = sessions[routingId]
-      let current = [...(session.subagentMessages[toolUseId] || [])]
+      const current = [...(session.subagentMessages[toolUseId] || [])]
 
       for (const message of messages) {
         const idx = current.findIndex((m) => m.id === message.id)

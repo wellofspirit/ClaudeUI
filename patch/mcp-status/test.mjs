@@ -30,7 +30,7 @@ async function main() {
   const t = new TestRunner('mcp-status')
 
   console.log('  Starting SDK query with MCP test server...')
-  const { q, cleanup, ac } = createQuery(
+  const { q, cleanup } = createQuery(
     PROMPT,
     {
       mcpServers: {

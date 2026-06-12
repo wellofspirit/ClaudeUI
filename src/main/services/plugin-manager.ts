@@ -230,7 +230,9 @@ export class PluginManager {
       return
     }
 
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    // Plugins are arbitrary CommonJS modules loaded synchronously from disk at
+    // runtime; require() is the correct primitive here, not a static import.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
     const mod = require(entryPath)
     const plugin: ClaudeUIPlugin = mod.default || mod
 

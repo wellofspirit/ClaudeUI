@@ -1,3 +1,9 @@
+/*
+ * This component renders Electron's <webview> element, whose attributes
+ * (preload / nodeintegration / plugins) are not part of React's DOM property
+ * registry. They are valid here, so disable the unknown-property check.
+ */
+/* eslint-disable react/no-unknown-property */
 import { useEffect, useState } from 'react'
 import { useSessionStore } from '../../stores/session-store'
 import { sanitizeSvg } from '../../utils/sanitize-svg'
@@ -41,7 +47,7 @@ export function PluginWebView({ pluginId, onClose }: PluginWebViewProps): React.
         <div className="flex items-center justify-between px-4 py-2.5" style={{ paddingTop: isMac ? 38 : 8 }}>
           <div className="flex items-center gap-2">
             {view.icon && sanitizeSvg(view.icon) ? (
-              // eslint-disable-next-line react/no-danger
+               
               <span className="text-text-accent" dangerouslySetInnerHTML={{ __html: sanitizeSvg(view.icon)! }} />
             ) : (
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="text-text-accent">

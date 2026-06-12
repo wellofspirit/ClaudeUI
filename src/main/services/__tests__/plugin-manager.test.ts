@@ -15,7 +15,7 @@
  *    the loader path, not a stub.
  */
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
+ 
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import * as fs from 'fs'
@@ -28,11 +28,11 @@ import * as path from 'path'
 // Shared tmpdir across the suite — allocated in a hoisted block so it exists
 // before `plugin-manager.ts` is imported (PLUGINS_DIR is a module-level const).
 const hoisted = vi.hoisted(() => {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
+   
   const realFs = require('fs') as typeof import('fs')
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
+   
   const realOs = require('os') as typeof import('os')
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
+   
   const realPath = require('path') as typeof import('path')
   const home = realFs.mkdtempSync(realPath.join(realOs.tmpdir(), 'claudeui-plugin-test-'))
   return { TEST_HOME: home }

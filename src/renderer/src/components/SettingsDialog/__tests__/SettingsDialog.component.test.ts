@@ -11,7 +11,7 @@
  *   4. versionInfo is passed to the View after resolve
  */
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
+ 
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import React from 'react'

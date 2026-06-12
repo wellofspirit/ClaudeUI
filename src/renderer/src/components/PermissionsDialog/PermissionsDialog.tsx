@@ -46,7 +46,7 @@ export function PermissionsDialog({
   useEffect(() => {
     if (initialTab) setActiveTab(initialTab)
     else if (!cwd) setActiveTab('user')
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+     
   }, [cwd, initialTab])
 
   useEffect(() => {

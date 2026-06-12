@@ -7,7 +7,7 @@
  *   3. onKeep + onCancel fire parent callbacks without IPC
  */
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
+ 
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import React from 'react'

@@ -8,7 +8,8 @@ import { buildMockupUrl } from '../shared/mockup-url'
  */
 function onEvent<T extends (...args: never[]) => void>(channel: string): (cb: T) => () => void {
   return (cb: T) => {
-    const handler = (_: Electron.IpcRendererEvent, ...args: unknown[]): void => (cb as Function)(...args)
+    const handler = (_: Electron.IpcRendererEvent, ...args: unknown[]): void =>
+      (cb as unknown as (...a: unknown[]) => void)(...args)
     ipcRenderer.on(channel, handler)
     return () => ipcRenderer.removeListener(channel, handler)
   }

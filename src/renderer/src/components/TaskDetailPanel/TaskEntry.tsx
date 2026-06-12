@@ -35,32 +35,17 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
   const clearTaskStopping = useSessionStore((s) => s.clearTaskStopping)
   const taskNotifications = useActiveSession((s) => s.taskNotifications)
   const [expanded, setExpanded] = useState(true)
-
-  const { taskBlock, resultBlock } = findTaskBlocks(messages, toolUseId)
-  if (!taskBlock) return null
-
-  const input = taskBlock.toolInput || {}
-  const description = String(input.description || input.prompt || '')
-  const msgs = subagentMsgs[toolUseId] || []
-  const streamText = subagentText[toolUseId] || ''
-  const streamThinking = subagentThinking[toolUseId] || ''
-  const hasSubagentOutput = msgs.length > 0 || !!streamText || !!streamThinking
-  const isBash = taskBlock?.toolName === 'Bash'
-  const isBackground = !!input.run_in_background
-  const progress = taskProgressMap[toolUseId]
-  const elapsed = progress?.elapsedTimeSeconds
-  const hasResult = !!resultBlock
-  const resultText = resultBlock?.toolResult?.replace(/<usage>[\s\S]*?<\/usage>/, '').trimEnd() || ''
-  const bgNotification = taskNotifications.find((n) => n.toolUseId === toolUseId)
-  const isRunning = isBackground ? !bgNotification : !hasResult
-
-  const isError = isBackground
-    ? bgNotification?.status === 'failed'
-    : resultBlock?.isError
-
   const bodyRef = useRef<HTMLDivElement>(null)
   const [following, setFollowing] = useState(true)
   const isAutoScrolling = useRef(false)
+
+  const { taskBlock, resultBlock } = findTaskBlocks(messages, toolUseId)
+
+  // Referenced by the autoscroll effect below, so they must be computed before
+  // it; they default to empty when the task block isn't present yet.
+  const msgs = subagentMsgs[toolUseId] || []
+  const streamText = subagentText[toolUseId] || ''
+  const streamThinking = subagentThinking[toolUseId] || ''
 
   useEffect(() => {
     const el = bodyRef.current
@@ -86,6 +71,26 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
     setFollowing(true)
     requestAnimationFrame(() => { isAutoScrolling.current = false })
   }, [])
+
+  // All hooks above run unconditionally (rules-of-hooks); bail out only after
+  // them when the task block isn't present in the message stream yet.
+  if (!taskBlock) return null
+
+  const input = taskBlock.toolInput || {}
+  const description = String(input.description || input.prompt || '')
+  const hasSubagentOutput = msgs.length > 0 || !!streamText || !!streamThinking
+  const isBash = taskBlock?.toolName === 'Bash'
+  const isBackground = !!input.run_in_background
+  const progress = taskProgressMap[toolUseId]
+  const elapsed = progress?.elapsedTimeSeconds
+  const hasResult = !!resultBlock
+  const resultText = resultBlock?.toolResult?.replace(/<usage>[\s\S]*?<\/usage>/, '').trimEnd() || ''
+  const bgNotification = taskNotifications.find((n) => n.toolUseId === toolUseId)
+  const isRunning = isBackground ? !bgNotification : !hasResult
+
+  const isError = isBackground
+    ? bgNotification?.status === 'failed'
+    : resultBlock?.isError
 
   const statusBadge = isError ? (
     <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-danger/10 text-danger shrink-0">failed</span>

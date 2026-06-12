@@ -11,7 +11,7 @@
  *   3. initial size syncs to PTY via resizeTerminal IPC
  */
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
+ 
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import React from 'react'

@@ -8,7 +8,7 @@
  * No behavior assumptions — just message passing.
  */
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
+ 
 
 export class TestIpcBridge {
   private handlers = new Map<string, (...args: any[]) => any>()

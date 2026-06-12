@@ -16,7 +16,7 @@ const { q, cleanup } = createQuery(
   { effort: 'low' }
 )
 
-let bashOutputMessages = []
+const bashOutputMessages = []
 let usedBashTool = false
 let sessionCompleted = false
 

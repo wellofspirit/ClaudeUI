@@ -24,9 +24,9 @@ function installWindowApi(isRepo: boolean): void {
   gitStartWatching = vi.fn().mockResolvedValue(undefined)
   gitStopWatching = vi.fn().mockResolvedValue(undefined)
   gitCheckRepo = vi.fn().mockResolvedValue(isRepo)
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+   
   ;(globalThis as any).window = globalThis.window || {}
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+   
   ;(globalThis as any).window.api = {
     gitStartWatching,
     gitStopWatching,

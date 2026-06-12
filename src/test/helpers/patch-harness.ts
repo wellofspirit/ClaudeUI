@@ -14,7 +14,7 @@
  *   2. Anchor matches 0 or >1 times → apply.mjs needs a refactor
  */
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
+ 
 
 import * as fs from 'node:fs'
 import * as path from 'node:path'

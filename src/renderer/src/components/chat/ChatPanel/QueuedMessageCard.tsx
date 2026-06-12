@@ -12,7 +12,10 @@ export function QueuedMessageCard({ isMobile }: { isMobile: boolean }): React.JS
     const savedText = queuedText
     if (activeSessionId && savedText) {
       const result = await window.api.dequeueMessage(activeSessionId, savedText)
-      const removed = (result as any)?.response?.removed ?? result?.removed ?? 0
+      // Direct IPC returns `{ removed }`; the remote bridge wraps it as
+      // `{ response: { removed } }`. Accept either shape.
+      const r = result as { removed?: number; response?: { removed?: number } }
+      const removed = r?.response?.removed ?? r?.removed ?? 0
       if (removed > 0) {
         setDraftText(savedText)
         clearQueuedText()

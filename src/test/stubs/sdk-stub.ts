@@ -5,7 +5,7 @@
  * Used in component and E2E tests.
  */
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
+ 
 
 /**
  * Represents an SDK message yielded by the query generator.

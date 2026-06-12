@@ -14,7 +14,7 @@
  *   6. onClose saves pending dirty scopes before calling onClose
  */
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
+ 
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import React from 'react'

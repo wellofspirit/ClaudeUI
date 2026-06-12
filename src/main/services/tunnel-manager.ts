@@ -3,6 +3,7 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import * as os from 'node:os'
 import * as https from 'node:https'
+import * as http from 'node:http'
 import { logger } from './logger'
 
 // ---------------------------------------------------------------------------
@@ -163,7 +164,7 @@ export class TunnelManager {
           return
         }
         // Handle both http and https
-        const mod = targetUrl.startsWith('https') ? https : require('node:http')
+        const mod = targetUrl.startsWith('https') ? https : http
         mod.get(targetUrl, (res: import('node:http').IncomingMessage) => {
           // Follow redirects
           if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {

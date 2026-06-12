@@ -26,7 +26,7 @@
  *   client.close()
  */
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
+ 
 
 import WebSocket from 'ws'
 import { E2ECrypto } from '../../shared/e2e-crypto'

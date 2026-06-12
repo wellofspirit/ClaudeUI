@@ -8,7 +8,7 @@
  *
  * Idempotent: if no "Part B" block is found, leaves the file alone.
  */
-import { readFileSync, writeFileSync, statSync } from 'node:fs'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 

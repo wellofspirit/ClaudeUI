@@ -6,7 +6,7 @@
  * test push data or simulate exit.
  */
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
+ 
 
 export interface FakeDisposable {
   dispose: () => void

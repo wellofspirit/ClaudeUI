@@ -372,7 +372,7 @@ export async function collectMessages(q, { onMessage, cleanup } = {}) {
     }
   } catch (err) {
     if (err.name !== 'AbortError' && !String(err).includes('abort')) {
-      // eslint-disable-next-line no-console
+       
       console.error('[collectMessages] Error:', err.message || err)
     }
   } finally {

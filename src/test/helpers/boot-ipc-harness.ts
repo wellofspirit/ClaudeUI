@@ -13,7 +13,7 @@
  * For unwrapped channels, use call().
  */
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
+ 
 
 import { TestIpcBridge } from '../bridges/test-ipc-bridge'
 import { setIpcBridge } from '../stubs/electron-shim'

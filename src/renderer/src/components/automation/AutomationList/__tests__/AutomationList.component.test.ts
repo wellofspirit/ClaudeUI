@@ -11,7 +11,7 @@
  *      the UI doesn't spin forever on a broken IPC.
  */
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
+ 
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import React from 'react'

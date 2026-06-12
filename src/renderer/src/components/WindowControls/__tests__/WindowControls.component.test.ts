@@ -7,7 +7,7 @@
  *   3. onMaximizeChange event updates isMaximized prop
  */
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
+ 
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import React from 'react'

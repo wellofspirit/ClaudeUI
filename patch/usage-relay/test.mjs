@@ -26,7 +26,7 @@ async function main() {
   const t = new TestRunner('usage-relay')
 
   console.log('  Starting SDK query...')
-  const { q, channel, cleanup } = createStreamingQuery(PROMPT, {}, 60_000)
+  const { q, cleanup } = createStreamingQuery(PROMPT, {}, 60_000)
 
   let usageResult = null
   let usageError = null

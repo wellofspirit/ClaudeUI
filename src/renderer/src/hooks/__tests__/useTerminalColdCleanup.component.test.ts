@@ -28,9 +28,9 @@ let killTerminalsByCwd: ReturnType<typeof vi.fn>
 
 function installWindowApi(): void {
   killTerminalsByCwd = vi.fn().mockResolvedValue(undefined)
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+   
   ;(globalThis as any).window = globalThis.window || {}
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+   
   ;(globalThis as any).window.api = {
     killTerminalsByCwd,
     saveSessionConfig: () => {},

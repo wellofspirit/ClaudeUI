@@ -23,7 +23,7 @@ import {
 // Stub window.api for store operations
 beforeEach(() => {
   resetFactoryCounter()
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+   
   ;(globalThis as any).window.api = {
     saveSessionConfig: vi.fn(),
     saveSlashCommands: vi.fn(),

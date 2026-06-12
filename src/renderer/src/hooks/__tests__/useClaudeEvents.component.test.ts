@@ -145,9 +145,9 @@ beforeEach(() => {
 
   // Provide minimal window.api stub — the store calls window.api.saveSessionConfig()
   // internally when sessions are created/removed. No-op in tests.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+   
   ;(globalThis as any).window = globalThis.window || {}
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+   
   ;(globalThis as any).window.api = {
     saveSessionConfig: () => {},
     saveSlashCommands: () => {},
