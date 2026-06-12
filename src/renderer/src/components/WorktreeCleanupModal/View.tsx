@@ -15,7 +15,7 @@ export function WorktreeCleanupModalView({
   removing,
   onKeep,
   onRemove,
-  onCancel,
+  onCancel
 }: WorktreeCleanupModalViewProps): React.JSX.Element {
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center">
@@ -24,14 +24,19 @@ export function WorktreeCleanupModalView({
         <h3 className="text-[15px] font-medium text-text-primary mb-3">Worktree cleanup</h3>
 
         <p className="text-[13px] text-text-secondary mb-3">
-          This session has an active worktree <span className="font-mono text-mode-edit">{worktreeInfo.worktreeName}</span>.
-          Would you like to remove it from disk?
+          This session has an active worktree{' '}
+          <span className="font-mono text-mode-edit">{worktreeInfo.worktreeName}</span>. Would you
+          like to remove it from disk?
         </p>
 
         {status && (
           <div className="px-3 py-2 rounded-lg bg-bg-tertiary border border-border mb-4 text-[12px] text-text-muted space-y-1">
-            <div>{status.uncommittedFiles} uncommitted file{status.uncommittedFiles !== 1 ? 's' : ''}</div>
-            <div>{status.commitsAhead} commit{status.commitsAhead !== 1 ? 's' : ''} ahead</div>
+            <div>
+              {status.uncommittedFiles} uncommitted file{status.uncommittedFiles !== 1 ? 's' : ''}
+            </div>
+            <div>
+              {status.commitsAhead} commit{status.commitsAhead !== 1 ? 's' : ''} ahead
+            </div>
           </div>
         )}
 

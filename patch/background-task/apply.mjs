@@ -78,8 +78,8 @@ if (src.includes(PATCH_MARKER)) {
     process.exit(1)
   }
 
-  const errorFn = anchorMatch[1]   // error response function (e.g., O6)
-  const msgVar = anchorMatch[2]    // control message variable (e.g., r)
+  const errorFn = anchorMatch[1] // error response function (e.g., O6)
+  const msgVar = anchorMatch[2] // control message variable (e.g., r)
   console.log(`Found fallback anchor at char ${anchorIdx} (errorFn=${errorFn}, msgVar=${msgVar})`)
 
   // ---------------------------------------------------------------------------
@@ -111,7 +111,9 @@ if (src.includes(PATCH_MARKER)) {
   console.log(`  getAppState: ${getAppStateFn}, setAppState: ${setAppStateFn}`)
 
   // --- wi (local_bash type check): function <name>(A){return typeof A==="object"&&A!==null&&"type"in A&&A.type==="local_bash"} ---
-  const wiRe = new RegExp(`function (${V})\\(${V}\\)\\{return typeof ${V}==="object"&&${V}!==null&&"type"in ${V}&&${V}\\.type==="local_bash"\\}`)
+  const wiRe = new RegExp(
+    `function (${V})\\(${V}\\)\\{return typeof ${V}==="object"&&${V}!==null&&"type"in ${V}&&${V}\\.type==="local_bash"\\}`
+  )
   const wiMatch = wiRe.exec(src)
   if (!wiMatch) {
     console.error('ERROR: Cannot find local_bash type check function (wi)')
@@ -131,10 +133,14 @@ if (src.includes(PATCH_MARKER)) {
   // In 0.2.87+ this function is duplicated (once in task-management, once in TUI).
   // Disambiguate by requiring the next function to reference the captured name
   // with agentType!=="main-session" (only the task-management copy has this).
-  const yiRe = new RegExp(`function (${V})\\(${V}\\)\\{return typeof ${V}==="object"&&${V}!==null&&"type"in ${V}&&${V}\\.type==="local_agent"\\}function ${V}\\(${V}\\)\\{return \\1\\(${V}\\)&&${V}\\.agentType!=="main-session"\\}`)
+  const yiRe = new RegExp(
+    `function (${V})\\(${V}\\)\\{return typeof ${V}==="object"&&${V}!==null&&"type"in ${V}&&${V}\\.type==="local_agent"\\}function ${V}\\(${V}\\)\\{return \\1\\(${V}\\)&&${V}\\.agentType!=="main-session"\\}`
+  )
   const yiMatch = yiRe.exec(src)
   if (!yiMatch) {
-    console.error('ERROR: Cannot find local_agent type check function (Yi) with agentType disambiguation')
+    console.error(
+      'ERROR: Cannot find local_agent type check function (Yi) with agentType disambiguation'
+    )
     process.exit(1)
   }
   const yiFn = yiMatch[1]
@@ -153,7 +159,9 @@ if (src.includes(PATCH_MARKER)) {
   // Near "backgroundSignal" which appears in the return statement
   // v0.2.97: MAP.set(A,B),FN(C,D);let E;if(F!==void 0&&F>0)
   // v0.2.105: MAP.set(q,J),Y.register(H);let M;if(A!==void 0&&A>0)
-  const bgSignalRe = new RegExp(`(${V})\\.set\\(${V},${V}\\),${V}(?:\\.${V})?\\(${V}(?:,${V})?\\);let ${V};if\\(${V}!==void 0&&${V}>0\\)`)
+  const bgSignalRe = new RegExp(
+    `(${V})\\.set\\(${V},${V}\\),${V}(?:\\.${V})?\\(${V}(?:,${V})?\\);let ${V};if\\(${V}!==void 0&&${V}>0\\)`
+  )
   const bgSignalMatch = bgSignalRe.exec(src)
   if (!bgSignalMatch) {
     console.error('ERROR: Cannot find backgroundSignal resolver Map (Ff6-like)')
@@ -182,28 +190,29 @@ if (src.includes(PATCH_MARKER)) {
   // Accept tool_use_id (from the tool_use block) and search tasks by toolUseId
   // property — NOT by task key. Foreground tasks don't have a task_id mapping
   // in the consumer because detectTaskMapping only runs on tool results.
-  const injection = PATCH_MARKER +
+  const injection =
+    PATCH_MARKER +
     `else if(${msgVar}.request.subtype==="background_task"){` +
-      `let{tool_use_id:Z6}=${msgVar}.request;` +
-      `try{` +
-        `let S6=null,C6=null,d6=(await ${getAppStateFn}()).tasks;` +
-        `for(let k6 of Object.keys(d6)){if(d6[k6].toolUseId===Z6){C6=k6;S6=d6[k6];break}}` +
-        `if(!S6||!C6)throw Error("No task found with toolUseId: "+Z6);` +
-        `if(S6.status!=="running")throw Error("Task "+C6+" is not running (status: "+S6.status+")");` +
-        `if(S6.isBackgrounded)throw Error("Task "+C6+" is already backgrounded");` +
-        `if(${wiFn}(S6)){` +
-          `if(!S6.shellCommand||!S6.shellCommand.background(C6))throw Error("Failed to background bash task "+C6);` +
-          `${setAppStateFn}((k6)=>{let m6=k6.tasks[C6];if(!m6||m6.isBackgrounded)return k6;return{...k6,tasks:{...k6.tasks,[C6]:{...m6,isBackgrounded:!0}}}})` +
-        `}else if(${yiFn}(S6)){` +
-          `${setAppStateFn}((k6)=>{let m6=k6.tasks[C6];if(!m6||m6.isBackgrounded)return k6;return{...k6,tasks:{...k6.tasks,[C6]:{...m6,isBackgrounded:!0}}}});` +
-          `let k6=${bgSignalMap}.get(C6);if(k6)k6(),${bgSignalMap}.delete(C6)` +
-        `}else{` +
-          `throw Error("Unsupported task type for backgrounding")` +
-        `}` +
-        `${successFn}(${msgVar},{task_id:C6,tool_use_id:Z6})` +
-      `}catch(S6){` +
-        `${errorFn}(${msgVar},S6 instanceof Error?S6.message:String(S6))` +
-      `}` +
+    `let{tool_use_id:Z6}=${msgVar}.request;` +
+    `try{` +
+    `let S6=null,C6=null,d6=(await ${getAppStateFn}()).tasks;` +
+    `for(let k6 of Object.keys(d6)){if(d6[k6].toolUseId===Z6){C6=k6;S6=d6[k6];break}}` +
+    `if(!S6||!C6)throw Error("No task found with toolUseId: "+Z6);` +
+    `if(S6.status!=="running")throw Error("Task "+C6+" is not running (status: "+S6.status+")");` +
+    `if(S6.isBackgrounded)throw Error("Task "+C6+" is already backgrounded");` +
+    `if(${wiFn}(S6)){` +
+    `if(!S6.shellCommand||!S6.shellCommand.background(C6))throw Error("Failed to background bash task "+C6);` +
+    `${setAppStateFn}((k6)=>{let m6=k6.tasks[C6];if(!m6||m6.isBackgrounded)return k6;return{...k6,tasks:{...k6.tasks,[C6]:{...m6,isBackgrounded:!0}}}})` +
+    `}else if(${yiFn}(S6)){` +
+    `${setAppStateFn}((k6)=>{let m6=k6.tasks[C6];if(!m6||m6.isBackgrounded)return k6;return{...k6,tasks:{...k6.tasks,[C6]:{...m6,isBackgrounded:!0}}}});` +
+    `let k6=${bgSignalMap}.get(C6);if(k6)k6(),${bgSignalMap}.delete(C6)` +
+    `}else{` +
+    `throw Error("Unsupported task type for backgrounding")` +
+    `}` +
+    `${successFn}(${msgVar},{task_id:C6,tool_use_id:Z6})` +
+    `}catch(S6){` +
+    `${errorFn}(${msgVar},S6 instanceof Error?S6.message:String(S6))` +
+    `}` +
     `}`
 
   src = src.slice(0, anchorIdx) + injection + src.slice(anchorIdx)
@@ -226,5 +235,7 @@ if (src.includes(PATCH_MARKER)) {
 
 console.log('')
 console.log('What this does:')
-console.log('  Part A (cli.js): background_task control-request handler (backgrounds running bash/agent tasks).')
+console.log(
+  '  Part A (cli.js): background_task control-request handler (backgrounds running bash/agent tasks).'
+)
 console.log('  Part B (sdk.mjs) was removed — backgroundTask() lives in src/main/sdk/.')

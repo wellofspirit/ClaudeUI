@@ -41,7 +41,7 @@ function defaultUsage(): AccountUsage {
     extraUsage: null,
     planName: null,
     fetchedAt: Date.now(),
-    error: null,
+    error: null
   }
 }
 
@@ -51,25 +51,28 @@ function parseResponse(data: Record<string, unknown>): AccountUsage {
     if (!w || typeof w.utilization !== 'number') return null
     return {
       usedPercent: w.utilization,
-      resetsAt: w.resets_at ?? null,
+      resetsAt: w.resets_at ?? null
     }
   }
 
   const fiveHour = parseWindow('five_hour')
 
   let extraUsage: ExtraUsage | null = null
-  const eu = data['extra_usage'] as {
-    is_enabled?: boolean
-    monthly_limit?: number | null
-    used_credits?: number
-    utilization?: number
-  } | undefined | null
+  const eu = data['extra_usage'] as
+    | {
+        is_enabled?: boolean
+        monthly_limit?: number | null
+        used_credits?: number
+        utilization?: number
+      }
+    | undefined
+    | null
   if (eu && typeof eu === 'object') {
     extraUsage = {
       isEnabled: eu.is_enabled ?? false,
       monthlyLimit: eu.monthly_limit ?? null,
       usedCredits: eu.used_credits ?? 0,
-      utilization: eu.utilization ?? 0,
+      utilization: eu.utilization ?? 0
     }
   }
 
@@ -81,7 +84,7 @@ function parseResponse(data: Record<string, unknown>): AccountUsage {
     extraUsage,
     planName: null,
     fetchedAt: Date.now(),
-    error: null,
+    error: null
   }
 }
 
@@ -98,16 +101,14 @@ function updateFromRateLimitEvent(
 
   const window: RateWindow = {
     usedPercent: utilization * 100,
-    resetsAt: typeof resetsAt === 'number'
-      ? new Date(resetsAt * 1000).toISOString()
-      : null,
+    resetsAt: typeof resetsAt === 'number' ? new Date(resetsAt * 1000).toISOString() : null
   }
 
   const fieldMap: Record<string, keyof AccountUsage> = {
     five_hour: 'fiveHour',
     seven_day: 'sevenDay',
     seven_day_sonnet: 'sevenDaySonnet',
-    seven_day_opus: 'sevenDayOpus',
+    seven_day_opus: 'sevenDayOpus'
   }
 
   const field = rateLimitType ? fieldMap[rateLimitType] : undefined
@@ -118,7 +119,7 @@ function updateFromRateLimitEvent(
     ...base,
     [field]: window,
     fetchedAt: Date.now(),
-    error: null,
+    error: null
   }
 }
 
@@ -132,7 +133,7 @@ function updateFromHeaderUtilization(
 
   const windowMap: Record<string, keyof AccountUsage> = {
     five_hour: 'fiveHour',
-    seven_day: 'sevenDay',
+    seven_day: 'sevenDay'
   }
 
   const result: Record<string, unknown> = { ...base }
@@ -143,9 +144,8 @@ function updateFromHeaderUtilization(
 
     const window: RateWindow = {
       usedPercent: data.utilization * 100,
-      resetsAt: typeof data.resets_at === 'number'
-        ? new Date(data.resets_at * 1000).toISOString()
-        : null,
+      resetsAt:
+        typeof data.resets_at === 'number' ? new Date(data.resets_at * 1000).toISOString() : null
     }
 
     result[field] = window
@@ -157,7 +157,7 @@ function updateFromHeaderUtilization(
   return {
     ...(result as unknown as AccountUsage),
     fetchedAt: Date.now(),
-    error: null,
+    error: null
   }
 }
 
@@ -171,7 +171,7 @@ describe('parseResponse', () => {
       five_hour: { utilization: 45.5, resets_at: '2025-01-15T20:00:00Z' },
       seven_day: { utilization: 30.2, resets_at: '2025-01-20T00:00:00Z' },
       seven_day_sonnet: { utilization: 15.0 },
-      seven_day_opus: { utilization: 10.0, resets_at: '2025-01-20T00:00:00Z' },
+      seven_day_opus: { utilization: 10.0, resets_at: '2025-01-20T00:00:00Z' }
     }
 
     const result = parseResponse(data)
@@ -204,8 +204,8 @@ describe('parseResponse', () => {
         is_enabled: true,
         monthly_limit: 100,
         used_credits: 25.5,
-        utilization: 0.255,
-      },
+        utilization: 0.255
+      }
     }
 
     const result = parseResponse(data)
@@ -231,7 +231,7 @@ describe('parseResponse', () => {
   it('skips windows with non-numeric utilization', () => {
     const result = parseResponse({
       five_hour: { utilization: 'high' },
-      seven_day: { utilization: null },
+      seven_day: { utilization: null }
     })
     expect(result.fiveHour.usedPercent).toBe(0) // fallback
     expect(result.sevenDay).toBeNull()
@@ -243,7 +243,7 @@ describe('updateFromRateLimitEvent', () => {
     const result = updateFromRateLimitEvent(null, {
       utilization: 0.75,
       rateLimitType: 'five_hour',
-      resetsAt: 1705350000, // epoch seconds
+      resetsAt: 1705350000 // epoch seconds
     })
 
     expect(result).not.toBeNull()
@@ -254,7 +254,7 @@ describe('updateFromRateLimitEvent', () => {
   it('updates sevenDay window', () => {
     const result = updateFromRateLimitEvent(null, {
       utilization: 0.3,
-      rateLimitType: 'seven_day',
+      rateLimitType: 'seven_day'
     })
 
     expect(result).not.toBeNull()
@@ -265,14 +265,14 @@ describe('updateFromRateLimitEvent', () => {
   it('returns null for unknown rateLimitType', () => {
     const result = updateFromRateLimitEvent(null, {
       utilization: 0.5,
-      rateLimitType: 'unknown_type',
+      rateLimitType: 'unknown_type'
     })
     expect(result).toBeNull()
   })
 
   it('returns null when utilization is not a number', () => {
     const result = updateFromRateLimitEvent(null, {
-      rateLimitType: 'five_hour',
+      rateLimitType: 'five_hour'
     })
     expect(result).toBeNull()
   })
@@ -280,12 +280,12 @@ describe('updateFromRateLimitEvent', () => {
   it('preserves existing usage data when updating', () => {
     const existing: AccountUsage = {
       ...defaultUsage(),
-      sevenDay: { usedPercent: 20, resetsAt: null },
+      sevenDay: { usedPercent: 20, resetsAt: null }
     }
 
     const result = updateFromRateLimitEvent(existing, {
       utilization: 0.8,
-      rateLimitType: 'five_hour',
+      rateLimitType: 'five_hour'
     })
 
     expect(result!.fiveHour.usedPercent).toBe(80)
@@ -296,7 +296,7 @@ describe('updateFromRateLimitEvent', () => {
     const result = updateFromRateLimitEvent(null, {
       utilization: 0.5,
       rateLimitType: 'five_hour',
-      resetsAt: 1705350000,
+      resetsAt: 1705350000
     })
 
     expect(result!.fiveHour.resetsAt).toContain('2024-01-15')
@@ -307,7 +307,7 @@ describe('updateFromHeaderUtilization', () => {
   it('updates both five_hour and seven_day', () => {
     const result = updateFromHeaderUtilization(null, {
       five_hour: { utilization: 0.6, resets_at: 1705350000 },
-      seven_day: { utilization: 0.3, resets_at: 1705950000 },
+      seven_day: { utilization: 0.3, resets_at: 1705950000 }
     })
 
     expect(result).not.toBeNull()
@@ -322,7 +322,7 @@ describe('updateFromHeaderUtilization', () => {
 
   it('updates only the windows present', () => {
     const result = updateFromHeaderUtilization(null, {
-      five_hour: { utilization: 0.5, resets_at: 1705350000 },
+      five_hour: { utilization: 0.5, resets_at: 1705350000 }
     })
 
     expect(result).not.toBeNull()
@@ -333,11 +333,11 @@ describe('updateFromHeaderUtilization', () => {
   it('preserves existing data', () => {
     const existing: AccountUsage = {
       ...defaultUsage(),
-      sevenDayOpus: { usedPercent: 15, resetsAt: null },
+      sevenDayOpus: { usedPercent: 15, resetsAt: null }
     }
 
     const result = updateFromHeaderUtilization(existing, {
-      five_hour: { utilization: 0.4, resets_at: 1705350000 },
+      five_hour: { utilization: 0.4, resets_at: 1705350000 }
     })
 
     expect(result!.sevenDayOpus!.usedPercent).toBe(15)
@@ -345,7 +345,7 @@ describe('updateFromHeaderUtilization', () => {
 
   it('skips entries with non-numeric utilization', () => {
     const result = updateFromHeaderUtilization(null, {
-      five_hour: { utilization: 'bad' as unknown as number, resets_at: 0 },
+      five_hour: { utilization: 'bad' as unknown as number, resets_at: 0 }
     })
     expect(result).toBeNull()
   })

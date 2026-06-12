@@ -45,12 +45,12 @@ Permission modes provide global control over how Claude uses tools. You can set 
 
 The SDK supports these permission modes:
 
-| Mode | Description | Tool behavior |
-| :--- | :---------- | :------------ |
-| `default` | Standard permission behavior | No auto-approvals; unmatched tools trigger your `canUseTool` callback |
-| `acceptEdits` | Auto-accept file edits | File edits and [filesystem operations](#accept-edits-mode-acceptedits) (`mkdir`, `rm`, `mv`, etc.) are automatically approved |
-| `bypassPermissions` | Bypass all permission checks | All tools run without permission prompts (use with caution) |
-| `plan` | Planning mode | No tool execution; Claude plans without making changes |
+| Mode                | Description                  | Tool behavior                                                                                                                 |
+| :------------------ | :--------------------------- | :---------------------------------------------------------------------------------------------------------------------------- |
+| `default`           | Standard permission behavior | No auto-approvals; unmatched tools trigger your `canUseTool` callback                                                         |
+| `acceptEdits`       | Auto-accept file edits       | File edits and [filesystem operations](#accept-edits-mode-acceptedits) (`mkdir`, `rm`, `mv`, etc.) are automatically approved |
+| `bypassPermissions` | Bypass all permission checks | All tools run without permission prompts (use with caution)                                                                   |
+| `plan`              | Planning mode                | No tool execution; Claude plans without making changes                                                                        |
 
 <Warning>
 **Subagent inheritance**: When using `bypassPermissions`, all subagents inherit this mode and it cannot be overridden. Subagents may have different system prompts and less constrained behavior than your main agent. Enabling `bypassPermissions` grants them full, autonomous system access without any approval prompts.
@@ -103,6 +103,7 @@ You can set the permission mode once when starting a query, or change it dynamic
     ```
 
     </CodeGroup>
+
   </Tab>
   <Tab title="During streaming">
     Call `set_permission_mode()` (Python) or `setPermissionMode()` (TypeScript) to change the mode mid-session. The new mode takes effect immediately for all subsequent tool requests. This lets you start restrictive and loosen permissions as trust builds, for example switching to `acceptEdits` after reviewing Claude's initial approach.
@@ -158,6 +159,7 @@ You can set the permission mode once when starting a query, or change it dynamic
     ```
 
     </CodeGroup>
+
   </Tab>
 </Tabs>
 
@@ -168,6 +170,7 @@ You can set the permission mode once when starting a query, or change it dynamic
 Auto-approves file operations so Claude can edit code without prompting. Other tools (like Bash commands that aren't filesystem operations) still require normal permissions.
 
 **Auto-approved operations:**
+
 - File edits (Edit, Write tools)
 - Filesystem commands: `mkdir`, `touch`, `rm`, `mv`, `cp`
 

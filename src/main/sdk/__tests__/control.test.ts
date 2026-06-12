@@ -37,8 +37,8 @@ describe('ControlChannel.request', () => {
       response: {
         subtype: 'success',
         request_id,
-        response: { port: 42 },
-      },
+        response: { port: 42 }
+      }
     })
     const r = await p
     expect(r).toEqual({ port: 42 })
@@ -53,7 +53,7 @@ describe('ControlChannel.request', () => {
 
     c.handleResponse({
       type: 'control_response',
-      response: { subtype: 'error', request_id, error: 'nope' },
+      response: { subtype: 'error', request_id, error: 'nope' }
     })
     await expect(p).rejects.toThrow('nope')
   })
@@ -85,7 +85,7 @@ describe('ControlChannel.request', () => {
     const request_id = written[0].request_id as string
     c.handleResponse({
       type: 'control_response',
-      response: { subtype: 'success', request_id, response: { done: true } },
+      response: { subtype: 'success', request_id, response: { done: true } }
     })
     await expect(p).resolves.toEqual({ done: true })
   })
@@ -103,8 +103,8 @@ describe('ControlChannel.request', () => {
       {
         type: 'control_request',
         request_id: 'pending-1',
-        request: { subtype: 'can_use_tool', tool_name: 'Bash', tool_use_id: 't1', input: {} },
-      },
+        request: { subtype: 'can_use_tool', tool_name: 'Bash', tool_use_id: 't1', input: {} }
+      }
     ]
     c.handleResponse({
       type: 'control_response',
@@ -112,8 +112,8 @@ describe('ControlChannel.request', () => {
         subtype: 'error',
         request_id,
         error: 'blocked',
-        pending_permission_requests: pendingRequests,
-      },
+        pending_permission_requests: pendingRequests
+      }
     })
 
     await expect(p).rejects.toThrow('blocked')

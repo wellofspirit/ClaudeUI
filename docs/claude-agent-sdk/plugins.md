@@ -9,6 +9,7 @@ Plugins allow you to extend Claude Code with custom functionality that can be sh
 ## What are plugins?
 
 Plugins are packages of Claude Code extensions that can include:
+
 - **Commands**: Custom slash commands
 - **Agents**: Specialized subagents for specific tasks
 - **Skills**: Model-invoked capabilities that Claude uses autonomously
@@ -24,14 +25,14 @@ Load plugins by providing their local file system paths in your options configur
 <CodeGroup>
 
 ```typescript TypeScript
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { query } from '@anthropic-ai/claude-agent-sdk'
 
 for await (const message of query({
-  prompt: "Hello",
+  prompt: 'Hello',
   options: {
     plugins: [
-      { type: "local", path: "./my-plugin" },
-      { type: "local", path: "/absolute/path/to/another-plugin" }
+      { type: 'local', path: './my-plugin' },
+      { type: 'local', path: '/absolute/path/to/another-plugin' }
     ]
   }
 })) {
@@ -64,6 +65,7 @@ asyncio.run(main())
 ### Path specifications
 
 Plugin paths can be:
+
 - **Relative paths**: Resolved relative to your current working directory (e.g., `"./plugins/my-plugin"`)
 - **Absolute paths**: Full file system paths (e.g., `"/home/user/plugins/my-plugin"`)
 
@@ -78,21 +80,21 @@ When plugins load successfully, they appear in the system initialization message
 <CodeGroup>
 
 ```typescript TypeScript
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { query } from '@anthropic-ai/claude-agent-sdk'
 
 for await (const message of query({
-  prompt: "Hello",
+  prompt: 'Hello',
   options: {
-    plugins: [{ type: "local", path: "./my-plugin" }]
+    plugins: [{ type: 'local', path: './my-plugin' }]
   }
 })) {
-  if (message.type === "system" && message.subtype === "init") {
+  if (message.type === 'system' && message.subtype === 'init') {
     // Check loaded plugins
-    console.log("Plugins:", message.plugins);
+    console.log('Plugins:', message.plugins)
     // Example: [{ name: "my-plugin", path: "./my-plugin" }]
 
     // Check available commands from plugins
-    console.log("Commands:", message.slash_commands);
+    console.log('Commands:', message.slash_commands)
     // Example: ["/help", "/compact", "my-plugin:custom-command"]
   }
 }
@@ -128,18 +130,18 @@ Commands from plugins are automatically namespaced with the plugin name to avoid
 <CodeGroup>
 
 ```typescript TypeScript
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { query } from '@anthropic-ai/claude-agent-sdk'
 
 // Load a plugin with a custom /greet command
 for await (const message of query({
-  prompt: "/my-plugin:greet",  // Use plugin command with namespace
+  prompt: '/my-plugin:greet', // Use plugin command with namespace
   options: {
-    plugins: [{ type: "local", path: "./my-plugin" }]
+    plugins: [{ type: 'local', path: './my-plugin' }]
   }
 })) {
   // Claude executes the custom greeting command from the plugin
-  if (message.type === "assistant") {
-    console.log(message.content);
+  if (message.type === 'assistant') {
+    console.log(message.content)
   }
 }
 ```
@@ -176,35 +178,33 @@ Here's a full example demonstrating plugin loading and usage:
 <CodeGroup>
 
 ```typescript TypeScript
-import { query } from "@anthropic-ai/claude-agent-sdk";
-import * as path from "path";
+import { query } from '@anthropic-ai/claude-agent-sdk'
+import * as path from 'path'
 
 async function runWithPlugin() {
-  const pluginPath = path.join(__dirname, "plugins", "my-plugin");
+  const pluginPath = path.join(__dirname, 'plugins', 'my-plugin')
 
-  console.log("Loading plugin from:", pluginPath);
+  console.log('Loading plugin from:', pluginPath)
 
   for await (const message of query({
-    prompt: "What custom commands do you have available?",
+    prompt: 'What custom commands do you have available?',
     options: {
-      plugins: [
-        { type: "local", path: pluginPath }
-      ],
+      plugins: [{ type: 'local', path: pluginPath }],
       maxTurns: 3
     }
   })) {
-    if (message.type === "system" && message.subtype === "init") {
-      console.log("Loaded plugins:", message.plugins);
-      console.log("Available commands:", message.slash_commands);
+    if (message.type === 'system' && message.subtype === 'init') {
+      console.log('Loaded plugins:', message.plugins)
+      console.log('Available commands:', message.slash_commands)
     }
 
-    if (message.type === "assistant") {
-      console.log("Assistant:", message.content);
+    if (message.type === 'assistant') {
+      console.log('Assistant:', message.content)
     }
   }
 }
 
-runWithPlugin().catch(console.error);
+runWithPlugin().catch(console.error)
 ```
 
 ```python Python
@@ -275,6 +275,7 @@ my-plugin/
 ```
 
 For detailed information on creating plugins, see:
+
 - [Plugins](https://code.claude.com/docs/en/plugins) - Complete plugin development guide
 - [Plugins reference](https://code.claude.com/docs/en/plugins-reference) - Technical specifications and schemas
 
@@ -285,9 +286,7 @@ For detailed information on creating plugins, see:
 Load plugins during development without installing them globally:
 
 ```typescript
-plugins: [
-  { type: "local", path: "./dev-plugins/my-plugin" }
-]
+plugins: [{ type: 'local', path: './dev-plugins/my-plugin' }]
 ```
 
 ### Project-specific extensions
@@ -295,9 +294,7 @@ plugins: [
 Include plugins in your project repository for team-wide consistency:
 
 ```typescript
-plugins: [
-  { type: "local", path: "./project-plugins/team-workflows" }
-]
+plugins: [{ type: 'local', path: './project-plugins/team-workflows' }]
 ```
 
 ### Multiple plugin sources
@@ -306,8 +303,8 @@ Combine plugins from different locations:
 
 ```typescript
 plugins: [
-  { type: "local", path: "./local-plugin" },
-  { type: "local", path: "~/.claude/custom-plugins/shared-plugin" }
+  { type: 'local', path: './local-plugin' },
+  { type: 'local', path: '~/.claude/custom-plugins/shared-plugin' }
 ]
 ```
 

@@ -36,7 +36,10 @@ async function isBinaryFile(absPath: string): Promise<boolean> {
   } catch {
     return false
   } finally {
-    if (fh) await fh.close().catch(() => { /* ignore */ })
+    if (fh)
+      await fh.close().catch(() => {
+        /* ignore */
+      })
   }
 }
 
@@ -233,7 +236,7 @@ export class GitService {
       // Treat oversized or binary untracked files as binary — never read
       // their content into a JS string (multi-GB files crash V8) and never
       // dump arbitrary bytes into the diff view.
-      if (stat.size > MAX_TEXT_FILE_BYTES || await isBinaryFile(absPath)) {
+      if (stat.size > MAX_TEXT_FILE_BYTES || (await isBinaryFile(absPath))) {
         return { patch: binaryAddedPatch(filePath), isBinary: true }
       }
 
@@ -254,7 +257,7 @@ export class GitService {
         `--- /dev/null`,
         `+++ b/${filePath}`,
         `@@ -0,0 +1,${lines.length} @@`,
-        body,
+        body
       ].join('\n')
       return { patch: unified }
     } catch (err) {
@@ -274,18 +277,44 @@ export class GitService {
     try {
       if (staged) {
         let oldContent = ''
-        try { oldContent = await this.git.show([`HEAD:${filePath}`]) } catch (err) { logger.warn('GitService', `Failed to get HEAD content for staged file: ${filePath}`, err) }
+        try {
+          oldContent = await this.git.show([`HEAD:${filePath}`])
+        } catch (err) {
+          logger.warn('GitService', `Failed to get HEAD content for staged file: ${filePath}`, err)
+        }
         let newContent = ''
-        try { newContent = await this.git.show([`:${filePath}`]) } catch (err) { logger.warn('GitService', `Failed to get index content for staged file: ${filePath}`, err) }
+        try {
+          newContent = await this.git.show([`:${filePath}`])
+        } catch (err) {
+          logger.warn('GitService', `Failed to get index content for staged file: ${filePath}`, err)
+        }
         return { oldContent: normEol(oldContent), newContent: normEol(newContent) }
       } else {
         let oldContent = ''
-        try { oldContent = await this.git.show([`:${filePath}`]) } catch (err) {
-          logger.warn('GitService', `Failed to get index content for unstaged file: ${filePath}`, err)
-          try { oldContent = await this.git.show([`HEAD:${filePath}`]) } catch (err2) { logger.warn('GitService', `Failed to get HEAD content for untracked file: ${filePath}`, err2) }
+        try {
+          oldContent = await this.git.show([`:${filePath}`])
+        } catch (err) {
+          logger.warn(
+            'GitService',
+            `Failed to get index content for unstaged file: ${filePath}`,
+            err
+          )
+          try {
+            oldContent = await this.git.show([`HEAD:${filePath}`])
+          } catch (err2) {
+            logger.warn(
+              'GitService',
+              `Failed to get HEAD content for untracked file: ${filePath}`,
+              err2
+            )
+          }
         }
         let newContent = ''
-        try { newContent = await fs.promises.readFile(absPath, 'utf-8') } catch (err) { logger.warn('GitService', `Failed to read working tree file: ${filePath}`, err) }
+        try {
+          newContent = await fs.promises.readFile(absPath, 'utf-8')
+        } catch (err) {
+          logger.warn('GitService', `Failed to read working tree file: ${filePath}`, err)
+        }
         return { oldContent: normEol(oldContent), newContent: normEol(newContent) }
       }
     } catch (err) {

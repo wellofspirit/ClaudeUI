@@ -29,11 +29,13 @@ async function main() {
         const hu = msg.header_utilization
         const fiveHr = hu?.five_hour
         const sevenDay = hu?.seven_day
-        console.log(`  [rate_limit_event] header_utilization: ` +
-          `five_hour=${fiveHr ? (fiveHr.utilization * 100).toFixed(1) + '%' : 'absent'} ` +
-          `seven_day=${sevenDay ? (sevenDay.utilization * 100).toFixed(1) + '%' : 'absent'}`)
+        console.log(
+          `  [rate_limit_event] header_utilization: ` +
+            `five_hour=${fiveHr ? (fiveHr.utilization * 100).toFixed(1) + '%' : 'absent'} ` +
+            `seven_day=${sevenDay ? (sevenDay.utilization * 100).toFixed(1) + '%' : 'absent'}`
+        )
       }
-    },
+    }
   })
 
   dumpMessages(messages)
@@ -41,54 +43,67 @@ async function main() {
   // ── Assertions ──────────────────────────────────────────────────────
 
   // Core: at least one rate_limit_event in the stream
-  t.assertSome('rate_limit_event present in message stream', messages,
+  t.assertSome(
+    'rate_limit_event present in message stream',
+    messages,
     (m) => m.type === 'rate_limit_event'
   )
 
   // Structure: event has header_utilization object
-  t.assertSome('header_utilization field present', messages,
-    (m) => m.type === 'rate_limit_event' &&
+  t.assertSome(
+    'header_utilization field present',
+    messages,
+    (m) =>
+      m.type === 'rate_limit_event' &&
       typeof m.header_utilization === 'object' &&
       m.header_utilization !== null
   )
 
   // Per-window data shape (at least five_hour should be present for subscription users)
-  const headerUtil = rateLimitEvents.find(e => e.header_utilization)?.header_utilization
+  const headerUtil = rateLimitEvents.find((e) => e.header_utilization)?.header_utilization
   if (headerUtil && (headerUtil.five_hour || headerUtil.seven_day)) {
     if (headerUtil.five_hour) {
-      t.assert('five_hour.utilization is a number',
+      t.assert(
+        'five_hour.utilization is a number',
         typeof headerUtil.five_hour.utilization === 'number'
       )
-      t.assert('five_hour.utilization in range [0, 1]',
+      t.assert(
+        'five_hour.utilization in range [0, 1]',
         headerUtil.five_hour.utilization >= 0 && headerUtil.five_hour.utilization <= 1
       )
-      t.assert('five_hour.resets_at is a number',
+      t.assert(
+        'five_hour.resets_at is a number',
         typeof headerUtil.five_hour.resets_at === 'number'
       )
-      t.assert('five_hour.resets_at is a valid epoch (> 2024)',
+      t.assert(
+        'five_hour.resets_at is a valid epoch (> 2024)',
         headerUtil.five_hour.resets_at > 1700000000
       )
-      console.log(`  five_hour: ${(headerUtil.five_hour.utilization * 100).toFixed(1)}% used, ` +
-        `resets ${new Date(headerUtil.five_hour.resets_at * 1000).toISOString()}`)
+      console.log(
+        `  five_hour: ${(headerUtil.five_hour.utilization * 100).toFixed(1)}% used, ` +
+          `resets ${new Date(headerUtil.five_hour.resets_at * 1000).toISOString()}`
+      )
     }
     if (headerUtil.seven_day) {
-      t.assert('seven_day.utilization is a number',
+      t.assert(
+        'seven_day.utilization is a number',
         typeof headerUtil.seven_day.utilization === 'number'
       )
-      t.assert('seven_day.resets_at is a number',
+      t.assert(
+        'seven_day.resets_at is a number',
         typeof headerUtil.seven_day.resets_at === 'number'
       )
-      console.log(`  seven_day: ${(headerUtil.seven_day.utilization * 100).toFixed(1)}% used, ` +
-        `resets ${new Date(headerUtil.seven_day.resets_at * 1000).toISOString()}`)
+      console.log(
+        `  seven_day: ${(headerUtil.seven_day.utilization * 100).toFixed(1)}% used, ` +
+          `resets ${new Date(headerUtil.seven_day.resets_at * 1000).toISOString()}`
+      )
     }
   } else {
     console.log('  (no header_utilization window data — may not be a subscription account)')
   }
 
   // Ensure we also got a normal result (the query completed successfully)
-  t.assertSome('query completed with result', messages,
-    (m) => m.type === 'result'
-  )
+  t.assertSome('query completed with result', messages, (m) => m.type === 'result')
 
   const ok = t.summarize()
   process.exit(ok ? 0 : 1)

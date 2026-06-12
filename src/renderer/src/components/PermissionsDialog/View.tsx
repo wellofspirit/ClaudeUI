@@ -108,7 +108,16 @@ function RulePill({
         className="shrink-0 w-4 h-4 flex items-center justify-center rounded text-text-muted opacity-0 group-hover:opacity-100 hover:text-text-primary transition-all cursor-default"
         title="Edit"
       >
-        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <svg
+          width="10"
+          height="10"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        >
           <path d="M17 3a2.85 2.85 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
         </svg>
       </button>
@@ -117,7 +126,15 @@ function RulePill({
         className="shrink-0 w-4 h-4 flex items-center justify-center rounded text-text-muted opacity-0 group-hover:opacity-100 hover:text-danger transition-all cursor-default"
         title="Remove"
       >
-        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+        <svg
+          width="10"
+          height="10"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+        >
           <path d="M18 6L6 18M6 6l12 12" />
         </svg>
       </button>
@@ -189,7 +206,9 @@ function AddRuleInput({
 
   const filteredEntries = useMemo(() => {
     if (!dirAutocomplete || !isAbsolutePath || dirEntries.length === 0) return []
-    const items: DirEntry[] = dirIsRoot ? dirEntries : [{ name: '..', isDirectory: true }, ...dirEntries]
+    const items: DirEntry[] = dirIsRoot
+      ? dirEntries
+      : [{ name: '..', isDirectory: true }, ...dirEntries]
     if (!query) return items
     const q = query.toLowerCase()
     return items.filter((e) => e.name.toLowerCase().includes(q))
@@ -197,34 +216,44 @@ function AddRuleInput({
 
   const menuOpen = filteredEntries.length > 0
 
-  const handleDirNavigate = useCallback((entry: DirEntry) => {
-    const sep = value.includes('\\') ? '\\' : '/'
-    let newValue: string
-    if (entry.name === '..') {
-      const normalized = dirPortion.replace(/\\/g, '/')
-      const lastSlash = normalized.lastIndexOf('/')
-      const parent = lastSlash > 0 ? dirPortion.slice(0, lastSlash) : dirPortion.slice(0, lastSlash + 1)
-      newValue = parent + sep
-    } else {
-      newValue = dirPortion + sep + entry.name + sep
-    }
-    newValue = newValue.replace(/[/\\]{2,}/g, sep)
-    setValue(newValue)
-    setSelectedIndex(0)
-    requestAnimationFrame(() => inputRef.current?.focus())
-  }, [value, dirPortion])
-
-  const handleDirConfirm = useCallback((entry: DirEntry) => {
-    if (entry.name === '..') {
-      const trimmed = dirPortion.replace(/[/\\]+$/, '')
-      if (trimmed) { onAdd(trimmed); setValue('') }
-    } else {
+  const handleDirNavigate = useCallback(
+    (entry: DirEntry) => {
       const sep = value.includes('\\') ? '\\' : '/'
-      const fullPath = (dirPortion + sep + entry.name).replace(/[/\\]{2,}/g, sep)
-      onAdd(fullPath)
-      setValue('')
-    }
-  }, [value, dirPortion, onAdd])
+      let newValue: string
+      if (entry.name === '..') {
+        const normalized = dirPortion.replace(/\\/g, '/')
+        const lastSlash = normalized.lastIndexOf('/')
+        const parent =
+          lastSlash > 0 ? dirPortion.slice(0, lastSlash) : dirPortion.slice(0, lastSlash + 1)
+        newValue = parent + sep
+      } else {
+        newValue = dirPortion + sep + entry.name + sep
+      }
+      newValue = newValue.replace(/[/\\]{2,}/g, sep)
+      setValue(newValue)
+      setSelectedIndex(0)
+      requestAnimationFrame(() => inputRef.current?.focus())
+    },
+    [value, dirPortion]
+  )
+
+  const handleDirConfirm = useCallback(
+    (entry: DirEntry) => {
+      if (entry.name === '..') {
+        const trimmed = dirPortion.replace(/[/\\]+$/, '')
+        if (trimmed) {
+          onAdd(trimmed)
+          setValue('')
+        }
+      } else {
+        const sep = value.includes('\\') ? '\\' : '/'
+        const fullPath = (dirPortion + sep + entry.name).replace(/[/\\]{2,}/g, sep)
+        onAdd(fullPath)
+        setValue('')
+      }
+    },
+    [value, dirPortion, onAdd]
+  )
 
   const commit = (): void => {
     const trimmed = value.trim()
@@ -277,7 +306,10 @@ function AddRuleInput({
               return
             }
           }
-          if (e.key === 'Enter') { e.preventDefault(); commit() }
+          if (e.key === 'Enter') {
+            e.preventDefault()
+            commit()
+          }
           if (e.key === 'Escape') setValue('')
         }}
         placeholder={placeholder}
@@ -289,7 +321,15 @@ function AddRuleInput({
         className="shrink-0 w-6 h-6 flex items-center justify-center rounded text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
         title="Insert template"
       >
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+        <svg
+          width="12"
+          height="12"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+        >
           <path d="M12 5v14M5 12h14" />
         </svg>
       </button>
@@ -299,7 +339,16 @@ function AddRuleInput({
         className="shrink-0 w-6 h-6 flex items-center justify-center rounded text-text-muted hover:text-accent disabled:opacity-30 transition-colors cursor-default"
         title="Add rule"
       >
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <svg
+          width="12"
+          height="12"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        >
           <polyline points="20 6 9 17 4 12" />
         </svg>
       </button>
@@ -405,7 +454,12 @@ function DirectoriesSection({
           ))}
         </div>
       )}
-      <AddRuleInput onAdd={onAdd} onListDir={onListDir} placeholder="/absolute/path/to/directory" dirAutocomplete />
+      <AddRuleInput
+        onAdd={onAdd}
+        onListDir={onListDir}
+        placeholder="/absolute/path/to/directory"
+        dirAutocomplete
+      />
     </div>
   )
 }
@@ -427,12 +481,14 @@ export function PermissionsDialogView({
   onDeleteDir,
   onAddDir,
   onSaveAll,
-  onClose,
+  onClose
 }: PermissionsDialogViewProps): React.JSX.Element {
   return (
     <div
       className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 backdrop-blur-sm animate-fade-in"
-      onClick={(e) => { if (e.target === e.currentTarget) onClose() }}
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose()
+      }}
     >
       <div
         className="bg-bg-primary border border-border rounded-xl shadow-2xl flex flex-col overflow-hidden"
@@ -442,7 +498,17 @@ export function PermissionsDialogView({
         {/* Header */}
         <div className="shrink-0 flex items-center justify-between px-5 py-3.5 border-b border-border">
           <div className="flex items-center gap-2.5">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="text-accent">
+            <svg
+              width="16"
+              height="16"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.8"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className="text-accent"
+            >
               <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
             </svg>
             <span className="text-[14px] font-medium text-text-primary">Permissions</span>
@@ -451,7 +517,15 @@ export function PermissionsDialogView({
             onClick={onClose}
             className="w-7 h-7 flex items-center justify-center rounded-md text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
           >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+            <svg
+              width="14"
+              height="14"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+            >
               <path d="M18 6L6 18M6 6l12 12" />
             </svg>
           </button>
@@ -464,9 +538,7 @@ export function PermissionsDialogView({
               key={scope}
               onClick={() => onChangeTab(scope)}
               className={`relative px-4 py-2.5 text-[12px] font-medium transition-colors cursor-default ${
-                activeTab === scope
-                  ? 'text-accent'
-                  : 'text-text-muted hover:text-text-secondary'
+                activeTab === scope ? 'text-accent' : 'text-text-muted hover:text-text-secondary'
               }`}
             >
               {SCOPE_LABELS[scope]}
@@ -479,7 +551,10 @@ export function PermissionsDialogView({
             </button>
           ))}
           <span className="flex-1" />
-          <span className="text-[10px] text-text-muted font-mono truncate max-w-[280px]" title={SCOPE_DESCRIPTIONS[activeTab]}>
+          <span
+            className="text-[10px] text-text-muted font-mono truncate max-w-[280px]"
+            title={SCOPE_DESCRIPTIONS[activeTab]}
+          >
             {SCOPE_DESCRIPTIONS[activeTab]}
           </span>
         </div>
@@ -545,7 +620,16 @@ export function PermissionsDialogView({
         {/* Footer */}
         <div className="shrink-0 flex items-center justify-between px-5 py-3 border-t border-border bg-bg-secondary/30">
           <div className="flex items-center gap-1.5 text-[11px] text-text-muted">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <svg
+              width="12"
+              height="12"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
               <circle cx="12" cy="12" r="10" />
               <path d="M12 16v-4" />
               <path d="M12 8h.01" />

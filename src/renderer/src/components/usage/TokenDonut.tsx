@@ -10,7 +10,11 @@ interface TokenDonutProps {
 // Minimum visible arc: 3% of circle so tiny slices are still visible
 const MIN_ARC_PCT = 0.03
 
-export function TokenDonut({ models, size = 100, totalTokens }: TokenDonutProps): React.JSX.Element {
+export function TokenDonut({
+  models,
+  size = 100,
+  totalTokens
+}: TokenDonutProps): React.JSX.Element {
   const cx = size / 2
   const cy = size / 2
   const radius = size * 0.35

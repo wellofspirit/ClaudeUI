@@ -11,7 +11,7 @@ import { useSessionStore } from '../../renderer/src/stores/session-store'
 import {
   makeAssistantMessage,
   makeSessionStatus,
-  resetFactoryCounter,
+  resetFactoryCounter
 } from '@test/factories/messages'
 import type { ChatMessage, PendingApproval, StreamDelta, SessionStatus } from '../../shared/types'
 
@@ -26,7 +26,9 @@ function wireEventHandlers(app: TestApp): Array<() => void> {
     return (cb: T) => {
       const handler = (_: unknown, ...args: unknown[]): void => (cb as Function)(...args)
       app.bridge.ipcRenderer.on(channel, handler)
-      const cleanup = (): void => { app.bridge.ipcRenderer.removeListener(channel, handler) }
+      const cleanup = (): void => {
+        app.bridge.ipcRenderer.removeListener(channel, handler)
+      }
       cleanups.push(cleanup)
       return cleanup
     }
@@ -39,32 +41,39 @@ function wireEventHandlers(app: TestApp): Array<() => void> {
     if (data.type === 'thinking') store().appendStreamingThinking(routingId, data.text)
     else store().appendStreamingText(routingId, data.text)
   })
-  onEvent<(routingId: string, status: SessionStatus) => void>('session:status')((routingId, status) => {
-    let effective = routingId
-    if (status.sessionId && status.sessionId !== routingId) {
-      const s = store()
-      if (s.sessions[routingId]) { s.rekeySession(routingId, status.sessionId); effective = status.sessionId }
-    }
-    if (status.state === 'disconnected') {
-      store().markSdkInactive(effective)
-      store().setStatus(effective, { ...status, state: 'idle' })
-      store().clearPendingApprovals(effective)
-      return
-    }
-    store().setStatus(effective, status)
-    if (status.state === 'idle') store().clearPendingApprovals(effective)
-  })
-  onEvent<(routingId: string, approval: PendingApproval) => void>('session:approval-request')((routingId, approval) => {
-    store().addPendingApproval(routingId, approval)
-  })
-  onEvent<(routingId: string, data: { prompt: string; queued?: boolean }) => void>('session:user-message')(
-    (routingId, data) => {
-      const s = store()
-      if (!s.sessions[routingId]) return
-      if (data.queued) s.setQueuedText(routingId, data.prompt)
-      else s.addUserMessage(routingId, `msg-${Date.now()}-${Math.random()}`, data.prompt)
+  onEvent<(routingId: string, status: SessionStatus) => void>('session:status')(
+    (routingId, status) => {
+      let effective = routingId
+      if (status.sessionId && status.sessionId !== routingId) {
+        const s = store()
+        if (s.sessions[routingId]) {
+          s.rekeySession(routingId, status.sessionId)
+          effective = status.sessionId
+        }
+      }
+      if (status.state === 'disconnected') {
+        store().markSdkInactive(effective)
+        store().setStatus(effective, { ...status, state: 'idle' })
+        store().clearPendingApprovals(effective)
+        return
+      }
+      store().setStatus(effective, status)
+      if (status.state === 'idle') store().clearPendingApprovals(effective)
     }
   )
+  onEvent<(routingId: string, approval: PendingApproval) => void>('session:approval-request')(
+    (routingId, approval) => {
+      store().addPendingApproval(routingId, approval)
+    }
+  )
+  onEvent<(routingId: string, data: { prompt: string; queued?: boolean }) => void>(
+    'session:user-message'
+  )((routingId, data) => {
+    const s = store()
+    if (!s.sessions[routingId]) return
+    if (data.queued) s.setQueuedText(routingId, data.prompt)
+    else s.addUserMessage(routingId, `msg-${Date.now()}-${Math.random()}`, data.prompt)
+  })
 
   return cleanups
 }
@@ -78,7 +87,7 @@ beforeEach(async () => {
     directories: [],
     recentSessionIds: [],
     pinnedSessionIds: [],
-    customTitles: {},
+    customTitles: {}
   })
   eventCleanups = wireEventHandlers(app)
 })

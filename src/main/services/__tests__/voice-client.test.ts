@@ -38,7 +38,7 @@ vi.mock('../voice-capture', () => ({
   stopRecording: () => stopRecordingMock(),
   isVoiceCaptureAvailable: () => true,
   getMicrophoneStatus: () => 3,
-  isRecording: () => false,
+  isRecording: () => false
 }))
 
 // --- logger mock ------------------------------------------------------------
@@ -48,8 +48,8 @@ vi.mock('../logger', () => ({
     debug: vi.fn(),
     info: vi.fn(),
     warn: vi.fn(),
-    error: vi.fn(),
-  },
+    error: vi.fn()
+  }
 }))
 
 // --- net mock ---------------------------------------------------------------
@@ -83,7 +83,7 @@ const connectMock = vi.fn((port: number, host: string) => {
 
 vi.mock('net', () => ({
   connect: (port: number, host: string) => connectMock(port, host),
-  default: { connect: (port: number, host: string) => connectMock(port, host) },
+  default: { connect: (port: number, host: string) => connectMock(port, host) }
 }))
 
 // --- readline mock ----------------------------------------------------------
@@ -107,8 +107,8 @@ vi.mock('readline', () => ({
       const rl = new FakeReadline()
       lastReadline = rl
       return rl
-    },
-  },
+    }
+  }
 }))
 
 // --- Imports under test (after all mocks registered) ------------------------
@@ -219,9 +219,7 @@ describe('VoiceClient', () => {
     capturedOnData!(Buffer.from([0x01, 0x02, 0x03]))
     const audioFrames2 = sentMessages().filter((m) => m.type === 'audio')
     expect(audioFrames2.length).toBe(2)
-    expect(audioFrames2[1].data).toBe(
-      Buffer.from([0x01, 0x02, 0x03]).toString('base64')
-    )
+    expect(audioFrames2[1].data).toBe(Buffer.from([0x01, 0x02, 0x03]).toString('base64'))
   })
 
   it('stopRecording() sends voice_stop and cleans up after the server closes, restoring idle state', async () => {

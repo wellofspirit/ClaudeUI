@@ -33,7 +33,7 @@ vi.mock('../View', () => ({
   GitBranchDropdownView: (props: GitBranchDropdownViewProps) => {
     viewProps = props
     return null
-  },
+  }
 }))
 
 // ---------------------------------------------------------------------------
@@ -55,7 +55,7 @@ function makeGitStatus(overrides: Partial<GitStatusData> = {}): GitStatusData {
     untracked: [],
     linesAdded: 0,
     linesRemoved: 0,
-    ...overrides,
+    ...overrides
   }
 }
 
@@ -65,7 +65,7 @@ function makeGitBranches(overrides: Partial<GitBranchData> = {}): GitBranchData 
     local: ['main', 'dev', 'feature/my-branch'],
     remote: ['origin/main', 'origin/dev'],
     tracking: { 'feature/my-branch': 'origin/feature/my-branch' },
-    ...overrides,
+    ...overrides
   }
 }
 
@@ -152,7 +152,7 @@ describe('GitBranchDropdown FC — rendered', () => {
       directories: [],
       recentSessionIds: [],
       pinnedSessionIds: [],
-      customTitles: {},
+      customTitles: {}
     })
   })
 
@@ -219,7 +219,9 @@ describe('GitBranchDropdown FC — rendered', () => {
     act(() => {
       // onFetch is typed as () => void but the FC binds an async handler
       const p = (viewProps.onFetch as () => Promise<void>)()
-      p.then(() => { fetchDone = true })
+      p.then(() => {
+        fetchDone = true
+      })
     })
 
     // The FC should have synchronously set syncOp = 'fetching'
@@ -299,7 +301,7 @@ describe('GitBranchDropdown FC — rendered', () => {
     // Override push to return a no-upstream error
     app.bridge.ipcMain.handle('git:push', () => ({
       ok: false,
-      error: 'error: The current branch feature/my-branch has no upstream branch.',
+      error: 'error: The current branch feature/my-branch has no upstream branch.'
     }))
 
     await renderFC()
@@ -319,7 +321,7 @@ describe('GitBranchDropdown FC — rendered', () => {
   it('onPush sets syncError for generic push failures (not upstream errors)', async () => {
     app.bridge.ipcMain.handle('git:push', () => ({
       ok: false,
-      error: 'error: remote rejected - permission denied',
+      error: 'error: remote rejected - permission denied'
     }))
 
     await renderFC()
@@ -342,7 +344,7 @@ describe('GitBranchDropdown FC — rendered', () => {
     // First trigger a push failure to set upstreamPrompt
     app.bridge.ipcMain.handle('git:push', () => ({
       ok: false,
-      error: 'error: The current branch has no upstream branch.',
+      error: 'error: The current branch has no upstream branch.'
     }))
 
     await renderFC()
@@ -392,7 +394,7 @@ describe('GitBranchDropdown FC — rendered', () => {
   it('onCheckout sets localError and does NOT call onClose on failure', async () => {
     app.bridge.ipcMain.handle('git:checkout', () => ({
       ok: false,
-      error: 'error: Your local changes would be overwritten by checkout.',
+      error: 'error: Your local changes would be overwritten by checkout.'
     }))
 
     await renderFC()
@@ -447,7 +449,7 @@ describe('GitBranchDropdown FC — rendered', () => {
   it('onCreateBranch sets localError and does NOT call onClose on failure', async () => {
     app.bridge.ipcMain.handle('git:create-branch', () => ({
       ok: false,
-      error: 'error: A branch named that already exists.',
+      error: 'error: A branch named that already exists.'
     }))
 
     await renderFC()
@@ -500,7 +502,7 @@ describe('GitBranchDropdown FC — rendered', () => {
     // Trigger push failure to set prompt
     app.bridge.ipcMain.handle('git:push', () => ({
       ok: false,
-      error: 'error: The current branch has no upstream branch.',
+      error: 'error: The current branch has no upstream branch.'
     }))
 
     await renderFC()

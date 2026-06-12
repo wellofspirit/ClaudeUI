@@ -46,7 +46,6 @@ export function PermissionsDialog({
   useEffect(() => {
     if (initialTab) setActiveTab(initialTab)
     else if (!cwd) setActiveTab('user')
-     
   }, [cwd, initialTab])
 
   useEffect(() => {
@@ -60,7 +59,9 @@ export function PermissionsDialog({
       try {
         const [user, project, local] = await Promise.all([
           window.api.loadClaudePermissions('user'),
-          cwd ? window.api.loadClaudePermissions('project', cwd) : Promise.resolve({ ...EMPTY_PERMS }),
+          cwd
+            ? window.api.loadClaudePermissions('project', cwd)
+            : Promise.resolve({ ...EMPTY_PERMS }),
           cwd ? window.api.loadClaudePermissions('local', cwd) : Promise.resolve({ ...EMPTY_PERMS })
         ])
         setPermsMap({ user, project, local })
@@ -128,10 +129,13 @@ export function PermissionsDialog({
     onClose()
   }, [saveAll, onClose])
 
-  const handleChangeTab = useCallback(async (scope: PermissionScope): Promise<void> => {
-    await saveScope(activeTab)
-    setActiveTab(scope)
-  }, [activeTab, saveScope])
+  const handleChangeTab = useCallback(
+    async (scope: PermissionScope): Promise<void> => {
+      await saveScope(activeTab)
+      setActiveTab(scope)
+    },
+    [activeTab, saveScope]
+  )
 
   useEffect(() => {
     if (!open) return
@@ -161,8 +165,12 @@ export function PermissionsDialog({
       hasDirty={hasDirty}
       onListDir={window.api.listDir}
       onChangeTab={handleChangeTab}
-      onUpdateRule={(category, i, v) => updateRules(activeTab, category, (r) => r.map((x, j) => (j === i ? v : x)))}
-      onDeleteRule={(category, i) => updateRules(activeTab, category, (r) => r.filter((_, j) => j !== i))}
+      onUpdateRule={(category, i, v) =>
+        updateRules(activeTab, category, (r) => r.map((x, j) => (j === i ? v : x)))
+      }
+      onDeleteRule={(category, i) =>
+        updateRules(activeTab, category, (r) => r.filter((_, j) => j !== i))
+      }
       onAddRule={(category, rule) => updateRules(activeTab, category, (r) => [...r, rule])}
       onUpdateDir={(i, v) => updateDirs(activeTab, (d) => d.map((x, j) => (j === i ? v : x)))}
       onDeleteDir={(i) => updateDirs(activeTab, (d) => d.filter((_, j) => j !== i))}

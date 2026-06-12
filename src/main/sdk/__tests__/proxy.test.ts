@@ -18,7 +18,7 @@ describe('buildEnv proxy overlay', () => {
       HTTP_PROXY: 'http://should-not-leak',
       HTTPS_PROXY: 'http://should-not-leak',
       ALL_PROXY: 'http://should-not-leak',
-      CLAUDEUI_PROXY_SUBPROCESSES: '1',
+      CLAUDEUI_PROXY_SUBPROCESSES: '1'
     })
     expect(env.HTTP_PROXY).toBeUndefined()
     expect(env.HTTPS_PROXY).toBeUndefined()
@@ -30,7 +30,7 @@ describe('buildEnv proxy overlay', () => {
     setProxyEnv({
       HTTP_PROXY: 'http://proxy.local:8080',
       HTTPS_PROXY: 'http://proxy.local:8080',
-      ALL_PROXY: 'http://proxy.local:8080',
+      ALL_PROXY: 'http://proxy.local:8080'
     })
     const env = buildEnv({})
     expect(env.HTTP_PROXY).toBe('http://proxy.local:8080')
@@ -43,7 +43,7 @@ describe('buildEnv proxy overlay', () => {
     setProxyEnv({
       HTTP_PROXY: 'http://proxy.local:8080',
       HTTPS_PROXY: 'http://proxy.local:8080',
-      ALL_PROXY: 'http://proxy.local:8080',
+      ALL_PROXY: 'http://proxy.local:8080'
     })
     setProxyAllSubprocesses(true)
     const env = buildEnv({})
@@ -55,7 +55,7 @@ describe('buildEnv proxy overlay', () => {
     setProxyEnv({
       HTTP_PROXY: 'http://proxy.local:8080',
       HTTPS_PROXY: 'http://proxy.local:8080',
-      ALL_PROXY: 'http://proxy.local:8080',
+      ALL_PROXY: 'http://proxy.local:8080'
     })
     expect(buildEnv({}).HTTP_PROXY).toBe('http://proxy.local:8080')
     setProxyEnv(null)

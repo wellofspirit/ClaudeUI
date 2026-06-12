@@ -15,7 +15,11 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import { GitService, gitServiceManager } from '../git-service'
-import { makeTempGitRepo, makeBareRemoteRepo, type TempGitRepo } from '../../../test/helpers/temp-git-repo'
+import {
+  makeTempGitRepo,
+  makeBareRemoteRepo,
+  type TempGitRepo
+} from '../../../test/helpers/temp-git-repo'
 
 const norm = (s: string): string => s.replace(/\r\n/g, '\n')
 
@@ -28,7 +32,11 @@ describe('GitService.isGitRepo', () => {
 
   afterEach(async () => {
     if (tempDir) {
-      try { await fs.promises.rm(tempDir, { recursive: true, force: true, maxRetries: 5 }) } catch { /* ignore */ }
+      try {
+        await fs.promises.rm(tempDir, { recursive: true, force: true, maxRetries: 5 })
+      } catch {
+        /* ignore */
+      }
     }
   })
 
@@ -782,9 +790,21 @@ describe('gitServiceManager', () => {
   afterEach(async () => {
     // Ensure manager is cleaned for this cwd
     // Repeatedly release until the entry is gone (idempotent on extra releases)
-    try { gitServiceManager.release(repo.path) } catch { /* noop */ }
-    try { gitServiceManager.release(repo.path) } catch { /* noop */ }
-    try { gitServiceManager.release(repo.path) } catch { /* noop */ }
+    try {
+      gitServiceManager.release(repo.path)
+    } catch {
+      /* noop */
+    }
+    try {
+      gitServiceManager.release(repo.path)
+    } catch {
+      /* noop */
+    }
+    try {
+      gitServiceManager.release(repo.path)
+    } catch {
+      /* noop */
+    }
     await repo.cleanup()
   })
 

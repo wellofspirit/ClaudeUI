@@ -7,8 +7,6 @@
  *   3. onClose calls closeTaskPanel store action
  */
 
- 
-
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import React from 'react'
 import { render, act } from '@testing-library/react'
@@ -21,7 +19,7 @@ vi.mock('../View', () => ({
   TaskDetailPanelView: (props: TaskDetailPanelViewProps) => {
     viewProps = props
     return null
-  },
+  }
 }))
 
 const ROUTE = 'route-task-panel'
@@ -58,8 +56,8 @@ describe('TaskDetailPanel FC', () => {
     useSessionStore.setState((state) => ({
       sessions: {
         ...state.sessions,
-        [ROUTE]: { ...state.sessions[ROUTE], openedTaskToolUseIds: [] },
-      },
+        [ROUTE]: { ...state.sessions[ROUTE], openedTaskToolUseIds: [] }
+      }
     }))
 
     await renderFC()
@@ -79,14 +77,19 @@ describe('TaskDetailPanel FC', () => {
               id: 'm1',
               role: 'assistant',
               content: [
-                { type: 'tool_use', toolUseId: 'tu-bash-bg', toolName: 'Bash', toolInput: { run_in_background: true } },
-                { type: 'tool_use', toolUseId: 'tu-task', toolName: 'Task', toolInput: {} },
+                {
+                  type: 'tool_use',
+                  toolUseId: 'tu-bash-bg',
+                  toolName: 'Bash',
+                  toolInput: { run_in_background: true }
+                },
+                { type: 'tool_use', toolUseId: 'tu-task', toolName: 'Task', toolInput: {} }
               ],
-              timestamp: 0,
-            },
-          ],
-        },
-      },
+              timestamp: 0
+            }
+          ]
+        }
+      }
     }))
 
     await renderFC()
@@ -94,7 +97,7 @@ describe('TaskDetailPanel FC', () => {
     expect(viewProps?.entries).toEqual([
       { toolUseId: 'tu-bash-bg', kind: 'bash-background' },
       { toolUseId: 'tu-task', kind: 'task' },
-      { toolUseId: 'tu-gone', kind: 'missing' },
+      { toolUseId: 'tu-gone', kind: 'missing' }
     ])
   })
 
@@ -104,7 +107,9 @@ describe('TaskDetailPanel FC', () => {
     await renderFC()
     expect(viewProps).not.toBeNull()
 
-    act(() => { viewProps!.onClose() })
+    act(() => {
+      viewProps!.onClose()
+    })
 
     expect(useSessionStore.getState().sessions[ROUTE].rightPanel).toBe('none')
   })

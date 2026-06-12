@@ -105,7 +105,7 @@ class TestClaudeSession {
       status: normalized,
       outputFile: this.backgroundFilePaths.get(toolUseId) || '',
       summary: '',
-      usage: undefined,
+      usage: undefined
     })
   }
 }
@@ -131,7 +131,7 @@ describe('ClaudeSession background bash', () => {
 
       session.detectTaskMapping(
         'tu-1',
-        'Command running in background with ID: abc123. Output is being written to: /tmp/abc123.output',
+        'Command running in background with ID: abc123. Output is being written to: /tmp/abc123.output'
       )
 
       expect(session.pendingBackgroundWatches.has('tu-1')).toBe(false)
@@ -147,7 +147,7 @@ describe('ClaudeSession background bash', () => {
     it('does not queue a pending watch when the poller is already registered', () => {
       session.detectTaskMapping(
         'tu-2',
-        'Command running in background with ID: xyz. Output is being written to: /tmp/xyz.output',
+        'Command running in background with ID: xyz. Output is being written to: /tmp/xyz.output'
       )
       session.sent = []
 
@@ -190,7 +190,7 @@ describe('ClaudeSession background bash', () => {
         status: 'completed',
         outputFile: '/tmp/bg.output',
         summary: '',
-        usage: undefined,
+        usage: undefined
       })
     })
 

@@ -14,7 +14,7 @@ const rgArgs = process.argv.slice(3).length > 0 ? process.argv.slice(3) : ['--ve
 
 const child = spawn(exe, rgArgs, {
   argv0: 'rg',
-  stdio: ['ignore', 'pipe', 'pipe'],
+  stdio: ['ignore', 'pipe', 'pipe']
 })
 let out = ''
 let err = ''

@@ -7,6 +7,7 @@ How to keep this documentation and the harness in sync with upstream cli.js.
 ## 12.1 When upstream cli.js version bumps
 
 Trigger: `package.json#claudeCliVersion` changes. This invalidates our assumptions about:
+
 - Minified variable names (they change every version)
 - Control-request subtype names (rarely change, but possible)
 - Stream-json message shapes (additive changes common, breaking changes rare)
@@ -35,6 +36,7 @@ Trigger: `package.json#claudeCliVersion` changes. This invalidates our assumptio
 3. **Re-verify the inbound message type set**
 
    Run a real session with DEBUG_SDK=1 and wireLogCapacity=5000:
+
    ```bash
    DEBUG_SDK=1 bun run dev
    # exercise a complex turn
@@ -49,6 +51,7 @@ Trigger: `package.json#claudeCliVersion` changes. This invalidates our assumptio
 5. **Re-verify CLI flags**
 
    Spawn cli.js with `--help` to dump the flag catalog:
+
    ```bash
    node vendor/claude-cli/cli.js --help
    ```

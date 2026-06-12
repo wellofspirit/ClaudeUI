@@ -32,7 +32,13 @@ import { mergeSlashCommands, filterSlashCommands } from '../SlashCommandMenu'
 //   - filterSlashCommands for type-ahead filtering
 // ---------------------------------------------------------------------------
 
-function SlashMenuHarness({ cwd, filter = '' }: { cwd: string; filter?: string }): React.JSX.Element {
+function SlashMenuHarness({
+  cwd,
+  filter = ''
+}: {
+  cwd: string
+  filter?: string
+}): React.JSX.Element {
   useClaudeEvents()
 
   const slashCommands = useSessionStore((s) => s.slashCommands)
@@ -47,9 +53,12 @@ function SlashMenuHarness({ cwd, filter = '' }: { cwd: string; filter?: string }
   // Same useEffect as InputBox FC — triggers scan when cwd changes
   useEffect(() => {
     if (!cwd) return
-    window.api.scanCustomCommands(cwd).then((names) => {
-      setCustomCommands(names.map((name) => ({ name })))
-    }).catch(() => {})
+    window.api
+      .scanCustomCommands(cwd)
+      .then((names) => {
+        setCustomCommands(names.map((name) => ({ name })))
+      })
+      .catch(() => {})
   }, [cwd, setCustomCommands])
 
   const filtered = filter ? filterSlashCommands(merged, filter) : merged
@@ -57,7 +66,9 @@ function SlashMenuHarness({ cwd, filter = '' }: { cwd: string; filter?: string }
   return (
     <ul data-testid="commands">
       {filtered.map((c) => (
-        <li key={c.name} data-testid="cmd">{c.name}</li>
+        <li key={c.name} data-testid="cmd">
+          {c.name}
+        </li>
       ))}
     </ul>
   )
@@ -145,10 +156,7 @@ describe('custom commands integration (IPC → store → render)', () => {
 
     // SDK init — /old-cmd was deleted, SDK doesn't include it
     await act(async () => {
-      app.emit('session:slash-commands', 'session-123', [
-        { name: '/help' },
-        { name: '/refactor' }
-      ])
+      app.emit('session:slash-commands', 'session-123', [{ name: '/help' }, { name: '/refactor' }])
     })
 
     expect(renderedCommands()).not.toContain('/old-cmd')
@@ -233,7 +241,10 @@ describe('custom commands integration (IPC → store → render)', () => {
   })
 
   it('full lifecycle: scan → merge → SDK init → clean', async () => {
-    app.bridge.ipcMain.handle('config:scan-custom-commands', async () => ['/refactor', '/stale-cmd'])
+    app.bridge.ipcMain.handle('config:scan-custom-commands', async () => [
+      '/refactor',
+      '/stale-cmd'
+    ])
 
     await act(async () => {
       render(<SlashMenuHarness cwd="/my/project" />)

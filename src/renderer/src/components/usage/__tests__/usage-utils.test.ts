@@ -7,7 +7,7 @@ import {
   formatTime,
   formatShortDate,
   formatDuration,
-  getModelColor,
+  getModelColor
 } from '../usage-utils'
 
 describe('formatTokenCount', () => {
@@ -60,21 +60,25 @@ describe('formatCost', () => {
 
 describe('sumTokens', () => {
   it('sums all token fields', () => {
-    expect(sumTokens({
-      inputTokens: 100,
-      outputTokens: 200,
-      cacheCreationTokens: 50,
-      cacheReadTokens: 25,
-    })).toBe(375)
+    expect(
+      sumTokens({
+        inputTokens: 100,
+        outputTokens: 200,
+        cacheCreationTokens: 50,
+        cacheReadTokens: 25
+      })
+    ).toBe(375)
   })
 
   it('returns 0 for all-zero counts', () => {
-    expect(sumTokens({
-      inputTokens: 0,
-      outputTokens: 0,
-      cacheCreationTokens: 0,
-      cacheReadTokens: 0,
-    })).toBe(0)
+    expect(
+      sumTokens({
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheCreationTokens: 0,
+        cacheReadTokens: 0
+      })
+    ).toBe(0)
   })
 })
 

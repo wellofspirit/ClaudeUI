@@ -89,7 +89,9 @@ export function GitBranchDropdownView({
       {/* Sync section — only when remotes exist */}
       {hasRemote && (
         <div className="px-2 py-2 border-b border-border">
-          <div className="text-[10px] text-text-muted uppercase tracking-wider font-medium px-1 mb-1.5">Sync</div>
+          <div className="text-[10px] text-text-muted uppercase tracking-wider font-medium px-1 mb-1.5">
+            Sync
+          </div>
           <div className="grid grid-cols-2 gap-1.5 mb-1.5">
             <SyncButton
               icon="↓"
@@ -98,7 +100,13 @@ export function GitBranchDropdownView({
               disabled={isSyncing || !hasTracking || behind === 0}
               active={syncOp === 'pulling'}
               onClick={onPull}
-              title={!hasTracking ? 'No upstream branch' : behind === 0 ? 'Already up to date' : `Pull ${behind} commit${behind !== 1 ? 's' : ''}`}
+              title={
+                !hasTracking
+                  ? 'No upstream branch'
+                  : behind === 0
+                    ? 'Already up to date'
+                    : `Pull ${behind} commit${behind !== 1 ? 's' : ''}`
+              }
             />
             <SyncButton
               icon="↑"
@@ -107,7 +115,13 @@ export function GitBranchDropdownView({
               disabled={isSyncing || (hasTracking && ahead === 0)}
               active={syncOp === 'pushing'}
               onClick={onPush}
-              title={!hasTracking ? 'Push and set upstream' : ahead === 0 ? 'Nothing to push' : `Push ${ahead} commit${ahead !== 1 ? 's' : ''}`}
+              title={
+                !hasTracking
+                  ? 'Push and set upstream'
+                  : ahead === 0
+                    ? 'Nothing to push'
+                    : `Push ${ahead} commit${ahead !== 1 ? 's' : ''}`
+              }
             />
           </div>
           <SyncButton
@@ -126,7 +140,8 @@ export function GitBranchDropdownView({
       {upstreamPrompt && (
         <div className="px-3 py-2 border-b border-border bg-bg-tertiary/50">
           <p className="text-[11px] text-text-primary mb-2">
-            No upstream for <span className="font-mono text-accent">{upstreamPrompt.branch}</span>. Set up tracking?
+            No upstream for <span className="font-mono text-accent">{upstreamPrompt.branch}</span>.
+            Set up tracking?
           </p>
           <div className="flex items-center justify-end gap-1.5">
             <button
@@ -168,7 +183,9 @@ export function GitBranchDropdownView({
           <>
             {localFiltered.length > 0 && (
               <div>
-                <div className="px-3 py-1.5 text-[10px] text-text-muted uppercase tracking-wider font-medium">Local</div>
+                <div className="px-3 py-1.5 text-[10px] text-text-muted uppercase tracking-wider font-medium">
+                  Local
+                </div>
                 {localFiltered.map((b) => (
                   <button
                     key={b}
@@ -176,7 +193,9 @@ export function GitBranchDropdownView({
                     disabled={loading}
                     className="w-full text-left px-3 py-1.5 text-[12px] hover:bg-bg-hover transition-colors flex items-center justify-between cursor-default disabled:opacity-50"
                   >
-                    <span className={`truncate ${b === branches.current ? 'text-accent font-medium' : 'text-text-primary'}`}>
+                    <span
+                      className={`truncate ${b === branches.current ? 'text-accent font-medium' : 'text-text-primary'}`}
+                    >
                       {b}
                     </span>
                     {b === branches.current && (
@@ -189,7 +208,9 @@ export function GitBranchDropdownView({
 
             {remoteFiltered.length > 0 && (
               <div>
-                <div className="px-3 py-1.5 text-[10px] text-text-muted uppercase tracking-wider font-medium border-t border-border">Remote</div>
+                <div className="px-3 py-1.5 text-[10px] text-text-muted uppercase tracking-wider font-medium border-t border-border">
+                  Remote
+                </div>
                 {remoteFiltered.map((b) => {
                   const slashIdx = b.indexOf('/')
                   const prefix = slashIdx >= 0 ? b.slice(0, slashIdx + 1) : ''
@@ -277,9 +298,10 @@ function SyncButton({
       title={title}
       className={`flex items-center justify-center gap-1.5 px-2.5 py-1.5 rounded-md text-[11px] font-medium transition-colors cursor-default
         ${fullWidth ? 'col-span-2' : ''}
-        ${disabled
-          ? 'bg-bg-tertiary/50 text-text-muted/50 cursor-default'
-          : 'bg-bg-tertiary text-text-secondary hover:bg-bg-hover hover:text-text-primary'
+        ${
+          disabled
+            ? 'bg-bg-tertiary/50 text-text-muted/50 cursor-default'
+            : 'bg-bg-tertiary text-text-secondary hover:bg-bg-hover hover:text-text-primary'
         }`}
     >
       {active ? (

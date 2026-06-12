@@ -78,19 +78,19 @@ Always exactly once, by us, immediately after spawn and before (or concurrent wi
 
 ### Fields cli.js READS on the initialize request
 
-| Field | Type | Effect |
-|---|---|---|
-| `hooks` | `Record<HookEventName, Array<{matcher?, hookCallbackIds, timeout?}>>` | Each `hookCallbackIds` entry is wrapped in `createHookCallback(id, timeout)` so that, when a hook fires, cli.js sends us `control_request { subtype: 'hook_callback', callback_id, input, tool_use_id }` and we dispatch to the stored callback. |
-| `sdkMcpServers` | `string[]` | Pre-populates stubs in cli.js's MCP server map. Actual connection (handshake) is deferred until the first `tools/list` or similar. |
-| `jsonSchema` | `Record<string, unknown>` | Calls `x76(jsonSchema)` to install structured-output coercion. Model output is forced into this JSON shape. |
-| `systemPrompt` | `string[]` | Sets `M.systemPrompt`. The special case `[""]` is mapped to empty string via `vs1()`. |
-| `appendSystemPrompt` | `string` | Appended to the preset system prompt. |
-| `appendSubagentSystemPrompt` | `string` | Appended to subagent system prompts. Env-gated. |
-| `excludeDynamicSections` | `boolean` | Strips `<env>`, `<working_dir>`, `<current_date>`, `<git_status>`, etc. from the system prompt so caches hit across users. |
-| `agents` | `Record<string, AgentConfig>` | Registered via `FH8(agents, 'flagSettings')`. If `M.agent` names one, its `prompt`/`model`/`initialPrompt` are applied to the current session. |
-| `title` | `string` | `P98(title.trim())` — updates persisted session title + sets the `w8` custom-title flag, which suppresses auto-title generation. Handled BEFORE the main init dispatcher. |
-| `promptSuggestions` | `boolean` | Sets `M.promptSuggestions`, also flips app-state `promptSuggestionEnabled: true`. |
-| `agentProgressSummaries` | `boolean` | Calls `_76(true)` if the `tengu_slate_prism` feature flag is enabled on the account. |
+| Field                        | Type                                                                  | Effect                                                                                                                                                                                                                                           |
+| ---------------------------- | --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `hooks`                      | `Record<HookEventName, Array<{matcher?, hookCallbackIds, timeout?}>>` | Each `hookCallbackIds` entry is wrapped in `createHookCallback(id, timeout)` so that, when a hook fires, cli.js sends us `control_request { subtype: 'hook_callback', callback_id, input, tool_use_id }` and we dispatch to the stored callback. |
+| `sdkMcpServers`              | `string[]`                                                            | Pre-populates stubs in cli.js's MCP server map. Actual connection (handshake) is deferred until the first `tools/list` or similar.                                                                                                               |
+| `jsonSchema`                 | `Record<string, unknown>`                                             | Calls `x76(jsonSchema)` to install structured-output coercion. Model output is forced into this JSON shape.                                                                                                                                      |
+| `systemPrompt`               | `string[]`                                                            | Sets `M.systemPrompt`. The special case `[""]` is mapped to empty string via `vs1()`.                                                                                                                                                            |
+| `appendSystemPrompt`         | `string`                                                              | Appended to the preset system prompt.                                                                                                                                                                                                            |
+| `appendSubagentSystemPrompt` | `string`                                                              | Appended to subagent system prompts. Env-gated.                                                                                                                                                                                                  |
+| `excludeDynamicSections`     | `boolean`                                                             | Strips `<env>`, `<working_dir>`, `<current_date>`, `<git_status>`, etc. from the system prompt so caches hit across users.                                                                                                                       |
+| `agents`                     | `Record<string, AgentConfig>`                                         | Registered via `FH8(agents, 'flagSettings')`. If `M.agent` names one, its `prompt`/`model`/`initialPrompt` are applied to the current session.                                                                                                   |
+| `title`                      | `string`                                                              | `P98(title.trim())` — updates persisted session title + sets the `w8` custom-title flag, which suppresses auto-title generation. Handled BEFORE the main init dispatcher.                                                                        |
+| `promptSuggestions`          | `boolean`                                                             | Sets `M.promptSuggestions`, also flips app-state `promptSuggestionEnabled: true`.                                                                                                                                                                |
+| `agentProgressSummaries`     | `boolean`                                                             | Calls `_76(true)` if the `tengu_slate_prism` feature flag is enabled on the account.                                                                                                                                                             |
 
 ### Fields NOT in the initialize request (common mistakes)
 
@@ -229,6 +229,7 @@ All fields are passed through to the agent runtime when Task tool invokes it. Se
 ```
 
 Common error messages:
+
 - `"Already initialized"` — duplicate initialize. Never re-send.
 - `"Invalid hook event: X"` — unknown `hookEventName` in `hooks`.
 - `"Invalid agent config"` — agent config fails schema validation.
@@ -280,7 +281,8 @@ if (options.appendSubagentSystemPrompt !== undefined)
 if (options.excludeDynamicSections !== undefined)
   initPayload.excludeDynamicSections = options.excludeDynamicSections
 if (options.agents !== undefined) initPayload.agents = options.agents
-if (options.promptSuggestions !== undefined) initPayload.promptSuggestions = options.promptSuggestions
+if (options.promptSuggestions !== undefined)
+  initPayload.promptSuggestions = options.promptSuggestions
 if (options.agentProgressSummaries !== undefined)
   initPayload.agentProgressSummaries = options.agentProgressSummaries
 // NOTE: enableAuthStatus is still included in the payload here — cli.js ignores it.
@@ -304,12 +306,12 @@ else if (sp?.type === 'preset' && sp.append) initPayload.appendSystemPrompt = sp
 
 The response is stored once in a `Promise<Record<string, unknown>>`. These `QueryHandle` methods read from it:
 
-| Method | Returns field |
-|---|---|
-| `initializationResult()` | Full response object |
-| `supportedModels()` | `response.models ?? []` |
-| `supportedCommands()` | `response.commands ?? []` |
-| `supportedAgents()` | `response.agents ?? []` |
+| Method                   | Returns field             |
+| ------------------------ | ------------------------- |
+| `initializationResult()` | Full response object      |
+| `supportedModels()`      | `response.models ?? []`   |
+| `supportedCommands()`    | `response.commands ?? []` |
+| `supportedAgents()`      | `response.agents ?? []`   |
 
 Calling these before initialize resolves returns a still-pending Promise (safe — they all return Promises). After the 60 s timeout, they return `[]` and a stderr log explains the failure.
 

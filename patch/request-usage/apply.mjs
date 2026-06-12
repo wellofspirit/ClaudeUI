@@ -65,25 +65,29 @@ console.log('\n--- Locating streaming message_start case ---')
 
 const startRe = new RegExp(
   `case"message_start":\\{(${V})=(${V})\\.message,` +
-  `(${V})=Math\\.max\\(0,Math\\.round\\(performance\\.now\\(\\)-(${V})\\)\\),` +
-  `(${V})=(${V})\\(\\5,\\2\\.message\\?\\.usage\\)`
+    `(${V})=Math\\.max\\(0,Math\\.round\\(performance\\.now\\(\\)-(${V})\\)\\),` +
+    `(${V})=(${V})\\(\\5,\\2\\.message\\?\\.usage\\)`
 )
 const startMatch = startRe.exec(src)
 if (!startMatch) {
-  console.error('ERROR: Cannot locate streaming message_start case (sH=<p>.message, QH=<merge>(QH,...)).')
+  console.error(
+    'ERROR: Cannot locate streaming message_start case (sH=<p>.message, QH=<merge>(QH,...)).'
+  )
   process.exit(1)
 }
 
 const allStart = [...src.matchAll(new RegExp(startRe, 'g'))]
 if (allStart.length > 1) {
-  console.error(`ERROR: message_start case matched ${allStart.length} times (expected 1). Aborting.`)
+  console.error(
+    `ERROR: message_start case matched ${allStart.length} times (expected 1). Aborting.`
+  )
   process.exit(1)
 }
 
-const msgVar = startMatch[1]    // sH — the message object (carries .model)
-const eventVar = startMatch[2]  // p_ — the stream event
-const usageVar = startMatch[5]  // QH — per-request usage accumulator
-const mergeFn = startMatch[6]   // O7H — usage merge function
+const msgVar = startMatch[1] // sH — the message object (carries .model)
+const eventVar = startMatch[2] // p_ — the stream event
+const usageVar = startMatch[5] // QH — per-request usage accumulator
+const mergeFn = startMatch[6] // O7H — usage merge function
 
 console.log(`Found message_start case at char ${startMatch.index}`)
 console.log(`  Message var: ${msgVar}`)
@@ -118,17 +122,19 @@ if (allStop.length !== 1) {
 
 const stopMatch = allStop[0]
 const existingStmts = stopMatch[1] // e.g. `eH("stream_completed",jH??null,r_);` in 2.1.170; empty in 2.1.163
-console.log(`Found message_stop case at char ${stopMatch.index}` +
-  (existingStmts ? ` (preserving existing statements: ${existingStmts})` : ''))
+console.log(
+  `Found message_stop case at char ${stopMatch.index}` +
+    (existingStmts ? ` (preserving existing statements: ${existingStmts})` : '')
+)
 
 const messageStopNew =
   `case"message_stop":` +
   existingStmts +
   PATCH_MARKER +
   `process.stdout.write(JSON.stringify({` +
-    `type:"request_usage",` +
-    `usage:${usageVar},` +
-    `model:${msgVar}?.model||""` +
+  `type:"request_usage",` +
+  `usage:${usageVar},` +
+  `model:${msgVar}?.model||""` +
   `})+"\\n");break}`
 
 src = src.replace(stopMatch[0], messageStopNew)

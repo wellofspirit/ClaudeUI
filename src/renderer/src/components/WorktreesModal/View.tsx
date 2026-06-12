@@ -15,7 +15,7 @@ export function WorktreesModalView({
   loading,
   removingSet,
   onRemove,
-  onClose,
+  onClose
 }: WorktreesModalViewProps): React.JSX.Element {
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center">
@@ -27,7 +27,15 @@ export function WorktreesModalView({
             onClick={onClose}
             className="w-6 h-6 flex items-center justify-center rounded-md text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
           >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+            <svg
+              width="14"
+              height="14"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+            >
               <path d="M18 6L6 18" />
               <path d="M6 6l12 12" />
             </svg>
@@ -47,12 +55,19 @@ export function WorktreesModalView({
                 const s = statuses[entry.name]
                 const isRemoving = removingSet.has(entry.name)
                 return (
-                  <div key={entry.name} className="flex items-center justify-between px-3 py-2 rounded-lg bg-bg-tertiary border border-border">
+                  <div
+                    key={entry.name}
+                    className="flex items-center justify-between px-3 py-2 rounded-lg bg-bg-tertiary border border-border"
+                  >
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2">
-                        <span className="text-[13px] text-text-primary font-mono truncate">{entry.name}</span>
+                        <span className="text-[13px] text-text-primary font-mono truncate">
+                          {entry.name}
+                        </span>
                         {!entry.exists && (
-                          <span className="text-[10px] text-red-400 bg-red-400/10 px-1.5 py-0.5 rounded">missing</span>
+                          <span className="text-[10px] text-red-400 bg-red-400/10 px-1.5 py-0.5 rounded">
+                            missing
+                          </span>
                         )}
                       </div>
                       <div className="text-[11px] text-text-muted mt-0.5">
@@ -63,8 +78,12 @@ export function WorktreesModalView({
                               ? 'clean'
                               : [
                                   s.uncommittedFiles > 0 ? `${s.uncommittedFiles} changed` : '',
-                                  s.commitsAhead > 0 ? `${s.commitsAhead} commit${s.commitsAhead !== 1 ? 's' : ''}` : ''
-                                ].filter(Boolean).join(' · ')}
+                                  s.commitsAhead > 0
+                                    ? `${s.commitsAhead} commit${s.commitsAhead !== 1 ? 's' : ''}`
+                                    : ''
+                                ]
+                                  .filter(Boolean)
+                                  .join(' · ')}
                           </span>
                         )}
                       </div>

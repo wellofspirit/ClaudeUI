@@ -185,7 +185,7 @@ export interface AuthStatusMessage extends BaseSDKMessage {
 export interface ControlRequestMessage extends BaseSDKMessage {
   type: 'control_request'
   request_id?: string
-  request?: { subtype?: string;[k: string]: unknown }
+  request?: { subtype?: string; [k: string]: unknown }
 }
 
 export interface ControlResponseMessage extends BaseSDKMessage {
@@ -255,7 +255,7 @@ export interface CanUseToolContext {
 export type CanUseTool = (
   toolName: string,
   input: Record<string, unknown>,
-  context: CanUseToolContext,
+  context: CanUseToolContext
 ) => Promise<CanUseToolResult>
 
 export interface ThinkingConfig {
@@ -283,7 +283,7 @@ export type SystemPrompt = string | string[] | SystemPromptPreset
 export type HookCallback = (
   input: Record<string, unknown>,
   toolUseId: string | undefined,
-  context: { signal: AbortSignal },
+  context: { signal: AbortSignal }
 ) => Promise<unknown> | unknown
 
 export interface HookMatcher {
@@ -314,12 +314,10 @@ export interface ElicitationContext {
 
 export type ElicitationCallback = (
   params: ElicitationContext,
-  opts: { signal: AbortSignal },
+  opts: { signal: AbortSignal }
 ) => Promise<unknown>
 
-export type GetOAuthTokenCallback = (opts: {
-  signal: AbortSignal
-}) => Promise<string | null>
+export type GetOAuthTokenCallback = (opts: { signal: AbortSignal }) => Promise<string | null>
 
 /**
  * Generic user-dialog prompt initiated by cli.js
@@ -345,7 +343,7 @@ export interface UserDialogResult {
 
 export type UserDialogCallback = (
   request: UserDialogRequest,
-  opts: { signal: AbortSignal },
+  opts: { signal: AbortSignal }
 ) => Promise<UserDialogResult>
 
 export type SpawnClaudeCodeProcess = (opts: {
@@ -396,11 +394,7 @@ export interface SdkMcpServer {
   instance?: import('@modelcontextprotocol/sdk/server/mcp.js').McpServer
 }
 
-export type McpServerConfig =
-  | McpServerStdio
-  | McpServerHttp
-  | McpServerSse
-  | SdkMcpServer
+export type McpServerConfig = McpServerStdio | McpServerHttp | McpServerSse | SdkMcpServer
 
 /**
  * A tool registered on an in-process SDK MCP server. The schema is a record
@@ -633,7 +627,7 @@ export interface QueryHandle extends AsyncIterable<SDKMessage> {
   enableRemoteControl(enabled: boolean, opts?: { name?: string }): Promise<unknown>
   generateSessionTitle(
     description: string,
-    opts?: { persist?: boolean },
+    opts?: { persist?: boolean }
   ): Promise<{ title?: string } | unknown>
   askSideQuestion(question: string): Promise<string | null>
   launchUltrareview(args: unknown, opts?: { confirm?: boolean }): Promise<unknown>

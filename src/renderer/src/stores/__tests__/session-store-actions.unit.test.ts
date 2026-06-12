@@ -13,17 +13,13 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import {
-  useSessionStore,
-  useActiveSession,
-  type PerSessionState,
-} from '../session-store'
+import { useSessionStore, useActiveSession, type PerSessionState } from '../session-store'
 import {
   makeChatMessage,
   makeAssistantMessage,
   makeToolUseBlock,
   makePendingApproval,
-  resetFactoryCounter,
+  resetFactoryCounter
 } from '@test/factories/messages'
 import { renderHook } from '@testing-library/react'
 
@@ -44,7 +40,7 @@ beforeEach(() => {
     killTerminal: vi.fn(),
     deleteSession: vi.fn().mockResolvedValue(undefined),
     deleteProject: vi.fn().mockResolvedValue(undefined),
-    logError: vi.fn(),
+    logError: vi.fn()
   } as any
 
   useSessionStore.setState({
@@ -58,7 +54,7 @@ beforeEach(() => {
     hiddenSessionIds: [],
     hiddenProjectKeys: [],
     terminalGroups: {},
-    activeView: { type: 'chat' },
+    activeView: { type: 'chat' }
   })
 })
 
@@ -79,12 +75,12 @@ describe('addMessage', () => {
     store().createNewSession('r1', '/p')
     const first = makeChatMessage({
       id: 'a-1',
-      content: [{ type: 'text', text: 'partial' }],
+      content: [{ type: 'text', text: 'partial' }]
     })
     store().addMessage('r1', first)
     const second = makeChatMessage({
       id: 'a-1',
-      content: [{ type: 'text', text: 'complete response' }],
+      content: [{ type: 'text', text: 'complete response' }]
     })
     store().addMessage('r1', second)
 
@@ -101,15 +97,15 @@ describe('addMessage', () => {
       id: 'a-1',
       content: [
         { type: 'text', text: 'let me...' },
-        makeToolUseBlock('Bash', { command: 'ls' }, 'tu-1'),
-      ],
+        makeToolUseBlock('Bash', { command: 'ls' }, 'tu-1')
+      ]
     })
     store().addMessage('r1', partial)
 
     // Second partial replaces text but omits the tool_use — mergeContentBlocks should preserve it
     const nextChunk = makeChatMessage({
       id: 'a-1',
-      content: [{ type: 'text', text: 'thinking through the problem' }],
+      content: [{ type: 'text', text: 'thinking through the problem' }]
     })
     store().addMessage('r1', nextChunk)
 
@@ -191,7 +187,7 @@ describe('appendToolResult', () => {
     const msg = makeChatMessage({
       id: 'a-1',
       role: 'assistant',
-      content: [makeToolUseBlock('Bash', { command: 'ls' }, 'tu-1')],
+      content: [makeToolUseBlock('Bash', { command: 'ls' }, 'tu-1')]
     })
     store().addMessage('r1', msg)
 
@@ -202,7 +198,7 @@ describe('appendToolResult', () => {
     expect(results[0]).toMatchObject({
       toolUseId: 'tu-1',
       toolResult: 'file1\nfile2',
-      isError: false,
+      isError: false
     })
   })
 
@@ -213,7 +209,7 @@ describe('appendToolResult', () => {
       makeChatMessage({
         id: 'a-1',
         role: 'assistant',
-        content: [makeToolUseBlock('Bash', {}, 'tu-old')],
+        content: [makeToolUseBlock('Bash', {}, 'tu-old')]
       })
     )
     store().addMessage(
@@ -221,19 +217,17 @@ describe('appendToolResult', () => {
       makeChatMessage({
         id: 'a-2',
         role: 'assistant',
-        content: [makeToolUseBlock('Read', {}, 'tu-new')],
+        content: [makeToolUseBlock('Read', {}, 'tu-new')]
       })
     )
     store().appendToolResult('r1', 'tu-new', 'contents', false)
     // Only the newer message should have the tool_result
-    expect(
-      store()
-        .sessions['r1'].messages[0].content.some((b) => b.type === 'tool_result')
-    ).toBe(false)
-    expect(
-      store()
-        .sessions['r1'].messages[1].content.some((b) => b.type === 'tool_result')
-    ).toBe(true)
+    expect(store().sessions['r1'].messages[0].content.some((b) => b.type === 'tool_result')).toBe(
+      false
+    )
+    expect(store().sessions['r1'].messages[1].content.some((b) => b.type === 'tool_result')).toBe(
+      true
+    )
   })
 
   it('marks isError=true when flagged', () => {
@@ -243,13 +237,11 @@ describe('appendToolResult', () => {
       makeChatMessage({
         id: 'a-1',
         role: 'assistant',
-        content: [makeToolUseBlock('Bash', {}, 'tu-err')],
+        content: [makeToolUseBlock('Bash', {}, 'tu-err')]
       })
     )
     store().appendToolResult('r1', 'tu-err', 'permission denied', true)
-    const result = store().sessions['r1'].messages[0].content.find(
-      (b) => b.type === 'tool_result'
-    )
+    const result = store().sessions['r1'].messages[0].content.find((b) => b.type === 'tool_result')
     expect(result).toMatchObject({ isError: true })
   })
 
@@ -260,7 +252,7 @@ describe('appendToolResult', () => {
       makeChatMessage({
         id: 'a-1',
         role: 'assistant',
-        content: [makeToolUseBlock('Bash', {}, 'tu-real')],
+        content: [makeToolUseBlock('Bash', {}, 'tu-real')]
       })
     )
     const before = store().sessions['r1'].messages[0].content.length
@@ -309,17 +301,14 @@ describe('addPendingApproval / clearPendingApprovals', () => {
     store().createNewSession('r1', '/p')
     store().addPendingApproval(
       'r1',
-      makePendingApproval({ requestId: 'req-1', toolUseId: 'toolu_a' }),
+      makePendingApproval({ requestId: 'req-1', toolUseId: 'toolu_a' })
     )
     store().addPendingApproval(
       'r1',
-      makePendingApproval({ requestId: 'req-2', toolUseId: 'toolu_b' }),
+      makePendingApproval({ requestId: 'req-2', toolUseId: 'toolu_b' })
     )
     // An older-style approval with no toolUseId should be unaffected.
-    store().addPendingApproval(
-      'r1',
-      makePendingApproval({ requestId: 'req-3' }),
-    )
+    store().addPendingApproval('r1', makePendingApproval({ requestId: 'req-3' }))
 
     store().removePendingApprovalByToolUse('r1', 'toolu_a')
     const remaining = store().sessions['r1'].pendingApprovals.map((a) => a.requestId)
@@ -330,7 +319,7 @@ describe('addPendingApproval / clearPendingApprovals', () => {
     store().createNewSession('r1', '/p')
     store().addPendingApproval(
       'r1',
-      makePendingApproval({ requestId: 'req-1', toolUseId: 'toolu_a' }),
+      makePendingApproval({ requestId: 'req-1', toolUseId: 'toolu_a' })
     )
     store().removePendingApprovalByToolUse('r1', 'toolu_unknown')
     expect(store().sessions['r1'].pendingApprovals.map((a) => a.requestId)).toEqual(['req-1'])
@@ -596,9 +585,7 @@ describe('derived selector safety', () => {
 
   it('useActiveSession returns EMPTY_SESSION_STATE slice when activeSessionId points at a deleted session', () => {
     useSessionStore.setState({ activeSessionId: 'ghost', sessions: {} })
-    const { result } = renderHook(() =>
-      useActiveSession((s: PerSessionState) => s.streamingText)
-    )
+    const { result } = renderHook(() => useActiveSession((s: PerSessionState) => s.streamingText))
     expect(result.current).toBe('')
   })
 
@@ -648,8 +635,8 @@ describe('clearConversation', () => {
     useSessionStore.setState((st) => ({
       sessions: {
         ...st.sessions,
-        r1: { ...st.sessions['r1'], sdkActive: true },
-      },
+        r1: { ...st.sessions['r1'], sdkActive: true }
+      }
     }))
     store().clearConversation('r1')
     const s = store().sessions['r1']
@@ -678,7 +665,7 @@ describe('setStatus cwd follow-through', () => {
       sessionId: 'sdk-id',
       model: 'claude-sonnet-4-6',
       cwd: '/worktree/branch',
-      totalCostUsd: 0,
+      totalCostUsd: 0
     })
     expect(store().sessions['r1'].cwd).toBe('/worktree/branch')
   })
@@ -690,7 +677,7 @@ describe('setStatus cwd follow-through', () => {
       sessionId: 'sdk-id',
       model: 'claude-sonnet-4-6',
       cwd: '/same',
-      totalCostUsd: 0,
+      totalCostUsd: 0
     })
     expect(store().sessions['r1'].cwd).toBe('/same')
   })
@@ -702,7 +689,7 @@ describe('setStatus cwd follow-through', () => {
       sessionId: null,
       model: null,
       cwd: null,
-      totalCostUsd: 0,
+      totalCostUsd: 0
     })
     expect(store().sessions['r1'].cwd).toBe('/keep')
   })

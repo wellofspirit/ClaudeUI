@@ -10,8 +10,6 @@
  *   6. onCopy triggers clipboard.writeText
  */
 
- 
-
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import React from 'react'
 import { render, act } from '@testing-library/react'
@@ -21,7 +19,7 @@ import type { RemoteStatus, NetworkInterfaceInfo } from '../../../../../shared/t
 
 // Stub QRCode.toDataURL since the real lib isn't needed for logic
 vi.mock('qrcode', () => ({
-  default: { toDataURL: async () => 'data:image/png;base64,STUB' },
+  default: { toDataURL: async () => 'data:image/png;base64,STUB' }
 }))
 
 let viewProps: RemoteAccessModalViewProps
@@ -29,7 +27,7 @@ vi.mock('../View', () => ({
   RemoteAccessModalView: (props: RemoteAccessModalViewProps) => {
     viewProps = props
     return null
-  },
+  }
 }))
 
 function makeStatus(overrides: Partial<RemoteStatus> = {}): RemoteStatus {
@@ -42,7 +40,7 @@ function makeStatus(overrides: Partial<RemoteStatus> = {}): RemoteStatus {
     tunnelError: null,
     connectedClients: 0,
     clientIps: [],
-    ...overrides,
+    ...overrides
   } as RemoteStatus
 }
 
@@ -64,18 +62,31 @@ describe('RemoteAccessModal FC', () => {
 
     // clipboard API
     Object.defineProperty(navigator, 'clipboard', {
-      value: { writeText: (s: string) => { writeTextCalls.push(s); return Promise.resolve() } },
-      configurable: true,
+      value: {
+        writeText: (s: string) => {
+          writeTextCalls.push(s)
+          return Promise.resolve()
+        }
+      },
+      configurable: true
     })
 
     app.bridge.ipcMain.handle('remote:status', async () => statusQueue.shift() ?? makeStatus())
-    app.bridge.ipcMain.handle('remote:interfaces', async (): Promise<NetworkInterfaceInfo[]> => [
-      { name: 'eth0', address: '192.168.1.10', priority: 0 } as NetworkInterfaceInfo,
-    ])
-    app.bridge.ipcMain.handle('remote:start', async (_e, opts?: { host?: string; tunnel?: boolean }) => {
-      startCalls.push(opts)
+    app.bridge.ipcMain.handle(
+      'remote:interfaces',
+      async (): Promise<NetworkInterfaceInfo[]> => [
+        { name: 'eth0', address: '192.168.1.10', priority: 0 } as NetworkInterfaceInfo
+      ]
+    )
+    app.bridge.ipcMain.handle(
+      'remote:start',
+      async (_e, opts?: { host?: string; tunnel?: boolean }) => {
+        startCalls.push(opts)
+      }
+    )
+    app.bridge.ipcMain.handle('remote:stop', async () => {
+      stopCalls++
     })
-    app.bridge.ipcMain.handle('remote:stop', async () => { stopCalls++ })
   })
 
   afterEach(() => {
@@ -89,20 +100,33 @@ describe('RemoteAccessModal FC', () => {
 
   it('fetches status + interfaces on mount', async () => {
     statusQueue = [makeStatus()]
-    await act(async () => { await renderFC() })
-    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    await act(async () => {
+      await renderFC()
+    })
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
 
     expect(viewProps.interfaces).toHaveLength(1)
     expect(viewProps.status).not.toBeNull()
   })
 
   it('onStart calls startRemoteServer and refreshes status', async () => {
-    statusQueue = [makeStatus(), makeStatus({ running: true, port: 5123, lanUrl: 'http://192.168.1.10:5123' })]
+    statusQueue = [
+      makeStatus(),
+      makeStatus({ running: true, port: 5123, lanUrl: 'http://192.168.1.10:5123' })
+    ]
 
-    await act(async () => { await renderFC() })
-    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    await act(async () => {
+      await renderFC()
+    })
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
 
-    await act(async () => { await viewProps.onStart() })
+    await act(async () => {
+      await viewProps.onStart()
+    })
 
     expect(startCalls).toHaveLength(1)
     expect(viewProps.status?.running).toBe(true)
@@ -110,23 +134,42 @@ describe('RemoteAccessModal FC', () => {
 
   it('onStart passes host + tunnel options when set', async () => {
     statusQueue = [makeStatus(), makeStatus()]
-    await act(async () => { await renderFC() })
-    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    await act(async () => {
+      await renderFC()
+    })
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
 
-    act(() => { viewProps.onSelectHost('192.168.1.10') })
-    act(() => { viewProps.onSetTunnelMode(true) })
+    act(() => {
+      viewProps.onSelectHost('192.168.1.10')
+    })
+    act(() => {
+      viewProps.onSetTunnelMode(true)
+    })
 
-    await act(async () => { await viewProps.onStart() })
+    await act(async () => {
+      await viewProps.onStart()
+    })
 
     expect(startCalls[0]).toEqual({ host: '192.168.1.10', tunnel: true })
   })
 
   it('onStop calls stopRemoteServer and refreshes status', async () => {
-    statusQueue = [makeStatus({ running: true, port: 5123, lanUrl: 'http://a/' }), makeStatus({ running: false })]
-    await act(async () => { await renderFC() })
-    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    statusQueue = [
+      makeStatus({ running: true, port: 5123, lanUrl: 'http://a/' }),
+      makeStatus({ running: false })
+    ]
+    await act(async () => {
+      await renderFC()
+    })
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
 
-    await act(async () => { await viewProps.onStop() })
+    await act(async () => {
+      await viewProps.onStop()
+    })
 
     expect(stopCalls).toBe(1)
     expect(viewProps.status?.running).toBe(false)
@@ -134,7 +177,9 @@ describe('RemoteAccessModal FC', () => {
 
   it('Escape key calls onClose', async () => {
     statusQueue = [makeStatus()]
-    await act(async () => { await renderFC() })
+    await act(async () => {
+      await renderFC()
+    })
 
     act(() => {
       window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
@@ -145,10 +190,16 @@ describe('RemoteAccessModal FC', () => {
 
   it('onCopy writes shareUrl to clipboard', async () => {
     statusQueue = [makeStatus({ running: true, port: 5123, lanUrl: 'http://host/#key123' })]
-    await act(async () => { await renderFC() })
-    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    await act(async () => {
+      await renderFC()
+    })
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
 
-    act(() => { viewProps.onCopy() })
+    act(() => {
+      viewProps.onCopy()
+    })
 
     expect(writeTextCalls).toEqual(['http://host/#key123'])
     expect(viewProps.copied).toBe(true)
@@ -156,8 +207,12 @@ describe('RemoteAccessModal FC', () => {
 
   it('pushed status event updates the view', async () => {
     statusQueue = [makeStatus()]
-    await act(async () => { await renderFC() })
-    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    await act(async () => {
+      await renderFC()
+    })
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
 
     await act(async () => {
       app.emit('remote:status', makeStatus({ running: true, port: 8080, lanUrl: 'http://host/' }))

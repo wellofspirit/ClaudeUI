@@ -83,19 +83,30 @@ export function useClaudeEvents(): void {
           }
           // If resuming an existing session, load its history from disk
           if (data.resumeSessionId) {
-            const projectKey = store.directories
-              .find((g) => g.sessions.some((s) => s.sessionId === data.resumeSessionId))?.projectKey
+            const projectKey = store.directories.find((g) =>
+              g.sessions.some((s) => s.sessionId === data.resumeSessionId)
+            )?.projectKey
             if (projectKey) {
-              window.api.loadSessionHistory(data.resumeSessionId, projectKey).then(({ messages, taskNotifications, customTitle, statusLine, warnings }) => {
-                const s = useSessionStore.getState()
-                // Only populate if the session still exists and is still empty
-                if (s.sessions[routingId] && s.sessions[routingId].messages.length === 0) {
-                  s.loadHistoricalSession(routingId, messages, data.cwd, taskNotifications, {}, statusLine, warnings)
-                  if (customTitle) s.setCustomTitle(routingId, customTitle)
-                  // Re-mark active since loadHistoricalSession sets isHistorical
-                  s.markSdkActive(routingId)
-                }
-              })
+              window.api
+                .loadSessionHistory(data.resumeSessionId, projectKey)
+                .then(({ messages, taskNotifications, customTitle, statusLine, warnings }) => {
+                  const s = useSessionStore.getState()
+                  // Only populate if the session still exists and is still empty
+                  if (s.sessions[routingId] && s.sessions[routingId].messages.length === 0) {
+                    s.loadHistoricalSession(
+                      routingId,
+                      messages,
+                      data.cwd,
+                      taskNotifications,
+                      {},
+                      statusLine,
+                      warnings
+                    )
+                    if (customTitle) s.setCustomTitle(routingId, customTitle)
+                    // Re-mark active since loadHistoricalSession sets isHistorical
+                    s.markSdkActive(routingId)
+                  }
+                })
             }
           }
         }
@@ -111,7 +122,13 @@ export function useClaudeEvents(): void {
         if (data.queued) {
           store.setQueuedText(routingId, data.prompt)
         } else {
-          store.addUserMessage(routingId, `msg-${Date.now()}`, data.prompt, undefined, data.attachments)
+          store.addUserMessage(
+            routingId,
+            `msg-${Date.now()}`,
+            data.prompt,
+            undefined,
+            data.attachments
+          )
         }
       }),
       window.api.onMessage((routingId, msg) => {
@@ -136,7 +153,11 @@ export function useClaudeEvents(): void {
         if (state.activeSessionId !== routingId || !document.hasFocus()) {
           state.setNeedsAttention(routingId, true)
         }
-        notifyIfNeeded(routingId, 'Permission required', `${approval.toolName || 'Tool'} needs approval`)
+        notifyIfNeeded(
+          routingId,
+          'Permission required',
+          `${approval.toolName || 'Tool'} needs approval`
+        )
       }),
       window.api.onStatus((routingId, status) => {
         // Re-key session when SDK provides its stable session ID
@@ -219,12 +240,22 @@ export function useClaudeEvents(): void {
               const toolBlock = msg.content.find(
                 (b) => b.type === 'tool_use' && b.toolUseId === toolUseId
               )
-              if (toolBlock && toolBlock.type === 'tool_use' && /worktree/i.test(toolBlock.toolName)) {
+              if (
+                toolBlock &&
+                toolBlock.type === 'tool_use' &&
+                /worktree/i.test(toolBlock.toolName)
+              ) {
                 // SDK result format: "Created worktree at <path> on branch <branch>. ..."
                 const naturalMatch = result.match(/worktree at (.+?) on branch ([\w-]+)/)
                 // Also try structured formats: worktreePath: <path> or JSON "worktreePath": "<path>"
-                const pathMatch = naturalMatch?.[1] || result.match(/worktreePath:\s*(.+?)(?:\n|$)/i)?.[1] || result.match(/"worktreePath"\s*:\s*"([^"]+)"/i)?.[1]
-                const branchMatch = naturalMatch?.[2] || result.match(/worktreeBranch:\s*(.+?)(?:\n|$)/i)?.[1] || result.match(/"worktreeBranch"\s*:\s*"([^"]+)"/i)?.[1]
+                const pathMatch =
+                  naturalMatch?.[1] ||
+                  result.match(/worktreePath:\s*(.+?)(?:\n|$)/i)?.[1] ||
+                  result.match(/"worktreePath"\s*:\s*"([^"]+)"/i)?.[1]
+                const branchMatch =
+                  naturalMatch?.[2] ||
+                  result.match(/worktreeBranch:\s*(.+?)(?:\n|$)/i)?.[1] ||
+                  result.match(/"worktreeBranch"\s*:\s*"([^"]+)"/i)?.[1]
                 if (pathMatch && branchMatch) {
                   const wtPath = pathMatch.trim()
                   const wtBranch = branchMatch.trim()
@@ -266,7 +297,13 @@ export function useClaudeEvents(): void {
         appendSubagentMessageBatch(routingId, data.toolUseId, data.messages)
       }),
       window.api.onSubagentToolResult((routingId, data) => {
-        appendSubagentToolResult(routingId, data.toolUseId, data.toolResultToolUseId, data.result, data.isError)
+        appendSubagentToolResult(
+          routingId,
+          data.toolUseId,
+          data.toolResultToolUseId,
+          data.result,
+          data.isError
+        )
       }),
       window.api.onBashOutput((routingId, data) => {
         setBashOutput(routingId, data.toolUseId, data.output, data.totalLines, data.totalBytes)
@@ -333,8 +370,9 @@ export function useClaudeEvents(): void {
       // Before-quit: check for active worktrees
       window.api.onBeforeQuit(() => {
         const store = useSessionStore.getState()
-        const activeWorktrees = Object.entries(store.worktreeInfoMap)
-          .map(([routingId, worktreeInfo]) => ({ routingId, worktreeInfo }))
+        const activeWorktrees = Object.entries(store.worktreeInfoMap).map(
+          ([routingId, worktreeInfo]) => ({ routingId, worktreeInfo })
+        )
         if (activeWorktrees.length === 0) {
           window.api.confirmQuit()
         } else {
@@ -358,20 +396,63 @@ export function useClaudeEvents(): void {
     ]
 
     // Trigger initial plugin views fetch
-    window.api.getPluginViews().then((views) => {
-      useSessionStore.getState().setPluginViews(views)
-    }).catch(() => { /* plugins may not be loaded yet */ })
+    window.api
+      .getPluginViews()
+      .then((views) => {
+        useSessionStore.getState().setPluginViews(views)
+      })
+      .catch(() => {
+        /* plugins may not be loaded yet */
+      })
 
     // Trigger initial usage fetch
-    window.api.fetchAccountUsage().then((data) => {
-      useSessionStore.getState().setAccountUsage(data)
-    }).catch((err) => { window.api.logError('useClaudeEvents', `Initial usage fetch failed: ${err}`) })
+    window.api
+      .fetchAccountUsage()
+      .then((data) => {
+        useSessionStore.getState().setAccountUsage(data)
+      })
+      .catch((err) => {
+        window.api.logError('useClaudeEvents', `Initial usage fetch failed: ${err}`)
+      })
 
     // Trigger initial block usage fetch
-    window.api.fetchBlockUsage().then((data) => {
-      useSessionStore.getState().setBlockUsage(data)
-    }).catch((err) => { window.api.logError('useClaudeEvents', `Initial block usage fetch failed: ${err}`) })
+    window.api
+      .fetchBlockUsage()
+      .then((data) => {
+        useSessionStore.getState().setBlockUsage(data)
+      })
+      .catch((err) => {
+        window.api.logError('useClaudeEvents', `Initial block usage fetch failed: ${err}`)
+      })
 
     return () => cleanups.forEach((fn) => fn())
-  }, [addMessage, appendStreamingText, appendStreamingThinking, addPendingApproval, clearPendingApprovals, removePendingApprovalByToolUse, setStatus, addError, addWarning, retractMessages, appendToolResult, updateTaskProgress, addTaskNotification, addSubagentMessage, appendSubagentMessageBatch, appendSubagentStreamingText, appendSubagentStreamingThinking, appendSubagentToolResult, setBashOutput, setBackgroundOutput, setStatusLine, setPermissionMode, setSlashCommands, setSdkSkillNames, addSandboxViolation, setVoiceState, appendVoiceTranscript])
+  }, [
+    addMessage,
+    appendStreamingText,
+    appendStreamingThinking,
+    addPendingApproval,
+    clearPendingApprovals,
+    removePendingApprovalByToolUse,
+    setStatus,
+    addError,
+    addWarning,
+    retractMessages,
+    appendToolResult,
+    updateTaskProgress,
+    addTaskNotification,
+    addSubagentMessage,
+    appendSubagentMessageBatch,
+    appendSubagentStreamingText,
+    appendSubagentStreamingThinking,
+    appendSubagentToolResult,
+    setBashOutput,
+    setBackgroundOutput,
+    setStatusLine,
+    setPermissionMode,
+    setSlashCommands,
+    setSdkSkillNames,
+    addSandboxViolation,
+    setVoiceState,
+    appendVoiceTranscript
+  ])
 }

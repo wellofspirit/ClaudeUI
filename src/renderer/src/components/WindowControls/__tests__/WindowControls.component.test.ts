@@ -7,8 +7,6 @@
  *   3. onMaximizeChange event updates isMaximized prop
  */
 
- 
-
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import React from 'react'
 import { render, act } from '@testing-library/react'
@@ -20,7 +18,7 @@ vi.mock('../View', () => ({
   WindowControlsView: (props: WindowControlsViewProps) => {
     viewProps = props
     return null
-  },
+  }
 }))
 
 describe('WindowControls FC', () => {
@@ -36,9 +34,15 @@ describe('WindowControls FC', () => {
     maximizeCalls = 0
     closeCalls = 0
 
-    app.bridge.ipcMain.handle('window:minimize', async () => { minimizeCalls++ })
-    app.bridge.ipcMain.handle('window:maximize', async () => { maximizeCalls++ })
-    app.bridge.ipcMain.handle('window:close', async () => { closeCalls++ })
+    app.bridge.ipcMain.handle('window:minimize', async () => {
+      minimizeCalls++
+    })
+    app.bridge.ipcMain.handle('window:maximize', async () => {
+      maximizeCalls++
+    })
+    app.bridge.ipcMain.handle('window:close', async () => {
+      closeCalls++
+    })
 
     // Override platform detection
     Object.defineProperty(window.api, 'platform', { value: 'win32', configurable: true })

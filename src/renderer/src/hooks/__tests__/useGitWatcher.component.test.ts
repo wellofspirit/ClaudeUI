@@ -24,9 +24,7 @@ function installWindowApi(isRepo: boolean): void {
   gitStartWatching = vi.fn().mockResolvedValue(undefined)
   gitStopWatching = vi.fn().mockResolvedValue(undefined)
   gitCheckRepo = vi.fn().mockResolvedValue(isRepo)
-   
   ;(globalThis as any).window = globalThis.window || {}
-   
   ;(globalThis as any).window.api = {
     gitStartWatching,
     gitStopWatching,
@@ -37,7 +35,7 @@ function installWindowApi(isRepo: boolean): void {
     logError: () => {},
     fetchAccountUsage: () => Promise.resolve(null),
     fetchBlockUsage: () => Promise.resolve(null),
-    getPluginViews: () => Promise.resolve([]),
+    getPluginViews: () => Promise.resolve([])
   }
 }
 
@@ -48,7 +46,7 @@ function resetStore(): void {
     directories: [],
     recentSessionIds: [],
     pinnedSessionIds: [],
-    customTitles: {},
+    customTitles: {}
   })
 }
 

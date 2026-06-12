@@ -16,7 +16,16 @@ interface Props {
   onSave: (comment: DiffComment) => void
 }
 
-export function DiffCommentWidget({ lineNumber, endLineNumber, side, filePath, lineContent, initialText, onClose, onSave }: Props): React.JSX.Element {
+export function DiffCommentWidget({
+  lineNumber,
+  endLineNumber,
+  side,
+  filePath,
+  lineContent,
+  initialText,
+  onClose,
+  onSave
+}: Props): React.JSX.Element {
   const [text, setText] = useState(initialText ?? '')
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const startLine = Math.min(lineNumber, endLineNumber ?? lineNumber)
@@ -46,15 +55,18 @@ export function DiffCommentWidget({ lineNumber, endLineNumber, side, filePath, l
     onClose()
   }, [text, filePath, startLine, endLine, side, lineContent, onSave, onClose])
 
-  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
-    if (e.key === 'Escape') {
-      e.preventDefault()
-      onClose()
-    } else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-      e.preventDefault()
-      handleSave()
-    }
-  }, [onClose, handleSave])
+  const handleKeyDown = useCallback(
+    (e: React.KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        onClose()
+      } else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+        e.preventDefault()
+        handleSave()
+      }
+    },
+    [onClose, handleSave]
+  )
 
   return (
     <div className="diff-comment-widget mx-2 my-1 rounded-md border border-accent/40 shadow-lg overflow-hidden">

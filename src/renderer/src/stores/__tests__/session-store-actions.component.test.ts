@@ -13,9 +13,14 @@ import {
   makeToolUseBlock,
   makeTaskNotification,
   makeSessionStatus,
-  resetFactoryCounter,
+  resetFactoryCounter
 } from '@test/factories/messages'
-import type { DiffComment, PlanComment, WorktreeInfo, GitStatusData } from '../../../../shared/types'
+import type {
+  DiffComment,
+  PlanComment,
+  WorktreeInfo,
+  GitStatusData
+} from '../../../../shared/types'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -35,7 +40,7 @@ function makeGitStatus(overrides?: Partial<GitStatusData>): GitStatusData {
     untracked: [],
     linesAdded: 0,
     linesRemoved: 0,
-    ...overrides,
+    ...overrides
   }
 }
 
@@ -49,7 +54,7 @@ function makeDiffComment(overrides?: Partial<DiffComment>): DiffComment {
     lineContent: 'const x = 1',
     comment: 'Consider renaming',
     createdAt: Date.now(),
-    ...overrides,
+    ...overrides
   }
 }
 
@@ -62,7 +67,7 @@ function makePlanComment(overrides?: Partial<PlanComment>): PlanComment {
     sectionIndex: 0,
     comment: 'Looks good',
     createdAt: Date.now(),
-    ...overrides,
+    ...overrides
   }
 }
 
@@ -75,7 +80,7 @@ function makeWorktreeInfo(overrides?: Partial<WorktreeInfo>): WorktreeInfo {
     gitRoot: '/test',
     originalHeadCommit: 'abc123',
     createdAt: Date.now(),
-    ...overrides,
+    ...overrides
   }
 }
 
@@ -95,7 +100,7 @@ beforeEach(() => {
     watchBackground: vi.fn(),
     unwatchBackground: vi.fn(),
     deleteSession: vi.fn().mockResolvedValue(undefined),
-    deleteProject: vi.fn().mockResolvedValue(undefined),
+    deleteProject: vi.fn().mockResolvedValue(undefined)
   } as any
 
   useSessionStore.setState({
@@ -108,7 +113,7 @@ beforeEach(() => {
     worktreeInfoMap: {},
     hiddenSessionIds: [],
     hiddenProjectKeys: [],
-    terminalGroups: {},
+    terminalGroups: {}
   })
 })
 
@@ -268,7 +273,7 @@ describe('forkFromMessage', () => {
       makeChatMessage({ id: 'u1' }),
       makeAssistantMessage('first', { id: 'msg_1' }),
       makeChatMessage({ id: 'u2' }),
-      makeAssistantMessage('second', { id: 'msg_2' }),
+      makeAssistantMessage('second', { id: 'msg_2' })
     ]
     store().loadHistoricalSession('src-session', messages, '/proj')
     ;(window.api as any).resolveForkAnchor = vi.fn().mockResolvedValue({ anchorUuid: 'anchor-1' })
@@ -298,7 +303,11 @@ describe('forkFromMessage', () => {
   })
 
   it('returns null and records an error when the anchor cannot be resolved', async () => {
-    store().loadHistoricalSession('src-session', [makeAssistantMessage('x', { id: 'msg_1' })], '/proj')
+    store().loadHistoricalSession(
+      'src-session',
+      [makeAssistantMessage('x', { id: 'msg_1' })],
+      '/proj'
+    )
     ;(window.api as any).resolveForkAnchor = vi
       .fn()
       .mockResolvedValue({ anchorUuid: null, reason: 'message-not-found' })
@@ -312,15 +321,19 @@ describe('forkFromMessage', () => {
   })
 
   it('uses status.sessionId as the source id for a rekeyed live session', async () => {
-    store().loadHistoricalSession('routing-temp', [makeAssistantMessage('x', { id: 'msg_1' })], '/proj')
+    store().loadHistoricalSession(
+      'routing-temp',
+      [makeAssistantMessage('x', { id: 'msg_1' })],
+      '/proj'
+    )
     useSessionStore.setState((s) => ({
       sessions: {
         ...s.sessions,
         'routing-temp': {
           ...s.sessions['routing-temp'],
-          status: makeSessionStatus({ sessionId: 'real-sid' }),
-        },
-      },
+          status: makeSessionStatus({ sessionId: 'real-sid' })
+        }
+      }
     }))
     ;(window.api as any).resolveForkAnchor = vi.fn().mockResolvedValue({ anchorUuid: 'a1' })
 
@@ -506,7 +519,7 @@ describe('deleteSession', () => {
 
   it('scrubs session from recent, pinned, hidden, customTitles, worktreeInfoMap', async () => {
     store().createNewSession('s1', '/test') // adds to recent
-    store().pinSession('s1')                 // moves to pinned
+    store().pinSession('s1') // moves to pinned
     store().setCustomTitle('s1', 'My Title')
     store().hideSession('s1')
     const wt = makeWorktreeInfo()
@@ -535,13 +548,31 @@ describe('deleteSession', () => {
     // Set state after createNewSession to avoid cleanupEmptySession side-effects from switchSession
     useSessionStore.setState({
       activeSessionId: 's1',
-      directories: [{
-        cwd: '/a', projectKey: 'proj-key', folderName: 'a',
-        sessions: [
-          { sessionId: 's1', cwd: '/a', projectKey: 'proj-key', title: 'x', timestamp: 0, lastActivityAt: 0 },
-          { sessionId: 's2', cwd: '/a', projectKey: 'proj-key', title: 'y', timestamp: 0, lastActivityAt: 0 },
-        ],
-      }],
+      directories: [
+        {
+          cwd: '/a',
+          projectKey: 'proj-key',
+          folderName: 'a',
+          sessions: [
+            {
+              sessionId: 's1',
+              cwd: '/a',
+              projectKey: 'proj-key',
+              title: 'x',
+              timestamp: 0,
+              lastActivityAt: 0
+            },
+            {
+              sessionId: 's2',
+              cwd: '/a',
+              projectKey: 'proj-key',
+              title: 'y',
+              timestamp: 0,
+              lastActivityAt: 0
+            }
+          ]
+        }
+      ]
     })
 
     await store().deleteSession('s1', 'proj-key')
@@ -554,10 +585,23 @@ describe('deleteSession', () => {
 
   it('drops an empty directory group after deleting its last session', async () => {
     useSessionStore.setState({
-      directories: [{
-        cwd: '/a', projectKey: 'proj-key', folderName: 'a',
-        sessions: [{ sessionId: 's1', cwd: '/a', projectKey: 'proj-key', title: 'x', timestamp: 0, lastActivityAt: 0 }],
-      }],
+      directories: [
+        {
+          cwd: '/a',
+          projectKey: 'proj-key',
+          folderName: 'a',
+          sessions: [
+            {
+              sessionId: 's1',
+              cwd: '/a',
+              projectKey: 'proj-key',
+              title: 'x',
+              timestamp: 0,
+              lastActivityAt: 0
+            }
+          ]
+        }
+      ]
     })
 
     await store().deleteSession('s1', 'proj-key')
@@ -592,19 +636,40 @@ describe('deleteProject', () => {
           projectKey: 'proj-key',
           folderName: 'test',
           sessions: [
-            { sessionId: 's1', cwd: '/test', projectKey: 'proj-key', title: 'a', timestamp: 0, lastActivityAt: 0 },
-            { sessionId: 's2', cwd: '/test', projectKey: 'proj-key', title: 'b', timestamp: 0, lastActivityAt: 0 },
-          ],
+            {
+              sessionId: 's1',
+              cwd: '/test',
+              projectKey: 'proj-key',
+              title: 'a',
+              timestamp: 0,
+              lastActivityAt: 0
+            },
+            {
+              sessionId: 's2',
+              cwd: '/test',
+              projectKey: 'proj-key',
+              title: 'b',
+              timestamp: 0,
+              lastActivityAt: 0
+            }
+          ]
         },
         {
           cwd: '/other',
           projectKey: 'other-key',
           folderName: 'other',
           sessions: [
-            { sessionId: 's3', cwd: '/other', projectKey: 'other-key', title: 'c', timestamp: 0, lastActivityAt: 0 },
-          ],
-        },
-      ],
+            {
+              sessionId: 's3',
+              cwd: '/other',
+              projectKey: 'other-key',
+              title: 'c',
+              timestamp: 0,
+              lastActivityAt: 0
+            }
+          ]
+        }
+      ]
     })
     store().createNewSession('s1', '/test')
     store().createNewSession('s2', '/test')
@@ -628,20 +693,42 @@ describe('deleteProject', () => {
 
   it('removes the project directory group and in-memory sessions so the sidebar purges', async () => {
     store().createNewSession('s1', '/test')
-    store().createNewSession('s2', '/test')  // in-memory-only session in same cwd
+    store().createNewSession('s2', '/test') // in-memory-only session in same cwd
     store().createNewSession('s3', '/other')
     useSessionStore.setState({
       activeSessionId: 's1',
       directories: [
         {
-          cwd: '/test', projectKey: 'proj-key', folderName: 'test',
-          sessions: [{ sessionId: 's1', cwd: '/test', projectKey: 'proj-key', title: 'a', timestamp: 0, lastActivityAt: 0 }],
+          cwd: '/test',
+          projectKey: 'proj-key',
+          folderName: 'test',
+          sessions: [
+            {
+              sessionId: 's1',
+              cwd: '/test',
+              projectKey: 'proj-key',
+              title: 'a',
+              timestamp: 0,
+              lastActivityAt: 0
+            }
+          ]
         },
         {
-          cwd: '/other', projectKey: 'other-key', folderName: 'other',
-          sessions: [{ sessionId: 's3', cwd: '/other', projectKey: 'other-key', title: 'c', timestamp: 0, lastActivityAt: 0 }],
-        },
-      ],
+          cwd: '/other',
+          projectKey: 'other-key',
+          folderName: 'other',
+          sessions: [
+            {
+              sessionId: 's3',
+              cwd: '/other',
+              projectKey: 'other-key',
+              title: 'c',
+              timestamp: 0,
+              lastActivityAt: 0
+            }
+          ]
+        }
+      ]
     })
 
     await store().deleteProject('proj-key')
@@ -662,10 +749,23 @@ describe('deleteProject', () => {
     store().createNewSession('s3', '/other')
     useSessionStore.setState({
       activeSessionId: 's3',
-      directories: [{
-        cwd: '/test', projectKey: 'proj-key', folderName: 'test',
-        sessions: [{ sessionId: 's1', cwd: '/test', projectKey: 'proj-key', title: 'a', timestamp: 0, lastActivityAt: 0 }],
-      }],
+      directories: [
+        {
+          cwd: '/test',
+          projectKey: 'proj-key',
+          folderName: 'test',
+          sessions: [
+            {
+              sessionId: 's1',
+              cwd: '/test',
+              projectKey: 'proj-key',
+              title: 'a',
+              timestamp: 0,
+              lastActivityAt: 0
+            }
+          ]
+        }
+      ]
     })
 
     await store().deleteProject('proj-key')
@@ -676,10 +776,23 @@ describe('deleteProject', () => {
   it('does not mutate store when the IPC call rejects', async () => {
     ;(window.api.deleteProject as any).mockRejectedValueOnce(new Error('EACCES'))
     useSessionStore.setState({
-      directories: [{
-        cwd: '/test', projectKey: 'proj-key', folderName: 'test',
-        sessions: [{ sessionId: 's1', cwd: '/test', projectKey: 'proj-key', title: 'a', timestamp: 0, lastActivityAt: 0 }],
-      }],
+      directories: [
+        {
+          cwd: '/test',
+          projectKey: 'proj-key',
+          folderName: 'test',
+          sessions: [
+            {
+              sessionId: 's1',
+              cwd: '/test',
+              projectKey: 'proj-key',
+              title: 'a',
+              timestamp: 0,
+              lastActivityAt: 0
+            }
+          ]
+        }
+      ]
     })
     store().createNewSession('s1', '/test')
     const recentBefore = [...store().recentSessionIds]
@@ -725,7 +838,7 @@ describe('addUserMessage', () => {
     expect(session.messages[0]).toMatchObject({
       id: 'msg-1',
       role: 'user',
-      content: [{ type: 'text', text: 'hello world' }],
+      content: [{ type: 'text', text: 'hello world' }]
     })
   })
 
@@ -846,9 +959,9 @@ describe('setStatus', () => {
         r1: {
           ...state.sessions.r1,
           streamingThinking: 'half-finished thought...',
-          thinkingStartedAt: startedAt,
-        },
-      },
+          thinkingStartedAt: startedAt
+        }
+      }
     }))
     expect(store().sessions['r1'].thinkingStartedAt).toBe(startedAt)
 
@@ -870,9 +983,9 @@ describe('setStatus', () => {
         r1: {
           ...state.sessions.r1,
           streamingThinking: 'mid-thought...',
-          thinkingStartedAt: startedAt,
-        },
-      },
+          thinkingStartedAt: startedAt
+        }
+      }
     }))
 
     store().setStatus('r1', makeSessionStatus({ state: 'running' }))
@@ -894,11 +1007,14 @@ describe('setStatus', () => {
 
   it('clears foreground subagent streaming buffers on idle', () => {
     store().createNewSession('r1', '/test')
-    store().addMessage('r1', makeChatMessage({
-      id: 'asst-1',
-      role: 'assistant',
-      content: [makeToolUseBlock('Task', { description: 'do work' }, 'tool-fg')],
-    }))
+    store().addMessage(
+      'r1',
+      makeChatMessage({
+        id: 'asst-1',
+        role: 'assistant',
+        content: [makeToolUseBlock('Task', { description: 'do work' }, 'tool-fg')]
+      })
+    )
     store().appendSubagentStreamingThinking('r1', 'tool-fg', 'subagent thinking...')
     store().appendSubagentStreamingText('r1', 'tool-fg', 'subagent answering...')
 
@@ -911,11 +1027,16 @@ describe('setStatus', () => {
 
   it('preserves background subagent streaming buffers on idle', () => {
     store().createNewSession('r1', '/test')
-    store().addMessage('r1', makeChatMessage({
-      id: 'asst-1',
-      role: 'assistant',
-      content: [makeToolUseBlock('Task', { description: 'bg work', run_in_background: true }, 'tool-bg')],
-    }))
+    store().addMessage(
+      'r1',
+      makeChatMessage({
+        id: 'asst-1',
+        role: 'assistant',
+        content: [
+          makeToolUseBlock('Task', { description: 'bg work', run_in_background: true }, 'tool-bg')
+        ]
+      })
+    )
     // appendSubagentStreamingText clears thinking by design (text supersedes
     // thinking in the live preview), so seed both buffers directly.
     useSessionStore.setState((state) => ({
@@ -924,9 +1045,9 @@ describe('setStatus', () => {
         r1: {
           ...state.sessions.r1,
           subagentStreamingThinking: { 'tool-bg': 'still thinking...' },
-          subagentStreamingText: { 'tool-bg': 'still answering...' },
-        },
-      },
+          subagentStreamingText: { 'tool-bg': 'still answering...' }
+        }
+      }
     }))
 
     store().setStatus('r1', makeSessionStatus({ state: 'idle' }))
@@ -938,14 +1059,17 @@ describe('setStatus', () => {
 
   it('clears foreground but not background subagent buffers when both are present', () => {
     store().createNewSession('r1', '/test')
-    store().addMessage('r1', makeChatMessage({
-      id: 'asst-1',
-      role: 'assistant',
-      content: [
-        makeToolUseBlock('Task', { description: 'fg' }, 'tool-fg'),
-        makeToolUseBlock('Task', { description: 'bg', run_in_background: true }, 'tool-bg'),
-      ],
-    }))
+    store().addMessage(
+      'r1',
+      makeChatMessage({
+        id: 'asst-1',
+        role: 'assistant',
+        content: [
+          makeToolUseBlock('Task', { description: 'fg' }, 'tool-fg'),
+          makeToolUseBlock('Task', { description: 'bg', run_in_background: true }, 'tool-bg')
+        ]
+      })
+    )
     store().appendSubagentStreamingThinking('r1', 'tool-fg', 'fg thinking')
     store().appendSubagentStreamingThinking('r1', 'tool-bg', 'bg thinking')
 
@@ -964,7 +1088,7 @@ describe('updateTaskProgress', () => {
       toolUseId: 'tool-1',
       toolName: 'Bash',
       parentToolUseId: null,
-      elapsedTimeSeconds: 5,
+      elapsedTimeSeconds: 5
     }
     store().updateTaskProgress('r1', progress)
     expect(store().sessions['r1'].taskProgressMap['tool-1']).toEqual(progress)
@@ -972,8 +1096,18 @@ describe('updateTaskProgress', () => {
 
   it('updates existing progress entry', () => {
     store().createNewSession('r1', '/test')
-    store().updateTaskProgress('r1', { toolUseId: 'tool-1', toolName: 'Bash', parentToolUseId: null, elapsedTimeSeconds: 5 })
-    store().updateTaskProgress('r1', { toolUseId: 'tool-1', toolName: 'Bash', parentToolUseId: null, elapsedTimeSeconds: 10 })
+    store().updateTaskProgress('r1', {
+      toolUseId: 'tool-1',
+      toolName: 'Bash',
+      parentToolUseId: null,
+      elapsedTimeSeconds: 5
+    })
+    store().updateTaskProgress('r1', {
+      toolUseId: 'tool-1',
+      toolName: 'Bash',
+      parentToolUseId: null,
+      elapsedTimeSeconds: 10
+    })
     expect(store().sessions['r1'].taskProgressMap['tool-1'].elapsedTimeSeconds).toBe(10)
   })
 })
@@ -988,9 +1122,17 @@ describe('addSubagentMessage', () => {
 
   it('upserts by message id when message already exists', () => {
     store().createNewSession('r1', '/test')
-    const msg = makeChatMessage({ id: 'shared-id', role: 'assistant', content: [{ type: 'text', text: 'v1' }] })
+    const msg = makeChatMessage({
+      id: 'shared-id',
+      role: 'assistant',
+      content: [{ type: 'text', text: 'v1' }]
+    })
     store().addSubagentMessage('r1', 'tool-1', msg)
-    const updated = makeChatMessage({ id: 'shared-id', role: 'assistant', content: [{ type: 'text', text: 'v2' }] })
+    const updated = makeChatMessage({
+      id: 'shared-id',
+      role: 'assistant',
+      content: [{ type: 'text', text: 'v2' }]
+    })
     store().addSubagentMessage('r1', 'tool-1', updated)
     const msgs = store().sessions['r1'].subagentMessages['tool-1']
     expect(msgs).toHaveLength(1)
@@ -1021,9 +1163,17 @@ describe('appendSubagentMessageBatch', () => {
 
   it('upserts messages that share existing ids', () => {
     store().createNewSession('r1', '/test')
-    const m1 = makeChatMessage({ id: 'x', role: 'assistant', content: [{ type: 'text', text: 'old' }] })
+    const m1 = makeChatMessage({
+      id: 'x',
+      role: 'assistant',
+      content: [{ type: 'text', text: 'old' }]
+    })
     store().addSubagentMessage('r1', 'tool-1', m1)
-    const m2 = makeChatMessage({ id: 'x', role: 'assistant', content: [{ type: 'text', text: 'new' }] })
+    const m2 = makeChatMessage({
+      id: 'x',
+      role: 'assistant',
+      content: [{ type: 'text', text: 'new' }]
+    })
     store().appendSubagentMessageBatch('r1', 'tool-1', [m2])
     const msgs = store().sessions['r1'].subagentMessages['tool-1']
     expect(msgs).toHaveLength(1)
@@ -1044,14 +1194,18 @@ describe('appendSubagentToolResult', () => {
     const toolMsg = makeChatMessage({
       id: 'agent-msg-1',
       role: 'assistant',
-      content: [makeToolUseBlock('Bash', { command: 'ls' }, 'tu-abc')],
+      content: [makeToolUseBlock('Bash', { command: 'ls' }, 'tu-abc')]
     })
     store().addSubagentMessage('r1', 'tool-1', toolMsg)
     store().appendSubagentToolResult('r1', 'tool-1', 'tu-abc', 'file1\nfile2', false)
     const msgs = store().sessions['r1'].subagentMessages['tool-1']
     const result = msgs[0].content.find((b) => b.type === 'tool_result')
     expect(result).toBeDefined()
-    expect(result).toMatchObject({ toolUseId: 'tu-abc', toolResult: 'file1\nfile2', isError: false })
+    expect(result).toMatchObject({
+      toolUseId: 'tu-abc',
+      toolResult: 'file1\nfile2',
+      isError: false
+    })
   })
 
   it('marks isError correctly', () => {
@@ -1059,7 +1213,7 @@ describe('appendSubagentToolResult', () => {
     const toolMsg = makeChatMessage({
       id: 'agent-msg-1',
       role: 'assistant',
-      content: [makeToolUseBlock('Bash', {}, 'tu-xyz')],
+      content: [makeToolUseBlock('Bash', {}, 'tu-xyz')]
     })
     store().addSubagentMessage('r1', 'tool-1', toolMsg)
     store().appendSubagentToolResult('r1', 'tool-1', 'tu-xyz', 'error: permission denied', true)
@@ -1069,7 +1223,9 @@ describe('appendSubagentToolResult', () => {
   })
 
   it('is a no-op when session does not exist', () => {
-    expect(() => store().appendSubagentToolResult('ghost', 'tool-1', 'tu-1', 'result', false)).not.toThrow()
+    expect(() =>
+      store().appendSubagentToolResult('ghost', 'tool-1', 'tu-1', 'result', false)
+    ).not.toThrow()
   })
 })
 
@@ -1124,7 +1280,10 @@ describe('appendVoiceTranscript', () => {
   it('does not modify draftText for interim transcripts', () => {
     store().createNewSession('r1', '/test')
     useSessionStore.setState({
-      sessions: { ...store().sessions, r1: { ...store().sessions['r1'], draftText: 'typed so far' } }
+      sessions: {
+        ...store().sessions,
+        r1: { ...store().sessions['r1'], draftText: 'typed so far' }
+      }
     })
     store().appendVoiceTranscript('r1', 'partial...', false)
     expect(store().sessions['r1'].draftText).toBe('typed so far')
@@ -1258,7 +1417,7 @@ describe('removeTerminalGroup', () => {
 
   it('normalizes cwd before removing', () => {
     store().addTerminalTab({ id: 'term-1', title: 'bash', cwd: '/project' })
-    store().removeTerminalGroup('/project/')  // trailing slash
+    store().removeTerminalGroup('/project/') // trailing slash
     expect(store().terminalGroups['/project']).toBeUndefined()
   })
 })
@@ -1278,7 +1437,10 @@ describe('setGitStatus', () => {
   it('caches git status for the session cwd', () => {
     // Create a second session with the same cwd — it should receive cached status
     store().createNewSession('r1', '/shared-cwd')
-    const status = makeGitStatus({ branch: 'main', files: [{ path: 'README.md', index: 'M', working: ' ' }] })
+    const status = makeGitStatus({
+      branch: 'main',
+      files: [{ path: 'README.md', index: 'M', working: ' ' }]
+    })
     store().setGitStatus('r1', status)
     // New session with same cwd should pick up cached status
     store().createNewSession('r2', '/shared-cwd')
@@ -1289,12 +1451,15 @@ describe('setGitStatus', () => {
 describe('selectNextGitFile', () => {
   it('selects the first file from gitStatus.files', () => {
     store().createNewSession('r1', '/test')
-    store().setGitStatus('r1', makeGitStatus({
-      files: [
-        { path: 'a.ts', index: 'M', working: ' ' },
-        { path: 'b.ts', index: 'M', working: ' ' },
-      ]
-    }))
+    store().setGitStatus(
+      'r1',
+      makeGitStatus({
+        files: [
+          { path: 'a.ts', index: 'M', working: ' ' },
+          { path: 'b.ts', index: 'M', working: ' ' }
+        ]
+      })
+    )
     store().selectNextGitFile('r1')
     expect(store().sessions['r1'].gitSelectedFile).toBe('a.ts')
   })
@@ -1315,7 +1480,10 @@ describe('selectNextGitFile', () => {
   it('clears gitFileDiff when selecting next file', () => {
     store().createNewSession('r1', '/test')
     store().setGitFileDiff('r1', { patch: 'diff --git...' })
-    store().setGitStatus('r1', makeGitStatus({ files: [{ path: 'a.ts', index: 'M', working: ' ' }] }))
+    store().setGitStatus(
+      'r1',
+      makeGitStatus({ files: [{ path: 'a.ts', index: 'M', working: ' ' }] })
+    )
     store().selectNextGitFile('r1')
     expect(store().sessions['r1'].gitFileDiff).toBeNull()
   })
@@ -1356,7 +1524,7 @@ describe('openPlanPanel / closePlanPanel', () => {
     expect(session.planReview).toMatchObject({
       planContent: 'the plan content',
       approvalRequestId: 'req-abc',
-      comments: [],
+      comments: []
     })
   })
 
@@ -1427,7 +1595,10 @@ describe('setWorktreeInfo', () => {
 
   it('updates session cwd to worktreePath when different', () => {
     store().createNewSession('r1', '/original')
-    const info = makeWorktreeInfo({ worktreePath: '/tmp/worktrees/branch', originalCwd: '/original' })
+    const info = makeWorktreeInfo({
+      worktreePath: '/tmp/worktrees/branch',
+      originalCwd: '/original'
+    })
     store().setWorktreeInfo('r1', info)
     expect(store().sessions['r1'].cwd).toBe('/tmp/worktrees/branch')
   })
@@ -1486,13 +1657,13 @@ describe('applyExternalSessionConfig', () => {
   })
 
   it('replaces customTitles', () => {
-    store().applyExternalSessionConfig({ customTitles: { 'r1': 'My Session' } })
+    store().applyExternalSessionConfig({ customTitles: { r1: 'My Session' } })
     expect(store().customTitles['r1']).toBe('My Session')
   })
 
   it('replaces worktreeInfoMap', () => {
     const info = makeWorktreeInfo()
-    store().applyExternalSessionConfig({ worktreeInfoMap: { 'r1': info } })
+    store().applyExternalSessionConfig({ worktreeInfoMap: { r1: info } })
     expect(store().worktreeInfoMap['r1']).toEqual(info)
   })
 

@@ -42,12 +42,26 @@ export function watchSession(
     if (entry.debounceTimer) clearTimeout(entry.debounceTimer)
     entry.debounceTimer = setTimeout(async () => {
       try {
-        const { messages, taskNotifications, statusLine } = await loadSessionHistory(sessionId, projectKey)
+        const { messages, taskNotifications, statusLine } = await loadSessionHistory(
+          sessionId,
+          projectKey
+        )
         if (!win.isDestroyed()) {
-          win.webContents.send('session:watch-update', { routingId, messages, taskNotifications, statusLine })
+          win.webContents.send('session:watch-update', {
+            routingId,
+            messages,
+            taskNotifications,
+            statusLine
+          })
         }
         for (const w of ClaudeSession.getExtraWindows()) {
-          if (!w.isDestroyed()) w.webContents.send('session:watch-update', { routingId, messages, taskNotifications, statusLine })
+          if (!w.isDestroyed())
+            w.webContents.send('session:watch-update', {
+              routingId,
+              messages,
+              taskNotifications,
+              statusLine
+            })
         }
       } catch (err) {
         logger.warn('SessionWatcher', `Parse error during watch update for ${sessionId}`, err)

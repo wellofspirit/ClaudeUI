@@ -11,9 +11,15 @@ import { useSessionStore } from '../../renderer/src/stores/session-store'
 import {
   makeAssistantMessage,
   makeSessionStatus,
-  resetFactoryCounter,
+  resetFactoryCounter
 } from '@test/factories/messages'
-import type { ChatMessage, PendingApproval, StreamDelta, SessionStatus, TodoItem } from '../../shared/types'
+import type {
+  ChatMessage,
+  PendingApproval,
+  StreamDelta,
+  SessionStatus,
+  TodoItem
+} from '../../shared/types'
 
 let app: TestApp
 let eventCleanups: Array<() => void>
@@ -26,7 +32,9 @@ function wireEventHandlers(app: TestApp): Array<() => void> {
     return (cb: T) => {
       const handler = (_: unknown, ...args: unknown[]): void => (cb as Function)(...args)
       app.bridge.ipcRenderer.on(channel, handler)
-      const cleanup = (): void => { app.bridge.ipcRenderer.removeListener(channel, handler) }
+      const cleanup = (): void => {
+        app.bridge.ipcRenderer.removeListener(channel, handler)
+      }
       cleanups.push(cleanup)
       return cleanup
     }
@@ -39,21 +47,26 @@ function wireEventHandlers(app: TestApp): Array<() => void> {
     if (data.type === 'thinking') store().appendStreamingThinking(routingId, data.text)
     else store().appendStreamingText(routingId, data.text)
   })
-  onEvent<(routingId: string, status: SessionStatus) => void>('session:status')((routingId, status) => {
-    let effective = routingId
-    if (status.sessionId && status.sessionId !== routingId) {
-      const s = store()
-      if (s.sessions[routingId]) { s.rekeySession(routingId, status.sessionId); effective = status.sessionId }
+  onEvent<(routingId: string, status: SessionStatus) => void>('session:status')(
+    (routingId, status) => {
+      let effective = routingId
+      if (status.sessionId && status.sessionId !== routingId) {
+        const s = store()
+        if (s.sessions[routingId]) {
+          s.rekeySession(routingId, status.sessionId)
+          effective = status.sessionId
+        }
+      }
+      if (status.state === 'disconnected') {
+        store().markSdkInactive(effective)
+        store().setStatus(effective, { ...status, state: 'idle' })
+        store().clearPendingApprovals(effective)
+        return
+      }
+      store().setStatus(effective, status)
+      if (status.state === 'idle') store().clearPendingApprovals(effective)
     }
-    if (status.state === 'disconnected') {
-      store().markSdkInactive(effective)
-      store().setStatus(effective, { ...status, state: 'idle' })
-      store().clearPendingApprovals(effective)
-      return
-    }
-    store().setStatus(effective, status)
-    if (status.state === 'idle') store().clearPendingApprovals(effective)
-  })
+  )
   onEvent<(routingId: string) => void>('session:result')((routingId) => {
     const s = store()
     const session = s.sessions[routingId]
@@ -62,17 +75,19 @@ function wireEventHandlers(app: TestApp): Array<() => void> {
       if (allDone) s.setTodos(routingId, [])
     }
   })
-  onEvent<(routingId: string, data: { prompt: string; queued?: boolean }) => void>('session:user-message')(
-    (routingId, data) => {
-      const s = store()
-      if (!s.sessions[routingId]) return
-      if (data.queued) s.setQueuedText(routingId, data.prompt)
-      else s.addUserMessage(routingId, `msg-${Date.now()}-${Math.random()}`, data.prompt)
+  onEvent<(routingId: string, data: { prompt: string; queued?: boolean }) => void>(
+    'session:user-message'
+  )((routingId, data) => {
+    const s = store()
+    if (!s.sessions[routingId]) return
+    if (data.queued) s.setQueuedText(routingId, data.prompt)
+    else s.addUserMessage(routingId, `msg-${Date.now()}-${Math.random()}`, data.prompt)
+  })
+  onEvent<(routingId: string, approval: PendingApproval) => void>('session:approval-request')(
+    (routingId, approval) => {
+      store().addPendingApproval(routingId, approval)
     }
   )
-  onEvent<(routingId: string, approval: PendingApproval) => void>('session:approval-request')((routingId, approval) => {
-    store().addPendingApproval(routingId, approval)
-  })
 
   return cleanups
 }
@@ -86,7 +101,7 @@ beforeEach(async () => {
     directories: [],
     recentSessionIds: [],
     pinnedSessionIds: [],
-    customTitles: {},
+    customTitles: {}
   })
   eventCleanups = wireEventHandlers(app)
 })
@@ -102,20 +117,36 @@ describe('E2E: multi-turn conversation', () => {
     useSessionStore.getState().createNewSession(routingId, '/test')
 
     // Turn 1
-    app.emit('session:status', routingId, makeSessionStatus({ state: 'running', sessionId: routingId }))
+    app.emit(
+      'session:status',
+      routingId,
+      makeSessionStatus({ state: 'running', sessionId: routingId })
+    )
     app.emit('session:user-message', routingId, { prompt: 'What is 2+2?', queued: false })
     app.emit('session:stream', routingId, { type: 'text', text: 'The answer is 4.' })
     app.emit('session:message', routingId, makeAssistantMessage('The answer is 4.'))
     app.emit('session:result', routingId)
-    app.emit('session:status', routingId, makeSessionStatus({ state: 'idle', sessionId: routingId }))
+    app.emit(
+      'session:status',
+      routingId,
+      makeSessionStatus({ state: 'idle', sessionId: routingId })
+    )
 
     // Turn 2
-    app.emit('session:status', routingId, makeSessionStatus({ state: 'running', sessionId: routingId }))
+    app.emit(
+      'session:status',
+      routingId,
+      makeSessionStatus({ state: 'running', sessionId: routingId })
+    )
     app.emit('session:user-message', routingId, { prompt: 'And 3+3?', queued: false })
     app.emit('session:stream', routingId, { type: 'text', text: 'That is 6.' })
     app.emit('session:message', routingId, makeAssistantMessage('That is 6.'))
     app.emit('session:result', routingId)
-    app.emit('session:status', routingId, makeSessionStatus({ state: 'idle', sessionId: routingId }))
+    app.emit(
+      'session:status',
+      routingId,
+      makeSessionStatus({ state: 'idle', sessionId: routingId })
+    )
 
     const session = useSessionStore.getState().sessions[routingId]
     expect(session.messages).toHaveLength(4)
@@ -156,13 +187,25 @@ describe('E2E: multi-turn conversation', () => {
     useSessionStore.getState().createNewSession(routingId, '/test')
 
     // Simulate main process reporting cumulative cost via status events.
-    app.emit('session:status', routingId, makeSessionStatus({ state: 'idle', sessionId: routingId, totalCostUsd: 0.01 }))
+    app.emit(
+      'session:status',
+      routingId,
+      makeSessionStatus({ state: 'idle', sessionId: routingId, totalCostUsd: 0.01 })
+    )
     expect(useSessionStore.getState().sessions[routingId].status.totalCostUsd).toBe(0.01)
 
-    app.emit('session:status', routingId, makeSessionStatus({ state: 'idle', sessionId: routingId, totalCostUsd: 0.025 }))
+    app.emit(
+      'session:status',
+      routingId,
+      makeSessionStatus({ state: 'idle', sessionId: routingId, totalCostUsd: 0.025 })
+    )
     expect(useSessionStore.getState().sessions[routingId].status.totalCostUsd).toBe(0.025)
 
-    app.emit('session:status', routingId, makeSessionStatus({ state: 'idle', sessionId: routingId, totalCostUsd: 0.04 }))
+    app.emit(
+      'session:status',
+      routingId,
+      makeSessionStatus({ state: 'idle', sessionId: routingId, totalCostUsd: 0.04 })
+    )
     expect(useSessionStore.getState().sessions[routingId].status.totalCostUsd).toBe(0.04)
   })
 

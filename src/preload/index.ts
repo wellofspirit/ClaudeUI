@@ -1,5 +1,10 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import type { ApprovalDecision, ClaudeAPI, PermissionSuggestion, ProxySettings } from '../shared/types'
+import type {
+  ApprovalDecision,
+  ClaudeAPI,
+  PermissionSuggestion,
+  ProxySettings
+} from '../shared/types'
 import { buildMockupUrl } from '../shared/mockup-url'
 
 /**
@@ -31,20 +36,54 @@ async function unwrap<T>(channel: string, ...args: unknown[]): Promise<T> {
 const api: ClaudeAPI = {
   platform: process.platform,
   pickFolder: () => ipcRenderer.invoke('session:pick-folder'),
-  createSession: (routingId: string, cwd: string, effort?: string, resumeSessionId?: string, permissionMode?: string, model?: string, thinkingMode?: string, resumeSessionAt?: string, forkSession?: boolean) =>
-    ipcRenderer.invoke('session:create', routingId, cwd, effort, resumeSessionId, permissionMode, model, thinkingMode, resumeSessionAt, forkSession),
-  rekeySession: (oldId: string, newId: string) =>
-    ipcRenderer.invoke('session:rekey', oldId, newId),
+  createSession: (
+    routingId: string,
+    cwd: string,
+    effort?: string,
+    resumeSessionId?: string,
+    permissionMode?: string,
+    model?: string,
+    thinkingMode?: string,
+    resumeSessionAt?: string,
+    forkSession?: boolean
+  ) =>
+    ipcRenderer.invoke(
+      'session:create',
+      routingId,
+      cwd,
+      effort,
+      resumeSessionId,
+      permissionMode,
+      model,
+      thinkingMode,
+      resumeSessionAt,
+      forkSession
+    ),
+  rekeySession: (oldId: string, newId: string) => ipcRenderer.invoke('session:rekey', oldId, newId),
   resolveForkAnchor: (sessionId: string, cwd: string, messageId: string) =>
     ipcRenderer.invoke('session:resolve-fork-anchor', sessionId, cwd, messageId),
-  sendPrompt: (routingId: string, prompt: string, attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>) =>
-    ipcRenderer.invoke('session:send', routingId, prompt, attachments),
-  cancelSession: (routingId: string) =>
-    ipcRenderer.invoke('session:cancel', routingId),
-  interruptSession: (routingId: string) =>
-    ipcRenderer.invoke('session:interrupt', routingId),
-  respondApproval: (routingId: string, requestId: string, decision: ApprovalDecision, answers?: Record<string, string>, updatedPermissions?: PermissionSuggestion[]) =>
-    ipcRenderer.invoke('session:approval-response', routingId, requestId, decision, answers, updatedPermissions),
+  sendPrompt: (
+    routingId: string,
+    prompt: string,
+    attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
+  ) => ipcRenderer.invoke('session:send', routingId, prompt, attachments),
+  cancelSession: (routingId: string) => ipcRenderer.invoke('session:cancel', routingId),
+  interruptSession: (routingId: string) => ipcRenderer.invoke('session:interrupt', routingId),
+  respondApproval: (
+    routingId: string,
+    requestId: string,
+    decision: ApprovalDecision,
+    answers?: Record<string, string>,
+    updatedPermissions?: PermissionSuggestion[]
+  ) =>
+    ipcRenderer.invoke(
+      'session:approval-response',
+      routingId,
+      requestId,
+      decision,
+      answers,
+      updatedPermissions
+    ),
   minimizeWindow: () => ipcRenderer.invoke('window:minimize'),
   maximizeWindow: () => ipcRenderer.invoke('window:maximize'),
   closeWindow: () => ipcRenderer.invoke('window:close'),
@@ -53,8 +92,11 @@ const api: ClaudeAPI = {
     ipcRenderer.invoke('session:load-history', sessionId, projectKey),
   loadSubagentHistory: (sessionId: string, projectKey: string, agentId: string) =>
     ipcRenderer.invoke('session:load-subagent-history', sessionId, projectKey, agentId),
-  buildSubagentFileMap: (sessionId: string, projectKey: string, taskPrompts: Record<string, string>) =>
-    ipcRenderer.invoke('session:build-subagent-file-map', sessionId, projectKey, taskPrompts),
+  buildSubagentFileMap: (
+    sessionId: string,
+    projectKey: string,
+    taskPrompts: Record<string, string>
+  ) => ipcRenderer.invoke('session:build-subagent-file-map', sessionId, projectKey, taskPrompts),
   loadBackgroundOutput: (projectKey: string, taskId: string, outputFile?: string) =>
     ipcRenderer.invoke('session:load-background-output', projectKey, taskId, outputFile),
 
@@ -133,14 +175,12 @@ const api: ClaudeAPI = {
     ipcRenderer.invoke('session:generate-commit-message', diff),
   writeCustomTitle: (sessionId: string, projectKey: string, title: string) =>
     ipcRenderer.invoke('session:write-custom-title', sessionId, projectKey, title),
-  getPlanContent: (routingId: string) =>
-    ipcRenderer.invoke('session:get-plan-content', routingId),
+  getPlanContent: (routingId: string) => ipcRenderer.invoke('session:get-plan-content', routingId),
   getSessionLogPath: (routingId: string) =>
     ipcRenderer.invoke('session:get-session-log-path', routingId),
   watchSession: (routingId: string, sessionId: string, projectKey: string) =>
     ipcRenderer.invoke('session:watch-session', routingId, sessionId, projectKey),
-  unwatchSession: (routingId: string) =>
-    ipcRenderer.invoke('session:unwatch-session', routingId),
+  unwatchSession: (routingId: string) => ipcRenderer.invoke('session:unwatch-session', routingId),
   // Terminal (PTY) operations
   createTerminal: (cwd: string) => ipcRenderer.invoke('terminal:create', cwd),
   writeTerminal: (id: string, data: string) => ipcRenderer.invoke('terminal:write', id, data),
@@ -177,7 +217,8 @@ const api: ClaudeAPI = {
   gitUnstageAll: (cwd: string) => unwrap('git:unstage-all', cwd),
   gitCommit: (cwd: string, message: string) => unwrap('git:commit', cwd, message),
   gitPush: (cwd: string) => unwrap('git:push', cwd),
-  gitPushWithUpstream: (cwd: string, branch: string) => unwrap('git:push-with-upstream', cwd, branch),
+  gitPushWithUpstream: (cwd: string, branch: string) =>
+    unwrap('git:push-with-upstream', cwd, branch),
   gitPull: (cwd: string) => unwrap('git:pull', cwd),
   gitFetch: (cwd: string) => unwrap('git:fetch', cwd),
   gitStartWatching: (cwd: string) => unwrap('git:start-watching', cwd),
@@ -191,8 +232,7 @@ const api: ClaudeAPI = {
   saveSessionConfig: (config) => ipcRenderer.invoke('config:save-sessions', config),
   deleteSession: (sessionId: string, projectKey: string) =>
     unwrap<void>('session:delete-session', sessionId, projectKey),
-  deleteProject: (projectKey: string) =>
-    unwrap<void>('session:delete-project', projectKey),
+  deleteProject: (projectKey: string) => unwrap<void>('session:delete-project', projectKey),
   loadSlashCommands: () => ipcRenderer.invoke('config:load-slash-commands'),
   saveSlashCommands: (commands) => ipcRenderer.invoke('config:save-slash-commands', commands),
   scanCustomCommands: (cwd: string) => ipcRenderer.invoke('config:scan-custom-commands', cwd),
@@ -207,8 +247,7 @@ const api: ClaudeAPI = {
     ipcRenderer.invoke('usage:set-account-filter', account),
 
   // Claude permissions (allow/deny/ask rule management)
-  loadClaudePermissions: (scope, cwd?) =>
-    ipcRenderer.invoke('claude:load-permissions', scope, cwd),
+  loadClaudePermissions: (scope, cwd?) => ipcRenderer.invoke('claude:load-permissions', scope, cwd),
   saveClaudePermissions: (scope, permissions, cwd?) =>
     ipcRenderer.invoke('claude:save-permissions', scope, permissions, cwd),
 
@@ -217,8 +256,7 @@ const api: ClaudeAPI = {
   setCleanupPeriodDays: (days) => ipcRenderer.invoke('claude:set-cleanup-period', days),
 
   // MCP server management — toggle/reconnect/set-servers use safeHandler
-  mcpServerStatus: (routingId: string) =>
-    ipcRenderer.invoke('mcp:status', routingId),
+  mcpServerStatus: (routingId: string) => ipcRenderer.invoke('mcp:status', routingId),
   mcpToggleServer: (routingId: string, serverName: string, enabled: boolean) =>
     unwrap('mcp:toggle', routingId, serverName, enabled),
   mcpReconnectServer: (routingId: string, serverName: string) =>
@@ -231,8 +269,7 @@ const api: ClaudeAPI = {
     ipcRenderer.invoke('mcp:save-servers', scope, servers, cwd),
   removeMcpServer: (scope: string, serverName: string, cwd?: string) =>
     ipcRenderer.invoke('mcp:remove-server', scope, serverName, cwd),
-  mcpReadDisabled: (cwd: string) =>
-    ipcRenderer.invoke('mcp:read-disabled', cwd),
+  mcpReadDisabled: (cwd: string) => ipcRenderer.invoke('mcp:read-disabled', cwd),
   mcpToggleDisabled: (cwd: string, serverName: string, enabled: boolean) =>
     ipcRenderer.invoke('mcp:toggle-disabled', cwd, serverName, enabled),
 
@@ -241,14 +278,17 @@ const api: ClaudeAPI = {
   saveAutomation: (automation) => ipcRenderer.invoke('automation:save', automation),
   deleteAutomation: (id: string) => ipcRenderer.invoke('automation:delete', id),
   runAutomationNow: (id: string) => ipcRenderer.invoke('automation:run-now', id),
-  toggleAutomation: (id: string, enabled: boolean) => ipcRenderer.invoke('automation:toggle', id, enabled),
-  listAutomationRuns: (automationId: string) => ipcRenderer.invoke('automation:list-runs', automationId),
+  toggleAutomation: (id: string, enabled: boolean) =>
+    ipcRenderer.invoke('automation:toggle', id, enabled),
+  listAutomationRuns: (automationId: string) =>
+    ipcRenderer.invoke('automation:list-runs', automationId),
   loadAutomationRunHistory: (automationId: string, runId: string) =>
     ipcRenderer.invoke('automation:load-run-history', automationId, runId),
   cancelAutomationRun: (id: string) => ipcRenderer.invoke('automation:cancel', id),
   dismissAutomationRun: (automationId: string, runId: string) =>
     ipcRenderer.invoke('automation:dismiss-run', automationId, runId),
-  sendAutomationMessage: (id: string, prompt: string) => ipcRenderer.invoke('automation:send-message', id, prompt),
+  sendAutomationMessage: (id: string, prompt: string) =>
+    ipcRenderer.invoke('automation:send-message', id, prompt),
 
   testProxyConnection: (proxy: ProxySettings) => unwrap('proxy:test-connection', proxy),
 
@@ -258,7 +298,8 @@ const api: ClaudeAPI = {
 
   // Remote access
   getNetworkInterfaces: () => ipcRenderer.invoke('remote:interfaces'),
-  startRemoteServer: (opts?: { port?: number; host?: string }) => ipcRenderer.invoke('remote:start', opts),
+  startRemoteServer: (opts?: { port?: number; host?: string }) =>
+    ipcRenderer.invoke('remote:start', opts),
   stopRemoteServer: () => ipcRenderer.invoke('remote:stop'),
   getRemoteStatus: () => ipcRenderer.invoke('remote:status'),
   onRemoteStatus: onEvent('remote:status'),
@@ -266,14 +307,16 @@ const api: ClaudeAPI = {
   // Voice input
   voiceStartServer: (routingId: string) => unwrap('voice:start-server', routingId),
   voiceStopServer: (routingId: string) => unwrap('voice:stop-server', routingId),
-  voiceStartRecording: (routingId: string, language: string) => unwrap('voice:start-recording', routingId, language),
+  voiceStartRecording: (routingId: string, language: string) =>
+    unwrap('voice:start-recording', routingId, language),
   voiceStopRecording: (routingId: string) => unwrap('voice:stop-recording', routingId),
   onVoiceTranscript: onEvent('voice:transcript'),
   onVoiceState: onEvent('voice:state'),
   onVoiceError: onEvent('voice:error'),
 
   // Renderer → main process log relay
-  logRelay: (level: string, source: string, message: string) => ipcRenderer.send('log:relay', level, source, message),
+  logRelay: (level: string, source: string, message: string) =>
+    ipcRenderer.send('log:relay', level, source, message),
 
   // Version info
   getVersionInfo: () => ipcRenderer.invoke('app:version-info'),
@@ -290,8 +333,10 @@ const api: ClaudeAPI = {
 
   // Mockup preview
   readMockupHtml: (cwd: string, directory: string) => unwrap('mockup:read-html', cwd, directory),
-  watchMockup: (cwd: string, directory: string) => ipcRenderer.invoke('mockup:watch', cwd, directory),
-  unwatchMockup: (cwd: string, directory: string) => ipcRenderer.invoke('mockup:unwatch', cwd, directory),
+  watchMockup: (cwd: string, directory: string) =>
+    ipcRenderer.invoke('mockup:watch', cwd, directory),
+  unwatchMockup: (cwd: string, directory: string) =>
+    ipcRenderer.invoke('mockup:unwatch', cwd, directory),
   onMockupFileChanged: onEvent('mockup:file-changed'),
   getMockupPreviewUrl: (cwd: string, directory: string, opts?: { dark?: boolean }) =>
     buildMockupUrl(cwd, directory, { dark: opts?.dark, parentOrigin: window.location.origin })

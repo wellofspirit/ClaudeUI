@@ -99,10 +99,7 @@ describe('findForkAnchorUuid', () => {
   })
 
   it('prefers the last line sharing a message id (defensive against partials)', () => {
-    const lines = [
-      assistantText('a1', 'msg_1', 'partial'),
-      assistantText('a1b', 'msg_1', 'final')
-    ]
+    const lines = [assistantText('a1', 'msg_1', 'partial'), assistantText('a1b', 'msg_1', 'final')]
     expect(findForkAnchorUuid(lines, 'msg_1')).toBe('a1b')
   })
 })

@@ -87,15 +87,14 @@ class TestClaudeSession {
 describe('ClaudeSession model fallback warnings', () => {
   it('model_refusal_fallback with CLI content forwards the content verbatim', () => {
     const s = new TestClaudeSession()
-    const content =
-      "Fable 5's safety measures flagged this message. Switched to Opus 4.8."
+    const content = "Fable 5's safety measures flagged this message. Switched to Opus 4.8."
     s.handleSystemMessage({
       type: 'system',
       subtype: 'model_refusal_fallback',
       trigger: 'refusal',
       original_model: 'claude-fable-5[1m]',
       fallback_model: 'claude-opus-4-8',
-      content,
+      content
     })
 
     const warnings = s.sent.filter((e) => e.channel === 'session:warning')
@@ -108,7 +107,7 @@ describe('ClaudeSession model fallback warnings', () => {
       type: 'system',
       subtype: 'model_refusal_fallback',
       original_model: 'claude-fable-5[1m]',
-      fallback_model: 'claude-opus-4-8',
+      fallback_model: 'claude-opus-4-8'
     })
 
     const warnings = s.sent.filter((e) => e.channel === 'session:warning')
@@ -126,7 +125,7 @@ describe('ClaudeSession model fallback warnings', () => {
       subtype: 'model_fallback',
       trigger: 'overloaded',
       original_model: 'claude-opus-4-8',
-      fallback_model: 'claude-sonnet-4-6',
+      fallback_model: 'claude-sonnet-4-6'
     })
 
     expect(s.sent).toHaveLength(1)
@@ -156,7 +155,7 @@ describe('refusal retraction (retracted_message_uuids)', () => {
     s.handleSystemMessage({
       type: 'system',
       subtype: 'model_refusal_fallback',
-      retracted_message_uuids: [WIRE_UUID],
+      retracted_message_uuids: [WIRE_UUID]
     })
 
     expect(s.messageHistory).toEqual([{ id: 'msg_keep' }])
@@ -173,7 +172,7 @@ describe('refusal retraction (retracted_message_uuids)', () => {
     s.handleSystemMessage({
       type: 'system',
       subtype: 'model_refusal_fallback',
-      retracted_message_uuids: [derived],
+      retracted_message_uuids: [derived]
     })
 
     expect(s.messageHistory).toEqual([])
@@ -186,7 +185,7 @@ describe('refusal retraction (retracted_message_uuids)', () => {
     s.handleSystemMessage({
       type: 'system',
       subtype: 'model_refusal_fallback',
-      retracted_message_uuids: ['99999999-8888-7777-6666-555555555555'],
+      retracted_message_uuids: ['99999999-8888-7777-6666-555555555555']
     })
 
     expect(s.messageHistory).toEqual([{ id: 'msg_keep' }])
@@ -202,7 +201,7 @@ describe('refusal retraction (retracted_message_uuids)', () => {
     s.handleSystemMessage({
       type: 'system',
       subtype: 'model_refusal_fallback',
-      retracted_message_uuids: [WIRE_UUID, 'ab0d7e37-f0cb-4d75-b0d0-ce157ad0e1bb'],
+      retracted_message_uuids: [WIRE_UUID, 'ab0d7e37-f0cb-4d75-b0d0-ce157ad0e1bb']
     })
 
     const retraction = s.sent.find((e) => e.channel === 'session:messages-retracted')
@@ -214,7 +213,7 @@ describe('refusal retraction (retracted_message_uuids)', () => {
     s.handleSystemMessage({
       type: 'system',
       subtype: 'model_fallback',
-      trigger: 'overloaded',
+      trigger: 'overloaded'
     })
 
     expect(s.sent.some((e) => e.channel === 'session:messages-retracted')).toBe(false)

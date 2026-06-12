@@ -14,9 +14,9 @@ function makeHunk(overrides: Partial<DiffHunk> = {}): DiffHunk {
       { type: 'del', content: 'line2', oldLineNumber: 2 },
       { type: 'add', content: 'line2_new', newLineNumber: 2 },
       { type: 'add', content: 'line2.5', newLineNumber: 3 },
-      { type: 'context', content: 'line3', oldLineNumber: 3, newLineNumber: 4 },
+      { type: 'context', content: 'line3', oldLineNumber: 3, newLineNumber: 4 }
     ],
-    ...overrides,
+    ...overrides
   }
 }
 
@@ -32,9 +32,9 @@ const twoHunks: DiffHunk[] = [
       { type: 'context', content: 'line10', oldLineNumber: 10, newLineNumber: 11 },
       { type: 'del', content: 'line11', oldLineNumber: 11 },
       { type: 'add', content: 'line11_new', newLineNumber: 12 },
-      { type: 'context', content: 'line12', oldLineNumber: 12, newLineNumber: 13 },
-    ],
-  },
+      { type: 'context', content: 'line12', oldLineNumber: 12, newLineNumber: 13 }
+    ]
+  }
 ]
 
 describe('buildUnifiedRows', () => {
@@ -147,8 +147,8 @@ describe('buildSplitRows', () => {
         { type: 'del', content: 'a', oldLineNumber: 1 },
         { type: 'del', content: 'b', oldLineNumber: 2 },
         { type: 'del', content: 'c', oldLineNumber: 3 },
-        { type: 'add', content: 'x', newLineNumber: 1 },
-      ],
+        { type: 'add', content: 'x', newLineNumber: 1 }
+      ]
     }
 
     const rows = buildSplitRows([hunk])
@@ -180,19 +180,19 @@ describe('expandGap', () => {
       type: 'context',
       content: 'line2',
       oldLineNumber: 2,
-      newLineNumber: 2,
+      newLineNumber: 2
     })
     expect(lines[1]).toEqual({
       type: 'context',
       content: 'line3',
       oldLineNumber: 3,
-      newLineNumber: 3,
+      newLineNumber: 3
     })
     expect(lines[2]).toEqual({
       type: 'context',
       content: 'line4',
       oldLineNumber: 4,
-      newLineNumber: 4,
+      newLineNumber: 4
     })
   })
 

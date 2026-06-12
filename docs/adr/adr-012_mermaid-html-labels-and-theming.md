@@ -11,7 +11,7 @@ problems surfaced:
 
 1. **No HTML in labels.** Diagrams could not use `<br/>` line breaks or inline
    markup (`<b>`, `<i>`, `<span style>`) in node/edge labels. The config used
-   `securityLevel: 'strict'`, which *encodes* HTML tags — so `<br/>` rendered
+   `securityLevel: 'strict'`, which _encodes_ HTML tags — so `<br/>` rendered
    as literal text rather than a line break, and `htmlLabels` was effectively
    off.
 
@@ -46,6 +46,7 @@ Concretely in `MermaidDiagram.tsx`:
   markup in labels, not interactivity.
 - **The DOMPurify call needs BOTH the `html` profile AND a
   `HTML_INTEGRATION_POINTS` override:**
+
   ```ts
   DOMPurify.sanitize(svg, {
     USE_PROFILES: { svg: true, svgFilters: true, html: true },
@@ -53,6 +54,7 @@ Concretely in `MermaidDiagram.tsx`:
     HTML_INTEGRATION_POINTS: { foreignobject: true, 'annotation-xml': true }
   })
   ```
+
   With `htmlLabels` on, Mermaid emits labels as
   `<foreignObject><div xmlns="http://www.w3.org/1999/xhtml">…<br/></div></foreignObject>`.
   Two distinct things would otherwise strip that inner HTML:
@@ -63,7 +65,7 @@ Concretely in `MermaidDiagram.tsx`:
      `annotation-xml` as an HTML integration point by default; `foreignobject`
      is **not** in the default set. So an XHTML `<div>` whose parent is
      `<foreignObject>` (SVG namespace) fails the SVG→HTML transition check and is
-     removed — *even with the `html` profile and the correct `xmlns`*. Adding
+     removed — _even with the `html` profile and the correct `xmlns`_. Adding
      `foreignobject` to `HTML_INTEGRATION_POINTS` (keeping `annotation-xml` so we
      don't regress MathML) fixes it. Verified empirically: the override preserves
      `div`/`span`/`p`/`br` while `<script>` and `javascript:` hrefs are still
@@ -71,8 +73,9 @@ Concretely in `MermaidDiagram.tsx`:
 
   All three (`antiscript`, `html` profile, `HTML_INTEGRATION_POINTS`) are the
   defence-in-depth stack — none is sufficient alone.
+
 - **All downstream SVG parsing uses the HTML parser, never `image/svg+xml`.**
-  This was the *actual* cause of the "nodes/boxes gone" report (sanitization
+  This was the _actual_ cause of the "nodes/boxes gone" report (sanitization
   above was correct — the breakage was further down the pipeline). DOMPurify
   HTML-serializes void tags as bare `<br>` (not `<br/>`). `MermaidDiagram` then
   re-parses the sanitized string in two places — `normalizedSvg` (strip

@@ -17,8 +17,6 @@
  *  10. onReorderPinned → reorderPinnedSessions store action
  */
 
- 
-
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import React from 'react'
 import { render, act } from '@testing-library/react'
@@ -36,7 +34,7 @@ vi.mock('../View', () => ({
   SidebarView: (props: SidebarViewProps) => {
     viewProps = props
     return null
-  },
+  }
 }))
 
 // ---------------------------------------------------------------------------
@@ -53,7 +51,7 @@ function makeSessionInfo(id: string, title = 'Session title'): SessionInfo {
     projectKey: PROJECT_KEY,
     title,
     timestamp: Date.now(),
-    lastActivityAt: Date.now(),
+    lastActivityAt: Date.now()
   }
 }
 
@@ -62,7 +60,7 @@ function makeDirectoryGroup(sessions: SessionInfo[]): DirectoryGroup {
     cwd: CWD,
     projectKey: PROJECT_KEY,
     folderName: 'demo',
-    sessions,
+    sessions
   }
 }
 
@@ -75,16 +73,19 @@ describe('Sidebar FC', () => {
 
   beforeEach(async () => {
     // useIsMobile calls window.matchMedia — jsdom needs a stub
-    ;(window as any).matchMedia = (window as any).matchMedia || ((): MediaQueryList => ({
-      matches: false,
-      media: '',
-      onchange: null,
-      addEventListener: () => {},
-      removeEventListener: () => {},
-      addListener: () => {},
-      removeListener: () => {},
-      dispatchEvent: () => false,
-    } as unknown as MediaQueryList))
+    ;(window as any).matchMedia =
+      (window as any).matchMedia ||
+      ((): MediaQueryList =>
+        ({
+          matches: false,
+          media: '',
+          onchange: null,
+          addEventListener: () => {},
+          removeEventListener: () => {},
+          addListener: () => {},
+          removeListener: () => {},
+          dispatchEvent: () => false
+        }) as unknown as MediaQueryList)
 
     app = await bootTestApp()
 
@@ -95,7 +96,7 @@ describe('Sidebar FC', () => {
       taskNotifications: [],
       customTitle: null,
       agentIdToToolUseId: {},
-      statusLine: null,
+      statusLine: null
     }))
     app.bridge.ipcMain.handle('session:load-subagent-history', async () => [])
     app.bridge.ipcMain.handle('session:build-subagent-file-map', async () => ({}))
@@ -117,7 +118,7 @@ describe('Sidebar FC', () => {
       hiddenProjectKeys: [],
       customTitles: {},
       worktreeInfoMap: {},
-      pluginViews: [],
+      pluginViews: []
     })
   })
 
@@ -138,7 +139,9 @@ describe('Sidebar FC', () => {
     const group = makeDirectoryGroup([makeSessionInfo('sess-1')])
     app.bridge.ipcMain.handle('session:list-directories', async () => [group])
 
-    await act(async () => { await renderFC() })
+    await act(async () => {
+      await renderFC()
+    })
 
     expect(useSessionStore.getState().directories).toHaveLength(1)
     expect(useSessionStore.getState().directories[0].sessions).toHaveLength(1)
@@ -152,9 +155,13 @@ describe('Sidebar FC', () => {
   it('picks a folder and creates a new session on double-click', async () => {
     app.bridge.ipcMain.handle('session:pick-folder', async () => '/new/folder')
 
-    await act(async () => { await renderFC() })
+    await act(async () => {
+      await renderFC()
+    })
 
-    await act(async () => { await viewProps.onNewSessionDblClick() })
+    await act(async () => {
+      await viewProps.onNewSessionDblClick()
+    })
 
     const sessions = Object.values(useSessionStore.getState().sessions)
     expect(sessions).toHaveLength(1)
@@ -172,12 +179,17 @@ describe('Sidebar FC', () => {
     app.bridge.ipcMain.handle('session:load-history', async () => {
       loadHistoryCalls++
       return {
-        messages: [], taskNotifications: [], customTitle: null,
-        agentIdToToolUseId: {}, statusLine: null,
+        messages: [],
+        taskNotifications: [],
+        customTitle: null,
+        agentIdToToolUseId: {},
+        statusLine: null
       }
     })
 
-    await act(async () => { await renderFC() })
+    await act(async () => {
+      await renderFC()
+    })
 
     await act(async () => {
       await viewProps.onClickSession(makeSessionInfo('already-loaded'))
@@ -196,12 +208,17 @@ describe('Sidebar FC', () => {
     app.bridge.ipcMain.handle('session:load-history', async (...args) => {
       historyCalls.push(args)
       return {
-        messages: [], taskNotifications: [], customTitle: 'From disk',
-        agentIdToToolUseId: {}, statusLine: null,
+        messages: [],
+        taskNotifications: [],
+        customTitle: 'From disk',
+        agentIdToToolUseId: {},
+        statusLine: null
       }
     })
 
-    await act(async () => { await renderFC() })
+    await act(async () => {
+      await renderFC()
+    })
 
     await act(async () => {
       await viewProps.onClickSession(makeSessionInfo('disk-sess'))
@@ -222,12 +239,18 @@ describe('Sidebar FC', () => {
   it('pins and unpins sessions via store actions', async () => {
     useSessionStore.getState().createNewSession('sess-p', CWD)
 
-    await act(async () => { await renderFC() })
+    await act(async () => {
+      await renderFC()
+    })
 
-    act(() => { viewProps.onPin('sess-p') })
+    act(() => {
+      viewProps.onPin('sess-p')
+    })
     expect(useSessionStore.getState().pinnedSessionIds).toContain('sess-p')
 
-    act(() => { viewProps.onUnpin('sess-p') })
+    act(() => {
+      viewProps.onUnpin('sess-p')
+    })
     expect(useSessionStore.getState().pinnedSessionIds).not.toContain('sess-p')
   })
 
@@ -246,8 +269,12 @@ describe('Sidebar FC', () => {
       writeCalls.push(args)
     })
 
-    await act(async () => { await renderFC() })
-    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    await act(async () => {
+      await renderFC()
+    })
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
 
     act(() => {
       viewProps.onFinishRename('rename-sess', 'My New Title')
@@ -274,7 +301,7 @@ describe('Sidebar FC', () => {
       id: 'u1',
       role: 'user',
       content: [{ type: 'text', text: 'Hello world'.repeat(40) }],
-      timestamp: Date.now(),
+      timestamp: Date.now()
     })
 
     const generateCalls: unknown[][] = []
@@ -283,8 +310,12 @@ describe('Sidebar FC', () => {
       return 'generated-title'
     })
 
-    await act(async () => { await renderFC() })
-    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    await act(async () => {
+      await renderFC()
+    })
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
 
     await act(async () => {
       viewProps.onAutoRename('auto-sess')
@@ -306,10 +337,16 @@ describe('Sidebar FC', () => {
 
     const watchCalls: unknown[][] = []
     const unwatchCalls: unknown[][] = []
-    app.bridge.ipcMain.handle('session:watch-session', async (...args) => { watchCalls.push(args) })
-    app.bridge.ipcMain.handle('session:unwatch-session', async (...args) => { unwatchCalls.push(args) })
+    app.bridge.ipcMain.handle('session:watch-session', async (...args) => {
+      watchCalls.push(args)
+    })
+    app.bridge.ipcMain.handle('session:unwatch-session', async (...args) => {
+      unwatchCalls.push(args)
+    })
 
-    await act(async () => { await renderFC() })
+    await act(async () => {
+      await renderFC()
+    })
 
     // Toggle on
     act(() => {
@@ -336,14 +373,18 @@ describe('Sidebar FC', () => {
       deleteCalls.push(args)
     })
 
-    await act(async () => { await renderFC() })
+    await act(async () => {
+      await renderFC()
+    })
 
     act(() => {
       viewProps.onDeleteSession(makeSessionInfo('del-sess'))
     })
     expect(viewProps.deleteTarget?.kind).toBe('session')
 
-    await act(async () => { await viewProps.onConfirmDelete() })
+    await act(async () => {
+      await viewProps.onConfirmDelete()
+    })
 
     expect(deleteCalls).toHaveLength(1)
     expect(deleteCalls[0][1]).toBe('del-sess')
@@ -357,9 +398,13 @@ describe('Sidebar FC', () => {
   it('reorders pinned sessions', async () => {
     useSessionStore.setState({ pinnedSessionIds: ['a', 'b', 'c'] })
 
-    await act(async () => { await renderFC() })
+    await act(async () => {
+      await renderFC()
+    })
 
-    act(() => { viewProps.onReorderPinned(['c', 'a', 'b']) })
+    act(() => {
+      viewProps.onReorderPinned(['c', 'a', 'b'])
+    })
 
     expect(useSessionStore.getState().pinnedSessionIds).toEqual(['c', 'a', 'b'])
   })
@@ -374,13 +419,17 @@ describe('Sidebar FC', () => {
       taskNotifications: [],
       customTitle: 'Disk Title',
       agentIdToToolUseId: {},
-      statusLine: null,
+      statusLine: null
     }))
 
     const watchCalls: unknown[][] = []
-    app.bridge.ipcMain.handle('session:watch-session', async (...args) => { watchCalls.push(args) })
+    app.bridge.ipcMain.handle('session:watch-session', async (...args) => {
+      watchCalls.push(args)
+    })
 
-    await act(async () => { await renderFC() })
+    await act(async () => {
+      await renderFC()
+    })
 
     await act(async () => {
       viewProps.onToggleWatch(makeSessionInfo('cold-sess'))
@@ -406,14 +455,18 @@ describe('Sidebar FC', () => {
           worktreeName: 'feat-x',
           worktreePath: '/d/repo/.claude/worktrees/feat-x',
           worktreeBranch: 'feat/x',
-          gitRoot: '/d/repo',
-        } as any,
-      },
+          gitRoot: '/d/repo'
+        } as any
+      }
     })
 
-    await act(async () => { await renderFC() })
+    await act(async () => {
+      await renderFC()
+    })
 
-    act(() => { viewProps.onRemoveRecent(makeSessionInfo('wt-sess')) })
+    act(() => {
+      viewProps.onRemoveRecent(makeSessionInfo('wt-sess'))
+    })
 
     expect(viewProps.cleanupWorktree?.sessionId).toBe('wt-sess')
   })
@@ -426,15 +479,21 @@ describe('Sidebar FC', () => {
           worktreeName: 'feat-x',
           worktreePath: '/p',
           worktreeBranch: 'b',
-          gitRoot: '/r',
-        } as any,
-      },
+          gitRoot: '/r'
+        } as any
+      }
     })
 
-    await act(async () => { await renderFC() })
-    act(() => { viewProps.onRemoveRecent(makeSessionInfo('wt-sess')) })
+    await act(async () => {
+      await renderFC()
+    })
+    act(() => {
+      viewProps.onRemoveRecent(makeSessionInfo('wt-sess'))
+    })
 
-    act(() => { viewProps.onWorktreeCleanupRemove() })
+    act(() => {
+      viewProps.onWorktreeCleanupRemove()
+    })
 
     expect(useSessionStore.getState().recentSessionIds).not.toContain('wt-sess')
     expect(useSessionStore.getState().worktreeInfoMap['wt-sess']).toBeUndefined()
@@ -449,16 +508,22 @@ describe('Sidebar FC', () => {
           worktreeName: 'feat-x',
           worktreePath: '/p',
           worktreeBranch: 'b',
-          gitRoot: '/r',
-        } as any,
-      },
+          gitRoot: '/r'
+        } as any
+      }
     })
 
-    await act(async () => { await renderFC() })
-    act(() => { viewProps.onRemoveRecent(makeSessionInfo('wt-sess')) })
+    await act(async () => {
+      await renderFC()
+    })
+    act(() => {
+      viewProps.onRemoveRecent(makeSessionInfo('wt-sess'))
+    })
     expect(viewProps.cleanupWorktree?.sessionId).toBe('wt-sess')
 
-    act(() => { viewProps.onWorktreeCleanupCancel() })
+    act(() => {
+      viewProps.onWorktreeCleanupCancel()
+    })
 
     // Modal closed, but recents and worktree info untouched
     expect(viewProps.cleanupWorktree).toBeNull()
@@ -474,15 +539,21 @@ describe('Sidebar FC', () => {
           worktreeName: 'feat-x',
           worktreePath: '/p',
           worktreeBranch: 'b',
-          gitRoot: '/r',
-        } as any,
-      },
+          gitRoot: '/r'
+        } as any
+      }
     })
 
-    await act(async () => { await renderFC() })
-    act(() => { viewProps.onRemoveRecent(makeSessionInfo('wt-sess')) })
+    await act(async () => {
+      await renderFC()
+    })
+    act(() => {
+      viewProps.onRemoveRecent(makeSessionInfo('wt-sess'))
+    })
 
-    act(() => { viewProps.onWorktreeCleanupKeep() })
+    act(() => {
+      viewProps.onWorktreeCleanupKeep()
+    })
 
     expect(useSessionStore.getState().recentSessionIds).not.toContain('wt-sess')
     expect(useSessionStore.getState().worktreeInfoMap['wt-sess']).toBeDefined()
@@ -499,15 +570,20 @@ describe('Sidebar FC', () => {
 
     useSessionStore.getState().createNewSession('auto-sess', CWD)
     useSessionStore.getState().addMessage('auto-sess', {
-      id: 'u1', role: 'user',
+      id: 'u1',
+      role: 'user',
       content: [{ type: 'text', text: 'Refactor the login screen flow' }],
-      timestamp: Date.now(),
+      timestamp: Date.now()
     })
 
     app.bridge.ipcMain.handle('session:generate-title', async () => null)
 
-    await act(async () => { await renderFC() })
-    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    await act(async () => {
+      await renderFC()
+    })
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
 
     await act(async () => {
       viewProps.onAutoRename('auto-sess')
@@ -517,7 +593,9 @@ describe('Sidebar FC', () => {
 
     // FC builds a kebab slug from the first user message (lowercase, dashes,
     // truncated to 40 chars — the first 60 chars of the prompt get slugified).
-    expect(useSessionStore.getState().customTitles['auto-sess']).toBe('refactor-the-login-screen-flow')
+    expect(useSessionStore.getState().customTitles['auto-sess']).toBe(
+      'refactor-the-login-screen-flow'
+    )
   })
 
   it('clears the "generating..." title when generateTitle rejects', async () => {
@@ -526,16 +604,23 @@ describe('Sidebar FC', () => {
 
     useSessionStore.getState().createNewSession('auto-err', CWD)
     useSessionStore.getState().addMessage('auto-err', {
-      id: 'u1', role: 'user',
+      id: 'u1',
+      role: 'user',
       content: [{ type: 'text', text: 'Hello'.repeat(40) }],
-      timestamp: Date.now(),
+      timestamp: Date.now()
     })
 
-    app.bridge.ipcMain.handle('session:generate-title', async () => { throw new Error('boom') })
+    app.bridge.ipcMain.handle('session:generate-title', async () => {
+      throw new Error('boom')
+    })
     app.bridge.ipcMain.handle('log:error' as any, async () => {})
 
-    await act(async () => { await renderFC() })
-    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    await act(async () => {
+      await renderFC()
+    })
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
 
     await act(async () => {
       viewProps.onAutoRename('auto-err')
@@ -557,13 +642,19 @@ describe('Sidebar FC', () => {
       deleteProjectCalls.push(args)
     })
 
-    await act(async () => { await renderFC() })
+    await act(async () => {
+      await renderFC()
+    })
 
     const group = makeDirectoryGroup([makeSessionInfo('s1'), makeSessionInfo('s2')])
-    act(() => { viewProps.onDeleteProject(group) })
+    act(() => {
+      viewProps.onDeleteProject(group)
+    })
     expect(viewProps.deleteTarget?.kind).toBe('project')
 
-    await act(async () => { await viewProps.onConfirmDelete() })
+    await act(async () => {
+      await viewProps.onConfirmDelete()
+    })
 
     expect(deleteProjectCalls).toHaveLength(1)
     expect(deleteProjectCalls[0][1]).toBe(PROJECT_KEY)
@@ -582,8 +673,12 @@ describe('Sidebar FC', () => {
       return listCalls === 1 ? [firstGroup] : [secondGroup]
     })
 
-    await act(async () => { await renderFC() })
-    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    await act(async () => {
+      await renderFC()
+    })
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
     expect(useSessionStore.getState().directories[0].sessions[0].sessionId).toBe('s-orig')
 
     await act(async () => {

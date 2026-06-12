@@ -44,11 +44,11 @@ Rationale: **[ADR-006](../adr/adr-006_rebundle-bun-binary.md)**. The previous pi
 
 ### Where the binary lives on disk
 
-| Mode | Path |
-|---|---|
-| Dev (`bun run dev`) | `<projectRoot>/vendor/claude-cli/bun-claude[.exe]` |
+| Mode                       | Path                                                       |
+| -------------------------- | ---------------------------------------------------------- |
+| Dev (`bun run dev`)        | `<projectRoot>/vendor/claude-cli/bun-claude[.exe]`         |
 | Production (installed app) | `<Resources>/claude-cli/bun-claude[.exe]` (extraResources) |
-| Production fallback | `<app.asar.unpacked>/vendor/claude-cli/bun-claude[.exe]` |
+| Production fallback        | `<app.asar.unpacked>/vendor/claude-cli/bun-claude[.exe]`   |
 
 Resolved by `locateBunClaude()` in `src/main/sdk/locate.ts`. `locateCliJs()` is kept as a deprecated alias returning the same path — lingering external callers.
 
@@ -65,11 +65,11 @@ spawn(executable, args, {
   cwd: options.cwd,
   env: buildEnv({ ...process.env, ...(options.env ?? {}) }),
   stdio: ['pipe', 'pipe', 'pipe'],
-  windowsHide: true,
+  windowsHide: true
 })
 ```
 
-- `stdin`  — we write newline-delimited JSON messages here (prompts + control_request + control_response)
+- `stdin` — we write newline-delimited JSON messages here (prompts + control_request + control_response)
 - `stdout` — cli.js writes newline-delimited JSON messages here (assistant/user/system/result/stream_event + control_request + control_response + control_cancel_request)
 - `stderr` — human-readable diagnostics. Never JSON; always a pass-through to `options.stderr` callback.
 
@@ -80,7 +80,7 @@ spawn(executable, args, {
 Callers may pass `options.spawnClaudeCodeProcess` to substitute a custom launcher (containerized, sandboxed, etc.). SDK-parity hook. Signature:
 
 ```ts
-(opts: {
+;(opts: {
   command: string
   args: string[]
   cwd?: string
@@ -98,6 +98,7 @@ Callers may pass `options.spawnClaudeCodeProcess` to substitute a custom launche
 ### Reader
 
 `NdjsonReader` in `src/main/sdk/protocol.ts`:
+
 - Accumulates chunks into a string buffer.
 - Splits on `\n` inside the buffer. Leaves trailing partial line for the next `data` event.
 - Skips empty lines (including surrounding whitespace).
@@ -107,6 +108,7 @@ Callers may pass `options.spawnClaudeCodeProcess` to substitute a custom launche
 ### Writer
 
 `NdjsonWriter` in `src/main/sdk/protocol.ts`:
+
 - Writes `JSON.stringify(obj) + '\n'`.
 - Silently no-ops after `stream.writable` flips false (post-close/post-error) — avoids spamming EPIPEs during teardown.
 
@@ -140,11 +142,11 @@ Everything else is optional. See `docs/protocol/02-cli-flags.md` for the complet
 
 ### Set by the harness at spawn time
 
-| Var | Source | Effect |
-|---|---|---|
-| `CLAUDE_CODE_ENTRYPOINT=sdk-ts` | `buildEnv()` default | cli.js telemetry tag. Distinguishes our harness from the upstream SDK (`sdk-mjs`) and the interactive CLI. Doesn't affect behavior. |
-| `DEBUG=1` | `buildEnv()` when `DEBUG_CLAUDE_AGENT_SDK` is set | Enables cli.js's internal debug trace. |
-| `NODE_OPTIONS` | Deleted | Prevents the child from inheriting debug attach / loader flags that would confuse startup. Harmless under Bun but kept for defensive consistency. |
+| Var                             | Source                                            | Effect                                                                                                                                            |
+| ------------------------------- | ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CLAUDE_CODE_ENTRYPOINT=sdk-ts` | `buildEnv()` default                              | cli.js telemetry tag. Distinguishes our harness from the upstream SDK (`sdk-mjs`) and the interactive CLI. Doesn't affect behavior.               |
+| `DEBUG=1`                       | `buildEnv()` when `DEBUG_CLAUDE_AGENT_SDK` is set | Enables cli.js's internal debug trace.                                                                                                            |
+| `NODE_OPTIONS`                  | Deleted                                           | Prevents the child from inheriting debug attach / loader flags that would confuse startup. Harmless under Bun but kept for defensive consistency. |
 
 Historically the table also carried `ELECTRON_RUN_AS_NODE=1` (when we spawned cli.js under Electron-as-Node) and `NODE_PATH` (pointing the unwrapped cli.js at our `node_modules` for `ws`/`undici`/`ajv`/etc.). Both retired with ADR-006 — the rebundled Bun binary is self-contained. `buildEnv()` still exists and still supports the `options.env` overlay so callers can pass per-spawn env without mutating `process.env`; that machinery is useful independently of the retired vars.
 
@@ -213,6 +215,7 @@ After we call `endSession()` or `SIGTERM`, our outbound writer might still be as
 ### `DEBUG_SDK=1` (our harness)
 
 Emits stderr timestamps for:
+
 - `+Xms spawn` — child process created
 - `+Xms first cli.js stdout byte`
 - `+Xms init system event` — first `type:'system', subtype:'init'`
@@ -245,11 +248,11 @@ Default capacity 1000 entries. Override with `options.wireLogCapacity` — bump 
 
 ## 1.9 Signals
 
-| Signal | Handler | Effect |
-|---|---|---|
-| `SIGTERM` | cli.js's default Node handler | Terminate, no cleanup. Our `child.on('exit', ...)` fires with `signal='SIGTERM'`. |
-| `SIGINT` | cli.js traps (REPL-mode); in stream-json mode the default handler | Normally we never send this. |
-| `child.kill()` w/o args | sends SIGTERM | Same as above. |
+| Signal                  | Handler                                                           | Effect                                                                            |
+| ----------------------- | ----------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| `SIGTERM`               | cli.js's default Node handler                                     | Terminate, no cleanup. Our `child.on('exit', ...)` fires with `signal='SIGTERM'`. |
+| `SIGINT`                | cli.js traps (REPL-mode); in stream-json mode the default handler | Normally we never send this.                                                      |
+| `child.kill()` w/o args | sends SIGTERM                                                     | Same as above.                                                                    |
 
 Windows has no UNIX signals. `child.kill('SIGTERM')` maps to `TerminateProcess`. Use `endSession()` for a graceful path.
 
@@ -279,8 +282,8 @@ const handle = query({
     canUseTool: async (name, input, ctx) => {
       return { behavior: 'allow', updatedInput: input }
     },
-    abortController: new AbortController(),
-  },
+    abortController: new AbortController()
+  }
 })
 
 // Consume messages:

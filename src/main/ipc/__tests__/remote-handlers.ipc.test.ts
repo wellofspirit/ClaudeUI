@@ -10,8 +10,6 @@
  *  - the dispatcher propagates handler errors so remote clients see them
  */
 
- 
-
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import * as fs from 'fs'
 import * as os from 'os'
@@ -27,12 +25,12 @@ vi.mock('../../services/session-history', () => ({
   loadSessionHistory: vi.fn(async () => [{ id: 'm1' }]),
   loadSubagentHistory: vi.fn(async () => []),
   buildSubagentFileMap: vi.fn(() => ({})),
-  loadBackgroundOutput: vi.fn(() => ''),
+  loadBackgroundOutput: vi.fn(() => '')
 }))
 
 vi.mock('../../services/delete-session-files', () => ({
   deleteSessionFiles: vi.fn(async () => {}),
-  deleteProjectFiles: vi.fn(async () => {}),
+  deleteProjectFiles: vi.fn(async () => {})
 }))
 
 vi.mock('../../services/ui-config', () => ({
@@ -40,60 +38,68 @@ vi.mock('../../services/ui-config', () => ({
   saveSettings: vi.fn(),
   loadSessionConfig: vi.fn(() => ({})),
   saveSessionConfig: vi.fn(),
-  loadSlashCommands: vi.fn(() => []),
+  loadSlashCommands: vi.fn(() => [])
 }))
 
 vi.mock('../../services/claude-settings', () => ({
-  loadClaudePermissions: vi.fn(() => ({ allow: [], deny: [], ask: [] })),
+  loadClaudePermissions: vi.fn(() => ({ allow: [], deny: [], ask: [] }))
 }))
 
 vi.mock('../../services/claude-mcp', () => ({
   loadMcpServers: vi.fn(() => ({})),
-  readDisabledMcpServers: vi.fn(() => []),
+  readDisabledMcpServers: vi.fn(() => [])
 }))
 
 vi.mock('../../services/skill-scanner', () => ({
-  scanSkills: vi.fn(async () => []),
+  scanSkills: vi.fn(async () => [])
 }))
 
 vi.mock('../../services/custom-command-scanner', () => ({
-  scanCustomCommands: vi.fn(async () => []),
+  scanCustomCommands: vi.fn(async () => [])
 }))
 
 vi.mock('../../services/usage-fetcher', () => ({
-  usageFetcher: { fetch: vi.fn(async () => ({ a: 1 })) },
+  usageFetcher: { fetch: vi.fn(async () => ({ a: 1 })) }
 }))
 
 vi.mock('../../services/block-usage', () => ({
   blockUsageService: {
     getData: vi.fn(() => null),
-    recalculate: vi.fn(async () => ({ blocks: [] })),
-  },
+    recalculate: vi.fn(async () => ({ blocks: [] }))
+  }
 }))
 
 vi.mock('../../services/persisted-sessions-dir', () => ({
-  PERSISTED_SESSIONS_DIR: '/tmp/persisted',
+  PERSISTED_SESSIONS_DIR: '/tmp/persisted'
 }))
 
 vi.mock('../../services/claude-session', () => {
   const extraWindows = new Set<any>()
   return {
     ClaudeSession: class {
-      static addExtraWindow(w: any): void { extraWindows.add(w) }
-      static removeExtraWindow(w: any): void { extraWindows.delete(w) }
-      static getExtraWindows(): Set<any> { return extraWindows }
+      static addExtraWindow(w: any): void {
+        extraWindows.add(w)
+      }
+      static removeExtraWindow(w: any): void {
+        extraWindows.delete(w)
+      }
+      static getExtraWindows(): Set<any> {
+        return extraWindows
+      }
     },
-    getSdkExecutableOpts: vi.fn(() => ({})),
+    getSdkExecutableOpts: vi.fn(() => ({}))
   }
 })
 
 vi.mock('../../sdk', () => ({
   query: vi.fn(() => {
-    async function* empty(): AsyncGenerator<unknown> { /* */ }
+    async function* empty(): AsyncGenerator<unknown> {
+      /* */
+    }
     const gen: any = empty()
     gen.supportedModels = async () => [{ value: 'sonnet', description: '' }]
     return gen
-  }),
+  })
 }))
 
 vi.mock('../../services/logger', () => ({
@@ -101,8 +107,8 @@ vi.mock('../../services/logger', () => ({
     debug: vi.fn(),
     info: vi.fn(),
     warn: vi.fn(),
-    error: vi.fn(),
-  },
+    error: vi.fn()
+  }
 }))
 
 // Import AFTER mocks.
@@ -120,7 +126,7 @@ function makeRequest(channel: string, ...args: unknown[]): WsInvokeRequest {
 function makeFakeWindow(): any {
   return {
     webContents: { send: vi.fn() },
-    isDestroyed: () => false,
+    isDestroyed: () => false
   }
 }
 
@@ -141,7 +147,7 @@ const sessionStub: any = {
   askSideQuestion: vi.fn(async () => 'answer'),
   mcpServerStatus: vi.fn(async () => [{ name: 'srv', connected: true }]),
   getPlanContent: vi.fn(() => null),
-  getSessionLogPath: vi.fn(() => '/tmp/log'),
+  getSessionLogPath: vi.fn(() => '/tmp/log')
 }
 
 const sessionManagerStub: any = {
@@ -149,7 +155,7 @@ const sessionManagerStub: any = {
   rekey: vi.fn(),
   get: vi.fn(() => sessionStub),
   cancel: vi.fn(),
-  interrupt: vi.fn(async () => {}),
+  interrupt: vi.fn(async () => {})
 }
 
 describe('RemoteDispatcher', () => {
@@ -166,7 +172,9 @@ describe('RemoteDispatcher', () => {
   })
 
   it('propagates handler errors for allowed channels', async () => {
-    dispatcher.register('test:boom', async () => { throw new Error('fail') })
+    dispatcher.register('test:boom', async () => {
+      throw new Error('fail')
+    })
     await expect(dispatcher.handle(makeRequest('test:boom'))).rejects.toThrow('fail')
   })
 
@@ -187,7 +195,7 @@ describe('RemoteDispatcher', () => {
     'terminal:write',
     'terminal:resize',
     'terminal:kill',
-    'terminal:kill-by-cwd',
+    'terminal:kill-by-cwd'
   ])('blocks desktop-only channel: %s', async (channel) => {
     const handler = vi.fn(async () => 'SHOULD NOT RUN')
     dispatcher.register(channel, handler)
@@ -220,7 +228,9 @@ describe('registerRemoteHandlers', () => {
     registerRemoteHandlers(dispatcher, sessionManagerStub, win)
   })
 
-  afterEach(() => { vi.clearAllMocks() })
+  afterEach(() => {
+    vi.clearAllMocks()
+  })
 
   it('registers the expected set of allowed channels', () => {
     const channels = dispatcher.channels()
@@ -256,9 +266,9 @@ describe('registerRemoteHandlers', () => {
 
   it('session:send rejects when routingId not found', async () => {
     sessionManagerStub.get.mockReturnValueOnce(undefined)
-    await expect(
-      dispatcher.handle(makeRequest('session:send', 'missing', 'x'))
-    ).rejects.toThrow(/No session for routingId/)
+    await expect(dispatcher.handle(makeRequest('session:send', 'missing', 'x'))).rejects.toThrow(
+      /No session for routingId/
+    )
   })
 
   it('session:cancel dispatches to manager.cancel', async () => {

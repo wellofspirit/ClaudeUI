@@ -31,12 +31,7 @@ export function locateBunClaude(): string {
   // path.dirname(appPath) is the Resources directory (where app.asar lives).
   const candidates = [
     path.join(path.dirname(appPath), 'claude-cli', BIN_NAME),
-    path.join(
-      appPath.replace('app.asar', 'app.asar.unpacked'),
-      'vendor',
-      'claude-cli',
-      BIN_NAME,
-    ),
+    path.join(appPath.replace('app.asar', 'app.asar.unpacked'), 'vendor', 'claude-cli', BIN_NAME)
   ]
   for (const c of candidates) {
     if (fs.existsSync(c)) return c

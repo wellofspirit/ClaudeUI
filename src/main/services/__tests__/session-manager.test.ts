@@ -18,11 +18,21 @@ class MockSession {
   constructor(routingId: string) {
     this.routingId = routingId
   }
-  cancel(): void { this.cancelled = true }
-  async interrupt(): Promise<void> { /* noop */ }
-  setInactivityTimeout(ms: number): void { this.timeoutMs = ms }
-  getSessionId(): string | null { return this.sessionId }
-  getMessages(): Array<{ id: string }> { return this.messages }
+  cancel(): void {
+    this.cancelled = true
+  }
+  async interrupt(): Promise<void> {
+    /* noop */
+  }
+  setInactivityTimeout(ms: number): void {
+    this.timeoutMs = ms
+  }
+  getSessionId(): string | null {
+    return this.sessionId
+  }
+  getMessages(): Array<{ id: string }> {
+    return this.messages
+  }
 }
 
 // Replicate SessionManager's core logic

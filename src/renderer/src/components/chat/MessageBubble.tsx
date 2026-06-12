@@ -77,9 +77,15 @@ export const MessageBubble = memo(function MessageBubble({
       )
     }
 
-    const imageBlocks = message.content.filter((b): b is Extract<ContentBlock, { type: 'image' }> => b.type === 'image')
-    const docBlocks = message.content.filter((b): b is Extract<ContentBlock, { type: 'document' }> => b.type === 'document')
-    const textBlocks = message.content.filter((b): b is Extract<ContentBlock, { type: 'text' }> => b.type === 'text')
+    const imageBlocks = message.content.filter(
+      (b): b is Extract<ContentBlock, { type: 'image' }> => b.type === 'image'
+    )
+    const docBlocks = message.content.filter(
+      (b): b is Extract<ContentBlock, { type: 'document' }> => b.type === 'document'
+    )
+    const textBlocks = message.content.filter(
+      (b): b is Extract<ContentBlock, { type: 'text' }> => b.type === 'text'
+    )
     const hasAttachments = imageBlocks.length > 0 || docBlocks.length > 0
     const userMarkdown = textBlocks.map((b) => b.text).join('\n\n')
 
@@ -100,18 +106,33 @@ export const MessageBubble = memo(function MessageBubble({
                 />
               ))}
               {docBlocks.map((block, i) => (
-                <div key={`doc-${i}`} className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-border bg-bg-hover">
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="text-red-400 shrink-0">
+                <div
+                  key={`doc-${i}`}
+                  className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-border bg-bg-hover"
+                >
+                  <svg
+                    width="14"
+                    height="14"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.5"
+                    className="text-red-400 shrink-0"
+                  >
                     <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
                     <polyline points="14 2 14 8 20 8" />
                   </svg>
-                  <span className="text-[11px] text-text-secondary">{block.fileName || 'Document'}</span>
+                  <span className="text-[11px] text-text-secondary">
+                    {block.fileName || 'Document'}
+                  </span>
                 </div>
               ))}
             </div>
           )}
           {textBlocks.map((block, i) => (
-            <span key={i} className="whitespace-pre-wrap">{block.text}</span>
+            <span key={i} className="whitespace-pre-wrap">
+              {block.text}
+            </span>
           ))}
         </div>
       </div>
@@ -143,9 +164,7 @@ export const MessageBubble = memo(function MessageBubble({
   const matchedApprovalIds = new Set<string>()
   for (const block of message.content) {
     if (block.type !== 'tool_use') continue
-    const byId = pendingApprovals.find(
-      (a) => a.toolUseId && a.toolUseId === block.toolUseId,
-    )
+    const byId = pendingApprovals.find((a) => a.toolUseId && a.toolUseId === block.toolUseId)
     if (byId) {
       approvalMap.set(block.toolUseId, byId)
       matchedApprovalIds.add(byId.requestId)
@@ -156,7 +175,7 @@ export const MessageBubble = memo(function MessageBubble({
         !a.toolUseId &&
         !matchedApprovalIds.has(a.requestId) &&
         a.toolName === block.toolName &&
-        JSON.stringify(a.input) === JSON.stringify(block.toolInput),
+        JSON.stringify(a.input) === JSON.stringify(block.toolInput)
     )
     if (legacy) {
       approvalMap.set(block.toolUseId, legacy)
@@ -172,7 +191,9 @@ export const MessageBubble = memo(function MessageBubble({
   const items: RenderItem[] = []
 
   const visible = message.content.filter(
-    (b) => b.type !== 'tool_result' && !(b.type === 'tool_use' && b.toolName && HIDDEN_TOOLS.has(b.toolName))
+    (b) =>
+      b.type !== 'tool_result' &&
+      !(b.type === 'tool_use' && b.toolName && HIDDEN_TOOLS.has(b.toolName))
   )
   for (let i = 0; i < visible.length; i++) {
     const block = visible[i]
@@ -191,10 +212,7 @@ export const MessageBubble = memo(function MessageBubble({
   }
 
   // Find the last thinking item so only it can be "active"
-  const lastThinkingGi = items.reduce(
-    (acc, item, i) => (item.kind === 'thinking' ? i : acc),
-    -1
-  )
+  const lastThinkingGi = items.reduce((acc, item, i) => (item.kind === 'thinking' ? i : acc), -1)
 
   return (
     <div className="group/msg flex flex-col gap-2 animate-fade-in">
@@ -210,13 +228,7 @@ export const MessageBubble = memo(function MessageBubble({
             message.timestamp >= thinkingStartedAt
           // Active thinking is rendered by the standalone ThinkingBlock in ChatPanel
           if (isActive) return null
-          return (
-            <ThinkingBlock
-              key={item.index}
-              text={item.block.text || ''}
-              isActive={false}
-            />
-          )
+          return <ThinkingBlock key={item.index} text={item.block.text || ''} isActive={false} />
         }
         if (item.kind === 'other') {
           return <ContentBlockView key={item.index} block={item.block} />
@@ -230,7 +242,9 @@ export const MessageBubble = memo(function MessageBubble({
             return <ExitPlanModeCard key={index} block={block} approval={approval} />
           }
           if (block.toolName === 'AskUserQuestion') {
-            return <AskUserQuestionBlock key={index} block={block} result={result} approval={approval} />
+            return (
+              <AskUserQuestionBlock key={index} block={block} result={result} approval={approval} />
+            )
           }
           if (TODO_TOOLS.has(block.toolName)) {
             return <TodoToolBlock key={index} block={block} result={result} />
@@ -242,7 +256,10 @@ export const MessageBubble = memo(function MessageBubble({
         }
         // Multiple tool calls — wrap in bordered group
         return (
-          <div key={`group-${gi}`} className="rounded-xl border border-border p-2 flex flex-col gap-2">
+          <div
+            key={`group-${gi}`}
+            className="rounded-xl border border-border p-2 flex flex-col gap-2"
+          >
             {item.blocks.map(({ block, index }) => {
               const result = block.toolUseId ? resultMap.get(block.toolUseId) : undefined
               const approval = block.toolUseId ? approvalMap.get(block.toolUseId) : undefined
@@ -250,7 +267,14 @@ export const MessageBubble = memo(function MessageBubble({
                 return <ExitPlanModeCard key={index} block={block} approval={approval} />
               }
               if (block.toolName === 'AskUserQuestion') {
-                return <AskUserQuestionBlock key={index} block={block} result={result} approval={approval} />
+                return (
+                  <AskUserQuestionBlock
+                    key={index}
+                    block={block}
+                    result={result}
+                    approval={approval}
+                  />
+                )
               }
               if (TODO_TOOLS.has(block.toolName)) {
                 return <TodoToolBlock key={index} block={block} result={result} />
@@ -273,7 +297,17 @@ export const MessageBubble = memo(function MessageBubble({
             title="Fork a new session from this point"
             className="flex items-center gap-1 text-[10px] text-text-muted hover:text-text-primary transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-default"
           >
-            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="rotate-90">
+            <svg
+              width="10"
+              height="10"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className="rotate-90"
+            >
               <circle cx="12" cy="18" r="3" />
               <circle cx="6" cy="6" r="3" />
               <circle cx="18" cy="6" r="3" />
@@ -288,7 +322,11 @@ export const MessageBubble = memo(function MessageBubble({
   )
 })
 
-const ContentBlockView = memo(function ContentBlockView({ block }: { block: ContentBlock }): React.JSX.Element | null {
+const ContentBlockView = memo(function ContentBlockView({
+  block
+}: {
+  block: ContentBlock
+}): React.JSX.Element | null {
   if (block.type === 'text' && block.text) {
     return (
       <div
@@ -323,13 +361,28 @@ function CompactSeparator({ summary }: { summary?: string }): React.JSX.Element 
         onClick={() => setExpanded(!expanded)}
         className="w-full flex items-center gap-2 px-3 h-9 text-[13px] bg-warning/5 hover:bg-warning/10 transition-colors cursor-pointer"
       >
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-warning shrink-0">
+        <svg
+          width="12"
+          height="12"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          className="text-warning shrink-0"
+        >
           <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" />
         </svg>
         <span className="font-mono font-medium text-warning">Compacted</span>
-        <span className="text-text-secondary text-[12px] truncate flex-1 text-left">Context summary</span>
+        <span className="text-text-secondary text-[12px] truncate flex-1 text-left">
+          Context summary
+        </span>
         <svg
-          width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
+          width="10"
+          height="10"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
           className={`text-text-secondary transition-transform shrink-0 ${expanded ? 'rotate-180' : ''}`}
         >
           <polyline points="6 9 12 15 18 9" />
@@ -346,7 +399,11 @@ function CompactSeparator({ summary }: { summary?: string }): React.JSX.Element 
   )
 }
 
-function CliCommandBlock({ block }: { block: Extract<ContentBlock, { type: 'cli_command' }> }): React.JSX.Element {
+function CliCommandBlock({
+  block
+}: {
+  block: Extract<ContentBlock, { type: 'cli_command' }>
+}): React.JSX.Element {
   const name = block.commandName
   const args = block.commandArgs || ''
   const output = block.commandOutput || ''
@@ -357,7 +414,9 @@ function CliCommandBlock({ block }: { block: Extract<ContentBlock, { type: 'cli_
     return (
       <div className="flex justify-end">
         <div className="max-w-[85%] bg-bg-tertiary rounded-2xl px-4 py-2.5 text-[13px] text-text-primary leading-[1.6]">
-          <pre className="font-mono text-[12px] text-text-primary/70 whitespace-pre-wrap break-words">{output}</pre>
+          <pre className="font-mono text-[12px] text-text-primary/70 whitespace-pre-wrap break-words">
+            {output}
+          </pre>
         </div>
       </div>
     )
@@ -368,22 +427,29 @@ function CliCommandBlock({ block }: { block: Extract<ContentBlock, { type: 'cli_
   return (
     <div className="flex justify-end">
       <div className="max-w-[85%] bg-bg-tertiary rounded-2xl px-4 py-2.5 text-[13px] text-text-primary leading-[1.6]">
-        <pre className="font-mono text-[12px] text-accent whitespace-pre-wrap break-words">{display}</pre>
+        <pre className="font-mono text-[12px] text-accent whitespace-pre-wrap break-words">
+          {display}
+        </pre>
       </div>
     </div>
   )
 }
 
-function ApiErrorBlock({ block }: { block: Extract<ContentBlock, { type: 'api_error' }> }): React.JSX.Element {
+function ApiErrorBlock({
+  block
+}: {
+  block: Extract<ContentBlock, { type: 'api_error' }>
+}): React.JSX.Element {
   const [expanded, setExpanded] = useState(false)
   const errorType = block.errorType
   const errorMessage = block.errorMessage
 
-  const label = errorType === 'rate_limit'
-    ? 'Rate Limited'
-    : errorType === 'invalid_request'
-      ? 'Invalid Request'
-      : errorType.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
+  const label =
+    errorType === 'rate_limit'
+      ? 'Rate Limited'
+      : errorType === 'invalid_request'
+        ? 'Invalid Request'
+        : errorType.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
 
   return (
     <div className="rounded-lg border border-danger/30 bg-bg-secondary overflow-hidden">
@@ -391,14 +457,30 @@ function ApiErrorBlock({ block }: { block: Extract<ContentBlock, { type: 'api_er
         onClick={() => setExpanded(!expanded)}
         className="w-full flex items-center gap-2 px-3 h-9 text-[13px] hover:bg-bg-hover transition-colors cursor-pointer"
       >
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-danger shrink-0">
+        <svg
+          width="12"
+          height="12"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          className="text-danger shrink-0"
+        >
           <circle cx="12" cy="12" r="10" />
           <line x1="15" y1="9" x2="9" y2="15" />
           <line x1="9" y1="9" x2="15" y2="15" />
         </svg>
         <span className="font-medium text-danger">API Error</span>
         <span className="text-text-secondary truncate flex-1 text-left text-[12px]">{label}</span>
-        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={`text-text-secondary transition-transform shrink-0 ${expanded ? 'rotate-180' : ''}`}>
+        <svg
+          width="10"
+          height="10"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          className={`text-text-secondary transition-transform shrink-0 ${expanded ? 'rotate-180' : ''}`}
+        >
           <polyline points="6 9 12 15 18 9" />
         </svg>
       </button>

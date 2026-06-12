@@ -1,6 +1,11 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useAutomationStore } from '../../../stores/automation-store'
-import type { Automation, AutomationRun, ClaudePermissions, ModelInfo } from '../../../../../shared/types'
+import type {
+  Automation,
+  AutomationRun,
+  ClaudePermissions,
+  ModelInfo
+} from '../../../../../shared/types'
 import { AutomationConfigView, type ModelOption, type InheritedPerms } from './View'
 
 export function AutomationConfig(): React.JSX.Element {
@@ -9,7 +14,11 @@ export function AutomationConfig(): React.JSX.Element {
   const automation = automations.find((a) => a.id === selectedId)
 
   if (!automation) {
-    return <div className="flex-1 flex items-center justify-center text-text-muted text-sm">Select an automation</div>
+    return (
+      <div className="flex-1 flex items-center justify-center text-text-muted text-sm">
+        Select an automation
+      </div>
+    )
   }
 
   return <AutomationConfigController key={automation.id} automation={automation} />
@@ -28,24 +37,40 @@ function AutomationConfigController({ automation }: { automation: Automation }):
 
   useEffect(() => {
     window.api.getModels().then((infos: ModelInfo[]) => {
-      setModels(infos.map((m) => ({
-        ...m,
-        shortName: m.description?.split('·')[0]?.trim() || m.displayName,
-      })))
+      setModels(
+        infos.map((m) => ({
+          ...m,
+          shortName: m.description?.split('·')[0]?.trim() || m.displayName
+        }))
+      )
     })
-    window.api.loadClaudePermissions('user').then((user: ClaudePermissions) => {
-      setGlobalPerms(user.allow.length > 0 || user.deny.length > 0 ? { allow: user.allow, deny: user.deny } : null)
-    }).catch(() => setGlobalPerms(null))
+    window.api
+      .loadClaudePermissions('user')
+      .then((user: ClaudePermissions) => {
+        setGlobalPerms(
+          user.allow.length > 0 || user.deny.length > 0
+            ? { allow: user.allow, deny: user.deny }
+            : null
+        )
+      })
+      .catch(() => setGlobalPerms(null))
   }, [])
 
   // Load runs on mount if not already in the store, so the Runs tab is populated.
   useEffect(() => {
     if (runs !== undefined) return
     let cancelled = false
-    window.api.listAutomationRuns(automation.id)
-      .then((r: AutomationRun[]) => { if (!cancelled) setRuns(automation.id, r) })
-      .catch(() => { if (!cancelled) setRuns(automation.id, []) })
-    return () => { cancelled = true }
+    window.api
+      .listAutomationRuns(automation.id)
+      .then((r: AutomationRun[]) => {
+        if (!cancelled) setRuns(automation.id, r)
+      })
+      .catch(() => {
+        if (!cancelled) setRuns(automation.id, [])
+      })
+    return () => {
+      cancelled = true
+    }
   }, [automation.id, runs, setRuns])
 
   const loadDirPerms = useCallback(async (cwd: string): Promise<InheritedPerms | null> => {
@@ -53,11 +78,11 @@ function AutomationConfigController({ automation }: { automation: Automation }):
     try {
       const [project, local] = await Promise.all([
         window.api.loadClaudePermissions('project', cwd),
-        window.api.loadClaudePermissions('local', cwd),
+        window.api.loadClaudePermissions('local', cwd)
       ])
       const merged: InheritedPerms = {
         allow: [...project.allow, ...local.allow],
-        deny: [...project.deny, ...local.deny],
+        deny: [...project.deny, ...local.deny]
       }
       return merged.allow.length > 0 || merged.deny.length > 0 ? merged : null
     } catch {
@@ -69,9 +94,12 @@ function AutomationConfigController({ automation }: { automation: Automation }):
     window.api.saveAutomation(updated)
   }, [])
 
-  const handleToggleEnabled = useCallback((enabled: boolean) => {
-    window.api.toggleAutomation(automation.id, enabled)
-  }, [automation.id])
+  const handleToggleEnabled = useCallback(
+    (enabled: boolean) => {
+      window.api.toggleAutomation(automation.id, enabled)
+    },
+    [automation.id]
+  )
 
   const handleRunNow = useCallback(() => {
     window.api.runAutomationNow(automation.id)
@@ -96,9 +124,12 @@ function AutomationConfigController({ automation }: { automation: Automation }):
     return window.api.pickFolder()
   }, [])
 
-  const handleSelectRun = useCallback((runId: string) => {
-    selectRun(automation.id, runId)
-  }, [automation.id, selectRun])
+  const handleSelectRun = useCallback(
+    (runId: string) => {
+      selectRun(automation.id, runId)
+    },
+    [automation.id, selectRun]
+  )
 
   return (
     <AutomationConfigView

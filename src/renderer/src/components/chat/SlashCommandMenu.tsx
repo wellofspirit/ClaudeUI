@@ -62,9 +62,7 @@ export function filterSlashCommands(
   commands: SlashCommandInfo[],
   filter: string
 ): SlashCommandInfo[] {
-  return commands.filter((cmd) =>
-    cmd.name.toLowerCase().startsWith('/' + filter.toLowerCase())
-  )
+  return commands.filter((cmd) => cmd.name.toLowerCase().startsWith('/' + filter.toLowerCase()))
 }
 
 /**

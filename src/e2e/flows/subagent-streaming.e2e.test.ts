@@ -12,7 +12,7 @@ import {
   makeChatMessage,
   makeAssistantMessage,
   makeToolUseBlock,
-  resetFactoryCounter,
+  resetFactoryCounter
 } from '@test/factories/messages'
 import type { ChatMessage, SubagentStreamDelta } from '../../shared/types'
 
@@ -27,7 +27,9 @@ function wireEventHandlers(app: TestApp): Array<() => void> {
     return (cb: T) => {
       const handler = (_: unknown, ...args: unknown[]): void => (cb as Function)(...args)
       app.bridge.ipcRenderer.on(channel, handler)
-      const cleanup = (): void => { app.bridge.ipcRenderer.removeListener(channel, handler) }
+      const cleanup = (): void => {
+        app.bridge.ipcRenderer.removeListener(channel, handler)
+      }
       cleanups.push(cleanup)
       return cleanup
     }
@@ -36,21 +38,38 @@ function wireEventHandlers(app: TestApp): Array<() => void> {
   onEvent<(routingId: string, msg: ChatMessage) => void>('session:message')((routingId, msg) => {
     store().addMessage(routingId, msg)
   })
-  onEvent<(routingId: string, data: SubagentStreamDelta) => void>('session:subagent-stream')((routingId, data) => {
-    if (data.type === 'thinking') {
-      store().appendSubagentStreamingThinking(routingId, data.toolUseId, data.text)
-    } else {
-      store().appendSubagentStreamingText(routingId, data.toolUseId, data.text)
+  onEvent<(routingId: string, data: SubagentStreamDelta) => void>('session:subagent-stream')(
+    (routingId, data) => {
+      if (data.type === 'thinking') {
+        store().appendSubagentStreamingThinking(routingId, data.toolUseId, data.text)
+      } else {
+        store().appendSubagentStreamingText(routingId, data.toolUseId, data.text)
+      }
     }
-  })
-  onEvent<(routingId: string, data: { toolUseId: string; message: ChatMessage }) => void>('session:subagent-message')((routingId, data) => {
+  )
+  onEvent<(routingId: string, data: { toolUseId: string; message: ChatMessage }) => void>(
+    'session:subagent-message'
+  )((routingId, data) => {
     store().addSubagentMessage(routingId, data.toolUseId, data.message)
   })
-  onEvent<(routingId: string, data: { toolUseId: string; messages: ChatMessage[] }) => void>('session:subagent-message-batch')((routingId, data) => {
+  onEvent<(routingId: string, data: { toolUseId: string; messages: ChatMessage[] }) => void>(
+    'session:subagent-message-batch'
+  )((routingId, data) => {
     store().appendSubagentMessageBatch(routingId, data.toolUseId, data.messages)
   })
-  onEvent<(routingId: string, data: { toolUseId: string; toolResultToolUseId: string; result: string; isError: boolean }) => void>('session:subagent-tool-result')((routingId, data) => {
-    store().appendSubagentToolResult(routingId, data.toolUseId, data.toolResultToolUseId, data.result, data.isError)
+  onEvent<
+    (
+      routingId: string,
+      data: { toolUseId: string; toolResultToolUseId: string; result: string; isError: boolean }
+    ) => void
+  >('session:subagent-tool-result')((routingId, data) => {
+    store().appendSubagentToolResult(
+      routingId,
+      data.toolUseId,
+      data.toolResultToolUseId,
+      data.result,
+      data.isError
+    )
   })
 
   return cleanups
@@ -65,7 +84,7 @@ beforeEach(async () => {
     directories: [],
     recentSessionIds: [],
     pinnedSessionIds: [],
-    customTitles: {},
+    customTitles: {}
   })
   eventCleanups = wireEventHandlers(app)
 })
@@ -82,16 +101,26 @@ describe('E2E: subagent streaming', () => {
     useSessionStore.getState().createNewSession(routingId, '/test')
 
     // Parent emits a Task tool_use creating the subagent
-    app.emit('session:message', routingId, makeChatMessage({
-      content: [makeToolUseBlock('Task', { description: 'search the codebase' }, subagentToolUseId)],
-    }))
+    app.emit(
+      'session:message',
+      routingId,
+      makeChatMessage({
+        content: [
+          makeToolUseBlock('Task', { description: 'search the codebase' }, subagentToolUseId)
+        ]
+      })
+    )
 
     // Subagent streams text
     app.emit('session:subagent-stream', routingId, {
-      toolUseId: subagentToolUseId, type: 'text', text: 'Looking '
+      toolUseId: subagentToolUseId,
+      type: 'text',
+      text: 'Looking '
     })
     app.emit('session:subagent-stream', routingId, {
-      toolUseId: subagentToolUseId, type: 'text', text: 'for files...'
+      toolUseId: subagentToolUseId,
+      type: 'text',
+      text: 'for files...'
     })
 
     const session = useSessionStore.getState().sessions[routingId]
@@ -102,9 +131,21 @@ describe('E2E: subagent streaming', () => {
     const routingId = 'r1'
     useSessionStore.getState().createNewSession(routingId, '/test')
 
-    app.emit('session:subagent-stream', routingId, { toolUseId: 'sub-A', type: 'text', text: 'alpha' })
-    app.emit('session:subagent-stream', routingId, { toolUseId: 'sub-B', type: 'text', text: 'beta' })
-    app.emit('session:subagent-stream', routingId, { toolUseId: 'sub-A', type: 'text', text: '-more' })
+    app.emit('session:subagent-stream', routingId, {
+      toolUseId: 'sub-A',
+      type: 'text',
+      text: 'alpha'
+    })
+    app.emit('session:subagent-stream', routingId, {
+      toolUseId: 'sub-B',
+      type: 'text',
+      text: 'beta'
+    })
+    app.emit('session:subagent-stream', routingId, {
+      toolUseId: 'sub-A',
+      type: 'text',
+      text: '-more'
+    })
 
     const session = useSessionStore.getState().sessions[routingId]
     expect(session.subagentStreamingText['sub-A']).toBe('alpha-more')
@@ -117,13 +158,17 @@ describe('E2E: subagent streaming', () => {
 
     const subagentMsg = makeAssistantMessage('subagent response')
     app.emit('session:subagent-message', routingId, {
-      toolUseId: 'sub-X', message: subagentMsg,
+      toolUseId: 'sub-X',
+      message: subagentMsg
     })
 
     const session = useSessionStore.getState().sessions[routingId]
     expect(session.subagentMessages['sub-X']).toBeDefined()
     expect(session.subagentMessages['sub-X']).toHaveLength(1)
-    expect(session.subagentMessages['sub-X'][0].content[0]).toEqual({ type: 'text', text: 'subagent response' })
+    expect(session.subagentMessages['sub-X'][0].content[0]).toEqual({
+      type: 'text',
+      text: 'subagent response'
+    })
   })
 
   it('thinking stream for subagent routes independently of text stream', () => {
@@ -131,7 +176,9 @@ describe('E2E: subagent streaming', () => {
     useSessionStore.getState().createNewSession(routingId, '/test')
 
     app.emit('session:subagent-stream', routingId, {
-      toolUseId: 'sub-think', type: 'thinking', text: 'pondering...',
+      toolUseId: 'sub-think',
+      type: 'thinking',
+      text: 'pondering...'
     })
 
     const session = useSessionStore.getState().sessions[routingId]

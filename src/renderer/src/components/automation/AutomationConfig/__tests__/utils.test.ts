@@ -1,9 +1,16 @@
 import { describe, it, expect } from 'vitest'
 import {
-  isAutomationDirty, SCHEDULE_PRESETS, PERMISSION_TEMPLATES, PERMISSION_MODES,
-  unitMultiplier, naturalUnit, computeNextRuns,
-  formatScheduleSummary, formatScheduleHint, formatTimeDelta,
-  deriveStatus,
+  isAutomationDirty,
+  SCHEDULE_PRESETS,
+  PERMISSION_TEMPLATES,
+  PERMISSION_MODES,
+  unitMultiplier,
+  naturalUnit,
+  computeNextRuns,
+  formatScheduleSummary,
+  formatScheduleHint,
+  formatTimeDelta,
+  deriveStatus
 } from '../utils'
 import type { Automation } from '../../../../../../shared/types'
 
@@ -27,91 +34,170 @@ function baseAutomation(): Automation {
 describe('isAutomationDirty', () => {
   it('returns false when nothing changed', () => {
     const auto = baseAutomation()
-    expect(isAutomationDirty({
-      name: auto.name, prompt: auto.prompt, cwd: auto.cwd,
-      schedule: auto.schedule, model: auto.model || '', effort: auto.effort || '',
-      thinkingMode: auto.thinkingMode || '',
-      permissionMode: auto.permissionMode || 'auto',
-      allowRules: auto.permissions.allow, denyRules: auto.permissions.deny
-    }, auto)).toBe(false)
+    expect(
+      isAutomationDirty(
+        {
+          name: auto.name,
+          prompt: auto.prompt,
+          cwd: auto.cwd,
+          schedule: auto.schedule,
+          model: auto.model || '',
+          effort: auto.effort || '',
+          thinkingMode: auto.thinkingMode || '',
+          permissionMode: auto.permissionMode || 'auto',
+          allowRules: auto.permissions.allow,
+          denyRules: auto.permissions.deny
+        },
+        auto
+      )
+    ).toBe(false)
   })
 
   it('detects name change', () => {
     const auto = baseAutomation()
-    expect(isAutomationDirty({
-      name: 'Changed', prompt: auto.prompt, cwd: auto.cwd,
-      schedule: auto.schedule, model: auto.model || '', effort: auto.effort || '',
-      thinkingMode: auto.thinkingMode || '',
-      permissionMode: auto.permissionMode || 'auto',
-      allowRules: auto.permissions.allow, denyRules: auto.permissions.deny
-    }, auto)).toBe(true)
+    expect(
+      isAutomationDirty(
+        {
+          name: 'Changed',
+          prompt: auto.prompt,
+          cwd: auto.cwd,
+          schedule: auto.schedule,
+          model: auto.model || '',
+          effort: auto.effort || '',
+          thinkingMode: auto.thinkingMode || '',
+          permissionMode: auto.permissionMode || 'auto',
+          allowRules: auto.permissions.allow,
+          denyRules: auto.permissions.deny
+        },
+        auto
+      )
+    ).toBe(true)
   })
 
   it('detects schedule change', () => {
     const auto = baseAutomation()
-    expect(isAutomationDirty({
-      name: auto.name, prompt: auto.prompt, cwd: auto.cwd,
-      schedule: { type: 'cron', cronExpression: '0 * * * *' },
-      model: auto.model || '', effort: auto.effort || '',
-      thinkingMode: auto.thinkingMode || '',
-      permissionMode: auto.permissionMode || 'auto',
-      allowRules: auto.permissions.allow, denyRules: auto.permissions.deny
-    }, auto)).toBe(true)
+    expect(
+      isAutomationDirty(
+        {
+          name: auto.name,
+          prompt: auto.prompt,
+          cwd: auto.cwd,
+          schedule: { type: 'cron', cronExpression: '0 * * * *' },
+          model: auto.model || '',
+          effort: auto.effort || '',
+          thinkingMode: auto.thinkingMode || '',
+          permissionMode: auto.permissionMode || 'auto',
+          allowRules: auto.permissions.allow,
+          denyRules: auto.permissions.deny
+        },
+        auto
+      )
+    ).toBe(true)
   })
 
   it('detects permission change', () => {
     const auto = baseAutomation()
-    expect(isAutomationDirty({
-      name: auto.name, prompt: auto.prompt, cwd: auto.cwd,
-      schedule: auto.schedule, model: auto.model || '', effort: auto.effort || '',
-      thinkingMode: auto.thinkingMode || '',
-      permissionMode: auto.permissionMode || 'auto',
-      allowRules: ['Read', 'Write'], denyRules: auto.permissions.deny
-    }, auto)).toBe(true)
+    expect(
+      isAutomationDirty(
+        {
+          name: auto.name,
+          prompt: auto.prompt,
+          cwd: auto.cwd,
+          schedule: auto.schedule,
+          model: auto.model || '',
+          effort: auto.effort || '',
+          thinkingMode: auto.thinkingMode || '',
+          permissionMode: auto.permissionMode || 'auto',
+          allowRules: ['Read', 'Write'],
+          denyRules: auto.permissions.deny
+        },
+        auto
+      )
+    ).toBe(true)
   })
 
   it('treats empty model and undefined model as equal', () => {
     const auto = { ...baseAutomation(), model: undefined }
-    expect(isAutomationDirty({
-      name: auto.name, prompt: auto.prompt, cwd: auto.cwd,
-      schedule: auto.schedule, model: '', effort: auto.effort || '',
-      thinkingMode: auto.thinkingMode || '',
-      permissionMode: auto.permissionMode || 'auto',
-      allowRules: auto.permissions.allow, denyRules: auto.permissions.deny
-    }, auto)).toBe(false)
+    expect(
+      isAutomationDirty(
+        {
+          name: auto.name,
+          prompt: auto.prompt,
+          cwd: auto.cwd,
+          schedule: auto.schedule,
+          model: '',
+          effort: auto.effort || '',
+          thinkingMode: auto.thinkingMode || '',
+          permissionMode: auto.permissionMode || 'auto',
+          allowRules: auto.permissions.allow,
+          denyRules: auto.permissions.deny
+        },
+        auto
+      )
+    ).toBe(false)
   })
 
   it('detects permissionMode change', () => {
     const auto = { ...baseAutomation(), permissionMode: 'auto' as const }
-    expect(isAutomationDirty({
-      name: auto.name, prompt: auto.prompt, cwd: auto.cwd,
-      schedule: auto.schedule, model: auto.model || '', effort: auto.effort || '',
-      thinkingMode: auto.thinkingMode || '',
-      permissionMode: 'default',
-      allowRules: auto.permissions.allow, denyRules: auto.permissions.deny
-    }, auto)).toBe(true)
+    expect(
+      isAutomationDirty(
+        {
+          name: auto.name,
+          prompt: auto.prompt,
+          cwd: auto.cwd,
+          schedule: auto.schedule,
+          model: auto.model || '',
+          effort: auto.effort || '',
+          thinkingMode: auto.thinkingMode || '',
+          permissionMode: 'default',
+          allowRules: auto.permissions.allow,
+          denyRules: auto.permissions.deny
+        },
+        auto
+      )
+    ).toBe(true)
   })
 
   it('treats undefined permissionMode and auto as equal', () => {
     const auto = baseAutomation() // permissionMode is undefined
-    expect(isAutomationDirty({
-      name: auto.name, prompt: auto.prompt, cwd: auto.cwd,
-      schedule: auto.schedule, model: auto.model || '', effort: auto.effort || '',
-      thinkingMode: auto.thinkingMode || '',
-      permissionMode: 'auto',
-      allowRules: auto.permissions.allow, denyRules: auto.permissions.deny
-    }, auto)).toBe(false)
+    expect(
+      isAutomationDirty(
+        {
+          name: auto.name,
+          prompt: auto.prompt,
+          cwd: auto.cwd,
+          schedule: auto.schedule,
+          model: auto.model || '',
+          effort: auto.effort || '',
+          thinkingMode: auto.thinkingMode || '',
+          permissionMode: 'auto',
+          allowRules: auto.permissions.allow,
+          denyRules: auto.permissions.deny
+        },
+        auto
+      )
+    ).toBe(false)
   })
 
   it('detects thinkingMode change', () => {
     const auto = baseAutomation()
-    expect(isAutomationDirty({
-      name: auto.name, prompt: auto.prompt, cwd: auto.cwd,
-      schedule: auto.schedule, model: auto.model || '', effort: auto.effort || '',
-      thinkingMode: 'adaptive',
-      permissionMode: auto.permissionMode || 'auto',
-      allowRules: auto.permissions.allow, denyRules: auto.permissions.deny
-    }, auto)).toBe(true)
+    expect(
+      isAutomationDirty(
+        {
+          name: auto.name,
+          prompt: auto.prompt,
+          cwd: auto.cwd,
+          schedule: auto.schedule,
+          model: auto.model || '',
+          effort: auto.effort || '',
+          thinkingMode: 'adaptive',
+          permissionMode: auto.permissionMode || 'auto',
+          allowRules: auto.permissions.allow,
+          denyRules: auto.permissions.deny
+        },
+        auto
+      )
+    ).toBe(true)
   })
 })
 
@@ -164,7 +250,9 @@ describe('computeNextRuns', () => {
   })
 
   it('returns empty array for invalid cron expression', () => {
-    expect(computeNextRuns({ type: 'cron', cronExpression: 'not a cron' }, null, 4, NOW)).toEqual([])
+    expect(computeNextRuns({ type: 'cron', cronExpression: 'not a cron' }, null, 4, NOW)).toEqual(
+      []
+    )
   })
 
   it('parses */15 * * * * as 15-minute intervals', () => {
@@ -209,7 +297,9 @@ describe('formatScheduleSummary', () => {
   })
 
   it('handles cron with and without expression', () => {
-    expect(formatScheduleSummary({ type: 'cron', cronExpression: '0 * * * *' })).toBe('cron · 0 * * * *')
+    expect(formatScheduleSummary({ type: 'cron', cronExpression: '0 * * * *' })).toBe(
+      'cron · 0 * * * *'
+    )
     expect(formatScheduleSummary({ type: 'cron' })).toBe('cron · (unset)')
   })
 
@@ -221,7 +311,9 @@ describe('formatScheduleSummary', () => {
 
 describe('formatScheduleHint', () => {
   it('shows cron expression raw (no "cron ·" prefix)', () => {
-    expect(formatScheduleHint({ type: 'cron', cronExpression: '*/15 * * * *' })).toBe('*/15 * * * *')
+    expect(formatScheduleHint({ type: 'cron', cronExpression: '*/15 * * * *' })).toBe(
+      '*/15 * * * *'
+    )
     expect(formatScheduleHint({ type: 'cron' })).toBe('cron')
   })
 
@@ -247,19 +339,29 @@ describe('formatTimeDelta', () => {
 
 describe('deriveStatus', () => {
   it('running wins over everything else', () => {
-    expect(deriveStatus({ enabled: false, hasRunningRun: true, lastRunStatus: 'error' })).toBe('running')
+    expect(deriveStatus({ enabled: false, hasRunningRun: true, lastRunStatus: 'error' })).toBe(
+      'running'
+    )
   })
 
   it('disabled when not enabled and not running', () => {
-    expect(deriveStatus({ enabled: false, hasRunningRun: false, lastRunStatus: 'success' })).toBe('disabled')
+    expect(deriveStatus({ enabled: false, hasRunningRun: false, lastRunStatus: 'success' })).toBe(
+      'disabled'
+    )
   })
 
   it('failed when enabled and last run errored', () => {
-    expect(deriveStatus({ enabled: true, hasRunningRun: false, lastRunStatus: 'error' })).toBe('failed')
+    expect(deriveStatus({ enabled: true, hasRunningRun: false, lastRunStatus: 'error' })).toBe(
+      'failed'
+    )
   })
 
   it('active when enabled, idle, and no recent failure', () => {
-    expect(deriveStatus({ enabled: true, hasRunningRun: false, lastRunStatus: 'success' })).toBe('active')
-    expect(deriveStatus({ enabled: true, hasRunningRun: false, lastRunStatus: null })).toBe('active')
+    expect(deriveStatus({ enabled: true, hasRunningRun: false, lastRunStatus: 'success' })).toBe(
+      'active'
+    )
+    expect(deriveStatus({ enabled: true, hasRunningRun: false, lastRunStatus: null })).toBe(
+      'active'
+    )
   })
 })

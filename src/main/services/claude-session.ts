@@ -9,7 +9,7 @@ import type {
   ToolProgressMessage,
   RateLimitEventMessage,
   BashOutputMessage,
-  ControlResponseMessage,
+  ControlResponseMessage
 } from '../sdk'
 import { v4 as uuid } from 'uuid'
 import * as fs from 'fs'
@@ -27,7 +27,13 @@ import { getContextWindowSize } from './context-window'
 import { usageFetcher } from './usage-fetcher'
 import { createMermaidServer } from './mermaid-tool'
 import { createMockupServer } from './mockup-tool'
-import { getClassifier, stopClassifier, isSafeTool, buildTranscript, type TranscriptMessage } from './auto-classifier'
+import {
+  getClassifier,
+  stopClassifier,
+  isSafeTool,
+  buildTranscript,
+  type TranscriptMessage
+} from './auto-classifier'
 import { resolveThinkingMode, type ThinkingMode } from '../../shared/model-capabilities'
 
 import { locateBunClaude, getCliVersion } from '../sdk'
@@ -66,7 +72,7 @@ export function getSdkExecutableOpts(): Record<string, unknown> {
     executable: bunClaude,
     executableArgs: [],
     standaloneExecutable: true,
-    env: {},
+    env: {}
   }
 }
 import type {
@@ -153,9 +159,15 @@ interface BackgroundPoller {
 
 export class ClaudeSession {
   private static extraWindows = new Set<BrowserWindow>()
-  static addExtraWindow(win: BrowserWindow): void { this.extraWindows.add(win) }
-  static removeExtraWindow(win: BrowserWindow): void { this.extraWindows.delete(win) }
-  static getExtraWindows(): Set<BrowserWindow> { return this.extraWindows }
+  static addExtraWindow(win: BrowserWindow): void {
+    this.extraWindows.add(win)
+  }
+  static removeExtraWindow(win: BrowserWindow): void {
+    this.extraWindows.delete(win)
+  }
+  static getExtraWindows(): Set<BrowserWindow> {
+    return this.extraWindows
+  }
 
   private sessionId: string | null = null
   private messageHistory: ChatMessage[] = []
@@ -224,14 +236,27 @@ export class ClaudeSession {
   private accTotalApiDurationMs = 0
   private lastContextLength = 0
 
-  constructor(routingId: string, win: BrowserWindow, cwd: string, effort?: string, resumeSessionId?: string, permissionMode?: string, model?: string, sandboxConfig?: SandboxSettings, thinkingMode?: string, resumeSessionAt?: string, forkSession?: boolean) {
+  constructor(
+    routingId: string,
+    win: BrowserWindow,
+    cwd: string,
+    effort?: string,
+    resumeSessionId?: string,
+    permissionMode?: string,
+    model?: string,
+    sandboxConfig?: SandboxSettings,
+    thinkingMode?: string,
+    resumeSessionAt?: string,
+    forkSession?: boolean
+  ) {
     this.routingId = routingId
     this.win = win
     this.cwd = cwd
     this.effort = effort || 'medium'
-    this.thinkingMode = (thinkingMode === 'adaptive' || thinkingMode === 'enabled' || thinkingMode === 'disabled')
-      ? thinkingMode
-      : 'adaptive'
+    this.thinkingMode =
+      thinkingMode === 'adaptive' || thinkingMode === 'enabled' || thinkingMode === 'disabled'
+        ? thinkingMode
+        : 'adaptive'
     this.resumeSessionId = resumeSessionId
     this.resumeSessionAt = resumeSessionAt
     this.forkSession = !!forkSession && !!resumeSessionAt
@@ -272,7 +297,10 @@ export class ClaudeSession {
     this.clearInactivityTimer()
     if (this.inactivityTimeoutMs > 0) {
       this.inactivityTimer = setTimeout(() => {
-        logger.info('ClaudeSession', `Idle timeout (${this.inactivityTimeoutMs / 60000} min) — auto-disconnecting`)
+        logger.info(
+          'ClaudeSession',
+          `Idle timeout (${this.inactivityTimeoutMs / 60000} min) — auto-disconnecting`
+        )
         this.cancel()
       }, this.inactivityTimeoutMs)
     }
@@ -290,7 +318,10 @@ export class ClaudeSession {
     return this.isProcessing
   }
 
-  async run(prompt: string | null, attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>): Promise<void> {
+  async run(
+    prompt: string | null,
+    attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
+  ): Promise<void> {
     this.clearInactivityTimer()
 
     // null prompt = spawn-only mode (for voice server, etc.)
@@ -405,10 +436,16 @@ export class ClaudeSession {
       }
 
       if (Object.keys(this._mcpAllServers).length > 0) {
-        logger.debug('ClaudeSession', `Loaded ${Object.keys(this._mcpAllServers).length} MCP server(s): ${Object.keys(this._mcpAllServers).join(', ')}`)
+        logger.debug(
+          'ClaudeSession',
+          `Loaded ${Object.keys(this._mcpAllServers).length} MCP server(s): ${Object.keys(this._mcpAllServers).join(', ')}`
+        )
       }
       if (this._mcpDisabledServers.size > 0) {
-        logger.debug('ClaudeSession', `Disabled MCP server(s) (from ~/.claude.json): ${[...this._mcpDisabledServers].join(', ')}`)
+        logger.debug(
+          'ClaudeSession',
+          `Disabled MCP server(s) (from ~/.claude.json): ${[...this._mcpDisabledServers].join(', ')}`
+        )
       }
 
       // Create in-process MCP servers for UI tools
@@ -449,58 +486,70 @@ You have mockup tools for creating visual UI prototypes that render inline in th
 Workflow: create_mockup → Edit the HTML file for changes (the preview auto-refreshes on file change — no need to call show_mockup after edits).
 The mockup appears as an interactive preview card with preview/code tabs and expand-to-panel support.`
           },
-          ...(this.sandboxConfig?.enabled ? {
-            sandbox: {
-              enabled: true,
-              autoAllowBashIfSandboxed: this.sandboxConfig.autoAllowBashIfSandboxed,
-              allowUnsandboxedCommands: this.sandboxConfig.allowUnsandboxedCommands,
-              excludedCommands: this.sandboxConfig.excludedCommands,
-              // Only pass network config when restrictions are needed.
-              // Omitting the network key entirely lets the SDK skip domain filtering,
-              // which is what "restrictNetwork: false" means.
-              ...(this.sandboxConfig.network.restrictNetwork ? {
-                network: {
-                  allowLocalBinding: this.sandboxConfig.network.allowLocalBinding,
-                  allowedDomains: this.sandboxConfig.network.allowedDomains,
-                  ...(this.sandboxConfig.network.allowManagedDomainsOnly
-                    ? { allowManagedDomainsOnly: true } : {}),
-                  ...(this.sandboxConfig.network.allowAllUnixSockets
-                    ? { allowAllUnixSockets: true } : {}),
-                  ...(this.sandboxConfig.network.allowUnixSockets.length > 0
-                    ? { allowUnixSockets: this.sandboxConfig.network.allowUnixSockets } : {})
+          ...(this.sandboxConfig?.enabled
+            ? {
+                sandbox: {
+                  enabled: true,
+                  autoAllowBashIfSandboxed: this.sandboxConfig.autoAllowBashIfSandboxed,
+                  allowUnsandboxedCommands: this.sandboxConfig.allowUnsandboxedCommands,
+                  excludedCommands: this.sandboxConfig.excludedCommands,
+                  // Only pass network config when restrictions are needed.
+                  // Omitting the network key entirely lets the SDK skip domain filtering,
+                  // which is what "restrictNetwork: false" means.
+                  ...(this.sandboxConfig.network.restrictNetwork
+                    ? {
+                        network: {
+                          allowLocalBinding: this.sandboxConfig.network.allowLocalBinding,
+                          allowedDomains: this.sandboxConfig.network.allowedDomains,
+                          ...(this.sandboxConfig.network.allowManagedDomainsOnly
+                            ? { allowManagedDomainsOnly: true }
+                            : {}),
+                          ...(this.sandboxConfig.network.allowAllUnixSockets
+                            ? { allowAllUnixSockets: true }
+                            : {}),
+                          ...(this.sandboxConfig.network.allowUnixSockets.length > 0
+                            ? { allowUnixSockets: this.sandboxConfig.network.allowUnixSockets }
+                            : {})
+                        }
+                      }
+                    : {
+                        // No network restrictions — only pass through binding/socket options if set
+                        ...(this.sandboxConfig.network.allowLocalBinding ||
+                        this.sandboxConfig.network.allowAllUnixSockets ||
+                        this.sandboxConfig.network.allowUnixSockets.length > 0
+                          ? {
+                              network: {
+                                allowLocalBinding: this.sandboxConfig.network.allowLocalBinding,
+                                ...(this.sandboxConfig.network.allowAllUnixSockets
+                                  ? { allowAllUnixSockets: true }
+                                  : {}),
+                                ...(this.sandboxConfig.network.allowUnixSockets.length > 0
+                                  ? {
+                                      allowUnixSockets: this.sandboxConfig.network.allowUnixSockets
+                                    }
+                                  : {})
+                              }
+                            }
+                          : {})
+                      }),
+                  filesystem: {
+                    ...(this.sandboxConfig.filesystem.allowWrite.length > 0
+                      ? { allowWrite: this.sandboxConfig.filesystem.allowWrite }
+                      : {}),
+                    ...(this.sandboxConfig.filesystem.denyWrite.length > 0
+                      ? { denyWrite: this.sandboxConfig.filesystem.denyWrite }
+                      : {}),
+                    ...(this.sandboxConfig.filesystem.denyRead.length > 0
+                      ? { denyRead: this.sandboxConfig.filesystem.denyRead }
+                      : {})
+                  }
                 }
-              } : {
-                // No network restrictions — only pass through binding/socket options if set
-                ...(this.sandboxConfig.network.allowLocalBinding ||
-                    this.sandboxConfig.network.allowAllUnixSockets ||
-                    this.sandboxConfig.network.allowUnixSockets.length > 0
-                  ? {
-                    network: {
-                      allowLocalBinding: this.sandboxConfig.network.allowLocalBinding,
-                      ...(this.sandboxConfig.network.allowAllUnixSockets
-                        ? { allowAllUnixSockets: true } : {}),
-                      ...(this.sandboxConfig.network.allowUnixSockets.length > 0
-                        ? { allowUnixSockets: this.sandboxConfig.network.allowUnixSockets } : {})
-                    }
-                  } : {})
-              }),
-              filesystem: {
-                ...(this.sandboxConfig.filesystem.allowWrite.length > 0
-                  ? { allowWrite: this.sandboxConfig.filesystem.allowWrite } : {}),
-                ...(this.sandboxConfig.filesystem.denyWrite.length > 0
-                  ? { denyWrite: this.sandboxConfig.filesystem.denyWrite } : {}),
-                ...(this.sandboxConfig.filesystem.denyRead.length > 0
-                  ? { denyRead: this.sandboxConfig.filesystem.denyRead } : {})
               }
-            }
-          } : {}),
+            : {}),
           settingSources: ['user', 'project', 'local'],
           settings: {
             permissions: {
-              allow: [
-                `Edit(${this.cwd}/.claude/ui/**)`,
-                `Write(${this.cwd}/.claude/ui/**)`,
-              ]
+              allow: [`Edit(${this.cwd}/.claude/ui/**)`, `Write(${this.cwd}/.claude/ui/**)`]
             }
           },
           mcpServers: {
@@ -534,7 +583,11 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
           // new branch's id differs from the source we resumed/truncated from.
           // Before init, fall back to the requested resume target (the source
           // session for a fork, or self for a plain historical resume).
-          ...(this.sessionId ? { resume: this.sessionId } : this.resumeSessionId ? { resume: this.resumeSessionId } : {}),
+          ...(this.sessionId
+            ? { resume: this.sessionId }
+            : this.resumeSessionId
+              ? { resume: this.resumeSessionId }
+              : {}),
           // Fork truncation applies only on the FIRST run, against the source
           // transcript. After init, sessionId is set and we resume the new
           // branch in place — no re-fork, no re-truncate.
@@ -570,7 +623,10 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
                 const classifier = getClassifier(this.routingId)
                 const result = await classifier.classify(toolName, input, transcript)
 
-                logger.debug('AutoClassifier', `${result.shouldBlock ? 'BLOCK' : 'ALLOW'} ${toolName}: ${result.reason}`)
+                logger.debug(
+                  'AutoClassifier',
+                  `${result.shouldBlock ? 'BLOCK' : 'ALLOW'} ${toolName}: ${result.reason}`
+                )
 
                 if (!result.shouldBlock) {
                   return { behavior: 'allow' as const, updatedInput: input }
@@ -580,7 +636,10 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
                 return { behavior: 'deny' as const, message: `Auto mode blocked: ${result.reason}` }
               } catch (err) {
                 // Classifier failed — fall through to manual approval
-                logger.warn('AutoClassifier', `Classifier failed for ${toolName}, falling back to manual approval: ${err}`)
+                logger.warn(
+                  'AutoClassifier',
+                  `Classifier failed for ${toolName}, falling back to manual approval: ${err}`
+                )
               }
             }
 
@@ -596,18 +655,20 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
               input,
               suggestions: opts.suggestions as PendingApproval['suggestions'],
               decisionReason: opts.decisionReason,
-              blockedPath: opts.blockedPath,
+              blockedPath: opts.blockedPath
             }
             this.send('session:approval-request', approval)
 
-            const { decision, answers, updatedPermissions } = await new Promise<ApprovalResult>((resolve) => {
-              this.pendingApprovals.set(requestId, { resolve })
+            const { decision, answers, updatedPermissions } = await new Promise<ApprovalResult>(
+              (resolve) => {
+                this.pendingApprovals.set(requestId, { resolve })
 
-              opts.signal.addEventListener('abort', () => {
-                this.pendingApprovals.delete(requestId)
-                resolve({ decision: 'deny' })
-              })
-            })
+                opts.signal.addEventListener('abort', () => {
+                  this.pendingApprovals.delete(requestId)
+                  resolve({ decision: 'deny' })
+                })
+              }
+            )
 
             this.pendingApprovals.delete(requestId)
 
@@ -619,7 +680,10 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
                 behavior: 'allow' as const,
                 updatedInput,
                 ...(updatedPermissions?.length
-                  ? { updatedPermissions: updatedPermissions as unknown as import('../sdk').PermissionUpdate[] }
+                  ? {
+                      updatedPermissions:
+                        updatedPermissions as unknown as import('../sdk').PermissionUpdate[]
+                    }
                   : {})
               }
             }
@@ -641,7 +705,8 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err)
       const stack = err instanceof Error ? err.stack : undefined
-      const stderrContext = stderrChunks.length > 0 ? `\nCollected stderr:\n${stderrChunks.join('\n')}` : ''
+      const stderrContext =
+        stderrChunks.length > 0 ? `\nCollected stderr:\n${stderrChunks.join('\n')}` : ''
       logger.error('ClaudeSession', `SDK error: ${errorMsg}${stderrContext}`, err)
       if (!errorMsg.includes('abort') && errorMsg !== '') {
         // Build a structured error message:
@@ -776,7 +841,10 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
 
         const mcpServers = sys.mcp_servers || []
         this._initMcpServers = mcpServers
-        logger.debug('ClaudeSession', `init mcp_servers (${mcpServers.length}): ${JSON.stringify(mcpServers).slice(0, 500)}`)
+        logger.debug(
+          'ClaudeSession',
+          `init mcp_servers (${mcpServers.length}): ${JSON.stringify(mcpServers).slice(0, 500)}`
+        )
         if (mcpServers.length > 0) {
           this.send('session:mcp-servers', mcpServers)
         }
@@ -833,7 +901,11 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
 
     if (delta.type === 'text_delta' && typeof delta.text === 'string') {
       if (routingId) {
-        this.send('session:subagent-stream', { toolUseId: routingId, type: 'text', text: delta.text })
+        this.send('session:subagent-stream', {
+          toolUseId: routingId,
+          type: 'text',
+          text: delta.text
+        })
       } else {
         this.send('session:stream', { type: 'text', text: delta.text })
       }
@@ -841,7 +913,11 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
     }
     if (delta.type === 'thinking_delta' && typeof delta.thinking === 'string') {
       if (routingId) {
-        this.send('session:subagent-stream', { toolUseId: routingId, type: 'thinking', text: delta.thinking })
+        this.send('session:subagent-stream', {
+          toolUseId: routingId,
+          type: 'thinking',
+          text: delta.thinking
+        })
       } else {
         this.send('session:stream', { type: 'thinking', text: delta.thinking })
       }
@@ -853,7 +929,7 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
       toolUseId: msg.tool_use_id || '',
       toolName: msg.tool_name || '',
       parentToolUseId: msg.parent_tool_use_id ?? null,
-      elapsedTimeSeconds: msg.elapsed_time_seconds || 0,
+      elapsedTimeSeconds: msg.elapsed_time_seconds || 0
     })
   }
 
@@ -906,7 +982,10 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
         ? `${msg.original_model || 'The model'} refused this request — switched to ${msg.fallback_model || 'a fallback model'} for the rest of the session.`
         : `${msg.original_model || 'The model'} is unavailable — using ${msg.fallback_model || 'a fallback model'} for this turn.`
     const text = msg.content || fallbackText
-    logger.warn('ClaudeSession', `${msg.subtype}: ${msg.original_model} -> ${msg.fallback_model} (trigger=${msg.trigger})`)
+    logger.warn(
+      'ClaudeSession',
+      `${msg.subtype}: ${msg.original_model} -> ${msg.fallback_model} (trigger=${msg.trigger})`
+    )
     this.send('session:warning', text)
 
     // Refusal retraction: evict the refused partial (and its tombstoned tool
@@ -978,7 +1057,7 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
       status: normalized,
       outputFile: this.backgroundFilePaths.get(toolUseId) || '',
       summary: '',
-      usage: undefined,
+      usage: undefined
     })
   }
 
@@ -997,7 +1076,7 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
       ? {
           totalTokens: rawUsage.total_tokens || 0,
           toolUses: rawUsage.tool_uses || 0,
-          durationMs: rawUsage.duration_ms || 0,
+          durationMs: rawUsage.duration_ms || 0
         }
       : undefined
 
@@ -1007,7 +1086,7 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
       status: msg.status || 'completed',
       outputFile,
       summary: msg.summary || '',
-      usage,
+      usage
     })
   }
 
@@ -1015,9 +1094,7 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
     const response = msg.response
     if (!response || response.subtype !== 'error') return
     const errText =
-      typeof response.error === 'string'
-        ? response.error
-        : JSON.stringify(response.error, null, 2)
+      typeof response.error === 'string' ? response.error : JSON.stringify(response.error, null, 2)
     logger.error('ClaudeSession', `Control response error: ${errText}`)
     this.send('session:error', `SDK control error: ${errText}`)
   }
@@ -1039,7 +1116,7 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
       toolUseId,
       output: msg.output || '',
       totalLines: msg.total_lines || 0,
-      totalBytes: msg.total_bytes || 0,
+      totalBytes: msg.total_bytes || 0
     })
   }
 
@@ -1056,9 +1133,7 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
       if (!this.wasInterrupted) {
         const errors = msg.errors || []
         const stderrContext =
-          stderrChunks.length > 0
-            ? '\n\nCLI stderr:\n' + stderrChunks.slice(-20).join('\n')
-            : ''
+          stderrChunks.length > 0 ? '\n\nCLI stderr:\n' + stderrChunks.slice(-20).join('\n') : ''
         if (errors.length) {
           logger.error('ClaudeSession', `Result error: ${errors.join('; ')}`)
           this.send('session:error', errors.join('; ') + stderrContext)
@@ -1080,7 +1155,7 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
       totalCostUsd: this.totalCostUsd,
       durationMs: resultDurationMs,
       result: msg.result || '',
-      sessionId: this.sessionId,
+      sessionId: this.sessionId
     })
     this.sendStatus()
     this.resetInactivityTimer()
@@ -1131,7 +1206,7 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
       return
     }
 
-this.permissionMode = mode
+    this.permissionMode = mode
     this.send('session:permission-mode', mode)
     if (this.activeQuery) {
       try {
@@ -1182,7 +1257,8 @@ this.permissionMode = mode
    * `adaptive` is auto-coerced to `enabled` when the model lacks adaptive support
    * (older models would otherwise reject the request).
    */
-  private buildThinkingConfig(): { type: 'adaptive'; display: 'summarized' }
+  private buildThinkingConfig():
+    | { type: 'adaptive'; display: 'summarized' }
     | { type: 'enabled'; display: 'summarized' }
     | { type: 'disabled' } {
     const resolved: ThinkingMode = resolveThinkingMode(this.model, this.thinkingMode)
@@ -1221,7 +1297,7 @@ this.permissionMode = mode
     const pending = this.activeQueryPromise
     if (!pending) throw new Error('SDK session did not initialize a query promise')
     const deadline = new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error('Timed out waiting for SDK session to start')), 15_000),
+      setTimeout(() => reject(new Error('Timed out waiting for SDK session to start')), 15_000)
     )
     await Promise.race([pending, deadline])
   }
@@ -1364,16 +1440,22 @@ this.permissionMode = mode
 
   async mcpServerStatus(): Promise<unknown[]> {
     if (!this.activeQuery) {
-      logger.debug('ClaudeSession', 'mcpServerStatus: no activeQuery, returning cached init servers')
+      logger.debug(
+        'ClaudeSession',
+        'mcpServerStatus: no activeQuery, returning cached init servers'
+      )
       return this._initMcpServers
     }
     try {
       const result = await this.activeQuery.mcpServerStatus()
       // Log each server's name and status for debugging
       const summary = Array.isArray(result)
-        ? (result as Array<Record<string, unknown>>).map(s => `${s.name}:${s.status}`).join(', ')
+        ? (result as Array<Record<string, unknown>>).map((s) => `${s.name}:${s.status}`).join(', ')
         : 'not-array'
-      logger.debug('ClaudeSession', `mcpServerStatus: ${Array.isArray(result) ? result.length : 0} servers → [${summary}]`)
+      logger.debug(
+        'ClaudeSession',
+        `mcpServerStatus: ${Array.isArray(result) ? result.length : 0} servers → [${summary}]`
+      )
       logger.debug('ClaudeSession', `mcpServerStatus raw: ${JSON.stringify(result).slice(0, 1000)}`)
       return result
     } catch (err) {
@@ -1409,17 +1491,23 @@ this.permissionMode = mode
 
     // Verify the toggle had the expected effect
     if (enabled && postDis.includes(serverName)) {
-      logger.error('ClaudeSession', `mcpToggle BUG: enabled=${enabled} but ${serverName} is still in disabledMcpServers!`)
+      logger.error(
+        'ClaudeSession',
+        `mcpToggle BUG: enabled=${enabled} but ${serverName} is still in disabledMcpServers!`
+      )
     }
     if (!enabled && !postDis.includes(serverName)) {
-      logger.error('ClaudeSession', `mcpToggle BUG: enabled=${enabled} but ${serverName} is NOT in disabledMcpServers!`)
+      logger.error(
+        'ClaudeSession',
+        `mcpToggle BUG: enabled=${enabled} but ${serverName} is NOT in disabledMcpServers!`
+      )
     }
 
     // Also query status to see the SDK's view
     try {
       const status = await this.activeQuery.mcpServerStatus()
       const summary = Array.isArray(status)
-        ? (status as Array<Record<string, unknown>>).map(s => `${s.name}:${s.status}`).join(', ')
+        ? (status as Array<Record<string, unknown>>).map((s) => `${s.name}:${s.status}`).join(', ')
         : 'not-array'
       logger.debug('ClaudeSession', `mcpToggle POST-STATUS: [${summary}]`)
     } catch {
@@ -1436,7 +1524,7 @@ this.permissionMode = mode
     try {
       const status = await this.activeQuery.mcpServerStatus()
       const summary = Array.isArray(status)
-        ? (status as Array<Record<string, unknown>>).map(s => `${s.name}:${s.status}`).join(', ')
+        ? (status as Array<Record<string, unknown>>).map((s) => `${s.name}:${s.status}`).join(', ')
         : 'not-array'
       logger.debug('ClaudeSession', `mcpReconnect POST-STATUS: [${summary}]`)
     } catch {
@@ -1451,7 +1539,7 @@ this.permissionMode = mode
     // McpServerConfig is a loose bag, the SDK layer uses a discriminated
     // union. Trust the SDK's splitMcpServers() + cli.js to validate.
     const result = await this.activeQuery.setMcpServers(
-      servers as unknown as Parameters<QueryHandle['setMcpServers']>[0],
+      servers as unknown as Parameters<QueryHandle['setMcpServers']>[0]
     )
     logger.debug('ClaudeSession', `mcpSetServers result: ${JSON.stringify(result).slice(0, 500)}`)
     return result
@@ -1476,7 +1564,7 @@ this.permissionMode = mode
         sessionId: this.sessionId,
         model: (msg.model as string) || this.model || 'unknown',
         usage,
-        cwd: this.cwd,
+        cwd: this.cwd
       }
 
       fs.appendFileSync(logPath, JSON.stringify(entry) + '\n', { mode: 0o600 })
@@ -1524,7 +1612,8 @@ this.permissionMode = mode
   /** Build StatusLineData from in-memory accumulators (zero I/O) */
   private buildStatusLineFromAccumulators(): import('../../shared/types').StatusLineData {
     const ctxWindow = this.contextWindowSize
-    const usedPct = this.lastContextLength > 0 ? Math.round((this.lastContextLength / ctxWindow) * 100) : null
+    const usedPct =
+      this.lastContextLength > 0 ? Math.round((this.lastContextLength / ctxWindow) * 100) : null
     return {
       totalCostUsd: this.totalCostUsd,
       totalDurationMs: this.accTotalDurationMs,
@@ -1570,7 +1659,8 @@ this.permissionMode = mode
 
     // Fallback: find the most recently modified .md file in plans dir
     try {
-      const files = fs.readdirSync(plansDir)
+      const files = fs
+        .readdirSync(plansDir)
         .filter((f) => f.endsWith('.md'))
         .map((f) => {
           const full = path.join(plansDir, f)
@@ -1588,7 +1678,12 @@ this.permissionMode = mode
     return null
   }
 
-  resolveApproval(requestId: string, decision: ApprovalDecision, answers?: Record<string, string>, updatedPermissions?: PermissionSuggestion[]): void {
+  resolveApproval(
+    requestId: string,
+    decision: ApprovalDecision,
+    answers?: Record<string, string>,
+    updatedPermissions?: PermissionSuggestion[]
+  ): void {
     const entry = this.pendingApprovals.get(requestId)
     if (entry) {
       entry.resolve({ decision, answers, updatedPermissions })
@@ -1836,13 +1931,13 @@ this.permissionMode = mode
           toolUseId: parentToolUseId,
           toolResultToolUseId: toolUseId,
           result: resultText,
-          isError: !!(b.is_error)
+          isError: !!b.is_error
         })
       } else {
         this.send('session:tool-result', {
           toolUseId,
           result: resultText,
-          isError: !!(b.is_error)
+          isError: !!b.is_error
         })
       }
 

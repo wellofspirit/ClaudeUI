@@ -75,6 +75,7 @@ Fast visual mockups with zero build step. Claude generates HTML + Tailwind, rend
 Bundle a **full pre-built Tailwind CSS** stylesheet (~300KB minified) as a static asset. No CDN, no JIT, no trimming.
 
 Rationale:
+
 - **ClaudeUI already uses Tailwind** — mockup utility classes match real app code exactly
 - **Zero mockup→implementation gap** — `class="flex gap-4 p-6"` in the mockup becomes `className="flex gap-4 p-6"` in JSX, done
 - **No component library mismatch** — no third-party classes to rewrite when shipping
@@ -87,6 +88,7 @@ The `create_mockup` tool wraps the user's HTML in a template that includes the b
 ### Rendering
 
 **Inline (chat)**: Sandboxed iframe using `srcdoc`, fixed preview height (~300px), with title bar showing the mockup title and buttons:
+
 - **Expand** — opens in right panel
 - **Copy HTML** — copies the raw HTML to clipboard
 - **Open directory** — reveals the mockup directory in finder/explorer
@@ -94,6 +96,7 @@ The `create_mockup` tool wraps the user's HTML in a template that includes the b
 Sandbox attributes: `sandbox` only (no `allow-scripts` needed — pure CSS, no JS).
 
 **Expanded (right panel)**: New right panel mode `rightPanel: 'mockup'`. Full-height iframe with:
+
 - Device frame toggle: mobile (375px) / tablet (768px) / desktop (100%)
 - Zoom controls
 - "Copy HTML" button
@@ -127,23 +130,24 @@ Edit tool on index.html (standard Claude behavior)
 
 ### New Files
 
-| File | Purpose |
-|------|---------|
-| `src/main/services/mockup-tool.ts` | MCP tool server (`create_mockup`, `show_mockup`) |
-| `src/renderer/src/components/chat/MockupPreviewCard.tsx` | Inline chat card with iframe preview |
-| `src/renderer/src/components/MockupPanel.tsx` | Right panel full-size preview with device frames |
-| `src/renderer/src/assets/tailwind-full.css` | Pre-built full Tailwind CSS (static asset) |
+| File                                                     | Purpose                                          |
+| -------------------------------------------------------- | ------------------------------------------------ |
+| `src/main/services/mockup-tool.ts`                       | MCP tool server (`create_mockup`, `show_mockup`) |
+| `src/renderer/src/components/chat/MockupPreviewCard.tsx` | Inline chat card with iframe preview             |
+| `src/renderer/src/components/MockupPanel.tsx`            | Right panel full-size preview with device frames |
+| `src/renderer/src/assets/tailwind-full.css`              | Pre-built full Tailwind CSS (static asset)       |
 
 ### Store Changes
 
 ```ts
 // session-store.ts additions
 rightPanel: 'none' | 'task' | 'git' | 'plan' | 'mockup'
-mockupDir: string | null          // current expanded mockup directory ID
+mockupDir: string | null // current expanded mockup directory ID
 mockupTitle: string | null
 ```
 
 ### Pros
+
 - Token-efficient — initial creation + surgical edits, no full regeneration
 - Persistent on disk — survives session restarts, browsable in file explorer
 - Tailwind classes translate directly to real implementation
@@ -151,6 +155,7 @@ mockupTitle: string | null
 - Simple mental model — it's just files
 
 ### Cons
+
 - Limited interactivity (no JS in sandbox — pure visual mockups)
 - Requires `show_mockup` call after edits to refresh the preview (no live file watching in Phase 1)
 
@@ -178,6 +183,7 @@ Same directory structure as Solution 1, but with `.jsx`/`.tsx` files instead of 
 ### Runtime
 
 **react-live** (MIT, by Formidable Labs):
+
 - Takes JSX string → transpiles with Sucrase → renders in React tree
 - ~200KB added dependency (Sucrase)
 - Built-in error boundary — bad JSX shows error message, not crash
@@ -189,9 +195,13 @@ Provide a curated scope of available components/hooks to the renderer:
 
 ```ts
 const scope = {
-  useState, useEffect, useRef, useCallback, useMemo,
+  useState,
+  useEffect,
+  useRef,
+  useCallback,
+  useMemo
   // Our Tailwind is already available (rendered in our React tree)
-};
+}
 ```
 
 Since this renders in our React tree, our own Tailwind styles apply — no separate CSS bundle needed. The mockup looks and behaves exactly like the real app would.
@@ -201,24 +211,25 @@ Since this renders in our React tree, our own Tailwind styles apply — no separ
 **Inline (chat)**: Same `MockupPreviewCard`, but using react-live renderer instead of iframe when mode is `react`.
 
 **Right panel**: Extends `MockupPanel` with:
+
 - Code editor pane (side-by-side or toggle) for manual tweaks — changes render live
 - Component file selector (if multiple files in mockup dir)
 - File watcher — edits from Claude or external editor trigger re-render
 
 ### New Dependencies
 
-| Package | Size | Purpose |
-|---------|------|---------|
-| `react-live` | ~50KB | JSX string → live React render |
-| `sucrase` | ~200KB | Fast JSX transpilation (peer dep of react-live) |
+| Package      | Size   | Purpose                                         |
+| ------------ | ------ | ----------------------------------------------- |
+| `react-live` | ~50KB  | JSX string → live React render                  |
+| `sucrase`    | ~200KB | Fast JSX transpilation (peer dep of react-live) |
 
 ### New Files (Phase 2 additions)
 
-| File | Purpose |
-|------|---------|
-| `src/main/services/mockup-watcher.ts` | File watcher for mockup directory |
+| File                                           | Purpose                           |
+| ---------------------------------------------- | --------------------------------- |
+| `src/main/services/mockup-watcher.ts`          | File watcher for mockup directory |
 | `src/renderer/src/components/MockupEditor.tsx` | Code editor pane for live editing |
-| `src/renderer/src/lib/mockup-scope.ts` | react-live scope definition |
+| `src/renderer/src/lib/mockup-scope.ts`         | react-live scope definition       |
 
 ### Store Changes (extends Phase 1)
 
@@ -229,6 +240,7 @@ mockupActiveFile: string | null   // currently selected file in editor
 ```
 
 ### Pros
+
 - Stateful interactive prototypes (useState, effects)
 - File-backed = persistent, version-controlled, editable in external tools
 - Uses our own Tailwind — styling is 1:1 with real app
@@ -236,6 +248,7 @@ mockupActiveFile: string | null   // currently selected file in editor
 - Composable — can build multi-component prototypes
 
 ### Cons
+
 - More complex implementation
 - react-live has limitations (no imports, single-file scope)
 - Need to define and maintain the component scope
@@ -245,6 +258,7 @@ mockupActiveFile: string | null   // currently selected file in editor
 ## Implementation Order
 
 ### Phase 1: HTML Mockup (file-backed)
+
 1. Generate and bundle full Tailwind CSS as static asset
 2. `mockup-tool.ts` — MCP tool server with `create_mockup` + `show_mockup`
 3. `MockupPreviewCard.tsx` — inline chat card with sandboxed iframe + inlined Tailwind
@@ -252,6 +266,7 @@ mockupActiveFile: string | null   // currently selected file in editor
 5. Store additions for mockup state
 
 ### Phase 2: React Live Preview
+
 1. Add `react-live` + `sucrase` dependencies
 2. Extend `create_mockup` with `mode: 'react'`
 3. `MockupEditor.tsx` — code editor with live preview
@@ -260,6 +275,7 @@ mockupActiveFile: string | null   // currently selected file in editor
 6. Extend right panel with code editor + file selector
 
 ### Phase 3: Polish
+
 1. Device frame presets with smooth transitions
 2. Export mockup as standalone HTML / React component
 3. Mockup history — browse previous mockup directories

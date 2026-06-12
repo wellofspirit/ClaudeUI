@@ -22,7 +22,7 @@ export function createSdkMcpServer(opts: {
 }): SdkMcpServer {
   const instance = new McpServer(
     { name: opts.name, version: opts.version ?? '0.0.0' },
-    { capabilities: { tools: {} } },
+    { capabilities: { tools: {} } }
   )
 
   for (const t of opts.tools) {
@@ -31,7 +31,7 @@ export function createSdkMcpServer(opts: {
       t.name,
       {
         description: t.description,
-        inputSchema: t.inputSchema as unknown as Record<string, z.ZodTypeAny>,
+        inputSchema: t.inputSchema as unknown as Record<string, z.ZodTypeAny>
       },
       // MCP's ToolCallback receives parsed-validated args as the first param.
       async (args: Record<string, unknown>) => {
@@ -39,7 +39,7 @@ export function createSdkMcpServer(opts: {
         return result as Parameters<Parameters<typeof instance.registerTool>[2]>[0] extends never
           ? never
           : { content: ToolResultContent['content']; isError?: boolean }
-      },
+      }
     )
   }
 
@@ -48,7 +48,7 @@ export function createSdkMcpServer(opts: {
     name: opts.name,
     version: opts.version,
     tools: opts.tools,
-    instance,
+    instance
   }
 }
 
@@ -62,12 +62,12 @@ export function tool<Shape extends Record<string, z.ZodTypeAny>>(
   name: string,
   description: string,
   inputSchema: Shape,
-  handler: (input: ToolInput<Shape>) => Promise<ToolResultContent>,
+  handler: (input: ToolInput<Shape>) => Promise<ToolResultContent>
 ): SdkMcpTool {
   return {
     name,
     description,
     inputSchema: inputSchema as unknown as SdkMcpTool['inputSchema'],
-    handler: handler as unknown as SdkMcpTool['handler'],
+    handler: handler as unknown as SdkMcpTool['handler']
   }
 }

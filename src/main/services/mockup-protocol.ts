@@ -254,10 +254,17 @@ export interface ServedMockup {
  * the server origin for HTTP. Asset responses carry `Access-Control-Allow-Origin: *`
  * because the web client's sandboxed iframe loads them from an opaque origin.
  */
-export async function serveMockup(decision: RouteDecision, selfSource: string): Promise<ServedMockup> {
+export async function serveMockup(
+  decision: RouteDecision,
+  selfSource: string
+): Promise<ServedMockup> {
   try {
     if (decision.kind === 'error') {
-      return { status: decision.status, headers: { 'Content-Type': 'text/plain; charset=utf-8' }, body: decision.reason }
+      return {
+        status: decision.status,
+        headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+        body: decision.reason
+      }
     }
 
     if (decision.kind === 'html') {
@@ -265,7 +272,11 @@ export async function serveMockup(decision: RouteDecision, selfSource: string): 
       try {
         html = await fs.promises.readFile(join(decision.mockupDir, 'index.html'), 'utf-8')
       } catch {
-        return { status: 404, headers: { 'Content-Type': 'text/plain; charset=utf-8' }, body: 'Not found' }
+        return {
+          status: 404,
+          headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+          body: 'Not found'
+        }
       }
       html = rewriteHtml(html, decision.dark)
       return {
@@ -284,7 +295,11 @@ export async function serveMockup(decision: RouteDecision, selfSource: string): 
     try {
       body = await fs.promises.readFile(decision.path)
     } catch {
-      return { status: 404, headers: { 'Content-Type': 'text/plain; charset=utf-8' }, body: 'Not found' }
+      return {
+        status: 404,
+        headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+        body: 'Not found'
+      }
     }
     return {
       status: 200,
@@ -301,7 +316,11 @@ export async function serveMockup(decision: RouteDecision, selfSource: string): 
       body
     }
   } catch {
-    return { status: 500, headers: { 'Content-Type': 'text/plain; charset=utf-8' }, body: 'Server error' }
+    return {
+      status: 500,
+      headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+      body: 'Server error'
+    }
   }
 }
 

@@ -104,11 +104,13 @@ describe('deleteProjectFiles', () => {
 describe('IPC handler signature (session:delete-session, session:delete-project)', () => {
   // Lift the same closures the IPC file registers. Kept minimal: we want to
   // lock in the (_e, ...args) contract, not re-test the whole IPC module.
-  const makeSessionHandler = () =>
+  const makeSessionHandler =
+    () =>
     async (_e: unknown, sessionId: string, projectKey: string): Promise<void> => {
       await deleteSessionFiles(sessionId, projectKey, root)
     }
-  const makeProjectHandler = () =>
+  const makeProjectHandler =
+    () =>
     async (_e: unknown, projectKey: string): Promise<void> => {
       await deleteProjectFiles(projectKey, root)
     }
@@ -153,8 +155,10 @@ describe('IPC handler signature (session:delete-session, session:delete-project)
       path.resolve(__dirname, '../../ipc/session.ipc.ts'),
       'utf8'
     )
-    const sessionRegistration = /ipcMain\.handle\(\s*['"]session:delete-session['"]\s*,\s*safeHandler\(\s*async\s*\(\s*_e\s*:/
-    const projectRegistration = /ipcMain\.handle\(\s*['"]session:delete-project['"]\s*,\s*safeHandler\(\s*async\s*\(\s*_e\s*:/
+    const sessionRegistration =
+      /ipcMain\.handle\(\s*['"]session:delete-session['"]\s*,\s*safeHandler\(\s*async\s*\(\s*_e\s*:/
+    const projectRegistration =
+      /ipcMain\.handle\(\s*['"]session:delete-project['"]\s*,\s*safeHandler\(\s*async\s*\(\s*_e\s*:/
     expect(src).toMatch(sessionRegistration)
     expect(src).toMatch(projectRegistration)
   })

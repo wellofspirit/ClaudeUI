@@ -2,11 +2,11 @@
 
 Three independent cancellation tiers. Understanding the split is crucial — they trigger differently and have different reach.
 
-| Tier | Who triggers it | Reach |
-|---|---|---|
-| **Query-wide** | Host (us) — `AbortController.abort()` or `SIGTERM` | Whole query, including the subprocess |
-| **Per-inbound-request** | cli.js → us — `control_cancel_request{request_id}` | One specific inbound handler (canUseTool, hook, elicitation, oauth, user_dialog) |
-| **Per-outbound-request** | Host (us) — request timeout or manual | One specific outbound control_request |
+| Tier                     | Who triggers it                                    | Reach                                                                            |
+| ------------------------ | -------------------------------------------------- | -------------------------------------------------------------------------------- |
+| **Query-wide**           | Host (us) — `AbortController.abort()` or `SIGTERM` | Whole query, including the subprocess                                            |
+| **Per-inbound-request**  | cli.js → us — `control_cancel_request{request_id}` | One specific inbound handler (canUseTool, hook, elicitation, oauth, user_dialog) |
+| **Per-outbound-request** | Host (us) — request timeout or manual              | One specific outbound control_request                                            |
 
 ---
 
@@ -28,6 +28,7 @@ ac.abort()
 ```
 
 Internals:
+
 1. `ac.signal` abort listener fires inside `query.ts`.
 2. `child.kill('SIGTERM')` sent to cli.js subprocess.
 3. cli.js exits (UNIX: SIGTERM default; Windows: TerminateProcess).
@@ -61,6 +62,7 @@ cli.js sends us `control_request` messages (can_use_tool, hook_callback, elicita
 ```
 
 Our harness handles this:
+
 1. `ControlChannel.cancelInbound(request_id)` fires the AbortController registered at `beginInbound(request_id)`.
 2. The `signal` we passed into the callback context (`canUseTool`, hook callback, `onElicitation`, `getOAuthToken`, `onUserDialog`) transitions to aborted.
 3. The consumer's handler observes `signal.aborted` and bails (e.g., dismiss the UI prompt without user action).
@@ -83,6 +85,7 @@ try {
 ### What should the consumer do?
 
 When `signal.aborted` fires mid-callback:
+
 1. **If UI is shown**: dismiss it. User should not be left with a stale prompt.
 2. **If already computing**: bail out via `throw new Error(...)` or return a sentinel.
 3. **Do NOT send a control_response** — cli.js has discarded its expectation. Sending one is benign (we wrap in try/finally), but wasteful.
@@ -92,6 +95,7 @@ Our harness catches the `abort` exception and invokes `respondError(request_id, 
 ### Concrete scenario
 
 User triggers agent → agent calls Bash → we show permission prompt. User presses `interrupt` in the UI. ClaudeUI sends `queryHandle.interrupt()` (outbound `control_request { subtype: 'interrupt' }`). cli.js:
+
 1. Handles the interrupt, stops the current turn.
 2. Fires `control_cancel_request` for any outstanding `can_use_tool` it had sent us.
 3. Our `canUseTool` context's `signal.aborted` flips.
@@ -103,17 +107,18 @@ User triggers agent → agent calls Bash → we show permission prompt. User pre
 
 `ControlChannel.request(payload, { timeoutMs })` in `src/main/sdk/control.ts`. Default **30 s**. Configurable per-call.
 
-| Subtype | Timeout | Reason |
-|---|---|---|
-| `initialize` | 60 s | First-run model listing / plugin scan can be slow |
-| `mcp_authenticate` | 0 (disabled) | Blocks on user completing OAuth in browser |
-| `claude_authenticate` | 0 | Same — browser-driven OAuth |
-| `claude_oauth_callback` | 0 | Long-lived completion |
-| `claude_oauth_wait_for_completion` | 0 | Explicit wait |
-| `end_session` | 5 s | Short — cli.js should drain fast |
-| Everything else | 30 s | Default |
+| Subtype                            | Timeout      | Reason                                            |
+| ---------------------------------- | ------------ | ------------------------------------------------- |
+| `initialize`                       | 60 s         | First-run model listing / plugin scan can be slow |
+| `mcp_authenticate`                 | 0 (disabled) | Blocks on user completing OAuth in browser        |
+| `claude_authenticate`              | 0            | Same — browser-driven OAuth                       |
+| `claude_oauth_callback`            | 0            | Long-lived completion                             |
+| `claude_oauth_wait_for_completion` | 0            | Explicit wait                                     |
+| `end_session`                      | 5 s          | Short — cli.js should drain fast                  |
+| Everything else                    | 30 s         | Default                                           |
 
 When a timeout fires:
+
 1. The pending entry is removed from `pending: Map<request_id, PendingRequest>`.
 2. The Promise rejects with `Error('control_request <subtype> (<id>) timed out after <ms>ms')`.
 3. cli.js's response, if it ever arrives, is silently dropped by `handleResponse()` (no matching pending entry).
@@ -137,6 +142,7 @@ child.on('exit', () => {
 ```
 
 `rejectAll()`:
+
 - Iterates `pending` map, calls each entry's `reject(new Error('cli.js exited'))` after clearing its timer.
 - Clears the map.
 - Calls `abortAllInbound()` — every outstanding inbound handler's AbortSignal fires.
@@ -163,11 +169,11 @@ Net effect: every Promise tied to the query resolves/rejects. No leaks. The cons
 
 ## 11.6 Interrupt vs end_session vs SIGTERM
 
-| Action | Turn-in-progress | Subprocess | Recommended use |
-|---|---|---|---|
-| `interrupt()` | Cancels | Stays alive | Mid-turn user interrupt; allow the agent to finish cleanup |
-| `endSession()` | Cancels cleanly, drains output | Exits code 0 | Normal session shutdown |
-| `AbortController.abort()` | Killed abruptly | SIGTERM | Unclean shutdown (window close, quit) |
-| `child.kill('SIGKILL')` | Killed instantly | Force killed | Never — we have no path that issues this |
+| Action                    | Turn-in-progress               | Subprocess   | Recommended use                                            |
+| ------------------------- | ------------------------------ | ------------ | ---------------------------------------------------------- |
+| `interrupt()`             | Cancels                        | Stays alive  | Mid-turn user interrupt; allow the agent to finish cleanup |
+| `endSession()`            | Cancels cleanly, drains output | Exits code 0 | Normal session shutdown                                    |
+| `AbortController.abort()` | Killed abruptly                | SIGTERM      | Unclean shutdown (window close, quit)                      |
+| `child.kill('SIGKILL')`   | Killed instantly               | Force killed | Never — we have no path that issues this                   |
 
 The happy path for most interactions is `interrupt()` for mid-turn cancellation and `endSession()` for cleanup. SIGTERM is the last-resort safety net.

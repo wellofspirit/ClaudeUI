@@ -19,7 +19,7 @@ export function initEvent(sessionId: string, overrides?: Record<string, unknown>
     tools: [],
     mcp_servers: [],
     permission_mode: 'default',
-    ...overrides,
+    ...overrides
   }
 }
 
@@ -30,7 +30,7 @@ export function streamTextEvent(text: string): SDKMessage {
   return {
     type: 'stream_event',
     subtype: 'text',
-    text,
+    text
   }
 }
 
@@ -41,7 +41,7 @@ export function streamThinkingEvent(text: string): SDKMessage {
   return {
     type: 'stream_event',
     subtype: 'thinking',
-    text,
+    text
   }
 }
 
@@ -50,7 +50,13 @@ export function streamThinkingEvent(text: string): SDKMessage {
  */
 export function assistantMessageEvent(
   sessionId: string,
-  content: Array<{ type: string; text?: string; id?: string; name?: string; input?: Record<string, unknown> }>,
+  content: Array<{
+    type: string
+    text?: string
+    id?: string
+    name?: string
+    input?: Record<string, unknown>
+  }>,
   messageId?: string
 ): SDKMessage {
   return {
@@ -62,8 +68,8 @@ export function assistantMessageEvent(
       role: 'assistant',
       content,
       model: 'claude-sonnet-4-6',
-      usage: { input_tokens: 100, output_tokens: 50 },
-    },
+      usage: { input_tokens: 100, output_tokens: 50 }
+    }
   }
 }
 
@@ -75,8 +81,8 @@ export function userMessageEvent(content: string): SDKMessage {
     type: 'user',
     message: {
       role: 'user',
-      content: [{ type: 'text', text: content }],
-    },
+      content: [{ type: 'text', text: content }]
+    }
   }
 }
 
@@ -90,7 +96,7 @@ export function resultEvent(sessionId: string, overrides?: Record<string, unknow
     result: 'success',
     duration_ms: 1000,
     total_cost_usd: 0.001,
-    ...overrides,
+    ...overrides
   }
 }
 
@@ -102,7 +108,7 @@ export function statusEvent(sessionId: string, state: 'running' | 'idle' = 'runn
     type: 'system',
     subtype: 'status',
     session_id: sessionId,
-    state,
+    state
   }
 }
 
@@ -120,7 +126,7 @@ export function textResponseSequence(sessionId: string, responseText: string): S
     streamTextEvent(responseText.slice(0, Math.ceil(responseText.length / 2))),
     streamTextEvent(responseText.slice(Math.ceil(responseText.length / 2))),
     assistantMessageEvent(sessionId, [{ type: 'text', text: responseText }]),
-    resultEvent(sessionId),
+    resultEvent(sessionId)
   ]
 }
 
@@ -140,34 +146,38 @@ export function toolUseSequence(
     initEvent(sessionId),
     // Assistant decides to use a tool
     assistantMessageEvent(sessionId, [
-      { type: 'tool_use', id: toolUseId, name: toolName, input: toolInput },
+      { type: 'tool_use', id: toolUseId, name: toolName, input: toolInput }
     ]),
     // After approval, user message with tool result
     {
       type: 'user',
       message: {
         role: 'user',
-        content: [{ type: 'tool_result', tool_use_id: toolUseId, content: toolResult }],
-      },
+        content: [{ type: 'tool_result', tool_use_id: toolUseId, content: toolResult }]
+      }
     },
     // Assistant responds with text
     assistantMessageEvent(sessionId, [{ type: 'text', text: responseText }]),
-    resultEvent(sessionId),
+    resultEvent(sessionId)
   ]
 }
 
 /**
  * A conversation with thinking blocks.
  */
-export function thinkingSequence(sessionId: string, thinking: string, responseText: string): SDKMessage[] {
+export function thinkingSequence(
+  sessionId: string,
+  thinking: string,
+  responseText: string
+): SDKMessage[] {
   return [
     initEvent(sessionId),
     streamThinkingEvent(thinking),
     streamTextEvent(responseText),
     assistantMessageEvent(sessionId, [
       { type: 'thinking', text: thinking },
-      { type: 'text', text: responseText },
+      { type: 'text', text: responseText }
     ]),
-    resultEvent(sessionId),
+    resultEvent(sessionId)
   ]
 }

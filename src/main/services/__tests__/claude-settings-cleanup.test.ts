@@ -17,11 +17,10 @@ import * as fs from 'fs'
 import * as path from 'path'
 
 const hoisted = vi.hoisted(() => {
-   
   const realFs = require('fs') as typeof import('fs')
-   
+
   const realOs = require('os') as typeof import('os')
-   
+
   const realPath = require('path') as typeof import('path')
   const home = realFs.mkdtempSync(realPath.join(realOs.tmpdir(), 'claudeui-cleanup-test-'))
   return { TEST_HOME: home }

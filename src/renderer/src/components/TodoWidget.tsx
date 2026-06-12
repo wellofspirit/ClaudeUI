@@ -10,14 +10,20 @@ function StatusIndicator({ status }: { status: TodoItem['status'] }): React.JSX.
   }
   if (status === 'completed') {
     return (
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" className="text-success shrink-0">
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2.5"
+        className="text-success shrink-0"
+      >
         <polyline points="4 12 10 18 20 6" />
       </svg>
     )
   }
-  return (
-    <span className="w-3.5 h-3.5 rounded-full border-[1.5px] border-text-secondary shrink-0" />
-  )
+  return <span className="w-3.5 h-3.5 rounded-full border-[1.5px] border-text-secondary shrink-0" />
 }
 
 function CircularProgress({ pct }: { pct: number }): React.JSX.Element {
@@ -25,9 +31,22 @@ function CircularProgress({ pct }: { pct: number }): React.JSX.Element {
   const circumference = 2 * Math.PI * r
   return (
     <svg width="18" height="18" viewBox="0 0 36 36" className="shrink-0 -rotate-90">
-      <circle cx="18" cy="18" r={r} fill="none" stroke="currentColor" strokeWidth="2.5" className="text-border" />
       <circle
-        cx="18" cy="18" r={r} fill="none" stroke="currentColor" strokeWidth="2.5"
+        cx="18"
+        cy="18"
+        r={r}
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2.5"
+        className="text-border"
+      />
+      <circle
+        cx="18"
+        cy="18"
+        r={r}
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2.5"
         className="text-accent"
         strokeDasharray={`${(pct / 100) * circumference} ${circumference}`}
         strokeLinecap="round"
@@ -64,9 +83,16 @@ export function TodoWidget(): React.JSX.Element | null {
         <div className="flex-1" />
         <div className="flex items-center gap-2">
           <CircularProgress pct={progressPct} />
-          <span className="text-[12px] text-text-secondary font-mono whitespace-nowrap">{completedCount}/{totalCount}</span>
+          <span className="text-[12px] text-text-secondary font-mono whitespace-nowrap">
+            {completedCount}/{totalCount}
+          </span>
           <svg
-            width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
+            width="12"
+            height="12"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
             className="text-text-secondary ml-1 transition-transform duration-200"
             style={{ transform: expanded ? 'rotate(0deg)' : 'rotate(180deg)' }}
           >
@@ -95,9 +121,13 @@ export function TodoWidget(): React.JSX.Element | null {
                   <StatusIndicator status={todo.status} />
                 </div>
                 <div className="flex-1 min-w-0">
-                  <div className={`text-[12px] leading-tight whitespace-nowrap overflow-hidden text-ellipsis ${
-                    todo.status === 'completed' ? 'text-text-secondary line-through' : 'text-text-primary'
-                  }`}>
+                  <div
+                    className={`text-[12px] leading-tight whitespace-nowrap overflow-hidden text-ellipsis ${
+                      todo.status === 'completed'
+                        ? 'text-text-secondary line-through'
+                        : 'text-text-primary'
+                    }`}
+                  >
                     {todo.content}
                   </div>
                   {todo.status === 'in_progress' && todo.activeForm && (

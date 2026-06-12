@@ -28,9 +28,7 @@ let killTerminalsByCwd: ReturnType<typeof vi.fn>
 
 function installWindowApi(): void {
   killTerminalsByCwd = vi.fn().mockResolvedValue(undefined)
-   
   ;(globalThis as any).window = globalThis.window || {}
-   
   ;(globalThis as any).window.api = {
     killTerminalsByCwd,
     saveSessionConfig: () => {},
@@ -38,7 +36,7 @@ function installWindowApi(): void {
     logError: () => {},
     fetchAccountUsage: () => Promise.resolve(null),
     fetchBlockUsage: () => Promise.resolve(null),
-    getPluginViews: () => Promise.resolve([]),
+    getPluginViews: () => Promise.resolve([])
   }
 }
 
@@ -50,7 +48,7 @@ function resetStore(): void {
     recentSessionIds: [],
     pinnedSessionIds: [],
     customTitles: {},
-    terminalGroups: {},
+    terminalGroups: {}
   })
 }
 
@@ -59,8 +57,8 @@ function setTerminalGroup(cwd: string, tabs: TerminalTab[]): void {
   useSessionStore.setState((state) => ({
     terminalGroups: {
       ...state.terminalGroups,
-      [cwd]: { tabs, activeTabId: tabs[0]?.id ?? null },
-    },
+      [cwd]: { tabs, activeTabId: tabs[0]?.id ?? null }
+    }
   }))
 }
 

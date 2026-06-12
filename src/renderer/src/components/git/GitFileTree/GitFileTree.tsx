@@ -36,44 +36,53 @@ export function GitFileTree(): React.JSX.Element {
 
   const tree = useMemo(() => flattenSingleChildDirs(buildTree(filteredFiles)), [filteredFiles])
 
-  const handleSelectFile = useCallback((filePath: string) => {
-    if (!activeSessionId) return
-    setGitSelectedFile(activeSessionId, filePath === gitSelectedFile ? null : filePath)
-  }, [activeSessionId, gitSelectedFile, setGitSelectedFile])
+  const handleSelectFile = useCallback(
+    (filePath: string) => {
+      if (!activeSessionId) return
+      setGitSelectedFile(activeSessionId, filePath === gitSelectedFile ? null : filePath)
+    },
+    [activeSessionId, gitSelectedFile, setGitSelectedFile]
+  )
 
-  const handleToggleStage = useCallback(async (file: GitFileStatus, e: React.MouseEvent) => {
-    e.stopPropagation()
-    if (!cwd || !activeSessionId) return
-    try {
-      if (isStaged(file)) {
-        await window.api.gitUnstageFile(cwd, file.path)
-      } else {
-        await window.api.gitStageFile(cwd, file.path)
-      }
-      const status = await window.api.gitGetStatus(cwd)
-      setGitStatus(activeSessionId, status)
-    } catch {
-      // Silently ignore
-    }
-  }, [cwd, activeSessionId, setGitStatus])
-
-  const handleToggleStageDirFiles = useCallback(async (files: GitFileStatus[], stage: boolean, e: React.MouseEvent) => {
-    e.stopPropagation()
-    if (!cwd || !activeSessionId) return
-    try {
-      for (const file of files) {
-        if (stage) {
-          await window.api.gitStageFile(cwd, file.path)
-        } else {
+  const handleToggleStage = useCallback(
+    async (file: GitFileStatus, e: React.MouseEvent) => {
+      e.stopPropagation()
+      if (!cwd || !activeSessionId) return
+      try {
+        if (isStaged(file)) {
           await window.api.gitUnstageFile(cwd, file.path)
+        } else {
+          await window.api.gitStageFile(cwd, file.path)
         }
+        const status = await window.api.gitGetStatus(cwd)
+        setGitStatus(activeSessionId, status)
+      } catch {
+        // Silently ignore
       }
-      const status = await window.api.gitGetStatus(cwd)
-      setGitStatus(activeSessionId, status)
-    } catch {
-      // Silently ignore
-    }
-  }, [cwd, activeSessionId, setGitStatus])
+    },
+    [cwd, activeSessionId, setGitStatus]
+  )
+
+  const handleToggleStageDirFiles = useCallback(
+    async (files: GitFileStatus[], stage: boolean, e: React.MouseEvent) => {
+      e.stopPropagation()
+      if (!cwd || !activeSessionId) return
+      try {
+        for (const file of files) {
+          if (stage) {
+            await window.api.gitStageFile(cwd, file.path)
+          } else {
+            await window.api.gitUnstageFile(cwd, file.path)
+          }
+        }
+        const status = await window.api.gitGetStatus(cwd)
+        setGitStatus(activeSessionId, status)
+      } catch {
+        // Silently ignore
+      }
+    },
+    [cwd, activeSessionId, setGitStatus]
+  )
 
   const handleFileContextMenu = useCallback((file: GitFileStatus, e: React.MouseEvent) => {
     e.preventDefault()
@@ -81,11 +90,14 @@ export function GitFileTree(): React.JSX.Element {
     setContextMenu({ ...contextMenuPosition(e), target: { kind: 'file', file } })
   }, [])
 
-  const handleDirContextMenu = useCallback((files: GitFileStatus[], dirName: string, e: React.MouseEvent) => {
-    e.preventDefault()
-    e.stopPropagation()
-    setContextMenu({ ...contextMenuPosition(e), target: { kind: 'dir', files, dirName } })
-  }, [])
+  const handleDirContextMenu = useCallback(
+    (files: GitFileStatus[], dirName: string, e: React.MouseEvent) => {
+      e.preventDefault()
+      e.stopPropagation()
+      setContextMenu({ ...contextMenuPosition(e), target: { kind: 'dir', files, dirName } })
+    },
+    []
+  )
 
   // Clamp context menu to viewport after render
   useEffect(() => {
@@ -114,47 +126,57 @@ export function GitFileTree(): React.JSX.Element {
   }, [contextMenu])
 
   // Execute discard
-  const executeDiscard = useCallback(async (target: ContextTarget) => {
-    if (!cwd || !activeSessionId) return
-    try {
-      const files = target.kind === 'file' ? [target.file] : target.files
-      for (const file of files) {
-        await window.api.gitDiscardFile(cwd, file.path)
+  const executeDiscard = useCallback(
+    async (target: ContextTarget) => {
+      if (!cwd || !activeSessionId) return
+      try {
+        const files = target.kind === 'file' ? [target.file] : target.files
+        for (const file of files) {
+          await window.api.gitDiscardFile(cwd, file.path)
+        }
+        const status = await window.api.gitGetStatus(cwd)
+        setGitStatus(activeSessionId, status)
+        if (gitSelectedFile) {
+          const discardedPaths = new Set(files.map((f) => f.path))
+          if (discardedPaths.has(gitSelectedFile)) {
+            setGitSelectedFile(activeSessionId, null)
+          }
+        }
+      } catch {
+        // Silently ignore
       }
-      const status = await window.api.gitGetStatus(cwd)
-      setGitStatus(activeSessionId, status)
-      if (gitSelectedFile) {
-        const discardedPaths = new Set(files.map((f) => f.path))
-        if (discardedPaths.has(gitSelectedFile)) {
-          setGitSelectedFile(activeSessionId, null)
+      setConfirmDiscard(null)
+    },
+    [cwd, activeSessionId, setGitStatus, gitSelectedFile, setGitSelectedFile]
+  )
+
+  const handleContextMenuAction = useCallback(
+    (action: 'stage-unstage' | 'discard') => {
+      if (!contextMenu) return
+      if (action === 'discard') {
+        const target = contextMenu.target
+        setContextMenu(null)
+        setConfirmDiscard(target)
+      } else if (action === 'stage-unstage' && contextMenu.target.kind === 'file') {
+        const file = contextMenu.target.file
+        setContextMenu(null)
+        if (isStaged(file)) {
+          window.api
+            .gitUnstageFile(cwd!, file.path)
+            .then(() =>
+              window.api.gitGetStatus(cwd!).then((s) => setGitStatus(activeSessionId!, s))
+            )
+        } else {
+          window.api
+            .gitStageFile(cwd!, file.path)
+            .then(() =>
+              window.api.gitGetStatus(cwd!).then((s) => setGitStatus(activeSessionId!, s))
+            )
         }
       }
-    } catch {
-      // Silently ignore
-    }
-    setConfirmDiscard(null)
-  }, [cwd, activeSessionId, setGitStatus, gitSelectedFile, setGitSelectedFile])
-
-  const handleContextMenuAction = useCallback((action: 'stage-unstage' | 'discard') => {
-    if (!contextMenu) return
-    if (action === 'discard') {
-      const target = contextMenu.target
-      setContextMenu(null)
-      setConfirmDiscard(target)
-    } else if (action === 'stage-unstage' && contextMenu.target.kind === 'file') {
-      const file = contextMenu.target.file
-      setContextMenu(null)
-      if (isStaged(file)) {
-        window.api.gitUnstageFile(cwd!, file.path).then(() =>
-          window.api.gitGetStatus(cwd!).then((s) => setGitStatus(activeSessionId!, s))
-        )
-      } else {
-        window.api.gitStageFile(cwd!, file.path).then(() =>
-          window.api.gitGetStatus(cwd!).then((s) => setGitStatus(activeSessionId!, s))
-        )
-      }
-    }
-  }, [contextMenu, cwd, activeSessionId, setGitStatus])
+    },
+    [contextMenu, cwd, activeSessionId, setGitStatus]
+  )
 
   return (
     <GitFileTreeView

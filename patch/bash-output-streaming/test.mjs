@@ -25,7 +25,9 @@ const messages = await collectMessages(q, {
     if (msg.type === 'bash_output') {
       bashOutputMessages.push(msg)
       if (bashOutputMessages.length === 1) {
-        console.log(`  First bash_output received (tool_use_id=${msg.tool_use_id?.slice(0, 20)}...)`)
+        console.log(
+          `  First bash_output received (tool_use_id=${msg.tool_use_id?.slice(0, 20)}...)`
+        )
       }
     }
     if (msg.type === 'assistant' && msg.message?.content) {
@@ -51,23 +53,29 @@ runner.assert('bash_output messages received', bashOutputMessages.length > 0)
 
 if (bashOutputMessages.length > 0) {
   const first = bashOutputMessages[0]
-  runner.assert('bash_output has tool_use_id', typeof first.tool_use_id === 'string' && first.tool_use_id.length > 0)
+  runner.assert(
+    'bash_output has tool_use_id',
+    typeof first.tool_use_id === 'string' && first.tool_use_id.length > 0
+  )
   runner.assert('bash_output has output field', typeof first.output === 'string')
   runner.assert('bash_output has total_lines', typeof first.total_lines === 'number')
   runner.assert('bash_output has total_bytes', typeof first.total_bytes === 'number')
 
   // Check that at least one message contains actual output text
-  const hasContent = bashOutputMessages.some(m => m.output && m.output.length > 0)
+  const hasContent = bashOutputMessages.some((m) => m.output && m.output.length > 0)
   runner.assert('At least one bash_output has non-empty output', hasContent)
 
   // Check that we got output containing our expected text
-  const hasExpectedOutput = bashOutputMessages.some(m =>
-    (m.output && m.output.includes('line-')) || (m.full_output && m.full_output.includes('line-'))
+  const hasExpectedOutput = bashOutputMessages.some(
+    (m) =>
+      (m.output && m.output.includes('line-')) || (m.full_output && m.full_output.includes('line-'))
   )
   runner.assert('Output contains expected "line-" text', hasExpectedOutput)
 
   console.log(`  Total bash_output messages: ${bashOutputMessages.length}`)
-  console.log(`  Last output preview: ${bashOutputMessages[bashOutputMessages.length - 1]?.output?.slice(-80)}`)
+  console.log(
+    `  Last output preview: ${bashOutputMessages[bashOutputMessages.length - 1]?.output?.slice(-80)}`
+  )
 } else {
   // Skip field checks if no messages received
   runner.assert('bash_output has tool_use_id', false)

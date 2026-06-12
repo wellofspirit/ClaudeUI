@@ -10,7 +10,13 @@ import { logger } from './logger'
 // Types
 // ---------------------------------------------------------------------------
 
-export type TunnelState = 'stopped' | 'starting' | 'downloading' | 'connected' | 'error' | 'restarting'
+export type TunnelState =
+  | 'stopped'
+  | 'starting'
+  | 'downloading'
+  | 'connected'
+  | 'error'
+  | 'restarting'
 
 export interface TunnelStatus {
   state: TunnelState
@@ -165,28 +171,39 @@ export class TunnelManager {
         }
         // Handle both http and https
         const mod = targetUrl.startsWith('https') ? https : http
-        mod.get(targetUrl, (res: import('node:http').IncomingMessage) => {
-          // Follow redirects
-          if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-            res.resume() // discard response body
-            request(res.headers.location, redirectCount + 1)
-            return
-          }
-          if (res.statusCode !== 200) {
-            file.close()
-            reject(new Error(`Download failed: HTTP ${res.statusCode}`))
-            return
-          }
-          res.pipe(file)
-          file.on('finish', () => {
-            file.close()
-            resolve()
+        mod
+          .get(targetUrl, (res: import('node:http').IncomingMessage) => {
+            // Follow redirects
+            if (
+              res.statusCode &&
+              res.statusCode >= 300 &&
+              res.statusCode < 400 &&
+              res.headers.location
+            ) {
+              res.resume() // discard response body
+              request(res.headers.location, redirectCount + 1)
+              return
+            }
+            if (res.statusCode !== 200) {
+              file.close()
+              reject(new Error(`Download failed: HTTP ${res.statusCode}`))
+              return
+            }
+            res.pipe(file)
+            file.on('finish', () => {
+              file.close()
+              resolve()
+            })
           })
-        }).on('error', (err: Error) => {
-          file.close()
-          try { fs.unlinkSync(destPath) } catch { /* best effort cleanup */ }
-          reject(err)
-        })
+          .on('error', (err: Error) => {
+            file.close()
+            try {
+              fs.unlinkSync(destPath)
+            } catch {
+              /* best effort cleanup */
+            }
+            reject(err)
+          })
       }
       request(url)
     })
@@ -278,7 +295,10 @@ export class TunnelManager {
 
         // Process exited after we already had the URL — unexpected death
         if (!this.destroyed) {
-          logger.warn('tunnel-manager', `cloudflared exited unexpectedly (code ${code}, signal ${signal}), scheduling restart`)
+          logger.warn(
+            'tunnel-manager',
+            `cloudflared exited unexpectedly (code ${code}, signal ${signal}), scheduling restart`
+          )
           this.scheduleRestart(binaryPath)
         }
       })

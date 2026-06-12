@@ -2,7 +2,14 @@
  * Factory functions for creating test ChatMessage and ContentBlock instances.
  */
 
-import type { ChatMessage, ContentBlock, PendingApproval, SessionStatus, TaskNotification, TodoItem } from '../../shared/types'
+import type {
+  ChatMessage,
+  ContentBlock,
+  PendingApproval,
+  SessionStatus,
+  TaskNotification,
+  TodoItem
+} from '../../shared/types'
 
 let messageCounter = 0
 
@@ -13,7 +20,7 @@ export function makeChatMessage(overrides?: Partial<ChatMessage>): ChatMessage {
     role: 'assistant',
     content: [{ type: 'text', text: 'Hello' }],
     timestamp: Date.now(),
-    ...overrides,
+    ...overrides
   }
 }
 
@@ -21,7 +28,7 @@ export function makeUserMessage(text: string, overrides?: Partial<ChatMessage>):
   return makeChatMessage({
     role: 'user',
     content: [{ type: 'text', text }],
-    ...overrides,
+    ...overrides
   })
 }
 
@@ -29,7 +36,7 @@ export function makeAssistantMessage(text: string, overrides?: Partial<ChatMessa
   return makeChatMessage({
     role: 'assistant',
     content: [{ type: 'text', text }],
-    ...overrides,
+    ...overrides
   })
 }
 
@@ -48,7 +55,7 @@ export function makeToolUseBlock(
     type: 'tool_use',
     toolUseId: toolUseId ?? `toolu_test_${++messageCounter}`,
     toolName,
-    toolInput,
+    toolInput
   }
 }
 
@@ -61,7 +68,7 @@ export function makeToolResultBlock(
     type: 'tool_result',
     toolUseId,
     toolResult: result,
-    isError,
+    isError
   }
 }
 
@@ -78,7 +85,7 @@ export function makeSessionStatus(overrides?: Partial<SessionStatus>): SessionSt
     model: 'claude-sonnet-4-6',
     cwd: '/test/project',
     totalCostUsd: 0,
-    ...overrides,
+    ...overrides
   }
 }
 
@@ -87,7 +94,7 @@ export function makePendingApproval(overrides?: Partial<PendingApproval>): Pendi
     requestId: `req-test-${++messageCounter}`,
     toolName: 'Bash',
     input: { command: 'echo hello' },
-    ...overrides,
+    ...overrides
   }
 }
 
@@ -98,15 +105,18 @@ export function makeTaskNotification(overrides?: Partial<TaskNotification>): Tas
     status: 'completed',
     outputFile: '/tmp/test-output',
     summary: 'Task completed',
-    ...overrides,
+    ...overrides
   }
 }
 
-export function makeTodoItem(content: string, status: 'pending' | 'in_progress' | 'completed' = 'pending'): TodoItem {
+export function makeTodoItem(
+  content: string,
+  status: 'pending' | 'in_progress' | 'completed' = 'pending'
+): TodoItem {
   return {
     content,
     status,
-    activeForm: content,
+    activeForm: content
   }
 }
 

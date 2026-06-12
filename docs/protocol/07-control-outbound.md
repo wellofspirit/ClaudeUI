@@ -20,6 +20,7 @@ Verified against cli.js 2.1.114. Main dispatcher at char `~12843876`. Unknown-su
 ```
 
 Response envelope (success):
+
 ```json
 {
   "type": "control_response",
@@ -32,6 +33,7 @@ Response envelope (success):
 ```
 
 Error:
+
 ```json
 {
   "type": "control_response",
@@ -50,11 +52,11 @@ Error:
 
 cli.js has **three** dispatchers. Most subtypes only work on the main one.
 
-| Dispatcher | Anchor | Handles |
-|---|---|---|
-| Main (stdio message loop) | `~12843876` | 30+ subtypes — the canonical list below |
-| REPL bridge (`Pl_`) | `~11352269` | **Remote-control peer traffic only.** `initialize`, `set_model`, `set_max_thinking_tokens`, `set_permission_mode`, `rename_session`, `file_suggestions`, `interrupt`. Everything else is rejected with "REPL session only supports..." |
-| RemoteSessionManager | `~11747217` | WebSocket bridge side (cli.js hosting remote control peers). Only `can_use_tool` forwarding. |
+| Dispatcher                | Anchor      | Handles                                                                                                                                                                                                                                |
+| ------------------------- | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Main (stdio message loop) | `~12843876` | 30+ subtypes — the canonical list below                                                                                                                                                                                                |
+| REPL bridge (`Pl_`)       | `~11352269` | **Remote-control peer traffic only.** `initialize`, `set_model`, `set_max_thinking_tokens`, `set_permission_mode`, `rename_session`, `file_suggestions`, `interrupt`. Everything else is rejected with "REPL session only supports..." |
+| RemoteSessionManager      | `~11747217` | WebSocket bridge side (cli.js hosting remote control peers). Only `can_use_tool` forwarding.                                                                                                                                           |
 
 **Gotcha**: `file_suggestions` and `rename_session` have Zod schemas in the canonical `kc1` union but are ONLY handled in the REPL bridge dispatcher. Sending them on the main stdio channel returns `"Unsupported control request subtype"`. If we want them on stdio, we need an upstream fix or a patch.
 
@@ -75,6 +77,7 @@ Abort the current turn. Instant.
 **Anchor:** `~12843876`. Schema `tQ1`.
 
 **Request:**
+
 ```json
 { "subtype": "interrupt" }
 ```
@@ -82,6 +85,7 @@ Abort the current turn. Instant.
 **Response (success):** empty `{}`.
 
 **Side effects:**
+
 - Aborts the turn abort-controller (`k.abort()`).
 - Aborts the input abort-controller (`y.abortController?.abort()`).
 - Clears `y.lastEmitted`, `y.pendingSuggestion`.
@@ -99,16 +103,18 @@ Graceful shutdown — cli.js flushes output, breaks the main read loop, exits.
 **Anchor:** `~12843970`. **No Zod schema** — shape is unvalidated.
 
 **Request:**
+
 ```json
 {
   "subtype": "end_session",
-  "reason": "...",       // optional; logged; defaults to "unspecified"
+  "reason": "..." // optional; logged; defaults to "unspecified"
 }
 ```
 
 **Response (success):** empty `{}`.
 
 **Side effects:**
+
 - Logs `[print.ts] end_session received, reason=<reason>`.
 - Aborts current turn (same as `interrupt`).
 - Calls `oH(mH)` — sends success.
@@ -127,6 +133,7 @@ Graceful shutdown — cli.js flushes output, breaks the main read loop, exits.
 **Anchor:** `~12844680`. Schema `Hc1`.
 
 **Request:**
+
 ```json
 {
   "subtype": "set_permission_mode",
@@ -138,6 +145,7 @@ Graceful shutdown — cli.js flushes output, breaks the main read loop, exits.
 **Response (success):** empty (no explicit `oH` call — success implied by absence of error).
 
 **Side effects:**
+
 - Updates `toolPermissionContext` in app state via `ks1(req, request_id, prev, h)`.
 - Optionally flips `isUltraplanMode`.
 
@@ -154,6 +162,7 @@ Graceful shutdown — cli.js flushes output, breaks the main read loop, exits.
 **Anchor:** `~12844820`. Schema `$c1`.
 
 **Request:**
+
 ```json
 {
   "subtype": "set_model",
@@ -164,6 +173,7 @@ Graceful shutdown — cli.js flushes output, breaks the main read loop, exits.
 **Response (success):** empty `{}`.
 
 **Side effects:**
+
 - Resolves `"default"` → user default via `UW()`.
 - Mutates active model `i`.
 - Persists via `l2(model)`.
@@ -180,10 +190,11 @@ Graceful shutdown — cli.js flushes output, breaks the main read loop, exits.
 **Anchor:** `~12844910`. Schema `qc1`.
 
 **Request:**
+
 ```json
 {
   "subtype": "set_max_thinking_tokens",
-  "max_thinking_tokens": 24000        // or null to clear
+  "max_thinking_tokens": 24000 // or null to clear
 }
 ```
 
@@ -204,13 +215,14 @@ Merge arbitrary settings into the `flagSettings` layer. `null` values delete key
 **Anchor:** `~12853700`. Schema `Zc1`.
 
 **Request:**
+
 ```json
 {
   "subtype": "apply_flag_settings",
   "settings": {
     "model": "claude-sonnet-4-6",
     "effort": "high",
-    "theme": null                     // null deletes
+    "theme": null // null deletes
   }
 }
 ```
@@ -218,6 +230,7 @@ Merge arbitrary settings into the `flagSettings` layer. `null` values delete key
 **Response (success):** empty `{}`.
 
 **Side effects:**
+
 - Merges `{...prev, ...settings}`, deletes null-valued keys.
 - Persists via `O76(merged)`.
 - `model` key special-cased — updates `l2()`.
@@ -236,11 +249,13 @@ Full settings dump — effective + per-source + applied + errors.
 **Anchor:** `~12854100`. Schema `Gc1`. Response schema `N3Y`.
 
 **Request:**
+
 ```json
 { "subtype": "get_settings" }
 ```
 
 **Response (success):**
+
 ```json
 {
   "effective": { /* merged settings */ },
@@ -274,11 +289,13 @@ Full context-window breakdown. Slow (CPU-bound token counting).
 **Anchor:** `~12845190`. Schema `Ac1`. Response schema `G3Y`.
 
 **Request:**
+
 ```json
 { "subtype": "get_context_usage" }
 ```
 
 **Response (success):** `G3Y` shape (exact fields at cli.js char `~11912470`):
+
 ```jsonc
 {
   "categories": [...],              // per-category token counts
@@ -316,19 +333,21 @@ Rewind files to their state at a given user message, or preview the diff.
 **Anchor:** `~12845420`. Schema `Yc1`. Response schema `T3Y`.
 
 **Request:**
+
 ```json
 {
   "subtype": "rewind_files",
   "user_message_id": "<uuid>",
-  "dry_run": false                  // optional; default false
+  "dry_run": false // optional; default false
 }
 ```
 
 **Response (success):**
+
 ```json
 {
   "canRewind": true,
-  "error": "...",                   // only when canRewind=false
+  "error": "...", // only when canRewind=false
   "filesChanged": ["src/foo.ts", "src/bar.ts"],
   "insertions": 42,
   "deletions": 12
@@ -352,6 +371,7 @@ Remove a queued message before it's consumed.
 **Anchor:** `~12845570`. Schema `Oc1`. Response schema `v3Y`.
 
 **Request:**
+
 ```json
 {
   "subtype": "cancel_async_message",
@@ -360,8 +380,9 @@ Remove a queued message before it's consumed.
 ```
 
 **Response (success):**
+
 ```json
-{ "cancelled": true }               // false if already dequeued for execution
+{ "cancelled": true } // false if already dequeued for execution
 ```
 
 **Side effects:** Removes from command queue via `tNH(item => item.uuid === uuid)`.
@@ -379,11 +400,12 @@ Pre-populate cli.js's Read-tool cache so a subsequent Edit can pass validation w
 **Anchor:** `~12845660`. Schema `wc1`.
 
 **Request:**
+
 ```json
 {
   "subtype": "seed_read_state",
   "path": "/abs/path/to/file",
-  "mtime": 1712345678901          // ms since epoch
+  "mtime": 1712345678901 // ms since epoch
 }
 ```
 
@@ -404,6 +426,7 @@ Kill a running task by ID.
 **Anchor:** `~12854720`. Schema `Jc1`.
 
 **Request:**
+
 ```json
 {
   "subtype": "stop_task",
@@ -414,6 +437,7 @@ Kill a running task by ID.
 **Response (success):** empty `{}`.
 
 **Side effects:** Calls `yi8(task_id, ...)`:
+
 - `local_bash` task → SIGTERM the shell process.
 - `local_agent` task → resolve its stop-signal Promise.
 
@@ -430,20 +454,23 @@ Generate a session title from a description, optionally persist it.
 **Anchor:** `~12854900`. **No Zod schema.** Async IIFE.
 
 **Request:**
+
 ```json
 {
   "subtype": "generate_session_title",
   "description": "what the session is about",
-  "persist": true                   // when true, writes to session file + sets custom-title flag
+  "persist": true // when true, writes to session file + sets custom-title flag
 }
 ```
 
 **Response (success):**
+
 ```json
-{ "title": "Fix the payment flow" }   // may be null on soft failure
+{ "title": "Fix the payment flow" } // may be null on soft failure
 ```
 
 **Side effects:**
+
 - Persists via `A86(sessionId, title)` when `persist:true`.
 - Sets `w8 = true` (custom-title flag — suppresses auto-generation).
 
@@ -460,6 +487,7 @@ Ask a side question that doesn't modify session history and can't use tools.
 **Anchor:** `~12855319`. **No Zod schema.** Async IIFE.
 
 **Request:**
+
 ```json
 {
   "subtype": "side_question",
@@ -468,10 +496,11 @@ Ask a side question that doesn't modify session history and can't use tools.
 ```
 
 **Response (success):**
+
 ```json
 {
   "response": "...",
-  "synthetic": false                 // true if fabricated without a model call
+  "synthetic": false // true if fabricated without a model call
 }
 ```
 
@@ -488,11 +517,12 @@ Launch the ultrareview slash command programmatically.
 **Anchor:** `~12855922`. **No Zod schema.** Async IIFE.
 
 **Request:**
+
 ```json
 {
   "subtype": "ultrareview_launch",
-  "args": "",                       // optional; defaults to ""
-  "confirm": false                  // optional; defaults to false
+  "args": "", // optional; defaults to ""
+  "confirm": false // optional; defaults to false
 }
 ```
 
@@ -511,15 +541,17 @@ Enable/disable remote-control bridging (peer-to-peer mirror).
 **Anchor:** `~12856154`. **No Zod schema.**
 
 **Request (enable):**
+
 ```json
 {
   "subtype": "remote_control",
   "enabled": true,
-  "name": "my-session"              // optional — session name, ignored if already active
+  "name": "my-session" // optional — session name, ignored if already active
 }
 ```
 
 **Response (success, enable):**
+
 ```json
 {
   "session_url": "...",
@@ -529,6 +561,7 @@ Enable/disable remote-control bridging (peer-to-peer mirror).
 ```
 
 **Request (disable):**
+
 ```json
 { "subtype": "remote_control", "enabled": false }
 ```
@@ -536,6 +569,7 @@ Enable/disable remote-control bridging (peer-to-peer mirror).
 **Response:** empty `{}`.
 
 **Side effects:**
+
 - On enable: wires `setOnControlRequestSent` + `setOnControlRequestResolved` so `can_use_tool` prompts mirror to peers.
 - On state change: emits `system/bridge_state` message.
 
@@ -554,16 +588,18 @@ Remove a queued command by text match. Added by `patch/queue-control/`.
 **Anchor:** `~12857658`. **No Zod schema** (patch-injected).
 
 **Request:**
+
 ```json
 {
   "subtype": "dequeue_message",
-  "value": "the text content"        // after m$4() attachment extraction
+  "value": "the text content" // after m$4() attachment extraction
 }
 ```
 
 **Response (success):**
+
 ```json
-{ "removed": 2 }                    // count of matching queue entries removed
+{ "removed": 2 } // count of matching queue entries removed
 ```
 
 **Timing:** instant.
@@ -579,6 +615,7 @@ Convert a running foreground task to background. Added by `patch/background-task
 **Anchor:** `~12857897`. **No Zod schema** (patch-injected).
 
 **Request:**
+
 ```json
 {
   "subtype": "background_task",
@@ -587,6 +624,7 @@ Convert a running foreground task to background. Added by `patch/background-task
 ```
 
 **Response (success):**
+
 ```json
 {
   "task_id": "<id>",
@@ -595,6 +633,7 @@ Convert a running foreground task to background. Added by `patch/background-task
 ```
 
 **Errors:**
+
 - `"No task found with toolUseId: <id>"`
 - `"Task <id> is not running"`
 - `"Task <id> is already backgrounded"`
@@ -602,6 +641,7 @@ Convert a running foreground task to background. Added by `patch/background-task
 - `"Unsupported task type for backgrounding"`
 
 **Side effects:**
+
 - Local bash: `shellCommand.background(taskId)` — spills stdout to disk, flips `isBackgrounded:true`.
 - Local agent: flips `isBackgrounded:true`, resolves `VuH.get(taskId)` stop-signal.
 
@@ -618,11 +658,13 @@ Expose cli.js's internal `/api/oauth/usage` API. Added by `patch/usage-relay/`.
 **Anchor:** `~12859013`. **No Zod schema** (patch-injected).
 
 **Request:**
+
 ```json
 { "subtype": "get_usage" }
 ```
 
 **Response (success):** raw `/api/oauth/usage` body:
+
 ```json
 {
   "five_hour": {...},
@@ -647,13 +689,15 @@ Start the internal voice-transcription TCP server. Added by `patch/voice-server/
 **Anchor:** `~12859247`. **No Zod schema**.
 
 **Request:**
+
 ```json
 { "subtype": "voice_server_start" }
 ```
 
 **Response (success):**
+
 ```json
-{ "port": 54321 }                   // 127.0.0.1:<port>, random port. Idempotent.
+{ "port": 54321 } // 127.0.0.1:<port>, random port. Idempotent.
 ```
 
 **Protocol (TCP):** newline-delimited JSON. Client sends `{"type":"voice_start","language":"en"}`, `{"type":"audio","data":"<base64 PCM>"}`, `{"type":"voice_stop"}`. Server pushes `{"type":"ready"}`, `{"type":"transcript","text","isFinal"}`, `{"type":"error","message"}`, `{"type":"closed"}`.
@@ -669,11 +713,13 @@ Start the internal voice-transcription TCP server. Added by `patch/voice-server/
 **Anchor:** `~12860400`. Added by `patch/voice-server/`.
 
 **Request:**
+
 ```json
 { "subtype": "voice_server_stop" }
 ```
 
 **Response (success):**
+
 ```json
 { "stopped": true }
 ```
@@ -691,11 +737,13 @@ List all MCP servers with status. **Patched** to await in-flight reconnects.
 **Anchor:** `~12845000`. Schema `_c1`. Response schema `J3Y`.
 
 **Request:**
+
 ```json
 { "subtype": "mcp_status" }
 ```
 
 **Response (success):**
+
 ```json
 {
   "mcpServers": [
@@ -724,6 +772,7 @@ Enable/disable an MCP server. **Does** propagate to the model's tool list (patch
 **Anchor:** `~12848500`. Schema `Lc1`.
 
 **Request:**
+
 ```json
 {
   "subtype": "mcp_toggle",
@@ -737,6 +786,7 @@ Enable/disable an MCP server. **Does** propagate to the model's tool list (patch
 **Errors:** `"Server not found: <name>"`, connection failure string on enable.
 
 **Side effects:**
+
 - Persists via `MIH(name, enabled)`.
 - Disable: marks `{type:"disabled", config}`, removes tools/commands/resources from app state.
 - Enable: `DF(name, config)` connect + merge.
@@ -752,6 +802,7 @@ Enable/disable an MCP server. **Does** propagate to the model's tool list (patch
 **Anchor:** `~12846950`. Schema `Xc1`.
 
 **Request:**
+
 ```json
 {
   "subtype": "mcp_reconnect",
@@ -776,6 +827,7 @@ Replace the entire dynamic MCP server set.
 **Anchor:** `~12845880`. Schema `Pc1`. Response schema `V3Y`.
 
 **Request:**
+
 ```json
 {
   "subtype": "mcp_set_servers",
@@ -788,6 +840,7 @@ Replace the entire dynamic MCP server set.
 ```
 
 **Response (success):**
+
 ```json
 {
   "added": ["foo"],
@@ -809,6 +862,7 @@ Subscribe to a plugin-sourced MCP channel. cli.js forwards `notifications/claude
 **Anchor:** call at `~12850046`, handler `Ns1` at `12868063`.
 
 **Request:**
+
 ```json
 {
   "subtype": "channel_enable",
@@ -819,6 +873,7 @@ Subscribe to a plugin-sourced MCP channel. cli.js forwards `notifications/claude
 **Response (success):** empty `{}`.
 
 **Errors:**
+
 - `"server <name> is not connected"`
 - `"server <name> is not plugin-sourced; channel_enable requires a marketplace plugin"`
 - Reason from `i48(...)` when server lacks notification capabilities.
@@ -836,6 +891,7 @@ Start an MCP OAuth flow. Long-lived — resolves once the URL is known, but the 
 **Anchor:** `~12849940`. **No Zod schema.**
 
 **Request:**
+
 ```json
 {
   "subtype": "mcp_authenticate",
@@ -844,10 +900,13 @@ Start an MCP OAuth flow. Long-lived — resolves once the URL is known, but the 
 ```
 
 **Response (success):**
+
 ```json
 { "authUrl": "https://...", "requiresUserAction": true }
 ```
+
 OR (auto-completed via existing session):
+
 ```json
 { "requiresUserAction": false }
 ```
@@ -869,6 +928,7 @@ Submit OAuth callback URL back to cli.js. Completes a pending `mcp_authenticate`
 **Anchor:** `~12851477`.
 
 **Request:**
+
 ```json
 {
   "subtype": "mcp_oauth_callback_url",
@@ -894,6 +954,7 @@ Clear stored OAuth credentials for an MCP server; reconnects unauthenticated.
 **Anchor:** `~12853376`. **No Zod schema.**
 
 **Request:**
+
 ```json
 {
   "subtype": "mcp_clear_auth",
@@ -918,11 +979,13 @@ Reload plugins + commands + agents + MCP from disk.
 **Anchor:** `~12846070`. Schema `Wc1`. Response schema `k3Y`.
 
 **Request:**
+
 ```json
 { "subtype": "reload_plugins" }
 ```
 
 **Response (success):**
+
 ```json
 {
   "commands": [...],                 // shape matches initialize.commands
@@ -950,17 +1013,19 @@ All three are long-lived (user-driven). Always pass `timeoutMs: 0` to disable th
 **Anchor:** `~12851790`. **No Zod schema.**
 
 **Request:**
+
 ```json
 {
   "subtype": "claude_authenticate",
-  "loginWithClaudeAi": true           // optional, default true
+  "loginWithClaudeAi": true // optional, default true
 }
 ```
 
 **Response (success):**
+
 ```json
 {
-  "manualUrl":    "https://...",
+  "manualUrl": "https://...",
   "automaticUrl": "https://..."
 }
 ```
@@ -980,6 +1045,7 @@ All three are long-lived (user-driven). Always pass `timeoutMs: 0` to disable th
 **Anchor:** `~12852869`.
 
 **Request:**
+
 ```json
 {
   "subtype": "claude_oauth_callback",
@@ -989,6 +1055,7 @@ All three are long-lived (user-driven). Always pass `timeoutMs: 0` to disable th
 ```
 
 **Response (success):**
+
 ```json
 {
   "account": {
@@ -1017,6 +1084,7 @@ Wait for browser-based OAuth flow to auto-complete via local loopback. No code r
 **Anchor:** `~12852984`.
 
 **Request:**
+
 ```json
 { "subtype": "claude_oauth_wait_for_completion" }
 ```
@@ -1038,6 +1106,7 @@ Wait for browser-based OAuth flow to auto-complete via local loopback. No code r
 Only works on the REPL bridge. Sending to the main dispatcher → `"Unsupported control request subtype"`.
 
 **Request:**
+
 ```json
 {
   "subtype": "rename_session",
@@ -1060,6 +1129,7 @@ Same caveat as `rename_session` — not usable on stdio.
 ## 7.7 Unknown subtypes — behavior
 
 Any subtype not matched by the else-if chain → error response:
+
 ```json
 {
   "subtype": "error",
@@ -1075,6 +1145,7 @@ The message loop continues. Unknown subtypes never terminate the session.
 ## 7.8 Stall detection
 
 cli.js arms a 5-minute (`Fc1 = 300000` ms) timer per non-result message. If fired while in `"running"` state, emits telemetry `tengu_sdk_stall` with:
+
 - last message type
 - `pending_control_requests` count
 
@@ -1084,42 +1155,42 @@ cli.js arms a 5-minute (`Fc1 = 300000` ms) timer per non-result message. If fire
 
 ## 7.9 QueryHandle → subtype quick reference
 
-| Method | Subtype |
-|---|---|
-| `interrupt()` | `interrupt` |
-| `endSession()` | `end_session` |
-| `setPermissionMode(mode)` | `set_permission_mode` |
-| `setModel(model?)` | `set_model` |
-| `setMaxThinkingTokens(n\|null)` | `set_max_thinking_tokens` |
-| `applyFlagSettings(obj)` | `apply_flag_settings` |
-| `getSettings()` | `get_settings` |
-| `getContextUsage()` | `get_context_usage` |
-| `rewindFiles(uuid, {dryRun})` | `rewind_files` |
-| `cancelAsyncMessage(uuid)` | `cancel_async_message` |
-| `seedReadState(path, mtime)` | `seed_read_state` |
-| `enableRemoteControl(enabled, {name})` | `remote_control` |
-| `generateSessionTitle(desc, {persist})` | `generate_session_title` |
-| `askSideQuestion(q)` | `side_question` |
-| `launchUltrareview(args, {confirm})` | `ultrareview_launch` |
-| `stopTask(id)` | `stop_task` |
-| `backgroundTask(toolUseId)` | `background_task` |
-| `dequeueMessage(value)` | `dequeue_message` |
-| `voiceServerStart()` | `voice_server_start` |
-| `voiceServerStop()` | `voice_server_stop` |
-| `getUsage()` | `get_usage` |
-| `mcpServerStatus()` | `mcp_status` |
-| `toggleMcpServer(n, enabled)` | `mcp_toggle` |
-| `reconnectMcpServer(n)` | `mcp_reconnect` |
-| `setMcpServers(map)` | `mcp_set_servers` |
-| `enableChannel(n)` | `channel_enable` |
-| `mcpAuthenticate(n)` | `mcp_authenticate` |
-| `mcpClearAuth(n)` | `mcp_clear_auth` |
-| `mcpSubmitOAuthCallbackUrl(n, url)` | `mcp_oauth_callback_url` |
-| `claudeAuthenticate(flag)` | `claude_authenticate` |
-| `claudeOAuthCallback(code, state)` | `claude_oauth_callback` |
-| `claudeOAuthWaitForCompletion()` | `claude_oauth_wait_for_completion` |
-| `reloadPlugins()` | `reload_plugins` |
-| `initializationResult()` | (reads cached initialize response) |
-| `supportedModels() / Commands() / Agents()` | (reads cached initialize response) |
-| (no method) | `rename_session` — REPL bridge only |
-| (no method) | `file_suggestions` — REPL bridge only |
+| Method                                      | Subtype                               |
+| ------------------------------------------- | ------------------------------------- |
+| `interrupt()`                               | `interrupt`                           |
+| `endSession()`                              | `end_session`                         |
+| `setPermissionMode(mode)`                   | `set_permission_mode`                 |
+| `setModel(model?)`                          | `set_model`                           |
+| `setMaxThinkingTokens(n\|null)`             | `set_max_thinking_tokens`             |
+| `applyFlagSettings(obj)`                    | `apply_flag_settings`                 |
+| `getSettings()`                             | `get_settings`                        |
+| `getContextUsage()`                         | `get_context_usage`                   |
+| `rewindFiles(uuid, {dryRun})`               | `rewind_files`                        |
+| `cancelAsyncMessage(uuid)`                  | `cancel_async_message`                |
+| `seedReadState(path, mtime)`                | `seed_read_state`                     |
+| `enableRemoteControl(enabled, {name})`      | `remote_control`                      |
+| `generateSessionTitle(desc, {persist})`     | `generate_session_title`              |
+| `askSideQuestion(q)`                        | `side_question`                       |
+| `launchUltrareview(args, {confirm})`        | `ultrareview_launch`                  |
+| `stopTask(id)`                              | `stop_task`                           |
+| `backgroundTask(toolUseId)`                 | `background_task`                     |
+| `dequeueMessage(value)`                     | `dequeue_message`                     |
+| `voiceServerStart()`                        | `voice_server_start`                  |
+| `voiceServerStop()`                         | `voice_server_stop`                   |
+| `getUsage()`                                | `get_usage`                           |
+| `mcpServerStatus()`                         | `mcp_status`                          |
+| `toggleMcpServer(n, enabled)`               | `mcp_toggle`                          |
+| `reconnectMcpServer(n)`                     | `mcp_reconnect`                       |
+| `setMcpServers(map)`                        | `mcp_set_servers`                     |
+| `enableChannel(n)`                          | `channel_enable`                      |
+| `mcpAuthenticate(n)`                        | `mcp_authenticate`                    |
+| `mcpClearAuth(n)`                           | `mcp_clear_auth`                      |
+| `mcpSubmitOAuthCallbackUrl(n, url)`         | `mcp_oauth_callback_url`              |
+| `claudeAuthenticate(flag)`                  | `claude_authenticate`                 |
+| `claudeOAuthCallback(code, state)`          | `claude_oauth_callback`               |
+| `claudeOAuthWaitForCompletion()`            | `claude_oauth_wait_for_completion`    |
+| `reloadPlugins()`                           | `reload_plugins`                      |
+| `initializationResult()`                    | (reads cached initialize response)    |
+| `supportedModels() / Commands() / Agents()` | (reads cached initialize response)    |
+| (no method)                                 | `rename_session` — REPL bridge only   |
+| (no method)                                 | `file_suggestions` — REPL bridge only |

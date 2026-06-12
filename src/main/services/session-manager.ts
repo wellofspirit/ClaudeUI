@@ -32,7 +32,19 @@ export class SessionManager {
       existing.cancel()
     }
 
-    const session = new ClaudeSession(routingId, win, cwd, effort, resumeSessionId, permissionMode, model, sandboxConfig, thinkingMode, resumeSessionAt, forkSession)
+    const session = new ClaudeSession(
+      routingId,
+      win,
+      cwd,
+      effort,
+      resumeSessionId,
+      permissionMode,
+      model,
+      sandboxConfig,
+      thinkingMode,
+      resumeSessionAt,
+      forkSession
+    )
     session.setInactivityTimeout(this._sessionTimeoutMs)
     this.sessions.set(routingId, session)
     return session

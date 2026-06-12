@@ -79,6 +79,7 @@ else if (g6.attachment.type === "queued_command") {
 ```
 
 The `queued_command_consumed` system message tells ClaudeUI to:
+
 - Add the queued text as a visible user message in the chat
 - Clear the QueuedMessageCard
 
@@ -90,20 +91,21 @@ Exposes `dequeueMessage(value)` on the query object, which sends a `dequeue_mess
 
 All minified function names are extracted **dynamically** from content patterns.
 
-| What | Stable Anchor / Pattern |
-|---|---|
-| Injection point (A1) | `else <fn>(c,\`Unsupported control request subtype: ...\`);continue}else if(c.type==="control_response")` |
-| Success response helper | `),<fn>(c,{})}}catch` — in the stop_task handler |
-| Queue push + loop starter | `<fn>({mode:"prompt",value:<v>.message.content,uuid:<v>.uuid}),<fn>()` |
-| Queue remove-by-predicate | `function <fn>(<v>){let <v>=[];for(let <v>=<queue>.length-1` |
-| Extract queue text | `<fn>(<var>.value)` — near popAllEditable |
-| queued_command handler (A2) | `else if(G&&<var>.attachment.type==="queued_command")yield{` |
-| Session ID / UUID generators | `session_id:<fn>(),uuid:<fn>()` within the yield |
-| sdk.mjs stopTask | `async stopTask(<v>){await this.request({subtype:"stop_task",task_id:<v>})}` |
+| What                         | Stable Anchor / Pattern                                                                                   |
+| ---------------------------- | --------------------------------------------------------------------------------------------------------- |
+| Injection point (A1)         | `else <fn>(c,\`Unsupported control request subtype: ...\`);continue}else if(c.type==="control_response")` |
+| Success response helper      | `),<fn>(c,{})}}catch` — in the stop_task handler                                                          |
+| Queue push + loop starter    | `<fn>({mode:"prompt",value:<v>.message.content,uuid:<v>.uuid}),<fn>()`                                    |
+| Queue remove-by-predicate    | `function <fn>(<v>){let <v>=[];for(let <v>=<queue>.length-1`                                              |
+| Extract queue text           | `<fn>(<var>.value)` — near popAllEditable                                                                 |
+| queued_command handler (A2)  | `else if(G&&<var>.attachment.type==="queued_command")yield{`                                              |
+| Session ID / UUID generators | `session_id:<fn>(),uuid:<fn>()` within the yield                                                          |
+| sdk.mjs stopTask             | `async stopTask(<v>){await this.request({subtype:"stop_task",task_id:<v>})}`                              |
 
 ## Race Condition Window
 
 There's a small window between `sendPrompt` and `snapshotQueue()` where:
+
 - The message is in the queue but not yet consumed
 - `dequeue_message` can still withdraw it
 

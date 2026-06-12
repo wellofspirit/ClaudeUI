@@ -15,6 +15,7 @@ This page covers output streaming (receiving tokens in real-time). For input mod
 To enable streaming, set `include_partial_messages` (Python) or `includePartialMessages` (TypeScript) to `true` in your options. This causes the SDK to yield `StreamEvent` messages containing raw API events as they arrive, in addition to the usual `AssistantMessage` and `ResultMessage`.
 
 Your code then needs to:
+
 1. Check each message's type to distinguish `StreamEvent` from other message types
 2. For `StreamEvent`, extract the `event` field and check its `type`
 3. Look for `content_block_delta` events where `delta.type` is `text_delta`, which contain the actual text chunks
@@ -46,20 +47,20 @@ asyncio.run(stream_response())
 ```
 
 ```typescript TypeScript
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { query } from '@anthropic-ai/claude-agent-sdk'
 
 for await (const message of query({
-  prompt: "List the files in my project",
+  prompt: 'List the files in my project',
   options: {
     includePartialMessages: true,
-    allowedTools: ["Bash", "Read"],
+    allowedTools: ['Bash', 'Read']
   }
 })) {
-  if (message.type === "stream_event") {
-    const event = message.event;
-    if (event.type === "content_block_delta") {
-      if (event.delta.type === "text_delta") {
-        process.stdout.write(event.delta.text);
+  if (message.type === 'stream_event') {
+    const event = message.event
+    if (event.type === 'content_block_delta') {
+      if (event.delta.type === 'text_delta') {
+        process.stdout.write(event.delta.text)
       }
     }
   }
@@ -90,11 +91,11 @@ class StreamEvent:
 
 ```typescript TypeScript
 type SDKPartialAssistantMessage = {
-  type: 'stream_event';
-  event: RawMessageStreamEvent;    // From Anthropic SDK
-  parent_tool_use_id: string | null;
-  uuid: UUID;
-  session_id: string;
+  type: 'stream_event'
+  event: RawMessageStreamEvent // From Anthropic SDK
+  parent_tool_use_id: string | null
+  uuid: UUID
+  session_id: string
 }
 ```
 
@@ -102,14 +103,14 @@ type SDKPartialAssistantMessage = {
 
 The `event` field contains the raw streaming event from the [Claude API](/docs/en/build-with-claude/streaming#event-types). Common event types include:
 
-| Event Type | Description |
-|:-----------|:------------|
-| `message_start` | Start of a new message |
+| Event Type            | Description                                     |
+| :-------------------- | :---------------------------------------------- |
+| `message_start`       | Start of a new message                          |
 | `content_block_start` | Start of a new content block (text or tool use) |
-| `content_block_delta` | Incremental update to content |
-| `content_block_stop` | End of a content block |
-| `message_delta` | Message-level updates (stop reason, usage) |
-| `message_stop` | End of the message |
+| `content_block_delta` | Incremental update to content                   |
+| `content_block_stop`  | End of a content block                          |
+| `message_delta`       | Message-level updates (stop reason, usage)      |
+| `message_stop`        | End of the message                              |
 
 ## Message flow
 
@@ -162,21 +163,21 @@ asyncio.run(stream_text())
 ```
 
 ```typescript TypeScript
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { query } from '@anthropic-ai/claude-agent-sdk'
 
 for await (const message of query({
-  prompt: "Explain how databases work",
+  prompt: 'Explain how databases work',
   options: { includePartialMessages: true }
 })) {
-  if (message.type === "stream_event") {
-    const event = message.event;
-    if (event.type === "content_block_delta" && event.delta.type === "text_delta") {
-      process.stdout.write(event.delta.text);
+  if (message.type === 'stream_event') {
+    const event = message.event
+    if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
+      process.stdout.write(event.delta.text)
     }
   }
 }
 
-console.log(); // Final newline
+console.log() // Final newline
 ```
 
 </CodeGroup>
@@ -237,41 +238,41 @@ asyncio.run(stream_tool_calls())
 ```
 
 ```typescript TypeScript
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { query } from '@anthropic-ai/claude-agent-sdk'
 
 // Track the current tool and accumulate its input JSON
-let currentTool: string | null = null;
-let toolInput = "";
+let currentTool: string | null = null
+let toolInput = ''
 
 for await (const message of query({
-  prompt: "Read the README.md file",
+  prompt: 'Read the README.md file',
   options: {
     includePartialMessages: true,
-    allowedTools: ["Read", "Bash"],
+    allowedTools: ['Read', 'Bash']
   }
 })) {
-  if (message.type === "stream_event") {
-    const event = message.event;
+  if (message.type === 'stream_event') {
+    const event = message.event
 
-    if (event.type === "content_block_start") {
+    if (event.type === 'content_block_start') {
       // New tool call is starting
-      if (event.content_block.type === "tool_use") {
-        currentTool = event.content_block.name;
-        toolInput = "";
-        console.log(`Starting tool: ${currentTool}`);
+      if (event.content_block.type === 'tool_use') {
+        currentTool = event.content_block.name
+        toolInput = ''
+        console.log(`Starting tool: ${currentTool}`)
       }
-    } else if (event.type === "content_block_delta") {
-      if (event.delta.type === "input_json_delta") {
+    } else if (event.type === 'content_block_delta') {
+      if (event.delta.type === 'input_json_delta') {
         // Accumulate JSON input as it streams in
-        const chunk = event.delta.partial_json;
-        toolInput += chunk;
-        console.log(`  Input chunk: ${chunk}`);
+        const chunk = event.delta.partial_json
+        toolInput += chunk
+        console.log(`  Input chunk: ${chunk}`)
       }
-    } else if (event.type === "content_block_stop") {
+    } else if (event.type === 'content_block_stop') {
       // Tool call complete - show final input
       if (currentTool) {
-        console.log(`Tool ${currentTool} called with: ${toolInput}`);
-        currentTool = null;
+        console.log(`Tool ${currentTool} called with: ${toolInput}`)
+        currentTool = null
       }
     }
   }
@@ -338,42 +339,42 @@ asyncio.run(streaming_ui())
 ```
 
 ```typescript TypeScript
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { query } from '@anthropic-ai/claude-agent-sdk'
 
 // Track whether we're currently in a tool call
-let inTool = false;
+let inTool = false
 
 for await (const message of query({
-  prompt: "Find all TODO comments in the codebase",
+  prompt: 'Find all TODO comments in the codebase',
   options: {
     includePartialMessages: true,
-    allowedTools: ["Read", "Bash", "Grep"],
+    allowedTools: ['Read', 'Bash', 'Grep']
   }
 })) {
-  if (message.type === "stream_event") {
-    const event = message.event;
+  if (message.type === 'stream_event') {
+    const event = message.event
 
-    if (event.type === "content_block_start") {
-      if (event.content_block.type === "tool_use") {
+    if (event.type === 'content_block_start') {
+      if (event.content_block.type === 'tool_use') {
         // Tool call is starting - show status indicator
-        process.stdout.write(`\n[Using ${event.content_block.name}...]`);
-        inTool = true;
+        process.stdout.write(`\n[Using ${event.content_block.name}...]`)
+        inTool = true
       }
-    } else if (event.type === "content_block_delta") {
+    } else if (event.type === 'content_block_delta') {
       // Only stream text when not executing a tool
-      if (event.delta.type === "text_delta" && !inTool) {
-        process.stdout.write(event.delta.text);
+      if (event.delta.type === 'text_delta' && !inTool) {
+        process.stdout.write(event.delta.text)
       }
-    } else if (event.type === "content_block_stop") {
+    } else if (event.type === 'content_block_stop') {
       if (inTool) {
         // Tool call finished
-        console.log(" done");
-        inTool = false;
+        console.log(' done')
+        inTool = false
       }
     }
-  } else if (message.type === "result") {
+  } else if (message.type === 'result') {
     // Agent finished all work
-    console.log("\n\n--- Complete ---");
+    console.log('\n\n--- Complete ---')
   }
 }
 ```

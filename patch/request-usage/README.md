@@ -6,11 +6,11 @@ Emits a `request_usage` JSON message to stdout after each API response completes
 
 `cli.js` — rebundled from `@anthropic-ai/claude-code` Bun standalone.
 
-| Component | Version |
-|---|---|
-| At time of discovery | bundled CLI `2.1.4x` (flat `if`-chain era) |
-| Redesigned | bundled CLI `2.1.163` |
-| Last re-anchored | bundled CLI `2.1.170` (message_stop case gained a telemetry call) |
+| Component            | Version                                                           |
+| -------------------- | ----------------------------------------------------------------- |
+| At time of discovery | bundled CLI `2.1.4x` (flat `if`-chain era)                        |
+| Redesigned           | bundled CLI `2.1.163`                                             |
+| Last re-anchored     | bundled CLI `2.1.170` (message_stop case gained a telemetry call) |
 
 ## The Problem
 
@@ -49,13 +49,13 @@ So the patch could not be re-anchored; it was **redesigned**.
 
 ### Variable mapping (v2.1.163 — names WILL change)
 
-| Var | Role | Where set |
-|---|---|---|
-| `p_` | the stream event (discriminator is bare `p_.type`, **not** `p_.event.type`) | switch scrutinee |
-| `sH` | the message object; `sH.model` is the model that served the request | `case"message_start":{sH=p_.message,...}` |
-| `QH` | per-request usage accumulator | init `QH=ZM` once at generator top; merged at message_start (`QH=O7H(QH,p_.message?.usage)`) and each message_delta (`QH=O7H(QH,p_.usage)`) |
-| `O7H` | usage merge fn | — |
-| `ZM` | zero-usage constant | — |
+| Var   | Role                                                                        | Where set                                                                                                                                    |
+| ----- | --------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `p_`  | the stream event (discriminator is bare `p_.type`, **not** `p_.event.type`) | switch scrutinee                                                                                                                             |
+| `sH`  | the message object; `sH.model` is the model that served the request         | `case"message_start":{sH=p_.message,...}`                                                                                                    |
+| `QH`  | per-request usage accumulator                                               | init `QH=ZM` once at generator top; merged at message*start (`QH=O7H(QH,p*.message?.usage)`) and each message_delta (`QH=O7H(QH,p\_.usage)`) |
+| `O7H` | usage merge fn                                                              | —                                                                                                                                            |
+| `ZM`  | zero-usage constant                                                         | —                                                                                                                                            |
 
 Both `sH` and `QH` are `let`-declared at the generator top and **reset per request** (`...sH=void 0,...QH=ZM` between requests), so at `message_stop` they hold the just-completed request's values — exactly the semantics the old `message_stop` inject point had.
 
@@ -80,17 +80,19 @@ case"message_start":{(sH)=(p_).message,(xH)=Math.max(0,Math.round(performance.no
 The `message_stop` case is a **bare** (brace-free) case body ending in `break}` (the trailing `}` closes the switch). It was `case"message_stop":break}` in 2.1.163; **2.1.170 added a telemetry statement**: `case"message_stop":eH("stream_completed",jH??null,r_);break}` (where `r_` is the same per-request usage accumulator Step 1 captures, and `jH` the TTFT timing var). The anchor is now a generalized regex that tolerates brace-free statements before the break and **preserves them**:
 
 ```js
-/case"message_stop":((?:[^{}]*;)?)break\}/g
+;/case"message_stop":((?:[^{}]*;)?)break\}/g
 ```
 
 The `[^{}]` restriction keeps it out of the two block-bodied `case"message_stop":{this._addMessageParam(...)` sites in the Anthropic SDK MessageStream classes and the two `case"message_stop":return q;...` accumulator sites (no `break`). Verified to match exactly once. Our stdout write is appended **after** the preserved statements, before `break`.
 
 **Before (2.1.170):**
+
 ```js
 case"message_stop":eH("stream_completed",jH??null,r_);break}
 ```
 
 **After:**
+
 ```js
 case"message_stop":eH("stream_completed",jH??null,r_);/*PATCHED:request-usage*/process.stdout.write(JSON.stringify({type:"request_usage",usage:r_,model:W_?.model||""})+"\n");break}
 ```
@@ -123,7 +125,7 @@ bundle-analyzer find cli.js "QH=O7H(ZM," --compact         # name will change
 
 ## Syntax Pitfalls
 
-- **Don't add a block at `message_stop`.** The case body ends `break}` — the `}` is the *switch* close. Replacing it with `{...break}` would consume the switch's closing brace. Inject as bare statements: `case"message_stop":<existing stmts><stmt>;break}` (the existing `}` still closes the switch).
+- **Don't add a block at `message_stop`.** The case body ends `break}` — the `}` is the _switch_ close. Replacing it with `{...break}` would consume the switch's closing brace. Inject as bare statements: `case"message_stop":<existing stmts><stmt>;break}` (the existing `}` still closes the switch).
 - **Preserve upstream statements in the case body.** 2.1.170 added `eH("stream_completed",jH??null,r_);` before the break — dropping it would silently kill upstream telemetry. The apply script captures and re-emits whatever brace-free statements precede `break`.
 - **`p_.type`, not `p_.event.type`.** In 2.1.163 the event is the switch scrutinee directly; there is no `.event` wrapper at this layer (that wrapping happens at the later `yield{type:"stream_event",event:p_,...}`).
 - **No `this`.** This is a standalone generator. Any injected code referencing `this` is a bug — read off the captured locals (`sH`, `QH`) instead.
@@ -173,11 +175,11 @@ Type: `RequestUsageMessage` in `src/main/sdk/types.ts` (`{ type:'request_usage',
 
 ## Key Functions Reference
 
-| Name (v2.1.163) | Purpose |
-|---|---|
-| `O7H` | usage merge fn |
-| `ZM` | zero-usage constant |
-| (generator) | streaming loop containing the `switch(p_.type)` and the per-request `finally` reconcile |
+| Name (v2.1.163) | Purpose                                                                                 |
+| --------------- | --------------------------------------------------------------------------------------- |
+| `O7H`           | usage merge fn                                                                          |
+| `ZM`            | zero-usage constant                                                                     |
+| (generator)     | streaming loop containing the `switch(p_.type)` and the per-request `finally` reconcile |
 
 **Note:** all minified names change between versions. Relocate by the `case"message_stop":break}` / `case"message_start":{` string literals and the usage-merge structural shape.
 
@@ -187,7 +189,7 @@ Type: `RequestUsageMessage` in `src/main/sdk/types.ts` (`{ type:'request_usage',
 
 ## Files
 
-| File | Purpose |
-|---|---|
+| File        | Purpose       |
+| ----------- | ------------- |
 | `README.md` | This document |
-| `apply.mjs` | Patch script |
+| `apply.mjs` | Patch script  |

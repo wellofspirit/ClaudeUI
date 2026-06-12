@@ -59,11 +59,5 @@ export function ReviewBar({ comments }: Props): React.JSX.Element | null {
     return () => document.removeEventListener('keydown', handler)
   }, [comments.length])
 
-  return (
-    <ReviewBarView
-      comments={comments}
-      fileCount={fileCount}
-      onSend={handleSend}
-    />
-  )
+  return <ReviewBarView comments={comments} fileCount={fileCount} onSend={handleSend} />
 }

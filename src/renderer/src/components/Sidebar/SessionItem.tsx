@@ -75,23 +75,22 @@ export const SessionItem = memo(function SessionItem({
   const renameCommittedRef = useRef(false)
   const [permissionsOpen, setPermissionsOpen] = useState(false)
 
-  const dotColor = needsAttention && !active
-    ? 'bg-warning animate-pulse'
-    : isRunning
-      ? 'bg-green-400 animate-pulse'
-      : isSdkActive
-        ? 'bg-green-400'
-        : isWatching
-          ? 'bg-blue-400'
-          : 'bg-text-muted/30'
+  const dotColor =
+    needsAttention && !active
+      ? 'bg-warning animate-pulse'
+      : isRunning
+        ? 'bg-green-400 animate-pulse'
+        : isSdkActive
+          ? 'bg-green-400'
+          : isWatching
+            ? 'bg-blue-400'
+            : 'bg-text-muted/30'
 
   // Right-side icon overlay is sized to its actual icon count. Each icon ≈20px
   // (icon + gap) tightly wrapped, plus 5px right padding, plus a 40px blur-in
   // transition zone extending to the left.
   const rightIconCount =
-    (isWorktree ? 1 : 0) +
-    ((onPin || onUnpin) ? 1 : 0) +
-    ((onToggleWatch && !isSdkActive) ? 1 : 0)
+    (isWorktree ? 1 : 0) + (onPin || onUnpin ? 1 : 0) + (onToggleWatch && !isSdkActive ? 1 : 0)
   const blurWidthPx = rightIconCount * 20 + 45
   const blurTransitionPct = Math.round((40 / blurWidthPx) * 100)
 
@@ -133,14 +132,27 @@ export const SessionItem = memo(function SessionItem({
         `}
       >
         <span className="shrink-0 w-[14px] h-[14px] flex items-center justify-center">
-          <span className={`inline-block w-[6px] h-[6px] rounded-full ${dotColor} ${onRemove ? 'group-hover:hidden' : ''}`} />
+          <span
+            className={`inline-block w-[6px] h-[6px] rounded-full ${dotColor} ${onRemove ? 'group-hover:hidden' : ''}`}
+          />
           {onRemove && (
             <span
-              onClick={(e) => { e.stopPropagation(); onRemove() }}
+              onClick={(e) => {
+                e.stopPropagation()
+                onRemove()
+              }}
               className="hidden group-hover:flex items-center justify-center w-[14px] h-[14px] rounded text-text-muted hover:text-text-primary transition-colors cursor-pointer"
               title="Remove from recent"
             >
-              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+              <svg
+                width="10"
+                height="10"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2.5"
+                strokeLinecap="round"
+              >
                 <path d="M18 6L6 18" />
                 <path d="M6 6l12 12" />
               </svg>
@@ -153,7 +165,11 @@ export const SessionItem = memo(function SessionItem({
             value={renameValue}
             onChange={(e) => setRenameValue(e.target.value)}
             onKeyDown={handleRenameKeyDown}
-            onBlur={() => { setTimeout(() => { if (!renameCommittedRef.current) onCancelRename?.() }, 0) }}
+            onBlur={() => {
+              setTimeout(() => {
+                if (!renameCommittedRef.current) onCancelRename?.()
+              }, 0)
+            }}
             placeholder="Enter to auto-generate"
             className="flex-1 min-w-0 bg-transparent border-b border-accent text-[13px] text-text-primary outline-none placeholder:text-text-muted/50"
           />
@@ -161,7 +177,8 @@ export const SessionItem = memo(function SessionItem({
           <span
             className="overflow-hidden whitespace-nowrap flex-1 min-w-0"
             style={{
-              WebkitMaskImage: 'linear-gradient(to right, black calc(100% - 12px), transparent 100%)',
+              WebkitMaskImage:
+                'linear-gradient(to right, black calc(100% - 12px), transparent 100%)',
               maskImage: 'linear-gradient(to right, black calc(100% - 12px), transparent 100%)'
             }}
             title={info.title}
@@ -189,7 +206,16 @@ export const SessionItem = memo(function SessionItem({
           <div className="absolute right-[5px] top-0 h-full flex items-center gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
             {isWorktree && (
               <span className="shrink-0 text-mode-edit opacity-100" title="Worktree session">
-                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <svg
+                  width="11"
+                  height="11"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
                   <circle cx="12" cy="18" r="3" />
                   <circle cx="6" cy="6" r="3" />
                   <circle cx="18" cy="6" r="3" />
@@ -200,11 +226,23 @@ export const SessionItem = memo(function SessionItem({
             )}
             {onPin && (
               <span
-                onClick={(e) => { e.stopPropagation(); onPin() }}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  onPin()
+                }}
                 className="shrink-0 text-text-primary opacity-90 hover:opacity-100 transition-opacity cursor-pointer"
                 title="Pin session"
               >
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <svg
+                  width="12"
+                  height="12"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
                   <path d="M12 17v5" />
                   <path d="M5 17h14v-1.76a2 2 0 00-1.11-1.79l-1.78-.9A2 2 0 0115 10.76V6h1a2 2 0 000-4H8a2 2 0 000 4h1v4.76a2 2 0 01-1.11 1.79l-1.78.9A2 2 0 005 15.24z" />
                 </svg>
@@ -212,11 +250,23 @@ export const SessionItem = memo(function SessionItem({
             )}
             {onUnpin && (
               <span
-                onClick={(e) => { e.stopPropagation(); onUnpin() }}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  onUnpin()
+                }}
                 className="shrink-0 text-text-primary opacity-90 hover:opacity-100 transition-opacity cursor-pointer"
                 title="Unpin session"
               >
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <svg
+                  width="12"
+                  height="12"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
                   <path d="M12 17v5" />
                   <path d="M5 17h14v-1.76a2 2 0 00-1.11-1.79l-1.78-.9A2 2 0 0115 10.76V6h1a2 2 0 000-4H8a2 2 0 000 4h1v4.76a2 2 0 01-1.11 1.79l-1.78.9A2 2 0 005 15.24z" />
                 </svg>
@@ -224,13 +274,25 @@ export const SessionItem = memo(function SessionItem({
             )}
             {onToggleWatch && !isSdkActive && (
               <span
-                onClick={(e) => { e.stopPropagation(); onToggleWatch() }}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  onToggleWatch()
+                }}
                 className={`shrink-0 transition-opacity cursor-pointer opacity-90 hover:opacity-100 ${
                   isWatching ? 'text-blue-400' : 'text-text-primary'
                 }`}
                 title={isWatching ? 'Stop watching' : 'Watch session'}
               >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                <svg
+                  width="14"
+                  height="14"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
                   <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
                   <circle cx="12" cy="12" r="3" />
                 </svg>
@@ -239,84 +301,91 @@ export const SessionItem = memo(function SessionItem({
           </div>
         )}
       </div>
-    {menu.isOpen && (
-      <div
-        ref={menu.ref}
-        className="fixed z-[9999] py-1 rounded-lg bg-bg-tertiary border border-border shadow-lg grid"
-        style={menu.style}
-      >
-        <button
-          onClick={() => {
-            menu.close()
-            onStartRename?.()
-          }}
-          className="w-full text-left px-3 py-1.5 text-[13px] text-text-secondary hover:bg-bg-hover hover:text-text-primary transition-colors cursor-default"
+      {menu.isOpen && (
+        <div
+          ref={menu.ref}
+          className="fixed z-[9999] py-1 rounded-lg bg-bg-tertiary border border-border shadow-lg grid"
+          style={menu.style}
         >
-          Rename session
-        </button>
-        <button
-          onClick={() => {
-            menu.close()
-            onAutoRename?.()
-          }}
-          className="w-full text-left px-3 py-1.5 text-[13px] text-text-secondary hover:bg-bg-hover hover:text-text-primary transition-colors cursor-default"
-        >
-          Auto rename
-        </button>
-        <button
-          onClick={() => {
-            menu.close()
-            setPermissionsOpen(true)
-          }}
-          className="w-full text-left px-3 py-1.5 text-[13px] text-text-secondary hover:bg-bg-hover hover:text-text-primary transition-colors cursor-default"
-        >
-          Edit permissions
-        </button>
-        {isSdkActive && (
           <button
             onClick={() => {
               menu.close()
-              window.api.cancelSession(info.sessionId)
+              onStartRename?.()
             }}
-            className="w-full text-left px-3 py-1.5 text-[13px] text-red-400 hover:bg-bg-hover hover:text-red-300 transition-colors cursor-default"
-          >
-            Disconnect
-          </button>
-        )}
-        {(onHide || onUnhide || onDelete) && (
-          <div className="h-px bg-border my-1" />
-        )}
-        {onHide && !hidden && (
-          <button
-            onClick={() => { menu.close(); onHide() }}
             className="w-full text-left px-3 py-1.5 text-[13px] text-text-secondary hover:bg-bg-hover hover:text-text-primary transition-colors cursor-default"
           >
-            Hide session
+            Rename session
           </button>
-        )}
-        {onUnhide && hidden && (
           <button
-            onClick={() => { menu.close(); onUnhide() }}
+            onClick={() => {
+              menu.close()
+              onAutoRename?.()
+            }}
             className="w-full text-left px-3 py-1.5 text-[13px] text-text-secondary hover:bg-bg-hover hover:text-text-primary transition-colors cursor-default"
           >
-            Unhide session
+            Auto rename
           </button>
-        )}
-        {onDelete && (
           <button
-            onClick={() => { menu.close(); onDelete() }}
-            className="w-full text-left px-3 py-1.5 text-[13px] text-red-400 hover:bg-red-500/15 hover:text-red-300 transition-colors cursor-default"
+            onClick={() => {
+              menu.close()
+              setPermissionsOpen(true)
+            }}
+            className="w-full text-left px-3 py-1.5 text-[13px] text-text-secondary hover:bg-bg-hover hover:text-text-primary transition-colors cursor-default"
           >
-            Delete session...
+            Edit permissions
           </button>
-        )}
-      </div>
-    )}
-    <PermissionsDialog
-      open={permissionsOpen}
-      onClose={() => setPermissionsOpen(false)}
-      cwd={info.cwd}
-    />
-  </>
+          {isSdkActive && (
+            <button
+              onClick={() => {
+                menu.close()
+                window.api.cancelSession(info.sessionId)
+              }}
+              className="w-full text-left px-3 py-1.5 text-[13px] text-red-400 hover:bg-bg-hover hover:text-red-300 transition-colors cursor-default"
+            >
+              Disconnect
+            </button>
+          )}
+          {(onHide || onUnhide || onDelete) && <div className="h-px bg-border my-1" />}
+          {onHide && !hidden && (
+            <button
+              onClick={() => {
+                menu.close()
+                onHide()
+              }}
+              className="w-full text-left px-3 py-1.5 text-[13px] text-text-secondary hover:bg-bg-hover hover:text-text-primary transition-colors cursor-default"
+            >
+              Hide session
+            </button>
+          )}
+          {onUnhide && hidden && (
+            <button
+              onClick={() => {
+                menu.close()
+                onUnhide()
+              }}
+              className="w-full text-left px-3 py-1.5 text-[13px] text-text-secondary hover:bg-bg-hover hover:text-text-primary transition-colors cursor-default"
+            >
+              Unhide session
+            </button>
+          )}
+          {onDelete && (
+            <button
+              onClick={() => {
+                menu.close()
+                onDelete()
+              }}
+              className="w-full text-left px-3 py-1.5 text-[13px] text-red-400 hover:bg-red-500/15 hover:text-red-300 transition-colors cursor-default"
+            >
+              Delete session...
+            </button>
+          )}
+        </div>
+      )}
+      <PermissionsDialog
+        open={permissionsOpen}
+        onClose={() => setPermissionsOpen(false)}
+        cwd={info.cwd}
+      />
+    </>
   )
 })

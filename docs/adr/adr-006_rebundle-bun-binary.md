@@ -23,7 +23,7 @@ This worked, but the impedance mismatch between Node and Bun kept biting us:
   remap **one** CI root (`file:///home/runner/work/claude-cli-internal/...`).
   Anthropic's Windows CI uses a different workspace root (`D:\a\...`), which
   the patch missed — producing `spawn D:\a\claude-cli-internal\...\rg.exe
-  ENOENT` on every Grep tool invocation from Windows builds.
+ENOENT` on every Grep tool invocation from Windows builds.
 - Every Anthropic CI layout change (new runner, new repo name) is a silent
   regression risk.
 - The per-build pipeline maintained two custom shims (Bun-path shim + CI-path
@@ -102,12 +102,15 @@ vendor/claude-cli/bun-claude[.exe]       (shipped artifact)
 ### Spawn model
 
 Before:
+
 ```ts
-spawn(electronHelper, [cliJsPath, ...buildArgs()],
-      { env: { ELECTRON_RUN_AS_NODE: '1', NODE_PATH: appNodeModules } })
+spawn(electronHelper, [cliJsPath, ...buildArgs()], {
+  env: { ELECTRON_RUN_AS_NODE: '1', NODE_PATH: appNodeModules }
+})
 ```
 
 After:
+
 ```ts
 spawn(bunClaudePath, [...buildArgs()])
 ```
@@ -134,7 +137,7 @@ spawn(bunClaudePath, [...buildArgs()])
   by `/bundle-analyzer` and text patches, but no longer runnable via
   `node cli.js` for ad-hoc testing. Rebundling takes ~270 ms, so the
   iteration loop is still fast (`node patch/<name>/apply.mjs && node
-  scripts/rebundle-cli.mjs`).
+scripts/rebundle-cli.mjs`).
 - **Rebundler is platform-specific.** PE (Windows) and Mach-O (macOS)
   implemented. ELF (Linux) is a follow-up; the extract path already works
   cross-platform via `lastIndexOf(BUN_MAGIC)`, but the writer doesn't.

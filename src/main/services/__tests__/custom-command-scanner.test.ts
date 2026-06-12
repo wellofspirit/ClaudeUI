@@ -191,7 +191,8 @@ describe('scanCustomCommands', () => {
       })
       vi.mocked(fs.readdirSync).mockImplementation((p) => {
         if (p.toString() === PROJECT_CMD_DIR) throw new Error('EACCES')
-        if (p.toString() === USER_CMD_DIR) return [dirent('lint.md')] as unknown as ReturnType<typeof fs.readdirSync>
+        if (p.toString() === USER_CMD_DIR)
+          return [dirent('lint.md')] as unknown as ReturnType<typeof fs.readdirSync>
         throw new Error(`ENOENT: ${p}`)
       })
 

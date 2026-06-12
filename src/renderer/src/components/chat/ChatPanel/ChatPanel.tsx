@@ -1,5 +1,9 @@
 import { useRef, useEffect, useState, useMemo, useCallback } from 'react'
-import { useActiveSession, useSessionStore, useFocusedAgentData } from '../../../stores/session-store'
+import {
+  useActiveSession,
+  useSessionStore,
+  useFocusedAgentData
+} from '../../../stores/session-store'
 import { MessageBubble } from '../MessageBubble'
 import { StreamingText } from '../StreamingText'
 import { ThinkingBlock } from '../ThinkingBlock'
@@ -73,11 +77,17 @@ export function ChatPanel(): React.JSX.Element {
 
     const timers = [
       requestAnimationFrame(() => {
-        if (el) { el.scrollTop = el.scrollHeight; lastScrollTop.current = el.scrollTop }
+        if (el) {
+          el.scrollTop = el.scrollHeight
+          lastScrollTop.current = el.scrollTop
+        }
       }),
       setTimeout(() => {
         requestAnimationFrame(() => {
-          if (el) { el.scrollTop = el.scrollHeight; lastScrollTop.current = el.scrollTop }
+          if (el) {
+            el.scrollTop = el.scrollHeight
+            lastScrollTop.current = el.scrollTop
+          }
         })
       }, 80) as unknown as number
     ]
@@ -116,7 +126,9 @@ export function ChatPanel(): React.JSX.Element {
       el.scrollTop = el.scrollHeight
       lastScrollTop.current = el.scrollTop
       wasNearBottom.current = true
-      requestAnimationFrame(() => { isAutoScrolling.current = false })
+      requestAnimationFrame(() => {
+        isAutoScrolling.current = false
+      })
     }
   }, [])
 
@@ -193,7 +205,11 @@ export function ChatPanel(): React.JSX.Element {
   const chatWidthPx = useSessionStore((s) => s.settings.chatWidthPx)
   const chatWidthPercent = useSessionStore((s) => s.settings.chatWidthPercent)
   const isMobile = useIsMobile()
-  const chatMaxWidth = isMobile ? '100%' : (chatWidthMode === 'px' ? `${chatWidthPx}px` : `${chatWidthPercent}%`)
+  const chatMaxWidth = isMobile
+    ? '100%'
+    : chatWidthMode === 'px'
+      ? `${chatWidthPx}px`
+      : `${chatWidthPercent}%`
   const chatZoom = chatFontScale / uiFontScale
   const hasContent = messages.length > 0 || hasStreamingText || !!thinkingStartedAt
   const showEmptyScreen = !hasContent && status.state === 'idle'
@@ -229,7 +245,10 @@ export function ChatPanel(): React.JSX.Element {
               <LoadingState />
             </div>
           ) : (
-            <div style={{ ...(chatZoom !== 1 ? { zoom: chatZoom } : {}), maxWidth: chatMaxWidth }} className={`mx-auto pt-5 pb-6 flex flex-col gap-3 ${isMobile ? 'px-3' : 'px-8'}`}>
+            <div
+              style={{ ...(chatZoom !== 1 ? { zoom: chatZoom } : {}), maxWidth: chatMaxWidth }}
+              className={`mx-auto pt-5 pb-6 flex flex-col gap-3 ${isMobile ? 'px-3' : 'px-8'}`}
+            >
               {messages.map((msg) => (
                 <div key={msg.id} className="cv-auto">
                   <MessageBubble
@@ -242,10 +261,10 @@ export function ChatPanel(): React.JSX.Element {
               ))}
               <div className="flex flex-col gap-5">
                 {hasStreamingText && <StreamingText />}
-                {thinkingStartedAt && (
-                  <ThinkingBlock text={streamingThinking} isActive />
+                {thinkingStartedAt && <ThinkingBlock text={streamingThinking} isActive />}
+                {!hasStreamingText && !thinkingStartedAt && status.state === 'running' && (
+                  <TypingIndicator />
                 )}
-                {!hasStreamingText && !thinkingStartedAt && status.state === 'running' && <TypingIndicator />}
               </div>
             </div>
           )}
@@ -261,7 +280,16 @@ export function ChatPanel(): React.JSX.Element {
                 className="pointer-events-auto w-8 h-8 flex items-center justify-center rounded-full bg-bg-tertiary border border-border text-text-muted hover:text-text-primary hover:bg-bg-hover shadow-lg transition-all cursor-default animate-fade-in"
                 title="Scroll to bottom"
               >
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <svg
+                  width="16"
+                  height="16"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
                   <path d="M6 9l6 6 6-6" />
                 </svg>
               </button>
@@ -288,7 +316,11 @@ function LoadingState(): React.JSX.Element {
     <div className="flex items-center gap-2.5 -mt-16 animate-fade-in">
       <div className="flex gap-[3px]">
         {[0, 200, 400].map((delay) => (
-          <span key={delay} className="w-[5px] h-[5px] rounded-full bg-accent" style={{ animation: 'pulse-dot 1.4s infinite', animationDelay: `${delay}ms` }} />
+          <span
+            key={delay}
+            className="w-[5px] h-[5px] rounded-full bg-accent"
+            style={{ animation: 'pulse-dot 1.4s infinite', animationDelay: `${delay}ms` }}
+          />
         ))}
       </div>
       <span className="text-[13px] text-text-muted">Thinking...</span>

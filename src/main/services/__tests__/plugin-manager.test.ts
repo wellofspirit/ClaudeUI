@@ -15,8 +15,6 @@
  *    the loader path, not a stub.
  */
 
- 
-
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import * as fs from 'fs'
 import * as path from 'path'
@@ -28,11 +26,10 @@ import * as path from 'path'
 // Shared tmpdir across the suite — allocated in a hoisted block so it exists
 // before `plugin-manager.ts` is imported (PLUGINS_DIR is a module-level const).
 const hoisted = vi.hoisted(() => {
-   
   const realFs = require('fs') as typeof import('fs')
-   
+
   const realOs = require('os') as typeof import('os')
-   
+
   const realPath = require('path') as typeof import('path')
   const home = realFs.mkdtempSync(realPath.join(realOs.tmpdir(), 'claudeui-plugin-test-'))
   return { TEST_HOME: home }
@@ -46,7 +43,7 @@ vi.mock('os', async () => {
   return {
     ...actual,
     default: { ...actual, homedir: () => hoisted.TEST_HOME },
-    homedir: () => hoisted.TEST_HOME,
+    homedir: () => hoisted.TEST_HOME
   }
 })
 
@@ -55,7 +52,7 @@ vi.mock('electron', async () => await import('../../../test/stubs/electron-shim'
 
 // Don't pull the real SDK bundle — we only need the named export to exist.
 vi.mock('../../sdk', () => ({
-  query: vi.fn(),
+  query: vi.fn()
 }))
 
 // claude-session imports the SDK and Electron app internals. Replace with a
@@ -65,10 +62,14 @@ vi.mock('../claude-session', () => {
   const extraWindows = new Set<unknown>()
   return {
     ClaudeSession: {
-      addExtraWindow: (w: unknown) => { extraWindows.add(w) },
-      removeExtraWindow: (w: unknown) => { extraWindows.delete(w) },
-      getExtraWindows: () => extraWindows,
-    },
+      addExtraWindow: (w: unknown) => {
+        extraWindows.add(w)
+      },
+      removeExtraWindow: (w: unknown) => {
+        extraWindows.delete(w)
+      },
+      getExtraWindows: () => extraWindows
+    }
   }
 })
 
@@ -80,8 +81,8 @@ vi.mock('../logger', () => ({
     debug: vi.fn(),
     info: vi.fn(),
     warn: vi.fn(),
-    error: vi.fn(),
-  },
+    error: vi.fn()
+  }
 }))
 
 // ---------------------------------------------------------------------------
@@ -124,7 +125,7 @@ function writePlugin(opts: FixtureOpts): string {
   const pkg = opts.pkg ?? {
     name: opts.id,
     version: '1.0.0',
-    claudeui: { plugin: true, entryPoint: 'dist/index.js' },
+    claudeui: { plugin: true, entryPoint: 'dist/index.js' }
   }
   const pkgText = typeof pkg === 'string' ? pkg : JSON.stringify(pkg, null, 2)
   fs.writeFileSync(path.join(dir, 'package.json'), pkgText)
@@ -175,7 +176,7 @@ function scaffold(opts?: { sessionIdFor?: (routingId: string) => string | null }
   const sessionManager = {
     getSessionId: vi.fn((routingId: string) =>
       opts?.sessionIdFor ? opts.sessionIdFor(routingId) : null
-    ),
+    )
   }
   const automationManager = {}
   const remoteDispatcher = new RemoteDispatcher()
@@ -184,7 +185,7 @@ function scaffold(opts?: { sessionIdFor?: (routingId: string) => string | null }
     win,
     sessionManager: sessionManager as any,
     automationManager: automationManager as any,
-    remoteDispatcher,
+    remoteDispatcher
   })
 
   return {
@@ -193,12 +194,17 @@ function scaffold(opts?: { sessionIdFor?: (routingId: string) => string | null }
     win,
     sessionManager: sessionManager as any,
     automationManager,
-    remoteDispatcher,
+    remoteDispatcher
   }
 }
 
 /** Fire a session event through the bridge the same way ClaudeSession.send() would. */
-function fireSessionEventViaBridge(manager: PluginManager, channel: string, routingId: string, data: unknown): void {
+function fireSessionEventViaBridge(
+  manager: PluginManager,
+  channel: string,
+  routingId: string,
+  data: unknown
+): void {
   // Grab the bridge instance by reaching into the manager. The bridge registers
   // itself as an ExtraWindow on ClaudeSession via addExtraWindow().
   const bridge: any = (manager as any).bridge
@@ -241,9 +247,9 @@ describe('PluginManager', () => {
         pkg: {
           name: 'valid-plugin',
           version: '2.3.4',
-          claudeui: { plugin: true, displayName: 'Valid', entryPoint: 'dist/index.js' },
+          claudeui: { plugin: true, displayName: 'Valid', entryPoint: 'dist/index.js' }
         },
-        entryJs: 'module.exports = { activate: (ctx) => { ctx.logger.info("activated") } }',
+        entryJs: 'module.exports = { activate: (ctx) => { ctx.logger.info("activated") } }'
       })
 
       await s.manager.loadAll()
@@ -254,7 +260,7 @@ describe('PluginManager', () => {
         id: 'valid-plugin',
         name: 'Valid',
         version: '2.3.4',
-        enabled: true,
+        enabled: true
       })
       expect(plugins[0].error).toBeUndefined()
     })
@@ -280,12 +286,12 @@ describe('PluginManager', () => {
       // No claudeui block at all
       writePlugin({
         id: 'not-a-plugin',
-        pkg: { name: 'not-a-plugin', version: '1.0.0' },
+        pkg: { name: 'not-a-plugin', version: '1.0.0' }
       })
       // Has claudeui but plugin=false
       writePlugin({
         id: 'disabled-flag',
-        pkg: { name: 'disabled-flag', version: '1.0.0', claudeui: { plugin: false } },
+        pkg: { name: 'disabled-flag', version: '1.0.0', claudeui: { plugin: false } }
       })
       // Genuine plugin
       writePlugin({ id: 'real' })
@@ -302,9 +308,9 @@ describe('PluginManager', () => {
         pkg: {
           name: 'no-entry',
           version: '1.0.0',
-          claudeui: { plugin: true, entryPoint: 'dist/does-not-exist.js' },
+          claudeui: { plugin: true, entryPoint: 'dist/does-not-exist.js' }
         },
-        omitEntry: true,
+        omitEntry: true
       })
 
       await s.manager.loadAll()
@@ -318,7 +324,7 @@ describe('PluginManager', () => {
     it('records an error when entry module has no activate() function', async () => {
       writePlugin({
         id: 'no-activate',
-        entryJs: 'module.exports = { notActivate: true }',
+        entryJs: 'module.exports = { notActivate: true }'
       })
 
       await s.manager.loadAll()
@@ -338,7 +344,7 @@ describe('PluginManager', () => {
               ctx.on('plugin:all-loaded', () => { global.__allLoaded++ })
             }
           }
-        `,
+        `
       })
 
       await s.manager.loadAll()
@@ -361,7 +367,7 @@ describe('PluginManager', () => {
               global.__activateCall = { id: ctx.id, hasOn: typeof ctx.on, hasEmit: typeof ctx.emit }
             }
           }
-        `,
+        `
       })
 
       await s.manager.loadAll()
@@ -382,7 +388,7 @@ describe('PluginManager', () => {
             activate: () => {},
             deactivate: () => { global.__deactivateCalls = (global.__deactivateCalls || 0) + 1 }
           }
-        `,
+        `
       })
 
       await s.manager.loadAll()
@@ -396,11 +402,11 @@ describe('PluginManager', () => {
     it("one plugin's activate() throwing does not prevent others from activating", async () => {
       writePlugin({
         id: 'a-boom',
-        entryJs: 'module.exports = { activate: () => { throw new Error("boom") } }',
+        entryJs: 'module.exports = { activate: () => { throw new Error("boom") } }'
       })
       writePlugin({
         id: 'b-ok',
-        entryJs: 'module.exports = { activate: () => { global.__bActivated = true } }',
+        entryJs: 'module.exports = { activate: () => { global.__bActivated = true } }'
       })
 
       await s.manager.loadAll()
@@ -424,7 +430,7 @@ describe('PluginManager', () => {
             activate: () => { global.__activations = (global.__activations || 0) + 1 },
             deactivate: () => { global.__deactivations = (global.__deactivations || 0) + 1 }
           }
-        `,
+        `
       })
 
       await s.manager.loadAll()
@@ -456,7 +462,7 @@ describe('PluginManager', () => {
               ctx.on('session:message', (evt) => { global.__sessionEvents.push(evt) })
             }
           }
-        `,
+        `
       })
       await s.manager.loadAll()
 
@@ -467,7 +473,7 @@ describe('PluginManager', () => {
       expect(events[0]).toMatchObject({
         routingId: 'R-1',
         sessionId: 'SID-1',
-        message: { id: 'm1' },
+        message: { id: 'm1' }
       })
       delete (global as any).__sessionEvents
     })
@@ -484,7 +490,7 @@ describe('PluginManager', () => {
               ctx.on('session:stream', (evt) => { global.__early.push(evt) })
             }
           }
-        `,
+        `
       })
       await s.manager.loadAll()
 
@@ -509,7 +515,7 @@ describe('PluginManager', () => {
               ctx.on('session:stream', () => { global.__streamHits++ })
             }
           }
-        `,
+        `
       })
       await s.manager.loadAll()
 
@@ -545,7 +551,7 @@ describe('PluginManager', () => {
               ctx.registerIpcHandler('ping', () => 'pong')
             }
           }
-        `,
+        `
       })
 
       await s.manager.loadAll()
@@ -568,7 +574,7 @@ describe('PluginManager', () => {
               ctx.registerRemoteHandler('ping', async () => 'pong')
             }
           }
-        `,
+        `
       })
 
       await s.manager.loadAll()
@@ -588,7 +594,7 @@ describe('PluginManager', () => {
               ctx.on('session:message', () => { global.__evtHits++ })
             }
           }
-        `,
+        `
       })
       await s.manager.loadAll()
 
@@ -612,7 +618,7 @@ describe('PluginManager', () => {
               ctx.registerView({ label: 'My View', htmlFile: 'index.html' })
             }
           }
-        `,
+        `
       })
 
       await s.manager.loadAll()
@@ -636,7 +642,7 @@ describe('PluginManager', () => {
           module.exports = {
             activate: (ctx) => { global.__ctxKeys = Object.keys(ctx).sort() }
           }
-        `,
+        `
       })
 
       await s.manager.loadAll()
@@ -644,9 +650,22 @@ describe('PluginManager', () => {
       const keys = (global as any).__ctxKeys as string[]
       // All expected fields must be present...
       const expected = [
-        'id', 'pluginDir', 'dataDir', 'configDir', 'debug', 'logger',
-        'sessions', 'automations', 'window', 'ipcMain', 'sdkQuery',
-        'on', 'emit', 'registerIpcHandler', 'registerRemoteHandler', 'registerView',
+        'id',
+        'pluginDir',
+        'dataDir',
+        'configDir',
+        'debug',
+        'logger',
+        'sessions',
+        'automations',
+        'window',
+        'ipcMain',
+        'sdkQuery',
+        'on',
+        'emit',
+        'registerIpcHandler',
+        'registerRemoteHandler',
+        'registerView'
       ].sort()
       for (const k of expected) expect(keys).toContain(k)
 

@@ -2,7 +2,7 @@ import { useEffect, useRef } from 'react'
 import type { DirEntry } from '../../../../shared/types'
 
 interface FileMentionMenuProps {
-  entries: DirEntry[]        // already filtered and includes ".." if needed
+  entries: DirEntry[] // already filtered and includes ".." if needed
   selectedIndex: number
   onSelect: (entry: DirEntry) => void
 }
@@ -10,7 +10,17 @@ interface FileMentionMenuProps {
 /** Directory icon (folder) */
 function FolderIcon(): React.JSX.Element {
   return (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className="text-accent shrink-0">
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className="text-accent shrink-0"
+    >
       <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
     </svg>
   )
@@ -19,7 +29,17 @@ function FolderIcon(): React.JSX.Element {
 /** File icon */
 function FileIcon(): React.JSX.Element {
   return (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className="text-text-muted shrink-0">
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className="text-text-muted shrink-0"
+    >
       <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
       <polyline points="14 2 14 8 20 8" />
     </svg>
@@ -61,7 +81,8 @@ export function FileMentionMenu({
         >
           {entry.isDirectory ? <FolderIcon /> : <FileIcon />}
           <span className="text-[13px] text-text-primary truncate">
-            {entry.name}{entry.isDirectory && entry.name !== '..' ? '/' : ''}
+            {entry.name}
+            {entry.isDirectory && entry.name !== '..' ? '/' : ''}
           </span>
         </button>
       ))}

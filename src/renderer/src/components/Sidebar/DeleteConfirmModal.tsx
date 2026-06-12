@@ -34,20 +34,44 @@ export function DeleteConfirmModal({
   }
 
   const title = kind === 'session' ? 'Delete session?' : 'Delete project?'
-  const confirmLabel = kind === 'project' && sessionCount && sessionCount > 0
-    ? `Delete all ${sessionCount} session${sessionCount === 1 ? '' : 's'}`
-    : 'Delete'
+  const confirmLabel =
+    kind === 'project' && sessionCount && sessionCount > 0
+      ? `Delete all ${sessionCount} session${sessionCount === 1 ? '' : 's'}`
+      : 'Delete'
 
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center">
-      <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={busy ? undefined : onCancel} />
+      <div
+        className="absolute inset-0 bg-black/40 backdrop-blur-sm"
+        onClick={busy ? undefined : onCancel}
+      />
       <div className="relative bg-bg-primary border border-border rounded-xl shadow-2xl w-[440px] p-5 animate-fade-in">
         <h3 className="text-[15px] font-medium text-text-primary mb-2">{title}</h3>
         <p className="text-[13px] text-text-secondary mb-3 leading-relaxed">
           {kind === 'session' ? (
-            <>This will permanently delete <span className="font-medium text-text-primary">&quot;{name}&quot;</span> and its subagent data from disk. This cannot be undone.</>
+            <>
+              This will permanently delete{' '}
+              <span className="font-medium text-text-primary">&quot;{name}&quot;</span> and its
+              subagent data from disk. This cannot be undone.
+            </>
           ) : (
-            <>This will permanently delete <span className="font-medium text-text-primary">{name}</span>{sessionCount ? <> and all <span className="font-medium text-text-primary">{sessionCount} session{sessionCount === 1 ? '' : 's'}</span> inside it</> : ''}. This cannot be undone.</>
+            <>
+              This will permanently delete{' '}
+              <span className="font-medium text-text-primary">{name}</span>
+              {sessionCount ? (
+                <>
+                  {' '}
+                  and all{' '}
+                  <span className="font-medium text-text-primary">
+                    {sessionCount} session{sessionCount === 1 ? '' : 's'}
+                  </span>{' '}
+                  inside it
+                </>
+              ) : (
+                ''
+              )}
+              . This cannot be undone.
+            </>
           )}
         </p>
         <div className="text-[11px] text-text-muted font-mono bg-bg-tertiary/60 border border-border rounded px-2 py-1.5 mb-4 break-all">

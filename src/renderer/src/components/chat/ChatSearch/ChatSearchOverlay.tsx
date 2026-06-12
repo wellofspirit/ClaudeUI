@@ -10,7 +10,13 @@ interface Props {
   onClose: () => void
 }
 
-export function ChatSearchOverlay({ scrollRef, active, query, onQueryChange, onClose }: Props): React.JSX.Element | null {
+export function ChatSearchOverlay({
+  scrollRef,
+  active,
+  query,
+  onQueryChange,
+  onClose
+}: Props): React.JSX.Element | null {
   const searchCaseSensitive = useSessionStore((s) => s.settings.searchCaseSensitive)
   const updateSettings = useSessionStore((s) => s.updateSettings)
 
@@ -86,11 +92,7 @@ export function ChatSearchOverlay({ scrollRef, active, query, onQueryChange, onC
   if (!active) return null
 
   const counter =
-    query.length < 2
-      ? ''
-      : state.total === 0
-        ? 'No results'
-        : `${state.index} / ${state.total}`
+    query.length < 2 ? '' : state.total === 0 ? 'No results' : `${state.index} / ${state.total}`
 
   return (
     <div
@@ -115,7 +117,16 @@ export function ChatSearchOverlay({ scrollRef, active, query, onQueryChange, onC
         title="Previous match (Shift+Enter)"
         className="w-6 h-6 flex items-center justify-center rounded text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
       >
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <svg
+          width="12"
+          height="12"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        >
           <path d="M18 15l-6-6-6 6" />
         </svg>
       </button>
@@ -124,7 +135,16 @@ export function ChatSearchOverlay({ scrollRef, active, query, onQueryChange, onC
         title="Next match (Enter)"
         className="w-6 h-6 flex items-center justify-center rounded text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
       >
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <svg
+          width="12"
+          height="12"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        >
           <path d="M6 9l6 6 6-6" />
         </svg>
       </button>
@@ -132,7 +152,9 @@ export function ChatSearchOverlay({ scrollRef, active, query, onQueryChange, onC
         onClick={toggleCase}
         title="Case sensitive"
         className={`w-6 h-6 flex items-center justify-center rounded text-[11px] font-mono transition-colors cursor-default ${
-          searchCaseSensitive ? 'bg-accent text-bg-primary' : 'text-text-muted hover:text-text-primary hover:bg-bg-hover'
+          searchCaseSensitive
+            ? 'bg-accent text-bg-primary'
+            : 'text-text-muted hover:text-text-primary hover:bg-bg-hover'
         }`}
       >
         Aa
@@ -142,7 +164,16 @@ export function ChatSearchOverlay({ scrollRef, active, query, onQueryChange, onC
         title="Close (Esc)"
         className="w-6 h-6 flex items-center justify-center rounded text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
       >
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <svg
+          width="12"
+          height="12"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        >
           <path d="M18 6L6 18" />
           <path d="M6 6l12 12" />
         </svg>

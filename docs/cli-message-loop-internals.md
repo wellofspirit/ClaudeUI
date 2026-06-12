@@ -83,38 +83,40 @@ The queue is a simple in-memory array (`queueArray`) with helper functions. It i
 
 ```typescript
 interface QueueItem {
-  value: string | ContentBlock[];  // the message content
-  mode: "prompt" | "task-notification" | "task-started" | "orphaned-permission" | "bash";
-  priority?: "now" | "next" | "later";  // default: "next" for push(), "later" for pushLater()
-  imagePasteIds?: string[];
+  value: string | ContentBlock[] // the message content
+  mode: 'prompt' | 'task-notification' | 'task-started' | 'orphaned-permission' | 'bash'
+  priority?: 'now' | 'next' | 'later' // default: "next" for push(), "later" for pushLater()
+  imagePasteIds?: string[]
   // NOTE: no `uuid` field on natively queued items
 }
 ```
 
 ### Queue Functions
 
-| Function | Pseudoname | What it does |
-|---|---|---|
-| `push(item)` | `queuePush` | Appends with `priority: "next"` (default). Calls `notifySubscribers()`. Logs `"enqueue"`. |
-| `pushLater(item)` | `queuePushLater` | Appends with `priority: "later"` (default). Same notifications. |
-| `dequeueOne()` | `dequeueOne` | Removes and returns the highest-priority item (priority order: `now=0, next=1, later=2`). Logs `"dequeue"`. |
-| `removeConsumed(items)` | `removeConsumed` | Removes items from `queueArray` by **`.value` match** (not by reference or UUID). Called after queue items are converted to attachments. Logs `"remove"` per item. |
-| `removeByPredicate(fn)` | `removeByPredicate` | Removes items where `fn(item)` returns true. Returns removed items. Used for cleanup (e.g., removing `task-started` items on result). |
-| `popAllEditable(currentInput, cursorOffset)` | `popAllEditable` | **The edit mechanism**: separates editable vs non-editable items, pops all editable ones from queue, concatenates their text with `currentInput`, returns `{text, cursorOffset, images}`. Clears queue and re-inserts only non-editable items. |
-| `snapshotQueue()` | `snapshotQueue` | Returns `[...queueArray]` — a shallow copy. Used by `queryGenerator` to capture queue state at sub-turn boundaries. |
-| `getFrozenSnapshot()` | `getFrozenSnapshot` | Returns `frozenSnapshot` (`Object.freeze([...queueArray])`). Used by UI via `useSyncExternalStore`. |
-| `isNonEmpty()` | `queueNonEmpty` | Returns `queueArray.length > 0`. Used by the do-while loop condition. |
-| `subscribe(callback)` | `subscribe` | Adds to subscriber set. Returns unsubscribe function. |
-| `notifySubscribers()` | `notifySubscribers` | Updates `frozenSnapshot` and calls all subscribers. |
-| `logQueueOp(operation, content?)` | `logQueueOp` | Writes to SQLite via `recordQueueOperation()`. Does NOT emit to SDK stream. |
+| Function                                     | Pseudoname          | What it does                                                                                                                                                                                                                                   |
+| -------------------------------------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `push(item)`                                 | `queuePush`         | Appends with `priority: "next"` (default). Calls `notifySubscribers()`. Logs `"enqueue"`.                                                                                                                                                      |
+| `pushLater(item)`                            | `queuePushLater`    | Appends with `priority: "later"` (default). Same notifications.                                                                                                                                                                                |
+| `dequeueOne()`                               | `dequeueOne`        | Removes and returns the highest-priority item (priority order: `now=0, next=1, later=2`). Logs `"dequeue"`.                                                                                                                                    |
+| `removeConsumed(items)`                      | `removeConsumed`    | Removes items from `queueArray` by **`.value` match** (not by reference or UUID). Called after queue items are converted to attachments. Logs `"remove"` per item.                                                                             |
+| `removeByPredicate(fn)`                      | `removeByPredicate` | Removes items where `fn(item)` returns true. Returns removed items. Used for cleanup (e.g., removing `task-started` items on result).                                                                                                          |
+| `popAllEditable(currentInput, cursorOffset)` | `popAllEditable`    | **The edit mechanism**: separates editable vs non-editable items, pops all editable ones from queue, concatenates their text with `currentInput`, returns `{text, cursorOffset, images}`. Clears queue and re-inserts only non-editable items. |
+| `snapshotQueue()`                            | `snapshotQueue`     | Returns `[...queueArray]` — a shallow copy. Used by `queryGenerator` to capture queue state at sub-turn boundaries.                                                                                                                            |
+| `getFrozenSnapshot()`                        | `getFrozenSnapshot` | Returns `frozenSnapshot` (`Object.freeze([...queueArray])`). Used by UI via `useSyncExternalStore`.                                                                                                                                            |
+| `isNonEmpty()`                               | `queueNonEmpty`     | Returns `queueArray.length > 0`. Used by the do-while loop condition.                                                                                                                                                                          |
+| `subscribe(callback)`                        | `subscribe`         | Adds to subscriber set. Returns unsubscribe function.                                                                                                                                                                                          |
+| `notifySubscribers()`                        | `notifySubscribers` | Updates `frozenSnapshot` and calls all subscribers.                                                                                                                                                                                            |
+| `logQueueOp(operation, content?)`            | `logQueueOp`        | Writes to SQLite via `recordQueueOperation()`. Does NOT emit to SDK stream.                                                                                                                                                                    |
 
 ### Editability
 
 The function `isEditable(mode)` returns `true` if the mode is NOT in the non-editable set:
 
 ```javascript
-const NON_EDITABLE_MODES = new Set(["task-notification", "task-started"]);
-function isEditable(mode) { return !NON_EDITABLE_MODES.has(mode); }
+const NON_EDITABLE_MODES = new Set(['task-notification', 'task-started'])
+function isEditable(mode) {
+  return !NON_EDITABLE_MODES.has(mode)
+}
 ```
 
 So `"prompt"` mode items ARE editable, while system items are not.
@@ -123,11 +125,10 @@ So `"prompt"` mode items ARE editable, while system items are not.
 
 ```javascript
 function extractQueueText(value) {
-  if (typeof value === "string") return value;
-  let parts = [];
-  for (let block of value)
-    if (block.type === "text") parts.push(block.text);
-  return parts.join("\n");
+  if (typeof value === 'string') return value
+  let parts = []
+  for (let block of value) if (block.type === 'text') parts.push(block.text)
+  return parts.join('\n')
 }
 ```
 
@@ -219,10 +220,10 @@ A more detailed look at what happens in each sub-turn:
 ### Phase 1: Pre-processing
 
 ```javascript
-let workingMessages = [...normalizeMessages(messages)];
+let workingMessages = [...normalizeMessages(messages)]
 // Microcompact (trim old messages if over threshold)
 // Autocompact (summarize conversation if needed)
-let systemPromptFinal = buildSystemPrompt(systemPrompt, systemContext);
+let systemPromptFinal = buildSystemPrompt(systemPrompt, systemContext)
 ```
 
 ### Phase 2: Queue Snapshot + Attachments
@@ -368,15 +369,15 @@ Main-thread-only attachments (querySource === "repl_main_thread" or "sdk"):
 
 ```javascript
 function queueItemsToAttachments(queueSnapshot) {
-  if (!queueSnapshot) return [];
+  if (!queueSnapshot) return []
   return queueSnapshot
-    .filter(item => item.mode === "prompt")
-    .map(item => ({
-      type: "queued_command",
+    .filter((item) => item.mode === 'prompt')
+    .map((item) => ({
+      type: 'queued_command',
       prompt: item.value,
-      source_uuid: item.uuid,         // only present if set by caller
+      source_uuid: item.uuid, // only present if set by caller
       imagePasteIds: item.imagePasteIds
-    }));
+    }))
 }
 ```
 
@@ -466,11 +467,11 @@ After T2 (snapshot taken), even removing from `queueArray` doesn't help — the 
 
 ### What the SDK Consumer Sees
 
-| Event | CLI REPL (React) | SDK Consumer (ClaudeUI) |
-|---|---|---|
-| Item enters queue | UI re-renders via `useSyncExternalStore(subscribe, getFrozenSnapshot)` | **Nothing** — queue is internal to CLI process |
-| Item consumed as attachment | Queue display updates (item disappears) | **Nothing** — `queued_command` attachment is NOT yielded when `replayUserMessages=false` |
-| Model processes steer | Response references the steer content | Assistant message contains response to steer |
+| Event                       | CLI REPL (React)                                                       | SDK Consumer (ClaudeUI)                                                                  |
+| --------------------------- | ---------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| Item enters queue           | UI re-renders via `useSyncExternalStore(subscribe, getFrozenSnapshot)` | **Nothing** — queue is internal to CLI process                                           |
+| Item consumed as attachment | Queue display updates (item disappears)                                | **Nothing** — `queued_command` attachment is NOT yielded when `replayUserMessages=false` |
+| Model processes steer       | Response references the steer content                                  | Assistant message contains response to steer                                             |
 
 **Key gap**: ClaudeUI has no way to know when a steer transitions from "editable" to "consumed."
 
@@ -618,21 +619,22 @@ The do-while loop wraps `sdkStreamingHandler` and keeps running while there are 
 
 ```javascript
 do {
-  await sdkStreamingHandler();  // processes all current queue items
-  shouldContinue = false;
+  await sdkStreamingHandler() // processes all current queue items
+  shouldContinue = false
 
   {
-    let appState = await getAppState();
-    let hasRunningTasks = getRunningAgents(appState)
-      .some(agent => agent.type !== "in_process_teammate" && isRunning(agent));
-    let hasQueueItems = queueNonEmpty();
+    let appState = await getAppState()
+    let hasRunningTasks = getRunningAgents(appState).some(
+      (agent) => agent.type !== 'in_process_teammate' && isRunning(agent)
+    )
+    let hasQueueItems = queueNonEmpty()
 
     if (hasRunningTasks || hasQueueItems) {
-      shouldContinue = true;
-      if (!hasQueueItems) await sleep(100);  // poll every 100ms
+      shouldContinue = true
+      if (!hasQueueItems) await sleep(100) // poll every 100ms
     }
   }
-} while (shouldContinue);
+} while (shouldContinue)
 
 // After loop: emit held result, check for team polling, etc.
 ```
@@ -640,6 +642,7 @@ do {
 ### Loop Condition
 
 The loop continues as long as:
+
 1. **Running background tasks exist** (excluding `in_process_teammate`) — polls every 100ms
 2. **Queue is non-empty** — processes immediately
 
@@ -676,12 +679,14 @@ function queueDisplayComponent() {
 Shows contextual hints in the input box:
 
 ```javascript
-function placeholderHint({input, submitCount, viewingAgentName}) {
-  let queueItems = useSyncExternalStore(subscribe, getFrozenSnapshot);
+function placeholderHint({ input, submitCount, viewingAgentName }) {
+  let queueItems = useSyncExternalStore(subscribe, getFrozenSnapshot)
   // ...
-  if (queueItems.some(item => isEditable(item.mode)) &&
-      (config().queuedCommandUpHintCount || 0) < 3) {
-    return "Press up to edit queued messages";
+  if (
+    queueItems.some((item) => isEditable(item.mode)) &&
+    (config().queuedCommandUpHintCount || 0) < 3
+  ) {
+    return 'Press up to edit queued messages'
   }
   // ...
 }
@@ -691,13 +696,13 @@ function placeholderHint({input, submitCount, viewingAgentName}) {
 
 ```javascript
 function onUpArrow() {
-  if (multipleBuffers) return;
-  if (!cursorAtTop) return;
+  if (multipleBuffers) return
+  if (!cursorAtTop) return
 
   // ★ Queue edit: if there are editable items, pop them
-  if (queueItems.some(item => isEditable(item.mode))) {
-    popAllEditableToInput();  // calls popAllEditable(input, cursor)
-    return;
+  if (queueItems.some((item) => isEditable(item.mode))) {
+    popAllEditableToInput() // calls popAllEditable(input, cursor)
+    return
   }
 
   // Otherwise: navigate to agents, history, etc.
@@ -708,20 +713,20 @@ function onUpArrow() {
 
 ```javascript
 const popAllEditableToInput = useCallback(() => {
-  let result = popAllEditable(currentInput, cursorOffset);
-  if (!result) return false;
-  setInput(result.text);
-  setMode("prompt");
-  setCursorOffset(result.cursorOffset);
+  let result = popAllEditable(currentInput, cursorOffset)
+  if (!result) return false
+  setInput(result.text)
+  setMode('prompt')
+  setCursorOffset(result.cursorOffset)
   if (result.images.length > 0) {
-    setPastedContents(prev => {
-      let next = {...prev};
-      for (let img of result.images) next[img.id] = img;
-      return next;
-    });
+    setPastedContents((prev) => {
+      let next = { ...prev }
+      for (let img of result.images) next[img.id] = img
+      return next
+    })
   }
-  return true;
-}, [setInput, setMode, currentInput, cursorOffset, setPastedContents]);
+  return true
+}, [setInput, setMode, currentInput, cursorOffset, setPastedContents])
 ```
 
 ---
@@ -730,14 +735,14 @@ const popAllEditableToInput = useCallback(() => {
 
 ### What ClaudeUI Can See
 
-| Event | Available? | How |
-|---|---|---|
-| User sends steer | Yes | ClaudeUI sends it (it controls the input) |
-| Queue push succeeds | No | `queuePush` is internal to CLI process |
-| Queue snapshot taken | No | `snapshotQueue()` is internal |
-| Steer consumed as attachment | No | `queued_command` not yielded when `replayUserMessages=false` |
-| Steer removed from queue | No | `removeConsumed` only updates internal state + SQLite |
-| Model responds to steer | Yes | Normal assistant message references steer content |
+| Event                        | Available? | How                                                          |
+| ---------------------------- | ---------- | ------------------------------------------------------------ |
+| User sends steer             | Yes        | ClaudeUI sends it (it controls the input)                    |
+| Queue push succeeds          | No         | `queuePush` is internal to CLI process                       |
+| Queue snapshot taken         | No         | `snapshotQueue()` is internal                                |
+| Steer consumed as attachment | No         | `queued_command` not yielded when `replayUserMessages=false` |
+| Steer removed from queue     | No         | `removeConsumed` only updates internal state + SQLite        |
+| Model responds to steer      | Yes        | Normal assistant message references steer content            |
 
 ### What ClaudeUI Needs (for edit/withdraw UX)
 
@@ -759,83 +764,83 @@ const popAllEditableToInput = useCallback(() => {
 
 ### Queue Module
 
-| Pseudoname | Minified | Char Offset | Description |
-|---|---|---|---|
-| `queueArray` | `L$` | — (module-level var) | The live queue array |
-| `frozenSnapshot` | `i24` | — (module-level var) | `Object.freeze([...L$])` for UI reads |
-| `subscriberSet` | `Tf8` | — (module-level var) | `Set` of subscriber callbacks |
-| `priorityMap` | `l24` | — (module-level var) | `{now:0, next:1, later:2}` |
-| `NON_EDITABLE_MODES` | `$a9` | 5750331 | `new Set(["task-notification","task-started"])` |
-| `notifySubscribers` | `q56` | ~5748250 | Updates `i24`, calls all in `Tf8` |
-| `subscribe` | `ID1` | ~5748375 | Adds to `Tf8`, returns unsubscribe |
-| `getFrozenSnapshot` | `bD1` | 5748393 | Returns `i24` |
-| `snapshotQueue` | `xD1` | 5748393 | Returns `[...L$]` |
-| `queueLength` | `n24` | ~5748420 | Returns `L$.length` |
-| `queueNonEmpty` | `Fd` | ~5748440 | Returns `L$.length > 0` |
-| `queuePush` | `jk` | 5748496 | Push with `priority: "next"` |
-| `queuePushLater` | `kB` | ~5748600 | Push with `priority: "later"` |
-| `dequeueOne` | `uD1` | ~5748700 | Remove highest-priority item |
-| `removeConsumed` | `r24` | 5748937 | Remove by `.value` match |
-| `removeByPredicate` | `fP6` | 5749128 | Remove where predicate returns true |
-| `clearAll` | `_a9` | ~5749340 | `L$.length = 0; q56()` |
-| `isEditable` | `mD1` | 5749341 | `!$a9.has(mode)` |
-| `extractQueueText` | `Ha9` | 5749375 | Extract text from value |
-| `popAllEditable` | `BD1` | 5749742 | Pop editable items → input text |
-| `logQueueOp` | `GP6` | 5748101 | Write to SQLite |
-| `recordQueueOperation` | `Vf8` | 10436815 | SQLite insert |
+| Pseudoname             | Minified | Char Offset          | Description                                     |
+| ---------------------- | -------- | -------------------- | ----------------------------------------------- |
+| `queueArray`           | `L$`     | — (module-level var) | The live queue array                            |
+| `frozenSnapshot`       | `i24`    | — (module-level var) | `Object.freeze([...L$])` for UI reads           |
+| `subscriberSet`        | `Tf8`    | — (module-level var) | `Set` of subscriber callbacks                   |
+| `priorityMap`          | `l24`    | — (module-level var) | `{now:0, next:1, later:2}`                      |
+| `NON_EDITABLE_MODES`   | `$a9`    | 5750331              | `new Set(["task-notification","task-started"])` |
+| `notifySubscribers`    | `q56`    | ~5748250             | Updates `i24`, calls all in `Tf8`               |
+| `subscribe`            | `ID1`    | ~5748375             | Adds to `Tf8`, returns unsubscribe              |
+| `getFrozenSnapshot`    | `bD1`    | 5748393              | Returns `i24`                                   |
+| `snapshotQueue`        | `xD1`    | 5748393              | Returns `[...L$]`                               |
+| `queueLength`          | `n24`    | ~5748420             | Returns `L$.length`                             |
+| `queueNonEmpty`        | `Fd`     | ~5748440             | Returns `L$.length > 0`                         |
+| `queuePush`            | `jk`     | 5748496              | Push with `priority: "next"`                    |
+| `queuePushLater`       | `kB`     | ~5748600             | Push with `priority: "later"`                   |
+| `dequeueOne`           | `uD1`    | ~5748700             | Remove highest-priority item                    |
+| `removeConsumed`       | `r24`    | 5748937              | Remove by `.value` match                        |
+| `removeByPredicate`    | `fP6`    | 5749128              | Remove where predicate returns true             |
+| `clearAll`             | `_a9`    | ~5749340             | `L$.length = 0; q56()`                          |
+| `isEditable`           | `mD1`    | 5749341              | `!$a9.has(mode)`                                |
+| `extractQueueText`     | `Ha9`    | 5749375              | Extract text from value                         |
+| `popAllEditable`       | `BD1`    | 5749742              | Pop editable items → input text                 |
+| `logQueueOp`           | `GP6`    | 5748101              | Write to SQLite                                 |
+| `recordQueueOperation` | `Vf8`    | 10436815             | SQLite insert                                   |
 
 ### Query / Session Layer
 
-| Pseudoname | Minified | Char Offset | Description |
-|---|---|---|---|
-| `queryGenerator` | `Ly` | 10157028 | Main `async function*` sub-turn loop |
-| `apiStreaming` | `VZ6` | 10124968 | API call + streaming |
-| `stopHookHandler` | `v_q` | 10153546 | Pre/post stop hooks |
-| `attachmentGenerator` | `BZ6` | 7172176 | `async function*` yields attachments |
-| `buildAttachments` | `QPY` | 7160021 | Collects all attachment sources |
-| `queueItemsToAttachments` | `UPY` | 7162011 | Converts queue items → `queued_command` |
-| `normalizeAttachment` | `Yg8` | 10404261 | Converts attachment → API messages |
-| `SessionQuery` class | `rWq` | 11055891 | SDK session wrapper |
-| `submitMessage` | `vHq` | 10290500 (method) | `for await(queryGenerator) yield` |
-| `sdkEntrypoint` | `aWq` | 11065694 | `yield* new SessionQuery(...).submitMessage()` |
-| `yieldHelper` | `xT8` | 5971183 | Normalizes and yields SDK events |
+| Pseudoname                | Minified | Char Offset       | Description                                    |
+| ------------------------- | -------- | ----------------- | ---------------------------------------------- |
+| `queryGenerator`          | `Ly`     | 10157028          | Main `async function*` sub-turn loop           |
+| `apiStreaming`            | `VZ6`    | 10124968          | API call + streaming                           |
+| `stopHookHandler`         | `v_q`    | 10153546          | Pre/post stop hooks                            |
+| `attachmentGenerator`     | `BZ6`    | 7172176           | `async function*` yields attachments           |
+| `buildAttachments`        | `QPY`    | 7160021           | Collects all attachment sources                |
+| `queueItemsToAttachments` | `UPY`    | 7162011           | Converts queue items → `queued_command`        |
+| `normalizeAttachment`     | `Yg8`    | 10404261          | Converts attachment → API messages             |
+| `SessionQuery` class      | `rWq`    | 11055891          | SDK session wrapper                            |
+| `submitMessage`           | `vHq`    | 10290500 (method) | `for await(queryGenerator) yield`              |
+| `sdkEntrypoint`           | `aWq`    | 11065694          | `yield* new SessionQuery(...).submitMessage()` |
+| `yieldHelper`             | `xT8`    | 5971183           | Normalizes and yields SDK events               |
 
 ### SDK Streaming Handler
 
-| Pseudoname | Minified | Char Offset | Description |
-|---|---|---|---|
-| `sdkStreamingHandler` | `h6` | 11083275 | `async () =>` dequeues + runs turns |
-| `ReadableStreamController` | `Z` | — (closure var) | `Z.enqueue(event)` sends to consumer |
-| `messagesArray` | `y` | — (closure var) | Accumulated messages (excludes `isReplay`) |
-| `resultHolder` | `P` | — (closure var) | Holds result when running agents exist |
+| Pseudoname                 | Minified | Char Offset     | Description                                |
+| -------------------------- | -------- | --------------- | ------------------------------------------ |
+| `sdkStreamingHandler`      | `h6`     | 11083275        | `async () =>` dequeues + runs turns        |
+| `ReadableStreamController` | `Z`      | — (closure var) | `Z.enqueue(event)` sends to consumer       |
+| `messagesArray`            | `y`      | — (closure var) | Accumulated messages (excludes `isReplay`) |
+| `resultHolder`             | `P`      | — (closure var) | Holds result when running agents exist     |
 
 ### CLI REPL (React/Ink)
 
-| Pseudoname | Minified | Char Offset | Description |
-|---|---|---|---|
-| `replComponent` | `KgY` | 8748492 | Main React component |
-| `onQuery` | (inline) | ~11515500 | `for await(Ly(...)) b8(msg)` |
-| `processMessage` | `GT6` | 10391044 | Stream event handler |
-| `messageHandler` | `b8` | ~11514504 | `useCallback` wrapping `GT6` |
-| `queueDisplayComponent` | `iVq` | ~11367605 | Renders queued messages |
-| `placeholderHint` | `FVq` | ~11365212 | Input placeholder text |
-| `inputComponent` | `Ed8` | 11420480 | Main input box component |
-| `onUpArrow` | `d5` | ~11385880 | Up arrow key handler |
-| `popAllEditableToInput` | `cz` | ~11389349 | Callback: `BD1(input, cursor)` |
+| Pseudoname              | Minified | Char Offset | Description                    |
+| ----------------------- | -------- | ----------- | ------------------------------ |
+| `replComponent`         | `KgY`    | 8748492     | Main React component           |
+| `onQuery`               | (inline) | ~11515500   | `for await(Ly(...)) b8(msg)`   |
+| `processMessage`        | `GT6`    | 10391044    | Stream event handler           |
+| `messageHandler`        | `b8`     | ~11514504   | `useCallback` wrapping `GT6`   |
+| `queueDisplayComponent` | `iVq`    | ~11367605   | Renders queued messages        |
+| `placeholderHint`       | `FVq`    | ~11365212   | Input placeholder text         |
+| `inputComponent`        | `Ed8`    | 11420480    | Main input box component       |
+| `onUpArrow`             | `d5`     | ~11385880   | Up arrow key handler           |
+| `popAllEditableToInput` | `cz`     | ~11389349   | Callback: `BD1(input, cursor)` |
 
 ### Helpers
 
-| Pseudoname | Minified | Description |
-|---|---|---|
-| `createUserMessage` | `t1` | Creates a user message object |
-| `wrapAttachment` | `Vq` | Wraps raw attachment into `{type:"attachment", attachment}` |
-| `normalizeToMessages` | `Z9` | Normalizes content blocks to message format |
-| `getSessionId` | `Q1` | Returns current session ID |
-| `generateUUID` | `Y16` / `BP` | UUID generators |
-| `flattenMessages` | `fH` | Flattens nested message structures |
-| `isValidMessage` | `Et` | Checks if message should be yielded |
-| `lastElement` | `wW` | Returns last element of array |
-| `hasToolUse` | `s_4` | Checks if last message has tool_use content |
+| Pseudoname            | Minified     | Description                                                 |
+| --------------------- | ------------ | ----------------------------------------------------------- |
+| `createUserMessage`   | `t1`         | Creates a user message object                               |
+| `wrapAttachment`      | `Vq`         | Wraps raw attachment into `{type:"attachment", attachment}` |
+| `normalizeToMessages` | `Z9`         | Normalizes content blocks to message format                 |
+| `getSessionId`        | `Q1`         | Returns current session ID                                  |
+| `generateUUID`        | `Y16` / `BP` | UUID generators                                             |
+| `flattenMessages`     | `fH`         | Flattens nested message structures                          |
+| `isValidMessage`      | `Et`         | Checks if message should be yielded                         |
+| `lastElement`         | `wW`         | Returns last element of array                               |
+| `hasToolUse`          | `s_4`        | Checks if last message has tool_use content                 |
 
 ---
 

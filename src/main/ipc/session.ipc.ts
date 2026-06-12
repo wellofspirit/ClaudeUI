@@ -6,25 +6,60 @@ import { query as sdkQuery } from '../sdk'
 import { PERSISTED_SESSIONS_DIR } from '../services/persisted-sessions-dir'
 import { SessionManager } from '../services/session-manager'
 import { getSdkExecutableOpts, ClaudeSession } from '../services/claude-session'
-import { listDirectories, loadSessionHistory, loadSubagentHistory, buildSubagentFileMap, loadBackgroundOutput, resolveForkAnchor } from '../services/session-history'
+import {
+  listDirectories,
+  loadSessionHistory,
+  loadSubagentHistory,
+  buildSubagentFileMap,
+  loadBackgroundOutput,
+  resolveForkAnchor
+} from '../services/session-history'
 import { watchSession, unwatchSession } from '../services/session-watcher'
-import { loadSettings, saveSettings, loadSessionConfig, saveSessionConfig, loadSlashCommands, saveSlashCommands, startConfigWatcher } from '../services/ui-config'
+import {
+  loadSettings,
+  saveSettings,
+  loadSessionConfig,
+  saveSessionConfig,
+  loadSlashCommands,
+  saveSlashCommands,
+  startConfigWatcher
+} from '../services/ui-config'
 import {
   loadClaudePermissions,
   saveClaudePermissions,
   loadCleanupPeriodDays,
   saveCleanupPeriodDays
 } from '../services/claude-settings'
-import { loadMcpServers, saveMcpServers, removeMcpServer, readDisabledMcpServers, writeDisabledMcpServers } from '../services/claude-mcp'
+import {
+  loadMcpServers,
+  saveMcpServers,
+  removeMcpServer,
+  readDisabledMcpServers,
+  writeDisabledMcpServers
+} from '../services/claude-mcp'
 import { scanSkills } from '../services/skill-scanner'
 import { scanCustomCommands } from '../services/custom-command-scanner'
 import type { UISettings, UISessionConfig, SlashCommandCache } from '../services/ui-config'
 import { gitServiceManager } from '../services/git-service'
-import { createWorktree, getWorktreeStatus, removeWorktree, listWorktrees } from '../services/worktree'
+import {
+  createWorktree,
+  getWorktreeStatus,
+  removeWorktree,
+  listWorktrees
+} from '../services/worktree'
 import { usageFetcher } from '../services/usage-fetcher'
 import { serviceSession } from '../services/service-session'
 import { blockUsageService } from '../services/block-usage'
-import type { ApprovalDecision, ModelInfo, SandboxSettings, ProxySettings, AnthropicEndpointSettings, ModelOverrideSettings, PermissionSuggestion, IpcResult } from '../../shared/types'
+import type {
+  ApprovalDecision,
+  ModelInfo,
+  SandboxSettings,
+  ProxySettings,
+  AnthropicEndpointSettings,
+  ModelOverrideSettings,
+  PermissionSuggestion,
+  IpcResult
+} from '../../shared/types'
 import { logger } from '../services/logger'
 import { deleteSessionFiles, deleteProjectFiles } from '../services/delete-session-files'
 import { startSocksBridge, stopSocksBridge } from '../services/socks-bridge'
@@ -83,12 +118,16 @@ async function generateTitle(conversationText: string): Promise<string | null> {
 
   try {
     const handle = q as unknown as {
-      generateSessionTitle(desc: string, opts?: { persist?: boolean }): Promise<{ title?: string | null } | unknown>
+      generateSessionTitle(
+        desc: string,
+        opts?: { persist?: boolean }
+      ): Promise<{ title?: string | null } | unknown>
     }
     const result = await handle.generateSessionTitle(conversationText, { persist: false })
-    const title = result && typeof result === 'object' && 'title' in result
-      ? (result as { title?: string | null }).title
-      : null
+    const title =
+      result && typeof result === 'object' && 'title' in result
+        ? (result as { title?: string | null }).title
+        : null
     const trimmed = typeof title === 'string' ? title.trim() : ''
     if (trimmed.length >= 2) {
       logger.debug('generateTitle', `title: ${trimmed}`)
@@ -129,7 +168,9 @@ async function generateCommitMessage(diff: string): Promise<string | null> {
       if (!message || typeof message !== 'object') continue
       const msg = message as Record<string, unknown>
       if (msg.type === 'assistant') {
-        const betaMessage = msg.message as { content?: Array<{ type: string; text?: string }> } | undefined
+        const betaMessage = msg.message as
+          | { content?: Array<{ type: string; text?: string }> }
+          | undefined
         if (betaMessage?.content) {
           for (const block of betaMessage.content) {
             if (block.type === 'text' && block.text) result += block.text
@@ -168,7 +209,9 @@ async function fetchModels(): Promise<ModelInfo[]> {
   })
 
   try {
-    const models = await (q as unknown as { supportedModels(): Promise<ModelInfo[]> }).supportedModels()
+    const models = await (
+      q as unknown as { supportedModels(): Promise<ModelInfo[]> }
+    ).supportedModels()
     cachedModels = models
     return models
   } finally {
@@ -177,35 +220,91 @@ async function fetchModels(): Promise<ModelInfo[]> {
 }
 
 const SESSION_IPC_CHANNELS = [
-  'session:pick-folder', 'session:create', 'session:rekey', 'session:resolve-fork-anchor', 'session:send',
-  'session:cancel', 'session:interrupt', 'session:approval-response', 'session:watch-background',
-  'session:unwatch-background', 'session:read-background-range', 'session:stop-task',
-  'session:background-task', 'session:dequeue-message',
-  'session:set-permission-mode', 'session:set-model', 'session:set-effort',
-  'session:get-models', 'session:generate-title', 'session:generate-commit-message',
-  'session:write-custom-title', 'session:get-plan-content', 'session:get-session-log-path',
-  'session:delete-session', 'session:delete-project',
-  'session:list-directories', 'session:load-history', 'session:load-subagent-history',
-  'session:build-subagent-file-map', 'session:load-background-output',
-  'session:watch-session', 'session:unwatch-session',
-  'config:load-settings', 'config:save-settings', 'config:load-sessions',
-  'config:save-sessions', 'config:load-slash-commands', 'config:save-slash-commands',
-  'config:scan-custom-commands', 'config:load-skill-details',
-  'git:check-repo', 'git:status', 'git:branches', 'git:checkout', 'git:create-branch',
-  'git:file-patch', 'git:file-contents', 'git:stage-file', 'git:unstage-file', 'git:discard-file',
-  'git:stage-all', 'git:unstage-all', 'git:commit', 'git:push', 'git:push-with-upstream', 'git:pull', 'git:fetch',
-  'git:start-watching', 'git:stop-watching',
+  'session:pick-folder',
+  'session:create',
+  'session:rekey',
+  'session:resolve-fork-anchor',
+  'session:send',
+  'session:cancel',
+  'session:interrupt',
+  'session:approval-response',
+  'session:watch-background',
+  'session:unwatch-background',
+  'session:read-background-range',
+  'session:stop-task',
+  'session:background-task',
+  'session:dequeue-message',
+  'session:set-permission-mode',
+  'session:set-model',
+  'session:set-effort',
+  'session:get-models',
+  'session:generate-title',
+  'session:generate-commit-message',
+  'session:write-custom-title',
+  'session:get-plan-content',
+  'session:get-session-log-path',
+  'session:delete-session',
+  'session:delete-project',
+  'session:list-directories',
+  'session:load-history',
+  'session:load-subagent-history',
+  'session:build-subagent-file-map',
+  'session:load-background-output',
+  'session:watch-session',
+  'session:unwatch-session',
+  'config:load-settings',
+  'config:save-settings',
+  'config:load-sessions',
+  'config:save-sessions',
+  'config:load-slash-commands',
+  'config:save-slash-commands',
+  'config:scan-custom-commands',
+  'config:load-skill-details',
+  'git:check-repo',
+  'git:status',
+  'git:branches',
+  'git:checkout',
+  'git:create-branch',
+  'git:file-patch',
+  'git:file-contents',
+  'git:stage-file',
+  'git:unstage-file',
+  'git:discard-file',
+  'git:stage-all',
+  'git:unstage-all',
+  'git:commit',
+  'git:push',
+  'git:push-with-upstream',
+  'git:pull',
+  'git:fetch',
+  'git:start-watching',
+  'git:stop-watching',
   'file:list-dir',
-  'usage:fetch', 'usage:fetch-block',
-  'claude:load-permissions', 'claude:save-permissions',
-  'claude:get-cleanup-period', 'claude:set-cleanup-period',
-  'mcp:status', 'mcp:toggle', 'mcp:reconnect', 'mcp:set-servers',
-  'mcp:load-servers', 'mcp:save-servers', 'mcp:remove-server',
-  'mcp:read-disabled', 'mcp:toggle-disabled',
-  'worktree:create', 'worktree:status', 'worktree:remove', 'worktree:list',
+  'usage:fetch',
+  'usage:fetch-block',
+  'claude:load-permissions',
+  'claude:save-permissions',
+  'claude:get-cleanup-period',
+  'claude:set-cleanup-period',
+  'mcp:status',
+  'mcp:toggle',
+  'mcp:reconnect',
+  'mcp:set-servers',
+  'mcp:load-servers',
+  'mcp:save-servers',
+  'mcp:remove-server',
+  'mcp:read-disabled',
+  'mcp:toggle-disabled',
+  'worktree:create',
+  'worktree:status',
+  'worktree:remove',
+  'worktree:list',
   'app:quit-confirm',
   'session:sandbox-violation',
-  'voice:start-server', 'voice:stop-server', 'voice:start-recording', 'voice:stop-recording',
+  'voice:start-server',
+  'voice:stop-server',
+  'voice:start-recording',
+  'voice:stop-recording',
   'proxy:test-connection'
 ]
 
@@ -215,7 +314,9 @@ const SESSION_IPC_CHANNELS = [
 
 /** Build a proxy URL from proxy settings. */
 function buildProxyUrl(proxy: ProxySettings): string {
-  const auth = proxy.username ? `${encodeURIComponent(proxy.username)}:${encodeURIComponent(proxy.password)}@` : ''
+  const auth = proxy.username
+    ? `${encodeURIComponent(proxy.username)}:${encodeURIComponent(proxy.password)}@`
+    : ''
   const scheme = proxy.type === 'socks5' ? 'socks5' : 'http'
   return `${scheme}://${auth}${proxy.hostname}:${proxy.port}`
 }
@@ -262,8 +363,7 @@ export function applyEndpointEnv(endpoint: AnthropicEndpointSettings | undefined
  */
 export function applyModelEnv(model: ModelOverrideSettings | undefined): void {
   const anyValue =
-    model?.enabled &&
-    (model.model || model.sonnetModel || model.opusModel || model.haikuModel)
+    model?.enabled && (model.model || model.sonnetModel || model.opusModel || model.haikuModel)
   if (anyValue) {
     setModelEnv({
       ANTHROPIC_MODEL: model.model ?? '',
@@ -295,9 +395,15 @@ export async function applyProxyEnv(proxy: ProxySettings | undefined): Promise<v
         })
         const bridgeUrl = `http://127.0.0.1:${port}`
         setProxyEnv({ HTTP_PROXY: bridgeUrl, HTTPS_PROXY: bridgeUrl, ALL_PROXY: bridgeUrl })
-        logger.info('Proxy', `SOCKS5 proxy via bridge: socks5://${proxy.hostname}:${proxy.port} → ${bridgeUrl}`)
+        logger.info(
+          'Proxy',
+          `SOCKS5 proxy via bridge: socks5://${proxy.hostname}:${proxy.port} → ${bridgeUrl}`
+        )
       } catch (err) {
-        logger.error('Proxy', `Failed to start SOCKS5 bridge: ${err instanceof Error ? err.message : err}`)
+        logger.error(
+          'Proxy',
+          `Failed to start SOCKS5 bridge: ${err instanceof Error ? err.message : err}`
+        )
         setProxyEnv(null)
       }
     } else {
@@ -320,7 +426,9 @@ export async function applyProxyEnv(proxy: ProxySettings | undefined): Promise<v
  * to api.anthropic.com. A 401 (Unauthorized) proves the proxy works — we're
  * testing the tunnel, not the API key.
  */
-async function testProxyConnection(proxy: ProxySettings): Promise<{ ok: boolean; latencyMs: number; error?: string }> {
+async function testProxyConnection(
+  proxy: ProxySettings
+): Promise<{ ok: boolean; latencyMs: number; error?: string }> {
   const http = await import('node:http')
   const tls = await import('node:tls')
   const net = await import('node:net')
@@ -331,7 +439,9 @@ async function testProxyConnection(proxy: ProxySettings): Promise<{ ok: boolean;
   const TIMEOUT_MS = 10_000
 
   /** Upgrade a raw socket to TLS, send a GET, and check the HTTP status. */
-  function verifyThroughTls(rawSocket: import('node:net').Socket): Promise<{ ok: boolean; latencyMs: number; error?: string }> {
+  function verifyThroughTls(
+    rawSocket: import('node:net').Socket
+  ): Promise<{ ok: boolean; latencyMs: number; error?: string }> {
     return new Promise((resolve) => {
       const timer = setTimeout(() => {
         tlsSocket.destroy()
@@ -354,7 +464,11 @@ async function testProxyConnection(proxy: ProxySettings): Promise<{ ok: boolean;
           // Any HTTP response (even 401) means the proxy routed traffic successfully
           resolve({ ok: true, latencyMs: Date.now() - start })
         } else {
-          resolve({ ok: false, latencyMs: Date.now() - start, error: 'Unexpected response from server' })
+          resolve({
+            ok: false,
+            latencyMs: Date.now() - start,
+            error: 'Unexpected response from server'
+          })
         }
       })
 
@@ -382,7 +496,9 @@ async function testProxyConnection(proxy: ProxySettings): Promise<{ ok: boolean;
 
       socket.once('connect', () => {
         // Step 1: greeting — offer no-auth (0x00) and user/pass (0x02)
-        const methods = proxy.username ? Buffer.from([0x05, 0x02, 0x00, 0x02]) : Buffer.from([0x05, 0x01, 0x00])
+        const methods = proxy.username
+          ? Buffer.from([0x05, 0x02, 0x00, 0x02])
+          : Buffer.from([0x05, 0x01, 0x00])
         socket.write(methods)
       })
 
@@ -393,7 +509,11 @@ async function testProxyConnection(proxy: ProxySettings): Promise<{ ok: boolean;
           if (data.length < 2 || data[0] !== 0x05) {
             clearTimeout(timer)
             socket.destroy()
-            resolve({ ok: false, latencyMs: Date.now() - start, error: 'Invalid SOCKS5 greeting response' })
+            resolve({
+              ok: false,
+              latencyMs: Date.now() - start,
+              error: 'Invalid SOCKS5 greeting response'
+            })
             return
           }
           const method = data[1]
@@ -416,13 +536,21 @@ async function testProxyConnection(proxy: ProxySettings): Promise<{ ok: boolean;
           } else if (method === 0xff) {
             clearTimeout(timer)
             socket.destroy()
-            resolve({ ok: false, latencyMs: Date.now() - start, error: 'SOCKS5 proxy rejected authentication methods' })
+            resolve({
+              ok: false,
+              latencyMs: Date.now() - start,
+              error: 'SOCKS5 proxy rejected authentication methods'
+            })
           }
         } else if (phase === 'auth') {
           if (data.length < 2 || data[1] !== 0x00) {
             clearTimeout(timer)
             socket.destroy()
-            resolve({ ok: false, latencyMs: Date.now() - start, error: 'SOCKS5 authentication failed' })
+            resolve({
+              ok: false,
+              latencyMs: Date.now() - start,
+              error: 'SOCKS5 authentication failed'
+            })
             return
           }
           // Auth succeeded — send connect request
@@ -432,19 +560,31 @@ async function testProxyConnection(proxy: ProxySettings): Promise<{ ok: boolean;
           if (data.length < 2 || data[0] !== 0x05) {
             clearTimeout(timer)
             socket.destroy()
-            resolve({ ok: false, latencyMs: Date.now() - start, error: 'Invalid SOCKS5 connect response' })
+            resolve({
+              ok: false,
+              latencyMs: Date.now() - start,
+              error: 'Invalid SOCKS5 connect response'
+            })
             return
           }
           if (data[1] !== 0x00) {
             const errors: Record<number, string> = {
-              0x01: 'general failure', 0x02: 'connection not allowed',
-              0x03: 'network unreachable', 0x04: 'host unreachable',
-              0x05: 'connection refused', 0x06: 'TTL expired',
-              0x07: 'command not supported', 0x08: 'address type not supported'
+              0x01: 'general failure',
+              0x02: 'connection not allowed',
+              0x03: 'network unreachable',
+              0x04: 'host unreachable',
+              0x05: 'connection refused',
+              0x06: 'TTL expired',
+              0x07: 'command not supported',
+              0x08: 'address type not supported'
             }
             clearTimeout(timer)
             socket.destroy()
-            resolve({ ok: false, latencyMs: Date.now() - start, error: `SOCKS5: ${errors[data[1]] || `error 0x${data[1].toString(16)}`}` })
+            resolve({
+              ok: false,
+              latencyMs: Date.now() - start,
+              error: `SOCKS5: ${errors[data[1]] || `error 0x${data[1].toString(16)}`}`
+            })
             return
           }
           // Tunnel established — remove listeners, verify with TLS
@@ -465,7 +605,10 @@ async function testProxyConnection(proxy: ProxySettings): Promise<{ ok: boolean;
     }, TIMEOUT_MS)
 
     const authHeader = proxy.username
-      ? { 'Proxy-Authorization': 'Basic ' + Buffer.from(`${proxy.username}:${proxy.password}`).toString('base64') }
+      ? {
+          'Proxy-Authorization':
+            'Basic ' + Buffer.from(`${proxy.username}:${proxy.password}`).toString('base64')
+        }
       : {}
 
     const req = http.request({
@@ -480,7 +623,11 @@ async function testProxyConnection(proxy: ProxySettings): Promise<{ ok: boolean;
       clearTimeout(timer)
       if (res.statusCode !== 200) {
         socket.destroy()
-        resolve({ ok: false, latencyMs: Date.now() - start, error: `Proxy returned HTTP ${res.statusCode}` })
+        resolve({
+          ok: false,
+          latencyMs: Date.now() - start,
+          error: `Proxy returned HTTP ${res.statusCode}`
+        })
         return
       }
       // Tunnel open — verify with TLS
@@ -513,7 +660,9 @@ function buildSocks5ConnectRequest(host: string, port: number): Buffer {
 
 /** Shared SessionManager — created once, used by both IPC and remote handlers. */
 let sharedManager: SessionManager | null = null
-export function getSessionManager(): SessionManager | null { return sharedManager }
+export function getSessionManager(): SessionManager | null {
+  return sharedManager
+}
 
 export function registerSessionIpc(win: BrowserWindow): SessionManager {
   // Remove previous handlers to allow re-registration (e.g. macOS dock re-open)
@@ -534,16 +683,40 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
 
   ipcMain.handle(
     'session:create',
-    async (_event, routingId: string, cwd: string, effort?: string, resumeSessionId?: string, permissionMode?: string, model?: string, thinkingMode?: string, resumeSessionAt?: string, forkSession?: boolean) => {
+    async (
+      _event,
+      routingId: string,
+      cwd: string,
+      effort?: string,
+      resumeSessionId?: string,
+      permissionMode?: string,
+      model?: string,
+      thinkingMode?: string,
+      resumeSessionAt?: string,
+      forkSession?: boolean
+    ) => {
       const settings = loadSettings() as Record<string, unknown>
       const sandboxConfig = (settings.sandbox as SandboxSettings) || undefined
       await applyProxyEnv((settings.proxy as ProxySettings) || undefined)
       applyEndpointEnv((settings.anthropicEndpoint as AnthropicEndpointSettings) || undefined)
       applyModelEnv((settings.modelOverride as ModelOverrideSettings) || undefined)
-      manager.create(routingId, win, cwd, effort, resumeSessionId, permissionMode, model, sandboxConfig, thinkingMode, resumeSessionAt, forkSession)
+      manager.create(
+        routingId,
+        win,
+        cwd,
+        effort,
+        resumeSessionId,
+        permissionMode,
+        model,
+        sandboxConfig,
+        thinkingMode,
+        resumeSessionAt,
+        forkSession
+      )
       // Notify all extra windows (remote bridge) that a session was created
       for (const w of ClaudeSession.getExtraWindows()) {
-        if (!w.isDestroyed()) w.webContents.send('session:created', routingId, { cwd, resumeSessionId })
+        if (!w.isDestroyed())
+          w.webContents.send('session:created', routingId, { cwd, resumeSessionId })
       }
     }
   )
@@ -561,22 +734,30 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     }
   )
 
-  ipcMain.handle('session:send', (_event, routingId: string, prompt: string, attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>) => {
-    const session = manager.get(routingId)
-    if (!session) throw new Error(`No session for routingId: ${routingId}`)
-    // Check before run() — if session already active, the message will be queued
-    const queued = session.willQueue
-    session.run(prompt, attachments)
-    // Relay user message back to all renderers (local + remote) as the single source of truth.
-    // Include queued flag so renderers show it as pending (not in chat) until consumed.
-    const payload = { prompt, attachments, queued }
-    if (!win.isDestroyed()) {
-      win.webContents.send('session:user-message', routingId, payload)
+  ipcMain.handle(
+    'session:send',
+    (
+      _event,
+      routingId: string,
+      prompt: string,
+      attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
+    ) => {
+      const session = manager.get(routingId)
+      if (!session) throw new Error(`No session for routingId: ${routingId}`)
+      // Check before run() — if session already active, the message will be queued
+      const queued = session.willQueue
+      session.run(prompt, attachments)
+      // Relay user message back to all renderers (local + remote) as the single source of truth.
+      // Include queued flag so renderers show it as pending (not in chat) until consumed.
+      const payload = { prompt, attachments, queued }
+      if (!win.isDestroyed()) {
+        win.webContents.send('session:user-message', routingId, payload)
+      }
+      for (const w of ClaudeSession.getExtraWindows()) {
+        if (!w.isDestroyed()) w.webContents.send('session:user-message', routingId, payload)
+      }
     }
-    for (const w of ClaudeSession.getExtraWindows()) {
-      if (!w.isDestroyed()) w.webContents.send('session:user-message', routingId, payload)
-    }
-  })
+  )
 
   ipcMain.handle('session:cancel', (_event, routingId: string) => {
     manager.cancel(routingId)
@@ -588,7 +769,14 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
 
   ipcMain.handle(
     'session:approval-response',
-    (_event, routingId: string, requestId: string, decision: ApprovalDecision, answers?: Record<string, string>, updatedPermissions?: PermissionSuggestion[]) => {
+    (
+      _event,
+      routingId: string,
+      requestId: string,
+      decision: ApprovalDecision,
+      answers?: Record<string, string>,
+      updatedPermissions?: PermissionSuggestion[]
+    ) => {
       manager.get(routingId)?.resolveApproval(requestId, decision, answers, updatedPermissions)
     }
   )
@@ -641,34 +829,49 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
   })
 
   // Voice input handlers
-  ipcMain.handle('voice:start-server', safeHandler(async (_e: unknown, routingId: string) => {
-    const session = manager.get(routingId)
-    if (!session) throw new Error('No active session')
-    await session.voiceStartServer()
-  }))
+  ipcMain.handle(
+    'voice:start-server',
+    safeHandler(async (_e: unknown, routingId: string) => {
+      const session = manager.get(routingId)
+      if (!session) throw new Error('No active session')
+      await session.voiceStartServer()
+    })
+  )
 
-  ipcMain.handle('voice:stop-server', safeHandler(async (_e: unknown, routingId: string) => {
-    const session = manager.get(routingId)
-    if (!session) throw new Error('No active session')
-    await session.voiceStopServer()
-  }))
+  ipcMain.handle(
+    'voice:stop-server',
+    safeHandler(async (_e: unknown, routingId: string) => {
+      const session = manager.get(routingId)
+      if (!session) throw new Error('No active session')
+      await session.voiceStopServer()
+    })
+  )
 
-  ipcMain.handle('voice:start-recording', safeHandler(async (_e: unknown, routingId: string, language: string) => {
-    const session = manager.get(routingId)
-    if (!session) throw new Error('No active session')
-    await session.voiceStartRecording(language)
-  }))
+  ipcMain.handle(
+    'voice:start-recording',
+    safeHandler(async (_e: unknown, routingId: string, language: string) => {
+      const session = manager.get(routingId)
+      if (!session) throw new Error('No active session')
+      await session.voiceStartRecording(language)
+    })
+  )
 
-  ipcMain.handle('voice:stop-recording', safeHandler(async (_e: unknown, routingId: string) => {
-    const session = manager.get(routingId)
-    if (!session) throw new Error('No active session')
-    await session.voiceStopRecording()
-  }))
+  ipcMain.handle(
+    'voice:stop-recording',
+    safeHandler(async (_e: unknown, routingId: string) => {
+      const session = manager.get(routingId)
+      if (!session) throw new Error('No active session')
+      await session.voiceStopRecording()
+    })
+  )
 
   // Proxy test connection
-  ipcMain.handle('proxy:test-connection', safeHandler(async (_e: unknown, proxy: ProxySettings) => {
-    return await testProxyConnection(proxy)
-  }))
+  ipcMain.handle(
+    'proxy:test-connection',
+    safeHandler(async (_e: unknown, proxy: ProxySettings) => {
+      return await testProxyConnection(proxy)
+    })
+  )
 
   ipcMain.handle('session:set-model', async (_e, routingId: string, model: string) => {
     await manager.get(routingId)?.setModel(model)
@@ -694,19 +897,34 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     return await generateCommitMessage(diff)
   })
 
-  ipcMain.handle('session:write-custom-title', async (_e, sessionId: string, projectKey: string, title: string) => {
-    const filePath = path.join(os.homedir(), '.claude', 'projects', projectKey, `${sessionId}.jsonl`)
-    const entry = JSON.stringify({ type: 'custom-title', customTitle: title, sessionId })
-    await fs.promises.appendFile(filePath, entry + '\n', { mode: 0o600 })
-  })
+  ipcMain.handle(
+    'session:write-custom-title',
+    async (_e, sessionId: string, projectKey: string, title: string) => {
+      const filePath = path.join(
+        os.homedir(),
+        '.claude',
+        'projects',
+        projectKey,
+        `${sessionId}.jsonl`
+      )
+      const entry = JSON.stringify({ type: 'custom-title', customTitle: title, sessionId })
+      await fs.promises.appendFile(filePath, entry + '\n', { mode: 0o600 })
+    }
+  )
 
-  ipcMain.handle('session:delete-session', safeHandler(async (_e: unknown, sessionId: string, projectKey: string) => {
-    await deleteSessionFiles(sessionId, projectKey)
-  }))
+  ipcMain.handle(
+    'session:delete-session',
+    safeHandler(async (_e: unknown, sessionId: string, projectKey: string) => {
+      await deleteSessionFiles(sessionId, projectKey)
+    })
+  )
 
-  ipcMain.handle('session:delete-project', safeHandler(async (_e: unknown, projectKey: string) => {
-    await deleteProjectFiles(projectKey)
-  }))
+  ipcMain.handle(
+    'session:delete-project',
+    safeHandler(async (_e: unknown, projectKey: string) => {
+      await deleteProjectFiles(projectKey)
+    })
+  )
 
   ipcMain.handle('session:get-plan-content', (_e, routingId: string) => {
     return manager.get(routingId)?.getPlanContent() ?? null
@@ -723,11 +941,21 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
   ipcMain.handle('file:list-dir', async (_e, dirPath: string) => {
     try {
       const entries = await fs.promises.readdir(dirPath, { withFileTypes: true })
-      const HIDDEN_NAMES = new Set(['node_modules', '.git', '.DS_Store', '__pycache__', '.next', '.cache'])
+      const HIDDEN_NAMES = new Set([
+        'node_modules',
+        '.git',
+        '.DS_Store',
+        '__pycache__',
+        '.next',
+        '.cache'
+      ])
       const result: Array<{ name: string; isDirectory: boolean }> = []
       for (const entry of entries) {
         if (entry.name.startsWith('.') || HIDDEN_NAMES.has(entry.name)) continue
-        result.push({ name: entry.name, isDirectory: entry.isDirectory() || entry.isSymbolicLink() })
+        result.push({
+          name: entry.name,
+          isDirectory: entry.isDirectory() || entry.isSymbolicLink()
+        })
       }
       // Sort: directories first, then alphabetical within each group
       result.sort((a, b) => {
@@ -749,21 +977,33 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     return await loadSessionHistory(sessionId, projectKey)
   })
 
-  ipcMain.handle('session:load-subagent-history', async (_e, sessionId: string, projectKey: string, agentId: string) => {
-    return await loadSubagentHistory(sessionId, projectKey, agentId)
-  })
+  ipcMain.handle(
+    'session:load-subagent-history',
+    async (_e, sessionId: string, projectKey: string, agentId: string) => {
+      return await loadSubagentHistory(sessionId, projectKey, agentId)
+    }
+  )
 
-  ipcMain.handle('session:build-subagent-file-map', (_e, sessionId: string, projectKey: string, taskPrompts: Record<string, string>) => {
-    return buildSubagentFileMap(sessionId, projectKey, taskPrompts)
-  })
+  ipcMain.handle(
+    'session:build-subagent-file-map',
+    (_e, sessionId: string, projectKey: string, taskPrompts: Record<string, string>) => {
+      return buildSubagentFileMap(sessionId, projectKey, taskPrompts)
+    }
+  )
 
-  ipcMain.handle('session:load-background-output', (_e, projectKey: string, taskId: string, outputFile?: string) => {
-    return loadBackgroundOutput(projectKey, taskId, outputFile)
-  })
+  ipcMain.handle(
+    'session:load-background-output',
+    (_e, projectKey: string, taskId: string, outputFile?: string) => {
+      return loadBackgroundOutput(projectKey, taskId, outputFile)
+    }
+  )
 
-  ipcMain.handle('session:watch-session', (_e, routingId: string, sessionId: string, projectKey: string) => {
-    watchSession(routingId, sessionId, projectKey, win)
-  })
+  ipcMain.handle(
+    'session:watch-session',
+    (_e, routingId: string, sessionId: string, projectKey: string) => {
+      watchSession(routingId, sessionId, projectKey, win)
+    }
+  )
 
   ipcMain.handle('session:unwatch-session', (_e, routingId: string) => {
     unwatchSession(routingId)
@@ -781,7 +1021,9 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     }
     // Propagate analytics refresh interval change
     if (typeof (settings as Record<string, unknown>).analyticsRefreshSecs === 'number') {
-      blockUsageService.setDebounceSecs((settings as Record<string, unknown>).analyticsRefreshSecs as number)
+      blockUsageService.setDebounceSecs(
+        (settings as Record<string, unknown>).analyticsRefreshSecs as number
+      )
     }
     // Apply log level + filter changes immediately
     {
@@ -798,7 +1040,9 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     )
     // Apply custom Anthropic endpoint env vars immediately
     applyEndpointEnv(
-      (settings as Record<string, unknown>).anthropicEndpoint as AnthropicEndpointSettings | undefined
+      (settings as Record<string, unknown>).anthropicEndpoint as
+        | AnthropicEndpointSettings
+        | undefined
     )
     // Apply model override env vars immediately
     applyModelEnv(
@@ -823,28 +1067,34 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     }
   })
   ipcMain.handle('config:load-slash-commands', () => loadSlashCommands())
-  ipcMain.handle('config:save-slash-commands', (_e, commands: SlashCommandCache[]) => saveSlashCommands(commands))
+  ipcMain.handle('config:save-slash-commands', (_e, commands: SlashCommandCache[]) =>
+    saveSlashCommands(commands)
+  )
   ipcMain.handle('config:scan-custom-commands', (_e, cwd: string) => scanCustomCommands(cwd))
   ipcMain.handle('config:load-skill-details', (_e, cwd: string) => scanSkills(cwd))
 
   // Claude permission settings (allow/deny/ask rules)
   ipcMain.handle('claude:load-permissions', (_e, scope: string, cwd?: string) =>
-    loadClaudePermissions(scope as 'user' | 'project' | 'local', cwd))
-  ipcMain.handle('claude:save-permissions', async (_e, scope: string, permissions: unknown, cwd?: string) => {
-    saveClaudePermissions(scope as 'user' | 'project' | 'local', permissions as never, cwd)
+    loadClaudePermissions(scope as 'user' | 'project' | 'local', cwd)
+  )
+  ipcMain.handle(
+    'claude:save-permissions',
+    async (_e, scope: string, permissions: unknown, cwd?: string) => {
+      saveClaudePermissions(scope as 'user' | 'project' | 'local', permissions as never, cwd)
 
-    // Hot-reload: tell running CLI sessions to re-read settings from disk.
-    // The CLI's file watcher is disabled in SDK mode, so writing to disk
-    // alone doesn't propagate.  notifySettingsChanged() sends an empty
-    // apply_flag_settings({}) which triggers the CLI's settings-change
-    // subscriber to invalidate its cache and re-read all sources from disk,
-    // respecting managed policies and the normal priority hierarchy.
-    manager.forEach((session) => {
-      if (!cwd || session.cwd === cwd || scope === 'user') {
-        session.notifySettingsChanged().catch(() => {})
-      }
-    })
-  })
+      // Hot-reload: tell running CLI sessions to re-read settings from disk.
+      // The CLI's file watcher is disabled in SDK mode, so writing to disk
+      // alone doesn't propagate.  notifySettingsChanged() sends an empty
+      // apply_flag_settings({}) which triggers the CLI's settings-change
+      // subscriber to invalidate its cache and re-read all sources from disk,
+      // respecting managed policies and the normal priority hierarchy.
+      manager.forEach((session) => {
+        if (!cwd || session.cwd === cwd || scope === 'user') {
+          session.notifySettingsChanged().catch(() => {})
+        }
+      })
+    }
+  )
 
   // Transcript retention window (~/.claude/settings.json#cleanupPeriodDays)
   ipcMain.handle('claude:get-cleanup-period', () => loadCleanupPeriodDays())
@@ -863,204 +1113,280 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     return await session.mcpServerStatus()
   })
 
-  ipcMain.handle('mcp:toggle', safeHandler(async (_e: unknown, routingId: string, serverName: string, enabled: boolean) => {
-    const session = manager.get(routingId)
-    if (!session) throw new Error('No active session')
-    await session.mcpToggleServer(serverName, enabled)
-  }))
+  ipcMain.handle(
+    'mcp:toggle',
+    safeHandler(async (_e: unknown, routingId: string, serverName: string, enabled: boolean) => {
+      const session = manager.get(routingId)
+      if (!session) throw new Error('No active session')
+      await session.mcpToggleServer(serverName, enabled)
+    })
+  )
 
-  ipcMain.handle('mcp:reconnect', safeHandler(async (_e: unknown, routingId: string, serverName: string) => {
-    const session = manager.get(routingId)
-    if (!session) throw new Error('No active session')
-    await session.mcpReconnectServer(serverName)
-  }))
+  ipcMain.handle(
+    'mcp:reconnect',
+    safeHandler(async (_e: unknown, routingId: string, serverName: string) => {
+      const session = manager.get(routingId)
+      if (!session) throw new Error('No active session')
+      await session.mcpReconnectServer(serverName)
+    })
+  )
 
-  ipcMain.handle('mcp:set-servers', safeHandler(async (_e: unknown, routingId: string, servers: Record<string, unknown>) => {
-    const session = manager.get(routingId)
-    if (!session) throw new Error('No active session')
-    return await session.mcpSetServers(servers)
-  }))
+  ipcMain.handle(
+    'mcp:set-servers',
+    safeHandler(async (_e: unknown, routingId: string, servers: Record<string, unknown>) => {
+      const session = manager.get(routingId)
+      if (!session) throw new Error('No active session')
+      return await session.mcpSetServers(servers)
+    })
+  )
 
   // MCP config file read/write (direct file access, no session needed)
   ipcMain.handle('mcp:load-servers', (_e, scope: string, cwd?: string) =>
-    loadMcpServers(scope as 'user' | 'project' | 'local', cwd))
-  ipcMain.handle('mcp:save-servers', (_e, scope: string, servers: Record<string, unknown>, cwd?: string) =>
-    saveMcpServers(scope as 'user' | 'project' | 'local', servers as never, cwd))
+    loadMcpServers(scope as 'user' | 'project' | 'local', cwd)
+  )
+  ipcMain.handle(
+    'mcp:save-servers',
+    (_e, scope: string, servers: Record<string, unknown>, cwd?: string) =>
+      saveMcpServers(scope as 'user' | 'project' | 'local', servers as never, cwd)
+  )
   ipcMain.handle('mcp:remove-server', (_e, scope: string, serverName: string, cwd?: string) =>
-    removeMcpServer(scope as 'user' | 'project' | 'local', serverName, cwd))
+    removeMcpServer(scope as 'user' | 'project' | 'local', serverName, cwd)
+  )
 
   // MCP disabled state (direct ~/.claude.json access, no session needed)
   ipcMain.handle('mcp:read-disabled', (_e, cwd: string) => {
     return readDisabledMcpServers(cwd)
   })
 
-  ipcMain.handle('mcp:toggle-disabled', async (_e, cwd: string, serverName: string, enabled: boolean) => {
-    const disabled = readDisabledMcpServers(cwd)
-    let updated: string[]
-    if (enabled) {
-      updated = disabled.filter(n => n !== serverName)
-    } else {
-      updated = disabled.includes(serverName) ? disabled : [...disabled, serverName]
+  ipcMain.handle(
+    'mcp:toggle-disabled',
+    async (_e, cwd: string, serverName: string, enabled: boolean) => {
+      const disabled = readDisabledMcpServers(cwd)
+      let updated: string[]
+      if (enabled) {
+        updated = disabled.filter((n) => n !== serverName)
+      } else {
+        updated = disabled.includes(serverName) ? disabled : [...disabled, serverName]
+      }
+      writeDisabledMcpServers(cwd, updated)
     }
-    writeDisabledMcpServers(cwd, updated)
-  })
+  )
 
   // -------------------------------------------------------------------------
   // Git integration IPC handlers
   // -------------------------------------------------------------------------
 
-  ipcMain.handle('git:check-repo', safeHandler(async (_e: unknown, cwd: string) => {
-    const svc = gitServiceManager.get(cwd)
-    try {
-      return await svc.isGitRepo()
-    } finally {
-      gitServiceManager.release(cwd)
-    }
-  }))
+  ipcMain.handle(
+    'git:check-repo',
+    safeHandler(async (_e: unknown, cwd: string) => {
+      const svc = gitServiceManager.get(cwd)
+      try {
+        return await svc.isGitRepo()
+      } finally {
+        gitServiceManager.release(cwd)
+      }
+    })
+  )
 
-  ipcMain.handle('git:status', safeHandler(async (_e: unknown, cwd: string) => {
-    const svc = gitServiceManager.get(cwd)
-    try {
-      return await svc.getStatus()
-    } finally {
-      gitServiceManager.release(cwd)
-    }
-  }))
+  ipcMain.handle(
+    'git:status',
+    safeHandler(async (_e: unknown, cwd: string) => {
+      const svc = gitServiceManager.get(cwd)
+      try {
+        return await svc.getStatus()
+      } finally {
+        gitServiceManager.release(cwd)
+      }
+    })
+  )
 
-  ipcMain.handle('git:branches', safeHandler(async (_e: unknown, cwd: string) => {
-    const svc = gitServiceManager.get(cwd)
-    try {
-      return await svc.getBranches()
-    } finally {
-      gitServiceManager.release(cwd)
-    }
-  }))
+  ipcMain.handle(
+    'git:branches',
+    safeHandler(async (_e: unknown, cwd: string) => {
+      const svc = gitServiceManager.get(cwd)
+      try {
+        return await svc.getBranches()
+      } finally {
+        gitServiceManager.release(cwd)
+      }
+    })
+  )
 
-  ipcMain.handle('git:checkout', safeHandler(async (_e: unknown, cwd: string, branch: string) => {
-    const svc = gitServiceManager.get(cwd)
-    try {
-      await svc.checkout(branch)
-    } finally {
-      gitServiceManager.release(cwd)
-    }
-  }))
+  ipcMain.handle(
+    'git:checkout',
+    safeHandler(async (_e: unknown, cwd: string, branch: string) => {
+      const svc = gitServiceManager.get(cwd)
+      try {
+        await svc.checkout(branch)
+      } finally {
+        gitServiceManager.release(cwd)
+      }
+    })
+  )
 
-  ipcMain.handle('git:create-branch', safeHandler(async (_e: unknown, cwd: string, name: string) => {
-    const svc = gitServiceManager.get(cwd)
-    try {
-      await svc.createBranch(name)
-    } finally {
-      gitServiceManager.release(cwd)
-    }
-  }))
+  ipcMain.handle(
+    'git:create-branch',
+    safeHandler(async (_e: unknown, cwd: string, name: string) => {
+      const svc = gitServiceManager.get(cwd)
+      try {
+        await svc.createBranch(name)
+      } finally {
+        gitServiceManager.release(cwd)
+      }
+    })
+  )
 
-  ipcMain.handle('git:file-patch', safeHandler(async (_e: unknown, cwd: string, filePath: string, staged: boolean, ignoreWhitespace: boolean) => {
-    const svc = gitServiceManager.get(cwd)
-    try {
-      return await svc.getFilePatch(filePath, staged, ignoreWhitespace)
-    } finally {
-      gitServiceManager.release(cwd)
-    }
-  }))
+  ipcMain.handle(
+    'git:file-patch',
+    safeHandler(
+      async (
+        _e: unknown,
+        cwd: string,
+        filePath: string,
+        staged: boolean,
+        ignoreWhitespace: boolean
+      ) => {
+        const svc = gitServiceManager.get(cwd)
+        try {
+          return await svc.getFilePatch(filePath, staged, ignoreWhitespace)
+        } finally {
+          gitServiceManager.release(cwd)
+        }
+      }
+    )
+  )
 
-  ipcMain.handle('git:file-contents', safeHandler(async (_e: unknown, cwd: string, filePath: string, staged: boolean) => {
-    const svc = gitServiceManager.get(cwd)
-    try {
-      return await svc.getFileContents(filePath, staged)
-    } finally {
-      gitServiceManager.release(cwd)
-    }
-  }))
+  ipcMain.handle(
+    'git:file-contents',
+    safeHandler(async (_e: unknown, cwd: string, filePath: string, staged: boolean) => {
+      const svc = gitServiceManager.get(cwd)
+      try {
+        return await svc.getFileContents(filePath, staged)
+      } finally {
+        gitServiceManager.release(cwd)
+      }
+    })
+  )
 
-  ipcMain.handle('git:stage-file', safeHandler(async (_e: unknown, cwd: string, filePath: string) => {
-    const svc = gitServiceManager.get(cwd)
-    try {
-      await svc.stageFile(filePath)
-    } finally {
-      gitServiceManager.release(cwd)
-    }
-  }))
+  ipcMain.handle(
+    'git:stage-file',
+    safeHandler(async (_e: unknown, cwd: string, filePath: string) => {
+      const svc = gitServiceManager.get(cwd)
+      try {
+        await svc.stageFile(filePath)
+      } finally {
+        gitServiceManager.release(cwd)
+      }
+    })
+  )
 
-  ipcMain.handle('git:unstage-file', safeHandler(async (_e: unknown, cwd: string, filePath: string) => {
-    const svc = gitServiceManager.get(cwd)
-    try {
-      await svc.unstageFile(filePath)
-    } finally {
-      gitServiceManager.release(cwd)
-    }
-  }))
+  ipcMain.handle(
+    'git:unstage-file',
+    safeHandler(async (_e: unknown, cwd: string, filePath: string) => {
+      const svc = gitServiceManager.get(cwd)
+      try {
+        await svc.unstageFile(filePath)
+      } finally {
+        gitServiceManager.release(cwd)
+      }
+    })
+  )
 
-  ipcMain.handle('git:discard-file', safeHandler(async (_e: unknown, cwd: string, filePath: string) => {
-    const svc = gitServiceManager.get(cwd)
-    try {
-      await svc.discardFile(filePath)
-    } finally {
-      gitServiceManager.release(cwd)
-    }
-  }))
+  ipcMain.handle(
+    'git:discard-file',
+    safeHandler(async (_e: unknown, cwd: string, filePath: string) => {
+      const svc = gitServiceManager.get(cwd)
+      try {
+        await svc.discardFile(filePath)
+      } finally {
+        gitServiceManager.release(cwd)
+      }
+    })
+  )
 
-  ipcMain.handle('git:stage-all', safeHandler(async (_e: unknown, cwd: string) => {
-    const svc = gitServiceManager.get(cwd)
-    try {
-      await svc.stageAll()
-    } finally {
-      gitServiceManager.release(cwd)
-    }
-  }))
+  ipcMain.handle(
+    'git:stage-all',
+    safeHandler(async (_e: unknown, cwd: string) => {
+      const svc = gitServiceManager.get(cwd)
+      try {
+        await svc.stageAll()
+      } finally {
+        gitServiceManager.release(cwd)
+      }
+    })
+  )
 
-  ipcMain.handle('git:unstage-all', safeHandler(async (_e: unknown, cwd: string) => {
-    const svc = gitServiceManager.get(cwd)
-    try {
-      await svc.unstageAll()
-    } finally {
-      gitServiceManager.release(cwd)
-    }
-  }))
+  ipcMain.handle(
+    'git:unstage-all',
+    safeHandler(async (_e: unknown, cwd: string) => {
+      const svc = gitServiceManager.get(cwd)
+      try {
+        await svc.unstageAll()
+      } finally {
+        gitServiceManager.release(cwd)
+      }
+    })
+  )
 
-  ipcMain.handle('git:commit', safeHandler(async (_e: unknown, cwd: string, message: string) => {
-    const svc = gitServiceManager.get(cwd)
-    try {
-      return await svc.commit(message)
-    } finally {
-      gitServiceManager.release(cwd)
-    }
-  }))
+  ipcMain.handle(
+    'git:commit',
+    safeHandler(async (_e: unknown, cwd: string, message: string) => {
+      const svc = gitServiceManager.get(cwd)
+      try {
+        return await svc.commit(message)
+      } finally {
+        gitServiceManager.release(cwd)
+      }
+    })
+  )
 
-  ipcMain.handle('git:push', safeHandler(async (_e: unknown, cwd: string) => {
-    const svc = gitServiceManager.get(cwd)
-    try {
-      await svc.push()
-    } finally {
-      gitServiceManager.release(cwd)
-    }
-  }))
+  ipcMain.handle(
+    'git:push',
+    safeHandler(async (_e: unknown, cwd: string) => {
+      const svc = gitServiceManager.get(cwd)
+      try {
+        await svc.push()
+      } finally {
+        gitServiceManager.release(cwd)
+      }
+    })
+  )
 
-  ipcMain.handle('git:push-with-upstream', safeHandler(async (_e: unknown, cwd: string, branch: string) => {
-    const svc = gitServiceManager.get(cwd)
-    try {
-      await svc.pushWithUpstream(branch)
-    } finally {
-      gitServiceManager.release(cwd)
-    }
-  }))
+  ipcMain.handle(
+    'git:push-with-upstream',
+    safeHandler(async (_e: unknown, cwd: string, branch: string) => {
+      const svc = gitServiceManager.get(cwd)
+      try {
+        await svc.pushWithUpstream(branch)
+      } finally {
+        gitServiceManager.release(cwd)
+      }
+    })
+  )
 
-  ipcMain.handle('git:pull', safeHandler(async (_e: unknown, cwd: string) => {
-    const svc = gitServiceManager.get(cwd)
-    try {
-      return await svc.pull()
-    } finally {
-      gitServiceManager.release(cwd)
-    }
-  }))
+  ipcMain.handle(
+    'git:pull',
+    safeHandler(async (_e: unknown, cwd: string) => {
+      const svc = gitServiceManager.get(cwd)
+      try {
+        return await svc.pull()
+      } finally {
+        gitServiceManager.release(cwd)
+      }
+    })
+  )
 
-  ipcMain.handle('git:fetch', safeHandler(async (_e: unknown, cwd: string) => {
-    const svc = gitServiceManager.get(cwd)
-    try {
-      await svc.fetch()
-    } finally {
-      gitServiceManager.release(cwd)
-    }
-  }))
+  ipcMain.handle(
+    'git:fetch',
+    safeHandler(async (_e: unknown, cwd: string) => {
+      const svc = gitServiceManager.get(cwd)
+      try {
+        await svc.fetch()
+      } finally {
+        gitServiceManager.release(cwd)
+      }
+    })
+  )
 
   // Git polling — persistent service per cwd
   const gitWatchers = new Map<string, { refCount: number }>()
@@ -1099,21 +1425,33 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
   // Worktree IPC handlers
   // -------------------------------------------------------------------------
 
-  ipcMain.handle('worktree:create', safeHandler(async (_e: unknown, cwd: string, name: string) => {
-    return await createWorktree(cwd, name)
-  }))
+  ipcMain.handle(
+    'worktree:create',
+    safeHandler(async (_e: unknown, cwd: string, name: string) => {
+      return await createWorktree(cwd, name)
+    })
+  )
 
-  ipcMain.handle('worktree:status', safeHandler(async (_e: unknown, worktreePath: string, originalHead: string) => {
-    return await getWorktreeStatus(worktreePath, originalHead)
-  }))
+  ipcMain.handle(
+    'worktree:status',
+    safeHandler(async (_e: unknown, worktreePath: string, originalHead: string) => {
+      return await getWorktreeStatus(worktreePath, originalHead)
+    })
+  )
 
-  ipcMain.handle('worktree:remove', safeHandler(async (_e: unknown, worktreePath: string, branch: string, gitRoot: string) => {
-    await removeWorktree(worktreePath, branch, gitRoot)
-  }))
+  ipcMain.handle(
+    'worktree:remove',
+    safeHandler(async (_e: unknown, worktreePath: string, branch: string, gitRoot: string) => {
+      await removeWorktree(worktreePath, branch, gitRoot)
+    })
+  )
 
-  ipcMain.handle('worktree:list', safeHandler(async (_e: unknown, cwd: string) => {
-    return await listWorktrees(cwd)
-  }))
+  ipcMain.handle(
+    'worktree:list',
+    safeHandler(async (_e: unknown, cwd: string) => {
+      return await listWorktrees(cwd)
+    })
+  )
 
   // Watch ~/.claude/projects/ for JSONL changes and notify renderer to refresh
   startProjectsWatcher(win)
@@ -1129,7 +1467,10 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
   }
   // Apply saved log level + filter (merged with CLAUDE_UI_LOG env var)
   {
-    const level = typeof savedSettings.logLevel === 'string' ? savedSettings.logLevel as 'debug' | 'info' | 'warn' | 'error' : undefined
+    const level =
+      typeof savedSettings.logLevel === 'string'
+        ? (savedSettings.logLevel as 'debug' | 'info' | 'warn' | 'error')
+        : undefined
     const filter = typeof savedSettings.logFilter === 'string' ? savedSettings.logFilter : ''
     if (level || filter) {
       logger.applyFilter(filter, level)
@@ -1156,7 +1497,9 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
       try {
         const data = await session.getUsage()
         if (data !== null) return data
-      } catch { /* try next session */ }
+      } catch {
+        /* try next session */
+      }
     }
     // Fall back to the service session (spawns lazily on first call)
     return serviceSession.getUsage()
@@ -1174,10 +1517,15 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
   const skipUsageInDev = !app.isPackaged && !process.env.CLAUDE_UI_DEV_USAGE
   blockUsageService.setWindow(win)
   if (!skipUsageInDev) {
-    blockUsageService.recalculate().catch((err) => { logger.error('BlockUsage', 'Initial recalculation failed', err) })
+    blockUsageService.recalculate().catch((err) => {
+      logger.error('BlockUsage', 'Initial recalculation failed', err)
+    })
     blockUsageService.startWatching()
   } else {
-    logger.info('IPC', 'Dev mode — skipping block usage writes (set CLAUDE_UI_DEV_USAGE=1 to enable)')
+    logger.info(
+      'IPC',
+      'Dev mode — skipping block usage writes (set CLAUDE_UI_DEV_USAGE=1 to enable)'
+    )
   }
 
   // IPC handlers — always registered so the renderer never gets "no handler" errors.
@@ -1194,13 +1542,19 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
   })
 
   // Mockup preview — read HTML from mockup directory
-  ipcMain.handle('mockup:read-html', safeHandler(async (_e: unknown, cwd: string, directory: string) => {
-    const htmlPath = path.join(cwd, '.claude', 'ui', 'mockups', directory, 'index.html')
-    return fs.promises.readFile(htmlPath, 'utf-8')
-  }))
+  ipcMain.handle(
+    'mockup:read-html',
+    safeHandler(async (_e: unknown, cwd: string, directory: string) => {
+      const htmlPath = path.join(cwd, '.claude', 'ui', 'mockups', directory, 'index.html')
+      return fs.promises.readFile(htmlPath, 'utf-8')
+    })
+  )
 
   // Mockup file watcher — watches a mockup directory for changes
-  const mockupWatchers = new Map<string, { watcher: fs.FSWatcher; debounceTimer: ReturnType<typeof setTimeout> | null }>()
+  const mockupWatchers = new Map<
+    string,
+    { watcher: fs.FSWatcher; debounceTimer: ReturnType<typeof setTimeout> | null }
+  >()
 
   ipcMain.handle('mockup:watch', (_e: unknown, cwd: string, directory: string) => {
     const key = `${cwd}:${directory}`
@@ -1209,7 +1563,10 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     const dirPath = path.join(cwd, '.claude', 'ui', 'mockups', directory)
     if (!fs.existsSync(dirPath)) return
 
-    const entry = { watcher: null! as fs.FSWatcher, debounceTimer: null as ReturnType<typeof setTimeout> | null }
+    const entry = {
+      watcher: null! as fs.FSWatcher,
+      debounceTimer: null as ReturnType<typeof setTimeout> | null
+    }
 
     // Recursive so edits to sibling subdirs (e.g. `images/hero.png`,
     // `components/card.css`) also trigger reloads. Debounced so editors

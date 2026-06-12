@@ -9,7 +9,7 @@ function LineCells({
   wrapLines,
   isPureAdd,
   isPureDel,
-  Cell,
+  Cell
 }: {
   line: DiffLine
   tokens?: SyntaxToken[]
@@ -20,11 +20,7 @@ function LineCells({
 }): React.JSX.Element {
   const indicatorChar = line.type === 'add' ? '+' : line.type === 'del' ? '-' : ' '
   const indicatorClass =
-    line.type === 'add'
-      ? 'diff-indicator-add'
-      : line.type === 'del'
-        ? 'diff-indicator-del'
-        : ''
+    line.type === 'add' ? 'diff-indicator-add' : line.type === 'del' ? 'diff-indicator-del' : ''
 
   return (
     <>
@@ -47,22 +43,16 @@ function LineCells({
         </Cell>
       )}
       {/* +/- indicator */}
-      <Cell className={`diff-indicator ${indicatorClass}`}>
-        {indicatorChar}
-      </Cell>
+      <Cell className={`diff-indicator ${indicatorClass}`}>{indicatorChar}</Cell>
       {/* Content with syntax highlighting */}
-      <Cell
-        className={`diff-content ${wrapLines ? 'diff-content-wrap' : 'diff-content-nowrap'}`}
-      >
-        {tokens ? (
-          tokens.map((token, i) => (
-            <span key={i} style={token.color ? { color: token.color } : undefined}>
-              {token.content}
-            </span>
-          ))
-        ) : (
-          line.content
-        )}
+      <Cell className={`diff-content ${wrapLines ? 'diff-content-wrap' : 'diff-content-nowrap'}`}>
+        {tokens
+          ? tokens.map((token, i) => (
+              <span key={i} style={token.color ? { color: token.color } : undefined}>
+                {token.content}
+              </span>
+            ))
+          : line.content}
         {/* Ensure empty lines have height */}
         {(!tokens || tokens.length === 0) && !line.content && '\u00a0'}
       </Cell>
@@ -88,14 +78,9 @@ export const DiffRow = memo(function DiffRow({
   isPureAdd,
   isPureDel,
   highlighted,
-  afterRow,
+  afterRow
 }: Props): React.JSX.Element {
-  const rowClass =
-    line.type === 'add'
-      ? 'diff-row-add'
-      : line.type === 'del'
-        ? 'diff-row-del'
-        : ''
+  const rowClass = line.type === 'add' ? 'diff-row-add' : line.type === 'del' ? 'diff-row-del' : ''
 
   return (
     <>
@@ -103,7 +88,14 @@ export const DiffRow = memo(function DiffRow({
         className={`diff-row ${rowClass}${highlighted ? ' diff-row-highlighted' : ''}`}
         role="row"
       >
-        <LineCells line={line} tokens={tokens} wrapLines={wrapLines} isPureAdd={isPureAdd} isPureDel={isPureDel} Cell="div" />
+        <LineCells
+          line={line}
+          tokens={tokens}
+          wrapLines={wrapLines}
+          isPureAdd={isPureAdd}
+          isPureDel={isPureDel}
+          Cell="div"
+        />
       </div>
       {afterRow}
     </>
@@ -118,21 +110,21 @@ export const DiffRowTr = memo(function DiffRowTr({
   isPureAdd,
   isPureDel,
   highlighted,
-  afterRow,
+  afterRow
 }: Props): React.JSX.Element {
-  const rowClass =
-    line.type === 'add'
-      ? 'diff-row-add'
-      : line.type === 'del'
-        ? 'diff-row-del'
-        : ''
+  const rowClass = line.type === 'add' ? 'diff-row-add' : line.type === 'del' ? 'diff-row-del' : ''
 
   return (
     <>
-      <tr
-        className={`diff-row ${rowClass}${highlighted ? ' diff-row-highlighted' : ''}`}
-      >
-        <LineCells line={line} tokens={tokens} wrapLines={wrapLines} isPureAdd={isPureAdd} isPureDel={isPureDel} Cell="td" />
+      <tr className={`diff-row ${rowClass}${highlighted ? ' diff-row-highlighted' : ''}`}>
+        <LineCells
+          line={line}
+          tokens={tokens}
+          wrapLines={wrapLines}
+          isPureAdd={isPureAdd}
+          isPureDel={isPureDel}
+          Cell="td"
+        />
       </tr>
       {afterRow && (
         <tr className="diff-after-row">
@@ -157,33 +149,31 @@ export const SplitDiffCell = memo(function SplitDiffCell({
   tokens,
   wrapLines,
   highlighted,
-  cellSide,
+  cellSide
 }: SplitCellProps): React.JSX.Element {
   if (!line) {
     return <div className="diff-split-side diff-row-empty flex" role="cell" />
   }
 
-  const bgClass =
-    line.type === 'add'
-      ? 'diff-row-add'
-      : line.type === 'del'
-        ? 'diff-row-del'
-        : ''
+  const bgClass = line.type === 'add' ? 'diff-row-add' : line.type === 'del' ? 'diff-row-del' : ''
 
   const indicatorChar = line.type === 'add' ? '+' : line.type === 'del' ? '-' : ' '
   const indicatorClass =
-    line.type === 'add'
-      ? 'diff-indicator-add'
-      : line.type === 'del'
-        ? 'diff-indicator-del'
-        : ''
+    line.type === 'add' ? 'diff-indicator-add' : line.type === 'del' ? 'diff-indicator-del' : ''
 
-  const lineNum = line.type === 'del' ? line.oldLineNumber : line.newLineNumber
-    ?? line.oldLineNumber ?? line.newLineNumber
+  const lineNum =
+    line.type === 'del'
+      ? line.oldLineNumber
+      : (line.newLineNumber ?? line.oldLineNumber ?? line.newLineNumber)
 
-  const gutterAttr = cellSide === 'old'
-    ? (line.oldLineNumber != null ? { 'data-line-old-num': line.oldLineNumber } : {})
-    : (line.newLineNumber != null ? { 'data-line-new-num': line.newLineNumber } : {})
+  const gutterAttr =
+    cellSide === 'old'
+      ? line.oldLineNumber != null
+        ? { 'data-line-old-num': line.oldLineNumber }
+        : {}
+      : line.newLineNumber != null
+        ? { 'data-line-new-num': line.newLineNumber }
+        : {}
 
   return (
     <div
@@ -200,15 +190,13 @@ export const SplitDiffCell = memo(function SplitDiffCell({
         className={`diff-content flex-1 min-w-0 ${wrapLines ? 'diff-content-wrap' : 'diff-content-nowrap'}`}
         role="cell"
       >
-        {tokens ? (
-          tokens.map((token, i) => (
-            <span key={i} style={token.color ? { color: token.color } : undefined}>
-              {token.content}
-            </span>
-          ))
-        ) : (
-          line.content
-        )}
+        {tokens
+          ? tokens.map((token, i) => (
+              <span key={i} style={token.color ? { color: token.color } : undefined}>
+                {token.content}
+              </span>
+            ))
+          : line.content}
         {(!tokens || tokens.length === 0) && !line.content && '\u00a0'}
       </div>
     </div>

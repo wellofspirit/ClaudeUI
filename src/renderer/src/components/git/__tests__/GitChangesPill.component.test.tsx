@@ -4,8 +4,6 @@
  * Tests the openGitPanel / closeGitPanel toggle via store.
  */
 
- 
-
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { render, fireEvent } from '@testing-library/react'
 import { useSessionStore } from '../../../stores/session-store'
@@ -27,7 +25,7 @@ function makeStatus(overrides: Partial<GitStatusData> = {}): GitStatusData {
     untracked: [],
     linesAdded: 3,
     linesRemoved: 1,
-    ...overrides,
+    ...overrides
   } as GitStatusData
 }
 

@@ -38,7 +38,13 @@ export function TerminalView({ text, maxHeight }: Props): React.JSX.Element {
     <pre
       ref={preRef}
       className="text-[12px] font-mono whitespace-pre-wrap break-words leading-[1.3] rounded-md p-2 border border-border overflow-y-auto"
-      style={{ background: bg, color: fg, maxHeight: maxHeight ?? MAX_VISIBLE_HEIGHT, flex: maxHeight === 'none' ? 1 : undefined, minHeight: maxHeight === 'none' ? 0 : undefined }}
+      style={{
+        background: bg,
+        color: fg,
+        maxHeight: maxHeight ?? MAX_VISIBLE_HEIGHT,
+        flex: maxHeight === 'none' ? 1 : undefined,
+        minHeight: maxHeight === 'none' ? 0 : undefined
+      }}
       dangerouslySetInnerHTML={{ __html: html }}
     />
   )

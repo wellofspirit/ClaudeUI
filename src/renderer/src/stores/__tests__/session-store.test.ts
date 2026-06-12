@@ -20,11 +20,12 @@ function cleanupEmptySession(
   if (!routingId) return { sessions, recentSessionIds }
   const session = sessions[routingId]
   if (!session) return { sessions, recentSessionIds }
-  if (session.messages.length > 0 || session.sdkActive || session.draftText) return { sessions, recentSessionIds }
+  if (session.messages.length > 0 || session.sdkActive || session.draftText)
+    return { sessions, recentSessionIds }
   const { [routingId]: _, ...rest } = sessions
   return {
     sessions: rest,
-    recentSessionIds: recentSessionIds.filter((id) => id !== routingId),
+    recentSessionIds: recentSessionIds.filter((id) => id !== routingId)
   }
 }
 
@@ -72,24 +73,26 @@ describe('buildTodosFromMessages', () => {
   it('returns null when no task tool calls found', () => {
     const messages: ChatMessage[] = [
       { id: 'm1', role: 'user', content: [{ type: 'text', text: 'hello' }], timestamp: 1 },
-      { id: 'm2', role: 'assistant', content: [{ type: 'text', text: 'hi' }], timestamp: 2 },
+      { id: 'm2', role: 'assistant', content: [{ type: 'text', text: 'hi' }], timestamp: 2 }
     ]
     expect(buildTodosFromMessages(messages)).toBeNull()
   })
 
   it('builds todos from TodoWrite', () => {
     const messages: ChatMessage[] = [
-      makeAssistantMsg([{
-        type: 'tool_use',
-        toolUseId: 'tu-1',
-        toolName: 'TodoWrite',
-        toolInput: {
-          todos: [
-            { content: 'Task 1', status: 'completed' },
-            { content: 'Task 2', status: 'pending' },
-          ],
-        },
-      }]),
+      makeAssistantMsg([
+        {
+          type: 'tool_use',
+          toolUseId: 'tu-1',
+          toolName: 'TodoWrite',
+          toolInput: {
+            todos: [
+              { content: 'Task 1', status: 'completed' },
+              { content: 'Task 2', status: 'pending' }
+            ]
+          }
+        }
+      ])
     ]
 
     const result = buildTodosFromMessages(messages)!
@@ -102,14 +105,22 @@ describe('buildTodosFromMessages', () => {
 
   it('TodoWrite replaces all previous tasks', () => {
     const messages: ChatMessage[] = [
-      makeAssistantMsg([{
-        type: 'tool_use', toolUseId: 'tu-1', toolName: 'TodoWrite',
-        toolInput: { todos: [{ content: 'Old task', status: 'pending' }] },
-      }]),
-      makeAssistantMsg([{
-        type: 'tool_use', toolUseId: 'tu-2', toolName: 'TodoWrite',
-        toolInput: { todos: [{ content: 'New task', status: 'pending' }] },
-      }]),
+      makeAssistantMsg([
+        {
+          type: 'tool_use',
+          toolUseId: 'tu-1',
+          toolName: 'TodoWrite',
+          toolInput: { todos: [{ content: 'Old task', status: 'pending' }] }
+        }
+      ]),
+      makeAssistantMsg([
+        {
+          type: 'tool_use',
+          toolUseId: 'tu-2',
+          toolName: 'TodoWrite',
+          toolInput: { todos: [{ content: 'New task', status: 'pending' }] }
+        }
+      ])
     ]
 
     const result = buildTodosFromMessages(messages)!
@@ -121,15 +132,21 @@ describe('buildTodosFromMessages', () => {
     const messages: ChatMessage[] = [
       makeAssistantMsg([
         {
-          type: 'tool_use', toolUseId: 'tu-1', toolName: 'TaskCreate',
-          toolInput: { subject: 'Task A' },
+          type: 'tool_use',
+          toolUseId: 'tu-1',
+          toolName: 'TaskCreate',
+          toolInput: { subject: 'Task A' }
         },
-        { type: 'tool_result', toolUseId: 'tu-1', toolResult: 'Task #abc created', isError: false },
+        { type: 'tool_result', toolUseId: 'tu-1', toolResult: 'Task #abc created', isError: false }
       ]),
-      makeAssistantMsg([{
-        type: 'tool_use', toolUseId: 'tu-2', toolName: 'TaskUpdate',
-        toolInput: { taskId: 'abc', status: 'deleted' },
-      }]),
+      makeAssistantMsg([
+        {
+          type: 'tool_use',
+          toolUseId: 'tu-2',
+          toolName: 'TaskUpdate',
+          toolInput: { taskId: 'abc', status: 'deleted' }
+        }
+      ])
     ]
 
     const result = buildTodosFromMessages(messages)!
@@ -140,15 +157,21 @@ describe('buildTodosFromMessages', () => {
     const messages: ChatMessage[] = [
       makeAssistantMsg([
         {
-          type: 'tool_use', toolUseId: 'tu-1', toolName: 'TaskCreate',
-          toolInput: { subject: 'Original' },
+          type: 'tool_use',
+          toolUseId: 'tu-1',
+          toolName: 'TaskCreate',
+          toolInput: { subject: 'Original' }
         },
-        { type: 'tool_result', toolUseId: 'tu-1', toolResult: 'Task #xyz created', isError: false },
+        { type: 'tool_result', toolUseId: 'tu-1', toolResult: 'Task #xyz created', isError: false }
       ]),
-      makeAssistantMsg([{
-        type: 'tool_use', toolUseId: 'tu-2', toolName: 'TaskUpdate',
-        toolInput: { taskId: 'xyz', status: 'completed', subject: 'Updated' },
-      }]),
+      makeAssistantMsg([
+        {
+          type: 'tool_use',
+          toolUseId: 'tu-2',
+          toolName: 'TaskUpdate',
+          toolInput: { taskId: 'xyz', status: 'completed', subject: 'Updated' }
+        }
+      ])
     ]
 
     const result = buildTodosFromMessages(messages)!
@@ -160,11 +183,18 @@ describe('buildTodosFromMessages', () => {
   it('ignores user messages', () => {
     const messages: ChatMessage[] = [
       {
-        id: 'm1', role: 'user', content: [{
-          type: 'tool_use', toolUseId: 'tu-1', toolName: 'TodoWrite',
-          toolInput: { todos: [{ content: 'Task', status: 'pending' }] },
-        }], timestamp: 1,
-      },
+        id: 'm1',
+        role: 'user',
+        content: [
+          {
+            type: 'tool_use',
+            toolUseId: 'tu-1',
+            toolName: 'TodoWrite',
+            toolInput: { todos: [{ content: 'Task', status: 'pending' }] }
+          }
+        ],
+        timestamp: 1
+      }
     ]
     expect(buildTodosFromMessages(messages)).toBeNull()
   })
@@ -173,22 +203,30 @@ describe('buildTodosFromMessages', () => {
     const messages: ChatMessage[] = [
       makeAssistantMsg([
         {
-          type: 'tool_use', toolUseId: 'tu-1', toolName: 'TaskCreate',
-          toolInput: { subject: 'Old Task' },
+          type: 'tool_use',
+          toolUseId: 'tu-1',
+          toolName: 'TaskCreate',
+          toolInput: { subject: 'Old Task' }
         },
-        { type: 'tool_result', toolUseId: 'tu-1', toolResult: 'Task #old1 created', isError: false },
+        { type: 'tool_result', toolUseId: 'tu-1', toolResult: 'Task #old1 created', isError: false }
       ]),
-      makeAssistantMsg([{
-        type: 'tool_use', toolUseId: 'tu-2', toolName: 'TaskUpdate',
-        toolInput: { taskId: 'old1', status: 'completed' },
-      }]),
       makeAssistantMsg([
         {
-          type: 'tool_use', toolUseId: 'tu-3', toolName: 'TaskCreate',
-          toolInput: { subject: 'New Task' },
-        },
-        { type: 'tool_result', toolUseId: 'tu-3', toolResult: 'Task #new1 created', isError: false },
+          type: 'tool_use',
+          toolUseId: 'tu-2',
+          toolName: 'TaskUpdate',
+          toolInput: { taskId: 'old1', status: 'completed' }
+        }
       ]),
+      makeAssistantMsg([
+        {
+          type: 'tool_use',
+          toolUseId: 'tu-3',
+          toolName: 'TaskCreate',
+          toolInput: { subject: 'New Task' }
+        },
+        { type: 'tool_result', toolUseId: 'tu-3', toolResult: 'Task #new1 created', isError: false }
+      ])
     ]
 
     const result = buildTodosFromMessages(messages)!
@@ -204,7 +242,7 @@ describe('buildTodosFromMessages', () => {
 describe('cleanupEmptySession', () => {
   it('removes session with no messages, not active, no draft', () => {
     const sessions = {
-      'r1': { messages: [], sdkActive: false, draftText: '' },
+      r1: { messages: [], sdkActive: false, draftText: '' }
     }
     const result = cleanupEmptySession(sessions, ['r1'], 'r1')
     expect(result.sessions).not.toHaveProperty('r1')
@@ -213,7 +251,7 @@ describe('cleanupEmptySession', () => {
 
   it('preserves session with messages', () => {
     const sessions = {
-      'r1': { messages: [{ id: 'm1' }], sdkActive: false, draftText: '' },
+      r1: { messages: [{ id: 'm1' }], sdkActive: false, draftText: '' }
     }
     const result = cleanupEmptySession(sessions, ['r1'], 'r1')
     expect(result.sessions).toHaveProperty('r1')
@@ -221,7 +259,7 @@ describe('cleanupEmptySession', () => {
 
   it('preserves session with active SDK', () => {
     const sessions = {
-      'r1': { messages: [], sdkActive: true, draftText: '' },
+      r1: { messages: [], sdkActive: true, draftText: '' }
     }
     const result = cleanupEmptySession(sessions, ['r1'], 'r1')
     expect(result.sessions).toHaveProperty('r1')
@@ -229,20 +267,20 @@ describe('cleanupEmptySession', () => {
 
   it('preserves session with draft text', () => {
     const sessions = {
-      'r1': { messages: [], sdkActive: false, draftText: 'typing...' },
+      r1: { messages: [], sdkActive: false, draftText: 'typing...' }
     }
     const result = cleanupEmptySession(sessions, ['r1'], 'r1')
     expect(result.sessions).toHaveProperty('r1')
   })
 
   it('returns unchanged when routingId is null', () => {
-    const sessions = { 'r1': { messages: [], sdkActive: false, draftText: '' } }
+    const sessions = { r1: { messages: [], sdkActive: false, draftText: '' } }
     const result = cleanupEmptySession(sessions, ['r1'], null)
     expect(result.sessions).toHaveProperty('r1')
   })
 
   it('returns unchanged when routingId not found', () => {
-    const sessions = { 'r1': { messages: [], sdkActive: false, draftText: '' } }
+    const sessions = { r1: { messages: [], sdkActive: false, draftText: '' } }
     const result = cleanupEmptySession(sessions, ['r1'], 'r2')
     expect(result.sessions).toHaveProperty('r1')
   })

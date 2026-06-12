@@ -4,8 +4,6 @@
  * Tests the removeError store action via dismiss button click.
  */
 
- 
-
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { render, fireEvent } from '@testing-library/react'
 import { useSessionStore } from '../../../stores/session-store'
@@ -18,11 +16,13 @@ describe('FloatingError', () => {
   let app: TestApp
 
   beforeEach(async () => {
-    ;(window as any).matchMedia = (window as any).matchMedia || (() => ({
-      matches: false,
-      addEventListener: () => {},
-      removeEventListener: () => {},
-    }))
+    ;(window as any).matchMedia =
+      (window as any).matchMedia ||
+      (() => ({
+        matches: false,
+        addEventListener: () => {},
+        removeEventListener: () => {}
+      }))
 
     app = await bootTestApp()
     useSessionStore.getState().createNewSession(ROUTE, '/d/repo')

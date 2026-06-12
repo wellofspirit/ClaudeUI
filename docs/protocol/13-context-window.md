@@ -13,14 +13,14 @@ Verified against cli.js **2.1.114**.
 
 Resolver: `DR(model, betas)` — cli.js@char3227080. First match wins:
 
-| # | Condition | Window | Anchor |
-|---|---|---|---|
-| 0 | `DISABLE_COMPACT` set **and** `CLAUDE_CODE_MAX_CONTEXT_TOKENS` parses to > 0 | env value | cli.js@char3227080 |
-| 1 | `/\[1m\]/i.test(modelName)` (`_J()`) | 1,000,000 | cli.js@char3226450 |
-| 2 | request betas include `context-1m-2025-08-07` **and** model is 1M-eligible (`bU()`) | 1,000,000 | cli.js@char3226880 |
-| 3 | implicit-1M model (`UE()`, see 13.2) | 1,000,000 | cli.js@char3226523 |
-| 4 | model is `claude-sonnet-4-6` and remote config `clientDataCache.kelp_forest_sonnet` parses to > 0 (`a56()`) | remote value | cli.js@char3227310 |
-| 5 | fallback (`AP_`) | 200,000 | cli.js@char3228870 |
+| #   | Condition                                                                                                   | Window       | Anchor             |
+| --- | ----------------------------------------------------------------------------------------------------------- | ------------ | ------------------ |
+| 0   | `DISABLE_COMPACT` set **and** `CLAUDE_CODE_MAX_CONTEXT_TOKENS` parses to > 0                                | env value    | cli.js@char3227080 |
+| 1   | `/\[1m\]/i.test(modelName)` (`_J()`)                                                                        | 1,000,000    | cli.js@char3226450 |
+| 2   | request betas include `context-1m-2025-08-07` **and** model is 1M-eligible (`bU()`)                         | 1,000,000    | cli.js@char3226880 |
+| 3   | implicit-1M model (`UE()`, see 13.2)                                                                        | 1,000,000    | cli.js@char3226523 |
+| 4   | model is `claude-sonnet-4-6` and remote config `clientDataCache.kelp_forest_sonnet` parses to > 0 (`a56()`) | remote value | cli.js@char3227310 |
+| 5   | fallback (`AP_`)                                                                                            | 200,000      | cli.js@char3228870 |
 
 All 1M paths (1–3) are killed by `CLAUDE_CODE_DISABLE_1M_CONTEXT` (truthy per
 `__()` boolean-env semantics: `1`/`true`/`yes`/`on`, case-insensitive —
@@ -48,13 +48,13 @@ list, so dated ids (`claude-fable-5-20260315`) and provider-prefixed ids
 Picker aliases resolve to concrete models (cli.js@char2255303) before `DR()`
 ever sees them:
 
-| Alias | Resolves to | Window |
-|---|---|---|
-| `fable` | `claude-fable-5` (or `ANTHROPIC_DEFAULT_FABLE_MODEL`) | 1M |
-| `opus` | `claude-opus-4-8` first-party, `claude-opus-4-7` on mantle (or `ANTHROPIC_DEFAULT_OPUS_MODEL`) | 1M |
-| `sonnet`, `opusplan` | `claude-sonnet-4-6` | 200K¹ |
-| `haiku` | `claude-haiku-4-5` | 200K |
-| `<alias>[1m]` | resolved model + `[1m]` suffix | 1M |
+| Alias                | Resolves to                                                                                    | Window |
+| -------------------- | ---------------------------------------------------------------------------------------------- | ------ |
+| `fable`              | `claude-fable-5` (or `ANTHROPIC_DEFAULT_FABLE_MODEL`)                                          | 1M     |
+| `opus`               | `claude-opus-4-8` first-party, `claude-opus-4-7` on mantle (or `ANTHROPIC_DEFAULT_OPUS_MODEL`) | 1M     |
+| `sonnet`, `opusplan` | `claude-sonnet-4-6`                                                                            | 200K¹  |
+| `haiku`              | `claude-haiku-4-5`                                                                             | 200K   |
+| `<alias>[1m]`        | resolved model + `[1m]` suffix                                                                 | 1M     |
 
 ¹ unless the kelp_forest remote-config override (13.1 row 4) applies.
 
@@ -101,7 +101,7 @@ Known divergences (accepted):
 - **No `CLAUDE_CODE_MAX_CONTEXT_TOKENS` override** (13.1 row 0).
 
 History: before 2026-06 the renderer did its own `/1m/i` test against the model
-picker *description*, which (a) missed every implicit-1M model (Fable 5 / Opus
+picker _description_, which (a) missed every implicit-1M model (Fable 5 / Opus
 4.8 carry no "1m" marker) so they were capped at 200K, and (b) clobbered the
 correct main-computed value for loaded historical sessions, sizing them off the
 store's `selectedModel` (often `default`) rather than the model that actually

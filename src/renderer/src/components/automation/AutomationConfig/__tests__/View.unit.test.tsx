@@ -19,14 +19,14 @@ const opus47: ModelOption = {
   value: 'claude-opus-4-7',
   displayName: 'Opus 4.7',
   description: 'Opus 4.7 · Latest',
-  shortName: 'Opus 4.7',
+  shortName: 'Opus 4.7'
 }
 
 const legacySonnet: ModelOption = {
   value: 'claude-3-5-sonnet',
   displayName: 'Sonnet 3.5',
   description: 'Sonnet 3.5 · Legacy',
-  shortName: 'Sonnet 3.5',
+  shortName: 'Sonnet 3.5'
 }
 
 function makeAutomation(overrides: Partial<Automation> = {}): Automation {
@@ -41,7 +41,7 @@ function makeAutomation(overrides: Partial<Automation> = {}): Automation {
     lastRunAt: null,
     lastRunStatus: null,
     createdAt: Date.now(),
-    ...overrides,
+    ...overrides
   }
 }
 
@@ -62,14 +62,14 @@ function makeProps(overrides: Partial<AutomationConfigViewProps> = {}): Automati
     onPickFolder: vi.fn(async () => null),
     onSelectRun: vi.fn(),
     onSetDetailTab: vi.fn(),
-    ...overrides,
+    ...overrides
   }
 }
 
 // The pickers share the same dropdown structure as InputBox — trigger has a
 // title, dropdown is an absolutely-positioned sibling. Mirror the helper so
 // we don't collide with same-named option buttons elsewhere in the form.
- 
+
 function openPickerDropdown(triggerTitle: string) {
   const trigger = screen.getByTitle(triggerTitle)
   fireEvent.click(trigger)
@@ -87,7 +87,7 @@ describe('AutomationConfigView — model / thinking / effort pickers', () => {
     const automation = makeAutomation({
       model: 'claude-opus-4-7',
       effort: 'xhigh',
-      thinkingMode: 'adaptive',
+      thinkingMode: 'adaptive'
     })
     render(<AutomationConfigView {...makeProps({ automation })} />)
     expect(screen.getByTitle('Model')).toHaveTextContent('Opus 4.7')
@@ -106,7 +106,7 @@ describe('AutomationConfigView — model / thinking / effort pickers', () => {
   it('shows enabled thinking mode when no thinkingMode is saved but model supports adaptive', () => {
     const automation = makeAutomation({
       model: 'claude-opus-4-7',
-      thinkingMode: undefined,
+      thinkingMode: undefined
     })
     render(<AutomationConfigView {...makeProps({ automation })} />)
     // modelDefaultThinkingMode = 'adaptive' for opus-4-7.
@@ -147,7 +147,7 @@ describe('AutomationConfigView — model / thinking / effort pickers', () => {
       id: 'a1',
       model: 'claude-opus-4-7',
       effort: 'high',
-      thinkingMode: 'disabled',
+      thinkingMode: 'disabled'
     })
   })
 
@@ -155,7 +155,7 @@ describe('AutomationConfigView — model / thinking / effort pickers', () => {
     const onSave = vi.fn()
     const automation = makeAutomation({
       model: 'claude-opus-4-7',
-      thinkingMode: 'adaptive',
+      thinkingMode: 'adaptive'
     })
     render(<AutomationConfigView {...makeProps({ automation, onSave })} />)
 
@@ -169,7 +169,7 @@ describe('AutomationConfigView — model / thinking / effort pickers', () => {
     fireEvent.click(screen.getByRole('button', { name: /^Save$/ }))
     expect(onSave.mock.calls[0][0]).toMatchObject({
       model: 'claude-3-5-sonnet',
-      thinkingMode: 'enabled',
+      thinkingMode: 'enabled'
     })
   })
 })

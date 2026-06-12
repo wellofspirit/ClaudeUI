@@ -21,7 +21,8 @@ export function WorktreesModal({
       setEntries(list)
       for (const entry of list) {
         if (entry.exists) {
-          window.api.getWorktreeStatus(entry.path, '')
+          window.api
+            .getWorktreeStatus(entry.path, '')
             .then((s) => setStatuses((prev) => ({ ...prev, [entry.name]: s })))
             .catch(() => {})
         }
@@ -33,23 +34,28 @@ export function WorktreesModal({
     }
   }, [cwd])
 
-  useEffect(() => { loadEntries() }, [loadEntries])
+  useEffect(() => {
+    loadEntries()
+  }, [loadEntries])
 
-  const handleRemove = useCallback(async (entry: WorktreeEntry): Promise<void> => {
-    setRemovingSet((prev) => new Set(prev).add(entry.name))
-    try {
-      await window.api.removeWorktree(entry.path, entry.branch, cwd)
-      setEntries((prev) => prev.filter((e) => e.name !== entry.name))
-    } catch (err) {
-      window.api.logError('WorktreesModal', `Failed to remove worktree ${entry.name}: ${err}`)
-    } finally {
-      setRemovingSet((prev) => {
-        const next = new Set(prev)
-        next.delete(entry.name)
-        return next
-      })
-    }
-  }, [cwd])
+  const handleRemove = useCallback(
+    async (entry: WorktreeEntry): Promise<void> => {
+      setRemovingSet((prev) => new Set(prev).add(entry.name))
+      try {
+        await window.api.removeWorktree(entry.path, entry.branch, cwd)
+        setEntries((prev) => prev.filter((e) => e.name !== entry.name))
+      } catch (err) {
+        window.api.logError('WorktreesModal', `Failed to remove worktree ${entry.name}: ${err}`)
+      } finally {
+        setRemovingSet((prev) => {
+          const next = new Set(prev)
+          next.delete(entry.name)
+          return next
+        })
+      }
+    },
+    [cwd]
+  )
 
   useEffect(() => {
     const handler = (e: KeyboardEvent): void => {

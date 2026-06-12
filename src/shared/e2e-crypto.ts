@@ -29,7 +29,9 @@ export class E2ECrypto {
     const subtle = getSubtle()
 
     // Import the raw key as HKDF input
-    const baseKey = await subtle.importKey('raw', raw.buffer as ArrayBuffer, 'HKDF', false, ['deriveKey'])
+    const baseKey = await subtle.importKey('raw', raw.buffer as ArrayBuffer, 'HKDF', false, [
+      'deriveKey'
+    ])
 
     // Derive AES-256-GCM key
     this.key = await subtle.deriveKey(
@@ -88,11 +90,7 @@ export class E2ECrypto {
     const nonce = data.slice(0, NONCE_BYTES)
     const ciphertext = data.slice(NONCE_BYTES)
 
-    const plaintext = await subtle.decrypt(
-      { name: 'AES-GCM', iv: nonce },
-      this.key,
-      ciphertext
-    )
+    const plaintext = await subtle.decrypt({ name: 'AES-GCM', iv: nonce }, this.key, ciphertext)
 
     return JSON.parse(new TextDecoder().decode(plaintext))
   }

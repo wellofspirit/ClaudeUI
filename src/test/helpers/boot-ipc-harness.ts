@@ -13,8 +13,6 @@
  * For unwrapped channels, use call().
  */
 
- 
-
 import { TestIpcBridge } from '../bridges/test-ipc-bridge'
 import { setIpcBridge } from '../stubs/electron-shim'
 
@@ -56,10 +54,7 @@ export function bootIpcHarness(): IpcHarness {
     }
     return res as T
   }
-  const onEvent = (
-    channel: string,
-    handler: (...args: unknown[]) => void,
-  ): (() => void) => {
+  const onEvent = (channel: string, handler: (...args: unknown[]) => void): (() => void) => {
     const wrap = (_: unknown, ...args: unknown[]): void => handler(...args)
     bridge.ipcRenderer.on(channel, wrap)
     return () => bridge.ipcRenderer.removeListener(channel, wrap)
@@ -85,6 +80,6 @@ export function bootIpcHarness(): IpcHarness {
     callSafe,
     onEvent,
     waitForEvent,
-    teardown: () => bridge.reset(),
+    teardown: () => bridge.reset()
   }
 }

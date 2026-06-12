@@ -20,30 +20,30 @@ const targets = [
     dir: 'voice-server',
     summary: [
       'Part A (cli.js): voice_server_start / voice_server_stop control requests.',
-      'Part B (sdk.mjs) was removed — voiceServerStart/voiceServerStop live in src/main/sdk/.',
-    ],
+      'Part B (sdk.mjs) was removed — voiceServerStart/voiceServerStop live in src/main/sdk/.'
+    ]
   },
   {
     dir: 'usage-relay',
     summary: [
       'Part A (cli.js): get_usage control-request handler (calls internal OAuth usage API).',
-      'Part B (sdk.mjs) was removed — getUsage() lives in src/main/sdk/.',
-    ],
+      'Part B (sdk.mjs) was removed — getUsage() lives in src/main/sdk/.'
+    ]
   },
   {
     dir: 'queue-control',
     summary: [
       'Part A (cli.js): dequeue_message control-request + queued_command_consumed notification.',
-      'Part B (sdk.mjs) was removed — dequeueMessage() lives in src/main/sdk/.',
-    ],
+      'Part B (sdk.mjs) was removed — dequeueMessage() lives in src/main/sdk/.'
+    ]
   },
   {
     dir: 'background-task',
     summary: [
       'Part A (cli.js): background_task control-request handler (backgrounds running bash/agent tasks).',
-      'Part B (sdk.mjs) was removed — backgroundTask() lives in src/main/sdk/.',
-    ],
-  },
+      'Part B (sdk.mjs) was removed — backgroundTask() lives in src/main/sdk/.'
+    ]
+  }
 ]
 
 for (const { dir, summary } of targets) {
@@ -59,10 +59,7 @@ for (const { dir, summary } of targets) {
   // The Part B section is preceded by a ==== divider; trim back to the blank
   // line before that divider so we leave a clean Part A ending.
   // The divider line (===...===) is just above partBHeader.
-  const dividerAbove = src.lastIndexOf(
-    '// =================',
-    partBHeader,
-  )
+  const dividerAbove = src.lastIndexOf('// =================', partBHeader)
   if (dividerAbove === -1) {
     console.error(`[fail] ${dir}: could not locate Part B divider`)
     process.exit(1)
@@ -74,20 +71,17 @@ for (const { dir, summary } of targets) {
 
   // Strip `const sdkPath = …` line, since Part B is the only consumer.
   let head = src.slice(0, cut)
-  head = head.replace(
-    /\nconst sdkPath = resolve\([^\n]*\n/,
-    '\n',
-  )
+  head = head.replace(/\nconst sdkPath = resolve\([^\n]*\n/, '\n')
 
   const tail =
-    '\n\nconsole.log(\'\')\n' +
-    'console.log(\'What this does:\')\n' +
+    "\n\nconsole.log('')\n" +
+    "console.log('What this does:')\n" +
     summary.map((s) => `console.log('  ${s.replace(/'/g, "\\'")}')`).join('\n') +
     '\n'
 
   const next = head.trimEnd() + tail
   writeFileSync(p, next)
   console.log(
-    `[done] ${dir}: removed ${(src.length - next.length).toLocaleString()} bytes of Part B`,
+    `[done] ${dir}: removed ${(src.length - next.length).toLocaleString()} bytes of Part B`
   )
 }

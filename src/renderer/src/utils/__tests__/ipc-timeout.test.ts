@@ -19,7 +19,9 @@ describe('withTimeout', () => {
 
   it('includes label and ms in the timeout error message', async () => {
     const slow = new Promise(() => {}) // never resolves
-    await expect(withTimeout(slow, 50, 'myIpcCall')).rejects.toThrow('IPC timeout: myIpcCall (50ms)')
+    await expect(withTimeout(slow, 50, 'myIpcCall')).rejects.toThrow(
+      'IPC timeout: myIpcCall (50ms)'
+    )
   })
 
   it('works with non-primitive resolved values', async () => {

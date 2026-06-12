@@ -27,20 +27,17 @@ export function SplitDiffTable({
   totalOldLines,
   onExpandGap,
   highlightedLines,
-  gutterWidth,
+  gutterWidth
 }: Props): React.JSX.Element {
   const parentRef = useRef<HTMLDivElement>(null)
 
-  const rows = useMemo(
-    () => buildSplitRows(hunks, totalOldLines),
-    [hunks, totalOldLines]
-  )
+  const rows = useMemo(() => buildSplitRows(hunks, totalOldLines), [hunks, totalOldLines])
 
   const virtualizer = useVirtualizer({
     count: rows.length,
     getScrollElement: () => parentRef.current,
     estimateSize: () => ROW_HEIGHT,
-    overscan: 30,
+    overscan: 30
   })
 
   const getLeftTokens = useCallback(
@@ -69,7 +66,8 @@ export function SplitDiffTable({
     (row: SplitRowData): boolean => {
       if (!highlightedLines || row.kind !== 'line' || !row.row.left) return false
       const line = row.row.left
-      if (line.oldLineNumber != null && highlightedLines.has(`old:${line.oldLineNumber}`)) return true
+      if (line.oldLineNumber != null && highlightedLines.has(`old:${line.oldLineNumber}`))
+        return true
       return false
     },
     [highlightedLines]
@@ -79,29 +77,32 @@ export function SplitDiffTable({
     (row: SplitRowData): boolean => {
       if (!highlightedLines || row.kind !== 'line' || !row.row.right) return false
       const line = row.row.right
-      if (line.newLineNumber != null && highlightedLines.has(`new:${line.newLineNumber}`)) return true
+      if (line.newLineNumber != null && highlightedLines.has(`new:${line.newLineNumber}`))
+        return true
       return false
     },
     [highlightedLines]
   )
 
-  const handleExpandGap = useCallback(
-    (gap: HunkGap) => onExpandGap?.(gap),
-    [onExpandGap]
-  )
+  const handleExpandGap = useCallback((gap: HunkGap) => onExpandGap?.(gap), [onExpandGap])
 
   return (
     <div
       ref={parentRef}
       className="diff-viewer overflow-auto rounded-md border border-border"
       role="table"
-      style={{ contain: 'strict', flex: '1 1 0', minHeight: 0, ...(gutterWidth ? { '--diff-gutter-width': gutterWidth } as React.CSSProperties : {}) }}
+      style={{
+        contain: 'strict',
+        flex: '1 1 0',
+        minHeight: 0,
+        ...(gutterWidth ? ({ '--diff-gutter-width': gutterWidth } as React.CSSProperties) : {})
+      }}
     >
       <div
         style={{
           height: `${virtualizer.getTotalSize()}px`,
           width: '100%',
-          position: 'relative',
+          position: 'relative'
         }}
       >
         {virtualizer.getVirtualItems().map((virtualRow) => {
@@ -116,13 +117,20 @@ export function SplitDiffTable({
                 position: 'absolute',
                 top: `${Math.round(virtualRow.start)}px`,
                 left: 0,
-                width: '100%',
+                width: '100%'
               }}
             >
               {row.kind === 'hunk-header' && (
-                <HunkHeader hunk={row.hunk} expandableGap={row.adjacentGap} onExpand={handleExpandGap} position={row.hunkPosition} />
+                <HunkHeader
+                  hunk={row.hunk}
+                  expandableGap={row.adjacentGap}
+                  onExpand={handleExpandGap}
+                  position={row.hunkPosition}
+                />
               )}
-              {row.kind === 'gap' && <GapRow gap={row.gap} position={row.position} onExpand={handleExpandGap} />}
+              {row.kind === 'gap' && (
+                <GapRow gap={row.gap} position={row.position} onExpand={handleExpandGap} />
+              )}
               {row.kind === 'line' && (
                 <div className="flex" role="row">
                   <SplitDiffCell

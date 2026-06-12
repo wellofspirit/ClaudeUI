@@ -6,10 +6,10 @@ Strip proxy env vars from the env handed to cli.js subprocesses (Bash tool, MCP 
 
 `cli.js` — rebundled from `@anthropic-ai/claude-code` Bun standalone.
 
-| Component | Version |
-|---|---|
+| Component            | Version               |
+| -------------------- | --------------------- |
 | At time of discovery | bundled CLI `2.1.114` |
-| Last re-anchored | bundled CLI `2.1.170` |
+| Last re-anchored     | bundled CLI `2.1.170` |
 
 ## The Problem
 
@@ -54,8 +54,14 @@ Define a proxy-strip helper once at the top of the function and wrap **every** `
 let __cuPS = (E) => {
   if (process.env.CLAUDEUI_PROXY_SUBPROCESSES) return E
   let R = { ...E }
-  delete R.HTTP_PROXY; delete R.HTTPS_PROXY; delete R.ALL_PROXY; delete R.NO_PROXY
-  delete R.http_proxy; delete R.https_proxy; delete R.all_proxy; delete R.no_proxy
+  delete R.HTTP_PROXY
+  delete R.HTTPS_PROXY
+  delete R.ALL_PROXY
+  delete R.NO_PROXY
+  delete R.http_proxy
+  delete R.https_proxy
+  delete R.all_proxy
+  delete R.no_proxy
   return R
 }
 ```
@@ -72,16 +78,16 @@ let __cuPS = (E) => {
 
 The body grows roughly every few releases. `apply.mjs` carries one regex+rebuild per shape, tried newest-first; older shapes remain as fallbacks.
 
-| Shape | Name (then) | What it added |
-|---|---|---|
-| v114 | `Qk` | 2-source merge (`process.env` + user env); scrub list = API keys only |
-| v118 | `uv` | + remote-env merge gated on `CLAUDE_CODE_REMOTE` (3-source) |
-| v119 | `PV` | + `CLAUDE_BG_*` / `CLAUDE_CODE_SESSION_KIND` scrub |
-| v129 | `sy` | + OAuth-token scrub flag, + `OTEL_*` strip loop, + unconditional `CLAUDE_CODE_RESUME_INTERRUPTED_TURN` delete |
-| v143 | `VS` | + extra global env source (`ifq`), + `CLAUDE_BG_AUTH_SNAPSHOT_PATH` |
-| v150 | `dT` | + `CLAUDE_BG_SESSION_PERMISSION_RULES`, `CLAUDE_BG_MEMORY_TOGGLED_OFF` |
-| v163 | `wN` | + one unconditional `delete <merged>.CLAUDE_CODE_RESUME_PROMPT` (inserted after `CLAUDE_CODE_RESUME_INTERRUPTED_TURN`; no matching `!==void 0` detection check, not in the early-return guard) |
-| **v170** | **`ek`** | **+ 3 background-session auth vars (`CLAUDE_BG_SOCKET_TOKENS_PATH`, `CLAUDE_BG_RV_AUTH`, `CLAUDE_BG_PTY_AUTH`)** — appended to the OAuth detection flag and to the unconditional delete chain after `CLAUDE_BG_AUTH_SNAPSHOT_PATH` |
+| Shape    | Name (then) | What it added                                                                                                                                                                                                                      |
+| -------- | ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| v114     | `Qk`        | 2-source merge (`process.env` + user env); scrub list = API keys only                                                                                                                                                              |
+| v118     | `uv`        | + remote-env merge gated on `CLAUDE_CODE_REMOTE` (3-source)                                                                                                                                                                        |
+| v119     | `PV`        | + `CLAUDE_BG_*` / `CLAUDE_CODE_SESSION_KIND` scrub                                                                                                                                                                                 |
+| v129     | `sy`        | + OAuth-token scrub flag, + `OTEL_*` strip loop, + unconditional `CLAUDE_CODE_RESUME_INTERRUPTED_TURN` delete                                                                                                                      |
+| v143     | `VS`        | + extra global env source (`ifq`), + `CLAUDE_BG_AUTH_SNAPSHOT_PATH`                                                                                                                                                                |
+| v150     | `dT`        | + `CLAUDE_BG_SESSION_PERMISSION_RULES`, `CLAUDE_BG_MEMORY_TOGGLED_OFF`                                                                                                                                                             |
+| v163     | `wN`        | + one unconditional `delete <merged>.CLAUDE_CODE_RESUME_PROMPT` (inserted after `CLAUDE_CODE_RESUME_INTERRUPTED_TURN`; no matching `!==void 0` detection check, not in the early-return guard)                                     |
+| **v170** | **`ek`**    | **+ 3 background-session auth vars (`CLAUDE_BG_SOCKET_TOKENS_PATH`, `CLAUDE_BG_RV_AUTH`, `CLAUDE_BG_PTY_AUTH`)** — appended to the OAuth detection flag and to the unconditional delete chain after `CLAUDE_BG_AUTH_SNAPSHOT_PATH` |
 
 **v170 gotcha:** the three new detection terms read off a **module-level env-snapshot global** (`$_` in 2.1.170: `$_.CLAUDE_BG_SOCKET_TOKENS_PATH!==void 0||...`), NOT `process.env` like every other term in the flag. The regex captures this global as its own group and the rebuild re-emits it by captured name. See the inline header comment in `apply.mjs` for the full v170 verbatim shape.
 
@@ -104,10 +110,10 @@ When the body changes again: extract the verbatim `function <name>(){...}` (from
 
 ## Gate env vars
 
-| Env var | Set by | Effect |
-|---|---|---|
+| Env var                         | Set by                                                   | Effect                                    |
+| ------------------------------- | -------------------------------------------------------- | ----------------------------------------- |
 | `CLAUDEUI_PROXY_SUBPROCESSES=1` | ClaudeUI when `ProxySettings.proxySubprocesses === true` | Helper no-ops; subprocesses inherit proxy |
-| (unset) | default | Helper strips proxy from subprocess env |
+| (unset)                         | default                                                  | Helper strips proxy from subprocess env   |
 
 ## What's NOT changed
 
@@ -148,7 +154,7 @@ Always run `node --check cli.js` after applying.
 
 ## Files
 
-| File | Purpose |
-|---|---|
-| `README.md` | This document |
+| File        | Purpose                                                   |
+| ----------- | --------------------------------------------------------- |
+| `README.md` | This document                                             |
 | `apply.mjs` | Patch script (per-version shapes v114→v170, newest-first) |

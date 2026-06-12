@@ -28,7 +28,13 @@ export interface ModelCapabilityInput {
 }
 
 export const THINKING_MODES: readonly ThinkingMode[] = ['adaptive', 'enabled', 'disabled'] as const
-export const EFFORT_LEVELS: readonly EffortLevel[] = ['low', 'medium', 'high', 'xhigh', 'max'] as const
+export const EFFORT_LEVELS: readonly EffortLevel[] = [
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max'
+] as const
 
 /**
  * Normalise a model identifier the same way cli.js does: strip date suffixes
@@ -87,7 +93,7 @@ const NO_MAX_EFFORT = new Set([
   'claude-opus-4',
   'claude-opus-4-0',
   'claude-opus-4-1',
-  'claude-opus-4-5',
+  'claude-opus-4-5'
 ])
 
 // ---------------------------------------------------------------------------
@@ -96,7 +102,9 @@ const NO_MAX_EFFORT = new Set([
 // values directly; the id-based heuristics below are the fallback.
 // ---------------------------------------------------------------------------
 
-export function modelSupportsAdaptiveThinking(model: ModelCapabilityInput | undefined | null): boolean {
+export function modelSupportsAdaptiveThinking(
+  model: ModelCapabilityInput | undefined | null
+): boolean {
   if (!model) return false
   if (typeof model.supportsAdaptiveThinking === 'boolean') return model.supportsAdaptiveThinking
   return supportsAdaptiveThinking(model.value)
@@ -109,7 +117,7 @@ export function modelSupportsEffort(model: ModelCapabilityInput | undefined | nu
 }
 
 export function modelSupportedEffortLevels(
-  model: ModelCapabilityInput | undefined | null,
+  model: ModelCapabilityInput | undefined | null
 ): EffortLevel[] {
   if (!model) return []
   if (model.supportedEffortLevels && model.supportedEffortLevels.length > 0) {
@@ -132,13 +140,15 @@ export function modelDefaultEffort(model: ModelCapabilityInput | undefined | nul
   return allowed[allowed.length - 1] ?? 'high'
 }
 
-export function modelDefaultThinkingMode(model: ModelCapabilityInput | undefined | null): ThinkingMode {
+export function modelDefaultThinkingMode(
+  model: ModelCapabilityInput | undefined | null
+): ThinkingMode {
   return modelSupportsAdaptiveThinking(model) ? 'adaptive' : 'enabled'
 }
 
 export function modelResolveThinkingMode(
   model: ModelCapabilityInput | undefined | null,
-  desired: ThinkingMode,
+  desired: ThinkingMode
 ): ThinkingMode {
   if (desired === 'disabled') return 'disabled'
   if (desired === 'adaptive' && !modelSupportsAdaptiveThinking(model)) return 'enabled'
@@ -147,7 +157,7 @@ export function modelResolveThinkingMode(
 
 export function modelResolveEffort(
   model: ModelCapabilityInput | undefined | null,
-  desired: EffortLevel,
+  desired: EffortLevel
 ): EffortLevel | null {
   if (!modelSupportsEffort(model)) return null
   const allowed = modelSupportedEffortLevels(model)
@@ -163,7 +173,13 @@ export function modelResolveEffort(
 /** Mirrors cli.js `kh8`. */
 export function supportsAdaptiveThinking(model: string | undefined | null): boolean {
   const id = normaliseModelId(model)
-  if (id.includes('opus-4-8') || id.includes('opus-4-7') || id.includes('opus-4-6') || id.includes('sonnet-4-6')) return true
+  if (
+    id.includes('opus-4-8') ||
+    id.includes('opus-4-7') ||
+    id.includes('opus-4-6') ||
+    id.includes('sonnet-4-6')
+  )
+    return true
   if (id.includes('opus') || id.includes('sonnet') || id.includes('haiku')) return false
   // Unknown family — assume modern, allow adaptive.
   return true
@@ -172,7 +188,13 @@ export function supportsAdaptiveThinking(model: string | undefined | null): bool
 /** Mirrors cli.js `QI`. */
 export function supportsEffort(model: string | undefined | null): boolean {
   const id = normaliseModelId(model)
-  if (id.includes('opus-4-8') || id.includes('opus-4-7') || id.includes('opus-4-6') || id.includes('sonnet-4-6')) return true
+  if (
+    id.includes('opus-4-8') ||
+    id.includes('opus-4-7') ||
+    id.includes('opus-4-6') ||
+    id.includes('sonnet-4-6')
+  )
+    return true
   if (id.includes('opus') || id.includes('sonnet') || id.includes('haiku')) return false
   return true
 }
@@ -235,7 +257,7 @@ export function defaultThinkingMode(model: string | undefined | null): ThinkingM
  */
 export function resolveThinkingMode(
   model: string | undefined | null,
-  desired: ThinkingMode,
+  desired: ThinkingMode
 ): ThinkingMode {
   if (desired === 'disabled') return 'disabled'
   if (desired === 'adaptive' && !supportsAdaptiveThinking(model)) return 'enabled'
@@ -249,7 +271,7 @@ export function resolveThinkingMode(
  */
 export function resolveEffort(
   model: string | undefined | null,
-  desired: EffortLevel,
+  desired: EffortLevel
 ): EffortLevel | null {
   if (!supportsEffort(model)) return null
   const allowed = supportedEffortLevels(model)

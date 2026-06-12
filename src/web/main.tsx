@@ -52,12 +52,15 @@ if (!token) {
       })
     }, [])
 
-    const handleCatchup = useCallback((events: Array<{ seq: number; channel: string; args: unknown[] }>) => {
-      // Catchup events are replayed by the api-adapter's event handler, which is
-      // already wired up — they flow through the normal onMessage/onStreamEvent/etc.
-      // paths. Nothing to do here beyond acknowledging receipt.
-      void events
-    }, [])
+    const handleCatchup = useCallback(
+      (events: Array<{ seq: number; channel: string; args: unknown[] }>) => {
+        // Catchup events are replayed by the api-adapter's event handler, which is
+        // already wired up — they flow through the normal onMessage/onStreamEvent/etc.
+        // paths. Nothing to do here beyond acknowledging receipt.
+        void events
+      },
+      []
+    )
 
     useEffect(() => {
       connection.setStateHandler(handleStateChange)

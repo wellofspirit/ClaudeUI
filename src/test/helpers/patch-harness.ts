@@ -14,18 +14,11 @@
  *   2. Anchor matches 0 or >1 times → apply.mjs needs a refactor
  */
 
- 
-
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { execFileSync } from 'node:child_process'
 
-export const CLI_JS_PATH = path.resolve(
-  process.cwd(),
-  'vendor',
-  'claude-cli',
-  'cli.js',
-)
+export const CLI_JS_PATH = path.resolve(process.cwd(), 'vendor', 'claude-cli', 'cli.js')
 
 export function readCliJs(): string {
   return fs.readFileSync(CLI_JS_PATH, 'utf-8')

@@ -54,12 +54,18 @@ export function flattenSingleChildDirs(nodes: TreeNode[]): TreeNode[] {
 export function statusBadge(file: GitFileStatus): { char: string; color: string } {
   const s = file.index !== ' ' && file.index !== '?' ? file.index : file.working
   switch (s) {
-    case 'M': return { char: 'M', color: 'text-yellow-400' }
-    case 'A': return { char: 'A', color: 'text-green-400' }
-    case 'D': return { char: 'D', color: 'text-red-400' }
-    case 'R': return { char: 'R', color: 'text-blue-400' }
-    case '?': return { char: 'U', color: 'text-green-400' }
-    default: return { char: s || '?', color: 'text-text-muted' }
+    case 'M':
+      return { char: 'M', color: 'text-yellow-400' }
+    case 'A':
+      return { char: 'A', color: 'text-green-400' }
+    case 'D':
+      return { char: 'D', color: 'text-red-400' }
+    case 'R':
+      return { char: 'R', color: 'text-blue-400' }
+    case '?':
+      return { char: 'U', color: 'text-green-400' }
+    default:
+      return { char: s || '?', color: 'text-text-muted' }
   }
 }
 

@@ -1,6 +1,4 @@
-export type IpcResult<T> =
-  | { ok: true; data: T }
-  | { ok: false; error: string; code?: string }
+export type IpcResult<T> = { ok: true; data: T } | { ok: false; error: string; code?: string }
 
 /** SDK sends "Agent" (canonical, v0.2.63+) or "Task" (alias for backward compat) */
 export function isAgentTool(toolName: string): boolean {
@@ -15,7 +13,12 @@ export type ContentBlock =
   | { type: 'cli_command'; commandName: string; commandArgs?: string; commandOutput?: string }
   | { type: 'api_error'; errorType: string; errorMessage: string }
   | { type: 'compact_separator'; text?: string }
-  | { type: 'image'; mediaType: 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp'; base64Data: string; fileName?: string }
+  | {
+      type: 'image'
+      mediaType: 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp'
+      base64Data: string
+      fileName?: string
+    }
   | { type: 'document'; mediaType: 'application/pdf'; base64Data: string; fileName?: string }
 
 export interface FileAttachment {
@@ -331,25 +334,79 @@ export interface ForkAnchorResult {
 interface SessionAPI {
   platform: string
   pickFolder(): Promise<string | null>
-  createSession(routingId: string, cwd: string, effort?: string, resumeSessionId?: string, permissionMode?: string, model?: string, thinkingMode?: string, resumeSessionAt?: string, forkSession?: boolean): Promise<void>
+  createSession(
+    routingId: string,
+    cwd: string,
+    effort?: string,
+    resumeSessionId?: string,
+    permissionMode?: string,
+    model?: string,
+    thinkingMode?: string,
+    resumeSessionAt?: string,
+    forkSession?: boolean
+  ): Promise<void>
   rekeySession(oldId: string, newId: string): Promise<void>
   /** Resolve the balanced JSONL line uuid to fork ("branch off") from, given
    *  an assistant message id. Returns { anchorUuid: null, reason } on failure. */
   resolveForkAnchor(sessionId: string, cwd: string, messageId: string): Promise<ForkAnchorResult>
-  sendPrompt(routingId: string, prompt: string, attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>): Promise<void>
+  sendPrompt(
+    routingId: string,
+    prompt: string,
+    attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
+  ): Promise<void>
   cancelSession(routingId: string): Promise<void>
   interruptSession(routingId: string): Promise<void>
-  respondApproval(routingId: string, requestId: string, decision: ApprovalDecision, answers?: Record<string, string>, updatedPermissions?: PermissionSuggestion[]): Promise<void>
+  respondApproval(
+    routingId: string,
+    requestId: string,
+    decision: ApprovalDecision,
+    answers?: Record<string, string>,
+    updatedPermissions?: PermissionSuggestion[]
+  ): Promise<void>
   minimizeWindow(): Promise<void>
   maximizeWindow(): Promise<void>
   closeWindow(): Promise<void>
   listDirectories(): Promise<DirectoryGroup[]>
-  loadSessionHistory(sessionId: string, projectKey: string): Promise<{ messages: ChatMessage[]; taskNotifications: TaskNotification[]; customTitle: string | null; agentIdToToolUseId: Record<string, string>; statusLine: StatusLineData | null; taskPrompts: Record<string, string>; warnings: string[] }>
-  loadSubagentHistory(sessionId: string, projectKey: string, agentId: string): Promise<ChatMessage[]>
-  buildSubagentFileMap(sessionId: string, projectKey: string, taskPrompts: Record<string, string>): Promise<Record<string, string>>
-  loadBackgroundOutput(projectKey: string, taskId: string, outputFile?: string): Promise<{ content: string | null; purged: boolean }>
-  onSessionCreated(cb: (routingId: string, data: { cwd: string; resumeSessionId?: string }) => void): () => void
-  onUserMessage(cb: (routingId: string, data: { prompt: string; attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>; queued?: boolean }) => void): () => void
+  loadSessionHistory(
+    sessionId: string,
+    projectKey: string
+  ): Promise<{
+    messages: ChatMessage[]
+    taskNotifications: TaskNotification[]
+    customTitle: string | null
+    agentIdToToolUseId: Record<string, string>
+    statusLine: StatusLineData | null
+    taskPrompts: Record<string, string>
+    warnings: string[]
+  }>
+  loadSubagentHistory(
+    sessionId: string,
+    projectKey: string,
+    agentId: string
+  ): Promise<ChatMessage[]>
+  buildSubagentFileMap(
+    sessionId: string,
+    projectKey: string,
+    taskPrompts: Record<string, string>
+  ): Promise<Record<string, string>>
+  loadBackgroundOutput(
+    projectKey: string,
+    taskId: string,
+    outputFile?: string
+  ): Promise<{ content: string | null; purged: boolean }>
+  onSessionCreated(
+    cb: (routingId: string, data: { cwd: string; resumeSessionId?: string }) => void
+  ): () => void
+  onUserMessage(
+    cb: (
+      routingId: string,
+      data: {
+        prompt: string
+        attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
+        queued?: boolean
+      }
+    ) => void
+  ): () => void
   onMessage(cb: (routingId: string, msg: ChatMessage) => void): () => void
   onStreamEvent(cb: (routingId: string, delta: StreamDelta) => void): () => void
   onApprovalRequest(cb: (routingId: string, approval: PendingApproval) => void): () => void
@@ -359,13 +416,17 @@ interface SessionAPI {
   onWarning(cb: (routingId: string, warning: string) => void): () => void
   /** Refusal-fallback retraction — remove these messages from the transcript (docs/protocol/04-system-subtypes.md §4.20) */
   onMessagesRetracted(cb: (routingId: string, data: { messageIds: string[] }) => void): () => void
-  onToolResult(cb: (routingId: string, data: { toolUseId: string; result: string; isError: boolean }) => void): () => void
+  onToolResult(
+    cb: (routingId: string, data: { toolUseId: string; result: string; isError: boolean }) => void
+  ): () => void
   onMaximizeChange(cb: (isMaximized: boolean) => void): () => void
   onTaskProgress(cb: (routingId: string, data: TaskProgress) => void): () => void
   onTaskNotification(cb: (routingId: string, data: TaskNotification) => void): () => void
   onSubagentStream(cb: (routingId: string, data: SubagentStreamDelta) => void): () => void
   onSubagentMessage(cb: (routingId: string, data: SubagentMessageData) => void): () => void
-  onSubagentMessageBatch(cb: (routingId: string, data: SubagentMessageBatchData) => void): () => void
+  onSubagentMessageBatch(
+    cb: (routingId: string, data: SubagentMessageBatchData) => void
+  ): () => void
   onSubagentToolResult(cb: (routingId: string, data: SubagentToolResultData) => void): () => void
   onPermissionMode(cb: (routingId: string, mode: PermissionMode) => void): () => void
   onSandboxViolation(cb: (routingId: string, message: string) => void): () => void
@@ -373,9 +434,17 @@ interface SessionAPI {
   onBackgroundOutput(cb: (routingId: string, data: BackgroundOutput) => void): () => void
   watchBackground(routingId: string, toolUseId: string): Promise<void>
   unwatchBackground(routingId: string, toolUseId: string): Promise<void>
-  readBackgroundRange(routingId: string, toolUseId: string, offset: number, length: number): Promise<string>
+  readBackgroundRange(
+    routingId: string,
+    toolUseId: string,
+    offset: number,
+    length: number
+  ): Promise<string>
   stopTask(routingId: string, toolUseId: string): Promise<{ success: boolean; error?: string }>
-  backgroundTask(routingId: string, toolUseId: string): Promise<{ success: boolean; error?: string }>
+  backgroundTask(
+    routingId: string,
+    toolUseId: string
+  ): Promise<{ success: boolean; error?: string }>
   dequeueMessage(routingId: string, value: string): Promise<{ removed: number }>
   askSideQuestion(routingId: string, question: string): Promise<string | null>
   onSteerConsumed(cb: (routingId: string, data: { prompt: string }) => void): () => void
@@ -412,7 +481,9 @@ interface SessionAPI {
   loadSkillDetails(cwd: string): Promise<SkillInfo[]>
   onBeforeQuit(cb: () => void): () => void
   confirmQuit(): Promise<void>
-  testProxyConnection(proxy: ProxySettings): Promise<{ ok: boolean; latencyMs: number; error?: string }>
+  testProxyConnection(
+    proxy: ProxySettings
+  ): Promise<{ ok: boolean; latencyMs: number; error?: string }>
   logError(source: string, message: string): void
 }
 
@@ -422,8 +493,17 @@ interface GitAPI {
   gitGetBranches(cwd: string): Promise<GitBranchData>
   gitCheckout(cwd: string, branch: string): Promise<void>
   gitCreateBranch(cwd: string, name: string): Promise<void>
-  gitGetFilePatch(cwd: string, filePath: string, staged: boolean, ignoreWhitespace: boolean): Promise<{ patch: string; isBinary?: boolean }>
-  gitGetFileContents(cwd: string, filePath: string, staged: boolean): Promise<{ oldContent: string; newContent: string }>
+  gitGetFilePatch(
+    cwd: string,
+    filePath: string,
+    staged: boolean,
+    ignoreWhitespace: boolean
+  ): Promise<{ patch: string; isBinary?: boolean }>
+  gitGetFileContents(
+    cwd: string,
+    filePath: string,
+    staged: boolean
+  ): Promise<{ oldContent: string; newContent: string }>
   gitStageFile(cwd: string, filePath: string): Promise<void>
   gitUnstageFile(cwd: string, filePath: string): Promise<void>
   gitDiscardFile(cwd: string, filePath: string): Promise<void>
@@ -443,15 +523,28 @@ interface McpAPI {
   mcpServerStatus(routingId: string): Promise<McpServerInfo[]>
   mcpToggleServer(routingId: string, serverName: string, enabled: boolean): Promise<void>
   mcpReconnectServer(routingId: string, serverName: string): Promise<void>
-  mcpSetServers(routingId: string, servers: Record<string, McpServerConfig>): Promise<McpSetServersResult>
+  mcpSetServers(
+    routingId: string,
+    servers: Record<string, McpServerConfig>
+  ): Promise<McpSetServersResult>
   loadMcpServers(scope: McpServerScope, cwd?: string): Promise<Record<string, McpServerConfig>>
-  saveMcpServers(scope: McpServerScope, servers: Record<string, McpServerConfig>, cwd?: string): Promise<void>
+  saveMcpServers(
+    scope: McpServerScope,
+    servers: Record<string, McpServerConfig>,
+    cwd?: string
+  ): Promise<void>
   removeMcpServer(scope: McpServerScope, serverName: string, cwd?: string): Promise<void>
   mcpReadDisabled(cwd: string): Promise<string[]>
   mcpToggleDisabled(cwd: string, serverName: string, enabled: boolean): Promise<void>
-  onMcpServers(cb: (routingId: string, servers: Array<{ name: string; status: string }>) => void): () => void
+  onMcpServers(
+    cb: (routingId: string, servers: Array<{ name: string; status: string }>) => void
+  ): () => void
   loadClaudePermissions(scope: PermissionScope, cwd?: string): Promise<ClaudePermissions>
-  saveClaudePermissions(scope: PermissionScope, permissions: ClaudePermissions, cwd?: string): Promise<void>
+  saveClaudePermissions(
+    scope: PermissionScope,
+    permissions: ClaudePermissions,
+    cwd?: string
+  ): Promise<void>
   /** Transcript retention window (cleanupPeriodDays). undefined = not set (CLI default of 30). */
   getCleanupPeriodDays(): Promise<number | undefined>
   setCleanupPeriodDays(days: number): Promise<void>
@@ -478,11 +571,19 @@ interface AutomationAPI {
   cancelAutomationRun(automationId: string): Promise<void>
   dismissAutomationRun(automationId: string, runId: string): Promise<void>
   sendAutomationMessage(automationId: string, prompt: string): Promise<void>
-  onAutomationRunUpdate(cb: (data: { automationId: string; run: AutomationRun }) => void): () => void
+  onAutomationRunUpdate(
+    cb: (data: { automationId: string; run: AutomationRun }) => void
+  ): () => void
   onAutomationsChanged(cb: (automations: Automation[]) => void): () => void
-  onAutomationRunMessage(cb: (data: { automationId: string; message: ChatMessage }) => void): () => void
-  onAutomationStreamEvent(cb: (data: { automationId: string; type: string; text: string }) => void): () => void
-  onAutomationProcessing(cb: (data: { automationId: string; isProcessing: boolean }) => void): () => void
+  onAutomationRunMessage(
+    cb: (data: { automationId: string; message: ChatMessage }) => void
+  ): () => void
+  onAutomationStreamEvent(
+    cb: (data: { automationId: string; type: string; text: string }) => void
+  ): () => void
+  onAutomationProcessing(
+    cb: (data: { automationId: string; isProcessing: boolean }) => void
+  ): () => void
 }
 
 interface FileAPI {
@@ -511,13 +612,23 @@ export interface NetworkInterfaceInfo {
 
 interface RemoteAPI {
   getNetworkInterfaces(): Promise<NetworkInterfaceInfo[]>
-  startRemoteServer(opts?: { port?: number; host?: string; tunnel?: boolean }): Promise<{ port: number; token: string; lanUrl: string }>
+  startRemoteServer(opts?: {
+    port?: number
+    host?: string
+    tunnel?: boolean
+  }): Promise<{ port: number; token: string; lanUrl: string }>
   stopRemoteServer(): Promise<void>
   getRemoteStatus(): Promise<RemoteStatus>
   onRemoteStatus(cb: (status: RemoteStatus) => void): () => void
 }
 
-export type TunnelState = 'stopped' | 'starting' | 'downloading' | 'connected' | 'error' | 'restarting'
+export type TunnelState =
+  | 'stopped'
+  | 'starting'
+  | 'downloading'
+  | 'connected'
+  | 'error'
+  | 'restarting'
 
 export interface RemoteStatus {
   running: boolean
@@ -536,8 +647,26 @@ export interface RemoteStatus {
 // ---------------------------------------------------------------------------
 
 export type VoiceLanguageCode =
-  | 'en' | 'es' | 'fr' | 'ja' | 'de' | 'pt' | 'it' | 'ko' | 'hi' | 'id'
-  | 'ru' | 'pl' | 'tr' | 'nl' | 'uk' | 'el' | 'cs' | 'da' | 'sv' | 'no'
+  | 'en'
+  | 'es'
+  | 'fr'
+  | 'ja'
+  | 'de'
+  | 'pt'
+  | 'it'
+  | 'ko'
+  | 'hi'
+  | 'id'
+  | 'ru'
+  | 'pl'
+  | 'tr'
+  | 'nl'
+  | 'uk'
+  | 'el'
+  | 'cs'
+  | 'da'
+  | 'sv'
+  | 'no'
 
 export interface VoiceLanguageOption {
   code: VoiceLanguageCode
@@ -586,7 +715,18 @@ interface VoiceAPI {
   onVoiceError(cb: (routingId: string, error: string) => void): () => void
 }
 
-export interface ClaudeAPI extends SessionAPI, GitAPI, McpAPI, TerminalAPI, AutomationAPI, FileAPI, AccountAPI, RemoteAPI, VoiceAPI, PluginAPI {
+export interface ClaudeAPI
+  extends
+    SessionAPI,
+    GitAPI,
+    McpAPI,
+    TerminalAPI,
+    AutomationAPI,
+    FileAPI,
+    AccountAPI,
+    RemoteAPI,
+    VoiceAPI,
+    PluginAPI {
   /** Relay a log message from the renderer to the main process logger */
   logRelay(level: string, source: string, message: string): void
   /** App + SDK version info for display in Settings */
@@ -832,8 +972,8 @@ export interface SkillInfo {
   description: string
   source: SkillSource
   pluginName?: string
-  path: string       // filesystem path to SKILL.md (empty for bundled)
-  content: string    // markdown body (no frontmatter)
+  path: string // filesystem path to SKILL.md (empty for bundled)
+  content: string // markdown body (no frontmatter)
 }
 
 // ---------------------------------------------------------------------------
@@ -841,7 +981,13 @@ export interface SkillInfo {
 // ---------------------------------------------------------------------------
 
 export type McpServerScope = 'user' | 'project' | 'local' | 'claudeai' | 'managed'
-export type McpServerConnectionStatus = 'connected' | 'failed' | 'needs-auth' | 'pending' | 'disabled' | 'not_started'
+export type McpServerConnectionStatus =
+  | 'connected'
+  | 'failed'
+  | 'needs-auth'
+  | 'pending'
+  | 'disabled'
+  | 'not_started'
 export type McpServerTransport = 'stdio' | 'sse' | 'http'
 
 export interface McpServerToolInfo {
@@ -937,8 +1083,8 @@ export interface TerminalTab {
 
 export interface GitFileStatus {
   path: string
-  index: string       // staged status: ' '|'M'|'A'|'D'|'R'|'?'|'!'
-  working: string     // working tree status
+  index: string // staged status: ' '|'M'|'A'|'D'|'R'|'?'|'!'
+  working: string // working tree status
 }
 
 export interface GitStatusData {

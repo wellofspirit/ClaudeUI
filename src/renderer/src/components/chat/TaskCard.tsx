@@ -88,7 +88,7 @@ export function TaskCard({ block, result }: Props): React.JSX.Element {
   const isBackground = !!input.run_in_background
   // Background tasks get a tool_result immediately ("agent launched") but keep running until task_notification
   const isError = bgNotification ? bgNotification.status === 'failed' : (result?.isError ?? false)
-  const isRunning = isHistorical ? false : (isBackground ? !bgNotification : !hasResult)
+  const isRunning = isHistorical ? false : isBackground ? !bgNotification : !hasResult
   // In historical mode, tasks without results show as "loaded" (neutral state)
   const isLoaded = isHistorical && !hasResult && !bgNotification
 
@@ -107,7 +107,11 @@ export function TaskCard({ block, result }: Props): React.JSX.Element {
 
   // For background tasks, usage comes from the task notification, not the tool result
   const usage = bgNotification?.usage
-    ? { totalTokens: bgNotification.usage.totalTokens, toolUses: bgNotification.usage.toolUses, durationMs: bgNotification.usage.durationMs }
+    ? {
+        totalTokens: bgNotification.usage.totalTokens,
+        toolUses: bgNotification.usage.toolUses,
+        durationMs: bgNotification.usage.durationMs
+      }
     : parsedUsage
 
   const borderColor = isRunning
@@ -150,18 +154,42 @@ export function TaskCard({ block, result }: Props): React.JSX.Element {
   }
 
   const statusIcon = isError ? (
-    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-danger shrink-0">
+    <svg
+      width="12"
+      height="12"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      className="text-danger shrink-0"
+    >
       <circle cx="12" cy="12" r="10" />
       <line x1="15" y1="9" x2="9" y2="15" />
       <line x1="9" y1="9" x2="15" y2="15" />
     </svg>
   ) : isLoaded ? (
-    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-text-muted shrink-0">
+    <svg
+      width="12"
+      height="12"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      className="text-text-muted shrink-0"
+    >
       <circle cx="12" cy="12" r="10" />
       <line x1="8" y1="12" x2="16" y2="12" />
     </svg>
   ) : isCompleted ? (
-    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-success shrink-0">
+    <svg
+      width="12"
+      height="12"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      className="text-success shrink-0"
+    >
       <circle cx="12" cy="12" r="10" />
       <polyline points="8 12 11 15 16 9" />
     </svg>
@@ -178,16 +206,21 @@ export function TaskCard({ block, result }: Props): React.JSX.Element {
       >
         {statusIcon}
         <span className="font-medium text-[13px] text-accent shrink-0">Task</span>
-        <span className="text-text-secondary text-[12px] truncate flex-1 text-left">{description}</span>
+        <span className="text-text-secondary text-[12px] truncate flex-1 text-left">
+          {description}
+        </span>
         {elapsed != null && (
-          <span className="text-[11px] text-text-muted font-mono shrink-0">{formatElapsed(elapsed)}</span>
+          <span className="text-[11px] text-text-muted font-mono shrink-0">
+            {formatElapsed(elapsed)}
+          </span>
         )}
-        {isLoaded && (
-          <span className="text-[10px] text-text-muted shrink-0">loaded</span>
-        )}
+        {isLoaded && <span className="text-[10px] text-text-muted shrink-0">loaded</span>}
         {canBackground && !isBackgrounding && !isHistorical && (
           <button
-            onClick={(e) => { e.stopPropagation(); handleBackgroundTask() }}
+            onClick={(e) => {
+              e.stopPropagation()
+              handleBackgroundTask()
+            }}
             className="text-[11px] px-2 py-0.5 rounded bg-accent/10 text-accent hover:bg-accent/20 transition-colors shrink-0"
           >
             Send to background
@@ -200,7 +233,10 @@ export function TaskCard({ block, result }: Props): React.JSX.Element {
         )}
         {isRunning && !isStopping && !isHistorical && (
           <button
-            onClick={(e) => { e.stopPropagation(); handleStopTask() }}
+            onClick={(e) => {
+              e.stopPropagation()
+              handleStopTask()
+            }}
             className="text-[11px] px-2 py-0.5 rounded bg-danger/10 text-danger hover:bg-danger/20 transition-colors shrink-0"
           >
             Stop
@@ -212,7 +248,12 @@ export function TaskCard({ block, result }: Props): React.JSX.Element {
           </span>
         )}
         <svg
-          width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
+          width="10"
+          height="10"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
           className="text-text-secondary shrink-0 transition-transform duration-150"
           style={{ transform: expanded ? 'rotate(180deg)' : 'rotate(0deg)' }}
         >
@@ -245,7 +286,9 @@ export function TaskCard({ block, result }: Props): React.JSX.Element {
                 usage.totalTokens != null && `${formatTokens(usage.totalTokens)} tokens`,
                 usage.toolUses != null && `${usage.toolUses} tools`,
                 usage.durationMs != null && formatDuration(usage.durationMs)
-              ].filter(Boolean).join(' · ')}
+              ]
+                .filter(Boolean)
+                .join(' · ')}
             </span>
           )}
           <div className="flex-1" />
@@ -264,7 +307,9 @@ export function TaskCard({ block, result }: Props): React.JSX.Element {
           {/* Instructions */}
           {prompt && (
             <div className="border-t border-border px-3 py-2">
-              <div className="text-[10px] uppercase tracking-wider text-text-muted font-semibold mb-1">Instructions</div>
+              <div className="text-[10px] uppercase tracking-wider text-text-muted font-semibold mb-1">
+                Instructions
+              </div>
               <div className="text-[12px] text-text-secondary leading-[1.5] max-h-[200px] overflow-y-auto whitespace-pre-wrap">
                 {prompt}
               </div>
@@ -285,7 +330,9 @@ export function TaskCard({ block, result }: Props): React.JSX.Element {
                   </div>
                 )}
                 {streamThinking && (
-                  <div className="text-[12px] text-text-secondary/60 italic mb-1.5">{streamThinking.slice(-200)}</div>
+                  <div className="text-[12px] text-text-secondary/60 italic mb-1.5">
+                    {streamThinking.slice(-200)}
+                  </div>
                 )}
                 {msgs.length > 0 && <SubagentMessages messages={msgs} maxHeight="none" />}
                 {streamText && (
@@ -336,7 +383,9 @@ export function TaskCard({ block, result }: Props): React.JSX.Element {
                     usage.totalTokens != null && `${formatTokens(usage.totalTokens)} tokens`,
                     usage.toolUses != null && `${usage.toolUses} tools`,
                     usage.durationMs != null && formatDuration(usage.durationMs)
-                  ].filter(Boolean).join(' · ')}
+                  ]
+                    .filter(Boolean)
+                    .join(' · ')}
                 </span>
               )}
               <div className="flex-1" />

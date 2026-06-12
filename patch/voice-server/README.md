@@ -9,7 +9,7 @@ Exposes the CLI's built-in voice transcription pipeline (Deepgram Nova 3 via Ant
 | Component              | Version at time of discovery |
 | ---------------------- | ---------------------------- |
 | SDK package            | 0.2.81                       |
-| Bundled CLI (`cli.js`) | (minified, ~12.4 MB)        |
+| Bundled CLI (`cli.js`) | (minified, ~12.4 MB)         |
 
 The SDK bundles its own CLI, independent of the native `claude` binary.
 
@@ -18,6 +18,7 @@ The SDK bundles its own CLI, independent of the native `claude` binary.
 The CLI's `/voice` slash command provides push-to-talk voice input using Deepgram Nova 3 speech-to-text (via Anthropic's WebSocket proxy at `/api/ws/speech_to_text/voice_stream`). This feature is entirely self-contained in cli.js — it captures audio from the local microphone (via a native NAPI module or sox/arecord), opens a WebSocket to Anthropic's proxy, streams audio, and receives transcripts.
 
 For our Electron UI, we need voice input but:
+
 1. **Cannot call the voice API directly** — the endpoint is undocumented and authenticated via OAuth. Calling it from our process would violate TOS.
 2. **Cannot stream audio through the JSON stdin protocol** — the SDK's stdin transport is newline-delimited JSON, designed for control messages, not high-frequency binary audio.
 3. **Cannot use cli.js's native mic capture** — cli.js spawns sox/arecord or uses a NAPI module for recording. We capture audio in Electron's main process instead (using the same NAPI module from the SDK's vendor directory).
@@ -64,6 +65,7 @@ Electron Main Process                    cli.js (patched)
 6. Calls `callbacks.onError(message)` and `callbacks.onClose()` on failures
 
 **Signature** (v0.2.81, minified name `hb8`):
+
 ```js
 async function hb8(A, q) {
   // A = { onTranscript, onError, onClose, onReady }
@@ -78,17 +80,18 @@ The CLI processes control requests in a `for await` loop inside an async generat
 
 **Key variables at the injection site** (v0.2.81):
 
-| Variable | Name (v0.2.81) | Purpose                                    |
-| -------- | -------------- | ------------------------------------------ |
-| msgVar   | `W6`           | The control request message being processed |
-| warnFn   | (first capture)| Logs unsupported subtype warning           |
-| successFn| `n`            | Sends control_response back to SDK consumer|
+| Variable  | Name (v0.2.81)  | Purpose                                     |
+| --------- | --------------- | ------------------------------------------- |
+| msgVar    | `W6`            | The control request message being processed |
+| warnFn    | (first capture) | Logs unsupported subtype warning            |
+| successFn | `n`             | Sends control_response back to SDK consumer |
 
 The `successFn` is called as `successFn(msgVar, responseData)` to yield a control_response message back through the SDK transport.
 
 ### Why `await` Works in the Injection
 
 The control request handler is inside a `for await (... of ...)` loop body within an async generator function. This means:
+
 - `await` is syntactically valid (we're in an async context)
 - `await` pauses the loop iteration (blocking other message processing briefly)
 - This is acceptable because server startup takes <1ms (binding to port 0 on localhost)
@@ -139,6 +142,7 @@ else WARN(MSG,`Unsupported control request subtype: ${MSG.request.subtype}`);con
 ```
 
 Regex:
+
 ```js
 else ([\w$]+)\(([\w$]+),`Unsupported control request subtype: \$\{\2\.request\.subtype\}`\);continue\}else if\(\2\.type==="control_response"\)
 ```
@@ -146,18 +150,22 @@ else ([\w$]+)\(([\w$]+),`Unsupported control request subtype: \$\{\2\.request\.s
 #### Dynamic Function Extraction
 
 **hb8** (voice stream function) — found by the unique string `"[voice_stream] No OAuth token available"` near the function start:
+
 ```js
-const hb8Re = /async function ([\w$]+)\(([\w$]+),([\w$]+)\)\{[^}]{0,200}\[voice_stream\] No OAuth token available/
+const hb8Re =
+  /async function ([\w$]+)\(([\w$]+),([\w$]+)\)\{[^}]{0,200}\[voice_stream\] No OAuth token available/
 ```
 
 **us1** (bs1 lazy module initializer) — `hb8`'s `finalize()` method reads `bs1.safety` and `bs1.noData` for timeout values. `bs1` is initialized inside a lazy module wrapper `L(()=>{...bs1={safety:5000,noData:1500}})`. If not triggered before `hb8()` is called, `finalize()` throws `TypeError: Cannot read properties of undefined (reading 'safety')`. Found by the literal timeout values:
+
 ```js
 const bs1Re = /var ([\w$]+)=L\(\(\)=>[\s\S]{0,500}?bs1=\{safety:5000,noData:1500\}/
 ```
 
 **successFn** (control response helper) — found by the pattern `,SUCCESS(MSG,{})` in a try/catch block near the control request handler:
+
 ```js
-const successRe = /\),([\w$]+)\(MSG,\{\}\)\}catch/   // MSG escaped for regex
+const successRe = /\),([\w$]+)\(MSG,\{\}\)\}catch/ // MSG escaped for regex
 ```
 
 #### Before
@@ -233,6 +241,7 @@ Note: `hb8`, `n`, `W6` are v0.2.81 names — extracted dynamically at apply time
 #### Anchor (unique, 1 match)
 
 Same anchor as `queue-control` Part B — the `stopTask` method:
+
 ```
 async stopTask(VAR){await this.request({subtype:"stop_task",task_id:VAR})}
 ```
@@ -319,10 +328,10 @@ if(MSG.request.subtype==="voice_server_start"){
 
 ```js
 // WRONG — bundler may have replaced `require` with internal resolution
-const net = require('net')  // might fail in bundled cli.js
+const net = require('net') // might fail in bundled cli.js
 
 // CORRECT — dynamic import bypasses bundler, always resolves Node.js built-ins
-const {createServer} = await import('node:net')
+const { createServer } = await import('node:net')
 ```
 
 ### Pitfall: Lazy module initialization for bs1 (finalize timeouts)
@@ -343,7 +352,7 @@ The CLI's own `/voice` code triggers `us1` implicitly through its module depende
 
 ```js
 // WRONG — module-level variable may not be in scope at injection site
-let voiceServer = null  // where does this go in a minified IIFE?
+let voiceServer = null // where does this go in a minified IIFE?
 
 // CORRECT — globalThis is always accessible from any scope
 globalThis.__vs = server
@@ -401,15 +410,15 @@ globalThis.__vs = server
 
 ## Key Functions Reference
 
-| Name (v0.2.81) | Purpose                                           | Char offset |
-| --------------- | ------------------------------------------------- | ----------- |
-| `hb8`           | Voice stream function (Deepgram WS client)        | ~10804673   |
-| `us1`           | Lazy module initializer for bs1 (finalize timeouts)| ~10808957   |
-| `bs1`           | `{safety:5000, noData:1500}` — finalize timeouts  | ~10809023   |
-| `n`             | Success response helper (control_response)        | nearby      |
-| `W6`            | Message variable in control request handler       | nearby      |
-| `sVq`           | startRecording (native/sox/arecord — NOT patched) | ~10814663   |
-| `Ps6`           | Load native audio NAPI module                     | ~10811366   |
+| Name (v0.2.81) | Purpose                                             | Char offset |
+| -------------- | --------------------------------------------------- | ----------- |
+| `hb8`          | Voice stream function (Deepgram WS client)          | ~10804673   |
+| `us1`          | Lazy module initializer for bs1 (finalize timeouts) | ~10808957   |
+| `bs1`          | `{safety:5000, noData:1500}` — finalize timeouts    | ~10809023   |
+| `n`            | Success response helper (control_response)          | nearby      |
+| `W6`           | Message variable in control request handler         | nearby      |
+| `sVq`          | startRecording (native/sox/arecord — NOT patched)   | ~10814663   |
+| `Ps6`          | Load native audio NAPI module                       | ~10811366   |
 
 **Note:** All minified names will change in future SDK versions. Use content patterns (string literals, structural shapes) to relocate code.
 

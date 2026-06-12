@@ -4,25 +4,28 @@ import { useIsMobile } from '../../hooks/useIsMobile'
 
 type NoticeVariant = 'error' | 'warning'
 
-const VARIANT_STYLES: Record<NoticeVariant, { border: string; text: string; pre: string; icon: string }> = {
+const VARIANT_STYLES: Record<
+  NoticeVariant,
+  { border: string; text: string; pre: string; icon: string }
+> = {
   error: {
     border: 'border-danger/40',
     text: 'text-danger/90',
     pre: 'text-danger/80',
-    icon: 'text-danger',
+    icon: 'text-danger'
   },
   warning: {
     border: 'border-warning/40',
     text: 'text-warning/90',
     pre: 'text-warning/80',
-    icon: 'text-warning',
-  },
+    icon: 'text-warning'
+  }
 }
 
 function NoticeCard({
   text,
   variant,
-  onDismiss,
+  onDismiss
 }: {
   text: string
   variant: NoticeVariant
@@ -35,7 +38,9 @@ function NoticeCard({
   const styles = VARIANT_STYLES[variant]
 
   return (
-    <div className={`rounded-lg border ${styles.border} bg-bg-secondary overflow-hidden animate-fade-in shadow-lg shadow-black/20`}>
+    <div
+      className={`rounded-lg border ${styles.border} bg-bg-secondary overflow-hidden animate-fade-in shadow-lg shadow-black/20`}
+    >
       {/* Header row */}
       <div
         className="px-3 py-2 flex items-center gap-2 cursor-pointer"
@@ -72,9 +77,7 @@ function NoticeCard({
         )}
 
         {/* Summary line */}
-        <span className={`text-[12px] ${styles.text} flex-1 truncate`}>
-          {firstLine}
-        </span>
+        <span className={`text-[12px] ${styles.text} flex-1 truncate`}>{firstLine}</span>
 
         {/* Expand chevron (if there's more to show) */}
         {hasMore && (
@@ -99,7 +102,14 @@ function NoticeCard({
           }}
           className="shrink-0 text-text-muted hover:text-text-secondary transition-colors cursor-pointer p-0.5"
         >
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <svg
+            width="12"
+            height="12"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+          >
             <line x1="18" y1="6" x2="6" y2="18" />
             <line x1="6" y1="6" x2="18" y2="18" />
           </svg>
@@ -109,7 +119,9 @@ function NoticeCard({
       {/* Expanded: full text */}
       {expanded && (
         <div className="px-3 pb-2">
-          <pre className={`text-[11px] font-mono ${styles.pre} whitespace-pre-wrap break-words bg-bg-primary rounded-md p-2 border border-border max-h-64 overflow-y-auto`}>
+          <pre
+            className={`text-[11px] font-mono ${styles.pre} whitespace-pre-wrap break-words bg-bg-primary rounded-md p-2 border border-border max-h-64 overflow-y-auto`}
+          >
             {text}
           </pre>
         </div>

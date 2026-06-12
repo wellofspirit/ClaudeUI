@@ -52,7 +52,7 @@ vi.mock('node:child_process', () => ({
     spawnedProcesses.push(fake)
     return fake
   }),
-  execFileSync: vi.fn(() => Buffer.from('')),
+  execFileSync: vi.fn(() => Buffer.from(''))
 }))
 
 // Make fs.existsSync() always return true so ensureBinary() short-circuits
@@ -66,7 +66,7 @@ vi.mock('node:fs', async () => {
     chmodSync: vi.fn(),
     unlinkSync: vi.fn(),
     renameSync: vi.fn(),
-    createWriteStream: vi.fn(() => ({ close: vi.fn(), on: vi.fn() })),
+    createWriteStream: vi.fn(() => ({ close: vi.fn(), on: vi.fn() }))
   }
 })
 
@@ -75,8 +75,8 @@ vi.mock('../logger', () => ({
     debug: vi.fn(),
     info: vi.fn(),
     warn: vi.fn(),
-    error: vi.fn(),
-  },
+    error: vi.fn()
+  }
 }))
 
 // Import after mocks are registered.
@@ -115,11 +115,15 @@ describe('TunnelManager', () => {
   afterEach(() => {
     // Ensure we tear down between tests so a leaking 'exit' listener from a
     // half-stopped manager doesn't trigger a scheduleRestart.
-    try { manager.stop() } catch { /* ignore */ }
+    try {
+      manager.stop()
+    } catch {
+      /* ignore */
+    }
     vi.clearAllMocks()
   })
 
-  it("start() spawns cloudflared with the expected args and resolves with the URL once stderr emits it", async () => {
+  it('start() spawns cloudflared with the expected args and resolves with the URL once stderr emits it', async () => {
     const startP = manager.start(8787)
     const proc = await waitForSpawn()
 
@@ -143,7 +147,7 @@ describe('TunnelManager', () => {
     const proc = await waitForSpawn()
 
     const enoent = Object.assign(new Error('spawn cloudflared ENOENT'), {
-      code: 'ENOENT',
+      code: 'ENOENT'
     })
     proc.emit('error', enoent)
 

@@ -21,22 +21,134 @@ interface ModelPricing {
 }
 
 const MODEL_PRICING: Array<{ match: string; pricing: ModelPricing }> = [
-  { match: 'fable', pricing: { inputPerMTok: 10, outputPerMTok: 50, cacheWritePerMTok: 12.5, cacheWrite1hPerMTok: 20, cacheReadPerMTok: 1 } },
-  { match: 'mythos', pricing: { inputPerMTok: 10, outputPerMTok: 50, cacheWritePerMTok: 12.5, cacheWrite1hPerMTok: 20, cacheReadPerMTok: 1 } },
-  { match: 'opus-4-5', pricing: { inputPerMTok: 5, outputPerMTok: 25, cacheWritePerMTok: 6.25, cacheWrite1hPerMTok: 10, cacheReadPerMTok: 0.5 } },
-  { match: 'opus-4-6', pricing: { inputPerMTok: 5, outputPerMTok: 25, cacheWritePerMTok: 6.25, cacheWrite1hPerMTok: 10, cacheReadPerMTok: 0.5 } },
-  { match: 'opus-4-7', pricing: { inputPerMTok: 5, outputPerMTok: 25, cacheWritePerMTok: 6.25, cacheWrite1hPerMTok: 10, cacheReadPerMTok: 0.5 } },
-  { match: 'opus-4-8', pricing: { inputPerMTok: 5, outputPerMTok: 25, cacheWritePerMTok: 6.25, cacheWrite1hPerMTok: 10, cacheReadPerMTok: 0.5 } },
-  { match: 'opus-4', pricing: { inputPerMTok: 15, outputPerMTok: 75, cacheWritePerMTok: 18.75, cacheWrite1hPerMTok: 30, cacheReadPerMTok: 1.5 } },
-  { match: 'opus', pricing: { inputPerMTok: 5, outputPerMTok: 25, cacheWritePerMTok: 6.25, cacheWrite1hPerMTok: 10, cacheReadPerMTok: 0.5 } },
-  { match: 'sonnet', pricing: { inputPerMTok: 3, outputPerMTok: 15, cacheWritePerMTok: 3.75, cacheWrite1hPerMTok: 6, cacheReadPerMTok: 0.3 } },
-  { match: 'haiku-4', pricing: { inputPerMTok: 1, outputPerMTok: 5, cacheWritePerMTok: 1.25, cacheWrite1hPerMTok: 2, cacheReadPerMTok: 0.1 } },
-  { match: 'haiku-3', pricing: { inputPerMTok: 0.8, outputPerMTok: 4, cacheWritePerMTok: 1, cacheWrite1hPerMTok: 1.6, cacheReadPerMTok: 0.08 } },
-  { match: 'haiku', pricing: { inputPerMTok: 1, outputPerMTok: 5, cacheWritePerMTok: 1.25, cacheWrite1hPerMTok: 2, cacheReadPerMTok: 0.1 } },
+  {
+    match: 'fable',
+    pricing: {
+      inputPerMTok: 10,
+      outputPerMTok: 50,
+      cacheWritePerMTok: 12.5,
+      cacheWrite1hPerMTok: 20,
+      cacheReadPerMTok: 1
+    }
+  },
+  {
+    match: 'mythos',
+    pricing: {
+      inputPerMTok: 10,
+      outputPerMTok: 50,
+      cacheWritePerMTok: 12.5,
+      cacheWrite1hPerMTok: 20,
+      cacheReadPerMTok: 1
+    }
+  },
+  {
+    match: 'opus-4-5',
+    pricing: {
+      inputPerMTok: 5,
+      outputPerMTok: 25,
+      cacheWritePerMTok: 6.25,
+      cacheWrite1hPerMTok: 10,
+      cacheReadPerMTok: 0.5
+    }
+  },
+  {
+    match: 'opus-4-6',
+    pricing: {
+      inputPerMTok: 5,
+      outputPerMTok: 25,
+      cacheWritePerMTok: 6.25,
+      cacheWrite1hPerMTok: 10,
+      cacheReadPerMTok: 0.5
+    }
+  },
+  {
+    match: 'opus-4-7',
+    pricing: {
+      inputPerMTok: 5,
+      outputPerMTok: 25,
+      cacheWritePerMTok: 6.25,
+      cacheWrite1hPerMTok: 10,
+      cacheReadPerMTok: 0.5
+    }
+  },
+  {
+    match: 'opus-4-8',
+    pricing: {
+      inputPerMTok: 5,
+      outputPerMTok: 25,
+      cacheWritePerMTok: 6.25,
+      cacheWrite1hPerMTok: 10,
+      cacheReadPerMTok: 0.5
+    }
+  },
+  {
+    match: 'opus-4',
+    pricing: {
+      inputPerMTok: 15,
+      outputPerMTok: 75,
+      cacheWritePerMTok: 18.75,
+      cacheWrite1hPerMTok: 30,
+      cacheReadPerMTok: 1.5
+    }
+  },
+  {
+    match: 'opus',
+    pricing: {
+      inputPerMTok: 5,
+      outputPerMTok: 25,
+      cacheWritePerMTok: 6.25,
+      cacheWrite1hPerMTok: 10,
+      cacheReadPerMTok: 0.5
+    }
+  },
+  {
+    match: 'sonnet',
+    pricing: {
+      inputPerMTok: 3,
+      outputPerMTok: 15,
+      cacheWritePerMTok: 3.75,
+      cacheWrite1hPerMTok: 6,
+      cacheReadPerMTok: 0.3
+    }
+  },
+  {
+    match: 'haiku-4',
+    pricing: {
+      inputPerMTok: 1,
+      outputPerMTok: 5,
+      cacheWritePerMTok: 1.25,
+      cacheWrite1hPerMTok: 2,
+      cacheReadPerMTok: 0.1
+    }
+  },
+  {
+    match: 'haiku-3',
+    pricing: {
+      inputPerMTok: 0.8,
+      outputPerMTok: 4,
+      cacheWritePerMTok: 1,
+      cacheWrite1hPerMTok: 1.6,
+      cacheReadPerMTok: 0.08
+    }
+  },
+  {
+    match: 'haiku',
+    pricing: {
+      inputPerMTok: 1,
+      outputPerMTok: 5,
+      cacheWritePerMTok: 1.25,
+      cacheWrite1hPerMTok: 2,
+      cacheReadPerMTok: 0.1
+    }
+  }
 ]
 
 const DEFAULT_PRICING: ModelPricing = {
-  inputPerMTok: 3, outputPerMTok: 15, cacheWritePerMTok: 3.75, cacheWrite1hPerMTok: 6, cacheReadPerMTok: 0.3
+  inputPerMTok: 3,
+  outputPerMTok: 15,
+  cacheWritePerMTok: 3.75,
+  cacheWrite1hPerMTok: 6,
+  cacheReadPerMTok: 0.3
 }
 
 function getPricing(model: string): ModelPricing {
@@ -97,7 +209,7 @@ function addTokens(a: TokenCounts, b: TokenCounts): TokenCounts {
     inputTokens: a.inputTokens + b.inputTokens,
     outputTokens: a.outputTokens + b.outputTokens,
     cacheCreationTokens: a.cacheCreationTokens + b.cacheCreationTokens,
-    cacheReadTokens: a.cacheReadTokens + b.cacheReadTokens,
+    cacheReadTokens: a.cacheReadTokens + b.cacheReadTokens
   }
 }
 
@@ -358,14 +470,26 @@ describe('token helpers', () => {
   })
 
   it('totalTokens sums all fields', () => {
-    expect(totalTokens({ inputTokens: 100, outputTokens: 200, cacheCreationTokens: 50, cacheReadTokens: 25 })).toBe(375)
+    expect(
+      totalTokens({
+        inputTokens: 100,
+        outputTokens: 200,
+        cacheCreationTokens: 50,
+        cacheReadTokens: 25
+      })
+    ).toBe(375)
   })
 
   it('addTokens adds corresponding fields', () => {
     const a = { inputTokens: 10, outputTokens: 20, cacheCreationTokens: 5, cacheReadTokens: 3 }
     const b = { inputTokens: 1, outputTokens: 2, cacheCreationTokens: 3, cacheReadTokens: 4 }
     const result = addTokens(a, b)
-    expect(result).toEqual({ inputTokens: 11, outputTokens: 22, cacheCreationTokens: 8, cacheReadTokens: 7 })
+    expect(result).toEqual({
+      inputTokens: 11,
+      outputTokens: 22,
+      cacheCreationTokens: 8,
+      cacheReadTokens: 7
+    })
   })
 })
 
@@ -404,12 +528,12 @@ describe('mergeModelFamilies', () => {
     map.set('claude-sonnet-4-6', {
       tokens: { inputTokens: 100, outputTokens: 50, cacheCreationTokens: 0, cacheReadTokens: 0 },
       costUsd: 1,
-      requestCount: 10,
+      requestCount: 10
     })
     map.set('claude-sonnet', {
       tokens: { inputTokens: 50, outputTokens: 25, cacheCreationTokens: 0, cacheReadTokens: 0 },
       costUsd: 0.5,
-      requestCount: 3,
+      requestCount: 3
     })
 
     const merged = mergeModelFamilies(map)
@@ -425,12 +549,12 @@ describe('mergeModelFamilies', () => {
     map.set('claude-opus-4-6', {
       tokens: { inputTokens: 100, outputTokens: 50, cacheCreationTokens: 0, cacheReadTokens: 0 },
       costUsd: 2,
-      requestCount: 10,
+      requestCount: 10
     })
     map.set('claude-opus-4-5', {
       tokens: { inputTokens: 80, outputTokens: 40, cacheCreationTokens: 0, cacheReadTokens: 0 },
       costUsd: 5,
-      requestCount: 5,
+      requestCount: 5
     })
 
     const merged = mergeModelFamilies(map)
@@ -444,14 +568,19 @@ describe('mergeModelFamilies', () => {
   it('merges generic into most-requested specific when multiple specifics exist', () => {
     const map = new Map<string, { tokens: TokenCounts; costUsd: number; requestCount: number }>()
     map.set('claude-sonnet-4-6', {
-      tokens: emptyTokenCounts(), costUsd: 1, requestCount: 10,
+      tokens: emptyTokenCounts(),
+      costUsd: 1,
+      requestCount: 10
     })
     map.set('claude-sonnet-4', {
-      tokens: emptyTokenCounts(), costUsd: 0.5, requestCount: 3,
+      tokens: emptyTokenCounts(),
+      costUsd: 0.5,
+      requestCount: 3
     })
     map.set('claude-sonnet', {
       tokens: { inputTokens: 20, outputTokens: 10, cacheCreationTokens: 0, cacheReadTokens: 0 },
-      costUsd: 0.2, requestCount: 2,
+      costUsd: 0.2,
+      requestCount: 2
     })
 
     const merged = mergeModelFamilies(map)
@@ -466,7 +595,7 @@ describe('mergeModelFamilies', () => {
     map.set('claude-opus-4-6', {
       tokens: { inputTokens: 100, outputTokens: 50, cacheCreationTokens: 0, cacheReadTokens: 0 },
       costUsd: 2,
-      requestCount: 5,
+      requestCount: 5
     })
 
     const merged = mergeModelFamilies(map)
@@ -477,10 +606,14 @@ describe('mergeModelFamilies', () => {
   it('separates different families', () => {
     const map = new Map<string, { tokens: TokenCounts; costUsd: number; requestCount: number }>()
     map.set('claude-opus-4-6', {
-      tokens: emptyTokenCounts(), costUsd: 1, requestCount: 5,
+      tokens: emptyTokenCounts(),
+      costUsd: 1,
+      requestCount: 5
     })
     map.set('claude-sonnet-4-6', {
-      tokens: emptyTokenCounts(), costUsd: 0.5, requestCount: 3,
+      tokens: emptyTokenCounts(),
+      costUsd: 0.5,
+      requestCount: 3
     })
 
     const merged = mergeModelFamilies(map)
@@ -492,7 +625,9 @@ describe('mergeModelFamilies', () => {
   it('keeps generic-only family as-is', () => {
     const map = new Map<string, { tokens: TokenCounts; costUsd: number; requestCount: number }>()
     map.set('claude-haiku', {
-      tokens: emptyTokenCounts(), costUsd: 0.5, requestCount: 8,
+      tokens: emptyTokenCounts(),
+      costUsd: 0.5,
+      requestCount: 8
     })
 
     const merged = mergeModelFamilies(map)

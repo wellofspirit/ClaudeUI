@@ -7,8 +7,6 @@
  * event pushes via webContents.send().
  */
 
- 
-
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import Module from 'module'
 import { createPtyStub } from '../../../test/stubs/pty-stub'
@@ -34,7 +32,7 @@ modRef._load = function patched(...args: unknown[]): unknown {
   if (request === 'node-pty') {
     return {
       spawn: (file: string, a: string[], options: Record<string, unknown>) =>
-        ptyStub.spawn(file, a, options),
+        ptyStub.spawn(file, a, options)
     }
   }
   return origLoad.call(this, ...args)
@@ -49,8 +47,8 @@ vi.mock('../../services/logger', () => ({
     debug: vi.fn(),
     info: vi.fn(),
     warn: vi.fn(),
-    error: vi.fn(),
-  },
+    error: vi.fn()
+  }
 }))
 
 // Import AFTER mocks so the real module picks up the mocked electron/pty.

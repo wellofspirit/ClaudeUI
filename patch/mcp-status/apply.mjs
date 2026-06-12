@@ -90,9 +90,7 @@ if (!skipA) {
   //
   //   Strategy: find f6=$X5(W6) by its unique position (right before "let k6=")
   //   and extract V6/W6 from the sync branch nearby.
-  const newElseRe = new RegExp(
-    `(${V})=(${V})\\((${V})\\);let ${V}=${V}\\(\\(\\)=>!${V}\\)`
-  )
+  const newElseRe = new RegExp(`(${V})=(${V})\\((${V})\\);let ${V}=${V}\\(\\(\\)=>!${V}\\)`)
   const newElseMatch = newElseRe.exec(src)
 
   // Try v2.1.144 pattern:
@@ -108,8 +106,8 @@ if (!skipA) {
   // We capture the LAST `(VAR)=(VAR)(...);` before the matching `else`.
   const v144AnchorRe = new RegExp(
     `process\\.env\\.CLAUDE_CODE_SYNC_PLUGIN_INSTALL\\)\\)[\\s\\S]*?` +
-    `(${V})=(${V})\\([^;]+\\);` +
-    `else (${V})=(${V})\\(\\2\\);`
+      `(${V})=(${V})\\([^;]+\\);` +
+      `else (${V})=(${V})\\(\\2\\);`
   )
   const v144Match = v144AnchorRe.exec(src)
 
@@ -131,18 +129,18 @@ if (!skipA) {
   //   the `<M>=(async()=>{` IIFE is the matching else.
   const v163AnchorRe = new RegExp(
     `(?:${V})\\.CLAUDE_CODE_SYNC_PLUGIN_INSTALL\\)\\{` +
-    `[\\s\\S]*?` +
-    `(${V})=\\(async\\(\\)=>\\{` +
-    `[\\s\\S]*?` +
-    `\\}\\)\\(\\)\\}else (${V})=(${V})\\((${V})\\);`
+      `[\\s\\S]*?` +
+      `(${V})=\\(async\\(\\)=>\\{` +
+      `[\\s\\S]*?` +
+      `\\}\\)\\(\\)\\}else (${V})=(${V})\\((${V})\\);`
   )
   const v163Match = v163AnchorRe.exec(src)
 
   if (v163Match) {
-    const promiseVar = v163Match[1]    // M_ — awaitable orchestration promise (sync branch)
+    const promiseVar = v163Match[1] // M_ — awaitable orchestration promise (sync branch)
     const fireForgetVar = v163Match[2] // k_ — non-awaitable wrapper result (else branch)
-    const wrapperFn = v163Match[3]     // ux4 — fire-and-forget wrapper
-    const refreshFn = v163Match[4]     // T_ — plugin refresh function
+    const wrapperFn = v163Match[3] // ux4 — fire-and-forget wrapper
+    const refreshFn = v163Match[4] // T_ — plugin refresh function
 
     console.log(`Found v163 pattern at char ${v163Match.index}`)
     console.log(`  Promise variable: ${promiseVar}`)
@@ -169,7 +167,9 @@ if (!skipA) {
     }
 
     src = src.slice(0, elseIdx) + newElse + src.slice(elseIdx + oldElse.length)
-    console.log(`Patched else branch: store awaitable ${promiseVar} (refresh started once, wrapper reuses it)`)
+    console.log(
+      `Patched else branch: store awaitable ${promiseVar} (refresh started once, wrapper reuses it)`
+    )
   } else if (oldMatch) {
     // Verify uniqueness
     const allMatches = [...src.matchAll(new RegExp(oldAnchorRe, 'g'))]
@@ -192,10 +192,10 @@ if (!skipA) {
     src = src.replace(oldCode, newCode)
     console.log(`Replaced fire-and-forget with always-stored promise`)
   } else if (v144Match) {
-    const promiseVar = v144Match[1]    // TH
-    const refreshFn = v144Match[2]     // A8
+    const promiseVar = v144Match[1] // TH
+    const refreshFn = v144Match[2] // A8
     const fireForgetVar = v144Match[3] // mH
-    const wrapperFn = v144Match[4]     // Mq4
+    const wrapperFn = v144Match[4] // Mq4
 
     console.log(`Found v144 pattern at char ${v144Match.index}`)
     console.log(`  Promise variable: ${promiseVar}`)
@@ -206,7 +206,9 @@ if (!skipA) {
     const oldElse = `else ${fireForgetVar}=${wrapperFn}(${refreshFn});`
     // Set promiseVar in the else branch too (refresh fn is called once; the
     // serializer dedupes concurrent calls).
-    const newElse = PATCH_A_MARKER + `else{${promiseVar}=${refreshFn}();${fireForgetVar}=${wrapperFn}(${refreshFn});}`
+    const newElse =
+      PATCH_A_MARKER +
+      `else{${promiseVar}=${refreshFn}();${fireForgetVar}=${wrapperFn}(${refreshFn});}`
 
     const elseIdx = src.indexOf(oldElse)
     if (elseIdx === -1) {
@@ -221,20 +223,18 @@ if (!skipA) {
     src = src.slice(0, elseIdx) + newElse + src.slice(elseIdx + oldElse.length)
     console.log(`Patched else branch: added ${promiseVar}=${refreshFn}() before wrapper`)
   } else if (newElseMatch) {
-    const fireForgetVar = newElseMatch[1]  // f6
-    const wrapperFn = newElseMatch[2]      // $X5
-    const refreshFn = newElseMatch[3]      // W6
+    const fireForgetVar = newElseMatch[1] // f6
+    const wrapperFn = newElseMatch[2] // $X5
+    const refreshFn = newElseMatch[3] // W6
 
     // Extract V6 from the sync branch: ,V6=W6(...);else f6=
-    const syncRe = new RegExp(
-      `,(${V})=${refreshFn}\\([^;]*\\);else ${fireForgetVar}=`
-    )
+    const syncRe = new RegExp(`,(${V})=${refreshFn}\\([^;]*\\);else ${fireForgetVar}=`)
     const syncMatch = syncRe.exec(src)
     if (!syncMatch) {
       console.error('ERROR: Cannot find sync branch V6=W6(...) before else.')
       process.exit(1)
     }
-    const promiseVar = syncMatch[1]  // V6
+    const promiseVar = syncMatch[1] // V6
 
     console.log(`Found new pattern at char ${newElseMatch.index}`)
     console.log(`  Promise variable: ${promiseVar}`)
@@ -246,7 +246,9 @@ if (!skipA) {
     // With:    else{V6=W6();f6=$X5(W6);}
     // W6 is called twice but the underlying serializer dedupes concurrent calls.
     const oldElse = `else ${fireForgetVar}=${wrapperFn}(${refreshFn});`
-    const newElse = PATCH_A_MARKER + `else{${promiseVar}=${refreshFn}();${fireForgetVar}=${wrapperFn}(${refreshFn});}`
+    const newElse =
+      PATCH_A_MARKER +
+      `else{${promiseVar}=${refreshFn}();${fireForgetVar}=${wrapperFn}(${refreshFn});}`
 
     const elseIdx = src.indexOf(oldElse)
     if (elseIdx === -1) {
@@ -292,7 +294,9 @@ if (!skipB) {
   let x6Var
 
   // Try 1: old Part A marker pattern (<=0.2.105): /*PATCHED:...*/V6=null;...V6=J6()
-  const markerRe = new RegExp(`\\/\\*PATCHED:mcp-status-store-promise\\*\\/(${V})=(?:null;(?:if\\(!${V}\\(\\)\\))\\1=)?(?:${V})\\(\\)`)
+  const markerRe = new RegExp(
+    `\\/\\*PATCHED:mcp-status-store-promise\\*\\/(${V})=(?:null;(?:if\\(!${V}\\(\\)\\))\\1=)?(?:${V})\\(\\)`
+  )
   const markerMatch = markerRe.exec(src)
   if (markerMatch) {
     x6Var = markerMatch[1]
@@ -323,7 +327,9 @@ if (!skipB) {
 
   // Try 3: unpatched env pattern (fallback)
   if (!x6Var) {
-    const envRe = new RegExp(`(${V})=null,(?:${V})=null[^;]*;if\\(!${V}\\(\\)\\)if\\(${V}\\(process\\.env\\.CLAUDE_CODE_SYNC_PLUGIN_INSTALL\\)\\)`)
+    const envRe = new RegExp(
+      `(${V})=null,(?:${V})=null[^;]*;if\\(!${V}\\(\\)\\)if\\(${V}\\(process\\.env\\.CLAUDE_CODE_SYNC_PLUGIN_INSTALL\\)\\)`
+    )
     const envMatch = envRe.exec(src)
     if (envMatch) {
       x6Var = envMatch[1]
@@ -374,12 +380,18 @@ if (!skipB) {
 
   // Verify the refresh function is in scope at the mcp_status handler.
   // Both should be inside the same parent function (the main run loop).
-  const refreshFnIdx = Math.max(0, anchorIdx - BACK) + (src.slice(Math.max(0, anchorIdx - BACK), anchorIdx).lastIndexOf(`async function ${refreshFn}`))
+  const refreshFnIdx =
+    Math.max(0, anchorIdx - BACK) +
+    src.slice(Math.max(0, anchorIdx - BACK), anchorIdx).lastIndexOf(`async function ${refreshFn}`)
   const mcpHandlerIdx = src.indexOf('"mcp_status"', refreshFnIdx)
   if (mcpHandlerIdx === -1 || mcpHandlerIdx - refreshFnIdx > 50000) {
-    console.warn(`  WARNING: Refresh function at ${refreshFnIdx}, mcp_status at ${mcpHandlerIdx} — may not share scope`)
+    console.warn(
+      `  WARNING: Refresh function at ${refreshFnIdx}, mcp_status at ${mcpHandlerIdx} — may not share scope`
+    )
   } else {
-    console.log(`  Scope check OK: refresh fn and mcp_status handler are ${mcpHandlerIdx - refreshFnIdx} chars apart`)
+    console.log(
+      `  Scope check OK: refresh fn and mcp_status handler are ${mcpHandlerIdx - refreshFnIdx} chars apart`
+    )
   }
 
   // Try new pattern first (0.2.87+): inline call without block
@@ -412,11 +424,14 @@ if (!skipB) {
 
     // Replace: wrap in block, call refresh fn to load servers, then await plugin refresh
     const oldMcp = mcpInlineMatch[0]
-    const newMcp = PATCH_B_MARKER +
+    const newMcp =
+      PATCH_B_MARKER +
       `${msgVar}.request.subtype==="mcp_status"){await ${refreshFn}();if(${x6Var})await ${x6Var};${respondFn}(${msgVar},{mcpServers:${getMcpFn}()})}`
 
     src = src.replace(oldMcp, newMcp)
-    console.log(`Injected await ${refreshFn}() + await ${x6Var} in mcp_status handler (inline->block)`)
+    console.log(
+      `Injected await ${refreshFn}() + await ${x6Var} in mcp_status handler (inline->block)`
+    )
   } else if (mcpBlockMatch) {
     // Verify uniqueness
     const allMatches = [...src.matchAll(new RegExp(mcpBlockRe, 'g'))]
@@ -434,14 +449,17 @@ if (!skipB) {
 
     const oldMcp = mcpBlockMatch[0]
     const awaitPart = hasAwaitD ? `await ${dFn}();` : ''
-    const newMcp = PATCH_B_MARKER +
+    const newMcp =
+      PATCH_B_MARKER +
       `${msgVar}.request.subtype==="mcp_status"){${awaitPart}await ${refreshFn}();if(${x6Var})await ${x6Var};let`
 
     src = src.replace(oldMcp, newMcp)
     console.log(`Injected await ${refreshFn}() + await ${x6Var} in mcp_status handler (block form)`)
   } else {
     console.error('ERROR: Cannot locate mcp_status handler pattern.')
-    console.error('Tried inline pattern: <msg>.request.subtype==="mcp_status")<respondFn>(<msg>,{mcpServers:<fn>()});')
+    console.error(
+      'Tried inline pattern: <msg>.request.subtype==="mcp_status")<respondFn>(<msg>,{mcpServers:<fn>()});'
+    )
     console.error('Tried block pattern: <msg>.request.subtype==="mcp_status"){(await <fn>();)?let')
     process.exit(1)
   }

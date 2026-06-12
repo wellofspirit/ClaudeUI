@@ -13,12 +13,12 @@ All test code lives in `patch/` alongside the patch apply scripts.
 
 ### Key Files
 
-| File | Purpose |
-|---|---|
-| `patch/test-helpers.mjs` | Shared utilities: spawns `bun-claude` directly, exposes stream-json iterator + control channel (`stopTask`, `mcpServerStatus`, `dequeueMessage`, `toggleMcpServer`, `getUsage`, `close`). Factories: `createQuery()`, `createStreamingQuery()`, helpers: `collectMessages()`, `TestRunner`, `dumpMessages()`, `MessageChannel`, `userMessage()`. |
-| `patch/test-all.mjs` | Sequential runner for all patch tests |
-| `patch/mcp-test-server.mjs` | Minimal stdio MCP server for MCP-related tests |
-| `patch/<name>/test.mjs` | Individual patch test (one per patch) |
+| File                        | Purpose                                                                                                                                                                                                                                                                                                                                          |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `patch/test-helpers.mjs`    | Shared utilities: spawns `bun-claude` directly, exposes stream-json iterator + control channel (`stopTask`, `mcpServerStatus`, `dequeueMessage`, `toggleMcpServer`, `getUsage`, `close`). Factories: `createQuery()`, `createStreamingQuery()`, helpers: `collectMessages()`, `TestRunner`, `dumpMessages()`, `MessageChannel`, `userMessage()`. |
+| `patch/test-all.mjs`        | Sequential runner for all patch tests                                                                                                                                                                                                                                                                                                            |
+| `patch/mcp-test-server.mjs` | Minimal stdio MCP server for MCP-related tests                                                                                                                                                                                                                                                                                                   |
+| `patch/<name>/test.mjs`     | Individual patch test (one per patch)                                                                                                                                                                                                                                                                                                            |
 
 **Prerequisite:** `vendor/claude-cli/bun-claude` must exist. Run `bun run ensure-cli` (or `bun run update-cli` after bumping `claudeCliVersion`). Tests auto-fail with a clear error if the binary is missing.
 
@@ -39,6 +39,7 @@ node patch/<name>/test.mjs
 ### 1. Understand the Patch Behavior
 
 Before writing, read the patch's `apply.mjs` and `README.md` to understand:
+
 - What observable behavior the patch adds or fixes
 - What SDK message types/subtypes should appear when it works
 - What workflow triggers the patched code path
@@ -46,6 +47,7 @@ Before writing, read the patch's `apply.mjs` and `README.md` to understand:
 ### 2. Choose the Right Query Helper
 
 **`createQuery(prompt, opts, timeoutMs)`** — For simple one-shot prompts where the model runs to completion:
+
 ```js
 import { createQuery, collectMessages, TestRunner, dumpMessages } from '../test-helpers.mjs'
 
@@ -54,6 +56,7 @@ const messages = await collectMessages(q, { cleanup })
 ```
 
 **`createStreamingQuery(initialPrompt, opts, timeoutMs)`** — For multi-turn tests that need to send follow-up messages or steer mid-turn:
+
 ```js
 import { createStreamingQuery, userMessage, collectMessages, TestRunner } from '../test-helpers.mjs'
 
@@ -108,33 +111,47 @@ main().catch((err) => {
 ### 4. Assertion Patterns
 
 **Check for a message type with fields:**
+
 ```js
-t.assertSome('stream_event from sub-agent', messages,
+t.assertSome(
+  'stream_event from sub-agent',
+  messages,
   (m) => m.type === 'stream_event' && !!m.parent_tool_use_id
 )
 ```
 
 **Check system notification:**
+
 ```js
-t.assertSome('task_notification with status stopped', messages,
+t.assertSome(
+  'task_notification with status stopped',
+  messages,
   (m) => m.type === 'system' && m.subtype === 'task_notification' && m.status === 'stopped'
 )
 ```
 
 **Check teammate messages:**
+
 ```js
-t.assertSome('assistant with teammate_id', messages,
+t.assertSome(
+  'assistant with teammate_id',
+  messages,
   (m) => m.type === 'assistant' && !!m.teammate_id
 )
 ```
 
 **Check MCP server status (via control request):**
+
 ```js
 const servers = await q.mcpServerStatus()
-t.assert('MCP server connected', servers.some(s => s.name === 'test-server' && s.status === 'connected'))
+t.assert(
+  'MCP server connected',
+  servers.some((s) => s.name === 'test-server' && s.status === 'connected')
+)
 ```
 
 **Check control request response shape** (SDK wraps in envelope):
+
 ```js
 // Control requests like dequeueMessage return a control_response envelope:
 //   { subtype: 'success', request_id: '...', response: { removed: 0 } }
@@ -178,7 +195,7 @@ const messages = await collectMessages(q, {
       // Second turn done — wrap up
       channel.end()
     }
-  },
+  }
 })
 ```
 
@@ -195,19 +212,24 @@ import { resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
-const { q, cleanup } = createQuery(PROMPT, {
-  mcpServers: {
-    'test-server': {
-      command: 'node',
-      args: [resolve(__dirname, '../mcp-test-server.mjs')],
-    },
+const { q, cleanup } = createQuery(
+  PROMPT,
+  {
+    mcpServers: {
+      'test-server': {
+        command: 'node',
+        args: [resolve(__dirname, '../mcp-test-server.mjs')]
+      }
+    }
   },
-}, 120_000)
+  120_000
+)
 ```
 
 The test server provides one tool: `patch_test_echo` — takes `{ text: string }` and echoes it back. The model sees it as `mcp__test-server__patch_test_echo`.
 
 **MCP server status shape** (returned by `q.mcpServerStatus()`):
+
 ```json
 {
   "name": "test-server",
@@ -231,40 +253,46 @@ After `toggleMcpServer(name, false)`: `status: "disabled"`, `tools: []`.
 ### 9. Registering New Tests
 
 Add new tests to `patch/test-all.mjs`:
+
 ```js
-const tests = [
-  { name: 'my-patch', script: resolve(__dirname, 'my-patch/test.mjs') },
-]
+const tests = [{ name: 'my-patch', script: resolve(__dirname, 'my-patch/test.mjs') }]
 ```
 
 ## Patch-Specific Test Strategies
 
 ### subagent-streaming
+
 **Trigger:** Forceful prompt to use Agent tool (synchronous). Must use `effort: 'medium'`.
 **Assert:** `stream_event` and `assistant` messages with non-null `parent_tool_use_id`. Check tool name with `b.name === 'Task' || b.name === 'Agent'` (name varies by SDK version).
 
 ### taskstop-notification
+
 **Trigger:** Launch background Agent with `sleep 300`, detect `task_started` via `onMessage`, then call `q.stopTask(taskId)` after a 2s delay.
 **Assert:** `task_notification` with `status === 'stopped'`, matching `task_id` between started and notification.
 
 ### team-streaming
+
 **Trigger:** Prompt creates a team with one teammate via TeamCreate + Agent tools. Timeout 180s.
 **Assert:** `stream_event`/`assistant` with `teammate_id` (format: `name@team`), `task_notification` with `@` in task_id.
 
 ### queue-control
+
 **Trigger:** Streaming query → prompt asks for `sleep 8 && echo done` → on tool_use detection, push steer message via `channel.push(userMessage(...))` after 1s delay.
 **Assert:** `queued_command_consumed` system notification received. `dequeueMessage()` returns envelope with `response.removed` field (number). For non-existent message, `removed === 0`.
 
 ### mcp-status
+
 **Trigger:** Query with MCP test server configured → detect `init` → call `q.mcpServerStatus()`.
 **Assert:** Non-empty array, test server present with `status: 'connected'`, has tools array with entries.
 
 ### mcp-tool-refresh
+
 **Trigger:** Streaming query with MCP test server → 3 turns:
+
 1. Ask model to call `patch_test_echo` (should succeed)
 2. Toggle OFF → verify `mcpServerStatus()` shows `disabled` + 0 tools → ask model to list tools
 3. Toggle ON → wait 2s for reconnection → verify status → ask model to call tool again (should succeed)
-**Assert:** Tool used in turn 1 and turn 3, toggle states correct in `mcpServerStatus()`, session completes.
+   **Assert:** Tool used in turn 1 and turn 3, toggle states correct in `mcpServerStatus()`, session completes.
 
 ## Debugging Failures
 
@@ -286,14 +314,14 @@ const tests = [
 
 ## SDK Message Type Reference
 
-| Type | Subtype | Key Fields | When |
-|---|---|---|---|
-| `system` | `init` | `slash_commands`, `mcp_servers` | Session start (once per turn in streaming mode) |
-| `assistant` | — | `message.content[]`, `parent_tool_use_id`, `teammate_id` | Model response |
-| `stream_event` | — | `event.type` (content_block_start/delta/stop, message_delta/stop), `parent_tool_use_id`, `teammate_id` | Streaming delta |
-| `user` | — | `message`, `parent_tool_use_id`, `teammate_id` | Synthetic tool_result |
-| `system` | `task_started` | `task_id` | Background agent/task launched |
-| `system` | `task_notification` | `task_id`, `status` (completed/stopped/failed) | Background agent/task ended |
-| `system` | `queued_command_consumed` | — | Steer message was consumed by CLI |
-| `rate_limit_event` | — | — | API rate limit info (ignore in tests) |
-| `result` | `success`/`error_*` | `total_cost_usd`, `num_turns` | Turn/session completed |
+| Type               | Subtype                   | Key Fields                                                                                             | When                                            |
+| ------------------ | ------------------------- | ------------------------------------------------------------------------------------------------------ | ----------------------------------------------- |
+| `system`           | `init`                    | `slash_commands`, `mcp_servers`                                                                        | Session start (once per turn in streaming mode) |
+| `assistant`        | —                         | `message.content[]`, `parent_tool_use_id`, `teammate_id`                                               | Model response                                  |
+| `stream_event`     | —                         | `event.type` (content_block_start/delta/stop, message_delta/stop), `parent_tool_use_id`, `teammate_id` | Streaming delta                                 |
+| `user`             | —                         | `message`, `parent_tool_use_id`, `teammate_id`                                                         | Synthetic tool_result                           |
+| `system`           | `task_started`            | `task_id`                                                                                              | Background agent/task launched                  |
+| `system`           | `task_notification`       | `task_id`, `status` (completed/stopped/failed)                                                         | Background agent/task ended                     |
+| `system`           | `queued_command_consumed` | —                                                                                                      | Steer message was consumed by CLI               |
+| `rate_limit_event` | —                         | —                                                                                                      | API rate limit info (ignore in tests)           |
+| `result`           | `success`/`error_*`       | `total_cost_usd`, `num_turns`                                                                          | Turn/session completed                          |

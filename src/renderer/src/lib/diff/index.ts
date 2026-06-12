@@ -16,5 +16,5 @@ export type {
   DiffViewMode,
   SplitRow,
   SplitRowData,
-  HunkGap,
+  HunkGap
 } from './types'

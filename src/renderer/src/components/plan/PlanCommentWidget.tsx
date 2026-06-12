@@ -11,7 +11,14 @@ interface Props {
   onClose: () => void
 }
 
-export function PlanCommentWidget({ selectedText, lineNumber, endLineNumber, sectionIndex, onSave, onClose }: Props): React.JSX.Element {
+export function PlanCommentWidget({
+  selectedText,
+  lineNumber,
+  endLineNumber,
+  sectionIndex,
+  onSave,
+  onClose
+}: Props): React.JSX.Element {
   const [text, setText] = useState('')
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const isRange = lineNumber !== endLineNumber
@@ -38,23 +45,27 @@ export function PlanCommentWidget({ selectedText, lineNumber, endLineNumber, sec
     onClose()
   }, [text, selectedText, lineNumber, endLineNumber, sectionIndex, onSave, onClose])
 
-  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
-    if (e.key === 'Escape') {
-      e.preventDefault()
-      onClose()
-    } else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-      e.preventDefault()
-      handleSave()
-    }
-  }, [onClose, handleSave])
+  const handleKeyDown = useCallback(
+    (e: React.KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        onClose()
+      } else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+        e.preventDefault()
+        handleSave()
+      }
+    },
+    [onClose, handleSave]
+  )
 
   // Truncate long selections for display
-  const displayText = selectedText.length > 200
-    ? selectedText.slice(0, 200) + '…'
-    : selectedText
+  const displayText = selectedText.length > 200 ? selectedText.slice(0, 200) + '…' : selectedText
 
   return (
-    <div className="plan-comment-widget mx-2 my-1.5 rounded-md border border-accent/40 shadow-lg overflow-hidden bg-bg-secondary" data-plan-comment>
+    <div
+      className="plan-comment-widget mx-2 my-1.5 rounded-md border border-accent/40 shadow-lg overflow-hidden bg-bg-secondary"
+      data-plan-comment
+    >
       {/* Quoted selection */}
       <div className="px-3 py-2 border-b border-border/50">
         <div className="text-[11px] text-text-muted leading-[1.5] whitespace-pre-wrap break-words">

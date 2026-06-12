@@ -16,17 +16,26 @@ export function PlanReviewPanel({ style }: Props): React.JSX.Element {
   const planReview = useActiveSession((s) => s.planReview)
   const uiFontScale = useSessionStore((s) => s.settings.uiFontScale)
 
-  const handleSaveComment = useCallback((comment: PlanComment) => {
-    if (activeSessionId) addPlanComment(activeSessionId, comment)
-  }, [activeSessionId, addPlanComment])
+  const handleSaveComment = useCallback(
+    (comment: PlanComment) => {
+      if (activeSessionId) addPlanComment(activeSessionId, comment)
+    },
+    [activeSessionId, addPlanComment]
+  )
 
-  const handleUpdateComment = useCallback((commentId: string, text: string) => {
-    if (activeSessionId) updatePlanComment(activeSessionId, commentId, text)
-  }, [activeSessionId, updatePlanComment])
+  const handleUpdateComment = useCallback(
+    (commentId: string, text: string) => {
+      if (activeSessionId) updatePlanComment(activeSessionId, commentId, text)
+    },
+    [activeSessionId, updatePlanComment]
+  )
 
-  const handleRemoveComment = useCallback((commentId: string) => {
-    if (activeSessionId) removePlanComment(activeSessionId, commentId)
-  }, [activeSessionId, removePlanComment])
+  const handleRemoveComment = useCallback(
+    (commentId: string) => {
+      if (activeSessionId) removePlanComment(activeSessionId, commentId)
+    },
+    [activeSessionId, removePlanComment]
+  )
 
   const handleClose = useCallback(() => {
     if (activeSessionId) closePlanPanel(activeSessionId)

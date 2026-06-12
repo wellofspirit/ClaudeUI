@@ -9,7 +9,14 @@ import type {
   FullStateSnapshot
 } from '../shared/remote-protocol'
 
-export type ConnectionState = 'connecting' | 'authenticating' | 'e2e-activating' | 'syncing' | 'connected' | 'reconnecting' | 'failed'
+export type ConnectionState =
+  | 'connecting'
+  | 'authenticating'
+  | 'e2e-activating'
+  | 'syncing'
+  | 'connected'
+  | 'reconnecting'
+  | 'failed'
 
 type EventCallback = (channel: string, ...args: unknown[]) => void
 type StateCallback = (state: ConnectionState, error?: string) => void
@@ -66,13 +73,21 @@ export class RemoteConnection {
   }
 
   /** Set callback for incoming events. */
-  setEventHandler(cb: EventCallback): void { this.onEvent = cb }
+  setEventHandler(cb: EventCallback): void {
+    this.onEvent = cb
+  }
   /** Set callback for connection state changes. */
-  setStateHandler(cb: StateCallback): void { this.onStateChange = cb }
+  setStateHandler(cb: StateCallback): void {
+    this.onStateChange = cb
+  }
   /** Set callback for full state snapshots (initial sync or reconnect). */
-  setFullStateHandler(cb: FullStateCallback): void { this.onFullState = cb }
+  setFullStateHandler(cb: FullStateCallback): void {
+    this.onFullState = cb
+  }
   /** Set callback for catchup event batches (reconnect). */
-  setCatchupHandler(cb: CatchupCallback): void { this.onCatchup = cb }
+  setCatchupHandler(cb: CatchupCallback): void {
+    this.onCatchup = cb
+  }
 
   /** Start the connection. */
   connect(): void {
@@ -116,7 +131,9 @@ export class RemoteConnection {
   }
 
   /** Get the current last sequence number (for debugging). */
-  getLastSeq(): number { return this.lastSeq }
+  getLastSeq(): number {
+    return this.lastSeq
+  }
 
   // ---------------------------------------------------------------------------
   // Internal

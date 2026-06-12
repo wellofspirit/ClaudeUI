@@ -19,45 +19,45 @@ Low-value components (minimal logic, no FC/View split) use **Option B — DOM in
 
 ### High Value — FC/View split + component test
 
-| Component | Test File | Tests |
-|-----------|-----------|-------|
-| Sidebar | `Sidebar/__tests__/Sidebar.component.test.ts` | 20 |
-| SettingsDialog | `SettingsDialog/__tests__/SettingsDialog.component.test.ts` | 6 |
-| PermissionsDialog | `PermissionsDialog/__tests__/PermissionsDialog.component.test.ts` | 11 |
-| McpDialog | `McpDialog/__tests__/McpDialog.component.test.ts` | 12 |
-| AutomationConfig | `automation/AutomationConfig/__tests__/AutomationConfig.component.test.ts` | 7 |
-| AutomationList | `automation/AutomationList/__tests__/AutomationList.component.test.ts` | 6 |
-| AutomationRunHistory | `automation/AutomationRunHistory/__tests__/AutomationRunHistory.component.test.ts` | 6 |
-| RemoteAccessModal | `RemoteAccessModal/__tests__/RemoteAccessModal.component.test.ts` | 7 |
-| ToolCallBlock | `chat/ToolCallBlock/__tests__/ToolCallBlock.component.test.ts` | 9 |
+| Component            | Test File                                                                          | Tests |
+| -------------------- | ---------------------------------------------------------------------------------- | ----- |
+| Sidebar              | `Sidebar/__tests__/Sidebar.component.test.ts`                                      | 20    |
+| SettingsDialog       | `SettingsDialog/__tests__/SettingsDialog.component.test.ts`                        | 6     |
+| PermissionsDialog    | `PermissionsDialog/__tests__/PermissionsDialog.component.test.ts`                  | 11    |
+| McpDialog            | `McpDialog/__tests__/McpDialog.component.test.ts`                                  | 12    |
+| AutomationConfig     | `automation/AutomationConfig/__tests__/AutomationConfig.component.test.ts`         | 7     |
+| AutomationList       | `automation/AutomationList/__tests__/AutomationList.component.test.ts`             | 6     |
+| AutomationRunHistory | `automation/AutomationRunHistory/__tests__/AutomationRunHistory.component.test.ts` | 6     |
+| RemoteAccessModal    | `RemoteAccessModal/__tests__/RemoteAccessModal.component.test.ts`                  | 7     |
+| ToolCallBlock        | `chat/ToolCallBlock/__tests__/ToolCallBlock.component.test.ts`                     | 9     |
 
 ### Medium Value — FC/View split + component test
 
-| Component | Test File | Tests |
-|-----------|-----------|-------|
-| WorktreesModal | `WorktreesModal/__tests__/WorktreesModal.component.test.ts` | 3 |
-| QuitWorktreeModal | `QuitWorktreeModal/__tests__/QuitWorktreeModal.component.test.ts` | 4 |
-| WorktreeCleanupModal | `WorktreeCleanupModal/__tests__/WorktreeCleanupModal.component.test.ts` | 4 |
-| WelcomeScreen | `WelcomeScreen/__tests__/WelcomeScreen.component.test.ts` | 3 |
-| TaskDetailPanel | `TaskDetailPanel/__tests__/TaskDetailPanel.component.test.ts` | 4 |
-| TerminalPanel | `terminal/TerminalPanel/__tests__/TerminalPanel.component.test.ts` | 5 |
-| XTermInstance | `terminal/__tests__/XTermInstance.component.test.ts` | 4 |
-| PlanReviewPanel | `plan/PlanReviewPanel/__tests__/PlanReviewPanel.component.test.ts` | 5 |
-| PlanReviewBar | `plan/PlanReviewBar/__tests__/PlanReviewBar.component.test.ts` | 4 |
-| AskUserQuestionBlock | `chat/AskUserQuestionBlock/__tests__/AskUserQuestionBlock.component.test.ts` | 3 |
-| SkillsDialog | `SkillsDialog/__tests__/SkillsDialog.component.test.ts` | 5 |
-| WindowControls | `WindowControls/__tests__/WindowControls.component.test.ts` | 4 |
+| Component            | Test File                                                                    | Tests |
+| -------------------- | ---------------------------------------------------------------------------- | ----- |
+| WorktreesModal       | `WorktreesModal/__tests__/WorktreesModal.component.test.ts`                  | 3     |
+| QuitWorktreeModal    | `QuitWorktreeModal/__tests__/QuitWorktreeModal.component.test.ts`            | 4     |
+| WorktreeCleanupModal | `WorktreeCleanupModal/__tests__/WorktreeCleanupModal.component.test.ts`      | 4     |
+| WelcomeScreen        | `WelcomeScreen/__tests__/WelcomeScreen.component.test.ts`                    | 3     |
+| TaskDetailPanel      | `TaskDetailPanel/__tests__/TaskDetailPanel.component.test.ts`                | 4     |
+| TerminalPanel        | `terminal/TerminalPanel/__tests__/TerminalPanel.component.test.ts`           | 5     |
+| XTermInstance        | `terminal/__tests__/XTermInstance.component.test.ts`                         | 4     |
+| PlanReviewPanel      | `plan/PlanReviewPanel/__tests__/PlanReviewPanel.component.test.ts`           | 5     |
+| PlanReviewBar        | `plan/PlanReviewBar/__tests__/PlanReviewBar.component.test.ts`               | 4     |
+| AskUserQuestionBlock | `chat/AskUserQuestionBlock/__tests__/AskUserQuestionBlock.component.test.ts` | 3     |
+| SkillsDialog         | `SkillsDialog/__tests__/SkillsDialog.component.test.ts`                      | 5     |
+| WindowControls       | `WindowControls/__tests__/WindowControls.component.test.ts`                  | 4     |
 
 ### Low Value — DOM interaction tests only (no FC/View split)
 
-| Component | Test File | Tests | Notes |
-|-----------|-----------|-------|-------|
-| BtwCard | `chat/__tests__/BtwCard.component.test.tsx` | 3 | `clearBtw` store action |
-| FloatingError | `chat/__tests__/FloatingError.component.test.tsx` | 2 | Error dismiss via store |
-| AgentTabBar | `chat/__tests__/AgentTabBar.component.test.tsx` | 5 | `setFocusedAgent`, stop task, monitor, non-running negative |
-| TodoWidget | `__tests__/TodoWidget.component.test.tsx` | 3 | Reads todos, expand toggle |
-| GitChangesPill | `git/__tests__/GitChangesPill.component.test.tsx` | 3 | `openGitPanel` / `closeGitPanel` toggle |
-| PluginWebView | `plugin/__tests__/PluginWebView.component.test.tsx` | 3 | WebView lifecycle, preload path |
+| Component      | Test File                                           | Tests | Notes                                                       |
+| -------------- | --------------------------------------------------- | ----- | ----------------------------------------------------------- |
+| BtwCard        | `chat/__tests__/BtwCard.component.test.tsx`         | 3     | `clearBtw` store action                                     |
+| FloatingError  | `chat/__tests__/FloatingError.component.test.tsx`   | 2     | Error dismiss via store                                     |
+| AgentTabBar    | `chat/__tests__/AgentTabBar.component.test.tsx`     | 5     | `setFocusedAgent`, stop task, monitor, non-running negative |
+| TodoWidget     | `__tests__/TodoWidget.component.test.tsx`           | 3     | Reads todos, expand toggle                                  |
+| GitChangesPill | `git/__tests__/GitChangesPill.component.test.tsx`   | 3     | `openGitPanel` / `closeGitPanel` toggle                     |
+| PluginWebView  | `plugin/__tests__/PluginWebView.component.test.tsx` | 3     | WebView lifecycle, preload path                             |
 
 ### Skipped (no meaningful logic beyond store read)
 
@@ -66,18 +66,18 @@ Low-value components (minimal logic, no FC/View split) use **Option B — DOM in
 
 ### Pre-existing (unchanged)
 
-| Component | Test File | Tests |
-|-----------|-----------|-------|
-| InputBox | `chat/InputBox/__tests__/InputBox.component.test.ts` | 34 |
-| GitCommitBox | `git/__tests__/GitCommitBox.component.test.ts` | 29 |
-| ExitPlanModeCard | `chat/__tests__/ExitPlanModeCard.component.test.ts` | 16 |
-| FloatingApproval | `chat/__tests__/FloatingApproval.component.test.tsx` | 20 |
-| GitFileTree | `git/GitFileTree/__tests__/GitFileTree.component.test.ts` | 12 |
-| GitBranchDropdown | `git/GitBranchDropdown/__tests__/GitBranchDropdown.component.test.ts` | 18 |
-| GitFileDiffView | `git/GitFileDiffView/__tests__/GitFileDiffView.component.test.ts` | 9 |
-| GitPanel | `git/GitPanel/__tests__/GitPanel.component.test.ts` | 8 |
-| TeamsView | `TeamsView/__tests__/TeamsView.component.test.ts` | 5 |
-| ReviewBar | `git/ReviewBar/__tests__/ReviewBar.component.test.ts` | 17 |
+| Component         | Test File                                                             | Tests |
+| ----------------- | --------------------------------------------------------------------- | ----- |
+| InputBox          | `chat/InputBox/__tests__/InputBox.component.test.ts`                  | 34    |
+| GitCommitBox      | `git/__tests__/GitCommitBox.component.test.ts`                        | 29    |
+| ExitPlanModeCard  | `chat/__tests__/ExitPlanModeCard.component.test.ts`                   | 16    |
+| FloatingApproval  | `chat/__tests__/FloatingApproval.component.test.tsx`                  | 20    |
+| GitFileTree       | `git/GitFileTree/__tests__/GitFileTree.component.test.ts`             | 12    |
+| GitBranchDropdown | `git/GitBranchDropdown/__tests__/GitBranchDropdown.component.test.ts` | 18    |
+| GitFileDiffView   | `git/GitFileDiffView/__tests__/GitFileDiffView.component.test.ts`     | 9     |
+| GitPanel          | `git/GitPanel/__tests__/GitPanel.component.test.ts`                   | 8     |
+| TeamsView         | `TeamsView/__tests__/TeamsView.component.test.ts`                     | 5     |
+| ReviewBar         | `git/ReviewBar/__tests__/ReviewBar.component.test.ts`                 | 17    |
 
 ## Test Infrastructure Reference
 

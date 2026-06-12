@@ -78,8 +78,8 @@ if (src.includes(patchAMarker)) {
     // Legacy path for older SDK versions
     const validatorRe = new RegExp(
       `(${V})=\\((${V})\\)=>\\2==="completed"\\|\\|\\2==="failed"\\|\\|\\2==="stopped",` +
-      `(${V})=(${V})\\?\\.\\[1\\],` +
-      `(${V})=\\1\\(\\3\\)\\?\\3:"completed";`
+        `(${V})=(${V})\\?\\.\\[1\\],` +
+        `(${V})=\\1\\(\\3\\)\\?\\3:"completed";`
     )
 
     const validatorMatch = src.match(validatorRe)
@@ -157,8 +157,7 @@ if (src.includes(patchBMarker)) {
   const wideContext = src.slice(wideStart, wideEnd)
 
   const upstreamNotifyRe = new RegExp(
-    `notified:!0[\\s\\S]{1,300}?` +
-    `(${V})\\(${V},"stopped",\\{toolUseId:`
+    `notified:!0[\\s\\S]{1,300}?` + `(${V})\\(${V},"stopped",\\{toolUseId:`
   )
 
   if (wideContext.match(upstreamNotifyRe)) {
@@ -169,17 +168,19 @@ if (src.includes(patchBMarker)) {
     //   function NAME(A,q,K,Y,z){...K==="completed"?...:K==="failed"?...:"was stopped"...}
     const notifySenderRe = new RegExp(
       `function (${V})\\((${V}),(${V}),(${V}),(${V}),(${V})\\)\\{` +
-      `[\\s\\S]{1,500}?` +
-      `\\4==="completed"\\?[\\s\\S]{1,200}?` +
-      `\\4==="failed"\\?[\\s\\S]{1,200}?` +
-      `:"was stopped"`
+        `[\\s\\S]{1,500}?` +
+        `\\4==="completed"\\?[\\s\\S]{1,200}?` +
+        `\\4==="failed"\\?[\\s\\S]{1,200}?` +
+        `:"was stopped"`
     )
 
     const notifySenderMatch = src.match(notifySenderRe)
 
     if (!notifySenderMatch) {
       console.error('ERROR: Cannot locate notification sender function.')
-      console.error('Search pattern: function NAME(taskId,cwd,status,summary,setState){..."was stopped"}')
+      console.error(
+        'Search pattern: function NAME(taskId,cwd,status,summary,setState){..."was stopped"}'
+      )
       process.exit(1)
     }
 
@@ -224,14 +225,14 @@ if (src.includes(patchBMarker)) {
       `(${V})=\\(await (${V})\\(\\)\\)\\.tasks\\?\\.\\[${taskIdVarName}\\]`
     )
     // v2.1.71+: refactored into JS1() — no await, just Y().tasks?.[A]
-    const taskVarRe3 = new RegExp(
-      `let (${V})=(${V})\\(\\)\\.tasks\\?\\.\\[${taskIdVarName}\\];`
-    )
+    const taskVarRe3 = new RegExp(`let (${V})=(${V})\\(\\)\\.tasks\\?\\.\\[${taskIdVarName}\\];`)
     // v2.1.71+: comma-separated let — let{...}=q,VAR=FUNC().tasks?.[TASKID];
-    const taskVarRe4 = new RegExp(
-      `,(${V})=(${V})\\(\\)\\.tasks\\?\\.\\[${taskIdVarName}\\];`
-    )
-    const taskVarMatch = searchContext.match(taskVarRe1) || searchContext.match(taskVarRe2) || searchContext.match(taskVarRe3) || searchContext.match(taskVarRe4)
+    const taskVarRe4 = new RegExp(`,(${V})=(${V})\\(\\)\\.tasks\\?\\.\\[${taskIdVarName}\\];`)
+    const taskVarMatch =
+      searchContext.match(taskVarRe1) ||
+      searchContext.match(taskVarRe2) ||
+      searchContext.match(taskVarRe3) ||
+      searchContext.match(taskVarRe4)
 
     if (!taskVarMatch) {
       console.error(`ERROR: Cannot locate task variable for tasks?.[${taskIdVarName}]`)
@@ -277,17 +278,23 @@ console.log(`\nPatch applied to ${cliPath}`)
 const verify = readFileSync(cliPath, 'utf-8')
 
 // Part A is optional (upstreamed in SDK 0.2.49+)
-const partAOk = verify.includes(patchAMarker) ||
-  /=\([\w$]+\)=>[\w$]+===\s*"completed"\|\|[\w$]+===\s*"failed"\|\|[\w$]+===\s*"stopped"\|\|[\w$]+===\s*"killed"/.test(verify)
+const partAOk =
+  verify.includes(patchAMarker) ||
+  /=\([\w$]+\)=>[\w$]+===\s*"completed"\|\|[\w$]+===\s*"failed"\|\|[\w$]+===\s*"stopped"\|\|[\w$]+===\s*"killed"/.test(
+    verify
+  )
 // Part B is optional (upstreamed in SDK 0.2.87+ — rx8() calls cN() with "stopped")
 const partBUpstreamed = new RegExp(
-  `notified:!0[\\s\\S]{1,300}?` +
-  `[\\w$]+\\([\\w$]+,"stopped",\\{toolUseId:`
+  `notified:!0[\\s\\S]{1,300}?` + `[\\w$]+\\([\\w$]+,"stopped",\\{toolUseId:`
 ).test(verify)
 const partBOk = verify.includes(patchBMarker) || partBUpstreamed
 
-console.log(`  ${partAOk ? 'OK' : 'MISSING'} Part A: killed → stopped mapping ${verify.includes(patchAMarker) ? '(patched)' : '(upstreamed)'}`)
-console.log(`  ${partBOk ? 'OK' : 'MISSING'} Part B: TaskStop notification injection ${verify.includes(patchBMarker) ? '(patched)' : '(upstreamed)'}`)
+console.log(
+  `  ${partAOk ? 'OK' : 'MISSING'} Part A: killed → stopped mapping ${verify.includes(patchAMarker) ? '(patched)' : '(upstreamed)'}`
+)
+console.log(
+  `  ${partBOk ? 'OK' : 'MISSING'} Part B: TaskStop notification injection ${verify.includes(patchBMarker) ? '(patched)' : '(upstreamed)'}`
+)
 
 if (!partBOk) {
   console.error('\nVerification FAILED.')

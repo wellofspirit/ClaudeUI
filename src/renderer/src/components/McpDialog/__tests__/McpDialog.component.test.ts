@@ -16,8 +16,6 @@
  *   9. filter prop flows through
  */
 
- 
-
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import React from 'react'
 import { render, act } from '@testing-library/react'
@@ -30,7 +28,7 @@ vi.mock('../View', () => ({
   McpDialogView: (props: McpDialogViewProps) => {
     viewProps = props
     return null
-  },
+  }
 }))
 
 const CWD = '/d/repo'
@@ -44,7 +42,11 @@ describe('McpDialog FC', () => {
   let app: TestApp
   let onClose: ReturnType<typeof vi.fn>
   let loadCalls: Array<{ scope: string; cwd: string | undefined }>
-  let saveCalls: Array<{ scope: string; servers: Record<string, McpServerConfig>; cwd: string | undefined }>
+  let saveCalls: Array<{
+    scope: string
+    servers: Record<string, McpServerConfig>
+    cwd: string | undefined
+  }>
   let toggleCalls: Array<{ routingId: string; name: string; enabled: boolean }>
   let toggleDisabledCalls: Array<{ cwd: string; name: string; enabled: boolean }>
   let reconnectCalls: Array<{ routingId: string; name: string }>
@@ -66,21 +68,33 @@ describe('McpDialog FC', () => {
       if (scope === 'project') return { 'proj-srv': makeConfig() }
       return {}
     })
-    app.bridge.ipcMain.handle('mcp:save-servers', async (_e, scope: string, servers: Record<string, McpServerConfig>, cwd?: string) => {
-      saveCalls.push({ scope, servers, cwd })
-    })
-    app.bridge.ipcMain.handle('mcp:remove-server', async (_e, scope: string, name: string, cwd?: string) => {
-      removeCalls.push({ scope, name, cwd })
-    })
+    app.bridge.ipcMain.handle(
+      'mcp:save-servers',
+      async (_e, scope: string, servers: Record<string, McpServerConfig>, cwd?: string) => {
+        saveCalls.push({ scope, servers, cwd })
+      }
+    )
+    app.bridge.ipcMain.handle(
+      'mcp:remove-server',
+      async (_e, scope: string, name: string, cwd?: string) => {
+        removeCalls.push({ scope, name, cwd })
+      }
+    )
     app.bridge.ipcMain.handle('mcp:read-disabled', async () => [])
     app.bridge.ipcMain.handle('mcp:status', async () => null)
-    app.bridge.ipcMain.handle('mcp:toggle', async (_e, routingId: string, name: string, enabled: boolean) => {
-      toggleCalls.push({ routingId, name, enabled })
-      return { ok: true, data: undefined }
-    })
-    app.bridge.ipcMain.handle('mcp:toggle-disabled', async (_e, cwd: string, name: string, enabled: boolean) => {
-      toggleDisabledCalls.push({ cwd, name, enabled })
-    })
+    app.bridge.ipcMain.handle(
+      'mcp:toggle',
+      async (_e, routingId: string, name: string, enabled: boolean) => {
+        toggleCalls.push({ routingId, name, enabled })
+        return { ok: true, data: undefined }
+      }
+    )
+    app.bridge.ipcMain.handle(
+      'mcp:toggle-disabled',
+      async (_e, cwd: string, name: string, enabled: boolean) => {
+        toggleDisabledCalls.push({ cwd, name, enabled })
+      }
+    )
     app.bridge.ipcMain.handle('mcp:reconnect', async (_e, routingId: string, name: string) => {
       reconnectCalls.push({ routingId, name })
       return { ok: true, data: undefined }
@@ -92,15 +106,27 @@ describe('McpDialog FC', () => {
     app.teardown()
   })
 
-  async function renderFC(props: { open: boolean; cwd: string | null; routingId: string | null } = { open: true, cwd: CWD, routingId: null }): Promise<ReturnType<typeof render>> {
+  async function renderFC(
+    props: { open: boolean; cwd: string | null; routingId: string | null } = {
+      open: true,
+      cwd: CWD,
+      routingId: null
+    }
+  ): Promise<ReturnType<typeof render>> {
     const { McpDialog } = await import('../McpDialog')
     return render(React.createElement(McpDialog, { ...props, onClose: onClose as () => void }))
   }
 
   it('loads servers from config on open', async () => {
-    await act(async () => { await renderFC() })
-    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
-    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    await act(async () => {
+      await renderFC()
+    })
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
 
     expect(loadCalls.some((c) => c.scope === 'user')).toBe(true)
     expect(loadCalls.some((c) => c.scope === 'project')).toBe(true)
@@ -109,20 +135,32 @@ describe('McpDialog FC', () => {
   })
 
   it('falls back to config-only when SDK returns nothing', async () => {
-    await act(async () => { await renderFC({ open: true, cwd: CWD, routingId: ROUTING_ID }) })
-    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
-    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    await act(async () => {
+      await renderFC({ open: true, cwd: CWD, routingId: ROUTING_ID })
+    })
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
 
     expect(viewProps.servers.length).toBeGreaterThan(0)
     expect(viewProps.hasRoutingId).toBe(true)
   })
 
   it('onToggleServer with routingId uses mcpToggleServer IPC', async () => {
-    await act(async () => { await renderFC({ open: true, cwd: CWD, routingId: ROUTING_ID }) })
-    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    await act(async () => {
+      await renderFC({ open: true, cwd: CWD, routingId: ROUTING_ID })
+    })
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
 
     const server = viewProps.servers[0]
-    await act(async () => { await viewProps.onToggleServer(server) })
+    await act(async () => {
+      await viewProps.onToggleServer(server)
+    })
 
     expect(toggleCalls).toHaveLength(1)
     expect(toggleCalls[0].routingId).toBe(ROUTING_ID)
@@ -130,11 +168,17 @@ describe('McpDialog FC', () => {
   })
 
   it('onToggleServer without routingId uses mcpToggleDisabled IPC', async () => {
-    await act(async () => { await renderFC({ open: true, cwd: CWD, routingId: null }) })
-    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    await act(async () => {
+      await renderFC({ open: true, cwd: CWD, routingId: null })
+    })
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
 
     const server = viewProps.servers[0]
-    await act(async () => { await viewProps.onToggleServer(server) })
+    await act(async () => {
+      await viewProps.onToggleServer(server)
+    })
 
     expect(toggleDisabledCalls).toHaveLength(1)
     expect(toggleDisabledCalls[0].cwd).toBe(CWD)
@@ -142,22 +186,34 @@ describe('McpDialog FC', () => {
   })
 
   it('onReconnectServer calls mcpReconnectServer IPC', async () => {
-    await act(async () => { await renderFC({ open: true, cwd: CWD, routingId: ROUTING_ID }) })
-    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    await act(async () => {
+      await renderFC({ open: true, cwd: CWD, routingId: ROUTING_ID })
+    })
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
 
     const server = viewProps.servers[0]
-    await act(async () => { await viewProps.onReconnectServer(server) })
+    await act(async () => {
+      await viewProps.onReconnectServer(server)
+    })
 
     expect(reconnectCalls).toHaveLength(1)
     expect(reconnectCalls[0].name).toBe(server.name)
   })
 
   it('onDeleteServer calls removeMcpServer IPC', async () => {
-    await act(async () => { await renderFC({ open: true, cwd: CWD, routingId: null }) })
-    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    await act(async () => {
+      await renderFC({ open: true, cwd: CWD, routingId: null })
+    })
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
 
     const server = viewProps.servers.find((s: McpServerInfo) => s.scope === 'user')!
-    await act(async () => { await viewProps.onDeleteServer(server) })
+    await act(async () => {
+      await viewProps.onDeleteServer(server)
+    })
 
     expect(removeCalls).toHaveLength(1)
     expect(removeCalls[0].scope).toBe('user')
@@ -165,14 +221,18 @@ describe('McpDialog FC', () => {
   })
 
   it('onSubmitAddForm persists via saveMcpServers', async () => {
-    await act(async () => { await renderFC({ open: true, cwd: CWD, routingId: null }) })
-    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    await act(async () => {
+      await renderFC({ open: true, cwd: CWD, routingId: null })
+    })
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
 
     const result = await act(async () => {
       return viewProps.onSubmitAddForm({
         name: 'new-server',
         scope: 'project',
-        config: makeConfig({ command: 'node' }),
+        config: makeConfig({ command: 'node' })
       })
     })
 
@@ -183,15 +243,19 @@ describe('McpDialog FC', () => {
   })
 
   it('onSubmitAddForm returns error when name already exists', async () => {
-    await act(async () => { await renderFC({ open: true, cwd: CWD, routingId: null }) })
-    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    await act(async () => {
+      await renderFC({ open: true, cwd: CWD, routingId: null })
+    })
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
 
     // 'user-srv' already exists in the user scope (from the load stub)
     const result = await act(async () => {
       return viewProps.onSubmitAddForm({
         name: 'user-srv',
         scope: 'user',
-        config: makeConfig(),
+        config: makeConfig()
       })
     })
 
@@ -200,10 +264,16 @@ describe('McpDialog FC', () => {
   })
 
   it('onChangeFilter updates filter prop', async () => {
-    await act(async () => { await renderFC() })
-    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    await act(async () => {
+      await renderFC()
+    })
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
 
-    act(() => { viewProps.onChangeFilter('user') })
+    act(() => {
+      viewProps.onChangeFilter('user')
+    })
 
     expect(viewProps.filter).toBe('user')
   })
@@ -215,20 +285,28 @@ describe('McpDialog FC', () => {
   // debugging mysterious assertion failures.
 
   it('onSubmitAddForm notifies the SDK via mcpSetServers when routingId is active', async () => {
-    const setServerCalls: Array<{ routingId: string; servers: Record<string, McpServerConfig> }> = []
-    app.bridge.ipcMain.handle('mcp:set-servers', async (_e, routingId: string, servers: Record<string, McpServerConfig>) => {
-      setServerCalls.push({ routingId, servers })
-      return { ok: true, data: undefined }
-    })
+    const setServerCalls: Array<{ routingId: string; servers: Record<string, McpServerConfig> }> =
+      []
+    app.bridge.ipcMain.handle(
+      'mcp:set-servers',
+      async (_e, routingId: string, servers: Record<string, McpServerConfig>) => {
+        setServerCalls.push({ routingId, servers })
+        return { ok: true, data: undefined }
+      }
+    )
 
-    await act(async () => { await renderFC({ open: true, cwd: CWD, routingId: ROUTING_ID }) })
-    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    await act(async () => {
+      await renderFC({ open: true, cwd: CWD, routingId: ROUTING_ID })
+    })
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
 
     await act(async () => {
       await viewProps.onSubmitAddForm({
         name: 'sdk-srv',
         scope: 'project',
-        config: makeConfig({ command: 'node' }),
+        config: makeConfig({ command: 'node' })
       })
     })
 
@@ -239,10 +317,13 @@ describe('McpDialog FC', () => {
 
   it('onDeleteServer notifies the SDK with the remaining servers when routingId is active', async () => {
     const setServerCalls: Array<Record<string, McpServerConfig>> = []
-    app.bridge.ipcMain.handle('mcp:set-servers', async (_e, _routingId: string, servers: Record<string, McpServerConfig>) => {
-      setServerCalls.push(servers)
-      return { ok: true, data: undefined }
-    })
+    app.bridge.ipcMain.handle(
+      'mcp:set-servers',
+      async (_e, _routingId: string, servers: Record<string, McpServerConfig>) => {
+        setServerCalls.push(servers)
+        return { ok: true, data: undefined }
+      }
+    )
 
     // Load sees user-srv; after delete, loadMcpServers should be called again and returns empty
     let loadCalls = 0
@@ -252,22 +333,34 @@ describe('McpDialog FC', () => {
       return {}
     })
 
-    await act(async () => { await renderFC({ open: true, cwd: CWD, routingId: ROUTING_ID }) })
-    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    await act(async () => {
+      await renderFC({ open: true, cwd: CWD, routingId: ROUTING_ID })
+    })
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
 
     const server = viewProps.servers.find((s) => s.name === 'user-srv')!
-    await act(async () => { await viewProps.onDeleteServer(server) })
+    await act(async () => {
+      await viewProps.onDeleteServer(server)
+    })
 
     expect(removeCalls).toHaveLength(1)
     expect(setServerCalls.length).toBeGreaterThanOrEqual(1)
   })
 
   it('onReconnectServer is a no-op when routingId is null', async () => {
-    await act(async () => { await renderFC({ open: true, cwd: CWD, routingId: null }) })
-    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    await act(async () => {
+      await renderFC({ open: true, cwd: CWD, routingId: null })
+    })
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
 
     const server = viewProps.servers[0]
-    await act(async () => { await viewProps.onReconnectServer(server) })
+    await act(async () => {
+      await viewProps.onReconnectServer(server)
+    })
 
     expect(reconnectCalls).toHaveLength(0)
   })

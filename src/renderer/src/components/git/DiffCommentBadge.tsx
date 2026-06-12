@@ -6,7 +6,8 @@ interface Props {
   onRemove: (commentId: string) => void
 }
 
-const btnClass = "shrink-0 mt-0.5 w-4 h-4 flex items-center justify-center rounded text-text-muted opacity-0 group-hover:opacity-100 hover:text-text-primary hover:bg-bg-hover transition-all cursor-default"
+const btnClass =
+  'shrink-0 mt-0.5 w-4 h-4 flex items-center justify-center rounded text-text-muted opacity-0 group-hover:opacity-100 hover:text-text-primary hover:bg-bg-hover transition-all cursor-default'
 
 export function DiffCommentBadge({ comments, onEdit, onRemove }: Props): React.JSX.Element {
   return (
@@ -27,21 +28,30 @@ export function DiffCommentBadge({ comments, onEdit, onRemove }: Props): React.J
             </span>
           </div>
           <div className="flex items-center gap-0.5">
-            <button
-              onClick={() => onEdit(c)}
-              className={btnClass}
-              title="Edit comment"
-            >
-              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <button onClick={() => onEdit(c)} className={btnClass} title="Edit comment">
+              <svg
+                width="10"
+                height="10"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
                 <path d="M17 3a2.85 2.85 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
               </svg>
             </button>
-            <button
-              onClick={() => onRemove(c.id)}
-              className={btnClass}
-              title="Remove comment"
-            >
-              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+            <button onClick={() => onRemove(c.id)} className={btnClass} title="Remove comment">
+              <svg
+                width="10"
+                height="10"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+              >
                 <path d="M18 6L6 18M6 6l12 12" />
               </svg>
             </button>

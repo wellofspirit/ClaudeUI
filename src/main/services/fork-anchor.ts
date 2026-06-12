@@ -56,7 +56,9 @@ export function findForkAnchorUuid(
     if (l.type === 'assistant') break
     if (l.type !== 'user') continue
     const msg = l.message as Record<string, unknown> | undefined
-    const blocks = Array.isArray(msg?.content) ? (msg!.content as Array<Record<string, unknown>>) : []
+    const blocks = Array.isArray(msg?.content)
+      ? (msg!.content as Array<Record<string, unknown>>)
+      : []
     const resolvesHere = blocks.some(
       (b) =>
         b.type === 'tool_result' &&

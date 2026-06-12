@@ -36,12 +36,11 @@ When `src/web` was added to the type-checker, it surfaced **10** more missing
 `interruptSession`, `askSideQuestion`, `setThinkingMode`, `deleteSession`,
 `deleteProject`, `removeMcpServer`, `testProxyConnection`) plus a batch of
 latent `as Promise<ReturnType<ClaudeAPI['x']>>` double-`Promise` casts
-(`ReturnType` of a `() => Promise<T>` already *is* `Promise<T>`).
+(`ReturnType` of a `() => Promise<T>` already _is_ `Promise<T>`).
 
 ## Decision
 
-**Add `src/web/**` to `tsconfig.web.json`'s `include` so `bun run typecheck`
-enforces `ClaudeAPI` conformance on the web adapter**, and fix everything that
+**Add `src/web/**`to`tsconfig.web.json`'s `include`so`bun run typecheck`enforces`ClaudeAPI` conformance on the web adapter\*\*, and fix everything that
 surfaced:
 
 - Implemented all 10 missing `ClaudeAPI` methods in `api-adapter.ts` — routed to

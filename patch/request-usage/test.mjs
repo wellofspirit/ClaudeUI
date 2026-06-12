@@ -31,7 +31,7 @@ async function main() {
           console.log('  First request_usage:', JSON.stringify(msg).slice(0, 200))
         }
       }
-    },
+    }
   })
 
   dumpMessages(messages)
@@ -47,18 +47,12 @@ async function main() {
 
     // 3. usage has the canonical token fields (input/output tokens always present).
     const usage = u.usage || {}
-    t.assert(
-      'usage has input_tokens (number)',
-      typeof usage.input_tokens === 'number',
-    )
-    t.assert(
-      'usage has output_tokens (number)',
-      typeof usage.output_tokens === 'number',
-    )
+    t.assert('usage has input_tokens (number)', typeof usage.input_tokens === 'number')
+    t.assert('usage has output_tokens (number)', typeof usage.output_tokens === 'number')
     // Cache fields exist on Anthropic usage objects (may be 0, but present).
     t.assert(
       'usage exposes cache breakdown field',
-      'cache_read_input_tokens' in usage || 'cache_creation_input_tokens' in usage,
+      'cache_read_input_tokens' in usage || 'cache_creation_input_tokens' in usage
     )
 
     // 4. Carries a model string (the patch reads it off the message object).
@@ -73,7 +67,10 @@ async function main() {
   // 6. One emit per API response — the single-turn "hello" prompt yields exactly
   //    one assistant response, so exactly one request_usage (allow >=1 to stay
   //    robust against an internal retry, but never zero — covered by #1).
-  t.assert('request_usage count is reasonable (1-3)', usageMsgs.length >= 1 && usageMsgs.length <= 3)
+  t.assert(
+    'request_usage count is reasonable (1-3)',
+    usageMsgs.length >= 1 && usageMsgs.length <= 3
+  )
 
   const ok = t.summarize()
   process.exit(ok ? 0 : 1)

@@ -50,11 +50,7 @@ delete process.env.CLAUDECODE
 // ---------------------------------------------------------------------------
 
 function buildArgs(options) {
-  const args = [
-    '--output-format', 'stream-json',
-    '--verbose',
-    '--input-format', 'stream-json',
-  ]
+  const args = ['--output-format', 'stream-json', '--verbose', '--input-format', 'stream-json']
   if (options.thinking) {
     const t = options.thinking
     if (t.type === 'enabled' && t.budgetTokens === undefined) {
@@ -97,7 +93,7 @@ function buildArgs(options) {
   } else if (options.settings !== undefined) {
     args.push(
       '--settings',
-      typeof options.settings === 'string' ? options.settings : JSON.stringify(options.settings),
+      typeof options.settings === 'string' ? options.settings : JSON.stringify(options.settings)
     )
   }
   return args
@@ -117,7 +113,7 @@ function buildArgs(options) {
 function spawnQuery({ prompt, options, ac }) {
   if (!existsSync(BUN_CLAUDE_PATH)) {
     throw new Error(
-      `bun-claude not found at ${BUN_CLAUDE_PATH}. Run "bun run ensure-cli" (or "bun run update-cli") first.`,
+      `bun-claude not found at ${BUN_CLAUDE_PATH}. Run "bun run ensure-cli" (or "bun run update-cli") first.`
     )
   }
 
@@ -125,12 +121,14 @@ function spawnQuery({ prompt, options, ac }) {
     cwd: options.cwd ?? PROJECT_ROOT,
     env: { ...process.env, CLAUDE_CODE_ENTRYPOINT: 'sdk-ts' },
     stdio: ['pipe', 'pipe', 'pipe'],
-    windowsHide: true,
+    windowsHide: true
   })
 
   // Fatal spawn error — child.pid will be undefined and exit will fire with an error.
   let spawnError = null
-  child.on('error', (err) => { spawnError = err })
+  child.on('error', (err) => {
+    spawnError = err
+  })
 
   const writer = (obj) => {
     if (!child.stdin || !child.stdin.writable) return
@@ -152,12 +150,20 @@ function spawnQuery({ prompt, options, ac }) {
           const p = pending.get(request_id)
           if (!p) return
           pending.delete(request_id)
-          reject(new Error(`control_request ${subtype} (${request_id}) timed out after ${timeoutMs}ms`))
+          reject(
+            new Error(`control_request ${subtype} (${request_id}) timed out after ${timeoutMs}ms`)
+          )
         }, timeoutMs)
       }
       pending.set(request_id, {
-        resolve: (value) => { if (timer) clearTimeout(timer); resolve(value) },
-        reject: (err) => { if (timer) clearTimeout(timer); reject(err) },
+        resolve: (value) => {
+          if (timer) clearTimeout(timer)
+          resolve(value)
+        },
+        reject: (err) => {
+          if (timer) clearTimeout(timer)
+          reject(err)
+        }
       })
       writer({ type: 'control_request', request_id, request: { subtype, ...fields } })
     })
@@ -174,7 +180,9 @@ function spawnQuery({ prompt, options, ac }) {
     if (err) iterError = err
     // Reject any in-flight control requests — the child is gone.
     for (const [, p] of pending) {
-      try { p.reject(new Error(err ? err.message : 'cli.js exited')) } catch {}
+      try {
+        p.reject(new Error(err ? err.message : 'cli.js exited'))
+      } catch {}
     }
     pending.clear()
     if (waiter) {
@@ -190,15 +198,23 @@ function spawnQuery({ prompt, options, ac }) {
   } else if (prompt && typeof prompt[Symbol.asyncIterator] === 'function') {
     ;(async () => {
       for await (const msg of prompt) writer(msg)
-    })().catch(() => { /* child teardown races input iterator — ignore */ })
+    })().catch(() => {
+      /* child teardown races input iterator — ignore */
+    })
   }
 
   // --- Abort propagation --------------------------------------------------
   if (ac) {
     ac.signal.addEventListener(
       'abort',
-      () => { try { child.kill('SIGTERM') } catch { /* already dead */ } },
-      { once: true },
+      () => {
+        try {
+          child.kill('SIGTERM')
+        } catch {
+          /* already dead */
+        }
+      },
+      { once: true }
     )
   }
 
@@ -254,7 +270,9 @@ function spawnQuery({ prompt, options, ac }) {
   if (process.env.DEBUG_HARNESS) {
     child.stderr.on('data', (chunk) => process.stderr.write(chunk))
   } else {
-    child.stderr.on('data', () => { /* swallow */ })
+    child.stderr.on('data', () => {
+      /* swallow */
+    })
   }
 
   child.on('exit', (code, signal) => {
@@ -274,21 +292,39 @@ function spawnQuery({ prompt, options, ac }) {
   // src/main/sdk/ via the main process, not this harness.
 
   return {
-    [Symbol.asyncIterator]() { return this },
+    [Symbol.asyncIterator]() {
+      return this
+    },
     async next() {
       if (queue.length) return { value: queue.shift(), done: false }
       if (done) {
         if (iterError) throw iterError
         return { value: undefined, done: true }
       }
-      return new Promise((resolve) => { waiter = resolve })
+      return new Promise((resolve) => {
+        waiter = resolve
+      })
     },
     /** Send SIGTERM. Prefer close() for graceful shutdown. */
-    async interrupt() { try { child.kill('SIGTERM') } catch { /* ignore */ } },
+    async interrupt() {
+      try {
+        child.kill('SIGTERM')
+      } catch {
+        /* ignore */
+      }
+    },
     /** Close stdin, then send SIGTERM so cli.js shuts down cleanly. */
     async close() {
-      try { child.stdin.end() } catch { /* ignore */ }
-      try { child.kill('SIGTERM') } catch { /* ignore */ }
+      try {
+        child.stdin.end()
+      } catch {
+        /* ignore */
+      }
+      try {
+        child.kill('SIGTERM')
+      } catch {
+        /* ignore */
+      }
     },
 
     // --- Control-channel methods (mirror src/main/sdk/query.ts) -----------
@@ -322,7 +358,7 @@ function spawnQuery({ prompt, options, ac }) {
     },
 
     _writer: writer,
-    _child: child,
+    _child: child
   }
 }
 
@@ -337,7 +373,7 @@ const DEFAULT_OPTIONS = {
   settingSources: [],
   thinking: { type: 'enabled', budgetTokens: 10_000 },
   effort: 'low',
-  model: 'claude-sonnet-4-6',
+  model: 'claude-sonnet-4-6'
 }
 
 /**
@@ -357,7 +393,7 @@ export function createQuery(prompt, optsOverride = {}, timeoutMs = 120_000) {
   const q = spawnQuery({
     prompt,
     ac,
-    options: { ...DEFAULT_OPTIONS, cwd: PROJECT_ROOT, ...optsOverride },
+    options: { ...DEFAULT_OPTIONS, cwd: PROJECT_ROOT, ...optsOverride }
   })
   return { q, cleanup, ac }
 }
@@ -372,7 +408,6 @@ export async function collectMessages(q, { onMessage, cleanup } = {}) {
     }
   } catch (err) {
     if (err.name !== 'AbortError' && !String(err).includes('abort')) {
-       
       console.error('[collectMessages] Error:', err.message || err)
     }
   } finally {
@@ -386,7 +421,11 @@ export async function collectMessages(q, { onMessage, cleanup } = {}) {
 // ---------------------------------------------------------------------------
 
 export class MessageChannel {
-  constructor() { this.queue = []; this.waiting = null; this.isDone = false }
+  constructor() {
+    this.queue = []
+    this.waiting = null
+    this.isDone = false
+  }
   push(msg) {
     if (this.isDone) return
     if (this.waiting) {
@@ -405,11 +444,15 @@ export class MessageChannel {
       r({ value: undefined, done: true })
     }
   }
-  [Symbol.asyncIterator]() { return this }
+  [Symbol.asyncIterator]() {
+    return this
+  }
   async next() {
     if (this.queue.length) return { value: this.queue.shift(), done: false }
     if (this.isDone) return { value: undefined, done: true }
-    return new Promise((resolve) => { this.waiting = resolve })
+    return new Promise((resolve) => {
+      this.waiting = resolve
+    })
   }
 }
 
@@ -418,7 +461,7 @@ export function userMessage(text, sessionId = '') {
     type: 'user',
     session_id: sessionId,
     message: { role: 'user', content: text },
-    parent_tool_use_id: null,
+    parent_tool_use_id: null
   }
 }
 
@@ -435,7 +478,7 @@ export function createStreamingQuery(initialPrompt, optsOverride = {}, timeoutMs
   const q = spawnQuery({
     prompt: channel,
     ac,
-    options: { ...DEFAULT_OPTIONS, cwd: PROJECT_ROOT, ...optsOverride },
+    options: { ...DEFAULT_OPTIONS, cwd: PROJECT_ROOT, ...optsOverride }
   })
   return { q, channel, cleanup, ac }
 }

@@ -66,12 +66,12 @@ UISettings remains the home for purely cosmetic/behavioral ClaudeUI state that
   verbatim, so the surface area is two helpers + two channels per setting.
 - **`set` hot-reloads running sessions** via `session.notifySettingsChanged()`
   (empty `apply_flag_settings({})`), matching the permissions-save behavior.
-  The cleanup *sweep* itself still only fires on `cli.js` startup (throttled to
+  The cleanup _sweep_ itself still only fires on `cli.js` startup (throttled to
   once / 24h via `.last-cleanup`), so a changed retention takes effect on the
   next launch — acceptable and non-surprising.
 - **Auto-delete OFF writes `3650` (≈ 10 years), not `0`.** Upstream marks
   `cleanupPeriodDays: 0` as schema-invalid (min 1) and steers users toward a
-  large window or `--no-session-persistence`. `0` *would* disable the sweep
+  large window or `--no-session-persistence`. `0` _would_ disable the sweep
   (cli.js's `pkO()` gate skips cleanup when an explicitly-set value carries a
   validation error), but at the cost of a startup validation warning on every
   launch and a schema-invalid `settings.json`. We use `3650` instead: it keeps

@@ -38,20 +38,17 @@ export function UnifiedDiffTable({
   onExpandGap,
   highlightedLines,
   renderAfterLine,
-  gutterWidth,
+  gutterWidth
 }: Props): React.JSX.Element {
   const parentRef = useRef<HTMLDivElement>(null)
 
-  const rows = useMemo(
-    () => buildUnifiedRows(hunks, totalOldLines),
-    [hunks, totalOldLines]
-  )
+  const rows = useMemo(() => buildUnifiedRows(hunks, totalOldLines), [hunks, totalOldLines])
 
   const virtualizer = useVirtualizer({
     count: rows.length,
     getScrollElement: () => parentRef.current,
     estimateSize: () => ROW_HEIGHT,
-    overscan: 30,
+    overscan: 30
   })
 
   const getTokensForLine = useCallback(
@@ -76,30 +73,34 @@ export function UnifiedDiffTable({
     (row: DiffRowData): boolean => {
       if (!highlightedLines || row.kind !== 'line') return false
       const { line } = row
-      if (line.oldLineNumber != null && highlightedLines.has(`old:${line.oldLineNumber}`)) return true
-      if (line.newLineNumber != null && highlightedLines.has(`new:${line.newLineNumber}`)) return true
+      if (line.oldLineNumber != null && highlightedLines.has(`old:${line.oldLineNumber}`))
+        return true
+      if (line.newLineNumber != null && highlightedLines.has(`new:${line.newLineNumber}`))
+        return true
       return false
     },
     [highlightedLines]
   )
 
-  const handleExpandGap = useCallback(
-    (gap: HunkGap) => onExpandGap?.(gap),
-    [onExpandGap]
-  )
+  const handleExpandGap = useCallback((gap: HunkGap) => onExpandGap?.(gap), [onExpandGap])
 
   return (
     <div
       ref={parentRef}
       className="diff-viewer overflow-auto rounded-md border border-border"
       role="table"
-      style={{ contain: 'strict', flex: '1 1 0', minHeight: 0, ...(gutterWidth ? { '--diff-gutter-width': gutterWidth } as React.CSSProperties : {}) }}
+      style={{
+        contain: 'strict',
+        flex: '1 1 0',
+        minHeight: 0,
+        ...(gutterWidth ? ({ '--diff-gutter-width': gutterWidth } as React.CSSProperties) : {})
+      }}
     >
       <div
         style={{
           height: `${virtualizer.getTotalSize()}px`,
           width: '100%',
-          position: 'relative',
+          position: 'relative'
         }}
       >
         {virtualizer.getVirtualItems().map((virtualRow) => {
@@ -114,13 +115,20 @@ export function UnifiedDiffTable({
                 position: 'absolute',
                 top: `${Math.round(virtualRow.start)}px`,
                 left: 0,
-                width: '100%',
+                width: '100%'
               }}
             >
               {row.kind === 'hunk-header' && (
-                <HunkHeader hunk={row.hunk} expandableGap={row.adjacentGap} onExpand={handleExpandGap} position={row.hunkPosition} />
+                <HunkHeader
+                  hunk={row.hunk}
+                  expandableGap={row.adjacentGap}
+                  onExpand={handleExpandGap}
+                  position={row.hunkPosition}
+                />
               )}
-              {row.kind === 'gap' && <GapRow gap={row.gap} position={row.position} onExpand={handleExpandGap} />}
+              {row.kind === 'gap' && (
+                <GapRow gap={row.gap} position={row.position} onExpand={handleExpandGap} />
+              )}
               {row.kind === 'line' && (
                 <DiffRow
                   line={row.line}

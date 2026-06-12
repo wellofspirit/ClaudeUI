@@ -96,10 +96,14 @@ function socks5Connect(
           }
           if (data[1] !== 0x00) {
             const errors: Record<number, string> = {
-              0x01: 'general failure', 0x02: 'connection not allowed',
-              0x03: 'network unreachable', 0x04: 'host unreachable',
-              0x05: 'connection refused', 0x06: 'TTL expired',
-              0x07: 'command not supported', 0x08: 'address type not supported'
+              0x01: 'general failure',
+              0x02: 'connection not allowed',
+              0x03: 'network unreachable',
+              0x04: 'host unreachable',
+              0x05: 'connection refused',
+              0x06: 'TTL expired',
+              0x07: 'command not supported',
+              0x08: 'address type not supported'
             }
             throw new Error(`SOCKS5: ${errors[data[1]] || `error 0x${data[1].toString(16)}`}`)
           }
@@ -133,11 +137,15 @@ function buildConnectRequest(host: string, port: number): Buffer {
 /** Start the local HTTP-to-SOCKS5 bridge. Returns the local port. */
 export async function startSocksBridge(config: SocksBridgeConfig): Promise<number> {
   // If already running with same config, return existing port
-  if (server && bridgePort && currentConfig &&
-      currentConfig.socksHost === config.socksHost &&
-      currentConfig.socksPort === config.socksPort &&
-      currentConfig.username === config.username &&
-      currentConfig.password === config.password) {
+  if (
+    server &&
+    bridgePort &&
+    currentConfig &&
+    currentConfig.socksHost === config.socksHost &&
+    currentConfig.socksPort === config.socksPort &&
+    currentConfig.username === config.username &&
+    currentConfig.password === config.password
+  ) {
     return bridgePort
   }
 
@@ -196,7 +204,10 @@ export async function startSocksBridge(config: SocksBridgeConfig): Promise<numbe
       server = srv
       bridgePort = addr.port
       currentConfig = { ...config }
-      logger.info('SocksBridge', `SOCKS5 bridge listening on 127.0.0.1:${bridgePort} → ${config.socksHost}:${config.socksPort}`)
+      logger.info(
+        'SocksBridge',
+        `SOCKS5 bridge listening on 127.0.0.1:${bridgePort} → ${config.socksHost}:${config.socksPort}`
+      )
       resolve(bridgePort)
     })
   })

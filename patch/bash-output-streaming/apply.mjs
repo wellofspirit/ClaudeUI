@@ -59,8 +59,8 @@ if (src.includes(PATCH_MARKER) && src.includes(EARLY_POLL_MARKER)) {
 
 const anchorRe = new RegExp(
   `onProgress\\((${V}),(${V}),(${V}),(${V}),(${V})\\)\\{` +
-  `(${V})=\\1,(${V})=\\2,(${V})=\\3,(${V})=\\5\\?\\4:0;` +
-  `let (${V})=(${V});if\\(\\10\\)\\11=null,\\10\\(\\)\\}`
+    `(${V})=\\1,(${V})=\\2,(${V})=\\3,(${V})=\\5\\?\\4:0;` +
+    `let (${V})=(${V});if\\(\\10\\)\\11=null,\\10\\(\\)\\}`
 )
 
 // Match anchor whether or not Part A is already applied (the patch marker
@@ -80,12 +80,14 @@ if (!anchorMatch) {
   process.exit(1)
 }
 
-const fullOutputVar = anchorMatch[1]  // U (fullOutput)
-const outputVar = anchorMatch[2]      // c (output/tail)
-const totalLinesVar = anchorMatch[3]  // n
-const totalBytesVar = anchorMatch[4]  // l
+const fullOutputVar = anchorMatch[1] // U (fullOutput)
+const outputVar = anchorMatch[2] // c (output/tail)
+const totalLinesVar = anchorMatch[3] // n
+const totalBytesVar = anchorMatch[4] // l
 console.log(`Found onProgress at char ${anchorMatch.index}`)
-console.log(`  Params: fullOutput=${fullOutputVar}, output=${outputVar}, totalLines=${totalLinesVar}, totalBytes=${totalBytesVar}`)
+console.log(
+  `  Params: fullOutput=${fullOutputVar}, output=${outputVar}, totalLines=${totalLinesVar}, totalBytes=${totalBytesVar}`
+)
 
 // Find the toolUseId variable ($) from the enclosing scope
 // Pattern: toolUseId:<var> in the UZY parameters
@@ -117,19 +119,20 @@ if (src.includes(PATCH_MARKER)) {
 
   const openBrace = anchorMatch[0].slice(0, anchorMatch[0].indexOf('{') + 1)
 
-  const injection = PATCH_MARKER +
+  const injection =
+    PATCH_MARKER +
     `{let _bo_now=Date.now();` +
     `if(!globalThis._bo_map)globalThis._bo_map=new Map;` +
     `let _bo_k=${toolUseIdVar}||"",_bo_last=globalThis._bo_map.get(_bo_k)||0;` +
     `if(_bo_now-_bo_last>=200){` +
-      `globalThis._bo_map.set(_bo_k,_bo_now);` +
-      `try{process.stdout.write(JSON.stringify({type:"bash_output",` +
-        `tool_use_id:${toolUseIdVar},` +
-        `output:${outputVar},` +
-        `full_output:${fullOutputVar},` +
-        `total_lines:${totalLinesVar},` +
-        `total_bytes:${totalBytesVar}` +
-      `})+"\\n")}catch(_bo_e){}` +
+    `globalThis._bo_map.set(_bo_k,_bo_now);` +
+    `try{process.stdout.write(JSON.stringify({type:"bash_output",` +
+    `tool_use_id:${toolUseIdVar},` +
+    `output:${outputVar},` +
+    `full_output:${fullOutputVar},` +
+    `total_lines:${totalLinesVar},` +
+    `total_bytes:${totalBytesVar}` +
+    `})+"\\n")}catch(_bo_e){}` +
     `}}`
 
   const insertIdx = src.indexOf(anchorMatch[0]) + openBrace.length
@@ -172,8 +175,9 @@ if (src.includes(INIT_MARKER)) {
     process.exit(1)
   }
 
-  const bcVar = resultMatch[2]  // b — the DH7 shell command instance
-  const resultAbsIdx = anchorMatch.index + afterPatch.indexOf(resultMatch[0]) + resultMatch[0].length
+  const bcVar = resultMatch[2] // b — the DH7 shell command instance
+  const resultAbsIdx =
+    anchorMatch.index + afterPatch.indexOf(resultMatch[0]) + resultMatch[0].length
   console.log(`  Found .result assignment: ${resultMatch[0]} (bcVar=${bcVar})`)
 
   // Verify uniqueness near the patch
@@ -195,8 +199,7 @@ if (src.includes(INIT_MARKER)) {
   const nwClass = nwMatch[1]
   console.log(`  Nw class name: ${nwClass}`)
 
-  const initInjection = INIT_MARKER +
-    `${nwClass}.startPolling(${bcVar}.taskOutput.taskId);`
+  const initInjection = INIT_MARKER + `${nwClass}.startPolling(${bcVar}.taskOutput.taskId);`
 
   src = src.slice(0, resultAbsIdx) + initInjection + src.slice(resultAbsIdx)
 

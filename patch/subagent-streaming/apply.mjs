@@ -82,11 +82,11 @@ if (src.includes(patchFMarker)) {
   // Find RVY function by its unique type-check pattern
   const rvyRe = new RegExp(
     `function (${V})\\(${V}\\)\\{` +
-    `return ${V}\\.type==="assistant"\\|\\|` +
-    `${V}\\.type==="user"\\|\\|` +
-    `${V}\\.type==="progress"\\|\\|` +
-    `${V}\\.type==="system"&&"subtype"in ${V}&&${V}\\.subtype==="compact_boundary"` +
-    `\\}`
+      `return ${V}\\.type==="assistant"\\|\\|` +
+      `${V}\\.type==="user"\\|\\|` +
+      `${V}\\.type==="progress"\\|\\|` +
+      `${V}\\.type==="system"&&"subtype"in ${V}&&${V}\\.subtype==="compact_boundary"` +
+      `\\}`
   )
   const rvyMatch = src.match(rvyRe)
   if (!rvyMatch) {
@@ -104,15 +104,9 @@ if (src.includes(patchFMarker)) {
   //
   // We try patterns newest first.
   const rvyNameRe = reEsc(rvyName)
-  const bracedCallRe = new RegExp(
-    `if\\(${rvyNameRe}\\((${V})\\)\\)\\{`
-  )
-  const awaitCallRe = new RegExp(
-    `if\\(${rvyNameRe}\\((${V})\\)\\)await `
-  )
-  const oldCallRe = new RegExp(
-    `if\\(${rvyNameRe}\\((${V})\\)\\)(${V})\\.push\\(\\1\\),`
-  )
+  const bracedCallRe = new RegExp(`if\\(${rvyNameRe}\\((${V})\\)\\)\\{`)
+  const awaitCallRe = new RegExp(`if\\(${rvyNameRe}\\((${V})\\)\\)await `)
+  const oldCallRe = new RegExp(`if\\(${rvyNameRe}\\((${V})\\)\\)(${V})\\.push\\(\\1\\),`)
   const callMatch = src.match(bracedCallRe) || src.match(awaitCallRe) || src.match(oldCallRe)
   if (!callMatch) {
     console.error('ERROR: Cannot locate RVY call site in cR.')
@@ -137,9 +131,7 @@ if (src.includes(patchFMarker)) {
 
   // Inject stream_event bypass before the RVY gate.
   // The original "if(RVY(MSG))..." is preserved unchanged after our "else".
-  const newStr =
-    `${patchFMarker}if(${msgVar}.type==="stream_event"){yield ${msgVar}}else ` +
-    oldStr
+  const newStr = `${patchFMarker}if(${msgVar}.type==="stream_event"){yield ${msgVar}}else ` + oldStr
 
   src = src.slice(0, idx) + newStr + src.slice(idx + oldStr.length)
   patchCount++
@@ -181,13 +173,13 @@ if (src.includes(patchAMarker)) {
   // v2.1.119+ shape: single content[0] check gated by forwardSubagentText flag.
   const newFilterRe = new RegExp(
     `let (${V})=(${V})\\.message\\.content\\[0\\];` +
-    `if\\(!(${V})&&\\1\\.type!=="tool_use"&&\\1\\.type!=="tool_result"\\)continue;`
+      `if\\(!(${V})&&\\1\\.type!=="tool_use"&&\\1\\.type!=="tool_result"\\)continue;`
   )
   // Legacy shape: nested for-loops over message.content.
   const oldFilterRe = new RegExp(
     `for\\(let (${V}) of (${V})\\)` +
-    `for\\(let (${V}) of \\1\\.message\\.content\\)\\{` +
-    `if\\(\\3\\.type!=="tool_use"&&\\3\\.type!=="tool_result"\\)continue;`
+      `for\\(let (${V}) of \\1\\.message\\.content\\)\\{` +
+      `if\\(\\3\\.type!=="tool_use"&&\\3\\.type!=="tool_result"\\)continue;`
   )
 
   const newM = src.match(newFilterRe)
@@ -205,7 +197,9 @@ if (src.includes(patchAMarker)) {
     const newStr = `${patchAMarker}let ${newM[1]}=${newM[2]}.message.content[0];`
     src = src.slice(0, idx) + newStr + src.slice(idx + oldStr.length)
     patchCount++
-    console.log(`Applied (v119 shape) at char ${idx}. Vars: blk=${newM[1]}, msg=${newM[2]}, fwdFlag=${newM[3]}`)
+    console.log(
+      `Applied (v119 shape) at char ${idx}. Vars: blk=${newM[1]}, msg=${newM[2]}, fwdFlag=${newM[3]}`
+    )
   } else if (oldM) {
     const oldStr = oldM[0]
     const newStr = `${patchAMarker}for(let ${oldM[1]} of ${oldM[2]}){`
@@ -216,9 +210,13 @@ if (src.includes(patchAMarker)) {
     }
     src = src.slice(0, idx) + newStr + src.slice(idx + oldStr.length)
     patchCount++
-    console.log(`Applied (legacy shape) at char ${idx}. Vars: msg=${oldM[1]}, msgs=${oldM[2]}, inner=${oldM[3]}`)
+    console.log(
+      `Applied (legacy shape) at char ${idx}. Vars: msg=${oldM[1]}, msgs=${oldM[2]}, inner=${oldM[3]}`
+    )
   } else {
-    console.error('ERROR: Cannot locate sub-agent progress callback filter (tried v119 + legacy shapes).')
+    console.error(
+      'ERROR: Cannot locate sub-agent progress callback filter (tried v119 + legacy shapes).'
+    )
     process.exit(1)
   }
 }
@@ -275,23 +273,23 @@ if (src.includes(patchBMarker)) {
   // Try patterns newest first.
   const v144PushRe = new RegExp(
     `=(${V})\\.value;if\\((${V})\\.type==="api_metrics"\\)\\{(${V})\\?\\.\\(\\2\\);continue\\}` +
-    `if\\((${V})\\.push\\(\\2\\),` +
-    `(${V})\\((${V}),\\2,(${V}),(${V})\\.options\\.tools\\),` +
-    `(${V})\\)`
+      `if\\((${V})\\.push\\(\\2\\),` +
+      `(${V})\\((${V}),\\2,(${V}),(${V})\\.options\\.tools\\),` +
+      `(${V})\\)`
   )
   const v87PushRe = new RegExp(
     `=(${V})\\.value;if\\((${V})\\.push\\((${V})\\),` +
-    `(${V})\\((${V}),\\3,(${V}),(${V})\\.options\\.tools\\),` +
-    `(${V})\\)`
+      `(${V})\\((${V}),\\3,(${V}),(${V})\\.options\\.tools\\),` +
+      `(${V})\\)`
   )
   const v71PushRe = new RegExp(
     `=(${V})\\.value;if\\((${V})\\.push\\((${V})\\),` +
-    `(${V})\\(${V},\\3,${V},${V}\\.options\\.tools\\)`
+      `(${V})\\(${V},\\3,${V},${V}\\.options\\.tools\\)`
   )
   const oldPushRe = new RegExp(
     `if\\((${V})\\.push\\((${V})\\),\\2\\.type==="progress"&&` +
-    `(?:\\(\\2\\.data\\.type==="bash_progress"\\|\\|\\2\\.data\\.type==="powershell_progress"\\)|` +
-    `\\2\\.data\\.type==="bash_progress")`
+      `(?:\\(\\2\\.data\\.type==="bash_progress"\\|\\|\\2\\.data\\.type==="powershell_progress"\\)|` +
+      `\\2\\.data\\.type==="bash_progress")`
   )
   let m = src.match(v144PushRe)
   let matchStr, msgVar, idx
@@ -303,7 +301,7 @@ if (src.includes(patchBMarker)) {
     const firstIf = fullMatch.indexOf('if(')
     const ifStart = fullMatch.indexOf('if(', firstIf + 1)
     matchStr = fullMatch.slice(ifStart)
-    msgVar = m[2]   // the message variable used in api_metrics check + push
+    msgVar = m[2] // the message variable used in api_metrics check + push
     idx = src.indexOf(fullMatch) + ifStart
     console.log(`Found sync loop body (v144 pattern) at char ${idx} (arr=${m[4]}, msg=${msgVar})`)
   } else if ((m = src.match(v87PushRe))) {
@@ -355,7 +353,9 @@ if (src.includes(patchBMarker)) {
   // Detect whether we're patching a v2.1.143+ cli.js — the callback wraps args
   // with `type:"progress",` and ZhA's switch dispatches on the outer type.
   const hasProgressWrap = cbm[0].includes('type:"progress",')
-  console.log(`  Callback=${cbVar}, ParentMsg=${parentVar}, AgentId=${agentVar}, wrap=${hasProgressWrap ? 'v143+' : 'legacy'}`)
+  console.log(
+    `  Callback=${cbVar}, ParentMsg=${parentVar}, AgentId=${agentVar}, wrap=${hasProgressWrap ? 'v143+' : 'legacy'}`
+  )
 
   if (src.indexOf(matchStr, idx + 1) !== -1) {
     console.error('ERROR: Multiple matches for Patch B. Aborting.')
@@ -402,7 +402,7 @@ if (src.includes(patchCMarker)) {
   // v2.1.87: else if(q.data.type==="bash_progress"||q.data.type==="powershell_progress"){
   const anchorRe = new RegExp(
     `else if\\((${V})\\.data\\.type==="bash_progress"` +
-    `(?:\\|\\|\\1\\.data\\.type==="powershell_progress")?\\)\\{`
+      `(?:\\|\\|\\1\\.data\\.type==="powershell_progress")?\\)\\{`
   )
   const anchorMatch = src.match(anchorRe)
   if (!anchorMatch) {
@@ -463,13 +463,13 @@ if (src.includes(patchDMarker)) {
   // Try new pattern first (uses helper), then old (inline filter).
   const newTextFnRe = new RegExp(
     `function (${V})\\((${V}),(${V})="Execution completed"\\)\\{` +
-    `let (${V})=(${V})\\(\\2\\);if\\(!\\4\\)return \\3;` +
-    `return (${V})\\(\\4\\.message\\.content,\`\\n\`\\)\\|\\|\\3\\}`
+      `let (${V})=(${V})\\(\\2\\);if\\(!\\4\\)return \\3;` +
+      `return (${V})\\(\\4\\.message\\.content,\`\\n\`\\)\\|\\|\\3\\}`
   )
   const oldTextFnRe = new RegExp(
     `function (${V})\\((${V}),(${V})="Execution completed"\\)\\{` +
-    `let (${V})=(${V})\\(\\2\\);if\\(!\\4\\)return \\3;` +
-    `return \\4\\.message\\.content\\.filter`
+      `let (${V})=(${V})\\(\\2\\);if\\(!\\4\\)return \\3;` +
+      `return \\4\\.message\\.content\\.filter`
   )
   const textFnMatch = src.match(newTextFnRe) || src.match(oldTextFnRe)
   if (!textFnMatch) {
@@ -500,7 +500,9 @@ if (src.includes(patchDMarker)) {
       process.exit(1)
     }
     src = src.slice(0, returnIdx) + newReturn + src.slice(returnIdx + oldReturn.length)
-    console.log(`Patched ${textFnName} (replaced ${helperName}() with inline filter+map including thinking).`)
+    console.log(
+      `Patched ${textFnName} (replaced ${helperName}() with inline filter+map including thinking).`
+    )
   } else {
     // Old pattern (v2.1.47–v2.1.81): inline filter/map
     const fm6Area = src.slice(textFnIdx, textFnIdx + 300)
@@ -522,7 +524,11 @@ if (src.includes(patchDMarker)) {
       process.exit(1)
     }
 
-    src = src.slice(0, filterAbsIdx) + patchDMarker + newFilter + src.slice(filterAbsIdx + oldFilter.length)
+    src =
+      src.slice(0, filterAbsIdx) +
+      patchDMarker +
+      newFilter +
+      src.slice(filterAbsIdx + oldFilter.length)
 
     // Patch map: ("text"in V)?V.text:"" → ("text"in V)?V.text:("thinking"in V)?V.thinking:""
     const oldMap = `("text"in ${fm6Var})?${fm6Var}.text:""`
@@ -539,9 +545,9 @@ if (src.includes(patchDMarker)) {
   // --- Background agent polling map ---
   const bgMapRe = new RegExp(
     `\\.map\\(\\((${V})\\)=>\\{if\\(\\1\\.type==="assistant"\\)` +
-    `return \\1\\.message\\.content\\.filter\\(\\((${V})\\)=>\\2\\.type==="text"\\)` +
-    `\\.map\\(\\(\\2\\)=>\\("text"in \\2\\)\\?\\2\\.text:""\\)` +
-    `\\.join\\(\`\\n\`\\);return (${V})\\(\\1\\)\\}`
+      `return \\1\\.message\\.content\\.filter\\(\\((${V})\\)=>\\2\\.type==="text"\\)` +
+      `\\.map\\(\\(\\2\\)=>\\("text"in \\2\\)\\?\\2\\.text:""\\)` +
+      `\\.join\\(\`\\n\`\\);return (${V})\\(\\1\\)\\}`
   )
   const bgm = src.match(bgMapRe)
 
@@ -550,7 +556,10 @@ if (src.includes(patchDMarker)) {
     const bgP = bgm[2]
     const newBg = oldBg
       .replace(`${bgP}.type==="text"`, `${bgP}.type==="text"||${bgP}.type==="thinking"`)
-      .replace(`("text"in ${bgP})?${bgP}.text:""`, `("text"in ${bgP})?${bgP}.text:("thinking"in ${bgP})?${bgP}.thinking:""`)
+      .replace(
+        `("text"in ${bgP})?${bgP}.text:""`,
+        `("text"in ${bgP})?${bgP}.text:("thinking"in ${bgP})?${bgP}.thinking:""`
+      )
     src = src.replace(oldBg, newBg)
     console.log('Patched background agent output writer.')
   } else {
@@ -624,16 +633,18 @@ if (src.includes(patchEMarker)) {
   // Try braced pattern first (v2.1.76+), fall back to old single-statement pattern.
   const bracedAsyncBodyRe = new RegExp(
     `\\)\\)\\{(?:if\\([\\w$]+\\.type==="api_metrics"\\)continue;)?` + // )){ [if(MSG.type==="api_metrics")continue;]
-    `(${V})\\.push\\((${V})\\),` +                                    // ARR.push(MSG),
-    `(${V})\\((${V}),\\2,` +                                          // STATS(STATS,MSG,
-    `(${V}),(${V})\\.options\\.tools\\),[^}]+\\}`                     // TOOLS,j.options.tools),...}
-  , 'g')
+      `(${V})\\.push\\((${V})\\),` + // ARR.push(MSG),
+      `(${V})\\((${V}),\\2,` + // STATS(STATS,MSG,
+      `(${V}),(${V})\\.options\\.tools\\),[^}]+\\}`, // TOOLS,j.options.tools),...}
+    'g'
+  )
   const unbracedAsyncBodyRe = new RegExp(
-    `\\)\\)(?:if\\()?(${V})\\.push\\((${V})\\),` +   // ))ARR.push(MSG), or ))if(ARR.push(MSG),
-    `(${V})\\((${V}),\\2,` +                          // STATS(STATS,MSG,
-    `(${V}),(${V})\\.options\\.tools\\),` +            // TOOLS,j.options.tools),
-    `[^;]+;`                                           // ...rest until ;
-  , 'g')
+    `\\)\\)(?:if\\()?(${V})\\.push\\((${V})\\),` + // ))ARR.push(MSG), or ))if(ARR.push(MSG),
+      `(${V})\\((${V}),\\2,` + // STATS(STATS,MSG,
+      `(${V}),(${V})\\.options\\.tools\\),` + // TOOLS,j.options.tools),
+      `[^;]+;`, // ...rest until ;
+    'g'
+  )
 
   let asyncMatch
   let asyncPatchCount = 0
@@ -668,8 +679,8 @@ if (src.includes(patchEMarker)) {
   // DESC is the minified name for the "description" input field.
   // PARENT_MSG is the 4th positional param (the parent assistant message).
   const callSigRe = new RegExp(
-    `async call\\(\\{[^}]*description:(${V})[^}]*\\},` +  // {prompt:A,...,description:K,...},
-    `(${V}),(${V}),(${V}),(${V})\\)\\{`                    // J,X,j,D){
+    `async call\\(\\{[^}]*description:(${V})[^}]*\\},` + // {prompt:A,...,description:K,...},
+      `(${V}),(${V}),(${V}),(${V})\\)\\{` // J,X,j,D){
   )
   const callSigMatch = src.match(callSigRe)
   if (!callSigMatch) {
@@ -677,8 +688,8 @@ if (src.includes(patchEMarker)) {
     console.error('Need to extract description and parent message variable names.')
     process.exit(1)
   }
-  const descVar = callSigMatch[1]       // K in current version — "description" input
-  const parentMsgVar = callSigMatch[4]  // j in current version — parent assistant message
+  const descVar = callSigMatch[1] // K in current version — "description" input
+  const parentMsgVar = callSigMatch[4] // j in current version — parent assistant message
   console.log(`Task call() signature: description=${descVar}, parentMsg=${parentMsgVar}`)
 
   // Apply in reverse order so indices stay valid
@@ -703,19 +714,19 @@ if (src.includes(patchEMarker)) {
       `){${patchEMarker}` +
       // stream_event: forward directly, skip push to collection array
       `if(${msgVar}.type==="stream_event"){` +
-        `${ptuLookup}` +
-        `process.stdout.write(JSON.stringify({type:"stream_event",event:${msgVar}.event,` +
-        `parent_tool_use_id:_ptu,session_id:${sessFn}(),uuid:${uuidFn}()})+"\\n")` +
+      `${ptuLookup}` +
+      `process.stdout.write(JSON.stringify({type:"stream_event",event:${msgVar}.event,` +
+      `parent_tool_use_id:_ptu,session_id:${sessFn}(),uuid:${uuidFn}()})+"\\n")` +
       `}else{` +
       // non-stream_event: original body (push, stats, state update)
       `${body}` +
       `{${ptuLookup}` +
       `if(${msgVar}.type==="assistant")` +
-        `process.stdout.write(JSON.stringify({type:"assistant",message:${msgVar}.message,` +
-        `parent_tool_use_id:_ptu,session_id:${sessFn}(),uuid:${uuidFn}()})+"\\n");` +
+      `process.stdout.write(JSON.stringify({type:"assistant",message:${msgVar}.message,` +
+      `parent_tool_use_id:_ptu,session_id:${sessFn}(),uuid:${uuidFn}()})+"\\n");` +
       `else if(${msgVar}.type==="user")` +
-        `process.stdout.write(JSON.stringify({type:"user",message:${msgVar}.message,` +
-        `parent_tool_use_id:_ptu,session_id:${sessFn}(),uuid:${uuidFn}()})+"\\n");` +
+      `process.stdout.write(JSON.stringify({type:"user",message:${msgVar}.message,` +
+      `parent_tool_use_id:_ptu,session_id:${sessFn}(),uuid:${uuidFn}()})+"\\n");` +
       `}}}`
 
     src = src.slice(0, index + 1) + replacement + src.slice(index + fullMatch.length)
@@ -750,8 +761,8 @@ if (src.includes(patchGMarker)) {
   // async function FUNC({taskId:VAR,abortController:VAR,makeStream:VAR,metadata:VAR,description:VAR,toolUseContext:VAR,taskRegistry:VAR,...})
   const iu8SigRe = new RegExp(
     `async function (${V})\\(\\{taskId:(${V}),abortController:(${V}),makeStream:(${V}),` +
-    `metadata:(${V}),description:(${V}),toolUseContext:(${V}),taskRegistry:(${V}),` +
-    `agentIdForCleanup:(${V}),enableSummarization:(${V}),getWorktreeResult:(${V})\\}\\)`
+      `metadata:(${V}),description:(${V}),toolUseContext:(${V}),taskRegistry:(${V}),` +
+      `agentIdForCleanup:(${V}),enableSummarization:(${V}),getWorktreeResult:(${V})\\}\\)`
   )
   const iu8Match = iu8SigRe.exec(src)
   if (!iu8Match) {
@@ -761,19 +772,24 @@ if (src.includes(patchGMarker)) {
   // Re-discover session ID and UUID functions (same as Patch E but in Patch G scope)
   const sessFnReG = /session_id:([\w$]+)\(\).*?parent_tool_use_id/
   const sessFnMatchG = src.match(sessFnReG)
-  if (!sessFnMatchG) { console.error('ERROR: Cannot locate session ID function for Patch G.'); process.exit(1) }
+  if (!sessFnMatchG) {
+    console.error('ERROR: Cannot locate session ID function for Patch G.')
+    process.exit(1)
+  }
   const sessFnG = sessFnMatchG[1]
 
   // Same rationale as Patch E — use the web crypto global, not a module-local.
   const uuidFnG = 'globalThis.crypto.randomUUID'
 
   const iu8Name = iu8Match[1]
-  const taskIdVar = iu8Match[2]        // q
-  const makeStreamVar = iu8Match[4]    // _
-  const descVar_g = iu8Match[6]        // Y — description
-  const toolUseCtxVar = iu8Match[7]    // A — toolUseContext (has .toolUseId)
+  const taskIdVar = iu8Match[2] // q
+  const makeStreamVar = iu8Match[4] // _
+  const descVar_g = iu8Match[6] // Y — description
+  const toolUseCtxVar = iu8Match[7] // A — toolUseContext (has .toolUseId)
   console.log(`  Found ${iu8Name}() at char ${iu8Match.index}`)
-  console.log(`    taskId=${taskIdVar}, makeStream=${makeStreamVar}, desc=${descVar_g}, toolUseCtx=${toolUseCtxVar}`)
+  console.log(
+    `    taskId=${taskIdVar}, makeStream=${makeStreamVar}, desc=${descVar_g}, toolUseCtx=${toolUseCtxVar}`
+  )
 
   // Find the for-await loop body inside iu8:
   // v2.1.76:  for await(let MSG of MAKESTREAM(CACHE)){ARR.push(MSG),REGISTRY.update(...
@@ -818,15 +834,16 @@ if (src.includes(patchGMarker)) {
   // Single injection at the start of the loop body — handles all three types.
   // stream_event: forward + continue (skip collection).
   // assistant/user: forward + fall through to existing body (push, stats, etc).
-  const gInjection = patchGMarker +
+  const gInjection =
+    patchGMarker +
     `if(${msgVar_g}.type==="stream_event"){` +
-      `try{process.stdout.write(JSON.stringify({type:"stream_event",event:${msgVar_g}.event,` +
-      `parent_tool_use_id:${ptuExpr},session_id:${sessFnG}(),uuid:${uuidFnG}()})+"\\n")}catch(_ge){}` +
-      `continue` +
+    `try{process.stdout.write(JSON.stringify({type:"stream_event",event:${msgVar_g}.event,` +
+    `parent_tool_use_id:${ptuExpr},session_id:${sessFnG}(),uuid:${uuidFnG}()})+"\\n")}catch(_ge){}` +
+    `continue` +
     `}` +
     `if(${msgVar_g}.type==="assistant"||${msgVar_g}.type==="user")` +
-      `try{process.stdout.write(JSON.stringify({type:${msgVar_g}.type,message:${msgVar_g}.message,` +
-      `parent_tool_use_id:${ptuExpr},session_id:${sessFnG}(),uuid:${uuidFnG}()})+"\\n")}catch(_ge){}`
+    `try{process.stdout.write(JSON.stringify({type:${msgVar_g}.type,message:${msgVar_g}.message,` +
+    `parent_tool_use_id:${ptuExpr},session_id:${sessFnG}(),uuid:${uuidFnG}()})+"\\n")}catch(_ge){}`
 
   src = src.slice(0, braceIdx) + gInjection + src.slice(braceIdx)
 

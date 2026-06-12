@@ -36,12 +36,9 @@ export function StaticDiffTable({
   onExpandGap,
   highlightedLines,
   renderAfterLine,
-  gutterWidth,
+  gutterWidth
 }: Props): React.JSX.Element {
-  const rows = useMemo(
-    () => buildUnifiedRows(hunks, totalOldLines),
-    [hunks, totalOldLines]
-  )
+  const rows = useMemo(() => buildUnifiedRows(hunks, totalOldLines), [hunks, totalOldLines])
 
   const getTokensForLine = useCallback(
     (row: DiffRowData): SyntaxToken[] | undefined => {
@@ -64,20 +61,24 @@ export function StaticDiffTable({
     (row: DiffRowData): boolean => {
       if (!highlightedLines || row.kind !== 'line') return false
       const { line } = row
-      if (line.oldLineNumber != null && highlightedLines.has(`old:${line.oldLineNumber}`)) return true
-      if (line.newLineNumber != null && highlightedLines.has(`new:${line.newLineNumber}`)) return true
+      if (line.oldLineNumber != null && highlightedLines.has(`old:${line.oldLineNumber}`))
+        return true
+      if (line.newLineNumber != null && highlightedLines.has(`new:${line.newLineNumber}`))
+        return true
       return false
     },
     [highlightedLines]
   )
 
-  const handleExpandGap = useCallback(
-    (gap: HunkGap) => onExpandGap?.(gap),
-    [onExpandGap]
-  )
+  const handleExpandGap = useCallback((gap: HunkGap) => onExpandGap?.(gap), [onExpandGap])
 
   return (
-    <div className="diff-viewer overflow-auto rounded-md border border-border" style={gutterWidth ? { '--diff-gutter-width': gutterWidth } as React.CSSProperties : undefined}>
+    <div
+      className="diff-viewer overflow-auto rounded-md border border-border"
+      style={
+        gutterWidth ? ({ '--diff-gutter-width': gutterWidth } as React.CSSProperties) : undefined
+      }
+    >
       <table className="diff-table" role="table">
         <tbody>
           {rows.map((row, i) => {

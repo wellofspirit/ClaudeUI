@@ -77,11 +77,11 @@ async function main() {
     if (def.probes.length > 0) {
       t.assert(
         '[default] ALL_PROXY stripped from subprocess (probe = MISSING)',
-        def.probes.every((v) => v === 'MISSING'),
+        def.probes.every((v) => v === 'MISSING')
       )
       t.assert(
         '[default] sentinel proxy value never leaked to subprocess',
-        def.probes.every((v) => v !== SENTINEL),
+        def.probes.every((v) => v !== SENTINEL)
       )
     }
 
@@ -93,7 +93,7 @@ async function main() {
     if (opt.probes.length > 0) {
       t.assert(
         '[opt-in] ALL_PROXY preserved in subprocess (probe = sentinel)',
-        opt.probes.includes(SENTINEL),
+        opt.probes.includes(SENTINEL)
       )
     }
   } finally {

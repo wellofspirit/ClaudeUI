@@ -16,7 +16,7 @@ import {
   modelDefaultThinkingMode,
   modelResolveEffort,
   canonicalizeModelValue,
-  resolveContextWindow,
+  resolveContextWindow
 } from '../model-capabilities'
 
 describe('supportsAdaptiveThinking', () => {
@@ -84,9 +84,27 @@ describe('supportsMaxEffort', () => {
 
 describe('supportedEffortLevels', () => {
   it('returns full set with xhigh for fable-5, opus-4-7 and opus-4-8', () => {
-    expect(supportedEffortLevels('claude-opus-4-7')).toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
-    expect(supportedEffortLevels('claude-opus-4-8')).toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
-    expect(supportedEffortLevels('claude-fable-5')).toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
+    expect(supportedEffortLevels('claude-opus-4-7')).toEqual([
+      'low',
+      'medium',
+      'high',
+      'xhigh',
+      'max'
+    ])
+    expect(supportedEffortLevels('claude-opus-4-8')).toEqual([
+      'low',
+      'medium',
+      'high',
+      'xhigh',
+      'max'
+    ])
+    expect(supportedEffortLevels('claude-fable-5')).toEqual([
+      'low',
+      'medium',
+      'high',
+      'xhigh',
+      'max'
+    ])
   })
   it('drops xhigh for opus-4-6 / sonnet-4-6', () => {
     expect(supportedEffortLevels('claude-opus-4-6')).toEqual(['low', 'medium', 'high', 'max'])
@@ -154,16 +172,20 @@ describe('resolveEffort', () => {
 
 describe('modelSupportsAdaptiveThinking', () => {
   it('trusts SDK-supplied supportsAdaptiveThinking=true', () => {
-    expect(modelSupportsAdaptiveThinking({
-      value: 'default', // alias, id heuristic has no info
-      supportsAdaptiveThinking: true,
-    })).toBe(true)
+    expect(
+      modelSupportsAdaptiveThinking({
+        value: 'default', // alias, id heuristic has no info
+        supportsAdaptiveThinking: true
+      })
+    ).toBe(true)
   })
   it('trusts SDK-supplied supportsAdaptiveThinking=false', () => {
-    expect(modelSupportsAdaptiveThinking({
-      value: 'default',
-      supportsAdaptiveThinking: false,
-    })).toBe(false)
+    expect(
+      modelSupportsAdaptiveThinking({
+        value: 'default',
+        supportsAdaptiveThinking: false
+      })
+    ).toBe(false)
   })
   it('falls back to id heuristic when field absent', () => {
     expect(modelSupportsAdaptiveThinking({ value: 'claude-haiku-4-5' })).toBe(false)
@@ -180,7 +202,7 @@ describe('modelSupportsEffort + modelSupportedEffortLevels', () => {
     const model = {
       value: 'default',
       supportsEffort: true,
-      supportedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max'] as const,
+      supportedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max'] as const
     }
     expect(modelSupportsEffort(model)).toBe(true)
     expect(modelSupportedEffortLevels(model)).toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
@@ -190,7 +212,7 @@ describe('modelSupportsEffort + modelSupportedEffortLevels', () => {
     const model = {
       value: 'sonnet',
       supportsEffort: true,
-      supportedEffortLevels: ['low', 'medium', 'high', 'max'] as const,
+      supportedEffortLevels: ['low', 'medium', 'high', 'max'] as const
     }
     expect(modelSupportedEffortLevels(model)).toEqual(['low', 'medium', 'high', 'max'])
   })
@@ -212,7 +234,7 @@ describe('modelDefaultEffort', () => {
     const sonnet = {
       value: 'sonnet',
       supportsEffort: true,
-      supportedEffortLevels: ['low', 'medium', 'high', 'max'] as const,
+      supportedEffortLevels: ['low', 'medium', 'high', 'max'] as const
     }
     expect(modelDefaultEffort(sonnet)).toBe('high')
   })
@@ -222,38 +244,48 @@ describe('modelDefaultEffort', () => {
   it('returns high for opus-4-8 even though it supports xhigh', () => {
     // 4.8 supports xhigh but defaults to high — mirrors cli.js YK6.
     expect(modelDefaultEffort({ value: 'claude-opus-4-8' })).toBe('high')
-    expect(modelDefaultEffort({
-      value: 'claude-opus-4-8',
-      supportsEffort: true,
-      supportedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max'],
-    })).toBe('high')
+    expect(
+      modelDefaultEffort({
+        value: 'claude-opus-4-8',
+        supportsEffort: true,
+        supportedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max']
+      })
+    ).toBe('high')
   })
   it('does not blanket-pick xhigh just because SDK lists it as allowed', () => {
     // The `default`/`opus` alias resolves to opus-4-8 today; xhigh in the
     // allowed list must not be auto-selected when the id heuristic says high.
-    expect(modelDefaultEffort({
-      value: 'default',
-      supportsEffort: true,
-      supportedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max'],
-    })).toBe('high')
+    expect(
+      modelDefaultEffort({
+        value: 'default',
+        supportsEffort: true,
+        supportedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max']
+      })
+    ).toBe('high')
   })
   it('skips id-heuristic default when not in SDK-provided list', () => {
     // Id heuristic says xhigh for opus-4-7, but here the SDK claims only
     // low/medium/high are allowed for this hypothetical model — must not pick xhigh.
-    expect(modelDefaultEffort({
-      value: 'claude-opus-4-7',
-      supportsEffort: true,
-      supportedEffortLevels: ['low', 'medium', 'high'],
-    })).toBe('high')
+    expect(
+      modelDefaultEffort({
+        value: 'claude-opus-4-7',
+        supportsEffort: true,
+        supportedEffortLevels: ['low', 'medium', 'high']
+      })
+    ).toBe('high')
   })
 })
 
 describe('modelDefaultThinkingMode', () => {
   it('adaptive when SDK supports it', () => {
-    expect(modelDefaultThinkingMode({ value: 'default', supportsAdaptiveThinking: true })).toBe('adaptive')
+    expect(modelDefaultThinkingMode({ value: 'default', supportsAdaptiveThinking: true })).toBe(
+      'adaptive'
+    )
   })
   it('enabled when SDK says no adaptive', () => {
-    expect(modelDefaultThinkingMode({ value: 'haiku', supportsAdaptiveThinking: false })).toBe('enabled')
+    expect(modelDefaultThinkingMode({ value: 'haiku', supportsAdaptiveThinking: false })).toBe(
+      'enabled'
+    )
     expect(modelDefaultThinkingMode({ value: 'haiku' })).toBe('enabled') // id-fallback
   })
 })
@@ -291,10 +323,10 @@ describe('modelResolveEffort', () => {
     const sonnet = {
       value: 'sonnet',
       supportsEffort: true,
-      supportedEffortLevels: ['low', 'medium', 'high', 'max'] as const,
+      supportedEffortLevels: ['low', 'medium', 'high', 'max'] as const
     }
     expect(modelResolveEffort(sonnet, 'xhigh')).toBe('high') // not in list → default
-    expect(modelResolveEffort(sonnet, 'max')).toBe('max')    // allowed
+    expect(modelResolveEffort(sonnet, 'max')).toBe('max') // allowed
   })
 })
 

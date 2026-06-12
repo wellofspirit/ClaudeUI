@@ -1,5 +1,9 @@
 import { useState } from 'react'
-import type { ContentBlock, AskUserQuestion, AskUserQuestionInput } from '../../../../../shared/types'
+import type {
+  ContentBlock,
+  AskUserQuestion,
+  AskUserQuestionInput
+} from '../../../../../shared/types'
 
 type ToolUseBlock = Extract<ContentBlock, { type: 'tool_use' }>
 
@@ -11,7 +15,13 @@ export interface AskUserQuestionBlockViewProps {
   onDeny: () => Promise<void>
 }
 
-export function AskUserQuestionBlockView({ block, isCompleted, isPending, onSubmit, onDeny }: AskUserQuestionBlockViewProps): React.JSX.Element {
+export function AskUserQuestionBlockView({
+  block,
+  isCompleted,
+  isPending,
+  onSubmit,
+  onDeny
+}: AskUserQuestionBlockViewProps): React.JSX.Element {
   const input = block.toolInput as unknown as AskUserQuestionInput | undefined
   const questions = input?.questions ?? []
 
@@ -30,7 +40,11 @@ export function AskUserQuestionBlockView({ block, isCompleted, isPending, onSubm
   const keyOf = (questionIdx: number, question: AskUserQuestion): string =>
     question.question || `q${questionIdx}`
 
-  const handleSelect = (questionIdx: number, question: AskUserQuestion, optionLabel: string): void => {
+  const handleSelect = (
+    questionIdx: number,
+    question: AskUserQuestion,
+    optionLabel: string
+  ): void => {
     const key = keyOf(questionIdx, question)
     if (question.multiSelect) {
       const current = answers[key] || ''
@@ -57,7 +71,11 @@ export function AskUserQuestionBlockView({ block, isCompleted, isPending, onSubm
     }
   }
 
-  const handleOtherChange = (questionIdx: number, question: AskUserQuestion, text: string): void => {
+  const handleOtherChange = (
+    questionIdx: number,
+    question: AskUserQuestion,
+    text: string
+  ): void => {
     const key = keyOf(questionIdx, question)
     setOtherText({ ...otherText, [key]: text })
     setAnswers({ ...answers, [key]: text })
@@ -68,7 +86,11 @@ export function AskUserQuestionBlockView({ block, isCompleted, isPending, onSubm
     return !!otherActive[key]
   }
 
-  const isSelected = (questionIdx: number, question: AskUserQuestion, optionLabel: string): boolean => {
+  const isSelected = (
+    questionIdx: number,
+    question: AskUserQuestion,
+    optionLabel: string
+  ): boolean => {
     const key = keyOf(questionIdx, question)
     if (otherActive[key] && !question.multiSelect) return false
     const answer = answers[key] || ''
@@ -95,7 +117,15 @@ export function AskUserQuestionBlockView({ block, isCompleted, isPending, onSubm
           onClick={() => setSummaryExpanded(!summaryExpanded)}
           className="w-full flex items-center gap-2 px-3 h-9 text-[13px] hover:bg-bg-hover transition-colors cursor-pointer"
         >
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-success shrink-0">
+          <svg
+            width="12"
+            height="12"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            className="text-success shrink-0"
+          >
             <circle cx="12" cy="12" r="10" />
             <polyline points="8 12 11 15 16 9" />
           </svg>
@@ -103,7 +133,15 @@ export function AskUserQuestionBlockView({ block, isCompleted, isPending, onSubm
           <span className="text-text-secondary truncate flex-1 text-left text-[12px]">
             {totalSteps} question{totalSteps !== 1 ? 's' : ''} answered
           </span>
-          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={`text-text-secondary transition-transform shrink-0 ${summaryExpanded ? 'rotate-180' : ''}`}>
+          <svg
+            width="10"
+            height="10"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            className={`text-text-secondary transition-transform shrink-0 ${summaryExpanded ? 'rotate-180' : ''}`}
+          >
             <polyline points="6 9 12 15 18 9" />
           </svg>
         </button>
@@ -111,7 +149,9 @@ export function AskUserQuestionBlockView({ block, isCompleted, isPending, onSubm
           <div className="border-t border-border px-3 py-2.5 flex flex-col gap-2">
             {questions.map((q, i) => (
               <div key={i} className="flex flex-col gap-0.5">
-                <span className="text-[11px] text-text-secondary uppercase tracking-wider">{q.header}</span>
+                <span className="text-[11px] text-text-secondary uppercase tracking-wider">
+                  {q.header}
+                </span>
                 <span className="text-[13px] text-text-primary">{answers[keyOf(i, q)] || '—'}</span>
               </div>
             ))}
@@ -144,7 +184,15 @@ export function AskUserQuestionBlockView({ block, isCompleted, isPending, onSubm
   return (
     <div className="rounded-lg border border-accent/30 bg-bg-secondary overflow-hidden">
       <div className="flex items-center gap-2 px-3 h-9 text-[13px] border-b border-border">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-accent shrink-0">
+        <svg
+          width="14"
+          height="14"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          className="text-accent shrink-0"
+        >
           <circle cx="12" cy="12" r="10" />
           <path d="M9.09 9a3 3 0 015.83 1c0 2-3 3-3 3" />
           <line x1="12" y1="17" x2="12.01" y2="17" />
@@ -180,19 +228,32 @@ export function AskUserQuestionBlockView({ block, isCompleted, isPending, onSubm
                 }`}
               >
                 <div className="flex items-start gap-2.5">
-                  <div className={`mt-0.5 shrink-0 w-4 h-4 rounded-${question.multiSelect ? 'sm' : 'full'} border-2 flex items-center justify-center transition-colors ${
-                    selected ? 'border-accent bg-accent' : 'border-text-muted'
-                  }`}>
+                  <div
+                    className={`mt-0.5 shrink-0 w-4 h-4 rounded-${question.multiSelect ? 'sm' : 'full'} border-2 flex items-center justify-center transition-colors ${
+                      selected ? 'border-accent bg-accent' : 'border-text-muted'
+                    }`}
+                  >
                     {selected && (
-                      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="3">
+                      <svg
+                        width="10"
+                        height="10"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="white"
+                        strokeWidth="3"
+                      >
                         <polyline points="4 12 10 18 20 6" />
                       </svg>
                     )}
                   </div>
                   <div className="flex flex-col gap-0.5 min-w-0">
-                    <span className="text-[13px] font-medium text-text-primary">{option.label}</span>
+                    <span className="text-[13px] font-medium text-text-primary">
+                      {option.label}
+                    </span>
                     {option.description && (
-                      <span className="text-[12px] text-text-secondary leading-[1.4]">{option.description}</span>
+                      <span className="text-[12px] text-text-secondary leading-[1.4]">
+                        {option.description}
+                      </span>
                     )}
                   </div>
                 </div>
@@ -213,11 +274,22 @@ export function AskUserQuestionBlockView({ block, isCompleted, isPending, onSubm
             }`}
           >
             <div className="flex items-start gap-2.5">
-              <div className={`mt-0.5 shrink-0 w-4 h-4 rounded-${question.multiSelect ? 'sm' : 'full'} border-2 flex items-center justify-center transition-colors ${
-                isOtherMode(currentStep, question) ? 'border-accent bg-accent' : 'border-text-muted'
-              }`}>
+              <div
+                className={`mt-0.5 shrink-0 w-4 h-4 rounded-${question.multiSelect ? 'sm' : 'full'} border-2 flex items-center justify-center transition-colors ${
+                  isOtherMode(currentStep, question)
+                    ? 'border-accent bg-accent'
+                    : 'border-text-muted'
+                }`}
+              >
                 {isOtherMode(currentStep, question) && (
-                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="3">
+                  <svg
+                    width="10"
+                    height="10"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="white"
+                    strokeWidth="3"
+                  >
                     <polyline points="4 12 10 18 20 6" />
                   </svg>
                 )}

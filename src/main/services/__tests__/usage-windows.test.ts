@@ -2,11 +2,7 @@
  * @vitest-environment node
  */
 import { describe, it, expect } from 'vitest'
-import {
-  canonicalizeWindowEnd,
-  accountForTimestamp,
-  type AccountLogRecord
-} from '../usage-windows'
+import { canonicalizeWindowEnd, accountForTimestamp, type AccountLogRecord } from '../usage-windows'
 
 const T = (iso: string): number => new Date(iso).getTime()
 

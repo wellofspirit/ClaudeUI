@@ -21,7 +21,8 @@ export function AutomationList({ className }: AutomationListProps): React.JSX.El
   useEffect(() => {
     automations.forEach((a) => {
       if (runs[a.id] !== undefined) return
-      window.api.listAutomationRuns(a.id)
+      window.api
+        .listAutomationRuns(a.id)
         .then((r: AutomationRun[]) => setRuns(a.id, r))
         .catch(() => setRuns(a.id, []))
     })

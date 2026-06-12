@@ -1,4 +1,10 @@
-import type { DirectoryGroup, PluginViewWithOwner, SessionInfo, WorktreeInfo, ActiveView } from '../../../../shared/types'
+import type {
+  DirectoryGroup,
+  PluginViewWithOwner,
+  SessionInfo,
+  WorktreeInfo,
+  ActiveView
+} from '../../../../shared/types'
 import { WorktreesModal } from '../WorktreesModal'
 import { WorktreeCleanupModal } from '../WorktreeCleanupModal'
 import { NavItem, SafeSvgIcon } from './NavItem'
@@ -118,20 +124,37 @@ export function SidebarView(props: SidebarViewProps): React.JSX.Element {
     onCancelDelete,
     onWorktreeCleanupKeep,
     onWorktreeCleanupRemove,
-    onWorktreeCleanupCancel,
+    onWorktreeCleanupCancel
   } = props
 
   return (
-    <div style={style} className={`shrink-0 h-full flex flex-col select-none ${platform === 'darwin' ? 'bg-bg-secondary/60' : 'bg-bg-secondary/85'}`}>
+    <div
+      style={style}
+      className={`shrink-0 h-full flex flex-col select-none ${platform === 'darwin' ? 'bg-bg-secondary/60' : 'bg-bg-secondary/85'}`}
+    >
       {/* Traffic light clearance + collapse toggle */}
       <div className="h-12 shrink-0 [-webkit-app-region:drag] relative">
         <button
           onClick={onToggleCollapse}
-          style={{ position: 'absolute', left: platform === 'darwin' ? 82 / uiFontScale : 8, top: 22 / uiFontScale, transform: 'translateY(-50%)' }}
+          style={{
+            position: 'absolute',
+            left: platform === 'darwin' ? 82 / uiFontScale : 8,
+            top: 22 / uiFontScale,
+            transform: 'translateY(-50%)'
+          }}
           className="[-webkit-app-region:no-drag] w-[26px] h-[26px] flex items-center justify-center rounded-md text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
           title="Collapse sidebar"
         >
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+          <svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.8"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
             <rect x="3" y="3" width="18" height="18" rx="2" />
             <path d="M9 3v18" />
             <path d="M16 15l-3-3 3-3" />
@@ -146,7 +169,15 @@ export function SidebarView(props: SidebarViewProps): React.JSX.Element {
           onClick={onNewSession}
           onDoubleClick={onNewSessionDblClick}
           icon={
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+            <svg
+              width="15"
+              height="15"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.8"
+              strokeLinecap="round"
+            >
               <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" />
               <path d="M18.5 2.5a2.12 2.12 0 013 3L12 15l-4 1 1-4z" />
             </svg>
@@ -156,11 +187,22 @@ export function SidebarView(props: SidebarViewProps): React.JSX.Element {
           label="Automations"
           active={activeView.type === 'automations'}
           onClick={() => {
-            onSetActiveView(activeView.type === 'automations' ? { type: 'chat' } : { type: 'automations' })
+            onSetActiveView(
+              activeView.type === 'automations' ? { type: 'chat' } : { type: 'automations' }
+            )
           }}
           badge={automationBadge}
           icon={
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+            <svg
+              width="15"
+              height="15"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.8"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
               <circle cx="12" cy="12" r="10" />
               <polyline points="12 6 12 12 16 14" />
             </svg>
@@ -182,7 +224,16 @@ export function SidebarView(props: SidebarViewProps): React.JSX.Element {
               view.icon ? (
                 <SafeSvgIcon svg={view.icon} />
               ) : (
-                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                <svg
+                  width="15"
+                  height="15"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
                   <path d="M12 2L2 7l10 5 10-5-10-5z" />
                   <path d="M2 17l10 5 10-5" />
                   <path d="M2 12l10 5 10-5" />
@@ -199,7 +250,9 @@ export function SidebarView(props: SidebarViewProps): React.JSX.Element {
         {pinnedSessions.length > 0 && (
           <div style={{ margin: '20px 8px 0' }}>
             <div style={{ paddingLeft: 5, marginBottom: 3 }}>
-              <span className="text-[10px] font-semibold text-text-muted uppercase tracking-[0.08em]">Pinned</span>
+              <span className="text-[10px] font-semibold text-text-muted uppercase tracking-[0.08em]">
+                Pinned
+              </span>
             </div>
             <PinnedSessionList
               pinnedSessions={pinnedSessions}
@@ -226,7 +279,9 @@ export function SidebarView(props: SidebarViewProps): React.JSX.Element {
         {watchingSessions.length > 0 && (
           <div style={{ margin: '20px 8px 0' }}>
             <div style={{ paddingLeft: 5, marginBottom: 3 }}>
-              <span className="text-[10px] font-semibold text-text-muted uppercase tracking-[0.08em]">Watching</span>
+              <span className="text-[10px] font-semibold text-text-muted uppercase tracking-[0.08em]">
+                Watching
+              </span>
             </div>
             <nav className="flex flex-col gap-px">
               {watchingSessions.map((info) => {
@@ -258,7 +313,9 @@ export function SidebarView(props: SidebarViewProps): React.JSX.Element {
         {recentSessions.length > 0 && (
           <div style={{ margin: '20px 8px 0' }}>
             <div style={{ paddingLeft: 5, marginBottom: 3 }}>
-              <span className="text-[10px] font-semibold text-text-muted uppercase tracking-[0.08em]">Recent</span>
+              <span className="text-[10px] font-semibold text-text-muted uppercase tracking-[0.08em]">
+                Recent
+              </span>
             </div>
             <nav className="flex flex-col gap-px">
               {recentSessions.map((info) => {
@@ -291,8 +348,13 @@ export function SidebarView(props: SidebarViewProps): React.JSX.Element {
         {/* Projects accordion */}
         {augmentedDirs.length > 0 && (
           <div style={{ margin: '20px 8px 0' }}>
-            <div style={{ paddingLeft: 5, marginBottom: 3 }} className="flex items-center justify-between pr-1">
-              <span className="text-[10px] font-semibold text-text-muted uppercase tracking-[0.08em]">Projects</span>
+            <div
+              style={{ paddingLeft: 5, marginBottom: 3 }}
+              className="flex items-center justify-between pr-1"
+            >
+              <span className="text-[10px] font-semibold text-text-muted uppercase tracking-[0.08em]">
+                Projects
+              </span>
               {hasAnyHidden && (
                 <button
                   onClick={onShowHiddenToggle}
@@ -317,7 +379,9 @@ export function SidebarView(props: SidebarViewProps): React.JSX.Element {
                       onClick={() => onDirClick(group.projectKey || group.cwd)}
                       onDoubleClick={() => onDirDoubleClick(group)}
                       onSessionClick={onClickSession}
-                      onSessionDoubleClick={(info) => { if (!pinnedSessionIds.includes(info.sessionId)) onSessionDoubleClick(info) }}
+                      onSessionDoubleClick={(info) => {
+                        if (!pinnedSessionIds.includes(info.sessionId)) onSessionDoubleClick(info)
+                      }}
                       onToggleWatch={onToggleWatch}
                       onViewWorktrees={() => onViewWorktrees(group.cwd)}
                       renamingKey={renamingKey}
@@ -327,8 +391,16 @@ export function SidebarView(props: SidebarViewProps): React.JSX.Element {
                       onAutoRename={onAutoRename}
                       onCancelRename={() => onSetRenamingKey(null)}
                       hidden={projectHidden}
-                      onHide={group.projectKey && !projectHidden ? () => onHideProject(group.projectKey) : undefined}
-                      onUnhide={group.projectKey && projectHidden ? () => onUnhideProject(group.projectKey) : undefined}
+                      onHide={
+                        group.projectKey && !projectHidden
+                          ? () => onHideProject(group.projectKey)
+                          : undefined
+                      }
+                      onUnhide={
+                        group.projectKey && projectHidden
+                          ? () => onUnhideProject(group.projectKey)
+                          : undefined
+                      }
                       onDelete={group.projectKey ? () => onDeleteProject(group) : undefined}
                       hiddenSessionIds={hiddenSessionSet}
                       showHidden={showHidden}
@@ -356,9 +428,10 @@ export function SidebarView(props: SidebarViewProps): React.JSX.Element {
         <DeleteConfirmModal
           kind={deleteTarget.kind}
           name={deleteTarget.kind === 'session' ? deleteTarget.title : deleteTarget.folderName}
-          path={deleteTarget.kind === 'session'
-            ? `~/.claude/projects/${deleteTarget.projectKey}/${deleteTarget.sessionId}.jsonl`
-            : `~/.claude/projects/${deleteTarget.projectKey}/`
+          path={
+            deleteTarget.kind === 'session'
+              ? `~/.claude/projects/${deleteTarget.projectKey}/${deleteTarget.sessionId}.jsonl`
+              : `~/.claude/projects/${deleteTarget.projectKey}/`
           }
           sessionCount={deleteTarget.kind === 'project' ? deleteTarget.sessionCount : undefined}
           onConfirm={onConfirmDelete}

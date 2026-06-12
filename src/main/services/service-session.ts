@@ -92,8 +92,8 @@ class ServiceSession {
           allowDangerouslySkipPermissions: true,
           persistSession: false,
           settingSources: [],
-          abortController: ac,
-        },
+          abortController: ac
+        }
       })
 
       // Cast to access patched getUsage()

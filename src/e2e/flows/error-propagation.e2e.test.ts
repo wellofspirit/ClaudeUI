@@ -21,7 +21,9 @@ function wireEventHandlers(app: TestApp): Array<() => void> {
     return (cb: T) => {
       const handler = (_: unknown, ...args: unknown[]): void => (cb as Function)(...args)
       app.bridge.ipcRenderer.on(channel, handler)
-      const cleanup = (): void => { app.bridge.ipcRenderer.removeListener(channel, handler) }
+      const cleanup = (): void => {
+        app.bridge.ipcRenderer.removeListener(channel, handler)
+      }
       cleanups.push(cleanup)
       return cleanup
     }
@@ -34,28 +36,35 @@ function wireEventHandlers(app: TestApp): Array<() => void> {
     if (data.type === 'thinking') store().appendStreamingThinking(routingId, data.text)
     else store().appendStreamingText(routingId, data.text)
   })
-  onEvent<(routingId: string, status: SessionStatus) => void>('session:status')((routingId, status) => {
-    let effective = routingId
-    if (status.sessionId && status.sessionId !== routingId) {
-      const s = store()
-      if (s.sessions[routingId]) { s.rekeySession(routingId, status.sessionId); effective = status.sessionId }
+  onEvent<(routingId: string, status: SessionStatus) => void>('session:status')(
+    (routingId, status) => {
+      let effective = routingId
+      if (status.sessionId && status.sessionId !== routingId) {
+        const s = store()
+        if (s.sessions[routingId]) {
+          s.rekeySession(routingId, status.sessionId)
+          effective = status.sessionId
+        }
+      }
+      if (status.state === 'disconnected') {
+        store().markSdkInactive(effective)
+        store().setStatus(effective, { ...status, state: 'idle' })
+        store().clearPendingApprovals(effective)
+        return
+      }
+      store().setStatus(effective, status)
+      if (status.state === 'idle') store().clearPendingApprovals(effective)
     }
-    if (status.state === 'disconnected') {
-      store().markSdkInactive(effective)
-      store().setStatus(effective, { ...status, state: 'idle' })
-      store().clearPendingApprovals(effective)
-      return
-    }
-    store().setStatus(effective, status)
-    if (status.state === 'idle') store().clearPendingApprovals(effective)
-  })
+  )
   onEvent<(routingId: string, error: string) => void>('session:error')((routingId, error) => {
     store().addError(routingId, error)
   })
   onEvent<(routingId: string, warning: string) => void>('session:warning')((routingId, warning) => {
     store().addWarning(routingId, warning)
   })
-  onEvent<(routingId: string, data: { messageIds: string[] }) => void>('session:messages-retracted')((routingId, data) => {
+  onEvent<(routingId: string, data: { messageIds: string[] }) => void>(
+    'session:messages-retracted'
+  )((routingId, data) => {
     store().retractMessages(routingId, data.messageIds)
   })
 
@@ -71,7 +80,7 @@ beforeEach(async () => {
     directories: [],
     recentSessionIds: [],
     pinnedSessionIds: [],
-    customTitles: {},
+    customTitles: {}
   })
   eventCleanups = wireEventHandlers(app)
 })
@@ -88,7 +97,9 @@ describe('E2E: error propagation', () => {
 
     app.emit('session:error', routingId, 'API rate limit exceeded')
 
-    expect(useSessionStore.getState().sessions[routingId].errors).toEqual(['API rate limit exceeded'])
+    expect(useSessionStore.getState().sessions[routingId].errors).toEqual([
+      'API rate limit exceeded'
+    ])
   })
 
   it('multiple errors accumulate in order', () => {
@@ -104,7 +115,7 @@ describe('E2E: error propagation', () => {
     expect(errors).toEqual(['First error', 'Second error', 'Third error'])
   })
 
-  it('errors are scoped per session — one session\'s errors do not leak to another', () => {
+  it("errors are scoped per session — one session's errors do not leak to another", () => {
     useSessionStore.getState().createNewSession('A', '/a')
     useSessionStore.getState().createNewSession('B', '/b')
 
@@ -124,7 +135,11 @@ describe('E2E: error propagation', () => {
     app.emit('session:error', routingId, 'persistent error')
     // Simulate status going back to idle
     useSessionStore.getState().setStatus(routingId, {
-      state: 'idle', sessionId: routingId, model: null, cwd: null, totalCostUsd: 0,
+      state: 'idle',
+      sessionId: routingId,
+      model: null,
+      cwd: null,
+      totalCostUsd: 0
     })
     expect(useSessionStore.getState().sessions[routingId].errors).toEqual(['persistent error'])
   })
@@ -158,8 +173,14 @@ describe('E2E: warning propagation (model_refusal_fallback / model_fallback)', (
     const routingId = 'r1'
     const store = useSessionStore.getState()
     store.createNewSession(routingId, '/test')
-    store.addMessage(routingId, makeChatMessage({ id: 'msg_refused', content: [{ type: 'text', text: 'partial' }] }))
-    store.addMessage(routingId, makeChatMessage({ id: 'msg_keep', content: [{ type: 'text', text: 'keep' }] }))
+    store.addMessage(
+      routingId,
+      makeChatMessage({ id: 'msg_refused', content: [{ type: 'text', text: 'partial' }] })
+    )
+    store.addMessage(
+      routingId,
+      makeChatMessage({ id: 'msg_keep', content: [{ type: 'text', text: 'keep' }] })
+    )
     store.appendStreamingText(routingId, 'refused partial stream')
 
     app.emit('session:messages-retracted', routingId, { messageIds: ['msg_refused'] })

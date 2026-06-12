@@ -59,7 +59,7 @@ transport.)
 
 **Serve mockups over HTTP from the remote server's existing HTTP listener,
 reusing the desktop serving logic, and render them in an iframe sandboxed
-*without* `allow-same-origin`.**
+_without_ `allow-same-origin`.**
 
 ### Transport-agnostic serving core
 
@@ -100,11 +100,11 @@ isolated from the web client even though it's served from the same host. This
 changes the postMessage contract on web (captured in
 `src/renderer/src/components/mockup-transport.ts`):
 
-| | Desktop | Web |
-|---|---|---|
-| iframe `sandbox` | `allow-scripts allow-same-origin` | `allow-scripts` |
-| parent→iframe reload target | `mockup-asset://<id>.m` | `'*'` |
-| bridge expected `event.origin` | `mockup-asset://<id>.m` | `'null'` |
+|                                | Desktop                           | Web             |
+| ------------------------------ | --------------------------------- | --------------- |
+| iframe `sandbox`               | `allow-scripts allow-same-origin` | `allow-scripts` |
+| parent→iframe reload target    | `mockup-asset://<id>.m`           | `'*'`           |
+| bridge expected `event.origin` | `mockup-asset://<id>.m`           | `'null'`        |
 
 The bridge's primary trust check (`event.source === iframe.contentWindow`)
 holds in both modes; the origin check is defense-in-depth.

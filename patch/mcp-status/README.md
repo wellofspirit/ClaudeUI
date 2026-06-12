@@ -6,10 +6,10 @@ Fixes `mcp_status` returning an empty/incomplete server list in SDK/headless mod
 
 `@anthropic-ai/claude-code` — rebundled `cli.js` (extracted from the Bun standalone binary).
 
-| Component | Version |
-|---|---|
-| At time of discovery | bundled CLI `2.1.87` |
-| Last re-anchored | bundled CLI `2.1.163` |
+| Component            | Version               |
+| -------------------- | --------------------- |
+| At time of discovery | bundled CLI `2.1.87`  |
+| Last re-anchored     | bundled CLI `2.1.163` |
 
 The CLI is spawned natively (Bun binary), independent of any native `claude` install. This patch operates on the wrapped CJS bytes in `vendor/claude-cli/cli.js`.
 
@@ -43,16 +43,16 @@ run-loop fn
 
 **Variable mapping (v2.1.163 — names WILL change):**
 
-| Var | Role |
-|---|---|
-| `<cachedEnv>` (`R_`) | cached `process.env` reference; access is `R_.CLAUDE_CODE_SYNC_PLUGIN_INSTALL`, **not** `process.env....` |
-| `M_` | awaitable orchestration promise (sync branch) — also consumed by an existing `if(M_){await M_;M_=null}` join before MCP prewait |
-| `k_` | fire-and-forget wrapper result (else branch) |
-| `ux4` | the fire-and-forget wrapper function |
-| `T_` | plugin refresh fn; internally `await OH(...)` |
-| `OH` | the Headless MCP refresh fn (Part B calls it) |
-| `K_` | reads current MCP server state for the response |
-| `bH` | control-response responder |
+| Var                  | Role                                                                                                                            |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `<cachedEnv>` (`R_`) | cached `process.env` reference; access is `R_.CLAUDE_CODE_SYNC_PLUGIN_INSTALL`, **not** `process.env....`                       |
+| `M_`                 | awaitable orchestration promise (sync branch) — also consumed by an existing `if(M_){await M_;M_=null}` join before MCP prewait |
+| `k_`                 | fire-and-forget wrapper result (else branch)                                                                                    |
+| `ux4`                | the fire-and-forget wrapper function                                                                                            |
+| `T_`                 | plugin refresh fn; internally `await OH(...)`                                                                                   |
+| `OH`                 | the Headless MCP refresh fn (Part B calls it)                                                                                   |
+| `K_`                 | reads current MCP server state for the response                                                                                 |
+| `bH`                 | control-response responder                                                                                                      |
 
 ## The Patches
 
@@ -63,21 +63,25 @@ run-loop fn
 The sync branch already stores an awaitable in `M_`. The else branch only stores the non-awaitable `k_`. We rewrite the else branch to start the refresh **once**, expose its promise as `M_` (the same var Part B awaits and the existing join consumes), and hand the wrapper a thunk so it reuses that promise instead of invoking `T_` a second time.
 
 **Before (v2.1.163):**
+
 ```js
 else k_=ux4(T_);
 ```
 
 **After:**
+
 ```js
 /*PATCHED:mcp-status-store-promise*/else{let _cuMcpRef=T_();M_=_cuMcpRef;k_=ux4(()=>_cuMcpRef);}
 ```
 
 **Why it's safe:**
+
 - `T_` is started exactly once. `ux4(()=>_cuMcpRef)` calls its arg, which returns the already-started promise — no double refresh.
 - `M_` was previously `undefined` in this branch; the only reader is `if(M_){let nK=performance.now();await M_,M_=null,L5("registry_refresh_join_ms",...)}` (a pre-MCP-prewait join). Setting `M_` here just makes that join also wait for the plugin refresh — the desired behavior — then nulls it.
 - `_cuMcpRef` is block-scoped inside the new `else{}`, so it cannot collide.
 
 > **Historical shapes** (all still handled by `apply.mjs` as fallbacks):
+>
 > - `<=0.2.105`: `z6=null;if(!Y9())if(S6(process.env.CLAUDE_CODE_SYNC_PLUGIN_INSTALL))z6=V6();else V6()` → `z6=null;if(!Y9())z6=V6()`
 > - `0.2.112+`: sync stores `V6=W6(...)`, else stores `f6=$X5(W6)` → patch the else to also set the promise var
 > - `2.1.144`: `...INSTALL))...TH=A8(...);else mH=Mq4(A8)` → else also sets the promise var
@@ -90,11 +94,13 @@ else k_=ux4(T_);
 Before responding, call the Headless MCP refresh fn (loads all configured servers into appState), then await the plugin promise if present.
 
 **Before:**
+
 ```js
 ...request.subtype==="mcp_status")bH(__,{mcpServers:K_()});
 ```
 
 **After:**
+
 ```js
 .../*PATCHED:mcp-status-await-refresh*/request.subtype==="mcp_status"){await OH();if(M_)await M_;bH(__,{mcpServers:K_()})}
 ```
@@ -103,7 +109,7 @@ Before responding, call the Headless MCP refresh fn (loads all configured server
 
 > **The refresh fn name is minified and changes every version** (`s` @0.2.87, `R6` @0.2.97, `OH` @2.1.163). `apply.mjs` extracts it by finding the `"Headless MCP refresh"` string literal and searching **backward** for the nearest `async function <name>(...)`. Hardcoding the name makes the handler call `undefined`, silently breaking the control response and hanging the UI.
 
-> **Backward-window gotcha (added 2.1.163):** the enclosing `async function OH(...)` declaration sits ~540 chars before the `"Headless MCP refresh"` string (its body grew). The original 500-char search window missed it; the window is now **2000**. The last-match-wins logic still resolves to the function that *contains* the string (no nested `async function` sits between the declaration and the string).
+> **Backward-window gotcha (added 2.1.163):** the enclosing `async function OH(...)` declaration sits ~540 chars before the `"Headless MCP refresh"` string (its body grew). The original 500-char search window missed it; the window is now **2000**. The last-match-wins logic still resolves to the function that _contains_ the string (no nested `async function` sits between the declaration and the string).
 
 ## How to Find This Code
 
@@ -154,32 +160,32 @@ Always run `node --check cli.js` after applying.
 
 ## Key Functions Reference
 
-| Name (v2.1.163) | Purpose |
-|---|---|
-| `OH` | Headless MCP refresh — loads all configured servers (Part B calls it) |
-| `T_` | plugin install/refresh; calls `OH` internally |
-| `ux4` | fire-and-forget wrapper returning `{needsRefresh}` |
-| `K_` | reads current MCP server state for the response |
-| `bH` | control-response responder |
+| Name (v2.1.163) | Purpose                                                               |
+| --------------- | --------------------------------------------------------------------- |
+| `OH`            | Headless MCP refresh — loads all configured servers (Part B calls it) |
+| `T_`            | plugin install/refresh; calls `OH` internally                         |
+| `ux4`           | fire-and-forget wrapper returning `{needsRefresh}`                    |
+| `K_`            | reads current MCP server state for the response                       |
+| `bH`            | control-response responder                                            |
 
 **Note:** all minified names change between versions. Relocate by string literals / structural shape.
 
 ## MCP control request subtypes reference
 
-| Subtype | Purpose | Response |
-|---|---|---|
-| `mcp_status` | Get all server statuses | `{mcpServers: [...]}` |
-| `mcp_set_servers` | Add/remove dynamic servers | `{added, removed, errors}` |
-| `mcp_reconnect` | Reconnect a named server | success/error |
-| `mcp_toggle` | Enable/disable a named server | success/error |
-| `mcp_authenticate` | Start OAuth for SSE/HTTP server | `{authUrl?, requiresUserAction}` |
-| `mcp_clear_auth` | Clear OAuth credentials | success/error |
-| `mcp_message` | Forward message to MCP transport | success |
+| Subtype            | Purpose                          | Response                         |
+| ------------------ | -------------------------------- | -------------------------------- |
+| `mcp_status`       | Get all server statuses          | `{mcpServers: [...]}`            |
+| `mcp_set_servers`  | Add/remove dynamic servers       | `{added, removed, errors}`       |
+| `mcp_reconnect`    | Reconnect a named server         | success/error                    |
+| `mcp_toggle`       | Enable/disable a named server    | success/error                    |
+| `mcp_authenticate` | Start OAuth for SSE/HTTP server  | `{authUrl?, requiresUserAction}` |
+| `mcp_clear_auth`   | Clear OAuth credentials          | success/error                    |
+| `mcp_message`      | Forward message to MCP transport | success                          |
 
 ## Files
 
-| File | Purpose |
-|---|---|
-| `README.md` | This document |
+| File        | Purpose                                                 |
+| ----------- | ------------------------------------------------------- |
+| `README.md` | This document                                           |
 | `apply.mjs` | Patch script (Part A + Part B, multi-version fallbacks) |
-| `test.mjs` | Behavioral harness |
+| `test.mjs`  | Behavioral harness                                      |

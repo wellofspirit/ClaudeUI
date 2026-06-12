@@ -167,26 +167,37 @@ export class UsageFetcher {
     // push to renderer and skip the initial API fetch. A cache without an
     // indicative window (no resetsAt, or already expired) can't anchor block
     // grouping, so fetch immediately in that case.
-    this.loadCache().then((cached) => {
-      const windowIndicative =
-        cached?.fiveHour.resetsAt != null &&
-        new Date(cached.fiveHour.resetsAt).getTime() > Date.now()
-      if (cached) {
-        this.lastUsage = cached
-        this.pushToRenderer(cached)
-        this.scheduleExpiryFetch()
-        logger.debug('UsageFetcher', `Loaded cache (age ${Math.round((Date.now() - cached.fetchedAt) / 1000)}s)`)
-      }
-      if (!cached || !windowIndicative) {
-        this.fetch().catch((err) => { logger.warn('UsageFetcher', 'Initial fetch failed', err) })
-      }
-    }).catch(() => {
-      // Cache read failed — fetch immediately
-      this.fetch().catch((err) => { logger.warn('UsageFetcher', 'Initial fetch failed', err) })
-    })
+    this.loadCache()
+      .then((cached) => {
+        const windowIndicative =
+          cached?.fiveHour.resetsAt != null &&
+          new Date(cached.fiveHour.resetsAt).getTime() > Date.now()
+        if (cached) {
+          this.lastUsage = cached
+          this.pushToRenderer(cached)
+          this.scheduleExpiryFetch()
+          logger.debug(
+            'UsageFetcher',
+            `Loaded cache (age ${Math.round((Date.now() - cached.fetchedAt) / 1000)}s)`
+          )
+        }
+        if (!cached || !windowIndicative) {
+          this.fetch().catch((err) => {
+            logger.warn('UsageFetcher', 'Initial fetch failed', err)
+          })
+        }
+      })
+      .catch(() => {
+        // Cache read failed — fetch immediately
+        this.fetch().catch((err) => {
+          logger.warn('UsageFetcher', 'Initial fetch failed', err)
+        })
+      })
 
     this.pollTimer = setInterval(() => {
-      this.fetch().catch((err) => { logger.warn('UsageFetcher', 'Poll fetch failed', err) })
+      this.fetch().catch((err) => {
+        logger.warn('UsageFetcher', 'Poll fetch failed', err)
+      })
     }, this.pollIntervalMs)
   }
 
@@ -236,7 +247,9 @@ export class UsageFetcher {
     if (windowKnown) return
     if (Date.now() - this.lastFetchStartedAt < UNKNOWN_WINDOW_FETCH_THROTTLE_MS) return
     logger.debug('UsageFetcher', 'Activity with no known 5h window — fetching usage')
-    this.fetch().catch((err) => { logger.warn('UsageFetcher', 'Unknown-window fetch failed', err) })
+    this.fetch().catch((err) => {
+      logger.warn('UsageFetcher', 'Unknown-window fetch failed', err)
+    })
   }
 
   /** Get the last cached result (may be null). */
@@ -317,7 +330,9 @@ export class UsageFetcher {
     this.expiryTimer = setTimeout(() => {
       this.expiryTimer = null
       logger.debug('UsageFetcher', '5h window expired — proactive usage fetch')
-      this.fetch().catch((err) => { logger.warn('UsageFetcher', 'Expiry fetch failed', err) })
+      this.fetch().catch((err) => {
+        logger.warn('UsageFetcher', 'Expiry fetch failed', err)
+      })
     }, delay)
   }
 
@@ -342,9 +357,7 @@ export class UsageFetcher {
 
     const window: RateWindow = {
       usedPercent: toUsedPercent(utilization, 'fraction'),
-      resetsAt: typeof resetsAt === 'number'
-        ? new Date(resetsAt * 1000).toISOString()
-        : null
+      resetsAt: typeof resetsAt === 'number' ? new Date(resetsAt * 1000).toISOString() : null
     }
 
     // Map rateLimitType to the AccountUsage field
@@ -380,7 +393,9 @@ export class UsageFetcher {
    *
    * Shape: { five_hour?: { utilization: number, resets_at: number }, seven_day?: { ... } }
    */
-  updateFromHeaderUtilization(headerUtil: Record<string, { utilization: number; resets_at: number }>): void {
+  updateFromHeaderUtilization(
+    headerUtil: Record<string, { utilization: number; resets_at: number }>
+  ): void {
     const base = this.lastUsage ?? this.defaultUsage()
     let updated = false
 
@@ -395,14 +410,12 @@ export class UsageFetcher {
 
       const window: RateWindow = {
         usedPercent: toUsedPercent(data.utilization, 'fraction'),
-        resetsAt: typeof data.resets_at === 'number'
-          ? new Date(data.resets_at * 1000).toISOString()
-          : null
+        resetsAt:
+          typeof data.resets_at === 'number' ? new Date(data.resets_at * 1000).toISOString() : null
       }
 
       ;(base as unknown as Record<string, unknown>)[field] = window
       updated = true
-
     }
 
     if (!updated) return
@@ -442,7 +455,9 @@ export class UsageFetcher {
       if (!this.lastUsage) return
       mkdir(CACHE_DIR, { recursive: true })
         .then(() => writeFile(CACHE_PATH, JSON.stringify(this.lastUsage), 'utf-8'))
-        .catch((err) => { logger.debug('UsageFetcher', `Cache write failed: ${err}`) })
+        .catch((err) => {
+          logger.debug('UsageFetcher', `Cache write failed: ${err}`)
+        })
     }, CACHE_WRITE_DEBOUNCE_MS)
   }
 
@@ -471,7 +486,9 @@ export class UsageFetcher {
       for (const w of ClaudeSession.getExtraWindows()) {
         if (!w.isDestroyed()) w.webContents.send('usage:data', usage)
       }
-    } catch { /* Window may have been closed */ }
+    } catch {
+      /* Window may have been closed */
+    }
   }
 
   /**
@@ -527,7 +544,7 @@ export class UsageFetcher {
         headers: {
           'Content-Type': 'application/json',
           'User-Agent': this.userAgent,
-          'Authorization': `Bearer ${token}`,
+          Authorization: `Bearer ${token}`,
           'anthropic-beta': ANTHROPIC_BETA
         },
         signal: controller.signal
@@ -545,7 +562,7 @@ export class UsageFetcher {
           headers: {
             'Content-Type': 'application/json',
             'User-Agent': this.userAgent,
-            'Authorization': `Bearer ${token}`,
+            Authorization: `Bearer ${token}`,
             'anthropic-beta': ANTHROPIC_BETA
           },
           signal: controller.signal
@@ -557,7 +574,10 @@ export class UsageFetcher {
 
       if (resp.status === 429) {
         // Rate-limited — don't retry or fall back, just wait for the next poll cycle
-        logger.debug('UsageFetcher', 'Direct API returned 429 (rate limited), skipping until next poll')
+        logger.debug(
+          'UsageFetcher',
+          'Direct API returned 429 (rate limited), skipping until next poll'
+        )
         return this.errorResult('Rate limited')
       }
 
@@ -612,7 +632,10 @@ export class UsageFetcher {
           { timeout: 5000 },
           (err, stdout, stderr) => {
             if (err) {
-              if ((err as NodeJS.ErrnoException).code === '44' || stderr?.includes('could not be found')) {
+              if (
+                (err as NodeJS.ErrnoException).code === '44' ||
+                stderr?.includes('could not be found')
+              ) {
                 return resolve('')
               }
               return reject(err)
@@ -662,7 +685,9 @@ export class UsageFetcher {
       const file = JSON.parse(raw) as CredentialsFile
       file.claudeAiOauth = newCreds
       await writeFile(CREDENTIALS_PATH, JSON.stringify(file, null, 2), 'utf-8')
-    } catch { /* best effort */ }
+    } catch {
+      /* best effort */
+    }
 
     return data.access_token
   }
@@ -687,21 +712,23 @@ export class UsageFetcher {
     const fiveHour = parseWindow('five_hour')
 
     if (!fiveHour && Object.keys(data).length > 0) {
-      logger.warn(
-        'UsageFetcher',
-        'API response missing five_hour utilization — defaulting to 0%',
-        { keys: Object.keys(data), five_hour: data['five_hour'] }
-      )
+      logger.warn('UsageFetcher', 'API response missing five_hour utilization — defaulting to 0%', {
+        keys: Object.keys(data),
+        five_hour: data['five_hour']
+      })
     }
 
     // Parse extra_usage: { is_enabled, monthly_limit, used_credits, utilization }
     let extraUsage: ExtraUsage | null = null
-    const eu = data['extra_usage'] as {
-      is_enabled?: boolean
-      monthly_limit?: number | null
-      used_credits?: number
-      utilization?: number
-    } | undefined | null
+    const eu = data['extra_usage'] as
+      | {
+          is_enabled?: boolean
+          monthly_limit?: number | null
+          used_credits?: number
+          utilization?: number
+        }
+      | undefined
+      | null
     if (eu && typeof eu === 'object') {
       extraUsage = {
         isEnabled: eu.is_enabled ?? false,

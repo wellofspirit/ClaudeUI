@@ -108,7 +108,10 @@ export async function makeTempGitRepo(opts: MakeTempRepoOptions = {}): Promise<T
  * Create a bare remote repo that can be used as push/pull target for another
  * tempGitRepo. Returns the absolute path + cleanup.
  */
-export async function makeBareRemoteRepo(): Promise<{ path: string; cleanup: () => Promise<void> }> {
+export async function makeBareRemoteRepo(): Promise<{
+  path: string
+  cleanup: () => Promise<void>
+}> {
   const repoPath = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'claudeui-git-remote-'))
   await simpleGit(repoPath).init(['--bare'])
   return {
@@ -119,6 +122,6 @@ export async function makeBareRemoteRepo(): Promise<{ path: string; cleanup: () 
       } catch {
         /* ignore */
       }
-    },
+    }
   }
 }

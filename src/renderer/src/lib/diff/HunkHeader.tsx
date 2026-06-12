@@ -39,7 +39,7 @@ export const HunkHeader = memo(function HunkHeader({
   hunk,
   expandableGap,
   onExpand,
-  position = 'middle',
+  position = 'middle'
 }: HunkHeaderProps): React.JSX.Element {
   const contextMatch = hunk.header.match(/@@[^@]*@@\s*(.*)$/)
   const context = contextMatch?.[1] || ''
@@ -50,9 +50,7 @@ export const HunkHeader = memo(function HunkHeader({
   // If the last hunk has hidden lines above (adjacentGap), show unfold
   // since there are hidden lines on both sides
   const iconPosition =
-    position === 'only' ? 'middle'
-      : (position === 'last' && expandableGap) ? 'middle'
-        : position
+    position === 'only' ? 'middle' : position === 'last' && expandableGap ? 'middle' : position
 
   return (
     <div className="diff-hunk-header">
@@ -78,15 +76,28 @@ interface GapRowProps {
   onExpand: (gap: HunkGap) => void
 }
 
-export const GapRow = memo(function GapRow({ gap, position, onExpand }: GapRowProps): React.JSX.Element {
+export const GapRow = memo(function GapRow({
+  gap,
+  position,
+  onExpand
+}: GapRowProps): React.JSX.Element {
   return (
     <div className="diff-hunk-header diff-gap" onClick={() => onExpand(gap)}>
       <button
         className="diff-expand-btn"
         title={`Show ${gap.count} hidden lines`}
-        onClick={(e) => { e.stopPropagation(); onExpand(gap) }}
+        onClick={(e) => {
+          e.stopPropagation()
+          onExpand(gap)
+        }}
       >
-        {position === 'before' ? <FoldUpIcon /> : position === 'after' ? <FoldDownIcon /> : <UnfoldIcon />}
+        {position === 'before' ? (
+          <FoldUpIcon />
+        ) : position === 'after' ? (
+          <FoldDownIcon />
+        ) : (
+          <UnfoldIcon />
+        )}
       </button>
       <span className="diff-hunk-label diff-gap-text">
         Show {gap.count} hidden line{gap.count !== 1 ? 's' : ''}

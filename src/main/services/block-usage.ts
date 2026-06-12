@@ -25,11 +25,7 @@ import type {
 import { ClaudeSession } from './claude-session'
 import { usageFetcher } from './usage-fetcher'
 import { logger } from './logger'
-import {
-  canonicalizeWindowEnd,
-  accountForTimestamp,
-  type AccountLogRecord
-} from './usage-windows'
+import { canonicalizeWindowEnd, accountForTimestamp, type AccountLogRecord } from './usage-windows'
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -74,64 +70,140 @@ const MODEL_PRICING: Array<{ match: string; pricing: ModelPricing }> = [
   // Fable 5 / Mythos 5 — 2× Opus 4.8 ($10/$50)
   {
     match: 'fable',
-    pricing: { inputPerMTok: 10, outputPerMTok: 50, cacheWritePerMTok: 12.5, cacheWrite1hPerMTok: 20, cacheReadPerMTok: 1 }
+    pricing: {
+      inputPerMTok: 10,
+      outputPerMTok: 50,
+      cacheWritePerMTok: 12.5,
+      cacheWrite1hPerMTok: 20,
+      cacheReadPerMTok: 1
+    }
   },
   {
     match: 'mythos',
-    pricing: { inputPerMTok: 10, outputPerMTok: 50, cacheWritePerMTok: 12.5, cacheWrite1hPerMTok: 20, cacheReadPerMTok: 1 }
+    pricing: {
+      inputPerMTok: 10,
+      outputPerMTok: 50,
+      cacheWritePerMTok: 12.5,
+      cacheWrite1hPerMTok: 20,
+      cacheReadPerMTok: 1
+    }
   },
   // Opus 4.5+ (cheaper — match these first before the older opus-4 variants)
   {
     match: 'opus-4-5',
-    pricing: { inputPerMTok: 5, outputPerMTok: 25, cacheWritePerMTok: 6.25, cacheWrite1hPerMTok: 10, cacheReadPerMTok: 0.5 }
+    pricing: {
+      inputPerMTok: 5,
+      outputPerMTok: 25,
+      cacheWritePerMTok: 6.25,
+      cacheWrite1hPerMTok: 10,
+      cacheReadPerMTok: 0.5
+    }
   },
   {
     match: 'opus-4-6',
-    pricing: { inputPerMTok: 5, outputPerMTok: 25, cacheWritePerMTok: 6.25, cacheWrite1hPerMTok: 10, cacheReadPerMTok: 0.5 }
+    pricing: {
+      inputPerMTok: 5,
+      outputPerMTok: 25,
+      cacheWritePerMTok: 6.25,
+      cacheWrite1hPerMTok: 10,
+      cacheReadPerMTok: 0.5
+    }
   },
   {
     match: 'opus-4-7',
-    pricing: { inputPerMTok: 5, outputPerMTok: 25, cacheWritePerMTok: 6.25, cacheWrite1hPerMTok: 10, cacheReadPerMTok: 0.5 }
+    pricing: {
+      inputPerMTok: 5,
+      outputPerMTok: 25,
+      cacheWritePerMTok: 6.25,
+      cacheWrite1hPerMTok: 10,
+      cacheReadPerMTok: 0.5
+    }
   },
   {
     match: 'opus-4-8',
-    pricing: { inputPerMTok: 5, outputPerMTok: 25, cacheWritePerMTok: 6.25, cacheWrite1hPerMTok: 10, cacheReadPerMTok: 0.5 }
+    pricing: {
+      inputPerMTok: 5,
+      outputPerMTok: 25,
+      cacheWritePerMTok: 6.25,
+      cacheWrite1hPerMTok: 10,
+      cacheReadPerMTok: 0.5
+    }
   },
   // Opus 4.0 / 4.1 (older, more expensive)
   {
     match: 'opus-4',
-    pricing: { inputPerMTok: 15, outputPerMTok: 75, cacheWritePerMTok: 18.75, cacheWrite1hPerMTok: 30, cacheReadPerMTok: 1.5 }
+    pricing: {
+      inputPerMTok: 15,
+      outputPerMTok: 75,
+      cacheWritePerMTok: 18.75,
+      cacheWrite1hPerMTok: 30,
+      cacheReadPerMTok: 1.5
+    }
   },
   // Opus fallback (assume newer pricing)
   {
     match: 'opus',
-    pricing: { inputPerMTok: 5, outputPerMTok: 25, cacheWritePerMTok: 6.25, cacheWrite1hPerMTok: 10, cacheReadPerMTok: 0.5 }
+    pricing: {
+      inputPerMTok: 5,
+      outputPerMTok: 25,
+      cacheWritePerMTok: 6.25,
+      cacheWrite1hPerMTok: 10,
+      cacheReadPerMTok: 0.5
+    }
   },
   // Sonnet (all versions: 3.7, 4, 4.5, 4.6)
   {
     match: 'sonnet',
-    pricing: { inputPerMTok: 3, outputPerMTok: 15, cacheWritePerMTok: 3.75, cacheWrite1hPerMTok: 6, cacheReadPerMTok: 0.3 }
+    pricing: {
+      inputPerMTok: 3,
+      outputPerMTok: 15,
+      cacheWritePerMTok: 3.75,
+      cacheWrite1hPerMTok: 6,
+      cacheReadPerMTok: 0.3
+    }
   },
   // Haiku 4.5
   {
     match: 'haiku-4',
-    pricing: { inputPerMTok: 1, outputPerMTok: 5, cacheWritePerMTok: 1.25, cacheWrite1hPerMTok: 2, cacheReadPerMTok: 0.1 }
+    pricing: {
+      inputPerMTok: 1,
+      outputPerMTok: 5,
+      cacheWritePerMTok: 1.25,
+      cacheWrite1hPerMTok: 2,
+      cacheReadPerMTok: 0.1
+    }
   },
   // Haiku 3.5
   {
     match: 'haiku-3',
-    pricing: { inputPerMTok: 0.8, outputPerMTok: 4, cacheWritePerMTok: 1, cacheWrite1hPerMTok: 1.6, cacheReadPerMTok: 0.08 }
+    pricing: {
+      inputPerMTok: 0.8,
+      outputPerMTok: 4,
+      cacheWritePerMTok: 1,
+      cacheWrite1hPerMTok: 1.6,
+      cacheReadPerMTok: 0.08
+    }
   },
   // Haiku (fallback)
   {
     match: 'haiku',
-    pricing: { inputPerMTok: 1, outputPerMTok: 5, cacheWritePerMTok: 1.25, cacheWrite1hPerMTok: 2, cacheReadPerMTok: 0.1 }
+    pricing: {
+      inputPerMTok: 1,
+      outputPerMTok: 5,
+      cacheWritePerMTok: 1.25,
+      cacheWrite1hPerMTok: 2,
+      cacheReadPerMTok: 0.1
+    }
   }
 ]
 
 // Default pricing (sonnet-tier) for unknown models
 const DEFAULT_PRICING: ModelPricing = {
-  inputPerMTok: 3, outputPerMTok: 15, cacheWritePerMTok: 3.75, cacheWrite1hPerMTok: 6, cacheReadPerMTok: 0.3
+  inputPerMTok: 3,
+  outputPerMTok: 15,
+  cacheWritePerMTok: 3.75,
+  cacheWrite1hPerMTok: 6,
+  cacheReadPerMTok: 0.3
 }
 
 function getPricing(model: string): ModelPricing {
@@ -341,8 +413,8 @@ function floorToHour(ts: number): number {
 /** A single (tokens, apiPercent) observation for projection regression. */
 interface ProjectionSample {
   timestamp: number
-  tokens: number     // total local tokens at this snapshot
-  apiPercent: number  // API 5hr usage % at this snapshot
+  tokens: number // total local tokens at this snapshot
+  apiPercent: number // API 5hr usage % at this snapshot
 }
 
 /** Exponential decay half-life for weighting projection samples. */
@@ -430,7 +502,10 @@ export class BlockUsageService {
   private registerWindow(resetAtIso: string, account: string | null): number | null {
     const resetMs = new Date(resetAtIso).getTime()
     if (isNaN(resetMs)) return null
-    const end = canonicalizeWindowEnd(resetMs, this.knownWindows.map((w) => w.end))
+    const end = canonicalizeWindowEnd(
+      resetMs,
+      this.knownWindows.map((w) => w.end)
+    )
     const existing = this.knownWindows.find((w) => w.end === end)
     if (existing) {
       if (existing.account === null && account) existing.account = account
@@ -570,10 +645,16 @@ export class BlockUsageService {
       this.changedFiles.clear()
       if (!this.initialScanDone) {
         // First scan hasn't completed yet — skip incremental, it'll come
-        logger.debug('BlockUsage', `Watcher: ${filesToUpdate.size} file(s) changed, but initial scan pending — skipping`)
+        logger.debug(
+          'BlockUsage',
+          `Watcher: ${filesToUpdate.size} file(s) changed, but initial scan pending — skipping`
+        )
         return
       }
-      logger.debug('BlockUsage', `Watcher: ${filesToUpdate.size} file(s) changed, incremental update`)
+      logger.debug(
+        'BlockUsage',
+        `Watcher: ${filesToUpdate.size} file(s) changed, incremental update`
+      )
       this.incrementalUpdate(filesToUpdate).catch((err) => {
         logger.debug('BlockUsage', `Watch-triggered incremental update failed: ${err}`)
       })
@@ -621,7 +702,10 @@ export class BlockUsageService {
         return
       }
 
-      logger.debug('BlockUsage', `Incremental update: ${newEntryCount} new entries from ${changedFiles.size} file(s)`)
+      logger.debug(
+        'BlockUsage',
+        `Incremental update: ${newEntryCount} new entries from ${changedFiles.size} file(s)`
+      )
 
       // New activity while no API window is known → a new window likely just
       // started; ask the fetcher to discover the new resets_at promptly.
@@ -661,7 +745,10 @@ export class BlockUsageService {
     const activeAccount = usageFetcher.getActiveAccount()
     let currentWindowEnd: number | null = null
     if (apiUsage && !apiUsage.error && apiUsage.fiveHour.resetsAt) {
-      currentWindowEnd = this.registerWindow(apiUsage.fiveHour.resetsAt, activeAccount?.email ?? null)
+      currentWindowEnd = this.registerWindow(
+        apiUsage.fiveHour.resetsAt,
+        activeAccount?.email ?? null
+      )
     }
     const windowKnown = currentWindowEnd !== null && currentWindowEnd > now
 
@@ -689,9 +776,7 @@ export class BlockUsageService {
 
     // Build current + recent
     const currentBlock = blocks.find((b) => b.isActive) ?? null
-    const recentBlocks = blocks.filter(
-      (b) => !b.isActive && now - b.endTime < 48 * MS_PER_HOUR
-    )
+    const recentBlocks = blocks.filter((b) => !b.isActive && now - b.endTime < 48 * MS_PER_HOUR)
 
     // Compute projection for the active block (paused while no window is known)
     if (currentBlock) {
@@ -743,9 +828,7 @@ export class BlockUsageService {
       // Populate the entry cache after the first full scan
       if (!this.initialScanDone) {
         this.cachedEntries = entries
-        this.cachedMessageIds = new Set(
-          entries.filter((e) => e.messageId).map((e) => e.messageId)
-        )
+        this.cachedMessageIds = new Set(entries.filter((e) => e.messageId).map((e) => e.messageId))
         this.initialScanDone = true
         logger.debug('BlockUsage', `Initial scan complete: ${entries.length} entries cached`)
       }
@@ -903,9 +986,7 @@ export class BlockUsageService {
    * (>1.5× the capacity its final data point implies) is discarded.
    */
   private restoreBlockMetadata(recentBlocks: UsageBlock[]): void {
-    const needsFill = recentBlocks.filter(
-      (b) => !b.projectedUsage || b.finalApiPercent == null
-    )
+    const needsFill = recentBlocks.filter((b) => !b.projectedUsage || b.finalApiPercent == null)
     if (needsFill.length === 0) return
 
     const byId = new Map(needsFill.map((b) => [b.id, b]))
@@ -1039,9 +1120,7 @@ export class BlockUsageService {
 
           if (data.type !== 'assistant' || !data.message?.usage) return
 
-          const timestamp = data.timestamp
-            ? new Date(data.timestamp as string).getTime()
-            : 0
+          const timestamp = data.timestamp ? new Date(data.timestamp as string).getTime() : 0
 
           if (!timestamp || timestamp < cutoff) return
 
@@ -1064,7 +1143,14 @@ export class BlockUsageService {
           const cache1h = (cacheBreakdown?.ephemeral_1h_input_tokens as number) || 0
 
           // Calculate cost from tokens using model pricing (not from JSONL costUSD)
-          const costUsd = calculateCostFromTokens(model, inTok, outTok, cacheCreate, cache1h, cacheRead)
+          const costUsd = calculateCostFromTokens(
+            model,
+            inTok,
+            outTok,
+            cacheCreate,
+            cache1h,
+            cacheRead
+          )
 
           entries.push({
             timestamp,
@@ -1169,7 +1255,11 @@ export class BlockUsageService {
     return blocks
   }
 
-  private buildBlock(entries: ParsedEntry[], blockStart: number, windowAligned: boolean): UsageBlock {
+  private buildBlock(
+    entries: ParsedEntry[],
+    blockStart: number,
+    windowAligned: boolean
+  ): UsageBlock {
     const now = Date.now()
     const endTime = blockStart + SESSION_DURATION_MS
     const actualEndTime = entries[entries.length - 1].timestamp
@@ -1215,14 +1305,12 @@ export class BlockUsageService {
 
     // Merge model families (e.g. "sonnet" + "claude-sonnet-4-6" → canonical name)
     const mergedMap = mergeModelFamilies(modelMap)
-    const models: ModelTokenBreakdown[] = Array.from(mergedMap.entries()).map(
-      ([model, data]) => ({
-        model,
-        tokens: data.tokens,
-        costUsd: data.costUsd,
-        requestCount: data.requestCount
-      })
-    )
+    const models: ModelTokenBreakdown[] = Array.from(mergedMap.entries()).map(([model, data]) => ({
+      model,
+      tokens: data.tokens,
+      costUsd: data.costUsd,
+      requestCount: data.requestCount
+    }))
 
     // Determine if active
     const isActive = now < endTime && now - actualEndTime < SESSION_DURATION_MS
@@ -1363,7 +1451,10 @@ export class BlockUsageService {
   /** Aggregate entries into per-day buckets. */
   private bucketEntriesByDay(
     entries: ParsedEntry[]
-  ): Map<string, { tokens: number; cost: number; models: Record<string, number>; requestCount: number }> {
+  ): Map<
+    string,
+    { tokens: number; cost: number; models: Record<string, number>; requestCount: number }
+  > {
     const entryBuckets = new Map<
       string,
       { tokens: number; cost: number; models: Record<string, number>; requestCount: number }
@@ -1377,8 +1468,7 @@ export class BlockUsageService {
         entryBuckets.set(day, bucket)
       }
       const tok =
-        entry.inputTokens + entry.outputTokens +
-        entry.cacheCreationTokens + entry.cacheReadTokens
+        entry.inputTokens + entry.outputTokens + entry.cacheCreationTokens + entry.cacheReadTokens
       bucket.tokens += tok
       bucket.cost += entry.costUsd
       bucket.requestCount += 1
@@ -1436,10 +1526,13 @@ export class BlockUsageService {
         let bestTok = 0
         for (const [model, mTok] of Object.entries(bucket.models)) {
           const lower = model.toLowerCase()
-          const mFamily =
-            lower.includes('opus') ? 'opus' :
-            lower.includes('sonnet') ? 'sonnet' :
-            lower.includes('haiku') ? 'haiku' : model
+          const mFamily = lower.includes('opus')
+            ? 'opus'
+            : lower.includes('sonnet')
+              ? 'sonnet'
+              : lower.includes('haiku')
+                ? 'haiku'
+                : model
           if (mFamily === family && mTok > bestTok) {
             bestModel = model
             bestTok = mTok
@@ -1463,9 +1556,7 @@ export class BlockUsageService {
           try {
             dailyFiles.set(
               date,
-              JSON.parse(
-                fs.readFileSync(path.join(USAGE_DIR, file), 'utf-8')
-              ) as DailyUsageFile
+              JSON.parse(fs.readFileSync(path.join(USAGE_DIR, file), 'utf-8')) as DailyUsageFile
             )
           } catch {
             // Skip corrupt files
@@ -1612,8 +1703,7 @@ export class BlockUsageService {
         dayBuckets.set(day, bucket)
       }
       const tok =
-        entry.inputTokens + entry.outputTokens +
-        entry.cacheCreationTokens + entry.cacheReadTokens
+        entry.inputTokens + entry.outputTokens + entry.cacheCreationTokens + entry.cacheReadTokens
       bucket.tokens += tok
       bucket.cost += entry.costUsd
       bucket.requestCount += 1
@@ -1632,9 +1722,7 @@ export class BlockUsageService {
       const filePath = path.join(USAGE_DIR, `${date}.json`)
       try {
         if (fs.existsSync(filePath)) {
-          const daily = JSON.parse(
-            fs.readFileSync(filePath, 'utf-8')
-          ) as DailyUsageFile
+          const daily = JSON.parse(fs.readFileSync(filePath, 'utf-8')) as DailyUsageFile
           if (daily.dailySummary) continue // already has correct summary
         }
       } catch {

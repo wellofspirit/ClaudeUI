@@ -22,7 +22,7 @@ function makeComment(overrides: Partial<DiffComment> = {}): DiffComment {
     lineContent: 'const x = 1',
     comment: 'Fix this',
     createdAt: Date.now(),
-    ...overrides,
+    ...overrides
   }
 }
 
@@ -36,7 +36,14 @@ describe('composeReviewPrompt', () => {
 
   it('formats a single-line comment with file, line, side, quote and comment text', () => {
     const result = composeReviewPrompt([
-      makeComment({ filePath: 'src/app.ts', lineNumber: 5, endLineNumber: 5, side: 'new', lineContent: 'let foo = bar', comment: 'Avoid let' }),
+      makeComment({
+        filePath: 'src/app.ts',
+        lineNumber: 5,
+        endLineNumber: 5,
+        side: 'new',
+        lineContent: 'let foo = bar',
+        comment: 'Avoid let'
+      })
     ])
 
     expect(result).toContain('**src/app.ts** (line 5, new side):')
@@ -45,9 +52,7 @@ describe('composeReviewPrompt', () => {
   })
 
   it('uses en-dash range label when endLineNumber exceeds lineNumber', () => {
-    const result = composeReviewPrompt([
-      makeComment({ lineNumber: 3, endLineNumber: 7 }),
-    ])
+    const result = composeReviewPrompt([makeComment({ lineNumber: 3, endLineNumber: 7 })])
 
     // en-dash U+2013
     expect(result).toContain('lines 3\u20137')
@@ -55,27 +60,35 @@ describe('composeReviewPrompt', () => {
   })
 
   it('uses single-line label when endLineNumber equals lineNumber', () => {
-    const result = composeReviewPrompt([
-      makeComment({ lineNumber: 42, endLineNumber: 42 }),
-    ])
+    const result = composeReviewPrompt([makeComment({ lineNumber: 42, endLineNumber: 42 })])
 
     expect(result).toContain('line 42')
     expect(result).not.toContain('lines 42')
   })
 
   it('respects the side field — old side', () => {
-    const result = composeReviewPrompt([
-      makeComment({ side: 'old' }),
-    ])
+    const result = composeReviewPrompt([makeComment({ side: 'old' })])
 
     expect(result).toContain('old side')
   })
 
   it('groups multiple comments on the same file together', () => {
     const comments = [
-      makeComment({ id: 'c1', filePath: 'a.ts', lineNumber: 1, endLineNumber: 1, comment: 'First' }),
-      makeComment({ id: 'c2', filePath: 'b.ts', lineNumber: 1, endLineNumber: 1, comment: 'Second' }),
-      makeComment({ id: 'c3', filePath: 'a.ts', lineNumber: 2, endLineNumber: 2, comment: 'Third' }),
+      makeComment({
+        id: 'c1',
+        filePath: 'a.ts',
+        lineNumber: 1,
+        endLineNumber: 1,
+        comment: 'First'
+      }),
+      makeComment({
+        id: 'c2',
+        filePath: 'b.ts',
+        lineNumber: 1,
+        endLineNumber: 1,
+        comment: 'Second'
+      }),
+      makeComment({ id: 'c3', filePath: 'a.ts', lineNumber: 2, endLineNumber: 2, comment: 'Third' })
     ]
     const result = composeReviewPrompt(comments)
 
@@ -94,7 +107,7 @@ describe('composeReviewPrompt', () => {
   it('outputs comments on different files in separate groups', () => {
     const comments = [
       makeComment({ id: 'c1', filePath: 'alpha.ts', comment: 'Alpha comment' }),
-      makeComment({ id: 'c2', filePath: 'beta.ts', comment: 'Beta comment' }),
+      makeComment({ id: 'c2', filePath: 'beta.ts', comment: 'Beta comment' })
     ]
     const result = composeReviewPrompt(comments)
 
@@ -106,18 +119,14 @@ describe('composeReviewPrompt', () => {
   })
 
   it('skips the blockquote when lineContent is falsy', () => {
-    const result = composeReviewPrompt([
-      makeComment({ lineContent: '' }),
-    ])
+    const result = composeReviewPrompt([makeComment({ lineContent: '' })])
 
     expect(result).not.toContain('> ')
     expect(result).toContain('Comment: "Fix this"')
   })
 
   it('prefixes each line of multi-line lineContent with "> "', () => {
-    const result = composeReviewPrompt([
-      makeComment({ lineContent: 'line1\nline2\nline3' }),
-    ])
+    const result = composeReviewPrompt([makeComment({ lineContent: 'line1\nline2\nline3' })])
 
     expect(result).toContain('> line1\n> line2\n> line3')
   })
@@ -128,7 +137,7 @@ describe('composeReviewPrompt', () => {
     const comments = [
       makeComment({ id: 'c1', filePath: 'file-x.ts', lineNumber: 1, comment: 'Comment A' }),
       makeComment({ id: 'c2', filePath: 'file-y.ts', lineNumber: 1, comment: 'Comment B' }),
-      makeComment({ id: 'c3', filePath: 'file-x.ts', lineNumber: 99, comment: 'Comment C' }),
+      makeComment({ id: 'c3', filePath: 'file-x.ts', lineNumber: 99, comment: 'Comment C' })
     ]
     const result = composeReviewPrompt(comments)
 
@@ -163,7 +172,7 @@ vi.mock('../View', () => ({
   ReviewBarView: (props: ReviewBarViewProps) => {
     viewProps = props
     return null
-  },
+  }
 }))
 
 function makeDiffComment(overrides: Partial<DiffComment> = {}): DiffComment {
@@ -176,7 +185,7 @@ function makeDiffComment(overrides: Partial<DiffComment> = {}): DiffComment {
     lineContent: 'const x = 1',
     comment: 'Fix this',
     createdAt: Date.now(),
-    ...overrides,
+    ...overrides
   }
 }
 
@@ -218,7 +227,7 @@ describe('ReviewBar FC — rendered', () => {
       directories: [],
       recentSessionIds: [],
       pinnedSessionIds: [],
-      customTitles: {},
+      customTitles: {}
     })
   })
 
@@ -267,7 +276,7 @@ describe('ReviewBar FC — rendered', () => {
   it('onSend clears diff comments from store', async () => {
     const comments = [
       makeDiffComment({ id: 'c1', comment: 'First comment' }),
-      makeDiffComment({ id: 'c2', filePath: 'src/other.ts', comment: 'Second comment' }),
+      makeDiffComment({ id: 'c2', filePath: 'src/other.ts', comment: 'Second comment' })
     ]
 
     // Pre-populate gitReviewComments in store
@@ -288,7 +297,7 @@ describe('ReviewBar FC — rendered', () => {
     const comments = [
       makeDiffComment({ id: 'c1', filePath: 'src/alpha.ts' }),
       makeDiffComment({ id: 'c2', filePath: 'src/beta.ts' }),
-      makeDiffComment({ id: 'c3', filePath: 'src/alpha.ts' }),
+      makeDiffComment({ id: 'c3', filePath: 'src/alpha.ts' })
     ]
 
     render(React.createElement(ReviewBar, { comments }))

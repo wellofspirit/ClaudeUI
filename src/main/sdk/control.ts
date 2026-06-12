@@ -56,7 +56,7 @@ export class ControlChannel {
 
   constructor(
     private readonly writer: NdjsonWriter,
-    private readonly hooks: ControlChannelHooks = {},
+    private readonly hooks: ControlChannelHooks = {}
   ) {}
 
   /**
@@ -69,15 +69,11 @@ export class ControlChannel {
    * and skip the cast at the call site. No runtime validation — cli.js's
    * response shape is still a trust-the-peer deal.
    */
-  request<T = unknown>(
-    request: Record<string, unknown>,
-    opts: RequestOptions = {},
-  ): Promise<T> {
+  request<T = unknown>(request: Record<string, unknown>, opts: RequestOptions = {}): Promise<T> {
     const request_id = this.newId()
     if (process.env.DEBUG_SDK) {
-       
       console.error(
-        `[sdk] → control_request ${request_id} ${JSON.stringify(request).slice(0, 200)}`,
+        `[sdk] → control_request ${request_id} ${JSON.stringify(request).slice(0, 200)}`
       )
     }
     const timeoutMs = opts.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS
@@ -93,9 +89,8 @@ export class ControlChannel {
         resolve: (value) => {
           clearTimer()
           if (process.env.DEBUG_SDK) {
-             
             console.error(
-              `[sdk] ← control_response ${request_id} ${JSON.stringify(value).slice(0, 200)}`,
+              `[sdk] ← control_response ${request_id} ${JSON.stringify(value).slice(0, 200)}`
             )
           }
           resolve(value as T)
@@ -103,24 +98,20 @@ export class ControlChannel {
         reject: (err) => {
           clearTimer()
           if (process.env.DEBUG_SDK) {
-             
             console.error(`[sdk] ← control_error ${request_id} ${err.message}`)
           }
           reject(err)
         },
-        clearTimer,
+        clearTimer
       })
       if (timeoutMs > 0) {
         timer = setTimeout(() => {
           const pending = this.pending.get(request_id)
           if (!pending) return
           this.pending.delete(request_id)
-          const subtype =
-            (request as { subtype?: string }).subtype ?? '<unknown>'
+          const subtype = (request as { subtype?: string }).subtype ?? '<unknown>'
           pending.reject(
-            new Error(
-              `control_request ${subtype} (${request_id}) timed out after ${timeoutMs}ms`,
-            ),
+            new Error(`control_request ${subtype} (${request_id}) timed out after ${timeoutMs}ms`)
           )
         }, timeoutMs)
       }
@@ -210,14 +201,14 @@ export class ControlChannel {
   respondSuccess(request_id: string, response: unknown): void {
     this.writer.write({
       type: 'control_response',
-      response: { subtype: 'success', request_id, response },
+      response: { subtype: 'success', request_id, response }
     })
   }
 
   respondError(request_id: string, error: string): void {
     this.writer.write({
       type: 'control_response',
-      response: { subtype: 'error', request_id, error },
+      response: { subtype: 'error', request_id, error }
     })
   }
 

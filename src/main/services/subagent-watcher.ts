@@ -31,11 +31,7 @@ const watched = new Map<string, WatchedSubagent>()
  * Find the subagent's JSONL file by content-matching the task prompt against
  * the first user message of each agent-*.jsonl file in the subagents directory.
  */
-function findSubagentFile(
-  sessionId: string,
-  projectKey: string,
-  prompt?: string
-): string | null {
+function findSubagentFile(sessionId: string, projectKey: string, prompt?: string): string | null {
   if (!prompt) return null
 
   const subagentDir = path.join(CLAUDE_PROJECTS_DIR, projectKey, sessionId, 'subagents')
@@ -48,7 +44,8 @@ function findSubagentFile(
 function findSubagentFileByPrompt(subagentDir: string, prompt: string): string | null {
   if (!fs.existsSync(subagentDir)) return null
 
-  const files = fs.readdirSync(subagentDir)
+  const files = fs
+    .readdirSync(subagentDir)
     .filter((f) => f.startsWith('agent-') && f.endsWith('.jsonl'))
     .sort()
 
@@ -180,7 +177,8 @@ function parseJsonlLine(line: string): ChatMessage | null {
               isError: block.is_error as boolean
             }
           }
-          if (blockType === 'thinking') return { type: 'thinking' as const, text: block.thinking as string }
+          if (blockType === 'thinking')
+            return { type: 'thinking' as const, text: block.thinking as string }
           return { type: 'text' as const, text: JSON.stringify(block) }
         }
       )
@@ -314,7 +312,10 @@ export function watchSubagent(
         }, 150)
       })
     } catch (err) {
-      logger.warn('SubagentWatcher', 'Failed to watch file, may have been removed', { filePath, err })
+      logger.warn('SubagentWatcher', 'Failed to watch file, may have been removed', {
+        filePath,
+        err
+      })
     }
   }
 

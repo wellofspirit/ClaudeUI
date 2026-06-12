@@ -32,8 +32,8 @@ const { appPathRef } = vi.hoisted(() => ({ appPathRef: { current: '' } }))
 vi.mock('electron', () => ({
   app: {
     getAppPath: () => appPathRef.current || process.cwd(),
-    isPackaged: false,
-  },
+    isPackaged: false
+  }
 }))
 
 // ClaudeSession has heavy imports (SDK, uuid, many services). The server only
@@ -41,8 +41,8 @@ vi.mock('electron', () => ({
 vi.mock('../claude-session', () => ({
   ClaudeSession: {
     addExtraWindow: vi.fn(),
-    removeExtraWindow: vi.fn(),
-  },
+    removeExtraWindow: vi.fn()
+  }
 }))
 
 // Silence the logger.
@@ -51,20 +51,30 @@ vi.mock('../logger', () => ({
     debug: vi.fn(),
     info: vi.fn(),
     warn: vi.fn(),
-    error: vi.fn(),
-  },
+    error: vi.fn()
+  }
 }))
 
 // TunnelManager ships with a CloudFlare download path; stub completely.
 vi.mock('../tunnel-manager', () => {
   class StubTunnelManager {
     private cb: ((status: unknown) => void) | null = null
-    setStatusHandler(fn: (status: unknown) => void): void { this.cb = fn }
-    getStatus() { return { state: 'stopped' as const, url: null, error: null } }
-    async start(): Promise<void> { /* no-op */ }
-    stop(): void { /* no-op */ }
+    setStatusHandler(fn: (status: unknown) => void): void {
+      this.cb = fn
+    }
+    getStatus() {
+      return { state: 'stopped' as const, url: null, error: null }
+    }
+    async start(): Promise<void> {
+      /* no-op */
+    }
+    stop(): void {
+      /* no-op */
+    }
     // Expose so tests could trigger it if ever needed.
-    _trigger(status: unknown): void { this.cb?.(status) }
+    _trigger(status: unknown): void {
+      this.cb?.(status)
+    }
   }
   return { TunnelManager: StubTunnelManager }
 })
@@ -84,7 +94,7 @@ async function httpGet(url: string): Promise<{ status: number; body: string }> {
         const chunks: Buffer[] = []
         res.on('data', (c) => chunks.push(c))
         res.on('end', () =>
-          resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString('utf-8') }),
+          resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString('utf-8') })
         )
       })
       .on('error', reject)
@@ -117,7 +127,11 @@ describe('RemoteServer', () => {
   })
 
   afterEach(() => {
-    try { server.stop() } catch { /* already stopped */ }
+    try {
+      server.stop()
+    } catch {
+      /* already stopped */
+    }
   })
 
   it('starts the server listening on the configured port', async () => {
@@ -195,7 +209,7 @@ describe('RemoteServer', () => {
 
     const client = await connectRemoteClient({
       url: `ws://127.0.0.1:${port}/`,
-      token: res.token,
+      token: res.token
     })
 
     // `ready` only resolves once we see `auth-response { ok: true }`.
@@ -257,7 +271,10 @@ describe('RemoteServer — mockup HTTP route', () => {
     b64 = Buffer.from(cwd, 'utf-8').toString('base64url')
     const dir = path.join(cwd, '.claude', 'ui', 'mockups', ID)
     fs.mkdirSync(dir, { recursive: true })
-    fs.writeFileSync(path.join(dir, 'index.html'), '<html><head></head><body>remote mockup</body></html>')
+    fs.writeFileSync(
+      path.join(dir, 'index.html'),
+      '<html><head></head><body>remote mockup</body></html>'
+    )
 
     // Provide a self-contained web-client build so the server serves the real
     // index.html (and injects the mockup token) instead of the placeholder.
@@ -267,11 +284,18 @@ describe('RemoteServer — mockup HTTP route', () => {
     appPathRef.current = appDir
     const webDir = path.join(appDir, 'out', 'web')
     fs.mkdirSync(webDir, { recursive: true })
-    fs.writeFileSync(path.join(webDir, 'index.html'), '<html><head></head><body>web client</body></html>')
+    fs.writeFileSync(
+      path.join(webDir, 'index.html'),
+      '<html><head></head><body>web client</body></html>'
+    )
   })
 
   afterEach(() => {
-    try { server.stop() } catch { /* already stopped */ }
+    try {
+      server.stop()
+    } catch {
+      /* already stopped */
+    }
     fs.rmSync(cwd, { recursive: true, force: true })
     fs.rmSync(appDir, { recursive: true, force: true })
     appPathRef.current = ''
@@ -307,7 +331,9 @@ describe('RemoteServer — mockup HTTP route', () => {
 
   it('rejects /mockup requests with a wrong token', async () => {
     await server.start(port, '127.0.0.1')
-    const got = await httpGet(`http://127.0.0.1:${port}/mockup/${ID}/${b64}/?token=${'a'.repeat(64)}`)
+    const got = await httpGet(
+      `http://127.0.0.1:${port}/mockup/${ID}/${b64}/?token=${'a'.repeat(64)}`
+    )
     expect(got.status).toBe(403)
   })
 

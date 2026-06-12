@@ -29,12 +29,11 @@ function Harness({ html }: { html: string }) {
 }
 
 beforeEach(() => {
-   
   ;(globalThis as any).window.api = {
-    saveSettings: vi.fn(),
+    saveSettings: vi.fn()
   }
   useSessionStore.setState((s) => ({
-    settings: { ...s.settings, searchCaseSensitive: false },
+    settings: { ...s.settings, searchCaseSensitive: false }
   }))
 })
 
@@ -120,8 +119,12 @@ describe('ChatSearchOverlay', () => {
       const [query, setQuery] = useState('foo')
       return (
         <div>
-          <button data-testid="toggle" onClick={() => setActive((a) => !a)}>toggle</button>
-          <div ref={scrollRef}><p>foo bar</p></div>
+          <button data-testid="toggle" onClick={() => setActive((a) => !a)}>
+            toggle
+          </button>
+          <div ref={scrollRef}>
+            <p>foo bar</p>
+          </div>
           <ChatSearchOverlay
             scrollRef={scrollRef}
             active={active}

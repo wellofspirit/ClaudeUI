@@ -27,7 +27,7 @@ describe('parseUsage', () => {
     expect(result.usage).toEqual({
       totalTokens: 12345,
       toolUses: 7,
-      durationMs: 45000,
+      durationMs: 45000
     })
   })
 
@@ -61,7 +61,7 @@ describe('parseUsage', () => {
       '  total_tokens: 9876',
       '  tool_uses: 15',
       '  duration_ms: 120000',
-      '</usage>',
+      '</usage>'
     ].join('\n')
 
     const result = parseUsage(text)

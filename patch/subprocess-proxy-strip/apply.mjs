@@ -169,20 +169,20 @@ const fnReV170 = new RegExp(
     `(${V})=Object\\.keys\\(\\7\\)\\.length>0,` +
     `(${V})=(${V})\\(\\),` +
     `(${V})=process\\.env\\.CLAUDE_CODE_OAUTH_TOKEN!==void 0\\|\\|` +
-       `process\\.env\\.CLAUDE_CODE_SUBSCRIPTION_TYPE!==void 0\\|\\|` +
-       `process\\.env\\.CLAUDE_CODE_RATE_LIMIT_TIER!==void 0\\|\\|` +
-       `process\\.env\\.CLAUDE_BG_AUTH_SNAPSHOT_PATH!==void 0\\|\\|` +
-       `(${V})\\.CLAUDE_BG_SOCKET_TOKENS_PATH!==void 0\\|\\|` +
-       `\\14\\.CLAUDE_BG_RV_AUTH!==void 0\\|\\|` +
-       `\\14\\.CLAUDE_BG_PTY_AUTH!==void 0,` +
+    `process\\.env\\.CLAUDE_CODE_SUBSCRIPTION_TYPE!==void 0\\|\\|` +
+    `process\\.env\\.CLAUDE_CODE_RATE_LIMIT_TIER!==void 0\\|\\|` +
+    `process\\.env\\.CLAUDE_BG_AUTH_SNAPSHOT_PATH!==void 0\\|\\|` +
+    `(${V})\\.CLAUDE_BG_SOCKET_TOKENS_PATH!==void 0\\|\\|` +
+    `\\14\\.CLAUDE_BG_RV_AUTH!==void 0\\|\\|` +
+    `\\14\\.CLAUDE_BG_PTY_AUTH!==void 0,` +
     `(${V})=!1;` +
     `\\15=process\\.env\\.CLAUDE_CODE_SESSION_KIND!==void 0\\|\\|` +
-       `process\\.env\\.CLAUDE_BG_SOURCE!==void 0\\|\\|` +
-       `process\\.env\\.CLAUDE_BG_ISOLATION!==void 0\\|\\|` +
-       `process\\.env\\.CLAUDE_BG_BACKEND!==void 0\\|\\|` +
-       `process\\.env\\.CLAUDE_CODE_SESSION_NAME!==void 0\\|\\|` +
-       `process\\.env\\.CLAUDE_BG_SESSION_PERMISSION_RULES!==void 0\\|\\|` +
-       `process\\.env\\.CLAUDE_BG_MEMORY_TOGGLED_OFF!==void 0;` +
+    `process\\.env\\.CLAUDE_BG_SOURCE!==void 0\\|\\|` +
+    `process\\.env\\.CLAUDE_BG_ISOLATION!==void 0\\|\\|` +
+    `process\\.env\\.CLAUDE_BG_BACKEND!==void 0\\|\\|` +
+    `process\\.env\\.CLAUDE_CODE_SESSION_NAME!==void 0\\|\\|` +
+    `process\\.env\\.CLAUDE_BG_SESSION_PERMISSION_RULES!==void 0\\|\\|` +
+    `process\\.env\\.CLAUDE_BG_MEMORY_TOGGLED_OFF!==void 0;` +
     `let (${V})=Object\\.keys\\(process\\.env\\)\\.some\\(\\((${V})\\)=>\\17\\.startsWith\\("OTEL_"\\)\\);` +
     `if\\(!\\4&&!\\10&&!\\11&&!\\15&&!\\13&&!\\16&&!\\5\\)return process\\.env;` +
     `let (${V})=\\{\\.\\.\\.process\\.env,\\.\\.\\.\\6,\\.\\.\\.\\2,\\.\\.\\.\\7\\};` +
@@ -222,17 +222,17 @@ const fnReV163 = new RegExp(
     `(${V})=Object\\.keys\\(\\7\\)\\.length>0,` +
     `(${V})=(${V})\\(\\),` +
     `(${V})=process\\.env\\.CLAUDE_CODE_OAUTH_TOKEN!==void 0\\|\\|` +
-       `process\\.env\\.CLAUDE_CODE_SUBSCRIPTION_TYPE!==void 0\\|\\|` +
-       `process\\.env\\.CLAUDE_CODE_RATE_LIMIT_TIER!==void 0\\|\\|` +
-       `process\\.env\\.CLAUDE_BG_AUTH_SNAPSHOT_PATH!==void 0,` +
+    `process\\.env\\.CLAUDE_CODE_SUBSCRIPTION_TYPE!==void 0\\|\\|` +
+    `process\\.env\\.CLAUDE_CODE_RATE_LIMIT_TIER!==void 0\\|\\|` +
+    `process\\.env\\.CLAUDE_BG_AUTH_SNAPSHOT_PATH!==void 0,` +
     `(${V})=!1;` +
     `\\14=process\\.env\\.CLAUDE_CODE_SESSION_KIND!==void 0\\|\\|` +
-       `process\\.env\\.CLAUDE_BG_SOURCE!==void 0\\|\\|` +
-       `process\\.env\\.CLAUDE_BG_ISOLATION!==void 0\\|\\|` +
-       `process\\.env\\.CLAUDE_BG_BACKEND!==void 0\\|\\|` +
-       `process\\.env\\.CLAUDE_CODE_SESSION_NAME!==void 0\\|\\|` +
-       `process\\.env\\.CLAUDE_BG_SESSION_PERMISSION_RULES!==void 0\\|\\|` +
-       `process\\.env\\.CLAUDE_BG_MEMORY_TOGGLED_OFF!==void 0;` +
+    `process\\.env\\.CLAUDE_BG_SOURCE!==void 0\\|\\|` +
+    `process\\.env\\.CLAUDE_BG_ISOLATION!==void 0\\|\\|` +
+    `process\\.env\\.CLAUDE_BG_BACKEND!==void 0\\|\\|` +
+    `process\\.env\\.CLAUDE_CODE_SESSION_NAME!==void 0\\|\\|` +
+    `process\\.env\\.CLAUDE_BG_SESSION_PERMISSION_RULES!==void 0\\|\\|` +
+    `process\\.env\\.CLAUDE_BG_MEMORY_TOGGLED_OFF!==void 0;` +
     `let (${V})=Object\\.keys\\(process\\.env\\)\\.some\\(\\((${V})\\)=>\\16\\.startsWith\\("OTEL_"\\)\\);` +
     `if\\(!\\4&&!\\10&&!\\11&&!\\14&&!\\13&&!\\15&&!\\5\\)return process\\.env;` +
     `let (${V})=\\{\\.\\.\\.process\\.env,\\.\\.\\.\\6,\\.\\.\\.\\2,\\.\\.\\.\\7\\};` +
@@ -265,17 +265,17 @@ const fnReV150 = new RegExp(
     `(${V})=Object\\.keys\\(\\7\\)\\.length>0,` +
     `(${V})=(${V})\\(\\),` +
     `(${V})=process\\.env\\.CLAUDE_CODE_OAUTH_TOKEN!==void 0\\|\\|` +
-       `process\\.env\\.CLAUDE_CODE_SUBSCRIPTION_TYPE!==void 0\\|\\|` +
-       `process\\.env\\.CLAUDE_CODE_RATE_LIMIT_TIER!==void 0\\|\\|` +
-       `process\\.env\\.CLAUDE_BG_AUTH_SNAPSHOT_PATH!==void 0,` +
+    `process\\.env\\.CLAUDE_CODE_SUBSCRIPTION_TYPE!==void 0\\|\\|` +
+    `process\\.env\\.CLAUDE_CODE_RATE_LIMIT_TIER!==void 0\\|\\|` +
+    `process\\.env\\.CLAUDE_BG_AUTH_SNAPSHOT_PATH!==void 0,` +
     `(${V})=!1;` +
     `\\14=process\\.env\\.CLAUDE_CODE_SESSION_KIND!==void 0\\|\\|` +
-       `process\\.env\\.CLAUDE_BG_SOURCE!==void 0\\|\\|` +
-       `process\\.env\\.CLAUDE_BG_ISOLATION!==void 0\\|\\|` +
-       `process\\.env\\.CLAUDE_BG_BACKEND!==void 0\\|\\|` +
-       `process\\.env\\.CLAUDE_CODE_SESSION_NAME!==void 0\\|\\|` +
-       `process\\.env\\.CLAUDE_BG_SESSION_PERMISSION_RULES!==void 0\\|\\|` +
-       `process\\.env\\.CLAUDE_BG_MEMORY_TOGGLED_OFF!==void 0;` +
+    `process\\.env\\.CLAUDE_BG_SOURCE!==void 0\\|\\|` +
+    `process\\.env\\.CLAUDE_BG_ISOLATION!==void 0\\|\\|` +
+    `process\\.env\\.CLAUDE_BG_BACKEND!==void 0\\|\\|` +
+    `process\\.env\\.CLAUDE_CODE_SESSION_NAME!==void 0\\|\\|` +
+    `process\\.env\\.CLAUDE_BG_SESSION_PERMISSION_RULES!==void 0\\|\\|` +
+    `process\\.env\\.CLAUDE_BG_MEMORY_TOGGLED_OFF!==void 0;` +
     `let (${V})=Object\\.keys\\(process\\.env\\)\\.some\\(\\((${V})\\)=>\\16\\.startsWith\\("OTEL_"\\)\\);` +
     `if\\(!\\4&&!\\10&&!\\11&&!\\14&&!\\13&&!\\15&&!\\5\\)return process\\.env;` +
     `let (${V})=\\{\\.\\.\\.process\\.env,\\.\\.\\.\\6,\\.\\.\\.\\2,\\.\\.\\.\\7\\};` +
@@ -336,15 +336,15 @@ const fnReV143 = new RegExp(
     `(${V})=Object\\.keys\\(\\7\\)\\.length>0,` +
     `(${V})=(${V})\\(\\),` +
     `(${V})=process\\.env\\.CLAUDE_CODE_OAUTH_TOKEN!==void 0\\|\\|` +
-       `process\\.env\\.CLAUDE_CODE_SUBSCRIPTION_TYPE!==void 0\\|\\|` +
-       `process\\.env\\.CLAUDE_CODE_RATE_LIMIT_TIER!==void 0\\|\\|` +
-       `process\\.env\\.CLAUDE_BG_AUTH_SNAPSHOT_PATH!==void 0,` +
+    `process\\.env\\.CLAUDE_CODE_SUBSCRIPTION_TYPE!==void 0\\|\\|` +
+    `process\\.env\\.CLAUDE_CODE_RATE_LIMIT_TIER!==void 0\\|\\|` +
+    `process\\.env\\.CLAUDE_BG_AUTH_SNAPSHOT_PATH!==void 0,` +
     `(${V})=!1;` +
     `\\14=process\\.env\\.CLAUDE_CODE_SESSION_KIND!==void 0\\|\\|` +
-       `process\\.env\\.CLAUDE_BG_SOURCE!==void 0\\|\\|` +
-       `process\\.env\\.CLAUDE_BG_ISOLATION!==void 0\\|\\|` +
-       `process\\.env\\.CLAUDE_BG_BACKEND!==void 0\\|\\|` +
-       `process\\.env\\.CLAUDE_CODE_SESSION_NAME!==void 0;` +
+    `process\\.env\\.CLAUDE_BG_SOURCE!==void 0\\|\\|` +
+    `process\\.env\\.CLAUDE_BG_ISOLATION!==void 0\\|\\|` +
+    `process\\.env\\.CLAUDE_BG_BACKEND!==void 0\\|\\|` +
+    `process\\.env\\.CLAUDE_CODE_SESSION_NAME!==void 0;` +
     `let (${V})=Object\\.keys\\(process\\.env\\)\\.some\\(\\((${V})\\)=>\\16\\.startsWith\\("OTEL_"\\)\\);` +
     `if\\(!\\4&&!\\10&&!\\11&&!\\14&&!\\13&&!\\15&&!\\5\\)return process\\.env;` +
     `let (${V})=\\{\\.\\.\\.process\\.env,\\.\\.\\.\\6,\\.\\.\\.\\2,\\.\\.\\.\\7\\};` +
@@ -394,14 +394,14 @@ const fnReV129 = new RegExp(
     `(${V})=Object\\.keys\\(\\5\\)\\.length>0,` +
     `(${V})=(${V})\\(\\),` +
     `(${V})=process\\.env\\.CLAUDE_CODE_OAUTH_TOKEN!==void 0\\|\\|` +
-       `process\\.env\\.CLAUDE_CODE_SUBSCRIPTION_TYPE!==void 0\\|\\|` +
-       `process\\.env\\.CLAUDE_CODE_RATE_LIMIT_TIER!==void 0,` +
+    `process\\.env\\.CLAUDE_CODE_SUBSCRIPTION_TYPE!==void 0\\|\\|` +
+    `process\\.env\\.CLAUDE_CODE_RATE_LIMIT_TIER!==void 0,` +
     `(${V})=!1;` +
     `\\12=process\\.env\\.CLAUDE_CODE_SESSION_KIND!==void 0\\|\\|` +
-       `process\\.env\\.CLAUDE_BG_SOURCE!==void 0\\|\\|` +
-       `process\\.env\\.CLAUDE_BG_ISOLATION!==void 0\\|\\|` +
-       `process\\.env\\.CLAUDE_BG_BACKEND!==void 0\\|\\|` +
-       `process\\.env\\.CLAUDE_CODE_SESSION_NAME!==void 0;` +
+    `process\\.env\\.CLAUDE_BG_SOURCE!==void 0\\|\\|` +
+    `process\\.env\\.CLAUDE_BG_ISOLATION!==void 0\\|\\|` +
+    `process\\.env\\.CLAUDE_BG_BACKEND!==void 0\\|\\|` +
+    `process\\.env\\.CLAUDE_CODE_SESSION_NAME!==void 0;` +
     `let (${V})=Object\\.keys\\(process\\.env\\)\\.some\\(\\((${V})\\)=>\\14\\.startsWith\\("OTEL_"\\)\\);` +
     `if\\(!\\4&&!\\8&&!\\9&&!\\12&&!\\11&&!\\13\\)return process\\.env;` +
     `let (${V})=\\{\\.\\.\\.process\\.env,\\.\\.\\.\\2,\\.\\.\\.\\5\\};` +
@@ -431,20 +431,20 @@ const fnReV119 = new RegExp(
     `(${V})=(${V})\\(\\),` +
     `(${V})=!1;` +
     `if\\(\\11=` +
-      `process\\.env\\.CLAUDE_CODE_SESSION_KIND!==void 0\\|\\|` +
-      `process\\.env\\.CLAUDE_BG_SOURCE!==void 0\\|\\|` +
-      `process\\.env\\.CLAUDE_BG_ISOLATION!==void 0\\|\\|` +
-      `process\\.env\\.CLAUDE_BG_BACKEND!==void 0\\|\\|` +
-      `process\\.env\\.CLAUDE_CODE_SESSION_NAME!==void 0,` +
-      `!\\4&&!\\8&&!\\9&&!\\11\\)return process\\.env;` +
+    `process\\.env\\.CLAUDE_CODE_SESSION_KIND!==void 0\\|\\|` +
+    `process\\.env\\.CLAUDE_BG_SOURCE!==void 0\\|\\|` +
+    `process\\.env\\.CLAUDE_BG_ISOLATION!==void 0\\|\\|` +
+    `process\\.env\\.CLAUDE_BG_BACKEND!==void 0\\|\\|` +
+    `process\\.env\\.CLAUDE_CODE_SESSION_NAME!==void 0,` +
+    `!\\4&&!\\8&&!\\9&&!\\11\\)return process\\.env;` +
     `let (${V})=\\{\\.\\.\\.process\\.env,\\.\\.\\.\\2,\\.\\.\\.\\5\\};` +
     `if\\(` +
-      `delete \\12\\.CLAUDE_CODE_SESSION_KIND,` +
-      `delete \\12\\.CLAUDE_BG_SOURCE,` +
-      `delete \\12\\.CLAUDE_BG_ISOLATION,` +
-      `delete \\12\\.CLAUDE_BG_BACKEND,` +
-      `delete \\12\\.CLAUDE_CODE_SESSION_NAME,` +
-      `!\\9\\)return \\12;` +
+    `delete \\12\\.CLAUDE_CODE_SESSION_KIND,` +
+    `delete \\12\\.CLAUDE_BG_SOURCE,` +
+    `delete \\12\\.CLAUDE_BG_ISOLATION,` +
+    `delete \\12\\.CLAUDE_BG_BACKEND,` +
+    `delete \\12\\.CLAUDE_CODE_SESSION_NAME,` +
+    `!\\9\\)return \\12;` +
     `for\\(let (${V}) of (${V})\\)delete \\12\\[\\13\\],delete \\12\\[\`INPUT_\\$\\{\\13\\}\`\\];` +
     `return \\12` +
     `\\}`
@@ -481,11 +481,11 @@ const fnReV114 = new RegExp(
 const stripHelperName = '__cuPS' // ClaudeUI proxy strip
 const stripHelperDecl =
   `let ${stripHelperName}=(E)=>{` +
-    `if(process.env.CLAUDEUI_PROXY_SUBPROCESSES)return E;` +
-    `let R={...E};` +
-    `delete R.HTTP_PROXY;delete R.HTTPS_PROXY;delete R.ALL_PROXY;delete R.NO_PROXY;` +
-    `delete R.http_proxy;delete R.https_proxy;delete R.all_proxy;delete R.no_proxy;` +
-    `return R` +
+  `if(process.env.CLAUDEUI_PROXY_SUBPROCESSES)return E;` +
+  `let R={...E};` +
+  `delete R.HTTP_PROXY;delete R.HTTPS_PROXY;delete R.ALL_PROXY;delete R.NO_PROXY;` +
+  `delete R.http_proxy;delete R.https_proxy;delete R.all_proxy;delete R.no_proxy;` +
+  `return R` +
   `};`
 
 let match, full, newFn, shape
@@ -501,84 +501,84 @@ if (match) {
   const [
     ,
     fnName,
-    H,                       // 2  — user env binding
-    userFn,                  // 3  — getter function for user env
-    flagUserNotEmpty,        // 4  — _
-    flagExtraNotEmpty,       // 5  — q
-    extraGlobal,             // 6  — fy8
-    qRemote,                 // 7  — K
-    remoteGate,              // 8  — __
-    remoteFn,                // 9  — _w7
-    flagRemoteNotEmpty,      // 10 — O
-    flagScrub,               // 11 — T
-    scrubFn,                 // 12 — _o5
-    flagOAuth,               // 13 — z
-    envSnap,                 // 14 — $_ (module-level env snapshot global)
-    flagBg,                  // 15 — $
-    flagOtel,                // 16 — A
-    YLambda,                 // 17 — w (lambda)
-    merged,                  // 18 — Y
-    YOtelLoop,               // 19 — w (otel loop)
-    YBlockLoop,              // 20 — w (block loop)
-    blockList                // 21 — Oo5
+    H, // 2  — user env binding
+    userFn, // 3  — getter function for user env
+    flagUserNotEmpty, // 4  — _
+    flagExtraNotEmpty, // 5  — q
+    extraGlobal, // 6  — fy8
+    qRemote, // 7  — K
+    remoteGate, // 8  — __
+    remoteFn, // 9  — _w7
+    flagRemoteNotEmpty, // 10 — O
+    flagScrub, // 11 — T
+    scrubFn, // 12 — _o5
+    flagOAuth, // 13 — z
+    envSnap, // 14 — $_ (module-level env snapshot global)
+    flagBg, // 15 — $
+    flagOtel, // 16 — A
+    YLambda, // 17 — w (lambda)
+    merged, // 18 — Y
+    YOtelLoop, // 19 — w (otel loop)
+    YBlockLoop, // 20 — w (block loop)
+    blockList // 21 — Oo5
   ] = match
   full = match[0]
   console.log(`Found ${fnName}() [v170 shape] at char ${match.index}`)
   console.log(
     `  locals: H=${H} userFn=${userFn} _=${flagUserNotEmpty} q=${flagExtraNotEmpty} fy8=${extraGlobal} ` +
-    `K=${qRemote} __=${remoteGate} _w7=${remoteFn} O=${flagRemoteNotEmpty} T=${flagScrub} _o5=${scrubFn} ` +
-    `z=${flagOAuth} $_=${envSnap} $=${flagBg} A=${flagOtel} w(λ)=${YLambda} Y=${merged} ` +
-    `w(otel)=${YOtelLoop} w(block)=${YBlockLoop} Oo5=${blockList}`
+      `K=${qRemote} __=${remoteGate} _w7=${remoteFn} O=${flagRemoteNotEmpty} T=${flagScrub} _o5=${scrubFn} ` +
+      `z=${flagOAuth} $_=${envSnap} $=${flagBg} A=${flagOtel} w(λ)=${YLambda} Y=${merged} ` +
+      `w(otel)=${YOtelLoop} w(block)=${YBlockLoop} Oo5=${blockList}`
   )
 
   newFn =
     MARKER +
     `function ${fnName}(){` +
-      stripHelperDecl +
-      `let ${H}=${userFn}(),` +
-          `${flagUserNotEmpty}=Object.keys(${H}).length>0,` +
-          `${flagExtraNotEmpty}=Object.keys(${extraGlobal}).length>0,` +
-          `${qRemote}=${remoteGate}(process.env.CLAUDE_CODE_REMOTE)?${remoteFn}(${flagUserNotEmpty}?{...process.env,...${H}}:process.env):{},` +
-          `${flagRemoteNotEmpty}=Object.keys(${qRemote}).length>0,` +
-          `${flagScrub}=${scrubFn}(),` +
-          `${flagOAuth}=process.env.CLAUDE_CODE_OAUTH_TOKEN!==void 0||` +
-              `process.env.CLAUDE_CODE_SUBSCRIPTION_TYPE!==void 0||` +
-              `process.env.CLAUDE_CODE_RATE_LIMIT_TIER!==void 0||` +
-              `process.env.CLAUDE_BG_AUTH_SNAPSHOT_PATH!==void 0||` +
-              `${envSnap}.CLAUDE_BG_SOCKET_TOKENS_PATH!==void 0||` +
-              `${envSnap}.CLAUDE_BG_RV_AUTH!==void 0||` +
-              `${envSnap}.CLAUDE_BG_PTY_AUTH!==void 0,` +
-          `${flagBg}=!1;` +
-      `${flagBg}=process.env.CLAUDE_CODE_SESSION_KIND!==void 0||` +
-          `process.env.CLAUDE_BG_SOURCE!==void 0||` +
-          `process.env.CLAUDE_BG_ISOLATION!==void 0||` +
-          `process.env.CLAUDE_BG_BACKEND!==void 0||` +
-          `process.env.CLAUDE_CODE_SESSION_NAME!==void 0||` +
-          `process.env.CLAUDE_BG_SESSION_PERMISSION_RULES!==void 0||` +
-          `process.env.CLAUDE_BG_MEMORY_TOGGLED_OFF!==void 0;` +
-      `let ${flagOtel}=Object.keys(process.env).some((${YLambda})=>${YLambda}.startsWith("OTEL_"));` +
-      `if(!${flagUserNotEmpty}&&!${flagRemoteNotEmpty}&&!${flagScrub}&&!${flagBg}&&!${flagOAuth}&&!${flagOtel}&&!${flagExtraNotEmpty})return ${stripHelperName}(process.env);` +
-      `let ${merged}={...process.env,...${extraGlobal},...${H},...${qRemote}};` +
-      `delete ${merged}.CLAUDE_CODE_OAUTH_TOKEN,` +
-      `delete ${merged}.CLAUDE_CODE_SUBSCRIPTION_TYPE,` +
-      `delete ${merged}.CLAUDE_CODE_RATE_LIMIT_TIER,` +
-      `delete ${merged}.CLAUDE_BG_AUTH_SNAPSHOT_PATH,` +
-      `delete ${merged}.CLAUDE_BG_SOCKET_TOKENS_PATH,` +
-      `delete ${merged}.CLAUDE_BG_RV_AUTH,` +
-      `delete ${merged}.CLAUDE_BG_PTY_AUTH,` +
-      `delete ${merged}.CLAUDE_CODE_SESSION_KIND,` +
-      `delete ${merged}.CLAUDE_BG_SOURCE,` +
-      `delete ${merged}.CLAUDE_BG_ISOLATION,` +
-      `delete ${merged}.CLAUDE_BG_BACKEND,` +
-      `delete ${merged}.CLAUDE_CODE_SESSION_NAME,` +
-      `delete ${merged}.CLAUDE_CODE_RESUME_INTERRUPTED_TURN,` +
-      `delete ${merged}.CLAUDE_CODE_RESUME_PROMPT,` +
-      `delete ${merged}.CLAUDE_BG_SESSION_PERMISSION_RULES,` +
-      `delete ${merged}.CLAUDE_BG_MEMORY_TOGGLED_OFF;` +
-      `for(let ${YOtelLoop} of Object.keys(${merged}))if(${YOtelLoop}.startsWith("OTEL_"))delete ${merged}[${YOtelLoop}];` +
-      `if(!${flagScrub})return ${stripHelperName}(${merged});` +
-      `for(let ${YBlockLoop} of ${blockList})delete ${merged}[${YBlockLoop}],delete ${merged}[\`INPUT_\${${YBlockLoop}}\`];` +
-      `return ${stripHelperName}(${merged})` +
+    stripHelperDecl +
+    `let ${H}=${userFn}(),` +
+    `${flagUserNotEmpty}=Object.keys(${H}).length>0,` +
+    `${flagExtraNotEmpty}=Object.keys(${extraGlobal}).length>0,` +
+    `${qRemote}=${remoteGate}(process.env.CLAUDE_CODE_REMOTE)?${remoteFn}(${flagUserNotEmpty}?{...process.env,...${H}}:process.env):{},` +
+    `${flagRemoteNotEmpty}=Object.keys(${qRemote}).length>0,` +
+    `${flagScrub}=${scrubFn}(),` +
+    `${flagOAuth}=process.env.CLAUDE_CODE_OAUTH_TOKEN!==void 0||` +
+    `process.env.CLAUDE_CODE_SUBSCRIPTION_TYPE!==void 0||` +
+    `process.env.CLAUDE_CODE_RATE_LIMIT_TIER!==void 0||` +
+    `process.env.CLAUDE_BG_AUTH_SNAPSHOT_PATH!==void 0||` +
+    `${envSnap}.CLAUDE_BG_SOCKET_TOKENS_PATH!==void 0||` +
+    `${envSnap}.CLAUDE_BG_RV_AUTH!==void 0||` +
+    `${envSnap}.CLAUDE_BG_PTY_AUTH!==void 0,` +
+    `${flagBg}=!1;` +
+    `${flagBg}=process.env.CLAUDE_CODE_SESSION_KIND!==void 0||` +
+    `process.env.CLAUDE_BG_SOURCE!==void 0||` +
+    `process.env.CLAUDE_BG_ISOLATION!==void 0||` +
+    `process.env.CLAUDE_BG_BACKEND!==void 0||` +
+    `process.env.CLAUDE_CODE_SESSION_NAME!==void 0||` +
+    `process.env.CLAUDE_BG_SESSION_PERMISSION_RULES!==void 0||` +
+    `process.env.CLAUDE_BG_MEMORY_TOGGLED_OFF!==void 0;` +
+    `let ${flagOtel}=Object.keys(process.env).some((${YLambda})=>${YLambda}.startsWith("OTEL_"));` +
+    `if(!${flagUserNotEmpty}&&!${flagRemoteNotEmpty}&&!${flagScrub}&&!${flagBg}&&!${flagOAuth}&&!${flagOtel}&&!${flagExtraNotEmpty})return ${stripHelperName}(process.env);` +
+    `let ${merged}={...process.env,...${extraGlobal},...${H},...${qRemote}};` +
+    `delete ${merged}.CLAUDE_CODE_OAUTH_TOKEN,` +
+    `delete ${merged}.CLAUDE_CODE_SUBSCRIPTION_TYPE,` +
+    `delete ${merged}.CLAUDE_CODE_RATE_LIMIT_TIER,` +
+    `delete ${merged}.CLAUDE_BG_AUTH_SNAPSHOT_PATH,` +
+    `delete ${merged}.CLAUDE_BG_SOCKET_TOKENS_PATH,` +
+    `delete ${merged}.CLAUDE_BG_RV_AUTH,` +
+    `delete ${merged}.CLAUDE_BG_PTY_AUTH,` +
+    `delete ${merged}.CLAUDE_CODE_SESSION_KIND,` +
+    `delete ${merged}.CLAUDE_BG_SOURCE,` +
+    `delete ${merged}.CLAUDE_BG_ISOLATION,` +
+    `delete ${merged}.CLAUDE_BG_BACKEND,` +
+    `delete ${merged}.CLAUDE_CODE_SESSION_NAME,` +
+    `delete ${merged}.CLAUDE_CODE_RESUME_INTERRUPTED_TURN,` +
+    `delete ${merged}.CLAUDE_CODE_RESUME_PROMPT,` +
+    `delete ${merged}.CLAUDE_BG_SESSION_PERMISSION_RULES,` +
+    `delete ${merged}.CLAUDE_BG_MEMORY_TOGGLED_OFF;` +
+    `for(let ${YOtelLoop} of Object.keys(${merged}))if(${YOtelLoop}.startsWith("OTEL_"))delete ${merged}[${YOtelLoop}];` +
+    `if(!${flagScrub})return ${stripHelperName}(${merged});` +
+    `for(let ${YBlockLoop} of ${blockList})delete ${merged}[${YBlockLoop}],delete ${merged}[\`INPUT_\${${YBlockLoop}}\`];` +
+    `return ${stripHelperName}(${merged})` +
     `}`
 } else if ((match = fnReV163.exec(src))) {
   shape = 'v163'
@@ -590,77 +590,77 @@ if (match) {
   const [
     ,
     fnName,
-    H,                       // 2  — user env binding
-    userFn,                  // 3  — getter function for user env
-    flagUserNotEmpty,        // 4  — q
-    flagExtraNotEmpty,       // 5  — K
-    extraGlobal,             // 6  — Fwq
-    qRemote,                 // 7  — $
-    remoteGate,              // 8  — mH
-    remoteFn,                // 9  — bo$
-    flagRemoteNotEmpty,      // 10 — _
-    flagScrub,               // 11 — f
-    scrubFn,                 // 12 — IY1
-    flagOAuth,               // 13 — A
-    flagBg,                  // 14 — z
-    flagOtel,                // 15 — Y
-    YLambda,                 // 16 — M (lambda)
-    merged,                  // 17 — O
-    YOtelLoop,               // 18 — M (otel loop)
-    YBlockLoop,              // 19 — M (block loop)
-    blockList                // 20 — xY1
+    H, // 2  — user env binding
+    userFn, // 3  — getter function for user env
+    flagUserNotEmpty, // 4  — q
+    flagExtraNotEmpty, // 5  — K
+    extraGlobal, // 6  — Fwq
+    qRemote, // 7  — $
+    remoteGate, // 8  — mH
+    remoteFn, // 9  — bo$
+    flagRemoteNotEmpty, // 10 — _
+    flagScrub, // 11 — f
+    scrubFn, // 12 — IY1
+    flagOAuth, // 13 — A
+    flagBg, // 14 — z
+    flagOtel, // 15 — Y
+    YLambda, // 16 — M (lambda)
+    merged, // 17 — O
+    YOtelLoop, // 18 — M (otel loop)
+    YBlockLoop, // 19 — M (block loop)
+    blockList // 20 — xY1
   ] = match
   full = match[0]
   console.log(`Found ${fnName}() [v163 shape] at char ${match.index}`)
   console.log(
     `  locals: H=${H} userFn=${userFn} q=${flagUserNotEmpty} K=${flagExtraNotEmpty} Fwq=${extraGlobal} ` +
-    `$=${qRemote} mH=${remoteGate} bo$=${remoteFn} _=${flagRemoteNotEmpty} f=${flagScrub} IY1=${scrubFn} ` +
-    `A=${flagOAuth} z=${flagBg} Y=${flagOtel} M(λ)=${YLambda} O=${merged} ` +
-    `M(otel)=${YOtelLoop} M(block)=${YBlockLoop} xY1=${blockList}`
+      `$=${qRemote} mH=${remoteGate} bo$=${remoteFn} _=${flagRemoteNotEmpty} f=${flagScrub} IY1=${scrubFn} ` +
+      `A=${flagOAuth} z=${flagBg} Y=${flagOtel} M(λ)=${YLambda} O=${merged} ` +
+      `M(otel)=${YOtelLoop} M(block)=${YBlockLoop} xY1=${blockList}`
   )
 
   newFn =
     MARKER +
     `function ${fnName}(){` +
-      stripHelperDecl +
-      `let ${H}=${userFn}(),` +
-          `${flagUserNotEmpty}=Object.keys(${H}).length>0,` +
-          `${flagExtraNotEmpty}=Object.keys(${extraGlobal}).length>0,` +
-          `${qRemote}=${remoteGate}(process.env.CLAUDE_CODE_REMOTE)?${remoteFn}(${flagUserNotEmpty}?{...process.env,...${H}}:process.env):{},` +
-          `${flagRemoteNotEmpty}=Object.keys(${qRemote}).length>0,` +
-          `${flagScrub}=${scrubFn}(),` +
-          `${flagOAuth}=process.env.CLAUDE_CODE_OAUTH_TOKEN!==void 0||` +
-              `process.env.CLAUDE_CODE_SUBSCRIPTION_TYPE!==void 0||` +
-              `process.env.CLAUDE_CODE_RATE_LIMIT_TIER!==void 0||` +
-              `process.env.CLAUDE_BG_AUTH_SNAPSHOT_PATH!==void 0,` +
-          `${flagBg}=!1;` +
-      `${flagBg}=process.env.CLAUDE_CODE_SESSION_KIND!==void 0||` +
-          `process.env.CLAUDE_BG_SOURCE!==void 0||` +
-          `process.env.CLAUDE_BG_ISOLATION!==void 0||` +
-          `process.env.CLAUDE_BG_BACKEND!==void 0||` +
-          `process.env.CLAUDE_CODE_SESSION_NAME!==void 0||` +
-          `process.env.CLAUDE_BG_SESSION_PERMISSION_RULES!==void 0||` +
-          `process.env.CLAUDE_BG_MEMORY_TOGGLED_OFF!==void 0;` +
-      `let ${flagOtel}=Object.keys(process.env).some((${YLambda})=>${YLambda}.startsWith("OTEL_"));` +
-      `if(!${flagUserNotEmpty}&&!${flagRemoteNotEmpty}&&!${flagScrub}&&!${flagBg}&&!${flagOAuth}&&!${flagOtel}&&!${flagExtraNotEmpty})return ${stripHelperName}(process.env);` +
-      `let ${merged}={...process.env,...${extraGlobal},...${H},...${qRemote}};` +
-      `delete ${merged}.CLAUDE_CODE_OAUTH_TOKEN,` +
-      `delete ${merged}.CLAUDE_CODE_SUBSCRIPTION_TYPE,` +
-      `delete ${merged}.CLAUDE_CODE_RATE_LIMIT_TIER,` +
-      `delete ${merged}.CLAUDE_BG_AUTH_SNAPSHOT_PATH,` +
-      `delete ${merged}.CLAUDE_CODE_SESSION_KIND,` +
-      `delete ${merged}.CLAUDE_BG_SOURCE,` +
-      `delete ${merged}.CLAUDE_BG_ISOLATION,` +
-      `delete ${merged}.CLAUDE_BG_BACKEND,` +
-      `delete ${merged}.CLAUDE_CODE_SESSION_NAME,` +
-      `delete ${merged}.CLAUDE_CODE_RESUME_INTERRUPTED_TURN,` +
-      `delete ${merged}.CLAUDE_CODE_RESUME_PROMPT,` +
-      `delete ${merged}.CLAUDE_BG_SESSION_PERMISSION_RULES,` +
-      `delete ${merged}.CLAUDE_BG_MEMORY_TOGGLED_OFF;` +
-      `for(let ${YOtelLoop} of Object.keys(${merged}))if(${YOtelLoop}.startsWith("OTEL_"))delete ${merged}[${YOtelLoop}];` +
-      `if(!${flagScrub})return ${stripHelperName}(${merged});` +
-      `for(let ${YBlockLoop} of ${blockList})delete ${merged}[${YBlockLoop}],delete ${merged}[\`INPUT_\${${YBlockLoop}}\`];` +
-      `return ${stripHelperName}(${merged})` +
+    stripHelperDecl +
+    `let ${H}=${userFn}(),` +
+    `${flagUserNotEmpty}=Object.keys(${H}).length>0,` +
+    `${flagExtraNotEmpty}=Object.keys(${extraGlobal}).length>0,` +
+    `${qRemote}=${remoteGate}(process.env.CLAUDE_CODE_REMOTE)?${remoteFn}(${flagUserNotEmpty}?{...process.env,...${H}}:process.env):{},` +
+    `${flagRemoteNotEmpty}=Object.keys(${qRemote}).length>0,` +
+    `${flagScrub}=${scrubFn}(),` +
+    `${flagOAuth}=process.env.CLAUDE_CODE_OAUTH_TOKEN!==void 0||` +
+    `process.env.CLAUDE_CODE_SUBSCRIPTION_TYPE!==void 0||` +
+    `process.env.CLAUDE_CODE_RATE_LIMIT_TIER!==void 0||` +
+    `process.env.CLAUDE_BG_AUTH_SNAPSHOT_PATH!==void 0,` +
+    `${flagBg}=!1;` +
+    `${flagBg}=process.env.CLAUDE_CODE_SESSION_KIND!==void 0||` +
+    `process.env.CLAUDE_BG_SOURCE!==void 0||` +
+    `process.env.CLAUDE_BG_ISOLATION!==void 0||` +
+    `process.env.CLAUDE_BG_BACKEND!==void 0||` +
+    `process.env.CLAUDE_CODE_SESSION_NAME!==void 0||` +
+    `process.env.CLAUDE_BG_SESSION_PERMISSION_RULES!==void 0||` +
+    `process.env.CLAUDE_BG_MEMORY_TOGGLED_OFF!==void 0;` +
+    `let ${flagOtel}=Object.keys(process.env).some((${YLambda})=>${YLambda}.startsWith("OTEL_"));` +
+    `if(!${flagUserNotEmpty}&&!${flagRemoteNotEmpty}&&!${flagScrub}&&!${flagBg}&&!${flagOAuth}&&!${flagOtel}&&!${flagExtraNotEmpty})return ${stripHelperName}(process.env);` +
+    `let ${merged}={...process.env,...${extraGlobal},...${H},...${qRemote}};` +
+    `delete ${merged}.CLAUDE_CODE_OAUTH_TOKEN,` +
+    `delete ${merged}.CLAUDE_CODE_SUBSCRIPTION_TYPE,` +
+    `delete ${merged}.CLAUDE_CODE_RATE_LIMIT_TIER,` +
+    `delete ${merged}.CLAUDE_BG_AUTH_SNAPSHOT_PATH,` +
+    `delete ${merged}.CLAUDE_CODE_SESSION_KIND,` +
+    `delete ${merged}.CLAUDE_BG_SOURCE,` +
+    `delete ${merged}.CLAUDE_BG_ISOLATION,` +
+    `delete ${merged}.CLAUDE_BG_BACKEND,` +
+    `delete ${merged}.CLAUDE_CODE_SESSION_NAME,` +
+    `delete ${merged}.CLAUDE_CODE_RESUME_INTERRUPTED_TURN,` +
+    `delete ${merged}.CLAUDE_CODE_RESUME_PROMPT,` +
+    `delete ${merged}.CLAUDE_BG_SESSION_PERMISSION_RULES,` +
+    `delete ${merged}.CLAUDE_BG_MEMORY_TOGGLED_OFF;` +
+    `for(let ${YOtelLoop} of Object.keys(${merged}))if(${YOtelLoop}.startsWith("OTEL_"))delete ${merged}[${YOtelLoop}];` +
+    `if(!${flagScrub})return ${stripHelperName}(${merged});` +
+    `for(let ${YBlockLoop} of ${blockList})delete ${merged}[${YBlockLoop}],delete ${merged}[\`INPUT_\${${YBlockLoop}}\`];` +
+    `return ${stripHelperName}(${merged})` +
     `}`
 } else if ((match = fnReV150.exec(src))) {
   shape = 'v150'
@@ -672,76 +672,76 @@ if (match) {
   const [
     ,
     fnName,
-    H,                       // 2  — user env binding
-    userFn,                  // 3  — getter function for user env
-    flagUserNotEmpty,        // 4  — q
-    flagExtraNotEmpty,       // 5  — K
-    extraGlobal,             // 6  — Fwq
-    qRemote,                 // 7  — $
-    remoteGate,              // 8  — mH
-    remoteFn,                // 9  — bo$
-    flagRemoteNotEmpty,      // 10 — _
-    flagScrub,               // 11 — f
-    scrubFn,                 // 12 — IY1
-    flagOAuth,               // 13 — A
-    flagBg,                  // 14 — z
-    flagOtel,                // 15 — Y
-    YLambda,                 // 16 — M (lambda)
-    merged,                  // 17 — O
-    YOtelLoop,               // 18 — M (otel loop)
-    YBlockLoop,              // 19 — M (block loop)
-    blockList                // 20 — xY1
+    H, // 2  — user env binding
+    userFn, // 3  — getter function for user env
+    flagUserNotEmpty, // 4  — q
+    flagExtraNotEmpty, // 5  — K
+    extraGlobal, // 6  — Fwq
+    qRemote, // 7  — $
+    remoteGate, // 8  — mH
+    remoteFn, // 9  — bo$
+    flagRemoteNotEmpty, // 10 — _
+    flagScrub, // 11 — f
+    scrubFn, // 12 — IY1
+    flagOAuth, // 13 — A
+    flagBg, // 14 — z
+    flagOtel, // 15 — Y
+    YLambda, // 16 — M (lambda)
+    merged, // 17 — O
+    YOtelLoop, // 18 — M (otel loop)
+    YBlockLoop, // 19 — M (block loop)
+    blockList // 20 — xY1
   ] = match
   full = match[0]
   console.log(`Found ${fnName}() [v150 shape] at char ${match.index}`)
   console.log(
     `  locals: H=${H} userFn=${userFn} q=${flagUserNotEmpty} K=${flagExtraNotEmpty} Fwq=${extraGlobal} ` +
-    `$=${qRemote} mH=${remoteGate} bo$=${remoteFn} _=${flagRemoteNotEmpty} f=${flagScrub} IY1=${scrubFn} ` +
-    `A=${flagOAuth} z=${flagBg} Y=${flagOtel} M(λ)=${YLambda} O=${merged} ` +
-    `M(otel)=${YOtelLoop} M(block)=${YBlockLoop} xY1=${blockList}`
+      `$=${qRemote} mH=${remoteGate} bo$=${remoteFn} _=${flagRemoteNotEmpty} f=${flagScrub} IY1=${scrubFn} ` +
+      `A=${flagOAuth} z=${flagBg} Y=${flagOtel} M(λ)=${YLambda} O=${merged} ` +
+      `M(otel)=${YOtelLoop} M(block)=${YBlockLoop} xY1=${blockList}`
   )
 
   newFn =
     MARKER +
     `function ${fnName}(){` +
-      stripHelperDecl +
-      `let ${H}=${userFn}(),` +
-          `${flagUserNotEmpty}=Object.keys(${H}).length>0,` +
-          `${flagExtraNotEmpty}=Object.keys(${extraGlobal}).length>0,` +
-          `${qRemote}=${remoteGate}(process.env.CLAUDE_CODE_REMOTE)?${remoteFn}(${flagUserNotEmpty}?{...process.env,...${H}}:process.env):{},` +
-          `${flagRemoteNotEmpty}=Object.keys(${qRemote}).length>0,` +
-          `${flagScrub}=${scrubFn}(),` +
-          `${flagOAuth}=process.env.CLAUDE_CODE_OAUTH_TOKEN!==void 0||` +
-              `process.env.CLAUDE_CODE_SUBSCRIPTION_TYPE!==void 0||` +
-              `process.env.CLAUDE_CODE_RATE_LIMIT_TIER!==void 0||` +
-              `process.env.CLAUDE_BG_AUTH_SNAPSHOT_PATH!==void 0,` +
-          `${flagBg}=!1;` +
-      `${flagBg}=process.env.CLAUDE_CODE_SESSION_KIND!==void 0||` +
-          `process.env.CLAUDE_BG_SOURCE!==void 0||` +
-          `process.env.CLAUDE_BG_ISOLATION!==void 0||` +
-          `process.env.CLAUDE_BG_BACKEND!==void 0||` +
-          `process.env.CLAUDE_CODE_SESSION_NAME!==void 0||` +
-          `process.env.CLAUDE_BG_SESSION_PERMISSION_RULES!==void 0||` +
-          `process.env.CLAUDE_BG_MEMORY_TOGGLED_OFF!==void 0;` +
-      `let ${flagOtel}=Object.keys(process.env).some((${YLambda})=>${YLambda}.startsWith("OTEL_"));` +
-      `if(!${flagUserNotEmpty}&&!${flagRemoteNotEmpty}&&!${flagScrub}&&!${flagBg}&&!${flagOAuth}&&!${flagOtel}&&!${flagExtraNotEmpty})return ${stripHelperName}(process.env);` +
-      `let ${merged}={...process.env,...${extraGlobal},...${H},...${qRemote}};` +
-      `delete ${merged}.CLAUDE_CODE_OAUTH_TOKEN,` +
-      `delete ${merged}.CLAUDE_CODE_SUBSCRIPTION_TYPE,` +
-      `delete ${merged}.CLAUDE_CODE_RATE_LIMIT_TIER,` +
-      `delete ${merged}.CLAUDE_BG_AUTH_SNAPSHOT_PATH,` +
-      `delete ${merged}.CLAUDE_CODE_SESSION_KIND,` +
-      `delete ${merged}.CLAUDE_BG_SOURCE,` +
-      `delete ${merged}.CLAUDE_BG_ISOLATION,` +
-      `delete ${merged}.CLAUDE_BG_BACKEND,` +
-      `delete ${merged}.CLAUDE_CODE_SESSION_NAME,` +
-      `delete ${merged}.CLAUDE_CODE_RESUME_INTERRUPTED_TURN,` +
-      `delete ${merged}.CLAUDE_BG_SESSION_PERMISSION_RULES,` +
-      `delete ${merged}.CLAUDE_BG_MEMORY_TOGGLED_OFF;` +
-      `for(let ${YOtelLoop} of Object.keys(${merged}))if(${YOtelLoop}.startsWith("OTEL_"))delete ${merged}[${YOtelLoop}];` +
-      `if(!${flagScrub})return ${stripHelperName}(${merged});` +
-      `for(let ${YBlockLoop} of ${blockList})delete ${merged}[${YBlockLoop}],delete ${merged}[\`INPUT_\${${YBlockLoop}}\`];` +
-      `return ${stripHelperName}(${merged})` +
+    stripHelperDecl +
+    `let ${H}=${userFn}(),` +
+    `${flagUserNotEmpty}=Object.keys(${H}).length>0,` +
+    `${flagExtraNotEmpty}=Object.keys(${extraGlobal}).length>0,` +
+    `${qRemote}=${remoteGate}(process.env.CLAUDE_CODE_REMOTE)?${remoteFn}(${flagUserNotEmpty}?{...process.env,...${H}}:process.env):{},` +
+    `${flagRemoteNotEmpty}=Object.keys(${qRemote}).length>0,` +
+    `${flagScrub}=${scrubFn}(),` +
+    `${flagOAuth}=process.env.CLAUDE_CODE_OAUTH_TOKEN!==void 0||` +
+    `process.env.CLAUDE_CODE_SUBSCRIPTION_TYPE!==void 0||` +
+    `process.env.CLAUDE_CODE_RATE_LIMIT_TIER!==void 0||` +
+    `process.env.CLAUDE_BG_AUTH_SNAPSHOT_PATH!==void 0,` +
+    `${flagBg}=!1;` +
+    `${flagBg}=process.env.CLAUDE_CODE_SESSION_KIND!==void 0||` +
+    `process.env.CLAUDE_BG_SOURCE!==void 0||` +
+    `process.env.CLAUDE_BG_ISOLATION!==void 0||` +
+    `process.env.CLAUDE_BG_BACKEND!==void 0||` +
+    `process.env.CLAUDE_CODE_SESSION_NAME!==void 0||` +
+    `process.env.CLAUDE_BG_SESSION_PERMISSION_RULES!==void 0||` +
+    `process.env.CLAUDE_BG_MEMORY_TOGGLED_OFF!==void 0;` +
+    `let ${flagOtel}=Object.keys(process.env).some((${YLambda})=>${YLambda}.startsWith("OTEL_"));` +
+    `if(!${flagUserNotEmpty}&&!${flagRemoteNotEmpty}&&!${flagScrub}&&!${flagBg}&&!${flagOAuth}&&!${flagOtel}&&!${flagExtraNotEmpty})return ${stripHelperName}(process.env);` +
+    `let ${merged}={...process.env,...${extraGlobal},...${H},...${qRemote}};` +
+    `delete ${merged}.CLAUDE_CODE_OAUTH_TOKEN,` +
+    `delete ${merged}.CLAUDE_CODE_SUBSCRIPTION_TYPE,` +
+    `delete ${merged}.CLAUDE_CODE_RATE_LIMIT_TIER,` +
+    `delete ${merged}.CLAUDE_BG_AUTH_SNAPSHOT_PATH,` +
+    `delete ${merged}.CLAUDE_CODE_SESSION_KIND,` +
+    `delete ${merged}.CLAUDE_BG_SOURCE,` +
+    `delete ${merged}.CLAUDE_BG_ISOLATION,` +
+    `delete ${merged}.CLAUDE_BG_BACKEND,` +
+    `delete ${merged}.CLAUDE_CODE_SESSION_NAME,` +
+    `delete ${merged}.CLAUDE_CODE_RESUME_INTERRUPTED_TURN,` +
+    `delete ${merged}.CLAUDE_BG_SESSION_PERMISSION_RULES,` +
+    `delete ${merged}.CLAUDE_BG_MEMORY_TOGGLED_OFF;` +
+    `for(let ${YOtelLoop} of Object.keys(${merged}))if(${YOtelLoop}.startsWith("OTEL_"))delete ${merged}[${YOtelLoop}];` +
+    `if(!${flagScrub})return ${stripHelperName}(${merged});` +
+    `for(let ${YBlockLoop} of ${blockList})delete ${merged}[${YBlockLoop}],delete ${merged}[\`INPUT_\${${YBlockLoop}}\`];` +
+    `return ${stripHelperName}(${merged})` +
     `}`
 } else if ((match = fnReV143.exec(src))) {
   shape = 'v143'
@@ -753,72 +753,72 @@ if (match) {
   const [
     ,
     fnName,
-    H,                       // 2  — user env binding
-    userFn,                  // 3  — getter function for user env
-    flagUserNotEmpty,        // 4  — q
-    flagExtraNotEmpty,       // 5  — $
-    extraGlobal,             // 6  — ifq (additional global env source)
-    qRemote,                 // 7  — K
-    remoteGate,              // 8  — xH
-    remoteFn,                // 9  — TgK
-    flagRemoteNotEmpty,      // 10 — _
-    flagScrub,               // 11 — A
-    scrubFn,                 // 12 — Ct9
-    flagOAuth,               // 13 — f
-    flagBg,                  // 14 — z
-    flagOtel,                // 15 — Y
-    YLambda,                 // 16 — O lambda for OTEL .some
-    merged,                  // 17 — M
-    YOtelLoop,               // 18 — O loop var for OTEL strip
-    YBlockLoop,              // 19 — O loop var for block list
-    blockList                // 20 — ut9
+    H, // 2  — user env binding
+    userFn, // 3  — getter function for user env
+    flagUserNotEmpty, // 4  — q
+    flagExtraNotEmpty, // 5  — $
+    extraGlobal, // 6  — ifq (additional global env source)
+    qRemote, // 7  — K
+    remoteGate, // 8  — xH
+    remoteFn, // 9  — TgK
+    flagRemoteNotEmpty, // 10 — _
+    flagScrub, // 11 — A
+    scrubFn, // 12 — Ct9
+    flagOAuth, // 13 — f
+    flagBg, // 14 — z
+    flagOtel, // 15 — Y
+    YLambda, // 16 — O lambda for OTEL .some
+    merged, // 17 — M
+    YOtelLoop, // 18 — O loop var for OTEL strip
+    YBlockLoop, // 19 — O loop var for block list
+    blockList // 20 — ut9
   ] = match
   full = match[0]
   console.log(`Found ${fnName}() [v143 shape] at char ${match.index}`)
   console.log(
     `  locals: H=${H} userFn=${userFn} q=${flagUserNotEmpty} $=${flagExtraNotEmpty} ifq=${extraGlobal} ` +
-    `K=${qRemote} xH=${remoteGate} TgK=${remoteFn} _=${flagRemoteNotEmpty} A=${flagScrub} Ct9=${scrubFn} ` +
-    `f=${flagOAuth} z=${flagBg} Y=${flagOtel} O(λ)=${YLambda} M=${merged} ` +
-    `O(otel)=${YOtelLoop} O(block)=${YBlockLoop} ut9=${blockList}`
+      `K=${qRemote} xH=${remoteGate} TgK=${remoteFn} _=${flagRemoteNotEmpty} A=${flagScrub} Ct9=${scrubFn} ` +
+      `f=${flagOAuth} z=${flagBg} Y=${flagOtel} O(λ)=${YLambda} M=${merged} ` +
+      `O(otel)=${YOtelLoop} O(block)=${YBlockLoop} ut9=${blockList}`
   )
 
   newFn =
     MARKER +
     `function ${fnName}(){` +
-      stripHelperDecl +
-      `let ${H}=${userFn}(),` +
-          `${flagUserNotEmpty}=Object.keys(${H}).length>0,` +
-          `${flagExtraNotEmpty}=Object.keys(${extraGlobal}).length>0,` +
-          `${qRemote}=${remoteGate}(process.env.CLAUDE_CODE_REMOTE)?${remoteFn}(${flagUserNotEmpty}?{...process.env,...${H}}:process.env):{},` +
-          `${flagRemoteNotEmpty}=Object.keys(${qRemote}).length>0,` +
-          `${flagScrub}=${scrubFn}(),` +
-          `${flagOAuth}=process.env.CLAUDE_CODE_OAUTH_TOKEN!==void 0||` +
-              `process.env.CLAUDE_CODE_SUBSCRIPTION_TYPE!==void 0||` +
-              `process.env.CLAUDE_CODE_RATE_LIMIT_TIER!==void 0||` +
-              `process.env.CLAUDE_BG_AUTH_SNAPSHOT_PATH!==void 0,` +
-          `${flagBg}=!1;` +
-      `${flagBg}=process.env.CLAUDE_CODE_SESSION_KIND!==void 0||` +
-          `process.env.CLAUDE_BG_SOURCE!==void 0||` +
-          `process.env.CLAUDE_BG_ISOLATION!==void 0||` +
-          `process.env.CLAUDE_BG_BACKEND!==void 0||` +
-          `process.env.CLAUDE_CODE_SESSION_NAME!==void 0;` +
-      `let ${flagOtel}=Object.keys(process.env).some((${YLambda})=>${YLambda}.startsWith("OTEL_"));` +
-      `if(!${flagUserNotEmpty}&&!${flagRemoteNotEmpty}&&!${flagScrub}&&!${flagBg}&&!${flagOAuth}&&!${flagOtel}&&!${flagExtraNotEmpty})return ${stripHelperName}(process.env);` +
-      `let ${merged}={...process.env,...${extraGlobal},...${H},...${qRemote}};` +
-      `delete ${merged}.CLAUDE_CODE_OAUTH_TOKEN,` +
-      `delete ${merged}.CLAUDE_CODE_SUBSCRIPTION_TYPE,` +
-      `delete ${merged}.CLAUDE_CODE_RATE_LIMIT_TIER,` +
-      `delete ${merged}.CLAUDE_BG_AUTH_SNAPSHOT_PATH,` +
-      `delete ${merged}.CLAUDE_CODE_SESSION_KIND,` +
-      `delete ${merged}.CLAUDE_BG_SOURCE,` +
-      `delete ${merged}.CLAUDE_BG_ISOLATION,` +
-      `delete ${merged}.CLAUDE_BG_BACKEND,` +
-      `delete ${merged}.CLAUDE_CODE_SESSION_NAME,` +
-      `delete ${merged}.CLAUDE_CODE_RESUME_INTERRUPTED_TURN;` +
-      `for(let ${YOtelLoop} of Object.keys(${merged}))if(${YOtelLoop}.startsWith("OTEL_"))delete ${merged}[${YOtelLoop}];` +
-      `if(!${flagScrub})return ${stripHelperName}(${merged});` +
-      `for(let ${YBlockLoop} of ${blockList})delete ${merged}[${YBlockLoop}],delete ${merged}[\`INPUT_\${${YBlockLoop}}\`];` +
-      `return ${stripHelperName}(${merged})` +
+    stripHelperDecl +
+    `let ${H}=${userFn}(),` +
+    `${flagUserNotEmpty}=Object.keys(${H}).length>0,` +
+    `${flagExtraNotEmpty}=Object.keys(${extraGlobal}).length>0,` +
+    `${qRemote}=${remoteGate}(process.env.CLAUDE_CODE_REMOTE)?${remoteFn}(${flagUserNotEmpty}?{...process.env,...${H}}:process.env):{},` +
+    `${flagRemoteNotEmpty}=Object.keys(${qRemote}).length>0,` +
+    `${flagScrub}=${scrubFn}(),` +
+    `${flagOAuth}=process.env.CLAUDE_CODE_OAUTH_TOKEN!==void 0||` +
+    `process.env.CLAUDE_CODE_SUBSCRIPTION_TYPE!==void 0||` +
+    `process.env.CLAUDE_CODE_RATE_LIMIT_TIER!==void 0||` +
+    `process.env.CLAUDE_BG_AUTH_SNAPSHOT_PATH!==void 0,` +
+    `${flagBg}=!1;` +
+    `${flagBg}=process.env.CLAUDE_CODE_SESSION_KIND!==void 0||` +
+    `process.env.CLAUDE_BG_SOURCE!==void 0||` +
+    `process.env.CLAUDE_BG_ISOLATION!==void 0||` +
+    `process.env.CLAUDE_BG_BACKEND!==void 0||` +
+    `process.env.CLAUDE_CODE_SESSION_NAME!==void 0;` +
+    `let ${flagOtel}=Object.keys(process.env).some((${YLambda})=>${YLambda}.startsWith("OTEL_"));` +
+    `if(!${flagUserNotEmpty}&&!${flagRemoteNotEmpty}&&!${flagScrub}&&!${flagBg}&&!${flagOAuth}&&!${flagOtel}&&!${flagExtraNotEmpty})return ${stripHelperName}(process.env);` +
+    `let ${merged}={...process.env,...${extraGlobal},...${H},...${qRemote}};` +
+    `delete ${merged}.CLAUDE_CODE_OAUTH_TOKEN,` +
+    `delete ${merged}.CLAUDE_CODE_SUBSCRIPTION_TYPE,` +
+    `delete ${merged}.CLAUDE_CODE_RATE_LIMIT_TIER,` +
+    `delete ${merged}.CLAUDE_BG_AUTH_SNAPSHOT_PATH,` +
+    `delete ${merged}.CLAUDE_CODE_SESSION_KIND,` +
+    `delete ${merged}.CLAUDE_BG_SOURCE,` +
+    `delete ${merged}.CLAUDE_BG_ISOLATION,` +
+    `delete ${merged}.CLAUDE_BG_BACKEND,` +
+    `delete ${merged}.CLAUDE_CODE_SESSION_NAME,` +
+    `delete ${merged}.CLAUDE_CODE_RESUME_INTERRUPTED_TURN;` +
+    `for(let ${YOtelLoop} of Object.keys(${merged}))if(${YOtelLoop}.startsWith("OTEL_"))delete ${merged}[${YOtelLoop}];` +
+    `if(!${flagScrub})return ${stripHelperName}(${merged});` +
+    `for(let ${YBlockLoop} of ${blockList})delete ${merged}[${YBlockLoop}],delete ${merged}[\`INPUT_\${${YBlockLoop}}\`];` +
+    `return ${stripHelperName}(${merged})` +
     `}`
 } else if ((match = fnReV129.exec(src))) {
   shape = 'v129'
@@ -852,44 +852,44 @@ if (match) {
   console.log(`Found ${fnName}() [v129 shape] at char ${match.index}`)
   console.log(
     `  locals: H=${H} Fn_=${Fn_} _=${flagUserNotEmpty} q=${qRemote} hH=${hH_} Kh9=${Kh9_} ` +
-    `K=${flagRemoteNotEmpty} O=${flagScrub} _C1=${_C1_} T=${flagOAuth} A=${flagBg} z=${flagOtel} ` +
-    `Y(λ)=${YLambda} $=${merged} Y(otel)=${YOtelLoop} Y(block)=${YBlockLoop} OC1=${OC1_}`
+      `K=${flagRemoteNotEmpty} O=${flagScrub} _C1=${_C1_} T=${flagOAuth} A=${flagBg} z=${flagOtel} ` +
+      `Y(λ)=${YLambda} $=${merged} Y(otel)=${YOtelLoop} Y(block)=${YBlockLoop} OC1=${OC1_}`
   )
 
   newFn =
     MARKER +
     `function ${fnName}(){` +
-      stripHelperDecl +
-      `let ${H}=${Fn_}(),` +
-          `${flagUserNotEmpty}=Object.keys(${H}).length>0,` +
-          `${qRemote}=${hH_}(process.env.CLAUDE_CODE_REMOTE)?${Kh9_}(${flagUserNotEmpty}?{...process.env,...${H}}:process.env):{},` +
-          `${flagRemoteNotEmpty}=Object.keys(${qRemote}).length>0,` +
-          `${flagScrub}=${_C1_}(),` +
-          `${flagOAuth}=process.env.CLAUDE_CODE_OAUTH_TOKEN!==void 0||` +
-              `process.env.CLAUDE_CODE_SUBSCRIPTION_TYPE!==void 0||` +
-              `process.env.CLAUDE_CODE_RATE_LIMIT_TIER!==void 0,` +
-          `${flagBg}=!1;` +
-      `${flagBg}=process.env.CLAUDE_CODE_SESSION_KIND!==void 0||` +
-          `process.env.CLAUDE_BG_SOURCE!==void 0||` +
-          `process.env.CLAUDE_BG_ISOLATION!==void 0||` +
-          `process.env.CLAUDE_BG_BACKEND!==void 0||` +
-          `process.env.CLAUDE_CODE_SESSION_NAME!==void 0;` +
-      `let ${flagOtel}=Object.keys(process.env).some((${YLambda})=>${YLambda}.startsWith("OTEL_"));` +
-      `if(!${flagUserNotEmpty}&&!${flagRemoteNotEmpty}&&!${flagScrub}&&!${flagBg}&&!${flagOAuth}&&!${flagOtel})return ${stripHelperName}(process.env);` +
-      `let ${merged}={...process.env,...${H},...${qRemote}};` +
-      `delete ${merged}.CLAUDE_CODE_OAUTH_TOKEN,` +
-      `delete ${merged}.CLAUDE_CODE_SUBSCRIPTION_TYPE,` +
-      `delete ${merged}.CLAUDE_CODE_RATE_LIMIT_TIER,` +
-      `delete ${merged}.CLAUDE_CODE_SESSION_KIND,` +
-      `delete ${merged}.CLAUDE_BG_SOURCE,` +
-      `delete ${merged}.CLAUDE_BG_ISOLATION,` +
-      `delete ${merged}.CLAUDE_BG_BACKEND,` +
-      `delete ${merged}.CLAUDE_CODE_SESSION_NAME,` +
-      `delete ${merged}.CLAUDE_CODE_RESUME_INTERRUPTED_TURN;` +
-      `for(let ${YOtelLoop} of Object.keys(${merged}))if(${YOtelLoop}.startsWith("OTEL_"))delete ${merged}[${YOtelLoop}];` +
-      `if(!${flagScrub})return ${stripHelperName}(${merged});` +
-      `for(let ${YBlockLoop} of ${OC1_})delete ${merged}[${YBlockLoop}],delete ${merged}[\`INPUT_\${${YBlockLoop}}\`];` +
-      `return ${stripHelperName}(${merged})` +
+    stripHelperDecl +
+    `let ${H}=${Fn_}(),` +
+    `${flagUserNotEmpty}=Object.keys(${H}).length>0,` +
+    `${qRemote}=${hH_}(process.env.CLAUDE_CODE_REMOTE)?${Kh9_}(${flagUserNotEmpty}?{...process.env,...${H}}:process.env):{},` +
+    `${flagRemoteNotEmpty}=Object.keys(${qRemote}).length>0,` +
+    `${flagScrub}=${_C1_}(),` +
+    `${flagOAuth}=process.env.CLAUDE_CODE_OAUTH_TOKEN!==void 0||` +
+    `process.env.CLAUDE_CODE_SUBSCRIPTION_TYPE!==void 0||` +
+    `process.env.CLAUDE_CODE_RATE_LIMIT_TIER!==void 0,` +
+    `${flagBg}=!1;` +
+    `${flagBg}=process.env.CLAUDE_CODE_SESSION_KIND!==void 0||` +
+    `process.env.CLAUDE_BG_SOURCE!==void 0||` +
+    `process.env.CLAUDE_BG_ISOLATION!==void 0||` +
+    `process.env.CLAUDE_BG_BACKEND!==void 0||` +
+    `process.env.CLAUDE_CODE_SESSION_NAME!==void 0;` +
+    `let ${flagOtel}=Object.keys(process.env).some((${YLambda})=>${YLambda}.startsWith("OTEL_"));` +
+    `if(!${flagUserNotEmpty}&&!${flagRemoteNotEmpty}&&!${flagScrub}&&!${flagBg}&&!${flagOAuth}&&!${flagOtel})return ${stripHelperName}(process.env);` +
+    `let ${merged}={...process.env,...${H},...${qRemote}};` +
+    `delete ${merged}.CLAUDE_CODE_OAUTH_TOKEN,` +
+    `delete ${merged}.CLAUDE_CODE_SUBSCRIPTION_TYPE,` +
+    `delete ${merged}.CLAUDE_CODE_RATE_LIMIT_TIER,` +
+    `delete ${merged}.CLAUDE_CODE_SESSION_KIND,` +
+    `delete ${merged}.CLAUDE_BG_SOURCE,` +
+    `delete ${merged}.CLAUDE_BG_ISOLATION,` +
+    `delete ${merged}.CLAUDE_BG_BACKEND,` +
+    `delete ${merged}.CLAUDE_CODE_SESSION_NAME,` +
+    `delete ${merged}.CLAUDE_CODE_RESUME_INTERRUPTED_TURN;` +
+    `for(let ${YOtelLoop} of Object.keys(${merged}))if(${YOtelLoop}.startsWith("OTEL_"))delete ${merged}[${YOtelLoop}];` +
+    `if(!${flagScrub})return ${stripHelperName}(${merged});` +
+    `for(let ${YBlockLoop} of ${OC1_})delete ${merged}[${YBlockLoop}],delete ${merged}[\`INPUT_\${${YBlockLoop}}\`];` +
+    `return ${stripHelperName}(${merged})` +
     `}`
 } else if ((match = fnReV119.exec(src))) {
   shape = 'v119'
@@ -919,36 +919,36 @@ if (match) {
   console.log(`Found ${fnName}() [v119 shape] at char ${match.index}`)
   console.log(
     `  locals: H=${H} Nd_=${Nd_} _=${flagUserNotEmpty} q=${qRemote} EH=${EH_} d09=${d09_} ` +
-    `K=${flagRemoteNotEmpty} O=${flagScrub} mR1=${mR1_} T=${flagBg} $=${merged} A=${T} gR1=${gR1_}`
+      `K=${flagRemoteNotEmpty} O=${flagScrub} mR1=${mR1_} T=${flagBg} $=${merged} A=${T} gR1=${gR1_}`
   )
 
   newFn =
     MARKER +
     `function ${fnName}(){` +
-      stripHelperDecl +
-      `let ${H}=${Nd_}(),` +
-          `${flagUserNotEmpty}=Object.keys(${H}).length>0,` +
-          `${qRemote}=${EH_}(process.env.CLAUDE_CODE_REMOTE)?${d09_}(${flagUserNotEmpty}?{...process.env,...${H}}:process.env):{},` +
-          `${flagRemoteNotEmpty}=Object.keys(${qRemote}).length>0,` +
-          `${flagScrub}=${mR1_}(),` +
-          `${flagBg}=!1;` +
-      `if(${flagBg}=` +
-        `process.env.CLAUDE_CODE_SESSION_KIND!==void 0||` +
-        `process.env.CLAUDE_BG_SOURCE!==void 0||` +
-        `process.env.CLAUDE_BG_ISOLATION!==void 0||` +
-        `process.env.CLAUDE_BG_BACKEND!==void 0||` +
-        `process.env.CLAUDE_CODE_SESSION_NAME!==void 0,` +
-        `!${flagUserNotEmpty}&&!${flagRemoteNotEmpty}&&!${flagScrub}&&!${flagBg})return ${stripHelperName}(process.env);` +
-      `let ${merged}={...process.env,...${H},...${qRemote}};` +
-      `if(` +
-        `delete ${merged}.CLAUDE_CODE_SESSION_KIND,` +
-        `delete ${merged}.CLAUDE_BG_SOURCE,` +
-        `delete ${merged}.CLAUDE_BG_ISOLATION,` +
-        `delete ${merged}.CLAUDE_BG_BACKEND,` +
-        `delete ${merged}.CLAUDE_CODE_SESSION_NAME,` +
-        `!${flagScrub})return ${stripHelperName}(${merged});` +
-      `for(let ${T} of ${gR1_})delete ${merged}[${T}],delete ${merged}[\`INPUT_\${${T}}\`];` +
-      `return ${stripHelperName}(${merged})` +
+    stripHelperDecl +
+    `let ${H}=${Nd_}(),` +
+    `${flagUserNotEmpty}=Object.keys(${H}).length>0,` +
+    `${qRemote}=${EH_}(process.env.CLAUDE_CODE_REMOTE)?${d09_}(${flagUserNotEmpty}?{...process.env,...${H}}:process.env):{},` +
+    `${flagRemoteNotEmpty}=Object.keys(${qRemote}).length>0,` +
+    `${flagScrub}=${mR1_}(),` +
+    `${flagBg}=!1;` +
+    `if(${flagBg}=` +
+    `process.env.CLAUDE_CODE_SESSION_KIND!==void 0||` +
+    `process.env.CLAUDE_BG_SOURCE!==void 0||` +
+    `process.env.CLAUDE_BG_ISOLATION!==void 0||` +
+    `process.env.CLAUDE_BG_BACKEND!==void 0||` +
+    `process.env.CLAUDE_CODE_SESSION_NAME!==void 0,` +
+    `!${flagUserNotEmpty}&&!${flagRemoteNotEmpty}&&!${flagScrub}&&!${flagBg})return ${stripHelperName}(process.env);` +
+    `let ${merged}={...process.env,...${H},...${qRemote}};` +
+    `if(` +
+    `delete ${merged}.CLAUDE_CODE_SESSION_KIND,` +
+    `delete ${merged}.CLAUDE_BG_SOURCE,` +
+    `delete ${merged}.CLAUDE_BG_ISOLATION,` +
+    `delete ${merged}.CLAUDE_BG_BACKEND,` +
+    `delete ${merged}.CLAUDE_CODE_SESSION_NAME,` +
+    `!${flagScrub})return ${stripHelperName}(${merged});` +
+    `for(let ${T} of ${gR1_})delete ${merged}[${T}],delete ${merged}[\`INPUT_\${${T}}\`];` +
+    `return ${stripHelperName}(${merged})` +
     `}`
 } else if ((match = fnReV118.exec(src))) {
   shape = 'v118'
@@ -957,25 +957,42 @@ if (match) {
     console.error(`ERROR: v118 pattern matched ${duplicates.length} times. Aborting.`)
     process.exit(1)
   }
-  const [, fnName, H, Bu_, flagUserNotEmpty, qRemote, hH_, QD9_, flagRemoteNotEmpty, flagScrub, LO1_, merged, T, D_1] = match
+  const [
+    ,
+    fnName,
+    H,
+    Bu_,
+    flagUserNotEmpty,
+    qRemote,
+    hH_,
+    QD9_,
+    flagRemoteNotEmpty,
+    flagScrub,
+    LO1_,
+    merged,
+    T,
+    D_1
+  ] = match
   full = match[0]
   console.log(`Found ${fnName}() [v118 shape] at char ${match.index}`)
-  console.log(`  locals: H=${H} Bu_=${Bu_} _=${flagUserNotEmpty} q=${qRemote} hH=${hH_} QD9=${QD9_} K=${flagRemoteNotEmpty} O=${flagScrub} LO1=${LO1_} $=${merged} A=${T} NO1=${D_1}`)
+  console.log(
+    `  locals: H=${H} Bu_=${Bu_} _=${flagUserNotEmpty} q=${qRemote} hH=${hH_} QD9=${QD9_} K=${flagRemoteNotEmpty} O=${flagScrub} LO1=${LO1_} $=${merged} A=${T} NO1=${D_1}`
+  )
 
   newFn =
     MARKER +
     `function ${fnName}(){` +
-      stripHelperDecl +
-      `let ${H}=${Bu_}(),` +
-          `${flagUserNotEmpty}=Object.keys(${H}).length>0,` +
-          `${qRemote}=${hH_}(process.env.CLAUDE_CODE_REMOTE)?${QD9_}(${flagUserNotEmpty}?{...process.env,...${H}}:process.env):{},` +
-          `${flagRemoteNotEmpty}=Object.keys(${qRemote}).length>0,` +
-          `${flagScrub}=${LO1_}();` +
-      `if(!${flagUserNotEmpty}&&!${flagRemoteNotEmpty}&&!${flagScrub}&&!0)return ${stripHelperName}(process.env);` +
-      `let ${merged}={...process.env,...${H},...${qRemote}};` +
-      `if(!${flagScrub})return ${stripHelperName}(${merged});` +
-      `for(let ${T} of ${D_1})delete ${merged}[${T}],delete ${merged}[\`INPUT_\${${T}}\`];` +
-      `return ${stripHelperName}(${merged})` +
+    stripHelperDecl +
+    `let ${H}=${Bu_}(),` +
+    `${flagUserNotEmpty}=Object.keys(${H}).length>0,` +
+    `${qRemote}=${hH_}(process.env.CLAUDE_CODE_REMOTE)?${QD9_}(${flagUserNotEmpty}?{...process.env,...${H}}:process.env):{},` +
+    `${flagRemoteNotEmpty}=Object.keys(${qRemote}).length>0,` +
+    `${flagScrub}=${LO1_}();` +
+    `if(!${flagUserNotEmpty}&&!${flagRemoteNotEmpty}&&!${flagScrub}&&!0)return ${stripHelperName}(process.env);` +
+    `let ${merged}={...process.env,...${H},...${qRemote}};` +
+    `if(!${flagScrub})return ${stripHelperName}(${merged});` +
+    `for(let ${T} of ${D_1})delete ${merged}[${T}],delete ${merged}[\`INPUT_\${${T}}\`];` +
+    `return ${stripHelperName}(${merged})` +
     `}`
 } else if ((match = fnReV114.exec(src))) {
   shape = 'v114'
@@ -987,21 +1004,25 @@ if (match) {
   const [, fnName, H, QE_, flagNotEmpty, flagScrub, Y_1_, O, T, D_1] = match
   full = match[0]
   console.log(`Found ${fnName}() [v114 shape] at char ${match.index}`)
-  console.log(`  locals: H=${H} QE_=${QE_} _=${flagNotEmpty} q=${flagScrub} Y_1=${Y_1_} O=${O} T=${T} D_1=${D_1}`)
+  console.log(
+    `  locals: H=${H} QE_=${QE_} _=${flagNotEmpty} q=${flagScrub} Y_1=${Y_1_} O=${O} T=${T} D_1=${D_1}`
+  )
 
   newFn =
     MARKER +
     `function ${fnName}(){` +
-      stripHelperDecl +
-      `let ${H}=${QE_}(),${flagNotEmpty}=Object.keys(${H}).length>0,${flagScrub}=${Y_1_}();` +
-      `if(!${flagNotEmpty}&&!${flagScrub}&&!0)return ${stripHelperName}(process.env);` +
-      `let ${O}={...process.env,...${H}};` +
-      `if(!${flagScrub})return ${stripHelperName}(${O});` +
-      `for(let ${T} of ${D_1})delete ${O}[${T}],delete ${O}[\`INPUT_\${${T}}\`];` +
-      `return ${stripHelperName}(${O})` +
+    stripHelperDecl +
+    `let ${H}=${QE_}(),${flagNotEmpty}=Object.keys(${H}).length>0,${flagScrub}=${Y_1_}();` +
+    `if(!${flagNotEmpty}&&!${flagScrub}&&!0)return ${stripHelperName}(process.env);` +
+    `let ${O}={...process.env,...${H}};` +
+    `if(!${flagScrub})return ${stripHelperName}(${O});` +
+    `for(let ${T} of ${D_1})delete ${O}[${T}],delete ${O}[\`INPUT_\${${T}}\`];` +
+    `return ${stripHelperName}(${O})` +
     `}`
 } else {
-  console.error('ERROR: Cannot locate env-builder function by v114, v118, v119, v129, v143, v150, v163, or v170 structural shape.')
+  console.error(
+    'ERROR: Cannot locate env-builder function by v114, v118, v119, v129, v143, v150, v163, or v170 structural shape.'
+  )
   console.error('The function may have been refactored by upstream. Re-run bundle-analyzer.')
   process.exit(1)
 }

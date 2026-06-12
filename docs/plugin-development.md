@@ -110,12 +110,12 @@ The `package.json` must contain a `claudeui` object with `plugin: true`:
 }
 ```
 
-| Field | Required | Default | Description |
-|-------|----------|---------|-------------|
-| `claudeui.plugin` | Yes | — | Must be `true` to be recognized as a plugin |
-| `claudeui.displayName` | No | `name` field | Human-readable name shown in plugin listings |
-| `claudeui.description` | No | — | Short description |
-| `claudeui.entryPoint` | No | `"dist/index.js"` | Path to main JS file, relative to plugin dir |
+| Field                  | Required | Default           | Description                                  |
+| ---------------------- | -------- | ----------------- | -------------------------------------------- |
+| `claudeui.plugin`      | Yes      | —                 | Must be `true` to be recognized as a plugin  |
+| `claudeui.displayName` | No       | `name` field      | Human-readable name shown in plugin listings |
+| `claudeui.description` | No       | —                 | Short description                            |
+| `claudeui.entryPoint`  | No       | `"dist/index.js"` | Path to main JS file, relative to plugin dir |
 
 ---
 
@@ -134,8 +134,12 @@ interface ClaudeUIPlugin {
 
 ```js
 module.exports = {
-  activate(ctx) { /* ... */ },
-  deactivate() { /* ... */ }
+  activate(ctx) {
+    /* ... */
+  },
+  deactivate() {
+    /* ... */
+  }
 }
 ```
 
@@ -143,8 +147,12 @@ module.exports = {
 
 ```typescript
 export default {
-  activate(ctx: PluginContext) { /* ... */ },
-  deactivate() { /* ... */ }
+  activate(ctx: PluginContext) {
+    /* ... */
+  },
+  deactivate() {
+    /* ... */
+  }
 }
 ```
 
@@ -159,11 +167,11 @@ The `PluginContext` object is passed to `activate()` and is your plugin's gatewa
 ### Identity & Paths
 
 ```typescript
-ctx.id         // string — plugin ID (directory name)
-ctx.pluginDir  // string — absolute path to plugin directory
-ctx.dataDir    // string — ~/.claude/ui/plugins/<id>/data/ (auto-created)
-ctx.configDir  // string — same as pluginDir
-ctx.debug      // boolean — true if CLAUDEUI_PLUGIN_DEBUG=1 env var is set
+ctx.id // string — plugin ID (directory name)
+ctx.pluginDir // string — absolute path to plugin directory
+ctx.dataDir // string — ~/.claude/ui/plugins/<id>/data/ (auto-created)
+ctx.configDir // string — same as pluginDir
+ctx.debug // boolean — true if CLAUDEUI_PLUGIN_DEBUG=1 env var is set
 ```
 
 **`dataDir`** is created automatically on activation. Use it for persistent storage (databases, caches, state files). It survives plugin reloads and app restarts.
@@ -178,6 +186,7 @@ ctx.logger.debug('Received message payload')
 ```
 
 All messages are prefixed with `[plugin:<id>]` and written to:
+
 - The Electron main process console
 - `~/.claude/ui/logs/YYYYMMDD.log` (same file as core ClaudeUI logs)
 
@@ -186,10 +195,10 @@ Debug messages are only shown when the log level is set to `debug` (via `CLAUDE_
 ### Core Services
 
 ```typescript
-ctx.sessions     // SessionManager — manage Claude sessions
-ctx.automations  // AutomationManager — manage scheduled automations
-ctx.window       // BrowserWindow — the main Electron window
-ctx.ipcMain      // Electron.ipcMain — raw IPC for advanced use cases
+ctx.sessions // SessionManager — manage Claude sessions
+ctx.automations // AutomationManager — manage scheduled automations
+ctx.window // BrowserWindow — the main Electron window
+ctx.ipcMain // Electron.ipcMain — raw IPC for advanced use cases
 ```
 
 #### SessionManager
@@ -205,12 +214,12 @@ ctx.sessions.has(routingId)
 
 // Create a new session
 const session = ctx.sessions.create(
-  routingId,      // unique ID (string)
-  ctx.window,     // BrowserWindow
+  routingId, // unique ID (string)
+  ctx.window, // BrowserWindow
   '/path/to/cwd', // working directory
-  'high',         // effort level (optional): 'low' | 'medium' | 'high'
-  undefined,      // resumeSessionId (optional)
-  'auto',         // permission mode (optional): 'default' | 'acceptEdits' | 'plan' | 'auto'
+  'high', // effort level (optional): 'low' | 'medium' | 'high'
+  undefined, // resumeSessionId (optional)
+  'auto', // permission mode (optional): 'default' | 'acceptEdits' | 'plan' | 'auto'
   'claude-sonnet-4-6' // model (optional)
 )
 
@@ -222,7 +231,9 @@ ctx.sessions.cancel(routingId)
 await ctx.sessions.interrupt(routingId)
 
 // Iterate all sessions
-ctx.sessions.forEach((session) => { /* ... */ })
+ctx.sessions.forEach((session) => {
+  /* ... */
+})
 ```
 
 **Important:** Sessions created by plugins are real SDK sessions. They consume API credits, trigger approval flows, and appear in the UI. Be thoughtful about when to create them.
@@ -303,10 +314,10 @@ Register a UI view that appears as a sidebar item and replaces the chat panel wh
 
 ```typescript
 ctx.registerView({
-  label: 'My Dashboard',       // sidebar label
-  htmlFile: 'dist/view.html',  // relative to plugin dir, or absolute path
-  icon: '<svg width="15" height="15" ...>...</svg>',  // optional SVG for sidebar
-  id: 'dashboard'              // optional, defaults to plugin ID
+  label: 'My Dashboard', // sidebar label
+  htmlFile: 'dist/view.html', // relative to plugin dir, or absolute path
+  icon: '<svg width="15" height="15" ...>...</svg>', // optional SVG for sidebar
+  id: 'dashboard' // optional, defaults to plugin ID
 })
 ```
 
@@ -387,11 +398,13 @@ module.exports = {
 
   connectInBackground(ctx) {
     // This runs after activation completes
-    someSlowConnection().then(() => {
-      ctx.logger.info('Connected!')
-    }).catch((err) => {
-      ctx.logger.error('Connection failed', err)
-    })
+    someSlowConnection()
+      .then(() => {
+        ctx.logger.info('Connected!')
+      })
+      .catch((err) => {
+        ctx.logger.error('Connection failed', err)
+      })
   }
 }
 ```
@@ -434,6 +447,7 @@ await window.api.reloadPlugin('my-plugin')
 ```
 
 The reload process:
+
 1. `deactivate()` is called on the old instance
 2. All tracked resources are cleaned up
 3. `require.cache` is cleared for all files under the plugin directory
@@ -442,6 +456,7 @@ The reload process:
 6. The sidebar updates to reflect any view changes
 
 **Caveats:**
+
 - Only files under the plugin directory are cleared from `require.cache`. If your plugin `require()`s files from `node_modules` outside the plugin dir, those modules won't be reloaded.
 - Any state stored outside the plugin object (global variables, module-level caches) will persist if the module isn't in the plugin directory.
 
@@ -462,31 +477,31 @@ During app shutdown (`before-quit`):
 
 These events fire for every active Claude session. All handlers receive a single object with `{ routingId: string, sessionId: string | null, ...eventData }` (see ADR-005).
 
-| Event | Data | Description |
-|-------|------|-------------|
-| `session:message` | `ChatMessage` | Assistant or user message (upserts by ID) |
-| `session:stream` | `{ type: 'text' \| 'thinking', text: string }` | Streaming text delta |
-| `session:status` | `{ state: string, ... }` | Session state change (active, idle, etc.) |
-| `session:result` | `{ costUsd, durationMs, ... }` | Turn completed with cost info |
-| `session:error` | `string` | Error message |
-| `session:approval-request` | `PendingApproval` | Tool use requires user approval |
-| `session:tool-result` | `{ toolUseId, result, isError }` | Tool execution result |
-| `session:task-progress` | `{ toolUseId, content }` | Background task progress update |
-| `session:task-notification` | `TaskNotification` | Background task completed/failed |
-| `session:subagent-message` | `{ toolUseId, message }` | Subagent sent a message |
-| `session:subagent-stream` | `{ toolUseId, type, text }` | Subagent streaming delta |
-| `session:subagent-tool-result` | `{ toolUseId, ... }` | Subagent tool result |
-| `session:background-output` | `{ toolUseId, tail, totalSize, done }` | Background task output chunk |
-| `session:permission-mode` | `string` | Permission mode changed |
-| `session:slash-commands` | `SlashCommandInfo[]` | Available slash commands updated |
-| `session:skills` | `string[]` | Available skill names updated |
-| `session:mcp-servers` | `McpServerInfo[]` | MCP server status updated |
-| `session:status-line` | `StatusLineData` | Status line metrics updated |
-| `session:teammate-detected` | `TeammateInfo` | New teammate/subagent detected |
-| `session:team-created` | `{ teamName }` | Team created |
-| `session:team-deleted` | `{}` | Team deleted |
-| `session:sandbox-violation` | `string` | Sandbox violation detected |
-| `session:steer-consumed` | `{ prompt }` | Steer/queue command consumed |
+| Event                          | Data                                           | Description                               |
+| ------------------------------ | ---------------------------------------------- | ----------------------------------------- |
+| `session:message`              | `ChatMessage`                                  | Assistant or user message (upserts by ID) |
+| `session:stream`               | `{ type: 'text' \| 'thinking', text: string }` | Streaming text delta                      |
+| `session:status`               | `{ state: string, ... }`                       | Session state change (active, idle, etc.) |
+| `session:result`               | `{ costUsd, durationMs, ... }`                 | Turn completed with cost info             |
+| `session:error`                | `string`                                       | Error message                             |
+| `session:approval-request`     | `PendingApproval`                              | Tool use requires user approval           |
+| `session:tool-result`          | `{ toolUseId, result, isError }`               | Tool execution result                     |
+| `session:task-progress`        | `{ toolUseId, content }`                       | Background task progress update           |
+| `session:task-notification`    | `TaskNotification`                             | Background task completed/failed          |
+| `session:subagent-message`     | `{ toolUseId, message }`                       | Subagent sent a message                   |
+| `session:subagent-stream`      | `{ toolUseId, type, text }`                    | Subagent streaming delta                  |
+| `session:subagent-tool-result` | `{ toolUseId, ... }`                           | Subagent tool result                      |
+| `session:background-output`    | `{ toolUseId, tail, totalSize, done }`         | Background task output chunk              |
+| `session:permission-mode`      | `string`                                       | Permission mode changed                   |
+| `session:slash-commands`       | `SlashCommandInfo[]`                           | Available slash commands updated          |
+| `session:skills`               | `string[]`                                     | Available skill names updated             |
+| `session:mcp-servers`          | `McpServerInfo[]`                              | MCP server status updated                 |
+| `session:status-line`          | `StatusLineData`                               | Status line metrics updated               |
+| `session:teammate-detected`    | `TeammateInfo`                                 | New teammate/subagent detected            |
+| `session:team-created`         | `{ teamName }`                                 | Team created                              |
+| `session:team-deleted`         | `{}`                                           | Team deleted                              |
+| `session:sandbox-violation`    | `string`                                       | Sandbox violation detected                |
+| `session:steer-consumed`       | `{ prompt }`                                   | Steer/queue command consumed              |
 
 **Example — listening to all assistant messages:**
 
@@ -517,18 +532,18 @@ for (const msg of messages) {
 
 These events fire for automation runs. Handlers receive the data directly (no routingId prefix).
 
-| Event | Data | Description |
-|-------|------|-------------|
-| `automation:run-update` | `{ automationId, run }` | Automation run status changed |
-| `automation:run-message` | `{ automationId, message }` | Message from automation run |
-| `automation:stream-event` | `{ automationId, type, text }` | Streaming output from automation |
-| `automation:processing` | `{ automationId, isProcessing }` | Processing state changed |
-| `automation:changed` | `Automation[]` | Automation list changed |
+| Event                     | Data                             | Description                      |
+| ------------------------- | -------------------------------- | -------------------------------- |
+| `automation:run-update`   | `{ automationId, run }`          | Automation run status changed    |
+| `automation:run-message`  | `{ automationId, message }`      | Message from automation run      |
+| `automation:stream-event` | `{ automationId, type, text }`   | Streaming output from automation |
+| `automation:processing`   | `{ automationId, isProcessing }` | Processing state changed         |
+| `automation:changed`      | `Automation[]`                   | Automation list changed          |
 
 ### Plugin Lifecycle Events
 
-| Event | Data | Description |
-|-------|------|-------------|
+| Event               | Data   | Description                  |
+| ------------------- | ------ | ---------------------------- |
 | `plugin:all-loaded` | (none) | All plugins finished loading |
 
 ---
@@ -544,7 +559,7 @@ module.exports = {
   activate(ctx) {
     ctx.registerView({
       label: 'My Dashboard',
-      htmlFile: 'dist/view.html',  // relative to plugin directory
+      htmlFile: 'dist/view.html', // relative to plugin directory
       icon: `<svg width="15" height="15" viewBox="0 0 24 24" fill="none"
                stroke="currentColor" strokeWidth="1.8">
                <rect x="3" y="3" width="18" height="18" rx="2"/>
@@ -563,38 +578,38 @@ Your HTML file is loaded via `file://` protocol in an Electron webview. It has a
 ```html
 <!DOCTYPE html>
 <html>
-<head>
-  <meta charset="UTF-8">
-  <title>My Plugin</title>
-  <style>
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-      background: #1a1a2e;
-      color: #e0e0e0;
-      margin: 0;
-      padding: 16px;
-    }
-  </style>
-</head>
-<body>
-  <h2>My Plugin Dashboard</h2>
-  <div id="status">Loading...</div>
+  <head>
+    <meta charset="UTF-8" />
+    <title>My Plugin</title>
+    <style>
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        background: #1a1a2e;
+        color: #e0e0e0;
+        margin: 0;
+        padding: 16px;
+      }
+    </style>
+  </head>
+  <body>
+    <h2>My Plugin Dashboard</h2>
+    <div id="status">Loading...</div>
 
-  <script>
-    // pluginApi is injected by ClaudeUI's plugin preload
-    async function init() {
-      const status = await window.pluginApi.invoke('get-status')
-      document.getElementById('status').textContent = JSON.stringify(status)
-    }
+    <script>
+      // pluginApi is injected by ClaudeUI's plugin preload
+      async function init() {
+        const status = await window.pluginApi.invoke('get-status')
+        document.getElementById('status').textContent = JSON.stringify(status)
+      }
 
-    // Listen for real-time updates
-    window.pluginApi.on('status-update', (data) => {
-      document.getElementById('status').textContent = JSON.stringify(data)
-    })
+      // Listen for real-time updates
+      window.pluginApi.on('status-update', (data) => {
+        document.getElementById('status').textContent = JSON.stringify(data)
+      })
 
-    init()
-  </script>
-</body>
+      init()
+    </script>
+  </body>
 </html>
 ```
 
@@ -648,6 +663,7 @@ ClaudeUI has a built-in log viewer window that captures **all** log output in on
 - **Programmatically:** `window.api.openLogViewer()` from the renderer
 
 The log viewer is a standalone window — it survives main window refreshes and page reloads. Features:
+
 - Color-coded log levels (debug, info, warn, error)
 - Source-based coloring (main process = purple, renderer = orange, plugins = cyan)
 - Level filter toggle buttons
@@ -674,6 +690,7 @@ CLAUDEUI_PLUGIN_TRACE=1 electron .
 ```
 
 This produces output like:
+
 ```
 [plugin-manager] [trace] session:message {"role":"assistant"...}
 [plugin-manager] [trace] emit plugin:my-plugin:status-changed
@@ -709,6 +726,7 @@ activate(ctx) {
 ### Activation Timeout
 
 Your `activate()` must complete within **10 seconds**. If it doesn't:
+
 - The plugin is marked as failed
 - All resources registered during the partial activation are cleaned up
 - The error is logged
@@ -730,6 +748,7 @@ d.dispose()
 ### IPC Handler Uniqueness
 
 `ipcMain.handle()` throws if you register the same channel twice. This is handled by the plugin system:
+
 - On reload, old handlers are disposed before new ones are registered
 - If two plugins try to register the same un-namespaced channel name, namespacing prevents collision (`plugin:a:status` vs `plugin:b:status`)
 
@@ -877,44 +896,44 @@ module.exports = {
 ```html
 <!DOCTYPE html>
 <html>
-<head>
-  <meta charset="UTF-8">
-  <style>
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-      background: #16163a;
-      color: #c8c8d4;
-      margin: 0;
-      padding: 24px;
-    }
-    .count {
-      font-size: 48px;
-      font-weight: bold;
-      color: #7c6fe0;
-      margin: 24px 0;
-    }
-    .label {
-      font-size: 14px;
-      color: #8888a0;
-    }
-  </style>
-</head>
-<body>
-  <div class="label">Messages logged</div>
-  <div class="count" id="count">...</div>
+  <head>
+    <meta charset="UTF-8" />
+    <style>
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        background: #16163a;
+        color: #c8c8d4;
+        margin: 0;
+        padding: 24px;
+      }
+      .count {
+        font-size: 48px;
+        font-weight: bold;
+        color: #7c6fe0;
+        margin: 24px 0;
+      }
+      .label {
+        font-size: 14px;
+        color: #8888a0;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="label">Messages logged</div>
+    <div class="count" id="count">...</div>
 
-  <script>
-    async function load() {
-      const { count } = await window.pluginApi.invoke('get-count')
-      document.getElementById('count').textContent = count
-    }
+    <script>
+      async function load() {
+        const { count } = await window.pluginApi.invoke('get-count')
+        document.getElementById('count').textContent = count
+      }
 
-    window.pluginApi.on('count-updated', ({ count }) => {
-      document.getElementById('count').textContent = count
-    })
+      window.pluginApi.on('count-updated', ({ count }) => {
+        document.getElementById('count').textContent = count
+      })
 
-    load()
-  </script>
-</body>
+      load()
+    </script>
+  </body>
 </html>
 ```

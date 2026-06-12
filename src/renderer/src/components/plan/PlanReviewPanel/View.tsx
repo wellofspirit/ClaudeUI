@@ -27,7 +27,7 @@ export function PlanReviewPanelView({
   onClose,
   onSaveComment,
   onUpdateComment,
-  onRemoveComment,
+  onRemoveComment
 }: PlanReviewPanelViewProps): React.JSX.Element {
   const contentRef = useRef<HTMLDivElement>(null)
   const panelRef = useRef<HTMLDivElement>(null)
@@ -57,10 +57,13 @@ export function PlanReviewPanelView({
     window.getSelection()?.removeAllRanges()
   }, [selection, clearSelection])
 
-  const handleSaveComment = useCallback((comment: PlanComment) => {
-    onSaveComment(comment)
-    setCommentingSelection(null)
-  }, [onSaveComment])
+  const handleSaveComment = useCallback(
+    (comment: PlanComment) => {
+      onSaveComment(comment)
+      setCommentingSelection(null)
+    },
+    [onSaveComment]
+  )
 
   const tooltipStyle = useMemo(() => {
     if (!selection || !panelRef.current) return undefined
@@ -75,7 +78,11 @@ export function PlanReviewPanelView({
   }, [selection, uiFontScale])
 
   return (
-    <div ref={panelRef} style={style} className="h-full flex flex-col bg-bg-primary border-l border-border relative">
+    <div
+      ref={panelRef}
+      style={style}
+      className="h-full flex flex-col bg-bg-primary border-l border-border relative"
+    >
       <div className="shrink-0 flex items-center justify-between px-4 h-12 border-b border-border">
         <span className="text-[13px] font-medium text-text-primary">Plan Review</span>
         <button
@@ -83,7 +90,15 @@ export function PlanReviewPanelView({
           className="w-6 h-6 flex items-center justify-center rounded text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
           title="Close"
         >
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+          <svg
+            width="12"
+            height="12"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+          >
             <path d="M18 6L6 18M6 6l12 12" />
           </svg>
         </button>
@@ -128,7 +143,16 @@ export function PlanReviewPanelView({
             onClick={handleStartComment}
             className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md bg-accent text-white text-[11px] font-medium shadow-lg hover:bg-accent/90 transition-colors cursor-default"
           >
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <svg
+              width="12"
+              height="12"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
               <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
             </svg>
             Comment

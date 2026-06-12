@@ -54,14 +54,15 @@ export function buildTodosFromMessages(messages: ChatMessage[]): TodoItem[] | nu
   for (const msg of messages) {
     if (msg.role !== 'assistant') continue
     for (const block of msg.content) {
-      if (block.type !== 'tool_use' || !block.toolName || !TASK_TOOL_NAMES.has(block.toolName)) continue
+      if (block.type !== 'tool_use' || !block.toolName || !TASK_TOOL_NAMES.has(block.toolName))
+        continue
       const input = block.toolInput || {}
 
       if (block.toolName === 'TodoWrite') {
         hasTaskCalls = true
         tasks.clear()
         if (Array.isArray(input.todos)) {
-          (input.todos as Record<string, unknown>[]).forEach((t, i) => {
+          ;(input.todos as Record<string, unknown>[]).forEach((t, i) => {
             tasks.set(String(i), {
               content: String(t.content || ''),
               status: (t.status as TodoItem['status']) || 'pending',
@@ -80,7 +81,8 @@ export function buildTodosFromMessages(messages: ChatMessage[]): TodoItem[] | nu
         const resultBlock = msg.content.find(
           (b) => b.type === 'tool_result' && b.toolUseId === block.toolUseId
         )
-        const idMatch = resultBlock?.type === 'tool_result' ? resultBlock.toolResult.match(/Task #(\w+)/) : null
+        const idMatch =
+          resultBlock?.type === 'tool_result' ? resultBlock.toolResult.match(/Task #(\w+)/) : null
         const id = idMatch ? idMatch[1] : block.toolUseId || String(tasks.size)
         tasks.set(id, {
           content: String(input.subject || ''),
@@ -130,7 +132,7 @@ export interface AppSettings {
   statusLineTemplate: string
   gitPanelLayout: 'single' | 'double'
   gitCommitMode: 'commit' | 'commit-push'
-  usageRefreshSecs: number   // how often to call the /usage API (background poll)
+  usageRefreshSecs: number // how often to call the /usage API (background poll)
   analyticsRefreshSecs: number // how often to recalculate token analytics from JSONL changes
   sessionTimeoutMins: number // 0 = never auto-disconnect
   remoteFollowActions: boolean // follow remote client's session switches & messages
@@ -260,7 +262,10 @@ type PersistedSessionFields = {
  * Pass the pre-change state + a patch of just the fields that changed — the helper
  * merges them so unrelated fields are never dropped from the saved file.
  */
-function saveSessionConfig(state: PersistedSessionFields, patch?: Partial<PersistedSessionFields>): void {
+function saveSessionConfig(
+  state: PersistedSessionFields,
+  patch?: Partial<PersistedSessionFields>
+): void {
   const merged: PersistedSessionFields = { ...state, ...patch }
   window.api.saveSessionConfig({
     recentSessions: merged.recentSessionIds,
@@ -307,37 +312,38 @@ export async function hydrateConfigFromDisk(): Promise<void> {
   }
 
   const saved = savedSettings as Partial<AppSettings>
-  const settings: AppSettings = Object.keys(saved).length > 0
-    ? {
-        ...DEFAULT_SETTINGS,
-        ...saved,
-        // Deep-merge nested objects so new fields get defaults even if parent was persisted
-        sandbox: {
-          ...DEFAULT_SETTINGS.sandbox,
-          ...saved.sandbox,
-          filesystem: {
-            ...DEFAULT_SETTINGS.sandbox.filesystem,
-            ...saved.sandbox?.filesystem
+  const settings: AppSettings =
+    Object.keys(saved).length > 0
+      ? {
+          ...DEFAULT_SETTINGS,
+          ...saved,
+          // Deep-merge nested objects so new fields get defaults even if parent was persisted
+          sandbox: {
+            ...DEFAULT_SETTINGS.sandbox,
+            ...saved.sandbox,
+            filesystem: {
+              ...DEFAULT_SETTINGS.sandbox.filesystem,
+              ...saved.sandbox?.filesystem
+            },
+            network: {
+              ...DEFAULT_SETTINGS.sandbox.network,
+              ...saved.sandbox?.network
+            }
           },
-          network: {
-            ...DEFAULT_SETTINGS.sandbox.network,
-            ...saved.sandbox?.network
+          proxy: {
+            ...DEFAULT_SETTINGS.proxy,
+            ...saved.proxy
+          },
+          anthropicEndpoint: {
+            ...DEFAULT_SETTINGS.anthropicEndpoint,
+            ...saved.anthropicEndpoint
+          },
+          modelOverride: {
+            ...DEFAULT_SETTINGS.modelOverride,
+            ...saved.modelOverride
           }
-        },
-        proxy: {
-          ...DEFAULT_SETTINGS.proxy,
-          ...saved.proxy
-        },
-        anthropicEndpoint: {
-          ...DEFAULT_SETTINGS.anthropicEndpoint,
-          ...saved.anthropicEndpoint
-        },
-        modelOverride: {
-          ...DEFAULT_SETTINGS.modelOverride,
-          ...saved.modelOverride
         }
-      }
-    : DEFAULT_SETTINGS
+      : DEFAULT_SETTINGS
 
   // Validate voiceLanguage — unsupported codes (e.g. 'zh' removed in v0.2.97) fall back to 'en'
   if (settings.voiceLanguage && !VOICE_LANGUAGES.some((l) => l.code === settings.voiceLanguage)) {
@@ -377,7 +383,8 @@ function cleanupEmptySession(
   const session = sessions[routingId]
   if (!session) return { sessions, recentSessionIds }
   // Only clean up sessions with no messages and no active SDK
-  if (session.messages.length > 0 || session.sdkActive || session.draftText) return { sessions, recentSessionIds }
+  if (session.messages.length > 0 || session.sdkActive || session.draftText)
+    return { sessions, recentSessionIds }
   const { [routingId]: _, ...rest } = sessions
   return {
     sessions: rest,
@@ -434,7 +441,12 @@ export interface PerSessionState {
   gitStatus: GitStatusData | null
   gitBranches: GitBranchData | null
   gitSelectedFile: string | null
-  gitFileDiff: { patch: string; isBinary?: boolean; oldContent?: string; newContent?: string } | null
+  gitFileDiff: {
+    patch: string
+    isBinary?: boolean
+    oldContent?: string
+    newContent?: string
+  } | null
   gitCommitMessage: string
   gitFileFilter: 'staged' | 'unstaged' | 'all'
   gitReviewComments: DiffComment[]
@@ -604,7 +616,15 @@ interface SessionState {
   showWelcome: () => void
   switchSession: (routingId: string) => void
   createNewSession: (routingId: string, cwd: string, switchTo?: boolean) => void
-  loadHistoricalSession: (routingId: string, messages: ChatMessage[], cwd: string, taskNotifications?: TaskNotification[], subagentMessages?: Record<string, ChatMessage[]>, statusLine?: StatusLineData | null, warnings?: string[]) => void
+  loadHistoricalSession: (
+    routingId: string,
+    messages: ChatMessage[],
+    cwd: string,
+    taskNotifications?: TaskNotification[],
+    subagentMessages?: Record<string, ChatMessage[]>,
+    statusLine?: StatusLineData | null,
+    warnings?: string[]
+  ) => void
   /** Fork ("branch off") a new session from an assistant message in `sourceRoutingId`.
    *  Resolves the disk anchor, seeds the new session with messages 1..N, and
    *  switches to it. The branch materializes on cli.js on first prompt send.
@@ -628,7 +648,13 @@ interface SessionState {
 
   // Per-session actions (all take routingId)
   addMessage: (routingId: string, message: ChatMessage) => void
-  addUserMessage: (routingId: string, id: string, text: string, planContent?: string, attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>) => void
+  addUserMessage: (
+    routingId: string,
+    id: string,
+    text: string,
+    planContent?: string,
+    attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
+  ) => void
   appendStreamingText: (routingId: string, text: string) => void
   appendStreamingThinking: (routingId: string, text: string) => void
   clearStreamingText: (routingId: string) => void
@@ -661,15 +687,39 @@ interface SessionState {
   setTodos: (routingId: string, todos: TodoItem[]) => void
   updateTaskProgress: (routingId: string, progress: TaskProgress) => void
   addTaskNotification: (routingId: string, notification: TaskNotification) => void
-  bulkSetSubagentMessages: (routingId: string, subagentMessages: Record<string, ChatMessage[]>) => void
+  bulkSetSubagentMessages: (
+    routingId: string,
+    subagentMessages: Record<string, ChatMessage[]>
+  ) => void
   addSubagentMessage: (routingId: string, toolUseId: string, message: ChatMessage) => void
-  appendSubagentMessageBatch: (routingId: string, toolUseId: string, messages: ChatMessage[]) => void
+  appendSubagentMessageBatch: (
+    routingId: string,
+    toolUseId: string,
+    messages: ChatMessage[]
+  ) => void
   appendSubagentStreamingText: (routingId: string, toolUseId: string, text: string) => void
   appendSubagentStreamingThinking: (routingId: string, toolUseId: string, text: string) => void
-  appendSubagentToolResult: (routingId: string, toolUseId: string, toolResultToolUseId: string, result: string, isError: boolean) => void
-  setBashOutput: (routingId: string, toolUseId: string, output: string, totalLines: number, totalBytes: number) => void
+  appendSubagentToolResult: (
+    routingId: string,
+    toolUseId: string,
+    toolResultToolUseId: string,
+    result: string,
+    isError: boolean
+  ) => void
+  setBashOutput: (
+    routingId: string,
+    toolUseId: string,
+    output: string,
+    totalLines: number,
+    totalBytes: number
+  ) => void
   clearBashOutput: (routingId: string, toolUseId: string) => void
-  setBackgroundOutput: (routingId: string, toolUseId: string, tail: string, totalSize: number) => void
+  setBackgroundOutput: (
+    routingId: string,
+    toolUseId: string,
+    tail: string,
+    totalSize: number
+  ) => void
   watchBackgroundOutput: (routingId: string, toolUseId: string) => void
   unwatchBackgroundOutput: (routingId: string, toolUseId: string) => void
   openTaskPanel: (routingId: string, toolUseId: string) => void
@@ -679,13 +729,29 @@ interface SessionState {
   clearTaskStopping: (routingId: string, toolUseId: string) => void
   setNeedsAttention: (routingId: string, value: boolean) => void
   setWatching: (routingId: string, watching: boolean) => void
-  updateWatchedSession: (routingId: string, messages: ChatMessage[], taskNotifications: TaskNotification[]) => void
+  updateWatchedSession: (
+    routingId: string,
+    messages: ChatMessage[],
+    taskNotifications: TaskNotification[]
+  ) => void
   updateSettings: (partial: Partial<AppSettings>) => void
   applyExternalSettings: (settings: Record<string, unknown>) => void
-  applyExternalSessionConfig: (config: { recentSessions?: string[]; pinnedSessions?: string[]; customTitles?: Record<string, string>; worktreeInfoMap?: Record<string, WorktreeInfo>; hiddenSessions?: string[]; hiddenProjects?: string[] }) => void
-  applyRemoteSnapshot: (snapshot: import('../../../shared/remote-protocol').FullStateSnapshot) => void
+  applyExternalSessionConfig: (config: {
+    recentSessions?: string[]
+    pinnedSessions?: string[]
+    customTitles?: Record<string, string>
+    worktreeInfoMap?: Record<string, WorktreeInfo>
+    hiddenSessions?: string[]
+    hiddenProjects?: string[]
+  }) => void
+  applyRemoteSnapshot: (
+    snapshot: import('../../../shared/remote-protocol').FullStateSnapshot
+  ) => void
   setPermissionMode: (mode: PermissionMode, routingId?: string) => void
-  setEffort: (effort: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null, routingId?: string) => void
+  setEffort: (
+    effort: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null,
+    routingId?: string
+  ) => void
   setThinkingMode: (mode: 'adaptive' | 'enabled' | 'disabled' | null, routingId?: string) => void
   setStatusLine: (routingId: string, data: StatusLineData) => void
   appendQueuedText: (text: string) => void
@@ -703,13 +769,18 @@ interface SessionState {
   // Worktree actions
   setWorktreeInfo: (routingId: string, info: WorktreeInfo | null) => void
   clearWorktreeInfo: (routingId: string) => void
-  setQuitWorktrees: (sessions: Array<{ routingId: string; worktreeInfo: WorktreeInfo }> | null) => void
+  setQuitWorktrees: (
+    sessions: Array<{ routingId: string; worktreeInfo: WorktreeInfo }> | null
+  ) => void
   // Git actions
   setIsGitRepo: (routingId: string, value: boolean) => void
   setGitStatus: (routingId: string, status: GitStatusData) => void
   setGitBranches: (routingId: string, branches: GitBranchData) => void
   setGitSelectedFile: (routingId: string, filePath: string | null) => void
-  setGitFileDiff: (routingId: string, diff: { patch: string; isBinary?: boolean; oldContent?: string; newContent?: string } | null) => void
+  setGitFileDiff: (
+    routingId: string,
+    diff: { patch: string; isBinary?: boolean; oldContent?: string; newContent?: string } | null
+  ) => void
   setGitCommitMessage: (routingId: string, message: string) => void
   setGitFileFilter: (routingId: string, filter: 'staged' | 'unstaged' | 'all') => void
   selectNextGitFile: (routingId: string) => void
@@ -784,7 +855,11 @@ export const useSessionStore = create<SessionState>((set) => ({
 
   showWelcome: () =>
     set((state) => {
-      const cleaned = cleanupEmptySession(state.sessions, state.recentSessionIds, state.activeSessionId)
+      const cleaned = cleanupEmptySession(
+        state.sessions,
+        state.recentSessionIds,
+        state.activeSessionId
+      )
       if (cleaned.recentSessionIds !== state.recentSessionIds) {
         saveSessionConfig(state, { recentSessionIds: cleaned.recentSessionIds })
       }
@@ -793,7 +868,11 @@ export const useSessionStore = create<SessionState>((set) => ({
 
   switchSession: (routingId) =>
     set((state) => {
-      const cleaned = cleanupEmptySession(state.sessions, state.recentSessionIds, state.activeSessionId)
+      const cleaned = cleanupEmptySession(
+        state.sessions,
+        state.recentSessionIds,
+        state.activeSessionId
+      )
       if (cleaned.recentSessionIds !== state.recentSessionIds) {
         saveSessionConfig(state, { recentSessionIds: cleaned.recentSessionIds })
       }
@@ -807,16 +886,29 @@ export const useSessionStore = create<SessionState>((set) => ({
 
   createNewSession: (routingId, cwd, switchTo = true) =>
     set((state) => {
-      const recentSessionIds = [routingId, ...state.recentSessionIds.filter((id) => id !== routingId)].slice(0, state.settings.maxRecentSessions)
+      const recentSessionIds = [
+        routingId,
+        ...state.recentSessionIds.filter((id) => id !== routingId)
+      ].slice(0, state.settings.maxRecentSessions)
       saveSessionConfig(state, { recentSessionIds })
       return {
-        ...(switchTo ? { activeSessionId: routingId, activeView: { type: 'chat' } as ActiveView } : {}),
+        ...(switchTo
+          ? { activeSessionId: routingId, activeView: { type: 'chat' } as ActiveView }
+          : {}),
         sessions: { ...state.sessions, [routingId]: createEmptySession(cwd) },
         recentSessionIds
       }
     }),
 
-  loadHistoricalSession: (routingId, messages, cwd, taskNotifications?, subagentMessages?, statusLine?, warnings?) =>
+  loadHistoricalSession: (
+    routingId,
+    messages,
+    cwd,
+    taskNotifications?,
+    subagentMessages?,
+    statusLine?,
+    warnings?
+  ) =>
     set((state) => ({
       sessions: {
         ...state.sessions,
@@ -844,10 +936,12 @@ export const useSessionStore = create<SessionState>((set) => ({
     if (!result?.anchorUuid) {
       // The message isn't flushed to the transcript yet (or vanished). Surface
       // it on the source session rather than silently doing nothing.
-      useSessionStore.getState().addError(
-        sourceRoutingId,
-        'Cannot branch from this message yet — it has not been saved to the transcript.'
-      )
+      useSessionStore
+        .getState()
+        .addError(
+          sourceRoutingId,
+          'Cannot branch from this message yet — it has not been saved to the transcript.'
+        )
       return null
     }
     const anchorUuid: string = result.anchorUuid
@@ -895,7 +989,10 @@ export const useSessionStore = create<SessionState>((set) => ({
 
   markSdkActive: (routingId) =>
     set((state) => ({
-      sessions: updateSession(state.sessions, routingId, () => ({ sdkActive: true, isHistorical: false }))
+      sessions: updateSession(state.sessions, routingId, () => ({
+        sdkActive: true,
+        isHistorical: false
+      }))
     })),
 
   markSdkInactive: (routingId) =>
@@ -909,7 +1006,10 @@ export const useSessionStore = create<SessionState>((set) => ({
     set((state) => {
       // Don't add pinned sessions to recents — they have their own section
       if (state.pinnedSessionIds.includes(routingId)) return state
-      const recentSessionIds = [routingId, ...state.recentSessionIds.filter((id) => id !== routingId)].slice(0, state.settings.maxRecentSessions)
+      const recentSessionIds = [
+        routingId,
+        ...state.recentSessionIds.filter((id) => id !== routingId)
+      ].slice(0, state.settings.maxRecentSessions)
       saveSessionConfig(state, { recentSessionIds })
       return { recentSessionIds }
     }),
@@ -945,7 +1045,10 @@ export const useSessionStore = create<SessionState>((set) => ({
   unpinSession: (routingId) =>
     set((state) => {
       const pinnedSessionIds = state.pinnedSessionIds.filter((id) => id !== routingId)
-      const recentSessionIds = [routingId, ...state.recentSessionIds.filter((id) => id !== routingId)].slice(0, state.settings.maxRecentSessions)
+      const recentSessionIds = [
+        routingId,
+        ...state.recentSessionIds.filter((id) => id !== routingId)
+      ].slice(0, state.settings.maxRecentSessions)
       saveSessionConfig(state, { pinnedSessionIds, recentSessionIds })
       return { pinnedSessionIds, recentSessionIds }
     }),
@@ -1003,13 +1106,30 @@ export const useSessionStore = create<SessionState>((set) => ({
       delete sessions[sessionId]
       // Drop the session from its directory group; drop the group itself if now empty
       const directories = state.directories
-        .map((g) => g.sessions.some((s) => s.sessionId === sessionId)
-          ? { ...g, sessions: g.sessions.filter((s) => s.sessionId !== sessionId) }
-          : g)
+        .map((g) =>
+          g.sessions.some((s) => s.sessionId === sessionId)
+            ? { ...g, sessions: g.sessions.filter((s) => s.sessionId !== sessionId) }
+            : g
+        )
         .filter((g) => g.sessions.length > 0)
       const activeSessionId = state.activeSessionId === sessionId ? null : state.activeSessionId
-      saveSessionConfig(state, { recentSessionIds, pinnedSessionIds, hiddenSessionIds, customTitles, worktreeInfoMap })
-      return { recentSessionIds, pinnedSessionIds, hiddenSessionIds, customTitles, worktreeInfoMap, sessions, directories, activeSessionId }
+      saveSessionConfig(state, {
+        recentSessionIds,
+        pinnedSessionIds,
+        hiddenSessionIds,
+        customTitles,
+        worktreeInfoMap
+      })
+      return {
+        recentSessionIds,
+        pinnedSessionIds,
+        hiddenSessionIds,
+        customTitles,
+        worktreeInfoMap,
+        sessions,
+        directories,
+        activeSessionId
+      }
     })
   },
 
@@ -1039,11 +1159,29 @@ export const useSessionStore = create<SessionState>((set) => ({
         delete sessions[id]
       }
       const directories = state.directories.filter((g) => g.projectKey !== projectKey)
-      const activeSessionId = state.activeSessionId && projectSessionIds.has(state.activeSessionId)
-        ? null
-        : state.activeSessionId
-      saveSessionConfig(state, { recentSessionIds, pinnedSessionIds, hiddenSessionIds, hiddenProjectKeys, customTitles, worktreeInfoMap })
-      return { recentSessionIds, pinnedSessionIds, hiddenSessionIds, hiddenProjectKeys, customTitles, worktreeInfoMap, sessions, directories, activeSessionId }
+      const activeSessionId =
+        state.activeSessionId && projectSessionIds.has(state.activeSessionId)
+          ? null
+          : state.activeSessionId
+      saveSessionConfig(state, {
+        recentSessionIds,
+        pinnedSessionIds,
+        hiddenSessionIds,
+        hiddenProjectKeys,
+        customTitles,
+        worktreeInfoMap
+      })
+      return {
+        recentSessionIds,
+        pinnedSessionIds,
+        hiddenSessionIds,
+        hiddenProjectKeys,
+        customTitles,
+        worktreeInfoMap,
+        sessions,
+        directories,
+        activeSessionId
+      }
     })
   },
 
@@ -1053,9 +1191,7 @@ export const useSessionStore = create<SessionState>((set) => ({
       const session = sessions[routingId]
 
       const idx = session.messages.findIndex((m) => m.id === message.id)
-      const hasNonThinking = message.content.some(
-        (b) => b.type === 'text' || b.type === 'tool_use'
-      )
+      const hasNonThinking = message.content.some((b) => b.type === 'text' || b.type === 'tool_use')
       const thinkingUpdate =
         session.thinkingStartedAt && hasNonThinking
           ? {
@@ -1095,16 +1231,29 @@ export const useSessionStore = create<SessionState>((set) => ({
       const session = state.sessions[routingId]
       if (!session) return state
 
-      const recentSessionIds = [routingId, ...state.recentSessionIds.filter((rid) => rid !== routingId)].slice(0, state.settings.maxRecentSessions)
+      const recentSessionIds = [
+        routingId,
+        ...state.recentSessionIds.filter((rid) => rid !== routingId)
+      ].slice(0, state.settings.maxRecentSessions)
       saveSessionConfig(state, { recentSessionIds })
 
       const content: ContentBlock[] = []
       if (attachments && attachments.length > 0) {
         for (const att of attachments) {
           if (att.mediaType === 'application/pdf') {
-            content.push({ type: 'document', mediaType: 'application/pdf', base64Data: att.base64Data, fileName: att.fileName })
+            content.push({
+              type: 'document',
+              mediaType: 'application/pdf',
+              base64Data: att.base64Data,
+              fileName: att.fileName
+            })
           } else {
-            content.push({ type: 'image', mediaType: att.mediaType as 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp', base64Data: att.base64Data, fileName: att.fileName })
+            content.push({
+              type: 'image',
+              mediaType: att.mediaType as 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp',
+              base64Data: att.base64Data,
+              fileName: att.fileName
+            })
           }
         }
       }
@@ -1304,7 +1453,8 @@ export const useSessionStore = create<SessionState>((set) => ({
   retractMessages: (routingId, messageIds) =>
     set((state) => ({
       sessions: updateSession(state.sessions, routingId, (s) => ({
-        messages: messageIds.length > 0 ? s.messages.filter((m) => !messageIds.includes(m.id)) : s.messages,
+        messages:
+          messageIds.length > 0 ? s.messages.filter((m) => !messageIds.includes(m.id)) : s.messages,
         streamingText: '',
         streamingThinking: '',
         thinkingStartedAt: null
@@ -1614,7 +1764,10 @@ export const useSessionStore = create<SessionState>((set) => ({
     set((state) => ({
       sessions: updateSession(state.sessions, routingId, (s) => {
         const updated = s.openedTaskToolUseIds.filter((id) => id !== toolUseId)
-        return { openedTaskToolUseIds: updated, rightPanel: updated.length > 0 ? 'task' as const : 'none' as const }
+        return {
+          openedTaskToolUseIds: updated,
+          rightPanel: updated.length > 0 ? ('task' as const) : ('none' as const)
+        }
       })
     })),
 
@@ -1770,9 +1923,11 @@ export const useSessionStore = create<SessionState>((set) => ({
   setQueuedText: (routingId, text) =>
     set((state) => {
       if (!state.sessions[routingId]) return state
-      return { sessions: updateSession(state.sessions, routingId, (s) => ({
-        queuedText: s.queuedText ? s.queuedText + '\n' + text : text
-      })) }
+      return {
+        sessions: updateSession(state.sessions, routingId, (s) => ({
+          queuedText: s.queuedText ? s.queuedText + '\n' + text : text
+        }))
+      }
     }),
 
   clearQueuedText: () =>
@@ -1852,8 +2007,22 @@ export const useSessionStore = create<SessionState>((set) => ({
         worktreeInfoMap[newId] = worktreeInfoMap[oldId]
         delete worktreeInfoMap[oldId]
       }
-      saveSessionConfig(state, { recentSessionIds, pinnedSessionIds, hiddenSessionIds, customTitles, worktreeInfoMap })
-      return { sessions, activeSessionId, recentSessionIds, pinnedSessionIds, hiddenSessionIds, customTitles, worktreeInfoMap }
+      saveSessionConfig(state, {
+        recentSessionIds,
+        pinnedSessionIds,
+        hiddenSessionIds,
+        customTitles,
+        worktreeInfoMap
+      })
+      return {
+        sessions,
+        activeSessionId,
+        recentSessionIds,
+        pinnedSessionIds,
+        hiddenSessionIds,
+        customTitles,
+        worktreeInfoMap
+      }
     })
   },
 
@@ -1868,7 +2037,6 @@ export const useSessionStore = create<SessionState>((set) => ({
         }
       }
     }),
-
 
   // Worktree actions
   setWorktreeInfo: (routingId, info) =>
@@ -1885,7 +2053,9 @@ export const useSessionStore = create<SessionState>((set) => ({
         sessions: updateSession(state.sessions, routingId, (s) => ({
           worktreeInfo: info,
           // Also update cwd to worktree path so git watcher restarts on the new directory
-          ...(info && info.worktreePath && s.cwd !== info.worktreePath ? { cwd: info.worktreePath } : {})
+          ...(info && info.worktreePath && s.cwd !== info.worktreePath
+            ? { cwd: info.worktreePath }
+            : {})
         }))
       }
     }),
@@ -1948,14 +2118,20 @@ export const useSessionStore = create<SessionState>((set) => ({
     set((state) => {
       const session = state.sessions[routingId]
       if (!session?.gitStatus) {
-        return { sessions: updateSession(state.sessions, routingId, () => ({
-          gitSelectedFile: null, gitFileDiff: null
-        })) }
+        return {
+          sessions: updateSession(state.sessions, routingId, () => ({
+            gitSelectedFile: null,
+            gitFileDiff: null
+          }))
+        }
       }
       const next = session.gitStatus.files[0]?.path ?? null
-      return { sessions: updateSession(state.sessions, routingId, () => ({
-        gitSelectedFile: next, gitFileDiff: null
-      })) }
+      return {
+        sessions: updateSession(state.sessions, routingId, () => ({
+          gitSelectedFile: next,
+          gitFileDiff: null
+        }))
+      }
     }),
 
   openGitPanel: (routingId) =>
@@ -2059,9 +2235,12 @@ export const useSessionStore = create<SessionState>((set) => ({
     set((state) => ({
       sessions: updateSession(state.sessions, routingId, (s) => ({
         planReview: s.planReview
-          ? { ...s.planReview, comments: s.planReview.comments.map((c) =>
-              c.id === commentId ? { ...c, comment: text } : c
-            ) }
+          ? {
+              ...s.planReview,
+              comments: s.planReview.comments.map((c) =>
+                c.id === commentId ? { ...c, comment: text } : c
+              )
+            }
           : null
       }))
     })),
@@ -2078,9 +2257,7 @@ export const useSessionStore = create<SessionState>((set) => ({
   clearPlanComments: (routingId) =>
     set((state) => ({
       sessions: updateSession(state.sessions, routingId, (s) => ({
-        planReview: s.planReview
-          ? { ...s.planReview, comments: [] }
-          : null
+        planReview: s.planReview ? { ...s.planReview, comments: [] } : null
       }))
     })),
 
@@ -2219,7 +2396,7 @@ export const useSessionStore = create<SessionState>((set) => ({
 
 function getActiveCwd(state: SessionState): string | null {
   const id = state.activeSessionId
-  return id ? state.sessions[id]?.cwd ?? null : null
+  return id ? (state.sessions[id]?.cwd ?? null) : null
 }
 
 /** Terminal tabs for the active session's cwd. */
@@ -2268,20 +2445,28 @@ const EMPTY_MESSAGES: ChatMessage[] = []
  * Uses useShallow for shallow equality to avoid infinite re-render loops.
  */
 export function useFocusedAgentData(): FocusedAgentData {
-  return useSessionStore(useShallow((state) => {
-    const id = state.activeSessionId
-    if (!id || !state.sessions[id]) {
-      return { isMain: true, messages: EMPTY_MESSAGES, streamingText: '', streamingThinking: '', thinkingStartedAt: null }
-    }
-    const session = state.sessions[id]
-    return {
-      isMain: true,
-      messages: session.messages,
-      streamingText: session.streamingText,
-      streamingThinking: session.streamingThinking,
-      thinkingStartedAt: session.thinkingStartedAt
-    }
-  }))
+  return useSessionStore(
+    useShallow((state) => {
+      const id = state.activeSessionId
+      if (!id || !state.sessions[id]) {
+        return {
+          isMain: true,
+          messages: EMPTY_MESSAGES,
+          streamingText: '',
+          streamingThinking: '',
+          thinkingStartedAt: null
+        }
+      }
+      const session = state.sessions[id]
+      return {
+        isMain: true,
+        messages: session.messages,
+        streamingText: session.streamingText,
+        streamingThinking: session.streamingThinking,
+        thinkingStartedAt: session.thinkingStartedAt
+      }
+    })
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -2293,28 +2478,31 @@ export function useFocusedAgentData(): FocusedAgentData {
  * Strips UI-only fields (draft text, git diffs, etc.) to keep the payload lean.
  */
 export function getRemoteStateSnapshot(): {
-  sessions: Record<string, {
-    routingId: string
-    cwd: string
-    messages: ChatMessage[]
-    streamingText: string
-    streamingThinking: string
-    status: SessionStatus
-    pendingApprovals: PendingApproval[]
-    todos: TodoItem[]
-    taskNotifications: TaskNotification[]
-    taskProgressMap: Record<string, TaskProgress>
-    subagentMessages: Record<string, ChatMessage[]>
-    subagentStreamingText: Record<string, string>
-    subagentStreamingThinking: Record<string, string>
-    permissionMode: string
-    effort: string
-    thinkingMode: string
-    statusLine: StatusLineData | null
-    slashCommands: SlashCommandInfo[]
-    customCommands: SlashCommandInfo[]
-    sdkSkillNames: string[]
-  }>
+  sessions: Record<
+    string,
+    {
+      routingId: string
+      cwd: string
+      messages: ChatMessage[]
+      streamingText: string
+      streamingThinking: string
+      status: SessionStatus
+      pendingApprovals: PendingApproval[]
+      todos: TodoItem[]
+      taskNotifications: TaskNotification[]
+      taskProgressMap: Record<string, TaskProgress>
+      subagentMessages: Record<string, ChatMessage[]>
+      subagentStreamingText: Record<string, string>
+      subagentStreamingThinking: Record<string, string>
+      permissionMode: string
+      effort: string
+      thinkingMode: string
+      statusLine: StatusLineData | null
+      slashCommands: SlashCommandInfo[]
+      customCommands: SlashCommandInfo[]
+      sdkSkillNames: string[]
+    }
+  >
   directories: DirectoryGroup[]
   activeSessionId: string | null
   settings: Record<string, unknown>

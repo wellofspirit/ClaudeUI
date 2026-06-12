@@ -109,10 +109,12 @@ async function testBackground(t) {
         msg.subtype === 'task_notification' &&
         (bgStreamCount > 0 || bgAssistantCount > 0)
       ) {
-        console.log(`  Background task completed. stream_events=${bgStreamCount}, assistants=${bgAssistantCount}`)
+        console.log(
+          `  Background task completed. stream_events=${bgStreamCount}, assistants=${bgAssistantCount}`
+        )
         setTimeout(() => q.close(), 500)
       }
-    },
+    }
   })
 
   dumpMessages(messages)

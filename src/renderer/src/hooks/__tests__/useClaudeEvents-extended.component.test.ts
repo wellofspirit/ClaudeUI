@@ -8,7 +8,7 @@ import {
   makeSessionStatus,
   makeTodoItem,
   makeTaskNotification,
-  resetFactoryCounter,
+  resetFactoryCounter
 } from '@test/factories/messages'
 import type {
   ChatMessage,
@@ -20,7 +20,7 @@ import type {
   BlockUsageData,
   PluginViewWithOwner,
   VoiceState,
-  WorktreeInfo,
+  WorktreeInfo
 } from '../../../../shared/types'
 
 let bridge: TestIpcBridge
@@ -30,7 +30,9 @@ function onEvent<T extends (...args: never[]) => void>(channel: string): (cb: T)
   return (cb: T) => {
     const handler = (_: unknown, ...args: unknown[]): void => (cb as Function)(...args)
     bridge.ipcRenderer.on(channel, handler)
-    const cleanup = (): void => { bridge.ipcRenderer.removeListener(channel, handler) }
+    const cleanup = (): void => {
+      bridge.ipcRenderer.removeListener(channel, handler)
+    }
     cleanups.push(cleanup)
     return cleanup
   }
@@ -39,56 +41,95 @@ function onEvent<T extends (...args: never[]) => void>(channel: string): (cb: T)
 function wireEventHandlers(): void {
   const store = useSessionStore.getState
 
-  onEvent<(routingId: string, data: TaskProgress) => void>('session:task-progress')((routingId, data) => {
-    store().updateTaskProgress(routingId, data)
-  })
+  onEvent<(routingId: string, data: TaskProgress) => void>('session:task-progress')(
+    (routingId, data) => {
+      store().updateTaskProgress(routingId, data)
+    }
+  )
 
-  onEvent<(routingId: string, data: TaskNotification) => void>('session:task-notification')((routingId, data) => {
-    store().addTaskNotification(routingId, data)
-  })
+  onEvent<(routingId: string, data: TaskNotification) => void>('session:task-notification')(
+    (routingId, data) => {
+      store().addTaskNotification(routingId, data)
+    }
+  )
 
-  onEvent<(routingId: string, data: { toolUseId: string; message: ChatMessage }) => void>('session:subagent-message')((routingId, data) => {
+  onEvent<(routingId: string, data: { toolUseId: string; message: ChatMessage }) => void>(
+    'session:subagent-message'
+  )((routingId, data) => {
     store().addSubagentMessage(routingId, data.toolUseId, data.message)
   })
 
-  onEvent<(routingId: string, data: { toolUseId: string; messages: ChatMessage[] }) => void>('session:subagent-message-batch')((routingId, data) => {
+  onEvent<(routingId: string, data: { toolUseId: string; messages: ChatMessage[] }) => void>(
+    'session:subagent-message-batch'
+  )((routingId, data) => {
     store().appendSubagentMessageBatch(routingId, data.toolUseId, data.messages)
   })
 
-  onEvent<(routingId: string, data: { toolUseId: string; toolResultToolUseId: string; result: string; isError: boolean }) => void>('session:subagent-tool-result')((routingId, data) => {
-    store().appendSubagentToolResult(routingId, data.toolUseId, data.toolResultToolUseId, data.result, data.isError)
+  onEvent<
+    (
+      routingId: string,
+      data: { toolUseId: string; toolResultToolUseId: string; result: string; isError: boolean }
+    ) => void
+  >('session:subagent-tool-result')((routingId, data) => {
+    store().appendSubagentToolResult(
+      routingId,
+      data.toolUseId,
+      data.toolResultToolUseId,
+      data.result,
+      data.isError
+    )
   })
 
-  onEvent<(routingId: string, data: { toolUseId: string; output: string; totalLines: number; totalBytes: number }) => void>('session:bash-output')((routingId, data) => {
+  onEvent<
+    (
+      routingId: string,
+      data: { toolUseId: string; output: string; totalLines: number; totalBytes: number }
+    ) => void
+  >('session:bash-output')((routingId, data) => {
     store().setBashOutput(routingId, data.toolUseId, data.output, data.totalLines, data.totalBytes)
   })
 
-  onEvent<(routingId: string, data: { toolUseId: string; tail: string; totalSize: number }) => void>('session:background-output')((routingId, data) => {
+  onEvent<
+    (routingId: string, data: { toolUseId: string; tail: string; totalSize: number }) => void
+  >('session:background-output')((routingId, data) => {
     store().setBackgroundOutput(routingId, data.toolUseId, data.tail, data.totalSize)
   })
 
-  onEvent<(routingId: string, data: StatusLineData) => void>('session:status-line')((routingId, data) => {
-    store().setStatusLine(routingId, data)
-  })
+  onEvent<(routingId: string, data: StatusLineData) => void>('session:status-line')(
+    (routingId, data) => {
+      store().setStatusLine(routingId, data)
+    }
+  )
 
-  onEvent<(routingId: string, commands: unknown[]) => void>('session:slash-commands')((_routingId, commands) => {
-    store().setSlashCommands(commands as never)
-    window.api.saveSlashCommands(commands as never)
-  })
+  onEvent<(routingId: string, commands: unknown[]) => void>('session:slash-commands')(
+    (_routingId, commands) => {
+      store().setSlashCommands(commands as never)
+      window.api.saveSlashCommands(commands as never)
+    }
+  )
 
   onEvent<(routingId: string, names: string[]) => void>('session:skills')((_routingId, names) => {
     store().setSdkSkillNames(names)
   })
 
-  onEvent<(routingId: string, message: string) => void>('session:sandbox-violation')((routingId, message) => {
-    store().addSandboxViolation(routingId, message)
-  })
+  onEvent<(routingId: string, message: string) => void>('session:sandbox-violation')(
+    (routingId, message) => {
+      store().addSandboxViolation(routingId, message)
+    }
+  )
 
   onEvent<(routingId: string) => void>('session:steer-consumed')((routingId) => {
     store().consumeQueuedText(routingId)
   })
 
-  onEvent<(data: { routingId: string; messages: ChatMessage[]; taskNotifications: TaskNotification[]; statusLine?: StatusLineData }) => void>('session:watch-update')((data) => {
+  onEvent<
+    (data: {
+      routingId: string
+      messages: ChatMessage[]
+      taskNotifications: TaskNotification[]
+      statusLine?: StatusLineData
+    }) => void
+  >('session:watch-update')((data) => {
     const { routingId, messages, taskNotifications, statusLine } = data
     store().updateWatchedSession(routingId, messages, taskNotifications)
     if (statusLine) store().setStatusLine(routingId, statusLine)
@@ -114,7 +155,14 @@ function wireEventHandlers(): void {
     store().applyExternalSettings(settings)
   })
 
-  onEvent<(config: { recentSessions?: string[]; pinnedSessions?: string[]; customTitles?: Record<string, string>; worktreeInfoMap?: Record<string, WorktreeInfo> }) => void>('config:sessions-changed')((config) => {
+  onEvent<
+    (config: {
+      recentSessions?: string[]
+      pinnedSessions?: string[]
+      customTitles?: Record<string, string>
+      worktreeInfoMap?: Record<string, WorktreeInfo>
+    }) => void
+  >('config:sessions-changed')((config) => {
     store().applyExternalSessionConfig(config)
   })
 
@@ -128,8 +176,10 @@ function wireEventHandlers(): void {
 
   onEvent<() => void>('app:before-quit')(() => {
     const s = store()
-    const activeWorktrees = Object.entries(s.worktreeInfoMap)
-      .map(([routingId, worktreeInfo]) => ({ routingId, worktreeInfo }))
+    const activeWorktrees = Object.entries(s.worktreeInfoMap).map(([routingId, worktreeInfo]) => ({
+      routingId,
+      worktreeInfo
+    }))
     if (activeWorktrees.length === 0) {
       window.api.confirmQuit()
     } else {
@@ -137,7 +187,9 @@ function wireEventHandlers(): void {
     }
   })
 
-  onEvent<(routingId: string, data: { text: string; isFinal: boolean }) => void>('voice:transcript')((routingId, data) => {
+  onEvent<(routingId: string, data: { text: string; isFinal: boolean }) => void>(
+    'voice:transcript'
+  )((routingId, data) => {
     store().appendVoiceTranscript(routingId, data.text, data.isFinal)
   })
 
@@ -153,7 +205,9 @@ function wireEventHandlers(): void {
     store().setPluginViews(views)
   })
 
-  onEvent<(routingId: string, status: import('../../../../shared/types').SessionStatus) => void>('session:status')((routingId, status) => {
+  onEvent<(routingId: string, status: import('../../../../shared/types').SessionStatus) => void>(
+    'session:status'
+  )((routingId, status) => {
     let effectiveRoutingId = routingId
     if (status.sessionId && status.sessionId !== routingId) {
       const s = store()
@@ -185,7 +239,9 @@ function wireEventHandlers(): void {
     }
   })
 
-  onEvent<(routingId: string, data: { toolUseId: string; result: string; isError: boolean }) => void>('session:tool-result')((routingId, { toolUseId, result, isError }) => {
+  onEvent<
+    (routingId: string, data: { toolUseId: string; result: string; isError: boolean }) => void
+  >('session:tool-result')((routingId, { toolUseId, result, isError }) => {
     store().appendToolResult(routingId, toolUseId, result, isError)
 
     if (!isError && result) {
@@ -198,8 +254,10 @@ function wireEventHandlers(): void {
           )
           if (toolBlock && toolBlock.type === 'tool_use' && /worktree/i.test(toolBlock.toolName)) {
             const naturalMatch = result.match(/worktree at (.+?) on branch ([\w-]+)/)
-            const pathMatch = naturalMatch?.[1] || result.match(/worktreePath:\s*(.+?)(?:\n|$)/i)?.[1]
-            const branchMatch = naturalMatch?.[2] || result.match(/worktreeBranch:\s*(.+?)(?:\n|$)/i)?.[1]
+            const pathMatch =
+              naturalMatch?.[1] || result.match(/worktreePath:\s*(.+?)(?:\n|$)/i)?.[1]
+            const branchMatch =
+              naturalMatch?.[2] || result.match(/worktreeBranch:\s*(.+?)(?:\n|$)/i)?.[1]
             if (pathMatch && branchMatch) {
               const wtPath = pathMatch.trim()
               const wtBranch = branchMatch.trim()
@@ -226,8 +284,8 @@ beforeEach(() => {
   bridge = new TestIpcBridge()
   cleanups = []
   resetFactoryCounter()
-
-  ;(globalThis as never as { window: unknown }).window = (globalThis as never as { window: unknown }).window || {}
+  ;(globalThis as never as { window: unknown }).window =
+    (globalThis as never as { window: unknown }).window || {}
   ;(globalThis as never as { window: { api: unknown } }).window.api = {
     saveSessionConfig: () => {},
     saveSlashCommands: vi.fn(),
@@ -238,7 +296,7 @@ beforeEach(() => {
     confirmQuit: vi.fn(),
     watchBackground: () => {},
     unwatchBackground: () => {},
-    rekeySession: () => {},
+    rekeySession: () => {}
   }
 
   useSessionStore.setState({
@@ -248,7 +306,7 @@ beforeEach(() => {
     recentSessionIds: [],
     pinnedSessionIds: [],
     customTitles: {},
-    worktreeInfoMap: {},
+    worktreeInfoMap: {}
   })
 
   wireEventHandlers()
@@ -260,7 +318,6 @@ afterEach(() => {
 })
 
 describe('useClaudeEvents extended component tests', () => {
-
   describe('session:task-progress', () => {
     it('upserts task progress in taskProgressMap by toolUseId', () => {
       const routingId = 'route-1'
@@ -270,7 +327,7 @@ describe('useClaudeEvents extended component tests', () => {
         toolUseId: 'tool-a',
         toolName: 'Task',
         parentToolUseId: null,
-        elapsedTimeSeconds: 5,
+        elapsedTimeSeconds: 5
       }
 
       bridge.webContents.send('session:task-progress', routingId, progress)
@@ -284,10 +341,16 @@ describe('useClaudeEvents extended component tests', () => {
       useSessionStore.getState().createNewSession(routingId, '/test')
 
       bridge.webContents.send('session:task-progress', routingId, {
-        toolUseId: 'tool-a', toolName: 'Task', parentToolUseId: null, elapsedTimeSeconds: 3,
+        toolUseId: 'tool-a',
+        toolName: 'Task',
+        parentToolUseId: null,
+        elapsedTimeSeconds: 3
       })
       bridge.webContents.send('session:task-progress', routingId, {
-        toolUseId: 'tool-a', toolName: 'Task', parentToolUseId: null, elapsedTimeSeconds: 10,
+        toolUseId: 'tool-a',
+        toolName: 'Task',
+        parentToolUseId: null,
+        elapsedTimeSeconds: 10
       })
 
       const session = useSessionStore.getState().sessions[routingId]
@@ -299,10 +362,16 @@ describe('useClaudeEvents extended component tests', () => {
       useSessionStore.getState().createNewSession(routingId, '/test')
 
       bridge.webContents.send('session:task-progress', routingId, {
-        toolUseId: 'tool-a', toolName: 'Task', parentToolUseId: null, elapsedTimeSeconds: 1,
+        toolUseId: 'tool-a',
+        toolName: 'Task',
+        parentToolUseId: null,
+        elapsedTimeSeconds: 1
       })
       bridge.webContents.send('session:task-progress', routingId, {
-        toolUseId: 'tool-b', toolName: 'Task', parentToolUseId: 'tool-a', elapsedTimeSeconds: 2,
+        toolUseId: 'tool-b',
+        toolName: 'Task',
+        parentToolUseId: 'tool-a',
+        elapsedTimeSeconds: 2
       })
 
       const session = useSessionStore.getState().sessions[routingId]
@@ -328,7 +397,11 @@ describe('useClaudeEvents extended component tests', () => {
       const routingId = 'route-1'
       useSessionStore.getState().createNewSession(routingId, '/test')
 
-      bridge.webContents.send('session:task-notification', routingId, makeTaskNotification({ toolUseId: null }))
+      bridge.webContents.send(
+        'session:task-notification',
+        routingId,
+        makeTaskNotification({ toolUseId: null })
+      )
 
       const session = useSessionStore.getState().sessions[routingId]
       expect(session.taskNotifications).toHaveLength(1)
@@ -343,23 +416,38 @@ describe('useClaudeEvents extended component tests', () => {
       const message = makeAssistantMessage('subagent says hi')
       bridge.webContents.send('session:subagent-message', routingId, {
         toolUseId: 'agent-1',
-        message,
+        message
       })
 
       const session = useSessionStore.getState().sessions[routingId]
       expect(session.subagentMessages['agent-1']).toHaveLength(1)
-      expect(session.subagentMessages['agent-1'][0].content[0]).toEqual({ type: 'text', text: 'subagent says hi' })
+      expect(session.subagentMessages['agent-1'][0].content[0]).toEqual({
+        type: 'text',
+        text: 'subagent says hi'
+      })
     })
 
     it('upserts subagent message with same ID', () => {
       const routingId = 'route-1'
       useSessionStore.getState().createNewSession(routingId, '/test')
 
-      const msg1 = makeChatMessage({ id: 'sub-msg-1', content: [{ type: 'text', text: 'partial' }] })
-      const msg2 = makeChatMessage({ id: 'sub-msg-1', content: [{ type: 'text', text: 'complete' }] })
+      const msg1 = makeChatMessage({
+        id: 'sub-msg-1',
+        content: [{ type: 'text', text: 'partial' }]
+      })
+      const msg2 = makeChatMessage({
+        id: 'sub-msg-1',
+        content: [{ type: 'text', text: 'complete' }]
+      })
 
-      bridge.webContents.send('session:subagent-message', routingId, { toolUseId: 'agent-1', message: msg1 })
-      bridge.webContents.send('session:subagent-message', routingId, { toolUseId: 'agent-1', message: msg2 })
+      bridge.webContents.send('session:subagent-message', routingId, {
+        toolUseId: 'agent-1',
+        message: msg1
+      })
+      bridge.webContents.send('session:subagent-message', routingId, {
+        toolUseId: 'agent-1',
+        message: msg2
+      })
 
       const session = useSessionStore.getState().sessions[routingId]
       expect(session.subagentMessages['agent-1']).toHaveLength(1)
@@ -370,10 +458,12 @@ describe('useClaudeEvents extended component tests', () => {
       useSessionStore.getState().createNewSession(routingId, '/test')
 
       bridge.webContents.send('session:subagent-message', routingId, {
-        toolUseId: 'agent-1', message: makeAssistantMessage('from agent 1'),
+        toolUseId: 'agent-1',
+        message: makeAssistantMessage('from agent 1')
       })
       bridge.webContents.send('session:subagent-message', routingId, {
-        toolUseId: 'agent-2', message: makeAssistantMessage('from agent 2'),
+        toolUseId: 'agent-2',
+        message: makeAssistantMessage('from agent 2')
       })
 
       const session = useSessionStore.getState().sessions[routingId]
@@ -390,12 +480,12 @@ describe('useClaudeEvents extended component tests', () => {
       const messages = [
         makeAssistantMessage('batch msg 1'),
         makeAssistantMessage('batch msg 2'),
-        makeAssistantMessage('batch msg 3'),
+        makeAssistantMessage('batch msg 3')
       ]
 
       bridge.webContents.send('session:subagent-message-batch', routingId, {
         toolUseId: 'agent-1',
-        messages,
+        messages
       })
 
       const session = useSessionStore.getState().sessions[routingId]
@@ -407,13 +497,16 @@ describe('useClaudeEvents extended component tests', () => {
       useSessionStore.getState().createNewSession(routingId, '/test')
 
       const existing = makeChatMessage({ id: 'sub-1', content: [{ type: 'text', text: 'old' }] })
-      bridge.webContents.send('session:subagent-message', routingId, { toolUseId: 'agent-1', message: existing })
+      bridge.webContents.send('session:subagent-message', routingId, {
+        toolUseId: 'agent-1',
+        message: existing
+      })
 
       const updated = makeChatMessage({ id: 'sub-1', content: [{ type: 'text', text: 'updated' }] })
       const fresh = makeAssistantMessage('new message')
       bridge.webContents.send('session:subagent-message-batch', routingId, {
         toolUseId: 'agent-1',
-        messages: [updated, fresh],
+        messages: [updated, fresh]
       })
 
       const session = useSessionStore.getState().sessions[routingId]
@@ -428,15 +521,18 @@ describe('useClaudeEvents extended component tests', () => {
 
       const toolMsg = makeChatMessage({
         id: 'sub-msg-1',
-        content: [makeToolUseBlock('Bash', { command: 'ls' }, 'sub-tool-1')],
+        content: [makeToolUseBlock('Bash', { command: 'ls' }, 'sub-tool-1')]
       })
-      bridge.webContents.send('session:subagent-message', routingId, { toolUseId: 'agent-1', message: toolMsg })
+      bridge.webContents.send('session:subagent-message', routingId, {
+        toolUseId: 'agent-1',
+        message: toolMsg
+      })
 
       bridge.webContents.send('session:subagent-tool-result', routingId, {
         toolUseId: 'agent-1',
         toolResultToolUseId: 'sub-tool-1',
         result: 'file1.txt',
-        isError: false,
+        isError: false
       })
 
       const session = useSessionStore.getState().sessions[routingId]
@@ -453,7 +549,7 @@ describe('useClaudeEvents extended component tests', () => {
         toolUseId: 'agent-1',
         toolResultToolUseId: 'nonexistent-tool',
         result: 'error output',
-        isError: true,
+        isError: true
       })
 
       const session = useSessionStore.getState().sessions[routingId]
@@ -470,14 +566,14 @@ describe('useClaudeEvents extended component tests', () => {
         toolUseId: 'bash-tool-1',
         output: 'Hello\nWorld\n',
         totalLines: 2,
-        totalBytes: 12,
+        totalBytes: 12
       })
 
       const session = useSessionStore.getState().sessions[routingId]
       expect(session.bashOutputs['bash-tool-1']).toEqual({
         output: 'Hello\nWorld\n',
         totalLines: 2,
-        totalBytes: 12,
+        totalBytes: 12
       })
     })
 
@@ -486,13 +582,21 @@ describe('useClaudeEvents extended component tests', () => {
       useSessionStore.getState().createNewSession(routingId, '/test')
 
       bridge.webContents.send('session:bash-output', routingId, {
-        toolUseId: 'bash-tool-1', output: 'old output', totalLines: 1, totalBytes: 10,
+        toolUseId: 'bash-tool-1',
+        output: 'old output',
+        totalLines: 1,
+        totalBytes: 10
       })
       bridge.webContents.send('session:bash-output', routingId, {
-        toolUseId: 'bash-tool-1', output: 'new output', totalLines: 1, totalBytes: 10,
+        toolUseId: 'bash-tool-1',
+        output: 'new output',
+        totalLines: 1,
+        totalBytes: 10
       })
 
-      expect(useSessionStore.getState().sessions[routingId].bashOutputs['bash-tool-1'].output).toBe('new output')
+      expect(useSessionStore.getState().sessions[routingId].bashOutputs['bash-tool-1'].output).toBe(
+        'new output'
+      )
     })
 
     it('stores outputs for different toolUseIds independently', () => {
@@ -500,10 +604,16 @@ describe('useClaudeEvents extended component tests', () => {
       useSessionStore.getState().createNewSession(routingId, '/test')
 
       bridge.webContents.send('session:bash-output', routingId, {
-        toolUseId: 'bash-1', output: 'output A', totalLines: 1, totalBytes: 8,
+        toolUseId: 'bash-1',
+        output: 'output A',
+        totalLines: 1,
+        totalBytes: 8
       })
       bridge.webContents.send('session:bash-output', routingId, {
-        toolUseId: 'bash-2', output: 'output B', totalLines: 1, totalBytes: 8,
+        toolUseId: 'bash-2',
+        output: 'output B',
+        totalLines: 1,
+        totalBytes: 8
       })
 
       const session = useSessionStore.getState().sessions[routingId]
@@ -520,13 +630,13 @@ describe('useClaudeEvents extended component tests', () => {
       bridge.webContents.send('session:background-output', routingId, {
         toolUseId: 'bg-tool-1',
         tail: 'last few lines',
-        totalSize: 1024,
+        totalSize: 1024
       })
 
       const session = useSessionStore.getState().sessions[routingId]
       expect(session.backgroundOutputs['bg-tool-1']).toEqual({
         tail: 'last few lines',
-        totalSize: 1024,
+        totalSize: 1024
       })
     })
 
@@ -535,13 +645,19 @@ describe('useClaudeEvents extended component tests', () => {
       useSessionStore.getState().createNewSession(routingId, '/test')
 
       bridge.webContents.send('session:background-output', routingId, {
-        toolUseId: 'bg-tool-1', tail: 'old tail', totalSize: 500,
+        toolUseId: 'bg-tool-1',
+        tail: 'old tail',
+        totalSize: 500
       })
       bridge.webContents.send('session:background-output', routingId, {
-        toolUseId: 'bg-tool-1', tail: 'new tail', totalSize: 1000,
+        toolUseId: 'bg-tool-1',
+        tail: 'new tail',
+        totalSize: 1000
       })
 
-      expect(useSessionStore.getState().sessions[routingId].backgroundOutputs['bg-tool-1'].tail).toBe('new tail')
+      expect(
+        useSessionStore.getState().sessions[routingId].backgroundOutputs['bg-tool-1'].tail
+      ).toBe('new tail')
     })
   })
 
@@ -560,7 +676,7 @@ describe('useClaudeEvents extended component tests', () => {
         totalTokens: 1500,
         contextWindowSize: 200000,
         usedPercentage: 0.75,
-        remainingPercentage: 99.25,
+        remainingPercentage: 99.25
       }
 
       bridge.webContents.send('session:status-line', routingId, statusLine)
@@ -573,16 +689,23 @@ describe('useClaudeEvents extended component tests', () => {
       useSessionStore.getState().createNewSession(routingId, '/test')
 
       const first: StatusLineData = {
-        totalCostUsd: 0.01, totalDurationMs: 1000, totalApiDurationMs: 800,
-        totalInputTokens: 100, totalOutputTokens: 50, cachedTokens: 0,
-        totalTokens: 150, contextWindowSize: 200000, usedPercentage: 0.1, remainingPercentage: 99.9,
+        totalCostUsd: 0.01,
+        totalDurationMs: 1000,
+        totalApiDurationMs: 800,
+        totalInputTokens: 100,
+        totalOutputTokens: 50,
+        cachedTokens: 0,
+        totalTokens: 150,
+        contextWindowSize: 200000,
+        usedPercentage: 0.1,
+        remainingPercentage: 99.9
       }
-      const second: StatusLineData = { ...first, totalCostUsd: 0.10, totalTokens: 5000 }
+      const second: StatusLineData = { ...first, totalCostUsd: 0.1, totalTokens: 5000 }
 
       bridge.webContents.send('session:status-line', routingId, first)
       bridge.webContents.send('session:status-line', routingId, second)
 
-      expect(useSessionStore.getState().sessions[routingId].statusLine?.totalCostUsd).toBe(0.10)
+      expect(useSessionStore.getState().sessions[routingId].statusLine?.totalCostUsd).toBe(0.1)
     })
   })
 
@@ -590,7 +713,7 @@ describe('useClaudeEvents extended component tests', () => {
     it('updates slashCommands in store', () => {
       const commands = [
         { name: 'review', description: 'Review code', content: 'Please review' },
-        { name: 'test', description: 'Run tests', content: 'Run the tests' },
+        { name: 'test', description: 'Run tests', content: 'Run the tests' }
       ]
 
       bridge.webContents.send('session:slash-commands', 'ignored', commands)
@@ -603,15 +726,17 @@ describe('useClaudeEvents extended component tests', () => {
 
       bridge.webContents.send('session:slash-commands', 'ignored', commands)
 
-      expect((window.api.saveSlashCommands as ReturnType<typeof vi.fn>)).toHaveBeenCalledWith(commands)
+      expect(window.api.saveSlashCommands as ReturnType<typeof vi.fn>).toHaveBeenCalledWith(
+        commands
+      )
     })
 
     it('replaces slash commands on subsequent event', () => {
       bridge.webContents.send('session:slash-commands', 'ignored', [
-        { name: 'old-cmd', description: 'old', content: 'old' },
+        { name: 'old-cmd', description: 'old', content: 'old' }
       ])
       bridge.webContents.send('session:slash-commands', 'ignored', [
-        { name: 'new-cmd', description: 'new', content: 'new' },
+        { name: 'new-cmd', description: 'new', content: 'new' }
       ])
 
       const { slashCommands } = useSessionStore.getState()
@@ -647,7 +772,11 @@ describe('useClaudeEvents extended component tests', () => {
       const routingId = 'route-1'
       useSessionStore.getState().createNewSession(routingId, '/test')
 
-      bridge.webContents.send('session:sandbox-violation', routingId, 'Network access denied to example.com')
+      bridge.webContents.send(
+        'session:sandbox-violation',
+        routingId,
+        'Network access denied to example.com'
+      )
 
       const session = useSessionStore.getState().sessions[routingId]
       expect(session.sandboxViolations).toContain('Network access denied to example.com')
@@ -709,7 +838,7 @@ describe('useClaudeEvents extended component tests', () => {
       bridge.webContents.send('session:watch-update', {
         routingId,
         messages: newMessages,
-        taskNotifications: newNotifications,
+        taskNotifications: newNotifications
       })
 
       const session = useSessionStore.getState().sessions[routingId]
@@ -723,16 +852,23 @@ describe('useClaudeEvents extended component tests', () => {
       useSessionStore.getState().createNewSession(routingId, '/test')
 
       const statusLine: StatusLineData = {
-        totalCostUsd: 0.02, totalDurationMs: 1000, totalApiDurationMs: 900,
-        totalInputTokens: 200, totalOutputTokens: 100, cachedTokens: 50,
-        totalTokens: 300, contextWindowSize: 200000, usedPercentage: 0.15, remainingPercentage: 99.85,
+        totalCostUsd: 0.02,
+        totalDurationMs: 1000,
+        totalApiDurationMs: 900,
+        totalInputTokens: 200,
+        totalOutputTokens: 100,
+        cachedTokens: 50,
+        totalTokens: 300,
+        contextWindowSize: 200000,
+        usedPercentage: 0.15,
+        remainingPercentage: 99.85
       }
 
       bridge.webContents.send('session:watch-update', {
         routingId,
         messages: [],
         taskNotifications: [],
-        statusLine,
+        statusLine
       })
 
       expect(useSessionStore.getState().sessions[routingId].statusLine).toEqual(statusLine)
@@ -745,7 +881,7 @@ describe('useClaudeEvents extended component tests', () => {
       bridge.webContents.send('session:watch-update', {
         routingId,
         messages: [],
-        taskNotifications: [],
+        taskNotifications: []
       })
 
       expect(useSessionStore.getState().sessions[routingId].statusLine).toBeNull()
@@ -754,13 +890,17 @@ describe('useClaudeEvents extended component tests', () => {
     it('dismisses all-completed todos on watch update', () => {
       const routingId = 'route-1'
       useSessionStore.getState().createNewSession(routingId, '/test')
-      useSessionStore.getState().setTodos(routingId, [
-        makeTodoItem('Done 1', 'completed'),
-        makeTodoItem('Done 2', 'completed'),
-      ])
+      useSessionStore
+        .getState()
+        .setTodos(routingId, [
+          makeTodoItem('Done 1', 'completed'),
+          makeTodoItem('Done 2', 'completed')
+        ])
 
       bridge.webContents.send('session:watch-update', {
-        routingId, messages: [], taskNotifications: [],
+        routingId,
+        messages: [],
+        taskNotifications: []
       })
 
       expect(useSessionStore.getState().sessions[routingId].todos).toHaveLength(0)
@@ -769,13 +909,17 @@ describe('useClaudeEvents extended component tests', () => {
     it('keeps todos when not all completed on watch update', () => {
       const routingId = 'route-1'
       useSessionStore.getState().createNewSession(routingId, '/test')
-      useSessionStore.getState().setTodos(routingId, [
-        makeTodoItem('Done', 'completed'),
-        makeTodoItem('Pending', 'pending'),
-      ])
+      useSessionStore
+        .getState()
+        .setTodos(routingId, [
+          makeTodoItem('Done', 'completed'),
+          makeTodoItem('Pending', 'pending')
+        ])
 
       bridge.webContents.send('session:watch-update', {
-        routingId, messages: [], taskNotifications: [],
+        routingId,
+        messages: [],
+        taskNotifications: []
       })
 
       expect(useSessionStore.getState().sessions[routingId].todos).toHaveLength(2)
@@ -797,7 +941,7 @@ describe('useClaudeEvents extended component tests', () => {
         unstaged: [],
         untracked: [],
         linesAdded: 0,
-        linesRemoved: 0,
+        linesRemoved: 0
       }
 
       bridge.webContents.send('git:status-update', { cwd: '/project/app', status })
@@ -810,8 +954,16 @@ describe('useClaudeEvents extended component tests', () => {
       useSessionStore.getState().createNewSession('route-2', '/other/project')
 
       const status: GitStatusData = {
-        branch: 'main', files: [], ahead: 0, behind: 0, trackingBranch: null,
-        staged: [], unstaged: [], untracked: [], linesAdded: 0, linesRemoved: 0,
+        branch: 'main',
+        files: [],
+        ahead: 0,
+        behind: 0,
+        trackingBranch: null,
+        staged: [],
+        unstaged: [],
+        untracked: [],
+        linesAdded: 0,
+        linesRemoved: 0
       }
 
       bridge.webContents.send('git:status-update', { cwd: '/project/app', status })
@@ -825,8 +977,16 @@ describe('useClaudeEvents extended component tests', () => {
       useSessionStore.getState().createNewSession('route-2', '/shared/project')
 
       const status: GitStatusData = {
-        branch: 'feature', files: [], ahead: 1, behind: 0, trackingBranch: null,
-        staged: [], unstaged: [], untracked: [], linesAdded: 0, linesRemoved: 0,
+        branch: 'feature',
+        files: [],
+        ahead: 1,
+        behind: 0,
+        trackingBranch: null,
+        staged: [],
+        unstaged: [],
+        untracked: [],
+        linesAdded: 0,
+        linesRemoved: 0
       }
 
       bridge.webContents.send('git:status-update', { cwd: '/shared/project', status })
@@ -858,7 +1018,7 @@ describe('useClaudeEvents extended component tests', () => {
       bridge.webContents.send('config:sessions-changed', {
         recentSessions: ['session-a', 'session-b'],
         pinnedSessions: ['session-a'],
-        customTitles: { 'session-a': 'My Session' },
+        customTitles: { 'session-a': 'My Session' }
       })
 
       const state = useSessionStore.getState()
@@ -881,8 +1041,7 @@ describe('useClaudeEvents extended component tests', () => {
       const usageData: AccountUsage = {
         fiveHour: {
           usedPercent: 42,
-          resetsAt: new Date(Date.now() + 3600000).toISOString(),
-          
+          resetsAt: new Date(Date.now() + 3600000).toISOString()
         },
         sevenDay: null,
         sevenDaySonnet: null,
@@ -890,7 +1049,7 @@ describe('useClaudeEvents extended component tests', () => {
         extraUsage: null,
         planName: 'claude_max_5x',
         fetchedAt: Date.now(),
-        error: null,
+        error: null
       }
 
       bridge.webContents.send('usage:data', usageData)
@@ -901,8 +1060,13 @@ describe('useClaudeEvents extended component tests', () => {
     it('replaces previous account usage on update', () => {
       const first: AccountUsage = {
         fiveHour: { usedPercent: 10, resetsAt: null },
-        sevenDay: null, sevenDaySonnet: null, sevenDayOpus: null,
-        extraUsage: null, planName: null, fetchedAt: Date.now(), error: null,
+        sevenDay: null,
+        sevenDaySonnet: null,
+        sevenDayOpus: null,
+        extraUsage: null,
+        planName: null,
+        fetchedAt: Date.now(),
+        error: null
       }
       const second: AccountUsage = { ...first, fiveHour: { usedPercent: 90, resetsAt: null } }
 
@@ -921,7 +1085,7 @@ describe('useClaudeEvents extended component tests', () => {
         todaySnapshots: [],
         dailyHistory: [],
         accounts: [],
-        accountFilter: null,
+        accountFilter: null
       }
 
       bridge.webContents.send('usage:block-data', blockData)
@@ -931,13 +1095,29 @@ describe('useClaudeEvents extended component tests', () => {
 
     it('replaces previous block usage on update', () => {
       const first: BlockUsageData = {
-        currentBlock: null, recentBlocks: [], todaySnapshots: [], dailyHistory: [],
-        accounts: [], accountFilter: null,
+        currentBlock: null,
+        recentBlocks: [],
+        todaySnapshots: [],
+        dailyHistory: [],
+        accounts: [],
+        accountFilter: null
       }
       const second: BlockUsageData = {
-        currentBlock: null, recentBlocks: [], todaySnapshots: [],
-        dailyHistory: [{ date: '2026-04-15', totalTokens: 5000, costUsd: 0.5, models: {}, peakApiPercent: 30, blockCount: 1 }],
-        accounts: [], accountFilter: null,
+        currentBlock: null,
+        recentBlocks: [],
+        todaySnapshots: [],
+        dailyHistory: [
+          {
+            date: '2026-04-15',
+            totalTokens: 5000,
+            costUsd: 0.5,
+            models: {},
+            peakApiPercent: 30,
+            blockCount: 1
+          }
+        ],
+        accounts: [],
+        accountFilter: null
       }
 
       bridge.webContents.send('usage:block-data', first)
@@ -953,7 +1133,7 @@ describe('useClaudeEvents extended component tests', () => {
 
       bridge.webContents.send('app:before-quit')
 
-      expect((window.api.confirmQuit as ReturnType<typeof vi.fn>)).toHaveBeenCalledOnce()
+      expect(window.api.confirmQuit as ReturnType<typeof vi.fn>).toHaveBeenCalledOnce()
     })
 
     it('calls setQuitWorktrees with active worktrees instead of confirming quit', () => {
@@ -964,16 +1144,16 @@ describe('useClaudeEvents extended component tests', () => {
         originalCwd: '/project',
         gitRoot: '/project',
         originalHeadCommit: 'abc123',
-        createdAt: Date.now(),
+        createdAt: Date.now()
       }
 
       useSessionStore.setState({
-        worktreeInfoMap: { 'route-1': worktreeInfo },
+        worktreeInfoMap: { 'route-1': worktreeInfo }
       })
 
       bridge.webContents.send('app:before-quit')
 
-      expect((window.api.confirmQuit as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled()
+      expect(window.api.confirmQuit as ReturnType<typeof vi.fn>).not.toHaveBeenCalled()
       const state = useSessionStore.getState()
       expect(state.quitWorktrees).toHaveLength(1)
       expect(state.quitWorktrees![0].routingId).toBe('route-1')
@@ -984,7 +1164,7 @@ describe('useClaudeEvents extended component tests', () => {
 
       bridge.webContents.send('app:before-quit')
 
-      expect((window.api.confirmQuit as ReturnType<typeof vi.fn>)).toHaveBeenCalledOnce()
+      expect(window.api.confirmQuit as ReturnType<typeof vi.fn>).toHaveBeenCalledOnce()
     })
   })
 
@@ -995,7 +1175,9 @@ describe('useClaudeEvents extended component tests', () => {
 
       bridge.webContents.send('voice:transcript', routingId, { text: 'hello wor', isFinal: false })
 
-      expect(useSessionStore.getState().sessions[routingId].voiceInterimTranscript).toBe('hello wor')
+      expect(useSessionStore.getState().sessions[routingId].voiceInterimTranscript).toBe(
+        'hello wor'
+      )
     })
 
     it('appends to draftText and clears interim for final transcript', () => {
@@ -1014,9 +1196,14 @@ describe('useClaudeEvents extended component tests', () => {
       useSessionStore.getState().createNewSession(routingId, '/test')
       useSessionStore.getState().setDraftText('existing text')
 
-      bridge.webContents.send('voice:transcript', routingId, { text: 'new sentence', isFinal: true })
+      bridge.webContents.send('voice:transcript', routingId, {
+        text: 'new sentence',
+        isFinal: true
+      })
 
-      expect(useSessionStore.getState().sessions[routingId].draftText).toBe('existing text new sentence')
+      expect(useSessionStore.getState().sessions[routingId].draftText).toBe(
+        'existing text new sentence'
+      )
     })
 
     it('replaces interim transcript on each non-final event', () => {
@@ -1027,7 +1214,9 @@ describe('useClaudeEvents extended component tests', () => {
       bridge.webContents.send('voice:transcript', routingId, { text: 'hello', isFinal: false })
       bridge.webContents.send('voice:transcript', routingId, { text: 'hello wor', isFinal: false })
 
-      expect(useSessionStore.getState().sessions[routingId].voiceInterimTranscript).toBe('hello wor')
+      expect(useSessionStore.getState().sessions[routingId].voiceInterimTranscript).toBe(
+        'hello wor'
+      )
     })
   })
 
@@ -1066,7 +1255,9 @@ describe('useClaudeEvents extended component tests', () => {
 
       bridge.webContents.send('voice:error', routingId, 'Microphone access denied')
 
-      expect(useSessionStore.getState().sessions[routingId].errors).toContain('Microphone access denied')
+      expect(useSessionStore.getState().sessions[routingId].errors).toContain(
+        'Microphone access denied'
+      )
     })
 
     it('accumulates multiple voice errors', () => {
@@ -1088,8 +1279,8 @@ describe('useClaudeEvents extended component tests', () => {
           id: 'main-view',
           label: 'My Plugin View',
           icon: 'gear',
-          htmlFile: 'index.html',
-        },
+          htmlFile: 'index.html'
+        }
       ]
 
       bridge.webContents.send('plugin:views-changed', views)
@@ -1099,7 +1290,7 @@ describe('useClaudeEvents extended component tests', () => {
 
     it('replaces previous plugin views on update', () => {
       bridge.webContents.send('plugin:views-changed', [
-        { pluginId: 'plugin-a', id: 'view-a', label: 'View A', icon: 'a', htmlFile: 'a.html' },
+        { pluginId: 'plugin-a', id: 'view-a', label: 'View A', icon: 'a', htmlFile: 'a.html' }
       ])
       bridge.webContents.send('plugin:views-changed', [])
 
@@ -1113,10 +1304,14 @@ describe('useClaudeEvents extended component tests', () => {
       useSessionStore.getState().createNewSession(routingId, '/test')
       useSessionStore.getState().setNeedsAttention(routingId, true)
 
-      bridge.webContents.send('session:status', routingId, makeSessionStatus({
-        state: 'running',
-        sessionId: routingId,
-      }))
+      bridge.webContents.send(
+        'session:status',
+        routingId,
+        makeSessionStatus({
+          state: 'running',
+          sessionId: routingId
+        })
+      )
 
       expect(useSessionStore.getState().sessions[routingId].needsAttention).toBe(false)
     })
@@ -1126,10 +1321,14 @@ describe('useClaudeEvents extended component tests', () => {
       useSessionStore.getState().createNewSession(routingId, '/test')
       useSessionStore.getState().setNeedsAttention(routingId, true)
 
-      bridge.webContents.send('session:status', routingId, makeSessionStatus({
-        state: 'idle',
-        sessionId: routingId,
-      }))
+      bridge.webContents.send(
+        'session:status',
+        routingId,
+        makeSessionStatus({
+          state: 'idle',
+          sessionId: routingId
+        })
+      )
 
       expect(useSessionStore.getState().sessions[routingId].needsAttention).toBe(true)
     })
@@ -1146,14 +1345,18 @@ describe('useClaudeEvents extended component tests', () => {
         originalCwd: '/project/app',
         gitRoot: '/project/app',
         originalHeadCommit: 'abc123',
-        createdAt: Date.now(),
+        createdAt: Date.now()
       })
 
-      bridge.webContents.send('session:status', routingId, makeSessionStatus({
-        state: 'idle',
-        sessionId: routingId,
-        cwd: '/project/app',
-      }))
+      bridge.webContents.send(
+        'session:status',
+        routingId,
+        makeSessionStatus({
+          state: 'idle',
+          sessionId: routingId,
+          cwd: '/project/app'
+        })
+      )
 
       expect(useSessionStore.getState().sessions[routingId].worktreeInfo).toBeNull()
       expect(useSessionStore.getState().worktreeInfoMap[routingId]).toBeUndefined()
@@ -1169,14 +1372,18 @@ describe('useClaudeEvents extended component tests', () => {
         originalCwd: '/project/app',
         gitRoot: '/project/app',
         originalHeadCommit: 'abc123',
-        createdAt: Date.now(),
+        createdAt: Date.now()
       })
 
-      bridge.webContents.send('session:status', routingId, makeSessionStatus({
-        state: 'running',
-        sessionId: routingId,
-        cwd: '/project/worktrees/feat',
-      }))
+      bridge.webContents.send(
+        'session:status',
+        routingId,
+        makeSessionStatus({
+          state: 'running',
+          sessionId: routingId,
+          cwd: '/project/worktrees/feat'
+        })
+      )
 
       expect(useSessionStore.getState().sessions[routingId].worktreeInfo).not.toBeNull()
     })
@@ -1191,13 +1398,17 @@ describe('useClaudeEvents extended component tests', () => {
         originalCwd: '/project/app',
         gitRoot: '/project/app',
         originalHeadCommit: 'abc123',
-        createdAt: Date.now(),
+        createdAt: Date.now()
       })
 
-      bridge.webContents.send('session:status', routingId, makeSessionStatus({
-        state: 'running',
-        sessionId: routingId,
-      }))
+      bridge.webContents.send(
+        'session:status',
+        routingId,
+        makeSessionStatus({
+          state: 'running',
+          sessionId: routingId
+        })
+      )
 
       expect(useSessionStore.getState().sessions[routingId].worktreeInfo).not.toBeNull()
     })
@@ -1209,14 +1420,15 @@ describe('useClaudeEvents extended component tests', () => {
       useSessionStore.getState().createNewSession(routingId, '/project/app')
 
       const toolMsg = makeChatMessage({
-        content: [makeToolUseBlock('EnterWorktree', {}, 'wt-tool-1')],
+        content: [makeToolUseBlock('EnterWorktree', {}, 'wt-tool-1')]
       })
       useSessionStore.getState().addMessage(routingId, toolMsg)
 
       bridge.webContents.send('session:tool-result', routingId, {
         toolUseId: 'wt-tool-1',
-        result: 'Created worktree at /project/worktrees/my-branch on branch my-branch. Now working in that directory.',
-        isError: false,
+        result:
+          'Created worktree at /project/worktrees/my-branch on branch my-branch. Now working in that directory.',
+        isError: false
       })
 
       const session = useSessionStore.getState().sessions[routingId]
@@ -1230,14 +1442,14 @@ describe('useClaudeEvents extended component tests', () => {
       useSessionStore.getState().createNewSession(routingId, '/project/app')
 
       const toolMsg = makeChatMessage({
-        content: [makeToolUseBlock('Bash', { command: 'git worktree add' }, 'bash-tool-1')],
+        content: [makeToolUseBlock('Bash', { command: 'git worktree add' }, 'bash-tool-1')]
       })
       useSessionStore.getState().addMessage(routingId, toolMsg)
 
       bridge.webContents.send('session:tool-result', routingId, {
         toolUseId: 'bash-tool-1',
         result: 'Created worktree at /project/worktrees/feat on branch feat.',
-        isError: false,
+        isError: false
       })
 
       expect(useSessionStore.getState().sessions[routingId].worktreeInfo).toBeNull()
@@ -1248,14 +1460,14 @@ describe('useClaudeEvents extended component tests', () => {
       useSessionStore.getState().createNewSession(routingId, '/project/app')
 
       const toolMsg = makeChatMessage({
-        content: [makeToolUseBlock('EnterWorktree', {}, 'wt-tool-err')],
+        content: [makeToolUseBlock('EnterWorktree', {}, 'wt-tool-err')]
       })
       useSessionStore.getState().addMessage(routingId, toolMsg)
 
       bridge.webContents.send('session:tool-result', routingId, {
         toolUseId: 'wt-tool-err',
         result: 'Failed to create worktree',
-        isError: true,
+        isError: true
       })
 
       expect(useSessionStore.getState().sessions[routingId].worktreeInfo).toBeNull()
@@ -1271,22 +1483,24 @@ describe('useClaudeEvents extended component tests', () => {
         originalCwd: '/project/app',
         gitRoot: '/project/app',
         originalHeadCommit: 'abc',
-        createdAt: Date.now(),
+        createdAt: Date.now()
       }
       useSessionStore.getState().setWorktreeInfo(routingId, existingInfo)
 
       const toolMsg = makeChatMessage({
-        content: [makeToolUseBlock('CreateWorktree', {}, 'wt-tool-2')],
+        content: [makeToolUseBlock('CreateWorktree', {}, 'wt-tool-2')]
       })
       useSessionStore.getState().addMessage(routingId, toolMsg)
 
       bridge.webContents.send('session:tool-result', routingId, {
         toolUseId: 'wt-tool-2',
         result: 'Created worktree at /project/worktrees/new on branch new.',
-        isError: false,
+        isError: false
       })
 
-      expect(useSessionStore.getState().sessions[routingId].worktreeInfo?.worktreePath).toBe('/project/worktrees/existing')
+      expect(useSessionStore.getState().sessions[routingId].worktreeInfo?.worktreePath).toBe(
+        '/project/worktrees/existing'
+      )
     })
   })
 
@@ -1296,7 +1510,10 @@ describe('useClaudeEvents extended component tests', () => {
       useSessionStore.getState().createNewSession('route-2', '/proj2')
 
       bridge.webContents.send('session:bash-output', 'route-1', {
-        toolUseId: 'tool-1', output: 'only for route-1', totalLines: 1, totalBytes: 15,
+        toolUseId: 'tool-1',
+        output: 'only for route-1',
+        totalLines: 1,
+        totalBytes: 15
       })
 
       expect(useSessionStore.getState().sessions['route-1'].bashOutputs['tool-1']).toBeDefined()
@@ -1307,7 +1524,10 @@ describe('useClaudeEvents extended component tests', () => {
       useSessionStore.getState().createNewSession('route-1', '/proj1')
       useSessionStore.getState().createNewSession('route-2', '/proj2')
 
-      bridge.webContents.send('voice:transcript', 'route-1', { text: 'only route-1', isFinal: true })
+      bridge.webContents.send('voice:transcript', 'route-1', {
+        text: 'only route-1',
+        isFinal: true
+      })
 
       expect(useSessionStore.getState().sessions['route-1'].draftText).toBe('only route-1')
       expect(useSessionStore.getState().sessions['route-2'].draftText).toBe('')

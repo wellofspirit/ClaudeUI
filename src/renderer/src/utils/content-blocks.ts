@@ -11,10 +11,14 @@ export function mergeContentBlocks(
   newBlocks: ContentBlock[]
 ): ContentBlock[] {
   const newToolUseIds = new Set(
-    newBlocks.filter((b): b is Extract<ContentBlock, { type: 'tool_use' }> => b.type === 'tool_use').map((b) => b.toolUseId)
+    newBlocks
+      .filter((b): b is Extract<ContentBlock, { type: 'tool_use' }> => b.type === 'tool_use')
+      .map((b) => b.toolUseId)
   )
   const newToolResultIds = new Set(
-    newBlocks.filter((b): b is Extract<ContentBlock, { type: 'tool_result' }> => b.type === 'tool_result').map((b) => b.toolUseId)
+    newBlocks
+      .filter((b): b is Extract<ContentBlock, { type: 'tool_result' }> => b.type === 'tool_result')
+      .map((b) => b.toolUseId)
   )
   const newThinkingCount = newBlocks.filter((b) => b.type === 'thinking').length
   const newHasText = newBlocks.some((b) => b.type === 'text')

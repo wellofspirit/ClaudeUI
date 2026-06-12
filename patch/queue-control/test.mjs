@@ -18,7 +18,7 @@ import {
   userMessage,
   collectMessages,
   TestRunner,
-  dumpMessages,
+  dumpMessages
 } from '../test-helpers.mjs'
 
 const PROMPT =
@@ -57,11 +57,7 @@ async function main() {
       }
 
       // Detect queued_command_consumed
-      if (
-        msg.type === 'system' &&
-        msg.subtype === 'queued_command_consumed' &&
-        !consumedReceived
-      ) {
+      if (msg.type === 'system' && msg.subtype === 'queued_command_consumed' && !consumedReceived) {
         consumedReceived = true
         console.log('  queued_command_consumed received')
 
@@ -74,7 +70,7 @@ async function main() {
           dequeueResult = { error: err.message }
         }
       }
-    },
+    }
   })
 
   dumpMessages(messages)
@@ -103,18 +99,14 @@ async function main() {
   // The SDK wraps the response in a control_response envelope:
   //   { subtype: 'success', request_id: '...', response: { removed: N } }
   // Or it may return the unwrapped { removed: N } directly.
-  const removedValue =
-    dequeueResult?.removed ?? dequeueResult?.response?.removed ?? undefined
+  const removedValue = dequeueResult?.removed ?? dequeueResult?.response?.removed ?? undefined
   t.assert(
     'dequeueMessage() returns response with removed field',
     dequeueResult !== null && typeof removedValue === 'number'
   )
 
   // 5. dequeueMessage for non-existent returns removed: 0
-  t.assert(
-    'dequeueMessage() for non-existent returns removed: 0',
-    removedValue === 0
-  )
+  t.assert('dequeueMessage() for non-existent returns removed: 0', removedValue === 0)
 
   // 6. Session completed
   t.assertSome('Session completed (result message)', messages, (m) => m.type === 'result')

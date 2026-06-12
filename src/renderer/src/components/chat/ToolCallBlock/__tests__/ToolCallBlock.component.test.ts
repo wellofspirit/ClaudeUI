@@ -14,8 +14,6 @@
  *   6. onOpenTaskPanel → openTaskPanel store action
  */
 
- 
-
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import React from 'react'
 import { render, act } from '@testing-library/react'
@@ -30,7 +28,7 @@ vi.mock('../View', () => ({
   ToolCallBlockView: (props: ToolCallBlockViewProps) => {
     viewProps = props
     return null
-  },
+  }
 }))
 
 const ROUTE = 'route-tool-block'
@@ -43,13 +41,19 @@ function makeToolUseBlock(overrides: Partial<ToolUseBlock> = {}): ToolUseBlock {
     toolUseId: 'tu-1',
     toolName: 'Bash',
     toolInput: { command: 'ls' },
-    ...overrides,
+    ...overrides
   } as ToolUseBlock
 }
 
 describe('ToolCallBlock FC', () => {
   let app: TestApp
-  let respondCalls: Array<{ routingId: string; requestId: string; decision: string; answers: unknown; permissions: unknown }>
+  let respondCalls: Array<{
+    routingId: string
+    requestId: string
+    decision: string
+    answers: unknown
+    permissions: unknown
+  }>
   let backgroundCalls: Array<{ routingId: string; toolUseId: string }>
   let stopCalls: Array<{ routingId: string; toolUseId: string }>
   let watchCalls: Array<{ routingId: string; toolUseId: string }>
@@ -63,24 +67,46 @@ describe('ToolCallBlock FC', () => {
     watchCalls = []
     unwatchCalls = []
 
-    app.bridge.ipcMain.handle('session:approval-response', async (_e, routingId: string, requestId: string, decision: string, answers: unknown, permissions: unknown) => {
-      respondCalls.push({ routingId, requestId, decision, answers, permissions })
-    })
-    app.bridge.ipcMain.handle('session:background-task', async (_e, routingId: string, toolUseId: string) => {
-      backgroundCalls.push({ routingId, toolUseId })
-      return { success: true }
-    })
-    app.bridge.ipcMain.handle('session:stop-task', async (_e, routingId: string, toolUseId: string) => {
-      stopCalls.push({ routingId, toolUseId })
-      return { success: true }
-    })
+    app.bridge.ipcMain.handle(
+      'session:approval-response',
+      async (
+        _e,
+        routingId: string,
+        requestId: string,
+        decision: string,
+        answers: unknown,
+        permissions: unknown
+      ) => {
+        respondCalls.push({ routingId, requestId, decision, answers, permissions })
+      }
+    )
+    app.bridge.ipcMain.handle(
+      'session:background-task',
+      async (_e, routingId: string, toolUseId: string) => {
+        backgroundCalls.push({ routingId, toolUseId })
+        return { success: true }
+      }
+    )
+    app.bridge.ipcMain.handle(
+      'session:stop-task',
+      async (_e, routingId: string, toolUseId: string) => {
+        stopCalls.push({ routingId, toolUseId })
+        return { success: true }
+      }
+    )
     app.bridge.ipcMain.handle('log:error' as any, async () => {})
-    app.bridge.ipcMain.handle('session:watch-background', async (_e, routingId: string, toolUseId: string) => {
-      watchCalls.push({ routingId, toolUseId })
-    })
-    app.bridge.ipcMain.handle('session:unwatch-background', async (_e, routingId: string, toolUseId: string) => {
-      unwatchCalls.push({ routingId, toolUseId })
-    })
+    app.bridge.ipcMain.handle(
+      'session:watch-background',
+      async (_e, routingId: string, toolUseId: string) => {
+        watchCalls.push({ routingId, toolUseId })
+      }
+    )
+    app.bridge.ipcMain.handle(
+      'session:unwatch-background',
+      async (_e, routingId: string, toolUseId: string) => {
+        unwatchCalls.push({ routingId, toolUseId })
+      }
+    )
 
     useSessionStore.getState().createNewSession(ROUTE, '/d/repo')
     useSessionStore.setState({ activeSessionId: ROUTE })
@@ -91,7 +117,10 @@ describe('ToolCallBlock FC', () => {
     useSessionStore.setState({ activeSessionId: null, sessions: {} })
   })
 
-  async function renderFC(props: { block: ToolUseBlock; approval?: ReturnType<typeof makePendingApproval> }): Promise<void> {
+  async function renderFC(props: {
+    block: ToolUseBlock
+    approval?: ReturnType<typeof makePendingApproval>
+  }): Promise<void> {
     const { ToolCallBlock } = await import('../ToolCallBlock')
     await act(async () => {
       render(React.createElement(ToolCallBlock, props as any))
@@ -134,7 +163,9 @@ describe('ToolCallBlock FC', () => {
 
     await renderFC({ block: makeToolUseBlock(), approval })
 
-    const suggestions: PermissionSuggestion[] = [{ type: 'addRules', rules: [], destination: 'localSettings' } as PermissionSuggestion]
+    const suggestions: PermissionSuggestion[] = [
+      { type: 'addRules', rules: [], destination: 'localSettings' } as PermissionSuggestion
+    ]
     await act(async () => {
       await viewProps.onApproval('allow', suggestions)
     })
@@ -168,7 +199,9 @@ describe('ToolCallBlock FC', () => {
   it('onOpenTaskPanel opens the task panel for the current session', async () => {
     await renderFC({ block: makeToolUseBlock() })
 
-    act(() => { viewProps.onOpenTaskPanel() })
+    act(() => {
+      viewProps.onOpenTaskPanel()
+    })
 
     const session = useSessionStore.getState().sessions[ROUTE]
     expect(session.rightPanel).toBe('task')
@@ -178,7 +211,9 @@ describe('ToolCallBlock FC', () => {
     // Have the handler await a signal so we can observe the intermediate
     // "stopping flag set" state before the promise rejects the IPC.
     let resolveStop!: (v: { success: boolean; error?: string }) => void
-    const pendingStop = new Promise<{ success: boolean; error?: string }>((r) => { resolveStop = r })
+    const pendingStop = new Promise<{ success: boolean; error?: string }>((r) => {
+      resolveStop = r
+    })
     app.bridge.ipcMain.handle('session:stop-task', () => pendingStop)
 
     const block = makeToolUseBlock({ toolInput: { command: 'x', run_in_background: true } })
@@ -186,7 +221,9 @@ describe('ToolCallBlock FC', () => {
 
     // Kick off onStopTask but don't await — the FC synchronously sets the flag before awaiting the IPC
     let stopPromise!: Promise<void>
-    act(() => { stopPromise = viewProps.onStopTask() })
+    act(() => {
+      stopPromise = viewProps.onStopTask()
+    })
 
     // FC should have primed the flag to true
     expect(useSessionStore.getState().sessions[ROUTE].stoppingTaskIds).toContain('tu-1')
@@ -204,7 +241,9 @@ describe('ToolCallBlock FC', () => {
   it('onBackgroundTask on IPC failure resets isBackgrounding flag', async () => {
     // Pending IPC so we can observe the interim isBackgrounding=true state
     let resolveBg!: (v: { success: boolean; error?: string }) => void
-    const pendingBg = new Promise<{ success: boolean; error?: string }>((r) => { resolveBg = r })
+    const pendingBg = new Promise<{ success: boolean; error?: string }>((r) => {
+      resolveBg = r
+    })
     app.bridge.ipcMain.handle('session:background-task', () => pendingBg)
 
     const block = makeToolUseBlock({ toolInput: { command: 'x', run_in_background: false } })
@@ -213,10 +252,14 @@ describe('ToolCallBlock FC', () => {
     expect(viewProps.isBackgrounding).toBe(false)
 
     let bgPromise!: Promise<void>
-    act(() => { bgPromise = viewProps.onBackgroundTask() })
+    act(() => {
+      bgPromise = viewProps.onBackgroundTask()
+    })
 
     // FC synchronously flips isBackgrounding=true before awaiting
-    await act(async () => { await Promise.resolve() })
+    await act(async () => {
+      await Promise.resolve()
+    })
     expect(viewProps.isBackgrounding).toBe(true)
 
     await act(async () => {
@@ -237,7 +280,7 @@ describe('ToolCallBlock FC', () => {
   it('starts watchBackground for background bash without waiting for the View to expand', async () => {
     const block = makeToolUseBlock({
       toolInput: { command: 'sleep 10', run_in_background: true },
-      toolUseId: 'tu-bg-1',
+      toolUseId: 'tu-bg-1'
     })
     await renderFC({ block })
 
@@ -255,7 +298,7 @@ describe('ToolCallBlock FC', () => {
     const { ToolCallBlock } = await import('../ToolCallBlock')
     const block = makeToolUseBlock({
       toolInput: { command: 'sleep 10', run_in_background: true },
-      toolUseId: 'tu-bg-cleanup',
+      toolUseId: 'tu-bg-cleanup'
     })
     let result!: ReturnType<typeof render>
     await act(async () => {
@@ -263,7 +306,9 @@ describe('ToolCallBlock FC', () => {
     })
     expect(watchCalls).toEqual([{ routingId: ROUTE, toolUseId: 'tu-bg-cleanup' }])
 
-    await act(async () => { result.unmount() })
+    await act(async () => {
+      result.unmount()
+    })
     expect(unwatchCalls).toEqual([{ routingId: ROUTE, toolUseId: 'tu-bg-cleanup' }])
   })
 
@@ -271,13 +316,13 @@ describe('ToolCallBlock FC', () => {
     useSessionStore.setState((state) => ({
       sessions: {
         ...state.sessions,
-        [ROUTE]: { ...state.sessions[ROUTE], isHistorical: true },
-      },
+        [ROUTE]: { ...state.sessions[ROUTE], isHistorical: true }
+      }
     }))
 
     const block = makeToolUseBlock({
       toolInput: { command: 'sleep 10', run_in_background: true },
-      toolUseId: 'tu-bg-hist',
+      toolUseId: 'tu-bg-hist'
     })
     await renderFC({ block })
 
@@ -290,7 +335,9 @@ describe('ToolCallBlock FC', () => {
       const block = makeToolUseBlock({ toolInput: { command: 'x', run_in_background: true } })
       await renderFC({ block })
 
-      await act(async () => { await viewProps.onStopTask() })
+      await act(async () => {
+        await viewProps.onStopTask()
+      })
       expect(useSessionStore.getState().sessions[ROUTE].stoppingTaskIds).toContain('tu-1')
 
       await act(async () => {

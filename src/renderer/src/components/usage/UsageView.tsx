@@ -32,7 +32,8 @@ export function UsageView({ onClose }: UsageViewProps): React.JSX.Element {
     )
   }
 
-  const { currentBlock, recentBlocks, todaySnapshots, dailyHistory, accounts, accountFilter } = blockUsage
+  const { currentBlock, recentBlocks, todaySnapshots, dailyHistory, accounts, accountFilter } =
+    blockUsage
 
   return (
     <div className="flex flex-col h-full bg-bg-primary overflow-y-auto">
@@ -60,9 +61,7 @@ export function UsageView({ onClose }: UsageViewProps): React.JSX.Element {
         )}
 
         {/* 5hr API Usage Bar */}
-        {accountUsage && !accountUsage.error && (
-          <ApiUsageBar usage={accountUsage} />
-        )}
+        {accountUsage && !accountUsage.error && <ApiUsageBar usage={accountUsage} />}
 
         {/* Recent Blocks */}
         {recentBlocks.length > 0 && (
@@ -98,8 +97,18 @@ function Header({
   return (
     <div className="flex items-center justify-between px-4 h-12 [-webkit-app-region:drag]">
       <div className="flex items-center gap-2">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-accent">
-          <path d="M18 20V10" /><path d="M12 20V4" /><path d="M6 20v-6" />
+        <svg
+          width="16"
+          height="16"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          className="text-accent"
+        >
+          <path d="M18 20V10" />
+          <path d="M12 20V4" />
+          <path d="M6 20v-6" />
         </svg>
         <h2 className="text-sm font-semibold text-text-primary">Usage Analytics</h2>
         {children}
@@ -109,8 +118,17 @@ function Header({
         className="[-webkit-app-region:no-drag] flex items-center justify-center w-6 h-6 rounded-md hover:bg-bg-hover transition-colors cursor-default"
         title="Close"
       >
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-          <path d="M18 6L6 18" /><path d="M6 6l12 12" />
+        <svg
+          width="12"
+          height="12"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+        >
+          <path d="M18 6L6 18" />
+          <path d="M6 6l12 12" />
         </svg>
       </button>
     </div>
@@ -159,9 +177,7 @@ function Section({
         <h3 className="text-[11px] font-semibold text-text-secondary uppercase tracking-wider">
           {title}
         </h3>
-        {subtitle && (
-          <span className="text-[9px] text-text-muted">{subtitle}</span>
-        )}
+        {subtitle && <span className="text-[9px] text-text-muted">{subtitle}</span>}
       </div>
       {children}
     </div>
@@ -175,7 +191,9 @@ function CurrentBlockCard({ block }: { block: UsageBlock | null }): React.JSX.El
         <h3 className="text-[11px] font-semibold text-text-secondary uppercase tracking-wider mb-2">
           Current Block
         </h3>
-        <div className="text-text-muted text-[11px]">No active block — start using Claude to begin tracking</div>
+        <div className="text-text-muted text-[11px]">
+          No active block — start using Claude to begin tracking
+        </div>
       </div>
     )
   }
@@ -224,7 +242,8 @@ function CurrentBlockCard({ block }: { block: UsageBlock | null }): React.JSX.El
           <div className="text-[10px] text-text-muted pt-1">
             {formatTime(block.startTime)} – {formatTime(block.endTime)}
             <span className="ml-2 text-text-muted/60">
-              ({formatDuration(elapsed)} in{remaining > 0 ? `, ${formatDuration(remaining)} left` : ''})
+              ({formatDuration(elapsed)} in
+              {remaining > 0 ? `, ${formatDuration(remaining)} left` : ''})
             </span>
           </div>
         </div>
@@ -315,9 +334,7 @@ function ApiUsageBar({ usage }: { usage: AccountUsage }): React.JSX.Element {
         <h3 className="text-[11px] font-semibold text-text-secondary uppercase tracking-wider">
           5hr API Usage
         </h3>
-        {resetStr && (
-          <span className="text-[9px] text-text-muted">{resetStr}</span>
-        )}
+        {resetStr && <span className="text-[9px] text-text-muted">{resetStr}</span>}
       </div>
       <div className="flex items-center gap-3">
         <div className="flex-1 h-2 rounded-full bg-white/5 overflow-hidden">
@@ -345,8 +362,7 @@ function BlockRow({ block }: { block: UsageBlock }): React.JSX.Element {
 
   // Derive projected total from API %: if we used `total` tokens at `apiPct`%,
   // the window capacity is `total / (apiPct / 100)`.
-  const projTokens =
-    apiPct != null && apiPct > 0 ? Math.round(total / (apiPct / 100)) : null
+  const projTokens = apiPct != null && apiPct > 0 ? Math.round(total / (apiPct / 100)) : null
   const projCost =
     apiPct != null && apiPct > 0 && total > 0
       ? Math.round((block.costUsd / (apiPct / 100)) * 100) / 100
@@ -368,9 +384,7 @@ function BlockRow({ block }: { block: UsageBlock }): React.JSX.Element {
       {/* Cost: used / projected */}
       <span className="font-mono w-[120px] text-right shrink-0">
         <span className="text-text-muted">{formatCost(block.costUsd)}</span>
-        {projCost != null && (
-          <span className="text-text-muted/50"> / {formatCost(projCost)}</span>
-        )}
+        {projCost != null && <span className="text-text-muted/50"> / {formatCost(projCost)}</span>}
       </span>
       {/* Utilization bar + percentage */}
       {pct !== null ? (
@@ -401,7 +415,9 @@ function BlockRow({ block }: { block: UsageBlock }): React.JSX.Element {
         </div>
       )}
       {block.isActive && (
-        <span className="text-[8px] px-1 py-0.5 rounded bg-green-500/15 text-green-400">active</span>
+        <span className="text-[8px] px-1 py-0.5 rounded bg-green-500/15 text-green-400">
+          active
+        </span>
       )}
     </div>
   )

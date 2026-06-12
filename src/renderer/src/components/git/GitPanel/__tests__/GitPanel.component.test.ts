@@ -31,7 +31,7 @@ vi.mock('../View', () => ({
   GitPanelView: (props: GitPanelViewProps) => {
     viewProps = props
     return null
-  },
+  }
 }))
 
 // ---------------------------------------------------------------------------
@@ -61,7 +61,7 @@ function makeGitStatus(files: GitFileStatus[] = []): GitStatusData {
     unstaged: files.filter((f) => f.index === ' ').map((f) => f.path),
     untracked: [],
     linesAdded: 0,
-    linesRemoved: 0,
+    linesRemoved: 0
   }
 }
 
@@ -97,7 +97,7 @@ describe('GitPanel FC — rendered', () => {
       directories: [],
       recentSessionIds: [],
       pinnedSessionIds: [],
-      customTitles: {},
+      customTitles: {}
     })
   })
 
@@ -179,7 +179,7 @@ describe('GitPanel FC — rendered', () => {
 
   it('onToggleLayout toggles from single to double', async () => {
     useSessionStore.setState((s) => ({
-      settings: { ...s.settings, gitPanelLayout: 'single' },
+      settings: { ...s.settings, gitPanelLayout: 'single' }
     }))
 
     await act(async () => {
@@ -195,7 +195,7 @@ describe('GitPanel FC — rendered', () => {
 
   it('onToggleLayout toggles from double to single', async () => {
     useSessionStore.setState((s) => ({
-      settings: { ...s.settings, gitPanelLayout: 'double' },
+      settings: { ...s.settings, gitPanelLayout: 'double' }
     }))
 
     await act(async () => {
@@ -215,7 +215,7 @@ describe('GitPanel FC — rendered', () => {
 
   it('passes isDouble=true when layout is double', async () => {
     useSessionStore.setState((s) => ({
-      settings: { ...s.settings, gitPanelLayout: 'double' },
+      settings: { ...s.settings, gitPanelLayout: 'double' }
     }))
 
     await act(async () => {
@@ -227,7 +227,7 @@ describe('GitPanel FC — rendered', () => {
 
   it('passes isDouble=false when layout is single', async () => {
     useSessionStore.setState((s) => ({
-      settings: { ...s.settings, gitPanelLayout: 'single' },
+      settings: { ...s.settings, gitPanelLayout: 'single' }
     }))
 
     await act(async () => {

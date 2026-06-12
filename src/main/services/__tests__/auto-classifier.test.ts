@@ -87,11 +87,13 @@ describe('auto-classifier', () => {
       const messages: TranscriptMessage[] = [
         {
           role: 'assistant',
-          content: [{
-            type: 'tool_use',
-            toolName: 'Bash',
-            toolInput: { command: 'ls -la' }
-          }]
+          content: [
+            {
+              type: 'tool_use',
+              toolName: 'Bash',
+              toolInput: { command: 'ls -la' }
+            }
+          ]
         }
       ]
       const result = buildTranscript(messages)
@@ -104,10 +106,12 @@ describe('auto-classifier', () => {
       const messages: TranscriptMessage[] = [
         {
           role: 'user',
-          content: [{
-            type: 'tool_result',
-            toolResult: longResult
-          }]
+          content: [
+            {
+              type: 'tool_result',
+              toolResult: longResult
+            }
+          ]
         }
       ]
       const result = buildTranscript(messages)
@@ -121,10 +125,12 @@ describe('auto-classifier', () => {
       const messages: TranscriptMessage[] = [
         {
           role: 'user',
-          content: [{
-            type: 'tool_result',
-            toolResult: 'short result'
-          }]
+          content: [
+            {
+              type: 'tool_result',
+              toolResult: 'short result'
+            }
+          ]
         }
       ]
       const result = buildTranscript(messages)
@@ -165,9 +171,7 @@ describe('auto-classifier', () => {
     })
 
     it('handles messages with empty content', () => {
-      const messages: TranscriptMessage[] = [
-        { role: 'user', content: [] }
-      ]
+      const messages: TranscriptMessage[] = [{ role: 'user', content: [] }]
       const result = buildTranscript(messages)
       expect(result).toBe('')
     })

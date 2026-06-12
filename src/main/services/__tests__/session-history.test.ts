@@ -22,7 +22,9 @@ interface TaskNotification {
   }
 }
 
-function parseTaskNotificationXml(text: string): Omit<TaskNotification, 'toolUseId' | 'outputFile'> | null {
+function parseTaskNotificationXml(
+  text: string
+): Omit<TaskNotification, 'toolUseId' | 'outputFile'> | null {
   const match = text.match(/<task-notification>([\s\S]*?)<\/task-notification>/)
   if (!match) return null
 
@@ -46,7 +48,7 @@ function parseTaskNotificationXml(text: string): Omit<TaskNotification, 'toolUse
     usage = {
       totalTokens: getNum('total_tokens'),
       toolUses: getNum('tool_uses'),
-      durationMs: getNum('duration_ms'),
+      durationMs: getNum('duration_ms')
     }
   }
 
@@ -54,23 +56,26 @@ function parseTaskNotificationXml(text: string): Omit<TaskNotification, 'toolUse
   return { taskId, status, summary, usage }
 }
 
-function parseCliCommand(text: string): { commandName: string; commandArgs?: string; commandOutput?: string } | null {
+function parseCliCommand(
+  text: string
+): { commandName: string; commandArgs?: string; commandOutput?: string } | null {
   const nameMatch = text.match(/<command-name>([\s\S]*?)<\/command-name>/)
   if (nameMatch) {
     const commandName = nameMatch[1].trim()
     const argsMatch = text.match(/<command-args>([\s\S]*?)<\/command-args>/)
     return {
       commandName,
-      commandArgs: argsMatch ? argsMatch[1].trim() : undefined,
+      commandArgs: argsMatch ? argsMatch[1].trim() : undefined
     }
   }
   const stdoutMatch = text.match(/<local-command-stdout>([\s\S]*?)<\/local-command-stdout>/)
   const stderrMatch = text.match(/<local-command-stderr>([\s\S]*?)<\/local-command-stderr>/)
   if (stdoutMatch || stderrMatch) {
-    const output = (stdoutMatch?.[1] || '') + (stderrMatch ? (stdoutMatch ? '\n' : '') + stderrMatch[1] : '')
+    const output =
+      (stdoutMatch?.[1] || '') + (stderrMatch ? (stdoutMatch ? '\n' : '') + stderrMatch[1] : '')
     return {
       commandName: 'output',
-      commandOutput: output.trim() || undefined,
+      commandOutput: output.trim() || undefined
     }
   }
   if (text.includes('<local-command-caveat>')) return null
@@ -103,7 +108,7 @@ describe('parseTaskNotificationXml', () => {
     expect(result!.usage).toEqual({
       totalTokens: 5000,
       toolUses: 3,
-      durationMs: 12000,
+      durationMs: 12000
     })
   })
 

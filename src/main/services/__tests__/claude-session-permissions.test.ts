@@ -103,9 +103,7 @@ describe('ClaudeSession permission mode', () => {
     it('updates mode and notifies UI', async () => {
       await session.setPermissionMode('acceptEdits')
       expect(session.permissionMode).toBe('acceptEdits')
-      expect(session.sent).toEqual([
-        { channel: 'session:permission-mode', args: ['acceptEdits'] }
-      ])
+      expect(session.sent).toEqual([{ channel: 'session:permission-mode', args: ['acceptEdits'] }])
     })
 
     it('forwards mode to active query', async () => {
@@ -148,9 +146,10 @@ describe('ClaudeSession permission mode', () => {
   describe('localAuto fallback', () => {
     it('falls back to localAuto when SDK rejects auto', async () => {
       session.permissionMode = 'default'
-      const setMode = vi.fn()
-        .mockRejectedValueOnce(new Error('auto mode gate failed'))  // rejects 'auto'
-        .mockResolvedValue(undefined)                                // accepts 'acceptEdits'
+      const setMode = vi
+        .fn()
+        .mockRejectedValueOnce(new Error('auto mode gate failed')) // rejects 'auto'
+        .mockResolvedValue(undefined) // accepts 'acceptEdits'
       session.activeQuery = { setPermissionMode: setMode }
 
       // Should NOT throw — auto rejection is handled gracefully
@@ -176,18 +175,14 @@ describe('ClaudeSession permission mode', () => {
       expect(session.permissionMode).toBe('localAuto')
       expect(setMode).toHaveBeenCalledWith('acceptEdits')
       expect(setMode).not.toHaveBeenCalledWith('localAuto')
-      expect(session.sent).toEqual([
-        { channel: 'session:permission-mode', args: ['localAuto'] }
-      ])
+      expect(session.sent).toEqual([{ channel: 'session:permission-mode', args: ['localAuto'] }])
     })
 
     it('handles localAuto without active query (pre-session)', async () => {
       session.activeQuery = null
       await session.setPermissionMode('localAuto')
       expect(session.permissionMode).toBe('localAuto')
-      expect(session.sent).toEqual([
-        { channel: 'session:permission-mode', args: ['localAuto'] }
-      ])
+      expect(session.sent).toEqual([{ channel: 'session:permission-mode', args: ['localAuto'] }])
     })
 
     it('auto mode succeeds when SDK accepts it (paid Anthropic plans)', async () => {
@@ -208,9 +203,7 @@ describe('ClaudeSession permission mode', () => {
       session = new TestClaudeSession('auto')
       session.handleInitMessage({ permissionMode: 'default' })
       expect(session.permissionMode).toBe('default')
-      expect(session.sent).toEqual([
-        { channel: 'session:permission-mode', args: ['default'] }
-      ])
+      expect(session.sent).toEqual([{ channel: 'session:permission-mode', args: ['default'] }])
     })
 
     it('does not notify when mode matches', () => {
@@ -253,9 +246,7 @@ describe('ClaudeSession permission mode', () => {
     it('updates mode when CLI changes it', () => {
       session.handleStatusMessage({ permissionMode: 'plan' })
       expect(session.permissionMode).toBe('plan')
-      expect(session.sent).toEqual([
-        { channel: 'session:permission-mode', args: ['plan'] }
-      ])
+      expect(session.sent).toEqual([{ channel: 'session:permission-mode', args: ['plan'] }])
     })
 
     it('ignores when mode matches current', () => {
@@ -300,7 +291,15 @@ describe('ClaudeSession permission mode', () => {
     })
 
     it('accepts all valid modes', () => {
-      for (const mode of ['default', 'acceptEdits', 'bypassPermissions', 'plan', 'dontAsk', 'auto', 'localAuto']) {
+      for (const mode of [
+        'default',
+        'acceptEdits',
+        'bypassPermissions',
+        'plan',
+        'dontAsk',
+        'auto',
+        'localAuto'
+      ]) {
         expect(new TestClaudeSession(mode).permissionMode).toBe(mode)
       }
     })

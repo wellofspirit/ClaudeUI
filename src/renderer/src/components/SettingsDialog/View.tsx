@@ -31,7 +31,7 @@ export function SettingsDialogView({
   onSearchChange,
   onSelectSection,
   onScrollTo,
-  onClose,
+  onClose
 }: SettingsDialogViewProps): React.JSX.Element {
   const contentRef = useRef<HTMLDivElement>(null)
   const sectionRefs = useRef<Record<string, HTMLDivElement | null>>({})
@@ -65,17 +65,20 @@ export function SettingsDialogView({
     return () => container.removeEventListener('scroll', handleScroll)
   }, [filteredSections, onSelectSection])
 
-  const scrollToSection = useCallback((id: string): void => {
-    onScrollTo(id)
-    const el = sectionRefs.current[id]
-    if (el && contentRef.current) {
-      isScrollingFromClick.current = true
-      el.scrollIntoView({ behavior: 'smooth', block: 'start' })
-      setTimeout(() => {
-        isScrollingFromClick.current = false
-      }, 500)
-    }
-  }, [onScrollTo])
+  const scrollToSection = useCallback(
+    (id: string): void => {
+      onScrollTo(id)
+      const el = sectionRefs.current[id]
+      if (el && contentRef.current) {
+        isScrollingFromClick.current = true
+        el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+        setTimeout(() => {
+          isScrollingFromClick.current = false
+        }, 500)
+      }
+    },
+    [onScrollTo]
+  )
 
   return (
     <div
@@ -112,8 +115,7 @@ export function SettingsDialogView({
           {/* Left nav */}
           <nav className="w-[180px] border-r border-border/50 py-2 px-2 shrink-0 overflow-y-auto">
             {SECTIONS.map((section) => {
-              const hasMatches =
-                !search.trim() || filteredSections.some((s) => s.id === section.id)
+              const hasMatches = !search.trim() || filteredSections.some((s) => s.id === section.id)
               return (
                 <button
                   key={section.id}
@@ -200,7 +202,10 @@ export function SettingsDialogView({
             {/* Version info footer */}
             {versionInfo && (
               <div className="px-4 py-1.5 text-[11px] text-text-muted/50 text-right border-t border-border/30">
-                {/^\d/.test(versionInfo.appVersion) ? `v${versionInfo.appVersion}` : versionInfo.appVersion} · SDK {versionInfo.sdkVersion} · CLI {versionInfo.cliVersion}
+                {/^\d/.test(versionInfo.appVersion)
+                  ? `v${versionInfo.appVersion}`
+                  : versionInfo.appVersion}{' '}
+                · SDK {versionInfo.sdkVersion} · CLI {versionInfo.cliVersion}
               </div>
             )}
           </div>

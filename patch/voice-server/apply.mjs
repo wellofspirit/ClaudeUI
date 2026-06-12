@@ -150,7 +150,9 @@ if (src.includes(PATCH_A_MARKER)) {
   // Multiple match sites are fine as long as they all reference the same helper.
   const successNames = new Set(successMatches.map((m) => m[1]))
   if (successNames.size > 1) {
-    console.error(`ERROR: Success response helper pattern resolved to multiple names: ${[...successNames].join(', ')}`)
+    console.error(
+      `ERROR: Success response helper pattern resolved to multiple names: ${[...successNames].join(', ')}`
+    )
     process.exit(1)
   }
   const successFn = successMatches[0][1]
@@ -177,36 +179,36 @@ if (src.includes(PATCH_A_MARKER)) {
     `let{createServer:__cs}=await import("node:net");` +
     `let{createInterface:__ci}=await import("node:readline");` +
     `let __s=__cs((__c)=>{` +
-      `let __st=null,__buf=[];` +
-      `let __rl=__ci({input:__c});` +
-      `let __send=(o)=>{try{__c.write(JSON.stringify(o)+"\\n")}catch{}};` +
-      `__rl.on("line",(l)=>{` +
-        `let m;try{m=JSON.parse(l)}catch{return}` +
-        `if(m.type==="voice_start"){` +
-          `let lang=m.language||"en";` +
-          `${us1Name}();` +  // trigger lazy init of bs1 (finalize timeouts)
-          `${hb8Name}({` +
-            `onTranscript:(text,isFinal)=>{__send({type:"transcript",text,isFinal})},` +
-            `onError:(msg)=>{__send({type:"error",message:String(msg)})},` +
-            `onClose:()=>{__send({type:"closed"});__st=null},` +
-            `onReady:(stream)=>{` +
-              `__st=stream;` +
-              `for(let b of __buf)stream.send(b);` +
-              `__buf=[];` +
-              `__send({type:"ready"})` +
-            `}` +
-          `},{language:lang,keyterms:m.keyterms||[]}).then((s)=>{` +
-            `if(!s)__send({type:"error",message:"Failed to connect voice stream"})` +
-          `})` +
-        `}else if(m.type==="audio"){` +
-          `let b=Buffer.from(m.data,"base64");` +
-          `if(__st)__st.send(b);else __buf.push(b)` +
-        `}else if(m.type==="voice_stop"){` +
-          `if(__st)__st.finalize().then(()=>{if(__st){__st.close();__st=null}}).catch(()=>{})` +
-        `}` +
-      `});` +
-      `__c.on("close",()=>{if(__st){__st.close();__st=null}__buf=[]});` +
-      `__c.on("error",()=>{})` +
+    `let __st=null,__buf=[];` +
+    `let __rl=__ci({input:__c});` +
+    `let __send=(o)=>{try{__c.write(JSON.stringify(o)+"\\n")}catch{}};` +
+    `__rl.on("line",(l)=>{` +
+    `let m;try{m=JSON.parse(l)}catch{return}` +
+    `if(m.type==="voice_start"){` +
+    `let lang=m.language||"en";` +
+    `${us1Name}();` + // trigger lazy init of bs1 (finalize timeouts)
+    `${hb8Name}({` +
+    `onTranscript:(text,isFinal)=>{__send({type:"transcript",text,isFinal})},` +
+    `onError:(msg)=>{__send({type:"error",message:String(msg)})},` +
+    `onClose:()=>{__send({type:"closed"});__st=null},` +
+    `onReady:(stream)=>{` +
+    `__st=stream;` +
+    `for(let b of __buf)stream.send(b);` +
+    `__buf=[];` +
+    `__send({type:"ready"})` +
+    `}` +
+    `},{language:lang,keyterms:m.keyterms||[]}).then((s)=>{` +
+    `if(!s)__send({type:"error",message:"Failed to connect voice stream"})` +
+    `})` +
+    `}else if(m.type==="audio"){` +
+    `let b=Buffer.from(m.data,"base64");` +
+    `if(__st)__st.send(b);else __buf.push(b)` +
+    `}else if(m.type==="voice_stop"){` +
+    `if(__st)__st.finalize().then(()=>{if(__st){__st.close();__st=null}}).catch(()=>{})` +
+    `}` +
+    `});` +
+    `__c.on("close",()=>{if(__st){__st.close();__st=null}__buf=[]});` +
+    `__c.on("error",()=>{})` +
     `});` +
     `await new Promise(r=>__s.listen(0,"127.0.0.1",r));` +
     `globalThis.__vs=__s;` +
@@ -238,4 +240,6 @@ if (src.includes(PATCH_A_MARKER)) {
 console.log('')
 console.log('What this does:')
 console.log('  Part A (cli.js): voice_server_start / voice_server_stop control requests.')
-console.log('  Part B (sdk.mjs) was removed — voiceServerStart/voiceServerStop live in src/main/sdk/.')
+console.log(
+  '  Part B (sdk.mjs) was removed — voiceServerStart/voiceServerStop live in src/main/sdk/.'
+)

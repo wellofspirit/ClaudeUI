@@ -8,8 +8,6 @@
  *   4. Ctrl/Cmd+Shift+Enter triggers onSend
  */
 
- 
-
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import React from 'react'
 import { render, act } from '@testing-library/react'
@@ -24,7 +22,7 @@ vi.mock('../View', () => ({
   PlanReviewBarView: (props: PlanReviewBarViewProps) => {
     viewProps = props
     return null
-  },
+  }
 }))
 
 const ROUTE = 'route-plan-bar'
@@ -38,7 +36,7 @@ function makeComment(overrides: Partial<PlanComment> = {}): PlanComment {
     endLineNumber: 1,
     sectionIndex: 0,
     createdAt: Date.now(),
-    ...overrides,
+    ...overrides
   } as PlanComment
 }
 
@@ -50,15 +48,20 @@ describe('PlanReviewBar FC', () => {
     app = await bootTestApp()
     respondCalls = []
 
-    app.bridge.ipcMain.handle('session:approval-response', async (_e, _rid: string, _reqId: string, decision: string, answers: unknown) => {
-      respondCalls.push({ decision, answers })
-    })
+    app.bridge.ipcMain.handle(
+      'session:approval-response',
+      async (_e, _rid: string, _reqId: string, decision: string, answers: unknown) => {
+        respondCalls.push({ decision, answers })
+      }
+    )
 
     useSessionStore.getState().createNewSession(ROUTE, '/d/repo')
     useSessionStore.setState({ activeSessionId: ROUTE })
     useSessionStore.getState().openPlanPanel(ROUTE, 'plan', 'req-1')
     // Put the approval in pendingApprovals so approvalStillPending=true
-    useSessionStore.getState().addPendingApproval(ROUTE, makePendingApproval({ requestId: 'req-1' }))
+    useSessionStore
+      .getState()
+      .addPendingApproval(ROUTE, makePendingApproval({ requestId: 'req-1' }))
   })
 
   afterEach(() => {
@@ -91,7 +94,9 @@ describe('PlanReviewBar FC', () => {
   it('onSend is a no-op when there are no comments', async () => {
     await renderFC([])
 
-    await act(async () => { await viewProps.onSend() })
+    await act(async () => {
+      await viewProps.onSend()
+    })
 
     expect(respondCalls).toHaveLength(0)
   })
@@ -100,7 +105,9 @@ describe('PlanReviewBar FC', () => {
     useSessionStore.getState().removePendingApproval(ROUTE, 'req-1')
     await renderFC([makeComment()])
 
-    await act(async () => { await viewProps.onSend() })
+    await act(async () => {
+      await viewProps.onSend()
+    })
 
     expect(respondCalls).toHaveLength(0)
     expect(viewProps.approvalStillPending).toBe(false)
@@ -110,7 +117,9 @@ describe('PlanReviewBar FC', () => {
     await renderFC([makeComment()])
 
     await act(async () => {
-      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', shiftKey: true, ctrlKey: true }))
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', shiftKey: true, ctrlKey: true })
+      )
       await new Promise((r) => setTimeout(r, 0))
     })
 

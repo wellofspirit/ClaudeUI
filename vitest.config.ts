@@ -3,7 +3,7 @@ import { resolve } from 'path'
 
 const sharedAlias = {
   '@renderer': resolve(__dirname, 'src/renderer/src'),
-  '@test': resolve(__dirname, 'src/test'),
+  '@test': resolve(__dirname, 'src/test')
 }
 
 export default defineConfig({
@@ -24,7 +24,7 @@ export default defineConfig({
           setupFiles: ['./src/test/setup/jsdom.setup.ts'],
           include: [
             'src/**/__tests__/**/*.test.{ts,tsx}',
-            'src/**/__tests__/**/*.unit.test.{ts,tsx}',
+            'src/**/__tests__/**/*.unit.test.{ts,tsx}'
           ],
           // Git-backed filesystem tests are slow (real simple-git subprocess
           // calls on Windows cost ~150-200ms each). They live in their own
@@ -36,10 +36,10 @@ export default defineConfig({
             '**/dist/**',
             '**/.{idea,git,cache,output,temp}/**',
             'src/main/services/__tests__/git-service*.test.ts',
-            'src/main/services/__tests__/worktree.test.ts',
+            'src/main/services/__tests__/worktree.test.ts'
           ],
-          testTimeout: 5000,
-        },
+          testTimeout: 5000
+        }
       },
       {
         resolve: { alias: sharedAlias },
@@ -50,10 +50,10 @@ export default defineConfig({
           setupFiles: ['./src/test/setup/node.setup.ts'],
           include: [
             'src/main/services/__tests__/git-service*.test.ts',
-            'src/main/services/__tests__/worktree.test.ts',
+            'src/main/services/__tests__/worktree.test.ts'
           ],
-          testTimeout: 30000,
-        },
+          testTimeout: 30000
+        }
       },
       {
         resolve: { alias: sharedAlias },
@@ -63,8 +63,8 @@ export default defineConfig({
           globals: true,
           setupFiles: ['./src/test/setup/jsdom.setup.ts'],
           include: ['src/**/__tests__/**/*.component.test.{ts,tsx}'],
-          testTimeout: 10000,
-        },
+          testTimeout: 10000
+        }
       },
       {
         resolve: { alias: sharedAlias },
@@ -74,8 +74,8 @@ export default defineConfig({
           globals: true,
           setupFiles: ['./src/test/setup/jsdom.setup.ts'],
           include: ['src/e2e/**/*.e2e.test.{ts,tsx}'],
-          testTimeout: 30000,
-        },
+          testTimeout: 30000
+        }
       },
       {
         resolve: { alias: sharedAlias },
@@ -85,9 +85,9 @@ export default defineConfig({
           globals: true,
           setupFiles: ['./src/test/setup/node.setup.ts'],
           include: ['src/integration/**/*.integration.test.ts'],
-          testTimeout: 60000,
-        },
-      },
-    ],
-  },
+          testTimeout: 60000
+        }
+      }
+    ]
+  }
 })

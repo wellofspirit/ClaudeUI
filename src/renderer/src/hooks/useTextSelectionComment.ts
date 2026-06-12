@@ -16,16 +16,16 @@ export interface TextSelection {
  */
 export function normalizeForMatching(s: string): string {
   return s
-    .replace(/\*\*(.+?)\*\*/g, '$1')   // **bold**
-    .replace(/\*(.+?)\*/g, '$1')        // *italic*
-    .replace(/__(.+?)__/g, '$1')        // __bold__
-    .replace(/_(.+?)_/g, '$1')          // _italic_
-    .replace(/~~(.+?)~~/g, '$1')        // ~~strikethrough~~
-    .replace(/`(.+?)`/g, '$1')          // `code`
-    .replace(/^#{1,6}\s+/gm, '')        // # headings
-    .replace(/^\s*[-*+]\s+/gm, '')      // - list items
-    .replace(/^\s*\d+\.\s+/gm, '')      // 1. ordered list items
-    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')  // [link](url)
+    .replace(/\*\*(.+?)\*\*/g, '$1') // **bold**
+    .replace(/\*(.+?)\*/g, '$1') // *italic*
+    .replace(/__(.+?)__/g, '$1') // __bold__
+    .replace(/_(.+?)_/g, '$1') // _italic_
+    .replace(/~~(.+?)~~/g, '$1') // ~~strikethrough~~
+    .replace(/`(.+?)`/g, '$1') // `code`
+    .replace(/^#{1,6}\s+/gm, '') // # headings
+    .replace(/^\s*[-*+]\s+/gm, '') // - list items
+    .replace(/^\s*\d+\.\s+/gm, '') // 1. ordered list items
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1') // [link](url)
     .replace(/\s+/g, ' ')
     .trim()
 }

@@ -39,12 +39,11 @@ function LiveHarness() {
 }
 
 beforeEach(() => {
-   
   ;(globalThis as any).window.api = {
-    saveSettings: vi.fn(),
+    saveSettings: vi.fn()
   }
   useSessionStore.setState((s) => ({
-    settings: { ...s.settings, searchCaseSensitive: false },
+    settings: { ...s.settings, searchCaseSensitive: false }
   }))
 })
 

@@ -10,10 +10,7 @@ import type { DiffHunk, DiffLine, DiffRowData, HunkGap, SplitRowData } from './t
  * "Between" gaps are merged into the adjacent hunk header (GitHub-style).
  * "Before" and "after" gaps are standalone expand rows.
  */
-export function buildUnifiedRows(
-  hunks: DiffHunk[],
-  totalOldLines?: number
-): DiffRowData[] {
+export function buildUnifiedRows(hunks: DiffHunk[], totalOldLines?: number): DiffRowData[] {
   const rows: DiffRowData[] = []
 
   for (let hi = 0; hi < hunks.length; hi++) {
@@ -24,12 +21,8 @@ export function buildUnifiedRows(
 
     // Gap before this hunk
     if (totalOldLines != null) {
-      const gapOldStart = prevHunk
-        ? prevHunk.oldStart + prevHunk.oldCount
-        : 1
-      const gapNewStart = prevHunk
-        ? prevHunk.newStart + prevHunk.newCount
-        : 1
+      const gapOldStart = prevHunk ? prevHunk.oldStart + prevHunk.oldCount : 1
+      const gapNewStart = prevHunk ? prevHunk.newStart + prevHunk.newCount : 1
       const gapCount = hunk.oldStart - gapOldStart
 
       if (gapCount > 0) {
@@ -41,10 +34,13 @@ export function buildUnifiedRows(
     // Hunk header — only show when there's a gap to expand
     if (adjacentGap) {
       const hunkPosition =
-        hunks.length === 1 ? 'only' as const
-          : hi === 0 ? 'first' as const
-            : hi === hunks.length - 1 ? 'last' as const
-              : 'middle' as const
+        hunks.length === 1
+          ? ('only' as const)
+          : hi === 0
+            ? ('first' as const)
+            : hi === hunks.length - 1
+              ? ('last' as const)
+              : ('middle' as const)
       rows.push({ kind: 'hunk-header', hunk, hunkIndex: hi, adjacentGap, hunkPosition })
     }
 
@@ -65,7 +61,7 @@ export function buildUnifiedRows(
       rows.push({
         kind: 'gap',
         gap: { count: gapCount, oldStart: gapOldStart, newStart: gapNewStart },
-        position: 'after',
+        position: 'after'
       })
     }
   }
@@ -80,10 +76,7 @@ export function buildUnifiedRows(
  * Context lines appear on both sides.
  * Unpaired dels go left-only, unpaired adds go right-only.
  */
-export function buildSplitRows(
-  hunks: DiffHunk[],
-  totalOldLines?: number
-): SplitRowData[] {
+export function buildSplitRows(hunks: DiffHunk[], totalOldLines?: number): SplitRowData[] {
   const rows: SplitRowData[] = []
 
   for (let hi = 0; hi < hunks.length; hi++) {
@@ -94,12 +87,8 @@ export function buildSplitRows(
 
     // Gap before this hunk
     if (totalOldLines != null) {
-      const gapOldStart = prevHunk
-        ? prevHunk.oldStart + prevHunk.oldCount
-        : 1
-      const gapNewStart = prevHunk
-        ? prevHunk.newStart + prevHunk.newCount
-        : 1
+      const gapOldStart = prevHunk ? prevHunk.oldStart + prevHunk.oldCount : 1
+      const gapNewStart = prevHunk ? prevHunk.newStart + prevHunk.newCount : 1
       const gapCount = hunk.oldStart - gapOldStart
 
       if (gapCount > 0) {
@@ -110,10 +99,13 @@ export function buildSplitRows(
     // Hunk header — only show when there's a gap to expand
     if (adjacentGap) {
       const hunkPosition =
-        hunks.length === 1 ? 'only' as const
-          : hi === 0 ? 'first' as const
-            : hi === hunks.length - 1 ? 'last' as const
-              : 'middle' as const
+        hunks.length === 1
+          ? ('only' as const)
+          : hi === 0
+            ? ('first' as const)
+            : hi === hunks.length - 1
+              ? ('last' as const)
+              : ('middle' as const)
       rows.push({ kind: 'hunk-header', hunk, hunkIndex: hi, adjacentGap, hunkPosition })
     }
 
@@ -125,7 +117,7 @@ export function buildSplitRows(
         rows.push({
           kind: 'line',
           row: { left: lines[i], right: lines[i] },
-          hunkIndex: hi,
+          hunkIndex: hi
         })
         i++
       } else {
@@ -146,9 +138,9 @@ export function buildSplitRows(
             kind: 'line',
             row: {
               left: j < dels.length ? dels[j] : null,
-              right: j < adds.length ? adds[j] : null,
+              right: j < adds.length ? adds[j] : null
             },
-            hunkIndex: hi,
+            hunkIndex: hi
           })
         }
       }
@@ -166,7 +158,7 @@ export function buildSplitRows(
       rows.push({
         kind: 'gap',
         gap: { count: gapCount, oldStart: gapOldStart, newStart: gapNewStart },
-        position: 'after',
+        position: 'after'
       })
     }
   }
@@ -178,11 +170,7 @@ export function buildSplitRows(
  * Expand a gap by inserting context lines from full file content.
  * Returns new hunk lines to replace the gap.
  */
-export function expandGap(
-  gap: HunkGap,
-  oldContent: string,
-  _newContent: string
-): DiffLine[] {
+export function expandGap(gap: HunkGap, oldContent: string, _newContent: string): DiffLine[] {
   const oldLines = oldContent.split('\n')
   const lines: DiffLine[] = []
 
@@ -192,7 +180,7 @@ export function expandGap(
       type: 'context',
       content: oldIdx < oldLines.length ? oldLines[oldIdx] : '',
       oldLineNumber: gap.oldStart + i,
-      newLineNumber: gap.newStart + i,
+      newLineNumber: gap.newStart + i
     })
   }
 

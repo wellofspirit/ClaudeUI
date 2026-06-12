@@ -55,7 +55,7 @@ describe('loadSessionHistory — model fallback warnings', () => {
         userType: 'external',
         message: { role: 'user', content: 'hello' },
         uuid: 'u1',
-        timestamp: TS,
+        timestamp: TS
       },
       {
         type: 'system',
@@ -67,14 +67,12 @@ describe('loadSessionHistory — model fallback warnings', () => {
         fallbackModel: 'claude-opus-4-8',
         level: 'warning',
         uuid: 's1',
-        timestamp: TS,
-      },
+        timestamp: TS
+      }
     ])
 
     const result = await loadSessionHistory(SESSION_ID, PROJECT_KEY)
-    expect(result.warnings).toEqual([
-      'Safety measures flagged this message. Switched to Opus 4.8.',
-    ])
+    expect(result.warnings).toEqual(['Safety measures flagged this message. Switched to Opus 4.8.'])
     // The system entry must not leak into the visible message list
     expect(result.messages).toHaveLength(1)
     expect(result.messages[0].role).toBe('user')
@@ -89,14 +87,12 @@ describe('loadSessionHistory — model fallback warnings', () => {
         originalModel: 'claude-opus-4-8',
         fallbackModel: 'claude-sonnet-4-6',
         uuid: 's1',
-        timestamp: TS,
-      },
+        timestamp: TS
+      }
     ])
 
     const result = await loadSessionHistory(SESSION_ID, PROJECT_KEY)
-    expect(result.warnings).toEqual([
-      'Switched models from claude-opus-4-8 to claude-sonnet-4-6.',
-    ])
+    expect(result.warnings).toEqual(['Switched models from claude-opus-4-8 to claude-sonnet-4-6.'])
   })
 
   it('returns empty warnings for a transcript without fallback events', async () => {
@@ -106,8 +102,8 @@ describe('loadSessionHistory — model fallback warnings', () => {
         userType: 'external',
         message: { role: 'user', content: 'hello' },
         uuid: 'u1',
-        timestamp: TS,
-      },
+        timestamp: TS
+      }
     ])
 
     const result = await loadSessionHistory(SESSION_ID, PROJECT_KEY)
@@ -125,20 +121,20 @@ describe('loadSessionHistory — model fallback warnings', () => {
             {
               type: 'fallback',
               from: { model: 'claude-fable-5' },
-              to: { model: 'claude-opus-4-8' },
-            },
-          ],
+              to: { model: 'claude-opus-4-8' }
+            }
+          ]
         },
         uuid: 'a1',
-        timestamp: TS,
-      },
+        timestamp: TS
+      }
     ])
 
     const result = await loadSessionHistory(SESSION_ID, PROJECT_KEY)
     expect(result.messages).toHaveLength(1)
     expect(result.messages[0].content[0]).toEqual({
       type: 'text',
-      text: 'Switched models from claude-fable-5 to claude-opus-4-8.',
+      text: 'Switched models from claude-fable-5 to claude-opus-4-8.'
     })
   })
 })

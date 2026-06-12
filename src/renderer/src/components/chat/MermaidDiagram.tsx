@@ -32,9 +32,9 @@ const THEME_CONFIGS: Record<ThemeId, MermaidThemeConfig> = {
       primaryColor: '#152540',
       primaryTextColor: '#d1d5db',
       primaryBorderColor: '#6c9eff',
-      lineColor: '#6c9eff',              // blue edges for visibility
-      secondaryColor: '#1a1535',          // purple tint for variety
-      tertiaryColor: '#0f2a20',           // green tint
+      lineColor: '#6c9eff', // blue edges for visibility
+      secondaryColor: '#1a1535', // purple tint for variety
+      tertiaryColor: '#0f2a20', // green tint
       textColor: '#d1d5db',
       mainBkg: '#152540',
       nodeBorder: '#6c9eff',
@@ -111,20 +111,20 @@ const THEME_CONFIGS: Record<ThemeId, MermaidThemeConfig> = {
     variables: {
       background: 'transparent',
       // Nodes — tinted cyan bg so they clearly stand out from the dark canvas
-      primaryColor: '#1a3a42',            // dark cyan-tinted fill
+      primaryColor: '#1a3a42', // dark cyan-tinted fill
       primaryTextColor: '#f8f8f2',
-      primaryBorderColor: '#66d9ef',      // cyan border
+      primaryBorderColor: '#66d9ef', // cyan border
       // Edges — orange (Monokai keyword-like) for good contrast
       lineColor: '#fd971f',
       // Secondary/tertiary — purple and green tinted fills for variety
-      secondaryColor: '#2a2540',          // purple tint
-      tertiaryColor: '#1a3020',           // green tint
+      secondaryColor: '#2a2540', // purple tint
+      tertiaryColor: '#1a3020', // green tint
       textColor: '#f8f8f2',
       mainBkg: '#1a3a42',
       nodeBorder: '#66d9ef',
       clusterBkg: '#1e1f1a',
       clusterBorder: '#75715e',
-      titleColor: '#e6db74',              // yellow titles
+      titleColor: '#e6db74', // yellow titles
       edgeLabelBackground: '#272822',
       nodeTextColor: '#f8f8f2',
       // Sequence diagram actors — cyan theme
@@ -151,16 +151,16 @@ const THEME_CONFIGS: Record<ThemeId, MermaidThemeConfig> = {
       taskBkgColor: '#1a3a42',
       taskTextColor: '#f8f8f2',
       taskBorderColor: '#66d9ef',
-      activeTaskBkgColor: '#2a4a20',      // green tint
+      activeTaskBkgColor: '#2a4a20', // green tint
       activeTaskBorderColor: '#a6e22e',
       doneTaskBkgColor: '#1a3020',
       doneTaskBorderColor: '#a6e22e',
-      critBkgColor: '#3a1525',            // pink tint
+      critBkgColor: '#3a1525', // pink tint
       critBorderColor: '#f92672',
       // ER diagrams — override mermaid's white (#ffffff / #f2f2f2) attribute-row
       // fills (the cause of white-text-on-light-box) with dark Monokai tints.
-      attributeBackgroundColorEven: '#1a3a42',  // cyan tint, matches nodes
-      attributeBackgroundColorOdd: '#1e1f1a'    // canvas tint
+      attributeBackgroundColorEven: '#1a3a42', // cyan tint, matches nodes
+      attributeBackgroundColorOdd: '#1e1f1a' // canvas tint
     }
   }
 }
@@ -257,7 +257,10 @@ async function svgToPngBlob(svgString: string): Promise<Blob | null> {
   let height = 600
   if (viewBox) {
     const parts = viewBox.split(/\s+|,/).map(Number)
-    if (parts.length === 4) { width = parts[2]; height = parts[3] }
+    if (parts.length === 4) {
+      width = parts[2]
+      height = parts[3]
+    }
   } else {
     const w = parseFloat(svgEl.getAttribute('width') || '800')
     const h = parseFloat(svgEl.getAttribute('height') || '600')
@@ -333,7 +336,14 @@ interface DiagramToolbarProps {
   onFitToView: () => void
 }
 
-function DiagramToolbar({ svgString, zoom, onZoomIn, onZoomOut, onZoomReset, onFitToView }: DiagramToolbarProps): React.JSX.Element {
+function DiagramToolbar({
+  svgString,
+  zoom,
+  onZoomIn,
+  onZoomOut,
+  onZoomReset,
+  onFitToView
+}: DiagramToolbarProps): React.JSX.Element {
   const [copyState, setCopyState] = useState<'idle' | 'copying' | 'copied'>('idle')
 
   const handleCopyImage = useCallback(async () => {
@@ -357,22 +367,38 @@ function DiagramToolbar({ svgString, zoom, onZoomIn, onZoomOut, onZoomReset, onF
     }
   }, [svgString])
 
-  const btnClass = 'text-[10px] px-1.5 py-0.5 rounded bg-bg-hover/80 text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-pointer backdrop-blur-sm disabled:opacity-50'
+  const btnClass =
+    'text-[10px] px-1.5 py-0.5 rounded bg-bg-hover/80 text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-pointer backdrop-blur-sm disabled:opacity-50'
 
   return (
     <div className="absolute top-2 right-2 z-10 flex items-center gap-1">
       {/* Zoom controls */}
-      <button onClick={onZoomOut} className={btnClass} title="Zoom out">−</button>
-      <button onClick={onZoomReset} className={`${btnClass} min-w-[36px] text-center`} title="Reset zoom">
+      <button onClick={onZoomOut} className={btnClass} title="Zoom out">
+        −
+      </button>
+      <button
+        onClick={onZoomReset}
+        className={`${btnClass} min-w-[36px] text-center`}
+        title="Reset zoom"
+      >
         {Math.round(zoom * 100)}%
       </button>
-      <button onClick={onZoomIn} className={btnClass} title="Zoom in">+</button>
-      <button onClick={onFitToView} className={btnClass} title="Fit to width">Fit</button>
+      <button onClick={onZoomIn} className={btnClass} title="Zoom in">
+        +
+      </button>
+      <button onClick={onFitToView} className={btnClass} title="Fit to width">
+        Fit
+      </button>
 
       <div className="w-px h-3 bg-border mx-0.5" />
 
       {/* Copy as image */}
-      <button onClick={handleCopyImage} disabled={copyState === 'copying'} className={btnClass} title="Copy as image to clipboard">
+      <button
+        onClick={handleCopyImage}
+        disabled={copyState === 'copying'}
+        className={btnClass}
+        title="Copy as image to clipboard"
+      >
         {copyState === 'copied' ? 'Copied!' : copyState === 'copying' ? '...' : 'Copy Image'}
       </button>
     </div>
@@ -465,7 +491,10 @@ function DiagramViewport({ svgString }: DiagramViewportProps): React.JSX.Element
 
   const handleZoomIn = useCallback(() => setZoom((z) => Math.min(z + 0.15, 3)), [])
   const handleZoomOut = useCallback(() => setZoom((z) => Math.max(z - 0.15, 0.1)), [])
-  const handleZoomReset = useCallback(() => { setZoom(1); setPan({ x: 0, y: 0 }) }, [])
+  const handleZoomReset = useCallback(() => {
+    setZoom(1)
+    setPan({ x: 0, y: 0 })
+  }, [])
 
   // Mouse drag to pan
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
@@ -484,7 +513,9 @@ function DiagramViewport({ svgString }: DiagramViewportProps): React.JSX.Element
     setPan((p) => ({ x: p.x + dx, y: p.y + dy }))
   }, [])
 
-  const handleMouseUp = useCallback(() => { isDragging.current = false }, [])
+  const handleMouseUp = useCallback(() => {
+    isDragging.current = false
+  }, [])
 
   // Ctrl + scroll wheel to zoom — plain scroll passes through to page.
   // Must use native event listener with { passive: false } so preventDefault() works.
@@ -502,7 +533,7 @@ function DiagramViewport({ svgString }: DiagramViewportProps): React.JSX.Element
 
     el.addEventListener('wheel', handler, { passive: false })
     return () => el.removeEventListener('wheel', handler)
-  }, [])  
+  }, [])
 
   return (
     <div className="relative">
@@ -532,9 +563,10 @@ function DiagramViewport({ svgString }: DiagramViewportProps): React.JSX.Element
           ref={contentRef}
           className="mermaid-content"
           style={{
-            transform: zoom === 1 && pan.x === 0 && pan.y === 0
-              ? undefined
-              : `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
+            transform:
+              zoom === 1 && pan.x === 0 && pan.y === 0
+                ? undefined
+                : `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
             transformOrigin: 'top left',
             transition: isDragging.current ? 'none' : 'transform 0.15s ease-out'
           }}
@@ -554,7 +586,9 @@ interface MermaidDiagramProps {
   title?: string
 }
 
-export const MermaidDiagram = memo(function MermaidDiagram({ source }: MermaidDiagramProps): React.JSX.Element {
+export const MermaidDiagram = memo(function MermaidDiagram({
+  source
+}: MermaidDiagramProps): React.JSX.Element {
   const [tab, setTab] = useState<'rendered' | 'source'>('rendered')
   const [svgString, setSvgString] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -611,7 +645,9 @@ export const MermaidDiagram = memo(function MermaidDiagram({ source }: MermaidDi
     renderIdRef.current = nextMermaidId()
     render()
 
-    return () => { cancelled = true }
+    return () => {
+      cancelled = true
+    }
   }, [source, themeConfig])
 
   return (
@@ -638,12 +674,18 @@ export const MermaidDiagram = memo(function MermaidDiagram({ source }: MermaidDi
         svgString ? (
           <DiagramViewport svgString={svgString} />
         ) : error ? (
-          <div className="rounded-md border border-danger/30 p-3" style={{ background: 'var(--color-bg-primary)' }}>
+          <div
+            className="rounded-md border border-danger/30 p-3"
+            style={{ background: 'var(--color-bg-primary)' }}
+          >
             <p className="text-[12px] text-danger font-mono mb-2">Render error: {error}</p>
             <SourceView source={source} />
           </div>
         ) : (
-          <div className="rounded-md border border-border p-3 flex items-center justify-center h-20" style={{ background: 'var(--color-bg-primary)' }}>
+          <div
+            className="rounded-md border border-border p-3 flex items-center justify-center h-20"
+            style={{ background: 'var(--color-bg-primary)' }}
+          >
             <span className="text-[11px] text-text-muted">Rendering diagram...</span>
           </div>
         )

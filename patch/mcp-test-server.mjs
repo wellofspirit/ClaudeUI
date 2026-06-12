@@ -12,7 +12,7 @@ import { createInterface } from 'node:readline'
 
 const SERVER_INFO = {
   name: 'patch-test-server',
-  version: '1.0.0',
+  version: '1.0.0'
 }
 
 const TOOLS = [
@@ -22,11 +22,11 @@ const TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
-        text: { type: 'string', description: 'Text to echo back' },
+        text: { type: 'string', description: 'Text to echo back' }
       },
-      required: ['text'],
-    },
-  },
+      required: ['text']
+    }
+  }
 ]
 
 function handleRequest(req) {
@@ -40,8 +40,8 @@ function handleRequest(req) {
         result: {
           protocolVersion: '2024-11-05',
           capabilities: { tools: {} },
-          serverInfo: SERVER_INFO,
-        },
+          serverInfo: SERVER_INFO
+        }
       }
 
     case 'notifications/initialized':
@@ -52,7 +52,7 @@ function handleRequest(req) {
       return {
         jsonrpc: '2.0',
         id,
-        result: { tools: TOOLS },
+        result: { tools: TOOLS }
       }
 
     case 'tools/call': {
@@ -64,15 +64,15 @@ function handleRequest(req) {
           jsonrpc: '2.0',
           id,
           result: {
-            content: [{ type: 'text', text: args.text || '(no text provided)' }],
-          },
+            content: [{ type: 'text', text: args.text || '(no text provided)' }]
+          }
         }
       }
 
       return {
         jsonrpc: '2.0',
         id,
-        error: { code: -32601, message: `Unknown tool: ${toolName}` },
+        error: { code: -32601, message: `Unknown tool: ${toolName}` }
       }
     }
 
@@ -81,7 +81,7 @@ function handleRequest(req) {
         return {
           jsonrpc: '2.0',
           id,
-          error: { code: -32601, message: `Method not found: ${method}` },
+          error: { code: -32601, message: `Method not found: ${method}` }
         }
       }
       // Ignore unknown notifications

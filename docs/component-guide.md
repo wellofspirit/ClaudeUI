@@ -152,13 +152,13 @@ Don't use `createContext` + `useContext` to pass state from an FC to its View. C
 
 ## Test Layer Mapping
 
-| What to test | Where | How |
-|---|---|---|
-| View renders correctly given props | Layer 1 (unit) | `render(<View {...props} />)`, assert DOM |
-| User clicks button, callback fires | Layer 1 (unit) | `fireEvent.click(...)`, assert `onX` called |
-| Pure state machine returns correct result | Layer 1 (unit) | Direct function call, assert return value |
-| IPC event → store state transition | Layer 2 (component) | TestIpcBridge `webContents.send()`, assert store |
-| User action → IPC call → store cleanup | Layer 2 (component) | Bridge handler captures IPC args, assert store |
-| Full workflow across subsystems | Layer 3 (e2e) | `bootTestApp()`, emit event sequences |
+| What to test                              | Where               | How                                              |
+| ----------------------------------------- | ------------------- | ------------------------------------------------ |
+| View renders correctly given props        | Layer 1 (unit)      | `render(<View {...props} />)`, assert DOM        |
+| User clicks button, callback fires        | Layer 1 (unit)      | `fireEvent.click(...)`, assert `onX` called      |
+| Pure state machine returns correct result | Layer 1 (unit)      | Direct function call, assert return value        |
+| IPC event → store state transition        | Layer 2 (component) | TestIpcBridge `webContents.send()`, assert store |
+| User action → IPC call → store cleanup    | Layer 2 (component) | Bridge handler captures IPC args, assert store   |
+| Full workflow across subsystems           | Layer 3 (e2e)       | `bootTestApp()`, emit event sequences            |
 
 The FC's inline handlers are glue code covered implicitly by Layer 2 component tests. They don't need their own extracted function or dedicated test.

@@ -10,24 +10,27 @@ import * as path from 'path'
 
 type McpScope = 'user' | 'project' | 'local'
 
-function configFilePaths(scope: McpScope, cwd?: string): { mcpJson: string | null; settingsJson: string } {
+function configFilePaths(
+  scope: McpScope,
+  cwd?: string
+): { mcpJson: string | null; settingsJson: string } {
   switch (scope) {
     case 'user':
       return {
         mcpJson: path.join(os.homedir(), '.claude', '.mcp.json'),
-        settingsJson: path.join(os.homedir(), '.claude', 'settings.json'),
+        settingsJson: path.join(os.homedir(), '.claude', 'settings.json')
       }
     case 'project':
       if (!cwd) throw new Error('cwd required for project scope')
       return {
         mcpJson: path.join(cwd, '.mcp.json'),
-        settingsJson: path.join(cwd, '.claude', 'settings.json'),
+        settingsJson: path.join(cwd, '.claude', 'settings.json')
       }
     case 'local':
       if (!cwd) throw new Error('cwd required for local scope')
       return {
         mcpJson: null,
-        settingsJson: path.join(cwd, '.claude', 'settings.local.json'),
+        settingsJson: path.join(cwd, '.claude', 'settings.local.json')
       }
   }
 }
@@ -78,8 +81,8 @@ describe('extractMcpServers', () => {
   it('extracts mcpServers from data', () => {
     const data = {
       mcpServers: {
-        'my-server': { command: 'node', args: ['server.js'] },
-      },
+        'my-server': { command: 'node', args: ['server.js'] }
+      }
     }
     const servers = extractMcpServers(data)
     expect(servers).toHaveProperty('my-server')

@@ -66,7 +66,17 @@ export class EventLog {
    */
   async getFullState(): Promise<FullStateSnapshot> {
     if (!this.win || this.win.isDestroyed()) {
-      return { seq: this.seq, sessions: {}, directories: [], activeSessionId: null, settings: {}, recentSessionIds: [], pinnedSessionIds: [], customTitles: {}, worktreeInfoMap: {} }
+      return {
+        seq: this.seq,
+        sessions: {},
+        directories: [],
+        activeSessionId: null,
+        settings: {},
+        recentSessionIds: [],
+        pinnedSessionIds: [],
+        customTitles: {},
+        worktreeInfoMap: {}
+      }
     }
 
     try {
@@ -80,7 +90,17 @@ export class EventLog {
       // Renderer not ready or errored
     }
 
-    return { seq: this.seq, sessions: {}, directories: [], activeSessionId: null, settings: {}, recentSessionIds: [], pinnedSessionIds: [], customTitles: {}, worktreeInfoMap: {} }
+    return {
+      seq: this.seq,
+      sessions: {},
+      directories: [],
+      activeSessionId: null,
+      settings: {},
+      recentSessionIds: [],
+      pinnedSessionIds: [],
+      customTitles: {},
+      worktreeInfoMap: {}
+    }
   }
 
   /** Clear the buffer (e.g. when server stops). */

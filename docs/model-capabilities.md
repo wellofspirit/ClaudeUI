@@ -10,11 +10,11 @@ When a new Claude model is released, the SDK will typically carry the right flag
 
 Three modes, surfaced in the InputBox picker:
 
-| Mode | What it does | When the API rejects it |
-|---|---|---|
-| **adaptive** | Claude decides when and how much to think. Required on Opus 4.7. | Models that don't support adaptive (see below). The UI greys out this option for them. |
-| **enabled** | Fixed budget thinking. Budget is omitted in the request — the SDK fills `Fgq(model) = upperLimit - 1` (e.g. 127999 for Opus 4.7-class models, 63999 for Sonnet 4.5, 8191 for older Sonnet 3.5). | Opus 4.7 returns 400 — we never send `enabled` to it because `adaptive` is auto-resolved when supported. |
-| **disabled** | No extended thinking. | Universally accepted. |
+| Mode         | What it does                                                                                                                                                                                    | When the API rejects it                                                                                  |
+| ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| **adaptive** | Claude decides when and how much to think. Required on Opus 4.7.                                                                                                                                | Models that don't support adaptive (see below). The UI greys out this option for them.                   |
+| **enabled**  | Fixed budget thinking. Budget is omitted in the request — the SDK fills `Fgq(model) = upperLimit - 1` (e.g. 127999 for Opus 4.7-class models, 63999 for Sonnet 4.5, 8191 for older Sonnet 3.5). | Opus 4.7 returns 400 — we never send `enabled` to it because `adaptive` is auto-resolved when supported. |
+| **disabled** | No extended thinking.                                                                                                                                                                           | Universally accepted.                                                                                    |
 
 ClaudeUI **always** sends `display: "summarized"` alongside non-disabled thinking. This is what makes Opus 4.7 emit `thinking_delta` events with the model's reasoning summary; without it, Opus 4.7 streams an empty thinking block (only a `signature_delta`) and the user sees no chain-of-thought.
 
@@ -33,23 +33,23 @@ Switching the model during a session auto-coerces the current thinking mode if t
 
 The effort dropdown sets `output_config.effort` in the API request. It controls thinking depth and overall token spend. Five levels:
 
-| Level | Notes |
-|---|---|
-| **low** | Minimal thinking, fastest responses. Useful for subagents and simple tasks. |
-| **medium** | Moderate thinking. |
-| **high** | Default for most modern models. |
-| **xhigh** | Deeper than high. **Opus 4.7 only.** Default in Claude Code on Opus 4.7. |
-| **max** | Maximum effort. Available on Opus 4.6, Opus 4.7, and Sonnet 4.6. **Not** on Haiku or pre-4.6 models. |
+| Level      | Notes                                                                                                |
+| ---------- | ---------------------------------------------------------------------------------------------------- |
+| **low**    | Minimal thinking, fastest responses. Useful for subagents and simple tasks.                          |
+| **medium** | Moderate thinking.                                                                                   |
+| **high**   | Default for most modern models.                                                                      |
+| **xhigh**  | Deeper than high. **Opus 4.7 only.** Default in Claude Code on Opus 4.7.                             |
+| **max**    | Maximum effort. Available on Opus 4.6, Opus 4.7, and Sonnet 4.6. **Not** on Haiku or pre-4.6 models. |
 
 If the user is on a model without effort support, the dropdown is hidden entirely. If they're on a model that supports effort but not a particular level (e.g. `xhigh` on Sonnet 4.6), that row in the dropdown is greyed out with a tooltip.
 
 ### Default effort per model
 
-| Model | Default |
-|---|---|
-| Opus 4.7 | `xhigh` |
-| Opus 4.6 / Sonnet 4.6 | `high` |
-| Older models with effort support | `high` |
+| Model                            | Default |
+| -------------------------------- | ------- |
+| Opus 4.7                         | `xhigh` |
+| Opus 4.6 / Sonnet 4.6            | `high`  |
+| Older models with effort support | `high`  |
 
 ## Capability matrix
 
@@ -59,23 +59,35 @@ Real `supportedModels()` output for a Max-plan user:
 
 ```json
 [
-  { "value": "default",     "displayName": "Default (recommended)",
+  {
+    "value": "default",
+    "displayName": "Default (recommended)",
     "description": "Opus 4.7 with 1M context · Most capable for complex work",
     "supportsEffort": true,
-    "supportedEffortLevels": ["low","medium","high","xhigh","max"],
-    "supportsAdaptiveThinking": true },
-  { "value": "sonnet",      "displayName": "Sonnet",
+    "supportedEffortLevels": ["low", "medium", "high", "xhigh", "max"],
+    "supportsAdaptiveThinking": true
+  },
+  {
+    "value": "sonnet",
+    "displayName": "Sonnet",
     "description": "Sonnet 4.6 · Best for everyday tasks",
     "supportsEffort": true,
-    "supportedEffortLevels": ["low","medium","high","max"],
-    "supportsAdaptiveThinking": true },
-  { "value": "sonnet[1m]",  "displayName": "Sonnet (1M context)",
+    "supportedEffortLevels": ["low", "medium", "high", "max"],
+    "supportsAdaptiveThinking": true
+  },
+  {
+    "value": "sonnet[1m]",
+    "displayName": "Sonnet (1M context)",
     "description": "Sonnet 4.6 with 1M context · Billed as extra usage",
     "supportsEffort": true,
-    "supportedEffortLevels": ["low","medium","high","max"],
-    "supportsAdaptiveThinking": true },
-  { "value": "haiku",       "displayName": "Haiku",
-    "description": "Haiku 4.5 · Fastest for quick answers" }
+    "supportedEffortLevels": ["low", "medium", "high", "max"],
+    "supportsAdaptiveThinking": true
+  },
+  {
+    "value": "haiku",
+    "displayName": "Haiku",
+    "description": "Haiku 4.5 · Fastest for quick answers"
+  }
 ]
 ```
 
@@ -83,21 +95,21 @@ Real `supportedModels()` output for a Max-plan user:
 
 The id-based table below applies to canonical model ids and to heuristic fallback when the SDK omits fields for a new model.
 
-| Model | Adaptive thinking | Effort | xhigh | max |
-|---|:---:|:---:|:---:|:---:|
-| **claude-opus-4-7** | ✅ | ✅ | ✅ | ✅ |
-| **claude-opus-4-6** | ✅ | ✅ | ❌ | ✅ |
-| **claude-sonnet-4-6** | ✅ | ✅ | ❌ | ✅ |
-| claude-opus-4-5 | ❌ | ❌ | ❌ | ❌ |
-| claude-opus-4-1 | ❌ | ❌ | ❌ | ❌ |
-| claude-opus-4 / -4-0 | ❌ | ❌ | ❌ | ❌ |
-| claude-sonnet-4-5 | ❌ | ❌ | ❌ | ❌ |
-| claude-sonnet-4 / -4-0 | ❌ | ❌ | ❌ | ❌ |
-| claude-3-7-sonnet | ❌ | ❌ | ❌ | ❌ |
-| claude-3-5-sonnet | ❌ | ❌ | ❌ | ❌ |
-| claude-3-opus / -sonnet | ❌ | ❌ | ❌ | ❌ |
-| All `*-haiku-*` | ❌ | ❌ | ❌ | ❌ |
-| Unknown / future | ✅ (assume modern) | ✅ (assume modern) | ❌ | ✅ |
+| Model                   | Adaptive thinking  |       Effort       | xhigh | max |
+| ----------------------- | :----------------: | :----------------: | :---: | :-: |
+| **claude-opus-4-7**     |         ✅         |         ✅         |  ✅   | ✅  |
+| **claude-opus-4-6**     |         ✅         |         ✅         |  ❌   | ✅  |
+| **claude-sonnet-4-6**   |         ✅         |         ✅         |  ❌   | ✅  |
+| claude-opus-4-5         |         ❌         |         ❌         |  ❌   | ❌  |
+| claude-opus-4-1         |         ❌         |         ❌         |  ❌   | ❌  |
+| claude-opus-4 / -4-0    |         ❌         |         ❌         |  ❌   | ❌  |
+| claude-sonnet-4-5       |         ❌         |         ❌         |  ❌   | ❌  |
+| claude-sonnet-4 / -4-0  |         ❌         |         ❌         |  ❌   | ❌  |
+| claude-3-7-sonnet       |         ❌         |         ❌         |  ❌   | ❌  |
+| claude-3-5-sonnet       |         ❌         |         ❌         |  ❌   | ❌  |
+| claude-3-opus / -sonnet |         ❌         |         ❌         |  ❌   | ❌  |
+| All `*-haiku-*`         |         ❌         |         ❌         |  ❌   | ❌  |
+| Unknown / future        | ✅ (assume modern) | ✅ (assume modern) |  ❌   | ✅  |
 
 ### Rules
 
@@ -137,16 +149,16 @@ The capability rules are mirrored from logic inside the bundled SDK (`node_modul
 
 Use the `bundle-analyzer` skill to navigate (`/bundle-analyzer`). For each rule:
 
-| Rule | Find via search for | What you'll see |
-|---|---|---|
-| Adaptive support set | `"adaptive_thinking"` (settings key) — anchor function uses `"opus-4-7"` / `"opus-4-6"` / `"sonnet-4-6"` substring checks. | A short helper that returns true if any of those substrings is in the normalised model id. |
-| Effort support set | `"effort"` (settings key, same shape as above) or `"CLAUDE_CODE_ALWAYS_ENABLE_EFFORT"`. | Mirrors the adaptive set today. Re-check on every SDK bump in case they diverge. |
-| xhigh predicate | `"xhigh_effort"` (settings key). The function returns true only when the model id contains `"opus-4-7"`. | Confirm whether new models join the xhigh tier. |
-| max predicate | `"max_effort"` (settings key) and the literal `"haiku"` substring check. | A second check builds a `Set` of legacy model ids — search for `"claude-3-opus"` or `"claude-opus-4-5"` to find the set initialiser; copy the full list into `NO_MAX_EFFORT`. |
-| Default effort | Search for the literal `"xhigh"` near a function returning `"high"` / `"medium"`. | Branches on `"opus-4-7"` substring (returns `"xhigh"`), then `"opus-4-6"`. Update `defaultEffort()` if branches change. |
-| Default budget for `enabled` | Search for the literal `upperLimit` or numeric tables `64000` / `128000`. | Per-model upper limits. The default budget the SDK fills in when `budgetTokens` is omitted is `upperLimit - 1`. |
-| Thinking display gating | Search for the CLI flag literal `"--thinking-display <display>"` (declared once in commander setup). | The choices array `["summarized","omitted"]` and the line that conditionally sets `MY.display = H.thinkingDisplay`. |
-| Streaming delta types | Search for the literal `"thinking_delta"`. | The async generator that mutates `p8.thinking += o8.thinking`. Confirms that summarised reasoning still arrives via the same delta type. |
+| Rule                         | Find via search for                                                                                                        | What you'll see                                                                                                                                                               |
+| ---------------------------- | -------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Adaptive support set         | `"adaptive_thinking"` (settings key) — anchor function uses `"opus-4-7"` / `"opus-4-6"` / `"sonnet-4-6"` substring checks. | A short helper that returns true if any of those substrings is in the normalised model id.                                                                                    |
+| Effort support set           | `"effort"` (settings key, same shape as above) or `"CLAUDE_CODE_ALWAYS_ENABLE_EFFORT"`.                                    | Mirrors the adaptive set today. Re-check on every SDK bump in case they diverge.                                                                                              |
+| xhigh predicate              | `"xhigh_effort"` (settings key). The function returns true only when the model id contains `"opus-4-7"`.                   | Confirm whether new models join the xhigh tier.                                                                                                                               |
+| max predicate                | `"max_effort"` (settings key) and the literal `"haiku"` substring check.                                                   | A second check builds a `Set` of legacy model ids — search for `"claude-3-opus"` or `"claude-opus-4-5"` to find the set initialiser; copy the full list into `NO_MAX_EFFORT`. |
+| Default effort               | Search for the literal `"xhigh"` near a function returning `"high"` / `"medium"`.                                          | Branches on `"opus-4-7"` substring (returns `"xhigh"`), then `"opus-4-6"`. Update `defaultEffort()` if branches change.                                                       |
+| Default budget for `enabled` | Search for the literal `upperLimit` or numeric tables `64000` / `128000`.                                                  | Per-model upper limits. The default budget the SDK fills in when `budgetTokens` is omitted is `upperLimit - 1`.                                                               |
+| Thinking display gating      | Search for the CLI flag literal `"--thinking-display <display>"` (declared once in commander setup).                       | The choices array `["summarized","omitted"]` and the line that conditionally sets `MY.display = H.thinkingDisplay`.                                                           |
+| Streaming delta types        | Search for the literal `"thinking_delta"`.                                                                                 | The async generator that mutates `p8.thinking += o8.thinking`. Confirms that summarised reasoning still arrives via the same delta type.                                      |
 
 ### Verification recipe when bumping the SDK
 

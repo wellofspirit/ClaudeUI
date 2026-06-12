@@ -6,7 +6,16 @@ export function SafeSvgIcon({ svg }: { svg: string }): React.JSX.Element {
   if (!sanitized) {
     // Fallback: default plugin icon if SVG is invalid
     return (
-      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <svg
+        width="15"
+        height="15"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
         <path d="M12 2L2 7l10 5 10-5-10-5z" />
         <path d="M2 17l10 5 10-5" />
         <path d="M2 12l10 5 10-5" />
@@ -14,11 +23,18 @@ export function SafeSvgIcon({ svg }: { svg: string }): React.JSX.Element {
     )
   }
   // Safe: sanitizeSvg has stripped all event handlers and disallowed elements
-   
+
   return <span dangerouslySetInnerHTML={{ __html: sanitized }} />
 }
 
-export function NavItem({ label, icon, active, onClick, onDoubleClick, badge }: {
+export function NavItem({
+  label,
+  icon,
+  active,
+  onClick,
+  onDoubleClick,
+  badge
+}: {
   label: string
   icon: React.ReactNode
   active?: boolean

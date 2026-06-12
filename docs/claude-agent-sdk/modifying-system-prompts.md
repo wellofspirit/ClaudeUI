@@ -80,23 +80,23 @@ CLAUDE.md files use plain markdown and can contain:
 <CodeGroup>
 
 ```typescript TypeScript
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { query } from '@anthropic-ai/claude-agent-sdk'
 
 // IMPORTANT: You must specify settingSources to load CLAUDE.md
 // The claude_code preset alone does NOT load CLAUDE.md files
-const messages = [];
+const messages = []
 
 for await (const message of query({
-  prompt: "Add a new React component for user profiles",
+  prompt: 'Add a new React component for user profiles',
   options: {
     systemPrompt: {
-      type: "preset",
-      preset: "claude_code", // Use Claude Code's system prompt
+      type: 'preset',
+      preset: 'claude_code' // Use Claude Code's system prompt
     },
-    settingSources: ["project"], // Required to load CLAUDE.md from project
-  },
+    settingSources: ['project'] // Required to load CLAUDE.md from project
+  }
 })) {
-  messages.push(message);
+  messages.push(message)
 }
 
 // Now Claude has access to your project guidelines from CLAUDE.md
@@ -152,39 +152,32 @@ Output styles are saved configurations that modify Claude's system prompt. They'
 <CodeGroup>
 
 ```typescript TypeScript
-import { writeFile, mkdir } from "fs/promises";
-import { join } from "path";
-import { homedir } from "os";
+import { writeFile, mkdir } from 'fs/promises'
+import { join } from 'path'
+import { homedir } from 'os'
 
-async function createOutputStyle(
-  name: string,
-  description: string,
-  prompt: string
-) {
+async function createOutputStyle(name: string, description: string, prompt: string) {
   // User-level: ~/.claude/output-styles
   // Project-level: .claude/output-styles
-  const outputStylesDir = join(homedir(), ".claude", "output-styles");
+  const outputStylesDir = join(homedir(), '.claude', 'output-styles')
 
-  await mkdir(outputStylesDir, { recursive: true });
+  await mkdir(outputStylesDir, { recursive: true })
 
   const content = `---
 name: ${name}
 description: ${description}
 ---
 
-${prompt}`;
+${prompt}`
 
-  const filePath = join(
-    outputStylesDir,
-    `${name.toLowerCase().replace(/\s+/g, "-")}.md`
-  );
-  await writeFile(filePath, content, "utf-8");
+  const filePath = join(outputStylesDir, `${name.toLowerCase().replace(/\s+/g, '-')}.md`)
+  await writeFile(filePath, content, 'utf-8')
 }
 
 // Example: Create a code review specialist
 await createOutputStyle(
-  "Code Reviewer",
-  "Thorough code review assistant",
+  'Code Reviewer',
+  'Thorough code review assistant',
   `You are an expert code reviewer.
 
 For every code submission:
@@ -192,7 +185,7 @@ For every code submission:
 2. Evaluate performance
 3. Suggest improvements
 4. Rate code quality (1-10)`
-);
+)
 ```
 
 ```python Python
@@ -249,24 +242,23 @@ You can use the Claude Code preset with an `append` property to add your custom 
 <CodeGroup>
 
 ```typescript TypeScript
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { query } from '@anthropic-ai/claude-agent-sdk'
 
-const messages = [];
+const messages = []
 
 for await (const message of query({
-  prompt: "Help me write a Python function to calculate fibonacci numbers",
+  prompt: 'Help me write a Python function to calculate fibonacci numbers',
   options: {
     systemPrompt: {
-      type: "preset",
-      preset: "claude_code",
-      append:
-        "Always include detailed docstrings and type hints in Python code.",
-    },
-  },
+      type: 'preset',
+      preset: 'claude_code',
+      append: 'Always include detailed docstrings and type hints in Python code.'
+    }
+  }
 })) {
-  messages.push(message);
-  if (message.type === "assistant") {
-    console.log(message.message.content);
+  messages.push(message)
+  if (message.type === 'assistant') {
+    console.log(message.message.content)
   }
 }
 ```
@@ -300,7 +292,7 @@ You can provide a custom string as `systemPrompt` to replace the default entirel
 <CodeGroup>
 
 ```typescript TypeScript
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { query } from '@anthropic-ai/claude-agent-sdk'
 
 const customPrompt = `You are a Python coding specialist.
 Follow these guidelines:
@@ -308,19 +300,19 @@ Follow these guidelines:
 - Use type hints for all functions
 - Include comprehensive docstrings
 - Prefer functional programming patterns when appropriate
-- Always explain your code choices`;
+- Always explain your code choices`
 
-const messages = [];
+const messages = []
 
 for await (const message of query({
-  prompt: "Create a data processing pipeline",
+  prompt: 'Create a data processing pipeline',
   options: {
-    systemPrompt: customPrompt,
-  },
+    systemPrompt: customPrompt
+  }
 })) {
-  messages.push(message);
-  if (message.type === "assistant") {
-    console.log(message.message.content);
+  messages.push(message)
+  if (message.type === 'assistant') {
+    console.log(message.message.content)
   }
 }
 ```
@@ -353,17 +345,17 @@ async for message in query(
 
 ## Comparison of all four approaches
 
-| Feature                 | CLAUDE.md           | Output Styles      | `systemPrompt` with append | Custom `systemPrompt`     |
-| ----------------------- | ------------------- | ------------------ | -------------------------- | ------------------------- |
-| **Persistence**         | Per-project file | Saved as files  | Session only            | Session only           |
-| **Reusability**         | Per-project      | Across projects | Code duplication        | Code duplication       |
-| **Management**          | On filesystem    | CLI + files     | In code                 | In code                |
-| **Default tools**       | Preserved        | Preserved       | Preserved               | Lost (unless included) |
-| **Built-in safety**     | Maintained       | Maintained      | Maintained              | Must be added          |
-| **Environment context** | Automatic        | Automatic       | Automatic               | Must be provided       |
-| **Customization level** | Additions only   | Replace default | Additions only          | Complete control       |
-| **Version control**     | With project     | Yes             | With code               | With code              |
-| **Scope**               | Project-specific | User or project | Code session            | Code session           |
+| Feature                 | CLAUDE.md        | Output Styles   | `systemPrompt` with append | Custom `systemPrompt`  |
+| ----------------------- | ---------------- | --------------- | -------------------------- | ---------------------- |
+| **Persistence**         | Per-project file | Saved as files  | Session only               | Session only           |
+| **Reusability**         | Per-project      | Across projects | Code duplication           | Code duplication       |
+| **Management**          | On filesystem    | CLI + files     | In code                    | In code                |
+| **Default tools**       | Preserved        | Preserved       | Preserved                  | Lost (unless included) |
+| **Built-in safety**     | Maintained       | Maintained      | Maintained                 | Must be added          |
+| **Environment context** | Automatic        | Automatic       | Automatic                  | Must be provided       |
+| **Customization level** | Additions only   | Replace default | Additions only             | Complete control       |
+| **Version control**     | With project     | Yes             | With code                  | With code              |
+| **Scope**               | Project-specific | User or project | Code session               | Code session           |
 
 **Note:** "With append" means using `systemPrompt: { type: "preset", preset: "claude_code", append: "..." }` in TypeScript or `system_prompt={"type": "preset", "preset": "claude_code", "append": "..."}` in Python.
 
@@ -431,28 +423,28 @@ You can combine these methods for maximum flexibility:
 <CodeGroup>
 
 ```typescript TypeScript
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { query } from '@anthropic-ai/claude-agent-sdk'
 
 // Assuming "Code Reviewer" output style is active (via /output-style)
 // Add session-specific focus areas
-const messages = [];
+const messages = []
 
 for await (const message of query({
-  prompt: "Review this authentication module",
+  prompt: 'Review this authentication module',
   options: {
     systemPrompt: {
-      type: "preset",
-      preset: "claude_code",
+      type: 'preset',
+      preset: 'claude_code',
       append: `
         For this review, prioritize:
         - OAuth 2.0 compliance
         - Token storage security
         - Session management
-      `,
-    },
-  },
+      `
+    }
+  }
 })) {
-  messages.push(message);
+  messages.push(message)
 }
 ```
 

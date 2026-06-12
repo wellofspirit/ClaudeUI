@@ -13,36 +13,48 @@ const SOURCE_ORDER: SkillSource[] = ['project', 'user', 'plugin', 'bundled']
 
 const SOURCE_META: Record<SkillSource, { label: string; icon: string }> = {
   project: { label: 'PROJECT', icon: '\u26A1' },
-  user:    { label: 'USER',    icon: '\u26A1' },
-  plugin:  { label: 'PLUGINS', icon: '\uD83D\uDD0C' },
-  bundled: { label: 'BUNDLED', icon: '\uD83D\uDCE6' },
+  user: { label: 'USER', icon: '\u26A1' },
+  plugin: { label: 'PLUGINS', icon: '\uD83D\uDD0C' },
+  bundled: { label: 'BUNDLED', icon: '\uD83D\uDCE6' }
 }
 
 function sourcePathHint(source: SkillSource, cwd: string | null): string {
   switch (source) {
-    case 'project': return cwd ? `${cwd}/.claude/skills/` : '.claude/skills/'
-    case 'user': return '~/.claude/skills/'
-    case 'plugin': return 'Installed plugins'
-    case 'bundled': return 'Built-in'
+    case 'project':
+      return cwd ? `${cwd}/.claude/skills/` : '.claude/skills/'
+    case 'user':
+      return '~/.claude/skills/'
+    case 'plugin':
+      return 'Installed plugins'
+    case 'bundled':
+      return 'Built-in'
   }
 }
 
-function SourceBadge({ source, pluginName }: { source: SkillSource; pluginName?: string }): React.JSX.Element {
+function SourceBadge({
+  source,
+  pluginName
+}: {
+  source: SkillSource
+  pluginName?: string
+}): React.JSX.Element {
   const colors: Record<SkillSource, string> = {
     project: 'bg-accent/15 text-accent',
-    user:    'bg-purple-500/15 text-purple-400',
-    plugin:  'bg-emerald-500/15 text-emerald-400',
-    bundled: 'bg-text-muted/15 text-text-muted',
+    user: 'bg-purple-500/15 text-purple-400',
+    plugin: 'bg-emerald-500/15 text-emerald-400',
+    bundled: 'bg-text-muted/15 text-text-muted'
   }
   const labels: Record<SkillSource, string> = {
     project: 'Project',
-    user:    'User',
-    plugin:  pluginName ? `Plugin: ${pluginName}` : 'Plugin',
-    bundled: 'Bundled',
+    user: 'User',
+    plugin: pluginName ? `Plugin: ${pluginName}` : 'Plugin',
+    bundled: 'Bundled'
   }
 
   return (
-    <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium ${colors[source]}`}>
+    <span
+      className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium ${colors[source]}`}
+    >
       {labels[source]}
     </span>
   )
@@ -71,7 +83,9 @@ function SkillRow({
     >
       <div className="flex items-center gap-2 min-w-0">
         <span className="shrink-0 text-[12px]">{meta.icon}</span>
-        <span className={`text-[12px] font-medium truncate ${selected ? 'text-accent' : 'text-text-primary'}`}>
+        <span
+          className={`text-[12px] font-medium truncate ${selected ? 'text-accent' : 'text-text-primary'}`}
+        >
           {displayName}
         </span>
       </div>
@@ -93,7 +107,17 @@ function EmptyPreview(): React.JSX.Element {
   return (
     <div className="flex-1 flex items-center justify-center text-text-muted">
       <div className="text-center">
-        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" className="mx-auto mb-2 opacity-40">
+        <svg
+          width="32"
+          height="32"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          className="mx-auto mb-2 opacity-40"
+        >
           <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z" />
           <polyline points="14 2 14 8 20 8" />
           <line x1="16" y1="13" x2="8" y2="13" />
@@ -113,7 +137,12 @@ export interface SkillsDialogViewProps {
   onClose: () => void
 }
 
-export function SkillsDialogView({ skills, loading, cwd, onClose }: SkillsDialogViewProps): React.JSX.Element {
+export function SkillsDialogView({
+  skills,
+  loading,
+  cwd,
+  onClose
+}: SkillsDialogViewProps): React.JSX.Element {
   const [filter, setFilter] = useState('')
   const [selected, setSelected] = useState<string | null>(null)
 
@@ -130,10 +159,11 @@ export function SkillsDialogView({ skills, loading, cwd, onClose }: SkillsDialog
   const filteredSkills = useMemo(() => {
     if (!filter) return skills
     const q = filter.toLowerCase()
-    return skills.filter((s) =>
-      s.name.toLowerCase().includes(q) ||
-      (s.displayName && s.displayName.toLowerCase().includes(q)) ||
-      s.description.toLowerCase().includes(q)
+    return skills.filter(
+      (s) =>
+        s.name.toLowerCase().includes(q) ||
+        (s.displayName && s.displayName.toLowerCase().includes(q)) ||
+        s.description.toLowerCase().includes(q)
     )
   }, [skills, filter])
 
@@ -144,14 +174,12 @@ export function SkillsDialogView({ skills, loading, cwd, onClose }: SkillsDialog
       list.push(s)
       map.set(s.source, list)
     }
-    return SOURCE_ORDER
-      .filter((src) => map.has(src))
-      .map((src) => ({
-        source: src,
-        label: SOURCE_META[src].label,
-        pathHint: sourcePathHint(src, cwd),
-        skills: map.get(src)!,
-      }))
+    return SOURCE_ORDER.filter((src) => map.has(src)).map((src) => ({
+      source: src,
+      label: SOURCE_META[src].label,
+      pathHint: sourcePathHint(src, cwd),
+      skills: map.get(src)!
+    }))
   }, [filteredSkills, cwd])
 
   const selectedSkill = useMemo(
@@ -160,7 +188,9 @@ export function SkillsDialogView({ skills, loading, cwd, onClose }: SkillsDialog
   )
 
   const handleBackdropClick = useCallback(
-    (e: React.MouseEvent) => { if (e.target === e.currentTarget) onClose() },
+    (e: React.MouseEvent) => {
+      if (e.target === e.currentTarget) onClose()
+    },
     [onClose]
   )
 
@@ -176,7 +206,17 @@ export function SkillsDialogView({ skills, loading, cwd, onClose }: SkillsDialog
       >
         <div className="shrink-0 flex items-center justify-between px-5 py-3 border-b border-border">
           <div className="flex items-center gap-2.5">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="text-accent">
+            <svg
+              width="16"
+              height="16"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.8"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className="text-accent"
+            >
               <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
             </svg>
             <span className="text-[14px] font-medium text-text-primary">Skills</span>
@@ -186,7 +226,15 @@ export function SkillsDialogView({ skills, loading, cwd, onClose }: SkillsDialog
             onClick={onClose}
             className="w-7 h-7 flex items-center justify-center rounded-md text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
           >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+            <svg
+              width="14"
+              height="14"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+            >
               <path d="M18 6L6 18M6 6l12 12" />
             </svg>
           </button>
@@ -196,7 +244,17 @@ export function SkillsDialogView({ skills, loading, cwd, onClose }: SkillsDialog
           <div className="w-[280px] shrink-0 border-r border-border flex flex-col">
             <div className="px-3 py-2.5 border-b border-border">
               <div className="relative">
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="absolute left-2.5 top-1/2 -translate-y-1/2 text-text-muted">
+                <svg
+                  width="12"
+                  height="12"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  className="absolute left-2.5 top-1/2 -translate-y-1/2 text-text-muted"
+                >
                   <circle cx="11" cy="11" r="8" />
                   <path d="m21 21-4.3-4.3" />
                 </svg>
@@ -228,9 +286,7 @@ export function SkillsDialogView({ skills, loading, cwd, onClose }: SkillsDialog
                       <span className="text-[10px] font-semibold text-text-muted tracking-wider">
                         {group.label}
                       </span>
-                      <span className="text-[10px] text-text-muted/50">
-                        {group.pathHint}
-                      </span>
+                      <span className="text-[10px] text-text-muted/50">{group.pathHint}</span>
                     </div>
                     <span className="text-[10px] text-text-muted/50">{group.skills.length}</span>
                   </div>
@@ -257,13 +313,21 @@ export function SkillsDialogView({ skills, loading, cwd, onClose }: SkillsDialog
                     <h2 className="text-[14px] font-semibold text-text-primary">
                       {selectedSkill.displayName || selectedSkill.name}
                     </h2>
-                    <SourceBadge source={selectedSkill.source} pluginName={selectedSkill.pluginName} />
+                    <SourceBadge
+                      source={selectedSkill.source}
+                      pluginName={selectedSkill.pluginName}
+                    />
                   </div>
                   {selectedSkill.description && (
-                    <p className="text-[11px] text-text-secondary mb-1.5">{selectedSkill.description}</p>
+                    <p className="text-[11px] text-text-secondary mb-1.5">
+                      {selectedSkill.description}
+                    </p>
                   )}
                   {selectedSkill.path && (
-                    <div className="text-[10px] text-text-muted/60 font-mono truncate" title={selectedSkill.path}>
+                    <div
+                      className="text-[10px] text-text-muted/60 font-mono truncate"
+                      title={selectedSkill.path}
+                    >
                       {selectedSkill.path}
                     </div>
                   )}

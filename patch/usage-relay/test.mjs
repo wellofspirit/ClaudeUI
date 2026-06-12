@@ -17,7 +17,7 @@ import {
   createStreamingQuery,
   collectMessages,
   TestRunner,
-  dumpMessages,
+  dumpMessages
 } from '../test-helpers.mjs'
 
 const PROMPT = 'Reply with the single word "hello" and nothing else.'
@@ -43,12 +43,7 @@ async function main() {
       }
 
       // Call getUsage() on the first assistant message (session is active)
-      if (
-        !usageFetched &&
-        methodExists &&
-        msg.type === 'assistant' &&
-        !msg.parent_tool_use_id
-      ) {
+      if (!usageFetched && methodExists && msg.type === 'assistant' && !msg.parent_tool_use_id) {
         usageFetched = true
         console.log('  Calling q.getUsage()...')
         try {
@@ -59,7 +54,7 @@ async function main() {
           console.error('  getUsage() error:', err.message || err)
         }
       }
-    },
+    }
   })
 
   dumpMessages(messages)
@@ -74,10 +69,7 @@ async function main() {
   t.assert('getUsage() did not throw', usageError === null)
 
   // 4. Result is an object (not null/undefined)
-  t.assert(
-    'getUsage() returned an object',
-    usageResult !== null && typeof usageResult === 'object'
-  )
+  t.assert('getUsage() returned an object', usageResult !== null && typeof usageResult === 'object')
 
   // 5. Response contains expected fields
   // The API returns: { five_hour, seven_day, seven_day_sonnet, extra_usage }
@@ -86,10 +78,7 @@ async function main() {
   const hasFiveHour = usageResult && 'five_hour' in usageResult
   if (hasFiveHour) {
     const fh = usageResult.five_hour
-    t.assert(
-      'five_hour has utilization field',
-      fh && typeof fh.utilization === 'number'
-    )
+    t.assert('five_hour has utilization field', fh && typeof fh.utilization === 'number')
     t.assert(
       'five_hour.utilization is a valid percentage (0-100)',
       fh && fh.utilization >= 0 && fh.utilization <= 100

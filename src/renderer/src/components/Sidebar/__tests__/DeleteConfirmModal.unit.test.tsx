@@ -17,7 +17,7 @@ function renderModal(overrides: Partial<React.ComponentProps<typeof DeleteConfir
     path: '~/.claude/projects/key/abc.jsonl',
     onConfirm: vi.fn().mockResolvedValue(undefined),
     onCancel: vi.fn(),
-    ...overrides,
+    ...overrides
   }
   return { ...render(<DeleteConfirmModal {...props} />), props }
 }
@@ -44,16 +44,24 @@ describe('DeleteConfirmModal (session)', () => {
 
   it('shows Deleting... state while onConfirm is pending and disables buttons', async () => {
     let resolve!: () => void
-    const onConfirm = vi.fn(() => new Promise<void>((r) => { resolve = r }))
+    const onConfirm = vi.fn(
+      () =>
+        new Promise<void>((r) => {
+          resolve = r
+        })
+    )
     renderModal({ onConfirm })
     fireEvent.click(screen.getByRole('button', { name: 'Delete' }))
     expect(await screen.findByRole('button', { name: 'Deleting...' })).toBeDisabled()
     expect(screen.getByRole('button', { name: 'Cancel' })).toBeDisabled()
-    await act(async () => { resolve() })
+    await act(async () => {
+      resolve()
+    })
   })
 
   it('shows an inline error + Retry when onConfirm rejects', async () => {
-    const onConfirm = vi.fn()
+    const onConfirm = vi
+      .fn()
       .mockRejectedValueOnce(new Error('EBUSY: resource busy'))
       .mockResolvedValueOnce(undefined)
     renderModal({ onConfirm })
@@ -65,7 +73,8 @@ describe('DeleteConfirmModal (session)', () => {
   })
 
   it('Retry re-invokes onConfirm', async () => {
-    const onConfirm = vi.fn()
+    const onConfirm = vi
+      .fn()
       .mockRejectedValueOnce(new Error('EBUSY'))
       .mockResolvedValueOnce(undefined)
     renderModal({ onConfirm })
@@ -78,19 +87,34 @@ describe('DeleteConfirmModal (session)', () => {
 
 describe('DeleteConfirmModal (project)', () => {
   it('renders session count in body + confirm button label', () => {
-    renderModal({ kind: 'project', name: 'ClaudeUI', path: '~/.claude/projects/key/', sessionCount: 57 })
+    renderModal({
+      kind: 'project',
+      name: 'ClaudeUI',
+      path: '~/.claude/projects/key/',
+      sessionCount: 57
+    })
     expect(screen.getByText('Delete project?')).toBeInTheDocument()
     expect(screen.getAllByText(/57 sessions/).length).toBeGreaterThanOrEqual(1)
     expect(screen.getByRole('button', { name: 'Delete all 57 sessions' })).toBeInTheDocument()
   })
 
   it('pluralises "1 session" correctly', () => {
-    renderModal({ kind: 'project', name: 'Solo', path: '~/.claude/projects/solo/', sessionCount: 1 })
+    renderModal({
+      kind: 'project',
+      name: 'Solo',
+      path: '~/.claude/projects/solo/',
+      sessionCount: 1
+    })
     expect(screen.getByRole('button', { name: 'Delete all 1 session' })).toBeInTheDocument()
   })
 
   it('falls back to plain Delete label when sessionCount is 0', () => {
-    renderModal({ kind: 'project', name: 'Empty', path: '~/.claude/projects/empty/', sessionCount: 0 })
+    renderModal({
+      kind: 'project',
+      name: 'Empty',
+      path: '~/.claude/projects/empty/',
+      sessionCount: 0
+    })
     expect(screen.getByRole('button', { name: 'Delete' })).toBeInTheDocument()
   })
 })

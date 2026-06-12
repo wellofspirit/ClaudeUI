@@ -14,13 +14,10 @@ import { mockupOriginFor } from '../../../shared/mockup-url'
  * `allow-same-origin`, giving it an opaque origin (`"null"`). That changes the
  * postMessage targeting/validation, captured here.
  */
-const isWeb = (): boolean =>
-  typeof window !== 'undefined' && window.api?.platform === 'web'
+const isWeb = (): boolean => typeof window !== 'undefined' && window.api?.platform === 'web'
 
 /** `sandbox` attribute for the preview iframe. */
-export const MOCKUP_IFRAME_SANDBOX = isWeb()
-  ? 'allow-scripts'
-  : 'allow-scripts allow-same-origin'
+export const MOCKUP_IFRAME_SANDBOX = isWeb() ? 'allow-scripts' : 'allow-scripts allow-same-origin'
 
 /**
  * Parent → iframe reload target origin. A sandboxed opaque-origin iframe can't

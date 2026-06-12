@@ -24,7 +24,7 @@ export function ApprovalCardView({
   onAlwaysAllowChange,
   checkedSuggestions,
   onToggleSuggestion,
-  onRespond,
+  onRespond
 }: ApprovalCardViewProps): React.JSX.Element {
   const input = approval.input
   const toolName = approval.toolName
@@ -39,7 +39,10 @@ export function ApprovalCardView({
         $ {String(input.command)}
       </pre>
     )
-  } else if ((toolName === 'Edit' || toolName === 'Write' || toolName === 'Read') && input?.file_path) {
+  } else if (
+    (toolName === 'Edit' || toolName === 'Write' || toolName === 'Read') &&
+    input?.file_path
+  ) {
     summary = (
       <span className="text-[12px] font-mono text-text-secondary">{String(input.file_path)}</span>
     )
@@ -57,22 +60,42 @@ export function ApprovalCardView({
   const labelText = isSandboxEscape ? 'Sandbox Escape' : 'Permission'
 
   return (
-    <div className={`rounded-lg border ${borderColor} bg-bg-secondary overflow-hidden animate-fade-in`}>
+    <div
+      className={`rounded-lg border ${borderColor} bg-bg-secondary overflow-hidden animate-fade-in`}
+    >
       <div className="px-3 py-2">
         <div className="flex items-center gap-2 mb-2">
           {isSandboxEscape ? (
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-danger shrink-0">
+            <svg
+              width="12"
+              height="12"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              className="text-danger shrink-0"
+            >
               <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
               <line x1="4" y1="4" x2="20" y2="20" />
             </svg>
           ) : (
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-warning shrink-0">
+            <svg
+              width="12"
+              height="12"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              className="text-warning shrink-0"
+            >
               <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
               <line x1="12" y1="9" x2="12" y2="13" />
               <line x1="12" y1="17" x2="12.01" y2="17" />
             </svg>
           )}
-          <span className={`text-[11px] font-semibold ${labelColor} uppercase tracking-wider`}>{labelText}</span>
+          <span className={`text-[11px] font-semibold ${labelColor} uppercase tracking-wider`}>
+            {labelText}
+          </span>
           <span className="font-mono text-[12px] text-accent">{toolName}</span>
         </div>
         {approval.decisionReason && (
@@ -94,7 +117,9 @@ export function ApprovalCardView({
               onChange={(e) => onAlwaysAllowChange(e.target.checked)}
               className="w-3.5 h-3.5 rounded border-border accent-accent cursor-pointer"
             />
-            <span className="text-[11px] text-text-muted">Always allow this command outside sandbox</span>
+            <span className="text-[11px] text-text-muted">
+              Always allow this command outside sandbox
+            </span>
           </label>
         )}
         {hasSuggestions && (
@@ -165,8 +190,8 @@ function ApprovalCard({ approval }: { approval: PendingApproval }): React.JSX.El
   const sandboxSettings = useSessionStore((s) => s.settings.sandbox)
   const permissionMode = useActiveSession((s) => s.permissionMode)
   const [alwaysAllow, setAlwaysAllow] = useState(false)
-  const [checkedSuggestions, setCheckedSuggestions] = useState<boolean[]>(
-    () => (approval.suggestions || []).map(() => false)
+  const [checkedSuggestions, setCheckedSuggestions] = useState<boolean[]>(() =>
+    (approval.suggestions || []).map(() => false)
   )
 
   const handleRespond = async (decision: 'allow' | 'deny'): Promise<void> => {
@@ -188,12 +213,16 @@ function ApprovalCard({ approval }: { approval: PendingApproval }): React.JSX.El
     }
 
     // On allow, include any checked permission suggestions
-    const selected = decision === 'allow' && approval.suggestions
-      ? approval.suggestions.filter((_, i) => checkedSuggestions[i])
-      : undefined
+    const selected =
+      decision === 'allow' && approval.suggestions
+        ? approval.suggestions.filter((_, i) => checkedSuggestions[i])
+        : undefined
 
     await window.api.respondApproval(
-      activeSessionId, approval.requestId, decision, undefined,
+      activeSessionId,
+      approval.requestId,
+      decision,
+      undefined,
       selected?.length ? selected : undefined
     )
     removePendingApproval(activeSessionId, approval.requestId)
@@ -206,7 +235,9 @@ function ApprovalCard({ approval }: { approval: PendingApproval }): React.JSX.El
       alwaysAllow={alwaysAllow}
       onAlwaysAllowChange={setAlwaysAllow}
       checkedSuggestions={checkedSuggestions}
-      onToggleSuggestion={(i) => setCheckedSuggestions((prev) => prev.map((v, j) => j === i ? !v : v))}
+      onToggleSuggestion={(i) =>
+        setCheckedSuggestions((prev) => prev.map((v, j) => (j === i ? !v : v)))
+      }
       onRespond={handleRespond}
     />
   )

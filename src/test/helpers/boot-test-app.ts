@@ -15,8 +15,6 @@
  *   // ... use app.api, app.store, app.bridge
  */
 
- 
-
 import { TestIpcBridge } from '../bridges/test-ipc-bridge'
 import { setIpcBridge } from '../stubs/electron-shim'
 import type { ClaudeAPI } from '../../shared/types'
@@ -30,7 +28,9 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     return (cb: T) => {
       const handler = (_: unknown, ...args: unknown[]): void => (cb as Function)(...args)
       ipcRenderer.on(channel, handler)
-      return () => { ipcRenderer.removeListener(channel, handler) }
+      return () => {
+        ipcRenderer.removeListener(channel, handler)
+      }
     }
   }
 
@@ -46,15 +46,39 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
   return {
     platform: process.platform,
     pickFolder: () => ipcRenderer.invoke('session:pick-folder'),
-    createSession: (routingId, cwd, effort?, resumeSessionId?, permissionMode?, model?, thinkingMode?) =>
-      ipcRenderer.invoke('session:create', routingId, cwd, effort, resumeSessionId, permissionMode, model, thinkingMode),
+    createSession: (
+      routingId,
+      cwd,
+      effort?,
+      resumeSessionId?,
+      permissionMode?,
+      model?,
+      thinkingMode?
+    ) =>
+      ipcRenderer.invoke(
+        'session:create',
+        routingId,
+        cwd,
+        effort,
+        resumeSessionId,
+        permissionMode,
+        model,
+        thinkingMode
+      ),
     rekeySession: (oldId, newId) => ipcRenderer.invoke('session:rekey', oldId, newId),
     sendPrompt: (routingId, prompt, attachments?) =>
       ipcRenderer.invoke('session:send', routingId, prompt, attachments),
     cancelSession: (routingId) => ipcRenderer.invoke('session:cancel', routingId),
     interruptSession: (routingId) => ipcRenderer.invoke('session:interrupt', routingId),
     respondApproval: (routingId, requestId, decision, answers?, updatedPermissions?) =>
-      ipcRenderer.invoke('session:approval-response', routingId, requestId, decision, answers, updatedPermissions),
+      ipcRenderer.invoke(
+        'session:approval-response',
+        routingId,
+        requestId,
+        decision,
+        answers,
+        updatedPermissions
+      ),
     minimizeWindow: () => ipcRenderer.invoke('window:minimize'),
     maximizeWindow: () => ipcRenderer.invoke('window:maximize'),
     closeWindow: () => ipcRenderer.invoke('window:close'),
@@ -130,27 +154,21 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
       ipcRenderer.invoke('session:ask-side-question', routingId, question),
     setPermissionMode: (routingId, mode) =>
       ipcRenderer.invoke('session:set-permission-mode', routingId, mode),
-    setModel: (routingId, model) =>
-      ipcRenderer.invoke('session:set-model', routingId, model),
-    setEffort: (routingId, effort) =>
-      ipcRenderer.invoke('session:set-effort', routingId, effort),
+    setModel: (routingId, model) => ipcRenderer.invoke('session:set-model', routingId, model),
+    setEffort: (routingId, effort) => ipcRenderer.invoke('session:set-effort', routingId, effort),
     setThinkingMode: (routingId, mode) =>
       ipcRenderer.invoke('session:set-thinking-mode', routingId, mode),
     getModels: () => ipcRenderer.invoke('session:get-models'),
     generateTitle: (conversationText) =>
       ipcRenderer.invoke('session:generate-title', conversationText),
-    generateCommitMessage: (diff) =>
-      ipcRenderer.invoke('session:generate-commit-message', diff),
+    generateCommitMessage: (diff) => ipcRenderer.invoke('session:generate-commit-message', diff),
     writeCustomTitle: (sessionId, projectKey, title) =>
       ipcRenderer.invoke('session:write-custom-title', sessionId, projectKey, title),
-    getPlanContent: (routingId) =>
-      ipcRenderer.invoke('session:get-plan-content', routingId),
-    getSessionLogPath: (routingId) =>
-      ipcRenderer.invoke('session:get-session-log-path', routingId),
+    getPlanContent: (routingId) => ipcRenderer.invoke('session:get-plan-content', routingId),
+    getSessionLogPath: (routingId) => ipcRenderer.invoke('session:get-session-log-path', routingId),
     watchSession: (routingId, sessionId, projectKey) =>
       ipcRenderer.invoke('session:watch-session', routingId, sessionId, projectKey),
-    unwatchSession: (routingId) =>
-      ipcRenderer.invoke('session:unwatch-session', routingId),
+    unwatchSession: (routingId) => ipcRenderer.invoke('session:unwatch-session', routingId),
 
     // Terminal
     createTerminal: (cwd) => ipcRenderer.invoke('terminal:create', cwd),
@@ -161,8 +179,10 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
 
     // Worktree
     createWorktree: (cwd, name) => unwrap('worktree:create', cwd, name),
-    getWorktreeStatus: (worktreePath, originalHead) => unwrap('worktree:status', worktreePath, originalHead),
-    removeWorktree: (worktreePath, branch, gitRoot) => unwrap('worktree:remove', worktreePath, branch, gitRoot),
+    getWorktreeStatus: (worktreePath, originalHead) =>
+      unwrap('worktree:status', worktreePath, originalHead),
+    removeWorktree: (worktreePath, branch, gitRoot) =>
+      unwrap('worktree:remove', worktreePath, branch, gitRoot),
     listWorktrees: (cwd) => unwrap('worktree:list', cwd),
 
     // App
@@ -193,8 +213,7 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
 
     deleteSession: (sessionId, projectKey) =>
       ipcRenderer.invoke('session:delete-session', sessionId, projectKey),
-    deleteProject: (projectKey) =>
-      ipcRenderer.invoke('session:delete-project', projectKey),
+    deleteProject: (projectKey) => ipcRenderer.invoke('session:delete-project', projectKey),
 
     listDir: (dirPath) => ipcRenderer.invoke('file:list-dir', dirPath),
     openInVSCode: (cwd) => ipcRenderer.invoke('app:open-in-vscode', cwd),
@@ -218,10 +237,8 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     mcpServerStatus: (routingId) => ipcRenderer.invoke('mcp:status', routingId),
     mcpToggleServer: (routingId, serverName, enabled) =>
       unwrap('mcp:toggle', routingId, serverName, enabled),
-    mcpReconnectServer: (routingId, serverName) =>
-      unwrap('mcp:reconnect', routingId, serverName),
-    mcpSetServers: (routingId, servers) =>
-      unwrap('mcp:set-servers', routingId, servers),
+    mcpReconnectServer: (routingId, serverName) => unwrap('mcp:reconnect', routingId, serverName),
+    mcpSetServers: (routingId, servers) => unwrap('mcp:set-servers', routingId, servers),
     loadMcpServers: (scope, cwd?) => ipcRenderer.invoke('mcp:load-servers', scope, cwd),
     saveMcpServers: (scope, servers, cwd?) =>
       ipcRenderer.invoke('mcp:save-servers', scope, servers, cwd),
@@ -242,11 +259,14 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     cancelAutomationRun: (id) => ipcRenderer.invoke('automation:cancel', id),
     dismissAutomationRun: (automationId, runId) =>
       ipcRenderer.invoke('automation:dismiss-run', automationId, runId),
-    sendAutomationMessage: (id, prompt) => ipcRenderer.invoke('automation:send-message', id, prompt),
+    sendAutomationMessage: (id, prompt) =>
+      ipcRenderer.invoke('automation:send-message', id, prompt),
 
     testProxyConnection: (proxy) => unwrap('proxy:test-connection', proxy),
 
-    logError: (source, message) => { ipcRenderer.send('log:error', source, message) },
+    logError: (source, message) => {
+      ipcRenderer.send('log:error', source, message)
+    },
 
     getNetworkInterfaces: () => ipcRenderer.invoke('remote:interfaces'),
     startRemoteServer: (opts?) => ipcRenderer.invoke('remote:start', opts),
@@ -256,7 +276,8 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
 
     voiceStartServer: (routingId) => unwrap('voice:start-server', routingId),
     voiceStopServer: (routingId) => unwrap('voice:stop-server', routingId),
-    voiceStartRecording: (routingId, language) => unwrap('voice:start-recording', routingId, language),
+    voiceStartRecording: (routingId, language) =>
+      unwrap('voice:start-recording', routingId, language),
     voiceStopRecording: (routingId) => unwrap('voice:stop-recording', routingId),
     onVoiceTranscript: onEvent('voice:transcript'),
     onVoiceState: onEvent('voice:state'),
@@ -278,7 +299,7 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     watchMockup: (cwd, directory) => ipcRenderer.invoke('mockup:watch', cwd, directory),
     unwatchMockup: (cwd, directory) => ipcRenderer.invoke('mockup:unwatch', cwd, directory),
     onMockupFileChanged: onEvent('mockup:file-changed'),
-    getMockupPreviewUrl: (cwd, directory) => `mockup-asset://test.m/${cwd}/${directory}`,
+    getMockupPreviewUrl: (cwd, directory) => `mockup-asset://test.m/${cwd}/${directory}`
   } as ClaudeAPI
 }
 
@@ -318,7 +339,7 @@ export async function bootTestApp(): Promise<TestApp> {
     'usage:fetch-block',
     'plugin:views',
     'log-viewer:open',
-    'app:version-info',
+    'app:version-info'
   ]
   for (const channel of stubChannels) {
     bridge.ipcMain.handle(channel, async () => null)
@@ -340,6 +361,6 @@ export async function bootTestApp(): Promise<TestApp> {
     teardown: () => {
       bridge.reset()
       delete (globalThis as any).window.api
-    },
+    }
   }
 }

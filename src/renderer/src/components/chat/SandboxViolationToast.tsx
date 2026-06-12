@@ -2,7 +2,13 @@ import { useEffect } from 'react'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
 import { useIsMobile } from '../../hooks/useIsMobile'
 
-function ViolationCard({ message, onDismiss }: { message: string; onDismiss: () => void }): React.JSX.Element {
+function ViolationCard({
+  message,
+  onDismiss
+}: {
+  message: string
+  onDismiss: () => void
+}): React.JSX.Element {
   useEffect(() => {
     const timer = setTimeout(onDismiss, 6000)
     return () => clearTimeout(timer)
@@ -25,16 +31,21 @@ function ViolationCard({ message, onDismiss }: { message: string; onDismiss: () 
         </svg>
 
         {/* Message */}
-        <span className="text-[12px] text-warning/90 flex-1 truncate">
-          {message}
-        </span>
+        <span className="text-[12px] text-warning/90 flex-1 truncate">{message}</span>
 
         {/* Close button */}
         <button
           onClick={onDismiss}
           className="shrink-0 text-text-muted hover:text-text-secondary transition-colors cursor-pointer p-0.5"
         >
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <svg
+            width="12"
+            height="12"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+          >
             <line x1="18" y1="6" x2="6" y2="18" />
             <line x1="6" y1="6" x2="18" y2="18" />
           </svg>

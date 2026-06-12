@@ -52,7 +52,13 @@ export interface HunkGap {
 /** A renderable row — either a diff line, a hunk header, or an expandable gap */
 export type DiffRowData =
   | { kind: 'line'; line: DiffLine; hunkIndex: number }
-  | { kind: 'hunk-header'; hunk: DiffHunk; hunkIndex: number; adjacentGap?: HunkGap; hunkPosition: 'first' | 'last' | 'middle' | 'only' }
+  | {
+      kind: 'hunk-header'
+      hunk: DiffHunk
+      hunkIndex: number
+      adjacentGap?: HunkGap
+      hunkPosition: 'first' | 'last' | 'middle' | 'only'
+    }
   | { kind: 'gap'; gap: HunkGap; position: 'before' | 'between' | 'after' }
 
 /** View mode for the diff viewer */
@@ -67,5 +73,11 @@ export interface SplitRow {
 /** A renderable row for split view */
 export type SplitRowData =
   | { kind: 'line'; row: SplitRow; hunkIndex: number }
-  | { kind: 'hunk-header'; hunk: DiffHunk; hunkIndex: number; adjacentGap?: HunkGap; hunkPosition: 'first' | 'last' | 'middle' | 'only' }
+  | {
+      kind: 'hunk-header'
+      hunk: DiffHunk
+      hunkIndex: number
+      adjacentGap?: HunkGap
+      hunkPosition: 'first' | 'last' | 'middle' | 'only'
+    }
   | { kind: 'gap'; gap: HunkGap; position: 'before' | 'between' | 'after' }

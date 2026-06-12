@@ -15,7 +15,12 @@ interface McpDialogProps {
   routingId: string | null
 }
 
-export function McpDialog({ open, onClose, cwd, routingId }: McpDialogProps): React.JSX.Element | null {
+export function McpDialog({
+  open,
+  onClose,
+  cwd,
+  routingId
+}: McpDialogProps): React.JSX.Element | null {
   const [servers, setServers] = useState<McpServerInfo[]>([])
   const [loading, setLoading] = useState(false)
   const [selected, setSelected] = useState<string | null>(null)
@@ -28,7 +33,7 @@ export function McpDialog({ open, onClose, cwd, routingId }: McpDialogProps): Re
     const scopes: Array<{ scope: McpServerScope; needsCwd: boolean }> = [
       { scope: 'user', needsCwd: false },
       { scope: 'project', needsCwd: true },
-      { scope: 'local', needsCwd: true },
+      { scope: 'local', needsCwd: true }
     ]
     for (const { scope, needsCwd } of scopes) {
       if (needsCwd && !cwd) continue
@@ -39,7 +44,7 @@ export function McpDialog({ open, onClose, cwd, routingId }: McpDialogProps): Re
             name,
             status: 'not_started',
             config,
-            scope,
+            scope
           })
         }
       } catch {
@@ -71,15 +76,17 @@ export function McpDialog({ open, onClose, cwd, routingId }: McpDialogProps): Re
     try {
       const raw = await window.api.mcpServerStatus(routingId)
       if (!raw || !Array.isArray(raw) || raw.length === 0) return null
-      const result: McpServerInfo[] = (raw as unknown as Array<Record<string, unknown>>).map((entry) => ({
-        name: (entry.name ?? entry.serverName ?? '') as string,
-        status: (entry.status ?? 'pending') as McpServerConnectionStatus,
-        serverInfo: entry.serverInfo as McpServerInfo['serverInfo'],
-        error: entry.error as string | undefined,
-        config: entry.config as McpServerConfig | undefined,
-        scope: entry.scope as McpServerScope | undefined,
-        tools: (entry.tools ?? []) as McpServerInfo['tools'],
-      })).filter((s) => s.name)
+      const result: McpServerInfo[] = (raw as unknown as Array<Record<string, unknown>>)
+        .map((entry) => ({
+          name: (entry.name ?? entry.serverName ?? '') as string,
+          status: (entry.status ?? 'pending') as McpServerConnectionStatus,
+          serverInfo: entry.serverInfo as McpServerInfo['serverInfo'],
+          error: entry.error as string | undefined,
+          config: entry.config as McpServerConfig | undefined,
+          scope: entry.scope as McpServerScope | undefined,
+          tools: (entry.tools ?? []) as McpServerInfo['tools']
+        }))
+        .filter((s) => s.name)
       return result.length > 0 ? result : null
     } catch (err) {
       console.error('[McpDialog] SDK mcpServerStatus error:', err)
@@ -101,7 +108,7 @@ export function McpDialog({ open, onClose, cwd, routingId }: McpDialogProps): Re
         return {
           ...sdk,
           scope: knownScope ?? cfg?.scope ?? 'managed',
-          config: sdk.config ?? cfg?.config,
+          config: sdk.config ?? cfg?.config
         }
       })
       const sdkNames = new Set(fromSdk.map((s) => s.name))
@@ -116,7 +123,9 @@ export function McpDialog({ open, onClose, cwd, routingId }: McpDialogProps): Re
   useEffect(() => {
     if (!open) return
     setLoading(true)
-    refreshServers().catch(err => console.error('[McpDialog] refreshServers error:', err)).finally(() => setLoading(false))
+    refreshServers()
+      .catch((err) => console.error('[McpDialog] refreshServers error:', err))
+      .finally(() => setLoading(false))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, routingId])
 
@@ -148,10 +157,11 @@ export function McpDialog({ open, onClose, cwd, routingId }: McpDialogProps): Re
   const filteredServers = useMemo(() => {
     if (!filter) return servers
     const q = filter.toLowerCase()
-    return servers.filter((s) =>
-      s.name.toLowerCase().includes(q) ||
-      s.status.toLowerCase().includes(q) ||
-      (s.scope && s.scope.toLowerCase().includes(q))
+    return servers.filter(
+      (s) =>
+        s.name.toLowerCase().includes(q) ||
+        s.status.toLowerCase().includes(q) ||
+        (s.scope && s.scope.toLowerCase().includes(q))
     )
   }, [servers, filter])
 
@@ -163,13 +173,11 @@ export function McpDialog({ open, onClose, cwd, routingId }: McpDialogProps): Re
       list.push(s)
       map.set(scope, list)
     }
-    return SCOPE_ORDER
-      .filter((scope) => map.has(scope))
-      .map((scope) => ({
-        scope,
-        label: SCOPE_META[scope]?.label ?? scope,
-        servers: map.get(scope)!,
-      }))
+    return SCOPE_ORDER.filter((scope) => map.has(scope)).map((scope) => ({
+      scope,
+      label: SCOPE_META[scope]?.label ?? scope,
+      servers: map.get(scope)!
+    }))
   }, [filteredServers])
 
   const selectedServer = useMemo(
@@ -177,86 +185,101 @@ export function McpDialog({ open, onClose, cwd, routingId }: McpDialogProps): Re
     [servers, selected]
   )
 
-  const refreshAfterAction = useCallback((delay = 800): void => {
-    setTimeout(refreshServers, delay)
-    setTimeout(refreshServers, delay * 2)
-  }, [refreshServers])
+  const refreshAfterAction = useCallback(
+    (delay = 800): void => {
+      setTimeout(refreshServers, delay)
+      setTimeout(refreshServers, delay * 2)
+    },
+    [refreshServers]
+  )
 
-  const handleToggle = useCallback(async (server: McpServerInfo): Promise<void> => {
-    setActionLoading(server.name)
-    try {
-      const enable = server.status === 'disabled' || server.status === 'not_started'
-      if (routingId) {
-        await window.api.mcpToggleServer(routingId, server.name, enable)
-        refreshAfterAction()
-      } else if (cwd) {
-        await window.api.mcpToggleDisabled(cwd, server.name, enable)
-        await refreshServers()
+  const handleToggle = useCallback(
+    async (server: McpServerInfo): Promise<void> => {
+      setActionLoading(server.name)
+      try {
+        const enable = server.status === 'disabled' || server.status === 'not_started'
+        if (routingId) {
+          await window.api.mcpToggleServer(routingId, server.name, enable)
+          refreshAfterAction()
+        } else if (cwd) {
+          await window.api.mcpToggleDisabled(cwd, server.name, enable)
+          await refreshServers()
+        }
+      } catch (err) {
+        console.error(`[McpDialog] toggle ${server.name} FAILED:`, err)
+        setActionLoading(null)
       }
-    } catch (err) {
-      console.error(`[McpDialog] toggle ${server.name} FAILED:`, err)
-      setActionLoading(null)
-    }
-  }, [routingId, cwd, refreshAfterAction, refreshServers])
+    },
+    [routingId, cwd, refreshAfterAction, refreshServers]
+  )
 
-  const handleReconnect = useCallback(async (server: McpServerInfo): Promise<void> => {
-    if (!routingId) return
-    setActionLoading(server.name)
-    try {
-      await window.api.mcpReconnectServer(routingId, server.name)
-      refreshAfterAction()
-    } catch (err) {
-      console.error('Reconnect failed:', err)
-      setActionLoading(null)
-    }
-  }, [routingId, refreshAfterAction])
+  const handleReconnect = useCallback(
+    async (server: McpServerInfo): Promise<void> => {
+      if (!routingId) return
+      setActionLoading(server.name)
+      try {
+        await window.api.mcpReconnectServer(routingId, server.name)
+        refreshAfterAction()
+      } catch (err) {
+        console.error('Reconnect failed:', err)
+        setActionLoading(null)
+      }
+    },
+    [routingId, refreshAfterAction]
+  )
 
-  const handleDelete = useCallback(async (server: McpServerInfo): Promise<void> => {
-    const isEditable = server.scope && ['user', 'project', 'local'].includes(server.scope)
-    if (!server.scope || !isEditable) return
-    setActionLoading(server.name)
-    try {
-      const scope = server.scope as 'user' | 'project' | 'local'
+  const handleDelete = useCallback(
+    async (server: McpServerInfo): Promise<void> => {
+      const isEditable = server.scope && ['user', 'project', 'local'].includes(server.scope)
+      if (!server.scope || !isEditable) return
+      setActionLoading(server.name)
+      try {
+        const scope = server.scope as 'user' | 'project' | 'local'
 
-      await window.api.removeMcpServer(scope, server.name, cwd ?? undefined)
+        await window.api.removeMcpServer(scope, server.name, cwd ?? undefined)
+
+        if (routingId) {
+          try {
+            const remaining = await window.api.loadMcpServers(scope, cwd ?? undefined)
+            await window.api.mcpSetServers(routingId, remaining)
+          } catch {
+            // SDK may not be ready — server is removed from config regardless
+          }
+        }
+
+        setSelected(null)
+        await refreshServers()
+      } catch (err) {
+        console.error('Delete failed:', err)
+        setActionLoading(null)
+      }
+    },
+    [cwd, routingId, refreshServers]
+  )
+
+  const handleSubmitAddForm = useCallback(
+    async (payload: AddServerPayload): Promise<{ error?: string } | void> => {
+      const { name, scope, config } = payload
+      const existing = await window.api.loadMcpServers(scope, cwd ?? undefined)
+      if (existing[name]) {
+        return { error: `Server "${name}" already exists in ${scope} scope` }
+      }
+      existing[name] = config
+      await window.api.saveMcpServers(scope, existing, cwd ?? undefined)
 
       if (routingId) {
         try {
-          const remaining = await window.api.loadMcpServers(scope, cwd ?? undefined)
-          await window.api.mcpSetServers(routingId, remaining)
+          await window.api.mcpSetServers(routingId, existing)
         } catch {
-          // SDK may not be ready — server is removed from config regardless
+          // SDK may not be ready — server is saved to config file regardless
         }
       }
 
-      setSelected(null)
+      setShowAddForm(false)
       await refreshServers()
-    } catch (err) {
-      console.error('Delete failed:', err)
-      setActionLoading(null)
-    }
-  }, [cwd, routingId, refreshServers])
-
-  const handleSubmitAddForm = useCallback(async (payload: AddServerPayload): Promise<{ error?: string } | void> => {
-    const { name, scope, config } = payload
-    const existing = await window.api.loadMcpServers(scope, cwd ?? undefined)
-    if (existing[name]) {
-      return { error: `Server "${name}" already exists in ${scope} scope` }
-    }
-    existing[name] = config
-    await window.api.saveMcpServers(scope, existing, cwd ?? undefined)
-
-    if (routingId) {
-      try {
-        await window.api.mcpSetServers(routingId, existing)
-      } catch {
-        // SDK may not be ready — server is saved to config file regardless
-      }
-    }
-
-    setShowAddForm(false)
-    await refreshServers()
-  }, [cwd, routingId, refreshServers])
+    },
+    [cwd, routingId, refreshServers]
+  )
 
   if (!open) return null
 
@@ -273,7 +296,10 @@ export function McpDialog({ open, onClose, cwd, routingId }: McpDialogProps): Re
       actionLoading={actionLoading}
       hasRoutingId={routingId !== null}
       hasCwd={cwd !== null}
-      onSelect={(name) => { setSelected(name); setShowAddForm(false) }}
+      onSelect={(name) => {
+        setSelected(name)
+        setShowAddForm(false)
+      }}
       onChangeFilter={setFilter}
       onOpenAddForm={() => setShowAddForm(true)}
       onCancelAddForm={() => setShowAddForm(false)}

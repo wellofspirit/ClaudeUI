@@ -5,7 +5,7 @@ const DESTINATION_LABELS: Record<string, string> = {
   projectSettings: 'project settings',
   localSettings: 'local settings',
   session: 'this session',
-  cliArg: 'CLI arg',
+  cliArg: 'CLI arg'
 }
 
 /**
@@ -26,7 +26,7 @@ export function formatSuggestionLabel(s: PermissionSuggestion): string {
   }
 
   // addRules / replaceRules / removeRules
-  const verb = s.type === 'removeRules' ? 'Remove' : (s.behavior || 'allow')
+  const verb = s.type === 'removeRules' ? 'Remove' : s.behavior || 'allow'
   const ruleTexts = (s.rules || []).map((r) => {
     if (r.ruleContent) return `${r.toolName}(${r.ruleContent})`
     return r.toolName
@@ -54,7 +54,7 @@ export function AlwaysAllowSection({
   suggestions,
   checkedSuggestions,
   onToggle,
-  currentMode,
+  currentMode
 }: {
   suggestions: PermissionSuggestion[]
   checkedSuggestions: boolean[]
@@ -74,10 +74,7 @@ export function AlwaysAllowSection({
         Permission rules
       </div>
       {visible.map(({ suggestion, index }) => (
-        <label
-          key={index}
-          className="flex items-start gap-2 cursor-default select-none group"
-        >
+        <label key={index} className="flex items-start gap-2 cursor-default select-none group">
           <input
             type="checkbox"
             checked={checkedSuggestions[index]}

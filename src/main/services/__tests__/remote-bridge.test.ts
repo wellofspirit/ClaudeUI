@@ -78,7 +78,7 @@ describe('RemoteBridge', () => {
     bridge.webContents.send('session:message', 'sess-A', { text: 'hello' })
 
     expect(clientA.received).toEqual([
-      { channel: 'session:message', args: ['sess-A', { text: 'hello' }] },
+      { channel: 'session:message', args: ['sess-A', { text: 'hello' }] }
     ])
   })
 

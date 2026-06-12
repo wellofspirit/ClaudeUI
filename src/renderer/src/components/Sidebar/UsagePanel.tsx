@@ -33,7 +33,13 @@ export function formatPlanName(tier: string | null): string {
   return tier
 }
 
-export function UsageProgressBar({ label, window: w }: { label: string; window: RateWindow }): React.JSX.Element {
+export function UsageProgressBar({
+  label,
+  window: w
+}: {
+  label: string
+  window: RateWindow
+}): React.JSX.Element {
   const pct = Math.round(w.usedPercent)
   const color = getUsageColor(pct)
   const resetStr = formatResetTime(w.resetsAt)
@@ -50,9 +56,7 @@ export function UsageProgressBar({ label, window: w }: { label: string; window: 
           style={{ width: `${Math.min(100, pct)}%`, backgroundColor: color }}
         />
       </div>
-      {resetStr && (
-        <div className="text-[9px] text-text-muted mt-0.5">{resetStr}</div>
-      )}
+      {resetStr && <div className="text-[9px] text-text-muted mt-0.5">{resetStr}</div>}
     </div>
   )
 }
@@ -65,9 +69,10 @@ export function ExtraUsageBar({ extra }: { extra: ExtraUsage }): React.JSX.Eleme
   const usedDollars = (extra.usedCredits / 100).toFixed(2)
 
   // unlimited vs capped
-  const limitStr = extra.monthlyLimit !== null
-    ? `$${usedDollars} / $${(extra.monthlyLimit / 100).toFixed(2)}`
-    : `$${usedDollars} used`
+  const limitStr =
+    extra.monthlyLimit !== null
+      ? `$${usedDollars} / $${(extra.monthlyLimit / 100).toFixed(2)}`
+      : `$${usedDollars} used`
 
   return (
     <div className="mb-2 last:mb-0">
@@ -87,10 +92,19 @@ export function ExtraUsageBar({ extra }: { extra: ExtraUsage }): React.JSX.Eleme
   )
 }
 
-export function UsagePanel({ usage, onRefresh }: { usage: AccountUsage | null; onRefresh: () => void }): React.JSX.Element {
+export function UsagePanel({
+  usage,
+  onRefresh
+}: {
+  usage: AccountUsage | null
+  onRefresh: () => void
+}): React.JSX.Element {
   const plan = usage ? formatPlanName(usage.planName) : null
   const agoStr = usage
-    ? (() => { const ago = Math.round((Date.now() - usage.fetchedAt) / 1000); return ago < 60 ? `${ago}s ago` : `${Math.floor(ago / 60)}m ago` })()
+    ? (() => {
+        const ago = Math.round((Date.now() - usage.fetchedAt) / 1000)
+        return ago < 60 ? `${ago}s ago` : `${Math.floor(ago / 60)}m ago`
+      })()
     : null
   const blockUsage = useSessionStore((s) => s.blockUsage)
   const setActiveView = useSessionStore((s) => s.setActiveView)
@@ -100,11 +114,16 @@ export function UsagePanel({ usage, onRefresh }: { usage: AccountUsage | null; o
   // Format block summary
   let blockSummary: string | null = null
   if (currentBlock) {
-    const total = currentBlock.tokens.inputTokens + currentBlock.tokens.outputTokens +
-      currentBlock.tokens.cacheCreationTokens + currentBlock.tokens.cacheReadTokens
+    const total =
+      currentBlock.tokens.inputTokens +
+      currentBlock.tokens.outputTokens +
+      currentBlock.tokens.cacheCreationTokens +
+      currentBlock.tokens.cacheReadTokens
     const tokStr = formatTokenCount(total)
     const costStr = currentBlock.costUsd >= 0.01 ? `$${currentBlock.costUsd.toFixed(2)}` : '$0.00'
-    const burnStr = currentBlock.burnRate ? `${formatTokenCount(currentBlock.burnRate.tokensPerMin)} tok/min` : ''
+    const burnStr = currentBlock.burnRate
+      ? `${formatTokenCount(currentBlock.burnRate.tokensPerMin)} tok/min`
+      : ''
     blockSummary = `${tokStr} tok\u2009·\u2009${costStr}${burnStr ? `\u2009·\u2009${burnStr}` : ''}`
   }
 
@@ -115,9 +134,15 @@ export function UsagePanel({ usage, onRefresh }: { usage: AccountUsage | null; o
       ) : usage ? (
         <>
           <UsageProgressBar label="5-Hour Session" window={usage.fiveHour} />
-          {usage.sevenDay && <UsageProgressBar label="7-Day (all models)" window={usage.sevenDay} />}
-          {usage.sevenDayOpus && <UsageProgressBar label="7-Day Opus" window={usage.sevenDayOpus} />}
-          {usage.sevenDaySonnet && <UsageProgressBar label="7-Day Sonnet" window={usage.sevenDaySonnet} />}
+          {usage.sevenDay && (
+            <UsageProgressBar label="7-Day (all models)" window={usage.sevenDay} />
+          )}
+          {usage.sevenDayOpus && (
+            <UsageProgressBar label="7-Day Opus" window={usage.sevenDayOpus} />
+          )}
+          {usage.sevenDaySonnet && (
+            <UsageProgressBar label="7-Day Sonnet" window={usage.sevenDaySonnet} />
+          )}
           {usage.extraUsage && <ExtraUsageBar extra={usage.extraUsage} />}
         </>
       ) : (
@@ -133,13 +158,18 @@ export function UsagePanel({ usage, onRefresh }: { usage: AccountUsage | null; o
       <div className="flex items-center justify-between mt-2 pt-1.5 border-t border-border/30">
         <div className="flex items-center gap-1.5">
           {plan && (
-            <span className="text-[9px] px-1.5 py-0.5 rounded bg-accent/15 text-accent font-medium">{plan}</span>
+            <span className="text-[9px] px-1.5 py-0.5 rounded bg-accent/15 text-accent font-medium">
+              {plan}
+            </span>
           )}
           {agoStr && <span className="text-[9px] text-text-muted">{agoStr}</span>}
         </div>
         <div className="flex items-center gap-1">
           <button
-            onClick={(e) => { e.stopPropagation(); setActiveView({ type: 'usage' }) }}
+            onClick={(e) => {
+              e.stopPropagation()
+              setActiveView({ type: 'usage' })
+            }}
             className="text-[9px] text-accent hover:text-accent/80 cursor-default"
             title="View usage analytics"
           >
@@ -147,11 +177,24 @@ export function UsagePanel({ usage, onRefresh }: { usage: AccountUsage | null; o
           </button>
           {usage && (
             <button
-              onClick={(e) => { e.stopPropagation(); onRefresh() }}
+              onClick={(e) => {
+                e.stopPropagation()
+                onRefresh()
+              }}
               className="flex items-center justify-center w-5 h-5 rounded hover:bg-bg-hover transition-colors cursor-default"
               title="Refresh usage"
             >
-              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-text-muted">
+              <svg
+                width="10"
+                height="10"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                className="text-text-muted"
+              >
                 <path d="M23 4v6h-6" />
                 <path d="M1 20v-6h6" />
                 <path d="M3.51 9a9 9 0 0114.85-3.36L23 10" />
@@ -185,11 +228,15 @@ export function UsageRing(): React.JSX.Element {
 
   const handleRefresh = (): void => {
     setIsRefreshing(true)
-    window.api.fetchAccountUsage().then((data) => {
-      useSessionStore.getState().setAccountUsage(data)
-    }).catch(() => {}).finally(() => {
-      setIsRefreshing(false)
-    })
+    window.api
+      .fetchAccountUsage()
+      .then((data) => {
+        useSessionStore.getState().setAccountUsage(data)
+      })
+      .catch(() => {})
+      .finally(() => {
+        setIsRefreshing(false)
+      })
   }
 
   // SVG ring params
@@ -200,7 +247,7 @@ export function UsageRing(): React.JSX.Element {
   const pct = usage?.error ? 0 : (usage?.fiveHour.usedPercent ?? 0)
   const dashOffset = circumference - (circumference * Math.min(100, pct)) / 100
   const color = usage && !usage.error ? getUsageColor(pct) : '#6b7280' // grey when no data
-  const displayText = usage && !usage.error ? `${Math.round(pct)}` : (usage?.error ? '!' : '—')
+  const displayText = usage && !usage.error ? `${Math.round(pct)}` : usage?.error ? '!' : '—'
 
   return (
     <div ref={ringRef} className="relative flex items-center gap-2">
@@ -243,9 +290,7 @@ export function UsageRing(): React.JSX.Element {
         </span>
       </button>
       <span className="text-[10px] text-text-muted select-none">
-        {usage && !usage.error
-          ? formatResetTime(usage.fiveHour.resetsAt)
-          : 'Usage'}
+        {usage && !usage.error ? formatResetTime(usage.fiveHour.resetsAt) : 'Usage'}
       </span>
       {showPanel && <UsagePanel usage={usage} onRefresh={handleRefresh} />}
     </div>

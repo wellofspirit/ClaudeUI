@@ -35,7 +35,6 @@ export class LogViewer {
   private unsubLogger: (() => void) | null = null
 
   constructor(mainWindow: BrowserWindow) {
-
     // Forward live log entries to the viewer window (if open).
     // logRing (in logger.ts) captures ALL entries from process start,
     // so the viewer can catch up even for entries before this point.
@@ -74,7 +73,7 @@ export class LogViewer {
 
     ipcMain.removeHandler('log-viewer:get-theme')
     ipcMain.handle('log-viewer:get-theme', () => {
-      return readPrefs().theme as string | undefined ?? null
+      return (readPrefs().theme as string | undefined) ?? null
     })
 
     ipcMain.removeHandler('log-viewer:set-theme')

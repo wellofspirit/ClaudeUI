@@ -26,15 +26,9 @@
  *   client.close()
  */
 
- 
-
 import WebSocket from 'ws'
 import { E2ECrypto } from '../../shared/e2e-crypto'
-import type {
-  WsServerMessage,
-  WsInvokeResponse,
-  WsEvent
-} from '../../shared/remote-protocol'
+import type { WsServerMessage, WsInvokeResponse, WsEvent } from '../../shared/remote-protocol'
 
 export interface ConnectOptions {
   url: string
@@ -180,7 +174,11 @@ export async function connectRemoteClient(opts: ConnectOptions): Promise<RemoteC
 
     // Fan out to raw listeners first.
     for (const cb of rawListeners) {
-      try { cb(parsed as WsServerMessage) } catch { /* ignore */ }
+      try {
+        cb(parsed as WsServerMessage)
+      } catch {
+        /* ignore */
+      }
     }
 
     if (parsed?.type === 'invoke-response') {
@@ -196,7 +194,11 @@ export async function connectRemoteClient(opts: ConnectOptions): Promise<RemoteC
       const set = listeners.get(evt.channel)
       if (set) {
         for (const cb of set) {
-          try { cb(...(evt.args ?? [])) } catch { /* ignore */ }
+          try {
+            cb(...(evt.args ?? []))
+          } catch {
+            /* ignore */
+          }
         }
       }
     } else if (parsed?.type === 'ping') {
@@ -241,8 +243,12 @@ export async function connectRemoteClient(opts: ConnectOptions): Promise<RemoteC
         req.reject(new Error('Connection closed'))
         pending.delete(id)
       }
-      try { ws.close() } catch { /* ignore */ }
-    },
+      try {
+        ws.close()
+      } catch {
+        /* ignore */
+      }
+    }
   }
 
   return client

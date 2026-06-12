@@ -38,7 +38,7 @@ Two structural constraints fell out of this:
    (partial chunks upsert by it). `--resume-session-at` needs the line `uuid`.
    The renderer therefore cannot pass its message id straight to the flag.
 2. **Tool-cycle balance.** Tool results are separate `type:"user"` JSONL lines
-   that land *after* the assistant line on disk (but render merged into the
+   that land _after_ the assistant line on disk (but render merged into the
    assistant bubble). Slicing on the bare assistant line would drop those
    results, leaving a dangling `tool_use` → the Anthropic API rejects the next
    turn with a 400.
@@ -69,7 +69,7 @@ Spawn plumbing (`QueryOptions` already declared `forkSession`/`resumeSessionAt`;
   gated to the **first run only** (`!this.sessionId`); the resume target then
   flips to the new branch id once `system/init` mints it. Resume precedence in
   `run()` becomes `sessionId ?? resumeSessionId` (was `resumeSessionId ??
-  sessionId`) — equivalent for plain historical resume (where they're the same
+sessionId`) — equivalent for plain historical resume (where they're the same
   id), correct for forks (where the source id must not be re-resumed after the
   branch is born).
 - Threaded through `SessionManager.create`, the `session:create` IPC, the new

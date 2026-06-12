@@ -15,9 +15,7 @@ import { getModelEnv } from './model-env'
 /** Strip in-process `type: 'sdk'` servers from an mcpServers map — those are
  *  hosted locally and are NOT written to --mcp-config (the CLI treats them
  *  specially via the `initialize` control_request). */
-export function splitMcpServers(
-  servers?: Record<string, McpServerConfig>,
-): {
+export function splitMcpServers(servers?: Record<string, McpServerConfig>): {
   cliServers: Record<string, Exclude<McpServerConfig, SdkMcpServer>>
   sdkServers: Record<string, SdkMcpServer>
 } {
@@ -46,7 +44,7 @@ export function buildArgs(options: QueryOptions): string[] {
     'stream-json',
     '--verbose',
     '--input-format',
-    'stream-json',
+    'stream-json'
   ]
 
   // --- Thinking ------------------------------------------------------------
@@ -113,7 +111,7 @@ export function buildArgs(options: QueryOptions): string[] {
   if (options.canUseTool) {
     if (options.permissionPromptToolName) {
       throw new Error(
-        'canUseTool callback cannot be used with permissionPromptToolName. Use one or the other.',
+        'canUseTool callback cannot be used with permissionPromptToolName. Use one or the other.'
       )
     }
     args.push('--permission-prompt-tool', 'stdio')
@@ -165,7 +163,7 @@ export function buildArgs(options: QueryOptions): string[] {
   if (options.fallbackModel) {
     if (options.model && options.fallbackModel === options.model) {
       throw new Error(
-        'fallbackModel cannot be the same as model. Please specify a different model for fallbackModel.',
+        'fallbackModel cannot be the same as model. Please specify a different model for fallbackModel.'
       )
     }
     args.push('--fallback-model', options.fallbackModel)
@@ -229,7 +227,7 @@ function mergeSettingsAndSandbox(options: QueryOptions): Record<string, string |
     const existing = options.settings
     if (typeof existing === 'string') {
       throw new Error(
-        'Cannot use both a settings file path and the sandbox option. Include the sandbox configuration in your settings file instead.',
+        'Cannot use both a settings file path and the sandbox option. Include the sandbox configuration in your settings file instead.'
       )
     }
     const merged = { ...(existing ?? {}), sandbox }

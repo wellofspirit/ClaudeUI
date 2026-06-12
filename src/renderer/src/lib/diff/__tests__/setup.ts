@@ -3,7 +3,10 @@ import '@testing-library/jest-dom/vitest'
 // Node 25+ ships a native `localStorage` getter that shadows jsdom's mock
 // when `--localstorage-file` isn't configured. Override it with a simple
 // in-memory implementation so jsdom-based tests work correctly.
-if (typeof globalThis.localStorage === 'object' && typeof globalThis.localStorage?.getItem !== 'function') {
+if (
+  typeof globalThis.localStorage === 'object' &&
+  typeof globalThis.localStorage?.getItem !== 'function'
+) {
   const store = new Map<string, string>()
   Object.defineProperty(globalThis, 'localStorage', {
     configurable: true,
@@ -13,8 +16,10 @@ if (typeof globalThis.localStorage === 'object' && typeof globalThis.localStorag
       setItem: (key: string, value: string) => store.set(key, String(value)),
       removeItem: (key: string) => store.delete(key),
       clear: () => store.clear(),
-      get length() { return store.size },
-      key: (index: number) => [...store.keys()][index] ?? null,
-    },
+      get length() {
+        return store.size
+      },
+      key: (index: number) => [...store.keys()][index] ?? null
+    }
   })
 }

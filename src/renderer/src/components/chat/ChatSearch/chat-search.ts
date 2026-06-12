@@ -13,7 +13,7 @@
 
 export interface EngineState {
   total: number
-  index: number  // 1-based; 0 when total = 0
+  index: number // 1-based; 0 when total = 0
 }
 
 export interface ChatSearchEngine {
@@ -36,9 +36,7 @@ const HighlightImpl: HighlightCtor | null =
     : null
 
 const hasHighlightRegistry =
-  typeof CSS !== 'undefined' &&
-  'highlights' in CSS &&
-  HighlightImpl !== null
+  typeof CSS !== 'undefined' && 'highlights' in CSS && HighlightImpl !== null
 
 function isInsideSkip(node: Node): boolean {
   let el: Node | null = node.parentNode
@@ -58,7 +56,7 @@ function findMatchesIn(root: Node, query: string, caseSensitive: boolean): Range
       if (!node.nodeValue) return NodeFilter.FILTER_REJECT
       if (isInsideSkip(node)) return NodeFilter.FILTER_REJECT
       return NodeFilter.FILTER_ACCEPT
-    },
+    }
   })
   let textNode: Text | null = walker.nextNode() as Text | null
   while (textNode) {
@@ -129,7 +127,10 @@ export function createChatSearchEngine(scrollEl: HTMLElement): ChatSearchEngine 
     const containerRect = scrollEl.getBoundingClientRect()
     // Center the match within the scroll container
     const targetTop =
-      scrollEl.scrollTop + (rect.top - containerRect.top) - scrollEl.clientHeight / 2 + rect.height / 2
+      scrollEl.scrollTop +
+      (rect.top - containerRect.top) -
+      scrollEl.clientHeight / 2 +
+      rect.height / 2
     scrollEl.scrollTo({ top: targetTop, behavior: 'smooth' })
   }
 
@@ -162,15 +163,14 @@ export function createChatSearchEngine(scrollEl: HTMLElement): ChatSearchEngine 
               const r = matches[i]
               const pos = r.startContainer.compareDocumentPosition(node)
               if (pos & Node.DOCUMENT_POSITION_PRECEDING) return i
-              if (
-                r.startContainer === node &&
-                r.startOffset >= offset
-              )
-                return i
+              if (r.startContainer === node && r.startOffset >= offset) return i
             }
             return matches.length - 1
           }
-          currentIdx = Math.max(0, Math.min(matches.length - 1, compareDoc(prevAnchor.node, prevAnchor.offset)))
+          currentIdx = Math.max(
+            0,
+            Math.min(matches.length - 1, compareDoc(prevAnchor.node, prevAnchor.offset))
+          )
         }
       }
     } else {
@@ -223,7 +223,9 @@ export function createChatSearchEngine(scrollEl: HTMLElement): ChatSearchEngine 
     getState,
     subscribe(listener) {
       listeners.add(listener)
-      return () => { listeners.delete(listener) }
+      return () => {
+        listeners.delete(listener)
+      }
     },
     dispose() {
       if (disposed) return
@@ -239,6 +241,6 @@ export function createChatSearchEngine(scrollEl: HTMLElement): ChatSearchEngine 
         registry.delete('chat-search-current')
       }
       listeners.clear()
-    },
+    }
   }
 }

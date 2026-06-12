@@ -38,12 +38,15 @@ export function useSlashMenu({
     [slashMenuOpen, slashCommands, slashFilter]
   )
 
-  const handleSelect = useCallback((name: string): void => {
-    setText(name + ' ')
-    setSlashMenuOpen(false)
-    setSlashMenuIndex(0)
-    textareaRef.current?.focus()
-  }, [setText, textareaRef])
+  const handleSelect = useCallback(
+    (name: string): void => {
+      setText(name + ' ')
+      setSlashMenuOpen(false)
+      setSlashMenuIndex(0)
+      textareaRef.current?.focus()
+    },
+    [setText, textareaRef]
+  )
 
   /** Called from handleInput to update slash menu state based on text changes */
   const handleInputChange = useCallback((value: string): void => {
@@ -56,31 +59,34 @@ export function useSlashMenu({
   }, [])
 
   /** Keyboard handler — returns true if the event was consumed */
-  const handleKeyDown = useCallback((e: React.KeyboardEvent): boolean => {
-    if (!slashMenuOpen || filteredCommands.length === 0) return false
+  const handleKeyDown = useCallback(
+    (e: React.KeyboardEvent): boolean => {
+      if (!slashMenuOpen || filteredCommands.length === 0) return false
 
-    if (e.key === 'ArrowDown') {
-      e.preventDefault()
-      setSlashMenuIndex((i) => (i + 1) % filteredCommands.length)
-      return true
-    }
-    if (e.key === 'ArrowUp') {
-      e.preventDefault()
-      setSlashMenuIndex((i) => (i - 1 + filteredCommands.length) % filteredCommands.length)
-      return true
-    }
-    if (e.key === 'Enter' || e.key === 'Tab') {
-      e.preventDefault()
-      handleSelect(filteredCommands[slashMenuIndex].name)
-      return true
-    }
-    if (e.key === 'Escape') {
-      e.preventDefault()
-      setSlashMenuOpen(false)
-      return true
-    }
-    return false
-  }, [slashMenuOpen, filteredCommands, slashMenuIndex, handleSelect])
+      if (e.key === 'ArrowDown') {
+        e.preventDefault()
+        setSlashMenuIndex((i) => (i + 1) % filteredCommands.length)
+        return true
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault()
+        setSlashMenuIndex((i) => (i - 1 + filteredCommands.length) % filteredCommands.length)
+        return true
+      }
+      if (e.key === 'Enter' || e.key === 'Tab') {
+        e.preventDefault()
+        handleSelect(filteredCommands[slashMenuIndex].name)
+        return true
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        setSlashMenuOpen(false)
+        return true
+      }
+      return false
+    },
+    [slashMenuOpen, filteredCommands, slashMenuIndex, handleSelect]
+  )
 
   return {
     slashMenuOpen,

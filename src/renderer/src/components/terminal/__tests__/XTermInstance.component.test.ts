@@ -11,8 +11,6 @@
  *   3. initial size syncs to PTY via resizeTerminal IPC
  */
 
- 
-
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import React from 'react'
 import { render, act } from '@testing-library/react'
@@ -34,7 +32,11 @@ class MockTerm {
 
   onData(cb: (data: string) => void): { dispose: () => void } {
     dataCallbacks.push(cb)
-    return { dispose: () => { dataCallbacks = dataCallbacks.filter((c) => c !== cb) } }
+    return {
+      dispose: () => {
+        dataCallbacks = dataCallbacks.filter((c) => c !== cb)
+      }
+    }
   }
 }
 
@@ -50,13 +52,13 @@ vi.mock('@xterm/xterm', () => ({
       termInstances.push(inst)
       return inst as any
     }
-  } as any,
+  } as any
 }))
 
 vi.mock('@xterm/addon-fit', () => ({
   FitAddon: class {
     fit = vi.fn()
-  } as any,
+  } as any
 }))
 
 vi.mock('@xterm/xterm/css/xterm.css', () => ({}))
@@ -72,17 +74,22 @@ describe('XTermInstance', () => {
     resizeCalls = []
     termInstances.length = 0
     dataCallbacks = []
-
     ;(global as any).ResizeObserver = MockResizeObserver
     // requestAnimationFrame fires synchronously in jsdom
-    ;(global as any).requestAnimationFrame = (cb: FrameRequestCallback) => { cb(0); return 0 }
+    ;(global as any).requestAnimationFrame = (cb: FrameRequestCallback) => {
+      cb(0)
+      return 0
+    }
 
     app.bridge.ipcMain.handle('terminal:write', async (_e, id: string, data: string) => {
       writeCalls.push({ id, data })
     })
-    app.bridge.ipcMain.handle('terminal:resize', async (_e, id: string, cols: number, rows: number) => {
-      resizeCalls.push({ id, cols, rows })
-    })
+    app.bridge.ipcMain.handle(
+      'terminal:resize',
+      async (_e, id: string, cols: number, rows: number) => {
+        resizeCalls.push({ id, cols, rows })
+      }
+    )
   })
 
   afterEach(() => {
@@ -136,7 +143,9 @@ describe('XTermInstance', () => {
 
   it('syncs initial size to PTY via resizeTerminal IPC', async () => {
     await renderFC('term-xyz')
-    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
 
     expect(resizeCalls.length).toBeGreaterThanOrEqual(1)
     expect(resizeCalls[0].id).toBe('term-xyz')

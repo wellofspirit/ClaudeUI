@@ -152,13 +152,19 @@ export class RemoteServer {
     this.idleTimer = setInterval(() => this.checkIdleClients(), 60_000)
 
     const lanUrl = `http://${this.boundHost}:${this.port}/remote?t=${this.token}`
-    logger.info('remote-server', `Remote server started on ${bindAddr}:${this.port} (URL host: ${this.boundHost})`)
+    logger.info(
+      'remote-server',
+      `Remote server started on ${bindAddr}:${this.port} (URL host: ${this.boundHost})`
+    )
     this.notifyStatus()
 
     // Start tunnel if requested (async — URL arrives via status callback)
     if (opts?.tunnel) {
       this.tunnel.start(this.port).catch((err) => {
-        logger.error('remote-server', `Tunnel start failed: ${err instanceof Error ? err.message : String(err)}`)
+        logger.error(
+          'remote-server',
+          `Tunnel start failed: ${err instanceof Error ? err.message : String(err)}`
+        )
         // Status is already updated by TunnelManager's status callback
       })
     }
@@ -244,7 +250,11 @@ export class RemoteServer {
     } else if (url.pathname.startsWith(`/${MOCKUP_HTTP_PREFIX}/`)) {
       // Serve mockup HTML + sibling assets (web client preview iframe)
       void this.serveMockupHttp(url, req, res)
-    } else if (url.pathname.startsWith('/assets/') || url.pathname.endsWith('.js') || url.pathname.endsWith('.css')) {
+    } else if (
+      url.pathname.startsWith('/assets/') ||
+      url.pathname.endsWith('.js') ||
+      url.pathname.endsWith('.css')
+    ) {
       // Serve static assets
       this.serveStatic(url.pathname, res)
     } else {
@@ -294,7 +304,9 @@ export class RemoteServer {
       // token itself. JSON.stringify-escaping is safe for a hex string.
       if (url.searchParams.get('t') === this.token) {
         const inject = `<script>window.__MOCKUP_TOKEN__=${JSON.stringify(this.mockupToken)}</script>`
-        html = html.includes('</head>') ? html.replace('</head>', `${inject}</head>`) : inject + html
+        html = html.includes('</head>')
+          ? html.replace('</head>', `${inject}</head>`)
+          : inject + html
       }
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
       res.end(html)
@@ -413,7 +425,10 @@ export class RemoteServer {
             this.clients.set(ws, newClient)
             // Send auth response plaintext
             ws.send(JSON.stringify({ type: 'auth-response', ok: true }))
-            logger.info('remote-server', `Client authenticated from ${ip} (${this.clients.size} total)`)
+            logger.info(
+              'remote-server',
+              `Client authenticated from ${ip} (${this.clients.size} total)`
+            )
             this.notifyStatus()
             // If server has an E2E key, expect e2e-activate as the next message
             if (this.e2eKey) {
@@ -470,7 +485,10 @@ export class RemoteServer {
       if (client?.pingTimer) clearInterval(client.pingTimer)
       this.clients.delete(ws)
       if (authenticated) {
-        logger.info('remote-server', `Client disconnected from ${ip} (${this.clients.size} remaining)`)
+        logger.info(
+          'remote-server',
+          `Client disconnected from ${ip} (${this.clients.size} remaining)`
+        )
         this.notifyStatus()
       }
     })
@@ -536,7 +554,10 @@ export class RemoteServer {
           try {
             ws.send(await client.e2e!.encrypt(msg))
           } catch (err) {
-            logger.error('remote-server', `E2E encrypt failed: ${err instanceof Error ? err.message : String(err)}`)
+            logger.error(
+              'remote-server',
+              `E2E encrypt failed: ${err instanceof Error ? err.message : String(err)}`
+            )
           }
         }
       })
@@ -558,7 +579,10 @@ export class RemoteServer {
             try {
               ws.send(await client.e2e!.encrypt(msg))
             } catch (err) {
-              logger.error('remote-server', `E2E broadcast encrypt failed: ${err instanceof Error ? err.message : String(err)}`)
+              logger.error(
+                'remote-server',
+                `E2E broadcast encrypt failed: ${err instanceof Error ? err.message : String(err)}`
+              )
             }
           }
         })

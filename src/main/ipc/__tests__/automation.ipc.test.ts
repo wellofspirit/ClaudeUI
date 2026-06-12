@@ -6,8 +6,6 @@
  * routes to the right manager method with the right args.
  */
 
- 
-
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { bootIpcHarness, type IpcHarness } from '../../../test/helpers/boot-ipc-harness'
 
@@ -21,13 +19,15 @@ const { mockState, managerSpies } = vi.hoisted(() => {
     list: vi.fn(() => [{ id: 'a1' }]),
     upsert: vi.fn(),
     delete: vi.fn(),
-    runNow: vi.fn(async () => { /* slow */ }),
+    runNow: vi.fn(async () => {
+      /* slow */
+    }),
     toggle: vi.fn(),
     listRuns: vi.fn(() => [{ id: 'r1' }]),
     loadRunMessages: vi.fn(() => [{ role: 'assistant' }]),
     cancelRun: vi.fn(),
     dismissRun: vi.fn(),
-    sendMessage: vi.fn(),
+    sendMessage: vi.fn()
   }
   return { mockState, managerSpies }
 })
@@ -35,7 +35,9 @@ const { mockState, managerSpies } = vi.hoisted(() => {
 // Mock the AutomationManager class to use our spies without touching disk.
 vi.mock('../../services/automation-manager', () => ({
   AutomationManager: class {
-    constructor(_win: unknown) { /* no-op */ }
+    constructor(_win: unknown) {
+      /* no-op */
+    }
     load = managerSpies.load
     startAll = managerSpies.startAll
     list = managerSpies.list
@@ -48,7 +50,7 @@ vi.mock('../../services/automation-manager', () => ({
     cancelRun = managerSpies.cancelRun
     dismissRun = managerSpies.dismissRun
     sendMessage = managerSpies.sendMessage
-  },
+  }
 }))
 
 // Electron shim with a dynamic isPackaged getter.
@@ -58,8 +60,10 @@ vi.mock('electron', async () => {
     ...shim,
     app: {
       ...shim.app,
-      get isPackaged() { return mockState.isPackaged },
-    },
+      get isPackaged() {
+        return mockState.isPackaged
+      }
+    }
   }
 })
 
@@ -68,8 +72,8 @@ vi.mock('../../services/logger', () => ({
     debug: vi.fn(),
     info: vi.fn(),
     warn: vi.fn(),
-    error: vi.fn(),
-  },
+    error: vi.fn()
+  }
 }))
 
 // Import AFTER mocks.
@@ -131,7 +135,10 @@ describe('automation.ipc', () => {
     // before runNow's promise resolves.
     let resolveRun: (() => void) | undefined
     managerSpies.runNow.mockImplementationOnce(
-      () => new Promise<void>((resolve) => { resolveRun = resolve })
+      () =>
+        new Promise<void>((resolve) => {
+          resolveRun = resolve
+        })
     )
     registerAutomationIpc(harness.win)
 

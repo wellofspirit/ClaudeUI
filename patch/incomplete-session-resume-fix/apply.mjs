@@ -104,16 +104,20 @@ const filterRe = new RegExp(
 const filterMatch = filterRe.exec(src)
 if (!filterMatch) {
   console.error('ERROR: Cannot find progress filter pattern in JSONL loader.')
-  console.error('Expected pattern like: if(VAR.type==="progress"&&VAR.data&&typeof VAR.data==="object"&&"type" in VAR.data&&FUNC(VAR.data.type))continue;')
+  console.error(
+    'Expected pattern like: if(VAR.type==="progress"&&VAR.data&&typeof VAR.data==="object"&&"type" in VAR.data&&FUNC(VAR.data.type))continue;'
+  )
   console.error('And upstream fix was not detected either. Cannot patch this SDK version.')
   process.exit(1)
 }
 
-const msgVar = filterMatch[1]   // e.g. "m"
+const msgVar = filterMatch[1] // e.g. "m"
 const filterFn = filterMatch[2] // e.g. "Ns6"
 const filterLiteral = filterMatch[0]
 
-console.log(`  Found progress filter: ${filterFn}(${msgVar}.data.type) at offset ${filterMatch.index}`)
+console.log(
+  `  Found progress filter: ${filterFn}(${msgVar}.data.type) at offset ${filterMatch.index}`
+)
 
 // Verify uniqueness
 const filterCount = src.split(filterLiteral).length - 1
