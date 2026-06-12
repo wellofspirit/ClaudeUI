@@ -85,9 +85,11 @@ export default defineConfig(
       'react-hooks/rules-of-hooks': 'error',
       'react-hooks/exhaustive-deps': 'warn',
       ...eslintPluginReactRefresh.configs.vite.rules,
-      // HMR-boundary hygiene, not a correctness issue — a violation just makes
-      // Fast Refresh fall back to a full reload for that module. Keep as a hint.
-      'react-refresh/only-export-components': 'warn'
+      // Off by choice: this only affects dev-server Fast Refresh (a violation
+      // makes that module do a full reload), never production. Co-locating small
+      // helpers/constants/types with the component that uses them is a pattern
+      // we keep, so the rule is pure noise here.
+      'react-refresh/only-export-components': 'off'
     }
   },
 

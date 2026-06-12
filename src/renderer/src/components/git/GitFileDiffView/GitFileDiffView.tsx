@@ -105,7 +105,19 @@ export function GitFileDiffView(): React.JSX.Element {
         }
       })
       .catch(() => {})
-  }, [cwd, gitSelectedFile, activeSessionId, gitStatus, gitFileDiff?.patch])
+    // The early-return guards above make the extra content/isBinary deps safe:
+    // once content is fetched the effect no-ops, so there is no refetch loop.
+  }, [
+    cwd,
+    gitSelectedFile,
+    activeSessionId,
+    gitStatus,
+    gitFileDiff?.patch,
+    gitFileDiff?.isBinary,
+    gitFileDiff?.oldContent,
+    gitFileDiff?.newContent,
+    setGitFileDiff
+  ])
 
   // Build highlighted lines set from comments + active input
   const highlightedLines = useMemo(() => {

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import type { ClaudePermissions, PermissionScope } from '../../../../shared/types'
 import { PermissionsDialogView, type RuleCategory } from './View'
 
@@ -39,8 +39,12 @@ export function PermissionsDialog({
 
   const loaded = useRef(false)
 
-  // Available tabs — project/local only available when cwd is set
-  const tabs: PermissionScope[] = cwd ? ['local', 'project', 'user'] : ['user']
+  // Available tabs — project/local only available when cwd is set. Memoized so
+  // its identity is stable (it feeds a useCallback dependency list).
+  const tabs: PermissionScope[] = useMemo(
+    () => (cwd ? ['local', 'project', 'user'] : ['user']),
+    [cwd]
+  )
 
   // Reset active tab only when cwd or initialTab changes (not when activeTab changes)
   useEffect(() => {

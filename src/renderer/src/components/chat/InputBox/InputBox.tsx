@@ -157,8 +157,19 @@ export function InputBox(): React.JSX.Element {
   )
   const selectedModelValue = useActiveSession((s) => s.selectedModel)
   const setSelectedModel = useSessionStore((s) => s.setSelectedModel)
-  const selectedModel = models.find((m) => m.value === selectedModelValue) ||
-    models[0] || { value: 'default', displayName: 'Default', shortName: 'Default', description: '' }
+  // Memoized so its identity is stable across renders (it feeds several
+  // downstream useMemo dependency lists).
+  const selectedModel = useMemo(
+    () =>
+      models.find((m) => m.value === selectedModelValue) ||
+      models[0] || {
+        value: 'default',
+        displayName: 'Default',
+        shortName: 'Default',
+        description: ''
+      },
+    [models, selectedModelValue]
+  )
   const statusLine = useActiveSession((s) => s.statusLine)
   const effort = useActiveSession((s) => s.effort)
   const setEffort = useSessionStore((s) => s.setEffort)

@@ -33,7 +33,8 @@ export function PlanReviewPanelView({
   const panelRef = useRef<HTMLDivElement>(null)
 
   const planContent = planReview.planContent ?? ''
-  const comments = planReview.comments ?? []
+  // Memoized so its identity is stable (it feeds a useMemo dependency list).
+  const comments = useMemo(() => planReview.comments ?? [], [planReview.comments])
 
   const { selection, clearSelection } = useTextSelectionComment(contentRef, planContent)
   const [commentingSelection, setCommentingSelection] = useState<TextSelection | null>(null)

@@ -450,6 +450,7 @@ export function useClaudeEvents(): void {
     setStatusLine,
     setPermissionMode,
     setSlashCommands,
+    setCustomCommands,
     setSdkSkillNames,
     addSandboxViolation,
     setVoiceState,

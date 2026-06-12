@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from 'react'
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
 import { MarkdownRenderer } from '../chat/MarkdownRenderer'
 import { SubagentMessages } from '../chat/SubagentMessages'
@@ -57,8 +57,9 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
   const { taskBlock, resultBlock } = findTaskBlocks(messages, toolUseId)
 
   // Referenced by the autoscroll effect below, so they must be computed before
-  // it; they default to empty when the task block isn't present yet.
-  const msgs = subagentMsgs[toolUseId] || []
+  // it; they default to empty when the task block isn't present yet. `msgs` is
+  // memoized so its identity is stable across renders (it's an effect dep).
+  const msgs = useMemo(() => subagentMsgs[toolUseId] || [], [subagentMsgs, toolUseId])
   const streamText = subagentText[toolUseId] || ''
   const streamThinking = subagentThinking[toolUseId] || ''
 
