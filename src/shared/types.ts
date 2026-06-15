@@ -464,6 +464,8 @@ interface SessionAPI {
   onDirectoriesChanged(cb: () => void): () => void
   onSlashCommands(cb: (routingId: string, commands: SlashCommandInfo[]) => void): () => void
   onSkills(cb: (routingId: string, names: string[]) => void): () => void
+  /** cli.js auth source from session init: 'oauth' | 'api_key' | 'none' (ADR-014). */
+  onAuthSource(cb: (routingId: string, source: string) => void): () => void
   onStatusLine(cb: (routingId: string, data: StatusLineData) => void): () => void
   onSettingsChanged(cb: (settings: Record<string, unknown>) => void): () => void
   onSessionConfigChanged(cb: (config: UISessionConfig) => void): () => void
@@ -602,6 +604,17 @@ interface AccountAPI {
   onBlockUsage(cb: (data: BlockUsageData) => void): () => void
   /** Filter usage analytics to one account email (null = all accounts) */
   setUsageAccountFilter(account: string | null): Promise<void>
+  // --- Native Anthropic OAuth (ADR-014) ---
+  /** Start the subscription login flow: opens the browser and awaits the
+   *  loopback redirect. Resolves once cli.js has stored fresh credentials. */
+  signIn(): Promise<AuthState>
+  /** Manual fallback: submit the authorization code pasted by the user.
+   *  `state` is recovered internally from the login URL. */
+  submitOAuthCode(code: string): Promise<AuthState>
+  /** Abort an in-flight login flow. */
+  cancelSignIn(): Promise<void>
+  /** Subscribe to login-flow state transitions. */
+  onAuthState(cb: (state: AuthState) => void): () => void
 }
 
 export interface NetworkInterfaceInfo {
@@ -759,6 +772,29 @@ export interface AccountUsage {
   extraUsage: ExtraUsage | null
   planName: string | null // e.g. "claude_max_5x"
   fetchedAt: number // Date.now()
+  error: string | null
+}
+
+// ---------------------------------------------------------------------------
+// Native Anthropic OAuth (subscription "Log in with Claude") — see ADR-014
+// ---------------------------------------------------------------------------
+
+/** Account info returned by cli.js after a successful OAuth token exchange. */
+export interface OAuthAccount {
+  email: string | null
+  organization: string | null
+  subscriptionType: string | null // e.g. "max", "pro"
+  tokenSource?: string | null
+  apiKeySource?: string | null
+  apiProvider?: string | null
+}
+
+export type AuthFlowStatus = 'idle' | 'authorizing' | 'success' | 'error'
+
+/** Broadcast to the renderer on every transition of the native login flow. */
+export interface AuthState {
+  status: AuthFlowStatus
+  account: OAuthAccount | null
   error: string | null
 }
 

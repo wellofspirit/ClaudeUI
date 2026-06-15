@@ -24,7 +24,12 @@ export class RemoteDispatcher {
     'terminal:write',
     'terminal:resize',
     'terminal:kill',
-    'terminal:kill-by-cwd'
+    'terminal:kill-by-cwd',
+    // Native OAuth opens a local browser + loopback listener on the desktop
+    // host — meaningless (and a credential vector) over remote. See ADR-014.
+    'auth:sign-in',
+    'auth:submit-code',
+    'auth:cancel'
   ])
 
   /** Register a handler for a channel. Blocked channels are silently skipped. */

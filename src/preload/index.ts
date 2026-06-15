@@ -136,6 +136,8 @@ const api: ClaudeAPI = {
   onSettingsChanged: onEvent('config:settings-changed'),
   onSessionConfigChanged: onEvent('config:sessions-changed'),
   onAccountUsage: onEvent('usage:data'),
+  onAuthState: onEvent('auth:state'),
+  onAuthSource: onEvent('session:auth-source'),
   onBlockUsage: onEvent('usage:block-data'),
   onTerminalData: onEvent('terminal:data'),
   onTerminalExit: onEvent('terminal:exit'),
@@ -245,6 +247,11 @@ const api: ClaudeAPI = {
   fetchBlockUsage: () => ipcRenderer.invoke('usage:fetch-block'),
   setUsageAccountFilter: (account: string | null) =>
     ipcRenderer.invoke('usage:set-account-filter', account),
+
+  // Native Anthropic OAuth (ADR-014)
+  signIn: () => ipcRenderer.invoke('auth:sign-in'),
+  submitOAuthCode: (code: string) => ipcRenderer.invoke('auth:submit-code', code),
+  cancelSignIn: () => ipcRenderer.invoke('auth:cancel'),
 
   // Claude permissions (allow/deny/ask rule management)
   loadClaudePermissions: (scope, cwd?) => ipcRenderer.invoke('claude:load-permissions', scope, cwd),

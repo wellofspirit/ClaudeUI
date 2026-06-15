@@ -367,6 +367,21 @@ export function useClaudeEvents(): void {
       window.api.onBlockUsage((data) => {
         useSessionStore.getState().setBlockUsage(data)
       }),
+      // Native OAuth login-flow transitions (ADR-014)
+      window.api.onAuthState((state) => {
+        const store = useSessionStore.getState()
+        store.setAuthState(state)
+        // The running cli.js process cached the stale credential; mark the active
+        // session inactive so the next normal send respawns with fresh creds
+        // (Retry does its own respawn). See ADR-014.
+        if (state.status === 'success' && store.activeSessionId) {
+          store.markSdkInactive(store.activeSessionId)
+        }
+      }),
+      // Auth source from session init ('none' = logged out) — drives the banner
+      window.api.onAuthSource((_routingId, source) => {
+        useSessionStore.getState().setAuthSource(source)
+      }),
       // Before-quit: check for active worktrees
       window.api.onBeforeQuit(() => {
         const store = useSessionStore.getState()

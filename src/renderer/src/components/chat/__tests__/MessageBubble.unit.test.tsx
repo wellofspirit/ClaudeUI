@@ -7,7 +7,7 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { render, screen, act } from '@testing-library/react'
 import { MessageBubble } from '../MessageBubble'
 import { useSessionStore } from '../../../stores/session-store'
 import {
@@ -390,6 +390,116 @@ describe('MessageBubble', () => {
       // ApiErrorBlock shows "API Error" header and error type as label
       expect(screen.getByText('API Error')).toBeInTheDocument()
       expect(screen.getByText('Overloaded')).toBeInTheDocument()
+    })
+
+    it('renders auth variant with Login action for authentication errors', () => {
+      useSessionStore.setState({ authState: null })
+      const msg = makeChatMessage({
+        role: 'system',
+        content: [
+          {
+            type: 'api_error',
+            errorType: 'authentication',
+            errorMessage: 'API Error: 401 Invalid authentication credentials'
+          } as any
+        ]
+      })
+      render(
+        <MessageBubble
+          message={msg}
+          pendingApprovals={[]}
+          isLastAssistant={false}
+          thinkingStartedAt={null}
+        />
+      )
+      // Auth variant — not the generic collapsible "API Error" card
+      expect(screen.getByText('Authentication failed')).toBeInTheDocument()
+      expect(screen.getByText('Log in with Claude')).toBeInTheDocument()
+      expect(screen.queryByText('API Error')).not.toBeInTheDocument()
+    })
+
+    it('clicking Log in triggers signIn', () => {
+      const signIn = vi.fn().mockResolvedValue(undefined)
+      ;(globalThis as any).window.api.signIn = signIn
+      useSessionStore.setState({ authState: null })
+      const msg = makeChatMessage({
+        role: 'system',
+        content: [{ type: 'api_error', errorType: 'authentication', errorMessage: '401' } as any]
+      })
+      render(
+        <MessageBubble
+          message={msg}
+          pendingApprovals={[]}
+          isLastAssistant={false}
+          thinkingStartedAt={null}
+        />
+      )
+      screen.getByText('Log in with Claude').click()
+      expect(signIn).toHaveBeenCalledOnce()
+    })
+
+    it('auth variant shows signed-in success state after this card initiates login', () => {
+      ;(globalThis as any).window.api.signIn = vi.fn().mockResolvedValue(undefined)
+      useSessionStore.setState({ authState: null })
+      const msg = makeChatMessage({
+        role: 'system',
+        content: [{ type: 'api_error', errorType: 'authentication', errorMessage: '401' } as any]
+      })
+      render(
+        <MessageBubble
+          message={msg}
+          pendingApprovals={[]}
+          isLastAssistant={false}
+          thinkingStartedAt={null}
+        />
+      )
+      // This card must initiate login to follow the global flow state.
+      act(() => {
+        screen.getByText('Log in with Claude').click()
+      })
+      act(() => {
+        useSessionStore.setState({
+          authState: {
+            status: 'success',
+            account: {
+              email: 'user@example.com',
+              organization: null,
+              subscriptionType: 'Claude Team'
+            },
+            error: null
+          }
+        })
+      })
+      expect(screen.getByText('Signed in as user@example.com')).toBeInTheDocument()
+      expect(screen.getByText('Claude Team subscription')).toBeInTheDocument()
+      expect(screen.getByText('Retry message')).toBeInTheDocument()
+    })
+
+    it('a non-initiating error card stays in the error state even when a login succeeded elsewhere (no retry loop)', () => {
+      // Global flow is "success" (another card logged in), but THIS freshly
+      // arrived error card did not initiate it — it must show Log in, not a
+      // stale "Retry message" success that would loop. See ADR-014.
+      useSessionStore.setState({
+        authState: {
+          status: 'success',
+          account: { email: 'user@example.com', organization: null, subscriptionType: 'max' },
+          error: null
+        }
+      })
+      const msg = makeChatMessage({
+        role: 'system',
+        content: [{ type: 'api_error', errorType: 'authentication', errorMessage: '401' } as any]
+      })
+      render(
+        <MessageBubble
+          message={msg}
+          pendingApprovals={[]}
+          isLastAssistant={false}
+          thinkingStartedAt={null}
+        />
+      )
+      expect(screen.getByText('Authentication failed')).toBeInTheDocument()
+      expect(screen.queryByText('Retry message')).not.toBeInTheDocument()
     })
   })
 

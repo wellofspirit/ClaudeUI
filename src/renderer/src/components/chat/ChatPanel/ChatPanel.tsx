@@ -12,6 +12,7 @@ import { TodoWidget } from '../../TodoWidget'
 import { FloatingApproval } from '../FloatingApproval'
 import { BtwCard } from '../BtwCard'
 import { FloatingError } from '../FloatingError'
+import { AuthBanner } from '../AuthBanner'
 import { SandboxViolationToast } from '../SandboxViolationToast'
 import { useIsMobile } from '../../../hooks/useIsMobile'
 import { TopBar } from './TopBar'
@@ -224,6 +225,7 @@ export function ChatPanel(): React.JSX.Element {
   return (
     <div className="flex-1 flex flex-col min-h-0 min-w-0 relative">
       <TopBar hasContent={hasContent} />
+      <AuthBanner />
 
       <div className="flex-1 flex flex-col min-h-0 relative">
         <ChatSearchOverlay

@@ -22,6 +22,7 @@ import type {
   PlanComment,
   PlanReviewData,
   AccountUsage,
+  AuthState,
   BlockUsageData,
   TerminalTab,
   WorktreeInfo,
@@ -600,6 +601,10 @@ interface SessionState {
   sdkSkillNames: string[]
   accountUsage: AccountUsage | null
   blockUsage: BlockUsageData | null
+  /** Native OAuth login-flow state (ADR-014). Null until first event/status. */
+  authState: AuthState | null
+  /** cli.js auth source from session init: 'oauth'|'api_key'|'none'|null (ADR-014). */
+  authSource: string | null
   activeView: ActiveView
   pluginViews: PluginViewWithOwner[]
 
@@ -788,6 +793,15 @@ interface SessionState {
   closeGitPanel: (routingId: string) => void
   // Account usage
   setAccountUsage: (data: AccountUsage) => void
+  // Native OAuth (ADR-014)
+  setAuthState: (data: AuthState) => void
+  setAuthSource: (source: string) => void
+  signIn: () => Promise<void>
+  submitOAuthCode: (code: string) => Promise<void>
+  cancelSignIn: () => Promise<void>
+  /** Respawn the session's cli.js process (so it re-reads freshly-stored
+   *  credentials) and resend a prompt. Used by the post-login Retry. */
+  retrySend: (routingId: string, prompt: string) => Promise<void>
   // Block usage analytics
   setBlockUsage: (data: BlockUsageData) => void
   setActiveView: (view: ActiveView) => void
@@ -844,6 +858,8 @@ export const useSessionStore = create<SessionState>((set) => ({
   customCommands: [],
   sdkSkillNames: [],
   accountUsage: null,
+  authState: null,
+  authSource: null,
   blockUsage: null,
   activeView: { type: 'chat' } as ActiveView,
   pluginViews: [],
@@ -1980,6 +1996,46 @@ export const useSessionStore = create<SessionState>((set) => ({
   setAvailableModels: (models) => set({ availableModels: models }),
 
   setAccountUsage: (data) => set({ accountUsage: data }),
+
+  // Native OAuth (ADR-014). signIn/submit return the "authorizing"/result
+  // snapshot synchronously; the terminal transition arrives via onAuthState.
+  setAuthState: (data) => set({ authState: data }),
+  setAuthSource: (source) => set({ authSource: source }),
+  signIn: async () => {
+    set({ authState: { status: 'authorizing', account: null, error: null } })
+    const result = await window.api.signIn()
+    set({ authState: result })
+  },
+  submitOAuthCode: async (code) => {
+    const result = await window.api.submitOAuthCode(code)
+    set({ authState: result })
+  },
+  cancelSignIn: async () => {
+    await window.api.cancelSignIn()
+    set((s) => ({
+      authState: s.authState ? { ...s.authState, status: 'idle', error: null } : null
+    }))
+  },
+  retrySend: async (routingId, prompt) => {
+    const session = useSessionStore.getState().sessions[routingId]
+    if (!session) return
+    // The persistent cli.js process caches credentials for its lifetime, so a
+    // post-login retry MUST respawn it (createSession → session-manager cancels
+    // the old process and spawns a fresh one that re-reads the new credential).
+    // Plain sendPrompt would just push to the stale, still-401ing process.
+    const resumeId = session.messages.length > 0 ? routingId : undefined
+    await window.api.createSession(
+      routingId,
+      session.cwd || '',
+      session.effort ?? undefined,
+      resumeId,
+      session.permissionMode,
+      session.selectedModel,
+      session.thinkingMode ?? undefined
+    )
+    set((s) => ({ sessions: updateSession(s.sessions, routingId, () => ({ sdkActive: true })) }))
+    await window.api.sendPrompt(routingId, prompt)
+  },
   setBlockUsage: (data) => set({ blockUsage: data }),
   setActiveView: (view) => set({ activeView: view }),
   setPluginViews: (views) => set({ pluginViews: views }),

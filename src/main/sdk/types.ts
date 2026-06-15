@@ -56,6 +56,14 @@ export interface AssistantMessage extends BaseSDKMessage {
     [k: string]: unknown
   }
   parent_tool_use_id?: string | null
+  /** Present on the JSONL transcript (not the SDK stdout frame) when this
+   *  "assistant" frame is a surfaced API error. Prefer `error` for live
+   *  detection. */
+  isApiErrorMessage?: boolean
+  /** Top-level error code on a surfaced API-error frame — the reliable live
+   *  signal on the SDK stdout stream (e.g. "authentication_failed"). Absent on
+   *  normal/benign synthetic assistant frames. */
+  error?: string
 }
 
 export interface UserMessage extends BaseSDKMessage {
@@ -97,6 +105,8 @@ export interface SystemMessage extends BaseSDKMessage {
     | 'model_fallback'
     | string
   permissionMode?: string
+  /** init only: where cli.js resolved credentials from. 'none' = logged out. */
+  apiKeySource?: 'api_key' | 'oauth' | 'none'
   /** init-only fields */
   /** Resolved canonical model id (e.g. "claude-opus-4-8") — what the `default`
    *  alias and other server-resolved aliases actually map to this session. */

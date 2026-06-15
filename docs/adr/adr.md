@@ -15,3 +15,4 @@
 | [011](adr-011_canonical-usage-windows-and-account-attribution.md) | Canonical 5h-window identity from `resets_at` + time-based account attribution for usage analytics |
 | [012](adr-012_mermaid-html-labels-and-theming.md)                 | Mermaid HTML labels (`antiscript` + DOMPurify `html` profile) and dark-theme ER contrast           |
 | [013](adr-013_eslint-flat-config-and-prettier-decoupling.md)      | ESLint flat-config rework — Prettier decoupling, scoped React rules, pragmatic strictness          |
+| [014](adr-014_native-anthropic-oauth.md)                          | Native Anthropic OAuth via cli.js control requests, hosted on the service session                  |

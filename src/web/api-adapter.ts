@@ -208,6 +208,7 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     onSandboxViolation: on('session:sandbox-violation') as ClaudeAPI['onSandboxViolation'],
     onSteerConsumed: on('session:steer-consumed') as ClaudeAPI['onSteerConsumed'],
     onSkills: on('session:skills') as ClaudeAPI['onSkills'],
+    onAuthSource: on('session:auth-source') as ClaudeAPI['onAuthSource'],
     onStatusLine: on('session:status-line') as ClaudeAPI['onStatusLine'],
     onMcpServers: on('session:mcp-servers') as ClaudeAPI['onMcpServers'],
 
@@ -388,6 +389,18 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       connection.invoke('usage:set-account-filter', account) as ReturnType<
         ClaudeAPI['setUsageAccountFilter']
       >,
+
+    // Native OAuth (ADR-014) — desktop-only (opens a local browser + loopback).
+    // sign-in/submit/cancel are blocklisted on the remote dispatcher; only the
+    // read-only status query is forwarded.
+    signIn: async () => {
+      throw new Error('Login is only available on the desktop app.')
+    },
+    submitOAuthCode: async () => {
+      throw new Error('Login is only available on the desktop app.')
+    },
+    cancelSignIn: async () => {},
+    onAuthState: on('auth:state') as ClaudeAPI['onAuthState'],
 
     // Claude permissions (read-only)
     loadClaudePermissions: (scope, cwd?) =>

@@ -37,6 +37,7 @@ import { registerRemoteHandlers, registerRemoteVersionInfo } from './ipc/remote-
 import { RemoteServer, getNetworkInterfaces } from './services/remote-server'
 import { RemoteDispatcher } from './services/remote-dispatcher'
 import { serviceSession } from './services/service-session'
+import { authManager } from './services/auth-manager'
 import { PluginManager } from './services/plugin-manager'
 import { LogViewer } from './services/log-viewer'
 import { logger } from './services/logger'
@@ -183,6 +184,7 @@ function createWindow(): void {
   })
 
   const sessionManager = registerSessionIpc(mainWindow)
+  authManager.setWindow(mainWindow)
   registerTerminalIpc(mainWindow)
   const automationManager = registerAutomationIpc(mainWindow)
 

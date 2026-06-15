@@ -17,6 +17,7 @@ import * as os from 'os'
 import * as path from 'path'
 import type { BrowserWindow } from 'electron'
 import { computeTokenMetrics, fallbackBlockText } from './session-history'
+import { classifyApiError } from './api-error'
 import { VoiceClient } from './voice-client'
 import { startRecording, stopRecording } from './voice-capture'
 import { unwatchAllSubagents } from './subagent-watcher'
@@ -839,6 +840,11 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
         const skillNames = sys.skills || []
         this.send('session:skills', skillNames)
 
+        // Auth source drives the proactive sign-in banner (ADR-014). 'none' =
+        // logged out. Sourced from cli.js here so we never read the Keychain
+        // ourselves (which would trigger `security` trust prompts).
+        this.send('session:auth-source', sys.apiKeySource ?? 'none')
+
         const mcpServers = sys.mcp_servers || []
         this._initMcpServers = mcpServers
         logger.debug(
@@ -871,6 +877,26 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
   private handleAssistantMessage(msg: AssistantMessage): void {
     const parentToolUseId = msg.parent_tool_use_id ?? undefined
     const isSidechain = !!parentToolUseId
+
+    // cli.js surfaces API failures (401/auth, rate_limit, overloaded, …) as a
+    // synthetic "assistant" frame. On disk the frame is flagged
+    // `isApiErrorMessage`, but the SDK stdout frame omits that field and instead
+    // carries a top-level `error` code (e.g. "authentication_failed"); the
+    // benign "No response requested." synthetic message has no `error`, so the
+    // field's presence is the reliable live discriminator. We emit a structured
+    // `api_error` block (matching history-reload rendering and giving the auth
+    // variant its Login action) instead of plain text. Main channel only —
+    // subagent errors fall through to the normal text path. See ADR-014.
+    const isApiErrorFrame = msg.isApiErrorMessage === true || typeof msg.error === 'string'
+    if (isApiErrorFrame && !parentToolUseId) {
+      const errMsg = this.transformApiErrorMessage(msg)
+      if (errMsg) {
+        this.upsertMessage(errMsg)
+        this.send('session:message', errMsg)
+        return
+      }
+    }
+
     const chatMsg = this.transformAssistantMessage(msg)
 
     // Accumulate usage from every assistant message (main + sidechain)
@@ -1812,6 +1838,36 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       return { success: false, error: msg }
+    }
+  }
+
+  /**
+   * Build a `system` ChatMessage carrying an `api_error` block from an
+   * `isApiErrorMessage` assistant frame. Mirrors session-history.ts so live and
+   * reloaded transcripts render identically. `errorType` of `'authentication'`
+   * drives the renderer's Login action. See ADR-014.
+   */
+  private transformApiErrorMessage(msg: AssistantMessage): ChatMessage | null {
+    const betaMessage = msg.message as Record<string, unknown> | undefined
+    const content = betaMessage?.content
+    let text = ''
+    if (typeof content === 'string') {
+      text = content
+    } else if (Array.isArray(content)) {
+      text = content
+        .map((b: Record<string, unknown>) => (b?.type === 'text' ? (b.text as string) || '' : ''))
+        .join('')
+        .trim()
+    }
+    if (!text) text = (msg.error as string) || 'API error'
+
+    return {
+      id: (betaMessage?.id as string) || (msg.uuid as string) || `error-${uuid()}`,
+      role: 'system',
+      content: [
+        { type: 'api_error', errorType: classifyApiError(text, msg.error), errorMessage: text }
+      ],
+      timestamp: Date.now()
     }
   }
 

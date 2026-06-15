@@ -53,7 +53,11 @@ export const MessageBubble = memo(function MessageBubble({
             return <CliCommandBlock key={i} block={block} />
           }
           if (block.type === 'api_error') {
-            return <ApiErrorBlock key={i} block={block} />
+            return block.errorType === 'authentication' ? (
+              <AuthErrorBlock key={i} block={block} />
+            ) : (
+              <ApiErrorBlock key={i} block={block} />
+            )
           }
           return null
         })}
@@ -491,6 +495,207 @@ function ApiErrorBlock({
           </pre>
         </div>
       )}
+    </div>
+  )
+}
+
+// Small button helpers — match FloatingApproval styling.
+function PrimaryBtn(props: React.ButtonHTMLAttributes<HTMLButtonElement>): React.JSX.Element {
+  return (
+    <button
+      {...props}
+      className="text-[12px] font-medium rounded-md px-3.5 py-1.5 bg-accent text-bg-primary hover:bg-accent-hover transition-colors cursor-pointer disabled:opacity-50"
+    />
+  )
+}
+function GhostBtn(props: React.ButtonHTMLAttributes<HTMLButtonElement>): React.JSX.Element {
+  return (
+    <button
+      {...props}
+      className="text-[12px] font-medium rounded-md px-3.5 py-1.5 border border-border-bright text-text-secondary hover:bg-bg-hover transition-colors cursor-pointer"
+    />
+  )
+}
+
+/**
+ * Authentication-error variant of the API error card (ADR-014). Renders the
+ * 401/expired-session message with an inline Login action, then walks the OAuth
+ * flow states (authorizing → success) driven by the global `authState`.
+ */
+function AuthErrorBlock({
+  block
+}: {
+  block: Extract<ContentBlock, { type: 'api_error' }>
+}): React.JSX.Element | null {
+  const authState = useSessionStore((s) => s.authState)
+  const signIn = useSessionStore((s) => s.signIn)
+  const submitOAuthCode = useSessionStore((s) => s.submitOAuthCode)
+  const cancelSignIn = useSessionStore((s) => s.cancelSignIn)
+  const retrySend = useSessionStore((s) => s.retrySend)
+  const [dismissed, setDismissed] = useState(false)
+  const [manual, setManual] = useState(false)
+  const [code, setCode] = useState('')
+  // Only the card the user clicked "Log in" on follows the global flow state.
+  // Other (and newly-arrived) error cards stay in the error state, so a retry
+  // that re-fails doesn't inherit a stale "success" and loop. See ADR-014.
+  const [initiated, setInitiated] = useState(false)
+
+  if (dismissed) return null
+  const status = initiated ? (authState?.status ?? 'idle') : 'idle'
+
+  const startLogin = (): void => {
+    setInitiated(true)
+    void signIn()
+  }
+
+  const retryLastPrompt = (): void => {
+    const st = useSessionStore.getState()
+    const sid = st.activeSessionId
+    if (!sid) return setDismissed(true)
+    const msgs = st.sessions[sid]?.messages ?? []
+    const lastUser = [...msgs].reverse().find((m) => m.role === 'user')
+    const text = (lastUser?.content ?? [])
+      .filter((b): b is Extract<ContentBlock, { type: 'text' }> => b.type === 'text')
+      .map((b) => b.text)
+      .join('\n')
+      .trim()
+    // retrySend respawns cli.js so it re-reads the new credential, then resends.
+    // The user bubble comes back via the main-process echo (single source of
+    // truth) — don't add it here.
+    if (text) void retrySend(sid, text)
+    setDismissed(true)
+  }
+
+  // --- Signed in -----------------------------------------------------------
+  if (status === 'success') {
+    const email = authState?.account?.email
+    const tier = authState?.account?.subscriptionType
+    return (
+      <div className="rounded-lg border border-success/30 bg-bg-secondary overflow-hidden animate-fade-in">
+        <div className="px-3 py-2.5 flex items-start gap-2.5">
+          <svg
+            width="14"
+            height="14"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            className="text-success shrink-0 mt-0.5"
+          >
+            <path d="M20 6 9 17l-5-5" />
+          </svg>
+          <div className="flex-1 min-w-0">
+            <div className="text-[13px] font-medium text-success">
+              {email ? `Signed in as ${email}` : 'Signed in'}
+            </div>
+            {tier && (
+              <div className="text-[12px] text-text-secondary mt-0.5">{tier} subscription</div>
+            )}
+          </div>
+        </div>
+        <div className="flex justify-end gap-2 px-3 py-2 border-t border-border">
+          <GhostBtn onClick={() => setDismissed(true)}>Dismiss</GhostBtn>
+          <PrimaryBtn onClick={retryLastPrompt}>Retry message</PrimaryBtn>
+        </div>
+      </div>
+    )
+  }
+
+  // --- Authorizing (loopback wait, or manual paste) ------------------------
+  if (status === 'authorizing') {
+    return (
+      <div className="rounded-lg border border-accent/35 bg-bg-secondary overflow-hidden animate-fade-in">
+        <div className="px-3 py-2.5 flex items-start gap-2.5">
+          {!manual && (
+            <svg
+              width="14"
+              height="14"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              className="text-accent shrink-0 mt-0.5 animate-spin"
+            >
+              <path d="M21 12a9 9 0 1 1-6.22-8.56" />
+            </svg>
+          )}
+          <div className="flex-1 min-w-0">
+            {manual ? (
+              <>
+                <div className="text-[13px] font-medium text-accent">Paste authorization code</div>
+                <div className="text-[11px] text-text-muted mt-0.5">
+                  state is recovered from the login URL — just paste the code
+                </div>
+                <input
+                  value={code}
+                  onChange={(e) => setCode(e.target.value)}
+                  placeholder="authorization code"
+                  className="font-mono w-full mt-2 text-[12px] rounded-md px-2.5 py-1.5 bg-bg-input border border-border-bright text-text-primary outline-none focus:border-accent"
+                />
+              </>
+            ) : (
+              <>
+                <div className="text-[13px] font-medium text-accent">
+                  Waiting for browser authorization…
+                </div>
+                <div className="text-[12px] text-text-secondary mt-0.5">
+                  Approve in the browser tab we opened — it completes automatically.
+                </div>
+                <button
+                  onClick={() => setManual(true)}
+                  className="text-[11px] mt-1.5 underline text-text-muted hover:text-text-secondary cursor-pointer"
+                >
+                  Browser didn&apos;t open? Paste code manually
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+        <div className="flex justify-end gap-2 px-3 py-2 border-t border-border">
+          {manual ? (
+            <>
+              <GhostBtn onClick={() => setManual(false)}>Back</GhostBtn>
+              <PrimaryBtn onClick={() => void submitOAuthCode(code)} disabled={!code.trim()}>
+                Submit
+              </PrimaryBtn>
+            </>
+          ) : (
+            <GhostBtn onClick={() => void cancelSignIn()}>Cancel</GhostBtn>
+          )}
+        </div>
+      </div>
+    )
+  }
+
+  // --- Error / idle: the initial auth-required prompt ----------------------
+  const detail = status === 'error' && authState?.error ? authState.error : block.errorMessage
+  return (
+    <div className="rounded-lg border border-danger/30 bg-bg-secondary overflow-hidden animate-fade-in">
+      <div className="px-3 py-2.5 flex items-start gap-2.5">
+        <svg
+          width="14"
+          height="14"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          className="text-danger shrink-0 mt-0.5"
+        >
+          <circle cx="12" cy="12" r="10" />
+          <line x1="12" y1="8" x2="12" y2="12" />
+          <line x1="12" y1="16" x2="12.01" y2="16" />
+        </svg>
+        <div className="flex-1 min-w-0">
+          <div className="text-[13px] font-medium text-danger">Authentication failed</div>
+          <div className="text-[12px] text-text-secondary mt-0.5 break-words">
+            {detail} — your Claude subscription session has expired.
+          </div>
+        </div>
+      </div>
+      <div className="flex justify-end gap-2 px-3 py-2 border-t border-border">
+        <GhostBtn onClick={() => setDismissed(true)}>Dismiss</GhostBtn>
+        <PrimaryBtn onClick={startLogin}>Log in with Claude</PrimaryBtn>
+      </div>
     </div>
   )
 }

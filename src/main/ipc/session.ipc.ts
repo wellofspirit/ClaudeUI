@@ -50,6 +50,7 @@ import {
 import { usageFetcher } from '../services/usage-fetcher'
 import { serviceSession } from '../services/service-session'
 import { blockUsageService } from '../services/block-usage'
+import { authManager } from '../services/auth-manager'
 import type {
   ApprovalDecision,
   ModelInfo,
@@ -282,6 +283,10 @@ const SESSION_IPC_CHANNELS = [
   'file:list-dir',
   'usage:fetch',
   'usage:fetch-block',
+  'usage:set-account-filter',
+  'auth:sign-in',
+  'auth:submit-code',
+  'auth:cancel',
   'claude:load-permissions',
   'claude:save-permissions',
   'claude:get-cleanup-period',
@@ -1540,6 +1545,12 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
   ipcMain.handle('usage:set-account-filter', async (_e, account: string | null) => {
     blockUsageService.setAccountFilter(account)
   })
+
+  // Native Anthropic OAuth (ADR-014). signIn resolves at "authorizing"; the
+  // terminal result is broadcast via the 'auth:state' event.
+  ipcMain.handle('auth:sign-in', async () => authManager.signIn())
+  ipcMain.handle('auth:submit-code', async (_e, code: string) => authManager.submitOAuthCode(code))
+  ipcMain.handle('auth:cancel', async () => authManager.cancelSignIn())
 
   // Mockup preview — read HTML from mockup directory
   ipcMain.handle(

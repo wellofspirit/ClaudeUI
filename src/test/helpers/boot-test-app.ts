@@ -117,6 +117,7 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     onSandboxViolation: onEvent('session:sandbox-violation'),
     onSteerConsumed: onEvent('session:steer-consumed'),
     onSkills: onEvent('session:skills'),
+    onAuthSource: onEvent('session:auth-source'),
     onStatusLine: onEvent('session:status-line'),
     onMcpServers: onEvent('session:mcp-servers'),
 
@@ -129,6 +130,7 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     onSessionConfigChanged: onEvent('config:sessions-changed'),
     onAccountUsage: onEvent('usage:data'),
     onBlockUsage: onEvent('usage:block-data'),
+    onAuthState: onEvent('auth:state'),
     onTerminalData: onEvent('terminal:data'),
     onTerminalExit: onEvent('terminal:exit'),
     onAutomationRunUpdate: onEvent('automation:run-update'),
@@ -228,6 +230,9 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
 
     fetchAccountUsage: () => ipcRenderer.invoke('usage:fetch'),
     fetchBlockUsage: () => ipcRenderer.invoke('usage:fetch-block'),
+    signIn: () => ipcRenderer.invoke('auth:sign-in'),
+    submitOAuthCode: (code: string) => ipcRenderer.invoke('auth:submit-code', code),
+    cancelSignIn: () => ipcRenderer.invoke('auth:cancel'),
 
     loadClaudePermissions: (scope, cwd?) =>
       ipcRenderer.invoke('claude:load-permissions', scope, cwd),
