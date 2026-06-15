@@ -14,7 +14,7 @@ scripts/extract-cli.mjs                  (pull wrapped cli.js from the Bun paylo
 vendor/claude-cli/cli.js                 (Bun CJS IIFE bytes, for patching + analysis)
           │
           ▼
-patch/apply-all.mjs                      (14 content-regex patches, idempotent)
+patch/apply-all.mjs                      (15 content-regex patches, idempotent)
           │
           ▼
 scripts/rebundle-cli.mjs                 (re-inject patched cli.js into a fresh copy
@@ -36,7 +36,7 @@ src/main/sdk/ (our harness)              (speaks stream-json over stdio)
 | `vendor/claude-cli/version.json`     | Upstream version + extraction metadata + path to the cached source binary (`sourceBinary` field feeds the rebundler in pipeline mode).                                                                                                                                                        |
 | `scripts/extract-cli.mjs`            | Downloads the per-platform Bun binary (SHA-verified against the manifest; cached under `.cache/claude-cli/` keyed on version), pulls `cli.js` out of its `.bun`/`__BUN` section. Always re-extracts — patches can change independently of `claudeCliVersion`, and post-download work is ~2 s. |
 | `scripts/rebundle-cli.mjs`           | Re-injects the patched `cli.js` into the Bun binary. PE writer shrinks the section + strips the Authenticode cert; Mach-O writer pads to original section size + runs `codesign --force --sign -` + `xattr -c` on macOS. Pipeline mode (no args) reads inputs from `version.json`.            |
-| `patch/`                             | 14 content-regex patches against the wrapped `cli.js`. Idempotent; safe to re-run.                                                                                                                                                                                                            |
+| `patch/`                             | 15 content-regex patches against the wrapped `cli.js`. Idempotent; safe to re-run.                                                                                                                                                                                                            |
 | `src/main/sdk/`                      | The in-house TypeScript harness.                                                                                                                                                                                                                                                              |
 | `src/main/sdk/wire-log.ts`           | Per-query ring buffer of every ndjson line. Snapshot via `queryHandle.wireLog()`.                                                                                                                                                                                                             |
 
@@ -470,7 +470,7 @@ DEBUG_SDK=1 DEBUG_CLAUDE_AGENT_SDK=1 bun run dev
 
 Patches apply to the wrapped `vendor/claude-cli/cli.js` (the Bun CJS IIFE bytes extracted verbatim from the binary). All use content-regex anchors — never char offsets or minified names. `patch/apply-all.mjs` is idempotent; safe to re-run.
 
-14 patches. 3 auto-detect upstream fixes and no-op on recent cli.js versions (`taskstop-notification`, `incomplete-session-resume-fix`, `mcp-tool-refresh`). The other 11 actively add capabilities:
+15 patches. 3 auto-detect upstream fixes and no-op on recent cli.js versions (`taskstop-notification`, `incomplete-session-resume-fix`, `mcp-tool-refresh`). The other 12 actively add capabilities:
 
 | Patch                      | What it adds to cli.js                                                                                                                                                                                      |
 | -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -485,6 +485,7 @@ Patches apply to the wrapped `vendor/claude-cli/cli.js` (the Bun CJS IIFE bytes 
 | `voice-server`             | Adds internal TCP voice-transcription server, control subtypes `voice_server_start`/`stop`                                                                                                                  |
 | `bash-output-streaming`    | Pushes Bash output to stream_event immediately instead of buffering 2s                                                                                                                                      |
 | `subprocess-proxy-strip`   | Strips `HTTP(S)_PROXY` / `ALL_PROXY` / `NO_PROXY` from env handed to bash/MCP/LSP/etc. subprocesses so the cli.js's own proxy doesn't leak into shell tools (gated off via `CLAUDEUI_PROXY_SUBPROCESSES=1`) |
+| `skip-securestorage`       | When `SKIP_SECURESTORAGE` is set, forces the credential store to the plaintext file backend (bypassing macOS Keychain) so per-account `.credentials.json` files can be managed/swapped. Enables multi-account (ADR-015)                                                                          |
 
 **Retired**:
 

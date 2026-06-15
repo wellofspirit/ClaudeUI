@@ -24,7 +24,8 @@ const tests = [
   { name: 'request-usage', script: resolve(__dirname, 'request-usage/test.mjs') },
   { name: 'rate-limit-relay', script: resolve(__dirname, 'rate-limit-relay/test.mjs') },
   { name: 'bash-output-streaming', script: resolve(__dirname, 'bash-output-streaming/test.mjs') },
-  { name: 'subprocess-proxy-strip', script: resolve(__dirname, 'subprocess-proxy-strip/test.mjs') }
+  { name: 'subprocess-proxy-strip', script: resolve(__dirname, 'subprocess-proxy-strip/test.mjs') },
+  { name: 'skip-securestorage', script: resolve(__dirname, 'skip-securestorage/test.mjs') }
 ]
 
 console.log(`\nRunning ${tests.length} patch tests...\n`)

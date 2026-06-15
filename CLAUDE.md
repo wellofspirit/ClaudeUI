@@ -297,7 +297,7 @@ cli.js is ~13MB minified. Use the `/bundle-analyzer` skill to navigate it — st
 
 ### Patches
 
-14 content-regex patches under `patch/`, applied by `bun run ensure-cli` between the extract and rebundle steps. Three auto-detect upstream fixes and no-op (`taskstop-notification`, `incomplete-session-resume-fix`, `mcp-tool-refresh`). The active 11 add stream forwarding, control subtypes, and small bug fixes — full table in `docs/sdk-layer.md#patches`. Patches operate on the wrapped Bun CJS IIFE bytes at `vendor/claude-cli/cli.js`; they run identically on the wrapped form since every anchor targets content inside the IIFE body. See **[ADR-006](docs/adr/adr-006_rebundle-bun-binary.md)** for why the pipeline now rebundles instead of unwrapping.
+15 content-regex patches under `patch/`, applied by `bun run ensure-cli` between the extract and rebundle steps. Three auto-detect upstream fixes and no-op (`taskstop-notification`, `incomplete-session-resume-fix`, `mcp-tool-refresh`). The active 12 add stream forwarding, control subtypes, file-only credential storage (`skip-securestorage`, ADR-015), and small bug fixes — full table in `docs/sdk-layer.md#patches`. Patches operate on the wrapped Bun CJS IIFE bytes at `vendor/claude-cli/cli.js`; they run identically on the wrapped form since every anchor targets content inside the IIFE body. See **[ADR-006](docs/adr/adr-006_rebundle-bun-binary.md)** for why the pipeline now rebundles instead of unwrapping.
 
 Skills for patch work:
 
@@ -335,5 +335,6 @@ ADRs live in `docs/adr/`. See `docs/adr/adr.md` for the index.
 | 012 | Mermaid HTML labels (`antiscript` + DOMPurify `html` profile) and dark-theme ER contrast           | Accepted |
 | 013 | ESLint flat-config rework — Prettier decoupling, scoped React rules, pragmatic strictness          | Accepted |
 | 014 | Native Anthropic OAuth via cli.js control requests, hosted on the service session                  | Accepted |
+| 015 | Multiple-account support via file-based credentials (SKIP_SECURESTORAGE patch)                      | Accepted |
 
 When a design or implementation decision is made during a conversation, prompt the user about whether it should be recorded as a new ADR entry. When adding a new ADR, proactively scan existing ADRs to check if the new decision supersedes or conflicts with a previous one — if so, update the old ADR's status to "Superseded by ADR-XXX" and note it in the new ADR.

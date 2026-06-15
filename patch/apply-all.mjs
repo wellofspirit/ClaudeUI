@@ -23,7 +23,8 @@ const patches = [
   resolve(__dirname, 'incomplete-session-resume-fix/apply.mjs'),
   resolve(__dirname, 'voice-server/apply.mjs'),
   resolve(__dirname, 'bash-output-streaming/apply.mjs'),
-  resolve(__dirname, 'subprocess-proxy-strip/apply.mjs')
+  resolve(__dirname, 'subprocess-proxy-strip/apply.mjs'),
+  resolve(__dirname, 'skip-securestorage/apply.mjs')
   // ci-path-remap retired: cli.js now runs inside a rebundled Bun binary,
   // which resolves baked file:// URLs natively via its module graph. The
   // Node-compatibility shim is no longer needed.
