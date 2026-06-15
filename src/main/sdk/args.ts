@@ -11,6 +11,7 @@ import type { QueryOptions, McpServerConfig, SdkMcpServer } from './types'
 import { getProxyEnv, getProxyAllSubprocesses } from './proxy'
 import { getEndpointEnv } from './endpoint-env'
 import { getModelEnv } from './model-env'
+import { getSecurestorageEnv } from './securestorage-env'
 
 /** Strip in-process `type: 'sdk'` servers from an mcpServers map — those are
  *  hosted locally and are NOT written to --mcp-config (the CLI treats them
@@ -332,6 +333,23 @@ export function buildEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessE
     delete env.ANTHROPIC_DEFAULT_SONNET_MODEL
     delete env.ANTHROPIC_DEFAULT_OPUS_MODEL
     delete env.ANTHROPIC_DEFAULT_HAIKU_MODEL
+  }
+
+  // Multi-account credential storage (ADR-015). Precedence: an explicit
+  // per-spawn override (options.env, already merged into `env` — used by
+  // add-account login into a specific dir) wins; else the active account's dir
+  // from module state; else clear so single-account Keychain mode is restored.
+  if (env.SKIP_SECURESTORAGE) {
+    // explicit per-spawn override — leave SKIP_SECURESTORAGE + dir as provided
+  } else {
+    const ss = getSecurestorageEnv()
+    if (ss) {
+      env.SKIP_SECURESTORAGE = '1'
+      env.CLAUDE_SECURESTORAGE_CONFIG_DIR = ss.dir
+    } else {
+      delete env.SKIP_SECURESTORAGE
+      delete env.CLAUDE_SECURESTORAGE_CONFIG_DIR
+    }
   }
 
   // Inject our app's node_modules into NODE_PATH so cli.js can resolve

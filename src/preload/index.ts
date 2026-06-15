@@ -138,6 +138,8 @@ const api: ClaudeAPI = {
   onAccountUsage: onEvent('usage:data'),
   onAuthState: onEvent('auth:state'),
   onAuthSource: onEvent('session:auth-source'),
+  onAccountsChanged: onEvent('account:changed'),
+  onAccountRespawnSessions: onEvent('account:respawn-sessions'),
   onBlockUsage: onEvent('usage:block-data'),
   onTerminalData: onEvent('terminal:data'),
   onTerminalExit: onEvent('terminal:exit'),
@@ -252,6 +254,11 @@ const api: ClaudeAPI = {
   signIn: () => ipcRenderer.invoke('auth:sign-in'),
   submitOAuthCode: (code: string) => ipcRenderer.invoke('auth:submit-code', code),
   cancelSignIn: () => ipcRenderer.invoke('auth:cancel'),
+  getAccounts: () => ipcRenderer.invoke('account:get'),
+  setMultiAccountEnabled: (enabled: boolean) => ipcRenderer.invoke('account:set-enabled', enabled),
+  addAccount: () => ipcRenderer.invoke('account:add'),
+  switchAccount: (id: string) => ipcRenderer.invoke('account:switch', id),
+  deleteAccount: (id: string) => ipcRenderer.invoke('account:delete', id),
 
   // Claude permissions (allow/deny/ask rule management)
   loadClaudePermissions: (scope, cwd?) => ipcRenderer.invoke('claude:load-permissions', scope, cwd),

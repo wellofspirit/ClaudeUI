@@ -51,6 +51,7 @@ import { usageFetcher } from '../services/usage-fetcher'
 import { serviceSession } from '../services/service-session'
 import { blockUsageService } from '../services/block-usage'
 import { authManager } from '../services/auth-manager'
+import { accountManager } from '../services/account-manager'
 import type {
   ApprovalDecision,
   ModelInfo,
@@ -298,6 +299,11 @@ const SESSION_IPC_CHANNELS = [
   'auth:sign-in',
   'auth:submit-code',
   'auth:cancel',
+  'account:get',
+  'account:set-enabled',
+  'account:add',
+  'account:switch',
+  'account:delete',
   'claude:load-permissions',
   'claude:save-permissions',
   'claude:get-cleanup-period',
@@ -1562,6 +1568,15 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
   ipcMain.handle('auth:sign-in', async () => authManager.signIn())
   ipcMain.handle('auth:submit-code', async (_e, code: string) => authManager.submitOAuthCode(code))
   ipcMain.handle('auth:cancel', async () => authManager.cancelSignIn())
+
+  // Multiple-account support (ADR-015).
+  ipcMain.handle('account:get', async () => accountManager.getState())
+  ipcMain.handle('account:set-enabled', async (_e, enabled: boolean) =>
+    accountManager.setEnabled(enabled)
+  )
+  ipcMain.handle('account:add', async () => accountManager.addAccount())
+  ipcMain.handle('account:switch', async (_e, id: string) => accountManager.switchAccount(id))
+  ipcMain.handle('account:delete', async (_e, id: string) => accountManager.deleteAccount(id))
 
   // Mockup preview — read HTML from mockup directory
   ipcMain.handle(

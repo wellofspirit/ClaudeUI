@@ -29,7 +29,12 @@ export class RemoteDispatcher {
     // host — meaningless (and a credential vector) over remote. See ADR-014.
     'auth:sign-in',
     'auth:submit-code',
-    'auth:cancel'
+    'auth:cancel',
+    // Account mutations open local browsers / touch the local filesystem (ADR-015).
+    'account:set-enabled',
+    'account:add',
+    'account:switch',
+    'account:delete'
   ])
 
   /** Register a handler for a channel. Blocked channels are silently skipped. */

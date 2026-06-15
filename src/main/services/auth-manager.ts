@@ -54,8 +54,17 @@ class AuthManager {
   /** Guards against finalizing the same flow twice (loopback + manual race). */
   private settled = false
 
+  /** Listeners notified with the account on a successful login (ADR-015). */
+  private onSuccessCbs: ((account: OAuthAccount | null) => void)[] = []
+
   setWindow(win: BrowserWindow): void {
     this.window = win
+  }
+
+  /** Subscribe to successful logins (used by the account manager to capture the
+   *  signed-in account's email for the active account dir). */
+  onLoginSuccess(cb: (account: OAuthAccount | null) => void): void {
+    this.onSuccessCbs.push(cb)
   }
 
   /**
@@ -165,6 +174,13 @@ class AuthManager {
     const state: AuthState = { status: 'success', account, error: null }
     logger.info('AuthManager', `Login succeeded${account?.email ? ` (${account.email})` : ''}`)
     this.broadcast(state)
+    for (const cb of this.onSuccessCbs) {
+      try {
+        cb(account)
+      } catch {
+        /* listener errors must not break the flow */
+      }
+    }
     return state
   }
 

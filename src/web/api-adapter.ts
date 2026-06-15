@@ -402,6 +402,25 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     cancelSignIn: async () => {},
     onAuthState: on('auth:state') as ClaudeAPI['onAuthState'],
 
+    // Multi-account (ADR-015) — read-only over remote; mutations are desktop-only.
+    getAccounts: () => connection.invoke('account:get') as ReturnType<ClaudeAPI['getAccounts']>,
+    setMultiAccountEnabled: async () => {
+      throw new Error('Account management is only available on the desktop app.')
+    },
+    addAccount: async () => {
+      throw new Error('Account management is only available on the desktop app.')
+    },
+    switchAccount: async () => {
+      throw new Error('Account management is only available on the desktop app.')
+    },
+    deleteAccount: async () => {
+      throw new Error('Account management is only available on the desktop app.')
+    },
+    onAccountsChanged: on('account:changed') as ClaudeAPI['onAccountsChanged'],
+    onAccountRespawnSessions: on(
+      'account:respawn-sessions'
+    ) as ClaudeAPI['onAccountRespawnSessions'],
+
     // Claude permissions (read-only)
     loadClaudePermissions: (scope, cwd?) =>
       connection.invoke('claude:load-permissions', scope, cwd) as ReturnType<

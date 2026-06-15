@@ -1,8 +1,13 @@
 import { useState, useEffect } from 'react'
-import { useActiveSession } from '../../stores/session-store'
+import { useActiveSession, useSessionStore } from '../../stores/session-store'
 import type { AppSettings } from '../../stores/session-store'
 import { PermissionsDialog } from '../PermissionsDialog'
-import type { ClaudePermissions, ProxySettings, VoiceLanguageCode } from '../../../../shared/types'
+import type {
+  ClaudePermissions,
+  ProxySettings,
+  VoiceLanguageCode,
+  AccountsState
+} from '../../../../shared/types'
 import { VOICE_LANGUAGES } from '../../../../shared/types'
 import {
   supportedEffortLevels,
@@ -179,6 +184,108 @@ function ModelEffortRow({
           </option>
         ))}
       </select>
+    </div>
+  )
+}
+
+// ── Accounts (multi-account support, ADR-015) ────────────────────────
+
+function AccountsSetting(): React.JSX.Element {
+  const accounts = useSessionStore((s) => s.accountsState)
+  const setAccounts = useSessionStore((s) => s.setAccountsState)
+  const [busy, setBusy] = useState(false)
+
+  useEffect(() => {
+    void window.api.getAccounts().then(setAccounts)
+  }, [setAccounts])
+
+  const enabled = accounts?.enabled ?? false
+  const isMac = window.api.platform === 'darwin'
+
+  const run = async (fn: () => Promise<AccountsState>): Promise<void> => {
+    setBusy(true)
+    try {
+      setAccounts(await fn())
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="px-3 py-1.5 space-y-2.5">
+      <SettingsToggle
+        label="Enable multiple account support"
+        checked={enabled}
+        onChange={(v) => void run(() => window.api.setMultiAccountEnabled(v))}
+        tooltip="Store credentials per-account in plaintext files instead of the macOS Keychain, so you can hold and switch between multiple Claude subscriptions."
+      />
+
+      {enabled && isMac && (
+        <div className="text-[11px] leading-relaxed text-warning/90 bg-warning/10 border border-warning/30 rounded-md px-2.5 py-1.5">
+          Multi-account mode uses file-based credentials, separate from your macOS Keychain login.
+          You may need to <b>log in again</b> for each account.
+        </div>
+      )}
+
+      {enabled && (
+        <div className="space-y-1">
+          {(accounts?.accounts ?? []).map((a) => {
+            const active = a.id === accounts?.activeId
+            return (
+              <div
+                key={a.id}
+                className={`flex items-center gap-2.5 rounded-md border px-2.5 py-1.5 ${
+                  active ? 'border-accent/50 bg-accent/5' : 'border-border'
+                }`}
+              >
+                <button
+                  disabled={busy || active}
+                  onClick={() => void run(() => window.api.switchAccount(a.id))}
+                  title={active ? 'Active account' : 'Switch to this account'}
+                  className="shrink-0 w-3.5 h-3.5 rounded-full border-2 flex items-center justify-center disabled:cursor-default"
+                  style={{
+                    borderColor: active ? 'var(--color-accent)' : 'var(--color-border-bright)'
+                  }}
+                >
+                  {active && <span className="w-1.5 h-1.5 rounded-full bg-accent" />}
+                </button>
+                <div className="flex-1 min-w-0">
+                  <div className="text-[12px] text-text-primary truncate">
+                    {a.email || 'Account'}
+                  </div>
+                  {a.subscriptionType && (
+                    <div className="text-[10px] text-text-muted">{a.subscriptionType}</div>
+                  )}
+                </div>
+                <button
+                  disabled={busy}
+                  onClick={() => void run(() => window.api.deleteAccount(a.id))}
+                  title="Delete account"
+                  className="shrink-0 text-text-muted hover:text-danger transition-colors disabled:opacity-50"
+                >
+                  <svg
+                    width="14"
+                    height="14"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                  >
+                    <path d="M3 6h18M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2m3 0v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6" />
+                  </svg>
+                </button>
+              </div>
+            )
+          })}
+          <button
+            disabled={busy}
+            onClick={() => void run(() => window.api.addAccount())}
+            className="text-[12px] font-medium text-accent hover:text-accent-hover bg-accent/10 hover:bg-accent/15 rounded-md px-2.5 py-1.5 transition-colors disabled:opacity-50"
+          >
+            + Add account
+          </button>
+        </div>
+      )}
     </div>
   )
 }
@@ -908,6 +1015,34 @@ export const SECTIONS: Section[] = [
         label: 'Global permissions',
         keywords: 'allow deny ask rules tools bash edit read write permissions security',
         render: () => <GlobalPermissionsSummary />
+      }
+    ]
+  },
+  {
+    id: 'accounts',
+    label: 'Accounts',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <path d="M16 21v-2a4 4 0 00-4-4H6a4 4 0 00-4 4v2" />
+        <circle cx="9" cy="7" r="4" />
+        <path d="M22 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'multiAccount',
+        label: 'Multiple account support',
+        keywords: 'account login subscription switch multi keychain credentials sign in',
+        render: () => <AccountsSetting />
       }
     ]
   },

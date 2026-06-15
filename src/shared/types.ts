@@ -615,6 +615,21 @@ interface AccountAPI {
   cancelSignIn(): Promise<void>
   /** Subscribe to login-flow state transitions. */
   onAuthState(cb: (state: AuthState) => void): () => void
+  // --- Multiple-account support (ADR-015) ---
+  /** Current accounts + active id + enabled flag. */
+  getAccounts(): Promise<AccountsState>
+  /** Toggle multi-account (file-based credential) mode. */
+  setMultiAccountEnabled(enabled: boolean): Promise<AccountsState>
+  /** Create a new account and start its login flow (resolves once login starts). */
+  addAccount(): Promise<AccountsState>
+  /** Make an existing account active (sessions respawn against it). */
+  switchAccount(id: string): Promise<AccountsState>
+  /** Delete a persisted account and its credentials. */
+  deleteAccount(id: string): Promise<AccountsState>
+  /** Subscribe to account list / active / enabled changes. */
+  onAccountsChanged(cb: (state: AccountsState) => void): () => void
+  /** Fired when the active account changed — renderer should respawn sessions. */
+  onAccountRespawnSessions(cb: () => void): () => void
 }
 
 export interface NetworkInterfaceInfo {
@@ -787,6 +802,23 @@ export interface OAuthAccount {
   tokenSource?: string | null
   apiKeySource?: string | null
   apiProvider?: string | null
+}
+
+// --- Multiple-account support (ADR-015) ---
+
+export interface AccountInfo {
+  id: string
+  email: string | null
+  subscriptionType: string | null
+  organization: string | null
+  createdAt: number
+}
+
+export interface AccountsState {
+  /** Multi-account mode (file-based credentials via SKIP_SECURESTORAGE). */
+  enabled: boolean
+  activeId: string | null
+  accounts: AccountInfo[]
 }
 
 export type AuthFlowStatus = 'idle' | 'authorizing' | 'success' | 'error'

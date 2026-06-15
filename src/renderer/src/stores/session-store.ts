@@ -23,6 +23,7 @@ import type {
   PlanReviewData,
   AccountUsage,
   AuthState,
+  AccountsState,
   BlockUsageData,
   TerminalTab,
   WorktreeInfo,
@@ -605,6 +606,8 @@ interface SessionState {
   authState: AuthState | null
   /** cli.js auth source from session init: 'oauth'|'api_key'|'none'|null (ADR-014). */
   authSource: string | null
+  /** Multi-account state (ADR-015). Null until first load/event. */
+  accountsState: AccountsState | null
   activeView: ActiveView
   pluginViews: PluginViewWithOwner[]
 
@@ -796,6 +799,9 @@ interface SessionState {
   // Native OAuth (ADR-014)
   setAuthState: (data: AuthState) => void
   setAuthSource: (source: string) => void
+  setAccountsState: (data: AccountsState) => void
+  /** Mark every session SDK-inactive so the next send respawns cli.js (ADR-015). */
+  respawnAllSessions: () => void
   signIn: () => Promise<void>
   submitOAuthCode: (code: string) => Promise<void>
   cancelSignIn: () => Promise<void>
@@ -860,6 +866,7 @@ export const useSessionStore = create<SessionState>((set) => ({
   accountUsage: null,
   authState: null,
   authSource: null,
+  accountsState: null,
   blockUsage: null,
   activeView: { type: 'chat' } as ActiveView,
   pluginViews: [],
@@ -2001,6 +2008,13 @@ export const useSessionStore = create<SessionState>((set) => ({
   // snapshot synchronously; the terminal transition arrives via onAuthState.
   setAuthState: (data) => set({ authState: data }),
   setAuthSource: (source) => set({ authSource: source }),
+  setAccountsState: (data) => set({ accountsState: data }),
+  respawnAllSessions: () =>
+    set((s) => ({
+      sessions: Object.fromEntries(
+        Object.entries(s.sessions).map(([id, sess]) => [id, { ...sess, sdkActive: false }])
+      )
+    })),
   signIn: async () => {
     set({ authState: { status: 'authorizing', account: null, error: null } })
     const result = await window.api.signIn()

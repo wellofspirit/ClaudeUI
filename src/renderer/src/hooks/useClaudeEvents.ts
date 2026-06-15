@@ -382,6 +382,14 @@ export function useClaudeEvents(): void {
       window.api.onAuthSource((_routingId, source) => {
         useSessionStore.getState().setAuthSource(source)
       }),
+      // Multi-account state changes (ADR-015)
+      window.api.onAccountsChanged((state) => {
+        useSessionStore.getState().setAccountsState(state)
+      }),
+      // Active account changed — respawn chat sessions against the new account
+      window.api.onAccountRespawnSessions(() => {
+        useSessionStore.getState().respawnAllSessions()
+      }),
       // Before-quit: check for active worktrees
       window.api.onBeforeQuit(() => {
         const store = useSessionStore.getState()
