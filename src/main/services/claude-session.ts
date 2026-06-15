@@ -699,6 +699,29 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
       this.resolveActiveQuery = null
       this.rejectActiveQuery = null
 
+      // Drive the proactive sign-in banner (ADR-014) from the initialize
+      // response's `account`. NOT from the system/init `apiKeySource`: that
+      // reports the *API-key* source, which is legitimately "none" for every
+      // logged-in *subscription* (OAuth-token) user — using it as a login signal
+      // falsely flags subscribers as logged out. A present `account.email` is the
+      // reliable "logged in" signal; absent = show the banner.
+      void q
+        .initializationResult()
+        .then((init) => {
+          const account = (init as Record<string, unknown>)?.account as
+            | Record<string, unknown>
+            | undefined
+          // `account.email` present = logged in (subscription or API key). A
+          // logged-out cli.js returns an account with no email (tokenSource
+          // "none"); an expired-but-cached login still has an email — that 401s
+          // on send and is handled by the reactive auth card, not this banner.
+          const loggedIn = !!(account && account.email)
+          this.send('session:auth-source', loggedIn ? 'authenticated' : 'none')
+        })
+        .catch(() => {
+          /* leave banner state unchanged on init-result failure */
+        })
+
       for await (const message of q) {
         if (!message || typeof message !== 'object') continue
         await this.dispatchMessage(message as SDKMessage, stderrChunks)
@@ -839,11 +862,6 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
 
         const skillNames = sys.skills || []
         this.send('session:skills', skillNames)
-
-        // Auth source drives the proactive sign-in banner (ADR-014). 'none' =
-        // logged out. Sourced from cli.js here so we never read the Keychain
-        // ourselves (which would trigger `security` trust prompts).
-        this.send('session:auth-source', sys.apiKeySource ?? 'none')
 
         const mcpServers = sys.mcp_servers || []
         this._initMcpServers = mcpServers

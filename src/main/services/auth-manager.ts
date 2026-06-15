@@ -17,7 +17,8 @@
  * We deliberately never read cli.js's credential store ourselves — doing so via
  * the `security` CLI triggers macOS Keychain trust prompts (the item's ACL does
  * not trust our spawned `security` process). Login state for the proactive
- * banner comes from cli.js's `apiKeySource` in the session init event instead.
+ * banner comes from the `account` in cli.js's initialize response instead
+ * (claude-session broadcasts `session:auth-source`).
  */
 
 import { shell } from 'electron'
@@ -55,6 +56,25 @@ class AuthManager {
 
   setWindow(win: BrowserWindow): void {
     this.window = win
+  }
+
+  /**
+   * Broadcast login status derived from an initialize-response `account`.
+   * Called both at app load (the model-detection query) and per chat-session
+   * init, so the banner is accurate before any session is opened. A present
+   * `account.email` = logged in; absent = logged out. See ADR-014.
+   */
+  reportLoginStatus(account: unknown): void {
+    if (!this.window || this.window.isDestroyed()) return
+    const acc = account as Record<string, unknown> | undefined
+    const loggedIn = !!(acc && acc.email)
+    // Matches the (routingId, source) shape of the session:auth-source event;
+    // login is global so the id is a synthetic 'system'.
+    this.window.webContents.send(
+      'session:auth-source',
+      'system',
+      loggedIn ? 'authenticated' : 'none'
+    )
   }
 
   // ---------------------------------------------------------------------------

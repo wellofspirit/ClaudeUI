@@ -105,8 +105,6 @@ export interface SystemMessage extends BaseSDKMessage {
     | 'model_fallback'
     | string
   permissionMode?: string
-  /** init only: where cli.js resolved credentials from. 'none' = logged out. */
-  apiKeySource?: 'api_key' | 'oauth' | 'none'
   /** init-only fields */
   /** Resolved canonical model id (e.g. "claude-opus-4-8") — what the `default`
    *  alias and other server-resolved aliases actually map to this session. */

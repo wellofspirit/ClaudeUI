@@ -210,10 +210,21 @@ async function fetchModels(): Promise<ModelInfo[]> {
   })
 
   try {
-    const models = await (
-      q as unknown as { supportedModels(): Promise<ModelInfo[]> }
-    ).supportedModels()
+    const handle = q as unknown as {
+      supportedModels(): Promise<ModelInfo[]>
+      initializationResult(): Promise<Record<string, unknown>>
+    }
+    const models = await handle.supportedModels()
     cachedModels = models
+    // The same initialize response carries the user's account — report login
+    // status at app load so the sign-in banner is accurate before any chat
+    // session is opened. Resolves immediately (init already completed). ADR-014.
+    try {
+      const init = await handle.initializationResult()
+      authManager.reportLoginStatus(init?.account)
+    } catch {
+      /* non-fatal — per-session init will still report status */
+    }
     return models
   } finally {
     abort.abort()

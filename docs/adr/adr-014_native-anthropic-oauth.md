@@ -105,17 +105,20 @@ main process.
    — the cause of an observed retry loop. On login success the active session is
    also marked `sdkInactive` so a normal (non-Retry) send respawns the same way.
 
-6. **Proactive banner is scoped to "logged out", driven by cli.js's
-   `apiKeySource`.** `AuthBanner` shows only when `apiKeySource === 'none'` in the
-   session init event (`system/init`, broadcast as `session:auth-source`). We do
-   **not** read the credential store ourselves: doing so via the `security` CLI
-   spawns a separate process whose code signature is not in the Keychain item's
-   ACL (the item was created by Claude, not by our `security` invocation), so
-   macOS shows a "**security** wants to use your confidential information" trust
-   prompt on **every** read. Sourcing login state from cli.js's init avoids the
-   Keychain entirely — zero prompts. Expiry is **not** surfaced proactively
-   (cli.js refreshes lazily; a stale `expiresAt` would false-positive); a
-   genuinely dead session is caught reactively by the inline 401 card.
+6. **Proactive banner is scoped to "logged out", driven by the initialize
+   response `account`.** `AuthBanner` shows only when cli.js's initialize response
+   carries no `account.email` (broadcast as `session:auth-source` = `'none'`).
+   Note `apiKeySource` is **not** the signal: it reports the *API-key* source and
+   is legitimately `"none"` for every logged-in *subscription* (OAuth-token) user,
+   so keying off it falsely flags subscribers as logged out. A logged-out cli.js
+   returns an account with no email (`tokenSource:"none"`); an expired-but-cached
+   login still has an email — that 401s on send and is handled by the reactive
+   card, not this banner. We do **not** read the credential store ourselves:
+   doing so via the `security` CLI spawns a process whose code signature is not in
+   the Keychain item's ACL (the item was created by Claude), so macOS shows a
+   "**security** wants to use your confidential information" prompt on **every**
+   read. Sourcing login state from the init response avoids the Keychain entirely
+   — zero prompts.
 
 7. **Remote: read-only.** `auth:status` is forwarded to remote clients;
    `auth:sign-in` / `submit-code` / `cancel` are blocklisted on the remote
@@ -135,8 +138,9 @@ the native control requests keeps a login from the app indistinguishable from a
 ## Consequences
 
 - **We never touch cli.js's credential store.** All credential reads/writes stay
-  inside cli.js (it owns the Keychain ACL trust). Login state comes from the init
-  `apiKeySource`; account details from the OAuth control-request response. This
+  inside cli.js (it owns the Keychain ACL trust). Login state comes from the
+  initialize response `account`; flow results from the OAuth control-request
+  response. This
   eliminates the macOS `security` trust prompts an earlier iteration caused by
   shelling out to `security find-generic-password`.
 - The api_error convergence is a behavioural change for **all** API errors:
