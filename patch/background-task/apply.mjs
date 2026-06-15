@@ -131,10 +131,14 @@ if (src.includes(PATCH_MARKER)) {
 
   // --- Yi (local_agent type check): same pattern but type==="local_agent" ---
   // In 0.2.87+ this function is duplicated (once in task-management, once in TUI).
-  // Disambiguate by requiring the next function to reference the captured name
+  // Disambiguate by requiring a nearby function to reference the captured name
   // with agentType!=="main-session" (only the task-management copy has this).
+  // 2.1.177: an intervening helper (e.g. `sIK`) now sits between the type-check
+  // fn and the `agentType!=="main-session"` disambiguator, so the reference is no
+  // longer immediately adjacent. Tolerate up to 400 chars of intervening code
+  // instead of requiring the disambiguator to be the very next function.
   const yiRe = new RegExp(
-    `function (${V})\\(${V}\\)\\{return typeof ${V}==="object"&&${V}!==null&&"type"in ${V}&&${V}\\.type==="local_agent"\\}function ${V}\\(${V}\\)\\{return \\1\\(${V}\\)&&${V}\\.agentType!=="main-session"\\}`
+    `function (${V})\\(${V}\\)\\{return typeof ${V}==="object"&&${V}!==null&&"type"in ${V}&&${V}\\.type==="local_agent"\\}[\\s\\S]{0,400}?\\1\\(${V}\\)&&${V}\\.agentType!=="main-session"`
   )
   const yiMatch = yiRe.exec(src)
   if (!yiMatch) {
