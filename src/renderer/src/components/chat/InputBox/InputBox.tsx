@@ -189,9 +189,27 @@ export function InputBox(): React.JSX.Element {
   const voiceInterimTranscript = useActiveSession((s) => s.voiceInterimTranscript)
   const clearVoiceTranscript = useSessionStore((s) => s.clearVoiceTranscript)
 
+  // Load models: Claude models via getModels(), Codex models via getCodexModels(cwd).
+  // Re-fetches whenever the active session's provider or cwd changes.
   useEffect(() => {
-    window.api.getModels().then(setAvailableModels)
-  }, [setAvailableModels])
+    if (selectedProvider === 'codex') {
+      if (!cwd) {
+        setAvailableModels([])
+        return
+      }
+      window.api
+        .getCodexModels(cwd)
+        .then((models) => {
+          // Fall back gracefully if empty (not authed / not installed)
+          setAvailableModels(models)
+        })
+        .catch(() => {
+          setAvailableModels([])
+        })
+    } else {
+      window.api.getModels().then(setAvailableModels)
+    }
+  }, [selectedProvider, cwd, setAvailableModels])
 
   useEffect(() => {
     if (!isRunning) textareaRef.current?.focus()
@@ -668,8 +686,9 @@ export function InputBox(): React.JSX.Element {
       thinkingMode={effectiveThinking}
       adaptiveSupported={adaptiveSupported}
       showThinkingPicker={capabilities.thinkingModes}
-      // Hide the Claude model list for Codex — model/list is a deferred follow-up (TODO)
-      showModelPicker={selectedProvider === 'claude'}
+      // Show the model picker for both Claude and Codex (hide only when Codex
+      // returned no models — not installed / not authenticated).
+      showModelPicker={selectedProvider === 'claude' || models.length > 0}
       showCostInStatusLine={capabilities.costUsd}
       sandboxEnabled={sandboxEnabled}
       voiceEnabled={voiceEnabled && capabilities.voice}

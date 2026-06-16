@@ -1,9 +1,10 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { useActiveSession, useSessionStore } from '../../stores/session-store'
 import type { AppSettings } from '../../stores/session-store'
 import { PermissionsDialog } from '../PermissionsDialog'
 import type {
   ClaudePermissions,
+  CodexStatus,
   ProxySettings,
   VoiceLanguageCode,
   AccountsState
@@ -286,6 +287,101 @@ function AccountsSetting(): React.JSX.Element {
           </button>
         </div>
       )}
+    </div>
+  )
+}
+
+// ── Codex provider status (auth probe, display only) ────────────────
+
+function CodexStatusSetting(): React.JSX.Element {
+  const cwd = useActiveSession((s) => s.cwd)
+  const [status, setStatus] = useState<CodexStatus | null>(null)
+  const [loading, setLoading] = useState(false)
+
+  const probe = useCallback((): void => {
+    // Use the active session's cwd so the app-server spawns in a meaningful
+    // directory. Fall back to '/' if no session is open — the auth state is
+    // global and cwd only affects path resolution inside the binary.
+    const dir = cwd ?? '/'
+    setLoading(true)
+    window.api
+      .getCodexStatus(dir)
+      .then((s) => {
+        setStatus(s)
+        setLoading(false)
+      })
+      .catch(() => {
+        setStatus({ authenticated: false, requiresLogin: false, error: 'Unknown error' })
+        setLoading(false)
+      })
+  }, [cwd])
+
+  // Probe on mount (when the section is opened)
+  useEffect(() => {
+    probe()
+  }, [probe])
+
+  return (
+    <div className="px-3 py-1.5 space-y-2">
+      {loading && (
+        <div className="text-[12px] text-text-secondary">Checking Codex status…</div>
+      )}
+
+      {!loading && status && (
+        <>
+          {status.notInstalled && (
+            <div className="text-[12px] text-warning">
+              Codex CLI is not installed or could not be found. Install it via{' '}
+              <code className="text-[11px] bg-bg-secondary px-1 py-0.5 rounded">
+                npm i -g @openai/codex
+              </code>{' '}
+              or ensure the bundled binary is present.
+            </div>
+          )}
+
+          {!status.notInstalled && status.error && !status.authenticated && (
+            <div className="text-[12px] text-danger">
+              Error checking Codex status: {status.error}
+            </div>
+          )}
+
+          {!status.notInstalled && status.requiresLogin && (
+            <div className="text-[12px] text-warning">
+              Codex CLI is not authenticated. Run{' '}
+              <code className="text-[11px] bg-bg-secondary px-1 py-0.5 rounded">codex login</code>{' '}
+              in a terminal, then click Refresh.
+            </div>
+          )}
+
+          {status.authenticated && (
+            <div className="space-y-0.5">
+              <div className="flex items-center gap-1.5">
+                <span className="w-2 h-2 rounded-full bg-success shrink-0" />
+                <span className="text-[12px] text-text-primary font-medium">Authenticated</span>
+              </div>
+              {status.email && (
+                <div className="text-[11px] text-text-secondary pl-3.5">{status.email}</div>
+              )}
+              {status.planLabel && (
+                <div className="text-[11px] text-text-muted pl-3.5">{status.planLabel}</div>
+              )}
+            </div>
+          )}
+        </>
+      )}
+
+      <div>
+        <button
+          onClick={probe}
+          disabled={loading}
+          className="px-2.5 py-1 text-[11px] font-medium text-accent hover:text-accent-hover bg-accent/10 hover:bg-accent/15 rounded-md transition-colors cursor-default disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {loading ? 'Checking…' : 'Refresh'}
+        </button>
+      </div>
+
+      {/* TODO: CODEX_HOME override setting (deferred — see implementation-plan.md §7) */}
+      {/* TODO: Codex enable/disable toggle (deferred — always available if installed) */}
     </div>
   )
 }
@@ -1043,6 +1139,33 @@ export const SECTIONS: Section[] = [
         label: 'Multiple account support',
         keywords: 'account login subscription switch multi keychain credentials sign in',
         render: () => <AccountsSetting />
+      }
+    ]
+  },
+  {
+    id: 'codex',
+    label: 'Codex',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <polyline points="16 18 22 12 16 6" />
+        <polyline points="8 6 2 12 8 18" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'codexStatus',
+        label: 'Codex provider status',
+        keywords: 'codex openai login auth authentication status provider',
+        render: () => <CodexStatusSetting />
       }
     ]
   },

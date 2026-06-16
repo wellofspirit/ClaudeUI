@@ -348,6 +348,25 @@ export interface ModelInfo {
   supportsAdaptiveThinking?: boolean
 }
 
+/** Result of a Codex auth probe (getCodexStatus IPC). */
+export interface CodexStatus {
+  /** True when account/read returned an account object. */
+  authenticated: boolean
+  /** ChatGPT account email — only present when account.type === 'chatgpt'. */
+  email?: string
+  /** Human-readable plan description (e.g. "ChatGPT Plus"). */
+  planLabel?: string
+  /**
+   * True when unauthenticated AND requiresOpenaiAuth — user should run
+   * `codex login`.
+   */
+  requiresLogin: boolean
+  /** True when the codex binary was not found or could not be spawned. */
+  notInstalled?: boolean
+  /** Error message from an unexpected failure (timeout, RPC error, etc.). */
+  error?: string
+}
+
 export interface SessionInfo {
   sessionId: string
   cwd: string
@@ -436,6 +455,16 @@ interface SessionAPI {
     threadId: string,
     cwd: string
   ): Promise<{ messages: ChatMessage[] }>
+  /**
+   * Load the list of models available in a Codex app-server for the given
+   * working directory. Returns [] if Codex is not installed or not authed.
+   */
+  getCodexModels(cwd: string): Promise<ModelInfo[]>
+  /**
+   * Probe the Codex auth state (account/read). Distinguishes "not installed"
+   * from "not authenticated" from "authenticated".
+   */
+  getCodexStatus(cwd: string): Promise<CodexStatus>
   loadSubagentHistory(
     sessionId: string,
     projectKey: string,

@@ -177,6 +177,8 @@ const api: ClaudeAPI = {
   setThinkingMode: (routingId: string, mode: string) =>
     ipcRenderer.invoke('session:set-thinking-mode', routingId, mode),
   getModels: () => ipcRenderer.invoke('session:get-models'),
+  getCodexModels: (cwd: string) => ipcRenderer.invoke('session:get-codex-models', cwd),
+  getCodexStatus: (cwd: string) => ipcRenderer.invoke('session:get-codex-status', cwd),
   generateTitle: (conversationText: string) =>
     ipcRenderer.invoke('session:generate-title', conversationText),
   generateCommitMessage: (diff: string) =>

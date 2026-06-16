@@ -275,6 +275,11 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       connection.invoke('session:set-thinking-mode', routingId, mode) as Promise<void>,
     getModels: () => connection.invoke('session:get-models') as ReturnType<ClaudeAPI['getModels']>,
 
+    // Codex-specific — desktop-only operations, not tunnelled via remote bridge.
+    getCodexModels: (_cwd) => Promise.resolve([]),
+    getCodexStatus: (_cwd) =>
+      Promise.resolve({ authenticated: false, requiresLogin: false, notInstalled: true }),
+
     // Generation
     generateTitle: (conversationText) =>
       connection.invoke('session:generate-title', conversationText) as Promise<string | null>,

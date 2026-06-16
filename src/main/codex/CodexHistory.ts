@@ -1,10 +1,9 @@
 /**
  * Codex thread history loader.
  *
- * Spawns a short-lived codex app-server process, performs the minimum
- * handshake (initialize → initialized), calls thread/read with
- * includeTurns:true, maps the returned turns → ChatMessage[], then kills
- * the process.
+ * Spawns a short-lived codex app-server process via withCodexAppServer,
+ * calls thread/read with includeTurns:true, maps the returned turns →
+ * ChatMessage[], then kills the process.
  *
  * Used by the session:load-codex-history IPC handler as the Codex-side
  * alternative to parseSessionHistory (which reads Claude JSONL transcripts).
@@ -12,7 +11,7 @@
  * Design notes:
  * - Does NOT set CODEX_HOME — forcing $HOME breaks auth (see memory note).
  * - Times out after 15 s if the process hangs or the server never responds.
- * - Always kills the child process in the finally block.
+ * - Always kills the child process via withCodexAppServer's finally block.
  * - Maps a subset of V2ThreadItem types to ChatMessage[]:
  *     userMessage       → role:'user' text block
  *     agentMessage      → role:'assistant' text block
@@ -24,10 +23,8 @@
  *     other             → skipped (plan, hookPrompt, subAgentActivity, etc.)
  */
 
-import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { locateCodex } from './locate'
-import { CodexAppServerClient } from './CodexAppServerClient'
+import { withCodexAppServer } from './codexQuery'
 import type { ChatMessage, ContentBlock } from '../../shared/types'
 import { logger } from '../services/logger'
 
@@ -202,84 +199,33 @@ export async function loadCodexHistory(
   cwd: string,
   timeoutMs = 15_000
 ): Promise<CodexHistoryResult> {
-  const binPath = locateCodex()
-  logger.debug('CodexHistory', `loading thread ${threadId} from ${binPath}`)
+  logger.debug('CodexHistory', `loading thread ${threadId}`)
 
-  // Spawn codex app-server. Do NOT set CODEX_HOME — forces $HOME breaks auth.
-  const child = spawn(binPath, ['app-server'], {
+  const response = await withCodexAppServer(
     cwd,
-    stdio: ['pipe', 'pipe', 'pipe'],
-    env: { ...process.env },
-  })
+    (client) =>
+      client.request('thread/read', {
+        threadId,
+        includeTurns: true,
+      }),
+    timeoutMs
+  )
 
-  const client = new CodexAppServerClient(child.stdin!, child.stdout!, {
-    defaultTimeoutMs: timeoutMs,
-  })
-
-  let timedOut = false
-  const timeoutHandle = setTimeout(() => {
-    timedOut = true
-    logger.warn('CodexHistory', `thread/read timed out after ${timeoutMs}ms for ${threadId}`)
-    child.kill('SIGTERM')
-    setTimeout(() => {
-      if (!child.killed) child.kill('SIGKILL')
-    }, 2000)
-  }, timeoutMs)
-
-  try {
-    // 1. initialize
-    await client.request('initialize', {
-      clientInfo: { name: 'ClaudeUI', version: '1.0' },
-      capabilities: { experimentalApi: true },
-    })
-
-    // 2. initialized notification
-    client.notify('initialized', undefined)
-
-    // 3. thread/read with includeTurns:true
-    const response = await client.request('thread/read', {
-      threadId,
-      includeTurns: true,
-    })
-
-    clearTimeout(timeoutHandle)
-
-    // 4. Map turns → ChatMessage[]
-    const messages: ChatMessage[] = []
-    const turns = response.thread?.turns ?? []
-    for (const turn of turns) {
-      const items = turn.items ?? []
-      for (const item of items) {
-        const mapped = mapThreadItem(item as Record<string, unknown>)
-        messages.push(...mapped)
-      }
+  // Map turns → ChatMessage[]
+  const messages: ChatMessage[] = []
+  const turns = response.thread?.turns ?? []
+  for (const turn of turns) {
+    const items = turn.items ?? []
+    for (const item of items) {
+      const mapped = mapThreadItem(item as Record<string, unknown>)
+      messages.push(...mapped)
     }
-
-    logger.debug(
-      'CodexHistory',
-      `loaded ${messages.length} messages from ${turns.length} turns for thread ${threadId}`
-    )
-
-    return { messages }
-  } catch (err) {
-    clearTimeout(timeoutHandle)
-    if (!timedOut) {
-      logger.error('CodexHistory', `Failed to load thread ${threadId}`, err)
-    }
-    throw err
-  } finally {
-    client.close()
-    // Give the process a moment to flush; then kill if still running
-    await new Promise<void>((resolve) => {
-      if (child.exitCode !== null) {
-        resolve()
-        return
-      }
-      child.once('exit', () => resolve())
-      setTimeout(() => {
-        if (child.exitCode === null) child.kill('SIGTERM')
-        resolve()
-      }, 500)
-    })
   }
+
+  logger.debug(
+    'CodexHistory',
+    `loaded ${messages.length} messages from ${turns.length} turns for thread ${threadId}`
+  )
+
+  return { messages }
 }
