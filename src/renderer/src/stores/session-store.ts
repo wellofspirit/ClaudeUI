@@ -258,6 +258,8 @@ type PersistedSessionFields = {
   worktreeInfoMap: Record<string, WorktreeInfo>
   hiddenSessionIds: string[]
   hiddenProjectKeys: string[]
+  /** Maps sessionId → ProviderId for sessions that used a non-default provider. */
+  sessionProviders: Record<string, ProviderId>
 }
 
 /**
@@ -276,7 +278,8 @@ function saveSessionConfig(
     customTitles: merged.customTitles,
     worktreeInfoMap: merged.worktreeInfoMap,
     hiddenSessions: merged.hiddenSessionIds,
-    hiddenProjects: merged.hiddenProjectKeys
+    hiddenProjects: merged.hiddenProjectKeys,
+    sessionProviders: merged.sessionProviders
   })
 }
 
@@ -363,6 +366,7 @@ export async function hydrateConfigFromDisk(): Promise<void> {
     worktreeInfoMap: sessionConfig.worktreeInfoMap ?? {},
     hiddenSessionIds: sessionConfig.hiddenSessions ?? [],
     hiddenProjectKeys: sessionConfig.hiddenProjects ?? [],
+    sessionProviders: sessionConfig.sessionProviders ?? {},
     slashCommands: slashCommands ?? []
   })
 }
@@ -606,6 +610,9 @@ interface SessionState {
   hiddenSessionIds: string[]
   /** Project keys hidden from the sidebar */
   hiddenProjectKeys: string[]
+  /** Maps sessionId → ProviderId for non-default-provider sessions. Used to route
+   *  history loading and resume correctly on app restart. */
+  sessionProviders: Record<string, ProviderId>
 
   /** Remembered provider choice — pre-fills provider for newly created sessions. */
   lastSelectedProvider: ProviderId
@@ -769,6 +776,7 @@ interface SessionState {
     worktreeInfoMap?: Record<string, WorktreeInfo>
     hiddenSessions?: string[]
     hiddenProjects?: string[]
+    sessionProviders?: Record<string, ProviderId>
   }) => void
   applyRemoteSnapshot: (
     snapshot: import('../../../shared/remote-protocol').FullStateSnapshot
@@ -876,6 +884,7 @@ export const useSessionStore = create<SessionState>((set) => ({
   customTitles: {},
   hiddenSessionIds: [],
   hiddenProjectKeys: [],
+  sessionProviders: {},
   lastSelectedProvider: (localStorage.getItem('lastSelectedProvider') as ProviderId | null) ?? 'claude',
   settings: DEFAULT_SETTINGS,
   availableModels: [],
@@ -932,21 +941,28 @@ export const useSessionStore = create<SessionState>((set) => ({
         routingId,
         ...state.recentSessionIds.filter((id) => id !== routingId)
       ].slice(0, state.settings.maxRecentSessions)
-      saveSessionConfig(state, { recentSessionIds })
+      const provider = state.lastSelectedProvider
+      // Persist provider only for non-default (Codex) sessions; Claude is the implicit default.
+      const sessionProviders =
+        provider !== 'claude'
+          ? { ...state.sessionProviders, [routingId]: provider }
+          : state.sessionProviders
+      saveSessionConfig(state, { recentSessionIds, sessionProviders })
       const newSession = createEmptySession(cwd)
-      newSession.selectedProvider = state.lastSelectedProvider
+      newSession.selectedProvider = provider
       // Seed status.provider/capabilities to match so they're correct before spawn
       newSession.status = {
         ...newSession.status,
-        provider: state.lastSelectedProvider,
-        capabilities: capabilitiesFor(state.lastSelectedProvider)
+        provider,
+        capabilities: capabilitiesFor(provider)
       }
       return {
         ...(switchTo
           ? { activeSessionId: routingId, activeView: { type: 'chat' } as ActiveView }
           : {}),
         sessions: { ...state.sessions, [routingId]: newSession },
-        recentSessionIds
+        recentSessionIds,
+        sessionProviders
       }
     }),
 
@@ -1880,7 +1896,8 @@ export const useSessionStore = create<SessionState>((set) => ({
       customTitles: config.customTitles ?? {},
       worktreeInfoMap: config.worktreeInfoMap ?? {},
       hiddenSessionIds: config.hiddenSessions ?? [],
-      hiddenProjectKeys: config.hiddenProjects ?? []
+      hiddenProjectKeys: config.hiddenProjects ?? [],
+      sessionProviders: config.sessionProviders ?? {}
     })),
 
   // Apply a full state snapshot from the remote server (initial sync)
@@ -2112,12 +2129,21 @@ export const useSessionStore = create<SessionState>((set) => ({
         worktreeInfoMap[newId] = worktreeInfoMap[oldId]
         delete worktreeInfoMap[oldId]
       }
+      // Carry over persisted provider mapping to the canonical session ID
+      const sessionProviders = { ...state.sessionProviders }
+      if (sessionProviders[oldId]) {
+        sessionProviders[newId] = sessionProviders[oldId]
+        delete sessionProviders[oldId]
+      } else if (session.selectedProvider !== 'claude') {
+        sessionProviders[newId] = session.selectedProvider
+      }
       saveSessionConfig(state, {
         recentSessionIds,
         pinnedSessionIds,
         hiddenSessionIds,
         customTitles,
-        worktreeInfoMap
+        worktreeInfoMap,
+        sessionProviders
       })
       return {
         sessions,
@@ -2126,7 +2152,8 @@ export const useSessionStore = create<SessionState>((set) => ({
         pinnedSessionIds,
         hiddenSessionIds,
         customTitles,
-        worktreeInfoMap
+        worktreeInfoMap,
+        sessionProviders
       }
     })
   },

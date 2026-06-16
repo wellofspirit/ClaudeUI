@@ -71,6 +71,7 @@ import { setEndpointEnv } from '../sdk/endpoint-env'
 import { setModelEnv } from '../sdk/model-env'
 import { invalidateMockupSecuritySettings } from '../services/mockup-settings'
 import type { ISession } from '../providers/ISession'
+import { loadCodexHistory } from '../codex/CodexHistory'
 
 /** Type guard: narrows ISession to ClaudeSession when provider === 'claude'. */
 function isClaudeSession(session: ISession): session is ClaudeSession {
@@ -267,6 +268,7 @@ const SESSION_IPC_CHANNELS = [
   'session:delete-project',
   'session:list-directories',
   'session:load-history',
+  'session:load-codex-history',
   'session:load-subagent-history',
   'session:build-subagent-file-map',
   'session:load-background-output',
@@ -1024,6 +1026,20 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
   ipcMain.handle('session:load-history', async (_e, sessionId: string, projectKey: string) => {
     return await loadSessionHistory(sessionId, projectKey)
   })
+
+  /**
+   * Codex history loader — calls thread/read via a short-lived app-server spawn.
+   * The renderer routes here when the session's persisted provider is 'codex'.
+   * Returns { messages: ChatMessage[] } — same shape as the messages field of
+   * loadSessionHistory so Sidebar/useClaudeEvents can call loadHistoricalSession
+   * with the same arguments.
+   */
+  ipcMain.handle(
+    'session:load-codex-history',
+    async (_e, threadId: string, cwd: string) => {
+      return await loadCodexHistory(threadId, cwd)
+    }
+  )
 
   ipcMain.handle(
     'session:load-subagent-history',

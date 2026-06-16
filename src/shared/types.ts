@@ -431,6 +431,11 @@ interface SessionAPI {
     taskPrompts: Record<string, string>
     warnings: string[]
   }>
+  /** Codex-specific history loader: spawns app-server, calls thread/read. */
+  loadCodexHistory(
+    threadId: string,
+    cwd: string
+  ): Promise<{ messages: ChatMessage[] }>
   loadSubagentHistory(
     sessionId: string,
     projectKey: string,
@@ -1073,6 +1078,12 @@ export interface UISessionConfig {
   hiddenSessions?: string[]
   /** Project keys the user has chosen to hide from the sidebar */
   hiddenProjects?: string[]
+  /**
+   * Provider per session. Maps sessionId → ProviderId for sessions that used a
+   * non-default provider. Absent keys are treated as 'claude'. Written at
+   * session-creation time and carried over on rekey.
+   */
+  sessionProviders?: Record<string, ProviderId>
 }
 
 export interface SlashCommandInfo {

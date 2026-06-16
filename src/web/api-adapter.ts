@@ -148,6 +148,10 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
         ClaudeAPI['loadSessionHistory']
       >,
 
+    // Codex history loader — not tunnelled via remote bridge (desktop-only operation).
+    loadCodexHistory: (_threadId, _cwd) =>
+      Promise.resolve({ messages: [] }),
+
     loadSubagentHistory: (sessionId, projectKey, agentId) =>
       connection.invoke(
         'session:load-subagent-history',

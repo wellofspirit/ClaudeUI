@@ -92,6 +92,8 @@ const api: ClaudeAPI = {
   listDirectories: () => ipcRenderer.invoke('session:list-directories'),
   loadSessionHistory: (sessionId: string, projectKey: string) =>
     ipcRenderer.invoke('session:load-history', sessionId, projectKey),
+  loadCodexHistory: (threadId: string, cwd: string) =>
+    ipcRenderer.invoke('session:load-codex-history', threadId, cwd),
   loadSubagentHistory: (sessionId: string, projectKey: string, agentId: string) =>
     ipcRenderer.invoke('session:load-subagent-history', sessionId, projectKey, agentId),
   buildSubagentFileMap: (

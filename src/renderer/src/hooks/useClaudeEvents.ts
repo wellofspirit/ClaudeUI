@@ -83,30 +83,45 @@ export function useClaudeEvents(): void {
           }
           // If resuming an existing session, load its history from disk
           if (data.resumeSessionId) {
-            const projectKey = store.directories.find((g) =>
-              g.sessions.some((s) => s.sessionId === data.resumeSessionId)
-            )?.projectKey
-            if (projectKey) {
+            const provider = store.sessionProviders[data.resumeSessionId] ?? 'claude'
+            if (provider === 'codex') {
+              // Codex: load history via thread/read (app-server).
               window.api
-                .loadSessionHistory(data.resumeSessionId, projectKey)
-                .then(({ messages, taskNotifications, customTitle, statusLine, warnings }) => {
+                .loadCodexHistory(data.resumeSessionId, data.cwd)
+                .then(({ messages }) => {
                   const s = useSessionStore.getState()
-                  // Only populate if the session still exists and is still empty
                   if (s.sessions[routingId] && s.sessions[routingId].messages.length === 0) {
-                    s.loadHistoricalSession(
-                      routingId,
-                      messages,
-                      data.cwd,
-                      taskNotifications,
-                      {},
-                      statusLine,
-                      warnings
-                    )
-                    if (customTitle) s.setCustomTitle(routingId, customTitle)
-                    // Re-mark active since loadHistoricalSession sets isHistorical
+                    s.loadHistoricalSession(routingId, messages, data.cwd, [], {}, null, [])
                     s.markSdkActive(routingId)
                   }
                 })
+                .catch(() => {/* ignore — session will start fresh */})
+            } else {
+              const projectKey = store.directories.find((g) =>
+                g.sessions.some((s) => s.sessionId === data.resumeSessionId)
+              )?.projectKey
+              if (projectKey) {
+                window.api
+                  .loadSessionHistory(data.resumeSessionId, projectKey)
+                  .then(({ messages, taskNotifications, customTitle, statusLine, warnings }) => {
+                    const s = useSessionStore.getState()
+                    // Only populate if the session still exists and is still empty
+                    if (s.sessions[routingId] && s.sessions[routingId].messages.length === 0) {
+                      s.loadHistoricalSession(
+                        routingId,
+                        messages,
+                        data.cwd,
+                        taskNotifications,
+                        {},
+                        statusLine,
+                        warnings
+                      )
+                      if (customTitle) s.setCustomTitle(routingId, customTitle)
+                      // Re-mark active since loadHistoricalSession sets isHistorical
+                      s.markSdkActive(routingId)
+                    }
+                  })
+              }
             }
           }
         }

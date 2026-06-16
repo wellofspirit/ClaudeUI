@@ -103,6 +103,7 @@ export function Sidebar({
   const setActiveView = useSessionStore((s) => s.setActiveView)
   const pluginViews = useSessionStore((s) => s.pluginViews)
   const addRecentSession = useSessionStore((s) => s.addRecentSession)
+  const sessionProviders = useSessionStore((s) => s.sessionProviders)
   const automationBadge = useAutomationStore((s) => s.notificationBadge)
 
   const isMobile = useIsMobile()
@@ -266,7 +267,37 @@ export function Sidebar({
       switchSession(routingId)
       return
     }
-    // Load from JSONL
+
+    // Route history loading by provider. Codex sessions use thread/read (app-server),
+    // Claude sessions use the JSONL transcript parser. Claude is the default for absent keys.
+    const provider = sessionProviders[info.sessionId] ?? 'claude'
+
+    if (provider === 'codex') {
+      // Codex: load via thread/read. threadId === sessionId for Codex sessions.
+      // TODO(phase6-followup): support browsing ALL historical Codex threads from sidebar directory scan.
+      const { messages } = await window.api.loadCodexHistory(info.sessionId, info.cwd)
+      loadHistoricalSession(routingId, messages, info.cwd, [], {}, null, [])
+      // Patch selectedProvider + status.provider so the session spawns as Codex on next send
+      useSessionStore.setState((state) => {
+        const existing = state.sessions[routingId]
+        if (!existing) return state
+        return {
+          sessions: {
+            ...state.sessions,
+            [routingId]: {
+              ...existing,
+              selectedProvider: 'codex' as const,
+              status: { ...existing.status, provider: 'codex' as const }
+            }
+          }
+        }
+      })
+      switchSession(routingId)
+      if (isMobile && onToggleCollapse) onToggleCollapse()
+      return
+    }
+
+    // Claude: Load from JSONL
     const { messages, taskNotifications, customTitle, agentIdToToolUseId, statusLine, warnings } =
       await window.api.loadSessionHistory(info.sessionId, info.projectKey)
 

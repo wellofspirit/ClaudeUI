@@ -19,6 +19,14 @@ export interface UISessionConfig {
   pinnedSessions?: string[]
   customTitles?: Record<string, string>
   worktreeInfoMap?: Record<string, import('../../shared/types').WorktreeInfo>
+  /**
+   * Persisted provider per session. Maps sessionId → ProviderId so that on
+   * app restart a historical Codex session can be reopened as Codex (not Claude).
+   * Claude sessions are the default — absent entries are treated as 'claude'.
+   */
+  sessionProviders?: Record<string, import('../../shared/types').ProviderId>
+  hiddenSessions?: string[]
+  hiddenProjects?: string[]
 }
 
 // Legacy combined config — kept for migration only
