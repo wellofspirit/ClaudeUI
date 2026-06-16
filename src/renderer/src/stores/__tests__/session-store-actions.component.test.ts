@@ -7,6 +7,7 @@
 
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { useSessionStore } from '../session-store'
+import { CLAUDE_CAPABILITIES, CODEX_CAPABILITIES, capabilitiesFor } from '../../../../shared/types'
 import {
   makeChatMessage,
   makeAssistantMessage,
@@ -1728,5 +1729,93 @@ describe('openMockupPanel / closeMockupPanel', () => {
     store().openMockupPanel('r1', 'abc12345', 'Page A')
     expect(store().sessions['r2'].rightPanel).toBe('none')
     expect(store().sessions['r2'].mockupDir).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Provider selection (Phase 5)
+// ---------------------------------------------------------------------------
+
+describe('setLastSelectedProvider', () => {
+  it('updates lastSelectedProvider in store', () => {
+    expect(store().lastSelectedProvider).toBe('claude')
+    store().setLastSelectedProvider('codex')
+    expect(store().lastSelectedProvider).toBe('codex')
+    store().setLastSelectedProvider('claude')
+    expect(store().lastSelectedProvider).toBe('claude')
+  })
+})
+
+describe('createNewSession inherits lastSelectedProvider', () => {
+  it('default is claude — new session selectedProvider is claude', () => {
+    store().createNewSession('r1', '/path')
+    expect(store().sessions['r1'].selectedProvider).toBe('claude')
+  })
+
+  it('after switching to codex — new session selectedProvider is codex', () => {
+    store().setLastSelectedProvider('codex')
+    store().createNewSession('r1', '/path')
+    expect(store().sessions['r1'].selectedProvider).toBe('codex')
+  })
+
+  it('new session status.provider matches selectedProvider', () => {
+    store().setLastSelectedProvider('codex')
+    store().createNewSession('r1', '/path')
+    expect(store().sessions['r1'].status.provider).toBe('codex')
+  })
+
+  it('new session status.capabilities matches codex capabilities when codex', () => {
+    store().setLastSelectedProvider('codex')
+    store().createNewSession('r1', '/path')
+    const caps = store().sessions['r1'].status.capabilities
+    expect(caps.thinkingModes).toBe(false)
+    expect(caps.costUsd).toBe(false)
+    expect(caps.effortLevels).toBe(true)
+  })
+
+  it('new session status.capabilities matches claude capabilities when claude', () => {
+    store().setLastSelectedProvider('claude')
+    store().createNewSession('r1', '/path')
+    const caps = store().sessions['r1'].status.capabilities
+    expect(caps.thinkingModes).toBe(true)
+    expect(caps.costUsd).toBe(true)
+  })
+
+  it('two sequential sessions inherit the currently-set provider', () => {
+    store().setLastSelectedProvider('codex')
+    store().createNewSession('r1', '/path1')
+    store().setLastSelectedProvider('claude')
+    store().createNewSession('r2', '/path2')
+    expect(store().sessions['r1'].selectedProvider).toBe('codex')
+    expect(store().sessions['r2'].selectedProvider).toBe('claude')
+  })
+})
+
+describe('capabilitiesFor helper', () => {
+  it('returns CLAUDE_CAPABILITIES for claude', () => {
+    expect(capabilitiesFor('claude')).toBe(CLAUDE_CAPABILITIES)
+  })
+
+  it('returns CODEX_CAPABILITIES for codex', () => {
+    expect(capabilitiesFor('codex')).toBe(CODEX_CAPABILITIES)
+  })
+
+  it('codex has no thinkingModes, costUsd, voice, hostedMcp, backgroundTasks', () => {
+    const caps = capabilitiesFor('codex')
+    expect(caps.thinkingModes).toBe(false)
+    expect(caps.costUsd).toBe(false)
+    expect(caps.voice).toBe(false)
+    expect(caps.hostedMcp).toBe(false)
+    expect(caps.backgroundTasks).toBe(false)
+    expect(caps.effortLevels).toBe(true)
+  })
+
+  it('claude has all capabilities enabled', () => {
+    const caps = capabilitiesFor('claude')
+    expect(caps.thinkingModes).toBe(true)
+    expect(caps.costUsd).toBe(true)
+    expect(caps.voice).toBe(true)
+    expect(caps.hostedMcp).toBe(true)
+    expect(caps.backgroundTasks).toBe(true)
   })
 })

@@ -13,6 +13,7 @@ import { SessionItem } from './SessionItem'
 import { PinnedSessionList } from './PinnedSessionList'
 import { SettingsPanel } from './SettingsPanel'
 import { DeleteConfirmModal } from './DeleteConfirmModal'
+import { ProviderToggle } from '../shared/ProviderToggle'
 
 export type DeleteTarget =
   | { kind: 'session'; sessionId: string; projectKey: string; title: string }
@@ -183,6 +184,9 @@ export function SidebarView(props: SidebarViewProps): React.JSX.Element {
             </svg>
           }
         />
+        <div className="px-2 py-1">
+          <ProviderToggle />
+        </div>
         <NavItem
           label="Automations"
           active={activeView.type === 'automations'}

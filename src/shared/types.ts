@@ -82,6 +82,11 @@ export const CODEX_CAPABILITIES: SessionCapabilities = Object.freeze({
   sideQuestion: false
 })
 
+/** Return the frozen capabilities constant for a given provider. */
+export function capabilitiesFor(provider: ProviderId): SessionCapabilities {
+  return provider === 'codex' ? CODEX_CAPABILITIES : CLAUDE_CAPABILITIES
+}
+
 export interface SessionStatus {
   state: 'idle' | 'running' | 'error' | 'disconnected'
   sessionId: string | null
@@ -389,7 +394,8 @@ interface SessionAPI {
     model?: string,
     thinkingMode?: string,
     resumeSessionAt?: string,
-    forkSession?: boolean
+    forkSession?: boolean,
+    providerId?: ProviderId
   ): Promise<void>
   rekeySession(oldId: string, newId: string): Promise<void>
   /** Resolve the balanced JSONL line uuid to fork ("branch off") from, given

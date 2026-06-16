@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import { useShallow } from 'zustand/react/shallow'
 import { mergeContentBlocks } from '../utils/content-blocks'
-import { VOICE_LANGUAGES, CLAUDE_CAPABILITIES } from '../../../shared/types'
+import { VOICE_LANGUAGES, CLAUDE_CAPABILITIES, capabilitiesFor } from '../../../shared/types'
 import type { EffortLevel } from '../../../shared/model-capabilities'
 import type {
   ChatMessage,
@@ -34,7 +34,8 @@ import type {
   VoiceState,
   VoiceLanguageCode,
   ActiveView,
-  PluginViewWithOwner
+  PluginViewWithOwner,
+  ProviderId
 } from '../../../shared/types'
 
 /** Normalize cwd for use as a terminal group key (strip trailing slash). */
@@ -436,6 +437,8 @@ export interface PerSessionState {
   queuedText: string
   draftText: string
   selectedModel: string
+  /** Provider chosen at session-creation time. Immutable after the session spawns. */
+  selectedProvider: ProviderId
   // Worktree state
   worktreeInfo: WorktreeInfo | null
   // Git state
@@ -515,6 +518,7 @@ const EMPTY_SESSION_STATE: PerSessionState = {
   queuedText: '',
   draftText: '',
   selectedModel: 'default',
+  selectedProvider: 'claude' as ProviderId,
   worktreeInfo: null,
   isGitRepo: false,
   gitStatus: null,
@@ -603,6 +607,9 @@ interface SessionState {
   /** Project keys hidden from the sidebar */
   hiddenProjectKeys: string[]
 
+  /** Remembered provider choice — pre-fills provider for newly created sessions. */
+  lastSelectedProvider: ProviderId
+
   // Global (not per-session)
   settings: AppSettings
   availableModels: ModelInfo[]
@@ -633,6 +640,8 @@ interface SessionState {
   showWelcome: () => void
   switchSession: (routingId: string) => void
   createNewSession: (routingId: string, cwd: string, switchTo?: boolean) => void
+  /** Set the remembered provider choice. Persisted in localStorage (lightweight). */
+  setLastSelectedProvider: (provider: ProviderId) => void
   loadHistoricalSession: (
     routingId: string,
     messages: ChatMessage[],
@@ -867,6 +876,7 @@ export const useSessionStore = create<SessionState>((set) => ({
   customTitles: {},
   hiddenSessionIds: [],
   hiddenProjectKeys: [],
+  lastSelectedProvider: (localStorage.getItem('lastSelectedProvider') as ProviderId | null) ?? 'claude',
   settings: DEFAULT_SETTINGS,
   availableModels: [],
   slashCommands: [],
@@ -923,14 +933,27 @@ export const useSessionStore = create<SessionState>((set) => ({
         ...state.recentSessionIds.filter((id) => id !== routingId)
       ].slice(0, state.settings.maxRecentSessions)
       saveSessionConfig(state, { recentSessionIds })
+      const newSession = createEmptySession(cwd)
+      newSession.selectedProvider = state.lastSelectedProvider
+      // Seed status.provider/capabilities to match so they're correct before spawn
+      newSession.status = {
+        ...newSession.status,
+        provider: state.lastSelectedProvider,
+        capabilities: capabilitiesFor(state.lastSelectedProvider)
+      }
       return {
         ...(switchTo
           ? { activeSessionId: routingId, activeView: { type: 'chat' } as ActiveView }
           : {}),
-        sessions: { ...state.sessions, [routingId]: createEmptySession(cwd) },
+        sessions: { ...state.sessions, [routingId]: newSession },
         recentSessionIds
       }
     }),
+
+  setLastSelectedProvider: (provider) => {
+    localStorage.setItem('lastSelectedProvider', provider)
+    set({ lastSelectedProvider: provider })
+  },
 
   loadHistoricalSession: (
     routingId,
@@ -2054,7 +2077,10 @@ export const useSessionStore = create<SessionState>((set) => ({
       resumeId,
       session.permissionMode,
       session.selectedModel,
-      session.thinkingMode ?? undefined
+      session.thinkingMode ?? undefined,
+      undefined,
+      undefined,
+      session.selectedProvider
     )
     set((s) => ({ sessions: updateSession(s.sessions, routingId, () => ({ sdkActive: true })) }))
     await window.api.sendPrompt(routingId, prompt)

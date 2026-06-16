@@ -14,6 +14,7 @@ export function ReviewBar({ comments }: Props): React.JSX.Element | null {
   const sessions = useSessionStore((s) => s.sessions)
   const markSdkActive = useSessionStore((s) => s.markSdkActive)
   const clearDiffComments = useSessionStore((s) => s.clearDiffComments)
+  const selectedProvider = useActiveSession((s) => s.selectedProvider)
 
   const fileCount = new Set(comments.map((c) => c.filePath)).size
 
@@ -32,7 +33,12 @@ export function ReviewBar({ comments }: Props): React.JSX.Element | null {
         session?.cwd || '',
         session?.effort ?? 'medium',
         resumeId,
-        session?.permissionMode
+        session?.permissionMode,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        selectedProvider
       )
       markSdkActive(activeSessionId)
     }

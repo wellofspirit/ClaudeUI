@@ -78,6 +78,12 @@ export interface InputBoxViewProps {
   allowedEffortLevels: readonly EffortLevel[]
   thinkingMode: ThinkingMode
   adaptiveSupported: boolean
+  /** Show/hide the thinking-mode picker (false for Codex). */
+  showThinkingPicker?: boolean
+  /** Show/hide the Claude model picker (false for Codex — deferred follow-up). */
+  showModelPicker?: boolean
+  /** Whether to include cost in the status line (false for Codex). */
+  showCostInStatusLine?: boolean
   sandboxEnabled: boolean
   voiceEnabled: boolean
   voiceState: VoiceState
@@ -106,9 +112,18 @@ export interface InputBoxViewProps {
 // StatusLine (reads its own store slices — not part of InputBox props)
 // ---------------------------------------------------------------------------
 
-function StatusLine({ data }: { data: StatusLineData }): React.JSX.Element {
+function StatusLine({
+  data,
+  showCost = true
+}: {
+  data: StatusLineData
+  showCost?: boolean
+}): React.JSX.Element {
   const align = useSessionStore((s) => s.settings.statusLineAlign)
-  const template = useSessionStore((s) => s.settings.statusLineTemplate)
+  const rawTemplate = useSessionStore((s) => s.settings.statusLineTemplate)
+
+  // Strip the cost placeholder when the provider doesn't report cost (e.g. Codex).
+  const template = showCost ? rawTemplate : rawTemplate.replace(/\{cost\}/g, '')
 
   // usedPercentage/remainingPercentage are computed in the main process (live:
   // claude-session, history: session-history), keyed on the *resolved* model id
@@ -468,16 +483,20 @@ export function InputBoxView(props: InputBoxViewProps): React.JSX.Element {
             {/* Left controls */}
             <div className="flex items-center gap-1">
               <AttachMenu fileInputRef={props.fileInputRef} onFileChange={props.onFileChange} />
-              <ModelPicker
-                models={props.models}
-                selectedModel={props.selectedModel}
-                onSelectModel={props.onSelectModel}
-              />
-              <ThinkingPicker
-                thinkingMode={props.thinkingMode}
-                adaptiveSupported={props.adaptiveSupported}
-                onSelectThinking={props.onSelectThinking}
-              />
+              {(props.showModelPicker ?? true) && (
+                <ModelPicker
+                  models={props.models}
+                  selectedModel={props.selectedModel}
+                  onSelectModel={props.onSelectModel}
+                />
+              )}
+              {(props.showThinkingPicker ?? true) && (
+                <ThinkingPicker
+                  thinkingMode={props.thinkingMode}
+                  adaptiveSupported={props.adaptiveSupported}
+                  onSelectThinking={props.onSelectThinking}
+                />
+              )}
               <EffortPicker
                 effort={props.effort}
                 allowedEffortLevels={props.allowedEffortLevels}
@@ -533,7 +552,7 @@ export function InputBoxView(props: InputBoxViewProps): React.JSX.Element {
             </div>
           </div>
         </div>
-        <StatusLine data={statusLine ?? DEFAULT_STATUS_LINE} />
+        <StatusLine data={statusLine ?? DEFAULT_STATUS_LINE} showCost={props.showCostInStatusLine ?? true} />
       </div>
     </div>
   )

@@ -60,7 +60,8 @@ import type {
   AnthropicEndpointSettings,
   ModelOverrideSettings,
   PermissionSuggestion,
-  IpcResult
+  IpcResult,
+  ProviderId
 } from '../../shared/types'
 import { logger } from '../services/logger'
 import { deleteSessionFiles, deleteProjectFiles } from '../services/delete-session-files'
@@ -721,7 +722,8 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
       model?: string,
       thinkingMode?: string,
       resumeSessionAt?: string,
-      forkSession?: boolean
+      forkSession?: boolean,
+      providerId?: ProviderId
     ) => {
       const settings = loadSettings() as Record<string, unknown>
       const sandboxConfig = (settings.sandbox as SandboxSettings) || undefined
@@ -739,7 +741,8 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
         sandboxConfig,
         thinkingMode,
         resumeSessionAt,
-        forkSession
+        forkSession,
+        providerId
       )
       // Notify all extra windows (remote bridge) that a session was created
       for (const w of ClaudeSession.getExtraWindows()) {

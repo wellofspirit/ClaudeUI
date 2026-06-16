@@ -1,6 +1,7 @@
 import { useState, useMemo, useCallback } from 'react'
 import { v4 as uuid } from 'uuid'
 import { useActiveSession, useSessionStore } from '../../../stores/session-store'
+import { ProviderToggle } from '../../shared/ProviderToggle'
 
 const WELCOME_PHRASES = [
   "Let's build",
@@ -137,6 +138,9 @@ export function WelcomeState(): React.JSX.Element {
 
       {/* Title */}
       <p className="text-[22px] text-text-secondary font-light tracking-tight">{phrase}</p>
+
+      {/* Provider toggle — only show when no directory is set yet */}
+      {!cwd && !isCreatingWorktree && <ProviderToggle />}
 
       {/* Creating worktree indicator */}
       {isCreatingWorktree && (

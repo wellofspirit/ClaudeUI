@@ -177,6 +177,11 @@ export function InputBox(): React.JSX.Element {
   const setThinkingMode = useSessionStore((s) => s.setThinkingMode)
   const sandboxEnabled = useSessionStore((s) => s.settings.sandbox.enabled)
 
+  // Capability gating — use status.capabilities (authoritative after spawn;
+  // seeded from selectedProvider before spawn via createNewSession).
+  const selectedProvider = useActiveSession((s) => s.selectedProvider)
+  const capabilities = useActiveSession((s) => s.status.capabilities)
+
   // Voice input
   const voiceEnabled = useSessionStore((s) => s.settings.voiceEnabled)
   const voiceLanguage = useSessionStore((s) => s.settings.voiceLanguage)
@@ -243,7 +248,8 @@ export function InputBox(): React.JSX.Element {
             session?.selectedModel,
             opts.thinkingMode,
             fork.anchorUuid,
-            true
+            true,
+            session?.selectedProvider
           )
         } else {
           const isHistorical = session && session.messages.length > 0
@@ -255,7 +261,10 @@ export function InputBox(): React.JSX.Element {
             resumeId,
             session?.permissionMode,
             session?.selectedModel,
-            opts.thinkingMode
+            opts.thinkingMode,
+            undefined,
+            undefined,
+            session?.selectedProvider
           )
         }
         markSdkActive(activeSessionId)
@@ -282,7 +291,8 @@ export function InputBox(): React.JSX.Element {
           session?.selectedModel,
           opts.thinkingMode,
           fork.anchorUuid,
-          true
+          true,
+          session?.selectedProvider
         )
       } else {
         const isHistorical = session && session.messages.length > 0 && !session.sdkActive
@@ -294,7 +304,10 @@ export function InputBox(): React.JSX.Element {
           resumeId,
           session?.permissionMode,
           session?.selectedModel,
-          opts.thinkingMode
+          opts.thinkingMode,
+          undefined,
+          undefined,
+          session?.selectedProvider
         )
       }
       markSdkActive(activeSessionId)
@@ -547,7 +560,10 @@ export function InputBox(): React.JSX.Element {
       activeSessionId,
       session?.permissionMode,
       session?.selectedModel,
-      opts.thinkingMode
+      opts.thinkingMode,
+      undefined,
+      undefined,
+      session?.selectedProvider
     )
     markSdkActive(activeSessionId)
   }, [activeSessionId, sdkActive, markSdkActive])
@@ -647,12 +663,16 @@ export function InputBox(): React.JSX.Element {
       models={models}
       selectedModel={selectedModel}
       effort={effectiveEffort}
-      effortSupported={effortSupported}
+      effortSupported={effortSupported && capabilities.effortLevels}
       allowedEffortLevels={allowedEffortLevels}
       thinkingMode={effectiveThinking}
       adaptiveSupported={adaptiveSupported}
+      showThinkingPicker={capabilities.thinkingModes}
+      // Hide the Claude model list for Codex — model/list is a deferred follow-up (TODO)
+      showModelPicker={selectedProvider === 'claude'}
+      showCostInStatusLine={capabilities.costUsd}
       sandboxEnabled={sandboxEnabled}
-      voiceEnabled={voiceEnabled}
+      voiceEnabled={voiceEnabled && capabilities.voice}
       voiceState={voiceState}
       statusLine={statusLine}
       onSend={handleSend}

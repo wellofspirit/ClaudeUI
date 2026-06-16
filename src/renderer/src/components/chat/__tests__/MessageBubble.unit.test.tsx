@@ -78,6 +78,7 @@ beforeEach(() => {
         queuedText: '',
         draftText: '',
         selectedModel: 'default',
+        selectedProvider: 'claude' as const,
         worktreeInfo: null,
         isGitRepo: false,
         gitStatus: null,
