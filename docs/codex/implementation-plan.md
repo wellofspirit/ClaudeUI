@@ -13,15 +13,15 @@
 | --- | --- | --- |
 | Abstraction | **Strategy B** — formal provider abstraction | Extract `ISession` + `BaseSession`; refactor `ClaudeSession` behind it; add `CodexSession` as a peer. The existing `ContentBlock`/`session:*` IPC contract **is** our neutral event model — we do **not** introduce a separate `ProviderRuntimeEvent` schema (avoid t3code-style over-modeling). |
 | MCP | **Out of scope for v1** | Codex sessions start with no ClaudeUI-hosted MCP tools (mermaid/mockup). No `-c mcp_servers…` injection. Revisit after parity. |
-| Codex binary | **Bundle our own, version-pinned** | Vendor a prebuilt `codex` per platform under `vendor/codex-cli/`, pinned via `package.json#codexCliVersion`. Spawn the bundled binary, never PATH. Gives a slot to drop in a custom build later. |
-| "Patching" Codex | **Protocol-layer interception now; source-fork later** | Codex app-server is compiled **Rust** — we cannot regex-patch it like cli.js. Our patch surface is (a) in-process JSON-RPC frame interceptors in our client/adapter for anything observable on the wire, and (b) a deferred, scaffolded `codex-rs` source-fork + build pipeline for non-observable internal changes. |
+| Codex binary | **Bundle our own, pinned to latest** | Vendor a prebuilt `codex` per platform under `vendor/codex-cli/`, pinned via `package.json#codexCliVersion` to the **latest** `@openai/codex` at setup. Spawn the bundled binary, never PATH. Gives a slot to drop in a custom build later. |
+| "Patching" Codex | **Deferred — no patch infra in v1** | We bundle only; we do **not** build any patch pipeline now. Add one *when a concrete need arises*. Note for later: Codex app-server is compiled **Rust** — not regex-patchable like cli.js — so the eventual options are (a) in-process JSON-RPC frame interception for wire-observable behavior, or (b) a `codex-rs` source fork + build for internal behavior. See Follow-ups (§15). |
 | Neutral model | Reuse `ChatMessage` + `ContentBlock` | Codex `item`s map onto existing block types. Synthesize `toolUseId` from Codex `item.id`. |
 
 ### Non-goals for v1
 - ClaudeUI-hosted MCP tools inside Codex sessions.
 - Codex multi-account / shadow-home (t3code's overlay). Single `CODEX_HOME`.
 - Codex realtime/voice (`thread/realtime/*`), web-search rendering polish, image generation.
-- A custom `codex-rs` binary build (scaffold only).
+- A custom `codex-rs` binary build, and **any Codex patch pipeline** — we bundle only; patch when needed (§15).
 - Usage-analytics dashboard integration for Codex (token feed differs; gate it off).
 
 ---
@@ -113,7 +113,6 @@ Steps:
    - `src/main/providers/` (new home for the abstraction + registry)
    - `src/main/codex/` (CodexSession + protocol client + mappers)
    - `src/main/codex/protocol/` (generated types)
-   - `patch/codex/` (future frame-interceptor patches; README only for now)
    - `docs/codex/`
 
 **Acceptance:** branch builds unchanged (`bun run typecheck`); plan doc on branch.
@@ -168,7 +167,7 @@ every IPC handler tolerates a stub `ISession` with all caps `false`.
 honest patch mechanism.
 
 ### 4a. Vendoring
-1. Add `package.json#codexCliVersion` (pin to a known-good `@openai/codex` release).
+1. Add `package.json#codexCliVersion`, pinned to the **latest** `@openai/codex` release at setup time (record the resolved version explicitly so builds are reproducible; bump deliberately thereafter).
 2. `scripts/ensure-codex.mjs`: download/extract the pinned `@openai/codex` platform binary
    into `vendor/codex-cli/codex[.exe]`. Cache-hit skip on matching version (mirror
    `ensure-cli.mjs`'s version-stamp approach). No rebundle/codesign needed beyond ad-hoc
@@ -191,16 +190,14 @@ honest patch mechanism.
 9. Add `docs/codex/protocol-reference.md` summarizing the surface we actually use
    (regenerate/verify against source — do not trust this plan's method list blindly).
 
-### 4c. Patch strategy (honest)
-- **Primary (now):** protocol-observable behavior is "patched" via in-process frame
-  interceptors in `CodexAppServerClient` (Phase 3) — a list of `(frame) => frame|null`
-  transforms on inbound/outbound JSON-RPC. Document the pattern in `patch/codex/README.md`.
-  This covers ~everything we needed cli.js patches for (forcing streaming, reshaping events),
-  because app-server already emits rich deltas/requests natively.
-- **Escape hatch (deferred, scaffold only):** for behavior **not** observable on stdio
-  (e.g. how codex talks to the OpenAI API), the only lever is a `codex-rs` source fork +
-  cross-platform Rust build. Add `patch/codex/SOURCE-FORK.md` describing the approach
-  (fork ref, `cargo build --release` targets, drop-in path) but **do not build it in v1**.
+### 4c. Patch strategy — deferred (no infra in v1)
+We **bundle only**. No patch pipeline, no `patch/codex/` directory, no interceptor scaffolding
+in v1. When a concrete need arises (§15), the options — designed *then*, not now — are:
+- **Wire-observable behavior** → in-process JSON-RPC frame interception in `CodexAppServerClient`
+  (a `(frame) => frame|null` transform list). Cheap; no separate process. Likely covers most
+  needs since app-server already emits rich deltas/requests natively.
+- **Non-wire behavior** (e.g. how codex talks to the OpenAI API) → a `codex-rs` source fork +
+  cross-platform Rust build dropped into `vendor/codex-cli/`. Heavy; only if unavoidable.
 
 **Acceptance:** `bun run ensure-codex` yields a runnable binary; `vendor/codex-cli/codex app-server`
 starts and responds to a manual `initialize` (verify with a throwaway script). Generated types
@@ -229,15 +226,14 @@ Steps:
      `handleServerRequest(method, handler)`, `handleServerNotification(method, handler)`,
      `handleUnknownServerRequest(handler)` (default reply `methodNotFound`).
    - Per-method param/response validation via generated `schema.ts`.
-   - **Interceptor hooks**: `addInboundInterceptor(fn)` / `addOutboundInterceptor(fn)` —
-     the Codex "patch" surface.
    - Drain stderr on a separate path (never feed the JSON parser); classify ERROR-level lines
      for surfacing.
+   - (No interceptor/patch hooks in v1 — added later only if we need to patch; see §15.)
 2. `src/main/codex/CodexAppServerClient.test.ts` — drive it against a mock peer that emits
    canned frames (port t3code's `codex-app-server-mock-peer.ts` fixtures conceptually).
 
-**Acceptance:** unit tests cover request/response correlation, notification dispatch, unknown
-server-request fallback, and interceptor application. No real binary needed (mock peer).
+**Acceptance:** unit tests cover request/response correlation, notification dispatch, and
+unknown server-request fallback. No real binary needed (mock peer).
 
 ---
 
@@ -297,8 +293,9 @@ approval/result matching (`types.ts:60-67`) works without the legacy fallback. G
    - Park the JSON-RPC response in a Deferred; emit `session:approval-request` with a
      `PendingApproval {requestId, toolUseId:item.id, toolName, input, …}`.
    - `resolveApproval(requestId, 'allow'|'deny', …)` → resolve the Deferred with the Codex
-     decision union: `allow → 'accept'`, `deny → 'decline'`. (Optionally expose
-     `acceptForSession` later via a UI affordance; v1 maps to the 2-value subset.)
+     decision union: `allow → 'accept'`, `deny → 'decline'`. **v1 is allow/deny only**;
+     `acceptForSession` (and the exec/network-policy amendment variants) are a **tracked
+     follow-up** (§15), not wired now.
    - `requestUserInput` → emit our AskUserQuestion-equivalent; map answers back to
      `{questionId:{answers:[…]}}`.
 8. Unknown server requests (incl. `account/chatgptAuthTokens/refresh`) → `methodNotFound`;
@@ -331,10 +328,20 @@ as the reference.
 Steps:
 1. **Store** (`session-store.ts`): add per-session `provider: ProviderId` and
    `capabilities: SessionCapabilities`, set from `SessionStatus`. Default to claude caps for
-   back-compat on history load.
-2. **Provider picker**: in the new-session flow (`WelcomeScreen`/`Sidebar` folder pick, and/or
-   a provider dropdown next to the model picker). Selecting a provider passes `providerId` to
-   `window.api.createSession`. Add `providerId` to the `createSession` IPC + preload.
+   back-compat on history load. Add a UI-settings-persisted `lastSelectedProvider` (the toggle's
+   remembered choice).
+2. **Provider is chosen at session creation only** — a thread is bound to one backend; there is
+   **no per-tab / mid-session provider switch**. Two creation entry points, sharing
+   `lastSelectedProvider`:
+   - **WelcomeScreen / new-session screen** (`WelcomeScreen.tsx`): a Claude ⇄ Codex **segmented
+     toggle** beside the folder picker. The selected provider is passed into the session the
+     folder pick creates.
+   - **Sidebar "new session" item** (`Sidebar.tsx`): the **same** Claude ⇄ Codex toggle inline on
+     the new-session control, so a session can be started as either backend without visiting the
+     welcome screen.
+   Both write `providerId` into `window.api.createSession(providerId, cwd, …)`. Add `providerId`
+   to the `createSession` IPC signature + preload bridge. The per-tab model picker lists only the
+   active session's provider's models and does **not** offer a provider switch.
 3. **Capability-gate pickers** (`InlinePickers.tsx`):
    - Thinking-mode picker: render only if `capabilities.thinkingModes`.
    - Effort picker: render for both, but Codex uses reasoningEffort tiers (low/medium/high) —
@@ -458,9 +465,10 @@ the abstraction) and again after Phase 4 (the protocol MVP). Keep Phases 5–7 a
 
 ## 13. Risk register (top items)
 
-1. **Rust binary ≠ patchable JS.** Set expectations: protocol-layer interception covers most
-   needs; true binary changes require a `codex-rs` fork + build (deferred). Don't promise
-   cli.js-style patches for Codex.
+1. **No Codex patching in v1.** We bundle only. If/when we need to alter behavior: Codex
+   app-server is compiled Rust (not regex-patchable like cli.js) — wire-observable changes go
+   through in-process frame interception, internal changes need a `codex-rs` fork + build
+   (§4c, §15). Don't promise cli.js-style patches for Codex.
 2. **Protocol/binary version skew.** `codexCliVersion` and `codexProtocolRef` must move
    together; decode failures otherwise. Enforce in `ensure-codex` (warn on mismatch).
 3. **`session.ipc.ts` Claude-only call sites.** Missing a guard → Codex runtime errors. The
@@ -476,9 +484,30 @@ the abstraction) and again after Phase 4 (the protocol MVP). Keep Phases 5–7 a
 
 ## 14. Open questions to resolve before/while building
 
-- Which `@openai/codex` version to pin first, and does its app-server protocol ref line up with
-  the latest schema we generate? (Resolve in Phase 2 against the real binary.)
-- Provider picker placement: per-tab dropdown vs. chosen at folder-open? (UX call in Phase 5.)
-- Do we expose `acceptForSession` (Codex's richer approval) now, or stay allow/deny-only in v1?
-- Effort-level UX for Codex (its reasoningEffort tiers differ from Claude's 5-tier) — reuse the
+- Does the latest `@openai/codex`'s app-server protocol ref line up with the schema we generate?
+  (Verify in Phase 2 against the real binary; keep `codexCliVersion` + `codexProtocolRef` in sync.)
+- Effort-level UX for Codex (its `reasoningEffort` tiers differ from Claude's 5-tier) — reuse the
   picker with a provider-sourced level list.
+
+**Resolved (locked):** Strategy B (session abstraction, not a new event model); pin Codex to
+**latest**; provider chosen **at session creation** via a Claude⇄Codex toggle on **both** the
+welcome screen and the sidebar new-session item (no mid-session switch); **allow/deny-only**
+approvals in v1; **no Codex patching and no MCP** in v1.
+
+---
+
+## 15. Follow-up items (post-v1, tracked)
+
+Explicitly deferred — revisit after the Phase 4 MVP / parity:
+
+1. **`acceptForSession` + amendment approvals** — wire Codex's richer decision union
+   (`acceptForSession`, exec-policy and network-policy amendment variants) and a UI affordance.
+2. **Codex patching mechanism** — only when a concrete need appears: in-process JSON-RPC frame
+   interception (wire-observable) or a `codex-rs` source fork + build (internal). See §4c.
+3. **ClaudeUI-hosted MCP in Codex** — expose mermaid/mockup (and others) to Codex by running them
+   as a real local MCP server and injecting `-c mcp_servers.<name>.url=… + bearer_token_env_var`.
+4. **Codex multi-account / shadow-home** — the work/personal `CODEX_HOME` overlay (t3code-style).
+5. **Usage dashboard for Codex** — token-based feed (`thread/tokenUsage`, `account/rateLimits`);
+   no USD. Currently gated off via `capabilities.costUsd`.
+6. **Codex realtime/voice** (`thread/realtime/*`), web-search and image-generation rendering polish.
+7. **Subagent/collab rendering** — `collabAgentToolCall` / `subAgentActivity` → subagent UI.
