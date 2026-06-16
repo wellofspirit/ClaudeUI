@@ -14,4 +14,7 @@ bin/
 # scripts/extract-cli.mjs. Cached locally, rebuilt when claudeCliVersion
 # bumps in package.json.
 /vendor/claude-cli/
+# Vendored Codex CLI binary — downloaded from npm by scripts/ensure-codex.mjs.
+# Rebuilt when codexCliVersion bumps in package.json.
+/vendor/codex-cli/
 /.cache/

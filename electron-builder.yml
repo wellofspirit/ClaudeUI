@@ -21,6 +21,14 @@ extraResources:
       - bun-claude*
       - version.json
       - vendor/**/*.node
+  # Ship the Codex CLI native binary + version metadata.
+  # Downloaded from npm by scripts/ensure-codex.mjs; pinned via codexCliVersion.
+  - from: vendor/codex-cli
+    to: codex-cli
+    filter:
+      - codex
+      - codex.exe
+      - version.json
   - from: out/web
     to: web
 asarUnpack:
