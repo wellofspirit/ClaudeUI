@@ -127,6 +127,24 @@ function clampEffort(effort: string | undefined): string | undefined {
 }
 
 // ---------------------------------------------------------------------------
+// Model normalization
+// ---------------------------------------------------------------------------
+
+/**
+ * Normalize a ClaudeUI model alias for Codex wire calls. Returns undefined for
+ * falsy input OR the literal `'default'` (ClaudeUI's alias) — Codex has no
+ * `'default'` model and rejects it with HTTP 400 ("The 'default' model is not
+ * supported when using Codex with a ChatGPT account."). Omitting the field
+ * makes Codex use the account's own default. A real slug passes through.
+ *
+ * Exported for unit testing; `CodexSession.codexModel()` delegates here.
+ */
+export function normalizeCodexModel(model: string | undefined): string | undefined {
+  if (!model || model === 'default') return undefined
+  return model
+}
+
+// ---------------------------------------------------------------------------
 // Error classification for thread/resume fallback
 // ---------------------------------------------------------------------------
 
@@ -252,6 +270,7 @@ export class CodexSession extends BaseSession {
     }
 
     const effort = clampEffort(this.effort)
+    const model = this.codexModel()
 
     try {
       const resp = await this.client!.request('turn/start', {
@@ -259,7 +278,7 @@ export class CodexSession extends BaseSession {
         input,
         approvalPolicy: toApprovalPolicy(this.permissionMode),
         sandboxPolicy: toSandboxPolicy(this.permissionMode),
-        ...(this.model ? { model: this.model } : {}),
+        ...(model ? { model } : {}),
         ...(effort ? { effort } : {}),
       }, { timeoutMs: 0 })
 
@@ -316,6 +335,16 @@ export class CodexSession extends BaseSession {
 
   async setModel(model: string): Promise<void> {
     this.model = model
+  }
+
+  /**
+   * Normalize the model for Codex wire calls (thread/start, thread/resume,
+   * turn/start). Delegates to {@link normalizeCodexModel}: omits ClaudeUI's
+   * `'default'` alias and falsy values so Codex falls back to the account's
+   * default model (Codex 400s on `model: 'default'`).
+   */
+  private codexModel(): string | undefined {
+    return normalizeCodexModel(this.model)
   }
 
   async setPermissionMode(mode: string): Promise<void> {
@@ -411,6 +440,7 @@ export class CodexSession extends BaseSession {
 
     // 3. thread/start or thread/resume
     let threadId: string | null = null
+    const model = this.codexModel()
 
     if (this.resumeSessionId) {
       try {
@@ -418,7 +448,7 @@ export class CodexSession extends BaseSession {
           threadId: this.resumeSessionId,
           approvalPolicy: toApprovalPolicy(this.permissionMode),
           sandbox: toSandboxMode(this.permissionMode),
-          ...(this.model ? { model: this.model } : {}),
+          ...(model ? { model } : {}),
         })
         threadId = resumeResp.thread?.id ?? null
       } catch (err) {
@@ -432,7 +462,7 @@ export class CodexSession extends BaseSession {
         cwd: this.cwd,
         approvalPolicy: toApprovalPolicy(this.permissionMode),
         sandbox: toSandboxMode(this.permissionMode),
-        ...(this.model ? { model: this.model } : {}),
+        ...(model ? { model } : {}),
       })
       threadId = startResp.thread?.id ?? null
     }
