@@ -86,6 +86,8 @@ import type {
   SandboxSettings,
   PermissionSuggestion
 } from '../../shared/types'
+import { CLAUDE_CAPABILITIES } from '../../shared/types'
+import { BaseSession } from '../providers/BaseSession'
 
 interface ApprovalResult {
   decision: ApprovalDecision
@@ -158,20 +160,23 @@ interface BackgroundPoller {
   done: boolean
 }
 
-export class ClaudeSession {
-  private static extraWindows = new Set<BrowserWindow>()
-  static addExtraWindow(win: BrowserWindow): void {
-    this.extraWindows.add(win)
+export class ClaudeSession extends BaseSession {
+  // Static pass-throughs to BaseSession so existing call sites in session.ipc.ts
+  // and remote-handlers.ts keep compiling without modification.
+  static override addExtraWindow(win: BrowserWindow): void {
+    BaseSession.addExtraWindow(win)
   }
-  static removeExtraWindow(win: BrowserWindow): void {
-    this.extraWindows.delete(win)
+  static override removeExtraWindow(win: BrowserWindow): void {
+    BaseSession.removeExtraWindow(win)
   }
-  static getExtraWindows(): Set<BrowserWindow> {
-    return this.extraWindows
+  static override getExtraWindows(): Set<BrowserWindow> {
+    return BaseSession.getExtraWindows()
   }
 
+  readonly provider = 'claude' as const
+  readonly capabilities = CLAUDE_CAPABILITIES
+
   private sessionId: string | null = null
-  private messageHistory: ChatMessage[] = []
   /**
    * Wire-frame uuid → ChatMessage id, keyed by the first 24 chars of the uuid
    * (cli.js's own retraction matching truncates to 24 so per-block derived
@@ -190,9 +195,6 @@ export class ClaudeSession {
   private _initMcpServers: Array<{ name: string; status: string }> = [] // cached from init message
   private _mcpAllServers: Record<string, McpServerConfig> = {} // full config loaded at session start
   private _mcpDisabledServers = new Set<string>() // servers disabled via toggle
-  private win: BrowserWindow
-  routingId: string
-  readonly cwd: string
   private totalCostUsd = 0
   private messageChannel: MessageChannel<unknown> | null = null
   /** Single source of truth for query method signatures: the SDK layer's
@@ -223,8 +225,6 @@ export class ClaudeSession {
   private resumeSessionAt: string | undefined
   private forkSession = false
   private statusLineTimer: ReturnType<typeof setTimeout> | null = null
-  private inactivityTimer: ReturnType<typeof setTimeout> | null = null
-  private inactivityTimeoutMs = 15 * 60 * 1000 // default 15 min, 0 = disabled
   private sandboxConfig: SandboxSettings | null = null
   private voiceClient: VoiceClient | null = null
   private voiceServerPort: number | null = null
@@ -250,9 +250,7 @@ export class ClaudeSession {
     resumeSessionAt?: string,
     forkSession?: boolean
   ) {
-    this.routingId = routingId
-    this.win = win
-    this.cwd = cwd
+    super(routingId, win, cwd)
     this.effort = effort || 'medium'
     this.thinkingMode =
       thinkingMode === 'adaptive' || thinkingMode === 'enabled' || thinkingMode === 'disabled'
@@ -267,13 +265,18 @@ export class ClaudeSession {
     this.sendStatus()
   }
 
+  get willQueue(): boolean {
+    return this.isProcessing
+  }
+
   get status(): SessionStatus {
     return {
       state: this.isProcessing ? 'running' : 'idle',
       sessionId: this.sessionId,
       model: this.model,
       cwd: this.cwd,
-      totalCostUsd: this.totalCostUsd
+      totalCostUsd: this.totalCostUsd,
+      ...this.baseStatusFields()
     }
   }
 
@@ -282,19 +285,7 @@ export class ClaudeSession {
     return this.sessionId
   }
 
-  /** Get all main-thread messages exchanged in this session. */
-  getMessages(): ChatMessage[] {
-    return this.messageHistory
-  }
-
-  /** Update the inactivity timeout. Pass 0 to disable. */
-  setInactivityTimeout(ms: number): void {
-    this.inactivityTimeoutMs = ms
-    // Re-evaluate: if idle, restart timer with new duration; if active, timer is already cleared
-    if (!this.isProcessing) this.resetInactivityTimer()
-  }
-
-  private resetInactivityTimer(): void {
+  protected override resetInactivityTimer(): void {
     this.clearInactivityTimer()
     if (this.inactivityTimeoutMs > 0) {
       this.inactivityTimer = setTimeout(() => {
@@ -305,18 +296,6 @@ export class ClaudeSession {
         this.cancel()
       }, this.inactivityTimeoutMs)
     }
-  }
-
-  private clearInactivityTimer(): void {
-    if (this.inactivityTimer) {
-      clearTimeout(this.inactivityTimer)
-      this.inactivityTimer = null
-    }
-  }
-
-  /** Whether a prompt sent now will be queued (session actively processing a turn) */
-  get willQueue(): boolean {
-    return this.isProcessing
   }
 
   async run(
@@ -2253,16 +2232,12 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
     }
   }
 
-  private send(channel: string, data: unknown): void {
-    if (!this.win.isDestroyed()) {
-      this.win.webContents.send(channel, this.routingId, data)
-    }
-    for (const w of ClaudeSession.extraWindows) {
-      if (!w.isDestroyed()) w.webContents.send(channel, this.routingId, data)
-    }
-  }
-
   private sendStatus(): void {
     this.send('session:status', this.status)
+  }
+
+  /** Dispose: cancel the session and release all resources. */
+  dispose(): void {
+    this.cancel()
   }
 }

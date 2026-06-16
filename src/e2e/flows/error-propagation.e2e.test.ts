@@ -7,7 +7,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
 import { useSessionStore } from '../../renderer/src/stores/session-store'
-import { makeChatMessage, resetFactoryCounter } from '@test/factories/messages'
+import { makeChatMessage, makeSessionStatus, resetFactoryCounter } from '@test/factories/messages'
 import type { ChatMessage, SessionStatus, StreamDelta } from '../../shared/types'
 
 let app: TestApp
@@ -134,13 +134,7 @@ describe('E2E: error propagation', () => {
 
     app.emit('session:error', routingId, 'persistent error')
     // Simulate status going back to idle
-    useSessionStore.getState().setStatus(routingId, {
-      state: 'idle',
-      sessionId: routingId,
-      model: null,
-      cwd: null,
-      totalCostUsd: 0
-    })
+    useSessionStore.getState().setStatus(routingId, makeSessionStatus({ state: 'idle', sessionId: routingId, model: null, cwd: null }))
     expect(useSessionStore.getState().sessions[routingId].errors).toEqual(['persistent error'])
   })
 })

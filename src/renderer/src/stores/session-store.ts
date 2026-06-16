@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import { useShallow } from 'zustand/react/shallow'
 import { mergeContentBlocks } from '../utils/content-blocks'
-import { VOICE_LANGUAGES } from '../../../shared/types'
+import { VOICE_LANGUAGES, CLAUDE_CAPABILITIES } from '../../../shared/types'
 import type { EffortLevel } from '../../../shared/model-capabilities'
 import type {
   ChatMessage,
@@ -481,7 +481,16 @@ const EMPTY_SESSION_STATE: PerSessionState = {
   streamingThinking: '',
   thinkingStartedAt: null,
   thinkingDurationMs: null,
-  status: { state: 'idle', sessionId: null, model: null, cwd: null, totalCostUsd: 0 },
+  // Full caps assumed for new sessions before the first status event.
+  status: {
+    state: 'idle',
+    sessionId: null,
+    model: null,
+    cwd: null,
+    totalCostUsd: 0,
+    provider: 'claude',
+    capabilities: CLAUDE_CAPABILITIES
+  },
   pendingApprovals: [],
   errors: [],
   warnings: [],

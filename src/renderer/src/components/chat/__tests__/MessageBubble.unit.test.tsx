@@ -17,6 +17,7 @@ import {
   makeToolResultBlock,
   makeThinkingBlock,
   makePendingApproval,
+  makeSessionStatus,
   resetFactoryCounter
 } from '@test/factories/messages'
 
@@ -52,7 +53,7 @@ beforeEach(() => {
         streamingThinking: '',
         thinkingStartedAt: null,
         thinkingDurationMs: null,
-        status: { state: 'idle', sessionId: null, model: null, cwd: null, totalCostUsd: 0 },
+        status: makeSessionStatus({ state: 'idle', sessionId: null, model: null, cwd: null }),
         pendingApprovals: [],
         errors: [],
         warnings: [],

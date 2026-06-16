@@ -19,6 +19,7 @@ import {
   makeAssistantMessage,
   makeToolUseBlock,
   makePendingApproval,
+  makeSessionStatus,
   resetFactoryCounter
 } from '@test/factories/messages'
 import { renderHook } from '@testing-library/react'
@@ -660,37 +661,19 @@ describe('clearConversation', () => {
 describe('setStatus cwd follow-through', () => {
   it('updates session.cwd when status.cwd differs from current', () => {
     store().createNewSession('r1', '/original')
-    store().setStatus('r1', {
-      state: 'idle',
-      sessionId: 'sdk-id',
-      model: 'claude-sonnet-4-6',
-      cwd: '/worktree/branch',
-      totalCostUsd: 0
-    })
+    store().setStatus('r1', makeSessionStatus({ state: 'idle', sessionId: 'sdk-id', model: 'claude-sonnet-4-6', cwd: '/worktree/branch' }))
     expect(store().sessions['r1'].cwd).toBe('/worktree/branch')
   })
 
   it('leaves cwd untouched when status.cwd matches current', () => {
     store().createNewSession('r1', '/same')
-    store().setStatus('r1', {
-      state: 'idle',
-      sessionId: 'sdk-id',
-      model: 'claude-sonnet-4-6',
-      cwd: '/same',
-      totalCostUsd: 0
-    })
+    store().setStatus('r1', makeSessionStatus({ state: 'idle', sessionId: 'sdk-id', model: 'claude-sonnet-4-6', cwd: '/same' }))
     expect(store().sessions['r1'].cwd).toBe('/same')
   })
 
   it('leaves cwd untouched when status.cwd is null', () => {
     store().createNewSession('r1', '/keep')
-    store().setStatus('r1', {
-      state: 'idle',
-      sessionId: null,
-      model: null,
-      cwd: null,
-      totalCostUsd: 0
-    })
+    store().setStatus('r1', makeSessionStatus({ state: 'idle', sessionId: null, model: null, cwd: null }))
     expect(store().sessions['r1'].cwd).toBe('/keep')
   })
 })
