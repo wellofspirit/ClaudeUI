@@ -4,10 +4,17 @@
  * Adding a new provider = add a factory registration here.
  */
 import { ClaudeSession } from '../services/claude-session'
+import { CodexSession } from '../codex/CodexSession'
 import { providerRegistry } from './ProviderRegistry'
 
 providerRegistry.register(
   'claude',
   (routingId, win, cwd, effort, resumeSessionId, permissionMode, model, sandboxConfig, thinkingMode, resumeSessionAt, forkSession) =>
     new ClaudeSession(routingId, win, cwd, effort, resumeSessionId, permissionMode, model, sandboxConfig, thinkingMode, resumeSessionAt, forkSession)
+)
+
+providerRegistry.register(
+  'codex',
+  (routingId, win, cwd, effort, resumeSessionId, permissionMode, model, sandboxConfig, thinkingMode, resumeSessionAt, forkSession) =>
+    new CodexSession(routingId, win, cwd, effort, resumeSessionId, permissionMode, model, sandboxConfig, thinkingMode, resumeSessionAt, forkSession)
 )

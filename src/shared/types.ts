@@ -68,6 +68,20 @@ export const CLAUDE_CAPABILITIES: SessionCapabilities = Object.freeze({
   sideQuestion: true
 })
 
+/** Capability set for the Codex backend. Frozen for the same reason. */
+export const CODEX_CAPABILITIES: SessionCapabilities = Object.freeze({
+  thinkingModes: false,
+  effortLevels: true,
+  voice: false,
+  hostedMcp: false,
+  backgroundTasks: false,
+  subagents: false,
+  plan: true,
+  costUsd: false,
+  fork: true,
+  sideQuestion: false
+})
+
 export interface SessionStatus {
   state: 'idle' | 'running' | 'error' | 'disconnected'
   sessionId: string | null

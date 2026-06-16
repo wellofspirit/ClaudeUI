@@ -140,6 +140,9 @@ export class CodexAppServerClient {
 
     // Wire up the NDJSON reader on the stdout side. Parse errors on a line
     // are forwarded to onParseError — we log and continue rather than crashing.
+    // NdjsonReader attaches to the stream's 'data' event — no reference needed
+    // since the stream keeps it alive. The closed-guard in handleFrame ensures
+    // frames after close() are silently dropped.
     new NdjsonReader(stdout, (obj) => this.handleFrame(obj), (err) => {
       // Malformed line: swallow the error, keep reading.
       if (process.env.DEBUG_CODEX) {
@@ -316,6 +319,9 @@ export class CodexAppServerClient {
   // -------------------------------------------------------------------------
 
   private handleFrame(obj: JsonLine): void {
+    // Guard: ignore frames that arrive after close() has been called
+    if (this.closed) return
+
     const hasMethod = typeof obj.method === 'string'
     const hasId = obj.id !== undefined && obj.id !== null
 

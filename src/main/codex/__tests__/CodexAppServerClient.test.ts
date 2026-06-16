@@ -500,4 +500,35 @@ describe('CodexAppServerClient — close / dispose', () => {
     peer.client.close()
     expect(() => peer.client.notify('initialized', undefined)).not.toThrow()
   })
+
+  it('frames arriving after close() are ignored (closed-guard in handleFrame)', async () => {
+    const receivedMethods: string[] = []
+    peer.client.handleServerNotification('thread/started', () => {
+      receivedMethods.push('thread/started')
+    })
+
+    // Register a request handler — it must NOT be called after close
+    let requestHandlerCalled = false
+    peer.client.handleServerRequest('item/commandExecution/requestApproval', async (_params) => {
+      requestHandlerCalled = true
+      return { decision: 'decline' as const }
+    })
+
+    peer.client.close()
+
+    // Inject frames after close — they should be silently discarded
+    peer.sendNotification('thread/started', { thread: { id: 'abc' } })
+    peer.sendServerRequest('item/commandExecution/requestApproval', {
+      itemId: 'x',
+      threadId: 'y',
+      turnId: 'z',
+      startedAtMs: 0,
+    })
+
+    // Give the async event loop a tick to process the injected line
+    await new Promise((r) => setTimeout(r, 20))
+
+    expect(receivedMethods).toHaveLength(0)
+    expect(requestHandlerCalled).toBe(false)
+  })
 })
