@@ -16,8 +16,10 @@ import type { BrowserWindow } from 'electron'
 import type { ApprovalDecision, PermissionSuggestion, SessionCapabilities } from '../../shared/types'
 import { CODEX_CAPABILITIES } from '../../shared/types'
 import { BaseSession } from '../providers/BaseSession'
+import { logger } from '../services/logger'
 import { locateCodex } from './locate'
 import { CodexAppServerClient } from './CodexAppServerClient'
+import { CodexSpawnError } from './codexQuery'
 import {
   makeAssemblyState,
   mapAgentMessageDelta,
@@ -180,6 +182,9 @@ export class CodexSession extends BaseSession {
   private threadId: string | null = null
   private activeTurnId: string | null = null
   private running = false
+  /** Set once dispose() runs. Suppresses any further IPC emission so events
+   *  (notifications, approval prompts) that resolve after teardown are dropped. */
+  private disposed = false
 
   private child: ChildProcessWithoutNullStreams | null = null
   private client: CodexAppServerClient | null = null
@@ -192,7 +197,13 @@ export class CodexSession extends BaseSession {
   // Pending approval deferreds: requestId → Deferred<{ decision: string } | { answers: unknown }>
   private pendingApprovals = new Map<string, Deferred<Record<string, unknown>>>()
 
-  // Assembly state (per-session, reset intent per turn)
+  /**
+   * Assembly state. Token accumulators (totalInputTokens, etc.) are
+   * session-level and intentionally persist across turns. The per-turn Maps
+   * (itemText, commandOutput) are explicitly cleared by resetTurnState() at the
+   * start of each run() so a turn that ends abnormally (process exit,
+   * turn/start failure) can't leak stale item buffers into the next turn.
+   */
   private assemblyState: CodexAssemblyState = makeAssemblyState()
 
   constructor(
@@ -232,9 +243,34 @@ export class CodexSession extends BaseSession {
     prompt: string | null,
     attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
   ): Promise<void> {
-    // Ensure spawned + handshake done
+    // Ensure spawned + handshake done. run() is called fire-and-forget by the
+    // session:send IPC, so a spawn/handshake failure must be surfaced to the
+    // renderer here — rethrowing would become an unhandled promise rejection.
+    // spawnAndHandshake() has already torn down its half-open connection (#3),
+    // leaving this.client null, so a subsequent run() re-spawns cleanly.
     if (!this.client) {
-      await this.spawnAndHandshake()
+      try {
+        await this.spawnAndHandshake()
+      } catch (err) {
+        this.running = false
+        this.resetInactivityTimer()
+        const msg =
+          err instanceof CodexSpawnError
+            ? 'Codex CLI not found. Install it (or check your PATH) and try again.'
+            : err instanceof Error
+              ? err.message
+              : String(err)
+        this.send('session:error', msg)
+        this.send('session:status', {
+          state: 'error',
+          sessionId: this.sessionId,
+          model: this.model ?? null,
+          cwd: this.cwd,
+          totalCostUsd: 0,
+          ...this.baseStatusFields(),
+        })
+        return
+      }
     }
 
     if (prompt === null) {
@@ -242,8 +278,19 @@ export class CodexSession extends BaseSession {
       return
     }
 
+    // Re-entrancy guard: a Codex thread allows only one active turn. The
+    // session-manager normally queues via willQueue, but guard here too so a
+    // double run() can't fire a second turn/start (which Codex rejects) and
+    // then corrupt the running flag on the failed-turn catch path.
+    if (this.running) {
+      logger.warn('CodexSession', `run() called while a turn is already active (routingId=${this.routingId}); ignoring`)
+      return
+    }
+
     this.running = true
     this.clearInactivityTimer()
+    // Clear per-turn assembly buffers (NOT the session-level token totals).
+    this.resetTurnState()
     this.assemblyState.turnStartMs = Date.now()
 
     this.send('session:status', {
@@ -351,7 +398,18 @@ export class CodexSession extends BaseSession {
     this.permissionMode = mode
   }
 
+  /**
+   * Clear the per-turn assembly buffers (accumulated agentMessage text and
+   * buffered command output) at the start of a new turn. Token accumulators
+   * are deliberately left intact — they track session-level totals.
+   */
+  private resetTurnState(): void {
+    this.assemblyState.itemText.clear()
+    this.assemblyState.commandOutput.clear()
+  }
+
   dispose(): void {
+    this.disposed = true
     this.clearInactivityTimer()
     this.running = false
 
@@ -428,47 +486,62 @@ export class CodexSession extends BaseSession {
     this.wireNotificationHandlers(client)
     this.wireServerRequestHandlers(client)
 
-    // 1. initialize
-    const initResp = await client.request('initialize', {
-      clientInfo: { name: 'ClaudeUI', version: '1.0' },
-      capabilities: { experimentalApi: true },
-    })
-    void initResp // captured for CODEX_HOME / userAgent if needed later
-
-    // 2. notify initialized
-    client.notify('initialized', undefined)
-
-    // 3. thread/start or thread/resume
+    // Any failure from here on (RPC timeout, thread/start rejection, missing
+    // thread id) must leave the session in a clean re-spawnable state: a dead
+    // client + zombie child would otherwise survive on this.client/this.child
+    // and make the next run() skip spawnAndHandshake() and fire turn/start on a
+    // broken connection. Tear both down and rethrow so the next run() retries
+    // from scratch.
     let threadId: string | null = null
-    const model = this.codexModel()
+    try {
+      // 1. initialize
+      const initResp = await client.request('initialize', {
+        clientInfo: { name: 'ClaudeUI', version: '1.0' },
+        capabilities: { experimentalApi: true },
+      })
+      void initResp // captured for CODEX_HOME / userAgent if needed later
 
-    if (this.resumeSessionId) {
-      try {
-        const resumeResp = await client.request('thread/resume', {
-          threadId: this.resumeSessionId,
+      // 2. notify initialized
+      client.notify('initialized', undefined)
+
+      // 3. thread/start or thread/resume
+      const model = this.codexModel()
+
+      if (this.resumeSessionId) {
+        try {
+          const resumeResp = await client.request('thread/resume', {
+            threadId: this.resumeSessionId,
+            approvalPolicy: toApprovalPolicy(this.permissionMode),
+            sandbox: toSandboxMode(this.permissionMode),
+            ...(model ? { model } : {}),
+          })
+          threadId = resumeResp.thread?.id ?? null
+        } catch (err) {
+          if (!isRecoverableThreadResumeError(err)) throw err
+          // Thread not found — fall through to fresh thread/start
+        }
+      }
+
+      if (!threadId) {
+        const startResp = await client.request('thread/start', {
+          cwd: this.cwd,
           approvalPolicy: toApprovalPolicy(this.permissionMode),
           sandbox: toSandboxMode(this.permissionMode),
           ...(model ? { model } : {}),
         })
-        threadId = resumeResp.thread?.id ?? null
-      } catch (err) {
-        if (!isRecoverableThreadResumeError(err)) throw err
-        // Thread not found — fall through to fresh thread/start
+        threadId = startResp.thread?.id ?? null
       }
-    }
 
-    if (!threadId) {
-      const startResp = await client.request('thread/start', {
-        cwd: this.cwd,
-        approvalPolicy: toApprovalPolicy(this.permissionMode),
-        sandbox: toSandboxMode(this.permissionMode),
-        ...(model ? { model } : {}),
-      })
-      threadId = startResp.thread?.id ?? null
-    }
-
-    if (!threadId) {
-      throw new Error('Codex app-server did not return a thread ID')
+      if (!threadId) {
+        throw new Error('Codex app-server did not return a thread ID')
+      }
+    } catch (err) {
+      // Clean up the half-open connection before rethrowing.
+      try { this.client?.dispose() } catch { /* ignore */ }
+      this.client = null
+      try { this.child?.kill('SIGTERM') } catch { /* ignore */ }
+      this.child = null
+      throw err
     }
 
     this.threadId = threadId
@@ -544,6 +617,24 @@ export class CodexSession extends BaseSession {
 
     client.handleServerNotification('error', (params) => {
       emit(mapErrorNotification(params, this.assemblyState))
+      // A non-retryable error is terminal for the turn: Codex may not follow it
+      // with turn/completed, so clear running here (mirroring the turn/completed
+      // failed path) or the session stays stuck 'running' — willQueue would then
+      // silently swallow every future prompt.
+      const willRetry = typeof params.willRetry === 'boolean' ? params.willRetry : false
+      if (!willRetry) {
+        this.running = false
+        this.activeTurnId = null
+        this.send('session:status', {
+          state: 'error',
+          sessionId: this.sessionId,
+          model: this.model ?? null,
+          cwd: this.cwd,
+          totalCostUsd: 0,
+          ...this.baseStatusFields(),
+        })
+        this.resetInactivityTimer()
+      }
     })
 
     client.handleServerNotification('thread/started', (params) => {
@@ -577,6 +668,7 @@ export class CodexSession extends BaseSession {
   private wireServerRequestHandlers(client: CodexAppServerClient): void {
     // item/commandExecution/requestApproval
     client.handleServerRequest('item/commandExecution/requestApproval', async (params) => {
+      if (this.disposed) return { decision: 'decline' as CommandExecutionApprovalDecision }
       const requestId = randomUUID()
       const toolInput: Record<string, unknown> = {}
       if (params.command !== undefined) toolInput.command = params.command
@@ -599,6 +691,7 @@ export class CodexSession extends BaseSession {
 
     // item/fileChange/requestApproval
     client.handleServerRequest('item/fileChange/requestApproval', async (params) => {
+      if (this.disposed) return { decision: 'decline' as FileChangeApprovalDecision }
       const requestId = randomUUID()
       const toolInput: Record<string, unknown> = {}
       if (params.reason !== undefined) toolInput.reason = params.reason
@@ -620,6 +713,7 @@ export class CodexSession extends BaseSession {
 
     // item/tool/requestUserInput
     client.handleServerRequest('item/tool/requestUserInput', async (params) => {
+      if (this.disposed) return { answers: {} }
       const requestId = randomUUID()
       const toolInput: Record<string, unknown> = { questions: params.questions }
 
@@ -654,6 +748,8 @@ export class CodexSession extends BaseSession {
   // ---------------------------------------------------------------------------
 
   private emitMapped(emissions: ReturnType<typeof mapAgentMessageDelta>): void {
+    // Drop any emission produced by a notification that resolved after teardown.
+    if (this.disposed) return
     if (emissions.stream) {
       this.send('session:stream', emissions.stream)
     }

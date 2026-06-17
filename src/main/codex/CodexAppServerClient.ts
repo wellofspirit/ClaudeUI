@@ -412,17 +412,23 @@ export class CodexAppServerClient {
         result = await this.unknownRequestHandler(method, params)
       } else {
         // No typed handler and no fallback — reply method-not-found.
+        if (this.closed) return
         this.writer.write({
           id,
           error: { code: -32601, message: `Method not found: ${method}` }
         })
         return
       }
+      // The handler may await for a long time (e.g. a user approval). If the
+      // client was closed meanwhile, drop the response rather than writing to a
+      // torn-down writer.
+      if (this.closed) return
       this.writer.write({
         id,
         result: (result ?? null) as JsonLine
       })
     } catch (err) {
+      if (this.closed) return
       const msg = err instanceof Error ? err.message : String(err)
       const code = err instanceof CodexAppServerError ? err.code : -32603
       this.writer.write({

@@ -268,6 +268,18 @@ describe('mapItemCompleted', () => {
     expect(result.toolResult).toBeUndefined()
   })
 
+  it('suppresses reasoning items (no tool-result for a non-tool item)', () => {
+    const result = mapItemCompleted(
+      { item: { id: ITEM_ID, type: 'reasoning', content: ['some reasoning'] } as never, completedAtMs: 0, threadId: THREAD_ID, turnId: TURN_ID },
+      state
+    )
+    // Must NOT fall through to the tool-result branch: there is no tool_use
+    // block to attach to (mapItemStarted suppressed the reasoning start).
+    expect(result.toolResult).toBeUndefined()
+    expect(result.message).toBeUndefined()
+    expect(result.stream).toBeUndefined()
+  })
+
   it('emits final ChatMessage for agentMessage using accumulated text', () => {
     state.itemText.set(ITEM_ID, 'Hello world')
     const result = mapItemCompleted(

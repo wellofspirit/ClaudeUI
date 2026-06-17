@@ -7,6 +7,7 @@ import type {
   SessionInfo,
   WorktreeInfo
 } from '../../../../shared/types'
+import { CODEX_CAPABILITIES } from '../../../../shared/types'
 import { useAutomationStore } from '../../stores/automation-store'
 import { useIsMobile } from '../../hooks/useIsMobile'
 import { SidebarView, type DeleteTarget } from './View'
@@ -277,7 +278,9 @@ export function Sidebar({
       // TODO(phase6-followup): support browsing ALL historical Codex threads from sidebar directory scan.
       const { messages } = await window.api.loadCodexHistory(info.sessionId, info.cwd)
       loadHistoricalSession(routingId, messages, info.cwd, [], {}, null, [])
-      // Patch selectedProvider + status.provider so the session spawns as Codex on next send
+      // Patch selectedProvider + status.provider/capabilities so the session
+      // spawns as Codex on next send and capability gating is correct immediately
+      // on history load (before the first spawn's session:status arrives).
       useSessionStore.setState((state) => {
         const existing = state.sessions[routingId]
         if (!existing) return state
@@ -287,7 +290,11 @@ export function Sidebar({
             [routingId]: {
               ...existing,
               selectedProvider: 'codex' as const,
-              status: { ...existing.status, provider: 'codex' as const }
+              status: {
+                ...existing.status,
+                provider: 'codex' as const,
+                capabilities: CODEX_CAPABILITIES
+              }
             }
           }
         }

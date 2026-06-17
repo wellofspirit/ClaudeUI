@@ -191,7 +191,22 @@ export function InputBox(): React.JSX.Element {
 
   // Load models: Claude models via getModels(), Codex models via getCodexModels(cwd).
   // Re-fetches whenever the active session's provider or cwd changes.
+  // `loadedModelsKey` tracks the provider:cwd the current list was loaded for.
+  const loadedModelsKey = useRef<string | null>(null)
   useEffect(() => {
+    const key = `${selectedProvider}:${cwd ?? ''}`
+    // Clear synchronously ONLY when the provider/cwd actually changes from what
+    // the list was last loaded for, so switching from a Codex session to a
+    // Claude one (or vice versa) can't briefly show the previous provider's
+    // list — which would let a stray model pick set an invalid model on the new
+    // provider. (Skipping the first run avoids wiping a pre-populated list.)
+    if (loadedModelsKey.current !== null && loadedModelsKey.current !== key) {
+      setAvailableModels([])
+    }
+    loadedModelsKey.current = key
+
+    // `ignore` discards a late resolution from a now-superseded provider/cwd.
+    let ignore = false
     if (selectedProvider === 'codex') {
       if (!cwd) {
         setAvailableModels([])
@@ -201,13 +216,18 @@ export function InputBox(): React.JSX.Element {
         .getCodexModels(cwd)
         .then((models) => {
           // Fall back gracefully if empty (not authed / not installed)
-          setAvailableModels(models)
+          if (!ignore) setAvailableModels(models)
         })
         .catch(() => {
-          setAvailableModels([])
+          if (!ignore) setAvailableModels([])
         })
     } else {
-      window.api.getModels().then(setAvailableModels)
+      window.api.getModels().then((models) => {
+        if (!ignore) setAvailableModels(models)
+      })
+    }
+    return () => {
+      ignore = true
     }
   }, [selectedProvider, cwd, setAvailableModels])
 

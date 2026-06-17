@@ -20,6 +20,19 @@ import { logger } from '../services/logger'
 
 const DEFAULT_TIMEOUT_MS = 15_000
 
+/**
+ * Kill a child process without throwing. On Windows, kill() on an
+ * already-exited (or PID-recycled) process can throw EPERM/ESRCH; on Unix it's
+ * a silent no-op, but we guard uniformly.
+ */
+function safeKill(child: ChildProcess, signal: NodeJS.Signals): void {
+  try {
+    child.kill(signal)
+  } catch {
+    /* process already gone — ignore */
+  }
+}
+
 export class CodexSpawnError extends Error {
   constructor(message: string, cause?: unknown) {
     super(message)
@@ -83,9 +96,9 @@ export async function withCodexAppServer<T>(
   const timeoutHandle = setTimeout(() => {
     timedOut = true
     logger.warn('codexQuery', `codex app-server call timed out after ${timeoutMs}ms`)
-    child.kill('SIGTERM')
+    safeKill(child, 'SIGTERM')
     setTimeout(() => {
-      if (!child.killed) child.kill('SIGKILL')
+      if (!child.killed) safeKill(child, 'SIGKILL')
     }, 2000)
   }, timeoutMs)
 
@@ -119,7 +132,7 @@ export async function withCodexAppServer<T>(
       }
       child.once('exit', () => resolve())
       setTimeout(() => {
-        if (child.exitCode === null) child.kill('SIGTERM')
+        if (child.exitCode === null) safeKill(child, 'SIGTERM')
         resolve()
       }, 500)
     })

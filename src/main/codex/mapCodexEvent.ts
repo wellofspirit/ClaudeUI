@@ -283,6 +283,15 @@ export function mapItemCompleted(
     return {} // suppress
   }
 
+  // Suppress reasoning completions. Reasoning deltas already streamed into
+  // streamingThinking and mapItemStarted suppressed the start, so there is no
+  // tool_use block to attach a result to. Falling through to the tool-result
+  // branch would emit a tool-result for a non-existent tool_use (silently
+  // dropped by appendToolResult) — drop it cleanly instead.
+  if (itemType === 'reasoning') {
+    return {}
+  }
+
   if (itemType === 'agentMessage') {
     // Emit the final assembled text; store upserts by id, clearing streamingText
     const accumulated = state.itemText.get(itemId) ?? (typeof item.text === 'string' ? item.text : '')
