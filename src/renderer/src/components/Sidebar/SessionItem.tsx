@@ -4,6 +4,7 @@ import { useShallow } from 'zustand/react/shallow'
 import type { SessionInfo } from '../../../../shared/types'
 import { PermissionsDialog } from '../PermissionsDialog'
 import { useContextMenu } from '../../hooks/useContextMenu'
+import { ProviderLogo } from '../shared/ProviderLogo'
 
 export const SessionItem = memo(function SessionItem({
   info,
@@ -175,7 +176,7 @@ export const SessionItem = memo(function SessionItem({
           />
         ) : (
           <span
-            className="overflow-hidden whitespace-nowrap flex-1 min-w-0"
+            className="overflow-hidden whitespace-nowrap flex-1 min-w-0 flex items-center gap-1"
             style={{
               WebkitMaskImage:
                 'linear-gradient(to right, black calc(100% - 12px), transparent 100%)',
@@ -183,6 +184,9 @@ export const SessionItem = memo(function SessionItem({
             }}
             title={info.title}
           >
+            {info.provider && info.provider !== 'claude' && (
+              <ProviderLogo provider={info.provider} size={10} className="shrink-0 opacity-80" />
+            )}
             {info.title}
           </span>
         )}

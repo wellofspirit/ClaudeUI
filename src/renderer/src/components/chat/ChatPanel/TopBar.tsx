@@ -8,12 +8,14 @@ import { GitChangesPill } from '../../git/GitChangesPill'
 import { PermissionsDialog } from '../../PermissionsDialog'
 import { SkillsDialog } from '../../SkillsDialog'
 import { McpDialog } from '../../McpDialog'
+import { ProviderLogo } from '../../shared/ProviderLogo'
 
 export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Element {
   const cwd = useActiveSession((s) => s.cwd)
   const sdkSessionId = useActiveSession((s) => s.status.sessionId)
   const statusLine = useActiveSession((s) => s.statusLine)
   const fallbackCost = useActiveSession((s) => s.status.totalCostUsd)
+  const provider = useActiveSession((s) => s.status.provider)
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const customTitle = useSessionStore((s) =>
     activeSessionId ? s.customTitles[activeSessionId] : undefined
@@ -164,7 +166,10 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
           onMouseEnter={infoMouseEnter}
           onMouseLeave={infoMouseLeave}
         >
-          <span className="text-[13px] text-text-secondary font-normal truncate cursor-default">
+          <span className="flex items-center gap-1 text-[13px] text-text-secondary font-normal truncate cursor-default">
+            {cwd && hasContent && provider && provider !== 'claude' && (
+              <ProviderLogo provider={provider} size={11} className="shrink-0 opacity-75" />
+            )}
             {!cwd ? 'New session' : hasContent ? customTitle || 'Session' : 'New session'}
           </span>
           {(cwd || displaySessionId) && (

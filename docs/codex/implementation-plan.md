@@ -502,6 +502,11 @@ approvals in v1; **no Codex patching and no MCP** in v1.
 
 Explicitly deferred — revisit after the Phase 4 MVP / parity:
 
+> **~~Cold-start sidebar browsing of all Codex threads~~** — ✅ **Done** (`codex-sup`, Phase 6
+> follow-up). `src/main/codex/codexSessions.ts` scans `CODEX_HOME/sessions/**/rollout-*.jsonl`,
+> merges by cwd into the same `DirectoryGroup` subtree as Claude sessions, tags each
+> `SessionInfo` with `provider:'codex'`, and shows a provider logo in sidebar rows and TopBar.
+
 1. **`acceptForSession` + amendment approvals** — wire Codex's richer decision union
    (`acceptForSession`, exec-policy and network-policy amendment variants) and a UI affordance.
 2. **Codex patching mechanism** — only when a concrete need appears: in-process JSON-RPC frame
@@ -513,3 +518,14 @@ Explicitly deferred — revisit after the Phase 4 MVP / parity:
    no USD. Currently gated off via `capabilities.costUsd`.
 6. **Codex realtime/voice** (`thread/realtime/*`), web-search and image-generation rendering polish.
 7. **Subagent/collab rendering** — `collabAgentToolCall` / `subAgentActivity` → subagent UI.
+8. **Rich AI-generated titles for Codex sessions** — currently derived from the first user message
+   in the rollout JSONL (bounded read, 64 KB). A better UX would call an LLM to summarise the
+   conversation, matching Claude's `generateTitle()` flow. Gate behind the existing
+   `generateTitle()` IPC method and a Codex-specific equivalent.
+9. **Watch / pin / delete actions for Codex sessions in sidebar** — hide, delete, and pin are
+   currently Claude-only (they operate on JSONL transcripts under `~/.claude/projects/`).
+   Codex rollout files live at a different path; expose equivalent IPC handlers
+   (`deleteCodexSession`) once the feature is requested.
+10. **Scan-performance tuning** — `codexSessions.ts` reads up to 64 KB from each rollout
+    file for title extraction. At very large session counts (>1000) this may be slow.
+    Consider a streaming readline-based approach or capping the number of files scanned.

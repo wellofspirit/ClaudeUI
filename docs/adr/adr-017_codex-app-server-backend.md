@@ -182,6 +182,12 @@ one lets codex use its own `~/.codex` default.
 5. Realtime/voice (`thread/realtime/*`), web-search and image-generation rendering polish.
 6. Subagent/collab rendering (`collabAgentToolCall` / `subAgentActivity`).
 7. Fail-fast missing-binary error surfaced to the user before session start.
+8. **Rich AI-generated titles for Codex sessions** — currently a bounded-read first-user-message
+   extraction (64 KB). LLM-generated titles (matching Claude's flow) deferred; see §15 of the
+   implementation plan.
+9. **Watch / pin / delete for Codex sessions** — sidebar context-menu actions that modify
+   `~/.claude/projects/` JSONL do not apply to Codex rollout files. Requires new IPC handlers.
+   Deferred until user-facing demand warrants the cross-path complexity.
 
 ## Related
 

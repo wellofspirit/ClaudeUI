@@ -269,13 +269,13 @@ export function Sidebar({
       return
     }
 
-    // Route history loading by provider. Codex sessions use thread/read (app-server),
-    // Claude sessions use the JSONL transcript parser. Claude is the default for absent keys.
-    const provider = sessionProviders[info.sessionId] ?? 'claude'
+    // Route history loading by provider. Prefer `info.provider` (authoritative from
+    // the directory scan) over the persisted sessionProviders map (which may be absent
+    // for sessions loaded from disk that were never opened in this run).
+    const provider = info.provider ?? sessionProviders[info.sessionId] ?? 'claude'
 
     if (provider === 'codex') {
       // Codex: load via thread/read. threadId === sessionId for Codex sessions.
-      // TODO(phase6-followup): support browsing ALL historical Codex threads from sidebar directory scan.
       const { messages } = await window.api.loadCodexHistory(info.sessionId, info.cwd)
       loadHistoricalSession(routingId, messages, info.cwd, [], {}, null, [])
       // Patch selectedProvider + status.provider/capabilities so the session
@@ -543,13 +543,15 @@ export function Sidebar({
     const inMemoryByDir: Record<string, SessionInfo[]> = {}
     for (const [rid, data] of Object.entries(sidebarSessions)) {
       if (dirSessionIds.has(rid) || !data.cwd) continue
+      const sessionProvider = sessionProviders[rid] ?? 'claude'
       const info: SessionInfo = {
         sessionId: rid,
         cwd: data.cwd,
         projectKey: '',
         title: data.firstUserText || 'New session',
         timestamp: Date.now(),
-        lastActivityAt: Date.now()
+        lastActivityAt: Date.now(),
+        provider: sessionProvider
       }
       const key = data.cwd
       if (!inMemoryByDir[key]) inMemoryByDir[key] = []

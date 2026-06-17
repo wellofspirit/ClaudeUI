@@ -376,6 +376,8 @@ export interface SessionInfo {
   lastActivityAt: number
   /** cli.js-generated session title (from `{type:"ai-title"}` JSONL records). */
   aiTitle?: string | null
+  /** Which backend produced this session. Defaults to 'claude' when absent (legacy records). */
+  provider?: ProviderId
 }
 
 export interface DirEntry {
