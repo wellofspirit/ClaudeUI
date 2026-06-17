@@ -1,6 +1,17 @@
 # Patch: skip-securestorage
 
-When the env var `SKIP_SECURESTORAGE` is truthy, cli.js reads and writes OAuth credentials to the plaintext file backend **only**, bypassing the macOS Keychain entirely.
+When the env var `SKIP_SECURESTORAGE` is truthy, cli.js reads and writes OAuth credentials to the plaintext file backend **only**, bypassing the OS secure store entirely — the macOS Keychain or the Windows Credential Manager.
+
+> **The getter shape is PLATFORM-SPECIFIC, not version-specific** (verified on 2.1.177 — both bundles report the same `VERSION`, but the bundled cli.js differs per platform):
+>
+> | Platform bundle    | Primary backend                       | Getter body                                       |
+> | ------------------ | ------------------------------------- | ------------------------------------------------- |
+> | macOS (darwin-\*)  | `name:"keychain"`                     | `return COMPOSER(keychain,file)` (unconditional)  |
+> | Windows (win32-\*) | `name:"windows-credman"`              | `if(<gate>())return COMPOSER(credman,file);return file` |
+>
+> The Windows bundle gained a **Windows Credential Manager** backend gated behind a GrowthBook flag (`tengu_windows_credman`) / `CLAUDE_CODE_FORCE_WINDOWS_CREDMAN=1`. The original patch matched only the macOS unconditional body, so it worked on mac and aborted on Windows (`0 store-getter matches`). The fix no longer matches the exact body — it captures the body and **prepends** a `SKIP_SECURESTORAGE` short-circuit, so it works on both. See **Anchor 2 / Before-After** below.
+>
+> Note: on a default Windows install the gate is **off**, so `pf()` already returns the bare file backend — file-based credentials happen without the patch. The patch makes it deterministic (immune to the flag flipping on remotely) and, critically, stops the build pipeline from hard-aborting.
 
 ## Affected Component
 
@@ -103,28 +114,40 @@ Regex captures the composer fn name (`ev9`):
 function ([\w$]+)\([\w$]+,[\w$]+\)\{let [\w$]+=\{name:`\$\{[\w$]+\.name\}-with-\$\{[\w$]+\.name\}-fallback`
 ```
 
-### Anchor 2 — the store getter (unique once `ev9` is known)
+### Anchor 2 — the store getter (unique once the composer is known)
 
-```
+The getter is the only **zero-arg** function whose **brace-free** body contains `COMPOSER(primary,file)`. Two shapes observed:
+
+```js
+// old (macOS, ≤ pre-credman):
 function p1(){return ev9(oM8,lK6)}
+// new (v2.1.177, credman-gated):
+function pf(){if(v21())return cy$(OXq,s_6);return s_6}
 ```
 
-Regex (composer interpolated): `function ([\w$]+)\(\)\{return ev9\(([\w$]+),([\w$]+)\)\}`
-→ `$1`=getter, `$2`=keychain (primary), `$3`=**file (fallback, the one we force)**.
+Regex (composer interpolated; `cy$` shown escaped):
+
+```
+function ([\w$]+)\(\)\{([^{}]*?cy\$\(([\w$]+),([\w$]+)\)[^{}]*?)\}
+```
+
+→ `$1`=getter, `$2`=**original body** (verbatim), `$3`=primary secure store, `$4`=**file (fallback, the one we force)**. The `[^{}]*` bounds keep the match inside the one-line getter and exclude the composer **definition** (which takes args and has a braced body). Asserting exactly 1 match guards uniqueness.
 
 ### Before
 
 ```js
-function p1(){return ev9(oM8,lK6)}
+function pf(){if(v21())return cy$(OXq,s_6);return s_6}
 ```
 
 ### After
 
 ```js
-function p1(){/*PATCHED:skip-securestorage*/return process.env.SKIP_SECURESTORAGE?lK6:ev9(oM8,lK6)}
+function pf(){/*PATCHED:skip-securestorage*/if(process.env.SKIP_SECURESTORAGE)return s_6;if(v21())return cy$(OXq,s_6);return s_6}
 ```
 
-When `SKIP_SECURESTORAGE` is unset/empty → unchanged behaviour (keychain-primary facade). When truthy → the bare file backend, so all credential I/O goes to `<CLAUDE_SECURESTORAGE_CONFIG_DIR || CLAUDE_CONFIG_DIR || ~/.claude>/.credentials.json`.
+The short-circuit is **prepended** to the captured body (`$2`) — `$4` is returned directly when the flag is set; otherwise the original body runs unchanged. This is shape-agnostic: it works for the old unconditional `return COMPOSER(...)` body and the new `if(<gate>())…` body alike. When `SKIP_SECURESTORAGE` is unset/empty → byte-identical original behaviour. When truthy → the bare file backend, so all credential I/O goes to `<CLAUDE_SECURESTORAGE_CONFIG_DIR || CLAUDE_CONFIG_DIR || ~/.claude>/.credentials.json`.
+
+> Note: `$2` interpolates the captured body **verbatim** via `String.prototype.replace` — its literal `$` characters (e.g. `cy$`) are not re-interpreted as replacement patterns, so no `$`-escaping of the body is needed. Only the literal `$n` group refs in the replacement template are special.
 
 ### Why it's safe
 
@@ -166,8 +189,8 @@ bundle-analyzer find vendor/claude-cli/cli.js "CLAUDE_SECURESTORAGE_CONFIG_DIR" 
 
 ## Syntax Pitfalls
 
-- **Escaping the composer name in regex/replacement.** Minified names can contain `$`. In `apply.mjs` the composer is escaped with `replace(/[$]/g,'\\$&')` for the match regex and `replace(/[$]/g,'$$$$')` for the replacement string. Forgetting the replacement escape silently corrupts output when a name contains `$`.
-- **Don't return `ev9(lK6,lK6)`.** It type-checks but hits the facade's `if(O===null)await _.delete()` branch on first write — deleting the credential you just wrote. Return the **bare** backend.
+- **Escaping the composer name in the match regex.** Minified names can contain `$`. In `apply.mjs` the composer is escaped with `replace(/[$]/g,'\\$&')` before being interpolated into the match regex. The replacement template no longer interpolates the composer name (we re-use the captured body `$2` verbatim), so the old `'$$$$'` replacement-escape dance is gone — but never put a captured name into a replacement string without `replace(/[$]/g,'$$$$')`.
+- **Don't return `COMPOSER(file,file)`.** It type-checks but hits the facade's "delete the other copy on success" branch on first write — deleting the credential you just wrote. Return the **bare** file backend (we prepend `return $4` where `$4` is the bare backend).
 - Always run `node --check vendor/claude-cli/cli.js` after applying.
 
 ## What's NOT Changed
@@ -199,14 +222,15 @@ ClaudeUI sets `SKIP_SECURESTORAGE=1` (and per-account `CLAUDE_SECURESTORAGE_CONF
 
 ## Key Functions Reference
 
-| Name (v2.1.177) | Purpose                                       | Char offset |
-| --------------- | --------------------------------------------- | ----------- |
-| `p1`            | credential store getter (patched)             | ~2323397    |
-| `ev9`           | facade composer (keychain + file fallback)    | ~2316773    |
-| `oM8`           | keychain backend (`name:"keychain"`)          | ~2317600    |
-| `lK6`           | plaintext file backend (`name:"plaintext"`)   | ~2321619    |
-| `dK6`           | resolves storageDir/storagePath               | —           |
-| `VyH`           | mutate (read-modify-write) helper             | ~2316395    |
+| Name (v2.1.177) | Purpose                                              | Char offset |
+| --------------- | --------------------------------------------------- | ----------- |
+| `pf`            | credential store getter (patched)                   | ~2325860    |
+| `v21`           | credman gate (`tengu_windows_credman` / force-env)  | ~2325490    |
+| `cy$`           | facade composer (secure store + file fallback)      | ~2316152    |
+| `OXq`           | Windows Credential Manager backend (`name:"windows-credman"`) | ~2324132 |
+| `s_6`           | plaintext file backend (`name:"plaintext"`)         | ~2318776    |
+
+(On a macOS-flavoured bundle the primary backend object is `name:"keychain"` instead of `windows-credman`; the patch captures whichever appears as the composer's first arg.)
 
 **Note:** All minified names change between SDK versions. Relocate via the content patterns above (string literals + structural shapes), never by name.
 
