@@ -183,10 +183,16 @@ export function SidebarView(props: SidebarViewProps): React.JSX.Element {
               <path d="M18.5 2.5a2.12 2.12 0 013 3L12 15l-4 1 1-4z" />
             </svg>
           }
+          rightSlot={
+            <div
+              className="shrink-0"
+              onClick={(e) => e.stopPropagation()}
+              onDoubleClick={(e) => e.stopPropagation()}
+            >
+              <ProviderToggle compact />
+            </div>
+          }
         />
-        <div className="px-2 py-1">
-          <ProviderToggle />
-        </div>
         <NavItem
           label="Automations"
           active={activeView.type === 'automations'}
