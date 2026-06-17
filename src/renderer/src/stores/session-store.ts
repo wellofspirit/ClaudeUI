@@ -676,7 +676,7 @@ interface SessionState {
   unhideSession: (sessionId: string) => void
   hideProject: (projectKey: string) => void
   unhideProject: (projectKey: string) => void
-  deleteSession: (sessionId: string, projectKey: string) => Promise<void>
+  deleteSession: (sessionId: string, projectKey: string, provider?: ProviderId) => Promise<void>
   deleteProject: (projectKey: string) => Promise<void>
 
   // Per-session actions (all take routingId)
@@ -1002,29 +1002,42 @@ export const useSessionStore = create<SessionState>((set) => ({
     // The on-disk session id: a rekeyed live session or a historical load both
     // carry it as the routingId; a still-streaming session exposes it on status.
     const sourceSessionId = src.status.sessionId ?? sourceRoutingId
+    const isCodex = src.selectedProvider === 'codex'
 
-    const result = await window.api.resolveForkAnchor(sourceSessionId, src.cwd, messageId)
-    if (!result?.anchorUuid) {
-      // The message isn't flushed to the transcript yet (or vanished). Surface
-      // it on the source session rather than silently doing nothing.
-      useSessionStore
-        .getState()
-        .addError(
-          sourceRoutingId,
-          'Cannot branch from this message yet — it has not been saved to the transcript.'
-        )
-      return null
+    let anchorUuid: string
+    let seeded: typeof src.messages
+
+    if (isCodex) {
+      // Codex: thread/fork is whole-thread only — no per-message anchor. The
+      // anchor is the source threadId; the branch is seeded with the full
+      // message history (Codex forks the entire thread server-side).
+      anchorUuid = sourceSessionId
+      seeded = src.messages.map((m) => ({ ...m, content: m.content.map((b) => ({ ...b })) }))
+    } else {
+      // Claude: resolve the JSONL-flushed uuid for the chosen message.
+      const result = await window.api.resolveForkAnchor(sourceSessionId, src.cwd, messageId)
+      if (!result?.anchorUuid) {
+        // The message isn't flushed to the transcript yet (or vanished). Surface
+        // it on the source session rather than silently doing nothing.
+        useSessionStore
+          .getState()
+          .addError(
+            sourceRoutingId,
+            'Cannot branch from this message yet — it has not been saved to the transcript.'
+          )
+        return null
+      }
+      anchorUuid = result.anchorUuid
+
+      // Optimistically seed the branch with messages 1..N (deep-ish copy so edits
+      // to one session never mutate the other). cli.js performs the same slice by
+      // uuid when it materializes the fork, so the displayed history will match.
+      const idx = src.messages.findIndex((m) => m.id === messageId)
+      seeded = (idx >= 0 ? src.messages.slice(0, idx + 1) : src.messages).map((m) => ({
+        ...m,
+        content: m.content.map((b) => ({ ...b }))
+      }))
     }
-    const anchorUuid: string = result.anchorUuid
-
-    // Optimistically seed the branch with messages 1..N (deep-ish copy so edits
-    // to one session never mutate the other). cli.js performs the same slice by
-    // uuid when it materializes the fork, so the displayed history will match.
-    const idx = src.messages.findIndex((m) => m.id === messageId)
-    const sliced = (idx >= 0 ? src.messages.slice(0, idx + 1) : src.messages).map((m) => ({
-      ...m,
-      content: m.content.map((b) => ({ ...b }))
-    }))
 
     const newRoutingId = crypto.randomUUID()
     set((s) => {
@@ -1033,12 +1046,13 @@ export const useSessionStore = create<SessionState>((set) => ({
         ...s.recentSessionIds.filter((id) => id !== newRoutingId)
       ].slice(0, s.settings.maxRecentSessions)
       saveSessionConfig(s, { recentSessionIds })
+      const baseSession = createEmptySession(src.cwd)
       return {
         sessions: {
           ...s.sessions,
           [newRoutingId]: {
-            ...createEmptySession(src.cwd),
-            messages: sliced,
+            ...baseSession,
+            messages: seeded,
             // Render the seeded history immediately; the fork-spawn path in
             // InputBox (gated on forkOrigin) overrides the resume target.
             isHistorical: true,
@@ -1047,7 +1061,16 @@ export const useSessionStore = create<SessionState>((set) => ({
             selectedModel: src.selectedModel,
             permissionMode: src.permissionMode,
             effort: src.effort,
-            thinkingMode: src.thinkingMode
+            thinkingMode: src.thinkingMode,
+            // Inherit the provider; seed status so gating is correct before spawn.
+            selectedProvider: isCodex ? ('codex' as const) : baseSession.selectedProvider,
+            status: isCodex
+              ? {
+                  ...baseSession.status,
+                  provider: 'codex' as const,
+                  capabilities: capabilitiesFor('codex')
+                }
+              : baseSession.status
           }
         },
         activeSessionId: newRoutingId,
@@ -1162,8 +1185,15 @@ export const useSessionStore = create<SessionState>((set) => ({
       return { hiddenProjectKeys }
     }),
 
-  deleteSession: async (sessionId, projectKey) => {
-    await window.api.deleteSession(sessionId, projectKey)
+  deleteSession: async (sessionId, projectKey, provider) => {
+    // Provider-specific delete: Codex rollout files live under CODEX_HOME, not
+    // ~/.claude/projects, so they go through a different IPC. The in-memory +
+    // persisted-config scrub below is identical for both providers.
+    if (provider === 'codex') {
+      await window.api.deleteCodexSession(sessionId)
+    } else {
+      await window.api.deleteSession(sessionId, projectKey)
+    }
     // Also scrub any references to this session from persisted config + in-memory state
     useSessionStore.setState((state) => {
       const recentSessionIds = state.recentSessionIds.filter((id) => id !== sessionId)

@@ -1819,3 +1819,111 @@ describe('capabilitiesFor helper', () => {
     expect(caps.backgroundTasks).toBe(true)
   })
 })
+
+// ---------------------------------------------------------------------------
+// forkFromMessage — Codex path
+// ---------------------------------------------------------------------------
+
+describe('forkFromMessage (Codex provider)', () => {
+  /**
+   * Set up a Codex session by using setLastSelectedProvider + createNewSession, then
+   * manually patch messages/status so it looks like a live rekeyed Codex session.
+   */
+  function makeCodexSession(
+    routingId: string,
+    messages: ReturnType<typeof makeAssistantMessage>[],
+    cwd = '/codex-proj'
+  ): void {
+    store().setLastSelectedProvider('codex')
+    store().createNewSession(routingId, cwd)
+    useSessionStore.setState((s) => ({
+      sessions: {
+        ...s.sessions,
+        [routingId]: {
+          ...s.sessions[routingId],
+          messages,
+          isHistorical: true,
+          status: makeSessionStatus({ sessionId: routingId + '-threadId' })
+        }
+      }
+    }))
+  }
+
+  it('does NOT call resolveForkAnchor for a Codex session', async () => {
+    const messages = [makeAssistantMessage('hello', { id: 'msg-a' })]
+    makeCodexSession('src-codex', messages)
+    ;(window.api as any).resolveForkAnchor = vi.fn()
+
+    await store().forkFromMessage('src-codex', 'msg-a')
+
+    expect(window.api.resolveForkAnchor).not.toHaveBeenCalled()
+  })
+
+  it('sets forkOrigin.anchorUuid to the source threadId (status.sessionId)', async () => {
+    const messages = [makeAssistantMessage('hello', { id: 'msg-a' })]
+    makeCodexSession('src-codex', messages)
+
+    const newId = await store().forkFromMessage('src-codex', 'msg-a')
+
+    expect(newId).toBeTruthy()
+    const branch = store().sessions[newId!]
+    expect(branch.forkOrigin).toEqual({
+      sourceSessionId: 'src-codex-threadId',
+      anchorUuid: 'src-codex-threadId'
+    })
+  })
+
+  it('seeds the branch with the FULL message history (not sliced)', async () => {
+    const messages = [
+      makeAssistantMessage('first', { id: 'msg-1' }),
+      makeChatMessage({ id: 'u2' }),
+      makeAssistantMessage('second', { id: 'msg-2' })
+    ]
+    makeCodexSession('src-codex', messages)
+
+    const newId = await store().forkFromMessage('src-codex', 'msg-1')
+
+    expect(newId).toBeTruthy()
+    const branch = store().sessions[newId!]
+    // All three messages, not just up to msg-1
+    expect(branch.messages.map((m) => m.id)).toEqual(['msg-1', 'u2', 'msg-2'])
+  })
+
+  it('deep-copies messages so branch and source do not alias', async () => {
+    const messages = [makeAssistantMessage('only', { id: 'msg-1' })]
+    makeCodexSession('src-codex', messages)
+
+    const newId = await store().forkFromMessage('src-codex', 'msg-1')
+    const branch = store().sessions[newId!]
+    expect(branch.messages[0]).not.toBe(store().sessions['src-codex'].messages[0])
+    expect(branch.messages[0].content).not.toBe(store().sessions['src-codex'].messages[0].content)
+  })
+
+  it('sets selectedProvider to codex on the branch', async () => {
+    const messages = [makeAssistantMessage('hello', { id: 'msg-a' })]
+    makeCodexSession('src-codex', messages)
+
+    const newId = await store().forkFromMessage('src-codex', 'msg-a')
+    expect(newId).toBeTruthy()
+    expect(store().sessions[newId!].selectedProvider).toBe('codex')
+  })
+
+  it('seeds status.provider and capabilities for codex on the branch', async () => {
+    const messages = [makeAssistantMessage('hello', { id: 'msg-a' })]
+    makeCodexSession('src-codex', messages)
+
+    const newId = await store().forkFromMessage('src-codex', 'msg-a')
+    expect(newId).toBeTruthy()
+    const branch = store().sessions[newId!]
+    expect(branch.status.provider).toBe('codex')
+    expect(branch.status.capabilities).toBe(CODEX_CAPABILITIES)
+  })
+
+  it('switches active session to the new branch', async () => {
+    const messages = [makeAssistantMessage('hello', { id: 'msg-a' })]
+    makeCodexSession('src-codex', messages)
+
+    const newId = await store().forkFromMessage('src-codex', 'msg-a')
+    expect(store().activeSessionId).toBe(newId)
+  })
+})

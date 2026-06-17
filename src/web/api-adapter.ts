@@ -185,6 +185,13 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       unwrap('session:delete-session', sessionId, projectKey),
     deleteProject: (projectKey) => unwrap('session:delete-project', projectKey),
 
+    // Codex session delete — mirrors the desktop safeHandler envelope.
+    deleteCodexSession: (sessionId) => unwrap('session:delete-codex-session', sessionId),
+    // Codex watch needs a BrowserWindow and isn't tunnelled via remote-handlers —
+    // desktop-only no-ops on the web client (v1).
+    watchCodexSession: (_routingId, _sessionId, _cwd) => Promise.resolve(),
+    unwatchCodexSession: (_routingId) => Promise.resolve(),
+
     // Routed session events
     onSessionCreated: on('session:created') as ClaudeAPI['onSessionCreated'],
     onUserMessage: on('session:user-message') as ClaudeAPI['onUserMessage'],
@@ -215,6 +222,7 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     onAuthSource: on('session:auth-source') as ClaudeAPI['onAuthSource'],
     onStatusLine: on('session:status-line') as ClaudeAPI['onStatusLine'],
     onMcpServers: on('session:mcp-servers') as ClaudeAPI['onMcpServers'],
+    onPlanSteps: on('session:plan') as ClaudeAPI['onPlanSteps'],
 
     // Non-routed events
     onMaximizeChange: on('window:maximized-change') as ClaudeAPI['onMaximizeChange'],

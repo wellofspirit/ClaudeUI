@@ -19,6 +19,7 @@ import {
   mapTokenUsageUpdated,
   mapTurnCompleted,
   mapErrorNotification,
+  mapPlanUpdated,
   type CodexAssemblyState,
 } from '../mapCodexEvent'
 
@@ -492,5 +493,114 @@ describe('mapErrorNotification', () => {
     )
     expect(result.alertKind).toBe('error')
     expect(result.alertText).toBe('Fatal error')
+  })
+})
+
+describe('mapPlanUpdated', () => {
+  let state: CodexAssemblyState
+
+  beforeEach(() => {
+    state = makeAssemblyState()
+  })
+
+  it('maps a full snapshot with all statuses correctly', () => {
+    const result = mapPlanUpdated(
+      {
+        plan: [
+          { step: 'Analyse codebase', status: 'completed' },
+          { step: 'Write tests', status: 'inProgress' },
+          { step: 'Open PR', status: 'pending' },
+        ],
+        threadId: THREAD_ID,
+        turnId: TURN_ID,
+      },
+      state
+    )
+    expect(result.plan).toHaveLength(3)
+    expect(result.plan![0]).toEqual({ content: 'Analyse codebase', status: 'completed', activeForm: 'Analyse codebase' })
+    expect(result.plan![1]).toEqual({ content: 'Write tests', status: 'in_progress', activeForm: 'Write tests' })
+    expect(result.plan![2]).toEqual({ content: 'Open PR', status: 'pending', activeForm: 'Open PR' })
+  })
+
+  it('converts inProgress (camelCase) → in_progress (snake_case)', () => {
+    const result = mapPlanUpdated(
+      { plan: [{ step: 'Doing work', status: 'inProgress' }], threadId: THREAD_ID, turnId: TURN_ID },
+      state
+    )
+    expect(result.plan![0].status).toBe('in_progress')
+  })
+
+  it('passes through pending status unchanged', () => {
+    const result = mapPlanUpdated(
+      { plan: [{ step: 'Not started', status: 'pending' }], threadId: THREAD_ID, turnId: TURN_ID },
+      state
+    )
+    expect(result.plan![0].status).toBe('pending')
+  })
+
+  it('passes through completed status unchanged', () => {
+    const result = mapPlanUpdated(
+      { plan: [{ step: 'Done', status: 'completed' }], threadId: THREAD_ID, turnId: TURN_ID },
+      state
+    )
+    expect(result.plan![0].status).toBe('completed')
+  })
+
+  it('sets content and activeForm to the step text', () => {
+    const result = mapPlanUpdated(
+      { plan: [{ step: 'My step text', status: 'pending' }], threadId: THREAD_ID, turnId: TURN_ID },
+      state
+    )
+    expect(result.plan![0].content).toBe('My step text')
+    expect(result.plan![0].activeForm).toBe('My step text')
+  })
+
+  it('returns an empty array when plan is empty', () => {
+    const result = mapPlanUpdated(
+      { plan: [], threadId: THREAD_ID, turnId: TURN_ID },
+      state
+    )
+    expect(result.plan).toEqual([])
+  })
+
+  it('returns an empty array when plan is missing/undefined', () => {
+    const result = mapPlanUpdated(
+      { plan: undefined as never, threadId: THREAD_ID, turnId: TURN_ID },
+      state
+    )
+    expect(result.plan).toEqual([])
+  })
+
+  it('is a full snapshot — maps all steps on each call (not a delta)', () => {
+    const firstCall = mapPlanUpdated(
+      { plan: [{ step: 'Step A', status: 'completed' }], threadId: THREAD_ID, turnId: TURN_ID },
+      state
+    )
+    const secondCall = mapPlanUpdated(
+      {
+        plan: [
+          { step: 'Step A', status: 'completed' },
+          { step: 'Step B', status: 'inProgress' },
+        ],
+        threadId: THREAD_ID,
+        turnId: TURN_ID,
+      },
+      state
+    )
+    expect(firstCall.plan).toHaveLength(1)
+    expect(secondCall.plan).toHaveLength(2)
+    expect(secondCall.plan![1].status).toBe('in_progress')
+  })
+
+  it('does not emit stream, message, toolResult, statusLine, or result', () => {
+    const result = mapPlanUpdated(
+      { plan: [{ step: 'A step', status: 'pending' }], threadId: THREAD_ID, turnId: TURN_ID },
+      state
+    )
+    expect(result.stream).toBeUndefined()
+    expect(result.message).toBeUndefined()
+    expect(result.toolResult).toBeUndefined()
+    expect(result.statusLine).toBeUndefined()
+    expect(result.result).toBeUndefined()
   })
 })

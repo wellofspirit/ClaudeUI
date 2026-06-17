@@ -361,31 +361,52 @@ export function Sidebar({
   const handleToggleWatch = (info: SessionInfo): void => {
     const routingId = info.sessionId
     const session = useSessionStore.getState().sessions[routingId]
+    const isCodex = info.provider === 'codex'
     if (session?.isWatching) {
-      window.api.unwatchSession(routingId)
+      if (isCodex) {
+        window.api.unwatchCodexSession(routingId)
+      } else {
+        window.api.unwatchSession(routingId)
+      }
       setWatching(routingId, false)
     } else {
-      // Need to load historical session first if not in memory
-      if (!session) {
-        window.api
-          .loadSessionHistory(info.sessionId, info.projectKey)
-          .then(({ messages, taskNotifications, customTitle: ct, statusLine: sl, warnings }) => {
-            loadHistoricalSession(
-              routingId,
-              messages,
-              info.cwd,
-              taskNotifications,
-              {},
-              sl,
-              warnings
-            )
-            if (ct) setCustomTitle(routingId, ct)
-            window.api.watchSession(routingId, info.sessionId, info.projectKey)
-            setWatching(routingId, true)
-          })
+      if (isCodex) {
+        // Codex: load via app-server thread/read, then start watching the rollout file
+        if (!session) {
+          window.api
+            .loadCodexHistory(info.sessionId, info.cwd)
+            .then(({ messages }) => {
+              loadHistoricalSession(routingId, messages, info.cwd, [], {}, null, [])
+              window.api.watchCodexSession(routingId, info.sessionId, info.cwd)
+              setWatching(routingId, true)
+            })
+        } else {
+          window.api.watchCodexSession(routingId, info.sessionId, info.cwd)
+          setWatching(routingId, true)
+        }
       } else {
-        window.api.watchSession(routingId, info.sessionId, info.projectKey)
-        setWatching(routingId, true)
+        // Claude: load JSONL history, then watch the .jsonl file
+        if (!session) {
+          window.api
+            .loadSessionHistory(info.sessionId, info.projectKey)
+            .then(({ messages, taskNotifications, customTitle: ct, statusLine: sl, warnings }) => {
+              loadHistoricalSession(
+                routingId,
+                messages,
+                info.cwd,
+                taskNotifications,
+                {},
+                sl,
+                warnings
+              )
+              if (ct) setCustomTitle(routingId, ct)
+              window.api.watchSession(routingId, info.sessionId, info.projectKey)
+              setWatching(routingId, true)
+            })
+        } else {
+          window.api.watchSession(routingId, info.sessionId, info.projectKey)
+          setWatching(routingId, true)
+        }
       }
     }
   }
@@ -501,12 +522,15 @@ export function Sidebar({
   )
 
   const handleDeleteSessionRequest = useCallback((info: SessionInfo) => {
-    if (!info.projectKey) return
+    // Codex sessions don't use ~/.claude/projects/ paths — allow them through
+    // even when projectKey is empty. Claude sessions still require a projectKey.
+    if (!info.projectKey && info.provider !== 'codex') return
     setDeleteTarget({
       kind: 'session',
       sessionId: info.sessionId,
       projectKey: info.projectKey,
-      title: info.title
+      title: info.title,
+      provider: info.provider
     })
   }, [])
 
@@ -523,7 +547,13 @@ export function Sidebar({
   const confirmDelete = useCallback(async (): Promise<void> => {
     if (!deleteTarget) return
     if (deleteTarget.kind === 'session') {
-      await deleteSessionAction(deleteTarget.sessionId, deleteTarget.projectKey)
+      // Store action is provider-aware: routes to the Codex or Claude delete IPC
+      // and performs the same in-memory + persisted-config scrub for both.
+      await deleteSessionAction(
+        deleteTarget.sessionId,
+        deleteTarget.projectKey,
+        deleteTarget.provider
+      )
     } else {
       await deleteProjectAction(deleteTarget.projectKey)
     }

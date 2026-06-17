@@ -1,7 +1,7 @@
 import { memo, useState } from 'react'
 import type { ChatMessage, ContentBlock, PendingApproval } from '../../../../shared/types'
 import { isAgentTool } from '../../../../shared/types'
-import { useSessionStore } from '../../stores/session-store'
+import { useSessionStore, useActiveSession } from '../../stores/session-store'
 import { MarkdownRenderer } from './MarkdownRenderer'
 import { ToolCallBlock } from './ToolCallBlock'
 import { ExitPlanModeCard } from './ExitPlanModeCard'
@@ -29,6 +29,8 @@ export const MessageBubble = memo(function MessageBubble({
   // Hooks must run unconditionally — declared before the role-based early returns.
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const forkFromMessage = useSessionStore((s) => s.forkFromMessage)
+  const forkCapability = useActiveSession((s) => s.status.capabilities.fork)
+  const isCodexSession = useActiveSession((s) => s.selectedProvider === 'codex')
   const [forking, setForking] = useState(false)
 
   const handleFork = async (): Promise<void> => {
@@ -292,13 +294,19 @@ export const MessageBubble = memo(function MessageBubble({
         )
       })}
       {/* Branch off: hidden until the message is hovered. Spins a new session
-          seeded with everything up to and including this assistant turn. */}
-      {activeSessionId && (
+          seeded with everything up to and including this assistant turn.
+          Gated on capabilities.fork so providers that don't support forking
+          never show this button. */}
+      {activeSessionId && forkCapability && (
         <div className="opacity-0 group-hover/msg:opacity-100 focus-within:opacity-100 transition-opacity">
           <button
             onClick={handleFork}
             disabled={forking}
-            title="Fork a new session from this point"
+            title={
+              isCodexSession
+                ? 'Fork this conversation into a new session'
+                : 'Fork a new session from this point'
+            }
             className="flex items-center gap-1 text-[10px] text-text-muted hover:text-text-primary transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-default"
           >
             <svg

@@ -130,6 +130,7 @@ const api: ClaudeAPI = {
   onSteerConsumed: onEvent('session:steer-consumed'),
   onSkills: onEvent('session:skills'),
   onStatusLine: onEvent('session:status-line'),
+  onPlanSteps: onEvent('session:plan'),
   onMcpServers: onEvent('session:mcp-servers'),
 
   // Non-routed events (no routingId prefix)
@@ -191,6 +192,12 @@ const api: ClaudeAPI = {
   watchSession: (routingId: string, sessionId: string, projectKey: string) =>
     ipcRenderer.invoke('session:watch-session', routingId, sessionId, projectKey),
   unwatchSession: (routingId: string) => ipcRenderer.invoke('session:unwatch-session', routingId),
+  deleteCodexSession: (sessionId: string) =>
+    unwrap<void>('session:delete-codex-session', sessionId),
+  watchCodexSession: (routingId: string, sessionId: string, cwd: string) =>
+    ipcRenderer.invoke('session:watch-codex-session', routingId, sessionId, cwd),
+  unwatchCodexSession: (routingId: string) =>
+    ipcRenderer.invoke('session:unwatch-codex-session', routingId),
   // Terminal (PTY) operations
   createTerminal: (cwd: string) => ipcRenderer.invoke('terminal:create', cwd),
   writeTerminal: (id: string, data: string) => ipcRenderer.invoke('terminal:write', id, data),

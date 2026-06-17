@@ -163,7 +163,7 @@ export interface PluginStreamEvent extends PluginSessionEvent {
   text: string
 }
 
-export type ApprovalDecision = 'allow' | 'deny'
+export type ApprovalDecision = 'allow' | 'allowForSession' | 'deny'
 
 export type PermissionMode = 'default' | 'acceptEdits' | 'plan' | 'auto' | 'localAuto'
 
@@ -548,6 +548,12 @@ interface SessionAPI {
   getSessionLogPath(routingId: string): Promise<string | null>
   watchSession(routingId: string, sessionId: string, projectKey: string): Promise<void>
   unwatchSession(routingId: string): Promise<void>
+  /** Permanently delete a Codex session's rollout-*.jsonl from CODEX_HOME/sessions/ */
+  deleteCodexSession(sessionId: string): Promise<void>
+  /** Start watching a Codex session's rollout file for live reload */
+  watchCodexSession(routingId: string, sessionId: string, cwd: string): Promise<void>
+  /** Stop watching a Codex session's rollout file */
+  unwatchCodexSession(routingId: string): Promise<void>
   onWatchUpdate(cb: (data: WatchUpdate) => void): () => void
   onDirectoriesChanged(cb: () => void): () => void
   onSlashCommands(cb: (routingId: string, commands: SlashCommandInfo[]) => void): () => void
@@ -555,15 +561,16 @@ interface SessionAPI {
   /** cli.js auth source from session init: 'oauth' | 'api_key' | 'none' (ADR-014). */
   onAuthSource(cb: (routingId: string, source: string) => void): () => void
   onStatusLine(cb: (routingId: string, data: StatusLineData) => void): () => void
+  onPlanSteps(cb: (routingId: string, todos: TodoItem[]) => void): () => void
   onSettingsChanged(cb: (settings: Record<string, unknown>) => void): () => void
   onSessionConfigChanged(cb: (config: UISessionConfig) => void): () => void
   loadSettings(): Promise<Record<string, unknown>>
   saveSettings(settings: Record<string, unknown>): Promise<void>
   loadSessionConfig(): Promise<UISessionConfig>
   saveSessionConfig(config: UISessionConfig): Promise<void>
-  /** Permanently delete a session's JSONL + subagent directory from disk */
+  /** Permanently delete a Claude session's JSONL + subagent directory from disk */
   deleteSession(sessionId: string, projectKey: string): Promise<void>
-  /** Permanently delete an entire project directory (all sessions) from disk */
+  /** Permanently delete an entire Claude project directory (all sessions) from disk */
   deleteProject(projectKey: string): Promise<void>
   loadSlashCommands(): Promise<SlashCommandInfo[]>
   saveSlashCommands(commands: SlashCommandInfo[]): Promise<void>

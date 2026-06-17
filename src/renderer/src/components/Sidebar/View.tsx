@@ -16,7 +16,13 @@ import { DeleteConfirmModal } from './DeleteConfirmModal'
 import { ProviderToggle } from '../shared/ProviderToggle'
 
 export type DeleteTarget =
-  | { kind: 'session'; sessionId: string; projectKey: string; title: string }
+  | {
+      kind: 'session'
+      sessionId: string
+      projectKey: string
+      title: string
+      provider?: import('../../../../shared/types').ProviderId
+    }
   | { kind: 'project'; projectKey: string; folderName: string; sessionCount: number }
 
 export interface SidebarViewProps {

@@ -74,6 +74,8 @@ import type { ISession } from '../providers/ISession'
 import { loadCodexHistory } from '../codex/CodexHistory'
 import { loadCodexModels } from '../codex/codexModels'
 import { getCodexStatus } from '../codex/codexStatus'
+import { deleteCodexSession } from '../codex/codexSessions'
+import { watchCodexSession, unwatchCodexSession } from '../codex/codex-watcher'
 
 /** Type guard: narrows ISession to ClaudeSession when provider === 'claude'. */
 function isClaudeSession(session: ISession): session is ClaudeSession {
@@ -278,6 +280,9 @@ const SESSION_IPC_CHANNELS = [
   'session:load-background-output',
   'session:watch-session',
   'session:unwatch-session',
+  'session:delete-codex-session',
+  'session:watch-codex-session',
+  'session:unwatch-codex-session',
   'config:load-settings',
   'config:save-settings',
   'config:load-sessions',
@@ -1097,6 +1102,24 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
 
   ipcMain.handle('session:unwatch-session', (_e, routingId: string) => {
     unwatchSession(routingId)
+  })
+
+  ipcMain.handle(
+    'session:delete-codex-session',
+    safeHandler(async (_e: unknown, sessionId: string) => {
+      await deleteCodexSession(sessionId)
+    })
+  )
+
+  ipcMain.handle(
+    'session:watch-codex-session',
+    (_e, routingId: string, sessionId: string, cwd: string) => {
+      return watchCodexSession(routingId, sessionId, cwd, win)
+    }
+  )
+
+  ipcMain.handle('session:unwatch-codex-session', (_e, routingId: string) => {
+    unwatchCodexSession(routingId)
   })
 
   // UI config persistence (~/.claude/ui/)

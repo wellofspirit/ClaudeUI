@@ -85,6 +85,10 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     listDirectories: () => ipcRenderer.invoke('session:list-directories'),
     loadSessionHistory: (sessionId, projectKey) =>
       ipcRenderer.invoke('session:load-history', sessionId, projectKey),
+    loadCodexHistory: (threadId, cwd) =>
+      ipcRenderer.invoke('session:load-codex-history', threadId, cwd),
+    getCodexModels: (cwd) => ipcRenderer.invoke('session:get-codex-models', cwd),
+    getCodexStatus: (cwd) => ipcRenderer.invoke('session:get-codex-status', cwd),
     loadSubagentHistory: (sessionId, projectKey, agentId) =>
       ipcRenderer.invoke('session:load-subagent-history', sessionId, projectKey, agentId),
     buildSubagentFileMap: (sessionId, projectKey, taskPrompts) =>
@@ -120,6 +124,7 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     onAuthSource: onEvent('session:auth-source'),
     onStatusLine: onEvent('session:status-line'),
     onMcpServers: onEvent('session:mcp-servers'),
+    onPlanSteps: onEvent('session:plan'),
 
     // Non-routed events
     onMaximizeChange: onEvent('window:maximized-change'),
@@ -173,6 +178,12 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     watchSession: (routingId, sessionId, projectKey) =>
       ipcRenderer.invoke('session:watch-session', routingId, sessionId, projectKey),
     unwatchSession: (routingId) => ipcRenderer.invoke('session:unwatch-session', routingId),
+    deleteCodexSession: (sessionId) =>
+      ipcRenderer.invoke('session:delete-codex-session', sessionId),
+    watchCodexSession: (routingId, sessionId, cwd) =>
+      ipcRenderer.invoke('session:watch-codex-session', routingId, sessionId, cwd),
+    unwatchCodexSession: (routingId) =>
+      ipcRenderer.invoke('session:unwatch-codex-session', routingId),
 
     // Terminal
     createTerminal: (cwd) => ipcRenderer.invoke('terminal:create', cwd),

@@ -16,7 +16,12 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import * as os from 'node:os'
-import { listCodexSessions, setCodexCacheFileForTesting } from '../codexSessions'
+import {
+  listCodexSessions,
+  setCodexCacheFileForTesting,
+  resolveCodexRolloutPath,
+  deleteCodexSession
+} from '../codexSessions'
 
 // ─── Inline the merge logic so we can test it without spawning codex ──────────
 //
@@ -571,5 +576,190 @@ describe('listCodexSessions (end-to-end, temp CODEX_HOME)', () => {
     expect(warm[0].sessionId).toBe('thread-warm')
     expect(warm[0].title).toBe('cold then warm')
     expect(warm[0].cwd).toBe('/work/warm')
+  })
+})
+
+// ─── Tests: resolveCodexRolloutPath ──────────────────────────────────────────
+
+describe('resolveCodexRolloutPath (temp CODEX_HOME)', () => {
+  let codexHome: string
+  let prevCodexHome: string | undefined
+
+  beforeEach(() => {
+    codexHome = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-resolve-'))
+    prevCodexHome = process.env.CODEX_HOME
+    process.env.CODEX_HOME = codexHome
+    setCodexCacheFileForTesting(path.join(codexHome, 'cache.json'))
+  })
+
+  afterEach(() => {
+    if (prevCodexHome === undefined) delete process.env.CODEX_HOME
+    else process.env.CODEX_HOME = prevCodexHome
+    setCodexCacheFileForTesting(null)
+    fs.rmSync(codexHome, { recursive: true, force: true })
+  })
+
+  function writeRollout(relDay: string, fileName: string, sessionId: string, cwd: string): string {
+    const dir = path.join(codexHome, 'sessions', relDay)
+    fs.mkdirSync(dir, { recursive: true })
+    const metaLine = JSON.stringify({
+      type: 'session_meta',
+      payload: { id: sessionId, timestamp: '2026-01-15T10:30:00.000Z', cwd }
+    })
+    const filePath = path.join(dir, fileName)
+    fs.writeFileSync(filePath, metaLine + '\n', 'utf-8')
+    return filePath
+  }
+
+  it('returns the rollout path when resolved via a fresh scan (no cache)', async () => {
+    const expected = writeRollout('2026/01/15', 'rollout-r1.jsonl', 'thread-r1', '/proj/r1')
+
+    const result = await resolveCodexRolloutPath('thread-r1')
+    expect(result).toBe(expected)
+  })
+
+  it('resolves correctly from the disk cache on a second call', async () => {
+    // Populate the cache by running listCodexSessions first.
+    writeRollout('2026/01/15', 'rollout-cached.jsonl', 'thread-c1', '/proj/c1')
+    await listCodexSessions()
+
+    // Second call should hit the cache (no additional scan needed).
+    const result = await resolveCodexRolloutPath('thread-c1')
+    expect(result).not.toBeNull()
+    expect(result).toContain('rollout-cached.jsonl')
+  })
+
+  it('returns null when the sessionId does not exist', async () => {
+    writeRollout('2026/01/15', 'rollout-other.jsonl', 'thread-other', '/proj/other')
+
+    const result = await resolveCodexRolloutPath('thread-nonexistent')
+    expect(result).toBeNull()
+  })
+
+  it('returns null when CODEX_HOME/sessions does not exist', async () => {
+    // sessions/ dir was never created in this temp home
+    const result = await resolveCodexRolloutPath('thread-any')
+    expect(result).toBeNull()
+  })
+
+  it('falls back to a fresh scan when the cached path no longer exists on disk', async () => {
+    const filePath = writeRollout('2026/01/16', 'rollout-gone.jsonl', 'thread-gone', '/proj/gone')
+    // Prime the cache
+    await listCodexSessions()
+    // Delete the file externally (simulates an out-of-band removal)
+    fs.unlinkSync(filePath)
+
+    // The cache hit will fail the fs.access check; fresh scan also finds nothing.
+    const result = await resolveCodexRolloutPath('thread-gone')
+    expect(result).toBeNull()
+  })
+})
+
+// ─── Tests: deleteCodexSession ────────────────────────────────────────────────
+
+describe('deleteCodexSession (temp CODEX_HOME)', () => {
+  let codexHome: string
+  let prevCodexHome: string | undefined
+
+  beforeEach(() => {
+    codexHome = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-delete-'))
+    prevCodexHome = process.env.CODEX_HOME
+    process.env.CODEX_HOME = codexHome
+    setCodexCacheFileForTesting(path.join(codexHome, 'cache.json'))
+  })
+
+  afterEach(() => {
+    if (prevCodexHome === undefined) delete process.env.CODEX_HOME
+    else process.env.CODEX_HOME = prevCodexHome
+    setCodexCacheFileForTesting(null)
+    fs.rmSync(codexHome, { recursive: true, force: true })
+  })
+
+  function writeRollout(relDay: string, fileName: string, sessionId: string, cwd: string): string {
+    const dir = path.join(codexHome, 'sessions', relDay)
+    fs.mkdirSync(dir, { recursive: true })
+    const metaLine = JSON.stringify({
+      type: 'session_meta',
+      payload: { id: sessionId, timestamp: '2026-01-15T10:30:00.000Z', cwd }
+    })
+    const filePath = path.join(dir, fileName)
+    fs.writeFileSync(filePath, metaLine + '\n', 'utf-8')
+    return filePath
+  }
+
+  it('deletes the rollout file and it no longer exists on disk', async () => {
+    const filePath = writeRollout('2026/01/15', 'rollout-del.jsonl', 'thread-del', '/proj/del')
+    expect(fs.existsSync(filePath)).toBe(true)
+
+    await deleteCodexSession('thread-del')
+
+    expect(fs.existsSync(filePath)).toBe(false)
+  })
+
+  it('deletes the correct file when multiple rollout files exist', async () => {
+    const keep = writeRollout('2026/01/15', 'rollout-keep.jsonl', 'thread-keep', '/proj/keep')
+    const remove = writeRollout('2026/01/16', 'rollout-remove.jsonl', 'thread-remove', '/proj/rm')
+
+    await deleteCodexSession('thread-remove')
+
+    expect(fs.existsSync(remove)).toBe(false)
+    expect(fs.existsSync(keep)).toBe(true)
+  })
+
+  it('no-ops gracefully when the sessionId is not found', async () => {
+    // Should resolve without throwing
+    await expect(deleteCodexSession('thread-nonexistent')).resolves.toBeUndefined()
+  })
+
+  it('invalidates the cache entry after deletion', async () => {
+    writeRollout('2026/01/15', 'rollout-inv.jsonl', 'thread-inv', '/proj/inv')
+    // Prime the cache
+    await listCodexSessions()
+
+    await deleteCodexSession('thread-inv')
+
+    // After deletion, resolveCodexRolloutPath should return null (no stale cache hit)
+    const resolved = await resolveCodexRolloutPath('thread-inv')
+    expect(resolved).toBeNull()
+  })
+
+  it('throws when sessionId is empty', async () => {
+    await expect(deleteCodexSession('')).rejects.toThrow('sessionId is required')
+  })
+
+  it('rejects paths outside CODEX_HOME/sessions (path-traversal guard)', async () => {
+    // Craft a fake cache entry pointing to a file outside sessions/
+    const outsidePath = path.join(codexHome, 'outside-sessions.jsonl')
+    fs.writeFileSync(
+      outsidePath,
+      JSON.stringify({
+        type: 'session_meta',
+        payload: { id: 'thread-evil', timestamp: '2026-01-01T00:00:00Z', cwd: '/evil' }
+      }) + '\n',
+      'utf-8'
+    )
+    // Manually inject a poisoned cache entry.
+    // We write the cache file directly to bypass the normal scan path.
+    const cacheFile = path.join(codexHome, 'cache.json')
+    fs.writeFileSync(
+      cacheFile,
+      JSON.stringify({
+        version: 1,
+        entries: {
+          [outsidePath]: {
+            mtime: Date.now(),
+            sessionId: 'thread-evil',
+            cwd: '/evil',
+            timestamp: Date.now(),
+            title: 'evil'
+          }
+        }
+      }),
+      'utf-8'
+    )
+
+    await expect(deleteCodexSession('thread-evil')).rejects.toThrow('Path traversal blocked')
+    // The outside file must still exist — we didn't touch it
+    expect(fs.existsSync(outsidePath)).toBe(true)
   })
 })

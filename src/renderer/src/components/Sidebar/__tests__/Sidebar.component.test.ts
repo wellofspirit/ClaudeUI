@@ -55,6 +55,18 @@ function makeSessionInfo(id: string, title = 'Session title'): SessionInfo {
   }
 }
 
+function makeCodexSessionInfo(id: string, title = 'Codex session'): SessionInfo {
+  return {
+    sessionId: id,
+    cwd: CWD,
+    projectKey: '', // Codex sessions have no Claude projectKey
+    title,
+    timestamp: Date.now(),
+    lastActivityAt: Date.now(),
+    provider: 'codex'
+  }
+}
+
 function makeDirectoryGroup(sessions: SessionInfo[]): DirectoryGroup {
   return {
     cwd: CWD,
@@ -107,6 +119,12 @@ describe('Sidebar FC', () => {
     app.bridge.ipcMain.handle('session:generate-title', async () => 'auto-title')
     app.bridge.ipcMain.handle('session:delete-session' as any, async () => undefined)
     app.bridge.ipcMain.handle('session:delete-project' as any, async () => undefined)
+    app.bridge.ipcMain.handle('session:delete-codex-session' as any, async () => undefined)
+    app.bridge.ipcMain.handle('session:watch-codex-session' as any, async () => undefined)
+    app.bridge.ipcMain.handle('session:unwatch-codex-session' as any, async () => undefined)
+    app.bridge.ipcMain.handle('session:load-codex-history' as any, async () => ({
+      messages: []
+    }))
 
     useSessionStore.setState({
       activeSessionId: null,
@@ -160,7 +178,8 @@ describe('Sidebar FC', () => {
     })
 
     await act(async () => {
-      await viewProps.onNewSessionDblClick()
+      viewProps.onNewSessionDblClick()
+      await new Promise((r) => setTimeout(r, 0))
     })
 
     const sessions = Object.values(useSessionStore.getState().sessions)
@@ -192,7 +211,8 @@ describe('Sidebar FC', () => {
     })
 
     await act(async () => {
-      await viewProps.onClickSession(makeSessionInfo('already-loaded'))
+      viewProps.onClickSession(makeSessionInfo('already-loaded'))
+      await new Promise((r) => setTimeout(r, 0))
     })
 
     expect(loadHistoryCalls).toBe(0)
@@ -221,7 +241,8 @@ describe('Sidebar FC', () => {
     })
 
     await act(async () => {
-      await viewProps.onClickSession(makeSessionInfo('disk-sess'))
+      viewProps.onClickSession(makeSessionInfo('disk-sess'))
+      await new Promise((r) => setTimeout(r, 0))
     })
 
     expect(historyCalls).toHaveLength(1)
@@ -558,6 +579,175 @@ describe('Sidebar FC', () => {
     expect(useSessionStore.getState().recentSessionIds).not.toContain('wt-sess')
     expect(useSessionStore.getState().worktreeInfoMap['wt-sess']).toBeDefined()
     expect(viewProps.cleanupWorktree).toBeNull()
+  })
+
+  // -------------------------------------------------------------------------
+  // Codex provider: delete routes to deleteCodexSession IPC
+  // -------------------------------------------------------------------------
+
+  it('Codex session delete calls deleteCodexSession IPC, not deleteSession', async () => {
+    const codexDeleteCalls: unknown[][] = []
+    const claudeDeleteCalls: unknown[][] = []
+    app.bridge.ipcMain.handle('session:delete-codex-session' as any, async (...args) => {
+      codexDeleteCalls.push(args)
+    })
+    app.bridge.ipcMain.handle('session:delete-session' as any, async (...args) => {
+      claudeDeleteCalls.push(args)
+    })
+
+    await act(async () => {
+      await renderFC()
+    })
+
+    const codexInfo = makeCodexSessionInfo('codex-del')
+    act(() => {
+      viewProps.onDeleteSession(codexInfo)
+    })
+    expect(viewProps.deleteTarget?.kind).toBe('session')
+    expect((viewProps.deleteTarget as any)?.provider).toBe('codex')
+
+    await act(async () => {
+      await viewProps.onConfirmDelete()
+    })
+
+    expect(codexDeleteCalls).toHaveLength(1)
+    expect(codexDeleteCalls[0][1]).toBe('codex-del')
+    expect(claudeDeleteCalls).toHaveLength(0)
+  })
+
+  it('Claude session delete still calls deleteSession IPC (unchanged path)', async () => {
+    const claudeDeleteCalls: unknown[][] = []
+    const codexDeleteCalls: unknown[][] = []
+    app.bridge.ipcMain.handle('session:delete-session' as any, async (...args) => {
+      claudeDeleteCalls.push(args)
+    })
+    app.bridge.ipcMain.handle('session:delete-codex-session' as any, async (...args) => {
+      codexDeleteCalls.push(args)
+    })
+
+    await act(async () => {
+      await renderFC()
+    })
+
+    act(() => {
+      viewProps.onDeleteSession(makeSessionInfo('claude-del'))
+    })
+    expect(viewProps.deleteTarget?.kind).toBe('session')
+
+    await act(async () => {
+      await viewProps.onConfirmDelete()
+    })
+
+    expect(claudeDeleteCalls).toHaveLength(1)
+    expect(claudeDeleteCalls[0][1]).toBe('claude-del')
+    expect(codexDeleteCalls).toHaveLength(0)
+  })
+
+  it('Codex session delete request is NOT blocked when projectKey is empty', async () => {
+    await act(async () => {
+      await renderFC()
+    })
+
+    const codexInfo = makeCodexSessionInfo('codex-no-key')
+    act(() => {
+      viewProps.onDeleteSession(codexInfo)
+    })
+
+    // deleteTarget should be set even though projectKey is ''
+    expect(viewProps.deleteTarget?.kind).toBe('session')
+    expect((viewProps.deleteTarget as any)?.sessionId).toBe('codex-no-key')
+  })
+
+  // -------------------------------------------------------------------------
+  // Codex provider: watch routes to watchCodexSession / unwatchCodexSession IPC
+  // -------------------------------------------------------------------------
+
+  it('Codex watch (session in memory) calls watchCodexSession IPC', async () => {
+    useSessionStore.getState().createNewSession('codex-watch', CWD)
+    // Mark it as a Codex provider in the store
+    useSessionStore.setState((s) => ({
+      sessionProviders: { ...s.sessionProviders, 'codex-watch': 'codex' }
+    }))
+
+    const watchCodexCalls: unknown[][] = []
+    const watchClaudeCalls: unknown[][] = []
+    app.bridge.ipcMain.handle('session:watch-codex-session' as any, async (...args) => {
+      watchCodexCalls.push(args)
+    })
+    app.bridge.ipcMain.handle('session:watch-session', async (...args) => {
+      watchClaudeCalls.push(args)
+    })
+
+    await act(async () => {
+      await renderFC()
+    })
+
+    act(() => {
+      viewProps.onToggleWatch(makeCodexSessionInfo('codex-watch'))
+    })
+
+    expect(watchCodexCalls).toHaveLength(1)
+    expect(watchCodexCalls[0][1]).toBe('codex-watch') // routingId
+    expect(watchCodexCalls[0][2]).toBe('codex-watch') // sessionId
+    expect(watchCodexCalls[0][3]).toBe(CWD)           // cwd
+    expect(watchClaudeCalls).toHaveLength(0)
+    expect(useSessionStore.getState().sessions['codex-watch'].isWatching).toBe(true)
+  })
+
+  it('Codex unwatch calls unwatchCodexSession IPC', async () => {
+    useSessionStore.getState().createNewSession('codex-unwatch', CWD)
+    useSessionStore.getState().setWatching('codex-unwatch', true)
+
+    const unwatchCodexCalls: unknown[][] = []
+    const unwatchClaudeCalls: unknown[][] = []
+    app.bridge.ipcMain.handle('session:unwatch-codex-session' as any, async (...args) => {
+      unwatchCodexCalls.push(args)
+    })
+    app.bridge.ipcMain.handle('session:unwatch-session', async (...args) => {
+      unwatchClaudeCalls.push(args)
+    })
+
+    await act(async () => {
+      await renderFC()
+    })
+
+    act(() => {
+      viewProps.onToggleWatch(makeCodexSessionInfo('codex-unwatch'))
+    })
+
+    expect(unwatchCodexCalls).toHaveLength(1)
+    expect(unwatchCodexCalls[0][1]).toBe('codex-unwatch')
+    expect(unwatchClaudeCalls).toHaveLength(0)
+    expect(useSessionStore.getState().sessions['codex-unwatch'].isWatching).toBe(false)
+  })
+
+  it('Codex watch (session NOT in memory) loads history via loadCodexHistory then watches', async () => {
+    const historyCalls: unknown[][] = []
+    const watchCalls: unknown[][] = []
+    app.bridge.ipcMain.handle('session:load-codex-history' as any, async (...args) => {
+      historyCalls.push(args)
+      return { messages: [] }
+    })
+    app.bridge.ipcMain.handle('session:watch-codex-session' as any, async (...args) => {
+      watchCalls.push(args)
+    })
+
+    await act(async () => {
+      await renderFC()
+    })
+
+    await act(async () => {
+      viewProps.onToggleWatch(makeCodexSessionInfo('codex-cold'))
+      await new Promise((r) => setTimeout(r, 0))
+      await new Promise((r) => setTimeout(r, 0))
+    })
+
+    expect(historyCalls).toHaveLength(1)
+    expect(historyCalls[0][1]).toBe('codex-cold') // threadId
+    expect(historyCalls[0][2]).toBe(CWD)          // cwd
+    expect(watchCalls).toHaveLength(1)
+    expect(useSessionStore.getState().sessions['codex-cold']).toBeDefined()
+    expect(useSessionStore.getState().sessions['codex-cold'].isWatching).toBe(true)
   })
 
   // -------------------------------------------------------------------------

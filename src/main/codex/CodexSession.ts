@@ -31,6 +31,7 @@ import {
   mapTokenUsageUpdated,
   mapTurnCompleted,
   mapErrorNotification,
+  mapPlanUpdated,
   type CodexAssemblyState,
 } from './mapCodexEvent'
 import type {
@@ -39,6 +40,8 @@ import type {
   V2UserInput,
   CommandExecutionApprovalDecision,
   FileChangeApprovalDecision,
+  PermissionsRequestApprovalResponse,
+  McpServerElicitationRequestResponse,
 } from './protocol/schema'
 
 // ---------------------------------------------------------------------------
@@ -193,6 +196,7 @@ export class CodexSession extends BaseSession {
   private model: string | undefined
   private effort: string | undefined
   private resumeSessionId: string | undefined
+  private forkSession: boolean = false
 
   // Pending approval deferreds: requestId → Deferred<{ decision: string } | { answers: unknown }>
   private pendingApprovals = new Map<string, Deferred<Record<string, unknown>>>()
@@ -214,17 +218,18 @@ export class CodexSession extends BaseSession {
     resumeSessionId?: string,
     permissionMode?: string,
     model?: string,
-    // sandboxConfig, thinkingMode, resumeSessionAt, forkSession — unused by Codex
+    // sandboxConfig, thinkingMode, resumeSessionAt — unused by Codex
     _sandboxConfig?: unknown,
     _thinkingMode?: string,
     _resumeSessionAt?: string,
-    _forkSession?: boolean
+    forkSession?: boolean
   ) {
     super(routingId, win, cwd)
     this.permissionMode = permissionMode ?? 'default'
     this.model = model
     this.effort = effort
     this.resumeSessionId = resumeSessionId
+    this.forkSession = !!forkSession
   }
 
   // ---------------------------------------------------------------------------
@@ -376,7 +381,10 @@ export class CodexSession extends BaseSession {
       // User-input response
       deferred.resolve({ answers })
     } else {
-      deferred.resolve({ decision: decision === 'allow' ? 'accept' : 'decline' })
+      // Pass the raw UI decision through; each handler maps it to its own
+      // Codex response shape (command/file use a decision enum; permissions
+      // use a permissions+scope object).
+      deferred.resolve({ decision })
     }
   }
 
@@ -504,10 +512,23 @@ export class CodexSession extends BaseSession {
       // 2. notify initialized
       client.notify('initialized', undefined)
 
-      // 3. thread/start or thread/resume
+      // 3. thread/fork, thread/start, or thread/resume
       const model = this.codexModel()
 
-      if (this.resumeSessionId) {
+      if (this.forkSession && this.resumeSessionId) {
+        try {
+          const forkResp = await client.request('thread/fork', {
+            threadId: this.resumeSessionId,
+            approvalPolicy: toApprovalPolicy(this.permissionMode),
+            sandbox: toSandboxMode(this.permissionMode),
+            ...(model ? { model } : {}),
+          })
+          threadId = forkResp.thread?.id ?? null
+        } catch (err) {
+          if (!isRecoverableThreadResumeError(err)) throw err
+          // Source thread gone — fall through to a fresh thread/start
+        }
+      } else if (this.resumeSessionId) {
         try {
           const resumeResp = await client.request('thread/resume', {
             threadId: this.resumeSessionId,
@@ -646,9 +667,8 @@ export class CodexSession extends BaseSession {
       }
     })
 
-    // Deferred/no-op handlers
-    client.handleServerNotification('turn/plan/updated', (_params) => {
-      // TODO(follow-up): surface plan steps in the UI
+    client.handleServerNotification('turn/plan/updated', (params) => {
+      emit(mapPlanUpdated(params, this.assemblyState))
     })
 
     client.handleServerNotification('turn/diff/updated', (_params) => {
@@ -663,6 +683,18 @@ export class CodexSession extends BaseSession {
     client.handleServerNotification('guardianWarning', (params) => {
       if (params.message) this.send('session:warning', `[guardian] ${params.message}`)
     })
+  }
+
+  /**
+   * Map the raw UI ApprovalDecision to the Codex command/file decision enum.
+   *   allow            → 'accept'
+   *   allowForSession  → 'acceptForSession'
+   *   anything else    → 'decline'  (covers 'deny' and the dispose-time 'decline')
+   */
+  private mapToCodexCommandDecision(raw: string | undefined): 'accept' | 'acceptForSession' | 'decline' {
+    if (raw === 'allow') return 'accept'
+    if (raw === 'allowForSession') return 'acceptForSession'
+    return 'decline'
   }
 
   private wireServerRequestHandlers(client: CodexAppServerClient): void {
@@ -685,7 +717,7 @@ export class CodexSession extends BaseSession {
       })
 
       const resolution = await deferred.promise
-      const decision = (resolution.decision ?? 'decline') as CommandExecutionApprovalDecision
+      const decision = this.mapToCodexCommandDecision(resolution.decision as string | undefined) as CommandExecutionApprovalDecision
       return { decision }
     })
 
@@ -707,8 +739,42 @@ export class CodexSession extends BaseSession {
       })
 
       const resolution = await deferred.promise
-      const decision = (resolution.decision ?? 'decline') as FileChangeApprovalDecision
+      const decision = this.mapToCodexCommandDecision(resolution.decision as string | undefined) as FileChangeApprovalDecision
       return { decision }
+    })
+
+    // item/permissions/requestApproval
+    client.handleServerRequest('item/permissions/requestApproval', async (params): Promise<PermissionsRequestApprovalResponse> => {
+      if (this.disposed) return { permissions: {} }
+      const requestId = randomUUID()
+
+      const deferred = makeDeferred<Record<string, unknown>>()
+      this.pendingApprovals.set(requestId, deferred)
+
+      this.send('session:approval-request', {
+        requestId,
+        toolUseId: params.itemId,
+        toolName: 'Permissions',
+        input: { reason: params.reason, permissions: params.permissions },
+      })
+
+      const resolution = await deferred.promise
+      const raw = resolution.decision as string | undefined
+      if (raw === 'allow') {
+        return { permissions: params.permissions, scope: 'turn' }
+      }
+      if (raw === 'allowForSession') {
+        return { permissions: params.permissions, scope: 'session' }
+      }
+      // deny / decline / anything else
+      return { permissions: {} }
+    })
+
+    // mcpServer/elicitation/request
+    // Interactive MCP elicitation UI is deferred to a later MCP work phase.
+    // For now, immediately decline to avoid wedging the turn with methodNotFound.
+    client.handleServerRequest('mcpServer/elicitation/request', async (_params): Promise<McpServerElicitationRequestResponse> => {
+      return { action: 'decline' }
     })
 
     // item/tool/requestUserInput
@@ -765,6 +831,9 @@ export class CodexSession extends BaseSession {
     }
     if (emissions.result) {
       this.send('session:result', emissions.result)
+    }
+    if (emissions.plan !== undefined) {
+      this.send('session:plan', emissions.plan)
     }
     if (emissions.alertKind === 'error' && emissions.alertText) {
       this.send('session:error', emissions.alertText)

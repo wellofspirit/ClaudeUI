@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
-import type { PendingApproval } from '../../../../shared/types'
+import type { ApprovalDecision, PendingApproval } from '../../../../shared/types'
 import { AlwaysAllowSection } from './PermissionSuggestions'
 
 // ---------------------------------------------------------------------------
@@ -14,7 +14,9 @@ export interface ApprovalCardViewProps {
   onAlwaysAllowChange: (checked: boolean) => void
   checkedSuggestions: boolean[]
   onToggleSuggestion: (index: number) => void
-  onRespond: (decision: 'allow' | 'deny') => void
+  onRespond: (decision: ApprovalDecision) => void
+  /** When true, renders the "Allow for session" button (Codex-only feature). */
+  showAllowForSession?: boolean
 }
 
 export function ApprovalCardView({
@@ -24,7 +26,8 @@ export function ApprovalCardView({
   onAlwaysAllowChange,
   checkedSuggestions,
   onToggleSuggestion,
-  onRespond
+  onRespond,
+  showAllowForSession = false
 }: ApprovalCardViewProps): React.JSX.Element {
   const input = approval.input
   const toolName = approval.toolName
@@ -138,6 +141,17 @@ export function ApprovalCardView({
         >
           Deny
         </button>
+        {showAllowForSession && (
+          <>
+            <div className={`w-px ${dividerColor.replace('border-', 'bg-')}`} />
+            <button
+              onClick={() => onRespond('allowForSession')}
+              className="flex-1 h-8 text-[12px] font-medium text-accent/80 hover:bg-accent/5 transition-colors cursor-pointer"
+            >
+              Allow for session
+            </button>
+          </>
+        )}
         <div className={`w-px ${dividerColor.replace('border-', 'bg-')}`} />
         <button
           onClick={() => onRespond('allow')}
@@ -189,12 +203,13 @@ function ApprovalCard({ approval }: { approval: PendingApproval }): React.JSX.El
   const updateSettings = useSessionStore((s) => s.updateSettings)
   const sandboxSettings = useSessionStore((s) => s.settings.sandbox)
   const permissionMode = useActiveSession((s) => s.permissionMode)
+  const isCodex = useActiveSession((s) => s.selectedProvider === 'codex')
   const [alwaysAllow, setAlwaysAllow] = useState(false)
   const [checkedSuggestions, setCheckedSuggestions] = useState<boolean[]>(() =>
     (approval.suggestions || []).map(() => false)
   )
 
-  const handleRespond = async (decision: 'allow' | 'deny'): Promise<void> => {
+  const handleRespond = async (decision: ApprovalDecision): Promise<void> => {
     if (!activeSessionId) return
 
     const isSandboxEscape = !!approval.input?.dangerouslyDisableSandbox
@@ -239,6 +254,7 @@ function ApprovalCard({ approval }: { approval: PendingApproval }): React.JSX.El
         setCheckedSuggestions((prev) => prev.map((v, j) => (j === i ? !v : v)))
       }
       onRespond={handleRespond}
+      showAllowForSession={isCodex}
     />
   )
 }

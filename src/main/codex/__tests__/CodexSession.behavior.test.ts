@@ -473,3 +473,396 @@ describe('CodexSession dispose suppresses late emissions (#6)', () => {
     expect(sent.filter((e) => e.channel === 'session:approval-request')).toHaveLength(0)
   })
 })
+
+// ---------------------------------------------------------------------------
+// thread/fork handshake
+// ---------------------------------------------------------------------------
+
+// Helper: start a run(), immediately grab the FakeClient instance (created
+// synchronously before the first await), patch its requestImpl, then await.
+// This works because FakeClient is constructed synchronously in spawnAndHandshake
+// before the first `await client.request(...)` — so the instance is in
+// fakeClients by the time we return from the first tick.
+async function runWithCustomImpl(
+  session: CodexSession,
+  impl: (method: string, params: unknown) => Promise<unknown>
+): Promise<void> {
+  const runPromise = session.run('prompt')
+  // Synchronous part of run() has executed: FakeClient is already constructed.
+  // Patching the instance before microtasks run ensures all request() calls
+  // (including 'initialize') use our custom impl.
+  latestClient().requestImpl = impl
+  await runPromise
+}
+
+describe('CodexSession fork handshake (thread/fork)', () => {
+  it('issues thread/fork with the source threadId and adopts the returned id', async () => {
+    // Constructor signature: routingId, win, cwd, effort, resumeSessionId, permissionMode,
+    // model, _sandboxConfig, _thinkingMode, _resumeSessionAt, forkSession
+    const forkSession = new CodexSession(
+      'r-fork',
+      makeFakeWin(sent),
+      '/cwd',
+      undefined,
+      'source-thread-abc',
+      'acceptEdits',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      true
+    )
+    liveSessions.push(forkSession)
+
+    const forkParams: unknown[] = []
+    await runWithCustomImpl(forkSession, async (method, params) => {
+      if (method === 'thread/fork') {
+        forkParams.push(params)
+        return { thread: { id: 'forked-thread-xyz' } }
+      }
+      if (method === 'turn/start') return { turn: { id: 'turn-fake-1' } }
+      return {}
+    })
+
+    // The session should have adopted the forked thread id, not the source id.
+    expect(forkSession.getSessionId()).toBe('forked-thread-xyz')
+
+    // Verify thread/fork was called with the correct source threadId.
+    expect(forkParams).toHaveLength(1)
+    expect((forkParams[0] as { threadId: string }).threadId).toBe('source-thread-abc')
+
+    // Rekey event should carry the forked thread id.
+    const statusEvent = sent.find(
+      (e) => e.channel === 'session:status' && (e.data as { sessionId?: string }).sessionId === 'forked-thread-xyz'
+    )
+    expect(statusEvent).toBeTruthy()
+  })
+
+  it('falls through to thread/start when thread/fork returns a recoverable error', async () => {
+    const { CodexAppServerError } = await import('../CodexAppServerClient')
+    const forkSession = new CodexSession(
+      'r-fork-fallback',
+      makeFakeWin(sent),
+      '/cwd',
+      undefined,
+      'source-thread-gone',
+      'acceptEdits',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      true
+    )
+    liveSessions.push(forkSession)
+
+    await runWithCustomImpl(forkSession, async (method) => {
+      if (method === 'thread/fork')
+        throw new CodexAppServerError('thread not found', -32000)
+      if (method === 'thread/start') return { thread: { id: 'fresh-thread-fallback' } }
+      if (method === 'turn/start') return { turn: { id: 'turn-fake-1' } }
+      return {}
+    })
+
+    // Falls back to a new thread, not the source.
+    expect(forkSession.getSessionId()).toBe('fresh-thread-fallback')
+  })
+
+  it('does NOT issue thread/fork when forkSession is false (normal resume)', async () => {
+    const resumeSession = new CodexSession(
+      'r-resume',
+      makeFakeWin(sent),
+      '/cwd',
+      undefined,
+      'existing-thread-id',
+      'acceptEdits',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      false
+    )
+    liveSessions.push(resumeSession)
+
+    const calledMethods: string[] = []
+    await runWithCustomImpl(resumeSession, async (method) => {
+      calledMethods.push(method)
+      if (method === 'thread/resume') return { thread: { id: 'existing-thread-id' } }
+      if (method === 'turn/start') return { turn: { id: 'turn-fake-1' } }
+      return {}
+    })
+
+    expect(calledMethods).not.toContain('thread/fork')
+    expect(calledMethods).toContain('thread/resume')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// resolveApproval: raw decision pass-through
+// ---------------------------------------------------------------------------
+
+describe('CodexSession.resolveApproval raw decision', () => {
+  it('resolves the deferred with the raw UI decision (no pre-mapping)', async () => {
+    const session = makeSession()
+    await session.run('do something')
+    const client = latestClient()
+
+    // Park an approval via the command handler
+    const handlerPromise = client.reqHandlers.get('item/commandExecution/requestApproval')!({
+      itemId: 'cmd-x',
+      command: 'echo hi',
+    }) as Promise<{ decision: string }>
+
+    // The handler should have emitted an approval-request and parked a deferred.
+    const req = sent.find((e) => e.channel === 'session:approval-request')!
+    const { requestId } = req.data as { requestId: string }
+
+    // Resolve with 'allow' — should map to 'accept' (not 'allow')
+    session.resolveApproval(requestId, 'allow')
+    const resp = await handlerPromise
+    expect(resp.decision).toBe('accept')
+  })
+
+  it('resolveApproval with allowForSession resolves raw; handler maps to acceptForSession', async () => {
+    const session = makeSession()
+    await session.run('do something')
+    const client = latestClient()
+
+    const handlerPromise = client.reqHandlers.get('item/commandExecution/requestApproval')!({
+      itemId: 'cmd-y',
+      command: 'ls',
+    }) as Promise<{ decision: string }>
+
+    const req = sent.find((e) => e.channel === 'session:approval-request')!
+    const { requestId } = req.data as { requestId: string }
+
+    session.resolveApproval(requestId, 'allowForSession')
+    const resp = await handlerPromise
+    expect(resp.decision).toBe('acceptForSession')
+  })
+
+  it('resolveApproval with deny maps to decline', async () => {
+    const session = makeSession()
+    await session.run('do something')
+    const client = latestClient()
+
+    const handlerPromise = client.reqHandlers.get('item/commandExecution/requestApproval')!({
+      itemId: 'cmd-z',
+      command: 'rm *',
+    }) as Promise<{ decision: string }>
+
+    const req = sent.find((e) => e.channel === 'session:approval-request')!
+    const { requestId } = req.data as { requestId: string }
+
+    session.resolveApproval(requestId, 'deny')
+    const resp = await handlerPromise
+    expect(resp.decision).toBe('decline')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// item/fileChange/requestApproval: decision mapping
+// ---------------------------------------------------------------------------
+
+describe('CodexSession item/fileChange/requestApproval decision mapping', () => {
+  it('allow → accept', async () => {
+    const session = makeSession()
+    await session.run('patch something')
+    const client = latestClient()
+
+    sent.length = 0
+    const handlerPromise = client.reqHandlers.get('item/fileChange/requestApproval')!({
+      itemId: 'file-1',
+      reason: 'Apply diff',
+    }) as Promise<{ decision: string }>
+
+    const req = sent.find((e) => e.channel === 'session:approval-request')!
+    expect((req.data as { toolName: string }).toolName).toBe('ApplyPatch')
+    const { requestId } = req.data as { requestId: string }
+
+    session.resolveApproval(requestId, 'allow')
+    expect((await handlerPromise).decision).toBe('accept')
+  })
+
+  it('allowForSession → acceptForSession', async () => {
+    const session = makeSession()
+    await session.run('patch something')
+    const client = latestClient()
+
+    sent.length = 0
+    const handlerPromise = client.reqHandlers.get('item/fileChange/requestApproval')!({
+      itemId: 'file-2',
+    }) as Promise<{ decision: string }>
+
+    const req = sent.find((e) => e.channel === 'session:approval-request')!
+    const { requestId } = req.data as { requestId: string }
+
+    session.resolveApproval(requestId, 'allowForSession')
+    expect((await handlerPromise).decision).toBe('acceptForSession')
+  })
+
+  it('deny → decline', async () => {
+    const session = makeSession()
+    await session.run('patch something')
+    const client = latestClient()
+
+    sent.length = 0
+    const handlerPromise = client.reqHandlers.get('item/fileChange/requestApproval')!({
+      itemId: 'file-3',
+    }) as Promise<{ decision: string }>
+
+    const req = sent.find((e) => e.channel === 'session:approval-request')!
+    const { requestId } = req.data as { requestId: string }
+
+    session.resolveApproval(requestId, 'deny')
+    expect((await handlerPromise).decision).toBe('decline')
+  })
+
+  it('returns decline on dispose (no deferred)', async () => {
+    const session = makeSession()
+    await session.run('do something')
+    const client = latestClient()
+
+    session.dispose()
+    const resp = await (client.reqHandlers.get('item/fileChange/requestApproval')!({
+      itemId: 'file-disposed',
+    }) as Promise<{ decision: string }>)
+    expect(resp.decision).toBe('decline')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// item/permissions/requestApproval
+// ---------------------------------------------------------------------------
+
+describe('CodexSession item/permissions/requestApproval', () => {
+  const fakePermissions = { fileSystem: null, network: null }
+
+  it('allow → { permissions: requested, scope: "turn" }', async () => {
+    const session = makeSession()
+    await session.run('needs permissions')
+    const client = latestClient()
+
+    sent.length = 0
+    const handlerPromise = client.reqHandlers.get('item/permissions/requestApproval')!({
+      itemId: 'perm-1',
+      cwd: '/cwd',
+      permissions: fakePermissions,
+      reason: 'needs network',
+      startedAtMs: Date.now(),
+      threadId: 'thread-fake-1',
+      turnId: 'turn-fake-1',
+    }) as Promise<{ permissions: unknown; scope?: string }>
+
+    const req = sent.find((e) => e.channel === 'session:approval-request')!
+    expect((req.data as { toolName: string }).toolName).toBe('Permissions')
+    const { requestId } = req.data as { requestId: string }
+
+    session.resolveApproval(requestId, 'allow')
+    const resp = await handlerPromise
+    expect(resp.permissions).toEqual(fakePermissions)
+    expect(resp.scope).toBe('turn')
+  })
+
+  it('allowForSession → { permissions: requested, scope: "session" }', async () => {
+    const session = makeSession()
+    await session.run('needs permissions')
+    const client = latestClient()
+
+    sent.length = 0
+    const handlerPromise = client.reqHandlers.get('item/permissions/requestApproval')!({
+      itemId: 'perm-2',
+      cwd: '/cwd',
+      permissions: fakePermissions,
+      startedAtMs: Date.now(),
+      threadId: 'thread-fake-1',
+      turnId: 'turn-fake-1',
+    }) as Promise<{ permissions: unknown; scope?: string }>
+
+    const req = sent.find((e) => e.channel === 'session:approval-request')!
+    const { requestId } = req.data as { requestId: string }
+
+    session.resolveApproval(requestId, 'allowForSession')
+    const resp = await handlerPromise
+    expect(resp.permissions).toEqual(fakePermissions)
+    expect(resp.scope).toBe('session')
+  })
+
+  it('deny → { permissions: {} } (no scope)', async () => {
+    const session = makeSession()
+    await session.run('needs permissions')
+    const client = latestClient()
+
+    sent.length = 0
+    const handlerPromise = client.reqHandlers.get('item/permissions/requestApproval')!({
+      itemId: 'perm-3',
+      cwd: '/cwd',
+      permissions: fakePermissions,
+      startedAtMs: Date.now(),
+      threadId: 'thread-fake-1',
+      turnId: 'turn-fake-1',
+    }) as Promise<{ permissions: unknown; scope?: string }>
+
+    const req = sent.find((e) => e.channel === 'session:approval-request')!
+    const { requestId } = req.data as { requestId: string }
+
+    session.resolveApproval(requestId, 'deny')
+    const resp = await handlerPromise
+    expect(resp.permissions).toEqual({})
+    expect(resp.scope).toBeUndefined()
+  })
+
+  it('returns { permissions: {} } on dispose (no deferred)', async () => {
+    const session = makeSession()
+    await session.run('do something')
+    const client = latestClient()
+
+    session.dispose()
+    const resp = await (client.reqHandlers.get('item/permissions/requestApproval')!({
+      itemId: 'perm-disposed',
+      cwd: '/cwd',
+      permissions: fakePermissions,
+      startedAtMs: Date.now(),
+      threadId: 'thread-fake-1',
+      turnId: 'turn-fake-1',
+    }) as Promise<{ permissions: unknown }>)
+    expect(resp.permissions).toEqual({})
+  })
+})
+
+// ---------------------------------------------------------------------------
+// mcpServer/elicitation/request
+// ---------------------------------------------------------------------------
+
+describe('CodexSession mcpServer/elicitation/request', () => {
+  it('immediately returns { action: "decline" } without emitting or parking a deferred', async () => {
+    const session = makeSession()
+    await session.run('do something')
+    const client = latestClient()
+
+    sent.length = 0
+    const resp = await (client.reqHandlers.get('mcpServer/elicitation/request')!({
+      message: 'Please enter your API key',
+      mode: 'form',
+      requestedSchema: {},
+    }) as Promise<{ action: string }>)
+
+    expect(resp.action).toBe('decline')
+    // No IPC emitted — it's a silent decline
+    expect(sent.filter((e) => e.channel === 'session:approval-request')).toHaveLength(0)
+  })
+
+  it('returns { action: "decline" } even after dispose()', async () => {
+    const session = makeSession()
+    await session.run('do something')
+    const client = latestClient()
+
+    session.dispose()
+    const resp = await (client.reqHandlers.get('mcpServer/elicitation/request')!({
+      message: 'enter value',
+      mode: 'form',
+      requestedSchema: {},
+    }) as Promise<{ action: string }>)
+
+    expect(resp.action).toBe('decline')
+  })
+})

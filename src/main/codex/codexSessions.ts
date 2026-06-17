@@ -401,3 +401,85 @@ function walkDir(dir: string, out: string[], depth = 0, maxDepth = 4): void {
 export function cwdToProjectKey(cwd: string): string {
   return cwd.replace(/[/\\\.]/g, '-')
 }
+
+// ─── resolve + delete helpers ─────────────────────────────────────────────────
+
+/**
+ * Find the rollout file whose session_meta.id === sessionId.
+ *
+ * Strategy:
+ *   1. Reverse-lookup the disk cache (O(n) over cached entries, no extra I/O).
+ *   2. If not found in cache, walk CODEX_HOME/sessions and parse until a match.
+ *
+ * Returns the absolute file path or null if not found / CODEX_HOME/sessions
+ * does not exist.
+ */
+export async function resolveCodexRolloutPath(sessionId: string): Promise<string | null> {
+  if (!sessionId) return null
+
+  // Fast path: check the disk cache for a reverse-lookup hit.
+  const cache = loadCodexDiskCache()
+  for (const [filePath, entry] of Object.entries(cache)) {
+    if (entry.sessionId === sessionId) {
+      // Confirm the file still exists (it may have been deleted externally).
+      try {
+        await fs.promises.access(filePath, fs.constants.F_OK)
+        return filePath
+      } catch {
+        // File gone — fall through to a fresh scan.
+        break
+      }
+    }
+  }
+
+  // Slow path: walk the sessions directory.
+  const sessionsDir = path.join(getCodexHome(), 'sessions')
+  if (!fs.existsSync(sessionsDir)) return null
+
+  const rolloutFiles: string[] = []
+  try {
+    walkDir(sessionsDir, rolloutFiles)
+  } catch {
+    return null
+  }
+
+  for (const filePath of rolloutFiles) {
+    const meta = await parseRolloutMetaAsync(filePath)
+    if (meta?.sessionId === sessionId) return filePath
+  }
+
+  return null
+}
+
+/**
+ * Permanently delete the rollout file for the given sessionId.
+ *
+ * - Resolves the rollout path via `resolveCodexRolloutPath`.
+ * - Validates the resolved path is inside `${getCodexHome()}/sessions/` to
+ *   block any path-traversal attempt.
+ * - Removes the file (force: true — no error if already gone).
+ * - Invalidates the cache entry for the deleted path.
+ * - No-ops gracefully if the rollout file cannot be found.
+ */
+export async function deleteCodexSession(sessionId: string): Promise<void> {
+  if (!sessionId) throw new Error('sessionId is required')
+
+  const rolloutPath = await resolveCodexRolloutPath(sessionId)
+  if (!rolloutPath) return // Session not found — no-op
+
+  // Path-traversal guard: the resolved path must sit inside CODEX_HOME/sessions/.
+  const sessionsDir = path.join(getCodexHome(), 'sessions')
+  const resolved = path.resolve(rolloutPath)
+  if (!resolved.startsWith(sessionsDir + path.sep)) {
+    throw new Error(`Path traversal blocked: ${resolved} is outside ${sessionsDir}`)
+  }
+
+  await fs.promises.rm(resolved, { force: true })
+
+  // Invalidate the cache entry so the next listCodexSessions scan is clean.
+  const cache = loadCodexDiskCache()
+  if (rolloutPath in cache) {
+    delete cache[rolloutPath]
+    saveCodexDiskCache(cache)
+  }
+}

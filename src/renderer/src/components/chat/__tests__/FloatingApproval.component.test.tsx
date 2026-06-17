@@ -522,3 +522,62 @@ describe('FloatingApproval rendered component', () => {
     expect(remaining[0].requestId).toBe(approval2.requestId)
   })
 })
+
+// ---------------------------------------------------------------------------
+// "Allow for session" button — Codex-only gating
+// ---------------------------------------------------------------------------
+
+describe('FloatingApproval "Allow for session" button gating', () => {
+  const ROUTE_CODEX = 'route-codex'
+  const ROUTE_CLAUDE = 'route-claude'
+
+  function setupWithProvider(routingId: string, provider: 'claude' | 'codex'): PendingApproval {
+    // Set the provider before creating the session so createNewSession picks it up.
+    useSessionStore.setState({ lastSelectedProvider: provider })
+    useSessionStore.getState().createNewSession(routingId, '/test')
+    useSessionStore.setState({ activeSessionId: routingId })
+
+    const approval = makePendingApproval({ toolName: 'Shell', input: { command: 'ls' } })
+    useSessionStore.getState().addPendingApproval(routingId, approval)
+    return approval
+  }
+
+  it('renders "Allow for session" button when the active session is Codex', () => {
+    setupWithProvider(ROUTE_CODEX, 'codex')
+
+    render(<FloatingApproval />)
+
+    expect(screen.getByText('Allow for session')).toBeInTheDocument()
+  })
+
+  it('does NOT render "Allow for session" button for a Claude session', () => {
+    setupWithProvider(ROUTE_CLAUDE, 'claude')
+
+    render(<FloatingApproval />)
+
+    expect(screen.queryByText('Allow for session')).toBeNull()
+    // Normal Allow + Deny still present
+    expect(screen.getByText('Allow')).toBeInTheDocument()
+    expect(screen.getByText('Deny')).toBeInTheDocument()
+  })
+
+  it('clicking "Allow for session" sends allowForSession decision via IPC', async () => {
+    const approval = setupWithProvider(ROUTE_CODEX, 'codex')
+
+    render(<FloatingApproval />)
+
+    await act(async () => {
+      fireEvent.click(screen.getByText('Allow for session'))
+    })
+
+    expect(lastApprovalResponse).toEqual({
+      routingId: ROUTE_CODEX,
+      requestId: approval.requestId,
+      decision: 'allowForSession',
+      answers: undefined,
+      suggestions: undefined
+    })
+
+    expect(useSessionStore.getState().sessions[ROUTE_CODEX].pendingApprovals).toHaveLength(0)
+  })
+})

@@ -1,6 +1,11 @@
 # Codex Provider Support — Implementation Plan (Strategy B)
 
 > **Status: All phases (0–9) complete.** Branch `codex-sup`. Deferred items tracked in §15.
+>
+> **Update:** Tier 0+1 parity quick-wins landed (fork, plan checklist, sidebar delete/watch,
+> acceptForSession, permissions/elicitation handlers). Live testing then surfaced three design
+> issues — approval-mode mapping, per-message fork via `thread/rollback`, and making Codex
+> sessions first-class (perf). Full analysis: **[first-class-redesign.md](first-class-redesign.md)**.
 
 > Branch: `codex-sup` (off `pre-release`).
 > Goal: add **OpenAI Codex** as a first-class agent backend alongside Claude, behind a
@@ -500,6 +505,10 @@ approvals in v1; **no Codex patching and no MCP** in v1.
 
 ## 15. Follow-up items (post-v1, tracked)
 
+> **Next phase: [first-class-redesign.md](first-class-redesign.md)** — approval-mode mapping fix,
+> per-message fork via `thread/rollback`, and the warm-app-server + rollout-parse redesign that
+> makes Codex sessions first-class. Items below are annotated with the Tier 0+1 work that landed.
+
 Explicitly deferred — revisit after the Phase 4 MVP / parity:
 
 > **~~Cold-start sidebar browsing of all Codex threads~~** — ✅ **Done** (`codex-sup`, Phase 6
@@ -507,8 +516,10 @@ Explicitly deferred — revisit after the Phase 4 MVP / parity:
 > merges by cwd into the same `DirectoryGroup` subtree as Claude sessions, tags each
 > `SessionInfo` with `provider:'codex'`, and shows a provider logo in sidebar rows and TopBar.
 
-1. **`acceptForSession` + amendment approvals** — wire Codex's richer decision union
-   (`acceptForSession`, exec-policy and network-policy amendment variants) and a UI affordance.
+1. **~~`acceptForSession`~~ + amendment approvals** — ✅ `acceptForSession` done ("Allow for
+   session" button, Codex-only; maps command/file approvals → `acceptForSession` and the
+   permissions request → `scope:'session'`). Still deferred: the exec-policy / network-policy
+   **amendment** decision variants and their UI.
 2. **Codex patching mechanism** — only when a concrete need appears: in-process JSON-RPC frame
    interception (wire-observable) or a `codex-rs` source fork + build (internal). See §4c.
 3. **ClaudeUI-hosted MCP in Codex** — expose mermaid/mockup (and others) to Codex by running them
@@ -522,10 +533,11 @@ Explicitly deferred — revisit after the Phase 4 MVP / parity:
    in the rollout JSONL (bounded read, 64 KB). A better UX would call an LLM to summarise the
    conversation, matching Claude's `generateTitle()` flow. Gate behind the existing
    `generateTitle()` IPC method and a Codex-specific equivalent.
-9. **Watch / pin / delete actions for Codex sessions in sidebar** — hide, delete, and pin are
-   currently Claude-only (they operate on JSONL transcripts under `~/.claude/projects/`).
-   Codex rollout files live at a different path; expose equivalent IPC handlers
-   (`deleteCodexSession`) once the feature is requested.
+9. **~~Watch / pin / delete actions for Codex sessions in sidebar~~** — ✅ **Done.** pin/hide were
+   already sessionId-keyed; delete + watch now route through `resolveCodexRolloutPath` /
+   `deleteCodexSession` / `codex-watcher.ts` and a provider-aware `deleteSession` store action.
+   (Watch currently reloads via a short-lived `app-server` — to be replaced by the rollout parser
+   in the first-class redesign.)
 10. **Scan-performance tuning** — `codexSessions.ts` reads up to 64 KB from each rollout
     file for title extraction. At very large session counts (>1000) this may be slow.
     Consider a streaming readline-based approach or capping the number of files scanned.

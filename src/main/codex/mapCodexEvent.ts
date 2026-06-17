@@ -9,7 +9,7 @@
  * (Bash, Agent, Task, TodoWrite, ExitPlanMode, AskUserQuestion).
  */
 
-import type { ChatMessage, ContentBlock, SessionResult, StatusLineData } from '../../shared/types'
+import type { ChatMessage, ContentBlock, SessionResult, StatusLineData, TodoItem } from '../../shared/types'
 import type { ServerNotificationParamsByMethod } from './protocol/methods'
 
 // ---------------------------------------------------------------------------
@@ -69,6 +69,8 @@ export interface MappedEmissions {
   /** 'error' | 'warning' | null */
   alertKind?: 'error' | 'warning'
   alertText?: string
+  /** Full plan snapshot from turn/plan/updated — maps to Todo widget via session:plan */
+  plan?: TodoItem[]
 }
 
 // ---------------------------------------------------------------------------
@@ -390,4 +392,25 @@ export function mapErrorNotification(
     alertKind: willRetry ? 'warning' : 'error',
     alertText: message,
   }
+}
+
+/**
+ * Map turn/plan/updated → session:plan (full snapshot → TodoItem[]).
+ *
+ * Codex emits a full snapshot each time (not a delta), so we replace the
+ * entire Todo list on each notification. Status conversion:
+ *   inProgress (Codex camelCase) → in_progress (TodoItem snake_case)
+ *   pending / completed pass through unchanged.
+ */
+export function mapPlanUpdated(
+  params: ServerNotificationParamsByMethod['turn/plan/updated'],
+  _state: CodexAssemblyState
+): MappedEmissions {
+  const steps = Array.isArray(params.plan) ? params.plan : []
+  const todos: TodoItem[] = steps.map((step) => ({
+    content: step.step,
+    status: step.status === 'inProgress' ? 'in_progress' : step.status,
+    activeForm: step.step,
+  }))
+  return { plan: todos }
 }

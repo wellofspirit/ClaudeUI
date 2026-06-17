@@ -329,6 +329,9 @@ export function useClaudeEvents(): void {
       window.api.onStatusLine((routingId, data) => {
         setStatusLine(routingId, data)
       }),
+      window.api.onPlanSteps((routingId, todos) => {
+        useSessionStore.getState().setTodos(routingId, todos)
+      }),
       window.api.onPermissionMode((routingId, mode) => {
         setPermissionMode(mode, routingId)
       }),

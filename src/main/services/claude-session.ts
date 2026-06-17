@@ -1709,7 +1709,12 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
   ): void {
     const entry = this.pendingApprovals.get(requestId)
     if (entry) {
-      entry.resolve({ decision, answers, updatedPermissions })
+      // cli.js's canUseTool only understands 'allow' | 'deny'. The widened
+      // ApprovalDecision union now includes 'allowForSession' (Codex-only),
+      // so coerce it to 'allow' here. Claude never shows the button, but the
+      // type union must be handled safely.
+      const coerced: 'allow' | 'deny' = decision === 'allowForSession' ? 'allow' : decision
+      entry.resolve({ decision: coerced, answers, updatedPermissions })
     }
   }
 
