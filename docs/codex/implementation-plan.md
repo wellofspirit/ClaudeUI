@@ -1,5 +1,7 @@
 # Codex Provider Support — Implementation Plan (Strategy B)
 
+> **Status: All phases (0–9) complete.** Branch `codex-sup`. Deferred items tracked in §15.
+
 > Branch: `codex-sup` (off `pre-release`).
 > Goal: add **OpenAI Codex** as a first-class agent backend alongside Claude, behind a
 > formal provider abstraction, so the renderer is backend-agnostic and a third
@@ -102,7 +104,7 @@ Holds what is identical across providers and is **not** protocol-specific:
 
 ---
 
-## 2. Phase 0 — Branch & scaffolding ✅ (you are here)
+## 2. Phase 0 — Branch & scaffolding ✅
 
 **Goal:** branch exists; plan committed; directory skeleton in place.
 
@@ -119,7 +121,7 @@ Steps:
 
 ---
 
-## 3. Phase 1 — Provider abstraction refactor (no Codex yet)
+## 3. Phase 1 — Provider abstraction refactor (no Codex yet) ✅
 
 **Goal:** introduce `ISession`/`BaseSession`/`ProviderRegistry`, refactor `ClaudeSession`
 to fit, make `SessionManager` and `session.ipc.ts` provider-agnostic. **Claude behaves
@@ -161,7 +163,7 @@ every IPC handler tolerates a stub `ISession` with all caps `false`.
 
 ---
 
-## 4. Phase 2 — Codex CLI vendoring + protocol generation + patch strategy
+## 4. Phase 2 — Codex CLI vendoring + protocol generation + patch strategy ✅
 
 **Goal:** a pinned `codex` binary on disk + generated TS protocol types + a documented,
 honest patch mechanism.
@@ -209,7 +211,7 @@ extraction per-OS. Protocol ref must match the binary version closely or decode 
 
 ---
 
-## 5. Phase 3 — Codex protocol client (NDJSON JSON-RPC)
+## 5. Phase 3 — Codex protocol client (NDJSON JSON-RPC) ✅
 
 **Goal:** a typed, plain-TS client that speaks Codex app-server over stdio, reusing our NDJSON
 transport.
@@ -237,7 +239,7 @@ unknown server-request fallback. No real binary needed (mock peer).
 
 ---
 
-## 6. Phase 4 — `CodexSession` (the core)
+## 6. Phase 4 — `CodexSession` (the core) ✅
 
 **Goal:** `CodexSession extends BaseSession implements ISession`, spawns the bundled binary,
 runs the thread/turn loop, and emits our `session:*` contract.
@@ -321,7 +323,7 @@ as the reference.
 
 ---
 
-## 7. Phase 5 — Renderer: provider selection + capability gating
+## 7. Phase 5 — Renderer: provider selection + capability gating ✅
 
 **Goal:** user can start a Codex session; provider-specific UI gates correctly.
 
@@ -363,7 +365,7 @@ Audit `session-store` selectors used by chat components; ensure they're inert wh
 
 ---
 
-## 8. Phase 6 — History, resume, fork
+## 8. Phase 6 — History, resume, fork ✅
 
 **Goal:** Codex sessions persist and resume like Claude's.
 
@@ -387,7 +389,7 @@ store in `CODEX_HOME`. Keep them separate; don't try to unify the on-disk format
 
 ---
 
-## 9. Phase 7 — Auth (delegated)
+## 9. Phase 7 — Auth (delegated) ✅
 
 **Goal:** detect Codex login state; guide the user; no in-app OAuth.
 
@@ -409,7 +411,7 @@ logged in" (spawn error vs runtime error), as t3code does.
 
 ---
 
-## 10. Phase 8 — Testing & hardening
+## 10. Phase 8 — Testing & hardening ✅
 
 Per the four-layer strategy (`docs/testing-strategy.md`):
 1. **Unit**: `mapCodexEvent` (table-driven, the highest-value tests); `CodexAppServerClient`
@@ -427,7 +429,7 @@ Per the four-layer strategy (`docs/testing-strategy.md`):
 
 ---
 
-## 11. Phase 9 — Docs & ADRs
+## 11. Phase 9 — Docs & ADRs ✅
 
 1. **ADR-016 — Provider abstraction (`ISession`/`BaseSession`/`ProviderRegistry`)**: records
    Strategy B, the "ContentBlock is the neutral model" decision, and capability gating. Scan

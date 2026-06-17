@@ -17,3 +17,5 @@
 | [013](adr-013_eslint-flat-config-and-prettier-decoupling.md)      | ESLint flat-config rework — Prettier decoupling, scoped React rules, pragmatic strictness          |
 | [014](adr-014_native-anthropic-oauth.md)                          | Native Anthropic OAuth via cli.js control requests, hosted on the service session                  |
 | [015](adr-015_multi-account-file-credentials.md)                  | Multiple-account support via file-based credentials (SKIP_SECURESTORAGE patch)                      |
+| [016](adr-016_provider-abstraction.md)                            | Provider abstraction — ISession / BaseSession / ProviderRegistry (Strategy B)                       |
+| [017](adr-017_codex-app-server-backend.md)                        | Codex backend via app-server protocol — bundled binary, generated types, delegated auth             |

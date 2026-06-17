@@ -14,6 +14,7 @@ A desktop GUI for Claude Code sessions, built with Electron. Features include mu
 - **Zustand** for state management
 - **react-markdown** + **remark-gfm** for rendering
 - **Claude Code CLI** integrated directly — we rebundle Anthropic's official Bun standalone binary with our patched cli.js, producing `vendor/claude-cli/bun-claude[.exe]` at build time. Handles PE (Windows `.bun` section) and Mach-O (macOS `__BUN,__bun` section + ad-hoc codesign); ELF (Linux) is a follow-up. Spawned natively (no `ELECTRON_RUN_AS_NODE`, no cli.js arg injection). No `@anthropic-ai/claude-agent-sdk` dependency. See **[docs/sdk-layer.md](docs/sdk-layer.md)**.
+- **OpenAI Codex CLI** as a second agent backend — pinned `@openai/codex` binary under `vendor/codex-cli/` (gitignored, downloaded by `ensure-codex`). Driven via `codex app-server` (NDJSON JSON-RPC 2.0 over stdio). Protocol types generated from the pinned schema ref into `src/main/codex/protocol/`. Auth fully delegated to the binary (`codex login`). See ADR-016/017 and **[docs/codex/](docs/codex/)**.
 - **@modelcontextprotocol/sdk** for in-process MCP server hosting
 - **simple-git** for git operations
 - **node-pty** + **@xterm/xterm** for terminal emulator
@@ -30,6 +31,9 @@ A desktop GUI for Claude Code sessions, built with Electron. Features include mu
 - `bun run build:win` — build Windows distributable
 - `bun run ensure-cli` — extract wrapped cli.js, apply patches, rebundle into `bun-claude[.exe]` (cache-hit skip on matching version)
 - `bun run update-cli` — force re-extract, re-patch, and re-rebundle (use after bumping `claudeCliVersion`)
+- `bun run ensure-codex` — download pinned Codex binary into `vendor/codex-cli/` (cache-hit skip on matching version)
+- `bun run update-codex` — force re-download (use after bumping `codexCliVersion`)
+- `bun run generate-codex-protocol` — regenerate `src/main/codex/protocol/` from the pinned schema ref (run after bumping `codexProtocolRef`)
 - `bun run test` — run Vitest tests
 - `bun run test:watch` — run tests in watch mode
 - `bun run typecheck` — run TypeScript checks (node + web)
@@ -37,6 +41,8 @@ A desktop GUI for Claude Code sessions, built with Electron. Features include mu
 - `bun run format` — Prettier
 
 The upstream CLI version is pinned via `package.json#claudeCliVersion`. `ensure-cli` is wired into `postinstall`, `dev`, and every `build:*` script.
+
+The Codex binary version is pinned via `package.json#codexCliVersion`; the protocol schema ref via `package.json#codexProtocolRef`. **Both must be bumped together** — see `docs/codex/maintenance.md`. `ensure-codex` is wired into `postinstall`, `dev`, and every `build:*` script alongside `ensure-cli`.
 
 ## Project Structure
 
@@ -51,6 +57,21 @@ src/
     sdk/                   — In-house cli.js harness, replaces @anthropic-ai/claude-agent-sdk
                              query(), tool(), createSdkMcpServer() + 9 modules
                              Full details: docs/sdk-layer.md
+    providers/             — Provider abstraction layer (ADR-016)
+      ISession.ts          — Provider-neutral session interface + ProviderSessionFactory type
+      BaseSession.ts       — Abstract base: extraWindows, send(), inactivity timer, getMessages()
+      ProviderRegistry.ts  — Singleton factory (providerRegistry.createSession)
+      register-providers.ts — Side-effect bootstrap: registers 'claude' + 'codex' factories
+    codex/                 — Codex backend (ADR-017)
+      CodexSession.ts      — ISession impl: spawns codex app-server, runs turn loop
+      CodexAppServerClient.ts — NDJSON JSON-RPC 2.0 client over stdio
+      mapCodexEvent.ts     — Maps Codex notifications → ContentBlock / session:* events
+      CodexHistory.ts      — thread/read → ChatMessage[] (history load for resume)
+      codexQuery.ts        — withCodexAppServer() helper for short-lived app-server calls
+      codexModels.ts       — model/list loader → ModelInfo[]
+      codexStatus.ts       — account/read probe → CodexStatus (auth state)
+      locate.ts            — Resolves vendor/codex-cli/codex[.exe] in dev + prod
+      protocol/            — Generated TS types (schema.ts, methods.ts, index.ts)
     ipc/
       session.ipc.ts       — Core IPC: sessions, git, config, MCP, usage, worktrees, voice, proxy
       terminal.ipc.ts      — PTY create/write/resize/kill
@@ -127,6 +148,7 @@ src/
   e2e/flows/                 — Layer 3 E2E tests
   integration/               — Layer 4 integration tests
 vendor/claude-cli/         — Rebundled bun-claude[.exe] + wrapped cli.js source (not checked in)
+vendor/codex-cli/          — Pinned codex[.exe] binary + version.json (not checked in)
 scripts/                   — Build-time helpers (extract-cli.mjs, rebundle-cli.mjs, ...)
 patch/                     — cli.js content-regex patches applied before rebundle
 docs/adr/                  — Architectural Decision Records
@@ -281,6 +303,32 @@ The terminal panel uses `display: none` (closed) / `display: contents` (open) in
 
 The `/api/oauth/usage` API returns utilization as 0–100 (percentage), while rate-limit HTTP headers return 0–1 (fraction). Both are stored as 0–100 in `RateWindow.usedPercent`. The `toUsedPercent()` helper in `usage-fetcher.ts` makes this conversion explicit.
 
+## Codex Integration
+
+ClaudeUI supports **OpenAI Codex** as a second agent backend via the `codex app-server`
+JSON-RPC protocol. The full design is in `docs/codex/` and ADR-016/017.
+
+Key points for day-to-day work:
+
+- **Provider abstraction**: `src/main/providers/` — `ISession`/`BaseSession`/`ProviderRegistry`.
+  `SessionManager` holds `Map<routingId, ISession>`; `ClaudeSession` and `CodexSession` both
+  implement `ISession`. The renderer consumes the same `session:*` events regardless of provider.
+- **Protocol types**: `src/main/codex/protocol/` — generated from the pinned schema ref. Never
+  hand-edit these; run `bun run generate-codex-protocol` to regenerate after bumping `codexProtocolRef`.
+- **`codexCliVersion` + `codexProtocolRef` must move together** — bumping one without the other
+  causes JSON decode failures. Full bump procedure: `docs/codex/maintenance.md`.
+- **Never override `CODEX_HOME`** — forcing `CODEX_HOME=$HOME` or any other path breaks auth
+  (causes 401). The Codex binary finds credentials in `~/.codex` by default. `CodexSession` and
+  `withCodexAppServer` deliberately do not set this env var.
+- **Auth is delegated** — no in-app OAuth for Codex (contrast: ADR-014 for Claude). Auth state
+  is probed via `account/read`; if unauthenticated the UI shows a "run `codex login`" card.
+- **No patching in v1** — the Codex binary is compiled Rust and is not regex-patchable. Wire-level
+  changes can go through in-process frame interception in `CodexAppServerClient`; behavior changes
+  would need a `codex-rs` source fork.
+
+See **[docs/codex/](docs/codex/)**, **[ADR-016](docs/adr/adr-016_provider-abstraction.md)**, and
+**[ADR-017](docs/adr/adr-017_codex-app-server-backend.md)**.
+
 ## cli.js Integration
 
 Everything about how ClaudeUI talks to cli.js — the Bun binary extraction pipeline, the stream-json wire protocol, control request subtypes, MCP hosting, cancellation tiers, the 16 patches — lives in **[docs/sdk-layer.md](docs/sdk-layer.md)**. Read that before touching anything under `src/main/sdk/`, `scripts/extract-cli.mjs`, or `patch/`.
@@ -336,5 +384,7 @@ ADRs live in `docs/adr/`. See `docs/adr/adr.md` for the index.
 | 013 | ESLint flat-config rework — Prettier decoupling, scoped React rules, pragmatic strictness          | Accepted |
 | 014 | Native Anthropic OAuth via cli.js control requests, hosted on the service session                  | Accepted |
 | 015 | Multiple-account support via file-based credentials (SKIP_SECURESTORAGE patch)                      | Accepted |
+| 016 | Provider abstraction — ISession / BaseSession / ProviderRegistry (Strategy B)                       | Accepted |
+| 017 | Codex backend via app-server protocol — bundled binary, generated types, delegated auth             | Accepted |
 
 When a design or implementation decision is made during a conversation, prompt the user about whether it should be recorded as a new ADR entry. When adding a new ADR, proactively scan existing ADRs to check if the new decision supersedes or conflicts with a previous one — if so, update the old ADR's status to "Superseded by ADR-XXX" and note it in the new ADR.
