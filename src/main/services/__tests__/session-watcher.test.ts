@@ -33,14 +33,16 @@ const { testHome, loadSessionHistoryMock } = vi.hoisted(() => {
   return {
     testHome: dir,
     loadSessionHistoryMock: vi.fn(async (sessionId: string, projectKey: string) => ({
-      messages: [{ id: 'm-1', role: 'assistant', content: [{ type: 'text', text: 'hi' }], timestamp: 0 }],
+      messages: [
+        { id: 'm-1', role: 'assistant', content: [{ type: 'text', text: 'hi' }], timestamp: 0 }
+      ],
       taskNotifications: [],
       customTitle: null,
       agentIdToToolUseId: {},
       statusLine: null,
       _sessionId: sessionId,
-      _projectKey: projectKey,
-    })),
+      _projectKey: projectKey
+    }))
   }
 })
 
@@ -48,13 +50,13 @@ const { testHome, loadSessionHistoryMock } = vi.hoisted(() => {
 // so we don't drag in the SDK.
 vi.mock('../claude-session', () => ({
   ClaudeSession: {
-    getExtraWindows: () => new Set(),
-  },
+    getExtraWindows: () => new Set()
+  }
 }))
 
 vi.mock('../session-history', () => ({
   loadSessionHistory: (sessionId: string, projectKey: string) =>
-    loadSessionHistoryMock(sessionId, projectKey),
+    loadSessionHistoryMock(sessionId, projectKey)
 }))
 
 // Silence logger.
@@ -63,8 +65,8 @@ vi.mock('../logger', () => ({
     debug: vi.fn(),
     info: vi.fn(),
     warn: vi.fn(),
-    error: vi.fn(),
-  },
+    error: vi.fn()
+  }
 }))
 
 // Import AFTER mocks.
@@ -84,7 +86,7 @@ function makeFakeWindow(): FakeWin {
   const win: FakeWin = {
     _destroyed: false,
     isDestroyed: () => win._destroyed,
-    webContents: { send: vi.fn() },
+    webContents: { send: vi.fn() }
   }
   return win
 }
@@ -113,7 +115,7 @@ async function cleanupCtx(ctx: TestCtx): Promise<void> {
     await fsp.rm(path.join(testHome, '.claude', 'projects', ctx.projectKey), {
       recursive: true,
       force: true,
-      maxRetries: 5,
+      maxRetries: 5
     })
   } catch {
     /* ignore */
@@ -142,7 +144,7 @@ describe('session-watcher', () => {
       'routing-1',
       ctx.sessionId,
       ctx.projectKey,
-      win as unknown as Electron.BrowserWindow,
+      win as unknown as Electron.BrowserWindow
     )
 
     // Cause a change on the watched file.
@@ -157,7 +159,7 @@ describe('session-watcher', () => {
         expect(payload.routingId).toBe('routing-1')
         expect(Array.isArray(payload.messages)).toBe(true)
       },
-      { timeout: 3000 },
+      { timeout: 3000 }
     )
   })
 
@@ -167,7 +169,7 @@ describe('session-watcher', () => {
       'routing-burst',
       ctx.sessionId,
       ctx.projectKey,
-      win as unknown as Electron.BrowserWindow,
+      win as unknown as Electron.BrowserWindow
     )
 
     // Burst of writes within the 100ms debounce window.
@@ -185,7 +187,7 @@ describe('session-watcher', () => {
 
     await vi.waitFor(
       () => expect(win.webContents.send.mock.calls.length).toBeGreaterThan(callsAfterBurst),
-      { timeout: 3000 },
+      { timeout: 3000 }
     )
 
     // Every emitted update must target our routingId, in order (no stray
@@ -202,7 +204,7 @@ describe('session-watcher', () => {
       'routing-stop',
       ctx.sessionId,
       ctx.projectKey,
-      win as unknown as Electron.BrowserWindow,
+      win as unknown as Electron.BrowserWindow
     )
 
     await fsp.appendFile(ctx.filePath, JSON.stringify({ type: 'assistant' }) + '\n')
@@ -228,8 +230,8 @@ describe('session-watcher', () => {
         'routing-missing',
         missingSessionId,
         ctx.projectKey,
-        win as unknown as Electron.BrowserWindow,
-      ),
+        win as unknown as Electron.BrowserWindow
+      )
     ).not.toThrow()
 
     // No watcher was registered, so calling unwatch on it is also safe.
@@ -252,7 +254,7 @@ describe('session-watcher', () => {
       'routing-recycle',
       ctx.sessionId,
       ctx.projectKey,
-      win as unknown as Electron.BrowserWindow,
+      win as unknown as Electron.BrowserWindow
     )
     await fsp.appendFile(ctx.filePath, JSON.stringify({ type: 'assistant', cycle: 1 }) + '\n')
     await vi.waitFor(() => expect(win.webContents.send).toHaveBeenCalled(), { timeout: 3000 })
@@ -264,13 +266,13 @@ describe('session-watcher', () => {
       'routing-recycle',
       ctx.sessionId,
       ctx.projectKey,
-      win as unknown as Electron.BrowserWindow,
+      win as unknown as Electron.BrowserWindow
     )
     await fsp.appendFile(ctx.filePath, JSON.stringify({ type: 'assistant', cycle: 2 }) + '\n')
 
     await vi.waitFor(
       () => expect(win.webContents.send.mock.calls.length).toBeGreaterThan(firstCycleCalls),
-      { timeout: 3000 },
+      { timeout: 3000 }
     )
 
     // Now sanity-check there isn't a duplicate/stale watcher: each write
@@ -280,7 +282,7 @@ describe('session-watcher', () => {
     await fsp.appendFile(ctx.filePath, JSON.stringify({ type: 'assistant', cycle: 3 }) + '\n')
     await vi.waitFor(
       () => expect(win.webContents.send.mock.calls.length).toBeGreaterThan(beforeFinal),
-      { timeout: 3000 },
+      { timeout: 3000 }
     )
     // Allow time for any would-be duplicate handler to also fire.
     await new Promise((r) => setTimeout(r, 300))

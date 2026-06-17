@@ -26,7 +26,11 @@ export const PERMISSION_TEMPLATES = [
 
 export const PERMISSION_MODES = [
   { value: 'default', label: 'Default', description: 'Deny tools that require approval' },
-  { value: 'auto', label: 'Auto', description: 'Auto-classify tool calls and reject dangerous ones' }
+  {
+    value: 'auto',
+    label: 'Auto',
+    description: 'Auto-classify tool calls and reject dangerous ones'
+  }
 ] as const
 
 export interface DirtyCheckInput {
@@ -79,7 +83,12 @@ export function naturalUnit(ms: number): IntervalUnit {
 }
 
 /** Compute the upcoming run times for a schedule, N runs ahead. */
-export function computeNextRuns(schedule: AutomationSchedule, lastRunAt: number | null, count: number, now: number = Date.now()): Date[] {
+export function computeNextRuns(
+  schedule: AutomationSchedule,
+  lastRunAt: number | null,
+  count: number,
+  now: number = Date.now()
+): Date[] {
   try {
     if (schedule.type === 'cron') {
       if (!schedule.cronExpression) return []
@@ -139,7 +148,11 @@ export function formatTimeDelta(ms: number): string {
 
 export type StatusKind = 'running' | 'active' | 'disabled' | 'failed'
 
-export function deriveStatus(input: { enabled: boolean; hasRunningRun: boolean; lastRunStatus: Automation['lastRunStatus'] }): StatusKind {
+export function deriveStatus(input: {
+  enabled: boolean
+  hasRunningRun: boolean
+  lastRunStatus: Automation['lastRunStatus']
+}): StatusKind {
   if (input.hasRunningRun) return 'running'
   if (!input.enabled) return 'disabled'
   if (input.lastRunStatus === 'error') return 'failed'

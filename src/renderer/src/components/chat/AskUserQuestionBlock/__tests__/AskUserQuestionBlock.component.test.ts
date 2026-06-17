@@ -7,8 +7,6 @@
  *   3. Post-submit, isCompleted flips to true
  */
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
-
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import React from 'react'
 import { render, act } from '@testing-library/react'
@@ -23,7 +21,7 @@ vi.mock('../View', () => ({
   AskUserQuestionBlockView: (props: AskUserQuestionBlockViewProps) => {
     viewProps = props
     return null
-  },
+  }
 }))
 
 type ToolUseBlock = Extract<ContentBlock, { type: 'tool_use' }>
@@ -34,13 +32,15 @@ function makeBlock(): ToolUseBlock {
     toolUseId: 'tu-1',
     toolName: 'AskUserQuestion',
     toolInput: {
-      questions: [{
-        header: 'Color',
-        question: 'Pick a color',
-        options: [{ label: 'red' }, { label: 'blue' }],
-        multiSelect: false,
-      }],
-    },
+      questions: [
+        {
+          header: 'Color',
+          question: 'Pick a color',
+          options: [{ label: 'red' }, { label: 'blue' }],
+          multiSelect: false
+        }
+      ]
+    }
   } as unknown as ToolUseBlock
 }
 
@@ -54,9 +54,12 @@ describe('AskUserQuestionBlock FC', () => {
     app = await bootTestApp()
     respondCalls = []
 
-    app.bridge.ipcMain.handle('session:approval-response', async (_e, _rid: string, _reqId: string, decision: string, answers: unknown) => {
-      respondCalls.push({ decision, answers })
-    })
+    app.bridge.ipcMain.handle(
+      'session:approval-response',
+      async (_e, _rid: string, _reqId: string, decision: string, answers: unknown) => {
+        respondCalls.push({ decision, answers })
+      }
+    )
 
     useSessionStore.getState().createNewSession(ROUTE, '/d/repo')
     useSessionStore.setState({ activeSessionId: ROUTE })

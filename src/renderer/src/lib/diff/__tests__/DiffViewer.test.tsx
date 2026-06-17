@@ -11,10 +11,10 @@ vi.mock('@tanstack/react-virtual', () => ({
         index: i,
         start: i * 18,
         size: 18,
-        key: i,
+        key: i
       })),
-    measureElement: () => {},
-  }),
+    measureElement: () => {}
+  })
 }))
 
 const SIMPLE_PATCH = `--- a/src/foo.ts
@@ -57,9 +57,9 @@ describe('DiffViewer', () => {
     it('shows + indicator for additions', () => {
       render(<DiffViewer patch={SIMPLE_PATCH} fileName="foo.ts" />)
 
-      const indicators = screen.getAllByRole('cell').filter(
-        (el) => el.classList.contains('diff-indicator-add')
-      )
+      const indicators = screen
+        .getAllByRole('cell')
+        .filter((el) => el.classList.contains('diff-indicator-add'))
       expect(indicators.length).toBeGreaterThan(0)
       expect(indicators[0].textContent).toBe('+')
     })
@@ -67,9 +67,9 @@ describe('DiffViewer', () => {
     it('shows - indicator for deletions', () => {
       render(<DiffViewer patch={SIMPLE_PATCH} fileName="foo.ts" />)
 
-      const indicators = screen.getAllByRole('cell').filter(
-        (el) => el.classList.contains('diff-indicator-del')
-      )
+      const indicators = screen
+        .getAllByRole('cell')
+        .filter((el) => el.classList.contains('diff-indicator-del'))
       expect(indicators.length).toBeGreaterThan(0)
       expect(indicators[0].textContent).toBe('-')
     })
@@ -112,13 +112,7 @@ describe('DiffViewer', () => {
     })
 
     it('handles pure addition (empty oldStr)', () => {
-      render(
-        <DiffViewer
-          oldStr=""
-          newStr="new content"
-          fileName="test.ts"
-        />
-      )
+      render(<DiffViewer oldStr="" newStr="new content" fileName="test.ts" />)
 
       // Should have diff-pure-add class
       const container = document.querySelector('.diff-pure-add')
@@ -126,13 +120,7 @@ describe('DiffViewer', () => {
     })
 
     it('handles pure deletion (empty newStr)', () => {
-      render(
-        <DiffViewer
-          oldStr="old content"
-          newStr=""
-          fileName="test.ts"
-        />
-      )
+      render(<DiffViewer oldStr="old content" newStr="" fileName="test.ts" />)
 
       const container = document.querySelector('.diff-pure-del')
       expect(container).toBeInTheDocument()
@@ -174,13 +162,7 @@ describe('DiffViewer', () => {
   describe('line highlighting', () => {
     it('applies highlight class to specified lines', () => {
       const highlighted = new Set(['new:2'])
-      render(
-        <DiffViewer
-          patch={SIMPLE_PATCH}
-          fileName="foo.ts"
-          highlightedLines={highlighted}
-        />
-      )
+      render(<DiffViewer patch={SIMPLE_PATCH} fileName="foo.ts" highlightedLines={highlighted} />)
 
       const highlightedRows = document.querySelectorAll('.diff-row-highlighted')
       expect(highlightedRows.length).toBeGreaterThan(0)

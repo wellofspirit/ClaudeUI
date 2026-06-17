@@ -44,16 +44,10 @@ describe('mergeContentBlocks', () => {
   })
 
   it('does not duplicate tool_result blocks already in new set', () => {
-    const old: ContentBlock[] = [
-      { type: 'tool_result', toolUseId: 'a', toolResult: 'v1' }
-    ]
-    const next: ContentBlock[] = [
-      { type: 'tool_result', toolUseId: 'a', toolResult: 'v2' }
-    ]
+    const old: ContentBlock[] = [{ type: 'tool_result', toolUseId: 'a', toolResult: 'v1' }]
+    const next: ContentBlock[] = [{ type: 'tool_result', toolUseId: 'a', toolResult: 'v2' }]
     const result = mergeContentBlocks(old, next)
-    expect(result).toEqual([
-      { type: 'tool_result', toolUseId: 'a', toolResult: 'v2' }
-    ])
+    expect(result).toEqual([{ type: 'tool_result', toolUseId: 'a', toolResult: 'v2' }])
   })
 
   it('preserves old thinking blocks dropped by new message', () => {
@@ -61,9 +55,7 @@ describe('mergeContentBlocks', () => {
       { type: 'thinking', text: 'thought 1' },
       { type: 'thinking', text: 'thought 2' }
     ]
-    const next: ContentBlock[] = [
-      { type: 'thinking', text: 'thought 2' }
-    ]
+    const next: ContentBlock[] = [{ type: 'thinking', text: 'thought 2' }]
     const result = mergeContentBlocks(old, next)
     // Old had 2 thinking, new has 1 → 1 dropped, so preserve the first
     expect(result).toEqual([
@@ -74,9 +66,7 @@ describe('mergeContentBlocks', () => {
 
   it('preserves old text block when new message has no text', () => {
     const old: ContentBlock[] = [{ type: 'text', text: 'old text' }]
-    const next: ContentBlock[] = [
-      { type: 'tool_use', toolUseId: 'x', toolName: 'Bash' }
-    ]
+    const next: ContentBlock[] = [{ type: 'tool_use', toolUseId: 'x', toolName: 'Bash' }]
     const result = mergeContentBlocks(old, next)
     expect(result).toEqual([
       { type: 'text', text: 'old text' },
@@ -109,7 +99,12 @@ describe('mergeContentBlocks', () => {
     // first thinking is preserved), tool_use 'a', tool_result 'a'
     // Old text dropped because new has text
     expect(result.map((b) => b.type)).toEqual([
-      'thinking', 'tool_use', 'tool_result', 'tool_use', 'tool_result', 'text'
+      'thinking',
+      'tool_use',
+      'tool_result',
+      'tool_use',
+      'tool_result',
+      'text'
     ])
     expect(result[1]).toEqual({ type: 'tool_use', toolUseId: 'a', toolName: 'Read' })
     expect(result[5]).toEqual({ type: 'text', text: 'done editing' })

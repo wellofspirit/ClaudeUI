@@ -35,7 +35,7 @@ vi.mock('../GitCommitBox/View', () => ({
   GitCommitBoxView: (props: GitCommitBoxViewProps) => {
     viewProps = props
     return null
-  },
+  }
 }))
 
 // ---------------------------------------------------------------------------
@@ -54,7 +54,7 @@ function makeGitStatus(overrides: Partial<GitStatusData> = {}): GitStatusData {
     untracked: [],
     linesAdded: 0,
     linesRemoved: 0,
-    ...overrides,
+    ...overrides
   }
 }
 
@@ -77,7 +77,7 @@ beforeEach(() => {
     logError: () => {},
     fetchAccountUsage: () => Promise.resolve(null),
     fetchBlockUsage: () => Promise.resolve(null),
-    getPluginViews: () => Promise.resolve([]),
+    getPluginViews: () => Promise.resolve([])
   }
 
   // Reset store to a clean slate
@@ -87,7 +87,7 @@ beforeEach(() => {
     directories: [],
     recentSessionIds: [],
     pinnedSessionIds: [],
-    customTitles: {},
+    customTitles: {}
   })
 })
 
@@ -134,12 +134,15 @@ describe('GitCommitBox store state — setGitCommitMessage', () => {
 describe('GitCommitBox store state — selectNextGitFile', () => {
   it('selects the first file from gitStatus after a commit', () => {
     useSessionStore.getState().createNewSession(ROUTE, '/repo')
-    useSessionStore.getState().setGitStatus(ROUTE, makeGitStatus({
-      files: [
-        { path: 'src/a.ts', index: 'M', working: ' ' },
-        { path: 'src/b.ts', index: 'A', working: ' ' },
-      ],
-    }))
+    useSessionStore.getState().setGitStatus(
+      ROUTE,
+      makeGitStatus({
+        files: [
+          { path: 'src/a.ts', index: 'M', working: ' ' },
+          { path: 'src/b.ts', index: 'A', working: ' ' }
+        ]
+      })
+    )
 
     useSessionStore.getState().selectNextGitFile(ROUTE)
 
@@ -157,9 +160,12 @@ describe('GitCommitBox store state — selectNextGitFile', () => {
 
   it('clears gitFileDiff when selecting next file', () => {
     useSessionStore.getState().createNewSession(ROUTE, '/repo')
-    useSessionStore.getState().setGitStatus(ROUTE, makeGitStatus({
-      files: [{ path: 'src/a.ts', index: 'M', working: ' ' }],
-    }))
+    useSessionStore.getState().setGitStatus(
+      ROUTE,
+      makeGitStatus({
+        files: [{ path: 'src/a.ts', index: 'M', working: ' ' }]
+      })
+    )
     // Simulate a diff being loaded for the previously selected file
     useSessionStore.getState().setGitFileDiff(ROUTE, { patch: '@@ -1 +1 @@\n-old\n+new' })
 
@@ -188,7 +194,7 @@ describe('GitCommitBox store state — setGitStatus and the git status cache', (
     const status = makeGitStatus({
       branch: 'feature/my-branch',
       staged: ['src/a.ts'],
-      files: [{ path: 'src/a.ts', index: 'M', working: ' ' }],
+      files: [{ path: 'src/a.ts', index: 'M', working: ' ' }]
     })
 
     useSessionStore.getState().setGitStatus(ROUTE, status)
@@ -228,10 +234,13 @@ describe('GitCommitBox store state — setGitStatus and the git status cache', (
 describe('GitCommitBox commit enablement conditions', () => {
   it('commit is enabled when staged count > 0 and message is non-empty', () => {
     useSessionStore.getState().createNewSession(ROUTE, '/repo')
-    useSessionStore.getState().setGitStatus(ROUTE, makeGitStatus({
-      staged: ['src/a.ts'],
-      files: [{ path: 'src/a.ts', index: 'M', working: ' ' }],
-    }))
+    useSessionStore.getState().setGitStatus(
+      ROUTE,
+      makeGitStatus({
+        staged: ['src/a.ts'],
+        files: [{ path: 'src/a.ts', index: 'M', working: ' ' }]
+      })
+    )
     useSessionStore.getState().setGitCommitMessage(ROUTE, 'fix: something')
 
     const session = useSessionStore.getState().sessions[ROUTE]
@@ -246,10 +255,13 @@ describe('GitCommitBox commit enablement conditions', () => {
 
   it('commit is blocked when there are no staged files', () => {
     useSessionStore.getState().createNewSession(ROUTE, '/repo')
-    useSessionStore.getState().setGitStatus(ROUTE, makeGitStatus({
-      staged: [],
-      files: [{ path: 'src/a.ts', index: ' ', working: 'M' }],
-    }))
+    useSessionStore.getState().setGitStatus(
+      ROUTE,
+      makeGitStatus({
+        staged: [],
+        files: [{ path: 'src/a.ts', index: ' ', working: 'M' }]
+      })
+    )
     useSessionStore.getState().setGitCommitMessage(ROUTE, 'fix: something')
 
     const session = useSessionStore.getState().sessions[ROUTE]
@@ -258,9 +270,12 @@ describe('GitCommitBox commit enablement conditions', () => {
 
   it('commit is blocked when message is empty', () => {
     useSessionStore.getState().createNewSession(ROUTE, '/repo')
-    useSessionStore.getState().setGitStatus(ROUTE, makeGitStatus({
-      staged: ['src/a.ts'],
-    }))
+    useSessionStore.getState().setGitStatus(
+      ROUTE,
+      makeGitStatus({
+        staged: ['src/a.ts']
+      })
+    )
     useSessionStore.getState().setGitCommitMessage(ROUTE, '')
 
     const session = useSessionStore.getState().sessions[ROUTE]
@@ -269,13 +284,16 @@ describe('GitCommitBox commit enablement conditions', () => {
 
   it('allStaged is true when every changed file is staged', () => {
     useSessionStore.getState().createNewSession(ROUTE, '/repo')
-    useSessionStore.getState().setGitStatus(ROUTE, makeGitStatus({
-      staged: ['src/a.ts', 'src/b.ts'],
-      files: [
-        { path: 'src/a.ts', index: 'M', working: ' ' },
-        { path: 'src/b.ts', index: 'A', working: ' ' },
-      ],
-    }))
+    useSessionStore.getState().setGitStatus(
+      ROUTE,
+      makeGitStatus({
+        staged: ['src/a.ts', 'src/b.ts'],
+        files: [
+          { path: 'src/a.ts', index: 'M', working: ' ' },
+          { path: 'src/b.ts', index: 'A', working: ' ' }
+        ]
+      })
+    )
 
     const session = useSessionStore.getState().sessions[ROUTE]
     const stagedCount = session.gitStatus?.staged.length ?? 0
@@ -311,7 +329,7 @@ function makeStagedStatus(staged: string[] = ['src/a.ts']): GitStatusData {
     unstaged: [],
     untracked: [],
     linesAdded: 1,
-    linesRemoved: 0,
+    linesRemoved: 0
   }
 }
 
@@ -367,10 +385,13 @@ describe('GitCommitBox FC — rendered', () => {
       pushUpstreamCalls.push([cwd, branch])
       return { ok: true, data: null }
     })
-    bridge.ipcMain.handle('git:file-patch', (_e, cwd: string, filePath: string, staged: boolean, ignoreWs: boolean) => {
-      filePatchCalls.push([cwd, filePath, staged, ignoreWs])
-      return { ok: true, data: { patch: `diff --git a/${filePath} b/${filePath}\n+new line` } }
-    })
+    bridge.ipcMain.handle(
+      'git:file-patch',
+      (_e, cwd: string, filePath: string, staged: boolean, ignoreWs: boolean) => {
+        filePatchCalls.push([cwd, filePath, staged, ignoreWs])
+        return { ok: true, data: { patch: `diff --git a/${filePath} b/${filePath}\n+new line` } }
+      }
+    )
     bridge.ipcMain.handle('session:generate-commit-message', (_e, diff: string) => {
       generateMsgCalls.push(diff)
       return 'feat: generated message'
@@ -391,7 +412,7 @@ describe('GitCommitBox FC — rendered', () => {
       directories: [],
       recentSessionIds: [],
       pinnedSessionIds: [],
-      customTitles: {},
+      customTitles: {}
     })
   })
 
@@ -411,13 +432,15 @@ describe('GitCommitBox FC — rendered', () => {
       viewProps.onCommitMessageChange('fix: updated message')
     })
 
-    expect(useSessionStore.getState().sessions[FC_ROUTE].gitCommitMessage).toBe('fix: updated message')
+    expect(useSessionStore.getState().sessions[FC_ROUTE].gitCommitMessage).toBe(
+      'fix: updated message'
+    )
   })
 
   it('onPrimaryCommit (commit-only mode) calls gitCommit, clears message, refreshes status, selects next file', async () => {
     // Ensure commit-only mode (default)
     useSessionStore.setState((s) => ({
-      settings: { ...s.settings, gitCommitMode: 'commit' },
+      settings: { ...s.settings, gitCommitMode: 'commit' }
     }))
 
     render(React.createElement(GitCommitBox))
@@ -443,8 +466,8 @@ describe('GitCommitBox FC — rendered', () => {
       ...makeStagedStatus(['src/a.ts']),
       files: [
         { path: 'src/a.ts', index: 'M', working: ' ' },
-        { path: 'src/b.ts', index: ' ', working: 'M' },
-      ],
+        { path: 'src/b.ts', index: ' ', working: 'M' }
+      ]
     })
 
     render(React.createElement(GitCommitBox))
@@ -541,13 +564,15 @@ describe('GitCommitBox FC — rendered', () => {
     expect(filePatchCalls).toHaveLength(1)
     expect(filePatchCalls[0][0]).toBe(FC_CWD)
     expect(filePatchCalls[0][1]).toBe('src/a.ts')
-    expect(filePatchCalls[0][2]).toBe(true)   // staged=true
-    expect(filePatchCalls[0][3]).toBe(false)  // ignoreWhitespace=false
+    expect(filePatchCalls[0][2]).toBe(true) // staged=true
+    expect(filePatchCalls[0][3]).toBe(false) // ignoreWhitespace=false
 
     expect(generateMsgCalls).toHaveLength(1)
     expect(generateMsgCalls[0]).toContain('new line')
 
-    expect(useSessionStore.getState().sessions[FC_ROUTE].gitCommitMessage).toBe('feat: generated message')
+    expect(useSessionStore.getState().sessions[FC_ROUTE].gitCommitMessage).toBe(
+      'feat: generated message'
+    )
   })
 
   it('onGenerateMessage shows error toast when no staged files', async () => {
@@ -588,7 +613,7 @@ describe('GitCommitBox FC — rendered', () => {
   it('onSecondaryCommit in commit-only mode triggers commitAndPush', async () => {
     // In commit-only mode, primary=commit, secondary=commitAndPush
     useSessionStore.setState((s) => ({
-      settings: { ...s.settings, gitCommitMode: 'commit' },
+      settings: { ...s.settings, gitCommitMode: 'commit' }
     }))
 
     render(React.createElement(GitCommitBox))

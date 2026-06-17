@@ -46,27 +46,28 @@ export const useAutomationStore = create<AutomationState>((set) => ({
   setAutomations: (automations) => set({ automations }),
 
   selectAutomation: (id) =>
-    set({ selectedAutomationId: id, selectedRunId: null, runMessages: null, detailTab: 'configure' }),
+    set({
+      selectedAutomationId: id,
+      selectedRunId: null,
+      runMessages: null,
+      detailTab: 'configure'
+    }),
 
   selectRun: (automationId, runId) =>
     set({ selectedAutomationId: automationId, selectedRunId: runId }),
 
   // Back from a run detail → return to Runs tab so the context stays intact.
-  clearRunSelection: () =>
-    set({ selectedRunId: null, runMessages: null, detailTab: 'runs' }),
+  clearRunSelection: () => set({ selectedRunId: null, runMessages: null, detailTab: 'runs' }),
 
   setDetailTab: (tab) => set({ detailTab: tab }),
 
-  setRuns: (automationId, runs) =>
-    set((s) => ({ runs: { ...s.runs, [automationId]: runs } })),
+  setRuns: (automationId, runs) => set((s) => ({ runs: { ...s.runs, [automationId]: runs } })),
 
   updateRun: (automationId, run) =>
     set((s) => {
       const existing = s.runs[automationId] || []
       const idx = existing.findIndex((r) => r.id === run.id)
-      const updated = idx >= 0
-        ? existing.map((r, i) => (i === idx ? run : r))
-        : [run, ...existing]
+      const updated = idx >= 0 ? existing.map((r, i) => (i === idx ? run : r)) : [run, ...existing]
 
       // Also update the automation's lastRunAt/lastRunStatus in the list
       const automations = s.automations.map((a) => {
@@ -103,8 +104,7 @@ export const useAutomationStore = create<AutomationState>((set) => ({
       return { runMessages: [...s.runMessages, message] }
     }),
 
-  appendStreamingText: (text) =>
-    set((s) => ({ streamingText: s.streamingText + text })),
+  appendStreamingText: (text) => set((s) => ({ streamingText: s.streamingText + text })),
 
   clearStreamingText: () => set({ streamingText: '' }),
 

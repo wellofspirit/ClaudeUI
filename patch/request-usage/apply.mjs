@@ -46,163 +46,98 @@ if (src.includes(PATCH_MARKER)) {
 }
 
 // ---------------------------------------------------------------------------
-// Step 2: Find the uuid function (randomUUID import near the tq5 class)
+// Step 2: Locate the streaming usage accumulator (message_start case)
 // ---------------------------------------------------------------------------
-// The tq5 class (sdkQuery) imports randomUUID: import{randomUUID as <Dc>}from"crypto";class tq5
-// We find it by the pattern: import{randomUUID as <V>}from"crypto";class <V>{config;mutableMessages
-
-console.log('\n--- Locating uuid function (randomUUID import) ---')
-
-// SDK cli.js (<=0.2.112) used: import{randomUUID as <V>}from"crypto";class <V>{config;mutableMessages
-// Bun-extracted (2.1.113+) uses:  <V>=require("crypto")    (method call: <V>.randomUUID())
-// Fall back to either form.
-let uuidFn, queryClass
-const oldImportRe = new RegExp(
-  `import\\{randomUUID as (${V})\\}from"crypto";class (${V})\\{config;mutableMessages`
-)
-const oldMatch = oldImportRe.exec(src)
-if (oldMatch) {
-  uuidFn = `${oldMatch[1]}`
-  queryClass = oldMatch[2]
-} else {
-  // 2.1.113+: find the class, then walk backwards for the crypto require binding.
-  const classRe = new RegExp(`class (${V})\\{config;mutableMessages`)
-  const classMatch = classRe.exec(src)
-  if (!classMatch) {
-    console.error('ERROR: Cannot locate sdkQuery class.')
-    process.exit(1)
-  }
-  queryClass = classMatch[1]
-  // Scan a reasonable window after for `<V>=require("crypto")` used in randomUUID() calls.
-  const searchWindow = src.slice(classMatch.index, classMatch.index + 50000)
-  const bindRe = new RegExp(`(${V})=require\\("crypto"\\)`)
-  const bindMatch = bindRe.exec(searchWindow)
-  if (!bindMatch) {
-    console.error('ERROR: Cannot locate crypto require binding near sdkQuery class.')
-    process.exit(1)
-  }
-  uuidFn = `${bindMatch[1]}.randomUUID`
-}
-console.log(`  UUID function: ${uuidFn}`)
-console.log(`  Query class: ${queryClass}`)
-
-// ---------------------------------------------------------------------------
-// Step 3: Find the session_id function (N8)
-// ---------------------------------------------------------------------------
-// Pattern: session_id:<N8>() appears in yield statements near stream_event handling.
-// We find it from the stream_event yield: yield{type:"stream_event",event:<q>.event,session_id:<N8>(),parent_tool_use_id:null,uuid:<Dc>()}
-
-console.log('\n--- Locating session_id function ---')
-
-const sessionIdRe = new RegExp(
-  `yield\\{type:"stream_event",event:(${V})\\.event,session_id:(${V})\\(\\),parent_tool_use_id:null,uuid:${uuidFn.replace(/\$/g, '\\$')}\\(\\)`
-)
-const sessionMatch = sessionIdRe.exec(src)
-if (!sessionMatch) {
-  console.error('ERROR: Cannot locate session_id function from stream_event yield.')
-  process.exit(1)
-}
-
-const sessionFn = sessionMatch[2]
-console.log(`  Session ID function: ${sessionFn}`)
-
-// ---------------------------------------------------------------------------
-// Step 4: Find the message_start + message_stop pattern in stream_event handling
-// ---------------------------------------------------------------------------
-// Pattern:
-//   if(<q>.event.type==="message_start")<H>=<O0>,<H>=<w56>(<H>,<q>.event.message.usage);
-//   if(<q>.event.type==="message_delta"){if(<H>=<w56>(<H>,<q>.event.usage),<q>.event.delta.stop_reason!=null)<y>=<q>.event.delta.stop_reason}
-//   if(<q>.event.type==="message_stop")this.totalUsage=<fB8>(this.totalUsage,<H>);
-
-console.log('\n--- Locating stream_event message handling ---')
-
-const streamRe = new RegExp(
-  `if\\((${V})\\.event\\.type==="message_start"\\)(${V})=(${V}),\\2=(${V})\\(\\2,\\1\\.event\\.message\\.usage\\);` +
-  `if\\(\\1\\.event\\.type==="message_delta"\\)\\{if\\(\\2=\\4\\(\\2,\\1\\.event\\.usage\\),(${V})\\.event\\.delta\\.stop_reason!=null\\)` +
-  `(${V})=\\5\\.event\\.delta\\.stop_reason(?:;if\\(${V}\\)${V}\\(\\))?\\}` +
-  `if\\(\\1\\.event\\.type==="message_stop"\\)this\\.totalUsage=(${V})\\(this\\.totalUsage,\\2\\)`
-)
-const streamMatch = streamRe.exec(src)
-if (!streamMatch) {
-  console.error('ERROR: Cannot locate stream_event message start/delta/stop pattern.')
-  process.exit(1)
-}
-
-// Verify uniqueness
-const allStreamMatches = [...src.matchAll(new RegExp(streamRe, 'g'))]
-if (allStreamMatches.length > 1) {
-  console.error(`ERROR: Pattern matched ${allStreamMatches.length} times (expected 1). Aborting.`)
-  process.exit(1)
-}
-
-const eventVar = streamMatch[1]    // q8 — the stream event
-const usageVar = streamMatch[2]    // H6 — per-request usage accumulator
-const zeroUsage = streamMatch[3]   // O0 — zero-usage constant
-const mergeFn = streamMatch[4]     // w56 — usage merge function
-// streamMatch[5] is the same as eventVar (q8) in the delta check
-const stopReasonVar = streamMatch[6] // y6 — stop reason
-const accumFn = streamMatch[7]     // fB8 — total usage accumulation function
-
-console.log(`Found at char ${streamMatch.index}`)
-console.log(`  Event var: ${eventVar}`)
-console.log(`  Usage var: ${usageVar}`)
-console.log(`  Zero usage: ${zeroUsage}`)
-console.log(`  Merge fn: ${mergeFn}`)
-console.log(`  Stop reason var: ${stopReasonVar}`)
-console.log(`  Accumulate fn: ${accumFn}`)
-
-// ---------------------------------------------------------------------------
-// Step 5: Inject the patch
-// ---------------------------------------------------------------------------
-// We modify the message_start handler to also capture the model:
-//   ...<H>=<w56>(<H>,<q>.event.message.usage)
-//   becomes:
-//   ...<H>=<w56>(<H>,<q>.event.message.usage),this._patchModel=<q>.event.message.model
+// As of 2.1.163 the per-event handling is a `switch(<p>.type){case ...}` inside
+// the streaming generator. The old flat `if(...==="message_start")...` chain and
+// the `this.totalUsage=<accum>(this.totalUsage,<H>)` accumulation on message_stop
+// are gone (the per-request total is now reconciled in the generator's finally
+// block, not on message_stop). We anchor on the message_start case to capture:
+//   * <sH> — the message object (`<sH>=<p>.message`); <sH>.model is the model
+//   * <QH> — the per-request usage accumulator (`<QH>=<merge>(<QH>,<p>.message?.usage)`)
+// Both are `let`-declared at the generator top and reset per request, so at
+// message_stop they hold the just-completed request's values.
 //
-// And after message_stop accumulation:
-//   this.totalUsage=<fB8>(this.totalUsage,<H>)
-//   becomes:
-//   this.totalUsage=<fB8>(this.totalUsage,<H>),process.stdout.write(JSON.stringify({...})+"\\n")
+// Verbatim 2.1.163 shape:
+//   case"message_start":{sH=p_.message,xH=Math.max(0,Math.round(performance.now()-TH)),QH=O7H(QH,p_.message?.usage),v_=...
 
-console.log('\n--- Injecting request_usage emission ---')
+console.log('\n--- Locating streaming message_start case ---')
 
-const original = streamMatch[0]
-
-// Build the replacement:
-// 1. message_start: add model capture after usage init
-// 2. message_stop: add stdout write after totalUsage accumulation
-
-const esc = (s) => s.replace(/\$/g, '\\$')
-
-const messageStartOld =
-  `${usageVar}=${mergeFn}(${usageVar},${eventVar}.event.message.usage)`
-const messageStartNew =
-  `${messageStartOld},this._patchModel=${eventVar}.event.message.model`
-
-const messageStopOld =
-  `this.totalUsage=${accumFn}(this.totalUsage,${usageVar})`
-const messageStopNew =
-  messageStopOld +
-  PATCH_MARKER +
-  `,process.stdout.write(JSON.stringify({` +
-    `type:"request_usage",` +
-    `usage:${usageVar},` +
-    `model:this._patchModel||"",` +
-    `uuid:${uuidFn}(),` +
-    `session_id:${sessionFn}()` +
-  `})+"\\n")`
-
-let patched = original
-  .replace(messageStartOld, messageStartNew)
-  .replace(messageStopOld, messageStopNew)
-
-// Verify the replacement actually changed something
-if (patched === original) {
-  console.error('ERROR: Replacement produced no changes.')
+const startRe = new RegExp(
+  `case"message_start":\\{(${V})=(${V})\\.message,` +
+    `(${V})=Math\\.max\\(0,Math\\.round\\(performance\\.now\\(\\)-(${V})\\)\\),` +
+    `(${V})=(${V})\\(\\5,\\2\\.message\\?\\.usage\\)`
+)
+const startMatch = startRe.exec(src)
+if (!startMatch) {
+  console.error(
+    'ERROR: Cannot locate streaming message_start case (sH=<p>.message, QH=<merge>(QH,...)).'
+  )
   process.exit(1)
 }
 
-src = src.replace(original, patched)
+const allStart = [...src.matchAll(new RegExp(startRe, 'g'))]
+if (allStart.length > 1) {
+  console.error(
+    `ERROR: message_start case matched ${allStart.length} times (expected 1). Aborting.`
+  )
+  process.exit(1)
+}
+
+const msgVar = startMatch[1] // sH — the message object (carries .model)
+const eventVar = startMatch[2] // p_ — the stream event
+const usageVar = startMatch[5] // QH — per-request usage accumulator
+const mergeFn = startMatch[6] // O7H — usage merge function
+
+console.log(`Found message_start case at char ${startMatch.index}`)
+console.log(`  Message var: ${msgVar}`)
+console.log(`  Event var: ${eventVar}`)
+console.log(`  Usage accumulator: ${usageVar}`)
+console.log(`  Merge fn: ${mergeFn}`)
+
+// ---------------------------------------------------------------------------
+// Step 3: Inject request_usage emission at the message_stop case
+// ---------------------------------------------------------------------------
+// 2.1.163: the case was reduced to `case"message_stop":break}`. 2.1.170 added a
+// telemetry call: `case"message_stop":eH("stream_completed",jH??null,r_);break}`.
+// We match a bare case body (zero or more brace-free statements ending in `;`)
+// followed by `break}` (the trailing `}` closes the switch), preserve whatever
+// statements are there, and append our stdout write just before the break —
+// statements are legal in a bare case body, no extra braces needed. The `[^{}]`
+// restriction keeps us out of the block-bodied message_stop cases in the
+// Anthropic SDK MessageStream classes. The consumer (claude-session.ts
+// logRequestUsage) reads only `usage` and `model`; session_id is supplied from
+// its own session state, so we omit it. No `this` is available here (standalone
+// generator), so we read the model off the captured message var instead of the
+// old `this._patchModel`.
+
+console.log('\n--- Injecting request_usage emission at message_stop ---')
+
+const stopRe = /case"message_stop":((?:[^{}]*;)?)break\}/g
+const allStop = [...src.matchAll(stopRe)]
+if (allStop.length !== 1) {
+  console.error(`ERROR: message_stop case matched ${allStop.length} times (expected 1). Aborting.`)
+  process.exit(1)
+}
+
+const stopMatch = allStop[0]
+const existingStmts = stopMatch[1] // e.g. `eH("stream_completed",jH??null,r_);` in 2.1.170; empty in 2.1.163
+console.log(
+  `Found message_stop case at char ${stopMatch.index}` +
+    (existingStmts ? ` (preserving existing statements: ${existingStmts})` : '')
+)
+
+const messageStopNew =
+  `case"message_stop":` +
+  existingStmts +
+  PATCH_MARKER +
+  `process.stdout.write(JSON.stringify({` +
+  `type:"request_usage",` +
+  `usage:${usageVar},` +
+  `model:${msgVar}?.model||""` +
+  `})+"\\n");break}`
+
+src = src.replace(stopMatch[0], messageStopNew)
 
 // ---------------------------------------------------------------------------
 // Step 6: Write and verify
@@ -224,4 +159,4 @@ console.log('\nVerified.')
 console.log('')
 console.log('What this does:')
 console.log('  Emits per-request token usage (including cache breakdowns) to SDK stdout')
-console.log('  Message format: { type: "request_usage", usage: {...}, model, uuid, session_id }')
+console.log('  Message format: { type: "request_usage", usage: {...}, model }')

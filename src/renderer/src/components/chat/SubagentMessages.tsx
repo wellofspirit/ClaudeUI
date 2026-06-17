@@ -21,7 +21,11 @@ function ThinkingBlock({ text }: { text: string }): React.JSX.Element {
   )
 }
 
-const ContentBlockView = memo(function ContentBlockView({ block }: { block: ContentBlock }): React.JSX.Element | null {
+const ContentBlockView = memo(function ContentBlockView({
+  block
+}: {
+  block: ContentBlock
+}): React.JSX.Element | null {
   if (block.type === 'text' && block.text) {
     return (
       <div className="text-[12px] text-text-primary/80 leading-[1.6]">
@@ -35,7 +39,10 @@ const ContentBlockView = memo(function ContentBlockView({ block }: { block: Cont
   return null
 })
 
-export const SubagentMessages = memo(function SubagentMessages({ messages, maxHeight = '400px' }: Props): React.JSX.Element {
+export const SubagentMessages = memo(function SubagentMessages({
+  messages,
+  maxHeight = '400px'
+}: Props): React.JSX.Element {
   const resultMap = useMemo(() => {
     const map = new Map<string, Extract<ContentBlock, { type: 'tool_result' }>>()
     for (const msg of messages) {

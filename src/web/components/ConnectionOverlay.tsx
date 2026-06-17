@@ -16,16 +16,20 @@ const STATE_LABELS: Record<ConnectionState, string> = {
   failed: 'Connection Failed'
 }
 
-export function ConnectionOverlay({ state, error }: ConnectionOverlayProps): React.JSX.Element | null {
+export function ConnectionOverlay({
+  state,
+  error
+}: ConnectionOverlayProps): React.JSX.Element | null {
   const [visible, setVisible] = useState(true)
 
   useEffect(() => {
-    if (state === 'connected') {
-      // Fade out after a short delay
-      const timer = setTimeout(() => setVisible(false), 800)
-      return () => clearTimeout(timer)
+    if (state !== 'connected') {
+      setVisible(true)
+      return
     }
-    setVisible(true)
+    // Fade out after a short delay
+    const timer = setTimeout(() => setVisible(false), 800)
+    return () => clearTimeout(timer)
   }, [state])
 
   if (!visible) return null
@@ -44,13 +48,25 @@ export function ConnectionOverlay({ state, error }: ConnectionOverlayProps): Rea
         {/* Spinner or status icon */}
         {isFailed ? (
           <div className="w-12 h-12 rounded-full bg-danger/20 flex items-center justify-center">
-            <svg className="w-6 h-6 text-danger" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <svg
+              className="w-6 h-6 text-danger"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+              strokeWidth={2}
+            >
               <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
             </svg>
           </div>
         ) : isConnected ? (
           <div className="w-12 h-12 rounded-full bg-success/20 flex items-center justify-center">
-            <svg className="w-6 h-6 text-success" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <svg
+              className="w-6 h-6 text-success"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+              strokeWidth={2}
+            >
               <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
             </svg>
           </div>
@@ -62,22 +78,14 @@ export function ConnectionOverlay({ state, error }: ConnectionOverlayProps): Rea
         )}
 
         {/* State label */}
-        <div className="text-text-primary text-lg font-medium">
-          {STATE_LABELS[state]}
-        </div>
+        <div className="text-text-primary text-lg font-medium">{STATE_LABELS[state]}</div>
 
         {/* Error message */}
-        {error && (
-          <div className="text-danger text-sm max-w-sm">
-            {error}
-          </div>
-        )}
+        {error && <div className="text-danger text-sm max-w-sm">{error}</div>}
 
         {/* Reconnecting hint */}
         {state === 'reconnecting' && (
-          <div className="text-text-muted text-xs">
-            Connection lost. Attempting to reconnect...
-          </div>
+          <div className="text-text-muted text-xs">Connection lost. Attempting to reconnect...</div>
         )}
 
         {/* Failed actions */}

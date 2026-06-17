@@ -14,7 +14,7 @@ describe('buildEnv anthropic endpoint overlay', () => {
   it('no endpoint set → ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN stripped from overlay', () => {
     const env = buildEnv({
       ANTHROPIC_BASE_URL: 'http://should-not-leak',
-      ANTHROPIC_AUTH_TOKEN: 'should-not-leak',
+      ANTHROPIC_AUTH_TOKEN: 'should-not-leak'
     })
     expect(env.ANTHROPIC_BASE_URL).toBeUndefined()
     expect(env.ANTHROPIC_AUTH_TOKEN).toBeUndefined()
@@ -23,7 +23,7 @@ describe('buildEnv anthropic endpoint overlay', () => {
   it('endpoint set → overlays both env vars on the spawn env', () => {
     setEndpointEnv({
       ANTHROPIC_BASE_URL: 'http://localhost:1234',
-      ANTHROPIC_AUTH_TOKEN: 'lmstudio',
+      ANTHROPIC_AUTH_TOKEN: 'lmstudio'
     })
     const env = buildEnv({})
     expect(env.ANTHROPIC_BASE_URL).toBe('http://localhost:1234')
@@ -33,7 +33,7 @@ describe('buildEnv anthropic endpoint overlay', () => {
   it('endpoint set with empty token → still overlays base URL', () => {
     setEndpointEnv({
       ANTHROPIC_BASE_URL: 'http://gateway.local',
-      ANTHROPIC_AUTH_TOKEN: '',
+      ANTHROPIC_AUTH_TOKEN: ''
     })
     const env = buildEnv({})
     expect(env.ANTHROPIC_BASE_URL).toBe('http://gateway.local')
@@ -43,7 +43,7 @@ describe('buildEnv anthropic endpoint overlay', () => {
   it('clearing endpoint after it was set removes both vars from overlay', () => {
     setEndpointEnv({
       ANTHROPIC_BASE_URL: 'http://localhost:1234',
-      ANTHROPIC_AUTH_TOKEN: 'lmstudio',
+      ANTHROPIC_AUTH_TOKEN: 'lmstudio'
     })
     expect(buildEnv({}).ANTHROPIC_BASE_URL).toBe('http://localhost:1234')
     setEndpointEnv(null)
@@ -55,11 +55,11 @@ describe('buildEnv anthropic endpoint overlay', () => {
   it('endpoint overlay overrides any value already in base env', () => {
     setEndpointEnv({
       ANTHROPIC_BASE_URL: 'http://override.local',
-      ANTHROPIC_AUTH_TOKEN: 'override-token',
+      ANTHROPIC_AUTH_TOKEN: 'override-token'
     })
     const env = buildEnv({
       ANTHROPIC_BASE_URL: 'http://stale-from-process-env',
-      ANTHROPIC_AUTH_TOKEN: 'stale-token',
+      ANTHROPIC_AUTH_TOKEN: 'stale-token'
     })
     expect(env.ANTHROPIC_BASE_URL).toBe('http://override.local')
     expect(env.ANTHROPIC_AUTH_TOKEN).toBe('override-token')
@@ -68,7 +68,7 @@ describe('buildEnv anthropic endpoint overlay', () => {
   it('endpoint and proxy overlays are independent', () => {
     setEndpointEnv({
       ANTHROPIC_BASE_URL: 'http://endpoint.local',
-      ANTHROPIC_AUTH_TOKEN: 'tok',
+      ANTHROPIC_AUTH_TOKEN: 'tok'
     })
     const env = buildEnv({})
     expect(env.ANTHROPIC_BASE_URL).toBe('http://endpoint.local')

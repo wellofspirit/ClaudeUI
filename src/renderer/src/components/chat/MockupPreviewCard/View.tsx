@@ -6,6 +6,7 @@ export interface MockupPreviewCardViewProps {
   html: string | null
   error: string | null
   src: string | null
+  sandbox: string
   onExpand: () => void
   onCopyHtml: () => void
   onRefresh: () => void
@@ -13,7 +14,7 @@ export interface MockupPreviewCardViewProps {
 
 export const MockupPreviewCardView = forwardRef<HTMLIFrameElement, MockupPreviewCardViewProps>(
   function MockupPreviewCardView(
-    { title, html, error, src, onExpand, onCopyHtml, onRefresh },
+    { title, html, error, src, sandbox, onExpand, onCopyHtml, onRefresh },
     iframeRef
   ) {
     const [tab, setTab] = useState<'preview' | 'code'>('preview')
@@ -106,7 +107,7 @@ export const MockupPreviewCardView = forwardRef<HTMLIFrameElement, MockupPreview
                   <iframe
                     ref={iframeRef}
                     src={src}
-                    sandbox="allow-scripts allow-same-origin"
+                    sandbox={sandbox}
                     referrerPolicy="no-referrer"
                     tabIndex={-1}
                     style={{ width: '100%', height: '100%', border: 'none', display: 'block' }}

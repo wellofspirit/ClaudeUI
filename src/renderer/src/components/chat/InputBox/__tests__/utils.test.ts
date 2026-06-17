@@ -3,10 +3,7 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import {
-  resolveSendAction,
-  type SendContext,
-} from '../utils'
+import { resolveSendAction, type SendContext } from '../utils'
 
 // ---------------------------------------------------------------------------
 // resolveSendAction
@@ -18,7 +15,7 @@ describe('resolveSendAction', () => {
     attachedFiles: [],
     isDisabled: false,
     activeSessionId: 'session-1',
-    isRunning: false,
+    isRunning: false
   }
 
   it('returns noop when text is empty and no files', () => {
@@ -60,10 +57,16 @@ describe('resolveSendAction', () => {
   })
 
   it('sends prompt with attachments when not running', () => {
-    const files = [{
-      id: '1', fileName: 'test.png', fileType: 'image' as const,
-      mediaType: 'image/png' as const, base64Data: 'abc123', previewUrl: '',
-    }]
+    const files = [
+      {
+        id: '1',
+        fileName: 'test.png',
+        fileType: 'image' as const,
+        mediaType: 'image/png' as const,
+        base64Data: 'abc123',
+        previewUrl: ''
+      }
+    ]
     const result = resolveSendAction({ ...baseCtx, attachedFiles: files })
     expect(result.type).toBe('send-prompt')
     if (result.type === 'send-prompt') {
@@ -78,22 +81,33 @@ describe('resolveSendAction', () => {
   })
 
   it('allows sending with files but no text', () => {
-    const files = [{
-      id: '1', fileName: 'doc.pdf', fileType: 'pdf' as const,
-      mediaType: 'application/pdf' as const, base64Data: 'abc', previewUrl: '',
-    }]
+    const files = [
+      {
+        id: '1',
+        fileName: 'doc.pdf',
+        fileType: 'pdf' as const,
+        mediaType: 'application/pdf' as const,
+        base64Data: 'abc',
+        previewUrl: ''
+      }
+    ]
     const result = resolveSendAction({ ...baseCtx, text: '', attachedFiles: files })
     expect(result.type).toBe('send-prompt')
   })
 
   it('queue path does not include attachments', () => {
-    const files = [{
-      id: '1', fileName: 'test.png', fileType: 'image' as const,
-      mediaType: 'image/png' as const, base64Data: 'abc', previewUrl: '',
-    }]
+    const files = [
+      {
+        id: '1',
+        fileName: 'test.png',
+        fileType: 'image' as const,
+        mediaType: 'image/png' as const,
+        base64Data: 'abc',
+        previewUrl: ''
+      }
+    ]
     const result = resolveSendAction({ ...baseCtx, isRunning: true, attachedFiles: files })
     // Queue only sends text, not attachments
     expect(result).toEqual({ type: 'queue-prompt', prompt: 'Hello Claude' })
   })
 })
-

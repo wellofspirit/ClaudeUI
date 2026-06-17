@@ -36,7 +36,9 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps): React.JS
       width: 256,
       margin: 2,
       color: { dark: '#d1d5db', light: '#00000000' }
-    }).then(setQrDataUrl).catch(() => setQrDataUrl(null))
+    })
+      .then(setQrDataUrl)
+      .catch(() => setQrDataUrl(null))
   }, [shareUrl])
 
   const handleStart = useCallback(async () => {

@@ -46,5 +46,5 @@ export type {
   PermissionBehavior,
   PermissionUpdateDestination,
   WireDirection,
-  WireEntry,
+  WireEntry
 } from './types'

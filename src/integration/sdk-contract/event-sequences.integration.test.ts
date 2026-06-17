@@ -31,12 +31,17 @@ describe('SDK event contract', () => {
           maxTurns: 1,
           tools: [],
           thinking: { type: 'disabled' },
-          persistSession: false,
-        },
+          persistSession: false
+        }
       })
 
       for await (const msg of q) {
         events.push(msg as Record<string, unknown>)
+        // In-house harness contract: a string prompt does NOT auto-terminate
+        // the session — cli.js stays alive awaiting further input. Consumers
+        // break on `result`, which triggers the iterator's return() → SIGTERM.
+        // (Same pattern as automation-manager.executeRun.)
+        if ((msg as Record<string, unknown>).type === 'result') break
       }
 
       // Verify event ordering matches our stubs
@@ -98,14 +103,18 @@ describe('SDK event contract', () => {
 
       // Should have tool_use in assistant message
       const assistantWithTool = events.find(
-        (e) => e.type === 'assistant' && Array.isArray((e.message as any)?.content) &&
+        (e) =>
+          e.type === 'assistant' &&
+          Array.isArray((e.message as any)?.content) &&
           (e.message as any).content.some((c: any) => c.type === 'tool_use')
       )
       expect(assistantWithTool).toBeDefined()
 
       // Should have user message with tool_result
       const userWithResult = events.find(
-        (e) => e.type === 'user' && Array.isArray((e.message as any)?.content) &&
+        (e) =>
+          e.type === 'user' &&
+          Array.isArray((e.message as any)?.content) &&
           (e.message as any).content.some((c: any) => c.type === 'tool_result')
       )
       expect(userWithResult).toBeDefined()
@@ -118,7 +127,9 @@ describe('SDK event contract', () => {
       const { thinkingSequence } = await import('@test/factories/sdk-events')
       const events = thinkingSequence('session-1', 'Let me think...', 'The answer')
 
-      const thinkingStream = events.find((e) => e.type === 'stream_event' && e.subtype === 'thinking')
+      const thinkingStream = events.find(
+        (e) => e.type === 'stream_event' && e.subtype === 'thinking'
+      )
       expect(thinkingStream).toBeDefined()
 
       const textStream = events.find((e) => e.type === 'stream_event' && e.subtype === 'text')

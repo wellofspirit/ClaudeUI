@@ -22,14 +22,10 @@ import type { DirEntry } from '../../../../shared/types'
 const DEFAULT_ENTRIES: DirEntry[] = [
   { name: 'src', isDirectory: true },
   { name: 'README.md', isDirectory: false },
-  { name: 'package.json', isDirectory: false },
+  { name: 'package.json', isDirectory: false }
 ]
 
-function mockListDir(
-  entries = DEFAULT_ENTRIES,
-  isRoot = false,
-  resolvedPath = '/project'
-) {
+function mockListDir(entries = DEFAULT_ENTRIES, isRoot = false, resolvedPath = '/project') {
   return vi.fn().mockResolvedValue({ entries, isRoot, resolvedPath })
 }
 
@@ -37,7 +33,7 @@ beforeEach(() => {
   ;(globalThis as any).window = (globalThis as any).window ?? {}
   ;(globalThis as any).window.api = {
     ...((globalThis as any).window.api ?? {}),
-    listDir: mockListDir(),
+    listDir: mockListDir()
   }
 })
 
@@ -63,8 +59,10 @@ function setup(opts?: {
     useFileMention({
       cwd,
       text: state.text,
-      setText: (t: string) => { state.text = t },
-      textareaRef,
+      setText: (t: string) => {
+        state.text = t
+      },
+      textareaRef
     })
   )
 
@@ -108,36 +106,48 @@ describe('useFileMention — initial state', () => {
 describe('useFileMention — handleInputChange open/close', () => {
   it('opens menu when "@" is at start of text', () => {
     const { rendered } = setup()
-    act(() => { rendered.result.current.handleInputChange('@', 1) })
+    act(() => {
+      rendered.result.current.handleInputChange('@', 1)
+    })
     expect(rendered.result.current.fileMentionOpen).toBe(true)
   })
 
   it('opens menu when "@" is preceded by a space', () => {
     const { rendered } = setup()
-    act(() => { rendered.result.current.handleInputChange('hello @', 7) })
+    act(() => {
+      rendered.result.current.handleInputChange('hello @', 7)
+    })
     expect(rendered.result.current.fileMentionOpen).toBe(true)
   })
 
   it('does NOT open menu when "@" is preceded by a non-whitespace char', () => {
     const { rendered } = setup()
-    act(() => { rendered.result.current.handleInputChange('hello@', 6) })
+    act(() => {
+      rendered.result.current.handleInputChange('hello@', 6)
+    })
     expect(rendered.result.current.fileMentionOpen).toBe(false)
   })
 
   it('does NOT open menu when cursor is not directly after "@"', () => {
     // cursor at position 5 but the @ is at position 6 — no trigger
     const { rendered } = setup()
-    act(() => { rendered.result.current.handleInputChange('hello@world', 5) })
+    act(() => {
+      rendered.result.current.handleInputChange('hello@world', 5)
+    })
     expect(rendered.result.current.fileMentionOpen).toBe(false)
   })
 
   it('closes menu when cursor moves before the @ anchor', () => {
     const { rendered } = setup()
     // Open by typing @
-    act(() => { rendered.result.current.handleInputChange('@', 1) })
+    act(() => {
+      rendered.result.current.handleInputChange('@', 1)
+    })
     expect(rendered.result.current.fileMentionOpen).toBe(true)
     // Simulate cursor moving to position 0 (before anchor at 0)
-    act(() => { rendered.result.current.handleInputChange('@', 0) })
+    act(() => {
+      rendered.result.current.handleInputChange('@', 0)
+    })
     expect(rendered.result.current.fileMentionOpen).toBe(false)
   })
 })
@@ -149,9 +159,11 @@ describe('useFileMention — handleInputChange open/close', () => {
 describe('useFileMention — filteredEntries .. prepend', () => {
   it('prepends ".." entry when not at root', async () => {
     const { rendered } = setup({
-      listDirMock: mockListDir(DEFAULT_ENTRIES, false, '/project'),
+      listDirMock: mockListDir(DEFAULT_ENTRIES, false, '/project')
     })
-    act(() => { rendered.result.current.handleInputChange('@', 1) })
+    act(() => {
+      rendered.result.current.handleInputChange('@', 1)
+    })
 
     await waitFor(() => {
       expect(rendered.result.current.filteredEntries.length).toBeGreaterThan(0)
@@ -163,9 +175,11 @@ describe('useFileMention — filteredEntries .. prepend', () => {
 
   it('does NOT prepend ".." when at root', async () => {
     const { rendered } = setup({
-      listDirMock: mockListDir(DEFAULT_ENTRIES, true, '/'),
+      listDirMock: mockListDir(DEFAULT_ENTRIES, true, '/')
     })
-    act(() => { rendered.result.current.handleInputChange('@', 1) })
+    act(() => {
+      rendered.result.current.handleInputChange('@', 1)
+    })
 
     await waitFor(() => {
       expect(rendered.result.current.filteredEntries.length).toBeGreaterThan(0)
@@ -181,7 +195,9 @@ describe('useFileMention — filteredEntries .. prepend', () => {
 describe('useFileMention — handleKeyDown navigation', () => {
   async function openAndLoad(opts?: Parameters<typeof setup>[0]) {
     const ctx = setup(opts)
-    act(() => { ctx.rendered.result.current.handleInputChange('@', 1) })
+    act(() => {
+      ctx.rendered.result.current.handleInputChange('@', 1)
+    })
     await waitFor(() => {
       expect(ctx.rendered.result.current.filteredEntries.length).toBeGreaterThan(0)
     })
@@ -191,7 +207,9 @@ describe('useFileMention — handleKeyDown navigation', () => {
 
   it('ArrowDown advances index forward', async () => {
     const { rendered } = await openAndLoad()
-    act(() => { rendered.result.current.handleKeyDown(makeKeyEvent('ArrowDown')) })
+    act(() => {
+      rendered.result.current.handleKeyDown(makeKeyEvent('ArrowDown'))
+    })
     expect(rendered.result.current.fileMentionIndex).toBe(1)
   })
 
@@ -199,7 +217,9 @@ describe('useFileMention — handleKeyDown navigation', () => {
     const { rendered } = await openAndLoad()
     const total = rendered.result.current.filteredEntries.length
     for (let i = 0; i < total; i++) {
-      act(() => { rendered.result.current.handleKeyDown(makeKeyEvent('ArrowDown')) })
+      act(() => {
+        rendered.result.current.handleKeyDown(makeKeyEvent('ArrowDown'))
+      })
     }
     expect(rendered.result.current.fileMentionIndex).toBe(0)
   })
@@ -207,28 +227,36 @@ describe('useFileMention — handleKeyDown navigation', () => {
   it('ArrowUp from 0 wraps to last index', async () => {
     const { rendered } = await openAndLoad()
     const total = rendered.result.current.filteredEntries.length
-    act(() => { rendered.result.current.handleKeyDown(makeKeyEvent('ArrowUp')) })
+    act(() => {
+      rendered.result.current.handleKeyDown(makeKeyEvent('ArrowUp'))
+    })
     expect(rendered.result.current.fileMentionIndex).toBe(total - 1)
   })
 
   it('ArrowDown returns true (event consumed)', async () => {
     const { rendered } = await openAndLoad()
     let consumed = false
-    act(() => { consumed = rendered.result.current.handleKeyDown(makeKeyEvent('ArrowDown')) })
+    act(() => {
+      consumed = rendered.result.current.handleKeyDown(makeKeyEvent('ArrowDown'))
+    })
     expect(consumed).toBe(true)
   })
 
   it('ArrowUp returns true (event consumed)', async () => {
     const { rendered } = await openAndLoad()
     let consumed = false
-    act(() => { consumed = rendered.result.current.handleKeyDown(makeKeyEvent('ArrowUp')) })
+    act(() => {
+      consumed = rendered.result.current.handleKeyDown(makeKeyEvent('ArrowUp'))
+    })
     expect(consumed).toBe(true)
   })
 
   it('returns false when menu is closed', () => {
     const { rendered } = setup()
     let consumed = true
-    act(() => { consumed = rendered.result.current.handleKeyDown(makeKeyEvent('ArrowDown')) })
+    act(() => {
+      consumed = rendered.result.current.handleKeyDown(makeKeyEvent('ArrowDown'))
+    })
     expect(consumed).toBe(false)
   })
 })
@@ -240,21 +268,29 @@ describe('useFileMention — handleKeyDown navigation', () => {
 describe('useFileMention — handleKeyDown Escape', () => {
   it('Escape closes menu', async () => {
     const { rendered } = setup()
-    act(() => { rendered.result.current.handleInputChange('@', 1) })
+    act(() => {
+      rendered.result.current.handleInputChange('@', 1)
+    })
     expect(rendered.result.current.fileMentionOpen).toBe(true)
 
-    act(() => { rendered.result.current.handleKeyDown(makeKeyEvent('Escape')) })
+    act(() => {
+      rendered.result.current.handleKeyDown(makeKeyEvent('Escape'))
+    })
     expect(rendered.result.current.fileMentionOpen).toBe(false)
   })
 
   it('Escape returns true even when no entries match', async () => {
     const { rendered } = setup({
-      listDirMock: mockListDir([], false, '/project'),
+      listDirMock: mockListDir([], false, '/project')
     })
-    act(() => { rendered.result.current.handleInputChange('@', 1) })
+    act(() => {
+      rendered.result.current.handleInputChange('@', 1)
+    })
 
     let consumed = false
-    act(() => { consumed = rendered.result.current.handleKeyDown(makeKeyEvent('Escape')) })
+    act(() => {
+      consumed = rendered.result.current.handleKeyDown(makeKeyEvent('Escape'))
+    })
     expect(consumed).toBe(true)
   })
 })
@@ -266,9 +302,13 @@ describe('useFileMention — handleKeyDown Escape', () => {
 describe('useFileMention — handleKeyDown with empty entries', () => {
   it('Enter on empty filteredEntries closes menu and returns true', async () => {
     const { rendered } = setup({
-      listDirMock: vi.fn().mockResolvedValue({ entries: [], isRoot: false, resolvedPath: '/project' }),
+      listDirMock: vi
+        .fn()
+        .mockResolvedValue({ entries: [], isRoot: false, resolvedPath: '/project' })
     })
-    act(() => { rendered.result.current.handleInputChange('@', 1) })
+    act(() => {
+      rendered.result.current.handleInputChange('@', 1)
+    })
 
     // Apply a filter that yields no results by typing past the entries
     act(() => {
@@ -283,16 +323,20 @@ describe('useFileMention — handleKeyDown with empty entries', () => {
 
     // Close via Enter while entries may be empty
     let consumed = false
-    act(() => { consumed = rendered.result.current.handleKeyDown(makeKeyEvent('Enter')) })
+    act(() => {
+      consumed = rendered.result.current.handleKeyDown(makeKeyEvent('Enter'))
+    })
     expect(consumed).toBe(true)
     expect(rendered.result.current.fileMentionOpen).toBe(false)
   })
 
   it('Tab on empty filteredEntries closes menu and returns true', async () => {
     const { rendered } = setup({
-      listDirMock: vi.fn().mockResolvedValue({ entries: [], isRoot: true, resolvedPath: '/' }),
+      listDirMock: vi.fn().mockResolvedValue({ entries: [], isRoot: true, resolvedPath: '/' })
     })
-    act(() => { rendered.result.current.handleInputChange('@', 1) })
+    act(() => {
+      rendered.result.current.handleInputChange('@', 1)
+    })
 
     await waitFor(() => {
       // entries loaded (empty list, root = true so no .. prepended)
@@ -300,7 +344,9 @@ describe('useFileMention — handleKeyDown with empty entries', () => {
     })
 
     let consumed = false
-    act(() => { consumed = rendered.result.current.handleKeyDown(makeKeyEvent('Tab')) })
+    act(() => {
+      consumed = rendered.result.current.handleKeyDown(makeKeyEvent('Tab'))
+    })
     expect(consumed).toBe(true)
     expect(rendered.result.current.fileMentionOpen).toBe(false)
   })
@@ -314,7 +360,9 @@ describe('useFileMention — handleConfirm', () => {
   it('confirms a file: inserts @filename and closes menu', async () => {
     const { rendered, state, updateText } = setup()
     // Simulate "@" typed at cursor 0 in empty input
-    act(() => { rendered.result.current.handleInputChange('@', 1) })
+    act(() => {
+      rendered.result.current.handleInputChange('@', 1)
+    })
     updateText('@')
 
     await waitFor(() => {
@@ -322,22 +370,24 @@ describe('useFileMention — handleConfirm', () => {
     })
 
     const fileEntry: DirEntry = { name: 'README.md', isDirectory: false }
-    act(() => { rendered.result.current.handleConfirm(fileEntry) })
+    act(() => {
+      rendered.result.current.handleConfirm(fileEntry)
+    })
 
     expect(state.text).toBe('@README.md ')
     expect(rendered.result.current.fileMentionOpen).toBe(false)
   })
 
   it('wraps path containing spaces in double quotes', async () => {
-    const spacedEntries: DirEntry[] = [
-      { name: 'my file.txt', isDirectory: false },
-    ]
+    const spacedEntries: DirEntry[] = [{ name: 'my file.txt', isDirectory: false }]
     // isRoot: false keeps fileMentionDir empty; the hook builds fullPath as just
     // the entry name when no subdirectory has been navigated into.
     const { rendered, state, updateText } = setup({
-      listDirMock: mockListDir(spacedEntries, false, '/project'),
+      listDirMock: mockListDir(spacedEntries, false, '/project')
     })
-    act(() => { rendered.result.current.handleInputChange('@', 1) })
+    act(() => {
+      rendered.result.current.handleInputChange('@', 1)
+    })
     updateText('@')
 
     await waitFor(() => {
@@ -345,7 +395,9 @@ describe('useFileMention — handleConfirm', () => {
     })
 
     const fileEntry: DirEntry = { name: 'my file.txt', isDirectory: false }
-    act(() => { rendered.result.current.handleConfirm(fileEntry) })
+    act(() => {
+      rendered.result.current.handleConfirm(fileEntry)
+    })
 
     expect(state.text).toBe('@"my file.txt" ')
     expect(rendered.result.current.fileMentionOpen).toBe(false)
@@ -353,7 +405,9 @@ describe('useFileMention — handleConfirm', () => {
 
   it('resets index to 0 after confirm', async () => {
     const { rendered, updateText } = setup()
-    act(() => { rendered.result.current.handleInputChange('@', 1) })
+    act(() => {
+      rendered.result.current.handleInputChange('@', 1)
+    })
     updateText('@')
 
     await waitFor(() => {
@@ -361,14 +415,18 @@ describe('useFileMention — handleConfirm', () => {
     })
 
     rendered.rerender()
-    act(() => { rendered.result.current.handleKeyDown(makeKeyEvent('ArrowDown')) })
+    act(() => {
+      rendered.result.current.handleKeyDown(makeKeyEvent('ArrowDown'))
+    })
 
     await waitFor(() => {
       expect(rendered.result.current.fileMentionIndex).toBe(1)
     })
 
     const fileEntry: DirEntry = { name: 'README.md', isDirectory: false }
-    act(() => { rendered.result.current.handleConfirm(fileEntry) })
+    act(() => {
+      rendered.result.current.handleConfirm(fileEntry)
+    })
     expect(rendered.result.current.fileMentionIndex).toBe(0)
   })
 })
@@ -380,7 +438,9 @@ describe('useFileMention — handleConfirm', () => {
 describe('useFileMention — handleNavigate', () => {
   it('navigating into a directory updates text with dir/', async () => {
     const { rendered, state, updateText } = setup()
-    act(() => { rendered.result.current.handleInputChange('@', 1) })
+    act(() => {
+      rendered.result.current.handleInputChange('@', 1)
+    })
     updateText('@')
 
     await waitFor(() => {
@@ -388,13 +448,17 @@ describe('useFileMention — handleNavigate', () => {
     })
 
     const dirEntry: DirEntry = { name: 'src', isDirectory: true }
-    act(() => { rendered.result.current.handleNavigate(dirEntry) })
+    act(() => {
+      rendered.result.current.handleNavigate(dirEntry)
+    })
     expect(state.text).toBe('@src/')
   })
 
   it('handleNavigate with ".." on empty dir sets dir text to ".."', async () => {
     const { rendered, state, updateText } = setup()
-    act(() => { rendered.result.current.handleInputChange('@', 1) })
+    act(() => {
+      rendered.result.current.handleInputChange('@', 1)
+    })
     updateText('@')
 
     await waitFor(() => {
@@ -402,14 +466,18 @@ describe('useFileMention — handleNavigate', () => {
     })
 
     const up: DirEntry = { name: '..', isDirectory: true }
-    act(() => { rendered.result.current.handleNavigate(up) })
+    act(() => {
+      rendered.result.current.handleNavigate(up)
+    })
     // dir was '' → navigating up sets dir to '..'
     expect(state.text).toBe('@../')
   })
 
   it('handleNavigate with ".." when dir is ".." sets dir to "../.."', async () => {
     const { rendered, state, updateText } = setup()
-    act(() => { rendered.result.current.handleInputChange('@', 1) })
+    act(() => {
+      rendered.result.current.handleInputChange('@', 1)
+    })
     updateText('@')
 
     await waitFor(() => {
@@ -418,16 +486,22 @@ describe('useFileMention — handleNavigate', () => {
 
     const up: DirEntry = { name: '..', isDirectory: true }
     // First up: '' → '..'
-    act(() => { rendered.result.current.handleNavigate(up) })
+    act(() => {
+      rendered.result.current.handleNavigate(up)
+    })
     updateText(state.text)
     // Simulate another up navigation — hook uses its own internal dir state
-    act(() => { rendered.result.current.handleNavigate(up) })
+    act(() => {
+      rendered.result.current.handleNavigate(up)
+    })
     expect(state.text).toBe('@../../')
   })
 
   it('does not navigate into non-directory entries', async () => {
     const { rendered, state, updateText } = setup()
-    act(() => { rendered.result.current.handleInputChange('@', 1) })
+    act(() => {
+      rendered.result.current.handleInputChange('@', 1)
+    })
     updateText('@')
 
     await waitFor(() => {
@@ -436,7 +510,9 @@ describe('useFileMention — handleNavigate', () => {
 
     const initialText = state.text
     const fileEntry: DirEntry = { name: 'README.md', isDirectory: false }
-    act(() => { rendered.result.current.handleNavigate(fileEntry) })
+    act(() => {
+      rendered.result.current.handleNavigate(fileEntry)
+    })
     // handleNavigate returns early for non-directories — text unchanged
     expect(state.text).toBe(initialText)
   })
@@ -449,10 +525,14 @@ describe('useFileMention — handleNavigate', () => {
 describe('useFileMention — close', () => {
   it('close() sets fileMentionOpen to false', async () => {
     const { rendered } = setup()
-    act(() => { rendered.result.current.handleInputChange('@', 1) })
+    act(() => {
+      rendered.result.current.handleInputChange('@', 1)
+    })
     expect(rendered.result.current.fileMentionOpen).toBe(true)
 
-    act(() => { rendered.result.current.close() })
+    act(() => {
+      rendered.result.current.close()
+    })
     expect(rendered.result.current.fileMentionOpen).toBe(false)
   })
 
@@ -460,7 +540,9 @@ describe('useFileMention — close', () => {
     // close() only resets open/anchor/dir — index is intentionally left as-is.
     // It is reset to 0 by handleConfirm, handleNavigate, and handleInputChange on open.
     const { rendered, updateText } = setup()
-    act(() => { rendered.result.current.handleInputChange('@', 1) })
+    act(() => {
+      rendered.result.current.handleInputChange('@', 1)
+    })
     updateText('@')
 
     await waitFor(() => {
@@ -468,20 +550,28 @@ describe('useFileMention — close', () => {
     })
 
     rendered.rerender()
-    act(() => { rendered.result.current.handleKeyDown(makeKeyEvent('ArrowDown')) })
+    act(() => {
+      rendered.result.current.handleKeyDown(makeKeyEvent('ArrowDown'))
+    })
 
     await waitFor(() => {
       expect(rendered.result.current.fileMentionIndex).toBe(1)
     })
 
-    act(() => { rendered.result.current.close() })
+    act(() => {
+      rendered.result.current.close()
+    })
     expect(rendered.result.current.fileMentionIndex).toBe(1)
   })
 
   it('close() clears filteredEntries (menu becomes closed)', () => {
     const { rendered } = setup()
-    act(() => { rendered.result.current.handleInputChange('@', 1) })
-    act(() => { rendered.result.current.close() })
+    act(() => {
+      rendered.result.current.handleInputChange('@', 1)
+    })
+    act(() => {
+      rendered.result.current.close()
+    })
     expect(rendered.result.current.filteredEntries).toHaveLength(0)
   })
 })
@@ -495,14 +585,18 @@ describe('useFileMention — backslash normalisation', () => {
     const { rendered, state } = setup()
 
     // Open the menu
-    act(() => { rendered.result.current.handleInputChange('@', 1) })
+    act(() => {
+      rendered.result.current.handleInputChange('@', 1)
+    })
 
     await waitFor(() => {
       expect(rendered.result.current.filteredEntries.length).toBeGreaterThan(0)
     })
 
     // Simulate user typing a backslash (e.g. on Windows paste): "@src\"
-    act(() => { rendered.result.current.handleInputChange('@src\\', 5) })
+    act(() => {
+      rendered.result.current.handleInputChange('@src\\', 5)
+    })
 
     // The hook should have rewritten the text to use forward slash
     expect(state.text).toBe('@src/')

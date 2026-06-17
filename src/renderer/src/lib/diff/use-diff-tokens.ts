@@ -32,7 +32,7 @@ export function useDiffTokens(
     if (oldContent != null && newContent != null) {
       return {
         oldTokens: tokenizeFullContent(oldContent, lang),
-        newTokens: tokenizeFullContent(newContent, lang),
+        newTokens: tokenizeFullContent(newContent, lang)
       }
     }
 

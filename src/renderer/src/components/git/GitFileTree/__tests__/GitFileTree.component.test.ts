@@ -30,7 +30,7 @@ vi.mock('../View', () => ({
   GitFileTreeView: (props: GitFileTreeViewProps) => {
     viewProps = props
     return null
-  },
+  }
 }))
 
 // ---------------------------------------------------------------------------
@@ -60,11 +60,14 @@ function makeGitStatus(files: GitFileStatus[] = []): GitStatusData {
     unstaged: files.filter((f) => f.index === ' ' || f.index === '?').map((f) => f.path),
     untracked: [],
     linesAdded: 0,
-    linesRemoved: 0,
+    linesRemoved: 0
   }
 }
 
-const fakeEvent = { stopPropagation: vi.fn(), preventDefault: vi.fn() } as unknown as React.MouseEvent
+const fakeEvent = {
+  stopPropagation: vi.fn(),
+  preventDefault: vi.fn()
+} as unknown as React.MouseEvent
 
 // ---------------------------------------------------------------------------
 // Setup / teardown
@@ -120,7 +123,7 @@ describe('GitFileTree FC — rendered', () => {
       directories: [],
       recentSessionIds: [],
       pinnedSessionIds: [],
-      customTitles: {},
+      customTitles: {}
     })
   })
 
@@ -207,7 +210,7 @@ describe('GitFileTree FC — rendered', () => {
   it('onToggleStageDirFiles calls gitStageFile for each file when stage=true', async () => {
     const files: GitFileStatus[] = [
       { path: 'src/c.ts', index: ' ', working: 'M' },
-      { path: 'src/d.ts', index: ' ', working: 'A' },
+      { path: 'src/d.ts', index: ' ', working: 'A' }
     ]
     render(React.createElement(GitFileTree))
 
@@ -225,7 +228,7 @@ describe('GitFileTree FC — rendered', () => {
   it('onToggleStageDirFiles calls gitUnstageFile for each file when stage=false', async () => {
     const files: GitFileStatus[] = [
       { path: 'src/e.ts', index: 'M', working: ' ' },
-      { path: 'src/f.ts', index: 'A', working: ' ' },
+      { path: 'src/f.ts', index: 'A', working: ' ' }
     ]
     render(React.createElement(GitFileTree))
 

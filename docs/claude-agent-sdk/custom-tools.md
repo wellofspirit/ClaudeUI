@@ -13,35 +13,39 @@ Use the `createSdkMcpServer` and `tool` helper functions to define type-safe cus
 <CodeGroup>
 
 ```typescript TypeScript
-import { query, tool, createSdkMcpServer } from "@anthropic-ai/claude-agent-sdk";
-import { z } from "zod";
+import { query, tool, createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk'
+import { z } from 'zod'
 
 // Create an SDK MCP server with custom tools
 const customServer = createSdkMcpServer({
-  name: "my-custom-tools",
-  version: "1.0.0",
+  name: 'my-custom-tools',
+  version: '1.0.0',
   tools: [
     tool(
-      "get_weather",
-      "Get current temperature for a location using coordinates",
+      'get_weather',
+      'Get current temperature for a location using coordinates',
       {
-        latitude: z.number().describe("Latitude coordinate"),
-        longitude: z.number().describe("Longitude coordinate")
+        latitude: z.number().describe('Latitude coordinate'),
+        longitude: z.number().describe('Longitude coordinate')
       },
       async (args) => {
-        const response = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${args.latitude}&longitude=${args.longitude}&current=temperature_2m&temperature_unit=fahrenheit`);
-        const data = await response.json();
+        const response = await fetch(
+          `https://api.open-meteo.com/v1/forecast?latitude=${args.latitude}&longitude=${args.longitude}&current=temperature_2m&temperature_unit=fahrenheit`
+        )
+        const data = await response.json()
 
         return {
-          content: [{
-            type: "text",
-            text: `Temperature: ${data.current.temperature_2m}°F`
-          }]
-        };
+          content: [
+            {
+              type: 'text',
+              text: `Temperature: ${data.current.temperature_2m}°F`
+            }
+          ]
+        }
       }
     )
   ]
-});
+})
 ```
 
 ```python Python
@@ -87,6 +91,7 @@ Pass the custom server to the `query` function via the `mcpServers` option as a 
 ### Tool Name Format
 
 When MCP tools are exposed to Claude, their names follow a specific format:
+
 - Pattern: `mcp__{server_name}__{tool_name}`
 - Example: A tool named `get_weather` in server `my-custom-tools` becomes `mcp__my-custom-tools__get_weather`
 
@@ -97,35 +102,35 @@ You can control which tools Claude can use via the `allowedTools` option:
 <CodeGroup>
 
 ```typescript TypeScript
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { query } from '@anthropic-ai/claude-agent-sdk'
 
 // Use the custom tools in your query with streaming input
 async function* generateMessages() {
   yield {
-    type: "user" as const,
+    type: 'user' as const,
     message: {
-      role: "user" as const,
+      role: 'user' as const,
       content: "What's the weather in San Francisco?"
     }
-  };
+  }
 }
 
 for await (const message of query({
-  prompt: generateMessages(),  // Use async generator for streaming input
+  prompt: generateMessages(), // Use async generator for streaming input
   options: {
     mcpServers: {
-      "my-custom-tools": customServer  // Pass as object/dictionary, not array
+      'my-custom-tools': customServer // Pass as object/dictionary, not array
     },
     // Optionally specify which tools Claude can use
     allowedTools: [
-      "mcp__my-custom-tools__get_weather",  // Allow the weather tool
+      'mcp__my-custom-tools__get_weather' // Allow the weather tool
       // Add other tools as needed
     ],
     maxTurns: 3
   }
 })) {
-  if (message.type === "result" && message.subtype === "success") {
-    console.log(message.result);
+  if (message.type === 'result' && message.subtype === 'success') {
+    console.log(message.result)
   }
 }
 ```
@@ -164,35 +169,62 @@ When your MCP server has multiple tools, you can selectively allow them:
 
 ```typescript TypeScript
 const multiToolServer = createSdkMcpServer({
-  name: "utilities",
-  version: "1.0.0",
+  name: 'utilities',
+  version: '1.0.0',
   tools: [
-    tool("calculate", "Perform calculations", { /* ... */ }, async (args) => { /* ... */ }),
-    tool("translate", "Translate text", { /* ... */ }, async (args) => { /* ... */ }),
-    tool("search_web", "Search the web", { /* ... */ }, async (args) => { /* ... */ })
+    tool(
+      'calculate',
+      'Perform calculations',
+      {
+        /* ... */
+      },
+      async (args) => {
+        /* ... */
+      }
+    ),
+    tool(
+      'translate',
+      'Translate text',
+      {
+        /* ... */
+      },
+      async (args) => {
+        /* ... */
+      }
+    ),
+    tool(
+      'search_web',
+      'Search the web',
+      {
+        /* ... */
+      },
+      async (args) => {
+        /* ... */
+      }
+    )
   ]
-});
+})
 
 // Allow only specific tools with streaming input
 async function* generateMessages() {
   yield {
-    type: "user" as const,
+    type: 'user' as const,
     message: {
-      role: "user" as const,
+      role: 'user' as const,
       content: "Calculate 5 + 3 and translate 'hello' to Spanish"
     }
-  };
+  }
 }
 
 for await (const message of query({
-  prompt: generateMessages(),  // Use async generator for streaming input
+  prompt: generateMessages(), // Use async generator for streaming input
   options: {
     mcpServers: {
       utilities: multiToolServer
     },
     allowedTools: [
-      "mcp__utilities__calculate",   // Allow calculator
-      "mcp__utilities__translate",   // Allow translator
+      'mcp__utilities__calculate', // Allow calculator
+      'mcp__utilities__translate' // Allow translator
       // "mcp__utilities__search_web" is NOT allowed
     ]
   }
@@ -262,11 +294,11 @@ The `@tool` decorator supports various schema definition approaches for type saf
 <CodeGroup>
 
 ```typescript TypeScript
-import { z } from "zod";
+import { z } from 'zod'
 
 tool(
-  "process_data",
-  "Process structured data with type safety",
+  'process_data',
+  'Process structured data with type safety',
   {
     // Zod schema defines both runtime validation and TypeScript types
     data: z.object({
@@ -275,20 +307,22 @@ tool(
       email: z.string().email(),
       preferences: z.array(z.string()).optional()
     }),
-    format: z.enum(["json", "csv", "xml"]).default("json")
+    format: z.enum(['json', 'csv', 'xml']).default('json')
   },
   async (args) => {
     // args is fully typed based on the schema
     // TypeScript knows: args.data.name is string, args.data.age is number, etc.
-    console.log(`Processing ${args.data.name}'s data as ${args.format}`);
-    
+    console.log(`Processing ${args.data.name}'s data as ${args.format}`)
+
     // Your processing logic here
     return {
-      content: [{
-        type: "text",
-        text: `Processed data for ${args.data.name}`
-      }]
-    };
+      content: [
+        {
+          type: 'text',
+          text: `Processed data for ${args.data.name}`
+        }
+      ]
+    }
   }
 )
 ```
@@ -313,9 +347,9 @@ async def process_data(args: dict[str, Any]) -> dict[str, Any]:
     age = args["age"]
     email = args["email"]
     preferences = args.get("preferences", [])
-    
+
     print(f"Processing {name}'s data (age: {age})")
-    
+
     return {
         "content": [{
             "type": "text",
@@ -358,38 +392,44 @@ Handle errors gracefully to provide meaningful feedback:
 
 ```typescript TypeScript
 tool(
-  "fetch_data",
-  "Fetch data from an API",
+  'fetch_data',
+  'Fetch data from an API',
   {
-    endpoint: z.string().url().describe("API endpoint URL")
+    endpoint: z.string().url().describe('API endpoint URL')
   },
   async (args) => {
     try {
-      const response = await fetch(args.endpoint);
-      
+      const response = await fetch(args.endpoint)
+
       if (!response.ok) {
         return {
-          content: [{
-            type: "text",
-            text: `API error: ${response.status} ${response.statusText}`
-          }]
-        };
+          content: [
+            {
+              type: 'text',
+              text: `API error: ${response.status} ${response.statusText}`
+            }
+          ]
+        }
       }
-      
-      const data = await response.json();
+
+      const data = await response.json()
       return {
-        content: [{
-          type: "text",
-          text: JSON.stringify(data, null, 2)
-        }]
-      };
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify(data, null, 2)
+          }
+        ]
+      }
     } catch (error) {
       return {
-        content: [{
-          type: "text",
-          text: `Failed to fetch data: ${error.message}`
-        }]
-      };
+        content: [
+          {
+            type: 'text',
+            text: `Failed to fetch data: ${error.message}`
+          }
+        ]
+      }
     }
   }
 )
@@ -416,7 +456,7 @@ async def fetch_data(args: dict[str, Any]) -> dict[str, Any]:
                             "text": f"API error: {response.status} {response.reason}"
                         }]
                     }
-                
+
                 data = await response.json()
                 return {
                     "content": [{
@@ -443,28 +483,30 @@ async def fetch_data(args: dict[str, Any]) -> dict[str, Any]:
 
 ```typescript TypeScript
 const databaseServer = createSdkMcpServer({
-  name: "database-tools",
-  version: "1.0.0",
+  name: 'database-tools',
+  version: '1.0.0',
   tools: [
     tool(
-      "query_database",
-      "Execute a database query",
+      'query_database',
+      'Execute a database query',
       {
-        query: z.string().describe("SQL query to execute"),
-        params: z.array(z.any()).optional().describe("Query parameters")
+        query: z.string().describe('SQL query to execute'),
+        params: z.array(z.any()).optional().describe('Query parameters')
       },
       async (args) => {
-        const results = await db.query(args.query, args.params || []);
+        const results = await db.query(args.query, args.params || [])
         return {
-          content: [{
-            type: "text",
-            text: `Found ${results.length} rows:\n${JSON.stringify(results, null, 2)}`
-          }]
-        };
+          content: [
+            {
+              type: 'text',
+              text: `Found ${results.length} rows:\n${JSON.stringify(results, null, 2)}`
+            }
+          ]
+        }
       }
     )
   ]
-});
+})
 ```
 
 ```python Python
@@ -500,51 +542,53 @@ database_server = create_sdk_mcp_server(
 
 ```typescript TypeScript
 const apiGatewayServer = createSdkMcpServer({
-  name: "api-gateway",
-  version: "1.0.0",
+  name: 'api-gateway',
+  version: '1.0.0',
   tools: [
     tool(
-      "api_request",
-      "Make authenticated API requests to external services",
+      'api_request',
+      'Make authenticated API requests to external services',
       {
-        service: z.enum(["stripe", "github", "openai", "slack"]).describe("Service to call"),
-        endpoint: z.string().describe("API endpoint path"),
-        method: z.enum(["GET", "POST", "PUT", "DELETE"]).describe("HTTP method"),
-        body: z.record(z.any()).optional().describe("Request body"),
-        query: z.record(z.string()).optional().describe("Query parameters")
+        service: z.enum(['stripe', 'github', 'openai', 'slack']).describe('Service to call'),
+        endpoint: z.string().describe('API endpoint path'),
+        method: z.enum(['GET', 'POST', 'PUT', 'DELETE']).describe('HTTP method'),
+        body: z.record(z.any()).optional().describe('Request body'),
+        query: z.record(z.string()).optional().describe('Query parameters')
       },
       async (args) => {
         const config = {
-          stripe: { baseUrl: "https://api.stripe.com/v1", key: process.env.STRIPE_KEY },
-          github: { baseUrl: "https://api.github.com", key: process.env.GITHUB_TOKEN },
-          openai: { baseUrl: "https://api.openai.com/v1", key: process.env.OPENAI_KEY },
-          slack: { baseUrl: "https://slack.com/api", key: process.env.SLACK_TOKEN }
-        };
-        
-        const { baseUrl, key } = config[args.service];
-        const url = new URL(`${baseUrl}${args.endpoint}`);
-        
-        if (args.query) {
-          Object.entries(args.query).forEach(([k, v]) => url.searchParams.set(k, v));
+          stripe: { baseUrl: 'https://api.stripe.com/v1', key: process.env.STRIPE_KEY },
+          github: { baseUrl: 'https://api.github.com', key: process.env.GITHUB_TOKEN },
+          openai: { baseUrl: 'https://api.openai.com/v1', key: process.env.OPENAI_KEY },
+          slack: { baseUrl: 'https://slack.com/api', key: process.env.SLACK_TOKEN }
         }
-        
+
+        const { baseUrl, key } = config[args.service]
+        const url = new URL(`${baseUrl}${args.endpoint}`)
+
+        if (args.query) {
+          Object.entries(args.query).forEach(([k, v]) => url.searchParams.set(k, v))
+        }
+
         const response = await fetch(url, {
           method: args.method,
-          headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+          headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
           body: args.body ? JSON.stringify(args.body) : undefined
-        });
-        
-        const data = await response.json();
+        })
+
+        const data = await response.json()
         return {
-          content: [{
-            type: "text",
-            text: JSON.stringify(data, null, 2)
-          }]
-        };
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(data, null, 2)
+            }
+          ]
+        }
       }
     )
   ]
-});
+})
 ```
 
 ```python Python
@@ -576,16 +620,16 @@ async def api_request(args: dict[str, Any]) -> dict[str, Any]:
         "openai": {"base_url": "https://api.openai.com/v1", "key": os.environ["OPENAI_KEY"]},
         "slack": {"base_url": "https://slack.com/api", "key": os.environ["SLACK_TOKEN"]}
     }
-    
+
     service_config = config[args["service"]]
     url = f"{service_config['base_url']}{args['endpoint']}"
-    
+
     if args.get("query"):
         params = "&".join([f"{k}={v}" for k, v in args["query"].items()])
         url += f"?{params}"
-    
+
     headers = {"Authorization": f"Bearer {service_config['key']}", "Content-Type": "application/json"}
-    
+
     async with aiohttp.ClientSession() as session:
         async with session.request(
             args["method"], url, headers=headers, json=args.get("body")
@@ -613,68 +657,75 @@ api_gateway_server = create_sdk_mcp_server(
 
 ```typescript TypeScript
 const calculatorServer = createSdkMcpServer({
-  name: "calculator",
-  version: "1.0.0",
+  name: 'calculator',
+  version: '1.0.0',
   tools: [
     tool(
-      "calculate",
-      "Perform mathematical calculations",
+      'calculate',
+      'Perform mathematical calculations',
       {
-        expression: z.string().describe("Mathematical expression to evaluate"),
-        precision: z.number().optional().default(2).describe("Decimal precision")
+        expression: z.string().describe('Mathematical expression to evaluate'),
+        precision: z.number().optional().default(2).describe('Decimal precision')
       },
       async (args) => {
         try {
           // Use a safe math evaluation library in production
-          const result = eval(args.expression); // Example only!
-          const formatted = Number(result).toFixed(args.precision);
-          
+          const result = eval(args.expression) // Example only!
+          const formatted = Number(result).toFixed(args.precision)
+
           return {
-            content: [{
-              type: "text",
-              text: `${args.expression} = ${formatted}`
-            }]
-          };
+            content: [
+              {
+                type: 'text',
+                text: `${args.expression} = ${formatted}`
+              }
+            ]
+          }
         } catch (error) {
           return {
-            content: [{
-              type: "text",
-              text: `Error: Invalid expression - ${error.message}`
-            }]
-          };
+            content: [
+              {
+                type: 'text',
+                text: `Error: Invalid expression - ${error.message}`
+              }
+            ]
+          }
         }
       }
     ),
     tool(
-      "compound_interest",
-      "Calculate compound interest for an investment",
+      'compound_interest',
+      'Calculate compound interest for an investment',
       {
-        principal: z.number().positive().describe("Initial investment amount"),
-        rate: z.number().describe("Annual interest rate (as decimal, e.g., 0.05 for 5%)"),
-        time: z.number().positive().describe("Investment period in years"),
-        n: z.number().positive().default(12).describe("Compounding frequency per year")
+        principal: z.number().positive().describe('Initial investment amount'),
+        rate: z.number().describe('Annual interest rate (as decimal, e.g., 0.05 for 5%)'),
+        time: z.number().positive().describe('Investment period in years'),
+        n: z.number().positive().default(12).describe('Compounding frequency per year')
       },
       async (args) => {
-        const amount = args.principal * Math.pow(1 + args.rate / args.n, args.n * args.time);
-        const interest = amount - args.principal;
-        
+        const amount = args.principal * Math.pow(1 + args.rate / args.n, args.n * args.time)
+        const interest = amount - args.principal
+
         return {
-          content: [{
-            type: "text",
-            text: `Investment Analysis:\n` +
-                  `Principal: $${args.principal.toFixed(2)}\n` +
-                  `Rate: ${(args.rate * 100).toFixed(2)}%\n` +
-                  `Time: ${args.time} years\n` +
-                  `Compounding: ${args.n} times per year\n\n` +
-                  `Final Amount: $${amount.toFixed(2)}\n` +
-                  `Interest Earned: $${interest.toFixed(2)}\n` +
-                  `Return: ${((interest / args.principal) * 100).toFixed(2)}%`
-          }]
-        };
+          content: [
+            {
+              type: 'text',
+              text:
+                `Investment Analysis:\n` +
+                `Principal: $${args.principal.toFixed(2)}\n` +
+                `Rate: ${(args.rate * 100).toFixed(2)}%\n` +
+                `Time: ${args.time} years\n` +
+                `Compounding: ${args.n} times per year\n\n` +
+                `Final Amount: $${amount.toFixed(2)}\n` +
+                `Interest Earned: $${interest.toFixed(2)}\n` +
+                `Return: ${((interest / args.principal) * 100).toFixed(2)}%`
+            }
+          ]
+        }
       }
     )
   ]
-});
+})
 ```
 
 ```python Python
@@ -692,7 +743,7 @@ async def calculate(args: dict[str, Any]) -> dict[str, Any]:
         result = eval(args["expression"], {"__builtins__": {}})
         precision = args.get("precision", 2)
         formatted = round(result, precision)
-        
+
         return {
             "content": [{
                 "type": "text",
@@ -717,10 +768,10 @@ async def compound_interest(args: dict[str, Any]) -> dict[str, Any]:
     rate = args["rate"]
     time = args["time"]
     n = args.get("n", 12)
-    
+
     amount = principal * (1 + rate / n) ** (n * time)
     interest = amount - principal
-    
+
     return {
         "content": [{
             "type": "text",

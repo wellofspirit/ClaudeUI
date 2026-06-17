@@ -15,7 +15,7 @@ export class NdjsonReader {
   constructor(
     stream: Readable,
     private readonly onLine: (obj: JsonLine) => void,
-    private readonly onError?: (err: Error) => void,
+    private readonly onError?: (err: Error) => void
   ) {
     stream.setEncoding('utf8')
     stream.on('data', (chunk: string) => this.ingest(chunk))

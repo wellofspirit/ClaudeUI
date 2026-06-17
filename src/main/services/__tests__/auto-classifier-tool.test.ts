@@ -2,7 +2,11 @@
  * @vitest-environment node
  */
 import { describe, it, expect, vi } from 'vitest'
-import { createClassifierServer, type ClassifyResult, type ClassifyResultHandler } from '../auto-classifier-tool'
+import {
+  createClassifierServer,
+  type ClassifyResult,
+  type ClassifyResultHandler
+} from '../auto-classifier-tool'
 
 describe('auto-classifier-tool', () => {
   describe('createClassifierServer', () => {

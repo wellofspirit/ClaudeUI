@@ -73,7 +73,9 @@ console.log('\n--- Locating header utilization getter (LR4) ---')
 // Pattern: function <LR4>(){return <kh8>}function <hR4>
 // v2.1.119+ appended ["overage","overage"] (and may add further bucket pairs)
 // to the for-loop array. Allow any number of trailing ["str","str"] entries.
-const lr4Re = new RegExp(`function (${V})\\(\\)\\{return (${V})\\}function (${V})\\(${V}\\)\\{let ${V}=\\{\\};for\\(let\\[${V},${V}\\]of\\[\\["five_hour","5h"\\],\\["seven_day","7d"\\](?:,\\["[\\w_]+","[\\w_]+"\\])*\\]\\)`)
+const lr4Re = new RegExp(
+  `function (${V})\\(\\)\\{return (${V})\\}function (${V})\\(${V}\\)\\{let ${V}=\\{\\};for\\(let\\[${V},${V}\\]of\\[\\["five_hour","5h"\\],\\["seven_day","7d"\\](?:,\\["[\\w_]+","[\\w_]+"\\])*\\]\\)`
+)
 const lr4Match = lr4Re.exec(src)
 if (!lr4Match) {
   console.error('ERROR: Cannot locate LR4 (header utilization getter) via hR4 context.')
@@ -100,7 +102,9 @@ console.log('\n--- Locating pF1 call in stream loop ---')
 // Find pF1 function name dynamically: it's the function that calls hR4 and
 // contains "anthropic-ratelimit-unified-status" via SR4.
 // Pattern: function <pF1>(<q>){let <K>=<I7>();if(!<mN6>(<K>))
-const pf1DefRe = new RegExp(`function (${V})\\(${V}\\)\\{let ${V}=(${V})\\(\\);if\\(!${V}\\(${V}\\)\\)\\{if\\(${kh8Var.replace(/\$/g, '\\$')}=\\{\\}`)
+const pf1DefRe = new RegExp(
+  `function (${V})\\(${V}\\)\\{let ${V}=(${V})\\(\\);if\\(!${V}\\(${V}\\)\\)\\{if\\(${kh8Var.replace(/\$/g, '\\$')}=\\{\\}`
+)
 const pf1DefMatch = pf1DefRe.exec(src)
 if (!pf1DefMatch) {
   console.error('ERROR: Cannot locate pF1 function definition.')
@@ -122,7 +126,9 @@ if (!callSiteMatch) {
 // Verify uniqueness
 const allCallSiteMatches = [...src.matchAll(new RegExp(callSiteRe, 'g'))]
 if (allCallSiteMatches.length > 1) {
-  console.error(`ERROR: pF1 call site matched ${allCallSiteMatches.length} times (expected 1). Aborting.`)
+  console.error(
+    `ERROR: pF1 call site matched ${allCallSiteMatches.length} times (expected 1). Aborting.`
+  )
   process.exit(1)
 }
 
@@ -147,8 +153,8 @@ const replacement =
   original +
   PATCH_MARKER +
   `,process.stdout.write(JSON.stringify({` +
-    `type:"rate_limit_event",` +
-    `header_utilization:${lr4Fn}()` +
+  `type:"rate_limit_event",` +
+  `header_utilization:${lr4Fn}()` +
   `})+"\\n")`
 
 src = src.replace(original, replacement)

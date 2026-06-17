@@ -39,12 +39,11 @@ function LiveHarness() {
 }
 
 beforeEach(() => {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   ;(globalThis as any).window.api = {
-    saveSettings: vi.fn(),
+    saveSettings: vi.fn()
   }
   useSessionStore.setState((s) => ({
-    settings: { ...s.settings, searchCaseSensitive: false },
+    settings: { ...s.settings, searchCaseSensitive: false }
   }))
 })
 

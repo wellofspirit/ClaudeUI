@@ -102,7 +102,7 @@ function log(...args) {
 }
 
 function alignUp(n, align) {
-  return ((n + align - 1) / align | 0) * align
+  return (((n + align - 1) / align) | 0) * align
 }
 
 // ---------------------------------------------------------------------------
@@ -144,7 +144,10 @@ function parsePE(buf) {
   let bunSectionIdx = -1
   for (let i = 0; i < numSections; i++) {
     const s = sectionsOff + i * 40
-    const name = buf.subarray(s, s + 8).toString('ascii').replace(/\0+$/, '')
+    const name = buf
+      .subarray(s, s + 8)
+      .toString('ascii')
+      .replace(/\0+$/, '')
     if (name === '.bun') {
       bunSectionIdx = i
       bunSection = {
@@ -152,14 +155,16 @@ function parsePE(buf) {
         virtualSize: buf.readUInt32LE(s + 8),
         virtualAddress: buf.readUInt32LE(s + 12),
         rawSize: buf.readUInt32LE(s + 16),
-        rawOff: buf.readUInt32LE(s + 20),
+        rawOff: buf.readUInt32LE(s + 20)
       }
     }
   }
   if (!bunSection) die('.bun section not found')
   if (bunSectionIdx !== numSections - 1) {
-    die(`.bun must be the last section (was index ${bunSectionIdx} of ${numSections}); ` +
-        'shrinking would require shifting later sections, not implemented.')
+    die(
+      `.bun must be the last section (was index ${bunSectionIdx} of ${numSections}); ` +
+        'shrinking would require shifting later sections, not implemented.'
+    )
   }
 
   return {
@@ -170,7 +175,7 @@ function parsePE(buf) {
     numSections,
     fileAlignment,
     sectionAlignment,
-    bunSection,
+    bunSection
   }
 }
 
@@ -186,7 +191,8 @@ function parseMachO(buf) {
   const LC_SEGMENT_64 = 0x19
   const LC_CODE_SIGNATURE = 0x1d
 
-  if (buf.readUInt32LE(0) !== 0xfeedfacf) die('not a 64-bit LE Mach-O (universal-fat not supported)')
+  if (buf.readUInt32LE(0) !== 0xfeedfacf)
+    die('not a 64-bit LE Mach-O (universal-fat not supported)')
   const ncmds = buf.readUInt32LE(16)
 
   let p = 32
@@ -199,7 +205,10 @@ function parseMachO(buf) {
     const cmdsize = buf.readUInt32LE(p + 4)
 
     if (cmd === LC_SEGMENT_64) {
-      const segname = buf.subarray(p + 8, p + 24).toString('ascii').replace(/\0+$/, '')
+      const segname = buf
+        .subarray(p + 8, p + 24)
+        .toString('ascii')
+        .replace(/\0+$/, '')
       const nsects = buf.readUInt32LE(p + 64)
       if (segname === '__BUN') {
         bunSeg = {
@@ -209,24 +218,27 @@ function parseMachO(buf) {
           vmaddr: Number(buf.readBigUInt64LE(p + 24)),
           vmsize: Number(buf.readBigUInt64LE(p + 32)),
           fileoff: Number(buf.readBigUInt64LE(p + 40)),
-          filesize: Number(buf.readBigUInt64LE(p + 48)),
+          filesize: Number(buf.readBigUInt64LE(p + 48))
         }
         // Exactly one section expected inside __BUN
         if (nsects !== 1) die(`__BUN segment has ${nsects} sections (expected 1)`)
         const sp = p + 72
         bunSect = {
           headerOff: sp,
-          sectname: buf.subarray(sp, sp + 16).toString('ascii').replace(/\0+$/, ''),
+          sectname: buf
+            .subarray(sp, sp + 16)
+            .toString('ascii')
+            .replace(/\0+$/, ''),
           addr: Number(buf.readBigUInt64LE(sp + 32)),
           size: Number(buf.readBigUInt64LE(sp + 40)),
-          offset: buf.readUInt32LE(sp + 48),
+          offset: buf.readUInt32LE(sp + 48)
         }
       }
     } else if (cmd === LC_CODE_SIGNATURE) {
       codeSig = {
         headerOff: p,
         dataOff: buf.readUInt32LE(p + 8),
-        dataSize: buf.readUInt32LE(p + 12),
+        dataSize: buf.readUInt32LE(p + 12)
       }
     }
     p += cmdsize
@@ -255,7 +267,8 @@ function readBlobAtSection(buf, sectionOff, sectionSize) {
   // Trailer: magic at very end, Offsets immediately before magic
   const magicIdx = blob.lastIndexOf(BUN_MAGIC)
   if (magicIdx < 0) die('Bun magic not found in blob')
-  if (magicIdx !== blob.length - 16) die(`magic not at end of blob (at ${magicIdx}, expected ${blob.length - 16})`)
+  if (magicIdx !== blob.length - 16)
+    die(`magic not at end of blob (at ${magicIdx}, expected ${blob.length - 16})`)
 
   const offsetsOff = magicIdx - 32
   const byte_count = Number(blob.readBigUInt64LE(offsetsOff))
@@ -285,7 +298,8 @@ function readBlobAtSection(buf, sectionOff, sectionSize) {
     const loader = blob.readUInt8(e + 49)
     const module_format = blob.readUInt8(e + 50)
     const side = blob.readUInt8(e + 51)
-    const readBytes = ({ off, len }) => (len > 0 ? Buffer.from(blob.subarray(off, off + len)) : Buffer.alloc(0))
+    const readBytes = ({ off, len }) =>
+      len > 0 ? Buffer.from(blob.subarray(off, off + len)) : Buffer.alloc(0)
     modules.push({
       index: i,
       name: readBytes(name),
@@ -297,13 +311,12 @@ function readBlobAtSection(buf, sectionOff, sectionSize) {
       encoding,
       loader,
       module_format,
-      side,
+      side
     })
   }
 
-  const argvBytes = argv_len > 0
-    ? Buffer.from(blob.subarray(argv_off, argv_off + argv_len))
-    : Buffer.alloc(0)
+  const argvBytes =
+    argv_len > 0 ? Buffer.from(blob.subarray(argv_off, argv_off + argv_len)) : Buffer.alloc(0)
 
   return { modules, argv: argvBytes, entry_point_id, flags }
 }
@@ -320,16 +333,24 @@ function writeBlob({ modules, argv, entry_point_id, flags }) {
     modules.reduce(
       (s, m) =>
         s +
-        m.name.length + 1 +
-        m.contents.length + 1 +
-        m.sourcemap.length + 1 +
-        m.module_info.length + 1 +
-        m.bytecode_origin_path.length + 1,
-      0,
+        m.name.length +
+        1 +
+        m.contents.length +
+        1 +
+        m.sourcemap.length +
+        1 +
+        m.module_info.length +
+        1 +
+        m.bytecode_origin_path.length +
+        1,
+      0
     ) +
-    argv.length + 1 +
+    argv.length +
+    1 +
     modules.length * ENTRY_SIZE +
-    32 + 16 + 256 /* slack */
+    32 +
+    16 +
+    256 /* slack */
   const out = Buffer.alloc(estimate)
   let pos = 0
 
@@ -390,16 +411,24 @@ function writeBlob({ modules, argv, entry_point_id, flags }) {
 
   // Offsets struct sits at byte_count (= current pos), trailer follows.
   const byte_count = pos
-  out.writeBigUInt64LE(BigInt(byte_count), pos); pos += 8
-  out.writeUInt32LE(mod_off, pos); pos += 4
-  out.writeUInt32LE(mod_len, pos); pos += 4
-  out.writeUInt32LE(entry_point_id, pos); pos += 4
-  out.writeUInt32LE(argvPtr.off, pos); pos += 4
-  out.writeUInt32LE(argvPtr.len, pos); pos += 4
-  out.writeUInt32LE(flags, pos); pos += 4
+  out.writeBigUInt64LE(BigInt(byte_count), pos)
+  pos += 8
+  out.writeUInt32LE(mod_off, pos)
+  pos += 4
+  out.writeUInt32LE(mod_len, pos)
+  pos += 4
+  out.writeUInt32LE(entry_point_id, pos)
+  pos += 4
+  out.writeUInt32LE(argvPtr.off, pos)
+  pos += 4
+  out.writeUInt32LE(argvPtr.len, pos)
+  pos += 4
+  out.writeUInt32LE(flags, pos)
+  pos += 4
 
   // Magic
-  BUN_MAGIC.copy(out, pos); pos += BUN_MAGIC.length
+  BUN_MAGIC.copy(out, pos)
+  pos += BUN_MAGIC.length
 
   return out.subarray(0, pos)
 }
@@ -421,7 +450,7 @@ function rewriteMachO(buf, macho, newBlob) {
     die(
       `new blob (${newBlob.length} + 8-byte header = ${newSectionContentSize} bytes) ` +
         `exceeds __BUN,__bun section size ${bunSect.size}. ` +
-        'Growing the section requires shifting __LINKEDIT + code signature — not implemented.',
+        'Growing the section requires shifting __LINKEDIT + code signature — not implemented.'
     )
   }
 
@@ -465,8 +494,8 @@ function rewritePE(buf, pe, newBlob) {
   // size — Bun's loader reads the 8-byte header then the blob, and Windows
   // maps the whole section regardless, so using the aligned size for both
   // is safe and matches how the original was laid out.
-  out.writeUInt32LE(newSectionRawSize, bunSection.headerOff + 8)   // VirtualSize
-  out.writeUInt32LE(newSectionRawSize, bunSection.headerOff + 16)  // SizeOfRawData
+  out.writeUInt32LE(newSectionRawSize, bunSection.headerOff + 8) // VirtualSize
+  out.writeUInt32LE(newSectionRawSize, bunSection.headerOff + 16) // SizeOfRawData
 
   // Zero out Security (cert table) data directory at index 4 (offset 4*8=32).
   // This removes the reference to the now-truncated Authenticode cert.
@@ -476,10 +505,7 @@ function rewritePE(buf, pe, newBlob) {
   // Update SizeOfImage in optional header: size of image in memory, aligned
   // to SectionAlignment. It's the VirtualAddress of the last section + its
   // aligned VirtualSize. Our .bun is last; its VirtualAddress is unchanged.
-  const sizeOfImage = alignUp(
-    bunSection.virtualAddress + newSectionRawSize,
-    pe.sectionAlignment,
-  )
+  const sizeOfImage = alignUp(bunSection.virtualAddress + newSectionRawSize, pe.sectionAlignment)
   out.writeUInt32LE(sizeOfImage, pe.optHdrOff + 56)
 
   // Zero CheckSum field — optional, set to 0 when unknown; Windows loader
@@ -509,7 +535,7 @@ function main() {
   const format = detectFormat(buf)
   log(`format: ${format}`)
 
-  let sectionOff, sectionSize, origBlobLen
+  let sectionOff, sectionSize
   let container // parser-specific metadata used by the rewriter
 
   if (format === 'pe') {
@@ -523,23 +549,29 @@ function main() {
     sectionOff = macho.bunSect.offset
     sectionSize = macho.bunSect.size
     container = { kind: 'macho', macho }
-    log(`__BUN,__bun at 0x${sectionOff.toString(16)}, size ${sectionSize}` +
-        (macho.codeSig ? `, code-sig at 0x${macho.codeSig.dataOff.toString(16)}` : ''))
+    log(
+      `__BUN,__bun at 0x${sectionOff.toString(16)}, size ${sectionSize}` +
+        (macho.codeSig ? `, code-sig at 0x${macho.codeSig.dataOff.toString(16)}` : '')
+    )
   } else {
     die(
       `unsupported format "${format}" (first bytes: ${buf.subarray(0, 4).toString('hex')}). ` +
-        'PE (Windows) and 64-bit LE Mach-O (macOS arm64/x64) are supported; ELF (Linux) is planned.',
+        'PE (Windows) and 64-bit LE Mach-O (macOS arm64/x64) are supported; ELF (Linux) is planned.'
     )
   }
 
-  origBlobLen = Number(buf.readBigUInt64LE(sectionOff))
+  const origBlobLen = Number(buf.readBigUInt64LE(sectionOff))
 
   const graph = readBlobAtSection(buf, sectionOff, sectionSize)
-  log(`${graph.modules.length} modules, ${graph.argv.length} argv bytes, flags=0x${graph.flags.toString(16)}`)
+  log(
+    `${graph.modules.length} modules, ${graph.argv.length} argv bytes, flags=0x${graph.flags.toString(16)}`
+  )
   for (const m of graph.modules) {
-    log(`  [${m.index}] ${m.name.toString('utf8')} ` +
+    log(
+      `  [${m.index}] ${m.name.toString('utf8')} ` +
         `contents=${m.contents.length} bc=${m.bytecode.length} ` +
-        `enc=${m.encoding} ldr=${m.loader}`)
+        `enc=${m.encoding} ldr=${m.loader}`
+    )
   }
 
   const cli = findCliModule(graph.modules)
@@ -553,7 +585,7 @@ function main() {
     if (!newCli.subarray(0, 8).toString('utf8').startsWith('// @bun')) {
       die(
         `${args.newCli} is not a wrapped Bun CJS module (missing "// @bun" header). ` +
-          'Re-run `node scripts/extract-cli.mjs` to regenerate it.',
+          'Re-run `node scripts/extract-cli.mjs` to regenerate it.'
       )
     }
     log(`replacing cli.js contents: ${cli.contents.length} → ${newCli.length} bytes`)
@@ -565,9 +597,10 @@ function main() {
   const newBlob = writeBlob(graph)
   log(`new blob: ${newBlob.length} bytes (was ${origBlobLen})`)
 
-  const out = container.kind === 'pe'
-    ? rewritePE(buf, container.pe, newBlob)
-    : rewriteMachO(buf, container.macho, newBlob)
+  const out =
+    container.kind === 'pe'
+      ? rewritePE(buf, container.pe, newBlob)
+      : rewriteMachO(buf, container.macho, newBlob)
   log(`new file size: ${out.length} (was ${buf.length})`)
 
   writeFileSync(args.output, out)
@@ -607,8 +640,10 @@ function main() {
       log(`warning: xattr -c failed (${err.message}) — output may retain quarantine`)
     }
   } else if (container.kind === 'macho') {
-    log(`warning: Mach-O output not code-signed (host is ${process.platform}). ` +
-        'Run `codesign --force --sign - <output> && xattr -c <output>` on macOS before executing.')
+    log(
+      `warning: Mach-O output not code-signed (host is ${process.platform}). ` +
+        'Run `codesign --force --sign - <output> && xattr -c <output>` on macOS before executing.'
+    )
   }
 }
 

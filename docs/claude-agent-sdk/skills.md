@@ -58,17 +58,17 @@ asyncio.run(main())
 ```
 
 ```typescript TypeScript
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { query } from '@anthropic-ai/claude-agent-sdk'
 
 for await (const message of query({
-  prompt: "Help me process this PDF document",
+  prompt: 'Help me process this PDF document',
   options: {
-    cwd: "/path/to/project",  // Project with .claude/skills/
-    settingSources: ["user", "project"],  // Load Skills from filesystem
-    allowedTools: ["Skill", "Read", "Write", "Bash"]  // Enable Skill tool
+    cwd: '/path/to/project', // Project with .claude/skills/
+    settingSources: ['user', 'project'], // Load Skills from filesystem
+    allowedTools: ['Skill', 'Read', 'Write', 'Bash'] // Enable Skill tool
   }
 })) {
-  console.log(message);
+  console.log(message)
 }
 ```
 
@@ -87,12 +87,14 @@ Skills are loaded from filesystem directories based on your `settingSources`/`se
 Skills are defined as directories containing a `SKILL.md` file with YAML frontmatter and Markdown content. The `description` field determines when Claude invokes your Skill.
 
 **Example directory structure**:
+
 ```bash
 .claude/skills/processing-pdfs/
 └── SKILL.md
 ```
 
 For complete guidance on creating Skills, including SKILL.md structure, multi-file Skills, and examples, see:
+
 - [Agent Skills in Claude Code](https://code.claude.com/docs/en/skills): Complete guide with examples
 - [Agent Skills Best Practices](/docs/en/agents-and-tools/agent-skills/best-practices): Authoring guidelines and naming conventions
 
@@ -128,13 +130,13 @@ async for message in query(
 ```typescript TypeScript
 // Skills can only use Read, Grep, and Glob tools
 for await (const message of query({
-  prompt: "Analyze the codebase structure",
+  prompt: 'Analyze the codebase structure',
   options: {
-    settingSources: ["user", "project"],  // Load Skills from filesystem
-    allowedTools: ["Skill", "Read", "Grep", "Glob"]  // Restricted toolset
+    settingSources: ['user', 'project'], // Load Skills from filesystem
+    allowedTools: ['Skill', 'Read', 'Grep', 'Glob'] // Restricted toolset
   }
 })) {
-  console.log(message);
+  console.log(message)
 }
 ```
 
@@ -161,13 +163,13 @@ async for message in query(
 
 ```typescript TypeScript
 for await (const message of query({
-  prompt: "What Skills are available?",
+  prompt: 'What Skills are available?',
   options: {
-    settingSources: ["user", "project"],  // Load Skills from filesystem
-    allowedTools: ["Skill"]
+    settingSources: ['user', 'project'], // Load Skills from filesystem
+    allowedTools: ['Skill']
   }
 })) {
-  console.log(message);
+  console.log(message)
 }
 ```
 
@@ -197,14 +199,14 @@ async for message in query(
 
 ```typescript TypeScript
 for await (const message of query({
-  prompt: "Extract text from invoice.pdf",
+  prompt: 'Extract text from invoice.pdf',
   options: {
-    cwd: "/path/to/project",
-    settingSources: ["user", "project"],  // Load Skills from filesystem
-    allowedTools: ["Skill", "Read", "Bash"]
+    cwd: '/path/to/project',
+    settingSources: ['user', 'project'], // Load Skills from filesystem
+    allowedTools: ['Skill', 'Read', 'Bash']
   }
 })) {
-  console.log(message);
+  console.log(message)
 }
 ```
 
@@ -236,14 +238,14 @@ options = ClaudeAgentOptions(
 ```typescript TypeScript
 // Wrong - Skills won't be loaded
 const options = {
-  allowedTools: ["Skill"]
-};
+  allowedTools: ['Skill']
+}
 
 // Correct - Skills will be loaded
 const options = {
-  settingSources: ["user", "project"],  // Required to load Skills
-  allowedTools: ["Skill"]
-};
+  settingSources: ['user', 'project'], // Required to load Skills
+  allowedTools: ['Skill']
+}
 ```
 
 </CodeGroup>
@@ -266,10 +268,10 @@ options = ClaudeAgentOptions(
 ```typescript TypeScript
 // Ensure your cwd points to the directory containing .claude/skills/
 const options = {
-  cwd: "/path/to/project",  // Must contain .claude/skills/
-  settingSources: ["user", "project"],  // Required to load Skills
-  allowedTools: ["Skill"]
-};
+  cwd: '/path/to/project', // Must contain .claude/skills/
+  settingSources: ['user', 'project'], // Required to load Skills
+  allowedTools: ['Skill']
+}
 ```
 
 </CodeGroup>
@@ -277,6 +279,7 @@ const options = {
 See the "Using Skills with the SDK" section above for the complete pattern.
 
 **Verify filesystem location**:
+
 ```bash
 # Check project Skills
 ls .claude/skills/*/SKILL.md
@@ -298,12 +301,14 @@ For general Skills troubleshooting (YAML syntax, debugging, etc.), see the [Clau
 ## Related Documentation
 
 ### Skills Guides
+
 - [Agent Skills in Claude Code](https://code.claude.com/docs/en/skills): Complete Skills guide with creation, examples, and troubleshooting
 - [Agent Skills Overview](/docs/en/agents-and-tools/agent-skills/overview): Conceptual overview, benefits, and architecture
 - [Agent Skills Best Practices](/docs/en/agents-and-tools/agent-skills/best-practices): Authoring guidelines for effective Skills
 - [Agent Skills Cookbook](https://platform.claude.com/cookbook/skills-notebooks-01-skills-introduction): Example Skills and templates
 
 ### SDK Resources
+
 - [Subagents in the SDK](/docs/en/agent-sdk/subagents): Similar filesystem-based agents with programmatic options
 - [Slash Commands in the SDK](/docs/en/agent-sdk/slash-commands): User-invoked commands
 - [SDK Overview](/docs/en/agent-sdk/overview): General SDK concepts

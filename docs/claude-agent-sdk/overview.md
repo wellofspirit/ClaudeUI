@@ -16,14 +16,15 @@ import asyncio
 from claude_agent_sdk import query, ClaudeAgentOptions
 
 async def main():
-    async for message in query(
-        prompt="Find and fix the bug in auth.py",
-        options=ClaudeAgentOptions(allowed_tools=["Read", "Edit", "Bash"])
-    ):
-        print(message)  # Claude reads the file, finds the bug, edits it
+async for message in query(
+prompt="Find and fix the bug in auth.py",
+options=ClaudeAgentOptions(allowed_tools=["Read", "Edit", "Bash"])
+):
+print(message) # Claude reads the file, finds the bug, edits it
 
 asyncio.run(main())
-```
+
+````
 
 ```typescript TypeScript
 import { query } from "@anthropic-ai/claude-agent-sdk";
@@ -34,7 +35,8 @@ for await (const message of query({
 })) {
   console.log(message);  // Claude reads the file, finds the bug, edits it
 }
-```
+````
+
 </CodeGroup>
 
 The Agent SDK includes built-in tools for reading files, running commands, and editing code, so your agent can start working immediately without you implementing tool execution. Dive into the quickstart or explore real agents built with the SDK:
@@ -83,6 +85,7 @@ The Agent SDK includes built-in tools for reading files, running commands, and e
     <Note>
     Unless previously approved, Anthropic does not allow third party developers to offer claude.ai login or rate limits for their products, including agents built on the Claude Agent SDK. Please use the API key authentication methods described in this document instead.
     </Note>
+
   </Step>
   <Step title="Run your first agent">
     This example creates an agent that lists files in your current directory using built-in tools.
@@ -114,6 +117,7 @@ The Agent SDK includes built-in tools for reading files, running commands, and e
     }
     ```
     </CodeGroup>
+
   </Step>
 </Steps>
 
@@ -230,6 +234,7 @@ Everything that makes Claude Code powerful is available in the SDK:
     </CodeGroup>
 
     [Learn more about hooks →](/docs/en/agent-sdk/hooks)
+
   </Tab>
   <Tab title="Subagents">
     Spawn specialized agents to handle focused subtasks. Your main agent delegates work, and subagents report back with results.
@@ -285,6 +290,7 @@ Everything that makes Claude Code powerful is available in the SDK:
     Messages from within a subagent's context include a `parent_tool_use_id` field, letting you track which messages belong to which subagent execution.
 
     [Learn more about subagents →](/docs/en/agent-sdk/subagents)
+
   </Tab>
   <Tab title="MCP">
     Connect to external systems via the Model Context Protocol: databases, browsers, APIs, and [hundreds more](https://github.com/modelcontextprotocol/servers).
@@ -328,6 +334,7 @@ Everything that makes Claude Code powerful is available in the SDK:
     </CodeGroup>
 
     [Learn more about MCP →](/docs/en/agent-sdk/mcp)
+
   </Tab>
   <Tab title="Permissions">
     Control exactly which tools your agent can use. Allow safe operations, block dangerous ones, or require approval for sensitive actions.
@@ -373,6 +380,7 @@ Everything that makes Claude Code powerful is available in the SDK:
     </CodeGroup>
 
     [Learn more about permissions →](/docs/en/agent-sdk/permissions)
+
   </Tab>
   <Tab title="Sessions">
     Maintain context across multiple exchanges. Claude remembers files read, analysis done, and conversation history. Resume sessions later, or fork them to explore different approaches.
@@ -432,19 +440,20 @@ Everything that makes Claude Code powerful is available in the SDK:
     </CodeGroup>
 
     [Learn more about sessions →](/docs/en/agent-sdk/sessions)
+
   </Tab>
 </Tabs>
 
 ### Claude Code features
 
-The SDK also supports Claude Code's filesystem-based configuration. To use these features, set `setting_sources=["project"]` (Python) or `settingSources: ['project']` (TypeScript)  in your options.
+The SDK also supports Claude Code's filesystem-based configuration. To use these features, set `setting_sources=["project"]` (Python) or `settingSources: ['project']` (TypeScript) in your options.
 
-| Feature | Description | Location |
-|---------|-------------|----------|
-| [Skills](/docs/en/agent-sdk/skills) | Specialized capabilities defined in Markdown | `.claude/skills/SKILL.md` |
-| [Slash commands](/docs/en/agent-sdk/slash-commands) | Custom commands for common tasks | `.claude/commands/*.md` |
-| [Memory](/docs/en/agent-sdk/modifying-system-prompts) | Project context and instructions | `CLAUDE.md` or `.claude/CLAUDE.md` |
-| [Plugins](/docs/en/agent-sdk/plugins) | Extend with custom commands, agents, and MCP servers | Programmatic via `plugins` option |
+| Feature                                               | Description                                          | Location                           |
+| ----------------------------------------------------- | ---------------------------------------------------- | ---------------------------------- |
+| [Skills](/docs/en/agent-sdk/skills)                   | Specialized capabilities defined in Markdown         | `.claude/skills/SKILL.md`          |
+| [Slash commands](/docs/en/agent-sdk/slash-commands)   | Custom commands for common tasks                     | `.claude/commands/*.md`            |
+| [Memory](/docs/en/agent-sdk/modifying-system-prompts) | Project context and instructions                     | `CLAUDE.md` or `.claude/CLAUDE.md` |
+| [Plugins](/docs/en/agent-sdk/plugins)                 | Extend with custom commands, agents, and MCP servers | Programmatic via `plugins` option  |
 
 ## Compare the Agent SDK to other Claude tools
 
@@ -483,6 +492,7 @@ The Claude platform offers multiple ways to build with Claude. Here's how the Ag
     }
     ```
     </CodeGroup>
+
   </Tab>
   <Tab title="Agent SDK vs Claude Code CLI">
     Same capabilities, different interface:
@@ -496,6 +506,7 @@ The Claude platform offers multiple ways to build with Claude. Here's how the Ag
     | Production automation | SDK |
 
     Many teams use both: CLI for daily development, SDK for production. Workflows translate directly between them.
+
   </Tab>
 </Tabs>
 
@@ -518,11 +529,13 @@ If you encounter bugs or issues with the Agent SDK:
 For partners integrating the Claude Agent SDK, use of Claude branding is optional. When referencing Claude in your product:
 
 **Allowed:**
+
 - "Claude Agent" (preferred for dropdown menus)
 - "Claude" (when within a menu already labeled "Agents")
 - "{YourAgentName} Powered by Claude" (if you have an existing agent name)
 
 **Not permitted:**
+
 - "Claude Code" or "Claude Code Agent"
 - Claude Code-branded ASCII art or visual elements that mimic Claude Code
 

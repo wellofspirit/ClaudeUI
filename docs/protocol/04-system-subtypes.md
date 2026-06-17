@@ -1,8 +1,9 @@
 # 04 — System message subtypes
 
-Every `{type: 'system', subtype: 'X', ...}` variant cli.js emits. Verified against 2.1.114 (patched).
+Every `{type: 'system', subtype: 'X', ...}` variant cli.js emits. Verified against 2.1.114 (patched). Sections 4.20–4.27 and the §4.17 shape were added against 2.1.170 — their anchors are 2.1.170 char offsets.
 
 Every `system` message includes minimally:
+
 ```json
 {
   "type": "system",
@@ -18,26 +19,35 @@ Exception: `session_state_changed` has no `session_id`/`uuid` (raw emit, not thr
 
 ## 4.1 Quick catalog
 
-| Subtype | Gate | Emitter path |
-|---|---|---|
-| `init` | Always (first turn) | Main generator |
-| `status` | Varies per variant | Main generator / control channel |
-| `task_notification` | Always | vT queue |
-| `task_started` | Always | vT queue |
-| `task_updated` | Always | vT queue |
-| `task_progress` | Always | vT queue |
-| `compact_boundary` | On conversation compaction | Main generator |
-| `api_retry` | On API error + auto-retry | Main generator |
-| `queued_command_consumed` | Patch `queue-control` | Main generator (patched) |
-| `hook_started` | `--include-hook-events` | Hook subscriber |
-| `hook_progress` | `--include-hook-events` | Hook subscriber |
-| `hook_response` | `--include-hook-events` | Hook subscriber |
-| `bridge_state` | `remote_control` active | Control channel |
-| `session_state_changed` | `CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS=1` | Direct emit |
-| `notification` | Error conditions | vT queue |
-| `memory_recall` | Memory feature returns results | Main generator |
-| `plugin_install` | `CLAUDE_CODE_SYNC_PLUGIN_INSTALL=1` | Main generator |
-| `post_turn_summary` | (referenced in filter; shape not observed) | — |
+| Subtype                   | Gate                                             | Emitter path                     |
+| ------------------------- | ------------------------------------------------ | -------------------------------- |
+| `init`                    | Always (first turn)                              | Main generator                   |
+| `status`                  | Varies per variant                               | Main generator / control channel |
+| `task_notification`       | Always                                           | vT queue                         |
+| `task_started`            | Always                                           | vT queue                         |
+| `task_updated`            | Always                                           | vT queue                         |
+| `task_progress`           | Always                                           | vT queue                         |
+| `compact_boundary`        | On conversation compaction                       | Main generator                   |
+| `api_retry`               | On API error + auto-retry                        | Main generator                   |
+| `queued_command_consumed` | Patch `queue-control`                            | Main generator (patched)         |
+| `hook_started`            | `--include-hook-events`                          | Hook subscriber                  |
+| `hook_progress`           | `--include-hook-events`                          | Hook subscriber                  |
+| `hook_response`           | `--include-hook-events`                          | Hook subscriber                  |
+| `bridge_state`            | `remote_control` active                          | Control channel                  |
+| `session_state_changed`   | `CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS=1`        | Direct emit                      |
+| `notification`            | Error conditions                                 | vT queue                         |
+| `memory_recall`           | Memory feature returns results                   | Main generator                   |
+| `plugin_install`          | `CLAUDE_CODE_SYNC_PLUGIN_INSTALL=1`              | Main generator                   |
+| `post_turn_summary`       | @internal background summarizer                  | Main generator                   |
+| `model_refusal_fallback`  | On unless `CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK` | Main generator (§4.20)           |
+| `model_fallback`          | Fallback model configured + availability error   | Main generator (§4.21)           |
+| `thinking_tokens`         | Thinking deltas during streaming                 | Main generator (§4.22)           |
+| `commands_changed`        | Mid-session slash-command list change            | stream-json module (§4.23)       |
+| `elicitation_complete`    | MCP URL-mode elicitation completes               | stream-json module (§4.24)       |
+| `permission_denied`       | Tool call auto-denied without prompt             | Control channel (§4.25)          |
+| `mirror_error`            | Transcript-mirror write failure                  | SessionStore mirror (§4.26)      |
+
+Subtypes that exist in the SDK schema union but are **not** emitted on the SDK stdout wire are cataloged in §4.27.
 
 ---
 
@@ -324,8 +334,10 @@ API error triggered automatic retry inside the streaming layer.
   "attempt": 2,
   "max_retries": 5,
   "retry_delay_ms": 1500,
-  "error_status": 529,                     // HTTP status, null if non-HTTP
-  "error": { /* normalized via U9K() */ },
+  "error_status": 529, // HTTP status, null if non-HTTP
+  "error": {
+    /* normalized via U9K() */
+  },
   "session_id": "...",
   "uuid": "..."
 }
@@ -361,6 +373,7 @@ Mid-turn queued steer consumed as an attachment.
 Internal hook events transformed by the `KGK` subscriber at char `4914613`. A dispatcher at char `12819444` subscribes when `--include-hook-events` + stream-json verbose.
 
 **Anchors:**
+
 - Dispatcher: `12819444`
 - `hook_started` transformer: `12819588`
 - `hook_progress` transformer: `12819602`
@@ -466,6 +479,7 @@ Session state machine transition.
 Error-condition notifications.
 
 **Anchors:**
+
 - `auto-mode-gate-plan-exit-fallback` at `~8376881`
 - `stop-hook-error` at `~8610623`
 - `error-compacting-conversation` at `~8914817`
@@ -539,15 +553,29 @@ Progress updates from plugin-install flow.
 
 ## 4.17 `post_turn_summary`
 
-Referenced in the outer JSON-aggregate filter at char `12822512` but shape not observed in the current bundle. Documented here for completeness so a future session doesn't re-research.
+Background post-turn summary emitted after each assistant turn (marked `@internal` in the SDK schema).
 
-If observed in the wild, update this doc.
+**Anchor (2.1.170):** schema `RF8` at `~7077561`.
+
+```jsonc
+{
+  "type": "system",
+  "subtype": "post_turn_summary",
+  "summarizes_uuid": "...", // assistant message this summarizes
+  "status_category": "...",
+  "status_detail": "...",
+  "needs_action": "...",
+  "session_id": "...",
+  "uuid": "..."
+}
+```
 
 ---
 
 ## 4.18 Filter behavior
 
 The outer filter at char `12822512` lists subtypes excluded from `--output-format json` aggregation:
+
 - `session_state_changed`
 - `task_notification`
 - `task_started`, `task_updated`, `task_progress`
@@ -572,5 +600,226 @@ The outer filter at char `12822512` lists subtypes excluded from `--output-forma
 - **`notification`** — surface as a toast / banner per `priority`/`color`/`timeout_ms`.
 - **`memory_recall`** — log or show which memories were loaded.
 - **`plugin_install`** — show install progress UI when the env var is set.
+- **`model_refusal_fallback`** — render a persistent warning banner (the model switch is sticky for the session); evict `retracted_message_uuids` from transcript state; update any model indicator. See §4.20.
+- **`model_fallback`** — render a warning for the current turn only (turn-scoped swap). See §4.21.
+- **`thinking_tokens`** — optional spinner/pill progress; not authoritative token counts.
+- **`commands_changed`** — REPLACE the cached slash-command list with the payload (a re-fetch returns the stale init list).
+- **`elicitation_complete`** — dismiss any pending MCP elicitation UI.
+- **`permission_denied`** — render the auto-denial on the tool call instead of only showing an `is_error` tool_result.
+- **`mirror_error`** — log; surfaces transcript-mirror data loss.
 
 Unknown subtypes: log and pass through. Don't silently drop.
+
+---
+
+## 4.20 `model_refusal_fallback`
+
+Emitted when the primary model ends the stream with `stop_reason: "refusal"` and the CLI retries the turn once on a fallback model. **The swap is persistent for the rest of the session** (`direction: "retry"`). The enum values `"revert"` and `"sticky"` are retained for SDK-consumer compat and are no longer emitted.
+
+This fires without any user-configured fallback model — it's a built-in safety-refusal recovery path (e.g. Fable 5 refusal → Opus 4.8).
+
+**Anchors (2.1.170):**
+
+- Gate fn `ed()` at `2535147`: `return !$_.CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK`
+- Schema `WkO` at `~7083170`
+- Internal builder `dxK` at `10478678`
+- SDK emitter yields at `16271622` / `16271675` (inside the main generator's `case "system"`)
+- Push-channel variant at `16088919`
+
+**Gate:** On by default; disabled only by `CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK` env var.
+
+### Shape (wire, snake_case)
+
+```jsonc
+{
+  "type": "system",
+  "subtype": "model_refusal_fallback",
+  "trigger": "refusal",
+  "direction": "retry", // "revert"|"sticky" legacy, no longer emitted
+  "original_model": "claude-fable-5[1m]",
+  "fallback_model": "claude-opus-4-8",
+  "request_id": "req_...", // nullable
+  "api_refusal_category": "cyber", // nullable/absent; open string ("cyber", "bio", …)
+  "api_refusal_explanation": "...", // nullable/absent; unstable prose — display only
+  "retracted_message_uuids": ["..."], // optional; see below
+  "content": "…safety measures flagged this message… Switched to Opus 4.8…",
+  "session_id": "...",
+  "uuid": "..."
+}
+```
+
+### Ordering (with `--include-partial-messages`)
+
+If a partial assistant message was mid-stream when the refusal hit, the CLI first **retracts** it by synthesizing closing stream events:
+
+1. `stream_event` `content_block_stop` (only if a block was open)
+2. `stream_event` `message_delta` with `delta.stop_reason: "refusal"` + usage
+3. `stream_event` `message_stop`
+4. the `model_refusal_fallback` system message
+5. the turn replays on the fallback model — subsequent `assistant` messages carry `model: <fallback_model>`
+
+### Field notes
+
+- **`retracted_message_uuids`** — wire uuids of the messages this fallback retracted (the refused partial as the consumer received it, one uuid per normalized SDK message, plus any tombstoned tool_results). Emitted AFTER the retraction: remove these from transcript state on receipt. Eviction is idempotent — unknown/already-removed uuids are a no-op. Absent on older CLIs.
+- **Transcript JSONL form is camelCase** (`originalModel`, `fallbackModel`, `requestId`, `apiRefusalCategory`, `retractedMessageUuids`) and adds `level: "warning"` — don't reuse wire parsing for transcript parsing.
+- The retried assistant message in the transcript may carry a `{"type": "fallback", "from": {"model": ...}, "to": {"model": ...}}` content block recording the swap.
+- **Usage attribution:** all post-fallback API calls record `message.model = fallback_model`. A session that started on Fable and fell back bills as the fallback model from that point — usage analytics will (correctly) show the fallback model.
+
+---
+
+## 4.21 `model_fallback`
+
+Availability fallback — the current turn is switched to the **configured** fallback model because the primary failed with an availability error. Unlike §4.20 this is **turn-scoped**: the primary is re-tried on the next user turn. Marked `@internal` / "not yet in the public SDKMessage union" in the schema, but it IS yielded by the SDK emitter, ungated.
+
+**Anchors (2.1.170):** schema `VIA` at `~7084860`; emitter yield at `16272124`.
+
+**Gate:** Requires a configured fallback model (`--fallback-model` / settings); fires on availability errors.
+
+```jsonc
+{
+  "type": "system",
+  "subtype": "model_fallback",
+  "trigger": "model_not_found"|"permission_denied"|"overloaded",
+  "original_model": "...",
+  "fallback_model": "...",
+  "content": "human-readable render text",
+  "session_id": "...",
+  "uuid": "..."
+}
+```
+
+`model_not_found`: model retired/unknown. `permission_denied`: org lacks access. `overloaded`: repeated 529s.
+
+---
+
+## 4.22 `thinking_tokens`
+
+Live thinking-token estimate, digested from `thinking_delta.estimated_tokens` during the redacted-thinking phase (where the API otherwise streams only pings). Also recomputed from signature length on `signature_delta`.
+
+**Anchors (2.1.170):** schema `xkO` at `~7092092`; yields at `16266973` / `16267340` (stream-event digestion in the main generator).
+
+**Gate:** Emitted while thinking deltas stream (practically: sessions with extended thinking).
+
+```jsonc
+{
+  "type": "system",
+  "subtype": "thinking_tokens",
+  "estimated_tokens": 1234, // running total for the current thinking block
+  "estimated_tokens_delta": 56, // increment carried by this frame
+  "session_id": "...",
+  "uuid": "..."
+}
+```
+
+Approximate progress for spinners/pills — not the authoritative billed `output_tokens`.
+
+---
+
+## 4.23 `commands_changed`
+
+Fire-and-forget push of the **full** slash-command list after a mid-session change (e.g. skills discovered dynamically as the agent works in a subdirectory).
+
+**Anchors (2.1.170):** schema `CkO` at `~7090713`; emit at `16316834` (stream-json module).
+
+**Gate:** Always (when the command list changes mid-session).
+
+```jsonc
+{
+  "type": "system",
+  "subtype": "commands_changed",
+  "commands": [
+    {
+      /* same command shape as initialize's supportedCommands */
+    }
+  ],
+  "session_id": "...",
+  "uuid": "..."
+}
+```
+
+**Consumer:** REPLACE the cached command list. `supportedCommands()` is captured once at initialize and never reflects mid-session changes, so a client re-fetch would return the stale init list.
+
+---
+
+## 4.24 `elicitation_complete`
+
+Emitted when an MCP server confirms that a URL-mode elicitation is complete.
+
+**Anchors (2.1.170):** schema `pkO` at `~7094043`; emit at `16307841` (stream-json module).
+
+```jsonc
+{
+  "type": "system",
+  "subtype": "elicitation_complete",
+  "mcp_server_name": "...",
+  "elicitation_id": "...",
+  "session_id": "...",
+  "uuid": "..."
+}
+```
+
+---
+
+## 4.25 `permission_denied`
+
+Emitted when a tool call is **auto-denied without an interactive permission prompt** (auto-mode classifier, `dontAsk` mode, headless-agent auto-deny, or a deny rule). The "ask" path surfaces via a `can_use_tool` control_request; this event covers the "deny" short-circuit so SDK hosts can render the denial instead of only seeing an `is_error` tool_result. PreToolUse hook denies bypass `canUseTool` and are NOT covered.
+
+**Anchors (2.1.170):** schema `BkO` at `~7094308`; emit at `7156177` (control-channel area).
+
+```jsonc
+{
+  "type": "system",
+  "subtype": "permission_denied",
+  "tool_name": "Bash",
+  "tool_use_id": "toolu_...",
+  "agent_id": "...", // optional; subagent ID when denied inside a subagent
+  "decision_reason_type": "rule", // optional; 'classifier'|'asyncAgent'|'mode'|'rule'|…
+  "decision_reason": "...", // optional human-readable reason
+  "message": "...", // the rejection message returned to the model
+  "session_id": "...",
+  "uuid": "..."
+}
+```
+
+---
+
+## 4.26 `mirror_error`
+
+Emitted when `SessionStore.append()` rejects or times out for a transcript-mirror batch after bounded retry (3 attempts with short backoff; timeouts are not retried). The batch is then dropped — this surfaces the failure so consumers are not silent on data loss.
+
+**Anchors (2.1.170):** schema `XkO` at `~7082241`; emit at `12946429`.
+
+```jsonc
+{
+  "type": "system",
+  "subtype": "mirror_error",
+  "error": "...",
+  "key": { "projectKey": "...", "sessionId": "...", "subpath": "..." }, // subpath optional
+  "session_id": "...",
+  "uuid": "..."
+}
+```
+
+---
+
+## 4.27 Schema-only / internal subtypes (not on the SDK stdout wire)
+
+The SDK schema union (region `~7060000–7100000` in 2.1.170) declares more subtypes than the wire emits. The main generator's `case "system"` forwards exactly four internal system messages — `compact_boundary`, `api_error`→`api_retry`, `model_refusal_fallback`, `model_fallback` — and the emitter switch explicitly `break`s (drops) others, e.g. `api_metrics`. The subtypes below are mapped from internal `SystemMessage`s for the **transcript-mirror channel** (desktop LocalSessionManager / SessionStore), so they can appear in session JSONL transcripts but should not be expected on stdout in SDK mode:
+
+| Subtype                | Internal meaning                                                                           |
+| ---------------------- | ------------------------------------------------------------------------------------------ |
+| `task_summary`         | Mid-turn progress line from the debounced classifier; `detail` null on idle clear          |
+| `informational`        | Generic loop text banner (`level`: info/notice/suggestion/warning; `prevent_continuation`) |
+| `permission_retry`     | Tool execution retried after permission-mode change allowed denied commands                |
+| `stop_hook_summary`    | Stop/SubagentStop hook execution summary at turn end                                       |
+| `memory_saved`         | Memory subsystem wrote `written_paths`                                                     |
+| `agents_killed`        | Background agents terminated (e.g. on interrupt)                                           |
+| `away_summary`         | Summary of what happened while the user was away                                           |
+| `thinking`             | Rendered thinking text (not the token estimate — that's §4.22)                             |
+| `file_snapshot`        | Snapshot of session files (plan, todo) captured for rewind                                 |
+| `scheduled_task_fire`  | Scheduled (cron) task fired                                                                |
+| `api_metrics`          | Per-turn TTFT + output-tokens/sec line (distinct from top-level `api_metrics` message)     |
+| `local_command_output` | Output from a local slash command (e.g. `/usage`)                                          |
+| `files_persisted`      | Attachment-file persistence results                                                        |
+
+If one of these is observed on stdout in a future CLI version, promote it to a numbered section.

@@ -21,8 +21,6 @@
  *      survives re-renders
  */
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
-
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import React from 'react'
 import { render, act } from '@testing-library/react'
@@ -36,7 +34,7 @@ vi.mock('../View', () => ({
   AutomationConfigView: (props: AutomationConfigViewProps) => {
     viewProps = props
     return null
-  },
+  }
 }))
 
 function makeAutomation(overrides: Partial<Automation> = {}): Automation {
@@ -48,7 +46,7 @@ function makeAutomation(overrides: Partial<Automation> = {}): Automation {
     schedule: { type: 'interval', intervalMs: 60_000 },
     enabled: true,
     permissions: { allow: [], deny: [] },
-    ...overrides,
+    ...overrides
   } as Automation
 }
 
@@ -59,7 +57,7 @@ function makePerms(overrides: Partial<ClaudePermissions> = {}): ClaudePermission
     ask: [],
     additionalDirectories: [],
     defaultMode: undefined,
-    ...overrides,
+    ...overrides
   }
 }
 
@@ -93,25 +91,50 @@ describe('AutomationConfig FC', () => {
       if (scope === 'local') return makePerms({ deny: ['LocalDeny'] })
       return makePerms({ allow: ['UserAllow'] })
     })
-    app.bridge.ipcMain.handle('automation:save', async (_e, a: Automation) => { saveCalls.push(a) })
-    app.bridge.ipcMain.handle('automation:toggle', async (_e, id: string, enabled: boolean) => { toggleCalls.push({ id, enabled }) })
-    app.bridge.ipcMain.handle('automation:delete', async (_e, id: string) => { deleteCalls.push(id) })
-    app.bridge.ipcMain.handle('automation:run-now', async (_e, id: string) => { runCalls.push(id) })
-    app.bridge.ipcMain.handle('automation:cancel', async (_e, id: string) => { cancelCalls.push(id) })
-    app.bridge.ipcMain.handle('automation:dismiss-run', async (_e, automationId: string, runId: string) => {
-      dismissCalls.push({ automationId, runId })
+    app.bridge.ipcMain.handle('automation:save', async (_e, a: Automation) => {
+      saveCalls.push(a)
     })
-    app.bridge.ipcMain.handle('automation:list-runs', async (_e, id: string): Promise<AutomationRun[]> => {
-      listRunsCalls.push(id)
-      return [{ id: `run-${id}`, automationId: id, status: 'success', startedAt: 1, finishedAt: 2, totalCostUsd: 0 }]
+    app.bridge.ipcMain.handle('automation:toggle', async (_e, id: string, enabled: boolean) => {
+      toggleCalls.push({ id, enabled })
     })
+    app.bridge.ipcMain.handle('automation:delete', async (_e, id: string) => {
+      deleteCalls.push(id)
+    })
+    app.bridge.ipcMain.handle('automation:run-now', async (_e, id: string) => {
+      runCalls.push(id)
+    })
+    app.bridge.ipcMain.handle('automation:cancel', async (_e, id: string) => {
+      cancelCalls.push(id)
+    })
+    app.bridge.ipcMain.handle(
+      'automation:dismiss-run',
+      async (_e, automationId: string, runId: string) => {
+        dismissCalls.push({ automationId, runId })
+      }
+    )
+    app.bridge.ipcMain.handle(
+      'automation:list-runs',
+      async (_e, id: string): Promise<AutomationRun[]> => {
+        listRunsCalls.push(id)
+        return [
+          {
+            id: `run-${id}`,
+            automationId: id,
+            status: 'success',
+            startedAt: 1,
+            finishedAt: 2,
+            totalCostUsd: 0
+          }
+        ]
+      }
+    )
 
     useAutomationStore.setState({
       automations: [],
       selectedAutomationId: null,
       selectedRunId: null,
       detailTab: 'configure',
-      runs: {},
+      runs: {}
     })
   })
 
@@ -137,13 +160,21 @@ describe('AutomationConfig FC', () => {
 
   it('onSave calls saveAutomation IPC', async () => {
     await selectAutomation(makeAutomation())
-    await act(async () => { await renderFC() })
-    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    await act(async () => {
+      await renderFC()
+    })
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
 
     const updated = makeAutomation({ name: 'Renamed', prompt: 'new prompt' })
-    act(() => { viewProps!.onSave(updated) })
+    act(() => {
+      viewProps!.onSave(updated)
+    })
 
-    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
 
     expect(saveCalls).toHaveLength(1)
     expect(saveCalls[0].name).toBe('Renamed')
@@ -151,12 +182,20 @@ describe('AutomationConfig FC', () => {
 
   it('onToggleEnabled calls toggleAutomation IPC', async () => {
     await selectAutomation(makeAutomation())
-    await act(async () => { await renderFC() })
-    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    await act(async () => {
+      await renderFC()
+    })
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
 
-    act(() => { viewProps!.onToggleEnabled(false) })
+    act(() => {
+      viewProps!.onToggleEnabled(false)
+    })
 
-    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
 
     expect(toggleCalls).toHaveLength(1)
     expect(toggleCalls[0]).toEqual({ id: 'auto-1', enabled: false })
@@ -164,12 +203,20 @@ describe('AutomationConfig FC', () => {
 
   it('onRunNow calls runAutomationNow IPC', async () => {
     await selectAutomation(makeAutomation())
-    await act(async () => { await renderFC() })
-    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    await act(async () => {
+      await renderFC()
+    })
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
 
-    act(() => { viewProps!.onRunNow() })
+    act(() => {
+      viewProps!.onRunNow()
+    })
 
-    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
 
     expect(runCalls).toEqual(['auto-1'])
   })
@@ -177,15 +224,23 @@ describe('AutomationConfig FC', () => {
   it('onStopRun cancels and dismisses the running run', async () => {
     await selectAutomation(makeAutomation())
     useAutomationStore.setState({
-      runs: { 'auto-1': [{ id: 'run-xyz', status: 'running', startedAt: Date.now() } as any] },
+      runs: { 'auto-1': [{ id: 'run-xyz', status: 'running', startedAt: Date.now() } as any] }
     })
 
-    await act(async () => { await renderFC() })
-    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    await act(async () => {
+      await renderFC()
+    })
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
 
-    act(() => { viewProps!.onStopRun() })
+    act(() => {
+      viewProps!.onStopRun()
+    })
 
-    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
 
     expect(cancelCalls).toEqual(['auto-1'])
     expect(dismissCalls).toEqual([{ automationId: 'auto-1', runId: 'run-xyz' }])
@@ -193,12 +248,20 @@ describe('AutomationConfig FC', () => {
 
   it('onDelete calls deleteAutomation and clears selection', async () => {
     await selectAutomation(makeAutomation())
-    await act(async () => { await renderFC() })
-    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    await act(async () => {
+      await renderFC()
+    })
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
 
-    act(() => { viewProps!.onDelete() })
+    act(() => {
+      viewProps!.onDelete()
+    })
 
-    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
 
     expect(deleteCalls).toEqual(['auto-1'])
     expect(useAutomationStore.getState().selectedAutomationId).toBeNull()
@@ -206,8 +269,12 @@ describe('AutomationConfig FC', () => {
 
   it('loadDirPerms merges project + local allow/deny', async () => {
     await selectAutomation(makeAutomation())
-    await act(async () => { await renderFC() })
-    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    await act(async () => {
+      await renderFC()
+    })
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
 
     const perms = await viewProps!.loadDirPerms('/d/repo')
     expect(perms).toEqual({ allow: ['ProjectAllow'], deny: ['LocalDeny'] })
@@ -215,8 +282,12 @@ describe('AutomationConfig FC', () => {
 
   it('backfills runs via listAutomationRuns on mount when runs not cached', async () => {
     await selectAutomation(makeAutomation())
-    await act(async () => { await renderFC() })
-    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    await act(async () => {
+      await renderFC()
+    })
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
 
     expect(listRunsCalls).toEqual(['auto-1'])
     expect(useAutomationStore.getState().runs['auto-1']).toHaveLength(1)
@@ -225,20 +296,41 @@ describe('AutomationConfig FC', () => {
   it('does not refetch runs when the store already has them', async () => {
     await selectAutomation(makeAutomation())
     useAutomationStore.setState({
-      runs: { 'auto-1': [{ id: 'cached', automationId: 'auto-1', status: 'success', startedAt: 0, finishedAt: 0, totalCostUsd: 0 }] },
+      runs: {
+        'auto-1': [
+          {
+            id: 'cached',
+            automationId: 'auto-1',
+            status: 'success',
+            startedAt: 0,
+            finishedAt: 0,
+            totalCostUsd: 0
+          }
+        ]
+      }
     })
-    await act(async () => { await renderFC() })
-    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    await act(async () => {
+      await renderFC()
+    })
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
 
     expect(listRunsCalls).toEqual([])
   })
 
   it('onSelectRun flips selectedRunId so the detail panel shows run history', async () => {
     await selectAutomation(makeAutomation())
-    await act(async () => { await renderFC() })
-    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    await act(async () => {
+      await renderFC()
+    })
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
 
-    act(() => { viewProps!.onSelectRun('run-xyz') })
+    act(() => {
+      viewProps!.onSelectRun('run-xyz')
+    })
 
     expect(useAutomationStore.getState().selectedRunId).toBe('run-xyz')
     expect(useAutomationStore.getState().selectedAutomationId).toBe('auto-1')
@@ -246,13 +338,21 @@ describe('AutomationConfig FC', () => {
 
   it('onSetDetailTab updates the store so tab choice persists across re-renders', async () => {
     await selectAutomation(makeAutomation())
-    await act(async () => { await renderFC() })
-    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    await act(async () => {
+      await renderFC()
+    })
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
 
-    act(() => { viewProps!.onSetDetailTab('runs') })
+    act(() => {
+      viewProps!.onSetDetailTab('runs')
+    })
     expect(useAutomationStore.getState().detailTab).toBe('runs')
 
-    act(() => { viewProps!.onSetDetailTab('permissions') })
+    act(() => {
+      viewProps!.onSetDetailTab('permissions')
+    })
     expect(useAutomationStore.getState().detailTab).toBe('permissions')
   })
 })

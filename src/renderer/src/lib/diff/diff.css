@@ -42,19 +42,43 @@
 
 /* ── Scrollbar styling ─────────────────────────────────────────────── */
 
-.diff-viewer::-webkit-scrollbar { width: 7px; height: 7px; }
-.diff-viewer::-webkit-scrollbar-track { background: transparent; }
-.diff-viewer::-webkit-scrollbar-thumb { background: var(--color-border); border-radius: 3.5px; }
-.diff-viewer::-webkit-scrollbar-thumb:hover { background: var(--color-border-bright); }
-.diff-viewer::-webkit-scrollbar-corner { background: transparent; }
+.diff-viewer::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+.diff-viewer::-webkit-scrollbar-track {
+  background: transparent;
+}
+.diff-viewer::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: 3.5px;
+}
+.diff-viewer::-webkit-scrollbar-thumb:hover {
+  background: var(--color-border-bright);
+}
+.diff-viewer::-webkit-scrollbar-corner {
+  background: transparent;
+}
 
 /* ── Row backgrounds ───────────────────────────────────────────────── */
 
-.diff-row-add { background: var(--diff-add-bg); }
-.diff-row-del { background: var(--diff-del-bg); }
+.diff-row-add {
+  background: var(--diff-add-bg);
+}
+.diff-row-del {
+  background: var(--diff-del-bg);
+}
 
-.diff-row-add .diff-gutter { background: var(--diff-add-gutter-bg); color: rgba(255, 255, 255, 0.8); --gutter-hover-bg: #2f5732; }
-.diff-row-del .diff-gutter { background: var(--diff-del-gutter-bg); color: rgba(255, 255, 255, 0.8); --gutter-hover-bg: #713431; }
+.diff-row-add .diff-gutter {
+  background: var(--diff-add-gutter-bg);
+  color: rgba(255, 255, 255, 0.8);
+  --gutter-hover-bg: #2f5732;
+}
+.diff-row-del .diff-gutter {
+  background: var(--diff-del-gutter-bg);
+  color: rgba(255, 255, 255, 0.8);
+  --gutter-hover-bg: #713431;
+}
 
 /* ── Gutter cells ──────────────────────────────────────────────────── */
 
@@ -84,8 +108,12 @@
   user-select: none;
 }
 
-.diff-indicator-add { color: var(--diff-add-indicator); }
-.diff-indicator-del { color: var(--diff-del-indicator); }
+.diff-indicator-add {
+  color: var(--diff-add-indicator);
+}
+.diff-indicator-del {
+  color: var(--diff-del-indicator);
+}
 
 /* ── Content cell ──────────────────────────────────────────────────── */
 

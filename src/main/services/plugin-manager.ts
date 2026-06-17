@@ -107,7 +107,11 @@ export class PluginManager {
         const routingId = args[0] as string
         const data = args[1]
         const sessionId = this.sessionManager.getSessionId(routingId)
-        this.fireEvent(channel, { routingId, sessionId, ...(data && typeof data === 'object' ? data as Record<string, unknown> : { data }) })
+        this.fireEvent(channel, {
+          routingId,
+          sessionId,
+          ...(data && typeof data === 'object' ? (data as Record<string, unknown>) : { data })
+        })
       } else {
         this.fireEvent(channel, ...args)
       }
@@ -125,7 +129,8 @@ export class PluginManager {
       return
     }
 
-    const entries = fs.readdirSync(PLUGINS_DIR, { withFileTypes: true })
+    const entries = fs
+      .readdirSync(PLUGINS_DIR, { withFileTypes: true })
       .filter((e) => e.isDirectory() || e.isSymbolicLink())
       .map((e) => e.name)
       .sort()
@@ -230,7 +235,9 @@ export class PluginManager {
       return
     }
 
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    // Plugins are arbitrary CommonJS modules loaded synchronously from disk at
+    // runtime; require() is the correct primitive here, not a static import.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
     const mod = require(entryPath)
     const plugin: ClaudeUIPlugin = mod.default || mod
 
@@ -283,7 +290,15 @@ export class PluginManager {
     const result = loaded.module.activate(ctx)
     if (result instanceof Promise) {
       const timeout = new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error(`Plugin "${loaded.id}" activation timed out after ${ACTIVATION_TIMEOUT_MS}ms`)), ACTIVATION_TIMEOUT_MS)
+        setTimeout(
+          () =>
+            reject(
+              new Error(
+                `Plugin "${loaded.id}" activation timed out after ${ACTIVATION_TIMEOUT_MS}ms`
+              )
+            ),
+          ACTIVATION_TIMEOUT_MS
+        )
       )
       await Promise.race([result, timeout])
     }
@@ -303,10 +318,7 @@ export class PluginManager {
       try {
         const result = loaded.module.deactivate()
         if (result instanceof Promise) {
-          await Promise.race([
-            result,
-            new Promise<void>((resolve) => setTimeout(resolve, 5000))
-          ])
+          await Promise.race([result, new Promise<void>((resolve) => setTimeout(resolve, 5000))])
         }
       } catch (err) {
         logger.error(LOG_SOURCE, `Error in deactivate() for "${id}"`, err)
@@ -338,7 +350,11 @@ export class PluginManager {
 
   private disposeAll(loaded: LoadedPlugin): void {
     for (const d of loaded.disposables) {
-      try { d.dispose() } catch { /* ignore */ }
+      try {
+        d.dispose()
+      } catch {
+        /* ignore */
+      }
     }
     loaded.disposables = []
     loaded.views = []
@@ -412,7 +428,10 @@ export class PluginManager {
         }
       },
 
-      registerIpcHandler: (channel: string, handler: (...args: unknown[]) => unknown): Disposable => {
+      registerIpcHandler: (
+        channel: string,
+        handler: (...args: unknown[]) => unknown
+      ): Disposable => {
         const fullChannel = `plugin:${id}:${channel}`
         ipcMain.handle(fullChannel, (_event, ...args) => handler(...args))
         pluginLogger.debug(`Registered IPC handler: ${fullChannel}`)
@@ -427,7 +446,10 @@ export class PluginManager {
         return disposable
       },
 
-      registerRemoteHandler: (channel: string, handler: (...args: unknown[]) => unknown): Disposable => {
+      registerRemoteHandler: (
+        channel: string,
+        handler: (...args: unknown[]) => unknown
+      ): Disposable => {
         const fullChannel = `plugin:${id}:${channel}`
         this.remoteDispatcher.register(fullChannel, async (...args) => handler(...args))
         pluginLogger.debug(`Registered remote handler: ${fullChannel}`)
@@ -447,7 +469,9 @@ export class PluginManager {
           id: config.id || id,
           label: config.label,
           icon: config.icon,
-          htmlFile: path.isAbsolute(config.htmlFile) ? config.htmlFile : path.join(pluginDir, config.htmlFile)
+          htmlFile: path.isAbsolute(config.htmlFile)
+            ? config.htmlFile
+            : path.join(pluginDir, config.htmlFile)
         }
         loaded.views.push(viewConfig)
         this.notifyViewsChanged()

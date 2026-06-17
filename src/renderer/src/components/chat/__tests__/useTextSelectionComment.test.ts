@@ -7,10 +7,7 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import {
-  normalizeForMatching,
-  deduceLineNumbers,
-} from '../../../hooks/useTextSelectionComment'
+import { normalizeForMatching, deduceLineNumbers } from '../../../hooks/useTextSelectionComment'
 
 // ---------------------------------------------------------------------------
 // normalizeForMatching

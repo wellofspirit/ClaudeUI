@@ -12,7 +12,7 @@ import type {
   QueryInput,
   QueryOptions,
   SDKMessage,
-  McpServerConfig,
+  McpServerConfig
 } from './types'
 import { locateBunClaude } from './locate'
 import { buildArgs, buildEnv, splitMcpServers } from './args'
@@ -84,11 +84,7 @@ export function query(input: QueryInput): QueryHandle {
   const executable = options.executable ?? bunClaude
   const executableArgs = options.executableArgs ?? []
 
-  const args = [
-    ...executableArgs,
-    ...(standalone ? [] : [bunClaude]),
-    ...buildArgs(options),
-  ]
+  const args = [...executableArgs, ...(standalone ? [] : [bunClaude]), ...buildArgs(options)]
   // Env overlay for the CLI child ONLY — keeps any temporary env changes from
   // poisoning Electron's GPU/renderer children.
   const env = buildEnv({ ...process.env, ...(options.env ?? {}) })
@@ -104,13 +100,13 @@ export function query(input: QueryInput): QueryHandle {
         args,
         cwd: options.cwd,
         env,
-        signal: options.abortController?.signal,
+        signal: options.abortController?.signal
       })
     : spawn(executable, args, {
         cwd: options.cwd,
         env,
         stdio: ['pipe', 'pipe', 'pipe'],
-        windowsHide: true,
+        windowsHide: true
       })
 
   if (!child.stdin || !child.stdout || !child.stderr) {
@@ -133,7 +129,6 @@ export function query(input: QueryInput): QueryHandle {
   const t0 = Date.now()
   const stamp = (label: string): void => {
     if (process.env.DEBUG_SDK) {
-      // eslint-disable-next-line no-console
       console.error(`[sdk] +${Date.now() - t0}ms ${label}`)
     }
   }
@@ -158,10 +153,10 @@ export function query(input: QueryInput): QueryHandle {
           mcpHost,
           queue,
           options,
-          hookCallbacks,
+          hookCallbacks
         })
       }
-    },
+    }
   })
 
   // ---- Hook callback registry ------------------------------------------
@@ -171,10 +166,7 @@ export function query(input: QueryInput): QueryHandle {
   const hookCallbacks = new Map<string, HookCallback>()
   let nextHookId = 0
   let initHooks:
-    | Record<
-        string,
-        Array<{ matcher?: string; hookCallbackIds: string[]; timeout?: number }>
-      >
+    | Record<string, Array<{ matcher?: string; hookCallbackIds: string[]; timeout?: number }>>
     | undefined
   if (options.hooks) {
     initHooks = {}
@@ -218,7 +210,7 @@ export function query(input: QueryInput): QueryHandle {
     },
     (err) => {
       queue.finish(new Error(`Failed to parse CLI stream-json: ${err.message}`))
-    },
+    }
   )
   void reader // reader self-attaches; reference kept to silence unused warning
 
@@ -281,7 +273,7 @@ export function query(input: QueryInput): QueryHandle {
       // Swallowing the error entirely used to mask real problems (bad init
       // payload, upstream version mismatch) as empty supportedModels/etc.
       // Log it so the failure is at least visible during debugging.
-      // eslint-disable-next-line no-console
+
       console.error(`[sdk] initialize failed: ${err?.message ?? err}`)
       options.stderr?.(Buffer.from(`[sdk] initialize failed: ${err?.message ?? err}\n`))
       return {}
@@ -301,7 +293,7 @@ export function query(input: QueryInput): QueryHandle {
       if (typeof input.prompt === 'string') {
         writer.write({
           type: 'user',
-          message: { role: 'user', content: input.prompt },
+          message: { role: 'user', content: input.prompt }
         })
         stamp('first user message sent (string)')
       } else {
@@ -410,20 +402,15 @@ async function handleControlRequest(line: Record<string, unknown>, ctx: InboundC
     }
     if (subtype === 'mcp_message') {
       const serverName = request.server_name as string
-      const message = request.message as Parameters<
-        McpHost['dispatch']
-      >[1]
+      const message = request.message as Parameters<McpHost['dispatch']>[1]
       const innerMsg = message as { method?: string; id?: string | number | null }
-      const isRequest =
-        innerMsg && 'method' in innerMsg && 'id' in innerMsg && innerMsg.id != null
+      const isRequest = innerMsg && 'method' in innerMsg && 'id' in innerMsg && innerMsg.id != null
       const result = await ctx.mcpHost.dispatch(serverName, message)
       // cli.js expects the response wrapped as `{ mcp_response: <jsonrpc> }`.
       // For notifications (no id) the SDK synthesizes a dummy RPC result so
       // cli.js sees a well-formed reply.
       const mcp_response =
-        isRequest && result
-          ? result
-          : { jsonrpc: '2.0' as const, result: {}, id: 0 }
+        isRequest && result ? result : { jsonrpc: '2.0' as const, result: {}, id: 0 }
       ctx.control.respondSuccess(request_id, { mcp_response })
       return
     }
@@ -439,7 +426,7 @@ async function handleControlRequest(line: Record<string, unknown>, ctx: InboundC
       const result = await cb(
         (request.input as Record<string, unknown>) ?? {},
         request.tool_use_id as string | undefined,
-        { signal: ac.signal },
+        { signal: ac.signal }
       )
       ctx.control.respondSuccess(request_id, (result as Record<string, unknown>) ?? {})
       return
@@ -461,9 +448,9 @@ async function handleControlRequest(line: Record<string, unknown>, ctx: InboundC
           requestedSchema: request.requested_schema,
           title: request.title as string | undefined,
           displayName: request.display_name as string | undefined,
-          description: request.description as string | undefined,
+          description: request.description as string | undefined
         },
-        { signal: ac.signal },
+        { signal: ac.signal }
       )
       ctx.control.respondSuccess(request_id, (result as Record<string, unknown>) ?? {})
       return
@@ -492,9 +479,9 @@ async function handleControlRequest(line: Record<string, unknown>, ctx: InboundC
         {
           dialogKind: request.dialog_kind as string | undefined,
           payload: request.payload,
-          toolUseId: request.tool_use_id as string | undefined,
+          toolUseId: request.tool_use_id as string | undefined
         },
-        { signal: ac.signal },
+        { signal: ac.signal }
       )
       ctx.control.respondSuccess(request_id, (result as Record<string, unknown>) ?? {})
       return
@@ -503,10 +490,7 @@ async function handleControlRequest(line: Record<string, unknown>, ctx: InboundC
     // Unknown subtype — benign success so cli.js doesn't stall. Gated log
     // so we catch new subtypes that appear upstream without grepping diffs.
     if (process.env.DEBUG_SDK) {
-      // eslint-disable-next-line no-console
-      console.error(
-        `[sdk] unknown inbound control subtype: ${subtype} (request_id=${request_id})`,
-      )
+      console.error(`[sdk] unknown inbound control subtype: ${subtype} (request_id=${request_id})`)
     }
     ctx.control.respondSuccess(request_id, {})
   } catch (err) {
@@ -519,7 +503,7 @@ async function handleControlRequest(line: Record<string, unknown>, ctx: InboundC
 async function handleCanUseTool(
   request: Record<string, unknown>,
   callback: CanUseTool | undefined,
-  signal: AbortSignal,
+  signal: AbortSignal
 ): Promise<Record<string, unknown>> {
   // cli.js validates the response with a Zod discriminated union over
   // `behavior`:
@@ -549,14 +533,14 @@ async function handleCanUseTool(
     displayName: request.display_name as string | undefined,
     description: request.description as string | undefined,
     toolUseId: request.tool_use_id as string | undefined,
-    agentId: request.agent_id as string | undefined,
+    agentId: request.agent_id as string | undefined
   }
   const result: CanUseToolResult = await callback(toolName, input, context)
   if (result.behavior === 'allow') {
     const response: Record<string, unknown> = {
       behavior: 'allow',
       updatedInput: result.updatedInput ?? input,
-      toolUseID,
+      toolUseID
     }
     if (result.updatedPermissions !== undefined) {
       response.updatedPermissions = result.updatedPermissions
@@ -570,7 +554,7 @@ async function handleCanUseTool(
   const response: Record<string, unknown> = {
     behavior: 'deny',
     message: result.message ?? 'Denied',
-    toolUseID,
+    toolUseID
   }
   if (result.interrupt !== undefined) response.interrupt = result.interrupt
   return response
@@ -590,7 +574,7 @@ async function handleCanUseTool(
 export function isCleanExit(
   code: number | null,
   signal: NodeJS.Signals | null,
-  killedByUs: boolean,
+  killedByUs: boolean
 ): boolean {
   return code === 0 || code === 143 || signal === 'SIGTERM' || killedByUs
 }
@@ -602,7 +586,7 @@ export function makeHandle(
   options: QueryOptions,
   initResponse: Promise<Record<string, unknown>>,
   wireLog: WireLog,
-  killChild: () => void,
+  killChild: () => void
 ): QueryHandle {
   const pickInit = async <T>(field: string): Promise<T[]> => {
     const r = await initResponse
@@ -616,7 +600,7 @@ export function makeHandle(
         return: async () => {
           killChild()
           return { value: undefined, done: true }
-        },
+        }
       }
     },
     // --- Turn / session control -------------------------------------------
@@ -638,7 +622,7 @@ export function makeHandle(
       control.request({
         subtype: 'rewind_files',
         user_message_id,
-        dry_run: opts?.dryRun,
+        dry_run: opts?.dryRun
       }),
     cancelAsyncMessage: (message_uuid: string) =>
       control
@@ -652,13 +636,13 @@ export function makeHandle(
       control.request({
         subtype: 'generate_session_title',
         description,
-        persist: opts?.persist,
+        persist: opts?.persist
       }),
     askSideQuestion: (question: string) =>
       control
         .request<{ response?: string | null; synthetic?: boolean } | null>({
           subtype: 'side_question',
-          question,
+          question
         })
         .then((r) => r?.response ?? null),
     launchUltrareview: (args: unknown, opts?: { confirm?: boolean }) =>
@@ -705,7 +689,7 @@ export function makeHandle(
       return control.request({
         subtype: 'mcp_set_servers',
         servers: cliServers,
-        sdkMcpServers: Object.keys(sdkServers),
+        sdkMcpServers: Object.keys(sdkServers)
       })
     },
     enableChannel: (serverName: string) =>
@@ -721,14 +705,11 @@ export function makeHandle(
     // --- Claude OAuth -----------------------------------------------------
     // All three are user-driven and can take minutes; never timeout.
     claudeAuthenticate: (loginWithClaudeAi: boolean) =>
-      control.request(
-        { subtype: 'claude_authenticate', loginWithClaudeAi },
-        { timeoutMs: 0 },
-      ),
+      control.request({ subtype: 'claude_authenticate', loginWithClaudeAi }, { timeoutMs: 0 }),
     claudeOAuthCallback: (authorizationCode: string, state: string) =>
       control.request(
         { subtype: 'claude_oauth_callback', authorizationCode, state },
-        { timeoutMs: 0 },
+        { timeoutMs: 0 }
       ),
     claudeOAuthWaitForCompletion: () =>
       control.request({ subtype: 'claude_oauth_wait_for_completion' }, { timeoutMs: 0 }),
@@ -748,7 +729,7 @@ export function makeHandle(
     /** Snapshot the per-query wire-log ring buffer (every ndjson line the
      *  harness has read from or written to cli.js). Shallow copy — callers
      *  may mutate. Intended for debug dumps on unexpected session state. */
-    wireLog: () => wireLog.snapshot(),
+    wireLog: () => wireLog.snapshot()
   }
   void options
   return handle

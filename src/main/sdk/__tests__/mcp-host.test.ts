@@ -8,7 +8,10 @@ import type { SdkMcpServer } from '../types'
  * set before Promise.all(connects) resolved — a second concurrent dispatch
  * would slip past the guard before the transport's onmessage was wired.
  */
-function makeFakeServer(name: string, onConnectDelayMs: number): {
+function makeFakeServer(
+  name: string,
+  onConnectDelayMs: number
+): {
   server: SdkMcpServer
   onMessageCount: () => number
 } {
@@ -16,17 +19,16 @@ function makeFakeServer(name: string, onConnectDelayMs: number): {
   let onMessageCount = 0
 
   const instance = {
-    connect: vi.fn(async (transport: {
-      onmessage?: (m: unknown) => void
-      start?: () => Promise<void>
-    }) => {
-      await new Promise((r) => setTimeout(r, onConnectDelayMs))
-      connected = true
-      transport.onmessage = () => {
-        onMessageCount++
+    connect: vi.fn(
+      async (transport: { onmessage?: (m: unknown) => void; start?: () => Promise<void> }) => {
+        await new Promise((r) => setTimeout(r, onConnectDelayMs))
+        connected = true
+        transport.onmessage = () => {
+          onMessageCount++
+        }
+        await transport.start?.()
       }
-      await transport.start?.()
-    }),
+    )
   } as unknown as SdkMcpServer['instance']
 
   return {
@@ -34,12 +36,12 @@ function makeFakeServer(name: string, onConnectDelayMs: number): {
       type: 'sdk',
       name,
       tools: [],
-      instance,
+      instance
     },
     onMessageCount: () => {
       if (!connected) throw new Error(`server ${name} not connected yet`)
       return onMessageCount
-    },
+    }
   }
 }
 
@@ -56,13 +58,13 @@ describe('McpHost.ensureStarted', () => {
       jsonrpc: '2.0',
       id: 1,
       method: 'tools/list',
-      params: {},
+      params: {}
     })
     const p2 = host.dispatch('srv-a', {
       jsonrpc: '2.0',
       id: 2,
       method: 'tools/list',
-      params: {},
+      params: {}
     })
 
     // Neither should have resolved yet — they're waiting for a server
@@ -90,12 +92,12 @@ describe('McpHost.ensureStarted', () => {
       jsonrpc: '2.0',
       id: 1,
       method: 'tools/list',
-      params: {},
+      params: {}
     })
     expect(resp).toMatchObject({
       jsonrpc: '2.0',
       id: 1,
-      error: { code: -32601 },
+      error: { code: -32601 }
     })
   })
 })

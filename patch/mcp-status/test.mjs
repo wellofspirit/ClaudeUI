@@ -30,20 +30,20 @@ async function main() {
   const t = new TestRunner('mcp-status')
 
   console.log('  Starting SDK query with MCP test server...')
-  const { q, cleanup, ac } = createQuery(
+  const { q, cleanup } = createQuery(
     PROMPT,
     {
       mcpServers: {
         [MCP_SERVER_NAME]: {
           command: 'node',
-          args: [resolve(__dirname, '../mcp-test-server.mjs')],
-        },
+          args: [resolve(__dirname, '../mcp-test-server.mjs')]
+        }
       },
       // Enterprise-managed environments may have an allowedMcpServers policy
       // that blocks dynamic MCP servers. Explicitly allow our test server.
       settings: JSON.stringify({
-        allowedMcpServers: [{ serverName: MCP_SERVER_NAME }],
-      }),
+        allowedMcpServers: [{ serverName: MCP_SERVER_NAME }]
+      })
     },
     60_000
   )
@@ -69,7 +69,7 @@ async function main() {
           console.error('  mcpServerStatus error:', err.message || err)
         }
       }
-    },
+    }
   })
 
   dumpMessages(messages)

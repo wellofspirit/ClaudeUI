@@ -80,6 +80,43 @@ export function loadClaudePermissions(scope: PermissionScope, cwd?: string): Cla
   return normalizePermissions(data.permissions)
 }
 
+// ---------------------------------------------------------------------------
+// cleanupPeriodDays — transcript retention window
+// ---------------------------------------------------------------------------
+//
+// Claude Code's startup sweep deletes chat transcripts under ~/.claude/projects
+// whose mtime is older than `cleanupPeriodDays` (default 30). This lives as a
+// top-level key in the user-scope settings.json — the same file the bundled
+// cli.js reads via settingSources:['user',...] — so it's the single source of
+// truth honored by both ClaudeUI and the native CLI.
+//
+// Stored as an integer >= 1 (upstream schema minimum). The UI writes a large
+// window (3650 ≈ 10 years) to mean "never clean up" rather than 0, which
+// upstream marks invalid and which trips a startup validation warning. See
+// ADR-009.
+
+export function loadCleanupPeriodDays(): number | undefined {
+  const data = readJsonSafe(settingsFilePath('user'))
+  const v = data?.cleanupPeriodDays
+  return typeof v === 'number' && Number.isFinite(v) ? v : undefined
+}
+
+export function saveCleanupPeriodDays(days: number): void {
+  const filePath = settingsFilePath('user')
+  const data = readJsonSafe(filePath) ?? {}
+
+  // Clamp to the upstream-valid range: integer >= 1.
+  data.cleanupPeriodDays = Math.max(1, Math.round(days))
+
+  const dir = path.dirname(filePath)
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
+  }
+
+  fs.writeFileSync(filePath, JSON.stringify(data, null, 2) + '\n', { mode: 0o600 })
+  logger.debug('ClaudeSettings', `Saved cleanupPeriodDays=${data.cleanupPeriodDays} to ${filePath}`)
+}
+
 export function saveClaudePermissions(
   scope: PermissionScope,
   permissions: ClaudePermissions,
@@ -88,7 +125,7 @@ export function saveClaudePermissions(
   const filePath = settingsFilePath(scope, cwd)
 
   // Read existing file to preserve non-permission keys
-  let data = readJsonSafe(filePath) ?? {}
+  const data = readJsonSafe(filePath) ?? {}
 
   // Build the permissions object, omitting empty arrays to keep file tidy
   const permsObj: Record<string, unknown> = {}

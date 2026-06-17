@@ -26,7 +26,7 @@ async function main() {
   const t = new TestRunner('taskstop-notification')
 
   console.log('  Starting SDK query...')
-  const { q, cleanup, ac } = createQuery(PROMPT, {}, 120_000)
+  const { q, cleanup } = createQuery(PROMPT, {}, 120_000)
 
   let startedTaskId = null
   let notificationReceived = false
@@ -68,7 +68,7 @@ async function main() {
         // We got what we need — close the query
         setTimeout(() => q.close(), 500)
       }
-    },
+    }
   })
 
   dumpMessages(messages)
@@ -84,10 +84,7 @@ async function main() {
   t.assertSome(
     "task_notification with status 'stopped'",
     messages,
-    (m) =>
-      m.type === 'system' &&
-      m.subtype === 'task_notification' &&
-      m.status === 'stopped'
+    (m) => m.type === 'system' && m.subtype === 'task_notification' && m.status === 'stopped'
   )
 
   // 3. task_id matches between started and notification

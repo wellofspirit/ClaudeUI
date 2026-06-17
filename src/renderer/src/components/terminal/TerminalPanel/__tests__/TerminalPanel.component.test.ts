@@ -9,8 +9,6 @@
  *   5. onTerminalExit event removes tab
  */
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
-
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import React from 'react'
 import { render, act } from '@testing-library/react'
@@ -23,7 +21,7 @@ vi.mock('../View', () => ({
   TerminalPanelView: (props: TerminalPanelViewProps) => {
     viewProps = props
     return null
-  },
+  }
 }))
 
 const ROUTE = 'route-term-panel'
@@ -47,7 +45,7 @@ describe('TerminalPanel FC', () => {
     useSessionStore.setState({
       activeSessionId: ROUTE,
       terminalGroups: {},
-      terminalPanelOpen: true,
+      terminalPanelOpen: true
     })
   })
 
@@ -81,7 +79,9 @@ describe('TerminalPanel FC', () => {
     useSessionStore.getState().addTerminalTab({ id: 'term-x', title: 'Test', cwd: CWD })
     await renderFC()
 
-    act(() => { viewProps.onCloseTab('term-x') })
+    act(() => {
+      viewProps.onCloseTab('term-x')
+    })
 
     // closeTerminalTab keeps the tab mounted but sets a flag — safe to just check the API
     // was invoked without crashing; further state is an implementation detail.
@@ -92,7 +92,9 @@ describe('TerminalPanel FC', () => {
     useSessionStore.getState().addTerminalTab({ id: 'term-a', title: 'A', cwd: CWD })
     await renderFC()
 
-    act(() => { viewProps.onSelectTab('term-a', CWD) })
+    act(() => {
+      viewProps.onSelectTab('term-a', CWD)
+    })
 
     const group = useSessionStore.getState().terminalGroups[CWD]
     expect(group?.activeTabId).toBe('term-a')
@@ -101,7 +103,9 @@ describe('TerminalPanel FC', () => {
   it('onClosePanel closes the terminal panel', async () => {
     await renderFC()
 
-    act(() => { viewProps.onClosePanel() })
+    act(() => {
+      viewProps.onClosePanel()
+    })
 
     expect(useSessionStore.getState().terminalPanelOpen).toBe(false)
   })
@@ -114,7 +118,9 @@ describe('TerminalPanel FC', () => {
       app.emit('terminal:exit', { terminalId: 'term-a' })
     })
 
-    const remaining = Object.values(useSessionStore.getState().terminalGroups).flatMap((g) => g.tabs)
+    const remaining = Object.values(useSessionStore.getState().terminalGroups).flatMap(
+      (g) => g.tabs
+    )
     expect(remaining.find((t) => t.id === 'term-a')).toBeUndefined()
   })
 })

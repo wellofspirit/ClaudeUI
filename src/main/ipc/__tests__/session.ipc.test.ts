@@ -8,8 +8,6 @@
  * sample one channel per family and trust the rest by inspection.
  */
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
-
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { bootIpcHarness, type IpcHarness } from '../../../test/helpers/boot-ipc-harness'
 
@@ -42,7 +40,7 @@ const { gitSvcSpies, sessionManagerSpies, sessionStub } = vi.hoisted(() => {
     pull: vi.fn(async () => ({ ok: true })),
     fetch: vi.fn(async () => {}),
     startPolling: vi.fn(),
-    stopPolling: vi.fn(),
+    stopPolling: vi.fn()
   }
   const sessionStub: any = {
     willQueue: false,
@@ -71,7 +69,7 @@ const { gitSvcSpies, sessionManagerSpies, sessionStub } = vi.hoisted(() => {
     notifySettingsChanged: vi.fn(async () => {}),
     getPlanContent: vi.fn(() => null),
     getSessionLogPath: vi.fn(() => null),
-    getUsage: vi.fn(async () => null),
+    getUsage: vi.fn(async () => null)
   }
   const sessionManagerSpies = {
     create: vi.fn(),
@@ -80,7 +78,7 @@ const { gitSvcSpies, sessionManagerSpies, sessionStub } = vi.hoisted(() => {
     cancel: vi.fn(),
     interrupt: vi.fn(async () => {}),
     forEach: vi.fn((cb: (s: any) => void) => cb(sessionStub)),
-    setSessionTimeout: vi.fn(),
+    setSessionTimeout: vi.fn()
   }
   return { gitSvcSpies, sessionManagerSpies, sessionStub }
 })
@@ -92,8 +90,8 @@ vi.mock('../../services/git-service', () => {
     gitServiceManager: {
       get: vi.fn(() => svc),
       getIfExists: vi.fn(() => svc),
-      release: vi.fn(),
-    },
+      release: vi.fn()
+    }
   }
 })
 
@@ -101,7 +99,7 @@ vi.mock('../../services/worktree', () => ({
   createWorktree: vi.fn(async () => ({ path: '/tmp/wt', branch: 'feat' })),
   getWorktreeStatus: vi.fn(async () => ({ dirty: false })),
   removeWorktree: vi.fn(async () => {}),
-  listWorktrees: vi.fn(async () => [{ path: '/tmp/wt', branch: 'feat' }]),
+  listWorktrees: vi.fn(async () => [{ path: '/tmp/wt', branch: 'feat' }])
 }))
 
 vi.mock('../../services/session-history', () => ({
@@ -109,12 +107,12 @@ vi.mock('../../services/session-history', () => ({
   loadSessionHistory: vi.fn(async () => []),
   loadSubagentHistory: vi.fn(async () => []),
   buildSubagentFileMap: vi.fn(() => ({})),
-  loadBackgroundOutput: vi.fn(() => ''),
+  loadBackgroundOutput: vi.fn(() => '')
 }))
 
 vi.mock('../../services/session-watcher', () => ({
   watchSession: vi.fn(),
-  unwatchSession: vi.fn(),
+  unwatchSession: vi.fn()
 }))
 
 vi.mock('../../services/ui-config', () => ({
@@ -124,12 +122,12 @@ vi.mock('../../services/ui-config', () => ({
   saveSessionConfig: vi.fn(),
   loadSlashCommands: vi.fn(() => []),
   saveSlashCommands: vi.fn(),
-  startConfigWatcher: vi.fn(),
+  startConfigWatcher: vi.fn()
 }))
 
 vi.mock('../../services/claude-settings', () => ({
   loadClaudePermissions: vi.fn(() => ({ allow: [], deny: [], ask: [] })),
-  saveClaudePermissions: vi.fn(),
+  saveClaudePermissions: vi.fn()
 }))
 
 vi.mock('../../services/claude-mcp', () => ({
@@ -137,25 +135,25 @@ vi.mock('../../services/claude-mcp', () => ({
   saveMcpServers: vi.fn(),
   removeMcpServer: vi.fn(),
   readDisabledMcpServers: vi.fn(() => []),
-  writeDisabledMcpServers: vi.fn(),
+  writeDisabledMcpServers: vi.fn()
 }))
 
 vi.mock('../../services/skill-scanner', () => ({
-  scanSkills: vi.fn(async () => []),
+  scanSkills: vi.fn(async () => [])
 }))
 
 vi.mock('../../services/custom-command-scanner', () => ({
-  scanCustomCommands: vi.fn(async () => []),
+  scanCustomCommands: vi.fn(async () => [])
 }))
 
 vi.mock('../../services/delete-session-files', () => ({
   deleteSessionFiles: vi.fn(async () => {}),
-  deleteProjectFiles: vi.fn(async () => {}),
+  deleteProjectFiles: vi.fn(async () => {})
 }))
 
 vi.mock('../../services/socks-bridge', () => ({
   startSocksBridge: vi.fn(async () => 1080),
-  stopSocksBridge: vi.fn(async () => {}),
+  stopSocksBridge: vi.fn(async () => {})
 }))
 
 vi.mock('../../services/usage-fetcher', () => ({
@@ -164,14 +162,14 @@ vi.mock('../../services/usage-fetcher', () => ({
     setSessionGetter: vi.fn(),
     setIntervalSecs: vi.fn(),
     startPolling: vi.fn(),
-    fetch: vi.fn(async () => ({})),
-  },
+    fetch: vi.fn(async () => ({}))
+  }
 }))
 
 vi.mock('../../services/service-session', () => ({
   serviceSession: {
-    getUsage: vi.fn(async () => ({})),
-  },
+    getUsage: vi.fn(async () => ({}))
+  }
 }))
 
 vi.mock('../../services/block-usage', () => ({
@@ -180,17 +178,19 @@ vi.mock('../../services/block-usage', () => ({
     setDebounceSecs: vi.fn(),
     recalculate: vi.fn(async () => ({})),
     startWatching: vi.fn(),
-    getData: vi.fn(() => null),
-  },
+    getData: vi.fn(() => null)
+  }
 }))
 
 vi.mock('../../services/persisted-sessions-dir', () => ({
-  PERSISTED_SESSIONS_DIR: '/tmp/persisted-sessions',
+  PERSISTED_SESSIONS_DIR: '/tmp/persisted-sessions'
 }))
 
 vi.mock('../../services/session-manager', () => ({
   SessionManager: class {
-    constructor() { /* no-op */ }
+    constructor() {
+      /* no-op */
+    }
     create = sessionManagerSpies.create
     rekey = sessionManagerSpies.rekey
     get = sessionManagerSpies.get
@@ -198,29 +198,37 @@ vi.mock('../../services/session-manager', () => ({
     interrupt = sessionManagerSpies.interrupt
     forEach = sessionManagerSpies.forEach
     setSessionTimeout = sessionManagerSpies.setSessionTimeout
-  },
+  }
 }))
 
 vi.mock('../../services/claude-session', () => {
   const extraWindows = new Set<any>()
   return {
     ClaudeSession: class {
-      static addExtraWindow(w: any): void { extraWindows.add(w) }
-      static removeExtraWindow(w: any): void { extraWindows.delete(w) }
-      static getExtraWindows(): Set<any> { return extraWindows }
+      static addExtraWindow(w: any): void {
+        extraWindows.add(w)
+      }
+      static removeExtraWindow(w: any): void {
+        extraWindows.delete(w)
+      }
+      static getExtraWindows(): Set<any> {
+        return extraWindows
+      }
     },
-    getSdkExecutableOpts: vi.fn(() => ({})),
+    getSdkExecutableOpts: vi.fn(() => ({}))
   }
 })
 
 vi.mock('../../sdk', () => ({
   query: vi.fn(() => {
     // Return an async iterable shaped like the SDK Query.
-    async function* empty(): AsyncGenerator<unknown> { /* noop */ }
+    async function* empty(): AsyncGenerator<unknown> {
+      /* noop */
+    }
     const gen: any = empty()
     gen.supportedModels = async () => []
     return gen
-  }),
+  })
 }))
 
 // Electron shim — must come last among electron-related mocks.
@@ -231,8 +239,8 @@ vi.mock('../../services/logger', () => ({
     debug: vi.fn(),
     info: vi.fn(),
     warn: vi.fn(),
-    error: vi.fn(),
-  },
+    error: vi.fn()
+  }
 }))
 
 // Import AFTER mocks.
@@ -336,7 +344,7 @@ describe('session.ipc', () => {
       gitSvcSpies.getStatus.mockRejectedValueOnce(new Error('x'))
       await harness.call('git:status', '/tmp/repo')
       // `release` was called in the finally block
-      expect((gitServiceManager.release as any)).toHaveBeenCalledWith('/tmp/repo')
+      expect(gitServiceManager.release as any).toHaveBeenCalledWith('/tmp/repo')
     })
   })
 
@@ -398,7 +406,7 @@ describe('session.ipc', () => {
       ['git:stage-file', ['/tmp/r', 'a.ts']],
       ['git:commit', ['/tmp/r', 'msg']],
       ['git:push', ['/tmp/r']],
-      ['git:pull', ['/tmp/r']],
+      ['git:pull', ['/tmp/r']]
     ])('%s is registered', async (channel, args) => {
       const res = await harness.call<any>(channel, ...args)
       expect(res).toHaveProperty('ok', true)
@@ -410,20 +418,20 @@ describe('session.ipc', () => {
   // -------------------------------------------------------------------------
 
   describe('config channels', () => {
-    it.each([
-      'config:load-settings',
-      'config:load-sessions',
-    ])('%s is registered (returns data)', async (channel) => {
-      await expect(harness.call(channel, {})).resolves.toBeDefined()
-    })
+    it.each(['config:load-settings', 'config:load-sessions'])(
+      '%s is registered (returns data)',
+      async (channel) => {
+        await expect(harness.call(channel, {})).resolves.toBeDefined()
+      }
+    )
 
-    it.each([
-      'config:save-settings',
-      'config:save-sessions',
-    ])('%s is registered (void)', async (channel) => {
-      // Save handlers return void; just assert they don't throw and a handler exists.
-      await expect(harness.call(channel, {})).resolves.toBeUndefined()
-    })
+    it.each(['config:save-settings', 'config:save-sessions'])(
+      '%s is registered (void)',
+      async (channel) => {
+        // Save handlers return void; just assert they don't throw and a handler exists.
+        await expect(harness.call(channel, {})).resolves.toBeUndefined()
+      }
+    )
 
     it('config:save-settings broadcasts config:settings-changed to extra windows', async () => {
       // No extra windows in harness, but call should succeed.

@@ -7,14 +7,20 @@ import { Notification, type BrowserWindow } from 'electron'
 import { CronExpressionParser } from 'cron-parser'
 import { getSdkExecutableOpts, ClaudeSession } from './claude-session'
 import { loadSessionHistory } from './session-history'
-import { getClassifier, stopClassifier, isSafeTool, buildTranscript, type TranscriptMessage } from './auto-classifier'
+import {
+  getClassifier,
+  stopClassifier,
+  isSafeTool,
+  buildTranscript,
+  type TranscriptMessage
+} from './auto-classifier'
 import { logger } from './logger'
 import {
   resolveThinkingMode,
   resolveEffort,
   defaultEffort,
   type EffortLevel,
-  type ThinkingMode,
+  type ThinkingMode
 } from '../../shared/model-capabilities'
 import type { Automation, AutomationRun, ChatMessage, ContentBlock } from '../../shared/types'
 
@@ -24,8 +30,13 @@ const CLAUDE_PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects')
 // canUseTool builder — extracted for testability
 // ---------------------------------------------------------------------------
 
-export type CanUseToolResult = { behavior: 'allow'; updatedInput: Record<string, unknown> } | { behavior: 'deny'; message: string }
-export type CanUseToolFn = (toolName: string, input: Record<string, unknown>) => Promise<CanUseToolResult>
+export type CanUseToolResult =
+  | { behavior: 'allow'; updatedInput: Record<string, unknown> }
+  | { behavior: 'deny'; message: string }
+export type CanUseToolFn = (
+  toolName: string,
+  input: Record<string, unknown>
+) => Promise<CanUseToolResult>
 
 /**
  * Build the canUseTool callback for an automation run.
@@ -51,20 +62,35 @@ export function buildCanUseTool(
         const transcript = buildTranscript(collectedMessages)
         const classifier = getClassifier(classifierId)
         const result = await classifier.classify(toolName, input, transcript)
-        logger.debug('AutomationManager', `Classifier ${result.shouldBlock ? 'BLOCK' : 'ALLOW'} ${toolName}: ${result.reason}`)
+        logger.debug(
+          'AutomationManager',
+          `Classifier ${result.shouldBlock ? 'BLOCK' : 'ALLOW'} ${toolName}: ${result.reason}`
+        )
         if (!result.shouldBlock) {
           return { behavior: 'allow' as const, updatedInput: input }
         }
-        return { behavior: 'deny' as const, message: `Automation auto mode blocked: ${result.reason}` }
+        return {
+          behavior: 'deny' as const,
+          message: `Automation auto mode blocked: ${result.reason}`
+        }
       } catch (err) {
-        logger.warn('AutomationManager', `Classifier failed for ${toolName}, denying for safety: ${err}`)
-        return { behavior: 'deny' as const, message: 'Automation: classifier unavailable, denied for safety' }
+        logger.warn(
+          'AutomationManager',
+          `Classifier failed for ${toolName}, denying for safety: ${err}`
+        )
+        return {
+          behavior: 'deny' as const,
+          message: 'Automation: classifier unavailable, denied for safety'
+        }
       }
     }
   }
 
   return async (_toolName: string, _input: Record<string, unknown>) => {
-    return { behavior: 'deny' as const, message: 'Automation: tool requires approval but no user is present' }
+    return {
+      behavior: 'deny' as const,
+      message: 'Automation: tool requires approval but no user is present'
+    }
   }
 }
 
@@ -113,7 +139,6 @@ function writeJson(filePath: string, data: unknown): void {
   fs.writeFileSync(filePath, JSON.stringify(data, null, 2), { mode: 0o600 })
 }
 
-
 // ---------------------------------------------------------------------------
 // AutomationManager
 // ---------------------------------------------------------------------------
@@ -160,8 +185,13 @@ export class AutomationManager {
       }
     }
     fs.unlinkSync(LEGACY_AUTOMATIONS_FILE)
-    setTimeout(() => { this.suppressWatch = false }, 100)
-    logger.debug('AutomationManager', `Migrated ${legacy.length} automation(s) from legacy automations.json`)
+    setTimeout(() => {
+      this.suppressWatch = false
+    }, 100)
+    logger.debug(
+      'AutomationManager',
+      `Migrated ${legacy.length} automation(s) from legacy automations.json`
+    )
   }
 
   /** Read all {id}.json files from the automation directory */
@@ -211,7 +241,12 @@ export class AutomationManager {
     // Reschedule changed/new automations
     for (const auto of diskAutomations) {
       const old = this.automations.find((a) => a.id === auto.id)
-      if (!old || old.enabled !== auto.enabled || old.schedule.cronExpression !== auto.schedule.cronExpression || old.schedule.intervalMs !== auto.schedule.intervalMs) {
+      if (
+        !old ||
+        old.enabled !== auto.enabled ||
+        old.schedule.cronExpression !== auto.schedule.cronExpression ||
+        old.schedule.intervalMs !== auto.schedule.intervalMs
+      ) {
         this.cancelSchedule(auto.id)
         if (auto.enabled && !this.activeRuns.has(auto.id)) {
           this.scheduleNext(auto)
@@ -228,7 +263,9 @@ export class AutomationManager {
   private saveAutomation(automation: Automation): void {
     this.suppressWatch = true
     writeJson(automationFile(automation.id), automation)
-    setTimeout(() => { this.suppressWatch = false }, 100)
+    setTimeout(() => {
+      this.suppressWatch = false
+    }, 100)
   }
 
   /** Delete a single automation file from disk */
@@ -236,7 +273,9 @@ export class AutomationManager {
     this.suppressWatch = true
     const file = automationFile(id)
     if (fs.existsSync(file)) fs.unlinkSync(file)
-    setTimeout(() => { this.suppressWatch = false }, 100)
+    setTimeout(() => {
+      this.suppressWatch = false
+    }, 100)
   }
 
   private loadRuns(automationId: string): AutomationRun[] {
@@ -309,7 +348,10 @@ export class AutomationManager {
         this.scheduleNext(auto)
       }
     }
-    logger.debug('AutomationManager', `Started ${this.automations.filter((a) => a.enabled).length} automation(s)`)
+    logger.debug(
+      'AutomationManager',
+      `Started ${this.automations.filter((a) => a.enabled).length} automation(s)`
+    )
   }
 
   stopAll(): void {
@@ -448,7 +490,8 @@ export class AutomationManager {
       this.win.webContents.send('automation:stream-event', { automationId, type, text })
     }
     for (const w of ClaudeSession.getExtraWindows()) {
-      if (!w.isDestroyed()) w.webContents.send('automation:stream-event', { automationId, type, text })
+      if (!w.isDestroyed())
+        w.webContents.send('automation:stream-event', { automationId, type, text })
     }
   }
 
@@ -457,7 +500,8 @@ export class AutomationManager {
       this.win.webContents.send('automation:processing', { automationId, isProcessing })
     }
     for (const w of ClaudeSession.getExtraWindows()) {
-      if (!w.isDestroyed()) w.webContents.send('automation:processing', { automationId, isProcessing })
+      if (!w.isDestroyed())
+        w.webContents.send('automation:processing', { automationId, isProcessing })
     }
   }
 
@@ -544,7 +588,11 @@ export class AutomationManager {
     const classifierId = `automation:${automation.id}`
 
     try {
-      const canUseTool = buildCanUseTool(useAutoMode ? 'auto' : 'default', collectedMessages, classifierId)
+      const canUseTool = buildCanUseTool(
+        useAutoMode ? 'auto' : 'default',
+        collectedMessages,
+        classifierId
+      )
 
       // Seed transcript with user prompt for classifier context
       collectedMessages.push({
@@ -553,15 +601,17 @@ export class AutomationManager {
       })
 
       const modelValue = automation.model || 'default'
-      const desiredThinking: ThinkingMode = (automation.thinkingMode as ThinkingMode | undefined)
-        ?? 'enabled'
+      const desiredThinking: ThinkingMode =
+        (automation.thinkingMode as ThinkingMode | undefined) ?? 'enabled'
       const thinkingMode = resolveThinkingMode(modelValue, desiredThinking)
-      const thinkingConfig = thinkingMode === 'disabled'
-        ? { type: 'disabled' as const }
-        : thinkingMode === 'adaptive'
-          ? { type: 'adaptive' as const, display: 'summarized' as const }
-          : { type: 'enabled' as const, display: 'summarized' as const, budgetTokens: 10000 }
-      const desiredEffort = (automation.effort as EffortLevel | undefined) ?? defaultEffort(modelValue)
+      const thinkingConfig =
+        thinkingMode === 'disabled'
+          ? { type: 'disabled' as const }
+          : thinkingMode === 'adaptive'
+            ? { type: 'adaptive' as const, display: 'summarized' as const }
+            : { type: 'enabled' as const, display: 'summarized' as const, budgetTokens: 10000 }
+      const desiredEffort =
+        (automation.effort as EffortLevel | undefined) ?? defaultEffort(modelValue)
       const resolvedEffort = resolveEffort(modelValue, desiredEffort) ?? undefined
 
       // Start with acceptEdits (auto mode) or default. The acceptEdits base ensures
@@ -573,7 +623,7 @@ export class AutomationManager {
           ...(resumeSessionId ? { resume: resumeSessionId } : {}),
           cwd: automation.cwd,
           model: modelValue,
-          permissionMode: useAutoMode ? 'acceptEdits' as const : 'default' as const,
+          permissionMode: useAutoMode ? ('acceptEdits' as const) : ('default' as const),
           settingSources: ['user', 'project', 'local'],
           abortController,
           includePartialMessages: true,
@@ -592,7 +642,11 @@ export class AutomationManager {
 
         // Capture session_id from the SDK and persist to run metadata.
         // Always update — each executeRun creates a fresh session with a new id.
-        if ('session_id' in msg && msg.session_id && msg.session_id !== this.sessionIds.get(automation.id)) {
+        if (
+          'session_id' in msg &&
+          msg.session_id &&
+          msg.session_id !== this.sessionIds.get(automation.id)
+        ) {
           const sid = msg.session_id as string
           this.sessionIds.set(automation.id, sid)
           // Update run metadata with sessionId
@@ -613,10 +667,18 @@ export class AutomationManager {
           if (useAutoMode && !autoModeUpgraded) {
             autoModeUpgraded = true
             try {
-              await (q as unknown as { setPermissionMode: (m: string) => Promise<void> }).setPermissionMode('auto')
-              logger.debug('AutomationManager', `Native auto mode accepted for "${automation.name}"`)
+              await (
+                q as unknown as { setPermissionMode: (m: string) => Promise<void> }
+              ).setPermissionMode('auto')
+              logger.debug(
+                'AutomationManager',
+                `Native auto mode accepted for "${automation.name}"`
+              )
             } catch {
-              logger.debug('AutomationManager', `SDK rejected auto mode for "${automation.name}", using local classifier`)
+              logger.debug(
+                'AutomationManager',
+                `SDK rejected auto mode for "${automation.name}", using local classifier`
+              )
             }
           }
         }
@@ -643,7 +705,9 @@ export class AutomationManager {
         } else if (type === 'user') {
           const messageParam = msg.message as Record<string, unknown> | undefined
           if (messageParam && Array.isArray(messageParam.content) && lastAssistantMsg) {
-            const toolResults = this.extractToolResults(messageParam.content as Array<Record<string, unknown>>)
+            const toolResults = this.extractToolResults(
+              messageParam.content as Array<Record<string, unknown>>
+            )
             if (toolResults.length > 0) {
               lastAssistantMsg.content.push(...toolResults)
               this.emitRunMessage(automation.id, lastAssistantMsg)
@@ -707,8 +771,6 @@ export class AutomationManager {
     }
   }
 
-
-
   // ---- Message Transform --------------------------------------------------
 
   private transformAssistantMessage(msg: Record<string, unknown>): ChatMessage | null {
@@ -719,22 +781,24 @@ export class AutomationManager {
     const rawContent = betaMessage.content as Array<Record<string, unknown>> | undefined
     if (!rawContent || !Array.isArray(rawContent)) return null
 
-    const content: ContentBlock[] = rawContent.map((block) => {
-      const blockType = block.type as string
-      if (blockType === 'text') {
-        return { type: 'text' as const, text: (block.text as string) || '' }
-      } else if (blockType === 'tool_use') {
-        return {
-          type: 'tool_use' as const,
-          toolName: (block.name as string) || '',
-          toolInput: (block.input as Record<string, unknown>) || {},
-          toolUseId: (block.id as string) || ''
+    const content: ContentBlock[] = rawContent
+      .map((block) => {
+        const blockType = block.type as string
+        if (blockType === 'text') {
+          return { type: 'text' as const, text: (block.text as string) || '' }
+        } else if (blockType === 'tool_use') {
+          return {
+            type: 'tool_use' as const,
+            toolName: (block.name as string) || '',
+            toolInput: (block.input as Record<string, unknown>) || {},
+            toolUseId: (block.id as string) || ''
+          }
+        } else if (blockType === 'thinking') {
+          return { type: 'thinking' as const, text: (block.thinking as string) || '' }
         }
-      } else if (blockType === 'thinking') {
-        return { type: 'thinking' as const, text: (block.thinking as string) || '' }
-      }
-      return { type: 'text' as const, text: '' }
-    }).filter((b) => b.text !== '' || b.type !== 'text')
+        return { type: 'text' as const, text: '' }
+      })
+      .filter((b) => b.text !== '' || b.type !== 'text')
 
     return { id, role: 'assistant', content, timestamp: Date.now() }
   }
@@ -760,7 +824,7 @@ export class AutomationManager {
         type: 'tool_result',
         toolUseId,
         toolResult: resultText,
-        isError: !!(block.is_error)
+        isError: !!block.is_error
       })
     }
     return results
@@ -799,7 +863,10 @@ export class AutomationManager {
           }
           return messages
         } catch (err) {
-          logger.warn('AutomationManager', `Failed to load session history for run ${runId}: ${err}`)
+          logger.warn(
+            'AutomationManager',
+            `Failed to load session history for run ${runId}: ${err}`
+          )
         }
       }
     }
@@ -862,7 +929,10 @@ export class AutomationManager {
       const summary = run.resultSummary ? `\n${run.resultSummary}` : ''
       new Notification({
         title: `Automation ${status}: ${automation.name}`,
-        body: run.error || summary || `Finished in ${((run.finishedAt! - run.startedAt) / 1000).toFixed(0)}s`,
+        body:
+          run.error ||
+          summary ||
+          `Finished in ${((run.finishedAt! - run.startedAt) / 1000).toFixed(0)}s`,
         silent: false
       }).show()
     } catch (err) {

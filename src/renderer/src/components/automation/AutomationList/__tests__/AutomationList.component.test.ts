@@ -11,8 +11,6 @@
  *      the UI doesn't spin forever on a broken IPC.
  */
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
-
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import React from 'react'
 import { render, act } from '@testing-library/react'
@@ -26,7 +24,7 @@ vi.mock('../View', () => ({
   AutomationListView: (props: AutomationListViewProps) => {
     viewProps = props
     return null
-  },
+  }
 }))
 
 function makeAutomation(overrides: Partial<Automation> = {}): Automation {
@@ -41,7 +39,7 @@ function makeAutomation(overrides: Partial<Automation> = {}): Automation {
     lastRunAt: null,
     lastRunStatus: null,
     createdAt: Date.now(),
-    ...overrides,
+    ...overrides
   } as Automation
 }
 
@@ -55,17 +53,31 @@ describe('AutomationList FC', () => {
     saveCalls = []
     listRunsCalls = []
 
-    app.bridge.ipcMain.handle('automation:save', async (_e, a: Automation) => { saveCalls.push(a) })
-    app.bridge.ipcMain.handle('automation:list-runs', async (_e, id: string): Promise<AutomationRun[]> => {
-      listRunsCalls.push(id)
-      return [{ id: `run-${id}`, automationId: id, status: 'success', startedAt: 1, finishedAt: 2, totalCostUsd: 0 }]
+    app.bridge.ipcMain.handle('automation:save', async (_e, a: Automation) => {
+      saveCalls.push(a)
     })
+    app.bridge.ipcMain.handle(
+      'automation:list-runs',
+      async (_e, id: string): Promise<AutomationRun[]> => {
+        listRunsCalls.push(id)
+        return [
+          {
+            id: `run-${id}`,
+            automationId: id,
+            status: 'success',
+            startedAt: 1,
+            finishedAt: 2,
+            totalCostUsd: 0
+          }
+        ]
+      }
+    )
 
     useAutomationStore.setState({
       automations: [],
       selectedAutomationId: null,
       selectedRunId: null,
-      runs: {},
+      runs: {}
     })
   })
 
@@ -79,11 +91,17 @@ describe('AutomationList FC', () => {
   }
 
   it('onCreate calls saveAutomation IPC and selects new automation', async () => {
-    await act(async () => { await renderFC() })
+    await act(async () => {
+      await renderFC()
+    })
 
-    act(() => { viewProps.onCreate() })
+    act(() => {
+      viewProps.onCreate()
+    })
 
-    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
 
     expect(saveCalls).toHaveLength(1)
     expect(useAutomationStore.getState().selectedAutomationId).toBe(saveCalls[0].id)
@@ -91,20 +109,28 @@ describe('AutomationList FC', () => {
 
   it('onSelect updates selectedAutomationId in store', async () => {
     useAutomationStore.setState({ automations: [makeAutomation()] })
-    await act(async () => { await renderFC() })
+    await act(async () => {
+      await renderFC()
+    })
 
-    act(() => { viewProps.onSelect('auto-1') })
+    act(() => {
+      viewProps.onSelect('auto-1')
+    })
 
     expect(useAutomationStore.getState().selectedAutomationId).toBe('auto-1')
   })
 
   it('backfills runs via listAutomationRuns for each unloaded automation on mount', async () => {
     useAutomationStore.setState({
-      automations: [makeAutomation({ id: 'a1' }), makeAutomation({ id: 'a2' })],
+      automations: [makeAutomation({ id: 'a1' }), makeAutomation({ id: 'a2' })]
     })
 
-    await act(async () => { await renderFC() })
-    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    await act(async () => {
+      await renderFC()
+    })
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
 
     expect(listRunsCalls.sort()).toEqual(['a1', 'a2'])
     expect(useAutomationStore.getState().runs['a1']).toHaveLength(1)
@@ -114,26 +140,49 @@ describe('AutomationList FC', () => {
   it('skips backfill for automations that already have cached runs', async () => {
     useAutomationStore.setState({
       automations: [makeAutomation({ id: 'a1' }), makeAutomation({ id: 'a2' })],
-      runs: { a1: [{ id: 'cached', automationId: 'a1', status: 'success', startedAt: 0, finishedAt: 0, totalCostUsd: 0 }] },
+      runs: {
+        a1: [
+          {
+            id: 'cached',
+            automationId: 'a1',
+            status: 'success',
+            startedAt: 0,
+            finishedAt: 0,
+            totalCostUsd: 0
+          }
+        ]
+      }
     })
 
-    await act(async () => { await renderFC() })
-    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    await act(async () => {
+      await renderFC()
+    })
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
 
     expect(listRunsCalls).toEqual(['a2']) // only the uncached one
     expect(useAutomationStore.getState().runs['a1']?.[0].id).toBe('cached')
   })
 
   it('falls back to an empty run list when listAutomationRuns rejects', async () => {
-    app.bridge.ipcMain.handle('automation:list-runs', async () => { throw new Error('boom') })
-
-    useAutomationStore.setState({
-      automations: [makeAutomation({ id: 'a1' })],
+    app.bridge.ipcMain.handle('automation:list-runs', async () => {
+      throw new Error('boom')
     })
 
-    await act(async () => { await renderFC() })
-    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
-    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    useAutomationStore.setState({
+      automations: [makeAutomation({ id: 'a1' })]
+    })
+
+    await act(async () => {
+      await renderFC()
+    })
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
 
     expect(useAutomationStore.getState().runs['a1']).toEqual([])
   })

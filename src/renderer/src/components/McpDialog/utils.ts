@@ -19,5 +19,5 @@ export const SCOPE_META: Record<McpServerScope, { label: string; color: string }
   project: { label: 'Project', color: 'bg-accent/15 text-accent' },
   local: { label: 'Local', color: 'bg-amber-500/15 text-amber-400' },
   managed: { label: 'Managed', color: 'bg-text-muted/15 text-text-muted' },
-  claudeai: { label: 'Claude AI', color: 'bg-sky-500/15 text-sky-400' },
+  claudeai: { label: 'Claude AI', color: 'bg-sky-500/15 text-sky-400' }
 }

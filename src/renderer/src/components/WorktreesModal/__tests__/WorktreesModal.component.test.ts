@@ -7,8 +7,6 @@
  *   3. Escape key closes
  */
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
-
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import React from 'react'
 import { render, act } from '@testing-library/react'
@@ -21,7 +19,7 @@ vi.mock('../View', () => ({
   WorktreesModalView: (props: WorktreesModalViewProps) => {
     viewProps = props
     return null
-  },
+  }
 }))
 
 function makeEntry(overrides: Partial<WorktreeEntry> = {}): WorktreeEntry {
@@ -30,7 +28,7 @@ function makeEntry(overrides: Partial<WorktreeEntry> = {}): WorktreeEntry {
     path: '/d/repo/.claude/worktrees/feat-x',
     branch: 'feat/x',
     exists: true,
-    ...overrides,
+    ...overrides
   } as WorktreeEntry
 }
 
@@ -44,18 +42,36 @@ describe('WorktreesModal FC', () => {
     onClose = vi.fn()
     removeCalls = []
 
-    app.bridge.ipcMain.handle('worktree:list', async (): Promise<{ ok: true; data: WorktreeEntry[] }> => ({
-      ok: true,
-      data: [makeEntry(), makeEntry({ name: 'feat-y', path: '/d/repo/.claude/worktrees/feat-y', branch: 'feat/y' })],
-    }))
-    app.bridge.ipcMain.handle('worktree:status', async (): Promise<{ ok: true; data: WorktreeStatus }> => ({
-      ok: true,
-      data: { uncommittedFiles: 0, commitsAhead: 0, commitsBehind: 0, originalHead: '', files: [] } as unknown as WorktreeStatus,
-    }))
-    app.bridge.ipcMain.handle('worktree:remove', async (_e, worktreePath: string, branch: string, gitRoot: string) => {
-      removeCalls.push({ worktreePath, branch, gitRoot })
-      return { ok: true, data: undefined }
-    })
+    app.bridge.ipcMain.handle(
+      'worktree:list',
+      async (): Promise<{ ok: true; data: WorktreeEntry[] }> => ({
+        ok: true,
+        data: [
+          makeEntry(),
+          makeEntry({ name: 'feat-y', path: '/d/repo/.claude/worktrees/feat-y', branch: 'feat/y' })
+        ]
+      })
+    )
+    app.bridge.ipcMain.handle(
+      'worktree:status',
+      async (): Promise<{ ok: true; data: WorktreeStatus }> => ({
+        ok: true,
+        data: {
+          uncommittedFiles: 0,
+          commitsAhead: 0,
+          commitsBehind: 0,
+          originalHead: '',
+          files: []
+        } as unknown as WorktreeStatus
+      })
+    )
+    app.bridge.ipcMain.handle(
+      'worktree:remove',
+      async (_e, worktreePath: string, branch: string, gitRoot: string) => {
+        removeCalls.push({ worktreePath, branch, gitRoot })
+        return { ok: true, data: undefined }
+      }
+    )
   })
 
   afterEach(() => {
@@ -65,13 +81,17 @@ describe('WorktreesModal FC', () => {
   async function renderFC(): Promise<void> {
     const { WorktreesModal } = await import('../WorktreesModal')
     await act(async () => {
-      render(React.createElement(WorktreesModal, { cwd: '/d/repo', onClose: onClose as () => void }))
+      render(
+        React.createElement(WorktreesModal, { cwd: '/d/repo', onClose: onClose as () => void })
+      )
     })
   }
 
   it('fetches worktrees on mount', async () => {
     await renderFC()
-    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
 
     expect(viewProps.loading).toBe(false)
     expect(viewProps.entries).toHaveLength(2)
@@ -79,7 +99,9 @@ describe('WorktreesModal FC', () => {
 
   it('onRemove calls removeWorktree IPC and removes from list', async () => {
     await renderFC()
-    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
 
     await act(async () => {
       await viewProps.onRemove(viewProps.entries[0])

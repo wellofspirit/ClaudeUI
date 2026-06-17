@@ -51,9 +51,7 @@ export class PtyManager {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const nodePty = require('node-pty')
     const shell =
-      os.platform() === 'win32'
-        ? resolveWindowsShell()
-        : process.env.SHELL || '/bin/bash'
+      os.platform() === 'win32' ? resolveWindowsShell() : process.env.SHELL || '/bin/bash'
 
     const args: string[] = []
     const pty: IPty = nodePty.spawn(shell, args, {

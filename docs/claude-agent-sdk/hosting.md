@@ -37,6 +37,7 @@ Each SDK instance requires:
 ## Understanding the SDK Architecture
 
 Unlike stateless API calls, the Claude Agent SDK operates as a **long-running process** that:
+
 - **Executes commands** in a persistent shell environment
 - **Manages file operations** within a working directory
 - **Handles tool execution** with context from previous interactions
@@ -52,17 +53,18 @@ Several providers specialize in secure container environments for AI code execut
 - **[Fly Machines](https://fly.io/docs/machines/)**
 - **[Vercel Sandbox](https://vercel.com/docs/functions/sandbox)**
 
-For self-hosted options (Docker, gVisor, Firecracker) and detailed isolation configuration, see [Isolation Technologies](/docs/en/agent-sdk/secure-deployment#isolation-technologies). 
+For self-hosted options (Docker, gVisor, Firecracker) and detailed isolation configuration, see [Isolation Technologies](/docs/en/agent-sdk/secure-deployment#isolation-technologies).
 
 ## Production Deployment Patterns
 
 ### Pattern 1: Ephemeral Sessions
 
-Create a new container for each user task, then destroy it when complete. 
+Create a new container for each user task, then destroy it when complete.
 
 Best for one-off tasks, the user may still interact with the AI while the task is completing, but once completed the container is destroyed.
 
 **Examples:**
+
 - Bug Investigation & Fix: Debug and resolve a specific issue with relevant context
 - Invoice Processing: Extract and structure data from receipts/invoices for accounting systems
 - Translation Tasks: Translate documents or content batches between languages
@@ -75,6 +77,7 @@ Maintain persistent container instances for long running tasks. Often times runn
 Best for proactive agents that take action without the users input, agents that serve content or agents that process high amounts of messages.
 
 **Examples:**
+
 - Email Agent: Monitors incoming emails and autonomously triages, responds, or takes actions based on content
 - Site Builder: Hosts custom websites per user with live editing capabilities served through container ports
 - High-Frequency Chat Bots: Handles continuous message streams from platforms like Slack where rapid response times are critical
@@ -86,6 +89,7 @@ Ephemeral containers that are hydrated with history and state, possibly from a d
 Best for containers with intermittent interaction from the user that kicks off work and spins down when the work is completed but can be continued.
 
 **Examples:**
+
 - Personal Project Manager: Helps manage ongoing projects with intermittent check-ins, maintains context of tasks, decisions, and progress
 - Deep Research: Conducts multi-hour research tasks, saves findings and resumes investigation when user returns
 - Customer Support Agent: Handles support tickets that span multiple interactions, loads ticket history and customer context
@@ -97,27 +101,34 @@ Run multiple Claude Agent SDK processes in one global container.
 Best for agents that must collaborate closely together. This is likely the least popular pattern because you will have to prevent agents from overwriting each other.
 
 **Examples:**
+
 - **Simulations**: Agents that interact with each other in simulations such as video games.
 
 # FAQ
 
 ### How do I communicate with my sandboxes?
+
 When hosting in containers, expose ports to communicate with your SDK instances. Your application can expose HTTP/WebSocket endpoints for external clients while the SDK runs internally within the container.
 
 ### What is the cost of hosting a container?
+
 We have found that the dominant cost of serving agents is the tokens, containers vary based on what you provision but a minimum cost is roughly 5 cents per hour running.
 
 ### When should I shut down idle containers vs. keeping them warm?
+
 This is likely provider dependent, different sandbox providers will let you set different criteria for idle timeouts after which a sandbox might spin down.
-You will want to tune this timeout based on how frequent you think user response might be. 
+You will want to tune this timeout based on how frequent you think user response might be.
 
 ### How often should I update the Claude Code CLI?
+
 The Claude Code CLI is versioned with semver, so any breaking changes will be versioned.
 
 ### How do I monitor container health and agent performance?
+
 Since containers are just servers the same logging infrastructure you use for the backend will work for containers.
 
 ### How long can an agent session run before timing out?
+
 An agent session will not timeout, but we recommend setting a 'maxTurns' property to prevent Claude from getting stuck in a loop.
 
 ## Next Steps

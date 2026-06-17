@@ -16,7 +16,10 @@ export function GitCommitBox(): React.JSX.Element {
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null)
   const [toastExiting, setToastExiting] = useState(false)
   const toastTimerRef = useRef<ReturnType<typeof setTimeout>>(null)
-  const [upstreamPrompt, setUpstreamPrompt] = useState<{ branch: string; afterCommitHash?: string } | null>(null)
+  const [upstreamPrompt, setUpstreamPrompt] = useState<{
+    branch: string
+    afterCommitHash?: string
+  } | null>(null)
   const [dropdownOpen, setDropdownOpen] = useState(false)
   const dropdownRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -31,13 +34,16 @@ export function GitCommitBox(): React.JSX.Element {
     if (toastTimerRef.current) clearTimeout(toastTimerRef.current)
     setToast({ message: msg, type })
     setToastExiting(false)
-    toastTimerRef.current = setTimeout(() => {
-      setToastExiting(true)
-      setTimeout(() => {
-        setToast(null)
-        setToastExiting(false)
-      }, 200)
-    }, type === 'error' ? 5000 : 2500)
+    toastTimerRef.current = setTimeout(
+      () => {
+        setToastExiting(true)
+        setTimeout(() => {
+          setToast(null)
+          setToastExiting(false)
+        }, 200)
+      },
+      type === 'error' ? 5000 : 2500
+    )
   }, [])
 
   // Clean up toast timer on unmount
@@ -74,26 +80,33 @@ export function GitCommitBox(): React.JSX.Element {
   }, [gitCommitMessage]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Drag-to-resize commit box
-  const onResizeMouseDown = useCallback((e: React.MouseEvent) => {
-    e.preventDefault()
-    dragRef.current = { startY: e.clientY, startH: commitBoxHeight }
-    const onMove = (ev: MouseEvent): void => {
-      if (!dragRef.current) return
-      const delta = dragRef.current.startY - ev.clientY
-      setCommitBoxHeight(Math.max(80, Math.min(600, dragRef.current.startH + delta)))
-    }
-    const onUp = (): void => {
-      dragRef.current = null
-      document.removeEventListener('mousemove', onMove)
-      document.removeEventListener('mouseup', onUp)
-    }
-    document.addEventListener('mousemove', onMove)
-    document.addEventListener('mouseup', onUp)
-  }, [commitBoxHeight])
+  const onResizeMouseDown = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault()
+      dragRef.current = { startY: e.clientY, startH: commitBoxHeight }
+      const onMove = (ev: MouseEvent): void => {
+        if (!dragRef.current) return
+        const delta = dragRef.current.startY - ev.clientY
+        setCommitBoxHeight(Math.max(80, Math.min(600, dragRef.current.startH + delta)))
+      }
+      const onUp = (): void => {
+        dragRef.current = null
+        document.removeEventListener('mousemove', onMove)
+        document.removeEventListener('mouseup', onUp)
+      }
+      document.addEventListener('mousemove', onMove)
+      document.addEventListener('mouseup', onUp)
+    },
+    [commitBoxHeight]
+  )
 
   const isNoUpstreamError = (err: unknown): boolean => {
     const msg = err instanceof Error ? err.message : String(err)
-    return msg.includes('no upstream branch') || msg.includes('set-upstream') || msg.includes('has no upstream')
+    return (
+      msg.includes('no upstream branch') ||
+      msg.includes('set-upstream') ||
+      msg.includes('has no upstream')
+    )
   }
 
   const refreshStatus = useCallback(async () => {
@@ -107,7 +120,12 @@ export function GitCommitBox(): React.JSX.Element {
     setLoading(true)
     try {
       await window.api.gitPushWithUpstream(cwd, upstreamPrompt.branch)
-      showToast(upstreamPrompt.afterCommitHash ? `Committed & pushed: ${upstreamPrompt.afterCommitHash}` : 'Pushed!', 'success')
+      showToast(
+        upstreamPrompt.afterCommitHash
+          ? `Committed & pushed: ${upstreamPrompt.afterCommitHash}`
+          : 'Pushed!',
+        'success'
+      )
       await refreshStatus()
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Push failed', 'error')
@@ -128,7 +146,10 @@ export function GitCommitBox(): React.JSX.Element {
       }
       await refreshStatus()
     } catch (err) {
-      showToast(err instanceof Error ? err.message : allStaged ? 'Failed to unstage' : 'Failed to stage', 'error')
+      showToast(
+        err instanceof Error ? err.message : allStaged ? 'Failed to unstage' : 'Failed to stage',
+        'error'
+      )
     } finally {
       setLoading(false)
     }
@@ -152,7 +173,17 @@ export function GitCommitBox(): React.JSX.Element {
     } finally {
       setLoading(false)
     }
-  }, [cwd, activeSessionId, gitCommitMessage, stagedCount, loading, setGitCommitMessage, refreshStatus, showToast, selectNextGitFile])
+  }, [
+    cwd,
+    activeSessionId,
+    gitCommitMessage,
+    stagedCount,
+    loading,
+    setGitCommitMessage,
+    refreshStatus,
+    showToast,
+    selectNextGitFile
+  ])
 
   const handleCommitAndPush = useCallback(async () => {
     if (!cwd || !activeSessionId || !gitCommitMessage.trim() || loading) return
@@ -184,7 +215,18 @@ export function GitCommitBox(): React.JSX.Element {
     } finally {
       setLoading(false)
     }
-  }, [cwd, activeSessionId, gitCommitMessage, stagedCount, loading, gitStatus?.branch, setGitCommitMessage, refreshStatus, showToast, selectNextGitFile])
+  }, [
+    cwd,
+    activeSessionId,
+    gitCommitMessage,
+    stagedCount,
+    loading,
+    gitStatus?.branch,
+    setGitCommitMessage,
+    refreshStatus,
+    showToast,
+    selectNextGitFile
+  ])
 
   const handlePush = useCallback(async () => {
     if (!cwd || loading) return

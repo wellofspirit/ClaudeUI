@@ -133,6 +133,7 @@ For notifications (JSON-RPC without `id`), the MCP server has no response to sen
 ## 10.4 JSON-RPC methods cli.js calls on SDK servers
 
 At least (may grow with upstream MCP protocol additions):
+
 - `initialize` — MCP handshake (called once per server lifecycle)
 - `notifications/initialized` — handshake complete
 - `tools/list` — fetch tool catalog
@@ -235,15 +236,15 @@ const mermaidServer = createSdkMcpServer({
       'Render a Mermaid diagram',
       {
         source: z.string().describe('Mermaid source'),
-        title: z.string().optional(),
+        title: z.string().optional()
       },
       async (input) => {
         return {
-          content: [{ type: 'text', text: `Rendered: ${input.source}` }],
+          content: [{ type: 'text', text: `Rendered: ${input.source}` }]
         }
-      },
-    ),
-  ],
+      }
+    )
+  ]
 })
 ```
 
@@ -253,8 +254,8 @@ Pass via `mcpServers` on `query()`:
 query({
   prompt: '...',
   options: {
-    mcpServers: { 'claude-ui': mermaidServer },
-  },
+    mcpServers: { 'claude-ui': mermaidServer }
+  }
 })
 ```
 
@@ -298,16 +299,16 @@ Set via `options.permissionPromptToolName = 'mcp__foo__check'`. cli.js invokes t
 
 Control subtypes for managing MCP servers after session start:
 
-| Subtype | Purpose |
-|---|---|
-| `mcp_status` | List all servers + status (connected/disabled/error) |
-| `mcp_toggle` | Enable/disable a server (propagates to model's tool list — see `patch/mcp-tool-refresh`) |
-| `mcp_reconnect` | Reconnect a server (e.g., after env/config change) |
-| `mcp_set_servers` | Replace the entire server config at runtime |
-| `mcp_authenticate` | Start an MCP OAuth flow (long-lived) |
-| `mcp_clear_auth` | Clear stored OAuth tokens for a server |
-| `mcp_oauth_callback_url` | Submit an OAuth callback URL back to cli.js |
-| `channel_enable` | Enable a specific channel/capability on a server |
+| Subtype                  | Purpose                                                                                  |
+| ------------------------ | ---------------------------------------------------------------------------------------- |
+| `mcp_status`             | List all servers + status (connected/disabled/error)                                     |
+| `mcp_toggle`             | Enable/disable a server (propagates to model's tool list — see `patch/mcp-tool-refresh`) |
+| `mcp_reconnect`          | Reconnect a server (e.g., after env/config change)                                       |
+| `mcp_set_servers`        | Replace the entire server config at runtime                                              |
+| `mcp_authenticate`       | Start an MCP OAuth flow (long-lived)                                                     |
+| `mcp_clear_auth`         | Clear stored OAuth tokens for a server                                                   |
+| `mcp_oauth_callback_url` | Submit an OAuth callback URL back to cli.js                                              |
+| `channel_enable`         | Enable a specific channel/capability on a server                                         |
 
 See `07-control-outbound.md` for full details on each.
 

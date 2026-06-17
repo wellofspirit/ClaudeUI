@@ -6,8 +6,6 @@
  * test push data or simulate exit.
  */
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
-
 export interface FakeDisposable {
   dispose: () => void
 }
@@ -91,7 +89,7 @@ export function createPtyStub(): PtyStubController {
           dispose: () => {
             const i = dataListeners.indexOf(cb)
             if (i >= 0) dataListeners.splice(i, 1)
-          },
+          }
         }
       },
       onExit(cb) {
@@ -100,7 +98,7 @@ export function createPtyStub(): PtyStubController {
           dispose: () => {
             const i = exitListeners.indexOf(cb)
             if (i >= 0) exitListeners.splice(i, 1)
-          },
+          }
         }
       },
 
@@ -114,7 +112,7 @@ export function createPtyStub(): PtyStubController {
         fake.disposed = true
       },
       dataListeners,
-      exitListeners,
+      exitListeners
     }
     return fake
   }
@@ -139,6 +137,6 @@ export function createPtyStub(): PtyStubController {
       spawned.length = 0
       pendingErrors.length = 0
       nextPid = 1000
-    },
+    }
   }
 }

@@ -24,10 +24,19 @@ export function PlanReviewBar({ comments }: Props): React.JSX.Element {
 
     const feedback = composePlanFeedback(comments)
 
-    await window.api.respondApproval(activeSessionId, planReview.approvalRequestId, 'deny', { feedback })
+    await window.api.respondApproval(activeSessionId, planReview.approvalRequestId, 'deny', {
+      feedback
+    })
     removePendingApproval(activeSessionId, planReview.approvalRequestId)
     closePlanPanel(activeSessionId)
-  }, [activeSessionId, planReview, comments, approvalStillPending, removePendingApproval, closePlanPanel])
+  }, [
+    activeSessionId,
+    planReview,
+    comments,
+    approvalStillPending,
+    removePendingApproval,
+    closePlanPanel
+  ])
 
   const sendRef = useRef(handleSend)
   sendRef.current = handleSend

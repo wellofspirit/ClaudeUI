@@ -86,8 +86,8 @@ if (src.includes(PATCH_MARKER)) {
     process.exit(1)
   }
 
-  const errorFn = anchorMatch[1]   // error response function
-  const msgVar = anchorMatch[2]    // control message variable
+  const errorFn = anchorMatch[1] // error response function
+  const msgVar = anchorMatch[2] // control message variable
   console.log(`Found fallback anchor at char ${anchorIdx} (errorFn=${errorFn}, msgVar=${msgVar})`)
 
   // ---------------------------------------------------------------------------
@@ -114,7 +114,9 @@ if (src.includes(PATCH_MARKER)) {
   // shape is no longer globally unique — but every site calls the same function.
   const successNames = new Set(successMatches.map((m) => m[1]))
   if (successNames.size > 1) {
-    console.error(`ERROR: Success response helper pattern resolved to multiple names: ${[...successNames].join(', ')}`)
+    console.error(
+      `ERROR: Success response helper pattern resolved to multiple names: ${[...successNames].join(', ')}`
+    )
     process.exit(1)
   }
   const successFn = successMatches[0][1]
@@ -140,7 +142,7 @@ if (src.includes(PATCH_MARKER)) {
   let usageFetcherFn = null
   let fnMatch
   while ((fnMatch = fnDeclRe.exec(lookback)) !== null) {
-    usageFetcherFn = fnMatch[1]  // take the last (closest) match
+    usageFetcherFn = fnMatch[1] // take the last (closest) match
   }
   if (!usageFetcherFn) {
     console.error('ERROR: Cannot find enclosing async function for "api/oauth/usage"')
@@ -156,10 +158,14 @@ if (src.includes(PATCH_MARKER)) {
   const usageUrlPositions = [...src.matchAll(/api\/oauth\/usage/g)].map((m) => m.index)
   const usageUrlSpan = usageUrlPositions[usageUrlPositions.length - 1] - usageUrlPositions[0]
   if (usageUrlPositions.length === 0 || usageUrlSpan > 500) {
-    console.error(`ERROR: "api/oauth/usage" occurrences (${usageUrlPositions.length}) span ${usageUrlSpan} chars — not co-located. Aborting.`)
+    console.error(
+      `ERROR: "api/oauth/usage" occurrences (${usageUrlPositions.length}) span ${usageUrlSpan} chars — not co-located. Aborting.`
+    )
     process.exit(1)
   }
-  console.log(`  Verified: "api/oauth/usage" appears ${usageUrlPositions.length}× within ${usageUrlSpan} chars (same function)`)
+  console.log(
+    `  Verified: "api/oauth/usage" appears ${usageUrlPositions.length}× within ${usageUrlSpan} chars (same function)`
+  )
 
   // ---------------------------------------------------------------------------
   // Inject the get_usage handler before the "Unsupported" fallback
@@ -171,19 +177,20 @@ if (src.includes(PATCH_MARKER)) {
   // account. Return an empty object so consumers can branch on `Object.keys()`
   // without try/catch. Real fetcher failures (network, malformed) still bubble
   // up via the error path so callers see them.
-  const injection = PATCH_MARKER +
+  const injection =
+    PATCH_MARKER +
     `else if(${msgVar}.request.subtype==="get_usage"){` +
-      `try{` +
-        `let Z6=await ${usageFetcherFn}();` +
-        `${successFn}(${msgVar},Z6??{})` +
-      `}catch(S6){` +
-        `let X6=S6 instanceof Error?S6.message:String(S6);` +
-        `if(typeof X6==="string"&&X6.indexOf("Auth error:")===0){` +
-          `${successFn}(${msgVar},{})` +
-        `}else{` +
-          `${errorFn}(${msgVar},X6)` +
-        `}` +
-      `}` +
+    `try{` +
+    `let Z6=await ${usageFetcherFn}();` +
+    `${successFn}(${msgVar},Z6??{})` +
+    `}catch(S6){` +
+    `let X6=S6 instanceof Error?S6.message:String(S6);` +
+    `if(typeof X6==="string"&&X6.indexOf("Auth error:")===0){` +
+    `${successFn}(${msgVar},{})` +
+    `}else{` +
+    `${errorFn}(${msgVar},X6)` +
+    `}` +
+    `}` +
     `}`
 
   src = src.slice(0, anchorIdx) + injection + src.slice(anchorIdx)
@@ -206,5 +213,7 @@ if (src.includes(PATCH_MARKER)) {
 
 console.log('')
 console.log('What this does:')
-console.log('  Part A (cli.js): get_usage control-request handler (calls internal OAuth usage API).')
+console.log(
+  '  Part A (cli.js): get_usage control-request handler (calls internal OAuth usage API).'
+)
 console.log('  Part B (sdk.mjs) was removed — getUsage() lives in src/main/sdk/.')

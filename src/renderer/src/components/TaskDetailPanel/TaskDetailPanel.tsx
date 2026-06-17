@@ -3,7 +3,11 @@ import { useSessionStore, useActiveSession } from '../../stores/session-store'
 import { findTaskBlocks } from './utils'
 import { TaskDetailPanelView, type TaskEntryDescriptor } from './View'
 
-export function TaskDetailPanel({ style }: { style?: React.CSSProperties }): React.JSX.Element | null {
+export function TaskDetailPanel({
+  style
+}: {
+  style?: React.CSSProperties
+}): React.JSX.Element | null {
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const taskPanelOpen = useActiveSession((s) => s.rightPanel === 'task')
   const openedTaskToolUseIds = useActiveSession((s) => s.openedTaskToolUseIds)

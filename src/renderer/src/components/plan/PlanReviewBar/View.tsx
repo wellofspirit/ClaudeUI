@@ -4,7 +4,11 @@ export interface PlanReviewBarViewProps {
   onSend: () => void
 }
 
-export function PlanReviewBarView({ commentCount, approvalStillPending, onSend }: PlanReviewBarViewProps): React.JSX.Element {
+export function PlanReviewBarView({
+  commentCount,
+  approvalStillPending,
+  onSend
+}: PlanReviewBarViewProps): React.JSX.Element {
   return (
     <div className="shrink-0 flex items-center justify-between px-3 py-2 border-t border-border bg-bg-secondary/80">
       <span className="text-[11px] text-text-muted">

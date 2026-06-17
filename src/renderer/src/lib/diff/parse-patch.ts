@@ -57,7 +57,7 @@ export function parsePatch(patch: string): ParsedDiff {
         oldCount: hunkMatch[2] != null ? parseInt(hunkMatch[2], 10) : 1,
         newStart: parseInt(hunkMatch[3], 10),
         newCount: hunkMatch[4] != null ? parseInt(hunkMatch[4], 10) : 1,
-        lines: [],
+        lines: []
       }
       hunks.push(currentHunk)
       oldLine = currentHunk.oldStart
@@ -77,7 +77,7 @@ export function parsePatch(patch: string): ParsedDiff {
       const diffLine: DiffLine = {
         type: 'add',
         content: line.slice(1),
-        newLineNumber: newLine++,
+        newLineNumber: newLine++
       }
       currentHunk.lines.push(diffLine)
     } else if (line.startsWith('-')) {
@@ -85,7 +85,7 @@ export function parsePatch(patch: string): ParsedDiff {
         type: 'del',
         content: line.slice(1),
         newLineNumber: undefined,
-        oldLineNumber: oldLine++,
+        oldLineNumber: oldLine++
       }
       currentHunk.lines.push(diffLine)
     } else if (line.startsWith(' ') || (line === '' && i < lines.length - 1)) {
@@ -95,7 +95,7 @@ export function parsePatch(patch: string): ParsedDiff {
         type: 'context',
         content: line.startsWith(' ') ? line.slice(1) : line,
         oldLineNumber: oldLine++,
-        newLineNumber: newLine++,
+        newLineNumber: newLine++
       }
       currentHunk.lines.push(diffLine)
     }

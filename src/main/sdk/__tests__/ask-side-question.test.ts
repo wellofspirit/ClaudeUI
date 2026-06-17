@@ -43,15 +43,7 @@ function buildHandle() {
   const wireLog = new WireLog()
   const fakeChild = {} as unknown as ChildProcess
   const initResponse = Promise.resolve({})
-  const handle = makeHandle(
-    queue,
-    control,
-    fakeChild,
-    {},
-    initResponse,
-    wireLog,
-    () => {},
-  )
+  const handle = makeHandle(queue, control, fakeChild, {}, initResponse, wireLog, () => {})
   return { handle, control, written }
 }
 
@@ -65,7 +57,7 @@ describe('QueryHandle.askSideQuestion (cli.js side_question contract)', () => {
     while (written.length === 0) await new Promise((r) => setImmediate(r))
     expect(written[0]).toMatchObject({
       type: 'control_request',
-      request: { subtype: 'side_question', question: 'what is 2+2?' },
+      request: { subtype: 'side_question', question: 'what is 2+2?' }
     })
     const request_id = written[0].request_id as string
 
@@ -75,8 +67,8 @@ describe('QueryHandle.askSideQuestion (cli.js side_question contract)', () => {
       response: {
         subtype: 'success',
         request_id,
-        response: { response: '2 + 2 = 4', synthetic: false },
-      },
+        response: { response: '2 + 2 = 4', synthetic: false }
+      }
     })
 
     await expect(p).resolves.toBe('2 + 2 = 4')
@@ -93,8 +85,8 @@ describe('QueryHandle.askSideQuestion (cli.js side_question contract)', () => {
       response: {
         subtype: 'success',
         request_id,
-        response: { response: null, synthetic: false },
-      },
+        response: { response: null, synthetic: false }
+      }
     })
 
     await expect(p).resolves.toBeNull()
@@ -108,7 +100,7 @@ describe('QueryHandle.askSideQuestion (cli.js side_question contract)', () => {
 
     control.handleResponse({
       type: 'control_response',
-      response: { subtype: 'success', request_id, response: null },
+      response: { subtype: 'success', request_id, response: null }
     })
 
     await expect(p).resolves.toBeNull()
@@ -122,7 +114,7 @@ describe('QueryHandle.askSideQuestion (cli.js side_question contract)', () => {
 
     control.handleResponse({
       type: 'control_response',
-      response: { subtype: 'error', request_id, error: 'boom' },
+      response: { subtype: 'error', request_id, error: 'boom' }
     })
 
     await expect(p).rejects.toThrow('boom')

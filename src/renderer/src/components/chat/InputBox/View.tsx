@@ -1,18 +1,21 @@
 import { useState, useEffect } from 'react'
-import type { FileAttachment, StatusLineData, SlashCommandInfo, DirEntry, VoiceState } from '../../../../../shared/types'
-import { useSessionStore, useActiveSession } from '../../../stores/session-store'
+import type {
+  FileAttachment,
+  StatusLineData,
+  SlashCommandInfo,
+  DirEntry,
+  VoiceState
+} from '../../../../../shared/types'
+import { useSessionStore } from '../../../stores/session-store'
 import { SlashCommandMenu } from '../SlashCommandMenu'
 import { FileMentionMenu } from '../FileMentionMenu'
 import { FileAttachmentBar } from '../FileAttachmentBar'
-import {
-  type EffortLevel,
-  type ThinkingMode,
-} from '../../../../../shared/model-capabilities'
+import { type EffortLevel, type ThinkingMode } from '../../../../../shared/model-capabilities'
 import {
   ModelPicker,
   EffortPicker,
   ThinkingPicker,
-  type ModelDisplay,
+  type ModelDisplay
 } from '../../shared/InlinePickers'
 
 export type { ModelDisplay }
@@ -103,27 +106,20 @@ export interface InputBoxViewProps {
 // StatusLine (reads its own store slices — not part of InputBox props)
 // ---------------------------------------------------------------------------
 
-function useContextWindowSize(): number {
-  const models = useSessionStore((s) => s.availableModels)
-  const selectedModel = useActiveSession((s) => s.selectedModel)
-  const info = models.find((m) => m.value === selectedModel)
-  return info && /1m/i.test(info.description) ? 1_000_000 : 200_000
-}
-
 function StatusLine({ data }: { data: StatusLineData }): React.JSX.Element {
   const align = useSessionStore((s) => s.settings.statusLineAlign)
   const template = useSessionStore((s) => s.settings.statusLineTemplate)
-  const ctxWindow = useContextWindowSize()
 
-  const adjusted: StatusLineData = {
-    ...data,
-    usedPercentage: data.contextWindowSize > 0 ? Math.round((data.contextWindowSize / ctxWindow) * 100) : null,
-    remainingPercentage: data.contextWindowSize > 0 ? 100 - Math.round((data.contextWindowSize / ctxWindow) * 100) : null
-  }
-
+  // usedPercentage/remainingPercentage are computed in the main process (live:
+  // claude-session, history: session-history), keyed on the *resolved* model id
+  // so the `default` alias and implicit-1M models (Fable 5, Opus 4.8) resolve
+  // correctly. setModel re-emits the status line on a model switch, so trusting
+  // the main-computed value stays reactive without duplicating window logic here.
   return (
-    <div className={`text-[10px] text-text-muted ${ALIGN_CLASS[align]} pt-1.5 select-none truncate`}>
-      {interpolateTemplate(template, adjusted)}
+    <div
+      className={`text-[10px] text-text-muted ${ALIGN_CLASS[align]} pt-1.5 select-none truncate`}
+    >
+      {interpolateTemplate(template, data)}
     </div>
   )
 }
@@ -138,7 +134,10 @@ const ALIGN_CLASS = {
 // Sub-components — each receives props from InputBoxView
 // ---------------------------------------------------------------------------
 
-function AttachMenu({ fileInputRef, onFileChange }: {
+function AttachMenu({
+  fileInputRef,
+  onFileChange
+}: {
   fileInputRef: React.RefObject<HTMLInputElement | null>
   onFileChange: (e: React.ChangeEvent<HTMLInputElement>) => void
 }): React.JSX.Element {
@@ -147,10 +146,21 @@ function AttachMenu({ fileInputRef, onFileChange }: {
   return (
     <div className="relative">
       <button
-        onClick={(e) => { e.stopPropagation(); setOpen(!open) }}
+        onClick={(e) => {
+          e.stopPropagation()
+          setOpen(!open)
+        }}
         className="w-7 h-7 flex items-center justify-center rounded-lg text-text-muted hover:text-text-secondary hover:bg-bg-hover transition-colors cursor-pointer"
       >
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+        <svg
+          width="16"
+          height="16"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+        >
           <line x1="12" y1="5" x2="12" y2="19" />
           <line x1="5" y1="12" x2="19" y2="12" />
         </svg>
@@ -158,10 +168,23 @@ function AttachMenu({ fileInputRef, onFileChange }: {
       {open && (
         <div className="absolute bottom-full mb-1 left-0 w-48 bg-bg-tertiary border border-border rounded-lg overflow-hidden shadow-lg shadow-black/30 z-20">
           <button
-            onClick={() => { setOpen(false); fileInputRef.current?.click() }}
+            onClick={() => {
+              setOpen(false)
+              fileInputRef.current?.click()
+            }}
             className="w-full flex items-center gap-2.5 px-3 h-9 text-[12px] text-text-secondary hover:bg-bg-hover hover:text-text-primary transition-colors cursor-pointer"
           >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="text-text-muted">
+            <svg
+              width="14"
+              height="14"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.8"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className="text-text-muted"
+            >
               <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
             </svg>
             Attach file
@@ -180,7 +203,13 @@ function AttachMenu({ fileInputRef, onFileChange }: {
   )
 }
 
-function VoiceButton({ voiceEnabled, voiceState, isDisabled, onVoiceStart, onVoiceStop }: {
+function VoiceButton({
+  voiceEnabled,
+  voiceState,
+  isDisabled,
+  onVoiceStart,
+  onVoiceStop
+}: {
   voiceEnabled: boolean
   voiceState: VoiceState
   isDisabled: boolean
@@ -191,7 +220,10 @@ function VoiceButton({ voiceEnabled, voiceState, isDisabled, onVoiceStart, onVoi
 
   return (
     <button
-      onMouseDown={(e) => { e.preventDefault(); onVoiceStart() }}
+      onMouseDown={(e) => {
+        e.preventDefault()
+        onVoiceStart()
+      }}
       onMouseUp={onVoiceStop}
       onMouseLeave={() => {
         if (voiceState === 'recording' || voiceState === 'connecting') onVoiceStop()
@@ -206,7 +238,16 @@ function VoiceButton({ voiceEnabled, voiceState, isDisabled, onVoiceStart, onVoi
             : 'text-text-muted hover:text-text-secondary hover:bg-bg-hover'
       }`}
     >
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
         <path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z" />
         <path d="M19 10v2a7 7 0 01-14 0v-2" />
         <line x1="12" y1="19" x2="12" y2="23" />
@@ -216,7 +257,10 @@ function VoiceButton({ voiceEnabled, voiceState, isDisabled, onVoiceStart, onVoi
   )
 }
 
-function SandboxPill({ sandboxEnabled, onOpenSandboxSettings }: {
+function SandboxPill({
+  sandboxEnabled,
+  onOpenSandboxSettings
+}: {
   sandboxEnabled: boolean
   onOpenSandboxSettings: () => void
 }): React.JSX.Element | null {
@@ -228,7 +272,16 @@ function SandboxPill({ sandboxEnabled, onOpenSandboxSettings }: {
       className="h-7 px-2 flex items-center gap-1 rounded-lg text-[11px] text-success/70 hover:text-success hover:bg-success/5 transition-colors cursor-pointer"
       title="Sandbox enabled — click to configure"
     >
-      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <svg
+        width="10"
+        height="10"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
         <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
         <path d="M7 11V7a5 5 0 0110 0v4" />
       </svg>
@@ -268,7 +321,10 @@ function interpolateTemplate(template: string, data: StatusLineData): string {
     .replace(/\{total\}/g, formatTokens(data.totalTokens))
     .replace(/\{cost\}/g, formatCost(data.totalCostUsd))
     .replace(/\{used\}/g, data.usedPercentage !== null ? String(data.usedPercentage) : '–')
-    .replace(/\{remaining\}/g, data.usedPercentage !== null ? String(100 - data.usedPercentage) : '–')
+    .replace(
+      /\{remaining\}/g,
+      data.usedPercentage !== null ? String(100 - data.usedPercentage) : '–'
+    )
     .replace(/\{duration\}/g, formatDuration(data.totalDurationMs))
 }
 
@@ -306,7 +362,7 @@ export function InputBoxView(props: InputBoxViewProps): React.JSX.Element {
     onPaste,
     onRemoveFile,
     onSlashSelect,
-    onFileMentionConfirm,
+    onFileMentionConfirm
   } = props
 
   // Close any open dropdown on outside click — sub-components manage their own
@@ -321,7 +377,13 @@ export function InputBoxView(props: InputBoxViewProps): React.JSX.Element {
   }, [])
 
   return (
-    <div style={{ padding: isMobile ? '8px 8px 16px' : '8px 13px 16px', paddingBottom: isMobile ? 'max(16px, env(safe-area-inset-bottom))' : '16px' }} className="shrink-0">
+    <div
+      style={{
+        padding: isMobile ? '8px 8px 16px' : '8px 13px 16px',
+        paddingBottom: isMobile ? 'max(16px, env(safe-area-inset-bottom))' : '16px'
+      }}
+      className="shrink-0"
+    >
       <div className={`${isMobile ? 'max-w-full' : 'max-w-[740px]'} mx-auto`}>
         <div
           className={`group relative rounded-2xl bg-bg-input transition-colors ${
@@ -349,7 +411,13 @@ export function InputBoxView(props: InputBoxViewProps): React.JSX.Element {
                       : 'border-mode-plan-dim group-focus-within:border-mode-plan bg-mode-plan-dim group-focus-within:bg-mode-plan'
               }`}
             >
-              {permissionMode === 'acceptEdits' ? 'Accept Edits' : permissionMode === 'auto' ? 'Auto ⏵⏵' : permissionMode === 'localAuto' ? 'Local Auto' : 'Plan'}
+              {permissionMode === 'acceptEdits'
+                ? 'Accept Edits'
+                : permissionMode === 'auto'
+                  ? 'Auto ⏵⏵'
+                  : permissionMode === 'localAuto'
+                    ? 'Local Auto'
+                    : 'Plan'}
             </div>
           )}
 
@@ -364,8 +432,8 @@ export function InputBoxView(props: InputBoxViewProps): React.JSX.Element {
           )}
 
           {/* @ file mention autocomplete */}
-          {fileMentionOpen && (
-            filteredFileMentionEntries.length > 0 ? (
+          {fileMentionOpen &&
+            (filteredFileMentionEntries.length > 0 ? (
               <FileMentionMenu
                 entries={filteredFileMentionEntries}
                 selectedIndex={fileMentionIndex}
@@ -375,8 +443,7 @@ export function InputBoxView(props: InputBoxViewProps): React.JSX.Element {
               <div className="absolute bottom-full left-0 mb-1 w-72 rounded-lg border border-[var(--border-primary)] bg-[var(--bg-secondary)] px-3 py-2 text-xs text-[var(--text-tertiary)] shadow-lg">
                 No matching files
               </div>
-            )
-          )}
+            ))}
 
           {/* File preview row */}
           <FileAttachmentBar attachments={attachedFiles} onRemove={onRemoveFile} />
@@ -401,10 +468,26 @@ export function InputBoxView(props: InputBoxViewProps): React.JSX.Element {
             {/* Left controls */}
             <div className="flex items-center gap-1">
               <AttachMenu fileInputRef={props.fileInputRef} onFileChange={props.onFileChange} />
-              <ModelPicker models={props.models} selectedModel={props.selectedModel} onSelectModel={props.onSelectModel} />
-              <ThinkingPicker thinkingMode={props.thinkingMode} adaptiveSupported={props.adaptiveSupported} onSelectThinking={props.onSelectThinking} />
-              <EffortPicker effort={props.effort} allowedEffortLevels={props.allowedEffortLevels} supported={props.effortSupported} onSelectEffort={props.onSelectEffort} />
-              <SandboxPill sandboxEnabled={props.sandboxEnabled} onOpenSandboxSettings={props.onOpenSandboxSettings} />
+              <ModelPicker
+                models={props.models}
+                selectedModel={props.selectedModel}
+                onSelectModel={props.onSelectModel}
+              />
+              <ThinkingPicker
+                thinkingMode={props.thinkingMode}
+                adaptiveSupported={props.adaptiveSupported}
+                onSelectThinking={props.onSelectThinking}
+              />
+              <EffortPicker
+                effort={props.effort}
+                allowedEffortLevels={props.allowedEffortLevels}
+                supported={props.effortSupported}
+                onSelectEffort={props.onSelectEffort}
+              />
+              <SandboxPill
+                sandboxEnabled={props.sandboxEnabled}
+                onOpenSandboxSettings={props.onOpenSandboxSettings}
+              />
             </div>
 
             {/* Right controls */}
@@ -433,7 +516,16 @@ export function InputBoxView(props: InputBoxViewProps): React.JSX.Element {
                 title={isRunning ? 'Queue message' : 'Send message'}
                 className="w-7 h-7 flex items-center justify-center rounded-full bg-text-primary text-bg-primary transition-opacity disabled:opacity-15 cursor-pointer disabled:cursor-default"
               >
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <svg
+                  width="13"
+                  height="13"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2.5"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
                   <line x1="12" y1="19" x2="12" y2="5" />
                   <polyline points="5 12 12 5 19 12" />
                 </svg>

@@ -35,10 +35,20 @@ function createHangingInput(): AsyncIterable<string> {
   }
 }
 
+/**
+ * The subset of the SDK QueryHandle we drive through the service session.
+ * `getUsage` is patched in; the three `claude*` methods are native control
+ * requests (see docs/protocol/07-control-outbound.md §7.5, ADR-014).
+ */
+export interface ServiceControlHandle {
+  getUsage(): Promise<Record<string, unknown>>
+  claudeAuthenticate(loginWithClaudeAi: boolean): Promise<unknown>
+  claudeOAuthCallback(authorizationCode: string, state: string): Promise<unknown>
+  claudeOAuthWaitForCompletion(): Promise<unknown>
+}
+
 class ServiceSession {
-  private activeQuery: {
-    getUsage(): Promise<Record<string, unknown>>
-  } | null = null
+  private activeQuery: ServiceControlHandle | null = null
 
   private abortController: AbortController | null = null
   private spawning = false
@@ -71,6 +81,18 @@ class ServiceSession {
     }
   }
 
+  /**
+   * Return the live control handle, spawning the session if needed. Used by
+   * the auth manager to issue OAuth control requests. Returns null if the
+   * subprocess could not be spawned.
+   */
+  async getControlHandle(): Promise<ServiceControlHandle | null> {
+    if (!this.activeQuery) {
+      await this.ensureSpawned()
+    }
+    return this.activeQuery
+  }
+
   // ---------------------------------------------------------------------------
   // Internal
   // ---------------------------------------------------------------------------
@@ -92,14 +114,12 @@ class ServiceSession {
           allowDangerouslySkipPermissions: true,
           persistSession: false,
           settingSources: [],
-          abortController: ac,
-        },
+          abortController: ac
+        }
       })
 
-      // Cast to access patched getUsage()
-      this.activeQuery = q as unknown as {
-        getUsage(): Promise<Record<string, unknown>>
-      }
+      // Cast to access patched getUsage() + native OAuth control requests
+      this.activeQuery = q as unknown as ServiceControlHandle
 
       logger.debug('ServiceSession', 'Service session spawned (lazy, no prompt)')
 

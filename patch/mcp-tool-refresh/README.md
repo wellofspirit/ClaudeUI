@@ -70,6 +70,7 @@ iR enters while(true) loop
 ```
 
 Where:
+
 - `w` = original toolUseContext parameter
 - `X6` = current toolUseContext (may be updated during tool execution)
 - After each turn, `X6` is wrapped into `G6` and passed to the next iteration
@@ -131,8 +132,9 @@ The fix requires two patches because tools are frozen at two levels:
 ### Part A: Refresh tools before each EVq call
 
 In the main message loop, `w6` is computed once:
+
 ```js
-let w6 = hZ([...Y, ...e, ...p, ...x.tools], "name")  // ONCE at session start
+let w6 = hZ([...Y, ...e, ...p, ...x.tools], 'name') // ONCE at session start
 ```
 
 Then for each user message, EVq is called with `tools: w6` (frozen). We inject a refresh
@@ -178,9 +180,9 @@ fires when the CLI React UI sets the callback.
 ```js
 // In iR, after tool execution (char ~9187131 in cli.js v2.1.59):
 if (X6.options.refreshTools) {
-  let s = X6.options.refreshTools();
+  let s = X6.options.refreshTools()
   if (s !== X6.options.tools) {
-    X6 = { ...X6, options: { ...X6.options, tools: s } };
+    X6 = { ...X6, options: { ...X6.options, tools: s } }
   }
 }
 ```
@@ -189,25 +191,30 @@ if (X6.options.refreshTools) {
 
 ```js
 if (X6.options.refreshTools) {
-  let s = X6.options.refreshTools();
+  let s = X6.options.refreshTools()
   if (s !== X6.options.tools) {
-    X6 = { ...X6, options: { ...X6.options, tools: s } };
+    X6 = { ...X6, options: { ...X6.options, tools: s } }
   }
 } else /*PATCHED:mcp-tool-refresh-B*/ {
-  let _st = await X6.getAppState();
+  let _st = await X6.getAppState()
   if (_st && _st.mcp && _st.mcp.tools) {
-    let _base = X6.options.tools.filter(function(_t) { return !_t.isMcp; });
-    let _merged = [..._base, ..._st.mcp.tools];
-    let _seen = new Set();
-    let _deduped = _merged.filter(function(_t) {
-      if (_seen.has(_t.name)) return false;
-      _seen.add(_t.name); return true;
-    });
-    if (_deduped.length !== X6.options.tools.length
-      || _deduped.some(function(_t, _i) {
-           return _t.name !== (X6.options.tools[_i] || {}).name;
-         }))
-      X6 = { ...X6, options: { ...X6.options, tools: _deduped } };
+    let _base = X6.options.tools.filter(function (_t) {
+      return !_t.isMcp
+    })
+    let _merged = [..._base, ..._st.mcp.tools]
+    let _seen = new Set()
+    let _deduped = _merged.filter(function (_t) {
+      if (_seen.has(_t.name)) return false
+      _seen.add(_t.name)
+      return true
+    })
+    if (
+      _deduped.length !== X6.options.tools.length ||
+      _deduped.some(function (_t, _i) {
+        return _t.name !== (X6.options.tools[_i] || {}).name
+      })
+    )
+      X6 = { ...X6, options: { ...X6.options, tools: _deduped } }
   }
 }
 ```
@@ -280,24 +287,24 @@ bundle-analyzer find cli.js "isMcp" --compact --limit 5
 
 ## Key Functions Reference
 
-| Minified Name (v2.1.59) | Purpose | Char Offset |
-|---|---|---|
-| `iR` | Multi-turn query loop (`async function*`). Contains the refreshTools check. | 9178311 |
-| `gAq` | Parent function containing iR's scope. Handles query setup/teardown. | 9069002 |
-| `oW6` | Streaming query wrapper — calls `D0q` which sends API request with `tools: w.options.tools` | 9369874 |
-| `D0q` | Builds API request params, filters tools by schema. Takes `Y` (4th param) as tools. | 10371473 |
-| `kVq` | SDK query class. `submitMessage()` creates toolUseContext without `refreshTools`. | 11182341 |
-| `EVq` | SDK query entry — creates `kVq` and calls `submitMessage()`. Called from main message loop. | 11192358 |
-| `lR` | Agent loop. Builds tool list via `hZ([...resolvedTools, ...mcpTools], "name")` — called once per user message from REPL. | 8377192 |
-| `hZ` | Deduplicate array by key (`name`). Equivalent to lodash `uniqBy`. | (utility) |
-| `Zf6` | Merges base tools with MCP tools: `hZ([...sM(ctx), ...AT6(mcpTools, ctx)], "name")` | 9141108 |
-| `SuY` | Loads agent-specific MCP server tools from agent definitions. | 8376040 |
-| `hc` | Resolves tool list from agent definition, filtering by allowed/disallowed tools. | 5987322 |
-| `mT` | Lodash `reject()` — removes items matching predicate. Used by mcp_toggle to strip tools. | (utility) |
-| `Bk` | Kills MCP subprocess: `client.cleanup()` + clears connection cache. | 5683031 |
-| `$c` | Reconnects MCP server: creates new client, fetches fresh tools/commands/resources. | (utility) |
-| `zW6` | Persists MCP disabled state to `~/.claude.json` (`disabledMcpServers` list). | 5615556 |
-| `TR` | Checks if server is disabled: `disabledMcpServers.includes(name)`. | 5615493 |
+| Minified Name (v2.1.59) | Purpose                                                                                                                  | Char Offset |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------ | ----------- |
+| `iR`                    | Multi-turn query loop (`async function*`). Contains the refreshTools check.                                              | 9178311     |
+| `gAq`                   | Parent function containing iR's scope. Handles query setup/teardown.                                                     | 9069002     |
+| `oW6`                   | Streaming query wrapper — calls `D0q` which sends API request with `tools: w.options.tools`                              | 9369874     |
+| `D0q`                   | Builds API request params, filters tools by schema. Takes `Y` (4th param) as tools.                                      | 10371473    |
+| `kVq`                   | SDK query class. `submitMessage()` creates toolUseContext without `refreshTools`.                                        | 11182341    |
+| `EVq`                   | SDK query entry — creates `kVq` and calls `submitMessage()`. Called from main message loop.                              | 11192358    |
+| `lR`                    | Agent loop. Builds tool list via `hZ([...resolvedTools, ...mcpTools], "name")` — called once per user message from REPL. | 8377192     |
+| `hZ`                    | Deduplicate array by key (`name`). Equivalent to lodash `uniqBy`.                                                        | (utility)   |
+| `Zf6`                   | Merges base tools with MCP tools: `hZ([...sM(ctx), ...AT6(mcpTools, ctx)], "name")`                                      | 9141108     |
+| `SuY`                   | Loads agent-specific MCP server tools from agent definitions.                                                            | 8376040     |
+| `hc`                    | Resolves tool list from agent definition, filtering by allowed/disallowed tools.                                         | 5987322     |
+| `mT`                    | Lodash `reject()` — removes items matching predicate. Used by mcp_toggle to strip tools.                                 | (utility)   |
+| `Bk`                    | Kills MCP subprocess: `client.cleanup()` + clears connection cache.                                                      | 5683031     |
+| `$c`                    | Reconnects MCP server: creates new client, fetches fresh tools/commands/resources.                                       | (utility)   |
+| `zW6`                   | Persists MCP disabled state to `~/.claude.json` (`disabledMcpServers` list).                                             | 5615556     |
+| `TR`                    | Checks if server is disabled: `disabledMcpServers.includes(name)`.                                                       | 5615493     |
 
 ## Data Flow: mcp_toggle → tool list update
 
@@ -356,13 +363,13 @@ If model makes tool calls (multi-turn):
 
 For context, here are all MCP-related control request subtypes handled in the main message loop:
 
-| Subtype | Purpose | Handler char offset (v2.1.59) |
-|---|---|---|
-| `mcp_status` | Returns list of MCP servers with status, tools, config | 11219037 |
-| `mcp_toggle` | Enable/disable an MCP server (kills subprocess on disable) | 11221287 |
-| `mcp_authenticate` | Initiates OAuth flow for SSE/HTTP MCP servers | (after mcp_toggle) |
-| `mcp_reconnect` | Reconnects a failed or disconnected MCP server | (after mcp_authenticate) |
-| `mcp_set_servers` | Adds new MCP servers from config (used by Add Server form) | (after mcp_reconnect) |
+| Subtype            | Purpose                                                    | Handler char offset (v2.1.59) |
+| ------------------ | ---------------------------------------------------------- | ----------------------------- |
+| `mcp_status`       | Returns list of MCP servers with status, tools, config     | 11219037                      |
+| `mcp_toggle`       | Enable/disable an MCP server (kills subprocess on disable) | 11221287                      |
+| `mcp_authenticate` | Initiates OAuth flow for SSE/HTTP MCP servers              | (after mcp_toggle)            |
+| `mcp_reconnect`    | Reconnects a failed or disconnected MCP server             | (after mcp_authenticate)      |
+| `mcp_set_servers`  | Adds new MCP servers from config (used by Add Server form) | (after mcp_reconnect)         |
 
 ## Discovery Method
 
@@ -379,9 +386,11 @@ Tested the same toggle in CLI mode (using `/mcp` command). In CLI, enable worked
 ### Step 3: Traced the API call tool list
 
 Found where tools are passed to the API at char 9180562:
+
 ```js
 for await(let o of oW6({...tools:w.options.tools...}))
 ```
+
 This reads from `w.options.tools` — the toolUseContext's options.
 
 ### Step 4: Found refreshTools mechanism
@@ -399,9 +408,11 @@ Patched the `refreshTools` check in `iR` with an `else` branch. This reads from 
 ### Step 7: Root cause at the main message loop level (Part A)
 
 Traced `w6` (the tools variable) to the main message loop where it's computed ONCE at session start:
+
 ```js
-let w6 = hZ([...Y, ...e, ...p, ...x.tools], "name")  // char ~11210884
+let w6 = hZ([...Y, ...e, ...p, ...x.tools], 'name') // char ~11210884
 ```
+
 Then passed to every `EVq` call as `tools: w6`. Even Part B can't fix this because `EVq` → `kVq.submitMessage` recreates the toolUseContext with `tools: z` (= the original `w6`).
 
 Added Part A: inject tool refresh code right before the `for await(... of EVq({` call. This reads current MCP tools from `await $()` (getAppState) and rebuilds `w6` by filtering out old MCP tools and merging with the current ones.
@@ -423,7 +434,7 @@ Added Part A: inject tool refresh code right before the `for await(... of EVq({`
 
 ## Files
 
-| File | Purpose |
-|---|---|
+| File        | Purpose       |
+| ----------- | ------------- |
 | `README.md` | This document |
-| `apply.mjs` | Patch script |
+| `apply.mjs` | Patch script  |

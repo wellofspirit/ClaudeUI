@@ -23,7 +23,7 @@ import {
   userMessage,
   collectMessages,
   TestRunner,
-  dumpMessages,
+  dumpMessages
 } from '../test-helpers.mjs'
 import { resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -46,14 +46,14 @@ async function main() {
       mcpServers: {
         [MCP_SERVER_NAME]: {
           command: 'node',
-          args: [resolve(__dirname, '../mcp-test-server.mjs')],
-        },
+          args: [resolve(__dirname, '../mcp-test-server.mjs')]
+        }
       },
       // Enterprise-managed environments may have an allowedMcpServers policy
       // that blocks dynamic MCP servers. Explicitly allow our test server.
       settings: JSON.stringify({
-        allowedMcpServers: [{ serverName: MCP_SERVER_NAME }],
-      }),
+        allowedMcpServers: [{ serverName: MCP_SERVER_NAME }]
+      })
     },
     180_000
   )
@@ -108,7 +108,9 @@ async function main() {
           await q.toggleMcpServer(MCP_SERVER_NAME, false)
           statusAfterDisable = await q.mcpServerStatus()
           const server = statusAfterDisable.find((s) => s.name === MCP_SERVER_NAME)
-          console.log(`  Status after disable: ${server?.status}, tools: ${server?.tools?.length ?? 0}`)
+          console.log(
+            `  Status after disable: ${server?.status}, tools: ${server?.tools?.length ?? 0}`
+          )
         } catch (err) {
           console.error('  Toggle OFF error:', err.message)
         }
@@ -134,7 +136,9 @@ async function main() {
           .join(' ')
 
         const mentionedDisabledTool = MCP_TOOL_PATTERN.test(textBlocks)
-        console.log(`  Second turn: model mentioned patch_test_echo in tool list = ${mentionedDisabledTool}`)
+        console.log(
+          `  Second turn: model mentioned patch_test_echo in tool list = ${mentionedDisabledTool}`
+        )
 
         // Toggle ON and check status
         phase = 'toggling-on'
@@ -145,7 +149,9 @@ async function main() {
           await new Promise((r) => setTimeout(r, 2000))
           statusAfterEnable = await q.mcpServerStatus()
           const server = statusAfterEnable.find((s) => s.name === MCP_SERVER_NAME)
-          console.log(`  Status after enable: ${server?.status}, tools: ${server?.tools?.length ?? 0}`)
+          console.log(
+            `  Status after enable: ${server?.status}, tools: ${server?.tools?.length ?? 0}`
+          )
         } catch (err) {
           console.error('  Toggle ON error:', err.message)
         }
@@ -176,7 +182,7 @@ async function main() {
         phase = 'done'
         channel.end()
       }
-    },
+    }
   })
 
   dumpMessages(messages)
@@ -191,30 +197,18 @@ async function main() {
 
   // 3. Toggle off: mcpServerStatus shows disabled
   const disabledServer = statusAfterDisable?.find((s) => s.name === MCP_SERVER_NAME)
-  t.assert(
-    'After toggle OFF: server status is disabled',
-    disabledServer?.status === 'disabled'
-  )
+  t.assert('After toggle OFF: server status is disabled', disabledServer?.status === 'disabled')
 
   // 4. Toggle off: no tools for disabled server
   const disabledToolCount = disabledServer?.tools?.length ?? 0
-  t.assert(
-    'After toggle OFF: server has 0 tools',
-    disabledToolCount === 0
-  )
+  t.assert('After toggle OFF: server has 0 tools', disabledToolCount === 0)
 
   // 5. Toggle on: mcpServerStatus shows connected with tools
   const enabledServer = statusAfterEnable?.find((s) => s.name === MCP_SERVER_NAME)
-  t.assert(
-    'After toggle ON: server status is connected',
-    enabledServer?.status === 'connected'
-  )
+  t.assert('After toggle ON: server status is connected', enabledServer?.status === 'connected')
 
   const enabledToolCount = enabledServer?.tools?.length ?? 0
-  t.assert(
-    'After toggle ON: server has tools again',
-    enabledToolCount > 0
-  )
+  t.assert('After toggle ON: server has tools again', enabledToolCount > 0)
 
   // 6. Third turn: model called patch_test_echo after re-enable
   t.assert('Third turn: model used patch_test_echo (server re-enabled)', thirdTurnUsedTool)

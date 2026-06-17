@@ -60,6 +60,7 @@ for await (const msg of q) {
 ### Basic session
 
 For interactions beyond a single prompt, create a session. V2 separates sending and streaming into distinct steps:
+
 - `send()` dispatches your message
 - `stream()` streams back the response
 
@@ -79,8 +80,8 @@ for await (const msg of session.stream()) {
   // Filter for assistant messages to get human-readable output
   if (msg.type === 'assistant') {
     const text = msg.message.content
-      .filter(block => block.type === 'text')
-      .map(block => block.text)
+      .filter((block) => block.type === 'text')
+      .map((block) => block.text)
       .join('')
     console.log(text)
   }
@@ -103,8 +104,8 @@ const q = query({
 for await (const msg of q) {
   if (msg.type === 'assistant') {
     const text = msg.message.content
-      .filter(block => block.type === 'text')
-      .map(block => block.text)
+      .filter((block) => block.type === 'text')
+      .map((block) => block.text)
       .join('')
     console.log(text)
   }
@@ -132,8 +133,8 @@ for await (const msg of session.stream()) {
   // Filter for assistant messages to get human-readable output
   if (msg.type === 'assistant') {
     const text = msg.message.content
-      .filter(block => block.type === 'text')
-      .map(block => block.text)
+      .filter((block) => block.type === 'text')
+      .map((block) => block.text)
       .join('')
     console.log(text)
   }
@@ -144,8 +145,8 @@ await session.send('Multiply that by 2')
 for await (const msg of session.stream()) {
   if (msg.type === 'assistant') {
     const text = msg.message.content
-      .filter(block => block.type === 'text')
-      .map(block => block.text)
+      .filter((block) => block.type === 'text')
+      .map((block) => block.text)
       .join('')
     console.log(text)
   }
@@ -183,8 +184,8 @@ const q = query({
 for await (const msg of q) {
   if (msg.type === 'assistant') {
     const text = msg.message.content
-      .filter(block => block.type === 'text')
-      .map(block => block.text)
+      .filter((block) => block.type === 'text')
+      .map((block) => block.text)
       .join('')
     console.log(text)
   }
@@ -210,8 +211,8 @@ import {
 function getAssistantText(msg: SDKMessage): string | null {
   if (msg.type !== 'assistant') return null
   return msg.message.content
-    .filter(block => block.type === 'text')
-    .map(block => block.text)
+    .filter((block) => block.type === 'text')
+    .map((block) => block.text)
     .join('')
 }
 
@@ -263,8 +264,8 @@ for await (const msg of initialQuery) {
   sessionId = msg.session_id
   if (msg.type === 'assistant') {
     const text = msg.message.content
-      .filter(block => block.type === 'text')
-      .map(block => block.text)
+      .filter((block) => block.type === 'text')
+      .map((block) => block.text)
       .join('')
     console.log('Initial response:', text)
   }
@@ -284,8 +285,8 @@ const resumedQuery = query({
 for await (const msg of resumedQuery) {
   if (msg.type === 'assistant') {
     const text = msg.message.content
-      .filter(block => block.type === 'text')
-      .map(block => block.text)
+      .filter((block) => block.type === 'text')
+      .map((block) => block.text)
       .join('')
     console.log('Resumed response:', text)
   }
@@ -329,7 +330,7 @@ Creates a new session for multi-turn conversations.
 
 ```typescript
 function unstable_v2_createSession(options: {
-  model: string;
+  model: string
   // Additional options supported
 }): Session
 ```
@@ -342,7 +343,7 @@ Resumes an existing session by ID.
 function unstable_v2_resumeSession(
   sessionId: string,
   options: {
-    model: string;
+    model: string
     // Additional options supported
   }
 ): Session
@@ -356,7 +357,7 @@ One-shot convenience function for single-turn queries.
 function unstable_v2_prompt(
   prompt: string,
   options: {
-    model: string;
+    model: string
     // Additional options supported
   }
 ): Promise<Result>
@@ -366,9 +367,9 @@ function unstable_v2_prompt(
 
 ```typescript
 interface Session {
-  send(message: string): Promise<void>;
-  stream(): AsyncGenerator<SDKMessage>;
-  close(): void;
+  send(message: string): Promise<void>
+  stream(): AsyncGenerator<SDKMessage>
+  close(): void
 }
 ```
 

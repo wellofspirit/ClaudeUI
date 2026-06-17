@@ -17,14 +17,14 @@ When you start a new query, the SDK automatically creates a session and returns 
 <CodeGroup>
 
 ```typescript TypeScript
-import { query } from "@anthropic-ai/claude-agent-sdk"
+import { query } from '@anthropic-ai/claude-agent-sdk'
 
 let sessionId: string | undefined
 
 const response = query({
-  prompt: "Help me build a web application",
+  prompt: 'Help me build a web application',
   options: {
-    model: "claude-opus-4-6"
+    model: 'claude-opus-4-6'
   }
 })
 
@@ -43,7 +43,7 @@ for await (const message of response) {
 // Later, you can use the saved sessionId to resume
 if (sessionId) {
   const resumedResponse = query({
-    prompt: "Continue where we left off",
+    prompt: 'Continue where we left off',
     options: {
       resume: sessionId
     }
@@ -91,15 +91,15 @@ The SDK supports resuming sessions from previous conversation states, enabling c
 <CodeGroup>
 
 ```typescript TypeScript
-import { query } from "@anthropic-ai/claude-agent-sdk"
+import { query } from '@anthropic-ai/claude-agent-sdk'
 
 // Resume a previous session using its ID
 const response = query({
-  prompt: "Continue implementing the authentication system from where we left off",
+  prompt: 'Continue implementing the authentication system from where we left off',
   options: {
-    resume: "session-xyz", // Session ID from previous conversation
-    model: "claude-opus-4-6",
-    allowedTools: ["Read", "Edit", "Write", "Glob", "Grep", "Bash"]
+    resume: 'session-xyz', // Session ID from previous conversation
+    model: 'claude-opus-4-6',
+    allowedTools: ['Read', 'Edit', 'Write', 'Glob', 'Grep', 'Bash']
   }
 })
 
@@ -141,6 +141,7 @@ When resuming a session, you can choose to either continue the original session 
 ### When to Fork a Session
 
 Forking is useful when you want to:
+
 - Explore different approaches from the same starting point
 - Create multiple conversation branches without modifying the original
 - Test changes without affecting the original session history
@@ -148,26 +149,26 @@ Forking is useful when you want to:
 
 ### Forking vs Continuing
 
-| Behavior | `forkSession: false` (default) | `forkSession: true` |
-|----------|-------------------------------|---------------------|
-| **Session ID** | Same as original | New session ID generated |
-| **History** | Appends to original session | Creates new branch from resume point |
-| **Original Session** | Modified | Preserved unchanged |
-| **Use Case** | Continue linear conversation | Branch to explore alternatives |
+| Behavior             | `forkSession: false` (default) | `forkSession: true`                  |
+| -------------------- | ------------------------------ | ------------------------------------ |
+| **Session ID**       | Same as original               | New session ID generated             |
+| **History**          | Appends to original session    | Creates new branch from resume point |
+| **Original Session** | Modified                       | Preserved unchanged                  |
+| **Use Case**         | Continue linear conversation   | Branch to explore alternatives       |
 
 ### Example: Forking a Session
 
 <CodeGroup>
 
 ```typescript TypeScript
-import { query } from "@anthropic-ai/claude-agent-sdk"
+import { query } from '@anthropic-ai/claude-agent-sdk'
 
 // First, capture the session ID
 let sessionId: string | undefined
 
 const response = query({
-  prompt: "Help me design a REST API",
-  options: { model: "claude-opus-4-6" }
+  prompt: 'Help me design a REST API',
+  options: { model: 'claude-opus-4-6' }
 })
 
 for await (const message of response) {
@@ -182,8 +183,8 @@ const forkedResponse = query({
   prompt: "Now let's redesign this as a GraphQL API instead",
   options: {
     resume: sessionId,
-    forkSession: true,  // Creates a new session ID
-    model: "claude-opus-4-6"
+    forkSession: true, // Creates a new session ID
+    model: 'claude-opus-4-6'
   }
 })
 
@@ -196,11 +197,11 @@ for await (const message of forkedResponse) {
 
 // The original session remains unchanged and can still be resumed
 const originalContinued = query({
-  prompt: "Add authentication to the REST API",
+  prompt: 'Add authentication to the REST API',
   options: {
     resume: sessionId,
-    forkSession: false,  // Continue original session (default)
-    model: "claude-opus-4-6"
+    forkSession: false, // Continue original session (default)
+    model: 'claude-opus-4-6'
   }
 })
 ```

@@ -7,6 +7,7 @@ How to keep this documentation and the harness in sync with upstream cli.js.
 ## 12.1 When upstream cli.js version bumps
 
 Trigger: `package.json#claudeCliVersion` changes. This invalidates our assumptions about:
+
 - Minified variable names (they change every version)
 - Control-request subtype names (rarely change, but possible)
 - Stream-json message shapes (additive changes common, breaking changes rare)
@@ -35,6 +36,7 @@ Trigger: `package.json#claudeCliVersion` changes. This invalidates our assumptio
 3. **Re-verify the inbound message type set**
 
    Run a real session with DEBUG_SDK=1 and wireLogCapacity=5000:
+
    ```bash
    DEBUG_SDK=1 bun run dev
    # exercise a complex turn
@@ -49,6 +51,7 @@ Trigger: `package.json#claudeCliVersion` changes. This invalidates our assumptio
 5. **Re-verify CLI flags**
 
    Spawn cli.js with `--help` to dump the flag catalog:
+
    ```bash
    node vendor/claude-cli/cli.js --help
    ```
@@ -66,7 +69,15 @@ Trigger: `package.json#claudeCliVersion` changes. This invalidates our assumptio
 
    The integration project is the one that catches real-world wire drift.
 
-7. **Re-issue the session on the master protocol document**
+7. **Re-verify the context-window mirror**
+
+   New model generations and alias remaps land in cli.js's context-window
+   resolver before anywhere else. Follow the drift check in
+   `docs/protocol/13-context-window.md` §13.5 and update
+   `src/main/services/context-window.ts` if the implicit-1M model list or
+   the `fable`/`opus` alias targets changed.
+
+8. **Re-issue the session on the master protocol document**
 
    Update `docs/protocol/README.md`'s version banner to the new cli.js version. Update any "verified against cli.js X.Y.Z" annotations in sub-docs.
 

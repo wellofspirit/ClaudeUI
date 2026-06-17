@@ -19,8 +19,8 @@ vi.mock('../logger', () => ({
     debug: vi.fn(),
     info: vi.fn(),
     warn: vi.fn(),
-    error: vi.fn(),
-  },
+    error: vi.fn()
+  }
 }))
 
 // Import after the mock is registered.

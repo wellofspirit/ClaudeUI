@@ -1,5 +1,11 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
-import type { ContentBlock, PendingApproval, PermissionMode, PermissionSuggestion, TaskNotification } from '../../../../../shared/types'
+import type {
+  ContentBlock,
+  PendingApproval,
+  PermissionMode,
+  PermissionSuggestion,
+  TaskNotification
+} from '../../../../../shared/types'
 import { useSessionStore, useActiveSession, type ThemeId } from '../../../stores/session-store'
 import { resolveToolVisualState, TOOL_BORDER_CLASSES, getSummary, shorten, trunc } from './utils'
 import { CodeView } from '../CodeView'
@@ -42,7 +48,10 @@ export interface ToolCallBlockViewProps {
   isStopping: boolean
   isBackgrounding: boolean
   hasActiveSession: boolean
-  onApproval: (decision: 'allow' | 'deny', selectedSuggestions?: PermissionSuggestion[]) => Promise<void>
+  onApproval: (
+    decision: 'allow' | 'deny',
+    selectedSuggestions?: PermissionSuggestion[]
+  ) => Promise<void>
   onBackgroundTask: () => Promise<void>
   onStopTask: () => Promise<void>
   onOpenTaskPanel: () => void
@@ -68,13 +77,13 @@ export function ToolCallBlockView({
   onApproval,
   onBackgroundTask,
   onStopTask,
-  onOpenTaskPanel,
+  onOpenTaskPanel
 }: ToolCallBlockViewProps): React.JSX.Element {
   const [expanded, setExpanded] = useState(
     block.toolName === 'Read' ? expandToolCalls && expandReadResults : expandToolCalls
   )
-  const [checkedSuggestions, setCheckedSuggestions] = useState<boolean[]>(
-    () => (approval?.suggestions || []).map(() => false)
+  const [checkedSuggestions, setCheckedSuggestions] = useState<boolean[]>(() =>
+    (approval?.suggestions || []).map(() => false)
   )
 
   useEffect(() => {
@@ -111,7 +120,7 @@ export function ToolCallBlockView({
     hasApproval: !!approval,
     isBackgroundBash,
     bgNotificationStatus: bgNotification?.status ?? null,
-    resultIsError: result?.isError ?? false,
+    resultIsError: result?.isError ?? false
   })
   const borderColor = TOOL_BORDER_CLASSES[visualState]
   const isError = visualState === 'error'
@@ -121,31 +130,64 @@ export function ToolCallBlockView({
 
   const handleApprovalDecision = async (decision: 'allow' | 'deny'): Promise<void> => {
     if (!approval) return
-    const selected = decision === 'allow' && approval.suggestions
-      ? approval.suggestions.filter((_, i) => checkedSuggestions[i])
-      : undefined
+    const selected =
+      decision === 'allow' && approval.suggestions
+        ? approval.suggestions.filter((_, i) => checkedSuggestions[i])
+        : undefined
     await onApproval(decision, selected?.length ? selected : undefined)
   }
 
   const statusIcon = isPendingApproval ? (
-    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-warning shrink-0">
+    <svg
+      width="12"
+      height="12"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      className="text-warning shrink-0"
+    >
       <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
       <line x1="12" y1="9" x2="12" y2="13" />
       <line x1="12" y1="17" x2="12.01" y2="17" />
     </svg>
   ) : isError ? (
-    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-danger shrink-0">
+    <svg
+      width="12"
+      height="12"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      className="text-danger shrink-0"
+    >
       <circle cx="12" cy="12" r="10" />
       <line x1="15" y1="9" x2="9" y2="15" />
       <line x1="9" y1="9" x2="15" y2="15" />
     </svg>
   ) : isSuccess ? (
-    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-success shrink-0">
+    <svg
+      width="12"
+      height="12"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      className="text-success shrink-0"
+    >
       <circle cx="12" cy="12" r="10" />
       <polyline points="8 12 11 15 16 9" />
     </svg>
   ) : isLoaded ? (
-    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-text-muted shrink-0">
+    <svg
+      width="12"
+      height="12"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      className="text-text-muted shrink-0"
+    >
       <circle cx="12" cy="12" r="10" />
       <line x1="8" y1="12" x2="16" y2="12" />
     </svg>
@@ -156,16 +198,28 @@ export function ToolCallBlockView({
   )
 
   const isMermaid = block.toolName === 'mcp__claude-ui__render_mermaid'
-  const isMockup = block.toolName === 'mcp__claude-ui-mockup__create_mockup' || block.toolName === 'mcp__claude-ui-mockup__show_mockup'
+  const isMockup =
+    block.toolName === 'mcp__claude-ui-mockup__create_mockup' ||
+    block.toolName === 'mcp__claude-ui-mockup__show_mockup'
 
   // Mermaid card
   if (isMermaid && block.toolInput?.source) {
     const mermaidTitle = block.toolInput.title ? String(block.toolInput.title) : undefined
     return (
-      <div className={`rounded-lg ${borderColor === 'border-border' ? 'border' : 'border-2'} ${borderColor} bg-bg-secondary overflow-hidden`}>
+      <div
+        className={`rounded-lg ${borderColor === 'border-border' ? 'border' : 'border-2'} ${borderColor} bg-bg-secondary overflow-hidden`}
+      >
         <div className="flex items-center gap-2 px-3 h-9 text-[13px]">
           {statusIcon}
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" className="text-accent shrink-0">
+          <svg
+            width="14"
+            height="14"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.8"
+            className="text-accent shrink-0"
+          >
             <rect x="3" y="3" width="7" height="7" rx="1" />
             <rect x="14" y="3" width="7" height="7" rx="1" />
             <rect x="8.5" y="14" width="7" height="7" rx="1" />
@@ -174,13 +228,9 @@ export function ToolCallBlockView({
             <line x1="6.5" y1="14" x2="12" y2="14" />
             <line x1="17.5" y1="14" x2="12" y2="14" />
           </svg>
-          <span className="font-medium text-text-primary">
-            {mermaidTitle || 'Mermaid Diagram'}
-          </span>
+          <span className="font-medium text-text-primary">{mermaidTitle || 'Mermaid Diagram'}</span>
           <div className="flex-1" />
-          {result?.isError && (
-            <span className="text-[11px] text-danger">Validation failed</span>
-          )}
+          {result?.isError && <span className="text-[11px] text-danger">Validation failed</span>}
         </div>
         <div className="border-t border-border px-3 py-2.5">
           <MermaidDiagram source={String(block.toolInput.source)} title={mermaidTitle} />
@@ -214,21 +264,27 @@ export function ToolCallBlockView({
     const mockupTitle = block.toolInput?.title ? String(block.toolInput.title) : undefined
 
     return (
-      <div className={`rounded-lg ${borderColor === 'border-border' ? 'border' : 'border-2'} ${borderColor} bg-bg-secondary overflow-hidden`}>
+      <div
+        className={`rounded-lg ${borderColor === 'border-border' ? 'border' : 'border-2'} ${borderColor} bg-bg-secondary overflow-hidden`}
+      >
         <div className="flex items-center gap-2 px-3 h-9 text-[13px]">
           {statusIcon}
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" className="text-accent shrink-0">
+          <svg
+            width="14"
+            height="14"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.8"
+            className="text-accent shrink-0"
+          >
             <rect x="3" y="3" width="18" height="18" rx="2" />
             <line x1="3" y1="9" x2="21" y2="9" />
             <line x1="9" y1="9" x2="9" y2="21" />
           </svg>
-          <span className="font-medium text-text-primary">
-            {mockupTitle || 'UI Mockup'}
-          </span>
+          <span className="font-medium text-text-primary">{mockupTitle || 'UI Mockup'}</span>
           <div className="flex-1" />
-          {result?.isError && (
-            <span className="text-[11px] text-danger">Failed</span>
-          )}
+          {result?.isError && <span className="text-[11px] text-danger">Failed</span>}
         </div>
         {mockupDirectory && !result?.isError && (
           <div className="border-t border-border px-3 py-2.5">
@@ -262,23 +318,30 @@ export function ToolCallBlockView({
   }
 
   return (
-    <div className={`rounded-lg ${borderColor === 'border-border' ? 'border' : 'border-2'} ${borderColor} bg-bg-secondary overflow-hidden`}>
+    <div
+      className={`rounded-lg ${borderColor === 'border-border' ? 'border' : 'border-2'} ${borderColor} bg-bg-secondary overflow-hidden`}
+    >
       <button
         onClick={() => setExpanded(!expanded)}
         className="w-full flex items-center gap-2 px-3 h-9 text-[13px] hover:bg-bg-hover transition-colors cursor-pointer"
       >
         {statusIcon}
         <span className="font-mono font-medium text-accent">{block.toolName}</span>
-        <span className="text-text-secondary truncate flex-1 text-left font-mono text-[12px]">{summary}</span>
+        <span className="text-text-secondary truncate flex-1 text-left font-mono text-[12px]">
+          {summary}
+        </span>
         {isPendingApproval && (
-          <span className="text-[11px] font-semibold text-warning uppercase tracking-wider mr-1">Permission</span>
+          <span className="text-[11px] font-semibold text-warning uppercase tracking-wider mr-1">
+            Permission
+          </span>
         )}
-        {isLoaded && (
-          <span className="text-[10px] text-text-muted shrink-0">loaded</span>
-        )}
+        {isLoaded && <span className="text-[10px] text-text-muted shrink-0">loaded</span>}
         {isForegroundBashRunning && !isBackgrounding && (
           <button
-            onClick={(e) => { e.stopPropagation(); onBackgroundTask() }}
+            onClick={(e) => {
+              e.stopPropagation()
+              onBackgroundTask()
+            }}
             className="text-[11px] px-2 py-0.5 rounded bg-accent/10 text-accent hover:bg-accent/20 transition-colors shrink-0"
           >
             Send to background
@@ -291,7 +354,10 @@ export function ToolCallBlockView({
         )}
         {bgRunning && !isStopping && !isHistorical && (
           <button
-            onClick={(e) => { e.stopPropagation(); onStopTask() }}
+            onClick={(e) => {
+              e.stopPropagation()
+              onStopTask()
+            }}
             className="text-[11px] px-2 py-0.5 rounded bg-danger/10 text-danger hover:bg-danger/20 transition-colors shrink-0"
           >
             Stop
@@ -302,7 +368,15 @@ export function ToolCallBlockView({
             stopping...
           </span>
         )}
-        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={`text-text-secondary transition-transform shrink-0 ${expanded ? 'rotate-180' : ''}`}>
+        <svg
+          width="10"
+          height="10"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          className={`text-text-secondary transition-transform shrink-0 ${expanded ? 'rotate-180' : ''}`}
+        >
           <polyline points="6 9 12 15 18 9" />
         </svg>
       </button>
@@ -312,7 +386,9 @@ export function ToolCallBlockView({
           {(!hideToolInput || block.toolName === 'Bash') && (
             <div className="px-3 py-2.5">
               {!hideToolInput && (
-                <div className="text-[11px] text-text-secondary uppercase tracking-wider mb-1.5">Input</div>
+                <div className="text-[11px] text-text-secondary uppercase tracking-wider mb-1.5">
+                  Input
+                </div>
               )}
               <ToolInput block={block} />
             </div>
@@ -320,14 +396,23 @@ export function ToolCallBlockView({
 
           {isForegroundBashRunning && bashOutput && !bgOutput && (
             <div className="border-t border-border">
-              <LiveBashOutput output={bashOutput.output} totalLines={bashOutput.totalLines} totalBytes={bashOutput.totalBytes} theme={theme} />
+              <LiveBashOutput
+                output={bashOutput.output}
+                totalLines={bashOutput.totalLines}
+                totalBytes={bashOutput.totalBytes}
+                theme={theme}
+              />
             </div>
           )}
 
           {hasResult && result.toolResult && !isBackgroundBash && (
-            <div className={`px-3 py-2.5 ${hideToolInput && block.toolName !== 'Bash' ? '' : 'border-t border-border'}`}>
+            <div
+              className={`px-3 py-2.5 ${hideToolInput && block.toolName !== 'Bash' ? '' : 'border-t border-border'}`}
+            >
               {!hideToolInput && (
-                <div className={`text-[11px] uppercase tracking-wider mb-1.5 ${isError ? 'text-danger' : 'text-success'}`}>
+                <div
+                  className={`text-[11px] uppercase tracking-wider mb-1.5 ${isError ? 'text-danger' : 'text-success'}`}
+                >
                   {isError ? 'Error' : 'Result'}
                 </div>
               )}
@@ -354,7 +439,9 @@ export function ToolCallBlockView({
                 <AlwaysAllowSection
                   suggestions={approval!.suggestions!}
                   checkedSuggestions={checkedSuggestions}
-                  onToggle={(i) => setCheckedSuggestions((prev) => prev.map((v, j) => j === i ? !v : v))}
+                  onToggle={(i) =>
+                    setCheckedSuggestions((prev) => prev.map((v, j) => (j === i ? !v : v)))
+                  }
                   currentMode={permissionMode}
                 />
               )}
@@ -380,7 +467,9 @@ export function ToolCallBlockView({
 
       {isForegroundBashRunning && bashOutput && !isPendingApproval && (
         <div className="border-t border-border px-3 py-1.5 flex items-center gap-1.5">
-          <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-accent/10 text-accent">streaming</span>
+          <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-accent/10 text-accent">
+            streaming
+          </span>
           <div className="flex-1" />
           <button
             onClick={() => hasActiveSession && onOpenTaskPanel()}
@@ -393,7 +482,9 @@ export function ToolCallBlockView({
 
       {isBackgroundBash && !isPendingApproval && (
         <div className="border-t border-border px-3 py-1.5 flex items-center gap-1.5">
-          <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-warning/10 text-warning">background</span>
+          <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-warning/10 text-warning">
+            background
+          </span>
           <div className="flex-1" />
           <button
             onClick={() => hasActiveSession && onOpenTaskPanel()}
@@ -415,7 +506,17 @@ const liveAnsiUp = new AnsiUp()
 liveAnsiUp.use_classes = false
 liveAnsiUp.escape_html = true
 
-function LiveBashOutput({ output, totalLines, totalBytes, theme }: { output: string; totalLines: number; totalBytes: number; theme: ThemeId }): React.JSX.Element {
+function LiveBashOutput({
+  output,
+  totalLines,
+  totalBytes,
+  theme
+}: {
+  output: string
+  totalLines: number
+  totalBytes: number
+  theme: ThemeId
+}): React.JSX.Element {
   const preRef = useRef<HTMLPreElement>(null)
   const bg = theme === 'light' ? '#e8eaed' : theme === 'monokai' ? '#272822' : '#0d1117'
   const fg = theme === 'light' ? '#1a1d24' : theme === 'monokai' ? '#f8f8f2' : '#d1d5db'
@@ -433,7 +534,8 @@ function LiveBashOutput({ output, totalLines, totalBytes, theme }: { output: str
       <div className="flex items-center gap-2 mb-1.5">
         <div className="text-[11px] text-text-secondary uppercase tracking-wider">Live Output</div>
         <span className="text-[10px] font-mono text-text-muted">
-          {totalLines} lines · {totalBytes > 1024 ? `${(totalBytes / 1024).toFixed(1)}KB` : `${totalBytes}B`}
+          {totalLines} lines ·{' '}
+          {totalBytes > 1024 ? `${(totalBytes / 1024).toFixed(1)}KB` : `${totalBytes}B`}
         </span>
         <div className="w-1.5 h-1.5 rounded-full bg-accent animate-pulse" />
       </div>
@@ -461,7 +563,9 @@ function BackgroundBashOutput({ toolUseId }: { toolUseId: string }): React.JSX.E
   useEffect(() => {
     if (!activeSessionId) return
     watchBg(activeSessionId, toolUseId)
-    return () => { if (activeSessionId) unwatchBg(activeSessionId, toolUseId) }
+    return () => {
+      if (activeSessionId) unwatchBg(activeSessionId, toolUseId)
+    }
   }, [toolUseId, activeSessionId, watchBg, unwatchBg])
 
   useEffect(() => {
@@ -469,7 +573,9 @@ function BackgroundBashOutput({ toolUseId }: { toolUseId: string }): React.JSX.E
     if (!el || !following) return
     isAutoScrolling.current = true
     el.scrollTop = el.scrollHeight
-    requestAnimationFrame(() => { isAutoScrolling.current = false })
+    requestAnimationFrame(() => {
+      isAutoScrolling.current = false
+    })
   }, [bgOutput?.tail, following])
 
   const handleScroll = useCallback(() => {
@@ -521,7 +627,8 @@ function BackgroundBashOutput({ toolUseId }: { toolUseId: string }): React.JSX.E
         className="text-[12px] font-mono text-text-primary/70 bg-bg-primary rounded-md p-2 border border-border overflow-y-auto whitespace-pre-wrap break-words leading-[1.3]"
         style={{ maxHeight: 10 * 12 * 1.3 + 16 }}
       >
-        {prependedContent}{bgOutput.tail}
+        {prependedContent}
+        {bgOutput.tail}
       </pre>
     </div>
   )
@@ -542,9 +649,15 @@ function ToolInput({ block }: { block: ToolUseBlock }): React.JSX.Element {
   if (toolName === 'Edit' && input?.file_path) {
     return (
       <div className="flex flex-col gap-1.5">
-        <span className="text-[11px] font-mono text-text-secondary">{shorten(String(input.file_path))}</span>
+        <span className="text-[11px] font-mono text-text-secondary">
+          {shorten(String(input.file_path))}
+        </span>
         {input.old_string != null && input.new_string != null && (
-          <DiffViewer oldStr={String(input.old_string)} newStr={String(input.new_string)} fileName={String(input.file_path)} />
+          <DiffViewer
+            oldStr={String(input.old_string)}
+            newStr={String(input.new_string)}
+            fileName={String(input.file_path)}
+          />
         )}
       </div>
     )
@@ -552,7 +665,9 @@ function ToolInput({ block }: { block: ToolUseBlock }): React.JSX.Element {
 
   if ((toolName === 'Read' || toolName === 'Write') && input?.file_path) {
     return (
-      <span className="text-[11px] font-mono text-text-secondary">{shorten(String(input.file_path))}</span>
+      <span className="text-[11px] font-mono text-text-secondary">
+        {shorten(String(input.file_path))}
+      </span>
     )
   }
 
@@ -563,7 +678,13 @@ function ToolInput({ block }: { block: ToolUseBlock }): React.JSX.Element {
   )
 }
 
-function ToolResult({ block, result }: { block: ToolUseBlock; result: ToolResultBlock }): React.JSX.Element {
+function ToolResult({
+  block,
+  result
+}: {
+  block: ToolUseBlock
+  result: ToolResultBlock
+}): React.JSX.Element {
   const toolName = block.toolName
   const text = result.toolResult
   const isError = result.isError
@@ -574,7 +695,11 @@ function ToolResult({ block, result }: { block: ToolUseBlock; result: ToolResult
     return <WriteResult content={content} filePath={filePath} />
   }
 
-  if (toolName === 'Edit' && block.toolInput?.old_string != null && block.toolInput?.new_string != null) {
+  if (
+    toolName === 'Edit' &&
+    block.toolInput?.old_string != null &&
+    block.toolInput?.new_string != null
+  ) {
     return (
       <div className="overflow-y-auto">
         <DiffViewer
@@ -587,7 +712,12 @@ function ToolResult({ block, result }: { block: ToolUseBlock; result: ToolResult
   }
 
   if (toolName === 'Read' && !isError) {
-    return <CodeView code={trunc(text, 5000)} filePath={block.toolInput?.file_path ? String(block.toolInput.file_path) : undefined} />
+    return (
+      <CodeView
+        code={trunc(text, 5000)}
+        filePath={block.toolInput?.file_path ? String(block.toolInput.file_path) : undefined}
+      />
+    )
   }
 
   if (toolName === 'Bash' && !isError) {
@@ -605,7 +735,13 @@ function ToolResult({ block, result }: { block: ToolUseBlock; result: ToolResult
   return <TerminalView text={text} />
 }
 
-function WriteResult({ content, filePath }: { content: string; filePath?: string }): React.JSX.Element {
+function WriteResult({
+  content,
+  filePath
+}: {
+  content: string
+  filePath?: string
+}): React.JSX.Element {
   const isMarkdown = !!filePath && /\.(md|markdown)$/i.test(filePath)
   const [tab, setTab] = useState<'preview' | 'code'>(isMarkdown ? 'preview' : 'code')
 

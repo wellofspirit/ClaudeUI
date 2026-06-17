@@ -13,14 +13,14 @@ The Claude Agent SDK provides information about available slash commands in the 
 <CodeGroup>
 
 ```typescript TypeScript
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { query } from '@anthropic-ai/claude-agent-sdk'
 
 for await (const message of query({
-  prompt: "Hello Claude",
+  prompt: 'Hello Claude',
   options: { maxTurns: 1 }
 })) {
-  if (message.type === "system" && message.subtype === "init") {
-    console.log("Available slash commands:", message.slash_commands);
+  if (message.type === 'system' && message.subtype === 'init') {
+    console.log('Available slash commands:', message.slash_commands)
     // Example output: ["/compact", "/clear", "/help"]
   }
 }
@@ -51,15 +51,15 @@ Send slash commands by including them in your prompt string, just like regular t
 <CodeGroup>
 
 ```typescript TypeScript
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { query } from '@anthropic-ai/claude-agent-sdk'
 
 // Send a slash command
 for await (const message of query({
-  prompt: "/compact",
+  prompt: '/compact',
   options: { maxTurns: 1 }
 })) {
-  if (message.type === "result") {
-    console.log("Command executed:", message.result);
+  if (message.type === 'result') {
+    console.log('Command executed:', message.result)
   }
 }
 ```
@@ -91,16 +91,16 @@ The `/compact` command reduces the size of your conversation history by summariz
 <CodeGroup>
 
 ```typescript TypeScript
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { query } from '@anthropic-ai/claude-agent-sdk'
 
 for await (const message of query({
-  prompt: "/compact",
+  prompt: '/compact',
   options: { maxTurns: 1 }
 })) {
-  if (message.type === "system" && message.subtype === "compact_boundary") {
-    console.log("Compaction completed");
-    console.log("Pre-compaction tokens:", message.compact_metadata.pre_tokens);
-    console.log("Trigger:", message.compact_metadata.trigger);
+  if (message.type === 'system' && message.subtype === 'compact_boundary') {
+    console.log('Compaction completed')
+    console.log('Pre-compaction tokens:', message.compact_metadata.pre_tokens)
+    console.log('Trigger:', message.compact_metadata.trigger)
   }
 }
 ```
@@ -114,10 +114,10 @@ async def main():
         prompt="/compact",
         options={"max_turns": 1}
     ):
-        if (message.type == "system" and 
+        if (message.type == "system" and
             message.subtype == "compact_boundary"):
             print("Compaction completed")
-            print("Pre-compaction tokens:", 
+            print("Pre-compaction tokens:",
                   message.compact_metadata.pre_tokens)
             print("Trigger:", message.compact_metadata.trigger)
 
@@ -133,16 +133,16 @@ The `/clear` command starts a fresh conversation by clearing all previous histor
 <CodeGroup>
 
 ```typescript TypeScript
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { query } from '@anthropic-ai/claude-agent-sdk'
 
 // Clear conversation and start fresh
 for await (const message of query({
-  prompt: "/clear",
+  prompt: '/clear',
   options: { maxTurns: 1 }
 })) {
-  if (message.type === "system" && message.subtype === "init") {
-    console.log("Conversation cleared, new session started");
-    console.log("Session ID:", message.session_id);
+  if (message.type === 'system' && message.subtype === 'init') {
+    console.log('Conversation cleared, new session started')
+    console.log('Session ID:', message.session_id)
   }
 }
 ```
@@ -180,6 +180,7 @@ Custom slash commands are stored in designated directories based on their scope:
 ### File Format
 
 Each custom command is a markdown file where:
+
 - The filename (without `.md` extension) becomes the command name
 - The file content defines what the command does
 - Optional YAML frontmatter provides configuration
@@ -207,6 +208,7 @@ model: claude-opus-4-6
 ---
 
 Analyze the codebase for security vulnerabilities including:
+
 - SQL injection risks
 - XSS vulnerabilities
 - Exposed credentials
@@ -220,26 +222,26 @@ Once defined in the filesystem, custom commands are automatically available thro
 <CodeGroup>
 
 ```typescript TypeScript
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { query } from '@anthropic-ai/claude-agent-sdk'
 
 // Use a custom command
 for await (const message of query({
-  prompt: "/refactor src/auth/login.ts",
+  prompt: '/refactor src/auth/login.ts',
   options: { maxTurns: 3 }
 })) {
-  if (message.type === "assistant") {
-    console.log("Refactoring suggestions:", message.message);
+  if (message.type === 'assistant') {
+    console.log('Refactoring suggestions:', message.message)
   }
 }
 
 // Custom commands appear in the slash_commands list
 for await (const message of query({
-  prompt: "Hello",
+  prompt: 'Hello',
   options: { maxTurns: 1 }
 })) {
-  if (message.type === "system" && message.subtype === "init") {
+  if (message.type === 'system' && message.subtype === 'init') {
     // Will include both built-in and custom commands
-    console.log("Available commands:", message.slash_commands);
+    console.log('Available commands:', message.slash_commands)
     // Example: ["/compact", "/clear", "/help", "/refactor", "/security-check"]
   }
 }
@@ -257,7 +259,7 @@ async def main():
     ):
         if message.type == "assistant":
             print("Refactoring suggestions:", message.message)
-    
+
     # Custom commands appear in the slash_commands list
     async for message in query(
         prompt="Hello",
@@ -296,16 +298,16 @@ Use in SDK:
 <CodeGroup>
 
 ```typescript TypeScript
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { query } from '@anthropic-ai/claude-agent-sdk'
 
 // Pass arguments to custom command
 for await (const message of query({
-  prompt: "/fix-issue 123 high",
+  prompt: '/fix-issue 123 high',
   options: { maxTurns: 5 }
 })) {
   // Command will process with $1="123" and $2="high"
-  if (message.type === "result") {
-    console.log("Issue fixed:", message.result);
+  if (message.type === 'result') {
+    console.log('Issue fixed:', message.result)
   }
 }
 ```
@@ -363,6 +365,7 @@ description: Review configuration files
 ---
 
 Review the following configuration files for issues:
+
 - Package config: @package.json
 - TypeScript config: @tsconfig.json
 - Environment config: @.env
@@ -400,14 +403,17 @@ description: Comprehensive code review
 ---
 
 ## Changed Files
+
 !`git diff --name-only HEAD~1`
 
 ## Detailed Changes
+
 !`git diff HEAD~1`
 
 ## Review Checklist
 
 Review the above changes for:
+
 1. Code quality and readability
 2. Security vulnerabilities
 3. Performance implications
@@ -441,11 +447,11 @@ Use these commands through the SDK:
 <CodeGroup>
 
 ```typescript TypeScript
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { query } from '@anthropic-ai/claude-agent-sdk'
 
 // Run code review
 for await (const message of query({
-  prompt: "/code-review",
+  prompt: '/code-review',
   options: { maxTurns: 3 }
 })) {
   // Process review feedback
@@ -453,7 +459,7 @@ for await (const message of query({
 
 // Run specific tests
 for await (const message of query({
-  prompt: "/test auth",
+  prompt: '/test auth',
   options: { maxTurns: 5 }
 })) {
   // Handle test results
@@ -472,7 +478,7 @@ async def main():
     ):
         # Process review feedback
         pass
-    
+
     # Run specific tests
     async for message in query(
         prompt="/test auth",

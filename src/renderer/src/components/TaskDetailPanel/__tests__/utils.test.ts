@@ -48,18 +48,14 @@ describe('findTaskBlocks', () => {
   })
 
   it('returns nulls when no matching blocks', () => {
-    const messages = [
-      { role: 'assistant', content: [toolUseBlock] }
-    ]
+    const messages = [{ role: 'assistant', content: [toolUseBlock] }]
     const result = findTaskBlocks(messages, 'tu-999')
     expect(result.taskBlock).toBeNull()
     expect(result.resultBlock).toBeNull()
   })
 
   it('ignores tool_use blocks in user messages (only assistant tool_use is valid)', () => {
-    const messages = [
-      { role: 'user', content: [toolUseBlock] }
-    ]
+    const messages = [{ role: 'user', content: [toolUseBlock] }]
     const result = findTaskBlocks(messages, 'tu-1')
     expect(result.taskBlock).toBeNull()
   })
@@ -72,7 +68,7 @@ describe('findTaskBlocks', () => {
   it('finds tool_result blocks that live in role:user messages', () => {
     const messages = [
       { role: 'assistant', content: [toolUseBlock] },
-      { role: 'user', content: [toolResultBlock] },
+      { role: 'user', content: [toolResultBlock] }
     ]
     const result = findTaskBlocks(messages, 'tu-1')
     expect(result.taskBlock?.toolUseId).toBe('tu-1')

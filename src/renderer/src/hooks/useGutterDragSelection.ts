@@ -60,7 +60,10 @@ function getLineInfo(target: HTMLElement): { lineNumber: number; side: 'old' | '
  * Constrains results to the given `side` — ignores rows that only have
  * the opposite side's line number.
  */
-function getLineInfoFromRow(target: HTMLElement, side: 'old' | 'new'): { lineNumber: number } | null {
+function getLineInfoFromRow(
+  target: HTMLElement,
+  side: 'old' | 'new'
+): { lineNumber: number } | null {
   const row = target.closest('[role="row"]')
   if (!row) return null
 
@@ -147,9 +150,7 @@ function extractLineContent(
  * - mousemove works on the entire row, so dragging over code content extends the selection
  * - Empty gutter slots (e.g. blank old-side on additions) fall back to whichever side has a number
  */
-export function useGutterDragSelection(
-  onSelect: (selection: GutterSelection) => void
-): {
+export function useGutterDragSelection(onSelect: (selection: GutterSelection) => void): {
   containerRef: (node: HTMLDivElement | null) => void
   isDragging: boolean
   activeSelection: Omit<GutterSelection, 'lineContent'> | null
@@ -164,7 +165,10 @@ export function useGutterDragSelection(
   }))
 
   const [isDragging, setIsDragging] = useState(false)
-  const [activeSelection, setActiveSelection] = useState<Omit<GutterSelection, 'lineContent'> | null>(null)
+  const [activeSelection, setActiveSelection] = useState<Omit<
+    GutterSelection,
+    'lineContent'
+  > | null>(null)
 
   useEffect(() => {
     if (!container) return
@@ -181,7 +185,11 @@ export function useGutterDragSelection(
       if (e.button !== 0) return
 
       e.preventDefault()
-      dragStateHolder.current = { startLine: info.lineNumber, endLine: info.lineNumber, side: info.side }
+      dragStateHolder.current = {
+        startLine: info.lineNumber,
+        endLine: info.lineNumber,
+        side: info.side
+      }
       setIsDragging(true)
       setActiveSelection({ startLine: info.lineNumber, endLine: info.lineNumber, side: info.side })
       highlightRange(container, info.lineNumber, info.lineNumber, info.side)
@@ -202,7 +210,12 @@ export function useGutterDragSelection(
         endLine: info.lineNumber,
         side: dragStateHolder.current.side
       })
-      highlightRange(container, dragStateHolder.current.startLine, info.lineNumber, dragStateHolder.current.side)
+      highlightRange(
+        container,
+        dragStateHolder.current.startLine,
+        info.lineNumber,
+        dragStateHolder.current.side
+      )
     }
 
     const handleMouseUp = () => {

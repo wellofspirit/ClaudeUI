@@ -19,7 +19,7 @@ import { render, screen, fireEvent, within } from '@testing-library/react'
  * query scope. Avoids ambiguity with the trigger button (which displays the
  * currently-selected value and would otherwise collide with same-named options).
  */
-// eslint-disable-next-line @typescript-eslint/explicit-function-return-type
+
 function openPickerDropdown(triggerTitle: string) {
   const trigger = screen.getByTitle(triggerTitle)
   fireEvent.click(trigger)
@@ -35,7 +35,7 @@ const baseModel: ModelDisplay = {
   value: 'claude-opus-4-7',
   displayName: 'Opus 4.7',
   description: 'Opus 4.7 · Latest',
-  shortName: 'Opus 4.7',
+  shortName: 'Opus 4.7'
 }
 
 function makeProps(overrides: Partial<InputBoxViewProps> = {}): InputBoxViewProps {
@@ -87,7 +87,7 @@ function makeProps(overrides: Partial<InputBoxViewProps> = {}): InputBoxViewProp
     onOpenSandboxSettings: vi.fn(),
     onVoiceStart: vi.fn(),
     onVoiceStop: vi.fn(),
-    ...overrides,
+    ...overrides
   }
 }
 
@@ -96,10 +96,10 @@ beforeEach(() => {
   // Provide a session so it doesn't crash.
   useSessionStore.setState({
     activeSessionId: 'unit-route',
-    sessions: {},
+    sessions: {}
   })
   ;(globalThis as { window: { api?: unknown } }).window.api = {
-    saveSessionConfig: () => {},
+    saveSessionConfig: () => {}
   }
 })
 
@@ -120,7 +120,10 @@ describe('ThinkingPicker', () => {
     const dropdown = openPickerDropdown('Thinking mode')
     const adaptive = dropdown.getByRole('button', { name: /^adaptive$/i })
     expect(adaptive).toBeDisabled()
-    expect(adaptive).toHaveAttribute('title', expect.stringContaining('Adaptive thinking is only supported'))
+    expect(adaptive).toHaveAttribute(
+      'title',
+      expect.stringContaining('Adaptive thinking is only supported')
+    )
     expect(dropdown.getByRole('button', { name: /^enabled$/i })).not.toBeDisabled()
     expect(dropdown.getByRole('button', { name: /^disabled$/i })).not.toBeDisabled()
   })
@@ -136,7 +139,11 @@ describe('ThinkingPicker', () => {
 
   it('clicking a disabled mode does not fire the callback', () => {
     const onSelectThinking = vi.fn()
-    render(<InputBoxView {...makeProps({ adaptiveSupported: false, thinkingMode: 'enabled', onSelectThinking })} />)
+    render(
+      <InputBoxView
+        {...makeProps({ adaptiveSupported: false, thinkingMode: 'enabled', onSelectThinking })}
+      />
+    )
     const dropdown = openPickerDropdown('Thinking mode')
     fireEvent.click(dropdown.getByRole('button', { name: /^adaptive$/i }))
     expect(onSelectThinking).not.toHaveBeenCalled()
@@ -159,10 +166,14 @@ describe('EffortPicker', () => {
   })
 
   it('renders all 5 levels and greys out unsupported ones (sonnet-4-6 shape)', () => {
-    render(<InputBoxView {...makeProps({
-      effort: 'high',
-      allowedEffortLevels: ['low', 'medium', 'high', 'max'],
-    })} />)
+    render(
+      <InputBoxView
+        {...makeProps({
+          effort: 'high',
+          allowedEffortLevels: ['low', 'medium', 'high', 'max']
+        })}
+      />
+    )
 
     const dropdown = openPickerDropdown('Effort level')
     expect(dropdown.getByRole('button', { name: /^low$/i })).not.toBeDisabled()
@@ -172,13 +183,20 @@ describe('EffortPicker', () => {
 
     const xhigh = dropdown.getByRole('button', { name: /^xhigh$/i })
     expect(xhigh).toBeDisabled()
-    expect(xhigh).toHaveAttribute('title', expect.stringContaining('xhigh effort is only available on Opus 4.7'))
+    expect(xhigh).toHaveAttribute(
+      'title',
+      expect.stringContaining('xhigh effort is only available on Opus 4.7')
+    )
   })
 
   it('greys out max with the no-max tooltip when not in allowedEffortLevels', () => {
-    render(<InputBoxView {...makeProps({
-      allowedEffortLevels: ['low', 'medium', 'high', 'xhigh'],
-    })} />)
+    render(
+      <InputBoxView
+        {...makeProps({
+          allowedEffortLevels: ['low', 'medium', 'high', 'xhigh']
+        })}
+      />
+    )
     const dropdown = openPickerDropdown('Effort level')
     const max = dropdown.getByRole('button', { name: /^max$/i })
     expect(max).toBeDisabled()
@@ -195,10 +213,14 @@ describe('EffortPicker', () => {
 
   it('clicking a disabled level does not fire the callback', () => {
     const onSelectEffort = vi.fn()
-    render(<InputBoxView {...makeProps({
-      allowedEffortLevels: ['low', 'medium', 'high'],
-      onSelectEffort,
-    })} />)
+    render(
+      <InputBoxView
+        {...makeProps({
+          allowedEffortLevels: ['low', 'medium', 'high'],
+          onSelectEffort
+        })}
+      />
+    )
     const dropdown = openPickerDropdown('Effort level')
     fireEvent.click(dropdown.getByRole('button', { name: /^xhigh$/i }))
     fireEvent.click(dropdown.getByRole('button', { name: /^max$/i }))

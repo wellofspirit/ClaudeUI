@@ -29,7 +29,9 @@ function onEvent<T extends (...args: never[]) => void>(channel: string): (cb: T)
   return (cb: T) => {
     const handler = (_: unknown, ...args: unknown[]): void => (cb as Function)(...args)
     bridge.ipcRenderer.on(channel, handler)
-    const cleanup = (): void => { bridge.ipcRenderer.removeListener(channel, handler) }
+    const cleanup = (): void => {
+      bridge.ipcRenderer.removeListener(channel, handler)
+    }
     cleanups.push(cleanup)
     return cleanup
   }
@@ -75,14 +77,14 @@ function wireEventHandlers(): void {
     }
   )
 
-  onEvent<(data: { automationId: string; type: string; text: string }) => void>('automation:stream-event')(
-    ({ automationId, type, text }) => {
-      const store = useAutomationStore.getState()
-      if (automationId === store.selectedAutomationId && type === 'text') {
-        store.appendStreamingText(text)
-      }
+  onEvent<(data: { automationId: string; type: string; text: string }) => void>(
+    'automation:stream-event'
+  )(({ automationId, type, text }) => {
+    const store = useAutomationStore.getState()
+    if (automationId === store.selectedAutomationId && type === 'text') {
+      store.appendStreamingText(text)
     }
-  )
+  })
 }
 
 // ---------------------------------------------------------------------------
@@ -101,7 +103,7 @@ function makeAutomation(overrides: Partial<Automation> = {}): Automation {
     lastRunAt: null,
     lastRunStatus: null,
     createdAt: Date.now(),
-    ...overrides,
+    ...overrides
   }
 }
 
@@ -113,7 +115,7 @@ function makeRun(overrides: Partial<AutomationRun> = {}): AutomationRun {
     finishedAt: null,
     status: 'running',
     totalCostUsd: 0,
-    ...overrides,
+    ...overrides
   }
 }
 
@@ -123,7 +125,7 @@ function makeChatMessage(overrides: Partial<ChatMessage> = {}): ChatMessage {
     role: 'assistant' as const,
     content: [{ type: 'text' as const, text: 'hello' }],
     timestamp: Date.now(),
-    ...overrides,
+    ...overrides
     // Ensure timestamp is never undefined even if overrides has timestamp: undefined
   } as ChatMessage
 }
@@ -152,7 +154,7 @@ beforeEach(() => {
     onAutomationProcessing: () => () => {},
     onAutomationsChanged: () => () => {},
     onAutomationRunMessage: () => () => {},
-    onAutomationStreamEvent: () => () => {},
+    onAutomationStreamEvent: () => () => {}
   } as any
 
   // Reset session store (may be relied upon by other store internals)
@@ -162,7 +164,7 @@ beforeEach(() => {
     directories: [],
     recentSessionIds: [],
     pinnedSessionIds: [],
-    customTitles: {},
+    customTitles: {}
   })
 
   // Reset automation store to a clean state before each test
@@ -174,7 +176,7 @@ beforeEach(() => {
     runMessages: null,
     streamingText: '',
     isRunProcessing: false,
-    notificationBadge: 0,
+    notificationBadge: 0
   })
 
   wireEventHandlers()
@@ -206,7 +208,10 @@ describe('useAutomationEvents component tests', () => {
 
     it('replaces an existing list with a new one on subsequent events', () => {
       bridge.webContents.send('automation:changed', [makeAutomation({ id: 'old' })])
-      bridge.webContents.send('automation:changed', [makeAutomation({ id: 'new-1' }), makeAutomation({ id: 'new-2' })])
+      bridge.webContents.send('automation:changed', [
+        makeAutomation({ id: 'new-1' }),
+        makeAutomation({ id: 'new-2' })
+      ])
 
       const { automations } = useAutomationStore.getState()
       expect(automations).toHaveLength(2)
@@ -285,7 +290,7 @@ describe('useAutomationEvents component tests', () => {
       useAutomationStore.setState({
         selectedAutomationId: 'auto-1',
         streamingText: 'partial output...',
-        isRunProcessing: true,
+        isRunProcessing: true
       })
       const run = makeRun({ status: 'success', finishedAt: Date.now() })
 
@@ -299,7 +304,7 @@ describe('useAutomationEvents component tests', () => {
       useAutomationStore.setState({
         selectedAutomationId: 'other-auto',
         streamingText: 'my output',
-        isRunProcessing: true,
+        isRunProcessing: true
       })
       const run = makeRun({ automationId: 'auto-1', status: 'success' })
 
@@ -316,7 +321,7 @@ describe('useAutomationEvents component tests', () => {
       useAutomationStore.setState({
         selectedAutomationId: 'auto-1',
         streamingText: 'in progress...',
-        isRunProcessing: true,
+        isRunProcessing: true
       })
       const run = makeRun({ status: 'running' })
 
@@ -334,7 +339,10 @@ describe('useAutomationEvents component tests', () => {
     it('sets isRunProcessing true for the selected automation', () => {
       useAutomationStore.setState({ selectedAutomationId: 'auto-1' })
 
-      bridge.webContents.send('automation:processing', { automationId: 'auto-1', isProcessing: true })
+      bridge.webContents.send('automation:processing', {
+        automationId: 'auto-1',
+        isProcessing: true
+      })
 
       expect(useAutomationStore.getState().isRunProcessing).toBe(true)
     })
@@ -343,10 +351,13 @@ describe('useAutomationEvents component tests', () => {
       useAutomationStore.setState({
         selectedAutomationId: 'auto-1',
         streamingText: 'streaming...',
-        isRunProcessing: true,
+        isRunProcessing: true
       })
 
-      bridge.webContents.send('automation:processing', { automationId: 'auto-1', isProcessing: false })
+      bridge.webContents.send('automation:processing', {
+        automationId: 'auto-1',
+        isProcessing: false
+      })
 
       expect(useAutomationStore.getState().isRunProcessing).toBe(false)
       expect(useAutomationStore.getState().streamingText).toBe('')
@@ -355,10 +366,13 @@ describe('useAutomationEvents component tests', () => {
     it('ignores event when automationId does not match selectedAutomationId', () => {
       useAutomationStore.setState({
         selectedAutomationId: 'other-auto',
-        isRunProcessing: false,
+        isRunProcessing: false
       })
 
-      bridge.webContents.send('automation:processing', { automationId: 'auto-1', isProcessing: true })
+      bridge.webContents.send('automation:processing', {
+        automationId: 'auto-1',
+        isProcessing: true
+      })
 
       expect(useAutomationStore.getState().isRunProcessing).toBe(false)
     })
@@ -366,10 +380,13 @@ describe('useAutomationEvents component tests', () => {
     it('does not clear streaming text when isProcessing is true', () => {
       useAutomationStore.setState({
         selectedAutomationId: 'auto-1',
-        streamingText: 'still streaming',
+        streamingText: 'still streaming'
       })
 
-      bridge.webContents.send('automation:processing', { automationId: 'auto-1', isProcessing: true })
+      bridge.webContents.send('automation:processing', {
+        automationId: 'auto-1',
+        isProcessing: true
+      })
 
       expect(useAutomationStore.getState().streamingText).toBe('still streaming')
     })
@@ -377,7 +394,10 @@ describe('useAutomationEvents component tests', () => {
     it('ignores event when no automation is selected', () => {
       useAutomationStore.setState({ selectedAutomationId: null, isRunProcessing: false })
 
-      bridge.webContents.send('automation:processing', { automationId: 'auto-1', isProcessing: true })
+      bridge.webContents.send('automation:processing', {
+        automationId: 'auto-1',
+        isProcessing: true
+      })
 
       expect(useAutomationStore.getState().isRunProcessing).toBe(false)
     })
@@ -390,11 +410,17 @@ describe('useAutomationEvents component tests', () => {
     it('appends a message when automationId matches selected automation', () => {
       useAutomationStore.setState({ selectedAutomationId: 'auto-1', runMessages: [] })
 
-      const message = makeChatMessage({ role: 'assistant', content: [{ type: 'text', text: 'Done!' }] })
+      const message = makeChatMessage({
+        role: 'assistant',
+        content: [{ type: 'text', text: 'Done!' }]
+      })
       bridge.webContents.send('automation:run-message', { automationId: 'auto-1', message })
 
       expect(useAutomationStore.getState().runMessages).toHaveLength(1)
-      expect(useAutomationStore.getState().runMessages![0].content[0]).toEqual({ type: 'text', text: 'Done!' })
+      expect(useAutomationStore.getState().runMessages![0].content[0]).toEqual({
+        type: 'text',
+        text: 'Done!'
+      })
     })
 
     it('does not append message for non-selected automation (store guard)', () => {
@@ -411,7 +437,7 @@ describe('useAutomationEvents component tests', () => {
       useAutomationStore.setState({
         selectedAutomationId: 'auto-1',
         runMessages: [],
-        streamingText: 'streamed so far',
+        streamingText: 'streamed so far'
       })
 
       const message = makeChatMessage({ role: 'assistant' })
@@ -424,7 +450,7 @@ describe('useAutomationEvents component tests', () => {
       useAutomationStore.setState({
         selectedAutomationId: 'auto-1',
         runMessages: [],
-        streamingText: 'streamed so far',
+        streamingText: 'streamed so far'
       })
 
       const message = makeChatMessage({ role: 'user', content: [{ type: 'text', text: 'prompt' }] })
@@ -437,7 +463,7 @@ describe('useAutomationEvents component tests', () => {
       useAutomationStore.setState({
         selectedAutomationId: 'other-auto',
         streamingText: 'my stream',
-        runMessages: [],
+        runMessages: []
       })
 
       const message = makeChatMessage({ role: 'assistant' })
@@ -449,11 +475,25 @@ describe('useAutomationEvents component tests', () => {
     it('upserts message by id (partial assistant messages share same id)', () => {
       useAutomationStore.setState({ selectedAutomationId: 'auto-1', runMessages: [] })
 
-      const partial = makeChatMessage({ id: 'msg-shared', role: 'assistant', content: [{ type: 'text', text: 'Hello' }] })
-      const complete = makeChatMessage({ id: 'msg-shared', role: 'assistant', content: [{ type: 'text', text: 'Hello world' }] })
+      const partial = makeChatMessage({
+        id: 'msg-shared',
+        role: 'assistant',
+        content: [{ type: 'text', text: 'Hello' }]
+      })
+      const complete = makeChatMessage({
+        id: 'msg-shared',
+        role: 'assistant',
+        content: [{ type: 'text', text: 'Hello world' }]
+      })
 
-      bridge.webContents.send('automation:run-message', { automationId: 'auto-1', message: partial })
-      bridge.webContents.send('automation:run-message', { automationId: 'auto-1', message: complete })
+      bridge.webContents.send('automation:run-message', {
+        automationId: 'auto-1',
+        message: partial
+      })
+      bridge.webContents.send('automation:run-message', {
+        automationId: 'auto-1',
+        message: complete
+      })
 
       // Should upsert, not duplicate
       expect(useAutomationStore.getState().runMessages).toHaveLength(1)
@@ -467,8 +507,16 @@ describe('useAutomationEvents component tests', () => {
     it('appends streaming text for the selected automation', () => {
       useAutomationStore.setState({ selectedAutomationId: 'auto-1', streamingText: '' })
 
-      bridge.webContents.send('automation:stream-event', { automationId: 'auto-1', type: 'text', text: 'chunk1 ' })
-      bridge.webContents.send('automation:stream-event', { automationId: 'auto-1', type: 'text', text: 'chunk2' })
+      bridge.webContents.send('automation:stream-event', {
+        automationId: 'auto-1',
+        type: 'text',
+        text: 'chunk1 '
+      })
+      bridge.webContents.send('automation:stream-event', {
+        automationId: 'auto-1',
+        type: 'text',
+        text: 'chunk2'
+      })
 
       expect(useAutomationStore.getState().streamingText).toBe('chunk1 chunk2')
     })
@@ -476,7 +524,11 @@ describe('useAutomationEvents component tests', () => {
     it('ignores stream events for non-selected automation', () => {
       useAutomationStore.setState({ selectedAutomationId: 'other-auto', streamingText: '' })
 
-      bridge.webContents.send('automation:stream-event', { automationId: 'auto-1', type: 'text', text: 'ignored' })
+      bridge.webContents.send('automation:stream-event', {
+        automationId: 'auto-1',
+        type: 'text',
+        text: 'ignored'
+      })
 
       expect(useAutomationStore.getState().streamingText).toBe('')
     })
@@ -484,8 +536,16 @@ describe('useAutomationEvents component tests', () => {
     it('ignores stream events with non-text type', () => {
       useAutomationStore.setState({ selectedAutomationId: 'auto-1', streamingText: '' })
 
-      bridge.webContents.send('automation:stream-event', { automationId: 'auto-1', type: 'thinking', text: 'inner thought' })
-      bridge.webContents.send('automation:stream-event', { automationId: 'auto-1', type: 'tool_use', text: 'tool data' })
+      bridge.webContents.send('automation:stream-event', {
+        automationId: 'auto-1',
+        type: 'thinking',
+        text: 'inner thought'
+      })
+      bridge.webContents.send('automation:stream-event', {
+        automationId: 'auto-1',
+        type: 'tool_use',
+        text: 'tool data'
+      })
 
       expect(useAutomationStore.getState().streamingText).toBe('')
     })
@@ -493,7 +553,11 @@ describe('useAutomationEvents component tests', () => {
     it('ignores stream events when no automation is selected', () => {
       useAutomationStore.setState({ selectedAutomationId: null, streamingText: '' })
 
-      bridge.webContents.send('automation:stream-event', { automationId: 'auto-1', type: 'text', text: 'lost' })
+      bridge.webContents.send('automation:stream-event', {
+        automationId: 'auto-1',
+        type: 'text',
+        text: 'lost'
+      })
 
       expect(useAutomationStore.getState().streamingText).toBe('')
     })

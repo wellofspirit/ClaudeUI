@@ -6,10 +6,10 @@ Forwards real-time per-window rate limit utilization data (from inference respon
 
 `@anthropic-ai/claude-agent-sdk` — bundled `cli.js` file.
 
-| Component | Version at time of discovery |
-|---|---|
-| SDK package | 0.2.97 |
-| Bundled CLI (`cli.js`) | 2.1.97 |
+| Component              | Version at time of discovery |
+| ---------------------- | ---------------------------- |
+| SDK package            | 0.2.97                       |
+| Bundled CLI (`cli.js`) | 2.1.97                       |
 
 The SDK bundles its own `cli.js`, independent of the native `claude` binary.
 
@@ -26,6 +26,7 @@ The CLI already parses `anthropic-ratelimit-unified-*` response headers after ev
 1. **Dedup gate blocks broadcasts**: The CLI has a `d46` listener Set and a broadcaster function (`BF1`). But `BF1` is only called when the rate limit **status changes** — guarded by a deep-equality check (`NJ(aV, z)`). For normal usage where status stays `"allowed"`, the initial `aV` value `{status:"allowed", unifiedRateLimitFallbackAvailable:false, isUsingOverage:false}` matches the parsed state (once `resetsAt` stabilizes), so `BF1` stops firing after the first request or two.
 
 2. **SDK adapter drops events anyway**: Even when `BF1` does fire, the `sdkMessageAdapter` function explicitly drops `rate_limit_event` messages:
+
    ```js
    case "rate_limit_event":
      return N("[sdkMessageAdapter] Ignoring rate_limit_event message"),
@@ -87,15 +88,15 @@ Anthropic API response
 
 ### Key functions
 
-| Function (v2.1.97) | Char offset | Purpose |
-|---|---|---|
-| `LR4()` | ~6485791 | Getter for `kh8` (cached parsed header utilization) |
-| `hR4(q)` | ~6485817 | Parses `anthropic-ratelimit-unified-*-utilization/reset` headers → `{ five_hour, seven_day }` |
-| `pF1(q)` | ~6488865 | Main handler: calls `hR4` + `SR4` + conditionally `BF1` |
-| `SR4(q)` | ~6487750 | Full unified rate limit status parser → status object |
-| `BF1(q)` | ~6486087 | Broadcaster: updates `aV`, calls `d46.forEach(cb => cb(q))`, fires telemetry |
-| `NJ` | (lodash isEqual) | Deep equality — `NJ(aV, z)` gates `BF1` |
-| `XiK(...)` | ~11714504 | Async generator stream loop — calls `pF1` after streaming completes |
+| Function (v2.1.97) | Char offset      | Purpose                                                                                       |
+| ------------------ | ---------------- | --------------------------------------------------------------------------------------------- |
+| `LR4()`            | ~6485791         | Getter for `kh8` (cached parsed header utilization)                                           |
+| `hR4(q)`           | ~6485817         | Parses `anthropic-ratelimit-unified-*-utilization/reset` headers → `{ five_hour, seven_day }` |
+| `pF1(q)`           | ~6488865         | Main handler: calls `hR4` + `SR4` + conditionally `BF1`                                       |
+| `SR4(q)`           | ~6487750         | Full unified rate limit status parser → status object                                         |
+| `BF1(q)`           | ~6486087         | Broadcaster: updates `aV`, calls `d46.forEach(cb => cb(q))`, fires telemetry                  |
+| `NJ`               | (lodash isEqual) | Deep equality — `NJ(aV, z)` gates `BF1`                                                       |
+| `XiK(...)`         | ~11714504        | Async generator stream loop — calls `pF1` after streaming completes                           |
 
 ### Why `d46` piggybacking doesn't work
 
@@ -121,25 +122,27 @@ The `kh8` store is updated unconditionally by `hR4`, but the `d46` broadcast is 
 
 ### Variable mapping at injection site
 
-| Variable | Source | Value |
-|---|---|---|
-| `U1` | `let U1 = l` | Raw `Response` object from `fetch()` in the API client |
-| `l` | set in `xE8` callback | Response stored for post-streaming header access |
-| `k8` | local to `XiK` | Cached headers (used elsewhere in the function) |
-| `pF1` | module-level function | Rate limit handler (calls `hR4` → stores in `kh8`) |
-| `LR4` | module-level function | Getter: `function LR4(){return kh8}` |
-| `kh8` | module-level var | `{ five_hour: { utilization, resets_at }, seven_day: { ... } }` |
+| Variable | Source                | Value                                                           |
+| -------- | --------------------- | --------------------------------------------------------------- |
+| `U1`     | `let U1 = l`          | Raw `Response` object from `fetch()` in the API client          |
+| `l`      | set in `xE8` callback | Response stored for post-streaming header access                |
+| `k8`     | local to `XiK`        | Cached headers (used elsewhere in the function)                 |
+| `pF1`    | module-level function | Rate limit handler (calls `hR4` → stores in `kh8`)              |
+| `LR4`    | module-level function | Getter: `function LR4(){return kh8}`                            |
+| `kh8`    | module-level var      | `{ five_hour: { utilization, resets_at }, seven_day: { ... } }` |
 
 ### `hR4` — header parser (what `kh8` / `LR4()` contains)
 
 ```js
 function hR4(q) {
-  let K = {};
-  for (let [_, z] of [["five_hour", "5h"], ["seven_day", "7d"]]) {
+  let K = {}
+  for (let [_, z] of [
+    ['five_hour', '5h'],
+    ['seven_day', '7d']
+  ]) {
     let Y = q.get(`anthropic-ratelimit-unified-${z}-utilization`),
-        A = q.get(`anthropic-ratelimit-unified-${z}-reset`);
-    if (Y !== null && A !== null)
-      K[_] = { utilization: Number(Y), resets_at: Number(A) }
+      A = q.get(`anthropic-ratelimit-unified-${z}-reset`)
+    if (Y !== null && A !== null) K[_] = { utilization: Number(Y), resets_at: Number(A) }
   }
   return K
 }
@@ -182,13 +185,20 @@ function %V%(){return %V%}function %V%(%V%){let %V%={};for(let[%V%,%V%]of[["five
 ### Before
 
 ```js
-let U1=l;if(U1)pF1(U1.headers),k8=U1.headers
+let U1 = l
+if (U1) (pF1(U1.headers), (k8 = U1.headers))
 ```
 
 ### After
 
 ```js
-let U1=l;if(U1)pF1(U1.headers),k8=U1.headers/*PATCHED:rate-limit-relay*/,process.stdout.write(JSON.stringify({type:"rate_limit_event",header_utilization:LR4()})+"\n")
+let U1 = l
+if (U1)
+  (pF1(U1.headers),
+    (k8 = U1.headers) /*PATCHED:rate-limit-relay*/,
+    process.stdout.write(
+      JSON.stringify({ type: 'rate_limit_event', header_utilization: LR4() }) + '\n'
+    ))
 ```
 
 ### Dynamic function extraction
@@ -196,8 +206,10 @@ let U1=l;if(U1)pF1(U1.headers),k8=U1.headers/*PATCHED:rate-limit-relay*/,process
 Two minified names are extracted at apply time:
 
 1. **`LR4`** (header utilization getter) — found by matching the getter adjacent to `hR4`:
+
    ```js
-   const lr4Re = /function (%V%)(){return (%V%)}function %V%(%V%){let %V%={};for(...["five_hour","5h"]...)/
+   const lr4Re =
+     /function (%V%)(){return (%V%)}function %V%(%V%){let %V%={};for(...["five_hour","5h"]...)/
    // Captures: [1]=LR4 fn name, [2]=kh8 var name
    ```
 
@@ -330,7 +342,7 @@ The `if(U1)` has no braces — it's a single-statement body. The comma operator 
 
 **`pF1` internals** — The handler itself is not modified. We only add code after it runs, reading its side effect (`kh8` update via `hR4`).
 
-**`/api/oauth/usage` endpoint** — The `usage-relay` patch's background poll still works independently. This patch provides real-time updates *between* polls, using data that arrives for free with inference responses.
+**`/api/oauth/usage` endpoint** — The `usage-relay` patch's background poll still works independently. This patch provides real-time updates _between_ polls, using data that arrives for free with inference responses.
 
 ## Consumer-Side Integration
 
@@ -403,26 +415,26 @@ Inference response headers
 
 ## Key Functions Reference
 
-| Name (v2.1.97) | Purpose | Char offset |
-|---|---|---|
-| `LR4()` | Getter for `kh8` (parsed header utilization) | ~6485791 |
-| `hR4(q)` | Header parser → `{ five_hour: {utilization, resets_at}, seven_day: {...} }` | ~6485817 |
-| `pF1(q)` | Main rate limit handler (calls `hR4`, `SR4`, conditionally `BF1`) | ~6488865 |
-| `SR4(q)` | Unified status parser → `{ status, resetsAt, rateLimitType, ... }` | ~6487750 |
-| `BF1(q)` | Broadcaster: `aV=q, d46.forEach(cb => cb(q))` + telemetry | ~6486087 |
-| `NJ` | Deep equality (lodash `isEqual`) — gates `BF1` | (lazy var) |
-| `XiK(q,K,_,z,Y,A)` | Async generator stream loop — injection site | ~11714504 |
-| `I7()` | OAuth + `user:inference` scope check | ~3493920 |
+| Name (v2.1.97)     | Purpose                                                                     | Char offset |
+| ------------------ | --------------------------------------------------------------------------- | ----------- |
+| `LR4()`            | Getter for `kh8` (parsed header utilization)                                | ~6485791    |
+| `hR4(q)`           | Header parser → `{ five_hour: {utilization, resets_at}, seven_day: {...} }` | ~6485817    |
+| `pF1(q)`           | Main rate limit handler (calls `hR4`, `SR4`, conditionally `BF1`)           | ~6488865    |
+| `SR4(q)`           | Unified status parser → `{ status, resetsAt, rateLimitType, ... }`          | ~6487750    |
+| `BF1(q)`           | Broadcaster: `aV=q, d46.forEach(cb => cb(q))` + telemetry                   | ~6486087    |
+| `NJ`               | Deep equality (lodash `isEqual`) — gates `BF1`                              | (lazy var)  |
+| `XiK(q,K,_,z,Y,A)` | Async generator stream loop — injection site                                | ~11714504   |
+| `I7()`             | OAuth + `user:inference` scope check                                        | ~3493920    |
 
 **Note:** All minified names will change in future SDK versions. Use content patterns (string literals, structural shapes) to relocate code.
 
 ## Related Patches
 
-- **`patch/usage-relay/`** — Relays the CLI's `/api/oauth/usage` endpoint through SDK control messages. Provides the full usage breakdown (5hr, 7-day, 7-day-sonnet, extra_usage) but requires an API call. This `rate-limit-relay` patch provides real-time updates *between* those API polls, using data that arrives for free with inference response headers.
+- **`patch/usage-relay/`** — Relays the CLI's `/api/oauth/usage` endpoint through SDK control messages. Provides the full usage breakdown (5hr, 7-day, 7-day-sonnet, extra*usage) but requires an API call. This `rate-limit-relay` patch provides real-time updates \_between* those API polls, using data that arrives for free with inference response headers.
 
 ## Files
 
-| File | Purpose |
-|---|---|
-| `README.md` | This document |
+| File        | Purpose                                                                |
+| ----------- | ---------------------------------------------------------------------- |
+| `README.md` | This document                                                          |
 | `apply.mjs` | Patch script — single injection, extracts 2 minified names dynamically |

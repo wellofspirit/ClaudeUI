@@ -46,9 +46,12 @@ beforeEach(() => {
   lastApprovalResponse = null
 
   // Register handler for approval-response IPC (what respondApproval calls)
-  bridge.ipcMain.handle('session:approval-response', (_event, routingId, requestId, decision, answers, suggestions) => {
-    lastApprovalResponse = { routingId, requestId, decision, answers, suggestions }
-  })
+  bridge.ipcMain.handle(
+    'session:approval-response',
+    (_event, routingId, requestId, decision, answers, suggestions) => {
+      lastApprovalResponse = { routingId, requestId, decision, answers, suggestions }
+    }
+  )
 
   // Stub other IPC channels the store calls internally
   bridge.ipcMain.handle('config:save-sessions', () => {})
@@ -56,15 +59,28 @@ beforeEach(() => {
   // Build window.api backed by the bridge
   ;(globalThis as any).window = globalThis.window || {}
   ;(globalThis as any).window.api = {
-    respondApproval: (routingId: string, requestId: string, decision: string, answers?: Record<string, string>, suggestions?: PermissionSuggestion[]) =>
-      bridge.ipcRenderer.invoke('session:approval-response', routingId, requestId, decision, answers, suggestions),
+    respondApproval: (
+      routingId: string,
+      requestId: string,
+      decision: string,
+      answers?: Record<string, string>,
+      suggestions?: PermissionSuggestion[]
+    ) =>
+      bridge.ipcRenderer.invoke(
+        'session:approval-response',
+        routingId,
+        requestId,
+        decision,
+        answers,
+        suggestions
+      ),
     saveSessionConfig: () => {},
     saveSlashCommands: () => {},
     saveSettings: () => {},
     logError: () => {},
     fetchAccountUsage: () => Promise.resolve(null),
     fetchBlockUsage: () => Promise.resolve(null),
-    getPluginViews: () => Promise.resolve([]),
+    getPluginViews: () => Promise.resolve([])
   }
 
   // Reset store (sessions + settings that tests mutate)
@@ -74,7 +90,7 @@ beforeEach(() => {
     directories: [],
     recentSessionIds: [],
     pinnedSessionIds: [],
-    customTitles: {},
+    customTitles: {}
   })
   // Reset sandbox exclusions (mutated by sandbox escape tests)
   useSessionStore.getState().updateSettings({
@@ -100,7 +116,8 @@ async function simulateApprovalResponse(
     checkedSuggestions?: boolean[]
   } = {}
 ): Promise<void> {
-  const { activeSessionId, sessions, removePendingApproval, updateSettings, settings } = useSessionStore.getState()
+  const { activeSessionId, sessions, removePendingApproval, updateSettings, settings } =
+    useSessionStore.getState()
   if (!activeSessionId) return
 
   const session = sessions[activeSessionId]
@@ -108,7 +125,8 @@ async function simulateApprovalResponse(
 
   const approval = session.pendingApprovals[0]
   const alwaysAllow = opts.alwaysAllow ?? false
-  const checkedSuggestions = opts.checkedSuggestions ?? (approval.suggestions || []).map(() => false)
+  const checkedSuggestions =
+    opts.checkedSuggestions ?? (approval.suggestions || []).map(() => false)
   const sandboxSettings = settings.sandbox
   const isSandboxEscape = !!approval.input?.dangerouslyDisableSandbox
 
@@ -126,12 +144,16 @@ async function simulateApprovalResponse(
   }
 
   // Permission suggestions
-  const selected = decision === 'allow' && approval.suggestions
-    ? approval.suggestions.filter((_, i) => checkedSuggestions[i])
-    : undefined
+  const selected =
+    decision === 'allow' && approval.suggestions
+      ? approval.suggestions.filter((_, i) => checkedSuggestions[i])
+      : undefined
 
   await window.api.respondApproval(
-    activeSessionId, approval.requestId, decision, undefined,
+    activeSessionId,
+    approval.requestId,
+    decision,
+    undefined,
     selected?.length ? selected : undefined
   )
   removePendingApproval(activeSessionId, approval.requestId)
@@ -164,7 +186,7 @@ describe('FloatingApproval approval response flow', () => {
       requestId: approval.requestId,
       decision: 'allow',
       answers: undefined,
-      suggestions: undefined,
+      suggestions: undefined
     })
 
     // Store cleaned up
@@ -181,7 +203,7 @@ describe('FloatingApproval approval response flow', () => {
       requestId: approval.requestId,
       decision: 'deny',
       answers: undefined,
-      suggestions: undefined,
+      suggestions: undefined
     })
 
     expect(useSessionStore.getState().sessions[ROUTE].pendingApprovals).toHaveLength(0)
@@ -189,8 +211,16 @@ describe('FloatingApproval approval response flow', () => {
 
   it('includes checked permission suggestions on allow', async () => {
     const suggestions: PermissionSuggestion[] = [
-      { type: 'addRules', destination: 'projectSettings', rules: [{ toolName: 'Bash', ruleContent: 'echo *' }] },
-      { type: 'addRules', destination: 'userSettings', rules: [{ toolName: 'Read', ruleContent: '/tmp/*' }] },
+      {
+        type: 'addRules',
+        destination: 'projectSettings',
+        rules: [{ toolName: 'Bash', ruleContent: 'echo *' }]
+      },
+      {
+        type: 'addRules',
+        destination: 'userSettings',
+        rules: [{ toolName: 'Read', ruleContent: '/tmp/*' }]
+      }
     ]
     setup({ toolName: 'Bash', input: { command: 'echo test' }, suggestions })
 
@@ -201,7 +231,11 @@ describe('FloatingApproval approval response flow', () => {
 
   it('omits suggestions when none are checked', async () => {
     const suggestions: PermissionSuggestion[] = [
-      { type: 'addRules', destination: 'projectSettings', rules: [{ toolName: 'Bash', ruleContent: 'echo *' }] },
+      {
+        type: 'addRules',
+        destination: 'projectSettings',
+        rules: [{ toolName: 'Bash', ruleContent: 'echo *' }]
+      }
     ]
     setup({ toolName: 'Bash', input: { command: 'echo test' }, suggestions })
 
@@ -212,7 +246,11 @@ describe('FloatingApproval approval response flow', () => {
 
   it('omits suggestions on deny even when checked', async () => {
     const suggestions: PermissionSuggestion[] = [
-      { type: 'addRules', destination: 'projectSettings', rules: [{ toolName: 'Bash', ruleContent: 'echo *' }] },
+      {
+        type: 'addRules',
+        destination: 'projectSettings',
+        rules: [{ toolName: 'Bash', ruleContent: 'echo *' }]
+      }
     ]
     setup({ toolName: 'Bash', input: { command: 'echo test' }, suggestions })
 
@@ -224,7 +262,7 @@ describe('FloatingApproval approval response flow', () => {
   it('adds command to sandbox exclusion list on allow with alwaysAllow for sandbox escape', async () => {
     setup({
       toolName: 'Bash',
-      input: { command: 'dangerous-cmd', dangerouslyDisableSandbox: true },
+      input: { command: 'dangerous-cmd', dangerouslyDisableSandbox: true }
     })
 
     await simulateApprovalResponse('allow', { alwaysAllow: true })
@@ -236,7 +274,7 @@ describe('FloatingApproval approval response flow', () => {
   it('does not add to sandbox exclusions on deny', async () => {
     setup({
       toolName: 'Bash',
-      input: { command: 'dangerous-cmd', dangerouslyDisableSandbox: true },
+      input: { command: 'dangerous-cmd', dangerouslyDisableSandbox: true }
     })
 
     await simulateApprovalResponse('deny', { alwaysAllow: true })
@@ -248,7 +286,7 @@ describe('FloatingApproval approval response flow', () => {
   it('does not add to sandbox exclusions when alwaysAllow is false', async () => {
     setup({
       toolName: 'Bash',
-      input: { command: 'dangerous-cmd', dangerouslyDisableSandbox: true },
+      input: { command: 'dangerous-cmd', dangerouslyDisableSandbox: true }
     })
 
     await simulateApprovalResponse('allow', { alwaysAllow: false })
@@ -266,7 +304,7 @@ describe('FloatingApproval approval response flow', () => {
 
     setup({
       toolName: 'Bash',
-      input: { command: 'dangerous-cmd', dangerouslyDisableSandbox: true },
+      input: { command: 'dangerous-cmd', dangerouslyDisableSandbox: true }
     })
 
     await simulateApprovalResponse('allow', { alwaysAllow: true })
@@ -278,7 +316,7 @@ describe('FloatingApproval approval response flow', () => {
   it('does not modify sandbox exclusions for non-sandbox-escape approvals', async () => {
     setup({
       toolName: 'Bash',
-      input: { command: 'echo hello' }, // no dangerouslyDisableSandbox
+      input: { command: 'echo hello' } // no dangerouslyDisableSandbox
     })
 
     await simulateApprovalResponse('allow', { alwaysAllow: true })
@@ -362,7 +400,7 @@ describe('FloatingApproval rendered component', () => {
       requestId: approval.requestId,
       decision: 'allow',
       answers: undefined,
-      suggestions: undefined,
+      suggestions: undefined
     })
 
     expect(useSessionStore.getState().sessions[ROUTE].pendingApprovals).toHaveLength(0)
@@ -382,7 +420,7 @@ describe('FloatingApproval rendered component', () => {
       requestId: approval.requestId,
       decision: 'deny',
       answers: undefined,
-      suggestions: undefined,
+      suggestions: undefined
     })
 
     expect(useSessionStore.getState().sessions[ROUTE].pendingApprovals).toHaveLength(0)
@@ -390,8 +428,16 @@ describe('FloatingApproval rendered component', () => {
 
   it('clicking Allow with checked suggestions forwards them via IPC', async () => {
     const suggestions: PermissionSuggestion[] = [
-      { type: 'addRules', destination: 'projectSettings', rules: [{ toolName: 'Bash', ruleContent: 'echo *' }] },
-      { type: 'addRules', destination: 'userSettings', rules: [{ toolName: 'Read', ruleContent: '/tmp/*' }] },
+      {
+        type: 'addRules',
+        destination: 'projectSettings',
+        rules: [{ toolName: 'Bash', ruleContent: 'echo *' }]
+      },
+      {
+        type: 'addRules',
+        destination: 'userSettings',
+        rules: [{ toolName: 'Read', ruleContent: '/tmp/*' }]
+      }
     ]
     setup({ toolName: 'Bash', input: { command: 'echo test' }, suggestions })
 
@@ -412,7 +458,11 @@ describe('FloatingApproval rendered component', () => {
 
   it('clicking Deny omits suggestions even when checkboxes are checked', async () => {
     const suggestions: PermissionSuggestion[] = [
-      { type: 'addRules', destination: 'projectSettings', rules: [{ toolName: 'Bash', ruleContent: 'echo *' }] },
+      {
+        type: 'addRules',
+        destination: 'projectSettings',
+        rules: [{ toolName: 'Bash', ruleContent: 'echo *' }]
+      }
     ]
     setup({ toolName: 'Bash', input: { command: 'echo test' }, suggestions })
 

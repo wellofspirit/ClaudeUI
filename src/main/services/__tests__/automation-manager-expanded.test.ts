@@ -17,8 +17,6 @@
  * logic, not its downstream integrations.
  */
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
-
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import * as fs from 'fs'
 import * as nodePath from 'path'
@@ -36,7 +34,7 @@ vi.mock('os', async () => {
   return {
     ...actual,
     homedir: () => TEMP_HOME,
-    default: { ...actual, homedir: () => TEMP_HOME },
+    default: { ...actual, homedir: () => TEMP_HOME }
   }
 })
 
@@ -104,7 +102,7 @@ vi.mock('../../sdk', () => ({
     const g = gen() as any
     g.setPermissionMode = vi.fn(async () => {})
     return g
-  },
+  }
 }))
 
 // ---------------------------------------------------------------------------
@@ -113,22 +111,22 @@ vi.mock('../../sdk', () => ({
 
 vi.mock('../claude-session', () => ({
   getSdkExecutableOpts: () => ({}),
-  ClaudeSession: { getExtraWindows: () => new Set() },
+  ClaudeSession: { getExtraWindows: () => new Set() }
 }))
 
 vi.mock('../session-history', () => ({
-  loadSessionHistory: vi.fn(async () => ({ messages: [] })),
+  loadSessionHistory: vi.fn(async () => ({ messages: [] }))
 }))
 
 vi.mock('../auto-classifier', () => ({
   isSafeTool: () => true,
   getClassifier: () => ({ classify: vi.fn(async () => ({ shouldBlock: false, reason: '' })) }),
   buildTranscript: () => '',
-  stopClassifier: vi.fn(),
+  stopClassifier: vi.fn()
 }))
 
 vi.mock('../logger', () => ({
-  logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+  logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 }))
 
 // ---------------------------------------------------------------------------
@@ -137,9 +135,7 @@ vi.mock('../logger', () => ({
 
 import type { Automation, AutomationRun } from '../../../shared/types'
 
-type AutomationManagerT = InstanceType<
-  typeof import('../automation-manager').AutomationManager
->
+type AutomationManagerT = InstanceType<typeof import('../automation-manager').AutomationManager>
 
 async function freshManager(): Promise<{
   mgr: AutomationManagerT
@@ -153,12 +149,11 @@ async function freshManager(): Promise<{
   const { AutomationManager } = await import('../automation-manager')
   const win = {
     isDestroyed: () => false,
-    webContents: { send: vi.fn() },
+    webContents: { send: vi.fn() }
   }
   const mgr = new AutomationManager(win as any)
   const automationDir = () => nodePath.join(TEMP_HOME, '.claude', 'ui', 'automation')
-  const runsIndexFile = (id: string) =>
-    nodePath.join(automationDir(), 'runs', id, 'runs.json')
+  const runsIndexFile = (id: string) => nodePath.join(automationDir(), 'runs', id, 'runs.json')
   return { mgr, win, automationDir, runsIndexFile }
 }
 
@@ -177,7 +172,7 @@ function makeAutomation(overrides: Partial<Automation> = {}): Automation {
     lastRunAt: null,
     lastRunStatus: null,
     createdAt: Date.now(),
-    ...overrides,
+    ...overrides
   }
 }
 
@@ -209,7 +204,7 @@ describe('AutomationManager — DST handling (via cron-parser)', () => {
     // 2024-03-10 US Eastern: clocks jump 02:00 → 03:00. Local time 02:30 does not exist.
     const expr = CronExpressionParser.parse('30 2 * * *', {
       currentDate: '2024-03-09T10:00:00-05:00',
-      tz: 'America/New_York',
+      tz: 'America/New_York'
     })
 
     const mar10 = expr.next().toDate()
@@ -229,7 +224,7 @@ describe('AutomationManager — DST handling (via cron-parser)', () => {
     // library change that switches to single-fire trips this test.
     const expr = CronExpressionParser.parse('30 1 * * *', {
       currentDate: '2024-11-02T10:00:00-04:00',
-      tz: 'America/New_York',
+      tz: 'America/New_York'
     })
 
     const first = expr.next().toDate()
@@ -259,7 +254,7 @@ describe('AutomationManager — scheduling & runtime', () => {
     const auto = makeAutomation({
       id: 'drift-1',
       enabled: true,
-      schedule: { type: 'interval', intervalMs: 60_000 },
+      schedule: { type: 'interval', intervalMs: 60_000 }
     })
     mgr.upsert(auto)
 
@@ -355,8 +350,22 @@ describe('AutomationManager — scheduling & runtime', () => {
     const runsPath = runsIndexFile('dismiss-1')
     fs.mkdirSync(nodePath.dirname(runsPath), { recursive: true })
     const seed: AutomationRun[] = [
-      { id: 'r-stuck', automationId: 'dismiss-1', startedAt: Date.now() - 10_000, finishedAt: null, status: 'running', totalCostUsd: 0 },
-      { id: 'r-done', automationId: 'dismiss-1', startedAt: Date.now() - 100_000, finishedAt: Date.now() - 90_000, status: 'success', totalCostUsd: 0.05 },
+      {
+        id: 'r-stuck',
+        automationId: 'dismiss-1',
+        startedAt: Date.now() - 10_000,
+        finishedAt: null,
+        status: 'running',
+        totalCostUsd: 0
+      },
+      {
+        id: 'r-done',
+        automationId: 'dismiss-1',
+        startedAt: Date.now() - 100_000,
+        finishedAt: Date.now() - 90_000,
+        status: 'success',
+        totalCostUsd: 0.05
+      }
     ]
     fs.writeFileSync(runsPath, JSON.stringify(seed))
 
@@ -382,7 +391,14 @@ describe('AutomationManager — scheduling & runtime', () => {
     const runsPath = runsIndexFile('dismiss-2')
     fs.mkdirSync(nodePath.dirname(runsPath), { recursive: true })
     const before: AutomationRun[] = [
-      { id: 'r-ok', automationId: 'dismiss-2', startedAt: 1, finishedAt: 2, status: 'success', totalCostUsd: 0 },
+      {
+        id: 'r-ok',
+        automationId: 'dismiss-2',
+        startedAt: 1,
+        finishedAt: 2,
+        status: 'success',
+        totalCostUsd: 0
+      }
     ]
     fs.writeFileSync(runsPath, JSON.stringify(before))
 
@@ -421,7 +437,11 @@ describe('AutomationManager — scheduling & runtime', () => {
     mgr.load()
 
     mgr.upsert(
-      makeAutomation({ id: 'toggle-1', enabled: true, schedule: { type: 'interval', intervalMs: 45_000 } })
+      makeAutomation({
+        id: 'toggle-1',
+        enabled: true,
+        schedule: { type: 'interval', intervalMs: 45_000 }
+      })
     )
 
     const timers: Map<string, unknown> = (mgr as any).timers
@@ -477,7 +497,14 @@ describe('AutomationManager — scheduling & runtime', () => {
     const runsPath = nodePath.join(automationDir, 'runs', 'persisted-1', 'runs.json')
     fs.mkdirSync(nodePath.dirname(runsPath), { recursive: true })
     const seededRuns: AutomationRun[] = [
-      { id: 'run-old', automationId: 'persisted-1', startedAt: 1, finishedAt: 2, status: 'success', totalCostUsd: 0 },
+      {
+        id: 'run-old',
+        automationId: 'persisted-1',
+        startedAt: 1,
+        finishedAt: 2,
+        status: 'success',
+        totalCostUsd: 0
+      }
     ]
     fs.writeFileSync(runsPath, JSON.stringify(seededRuns))
 
@@ -506,9 +533,19 @@ describe('AutomationManager — scheduling & runtime', () => {
     )
     const goodRuns = nodePath.join(automationDir, 'runs', 'good', 'runs.json')
     fs.mkdirSync(nodePath.dirname(goodRuns), { recursive: true })
-    fs.writeFileSync(goodRuns, JSON.stringify([
-      { id: 'g1', automationId: 'good', startedAt: 1, finishedAt: 2, status: 'success', totalCostUsd: 0 },
-    ]))
+    fs.writeFileSync(
+      goodRuns,
+      JSON.stringify([
+        {
+          id: 'g1',
+          automationId: 'good',
+          startedAt: 1,
+          finishedAt: 2,
+          status: 'success',
+          totalCostUsd: 0
+        }
+      ])
+    )
 
     fs.writeFileSync(nodePath.join(automationDir, 'bad.json'), '{ not valid json')
 
@@ -523,7 +560,10 @@ describe('AutomationManager — scheduling & runtime', () => {
     const { mgr } = await freshManager()
     mgr.load()
 
-    const ids = mgr.list().map((a) => a.id).sort()
+    const ids = mgr
+      .list()
+      .map((a) => a.id)
+      .sort()
     expect(ids).toEqual(['good', 'partial'])
 
     expect(mgr.listRuns('good')).toHaveLength(1)
@@ -565,16 +605,22 @@ describe('AutomationManager — scheduling & runtime', () => {
     sdkMode = {
       kind: 'eventsThenWait',
       events: [
-        { type: 'assistant', message: { id: 'm1', content: [{ type: 'text', text: 'done' }] }, session_id: 's1' },
-        { type: 'result', total_cost_usd: 0.01 },
-      ],
+        {
+          type: 'assistant',
+          message: { id: 'm1', content: [{ type: 'text', text: 'done' }] },
+          session_id: 's1'
+        },
+        { type: 'result', total_cost_usd: 0.01 }
+      ]
     }
     mgr.upsert(makeAutomation({ id: 'eager-exit-1' }))
 
     // Race runNow against a short timeout. Pre-fix this would time out.
     await Promise.race([
       mgr.runNow('eager-exit-1'),
-      new Promise((_resolve, reject) => setTimeout(() => reject(new Error('run did not exit after result')), 500)),
+      new Promise((_resolve, reject) =>
+        setTimeout(() => reject(new Error('run did not exit after result')), 500)
+      )
     ])
 
     expect(lastGeneratorReturned).toBe(true)
@@ -591,12 +637,14 @@ describe('AutomationManager — scheduling & runtime', () => {
     mgr.load()
 
     sdkMode = { kind: 'events', events: [{ type: 'result', total_cost_usd: 0 }] }
-    mgr.upsert(makeAutomation({
-      id: 'thinking-1',
-      model: 'claude-opus-4-7',
-      effort: 'xhigh',
-      thinkingMode: 'adaptive',
-    }))
+    mgr.upsert(
+      makeAutomation({
+        id: 'thinking-1',
+        model: 'claude-opus-4-7',
+        effort: 'xhigh',
+        thinkingMode: 'adaptive'
+      })
+    )
     await mgr.runNow('thinking-1')
 
     expect(lastSdkParams?.options?.thinking).toEqual({ type: 'adaptive', display: 'summarized' })
@@ -612,16 +660,20 @@ describe('AutomationManager — scheduling & runtime', () => {
     sdkMode = { kind: 'events', events: [{ type: 'result', total_cost_usd: 0 }] }
     // Legacy model: no adaptive thinking and no effort picker at all — old
     // saved automations with adaptive/xhigh must not leak through to cli.js.
-    mgr.upsert(makeAutomation({
-      id: 'coerce-1',
-      model: 'claude-3-5-sonnet',
-      effort: 'xhigh',
-      thinkingMode: 'adaptive',
-    }))
+    mgr.upsert(
+      makeAutomation({
+        id: 'coerce-1',
+        model: 'claude-3-5-sonnet',
+        effort: 'xhigh',
+        thinkingMode: 'adaptive'
+      })
+    )
     await mgr.runNow('coerce-1')
 
     expect(lastSdkParams?.options?.thinking).toEqual({
-      type: 'enabled', display: 'summarized', budgetTokens: 10000,
+      type: 'enabled',
+      display: 'summarized',
+      budgetTokens: 10000
     })
     expect(lastSdkParams?.options?.effort).toBeUndefined()
 
@@ -641,7 +693,9 @@ describe('AutomationManager — scheduling & runtime', () => {
     await mgr.runNow('defaults-1')
 
     expect(lastSdkParams?.options?.thinking).toEqual({
-      type: 'enabled', display: 'summarized', budgetTokens: 10000,
+      type: 'enabled',
+      display: 'summarized',
+      budgetTokens: 10000
     })
     // defaultEffort for opus-4-7 is xhigh per model-capabilities heuristic.
     expect(lastSdkParams?.options?.effort).toBe('xhigh')

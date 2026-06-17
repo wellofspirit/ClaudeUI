@@ -7,10 +7,14 @@
  * No Electron mocking: all tests hit the pure functions.
  */
 
-import { describe, it, expect } from 'vitest'
+import { afterEach, beforeEach, describe, it, expect } from 'vitest'
+import * as fs from 'fs'
+import * as os from 'os'
 import { join, resolve, sep } from 'path'
 import {
   routeAndValidate,
+  routeHttpMockup,
+  serveMockup,
   rewriteHtml,
   ASSET_EXT_MIME,
   buildMockupCsp,
@@ -394,5 +398,103 @@ describe('buildMockupCsp', () => {
     // outside origins anyway (lives on its own sub-origin).
     const csp = buildMockupCsp({ connectAllowlist: [], allowHttp: false })
     expect(csp).not.toContain('frame-ancestors')
+  })
+
+  it('threads an explicit selfSource (HTTP origin) through the directives', () => {
+    // For the remote HTTP transport the iframe runs in a sandboxed opaque
+    // origin, so CSP `'self'` matches nothing — assets must be allowed by the
+    // server's concrete origin instead.
+    const origin = 'https://host.example:8443'
+    const csp = buildMockupCsp({ connectAllowlist: [], allowHttp: false }, origin)
+    const script = csp.split('; ').find((d) => d.startsWith('script-src'))!
+    const img = csp.split('; ').find((d) => d.startsWith('img-src'))!
+    expect(script).toContain(origin)
+    expect(img).toContain(origin)
+    // The default `mockup-asset:` scheme should NOT leak into an HTTP CSP.
+    expect(csp).not.toContain('mockup-asset:')
+  })
+})
+
+describe('routeHttpMockup', () => {
+  it('routes /mockup/<id>/<b64cwd>/ to the HTML document', () => {
+    const d = routeHttpMockup(`/mockup/${ID}/${B64_CWD}/`, new URLSearchParams())
+    expect(d).toMatchObject({ kind: 'html', id: ID, mockupDir: MOCKUP_DIR, dark: false })
+  })
+
+  it('honors ?dark=1', () => {
+    const d = routeHttpMockup(`/mockup/${ID}/${B64_CWD}/`, new URLSearchParams('dark=1'))
+    expect(d).toMatchObject({ kind: 'html', dark: true })
+  })
+
+  it('routes a sibling asset and resolves its mime', () => {
+    const d = routeHttpMockup(`/mockup/${ID}/${B64_CWD}/app.js`, new URLSearchParams())
+    expect(d).toMatchObject({ kind: 'asset', mime: ASSET_EXT_MIME['.js'] })
+  })
+
+  it('rejects an unknown route prefix', () => {
+    const d = routeHttpMockup(`/other/${ID}/${B64_CWD}/`, new URLSearchParams())
+    expect(d).toEqual({ kind: 'error', status: 404, reason: 'unknown route' })
+  })
+
+  it('rejects a non-hex id', () => {
+    const d = routeHttpMockup(`/mockup/nothex/${B64_CWD}/`, new URLSearchParams())
+    expect(d).toMatchObject({ kind: 'error', status: 400, reason: 'invalid id' })
+  })
+
+  it('blocks path traversal (shares the protocol validation)', () => {
+    const d = routeHttpMockup(
+      `/mockup/${ID}/${B64_CWD}/${encodeURIComponent('../../../../etc/passwd')}`,
+      new URLSearchParams()
+    )
+    expect(d).toMatchObject({ kind: 'error', status: 403 })
+  })
+})
+
+describe('serveMockup', () => {
+  let cwd: string
+  let b64: string
+
+  beforeEach(() => {
+    cwd = fs.mkdtempSync(join(os.tmpdir(), 'mockup-serve-'))
+    b64 = Buffer.from(cwd, 'utf-8').toString('base64url')
+    const dir = join(cwd, '.claude', 'ui', 'mockups', ID)
+    fs.mkdirSync(dir, { recursive: true })
+    fs.writeFileSync(join(dir, 'index.html'), '<html><head></head><body>hi</body></html>')
+    fs.writeFileSync(join(dir, 'app.js'), 'console.log(1)')
+  })
+
+  afterEach(() => fs.rmSync(cwd, { recursive: true, force: true }))
+
+  it('serves HTML with the bridge injected and a CSP using selfSource', async () => {
+    const decision = routeHttpMockup(`/mockup/${ID}/${b64}/`, new URLSearchParams())
+    const served = await serveMockup(decision, 'http://localhost:5000')
+    expect(served.status).toBe(200)
+    expect(served.headers['Content-Type']).toContain('text/html')
+    expect(served.headers['Content-Security-Policy']).toContain('http://localhost:5000')
+    expect(String(served.body)).toContain('data-omelette="1"') // bridge injected
+  })
+
+  it('serves a sibling asset with its mime + permissive CORS for the opaque-origin iframe', async () => {
+    const decision = routeHttpMockup(`/mockup/${ID}/${b64}/app.js`, new URLSearchParams())
+    const served = await serveMockup(decision, 'http://localhost:5000')
+    expect(served.status).toBe(200)
+    expect(served.headers['Content-Type']).toBe(ASSET_EXT_MIME['.js'])
+    expect(served.headers['Access-Control-Allow-Origin']).toBe('*')
+    expect(served.body).toBeInstanceOf(Buffer)
+  })
+
+  it('returns 404 when the mockup HTML is missing', async () => {
+    const decision = routeHttpMockup(`/mockup/aaaaaaaa/${b64}/`, new URLSearchParams())
+    const served = await serveMockup(decision, 'http://localhost:5000')
+    expect(served.status).toBe(404)
+  })
+
+  it('propagates routing errors as the served status', async () => {
+    const served = await serveMockup(
+      { kind: 'error', status: 403, reason: 'path traversal blocked' },
+      'http://localhost:5000'
+    )
+    expect(served.status).toBe(403)
+    expect(String(served.body)).toContain('path traversal')
   })
 })

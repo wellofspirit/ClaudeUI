@@ -14,9 +14,9 @@ directory. This file is executed by the SDK via `node` or `bun` when you call
 `query()`. It is **independent** of the native `claude` binary installed on
 your system, and may trail behind in version.
 
-| Component | Version at time of discovery |
-|---|---|
-| SDK package | 0.2.38 → 0.2.39 → 0.2.41 → 0.2.42 → 0.2.49 |
+| Component              | Version at time of discovery               |
+| ---------------------- | ------------------------------------------ |
+| SDK package            | 0.2.38 → 0.2.39 → 0.2.41 → 0.2.42 → 0.2.49 |
 | Bundled CLI (`cli.js`) | 2.1.38 → 2.1.39 → 2.1.41 → 2.1.42 → 2.1.49 |
 
 All versions exhibit the same behavior. Function names change between
@@ -111,9 +111,15 @@ Key function `U1q()` / `O6q()` wraps progress callback arguments:
 ```js
 // v2.1.38: U1q, char ~10400725
 // v2.1.39: O6q, char ~10407267
-function O6q({toolUseID:A,parentToolUseID:q,data:K}){
-    return{type:"progress",data:K,toolUseID:A,parentToolUseID:q,
-           uuid:_f(),timestamp:new Date().toISOString()}
+function O6q({ toolUseID: A, parentToolUseID: q, data: K }) {
+  return {
+    type: 'progress',
+    data: K,
+    toolUseID: A,
+    parentToolUseID: q,
+    uuid: _f(),
+    timestamp: new Date().toISOString()
+  }
 }
 ```
 
@@ -131,10 +137,12 @@ sub-agent query loop generator).
 ```js
 // v2.1.39: RVY, char ~7907312
 function RVY(A) {
-    return A.type === "assistant" ||
-           A.type === "user" ||
-           A.type === "progress" ||
-           A.type === "system" && "subtype" in A && A.subtype === "compact_boundary"
+  return (
+    A.type === 'assistant' ||
+    A.type === 'user' ||
+    A.type === 'progress' ||
+    (A.type === 'system' && 'subtype' in A && A.subtype === 'compact_boundary')
+  )
 }
 ```
 
@@ -287,14 +295,16 @@ and the background agent polling loop.
 // v2.1.38: FM6, char ~9019631
 // v2.1.39: sM6, char ~9022069
 
-function FM6(A, q = "Execution completed") {
-    let K = GN(A);                     // get last assistant message
-    if (!K) return q;
-    // ↓↓↓ FILTER: only text blocks ↓↓↓
-    return K.message.content
-        .filter((z) => z.type === "text")
-        .map((z) => ("text" in z) ? z.text : "")
-        .join("\n") || q;
+function FM6(A, q = 'Execution completed') {
+  let K = GN(A) // get last assistant message
+  if (!K) return q
+  // ↓↓↓ FILTER: only text blocks ↓↓↓
+  return (
+    K.message.content
+      .filter((z) => z.type === 'text')
+      .map((z) => ('text' in z ? z.text : ''))
+      .join('\n') || q
+  )
 }
 ```
 
@@ -305,15 +315,15 @@ And in the background agent polling loop:
 // v2.1.39: char ~8592091
 
 let j = J.map((M) => {
-    if (M.type === "assistant")
-        // ↓↓↓ FILTER: only text blocks ↓↓↓
-        return M.message.content
-            .filter((P) => P.type === "text")
-            .map((P) => ("text" in P) ? P.text : "")
-            .join("\n");
-    return Q1(M);                      // JSON.stringify for non-assistant messages
-}).join("\n");
-if (j) ZK1(A, j + "\n");             // append to .output file
+  if (M.type === 'assistant')
+    // ↓↓↓ FILTER: only text blocks ↓↓↓
+    return M.message.content
+      .filter((P) => P.type === 'text')
+      .map((P) => ('text' in P ? P.text : ''))
+      .join('\n')
+  return Q1(M) // JSON.stringify for non-assistant messages
+}).join('\n')
+if (j) ZK1(A, j + '\n') // append to .output file
 ```
 
 **Effect:** The `.output` file (used for background agents, tailed via `Read`
@@ -496,6 +506,7 @@ else if (RVY($1))
 ```
 
 **Why this approach over modifying RVY:**
+
 - Modifying RVY to include `stream_event` causes stream events to be:
   - Pushed to `x[]` — later processed by `_kA()` which expects `.message.content`
   - Passed to `E51()` which expects a `.uuid` property
@@ -503,6 +514,7 @@ else if (RVY($1))
 - By intercepting before `RVY()`, we yield without side effects
 
 **Why this is safe:**
+
 - `stream_event` messages are lightweight (`{type, event}`) — no state
   to track
 - They don't need transcript recording (they're transient deltas)
@@ -510,6 +522,7 @@ else if (RVY($1))
 - The Task tool's for-await loop (Patch B) handles them correctly
 
 **How to find this code in a new version:**
+
 1. Find the RVY function by its unique type-check pattern:
 
 ```
@@ -528,23 +541,39 @@ Before:
 
 ```js
 for (let $1 of _1)
-    for (let G1 of $1.message.content) {
-        if (G1.type !== "tool_use" && G1.type !== "tool_result") continue;
-        if (j) j({toolUseID: `agent_${D.message.id}`, data: {
-            message: $1, normalizedMessages: T1,
-            type: "agent_progress", prompt: A, resume: z, agentId: r
-        }});
-    }
+  for (let G1 of $1.message.content) {
+    if (G1.type !== 'tool_use' && G1.type !== 'tool_result') continue
+    if (j)
+      j({
+        toolUseID: `agent_${D.message.id}`,
+        data: {
+          message: $1,
+          normalizedMessages: T1,
+          type: 'agent_progress',
+          prompt: A,
+          resume: z,
+          agentId: r
+        }
+      })
+  }
 ```
 
 After:
 
 ```js
 for (let $1 of _1) {
-    if (j) j({toolUseID: `agent_${D.message.id}`, data: {
-        message: $1, normalizedMessages: T1,
-        type: "agent_progress", prompt: A, resume: z, agentId: r
-    }});
+  if (j)
+    j({
+      toolUseID: `agent_${D.message.id}`,
+      data: {
+        message: $1,
+        normalizedMessages: T1,
+        type: 'agent_progress',
+        prompt: A,
+        resume: z,
+        agentId: r
+      }
+    })
 }
 ```
 
@@ -554,6 +583,7 @@ fires once per normalized message regardless of what content blocks it
 contains.
 
 **Why this is safe:**
+
 - `ZhA()` already handles `agent_progress` data type correctly for both
   assistant and user messages
 - The `iO()` normalization splits multi-block messages into individual
@@ -608,6 +638,7 @@ detected, it's forwarded and skipped via `continue` — the `O1.push()`
 line is never reached.
 
 **Why stream_events must NOT enter O1:**
+
 - `O1` is passed to `UEA()` when the Task tool finishes
 - `UEA()` calls `GN(O1)` to get the last assistant message, then
   iterates `.message.content` to extract text blocks
@@ -617,6 +648,7 @@ line is never reached.
   `_kA()` or `dP()` access `.message.content` on a stream_event
 
 **Why this is safe:**
+
 - Stream events are forwarded via the progress callback before being
   skipped — they reach the SDK consumer via Patch C
 - All other message types (assistant, user, system, progress) follow the
@@ -706,6 +738,7 @@ function* if8(A) {
 ```
 
 **Why this is safe:**
+
 - `ZhA` is a generator function — our injected `yield` integrates naturally
 - The yielded message matches the SDK's `stream_event` Zod schema:
   `{type, event, parent_tool_use_id, uuid, session_id}`
@@ -757,6 +790,7 @@ After:
 The same change is applied to the background agent polling map.
 
 **Note on text extraction function naming:**
+
 - v2.1.38: `FM6` at char ~9019631
 - v2.1.39: `sM6` at char ~9022069
 - The function structure is stable: `function NAME(A, q="Execution completed")`
@@ -852,11 +886,9 @@ a 4-byte UInt32LE length header followed by the message body:
 
 ```js
 function fY1(A) {
-    let q = Buffer.from(A, "utf-8"),
-        K = Buffer.alloc(4);
-    K.writeUInt32LE(q.length, 0),
-    process.stdout.write(K),
-    process.stdout.write(q)
+  let q = Buffer.from(A, 'utf-8'),
+    K = Buffer.alloc(4)
+  ;(K.writeUInt32LE(q.length, 0), process.stdout.write(K), process.stdout.write(q))
 }
 ```
 
@@ -917,11 +949,12 @@ Instead, find the matching `tool_use` block by matching the `description`
 field from the destructured input (variable `K` in the minified code):
 
 ```js
-let _ptu = null;
+let _ptu = null
 for (let _b of D.message.content) {
-    if (_b.type === "tool_use" && _b.input && _b.input.description === K) {
-        _ptu = _b.id; break;
-    }
+  if (_b.type === 'tool_use' && _b.input && _b.input.description === K) {
+    _ptu = _b.id
+    break
+  }
 }
 ```
 
@@ -995,7 +1028,7 @@ the two background agent loops.
 
 **Covers agents launched with `run_in_background: true` from the start.**
 
-Patch E targets the *re-background* path — where a foreground agent is
+Patch E targets the _re-background_ path — where a foreground agent is
 backgrounded mid-execution via the `backgroundSignal` race. However,
 agents launched directly as background (`run_in_background: true` in the
 Agent tool input) take a completely different path: the Tool's `call()`
@@ -1011,16 +1044,19 @@ forwarding mechanism exists.
 **Marker**: `/*PATCHED:subagent-G*/`
 
 **Anchor**: The `iu8` function signature is unique:
+
 ```
 async function iu8({taskId:VAR,abortController:VAR,makeStream:VAR,metadata:VAR,description:VAR,toolUseContext:VAR,taskRegistry:VAR,agentIdForCleanup:VAR,enableSummarization:VAR,getWorktreeResult:VAR})
 ```
 
 Find it with:
+
 ```bash
 bundle-analyzer find cli.js "taskId:.*abortController:.*makeStream:.*metadata:.*description:.*toolUseContext:.*taskRegistry:.*agentIdForCleanup" --regex --compact
 ```
 
 **Before** (loop body just collects):
+
 ```js
 for await (let G of _(P)) {
     J.push(G), O.update(q, ...), G36(X, G, M, A.options.tools), q78(q, ...);
@@ -1029,6 +1065,7 @@ for await (let G of _(P)) {
 ```
 
 **After** (stream_event forwarded + continue, assistant/user forwarded then fall through):
+
 ```js
 for await (let G of _(P)) {
     /*PATCHED:subagent-G*/
@@ -1054,11 +1091,11 @@ for await (let G of _(P)) {
 
 **Key differences from Patch E:**
 
-| Aspect | Patch E | Patch G |
-|---|---|---|
-| Code path | Re-background loop (after `backgroundSignal`) | `iu8()` (agents launched as background) |
+| Aspect                      | Patch E                                                       | Patch G                                                     |
+| --------------------------- | ------------------------------------------------------------- | ----------------------------------------------------------- |
+| Code path                   | Re-background loop (after `backgroundSignal`)                 | `iu8()` (agents launched as background)                     |
 | `parent_tool_use_id` source | Looked up from parent message content by matching description | Direct: `toolUseContext.toolUseId` (available as parameter) |
-| Loop pattern | `for await` with `isAsync:!0` in override | `for await(let G of _(P))` in standalone function |
+| Loop pattern                | `for await` with `isAsync:!0` in override                     | `for await(let G of _(P))` in standalone function           |
 
 Patch G is simpler than Patch E because `iu8()` receives `toolUseContext`
 as a parameter, which contains `.toolUseId` — the parent Agent tool's ID.
@@ -1122,16 +1159,16 @@ Messages from sub-agents carry `parent_tool_use_id` for attribution.
 
 ## Where Thinking Tokens Exist After Patching
 
-| Location | Has thinking? | Accessible? |
-|---|---|---|
-| Sub-agent `dR()` yield (sync) | Yes | Yes — forwarded via Patch A |
-| Sub-agent stream_events (sync) | Yes | Yes — Patch F unblocks cR, B+C forward |
-| Sub-agent messages (async/bg) | Yes | Yes — forwarded via Patch E |
-| SDK stdout stream | Yes | Yes — `parent_tool_use_id` set |
-| `.output` file (background) | Yes | Yes — included via Patch D |
-| Sub-agent transcript (`.jsonl`) | Yes | Yes — always had it |
-| Main session transcript (`.jsonl`) | Yes | Yes — via progress messages |
-| Task tool_result (UEA) | No | N/A — intentionally excluded |
+| Location                           | Has thinking? | Accessible?                            |
+| ---------------------------------- | ------------- | -------------------------------------- |
+| Sub-agent `dR()` yield (sync)      | Yes           | Yes — forwarded via Patch A            |
+| Sub-agent stream_events (sync)     | Yes           | Yes — Patch F unblocks cR, B+C forward |
+| Sub-agent messages (async/bg)      | Yes           | Yes — forwarded via Patch E            |
+| SDK stdout stream                  | Yes           | Yes — `parent_tool_use_id` set         |
+| `.output` file (background)        | Yes           | Yes — included via Patch D             |
+| Sub-agent transcript (`.jsonl`)    | Yes           | Yes — always had it                    |
+| Main session transcript (`.jsonl`) | Yes           | Yes — via progress messages            |
+| Task tool_result (UEA)             | No            | N/A — intentionally excluded           |
 
 ## Applying the Patch
 
@@ -1200,19 +1237,19 @@ Where the message content includes `type:"thinking"` blocks.
 
 ## Key Functions Reference
 
-| Name (v2.1.38 → v2.1.39 → v2.1.41 → v2.1.42 → v2.1.49) | Purpose |
-|---|---|
-| `RVY()` → `RVY()` → `BRY()` → `myY()` → `T7z()` | cR/jy/Wy yield filter (gates what the generator yields to callers) |
-| `dR()` → `dR()` → ? → (merged into Wy) | Sub-agent execution generator |
-| `UEA()` → `UEA()` → `NR8()` → `uRA()` → `Mg8()` | Extract text-only result from agent messages |
-| `FM6()` → `sM6()` → `QW6()` → `tW6()` → `r_1()` | Extract text from last assistant message |
-| `ZhA()` → `ihA()` → `mI8()` → ? → `if8()` | Convert internal messages to SDK output format |
-| `U1q()` → `O6q()` → ? → ? | Wrap progress data into progress message format |
-| `iO()` → `rO()` → `lO()` → `j$()` → `W_()` | Normalize messages to individual content blocks |
-| `_f()` → `_f()` → `Gf()` → `Zf()` → `nk()` | UUID generator for message wrapping |
-| `cR()` → `cR()` → `jy()` → `Wy()` | Sub-agent query function (async generator) |
-| `s0A()` → `s0A()` → `XW8()` → `kWA()` → `zT8()` | Task state updater (in async loops) |
-| `s01()` → `s01()` → `QM1()` → `tM1()` → `GP6()` | Stats updater (in async loops) |
+| Name (v2.1.38 → v2.1.39 → v2.1.41 → v2.1.42 → v2.1.49) | Purpose                                                            |
+| ------------------------------------------------------ | ------------------------------------------------------------------ |
+| `RVY()` → `RVY()` → `BRY()` → `myY()` → `T7z()`        | cR/jy/Wy yield filter (gates what the generator yields to callers) |
+| `dR()` → `dR()` → ? → (merged into Wy)                 | Sub-agent execution generator                                      |
+| `UEA()` → `UEA()` → `NR8()` → `uRA()` → `Mg8()`        | Extract text-only result from agent messages                       |
+| `FM6()` → `sM6()` → `QW6()` → `tW6()` → `r_1()`        | Extract text from last assistant message                           |
+| `ZhA()` → `ihA()` → `mI8()` → ? → `if8()`              | Convert internal messages to SDK output format                     |
+| `U1q()` → `O6q()` → ? → ?                              | Wrap progress data into progress message format                    |
+| `iO()` → `rO()` → `lO()` → `j$()` → `W_()`             | Normalize messages to individual content blocks                    |
+| `_f()` → `_f()` → `Gf()` → `Zf()` → `nk()`             | UUID generator for message wrapping                                |
+| `cR()` → `cR()` → `jy()` → `Wy()`                      | Sub-agent query function (async generator)                         |
+| `s0A()` → `s0A()` → `XW8()` → `kWA()` → `zT8()`        | Task state updater (in async loops)                                |
+| `s01()` → `s01()` → `QM1()` → `tM1()` → `GP6()`        | Stats updater (in async loops)                                     |
 
 **Note:** Names change between versions — always use content patterns, not
 names. Use `bundle-analyzer find` with string literals as anchors.
@@ -1222,6 +1259,7 @@ names. Use `bundle-analyzer find` with string literals as anchors.
 ### Sub-agent transcript is independent
 
 The sub-agent writes its own transcript to a `.jsonl` file at:
+
 ```
 ~/.claude/projects/<project-hash>/<session-id>/subagents/agent-<agent-id>.jsonl
 ```
@@ -1266,7 +1304,7 @@ callback / `O6q()` / ZhA pipeline entirely. Like Patch B, these patches
 intercept stream_events before the collection array push to prevent
 downstream crashes.
 
-- **Patch E** covers agents that start foreground and are *re-backgrounded*
+- **Patch E** covers agents that start foreground and are _re-backgrounded_
   mid-execution (via the `backgroundSignal` race in the sync path).
 - **Patch G** covers agents launched directly with `run_in_background: true`
   (the `iu8()` function, a separate async execution path).
@@ -1301,15 +1339,16 @@ consumers. The relevant schema for stream events:
 ```js
 // v2.1.39
 gZY = u.object({
-    type: u.literal("stream_event"),
-    event: SZY,                        // permissive event schema
-    parent_tool_use_id: u.string().nullable(),
-    uuid: oD,
-    session_id: u.string()
+  type: u.literal('stream_event'),
+  event: SZY, // permissive event schema
+  parent_tool_use_id: u.string().nullable(),
+  uuid: oD,
+  session_id: u.string()
 })
 ```
 
 Our Patch C yields messages matching this schema:
+
 - `type: "stream_event"` ✓
 - `event: A.data.event` ✓ (raw API event, matches SZY)
 - `parent_tool_use_id: A.parentToolUseID` ✓ (string, from U1q wrapping)
@@ -1323,18 +1362,17 @@ assistant messages. `et()` checks:
 
 ```js
 function et(A) {
-    if (A.type === "progress" || A.type === "attachment" || A.type === "system")
-        return true;
-    if (typeof A.message.content === "string")
-        return A.message.content.trim().length > 0;
-    if (A.message.content.length === 0) return false;
-    if (A.message.content.length > 1) return true;
-    if (A.message.content[0].type !== "text") return true;  // non-text always passes
-    return A.message.content[0].text?.trim().length > 0;
+  if (A.type === 'progress' || A.type === 'attachment' || A.type === 'system') return true
+  if (typeof A.message.content === 'string') return A.message.content.trim().length > 0
+  if (A.message.content.length === 0) return false
+  if (A.message.content.length > 1) return true
+  if (A.message.content[0].type !== 'text') return true // non-text always passes
+  return A.message.content[0].text?.trim().length > 0
 }
 ```
 
 This means:
+
 - Thinking-only messages pass (`type !== "text"` → returns true)
 - Text messages with empty text are filtered out
 - Messages with tool_use blocks pass
@@ -1344,9 +1382,9 @@ handles all content types. No change needed to `et()`.
 
 ## Files
 
-| File | Purpose |
-|---|---|
-| `README.md` | This document |
+| File        | Purpose                                        |
+| ----------- | ---------------------------------------------- |
+| `README.md` | This document                                  |
 | `apply.mjs` | Patch script — run after install or SDK update |
 
 ## Related Patches

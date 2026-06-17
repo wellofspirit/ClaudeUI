@@ -10,11 +10,15 @@ function makeAutomation(id: string, overrides?: Partial<Automation>): Automation
     cwd: '/test',
     enabled: true,
     schedule: { type: 'interval', intervalMs: 60000 },
-    ...overrides,
+    ...overrides
   } as Automation
 }
 
-function makeRun(id: string, automationId: string, overrides?: Partial<AutomationRun>): AutomationRun {
+function makeRun(
+  id: string,
+  automationId: string,
+  overrides?: Partial<AutomationRun>
+): AutomationRun {
   return {
     id,
     automationId,
@@ -22,7 +26,7 @@ function makeRun(id: string, automationId: string, overrides?: Partial<Automatio
     finishedAt: null,
     status: 'running',
     totalCostUsd: 0,
-    ...overrides,
+    ...overrides
   }
 }
 
@@ -31,7 +35,7 @@ function makeMessage(id: string, role: 'user' | 'assistant' = 'assistant'): Chat
     id,
     role,
     content: [{ type: 'text', text: `Message ${id}` }],
-    timestamp: Date.now(),
+    timestamp: Date.now()
   }
 }
 
@@ -47,7 +51,7 @@ describe('useAutomationStore', () => {
       runMessages: null,
       notificationBadge: 0,
       streamingText: '',
-      isRunProcessing: false,
+      isRunProcessing: false
     })
   })
 
@@ -114,26 +118,26 @@ describe('useAutomationStore', () => {
 
     it('updates automation lastRunAt and lastRunStatus', () => {
       useAutomationStore.setState({
-        automations: [makeAutomation('a1')],
+        automations: [makeAutomation('a1')]
       })
 
       const run = makeRun('r1', 'a1', { status: 'success', startedAt: 12345 })
       useAutomationStore.getState().updateRun('a1', run)
 
-      const auto = useAutomationStore.getState().automations.find(a => a.id === 'a1')
+      const auto = useAutomationStore.getState().automations.find((a) => a.id === 'a1')
       expect(auto?.lastRunAt).toBe(12345)
       expect(auto?.lastRunStatus).toBe('success')
     })
 
     it('does not update lastRunStatus for running state', () => {
       useAutomationStore.setState({
-        automations: [makeAutomation('a1', { lastRunStatus: 'success' })],
+        automations: [makeAutomation('a1', { lastRunStatus: 'success' })]
       })
 
       const run = makeRun('r1', 'a1', { status: 'running' })
       useAutomationStore.getState().updateRun('a1', run)
 
-      const auto = useAutomationStore.getState().automations.find(a => a.id === 'a1')
+      const auto = useAutomationStore.getState().automations.find((a) => a.id === 'a1')
       expect(auto?.lastRunStatus).toBe('success') // preserved
     })
   })
@@ -142,7 +146,7 @@ describe('useAutomationStore', () => {
     it('appends a new message when viewing the automation', () => {
       useAutomationStore.setState({
         selectedAutomationId: 'a1',
-        runMessages: [],
+        runMessages: []
       })
 
       useAutomationStore.getState().appendRunMessage('a1', makeMessage('m1'))
@@ -152,7 +156,7 @@ describe('useAutomationStore', () => {
     it('ignores messages for a different automation', () => {
       useAutomationStore.setState({
         selectedAutomationId: 'a1',
-        runMessages: [],
+        runMessages: []
       })
 
       useAutomationStore.getState().appendRunMessage('a2', makeMessage('m1'))
@@ -163,12 +167,12 @@ describe('useAutomationStore', () => {
       const msg1 = makeMessage('m1')
       useAutomationStore.setState({
         selectedAutomationId: 'a1',
-        runMessages: [msg1],
+        runMessages: [msg1]
       })
 
       const msg1Updated: ChatMessage = {
         ...msg1,
-        content: [{ type: 'text', text: 'Updated text' }],
+        content: [{ type: 'text', text: 'Updated text' }]
       }
       useAutomationStore.getState().appendRunMessage('a1', msg1Updated)
 
@@ -180,7 +184,7 @@ describe('useAutomationStore', () => {
     it('creates runMessages array if null', () => {
       useAutomationStore.setState({
         selectedAutomationId: 'a1',
-        runMessages: null,
+        runMessages: null
       })
 
       useAutomationStore.getState().appendRunMessage('a1', makeMessage('m1'))
@@ -220,7 +224,7 @@ describe('useAutomationStore', () => {
     it('clears run selection and messages', () => {
       useAutomationStore.setState({
         selectedRunId: 'r1',
-        runMessages: [makeMessage('m1')],
+        runMessages: [makeMessage('m1')]
       })
 
       useAutomationStore.getState().clearRunSelection()

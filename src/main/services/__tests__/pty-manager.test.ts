@@ -17,7 +17,7 @@ vi.mock('os', async () => {
   const actual = await vi.importActual<typeof import('os')>('os')
   return {
     ...actual,
-    platform: () => mockPlatform,
+    platform: () => mockPlatform
   }
 })
 
@@ -34,7 +34,7 @@ const origLoad = (Module as unknown as { _load: (...a: unknown[]) => unknown }).
   if (request === 'node-pty') {
     return {
       spawn: (file: string, args: string[], options: Record<string, unknown>) =>
-        ptyStub.spawn(file, args, options),
+        ptyStub.spawn(file, args, options)
     }
   }
   return origLoad.call(this, ...a)
@@ -46,16 +46,15 @@ vi.mock('../logger', () => ({
     debug: vi.fn(),
     info: vi.fn(),
     warn: vi.fn(),
-    error: vi.fn(),
-  },
+    error: vi.fn()
+  }
 }))
 
 // Import after mocks are registered.
 import { PtyManager } from '../pty-manager'
 
 // Convenience: flush queued microtasks (for kill -> emitExit via queueMicrotask).
-const flushMicrotasks = (): Promise<void> =>
-  new Promise((resolve) => queueMicrotask(resolve))
+const flushMicrotasks = (): Promise<void> => new Promise((resolve) => queueMicrotask(resolve))
 
 describe('PtyManager', () => {
   let manager: PtyManager
@@ -153,9 +152,7 @@ describe('PtyManager', () => {
       for (const id of [id1, id2, id3]) {
         expect(typeof id).toBe('string')
         // RFC4122 uuid v4 shape
-        expect(id).toMatch(
-          /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-        )
+        expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i)
       }
       expect(new Set([id1, id2, id3]).size).toBe(3)
     })
@@ -268,9 +265,11 @@ describe('PtyManager', () => {
     it('swallows errors when pty.kill() throws', () => {
       const id = manager.create('/a', vi.fn(), vi.fn())
       // Replace the underlying pty.kill with a throwing function.
-      const entry = (manager as unknown as {
-        ptys: Map<string, { pty: { kill: () => void } }>
-      }).ptys.get(id)!
+      const entry = (
+        manager as unknown as {
+          ptys: Map<string, { pty: { kill: () => void } }>
+        }
+      ).ptys.get(id)!
       entry.pty.kill = () => {
         throw new Error('kill failed')
       }

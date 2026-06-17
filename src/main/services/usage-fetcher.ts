@@ -17,7 +17,7 @@
  * starts can display data immediately without an API call.
  */
 
-import { readFile, writeFile, mkdir } from 'node:fs/promises'
+import { readFile, writeFile, mkdir, appendFile } from 'node:fs/promises'
 import { execFile } from 'node:child_process'
 import { join } from 'node:path'
 import { homedir, platform } from 'node:os'
@@ -25,6 +25,12 @@ import type { BrowserWindow } from 'electron'
 import { ClaudeSession, getSdkVersion } from './claude-session'
 import type { AccountUsage, ExtraUsage, RateWindow } from '../../shared/types'
 import { logger } from './logger'
+
+/** The currently authenticated Claude account (from ~/.claude.json). */
+export interface ActiveAccount {
+  uuid: string
+  email: string
+}
 
 // ---------------------------------------------------------------------------
 // Credential types
@@ -59,6 +65,14 @@ const CACHE_STALE_MS = 10 * 60 * 1000 // 10 minutes — skip API call on startup
 const CACHE_WRITE_DEBOUNCE_MS = 30_000 // 30s — match block-usage recalc cadence
 const CACHE_DIR = join(homedir(), '.claude', 'ui')
 const CACHE_PATH = join(CACHE_DIR, 'usage-cache.json')
+const CLAUDE_JSON_PATH = join(homedir(), '.claude.json')
+const ACCOUNT_LOG_DIR = join(CACHE_DIR, 'usage')
+const ACCOUNT_LOG_PATH = join(ACCOUNT_LOG_DIR, 'account-log.jsonl')
+
+/** Delay after the 5h window expires before proactively re-fetching usage. */
+const WINDOW_EXPIRY_FETCH_DELAY_MS = 10_000
+/** Throttle for fetchIfWindowUnknown() — avoid hammering on bursty JSONL updates. */
+const UNKNOWN_WINDOW_FETCH_THROTTLE_MS = 30_000
 
 /**
  * Construct the User-Agent header matching the CLI's jO() function.
@@ -116,6 +130,13 @@ export class UsageFetcher {
   private sessionGetter: SessionUsageGetter | null = null
   private userAgent = getCliUserAgent()
   private cacheWriteTimer: ReturnType<typeof setTimeout> | null = null
+  private activeAccount: ActiveAccount | null = null
+  /** Last account written to the account log (avoid duplicate records). */
+  private lastLoggedAccountUuid: string | null = null
+  private accountLogSeeded = false
+  /** One-shot timer firing shortly after the 5h window expires. */
+  private expiryTimer: ReturnType<typeof setTimeout> | null = null
+  private lastFetchStartedAt = 0
 
   /** Attach the main BrowserWindow so we can push events to the renderer. */
   setWindow(win: BrowserWindow): void {
@@ -142,23 +163,41 @@ export class UsageFetcher {
   startPolling(): void {
     if (this.pollTimer) return
 
-    // Try disk cache first — if fresh, push to renderer and skip the initial API fetch
-    this.loadCache().then((cached) => {
-      if (cached) {
-        this.lastUsage = cached
-        this.pushToRenderer(cached)
-        logger.debug('UsageFetcher', `Loaded cache (age ${Math.round((Date.now() - cached.fetchedAt) / 1000)}s)`)
-      } else {
-        // Cache stale or missing — fetch immediately
-        this.fetch().catch((err) => { logger.warn('UsageFetcher', 'Initial fetch failed', err) })
-      }
-    }).catch(() => {
-      // Cache read failed — fetch immediately
-      this.fetch().catch((err) => { logger.warn('UsageFetcher', 'Initial fetch failed', err) })
-    })
+    // Try disk cache first — if fresh AND it carries an unexpired 5h window,
+    // push to renderer and skip the initial API fetch. A cache without an
+    // indicative window (no resetsAt, or already expired) can't anchor block
+    // grouping, so fetch immediately in that case.
+    this.loadCache()
+      .then((cached) => {
+        const windowIndicative =
+          cached?.fiveHour.resetsAt != null &&
+          new Date(cached.fiveHour.resetsAt).getTime() > Date.now()
+        if (cached) {
+          this.lastUsage = cached
+          this.pushToRenderer(cached)
+          this.scheduleExpiryFetch()
+          logger.debug(
+            'UsageFetcher',
+            `Loaded cache (age ${Math.round((Date.now() - cached.fetchedAt) / 1000)}s)`
+          )
+        }
+        if (!cached || !windowIndicative) {
+          this.fetch().catch((err) => {
+            logger.warn('UsageFetcher', 'Initial fetch failed', err)
+          })
+        }
+      })
+      .catch(() => {
+        // Cache read failed — fetch immediately
+        this.fetch().catch((err) => {
+          logger.warn('UsageFetcher', 'Initial fetch failed', err)
+        })
+      })
 
     this.pollTimer = setInterval(() => {
-      this.fetch().catch((err) => { logger.warn('UsageFetcher', 'Poll fetch failed', err) })
+      this.fetch().catch((err) => {
+        logger.warn('UsageFetcher', 'Poll fetch failed', err)
+      })
     }, this.pollIntervalMs)
   }
 
@@ -168,10 +207,18 @@ export class UsageFetcher {
       clearInterval(this.pollTimer)
       this.pollTimer = null
     }
+    if (this.expiryTimer) {
+      clearTimeout(this.expiryTimer)
+      this.expiryTimer = null
+    }
   }
 
   /** Fetch usage and push to the renderer. Returns the result. */
   async fetch(): Promise<AccountUsage> {
+    this.lastFetchStartedAt = Date.now()
+    // Track the authenticated account alongside usage (cheap local read)
+    await this.trackActiveAccount()
+
     const usage = await this.fetchUsage()
 
     if (!usage.error) {
@@ -184,13 +231,109 @@ export class UsageFetcher {
 
     this.pushToRenderer(this.lastUsage)
     this.scheduleCacheWrite()
+    this.scheduleExpiryFetch()
 
     return this.lastUsage
+  }
+
+  /**
+   * Fetch promptly when local activity is observed while no (or an expired)
+   * 5h window is known — a new window has likely just started and we want
+   * its resets_at without waiting for the regular poll. Throttled.
+   */
+  fetchIfWindowUnknown(): void {
+    const resetsAt = this.lastUsage?.fiveHour.resetsAt
+    const windowKnown = resetsAt != null && new Date(resetsAt).getTime() > Date.now()
+    if (windowKnown) return
+    if (Date.now() - this.lastFetchStartedAt < UNKNOWN_WINDOW_FETCH_THROTTLE_MS) return
+    logger.debug('UsageFetcher', 'Activity with no known 5h window — fetching usage')
+    this.fetch().catch((err) => {
+      logger.warn('UsageFetcher', 'Unknown-window fetch failed', err)
+    })
   }
 
   /** Get the last cached result (may be null). */
   getLastUsage(): AccountUsage | null {
     return this.lastUsage
+  }
+
+  /** The currently authenticated account, if known. */
+  getActiveAccount(): ActiveAccount | null {
+    return this.activeAccount
+  }
+
+  // -------------------------------------------------------------------------
+  // Account tracking
+  // -------------------------------------------------------------------------
+
+  /**
+   * Read the authenticated account from ~/.claude.json and append a record to
+   * the account log when it changes. The log lets block-usage attribute JSONL
+   * entries to the account active at their timestamp.
+   */
+  private async trackActiveAccount(): Promise<void> {
+    try {
+      const raw = await readFile(CLAUDE_JSON_PATH, 'utf-8')
+      const parsed = JSON.parse(raw) as {
+        oauthAccount?: { accountUuid?: string; emailAddress?: string }
+      }
+      const uuid = parsed.oauthAccount?.accountUuid
+      const email = parsed.oauthAccount?.emailAddress
+      if (!uuid || !email) return
+      this.activeAccount = { uuid, email }
+
+      // Initialize dedup state from the log's last record (once per launch)
+      if (!this.accountLogSeeded) {
+        this.accountLogSeeded = true
+        try {
+          const log = await readFile(ACCOUNT_LOG_PATH, 'utf-8')
+          const lines = log.trim().split('\n')
+          const last = JSON.parse(lines[lines.length - 1]) as { accountUuid?: string }
+          this.lastLoggedAccountUuid = last.accountUuid ?? null
+        } catch {
+          this.lastLoggedAccountUuid = null
+        }
+      }
+
+      if (uuid !== this.lastLoggedAccountUuid) {
+        this.lastLoggedAccountUuid = uuid
+        const record = JSON.stringify({ ts: Date.now(), accountUuid: uuid, email })
+        await mkdir(ACCOUNT_LOG_DIR, { recursive: true })
+        await appendFile(ACCOUNT_LOG_PATH, record + '\n', 'utf-8')
+        logger.info('UsageFetcher', `Active account changed → ${email}`)
+      }
+    } catch (err) {
+      logger.debug('UsageFetcher', `Account tracking failed: ${err}`)
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Proactive window-expiry fetch
+  // -------------------------------------------------------------------------
+
+  /**
+   * Schedule a one-shot fetch shortly after the current 5h window expires,
+   * so the UI learns about the roll promptly instead of waiting up to a full
+   * poll interval. Rescheduled on every usage update.
+   */
+  private scheduleExpiryFetch(): void {
+    if (this.expiryTimer) {
+      clearTimeout(this.expiryTimer)
+      this.expiryTimer = null
+    }
+    const resetsAt = this.lastUsage?.fiveHour.resetsAt
+    if (!resetsAt) return
+    const resetMs = new Date(resetsAt).getTime()
+    if (isNaN(resetMs)) return
+    const delay = resetMs - Date.now() + WINDOW_EXPIRY_FETCH_DELAY_MS
+    if (delay <= 0) return // already expired — fetchIfWindowUnknown covers it
+    this.expiryTimer = setTimeout(() => {
+      this.expiryTimer = null
+      logger.debug('UsageFetcher', '5h window expired — proactive usage fetch')
+      this.fetch().catch((err) => {
+        logger.warn('UsageFetcher', 'Expiry fetch failed', err)
+      })
+    }, delay)
   }
 
   // -------------------------------------------------------------------------
@@ -214,9 +357,7 @@ export class UsageFetcher {
 
     const window: RateWindow = {
       usedPercent: toUsedPercent(utilization, 'fraction'),
-      resetsAt: typeof resetsAt === 'number'
-        ? new Date(resetsAt * 1000).toISOString()
-        : null
+      resetsAt: typeof resetsAt === 'number' ? new Date(resetsAt * 1000).toISOString() : null
     }
 
     // Map rateLimitType to the AccountUsage field
@@ -241,6 +382,7 @@ export class UsageFetcher {
 
     this.pushToRenderer(this.lastUsage)
     this.scheduleCacheWrite()
+    this.scheduleExpiryFetch()
   }
 
   /**
@@ -251,7 +393,9 @@ export class UsageFetcher {
    *
    * Shape: { five_hour?: { utilization: number, resets_at: number }, seven_day?: { ... } }
    */
-  updateFromHeaderUtilization(headerUtil: Record<string, { utilization: number; resets_at: number }>): void {
+  updateFromHeaderUtilization(
+    headerUtil: Record<string, { utilization: number; resets_at: number }>
+  ): void {
     const base = this.lastUsage ?? this.defaultUsage()
     let updated = false
 
@@ -266,14 +410,12 @@ export class UsageFetcher {
 
       const window: RateWindow = {
         usedPercent: toUsedPercent(data.utilization, 'fraction'),
-        resetsAt: typeof data.resets_at === 'number'
-          ? new Date(data.resets_at * 1000).toISOString()
-          : null
+        resetsAt:
+          typeof data.resets_at === 'number' ? new Date(data.resets_at * 1000).toISOString() : null
       }
 
       ;(base as unknown as Record<string, unknown>)[field] = window
       updated = true
-
     }
 
     if (!updated) return
@@ -286,6 +428,7 @@ export class UsageFetcher {
 
     this.pushToRenderer(this.lastUsage)
     this.scheduleCacheWrite()
+    this.scheduleExpiryFetch()
   }
 
   // -------------------------------------------------------------------------
@@ -312,7 +455,9 @@ export class UsageFetcher {
       if (!this.lastUsage) return
       mkdir(CACHE_DIR, { recursive: true })
         .then(() => writeFile(CACHE_PATH, JSON.stringify(this.lastUsage), 'utf-8'))
-        .catch((err) => { logger.debug('UsageFetcher', `Cache write failed: ${err}`) })
+        .catch((err) => {
+          logger.debug('UsageFetcher', `Cache write failed: ${err}`)
+        })
     }, CACHE_WRITE_DEBOUNCE_MS)
   }
 
@@ -341,7 +486,9 @@ export class UsageFetcher {
       for (const w of ClaudeSession.getExtraWindows()) {
         if (!w.isDestroyed()) w.webContents.send('usage:data', usage)
       }
-    } catch { /* Window may have been closed */ }
+    } catch {
+      /* Window may have been closed */
+    }
   }
 
   /**
@@ -397,7 +544,7 @@ export class UsageFetcher {
         headers: {
           'Content-Type': 'application/json',
           'User-Agent': this.userAgent,
-          'Authorization': `Bearer ${token}`,
+          Authorization: `Bearer ${token}`,
           'anthropic-beta': ANTHROPIC_BETA
         },
         signal: controller.signal
@@ -415,7 +562,7 @@ export class UsageFetcher {
           headers: {
             'Content-Type': 'application/json',
             'User-Agent': this.userAgent,
-            'Authorization': `Bearer ${token}`,
+            Authorization: `Bearer ${token}`,
             'anthropic-beta': ANTHROPIC_BETA
           },
           signal: controller.signal
@@ -427,7 +574,10 @@ export class UsageFetcher {
 
       if (resp.status === 429) {
         // Rate-limited — don't retry or fall back, just wait for the next poll cycle
-        logger.debug('UsageFetcher', 'Direct API returned 429 (rate limited), skipping until next poll')
+        logger.debug(
+          'UsageFetcher',
+          'Direct API returned 429 (rate limited), skipping until next poll'
+        )
         return this.errorResult('Rate limited')
       }
 
@@ -482,7 +632,10 @@ export class UsageFetcher {
           { timeout: 5000 },
           (err, stdout, stderr) => {
             if (err) {
-              if ((err as NodeJS.ErrnoException).code === '44' || stderr?.includes('could not be found')) {
+              if (
+                (err as NodeJS.ErrnoException).code === '44' ||
+                stderr?.includes('could not be found')
+              ) {
                 return resolve('')
               }
               return reject(err)
@@ -532,7 +685,9 @@ export class UsageFetcher {
       const file = JSON.parse(raw) as CredentialsFile
       file.claudeAiOauth = newCreds
       await writeFile(CREDENTIALS_PATH, JSON.stringify(file, null, 2), 'utf-8')
-    } catch { /* best effort */ }
+    } catch {
+      /* best effort */
+    }
 
     return data.access_token
   }
@@ -557,21 +712,23 @@ export class UsageFetcher {
     const fiveHour = parseWindow('five_hour')
 
     if (!fiveHour && Object.keys(data).length > 0) {
-      logger.warn(
-        'UsageFetcher',
-        'API response missing five_hour utilization — defaulting to 0%',
-        { keys: Object.keys(data), five_hour: data['five_hour'] }
-      )
+      logger.warn('UsageFetcher', 'API response missing five_hour utilization — defaulting to 0%', {
+        keys: Object.keys(data),
+        five_hour: data['five_hour']
+      })
     }
 
     // Parse extra_usage: { is_enabled, monthly_limit, used_credits, utilization }
     let extraUsage: ExtraUsage | null = null
-    const eu = data['extra_usage'] as {
-      is_enabled?: boolean
-      monthly_limit?: number | null
-      used_credits?: number
-      utilization?: number
-    } | undefined | null
+    const eu = data['extra_usage'] as
+      | {
+          is_enabled?: boolean
+          monthly_limit?: number | null
+          used_credits?: number
+          utilization?: number
+        }
+      | undefined
+      | null
     if (eu && typeof eu === 'object') {
       extraUsage = {
         isEnabled: eu.is_enabled ?? false,

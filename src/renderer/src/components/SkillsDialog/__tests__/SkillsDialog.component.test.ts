@@ -7,8 +7,6 @@
  *   3. Escape key closes dialog
  */
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
-
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import React from 'react'
 import { render, act } from '@testing-library/react'
@@ -21,7 +19,7 @@ vi.mock('../View', () => ({
   SkillsDialogView: (props: SkillsDialogViewProps) => {
     viewProps = props
     return null
-  },
+  }
 }))
 
 function makeSkill(overrides: Partial<SkillInfo> = {}): SkillInfo {
@@ -32,7 +30,7 @@ function makeSkill(overrides: Partial<SkillInfo> = {}): SkillInfo {
     source: 'project',
     path: '.claude/skills/test-skill',
     content: '# Test',
-    ...overrides,
+    ...overrides
   } as SkillInfo
 }
 
@@ -71,7 +69,9 @@ describe('SkillsDialog FC', () => {
 
   it('loads skills via IPC and passes them to View', async () => {
     await renderFC({ open: true, cwd: '/d/repo' })
-    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
 
     expect(loadCalls).toEqual(['/d/repo'])
     expect(viewProps?.skills).toHaveLength(1)
@@ -107,25 +107,39 @@ describe('SkillsDialog FC', () => {
     const onClose = vi.fn()
 
     // Open with /a — View sees skill-a
-    const { rerender, unmount } = await act(async () => render(
-      React.createElement(SkillsDialog, { open: true, cwd: '/a', onClose: onClose as () => void }),
-    ))
-    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const { rerender, unmount } = await act(async () =>
+      render(
+        React.createElement(SkillsDialog, { open: true, cwd: '/a', onClose: onClose as () => void })
+      )
+    )
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
     expect(viewProps?.skills.map((s) => s.name)).toEqual(['skill-a'])
 
     // Close — FC should clear skills immediately
-    await act(async () => rerender(
-      React.createElement(SkillsDialog, { open: false, cwd: '/a', onClose: onClose as () => void }),
-    ))
+    await act(async () =>
+      rerender(
+        React.createElement(SkillsDialog, {
+          open: false,
+          cwd: '/a',
+          onClose: onClose as () => void
+        })
+      )
+    )
 
     // Reopen with /b — before IPC resolves, skills must NOT still be ['skill-a']
     let resolveLoad!: (v: unknown) => void
-    const pendingLoad = new Promise((r) => { resolveLoad = r })
+    const pendingLoad = new Promise((r) => {
+      resolveLoad = r
+    })
     app.bridge.ipcMain.handle('config:load-skill-details', () => pendingLoad)
 
-    await act(async () => rerender(
-      React.createElement(SkillsDialog, { open: true, cwd: '/b', onClose: onClose as () => void }),
-    ))
+    await act(async () =>
+      rerender(
+        React.createElement(SkillsDialog, { open: true, cwd: '/b', onClose: onClose as () => void })
+      )
+    )
 
     // At this point, stale skills must be cleared (view shows loading, not skill-a)
     expect(viewProps?.skills).toEqual([])

@@ -8,8 +8,6 @@
  * No behavior assumptions — just message passing.
  */
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
-
 export class TestIpcBridge {
   private handlers = new Map<string, (...args: any[]) => any>()
   private rendererListeners = new Map<string, Set<(...args: any[]) => void>>()
@@ -29,7 +27,7 @@ export class TestIpcBridge {
     },
     removeListener: (channel: string, handler: (...args: any[]) => void): void => {
       this.mainListeners.get(channel)?.delete(handler)
-    },
+    }
   }
 
   // --- Renderer-side API (replaces ipcRenderer) ---
@@ -56,9 +54,13 @@ export class TestIpcBridge {
       // Fire-and-forget from renderer to main (e.g., log:error, log:relay)
       const fakeEvent = { sender: this.webContents }
       this.mainListeners.get(channel)?.forEach((handler) => {
-        try { handler(fakeEvent, ...args) } catch { /* ignore */ }
+        try {
+          handler(fakeEvent, ...args)
+        } catch {
+          /* ignore */
+        }
       })
-    },
+    }
   }
 
   // --- Mock webContents (used by BrowserWindow.webContents.send) ---
@@ -68,13 +70,17 @@ export class TestIpcBridge {
       // Electron passes IpcRendererEvent as first arg to on() callbacks
       const fakeEvent = {}
       this.rendererListeners.get(channel)?.forEach((handler) => {
-        try { handler(fakeEvent, ...args) } catch { /* ignore */ }
+        try {
+          handler(fakeEvent, ...args)
+        } catch {
+          /* ignore */
+        }
       })
     },
     isDevToolsOpened: (): boolean => false,
     closeDevTools: (): void => {},
     openDevTools: (): void => {},
-    id: 1,
+    id: 1
   }
 
   /**
@@ -102,7 +108,7 @@ export class TestIpcBridge {
       on: () => {},
       once: () => {},
       removeListener: () => {},
-      removeAllListeners: () => {},
+      removeAllListeners: () => {}
     }
   }
 

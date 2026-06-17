@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import type { ClaudePermissions, PermissionScope } from '../../../../shared/types'
 import { PermissionsDialogView, type RuleCategory } from './View'
 
@@ -39,14 +39,17 @@ export function PermissionsDialog({
 
   const loaded = useRef(false)
 
-  // Available tabs — project/local only available when cwd is set
-  const tabs: PermissionScope[] = cwd ? ['local', 'project', 'user'] : ['user']
+  // Available tabs — project/local only available when cwd is set. Memoized so
+  // its identity is stable (it feeds a useCallback dependency list).
+  const tabs: PermissionScope[] = useMemo(
+    () => (cwd ? ['local', 'project', 'user'] : ['user']),
+    [cwd]
+  )
 
   // Reset active tab only when cwd or initialTab changes (not when activeTab changes)
   useEffect(() => {
     if (initialTab) setActiveTab(initialTab)
     else if (!cwd) setActiveTab('user')
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cwd, initialTab])
 
   useEffect(() => {
@@ -60,7 +63,9 @@ export function PermissionsDialog({
       try {
         const [user, project, local] = await Promise.all([
           window.api.loadClaudePermissions('user'),
-          cwd ? window.api.loadClaudePermissions('project', cwd) : Promise.resolve({ ...EMPTY_PERMS }),
+          cwd
+            ? window.api.loadClaudePermissions('project', cwd)
+            : Promise.resolve({ ...EMPTY_PERMS }),
           cwd ? window.api.loadClaudePermissions('local', cwd) : Promise.resolve({ ...EMPTY_PERMS })
         ])
         setPermsMap({ user, project, local })
@@ -128,10 +133,13 @@ export function PermissionsDialog({
     onClose()
   }, [saveAll, onClose])
 
-  const handleChangeTab = useCallback(async (scope: PermissionScope): Promise<void> => {
-    await saveScope(activeTab)
-    setActiveTab(scope)
-  }, [activeTab, saveScope])
+  const handleChangeTab = useCallback(
+    async (scope: PermissionScope): Promise<void> => {
+      await saveScope(activeTab)
+      setActiveTab(scope)
+    },
+    [activeTab, saveScope]
+  )
 
   useEffect(() => {
     if (!open) return
@@ -161,8 +169,12 @@ export function PermissionsDialog({
       hasDirty={hasDirty}
       onListDir={window.api.listDir}
       onChangeTab={handleChangeTab}
-      onUpdateRule={(category, i, v) => updateRules(activeTab, category, (r) => r.map((x, j) => (j === i ? v : x)))}
-      onDeleteRule={(category, i) => updateRules(activeTab, category, (r) => r.filter((_, j) => j !== i))}
+      onUpdateRule={(category, i, v) =>
+        updateRules(activeTab, category, (r) => r.map((x, j) => (j === i ? v : x)))
+      }
+      onDeleteRule={(category, i) =>
+        updateRules(activeTab, category, (r) => r.filter((_, j) => j !== i))
+      }
       onAddRule={(category, rule) => updateRules(activeTab, category, (r) => [...r, rule])}
       onUpdateDir={(i, v) => updateDirs(activeTab, (d) => d.map((x, j) => (j === i ? v : x)))}
       onDeleteDir={(i) => updateDirs(activeTab, (d) => d.filter((_, j) => j !== i))}

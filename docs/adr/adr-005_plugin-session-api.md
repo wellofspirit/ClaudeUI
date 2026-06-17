@@ -43,12 +43,14 @@ ctx.on('session:result', (event: {
 ```
 
 **Why both IDs:**
+
 - Early events (before first SDK response) arrive with `sessionId: null`. The plugin uses `routingId` as a temporary key.
 - Once `sessionId` appears, the plugin knows the `routingId → sessionId` mapping and re-keys its internal state.
 - From that point, the plugin uses `sessionId` for all durable operations (history queries, resume).
 - The core doesn't need to buffer, replay, or hide the reality of async sessionId availability.
 
 **Why an object, not positional args:**
+
 - Self-documenting — no guessing what the 3rd parameter means.
 - Extensible — adding fields (e.g., `teamName`, `isSubagent`) doesn't break existing handlers.
 
@@ -61,6 +63,7 @@ ctx.sessions.getMessages(sessionId: string): ChatMessage[]
 ```
 
 This enables:
+
 - Backfilling a plugin's chat view when opened after messages were already exchanged.
 - Loading history from previous app sessions (sessionId maps to disk-level storage).
 

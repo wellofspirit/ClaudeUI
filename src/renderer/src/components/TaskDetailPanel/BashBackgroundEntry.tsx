@@ -2,7 +2,11 @@ import { useState, useRef, useEffect, useCallback } from 'react'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
 import { findTaskBlocks } from './utils'
 
-export function BashBackgroundEntry({ toolUseId }: { toolUseId: string }): React.JSX.Element | null {
+export function BashBackgroundEntry({
+  toolUseId
+}: {
+  toolUseId: string
+}): React.JSX.Element | null {
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const messages = useActiveSession((s) => s.messages)
   const taskNotifications = useActiveSession((s) => s.taskNotifications)
@@ -16,18 +20,11 @@ export function BashBackgroundEntry({ toolUseId }: { toolUseId: string }): React
   const [expanded, setExpanded] = useState(true)
   const [prependedContent, setPrependedContent] = useState('')
   const [loadingMore, setLoadingMore] = useState(false)
-
-  const { taskBlock } = findTaskBlocks(messages, toolUseId)
-  if (!taskBlock) return null
-
-  const command = String(taskBlock.toolInput?.command || '')
-  const bgNotification = taskNotifications.find((n) => n.toolUseId === toolUseId)
-  const isRunning = !bgNotification
-  const isError = bgNotification?.status === 'failed'
-
   const bodyRef = useRef<HTMLDivElement>(null)
   const [following, setFollowing] = useState(true)
   const isAutoScrolling = useRef(false)
+
+  const { taskBlock } = findTaskBlocks(messages, toolUseId)
 
   // Watch on mount/expand, unwatch on unmount/collapse
   useEffect(() => {
@@ -44,7 +41,9 @@ export function BashBackgroundEntry({ toolUseId }: { toolUseId: string }): React
     if (!el || !following) return
     isAutoScrolling.current = true
     el.scrollTop = el.scrollHeight
-    requestAnimationFrame(() => { isAutoScrolling.current = false })
+    requestAnimationFrame(() => {
+      isAutoScrolling.current = false
+    })
   }, [bgOutput?.tail, following])
 
   const handleScroll = useCallback(() => {
@@ -61,7 +60,9 @@ export function BashBackgroundEntry({ toolUseId }: { toolUseId: string }): React
     isAutoScrolling.current = true
     el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
     setFollowing(true)
-    requestAnimationFrame(() => { isAutoScrolling.current = false })
+    requestAnimationFrame(() => {
+      isAutoScrolling.current = false
+    })
   }, [])
 
   const handleLoadEarlier = useCallback(async () => {
@@ -80,16 +81,33 @@ export function BashBackgroundEntry({ toolUseId }: { toolUseId: string }): React
     setLoadingMore(false)
   }, [bgOutput, prependedContent, loadingMore, toolUseId, activeSessionId])
 
+  // All hooks above run unconditionally (rules-of-hooks); bail out only after
+  // them when the task block isn't present in the message stream yet.
+  if (!taskBlock) return null
+
+  const command = String(taskBlock.toolInput?.command || '')
+  const bgNotification = taskNotifications.find((n) => n.toolUseId === toolUseId)
+  const isRunning = !bgNotification
+  const isError = bgNotification?.status === 'failed'
+
   const statusBadge = isError ? (
-    <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-danger/10 text-danger shrink-0">failed</span>
+    <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-danger/10 text-danger shrink-0">
+      failed
+    </span>
   ) : !isRunning ? (
     bgNotification?.status === 'stopped' ? (
-      <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-warning/10 text-warning shrink-0">stopped</span>
+      <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-warning/10 text-warning shrink-0">
+        stopped
+      </span>
     ) : (
-      <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-success/10 text-success shrink-0">completed</span>
+      <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-success/10 text-success shrink-0">
+        completed
+      </span>
     )
   ) : (
-    <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-accent/10 text-accent shrink-0">running</span>
+    <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-accent/10 text-accent shrink-0">
+      running
+    </span>
   )
 
   const isStopping = stoppingTaskIds.includes(toolUseId)
@@ -120,14 +138,21 @@ export function BashBackgroundEntry({ toolUseId }: { toolUseId: string }): React
         className="w-full flex items-center px-4 h-10 shrink-0 gap-2 hover:bg-bg-hover transition-colors cursor-pointer"
       >
         <svg
-          width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
+          width="10"
+          height="10"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
           className="text-text-secondary shrink-0 transition-transform duration-150"
           style={{ transform: expanded ? 'rotate(180deg)' : 'rotate(0deg)' }}
         >
           <polyline points="6 9 12 15 18 9" />
         </svg>
         <span className="text-[13px] text-accent font-medium shrink-0">Bash</span>
-        <span className="text-[12px] text-text-primary truncate flex-1 text-left font-mono">{command.slice(0, 60)}</span>
+        <span className="text-[12px] text-text-primary truncate flex-1 text-left font-mono">
+          {command.slice(0, 60)}
+        </span>
         {statusBadge}
         {isRunning && !isStopping && (
           <button
@@ -143,10 +168,20 @@ export function BashBackgroundEntry({ toolUseId }: { toolUseId: string }): React
           </span>
         )}
         <button
-          onClick={(e) => { e.stopPropagation(); activeSessionId && removeTaskFromPanel(activeSessionId, toolUseId) }}
+          onClick={(e) => {
+            e.stopPropagation()
+            activeSessionId && removeTaskFromPanel(activeSessionId, toolUseId)
+          }}
           className="text-text-muted hover:text-text-primary transition-colors shrink-0 ml-1"
         >
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <svg
+            width="12"
+            height="12"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+          >
             <line x1="18" y1="6" x2="6" y2="18" />
             <line x1="6" y1="6" x2="18" y2="18" />
           </svg>
@@ -173,7 +208,8 @@ export function BashBackgroundEntry({ toolUseId }: { toolUseId: string }): React
             )}
             {bgOutput ? (
               <pre className="text-[12px] font-mono text-text-primary/70 bg-bg-primary rounded-md p-2 border border-border whitespace-pre-wrap break-words leading-[1.5]">
-                {prependedContent}{bgOutput.tail}
+                {prependedContent}
+                {bgOutput.tail}
               </pre>
             ) : isRunning ? (
               <div className="text-[12px] text-text-muted">Waiting for output...</div>
@@ -184,7 +220,15 @@ export function BashBackgroundEntry({ toolUseId }: { toolUseId: string }): React
               onClick={scrollToBottom}
               className="absolute bottom-2 left-1/2 -translate-x-1/2 bg-bg-tertiary border border-border rounded-full p-1.5 shadow-md shadow-black/20 hover:bg-bg-hover transition-colors cursor-pointer z-10"
             >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-text-secondary">
+              <svg
+                width="14"
+                height="14"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                className="text-text-secondary"
+              >
                 <polyline points="6 9 12 15 18 9" />
               </svg>
             </button>

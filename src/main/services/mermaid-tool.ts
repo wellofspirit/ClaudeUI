@@ -30,10 +30,12 @@ export function createMermaidServer() {
             }
           }
           return {
-            content: [{
-              type: 'text' as const,
-              text: `Mermaid syntax error:\n${result.error}\n\nFix the syntax and call render_mermaid again.`
-            }],
+            content: [
+              {
+                type: 'text' as const,
+                text: `Mermaid syntax error:\n${result.error}\n\nFix the syntax and call render_mermaid again.`
+              }
+            ],
             isError: true
           }
         }
@@ -60,14 +62,14 @@ const PARSEABLE_TYPES: Record<string, string> = {
   architecture: 'architecture',
   'architecture-beta': 'architecture',
   gitgraph: 'gitGraph',
-  'gitGraph': 'gitGraph',
+  gitGraph: 'gitGraph',
   radar: 'radar',
   'radar-beta': 'radar',
   treemap: 'treemap',
   'treemap-beta': 'treemap',
   treeview: 'treeView',
   'tree-view': 'treeView',
-  wardley: 'wardley',
+  wardley: 'wardley'
 }
 
 /**
@@ -95,7 +97,10 @@ function detectDiagramType(source: string): string | null {
 async function validateMermaid(source: string): Promise<ValidationResult> {
   const detected = detectDiagramType(source)
   if (!detected) {
-    return { valid: false, error: 'Could not detect diagram type. The source appears empty or malformed.' }
+    return {
+      valid: false,
+      error: 'Could not detect diagram type. The source appears empty or malformed.'
+    }
   }
 
   const parserType = PARSEABLE_TYPES[detected] || PARSEABLE_TYPES[detected.toLowerCase()]
@@ -111,7 +116,13 @@ async function validateMermaid(source: string): Promise<ValidationResult> {
   } catch (err: unknown) {
     if (err && typeof err === 'object' && 'result' in err) {
       // MermaidParseError — extract diagnostics
-      const parseErr = err as { result: { lexerErrors?: Array<{ message: string }>; parserErrors?: Array<{ message: string }> }; message: string }
+      const parseErr = err as {
+        result: {
+          lexerErrors?: Array<{ message: string }>
+          parserErrors?: Array<{ message: string }>
+        }
+        message: string
+      }
       const messages: string[] = []
       if (parseErr.result.lexerErrors?.length) {
         messages.push(...parseErr.result.lexerErrors.map((e) => e.message))

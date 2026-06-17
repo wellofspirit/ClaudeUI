@@ -20,10 +20,13 @@ export function TerminalPanelView({
   onSelectTab,
   onCloseTab,
   onNewTab,
-  onClosePanel,
+  onClosePanel
 }: TerminalPanelViewProps): React.JSX.Element {
   return (
-    <div style={style} className="flex flex-col bg-bg-primary border-t border-border overflow-hidden">
+    <div
+      style={style}
+      className="flex flex-col bg-bg-primary border-t border-border overflow-hidden"
+    >
       <div className="flex items-center gap-0.5 px-2 py-1 bg-bg-secondary border-b border-border shrink-0">
         {visibleTabs.map((tab) => (
           <div
@@ -75,7 +78,11 @@ export function TerminalPanelView({
         ))}
         {visibleTabs.length === 0 && (
           <div className="h-full flex items-center justify-center text-text-muted text-xs">
-            Press <span className="font-mono mx-1 px-1 py-0.5 bg-bg-tertiary rounded text-text-secondary">+</span> to open a terminal
+            Press{' '}
+            <span className="font-mono mx-1 px-1 py-0.5 bg-bg-tertiary rounded text-text-secondary">
+              +
+            </span>{' '}
+            to open a terminal
           </div>
         )}
       </div>

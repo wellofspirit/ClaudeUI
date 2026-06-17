@@ -6,8 +6,6 @@
  * — the component has no IPC, just a single clearBtw store action.
  */
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
-
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { render, fireEvent } from '@testing-library/react'
 import { useSessionStore } from '../../../stores/session-store'
@@ -40,8 +38,8 @@ describe('BtwCard', () => {
     useSessionStore.setState((state) => ({
       sessions: {
         ...state.sessions,
-        [ROUTE]: { ...state.sessions[ROUTE], btwResponse: 'A typed language', btwLoading: false },
-      },
+        [ROUTE]: { ...state.sessions[ROUTE], btwResponse: 'A typed language', btwLoading: false }
+      }
     }))
 
     const { getByText, container } = render(<BtwCard isMobile={false} />)

@@ -21,7 +21,7 @@ export function AutomationRunHistoryView({
   isRunProcessing,
   onBack,
   onStop,
-  onSend,
+  onSend
 }: AutomationRunHistoryViewProps): React.JSX.Element {
   const [inputText, setInputText] = useState('')
   const messagesEndRef = useRef<HTMLDivElement>(null)
@@ -32,7 +32,11 @@ export function AutomationRunHistoryView({
   }, [runMessages?.length, streamingText])
 
   if (!run) {
-    return <div className="flex-1 flex items-center justify-center text-text-muted text-sm">Run not found</div>
+    return (
+      <div className="flex-1 flex items-center justify-center text-text-muted text-sm">
+        Run not found
+      </div>
+    )
   }
 
   const isRunning = run.status === 'running'
@@ -63,7 +67,15 @@ export function AutomationRunHistoryView({
           onClick={onBack}
           className="flex items-center gap-1 text-xs text-text-accent hover:text-text-primary transition-colors"
         >
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+          <svg
+            width="12"
+            height="12"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+          >
             <polyline points="15 18 9 12 15 6" />
           </svg>
           Back
@@ -139,7 +151,9 @@ export function AutomationRunHistoryView({
                   if (canSend) handleSend()
                 }
               }}
-              placeholder={isRunProcessing ? 'Waiting for response...' : 'Continue the conversation...'}
+              placeholder={
+                isRunProcessing ? 'Waiting for response...' : 'Continue the conversation...'
+              }
               className="flex-1 bg-bg-tertiary border border-border/40 rounded-lg px-3 py-1.5 text-sm text-text-primary outline-none focus:border-text-accent transition-colors resize-none"
               rows={1}
               disabled={isRunProcessing}

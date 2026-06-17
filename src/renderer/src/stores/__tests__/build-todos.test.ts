@@ -6,7 +6,11 @@ function msg(role: 'user' | 'assistant', ...blocks: ChatMessage['content']): Cha
   return { id: `msg-${Math.random()}`, role, content: blocks.flat(), timestamp: Date.now() }
 }
 
-function toolUse(toolName: string, toolInput: Record<string, unknown>, toolUseId = `tu-${Math.random()}`): ChatMessage['content'][0] {
+function toolUse(
+  toolName: string,
+  toolInput: Record<string, unknown>,
+  toolUseId = `tu-${Math.random()}`
+): ChatMessage['content'][0] {
   return { type: 'tool_use', toolUseId, toolName, toolInput }
 }
 
@@ -25,7 +29,8 @@ describe('buildTodosFromMessages', () => {
 
   it('builds todos from TodoWrite calls', () => {
     const messages = [
-      msg('assistant',
+      msg(
+        'assistant',
         toolUse('TodoWrite', {
           todos: [
             { content: 'Fix bug', status: 'pending' },
@@ -43,12 +48,14 @@ describe('buildTodosFromMessages', () => {
 
   it('TodoWrite replaces all previous tasks', () => {
     const messages = [
-      msg('assistant',
+      msg(
+        'assistant',
         toolUse('TodoWrite', {
           todos: [{ content: 'Old task', status: 'pending' }]
         })
       ),
-      msg('assistant',
+      msg(
+        'assistant',
         toolUse('TodoWrite', {
           todos: [{ content: 'New task', status: 'pending' }]
         })
@@ -62,7 +69,8 @@ describe('buildTodosFromMessages', () => {
   it('builds todos from TaskCreate with ID from tool_result', () => {
     const tuId = 'tu-create'
     const messages = [
-      msg('assistant',
+      msg(
+        'assistant',
         toolUse('TaskCreate', { subject: 'Implement feature' }, tuId),
         toolResult(tuId, 'Task #abc123 created')
       )
@@ -75,13 +83,12 @@ describe('buildTodosFromMessages', () => {
   it('TaskUpdate changes status of existing task', () => {
     const tuId = 'tu-create'
     const messages = [
-      msg('assistant',
+      msg(
+        'assistant',
         toolUse('TaskCreate', { subject: 'Do thing' }, tuId),
         toolResult(tuId, 'Task #t1 created')
       ),
-      msg('assistant',
-        toolUse('TaskUpdate', { taskId: 't1', status: 'completed' })
-      )
+      msg('assistant', toolUse('TaskUpdate', { taskId: 't1', status: 'completed' }))
     ]
     const result = buildTodosFromMessages(messages)
     expect(result).toHaveLength(1)
@@ -91,13 +98,12 @@ describe('buildTodosFromMessages', () => {
   it('TaskUpdate with status=deleted removes task', () => {
     const tuId = 'tu-create'
     const messages = [
-      msg('assistant',
+      msg(
+        'assistant',
         toolUse('TaskCreate', { subject: 'Temp task' }, tuId),
         toolResult(tuId, 'Task #t1 created')
       ),
-      msg('assistant',
-        toolUse('TaskUpdate', { taskId: 't1', status: 'deleted' })
-      )
+      msg('assistant', toolUse('TaskUpdate', { taskId: 't1', status: 'deleted' }))
     ]
     const result = buildTodosFromMessages(messages)
     expect(result).toHaveLength(0)
@@ -107,14 +113,14 @@ describe('buildTodosFromMessages', () => {
     const tu1 = 'tu-1'
     const tu2 = 'tu-2'
     const messages = [
-      msg('assistant',
+      msg(
+        'assistant',
         toolUse('TaskCreate', { subject: 'First' }, tu1),
         toolResult(tu1, 'Task #t1 created')
       ),
-      msg('assistant',
-        toolUse('TaskUpdate', { taskId: 't1', status: 'completed' })
-      ),
-      msg('assistant',
+      msg('assistant', toolUse('TaskUpdate', { taskId: 't1', status: 'completed' })),
+      msg(
+        'assistant',
         toolUse('TaskCreate', { subject: 'Second batch' }, tu2),
         toolResult(tu2, 'Task #t2 created')
       )
@@ -127,9 +133,7 @@ describe('buildTodosFromMessages', () => {
 
   it('ignores user messages', () => {
     const messages = [
-      msg('user',
-        toolUse('TodoWrite', { todos: [{ content: 'Fake', status: 'pending' }] })
-      )
+      msg('user', toolUse('TodoWrite', { todos: [{ content: 'Fake', status: 'pending' }] }))
     ]
     expect(buildTodosFromMessages(messages)).toBeNull()
   })

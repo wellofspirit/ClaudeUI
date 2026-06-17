@@ -9,13 +9,21 @@ import type { TranscriptMessage } from '../auto-classifier'
 // Mock auto-classifier
 // ---------------------------------------------------------------------------
 
-const mockClassify = vi.fn<(toolName: string, input: Record<string, unknown>, transcript: string) => Promise<{ shouldBlock: boolean; reason: string }>>()
+const mockClassify =
+  vi.fn<
+    (
+      toolName: string,
+      input: Record<string, unknown>,
+      transcript: string
+    ) => Promise<{ shouldBlock: boolean; reason: string }>
+  >()
 const mockClassifierInstance = { classify: mockClassify }
 
 vi.mock('../auto-classifier', () => ({
   isSafeTool: (name: string) => ['Read', 'Grep', 'Glob', 'WebSearch', 'TodoWrite'].includes(name),
   getClassifier: () => mockClassifierInstance,
-  buildTranscript: (msgs: TranscriptMessage[]) => msgs.map((m) => `${m.role}: ${JSON.stringify(m.content)}`).join('\n'),
+  buildTranscript: (msgs: TranscriptMessage[]) =>
+    msgs.map((m) => `${m.role}: ${JSON.stringify(m.content)}`).join('\n'),
   stopClassifier: vi.fn()
 }))
 
@@ -42,7 +50,9 @@ describe('buildCanUseTool', () => {
       const result = await canUseTool('mcp__claude-ui__render_mermaid', { source: 'graph TD' })
 
       expect(result.behavior).toBe('allow')
-      expect((result as Extract<CanUseToolResult, { behavior: 'allow' }>).updatedInput).toEqual({ source: 'graph TD' })
+      expect((result as Extract<CanUseToolResult, { behavior: 'allow' }>).updatedInput).toEqual({
+        source: 'graph TD'
+      })
       expect(mockClassify).not.toHaveBeenCalled()
     })
 
@@ -63,7 +73,11 @@ describe('buildCanUseTool', () => {
       const result = await canUseTool('Bash', { command: 'git status' })
 
       expect(result.behavior).toBe('allow')
-      expect(mockClassify).toHaveBeenCalledWith('Bash', { command: 'git status' }, expect.any(String))
+      expect(mockClassify).toHaveBeenCalledWith(
+        'Bash',
+        { command: 'git status' },
+        expect.any(String)
+      )
     })
 
     it('invokes classifier for non-safe tools and denies when blocked', async () => {
@@ -73,7 +87,9 @@ describe('buildCanUseTool', () => {
       const result = await canUseTool('Bash', { command: 'rm -rf /' })
 
       expect(result.behavior).toBe('deny')
-      expect((result as Extract<CanUseToolResult, { behavior: 'deny' }>).message).toContain('destructive command')
+      expect((result as Extract<CanUseToolResult, { behavior: 'deny' }>).message).toContain(
+        'destructive command'
+      )
     })
 
     it('denies when classifier throws (no user fallback)', async () => {
@@ -83,7 +99,9 @@ describe('buildCanUseTool', () => {
       const result = await canUseTool('Edit', { file_path: '/test.ts', new_string: 'x' })
 
       expect(result.behavior).toBe('deny')
-      expect((result as Extract<CanUseToolResult, { behavior: 'deny' }>).message).toContain('classifier unavailable')
+      expect((result as Extract<CanUseToolResult, { behavior: 'deny' }>).message).toContain(
+        'classifier unavailable'
+      )
     })
 
     it('passes accumulated transcript to classifier', async () => {
@@ -109,7 +127,9 @@ describe('buildCanUseTool', () => {
       for (const tool of ['Read', 'Bash', 'Edit', 'Write', 'mcp__claude-ui__render_mermaid']) {
         const result = await canUseTool(tool, {})
         expect(result.behavior).toBe('deny')
-        expect((result as Extract<CanUseToolResult, { behavior: 'deny' }>).message).toContain('no user is present')
+        expect((result as Extract<CanUseToolResult, { behavior: 'deny' }>).message).toContain(
+          'no user is present'
+        )
       }
       expect(mockClassify).not.toHaveBeenCalled()
     })

@@ -18,8 +18,8 @@ vi.mock('../logger', () => ({
     debug: vi.fn(),
     info: vi.fn(),
     warn: vi.fn(),
-    error: vi.fn(),
-  },
+    error: vi.fn()
+  }
 }))
 
 function req(channel: string, args: unknown[] = [], id = 'req-1'): WsInvokeRequest {
@@ -68,7 +68,7 @@ describe('RemoteDispatcher', () => {
       'terminal:write',
       'terminal:resize',
       'terminal:kill',
-      'terminal:kill-by-cwd',
+      'terminal:kill-by-cwd'
     ] as const
 
     it.each(BLOCKED_CHANNELS)(
@@ -82,7 +82,7 @@ describe('RemoteDispatcher', () => {
 
         await expect(dispatcher.handle(req(channel))).rejects.toThrow(/Channel not available/)
         expect(handler).not.toHaveBeenCalled()
-      },
+      }
     )
   })
 

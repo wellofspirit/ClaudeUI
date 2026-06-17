@@ -5,7 +5,12 @@ export interface WindowControlsViewProps {
   onClose: () => void
 }
 
-export function WindowControlsView({ isMaximized, onMinimize, onMaximize, onClose }: WindowControlsViewProps): React.JSX.Element {
+export function WindowControlsView({
+  isMaximized,
+  onMinimize,
+  onMaximize,
+  onClose
+}: WindowControlsViewProps): React.JSX.Element {
   return (
     <div className="flex items-center [-webkit-app-region:no-drag]">
       <button
@@ -21,12 +26,26 @@ export function WindowControlsView({ isMaximized, onMinimize, onMaximize, onClos
         className="w-[46px] h-12 flex items-center justify-center text-text-secondary hover:bg-white/10 transition-colors"
       >
         {isMaximized ? (
-          <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1">
+          <svg
+            width="10"
+            height="10"
+            viewBox="0 0 10 10"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1"
+          >
             <rect x="2" y="0" width="8" height="8" rx="0.5" />
             <rect x="0" y="2" width="8" height="8" rx="0.5" />
           </svg>
         ) : (
-          <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1">
+          <svg
+            width="10"
+            height="10"
+            viewBox="0 0 10 10"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1"
+          >
             <rect x="0.5" y="0.5" width="9" height="9" rx="0.5" />
           </svg>
         )}

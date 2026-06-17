@@ -30,7 +30,9 @@ function createOnEvent(): {
 
   const register = (cb: (...args: unknown[]) => void): (() => void) => {
     handler = cb
-    return () => { handler = null }
+    return () => {
+      handler = null
+    }
   }
 
   const simulateEvent = (...args: unknown[]): void => {
@@ -51,13 +53,13 @@ describe('unwrap', () => {
   })
 
   it('throws on failed result', async () => {
-    await expect(unwrap({ ok: false, error: 'Something went wrong' }))
-      .rejects.toThrow('Something went wrong')
+    await expect(unwrap({ ok: false, error: 'Something went wrong' })).rejects.toThrow(
+      'Something went wrong'
+    )
   })
 
   it('throws with default message when error is missing', async () => {
-    await expect(unwrap({ ok: false }))
-      .rejects.toThrow('IPC call failed')
+    await expect(unwrap({ ok: false })).rejects.toThrow('IPC call failed')
   })
 
   it('passes through non-envelope values', async () => {

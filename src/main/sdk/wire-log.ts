@@ -46,7 +46,7 @@ export class WireLog {
       seq: this.nextSeq++,
       t: Date.now() - this.t0,
       dir,
-      line,
+      line
     })
   }
 

@@ -17,7 +17,8 @@ export function WorktreeCleanupModal({
   const [removing, setRemoving] = useState(false)
 
   useEffect(() => {
-    window.api.getWorktreeStatus(worktreeInfo.worktreePath, worktreeInfo.originalHeadCommit)
+    window.api
+      .getWorktreeStatus(worktreeInfo.worktreePath, worktreeInfo.originalHeadCommit)
       .then(setStatus)
       .catch(() => setStatus(null))
   }, [worktreeInfo])
@@ -25,7 +26,11 @@ export function WorktreeCleanupModal({
   const handleRemove = async (): Promise<void> => {
     setRemoving(true)
     try {
-      await window.api.removeWorktree(worktreeInfo.worktreePath, worktreeInfo.worktreeBranch, worktreeInfo.gitRoot)
+      await window.api.removeWorktree(
+        worktreeInfo.worktreePath,
+        worktreeInfo.worktreeBranch,
+        worktreeInfo.gitRoot
+      )
       onRemove()
     } catch (err) {
       window.api.logError('WorktreeCleanup', `Failed to remove worktree: ${err}`)

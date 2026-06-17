@@ -27,24 +27,27 @@ import { logger } from './logger'
 type McpScope = 'user' | 'project' | 'local'
 
 /** Returns [mcpJsonPath, settingsJsonPath] for the given scope */
-function configFilePaths(scope: McpScope, cwd?: string): { mcpJson: string | null; settingsJson: string } {
+function configFilePaths(
+  scope: McpScope,
+  cwd?: string
+): { mcpJson: string | null; settingsJson: string } {
   switch (scope) {
     case 'user':
       return {
         mcpJson: path.join(os.homedir(), '.claude', '.mcp.json'),
-        settingsJson: path.join(os.homedir(), '.claude', 'settings.json'),
+        settingsJson: path.join(os.homedir(), '.claude', 'settings.json')
       }
     case 'project':
       if (!cwd) throw new Error('cwd required for project scope')
       return {
         mcpJson: path.join(cwd, '.mcp.json'),
-        settingsJson: path.join(cwd, '.claude', 'settings.json'),
+        settingsJson: path.join(cwd, '.claude', 'settings.json')
       }
     case 'local':
       if (!cwd) throw new Error('cwd required for local scope')
       return {
         mcpJson: null, // local scope uses settings.local.json only
-        settingsJson: path.join(cwd, '.claude', 'settings.local.json'),
+        settingsJson: path.join(cwd, '.claude', 'settings.local.json')
       }
   }
 }
@@ -76,10 +79,7 @@ function extractMcpServers(data: Record<string, unknown> | null): Record<string,
  * Load MCP servers from config files for the given scope.
  * Merges from both .mcp.json and settings.json (mcp.json takes priority).
  */
-export function loadMcpServers(
-  scope: McpScope,
-  cwd?: string
-): Record<string, McpServerConfig> {
+export function loadMcpServers(scope: McpScope, cwd?: string): Record<string, McpServerConfig> {
   const paths = configFilePaths(scope, cwd)
   const result: Record<string, McpServerConfig> = {}
 
@@ -152,7 +152,10 @@ export function writeDisabledMcpServers(cwd: string, disabledNames: string[]): v
   }
 
   fs.writeFileSync(configPath, JSON.stringify(data, null, 2) + '\n', { mode: 0o600 })
-  logger.debug('ClaudeMcp', `Wrote disabledMcpServers for ${normalizedCwd}: [${disabledNames.join(', ')}]`)
+  logger.debug(
+    'ClaudeMcp',
+    `Wrote disabledMcpServers for ${normalizedCwd}: [${disabledNames.join(', ')}]`
+  )
 }
 
 /**
@@ -161,11 +164,7 @@ export function writeDisabledMcpServers(cwd: string, disabledNames: string[]): v
  * Unlike saveMcpServers (which writes to a single target file), this removes the
  * server key from both .mcp.json and settings.json so it doesn't reappear on reload.
  */
-export function removeMcpServer(
-  scope: McpScope,
-  serverName: string,
-  cwd?: string
-): void {
+export function removeMcpServer(scope: McpScope, serverName: string, cwd?: string): void {
   const paths = configFilePaths(scope, cwd)
 
   // Remove from .mcp.json
@@ -197,7 +196,9 @@ export function removeMcpServer(
       } else {
         settingsData.mcpServers = servers
       }
-      fs.writeFileSync(paths.settingsJson, JSON.stringify(settingsData, null, 2) + '\n', { mode: 0o600 })
+      fs.writeFileSync(paths.settingsJson, JSON.stringify(settingsData, null, 2) + '\n', {
+        mode: 0o600
+      })
       logger.debug('ClaudeMcp', `Removed "${serverName}" from ${paths.settingsJson}`)
     }
   }

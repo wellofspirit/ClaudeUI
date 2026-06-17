@@ -17,7 +17,11 @@ describe('formatSuggestionLabel', () => {
     })
 
     it('setMode_projectSettings_usesProjectLabel', () => {
-      const s: PermissionSuggestion = { type: 'setMode', destination: 'projectSettings', mode: 'acceptEdits' }
+      const s: PermissionSuggestion = {
+        type: 'setMode',
+        destination: 'projectSettings',
+        mode: 'acceptEdits'
+      }
       expect(formatSuggestionLabel(s)).toBe('Set mode to "acceptEdits" in project settings')
     })
 
@@ -32,7 +36,7 @@ describe('formatSuggestionLabel', () => {
       const s: PermissionSuggestion = {
         type: 'addDirectories',
         destination: 'projectSettings',
-        directories: ['/src', '/lib'],
+        directories: ['/src', '/lib']
       }
       expect(formatSuggestionLabel(s)).toBe('Add directories [/src, /lib] in project settings')
     })
@@ -41,7 +45,7 @@ describe('formatSuggestionLabel', () => {
       const s: PermissionSuggestion = {
         type: 'addDirectories',
         destination: 'userSettings',
-        directories: ['/home/user/project'],
+        directories: ['/home/user/project']
       }
       expect(formatSuggestionLabel(s)).toBe('Add directories [/home/user/project] in user settings')
     })
@@ -50,7 +54,7 @@ describe('formatSuggestionLabel', () => {
       const s: PermissionSuggestion = {
         type: 'addDirectories',
         destination: 'localSettings',
-        directories: [],
+        directories: []
       }
       expect(formatSuggestionLabel(s)).toBe('Add directories [...] in local settings')
     })
@@ -66,7 +70,7 @@ describe('formatSuggestionLabel', () => {
       const s: PermissionSuggestion = {
         type: 'removeDirectories',
         destination: 'localSettings',
-        directories: ['/tmp'],
+        directories: ['/tmp']
       }
       expect(formatSuggestionLabel(s)).toBe('Remove directories [/tmp] in local settings')
     })
@@ -78,7 +82,7 @@ describe('formatSuggestionLabel', () => {
         type: 'addRules',
         destination: 'userSettings',
         behavior: 'allow',
-        rules: [{ toolName: 'Bash', ruleContent: 'npm install' }],
+        rules: [{ toolName: 'Bash', ruleContent: 'npm install' }]
       }
       expect(formatSuggestionLabel(s)).toBe('Allow Bash(npm install) in user settings')
     })
@@ -87,7 +91,7 @@ describe('formatSuggestionLabel', () => {
       const s: PermissionSuggestion = {
         type: 'addRules',
         destination: 'session',
-        rules: [{ toolName: 'Read' }],
+        rules: [{ toolName: 'Read' }]
       }
       expect(formatSuggestionLabel(s)).toBe('Allow Read in this session')
     })
@@ -96,7 +100,7 @@ describe('formatSuggestionLabel', () => {
       const s: PermissionSuggestion = {
         type: 'addRules',
         destination: 'projectSettings',
-        rules: [{ toolName: 'Write', ruleContent: 'src/**' }],
+        rules: [{ toolName: 'Write', ruleContent: 'src/**' }]
       }
       expect(formatSuggestionLabel(s)).toBe('Allow Write(src/**) in project settings')
     })
@@ -109,8 +113,8 @@ describe('formatSuggestionLabel', () => {
         rules: [
           { toolName: 'Bash', ruleContent: 'npm run test' },
           { toolName: 'Read' },
-          { toolName: 'Write', ruleContent: 'src/**' },
-        ],
+          { toolName: 'Write', ruleContent: 'src/**' }
+        ]
       }
       expect(formatSuggestionLabel(s)).toBe(
         'Allow Bash(npm run test), Read, Write(src/**) in user settings'
@@ -122,7 +126,7 @@ describe('formatSuggestionLabel', () => {
         type: 'addRules',
         destination: 'session',
         behavior: 'allow',
-        rules: [],
+        rules: []
       }
       expect(formatSuggestionLabel(s)).toBe('Allow ... in this session')
     })
@@ -134,7 +138,7 @@ describe('formatSuggestionLabel', () => {
         type: 'removeRules',
         destination: 'userSettings',
         behavior: 'allow', // behavior is ignored for removeRules
-        rules: [{ toolName: 'Bash', ruleContent: 'rm -rf' }],
+        rules: [{ toolName: 'Bash', ruleContent: 'rm -rf' }]
       }
       expect(formatSuggestionLabel(s)).toBe('Remove Bash(rm -rf) in user settings')
     })
@@ -146,7 +150,7 @@ describe('formatSuggestionLabel', () => {
         type: 'replaceRules',
         destination: 'localSettings',
         behavior: 'deny',
-        rules: [{ toolName: 'Write' }],
+        rules: [{ toolName: 'Write' }]
       }
       expect(formatSuggestionLabel(s)).toBe('Deny Write in local settings')
     })
@@ -156,7 +160,7 @@ describe('formatSuggestionLabel', () => {
         type: 'replaceRules',
         destination: 'userSettings',
         behavior: 'ask',
-        rules: [{ toolName: 'Bash' }],
+        rules: [{ toolName: 'Bash' }]
       }
       expect(formatSuggestionLabel(s)).toBe('Ask Bash in user settings')
     })
@@ -167,7 +171,7 @@ describe('formatSuggestionLabel', () => {
       const s: PermissionSuggestion = {
         type: 'addRules',
         destination: 'cliArg',
-        rules: [{ toolName: 'Read' }],
+        rules: [{ toolName: 'Read' }]
       }
       expect(formatSuggestionLabel(s)).toBe('Allow Read in CLI arg')
     })
@@ -176,7 +180,7 @@ describe('formatSuggestionLabel', () => {
       const s: PermissionSuggestion = {
         type: 'addRules',
         destination: 'someUnknownDest',
-        rules: [{ toolName: 'Read' }],
+        rules: [{ toolName: 'Read' }]
       }
       expect(formatSuggestionLabel(s)).toBe('Allow Read in someUnknownDest')
     })

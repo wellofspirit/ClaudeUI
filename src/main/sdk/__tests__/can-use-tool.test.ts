@@ -43,7 +43,7 @@ function fakeChild(): {
         if (line.trim()) stdinLines.push(JSON.parse(line))
       }
       cb()
-    },
+    }
   })
   const stderr = new Readable({ read() {} })
   const child = Object.assign(new EventEmitter(), {
@@ -51,7 +51,7 @@ function fakeChild(): {
     stdout,
     stderr,
     kill: (_sig?: string): boolean => true,
-    pid: 12345,
+    pid: 12345
   }) as unknown as EventEmitter & Record<string, unknown>
 
   return {
@@ -61,7 +61,7 @@ function fakeChild(): {
     finish: () => {
       stdout.push(null)
       child.emit('exit', 0, null)
-    },
+    }
   }
 }
 
@@ -92,8 +92,8 @@ describe('can_use_tool control_response shape', () => {
         // under vitest/jsdom. The path is never actually used because our
         // spawnClaudeCodeProcess hook takes over.
         pathToClaudeCodeExecutable: '/fake/cli.js',
-        spawnClaudeCodeProcess: () => child as unknown as import('node:child_process').ChildProcess,
-      },
+        spawnClaudeCodeProcess: () => child as unknown as import('node:child_process').ChildProcess
+      }
     })
     handles.push(q)
     // Drain messages in the background so the iterator doesn't block.
@@ -120,7 +120,7 @@ describe('can_use_tool control_response shape', () => {
   it('allow-branch response uses behavior:"allow" (not permitted:true)', async () => {
     const canUseTool: CanUseTool = async (_name, input) => ({
       behavior: 'allow',
-      updatedInput: { ...input, patched: true },
+      updatedInput: { ...input, patched: true }
     })
     const { stdinLines, emitLine } = await runWith(canUseTool)
 
@@ -131,22 +131,22 @@ describe('can_use_tool control_response shape', () => {
         subtype: 'can_use_tool',
         tool_name: 'Bash',
         input: { cmd: 'ls' },
-        tool_use_id: 'toolu_abc',
-      },
+        tool_use_id: 'toolu_abc'
+      }
     })
 
     const resp = await waitFor(() =>
       stdinLines.find(
         (l) =>
           l.type === 'control_response' &&
-          (l.response as { request_id?: string } | undefined)?.request_id === 'r1',
-      ),
+          (l.response as { request_id?: string } | undefined)?.request_id === 'r1'
+      )
     )
     const inner = (resp.response as { response: Record<string, unknown> }).response
     expect(inner).toMatchObject({
       behavior: 'allow',
       updatedInput: { cmd: 'ls', patched: true },
-      toolUseID: 'toolu_abc',
+      toolUseID: 'toolu_abc'
     })
     // Legacy shape must not leak through.
     expect(inner).not.toHaveProperty('permitted')
@@ -156,7 +156,7 @@ describe('can_use_tool control_response shape', () => {
     const canUseTool: CanUseTool = async () => ({
       behavior: 'deny',
       message: 'user refused',
-      interrupt: true,
+      interrupt: true
     })
     const { stdinLines, emitLine } = await runWith(canUseTool)
 
@@ -167,23 +167,23 @@ describe('can_use_tool control_response shape', () => {
         subtype: 'can_use_tool',
         tool_name: 'Bash',
         input: { cmd: 'rm -rf /' },
-        tool_use_id: 'toolu_xyz',
-      },
+        tool_use_id: 'toolu_xyz'
+      }
     })
 
     const resp = await waitFor(() =>
       stdinLines.find(
         (l) =>
           l.type === 'control_response' &&
-          (l.response as { request_id?: string } | undefined)?.request_id === 'r2',
-      ),
+          (l.response as { request_id?: string } | undefined)?.request_id === 'r2'
+      )
     )
     const inner = (resp.response as { response: Record<string, unknown> }).response
     expect(inner).toMatchObject({
       behavior: 'deny',
       message: 'user refused',
       interrupt: true,
-      toolUseID: 'toolu_xyz',
+      toolUseID: 'toolu_xyz'
     })
     expect(inner).not.toHaveProperty('permitted')
   })
@@ -192,7 +192,7 @@ describe('can_use_tool control_response shape', () => {
     // cli.js's schema has `message: z.string()` on the deny branch — no
     // `.optional()`. A canUseTool callback that omits it must not break
     // the channel; we coerce to a default.
-    const canUseTool: CanUseTool = async () => ({ behavior: 'deny' } as never)
+    const canUseTool: CanUseTool = async () => ({ behavior: 'deny' }) as never
     const { stdinLines, emitLine } = await runWith(canUseTool)
 
     emitLine({
@@ -202,16 +202,16 @@ describe('can_use_tool control_response shape', () => {
         subtype: 'can_use_tool',
         tool_name: 'Bash',
         input: {},
-        tool_use_id: 'toolu_fff',
-      },
+        tool_use_id: 'toolu_fff'
+      }
     })
 
     const resp = await waitFor(() =>
       stdinLines.find(
         (l) =>
           l.type === 'control_response' &&
-          (l.response as { request_id?: string } | undefined)?.request_id === 'r3',
-      ),
+          (l.response as { request_id?: string } | undefined)?.request_id === 'r3'
+      )
     )
     const inner = (resp.response as { response: Record<string, unknown> }).response
     expect(inner.behavior).toBe('deny')
@@ -229,16 +229,16 @@ describe('can_use_tool control_response shape', () => {
         subtype: 'can_use_tool',
         tool_name: 'Bash',
         input: { cmd: 'ls' },
-        tool_use_id: 'toolu_no_cb',
-      },
+        tool_use_id: 'toolu_no_cb'
+      }
     })
 
     const resp = await waitFor(() =>
       stdinLines.find(
         (l) =>
           l.type === 'control_response' &&
-          (l.response as { request_id?: string } | undefined)?.request_id === 'r4',
-      ),
+          (l.response as { request_id?: string } | undefined)?.request_id === 'r4'
+      )
     )
     const inner = (resp.response as { response: Record<string, unknown> }).response
     expect(inner).toMatchObject({ behavior: 'allow', toolUseID: 'toolu_no_cb' })

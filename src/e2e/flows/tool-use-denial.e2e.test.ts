@@ -14,7 +14,7 @@ import {
   makeToolUseBlock,
   makeSessionStatus,
   makePendingApproval,
-  resetFactoryCounter,
+  resetFactoryCounter
 } from '@test/factories/messages'
 import type { ChatMessage, PendingApproval, StreamDelta, SessionStatus } from '../../shared/types'
 
@@ -29,7 +29,9 @@ function wireEventHandlers(app: TestApp): Array<() => void> {
     return (cb: T) => {
       const handler = (_: unknown, ...args: unknown[]): void => (cb as Function)(...args)
       app.bridge.ipcRenderer.on(channel, handler)
-      const cleanup = (): void => { app.bridge.ipcRenderer.removeListener(channel, handler) }
+      const cleanup = (): void => {
+        app.bridge.ipcRenderer.removeListener(channel, handler)
+      }
       cleanups.push(cleanup)
       return cleanup
     }
@@ -42,29 +44,36 @@ function wireEventHandlers(app: TestApp): Array<() => void> {
     if (data.type === 'thinking') store().appendStreamingThinking(routingId, data.text)
     else store().appendStreamingText(routingId, data.text)
   })
-  onEvent<(routingId: string, approval: PendingApproval) => void>('session:approval-request')((routingId, approval) => {
-    store().addPendingApproval(routingId, approval)
-  })
-  onEvent<(routingId: string, status: SessionStatus) => void>('session:status')((routingId, status) => {
-    let effective = routingId
-    if (status.sessionId && status.sessionId !== routingId) {
-      const s = store()
-      if (s.sessions[routingId]) { s.rekeySession(routingId, status.sessionId); effective = status.sessionId }
-    }
-    if (status.state === 'disconnected') {
-      store().markSdkInactive(effective)
-      store().setStatus(effective, { ...status, state: 'idle' })
-      store().clearPendingApprovals(effective)
-      return
-    }
-    store().setStatus(effective, status)
-    if (status.state === 'idle') store().clearPendingApprovals(effective)
-  })
-  onEvent<(routingId: string, data: { toolUseId: string; result: string; isError: boolean }) => void>('session:tool-result')(
-    (routingId, { toolUseId, result, isError }) => {
-      store().appendToolResult(routingId, toolUseId, result, isError)
+  onEvent<(routingId: string, approval: PendingApproval) => void>('session:approval-request')(
+    (routingId, approval) => {
+      store().addPendingApproval(routingId, approval)
     }
   )
+  onEvent<(routingId: string, status: SessionStatus) => void>('session:status')(
+    (routingId, status) => {
+      let effective = routingId
+      if (status.sessionId && status.sessionId !== routingId) {
+        const s = store()
+        if (s.sessions[routingId]) {
+          s.rekeySession(routingId, status.sessionId)
+          effective = status.sessionId
+        }
+      }
+      if (status.state === 'disconnected') {
+        store().markSdkInactive(effective)
+        store().setStatus(effective, { ...status, state: 'idle' })
+        store().clearPendingApprovals(effective)
+        return
+      }
+      store().setStatus(effective, status)
+      if (status.state === 'idle') store().clearPendingApprovals(effective)
+    }
+  )
+  onEvent<
+    (routingId: string, data: { toolUseId: string; result: string; isError: boolean }) => void
+  >('session:tool-result')((routingId, { toolUseId, result, isError }) => {
+    store().appendToolResult(routingId, toolUseId, result, isError)
+  })
 
   return cleanups
 }
@@ -76,7 +85,10 @@ beforeEach(async () => {
   // Override approval-response handler so we can observe what the renderer
   // sent back to main.
   app.bridge.ipcMain.removeHandler?.('session:approval-response')
-  app.bridge.ipcMain.handle('session:approval-response', async (_: unknown, ...args: unknown[]) => ({ ok: true, data: { args } }))
+  app.bridge.ipcMain.handle(
+    'session:approval-response',
+    async (_: unknown, ...args: unknown[]) => ({ ok: true, data: { args } })
+  )
 
   useSessionStore.setState({
     activeSessionId: null,
@@ -84,7 +96,7 @@ beforeEach(async () => {
     directories: [],
     recentSessionIds: [],
     pinnedSessionIds: [],
-    customTitles: {},
+    customTitles: {}
   })
   eventCleanups = wireEventHandlers(app)
 })
@@ -98,16 +110,26 @@ describe('E2E: tool use denial flow', () => {
   it('user denies → approval removed, tool_result carries error, assistant continues', async () => {
     const routingId = 'r1'
     useSessionStore.getState().createNewSession(routingId, '/test')
-    app.emit('session:status', routingId, makeSessionStatus({ state: 'running', sessionId: routingId }))
+    app.emit(
+      'session:status',
+      routingId,
+      makeSessionStatus({ state: 'running', sessionId: routingId })
+    )
 
     const toolUseMsg = makeChatMessage({
-      content: [makeToolUseBlock('Bash', { command: 'rm -rf /' }, 'tool-danger')],
+      content: [makeToolUseBlock('Bash', { command: 'rm -rf /' }, 'tool-danger')]
     })
     app.emit('session:message', routingId, toolUseMsg)
 
-    app.emit('session:approval-request', routingId, makePendingApproval({
-      requestId: 'req-danger', toolName: 'Bash', input: { command: 'rm -rf /' },
-    }))
+    app.emit(
+      'session:approval-request',
+      routingId,
+      makePendingApproval({
+        requestId: 'req-danger',
+        toolName: 'Bash',
+        input: { command: 'rm -rf /' }
+      })
+    )
     expect(useSessionStore.getState().sessions[routingId].pendingApprovals).toHaveLength(1)
 
     // User denies → renderer fires respondApproval('deny')
@@ -117,7 +139,7 @@ describe('E2E: tool use denial flow', () => {
     app.emit('session:tool-result', routingId, {
       toolUseId: 'tool-danger',
       result: 'Permission denied by user',
-      isError: true,
+      isError: true
     })
 
     // Assistant continues with alternate response
@@ -125,7 +147,11 @@ describe('E2E: tool use denial flow', () => {
     app.emit('session:message', routingId, makeAssistantMessage('I cannot do that.'))
 
     // Session goes idle — clears approvals
-    app.emit('session:status', routingId, makeSessionStatus({ state: 'idle', sessionId: routingId }))
+    app.emit(
+      'session:status',
+      routingId,
+      makeSessionStatus({ state: 'idle', sessionId: routingId })
+    )
 
     const session = useSessionStore.getState().sessions[routingId]
     expect(session.pendingApprovals).toHaveLength(0)
@@ -153,7 +179,11 @@ describe('E2E: tool use denial flow', () => {
 
     const routingId = 'r1'
     useSessionStore.getState().createNewSession(routingId, '/test')
-    app.emit('session:approval-request', routingId, makePendingApproval({ requestId: 'req-deny', toolName: 'Write' }))
+    app.emit(
+      'session:approval-request',
+      routingId,
+      makePendingApproval({ requestId: 'req-deny', toolName: 'Write' })
+    )
 
     await app.api.respondApproval(routingId, 'req-deny', 'deny')
 
@@ -169,8 +199,16 @@ describe('E2E: tool use denial flow', () => {
     const routingId = 'r1'
     useSessionStore.getState().createNewSession(routingId, '/test')
 
-    app.emit('session:approval-request', routingId, makePendingApproval({ requestId: 'req-1', toolName: 'Bash' }))
-    app.emit('session:approval-request', routingId, makePendingApproval({ requestId: 'req-2', toolName: 'Write' }))
+    app.emit(
+      'session:approval-request',
+      routingId,
+      makePendingApproval({ requestId: 'req-1', toolName: 'Bash' })
+    )
+    app.emit(
+      'session:approval-request',
+      routingId,
+      makePendingApproval({ requestId: 'req-2', toolName: 'Write' })
+    )
     expect(useSessionStore.getState().sessions[routingId].pendingApprovals).toHaveLength(2)
 
     // Simulate: deny on req-1 → store.removePendingApproval by requestId

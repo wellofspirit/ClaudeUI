@@ -26,7 +26,7 @@ import type { DiffComment, GitStatusData, GitFileStatus } from '../../../../../.
 // ---------------------------------------------------------------------------
 
 vi.mock('../../../../hooks/useGutterDragSelection', () => ({
-  useGutterDragSelection: () => ({ containerRef: () => {} }),
+  useGutterDragSelection: () => ({ containerRef: () => {} })
 }))
 
 // ---------------------------------------------------------------------------
@@ -39,7 +39,7 @@ vi.mock('../View', () => ({
   GitFileDiffViewView: (props: GitFileDiffViewViewProps) => {
     viewProps = props
     return null
-  },
+  }
 }))
 
 // ---------------------------------------------------------------------------
@@ -69,7 +69,7 @@ function makeGitStatus(files: GitFileStatus[] = []): GitStatusData {
     unstaged: files.filter((f) => f.index === ' ' || f.index === '?').map((f) => f.path),
     untracked: [],
     linesAdded: 0,
-    linesRemoved: 0,
+    linesRemoved: 0
   }
 }
 
@@ -83,7 +83,7 @@ function makeDiffComment(overrides: Partial<DiffComment> = {}): DiffComment {
     lineContent: 'const x = 1',
     comment: 'Looks good',
     createdAt: Date.now(),
-    ...overrides,
+    ...overrides
   }
 }
 
@@ -134,7 +134,7 @@ describe('GitFileDiffView FC', () => {
       directories: [],
       recentSessionIds: [],
       pinnedSessionIds: [],
-      customTitles: {},
+      customTitles: {}
     })
   })
 
@@ -284,7 +284,7 @@ describe('GitFileDiffView FC', () => {
       endLineNumber: 12,
       side: 'new',
       lineContent: 'const foo = bar',
-      comment: 'Check this',
+      comment: 'Check this'
     })
     useSessionStore.getState().addDiffComment(ROUTE, comment)
 

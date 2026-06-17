@@ -6,10 +6,10 @@ Exposes the CLI's "send to background" feature (foreground → background task c
 
 `@anthropic-ai/claude-agent-sdk` — bundled `cli.js` and `sdk.mjs` files.
 
-| Component | Version at time of discovery |
-|---|---|
-| SDK package | 0.2.63 |
-| Bundled CLI (`cli.js`) | 2.1.63 |
+| Component              | Version at time of discovery |
+| ---------------------- | ---------------------------- |
+| SDK package            | 0.2.63                       |
+| Bundled CLI (`cli.js`) | 2.1.63                       |
 
 ## The Problem
 
@@ -38,6 +38,7 @@ tasks: {
 ### Background conversion — two task types
 
 **Bash tasks** (`type: "local_bash"`):
+
 ```
 User triggers background
   → shellCommand.background(taskId)
@@ -49,6 +50,7 @@ User triggers background
 ```
 
 **Agent tasks** (`type: "local_agent"`):
+
 ```
 User triggers background
   → state.isBackgrounded = true
@@ -82,16 +84,16 @@ These functions are **not accessible** from the control message handler's scope 
 
 ### Variable mapping (Part A injection site)
 
-| Variable | Source | Value |
-|---|---|---|
-| `r` | Control message loop | The incoming control request message |
-| `$` | Closure (`getAppState`) | Async function returning app state |
-| `f` | Closure (`setAppState`) | Zustand-style state updater |
-| `t` | Closure | Success response function: `t(msg, result)` |
-| `O6` | Closure | Error response function: `O6(msg, errorString)` |
-| `wi` | Module scope | Type guard: `A.type === "local_bash"` |
-| `Yi` | Module scope | Type guard: `A.type === "local_agent"` |
-| `Ff6` | Module scope | `Map<taskId, resolveBackgroundSignal>` |
+| Variable | Source                  | Value                                           |
+| -------- | ----------------------- | ----------------------------------------------- |
+| `r`      | Control message loop    | The incoming control request message            |
+| `$`      | Closure (`getAppState`) | Async function returning app state              |
+| `f`      | Closure (`setAppState`) | Zustand-style state updater                     |
+| `t`      | Closure                 | Success response function: `t(msg, result)`     |
+| `O6`     | Closure                 | Error response function: `O6(msg, errorString)` |
+| `wi`     | Module scope            | Type guard: `A.type === "local_bash"`           |
+| `Yi`     | Module scope            | Type guard: `A.type === "local_agent"`          |
+| `Ff6`    | Module scope            | `Map<taskId, resolveBackgroundSignal>`          |
 
 ## The Patches
 
@@ -167,16 +169,16 @@ else O6(r,`Unsupported control request subtype: ${r.request.subtype}`)
 
 Six symbols are extracted at apply time from content patterns:
 
-| Symbol | Pattern | Example (v2.1.63) |
-|---|---|---|
-| `errorFn` | From anchor: `else <fn>(<msg>,\`Unsupported...` | `O6` |
-| `msgVar` | From anchor: backreference `\2` | `r` |
-| `successFn` | `),<fn>(<msg>,{})}catch` near anchor | `t` |
-| `getAppStateFn` | `getAppState:<var>,setAppState:<var>` | `$` |
-| `setAppStateFn` | Same pattern, second capture | `f` |
-| `wiFn` | `function <fn>(...){...A.type==="local_bash"}` | `wi` |
-| `yiFn` | `function <fn>(...){...A.type==="local_agent"}` | `Yi` |
-| `bgSignalMap` | `<map>.set(A,<var>),<fn>(<state>,<setter>);let <var>;if(<var>!==void 0&&<var>>0)` + verified `<map>=new Map` | `Ff6` |
+| Symbol          | Pattern                                                                                                      | Example (v2.1.63) |
+| --------------- | ------------------------------------------------------------------------------------------------------------ | ----------------- |
+| `errorFn`       | From anchor: `else <fn>(<msg>,\`Unsupported...`                                                              | `O6`              |
+| `msgVar`        | From anchor: backreference `\2`                                                                              | `r`               |
+| `successFn`     | `),<fn>(<msg>,{})}catch` near anchor                                                                         | `t`               |
+| `getAppStateFn` | `getAppState:<var>,setAppState:<var>`                                                                        | `$`               |
+| `setAppStateFn` | Same pattern, second capture                                                                                 | `f`               |
+| `wiFn`          | `function <fn>(...){...A.type==="local_bash"}`                                                               | `wi`              |
+| `yiFn`          | `function <fn>(...){...A.type==="local_agent"}`                                                              | `Yi`              |
+| `bgSignalMap`   | `<map>.set(A,<var>),<fn>(<state>,<setter>);let <var>;if(<var>!==void 0&&<var>>0)` + verified `<map>=new Map` | `Ff6`             |
 
 ### Part B: `backgroundTask()` method (sdk.mjs)
 
@@ -207,46 +209,55 @@ This adds a new method to the `U4` (Query) class. It follows the identical patte
 ## How to Find This Code
 
 ### Control request dispatcher (injection site)
+
 ```bash
 bundle-analyzer find cli.js "Unsupported control request subtype" --compact
 ```
+
 The match inside the `async()=>` function (~char 11.3M) is the main SDK query loop. The other matches are the DirectConnect WebSocket handler and the remote REPL bridge handler.
 
 ### `stop_task` handler (reference pattern for the injection)
+
 ```bash
 bundle-analyzer find cli.js "stop_task" --compact
 ```
 
 ### `wi` — local_bash type check
+
 ```bash
 bundle-analyzer find cli.js '"local_bash"' --compact
 # Then extract the function with the type guard pattern
 ```
 
 ### `Yi` — local_agent type check
+
 ```bash
 bundle-analyzer find cli.js '"local_agent"' --compact
 ```
 
 ### `Ff6` — backgroundSignal resolver Map
+
 ```bash
 bundle-analyzer find cli.js "backgroundSignal" --compact
 # Returns the agent task factory (Wo4) where the Map is populated
 ```
 
 ### `mpY` — CLI's native bash background function (reference only)
+
 ```bash
 bundle-analyzer find cli.js ".background(" --compact
 # The match inside function mpY shows the CLI's own implementation
 ```
 
 ### `Go4` — CLI's native agent background function (reference only)
+
 ```bash
 bundle-analyzer find cli.js "isBackgrounded" --compact --limit 5
 # Go4 is the function that sets isBackgrounded and resolves Ff6
 ```
 
 ### `shellCommand.background()` — the ShellCommand method
+
 ```bash
 bundle-analyzer extract-fn cli.js <offset-of-mpY>
 # The .background() method is on the ShellCommand class, sets status="backgrounded"
@@ -254,6 +265,7 @@ bundle-analyzer extract-fn cli.js <offset-of-mpY>
 ```
 
 ### `stopTask` in sdk.mjs (Part B anchor)
+
 ```bash
 grep -o 'async stopTask.*}' node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs | head -1
 ```
@@ -338,17 +350,17 @@ renderer: window.api.backgroundTask(routingId, toolUseId)
 
 ## Key Functions Reference
 
-| Name (v2.1.63) | Purpose | Find pattern |
-|---|---|---|
-| `wi` | Type guard: `local_bash` | `A.type==="local_bash"` |
-| `Yi` | Type guard: `local_agent` | `A.type==="local_agent"` |
-| `Ff6` | Background signal resolver Map | `backgroundSignal` nearby |
-| `mpY` | CLI's bash background function | `.background(` in task module |
-| `Go4` | CLI's agent background function | `isBackgrounded` + `Ff6` |
-| `gN1` | CLI's background-all-tasks function | Calls `mpY` and `Go4` |
-| `Eo4` | Bash task factory (creates task state) | `"local_bash"` + `shellCommand` |
-| `Wo4` | Agent task factory (creates task state + `Ff6` entry) | `"local_agent"` + `backgroundSignal` |
-| `uv1` | `stop_task` implementation (reference) | `"No task found with ID"` |
+| Name (v2.1.63) | Purpose                                               | Find pattern                         |
+| -------------- | ----------------------------------------------------- | ------------------------------------ |
+| `wi`           | Type guard: `local_bash`                              | `A.type==="local_bash"`              |
+| `Yi`           | Type guard: `local_agent`                             | `A.type==="local_agent"`             |
+| `Ff6`          | Background signal resolver Map                        | `backgroundSignal` nearby            |
+| `mpY`          | CLI's bash background function                        | `.background(` in task module        |
+| `Go4`          | CLI's agent background function                       | `isBackgrounded` + `Ff6`             |
+| `gN1`          | CLI's background-all-tasks function                   | Calls `mpY` and `Go4`                |
+| `Eo4`          | Bash task factory (creates task state)                | `"local_bash"` + `shellCommand`      |
+| `Wo4`          | Agent task factory (creates task state + `Ff6` entry) | `"local_agent"` + `backgroundSignal` |
+| `uv1`          | `stop_task` implementation (reference)                | `"No task found with ID"`            |
 
 **Note:** All minified names will change in future SDK versions. Use
 content patterns (string literals, structural shapes) to relocate code.
@@ -360,7 +372,7 @@ content patterns (string literals, structural shapes) to relocate code.
 
 ## Files
 
-| File | Purpose |
-|---|---|
-| `README.md` | This document |
+| File        | Purpose                                                       |
+| ----------- | ------------------------------------------------------------- |
+| `README.md` | This document                                                 |
 | `apply.mjs` | Patch script (Part A: cli.js handler, Part B: sdk.mjs method) |

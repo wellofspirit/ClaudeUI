@@ -36,7 +36,14 @@
  */
 
 import { createHash } from 'node:crypto'
-import { createWriteStream, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  createWriteStream,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync
+} from 'node:fs'
 import { get as httpsGet } from 'node:https'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -48,7 +55,7 @@ const OUT_CLI = join(VENDOR_DIR, 'cli.js')
 const OUT_VERSION = join(VENDOR_DIR, 'version.json')
 const DL_BASE = 'https://downloads.claude.ai/claude-code-releases'
 const UA = {
-  'User-Agent': 'claude-ui-extract/2.0 (+https://github.com/wellofspirit/ClaudeUI)',
+  'User-Agent': 'claude-ui-extract/2.0 (+https://github.com/wellofspirit/ClaudeUI)'
 }
 const BUN_MAGIC = Buffer.from('\n---- Bun! ----\n', 'utf8')
 
@@ -160,7 +167,7 @@ async function resolveBinary(arg) {
   const entry = manifest.platforms[key]
   if (!entry) {
     throw new Error(
-      `Platform ${key} not in manifest for ${version}. Available: ${Object.keys(manifest.platforms).join(', ')}`,
+      `Platform ${key} not in manifest for ${version}. Available: ${Object.keys(manifest.platforms).join(', ')}`
     )
   }
 
@@ -168,7 +175,7 @@ async function resolveBinary(arg) {
   mkdirSync(cacheDir, { recursive: true })
   const binPath = join(
     cacheDir,
-    `claude-${version}-${key}${binName.endsWith('.exe') ? '.exe' : ''}`,
+    `claude-${version}-${key}${binName.endsWith('.exe') ? '.exe' : ''}`
   )
 
   if (existsSync(binPath) && !arg.force) {
@@ -209,7 +216,10 @@ function findBunSectionRawOff(buf) {
   const sectionsOff = peOff + 24 + sizeOptHdr
   for (let i = 0; i < numSections; i++) {
     const s = sectionsOff + i * 40
-    const name = buf.subarray(s, s + 8).toString('ascii').replace(/\0+$/, '')
+    const name = buf
+      .subarray(s, s + 8)
+      .toString('ascii')
+      .replace(/\0+$/, '')
     if (name === '.bun') return buf.readUInt32LE(s + 20)
   }
   throw new Error('.bun section not found in PE binary')
@@ -251,7 +261,9 @@ function extractWrappedAssets(buf) {
     const e = base + i * 52
     const nameOff = blob.readUInt32LE(e)
     const nameLen = blob.readUInt32LE(e + 4)
-    const name = blob.subarray(data_start + nameOff, data_start + nameOff + nameLen).toString('utf8')
+    const name = blob
+      .subarray(data_start + nameOff, data_start + nameOff + nameLen)
+      .toString('utf8')
     const cOff = blob.readUInt32LE(e + 8)
     const cLen = blob.readUInt32LE(e + 12)
     const bytes = Buffer.from(blob.subarray(data_start + cOff, data_start + cOff + cLen))
@@ -322,11 +334,11 @@ async function main() {
         extractedAt: new Date().toISOString(),
         cliSize: cliBytes.length,
         cliSha256: createHash('sha256').update(cliBytes).digest('hex'),
-        form: 'wrapped',
+        form: 'wrapped'
       },
       null,
-      2,
-    ) + '\n',
+      2
+    ) + '\n'
   )
   log(`wrote ${OUT_VERSION}`)
   log('done.')

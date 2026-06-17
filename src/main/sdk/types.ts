@@ -56,6 +56,14 @@ export interface AssistantMessage extends BaseSDKMessage {
     [k: string]: unknown
   }
   parent_tool_use_id?: string | null
+  /** Present on the JSONL transcript (not the SDK stdout frame) when this
+   *  "assistant" frame is a surfaced API error. Prefer `error` for live
+   *  detection. */
+  isApiErrorMessage?: boolean
+  /** Top-level error code on a surfaced API-error frame — the reliable live
+   *  signal on the SDK stdout stream (e.g. "authentication_failed"). Absent on
+   *  normal/benign synthetic assistant frames. */
+  error?: string
 }
 
 export interface UserMessage extends BaseSDKMessage {
@@ -93,9 +101,14 @@ export interface SystemMessage extends BaseSDKMessage {
     | 'task_notification'
     | 'queued_command_consumed'
     | 'compact_boundary'
+    | 'model_refusal_fallback'
+    | 'model_fallback'
     | string
   permissionMode?: string
   /** init-only fields */
+  /** Resolved canonical model id (e.g. "claude-opus-4-8") — what the `default`
+   *  alias and other server-resolved aliases actually map to this session. */
+  model?: string
   slash_commands?: string[]
   skills?: string[]
   mcp_servers?: Array<{ name: string; status: string }>
@@ -121,6 +134,13 @@ export interface SystemMessage extends BaseSDKMessage {
   } | null
   /** queued_command_consumed-only field */
   prompt?: string
+  /** model_refusal_fallback / model_fallback fields (docs/protocol/04-system-subtypes.md §4.20–4.21) */
+  trigger?: string
+  direction?: 'retry' | 'revert' | 'sticky'
+  original_model?: string
+  fallback_model?: string
+  content?: string
+  retracted_message_uuids?: string[]
 }
 
 export interface ResultMessage extends BaseSDKMessage {
@@ -173,7 +193,7 @@ export interface AuthStatusMessage extends BaseSDKMessage {
 export interface ControlRequestMessage extends BaseSDKMessage {
   type: 'control_request'
   request_id?: string
-  request?: { subtype?: string;[k: string]: unknown }
+  request?: { subtype?: string; [k: string]: unknown }
 }
 
 export interface ControlResponseMessage extends BaseSDKMessage {
@@ -243,7 +263,7 @@ export interface CanUseToolContext {
 export type CanUseTool = (
   toolName: string,
   input: Record<string, unknown>,
-  context: CanUseToolContext,
+  context: CanUseToolContext
 ) => Promise<CanUseToolResult>
 
 export interface ThinkingConfig {
@@ -271,7 +291,7 @@ export type SystemPrompt = string | string[] | SystemPromptPreset
 export type HookCallback = (
   input: Record<string, unknown>,
   toolUseId: string | undefined,
-  context: { signal: AbortSignal },
+  context: { signal: AbortSignal }
 ) => Promise<unknown> | unknown
 
 export interface HookMatcher {
@@ -302,12 +322,10 @@ export interface ElicitationContext {
 
 export type ElicitationCallback = (
   params: ElicitationContext,
-  opts: { signal: AbortSignal },
+  opts: { signal: AbortSignal }
 ) => Promise<unknown>
 
-export type GetOAuthTokenCallback = (opts: {
-  signal: AbortSignal
-}) => Promise<string | null>
+export type GetOAuthTokenCallback = (opts: { signal: AbortSignal }) => Promise<string | null>
 
 /**
  * Generic user-dialog prompt initiated by cli.js
@@ -333,7 +351,7 @@ export interface UserDialogResult {
 
 export type UserDialogCallback = (
   request: UserDialogRequest,
-  opts: { signal: AbortSignal },
+  opts: { signal: AbortSignal }
 ) => Promise<UserDialogResult>
 
 export type SpawnClaudeCodeProcess = (opts: {
@@ -384,11 +402,7 @@ export interface SdkMcpServer {
   instance?: import('@modelcontextprotocol/sdk/server/mcp.js').McpServer
 }
 
-export type McpServerConfig =
-  | McpServerStdio
-  | McpServerHttp
-  | McpServerSse
-  | SdkMcpServer
+export type McpServerConfig = McpServerStdio | McpServerHttp | McpServerSse | SdkMcpServer
 
 /**
  * A tool registered on an in-process SDK MCP server. The schema is a record
@@ -621,7 +635,7 @@ export interface QueryHandle extends AsyncIterable<SDKMessage> {
   enableRemoteControl(enabled: boolean, opts?: { name?: string }): Promise<unknown>
   generateSessionTitle(
     description: string,
-    opts?: { persist?: boolean },
+    opts?: { persist?: boolean }
   ): Promise<{ title?: string } | unknown>
   askSideQuestion(question: string): Promise<string | null>
   launchUltrareview(args: unknown, opts?: { confirm?: boolean }): Promise<unknown>

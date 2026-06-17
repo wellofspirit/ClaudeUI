@@ -16,7 +16,7 @@ describe('buildEnv model override overlay', () => {
       ANTHROPIC_MODEL: 'should-not-leak',
       ANTHROPIC_DEFAULT_SONNET_MODEL: 'should-not-leak',
       ANTHROPIC_DEFAULT_OPUS_MODEL: 'should-not-leak',
-      ANTHROPIC_DEFAULT_HAIKU_MODEL: 'should-not-leak',
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: 'should-not-leak'
     })
     expect(env.ANTHROPIC_MODEL).toBeUndefined()
     expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBeUndefined()
@@ -29,7 +29,7 @@ describe('buildEnv model override overlay', () => {
       ANTHROPIC_MODEL: 'sonnet',
       ANTHROPIC_DEFAULT_SONNET_MODEL: 'claude-sonnet-4-6',
       ANTHROPIC_DEFAULT_OPUS_MODEL: 'claude-opus-4-7',
-      ANTHROPIC_DEFAULT_HAIKU_MODEL: 'claude-haiku-4-5',
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: 'claude-haiku-4-5'
     })
     const env = buildEnv({})
     expect(env.ANTHROPIC_MODEL).toBe('sonnet')
@@ -43,7 +43,7 @@ describe('buildEnv model override overlay', () => {
       ANTHROPIC_MODEL: '',
       ANTHROPIC_DEFAULT_SONNET_MODEL: 'my-gateway/sonnet',
       ANTHROPIC_DEFAULT_OPUS_MODEL: '',
-      ANTHROPIC_DEFAULT_HAIKU_MODEL: '',
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: ''
     })
     const env = buildEnv({})
     expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe('my-gateway/sonnet')
@@ -57,12 +57,12 @@ describe('buildEnv model override overlay', () => {
       ANTHROPIC_MODEL: 'opus',
       ANTHROPIC_DEFAULT_SONNET_MODEL: '',
       ANTHROPIC_DEFAULT_OPUS_MODEL: '',
-      ANTHROPIC_DEFAULT_HAIKU_MODEL: '',
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: ''
     })
     // Base env carries a stale ANTHROPIC_DEFAULT_SONNET_MODEL — overlay must strip it
     // because the user did not opt to set sonnet.
     const env = buildEnv({
-      ANTHROPIC_DEFAULT_SONNET_MODEL: 'stale-from-process-env',
+      ANTHROPIC_DEFAULT_SONNET_MODEL: 'stale-from-process-env'
     })
     expect(env.ANTHROPIC_MODEL).toBe('opus')
     expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBeUndefined()
@@ -73,7 +73,7 @@ describe('buildEnv model override overlay', () => {
       ANTHROPIC_MODEL: 'sonnet',
       ANTHROPIC_DEFAULT_SONNET_MODEL: 'claude-sonnet-4-6',
       ANTHROPIC_DEFAULT_OPUS_MODEL: 'claude-opus-4-7',
-      ANTHROPIC_DEFAULT_HAIKU_MODEL: 'claude-haiku-4-5',
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: 'claude-haiku-4-5'
     })
     expect(buildEnv({}).ANTHROPIC_MODEL).toBe('sonnet')
     setModelEnv(null)
@@ -89,7 +89,7 @@ describe('buildEnv model override overlay', () => {
       ANTHROPIC_MODEL: 'opusplan',
       ANTHROPIC_DEFAULT_SONNET_MODEL: '',
       ANTHROPIC_DEFAULT_OPUS_MODEL: 'claude-opus-4-7[1m]',
-      ANTHROPIC_DEFAULT_HAIKU_MODEL: '',
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: ''
     })
     const env = buildEnv({})
     expect(env.ANTHROPIC_MODEL).toBe('opusplan')

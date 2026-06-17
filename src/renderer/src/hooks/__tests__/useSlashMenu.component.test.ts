@@ -15,7 +15,7 @@ import type { SlashCommandInfo } from '../../../../shared/types'
 const commands: SlashCommandInfo[] = [
   { name: '/commit', description: 'Commit changes' },
   { name: '/clear', description: 'Clear session' },
-  { name: '/help', description: 'Get help' },
+  { name: '/help', description: 'Get help' }
 ]
 
 function makeKeyEvent(key: string): React.KeyboardEvent {
@@ -37,8 +37,10 @@ function setup(initialText = '', cmds = commands) {
     useSlashMenu({
       slashCommands: cmds,
       text: state.text,
-      setText: (t: string) => { state.text = t },
-      textareaRef,
+      setText: (t: string) => {
+        state.text = t
+      },
+      textareaRef
     })
   )
 
@@ -79,51 +81,73 @@ describe('useSlashMenu — initial state', () => {
 describe('useSlashMenu — handleInputChange', () => {
   it('handleInputChange("/") opens menu', () => {
     const { rendered } = setup()
-    act(() => { rendered.result.current.handleInputChange('/') })
+    act(() => {
+      rendered.result.current.handleInputChange('/')
+    })
     expect(rendered.result.current.slashMenuOpen).toBe(true)
   })
 
   it('handleInputChange("/co") opens menu (no space)', () => {
     const { rendered } = setup()
-    act(() => { rendered.result.current.handleInputChange('/co') })
+    act(() => {
+      rendered.result.current.handleInputChange('/co')
+    })
     expect(rendered.result.current.slashMenuOpen).toBe(true)
   })
 
   it('handleInputChange resets index to 0 on open', () => {
     const { rendered } = setup()
     // First open and navigate to index 1
-    act(() => { rendered.result.current.handleInputChange('/') })
-    act(() => { rendered.result.current.handleKeyDown(makeKeyEvent('ArrowDown')) })
+    act(() => {
+      rendered.result.current.handleInputChange('/')
+    })
+    act(() => {
+      rendered.result.current.handleKeyDown(makeKeyEvent('ArrowDown'))
+    })
     expect(rendered.result.current.slashMenuIndex).toBe(1)
     // New input should reset index
-    act(() => { rendered.result.current.handleInputChange('/co') })
+    act(() => {
+      rendered.result.current.handleInputChange('/co')
+    })
     expect(rendered.result.current.slashMenuIndex).toBe(0)
   })
 
   it('handleInputChange("/commit ") closes menu (has space)', () => {
     const { rendered } = setup()
-    act(() => { rendered.result.current.handleInputChange('/commit') })
-    act(() => { rendered.result.current.handleInputChange('/commit ') })
+    act(() => {
+      rendered.result.current.handleInputChange('/commit')
+    })
+    act(() => {
+      rendered.result.current.handleInputChange('/commit ')
+    })
     expect(rendered.result.current.slashMenuOpen).toBe(false)
   })
 
   it('handleInputChange("hello") keeps menu closed', () => {
     const { rendered } = setup()
-    act(() => { rendered.result.current.handleInputChange('hello') })
+    act(() => {
+      rendered.result.current.handleInputChange('hello')
+    })
     expect(rendered.result.current.slashMenuOpen).toBe(false)
   })
 
   it('handleInputChange("") keeps menu closed', () => {
     const { rendered } = setup()
-    act(() => { rendered.result.current.handleInputChange('') })
+    act(() => {
+      rendered.result.current.handleInputChange('')
+    })
     expect(rendered.result.current.slashMenuOpen).toBe(false)
   })
 
   it('handleInputChange closes menu that was previously open', () => {
     const { rendered } = setup()
-    act(() => { rendered.result.current.handleInputChange('/') })
+    act(() => {
+      rendered.result.current.handleInputChange('/')
+    })
     expect(rendered.result.current.slashMenuOpen).toBe(true)
-    act(() => { rendered.result.current.handleInputChange('hello') })
+    act(() => {
+      rendered.result.current.handleInputChange('hello')
+    })
     expect(rendered.result.current.slashMenuOpen).toBe(false)
   })
 })
@@ -142,14 +166,18 @@ describe('useSlashMenu — slashFilter', () => {
 
   it('slashFilter returns text after "/" when menu is open', () => {
     const { rendered, updateText } = setup()
-    act(() => { rendered.result.current.handleInputChange('/co') })
+    act(() => {
+      rendered.result.current.handleInputChange('/co')
+    })
     updateText('/co')
     expect(rendered.result.current.slashFilter).toBe('co')
   })
 
   it('slashFilter returns empty string for bare "/"', () => {
     const { rendered, updateText } = setup()
-    act(() => { rendered.result.current.handleInputChange('/') })
+    act(() => {
+      rendered.result.current.handleInputChange('/')
+    })
     updateText('/')
     expect(rendered.result.current.slashFilter).toBe('')
   })
@@ -158,7 +186,9 @@ describe('useSlashMenu — slashFilter', () => {
 describe('useSlashMenu — filteredCommands', () => {
   it('filteredCommands filters by prefix: "/co" → only /commit', () => {
     const { rendered, updateText } = setup()
-    act(() => { rendered.result.current.handleInputChange('/co') })
+    act(() => {
+      rendered.result.current.handleInputChange('/co')
+    })
     updateText('/co')
     expect(rendered.result.current.filteredCommands).toHaveLength(1)
     expect(rendered.result.current.filteredCommands[0].name).toBe('/commit')
@@ -166,7 +196,9 @@ describe('useSlashMenu — filteredCommands', () => {
 
   it('filteredCommands shows all commands for bare "/"', () => {
     const { rendered, updateText } = setup()
-    act(() => { rendered.result.current.handleInputChange('/') })
+    act(() => {
+      rendered.result.current.handleInputChange('/')
+    })
     updateText('/')
     expect(rendered.result.current.filteredCommands).toHaveLength(commands.length)
   })
@@ -179,7 +211,9 @@ describe('useSlashMenu — filteredCommands', () => {
 
   it('filteredCommands is case-insensitive', () => {
     const { rendered, updateText } = setup()
-    act(() => { rendered.result.current.handleInputChange('/CO') })
+    act(() => {
+      rendered.result.current.handleInputChange('/CO')
+    })
     updateText('/CO')
     expect(rendered.result.current.filteredCommands).toHaveLength(1)
     expect(rendered.result.current.filteredCommands[0].name).toBe('/commit')
@@ -187,7 +221,9 @@ describe('useSlashMenu — filteredCommands', () => {
 
   it('filteredCommands returns empty array for unmatched filter', () => {
     const { rendered, updateText } = setup()
-    act(() => { rendered.result.current.handleInputChange('/xyz') })
+    act(() => {
+      rendered.result.current.handleInputChange('/xyz')
+    })
     updateText('/xyz')
     expect(rendered.result.current.filteredCommands).toHaveLength(0)
   })
@@ -200,71 +236,103 @@ describe('useSlashMenu — filteredCommands', () => {
 describe('useSlashMenu — handleKeyDown navigation', () => {
   it('ArrowDown advances index forward (0→1)', () => {
     const { rendered, updateText } = setup()
-    act(() => { rendered.result.current.handleInputChange('/') })
+    act(() => {
+      rendered.result.current.handleInputChange('/')
+    })
     updateText('/')
 
-    act(() => { rendered.result.current.handleKeyDown(makeKeyEvent('ArrowDown')) })
+    act(() => {
+      rendered.result.current.handleKeyDown(makeKeyEvent('ArrowDown'))
+    })
     expect(rendered.result.current.slashMenuIndex).toBe(1)
   })
 
   it('ArrowDown cycles from last back to 0', () => {
     const { rendered, updateText } = setup()
-    act(() => { rendered.result.current.handleInputChange('/') })
+    act(() => {
+      rendered.result.current.handleInputChange('/')
+    })
     updateText('/')
 
     // Advance to last index (commands.length - 1 = 2)
     for (let i = 0; i < commands.length - 1; i++) {
-      act(() => { rendered.result.current.handleKeyDown(makeKeyEvent('ArrowDown')) })
+      act(() => {
+        rendered.result.current.handleKeyDown(makeKeyEvent('ArrowDown'))
+      })
     }
     expect(rendered.result.current.slashMenuIndex).toBe(commands.length - 1)
 
-    act(() => { rendered.result.current.handleKeyDown(makeKeyEvent('ArrowDown')) })
+    act(() => {
+      rendered.result.current.handleKeyDown(makeKeyEvent('ArrowDown'))
+    })
     expect(rendered.result.current.slashMenuIndex).toBe(0)
   })
 
   it('ArrowUp from 0 wraps to last index', () => {
     const { rendered, updateText } = setup()
-    act(() => { rendered.result.current.handleInputChange('/') })
+    act(() => {
+      rendered.result.current.handleInputChange('/')
+    })
     updateText('/')
 
-    act(() => { rendered.result.current.handleKeyDown(makeKeyEvent('ArrowUp')) })
+    act(() => {
+      rendered.result.current.handleKeyDown(makeKeyEvent('ArrowUp'))
+    })
     expect(rendered.result.current.slashMenuIndex).toBe(commands.length - 1)
   })
 
   it('ArrowUp decrements index (2→1→0)', () => {
     const { rendered, updateText } = setup()
-    act(() => { rendered.result.current.handleInputChange('/') })
+    act(() => {
+      rendered.result.current.handleInputChange('/')
+    })
     updateText('/')
 
     // Navigate to index 2
-    act(() => { rendered.result.current.handleKeyDown(makeKeyEvent('ArrowDown')) })
-    act(() => { rendered.result.current.handleKeyDown(makeKeyEvent('ArrowDown')) })
+    act(() => {
+      rendered.result.current.handleKeyDown(makeKeyEvent('ArrowDown'))
+    })
+    act(() => {
+      rendered.result.current.handleKeyDown(makeKeyEvent('ArrowDown'))
+    })
     expect(rendered.result.current.slashMenuIndex).toBe(2)
 
-    act(() => { rendered.result.current.handleKeyDown(makeKeyEvent('ArrowUp')) })
+    act(() => {
+      rendered.result.current.handleKeyDown(makeKeyEvent('ArrowUp'))
+    })
     expect(rendered.result.current.slashMenuIndex).toBe(1)
 
-    act(() => { rendered.result.current.handleKeyDown(makeKeyEvent('ArrowUp')) })
+    act(() => {
+      rendered.result.current.handleKeyDown(makeKeyEvent('ArrowUp'))
+    })
     expect(rendered.result.current.slashMenuIndex).toBe(0)
   })
 
   it('ArrowDown returns true (event consumed)', () => {
     const { rendered, updateText } = setup()
-    act(() => { rendered.result.current.handleInputChange('/') })
+    act(() => {
+      rendered.result.current.handleInputChange('/')
+    })
     updateText('/')
 
     let consumed = false
-    act(() => { consumed = rendered.result.current.handleKeyDown(makeKeyEvent('ArrowDown')) })
+    act(() => {
+      consumed = rendered.result.current.handleKeyDown(makeKeyEvent('ArrowDown'))
+    })
     expect(consumed).toBe(true)
   })
 
   it('ArrowUp returns true (event consumed)', () => {
     const { rendered, updateText } = setup()
-    act(() => { rendered.result.current.handleInputChange('/') })
+    act(() => {
+      rendered.result.current.handleInputChange('/')
+    })
     updateText('/')
 
     let consumed = false
-    act(() => { consumed = rendered.result.current.handleKeyDown(makeKeyEvent('ArrowUp')) })
+    act(() => {
+      consumed = rendered.result.current.handleKeyDown(makeKeyEvent('ArrowUp'))
+    })
     expect(consumed).toBe(true)
   })
 })
@@ -276,32 +344,46 @@ describe('useSlashMenu — handleKeyDown navigation', () => {
 describe('useSlashMenu — handleKeyDown selection', () => {
   it('Enter selects current command and closes menu', () => {
     const { rendered, state, updateText } = setup()
-    act(() => { rendered.result.current.handleInputChange('/') })
+    act(() => {
+      rendered.result.current.handleInputChange('/')
+    })
     updateText('/')
     // index=0 → /commit
-    act(() => { rendered.result.current.handleKeyDown(makeKeyEvent('Enter')) })
+    act(() => {
+      rendered.result.current.handleKeyDown(makeKeyEvent('Enter'))
+    })
     expect(rendered.result.current.slashMenuOpen).toBe(false)
     expect(state.text).toBe('/commit ')
   })
 
   it('Tab selects current command and closes menu', () => {
     const { rendered, state, updateText } = setup()
-    act(() => { rendered.result.current.handleInputChange('/') })
+    act(() => {
+      rendered.result.current.handleInputChange('/')
+    })
     updateText('/')
     // Navigate to index 1 → /clear
-    act(() => { rendered.result.current.handleKeyDown(makeKeyEvent('ArrowDown')) })
-    act(() => { rendered.result.current.handleKeyDown(makeKeyEvent('Tab')) })
+    act(() => {
+      rendered.result.current.handleKeyDown(makeKeyEvent('ArrowDown'))
+    })
+    act(() => {
+      rendered.result.current.handleKeyDown(makeKeyEvent('Tab'))
+    })
     expect(rendered.result.current.slashMenuOpen).toBe(false)
     expect(state.text).toBe('/clear ')
   })
 
   it('Enter returns true (event consumed)', () => {
     const { rendered, updateText } = setup()
-    act(() => { rendered.result.current.handleInputChange('/') })
+    act(() => {
+      rendered.result.current.handleInputChange('/')
+    })
     updateText('/')
 
     let consumed = false
-    act(() => { consumed = rendered.result.current.handleKeyDown(makeKeyEvent('Enter')) })
+    act(() => {
+      consumed = rendered.result.current.handleKeyDown(makeKeyEvent('Enter'))
+    })
     expect(consumed).toBe(true)
   })
 })
@@ -313,19 +395,27 @@ describe('useSlashMenu — handleKeyDown selection', () => {
 describe('useSlashMenu — handleKeyDown Escape', () => {
   it('Escape closes menu', () => {
     const { rendered, updateText } = setup()
-    act(() => { rendered.result.current.handleInputChange('/') })
+    act(() => {
+      rendered.result.current.handleInputChange('/')
+    })
     updateText('/')
-    act(() => { rendered.result.current.handleKeyDown(makeKeyEvent('Escape')) })
+    act(() => {
+      rendered.result.current.handleKeyDown(makeKeyEvent('Escape'))
+    })
     expect(rendered.result.current.slashMenuOpen).toBe(false)
   })
 
   it('Escape returns true (event consumed)', () => {
     const { rendered, updateText } = setup()
-    act(() => { rendered.result.current.handleInputChange('/') })
+    act(() => {
+      rendered.result.current.handleInputChange('/')
+    })
     updateText('/')
 
     let consumed = false
-    act(() => { consumed = rendered.result.current.handleKeyDown(makeKeyEvent('Escape')) })
+    act(() => {
+      consumed = rendered.result.current.handleKeyDown(makeKeyEvent('Escape'))
+    })
     expect(consumed).toBe(true)
   })
 })
@@ -338,38 +428,52 @@ describe('useSlashMenu — handleKeyDown guard conditions', () => {
   it('returns false when menu is closed', () => {
     const { rendered } = setup()
     let consumed = true
-    act(() => { consumed = rendered.result.current.handleKeyDown(makeKeyEvent('ArrowDown')) })
+    act(() => {
+      consumed = rendered.result.current.handleKeyDown(makeKeyEvent('ArrowDown'))
+    })
     expect(consumed).toBe(false)
   })
 
   it('returns false for unrecognized keys when open', () => {
     const { rendered, updateText } = setup()
-    act(() => { rendered.result.current.handleInputChange('/') })
+    act(() => {
+      rendered.result.current.handleInputChange('/')
+    })
     updateText('/')
 
     let consumed = true
-    act(() => { consumed = rendered.result.current.handleKeyDown(makeKeyEvent('a')) })
+    act(() => {
+      consumed = rendered.result.current.handleKeyDown(makeKeyEvent('a'))
+    })
     expect(consumed).toBe(false)
   })
 
   it('returns false when open but filteredCommands is empty', () => {
     const { rendered, updateText } = setup()
-    act(() => { rendered.result.current.handleInputChange('/xyz') })
+    act(() => {
+      rendered.result.current.handleInputChange('/xyz')
+    })
     updateText('/xyz')
     // filteredCommands will be [] because no command starts with /xyz
     let consumed = true
-    act(() => { consumed = rendered.result.current.handleKeyDown(makeKeyEvent('ArrowDown')) })
+    act(() => {
+      consumed = rendered.result.current.handleKeyDown(makeKeyEvent('ArrowDown'))
+    })
     expect(consumed).toBe(false)
   })
 
   it('returns false for all navigation keys when commands list is empty', () => {
     const { rendered, updateText } = setup('', [])
-    act(() => { rendered.result.current.handleInputChange('/') })
+    act(() => {
+      rendered.result.current.handleInputChange('/')
+    })
     updateText('/')
 
     for (const key of ['ArrowDown', 'ArrowUp', 'Enter', 'Tab']) {
       let consumed = true
-      act(() => { consumed = rendered.result.current.handleKeyDown(makeKeyEvent(key)) })
+      act(() => {
+        consumed = rendered.result.current.handleKeyDown(makeKeyEvent(key))
+      })
       expect(consumed).toBe(false)
     }
   })
@@ -382,26 +486,38 @@ describe('useSlashMenu — handleKeyDown guard conditions', () => {
 describe('useSlashMenu — handleSelect', () => {
   it('sets text to name + space', () => {
     const { rendered, state } = setup()
-    act(() => { rendered.result.current.handleSelect('/commit') })
+    act(() => {
+      rendered.result.current.handleSelect('/commit')
+    })
     expect(state.text).toBe('/commit ')
   })
 
   it('closes menu after select', () => {
     const { rendered, updateText } = setup()
-    act(() => { rendered.result.current.handleInputChange('/') })
+    act(() => {
+      rendered.result.current.handleInputChange('/')
+    })
     updateText('/')
     expect(rendered.result.current.slashMenuOpen).toBe(true)
-    act(() => { rendered.result.current.handleSelect('/commit') })
+    act(() => {
+      rendered.result.current.handleSelect('/commit')
+    })
     expect(rendered.result.current.slashMenuOpen).toBe(false)
   })
 
   it('resets index to 0 after select', () => {
     const { rendered, updateText } = setup()
-    act(() => { rendered.result.current.handleInputChange('/') })
+    act(() => {
+      rendered.result.current.handleInputChange('/')
+    })
     updateText('/')
-    act(() => { rendered.result.current.handleKeyDown(makeKeyEvent('ArrowDown')) })
+    act(() => {
+      rendered.result.current.handleKeyDown(makeKeyEvent('ArrowDown'))
+    })
     expect(rendered.result.current.slashMenuIndex).toBe(1)
-    act(() => { rendered.result.current.handleSelect('/help') })
+    act(() => {
+      rendered.result.current.handleSelect('/help')
+    })
     expect(rendered.result.current.slashMenuIndex).toBe(0)
   })
 })

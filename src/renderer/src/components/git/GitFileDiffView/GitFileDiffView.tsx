@@ -50,10 +50,13 @@ export function GitFileDiffView(): React.JSX.Element {
   const { containerRef: gutterRef } = useGutterDragSelection(handleGutterSelect)
 
   const containerNodeRef = useRef<HTMLDivElement | null>(null)
-  const containerRef = useCallback((node: HTMLDivElement | null) => {
-    containerNodeRef.current = node
-    gutterRef(node)
-  }, [gutterRef])
+  const containerRef = useCallback(
+    (node: HTMLDivElement | null) => {
+      containerNodeRef.current = node
+      gutterRef(node)
+    },
+    [gutterRef]
+  )
 
   // Clear active input when switching files
   useEffect(() => {
@@ -72,11 +75,14 @@ export function GitFileDiffView(): React.JSX.Element {
 
     const staged = fileStatus.index !== ' ' && fileStatus.index !== '?'
 
-    window.api.gitGetFilePatch(cwd, gitSelectedFile, staged, diffIgnoreWhitespace).then((diff) => {
-      setGitFileDiff(activeSessionId, diff)
-    }).catch(() => {
-      setGitFileDiff(activeSessionId, null)
-    })
+    window.api
+      .gitGetFilePatch(cwd, gitSelectedFile, staged, diffIgnoreWhitespace)
+      .then((diff) => {
+        setGitFileDiff(activeSessionId, diff)
+      })
+      .catch(() => {
+        setGitFileDiff(activeSessionId, null)
+      })
   }, [cwd, gitSelectedFile, activeSessionId, setGitFileDiff, gitStatus, diffIgnoreWhitespace])
 
   // Background-fetch full file content for hunk expansion
@@ -90,13 +96,28 @@ export function GitFileDiffView(): React.JSX.Element {
 
     const staged = fileStatus.index !== ' ' && fileStatus.index !== '?'
 
-    window.api.gitGetFileContents(cwd, gitSelectedFile, staged).then(({ oldContent, newContent }) => {
-      const current = useSessionStore.getState().sessions[activeSessionId]?.gitFileDiff
-      if (current?.patch) {
-        setGitFileDiff(activeSessionId, { ...current, oldContent, newContent })
-      }
-    }).catch(() => {})
-  }, [cwd, gitSelectedFile, activeSessionId, gitStatus, gitFileDiff?.patch])
+    window.api
+      .gitGetFileContents(cwd, gitSelectedFile, staged)
+      .then(({ oldContent, newContent }) => {
+        const current = useSessionStore.getState().sessions[activeSessionId]?.gitFileDiff
+        if (current?.patch) {
+          setGitFileDiff(activeSessionId, { ...current, oldContent, newContent })
+        }
+      })
+      .catch(() => {})
+    // The early-return guards above make the extra content/isBinary deps safe:
+    // once content is fetched the effect no-ops, so there is no refetch loop.
+  }, [
+    cwd,
+    gitSelectedFile,
+    activeSessionId,
+    gitStatus,
+    gitFileDiff?.patch,
+    gitFileDiff?.isBinary,
+    gitFileDiff?.oldContent,
+    gitFileDiff?.newContent,
+    setGitFileDiff
+  ])
 
   // Build highlighted lines set from comments + active input
   const highlightedLines = useMemo(() => {
@@ -114,25 +135,34 @@ export function GitFileDiffView(): React.JSX.Element {
     return set.size > 0 ? set : undefined
   }, [fileComments, activeInput])
 
-  const handleAddComment = useCallback((comment: DiffComment) => {
-    if (activeSessionId) addDiffComment(activeSessionId, comment)
-  }, [activeSessionId, addDiffComment])
+  const handleAddComment = useCallback(
+    (comment: DiffComment) => {
+      if (activeSessionId) addDiffComment(activeSessionId, comment)
+    },
+    [activeSessionId, addDiffComment]
+  )
 
-  const handleRemoveComment = useCallback((commentId: string) => {
-    if (activeSessionId) removeDiffComment(activeSessionId, commentId)
-  }, [activeSessionId, removeDiffComment])
+  const handleRemoveComment = useCallback(
+    (commentId: string) => {
+      if (activeSessionId) removeDiffComment(activeSessionId, commentId)
+    },
+    [activeSessionId, removeDiffComment]
+  )
 
-  const handleEditComment = useCallback((comment: DiffComment) => {
-    if (activeSessionId) removeDiffComment(activeSessionId, comment.id)
-    setActiveInput({
-      lineNumber: comment.endLineNumber,
-      side: comment.side,
-      startLine: comment.lineNumber,
-      endLine: comment.endLineNumber,
-      lineContent: comment.lineContent,
-      editText: comment.comment,
-    })
-  }, [activeSessionId, removeDiffComment])
+  const handleEditComment = useCallback(
+    (comment: DiffComment) => {
+      if (activeSessionId) removeDiffComment(activeSessionId, comment.id)
+      setActiveInput({
+        lineNumber: comment.endLineNumber,
+        side: comment.side,
+        startLine: comment.lineNumber,
+        endLine: comment.endLineNumber,
+        lineContent: comment.lineContent,
+        editText: comment.comment
+      })
+    },
+    [activeSessionId, removeDiffComment]
+  )
 
   return (
     <GitFileDiffViewView
@@ -148,7 +178,9 @@ export function GitFileDiffView(): React.JSX.Element {
       diffViewSplit={diffViewSplit}
       containerRef={containerRef}
       onToggleWrapLines={() => updateSettings({ diffWrapLines: !diffWrapLines })}
-      onToggleIgnoreWhitespace={() => updateSettings({ diffIgnoreWhitespace: !diffIgnoreWhitespace })}
+      onToggleIgnoreWhitespace={() =>
+        updateSettings({ diffIgnoreWhitespace: !diffIgnoreWhitespace })
+      }
       onAddComment={handleAddComment}
       onEditComment={handleEditComment}
       onRemoveComment={handleRemoveComment}

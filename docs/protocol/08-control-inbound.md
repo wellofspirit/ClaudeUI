@@ -9,6 +9,7 @@ Verified against cli.js 2.1.114. All outbound control requests originate from `M
 ## 8.1 Envelope
 
 cli.js sends:
+
 ```json
 {
   "type": "control_request",
@@ -18,6 +19,7 @@ cli.js sends:
 ```
 
 We respond with `control_response`:
+
 ```json
 {
   "type": "control_response",
@@ -30,6 +32,7 @@ We respond with `control_response`:
 ```
 
 Or error:
+
 ```json
 {
   "type": "control_response",
@@ -90,6 +93,7 @@ Permission prompt for a tool invocation. The most common inbound subtype. Races 
 ### Response (success) — discriminated union
 
 **Allow branch:**
+
 ```jsonc
 {
   "behavior": "allow",
@@ -104,13 +108,14 @@ Permission prompt for a tool invocation. The most common inbound subtype. Races 
 ```
 
 **Deny branch:**
+
 ```jsonc
 {
   "behavior": "deny",
-  "message": "Reason for denial",               // REQUIRED. Empty string passes Zod but bad UX.
-  "interrupt": false,                           // optional. true → aborts the whole turn.
-  "toolUseID": "toolu_xxx",                     // optional
-  "decisionClassification": "user_reject"       // optional
+  "message": "Reason for denial", // REQUIRED. Empty string passes Zod but bad UX.
+  "interrupt": false, // optional. true → aborts the whole turn.
+  "toolUseID": "toolu_xxx", // optional
+  "decisionClassification": "user_reject" // optional
 }
 ```
 
@@ -129,6 +134,7 @@ cli.js parses via `rA8` (discriminated union over `behavior`). Malformed shapes 
 ### Pseudo-tool: `SandboxNetworkAccess`
 
 When the sandbox denies a network connection, cli.js sends a `can_use_tool` with:
+
 ```jsonc
 {
   "tool_name": "SandboxNetworkAccess",
@@ -143,6 +149,7 @@ Not a real tool — just a permission prompt for network egress. Handle it the s
 ### Cancellation
 
 cli.js sends `control_cancel_request` when:
+
 - The turn's abort signal fires (user pressed interrupt, etc.)
 - The tool is abandoned before the user decides
 
@@ -155,6 +162,7 @@ If a `PermissionRequest` hook returns a decision BEFORE we respond, cli.js uses 
 ### Our harness implementation
 
 See `src/main/sdk/query.ts::handleCanUseTool()`. Pass-through plus:
+
 - Coerces missing `message` on deny to `"Denied"` (avoids ZodError).
 - Echoes `tool_use_id` as `toolUseID` in response.
 
@@ -191,6 +199,7 @@ Validated by `E.object({mcp_response: E.any()})`. Missing `mcp_response` wrapper
 ### Notifications (no id)
 
 For JSON-RPC notifications (no `id`), we synthesize:
+
 ```json
 { "mcp_response": { "jsonrpc": "2.0", "result": {}, "id": 0 } }
 ```
@@ -322,6 +331,7 @@ cli.js needs a fresh OAuth token.
 **Anchor:** emission at `~11934264`. Schema `Vc1`. Response schema `G87`.
 
 **Gate:** env-gated. Fires only when BOTH:
+
 - `process.env.CLAUDE_CODE_SDK_HAS_OAUTH_REFRESH` is truthy
 - `process.env.CLAUDE_CODE_ENTRYPOINT` is in the allow-set `IR6` (typically SDK entry points)
 
@@ -402,6 +412,7 @@ Not a request — a one-way cancel signal. Documented here because it comes thro
 ```
 
 **When cli.js sends it:**
+
 1. The AbortSignal attached to a pending outbound request from cli.js fires.
 2. As belt-and-suspenders cleanup after cli.js receives our success response — this is harmless and expected; our `cancelInbound()` already treats "no matching AC" as a silent no-op.
 
@@ -414,6 +425,7 @@ Not a request — a one-way cancel signal. Documented here because it comes thro
 ## 8.10 Unknown inbound subtypes
 
 Our harness at `src/main/sdk/query.ts::handleControlRequest()` falls back to:
+
 ```ts
 if (process.env.DEBUG_SDK) {
   console.error(`[sdk] unknown inbound control subtype: ${subtype}`)

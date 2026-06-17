@@ -10,9 +10,10 @@
  *  - the dispatcher propagates handler errors so remote clients see them
  */
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
-
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import * as fs from 'fs'
+import * as os from 'os'
+import * as path from 'path'
 import type { WsInvokeRequest } from '../../../shared/remote-protocol'
 
 // ---------------------------------------------------------------------------
@@ -24,7 +25,12 @@ vi.mock('../../services/session-history', () => ({
   loadSessionHistory: vi.fn(async () => [{ id: 'm1' }]),
   loadSubagentHistory: vi.fn(async () => []),
   buildSubagentFileMap: vi.fn(() => ({})),
-  loadBackgroundOutput: vi.fn(() => ''),
+  loadBackgroundOutput: vi.fn(() => '')
+}))
+
+vi.mock('../../services/delete-session-files', () => ({
+  deleteSessionFiles: vi.fn(async () => {}),
+  deleteProjectFiles: vi.fn(async () => {})
 }))
 
 vi.mock('../../services/ui-config', () => ({
@@ -32,60 +38,68 @@ vi.mock('../../services/ui-config', () => ({
   saveSettings: vi.fn(),
   loadSessionConfig: vi.fn(() => ({})),
   saveSessionConfig: vi.fn(),
-  loadSlashCommands: vi.fn(() => []),
+  loadSlashCommands: vi.fn(() => [])
 }))
 
 vi.mock('../../services/claude-settings', () => ({
-  loadClaudePermissions: vi.fn(() => ({ allow: [], deny: [], ask: [] })),
+  loadClaudePermissions: vi.fn(() => ({ allow: [], deny: [], ask: [] }))
 }))
 
 vi.mock('../../services/claude-mcp', () => ({
   loadMcpServers: vi.fn(() => ({})),
-  readDisabledMcpServers: vi.fn(() => []),
+  readDisabledMcpServers: vi.fn(() => [])
 }))
 
 vi.mock('../../services/skill-scanner', () => ({
-  scanSkills: vi.fn(async () => []),
+  scanSkills: vi.fn(async () => [])
 }))
 
 vi.mock('../../services/custom-command-scanner', () => ({
-  scanCustomCommands: vi.fn(async () => []),
+  scanCustomCommands: vi.fn(async () => [])
 }))
 
 vi.mock('../../services/usage-fetcher', () => ({
-  usageFetcher: { fetch: vi.fn(async () => ({ a: 1 })) },
+  usageFetcher: { fetch: vi.fn(async () => ({ a: 1 })) }
 }))
 
 vi.mock('../../services/block-usage', () => ({
   blockUsageService: {
     getData: vi.fn(() => null),
-    recalculate: vi.fn(async () => ({ blocks: [] })),
-  },
+    recalculate: vi.fn(async () => ({ blocks: [] }))
+  }
 }))
 
 vi.mock('../../services/persisted-sessions-dir', () => ({
-  PERSISTED_SESSIONS_DIR: '/tmp/persisted',
+  PERSISTED_SESSIONS_DIR: '/tmp/persisted'
 }))
 
 vi.mock('../../services/claude-session', () => {
   const extraWindows = new Set<any>()
   return {
     ClaudeSession: class {
-      static addExtraWindow(w: any): void { extraWindows.add(w) }
-      static removeExtraWindow(w: any): void { extraWindows.delete(w) }
-      static getExtraWindows(): Set<any> { return extraWindows }
+      static addExtraWindow(w: any): void {
+        extraWindows.add(w)
+      }
+      static removeExtraWindow(w: any): void {
+        extraWindows.delete(w)
+      }
+      static getExtraWindows(): Set<any> {
+        return extraWindows
+      }
     },
-    getSdkExecutableOpts: vi.fn(() => ({})),
+    getSdkExecutableOpts: vi.fn(() => ({}))
   }
 })
 
 vi.mock('../../sdk', () => ({
   query: vi.fn(() => {
-    async function* empty(): AsyncGenerator<unknown> { /* */ }
+    async function* empty(): AsyncGenerator<unknown> {
+      /* */
+    }
     const gen: any = empty()
     gen.supportedModels = async () => [{ value: 'sonnet', description: '' }]
     return gen
-  }),
+  })
 }))
 
 vi.mock('../../services/logger', () => ({
@@ -93,13 +107,13 @@ vi.mock('../../services/logger', () => ({
     debug: vi.fn(),
     info: vi.fn(),
     warn: vi.fn(),
-    error: vi.fn(),
-  },
+    error: vi.fn()
+  }
 }))
 
 // Import AFTER mocks.
 import { RemoteDispatcher } from '../../services/remote-dispatcher'
-import { registerRemoteHandlers } from '../remote-handlers'
+import { registerRemoteHandlers, registerRemoteVersionInfo } from '../remote-handlers'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -112,7 +126,7 @@ function makeRequest(channel: string, ...args: unknown[]): WsInvokeRequest {
 function makeFakeWindow(): any {
   return {
     webContents: { send: vi.fn() },
-    isDestroyed: () => false,
+    isDestroyed: () => false
   }
 }
 
@@ -129,9 +143,11 @@ const sessionStub: any = {
   setPermissionMode: vi.fn(async () => {}),
   setModel: vi.fn(async () => {}),
   setEffort: vi.fn(),
+  setThinkingMode: vi.fn(),
+  askSideQuestion: vi.fn(async () => 'answer'),
   mcpServerStatus: vi.fn(async () => [{ name: 'srv', connected: true }]),
   getPlanContent: vi.fn(() => null),
-  getSessionLogPath: vi.fn(() => '/tmp/log'),
+  getSessionLogPath: vi.fn(() => '/tmp/log')
 }
 
 const sessionManagerStub: any = {
@@ -139,6 +155,7 @@ const sessionManagerStub: any = {
   rekey: vi.fn(),
   get: vi.fn(() => sessionStub),
   cancel: vi.fn(),
+  interrupt: vi.fn(async () => {})
 }
 
 describe('RemoteDispatcher', () => {
@@ -155,7 +172,9 @@ describe('RemoteDispatcher', () => {
   })
 
   it('propagates handler errors for allowed channels', async () => {
-    dispatcher.register('test:boom', async () => { throw new Error('fail') })
+    dispatcher.register('test:boom', async () => {
+      throw new Error('fail')
+    })
     await expect(dispatcher.handle(makeRequest('test:boom'))).rejects.toThrow('fail')
   })
 
@@ -176,7 +195,7 @@ describe('RemoteDispatcher', () => {
     'terminal:write',
     'terminal:resize',
     'terminal:kill',
-    'terminal:kill-by-cwd',
+    'terminal:kill-by-cwd'
   ])('blocks desktop-only channel: %s', async (channel) => {
     const handler = vi.fn(async () => 'SHOULD NOT RUN')
     dispatcher.register(channel, handler)
@@ -209,7 +228,9 @@ describe('registerRemoteHandlers', () => {
     registerRemoteHandlers(dispatcher, sessionManagerStub, win)
   })
 
-  afterEach(() => { vi.clearAllMocks() })
+  afterEach(() => {
+    vi.clearAllMocks()
+  })
 
   it('registers the expected set of allowed channels', () => {
     const channels = dispatcher.channels()
@@ -245,9 +266,9 @@ describe('registerRemoteHandlers', () => {
 
   it('session:send rejects when routingId not found', async () => {
     sessionManagerStub.get.mockReturnValueOnce(undefined)
-    await expect(
-      dispatcher.handle(makeRequest('session:send', 'missing', 'x'))
-    ).rejects.toThrow(/No session for routingId/)
+    await expect(dispatcher.handle(makeRequest('session:send', 'missing', 'x'))).rejects.toThrow(
+      /No session for routingId/
+    )
   })
 
   it('session:cancel dispatches to manager.cancel', async () => {
@@ -298,5 +319,96 @@ describe('registerRemoteHandlers', () => {
     sessionManagerStub.get.mockReturnValueOnce(undefined)
     const res = await dispatcher.handle(makeRequest('session:dequeue-message', 'ghost', 'val'))
     expect(res).toEqual({ removed: 0 })
+  })
+
+  // Regression: these were missing from both the dispatcher and the web
+  // api-adapter, so the remote client either crashed (undefined method) or
+  // hit "Channel not available". They're now wired end-to-end.
+  describe('newly-bridged channels', () => {
+    it('session:interrupt routes to manager.interrupt', async () => {
+      await dispatcher.handle(makeRequest('session:interrupt', 'rid-1'))
+      expect(sessionManagerStub.interrupt).toHaveBeenCalledWith('rid-1')
+    })
+
+    it('session:set-thinking-mode routes to session.setThinkingMode', async () => {
+      await dispatcher.handle(makeRequest('session:set-thinking-mode', 'rid-1', 'think'))
+      expect(sessionStub.setThinkingMode).toHaveBeenCalledWith('think')
+    })
+
+    it('session:ask-side-question returns the session answer', async () => {
+      const res = await dispatcher.handle(makeRequest('session:ask-side-question', 'rid-1', 'q?'))
+      expect(sessionStub.askSideQuestion).toHaveBeenCalledWith('q?')
+      expect(res).toBe('answer')
+    })
+
+    it('session:ask-side-question returns null when session missing', async () => {
+      sessionManagerStub.get.mockReturnValueOnce(undefined)
+      const res = await dispatcher.handle(makeRequest('session:ask-side-question', 'ghost', 'q?'))
+      expect(res).toBeNull()
+    })
+
+    it('session:delete-session and session:delete-project are registered', () => {
+      const channels = dispatcher.channels()
+      expect(channels).toContain('session:delete-session')
+      expect(channels).toContain('session:delete-project')
+    })
+  })
+
+  it('registerRemoteVersionInfo exposes app:version-info on the dispatcher', async () => {
+    expect(dispatcher.has('app:version-info')).toBe(false)
+    registerRemoteVersionInfo({ appVersion: '1.2.3', sdkVersion: '0.9', cliVersion: '2.9' })
+    const res = await dispatcher.handle(makeRequest('app:version-info'))
+    expect(res).toEqual({ appVersion: '1.2.3', sdkVersion: '0.9', cliVersion: '2.9' })
+  })
+
+  // Regression: mockup channels must be reachable over remote — the web client
+  // crashed with "window.api.readMockupHtml is not a function" because these
+  // were never registered on the dispatcher (nor in the web api-adapter).
+  describe('mockup preview', () => {
+    let cwd: string
+
+    beforeEach(() => {
+      cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'mockup-remote-'))
+      const dir = path.join(cwd, '.claude', 'ui', 'mockups', 'm1')
+      fs.mkdirSync(dir, { recursive: true })
+      fs.writeFileSync(path.join(dir, 'index.html'), '<h1>hello</h1>')
+    })
+
+    afterEach(() => {
+      fs.rmSync(cwd, { recursive: true, force: true })
+    })
+
+    it('registers the mockup channels', () => {
+      const channels = dispatcher.channels()
+      expect(channels).toContain('mockup:read-html')
+      expect(channels).toContain('mockup:watch')
+      expect(channels).toContain('mockup:unwatch')
+    })
+
+    it('mockup:read-html returns the mockup index.html contents', async () => {
+      const res = await dispatcher.handle(makeRequest('mockup:read-html', cwd, 'm1'))
+      expect(res).toBe('<h1>hello</h1>')
+    })
+
+    it('mockup:read-html rejects for a missing mockup', async () => {
+      await expect(
+        dispatcher.handle(makeRequest('mockup:read-html', cwd, 'does-not-exist'))
+      ).rejects.toThrow()
+    })
+
+    it('mockup:watch/unwatch are idempotent and tolerate a missing directory', async () => {
+      // Missing dir → no-op, no throw.
+      await expect(
+        dispatcher.handle(makeRequest('mockup:watch', cwd, 'ghost'))
+      ).resolves.toBeUndefined()
+      // Real dir → watches; second call is a no-op (already watching).
+      await dispatcher.handle(makeRequest('mockup:watch', cwd, 'm1'))
+      await dispatcher.handle(makeRequest('mockup:watch', cwd, 'm1'))
+      // Unwatch tears down without throwing; double-unwatch is safe.
+      await dispatcher.handle(makeRequest('mockup:unwatch', cwd, 'm1'))
+      await expect(
+        dispatcher.handle(makeRequest('mockup:unwatch', cwd, 'm1'))
+      ).resolves.toBeUndefined()
+    })
   })
 })

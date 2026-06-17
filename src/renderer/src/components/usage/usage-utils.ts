@@ -2,9 +2,10 @@ import type { TokenCounts } from '../../../../shared/types'
 
 /** Model color palette — match by substring */
 const MODEL_COLORS: Array<{ match: string; color: string }> = [
-  { match: 'opus', color: '#8b5fcc' },
-  { match: 'sonnet', color: '#6c9eff' },
-  { match: 'haiku', color: '#4ade80' }
+  { match: 'fable', color: '#d97757' },
+  { match: 'opus', color: '#7c5cff' },
+  { match: 'sonnet', color: '#e8a728' },
+  { match: 'haiku', color: '#06b6d4' }
 ]
 
 const FALLBACK_COLORS = ['#f97316', '#ec4899', '#06b6d4', '#eab308', '#a855f7', '#14b8a6']
@@ -61,6 +62,7 @@ export function sumTokens(t: TokenCounts): number {
  * e.g., "claude-opus-4-6-20250514" → "Opus 4.6"
  *        "claude-sonnet-4-20250514" → "Sonnet 4"
  *        "claude-haiku-3-5-20240101" → "Haiku 3.5"
+ *        "claude-fable-5[1m]" → "Fable 5"
  *        "opus" → "Opus"
  */
 export function shortModelName(model: string): string {
@@ -68,7 +70,7 @@ export function shortModelName(model: string): string {
 
   // Match family name, then optional major.minor version.
   // Minor is a single digit (to avoid matching the 8-digit date suffix).
-  const match = m.match(/(opus|sonnet|haiku)(?:[- ](\d{1,2})(?:[- ](\d)(?!\d))?)?/)
+  const match = m.match(/(opus|sonnet|haiku|fable|mythos)(?:[- ](\d{1,2})(?:[- ](\d)(?!\d))?)?/)
   if (match) {
     const family = match[1].charAt(0).toUpperCase() + match[1].slice(1)
     const major = match[2]
@@ -96,7 +98,20 @@ export function formatTime(ts: number): string {
 /** Format a date as "Mon DD" */
 export function formatShortDate(dateStr: string): string {
   const d = new Date(dateStr + 'T00:00:00')
-  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+  const months = [
+    'Jan',
+    'Feb',
+    'Mar',
+    'Apr',
+    'May',
+    'Jun',
+    'Jul',
+    'Aug',
+    'Sep',
+    'Oct',
+    'Nov',
+    'Dec'
+  ]
   return `${months[d.getMonth()]} ${d.getDate()}`
 }
 

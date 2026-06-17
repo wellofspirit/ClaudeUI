@@ -5,7 +5,9 @@ import { AutomationRunHistoryView } from './View'
 export function AutomationRunHistory(): React.JSX.Element {
   const selectedAutomationId = useAutomationStore((s) => s.selectedAutomationId)
   const selectedRunId = useAutomationStore((s) => s.selectedRunId)
-  const runs = useAutomationStore((s) => selectedAutomationId ? s.runs[selectedAutomationId] : undefined)
+  const runs = useAutomationStore((s) =>
+    selectedAutomationId ? s.runs[selectedAutomationId] : undefined
+  )
   const runMessages = useAutomationStore((s) => s.runMessages)
   const setRunMessages = useAutomationStore((s) => s.setRunMessages)
   const clearRunSelection = useAutomationStore((s) => s.clearRunSelection)
@@ -18,8 +20,11 @@ export function AutomationRunHistory(): React.JSX.Element {
     if (!selectedAutomationId || !selectedRunId) return
     setRunMessages(null)
     useAutomationStore.getState().clearStreamingText()
-    window.api.loadAutomationRunHistory(selectedAutomationId, selectedRunId)
-      .then((msgs) => { setRunMessages(msgs) })
+    window.api
+      .loadAutomationRunHistory(selectedAutomationId, selectedRunId)
+      .then((msgs) => {
+        setRunMessages(msgs)
+      })
       .catch((err) => {
         window.api.logError('AutomationRunHistory', `Failed to load run ${selectedRunId}: ${err}`)
         // Fall back to empty list so the UI shows "No messages recorded" instead of "Loading..."
@@ -27,10 +32,13 @@ export function AutomationRunHistory(): React.JSX.Element {
       })
   }, [selectedAutomationId, selectedRunId, setRunMessages])
 
-  const handleSend = useCallback((text: string) => {
-    if (!selectedAutomationId) return
-    window.api.sendAutomationMessage(selectedAutomationId, text)
-  }, [selectedAutomationId])
+  const handleSend = useCallback(
+    (text: string) => {
+      if (!selectedAutomationId) return
+      window.api.sendAutomationMessage(selectedAutomationId, text)
+    },
+    [selectedAutomationId]
+  )
 
   const handleStop = useCallback(() => {
     if (!selectedAutomationId || !selectedRunId) return

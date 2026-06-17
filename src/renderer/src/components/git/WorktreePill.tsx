@@ -12,8 +12,12 @@ export function WorktreePill(): React.JSX.Element | null {
   useEffect(() => {
     if (!popoverOpen) return
     const handler = (e: MouseEvent): void => {
-      if (popoverRef.current && !popoverRef.current.contains(e.target as Node) &&
-          buttonRef.current && !buttonRef.current.contains(e.target as Node)) {
+      if (
+        popoverRef.current &&
+        !popoverRef.current.contains(e.target as Node) &&
+        buttonRef.current &&
+        !buttonRef.current.contains(e.target as Node)
+      ) {
         setPopoverOpen(false)
       }
     }
@@ -23,16 +27,19 @@ export function WorktreePill(): React.JSX.Element | null {
 
   if (!worktreeInfo) return null
 
-  const displayName = worktreeInfo.worktreeName.length > 16
-    ? worktreeInfo.worktreeName.slice(0, 15) + '\u2026'
-    : worktreeInfo.worktreeName
+  const displayName =
+    worktreeInfo.worktreeName.length > 16
+      ? worktreeInfo.worktreeName.slice(0, 15) + '\u2026'
+      : worktreeInfo.worktreeName
 
   const handleCopyPath = async (): Promise<void> => {
     try {
       await navigator.clipboard.writeText(worktreeInfo.worktreePath)
       setCopied(true)
       setTimeout(() => setCopied(false), 1500)
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
   }
 
   return (
@@ -44,7 +51,17 @@ export function WorktreePill(): React.JSX.Element | null {
         title={`Worktree: ${worktreeInfo.worktreeName}`}
       >
         {/* Git tree/fork icon */}
-        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0 relative top-[1.5px]">
+        <svg
+          width="11"
+          height="11"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          className="shrink-0 relative top-[1.5px]"
+        >
           <circle cx="12" cy="18" r="3" />
           <circle cx="6" cy="6" r="3" />
           <circle cx="18" cy="6" r="3" />
@@ -61,14 +78,27 @@ export function WorktreePill(): React.JSX.Element | null {
           <div className="flex flex-col gap-2 text-[12px]">
             <div className="flex items-center justify-between">
               <span className="text-text-muted">Worktree</span>
-              <span className="font-mono text-mode-edit truncate max-w-[160px]" title={worktreeInfo.worktreeName}>{worktreeInfo.worktreeName}</span>
+              <span
+                className="font-mono text-mode-edit truncate max-w-[160px]"
+                title={worktreeInfo.worktreeName}
+              >
+                {worktreeInfo.worktreeName}
+              </span>
             </div>
             <div className="flex items-center justify-between">
               <span className="text-text-muted">Branch</span>
-              <span className="font-mono text-text-primary truncate max-w-[160px]" title={worktreeInfo.worktreeBranch}>{worktreeInfo.worktreeBranch}</span>
+              <span
+                className="font-mono text-text-primary truncate max-w-[160px]"
+                title={worktreeInfo.worktreeBranch}
+              >
+                {worktreeInfo.worktreeBranch}
+              </span>
             </div>
             <div className="flex items-center gap-1.5 mt-1">
-              <span className="font-mono text-[11px] text-text-muted truncate max-w-[200px]" title={worktreeInfo.worktreePath}>
+              <span
+                className="font-mono text-[11px] text-text-muted truncate max-w-[200px]"
+                title={worktreeInfo.worktreePath}
+              >
                 {worktreeInfo.worktreePath}
               </span>
               <button

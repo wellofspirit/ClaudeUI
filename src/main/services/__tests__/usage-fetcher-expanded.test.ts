@@ -31,9 +31,9 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 
 vi.mock('../claude-session', () => ({
   ClaudeSession: {
-    getExtraWindows: () => [],
+    getExtraWindows: () => []
   },
-  getSdkVersion: () => '0.2.97',
+  getSdkVersion: () => '0.2.97'
 }))
 
 // Silence logger writes during tests.
@@ -42,8 +42,8 @@ vi.mock('../logger', () => ({
     debug: vi.fn(),
     info: vi.fn(),
     warn: vi.fn(),
-    error: vi.fn(),
-  },
+    error: vi.fn()
+  }
 }))
 
 // ---------------------------------------------------------------------------
@@ -61,7 +61,7 @@ type VirtualFS = {
 
 const vfs: VirtualFS = {
   files: new Map(),
-  readErrors: new Map(),
+  readErrors: new Map()
 }
 
 function basenameOf(p: string | URL): string {
@@ -85,7 +85,11 @@ vi.mock('node:fs/promises', () => ({
   writeFile: vi.fn(async (p: string | URL, data: string) => {
     vfs.files.set(basenameOf(p), data)
   }),
-  mkdir: vi.fn(async () => undefined),
+  appendFile: vi.fn(async (p: string | URL, data: string) => {
+    const name = basenameOf(p)
+    vfs.files.set(name, (vfs.files.get(name) ?? '') + data)
+  }),
+  mkdir: vi.fn(async () => undefined)
 }))
 
 // ---------------------------------------------------------------------------
@@ -106,25 +110,25 @@ function seedValidCredentials(): void {
         refreshToken: 'test-refresh-token',
         // far-future expiry → no refresh attempt
         expiresAt: Date.now() + 60 * 60 * 1000,
-        scopes: ['user:inference'],
-      },
-    }),
+        scopes: ['user:inference']
+      }
+    })
   )
 }
 
 function makeFetchResponse(
   status: number,
   body: unknown,
-  headers: Record<string, string> = {},
+  headers: Record<string, string> = {}
 ): Response {
   return {
     ok: status >= 200 && status < 300,
     status,
     headers: {
-      get: (k: string) => headers[k.toLowerCase()] ?? headers[k] ?? null,
+      get: (k: string) => headers[k.toLowerCase()] ?? headers[k] ?? null
     },
     json: async () => body,
-    text: async () => (typeof body === 'string' ? body : JSON.stringify(body)),
+    text: async () => (typeof body === 'string' ? body : JSON.stringify(body))
   } as unknown as Response
 }
 
@@ -154,7 +158,7 @@ describe('UsageFetcher — 429 rate-limit behavior', () => {
     // this test should be replaced with the retry-timing assertion from
     // docs/test-coverage-proposal.md §3.2.
     fetchMock.mockResolvedValueOnce(
-      makeFetchResponse(429, { error: 'rate_limited' }, { 'retry-after': '30' }),
+      makeFetchResponse(429, { error: 'rate_limited' }, { 'retry-after': '30' })
     )
 
     const result = await fetcher.fetch()
@@ -170,8 +174,8 @@ describe('UsageFetcher — 429 rate-limit behavior', () => {
     fetchMock.mockResolvedValueOnce(
       makeFetchResponse(200, {
         five_hour: { utilization: 42, resets_at: '2025-01-15T20:00:00Z' },
-        seven_day: { utilization: 20, resets_at: '2025-01-20T00:00:00Z' },
-      }),
+        seven_day: { utilization: 20, resets_at: '2025-01-20T00:00:00Z' }
+      })
     )
     const ok = await fetcher.fetch()
     expect(ok.error).toBeNull()
@@ -213,8 +217,8 @@ describe('UsageFetcher — disk cache loadCache()', () => {
         extraUsage: null,
         planName: null,
         fetchedAt: elevenMinAgo,
-        error: null,
-      }),
+        error: null
+      })
     )
 
     const cached = await fetcher.loadCache()
@@ -233,8 +237,8 @@ describe('UsageFetcher — disk cache loadCache()', () => {
         extraUsage: null,
         planName: null,
         fetchedAt: twoMinAgo,
-        error: null,
-      }),
+        error: null
+      })
     )
 
     const cached = await fetcher.loadCache()
@@ -277,7 +281,7 @@ describe('UsageFetcher — utilization scale conversion (0-1 vs 0-100)', () => {
     fetcher.updateFromRateLimitEvent({
       utilization: 0.5,
       rateLimitType: 'five_hour',
-      resetsAt: 1737000000,
+      resetsAt: 1737000000
     })
 
     const usage = fetcher.getLastUsage()
@@ -289,7 +293,7 @@ describe('UsageFetcher — utilization scale conversion (0-1 vs 0-100)', () => {
   it('updateFromHeaderUtilization converts 0-1 fraction to 0-100 percent', () => {
     fetcher.updateFromHeaderUtilization({
       five_hour: { utilization: 0.5, resets_at: 1737000000 },
-      seven_day: { utilization: 0.25, resets_at: 1737600000 },
+      seven_day: { utilization: 0.25, resets_at: 1737600000 }
     })
 
     const usage = fetcher.getLastUsage()
@@ -302,8 +306,8 @@ describe('UsageFetcher — utilization scale conversion (0-1 vs 0-100)', () => {
     fetchMock.mockResolvedValueOnce(
       makeFetchResponse(200, {
         // API returns percent, not fraction. 50 must stay 50, not become 5000.
-        five_hour: { utilization: 50, resets_at: '2025-01-15T20:00:00Z' },
-      }),
+        five_hour: { utilization: 50, resets_at: '2025-01-15T20:00:00Z' }
+      })
     )
 
     const result = await fetcher.fetch()
@@ -325,7 +329,7 @@ describe('UsageFetcher — merge semantics across header + event sources', () =>
   it('header utilization + rate_limit_event merge into one AccountUsage by window', () => {
     // Seed with a header-sourced five_hour window
     fetcher.updateFromHeaderUtilization({
-      five_hour: { utilization: 0.4, resets_at: 1737000000 },
+      five_hour: { utilization: 0.4, resets_at: 1737000000 }
     })
     expect(fetcher.getLastUsage()!.fiveHour.usedPercent).toBe(40)
     expect(fetcher.getLastUsage()!.sevenDay).toBeNull()
@@ -334,7 +338,7 @@ describe('UsageFetcher — merge semantics across header + event sources', () =>
     fetcher.updateFromRateLimitEvent({
       utilization: 0.3,
       rateLimitType: 'seven_day',
-      resetsAt: 1737600000,
+      resetsAt: 1737600000
     })
 
     const usage = fetcher.getLastUsage()!
@@ -346,7 +350,7 @@ describe('UsageFetcher — merge semantics across header + event sources', () =>
     fetcher.updateFromRateLimitEvent({
       utilization: 0.2,
       rateLimitType: 'five_hour',
-      resetsAt: 1737000000,
+      resetsAt: 1737000000
     })
     expect(fetcher.getLastUsage()!.fiveHour.usedPercent).toBe(20)
 
@@ -354,11 +358,11 @@ describe('UsageFetcher — merge semantics across header + event sources', () =>
     fetcher.updateFromRateLimitEvent({
       utilization: 0.9,
       rateLimitType: 'five_hour',
-      resetsAt: 1737001000,
+      resetsAt: 1737001000
     })
     expect(fetcher.getLastUsage()!.fiveHour.usedPercent).toBe(90)
     expect(fetcher.getLastUsage()!.fiveHour.resetsAt).toBe(
-      new Date(1737001000 * 1000).toISOString(),
+      new Date(1737001000 * 1000).toISOString()
     )
   })
 
@@ -368,13 +372,13 @@ describe('UsageFetcher — merge semantics across header + event sources', () =>
     // then corrupt the error via another event and verify it stays cleared.
     fetcher.updateFromRateLimitEvent({
       utilization: 0.1,
-      rateLimitType: 'five_hour',
+      rateLimitType: 'five_hour'
     })
     const first = fetcher.getLastUsage()!
     expect(first.error).toBeNull()
 
     fetcher.updateFromHeaderUtilization({
-      seven_day: { utilization: 0.2, resets_at: 1737600000 },
+      seven_day: { utilization: 0.2, resets_at: 1737600000 }
     })
     const second = fetcher.getLastUsage()!
     expect(second.error).toBeNull()
@@ -401,7 +405,34 @@ describe('UsageFetcher — cache TTL short-circuits startPolling() network call'
     vi.unstubAllGlobals()
   })
 
-  it('skips the initial API fetch when disk cache is fresh (within TTL)', async () => {
+  it('skips the initial API fetch when disk cache is fresh AND its window is unexpired', async () => {
+    const thirtySecAgo = Date.now() - 30 * 1000
+    const futureReset = new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString()
+    vfs.files.set(
+      'usage-cache.json',
+      JSON.stringify({
+        fiveHour: { usedPercent: 12, resetsAt: futureReset },
+        sevenDay: null,
+        sevenDaySonnet: null,
+        sevenDayOpus: null,
+        extraUsage: null,
+        planName: null,
+        fetchedAt: thirtySecAgo,
+        error: null
+      })
+    )
+
+    fetcher.startPolling()
+
+    // startPolling() kicks off an async loadCache() → pushToRenderer chain.
+    // Drain the microtask queue generously.
+    for (let i = 0; i < 20; i++) await Promise.resolve()
+
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(fetcher.getLastUsage()?.fiveHour.usedPercent).toBe(12)
+  })
+
+  it('fetches at launch when the cached window is not indicative (no resetsAt)', async () => {
     const thirtySecAgo = Date.now() - 30 * 1000
     vfs.files.set(
       'usage-cache.json',
@@ -413,21 +444,22 @@ describe('UsageFetcher — cache TTL short-circuits startPolling() network call'
         extraUsage: null,
         planName: null,
         fetchedAt: thirtySecAgo,
-        error: null,
-      }),
+        error: null
+      })
+    )
+
+    fetchMock.mockResolvedValueOnce(
+      makeFetchResponse(200, {
+        five_hour: { utilization: 33, resets_at: '2025-01-15T20:00:00Z' }
+      })
     )
 
     fetcher.startPolling()
 
-    // startPolling() kicks off an async loadCache() → pushToRenderer chain.
-    // Drain the microtask queue by awaiting a resolved promise twice: once
-    // for the loadCache() .then, once for any chained handlers.
-    await Promise.resolve()
-    await Promise.resolve()
-    await Promise.resolve()
-
-    expect(fetchMock).not.toHaveBeenCalled()
-    expect(fetcher.getLastUsage()?.fiveHour.usedPercent).toBe(12)
+    await vi.waitFor(() => {
+      expect(fetcher.getLastUsage()?.fiveHour.usedPercent).toBe(33)
+    })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
   it('falls through to fetchUsage when cache is stale', async () => {
@@ -442,23 +474,26 @@ describe('UsageFetcher — cache TTL short-circuits startPolling() network call'
         extraUsage: null,
         planName: null,
         fetchedAt: elevenMinAgo,
-        error: null,
-      }),
+        error: null
+      })
     )
 
     fetchMock.mockResolvedValueOnce(
       makeFetchResponse(200, {
-        five_hour: { utilization: 33, resets_at: '2025-01-15T20:00:00Z' },
-      }),
+        five_hour: { utilization: 33, resets_at: '2025-01-15T20:00:00Z' }
+      })
     )
 
     fetcher.startPolling()
 
-    // Wait for loadCache() → fetch() chain to settle.
-    for (let i = 0; i < 10; i++) await Promise.resolve()
-
-    expect(fetchMock).toHaveBeenCalledTimes(1)
+    // Wait for loadCache() → fetch() chain to settle (the chain now includes
+    // account tracking reads before the network call).
+    await vi.waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+    })
     expect(fetchMock.mock.calls[0][0]).toBe('https://api.anthropic.com/api/oauth/usage')
-    expect(fetcher.getLastUsage()?.fiveHour.usedPercent).toBe(33)
+    await vi.waitFor(() => {
+      expect(fetcher.getLastUsage()?.fiveHour.usedPercent).toBe(33)
+    })
   })
 })

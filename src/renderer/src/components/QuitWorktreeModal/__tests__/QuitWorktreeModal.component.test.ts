@@ -8,8 +8,6 @@
  *   4. onRemoveAll removes each worktree + confirmQuit
  */
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
-
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import React from 'react'
 import { render, act } from '@testing-library/react'
@@ -23,7 +21,7 @@ vi.mock('../View', () => ({
   QuitWorktreeModalView: (props: QuitWorktreeModalViewProps) => {
     viewProps = props
     return null
-  },
+  }
 }))
 
 function makeWorktreeInfo(name: string): WorktreeInfo {
@@ -31,7 +29,7 @@ function makeWorktreeInfo(name: string): WorktreeInfo {
     worktreeName: name,
     worktreePath: `/d/repo/.claude/worktrees/${name}`,
     worktreeBranch: `feat/${name}`,
-    gitRoot: '/d/repo',
+    gitRoot: '/d/repo'
   } as WorktreeInfo
 }
 
@@ -46,8 +44,13 @@ describe('QuitWorktreeModal FC', () => {
     confirmQuitCalls = 0
     removeCalls = 0
 
-    app.bridge.ipcMain.handle('app:quit-confirm', async () => { confirmQuitCalls++ })
-    app.bridge.ipcMain.handle('worktree:remove', async () => { removeCalls++; return { ok: true, data: undefined } })
+    app.bridge.ipcMain.handle('app:quit-confirm', async () => {
+      confirmQuitCalls++
+    })
+    app.bridge.ipcMain.handle('worktree:remove', async () => {
+      removeCalls++
+      return { ok: true, data: undefined }
+    })
 
     useSessionStore.setState({ quitWorktrees: null })
   })
@@ -69,20 +72,30 @@ describe('QuitWorktreeModal FC', () => {
   })
 
   it('onCancel clears quitWorktrees in the store', async () => {
-    useSessionStore.setState({ quitWorktrees: [{ routingId: 'r1', worktreeInfo: makeWorktreeInfo('wt1') }] })
+    useSessionStore.setState({
+      quitWorktrees: [{ routingId: 'r1', worktreeInfo: makeWorktreeInfo('wt1') }]
+    })
     await renderFC()
 
-    act(() => { viewProps!.onCancel() })
+    act(() => {
+      viewProps!.onCancel()
+    })
 
     expect(useSessionStore.getState().quitWorktrees).toBeNull()
   })
 
   it('onKeepAll clears state and calls confirmQuit', async () => {
-    useSessionStore.setState({ quitWorktrees: [{ routingId: 'r1', worktreeInfo: makeWorktreeInfo('wt1') }] })
+    useSessionStore.setState({
+      quitWorktrees: [{ routingId: 'r1', worktreeInfo: makeWorktreeInfo('wt1') }]
+    })
     await renderFC()
 
-    act(() => { viewProps!.onKeepAll() })
-    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    act(() => {
+      viewProps!.onKeepAll()
+    })
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
 
     expect(confirmQuitCalls).toBe(1)
     expect(useSessionStore.getState().quitWorktrees).toBeNull()
@@ -92,8 +105,8 @@ describe('QuitWorktreeModal FC', () => {
     useSessionStore.setState({
       quitWorktrees: [
         { routingId: 'r1', worktreeInfo: makeWorktreeInfo('wt1') },
-        { routingId: 'r2', worktreeInfo: makeWorktreeInfo('wt2') },
-      ],
+        { routingId: 'r2', worktreeInfo: makeWorktreeInfo('wt2') }
+      ]
     })
     await renderFC()
 

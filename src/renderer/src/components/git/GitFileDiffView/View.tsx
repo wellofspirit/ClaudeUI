@@ -108,14 +108,19 @@ export function GitFileDiffViewView({
     const lineComments = fileComments.filter(
       (c) => c.endLineNumber === lineNum && c.side === lineSide
     )
-    const hasInput = activeInput && activeInput.lineNumber === lineNum && activeInput.side === lineSide
+    const hasInput =
+      activeInput && activeInput.lineNumber === lineNum && activeInput.side === lineSide
 
     if (lineComments.length === 0 && !hasInput) return null
 
     return (
       <>
         {lineComments.length > 0 && (
-          <DiffCommentBadge comments={lineComments} onEdit={onEditComment} onRemove={onRemoveComment} />
+          <DiffCommentBadge
+            comments={lineComments}
+            onEdit={onEditComment}
+            onRemove={onRemoveComment}
+          />
         )}
         {hasInput && (
           <DiffCommentWidget

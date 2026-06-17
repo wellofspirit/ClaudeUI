@@ -1,5 +1,9 @@
 import { memo, useEffect, useState } from 'react'
-import type { ContentBlock, PendingApproval, PermissionSuggestion } from '../../../../../shared/types'
+import type {
+  ContentBlock,
+  PendingApproval,
+  PermissionSuggestion
+} from '../../../../../shared/types'
 import { useSessionStore, useActiveSession } from '../../../stores/session-store'
 import { ToolCallBlockView } from './View'
 
@@ -12,7 +16,11 @@ interface Props {
   approval?: PendingApproval
 }
 
-export const ToolCallBlock = memo(function ToolCallBlock({ block, result, approval }: Props): React.JSX.Element {
+export const ToolCallBlock = memo(function ToolCallBlock({
+  block,
+  result,
+  approval
+}: Props): React.JSX.Element {
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const removePendingApproval = useSessionStore((s) => s.removePendingApproval)
   const openTaskPanel = useSessionStore((s) => s.openTaskPanel)
@@ -34,7 +42,9 @@ export const ToolCallBlock = memo(function ToolCallBlock({ block, result, approv
   const watchBackgroundOutput = useSessionStore((s) => s.watchBackgroundOutput)
   const unwatchBackgroundOutput = useSessionStore((s) => s.unwatchBackgroundOutput)
 
-  const bgNotification = isBackgroundBash ? taskNotifications.find((n) => n.toolUseId === toolUseId) ?? null : null
+  const bgNotification = isBackgroundBash
+    ? (taskNotifications.find((n) => n.toolUseId === toolUseId) ?? null)
+    : null
 
   const isStopping = stoppingTaskIds.includes(toolUseId)
   const [isBackgrounding, setIsBackgrounding] = useState(false)
@@ -45,13 +55,28 @@ export const ToolCallBlock = memo(function ToolCallBlock({ block, result, approv
   useEffect(() => {
     if (!isBackgroundBash || isHistorical || !activeSessionId || !toolUseId) return
     watchBackgroundOutput(activeSessionId, toolUseId)
-    return () => { unwatchBackgroundOutput(activeSessionId, toolUseId) }
-  }, [isBackgroundBash, isHistorical, activeSessionId, toolUseId, watchBackgroundOutput, unwatchBackgroundOutput])
+    return () => {
+      unwatchBackgroundOutput(activeSessionId, toolUseId)
+    }
+  }, [
+    isBackgroundBash,
+    isHistorical,
+    activeSessionId,
+    toolUseId,
+    watchBackgroundOutput,
+    unwatchBackgroundOutput
+  ])
 
-  const handleApproval = async (decision: 'allow' | 'deny', selectedSuggestions?: PermissionSuggestion[]): Promise<void> => {
+  const handleApproval = async (
+    decision: 'allow' | 'deny',
+    selectedSuggestions?: PermissionSuggestion[]
+  ): Promise<void> => {
     if (!approval || !activeSessionId) return
     await window.api.respondApproval(
-      activeSessionId, approval.requestId, decision, undefined,
+      activeSessionId,
+      approval.requestId,
+      decision,
+      undefined,
       selectedSuggestions
     )
     removePendingApproval(activeSessionId, approval.requestId)

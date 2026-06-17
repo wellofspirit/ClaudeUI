@@ -17,15 +17,15 @@ Patches:               0 automated tests (13 patches registered in apply-all.mjs
 
 ### Gaps by severity
 
-| Area | Files | Tested | Risk |
-|------|-------|--------|------|
-| Main services | 36 | 15 (42%) | High — stateful business logic |
-| IPC handlers | 4 files, ~106 handlers | 0 | High — renderer/main contract |
-| Renderer hooks | 10 | 6 | Medium |
-| E2E flows | — | 1 | High — cross-subsystem nets |
-| SDK patches | 13 | 0 | High — break silently on SDK upgrade |
-| Renderer components | 29 with logic | 29 | Well covered |
-| Pure utilities (diff lib, crypto, content-blocks) | — | Most | Well covered |
+| Area                                              | Files                  | Tested   | Risk                                 |
+| ------------------------------------------------- | ---------------------- | -------- | ------------------------------------ |
+| Main services                                     | 36                     | 15 (42%) | High — stateful business logic       |
+| IPC handlers                                      | 4 files, ~106 handlers | 0        | High — renderer/main contract        |
+| Renderer hooks                                    | 10                     | 6        | Medium                               |
+| E2E flows                                         | —                      | 1        | High — cross-subsystem nets          |
+| SDK patches                                       | 13                     | 0        | High — break silently on SDK upgrade |
+| Renderer components                               | 29 with logic          | 29       | Well covered                         |
+| Pure utilities (diff lib, crypto, content-blocks) | —                      | Most     | Well covered                         |
 
 The investment has been concentrated on the renderer. The main process — where git operations, PTY lifecycle, remote-access networking, and plugin execution live — is largely uncovered.
 
@@ -46,6 +46,7 @@ Tiers are ordered by **blast radius × probability of breakage**. Tier 1 is non-
 **Infrastructure:** Use a real temporary git repo per test via `fs.mkdtemp()` + `simple-git` against that path. Do NOT mock `simple-git` — we want to catch wrapper bugs and argument-shape regressions.
 
 **Cases:**
+
 - `status()` — clean repo, staged files, unstaged files, untracked files, deleted files, renames, submodules ignored
 - `getBranches()` — current branch marking, remote-tracking branches, detached HEAD
 - `switchBranch()` — success, dirty-tree rejection, nonexistent branch
@@ -71,6 +72,7 @@ Tiers are ordered by **blast radius × probability of breakage**. Tier 1 is non-
 **Infrastructure:** Mock `node-pty.spawn` — return a fake PTY that exposes `write`, `resize`, `onData`, `onExit`, `kill`. Do not launch real shells in CI.
 
 **Cases:**
+
 - `create()` — picks pwsh on Windows, bash on Unix; honors `SHELL` env var; passes `cwd` and `cols`/`rows`
 - `write()` — routes to the correct PTY by id; no-op on unknown id (don't throw — preserve renderer contract)
 - `resize()` — clamps to sane bounds; no-op if cols/rows unchanged
@@ -94,6 +96,7 @@ Tiers are ordered by **blast radius × probability of breakage**. Tier 1 is non-
 **Infrastructure:** Use `TestIpcBridge` (same bridge that powers component tests) plus a stub for the underlying service. Wire the real `registerSessionIpc()` / `registerTerminalIpc()` / etc. against the bridge and assert behavior from the renderer side.
 
 **Cases per module:**
+
 - **Handler registration** — each documented channel is actually registered (prevents typo regressions)
 - **Envelope contract** — `safeHandler`-wrapped channels return `{ ok: true, data }` on success and `{ ok: false, error }` on thrown error; `unwrap()` round-trips both
 - **Argument validation** — malformed or missing args return a typed error, not an unhandled throw that crashes main
@@ -112,6 +115,7 @@ Tiers are ordered by **blast radius × probability of breakage**. Tier 1 is non-
 **Layer:** Layer 4 (behavioral, in `patch/<name>/test.mjs` using the `/patch-test-harness` skill).
 
 **Cases per patch:**
+
 - **Application success** — `apply.mjs` produces a marker and the marker is idempotent (running twice is a no-op)
 - **Anchor uniqueness** — the pattern in `apply.mjs` matches exactly once in the current `cli.js` (future-proofing: if a refactor duplicates the anchor, we want a failing test, not a silent miscompile)
 - **Behavioral verification** — exercise the patched code path via `sdkQuery()` and assert the expected event/message shape:
@@ -164,6 +168,7 @@ Tiers are ordered by **blast radius × probability of breakage**. Tier 1 is non-
 **Why:** Plugin system (ADR-004, ADR-005) runs third-party code. Lifecycle bugs here mean ghost plugins, crashed renderer, or unauthorized IPC access.
 
 **Cases:**
+
 - Load — scans `~/.claude/ui/plugins/`, skips malformed manifests, respects `enabled` flag
 - Isolation — plugin preload bridge exposes only the whitelisted API surface; direct `ipcRenderer` access is blocked
 - Lifecycle — `activate` / `deactivate` hooks fire in order; errors in one plugin don't kill others
@@ -179,6 +184,7 @@ Tiers are ordered by **blast radius × probability of breakage**. Tier 1 is non-
 **Why:** Remote web access (ADR / feature) exposes a WebSocket server with E2E crypto and token auth. Security-relevant; bugs could leak sessions.
 
 **Cases:**
+
 - Token auth — missing/invalid token rejects with 401; valid token upgrades to WebSocket
 - E2E handshake — key exchange completes; subsequent messages decrypt; tampered ciphertext rejected
 - Dispatcher routing — allowed channel routes to handler; blocklisted channel returns typed error without invoking handler
@@ -194,15 +200,18 @@ Tiers are ordered by **blast radius × probability of breakage**. Tier 1 is non-
 #### 2.3 `worktree.ts` + `useGitWatcher` + `useTerminalColdCleanup`
 
 **Cases for worktree.ts:**
+
 - `create()` — happy path, path collision, target branch missing
 - `remove()` — with and without `--force`, when worktree has uncommitted changes
 - `list()` — parses porcelain output, handles detached HEAD worktrees
 
 **Cases for useGitWatcher:**
+
 - Starts polling when active session has a git cwd; stops on session switch to non-git cwd
 - Debounces rapid cwd changes
 
 **Cases for useTerminalColdCleanup:**
+
 - Fires after 10 min inactivity (ADR-003); reset on any terminal activity
 - Does not fire for the currently-focused terminal
 - Cleanup unsubscribes timers on unmount
@@ -218,6 +227,7 @@ Tiers are ordered by **blast radius × probability of breakage**. Tier 1 is non-
 **Layer:** Layer 1, `src/renderer/src/stores/__tests__/session-store-actions.test.ts` (augmenting the existing `.component.test.ts`).
 
 **Cases:**
+
 - `addMessage()` upserts by `betaMessage.id` across partial streams
 - `appendStreamingText()` merges text blocks into the current assistant message
 - `appendToolResult()` extracts from synthetic user message and attaches to the right tool_use
@@ -234,6 +244,7 @@ Tiers are ordered by **blast radius × probability of breakage**. Tier 1 is non-
 #### 2.5 `automation-manager.ts` expanded coverage
 
 Existing tests cover core scheduling. Add:
+
 - DST transition — cron schedule across spring-forward / fall-back doesn't double-fire or skip
 - Interval drift — long-running runs don't cause next-run to pile up; interval reschedules from end, not start
 - Crash recovery — partially-written run record on disk doesn't corrupt history on restart
@@ -256,6 +267,7 @@ File-watch lifecycle: spawn → watch → update → unwatch → respawn. Real f
 #### 3.2 `usage-fetcher.ts` rate-limit merge logic
 
 Existing tests exist. Add:
+
 - 429 backoff + retry-after header
 - Disk cache stale fallback when network is down
 - Header-vs-API scale conversion (0–1 vs 0–100) — known gotcha, deserves a pinned test

@@ -24,27 +24,30 @@ The app has two natural boundaries:
 
 Tests are organized into four layers that target different concerns:
 
-| Layer | What it tests | What it fakes | Runs in CI |
-|-------|---------------|---------------|------------|
-| **Unit** | Pure rendering, pure functions | Store selectors (pre-populated state) | Yes |
-| **Component** | Business logic (events → state) | Electron IPC transport, SDK | Yes |
-| **E2E** | Full pipeline (action → state → outcome) | Electron IPC transport, SDK | Yes |
-| **Integration** | SDK event contracts | Nothing (real SDK) | No (gated) |
+| Layer           | What it tests                            | What it fakes                         | Runs in CI |
+| --------------- | ---------------------------------------- | ------------------------------------- | ---------- |
+| **Unit**        | Pure rendering, pure functions           | Store selectors (pre-populated state) | Yes        |
+| **Component**   | Business logic (events → state)          | Electron IPC transport, SDK           | Yes        |
+| **E2E**         | Full pipeline (action → state → outcome) | Electron IPC transport, SDK           | Yes        |
+| **Integration** | SDK event contracts                      | Nothing (real SDK)                    | No (gated) |
 
 ## Layer 1: Unit Tests
 
 **Purpose:** Verify that React components render correctly given specific props and store state. Also covers pure utility functions (formatting, parsing, math).
 
 **What to test:**
+
 - Given a `ChatMessage` with certain content blocks, does `MessageBubble` render the right sub-components?
 - Given a tool_use block with an approval, does `ToolCallBlock` show the approval UI?
 - Given formatted token counts, does `formatTokenCount` return the right abbreviation?
 
 **What NOT to test here:**
+
 - Business logic (event handling, state transitions, IPC routing)
 - Side effects (IPC calls, navigation, timers)
 
 **How to write:**
+
 ```typescript
 // File: src/renderer/src/components/chat/__tests__/MyComponent.unit.test.tsx
 
@@ -81,6 +84,7 @@ it('renders text content', () => {
 This is the highest-value test layer. It catches the bugs that actually ship: broken event handlers, incorrect state transitions, race conditions in approval flows.
 
 **What to test:**
+
 - IPC event → store state transition (message arrives → addMessage updates session)
 - Session rekey flow (status event with different sessionId → old key removed, new key created)
 - Approval lifecycle (request arrives → pending in store → status idle → cleared)
@@ -89,11 +93,13 @@ This is the highest-value test layer. It catches the bugs that actually ship: br
 - Error accumulation, permission mode changes, team events, subagent streaming
 
 **What NOT to test here:**
+
 - React rendering (that's Layer 1)
 - Full pipeline end-to-end (that's Layer 3)
 - Real SDK behavior (that's Layer 4)
 
 **How to write:**
+
 ```typescript
 // File: src/renderer/src/hooks/__tests__/myLogic.component.test.ts
 // Note: .ts not .tsx — no React rendering
@@ -107,7 +113,7 @@ let bridge: TestIpcBridge
 beforeEach(() => {
   bridge = new TestIpcBridge()
   // Stub window.api for store internal calls
-  window.api = { saveSessionConfig: () => {}, /* ... */ } as any
+  window.api = { saveSessionConfig: () => {} /* ... */ } as any
   // Reset store
   useSessionStore.setState({ activeSessionId: null, sessions: {} })
   // Wire event handlers (same logic as useClaudeEvents)
@@ -120,9 +126,14 @@ afterEach(() => {
 
 it('rekeys session when status has different sessionId', () => {
   useSessionStore.getState().createNewSession('temp-id', '/test')
-  bridge.webContents.send('session:status', 'temp-id', makeSessionStatus({
-    state: 'running', sessionId: 'stable-uuid'
-  }))
+  bridge.webContents.send(
+    'session:status',
+    'temp-id',
+    makeSessionStatus({
+      state: 'running',
+      sessionId: 'stable-uuid'
+    })
+  )
   expect(useSessionStore.getState().sessions['stable-uuid']).toBeDefined()
   expect(useSessionStore.getState().sessions['temp-id']).toBeUndefined()
 })
@@ -139,6 +150,7 @@ it('rekeys session when status has different sessionId', () => {
 **Purpose:** Verify the full pipeline — from user action through IPC bridge to store update to final state. These tests wire the complete app stack (minus Electron shell and SDK subprocess) in a single process.
 
 **What to test:**
+
 - Complete conversation flow: send prompt → user message event → streaming → assistant message → result → idle
 - Approval flow end-to-end: tool use → approval request → user approves → tool result → continue
 - Session rekey through the full chain
@@ -146,11 +158,13 @@ it('rekeys session when status has different sessionId', () => {
 - Multi-session isolation under concurrent events
 
 **When to add E2E tests:**
+
 - When a bug involves multiple subsystems interacting (e.g., "rekey breaks streaming")
 - When you want to verify a user-visible workflow works end-to-end
 - As smoke tests for critical paths
 
 **How to write:**
+
 ```typescript
 // File: src/e2e/flows/my-flow.e2e.test.ts
 
@@ -165,7 +179,9 @@ beforeEach(async () => {
   wireEventHandlers(app) // same pattern as component tests
 })
 
-afterEach(() => { app.teardown() })
+afterEach(() => {
+  app.teardown()
+})
 
 it('full conversation flow', () => {
   useSessionStore.getState().createNewSession('r1', '/test')
@@ -173,7 +189,7 @@ it('full conversation flow', () => {
   app.emit('session:stream', 'r1', { type: 'text', text: 'Hi there' })
   app.emit('session:message', 'r1', makeAssistantMessage('Hi there'))
   app.emit('session:result', 'r1')
-  
+
   const session = useSessionStore.getState().sessions['r1']
   expect(session.messages).toHaveLength(2)
   expect(session.status.state).toBe('idle')
@@ -193,6 +209,7 @@ it('full conversation flow', () => {
 **Purpose:** Verify that the real SDK produces the event sequences our other tests assume. When the SDK upgrades or patches change, these tests break first — telling you the contract changed before your app code silently breaks.
 
 **What to test:**
+
 - Real SDK yields `init → assistant → result` in the correct order
 - Real SDK's assistant messages have `{ role: 'assistant', content: [...] }` structure
 - Real SDK's `canUseTool` callback fires for tool use
@@ -201,6 +218,7 @@ it('full conversation flow', () => {
 **Gating:** Tests that hit the real SDK require `CLAUDE_INTEGRATION_TESTS=1` environment variable and valid API auth. They are excluded from CI. Factory shape validation tests run always.
 
 **How to write:**
+
 ```typescript
 // File: src/integration/sdk-contract/my-contract.integration.test.ts
 // @vitest-environment node
@@ -240,6 +258,7 @@ describe('factory validation', () => {
 ### TestIpcBridge (`src/test/bridges/test-ipc-bridge.ts`)
 
 In-process replacement for Electron's IPC. Implements both patterns:
+
 - **Request-response:** `ipcRenderer.invoke(channel, ...args)` → `ipcMain.handle(channel, handler)` → returns result
 - **Push events:** `webContents.send(channel, ...args)` → `ipcRenderer.on(channel, handler)` callbacks
 
@@ -278,12 +297,12 @@ bun run test:watch     # Unit tests in watch mode
 
 ### File naming
 
-| Layer | Pattern | Example |
-|-------|---------|---------|
-| Unit | `*.unit.test.tsx` or `*.test.ts` | `MessageBubble.unit.test.tsx` |
-| Component | `*.component.test.ts` | `useClaudeEvents.component.test.ts` |
-| E2E | `*.e2e.test.ts` | `basic-conversation.e2e.test.ts` |
-| Integration | `*.integration.test.ts` | `event-sequences.integration.test.ts` |
+| Layer       | Pattern                          | Example                               |
+| ----------- | -------------------------------- | ------------------------------------- |
+| Unit        | `*.unit.test.tsx` or `*.test.ts` | `MessageBubble.unit.test.tsx`         |
+| Component   | `*.component.test.ts`            | `useClaudeEvents.component.test.ts`   |
+| E2E         | `*.e2e.test.ts`                  | `basic-conversation.e2e.test.ts`      |
+| Integration | `*.integration.test.ts`          | `event-sequences.integration.test.ts` |
 
 ### File location
 
@@ -303,7 +322,7 @@ useSessionStore.setState({
   directories: [],
   recentSessionIds: [],
   pinnedSessionIds: [],
-  customTitles: {},
+  customTitles: {}
 })
 ```
 

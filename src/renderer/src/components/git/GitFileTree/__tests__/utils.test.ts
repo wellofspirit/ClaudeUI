@@ -167,9 +167,9 @@ describe('collectFiles', () => {
 
 describe('filterAndSortFiles', () => {
   const files = [
-    file('z.ts', 'M', ' '),   // staged
-    file('a.ts', ' ', 'M'),   // unstaged
-    file('m.ts', '?', '?'),   // untracked (unstaged)
+    file('z.ts', 'M', ' '), // staged
+    file('a.ts', ' ', 'M'), // unstaged
+    file('m.ts', '?', '?') // untracked (unstaged)
   ]
 
   it('returns all files sorted by path for "all"', () => {
@@ -211,13 +211,17 @@ describe('discardLabel', () => {
 
   it('returns discard count for mixed dir', () => {
     const f = [file('a', 'M', ' '), file('b', '?', '?')]
-    expect(discardLabel({ kind: 'dir', files: f, dirName: 'src' })).toBe('Discard changes (2 files)')
+    expect(discardLabel({ kind: 'dir', files: f, dirName: 'src' })).toBe(
+      'Discard changes (2 files)'
+    )
   })
 })
 
 describe('discardDialogTitle', () => {
   it('returns correct title for untracked file', () => {
-    expect(discardDialogTitle({ kind: 'file', file: file('x', '?', '?') })).toBe('Delete untracked file?')
+    expect(discardDialogTitle({ kind: 'file', file: file('x', '?', '?') })).toBe(
+      'Delete untracked file?'
+    )
   })
 
   it('returns correct title for tracked file', () => {
@@ -226,6 +230,8 @@ describe('discardDialogTitle', () => {
 
   it('returns correct title for all-untracked dir', () => {
     const f = [file('a', '?', '?')]
-    expect(discardDialogTitle({ kind: 'dir', files: f, dirName: 'src' })).toBe('Delete untracked files?')
+    expect(discardDialogTitle({ kind: 'dir', files: f, dirName: 'src' })).toBe(
+      'Delete untracked files?'
+    )
   })
 })

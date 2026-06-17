@@ -23,9 +23,11 @@ if (typeof globalThis.localStorage?.getItem !== 'function') {
       setItem: (key: string, value: string) => store.set(key, String(value)),
       removeItem: (key: string) => store.delete(key),
       clear: () => store.clear(),
-      get length() { return store.size },
-      key: (index: number) => [...store.keys()][index] ?? null,
-    },
+      get length() {
+        return store.size
+      },
+      key: (index: number) => [...store.keys()][index] ?? null
+    }
   })
 }
 
@@ -37,6 +39,6 @@ if (!('Notification' in globalThis)) {
       static permission = 'denied'
       static requestPermission = async () => 'denied' as NotificationPermission
       constructor(_title: string, _options?: NotificationOptions) {}
-    },
+    }
   })
 }

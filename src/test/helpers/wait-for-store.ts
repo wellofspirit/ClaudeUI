@@ -3,8 +3,6 @@
  * Polls the store at short intervals until the predicate returns true or timeout.
  */
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
-
 export async function waitForStore<S>(
   store: { getState: () => S; subscribe: (listener: (state: S) => void) => () => void },
   predicate: (state: S) => boolean,

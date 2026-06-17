@@ -92,7 +92,13 @@ jobs:
             platform: mac
             zip_name: ClaudeUI-${{ needs.version.outputs.version }}-mac-arm64.zip
             build_dir: dist/mac-arm64
-          - os: windows-latest
+          # Pinned to windows-2022: windows-latest migrated to Windows Server
+          # 2025 which ships only Visual Studio 2026. node-gyp (11.x, bundled via
+          # electron-builder install-app-deps) hard-codes its supported VS years
+          # to [2019, 2022], so it can't detect VS2026 and the node-pty rebuild
+          # fails with "Could not find any Visual Studio installation to use".
+          # Revisit once node-gyp whitelists VS2026.
+          - os: windows-2022
             platform: win
             zip_name: ClaudeUI-${{ needs.version.outputs.version }}-win-x64.zip
             build_dir: dist/win-unpacked

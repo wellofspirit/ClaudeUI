@@ -24,7 +24,17 @@ export class RemoteDispatcher {
     'terminal:write',
     'terminal:resize',
     'terminal:kill',
-    'terminal:kill-by-cwd'
+    'terminal:kill-by-cwd',
+    // Native OAuth opens a local browser + loopback listener on the desktop
+    // host — meaningless (and a credential vector) over remote. See ADR-014.
+    'auth:sign-in',
+    'auth:submit-code',
+    'auth:cancel',
+    // Account mutations open local browsers / touch the local filesystem (ADR-015).
+    'account:set-enabled',
+    'account:add',
+    'account:switch',
+    'account:delete'
   ])
 
   /** Register a handler for a channel. Blocked channels are silently skipped. */

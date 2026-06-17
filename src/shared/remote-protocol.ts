@@ -78,8 +78,22 @@ export interface WsE2EAck {
   type: 'e2e-ack'
 }
 
-export type WsClientMessage = WsAuthRequest | WsInvokeRequest | WsSyncRequest | WsPing | WsPong | WsE2EActivate
-export type WsServerMessage = WsAuthResponse | WsInvokeResponse | WsEvent | WsSyncCatchup | WsSyncFull | WsPing | WsPong | WsE2EAck
+export type WsClientMessage =
+  | WsAuthRequest
+  | WsInvokeRequest
+  | WsSyncRequest
+  | WsPing
+  | WsPong
+  | WsE2EActivate
+export type WsServerMessage =
+  | WsAuthResponse
+  | WsInvokeResponse
+  | WsEvent
+  | WsSyncCatchup
+  | WsSyncFull
+  | WsPing
+  | WsPong
+  | WsE2EAck
 
 // ---------------------------------------------------------------------------
 // Event Log

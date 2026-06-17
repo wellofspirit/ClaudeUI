@@ -137,41 +137,42 @@ docs/sdk-layer.md          — Reference for the in-house cli.js harness
 
 All services live in `src/main/services/`. Key modules:
 
-| Service | Purpose |
-|---------|---------|
-| `claude-session.ts` | Core cli.js wrapper — spawns `sdkQuery()` from `src/main/sdk`, handles streaming, approvals, tool results |
-| `session-manager.ts` | Maps routingId → ClaudeSession, manages lifecycle, rekey, timeouts |
-| `session-history.ts` | Parses JSONL transcripts, loads message history, computes token metrics |
-| `session-watcher.ts` | Watches session JSONL files for live updates |
-| `service-session.ts` | Lightweight CLI subprocess for background usage polling |
-| `automation-manager.ts` | Cron/interval scheduling, per-file storage, run history, cli.js execution |
-| `git-service.ts` | Wraps simple-git: status, branches, stage/unstage, commit, push/pull, diff |
-| `worktree.ts` | Git worktree create/remove/list |
-| `pty-manager.ts` | Spawns shell PTYs (pwsh/cmd on Windows, bash/zsh on Unix) |
-| `plugin-manager.ts` | Loads plugins from `~/.claude/ui/plugins/`, lifecycle, isolated IPC |
-| `remote-server.ts` | HTTP + WebSocket server, token auth, E2E encryption, tunnel support |
-| `remote-dispatcher.ts` | Routes WebSocket requests to handlers (same as IPC, with blocklist) |
-| `remote-bridge.ts` | Subscribes to session/config events, broadcasts to remote clients |
-| `usage-fetcher.ts` | Polls `/api/oauth/usage`, merges rate-limit headers, disk cache |
-| `block-usage.ts` | Parses JSONL for token analytics, 5hr billing windows, per-model breakdown |
-| `logger.ts` | File + ring buffer logging, per-source levels, subscriber pattern |
-| `log-viewer.ts` | Spawns debug window, streams logs |
-| `ui-config.ts` | Manages `~/.claude/ui/config/` (settings, sessions, slash commands) |
-| `claude-settings.ts` | Claude permission rules (allow/deny/ask) per scope |
-| `claude-mcp.ts` | MCP server config merge from `.mcp.json` + `settings.json` |
-| `skill-scanner.ts` | Scans project/user/plugin skill directories, YAML frontmatter parser |
-| `event-log.ts` | Ring buffer of all events for remote client catchup |
-| `mermaid-tool.ts` | MCP server for Mermaid diagram rendering |
-| `tunnel-manager.ts` | CloudFlare tunnel management for remote access |
-| `socks-bridge.ts` | Local HTTP CONNECT bridge for SOCKS5 proxy support |
-| `voice-capture.ts` | Native audio capture wrapper |
-| `voice-client.ts` | Streams voice input to transcription server |
-| `subagent-watcher.ts` | Watches subagent task files, parses messages |
-| `persisted-sessions-dir.ts` | Path constant for `~/.claude/ui/persisted-sessions` |
+| Service                     | Purpose                                                                                                   |
+| --------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `claude-session.ts`         | Core cli.js wrapper — spawns `sdkQuery()` from `src/main/sdk`, handles streaming, approvals, tool results |
+| `session-manager.ts`        | Maps routingId → ClaudeSession, manages lifecycle, rekey, timeouts                                        |
+| `session-history.ts`        | Parses JSONL transcripts, loads message history, computes token metrics                                   |
+| `session-watcher.ts`        | Watches session JSONL files for live updates                                                              |
+| `service-session.ts`        | Lightweight CLI subprocess for background usage polling                                                   |
+| `automation-manager.ts`     | Cron/interval scheduling, per-file storage, run history, cli.js execution                                 |
+| `git-service.ts`            | Wraps simple-git: status, branches, stage/unstage, commit, push/pull, diff                                |
+| `worktree.ts`               | Git worktree create/remove/list                                                                           |
+| `pty-manager.ts`            | Spawns shell PTYs (pwsh/cmd on Windows, bash/zsh on Unix)                                                 |
+| `plugin-manager.ts`         | Loads plugins from `~/.claude/ui/plugins/`, lifecycle, isolated IPC                                       |
+| `remote-server.ts`          | HTTP + WebSocket server, token auth, E2E encryption, tunnel support                                       |
+| `remote-dispatcher.ts`      | Routes WebSocket requests to handlers (same as IPC, with blocklist)                                       |
+| `remote-bridge.ts`          | Subscribes to session/config events, broadcasts to remote clients                                         |
+| `usage-fetcher.ts`          | Polls `/api/oauth/usage`, merges rate-limit headers, disk cache                                           |
+| `block-usage.ts`            | Parses JSONL for token analytics, 5hr billing windows, per-model breakdown                                |
+| `logger.ts`                 | File + ring buffer logging, per-source levels, subscriber pattern                                         |
+| `log-viewer.ts`             | Spawns debug window, streams logs                                                                         |
+| `ui-config.ts`              | Manages `~/.claude/ui/config/` (settings, sessions, slash commands)                                       |
+| `claude-settings.ts`        | Claude permission rules (allow/deny/ask) per scope                                                        |
+| `claude-mcp.ts`             | MCP server config merge from `.mcp.json` + `settings.json`                                                |
+| `skill-scanner.ts`          | Scans project/user/plugin skill directories, YAML frontmatter parser                                      |
+| `event-log.ts`              | Ring buffer of all events for remote client catchup                                                       |
+| `mermaid-tool.ts`           | MCP server for Mermaid diagram rendering                                                                  |
+| `tunnel-manager.ts`         | CloudFlare tunnel management for remote access                                                            |
+| `socks-bridge.ts`           | Local HTTP CONNECT bridge for SOCKS5 proxy support                                                        |
+| `voice-capture.ts`          | Native audio capture wrapper                                                                              |
+| `voice-client.ts`           | Streams voice input to transcription server                                                               |
+| `subagent-watcher.ts`       | Watches subagent task files, parses messages                                                              |
+| `persisted-sessions-dir.ts` | Path constant for `~/.claude/ui/persisted-sessions`                                                       |
 
 ## Architecture
 
 ### IPC Communication
+
 - Main ↔ Renderer via `contextBridge` + `ipcMain.handle`/`webContents.send`
 - Typed `ClaudeAPI` interface in `shared/types.ts`, exposed on `window.api`
 - Fire-and-forget pattern for `session:send` (streams results back via events)
@@ -194,6 +195,7 @@ User types prompt → InputBox.handleSend()
 ```
 
 ### Key Patterns
+
 - **Message upsert by ID** — cli.js sends partial messages with the same `betaMessage.id`; updates replace in place rather than duplicating
 - **Approval Promise** — `canUseTool` callback creates a Promise stored in `pendingApprovals` Map, resolved when user clicks Allow/Deny
 - **Tool result extraction** — Tool results arrive via synthetic `type: 'user'` messages (not assistant), extracted by `extractToolResults()`
@@ -206,13 +208,16 @@ User types prompt → InputBox.handleSend()
 - **cli.js integration details** — see **[docs/sdk-layer.md](docs/sdk-layer.md)** for wire protocol, control subtypes, MCP hosting, cancellation tiers, and extraction pipeline
 
 ### Views
+
 The app has four main views switchable via sidebar:
+
 - **Chat** — Primary Claude conversation interface
 - **Usage** — Token analytics dashboard (5hr blocks, daily charts, per-model breakdown)
 - **Automations** — Cron/interval scheduled prompt execution with run history
 - **Plugin** — Embedded plugin WebView (when a plugin registers a view)
 
 ### Design
+
 - Three themes: **dark** (default), **light**, **monokai** — CSS custom properties in `@theme` block of `main.css`
 - Transparent window with `vibrancy: 'under-window'` on macOS, acrylic on Windows
 - Resizable sidebar (240–480px) + main content area + optional right panel (git/tasks/plan)
@@ -222,13 +227,13 @@ The app has four main views switchable via sidebar:
 
 Four-layer testing architecture. Full details in **[docs/testing-strategy.md](docs/testing-strategy.md)**.
 
-| Project | Command | What it tests | File pattern |
-|-------|---------|---------------|--------------|
-| **unit** | `bun run test:unit` | Pure rendering, pure functions | `*.test.ts`, `*.unit.test.tsx` |
-| **component** | `bun run test:component` | Business logic (events → store state) | `*.component.test.ts` |
-| **e2e** | `bun run test:e2e` | Full pipeline (bridge events → store) | `*.e2e.test.ts` |
-| **git** | `bun run test:git` | Real simple-git / filesystem (slow) | `git-service*.test.ts`, `worktree.test.ts` |
-| **integration** | `bun run test:integration` | Real cli.js event contracts (gated) | `*.integration.test.ts` |
+| Project         | Command                    | What it tests                         | File pattern                               |
+| --------------- | -------------------------- | ------------------------------------- | ------------------------------------------ |
+| **unit**        | `bun run test:unit`        | Pure rendering, pure functions        | `*.test.ts`, `*.unit.test.tsx`             |
+| **component**   | `bun run test:component`   | Business logic (events → store state) | `*.component.test.ts`                      |
+| **e2e**         | `bun run test:e2e`         | Full pipeline (bridge events → store) | `*.e2e.test.ts`                            |
+| **git**         | `bun run test:git`         | Real simple-git / filesystem (slow)   | `git-service*.test.ts`, `worktree.test.ts` |
+| **integration** | `bun run test:integration` | Real cli.js event contracts (gated)   | `*.integration.test.ts`                    |
 
 - **Default local run:** `bun run test` — unit + component + e2e (no git, no integration). Snappy — ~14s.
 - **After editing git-service.ts / worktree.ts / simple-git helpers:** `bun run test:git:changed` — uses vitest `--changed` to run only git tests whose import graph includes a modified file. `bun run test:git` always runs the whole git project.
@@ -249,24 +254,31 @@ On Windows (Git Bash), cli.js's working directory uses POSIX format (`/d/WorkPla
 ## Known Gotchas
 
 ### Tailwind v4 + CSS Reset
+
 Never add a `* { margin: 0; padding: 0; }` reset after `@import "tailwindcss"` in main.css. It will appear **after** Tailwind's utility layer in the built CSS, silently overriding all padding/margin utilities. Tailwind v4's preflight already handles this.
 
 ### Tailwind Source Scanning
+
 The `@source "../../";` directive in main.css is required so the Tailwind scanner finds renderer source files. Without it, some utility classes won't generate.
 
 ### Electron Transparency
+
 Requires `transparent: true` + `vibrancy` on BrowserWindow, plus `background: transparent` on html, body, and #root. Any opaque background in the component tree blocks the effect.
 
 ### canUseTool Return Value
+
 Must return `{ behavior: 'allow', updatedInput: input }` (passing back the original input). For deny: `{ behavior: 'deny', message: '...' }`. The `context.signal` is a real AbortSignal now — observe `.aborted` to dismiss the UI when cli.js sends a `control_cancel_request` for the pending prompt.
 
 ### cli.js Message Flow
+
 With `includePartialMessages: true`, messages arrive in order: `assistant` (partial updates) → `user` (synthetic tool_result) → `assistant` (response) → `result` (cost). Assistant messages share the same `betaMessage.id` across partial updates.
 
 ### Terminal Panel Always Mounted
+
 The terminal panel uses `display: none` (closed) / `display: contents` (open) instead of conditional rendering. Unmounting destroys xterm scrollback buffers. See ADR-002.
 
 ### Usage Utilization Scales
+
 The `/api/oauth/usage` API returns utilization as 0–100 (percentage), while rate-limit HTTP headers return 0–1 (fraction). Both are stored as 0–100 in `RateWindow.usedPercent`. The `toUsedPercent()` helper in `usage-fetcher.ts` makes this conversion explicit.
 
 ## cli.js Integration
@@ -285,14 +297,16 @@ cli.js is ~13MB minified. Use the `/bundle-analyzer` skill to navigate it — st
 
 ### Patches
 
-14 content-regex patches under `patch/`, applied by `bun run ensure-cli` between the extract and rebundle steps. Three auto-detect upstream fixes and no-op (`taskstop-notification`, `incomplete-session-resume-fix`, `mcp-tool-refresh`). The active 11 add stream forwarding, control subtypes, and small bug fixes — full table in `docs/sdk-layer.md#patches`. Patches operate on the wrapped Bun CJS IIFE bytes at `vendor/claude-cli/cli.js`; they run identically on the wrapped form since every anchor targets content inside the IIFE body. See **[ADR-006](docs/adr/adr-006_rebundle-bun-binary.md)** for why the pipeline now rebundles instead of unwrapping.
+15 content-regex patches under `patch/`, applied by `bun run ensure-cli` between the extract and rebundle steps. Three auto-detect upstream fixes and no-op (`taskstop-notification`, `incomplete-session-resume-fix`, `mcp-tool-refresh`). The active 12 add stream forwarding, control subtypes, file-only credential storage (`skip-securestorage`, ADR-015), and small bug fixes — full table in `docs/sdk-layer.md#patches`. Patches operate on the wrapped Bun CJS IIFE bytes at `vendor/claude-cli/cli.js`; they run identically on the wrapped form since every anchor targets content inside the IIFE body. See **[ADR-006](docs/adr/adr-006_rebundle-bun-binary.md)** for why the pipeline now rebundles instead of unwrapping.
 
 Skills for patch work:
+
 - `/bundle-analyzer` — locate patch targets in minified cli.js.
 - `/patch-readme` — generate/update per-patch README with anchors.
 - `/patch-test-harness` — behavioral tests for a patch.
 
 `apply.mjs` conventions:
+
 1. Read `vendor/claude-cli/cli.js`, check for `/*PATCHED:<name>*/` marker (idempotency).
 2. Find code by **content patterns/string literals** — never char offsets or minified names.
 3. Extract minified variable names dynamically from regex captures.
@@ -305,13 +319,22 @@ Register new patches in the `patches` array in `patch/apply-all.mjs`.
 
 ADRs live in `docs/adr/`. See `docs/adr/adr.md` for the index.
 
-| ADR | Title | Status |
-|-----|-------|--------|
-| 001 | Preserve `@` file mentions in user prompt text sent to SDK | Accepted |
-| 002 | Always mount TerminalPanel to preserve xterm scrollback buffers | Accepted |
-| 003 | Group terminal tabs by session cwd with 10-minute cold cleanup | Accepted |
-| 004 | VS Code-style plugin system for extensibility | Accepted |
-| 005 | Plugin session API — sessionId-based events and history | Accepted |
-| 006 | Rebundle Bun standalone binary instead of running cli.js under Node | Accepted |
+| ADR | Title                                                                                              | Status   |
+| --- | -------------------------------------------------------------------------------------------------- | -------- |
+| 001 | Preserve `@` file mentions in user prompt text sent to SDK                                         | Accepted |
+| 002 | Always mount TerminalPanel to preserve xterm scrollback buffers                                    | Accepted |
+| 003 | Group terminal tabs by session cwd with 10-minute cold cleanup                                     | Accepted |
+| 004 | VS Code-style plugin system for extensibility                                                      | Accepted |
+| 005 | Plugin session API — sessionId-based events and history                                            | Accepted |
+| 006 | Rebundle Bun standalone binary instead of running cli.js under Node                                | Accepted |
+| 007 | Serve mockup previews over HTTP with a sandboxed iframe for the remote web client                  | Accepted |
+| 008 | Type-check the remote web client (`src/web`) against `ClaudeAPI`                                   | Accepted |
+| 009 | Store cli.js-consumed settings in Claude's settings.json, not UISettings                           | Accepted |
+| 010 | Fork ("branch off") sessions via cli.js's native `--resume-session-at` + `--fork-session`          | Accepted |
+| 011 | Canonical 5h-window identity from `resets_at` + time-based account attribution for usage analytics | Accepted |
+| 012 | Mermaid HTML labels (`antiscript` + DOMPurify `html` profile) and dark-theme ER contrast           | Accepted |
+| 013 | ESLint flat-config rework — Prettier decoupling, scoped React rules, pragmatic strictness          | Accepted |
+| 014 | Native Anthropic OAuth via cli.js control requests, hosted on the service session                  | Accepted |
+| 015 | Multiple-account support via file-based credentials (SKIP_SECURESTORAGE patch)                      | Accepted |
 
 When a design or implementation decision is made during a conversation, prompt the user about whether it should be recorded as a new ADR entry. When adding a new ADR, proactively scan existing ADRs to check if the new decision supersedes or conflicts with a previous one — if so, update the old ADR's status to "Superseded by ADR-XXX" and note it in the new ADR.

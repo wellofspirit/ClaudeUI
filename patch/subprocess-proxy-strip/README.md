@@ -6,9 +6,10 @@ Strip proxy env vars from the env handed to cli.js subprocesses (Bash tool, MCP 
 
 `cli.js` — rebundled from `@anthropic-ai/claude-code` Bun standalone.
 
-| Component | Version at time of discovery |
-|---|---|
-| Bundled CLI (`cli.js`) | 2.1.114 |
+| Component            | Version               |
+| -------------------- | --------------------- |
+| At time of discovery | bundled CLI `2.1.114` |
+| Last re-anchored     | bundled CLI `2.1.170` |
 
 ## The Problem
 
@@ -18,81 +19,142 @@ When a user sets a proxy in ClaudeUI's settings (e.g. for a corporate egress tha
 
 ### Root cause
 
-cli.js funnels every subprocess spawn through the `Qk()` env helper:
+cli.js funnels every subprocess spawn through a single env-builder function. It returns either `process.env` verbatim (the typical ClaudeUI path) or a scrubbed clone. The scrub list it applies covers API keys / OAuth tokens / session vars — **never the proxy vars** — so in our path the proxy env is passed straight through to every child process.
 
-```js
-function Qk() {
-  let H = QE_(), _ = Object.keys(H).length > 0, q = Y_1()
-  if (!_ && !q && !0) return process.env        // ← typical ClaudeUI path
-  let O = { ...process.env, ...H }
-  if (!q) return O
-  for (let T of D_1) delete O[T], delete O[`INPUT_${T}`]   // D_1 = API-key scrub list
-  return O
+## Architecture Overview
+
+The env-builder is a zero-arg `function <name>(){...}`. Its body has grown across versions but the skeleton is stable:
+
+```
+function <fn>() {
+  let <H> = <userEnvGetter>(),                 // optional hook-injected env (usually empty)
+      ...flags for "does this source have keys",
+      <remote> = <gate>(process.env.CLAUDE_CODE_REMOTE) ? <remoteFn>(...) : {},
+      <scrub> = <blockListGate>(),             // true iff CLAUDE_CODE_SUBPROCESS_ENV_SCRUB / local-agent
+      ...detection flags for OAuth/session/OTEL vars;
+  if (<nothing-to-do>) return process.env;     // ← typical ClaudeUI path: returns env VERBATIM
+  let <merged> = { ...process.env, ...sources };
+  delete <merged>.CLAUDE_CODE_OAUTH_TOKEN, ... ; // unconditional scrub of auth/session vars
+  for (k of keys) if (k.startsWith("OTEL_")) delete <merged>[k];
+  if (!<scrub>) return <merged>;
+  for (<x> of <blockList>) delete <merged>[<x>], delete <merged>[`INPUT_${<x>}`];
+  return <merged>;
 }
 ```
 
-- `QE_()` — optional hook-injected env map (usually empty)
-- `Y_1()` — returns true only when `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1` **or** `CLAUDE_CODE_ENTRYPOINT==="local-agent"`. Neither applies to us (entrypoint is `sdk-cli`).
-- `D_1` — scrub list contains `ANTHROPIC_API_KEY`, `AWS_SECRET_ACCESS_KEY`, OAuth tokens, etc. **Does not include proxy vars.**
+**There are 3–4 `return` statements.** The first (`return process.env`) is the load-bearing one for ClaudeUI — none of the scrub gates fire for us (entrypoint is `sdk-cli`, no `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB`), so the function returns the raw proxied env.
 
-In our path (`!_ && !q && !0`) cli.js returns `process.env` verbatim. That env carries the proxy vars ClaudeUI set on the cli.js spawn, and every subprocess inherits them.
+## The Fix
 
-## Fix
+**Marker:** `/*PATCHED:subprocess-proxy-strip*/`
 
-Wrap every `return` in `Qk()` with a proxy-strip helper that deletes the four proxy env vars (upper + lower case) unless `CLAUDEUI_PROXY_SUBPROCESSES=1` is set by the parent (user's opt-in to "proxy everything").
-
-The helper is defined once at the top of `Qk()`:
+Define a proxy-strip helper once at the top of the function and wrap **every** `return <expr>` with it. The helper deletes the four proxy vars (upper + lower case) unless the parent set `CLAUDEUI_PROXY_SUBPROCESSES=1`:
 
 ```js
 let __cuPS = (E) => {
   if (process.env.CLAUDEUI_PROXY_SUBPROCESSES) return E
   let R = { ...E }
-  delete R.HTTP_PROXY; delete R.HTTPS_PROXY; delete R.ALL_PROXY; delete R.NO_PROXY
-  delete R.http_proxy; delete R.https_proxy; delete R.all_proxy; delete R.no_proxy
+  delete R.HTTP_PROXY
+  delete R.HTTPS_PROXY
+  delete R.ALL_PROXY
+  delete R.NO_PROXY
+  delete R.http_proxy
+  delete R.https_proxy
+  delete R.all_proxy
+  delete R.no_proxy
   return R
 }
 ```
 
-Every `return` path (`return process.env`, `return O` early, `return O` after scrub) is rewritten to `return __cuPS(...)`.
+`return process.env` → `return __cuPS(process.env)`, `return <merged>` → `return __cuPS(<merged>)`, etc. The patch captures every minified identifier in the matched body and **rebuilds the whole function verbatim** with the helper inserted — this guarantees no return path is missed.
+
+### Why it's safe
+
+- The helper clones (`{...E}`) before deleting, so it never mutates `process.env`.
+- The gate is read from `process.env` on every call (not cached) — toggling the user's setting takes effect on the next spawn.
+- All of cli.js's own scrub/merge logic is preserved byte-for-byte; we only wrap the return values.
+
+## Version evolution
+
+The body grows roughly every few releases. `apply.mjs` carries one regex+rebuild per shape, tried newest-first; older shapes remain as fallbacks.
+
+| Shape    | Name (then) | What it added                                                                                                                                                                                                                      |
+| -------- | ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| v114     | `Qk`        | 2-source merge (`process.env` + user env); scrub list = API keys only                                                                                                                                                              |
+| v118     | `uv`        | + remote-env merge gated on `CLAUDE_CODE_REMOTE` (3-source)                                                                                                                                                                        |
+| v119     | `PV`        | + `CLAUDE_BG_*` / `CLAUDE_CODE_SESSION_KIND` scrub                                                                                                                                                                                 |
+| v129     | `sy`        | + OAuth-token scrub flag, + `OTEL_*` strip loop, + unconditional `CLAUDE_CODE_RESUME_INTERRUPTED_TURN` delete                                                                                                                      |
+| v143     | `VS`        | + extra global env source (`ifq`), + `CLAUDE_BG_AUTH_SNAPSHOT_PATH`                                                                                                                                                                |
+| v150     | `dT`        | + `CLAUDE_BG_SESSION_PERMISSION_RULES`, `CLAUDE_BG_MEMORY_TOGGLED_OFF`                                                                                                                                                             |
+| v163     | `wN`        | + one unconditional `delete <merged>.CLAUDE_CODE_RESUME_PROMPT` (inserted after `CLAUDE_CODE_RESUME_INTERRUPTED_TURN`; no matching `!==void 0` detection check, not in the early-return guard)                                     |
+| **v170** | **`ek`**    | **+ 3 background-session auth vars (`CLAUDE_BG_SOCKET_TOKENS_PATH`, `CLAUDE_BG_RV_AUTH`, `CLAUDE_BG_PTY_AUTH`)** — appended to the OAuth detection flag and to the unconditional delete chain after `CLAUDE_BG_AUTH_SNAPSHOT_PATH` |
+
+**v170 gotcha:** the three new detection terms read off a **module-level env-snapshot global** (`$_` in 2.1.170: `$_.CLAUDE_BG_SOCKET_TOKENS_PATH!==void 0||...`), NOT `process.env` like every other term in the flag. The regex captures this global as its own group and the rebuild re-emits it by captured name. See the inline header comment in `apply.mjs` for the full v170 verbatim shape.
 
 ## Locating the function in a new CLI version
 
-`Qk()` has a distinctive shape — do NOT search by name (minified names change). Search for the structural body:
+Do NOT search by name (minified, changes every release). Search by structural landmarks:
 
+```bash
+# Best single anchor — the block-list loop's template literal is unique in the whole file:
+bundle-analyzer find cli.js 'INPUT_${' --compact
+
+# Confirm via the newest session-var tokens (present only in this function's scrub chain):
+bundle-analyzer find cli.js "CLAUDE_BG_MEMORY_TOGGLED_OFF" --compact
+bundle-analyzer find cli.js "CLAUDE_CODE_RESUME_PROMPT" --compact
+
+# The combo of CLAUDE_CODE_REMOTE + startsWith("OTEL_") + INPUT_${ is unique to this fn.
 ```
-function <fn>() {
-  let <H> = <QE_>(), <_> = Object.keys(<H>).length > 0, <q> = <Y_1>()
-  if (!<_> && !<q> && !0) return process.env
-  let <O> = { ...process.env, ...<H> }
-  if (!<q>) return <O>
-  for (let <T> of <D_1>) delete <O>[<T>], delete <O>[`INPUT_${<T>}`]
-  return <O>
-}
-```
 
-The patch regex captures the nine minified identifiers and rebuilds the function body verbatim with the `__cuPS` wrapper inserted at the top and around each return.
-
-Landmarks near `Qk()`:
-- Preceded by `function QE_() { return M39?.() ?? {} }` — the env-hook accessor
-- Followed by `function uB6()` — MCP allowlist env check
-- Neighboring constant `D_1` (API-key scrub list) lives ~2 KB later in the same var block. Strings inside `D_1`: `"ANTHROPIC_API_KEY"`, `"AWS_SECRET_ACCESS_KEY"`, `"ACTIONS_RUNTIME_TOKEN"`.
+When the body changes again: extract the verbatim `function <name>(){...}` (from `function` to the `return <merged>}`), diff it against the v170 shape in `apply.mjs`, add a new `fnReV<NNN>` regex + rebuild block, and register it as the first branch in the `if/else` chain. Keep older shapes as fallbacks. Watch the group numbering: any new capture inserted mid-pattern shifts every later backreference (`\\14`, `\\15`, …) — renumber both the regex backrefs and the destructuring.
 
 ## Gate env vars
 
-| Env var | Set by | Effect |
-|---|---|---|
-| `CLAUDEUI_PROXY_SUBPROCESSES=1` | ClaudeUI when `ProxySettings.proxySubprocesses === true` | Patch no-ops; subprocesses inherit proxy |
-| (unset) | default | Patch strips proxy from subprocess env |
+| Env var                         | Set by                                                   | Effect                                    |
+| ------------------------------- | -------------------------------------------------------- | ----------------------------------------- |
+| `CLAUDEUI_PROXY_SUBPROCESSES=1` | ClaudeUI when `ProxySettings.proxySubprocesses === true` | Helper no-ops; subprocesses inherit proxy |
+| (unset)                         | default                                                  | Helper strips proxy from subprocess env   |
 
-The gate is read from `process.env` **inside each subprocess spawn call**, not cached — toggling the user's setting takes effect on the next subprocess that cli.js spawns.
+## What's NOT changed
+
+- The early-return guard expression, the source-merge order, the auth/session/OTEL delete chain, and the block-list loop are all reproduced verbatim — we only wrap return values.
+- The CLI's own scrub list (`CLAUDE_CODE_OAUTH_TOKEN`, etc.) is untouched; proxy stripping is additive and orthogonal.
 
 ## Risk / side effects
 
-- **MCP stdio servers** that legitimately need the corporate proxy (e.g. a remote MCP server behind the same egress) will stop working under the default. User can flip `proxySubprocesses=true` to restore.
-- **LSP servers** typically don't make network calls, so impact is nil.
-- **Shell snapshot** (one-shot shell env dump at startup) — if the user's shell profile reads something over HTTP, it'd no longer go through the proxy. Edge case.
-- If a future cli.js version adds a new return path inside `Qk()` that the patch misses, subprocesses from that path would still leak the proxy. Low likelihood since the function body is small and stable.
+- **MCP stdio servers** that legitimately need the corporate proxy stop working under the default. User flips `proxySubprocesses=true` to restore.
+- **LSP servers** typically make no network calls — impact nil.
+- **Shell snapshot** (one-shot shell env dump at startup) — edge case if the user's profile fetches over HTTP.
+- If a future cli.js version adds a new `return` path inside the env-builder that a stale regex misses, that path would leak the proxy. Mitigated by rebuilding the whole function (all returns covered) and the uniqueness check that aborts on a multi-match.
 
-## Tests
+## Verification
 
-See `patch/subprocess-proxy-strip/*.test.ts` (if added) — exercises `Qk()` behavior by spawning a test fixture and verifying `HTTP_PROXY` is absent from the child env under default mode and present under opt-in mode.
+1. `node patch/subprocess-proxy-strip/apply.mjs` — reports `Found <fn>() [v170 shape]` and wraps every return.
+2. Run again — reports "Patch already applied. Nothing to do."
+3. `node patch/apply-all.mjs` — `node --check` passes.
+4. `node patch/subagent-streaming/test.mjs` / `bash-output-streaming/test.mjs` — confirm subprocesses still spawn (indirect coverage; there is no dedicated proxy-strip behavioral harness yet).
+
+Always run `node --check cli.js` after applying.
+
+## Discovery Method (2.1.163 re-anchor)
+
+1. **Apply failed:** `Cannot locate env-builder function by v114/v118/v119/v129/v143/v150 structural shape`.
+2. **Located via `INPUT_${`** (unique template literal) → `function wN(){...}`.
+3. **Diffed against v150:** identical control flow; the only change is one extra unconditional `delete Y.CLAUDE_CODE_RESUME_PROMPT` between `...RESUME_INTERRUPTED_TURN` and `...BG_SESSION_PERMISSION_RULES`. (Initial agent report claimed "two new" deletes, but `RESUME_INTERRUPTED_TURN` already existed in v150 — verified by extracting both bodies.)
+4. **Added `fnReV163`** (clone of v150 + the inserted delete in both regex and rebuild), placed first in the branch chain.
+5. **Applied cleanly**, `node --check` passed, full rebundle + codesign succeeded.
+
+## Discovery Method (2.1.170 re-anchor)
+
+1. **Apply failed:** `Cannot locate env-builder function by ... structural shape`.
+2. **Located via `CLAUDE_BG_MEMORY_TOGGLED_OFF`** (4 occurrences; first two are this function's flag line + delete chain) → `function ek(){...}`.
+3. **Diffed against v163:** three new vars (`CLAUDE_BG_SOCKET_TOKENS_PATH`, `CLAUDE_BG_RV_AUTH`, `CLAUDE_BG_PTY_AUTH`) in the OAuth flag and the delete chain. The flag terms read off a module global `$_` instead of `process.env` — required a new capture group (14), shifting all later backrefs by one vs the v163 pattern.
+4. **Added `fnReV170`** as the first branch; v163 kept as fallback.
+5. **Applied cleanly** (`Found ek() [v170 shape]`), `node --check` passed, rebundle + codesign succeeded.
+
+## Files
+
+| File        | Purpose                                                   |
+| ----------- | --------------------------------------------------------- |
+| `README.md` | This document                                             |
+| `apply.mjs` | Patch script (per-version shapes v114→v170, newest-first) |

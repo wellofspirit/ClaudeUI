@@ -9,8 +9,6 @@
  *   5. onClose → closePlanPanel
  */
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
-
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import React from 'react'
 import { render, act } from '@testing-library/react'
@@ -24,7 +22,7 @@ vi.mock('../View', () => ({
   PlanReviewPanelView: (props: PlanReviewPanelViewProps) => {
     viewProps = props
     return null
-  },
+  }
 }))
 
 const ROUTE = 'route-plan'
@@ -38,7 +36,7 @@ function makeComment(overrides: Partial<PlanComment> = {}): PlanComment {
     endLineNumber: 0,
     sectionIndex: 0,
     createdAt: Date.now(),
-    ...overrides,
+    ...overrides
   } as PlanComment
 }
 
@@ -50,7 +48,9 @@ describe('PlanReviewPanel FC', () => {
     viewProps = null
     useSessionStore.getState().createNewSession(ROUTE, '/d/repo')
     useSessionStore.setState({ activeSessionId: ROUTE })
-    useSessionStore.getState().openPlanPanel(ROUTE, 'some plan content\n\nsecond paragraph', 'req-1')
+    useSessionStore
+      .getState()
+      .openPlanPanel(ROUTE, 'some plan content\n\nsecond paragraph', 'req-1')
   })
 
   afterEach(() => {
@@ -68,9 +68,9 @@ describe('PlanReviewPanel FC', () => {
   it('renders an empty div when there is no plan review', async () => {
     useSessionStore.getState().closePlanPanel(ROUTE)
 
-    const { container } = render(React.createElement(
-      (await import('../PlanReviewPanel')).PlanReviewPanel,
-    ))
+    const { container } = render(
+      React.createElement((await import('../PlanReviewPanel')).PlanReviewPanel)
+    )
 
     expect(container.firstChild?.nodeName).toBe('DIV')
     expect(viewProps).toBeNull()
@@ -80,7 +80,9 @@ describe('PlanReviewPanel FC', () => {
     await renderFC()
     expect(viewProps).not.toBeNull()
 
-    act(() => { viewProps!.onSaveComment(makeComment()) })
+    act(() => {
+      viewProps!.onSaveComment(makeComment())
+    })
 
     expect(useSessionStore.getState().sessions[ROUTE].planReview?.comments).toHaveLength(1)
   })
@@ -89,9 +91,13 @@ describe('PlanReviewPanel FC', () => {
     useSessionStore.getState().addPlanComment(ROUTE, makeComment({ id: 'c1' }))
     await renderFC()
 
-    act(() => { viewProps!.onUpdateComment('c1', 'updated text') })
+    act(() => {
+      viewProps!.onUpdateComment('c1', 'updated text')
+    })
 
-    const comment = useSessionStore.getState().sessions[ROUTE].planReview?.comments.find((c) => c.id === 'c1')
+    const comment = useSessionStore
+      .getState()
+      .sessions[ROUTE].planReview?.comments.find((c) => c.id === 'c1')
     expect(comment?.comment).toBe('updated text')
   })
 
@@ -99,7 +105,9 @@ describe('PlanReviewPanel FC', () => {
     useSessionStore.getState().addPlanComment(ROUTE, makeComment({ id: 'c1' }))
     await renderFC()
 
-    act(() => { viewProps!.onRemoveComment('c1') })
+    act(() => {
+      viewProps!.onRemoveComment('c1')
+    })
 
     expect(useSessionStore.getState().sessions[ROUTE].planReview?.comments).toHaveLength(0)
   })
@@ -107,7 +115,9 @@ describe('PlanReviewPanel FC', () => {
   it('onClose closes the plan panel', async () => {
     await renderFC()
 
-    act(() => { viewProps!.onClose() })
+    act(() => {
+      viewProps!.onClose()
+    })
 
     expect(useSessionStore.getState().sessions[ROUTE].planReview).toBeNull()
   })

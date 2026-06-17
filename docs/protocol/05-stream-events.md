@@ -68,7 +68,7 @@ Opens a new assistant message. Contains the initial message skeleton.
         "input_tokens": 1234,
         "cache_creation_input_tokens": 890,
         "cache_read_input_tokens": 100,
-        "output_tokens": 0               // always 0 here; grows in message_delta
+        "output_tokens": 0 // always 0 here; grows in message_delta
       }
     }
   },
@@ -80,6 +80,7 @@ Opens a new assistant message. Contains the initial message skeleton.
 ```
 
 **Field notes:**
+
 - `event.message.id` — stable across all subsequent `stream_event` and partial `assistant` messages for this turn.
 - `event.message.content` — empty array. Content arrives via `content_block_*` events.
 - `event.message.usage` — input tokens known at start. `output_tokens` starts at 0 and grows on `message_delta`.
@@ -109,29 +110,36 @@ A new content block (text, thinking, tool_use, citations) begins.
 ### `content_block.type` variants
 
 #### `text`
+
 ```json
 { "type": "text", "text": "" }
 ```
+
 Initial text is empty; grows via `text_delta` in subsequent `content_block_delta`.
 
 #### `thinking`
+
 ```json
 { "type": "thinking", "thinking": "" }
 ```
+
 Grows via `thinking_delta`. Finalized by `signature_delta` at end.
 
 #### `tool_use`
+
 ```json
 {
   "type": "tool_use",
   "id": "toolu_XXXX",
   "name": "Bash",
-  "input": {}                            // populated via input_json_delta
+  "input": {} // populated via input_json_delta
 }
 ```
+
 Tool input starts empty; grows via `input_json_delta` (partial JSON strings that must be concatenated and parsed).
 
 #### `citations`
+
 ```json
 {
   "type": "citations",
@@ -163,33 +171,43 @@ Incremental update to the block at `event.index`. The workhorse event.
 ### `delta.type` variants
 
 #### `text_delta`
+
 ```json
 { "type": "text_delta", "text": "the next chunk of text" }
 ```
+
 Concatenate to the block's `.text`.
 
 #### `thinking_delta`
+
 ```json
 { "type": "thinking_delta", "thinking": "next chunk" }
 ```
+
 Concatenate to the block's `.thinking`.
 
 #### `input_json_delta`
+
 ```json
 { "type": "input_json_delta", "partial_json": "{\"cmd\":\"" }
 ```
+
 Partial JSON string. Concatenate ALL `input_json_delta.partial_json` across all deltas for this block, then `JSON.parse` to get the final `tool_use.input`.
 
 #### `signature_delta`
+
 ```json
 { "type": "signature_delta", "signature": "..." }
 ```
+
 Finalizes the thinking block. Marks the end of thinking content.
 
 #### `citations_delta`
+
 ```json
 { "type": "citations_delta", "citation": { ... } }
 ```
+
 Appends a citation entry to the block's `citations` array.
 
 ---
@@ -238,6 +256,7 @@ Final message-level delta. Carries the final usage counts and stop_reason.
 ```
 
 **Field notes:**
+
 - `event.delta.stop_reason` — populated here. This is the authoritative stop reason.
 - `event.usage.output_tokens` — final count (was 0 at message_start).
 
@@ -298,6 +317,7 @@ You'll never see `stream_event` at all. Only `assistant` messages — one per "c
 ### When `includePartialMessages: true`
 
 You'll see both stream events AND periodic `assistant` snapshots. Typical pattern:
+
 1. Show a skeleton on `message_start`.
 2. Append text on `text_delta` for real-time streaming UX.
 3. On `content_block_start` with `tool_use`, show a "pending tool" indicator.
@@ -325,6 +345,7 @@ Via patches (see `patch/subagent-streaming/` and `patch/team-streaming/`):
 ### Subagent (patches C, E, G)
 
 `parent_tool_use_id` non-null:
+
 ```jsonc
 {
   "type": "stream_event",
@@ -338,6 +359,7 @@ Via patches (see `patch/subagent-streaming/` and `patch/team-streaming/`):
 ### Teammate (patch team-streaming-B)
 
 `teammate_id` instead of `parent_tool_use_id`:
+
 ```jsonc
 {
   "type": "stream_event",
@@ -351,6 +373,7 @@ Via patches (see `patch/subagent-streaming/` and `patch/team-streaming/`):
 ### Gate
 
 Subagent/teammate variants require both:
+
 - `--include-partial-messages` (the normal gate)
 - The corresponding ClaudeUI patch applied
 

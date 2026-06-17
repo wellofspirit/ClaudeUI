@@ -27,10 +27,10 @@ sequenceDiagram
     participant Agent as Claude Agent
     participant Tools as Tools/Hooks
     participant FS as Environment/<br/>File System
-    
+
     App->>Agent: Initialize with AsyncGenerator
     activate Agent
-    
+
     App->>Agent: Yield Message 1
     Agent->>Tools: Execute tools
     Tools->>FS: Read files
@@ -40,20 +40,20 @@ sequenceDiagram
     Agent-->>App: Stream partial response
     Agent-->>App: Stream more content...
     Agent->>App: Complete Message 1
-    
+
     App->>Agent: Yield Message 2 + Image
     Agent->>Tools: Process image & execute
     Tools->>FS: Access filesystem
     FS-->>Tools: Operation results
     Agent-->>App: Stream response 2
-    
+
     App->>Agent: Queue Message 3
     App->>Agent: Interrupt/Cancel
     Agent->>App: Handle interruption
-    
+
     Note over App,Agent: Session stays alive
     Note over Tools,FS: Persistent file system<br/>state maintained
-    
+
     deactivate Agent
 ```
 
@@ -85,43 +85,43 @@ sequenceDiagram
 <CodeGroup>
 
 ```typescript TypeScript
-import { query } from "@anthropic-ai/claude-agent-sdk";
-import { readFileSync } from "fs";
+import { query } from '@anthropic-ai/claude-agent-sdk'
+import { readFileSync } from 'fs'
 
 async function* generateMessages() {
   // First message
   yield {
-    type: "user" as const,
+    type: 'user' as const,
     message: {
-      role: "user" as const,
-      content: "Analyze this codebase for security issues"
+      role: 'user' as const,
+      content: 'Analyze this codebase for security issues'
     }
-  };
-  
+  }
+
   // Wait for conditions or user input
-  await new Promise(resolve => setTimeout(resolve, 2000));
-  
+  await new Promise((resolve) => setTimeout(resolve, 2000))
+
   // Follow-up with image
   yield {
-    type: "user" as const,
+    type: 'user' as const,
     message: {
-      role: "user" as const,
+      role: 'user' as const,
       content: [
         {
-          type: "text",
-          text: "Review this architecture diagram"
+          type: 'text',
+          text: 'Review this architecture diagram'
         },
         {
-          type: "image",
+          type: 'image',
           source: {
-            type: "base64",
-            media_type: "image/png",
-            data: readFileSync("diagram.png", "base64")
+            type: 'base64',
+            media_type: 'image/png',
+            data: readFileSync('diagram.png', 'base64')
           }
         }
       ]
     }
-  };
+  }
 }
 
 // Process streaming responses
@@ -129,11 +129,11 @@ for await (const message of query({
   prompt: generateMessages(),
   options: {
     maxTurns: 10,
-    allowedTools: ["Read", "Grep"]
+    allowedTools: ['Read', 'Grep']
   }
 })) {
-  if (message.type === "result") {
-    console.log(message.result);
+  if (message.type === 'result') {
+    console.log(message.result)
   }
 }
 ```
@@ -232,31 +232,31 @@ Single message input mode does **not** support:
 <CodeGroup>
 
 ```typescript TypeScript
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { query } from '@anthropic-ai/claude-agent-sdk'
 
 // Simple one-shot query
 for await (const message of query({
-  prompt: "Explain the authentication flow",
+  prompt: 'Explain the authentication flow',
   options: {
     maxTurns: 1,
-    allowedTools: ["Read", "Grep"]
+    allowedTools: ['Read', 'Grep']
   }
 })) {
-  if (message.type === "result") {
-    console.log(message.result);
+  if (message.type === 'result') {
+    console.log(message.result)
   }
 }
 
 // Continue conversation with session management
 for await (const message of query({
-  prompt: "Now explain the authorization process",
+  prompt: 'Now explain the authorization process',
   options: {
     continue: true,
     maxTurns: 1
   }
 })) {
-  if (message.type === "result") {
-    console.log(message.result);
+  if (message.type === 'result') {
+    console.log(message.result)
   }
 }
 ```

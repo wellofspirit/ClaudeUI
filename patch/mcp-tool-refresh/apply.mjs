@@ -64,12 +64,11 @@ function deduplicateCode(toolsExpr, mcpToolsExpr, assignTarget) {
     `let _merged=[..._base,...${mcpToolsExpr}];` +
     `let _seen=new Set();` +
     `${assignTarget}=_merged.filter(function(_t){` +
-      `if(_seen.has(_t.name))return!1;` +
-      `_seen.add(_t.name);return!0` +
+    `if(_seen.has(_t.name))return!1;` +
+    `_seen.add(_t.name);return!0` +
     `})}`
   )
 }
-
 
 // =====================================================================
 // Part A: Refresh tools before each EVq call in the main message loop
@@ -105,11 +104,11 @@ if (!skipA) {
   // We use non-greedy skips to bridge these variable regions.
   const evqRe = new RegExp(
     `for await\\(let (${V}) of (${V})\\(\\{` +
-    `.+?` +                           // skip commands:...,prompt:..., etc.
-    `promptUuid:(${V})\\.uuid,` +     // stable anchor
-    `.*?` +                           // skip optional fields (isMeta, etc.) — may be empty
-    `cwd:(${V})\\(\\),` +            // stable anchor
-    `tools:(${V}),`                   // target: tools variable
+      `.+?` + // skip commands:...,prompt:..., etc.
+      `promptUuid:(${V})\\.uuid,` + // stable anchor
+      `.*?` + // skip optional fields (isMeta, etc.) — may be empty
+      `cwd:(${V})\\(\\),` + // stable anchor
+      `tools:(${V}),` // target: tools variable
   )
 
   const evqMatch = evqRe.exec(src)
@@ -127,8 +126,8 @@ if (!skipA) {
     process.exit(1)
   }
 
-  const queryFn = evqMatch[2]   // EVq / ckq / LQq
-  const toolsVar = evqMatch[5]  // w6 / Z6 / L6
+  const queryFn = evqMatch[2] // EVq / ckq / LQq
+  const toolsVar = evqMatch[5] // w6 / Z6 / L6
   console.log(`Found ${queryFn} call at char ${evqMatch.index}`)
   console.log(`  Tools variable: ${toolsVar}`)
 
@@ -142,13 +141,14 @@ if (!skipA) {
     process.exit(1)
   }
 
-  const getAppStateVar = gasMatch[1]  // $
+  const getAppStateVar = gasMatch[1] // $
   console.log(`  getAppState variable: ${getAppStateVar}`)
 
   // Step A3: Build the injection code
   // Inject right before `for await(let ... of EVq({`
   // Read MCP tools from app state and rebuild the tools list
-  const refreshCode = PATCH_A_MARKER +
+  const refreshCode =
+    PATCH_A_MARKER +
     `{let _st=await ${getAppStateVar}();` +
     `if(_st&&_st.mcp&&_st.mcp.tools)` +
     deduplicateCode(toolsVar, '_st.mcp.tools', toolsVar) +
@@ -159,7 +159,6 @@ if (!skipA) {
   src = src.replace(forAwaitStr, refreshCode + forAwaitStr)
   console.log(`Injected tool refresh before ${queryFn} call`)
 }
-
 
 // =====================================================================
 // Part B: Add refreshTools fallback in iR's turn loop
@@ -194,8 +193,8 @@ if (!skipB) {
   // opening and then find the matching closing braces programmatically.
   const refreshOpenRe = new RegExp(
     `(${V})\\.options\\.refreshTools\\)\\{` +
-    `let (${V})=\\1\\.options\\.refreshTools\\(\\);` +
-    `if\\(\\2!==\\1\\.options\\.tools\\)\\{`
+      `let (${V})=\\1\\.options\\.refreshTools\\(\\);` +
+      `if\\(\\2!==\\1\\.options\\.tools\\)\\{`
   )
 
   const match = refreshOpenRe.exec(src)
@@ -213,14 +212,14 @@ if (!skipB) {
     process.exit(1)
   }
 
-  const ctxVar = match[1]  // X6 / y6 (toolUseContext)
+  const ctxVar = match[1] // X6 / y6 (toolUseContext)
   console.log(`Found refreshTools check at char ${match.index}`)
   console.log(`  Context variable: ${ctxVar}`)
 
   // Find the full block by counting braces from the opening `{` of the if-block.
   // We start after the `VAR.options.refreshTools){` part — that's 2 open braces deep.
   const blockStart = match.index
-  let depth = 2  // two opening braces already matched: `){` and `){`
+  let depth = 2 // two opening braces already matched: `){` and `){`
   let pos = match.index + match[0].length
   while (pos < src.length && depth > 0) {
     if (src[pos] === '{') depth++
@@ -232,28 +231,28 @@ if (!skipB) {
     process.exit(1)
   }
   const oldCode = src.slice(blockStart, pos)
-  const newCode = oldCode +
+  const newCode =
+    oldCode +
     `else ${PATCH_B_MARKER}` +
     `{let _st=await ${ctxVar}.getAppState();` +
     `if(_st&&_st.mcp&&_st.mcp.tools){` +
-      `let _base=${ctxVar}.options.tools.filter(function(_t){return!_t.isMcp});` +
-      `let _merged=[..._base,..._st.mcp.tools];` +
-      `let _seen=new Set();` +
-      `let _deduped=_merged.filter(function(_t){` +
-        `if(_seen.has(_t.name))return!1;` +
-        `_seen.add(_t.name);return!0` +
-      `});` +
-      `if(_deduped.length!==${ctxVar}.options.tools.length` +
-        `||_deduped.some(function(_t,_i){` +
-          `return _t.name!==(${ctxVar}.options.tools[_i]||{}).name` +
-        `}))` +
-        `${ctxVar}={...${ctxVar},options:{...${ctxVar}.options,tools:_deduped}}` +
+    `let _base=${ctxVar}.options.tools.filter(function(_t){return!_t.isMcp});` +
+    `let _merged=[..._base,..._st.mcp.tools];` +
+    `let _seen=new Set();` +
+    `let _deduped=_merged.filter(function(_t){` +
+    `if(_seen.has(_t.name))return!1;` +
+    `_seen.add(_t.name);return!0` +
+    `});` +
+    `if(_deduped.length!==${ctxVar}.options.tools.length` +
+    `||_deduped.some(function(_t,_i){` +
+    `return _t.name!==(${ctxVar}.options.tools[_i]||{}).name` +
+    `}))` +
+    `${ctxVar}={...${ctxVar},options:{...${ctxVar}.options,tools:_deduped}}` +
     `}}`
 
   src = src.replace(oldCode, newCode)
   console.log('Injected MCP tool refresh fallback in iR')
 }
-
 
 // ---------------------------------------------------------------------------
 // Write and verify

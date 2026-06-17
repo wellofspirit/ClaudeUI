@@ -28,7 +28,13 @@ export interface ModelCapabilityInput {
 }
 
 export const THINKING_MODES: readonly ThinkingMode[] = ['adaptive', 'enabled', 'disabled'] as const
-export const EFFORT_LEVELS: readonly EffortLevel[] = ['low', 'medium', 'high', 'xhigh', 'max'] as const
+export const EFFORT_LEVELS: readonly EffortLevel[] = [
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max'
+] as const
 
 /**
  * Normalise a model identifier the same way cli.js does: strip date suffixes
@@ -87,7 +93,7 @@ const NO_MAX_EFFORT = new Set([
   'claude-opus-4',
   'claude-opus-4-0',
   'claude-opus-4-1',
-  'claude-opus-4-5',
+  'claude-opus-4-5'
 ])
 
 // ---------------------------------------------------------------------------
@@ -96,7 +102,9 @@ const NO_MAX_EFFORT = new Set([
 // values directly; the id-based heuristics below are the fallback.
 // ---------------------------------------------------------------------------
 
-export function modelSupportsAdaptiveThinking(model: ModelCapabilityInput | undefined | null): boolean {
+export function modelSupportsAdaptiveThinking(
+  model: ModelCapabilityInput | undefined | null
+): boolean {
   if (!model) return false
   if (typeof model.supportsAdaptiveThinking === 'boolean') return model.supportsAdaptiveThinking
   return supportsAdaptiveThinking(model.value)
@@ -109,7 +117,7 @@ export function modelSupportsEffort(model: ModelCapabilityInput | undefined | nu
 }
 
 export function modelSupportedEffortLevels(
-  model: ModelCapabilityInput | undefined | null,
+  model: ModelCapabilityInput | undefined | null
 ): EffortLevel[] {
   if (!model) return []
   if (model.supportedEffortLevels && model.supportedEffortLevels.length > 0) {
@@ -132,13 +140,15 @@ export function modelDefaultEffort(model: ModelCapabilityInput | undefined | nul
   return allowed[allowed.length - 1] ?? 'high'
 }
 
-export function modelDefaultThinkingMode(model: ModelCapabilityInput | undefined | null): ThinkingMode {
+export function modelDefaultThinkingMode(
+  model: ModelCapabilityInput | undefined | null
+): ThinkingMode {
   return modelSupportsAdaptiveThinking(model) ? 'adaptive' : 'enabled'
 }
 
 export function modelResolveThinkingMode(
   model: ModelCapabilityInput | undefined | null,
-  desired: ThinkingMode,
+  desired: ThinkingMode
 ): ThinkingMode {
   if (desired === 'disabled') return 'disabled'
   if (desired === 'adaptive' && !modelSupportsAdaptiveThinking(model)) return 'enabled'
@@ -147,7 +157,7 @@ export function modelResolveThinkingMode(
 
 export function modelResolveEffort(
   model: ModelCapabilityInput | undefined | null,
-  desired: EffortLevel,
+  desired: EffortLevel
 ): EffortLevel | null {
   if (!modelSupportsEffort(model)) return null
   const allowed = modelSupportedEffortLevels(model)
@@ -163,7 +173,13 @@ export function modelResolveEffort(
 /** Mirrors cli.js `kh8`. */
 export function supportsAdaptiveThinking(model: string | undefined | null): boolean {
   const id = normaliseModelId(model)
-  if (id.includes('opus-4-8') || id.includes('opus-4-7') || id.includes('opus-4-6') || id.includes('sonnet-4-6')) return true
+  if (
+    id.includes('opus-4-8') ||
+    id.includes('opus-4-7') ||
+    id.includes('opus-4-6') ||
+    id.includes('sonnet-4-6')
+  )
+    return true
   if (id.includes('opus') || id.includes('sonnet') || id.includes('haiku')) return false
   // Unknown family — assume modern, allow adaptive.
   return true
@@ -172,15 +188,35 @@ export function supportsAdaptiveThinking(model: string | undefined | null): bool
 /** Mirrors cli.js `QI`. */
 export function supportsEffort(model: string | undefined | null): boolean {
   const id = normaliseModelId(model)
-  if (id.includes('opus-4-8') || id.includes('opus-4-7') || id.includes('opus-4-6') || id.includes('sonnet-4-6')) return true
+  if (
+    id.includes('opus-4-8') ||
+    id.includes('opus-4-7') ||
+    id.includes('opus-4-6') ||
+    id.includes('sonnet-4-6')
+  )
+    return true
   if (id.includes('opus') || id.includes('sonnet') || id.includes('haiku')) return false
   return true
 }
 
-/** Mirrors cli.js `bt6` — `xhigh` is opus-4-7 and opus-4-8 today. */
+/**
+ * Mirrors cli.js's xhigh gate (2.1.170): explicit true for fable-5, mythos-5,
+ * opus-4-8, opus-4-7; explicit false for sonnet-4-6 / haiku-4-5 (covered here
+ * by the legacy-family branch). Unknown families are assumed modern and
+ * allowed, consistent with `supportsEffort`.
+ */
 export function supportsXhighEffort(model: string | undefined | null): boolean {
   const id = normaliseModelId(model)
-  return id.includes('opus-4-7') || id.includes('opus-4-8')
+  if (
+    id.includes('opus-4-7') ||
+    id.includes('opus-4-8') ||
+    id.includes('fable-5') ||
+    id.includes('mythos-5')
+  ) {
+    return true
+  }
+  if (id.includes('opus') || id.includes('sonnet') || id.includes('haiku')) return false
+  return true
 }
 
 /** Mirrors cli.js `Ct6`. Haiku never supports max; legacy models in NO_MAX_EFFORT don't either. */
@@ -221,7 +257,7 @@ export function defaultThinkingMode(model: string | undefined | null): ThinkingM
  */
 export function resolveThinkingMode(
   model: string | undefined | null,
-  desired: ThinkingMode,
+  desired: ThinkingMode
 ): ThinkingMode {
   if (desired === 'disabled') return 'disabled'
   if (desired === 'adaptive' && !supportsAdaptiveThinking(model)) return 'enabled'
@@ -235,10 +271,56 @@ export function resolveThinkingMode(
  */
 export function resolveEffort(
   model: string | undefined | null,
-  desired: EffortLevel,
+  desired: EffortLevel
 ): EffortLevel | null {
   if (!supportsEffort(model)) return null
   const allowed = supportedEffortLevels(model)
   if (allowed.includes(desired)) return desired
   return defaultEffort(model)
+}
+
+// ---------------------------------------------------------------------------
+// Context window
+// ---------------------------------------------------------------------------
+
+export const CONTEXT_WINDOW_1M = 1_000_000
+export const CONTEXT_WINDOW_DEFAULT = 200_000
+
+/**
+ * Base models that get a 1M window without a "[1m]" suffix — cli.js `UE()`.
+ * Matched by substring like cli.js's normaliser, so dated ids and
+ * provider-prefixed ids (Bedrock) resolve too.
+ */
+const IMPLICIT_1M_BASE_MODELS = [
+  'claude-fable-5',
+  'claude-mythos-5',
+  'claude-opus-4-7',
+  'claude-opus-4-8'
+]
+
+/**
+ * Picker aliases that cli.js currently resolves to an implicit-1M base model:
+ * "fable" → claude-fable-5, "opus" → claude-opus-4-8. Aliases track the latest
+ * model generation, so re-verify this set on claudeCliVersion bumps.
+ */
+const IMPLICIT_1M_ALIASES = new Set(['fable', 'opus'])
+
+/**
+ * Resolve a model value (picker alias or full id) to its context-window size,
+ * mirroring cli.js's `DR(model, betas)`. Does NOT honour the
+ * `CLAUDE_CODE_DISABLE_1M_CONTEXT` env override — that's a main-process concern
+ * applied by `getContextWindowSize` in services/context-window.ts. The renderer
+ * has no access to that env var, so it calls this directly.
+ *
+ * Crucially, resolution is keyed on the model VALUE, not the SDK-provided
+ * description: implicit-1M models (Fable 5, Opus 4.8) carry no "1m" marker in
+ * their description, so a description heuristic silently caps them at 200K.
+ */
+export function resolveContextWindow(modelValue: string | undefined | null): number {
+  if (!modelValue) return CONTEXT_WINDOW_DEFAULT
+  const value = modelValue.toLowerCase().trim()
+  if (value.includes('[1m]')) return CONTEXT_WINDOW_1M
+  if (IMPLICIT_1M_BASE_MODELS.some((base) => value.includes(base))) return CONTEXT_WINDOW_1M
+  if (IMPLICIT_1M_ALIASES.has(value)) return CONTEXT_WINDOW_1M
+  return CONTEXT_WINDOW_DEFAULT
 }

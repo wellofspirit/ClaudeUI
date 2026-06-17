@@ -28,7 +28,7 @@ vi.mock('../ExitPlanModeCard/View', () => ({
   ExitPlanModeCardView: (props: ExitPlanModeCardViewProps) => {
     viewProps = props
     return null
-  },
+  }
 }))
 
 // Replace waitForModeChange with a vi.fn so the FC tests can control it.
@@ -43,7 +43,7 @@ vi.mock('../ExitPlanModeCard/utils', async (importOriginal) => {
   _realWaitForModeChange = original.waitForModeChange
   return {
     ...original,
-    waitForModeChange: vi.fn(() => Promise.resolve()),
+    waitForModeChange: vi.fn(() => Promise.resolve())
   }
 })
 
@@ -54,13 +54,13 @@ beforeEach(() => {
   ;(globalThis as any).window = globalThis.window || {}
   ;(globalThis as any).window.api = {
     saveSessionConfig: () => {},
-    saveSettings: () => {},
+    saveSettings: () => {}
   } as any
 
   useSessionStore.setState({
     activeSessionId: ROUTE,
     sessions: {},
-    recentSessionIds: [],
+    recentSessionIds: []
   })
   useSessionStore.getState().createNewSession(ROUTE, '/test')
 })
@@ -104,7 +104,9 @@ describe('waitForModeChange', () => {
     useSessionStore.getState().setPermissionMode('default')
 
     let resolved = false
-    void waitForModeChange().then(() => { resolved = true })
+    void waitForModeChange().then(() => {
+      resolved = true
+    })
 
     // Setting the same mode again should not resolve — subscription only fires on change
     // but the comparison in the subscriber checks mode !== currentMode.
@@ -149,7 +151,9 @@ describe('waitForModeChange', () => {
     vi.useFakeTimers()
     try {
       let resolved = false
-      waitForModeChange().then(() => { resolved = true })
+      waitForModeChange().then(() => {
+        resolved = true
+      })
 
       vi.advanceTimersByTime(1999)
       await Promise.resolve() // flush microtasks
@@ -212,7 +216,9 @@ describe('waitForModeChange', () => {
       useSessionStore.setState({ activeSessionId: null })
 
       let resolved = false
-      waitForModeChange().then(() => { resolved = true })
+      waitForModeChange().then(() => {
+        resolved = true
+      })
 
       vi.advanceTimersByTime(2000)
       await Promise.resolve()
@@ -229,7 +235,9 @@ describe('waitForModeChange', () => {
       useSessionStore.getState().createNewSession('other-session', '/other', false)
 
       let resolved = false
-      waitForModeChange().then(() => { resolved = true })
+      waitForModeChange().then(() => {
+        resolved = true
+      })
 
       // Change mode on the other session — should not trigger ROUTE's subscription
       useSessionStore.getState().setPermissionMode('plan', 'other-session')
@@ -257,13 +265,13 @@ const block = {
   id: 'tu-1',
   toolName: 'ExitPlanMode',
   toolInput: { plan: planText },
-  toolUseId: 'tu-1',
+  toolUseId: 'tu-1'
 }
 const approval = {
   requestId: 'req-1',
   toolName: 'ExitPlanMode',
   input: { plan: planText },
-  toolUseId: 'tu-1',
+  toolUseId: 'tu-1'
 }
 
 describe('ExitPlanModeCard FC', () => {
@@ -295,7 +303,7 @@ describe('ExitPlanModeCard FC', () => {
       'session:create',
       'session:send',
       'session:get-session-log-path',
-      'session:set-permission-mode',
+      'session:set-permission-mode'
     ]
     for (const ch of channels) {
       recordIpc(ch)
@@ -312,7 +320,7 @@ describe('ExitPlanModeCard FC', () => {
     useSessionStore.setState({
       activeSessionId: ROUTE_FC,
       sessions: {},
-      recentSessionIds: [],
+      recentSessionIds: []
     })
     useSessionStore.getState().createNewSession(ROUTE_FC, '/workspace')
     useSessionStore.getState().addPendingApproval(ROUTE_FC, approval)
@@ -323,9 +331,7 @@ describe('ExitPlanModeCard FC', () => {
   })
 
   function renderFC(): ReturnType<typeof render> {
-    return render(
-      React.createElement(ExitPlanModeCard, { block, approval })
-    )
+    return render(React.createElement(ExitPlanModeCard, { block, approval }))
   }
 
   // -------------------------------------------------------------------------
@@ -370,9 +376,7 @@ describe('ExitPlanModeCard FC', () => {
   })
 
   it('onStartFresh: does nothing when approval is undefined', async () => {
-    const { unmount } = render(
-      React.createElement(ExitPlanModeCard, { block })
-    )
+    const { unmount } = render(React.createElement(ExitPlanModeCard, { block }))
 
     await act(async () => {
       await viewProps.onStartFresh()
@@ -505,7 +509,7 @@ describe('ExitPlanModeCard FC', () => {
     expect(session.planReview).toEqual({
       planContent: planText,
       approvalRequestId: approval.requestId,
-      comments: [],
+      comments: []
     })
 
     unmount()

@@ -6,8 +6,6 @@
  * via setIpcBridge().
  */
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
-
 import type { TestIpcBridge } from '../bridges/test-ipc-bridge'
 
 let bridge: TestIpcBridge | null = null
@@ -48,20 +46,22 @@ export const app = {
   emit: (event: string, ...args: any[]) => {
     appCallbacks.get(event)?.forEach((cb) => cb(...args))
   },
-  isPackaged: false,
+  isPackaged: false
 }
 
 // --- ipcMain (delegates to bridge) ---
 export const ipcMain = {
   handle: (channel: string, handler: any) => {
-    if (!bridge) throw new Error('electron-shim: setIpcBridge() must be called before using ipcMain')
+    if (!bridge)
+      throw new Error('electron-shim: setIpcBridge() must be called before using ipcMain')
     bridge.ipcMain.handle(channel, handler)
   },
   removeHandler: (channel: string) => {
     bridge?.ipcMain.removeHandler(channel)
   },
   on: (channel: string, handler: any) => {
-    if (!bridge) throw new Error('electron-shim: setIpcBridge() must be called before using ipcMain')
+    if (!bridge)
+      throw new Error('electron-shim: setIpcBridge() must be called before using ipcMain')
     bridge.ipcMain.on(channel, handler)
     return ipcMain
   },
@@ -69,17 +69,19 @@ export const ipcMain = {
     bridge?.ipcMain.removeListener(channel, handler)
     return ipcMain
   },
-  removeAllListeners: () => ipcMain,
+  removeAllListeners: () => ipcMain
 }
 
 // --- ipcRenderer (delegates to bridge) ---
 export const ipcRenderer = {
   invoke: async (channel: string, ...args: any[]) => {
-    if (!bridge) throw new Error('electron-shim: setIpcBridge() must be called before using ipcRenderer')
+    if (!bridge)
+      throw new Error('electron-shim: setIpcBridge() must be called before using ipcRenderer')
     return bridge.ipcRenderer.invoke(channel, ...args)
   },
   on: (channel: string, handler: any) => {
-    if (!bridge) throw new Error('electron-shim: setIpcBridge() must be called before using ipcRenderer')
+    if (!bridge)
+      throw new Error('electron-shim: setIpcBridge() must be called before using ipcRenderer')
     bridge.ipcRenderer.on(channel, handler)
     return ipcRenderer
   },
@@ -89,14 +91,14 @@ export const ipcRenderer = {
   },
   send: (channel: string, ...args: any[]) => {
     bridge?.ipcRenderer.send(channel, ...args)
-  },
+  }
 }
 
 // --- contextBridge ---
 export const contextBridge = {
   exposeInMainWorld: (_key: string, _api: any) => {
     // No-op in tests — we assign window.api directly
-  },
+  }
 }
 
 // --- BrowserWindow ---
@@ -107,57 +109,77 @@ export class BrowserWindow {
       send: () => {},
       isDevToolsOpened: () => false,
       closeDevTools: () => {},
-      openDevTools: () => {},
+      openDevTools: () => {}
     }
   }
-  isDestroyed() { return false }
-  isMinimized() { return false }
-  isMaximized() { return false }
+  isDestroyed() {
+    return false
+  }
+  isMinimized() {
+    return false
+  }
+  isMaximized() {
+    return false
+  }
   show() {}
   hide() {}
   focus() {}
-  loadURL() { return Promise.resolve() }
-  loadFile() { return Promise.resolve() }
-  on() { return this }
-  once() { return this }
-  removeListener() { return this }
-  static getAllWindows() { return [] }
-  static getFocusedWindow() { return null }
+  loadURL() {
+    return Promise.resolve()
+  }
+  loadFile() {
+    return Promise.resolve()
+  }
+  on() {
+    return this
+  }
+  once() {
+    return this
+  }
+  removeListener() {
+    return this
+  }
+  static getAllWindows() {
+    return []
+  }
+  static getFocusedWindow() {
+    return null
+  }
 }
 
 // --- dialog ---
 export const dialog = {
   showOpenDialog: async () => ({ canceled: true, filePaths: [] }),
   showSaveDialog: async () => ({ canceled: true, filePath: undefined }),
-  showMessageBox: async () => ({ response: 0 }),
+  showMessageBox: async () => ({ response: 0 })
 }
 
 // --- shell ---
 export const shell = {
   openExternal: async () => {},
-  openPath: async () => ({ error: '' }),
+  openPath: async () => ({ error: '' })
 }
 
 // --- Menu ---
 export const Menu = {
   setApplicationMenu: () => {},
   buildFromTemplate: () => ({}),
-  getApplicationMenu: () => null,
+  getApplicationMenu: () => null
 }
 
 // --- nativeTheme ---
 export const nativeTheme = {
   themeSource: 'system',
   shouldUseDarkColors: true,
-  on: () => {},
+  on: () => {}
 }
 
 // --- screen ---
 export const screen = {
   getPrimaryDisplay: () => ({
     workAreaSize: { width: 1920, height: 1080 },
-    bounds: { x: 0, y: 0, width: 1920, height: 1080 },
-  }),
+    bounds: { x: 0, y: 0, width: 1920, height: 1080 }
+  })
 }
 
 // Default export matches Electron's module shape
@@ -171,5 +193,5 @@ export default {
   shell,
   Menu,
   nativeTheme,
-  screen,
+  screen
 }

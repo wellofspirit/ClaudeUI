@@ -36,8 +36,8 @@ vi.mock('fs', async () => {
     existsSync: (p: unknown) => existsSyncImpl(p),
     default: {
       ...actual,
-      existsSync: (p: unknown) => existsSyncImpl(p),
-    },
+      existsSync: (p: unknown) => existsSyncImpl(p)
+    }
   }
 })
 
@@ -78,18 +78,16 @@ function makeFakeNative(): FakeNative {
 
     lastOnData: null,
     lastOnSilence: null,
-    _recording: false,
+    _recording: false
   }
 
-  fake.startRecording.mockImplementation(
-    (onData: (buf: Buffer) => void, onSilence: () => void) => {
-      fake.lastOnData = onData
-      fake.lastOnSilence = onSilence
-      state.recording = true
-      fake._recording = true
-      return true
-    }
-  )
+  fake.startRecording.mockImplementation((onData: (buf: Buffer) => void, onSilence: () => void) => {
+    fake.lastOnData = onData
+    fake.lastOnSilence = onSilence
+    state.recording = true
+    fake._recording = true
+    return true
+  })
 
   return fake
 }
@@ -110,20 +108,19 @@ const origLoad = (Module as unknown as { _load: (...a: unknown[]) => unknown }).
     return {
       app: {
         getAppPath: () => '/test/app',
-        isPackaged: false,
-      },
+        isPackaged: false
+      }
     }
   }
 
   // Intercept the native module require. The candidate path always contains
   // `node_modules/@anthropic-ai/claude-agent-sdk/vendor/audio-capture` and ends
   // in `audio-capture.node`. Match loosely to work on any platform.
-  if (
-    request.endsWith('audio-capture.node') ||
-    request.includes('audio-capture')
-  ) {
+  if (request.endsWith('audio-capture.node') || request.includes('audio-capture')) {
     if (!currentFake) {
-      throw new Error('voice-capture.test: Module._load called for native module but no fake installed')
+      throw new Error(
+        'voice-capture.test: Module._load called for native module but no fake installed'
+      )
     }
     return currentFake
   }
@@ -138,8 +135,8 @@ vi.mock('../logger', () => ({
     debug: vi.fn(),
     info: vi.fn(),
     warn: vi.fn(),
-    error: vi.fn(),
-  },
+    error: vi.fn()
+  }
 }))
 
 // --- Tests ------------------------------------------------------------------

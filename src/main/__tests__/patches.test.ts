@@ -26,7 +26,7 @@ import {
   readCliJs,
   hasMarker,
   countOccurrences,
-  findMarkers,
+  findMarkers
 } from '../../test/helpers/patch-harness'
 
 // Read cli.js once — it's ~11MB and we don't want to re-read per test.
@@ -37,8 +37,7 @@ const TASKSTOP_A_UPSTREAM =
   /=\([\w$]+\)=>[\w$]+==="completed"\|\|[\w$]+==="failed"\|\|[\w$]+==="stopped"\|\|[\w$]+==="killed"/
 
 /** Upstream detection for taskstop-notification Part B (SDK >= 0.2.87). */
-const TASKSTOP_B_UPSTREAM =
-  /notified:!0[\s\S]{1,300}?[\w$]+\([\w$]+,"stopped",\{toolUseId:/
+const TASKSTOP_B_UPSTREAM = /notified:!0[\s\S]{1,300}?[\w$]+\([\w$]+,"stopped",\{toolUseId:/
 
 /** Upstream detection for incomplete-session-resume-fix (SDK >= 0.2.87). */
 const RESUME_FIX_UPSTREAM_BUILD =
@@ -50,8 +49,7 @@ const RESUME_FIX_UPSTREAM_APPLY =
 /** Upstream detection for mcp-tool-refresh (CLI 2.1.114+). The CLI now
  *  calls refreshTools() before each API call natively — our patches are a
  *  no-op when this pattern is present. */
-const MCP_TOOL_REFRESH_UPSTREAM =
-  /\.options\.refreshTools\)\{[^}]*\.options\.refreshTools\(\)/
+const MCP_TOOL_REFRESH_UPSTREAM = /\.options\.refreshTools\)\{[^}]*\.options\.refreshTools\(\)/
 
 describe.skipIf(!cliJsExists())('patches', () => {
   it('cli.js is readable and non-empty', () => {
@@ -82,8 +80,8 @@ describe.skipIf(!cliJsExists())('patches', () => {
         '/*PATCHED:rate-limit-relay*/',
         '/*PATCHED:voice-server*/',
         '/*PATCHED:bash-output-streaming*/',
-        '/*PATCHED:bash-early-poll*/',
-      ]),
+        '/*PATCHED:bash-early-poll*/'
+      ])
     )
   })
 

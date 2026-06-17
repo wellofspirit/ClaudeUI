@@ -76,7 +76,7 @@ export function DiffViewer(props: Props): React.JSX.Element {
     wrapLines = false,
     highlightedLines,
     renderAfterLine,
-    virtualize = false,
+    virtualize = false
   } = props
 
   // Destructure union fields safely
@@ -85,17 +85,23 @@ export function DiffViewer(props: Props): React.JSX.Element {
   const newContent = 'newContent' in props ? (props as PatchProps).newContent : undefined
   const oldStr = 'oldStr' in props ? props.oldStr : undefined
   const newStr = 'newStr' in props ? props.newStr : undefined
-  const ignoreWhitespace = 'ignoreWhitespace' in props ? (props as ContentProps).ignoreWhitespace : undefined
+  const ignoreWhitespace =
+    'ignoreWhitespace' in props ? (props as ContentProps).ignoreWhitespace : undefined
 
   // Parse the patch into structured hunks
-  const { hunks: initialHunks, pureAdd, pureDel, computedPatch } = useMemo(() => {
+  const {
+    hunks: initialHunks,
+    pureAdd,
+    pureDel,
+    computedPatch
+  } = useMemo(() => {
     if (patchStr != null) {
       const parsed = parsePatch(patchStr)
       return {
         hunks: parsed.hunks,
         pureAdd: checkIsPureAdd(patchStr),
         pureDel: checkIsPureDel(patchStr),
-        computedPatch: patchStr,
+        computedPatch: patchStr
       }
     }
 
@@ -110,7 +116,7 @@ export function DiffViewer(props: Props): React.JSX.Element {
       hunks: parsed.hunks,
       pureAdd: oldStr === '',
       pureDel: newStr === '',
-      computedPatch: computed,
+      computedPatch: computed
     }
   }, [patchStr, oldStr, newStr, fileName, ignoreWhitespace])
 
@@ -160,7 +166,7 @@ export function DiffViewer(props: Props): React.JSX.Element {
         oldCount: gap.count,
         newStart: gap.newStart,
         newCount: gap.count,
-        lines: contextLines,
+        lines: contextLines
       }
 
       setExpandedHunks((prev) => {
@@ -185,14 +191,16 @@ export function DiffViewer(props: Props): React.JSX.Element {
     'flex flex-col min-h-0',
     pureAdd ? 'diff-pure-add' : '',
     pureDel ? 'diff-pure-del' : '',
-    className || '',
+    className || ''
   ]
     .filter(Boolean)
     .join(' ')
 
   if (hunks.length === 0) {
     return (
-      <div className={`${containerClass} flex items-center justify-center text-[12px] text-text-muted`}>
+      <div
+        className={`${containerClass} flex items-center justify-center text-[12px] text-text-muted`}
+      >
         No changes
       </div>
     )
@@ -207,7 +215,7 @@ export function DiffViewer(props: Props): React.JSX.Element {
     onExpandGap: oldContent && newContent ? handleExpandGap : undefined,
     highlightedLines,
     renderAfterLine,
-    gutterWidth,
+    gutterWidth
   }
 
   return (
@@ -215,17 +223,9 @@ export function DiffViewer(props: Props): React.JSX.Element {
       {virtualize && viewMode === 'split' ? (
         <SplitDiffTable {...sharedProps} />
       ) : virtualize ? (
-        <UnifiedDiffTable
-          {...sharedProps}
-          isPureAdd={pureAdd}
-          isPureDel={pureDel}
-        />
+        <UnifiedDiffTable {...sharedProps} isPureAdd={pureAdd} isPureDel={pureDel} />
       ) : (
-        <StaticDiffTable
-          {...sharedProps}
-          isPureAdd={pureAdd}
-          isPureDel={pureDel}
-        />
+        <StaticDiffTable {...sharedProps} isPureAdd={pureAdd} isPureDel={pureDel} />
       )}
     </div>
   )
@@ -275,7 +275,7 @@ function mergeAdjacentHunks(hunks: DiffHunk[]): DiffHunk[] {
         oldCount: Math.max(prevEnd, curr.oldStart + curr.oldCount) - prev.oldStart,
         newStart: prev.newStart,
         newCount: mergedLines.filter((l) => l.type !== 'del').length,
-        lines: mergedLines,
+        lines: mergedLines
       }
     } else {
       result.push(curr)

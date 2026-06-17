@@ -5,8 +5,6 @@
  * Used in component and E2E tests.
  */
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
-
 /**
  * Represents an SDK message yielded by the query generator.
  * Kept as Record<string, unknown> since the SDK doesn't export concrete message types
@@ -62,7 +60,7 @@ function createCallTracker(): SdkStubCallTracker {
     stoppedTasks: [],
     backgroundedTasks: [],
     dequeuedMessages: [],
-    sideQuestions: [],
+    sideQuestions: []
   }
 }
 
@@ -104,13 +102,31 @@ export function createSdkStub(options: SdkStubOptions): {
 
     // Attach control methods to match Query interface
     const controlMethods: QueryControlMethods = {
-      interrupt: async () => { tracker.interrupts++; interrupted = true },
-      setPermissionMode: async (mode) => { tracker.permissionModes.push(mode) },
-      setModel: async (model) => { tracker.models.push(model) },
-      stopTask: async (taskId) => { tracker.stoppedTasks.push(taskId) },
-      backgroundTask: async (taskId) => { tracker.backgroundedTasks.push(taskId); return {} },
-      dequeueMessage: async (value) => { tracker.dequeuedMessages.push(value); return { removed: 1 } },
-      askSideQuestion: async (question) => { tracker.sideQuestions.push(question); return null },
+      interrupt: async () => {
+        tracker.interrupts++
+        interrupted = true
+      },
+      setPermissionMode: async (mode) => {
+        tracker.permissionModes.push(mode)
+      },
+      setModel: async (model) => {
+        tracker.models.push(model)
+      },
+      stopTask: async (taskId) => {
+        tracker.stoppedTasks.push(taskId)
+      },
+      backgroundTask: async (taskId) => {
+        tracker.backgroundedTasks.push(taskId)
+        return {}
+      },
+      dequeueMessage: async (value) => {
+        tracker.dequeuedMessages.push(value)
+        return { removed: 1 }
+      },
+      askSideQuestion: async (question) => {
+        tracker.sideQuestions.push(question)
+        return null
+      },
       getUsage: async () => ({}),
       mcpServerStatus: async () => [],
       toggleMcpServer: async () => {},
@@ -122,7 +138,7 @@ export function createSdkStub(options: SdkStubOptions): {
       supportedModels: async () => [],
       supportedCommands: async () => [],
       supportedAgents: async () => [],
-      getContextUsage: async () => ({}),
+      getContextUsage: async () => ({})
     }
 
     // Merge control methods onto the generator

@@ -9,17 +9,23 @@ import { UsageView } from './usage/UsageView'
 import { AutomationView } from './automation/AutomationView'
 import { PluginWebView } from './plugin/PluginWebView'
 import { TerminalPanel } from './terminal/TerminalPanel'
-import { useActiveSession, useSessionStore, applyTheme, normalizeCwd } from '../stores/session-store'
+import {
+  useActiveSession,
+  useSessionStore,
+  applyTheme,
+  normalizeCwd
+} from '../stores/session-store'
 import { useGitWatcher } from '../hooks/useGitWatcher'
 import { useAutomationEvents } from '../hooks/useAutomationEvents'
 import { useTerminalColdCleanup } from '../hooks/useTerminalColdCleanup'
 import { useIsMobile, useVisualViewportHeight } from '../hooks/useIsMobile'
 import { QuitWorktreeModal } from './QuitWorktreeModal'
 
-
 const PERMISSION_MODES = ['default', 'acceptEdits', 'plan', 'auto'] as const
 
-const SidebarContext = createContext<{ collapsed: boolean; toggle: () => void; isMobile: boolean }>({ collapsed: false, toggle: () => {}, isMobile: false })
+const SidebarContext = createContext<{ collapsed: boolean; toggle: () => void; isMobile: boolean }>(
+  { collapsed: false, toggle: () => {}, isMobile: false }
+)
 export const useSidebarCollapsed = () => useContext(SidebarContext)
 
 function useResizablePanel(key: string, defaultW: number, min: number, max: number) {
@@ -28,44 +34,55 @@ function useResizablePanel(key: string, defaultW: number, min: number, max: numb
     return saved ? Math.min(max, Math.max(min, Number(saved))) : defaultW
   })
 
-  const onPointerDown = useCallback((dir: 1 | -1) => (e: React.PointerEvent<HTMLDivElement>) => {
-    e.preventDefault()
-    const target = e.currentTarget
-    const pointerId = e.pointerId
-    const startX = e.clientX
-    const startW = width
+  const onPointerDown = useCallback(
+    (dir: 1 | -1) => (e: React.PointerEvent<HTMLDivElement>) => {
+      e.preventDefault()
+      const target = e.currentTarget
+      const pointerId = e.pointerId
+      const startX = e.clientX
+      const startW = width
 
-    // Pointer capture keeps events firing on `target` even when the cursor
-    // crosses over iframes/webviews, so mouseup never goes missing.
-    target.setPointerCapture(pointerId)
+      // Pointer capture keeps events firing on `target` even when the cursor
+      // crosses over iframes/webviews, so mouseup never goes missing.
+      target.setPointerCapture(pointerId)
 
-    const onPointerMove = (ev: PointerEvent): void => {
-      const newW = Math.min(max, Math.max(min, startW + (ev.clientX - startX) * dir))
-      setWidth(newW)
-    }
+      const onPointerMove = (ev: PointerEvent): void => {
+        const newW = Math.min(max, Math.max(min, startW + (ev.clientX - startX) * dir))
+        setWidth(newW)
+      }
 
-    const onPointerUp = (ev: PointerEvent): void => {
-      const finalW = Math.min(max, Math.max(min, startW + (ev.clientX - startX) * dir))
-      localStorage.setItem(key, String(finalW))
-      target.removeEventListener('pointermove', onPointerMove)
-      target.removeEventListener('pointerup', onPointerUp)
-      target.removeEventListener('pointercancel', onPointerUp)
-      try { target.releasePointerCapture(pointerId) } catch { /* already released */ }
-      document.body.style.cursor = ''
-      document.body.style.userSelect = ''
-    }
+      const onPointerUp = (ev: PointerEvent): void => {
+        const finalW = Math.min(max, Math.max(min, startW + (ev.clientX - startX) * dir))
+        localStorage.setItem(key, String(finalW))
+        target.removeEventListener('pointermove', onPointerMove)
+        target.removeEventListener('pointerup', onPointerUp)
+        target.removeEventListener('pointercancel', onPointerUp)
+        try {
+          target.releasePointerCapture(pointerId)
+        } catch {
+          /* already released */
+        }
+        document.body.style.cursor = ''
+        document.body.style.userSelect = ''
+      }
 
-    document.body.style.cursor = 'col-resize'
-    document.body.style.userSelect = 'none'
-    target.addEventListener('pointermove', onPointerMove)
-    target.addEventListener('pointerup', onPointerUp)
-    target.addEventListener('pointercancel', onPointerUp)
-  }, [width, key, min, max])
+      document.body.style.cursor = 'col-resize'
+      document.body.style.userSelect = 'none'
+      target.addEventListener('pointermove', onPointerMove)
+      target.addEventListener('pointerup', onPointerUp)
+      target.addEventListener('pointercancel', onPointerUp)
+    },
+    [width, key, min, max]
+  )
 
   return { width, onPointerDown }
 }
 
-function ResizeHandle({ onPointerDown }: { onPointerDown: (e: React.PointerEvent<HTMLDivElement>) => void }) {
+function ResizeHandle({
+  onPointerDown
+}: {
+  onPointerDown: (e: React.PointerEvent<HTMLDivElement>) => void
+}) {
   return (
     <div
       onPointerDown={onPointerDown}
@@ -99,7 +116,11 @@ function useResizableBottomPanel(_key: string, min: number, max: number) {
         target.removeEventListener('pointermove', onPointerMove)
         target.removeEventListener('pointerup', onPointerUp)
         target.removeEventListener('pointercancel', onPointerUp)
-        try { target.releasePointerCapture(pointerId) } catch { /* already released */ }
+        try {
+          target.releasePointerCapture(pointerId)
+        } catch {
+          /* already released */
+        }
         document.body.style.cursor = ''
         document.body.style.userSelect = ''
       }
@@ -121,9 +142,16 @@ function useResizableBottomPanel(_key: string, min: number, max: number) {
   return { height, onPointerDown }
 }
 
-function HorizontalResizeHandle({ onPointerDown }: { onPointerDown: (e: React.PointerEvent<HTMLDivElement>) => void }) {
+function HorizontalResizeHandle({
+  onPointerDown
+}: {
+  onPointerDown: (e: React.PointerEvent<HTMLDivElement>) => void
+}) {
   return (
-    <div onPointerDown={onPointerDown} className="h-0 shrink-0 cursor-row-resize relative z-10 touch-none">
+    <div
+      onPointerDown={onPointerDown}
+      className="h-0 shrink-0 cursor-row-resize relative z-10 touch-none"
+    >
       <div className="absolute inset-x-0 -top-1.5 h-3" />
     </div>
   )
@@ -143,7 +171,9 @@ export function SessionView(): React.JSX.Element {
   const mockupPanel = useResizablePanel('mockupPanelWidth', 500, 350, 9999)
   const terminalPanelOpen = useSessionStore((s) => s.terminalPanelOpen)
   const bottomPanel = useResizableBottomPanel('terminalPanelHeight', 120, 600)
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => isMobile ? true : localStorage.getItem('sidebarCollapsed') === 'true')
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() =>
+    isMobile ? true : localStorage.getItem('sidebarCollapsed') === 'true'
+  )
 
   // Git repo detection and polling
   useGitWatcher()
@@ -177,8 +207,12 @@ export function SessionView(): React.JSX.Element {
         const session = sessions[activeSessionId]
         const permissionMode = session?.permissionMode ?? 'default'
         // localAuto is not in the cycle — treat it as 'auto' for cycling purposes
-        const cycleMode = permissionMode === 'localAuto' ? 'auto' : permissionMode as typeof PERMISSION_MODES[number]
-        let next = PERMISSION_MODES[(PERMISSION_MODES.indexOf(cycleMode) + 1) % PERMISSION_MODES.length]
+        const cycleMode =
+          permissionMode === 'localAuto'
+            ? 'auto'
+            : (permissionMode as (typeof PERMISSION_MODES)[number])
+        let next =
+          PERMISSION_MODES[(PERMISSION_MODES.indexOf(cycleMode) + 1) % PERMISSION_MODES.length]
         // Auto mode requires an active SDK session — skip to next mode if session not started
         if (next === 'auto' && !session?.sdkActive) {
           next = PERMISSION_MODES[(PERMISSION_MODES.indexOf('auto') + 1) % PERMISSION_MODES.length]
@@ -229,7 +263,7 @@ export function SessionView(): React.JSX.Element {
         // Auto-create first terminal if opening and no tabs for this cwd
         if (willOpen) {
           const cwd = state.activeSessionId
-            ? state.sessions[state.activeSessionId]?.cwd ?? '.'
+            ? (state.sessions[state.activeSessionId]?.cwd ?? '.')
             : '.'
           const key = normalizeCwd(cwd || '.')
           const group = state.terminalGroups[key]
@@ -246,11 +280,17 @@ export function SessionView(): React.JSX.Element {
   }, [])
 
   return (
-    <SidebarContext.Provider value={{ collapsed: sidebarCollapsed, toggle: toggleSidebar, isMobile }}>
+    <SidebarContext.Provider
+      value={{ collapsed: sidebarCollapsed, toggle: toggleSidebar, isMobile }}
+    >
       <div
         style={{
-          height: visualHeight ? `${visualHeight / uiFontScale}px` : (uiFontScale !== 1 ? `calc(100dvh / ${uiFontScale})` : undefined),
-          ...(uiFontScale !== 1 ? { zoom: uiFontScale, width: `calc(100vw / ${uiFontScale})` } : {}),
+          height: visualHeight
+            ? `${visualHeight / uiFontScale}px`
+            : uiFontScale !== 1
+              ? `calc(100dvh / ${uiFontScale})`
+              : undefined,
+          ...(uiFontScale !== 1 ? { zoom: uiFontScale, width: `calc(100vw / ${uiFontScale})` } : {})
         }}
         className={`${visualHeight ? '' : 'h-screen'} flex ${import.meta.env.DEV ? 'border-2 border-orange-400 rounded-2xl overflow-hidden' : ''}`}
       >
@@ -270,16 +310,23 @@ export function SessionView(): React.JSX.Element {
             <ResizeHandle onPointerDown={sidebar.onPointerDown(1)} />
           </>
         )}
-        <div className={`flex-1 min-w-0 flex flex-col ${window.api.platform === 'darwin' ? 'bg-bg-secondary/60' : 'bg-bg-secondary/80'}`}>
+        <div
+          className={`flex-1 min-w-0 flex flex-col ${window.api.platform === 'darwin' ? 'bg-bg-secondary/60' : 'bg-bg-secondary/80'}`}
+        >
           {/* Main content row: chat + optional right panels */}
           <div className="flex-1 min-w-0 min-h-0 flex">
-            <div className={`flex-1 min-w-0 h-full flex flex-col bg-bg-primary overflow-hidden ${sidebarCollapsed || isMobile ? '' : 'rounded-l-2xl shadow-[-1px_0_4px_rgba(0,0,0,0.15),-3px_0_12px_rgba(0,0,0,0.1)]'}`}>
+            <div
+              className={`flex-1 min-w-0 h-full flex flex-col bg-bg-primary overflow-hidden ${sidebarCollapsed || isMobile ? '' : 'rounded-l-2xl shadow-[-1px_0_4px_rgba(0,0,0,0.15),-3px_0_12px_rgba(0,0,0,0.1)]'}`}
+            >
               {activeView.type === 'usage' ? (
                 <UsageView onClose={() => setActiveView({ type: 'chat' })} />
               ) : activeView.type === 'automations' ? (
                 <AutomationView onClose={() => setActiveView({ type: 'chat' })} />
               ) : activeView.type === 'plugin' ? (
-                <PluginWebView pluginId={activeView.pluginId} onClose={() => setActiveView({ type: 'chat' })} />
+                <PluginWebView
+                  pluginId={activeView.pluginId}
+                  onClose={() => setActiveView({ type: 'chat' })}
+                />
               ) : (
                 <ChatPanel />
               )}

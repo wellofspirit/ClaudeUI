@@ -29,9 +29,14 @@ declare global {
 const isMac = window.logViewerApi?.platform === 'darwin'
 
 const LEVELS = ['debug', 'info', 'warn', 'error'] as const
-const LEVEL_LABELS: Record<string, string> = { debug: 'DBG', info: 'INF', warn: 'WRN', error: 'ERR' }
+const LEVEL_LABELS: Record<string, string> = {
+  debug: 'DBG',
+  info: 'INF',
+  warn: 'WRN',
+  error: 'ERR'
+}
 const THEMES = ['dark', 'light', 'monokai'] as const
-type Theme = typeof THEMES[number]
+type Theme = (typeof THEMES)[number]
 
 function sourceClass(src: string): string {
   if (src === 'renderer' || src === 'renderer:error') return 'renderer'
@@ -43,7 +48,13 @@ function escapeHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 }
 
-function EntryRow({ entry, onSourceClick }: { entry: LogEntry; onSourceClick: (src: string) => void }): React.JSX.Element {
+function EntryRow({
+  entry,
+  onSourceClick
+}: {
+  entry: LogEntry
+  onSourceClick: (src: string) => void
+}): React.JSX.Element {
   let msgHtml = escapeHtml(entry.message)
   if (entry.error) {
     msgHtml += `<span class="err">${escapeHtml(entry.error)}</span>`
@@ -52,9 +63,7 @@ function EntryRow({ entry, onSourceClick }: { entry: LogEntry; onSourceClick: (s
   return (
     <div className="log-entry" data-level={entry.level} data-source={entry.source}>
       <span className="log-ts">{entry.timestamp}</span>
-      <span className={`log-level ${entry.level}`}>
-        {entry.level.toUpperCase().padEnd(5)}
-      </span>
+      <span className={`log-level ${entry.level}`}>{entry.level.toUpperCase().padEnd(5)}</span>
       <span
         className={`log-source ${sourceClass(entry.source)}`}
         title={`Click to filter by "${entry.source}"`}
@@ -98,11 +107,7 @@ function SourceFilter({
       />
       <div className="source-list">
         <label className="source-item" key="__all__">
-          <input
-            type="checkbox"
-            checked={allActive}
-            onChange={() => onToggle('__all__')}
-          />
+          <input type="checkbox" checked={allActive} onChange={() => onToggle('__all__')} />
           <span className="source-label">All sources ({allSources.length})</span>
         </label>
         {visible.map((src) => (
@@ -118,7 +123,9 @@ function SourceFilter({
       </div>
       <div className="source-footer">
         <span className="source-footer-count">{activeCount} selected</span>
-        <button className="source-footer-btn" onClick={onClose}>Done</button>
+        <button className="source-footer-btn" onClick={onClose}>
+          Done
+        </button>
       </div>
     </div>
   )
@@ -131,9 +138,7 @@ export function LogViewer(): React.JSX.Element {
     setThemeState(t)
     window.logViewerApi?.setTheme(t)
   }, [])
-  const [activeLevels, setActiveLevels] = useState<Set<string>>(
-    () => new Set(LEVELS)
-  )
+  const [activeLevels, setActiveLevels] = useState<Set<string>>(() => new Set(LEVELS))
   // null = all sources active (default), Set = only these sources
   const [activeSources, setActiveSources] = useState<Set<string> | null>(null)
   const [showSourceDropdown, setShowSourceDropdown] = useState(false)
@@ -208,25 +213,28 @@ export function LogViewer(): React.JSX.Element {
     })
   }, [])
 
-  const toggleSource = useCallback((src: string) => {
-    if (src === '__all__') {
-      // Toggle between all and none
-      setActiveSources((prev) => (prev === null ? new Set<string>() : null))
-      return
-    }
-    setActiveSources((prev) => {
-      if (prev === null) {
-        // Was "all" — switch to all-except-this
-        const next = new Set(allSources)
-        next.delete(src)
-        return next
+  const toggleSource = useCallback(
+    (src: string) => {
+      if (src === '__all__') {
+        // Toggle between all and none
+        setActiveSources((prev) => (prev === null ? new Set<string>() : null))
+        return
       }
-      const next = new Set(prev)
-      if (next.has(src)) next.delete(src)
-      else next.add(src)
-      return next
-    })
-  }, [allSources])
+      setActiveSources((prev) => {
+        if (prev === null) {
+          // Was "all" — switch to all-except-this
+          const next = new Set(allSources)
+          next.delete(src)
+          return next
+        }
+        const next = new Set(prev)
+        if (next.has(src)) next.delete(src)
+        else next.add(src)
+        return next
+      })
+    },
+    [allSources]
+  )
 
   // Click a source name in a log entry → filter to just that source
   const handleSourceClick = useCallback((src: string) => {
@@ -287,7 +295,10 @@ export function LogViewer(): React.JSX.Element {
         <div className="source-dropdown-wrapper">
           <button
             className={`filter-btn source-btn${activeSources !== null ? ' active' : ''}`}
-            onClick={(e) => { e.stopPropagation(); setShowSourceDropdown((v) => !v) }}
+            onClick={(e) => {
+              e.stopPropagation()
+              setShowSourceDropdown((v) => !v)
+            }}
           >
             Sources
           </button>
@@ -314,14 +325,40 @@ export function LogViewer(): React.JSX.Element {
         </button>
         {!isMac && (
           <div className="window-controls">
-            <button className="win-ctrl win-minimize" onClick={() => window.logViewerApi?.minimize()} title="Minimize">
-              <svg width="10" height="1" viewBox="0 0 10 1"><rect width="10" height="1" fill="currentColor"/></svg>
+            <button
+              className="win-ctrl win-minimize"
+              onClick={() => window.logViewerApi?.minimize()}
+              title="Minimize"
+            >
+              <svg width="10" height="1" viewBox="0 0 10 1">
+                <rect width="10" height="1" fill="currentColor" />
+              </svg>
             </button>
-            <button className="win-ctrl win-maximize" onClick={() => window.logViewerApi?.maximize()} title="Maximize">
-              <svg width="10" height="10" viewBox="0 0 10 10"><rect x="0.5" y="0.5" width="9" height="9" fill="none" stroke="currentColor" strokeWidth="1"/></svg>
+            <button
+              className="win-ctrl win-maximize"
+              onClick={() => window.logViewerApi?.maximize()}
+              title="Maximize"
+            >
+              <svg width="10" height="10" viewBox="0 0 10 10">
+                <rect
+                  x="0.5"
+                  y="0.5"
+                  width="9"
+                  height="9"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1"
+                />
+              </svg>
             </button>
-            <button className="win-ctrl win-close" onClick={() => window.logViewerApi?.close()} title="Close">
-              <svg width="10" height="10" viewBox="0 0 10 10"><path d="M1 1L9 9M9 1L1 9" stroke="currentColor" strokeWidth="1.2"/></svg>
+            <button
+              className="win-ctrl win-close"
+              onClick={() => window.logViewerApi?.close()}
+              title="Close"
+            >
+              <svg width="10" height="10" viewBox="0 0 10 10">
+                <path d="M1 1L9 9M9 1L1 9" stroke="currentColor" strokeWidth="1.2" />
+              </svg>
             </button>
           </div>
         )}

@@ -25,6 +25,7 @@ import type {
 import { ClaudeSession } from './claude-session'
 import { usageFetcher } from './usage-fetcher'
 import { logger } from './logger'
+import { canonicalizeWindowEnd, accountForTimestamp, type AccountLogRecord } from './usage-windows'
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -32,12 +33,23 @@ import { logger } from './logger'
 
 const CLAUDE_PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects')
 const USAGE_DIR = path.join(os.homedir(), '.claude', 'ui', 'usage')
+const ACCOUNT_LOG_PATH = path.join(USAGE_DIR, 'account-log.jsonl')
 const SESSION_DURATION_MS = 5 * 60 * 60 * 1000 // 5 hours
 const SCAN_WINDOW_MS = 7 * 24 * 60 * 60 * 1000 // only scan entries from last 7 days
-const HISTORY_DAYS = 30 // how many days to show in daily chart
 const MS_PER_HOUR = 3600_000
 const MS_PER_MINUTE = 60_000
 const RECALC_DEBOUNCE_MS = 30_000 // 30 seconds — debounce after file change events
+
+/** Grace for attaching entries that slightly precede a window's derived start. */
+const WINDOW_START_GRACE_MS = 30 * MS_PER_MINUTE
+
+/** A 5h rate-limit window observed via resets_at. */
+interface ApiWindow {
+  start: number // end - 5h
+  end: number // canonical (minute-rounded, snap-deduped)
+  /** Account email active when this window was observed (null = unknown/seeded). */
+  account: string | null
+}
 
 // ---------------------------------------------------------------------------
 // Token-based cost calculation (per million tokens)
@@ -47,63 +59,151 @@ const RECALC_DEBOUNCE_MS = 30_000 // 30 seconds — debounce after file change e
 interface ModelPricing {
   inputPerMTok: number
   outputPerMTok: number
+  /** 5-minute TTL cache write rate (1.25× input) */
   cacheWritePerMTok: number
+  /** 1-hour TTL cache write rate (2× input) */
+  cacheWrite1hPerMTok: number
   cacheReadPerMTok: number
 }
 
 const MODEL_PRICING: Array<{ match: string; pricing: ModelPricing }> = [
+  // Fable 5 / Mythos 5 — 2× Opus 4.8 ($10/$50)
+  {
+    match: 'fable',
+    pricing: {
+      inputPerMTok: 10,
+      outputPerMTok: 50,
+      cacheWritePerMTok: 12.5,
+      cacheWrite1hPerMTok: 20,
+      cacheReadPerMTok: 1
+    }
+  },
+  {
+    match: 'mythos',
+    pricing: {
+      inputPerMTok: 10,
+      outputPerMTok: 50,
+      cacheWritePerMTok: 12.5,
+      cacheWrite1hPerMTok: 20,
+      cacheReadPerMTok: 1
+    }
+  },
   // Opus 4.5+ (cheaper — match these first before the older opus-4 variants)
   {
     match: 'opus-4-5',
-    pricing: { inputPerMTok: 5, outputPerMTok: 25, cacheWritePerMTok: 6.25, cacheReadPerMTok: 0.5 }
+    pricing: {
+      inputPerMTok: 5,
+      outputPerMTok: 25,
+      cacheWritePerMTok: 6.25,
+      cacheWrite1hPerMTok: 10,
+      cacheReadPerMTok: 0.5
+    }
   },
   {
     match: 'opus-4-6',
-    pricing: { inputPerMTok: 5, outputPerMTok: 25, cacheWritePerMTok: 6.25, cacheReadPerMTok: 0.5 }
+    pricing: {
+      inputPerMTok: 5,
+      outputPerMTok: 25,
+      cacheWritePerMTok: 6.25,
+      cacheWrite1hPerMTok: 10,
+      cacheReadPerMTok: 0.5
+    }
   },
   {
     match: 'opus-4-7',
-    pricing: { inputPerMTok: 5, outputPerMTok: 25, cacheWritePerMTok: 6.25, cacheReadPerMTok: 0.5 }
+    pricing: {
+      inputPerMTok: 5,
+      outputPerMTok: 25,
+      cacheWritePerMTok: 6.25,
+      cacheWrite1hPerMTok: 10,
+      cacheReadPerMTok: 0.5
+    }
   },
   {
     match: 'opus-4-8',
-    pricing: { inputPerMTok: 5, outputPerMTok: 25, cacheWritePerMTok: 6.25, cacheReadPerMTok: 0.5 }
+    pricing: {
+      inputPerMTok: 5,
+      outputPerMTok: 25,
+      cacheWritePerMTok: 6.25,
+      cacheWrite1hPerMTok: 10,
+      cacheReadPerMTok: 0.5
+    }
   },
   // Opus 4.0 / 4.1 (older, more expensive)
   {
     match: 'opus-4',
-    pricing: { inputPerMTok: 15, outputPerMTok: 75, cacheWritePerMTok: 18.75, cacheReadPerMTok: 1.5 }
+    pricing: {
+      inputPerMTok: 15,
+      outputPerMTok: 75,
+      cacheWritePerMTok: 18.75,
+      cacheWrite1hPerMTok: 30,
+      cacheReadPerMTok: 1.5
+    }
   },
   // Opus fallback (assume newer pricing)
   {
     match: 'opus',
-    pricing: { inputPerMTok: 5, outputPerMTok: 25, cacheWritePerMTok: 6.25, cacheReadPerMTok: 0.5 }
+    pricing: {
+      inputPerMTok: 5,
+      outputPerMTok: 25,
+      cacheWritePerMTok: 6.25,
+      cacheWrite1hPerMTok: 10,
+      cacheReadPerMTok: 0.5
+    }
   },
   // Sonnet (all versions: 3.7, 4, 4.5, 4.6)
   {
     match: 'sonnet',
-    pricing: { inputPerMTok: 3, outputPerMTok: 15, cacheWritePerMTok: 3.75, cacheReadPerMTok: 0.3 }
+    pricing: {
+      inputPerMTok: 3,
+      outputPerMTok: 15,
+      cacheWritePerMTok: 3.75,
+      cacheWrite1hPerMTok: 6,
+      cacheReadPerMTok: 0.3
+    }
   },
   // Haiku 4.5
   {
     match: 'haiku-4',
-    pricing: { inputPerMTok: 1, outputPerMTok: 5, cacheWritePerMTok: 1.25, cacheReadPerMTok: 0.1 }
+    pricing: {
+      inputPerMTok: 1,
+      outputPerMTok: 5,
+      cacheWritePerMTok: 1.25,
+      cacheWrite1hPerMTok: 2,
+      cacheReadPerMTok: 0.1
+    }
   },
   // Haiku 3.5
   {
     match: 'haiku-3',
-    pricing: { inputPerMTok: 0.8, outputPerMTok: 4, cacheWritePerMTok: 1, cacheReadPerMTok: 0.08 }
+    pricing: {
+      inputPerMTok: 0.8,
+      outputPerMTok: 4,
+      cacheWritePerMTok: 1,
+      cacheWrite1hPerMTok: 1.6,
+      cacheReadPerMTok: 0.08
+    }
   },
   // Haiku (fallback)
   {
     match: 'haiku',
-    pricing: { inputPerMTok: 1, outputPerMTok: 5, cacheWritePerMTok: 1.25, cacheReadPerMTok: 0.1 }
+    pricing: {
+      inputPerMTok: 1,
+      outputPerMTok: 5,
+      cacheWritePerMTok: 1.25,
+      cacheWrite1hPerMTok: 2,
+      cacheReadPerMTok: 0.1
+    }
   }
 ]
 
 // Default pricing (sonnet-tier) for unknown models
 const DEFAULT_PRICING: ModelPricing = {
-  inputPerMTok: 3, outputPerMTok: 15, cacheWritePerMTok: 3.75, cacheReadPerMTok: 0.3
+  inputPerMTok: 3,
+  outputPerMTok: 15,
+  cacheWritePerMTok: 3.75,
+  cacheWrite1hPerMTok: 6,
+  cacheReadPerMTok: 0.3
 }
 
 function getPricing(model: string): ModelPricing {
@@ -114,19 +214,31 @@ function getPricing(model: string): ModelPricing {
   return DEFAULT_PRICING
 }
 
-/** Calculate cost in USD from token counts and model */
+/**
+ * Calculate cost in USD from token counts and model.
+ *
+ * `cacheCreation1hTokens` is the subset of `cacheCreationTokens` written with
+ * the 1-hour TTL (billed at 2× input vs 1.25× for the 5-minute TTL). When the
+ * JSONL usage lacks the `cache_creation` breakdown, pass 0 — everything is
+ * billed at the 5m rate, matching the pre-split behavior.
+ */
 function calculateCostFromTokens(
   model: string,
   inputTokens: number,
   outputTokens: number,
   cacheCreationTokens: number,
+  cacheCreation1hTokens: number,
   cacheReadTokens: number
 ): number {
   const p = getPricing(model)
+  // Clamp: the 1h subset can never exceed the total (guards malformed usage)
+  const cache1h = Math.min(Math.max(cacheCreation1hTokens, 0), cacheCreationTokens)
+  const cache5m = cacheCreationTokens - cache1h
   return (
     (inputTokens / 1_000_000) * p.inputPerMTok +
     (outputTokens / 1_000_000) * p.outputPerMTok +
-    (cacheCreationTokens / 1_000_000) * p.cacheWritePerMTok +
+    (cache5m / 1_000_000) * p.cacheWritePerMTok +
+    (cache1h / 1_000_000) * p.cacheWrite1hPerMTok +
     (cacheReadTokens / 1_000_000) * p.cacheReadPerMTok
   )
 }
@@ -301,8 +413,8 @@ function floorToHour(ts: number): number {
 /** A single (tokens, apiPercent) observation for projection regression. */
 interface ProjectionSample {
   timestamp: number
-  tokens: number     // total local tokens at this snapshot
-  apiPercent: number  // API 5hr usage % at this snapshot
+  tokens: number // total local tokens at this snapshot
+  apiPercent: number // API 5hr usage % at this snapshot
 }
 
 /** Exponential decay half-life for weighting projection samples. */
@@ -339,8 +451,19 @@ export class BlockUsageService {
 
   /** Ring buffer of (tokens, apiPercent) samples for the current active block. */
   private projectionSamples: ProjectionSample[] = []
-  /** Block ID the projection samples belong to. Cleared on block change. */
-  private projectionBlockId: string | null = null
+  /** Canonical window end the projection samples belong to. Cleared on window change. */
+  private projectionWindowEnd: number | null = null
+
+  /** Known 5h API windows, sorted by end ascending. */
+  private knownWindows: ApiWindow[] = []
+  /** Whether known windows were seeded from persisted daily snapshots. */
+  private windowSeedDone = false
+
+  /** Account filter for the usage view (email, null = all accounts). */
+  private accountFilter: string | null = null
+  /** Cached account log + file mtime for invalidation. */
+  private accountLog: AccountLogRecord[] = []
+  private accountLogMtime = 0
 
   setWindow(win: BrowserWindow): void {
     this.window = win
@@ -354,6 +477,125 @@ export class BlockUsageService {
 
   getData(): BlockUsageData | null {
     return this.lastData
+  }
+
+  /** Set the account filter (email, null = all) and rebuild the view. */
+  setAccountFilter(account: string | null): void {
+    if (this.accountFilter === account) return
+    this.accountFilter = account
+    if (this.initialScanDone) {
+      this.rebuildFromEntries(this.cachedEntries).catch((err) =>
+        logger.error('BlockUsage', 'Rebuild after account filter change failed', err)
+      )
+    }
+  }
+
+  getAccountFilter(): string | null {
+    return this.accountFilter
+  }
+
+  // -------------------------------------------------------------------------
+  // API window registry
+  // -------------------------------------------------------------------------
+
+  /** Register an observed resets_at, returning the canonical window end. */
+  private registerWindow(resetAtIso: string, account: string | null): number | null {
+    const resetMs = new Date(resetAtIso).getTime()
+    if (isNaN(resetMs)) return null
+    const end = canonicalizeWindowEnd(
+      resetMs,
+      this.knownWindows.map((w) => w.end)
+    )
+    const existing = this.knownWindows.find((w) => w.end === end)
+    if (existing) {
+      if (existing.account === null && account) existing.account = account
+      return end
+    }
+    this.knownWindows.push({ start: end - SESSION_DURATION_MS, end, account })
+    this.knownWindows.sort((a, b) => a.end - b.end)
+    // Prune windows older than the scan window
+    const cutoff = Date.now() - SCAN_WINDOW_MS
+    this.knownWindows = this.knownWindows.filter((w) => w.end >= cutoff)
+    return end
+  }
+
+  /**
+   * Seed the window registry from apiResetAt values persisted in the last
+   * two daily files, so block boundaries survive an app restart.
+   */
+  private seedWindowsFromDailyFiles(): void {
+    if (this.windowSeedDone) return
+    this.windowSeedDone = true
+    const now = Date.now()
+    for (let i = 1; i >= 0; i--) {
+      const date = dateStrFromTimestamp(now - i * 24 * MS_PER_HOUR)
+      try {
+        const filePath = path.join(USAGE_DIR, `${date}.json`)
+        if (!fs.existsSync(filePath)) continue
+        const daily = JSON.parse(fs.readFileSync(filePath, 'utf-8')) as DailyUsageFile
+        for (const snap of daily.snapshots) {
+          if (snap.apiResetAt) this.registerWindow(snap.apiResetAt, null)
+        }
+      } catch {
+        // Skip corrupt files
+      }
+    }
+    if (this.knownWindows.length > 0) {
+      logger.debug('BlockUsage', `Seeded ${this.knownWindows.length} window(s) from daily files`)
+    }
+  }
+
+  /**
+   * Find the window an entry belongs to. Prefers a window containing the
+   * timestamp (account-matching first when two accounts' windows overlap);
+   * falls back to the next window when the entry slightly precedes its
+   * derived start (resets_at − 5h is an estimate of the true start).
+   */
+  private findWindowFor(ts: number, account: string | null): ApiWindow | null {
+    const containing = this.knownWindows.filter((w) => ts >= w.start && ts < w.end)
+    if (containing.length > 0) {
+      const matching = containing.find((w) => w.account === null || w.account === account)
+      return matching ?? containing[0]
+    }
+    // Dead zone between windows: attach to the next window within grace
+    for (const w of this.knownWindows) {
+      if (ts < w.start && w.start - ts <= WINDOW_START_GRACE_MS) return w
+    }
+    return null
+  }
+
+  // -------------------------------------------------------------------------
+  // Account log
+  // -------------------------------------------------------------------------
+
+  /** Load (and cache) the account log written by UsageFetcher. */
+  private loadAccountLog(): AccountLogRecord[] {
+    try {
+      const mtime = fs.statSync(ACCOUNT_LOG_PATH).mtimeMs
+      if (mtime === this.accountLogMtime) return this.accountLog
+      const lines = fs.readFileSync(ACCOUNT_LOG_PATH, 'utf-8').split('\n')
+      const log: AccountLogRecord[] = []
+      for (const line of lines) {
+        if (!line.trim()) continue
+        try {
+          const rec = JSON.parse(line) as AccountLogRecord
+          if (typeof rec.ts === 'number' && typeof rec.email === 'string') log.push(rec)
+        } catch {
+          // Skip malformed lines
+        }
+      }
+      log.sort((a, b) => a.ts - b.ts)
+      this.accountLog = log
+      this.accountLogMtime = mtime
+      return log
+    } catch {
+      return this.accountLog
+    }
+  }
+
+  /** Distinct account emails known from the log. */
+  private knownAccounts(): string[] {
+    return [...new Set(this.loadAccountLog().map((r) => r.email))]
   }
 
   /**
@@ -403,10 +645,16 @@ export class BlockUsageService {
       this.changedFiles.clear()
       if (!this.initialScanDone) {
         // First scan hasn't completed yet — skip incremental, it'll come
-        logger.debug('BlockUsage', `Watcher: ${filesToUpdate.size} file(s) changed, but initial scan pending — skipping`)
+        logger.debug(
+          'BlockUsage',
+          `Watcher: ${filesToUpdate.size} file(s) changed, but initial scan pending — skipping`
+        )
         return
       }
-      logger.debug('BlockUsage', `Watcher: ${filesToUpdate.size} file(s) changed, incremental update`)
+      logger.debug(
+        'BlockUsage',
+        `Watcher: ${filesToUpdate.size} file(s) changed, incremental update`
+      )
       this.incrementalUpdate(filesToUpdate).catch((err) => {
         logger.debug('BlockUsage', `Watch-triggered incremental update failed: ${err}`)
       })
@@ -454,7 +702,14 @@ export class BlockUsageService {
         return
       }
 
-      logger.debug('BlockUsage', `Incremental update: ${newEntryCount} new entries from ${changedFiles.size} file(s)`)
+      logger.debug(
+        'BlockUsage',
+        `Incremental update: ${newEntryCount} new entries from ${changedFiles.size} file(s)`
+      )
+
+      // New activity while no API window is known → a new window likely just
+      // started; ask the fetcher to discover the new resets_at promptly.
+      usageFetcher.fetchIfWindowUnknown()
 
       // Re-sort (new entries appended at end, but may not be chronological)
       this.cachedEntries.sort((a, b) => a.timestamp - b.timestamp)
@@ -482,52 +737,78 @@ export class BlockUsageService {
    * Shared between the full recalculate path (after first scan) and incremental updates.
    */
   private async rebuildFromEntries(entries: ParsedEntry[]): Promise<BlockUsageData> {
-    const blocks = this.groupIntoBlocks(entries)
+    const now = Date.now()
 
-    // Detect newly completed blocks
+    // Register the currently observed API window (if any) before grouping
+    this.seedWindowsFromDailyFiles()
+    const apiUsage = usageFetcher.getLastUsage()
+    const activeAccount = usageFetcher.getActiveAccount()
+    let currentWindowEnd: number | null = null
+    if (apiUsage && !apiUsage.error && apiUsage.fiveHour.resetsAt) {
+      currentWindowEnd = this.registerWindow(
+        apiUsage.fiveHour.resetsAt,
+        activeAccount?.email ?? null
+      )
+    }
+    const windowKnown = currentWindowEnd !== null && currentWindowEnd > now
+
+    // Apply the account filter for the view (persisted summaries stay unfiltered)
+    const accountLog = this.loadAccountLog()
+    const viewEntries = this.accountFilter
+      ? entries.filter((e) => accountForTimestamp(accountLog, e.timestamp) === this.accountFilter)
+      : entries
+
+    const blocks = this.groupIntoBlocks(viewEntries)
+
+    // Detect newly completed blocks. Recent provisional blocks (not aligned
+    // to a known API window) are skipped — they exist only because the next
+    // window hasn't been observed yet, and will regroup once it is. Persisting
+    // them creates phantom completed blocks with bogus metadata.
     const currentBlockIds = new Set(blocks.map((b) => b.id))
     const newlyCompleted: UsageBlock[] = []
     for (const b of blocks) {
-      if (!b.isActive && !this.previousBlockIds.has(b.id)) {
-        newlyCompleted.push(b)
-      }
+      if (b.isActive || this.previousBlockIds.has(b.id)) continue
+      const provisional = !b.windowAligned && now - b.actualEndTime < 6 * MS_PER_HOUR
+      if (provisional) continue
+      newlyCompleted.push(b)
     }
     this.previousBlockIds = currentBlockIds
 
     // Build current + recent
-    const now = Date.now()
     const currentBlock = blocks.find((b) => b.isActive) ?? null
-    const recentBlocks = blocks.filter(
-      (b) => !b.isActive && now - b.endTime < 48 * MS_PER_HOUR
-    )
+    const recentBlocks = blocks.filter((b) => !b.isActive && now - b.endTime < 48 * MS_PER_HOUR)
 
-    // Compute projection for the active block
+    // Compute projection for the active block (paused while no window is known)
     if (currentBlock) {
-      currentBlock.projectedUsage = this.updateProjection(currentBlock, now)
+      currentBlock.projectedUsage = this.updateProjection(currentBlock, currentWindowEnd, now)
     }
 
     // Carry projections to newly completed blocks
     if (newlyCompleted.length > 0) {
       for (const b of newlyCompleted) {
-        if (b.id === this.projectionBlockId && this.projectionSamples.length > 0) {
+        if (b.endTime === this.projectionWindowEnd && this.projectionSamples.length > 0) {
           b.projectedUsage = this.computeProjectionWLS(b)
         }
       }
     }
-    this.backfillProjections(recentBlocks)
+    this.restoreBlockMetadata(recentBlocks)
 
-    // Persist snapshot + completed blocks
-    const snapshot = this.buildSnapshot(currentBlock)
+    // Persist snapshot + completed blocks. While no window is known the
+    // snapshot carries no signal (0% / null reset) — skip it rather than
+    // poison the time-series, but still persist completed blocks.
+    const snapshot = windowKnown ? this.buildSnapshot(currentBlock) : null
     const todaySnapshots = await this.persistSnapshot(snapshot, newlyCompleted)
 
-    // Load history — pass entries for authoritative recent-day computation
-    const dailyHistory = await this.loadDailyHistory(HISTORY_DAYS, entries)
+    // Load history — unfiltered entries drive persistence, view entries drive display
+    const dailyHistory = await this.loadDailyHistory(entries, viewEntries)
 
     const data: BlockUsageData = {
       currentBlock,
       recentBlocks,
       todaySnapshots,
-      dailyHistory
+      dailyHistory,
+      accounts: this.knownAccounts(),
+      accountFilter: this.accountFilter
     }
 
     this.lastData = data
@@ -547,9 +828,7 @@ export class BlockUsageService {
       // Populate the entry cache after the first full scan
       if (!this.initialScanDone) {
         this.cachedEntries = entries
-        this.cachedMessageIds = new Set(
-          entries.filter((e) => e.messageId).map((e) => e.messageId)
-        )
+        this.cachedMessageIds = new Set(entries.filter((e) => e.messageId).map((e) => e.messageId))
         this.initialScanDone = true
         logger.debug('BlockUsage', `Initial scan complete: ${entries.length} entries cached`)
       }
@@ -590,24 +869,38 @@ export class BlockUsageService {
    */
   private updateProjection(
     block: UsageBlock,
+    currentWindowEnd: number | null,
     now: number
   ): UsageBlock['projectedUsage'] {
     const apiUsage = usageFetcher.getLastUsage()
     if (!apiUsage || apiUsage.error) return null
 
+    // No known window (expired / not yet reported): the percent denominator
+    // is meaningless — pause the projection entirely.
+    if (currentWindowEnd === null || currentWindowEnd <= now) return null
+
     const apiPercent = apiUsage.fiveHour.usedPercent
     const apiAge = now - apiUsage.fetchedAt
     const currentTok = totalTokens(block.tokens)
 
+    // Reset buffer if the API window changed (new window or account switch —
+    // both arrive as a different resets_at)
+    if (currentWindowEnd !== this.projectionWindowEnd) {
+      this.projectionSamples = []
+      this.projectionWindowEnd = currentWindowEnd
+    }
+
+    // A materially lower percent than already sampled means the window
+    // semantics changed under us (roll/switch the resets_at didn't catch) —
+    // old samples would inflate the fit through the origin. Drop them.
+    const maxSampled = this.projectionSamples.reduce((m, s) => Math.max(m, s.apiPercent), 0)
+    if (apiPercent < maxSampled - 5) {
+      this.projectionSamples = []
+    }
+
     // Don't add a sample if API data is stale or values are too small
     if (apiAge > 5 * MS_PER_MINUTE) return this.computeProjectionWLS(block)
     if (apiPercent < MIN_API_PERCENT_FOR_SAMPLE || currentTok <= 0) return null
-
-    // Reset buffer if the active block changed (new window)
-    if (block.id !== this.projectionBlockId) {
-      this.projectionSamples = []
-      this.projectionBlockId = block.id
-    }
 
     // Deduplicate: skip if the latest sample has the same tokens AND percent
     // (no new information since last poll)
@@ -640,7 +933,10 @@ export class BlockUsageService {
     const currentTok = totalTokens(block.tokens)
     if (currentTok <= 0) return null
 
-    // Compute cost-per-token ratio from current block (always fresh)
+    // Compute cost-per-token ratio from current block (always fresh). This is
+    // a blended rate over the block's actual model + cache-TTL mix — per-entry
+    // costs already price 5m vs 1h cache writes separately, so the projection
+    // inherits the split without modeling TTLs itself.
     const costPerToken = block.costUsd / currentTok
 
     // ---- Single-point fallback ----
@@ -682,67 +978,28 @@ export class BlockUsageService {
   }
 
   /**
-   * Backfill projectedUsage on recent (completed) blocks from persisted daily
-   * data. Three strategies, in priority order:
-   *
-   * 1. Stored projection on completedBlocks in the daily file (best — exact WLS
-   *    result captured when the block was active).
-   * 2. Stored projection on snapshots (same as above, per-poll granularity).
-   * 3. Retroactive WLS computation from historical snapshot (apiPercent,
-   *    blockTokens) pairs. This works even for old daily files that predate
-   *    the projectedUsage field.
-   *
-   * Note: matching uses time-range overlap rather than exact block ID, because
-   * the ID can differ between when the block was active (API-aligned start)
-   * and when it's reconstructed now (floorToHour for past windows).
+   * Restore persisted metadata (projectedUsage, finalApiPercent) on recent
+   * completed blocks after an app restart. Matching is by exact block ID only
+   * — time-overlap matching cross-contaminated metadata between realigned
+   * blocks, and the canonical-window grouping makes IDs stable across runs.
+   * A stored projection inconsistent with the block's own finalApiPercent
+   * (>1.5× the capacity its final data point implies) is discarded.
    */
-  private backfillProjections(recentBlocks: UsageBlock[]): void {
-    // Blocks are rebuilt from JSONL each recalculate(), so metadata like
-    // projectedUsage and finalApiPercent need to be restored from persisted
-    // daily files. For blocks that completed while the app was running,
-    // these are set directly in recalculate() — this backfill handles
-    // blocks from previous sessions or before finalApiPercent existed.
-    const needsProjection = recentBlocks.filter((b) => !b.projectedUsage)
-    const needsApiPercent = recentBlocks.filter((b) => b.finalApiPercent == null)
-    if (needsProjection.length === 0 && needsApiPercent.length === 0) return
+  private restoreBlockMetadata(recentBlocks: UsageBlock[]): void {
+    const needsFill = recentBlocks.filter((b) => !b.projectedUsage || b.finalApiPercent == null)
+    if (needsFill.length === 0) return
 
-    // All blocks that still need something filled
-    const needsFill = recentBlocks.filter(
-      (b) => !b.projectedUsage || b.finalApiPercent == null
-    )
+    const byId = new Map(needsFill.map((b) => [b.id, b]))
 
-    const findBlockForTimestamp = (ts: number): UsageBlock | undefined => {
-      return needsFill.find((b) => ts >= b.startTime && ts <= b.endTime)
-    }
-
-    const findBlockById = (id: string): UsageBlock | undefined => {
-      return needsFill.find((b) => b.id === id)
-    }
-
-    // Track the last (most recent) apiPercent seen per block (for legacy fallback)
-    const lastApiPercent = new Map<string, number>()
-
-    // Collect snapshot pairs per block for retroactive WLS (strategy 3)
-    const blockSnapPairs = new Map<
-      string,
-      Array<{ tokens: number; apiPercent: number; timestamp: number }>
-    >()
-
-    // Scan the last 3 days of daily files (oldest first so later snapshots
-    // overwrite earlier ones — we want the most recent data for each block)
     const now = Date.now()
     for (let i = 2; i >= 0; i--) {
       const date = dateStrFromTimestamp(now - i * 24 * MS_PER_HOUR)
       const filePath = path.join(USAGE_DIR, `${date}.json`)
       try {
         if (!fs.existsSync(filePath)) continue
-        const daily = JSON.parse(
-          fs.readFileSync(filePath, 'utf-8')
-        ) as DailyUsageFile
-
-        // Strategy 1: restore metadata from stored completedBlocks
+        const daily = JSON.parse(fs.readFileSync(filePath, 'utf-8')) as DailyUsageFile
         for (const cb of daily.completedBlocks) {
-          const block = findBlockById(cb.id) ?? findBlockForTimestamp(cb.startTime)
+          const block = byId.get(cb.id)
           if (!block) continue
           if (!block.projectedUsage && cb.projectedUsage) {
             block.projectedUsage = cb.projectedUsage
@@ -751,117 +1008,23 @@ export class BlockUsageService {
             block.finalApiPercent = cb.finalApiPercent
           }
         }
-
-        // Scan snapshots for projection fill (strategy 2+3) and legacy apiPercent
-        for (const snap of daily.snapshots) {
-          if (!snap.activeBlockId) continue
-
-          const block =
-            findBlockById(snap.activeBlockId) ??
-            findBlockForTimestamp(snap.timestamp)
-          if (!block) continue
-
-          // Strategy 2: use the LAST snapshot's projection (overwrite, not first-wins)
-          if (!block.projectedUsage && snap.projectedUsage) {
-            block.projectedUsage = snap.projectedUsage
-          } else if (snap.projectedUsage) {
-            // Overwrite with later (more accurate) projection
-            block.projectedUsage = snap.projectedUsage
-          }
-
-          // Strategy 3: collect (apiPercent, blockTokens) pairs for later WLS
-          if (snap.blockTokens && snap.apiUsagePercent >= MIN_API_PERCENT_FOR_SAMPLE) {
-            const tok = totalTokens(snap.blockTokens)
-            if (tok > 0) {
-              let pairs = blockSnapPairs.get(block.id)
-              if (!pairs) {
-                pairs = []
-                blockSnapPairs.set(block.id, pairs)
-              }
-              pairs.push({
-                tokens: tok,
-                apiPercent: snap.apiUsagePercent,
-                timestamp: snap.timestamp
-              })
-            }
-          }
-
-          // Track last apiPercent for legacy blocks missing finalApiPercent
-          if (block.finalApiPercent == null && snap.apiUsagePercent > 0) {
-            lastApiPercent.set(block.id, snap.apiUsagePercent)
-          }
-        }
       } catch {
         // Skip corrupt files
       }
     }
 
-    // Apply finalApiPercent from snapshots (legacy fallback for blocks
-    // that were persisted before finalApiPercent existed)
-    for (const block of needsApiPercent) {
-      if (block.finalApiPercent != null) continue // already filled by strategy 1
-      const pct = lastApiPercent.get(block.id)
-      if (pct != null) {
-        block.finalApiPercent = pct
-      }
-    }
-
-    // Sanity-check projections: if projectedUsage.tokens < actual, discard it
-    // (can happen when a stale snapshot's projection was stored early in the block)
-    for (const block of needsProjection) {
-      if (block.projectedUsage) {
-        const blockTok = totalTokens(block.tokens)
-        if (block.projectedUsage.tokens < blockTok) {
-          block.projectedUsage = null // discard bad projection, let strategy 3 try
-        }
-      }
-    }
-
-    // Strategy 3: retroactive WLS for blocks still without a projection
-    for (const [blockId, pairs] of blockSnapPairs) {
-      const block = needsProjection.find((b) => b.id === blockId)
-      if (!block || block.projectedUsage) continue // already filled
-      if (pairs.length === 0) continue
-
+    // Sanity-clamp restored projections against the block's own final percent
+    for (const block of needsFill) {
+      if (!block.projectedUsage) continue
       const blockTok = totalTokens(block.tokens)
-      if (blockTok <= 0) continue
-      const costPerToken = block.costUsd / blockTok
-
-      if (pairs.length < MIN_REGRESSION_SAMPLES) {
-        // Single-point fallback using the last pair
-        const last = pairs[pairs.length - 1]
-        if (last.apiPercent > 0) {
-          const maxTokens = last.tokens / (last.apiPercent / 100)
-          if (maxTokens >= blockTok) {
-            block.projectedUsage = {
-              tokens: Math.round(maxTokens),
-              costUsd: Math.round(maxTokens * costPerToken * 100) / 100
-            }
-          }
-        }
+      if (block.projectedUsage.tokens < blockTok) {
+        block.projectedUsage = null
         continue
       }
-
-      // WLS: tokens = k × percent, weighted by recency within the block
-      const lastTs = pairs[pairs.length - 1].timestamp
-      let sumWTP = 0
-      let sumWPP = 0
-      for (const s of pairs) {
-        if (s.apiPercent <= 0) continue
-        const age = lastTs - s.timestamp
-        const w = Math.exp((-age * Math.LN2) / PROJECTION_HALF_LIFE_MS)
-        sumWTP += w * s.tokens * s.apiPercent
-        sumWPP += w * s.apiPercent * s.apiPercent
-      }
-
-      if (sumWPP === 0) continue
-      const k = sumWTP / sumWPP
-      const maxTokens = k * 100
-
-      if (maxTokens >= blockTok) {
-        block.projectedUsage = {
-          tokens: Math.round(maxTokens),
-          costUsd: Math.round(maxTokens * costPerToken * 100) / 100
+      if (block.finalApiPercent != null && block.finalApiPercent > 0) {
+        const impliedCapacity = blockTok / (block.finalApiPercent / 100)
+        if (block.projectedUsage.tokens > impliedCapacity * 1.5) {
+          block.projectedUsage = null
         }
       }
     }
@@ -957,9 +1120,7 @@ export class BlockUsageService {
 
           if (data.type !== 'assistant' || !data.message?.usage) return
 
-          const timestamp = data.timestamp
-            ? new Date(data.timestamp as string).getTime()
-            : 0
+          const timestamp = data.timestamp ? new Date(data.timestamp as string).getTime() : 0
 
           if (!timestamp || timestamp < cutoff) return
 
@@ -973,9 +1134,23 @@ export class BlockUsageService {
           const outTok = (usage.output_tokens as number) || 0
           const cacheCreate = (usage.cache_creation_input_tokens as number) || 0
           const cacheRead = (usage.cache_read_input_tokens as number) || 0
+          // TTL breakdown of cache writes (cli.js sessions use the 1h cache,
+          // billed at 2× input). Older transcripts may lack the breakdown —
+          // treated as all-5m, matching the pre-split behavior.
+          const cacheBreakdown = usage.cache_creation as
+            | { ephemeral_5m_input_tokens?: number; ephemeral_1h_input_tokens?: number }
+            | undefined
+          const cache1h = (cacheBreakdown?.ephemeral_1h_input_tokens as number) || 0
 
           // Calculate cost from tokens using model pricing (not from JSONL costUSD)
-          const costUsd = calculateCostFromTokens(model, inTok, outTok, cacheCreate, cacheRead)
+          const costUsd = calculateCostFromTokens(
+            model,
+            inTok,
+            outTok,
+            cacheCreate,
+            cache1h,
+            cacheRead
+          )
 
           entries.push({
             timestamp,
@@ -1004,92 +1179,74 @@ export class BlockUsageService {
   private groupIntoBlocks(entries: ParsedEntry[]): UsageBlock[] {
     if (entries.length === 0) return []
 
-    // Derive authoritative API window boundaries from resets_at when available.
-    // The API tells us exactly when the current 5hr window ends, so we can
-    // back-calculate the precise start instead of guessing with floorToHour().
-    const apiUsage = usageFetcher.getLastUsage()
-    const apiResetAt = apiUsage?.fiveHour.resetsAt
-    let apiWindowStart: number | null = null
-    let apiWindowEnd: number | null = null
-    if (apiResetAt) {
-      const resetMs = new Date(apiResetAt).getTime()
-      if (!isNaN(resetMs)) {
-        // Round to the nearest HOUR. Block boundaries are always on exact
-        // hour marks (e.g. 15:00:00.000), but the API's resets_at can have
-        // jitter in minutes/seconds (e.g. 15:00:01.234 or 14:59:58.567).
-        // Without this, different poll cycles produce different block IDs
-        // for the same 5-hour window — breaking snapshot-to-block matching.
-        const resetRounded = Math.round(resetMs / MS_PER_HOUR) * MS_PER_HOUR
-        apiWindowEnd = resetRounded
-        apiWindowStart = resetRounded - SESSION_DURATION_MS
-      }
-    }
+    const accountLog = this.loadAccountLog()
 
-    /** Return the authoritative block start for a given timestamp. */
-    const blockStartFor = (ts: number): number => {
-      if (
-        apiWindowStart !== null &&
-        apiWindowEnd !== null &&
-        ts >= apiWindowStart &&
-        ts < apiWindowEnd
-      ) {
-        return apiWindowStart
-      }
-      return floorToHour(ts)
+    /** Authoritative block start for a timestamp + whether window-derived. */
+    const blockStartFor = (ts: number): { start: number; aligned: boolean } => {
+      const win = this.findWindowFor(ts, accountForTimestamp(accountLog, ts))
+      if (win) return { start: win.start, aligned: true }
+      return { start: floorToHour(ts), aligned: false }
     }
 
     const blocks: UsageBlock[] = []
     let blockEntries: ParsedEntry[] = []
     let blockStart = 0
+    let blockAligned = false
 
     for (const entry of entries) {
       if (blockEntries.length === 0) {
-        // Start a new block
-        blockStart = blockStartFor(entry.timestamp)
+        const ideal = blockStartFor(entry.timestamp)
+        blockStart = ideal.start
+        blockAligned = ideal.aligned
         blockEntries = [entry]
         continue
       }
 
-      const idealStart = blockStartFor(entry.timestamp)
+      const ideal = blockStartFor(entry.timestamp)
       const timeSinceBlockStart = entry.timestamp - blockStart
       const lastEntry = blockEntries[blockEntries.length - 1]
       const timeSinceLastEntry = entry.timestamp - lastEntry.timestamp
 
       // Start a new block when:
-      // 1. Entry exceeds 5hr from block start or last entry (existing gap logic), OR
-      // 2. Entry falls inside the API window but the current block isn't API-aligned
-      //    (the API boundary is authoritative and must be respected)
-      const apiWindowMismatch =
-        idealStart !== blockStart &&
-        apiWindowStart !== null &&
-        idealStart === apiWindowStart
+      // 1. Entry exceeds 5hr from block start or last entry (gap logic), OR
+      // 2. Entry maps to a known API window different from the current block
+      //    (window boundaries are authoritative). Fallback floorToHour starts
+      //    change every hour and must NOT split blocks on their own.
+      const windowMismatch = ideal.aligned && ideal.start !== blockStart
 
       if (
         timeSinceBlockStart > SESSION_DURATION_MS ||
         timeSinceLastEntry > SESSION_DURATION_MS ||
-        apiWindowMismatch
+        windowMismatch
       ) {
-        // Close current block and start new one
-        blocks.push(this.buildBlock(blockEntries, blockStart))
-        blockStart = idealStart
+        blocks.push(this.buildBlock(blockEntries, blockStart, blockAligned))
+        blockStart = ideal.start
+        blockAligned = ideal.aligned
         blockEntries = [entry]
       } else {
         blockEntries.push(entry)
+        // A provisional block upgrades in place when a later entry resolves
+        // to a window whose start matches the block's
+        if (!blockAligned && ideal.aligned && ideal.start === blockStart) {
+          blockAligned = true
+        }
       }
     }
 
     // Close final block
     if (blockEntries.length > 0) {
-      blocks.push(this.buildBlock(blockEntries, blockStart))
+      blocks.push(this.buildBlock(blockEntries, blockStart, blockAligned))
     }
 
     // Clamp isActive = false for blocks that precede the current API window.
     // When the API rolls to a new 5hr window, old blocks may still have
     // endTime > now (due to floorToHour misalignment), but the API boundary
     // is authoritative — those blocks are no longer active.
-    if (apiWindowStart !== null) {
+    const now = Date.now()
+    const currentWindow = this.knownWindows.find((w) => now >= w.start && now < w.end)
+    if (currentWindow) {
       for (const block of blocks) {
-        if (block.isActive && block.startTime < apiWindowStart) {
+        if (block.isActive && block.startTime < currentWindow.start) {
           block.isActive = false
         }
       }
@@ -1098,7 +1255,11 @@ export class BlockUsageService {
     return blocks
   }
 
-  private buildBlock(entries: ParsedEntry[], blockStart: number): UsageBlock {
+  private buildBlock(
+    entries: ParsedEntry[],
+    blockStart: number,
+    windowAligned: boolean
+  ): UsageBlock {
     const now = Date.now()
     const endTime = blockStart + SESSION_DURATION_MS
     const actualEndTime = entries[entries.length - 1].timestamp
@@ -1144,14 +1305,12 @@ export class BlockUsageService {
 
     // Merge model families (e.g. "sonnet" + "claude-sonnet-4-6" → canonical name)
     const mergedMap = mergeModelFamilies(modelMap)
-    const models: ModelTokenBreakdown[] = Array.from(mergedMap.entries()).map(
-      ([model, data]) => ({
-        model,
-        tokens: data.tokens,
-        costUsd: data.costUsd,
-        requestCount: data.requestCount
-      })
-    )
+    const models: ModelTokenBreakdown[] = Array.from(mergedMap.entries()).map(([model, data]) => ({
+      model,
+      tokens: data.tokens,
+      costUsd: data.costUsd,
+      requestCount: data.requestCount
+    }))
 
     // Determine if active
     const isActive = now < endTime && now - actualEndTime < SESSION_DURATION_MS
@@ -1184,7 +1343,8 @@ export class BlockUsageService {
       models,
       burnRate,
       projectedUsage,
-      finalApiPercent: null
+      finalApiPercent: null,
+      windowAligned
     }
   }
 
@@ -1209,7 +1369,7 @@ export class BlockUsageService {
   }
 
   private async persistSnapshot(
-    snapshot: UsageSnapshot,
+    snapshot: UsageSnapshot | null,
     newlyCompleted: UsageBlock[]
   ): Promise<UsageSnapshot[]> {
     const today = todayDateStr()
@@ -1227,8 +1387,8 @@ export class BlockUsageService {
       daily = { date: today, snapshots: [], completedBlocks: [] }
     }
 
-    // Append snapshot
-    daily.snapshots.push(snapshot)
+    // Append snapshot (null while no API window is known — nothing to record)
+    if (snapshot) daily.snapshots.push(snapshot)
 
     // Add newly completed blocks, routing each to the correct day's file.
     // On app restart, previousBlockIds is empty, so ALL completed blocks from
@@ -1288,26 +1448,13 @@ export class BlockUsageService {
     return daily.snapshots
   }
 
-  /**
-   * Build daily usage history for the chart.
-   *
-   * For days covered by the JSONL scan window (last 7 days), totals are
-   * computed directly from deduplicated entries — this is authoritative and
-   * immune to the overlapping-blocks problem where app restarts re-group
-   * the same entries into differently-aligned blocks.
-   *
-   * For older days (beyond the JSONL window), we fall back to persisted
-   * daily summaries stored in `dailySummary` (entry-derived, not block-derived).
-   * Legacy daily files that only have `completedBlocks` are skipped for cost
-   * aggregation since those blocks may overlap and double-count.
-   */
-  private async loadDailyHistory(
-    _days: number,
+  /** Aggregate entries into per-day buckets. */
+  private bucketEntriesByDay(
     entries: ParsedEntry[]
-  ): Promise<BlockUsageData['dailyHistory']> {
-
-    // Phase 1: Compute daily totals from JSONL entries (authoritative).
-    // Entries are already deduplicated by messageId in scanAllJsonl().
+  ): Map<
+    string,
+    { tokens: number; cost: number; models: Record<string, number>; requestCount: number }
+  > {
     const entryBuckets = new Map<
       string,
       { tokens: number; cost: number; models: Record<string, number>; requestCount: number }
@@ -1321,8 +1468,7 @@ export class BlockUsageService {
         entryBuckets.set(day, bucket)
       }
       const tok =
-        entry.inputTokens + entry.outputTokens +
-        entry.cacheCreationTokens + entry.cacheReadTokens
+        entry.inputTokens + entry.outputTokens + entry.cacheCreationTokens + entry.cacheReadTokens
       bucket.tokens += tok
       bucket.cost += entry.costUsd
       bucket.requestCount += 1
@@ -1332,6 +1478,34 @@ export class BlockUsageService {
         bucket.models[normalized] = (bucket.models[normalized] || 0) + tok
       }
     }
+    return entryBuckets
+  }
+
+  /**
+   * Build daily usage history for the chart.
+   *
+   * For days covered by the JSONL scan window (last 7 days), totals are
+   * computed directly from deduplicated entries — this is authoritative and
+   * immune to the overlapping-blocks problem where app restarts re-group
+   * the same entries into differently-aligned blocks.
+   *
+   * For older days (beyond the JSONL window), we fall back to persisted
+   * daily summaries stored in `dailySummary` (entry-derived, not block-derived).
+   * Legacy daily files that only have `completedBlocks` are skipped for cost
+   * aggregation since those blocks may overlap and double-count.
+   *
+   * `allEntries` (unfiltered) drives summary persistence; `viewEntries`
+   * (account-filtered) drives the returned display history. When a filter is
+   * active, fallback days from persisted summaries are skipped — they are
+   * all-account aggregates and can't be filtered retroactively.
+   */
+  private async loadDailyHistory(
+    allEntries: ParsedEntry[],
+    viewEntries: ParsedEntry[]
+  ): Promise<BlockUsageData['dailyHistory']> {
+    const filtered = viewEntries !== allEntries
+    const persistBuckets = this.bucketEntriesByDay(allEntries)
+    const entryBuckets = filtered ? this.bucketEntriesByDay(viewEntries) : persistBuckets
 
     // Merge model families in entry buckets (same logic as block building)
     for (const bucket of entryBuckets.values()) {
@@ -1352,10 +1526,13 @@ export class BlockUsageService {
         let bestTok = 0
         for (const [model, mTok] of Object.entries(bucket.models)) {
           const lower = model.toLowerCase()
-          const mFamily =
-            lower.includes('opus') ? 'opus' :
-            lower.includes('sonnet') ? 'sonnet' :
-            lower.includes('haiku') ? 'haiku' : model
+          const mFamily = lower.includes('opus')
+            ? 'opus'
+            : lower.includes('sonnet')
+              ? 'sonnet'
+              : lower.includes('haiku')
+                ? 'haiku'
+                : model
           if (mFamily === family && mTok > bestTok) {
             bestModel = model
             bestTok = mTok
@@ -1379,9 +1556,7 @@ export class BlockUsageService {
           try {
             dailyFiles.set(
               date,
-              JSON.parse(
-                fs.readFileSync(path.join(USAGE_DIR, file), 'utf-8')
-              ) as DailyUsageFile
+              JSON.parse(fs.readFileSync(path.join(USAGE_DIR, file), 'utf-8')) as DailyUsageFile
             )
           } catch {
             // Skip corrupt files
@@ -1394,8 +1569,9 @@ export class BlockUsageService {
 
     // Phase 2b: Persist entry-derived summaries so correct data survives past
     // the JSONL scan window. Only write today's each poll; older days once.
+    // Always from UNFILTERED buckets — summaries are all-account aggregates.
     const todayStr = todayDateStr()
-    for (const [date, bucket] of entryBuckets) {
+    for (const [date, bucket] of persistBuckets) {
       if (date === todayStr) {
         this.persistDailySummary(date, bucket)
       } else if (!dailyFiles.get(date)?.dailySummary) {
@@ -1423,8 +1599,10 @@ export class BlockUsageService {
         dayCost = entryBucket.cost
         dayModels = entryBucket.models
         blockCount = 0 // not meaningful for entry-based aggregation
-      } else if (daily?.dailySummary) {
-        // Fall back to persisted entry-derived summary (for days past JSONL window)
+      } else if (daily?.dailySummary && !filtered) {
+        // Fall back to persisted entry-derived summary (for days past JSONL
+        // window). Skipped under an account filter — summaries are
+        // all-account aggregates and can't be filtered retroactively.
         dayTokens = daily.dailySummary.totalTokens
         dayCost = daily.dailySummary.costUsd
         dayModels = daily.dailySummary.models
@@ -1525,8 +1703,7 @@ export class BlockUsageService {
         dayBuckets.set(day, bucket)
       }
       const tok =
-        entry.inputTokens + entry.outputTokens +
-        entry.cacheCreationTokens + entry.cacheReadTokens
+        entry.inputTokens + entry.outputTokens + entry.cacheCreationTokens + entry.cacheReadTokens
       bucket.tokens += tok
       bucket.cost += entry.costUsd
       bucket.requestCount += 1
@@ -1545,9 +1722,7 @@ export class BlockUsageService {
       const filePath = path.join(USAGE_DIR, `${date}.json`)
       try {
         if (fs.existsSync(filePath)) {
-          const daily = JSON.parse(
-            fs.readFileSync(filePath, 'utf-8')
-          ) as DailyUsageFile
+          const daily = JSON.parse(fs.readFileSync(filePath, 'utf-8')) as DailyUsageFile
           if (daily.dailySummary) continue // already has correct summary
         }
       } catch {
@@ -1565,7 +1740,7 @@ export class BlockUsageService {
     // Trigger a re-render so the chart updates with the backfilled data
     if (backfilled > 0 && this.lastData) {
       const entries7d = await this.scanAllJsonl()
-      const dailyHistory = await this.loadDailyHistory(HISTORY_DAYS, entries7d)
+      const dailyHistory = await this.loadDailyHistory(entries7d, entries7d)
       this.lastData = { ...this.lastData, dailyHistory }
       this.pushToRenderer(this.lastData)
     }
@@ -1632,7 +1807,9 @@ export class BlockUsageService {
       currentBlock: null,
       recentBlocks: [],
       todaySnapshots: [],
-      dailyHistory: []
+      dailyHistory: [],
+      accounts: [],
+      accountFilter: this.accountFilter
     }
   }
 }

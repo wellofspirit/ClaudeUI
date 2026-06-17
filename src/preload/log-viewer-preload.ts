@@ -27,9 +27,15 @@ const logViewerApi = {
   },
 
   /** Window controls */
-  minimize: (): void => { ipcRenderer.invoke('log-viewer:minimize') },
-  maximize: (): void => { ipcRenderer.invoke('log-viewer:maximize') },
-  close: (): void => { ipcRenderer.invoke('log-viewer:close') },
+  minimize: (): void => {
+    ipcRenderer.invoke('log-viewer:minimize')
+  },
+  maximize: (): void => {
+    ipcRenderer.invoke('log-viewer:maximize')
+  },
+  close: (): void => {
+    ipcRenderer.invoke('log-viewer:close')
+  },
 
   /** Platform info */
   platform: process.platform

@@ -61,16 +61,16 @@ asyncio.run(main())
 ```
 
 ```typescript TypeScript
-import { query, HookCallback, PreToolUseHookInput } from "@anthropic-ai/claude-agent-sdk";
+import { query, HookCallback, PreToolUseHookInput } from '@anthropic-ai/claude-agent-sdk'
 
 // Define a hook callback with the HookCallback type
 const protectEnvFiles: HookCallback = async (input, toolUseID, { signal }) => {
   // Cast input to the specific hook type for type safety
-  const preInput = input as PreToolUseHookInput;
+  const preInput = input as PreToolUseHookInput
 
   // Extract the file path from the tool's input arguments
-  const filePath = preInput.tool_input?.file_path as string;
-  const fileName = filePath?.split('/').pop();
+  const filePath = preInput.tool_input?.file_path as string
+  const fileName = filePath?.split('/').pop()
 
   // Block the operation if targeting a .env file
   if (fileName === '.env') {
@@ -80,15 +80,15 @@ const protectEnvFiles: HookCallback = async (input, toolUseID, { signal }) => {
         permissionDecision: 'deny',
         permissionDecisionReason: 'Cannot modify .env files'
       }
-    };
+    }
   }
 
   // Return empty object to allow the operation
-  return {};
-};
+  return {}
+}
 
 for await (const message of query({
-  prompt: "Update the database configuration",
+  prompt: 'Update the database configuration',
   options: {
     hooks: {
       // Register the hook for PreToolUse events
@@ -97,7 +97,7 @@ for await (const message of query({
     }
   }
 })) {
-  console.log(message);
+  console.log(message)
 }
 ```
 
@@ -109,20 +109,20 @@ This is a `PreToolUse` hook. It runs before the tool executes and can block or a
 
 The SDK provides hooks for different stages of agent execution. Some hooks are available in both SDKs, while others are TypeScript-only because the Python SDK doesn't support them.
 
-| Hook Event | Python SDK | TypeScript SDK | What triggers it | Example use case |
-|------------|------------|----------------|------------------|------------------|
-| `PreToolUse` | Yes | Yes | Tool call request (can block or modify) | Block dangerous shell commands |
-| `PostToolUse` | Yes | Yes | Tool execution result | Log all file changes to audit trail |
-| `PostToolUseFailure` | No | Yes | Tool execution failure | Handle or log tool errors |
-| `UserPromptSubmit` | Yes | Yes | User prompt submission | Inject additional context into prompts |
-| `Stop` | Yes | Yes | Agent execution stop | Save session state before exit |
-| `SubagentStart` | No | Yes | Subagent initialization | Track parallel task spawning |
-| `SubagentStop` | Yes | Yes | Subagent completion | Aggregate results from parallel tasks |
-| `PreCompact` | Yes | Yes | Conversation compaction request | Archive full transcript before summarizing |
-| `PermissionRequest` | No | Yes | Permission dialog would be displayed | Custom permission handling |
-| `SessionStart` | No | Yes | Session initialization | Initialize logging and telemetry |
-| `SessionEnd` | No | Yes | Session termination | Clean up temporary resources |
-| `Notification` | No | Yes | Agent status messages | Send agent status updates to Slack or PagerDuty |
+| Hook Event           | Python SDK | TypeScript SDK | What triggers it                        | Example use case                                |
+| -------------------- | ---------- | -------------- | --------------------------------------- | ----------------------------------------------- |
+| `PreToolUse`         | Yes        | Yes            | Tool call request (can block or modify) | Block dangerous shell commands                  |
+| `PostToolUse`        | Yes        | Yes            | Tool execution result                   | Log all file changes to audit trail             |
+| `PostToolUseFailure` | No         | Yes            | Tool execution failure                  | Handle or log tool errors                       |
+| `UserPromptSubmit`   | Yes        | Yes            | User prompt submission                  | Inject additional context into prompts          |
+| `Stop`               | Yes        | Yes            | Agent execution stop                    | Save session state before exit                  |
+| `SubagentStart`      | No         | Yes            | Subagent initialization                 | Track parallel task spawning                    |
+| `SubagentStop`       | Yes        | Yes            | Subagent completion                     | Aggregate results from parallel tasks           |
+| `PreCompact`         | Yes        | Yes            | Conversation compaction request         | Archive full transcript before summarizing      |
+| `PermissionRequest`  | No         | Yes            | Permission dialog would be displayed    | Custom permission handling                      |
+| `SessionStart`       | No         | Yes            | Session initialization                  | Initialize logging and telemetry                |
+| `SessionEnd`         | No         | Yes            | Session termination                     | Clean up temporary resources                    |
+| `Notification`       | No         | Yes            | Agent status messages                   | Send agent status updates to Slack or PagerDuty |
 
 ## Common use cases
 
@@ -171,20 +171,21 @@ async for message in query(
 
 ```typescript TypeScript
 for await (const message of query({
-  prompt: "Your prompt",
+  prompt: 'Your prompt',
   options: {
     hooks: {
       PreToolUse: [{ matcher: 'Bash', hooks: [myCallback] }]
     }
   }
 })) {
-  console.log(message);
+  console.log(message)
 }
 ```
 
 </CodeGroup>
 
 The `hooks` option is a dictionary (Python) or object (TypeScript) where:
+
 - **Keys** are [hook event names](#available-hooks) (e.g., `'PreToolUse'`, `'PostToolUse'`, `'Stop'`)
 - **Values** are arrays of [matchers](#matchers), each containing an optional filter pattern and your [callback functions](#callback-function-inputs)
 
@@ -194,11 +195,11 @@ Your hook callback functions receive [input data](#input-data) about the event a
 
 Use matchers to filter which tools trigger your callbacks:
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `matcher` | `string` | `undefined` | Regex pattern to match tool names. Built-in tools include `Bash`, `Read`, `Write`, `Edit`, `Glob`, `Grep`, `WebFetch`, `Task`, and others. MCP tools use the pattern `mcp__<server>__<action>`. |
-| `hooks` | `HookCallback[]` | - | Required. Array of callback functions to execute when the pattern matches |
-| `timeout` | `number` | `60` | Timeout in seconds; increase for hooks that make external API calls |
+| Option    | Type             | Default     | Description                                                                                                                                                                                     |
+| --------- | ---------------- | ----------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `matcher` | `string`         | `undefined` | Regex pattern to match tool names. Built-in tools include `Bash`, `Read`, `Write`, `Edit`, `Glob`, `Grep`, `WebFetch`, `Task`, and others. MCP tools use the pattern `mcp__<server>__<action>`. |
+| `hooks`   | `HookCallback[]` | -           | Required. Array of callback functions to execute when the pattern matches                                                                                                                       |
+| `timeout` | `number`         | `60`        | Timeout in seconds; increase for hooks that make external API calls                                                                                                                             |
 
 Use the `matcher` pattern to target specific tools whenever possible. A matcher with `'Bash'` only runs for Bash commands, while omitting the pattern runs your callbacks for every tool call. Note that matchers only filter by **tool name**, not by file paths or other arguments—to filter by file path, check `tool_input.file_path` inside your callback.
 
@@ -227,11 +228,9 @@ options = ClaudeAgentOptions(
 ```typescript TypeScript
 const options = {
   hooks: {
-    PreToolUse: [
-      { matcher: 'Write|Edit', hooks: [validateFilePath] }
-    ]
+    PreToolUse: [{ matcher: 'Write|Edit', hooks: [validateFilePath] }]
   }
-};
+}
 ```
 
 </CodeGroup>
@@ -250,35 +249,35 @@ The first argument to your hook callback contains information about the event. F
 
 **Common fields** present in all hook types:
 
-| Field | Type | Description |
-|-------|------|-------------|
+| Field             | Type     | Description                                       |
+| ----------------- | -------- | ------------------------------------------------- |
 | `hook_event_name` | `string` | The hook type (`PreToolUse`, `PostToolUse`, etc.) |
-| `session_id` | `string` | Current session identifier |
-| `transcript_path` | `string` | Path to the conversation transcript |
-| `cwd` | `string` | Current working directory |
+| `session_id`      | `string` | Current session identifier                        |
+| `transcript_path` | `string` | Path to the conversation transcript               |
+| `cwd`             | `string` | Current working directory                         |
 
 **Hook-specific fields** vary by hook type. Items marked <sup>TS</sup> are only available in the TypeScript SDK:
 
-| Field | Type | Description | Hooks |
-|-------|------|-------------|-------|
-| `tool_name` | `string` | Name of the tool being called | PreToolUse, PostToolUse, PostToolUseFailure<sup>TS</sup>, PermissionRequest<sup>TS</sup> |
-| `tool_input` | `object` | Arguments passed to the tool | PreToolUse, PostToolUse, PostToolUseFailure<sup>TS</sup>, PermissionRequest<sup>TS</sup> |
-| `tool_response` | `any` | Result returned from tool execution | PostToolUse |
-| `error` | `string` | Error message from tool execution failure | PostToolUseFailure<sup>TS</sup> |
-| `is_interrupt` | `boolean` | Whether the failure was caused by an interrupt | PostToolUseFailure<sup>TS</sup> |
-| `prompt` | `string` | The user's prompt text | UserPromptSubmit |
-| `stop_hook_active` | `boolean` | Whether a stop hook is currently processing | Stop, SubagentStop |
-| `agent_id` | `string` | Unique identifier for the subagent | SubagentStart<sup>TS</sup>, SubagentStop<sup>TS</sup> |
-| `agent_type` | `string` | Type/role of the subagent | SubagentStart<sup>TS</sup> |
-| `agent_transcript_path` | `string` | Path to the subagent's conversation transcript | SubagentStop<sup>TS</sup> |
-| `trigger` | `string` | What triggered compaction: `manual` or `auto` | PreCompact |
-| `custom_instructions` | `string` | Custom instructions provided for compaction | PreCompact |
-| `permission_suggestions` | `array` | Suggested permission updates for the tool | PermissionRequest<sup>TS</sup> |
-| `source` | `string` | How the session started: `startup`, `resume`, `clear`, or `compact` | SessionStart<sup>TS</sup> |
-| `reason` | `string` | Why the session ended: `clear`, `logout`, `prompt_input_exit`, `bypass_permissions_disabled`, or `other` | SessionEnd<sup>TS</sup> |
-| `message` | `string` | Status message from the agent | Notification<sup>TS</sup> |
-| `notification_type` | `string` | Type of notification: `permission_prompt`, `idle_prompt`, `auth_success`, or `elicitation_dialog` | Notification<sup>TS</sup> |
-| `title` | `string` | Optional title set by the agent | Notification<sup>TS</sup> |
+| Field                    | Type      | Description                                                                                              | Hooks                                                                                    |
+| ------------------------ | --------- | -------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `tool_name`              | `string`  | Name of the tool being called                                                                            | PreToolUse, PostToolUse, PostToolUseFailure<sup>TS</sup>, PermissionRequest<sup>TS</sup> |
+| `tool_input`             | `object`  | Arguments passed to the tool                                                                             | PreToolUse, PostToolUse, PostToolUseFailure<sup>TS</sup>, PermissionRequest<sup>TS</sup> |
+| `tool_response`          | `any`     | Result returned from tool execution                                                                      | PostToolUse                                                                              |
+| `error`                  | `string`  | Error message from tool execution failure                                                                | PostToolUseFailure<sup>TS</sup>                                                          |
+| `is_interrupt`           | `boolean` | Whether the failure was caused by an interrupt                                                           | PostToolUseFailure<sup>TS</sup>                                                          |
+| `prompt`                 | `string`  | The user's prompt text                                                                                   | UserPromptSubmit                                                                         |
+| `stop_hook_active`       | `boolean` | Whether a stop hook is currently processing                                                              | Stop, SubagentStop                                                                       |
+| `agent_id`               | `string`  | Unique identifier for the subagent                                                                       | SubagentStart<sup>TS</sup>, SubagentStop<sup>TS</sup>                                    |
+| `agent_type`             | `string`  | Type/role of the subagent                                                                                | SubagentStart<sup>TS</sup>                                                               |
+| `agent_transcript_path`  | `string`  | Path to the subagent's conversation transcript                                                           | SubagentStop<sup>TS</sup>                                                                |
+| `trigger`                | `string`  | What triggered compaction: `manual` or `auto`                                                            | PreCompact                                                                               |
+| `custom_instructions`    | `string`  | Custom instructions provided for compaction                                                              | PreCompact                                                                               |
+| `permission_suggestions` | `array`   | Suggested permission updates for the tool                                                                | PermissionRequest<sup>TS</sup>                                                           |
+| `source`                 | `string`  | How the session started: `startup`, `resume`, `clear`, or `compact`                                      | SessionStart<sup>TS</sup>                                                                |
+| `reason`                 | `string`  | Why the session ended: `clear`, `logout`, `prompt_input_exit`, `bypass_permissions_disabled`, or `other` | SessionEnd<sup>TS</sup>                                                                  |
+| `message`                | `string`  | Status message from the agent                                                                            | Notification<sup>TS</sup>                                                                |
+| `notification_type`      | `string`  | Type of notification: `permission_prompt`, `idle_prompt`, `auth_success`, or `elicitation_dialog`        | Notification<sup>TS</sup>                                                                |
+| `title`                  | `string`  | Optional title set by the agent                                                                          | Notification<sup>TS</sup>                                                                |
 
 The code below defines a hook callback that uses `tool_name` and `tool_input` to log details about each tool call:
 
@@ -295,12 +294,12 @@ async def log_tool_calls(input_data, tool_use_id, context):
 ```typescript TypeScript
 const logToolCalls: HookCallback = async (input, toolUseID, { signal }) => {
   if (input.hook_event_name === 'PreToolUse') {
-    const preInput = input as PreToolUseHookInput;
-    console.log(`Tool: ${preInput.tool_name}`);
-    console.log(`Input:`, preInput.tool_input);
+    const preInput = input as PreToolUseHookInput
+    console.log(`Tool: ${preInput.tool_name}`)
+    console.log(`Input:`, preInput.tool_input)
   }
-  return {};
-};
+  return {}
+}
 ```
 
 </CodeGroup>
@@ -311,22 +310,22 @@ Your callback function returns an object that tells the SDK how to proceed. Retu
 
 **Top-level fields** (outside `hookSpecificOutput`):
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `continue` | `boolean` | Whether the agent should continue after this hook (default: `true`) |
-| `stopReason` | `string` | Message shown when `continue` is `false` |
-| `suppressOutput` | `boolean` | Hide stdout from the transcript (default: `false`) |
-| `systemMessage` | `string` | Message injected into the conversation for Claude to see |
+| Field            | Type      | Description                                                         |
+| ---------------- | --------- | ------------------------------------------------------------------- |
+| `continue`       | `boolean` | Whether the agent should continue after this hook (default: `true`) |
+| `stopReason`     | `string`  | Message shown when `continue` is `false`                            |
+| `suppressOutput` | `boolean` | Hide stdout from the transcript (default: `false`)                  |
+| `systemMessage`  | `string`  | Message injected into the conversation for Claude to see            |
 
 **Fields inside `hookSpecificOutput`**:
 
-| Field | Type | Hooks | Description |
-|-------|------|-------|-------------|
-| `hookEventName` | `string` | All | Required. Use `input.hook_event_name` to match the current event |
-| `permissionDecision` | `'allow'` \| `'deny'` \| `'ask'` | PreToolUse | Controls whether the tool executes |
-| `permissionDecisionReason` | `string` | PreToolUse | Explanation shown to Claude for the decision |
-| `updatedInput` | `object` | PreToolUse | Modified tool input (requires `permissionDecision: 'allow'`) |
-| `additionalContext` | `string` | PreToolUse, PostToolUse, UserPromptSubmit, SessionStart<sup>TS</sup>, SubagentStart<sup>TS</sup> | Context added to the conversation |
+| Field                      | Type                             | Hooks                                                                                            | Description                                                      |
+| -------------------------- | -------------------------------- | ------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------- |
+| `hookEventName`            | `string`                         | All                                                                                              | Required. Use `input.hook_event_name` to match the current event |
+| `permissionDecision`       | `'allow'` \| `'deny'` \| `'ask'` | PreToolUse                                                                                       | Controls whether the tool executes                               |
+| `permissionDecisionReason` | `string`                         | PreToolUse                                                                                       | Explanation shown to Claude for the decision                     |
+| `updatedInput`             | `object`                         | PreToolUse                                                                                       | Modified tool input (requires `permissionDecision: 'allow'`)     |
+| `additionalContext`        | `string`                         | PreToolUse, PostToolUse, UserPromptSubmit, SessionStart<sup>TS</sup>, SubagentStart<sup>TS</sup> | Context added to the conversation                                |
 
 This example blocks write operations to the `/etc` directory while injecting a system message to remind Claude about safe file practices:
 
@@ -352,7 +351,7 @@ async def block_etc_writes(input_data, tool_use_id, context):
 
 ```typescript TypeScript
 const blockEtcWrites: HookCallback = async (input, toolUseID, { signal }) => {
-  const filePath = (input as PreToolUseHookInput).tool_input?.file_path as string;
+  const filePath = (input as PreToolUseHookInput).tool_input?.file_path as string
 
   if (filePath?.startsWith('/etc')) {
     return {
@@ -364,10 +363,10 @@ const blockEtcWrites: HookCallback = async (input, toolUseID, { signal }) => {
         permissionDecision: 'deny',
         permissionDecisionReason: 'Writing to /etc is not allowed'
       }
-    };
+    }
   }
-  return {};
-};
+  return {}
+}
 ```
 
 </CodeGroup>
@@ -409,9 +408,9 @@ async def block_dangerous_commands(input_data, tool_use_id, context):
 
 ```typescript TypeScript
 const blockDangerousCommands: HookCallback = async (input, toolUseID, { signal }) => {
-  if (input.hook_event_name !== 'PreToolUse') return {};
+  if (input.hook_event_name !== 'PreToolUse') return {}
 
-  const command = (input as PreToolUseHookInput).tool_input.command as string;
+  const command = (input as PreToolUseHookInput).tool_input.command as string
 
   if (command?.includes('rm -rf /')) {
     return {
@@ -420,10 +419,10 @@ const blockDangerousCommands: HookCallback = async (input, toolUseID, { signal }
         permissionDecision: 'deny',
         permissionDecisionReason: 'Dangerous command blocked: rm -rf /'
       }
-    };
+    }
   }
-  return {};
-};
+  return {}
+}
 ```
 
 </CodeGroup>
@@ -456,11 +455,11 @@ async def redirect_to_sandbox(input_data, tool_use_id, context):
 
 ```typescript TypeScript
 const redirectToSandbox: HookCallback = async (input, toolUseID, { signal }) => {
-  if (input.hook_event_name !== 'PreToolUse') return {};
+  if (input.hook_event_name !== 'PreToolUse') return {}
 
-  const preInput = input as PreToolUseHookInput;
+  const preInput = input as PreToolUseHookInput
   if (preInput.tool_name === 'Write') {
-    const originalPath = preInput.tool_input.file_path as string;
+    const originalPath = preInput.tool_input.file_path as string
     return {
       hookSpecificOutput: {
         hookEventName: input.hook_event_name,
@@ -470,10 +469,10 @@ const redirectToSandbox: HookCallback = async (input, toolUseID, { signal }) => 
           file_path: `/sandbox${originalPath}`
         }
       }
-    };
+    }
   }
-  return {};
-};
+  return {}
+}
 ```
 
 </CodeGroup>
@@ -499,8 +498,8 @@ async def add_security_reminder(input_data, tool_use_id, context):
 const addSecurityReminder: HookCallback = async (input, toolUseID, { signal }) => {
   return {
     systemMessage: 'Remember to follow security best practices.'
-  };
-};
+  }
+}
 ```
 
 </CodeGroup>
@@ -530,10 +529,10 @@ async def auto_approve_read_only(input_data, tool_use_id, context):
 
 ```typescript TypeScript
 const autoApproveReadOnly: HookCallback = async (input, toolUseID, { signal }) => {
-  if (input.hook_event_name !== 'PreToolUse') return {};
+  if (input.hook_event_name !== 'PreToolUse') return {}
 
-  const preInput = input as PreToolUseHookInput;
-  const readOnlyTools = ['Read', 'Glob', 'Grep', 'LS'];
+  const preInput = input as PreToolUseHookInput
+  const readOnlyTools = ['Read', 'Glob', 'Grep', 'LS']
   if (readOnlyTools.includes(preInput.tool_name)) {
     return {
       hookSpecificOutput: {
@@ -541,10 +540,10 @@ const autoApproveReadOnly: HookCallback = async (input, toolUseID, { signal }) =
         permissionDecision: 'allow',
         permissionDecisionReason: 'Read-only tool auto-approved'
       }
-    };
+    }
   }
-  return {};
-};
+  return {}
+}
 ```
 
 </CodeGroup>
@@ -579,14 +578,14 @@ options = ClaudeAgentOptions(
 ```typescript TypeScript
 const options = {
   hooks: {
-    'PreToolUse': [
-      { hooks: [rateLimiter] },        // First: check rate limits
+    PreToolUse: [
+      { hooks: [rateLimiter] }, // First: check rate limits
       { hooks: [authorizationCheck] }, // Second: verify permissions
-      { hooks: [inputSanitizer] },     // Third: sanitize inputs
-      { hooks: [auditLogger] }         // Last: log the action
+      { hooks: [inputSanitizer] }, // Third: sanitize inputs
+      { hooks: [auditLogger] } // Last: log the action
     ]
   }
-};
+}
 ```
 
 </CodeGroup>
@@ -617,7 +616,7 @@ options = ClaudeAgentOptions(
 ```typescript TypeScript
 const options = {
   hooks: {
-    'PreToolUse': [
+    PreToolUse: [
       // Match file modification tools
       { matcher: 'Write|Edit|Delete', hooks: [fileSecurityHook] },
 
@@ -628,7 +627,7 @@ const options = {
       { hooks: [globalLogger] }
     ]
   }
-};
+}
 ```
 
 </CodeGroup>
@@ -661,18 +660,18 @@ options = ClaudeAgentOptions(
 ```typescript TypeScript
 const subagentTracker: HookCallback = async (input, toolUseID, { signal }) => {
   if (input.hook_event_name === 'SubagentStop') {
-    console.log(`[SUBAGENT] Completed`);
-    console.log(`  Tool use ID: ${toolUseID}`);
-    console.log(`  Stop hook active: ${input.stop_hook_active}`);
+    console.log(`[SUBAGENT] Completed`)
+    console.log(`  Tool use ID: ${toolUseID}`)
+    console.log(`  Stop hook active: ${input.stop_hook_active}`)
   }
-  return {};
-};
+  return {}
+}
 
 const options = {
   hooks: {
     SubagentStop: [{ hooks: [subagentTracker] }]
   }
-};
+}
 ```
 
 </CodeGroup>
@@ -708,7 +707,7 @@ async def webhook_notifier(input_data, tool_use_id, context):
 
 ```typescript TypeScript
 const webhookNotifier: HookCallback = async (input, toolUseID, { signal }) => {
-  if (input.hook_event_name !== 'PostToolUse') return {};
+  if (input.hook_event_name !== 'PostToolUse') return {}
 
   try {
     // Pass signal for proper cancellation
@@ -719,15 +718,15 @@ const webhookNotifier: HookCallback = async (input, toolUseID, { signal }) => {
         timestamp: new Date().toISOString()
       }),
       signal
-    });
+    })
   } catch (error) {
     if (error instanceof Error && error.name === 'AbortError') {
-      console.log('Webhook request cancelled');
+      console.log('Webhook request cancelled')
     }
   }
 
-  return {};
-};
+  return {}
+}
 ```
 
 </CodeGroup>
@@ -737,10 +736,10 @@ const webhookNotifier: HookCallback = async (input, toolUseID, { signal }) => {
 Use `Notification` hooks to receive status updates from the agent and forward them to external services like Slack or monitoring dashboards:
 
 ```typescript TypeScript
-import { query, HookCallback, NotificationHookInput } from "@anthropic-ai/claude-agent-sdk";
+import { query, HookCallback, NotificationHookInput } from '@anthropic-ai/claude-agent-sdk'
 
 const notificationHandler: HookCallback = async (input, toolUseID, { signal }) => {
-  const notification = input as NotificationHookInput;
+  const notification = input as NotificationHookInput
 
   await fetch('https://hooks.slack.com/services/YOUR/WEBHOOK/URL', {
     method: 'POST',
@@ -748,20 +747,20 @@ const notificationHandler: HookCallback = async (input, toolUseID, { signal }) =
       text: `Agent status: ${notification.message}`
     }),
     signal
-  });
+  })
 
-  return {};
-};
+  return {}
+}
 
 for await (const message of query({
-  prompt: "Analyze this codebase",
+  prompt: 'Analyze this codebase',
   options: {
     hooks: {
       Notification: [{ hooks: [notificationHandler] }]
     }
   }
 })) {
-  console.log(message);
+  console.log(message)
 }
 ```
 
@@ -783,11 +782,11 @@ Matchers only match **tool names**, not file paths or other arguments. To filter
 
 ```typescript
 const myHook: HookCallback = async (input, toolUseID, { signal }) => {
-  const preInput = input as PreToolUseHookInput;
-  const filePath = preInput.tool_input?.file_path as string;
-  if (!filePath?.endsWith('.md')) return {};  // Skip non-markdown files
+  const preInput = input as PreToolUseHookInput
+  const filePath = preInput.tool_input?.file_path as string
+  if (!filePath?.endsWith('.md')) return {} // Skip non-markdown files
   // Process markdown files...
-};
+}
 ```
 
 ### Hook timeout
@@ -812,7 +811,7 @@ const myHook: HookCallback = async (input, toolUseID, { signal }) => {
       permissionDecision: 'allow',
       updatedInput: { command: 'new command' }
     }
-  };
+  }
   ```
 
 - You must also return `permissionDecision: 'allow'` for the input modification to take effect

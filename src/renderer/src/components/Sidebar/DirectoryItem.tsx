@@ -108,10 +108,22 @@ export const DirectoryItem = memo(function DirectoryItem({
             <path d="M8 5l8 7-8 7z" />
           </svg>
         </span>
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="shrink-0 text-text-muted">
+        <svg
+          width="15"
+          height="15"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.8"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          className="shrink-0 text-text-muted"
+        >
           <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" />
         </svg>
-        <span className="truncate flex-1" title={group.cwd || group.folderName}>{group.folderName}</span>
+        <span className="truncate flex-1" title={group.cwd || group.folderName}>
+          {group.folderName}
+        </span>
         <span className="text-[10px] text-text-muted">{group.sessions.length}</span>
       </div>
       {expanded && (
@@ -134,9 +146,17 @@ export const DirectoryItem = memo(function DirectoryItem({
                   onAutoRename={() => onAutoRename(info.sessionId)}
                   onCancelRename={onCancelRename}
                   hidden={sessionHidden}
-                  onHide={!sessionHidden && onHideSession && info.projectKey ? () => onHideSession(info) : undefined}
-                  onUnhide={sessionHidden && onUnhideSession ? () => onUnhideSession(info) : undefined}
-                  onDelete={onDeleteSession && info.projectKey ? () => onDeleteSession(info) : undefined}
+                  onHide={
+                    !sessionHidden && onHideSession && info.projectKey
+                      ? () => onHideSession(info)
+                      : undefined
+                  }
+                  onUnhide={
+                    sessionHidden && onUnhideSession ? () => onUnhideSession(info) : undefined
+                  }
+                  onDelete={
+                    onDeleteSession && info.projectKey ? () => onDeleteSession(info) : undefined
+                  }
                 />
               )
             })}
@@ -152,10 +172,23 @@ export const DirectoryItem = memo(function DirectoryItem({
         >
           {onViewWorktrees && (
             <button
-              onClick={() => { menu.close(); onViewWorktrees() }}
+              onClick={() => {
+                menu.close()
+                onViewWorktrees()
+              }}
               className="w-full flex items-center gap-2 px-3 py-1.5 text-[12px] text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-colors text-left cursor-default"
             >
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0 text-text-muted">
+              <svg
+                width="12"
+                height="12"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                className="shrink-0 text-text-muted"
+              >
                 <circle cx="12" cy="18" r="3" />
                 <circle cx="6" cy="6" r="3" />
                 <circle cx="18" cy="6" r="3" />
@@ -172,7 +205,16 @@ export const DirectoryItem = memo(function DirectoryItem({
             }}
             className="w-full flex items-center gap-2 px-3 py-1.5 text-[12px] text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-colors text-left cursor-default"
           >
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" className="shrink-0 text-text-muted">
+            <svg
+              width="12"
+              height="12"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.8"
+              strokeLinecap="round"
+              className="shrink-0 text-text-muted"
+            >
               <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" />
               <path d="M18.5 2.5a2.12 2.12 0 013 3L12 15l-4 1 1-4z" />
             </svg>
@@ -181,7 +223,10 @@ export const DirectoryItem = memo(function DirectoryItem({
           {(onHide || onUnhide || onDelete) && <div className="h-px bg-border my-1" />}
           {onHide && !hidden && (
             <button
-              onClick={() => { menu.close(); onHide() }}
+              onClick={() => {
+                menu.close()
+                onHide()
+              }}
               className="w-full text-left px-3 py-1.5 text-[12px] text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
             >
               Hide project
@@ -189,7 +234,10 @@ export const DirectoryItem = memo(function DirectoryItem({
           )}
           {onUnhide && hidden && (
             <button
-              onClick={() => { menu.close(); onUnhide() }}
+              onClick={() => {
+                menu.close()
+                onUnhide()
+              }}
               className="w-full text-left px-3 py-1.5 text-[12px] text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
             >
               Unhide project
@@ -197,7 +245,10 @@ export const DirectoryItem = memo(function DirectoryItem({
           )}
           {onDelete && (
             <button
-              onClick={() => { menu.close(); onDelete() }}
+              onClick={() => {
+                menu.close()
+                onDelete()
+              }}
               className="w-full text-left px-3 py-1.5 text-[12px] text-red-400 hover:bg-red-500/15 hover:text-red-300 transition-colors cursor-default"
             >
               Delete project...

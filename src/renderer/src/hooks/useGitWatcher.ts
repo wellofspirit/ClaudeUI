@@ -18,11 +18,14 @@ export function useGitWatcher(): void {
     // Just check if it's a git repo — don't fetch status here.
     // gitStartWatching does an initial poll immediately, so status
     // will arrive via the git:status-update event without the extra call.
-    window.api.gitCheckRepo(cwd).then((isRepo) => {
-      setIsGitRepo(activeSessionId, isRepo)
-    }).catch(() => {
-      setIsGitRepo(activeSessionId, false)
-    })
+    window.api
+      .gitCheckRepo(cwd)
+      .then((isRepo) => {
+        setIsGitRepo(activeSessionId, isRepo)
+      })
+      .catch(() => {
+        setIsGitRepo(activeSessionId, false)
+      })
   }, [cwd, activeSessionId, setIsGitRepo])
 
   // Start/stop git polling when cwd changes

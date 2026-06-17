@@ -12,16 +12,16 @@ Unknown top-level `type` values are also tolerated — logged as `"Ignoring unkn
 
 cli.js branches on seven top-level `type` values. Anything else is ignored.
 
-| `type` | Schema (cli.js) | Purpose | Response |
-|---|---|---|---|
-| `user` | `BGK` at `4974365` | User prompt or tool_result reply | Turn generates `assistant` messages + final `result` |
-| `control_request` | `PW$` | Host-initiated RPC to cli.js | `control_response` correlated by `request_id` |
-| `control_response` | `T87` at `11921367` | Host's reply to an inbound control_request from cli.js | None (one-way) |
-| `control_cancel_request` | (direct parse) | Cancel a pending inbound control_request | None |
-| `keep_alive` | `v87` at `11921898` | No-op heartbeat | None |
-| `update_environment_variables` | `yc1` | Mutate cli.js's `process.env` | None |
-| `assistant` | `E.unknown()` (see `mj4`) | Inject assistant message into transcript | None (buffered) |
-| `system` | `E.unknown()` (see `pj4`) | Inject system message into transcript | None (buffered) |
+| `type`                         | Schema (cli.js)           | Purpose                                                | Response                                             |
+| ------------------------------ | ------------------------- | ------------------------------------------------------ | ---------------------------------------------------- |
+| `user`                         | `BGK` at `4974365`        | User prompt or tool_result reply                       | Turn generates `assistant` messages + final `result` |
+| `control_request`              | `PW$`                     | Host-initiated RPC to cli.js                           | `control_response` correlated by `request_id`        |
+| `control_response`             | `T87` at `11921367`       | Host's reply to an inbound control_request from cli.js | None (one-way)                                       |
+| `control_cancel_request`       | (direct parse)            | Cancel a pending inbound control_request               | None                                                 |
+| `keep_alive`                   | `v87` at `11921898`       | No-op heartbeat                                        | None                                                 |
+| `update_environment_variables` | `yc1`                     | Mutate cli.js's `process.env`                          | None                                                 |
+| `assistant`                    | `E.unknown()` (see `mj4`) | Inject assistant message into transcript               | None (buffered)                                      |
+| `system`                       | `E.unknown()` (see `pj4`) | Inject system message into transcript                  | None (buffered)                                      |
 
 ---
 
@@ -243,16 +243,16 @@ Pre-seeding session context. Not used by our harness.
 
 ## 6.10 Validation behavior summary
 
-| Case | cli.js response |
-|---|---|
-| Valid known type | Processed per type |
-| Unknown `type` string | Logged, dropped |
-| Missing `type` | Logged, dropped |
-| Malformed JSON (parse error) | Logged, dropped; process continues |
-| `user` without `message` | Thrown error inside parser; dropped |
-| `user` with `message.role !== 'user'` | Thrown error; dropped |
-| `control_request` without `request` | Error control_response emitted |
-| `control_request` with unknown `subtype` | Error control_response emitted (cli.js validates against `kc1` union) |
+| Case                                                     | cli.js response                                                         |
+| -------------------------------------------------------- | ----------------------------------------------------------------------- |
+| Valid known type                                         | Processed per type                                                      |
+| Unknown `type` string                                    | Logged, dropped                                                         |
+| Missing `type`                                           | Logged, dropped                                                         |
+| Malformed JSON (parse error)                             | Logged, dropped; process continues                                      |
+| `user` without `message`                                 | Thrown error inside parser; dropped                                     |
+| `user` with `message.role !== 'user'`                    | Thrown error; dropped                                                   |
+| `control_request` without `request`                      | Error control_response emitted                                          |
+| `control_request` with unknown `subtype`                 | Error control_response emitted (cli.js validates against `kc1` union)   |
 | `control_response` without matching pending `request_id` | Calls `unexpectedResponseCallback` (if set); otherwise silently dropped |
 
 ---

@@ -19,10 +19,17 @@ export function QuitWorktreeModal(): React.JSX.Element | null {
     setRemoving(true)
     for (const { routingId, worktreeInfo } of quitWorktrees) {
       try {
-        await window.api.removeWorktree(worktreeInfo.worktreePath, worktreeInfo.worktreeBranch, worktreeInfo.gitRoot)
+        await window.api.removeWorktree(
+          worktreeInfo.worktreePath,
+          worktreeInfo.worktreeBranch,
+          worktreeInfo.gitRoot
+        )
         clearWorktreeInfo(routingId)
       } catch (err) {
-        window.api.logError('QuitWorktreeModal', `Failed to remove worktree ${worktreeInfo.worktreeName}: ${err}`)
+        window.api.logError(
+          'QuitWorktreeModal',
+          `Failed to remove worktree ${worktreeInfo.worktreeName}: ${err}`
+        )
       }
     }
     setQuitWorktrees(null)

@@ -24,10 +24,7 @@ class PairedTransport implements Transport {
   onmessage?: (message: JSONRPCMessage) => void
   onclose?: () => void
   onerror?: (error: Error) => void
-  private readonly pending = new Map<
-    string | number,
-    (response: JSONRPCMessage) => void
-  >()
+  private readonly pending = new Map<string | number, (response: JSONRPCMessage) => void>()
 
   async start(): Promise<void> {
     /* nothing to start — we drive messages synchronously via inject() */
@@ -116,21 +113,18 @@ export class McpHost {
   descriptors(): Array<{ name: string; tools: Array<{ name: string; description: string }> }> {
     return [...this.servers.values()].map(({ server }) => ({
       name: server.name,
-      tools: server.tools.map((t) => ({ name: t.name, description: t.description })),
+      tools: server.tools.map((t) => ({ name: t.name, description: t.description }))
     }))
   }
 
-  async dispatch(
-    serverName: string,
-    message: JSONRPCMessage,
-  ): Promise<JSONRPCMessage | null> {
+  async dispatch(serverName: string, message: JSONRPCMessage): Promise<JSONRPCMessage | null> {
     await this.ensureStarted()
     const entry = this.servers.get(serverName)
     if (!entry) {
       return {
         jsonrpc: '2.0',
         id: 'id' in message ? (message.id ?? null) : null,
-        error: { code: -32601, message: `Unknown MCP server: ${serverName}` },
+        error: { code: -32601, message: `Unknown MCP server: ${serverName}` }
       } as JSONRPCMessage
     }
     return entry.transport.inject(message)

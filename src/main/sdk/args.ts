@@ -11,13 +11,12 @@ import type { QueryOptions, McpServerConfig, SdkMcpServer } from './types'
 import { getProxyEnv, getProxyAllSubprocesses } from './proxy'
 import { getEndpointEnv } from './endpoint-env'
 import { getModelEnv } from './model-env'
+import { getSecurestorageEnv } from './securestorage-env'
 
 /** Strip in-process `type: 'sdk'` servers from an mcpServers map — those are
  *  hosted locally and are NOT written to --mcp-config (the CLI treats them
  *  specially via the `initialize` control_request). */
-export function splitMcpServers(
-  servers?: Record<string, McpServerConfig>,
-): {
+export function splitMcpServers(servers?: Record<string, McpServerConfig>): {
   cliServers: Record<string, Exclude<McpServerConfig, SdkMcpServer>>
   sdkServers: Record<string, SdkMcpServer>
 } {
@@ -46,7 +45,7 @@ export function buildArgs(options: QueryOptions): string[] {
     'stream-json',
     '--verbose',
     '--input-format',
-    'stream-json',
+    'stream-json'
   ]
 
   // --- Thinking ------------------------------------------------------------
@@ -113,7 +112,7 @@ export function buildArgs(options: QueryOptions): string[] {
   if (options.canUseTool) {
     if (options.permissionPromptToolName) {
       throw new Error(
-        'canUseTool callback cannot be used with permissionPromptToolName. Use one or the other.',
+        'canUseTool callback cannot be used with permissionPromptToolName. Use one or the other.'
       )
     }
     args.push('--permission-prompt-tool', 'stdio')
@@ -165,7 +164,7 @@ export function buildArgs(options: QueryOptions): string[] {
   if (options.fallbackModel) {
     if (options.model && options.fallbackModel === options.model) {
       throw new Error(
-        'fallbackModel cannot be the same as model. Please specify a different model for fallbackModel.',
+        'fallbackModel cannot be the same as model. Please specify a different model for fallbackModel.'
       )
     }
     args.push('--fallback-model', options.fallbackModel)
@@ -229,7 +228,7 @@ function mergeSettingsAndSandbox(options: QueryOptions): Record<string, string |
     const existing = options.settings
     if (typeof existing === 'string') {
       throw new Error(
-        'Cannot use both a settings file path and the sandbox option. Include the sandbox configuration in your settings file instead.',
+        'Cannot use both a settings file path and the sandbox option. Include the sandbox configuration in your settings file instead.'
       )
     }
     const merged = { ...(existing ?? {}), sandbox }
@@ -334,6 +333,23 @@ export function buildEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessE
     delete env.ANTHROPIC_DEFAULT_SONNET_MODEL
     delete env.ANTHROPIC_DEFAULT_OPUS_MODEL
     delete env.ANTHROPIC_DEFAULT_HAIKU_MODEL
+  }
+
+  // Multi-account credential storage (ADR-015). Precedence: an explicit
+  // per-spawn override (options.env, already merged into `env` — used by
+  // add-account login into a specific dir) wins; else the active account's dir
+  // from module state; else clear so single-account Keychain mode is restored.
+  if (env.SKIP_SECURESTORAGE) {
+    // explicit per-spawn override — leave SKIP_SECURESTORAGE + dir as provided
+  } else {
+    const ss = getSecurestorageEnv()
+    if (ss) {
+      env.SKIP_SECURESTORAGE = '1'
+      env.CLAUDE_SECURESTORAGE_CONFIG_DIR = ss.dir
+    } else {
+      delete env.SKIP_SECURESTORAGE
+      delete env.CLAUDE_SECURESTORAGE_CONFIG_DIR
+    }
   }
 
   // Inject our app's node_modules into NODE_PATH so cli.js can resolve

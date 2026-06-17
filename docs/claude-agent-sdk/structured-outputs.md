@@ -141,11 +141,13 @@ import { query } from '@anthropic-ai/claude-agent-sdk'
 const FeaturePlan = z.object({
   feature_name: z.string(),
   summary: z.string(),
-  steps: z.array(z.object({
-    step_number: z.number(),
-    description: z.string(),
-    estimated_complexity: z.enum(['low', 'medium', 'high'])
-  })),
+  steps: z.array(
+    z.object({
+      step_number: z.number(),
+      description: z.string(),
+      estimated_complexity: z.enum(['low', 'medium', 'high'])
+    })
+  ),
   risks: z.array(z.string())
 })
 
@@ -171,7 +173,7 @@ for await (const message of query({
       const plan: FeaturePlan = parsed.data
       console.log(`Feature: ${plan.feature_name}`)
       console.log(`Summary: ${plan.summary}`)
-      plan.steps.forEach(step => {
+      plan.steps.forEach((step) => {
         console.log(`${step.step_number}. [${step.estimated_complexity}] ${step.description}`)
       })
     }
@@ -219,6 +221,7 @@ asyncio.run(main())
 </CodeGroup>
 
 **Benefits:**
+
 - Full type inference (TypeScript) and type hints (Python)
 - Runtime validation with `safeParse()` or `model_validate()`
 - Better error messages
@@ -280,7 +283,7 @@ for await (const message of query({
   if (message.type === 'result' && message.structured_output) {
     const data = message.structured_output
     console.log(`Found ${data.total_count} TODOs`)
-    data.todos.forEach(todo => {
+    data.todos.forEach((todo) => {
       console.log(`${todo.file}:${todo.line} - ${todo.text}`)
       if (todo.author) {
         console.log(`  Added by ${todo.author} on ${todo.date}`)
@@ -347,9 +350,9 @@ Structured output generation can fail when the agent cannot produce valid JSON m
 
 When an error occurs, the result message has a `subtype` indicating what went wrong:
 
-| Subtype | Meaning |
-|---------|---------|
-| `success` | Output was generated and validated successfully |
+| Subtype                               | Meaning                                                     |
+| ------------------------------------- | ----------------------------------------------------------- |
+| `success`                             | Output was generated and validated successfully             |
 | `error_max_structured_output_retries` | Agent couldn't produce valid output after multiple attempts |
 
 The example below checks the `subtype` field to determine whether the output was generated successfully or if you need to handle a failure:

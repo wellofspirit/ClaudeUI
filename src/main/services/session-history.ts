@@ -2,9 +2,18 @@ import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
 import * as readline from 'readline'
-import type { ChatMessage, ContentBlock, DirectoryGroup, SessionInfo, TaskNotification, StatusLineData } from '../../shared/types'
+import type {
+  ChatMessage,
+  ContentBlock,
+  DirectoryGroup,
+  SessionInfo,
+  TaskNotification,
+  StatusLineData,
+  ForkAnchorResult
+} from '../../shared/types'
 import { logger } from './logger'
-import { getContextWindowSize } from '../ipc/session.ipc'
+import { getContextWindowSize } from './context-window'
+import { findForkAnchorUuid } from './fork-anchor'
 
 const CLAUDE_PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects')
 const CACHE_DIR = path.join(os.homedir(), '.claude', 'ui')
@@ -65,7 +74,10 @@ function saveDiskCache(cache: DiskCache): void {
  * Compute token metrics from a JSONL transcript file.
  * Mirrors ccstatusline's approach: sums message.usage from every assistant entry.
  */
-export async function computeTokenMetrics(filePath: string, model?: string): Promise<StatusLineData> {
+export async function computeTokenMetrics(
+  filePath: string,
+  model?: string
+): Promise<StatusLineData> {
   const empty: StatusLineData = {
     totalCostUsd: 0,
     totalDurationMs: 0,
@@ -92,6 +104,10 @@ export async function computeTokenMetrics(filePath: string, model?: string): Pro
 
     // Track the most recent non-sidechain assistant for context length
     let mostRecentMainChainUsage: Record<string, number> | null = null
+    // Authoritative model id for window sizing: the transcript records the
+    // *resolved* id (e.g. "claude-opus-4-8"), so it disambiguates aliases like
+    // "default" that the caller can't resolve. Latest main-chain wins.
+    let transcriptModel: string | undefined
 
     const stream = fs.createReadStream(filePath, { encoding: 'utf-8' })
     const rl = readline.createInterface({ input: stream })
@@ -104,10 +120,12 @@ export async function computeTokenMetrics(filePath: string, model?: string): Pro
           const usage = data.message.usage
           inputTokens += usage.input_tokens || 0
           outputTokens += usage.output_tokens || 0
-          cachedTokens += (usage.cache_read_input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0)
+          cachedTokens +=
+            (usage.cache_read_input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0)
 
           if (data.isSidechain !== true && !data.isApiErrorMessage) {
             mostRecentMainChainUsage = usage
+            if (typeof data.message.model === 'string') transcriptModel = data.message.model
           }
         } else if (data.type === 'result') {
           totalCostUsd += (data.total_cost_usd as number) || 0
@@ -128,8 +146,11 @@ export async function computeTokenMetrics(filePath: string, model?: string): Pro
       }
 
       const totalTokens = inputTokens + outputTokens + cachedTokens
-      const ctxWindow = model ? getContextWindowSize(model) : 200_000
-      const usedPercentage = contextLength > 0 ? Math.round((contextLength / ctxWindow) * 100) : null
+      // Prefer the transcript's resolved id over the caller-supplied alias.
+      const effectiveModel = transcriptModel ?? model
+      const ctxWindow = effectiveModel ? getContextWindowSize(effectiveModel) : 200_000
+      const usedPercentage =
+        contextLength > 0 ? Math.round((contextLength / ctxWindow) * 100) : null
       const remainingPercentage = usedPercentage !== null ? 100 - usedPercentage : null
 
       resolve({
@@ -209,9 +230,7 @@ export async function listDirectories(): Promise<DirectoryGroup[]> {
 
     // Parse stale files in parallel
     if (staleFiles.length > 0) {
-      const results = await Promise.all(
-        staleFiles.map((f) => parseSessionMeta(f.filePath))
-      )
+      const results = await Promise.all(staleFiles.map((f) => parseSessionMeta(f.filePath)))
       for (let i = 0; i < staleFiles.length; i++) {
         const meta = results[i]
         const f = staleFiles[i]
@@ -248,7 +267,8 @@ export async function listDirectories(): Promise<DirectoryGroup[]> {
       if (!groupCwd && meta.cwd) groupCwd = meta.cwd
 
       // Priority: custom-title (user override) > ai-title (cli.js auto) > summary (compact) > first user prompt title
-      const displayTitle = meta.customTitle || meta.aiTitle || meta.summary || meta.title || 'Untitled'
+      const displayTitle =
+        meta.customTitle || meta.aiTitle || meta.summary || meta.title || 'Untitled'
 
       sessions.push({
         sessionId: f.sessionId,
@@ -265,9 +285,7 @@ export async function listDirectories(): Promise<DirectoryGroup[]> {
 
     sessions.sort((a, b) => b.lastActivityAt - a.lastActivityAt)
 
-    const folderName = groupCwd
-      ? groupCwd.split(/[\\/]/).pop() || groupCwd
-      : projectKey
+    const folderName = groupCwd ? groupCwd.split(/[\\/]/).pop() || groupCwd : projectKey
 
     groups.push({
       cwd: groupCwd,
@@ -345,7 +363,12 @@ function parseSessionMeta(filePath: string): Promise<SessionMeta | null> {
         if (!hasConversation) {
           if (obj.type === 'assistant' && obj.message?.content && !obj.isMeta) {
             hasConversation = true
-          } else if (obj.type === 'user' && obj.userType === 'external' && obj.message?.content && !obj.isMeta) {
+          } else if (
+            obj.type === 'user' &&
+            obj.userType === 'external' &&
+            obj.message?.content &&
+            !obj.isMeta
+          ) {
             hasConversation = true
           }
         }
@@ -368,9 +391,7 @@ function parseSessionMeta(filePath: string): Promise<SessionMeta | null> {
           if (typeof content === 'string') {
             text = content
           } else if (Array.isArray(content)) {
-            const textBlock = content.find(
-              (b: Record<string, unknown>) => b.type === 'text'
-            )
+            const textBlock = content.find((b: Record<string, unknown>) => b.type === 'text')
             if (textBlock) text = textBlock.text as string
           }
 
@@ -413,13 +434,34 @@ export interface SessionHistoryResult {
   statusLine: StatusLineData | null
   /** Maps agentId → toolUseId for subagent JSONL lookup */
   agentIdToToolUseId: Record<string, string>
+  /**
+   * Warnings worth resurfacing when the session is reopened — currently the
+   * model_refusal_fallback / model_fallback system entries (the model swap is
+   * sticky for the session, so the user should know which model answered).
+   */
+  warnings: string[]
+}
+
+/**
+ * Render text for a `fallback` content block — the canonical-replacement frame
+ * cli.js emits when a refused partial is retracted and the turn retried on a
+ * fallback model (docs/protocol/04-system-subtypes.md §4.20). Live sessions
+ * normally evict the whole message via retracted_message_uuids; this text is
+ * the fallback rendering when the frame survives (history, older CLIs).
+ */
+export function fallbackBlockText(block: Record<string, unknown>): string {
+  const from = (block.from as Record<string, unknown> | undefined)?.model
+  const to = (block.to as Record<string, unknown> | undefined)?.model
+  return `Switched models${from ? ` from ${from}` : ''}${to ? ` to ${to}` : ''}.`
 }
 
 /**
  * Parse task-notification XML from JSONL content strings.
  * Returns null if no task notification found.
  */
-function parseTaskNotificationXml(text: string): Omit<TaskNotification, 'toolUseId' | 'outputFile'> | null {
+function parseTaskNotificationXml(
+  text: string
+): Omit<TaskNotification, 'toolUseId' | 'outputFile'> | null {
   const match = text.match(/<task-notification>([\s\S]*?)<\/task-notification>/)
   if (!match) return null
 
@@ -453,7 +495,9 @@ function parseTaskNotificationXml(text: string): Omit<TaskNotification, 'toolUse
 }
 
 /** Parse CLI command XML into structured data */
-function parseCliCommand(text: string): { commandName: string; commandArgs?: string; commandOutput?: string } | null {
+function parseCliCommand(
+  text: string
+): { commandName: string; commandArgs?: string; commandOutput?: string } | null {
   // Format 1: <command-name>X</command-name><command-message>Y</command-message><command-args>Z</command-args>
   const nameMatch = text.match(/<command-name>([\s\S]*?)<\/command-name>/)
   if (nameMatch) {
@@ -468,7 +512,8 @@ function parseCliCommand(text: string): { commandName: string; commandArgs?: str
   const stdoutMatch = text.match(/<local-command-stdout>([\s\S]*?)<\/local-command-stdout>/)
   const stderrMatch = text.match(/<local-command-stderr>([\s\S]*?)<\/local-command-stderr>/)
   if (stdoutMatch || stderrMatch) {
-    const output = (stdoutMatch?.[1] || '') + (stderrMatch ? (stdoutMatch ? '\n' : '') + stderrMatch[1] : '')
+    const output =
+      (stdoutMatch?.[1] || '') + (stderrMatch ? (stdoutMatch ? '\n' : '') + stderrMatch[1] : '')
     return {
       commandName: 'output',
       commandOutput: output.trim() || undefined
@@ -486,6 +531,57 @@ function extractOutputFile(text: string): string {
 }
 
 /**
+ * Resolve the JSONL line `uuid` to pass to cli.js `--resume-session-at` when
+ * forking ("branching") a new session from an assistant message.
+ *
+ * cli.js truncates the resumed transcript to `messages.slice(0, w + 1)` where
+ * `w` is the index of the line whose `uuid === <anchor>` — everything after is
+ * dropped (no summarization). If we anchored on the bare assistant line and it
+ * had issued tool calls, the following `tool_result` lines would be sliced off,
+ * leaving a dangling `tool_use` → the API rejects the next turn with a 400.
+ *
+ * So we anchor at the LAST line of the target assistant turn: the assistant
+ * line itself when it issued no tools, otherwise the last trailing
+ * `tool_result` user-line that resolves its tool_uses (stopping at the next
+ * assistant turn). The resulting prefix is always tool-cycle balanced.
+ *
+ * `messageId` is the renderer's `ChatMessage.id`, which for assistant messages
+ * is the `betaMessage.id` (`msg_xxx`); we also accept a raw line uuid as a
+ * fallback. The matching itself is against the JSONL line `uuid`, never the
+ * `msg_xxx` id (verified against cli.js's truncation: `j.uuid === resumeSessionAt`).
+ */
+export async function resolveForkAnchor(
+  sessionId: string,
+  cwd: string,
+  messageId: string
+): Promise<ForkAnchorResult> {
+  const projectKey = cwd.replace(/[/.]/g, '-')
+  const filePath = path.join(CLAUDE_PROJECTS_DIR, projectKey, `${sessionId}.jsonl`)
+  if (!fs.existsSync(filePath)) return { anchorUuid: null, reason: 'transcript-not-found' }
+
+  let raw: string
+  try {
+    raw = fs.readFileSync(filePath, 'utf8')
+  } catch {
+    return { anchorUuid: null, reason: 'read-failed' }
+  }
+
+  const lines: Array<Record<string, unknown>> = []
+  for (const line of raw.split('\n')) {
+    const t = line.trim()
+    if (!t) continue
+    try {
+      lines.push(JSON.parse(t))
+    } catch {
+      /* skip malformed lines */
+    }
+  }
+
+  const anchorUuid = findForkAnchorUuid(lines, messageId)
+  return anchorUuid ? { anchorUuid } : { anchorUuid: null, reason: 'message-not-found' }
+}
+
+/**
  * Load full conversation history from a JSONL session file.
  * Converts SDK messages to ChatMessage[] and extracts TaskNotification[].
  */
@@ -498,6 +594,7 @@ export async function loadSessionHistory(
   return new Promise((resolve) => {
     const messages: ChatMessage[] = []
     const taskNotifications: TaskNotification[] = []
+    const warnings: string[] = []
     let customTitle: string | null = null
     // Map agentId (from task-notification <task-id>) → toolUseId (from Task tool_use)
     const agentIdToToolUseId: Record<string, string> = {}
@@ -507,7 +604,14 @@ export async function loadSessionHistory(
       stream = fs.createReadStream(filePath, { encoding: 'utf-8' })
     } catch (err) {
       logger.warn('SessionHistory', 'Failed to open session history file', err)
-      resolve({ messages: [], taskNotifications: [], customTitle: null, agentIdToToolUseId: {}, statusLine: null })
+      resolve({
+        messages: [],
+        taskNotifications: [],
+        customTitle: null,
+        agentIdToToolUseId: {},
+        statusLine: null,
+        warnings: []
+      })
       return
     }
 
@@ -529,8 +633,9 @@ export async function loadSessionHistory(
 
           // Meta messages (skill context injections, system reminders) are not human input.
           // Drop unless they carry tool_result blocks, which are real conversation data.
-          const hasMetaToolResult = Array.isArray(content)
-            && content.some((b: Record<string, unknown>) => b.type === 'tool_result')
+          const hasMetaToolResult =
+            Array.isArray(content) &&
+            content.some((b: Record<string, unknown>) => b.type === 'tool_result')
           if (obj.isMeta && !hasMetaToolResult) return
 
           // Compact summary — attach text to the preceding compact_separator
@@ -591,7 +696,9 @@ export async function loadSessionHistory(
 
           // Array content — check block types
           const hasTextBlock = content.some((b: Record<string, unknown>) => b.type === 'text')
-          const hasToolResult = content.some((b: Record<string, unknown>) => b.type === 'tool_result')
+          const hasToolResult = content.some(
+            (b: Record<string, unknown>) => b.type === 'tool_result'
+          )
 
           // External user prompt with text blocks
           if (userType === 'external' && hasTextBlock) {
@@ -603,7 +710,10 @@ export async function loadSessionHistory(
             if (notif) {
               const toolUseId = agentIdToToolUseId[notif.taskId] || null
               taskNotifications.push({ ...notif, toolUseId, outputFile: extractOutputFile(text) })
-            } else if (text && (text.startsWith('<command-name>') || text.startsWith('<local-command'))) {
+            } else if (
+              text &&
+              (text.startsWith('<command-name>') || text.startsWith('<local-command'))
+            ) {
               const cmd = parseCliCommand(text)
               if (cmd) {
                 messages.push({
@@ -675,15 +785,17 @@ export async function loadSessionHistory(
             messages.push({
               id: obj.uuid || `error-${messages.length}`,
               role: 'system',
-              content: [{
-                type: 'api_error',
-                errorType: (obj.error as string) || 'unknown',
-                errorMessage: obj.message
-                  ? typeof obj.message === 'string'
-                    ? obj.message
-                    : JSON.stringify(obj.message)
-                  : (obj.error as string) || 'API error'
-              }],
+              content: [
+                {
+                  type: 'api_error',
+                  errorType: (obj.error as string) || 'unknown',
+                  errorMessage: obj.message
+                    ? typeof obj.message === 'string'
+                      ? obj.message
+                      : JSON.stringify(obj.message)
+                    : (obj.error as string) || 'API error'
+                }
+              ],
               timestamp: obj.timestamp ? new Date(obj.timestamp).getTime() : Date.now()
             })
             return
@@ -692,40 +804,42 @@ export async function loadSessionHistory(
           const betaMessage = obj.message as Record<string, unknown> | undefined
           if (!betaMessage?.content || !Array.isArray(betaMessage.content)) return
 
-          const blocks: ContentBlock[] = (betaMessage.content as Array<Record<string, unknown>>).map(
-            (block) => {
-              const blockType = block.type as string
-              if (blockType === 'text') {
-                return { type: 'text' as const, text: block.text as string }
-              } else if (blockType === 'tool_use') {
-                return {
-                  type: 'tool_use' as const,
-                  toolName: block.name as string,
-                  toolInput: block.input as Record<string, unknown>,
-                  toolUseId: block.id as string
-                }
-              } else if (blockType === 'tool_result') {
-                const resultContent = block.content
-                let text = ''
-                if (typeof resultContent === 'string') {
-                  text = resultContent
-                } else if (Array.isArray(resultContent)) {
-                  text = resultContent
-                    .map((c: Record<string, unknown>) => (c.text as string) || '')
-                    .join('\n')
-                }
-                return {
-                  type: 'tool_result' as const,
-                  toolUseId: block.tool_use_id as string,
-                  toolResult: text,
-                  isError: block.is_error as boolean
-                }
-              } else if (blockType === 'thinking') {
-                return { type: 'thinking' as const, text: block.thinking as string }
+          const blocks: ContentBlock[] = (
+            betaMessage.content as Array<Record<string, unknown>>
+          ).map((block) => {
+            const blockType = block.type as string
+            if (blockType === 'text') {
+              return { type: 'text' as const, text: block.text as string }
+            } else if (blockType === 'tool_use') {
+              return {
+                type: 'tool_use' as const,
+                toolName: block.name as string,
+                toolInput: block.input as Record<string, unknown>,
+                toolUseId: block.id as string
               }
-              return { type: 'text' as const, text: JSON.stringify(block) }
+            } else if (blockType === 'tool_result') {
+              const resultContent = block.content
+              let text = ''
+              if (typeof resultContent === 'string') {
+                text = resultContent
+              } else if (Array.isArray(resultContent)) {
+                text = resultContent
+                  .map((c: Record<string, unknown>) => (c.text as string) || '')
+                  .join('\n')
+              }
+              return {
+                type: 'tool_result' as const,
+                toolUseId: block.tool_use_id as string,
+                toolResult: text,
+                isError: block.is_error as boolean
+              }
+            } else if (blockType === 'thinking') {
+              return { type: 'thinking' as const, text: block.thinking as string }
+            } else if (blockType === 'fallback') {
+              return { type: 'text' as const, text: fallbackBlockText(block) }
             }
-          )
+            return { type: 'text' as const, text: JSON.stringify(block) }
+          })
 
           const messageId =
             (betaMessage.id as string) || (obj.uuid as string) || `assistant-${messages.length}`
@@ -742,13 +856,28 @@ export async function loadSessionHistory(
           if (existingIdx >= 0) {
             // Merge: preserve old blocks not present in the new update
             const oldBlocks = messages[existingIdx].content
-            const newToolUseIds = new Set(blocks.filter((b): b is Extract<ContentBlock, { type: 'tool_use' }> => b.type === 'tool_use').map(b => b.toolUseId))
-            const newToolResultIds = new Set(blocks.filter((b): b is Extract<ContentBlock, { type: 'tool_result' }> => b.type === 'tool_result').map(b => b.toolUseId))
-            const newHasText = blocks.some(b => b.type === 'text')
-            const newHasThinking = blocks.some(b => b.type === 'thinking')
-            const preserved = oldBlocks.filter(b => {
-              if (b.type === 'tool_use' && b.toolUseId && !newToolUseIds.has(b.toolUseId)) return true
-              if (b.type === 'tool_result' && b.toolUseId && !newToolResultIds.has(b.toolUseId)) return true
+            const newToolUseIds = new Set(
+              blocks
+                .filter(
+                  (b): b is Extract<ContentBlock, { type: 'tool_use' }> => b.type === 'tool_use'
+                )
+                .map((b) => b.toolUseId)
+            )
+            const newToolResultIds = new Set(
+              blocks
+                .filter(
+                  (b): b is Extract<ContentBlock, { type: 'tool_result' }> =>
+                    b.type === 'tool_result'
+                )
+                .map((b) => b.toolUseId)
+            )
+            const newHasText = blocks.some((b) => b.type === 'text')
+            const newHasThinking = blocks.some((b) => b.type === 'thinking')
+            const preserved = oldBlocks.filter((b) => {
+              if (b.type === 'tool_use' && b.toolUseId && !newToolUseIds.has(b.toolUseId))
+                return true
+              if (b.type === 'tool_result' && b.toolUseId && !newToolResultIds.has(b.toolUseId))
+                return true
               if (b.type === 'text' && !newHasText) return true
               if (b.type === 'thinking' && !newHasThinking) return true
               return false
@@ -780,6 +909,14 @@ export async function loadSessionHistory(
               content: [{ type: 'compact_separator' }],
               timestamp: obj.timestamp ? new Date(obj.timestamp).getTime() : Date.now()
             })
+          } else if (subtype === 'model_refusal_fallback' || subtype === 'model_fallback') {
+            // Transcript form uses camelCase (originalModel/fallbackModel) and
+            // carries the CLI's human-readable content. Resurface as a warning
+            // since the refusal swap is sticky for the session.
+            const text =
+              (obj.content as string) ||
+              `Switched models${obj.originalModel ? ` from ${obj.originalModel}` : ''}${obj.fallbackModel ? ` to ${obj.fallbackModel}` : ''}.`
+            warnings.push(text)
           }
         }
       } catch (err) {
@@ -789,9 +926,25 @@ export async function loadSessionHistory(
 
     rl.on('close', async () => {
       const statusLine = await computeTokenMetrics(filePath)
-      resolve({ messages, taskNotifications, customTitle, agentIdToToolUseId, statusLine })
+      resolve({
+        messages,
+        taskNotifications,
+        customTitle,
+        agentIdToToolUseId,
+        statusLine,
+        warnings
+      })
     })
-    rl.on('error', () => resolve({ messages: [], taskNotifications: [], customTitle: null, agentIdToToolUseId: {}, statusLine: null }))
+    rl.on('error', () =>
+      resolve({
+        messages: [],
+        taskNotifications: [],
+        customTitle: null,
+        agentIdToToolUseId: {},
+        statusLine: null,
+        warnings: []
+      })
+    )
   })
 }
 
@@ -831,7 +984,8 @@ export function buildSubagentFileMap(
   const subagentDir = path.join(CLAUDE_PROJECTS_DIR, projectKey, sessionId, 'subagents')
   if (!fs.existsSync(subagentDir)) return {}
 
-  const files = fs.readdirSync(subagentDir)
+  const files = fs
+    .readdirSync(subagentDir)
     .filter((f) => f.startsWith('agent-') && f.endsWith('.jsonl'))
     .sort() // alphabetical = chronological for hex IDs
 
@@ -900,7 +1054,13 @@ export function loadBackgroundOutput(
 
   // Fallback: interpolate path
   const uid = process.getuid?.() ?? 0
-  const outputPath = path.join('/private/tmp', `claude-${uid}`, projectKey, 'tasks', `${taskId}.output`)
+  const outputPath = path.join(
+    '/private/tmp',
+    `claude-${uid}`,
+    projectKey,
+    'tasks',
+    `${taskId}.output`
+  )
 
   if (!fs.existsSync(outputPath)) {
     return { content: null, purged: true }
@@ -946,7 +1106,8 @@ async function parseJsonlFile(filePath: string): Promise<ChatMessage[]> {
           const hasTextBlock = isArray
             ? content.some((b: Record<string, unknown>) => b.type === 'text')
             : typeof content === 'string'
-          const hasToolResult = isArray && content.some((b: Record<string, unknown>) => b.type === 'tool_result')
+          const hasToolResult =
+            isArray && content.some((b: Record<string, unknown>) => b.type === 'tool_result')
 
           if (userType === 'external' && hasTextBlock) {
             let text = ''
@@ -980,15 +1141,22 @@ async function parseJsonlFile(filePath: string): Promise<ChatMessage[]> {
                 for (let i = messages.length - 1; i >= 0; i--) {
                   const msg = messages[i]
                   if (msg.role !== 'assistant') continue
-                  if (msg.content.some((b) => b.type === 'tool_use' && b.toolUseId === block.tool_use_id)) {
+                  if (
+                    msg.content.some(
+                      (b) => b.type === 'tool_use' && b.toolUseId === block.tool_use_id
+                    )
+                  ) {
                     messages[i] = {
                       ...msg,
-                      content: [...msg.content, {
-                        type: 'tool_result',
-                        toolUseId: block.tool_use_id,
-                        toolResult: resultText,
-                        isError: !!block.is_error
-                      }]
+                      content: [
+                        ...msg.content,
+                        {
+                          type: 'tool_result',
+                          toolUseId: block.tool_use_id,
+                          toolResult: resultText,
+                          isError: !!block.is_error
+                        }
+                      ]
                     }
                     break
                   }
@@ -1000,35 +1168,69 @@ async function parseJsonlFile(filePath: string): Promise<ChatMessage[]> {
           const betaMessage = obj.message as Record<string, unknown> | undefined
           if (!betaMessage?.content || !Array.isArray(betaMessage.content)) return
 
-          const blocks: ContentBlock[] = (betaMessage.content as Array<Record<string, unknown>>).map(
-            (block) => {
-              const blockType = block.type as string
-              if (blockType === 'text') return { type: 'text' as const, text: block.text as string }
-              if (blockType === 'tool_use') return { type: 'tool_use' as const, toolName: block.name as string, toolInput: block.input as Record<string, unknown>, toolUseId: block.id as string }
-              if (blockType === 'tool_result') {
-                const rc = block.content
-                let text = ''
-                if (typeof rc === 'string') text = rc
-                else if (Array.isArray(rc)) text = rc.map((c: Record<string, unknown>) => (c.text as string) || '').join('\n')
-                return { type: 'tool_result' as const, toolUseId: block.tool_use_id as string, toolResult: text, isError: block.is_error as boolean }
+          const blocks: ContentBlock[] = (
+            betaMessage.content as Array<Record<string, unknown>>
+          ).map((block) => {
+            const blockType = block.type as string
+            if (blockType === 'text') return { type: 'text' as const, text: block.text as string }
+            if (blockType === 'tool_use')
+              return {
+                type: 'tool_use' as const,
+                toolName: block.name as string,
+                toolInput: block.input as Record<string, unknown>,
+                toolUseId: block.id as string
               }
-              if (blockType === 'thinking') return { type: 'thinking' as const, text: block.thinking as string }
-              return { type: 'text' as const, text: JSON.stringify(block) }
+            if (blockType === 'tool_result') {
+              const rc = block.content
+              let text = ''
+              if (typeof rc === 'string') text = rc
+              else if (Array.isArray(rc))
+                text = rc.map((c: Record<string, unknown>) => (c.text as string) || '').join('\n')
+              return {
+                type: 'tool_result' as const,
+                toolUseId: block.tool_use_id as string,
+                toolResult: text,
+                isError: block.is_error as boolean
+              }
             }
-          )
+            if (blockType === 'thinking')
+              return { type: 'thinking' as const, text: block.thinking as string }
+            return { type: 'text' as const, text: JSON.stringify(block) }
+          })
 
-          const messageId = (betaMessage.id as string) || (obj.uuid as string) || `assistant-${messages.length}`
+          const messageId =
+            (betaMessage.id as string) || (obj.uuid as string) || `assistant-${messages.length}`
           const existingIdx = messages.findIndex((m) => m.id === messageId)
-          const chatMsg: ChatMessage = { id: messageId, role: 'assistant', content: blocks, timestamp: obj.timestamp ? new Date(obj.timestamp).getTime() : Date.now() }
+          const chatMsg: ChatMessage = {
+            id: messageId,
+            role: 'assistant',
+            content: blocks,
+            timestamp: obj.timestamp ? new Date(obj.timestamp).getTime() : Date.now()
+          }
           if (existingIdx >= 0) {
             const oldBlocks = messages[existingIdx].content
-            const newToolUseIds = new Set(blocks.filter((b): b is Extract<ContentBlock, { type: 'tool_use' }> => b.type === 'tool_use').map(b => b.toolUseId))
-            const newToolResultIds = new Set(blocks.filter((b): b is Extract<ContentBlock, { type: 'tool_result' }> => b.type === 'tool_result').map(b => b.toolUseId))
-            const newHasText = blocks.some(b => b.type === 'text')
-            const newHasThinking = blocks.some(b => b.type === 'thinking')
-            const preserved = oldBlocks.filter(b => {
-              if (b.type === 'tool_use' && b.toolUseId && !newToolUseIds.has(b.toolUseId)) return true
-              if (b.type === 'tool_result' && b.toolUseId && !newToolResultIds.has(b.toolUseId)) return true
+            const newToolUseIds = new Set(
+              blocks
+                .filter(
+                  (b): b is Extract<ContentBlock, { type: 'tool_use' }> => b.type === 'tool_use'
+                )
+                .map((b) => b.toolUseId)
+            )
+            const newToolResultIds = new Set(
+              blocks
+                .filter(
+                  (b): b is Extract<ContentBlock, { type: 'tool_result' }> =>
+                    b.type === 'tool_result'
+                )
+                .map((b) => b.toolUseId)
+            )
+            const newHasText = blocks.some((b) => b.type === 'text')
+            const newHasThinking = blocks.some((b) => b.type === 'thinking')
+            const preserved = oldBlocks.filter((b) => {
+              if (b.type === 'tool_use' && b.toolUseId && !newToolUseIds.has(b.toolUseId))
+                return true
+              if (b.type === 'tool_result' && b.toolUseId && !newToolResultIds.has(b.toolUseId))
+                return true
               if (b.type === 'text' && !newHasText) return true
               if (b.type === 'thinking' && !newHasThinking) return true
               return false

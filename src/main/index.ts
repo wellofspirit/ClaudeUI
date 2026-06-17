@@ -33,10 +33,12 @@ const optimizer = {
 import { registerSessionIpc } from './ipc/session.ipc'
 import { registerTerminalIpc } from './ipc/terminal.ipc'
 import { registerAutomationIpc } from './ipc/automation.ipc'
-import { registerRemoteHandlers } from './ipc/remote-handlers'
+import { registerRemoteHandlers, registerRemoteVersionInfo } from './ipc/remote-handlers'
 import { RemoteServer, getNetworkInterfaces } from './services/remote-server'
 import { RemoteDispatcher } from './services/remote-dispatcher'
 import { serviceSession } from './services/service-session'
+import { authManager } from './services/auth-manager'
+import { accountManager } from './services/account-manager'
 import { PluginManager } from './services/plugin-manager'
 import { LogViewer } from './services/log-viewer'
 import { logger } from './services/logger'
@@ -183,6 +185,8 @@ function createWindow(): void {
   })
 
   const sessionManager = registerSessionIpc(mainWindow)
+  authManager.setWindow(mainWindow)
+  accountManager.init(mainWindow)
   registerTerminalIpc(mainWindow)
   const automationManager = registerAutomationIpc(mainWindow)
 
@@ -348,11 +352,11 @@ app.whenReady().then(() => {
   })
 
   // ── Version info IPC (for Settings dialog) ─────────────────────────
-  ipcMain.handle('app:version-info', () => ({
-    appVersion,
-    sdkVersion,
-    cliVersion
-  }))
+  const versionInfo = { appVersion, sdkVersion, cliVersion }
+  ipcMain.handle('app:version-info', () => versionInfo)
+  // Mirror to the remote dispatcher so the web client's Settings dialog can
+  // read the server's build versions.
+  registerRemoteVersionInfo(versionInfo)
 
   // ── App menu (About panel + standard shortcuts) ────────────────────
   const isMac = process.platform === 'darwin'

@@ -22,7 +22,9 @@ export class SessionManager {
     permissionMode?: string,
     model?: string,
     sandboxConfig?: SandboxSettings,
-    thinkingMode?: string
+    thinkingMode?: string,
+    resumeSessionAt?: string,
+    forkSession?: boolean
   ): ClaudeSession {
     // Clean up existing session with same routingId
     const existing = this.sessions.get(routingId)
@@ -30,7 +32,19 @@ export class SessionManager {
       existing.cancel()
     }
 
-    const session = new ClaudeSession(routingId, win, cwd, effort, resumeSessionId, permissionMode, model, sandboxConfig, thinkingMode)
+    const session = new ClaudeSession(
+      routingId,
+      win,
+      cwd,
+      effort,
+      resumeSessionId,
+      permissionMode,
+      model,
+      sandboxConfig,
+      thinkingMode,
+      resumeSessionAt,
+      forkSession
+    )
     session.setInactivityTimeout(this._sessionTimeoutMs)
     this.sessions.set(routingId, session)
     return session

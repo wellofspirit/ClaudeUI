@@ -29,22 +29,25 @@ export function resolveToolVisualState(ctx: ToolStateContext): ToolVisualState {
   if (isPendingApproval) return 'pending'
 
   // Error determination depends on tool type
-  const isError = ctx.isBackgroundBash
-    ? ctx.bgNotificationStatus === 'failed'
-    : ctx.resultIsError
+  const isError = ctx.isBackgroundBash ? ctx.bgNotificationStatus === 'failed' : ctx.resultIsError
 
   if (isError) return 'error'
 
   // Running: foreground bash or background bash without notification
   const bgRunning = ctx.isBackgroundBash && ctx.bgNotificationStatus === null && !ctx.isHistorical
-  const isForegroundBashRunning = ctx.toolName === 'Bash' && !ctx.isBackgroundBash && !ctx.hasResult && !isPendingApproval && !ctx.isHistorical
+  const isForegroundBashRunning =
+    ctx.toolName === 'Bash' &&
+    !ctx.isBackgroundBash &&
+    !ctx.hasResult &&
+    !isPendingApproval &&
+    !ctx.isHistorical
 
   if (bgRunning || isForegroundBashRunning) return 'running'
 
   // Success
   const isSuccess = ctx.isBackgroundBash
-    ? (ctx.bgNotificationStatus !== null && ctx.bgNotificationStatus !== 'failed')
-    : (ctx.hasResult && !isError)
+    ? ctx.bgNotificationStatus !== null && ctx.bgNotificationStatus !== 'failed'
+    : ctx.hasResult && !isError
 
   if (isSuccess) return 'success'
 
@@ -60,7 +63,7 @@ export const TOOL_BORDER_CLASSES: Record<ToolVisualState, string> = {
   running: 'border-accent/30',
   success: 'border-success/30',
   loaded: 'border-border',
-  idle: 'border-border',
+  idle: 'border-border'
 }
 
 // ---------------------------------------------------------------------------
@@ -91,7 +94,9 @@ export function getSummary(block: ToolUseBlock): string {
     return `${n} question${n !== 1 ? 's' : ''}`
   }
   if (block.toolName === 'TodoWrite' && Array.isArray(input.todos)) {
-    const completed = input.todos.filter((t: Record<string, unknown>) => t.status === 'completed').length
+    const completed = input.todos.filter(
+      (t: Record<string, unknown>) => t.status === 'completed'
+    ).length
     return `${completed}/${input.todos.length} tasks`
   }
   if (block.toolName === 'mcp__claude-ui__render_mermaid') {
@@ -104,8 +109,10 @@ export function getSummary(block: ToolUseBlock): string {
     return input.directory ? `show ${String(input.directory).slice(0, 8)}` : 'show mockup'
   }
   if (isAgentTool(block.toolName) && input.description) return String(input.description)
-  if (block.toolName === 'TaskOutput' && input.task_id) return `task ${String(input.task_id).slice(0, 8)}…`
-  if (block.toolName === 'TaskStop' && input.task_id) return `stop ${String(input.task_id).slice(0, 8)}…`
+  if (block.toolName === 'TaskOutput' && input.task_id)
+    return `task ${String(input.task_id).slice(0, 8)}…`
+  if (block.toolName === 'TaskStop' && input.task_id)
+    return `stop ${String(input.task_id).slice(0, 8)}…`
 
   return JSON.stringify(input)
 }

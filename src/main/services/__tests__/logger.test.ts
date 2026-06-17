@@ -79,7 +79,11 @@ describe('LogRingBuffer', () => {
 type LogLevel = 'debug' | 'info' | 'warn' | 'error' | 'silent'
 
 const LEVEL_ORDER: Record<LogLevel, number> = {
-  debug: 0, info: 1, warn: 2, error: 3, silent: 4
+  debug: 0,
+  info: 1,
+  warn: 2,
+  error: 3,
+  silent: 4
 }
 
 function parseFilter(raw: string): { global: LogLevel; sources: Map<string, LogLevel> } {
@@ -87,7 +91,10 @@ function parseFilter(raw: string): { global: LogLevel; sources: Map<string, LogL
   const sources = new Map<string, LogLevel>()
   if (!raw) return { global: defaultLevel, sources }
 
-  const parts = raw.split(',').map((s) => s.trim()).filter(Boolean)
+  const parts = raw
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
   let resolvedGlobal: LogLevel = defaultLevel
 
   for (const part of parts) {

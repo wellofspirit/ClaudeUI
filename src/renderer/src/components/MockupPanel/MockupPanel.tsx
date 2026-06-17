@@ -1,7 +1,11 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
-import { buildMockupUrl, mockupOriginFor } from '../../../../shared/mockup-url'
 import { useMockupBridge } from '../../hooks/useMockupBridge'
+import {
+  MOCKUP_IFRAME_SANDBOX,
+  mockupExpectedOrigin,
+  mockupReloadTarget
+} from '../mockup-transport'
 import { MockupPanelView } from './View'
 
 interface Props {
@@ -70,14 +74,14 @@ export function MockupPanel({ style }: Props): React.JSX.Element {
   // `dark` stays in the URL because dark mode needs a server-side HTML
   // rewrite to add `class="dark"` to <html>.
   const iframeSrc =
-    cwd && mockupDir
-      ? buildMockupUrl(cwd, mockupDir, {
-          dark: darkMode,
-          parentOrigin: window.location.origin
-        })
-      : null
+    cwd && mockupDir ? window.api.getMockupPreviewUrl(cwd, mockupDir, { dark: darkMode }) : null
 
-  const { logs, errors, clearLogs } = useMockupBridge(iframeRef, mockupDir, version)
+  const { logs, errors, clearLogs } = useMockupBridge(
+    iframeRef,
+    mockupDir,
+    version,
+    mockupDir ? mockupExpectedOrigin(mockupDir) : undefined
+  )
 
   // Trigger an in-place iframe reload on version bump — after the initial
   // load. First render uses the src attribute; subsequent file changes
@@ -89,7 +93,7 @@ export function MockupPanel({ style }: Props): React.JSX.Element {
     if (!mockupDir) return
     const iframe = iframeRef.current
     if (!iframe?.contentWindow) return
-    iframe.contentWindow.postMessage({ type: 'mockup:reload' }, mockupOriginFor(mockupDir))
+    iframe.contentWindow.postMessage({ type: 'mockup:reload' }, mockupReloadTarget(mockupDir))
   }, [version, mockupDir])
 
   // Auto-pop the drawer when the error count grows (e.g. 0 → 1) so users
@@ -127,6 +131,7 @@ export function MockupPanel({ style }: Props): React.JSX.Element {
       html={html}
       error={error}
       src={iframeSrc}
+      sandbox={MOCKUP_IFRAME_SANDBOX}
       onClose={handleClose}
       onCopyHtml={handleCopyHtml}
       onRefresh={handleRefresh}

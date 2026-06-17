@@ -30,21 +30,27 @@ export function RemoteAccessModalView({
   onStart,
   onStop,
   onCopy,
-  onClose,
+  onClose
 }: RemoteAccessModalViewProps): React.JSX.Element {
   const overlayRef = useRef<HTMLDivElement>(null)
 
   const shareUrl = status?.tunnelUrl ?? status?.lanUrl ?? null
   const displayUrl = shareUrl ? shareUrl.replace(/#.*$/, '') : null
 
-  const handleOverlayClick = useCallback((e: React.MouseEvent) => {
-    if (e.target === overlayRef.current) onClose()
-  }, [onClose])
+  const handleOverlayClick = useCallback(
+    (e: React.MouseEvent) => {
+      if (e.target === overlayRef.current) onClose()
+    },
+    [onClose]
+  )
 
   const isRunning = status?.running ?? false
   const isTunnelActive = status?.tunnelState != null && status.tunnelState !== 'stopped'
   const isTunnelConnected = status?.tunnelState === 'connected'
-  const isTunnelLoading = status?.tunnelState === 'starting' || status?.tunnelState === 'downloading' || status?.tunnelState === 'restarting'
+  const isTunnelLoading =
+    status?.tunnelState === 'starting' ||
+    status?.tunnelState === 'downloading' ||
+    status?.tunnelState === 'restarting'
   const isTunnelError = status?.tunnelState === 'error'
 
   return (
@@ -57,7 +63,17 @@ export function RemoteAccessModalView({
         {/* Header */}
         <div className="flex items-center justify-between px-5 py-4 border-b border-border">
           <div className="flex items-center gap-2.5">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="text-accent">
+            <svg
+              width="18"
+              height="18"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.8"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className="text-accent"
+            >
               <path d="M5 12.55a11 11 0 0114.08 0" />
               <path d="M1.42 9a16 16 0 0121.16 0" />
               <path d="M8.53 16.11a6 6 0 016.95 0" />
@@ -69,7 +85,15 @@ export function RemoteAccessModalView({
             onClick={onClose}
             className="w-7 h-7 flex items-center justify-center rounded-md hover:bg-bg-hover text-text-muted hover:text-text-primary transition-colors"
           >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+            <svg
+              width="14"
+              height="14"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+            >
               <path d="M18 6L6 18M6 6l12 12" />
             </svg>
           </button>
@@ -81,13 +105,25 @@ export function RemoteAccessModalView({
             /* Not running state */
             <div className="flex flex-col items-center gap-4 py-4">
               <div className="w-16 h-16 rounded-2xl bg-bg-tertiary flex items-center justify-center">
-                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className="text-text-muted">
+                <svg
+                  width="28"
+                  height="28"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.5"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  className="text-text-muted"
+                >
                   <rect x="5" y="2" width="14" height="20" rx="2" ry="2" />
                   <path d="M12 18h.01" />
                 </svg>
               </div>
               <div className="text-center">
-                <div className="text-text-primary text-[13px] font-medium mb-1">Control from your phone</div>
+                <div className="text-text-primary text-[13px] font-medium mb-1">
+                  Control from your phone
+                </div>
                 <div className="text-text-muted text-[12px] leading-relaxed">
                   Start the remote server, then scan the QR code on your phone to connect.
                 </div>
@@ -95,7 +131,9 @@ export function RemoteAccessModalView({
 
               {/* Mode toggle */}
               <div className="w-full">
-                <label className="block text-[11px] text-text-muted mb-1.5 px-0.5">Connection Mode</label>
+                <label className="block text-[11px] text-text-muted mb-1.5 px-0.5">
+                  Connection Mode
+                </label>
                 <div className="flex rounded-lg border border-border overflow-hidden">
                   <button
                     onClick={() => onSetTunnelMode(false)}
@@ -120,7 +158,16 @@ export function RemoteAccessModalView({
                 </div>
                 {tunnelMode && (
                   <div className="mt-1.5 text-[11px] text-text-muted px-0.5 flex items-center gap-1">
-                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <svg
+                      width="12"
+                      height="12"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    >
                       <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
                       <path d="M7 11V7a5 5 0 0110 0v4" />
                     </svg>
@@ -132,12 +179,18 @@ export function RemoteAccessModalView({
               {/* Network interface picker (only for LAN mode) */}
               {!tunnelMode && interfaces.length > 0 && (
                 <div className="w-full">
-                  <label className="block text-[11px] text-text-muted mb-1.5 px-0.5">Network Interface</label>
+                  <label className="block text-[11px] text-text-muted mb-1.5 px-0.5">
+                    Network Interface
+                  </label>
                   <select
                     value={selectedHost}
                     onChange={(e) => onSelectHost(e.target.value)}
                     className="w-full bg-bg-primary border border-border rounded-lg px-3 py-2 text-[12px] text-text-primary outline-none focus:border-accent transition-colors appearance-none cursor-pointer"
-                    style={{ backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='2' stroke-linecap='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E")`, backgroundRepeat: 'no-repeat', backgroundPosition: 'right 10px center' }}
+                    style={{
+                      backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='2' stroke-linecap='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E")`,
+                      backgroundRepeat: 'no-repeat',
+                      backgroundPosition: 'right 10px center'
+                    }}
                   >
                     <option value="">All interfaces (auto-detect)</option>
                     {interfaces.map((iface) => (
@@ -180,15 +233,27 @@ export function RemoteAccessModalView({
                       <>
                         <div className="w-2 h-2 rounded-full bg-warning animate-pulse" />
                         <span className="text-text-secondary">
-                          {status.tunnelState === 'downloading' ? 'Downloading tunnel binary...' :
-                           status.tunnelState === 'restarting' ? 'Tunnel reconnecting...' :
-                           'Tunnel starting...'}
+                          {status.tunnelState === 'downloading'
+                            ? 'Downloading tunnel binary...'
+                            : status.tunnelState === 'restarting'
+                              ? 'Tunnel reconnecting...'
+                              : 'Tunnel starting...'}
                         </span>
                       </>
                     )}
                     {isTunnelConnected && (
                       <>
-                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-success">
+                        <svg
+                          width="12"
+                          height="12"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          className="text-success"
+                        >
                           <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
                           <path d="M7 11V7a5 5 0 0110 0v4" />
                         </svg>
@@ -198,15 +263,18 @@ export function RemoteAccessModalView({
                     {isTunnelError && (
                       <>
                         <div className="w-2 h-2 rounded-full bg-danger" />
-                        <span className="text-danger text-[11px] truncate">{status.tunnelError || 'Tunnel error'}</span>
+                        <span className="text-danger text-[11px] truncate">
+                          {status.tunnelError || 'Tunnel error'}
+                        </span>
                       </>
                     )}
                   </div>
-                  {(isTunnelConnected || isTunnelLoading) && status.tunnelState === 'restarting' && (
-                    <div className="text-[10px] text-text-muted mt-1 px-1">
-                      URL may change — re-scan QR if needed
-                    </div>
-                  )}
+                  {(isTunnelConnected || isTunnelLoading) &&
+                    status.tunnelState === 'restarting' && (
+                      <div className="text-[10px] text-text-muted mt-1 px-1">
+                        URL may change — re-scan QR if needed
+                      </div>
+                    )}
                 </div>
               )}
 
@@ -222,11 +290,29 @@ export function RemoteAccessModalView({
                     title="Copy URL"
                   >
                     {copied ? (
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="text-success">
+                      <svg
+                        width="14"
+                        height="14"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        className="text-success"
+                      >
                         <path d="M20 6L9 17l-5-5" />
                       </svg>
                     ) : (
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                      <svg
+                        width="14"
+                        height="14"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="1.8"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      >
                         <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
                         <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1" />
                       </svg>
@@ -238,7 +324,9 @@ export function RemoteAccessModalView({
               {/* Connection status */}
               <div className="w-full flex items-center justify-between text-[12px] px-1">
                 <div className="flex items-center gap-1.5">
-                  <div className={`w-2 h-2 rounded-full ${(status.connectedClients ?? 0) > 0 ? 'bg-success' : 'bg-warning animate-pulse'}`} />
+                  <div
+                    className={`w-2 h-2 rounded-full ${(status.connectedClients ?? 0) > 0 ? 'bg-success' : 'bg-warning animate-pulse'}`}
+                  />
                   <span className="text-text-secondary">
                     {(status.connectedClients ?? 0) === 0
                       ? 'Waiting for connection...'
@@ -252,7 +340,9 @@ export function RemoteAccessModalView({
               {status.clientIps && status.clientIps.length > 0 && (
                 <div className="w-full text-[11px] text-text-muted px-1">
                   {status.clientIps.map((ip, i) => (
-                    <span key={i} className="mr-2">{ip}</span>
+                    <span key={i} className="mr-2">
+                      {ip}
+                    </span>
                   ))}
                 </div>
               )}

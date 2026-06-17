@@ -2,18 +2,53 @@ import { Highlight, themes, normalizeTokens, Prism } from 'prism-react-renderer'
 
 /** Map file extensions to Prism language identifiers */
 const EXT_TO_LANG: Record<string, string> = {
-  ts: 'typescript', tsx: 'tsx', js: 'javascript', jsx: 'jsx',
-  mjs: 'javascript', cjs: 'javascript', mts: 'typescript', cts: 'typescript',
-  py: 'python', rb: 'ruby', rs: 'rust', go: 'go',
-  java: 'java', kt: 'kotlin', c: 'c', cpp: 'cpp', h: 'c', hpp: 'cpp',
-  cs: 'csharp', css: 'css', scss: 'scss', html: 'markup', xml: 'markup',
-  json: 'json', yaml: 'yaml', yml: 'yaml', toml: 'toml',
-  md: 'markdown', sh: 'bash', bash: 'bash', zsh: 'bash',
-  sql: 'sql', graphql: 'graphql', swift: 'swift',
-  dockerfile: 'docker', makefile: 'makefile',
-  vue: 'markup', svelte: 'markup', php: 'php', r: 'r',
-  scala: 'scala', lua: 'lua', perl: 'perl', zig: 'zig',
-  elixir: 'elixir', erlang: 'erlang', haskell: 'haskell',
+  ts: 'typescript',
+  tsx: 'tsx',
+  js: 'javascript',
+  jsx: 'jsx',
+  mjs: 'javascript',
+  cjs: 'javascript',
+  mts: 'typescript',
+  cts: 'typescript',
+  py: 'python',
+  rb: 'ruby',
+  rs: 'rust',
+  go: 'go',
+  java: 'java',
+  kt: 'kotlin',
+  c: 'c',
+  cpp: 'cpp',
+  h: 'c',
+  hpp: 'cpp',
+  cs: 'csharp',
+  css: 'css',
+  scss: 'scss',
+  html: 'markup',
+  xml: 'markup',
+  json: 'json',
+  yaml: 'yaml',
+  yml: 'yaml',
+  toml: 'toml',
+  md: 'markdown',
+  sh: 'bash',
+  bash: 'bash',
+  zsh: 'bash',
+  sql: 'sql',
+  graphql: 'graphql',
+  swift: 'swift',
+  dockerfile: 'docker',
+  makefile: 'makefile',
+  vue: 'markup',
+  svelte: 'markup',
+  php: 'php',
+  r: 'r',
+  scala: 'scala',
+  lua: 'lua',
+  perl: 'perl',
+  zig: 'zig',
+  elixir: 'elixir',
+  erlang: 'erlang',
+  haskell: 'haskell'
 }
 
 /** Resolve a file path to a Prism language identifier */
@@ -71,10 +106,7 @@ function resolveColor(types: string[]): string | undefined {
  * literals, block comments) are highlighted correctly because Prism sees
  * full context.
  */
-export function tokenizeLines(
-  code: string,
-  language: string
-): SyntaxToken[][] {
+export function tokenizeLines(code: string, language: string): SyntaxToken[][] {
   // Get the Prism grammar for this language
   const grammar = Prism.languages[language]
   if (!grammar) {
@@ -92,7 +124,7 @@ export function tokenizeLines(
   return normalized.map((line) =>
     line.map((token) => ({
       content: token.content,
-      color: resolveColor(token.types),
+      color: resolveColor(token.types)
     }))
   )
 }

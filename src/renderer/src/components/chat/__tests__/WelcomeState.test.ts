@@ -22,8 +22,40 @@ import { describe, it, expect } from 'vitest'
 // Replicated pure functions (mirrors WelcomeState.tsx + TopBar.tsx exactly)
 // ---------------------------------------------------------------------------
 
-const ADJECTIVES = ['swift', 'calm', 'bold', 'keen', 'warm', 'cool', 'wild', 'soft', 'fair', 'deep', 'pure', 'dark', 'safe', 'firm', 'vast']
-const NOUNS = ['river', 'stone', 'cloud', 'flame', 'frost', 'ridge', 'creek', 'grove', 'bloom', 'cedar', 'maple', 'cliff', 'brook', 'trail', 'haven']
+const ADJECTIVES = [
+  'swift',
+  'calm',
+  'bold',
+  'keen',
+  'warm',
+  'cool',
+  'wild',
+  'soft',
+  'fair',
+  'deep',
+  'pure',
+  'dark',
+  'safe',
+  'firm',
+  'vast'
+]
+const NOUNS = [
+  'river',
+  'stone',
+  'cloud',
+  'flame',
+  'frost',
+  'ridge',
+  'creek',
+  'grove',
+  'bloom',
+  'cedar',
+  'maple',
+  'cliff',
+  'brook',
+  'trail',
+  'haven'
+]
 
 function generateRandomName(): string {
   const adj = ADJECTIVES[Math.floor(Math.random() * ADJECTIVES.length)]
@@ -32,7 +64,10 @@ function generateRandomName(): string {
 }
 
 function sanitizeWorktreeName(val: string): string {
-  return val.toLowerCase().replace(/[^a-z0-9-]/g, '').slice(0, 30)
+  return val
+    .toLowerCase()
+    .replace(/[^a-z0-9-]/g, '')
+    .slice(0, 30)
 }
 
 function formatCost(cost: number): string {

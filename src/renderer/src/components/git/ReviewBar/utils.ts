@@ -16,12 +16,16 @@ export function composeReviewPrompt(comments: DiffComment[]): string {
 
   for (const [file, fileComments] of Object.entries(byFile)) {
     for (const c of fileComments) {
-      const lineLabel = c.endLineNumber > c.lineNumber
-        ? `lines ${c.lineNumber}\u2013${c.endLineNumber}`
-        : `line ${c.lineNumber}`
+      const lineLabel =
+        c.endLineNumber > c.lineNumber
+          ? `lines ${c.lineNumber}\u2013${c.endLineNumber}`
+          : `line ${c.lineNumber}`
       parts.push(`**${file}** (${lineLabel}, ${c.side} side):`)
       if (c.lineContent) {
-        const quoted = c.lineContent.split('\n').map((l) => `> ${l}`).join('\n')
+        const quoted = c.lineContent
+          .split('\n')
+          .map((l) => `> ${l}`)
+          .join('\n')
         parts.push(quoted)
       }
       parts.push(`Comment: "${c.comment}"\n`)

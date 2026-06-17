@@ -22,12 +22,15 @@ export function SkillsDialog({ open, onClose, cwd }: SkillsDialogProps): React.J
     setLoading(true)
     // Clear old skills immediately so the View's auto-select effect re-fires on the new cwd
     setSkills([])
-    window.api.loadSkillDetails(cwd).then((result) => {
-      setSkills(result)
-      setLoading(false)
-    }).catch(() => {
-      setLoading(false)
-    })
+    window.api
+      .loadSkillDetails(cwd)
+      .then((result) => {
+        setSkills(result)
+        setLoading(false)
+      })
+      .catch(() => {
+        setLoading(false)
+      })
   }, [open, cwd])
 
   useEffect(() => {
@@ -44,12 +47,5 @@ export function SkillsDialog({ open, onClose, cwd }: SkillsDialogProps): React.J
 
   if (!open) return null
 
-  return (
-    <SkillsDialogView
-      skills={skills}
-      loading={loading}
-      cwd={cwd}
-      onClose={onClose}
-    />
-  )
+  return <SkillsDialogView skills={skills} loading={loading} cwd={cwd} onClose={onClose} />
 }

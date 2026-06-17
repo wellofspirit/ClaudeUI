@@ -114,7 +114,11 @@ function notify(level: LogLevel, source: string, message: string, err?: unknown)
   }
   logRing.push(entry)
   for (const fn of subscribers) {
-    try { fn(entry) } catch { /* don't let subscriber errors break logging */ }
+    try {
+      fn(entry)
+    } catch {
+      /* don't let subscriber errors break logging */
+    }
   }
 }
 
@@ -155,7 +159,10 @@ function parseFilter(raw: string): { global: LogLevel; sources: Map<string, LogL
 
   if (!raw) return { global: defaultLevel, sources }
 
-  const parts = raw.split(',').map((s) => s.trim()).filter(Boolean)
+  const parts = raw
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
   let resolvedGlobal: LogLevel = defaultLevel
 
   for (const part of parts) {

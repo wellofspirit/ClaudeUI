@@ -18,13 +18,14 @@ The artifact preview is a single iframe injected into the main chat page. Captur
        &formattedSpreadsheets=true"
   allow="fullscreen; clipboard-write"
   referrerpolicy="no-referrer"
-  style="zoom: 1;">
+  style="zoom: 1;"
+>
 </iframe>
 ```
 
 ### Real boundary: origin isolation, not the sandbox attribute
 
-The sandbox flags `allow-scripts allow-same-origin` would be dangerous if the iframe were same-origin with the host page — the artifact could read `parent.document`, exfiltrate cookies, etc. Anthropic defuses this by serving the iframe from **`claudeusercontent.com`**, a separate eTLD+1. Because the parent is `claude.ai`, the iframe is cross-origin; `allow-same-origin` just means "same as *claudeusercontent.com*," which gives the artifact:
+The sandbox flags `allow-scripts allow-same-origin` would be dangerous if the iframe were same-origin with the host page — the artifact could read `parent.document`, exfiltrate cookies, etc. Anthropic defuses this by serving the iframe from **`claudeusercontent.com`**, a separate eTLD+1. Because the parent is `claude.ai`, the iframe is cross-origin; `allow-same-origin` just means "same as _claudeusercontent.com_," which gives the artifact:
 
 - Its own cookie jar, localStorage, IndexedDB
 - `fetch()` / `XMLHttpRequest` that actually work (CORS still applies to outbound calls)
@@ -117,16 +118,16 @@ anthropic-allowed-parent-domains: https://claude.ai
 
 Reading the CSP:
 
-| Directive | Effect |
-|---|---|
+| Directive                                              | Effect                                                                                                                                                                                                                                                                             |
+| ------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `script-src 'unsafe-eval' 'unsafe-inline' + allowlist` | Inline `<script>` and `eval()` are **allowed** — needed because the generated artifact is essentially untrusted inline HTML. The allowlist pins external CDNs (jQuery, Tailwind CDN, Pyodide, cdnjs, jsDelivr/npm + gh/python-visualization). Mitigated solely by the origin wall. |
-| `connect-src` | Narrow CDN-only allowlist. Notably **`api.github.com` is NOT allowed** — that's why an artifact that calls `fetch("https://api.github.com/...")` fails with "Failed to fetch". |
-| `worker-src 'self' blob:` | Web Workers and blob-URL workers allowed. |
-| `object-src 'none'` | No Flash / applets / plugins. |
-| `base-uri` / `form-action` locked | Can't inject `<base>` or redirect a form. |
-| `frame-ancestors` | Only approved parents can embed this content. Complements sandbox. |
-| `report-uri` → Datadog | CSP violations get reported (observability). |
-| `anthropic-allowed-parent-domains` | Anthropic's own runtime check on top of `frame-ancestors`. |
+| `connect-src`                                          | Narrow CDN-only allowlist. Notably **`api.github.com` is NOT allowed** — that's why an artifact that calls `fetch("https://api.github.com/...")` fails with "Failed to fetch".                                                                                                     |
+| `worker-src 'self' blob:`                              | Web Workers and blob-URL workers allowed.                                                                                                                                                                                                                                          |
+| `object-src 'none'`                                    | No Flash / applets / plugins.                                                                                                                                                                                                                                                      |
+| `base-uri` / `form-action` locked                      | Can't inject `<base>` or redirect a form.                                                                                                                                                                                                                                          |
+| `frame-ancestors`                                      | Only approved parents can embed this content. Complements sandbox.                                                                                                                                                                                                                 |
+| `report-uri` → Datadog                                 | CSP violations get reported (observability).                                                                                                                                                                                                                                       |
+| `anthropic-allowed-parent-domains`                     | Anthropic's own runtime check on top of `frame-ancestors`.                                                                                                                                                                                                                         |
 
 ## 3. Parent ↔ artifact communication
 
@@ -141,7 +142,7 @@ Think of it as two orthogonal defenses:
 1. **Origin separation** (the real wall): served from `claudeusercontent.com`.
 2. **Sandbox flags + CSP + Permissions-Policy** (belt-and-braces): even if attacker finds an origin bypass, they still can't open popups, navigate top, access mic, or hit `api.github.com`.
 
-Dropping `allow-same-origin` would make it *even* stricter (null origin) but then the artifact loses localStorage and usable fetch/WebSocket — too limiting for rich demos. So Anthropic chose "full power within its own sandbox domain" over "no power at all."
+Dropping `allow-same-origin` would make it _even_ stricter (null origin) but then the artifact loses localStorage and usable fetch/WebSocket — too limiting for rich demos. So Anthropic chose "full power within its own sandbox domain" over "no power at all."
 
 ## 5. Applying this to ClaudeUI's mockup tool
 
@@ -254,12 +255,16 @@ Two iframes were captured on the same page (possibly thumbnail + full preview):
 
 ```html
 <!-- thumbnail variant -->
-<iframe sandbox="allow-scripts allow-forms allow-popups allow-same-origin"
-        allow="camera; microphone; geolocation">
-
-<!-- full preview variant -->
-<iframe sandbox="allow-scripts allow-forms allow-popups allow-modals allow-downloads allow-same-origin"
-        allow="camera; microphone; geolocation">
+<iframe
+  sandbox="allow-scripts allow-forms allow-popups allow-same-origin"
+  allow="camera; microphone; geolocation"
+>
+  <!-- full preview variant -->
+  <iframe
+    sandbox="allow-scripts allow-forms allow-popups allow-modals allow-downloads allow-same-origin"
+    allow="camera; microphone; geolocation"
+  ></iframe
+></iframe>
 ```
 
 Much more permissive than `/new` (which was `allow-scripts allow-same-origin` + `fullscreen; clipboard-write`):
@@ -290,8 +295,15 @@ No `script-src`, no `connect-src` restrictions. The model here is: origin isolat
 Every served design HTML gets two blocks auto-injected at the top:
 
 ```html
-<style data-omelette-injected>html,body{background:transparent}</style>
-<script data-omelette-injected>…</script>
+<style data-omelette-injected>
+  html,
+  body {
+    background: transparent;
+  }
+</style>
+<script data-omelette-injected>
+  …
+</script>
 ```
 
 Decoded capabilities of the runtime (de-minified highlights):
@@ -300,10 +312,10 @@ Decoded capabilities of the runtime (de-minified highlights):
 
 ```js
 const PARENTS = [
-  "https://claude.ai",
-  "https://preview.claude.ai",
-  "https://eap-omelette.claude.ai"  // internal alpha?
-];
+  'https://claude.ai',
+  'https://preview.claude.ai',
+  'https://eap-omelette.claude.ai' // internal alpha?
+]
 ```
 
 All outgoing postMessages are targeted to these origins (broadcast to each); all incoming messages are filtered by both `event.origin ∈ PARENTS` **and** `event.source === window.parent`.
@@ -335,9 +347,10 @@ So the Design UI can show a real DevTools-like console for the sandbox.
 ### 3. Auto-resize
 
 ```js
-const post = () => parent.postMessage({type:"omelette:height", height: documentElement.scrollHeight}, "*");
-window.addEventListener("load", post);
-new ResizeObserver(post).observe(documentElement);
+const post = () =>
+  parent.postMessage({ type: 'omelette:height', height: documentElement.scrollHeight }, '*')
+window.addEventListener('load', post)
+new ResizeObserver(post).observe(documentElement)
 ```
 
 Parent reads `omelette:height` and resizes the iframe container. This is why the designs in the right panel fit flush without internal scrollbars.
@@ -375,14 +388,15 @@ This is a **live RPC bridge**: the sandboxed design can ask Claude to complete a
 
 ```js
 window.omelette = {
-  writeFile: (path, content) => new Promise((resolve, reject) => {
-    const id = `f${++seq}`;
-    const timer = setTimeout(() => resolve(), 3000); // soft-fail
-    for (const parent of PARENTS) {
-      window.parent.postMessage({__om_file: true, id, op: "write", path, content}, parent);
-    }
-  })
-};
+  writeFile: (path, content) =>
+    new Promise((resolve, reject) => {
+      const id = `f${++seq}`
+      const timer = setTimeout(() => resolve(), 3000) // soft-fail
+      for (const parent of PARENTS) {
+        window.parent.postMessage({ __om_file: true, id, op: 'write', path, content }, parent)
+      }
+    })
+}
 ```
 
 Lets the iframe persist files (images generated on canvas, exported JSON, etc.) back into the project sidebar — a nice self-saving feature.
@@ -401,28 +415,28 @@ The parent Design UI can run arbitrary JS inside the iframe for inspection/comma
 
 ## A5. Message protocol summary
 
-| Direction | Shape | Purpose |
-|---|---|---|
-| iframe → parent | `{__omelette_log, type, data}` | console/error forwarding |
-| iframe → parent | `{type: "omelette:height", height}` | auto-resize |
-| iframe → parent | `{__om_api: true, id, body}` | LLM completion request |
-| parent → iframe | `{__om_api_r: true, id, chunk/text/error/done}` | LLM streaming response |
-| iframe → parent | `{__om_file: true, id, op:"write", path, content}` | save file |
-| parent → iframe | `{__om_file_r: true, id, ok/error}` | file write ack |
-| parent → iframe | `{__om_eval: true, id, code}` | remote eval |
-| iframe → parent | `{__om_eval_r: 1, id, ok/v/e}` | eval result |
+| Direction       | Shape                                              | Purpose                  |
+| --------------- | -------------------------------------------------- | ------------------------ |
+| iframe → parent | `{__omelette_log, type, data}`                     | console/error forwarding |
+| iframe → parent | `{type: "omelette:height", height}`                | auto-resize              |
+| iframe → parent | `{__om_api: true, id, body}`                       | LLM completion request   |
+| parent → iframe | `{__om_api_r: true, id, chunk/text/error/done}`    | LLM streaming response   |
+| iframe → parent | `{__om_file: true, id, op:"write", path, content}` | save file                |
+| parent → iframe | `{__om_file_r: true, id, ok/error}`                | file write ack           |
+| parent → iframe | `{__om_eval: true, id, code}`                      | remote eval              |
+| iframe → parent | `{__om_eval_r: 1, id, ok/v/e}`                     | eval result              |
 
 ## A6. Comparison
 
-|  | `/new` artifact | `/design` preview |
-|---|---|---|
-| Host origin | Single `www.claudeusercontent.com` | Per-project `<uuid>.claudeusercontent.com` |
-| Sandbox flags | `allow-scripts allow-same-origin` | + `allow-forms`, `allow-popups`, `allow-modals`, `allow-downloads` |
-| Permissions policy | `fullscreen; clipboard-write` | `camera; microphone; geolocation` |
-| Response CSP | Full (script/connect/worker/etc. allowlisted) | Minimal (only `frame-ancestors`) |
-| connect-src | Allowlist of CDNs only | Unrestricted (sandbox + subdomain is the control) |
-| Injected runtime | None visible | "omelette" — console forwarding, auto-resize, `window.claude`, `window.omelette.writeFile`, eval bridge |
-| Target use case | Share-ready snippets | Full prototyping workspace with LLM calls, file I/O, hardware access |
+|                    | `/new` artifact                               | `/design` preview                                                                                       |
+| ------------------ | --------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| Host origin        | Single `www.claudeusercontent.com`            | Per-project `<uuid>.claudeusercontent.com`                                                              |
+| Sandbox flags      | `allow-scripts allow-same-origin`             | + `allow-forms`, `allow-popups`, `allow-modals`, `allow-downloads`                                      |
+| Permissions policy | `fullscreen; clipboard-write`                 | `camera; microphone; geolocation`                                                                       |
+| Response CSP       | Full (script/connect/worker/etc. allowlisted) | Minimal (only `frame-ancestors`)                                                                        |
+| connect-src        | Allowlist of CDNs only                        | Unrestricted (sandbox + subdomain is the control)                                                       |
+| Injected runtime   | None visible                                  | "omelette" — console forwarding, auto-resize, `window.claude`, `window.omelette.writeFile`, eval bridge |
+| Target use case    | Share-ready snippets                          | Full prototyping workspace with LLM calls, file I/O, hardware access                                    |
 
 ## A7. Takeaways for ClaudeUI
 
@@ -438,7 +452,7 @@ The parent Design UI can run arbitrary JS inside the iframe for inspection/comma
 
 ---
 
-# Appendix B — How `/design` does *iterative* updates
+# Appendix B — How `/design` does _iterative_ updates
 
 The really clever part of `/design` isn't the initial generation — it's how every subsequent change avoids a round-trip to the LLM. Three independent layers:
 
@@ -448,9 +462,9 @@ When Claude generates a design, it wraps tweakable values in sentinel comments i
 
 ```js
 // ---- Tweakable defaults ----
-const TWEAKS = /*EDITMODE-BEGIN*/{
-  "count": 20
-}/*EDITMODE-END*/;
+const TWEAKS = /*EDITMODE-BEGIN*/ {
+  count: 20
+} /*EDITMODE-END*/
 ```
 
 The `/*EDITMODE-BEGIN*/ ... /*EDITMODE-END*/` pair marks a JSON-valued region the parent can safely substitute by pure string replacement — no AST, no AI call. The parent saves new values into the file by rewriting exactly the bytes between those markers.
@@ -461,7 +475,7 @@ Claude also injects a self-contained "Tweaks" panel into the HTML:
 <div id="tweaks" class="...">
   <div class="title">TWEAKS</div>
   <label>Loaders shown <span id="tw-count-val">20</span></label>
-  <input id="tw-count" type="range" min="5" max="30" value="20">
+  <input id="tw-count" type="range" min="5" max="30" value="20" />
 </div>
 ```
 
@@ -470,24 +484,25 @@ And the wiring that connects the panel to the DOM + file system:
 ```js
 function applyCount(n) {
   document.querySelectorAll('.grid .cell').forEach((c, i) => {
-    c.classList.toggle('hidden', i >= n);
-  });
-  document.getElementById('tw-count-val').textContent = n;
-  const slider = document.getElementById('tw-count');
-  if (slider && +slider.value !== n) slider.value = n;
+    c.classList.toggle('hidden', i >= n)
+  })
+  document.getElementById('tw-count-val').textContent = n
+  const slider = document.getElementById('tw-count')
+  if (slider && +slider.value !== n) slider.value = n
 }
 
-applyCount(TWEAKS.count);
+applyCount(TWEAKS.count)
 
 // Slider wiring
 document.getElementById('tw-count').addEventListener('input', (e) => {
-  const n = +e.target.value;
-  applyCount(n);                                          // 1) live DOM update
-  window.parent.postMessage(                              // 2) tell parent to save
+  const n = +e.target.value
+  applyCount(n) // 1) live DOM update
+  window.parent.postMessage(
+    // 2) tell parent to save
     { type: '__edit_mode_set_keys', edits: { count: n } },
     '*'
-  );
-});
+  )
+})
 ```
 
 So dragging the slider does two things independently:
@@ -501,11 +516,11 @@ No file re-render, no iframe reload during interaction. On a subsequent cold loa
 
 Full protocol, all self-contained in the served HTML:
 
-| Msg | Direction | Purpose |
-|---|---|---|
-| `{type:'__edit_mode_available'}` | iframe → parent | On load. Announces the file supports edit-mode, so the "Tweaks" toggle is enabled. |
-| `{type:'__activate_edit_mode'}` | parent → iframe | User flipped the Tweaks toggle ON. The iframe adds `.on` class to the panel (show). |
-| `{type:'__deactivate_edit_mode'}` | parent → iframe | User flipped the toggle OFF. Panel hides. |
+| Msg                                        | Direction       | Purpose                                                                                   |
+| ------------------------------------------ | --------------- | ----------------------------------------------------------------------------------------- |
+| `{type:'__edit_mode_available'}`           | iframe → parent | On load. Announces the file supports edit-mode, so the "Tweaks" toggle is enabled.        |
+| `{type:'__activate_edit_mode'}`            | parent → iframe | User flipped the Tweaks toggle ON. The iframe adds `.on` class to the panel (show).       |
+| `{type:'__deactivate_edit_mode'}`          | parent → iframe | User flipped the toggle OFF. Panel hides.                                                 |
 | `{type:'__edit_mode_set_keys', edits:{…}}` | iframe → parent | User interacted with a control; parent persists these keys into the EDITMODE JSON region. |
 
 Observed from the wire (decoded from minified cli.js-style style):
@@ -513,21 +528,26 @@ Observed from the wire (decoded from minified cli.js-style style):
 ```js
 // In the generated HTML:
 window.addEventListener('message', (e) => {
-  const d = e.data || {};
-  if (d.type === '__activate_edit_mode')      { document.getElementById('tweaks').classList.add('on'); }
-  else if (d.type === '__deactivate_edit_mode') { document.getElementById('tweaks').classList.remove('on'); }
-});
-window.parent.postMessage({ type: '__edit_mode_available' }, '*');
+  const d = e.data || {}
+  if (d.type === '__activate_edit_mode') {
+    document.getElementById('tweaks').classList.add('on')
+  } else if (d.type === '__deactivate_edit_mode') {
+    document.getElementById('tweaks').classList.remove('on')
+  }
+})
+window.parent.postMessage({ type: '__edit_mode_available' }, '*')
 ```
 
-Notice this protocol is **orthogonal to** the `omelette` runtime (A4). The EDITMODE protocol is emitted *by Claude's generated file content*; the omelette runtime is injected *by the serving infra* around it. Separation of concerns: infra handles log/resize/LLM bridge; generated content handles its own domain-specific tweak schema.
+Notice this protocol is **orthogonal to** the `omelette` runtime (A4). The EDITMODE protocol is emitted _by Claude's generated file content_; the omelette runtime is injected _by the serving infra_ around it. Separation of concerns: infra handles log/resize/LLM bridge; generated content handles its own domain-specific tweak schema.
 
 ## B3. "Tweaks / Comment / Edit / Draw" — four distinct update loops
 
 The preview toolbar exposes four orthogonal interaction modes:
 
 ### Tweaks
+
 A toggle that shows/hides the EDITMODE panel from B1. The dropdown next to it ("Ask Claude to add sliders or options") is how the user **grows** the EDITMODE contract — prompts like "add a color picker for accent" tell Claude to:
+
 1. Extend the EDITMODE JSON block with a new key (e.g. `"accent": "#000"`)
 2. Add a matching control to the Tweaks panel HTML
 3. Add an `applyAccent(hex)` function and wire it to the control
@@ -536,6 +556,7 @@ A toggle that shows/hides the EDITMODE panel from B1. The dropdown next to it ("
 So Tweaks is an **additive, Claude-authored UI surface** that grows the interactive controls one at a time. Future drags of those controls are AI-free.
 
 ### Edit
+
 Opens a right-hand properties panel that looks straight out of Figma:
 
 ```
@@ -545,9 +566,10 @@ PAGE
   Base size              16 px
 ```
 
-These are *also* EDITMODE values, but surfaced by the Design app's own UI (not injected by Claude). The Design app knows how to parse the EDITMODE block as JSON and render a schema-driven form. (I didn't observe element-level selection in Edit mode during this session — the right panel stayed on PAGE even when clicking individual cells — so Edit may be limited to well-known top-level keys for now.)
+These are _also_ EDITMODE values, but surfaced by the Design app's own UI (not injected by Claude). The Design app knows how to parse the EDITMODE block as JSON and render a schema-driven form. (I didn't observe element-level selection in Edit mode during this session — the right panel stayed on PAGE even when clicking individual cells — so Edit may be limited to well-known top-level keys for now.)
 
 ### Draw
+
 A sketch/annotation overlay. Toolbar shows:
 
 ```
@@ -578,6 +600,7 @@ This is a much richer feedback channel than chat alone — visual pointing + tex
 ```
 
 ### Comment
+
 Standard comment threads on the preview — collaboration / review channel, doesn't trigger code changes.
 
 ## B4. Why this pattern is compelling

@@ -1,20 +1,26 @@
 import { useState, useEffect } from 'react'
-import { useActiveSession } from '../../stores/session-store'
+import { useActiveSession, useSessionStore } from '../../stores/session-store'
 import type { AppSettings } from '../../stores/session-store'
 import { PermissionsDialog } from '../PermissionsDialog'
-import type { ClaudePermissions, ProxySettings, VoiceLanguageCode } from '../../../../shared/types'
+import type {
+  ClaudePermissions,
+  ProxySettings,
+  VoiceLanguageCode,
+  AccountsState
+} from '../../../../shared/types'
 import { VOICE_LANGUAGES } from '../../../../shared/types'
 import {
   supportedEffortLevels,
   defaultEffort,
-  type EffortLevel,
+  type EffortLevel
 } from '../../../../shared/model-capabilities'
 import {
   SettingsToggle,
   SettingsSlider,
   SettingsSelect,
   SettingsTextarea,
-  SandboxListSetting
+  SandboxListSetting,
+  ChatRetentionSetting
 } from './settings-controls'
 
 // ── Section definitions ──────────────────────────────────────────────
@@ -68,9 +74,7 @@ function ProxyTestButton({ proxy }: { proxy: ProxySettings }): React.JSX.Element
           {state === 'testing' ? 'Testing...' : 'Test Connection'}
         </button>
         {state === 'success' && result && (
-          <span className="text-[11px] text-success">
-            Connected ({result.latencyMs}ms)
-          </span>
+          <span className="text-[11px] text-success">Connected ({result.latencyMs}ms)</span>
         )}
         {state === 'error' && result && (
           <span className="text-[11px] text-danger truncate max-w-[300px]" title={result.error}>
@@ -90,7 +94,10 @@ function GlobalPermissionsSummary(): React.JSX.Element {
   const cwd = useActiveSession((s) => s.cwd)
 
   useEffect(() => {
-    window.api.loadClaudePermissions('user').then(setPerms).catch(() => {})
+    window.api
+      .loadClaudePermissions('user')
+      .then(setPerms)
+      .catch(() => {})
   }, [dialogOpen]) // reload after dialog closes
 
   const totalRules = perms ? perms.allow.length + perms.ask.length + perms.deny.length : 0
@@ -103,7 +110,8 @@ function GlobalPermissionsSummary(): React.JSX.Element {
           {perms && (
             <div className="text-[11px] text-text-muted">
               {perms.allow.length} allow · {perms.ask.length} ask · {perms.deny.length} deny
-              {perms.additionalDirectories.length > 0 && ` · ${perms.additionalDirectories.length} dir${perms.additionalDirectories.length !== 1 ? 's' : ''}`}
+              {perms.additionalDirectories.length > 0 &&
+                ` · ${perms.additionalDirectories.length} dir${perms.additionalDirectories.length !== 1 ? 's' : ''}`}
               {totalRules === 0 && 'No rules configured'}
             </div>
           )}
@@ -132,20 +140,21 @@ const EFFORT_LEVEL_LABEL: Record<EffortLevel, string> = {
   medium: 'Medium',
   high: 'High',
   xhigh: 'Extra high',
-  max: 'Max',
+  max: 'Max'
 }
 
 const EFFORT_MODELS: ReadonlyArray<{ id: string; label: string }> = [
   { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6' },
   { id: 'claude-opus-4-7', label: 'Opus 4.7' },
   { id: 'claude-opus-4-8', label: 'Opus 4.8' },
+  { id: 'claude-fable-5', label: 'Fable 5' }
 ]
 
 function ModelEffortRow({
   modelId,
   modelLabel,
   current,
-  onChange,
+  onChange
 }: {
   modelId: string
   modelLabel: string
@@ -175,6 +184,108 @@ function ModelEffortRow({
           </option>
         ))}
       </select>
+    </div>
+  )
+}
+
+// ── Accounts (multi-account support, ADR-015) ────────────────────────
+
+function AccountsSetting(): React.JSX.Element {
+  const accounts = useSessionStore((s) => s.accountsState)
+  const setAccounts = useSessionStore((s) => s.setAccountsState)
+  const [busy, setBusy] = useState(false)
+
+  useEffect(() => {
+    void window.api.getAccounts().then(setAccounts)
+  }, [setAccounts])
+
+  const enabled = accounts?.enabled ?? false
+  const isMac = window.api.platform === 'darwin'
+
+  const run = async (fn: () => Promise<AccountsState>): Promise<void> => {
+    setBusy(true)
+    try {
+      setAccounts(await fn())
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="px-3 py-1.5 space-y-2.5">
+      <SettingsToggle
+        label="Enable multiple account support"
+        checked={enabled}
+        onChange={(v) => void run(() => window.api.setMultiAccountEnabled(v))}
+        tooltip="Store credentials per-account in plaintext files instead of the macOS Keychain, so you can hold and switch between multiple Claude subscriptions."
+      />
+
+      {enabled && isMac && (
+        <div className="text-[11px] leading-relaxed text-warning/90 bg-warning/10 border border-warning/30 rounded-md px-2.5 py-1.5">
+          Multi-account mode uses file-based credentials, separate from your macOS Keychain login.
+          You may need to <b>log in again</b> for each account.
+        </div>
+      )}
+
+      {enabled && (
+        <div className="space-y-1">
+          {(accounts?.accounts ?? []).map((a) => {
+            const active = a.id === accounts?.activeId
+            return (
+              <div
+                key={a.id}
+                className={`flex items-center gap-2.5 rounded-md border px-2.5 py-1.5 ${
+                  active ? 'border-accent/50 bg-accent/5' : 'border-border'
+                }`}
+              >
+                <button
+                  disabled={busy || active}
+                  onClick={() => void run(() => window.api.switchAccount(a.id))}
+                  title={active ? 'Active account' : 'Switch to this account'}
+                  className="shrink-0 w-3.5 h-3.5 rounded-full border-2 flex items-center justify-center disabled:cursor-default"
+                  style={{
+                    borderColor: active ? 'var(--color-accent)' : 'var(--color-border-bright)'
+                  }}
+                >
+                  {active && <span className="w-1.5 h-1.5 rounded-full bg-accent" />}
+                </button>
+                <div className="flex-1 min-w-0">
+                  <div className="text-[12px] text-text-primary truncate">
+                    {a.email || 'Account'}
+                  </div>
+                  {a.subscriptionType && (
+                    <div className="text-[10px] text-text-muted">{a.subscriptionType}</div>
+                  )}
+                </div>
+                <button
+                  disabled={busy}
+                  onClick={() => void run(() => window.api.deleteAccount(a.id))}
+                  title="Delete account"
+                  className="shrink-0 text-text-muted hover:text-danger transition-colors disabled:opacity-50"
+                >
+                  <svg
+                    width="14"
+                    height="14"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                  >
+                    <path d="M3 6h18M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2m3 0v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6" />
+                  </svg>
+                </button>
+              </div>
+            )
+          })}
+          <button
+            disabled={busy}
+            onClick={() => void run(() => window.api.addAccount())}
+            className="text-[12px] font-medium text-accent hover:text-accent-hover bg-accent/10 hover:bg-accent/15 rounded-md px-2.5 py-1.5 transition-colors disabled:opacity-50"
+          >
+            + Add account
+          </button>
+        </div>
+      )}
     </div>
   )
 }
@@ -392,6 +503,13 @@ export const SECTIONS: Section[] = [
             onChange={(v) => u({ sessionTimeoutMins: Number(v) })}
           />
         )
+      },
+      {
+        key: 'cleanupPeriodDays',
+        label: 'Chat history retention',
+        keywords:
+          'cleanup retention delete history transcripts privacy purge old chats days forever',
+        render: () => <ChatRetentionSetting />
       }
     ]
   },
@@ -623,9 +741,7 @@ export const SECTIONS: Section[] = [
         keywords: 'format tokens cost context',
         render: (s, u) => (
           <div className="px-3 py-1.5 text-[13px] text-text-secondary">
-            <div className="mb-1">
-              Template
-            </div>
+            <div className="mb-1">Template</div>
             <input
               type="text"
               value={s.statusLineTemplate}
@@ -634,8 +750,8 @@ export const SECTIONS: Section[] = [
               placeholder="{in} / {out} / {total} · {used}%"
             />
             <div className="text-[9px] text-text-muted/60 mt-0.5">
-              Tokens: {'{in} {out} {total}'} · Cost: {'{cost}'} · Context:{' '}
-              {'{used} {remaining}'} · Lines: {'{lines+} {lines-}'} · Time: {'{duration}'}
+              Tokens: {'{in} {out} {total}'} · Cost: {'{cost}'} · Context: {'{used} {remaining}'} ·
+              Lines: {'{lines+} {lines-}'} · Time: {'{duration}'}
             </div>
           </div>
         )
@@ -673,10 +789,13 @@ export const SECTIONS: Section[] = [
               max={3600}
               step={60}
               onChange={(v) => u({ usageRefreshSecs: v })}
-              formatValue={(v) => v >= 60 ? `${Math.floor(v / 60)}m${v % 60 ? ` ${v % 60}s` : ''}` : `${v}s`}
+              formatValue={(v) =>
+                v >= 60 ? `${Math.floor(v / 60)}m${v % 60 ? ` ${v % 60}s` : ''}` : `${v}s`
+              }
             />
             <div className="text-[10px] text-text-muted/50 mt-0.5 pl-3">
-              How often to call the usage API for detailed plan data. Rate limits update in real-time from inference headers.
+              How often to call the usage API for detailed plan data. Rate limits update in
+              real-time from inference headers.
             </div>
           </div>
         )
@@ -761,8 +880,12 @@ export const SECTIONS: Section[] = [
             />
             <div className="text-[10px] text-text-muted/60 mt-1.5 space-y-0.5">
               <div>Comma-separated. Bare names enable debug for that source.</div>
-              <div>Use <span className="font-mono">source:level</span> for explicit levels.</div>
-              <div>Logs are written to <span className="font-mono">~/.claude/ui/logs/</span></div>
+              <div>
+                Use <span className="font-mono">source:level</span> for explicit levels.
+              </div>
+              <div>
+                Logs are written to <span className="font-mono">~/.claude/ui/logs/</span>
+              </div>
             </div>
           </div>
         )
@@ -896,6 +1019,34 @@ export const SECTIONS: Section[] = [
     ]
   },
   {
+    id: 'accounts',
+    label: 'Accounts',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <path d="M16 21v-2a4 4 0 00-4-4H6a4 4 0 00-4 4v2" />
+        <circle cx="9" cy="7" r="4" />
+        <path d="M22 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'multiAccount',
+        label: 'Multiple account support',
+        keywords: 'account login subscription switch multi keychain credentials sign in',
+        render: () => <AccountsSetting />
+      }
+    ]
+  },
+  {
     id: 'mockup',
     label: 'Mockups',
     icon: (
@@ -956,8 +1107,8 @@ export const SECTIONS: Section[] = [
         keywords: 'mockup info csp security',
         render: () => (
           <div className="px-3 py-1.5 text-[11px] text-text-muted/60 leading-relaxed">
-            Mockups render in a sandboxed iframe on a per-mockup origin. Changes apply when the mockup
-            is next loaded or reloaded — open mockups keep the CSP they were served with.
+            Mockups render in a sandboxed iframe on a per-mockup origin. Changes apply when the
+            mockup is next loaded or reloaded — open mockups keep the CSP they were served with.
           </div>
         )
       }
@@ -1050,7 +1201,14 @@ export const SECTIONS: Section[] = [
               <SettingsToggle
                 label="Allow local port binding"
                 checked={s.sandbox.network.allowLocalBinding}
-                onChange={(v) => u({ sandbox: { ...s.sandbox, network: { ...s.sandbox.network, allowLocalBinding: v } } })}
+                onChange={(v) =>
+                  u({
+                    sandbox: {
+                      ...s.sandbox,
+                      network: { ...s.sandbox.network, allowLocalBinding: v }
+                    }
+                  })
+                }
                 tooltip="Lets processes inside the sandbox listen on localhost ports (e.g. webpack-dev-server, vite, flask). Without this, dev servers started by the model will fail to bind."
               />
               <div className="text-[10px] text-text-muted/50 mt-0.5 pl-3">
@@ -1070,7 +1228,11 @@ export const SECTIONS: Section[] = [
               <SettingsToggle
                 label="Restrict network access"
                 checked={s.sandbox.network.restrictNetwork}
-                onChange={(v) => u({ sandbox: { ...s.sandbox, network: { ...s.sandbox.network, restrictNetwork: v } } })}
+                onChange={(v) =>
+                  u({
+                    sandbox: { ...s.sandbox, network: { ...s.sandbox.network, restrictNetwork: v } }
+                  })
+                }
                 tooltip="When enabled, sandboxed commands can only reach explicitly whitelisted domains via a local proxy. All other network access is blocked. When disabled, sandboxed commands have unrestricted network access."
               />
               <div className="text-[10px] text-text-muted/50 mt-0.5 pl-3">
@@ -1085,14 +1247,27 @@ export const SECTIONS: Section[] = [
         label: 'Allowed domains',
         keywords: 'network domain whitelist url',
         render: (s, u) => (
-          <div className={s.sandbox.enabled && s.sandbox.network.restrictNetwork ? '' : 'opacity-40 pointer-events-none'}>
+          <div
+            className={
+              s.sandbox.enabled && s.sandbox.network.restrictNetwork
+                ? ''
+                : 'opacity-40 pointer-events-none'
+            }
+          >
             <div className="pl-8">
               <SandboxListSetting
                 label="Allowed domains"
                 labelColor="text-success"
                 items={s.sandbox.network.allowedDomains}
                 placeholder="e.g. registry.npmjs.org"
-                onUpdate={(items) => u({ sandbox: { ...s.sandbox, network: { ...s.sandbox.network, allowedDomains: items } } })}
+                onUpdate={(items) =>
+                  u({
+                    sandbox: {
+                      ...s.sandbox,
+                      network: { ...s.sandbox.network, allowedDomains: items }
+                    }
+                  })
+                }
                 tooltip="Domains that sandboxed commands can reach. Supports wildcards like *.npmjs.org. Traffic is routed through a local HTTP/SOCKS proxy. Leave empty to block all outbound network access."
               />
             </div>
@@ -1104,12 +1279,25 @@ export const SECTIONS: Section[] = [
         label: 'Managed domains only',
         keywords: 'enterprise managed policy domains',
         render: (s, u) => (
-          <div className={s.sandbox.enabled && s.sandbox.network.restrictNetwork ? '' : 'opacity-40 pointer-events-none'}>
+          <div
+            className={
+              s.sandbox.enabled && s.sandbox.network.restrictNetwork
+                ? ''
+                : 'opacity-40 pointer-events-none'
+            }
+          >
             <div className="pl-8">
               <SettingsToggle
                 label="Managed domains only"
                 checked={s.sandbox.network.allowManagedDomainsOnly}
-                onChange={(v) => u({ sandbox: { ...s.sandbox, network: { ...s.sandbox.network, allowManagedDomainsOnly: v } } })}
+                onChange={(v) =>
+                  u({
+                    sandbox: {
+                      ...s.sandbox,
+                      network: { ...s.sandbox.network, allowManagedDomainsOnly: v }
+                    }
+                  })
+                }
                 tooltip="Enterprise feature. When enabled, only allowedDomains from managed settings and WebFetch(domain:...) allow rules from managed settings are used. Domains from user, project, local, and flag settings are ignored. Denied domains are still respected from all sources."
               />
               <div className="text-[10px] text-text-muted/50 mt-0.5 pl-3">
@@ -1129,7 +1317,14 @@ export const SECTIONS: Section[] = [
               <SettingsToggle
                 label="Allow all Unix sockets"
                 checked={s.sandbox.network.allowAllUnixSockets}
-                onChange={(v) => u({ sandbox: { ...s.sandbox, network: { ...s.sandbox.network, allowAllUnixSockets: v } } })}
+                onChange={(v) =>
+                  u({
+                    sandbox: {
+                      ...s.sandbox,
+                      network: { ...s.sandbox.network, allowAllUnixSockets: v }
+                    }
+                  })
+                }
                 tooltip="Disables Unix socket blocking on both macOS and Linux. This grants access to all Unix sockets including the Docker socket, which effectively gives full host access. Only enable if you trust the commands being run."
               />
               <div className="text-[10px] text-text-muted/50 mt-0.5 pl-3">
@@ -1144,14 +1339,27 @@ export const SECTIONS: Section[] = [
         label: 'Unix socket paths',
         keywords: 'unix socket path docker',
         render: (s, u) => (
-          <div className={s.sandbox.enabled && !s.sandbox.network.allowAllUnixSockets ? '' : 'opacity-40 pointer-events-none'}>
+          <div
+            className={
+              s.sandbox.enabled && !s.sandbox.network.allowAllUnixSockets
+                ? ''
+                : 'opacity-40 pointer-events-none'
+            }
+          >
             <div className="pl-8">
               <SandboxListSetting
                 label="Unix socket paths"
                 labelColor="text-warning"
                 items={s.sandbox.network.allowUnixSockets}
                 placeholder="e.g. /var/run/docker.sock"
-                onUpdate={(items) => u({ sandbox: { ...s.sandbox, network: { ...s.sandbox.network, allowUnixSockets: items } } })}
+                onUpdate={(items) =>
+                  u({
+                    sandbox: {
+                      ...s.sandbox,
+                      network: { ...s.sandbox.network, allowUnixSockets: items }
+                    }
+                  })
+                }
                 tooltip="macOS only — specific Unix socket paths to allow. Linux uses seccomp which cannot filter by path. Allowing /var/run/docker.sock grants full host access through the Docker API."
               />
             </div>
@@ -1170,7 +1378,14 @@ export const SECTIONS: Section[] = [
                 labelColor="text-success"
                 items={s.sandbox.filesystem.allowWrite}
                 placeholder="e.g. /usr/local/bin"
-                onUpdate={(items) => u({ sandbox: { ...s.sandbox, filesystem: { ...s.sandbox.filesystem, allowWrite: items } } })}
+                onUpdate={(items) =>
+                  u({
+                    sandbox: {
+                      ...s.sandbox,
+                      filesystem: { ...s.sandbox.filesystem, allowWrite: items }
+                    }
+                  })
+                }
                 tooltip="Paths outside the project directory where sandboxed commands can write files. The project directory and $TMPDIR are always writable."
               />
             </div>
@@ -1189,7 +1404,14 @@ export const SECTIONS: Section[] = [
                 labelColor="text-warning"
                 items={s.sandbox.filesystem.denyWrite}
                 placeholder="e.g. /etc"
-                onUpdate={(items) => u({ sandbox: { ...s.sandbox, filesystem: { ...s.sandbox.filesystem, denyWrite: items } } })}
+                onUpdate={(items) =>
+                  u({
+                    sandbox: {
+                      ...s.sandbox,
+                      filesystem: { ...s.sandbox.filesystem, denyWrite: items }
+                    }
+                  })
+                }
                 tooltip="Paths that should be read-only even within writable areas. Useful for protecting config files or build artifacts from accidental modification."
               />
             </div>
@@ -1208,7 +1430,14 @@ export const SECTIONS: Section[] = [
                 labelColor="text-danger"
                 items={s.sandbox.filesystem.denyRead}
                 placeholder="e.g. ~/.ssh"
-                onUpdate={(items) => u({ sandbox: { ...s.sandbox, filesystem: { ...s.sandbox.filesystem, denyRead: items } } })}
+                onUpdate={(items) =>
+                  u({
+                    sandbox: {
+                      ...s.sandbox,
+                      filesystem: { ...s.sandbox.filesystem, denyRead: items }
+                    }
+                  })
+                }
                 tooltip="Paths completely hidden from sandboxed commands — they cannot read or detect these files exist. Good for credentials, SSH keys, cloud configs."
               />
             </div>
@@ -1221,7 +1450,8 @@ export const SECTIONS: Section[] = [
         keywords: 'sandbox info macos linux bwrap',
         render: () => (
           <div className="px-3 py-1.5 text-[11px] text-text-muted/60">
-            Filesystem defaults: project dir + $TMPDIR writable. Changes take effect on next session start.
+            Filesystem defaults: project dir + $TMPDIR writable. Changes take effect on next session
+            start.
           </div>
         )
       }
@@ -1379,7 +1609,9 @@ export const SECTIONS: Section[] = [
         label: 'Test proxy connection',
         keywords: 'test verify check ping connectivity',
         render: (s) => (
-          <div className={s.proxy.enabled && s.proxy.hostname ? '' : 'opacity-40 pointer-events-none'}>
+          <div
+            className={s.proxy.enabled && s.proxy.hostname ? '' : 'opacity-40 pointer-events-none'}
+          >
             <div className="pl-4">
               <ProxyTestButton proxy={s.proxy} />
             </div>
@@ -1464,7 +1696,9 @@ export const SECTIONS: Section[] = [
               <input
                 type="text"
                 value={s.anthropicEndpoint.baseUrl}
-                onChange={(e) => u({ anthropicEndpoint: { ...s.anthropicEndpoint, baseUrl: e.target.value } })}
+                onChange={(e) =>
+                  u({ anthropicEndpoint: { ...s.anthropicEndpoint, baseUrl: e.target.value } })
+                }
                 className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors"
                 placeholder="e.g. http://localhost:1234"
                 spellCheck={false}
@@ -1485,7 +1719,9 @@ export const SECTIONS: Section[] = [
               <input
                 type="password"
                 value={s.anthropicEndpoint.authToken}
-                onChange={(e) => u({ anthropicEndpoint: { ...s.anthropicEndpoint, authToken: e.target.value } })}
+                onChange={(e) =>
+                  u({ anthropicEndpoint: { ...s.anthropicEndpoint, authToken: e.target.value } })
+                }
                 className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors"
                 placeholder="e.g. lmstudio"
                 spellCheck={false}
@@ -1501,7 +1737,8 @@ export const SECTIONS: Section[] = [
         keywords: 'anthropic endpoint info env environment variable',
         render: () => (
           <div className="px-3 py-1.5 text-[11px] text-text-muted/60">
-            Overrides cli.js&apos;s API target. Changes apply to new sessions. Leave the auth token empty if your gateway doesn&apos;t require one.
+            Overrides cli.js&apos;s API target. Changes apply to new sessions. Leave the auth token
+            empty if your gateway doesn&apos;t require one.
           </div>
         )
       }
@@ -1559,7 +1796,9 @@ export const SECTIONS: Section[] = [
               <input
                 type="text"
                 value={s.modelOverride.model}
-                onChange={(e) => u({ modelOverride: { ...s.modelOverride, model: e.target.value } })}
+                onChange={(e) =>
+                  u({ modelOverride: { ...s.modelOverride, model: e.target.value } })
+                }
                 className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors"
                 placeholder="alias (sonnet/opus/haiku/opusplan) or full model name"
                 spellCheck={false}
@@ -1578,12 +1817,16 @@ export const SECTIONS: Section[] = [
             <div className="pl-4 px-3 py-1.5 text-[13px] text-text-secondary">
               <div className="mb-1">
                 <span>Sonnet → resolves to</span>
-                <span className="text-[10px] text-text-muted/50 ml-1.5">ANTHROPIC_DEFAULT_SONNET_MODEL</span>
+                <span className="text-[10px] text-text-muted/50 ml-1.5">
+                  ANTHROPIC_DEFAULT_SONNET_MODEL
+                </span>
               </div>
               <input
                 type="text"
                 value={s.modelOverride.sonnetModel}
-                onChange={(e) => u({ modelOverride: { ...s.modelOverride, sonnetModel: e.target.value } })}
+                onChange={(e) =>
+                  u({ modelOverride: { ...s.modelOverride, sonnetModel: e.target.value } })
+                }
                 className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors"
                 placeholder="e.g. claude-sonnet-4-6 or my-gateway/sonnet"
                 spellCheck={false}
@@ -1602,12 +1845,16 @@ export const SECTIONS: Section[] = [
             <div className="pl-4 px-3 py-1.5 text-[13px] text-text-secondary">
               <div className="mb-1">
                 <span>Opus → resolves to</span>
-                <span className="text-[10px] text-text-muted/50 ml-1.5">ANTHROPIC_DEFAULT_OPUS_MODEL</span>
+                <span className="text-[10px] text-text-muted/50 ml-1.5">
+                  ANTHROPIC_DEFAULT_OPUS_MODEL
+                </span>
               </div>
               <input
                 type="text"
                 value={s.modelOverride.opusModel}
-                onChange={(e) => u({ modelOverride: { ...s.modelOverride, opusModel: e.target.value } })}
+                onChange={(e) =>
+                  u({ modelOverride: { ...s.modelOverride, opusModel: e.target.value } })
+                }
                 className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors"
                 placeholder="e.g. claude-opus-4-8 or my-gateway/opus"
                 spellCheck={false}
@@ -1620,18 +1867,23 @@ export const SECTIONS: Section[] = [
       {
         key: 'modelOverrideHaiku',
         label: 'Haiku alias (ANTHROPIC_DEFAULT_HAIKU_MODEL)',
-        keywords: 'anthropic_default_haiku_model haiku alias background small fast deprecated anthropic_small_fast_model',
+        keywords:
+          'anthropic_default_haiku_model haiku alias background small fast deprecated anthropic_small_fast_model',
         render: (s, u) => (
           <div className={s.modelOverride.enabled ? '' : 'opacity-40 pointer-events-none'}>
             <div className="pl-4 px-3 py-1.5 text-[13px] text-text-secondary">
               <div className="mb-1">
                 <span>Haiku → resolves to</span>
-                <span className="text-[10px] text-text-muted/50 ml-1.5">ANTHROPIC_DEFAULT_HAIKU_MODEL</span>
+                <span className="text-[10px] text-text-muted/50 ml-1.5">
+                  ANTHROPIC_DEFAULT_HAIKU_MODEL
+                </span>
               </div>
               <input
                 type="text"
                 value={s.modelOverride.haikuModel}
-                onChange={(e) => u({ modelOverride: { ...s.modelOverride, haikuModel: e.target.value } })}
+                onChange={(e) =>
+                  u({ modelOverride: { ...s.modelOverride, haikuModel: e.target.value } })
+                }
                 className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors"
                 placeholder="e.g. claude-haiku-4-5 or my-gateway/haiku"
                 spellCheck={false}
@@ -1647,7 +1899,8 @@ export const SECTIONS: Section[] = [
         keywords: 'model override info env environment variable',
         render: () => (
           <div className="px-3 py-1.5 text-[11px] text-text-muted/60">
-            Each field maps to an Anthropic env var. Empty fields keep cli.js&apos;s defaults for that family. Changes apply to new sessions.
+            Each field maps to an Anthropic env var. Empty fields keep cli.js&apos;s defaults for
+            that family. Changes apply to new sessions.
           </div>
         )
       }
@@ -1687,7 +1940,7 @@ export const SECTIONS: Section[] = [
               u({ modelEffortDefaults: map })
             }}
           />
-        ),
+        )
       })),
       {
         key: 'effortDefaultsFooter',
@@ -1699,8 +1952,8 @@ export const SECTIONS: Section[] = [
             choice (chip next to the input) always wins. Applies to the canonical model and its
             aliases (e.g. selecting <code>opus</code> in the picker uses your Opus 4.8 default).
           </div>
-        ),
-      },
-    ],
-  },
+        )
+      }
+    ]
+  }
 ]

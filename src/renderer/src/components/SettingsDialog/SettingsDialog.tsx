@@ -13,7 +13,10 @@ export function SettingsDialog({ onClose }: { onClose: () => void }): React.JSX.
 
   // Fetch version info on mount
   useEffect(() => {
-    window.api.getVersionInfo().then(setVersionInfo).catch(() => {})
+    window.api
+      .getVersionInfo()
+      .then(setVersionInfo)
+      .catch(() => {})
   }, [])
 
   // Close on Escape

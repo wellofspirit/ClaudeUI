@@ -16,9 +16,15 @@ import {
   makeChatMessage,
   makeToolUseBlock,
   makePendingApproval,
-  resetFactoryCounter,
+  resetFactoryCounter
 } from '@test/factories/messages'
-import type { ChatMessage, PendingApproval, PermissionMode, SessionStatus, StreamDelta } from '../../shared/types'
+import type {
+  ChatMessage,
+  PendingApproval,
+  PermissionMode,
+  SessionStatus,
+  StreamDelta
+} from '../../shared/types'
 
 let app: TestApp
 let eventCleanups: Array<() => void>
@@ -32,7 +38,9 @@ function wireEventHandlers(app: TestApp): Array<() => void> {
     return (cb: T) => {
       const handler = (_: unknown, ...args: unknown[]): void => (cb as Function)(...args)
       app.bridge.ipcRenderer.on(channel, handler)
-      const cleanup = (): void => { app.bridge.ipcRenderer.removeListener(channel, handler) }
+      const cleanup = (): void => {
+        app.bridge.ipcRenderer.removeListener(channel, handler)
+      }
       cleanups.push(cleanup)
       return cleanup
     }
@@ -45,32 +53,41 @@ function wireEventHandlers(app: TestApp): Array<() => void> {
     if (data.type === 'thinking') store().appendStreamingThinking(routingId, data.text)
     else store().appendStreamingText(routingId, data.text)
   })
-  onEvent<(routingId: string, approval: PendingApproval) => void>('session:approval-request')((routingId, approval) => {
-    store().addPendingApproval(routingId, approval)
-  })
-  onEvent<(routingId: string, status: SessionStatus) => void>('session:status')((routingId, status) => {
-    let effective = routingId
-    if (status.sessionId && status.sessionId !== routingId) {
-      const s = store()
-      if (s.sessions[routingId]) { s.rekeySession(routingId, status.sessionId); effective = status.sessionId }
-    }
-    if (status.state === 'disconnected') {
-      store().markSdkInactive(effective)
-      store().setStatus(effective, { ...status, state: 'idle' })
-      store().clearPendingApprovals(effective)
-      return
-    }
-    store().setStatus(effective, status)
-    if (status.state === 'idle') store().clearPendingApprovals(effective)
-  })
-  onEvent<(routingId: string, mode: PermissionMode) => void>('session:permission-mode')((routingId, mode) => {
-    store().setPermissionMode(mode, routingId)
-  })
-  onEvent<(routingId: string, data: { toolUseId: string; result: string; isError: boolean }) => void>('session:tool-result')(
-    (routingId, { toolUseId, result, isError }) => {
-      store().appendToolResult(routingId, toolUseId, result, isError)
+  onEvent<(routingId: string, approval: PendingApproval) => void>('session:approval-request')(
+    (routingId, approval) => {
+      store().addPendingApproval(routingId, approval)
     }
   )
+  onEvent<(routingId: string, status: SessionStatus) => void>('session:status')(
+    (routingId, status) => {
+      let effective = routingId
+      if (status.sessionId && status.sessionId !== routingId) {
+        const s = store()
+        if (s.sessions[routingId]) {
+          s.rekeySession(routingId, status.sessionId)
+          effective = status.sessionId
+        }
+      }
+      if (status.state === 'disconnected') {
+        store().markSdkInactive(effective)
+        store().setStatus(effective, { ...status, state: 'idle' })
+        store().clearPendingApprovals(effective)
+        return
+      }
+      store().setStatus(effective, status)
+      if (status.state === 'idle') store().clearPendingApprovals(effective)
+    }
+  )
+  onEvent<(routingId: string, mode: PermissionMode) => void>('session:permission-mode')(
+    (routingId, mode) => {
+      store().setPermissionMode(mode, routingId)
+    }
+  )
+  onEvent<
+    (routingId: string, data: { toolUseId: string; result: string; isError: boolean }) => void
+  >('session:tool-result')((routingId, { toolUseId, result, isError }) => {
+    store().appendToolResult(routingId, toolUseId, result, isError)
+  })
 
   return cleanups
 }
@@ -82,12 +99,15 @@ beforeEach(async () => {
 
   // Track setPermissionMode IPC calls (renderer → main)
   app.bridge.ipcMain.removeHandler?.('session:set-permission-mode')
-  app.bridge.ipcMain.handle('session:set-permission-mode', async (_: unknown, routingId: string, mode: PermissionMode) => {
-    permissionModeCalls.push({ routingId, mode })
-    // Simulate main echoing back via the permission-mode event
-    app.emit('session:permission-mode', routingId, mode)
-    return { ok: true, data: null }
-  })
+  app.bridge.ipcMain.handle(
+    'session:set-permission-mode',
+    async (_: unknown, routingId: string, mode: PermissionMode) => {
+      permissionModeCalls.push({ routingId, mode })
+      // Simulate main echoing back via the permission-mode event
+      app.emit('session:permission-mode', routingId, mode)
+      return { ok: true, data: null }
+    }
+  )
 
   useSessionStore.setState({
     activeSessionId: null,
@@ -95,7 +115,7 @@ beforeEach(async () => {
     directories: [],
     recentSessionIds: [],
     pinnedSessionIds: [],
-    customTitles: {},
+    customTitles: {}
   })
   eventCleanups = wireEventHandlers(app)
 })
@@ -123,10 +143,14 @@ describe('E2E: permission mode change', () => {
 
     // Tool use arrives — simulating main process skipping the approval IPC under acceptEdits.
     const toolMsg = makeChatMessage({
-      content: [makeToolUseBlock('Edit', { file: 'x.ts' }, 'tool-1')],
+      content: [makeToolUseBlock('Edit', { file: 'x.ts' }, 'tool-1')]
     })
     app.emit('session:message', routingId, toolMsg)
-    app.emit('session:tool-result', routingId, { toolUseId: 'tool-1', result: 'edited', isError: false })
+    app.emit('session:tool-result', routingId, {
+      toolUseId: 'tool-1',
+      result: 'edited',
+      isError: false
+    })
 
     const session = useSessionStore.getState().sessions[routingId]
     expect(session.pendingApprovals).toHaveLength(0)
@@ -146,12 +170,22 @@ describe('E2E: permission mode change', () => {
     expect(useSessionStore.getState().sessions[routingId].permissionMode).toBe('default')
 
     // Now a tool_use arrives and so does an approval request (main process behavior under default).
-    app.emit('session:message', routingId, makeChatMessage({
-      content: [makeToolUseBlock('Bash', { command: 'ls' }, 'tool-2')],
-    }))
-    app.emit('session:approval-request', routingId, makePendingApproval({
-      requestId: 'req-2', toolName: 'Bash', input: { command: 'ls' },
-    }))
+    app.emit(
+      'session:message',
+      routingId,
+      makeChatMessage({
+        content: [makeToolUseBlock('Bash', { command: 'ls' }, 'tool-2')]
+      })
+    )
+    app.emit(
+      'session:approval-request',
+      routingId,
+      makePendingApproval({
+        requestId: 'req-2',
+        toolName: 'Bash',
+        input: { command: 'ls' }
+      })
+    )
 
     expect(useSessionStore.getState().sessions[routingId].pendingApprovals).toHaveLength(1)
     expect(permissionModeCalls.map((c) => c.mode)).toEqual(['acceptEdits', 'default'])

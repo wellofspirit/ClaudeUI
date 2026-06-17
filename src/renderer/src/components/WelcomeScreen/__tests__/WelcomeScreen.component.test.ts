@@ -6,8 +6,6 @@
  *   2. onOpen cancelled (user dismisses dialog) → no session created
  */
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
-
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import React from 'react'
 import { render, act } from '@testing-library/react'
@@ -20,7 +18,7 @@ vi.mock('../View', () => ({
   WelcomeScreenView: (props: WelcomeScreenViewProps) => {
     viewProps = props
     return null
-  },
+  }
 }))
 
 describe('WelcomeScreen FC', () => {
@@ -47,7 +45,9 @@ describe('WelcomeScreen FC', () => {
 
     await renderFC()
 
-    await act(async () => { await viewProps.onOpen() })
+    await act(async () => {
+      await viewProps.onOpen()
+    })
 
     const sessions = Object.values(useSessionStore.getState().sessions)
     expect(sessions).toHaveLength(1)
@@ -59,23 +59,36 @@ describe('WelcomeScreen FC', () => {
 
     await renderFC()
 
-    await act(async () => { await viewProps.onOpen() })
+    await act(async () => {
+      await viewProps.onOpen()
+    })
 
     expect(Object.values(useSessionStore.getState().sessions)).toHaveLength(0)
   })
 
   it('toggles loading around pickFolder', async () => {
     let resolve!: (v: string | null) => void
-    app.bridge.ipcMain.handle('session:pick-folder', () => new Promise((r) => { resolve = r }))
+    app.bridge.ipcMain.handle(
+      'session:pick-folder',
+      () =>
+        new Promise((r) => {
+          resolve = r
+        })
+    )
 
     await renderFC()
 
     const p = viewProps.onOpen() as unknown as Promise<void>
     // The FC calls setLoading(true) before awaiting pickFolder
-    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
     expect(viewProps.loading).toBe(true)
 
-    await act(async () => { resolve(null); await p })
+    await act(async () => {
+      resolve(null)
+      await p
+    })
     expect(viewProps.loading).toBe(false)
   })
 })

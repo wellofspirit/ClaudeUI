@@ -32,7 +32,7 @@ vi.mock('../View', () => ({
   InputBoxView: (props: InputBoxViewProps) => {
     viewProps = props
     return null
-  },
+  }
 }))
 
 // ---------------------------------------------------------------------------
@@ -47,8 +47,8 @@ vi.mock('../../../../hooks/useSlashMenu', () => ({
     filteredCommands: [],
     handleInputChange: () => {},
     handleKeyDown: () => false,
-    handleSelect: () => {},
-  }),
+    handleSelect: () => {}
+  })
 }))
 
 vi.mock('../../../../hooks/useFileMention', () => ({
@@ -58,12 +58,12 @@ vi.mock('../../../../hooks/useFileMention', () => ({
     filteredEntries: [],
     handleInputChange: () => {},
     handleKeyDown: () => false,
-    handleConfirm: () => {},
-  }),
+    handleConfirm: () => {}
+  })
 }))
 
 vi.mock('../../../../hooks/useIsMobile', () => ({
-  useIsMobile: () => false,
+  useIsMobile: () => false
 }))
 
 const ROUTE = 'r-input-1'
@@ -79,13 +79,13 @@ beforeEach(() => {
   ;(globalThis as any).window.api = {
     saveSessionConfig: () => {},
     saveSettings: () => {},
-    logError: () => {},
+    logError: () => {}
   } as any
 
   useSessionStore.setState({
     activeSessionId: null,
     sessions: {},
-    recentSessionIds: [],
+    recentSessionIds: []
   })
 })
 
@@ -407,7 +407,7 @@ describe('InputBox FC — rendered', () => {
     useSessionStore.setState({
       activeSessionId: null,
       sessions: {},
-      recentSessionIds: [],
+      recentSessionIds: []
     })
     useSessionStore.getState().createNewSession(FC_ROUTE, '/test/cwd')
     useSessionStore.setState({ activeSessionId: FC_ROUTE })
@@ -559,16 +559,18 @@ describe('InputBox FC — rendered', () => {
     useSessionStore.setState((state) => ({
       sessions: {
         ...state.sessions,
-        [FC_ROUTE]: { ...state.sessions[FC_ROUTE], selectedModel: 'default' },
+        [FC_ROUTE]: { ...state.sessions[FC_ROUTE], selectedModel: 'default' }
       },
-      availableModels: [{
-        value: 'default',
-        displayName: 'Default (recommended)',
-        description: 'Opus 4.7 with 1M context · Most capable for complex work',
-        supportsEffort: true,
-        supportedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max'],
-        supportsAdaptiveThinking: true,
-      }],
+      availableModels: [
+        {
+          value: 'default',
+          displayName: 'Default (recommended)',
+          description: 'Opus 4.7 with 1M context · Most capable for complex work',
+          supportsEffort: true,
+          supportedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max'],
+          supportsAdaptiveThinking: true
+        }
+      ]
     }))
 
     renderFC()
@@ -591,20 +593,24 @@ describe('InputBox FC — rendered', () => {
           ...state.sessions[FC_ROUTE],
           selectedModel: 'default',
           effort: null,
-          thinkingMode: null,
-        },
+          thinkingMode: null
+        }
       },
-      availableModels: [{
-        value: 'default', displayName: 'Default', description: 'Opus 4.8',
-        supportsEffort: true,
-        supportedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max'],
-        supportsAdaptiveThinking: true,
-      }],
+      availableModels: [
+        {
+          value: 'default',
+          displayName: 'Default',
+          description: 'Opus 4.8',
+          supportsEffort: true,
+          supportedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max'],
+          supportsAdaptiveThinking: true
+        }
+      ]
     }))
 
     renderFC()
 
-    expect(viewProps.effort).toBe('high')           // Opus 4.8 default (not xhigh)
+    expect(viewProps.effort).toBe('high') // Opus 4.8 default (not xhigh)
     expect(viewProps.thinkingMode).toBe('adaptive') // adaptive when supported
   })
 
@@ -617,20 +623,24 @@ describe('InputBox FC — rendered', () => {
           ...state.sessions[FC_ROUTE],
           selectedModel: 'claude-opus-4-7',
           effort: null,
-          thinkingMode: null,
-        },
+          thinkingMode: null
+        }
       },
-      availableModels: [{
-        value: 'claude-opus-4-7', displayName: 'Opus 4.7', description: 'Opus 4.7',
-        supportsEffort: true,
-        supportedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max'],
-        supportsAdaptiveThinking: true,
-      }],
+      availableModels: [
+        {
+          value: 'claude-opus-4-7',
+          displayName: 'Opus 4.7',
+          description: 'Opus 4.7',
+          supportsEffort: true,
+          supportedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max'],
+          supportsAdaptiveThinking: true
+        }
+      ]
     }))
 
     renderFC()
 
-    expect(viewProps.effort).toBe('xhigh')          // Opus 4.7 default
+    expect(viewProps.effort).toBe('xhigh') // Opus 4.7 default
     expect(viewProps.thinkingMode).toBe('adaptive')
   })
 
@@ -641,16 +651,20 @@ describe('InputBox FC — rendered', () => {
         [FC_ROUTE]: {
           ...state.sessions[FC_ROUTE],
           selectedModel: 'default',
-          effort: 'medium',       // user explicitly chose medium
-          thinkingMode: 'disabled', // user explicitly chose disabled
-        },
+          effort: 'medium', // user explicitly chose medium
+          thinkingMode: 'disabled' // user explicitly chose disabled
+        }
       },
-      availableModels: [{
-        value: 'default', displayName: 'Default', description: 'Opus 4.7',
-        supportsEffort: true,
-        supportedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max'],
-        supportsAdaptiveThinking: true,
-      }],
+      availableModels: [
+        {
+          value: 'default',
+          displayName: 'Default',
+          description: 'Opus 4.7',
+          supportsEffort: true,
+          supportedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max'],
+          supportsAdaptiveThinking: true
+        }
+      ]
     }))
 
     renderFC()
@@ -663,9 +677,11 @@ describe('InputBox FC — rendered', () => {
     useSessionStore.setState((state) => ({
       sessions: {
         ...state.sessions,
-        [FC_ROUTE]: { ...state.sessions[FC_ROUTE], selectedModel: 'claude-opus-4-7' },
+        [FC_ROUTE]: { ...state.sessions[FC_ROUTE], selectedModel: 'claude-opus-4-7' }
       },
-      availableModels: [{ value: 'claude-opus-4-7', displayName: 'Opus 4.7', description: 'Opus 4.7' }],
+      availableModels: [
+        { value: 'claude-opus-4-7', displayName: 'Opus 4.7', description: 'Opus 4.7' }
+      ]
     }))
 
     renderFC()
@@ -679,9 +695,11 @@ describe('InputBox FC — rendered', () => {
     useSessionStore.setState((state) => ({
       sessions: {
         ...state.sessions,
-        [FC_ROUTE]: { ...state.sessions[FC_ROUTE], selectedModel: 'claude-sonnet-4-5' },
+        [FC_ROUTE]: { ...state.sessions[FC_ROUTE], selectedModel: 'claude-sonnet-4-5' }
       },
-      availableModels: [{ value: 'claude-sonnet-4-5', displayName: 'Sonnet 4.5', description: 'Sonnet 4.5' }],
+      availableModels: [
+        { value: 'claude-sonnet-4-5', displayName: 'Sonnet 4.5', description: 'Sonnet 4.5' }
+      ]
     }))
 
     renderFC()
@@ -695,9 +713,11 @@ describe('InputBox FC — rendered', () => {
     useSessionStore.setState((state) => ({
       sessions: {
         ...state.sessions,
-        [FC_ROUTE]: { ...state.sessions[FC_ROUTE], selectedModel: 'claude-sonnet-4-6' },
+        [FC_ROUTE]: { ...state.sessions[FC_ROUTE], selectedModel: 'claude-sonnet-4-6' }
       },
-      availableModels: [{ value: 'claude-sonnet-4-6', displayName: 'Sonnet 4.6', description: 'Sonnet 4.6' }],
+      availableModels: [
+        { value: 'claude-sonnet-4-6', displayName: 'Sonnet 4.6', description: 'Sonnet 4.6' }
+      ]
     }))
 
     renderFC()
@@ -767,21 +787,25 @@ describe('InputBox FC — rendered', () => {
           ...state.sessions[FC_ROUTE],
           selectedModel: 'default',
           thinkingMode: 'adaptive',
-          effort: 'xhigh',
-        },
+          effort: 'xhigh'
+        }
       },
       availableModels: [
         {
-          value: 'default', displayName: 'Default', description: 'Opus 4.7',
+          value: 'default',
+          displayName: 'Default',
+          description: 'Opus 4.7',
           supportsEffort: true,
           supportedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max'],
-          supportsAdaptiveThinking: true,
+          supportsAdaptiveThinking: true
         },
         {
-          value: 'haiku', displayName: 'Haiku', description: 'Haiku 4.5',
+          value: 'haiku',
+          displayName: 'Haiku',
+          description: 'Haiku 4.5'
           // No capability fields — haiku has neither effort nor adaptive.
-        },
-      ],
+        }
+      ]
     }))
 
     renderFC()
@@ -791,7 +815,7 @@ describe('InputBox FC — rendered', () => {
     const session = useSessionStore.getState().sessions[FC_ROUTE]
     expect(session.selectedModel).toBe('haiku')
     expect(session.thinkingMode).toBe('enabled') // adaptive coerced (id fallback: haiku)
-    expect(session.effort).toBeNull()             // effort unsupported → explicit pick cleared
+    expect(session.effort).toBeNull() // effort unsupported → explicit pick cleared
   })
 
   it('onSelectModel: switching to a model with adaptive but no xhigh coerces xhigh → high', () => {
@@ -802,23 +826,27 @@ describe('InputBox FC — rendered', () => {
           ...state.sessions[FC_ROUTE],
           selectedModel: 'default',
           thinkingMode: 'adaptive',
-          effort: 'xhigh',
-        },
+          effort: 'xhigh'
+        }
       },
       availableModels: [
         {
-          value: 'default', displayName: 'Default', description: 'Opus 4.7',
+          value: 'default',
+          displayName: 'Default',
+          description: 'Opus 4.7',
           supportsEffort: true,
           supportedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max'],
-          supportsAdaptiveThinking: true,
+          supportsAdaptiveThinking: true
         },
         {
-          value: 'sonnet', displayName: 'Sonnet', description: 'Sonnet 4.6',
+          value: 'sonnet',
+          displayName: 'Sonnet',
+          description: 'Sonnet 4.6',
           supportsEffort: true,
           supportedEffortLevels: ['low', 'medium', 'high', 'max'],
-          supportsAdaptiveThinking: true,
-        },
-      ],
+          supportsAdaptiveThinking: true
+        }
+      ]
     }))
 
     renderFC()
@@ -827,6 +855,6 @@ describe('InputBox FC — rendered', () => {
 
     const session = useSessionStore.getState().sessions[FC_ROUTE]
     expect(session.thinkingMode).toBe('adaptive') // both support adaptive
-    expect(session.effort).toBe('high')           // xhigh coerced to model's default
+    expect(session.effort).toBe('high') // xhigh coerced to model's default
   })
 })

@@ -18,7 +18,7 @@ import {
   modelDefaultThinkingMode,
   canonicalizeModelValue,
   type EffortLevel,
-  type ThinkingMode,
+  type ThinkingMode
 } from '../../../../../shared/model-capabilities'
 
 const ACCEPTED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp']
@@ -37,7 +37,11 @@ function processImageFile(file: File): Promise<{ mediaType: string; base64Data: 
       const img = new Image()
       img.onload = (): void => {
         const { width, height } = img
-        if (width <= MAX_IMAGE_DIMENSION && height <= MAX_IMAGE_DIMENSION && file.size <= 4 * 1024 * 1024) {
+        if (
+          width <= MAX_IMAGE_DIMENSION &&
+          height <= MAX_IMAGE_DIMENSION &&
+          file.size <= 4 * 1024 * 1024
+        ) {
           resolve({ mediaType, base64Data: base64Raw })
           return
         }
@@ -111,9 +115,14 @@ export function InputBox(): React.JSX.Element {
   // Eagerly scan custom commands when cwd changes
   useEffect(() => {
     if (!cwd) return
-    window.api.scanCustomCommands(cwd).then((names) => {
-      setCustomCommands(names.map((name) => ({ name })))
-    }).catch(() => { /* scanner failed — keep existing commands */ })
+    window.api
+      .scanCustomCommands(cwd)
+      .then((names) => {
+        setCustomCommands(names.map((name) => ({ name })))
+      })
+      .catch(() => {
+        /* scanner failed — keep existing commands */
+      })
   }, [cwd, setCustomCommands])
 
   const {
@@ -138,13 +147,29 @@ export function InputBox(): React.JSX.Element {
 
   const availableModels = useSessionStore((s) => s.availableModels)
   const setAvailableModels = useSessionStore((s) => s.setAvailableModels)
-  const models = useMemo(() => availableModels.map((m) => {
-    const shortName = m.description?.split('·')[0]?.trim() || m.displayName
-    return { ...m, shortName }
-  }), [availableModels])
+  const models = useMemo(
+    () =>
+      availableModels.map((m) => {
+        const shortName = m.description?.split('·')[0]?.trim() || m.displayName
+        return { ...m, shortName }
+      }),
+    [availableModels]
+  )
   const selectedModelValue = useActiveSession((s) => s.selectedModel)
   const setSelectedModel = useSessionStore((s) => s.setSelectedModel)
-  const selectedModel = models.find((m) => m.value === selectedModelValue) || models[0] || { value: 'default', displayName: 'Default', shortName: 'Default', description: '' }
+  // Memoized so its identity is stable across renders (it feeds several
+  // downstream useMemo dependency lists).
+  const selectedModel = useMemo(
+    () =>
+      models.find((m) => m.value === selectedModelValue) ||
+      models[0] || {
+        value: 'default',
+        displayName: 'Default',
+        shortName: 'Default',
+        description: ''
+      },
+    [models, selectedModelValue]
+  )
   const statusLine = useActiveSession((s) => s.statusLine)
   const effort = useActiveSession((s) => s.effort)
   const setEffort = useSessionStore((s) => s.setEffort)
@@ -182,40 +207,96 @@ export function InputBox(): React.JSX.Element {
     const state = useSessionStore.getState()
     const session = state.sessions[routingId]
     const modelInfo = state.availableModels.find((m) => m.value === session?.selectedModel)
-    const desiredThinking: ThinkingMode = session?.thinkingMode ?? modelDefaultThinkingMode(modelInfo)
+    const desiredThinking: ThinkingMode =
+      session?.thinkingMode ?? modelDefaultThinkingMode(modelInfo)
     // Effort precedence: explicit per-session pick > per-model user default > cli.js heuristic.
-    const userDefault = state.settings.modelEffortDefaults?.[canonicalizeModelValue(modelInfo?.value)]
+    const userDefault =
+      state.settings.modelEffortDefaults?.[canonicalizeModelValue(modelInfo?.value)]
     const desiredEffort: EffortLevel =
       session?.effort ?? userDefault ?? modelDefaultEffort(modelInfo)
     return {
       effort: modelResolveEffort(modelInfo, desiredEffort) ?? desiredEffort,
-      thinkingMode: modelResolveThinkingMode(modelInfo, desiredThinking),
+      thinkingMode: modelResolveThinkingMode(modelInfo, desiredThinking)
     }
   }
 
-  const doSend = useCallback(async (prompt: string, attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>) => {
-    if (!activeSessionId) return
-    if (!sdkActive) {
-      const { sessions } = useSessionStore.getState()
-      const session = sessions[activeSessionId]
-      const isHistorical = session && session.messages.length > 0
-      const resumeId = isHistorical ? activeSessionId : undefined
-      const opts = resolveSessionSdkOptions(activeSessionId)
-      await window.api.createSession(activeSessionId, session?.cwd || '', opts.effort, resumeId, session?.permissionMode, session?.selectedModel, opts.thinkingMode)
-      markSdkActive(activeSessionId)
-    }
-    await window.api.sendPrompt(activeSessionId, prompt, attachments)
-  }, [activeSessionId, sdkActive, markSdkActive])
+  const doSend = useCallback(
+    async (
+      prompt: string,
+      attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
+    ) => {
+      if (!activeSessionId) return
+      if (!sdkActive) {
+        const { sessions } = useSessionStore.getState()
+        const session = sessions[activeSessionId]
+        const opts = resolveSessionSdkOptions(activeSessionId)
+        const fork = session?.forkOrigin
+        if (fork) {
+          // Branch: resume the SOURCE session, truncated to the anchor, forked into
+          // a fresh UUID. cli.js mints the new id and we rekey to it on first init.
+          await window.api.createSession(
+            activeSessionId,
+            session?.cwd || '',
+            opts.effort,
+            fork.sourceSessionId,
+            session?.permissionMode,
+            session?.selectedModel,
+            opts.thinkingMode,
+            fork.anchorUuid,
+            true
+          )
+        } else {
+          const isHistorical = session && session.messages.length > 0
+          const resumeId = isHistorical ? activeSessionId : undefined
+          await window.api.createSession(
+            activeSessionId,
+            session?.cwd || '',
+            opts.effort,
+            resumeId,
+            session?.permissionMode,
+            session?.selectedModel,
+            opts.thinkingMode
+          )
+        }
+        markSdkActive(activeSessionId)
+      }
+      await window.api.sendPrompt(activeSessionId, prompt, attachments)
+    },
+    [activeSessionId, sdkActive, markSdkActive]
+  )
 
   const ensureSession = useCallback(async () => {
     if (!activeSessionId) return
     if (!sdkActive) {
       const { sessions } = useSessionStore.getState()
       const session = sessions[activeSessionId]
-      const isHistorical = session && session.messages.length > 0 && !session.sdkActive
-      const resumeId = isHistorical ? activeSessionId : undefined
       const opts = resolveSessionSdkOptions(activeSessionId)
-      await window.api.createSession(activeSessionId, session?.cwd || '', opts.effort, resumeId, session?.permissionMode, session?.selectedModel, opts.thinkingMode)
+      const fork = session?.forkOrigin
+      if (fork) {
+        await window.api.createSession(
+          activeSessionId,
+          session?.cwd || '',
+          opts.effort,
+          fork.sourceSessionId,
+          session?.permissionMode,
+          session?.selectedModel,
+          opts.thinkingMode,
+          fork.anchorUuid,
+          true
+        )
+      } else {
+        const isHistorical = session && session.messages.length > 0 && !session.sdkActive
+        const resumeId = isHistorical ? activeSessionId : undefined
+        await window.api.createSession(
+          activeSessionId,
+          session?.cwd || '',
+          opts.effort,
+          resumeId,
+          session?.permissionMode,
+          session?.selectedModel,
+          opts.thinkingMode
+        )
+      }
       markSdkActive(activeSessionId)
     }
   }, [activeSessionId, sdkActive, markSdkActive])
@@ -248,7 +329,11 @@ export function InputBox(): React.JSX.Element {
   // keystroke, so memoization gives no benefit. View is unmemoized too.
   const handleSend = async (): Promise<void> => {
     const action = resolveSendAction({
-      text, attachedFiles, isDisabled, activeSessionId, isRunning,
+      text,
+      attachedFiles,
+      isDisabled,
+      activeSessionId,
+      isRunning
     })
     if (action.type === 'noop') return
 
@@ -260,11 +345,14 @@ export function InputBox(): React.JSX.Element {
       case 'side-question': {
         const { setBtwQuestion, setBtwResponse } = useSessionStore.getState()
         setBtwQuestion(activeSessionId!, action.question)
-        window.api.askSideQuestion(activeSessionId!, action.question).then((response) => {
-          setBtwResponse(activeSessionId!, response)
-        }).catch(() => {
-          setBtwResponse(activeSessionId!, null)
-        })
+        window.api
+          .askSideQuestion(activeSessionId!, action.question)
+          .then((response) => {
+            setBtwResponse(activeSessionId!, response)
+          })
+          .catch(() => {
+            setBtwResponse(activeSessionId!, null)
+          })
         return
       }
       case 'clear-session': {
@@ -295,8 +383,11 @@ export function InputBox(): React.JSX.Element {
 
   const handleEditQueued = useCallback(async () => {
     const savedText = queuedText
-    if (!activeSessionId || !savedText) { clearQueuedText(); return }
-    const result = await window.api.dequeueMessage(activeSessionId, savedText) as
+    if (!activeSessionId || !savedText) {
+      clearQueuedText()
+      return
+    }
+    const result = (await window.api.dequeueMessage(activeSessionId, savedText)) as
       | { removed: number }
       | { response?: { removed?: number } }
       | null
@@ -310,7 +401,11 @@ export function InputBox(): React.JSX.Element {
       clearQueuedText()
       requestAnimationFrame(() => {
         const el = textareaRef.current
-        if (el) { el.focus(); el.style.height = 'auto'; el.style.height = Math.min(el.scrollHeight, 200) + 'px' }
+        if (el) {
+          el.focus()
+          el.style.height = 'auto'
+          el.style.height = Math.min(el.scrollHeight, 200) + 'px'
+        }
       })
     } else {
       clearQueuedText()
@@ -324,18 +419,27 @@ export function InputBox(): React.JSX.Element {
   const handleKeyDown = (e: React.KeyboardEvent): void => {
     if (fileMentionHandleKeyDown(e)) return
     if (slashHandleKeyDown(e)) return
-    if (e.key === 'ArrowUp' && !text && queuedText) { e.preventDefault(); handleEditQueued(); return }
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend() }
+    if (e.key === 'ArrowUp' && !text && queuedText) {
+      e.preventDefault()
+      handleEditQueued()
+      return
+    }
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault()
+      handleSend()
+    }
     if (e.key === 'Escape' && isRunning) handleCancel()
     if (e.key === 'Tab' && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
       e.preventDefault()
-      if (voiceEnabled && voiceState === 'idle' && !slashMenuOpen && !fileMentionOpen) handleVoiceStart()
+      if (voiceEnabled && voiceState === 'idle' && !slashMenuOpen && !fileMentionOpen)
+        handleVoiceStart()
     }
   }
 
   const handleKeyUp = (e: React.KeyboardEvent): void => {
     if (e.key === 'Tab' && (voiceState === 'recording' || voiceState === 'connecting')) {
-      e.preventDefault(); handleVoiceStop()
+      e.preventDefault()
+      handleVoiceStop()
     }
   }
 
@@ -363,10 +467,15 @@ export function InputBox(): React.JSX.Element {
     for (const file of accepted) {
       try {
         const isPdf = file.type === 'application/pdf'
-        const { mediaType, base64Data } = isPdf ? await readFileAsBase64(file) : await processImageFile(file)
+        const { mediaType, base64Data } = isPdf
+          ? await readFileAsBase64(file)
+          : await processImageFile(file)
         newAttachments.push({
-          id: uuid(), fileName: file.name, fileType: isPdf ? 'pdf' : 'image',
-          mediaType: mediaType as FileAttachment['mediaType'], base64Data,
+          id: uuid(),
+          fileName: file.name,
+          fileType: isPdf ? 'pdf' : 'image',
+          mediaType: mediaType as FileAttachment['mediaType'],
+          base64Data,
           previewUrl: isPdf ? '' : `data:${mediaType};base64,${base64Data}`
         })
       } catch (err) {
@@ -376,41 +485,52 @@ export function InputBox(): React.JSX.Element {
     if (newAttachments.length > 0) setAttachedFiles((prev) => [...prev, ...newAttachments])
   }, [])
 
-  const handleFileChange = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
-    await addFiles(Array.from(e.target.files || []))
-    if (fileInputRef.current) fileInputRef.current.value = ''
-  }, [addFiles])
+  const handleFileChange = useCallback(
+    async (e: React.ChangeEvent<HTMLInputElement>) => {
+      await addFiles(Array.from(e.target.files || []))
+      if (fileInputRef.current) fileInputRef.current.value = ''
+    },
+    [addFiles]
+  )
 
-  const handlePaste = useCallback(async (e: React.ClipboardEvent) => {
-    const imageItems = Array.from(e.clipboardData.items).filter((item) => item.type.startsWith('image/'))
-    if (imageItems.length === 0) return
-    e.preventDefault()
-    await addFiles(imageItems.map((item) => item.getAsFile()).filter(Boolean) as File[])
-  }, [addFiles])
+  const handlePaste = useCallback(
+    async (e: React.ClipboardEvent) => {
+      const imageItems = Array.from(e.clipboardData.items).filter((item) =>
+        item.type.startsWith('image/')
+      )
+      if (imageItems.length === 0) return
+      e.preventDefault()
+      await addFiles(imageItems.map((item) => item.getAsFile()).filter(Boolean) as File[])
+    },
+    [addFiles]
+  )
 
   const removeFile = useCallback((id: string) => {
     setAttachedFiles((prev) => prev.filter((i) => i.id !== id))
   }, [])
 
-  const handleSelectModel = useCallback((value: string) => {
-    setSelectedModel(value)
-    if (activeSessionId) window.api.setModel(activeSessionId, value)
-    // Auto-coerce the user's explicit picks against the new model. Leave
-    // `null` store values alone — they auto-track the new model's defaults.
-    const state = useSessionStore.getState()
-    const session = state.sessions[activeSessionId ?? '']
-    const newModel = state.availableModels.find((m) => m.value === value)
-    if (session?.thinkingMode !== null && session?.thinkingMode !== undefined) {
-      const coerced = modelResolveThinkingMode(newModel, session.thinkingMode)
-      if (coerced !== session.thinkingMode) setThinkingMode(coerced)
-    }
-    if (session?.effort !== null && session?.effort !== undefined) {
-      const coerced = modelResolveEffort(newModel, session.effort)
-      // Effort unsupported on new model → clear the user's pick (fall back to default).
-      if (coerced === null) setEffort(null)
-      else if (coerced !== session.effort) setEffort(coerced)
-    }
-  }, [activeSessionId, setSelectedModel, setThinkingMode, setEffort])
+  const handleSelectModel = useCallback(
+    (value: string) => {
+      setSelectedModel(value)
+      if (activeSessionId) window.api.setModel(activeSessionId, value)
+      // Auto-coerce the user's explicit picks against the new model. Leave
+      // `null` store values alone — they auto-track the new model's defaults.
+      const state = useSessionStore.getState()
+      const session = state.sessions[activeSessionId ?? '']
+      const newModel = state.availableModels.find((m) => m.value === value)
+      if (session?.thinkingMode !== null && session?.thinkingMode !== undefined) {
+        const coerced = modelResolveThinkingMode(newModel, session.thinkingMode)
+        if (coerced !== session.thinkingMode) setThinkingMode(coerced)
+      }
+      if (session?.effort !== null && session?.effort !== undefined) {
+        const coerced = modelResolveEffort(newModel, session.effort)
+        // Effort unsupported on new model → clear the user's pick (fall back to default).
+        if (coerced === null) setEffort(null)
+        else if (coerced !== session.effort) setEffort(coerced)
+      }
+    },
+    [activeSessionId, setSelectedModel, setThinkingMode, setEffort]
+  )
 
   // Effort and thinking mode are read at sdkQuery start time, so restart the
   // session (with resume) to apply changes mid-conversation.
@@ -427,20 +547,26 @@ export function InputBox(): React.JSX.Element {
       activeSessionId,
       session?.permissionMode,
       session?.selectedModel,
-      opts.thinkingMode,
+      opts.thinkingMode
     )
     markSdkActive(activeSessionId)
   }, [activeSessionId, sdkActive, markSdkActive])
 
-  const handleSelectEffort = useCallback(async (level: EffortLevel) => {
-    setEffort(level)
-    await restartSdkSession()
-  }, [setEffort, restartSdkSession])
+  const handleSelectEffort = useCallback(
+    async (level: EffortLevel) => {
+      setEffort(level)
+      await restartSdkSession()
+    },
+    [setEffort, restartSdkSession]
+  )
 
-  const handleSelectThinking = useCallback(async (mode: ThinkingMode) => {
-    setThinkingMode(mode)
-    await restartSdkSession()
-  }, [setThinkingMode, restartSdkSession])
+  const handleSelectThinking = useCallback(
+    async (mode: ThinkingMode) => {
+      setThinkingMode(mode)
+      await restartSdkSession()
+    },
+    [setThinkingMode, restartSdkSession]
+  )
 
   const handleOpenSandboxSettings = useCallback(() => {
     window.dispatchEvent(new CustomEvent('open-settings', { detail: { section: 'sandbox' } }))
@@ -448,65 +574,103 @@ export function InputBox(): React.JSX.Element {
 
   // --- Derived values for context ---
 
-  const isVoiceActive = voiceState === 'recording' || voiceState === 'connecting' || voiceState === 'processing'
+  const isVoiceActive =
+    voiceState === 'recording' || voiceState === 'connecting' || voiceState === 'processing'
 
   const displayValue = isVoiceActive
-    ? text + (voiceInterimTranscript ? (text && !text.endsWith(' ') ? ' ' : '') + voiceInterimTranscript : '')
+    ? text +
+      (voiceInterimTranscript
+        ? (text && !text.endsWith(' ') ? ' ' : '') + voiceInterimTranscript
+        : '')
     : text
 
-  const placeholder = (voiceState === 'recording' || voiceState === 'connecting')
-    ? 'Listening...'
-    : voiceState === 'processing'
-      ? 'Finishing transcription...'
-      : !activeSessionId || !cwd
-        ? 'Select a folder to get started'
-        : isRunning
-          ? 'Type to queue a message...'
-          : 'Ask Claude anything, / for commands'
+  const placeholder =
+    voiceState === 'recording' || voiceState === 'connecting'
+      ? 'Listening...'
+      : voiceState === 'processing'
+        ? 'Finishing transcription...'
+        : !activeSessionId || !cwd
+          ? 'Select a folder to get started'
+          : isRunning
+            ? 'Type to queue a message...'
+            : 'Ask Claude anything, / for commands'
 
-  const textClassName = isVoiceActive && voiceInterimTranscript
-    ? 'text-[var(--text-secondary)] italic'
-    : 'text-text-primary'
+  const textClassName =
+    isVoiceActive && voiceInterimTranscript
+      ? 'text-[var(--text-secondary)] italic'
+      : 'text-text-primary'
 
-  const adaptiveSupported = useMemo(() => modelSupportsAdaptiveThinking(selectedModel), [selectedModel])
+  const adaptiveSupported = useMemo(
+    () => modelSupportsAdaptiveThinking(selectedModel),
+    [selectedModel]
+  )
   const effortSupported = useMemo(() => modelSupportsEffort(selectedModel), [selectedModel])
-  const allowedEffortLevels = useMemo(() => modelSupportedEffortLevels(selectedModel), [selectedModel])
+  const allowedEffortLevels = useMemo(
+    () => modelSupportedEffortLevels(selectedModel),
+    [selectedModel]
+  )
 
   // Effective display values: show the user's explicit pick when set,
   // otherwise fall back to the current model's default so new sessions
   // present the right tier (e.g. xhigh on Opus 4.7, high on Sonnet 4.6).
   const effectiveEffort = useMemo<EffortLevel>(
     () => effort ?? modelDefaultEffort(selectedModel),
-    [effort, selectedModel],
+    [effort, selectedModel]
   )
   const effectiveThinking = useMemo<ThinkingMode>(
     () => thinkingMode ?? modelDefaultThinkingMode(selectedModel),
-    [thinkingMode, selectedModel],
+    [thinkingMode, selectedModel]
   )
 
   return (
     <InputBoxView
-      textareaRef={textareaRef} fileInputRef={fileInputRef} isMobile={isMobile}
-      text={text} displayValue={displayValue} isDisabled={isDisabled} isRunning={isRunning}
-      isVoiceActive={isVoiceActive} placeholder={placeholder} textClassName={textClassName}
+      textareaRef={textareaRef}
+      fileInputRef={fileInputRef}
+      isMobile={isMobile}
+      text={text}
+      displayValue={displayValue}
+      isDisabled={isDisabled}
+      isRunning={isRunning}
+      isVoiceActive={isVoiceActive}
+      placeholder={placeholder}
+      textClassName={textClassName}
       permissionMode={permissionMode}
-      slashMenuOpen={slashMenuOpen} slashCommands={slashCommands} slashFilter={slashFilter}
-      slashMenuIndex={slashMenuIndex} filteredSlashCommands={filteredSlashCommands}
-      fileMentionOpen={fileMentionOpen} fileMentionIndex={fileMentionIndex}
+      slashMenuOpen={slashMenuOpen}
+      slashCommands={slashCommands}
+      slashFilter={slashFilter}
+      slashMenuIndex={slashMenuIndex}
+      filteredSlashCommands={filteredSlashCommands}
+      fileMentionOpen={fileMentionOpen}
+      fileMentionIndex={fileMentionIndex}
       filteredFileMentionEntries={filteredFileMentionEntries}
       attachedFiles={attachedFiles}
-      models={models} selectedModel={selectedModel} effort={effectiveEffort}
-      effortSupported={effortSupported} allowedEffortLevels={allowedEffortLevels}
-      thinkingMode={effectiveThinking} adaptiveSupported={adaptiveSupported}
-      sandboxEnabled={sandboxEnabled} voiceEnabled={voiceEnabled} voiceState={voiceState}
+      models={models}
+      selectedModel={selectedModel}
+      effort={effectiveEffort}
+      effortSupported={effortSupported}
+      allowedEffortLevels={allowedEffortLevels}
+      thinkingMode={effectiveThinking}
+      adaptiveSupported={adaptiveSupported}
+      sandboxEnabled={sandboxEnabled}
+      voiceEnabled={voiceEnabled}
+      voiceState={voiceState}
       statusLine={statusLine}
-      onSend={handleSend} onCancel={handleCancel}
-      onInput={handleInput} onKeyDown={handleKeyDown} onKeyUp={handleKeyUp} onPaste={handlePaste}
-      onFileChange={handleFileChange} onRemoveFile={removeFile}
-      onSlashSelect={handleSlashSelect} onFileMentionConfirm={handleFileMentionConfirm}
-      onSelectModel={handleSelectModel} onSelectEffort={handleSelectEffort} onSelectThinking={handleSelectThinking}
+      onSend={handleSend}
+      onCancel={handleCancel}
+      onInput={handleInput}
+      onKeyDown={handleKeyDown}
+      onKeyUp={handleKeyUp}
+      onPaste={handlePaste}
+      onFileChange={handleFileChange}
+      onRemoveFile={removeFile}
+      onSlashSelect={handleSlashSelect}
+      onFileMentionConfirm={handleFileMentionConfirm}
+      onSelectModel={handleSelectModel}
+      onSelectEffort={handleSelectEffort}
+      onSelectThinking={handleSelectThinking}
       onOpenSandboxSettings={handleOpenSandboxSettings}
-      onVoiceStart={handleVoiceStart} onVoiceStop={handleVoiceStop}
+      onVoiceStart={handleVoiceStart}
+      onVoiceStop={handleVoiceStop}
     />
   )
 }

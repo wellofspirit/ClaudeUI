@@ -18,16 +18,16 @@ const PATCH_DIR = resolve(__dirname, '..', 'patch')
 const replacements = [
   {
     from: `'node_modules/@anthropic-ai/claude-agent-sdk/cli.js'`,
-    to: `'vendor/claude-cli/cli.js'`,
+    to: `'vendor/claude-cli/cli.js'`
   },
   {
     from: `"node_modules/@anthropic-ai/claude-agent-sdk/cli.js"`,
-    to: `"vendor/claude-cli/cli.js"`,
+    to: `"vendor/claude-cli/cli.js"`
   },
   {
     from: `'Is @anthropic-ai/claude-agent-sdk installed?'`,
-    to: `'Did you run: node scripts/extract-cli.mjs ?'`,
-  },
+    to: `'Did you run: node scripts/extract-cli.mjs ?'`
+  }
 ]
 
 let files = 0

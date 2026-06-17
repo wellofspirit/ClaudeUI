@@ -17,7 +17,7 @@ const STATUS_COLORS: Record<McpServerConnectionStatus, string> = {
   'needs-auth': 'bg-amber-400',
   pending: 'bg-amber-400',
   disabled: 'bg-text-muted/40',
-  not_started: 'bg-text-muted/25',
+  not_started: 'bg-text-muted/25'
 }
 
 const STATUS_LABELS: Record<McpServerConnectionStatus, string> = {
@@ -26,7 +26,7 @@ const STATUS_LABELS: Record<McpServerConnectionStatus, string> = {
   'needs-auth': 'Needs Auth',
   pending: 'Connecting...',
   disabled: 'Disabled',
-  not_started: 'Not Started',
+  not_started: 'Not Started'
 }
 
 export interface McpDialogViewProps {
@@ -55,7 +55,9 @@ export interface McpDialogViewProps {
 function ScopeBadge({ scope }: { scope: McpServerScope }): React.JSX.Element {
   const meta = SCOPE_META[scope] ?? SCOPE_META.managed
   return (
-    <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium ${meta.color}`}>
+    <span
+      className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium ${meta.color}`}
+    >
       {meta.label}
     </span>
   )
@@ -91,7 +93,9 @@ function ServerRow({
     >
       <div className="flex items-center gap-2 min-w-0">
         <StatusDot status={server.status} />
-        <span className={`text-[12px] font-medium truncate ${selected ? 'text-accent' : 'text-text-primary'}`}>
+        <span
+          className={`text-[12px] font-medium truncate ${selected ? 'text-accent' : 'text-text-primary'}`}
+        >
           {server.name}
         </span>
         {toolCount > 0 && (
@@ -99,9 +103,7 @@ function ServerRow({
         )}
       </div>
       {server.error && (
-        <div className="text-[10px] text-red-400/80 truncate mt-0.5 pl-[18px]">
-          {server.error}
-        </div>
+        <div className="text-[10px] text-red-400/80 truncate mt-0.5 pl-[18px]">{server.error}</div>
       )}
     </button>
   )
@@ -109,7 +111,7 @@ function ServerRow({
 
 function AddServerForm({
   onCancel,
-  onSubmit,
+  onSubmit
 }: {
   onCancel: () => void
   onSubmit: (payload: AddServerPayload) => Promise<{ error?: string } | void>
@@ -125,9 +127,7 @@ function AddServerForm({
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  const canSave = name.trim() && (
-    transport === 'stdio' ? command.trim() : url.trim()
-  )
+  const canSave = name.trim() && (transport === 'stdio' ? command.trim() : url.trim())
 
   const handleSave = async (): Promise<void> => {
     if (!canSave) return
@@ -139,7 +139,10 @@ function AddServerForm({
       if (transport === 'stdio') {
         config.command = command.trim()
         if (args.trim()) {
-          config.args = args.split('\n').map((a) => a.trim()).filter(Boolean)
+          config.args = args
+            .split('\n')
+            .map((a) => a.trim())
+            .filter(Boolean)
         }
         if (envText.trim()) {
           try {
@@ -174,7 +177,8 @@ function AddServerForm({
     }
   }
 
-  const inputCls = 'w-full px-2.5 py-1.5 rounded-md bg-bg-secondary border border-border text-[12px] text-text-primary placeholder-text-muted/50 outline-none focus:border-accent/50 transition-colors'
+  const inputCls =
+    'w-full px-2.5 py-1.5 rounded-md bg-bg-secondary border border-border text-[12px] text-text-primary placeholder-text-muted/50 outline-none focus:border-accent/50 transition-colors'
   const labelCls = 'text-[11px] text-text-secondary font-medium mb-1'
 
   return (
@@ -294,9 +298,7 @@ function AddServerForm({
         )}
 
         {error && (
-          <div className="text-[11px] text-red-400 bg-red-400/10 rounded-md px-3 py-2">
-            {error}
-          </div>
+          <div className="text-[11px] text-red-400 bg-red-400/10 rounded-md px-3 py-2">{error}</div>
         )}
       </div>
 
@@ -326,7 +328,7 @@ function ServerDetail({
   actionLoading,
   onToggle,
   onReconnect,
-  onDelete,
+  onDelete
 }: {
   server: McpServerInfo
   hasRoutingId: boolean
@@ -354,7 +356,15 @@ function ServerDetail({
         </div>
         <div className="flex items-center gap-2 text-[11px]">
           <StatusDot status={server.status} />
-          <span className={server.status === 'connected' ? 'text-emerald-400' : server.status === 'failed' ? 'text-red-400' : 'text-text-muted'}>
+          <span
+            className={
+              server.status === 'connected'
+                ? 'text-emerald-400'
+                : server.status === 'failed'
+                  ? 'text-red-400'
+                  : 'text-text-muted'
+            }
+          >
             {STATUS_LABELS[server.status] ?? server.status}
           </span>
           {server.serverInfo && (
@@ -374,19 +384,37 @@ function ServerDetail({
       <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
         {config && (
           <div>
-            <div className="text-[10px] font-semibold text-text-muted tracking-wider mb-1.5">CONFIG</div>
+            <div className="text-[10px] font-semibold text-text-muted tracking-wider mb-1.5">
+              CONFIG
+            </div>
             <div className="bg-bg-secondary/60 rounded-lg px-3 py-2.5 text-[11px] font-mono text-text-secondary space-y-1">
-              {config.type && <div><span className="text-text-muted">type:</span> {config.type}</div>}
-              {config.command && <div><span className="text-text-muted">command:</span> {config.command}</div>}
-              {config.args && config.args.length > 0 && (
-                <div><span className="text-text-muted">args:</span> {JSON.stringify(config.args)}</div>
+              {config.type && (
+                <div>
+                  <span className="text-text-muted">type:</span> {config.type}
+                </div>
               )}
-              {config.url && <div><span className="text-text-muted">url:</span> {config.url}</div>}
+              {config.command && (
+                <div>
+                  <span className="text-text-muted">command:</span> {config.command}
+                </div>
+              )}
+              {config.args && config.args.length > 0 && (
+                <div>
+                  <span className="text-text-muted">args:</span> {JSON.stringify(config.args)}
+                </div>
+              )}
+              {config.url && (
+                <div>
+                  <span className="text-text-muted">url:</span> {config.url}
+                </div>
+              )}
               {config.env && Object.keys(config.env).length > 0 && (
                 <div>
                   <span className="text-text-muted">env:</span>
                   {Object.entries(config.env).map(([k, v]) => (
-                    <div key={k} className="pl-3">{k}: {v.length > 20 ? v.slice(0, 8) + '...' + v.slice(-4) : v}</div>
+                    <div key={k} className="pl-3">
+                      {k}: {v.length > 20 ? v.slice(0, 8) + '...' + v.slice(-4) : v}
+                    </div>
                   ))}
                 </div>
               )}
@@ -394,7 +422,9 @@ function ServerDetail({
                 <div>
                   <span className="text-text-muted">headers:</span>
                   {Object.entries(config.headers).map(([k, v]) => (
-                    <div key={k} className="pl-3">{k}: {v.length > 20 ? v.slice(0, 8) + '...' : v}</div>
+                    <div key={k} className="pl-3">
+                      {k}: {v.length > 20 ? v.slice(0, 8) + '...' : v}
+                    </div>
                   ))}
                 </div>
               )}
@@ -410,7 +440,11 @@ function ServerDetail({
                 disabled={isBusy}
                 className="px-2.5 py-1.5 rounded-md bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/30 text-[11px] text-amber-400 font-medium transition-colors cursor-default disabled:opacity-40"
               >
-                {isBusy ? 'Reconnecting...' : server.status === 'connected' ? 'Restart' : 'Reconnect'}
+                {isBusy
+                  ? 'Reconnecting...'
+                  : server.status === 'connected'
+                    ? 'Restart'
+                    : 'Reconnect'}
               </button>
             )}
             <button
@@ -422,7 +456,9 @@ function ServerDetail({
                   : 'bg-text-muted/10 hover:bg-text-muted/20 border-text-muted/20 text-text-muted'
               }`}
             >
-              {server.status === 'disabled' || server.status === 'not_started' ? 'Enable' : 'Disable'}
+              {server.status === 'disabled' || server.status === 'not_started'
+                ? 'Enable'
+                : 'Disable'}
             </button>
             {isEditable && !confirmingDelete && (
               <button
@@ -443,20 +479,29 @@ function ServerDetail({
             </div>
             <div className="space-y-0.5">
               {tools.map((tool) => (
-                <div key={tool.name} className="flex items-start gap-2 px-2 py-1.5 rounded-md hover:bg-bg-hover/50">
+                <div
+                  key={tool.name}
+                  className="flex items-start gap-2 px-2 py-1.5 rounded-md hover:bg-bg-hover/50"
+                >
                   <span className="text-[11px] font-mono text-accent shrink-0">{tool.name}</span>
                   {tool.description && (
                     <span className="text-[10px] text-text-muted truncate">{tool.description}</span>
                   )}
                   <div className="ml-auto flex gap-1 shrink-0">
                     {tool.annotations?.readOnly && (
-                      <span className="text-[9px] px-1 py-0.5 rounded bg-emerald-500/10 text-emerald-400">RO</span>
+                      <span className="text-[9px] px-1 py-0.5 rounded bg-emerald-500/10 text-emerald-400">
+                        RO
+                      </span>
                     )}
                     {tool.annotations?.destructive && (
-                      <span className="text-[9px] px-1 py-0.5 rounded bg-red-500/10 text-red-400">!</span>
+                      <span className="text-[9px] px-1 py-0.5 rounded bg-red-500/10 text-red-400">
+                        !
+                      </span>
                     )}
                     {tool.annotations?.openWorld && (
-                      <span className="text-[9px] px-1 py-0.5 rounded bg-amber-500/10 text-amber-400">net</span>
+                      <span className="text-[9px] px-1 py-0.5 rounded bg-amber-500/10 text-amber-400">
+                        net
+                      </span>
                     )}
                   </div>
                 </div>
@@ -475,7 +520,17 @@ function ServerDetail({
         <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/40 backdrop-blur-[2px] rounded-r-xl">
           <div className="bg-bg-primary border border-red-500/30 rounded-xl shadow-2xl px-5 py-4 mx-6 max-w-[320px]">
             <div className="flex items-center gap-2 mb-2">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-red-400 shrink-0">
+              <svg
+                width="16"
+                height="16"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                className="text-red-400 shrink-0"
+              >
                 <path d="M3 6h18" />
                 <path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" />
                 <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
@@ -483,7 +538,8 @@ function ServerDetail({
               <h3 className="text-[13px] font-semibold text-text-primary">Delete Server</h3>
             </div>
             <p className="text-[12px] text-text-secondary mb-1">
-              Are you sure you want to delete <span className="font-semibold text-text-primary">{server.name}</span>?
+              Are you sure you want to delete{' '}
+              <span className="font-semibold text-text-primary">{server.name}</span>?
             </p>
             <p className="text-[11px] text-text-muted mb-4">
               This will remove it from your {server.scope} config. This cannot be undone.
@@ -497,7 +553,10 @@ function ServerDetail({
                 Cancel
               </button>
               <button
-                onClick={async () => { await onDelete(server); setConfirmingDelete(false) }}
+                onClick={async () => {
+                  await onDelete(server)
+                  setConfirmingDelete(false)
+                }}
                 disabled={isBusy}
                 className="px-3 py-1.5 rounded-md bg-red-500/20 hover:bg-red-500/30 border border-red-500/30 text-[12px] text-red-400 font-medium transition-colors cursor-default disabled:opacity-40"
               >
@@ -515,7 +574,17 @@ function EmptyDetail(): React.JSX.Element {
   return (
     <div className="flex-1 flex items-center justify-center text-text-muted">
       <div className="text-center">
-        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" className="mx-auto mb-2 opacity-40">
+        <svg
+          width="32"
+          height="32"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          className="mx-auto mb-2 opacity-40"
+        >
           <path d="M12 22v-5" />
           <path d="M9 8V2" />
           <path d="M15 8V2" />
@@ -547,14 +616,19 @@ export function McpDialogView({
   onToggleServer,
   onReconnectServer,
   onDeleteServer,
-  onClose,
+  onClose
 }: McpDialogViewProps): React.JSX.Element {
-  const connectedCount = useMemo(() => servers.filter((s) => s.status === 'connected').length, [servers])
+  const connectedCount = useMemo(
+    () => servers.filter((s) => s.status === 'connected').length,
+    [servers]
+  )
 
   return (
     <div
       className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 backdrop-blur-sm animate-fade-in"
-      onClick={(e) => { if (e.target === e.currentTarget) onClose() }}
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose()
+      }}
     >
       <div
         className="bg-bg-primary border border-border rounded-xl shadow-2xl flex flex-col overflow-hidden"
@@ -564,7 +638,17 @@ export function McpDialogView({
         {/* Header */}
         <div className="shrink-0 flex items-center justify-between px-5 py-3 border-b border-border">
           <div className="flex items-center gap-2.5">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="text-accent">
+            <svg
+              width="16"
+              height="16"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.8"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className="text-accent"
+            >
               <path d="M12 22v-5" />
               <path d="M9 8V2" />
               <path d="M15 8V2" />
@@ -580,7 +664,15 @@ export function McpDialogView({
               onClick={onOpenAddForm}
               className="flex items-center gap-1 px-2.5 py-1 rounded-md bg-accent/15 hover:bg-accent/25 border border-accent/30 text-[11px] text-accent font-medium transition-colors cursor-default"
             >
-              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+              <svg
+                width="11"
+                height="11"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2.5"
+                strokeLinecap="round"
+              >
                 <path d="M12 5v14M5 12h14" />
               </svg>
               Add Server
@@ -589,7 +681,15 @@ export function McpDialogView({
               onClick={onClose}
               className="w-7 h-7 flex items-center justify-center rounded-md text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
             >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+              <svg
+                width="14"
+                height="14"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+              >
                 <path d="M18 6L6 18M6 6l12 12" />
               </svg>
             </button>
@@ -601,7 +701,17 @@ export function McpDialogView({
           <div className="w-[280px] shrink-0 border-r border-border flex flex-col">
             <div className="px-3 py-2.5 border-b border-border">
               <div className="relative">
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="absolute left-2.5 top-1/2 -translate-y-1/2 text-text-muted">
+                <svg
+                  width="12"
+                  height="12"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  className="absolute left-2.5 top-1/2 -translate-y-1/2 text-text-muted"
+                >
                   <circle cx="11" cy="11" r="8" />
                   <path d="m21 21-4.3-4.3" />
                 </svg>

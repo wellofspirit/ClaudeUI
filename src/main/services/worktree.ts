@@ -68,7 +68,10 @@ export async function createWorktree(cwd: string, name: string): Promise<Worktre
   return info
 }
 
-export async function getWorktreeStatus(worktreePath: string, originalHead: string): Promise<WorktreeStatus> {
+export async function getWorktreeStatus(
+  worktreePath: string,
+  originalHead: string
+): Promise<WorktreeStatus> {
   const git = simpleGit(worktreePath)
 
   // Get uncommitted files
@@ -93,7 +96,11 @@ export async function getWorktreeStatus(worktreePath: string, originalHead: stri
   }
 }
 
-export async function removeWorktree(worktreePath: string, branch: string, gitRoot: string): Promise<void> {
+export async function removeWorktree(
+  worktreePath: string,
+  branch: string,
+  gitRoot: string
+): Promise<void> {
   const git = simpleGit(gitRoot)
 
   try {

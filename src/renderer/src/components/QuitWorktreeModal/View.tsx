@@ -18,7 +18,7 @@ export function QuitWorktreeModalView({
   removing,
   onCancel,
   onKeepAll,
-  onRemoveAll,
+  onRemoveAll
 }: QuitWorktreeModalViewProps): React.JSX.Element {
   return (
     <div className="fixed inset-0 z-[200] flex items-center justify-center">
@@ -33,15 +33,30 @@ export function QuitWorktreeModalView({
 
         <div className="mb-4 space-y-1.5">
           {quitWorktrees.map(({ worktreeInfo }) => (
-            <div key={worktreeInfo.worktreeName} className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-bg-tertiary border border-border">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0 text-mode-edit">
+            <div
+              key={worktreeInfo.worktreeName}
+              className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-bg-tertiary border border-border"
+            >
+              <svg
+                width="12"
+                height="12"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                className="shrink-0 text-mode-edit"
+              >
                 <circle cx="12" cy="18" r="3" />
                 <circle cx="6" cy="6" r="3" />
                 <circle cx="18" cy="6" r="3" />
                 <path d="M18 9v2c0 .6-.4 1-1 1H7c-.6 0-1-.4-1-1V9" />
                 <path d="M12 12v3" />
               </svg>
-              <span className="text-[12px] text-text-primary font-mono truncate">{worktreeInfo.worktreeName}</span>
+              <span className="text-[12px] text-text-primary font-mono truncate">
+                {worktreeInfo.worktreeName}
+              </span>
             </div>
           ))}
         </div>

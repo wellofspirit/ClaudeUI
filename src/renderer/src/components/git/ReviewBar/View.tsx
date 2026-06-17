@@ -6,7 +6,11 @@ export interface ReviewBarViewProps {
   onSend: () => void
 }
 
-export function ReviewBarView({ comments, fileCount, onSend }: ReviewBarViewProps): React.JSX.Element | null {
+export function ReviewBarView({
+  comments,
+  fileCount,
+  onSend
+}: ReviewBarViewProps): React.JSX.Element | null {
   if (!comments.length) return null
 
   return (

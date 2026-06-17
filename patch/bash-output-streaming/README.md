@@ -6,10 +6,10 @@ Live Bash/PowerShell command output never reaches the SDK consumer until the com
 
 `@anthropic-ai/claude-agent-sdk` — bundled `cli.js` file.
 
-| Component | Version at time of discovery |
-|---|---|
-| SDK package | 0.2.97 → 0.2.105 |
-| Bundled CLI (`cli.js`) | 2.1.97 → 2.1.105 |
+| Component              | Version at time of discovery |
+| ---------------------- | ---------------------------- |
+| SDK package            | 0.2.97 → 0.2.105             |
+| Bundled CLI (`cli.js`) | 2.1.97 → 2.1.105             |
 
 ## The Problem
 
@@ -88,40 +88,40 @@ sLz continues:
 
 ### Key classes and functions
 
-| Name (v2.1.105) | Purpose |
-|---|---|
-| `sLz` | Bash async generator — orchestrates command execution |
-| `nE6` | Command runner — spawns process, returns `IO7` wrapper |
-| `j$` | `TaskOutput` — manages output buffering, file spill, polling |
-| `IO7` | `ShellCommand` — wraps child process, handles backgrounding |
-| `xO7` | `StreamHandler` — bridges process stdout → `j$.writeStdout()` (only created when `onStdout` exists) |
-| `wvz` | stdio config — returns `["pipe","pipe","pipe"]` or `["pipe",fd,fd]` |
-| `nY` | Path generator — `nY(taskId)` → `<sessions-dir>/<taskId>.output` |
+| Name (v2.1.105) | Purpose                                                                                             |
+| --------------- | --------------------------------------------------------------------------------------------------- |
+| `sLz`           | Bash async generator — orchestrates command execution                                               |
+| `nE6`           | Command runner — spawns process, returns `IO7` wrapper                                              |
+| `j$`            | `TaskOutput` — manages output buffering, file spill, polling                                        |
+| `IO7`           | `ShellCommand` — wraps child process, handles backgrounding                                         |
+| `xO7`           | `StreamHandler` — bridges process stdout → `j$.writeStdout()` (only created when `onStdout` exists) |
+| `wvz`           | stdio config — returns `["pipe","pipe","pipe"]` or `["pipe",fd,fd]`                                 |
+| `nY`            | Path generator — `nY(taskId)` → `<sessions-dir>/<taskId>.output`                                    |
 
 ### Variable mapping (inside `sLz`)
 
-| Variable | Meaning |
-|---|---|
-| `w` | Command string |
-| `j` | Description |
-| `O` | `toolUseId` |
-| `$` | `agentId` |
-| `k` | `IO7` shell command instance (returned by `nE6`) |
-| `h` | `k.result` — promise that resolves when command finishes |
-| `J` | `run_in_background` flag |
-| `Bc4` | HEK timeout constant (2000ms) |
-| `V` | `shouldAutoBackground` flag |
+| Variable | Meaning                                                  |
+| -------- | -------------------------------------------------------- |
+| `w`      | Command string                                           |
+| `j`      | Description                                              |
+| `O`      | `toolUseId`                                              |
+| `$`      | `agentId`                                                |
+| `k`      | `IO7` shell command instance (returned by `nE6`)         |
+| `h`      | `k.result` — promise that resolves when command finishes |
+| `J`      | `run_in_background` flag                                 |
+| `Bc4`    | HEK timeout constant (2000ms)                            |
+| `V`      | `shouldAutoBackground` flag                              |
 
 ### Variable mapping (inside `nE6`)
 
-| Variable | Meaning |
-|---|---|
-| `A` | `onProgress` callback |
-| `j` | `onStdout` callback (undefined when called from `sLz`) |
-| `R` | `!!j` — true if `onStdout` exists |
-| `x` | Task ID from `vB("local_bash")` |
-| `m` | `j$` (TaskOutput) instance — `new j$(x, A??null, !R)` |
-| `S` | File descriptor for output file (opened when `!R`) |
+| Variable | Meaning                                                |
+| -------- | ------------------------------------------------------ |
+| `A`      | `onProgress` callback                                  |
+| `j`      | `onStdout` callback (undefined when called from `sLz`) |
+| `R`      | `!!j` — true if `onStdout` exists                      |
+| `x`      | Task ID from `vB("local_bash")`                        |
+| `m`      | `j$` (TaskOutput) instance — `new j$(x, A??null, !R)`  |
+| `S`      | File descriptor for output file (opened when `!R`)     |
 
 ## The Patches
 
@@ -136,10 +136,11 @@ onProgress(<5 vars>){<var>=<1st>,<var>=<2nd>,<var>=<3rd>,<var>=<5th>?<4th>:0;let
 ```
 
 Regex:
+
 ```js
-`onProgress\\((V),(V),(V),(V),(V))\\{` +
-`(V)=\\1,(V)=\\2,(V)=\\3,(V)=\\5\\?\\4:0;` +
-`let (V)=(V);if\\(\\10\\)\\11=null,\\10\\(\\)`
+;`onProgress\\((V),(V),(V),(V),(V))\\{` +
+  `(V)=\\1,(V)=\\2,(V)=\\3,(V)=\\5\\?\\4:0;` +
+  `let (V)=(V);if\\(\\10\\)\\11=null,\\10\\(\\)`
 ```
 
 #### Before
@@ -192,8 +193,9 @@ The `nE6()` result assignment immediately after the `onProgress` callback closur
 ```
 
 Regex:
+
 ```js
-`\\),(${V})=(${V})\\.result;`
+;`\\),(${V})=(${V})\\.result;`
 ```
 
 Found by searching within 2000 chars after the Part A anchor.
@@ -230,28 +232,39 @@ Both `O` (toolUseId) and `k` (shell command) are extracted dynamically:
 ### `bash_output` (Part A)
 
 ```json
-{"type":"bash_output","tool_use_id":"toolu_XXX","output":"last 100 lines","full_output":"last 5 lines","total_lines":42,"total_bytes":1234}
+{
+  "type": "bash_output",
+  "tool_use_id": "toolu_XXX",
+  "output": "last 100 lines",
+  "full_output": "last 5 lines",
+  "total_lines": 42,
+  "total_bytes": 1234
+}
 ```
 
-| Field | Type | Description |
-|---|---|---|
-| `tool_use_id` | string | The tool_use block ID for this Bash invocation |
-| `output` | string | Last ~100 lines of output (from `j$` ring buffer) |
-| `full_output` | string | Last ~5 lines of output |
-| `total_lines` | number | Total line count so far |
-| `total_bytes` | number | Total byte count so far |
+| Field         | Type   | Description                                       |
+| ------------- | ------ | ------------------------------------------------- |
+| `tool_use_id` | string | The tool_use block ID for this Bash invocation    |
+| `output`      | string | Last ~100 lines of output (from `j$` ring buffer) |
+| `full_output` | string | Last ~5 lines of output                           |
+| `total_lines` | number | Total line count so far                           |
+| `total_bytes` | number | Total byte count so far                           |
 
 **Note:** The `output` and `full_output` field names are misleading (inherited from the `onProgress` callback semantics). `output` is actually the larger window (~100 lines) and `full_output` is the smaller window (~5 lines). This is because `onProgress` is called from `j$.startPolling()` with `(last5, last100, totalLines, totalBytes, hasMore)` — our patch captures param positions 1 and 2.
 
 ### `bash_output_init` (Part B)
 
 ```json
-{"type":"bash_output_init","tool_use_id":"toolu_XXX","output_file":"/path/to/sessions/<taskId>.output"}
+{
+  "type": "bash_output_init",
+  "tool_use_id": "toolu_XXX",
+  "output_file": "/path/to/sessions/<taskId>.output"
+}
 ```
 
-| Field | Type | Description |
-|---|---|---|
-| `tool_use_id` | string | The tool_use block ID for this Bash invocation |
+| Field         | Type   | Description                                                         |
+| ------------- | ------ | ------------------------------------------------------------------- |
+| `tool_use_id` | string | The tool_use block ID for this Bash invocation                      |
 | `output_file` | string | Absolute path to the output file being written by the child process |
 
 ## Consumer-Side Integration
@@ -279,6 +292,7 @@ This reuses the existing `watchBackground` / `pollBackgroundFile` / `readTail` i
 **`bash_output` handler**: Forwards to the renderer as `session:bash-output` IPC event (unchanged from before Part B).
 
 **Cleanup**: `markBackgroundDone(toolUseId)` is called when:
+
 - A foreground tool result arrives (command completed)
 - A task notification arrives (background task completed)
 
@@ -292,6 +306,7 @@ This reuses the existing `watchBackground` / `pollBackgroundFile` / `readTail` i
 ### Timeline comparison
 
 **Before patch** (foreground bash):
+
 ```
 t=0.0s  Process spawns
 t=2.0s  HEK timeout resolves
@@ -301,6 +316,7 @@ t=∞     Command finishes → tool result arrives → GUI shows output
 ```
 
 **After patch** (foreground bash):
+
 ```
 t=0.0s  Process spawns
 t=0.0s  bash_output_init emitted with file path
@@ -423,15 +439,15 @@ process.stdout.write(JSON.stringify({...})+"\\n")  // \\n = escaped in the sourc
 
 ## Key Functions Reference
 
-| Name (v2.1.105) | Purpose | How to find |
-|---|---|---|
-| `sLz` | Bash async generator | `bundle-analyzer find cli.js "onProgress" --compact` near `toolUseId` |
-| `nE6` | Command runner (spawns process) | `bundle-analyzer find cli.js "onStdout" --compact` |
-| `j$` | TaskOutput (output buffering + file spill) | `bundle-analyzer find cli.js "stdoutToFile" --compact` |
-| `IO7` | ShellCommand wrapper (DH7) | `bundle-analyzer find cli.js '"running"' --compact` near `taskOutput` |
-| `xO7` | StreamHandler (stdout→TaskOutput bridge) | Near `IO7`, has `setEncoding("utf-8")` |
-| `wvz` | stdio config function | `bundle-analyzer find cli.js '"pipe","pipe","pipe"' --compact` |
-| `nY` | Output file path generator | `bundle-analyzer find cli.js ".output" --compact` |
+| Name (v2.1.105) | Purpose                                    | How to find                                                           |
+| --------------- | ------------------------------------------ | --------------------------------------------------------------------- |
+| `sLz`           | Bash async generator                       | `bundle-analyzer find cli.js "onProgress" --compact` near `toolUseId` |
+| `nE6`           | Command runner (spawns process)            | `bundle-analyzer find cli.js "onStdout" --compact`                    |
+| `j$`            | TaskOutput (output buffering + file spill) | `bundle-analyzer find cli.js "stdoutToFile" --compact`                |
+| `IO7`           | ShellCommand wrapper (DH7)                 | `bundle-analyzer find cli.js '"running"' --compact` near `taskOutput` |
+| `xO7`           | StreamHandler (stdout→TaskOutput bridge)   | Near `IO7`, has `setEncoding("utf-8")`                                |
+| `wvz`           | stdio config function                      | `bundle-analyzer find cli.js '"pipe","pipe","pipe"' --compact`        |
+| `nY`            | Output file path generator                 | `bundle-analyzer find cli.js ".output" --compact`                     |
 
 **Note:** All minified names will change in future SDK versions. Use content patterns (string literals, structural shapes) to relocate code.
 
@@ -442,7 +458,7 @@ process.stdout.write(JSON.stringify({...})+"\\n")  // \\n = escaped in the sourc
 
 ## Files
 
-| File | Purpose |
-|---|---|
-| `README.md` | This document |
+| File        | Purpose                                                          |
+| ----------- | ---------------------------------------------------------------- |
+| `README.md` | This document                                                    |
 | `apply.mjs` | Patch script (Part A: onProgress hook, Part B: bash_output_init) |

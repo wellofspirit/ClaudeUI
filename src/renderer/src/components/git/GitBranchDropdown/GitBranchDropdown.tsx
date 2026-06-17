@@ -50,35 +50,47 @@ export function GitBranchDropdown({ onClose, anchorRef }: Props): React.JSX.Elem
       setGitStatus(activeSessionId, status)
       setGitBranches(activeSessionId, newBranches)
       setBranches(newBranches)
-    } catch { /* swallow — individual handlers report errors */ }
+    } catch {
+      /* swallow — individual handlers report errors */
+    }
   }, [cwd, activeSessionId, setGitStatus, setGitBranches])
 
   // Load branches on open
   useEffect(() => {
     if (!cwd) return
-    window.api.gitGetBranches(cwd).then((b) => {
-      setBranches(b)
-      if (activeSessionId) setGitBranches(activeSessionId, b)
-    }).catch(() => {})
+    window.api
+      .gitGetBranches(cwd)
+      .then((b) => {
+        setBranches(b)
+        if (activeSessionId) setGitBranches(activeSessionId, b)
+      })
+      .catch(() => {})
   }, [cwd, activeSessionId, setGitBranches])
 
   // Auto-fetch on open (with cooldown)
   useEffect(() => {
     if (!cwd || !activeSessionId || !hasTracking) return
     const now = Date.now()
-    if (lastFetchTime && (now - lastFetchTime) < FETCH_COOLDOWN) return
+    if (lastFetchTime && now - lastFetchTime < FETCH_COOLDOWN) return
 
-    window.api.gitFetch(cwd).then(async () => {
-      setLastFetchTime(activeSessionId, Date.now())
-      await refreshAll()
-    }).catch(() => {})
-  }, []) // eslint-disable-line react-hooks/exhaustive-deps — only on mount
+    window.api
+      .gitFetch(cwd)
+      .then(async () => {
+        setLastFetchTime(activeSessionId, Date.now())
+        await refreshAll()
+      })
+      .catch(() => {})
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps -- only on mount
 
   // Click-outside to close
   useEffect(() => {
     const handler = (e: MouseEvent): void => {
-      if (ref.current && !ref.current.contains(e.target as Node) &&
-          anchorRef.current && !anchorRef.current.contains(e.target as Node)) {
+      if (
+        ref.current &&
+        !ref.current.contains(e.target as Node) &&
+        anchorRef.current &&
+        !anchorRef.current.contains(e.target as Node)
+      ) {
         onClose()
       }
     }
@@ -141,7 +153,11 @@ export function GitBranchDropdown({ onClose, anchorRef }: Props): React.JSX.Elem
 
   const isNoUpstreamError = (err: unknown): boolean => {
     const msg = err instanceof Error ? err.message : String(err)
-    return msg.includes('no upstream branch') || msg.includes('set-upstream') || msg.includes('has no upstream')
+    return (
+      msg.includes('no upstream branch') ||
+      msg.includes('set-upstream') ||
+      msg.includes('has no upstream')
+    )
   }
 
   const handlePush = useCallback(async () => {
@@ -184,20 +200,23 @@ export function GitBranchDropdown({ onClose, anchorRef }: Props): React.JSX.Elem
     }
   }, [cwd, activeSessionId, upstreamPrompt, setSyncOp, setSyncError, refreshAll])
 
-  const handleCheckout = useCallback(async (branch: string) => {
-    if (!cwd || loading) return
-    setLoading(true)
-    setLocalError(null)
-    try {
-      await window.api.gitCheckout(cwd, branch)
-      await refreshAll()
-      onClose()
-    } catch (err) {
-      setLocalError(err instanceof Error ? err.message : 'Failed to switch branch')
-    } finally {
-      setLoading(false)
-    }
-  }, [cwd, loading, onClose, refreshAll])
+  const handleCheckout = useCallback(
+    async (branch: string) => {
+      if (!cwd || loading) return
+      setLoading(true)
+      setLocalError(null)
+      try {
+        await window.api.gitCheckout(cwd, branch)
+        await refreshAll()
+        onClose()
+      } catch (err) {
+        setLocalError(err instanceof Error ? err.message : 'Failed to switch branch')
+      } finally {
+        setLoading(false)
+      }
+    },
+    [cwd, loading, onClose, refreshAll]
+  )
 
   const handleCreateBranch = useCallback(async () => {
     if (!cwd || !newBranchName.trim() || loading) return
@@ -243,7 +262,10 @@ export function GitBranchDropdown({ onClose, anchorRef }: Props): React.JSX.Elem
       loading={loading}
       onNewBranchNameChange={setNewBranchName}
       onStartCreating={() => setCreating(true)}
-      onCancelCreating={() => { setCreating(false); setNewBranchName('') }}
+      onCancelCreating={() => {
+        setCreating(false)
+        setNewBranchName('')
+      }}
       onCreateBranch={handleCreateBranch}
       onCheckout={handleCheckout}
       onFetch={handleFetch}

@@ -20,24 +20,24 @@ A fourth pseudo-path queues vT-class system subtypes (`task_notification`, `task
 
 ## 3.2 Catalog
 
-| Type | Emitted by | Gate | See |
-|---|---|---|---|
-| `assistant` | Generator | Always | §3.3 |
-| `user` | Generator (synthetic tool_result + replays) | Always | §3.4 |
-| `stream_event` | Generator | `--include-partial-messages` | §3.5, and `05-stream-events.md` for deltas |
-| `system` | Generator + vT queue + control channel | Varies per subtype | §3.6 + `04-system-subtypes.md` |
-| `result` | Generator | Always (once per turn) | §3.7 |
-| `tool_progress` | Generator | `CLAUDE_CODE_REMOTE` or `CLAUDE_CODE_CONTAINER_ID` for bash/pwsh; always for REPL | §3.8 |
-| `tool_use_summary` | Generator | Always when tool_use_summary attachment produced | §3.9 |
-| `request_usage` | Patch `request-usage` (direct stdout) | Always (when patched) | §3.10 |
-| `rate_limit_event` | Patch `rate-limit-relay` or native G_H listener | Patched path: always; native: rare | §3.11 |
-| `bash_output` | Patch `bash-output-streaming` (direct stdout) | Rate-limited ≤1/200ms per tool | §3.12 |
-| `auth_status` | Control channel | `--enable-auth-status` flag | §3.13 |
-| `prompt_suggestion` | Control channel | `promptSuggestions: true` in initialize | §3.14 |
-| `transcript_mirror` | Direct write from file watcher | `sessionMirror: true` (ClaudeUI doesn't use) | §3.15 |
-| `control_request` | Control channel | Per inbound subtype — see `08-control-inbound.md` | §3.16 |
-| `control_response` | Control channel | One per inbound outbound control_request | §3.17 |
-| `control_cancel_request` | Control channel | On abort of pending inbound control_request | §3.18 |
+| Type                     | Emitted by                                      | Gate                                                                              | See                                        |
+| ------------------------ | ----------------------------------------------- | --------------------------------------------------------------------------------- | ------------------------------------------ |
+| `assistant`              | Generator                                       | Always                                                                            | §3.3                                       |
+| `user`                   | Generator (synthetic tool_result + replays)     | Always                                                                            | §3.4                                       |
+| `stream_event`           | Generator                                       | `--include-partial-messages`                                                      | §3.5, and `05-stream-events.md` for deltas |
+| `system`                 | Generator + vT queue + control channel          | Varies per subtype                                                                | §3.6 + `04-system-subtypes.md`             |
+| `result`                 | Generator                                       | Always (once per turn)                                                            | §3.7                                       |
+| `tool_progress`          | Generator                                       | `CLAUDE_CODE_REMOTE` or `CLAUDE_CODE_CONTAINER_ID` for bash/pwsh; always for REPL | §3.8                                       |
+| `tool_use_summary`       | Generator                                       | Always when tool_use_summary attachment produced                                  | §3.9                                       |
+| `request_usage`          | Patch `request-usage` (direct stdout)           | Always (when patched)                                                             | §3.10                                      |
+| `rate_limit_event`       | Patch `rate-limit-relay` or native G_H listener | Patched path: always; native: rare                                                | §3.11                                      |
+| `bash_output`            | Patch `bash-output-streaming` (direct stdout)   | Rate-limited ≤1/200ms per tool                                                    | §3.12                                      |
+| `auth_status`            | Control channel                                 | `--enable-auth-status` flag                                                       | §3.13                                      |
+| `prompt_suggestion`      | Control channel                                 | `promptSuggestions: true` in initialize                                           | §3.14                                      |
+| `transcript_mirror`      | Direct write from file watcher                  | `sessionMirror: true` (ClaudeUI doesn't use)                                      | §3.15                                      |
+| `control_request`        | Control channel                                 | Per inbound subtype — see `08-control-inbound.md`                                 | §3.16                                      |
+| `control_response`       | Control channel                                 | One per inbound outbound control_request                                          | §3.17                                      |
+| `control_cancel_request` | Control channel                                 | On abort of pending inbound control_request                                       | §3.18                                      |
 
 ---
 
@@ -236,6 +236,7 @@ Teammate variant has `teammate_id` instead of `parent_tool_use_id`.
 ### `event.type` values
 
 See `05-stream-events.md` for complete delta shapes. Summary:
+
 - `message_start` — skeleton with initial message id, role, model, empty content, input-token usage
 - `content_block_start` — new content block starts (text, thinking, tool_use, citations)
 - `content_block_delta` — incremental update to the current block
@@ -255,6 +256,7 @@ See `05-stream-events.md` for complete delta shapes. Summary:
 Umbrella type with 14+ subtypes. See `04-system-subtypes.md` for each subtype's shape.
 
 Every system message contains minimally:
+
 ```json
 {
   "type": "system",
@@ -305,15 +307,15 @@ Emitted exactly once per turn, last message of the turn.
 
 ### Subtype detail
 
-| Subtype | Trigger | Key fields |
-|---|---|---|
-| `success` | Normal turn completion | `is_error:false`, `result` = last assistant text |
-| `success` + `stop_reason:"tool_deferred"` | Hook deferred a tool | `deferred_tool_use` populated |
-| `success` + `stop_reason:"tool_deferred_unavailable"` | MCP tool vanished mid-turn | `deferred_tool_use` populated |
-| `error_max_budget_usd` | `--max-budget-usd` exceeded | `errors: ["Reached maximum budget ($N)"]`, `is_error:true` |
-| `error_max_structured_output_retries` | JSON schema validation failed too many times | `errors: ["Failed to provide valid structured output after N attempts"]` |
-| `error_max_turns` | `--max-turns` limit hit | `errors: ["Reached maximum number of turns (N)"]`, `num_turns` = exact count |
-| `error_during_execution` | Stop-reason / content mismatch, or sandbox startup failure | `errors: ["[ede_diagnostic] result_type=... last_content_type=... stop_reason=...", ...]` |
+| Subtype                                               | Trigger                                                    | Key fields                                                                                |
+| ----------------------------------------------------- | ---------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| `success`                                             | Normal turn completion                                     | `is_error:false`, `result` = last assistant text                                          |
+| `success` + `stop_reason:"tool_deferred"`             | Hook deferred a tool                                       | `deferred_tool_use` populated                                                             |
+| `success` + `stop_reason:"tool_deferred_unavailable"` | MCP tool vanished mid-turn                                 | `deferred_tool_use` populated                                                             |
+| `error_max_budget_usd`                                | `--max-budget-usd` exceeded                                | `errors: ["Reached maximum budget ($N)"]`, `is_error:true`                                |
+| `error_max_structured_output_retries`                 | JSON schema validation failed too many times               | `errors: ["Failed to provide valid structured output after N attempts"]`                  |
+| `error_max_turns`                                     | `--max-turns` limit hit                                    | `errors: ["Reached maximum number of turns (N)"]`, `num_turns` = exact count              |
+| `error_during_execution`                              | Stop-reason / content mismatch, or sandbox startup failure | `errors: ["[ede_diagnostic] result_type=... last_content_type=... stop_reason=...", ...]` |
 
 ### Ordering
 
@@ -479,7 +481,7 @@ Live Bash output from patched `onProgress` callback. Rate-limited ≤1 per 200ms
 {
   "type": "bash_output",
   "tool_use_id": "toolu_xxx",
-  "output": "<larger window, last ~100 lines>",     // larger window
+  "output": "<larger window, last ~100 lines>", // larger window
   "full_output": "<smaller window, last ~5 lines>", // smaller window (naming is misleading)
   "total_lines": 42,
   "total_bytes": 1234
@@ -634,6 +636,7 @@ Control-channel messages (`control_request`/`control_response`/`control_cancel_r
 ## 3.20 Patches vs. unpatched
 
 Messages that exist ONLY because of ClaudeUI patches:
+
 - `request_usage` — `patch/request-usage`
 - `rate_limit_event` (header_utilization variant) — `patch/rate-limit-relay`
 - `bash_output` — `patch/bash-output-streaming`

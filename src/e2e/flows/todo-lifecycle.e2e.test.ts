@@ -7,11 +7,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
 import { useSessionStore, buildTodosFromMessages } from '../../renderer/src/stores/session-store'
-import {
-  makeChatMessage,
-  makeToolUseBlock,
-  resetFactoryCounter,
-} from '@test/factories/messages'
+import { makeChatMessage, makeToolUseBlock, resetFactoryCounter } from '@test/factories/messages'
 import type { ChatMessage, SessionStatus, StreamDelta, TodoItem } from '../../shared/types'
 
 let app: TestApp
@@ -35,7 +31,9 @@ function wireEventHandlers(app: TestApp): Array<() => void> {
     return (cb: T) => {
       const handler = (_: unknown, ...args: unknown[]): void => (cb as Function)(...args)
       app.bridge.ipcRenderer.on(channel, handler)
-      const cleanup = (): void => { app.bridge.ipcRenderer.removeListener(channel, handler) }
+      const cleanup = (): void => {
+        app.bridge.ipcRenderer.removeListener(channel, handler)
+      }
       cleanups.push(cleanup)
       return cleanup
     }
@@ -50,21 +48,26 @@ function wireEventHandlers(app: TestApp): Array<() => void> {
     if (data.type === 'thinking') store().appendStreamingThinking(routingId, data.text)
     else store().appendStreamingText(routingId, data.text)
   })
-  onEvent<(routingId: string, status: SessionStatus) => void>('session:status')((routingId, status) => {
-    let effective = routingId
-    if (status.sessionId && status.sessionId !== routingId) {
-      const s = store()
-      if (s.sessions[routingId]) { s.rekeySession(routingId, status.sessionId); effective = status.sessionId }
+  onEvent<(routingId: string, status: SessionStatus) => void>('session:status')(
+    (routingId, status) => {
+      let effective = routingId
+      if (status.sessionId && status.sessionId !== routingId) {
+        const s = store()
+        if (s.sessions[routingId]) {
+          s.rekeySession(routingId, status.sessionId)
+          effective = status.sessionId
+        }
+      }
+      if (status.state === 'disconnected') {
+        store().markSdkInactive(effective)
+        store().setStatus(effective, { ...status, state: 'idle' })
+        store().clearPendingApprovals(effective)
+        return
+      }
+      store().setStatus(effective, status)
+      if (status.state === 'idle') store().clearPendingApprovals(effective)
     }
-    if (status.state === 'disconnected') {
-      store().markSdkInactive(effective)
-      store().setStatus(effective, { ...status, state: 'idle' })
-      store().clearPendingApprovals(effective)
-      return
-    }
-    store().setStatus(effective, status)
-    if (status.state === 'idle') store().clearPendingApprovals(effective)
-  })
+  )
   onEvent<(routingId: string) => void>('session:result')((routingId) => {
     const s = store()
     const session = s.sessions[routingId]
@@ -86,7 +89,7 @@ beforeEach(async () => {
     directories: [],
     recentSessionIds: [],
     pinnedSessionIds: [],
-    customTitles: {},
+    customTitles: {}
   })
   eventCleanups = wireEventHandlers(app)
 })
@@ -103,14 +106,18 @@ describe('E2E: todo lifecycle', () => {
 
     const todoMsg = makeChatMessage({
       content: [
-        makeToolUseBlock('TodoWrite', {
-          todos: [
-            { content: 'Write spec', status: 'in_progress', activeForm: 'Writing spec' },
-            { content: 'Implement', status: 'pending', activeForm: 'Implementing' },
-            { content: 'Test', status: 'pending', activeForm: 'Testing' },
-          ],
-        }, 'tw-1'),
-      ],
+        makeToolUseBlock(
+          'TodoWrite',
+          {
+            todos: [
+              { content: 'Write spec', status: 'in_progress', activeForm: 'Writing spec' },
+              { content: 'Implement', status: 'pending', activeForm: 'Implementing' },
+              { content: 'Test', status: 'pending', activeForm: 'Testing' }
+            ]
+          },
+          'tw-1'
+        )
+      ]
     })
     app.emit('session:message', routingId, todoMsg)
 
@@ -125,25 +132,45 @@ describe('E2E: todo lifecycle', () => {
     const routingId = 'r1'
     useSessionStore.getState().createNewSession(routingId, '/test')
 
-    app.emit('session:message', routingId, makeChatMessage({
-      content: [makeToolUseBlock('TodoWrite', {
-        todos: [
-          { content: 'A', status: 'pending', activeForm: 'a' },
-          { content: 'B', status: 'pending', activeForm: 'b' },
-        ],
-      }, 'tw-1')],
-    }))
+    app.emit(
+      'session:message',
+      routingId,
+      makeChatMessage({
+        content: [
+          makeToolUseBlock(
+            'TodoWrite',
+            {
+              todos: [
+                { content: 'A', status: 'pending', activeForm: 'a' },
+                { content: 'B', status: 'pending', activeForm: 'b' }
+              ]
+            },
+            'tw-1'
+          )
+        ]
+      })
+    )
     expect(useSessionStore.getState().sessions[routingId].todos).toHaveLength(2)
 
     // Second TodoWrite updates statuses
-    app.emit('session:message', routingId, makeChatMessage({
-      content: [makeToolUseBlock('TodoWrite', {
-        todos: [
-          { content: 'A', status: 'completed', activeForm: 'a' },
-          { content: 'B', status: 'in_progress', activeForm: 'b' },
-        ],
-      }, 'tw-2')],
-    }))
+    app.emit(
+      'session:message',
+      routingId,
+      makeChatMessage({
+        content: [
+          makeToolUseBlock(
+            'TodoWrite',
+            {
+              todos: [
+                { content: 'A', status: 'completed', activeForm: 'a' },
+                { content: 'B', status: 'in_progress', activeForm: 'b' }
+              ]
+            },
+            'tw-2'
+          )
+        ]
+      })
+    )
     const todos = useSessionStore.getState().sessions[routingId].todos
     expect(todos[0].status).toBe('completed')
     expect(todos[1].status).toBe('in_progress')
@@ -153,14 +180,24 @@ describe('E2E: todo lifecycle', () => {
     const routingId = 'r1'
     useSessionStore.getState().createNewSession(routingId, '/test')
 
-    app.emit('session:message', routingId, makeChatMessage({
-      content: [makeToolUseBlock('TodoWrite', {
-        todos: [
-          { content: 'X', status: 'completed', activeForm: 'x' },
-          { content: 'Y', status: 'completed', activeForm: 'y' },
-        ],
-      }, 'tw-final')],
-    }))
+    app.emit(
+      'session:message',
+      routingId,
+      makeChatMessage({
+        content: [
+          makeToolUseBlock(
+            'TodoWrite',
+            {
+              todos: [
+                { content: 'X', status: 'completed', activeForm: 'x' },
+                { content: 'Y', status: 'completed', activeForm: 'y' }
+              ]
+            },
+            'tw-final'
+          )
+        ]
+      })
+    )
     expect(useSessionStore.getState().sessions[routingId].todos).toHaveLength(2)
 
     // Result event with all todos done → todos cleared
@@ -173,14 +210,24 @@ describe('E2E: todo lifecycle', () => {
     const routingId = 'r1'
     useSessionStore.getState().createNewSession(routingId, '/test')
 
-    app.emit('session:message', routingId, makeChatMessage({
-      content: [makeToolUseBlock('TodoWrite', {
-        todos: [
-          { content: 'Done', status: 'completed', activeForm: 'done' },
-          { content: 'Pending', status: 'pending', activeForm: 'pending' },
-        ],
-      }, 'tw-partial')],
-    }))
+    app.emit(
+      'session:message',
+      routingId,
+      makeChatMessage({
+        content: [
+          makeToolUseBlock(
+            'TodoWrite',
+            {
+              todos: [
+                { content: 'Done', status: 'completed', activeForm: 'done' },
+                { content: 'Pending', status: 'pending', activeForm: 'pending' }
+              ]
+            },
+            'tw-partial'
+          )
+        ]
+      })
+    )
     app.emit('session:result', routingId)
 
     expect(useSessionStore.getState().sessions[routingId].todos).toHaveLength(2)

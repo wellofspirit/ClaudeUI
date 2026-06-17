@@ -24,7 +24,7 @@ export function TerminalPanel({ style }: Props): React.JSX.Element {
 
   const cwd = useSessionStore((s) => {
     const id = s.activeSessionId
-    return id ? s.sessions[id]?.cwd ?? '' : ''
+    return id ? (s.sessions[id]?.cwd ?? '') : ''
   })
 
   const handleNewTab = async (): Promise<void> => {

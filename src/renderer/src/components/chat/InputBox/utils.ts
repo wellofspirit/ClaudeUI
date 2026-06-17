@@ -12,7 +12,11 @@ export type SendAction =
   | { type: 'side-question'; question: string }
   | { type: 'clear-session' }
   | { type: 'queue-prompt'; prompt: string }
-  | { type: 'send-prompt'; prompt: string; attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }> }
+  | {
+      type: 'send-prompt'
+      prompt: string
+      attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
+    }
   | { type: 'noop' }
 
 export interface SendContext {
@@ -48,7 +52,11 @@ export function resolveSendAction(ctx: SendContext): SendAction {
 
   // Queue vs direct send
   const attachments = hasFiles
-    ? ctx.attachedFiles.map(({ mediaType, base64Data, fileName }) => ({ mediaType, base64Data, fileName }))
+    ? ctx.attachedFiles.map(({ mediaType, base64Data, fileName }) => ({
+        mediaType,
+        base64Data,
+        fileName
+      }))
     : undefined
 
   if (ctx.isRunning) {

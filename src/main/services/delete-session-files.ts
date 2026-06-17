@@ -27,7 +27,11 @@ function resolveProjectDir(projectKey: string, root: string): string {
  *
  * @param root — overrides ~/.claude/projects; used by tests.
  */
-export async function deleteSessionFiles(sessionId: string, projectKey: string, root: string = defaultProjectsRoot()): Promise<void> {
+export async function deleteSessionFiles(
+  sessionId: string,
+  projectKey: string,
+  root: string = defaultProjectsRoot()
+): Promise<void> {
   if (!sessionId || !projectKey) throw new Error('sessionId and projectKey are required')
   if (SEGMENT_TRAVERSAL.test(sessionId) || SEGMENT_TRAVERSAL.test(projectKey)) {
     throw new Error('Invalid sessionId or projectKey')
@@ -42,7 +46,10 @@ export async function deleteSessionFiles(sessionId: string, projectKey: string, 
 /**
  * Permanently delete an entire project directory (all sessions inside it).
  */
-export async function deleteProjectFiles(projectKey: string, root: string = defaultProjectsRoot()): Promise<void> {
+export async function deleteProjectFiles(
+  projectKey: string,
+  root: string = defaultProjectsRoot()
+): Promise<void> {
   if (!projectKey) throw new Error('projectKey is required')
   if (SEGMENT_TRAVERSAL.test(projectKey)) throw new Error('Invalid projectKey')
   const projectDir = resolveProjectDir(projectKey, root)

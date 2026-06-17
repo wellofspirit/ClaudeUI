@@ -9,25 +9,32 @@ import type {
   ToolProgressMessage,
   RateLimitEventMessage,
   BashOutputMessage,
-  ControlResponseMessage,
+  ControlResponseMessage
 } from '../sdk'
 import { v4 as uuid } from 'uuid'
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 import type { BrowserWindow } from 'electron'
-import { computeTokenMetrics } from './session-history'
+import { computeTokenMetrics, fallbackBlockText } from './session-history'
+import { classifyApiError } from './api-error'
 import { VoiceClient } from './voice-client'
 import { startRecording, stopRecording } from './voice-capture'
 import { unwatchAllSubagents } from './subagent-watcher'
 import { saveSlashCommands } from './ui-config'
 import { loadMcpServers, readDisabledMcpServers } from './claude-mcp'
 import { logger } from './logger'
-import { getContextWindowSize } from '../ipc/session.ipc'
+import { getContextWindowSize } from './context-window'
 import { usageFetcher } from './usage-fetcher'
 import { createMermaidServer } from './mermaid-tool'
 import { createMockupServer } from './mockup-tool'
-import { getClassifier, stopClassifier, isSafeTool, buildTranscript, type TranscriptMessage } from './auto-classifier'
+import {
+  getClassifier,
+  stopClassifier,
+  isSafeTool,
+  buildTranscript,
+  type TranscriptMessage
+} from './auto-classifier'
 import { resolveThinkingMode, type ThinkingMode } from '../../shared/model-capabilities'
 
 import { locateBunClaude, getCliVersion } from '../sdk'
@@ -47,6 +54,13 @@ export function getSdkVersion(): string {
 }
 
 /**
+ * cli.js compares retracted_message_uuids against frame uuids truncated to 24
+ * chars (its `JWK` constant) so per-block derived uuids resolve to their base
+ * frame. Mirror that here. See docs/protocol/04-system-subtypes.md §4.20.
+ */
+const RETRACTION_UUID_PREFIX_LEN = 24
+
+/**
  * SDK options for the CLI spawn. The executable is our rebundled Bun binary;
  * it runs natively, carries all of Anthropic's bundled assets (ripgrep,
  * native addons, helper scripts), and does not need `ELECTRON_RUN_AS_NODE`
@@ -59,7 +73,7 @@ export function getSdkExecutableOpts(): Record<string, unknown> {
     executable: bunClaude,
     executableArgs: [],
     standaloneExecutable: true,
-    env: {},
+    env: {}
   }
 }
 import type {
@@ -146,12 +160,25 @@ interface BackgroundPoller {
 
 export class ClaudeSession {
   private static extraWindows = new Set<BrowserWindow>()
-  static addExtraWindow(win: BrowserWindow): void { this.extraWindows.add(win) }
-  static removeExtraWindow(win: BrowserWindow): void { this.extraWindows.delete(win) }
-  static getExtraWindows(): Set<BrowserWindow> { return this.extraWindows }
+  static addExtraWindow(win: BrowserWindow): void {
+    this.extraWindows.add(win)
+  }
+  static removeExtraWindow(win: BrowserWindow): void {
+    this.extraWindows.delete(win)
+  }
+  static getExtraWindows(): Set<BrowserWindow> {
+    return this.extraWindows
+  }
 
   private sessionId: string | null = null
   private messageHistory: ChatMessage[] = []
+  /**
+   * Wire-frame uuid → ChatMessage id, keyed by the first 24 chars of the uuid
+   * (cli.js's own retraction matching truncates to 24 so per-block derived
+   * uuids resolve to their base frame). Used to evict refused partials when a
+   * model_refusal_fallback arrives with retracted_message_uuids.
+   */
+  private wireUuidToMessageId = new Map<string, string>()
   private abortController: AbortController | null = null
   private isProcessing = false
   private wasInterrupted = false
@@ -183,7 +210,18 @@ export class ClaudeSession {
   private effort: string
   private thinkingMode: 'adaptive' | 'enabled' | 'disabled'
   private model: string = 'default'
+  /** Canonical model id reported by system/init — what the `default` alias
+   *  (and other server-resolved aliases) actually map to. Used to resolve the
+   *  context window when `this.model` is an ambiguous alias. */
+  private resolvedModelId: string | null = null
   private resumeSessionId: string | undefined
+  /** Fork ("branch off") seeding: when set on creation, the FIRST run resumes
+   *  `resumeSessionId` truncated to this line uuid with `--fork-session`, so a
+   *  brand-new session UUID is minted carrying messages 1..N. Cleared once the
+   *  fork has materialized (sessionId established) so later turns resume the
+   *  new session normally. See resolveForkAnchor() in session-history.ts. */
+  private resumeSessionAt: string | undefined
+  private forkSession = false
   private statusLineTimer: ReturnType<typeof setTimeout> | null = null
   private inactivityTimer: ReturnType<typeof setTimeout> | null = null
   private inactivityTimeoutMs = 15 * 60 * 1000 // default 15 min, 0 = disabled
@@ -199,15 +237,30 @@ export class ClaudeSession {
   private accTotalApiDurationMs = 0
   private lastContextLength = 0
 
-  constructor(routingId: string, win: BrowserWindow, cwd: string, effort?: string, resumeSessionId?: string, permissionMode?: string, model?: string, sandboxConfig?: SandboxSettings, thinkingMode?: string) {
+  constructor(
+    routingId: string,
+    win: BrowserWindow,
+    cwd: string,
+    effort?: string,
+    resumeSessionId?: string,
+    permissionMode?: string,
+    model?: string,
+    sandboxConfig?: SandboxSettings,
+    thinkingMode?: string,
+    resumeSessionAt?: string,
+    forkSession?: boolean
+  ) {
     this.routingId = routingId
     this.win = win
     this.cwd = cwd
     this.effort = effort || 'medium'
-    this.thinkingMode = (thinkingMode === 'adaptive' || thinkingMode === 'enabled' || thinkingMode === 'disabled')
-      ? thinkingMode
-      : 'adaptive'
+    this.thinkingMode =
+      thinkingMode === 'adaptive' || thinkingMode === 'enabled' || thinkingMode === 'disabled'
+        ? thinkingMode
+        : 'adaptive'
     this.resumeSessionId = resumeSessionId
+    this.resumeSessionAt = resumeSessionAt
+    this.forkSession = !!forkSession && !!resumeSessionAt
     if (permissionMode) this.permissionMode = permissionMode
     if (model) this.model = model
     if (sandboxConfig) this.sandboxConfig = sandboxConfig
@@ -245,7 +298,10 @@ export class ClaudeSession {
     this.clearInactivityTimer()
     if (this.inactivityTimeoutMs > 0) {
       this.inactivityTimer = setTimeout(() => {
-        logger.info('ClaudeSession', `Idle timeout (${this.inactivityTimeoutMs / 60000} min) — auto-disconnecting`)
+        logger.info(
+          'ClaudeSession',
+          `Idle timeout (${this.inactivityTimeoutMs / 60000} min) — auto-disconnecting`
+        )
         this.cancel()
       }, this.inactivityTimeoutMs)
     }
@@ -263,7 +319,10 @@ export class ClaudeSession {
     return this.isProcessing
   }
 
-  async run(prompt: string | null, attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>): Promise<void> {
+  async run(
+    prompt: string | null,
+    attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
+  ): Promise<void> {
     this.clearInactivityTimer()
 
     // null prompt = spawn-only mode (for voice server, etc.)
@@ -378,10 +437,16 @@ export class ClaudeSession {
       }
 
       if (Object.keys(this._mcpAllServers).length > 0) {
-        logger.debug('ClaudeSession', `Loaded ${Object.keys(this._mcpAllServers).length} MCP server(s): ${Object.keys(this._mcpAllServers).join(', ')}`)
+        logger.debug(
+          'ClaudeSession',
+          `Loaded ${Object.keys(this._mcpAllServers).length} MCP server(s): ${Object.keys(this._mcpAllServers).join(', ')}`
+        )
       }
       if (this._mcpDisabledServers.size > 0) {
-        logger.debug('ClaudeSession', `Disabled MCP server(s) (from ~/.claude.json): ${[...this._mcpDisabledServers].join(', ')}`)
+        logger.debug(
+          'ClaudeSession',
+          `Disabled MCP server(s) (from ~/.claude.json): ${[...this._mcpDisabledServers].join(', ')}`
+        )
       }
 
       // Create in-process MCP servers for UI tools
@@ -422,58 +487,70 @@ You have mockup tools for creating visual UI prototypes that render inline in th
 Workflow: create_mockup → Edit the HTML file for changes (the preview auto-refreshes on file change — no need to call show_mockup after edits).
 The mockup appears as an interactive preview card with preview/code tabs and expand-to-panel support.`
           },
-          ...(this.sandboxConfig?.enabled ? {
-            sandbox: {
-              enabled: true,
-              autoAllowBashIfSandboxed: this.sandboxConfig.autoAllowBashIfSandboxed,
-              allowUnsandboxedCommands: this.sandboxConfig.allowUnsandboxedCommands,
-              excludedCommands: this.sandboxConfig.excludedCommands,
-              // Only pass network config when restrictions are needed.
-              // Omitting the network key entirely lets the SDK skip domain filtering,
-              // which is what "restrictNetwork: false" means.
-              ...(this.sandboxConfig.network.restrictNetwork ? {
-                network: {
-                  allowLocalBinding: this.sandboxConfig.network.allowLocalBinding,
-                  allowedDomains: this.sandboxConfig.network.allowedDomains,
-                  ...(this.sandboxConfig.network.allowManagedDomainsOnly
-                    ? { allowManagedDomainsOnly: true } : {}),
-                  ...(this.sandboxConfig.network.allowAllUnixSockets
-                    ? { allowAllUnixSockets: true } : {}),
-                  ...(this.sandboxConfig.network.allowUnixSockets.length > 0
-                    ? { allowUnixSockets: this.sandboxConfig.network.allowUnixSockets } : {})
+          ...(this.sandboxConfig?.enabled
+            ? {
+                sandbox: {
+                  enabled: true,
+                  autoAllowBashIfSandboxed: this.sandboxConfig.autoAllowBashIfSandboxed,
+                  allowUnsandboxedCommands: this.sandboxConfig.allowUnsandboxedCommands,
+                  excludedCommands: this.sandboxConfig.excludedCommands,
+                  // Only pass network config when restrictions are needed.
+                  // Omitting the network key entirely lets the SDK skip domain filtering,
+                  // which is what "restrictNetwork: false" means.
+                  ...(this.sandboxConfig.network.restrictNetwork
+                    ? {
+                        network: {
+                          allowLocalBinding: this.sandboxConfig.network.allowLocalBinding,
+                          allowedDomains: this.sandboxConfig.network.allowedDomains,
+                          ...(this.sandboxConfig.network.allowManagedDomainsOnly
+                            ? { allowManagedDomainsOnly: true }
+                            : {}),
+                          ...(this.sandboxConfig.network.allowAllUnixSockets
+                            ? { allowAllUnixSockets: true }
+                            : {}),
+                          ...(this.sandboxConfig.network.allowUnixSockets.length > 0
+                            ? { allowUnixSockets: this.sandboxConfig.network.allowUnixSockets }
+                            : {})
+                        }
+                      }
+                    : {
+                        // No network restrictions — only pass through binding/socket options if set
+                        ...(this.sandboxConfig.network.allowLocalBinding ||
+                        this.sandboxConfig.network.allowAllUnixSockets ||
+                        this.sandboxConfig.network.allowUnixSockets.length > 0
+                          ? {
+                              network: {
+                                allowLocalBinding: this.sandboxConfig.network.allowLocalBinding,
+                                ...(this.sandboxConfig.network.allowAllUnixSockets
+                                  ? { allowAllUnixSockets: true }
+                                  : {}),
+                                ...(this.sandboxConfig.network.allowUnixSockets.length > 0
+                                  ? {
+                                      allowUnixSockets: this.sandboxConfig.network.allowUnixSockets
+                                    }
+                                  : {})
+                              }
+                            }
+                          : {})
+                      }),
+                  filesystem: {
+                    ...(this.sandboxConfig.filesystem.allowWrite.length > 0
+                      ? { allowWrite: this.sandboxConfig.filesystem.allowWrite }
+                      : {}),
+                    ...(this.sandboxConfig.filesystem.denyWrite.length > 0
+                      ? { denyWrite: this.sandboxConfig.filesystem.denyWrite }
+                      : {}),
+                    ...(this.sandboxConfig.filesystem.denyRead.length > 0
+                      ? { denyRead: this.sandboxConfig.filesystem.denyRead }
+                      : {})
+                  }
                 }
-              } : {
-                // No network restrictions — only pass through binding/socket options if set
-                ...(this.sandboxConfig.network.allowLocalBinding ||
-                    this.sandboxConfig.network.allowAllUnixSockets ||
-                    this.sandboxConfig.network.allowUnixSockets.length > 0
-                  ? {
-                    network: {
-                      allowLocalBinding: this.sandboxConfig.network.allowLocalBinding,
-                      ...(this.sandboxConfig.network.allowAllUnixSockets
-                        ? { allowAllUnixSockets: true } : {}),
-                      ...(this.sandboxConfig.network.allowUnixSockets.length > 0
-                        ? { allowUnixSockets: this.sandboxConfig.network.allowUnixSockets } : {})
-                    }
-                  } : {})
-              }),
-              filesystem: {
-                ...(this.sandboxConfig.filesystem.allowWrite.length > 0
-                  ? { allowWrite: this.sandboxConfig.filesystem.allowWrite } : {}),
-                ...(this.sandboxConfig.filesystem.denyWrite.length > 0
-                  ? { denyWrite: this.sandboxConfig.filesystem.denyWrite } : {}),
-                ...(this.sandboxConfig.filesystem.denyRead.length > 0
-                  ? { denyRead: this.sandboxConfig.filesystem.denyRead } : {})
               }
-            }
-          } : {}),
+            : {}),
           settingSources: ['user', 'project', 'local'],
           settings: {
             permissions: {
-              allow: [
-                `Edit(${this.cwd}/.claude/ui/**)`,
-                `Write(${this.cwd}/.claude/ui/**)`,
-              ]
+              allow: [`Edit(${this.cwd}/.claude/ui/**)`, `Write(${this.cwd}/.claude/ui/**)`]
             }
           },
           mcpServers: {
@@ -502,7 +579,22 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
               stderrChunks.push(text)
             }
           },
-          ...(this.resumeSessionId ? { resume: this.resumeSessionId } : this.sessionId ? { resume: this.sessionId } : {}),
+          // Resume precedence: once cli.js has minted a stable sessionId
+          // (post-init), always resume THAT — critical for forks, where the
+          // new branch's id differs from the source we resumed/truncated from.
+          // Before init, fall back to the requested resume target (the source
+          // session for a fork, or self for a plain historical resume).
+          ...(this.sessionId
+            ? { resume: this.sessionId }
+            : this.resumeSessionId
+              ? { resume: this.resumeSessionId }
+              : {}),
+          // Fork truncation applies only on the FIRST run, against the source
+          // transcript. After init, sessionId is set and we resume the new
+          // branch in place — no re-fork, no re-truncate.
+          ...(this.forkSession && this.resumeSessionAt && !this.sessionId
+            ? { resumeSessionAt: this.resumeSessionAt, forkSession: true }
+            : {}),
           canUseTool: async (toolName, input, opts) => {
             // Auto-allow our in-process UI tools (mermaid, etc.) — no user approval needed
             if (toolName.startsWith('mcp__claude-ui__')) {
@@ -532,7 +624,10 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
                 const classifier = getClassifier(this.routingId)
                 const result = await classifier.classify(toolName, input, transcript)
 
-                logger.debug('AutoClassifier', `${result.shouldBlock ? 'BLOCK' : 'ALLOW'} ${toolName}: ${result.reason}`)
+                logger.debug(
+                  'AutoClassifier',
+                  `${result.shouldBlock ? 'BLOCK' : 'ALLOW'} ${toolName}: ${result.reason}`
+                )
 
                 if (!result.shouldBlock) {
                   return { behavior: 'allow' as const, updatedInput: input }
@@ -542,7 +637,10 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
                 return { behavior: 'deny' as const, message: `Auto mode blocked: ${result.reason}` }
               } catch (err) {
                 // Classifier failed — fall through to manual approval
-                logger.warn('AutoClassifier', `Classifier failed for ${toolName}, falling back to manual approval: ${err}`)
+                logger.warn(
+                  'AutoClassifier',
+                  `Classifier failed for ${toolName}, falling back to manual approval: ${err}`
+                )
               }
             }
 
@@ -558,18 +656,20 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
               input,
               suggestions: opts.suggestions as PendingApproval['suggestions'],
               decisionReason: opts.decisionReason,
-              blockedPath: opts.blockedPath,
+              blockedPath: opts.blockedPath
             }
             this.send('session:approval-request', approval)
 
-            const { decision, answers, updatedPermissions } = await new Promise<ApprovalResult>((resolve) => {
-              this.pendingApprovals.set(requestId, { resolve })
+            const { decision, answers, updatedPermissions } = await new Promise<ApprovalResult>(
+              (resolve) => {
+                this.pendingApprovals.set(requestId, { resolve })
 
-              opts.signal.addEventListener('abort', () => {
-                this.pendingApprovals.delete(requestId)
-                resolve({ decision: 'deny' })
-              })
-            })
+                opts.signal.addEventListener('abort', () => {
+                  this.pendingApprovals.delete(requestId)
+                  resolve({ decision: 'deny' })
+                })
+              }
+            )
 
             this.pendingApprovals.delete(requestId)
 
@@ -581,7 +681,10 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
                 behavior: 'allow' as const,
                 updatedInput,
                 ...(updatedPermissions?.length
-                  ? { updatedPermissions: updatedPermissions as unknown as import('../sdk').PermissionUpdate[] }
+                  ? {
+                      updatedPermissions:
+                        updatedPermissions as unknown as import('../sdk').PermissionUpdate[]
+                    }
                   : {})
               }
             }
@@ -596,6 +699,29 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
       this.resolveActiveQuery = null
       this.rejectActiveQuery = null
 
+      // Drive the proactive sign-in banner (ADR-014) from the initialize
+      // response's `account`. NOT from the system/init `apiKeySource`: that
+      // reports the *API-key* source, which is legitimately "none" for every
+      // logged-in *subscription* (OAuth-token) user — using it as a login signal
+      // falsely flags subscribers as logged out. A present `account.email` is the
+      // reliable "logged in" signal; absent = show the banner.
+      void q
+        .initializationResult()
+        .then((init) => {
+          const account = (init as Record<string, unknown>)?.account as
+            | Record<string, unknown>
+            | undefined
+          // `account.email` present = logged in (subscription or API key). A
+          // logged-out cli.js returns an account with no email (tokenSource
+          // "none"); an expired-but-cached login still has an email — that 401s
+          // on send and is handled by the reactive auth card, not this banner.
+          const loggedIn = !!(account && account.email)
+          this.send('session:auth-source', loggedIn ? 'authenticated' : 'none')
+        })
+        .catch(() => {
+          /* leave banner state unchanged on init-result failure */
+        })
+
       for await (const message of q) {
         if (!message || typeof message !== 'object') continue
         await this.dispatchMessage(message as SDKMessage, stderrChunks)
@@ -603,7 +729,8 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err)
       const stack = err instanceof Error ? err.stack : undefined
-      const stderrContext = stderrChunks.length > 0 ? `\nCollected stderr:\n${stderrChunks.join('\n')}` : ''
+      const stderrContext =
+        stderrChunks.length > 0 ? `\nCollected stderr:\n${stderrChunks.join('\n')}` : ''
       logger.error('ClaudeSession', `SDK error: ${errorMsg}${stderrContext}`, err)
       if (!errorMsg.includes('abort') && errorMsg !== '') {
         // Build a structured error message:
@@ -721,6 +848,9 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
 
       if (type === 'system' && (msg as SystemMessage).subtype === 'init') {
         const sys = msg as SystemMessage
+        // Resolved canonical model id (e.g. "default" → "claude-opus-4-8"),
+        // used to size the context window when this.model is an alias.
+        if (sys.model) this.resolvedModelId = sys.model
         // CLI-only commands that produce no output through the SDK
         const CLI_ONLY = new Set(['context', 'cost', 'login', 'logout', 'release-notes', 'doctor'])
         const raw = sys.slash_commands || []
@@ -735,7 +865,10 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
 
         const mcpServers = sys.mcp_servers || []
         this._initMcpServers = mcpServers
-        logger.debug('ClaudeSession', `init mcp_servers (${mcpServers.length}): ${JSON.stringify(mcpServers).slice(0, 500)}`)
+        logger.debug(
+          'ClaudeSession',
+          `init mcp_servers (${mcpServers.length}): ${JSON.stringify(mcpServers).slice(0, 500)}`
+        )
         if (mcpServers.length > 0) {
           this.send('session:mcp-servers', mcpServers)
         }
@@ -762,6 +895,26 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
   private handleAssistantMessage(msg: AssistantMessage): void {
     const parentToolUseId = msg.parent_tool_use_id ?? undefined
     const isSidechain = !!parentToolUseId
+
+    // cli.js surfaces API failures (401/auth, rate_limit, overloaded, …) as a
+    // synthetic "assistant" frame. On disk the frame is flagged
+    // `isApiErrorMessage`, but the SDK stdout frame omits that field and instead
+    // carries a top-level `error` code (e.g. "authentication_failed"); the
+    // benign "No response requested." synthetic message has no `error`, so the
+    // field's presence is the reliable live discriminator. We emit a structured
+    // `api_error` block (matching history-reload rendering and giving the auth
+    // variant its Login action) instead of plain text. Main channel only —
+    // subagent errors fall through to the normal text path. See ADR-014.
+    const isApiErrorFrame = msg.isApiErrorMessage === true || typeof msg.error === 'string'
+    if (isApiErrorFrame && !parentToolUseId) {
+      const errMsg = this.transformApiErrorMessage(msg)
+      if (errMsg) {
+        this.upsertMessage(errMsg)
+        this.send('session:message', errMsg)
+        return
+      }
+    }
+
     const chatMsg = this.transformAssistantMessage(msg)
 
     // Accumulate usage from every assistant message (main + sidechain)
@@ -771,6 +924,9 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
       if (parentToolUseId) {
         this.send('session:subagent-message', { toolUseId: parentToolUseId, message: chatMsg })
       } else {
+        if (typeof msg.uuid === 'string') {
+          this.wireUuidToMessageId.set(msg.uuid.slice(0, RETRACTION_UUID_PREFIX_LEN), chatMsg.id)
+        }
         this.upsertMessage(chatMsg)
         this.send('session:message', chatMsg)
         // Only update status line when usage actually changed (final message per API call)
@@ -789,7 +945,11 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
 
     if (delta.type === 'text_delta' && typeof delta.text === 'string') {
       if (routingId) {
-        this.send('session:subagent-stream', { toolUseId: routingId, type: 'text', text: delta.text })
+        this.send('session:subagent-stream', {
+          toolUseId: routingId,
+          type: 'text',
+          text: delta.text
+        })
       } else {
         this.send('session:stream', { type: 'text', text: delta.text })
       }
@@ -797,7 +957,11 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
     }
     if (delta.type === 'thinking_delta' && typeof delta.thinking === 'string') {
       if (routingId) {
-        this.send('session:subagent-stream', { toolUseId: routingId, type: 'thinking', text: delta.thinking })
+        this.send('session:subagent-stream', {
+          toolUseId: routingId,
+          type: 'thinking',
+          text: delta.thinking
+        })
       } else {
         this.send('session:stream', { type: 'thinking', text: delta.thinking })
       }
@@ -809,7 +973,7 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
       toolUseId: msg.tool_use_id || '',
       toolName: msg.tool_name || '',
       parentToolUseId: msg.parent_tool_use_id ?? null,
-      elapsedTimeSeconds: msg.elapsed_time_seconds || 0,
+      elapsedTimeSeconds: msg.elapsed_time_seconds || 0
     })
   }
 
@@ -839,9 +1003,53 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
       this.send('session:steer-consumed', { prompt: msg.prompt || '' })
       return
     }
+    if (msg.subtype === 'model_refusal_fallback' || msg.subtype === 'model_fallback') {
+      this.handleModelFallback(msg)
+      return
+    }
     // Unknown / init / compact_boundary — init is already consumed in
     // captureSessionBootstrap; compact_boundary is informational and not
     // currently surfaced. Fall through silently.
+  }
+
+  /**
+   * The CLI silently swapped models mid-session: `model_refusal_fallback`
+   * (safety refusal → permanent swap for the session) or `model_fallback`
+   * (availability error → swap for this turn only). Surface it as a warning
+   * banner so the user knows which model is actually answering — without this,
+   * the only trace is the `model` field on subsequent assistant messages.
+   * Shapes in docs/protocol/04-system-subtypes.md §4.20–4.21.
+   */
+  private handleModelFallback(msg: SystemMessage): void {
+    const fallbackText =
+      msg.subtype === 'model_refusal_fallback'
+        ? `${msg.original_model || 'The model'} refused this request — switched to ${msg.fallback_model || 'a fallback model'} for the rest of the session.`
+        : `${msg.original_model || 'The model'} is unavailable — using ${msg.fallback_model || 'a fallback model'} for this turn.`
+    const text = msg.content || fallbackText
+    logger.warn(
+      'ClaudeSession',
+      `${msg.subtype}: ${msg.original_model} -> ${msg.fallback_model} (trigger=${msg.trigger})`
+    )
+    this.send('session:warning', text)
+
+    // Refusal retraction: evict the refused partial (and its tombstoned tool
+    // results) from transcript state. Unknown uuids are a no-op per protocol.
+    // Sent even when nothing resolves — the renderer also clears any streamed
+    // partial text the retracted message left behind.
+    if (msg.subtype === 'model_refusal_fallback') {
+      const retracted = msg.retracted_message_uuids ?? []
+      const messageIds = [
+        ...new Set(
+          retracted
+            .map((u) => this.wireUuidToMessageId.get(u.slice(0, RETRACTION_UUID_PREFIX_LEN)))
+            .filter((id): id is string => !!id)
+        )
+      ]
+      if (messageIds.length > 0) {
+        this.messageHistory = this.messageHistory.filter((m) => !messageIds.includes(m.id))
+      }
+      this.send('session:messages-retracted', { messageIds })
+    }
   }
 
   /**
@@ -893,7 +1101,7 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
       status: normalized,
       outputFile: this.backgroundFilePaths.get(toolUseId) || '',
       summary: '',
-      usage: undefined,
+      usage: undefined
     })
   }
 
@@ -912,7 +1120,7 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
       ? {
           totalTokens: rawUsage.total_tokens || 0,
           toolUses: rawUsage.tool_uses || 0,
-          durationMs: rawUsage.duration_ms || 0,
+          durationMs: rawUsage.duration_ms || 0
         }
       : undefined
 
@@ -922,7 +1130,7 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
       status: msg.status || 'completed',
       outputFile,
       summary: msg.summary || '',
-      usage,
+      usage
     })
   }
 
@@ -930,9 +1138,7 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
     const response = msg.response
     if (!response || response.subtype !== 'error') return
     const errText =
-      typeof response.error === 'string'
-        ? response.error
-        : JSON.stringify(response.error, null, 2)
+      typeof response.error === 'string' ? response.error : JSON.stringify(response.error, null, 2)
     logger.error('ClaudeSession', `Control response error: ${errText}`)
     this.send('session:error', `SDK control error: ${errText}`)
   }
@@ -954,7 +1160,7 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
       toolUseId,
       output: msg.output || '',
       totalLines: msg.total_lines || 0,
-      totalBytes: msg.total_bytes || 0,
+      totalBytes: msg.total_bytes || 0
     })
   }
 
@@ -971,9 +1177,7 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
       if (!this.wasInterrupted) {
         const errors = msg.errors || []
         const stderrContext =
-          stderrChunks.length > 0
-            ? '\n\nCLI stderr:\n' + stderrChunks.slice(-20).join('\n')
-            : ''
+          stderrChunks.length > 0 ? '\n\nCLI stderr:\n' + stderrChunks.slice(-20).join('\n') : ''
         if (errors.length) {
           logger.error('ClaudeSession', `Result error: ${errors.join('; ')}`)
           this.send('session:error', errors.join('; ') + stderrContext)
@@ -995,7 +1199,7 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
       totalCostUsd: this.totalCostUsd,
       durationMs: resultDurationMs,
       result: msg.result || '',
-      sessionId: this.sessionId,
+      sessionId: this.sessionId
     })
     this.sendStatus()
     this.resetInactivityTimer()
@@ -1046,7 +1250,7 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
       return
     }
 
-this.permissionMode = mode
+    this.permissionMode = mode
     this.send('session:permission-mode', mode)
     if (this.activeQuery) {
       try {
@@ -1097,7 +1301,8 @@ this.permissionMode = mode
    * `adaptive` is auto-coerced to `enabled` when the model lacks adaptive support
    * (older models would otherwise reject the request).
    */
-  private buildThinkingConfig(): { type: 'adaptive'; display: 'summarized' }
+  private buildThinkingConfig():
+    | { type: 'adaptive'; display: 'summarized' }
     | { type: 'enabled'; display: 'summarized' }
     | { type: 'disabled' } {
     const resolved: ThinkingMode = resolveThinkingMode(this.model, this.thinkingMode)
@@ -1136,7 +1341,7 @@ this.permissionMode = mode
     const pending = this.activeQueryPromise
     if (!pending) throw new Error('SDK session did not initialize a query promise')
     const deadline = new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error('Timed out waiting for SDK session to start')), 15_000),
+      setTimeout(() => reject(new Error('Timed out waiting for SDK session to start')), 15_000)
     )
     await Promise.race([pending, deadline])
   }
@@ -1279,16 +1484,22 @@ this.permissionMode = mode
 
   async mcpServerStatus(): Promise<unknown[]> {
     if (!this.activeQuery) {
-      logger.debug('ClaudeSession', 'mcpServerStatus: no activeQuery, returning cached init servers')
+      logger.debug(
+        'ClaudeSession',
+        'mcpServerStatus: no activeQuery, returning cached init servers'
+      )
       return this._initMcpServers
     }
     try {
       const result = await this.activeQuery.mcpServerStatus()
       // Log each server's name and status for debugging
       const summary = Array.isArray(result)
-        ? (result as Array<Record<string, unknown>>).map(s => `${s.name}:${s.status}`).join(', ')
+        ? (result as Array<Record<string, unknown>>).map((s) => `${s.name}:${s.status}`).join(', ')
         : 'not-array'
-      logger.debug('ClaudeSession', `mcpServerStatus: ${Array.isArray(result) ? result.length : 0} servers → [${summary}]`)
+      logger.debug(
+        'ClaudeSession',
+        `mcpServerStatus: ${Array.isArray(result) ? result.length : 0} servers → [${summary}]`
+      )
       logger.debug('ClaudeSession', `mcpServerStatus raw: ${JSON.stringify(result).slice(0, 1000)}`)
       return result
     } catch (err) {
@@ -1324,17 +1535,23 @@ this.permissionMode = mode
 
     // Verify the toggle had the expected effect
     if (enabled && postDis.includes(serverName)) {
-      logger.error('ClaudeSession', `mcpToggle BUG: enabled=${enabled} but ${serverName} is still in disabledMcpServers!`)
+      logger.error(
+        'ClaudeSession',
+        `mcpToggle BUG: enabled=${enabled} but ${serverName} is still in disabledMcpServers!`
+      )
     }
     if (!enabled && !postDis.includes(serverName)) {
-      logger.error('ClaudeSession', `mcpToggle BUG: enabled=${enabled} but ${serverName} is NOT in disabledMcpServers!`)
+      logger.error(
+        'ClaudeSession',
+        `mcpToggle BUG: enabled=${enabled} but ${serverName} is NOT in disabledMcpServers!`
+      )
     }
 
     // Also query status to see the SDK's view
     try {
       const status = await this.activeQuery.mcpServerStatus()
       const summary = Array.isArray(status)
-        ? (status as Array<Record<string, unknown>>).map(s => `${s.name}:${s.status}`).join(', ')
+        ? (status as Array<Record<string, unknown>>).map((s) => `${s.name}:${s.status}`).join(', ')
         : 'not-array'
       logger.debug('ClaudeSession', `mcpToggle POST-STATUS: [${summary}]`)
     } catch {
@@ -1351,7 +1568,7 @@ this.permissionMode = mode
     try {
       const status = await this.activeQuery.mcpServerStatus()
       const summary = Array.isArray(status)
-        ? (status as Array<Record<string, unknown>>).map(s => `${s.name}:${s.status}`).join(', ')
+        ? (status as Array<Record<string, unknown>>).map((s) => `${s.name}:${s.status}`).join(', ')
         : 'not-array'
       logger.debug('ClaudeSession', `mcpReconnect POST-STATUS: [${summary}]`)
     } catch {
@@ -1366,7 +1583,7 @@ this.permissionMode = mode
     // McpServerConfig is a loose bag, the SDK layer uses a discriminated
     // union. Trust the SDK's splitMcpServers() + cli.js to validate.
     const result = await this.activeQuery.setMcpServers(
-      servers as unknown as Parameters<QueryHandle['setMcpServers']>[0],
+      servers as unknown as Parameters<QueryHandle['setMcpServers']>[0]
     )
     logger.debug('ClaudeSession', `mcpSetServers result: ${JSON.stringify(result).slice(0, 500)}`)
     return result
@@ -1391,7 +1608,7 @@ this.permissionMode = mode
         sessionId: this.sessionId,
         model: (msg.model as string) || this.model || 'unknown',
         usage,
-        cwd: this.cwd,
+        cwd: this.cwd
       }
 
       fs.appendFileSync(logPath, JSON.stringify(entry) + '\n', { mode: 0o600 })
@@ -1427,15 +1644,20 @@ this.permissionMode = mode
     return true
   }
 
-  /** Context window size based on the currently selected model. */
+  /** Context window size based on the currently selected model. The `default`
+   *  alias is resolved server-side by cli.js, so its real window is only known
+   *  from the canonical id reported in system/init — prefer that when present. */
   private get contextWindowSize(): number {
-    return getContextWindowSize(this.model)
+    const effectiveModel =
+      this.model === 'default' && this.resolvedModelId ? this.resolvedModelId : this.model
+    return getContextWindowSize(effectiveModel)
   }
 
   /** Build StatusLineData from in-memory accumulators (zero I/O) */
   private buildStatusLineFromAccumulators(): import('../../shared/types').StatusLineData {
     const ctxWindow = this.contextWindowSize
-    const usedPct = this.lastContextLength > 0 ? Math.round((this.lastContextLength / ctxWindow) * 100) : null
+    const usedPct =
+      this.lastContextLength > 0 ? Math.round((this.lastContextLength / ctxWindow) * 100) : null
     return {
       totalCostUsd: this.totalCostUsd,
       totalDurationMs: this.accTotalDurationMs,
@@ -1481,7 +1703,8 @@ this.permissionMode = mode
 
     // Fallback: find the most recently modified .md file in plans dir
     try {
-      const files = fs.readdirSync(plansDir)
+      const files = fs
+        .readdirSync(plansDir)
         .filter((f) => f.endsWith('.md'))
         .map((f) => {
           const full = path.join(plansDir, f)
@@ -1499,7 +1722,12 @@ this.permissionMode = mode
     return null
   }
 
-  resolveApproval(requestId: string, decision: ApprovalDecision, answers?: Record<string, string>, updatedPermissions?: PermissionSuggestion[]): void {
+  resolveApproval(
+    requestId: string,
+    decision: ApprovalDecision,
+    answers?: Record<string, string>,
+    updatedPermissions?: PermissionSuggestion[]
+  ): void {
     const entry = this.pendingApprovals.get(requestId)
     if (entry) {
       entry.resolve({ decision, answers, updatedPermissions })
@@ -1631,6 +1859,36 @@ this.permissionMode = mode
     }
   }
 
+  /**
+   * Build a `system` ChatMessage carrying an `api_error` block from an
+   * `isApiErrorMessage` assistant frame. Mirrors session-history.ts so live and
+   * reloaded transcripts render identically. `errorType` of `'authentication'`
+   * drives the renderer's Login action. See ADR-014.
+   */
+  private transformApiErrorMessage(msg: AssistantMessage): ChatMessage | null {
+    const betaMessage = msg.message as Record<string, unknown> | undefined
+    const content = betaMessage?.content
+    let text = ''
+    if (typeof content === 'string') {
+      text = content
+    } else if (Array.isArray(content)) {
+      text = content
+        .map((b: Record<string, unknown>) => (b?.type === 'text' ? (b.text as string) || '' : ''))
+        .join('')
+        .trim()
+    }
+    if (!text) text = (msg.error as string) || 'API error'
+
+    return {
+      id: (betaMessage?.id as string) || (msg.uuid as string) || `error-${uuid()}`,
+      role: 'system',
+      content: [
+        { type: 'api_error', errorType: classifyApiError(text, msg.error), errorMessage: text }
+      ],
+      timestamp: Date.now()
+    }
+  }
+
   private transformAssistantMessage(msg: Record<string, unknown>): ChatMessage | null {
     const betaMessage = msg.message as Record<string, unknown> | undefined
     if (!betaMessage) return null
@@ -1667,6 +1925,11 @@ this.permissionMode = mode
         }
       } else if (blockType === 'thinking') {
         return { type: 'thinking' as const, text: block.thinking as string }
+      } else if (blockType === 'fallback') {
+        // Canonical-replacement frame for a refusal-retracted partial. The
+        // whole message is normally evicted right after via
+        // retracted_message_uuids; render a readable note in case it survives.
+        return { type: 'text' as const, text: fallbackBlockText(block) }
       }
       return { type: 'text' as const, text: JSON.stringify(block) }
     })
@@ -1742,13 +2005,13 @@ this.permissionMode = mode
           toolUseId: parentToolUseId,
           toolResultToolUseId: toolUseId,
           result: resultText,
-          isError: !!(b.is_error)
+          isError: !!b.is_error
         })
       } else {
         this.send('session:tool-result', {
           toolUseId,
           result: resultText,
-          isError: !!(b.is_error)
+          isError: !!b.is_error
         })
       }
 

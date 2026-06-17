@@ -21,15 +21,11 @@ vi.mock('../logger', () => ({
     debug: vi.fn(),
     info: vi.fn(),
     warn: vi.fn(),
-    error: vi.fn(),
-  },
+    error: vi.fn()
+  }
 }))
 
-import {
-  startSocksBridge,
-  stopSocksBridge,
-  getBridgePort,
-} from '../socks-bridge'
+import { startSocksBridge, stopSocksBridge, getBridgePort } from '../socks-bridge'
 
 // ---------------------------------------------------------------------------
 // Minimal SOCKS5 server for tests
@@ -103,7 +99,7 @@ async function startFakeSocks5Server(): Promise<FakeSocks5Server> {
         // closeAllConnections is Node 18.2+; tolerate absence on older typings.
         ;(server as unknown as { closeAllConnections?: () => void }).closeAllConnections?.()
         server.close(() => resolve())
-      }),
+      })
   }
 }
 
@@ -111,16 +107,13 @@ async function startFakeSocks5Server(): Promise<FakeSocks5Server> {
  * Issue an HTTP CONNECT through the bridge and return the resulting socket
  * once the bridge replies `200 Connection Established`.
  */
-function httpConnectThrough(
-  bridgePort: number,
-  target: string,
-): Promise<net.Socket> {
+function httpConnectThrough(bridgePort: number, target: string): Promise<net.Socket> {
   return new Promise((resolve, reject) => {
     const req = http.request({
       host: '127.0.0.1',
       port: bridgePort,
       method: 'CONNECT',
-      path: target,
+      path: target
     })
     req.on('connect', (res, socket) => {
       if (res.statusCode !== 200) {
@@ -154,7 +147,7 @@ describe('socks-bridge', () => {
   it('starts, listens on a 127.0.0.1 port, and exposes it via getBridgePort()', async () => {
     const port = await startSocksBridge({
       socksHost: '127.0.0.1',
-      socksPort: socks.port,
+      socksPort: socks.port
     })
 
     expect(typeof port).toBe('number')
@@ -174,7 +167,7 @@ describe('socks-bridge', () => {
   it('forwards an HTTP CONNECT through the SOCKS5 proxy to the requested host:port', async () => {
     const bridgePort = await startSocksBridge({
       socksHost: '127.0.0.1',
-      socksPort: socks.port,
+      socksPort: socks.port
     })
 
     const tunneled = await httpConnectThrough(bridgePort, 'example.com:443')
@@ -197,7 +190,7 @@ describe('socks-bridge', () => {
   it('stopSocksBridge() closes the listener and clears getBridgePort()', async () => {
     const port = await startSocksBridge({
       socksHost: '127.0.0.1',
-      socksPort: socks.port,
+      socksPort: socks.port
     })
     expect(getBridgePort()).toBe(port)
 
@@ -212,14 +205,14 @@ describe('socks-bridge', () => {
           resolve()
         })
         s.on('error', reject)
-      }),
+      })
     ).rejects.toBeInstanceOf(Error)
   })
 
   it('does not leak: start → stop → start again succeeds and yields a working port', async () => {
     const p1 = await startSocksBridge({
       socksHost: '127.0.0.1',
-      socksPort: socks.port,
+      socksPort: socks.port
     })
     expect(p1).toBeGreaterThan(0)
 
@@ -228,7 +221,7 @@ describe('socks-bridge', () => {
 
     const p2 = await startSocksBridge({
       socksHost: '127.0.0.1',
-      socksPort: socks.port,
+      socksPort: socks.port
     })
     expect(p2).toBeGreaterThan(0)
     expect(getBridgePort()).toBe(p2)

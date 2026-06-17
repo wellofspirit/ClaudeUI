@@ -42,7 +42,13 @@ export function ExitPlanModeCard({ block, approval }: ExitPlanModeCardProps): Re
 
     // Create a fresh SDK session for the same routingId
     const session = useSessionStore.getState().sessions[activeSessionId]
-    await window.api.createSession(activeSessionId, cwd, session?.effort ?? 'medium', undefined, 'acceptEdits')
+    await window.api.createSession(
+      activeSessionId,
+      cwd,
+      session?.effort ?? 'medium',
+      undefined,
+      'acceptEdits'
+    )
     markSdkActive(activeSessionId)
     setPermissionMode('acceptEdits', activeSessionId)
 
@@ -53,7 +59,16 @@ export function ExitPlanModeCard({ block, approval }: ExitPlanModeCardProps): Re
     }
     // User message is added by the server-relayed session:user-message event
     await window.api.sendPrompt(activeSessionId, prompt)
-  }, [planContent, approval, cwd, activeSessionId, removePendingApproval, clearConversation, setPermissionMode, markSdkActive])
+  }, [
+    planContent,
+    approval,
+    cwd,
+    activeSessionId,
+    removePendingApproval,
+    clearConversation,
+    setPermissionMode,
+    markSdkActive
+  ])
 
   // Option 2: Continue, auto-accept edits
   const handleContinueAutoEdit = useCallback(async () => {
@@ -82,7 +97,9 @@ export function ExitPlanModeCard({ block, approval }: ExitPlanModeCardProps): Re
     if (!approval || !activeSessionId) return
     const text = feedback.trim()
     if (!text) return
-    await window.api.respondApproval(activeSessionId, approval.requestId, 'deny', { feedback: text })
+    await window.api.respondApproval(activeSessionId, approval.requestId, 'deny', {
+      feedback: text
+    })
     removePendingApproval(activeSessionId, approval.requestId)
     setShowFeedback(false)
     setFeedback('')

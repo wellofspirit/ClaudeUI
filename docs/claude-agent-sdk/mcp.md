@@ -15,22 +15,22 @@ This example connects to the [Claude Code documentation](https://code.claude.com
 <CodeGroup>
 
 ```typescript TypeScript
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { query } from '@anthropic-ai/claude-agent-sdk'
 
 for await (const message of query({
-  prompt: "Use the docs MCP server to explain what hooks are in Claude Code",
+  prompt: 'Use the docs MCP server to explain what hooks are in Claude Code',
   options: {
     mcpServers: {
-      "claude-code-docs": {
-        type: "http",
-        url: "https://code.claude.com/docs/mcp"
+      'claude-code-docs': {
+        type: 'http',
+        url: 'https://code.claude.com/docs/mcp'
       }
     },
-    allowedTools: ["mcp__claude-code-docs__*"]
+    allowedTools: ['mcp__claude-code-docs__*']
   }
 })) {
-  if (message.type === "result" && message.subtype === "success") {
-    console.log(message.result);
+  if (message.type === 'result' && message.subtype === 'success') {
+    console.log(message.result)
   }
 }
 ```
@@ -72,22 +72,22 @@ Pass MCP servers directly in the `mcpServers` option:
 <CodeGroup>
 
 ```typescript TypeScript
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { query } from '@anthropic-ai/claude-agent-sdk'
 
 for await (const message of query({
-  prompt: "List files in my project",
+  prompt: 'List files in my project',
   options: {
     mcpServers: {
-      "filesystem": {
-        command: "npx",
-        args: ["-y", "@modelcontextprotocol/server-filesystem", "/Users/me/projects"]
+      filesystem: {
+        command: 'npx',
+        args: ['-y', '@modelcontextprotocol/server-filesystem', '/Users/me/projects']
       }
     },
-    allowedTools: ["mcp__filesystem__*"]
+    allowedTools: ['mcp__filesystem__*']
   }
 })) {
-  if (message.type === "result" && message.subtype === "success") {
-    console.log(message.result);
+  if (message.type === 'result' && message.subtype === 'success') {
+    console.log(message.result)
   }
 }
 ```
@@ -177,9 +177,9 @@ See [Permissions](/docs/en/agent-sdk/permissions) for more details on permission
 To see what tools an MCP server provides, check the server's documentation or connect to the server and inspect the `system` init message:
 
 ```typescript
-for await (const message of query({ prompt: "...", options })) {
-  if (message.type === "system" && message.subtype === "init") {
-    console.log("Available MCP tools:", message.mcp_servers);
+for await (const message of query({ prompt: '...', options })) {
+  if (message.type === 'system' && message.subtype === 'init') {
+    console.log('Available MCP tools:', message.mcp_servers)
   }
 }
 ```
@@ -231,6 +231,7 @@ Local processes that communicate via stdin/stdout. Use this for MCP servers you 
     ```
 
     </CodeGroup>
+
   </Tab>
   <Tab title=".mcp.json">
     ```json
@@ -288,6 +289,7 @@ Use HTTP or SSE for cloud-hosted MCP servers and remote APIs:
     ```
 
     </CodeGroup>
+
   </Tab>
   <Tab title=".mcp.json">
     ```json
@@ -330,12 +332,12 @@ Tool search requires models that support `tool_reference` blocks: Sonnet 4 and l
 
 Control tool search behavior with the `ENABLE_TOOL_SEARCH` environment variable:
 
-| Value | Behavior |
-|:------|:---------|
-| `auto` | Activates when MCP tools exceed 10% of context (default) |
-| `auto:5` | Activates at 5% threshold (customize the percentage) |
-| `true` | Always enabled |
-| `false` | Disabled, all MCP tools loaded upfront |
+| Value    | Behavior                                                 |
+| :------- | :------------------------------------------------------- |
+| `auto`   | Activates when MCP tools exceed 10% of context (default) |
+| `auto:5` | Activates at 5% threshold (customize the percentage)     |
+| `true`   | Always enabled                                           |
+| `false`  | Disabled, all MCP tools loaded upfront                   |
 
 Set the value in the `env` option:
 
@@ -343,11 +345,13 @@ Set the value in the `env` option:
 
 ```typescript TypeScript
 const options = {
-  mcpServers: { /* your MCP servers */ },
+  mcpServers: {
+    /* your MCP servers */
+  },
   env: {
-    ENABLE_TOOL_SEARCH: "auto:5"  // Enable at 5% threshold
+    ENABLE_TOOL_SEARCH: 'auto:5' // Enable at 5% threshold
   }
-};
+}
 ```
 
 ```python Python
@@ -404,6 +408,7 @@ Use the `env` field to pass API keys, tokens, and other credentials to the MCP s
     ```
 
     </CodeGroup>
+
   </Tab>
   <Tab title=".mcp.json">
     ```json
@@ -421,6 +426,7 @@ Use the `env` field to pass API keys, tokens, and other credentials to the MCP s
     ```
 
     The `${GITHUB_TOKEN}` syntax expands environment variables at runtime.
+
   </Tab>
 </Tabs>
 
@@ -465,6 +471,7 @@ For HTTP and SSE servers, pass authentication headers directly in the server con
     ```
 
     </CodeGroup>
+
   </Tab>
   <Tab title=".mcp.json">
     ```json
@@ -482,6 +489,7 @@ For HTTP and SSE servers, pass authentication headers directly in the server con
     ```
 
     The `${API_TOKEN}` syntax expands environment variables at runtime.
+
   </Tab>
 </Tabs>
 
@@ -493,20 +501,20 @@ The [MCP specification supports OAuth 2.1](https://modelcontextprotocol.io/speci
 
 ```typescript TypeScript
 // After completing OAuth flow in your app
-const accessToken = await getAccessTokenFromOAuthFlow();
+const accessToken = await getAccessTokenFromOAuthFlow()
 
 const options = {
   mcpServers: {
-    "oauth-api": {
-      type: "http",
-      url: "https://api.example.com/mcp",
+    'oauth-api': {
+      type: 'http',
+      url: 'https://api.example.com/mcp',
       headers: {
         Authorization: `Bearer ${accessToken}`
       }
     }
   },
-  allowedTools: ["mcp__oauth-api__*"]
-};
+  allowedTools: ['mcp__oauth-api__*']
+}
 ```
 
 ```python Python
@@ -544,40 +552,40 @@ export GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
 <CodeGroup>
 
 ```typescript TypeScript
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { query } from '@anthropic-ai/claude-agent-sdk'
 
 for await (const message of query({
-  prompt: "List the 3 most recent issues in anthropics/claude-code",
+  prompt: 'List the 3 most recent issues in anthropics/claude-code',
   options: {
     mcpServers: {
-      "github": {
-        command: "npx",
-        args: ["-y", "@modelcontextprotocol/server-github"],
+      github: {
+        command: 'npx',
+        args: ['-y', '@modelcontextprotocol/server-github'],
         env: {
           GITHUB_TOKEN: process.env.GITHUB_TOKEN
         }
       }
     },
-    allowedTools: ["mcp__github__list_issues"]
+    allowedTools: ['mcp__github__list_issues']
   }
 })) {
   // Verify MCP server connected successfully
-  if (message.type === "system" && message.subtype === "init") {
-    console.log("MCP servers:", message.mcp_servers);
+  if (message.type === 'system' && message.subtype === 'init') {
+    console.log('MCP servers:', message.mcp_servers)
   }
 
   // Log when Claude calls an MCP tool
-  if (message.type === "assistant") {
+  if (message.type === 'assistant') {
     for (const block of message.content) {
-      if (block.type === "tool_use" && block.name.startsWith("mcp__")) {
-        console.log("MCP tool called:", block.name);
+      if (block.type === 'tool_use' && block.name.startsWith('mcp__')) {
+        console.log('MCP tool called:', block.name)
       }
     }
   }
 
   // Print the final result
-  if (message.type === "result" && message.subtype === "success") {
-    console.log(message.result);
+  if (message.type === 'result' && message.subtype === 'success') {
+    console.log(message.result)
   }
 }
 ```
@@ -628,28 +636,28 @@ This example uses the [Postgres MCP server](https://github.com/modelcontextproto
 <CodeGroup>
 
 ```typescript TypeScript
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { query } from '@anthropic-ai/claude-agent-sdk'
 
 // Connection string from environment variable
-const connectionString = process.env.DATABASE_URL;
+const connectionString = process.env.DATABASE_URL
 
 for await (const message of query({
   // Natural language query - Claude writes the SQL
-  prompt: "How many users signed up last week? Break it down by day.",
+  prompt: 'How many users signed up last week? Break it down by day.',
   options: {
     mcpServers: {
-      "postgres": {
-        command: "npx",
+      postgres: {
+        command: 'npx',
         // Pass connection string as argument to the server
-        args: ["-y", "@modelcontextprotocol/server-postgres", connectionString]
+        args: ['-y', '@modelcontextprotocol/server-postgres', connectionString]
       }
     },
     // Allow only read queries, not writes
-    allowedTools: ["mcp__postgres__query"]
+    allowedTools: ['mcp__postgres__query']
   }
 })) {
-  if (message.type === "result" && message.subtype === "success") {
-    console.log(message.result);
+  if (message.type === 'result' && message.subtype === 'success') {
+    console.log(message.result)
   }
 }
 ```
@@ -697,28 +705,26 @@ The SDK emits a `system` message with subtype `init` at the start of each query.
 <CodeGroup>
 
 ```typescript TypeScript
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { query } from '@anthropic-ai/claude-agent-sdk'
 
 for await (const message of query({
-  prompt: "Process data",
+  prompt: 'Process data',
   options: {
     mcpServers: {
-      "data-processor": dataServer
+      'data-processor': dataServer
     }
   }
 })) {
-  if (message.type === "system" && message.subtype === "init") {
-    const failedServers = message.mcp_servers.filter(
-      s => s.status !== "connected"
-    );
+  if (message.type === 'system' && message.subtype === 'init') {
+    const failedServers = message.mcp_servers.filter((s) => s.status !== 'connected')
 
     if (failedServers.length > 0) {
-      console.warn("Failed to connect:", failedServers);
+      console.warn('Failed to connect:', failedServers)
     }
   }
 
-  if (message.type === "result" && message.subtype === "error_during_execution") {
-    console.error("Execution failed");
+  if (message.type === 'result' && message.subtype === 'error_during_execution') {
+    console.error('Execution failed')
   }
 }
 ```
@@ -759,10 +765,10 @@ asyncio.run(main())
 Check the `init` message to see which servers failed to connect:
 
 ```typescript
-if (message.type === "system" && message.subtype === "init") {
+if (message.type === 'system' && message.subtype === 'init') {
   for (const server of message.mcp_servers) {
-    if (server.status === "failed") {
-      console.error(`Server ${server.name} failed to connect`);
+    if (server.status === 'failed') {
+      console.error(`Server ${server.name} failed to connect`)
     }
   }
 }

@@ -16,6 +16,7 @@ import {
   modelDefaultThinkingMode,
   modelResolveEffort,
   canonicalizeModelValue,
+  resolveContextWindow
 } from '../model-capabilities'
 
 describe('supportsAdaptiveThinking', () => {
@@ -51,11 +52,18 @@ describe('supportsEffort', () => {
 })
 
 describe('supportsXhighEffort', () => {
-  it('is opus-4-7 and opus-4-8', () => {
+  it('is fable-5, mythos-5, opus-4-7 and opus-4-8', () => {
     expect(supportsXhighEffort('claude-opus-4-7')).toBe(true)
     expect(supportsXhighEffort('claude-opus-4-8')).toBe(true)
+    expect(supportsXhighEffort('claude-fable-5')).toBe(true)
+    expect(supportsXhighEffort('claude-fable-5[1m]')).toBe(true)
+    expect(supportsXhighEffort('claude-mythos-5')).toBe(true)
     expect(supportsXhighEffort('claude-opus-4-6')).toBe(false)
     expect(supportsXhighEffort('claude-sonnet-4-6')).toBe(false)
+    expect(supportsXhighEffort('claude-haiku-4-5')).toBe(false)
+  })
+  it('assumes unknown families are modern and allows xhigh', () => {
+    expect(supportsXhighEffort('claude-saga-6')).toBe(true)
   })
 })
 
@@ -75,9 +83,28 @@ describe('supportsMaxEffort', () => {
 })
 
 describe('supportedEffortLevels', () => {
-  it('returns full set with xhigh for opus-4-7 and opus-4-8', () => {
-    expect(supportedEffortLevels('claude-opus-4-7')).toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
-    expect(supportedEffortLevels('claude-opus-4-8')).toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
+  it('returns full set with xhigh for fable-5, opus-4-7 and opus-4-8', () => {
+    expect(supportedEffortLevels('claude-opus-4-7')).toEqual([
+      'low',
+      'medium',
+      'high',
+      'xhigh',
+      'max'
+    ])
+    expect(supportedEffortLevels('claude-opus-4-8')).toEqual([
+      'low',
+      'medium',
+      'high',
+      'xhigh',
+      'max'
+    ])
+    expect(supportedEffortLevels('claude-fable-5')).toEqual([
+      'low',
+      'medium',
+      'high',
+      'xhigh',
+      'max'
+    ])
   })
   it('drops xhigh for opus-4-6 / sonnet-4-6', () => {
     expect(supportedEffortLevels('claude-opus-4-6')).toEqual(['low', 'medium', 'high', 'max'])
@@ -90,9 +117,10 @@ describe('supportedEffortLevels', () => {
 })
 
 describe('defaultEffort', () => {
-  it('xhigh for opus-4-7, high for everyone else (incl. opus-4-8)', () => {
+  it('xhigh for opus-4-7, high for everyone else (incl. opus-4-8 and fable-5)', () => {
     expect(defaultEffort('claude-opus-4-7')).toBe('xhigh')
     expect(defaultEffort('claude-opus-4-8')).toBe('high')
+    expect(defaultEffort('claude-fable-5')).toBe('high')
     expect(defaultEffort('claude-opus-4-6')).toBe('high')
     expect(defaultEffort('claude-sonnet-4-5')).toBe('high')
   })
@@ -127,6 +155,9 @@ describe('resolveEffort', () => {
   it('keeps allowed level', () => {
     expect(resolveEffort('claude-opus-4-7', 'xhigh')).toBe('xhigh')
     expect(resolveEffort('claude-opus-4-6', 'max')).toBe('max')
+    // Regression: automation runs use this string-based path — Fable + xhigh
+    // must not be silently downgraded (cli.js 2.1.170 allows xhigh on fable-5).
+    expect(resolveEffort('claude-fable-5[1m]', 'xhigh')).toBe('xhigh')
   })
   it('falls back to default when level not allowed', () => {
     expect(resolveEffort('claude-opus-4-6', 'xhigh')).toBe('high')
@@ -141,16 +172,20 @@ describe('resolveEffort', () => {
 
 describe('modelSupportsAdaptiveThinking', () => {
   it('trusts SDK-supplied supportsAdaptiveThinking=true', () => {
-    expect(modelSupportsAdaptiveThinking({
-      value: 'default', // alias, id heuristic has no info
-      supportsAdaptiveThinking: true,
-    })).toBe(true)
+    expect(
+      modelSupportsAdaptiveThinking({
+        value: 'default', // alias, id heuristic has no info
+        supportsAdaptiveThinking: true
+      })
+    ).toBe(true)
   })
   it('trusts SDK-supplied supportsAdaptiveThinking=false', () => {
-    expect(modelSupportsAdaptiveThinking({
-      value: 'default',
-      supportsAdaptiveThinking: false,
-    })).toBe(false)
+    expect(
+      modelSupportsAdaptiveThinking({
+        value: 'default',
+        supportsAdaptiveThinking: false
+      })
+    ).toBe(false)
   })
   it('falls back to id heuristic when field absent', () => {
     expect(modelSupportsAdaptiveThinking({ value: 'claude-haiku-4-5' })).toBe(false)
@@ -167,7 +202,7 @@ describe('modelSupportsEffort + modelSupportedEffortLevels', () => {
     const model = {
       value: 'default',
       supportsEffort: true,
-      supportedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max'] as const,
+      supportedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max'] as const
     }
     expect(modelSupportsEffort(model)).toBe(true)
     expect(modelSupportedEffortLevels(model)).toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
@@ -177,7 +212,7 @@ describe('modelSupportsEffort + modelSupportedEffortLevels', () => {
     const model = {
       value: 'sonnet',
       supportsEffort: true,
-      supportedEffortLevels: ['low', 'medium', 'high', 'max'] as const,
+      supportedEffortLevels: ['low', 'medium', 'high', 'max'] as const
     }
     expect(modelSupportedEffortLevels(model)).toEqual(['low', 'medium', 'high', 'max'])
   })
@@ -199,7 +234,7 @@ describe('modelDefaultEffort', () => {
     const sonnet = {
       value: 'sonnet',
       supportsEffort: true,
-      supportedEffortLevels: ['low', 'medium', 'high', 'max'] as const,
+      supportedEffortLevels: ['low', 'medium', 'high', 'max'] as const
     }
     expect(modelDefaultEffort(sonnet)).toBe('high')
   })
@@ -209,38 +244,48 @@ describe('modelDefaultEffort', () => {
   it('returns high for opus-4-8 even though it supports xhigh', () => {
     // 4.8 supports xhigh but defaults to high — mirrors cli.js YK6.
     expect(modelDefaultEffort({ value: 'claude-opus-4-8' })).toBe('high')
-    expect(modelDefaultEffort({
-      value: 'claude-opus-4-8',
-      supportsEffort: true,
-      supportedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max'],
-    })).toBe('high')
+    expect(
+      modelDefaultEffort({
+        value: 'claude-opus-4-8',
+        supportsEffort: true,
+        supportedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max']
+      })
+    ).toBe('high')
   })
   it('does not blanket-pick xhigh just because SDK lists it as allowed', () => {
     // The `default`/`opus` alias resolves to opus-4-8 today; xhigh in the
     // allowed list must not be auto-selected when the id heuristic says high.
-    expect(modelDefaultEffort({
-      value: 'default',
-      supportsEffort: true,
-      supportedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max'],
-    })).toBe('high')
+    expect(
+      modelDefaultEffort({
+        value: 'default',
+        supportsEffort: true,
+        supportedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max']
+      })
+    ).toBe('high')
   })
   it('skips id-heuristic default when not in SDK-provided list', () => {
     // Id heuristic says xhigh for opus-4-7, but here the SDK claims only
     // low/medium/high are allowed for this hypothetical model — must not pick xhigh.
-    expect(modelDefaultEffort({
-      value: 'claude-opus-4-7',
-      supportsEffort: true,
-      supportedEffortLevels: ['low', 'medium', 'high'],
-    })).toBe('high')
+    expect(
+      modelDefaultEffort({
+        value: 'claude-opus-4-7',
+        supportsEffort: true,
+        supportedEffortLevels: ['low', 'medium', 'high']
+      })
+    ).toBe('high')
   })
 })
 
 describe('modelDefaultThinkingMode', () => {
   it('adaptive when SDK supports it', () => {
-    expect(modelDefaultThinkingMode({ value: 'default', supportsAdaptiveThinking: true })).toBe('adaptive')
+    expect(modelDefaultThinkingMode({ value: 'default', supportsAdaptiveThinking: true })).toBe(
+      'adaptive'
+    )
   })
   it('enabled when SDK says no adaptive', () => {
-    expect(modelDefaultThinkingMode({ value: 'haiku', supportsAdaptiveThinking: false })).toBe('enabled')
+    expect(modelDefaultThinkingMode({ value: 'haiku', supportsAdaptiveThinking: false })).toBe(
+      'enabled'
+    )
     expect(modelDefaultThinkingMode({ value: 'haiku' })).toBe('enabled') // id-fallback
   })
 })
@@ -256,6 +301,9 @@ describe('canonicalizeModelValue', () => {
   it('passes canonical ids through (normalised, date stripped)', () => {
     expect(canonicalizeModelValue('claude-opus-4-8')).toBe('claude-opus-4-8')
     expect(canonicalizeModelValue('claude-opus-4-7-20260101')).toBe('claude-opus-4-7')
+    // Fable's picker value carries the [1m] context suffix — it must normalise
+    // to the bare id used as the modelEffortDefaults key / EFFORT_MODELS row.
+    expect(canonicalizeModelValue('claude-fable-5[1m]')).toBe('claude-fable-5')
   })
   it('leaves the `default` alias unmapped — its target depends on user config', () => {
     expect(canonicalizeModelValue('default')).toBe('default')
@@ -275,9 +323,43 @@ describe('modelResolveEffort', () => {
     const sonnet = {
       value: 'sonnet',
       supportsEffort: true,
-      supportedEffortLevels: ['low', 'medium', 'high', 'max'] as const,
+      supportedEffortLevels: ['low', 'medium', 'high', 'max'] as const
     }
     expect(modelResolveEffort(sonnet, 'xhigh')).toBe('high') // not in list → default
-    expect(modelResolveEffort(sonnet, 'max')).toBe('max')    // allowed
+    expect(modelResolveEffort(sonnet, 'max')).toBe('max') // allowed
+  })
+})
+
+describe('resolveContextWindow', () => {
+  const ONE_M = 1_000_000
+  const DEFAULT = 200_000
+
+  it('resolves the [1m] suffix to 1M, case-insensitively', () => {
+    expect(resolveContextWindow('sonnet[1m]')).toBe(ONE_M)
+    expect(resolveContextWindow('SONNET[1M]')).toBe(ONE_M)
+  })
+
+  it('resolves implicit-1M picker aliases (the regression: no "1m" marker)', () => {
+    expect(resolveContextWindow('fable')).toBe(ONE_M)
+    expect(resolveContextWindow('opus')).toBe(ONE_M)
+  })
+
+  it('resolves implicit-1M full ids by substring (dated / Bedrock)', () => {
+    expect(resolveContextWindow('claude-fable-5')).toBe(ONE_M)
+    expect(resolveContextWindow('claude-opus-4-8-20251201')).toBe(ONE_M)
+    expect(resolveContextWindow('us.anthropic.claude-opus-4-8-20251201-v1:0')).toBe(ONE_M)
+  })
+
+  it('keeps 200K models and aliases at the default', () => {
+    expect(resolveContextWindow('sonnet')).toBe(DEFAULT)
+    expect(resolveContextWindow('haiku')).toBe(DEFAULT)
+    expect(resolveContextWindow('claude-opus-4-6')).toBe(DEFAULT)
+  })
+
+  it('falls back to the default for unknown / empty values', () => {
+    expect(resolveContextWindow('some-future-model')).toBe(DEFAULT)
+    expect(resolveContextWindow('')).toBe(DEFAULT)
+    expect(resolveContextWindow(undefined)).toBe(DEFAULT)
+    expect(resolveContextWindow(null)).toBe(DEFAULT)
   })
 })

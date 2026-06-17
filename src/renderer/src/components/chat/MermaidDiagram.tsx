@@ -32,9 +32,9 @@ const THEME_CONFIGS: Record<ThemeId, MermaidThemeConfig> = {
       primaryColor: '#152540',
       primaryTextColor: '#d1d5db',
       primaryBorderColor: '#6c9eff',
-      lineColor: '#6c9eff',              // blue edges for visibility
-      secondaryColor: '#1a1535',          // purple tint for variety
-      tertiaryColor: '#0f2a20',           // green tint
+      lineColor: '#6c9eff', // blue edges for visibility
+      secondaryColor: '#1a1535', // purple tint for variety
+      tertiaryColor: '#0f2a20', // green tint
       textColor: '#d1d5db',
       mainBkg: '#152540',
       nodeBorder: '#6c9eff',
@@ -72,7 +72,12 @@ const THEME_CONFIGS: Record<ThemeId, MermaidThemeConfig> = {
       doneTaskBkgColor: '#0f2a20',
       doneTaskBorderColor: '#4ade80',
       critBkgColor: '#2a1015',
-      critBorderColor: '#f87171'
+      critBorderColor: '#f87171',
+      // ER diagrams — mermaid's 'dark' base hardcodes attribute-row fills to
+      // #ffffff / #f2f2f2 (white) regardless of dark mode, which leaves the
+      // theme's light text unreadable. Override to dark fills.
+      attributeBackgroundColorEven: '#152540',
+      attributeBackgroundColorOdd: '#0d1117'
     }
   },
 
@@ -106,20 +111,20 @@ const THEME_CONFIGS: Record<ThemeId, MermaidThemeConfig> = {
     variables: {
       background: 'transparent',
       // Nodes — tinted cyan bg so they clearly stand out from the dark canvas
-      primaryColor: '#1a3a42',            // dark cyan-tinted fill
+      primaryColor: '#1a3a42', // dark cyan-tinted fill
       primaryTextColor: '#f8f8f2',
-      primaryBorderColor: '#66d9ef',      // cyan border
+      primaryBorderColor: '#66d9ef', // cyan border
       // Edges — orange (Monokai keyword-like) for good contrast
       lineColor: '#fd971f',
       // Secondary/tertiary — purple and green tinted fills for variety
-      secondaryColor: '#2a2540',          // purple tint
-      tertiaryColor: '#1a3020',           // green tint
+      secondaryColor: '#2a2540', // purple tint
+      tertiaryColor: '#1a3020', // green tint
       textColor: '#f8f8f2',
       mainBkg: '#1a3a42',
       nodeBorder: '#66d9ef',
       clusterBkg: '#1e1f1a',
       clusterBorder: '#75715e',
-      titleColor: '#e6db74',              // yellow titles
+      titleColor: '#e6db74', // yellow titles
       edgeLabelBackground: '#272822',
       nodeTextColor: '#f8f8f2',
       // Sequence diagram actors — cyan theme
@@ -146,12 +151,16 @@ const THEME_CONFIGS: Record<ThemeId, MermaidThemeConfig> = {
       taskBkgColor: '#1a3a42',
       taskTextColor: '#f8f8f2',
       taskBorderColor: '#66d9ef',
-      activeTaskBkgColor: '#2a4a20',      // green tint
+      activeTaskBkgColor: '#2a4a20', // green tint
       activeTaskBorderColor: '#a6e22e',
       doneTaskBkgColor: '#1a3020',
       doneTaskBorderColor: '#a6e22e',
-      critBkgColor: '#3a1525',            // pink tint
-      critBorderColor: '#f92672'
+      critBkgColor: '#3a1525', // pink tint
+      critBorderColor: '#f92672',
+      // ER diagrams — override mermaid's white (#ffffff / #f2f2f2) attribute-row
+      // fills (the cause of white-text-on-light-box) with dark Monokai tints.
+      attributeBackgroundColorEven: '#1a3a42', // cyan tint, matches nodes
+      attributeBackgroundColorOdd: '#1e1f1a' // canvas tint
     }
   }
 }
@@ -168,6 +177,33 @@ function resolveThemeConfig(setting: MermaidTheme | 'auto', appTheme: ThemeId): 
 }
 
 // ---------------------------------------------------------------------------
+// SVG sanitization
+// ---------------------------------------------------------------------------
+
+/**
+ * Sanitize Mermaid's rendered SVG before it goes through dangerouslySetInnerHTML.
+ *
+ * With htmlLabels enabled, Mermaid emits labels as
+ * `<foreignObject><div xmlns="…/xhtml">…<br/></div></foreignObject>`. Preserving
+ * that inner HTML (while still stripping scripts) requires three things together:
+ *  - the `html` profile, so div/span/p/br/b/i are in the allow-list;
+ *  - `foreignObject` added as a tag;
+ *  - `HTML_INTEGRATION_POINTS: { foreignobject }` — DOMPurify 3.x only treats
+ *    `annotation-xml` as an HTML integration point by default, so XHTML children
+ *    of `<foreignObject>` otherwise fail its SVG→HTML namespace check and are
+ *    dropped (labels render empty). See ADR-012.
+ *
+ * Scripts, on* handlers, and javascript: hrefs are still removed.
+ */
+export function sanitizeMermaidSvg(svg: string): string {
+  return DOMPurify.sanitize(svg, {
+    USE_PROFILES: { svg: true, svgFilters: true, html: true },
+    ADD_TAGS: ['foreignObject'],
+    HTML_INTEGRATION_POINTS: { foreignobject: true, 'annotation-xml': true }
+  })
+}
+
+// ---------------------------------------------------------------------------
 // Unique ID generator for mermaid.render()
 // ---------------------------------------------------------------------------
 
@@ -177,13 +213,43 @@ function nextMermaidId(): string {
 }
 
 // ---------------------------------------------------------------------------
+// SVG parsing / serialization helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse a (possibly HTML-serialized) Mermaid SVG into its <svg> element.
+ *
+ * Always uses the HTML parser, never image/svg+xml: with htmlLabels enabled,
+ * labels are <foreignObject> HTML and DOMPurify serializes void tags as bare
+ * <br> (not <br/>). The strict XML parser errors on that — and Chromium then
+ * truncates the SVG at the first <br>, silently dropping every node/label after
+ * it. The HTML parser tolerates <br> and handles SVG foreign content. ADR-012.
+ */
+export function parseSvgElement(svgString: string): SVGSVGElement | null {
+  const doc = new DOMParser().parseFromString(svgString, 'text/html')
+  return doc.querySelector('svg')
+}
+
+/**
+ * Serialize an <svg> element to XML-well-formed markup (void tags self-closed,
+ * e.g. <br/>). Required for rasterizing via <img src="data:image/svg+xml">,
+ * which always parses as strict XML. Strips redundant literal xmlns attributes
+ * (Mermaid emits xmlns on the foreignObject's <div>) that would otherwise
+ * collide with XMLSerializer's own namespace declarations and produce invalid
+ * XML. The element's real namespaces are preserved by the DOM and re-emitted.
+ */
+export function svgElementToXml(svgEl: SVGSVGElement): string {
+  const clone = svgEl.cloneNode(true) as SVGSVGElement
+  clone.querySelectorAll('[xmlns]').forEach((el) => el.removeAttribute('xmlns'))
+  return new XMLSerializer().serializeToString(clone)
+}
+
+// ---------------------------------------------------------------------------
 // SVG → PNG conversion (used by both export and copy)
 // ---------------------------------------------------------------------------
 
 async function svgToPngBlob(svgString: string): Promise<Blob | null> {
-  const parser = new DOMParser()
-  const doc = parser.parseFromString(svgString, 'image/svg+xml')
-  const svgEl = doc.querySelector('svg')
+  const svgEl = parseSvgElement(svgString)
   if (!svgEl) return null
 
   const viewBox = svgEl.getAttribute('viewBox')
@@ -191,7 +257,10 @@ async function svgToPngBlob(svgString: string): Promise<Blob | null> {
   let height = 600
   if (viewBox) {
     const parts = viewBox.split(/\s+|,/).map(Number)
-    if (parts.length === 4) { width = parts[2]; height = parts[3] }
+    if (parts.length === 4) {
+      width = parts[2]
+      height = parts[3]
+    }
   } else {
     const w = parseFloat(svgEl.getAttribute('width') || '800')
     const h = parseFloat(svgEl.getAttribute('height') || '600')
@@ -214,7 +283,9 @@ async function svgToPngBlob(svgString: string): Promise<Blob | null> {
 
   // Use a data URI instead of blob URL — blob URLs taint the canvas in Electron,
   // preventing toBlob() from working. Data URIs are always same-origin.
-  const encoded = btoa(unescape(encodeURIComponent(svgString)))
+  // Serialize to XML-well-formed markup so the <img> SVG (parsed as strict XML)
+  // doesn't choke on htmlLabels' bare <br> tags. See ADR-012.
+  const encoded = btoa(unescape(encodeURIComponent(svgElementToXml(svgEl))))
   const dataUri = `data:image/svg+xml;base64,${encoded}`
 
   return new Promise<Blob | null>((resolve) => {
@@ -265,7 +336,14 @@ interface DiagramToolbarProps {
   onFitToView: () => void
 }
 
-function DiagramToolbar({ svgString, zoom, onZoomIn, onZoomOut, onZoomReset, onFitToView }: DiagramToolbarProps): React.JSX.Element {
+function DiagramToolbar({
+  svgString,
+  zoom,
+  onZoomIn,
+  onZoomOut,
+  onZoomReset,
+  onFitToView
+}: DiagramToolbarProps): React.JSX.Element {
   const [copyState, setCopyState] = useState<'idle' | 'copying' | 'copied'>('idle')
 
   const handleCopyImage = useCallback(async () => {
@@ -289,22 +367,38 @@ function DiagramToolbar({ svgString, zoom, onZoomIn, onZoomOut, onZoomReset, onF
     }
   }, [svgString])
 
-  const btnClass = 'text-[10px] px-1.5 py-0.5 rounded bg-bg-hover/80 text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-pointer backdrop-blur-sm disabled:opacity-50'
+  const btnClass =
+    'text-[10px] px-1.5 py-0.5 rounded bg-bg-hover/80 text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-pointer backdrop-blur-sm disabled:opacity-50'
 
   return (
     <div className="absolute top-2 right-2 z-10 flex items-center gap-1">
       {/* Zoom controls */}
-      <button onClick={onZoomOut} className={btnClass} title="Zoom out">−</button>
-      <button onClick={onZoomReset} className={`${btnClass} min-w-[36px] text-center`} title="Reset zoom">
+      <button onClick={onZoomOut} className={btnClass} title="Zoom out">
+        −
+      </button>
+      <button
+        onClick={onZoomReset}
+        className={`${btnClass} min-w-[36px] text-center`}
+        title="Reset zoom"
+      >
         {Math.round(zoom * 100)}%
       </button>
-      <button onClick={onZoomIn} className={btnClass} title="Zoom in">+</button>
-      <button onClick={onFitToView} className={btnClass} title="Fit to width">Fit</button>
+      <button onClick={onZoomIn} className={btnClass} title="Zoom in">
+        +
+      </button>
+      <button onClick={onFitToView} className={btnClass} title="Fit to width">
+        Fit
+      </button>
 
       <div className="w-px h-3 bg-border mx-0.5" />
 
       {/* Copy as image */}
-      <button onClick={handleCopyImage} disabled={copyState === 'copying'} className={btnClass} title="Copy as image to clipboard">
+      <button
+        onClick={handleCopyImage}
+        disabled={copyState === 'copying'}
+        className={btnClass}
+        title="Copy as image to clipboard"
+      >
         {copyState === 'copied' ? 'Copied!' : copyState === 'copying' ? '...' : 'Copy Image'}
       </button>
     </div>
@@ -370,9 +464,7 @@ function DiagramViewport({ svgString }: DiagramViewportProps): React.JSX.Element
   // Normalize SVG: ensure it has a viewBox so it scales properly,
   // then remove fixed width/height so it fills the container at zoom=1.
   const normalizedSvg = useMemo(() => {
-    const parser = new DOMParser()
-    const doc = parser.parseFromString(svgString, 'image/svg+xml')
-    const svg = doc.querySelector('svg')
+    const svg = parseSvgElement(svgString)
     if (!svg) return svgString
 
     // If no viewBox, create one from width/height attributes
@@ -399,7 +491,10 @@ function DiagramViewport({ svgString }: DiagramViewportProps): React.JSX.Element
 
   const handleZoomIn = useCallback(() => setZoom((z) => Math.min(z + 0.15, 3)), [])
   const handleZoomOut = useCallback(() => setZoom((z) => Math.max(z - 0.15, 0.1)), [])
-  const handleZoomReset = useCallback(() => { setZoom(1); setPan({ x: 0, y: 0 }) }, [])
+  const handleZoomReset = useCallback(() => {
+    setZoom(1)
+    setPan({ x: 0, y: 0 })
+  }, [])
 
   // Mouse drag to pan
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
@@ -418,7 +513,9 @@ function DiagramViewport({ svgString }: DiagramViewportProps): React.JSX.Element
     setPan((p) => ({ x: p.x + dx, y: p.y + dy }))
   }, [])
 
-  const handleMouseUp = useCallback(() => { isDragging.current = false }, [])
+  const handleMouseUp = useCallback(() => {
+    isDragging.current = false
+  }, [])
 
   // Ctrl + scroll wheel to zoom — plain scroll passes through to page.
   // Must use native event listener with { passive: false } so preventDefault() works.
@@ -436,7 +533,7 @@ function DiagramViewport({ svgString }: DiagramViewportProps): React.JSX.Element
 
     el.addEventListener('wheel', handler, { passive: false })
     return () => el.removeEventListener('wheel', handler)
-  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [])
 
   return (
     <div className="relative">
@@ -466,9 +563,10 @@ function DiagramViewport({ svgString }: DiagramViewportProps): React.JSX.Element
           ref={contentRef}
           className="mermaid-content"
           style={{
-            transform: zoom === 1 && pan.x === 0 && pan.y === 0
-              ? undefined
-              : `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
+            transform:
+              zoom === 1 && pan.x === 0 && pan.y === 0
+                ? undefined
+                : `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
             transformOrigin: 'top left',
             transition: isDragging.current ? 'none' : 'transform 0.15s ease-out'
           }}
@@ -488,7 +586,9 @@ interface MermaidDiagramProps {
   title?: string
 }
 
-export const MermaidDiagram = memo(function MermaidDiagram({ source }: MermaidDiagramProps): React.JSX.Element {
+export const MermaidDiagram = memo(function MermaidDiagram({
+  source
+}: MermaidDiagramProps): React.JSX.Element {
   const [tab, setTab] = useState<'rendered' | 'source'>('rendered')
   const [svgString, setSvgString] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -510,8 +610,18 @@ export const MermaidDiagram = memo(function MermaidDiagram({ source }: MermaidDi
       try {
         mermaid.initialize({
           startOnLoad: false,
-          securityLevel: 'strict',
+          // 'antiscript' (not 'strict') so HTML labels render: <br/> line breaks,
+          // <b>/<i>/<span style> inline styling. It still strips <script> tags and
+          // click handlers; the DOMPurify pass below is the second line of defence.
+          securityLevel: 'antiscript',
           theme: themeConfig.base,
+          // Render labels as HTML (foreignObject) instead of flat SVG <text>, so
+          // <br/> and inline markup in node/edge labels are honoured.
+          htmlLabels: true,
+          // LLM-generated diagrams can be large; lift the default caps (50000 chars
+          // / 500 edges) so big diagrams render instead of failing silently.
+          maxTextSize: 90000,
+          maxEdges: 2000,
           fontFamily: 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace',
           themeVariables: themeConfig.variables
         })
@@ -519,11 +629,8 @@ export const MermaidDiagram = memo(function MermaidDiagram({ source }: MermaidDi
         const { svg } = await mermaid.render(renderIdRef.current, source)
         if (cancelled) return
 
-        // Sanitize SVG output (belt-and-suspenders with securityLevel: 'strict')
-        const clean = DOMPurify.sanitize(svg, {
-          USE_PROFILES: { svg: true, svgFilters: true },
-          ADD_TAGS: ['foreignObject']
-        })
+        // Sanitize SVG output (belt-and-suspenders with securityLevel: 'antiscript').
+        const clean = sanitizeMermaidSvg(svg)
 
         setSvgString(clean)
         setError(null)
@@ -538,7 +645,9 @@ export const MermaidDiagram = memo(function MermaidDiagram({ source }: MermaidDi
     renderIdRef.current = nextMermaidId()
     render()
 
-    return () => { cancelled = true }
+    return () => {
+      cancelled = true
+    }
   }, [source, themeConfig])
 
   return (
@@ -565,12 +674,18 @@ export const MermaidDiagram = memo(function MermaidDiagram({ source }: MermaidDi
         svgString ? (
           <DiagramViewport svgString={svgString} />
         ) : error ? (
-          <div className="rounded-md border border-danger/30 p-3" style={{ background: 'var(--color-bg-primary)' }}>
+          <div
+            className="rounded-md border border-danger/30 p-3"
+            style={{ background: 'var(--color-bg-primary)' }}
+          >
             <p className="text-[12px] text-danger font-mono mb-2">Render error: {error}</p>
             <SourceView source={source} />
           </div>
         ) : (
-          <div className="rounded-md border border-border p-3 flex items-center justify-center h-20" style={{ background: 'var(--color-bg-primary)' }}>
+          <div
+            className="rounded-md border border-border p-3 flex items-center justify-center h-20"
+            style={{ background: 'var(--color-bg-primary)' }}
+          >
             <span className="text-[11px] text-text-muted">Rendering diagram...</span>
           </div>
         )

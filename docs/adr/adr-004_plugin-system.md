@@ -8,6 +8,7 @@
 ClaudeUI is an open-source desktop GUI for Claude Code sessions. Users have asked for extensibility — the ability to add custom integrations (messaging platforms, external triggers, custom services) without modifying the core codebase. Some extensions involve sensitive or niche functionality that shouldn't live in the open-source repo (e.g., enterprise messaging bridges, personal automation).
 
 The existing architecture already has clean service boundaries:
+
 - `SessionManager` — manages multiple Claude sessions by `routingId`
 - `AutomationManager` — cron/interval scheduling with headless SDK execution
 - `RemoteServer` — WebSocket server with auth, event replay, remote dispatch
@@ -65,14 +66,14 @@ export interface PluginContext {
   ipcMain: typeof Electron.ipcMain
 
   // --- SDK ---
-  sdkQuery: typeof sdkQuery      // Direct Claude Agent SDK access
+  sdkQuery: typeof sdkQuery // Direct Claude Agent SDK access
 
   // --- Plugin storage ---
-  dataDir: string                 // ~/.claude/ui/plugins/<id>/data/   (auto-created)
-  configDir: string               // ~/.claude/ui/plugins/<id>/        (plugin root)
+  dataDir: string // ~/.claude/ui/plugins/<id>/data/   (auto-created)
+  configDir: string // ~/.claude/ui/plugins/<id>/        (plugin root)
 
   // --- Logging ---
-  logger: Logger                  // Pre-configured with source = plugin id
+  logger: Logger // Pre-configured with source = plugin id
 
   // --- Event bus ---
   on(event: string, handler: (...args: unknown[]) => void): void
@@ -131,12 +132,12 @@ New file: `src/main/services/plugin-manager.ts`
 
 ```typescript
 class PluginManager {
-  private plugins: Map<string, { plugin: ClaudeUIPlugin, ctx: PluginContext }>
+  private plugins: Map<string, { plugin: ClaudeUIPlugin; ctx: PluginContext }>
 
   async loadAll(baseCtx: Omit<PluginContext, 'dataDir' | 'configDir' | 'logger'>): Promise<void>
   async deactivateAll(): Promise<void>
   getPlugin(id: string): ClaudeUIPlugin | undefined
-  listPlugins(): Array<{ id: string, name: string, active: boolean }>
+  listPlugins(): Array<{ id: string; name: string; active: boolean }>
 }
 ```
 
@@ -182,7 +183,7 @@ Plugins can register a debug panel by emitting structured events on a well-known
 // Plugin emits debug events
 ctx.window.webContents.send('plugin:debug-event', {
   pluginId: 'wecom-assistant',
-  type: 'message-received',          // or 'session-created', 'reply-sent', etc.
+  type: 'message-received', // or 'session-created', 'reply-sent', etc.
   timestamp: Date.now(),
   data: { from: 'wife', text: '下载三体' }
 })
@@ -193,6 +194,7 @@ The renderer can display these in a debug panel (future UI work). In the meantim
 #### 3. Debug Mode & Mock Services
 
 Plugins should support a `debug` flag in their config that enables:
+
 - Verbose logging (all message payloads, API calls, session events)
 - Mock mode for external services (e.g., fake WeCom connection that reads from a local file or stdin)
 - Dry-run mode for actions (log what would happen without actually calling Claude or WeCom)
@@ -202,6 +204,7 @@ This is plugin-specific, not enforced by the plugin system, but strongly recomme
 #### 4. Electron DevTools
 
 Since plugins run in the main process:
+
 - `console.log` in plugin code appears in the Electron main process console
 - Launch with `--inspect` to attach Node.js debugger (Chrome DevTools or VS Code)
 - `electron-vite dev` already supports this for development
@@ -209,6 +212,7 @@ Since plugins run in the main process:
 #### 5. Event Tracing
 
 The `PluginContext.emit()` / `on()` event bus should optionally log all events when a `CLAUDEUI_PLUGIN_TRACE=1` env var is set. This gives a full trace of:
+
 - Incoming messages from external services
 - Session lifecycle events
 - Outgoing responses

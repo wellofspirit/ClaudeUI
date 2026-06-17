@@ -1,17 +1,28 @@
 import { useState, useEffect, useMemo, useRef } from 'react'
-import type { Automation, AutomationSchedule, AutomationRun, ClaudePermissions } from '../../../../../shared/types'
+import type {
+  Automation,
+  AutomationSchedule,
+  AutomationRun,
+  ClaudePermissions
+} from '../../../../../shared/types'
 import type { DetailTab } from '../../../stores/automation-store'
 import {
-  PERMISSION_TEMPLATES, PERMISSION_MODES, isAutomationDirty,
-  type IntervalUnit, type StatusKind,
-  unitMultiplier, naturalUnit, computeNextRuns,
-  formatScheduleSummary, deriveStatus,
+  PERMISSION_TEMPLATES,
+  PERMISSION_MODES,
+  isAutomationDirty,
+  type IntervalUnit,
+  type StatusKind,
+  unitMultiplier,
+  naturalUnit,
+  computeNextRuns,
+  formatScheduleSummary,
+  deriveStatus
 } from './utils'
 import {
   ModelPicker,
   EffortPicker,
   ThinkingPicker,
-  type ModelDisplay,
+  type ModelDisplay
 } from '../../shared/InlinePickers'
 import {
   modelSupportsAdaptiveThinking,
@@ -22,7 +33,7 @@ import {
   modelResolveThinkingMode,
   modelResolveEffort,
   type EffortLevel,
-  type ThinkingMode,
+  type ThinkingMode
 } from '../../../../../shared/model-capabilities'
 
 export type ModelOption = ModelDisplay
@@ -52,8 +63,21 @@ export interface AutomationConfigViewProps {
 
 export function AutomationConfigView(props: AutomationConfigViewProps): React.JSX.Element {
   const {
-    automation, models, globalPerms, hasRunningRun, runs, detailTab, loadDirPerms,
-    onSave, onToggleEnabled, onDelete, onRunNow, onStopRun, onPickFolder, onSelectRun, onSetDetailTab,
+    automation,
+    models,
+    globalPerms,
+    hasRunningRun,
+    runs,
+    detailTab,
+    loadDirPerms,
+    onSave,
+    onToggleEnabled,
+    onDelete,
+    onRunNow,
+    onStopRun,
+    onPickFolder,
+    onSelectRun,
+    onSetDetailTab
   } = props
 
   // Form state
@@ -63,8 +87,12 @@ export function AutomationConfigView(props: AutomationConfigViewProps): React.JS
   const [cwd, setCwd] = useState(automation.cwd)
   const [schedule, setSchedule] = useState<AutomationSchedule>(automation.schedule)
   const [model, setModel] = useState(automation.model || '')
-  const [effort, setEffort] = useState<EffortLevel | ''>((automation.effort as EffortLevel | undefined) ?? '')
-  const [thinkingMode, setThinkingModeState] = useState<ThinkingMode | ''>(automation.thinkingMode ?? '')
+  const [effort, setEffort] = useState<EffortLevel | ''>(
+    (automation.effort as EffortLevel | undefined) ?? ''
+  )
+  const [thinkingMode, setThinkingModeState] = useState<ThinkingMode | ''>(
+    automation.thinkingMode ?? ''
+  )
   const [permissionMode, setPermissionMode] = useState(automation.permissionMode || 'auto')
   const [enabled, setEnabled] = useState(automation.enabled)
   const [allowRules, setAllowRules] = useState<string[]>(automation.permissions.allow)
@@ -80,28 +108,68 @@ export function AutomationConfigView(props: AutomationConfigViewProps): React.JS
     return { value: '', displayName: 'Default', shortName: 'Default' }
   }, [models, model])
 
-  const adaptiveSupported = useMemo(() => modelSupportsAdaptiveThinking(selectedModel), [selectedModel])
+  const adaptiveSupported = useMemo(
+    () => modelSupportsAdaptiveThinking(selectedModel),
+    [selectedModel]
+  )
   const effortSupported = useMemo(() => modelSupportsEffort(selectedModel), [selectedModel])
-  const allowedEffortLevels = useMemo(() => modelSupportedEffortLevels(selectedModel), [selectedModel])
+  const allowedEffortLevels = useMemo(
+    () => modelSupportedEffortLevels(selectedModel),
+    [selectedModel]
+  )
   const effectiveEffort = useMemo<EffortLevel>(
-    () => (effort || modelDefaultEffort(selectedModel)),
-    [effort, selectedModel],
+    () => effort || modelDefaultEffort(selectedModel),
+    [effort, selectedModel]
   )
   const effectiveThinking = useMemo<ThinkingMode>(
-    () => (thinkingMode || modelDefaultThinkingMode(selectedModel)),
-    [thinkingMode, selectedModel],
+    () => thinkingMode || modelDefaultThinkingMode(selectedModel),
+    [thinkingMode, selectedModel]
   )
 
   const isDirty = useMemo(
-    () => isAutomationDirty({ name, prompt, cwd, schedule, model, effort, thinkingMode, permissionMode, allowRules, denyRules }, automation),
-    [name, prompt, cwd, schedule, model, effort, thinkingMode, permissionMode, allowRules, denyRules, automation],
+    () =>
+      isAutomationDirty(
+        {
+          name,
+          prompt,
+          cwd,
+          schedule,
+          model,
+          effort,
+          thinkingMode,
+          permissionMode,
+          allowRules,
+          denyRules
+        },
+        automation
+      ),
+    [
+      name,
+      prompt,
+      cwd,
+      schedule,
+      model,
+      effort,
+      thinkingMode,
+      permissionMode,
+      allowRules,
+      denyRules,
+      automation
+    ]
   )
 
   useEffect(() => {
-    if (!cwd) { setDirPerms(null); return }
+    if (!cwd) {
+      setDirPerms(null)
+      return
+    }
     let cancelled = false
-    loadDirPerms(cwd).then((perms) => { if (!cancelled) setDirPerms(perms) })
-    return () => { cancelled = true }
+    loadDirPerms(cwd).then((perms) => {
+      if (!cancelled) setDirPerms(perms)
+    })
+    return () => {
+      cancelled = true
+    }
   }, [cwd, loadDirPerms])
 
   const handleSave = (): void => {
@@ -116,7 +184,7 @@ export function AutomationConfigView(props: AutomationConfigViewProps): React.JS
       thinkingMode: thinkingMode || undefined,
       permissionMode: permissionMode as 'default' | 'auto',
       enabled,
-      permissions: { allow: allowRules, deny: denyRules },
+      permissions: { allow: allowRules, deny: denyRules }
     }
     onSave(updated)
   }
@@ -158,7 +226,8 @@ export function AutomationConfigView(props: AutomationConfigViewProps): React.JS
     setNewRule('')
   }
 
-  const removeAllowRule = (idx: number): void => setAllowRules(allowRules.filter((_, i) => i !== idx))
+  const removeAllowRule = (idx: number): void =>
+    setAllowRules(allowRules.filter((_, i) => i !== idx))
   const removeDenyRule = (idx: number): void => setDenyRules(denyRules.filter((_, i) => i !== idx))
 
   const commitName = (): void => {
@@ -167,7 +236,11 @@ export function AutomationConfigView(props: AutomationConfigViewProps): React.JS
   }
 
   // ── Derived header values ────────────────────────────────────────
-  const statusKind = deriveStatus({ enabled, hasRunningRun, lastRunStatus: automation.lastRunStatus })
+  const statusKind = deriveStatus({
+    enabled,
+    hasRunningRun,
+    lastRunStatus: automation.lastRunStatus
+  })
   const scheduleSummary = formatScheduleSummary(schedule)
   const lastRunLine = formatLastRunLine(automation, hasRunningRun)
 
@@ -186,7 +259,10 @@ export function AutomationConfigView(props: AutomationConfigViewProps): React.JS
                   onBlur={commitName}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter') commitName()
-                    if (e.key === 'Escape') { setName(automation.name); setNameEditing(false) }
+                    if (e.key === 'Escape') {
+                      setName(automation.name)
+                      setNameEditing(false)
+                    }
                   }}
                   className="text-[15px] font-semibold tracking-tight bg-bg-tertiary border border-border/40 rounded px-1.5 py-0.5 text-text-primary outline-none focus:border-text-accent min-w-0 flex-1"
                 />
@@ -204,7 +280,14 @@ export function AutomationConfigView(props: AutomationConfigViewProps): React.JS
                     className="opacity-0 group-hover:opacity-100 transition-opacity text-text-muted hover:text-text-secondary shrink-0"
                     title="Rename"
                   >
-                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <svg
+                      width="12"
+                      height="12"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                    >
                       <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
                     </svg>
                   </button>
@@ -215,7 +298,12 @@ export function AutomationConfigView(props: AutomationConfigViewProps): React.JS
               <StatusInline status={statusKind} />
               <span className="text-border-bright">·</span>
               <span>{scheduleSummary}</span>
-              {lastRunLine && <><span className="text-border-bright">·</span><span>{lastRunLine}</span></>}
+              {lastRunLine && (
+                <>
+                  <span className="text-border-bright">·</span>
+                  <span>{lastRunLine}</span>
+                </>
+              )}
             </div>
           </div>
 
@@ -237,10 +325,14 @@ export function AutomationConfigView(props: AutomationConfigViewProps): React.JS
               }`}
             >
               {hasRunningRun ? (
-                <><span className="text-[10px] leading-none">■</span>Stop</>
+                <>
+                  <span className="text-[10px] leading-none">■</span>Stop
+                </>
               ) : (
                 <>
-                  <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21" /></svg>
+                  <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor">
+                    <polygon points="5 3 19 12 5 21" />
+                  </svg>
                   Run now
                 </>
               )}
@@ -252,13 +344,21 @@ export function AutomationConfigView(props: AutomationConfigViewProps): React.JS
       {/* Tabs */}
       <div className="px-6 border-b border-border/30 shrink-0">
         <div className="flex gap-1 pt-2.5">
-          <TabButton active={detailTab === 'configure'} onClick={() => onSetDetailTab('configure')}>Configure</TabButton>
-          <TabButton active={detailTab === 'runs'} onClick={() => onSetDetailTab('runs')}>
-            Runs{runs && runs.length > 0 && <span className="ml-1.5 text-text-muted">{runs.length}</span>}
+          <TabButton active={detailTab === 'configure'} onClick={() => onSetDetailTab('configure')}>
+            Configure
           </TabButton>
-          <TabButton active={detailTab === 'permissions'} onClick={() => onSetDetailTab('permissions')}>
+          <TabButton active={detailTab === 'runs'} onClick={() => onSetDetailTab('runs')}>
+            Runs
+            {runs && runs.length > 0 && (
+              <span className="ml-1.5 text-text-muted">{runs.length}</span>
+            )}
+          </TabButton>
+          <TabButton
+            active={detailTab === 'permissions'}
+            onClick={() => onSetDetailTab('permissions')}
+          >
             Permissions
-            {(allowRules.length + denyRules.length) > 0 && (
+            {allowRules.length + denyRules.length > 0 && (
               <span className="ml-1.5 text-text-muted">{allowRules.length + denyRules.length}</span>
             )}
           </TabButton>
@@ -269,33 +369,57 @@ export function AutomationConfigView(props: AutomationConfigViewProps): React.JS
       <div className="flex-1 min-h-0 overflow-y-auto">
         {detailTab === 'configure' && (
           <ConfigurePanel
-            prompt={prompt} setPrompt={setPrompt}
-            schedule={schedule} setSchedule={setSchedule}
+            prompt={prompt}
+            setPrompt={setPrompt}
+            schedule={schedule}
+            setSchedule={setSchedule}
             lastRunAt={automation.lastRunAt}
-            cwd={cwd} setCwd={setCwd} onBrowseFolder={handlePickFolder}
-            models={models} selectedModel={selectedModel} onSelectModel={handleSelectModel}
-            thinkingMode={effectiveThinking} onSelectThinking={(m) => setThinkingModeState(m)} adaptiveSupported={adaptiveSupported}
-            effort={effectiveEffort} onSelectEffort={(l) => setEffort(l)} effortSupported={effortSupported} allowedEffortLevels={allowedEffortLevels}
-            permissionMode={permissionMode} setPermissionMode={setPermissionMode}
-            isDirty={isDirty} onSave={handleSave} onDelete={onDelete}
+            cwd={cwd}
+            setCwd={setCwd}
+            onBrowseFolder={handlePickFolder}
+            models={models}
+            selectedModel={selectedModel}
+            onSelectModel={handleSelectModel}
+            thinkingMode={effectiveThinking}
+            onSelectThinking={(m) => setThinkingModeState(m)}
+            adaptiveSupported={adaptiveSupported}
+            effort={effectiveEffort}
+            onSelectEffort={(l) => setEffort(l)}
+            effortSupported={effortSupported}
+            allowedEffortLevels={allowedEffortLevels}
+            permissionMode={permissionMode}
+            setPermissionMode={setPermissionMode}
+            isDirty={isDirty}
+            onSave={handleSave}
+            onDelete={onDelete}
           />
         )}
         {detailTab === 'runs' && (
-          <RunsPanel runs={runs} onSelectRun={onSelectRun} onRunNow={onRunNow} hasRunningRun={hasRunningRun} />
+          <RunsPanel
+            runs={runs}
+            onSelectRun={onSelectRun}
+            onRunNow={onRunNow}
+            hasRunningRun={hasRunningRun}
+          />
         )}
         {detailTab === 'permissions' && (
           <PermissionsPanel
-            allowRules={allowRules} denyRules={denyRules}
-            onRemoveAllow={removeAllowRule} onRemoveDeny={removeDenyRule}
-            newRule={newRule} setNewRule={setNewRule}
-            ruleType={ruleType} setRuleType={setRuleType}
+            allowRules={allowRules}
+            denyRules={denyRules}
+            onRemoveAllow={removeAllowRule}
+            onRemoveDeny={removeDenyRule}
+            newRule={newRule}
+            setNewRule={setNewRule}
+            ruleType={ruleType}
+            setRuleType={setRuleType}
             onAddRule={addRule}
             onAddTemplate={(t) => setAllowRules([...allowRules, t])}
             globalPerms={globalPerms}
             dirPerms={dirPerms}
             permissionMode={permissionMode}
             setPermissionMode={setPermissionMode}
-            isDirty={isDirty} onSave={handleSave}
+            isDirty={isDirty}
+            onSave={handleSave}
           />
         )}
       </div>
@@ -306,23 +430,56 @@ export function AutomationConfigView(props: AutomationConfigViewProps): React.JS
 // ── Configure tab content ──────────────────────────────────────────
 
 interface ConfigurePanelProps {
-  prompt: string; setPrompt: (v: string) => void
-  schedule: AutomationSchedule; setSchedule: (s: AutomationSchedule) => void
+  prompt: string
+  setPrompt: (v: string) => void
+  schedule: AutomationSchedule
+  setSchedule: (s: AutomationSchedule) => void
   lastRunAt: number | null
-  cwd: string; setCwd: (v: string) => void; onBrowseFolder: () => void
-  models: ModelOption[]; selectedModel: ModelDisplay; onSelectModel: (v: string) => void
-  thinkingMode: ThinkingMode; onSelectThinking: (m: ThinkingMode) => void; adaptiveSupported: boolean
-  effort: EffortLevel; onSelectEffort: (l: EffortLevel) => void; effortSupported: boolean; allowedEffortLevels: EffortLevel[]
-  permissionMode: string; setPermissionMode: (v: 'default' | 'auto') => void
-  isDirty: boolean; onSave: () => void; onDelete: () => void
+  cwd: string
+  setCwd: (v: string) => void
+  onBrowseFolder: () => void
+  models: ModelOption[]
+  selectedModel: ModelDisplay
+  onSelectModel: (v: string) => void
+  thinkingMode: ThinkingMode
+  onSelectThinking: (m: ThinkingMode) => void
+  adaptiveSupported: boolean
+  effort: EffortLevel
+  onSelectEffort: (l: EffortLevel) => void
+  effortSupported: boolean
+  allowedEffortLevels: EffortLevel[]
+  permissionMode: string
+  setPermissionMode: (v: 'default' | 'auto') => void
+  isDirty: boolean
+  onSave: () => void
+  onDelete: () => void
 }
 
 function ConfigurePanel(p: ConfigurePanelProps): React.JSX.Element {
   const {
-    prompt, setPrompt, schedule, setSchedule, lastRunAt, cwd, setCwd, onBrowseFolder,
-    models, selectedModel, onSelectModel, thinkingMode, onSelectThinking, adaptiveSupported,
-    effort, onSelectEffort, effortSupported, allowedEffortLevels,
-    permissionMode, setPermissionMode, isDirty, onSave, onDelete,
+    prompt,
+    setPrompt,
+    schedule,
+    setSchedule,
+    lastRunAt,
+    cwd,
+    setCwd,
+    onBrowseFolder,
+    models,
+    selectedModel,
+    onSelectModel,
+    thinkingMode,
+    onSelectThinking,
+    adaptiveSupported,
+    effort,
+    onSelectEffort,
+    effortSupported,
+    allowedEffortLevels,
+    permissionMode,
+    setPermissionMode,
+    isDirty,
+    onSave,
+    onDelete
   } = p
 
   const nextRuns = useMemo(() => computeNextRuns(schedule, lastRunAt, 4), [schedule, lastRunAt])
@@ -330,11 +487,12 @@ function ConfigurePanel(p: ConfigurePanelProps): React.JSX.Element {
   // Sticky unit for the interval editor — if we derived it every render, typing
   // "60" (minutes) would snap to "1 hour" and you couldn't edit freely.
   const [intervalUnit, setIntervalUnit] = useState<IntervalUnit>(() =>
-    schedule.type === 'interval' ? naturalUnit(schedule.intervalMs ?? 900_000) : 'minutes',
+    schedule.type === 'interval' ? naturalUnit(schedule.intervalMs ?? 900_000) : 'minutes'
   )
-  const intervalValue = schedule.type === 'interval'
-    ? Math.max(1, Math.round((schedule.intervalMs ?? 900_000) / unitMultiplier(intervalUnit)))
-    : 1
+  const intervalValue =
+    schedule.type === 'interval'
+      ? Math.max(1, Math.round((schedule.intervalMs ?? 900_000) / unitMultiplier(intervalUnit)))
+      : 1
   const setIntervalValue = (n: number): void => {
     const clamped = Math.max(1, Math.floor(n) || 1)
     setSchedule({ type: 'interval', intervalMs: clamped * unitMultiplier(intervalUnit) })
@@ -350,7 +508,9 @@ function ConfigurePanel(p: ConfigurePanelProps): React.JSX.Element {
       <section className="px-6 pt-5 pb-6">
         <div className="flex items-baseline justify-between mb-2.5">
           <SectionLabel>Prompt</SectionLabel>
-          <span className="text-[10px] text-text-muted font-mono">{prompt.length.toLocaleString()} chars</span>
+          <span className="text-[10px] text-text-muted font-mono">
+            {prompt.length.toLocaleString()} chars
+          </span>
         </div>
         <textarea
           value={prompt}
@@ -368,8 +528,25 @@ function ConfigurePanel(p: ConfigurePanelProps): React.JSX.Element {
         <InspectorRow label="Schedule">
           <div className="flex items-center gap-2 mb-2">
             <div className="flex gap-0.5 p-0.5 rounded-md border border-border/40 bg-bg-input shrink-0">
-              <SegButton active={schedule.type === 'interval'} onClick={() => setSchedule({ type: 'interval', intervalMs: schedule.intervalMs ?? 15 * 60_000 })}>Interval</SegButton>
-              <SegButton active={schedule.type === 'cron'} onClick={() => setSchedule({ type: 'cron', cronExpression: schedule.cronExpression ?? '*/15 * * * *' })}>Cron</SegButton>
+              <SegButton
+                active={schedule.type === 'interval'}
+                onClick={() =>
+                  setSchedule({ type: 'interval', intervalMs: schedule.intervalMs ?? 15 * 60_000 })
+                }
+              >
+                Interval
+              </SegButton>
+              <SegButton
+                active={schedule.type === 'cron'}
+                onClick={() =>
+                  setSchedule({
+                    type: 'cron',
+                    cronExpression: schedule.cronExpression ?? '*/15 * * * *'
+                  })
+                }
+              >
+                Cron
+              </SegButton>
             </div>
             {schedule.type === 'cron' ? (
               <input
@@ -396,7 +573,10 @@ function ConfigurePanel(p: ConfigurePanelProps): React.JSX.Element {
             )}
           </div>
 
-          <NextRunsRow runs={nextRuns} invalid={schedule.type === 'cron' && !!schedule.cronExpression && nextRuns.length === 0} />
+          <NextRunsRow
+            runs={nextRuns}
+            invalid={schedule.type === 'cron' && !!schedule.cronExpression && nextRuns.length === 0}
+          />
         </InspectorRow>
       </section>
 
@@ -406,7 +586,15 @@ function ConfigurePanel(p: ConfigurePanelProps): React.JSX.Element {
 
         <InspectorRow label="Directory">
           <div className="flex items-center gap-2 bg-bg-tertiary border border-border/40 rounded-md px-2.5 py-1 focus-within:border-text-accent/60 transition-colors">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-text-muted shrink-0">
+            <svg
+              width="13"
+              height="13"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              className="text-text-muted shrink-0"
+            >
               <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
             </svg>
             <input
@@ -431,9 +619,22 @@ function ConfigurePanel(p: ConfigurePanelProps): React.JSX.Element {
 
         <InspectorRow label="Model">
           <div className="inline-flex items-center flex-wrap gap-0.5">
-            <ModelPicker models={models} selectedModel={selectedModel} onSelectModel={onSelectModel} />
-            <ThinkingPicker thinkingMode={thinkingMode} adaptiveSupported={adaptiveSupported} onSelectThinking={onSelectThinking} />
-            <EffortPicker effort={effort} allowedEffortLevels={allowedEffortLevels} supported={effortSupported} onSelectEffort={onSelectEffort} />
+            <ModelPicker
+              models={models}
+              selectedModel={selectedModel}
+              onSelectModel={onSelectModel}
+            />
+            <ThinkingPicker
+              thinkingMode={thinkingMode}
+              adaptiveSupported={adaptiveSupported}
+              onSelectThinking={onSelectThinking}
+            />
+            <EffortPicker
+              effort={effort}
+              allowedEffortLevels={allowedEffortLevels}
+              supported={effortSupported}
+              onSelectEffort={onSelectEffort}
+            />
           </div>
         </InspectorRow>
 
@@ -468,7 +669,16 @@ function ConfigurePanel(p: ConfigurePanelProps): React.JSX.Element {
               : 'bg-bg-tertiary border-border/40 text-text-muted cursor-not-allowed opacity-50'
           }`}
         >
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <svg
+            width="12"
+            height="12"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
             <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" />
             <polyline points="17 21 17 13 7 13 7 21" />
             <polyline points="7 3 7 8 15 8" />
@@ -489,8 +699,16 @@ function ConfigurePanel(p: ConfigurePanelProps): React.JSX.Element {
 // ── Runs tab content ──────────────────────────────────────────
 
 function RunsPanel({
-  runs, onSelectRun, onRunNow, hasRunningRun,
-}: { runs: AutomationRun[] | undefined; onSelectRun: (id: string) => void; onRunNow: () => void; hasRunningRun: boolean }): React.JSX.Element {
+  runs,
+  onSelectRun,
+  onRunNow,
+  hasRunningRun
+}: {
+  runs: AutomationRun[] | undefined
+  onSelectRun: (id: string) => void
+  onRunNow: () => void
+  hasRunningRun: boolean
+}): React.JSX.Element {
   if (!runs) {
     return <div className="p-8 text-center text-xs text-text-muted">Loading runs…</div>
   }
@@ -498,13 +716,17 @@ function RunsPanel({
     return (
       <div className="p-10 text-center">
         <div className="text-sm text-text-secondary mb-1">No runs yet</div>
-        <div className="text-xs text-text-muted mb-4">Run this automation now, or wait for its next scheduled run.</div>
+        <div className="text-xs text-text-muted mb-4">
+          Run this automation now, or wait for its next scheduled run.
+        </div>
         <button
           onClick={onRunNow}
           disabled={hasRunningRun}
           className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-md border bg-green-500/10 border-green-500/30 text-green-400 hover:bg-green-500/20 disabled:opacity-50 transition-colors"
         >
-          <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21" /></svg>
+          <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor">
+            <polygon points="5 3 19 12 5 21" />
+          </svg>
           Run now
         </button>
       </div>
@@ -522,33 +744,50 @@ function RunsPanel({
 
 function RunRow({ run, onClick }: { run: AutomationRun; onClick: () => void }): React.JSX.Element {
   const time = new Date(run.startedAt).toLocaleString(undefined, {
-    month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit'
   })
   const duration = run.finishedAt ? formatMs(run.finishedAt - run.startedAt) : 'running'
   const cost = run.totalCostUsd > 0 ? `$${run.totalCostUsd.toFixed(4)}` : null
   const statusConfig =
-    run.status === 'success' ? { bg: 'bg-green-500/15', fg: 'text-green-400', label: '✓' } :
-    run.status === 'error' ? { bg: 'bg-red-500/15', fg: 'text-red-400', label: '✕' } :
-    { bg: 'bg-blue-500/15', fg: 'text-blue-400', label: '●' }
+    run.status === 'success'
+      ? { bg: 'bg-green-500/15', fg: 'text-green-400', label: '✓' }
+      : run.status === 'error'
+        ? { bg: 'bg-red-500/15', fg: 'text-red-400', label: '✕' }
+        : { bg: 'bg-blue-500/15', fg: 'text-blue-400', label: '●' }
 
   return (
     <button
       onClick={onClick}
       className="w-full text-left px-6 py-2.5 flex items-center gap-3 hover:bg-bg-hover/50 transition-colors group"
     >
-      <span className={`w-5 h-5 rounded-md flex items-center justify-center text-[11px] font-semibold ${statusConfig.bg} ${statusConfig.fg} shrink-0`}>
+      <span
+        className={`w-5 h-5 rounded-md flex items-center justify-center text-[11px] font-semibold ${statusConfig.bg} ${statusConfig.fg} shrink-0`}
+      >
         {statusConfig.label}
       </span>
       <span className="text-[13px] text-text-primary shrink-0 w-[130px]">{time}</span>
       <span className="text-[12px] text-text-muted font-mono shrink-0 w-[70px]">{duration}</span>
       {cost && <span className="text-[12px] text-text-muted font-mono shrink-0">{cost}</span>}
       {run.resultSummary && (
-        <span className="text-[12px] text-text-muted truncate flex-1 ml-2">{run.resultSummary}</span>
+        <span className="text-[12px] text-text-muted truncate flex-1 ml-2">
+          {run.resultSummary}
+        </span>
       )}
       {run.error && (
         <span className="text-[12px] text-red-400/80 truncate flex-1 ml-2">{run.error}</span>
       )}
-      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-text-muted opacity-0 group-hover:opacity-100 transition-opacity shrink-0 ml-auto">
+      <svg
+        width="12"
+        height="12"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+        className="text-text-muted opacity-0 group-hover:opacity-100 transition-opacity shrink-0 ml-auto"
+      >
         <polyline points="9 18 15 12 9 6" />
       </svg>
     </button>
@@ -558,24 +797,42 @@ function RunRow({ run, onClick }: { run: AutomationRun; onClick: () => void }): 
 // ── Permissions tab content ──────────────────────────────────────
 
 interface PermissionsPanelProps {
-  allowRules: string[]; denyRules: string[]
-  onRemoveAllow: (idx: number) => void; onRemoveDeny: (idx: number) => void
-  newRule: string; setNewRule: (v: string) => void
-  ruleType: 'allow' | 'deny'; setRuleType: (v: 'allow' | 'deny') => void
-  onAddRule: () => void; onAddTemplate: (t: string) => void
+  allowRules: string[]
+  denyRules: string[]
+  onRemoveAllow: (idx: number) => void
+  onRemoveDeny: (idx: number) => void
+  newRule: string
+  setNewRule: (v: string) => void
+  ruleType: 'allow' | 'deny'
+  setRuleType: (v: 'allow' | 'deny') => void
+  onAddRule: () => void
+  onAddTemplate: (t: string) => void
   globalPerms: InheritedPerms | null
   dirPerms: InheritedPerms | null
   permissionMode: string
   setPermissionMode: (v: 'default' | 'auto') => void
-  isDirty: boolean; onSave: () => void
+  isDirty: boolean
+  onSave: () => void
 }
 
 function PermissionsPanel(p: PermissionsPanelProps): React.JSX.Element {
   const {
-    allowRules, denyRules, onRemoveAllow, onRemoveDeny,
-    newRule, setNewRule, ruleType, setRuleType, onAddRule, onAddTemplate,
-    globalPerms, dirPerms, permissionMode, setPermissionMode,
-    isDirty, onSave,
+    allowRules,
+    denyRules,
+    onRemoveAllow,
+    onRemoveDeny,
+    newRule,
+    setNewRule,
+    ruleType,
+    setRuleType,
+    onAddRule,
+    onAddTemplate,
+    globalPerms,
+    dirPerms,
+    permissionMode,
+    setPermissionMode,
+    isDirty,
+    onSave
   } = p
 
   return (
@@ -612,9 +869,13 @@ function PermissionsPanel(p: PermissionsPanelProps): React.JSX.Element {
         <SectionHeader icon="check">Allow</SectionHeader>
         <div className="flex flex-wrap gap-1.5 mb-3">
           {allowRules.map((rule, idx) => (
-            <Pill key={idx} variant="allow" onRemove={() => onRemoveAllow(idx)}>{rule}</Pill>
+            <Pill key={idx} variant="allow" onRemove={() => onRemoveAllow(idx)}>
+              {rule}
+            </Pill>
           ))}
-          {allowRules.length === 0 && <span className="text-xs text-text-muted italic">No rules set</span>}
+          {allowRules.length === 0 && (
+            <span className="text-xs text-text-muted italic">No rules set</span>
+          )}
         </div>
       </section>
 
@@ -622,9 +883,13 @@ function PermissionsPanel(p: PermissionsPanelProps): React.JSX.Element {
         <SectionHeader icon="x">Deny</SectionHeader>
         <div className="flex flex-wrap gap-1.5 mb-3">
           {denyRules.map((rule, idx) => (
-            <Pill key={idx} variant="deny" onRemove={() => onRemoveDeny(idx)}>{rule}</Pill>
+            <Pill key={idx} variant="deny" onRemove={() => onRemoveDeny(idx)}>
+              {rule}
+            </Pill>
           ))}
-          {denyRules.length === 0 && <span className="text-xs text-text-muted italic">No rules set</span>}
+          {denyRules.length === 0 && (
+            <span className="text-xs text-text-muted italic">No rules set</span>
+          )}
         </div>
       </section>
 
@@ -648,7 +913,9 @@ function PermissionsPanel(p: PermissionsPanelProps): React.JSX.Element {
             list="permission-templates"
           />
           <datalist id="permission-templates">
-            {PERMISSION_TEMPLATES.map((t) => <option key={t} value={t} />)}
+            {PERMISSION_TEMPLATES.map((t) => (
+              <option key={t} value={t} />
+            ))}
           </datalist>
           <button
             onClick={onAddRule}
@@ -697,10 +964,20 @@ function PermissionsPanel(p: PermissionsPanelProps): React.JSX.Element {
 // ── Shared helpers ────────────────────────────────────────────────
 
 function SectionLabel({ children }: { children: React.ReactNode }): React.JSX.Element {
-  return <span className="text-[11px] uppercase tracking-wider text-text-muted font-semibold">{children}</span>
+  return (
+    <span className="text-[11px] uppercase tracking-wider text-text-muted font-semibold">
+      {children}
+    </span>
+  )
 }
 
-function SectionHeader({ icon, children }: { icon: 'clock' | 'folder' | 'bolt' | 'shield' | 'link' | 'check' | 'x' | 'plus'; children: React.ReactNode }): React.JSX.Element {
+function SectionHeader({
+  icon,
+  children
+}: {
+  icon: 'clock' | 'folder' | 'bolt' | 'shield' | 'link' | 'check' | 'x' | 'plus'
+  children: React.ReactNode
+}): React.JSX.Element {
   return (
     <div className="flex items-center gap-2 mb-4">
       <SectionIcon name={icon} />
@@ -711,23 +988,61 @@ function SectionHeader({ icon, children }: { icon: 'clock' | 'folder' | 'bolt' |
 
 function SectionIcon({ name }: { name: string }): React.JSX.Element {
   const paths: Record<string, React.ReactNode> = {
-    clock: <><circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" /></>,
-    folder: <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />,
+    clock: (
+      <>
+        <circle cx="12" cy="12" r="10" />
+        <polyline points="12 6 12 12 16 14" />
+      </>
+    ),
+    folder: (
+      <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+    ),
     bolt: <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />,
     shield: <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />,
-    link: <><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.72" /><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" /></>,
+    link: (
+      <>
+        <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.72" />
+        <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
+      </>
+    ),
     check: <polyline points="20 6 9 17 4 12" />,
-    x: <><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></>,
-    plus: <><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></>,
+    x: (
+      <>
+        <line x1="18" y1="6" x2="6" y2="18" />
+        <line x1="6" y1="6" x2="18" y2="18" />
+      </>
+    ),
+    plus: (
+      <>
+        <line x1="12" y1="5" x2="12" y2="19" />
+        <line x1="5" y1="12" x2="19" y2="12" />
+      </>
+    )
   }
   return (
-    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-text-muted">
+    <svg
+      width="12"
+      height="12"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className="text-text-muted"
+    >
       {paths[name]}
     </svg>
   )
 }
 
-function InspectorRow({ label, children }: { label: string; children: React.ReactNode }): React.JSX.Element {
+function InspectorRow({
+  label,
+  children
+}: {
+  label: string
+  children: React.ReactNode
+}): React.JSX.Element {
   return (
     <div className="flex items-start gap-5 mb-3 last:mb-0">
       <label className="text-[13px] text-text-secondary pt-1.5 w-24 shrink-0">{label}</label>
@@ -736,7 +1051,15 @@ function InspectorRow({ label, children }: { label: string; children: React.Reac
   )
 }
 
-function TabButton({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }): React.JSX.Element {
+function TabButton({
+  active,
+  onClick,
+  children
+}: {
+  active: boolean
+  onClick: () => void
+  children: React.ReactNode
+}): React.JSX.Element {
   return (
     <button
       onClick={onClick}
@@ -749,7 +1072,15 @@ function TabButton({ active, onClick, children }: { active: boolean; onClick: ()
   )
 }
 
-function SegButton({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }): React.JSX.Element {
+function SegButton({
+  active,
+  onClick,
+  children
+}: {
+  active: boolean
+  onClick: () => void
+  children: React.ReactNode
+}): React.JSX.Element {
   return (
     <button
       onClick={onClick}
@@ -762,7 +1093,13 @@ function SegButton({ active, onClick, children }: { active: boolean; onClick: ()
   )
 }
 
-function UnitDropdown({ value, onChange }: { value: IntervalUnit; onChange: (u: IntervalUnit) => void }): React.JSX.Element {
+function UnitDropdown({
+  value,
+  onChange
+}: {
+  value: IntervalUnit
+  onChange: (u: IntervalUnit) => void
+}): React.JSX.Element {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
 
@@ -778,7 +1115,7 @@ function UnitDropdown({ value, onChange }: { value: IntervalUnit; onChange: (u: 
   const options: Array<{ value: IntervalUnit; label: string }> = [
     { value: 'minutes', label: 'min' },
     { value: 'hours', label: 'hr' },
-    { value: 'days', label: 'day' },
+    { value: 'days', label: 'day' }
   ]
   const current = options.find((o) => o.value === value)!
 
@@ -790,7 +1127,17 @@ function UnitDropdown({ value, onChange }: { value: IntervalUnit; onChange: (u: 
         className="flex items-center gap-1.5 pl-2.5 pr-2 py-1 text-[13px] text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-colors cursor-pointer outline-none rounded-r-md"
       >
         <span>{current.label}</span>
-        <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className={`text-text-muted transition-transform ${open ? 'rotate-180' : ''}`}>
+        <svg
+          width="9"
+          height="9"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2.5"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          className={`text-text-muted transition-transform ${open ? 'rotate-180' : ''}`}
+        >
           <polyline points="6 9 12 15 18 9" />
         </svg>
       </button>
@@ -800,9 +1147,14 @@ function UnitDropdown({ value, onChange }: { value: IntervalUnit; onChange: (u: 
             <button
               key={opt.value}
               type="button"
-              onClick={() => { onChange(opt.value); setOpen(false) }}
+              onClick={() => {
+                onChange(opt.value)
+                setOpen(false)
+              }}
               className={`w-full flex items-center px-3 h-8 text-[12px] transition-colors text-left ${
-                value === opt.value ? 'bg-bg-hover text-text-primary' : 'text-text-secondary hover:bg-bg-hover/60'
+                value === opt.value
+                  ? 'bg-bg-hover text-text-primary'
+                  : 'text-text-secondary hover:bg-bg-hover/60'
               }`}
             >
               {opt.label}
@@ -816,7 +1168,9 @@ function UnitDropdown({ value, onChange }: { value: IntervalUnit; onChange: (u: 
 
 function Toggle({ on }: { on: boolean }): React.JSX.Element {
   return (
-    <span className={`relative inline-block w-7 h-4 rounded-full transition-colors ${on ? 'bg-green-500' : 'bg-gray-600'}`}>
+    <span
+      className={`relative inline-block w-7 h-4 rounded-full transition-colors ${on ? 'bg-green-500' : 'bg-gray-600'}`}
+    >
       <span
         className="absolute top-0.5 left-0.5 w-3 h-3 bg-white rounded-full transition-transform"
         style={{ transform: on ? 'translateX(12px)' : 'translateX(0)' }}
@@ -827,10 +1181,14 @@ function Toggle({ on }: { on: boolean }): React.JSX.Element {
 
 function StatusInline({ status }: { status: StatusKind }): React.JSX.Element {
   const cfg = {
-    running: { label: 'running', text: 'text-green-400', dot: 'bg-green-400 ring-2 ring-green-400/20' },
+    running: {
+      label: 'running',
+      text: 'text-green-400',
+      dot: 'bg-green-400 ring-2 ring-green-400/20'
+    },
     active: { label: 'active', text: 'text-green-400/90', dot: 'bg-green-400' },
     disabled: { label: 'disabled', text: 'text-text-muted', dot: 'bg-gray-500' },
-    failed: { label: 'failed', text: 'text-red-400', dot: 'bg-red-400' },
+    failed: { label: 'failed', text: 'text-red-400', dot: 'bg-red-400' }
   }[status]
   return (
     <span className="inline-flex items-center gap-1.5">
@@ -840,26 +1198,54 @@ function StatusInline({ status }: { status: StatusKind }): React.JSX.Element {
   )
 }
 
-function Pill({ variant, onRemove, children }: { variant: 'allow' | 'deny'; onRemove: () => void; children: React.ReactNode }): React.JSX.Element {
-  const cls = variant === 'allow'
-    ? 'bg-green-500/10 border-green-500/20 text-green-400'
-    : 'bg-red-500/10 border-red-500/20 text-red-400'
+function Pill({
+  variant,
+  onRemove,
+  children
+}: {
+  variant: 'allow' | 'deny'
+  onRemove: () => void
+  children: React.ReactNode
+}): React.JSX.Element {
+  const cls =
+    variant === 'allow'
+      ? 'bg-green-500/10 border-green-500/20 text-green-400'
+      : 'bg-red-500/10 border-red-500/20 text-red-400'
   return (
-    <span className={`inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-mono rounded-full border ${cls}`}>
+    <span
+      className={`inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-mono rounded-full border ${cls}`}
+    >
       {children}
-      <button onClick={onRemove} className="hover:text-text-primary ml-0.5 -mr-1 px-1" aria-label="Remove">&times;</button>
+      <button
+        onClick={onRemove}
+        className="hover:text-text-primary ml-0.5 -mr-1 px-1"
+        aria-label="Remove"
+      >
+        &times;
+      </button>
     </span>
   )
 }
 
-function InheritedBlock({ label, perms }: { label: string; perms: InheritedPerms }): React.JSX.Element {
+function InheritedBlock({
+  label,
+  perms
+}: {
+  label: string
+  perms: InheritedPerms
+}): React.JSX.Element {
   return (
     <div className="bg-bg-tertiary/40 rounded-md px-3 py-2 space-y-1.5">
-      <span className="text-[10px] text-text-muted uppercase font-semibold tracking-wider">{label}</span>
+      <span className="text-[10px] text-text-muted uppercase font-semibold tracking-wider">
+        {label}
+      </span>
       {perms.allow.length > 0 && (
         <div className="flex flex-wrap gap-1">
           {perms.allow.map((rule, idx) => (
-            <span key={idx} className="inline-flex items-center px-2 py-0.5 text-[10px] font-mono rounded-full border bg-green-500/5 border-green-500/15 text-green-400/70">
+            <span
+              key={idx}
+              className="inline-flex items-center px-2 py-0.5 text-[10px] font-mono rounded-full border bg-green-500/5 border-green-500/15 text-green-400/70"
+            >
               {rule}
             </span>
           ))}
@@ -868,7 +1254,10 @@ function InheritedBlock({ label, perms }: { label: string; perms: InheritedPerms
       {perms.deny.length > 0 && (
         <div className="flex flex-wrap gap-1">
           {perms.deny.map((rule, idx) => (
-            <span key={idx} className="inline-flex items-center px-2 py-0.5 text-[10px] font-mono rounded-full border bg-red-500/5 border-red-500/15 text-red-400/70">
+            <span
+              key={idx}
+              className="inline-flex items-center px-2 py-0.5 text-[10px] font-mono rounded-full border bg-red-500/5 border-red-500/15 text-red-400/70"
+            >
               {rule}
             </span>
           ))}
@@ -911,14 +1300,27 @@ function formatUpcoming(d: Date): string {
   return d.toLocaleString(undefined, opts)
 }
 
-function NextRunsRow({ runs, invalid }: { runs: Date[]; invalid: boolean }): React.JSX.Element | null {
+function NextRunsRow({
+  runs,
+  invalid
+}: {
+  runs: Date[]
+  invalid: boolean
+}): React.JSX.Element | null {
   if (invalid) {
     return <div className="text-[11px] text-red-400/80">Invalid cron expression</div>
   }
   if (runs.length === 0) return null
   const next = runs[0]
   const diff = next.getTime() - Date.now()
-  const inStr = diff < 60_000 ? 'soon' : diff < 3_600_000 ? `${Math.round(diff / 60_000)}m` : diff < 86_400_000 ? `${Math.round(diff / 3_600_000)}h` : `${Math.round(diff / 86_400_000)}d`
+  const inStr =
+    diff < 60_000
+      ? 'soon'
+      : diff < 3_600_000
+        ? `${Math.round(diff / 60_000)}m`
+        : diff < 86_400_000
+          ? `${Math.round(diff / 3_600_000)}h`
+          : `${Math.round(diff / 86_400_000)}d`
   return (
     <div className="flex items-center gap-1.5 flex-wrap">
       <span className="text-[10px] uppercase tracking-wider text-text-muted">next in</span>

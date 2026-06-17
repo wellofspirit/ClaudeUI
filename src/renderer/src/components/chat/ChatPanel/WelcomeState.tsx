@@ -5,18 +5,50 @@ import { useActiveSession, useSessionStore } from '../../../stores/session-store
 const WELCOME_PHRASES = [
   "Let's build",
   "What's the plan?",
-  "Ready when you are",
-  "Where to next?",
+  'Ready when you are',
+  'Where to next?',
   "Let's ship it",
-  "What shall we make?",
-  "Got an idea?",
+  'What shall we make?',
+  'Got an idea?',
   "Let's get started",
   "What's on your mind?",
-  "Time to create",
+  'Time to create'
 ]
 
-const ADJECTIVES = ['swift', 'calm', 'bold', 'keen', 'warm', 'cool', 'wild', 'soft', 'fair', 'deep', 'pure', 'dark', 'safe', 'firm', 'vast']
-const NOUNS = ['river', 'stone', 'cloud', 'flame', 'frost', 'ridge', 'creek', 'grove', 'bloom', 'cedar', 'maple', 'cliff', 'brook', 'trail', 'haven']
+const ADJECTIVES = [
+  'swift',
+  'calm',
+  'bold',
+  'keen',
+  'warm',
+  'cool',
+  'wild',
+  'soft',
+  'fair',
+  'deep',
+  'pure',
+  'dark',
+  'safe',
+  'firm',
+  'vast'
+]
+const NOUNS = [
+  'river',
+  'stone',
+  'cloud',
+  'flame',
+  'frost',
+  'ridge',
+  'creek',
+  'grove',
+  'bloom',
+  'cedar',
+  'maple',
+  'cliff',
+  'brook',
+  'trail',
+  'haven'
+]
 
 function generateRandomName(): string {
   const adj = ADJECTIVES[Math.floor(Math.random() * ADJECTIVES.length)]
@@ -25,7 +57,10 @@ function generateRandomName(): string {
 }
 
 function sanitizeWorktreeName(val: string): string {
-  return val.toLowerCase().replace(/[^a-z0-9-]/g, '').slice(0, 30)
+  return val
+    .toLowerCase()
+    .replace(/[^a-z0-9-]/g, '')
+    .slice(0, 30)
 }
 
 export function WelcomeState(): React.JSX.Element {
@@ -45,24 +80,27 @@ export function WelcomeState(): React.JSX.Element {
     [activeSessionId]
   )
 
-  const startSession = useCallback(async (dirCwd: string): Promise<void> => {
-    const routingId = uuid()
-    if (worktreeEnabled && worktreeName.trim()) {
-      setIsCreatingWorktree(true)
-      try {
-        const info = await window.api.createWorktree(dirCwd, worktreeName.trim())
-        createNewSession(routingId, info.worktreePath)
-        setWorktreeInfo(routingId, info)
-      } catch (err) {
-        window.api.logError('WelcomeState', `Failed to create worktree: ${err}`)
+  const startSession = useCallback(
+    async (dirCwd: string): Promise<void> => {
+      const routingId = uuid()
+      if (worktreeEnabled && worktreeName.trim()) {
+        setIsCreatingWorktree(true)
+        try {
+          const info = await window.api.createWorktree(dirCwd, worktreeName.trim())
+          createNewSession(routingId, info.worktreePath)
+          setWorktreeInfo(routingId, info)
+        } catch (err) {
+          window.api.logError('WelcomeState', `Failed to create worktree: ${err}`)
+          createNewSession(routingId, dirCwd)
+        } finally {
+          setIsCreatingWorktree(false)
+        }
+      } else {
         createNewSession(routingId, dirCwd)
-      } finally {
-        setIsCreatingWorktree(false)
       }
-    } else {
-      createNewSession(routingId, dirCwd)
-    }
-  }, [worktreeEnabled, worktreeName, createNewSession, setWorktreeInfo])
+    },
+    [worktreeEnabled, worktreeName, createNewSession, setWorktreeInfo]
+  )
 
   const handleSelectDir = (dirCwd: string): void => {
     setDropdownOpen(false)
@@ -78,8 +116,19 @@ export function WelcomeState(): React.JSX.Element {
   return (
     <div className="flex flex-col items-center gap-4 -mt-16 animate-fade-in">
       {/* Icon */}
-      <div style={{ width: 56, height: 56, borderRadius: 16 }} className="bg-bg-tertiary border border-border flex items-center justify-center">
-        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="text-accent">
+      <div
+        style={{ width: 56, height: 56, borderRadius: 16 }}
+        className="bg-bg-tertiary border border-border flex items-center justify-center"
+      >
+        <svg
+          width="28"
+          height="28"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.5"
+          className="text-accent"
+        >
           <path d="M12 2L2 7l10 5 10-5-10-5z" strokeLinecap="round" strokeLinejoin="round" />
           <path d="M2 17l10 5 10-5" strokeLinecap="round" strokeLinejoin="round" />
           <path d="M2 12l10 5 10-5" strokeLinecap="round" strokeLinejoin="round" />
@@ -94,7 +143,11 @@ export function WelcomeState(): React.JSX.Element {
         <div className="flex items-center gap-2 text-[12px] text-text-muted animate-fade-in">
           <div className="flex gap-[3px]">
             {[0, 200, 400].map((delay) => (
-              <span key={delay} className="w-[4px] h-[4px] rounded-full bg-mode-edit" style={{ animation: 'pulse-dot 1.4s infinite', animationDelay: `${delay}ms` }} />
+              <span
+                key={delay}
+                className="w-[4px] h-[4px] rounded-full bg-mode-edit"
+                style={{ animation: 'pulse-dot 1.4s infinite', animationDelay: `${delay}ms` }}
+              />
             ))}
           </div>
           <span>Creating worktree...</span>
@@ -109,7 +162,16 @@ export function WelcomeState(): React.JSX.Element {
             className="flex items-center gap-1 text-[14px] text-accent hover:text-accent/80 transition-colors cursor-default"
           >
             <span>Select a project directory</span>
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="mt-px">
+            <svg
+              width="12"
+              height="12"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2.5"
+              strokeLinecap="round"
+              className="mt-px"
+            >
               <path d="M6 9l6 6 6-6" />
             </svg>
           </button>
@@ -124,7 +186,17 @@ export function WelcomeState(): React.JSX.Element {
                     onClick={() => handleSelectDir(group.cwd)}
                     className="w-full flex items-center gap-2.5 px-3 py-2 text-[13px] text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-colors text-left cursor-default"
                   >
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="shrink-0 text-text-muted">
+                    <svg
+                      width="14"
+                      height="14"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="1.8"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      className="shrink-0 text-text-muted"
+                    >
                       <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" />
                     </svg>
                     <div className="flex flex-col min-w-0">
@@ -138,7 +210,16 @@ export function WelcomeState(): React.JSX.Element {
                   onClick={handleBrowse}
                   className="w-full flex items-center gap-2.5 px-3 py-2 text-[13px] text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-colors text-left cursor-default"
                 >
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" className="shrink-0 text-text-muted">
+                  <svg
+                    width="14"
+                    height="14"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.8"
+                    strokeLinecap="round"
+                    className="shrink-0 text-text-muted"
+                  >
                     <circle cx="11" cy="11" r="8" />
                     <path d="M21 21l-4.35-4.35" />
                   </svg>
@@ -158,7 +239,9 @@ export function WelcomeState(): React.JSX.Element {
               onClick={() => setWorktreeEnabled(!worktreeEnabled)}
               className={`relative w-8 h-[18px] rounded-full transition-colors ${worktreeEnabled ? 'bg-mode-edit' : 'bg-bg-hover border border-border'}`}
             >
-              <span className={`absolute top-[2px] w-[14px] h-[14px] rounded-full bg-white shadow transition-transform ${worktreeEnabled ? 'left-[15px]' : 'left-[1px]'}`} />
+              <span
+                className={`absolute top-[2px] w-[14px] h-[14px] rounded-full bg-white shadow transition-transform ${worktreeEnabled ? 'left-[15px]' : 'left-[1px]'}`}
+              />
             </button>
             <span className="text-[12px] text-text-muted">Start in worktree</span>
           </label>
@@ -177,7 +260,16 @@ export function WelcomeState(): React.JSX.Element {
                 className="w-6 h-6 flex items-center justify-center rounded-md text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
                 title="Randomize name"
               >
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <svg
+                  width="12"
+                  height="12"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
                   <rect x="1" y="1" width="22" height="22" rx="4" />
                   <circle cx="8" cy="8" r="1.5" fill="currentColor" />
                   <circle cx="16" cy="8" r="1.5" fill="currentColor" />
@@ -193,9 +285,7 @@ export function WelcomeState(): React.JSX.Element {
 
       {/* Current directory */}
       {cwd && (
-        <span className="text-[15px] text-text-muted">
-          {cwd.split(/[\\/]/).pop() || cwd}
-        </span>
+        <span className="text-[15px] text-text-muted">{cwd.split(/[\\/]/).pop() || cwd}</span>
       )}
     </div>
   )

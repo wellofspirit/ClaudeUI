@@ -1,6 +1,12 @@
 import { useState } from 'react'
 import type { BlockUsageData } from '../../../../shared/types'
-import { getModelColor, formatTokenCount, formatCost, formatShortDate, shortModelName } from './usage-utils'
+import {
+  getModelColor,
+  formatTokenCount,
+  formatCost,
+  formatShortDate,
+  shortModelName
+} from './usage-utils'
 
 interface DailyUsageChartProps {
   dailyHistory: BlockUsageData['dailyHistory']
@@ -49,8 +55,7 @@ export function DailyUsageChart({
   const barGap = 2
   const barWidth = Math.max(4, (chartW - barGap * barCount) / barCount)
 
-  const yScale = (val: number): number =>
-    padT + chartH - (val / maxTokens) * chartH
+  const yScale = (val: number): number => padT + chartH - (val / maxTokens) * chartH
 
   return (
     <div className="relative">
@@ -110,19 +115,9 @@ export function DailyUsageChart({
           }
 
           return (
-            <g
-              key={day.date}
-              onMouseEnter={() => setHoverIdx(i)}
-              className="cursor-default"
-            >
+            <g key={day.date} onMouseEnter={() => setHoverIdx(i)} className="cursor-default">
               {/* Invisible hit area */}
-              <rect
-                x={x}
-                y={padT}
-                width={barWidth}
-                height={chartH}
-                fill="transparent"
-              />
+              <rect x={x} y={padT} width={barWidth} height={chartH} fill="transparent" />
               {/* Stacked segments */}
               {segments.map((seg) => (
                 <rect
@@ -197,7 +192,10 @@ export function DailyUsageChart({
             Blocks: <span className="font-mono">{dailyHistory[hoverIdx].blockCount}</span>
           </div>
           <div className="text-text-muted">
-            Peak API: <span className="text-red-400 font-mono">{Math.round(dailyHistory[hoverIdx].peakApiPercent)}%</span>
+            Peak API:{' '}
+            <span className="text-red-400 font-mono">
+              {Math.round(dailyHistory[hoverIdx].peakApiPercent)}%
+            </span>
           </div>
           <div className="border-t border-border/30 mt-1 pt-1 space-y-0.5">
             {Object.entries(dailyHistory[hoverIdx].models)

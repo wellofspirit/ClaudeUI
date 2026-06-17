@@ -57,7 +57,7 @@ const PATCH_A2_MARKER = '/*PATCHED:queue-control-consumed*/'
 // Part A1: dequeue_message control request (value-based matching)
 // =====================================================================
 
-let skipA1 = src.includes(PATCH_A1_MARKER)
+const skipA1 = src.includes(PATCH_A1_MARKER)
 if (skipA1) {
   console.log('Part A1 already applied. Skipping.')
 }
@@ -91,7 +91,7 @@ if (!skipA1) {
     process.exit(1)
   }
 
-  const msgVar = anchorMatch[2]  // message variable (c in 0.2.50, e in 0.2.59)
+  const msgVar = anchorMatch[2] // message variable (c in 0.2.50, e in 0.2.59)
   console.log(`Found fallback anchor at char ${anchorIdx} (msgVar=${msgVar})`)
 
   // ---------------------------------------------------------------------------
@@ -137,9 +137,7 @@ if (!skipA1) {
   // We need that MODLOCAL — the control-request handler runs in a scope where
   // the closure-locals are not in lexical scope. Using `Z` would shadow with
   // whatever happens to be named `Z` at the handler site (e.g. a string).
-  const removeFnRe = new RegExp(
-    `(${V})=(${V})\\.dequeueAllMatching\\b`
-  )
+  const removeFnRe = new RegExp(`(${V})=(${V})\\.dequeueAllMatching\\b`)
   const removeFnMatch = removeFnRe.exec(src)
   if (!removeFnMatch) {
     console.error('ERROR: Cannot find module-level binding for queue.dequeueAllMatching')
@@ -185,7 +183,9 @@ if (!skipA1) {
     extractTextFn = extractTextMatch[1]
     console.log(`  Extract queue text function: ${extractTextFn}`)
   } else {
-    console.log('  WARNING: Cannot find extractQueueText function — will use direct value comparison')
+    console.log(
+      '  WARNING: Cannot find extractQueueText function — will use direct value comparison'
+    )
   }
 
   // ---------------------------------------------------------------------------
@@ -198,11 +198,12 @@ if (!skipA1) {
     ? `(_6)=>${extractTextFn}(_6.value)===Y6`
     : `(_6)=>typeof _6.value==="string"?_6.value===Y6:JSON.stringify(_6.value)===Y6`
 
-  const injectionA1 = PATCH_A1_MARKER +
+  const injectionA1 =
+    PATCH_A1_MARKER +
     `else if(${msgVar}.request.subtype==="dequeue_message"){` +
-      `let{value:Y6}=${msgVar}.request;` +
-      `let O6=${removeFn}(${predicate});` +
-      `${successFn}(${msgVar},{removed:O6.length})` +
+    `let{value:Y6}=${msgVar}.request;` +
+    `let O6=${removeFn}(${predicate});` +
+    `${successFn}(${msgVar},{removed:O6.length})` +
     `}`
 
   src = src.slice(0, anchorIdx) + injectionA1 + src.slice(anchorIdx)
@@ -214,7 +215,7 @@ if (!skipA1) {
 // Part A2: queued_command_consumed notification in submitMessage
 // =====================================================================
 
-let skipA2 = src.includes(PATCH_A2_MARKER)
+const skipA2 = src.includes(PATCH_A2_MARKER)
 if (skipA2) {
   console.log('Part A2 already applied. Skipping.')
 }
@@ -239,7 +240,7 @@ if (!skipA2) {
   )
 
   let qcMatch = qcReNew.exec(src)
-  let isNewPattern = !!qcMatch
+  const isNewPattern = !!qcMatch
   if (!qcMatch) qcMatch = qcReOld.exec(src)
   if (!qcMatch) {
     console.error('ERROR: Cannot find queued_command attachment handler in submitMessage')
@@ -250,7 +251,9 @@ if (!skipA2) {
   const replayVar = qcMatch[1]
   const attachVar = qcMatch[2]
   const extractedVar = isNewPattern ? qcMatch[3] : null
-  console.log(`Found queued_command handler at char ${qcIdx}, replay var: ${replayVar}, attachment var: ${attachVar}${isNewPattern ? `, extracted var: ${extractedVar}` : ''} (${isNewPattern ? 'new' : 'old'} pattern)`)
+  console.log(
+    `Found queued_command handler at char ${qcIdx}, replay var: ${replayVar}, attachment var: ${attachVar}${isNewPattern ? `, extracted var: ${extractedVar}` : ''} (${isNewPattern ? 'new' : 'old'} pattern)`
+  )
 
   // Verify uniqueness
   const qcReUsed = isNewPattern ? qcReNew : qcReOld
@@ -321,15 +324,16 @@ if (!skipA2) {
   const timestampExpr = isNewPattern ? `,timestamp:${attachVar}.timestamp` : ''
   const letPrefix = isNewPattern ? `let ${extractedVar}=${attachVar}.attachment;` : ''
 
-  const newCode = PATCH_A2_MARKER +
+  const newCode =
+    PATCH_A2_MARKER +
     `else if(${attachVar}.attachment.type==="queued_command"){` +
-      letPrefix +
-      `yield{type:"system",subtype:"queued_command_consumed",` +
-        `prompt:${promptExpr},source_uuid:${srcUuidExpr},` +
-        `session_id:${sessionIdFn}(),uuid:${uuidFn}()};` +
-      `if(${replayVar})yield{type:"user",message:{role:"user",content:${promptExpr}},` +
-        `session_id:${sessionIdFn}(),parent_tool_use_id:null,` +
-        `uuid:${srcUuidExpr}||${attachVar}.uuid${timestampExpr},isReplay:!0${fileAttachExpr}}` +
+    letPrefix +
+    `yield{type:"system",subtype:"queued_command_consumed",` +
+    `prompt:${promptExpr},source_uuid:${srcUuidExpr},` +
+    `session_id:${sessionIdFn}(),uuid:${uuidFn}()};` +
+    `if(${replayVar})yield{type:"user",message:{role:"user",content:${promptExpr}},` +
+    `session_id:${sessionIdFn}(),parent_tool_use_id:null,` +
+    `uuid:${srcUuidExpr}||${attachVar}.uuid${timestampExpr},isReplay:!0${fileAttachExpr}}` +
     `}`
 
   src = src.slice(0, qcIdx) + newCode + src.slice(qcIdx + oldCode.length)
@@ -359,5 +363,7 @@ if (!skipA1 || !skipA2) {
 
 console.log('')
 console.log('What this does:')
-console.log('  Part A (cli.js): dequeue_message control-request + queued_command_consumed notification.')
+console.log(
+  '  Part A (cli.js): dequeue_message control-request + queued_command_consumed notification.'
+)
 console.log('  Part B (sdk.mjs) was removed — dequeueMessage() lives in src/main/sdk/.')

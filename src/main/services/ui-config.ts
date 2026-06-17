@@ -136,7 +136,10 @@ export function saveSlashCommands(commands: SlashCommandCache[]): void {
  * Polling interval is 500ms — a good balance between responsiveness and CPU.
  * For just 2 small config files, the stat overhead is negligible.
  */
-export function startConfigWatcher(win: BrowserWindow, getExtraWindows?: () => Set<BrowserWindow>): () => void {
+export function startConfigWatcher(
+  win: BrowserWindow,
+  getExtraWindows?: () => Set<BrowserWindow>
+): () => void {
   ensureDir()
 
   const watched = [

@@ -12,17 +12,28 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import WebSocket from 'ws'
 import * as http from 'node:http'
+import * as fs from 'node:fs'
+import * as os from 'node:os'
+import * as path from 'node:path'
 import { connectRemoteClient, ephemeralPort } from '../../../test/helpers/ws-test-client'
 
 // ---------------------------------------------------------------------------
 // Mocks — must be declared before importing remote-server.
 // ---------------------------------------------------------------------------
 
+// `getAppPath()` drives where the server looks for the built web client
+// (`<appPath>/out/web/index.html`). Tests that need the real web-client HTML
+// served (mockup-token injection) must NOT depend on the repo's `out/web`
+// build artifact — in CI, tests run before the build, so it doesn't exist.
+// Expose a mutable ref so individual suites can point it at a temp dir they
+// populate themselves. Defaults to cwd to preserve prior behavior.
+const { appPathRef } = vi.hoisted(() => ({ appPathRef: { current: '' } }))
+
 vi.mock('electron', () => ({
   app: {
-    getAppPath: () => process.cwd(),
-    isPackaged: false,
-  },
+    getAppPath: () => appPathRef.current || process.cwd(),
+    isPackaged: false
+  }
 }))
 
 // ClaudeSession has heavy imports (SDK, uuid, many services). The server only
@@ -30,8 +41,8 @@ vi.mock('electron', () => ({
 vi.mock('../claude-session', () => ({
   ClaudeSession: {
     addExtraWindow: vi.fn(),
-    removeExtraWindow: vi.fn(),
-  },
+    removeExtraWindow: vi.fn()
+  }
 }))
 
 // Silence the logger.
@@ -40,20 +51,30 @@ vi.mock('../logger', () => ({
     debug: vi.fn(),
     info: vi.fn(),
     warn: vi.fn(),
-    error: vi.fn(),
-  },
+    error: vi.fn()
+  }
 }))
 
 // TunnelManager ships with a CloudFlare download path; stub completely.
 vi.mock('../tunnel-manager', () => {
   class StubTunnelManager {
     private cb: ((status: unknown) => void) | null = null
-    setStatusHandler(fn: (status: unknown) => void): void { this.cb = fn }
-    getStatus() { return { state: 'stopped' as const, url: null, error: null } }
-    async start(): Promise<void> { /* no-op */ }
-    stop(): void { /* no-op */ }
+    setStatusHandler(fn: (status: unknown) => void): void {
+      this.cb = fn
+    }
+    getStatus() {
+      return { state: 'stopped' as const, url: null, error: null }
+    }
+    async start(): Promise<void> {
+      /* no-op */
+    }
+    stop(): void {
+      /* no-op */
+    }
     // Expose so tests could trigger it if ever needed.
-    _trigger(status: unknown): void { this.cb?.(status) }
+    _trigger(status: unknown): void {
+      this.cb?.(status)
+    }
   }
   return { TunnelManager: StubTunnelManager }
 })
@@ -73,7 +94,7 @@ async function httpGet(url: string): Promise<{ status: number; body: string }> {
         const chunks: Buffer[] = []
         res.on('data', (c) => chunks.push(c))
         res.on('end', () =>
-          resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString('utf-8') }),
+          resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString('utf-8') })
         )
       })
       .on('error', reject)
@@ -106,7 +127,11 @@ describe('RemoteServer', () => {
   })
 
   afterEach(() => {
-    try { server.stop() } catch { /* already stopped */ }
+    try {
+      server.stop()
+    } catch {
+      /* already stopped */
+    }
   })
 
   it('starts the server listening on the configured port', async () => {
@@ -184,7 +209,7 @@ describe('RemoteServer', () => {
 
     const client = await connectRemoteClient({
       url: `ws://127.0.0.1:${port}/`,
-      token: res.token,
+      token: res.token
     })
 
     // `ready` only resolves once we see `auth-response { ok: true }`.
@@ -228,5 +253,99 @@ describe('RemoteServer', () => {
     }
     // getStatus after stop() should reflect zero clients.
     expect(server.getStatus().connectedClients).toBe(0)
+  })
+})
+
+describe('RemoteServer — mockup HTTP route', () => {
+  let server: RemoteServer
+  let port: number
+  let cwd: string
+  let appDir: string
+  let b64: string
+  const ID = 'abcdef12'
+
+  beforeEach(async () => {
+    server = new RemoteServer(new RemoteDispatcher())
+    port = await ephemeralPort()
+    cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'mockup-rs-'))
+    b64 = Buffer.from(cwd, 'utf-8').toString('base64url')
+    const dir = path.join(cwd, '.claude', 'ui', 'mockups', ID)
+    fs.mkdirSync(dir, { recursive: true })
+    fs.writeFileSync(
+      path.join(dir, 'index.html'),
+      '<html><head></head><body>remote mockup</body></html>'
+    )
+
+    // Provide a self-contained web-client build so the server serves the real
+    // index.html (and injects the mockup token) instead of the placeholder.
+    // The repo's `out/web` is gitignored and absent in CI, where tests run
+    // before the build — relying on it makes these tests non-hermetic.
+    appDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mockup-app-'))
+    appPathRef.current = appDir
+    const webDir = path.join(appDir, 'out', 'web')
+    fs.mkdirSync(webDir, { recursive: true })
+    fs.writeFileSync(
+      path.join(webDir, 'index.html'),
+      '<html><head></head><body>web client</body></html>'
+    )
+  })
+
+  afterEach(() => {
+    try {
+      server.stop()
+    } catch {
+      /* already stopped */
+    }
+    fs.rmSync(cwd, { recursive: true, force: true })
+    fs.rmSync(appDir, { recursive: true, force: true })
+    appPathRef.current = ''
+  })
+
+  /** Pull the injected mockup token out of the served web-client HTML. */
+  function extractMockupToken(html: string): string | null {
+    const m = html.match(/window\.__MOCKUP_TOKEN__="([a-f0-9]{64})"/)
+    return m ? m[1] : null
+  }
+
+  it('injects a mockup token into /remote only when the WS token matches', async () => {
+    const res = await server.start(port, '127.0.0.1')
+
+    const authed = await httpGet(`http://127.0.0.1:${port}/remote?t=${res.token}`)
+    const token = extractMockupToken(authed.body)
+    expect(token).toMatch(/^[a-f0-9]{64}$/)
+    // The mockup token must NOT be the WS token.
+    expect(token).not.toBe(res.token)
+
+    const anon = await httpGet(`http://127.0.0.1:${port}/remote`)
+    expect(extractMockupToken(anon.body)).toBeNull()
+
+    const wrong = await httpGet(`http://127.0.0.1:${port}/remote?t=${'0'.repeat(64)}`)
+    expect(extractMockupToken(wrong.body)).toBeNull()
+  })
+
+  it('rejects /mockup requests without the mockup token', async () => {
+    await server.start(port, '127.0.0.1')
+    const got = await httpGet(`http://127.0.0.1:${port}/mockup/${ID}/${b64}/`)
+    expect(got.status).toBe(403)
+  })
+
+  it('rejects /mockup requests with a wrong token', async () => {
+    await server.start(port, '127.0.0.1')
+    const got = await httpGet(
+      `http://127.0.0.1:${port}/mockup/${ID}/${b64}/?token=${'a'.repeat(64)}`
+    )
+    expect(got.status).toBe(403)
+  })
+
+  it('serves the mockup HTML with a valid mockup token (end-to-end)', async () => {
+    const res = await server.start(port, '127.0.0.1')
+    const page = await httpGet(`http://127.0.0.1:${port}/remote?t=${res.token}`)
+    const token = extractMockupToken(page.body)!
+
+    const got = await httpGet(`http://127.0.0.1:${port}/mockup/${ID}/${b64}/?token=${token}`)
+    expect(got.status).toBe(200)
+    expect(got.body).toContain('remote mockup')
+    // The serve-time bridge must be injected.
+    expect(got.body).toContain('data-omelette="1"')
   })
 })

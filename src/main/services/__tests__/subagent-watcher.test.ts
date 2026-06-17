@@ -37,16 +37,12 @@ vi.mock('../logger', () => ({
     debug: vi.fn(),
     info: vi.fn(),
     warn: vi.fn(),
-    error: vi.fn(),
-  },
+    error: vi.fn()
+  }
 }))
 
 // Import AFTER mocks are registered.
-import {
-  watchSubagent,
-  unwatchSubagent,
-  unwatchAllSubagents,
-} from '../subagent-watcher'
+import { watchSubagent, unwatchSubagent, unwatchAllSubagents } from '../subagent-watcher'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -76,7 +72,7 @@ async function cleanupCtx(ctx: TestCtx): Promise<void> {
     await fsp.rm(path.join(testHome, '.claude', 'projects', ctx.projectKey), {
       recursive: true,
       force: true,
-      maxRetries: 5,
+      maxRetries: 5
     })
   } catch {
     /* ignore */
@@ -84,36 +80,42 @@ async function cleanupCtx(ctx: TestCtx): Promise<void> {
 }
 
 /** Build a teammate JSONL line in the format the SDK writes. */
-function teammateLine(type: 'user' | 'assistant', textOrBlocks: string | unknown[], opts: {
-  uuid?: string
-  userType?: string
-  messageId?: string
-} = {}): string {
+function teammateLine(
+  type: 'user' | 'assistant',
+  textOrBlocks: string | unknown[],
+  opts: {
+    uuid?: string
+    userType?: string
+    messageId?: string
+  } = {}
+): string {
   if (type === 'user') {
-    return JSON.stringify({
-      type: 'user',
-      uuid: opts.uuid ?? `user-${Math.random().toString(36).slice(2)}`,
-      userType: opts.userType ?? 'external',
-      timestamp: new Date().toISOString(),
-      message: {
-        content: typeof textOrBlocks === 'string'
-          ? [{ type: 'text', text: textOrBlocks }]
-          : textOrBlocks,
-      },
-    }) + '\n'
+    return (
+      JSON.stringify({
+        type: 'user',
+        uuid: opts.uuid ?? `user-${Math.random().toString(36).slice(2)}`,
+        userType: opts.userType ?? 'external',
+        timestamp: new Date().toISOString(),
+        message: {
+          content:
+            typeof textOrBlocks === 'string' ? [{ type: 'text', text: textOrBlocks }] : textOrBlocks
+        }
+      }) + '\n'
+    )
   }
   // assistant
-  return JSON.stringify({
-    type: 'assistant',
-    uuid: opts.uuid ?? `asst-uuid-${Math.random().toString(36).slice(2)}`,
-    timestamp: new Date().toISOString(),
-    message: {
-      id: opts.messageId ?? `msg-${Math.random().toString(36).slice(2)}`,
-      content: typeof textOrBlocks === 'string'
-        ? [{ type: 'text', text: textOrBlocks }]
-        : textOrBlocks,
-    },
-  }) + '\n'
+  return (
+    JSON.stringify({
+      type: 'assistant',
+      uuid: opts.uuid ?? `asst-uuid-${Math.random().toString(36).slice(2)}`,
+      timestamp: new Date().toISOString(),
+      message: {
+        id: opts.messageId ?? `msg-${Math.random().toString(36).slice(2)}`,
+        content:
+          typeof textOrBlocks === 'string' ? [{ type: 'text', text: textOrBlocks }] : textOrBlocks
+      }
+    }) + '\n'
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -142,13 +144,7 @@ describe('subagent-watcher', () => {
     await fsp.writeFile(filePath, teammateLine('user', initialPrompt))
 
     const sendFn = vi.fn()
-    watchSubagent(
-      'tool-use-1',
-      ctx.sessionId,
-      ctx.projectKey,
-      initialPrompt,
-      sendFn,
-    )
+    watchSubagent('tool-use-1', ctx.sessionId, ctx.projectKey, initialPrompt, sendFn)
 
     // Initial read should have already been flushed (startWatching calls it
     // synchronously before attaching the FSWatcher).
@@ -160,7 +156,7 @@ describe('subagent-watcher', () => {
         expect((firstCall[1] as { toolUseId: string }).toolUseId).toBe('tool-use-1')
         expect((firstCall[1] as { messages: unknown[] }).messages.length).toBeGreaterThan(0)
       },
-      { timeout: 2000 },
+      { timeout: 2000 }
     )
 
     // Append an assistant message — the watcher should emit a second batch.
@@ -172,13 +168,15 @@ describe('subagent-watcher', () => {
         expect(sendFn.mock.calls.length).toBeGreaterThan(before)
         const latest = sendFn.mock.calls[sendFn.mock.calls.length - 1]
         expect(latest[0]).toBe('session:subagent-message-batch')
-        const payload = latest[1] as { messages: Array<{ role: string; content: Array<{ type: string; text?: string }> }> }
+        const payload = latest[1] as {
+          messages: Array<{ role: string; content: Array<{ type: string; text?: string }> }>
+        }
         const assistantMsg = payload.messages.find((m) => m.role === 'assistant')
         expect(assistantMsg).toBeDefined()
         const textBlock = assistantMsg!.content.find((b) => b.type === 'text')
         expect((textBlock as { text: string }).text).toBe('Here is my review')
       },
-      { timeout: 3000 },
+      { timeout: 3000 }
     )
   })
 
@@ -193,18 +191,12 @@ describe('subagent-watcher', () => {
     const lines = [
       teammateLine('user', prompt),
       malformed,
-      teammateLine('assistant', 'Found three bugs'),
+      teammateLine('assistant', 'Found three bugs')
     ].join('')
     await fsp.writeFile(filePath, lines)
 
     const sendFn = vi.fn()
-    watchSubagent(
-      'tool-use-malformed',
-      ctx.sessionId,
-      ctx.projectKey,
-      prompt,
-      sendFn,
-    )
+    watchSubagent('tool-use-malformed', ctx.sessionId, ctx.projectKey, prompt, sendFn)
 
     // Initial batch should include the two valid messages and drop the
     // malformed one — never throw.
@@ -218,7 +210,7 @@ describe('subagent-watcher', () => {
         // Exactly two parseable messages, the malformed line was dropped.
         expect(payload.messages.length).toBe(2)
       },
-      { timeout: 2000 },
+      { timeout: 2000 }
     )
   })
 
@@ -230,13 +222,7 @@ describe('subagent-watcher', () => {
     await fsp.writeFile(filePath, teammateLine('user', prompt))
 
     const sendFn = vi.fn()
-    watchSubagent(
-      'tool-use-stop',
-      ctx.sessionId,
-      ctx.projectKey,
-      prompt,
-      sendFn,
-    )
+    watchSubagent('tool-use-stop', ctx.sessionId, ctx.projectKey, prompt, sendFn)
 
     // Wait for initial batch.
     await vi.waitFor(() => expect(sendFn).toHaveBeenCalled(), { timeout: 2000 })
@@ -271,7 +257,7 @@ describe('subagent-watcher', () => {
         expect(sendA).toHaveBeenCalled()
         expect(sendB).toHaveBeenCalled()
       },
-      { timeout: 2000 },
+      { timeout: 2000 }
     )
 
     // All sendA payloads must reference toolUseId "use-A" only.
@@ -291,7 +277,7 @@ describe('subagent-watcher', () => {
       () => {
         expect(sendA.mock.calls.length).toBeGreaterThan(aCallsBefore)
       },
-      { timeout: 3000 },
+      { timeout: 3000 }
     )
 
     // Give B's (nonexistent) debounce plenty of time — it should never fire.
@@ -306,13 +292,7 @@ describe('subagent-watcher', () => {
     await fsp.writeFile(filePath, teammateLine('user', 'A cleanup prompt'))
 
     const sendFn = vi.fn()
-    watchSubagent(
-      'tool-use-cleanup',
-      ctx.sessionId,
-      ctx.projectKey,
-      'A cleanup prompt',
-      sendFn,
-    )
+    watchSubagent('tool-use-cleanup', ctx.sessionId, ctx.projectKey, 'A cleanup prompt', sendFn)
 
     await vi.waitFor(() => expect(sendFn).toHaveBeenCalled(), { timeout: 2000 })
 
@@ -328,13 +308,7 @@ describe('subagent-watcher', () => {
     // Now register two, then call unwatchAll and ensure no future events fire
     // when files grow.
     const s2 = vi.fn()
-    watchSubagent(
-      'tool-use-a',
-      ctx.sessionId,
-      ctx.projectKey,
-      'A cleanup prompt',
-      s2,
-    )
+    watchSubagent('tool-use-a', ctx.sessionId, ctx.projectKey, 'A cleanup prompt', s2)
     await vi.waitFor(() => expect(s2).toHaveBeenCalled(), { timeout: 2000 })
     const beforeAll = s2.mock.calls.length
 

@@ -18,6 +18,7 @@ export interface MockupPanelViewProps {
   html: string | null
   error: string | null
   src: string | null
+  sandbox: string
   onClose: () => void
   onCopyHtml: () => void
   onRefresh: () => void
@@ -39,6 +40,7 @@ export const MockupPanelView = forwardRef<HTMLIFrameElement, MockupPanelViewProp
       html,
       error,
       src,
+      sandbox,
       onClose,
       onCopyHtml,
       onRefresh,
@@ -250,7 +252,7 @@ export const MockupPanelView = forwardRef<HTMLIFrameElement, MockupPanelViewProp
               <iframe
                 ref={iframeRef}
                 src={src}
-                sandbox="allow-scripts allow-same-origin"
+                sandbox={sandbox}
                 referrerPolicy="no-referrer"
                 tabIndex={-1}
                 style={{ width: '100%', height: '100%', border: 'none', display: 'block' }}

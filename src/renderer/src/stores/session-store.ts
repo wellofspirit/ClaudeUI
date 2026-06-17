@@ -22,6 +22,8 @@ import type {
   PlanComment,
   PlanReviewData,
   AccountUsage,
+  AuthState,
+  AccountsState,
   BlockUsageData,
   TerminalTab,
   WorktreeInfo,
@@ -54,14 +56,15 @@ export function buildTodosFromMessages(messages: ChatMessage[]): TodoItem[] | nu
   for (const msg of messages) {
     if (msg.role !== 'assistant') continue
     for (const block of msg.content) {
-      if (block.type !== 'tool_use' || !block.toolName || !TASK_TOOL_NAMES.has(block.toolName)) continue
+      if (block.type !== 'tool_use' || !block.toolName || !TASK_TOOL_NAMES.has(block.toolName))
+        continue
       const input = block.toolInput || {}
 
       if (block.toolName === 'TodoWrite') {
         hasTaskCalls = true
         tasks.clear()
         if (Array.isArray(input.todos)) {
-          (input.todos as Record<string, unknown>[]).forEach((t, i) => {
+          ;(input.todos as Record<string, unknown>[]).forEach((t, i) => {
             tasks.set(String(i), {
               content: String(t.content || ''),
               status: (t.status as TodoItem['status']) || 'pending',
@@ -80,7 +83,8 @@ export function buildTodosFromMessages(messages: ChatMessage[]): TodoItem[] | nu
         const resultBlock = msg.content.find(
           (b) => b.type === 'tool_result' && b.toolUseId === block.toolUseId
         )
-        const idMatch = resultBlock?.type === 'tool_result' ? resultBlock.toolResult.match(/Task #(\w+)/) : null
+        const idMatch =
+          resultBlock?.type === 'tool_result' ? resultBlock.toolResult.match(/Task #(\w+)/) : null
         const id = idMatch ? idMatch[1] : block.toolUseId || String(tasks.size)
         tasks.set(id, {
           content: String(input.subject || ''),
@@ -130,7 +134,7 @@ export interface AppSettings {
   statusLineTemplate: string
   gitPanelLayout: 'single' | 'double'
   gitCommitMode: 'commit' | 'commit-push'
-  usageRefreshSecs: number   // how often to call the /usage API (background poll)
+  usageRefreshSecs: number // how often to call the /usage API (background poll)
   analyticsRefreshSecs: number // how often to recalculate token analytics from JSONL changes
   sessionTimeoutMins: number // 0 = never auto-disconnect
   remoteFollowActions: boolean // follow remote client's session switches & messages
@@ -142,7 +146,8 @@ export interface AppSettings {
   modelOverride: ModelOverrideSettings
   /**
    * Per-model default effort overrides. Keyed by canonical model id
-   * (`claude-sonnet-4-6`, `claude-opus-4-7`, `claude-opus-4-8`). When set,
+   * (`claude-sonnet-4-6`, `claude-opus-4-7`, `claude-opus-4-8`,
+   * `claude-fable-5`). When set,
    * overrides the cli.js-derived default for that model; a per-session
    * explicit pick still wins.
    */
@@ -259,7 +264,10 @@ type PersistedSessionFields = {
  * Pass the pre-change state + a patch of just the fields that changed — the helper
  * merges them so unrelated fields are never dropped from the saved file.
  */
-function saveSessionConfig(state: PersistedSessionFields, patch?: Partial<PersistedSessionFields>): void {
+function saveSessionConfig(
+  state: PersistedSessionFields,
+  patch?: Partial<PersistedSessionFields>
+): void {
   const merged: PersistedSessionFields = { ...state, ...patch }
   window.api.saveSessionConfig({
     recentSessions: merged.recentSessionIds,
@@ -306,37 +314,38 @@ export async function hydrateConfigFromDisk(): Promise<void> {
   }
 
   const saved = savedSettings as Partial<AppSettings>
-  const settings: AppSettings = Object.keys(saved).length > 0
-    ? {
-        ...DEFAULT_SETTINGS,
-        ...saved,
-        // Deep-merge nested objects so new fields get defaults even if parent was persisted
-        sandbox: {
-          ...DEFAULT_SETTINGS.sandbox,
-          ...saved.sandbox,
-          filesystem: {
-            ...DEFAULT_SETTINGS.sandbox.filesystem,
-            ...saved.sandbox?.filesystem
+  const settings: AppSettings =
+    Object.keys(saved).length > 0
+      ? {
+          ...DEFAULT_SETTINGS,
+          ...saved,
+          // Deep-merge nested objects so new fields get defaults even if parent was persisted
+          sandbox: {
+            ...DEFAULT_SETTINGS.sandbox,
+            ...saved.sandbox,
+            filesystem: {
+              ...DEFAULT_SETTINGS.sandbox.filesystem,
+              ...saved.sandbox?.filesystem
+            },
+            network: {
+              ...DEFAULT_SETTINGS.sandbox.network,
+              ...saved.sandbox?.network
+            }
           },
-          network: {
-            ...DEFAULT_SETTINGS.sandbox.network,
-            ...saved.sandbox?.network
+          proxy: {
+            ...DEFAULT_SETTINGS.proxy,
+            ...saved.proxy
+          },
+          anthropicEndpoint: {
+            ...DEFAULT_SETTINGS.anthropicEndpoint,
+            ...saved.anthropicEndpoint
+          },
+          modelOverride: {
+            ...DEFAULT_SETTINGS.modelOverride,
+            ...saved.modelOverride
           }
-        },
-        proxy: {
-          ...DEFAULT_SETTINGS.proxy,
-          ...saved.proxy
-        },
-        anthropicEndpoint: {
-          ...DEFAULT_SETTINGS.anthropicEndpoint,
-          ...saved.anthropicEndpoint
-        },
-        modelOverride: {
-          ...DEFAULT_SETTINGS.modelOverride,
-          ...saved.modelOverride
         }
-      }
-    : DEFAULT_SETTINGS
+      : DEFAULT_SETTINGS
 
   // Validate voiceLanguage — unsupported codes (e.g. 'zh' removed in v0.2.97) fall back to 'en'
   if (settings.voiceLanguage && !VOICE_LANGUAGES.some((l) => l.code === settings.voiceLanguage)) {
@@ -376,7 +385,8 @@ function cleanupEmptySession(
   const session = sessions[routingId]
   if (!session) return { sessions, recentSessionIds }
   // Only clean up sessions with no messages and no active SDK
-  if (session.messages.length > 0 || session.sdkActive || session.draftText) return { sessions, recentSessionIds }
+  if (session.messages.length > 0 || session.sdkActive || session.draftText)
+    return { sessions, recentSessionIds }
   const { [routingId]: _, ...rest } = sessions
   return {
     sessions: rest,
@@ -389,6 +399,11 @@ export interface PerSessionState {
   cwd: string
   sdkActive: boolean
   isHistorical: boolean
+  /** Set on a freshly-forked ("branched off") session before its first send.
+   *  Tells InputBox to spawn cli.js with `--resume <source> --resume-session-at
+   *  <anchor> --fork-session`, minting a new branch seeded with messages 1..N.
+   *  Read only while `!sdkActive`; the fork materializes lazily on first prompt. */
+  forkOrigin: { sourceSessionId: string; anchorUuid: string } | null
   messages: ChatMessage[]
   streamingText: string
   streamingThinking: string
@@ -397,6 +412,7 @@ export interface PerSessionState {
   status: SessionStatus
   pendingApprovals: PendingApproval[]
   errors: string[]
+  warnings: string[]
   todos: TodoItem[]
   taskProgressMap: Record<string, TaskProgress>
   taskNotifications: TaskNotification[]
@@ -427,7 +443,12 @@ export interface PerSessionState {
   gitStatus: GitStatusData | null
   gitBranches: GitBranchData | null
   gitSelectedFile: string | null
-  gitFileDiff: { patch: string; isBinary?: boolean; oldContent?: string; newContent?: string } | null
+  gitFileDiff: {
+    patch: string
+    isBinary?: boolean
+    oldContent?: string
+    newContent?: string
+  } | null
   gitCommitMessage: string
   gitFileFilter: 'staged' | 'unstaged' | 'all'
   gitReviewComments: DiffComment[]
@@ -454,6 +475,7 @@ const EMPTY_SESSION_STATE: PerSessionState = {
   cwd: '',
   sdkActive: false,
   isHistorical: false,
+  forkOrigin: null,
   messages: [],
   streamingText: '',
   streamingThinking: '',
@@ -462,6 +484,7 @@ const EMPTY_SESSION_STATE: PerSessionState = {
   status: { state: 'idle', sessionId: null, model: null, cwd: null, totalCostUsd: 0 },
   pendingApprovals: [],
   errors: [],
+  warnings: [],
   todos: [],
   taskProgressMap: {},
   taskNotifications: [],
@@ -579,6 +602,12 @@ interface SessionState {
   sdkSkillNames: string[]
   accountUsage: AccountUsage | null
   blockUsage: BlockUsageData | null
+  /** Native OAuth login-flow state (ADR-014). Null until first event/status. */
+  authState: AuthState | null
+  /** cli.js auth source from session init: 'oauth'|'api_key'|'none'|null (ADR-014). */
+  authSource: string | null
+  /** Multi-account state (ADR-015). Null until first load/event. */
+  accountsState: AccountsState | null
   activeView: ActiveView
   pluginViews: PluginViewWithOwner[]
 
@@ -595,7 +624,20 @@ interface SessionState {
   showWelcome: () => void
   switchSession: (routingId: string) => void
   createNewSession: (routingId: string, cwd: string, switchTo?: boolean) => void
-  loadHistoricalSession: (routingId: string, messages: ChatMessage[], cwd: string, taskNotifications?: TaskNotification[], subagentMessages?: Record<string, ChatMessage[]>, statusLine?: StatusLineData | null) => void
+  loadHistoricalSession: (
+    routingId: string,
+    messages: ChatMessage[],
+    cwd: string,
+    taskNotifications?: TaskNotification[],
+    subagentMessages?: Record<string, ChatMessage[]>,
+    statusLine?: StatusLineData | null,
+    warnings?: string[]
+  ) => void
+  /** Fork ("branch off") a new session from an assistant message in `sourceRoutingId`.
+   *  Resolves the disk anchor, seeds the new session with messages 1..N, and
+   *  switches to it. The branch materializes on cli.js on first prompt send.
+   *  Returns the new routingId, or null if the anchor could not be resolved. */
+  forkFromMessage: (sourceRoutingId: string, messageId: string) => Promise<string | null>
   markSdkActive: (routingId: string) => void
   markSdkInactive: (routingId: string) => void
   setDirectories: (dirs: DirectoryGroup[]) => void
@@ -614,7 +656,13 @@ interface SessionState {
 
   // Per-session actions (all take routingId)
   addMessage: (routingId: string, message: ChatMessage) => void
-  addUserMessage: (routingId: string, id: string, text: string, planContent?: string, attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>) => void
+  addUserMessage: (
+    routingId: string,
+    id: string,
+    text: string,
+    planContent?: string,
+    attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
+  ) => void
   appendStreamingText: (routingId: string, text: string) => void
   appendStreamingThinking: (routingId: string, text: string) => void
   clearStreamingText: (routingId: string) => void
@@ -631,6 +679,14 @@ interface SessionState {
   removePendingApprovalByToolUse: (routingId: string, toolUseId: string) => void
   clearPendingApprovals: (routingId: string) => void
   addError: (routingId: string, error: string) => void
+  addWarning: (routingId: string, warning: string) => void
+  removeWarning: (routingId: string, index: number) => void
+  clearWarnings: (routingId: string) => void
+  /**
+   * Refusal-fallback retraction: remove the refused partial's messages and
+   * clear any streamed text it left behind. Unknown ids are a no-op.
+   */
+  retractMessages: (routingId: string, messageIds: string[]) => void
   removeError: (routingId: string, index: number) => void
   clearErrors: (routingId: string) => void
   addSandboxViolation: (routingId: string, message: string) => void
@@ -639,15 +695,39 @@ interface SessionState {
   setTodos: (routingId: string, todos: TodoItem[]) => void
   updateTaskProgress: (routingId: string, progress: TaskProgress) => void
   addTaskNotification: (routingId: string, notification: TaskNotification) => void
-  bulkSetSubagentMessages: (routingId: string, subagentMessages: Record<string, ChatMessage[]>) => void
+  bulkSetSubagentMessages: (
+    routingId: string,
+    subagentMessages: Record<string, ChatMessage[]>
+  ) => void
   addSubagentMessage: (routingId: string, toolUseId: string, message: ChatMessage) => void
-  appendSubagentMessageBatch: (routingId: string, toolUseId: string, messages: ChatMessage[]) => void
+  appendSubagentMessageBatch: (
+    routingId: string,
+    toolUseId: string,
+    messages: ChatMessage[]
+  ) => void
   appendSubagentStreamingText: (routingId: string, toolUseId: string, text: string) => void
   appendSubagentStreamingThinking: (routingId: string, toolUseId: string, text: string) => void
-  appendSubagentToolResult: (routingId: string, toolUseId: string, toolResultToolUseId: string, result: string, isError: boolean) => void
-  setBashOutput: (routingId: string, toolUseId: string, output: string, totalLines: number, totalBytes: number) => void
+  appendSubagentToolResult: (
+    routingId: string,
+    toolUseId: string,
+    toolResultToolUseId: string,
+    result: string,
+    isError: boolean
+  ) => void
+  setBashOutput: (
+    routingId: string,
+    toolUseId: string,
+    output: string,
+    totalLines: number,
+    totalBytes: number
+  ) => void
   clearBashOutput: (routingId: string, toolUseId: string) => void
-  setBackgroundOutput: (routingId: string, toolUseId: string, tail: string, totalSize: number) => void
+  setBackgroundOutput: (
+    routingId: string,
+    toolUseId: string,
+    tail: string,
+    totalSize: number
+  ) => void
   watchBackgroundOutput: (routingId: string, toolUseId: string) => void
   unwatchBackgroundOutput: (routingId: string, toolUseId: string) => void
   openTaskPanel: (routingId: string, toolUseId: string) => void
@@ -657,13 +737,29 @@ interface SessionState {
   clearTaskStopping: (routingId: string, toolUseId: string) => void
   setNeedsAttention: (routingId: string, value: boolean) => void
   setWatching: (routingId: string, watching: boolean) => void
-  updateWatchedSession: (routingId: string, messages: ChatMessage[], taskNotifications: TaskNotification[]) => void
+  updateWatchedSession: (
+    routingId: string,
+    messages: ChatMessage[],
+    taskNotifications: TaskNotification[]
+  ) => void
   updateSettings: (partial: Partial<AppSettings>) => void
   applyExternalSettings: (settings: Record<string, unknown>) => void
-  applyExternalSessionConfig: (config: { recentSessions?: string[]; pinnedSessions?: string[]; customTitles?: Record<string, string>; worktreeInfoMap?: Record<string, WorktreeInfo>; hiddenSessions?: string[]; hiddenProjects?: string[] }) => void
-  applyRemoteSnapshot: (snapshot: import('../../../shared/remote-protocol').FullStateSnapshot) => void
+  applyExternalSessionConfig: (config: {
+    recentSessions?: string[]
+    pinnedSessions?: string[]
+    customTitles?: Record<string, string>
+    worktreeInfoMap?: Record<string, WorktreeInfo>
+    hiddenSessions?: string[]
+    hiddenProjects?: string[]
+  }) => void
+  applyRemoteSnapshot: (
+    snapshot: import('../../../shared/remote-protocol').FullStateSnapshot
+  ) => void
   setPermissionMode: (mode: PermissionMode, routingId?: string) => void
-  setEffort: (effort: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null, routingId?: string) => void
+  setEffort: (
+    effort: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null,
+    routingId?: string
+  ) => void
   setThinkingMode: (mode: 'adaptive' | 'enabled' | 'disabled' | null, routingId?: string) => void
   setStatusLine: (routingId: string, data: StatusLineData) => void
   appendQueuedText: (text: string) => void
@@ -681,13 +777,18 @@ interface SessionState {
   // Worktree actions
   setWorktreeInfo: (routingId: string, info: WorktreeInfo | null) => void
   clearWorktreeInfo: (routingId: string) => void
-  setQuitWorktrees: (sessions: Array<{ routingId: string; worktreeInfo: WorktreeInfo }> | null) => void
+  setQuitWorktrees: (
+    sessions: Array<{ routingId: string; worktreeInfo: WorktreeInfo }> | null
+  ) => void
   // Git actions
   setIsGitRepo: (routingId: string, value: boolean) => void
   setGitStatus: (routingId: string, status: GitStatusData) => void
   setGitBranches: (routingId: string, branches: GitBranchData) => void
   setGitSelectedFile: (routingId: string, filePath: string | null) => void
-  setGitFileDiff: (routingId: string, diff: { patch: string; isBinary?: boolean; oldContent?: string; newContent?: string } | null) => void
+  setGitFileDiff: (
+    routingId: string,
+    diff: { patch: string; isBinary?: boolean; oldContent?: string; newContent?: string } | null
+  ) => void
   setGitCommitMessage: (routingId: string, message: string) => void
   setGitFileFilter: (routingId: string, filter: 'staged' | 'unstaged' | 'all') => void
   selectNextGitFile: (routingId: string) => void
@@ -695,6 +796,18 @@ interface SessionState {
   closeGitPanel: (routingId: string) => void
   // Account usage
   setAccountUsage: (data: AccountUsage) => void
+  // Native OAuth (ADR-014)
+  setAuthState: (data: AuthState) => void
+  setAuthSource: (source: string) => void
+  setAccountsState: (data: AccountsState) => void
+  /** Mark every session SDK-inactive so the next send respawns cli.js (ADR-015). */
+  respawnAllSessions: () => void
+  signIn: () => Promise<void>
+  submitOAuthCode: (code: string) => Promise<void>
+  cancelSignIn: () => Promise<void>
+  /** Respawn the session's cli.js process (so it re-reads freshly-stored
+   *  credentials) and resend a prompt. Used by the post-login Retry. */
+  retrySend: (routingId: string, prompt: string) => Promise<void>
   // Block usage analytics
   setBlockUsage: (data: BlockUsageData) => void
   setActiveView: (view: ActiveView) => void
@@ -751,6 +864,9 @@ export const useSessionStore = create<SessionState>((set) => ({
   customCommands: [],
   sdkSkillNames: [],
   accountUsage: null,
+  authState: null,
+  authSource: null,
+  accountsState: null,
   blockUsage: null,
   activeView: { type: 'chat' } as ActiveView,
   pluginViews: [],
@@ -762,7 +878,11 @@ export const useSessionStore = create<SessionState>((set) => ({
 
   showWelcome: () =>
     set((state) => {
-      const cleaned = cleanupEmptySession(state.sessions, state.recentSessionIds, state.activeSessionId)
+      const cleaned = cleanupEmptySession(
+        state.sessions,
+        state.recentSessionIds,
+        state.activeSessionId
+      )
       if (cleaned.recentSessionIds !== state.recentSessionIds) {
         saveSessionConfig(state, { recentSessionIds: cleaned.recentSessionIds })
       }
@@ -771,7 +891,11 @@ export const useSessionStore = create<SessionState>((set) => ({
 
   switchSession: (routingId) =>
     set((state) => {
-      const cleaned = cleanupEmptySession(state.sessions, state.recentSessionIds, state.activeSessionId)
+      const cleaned = cleanupEmptySession(
+        state.sessions,
+        state.recentSessionIds,
+        state.activeSessionId
+      )
       if (cleaned.recentSessionIds !== state.recentSessionIds) {
         saveSessionConfig(state, { recentSessionIds: cleaned.recentSessionIds })
       }
@@ -785,16 +909,29 @@ export const useSessionStore = create<SessionState>((set) => ({
 
   createNewSession: (routingId, cwd, switchTo = true) =>
     set((state) => {
-      const recentSessionIds = [routingId, ...state.recentSessionIds.filter((id) => id !== routingId)].slice(0, state.settings.maxRecentSessions)
+      const recentSessionIds = [
+        routingId,
+        ...state.recentSessionIds.filter((id) => id !== routingId)
+      ].slice(0, state.settings.maxRecentSessions)
       saveSessionConfig(state, { recentSessionIds })
       return {
-        ...(switchTo ? { activeSessionId: routingId, activeView: { type: 'chat' } as ActiveView } : {}),
+        ...(switchTo
+          ? { activeSessionId: routingId, activeView: { type: 'chat' } as ActiveView }
+          : {}),
         sessions: { ...state.sessions, [routingId]: createEmptySession(cwd) },
         recentSessionIds
       }
     }),
 
-  loadHistoricalSession: (routingId, messages, cwd, taskNotifications?, subagentMessages?, statusLine?) =>
+  loadHistoricalSession: (
+    routingId,
+    messages,
+    cwd,
+    taskNotifications?,
+    subagentMessages?,
+    statusLine?,
+    warnings?
+  ) =>
     set((state) => ({
       sessions: {
         ...state.sessions,
@@ -805,14 +942,80 @@ export const useSessionStore = create<SessionState>((set) => ({
           taskNotifications: taskNotifications || [],
           subagentMessages: subagentMessages || {},
           statusLine: statusLine ?? null,
+          warnings: warnings || [],
           worktreeInfo: state.worktreeInfoMap[routingId] ?? null
         }
       }
     })),
 
+  forkFromMessage: async (sourceRoutingId, messageId) => {
+    const src = useSessionStore.getState().sessions[sourceRoutingId]
+    if (!src) return null
+    // The on-disk session id: a rekeyed live session or a historical load both
+    // carry it as the routingId; a still-streaming session exposes it on status.
+    const sourceSessionId = src.status.sessionId ?? sourceRoutingId
+
+    const result = await window.api.resolveForkAnchor(sourceSessionId, src.cwd, messageId)
+    if (!result?.anchorUuid) {
+      // The message isn't flushed to the transcript yet (or vanished). Surface
+      // it on the source session rather than silently doing nothing.
+      useSessionStore
+        .getState()
+        .addError(
+          sourceRoutingId,
+          'Cannot branch from this message yet — it has not been saved to the transcript.'
+        )
+      return null
+    }
+    const anchorUuid: string = result.anchorUuid
+
+    // Optimistically seed the branch with messages 1..N (deep-ish copy so edits
+    // to one session never mutate the other). cli.js performs the same slice by
+    // uuid when it materializes the fork, so the displayed history will match.
+    const idx = src.messages.findIndex((m) => m.id === messageId)
+    const sliced = (idx >= 0 ? src.messages.slice(0, idx + 1) : src.messages).map((m) => ({
+      ...m,
+      content: m.content.map((b) => ({ ...b }))
+    }))
+
+    const newRoutingId = crypto.randomUUID()
+    set((s) => {
+      const recentSessionIds = [
+        newRoutingId,
+        ...s.recentSessionIds.filter((id) => id !== newRoutingId)
+      ].slice(0, s.settings.maxRecentSessions)
+      saveSessionConfig(s, { recentSessionIds })
+      return {
+        sessions: {
+          ...s.sessions,
+          [newRoutingId]: {
+            ...createEmptySession(src.cwd),
+            messages: sliced,
+            // Render the seeded history immediately; the fork-spawn path in
+            // InputBox (gated on forkOrigin) overrides the resume target.
+            isHistorical: true,
+            forkOrigin: { sourceSessionId, anchorUuid },
+            // Inherit the source's model/permission/effort/thinking choices.
+            selectedModel: src.selectedModel,
+            permissionMode: src.permissionMode,
+            effort: src.effort,
+            thinkingMode: src.thinkingMode
+          }
+        },
+        activeSessionId: newRoutingId,
+        activeView: { type: 'chat' } as ActiveView,
+        recentSessionIds
+      }
+    })
+    return newRoutingId
+  },
+
   markSdkActive: (routingId) =>
     set((state) => ({
-      sessions: updateSession(state.sessions, routingId, () => ({ sdkActive: true, isHistorical: false }))
+      sessions: updateSession(state.sessions, routingId, () => ({
+        sdkActive: true,
+        isHistorical: false
+      }))
     })),
 
   markSdkInactive: (routingId) =>
@@ -826,7 +1029,10 @@ export const useSessionStore = create<SessionState>((set) => ({
     set((state) => {
       // Don't add pinned sessions to recents — they have their own section
       if (state.pinnedSessionIds.includes(routingId)) return state
-      const recentSessionIds = [routingId, ...state.recentSessionIds.filter((id) => id !== routingId)].slice(0, state.settings.maxRecentSessions)
+      const recentSessionIds = [
+        routingId,
+        ...state.recentSessionIds.filter((id) => id !== routingId)
+      ].slice(0, state.settings.maxRecentSessions)
       saveSessionConfig(state, { recentSessionIds })
       return { recentSessionIds }
     }),
@@ -862,7 +1068,10 @@ export const useSessionStore = create<SessionState>((set) => ({
   unpinSession: (routingId) =>
     set((state) => {
       const pinnedSessionIds = state.pinnedSessionIds.filter((id) => id !== routingId)
-      const recentSessionIds = [routingId, ...state.recentSessionIds.filter((id) => id !== routingId)].slice(0, state.settings.maxRecentSessions)
+      const recentSessionIds = [
+        routingId,
+        ...state.recentSessionIds.filter((id) => id !== routingId)
+      ].slice(0, state.settings.maxRecentSessions)
       saveSessionConfig(state, { pinnedSessionIds, recentSessionIds })
       return { pinnedSessionIds, recentSessionIds }
     }),
@@ -920,13 +1129,30 @@ export const useSessionStore = create<SessionState>((set) => ({
       delete sessions[sessionId]
       // Drop the session from its directory group; drop the group itself if now empty
       const directories = state.directories
-        .map((g) => g.sessions.some((s) => s.sessionId === sessionId)
-          ? { ...g, sessions: g.sessions.filter((s) => s.sessionId !== sessionId) }
-          : g)
+        .map((g) =>
+          g.sessions.some((s) => s.sessionId === sessionId)
+            ? { ...g, sessions: g.sessions.filter((s) => s.sessionId !== sessionId) }
+            : g
+        )
         .filter((g) => g.sessions.length > 0)
       const activeSessionId = state.activeSessionId === sessionId ? null : state.activeSessionId
-      saveSessionConfig(state, { recentSessionIds, pinnedSessionIds, hiddenSessionIds, customTitles, worktreeInfoMap })
-      return { recentSessionIds, pinnedSessionIds, hiddenSessionIds, customTitles, worktreeInfoMap, sessions, directories, activeSessionId }
+      saveSessionConfig(state, {
+        recentSessionIds,
+        pinnedSessionIds,
+        hiddenSessionIds,
+        customTitles,
+        worktreeInfoMap
+      })
+      return {
+        recentSessionIds,
+        pinnedSessionIds,
+        hiddenSessionIds,
+        customTitles,
+        worktreeInfoMap,
+        sessions,
+        directories,
+        activeSessionId
+      }
     })
   },
 
@@ -956,11 +1182,29 @@ export const useSessionStore = create<SessionState>((set) => ({
         delete sessions[id]
       }
       const directories = state.directories.filter((g) => g.projectKey !== projectKey)
-      const activeSessionId = state.activeSessionId && projectSessionIds.has(state.activeSessionId)
-        ? null
-        : state.activeSessionId
-      saveSessionConfig(state, { recentSessionIds, pinnedSessionIds, hiddenSessionIds, hiddenProjectKeys, customTitles, worktreeInfoMap })
-      return { recentSessionIds, pinnedSessionIds, hiddenSessionIds, hiddenProjectKeys, customTitles, worktreeInfoMap, sessions, directories, activeSessionId }
+      const activeSessionId =
+        state.activeSessionId && projectSessionIds.has(state.activeSessionId)
+          ? null
+          : state.activeSessionId
+      saveSessionConfig(state, {
+        recentSessionIds,
+        pinnedSessionIds,
+        hiddenSessionIds,
+        hiddenProjectKeys,
+        customTitles,
+        worktreeInfoMap
+      })
+      return {
+        recentSessionIds,
+        pinnedSessionIds,
+        hiddenSessionIds,
+        hiddenProjectKeys,
+        customTitles,
+        worktreeInfoMap,
+        sessions,
+        directories,
+        activeSessionId
+      }
     })
   },
 
@@ -970,9 +1214,7 @@ export const useSessionStore = create<SessionState>((set) => ({
       const session = sessions[routingId]
 
       const idx = session.messages.findIndex((m) => m.id === message.id)
-      const hasNonThinking = message.content.some(
-        (b) => b.type === 'text' || b.type === 'tool_use'
-      )
+      const hasNonThinking = message.content.some((b) => b.type === 'text' || b.type === 'tool_use')
       const thinkingUpdate =
         session.thinkingStartedAt && hasNonThinking
           ? {
@@ -1012,16 +1254,29 @@ export const useSessionStore = create<SessionState>((set) => ({
       const session = state.sessions[routingId]
       if (!session) return state
 
-      const recentSessionIds = [routingId, ...state.recentSessionIds.filter((rid) => rid !== routingId)].slice(0, state.settings.maxRecentSessions)
+      const recentSessionIds = [
+        routingId,
+        ...state.recentSessionIds.filter((rid) => rid !== routingId)
+      ].slice(0, state.settings.maxRecentSessions)
       saveSessionConfig(state, { recentSessionIds })
 
       const content: ContentBlock[] = []
       if (attachments && attachments.length > 0) {
         for (const att of attachments) {
           if (att.mediaType === 'application/pdf') {
-            content.push({ type: 'document', mediaType: 'application/pdf', base64Data: att.base64Data, fileName: att.fileName })
+            content.push({
+              type: 'document',
+              mediaType: 'application/pdf',
+              base64Data: att.base64Data,
+              fileName: att.fileName
+            })
           } else {
-            content.push({ type: 'image', mediaType: att.mediaType as 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp', base64Data: att.base64Data, fileName: att.fileName })
+            content.push({
+              type: 'image',
+              mediaType: att.mediaType as 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp',
+              base64Data: att.base64Data,
+              fileName: att.fileName
+            })
           }
         }
       }
@@ -1199,6 +1454,36 @@ export const useSessionStore = create<SessionState>((set) => ({
       sessions: updateSession(state.sessions, routingId, () => ({ errors: [] }))
     })),
 
+  addWarning: (routingId, warning) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, routingId, (s) => ({
+        warnings: [...s.warnings, warning]
+      }))
+    })),
+
+  removeWarning: (routingId, index) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, routingId, (s) => ({
+        warnings: s.warnings.filter((_, i) => i !== index)
+      }))
+    })),
+
+  clearWarnings: (routingId) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, routingId, () => ({ warnings: [] }))
+    })),
+
+  retractMessages: (routingId, messageIds) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, routingId, (s) => ({
+        messages:
+          messageIds.length > 0 ? s.messages.filter((m) => !messageIds.includes(m.id)) : s.messages,
+        streamingText: '',
+        streamingThinking: '',
+        thinkingStartedAt: null
+      }))
+    })),
+
   addSandboxViolation: (routingId, message) =>
     set((state) => ({
       sessions: updateSession(state.sessions, routingId, (s) => ({
@@ -1316,7 +1601,7 @@ export const useSessionStore = create<SessionState>((set) => ({
     set((state) => {
       const sessions = ensureSession(state.sessions, routingId)
       const session = sessions[routingId]
-      let current = [...(session.subagentMessages[toolUseId] || [])]
+      const current = [...(session.subagentMessages[toolUseId] || [])]
 
       for (const message of messages) {
         const idx = current.findIndex((m) => m.id === message.id)
@@ -1502,7 +1787,10 @@ export const useSessionStore = create<SessionState>((set) => ({
     set((state) => ({
       sessions: updateSession(state.sessions, routingId, (s) => {
         const updated = s.openedTaskToolUseIds.filter((id) => id !== toolUseId)
-        return { openedTaskToolUseIds: updated, rightPanel: updated.length > 0 ? 'task' as const : 'none' as const }
+        return {
+          openedTaskToolUseIds: updated,
+          rightPanel: updated.length > 0 ? ('task' as const) : ('none' as const)
+        }
       })
     })),
 
@@ -1658,9 +1946,11 @@ export const useSessionStore = create<SessionState>((set) => ({
   setQueuedText: (routingId, text) =>
     set((state) => {
       if (!state.sessions[routingId]) return state
-      return { sessions: updateSession(state.sessions, routingId, (s) => ({
-        queuedText: s.queuedText ? s.queuedText + '\n' + text : text
-      })) }
+      return {
+        sessions: updateSession(state.sessions, routingId, (s) => ({
+          queuedText: s.queuedText ? s.queuedText + '\n' + text : text
+        }))
+      }
     }),
 
   clearQueuedText: () =>
@@ -1713,6 +2003,53 @@ export const useSessionStore = create<SessionState>((set) => ({
   setAvailableModels: (models) => set({ availableModels: models }),
 
   setAccountUsage: (data) => set({ accountUsage: data }),
+
+  // Native OAuth (ADR-014). signIn/submit return the "authorizing"/result
+  // snapshot synchronously; the terminal transition arrives via onAuthState.
+  setAuthState: (data) => set({ authState: data }),
+  setAuthSource: (source) => set({ authSource: source }),
+  setAccountsState: (data) => set({ accountsState: data }),
+  respawnAllSessions: () =>
+    set((s) => ({
+      sessions: Object.fromEntries(
+        Object.entries(s.sessions).map(([id, sess]) => [id, { ...sess, sdkActive: false }])
+      )
+    })),
+  signIn: async () => {
+    set({ authState: { status: 'authorizing', account: null, error: null } })
+    const result = await window.api.signIn()
+    set({ authState: result })
+  },
+  submitOAuthCode: async (code) => {
+    const result = await window.api.submitOAuthCode(code)
+    set({ authState: result })
+  },
+  cancelSignIn: async () => {
+    await window.api.cancelSignIn()
+    set((s) => ({
+      authState: s.authState ? { ...s.authState, status: 'idle', error: null } : null
+    }))
+  },
+  retrySend: async (routingId, prompt) => {
+    const session = useSessionStore.getState().sessions[routingId]
+    if (!session) return
+    // The persistent cli.js process caches credentials for its lifetime, so a
+    // post-login retry MUST respawn it (createSession → session-manager cancels
+    // the old process and spawns a fresh one that re-reads the new credential).
+    // Plain sendPrompt would just push to the stale, still-401ing process.
+    const resumeId = session.messages.length > 0 ? routingId : undefined
+    await window.api.createSession(
+      routingId,
+      session.cwd || '',
+      session.effort ?? undefined,
+      resumeId,
+      session.permissionMode,
+      session.selectedModel,
+      session.thinkingMode ?? undefined
+    )
+    set((s) => ({ sessions: updateSession(s.sessions, routingId, () => ({ sdkActive: true })) }))
+    await window.api.sendPrompt(routingId, prompt)
+  },
   setBlockUsage: (data) => set({ blockUsage: data }),
   setActiveView: (view) => set({ activeView: view }),
   setPluginViews: (views) => set({ pluginViews: views }),
@@ -1740,8 +2077,22 @@ export const useSessionStore = create<SessionState>((set) => ({
         worktreeInfoMap[newId] = worktreeInfoMap[oldId]
         delete worktreeInfoMap[oldId]
       }
-      saveSessionConfig(state, { recentSessionIds, pinnedSessionIds, hiddenSessionIds, customTitles, worktreeInfoMap })
-      return { sessions, activeSessionId, recentSessionIds, pinnedSessionIds, hiddenSessionIds, customTitles, worktreeInfoMap }
+      saveSessionConfig(state, {
+        recentSessionIds,
+        pinnedSessionIds,
+        hiddenSessionIds,
+        customTitles,
+        worktreeInfoMap
+      })
+      return {
+        sessions,
+        activeSessionId,
+        recentSessionIds,
+        pinnedSessionIds,
+        hiddenSessionIds,
+        customTitles,
+        worktreeInfoMap
+      }
     })
   },
 
@@ -1756,7 +2107,6 @@ export const useSessionStore = create<SessionState>((set) => ({
         }
       }
     }),
-
 
   // Worktree actions
   setWorktreeInfo: (routingId, info) =>
@@ -1773,7 +2123,9 @@ export const useSessionStore = create<SessionState>((set) => ({
         sessions: updateSession(state.sessions, routingId, (s) => ({
           worktreeInfo: info,
           // Also update cwd to worktree path so git watcher restarts on the new directory
-          ...(info && info.worktreePath && s.cwd !== info.worktreePath ? { cwd: info.worktreePath } : {})
+          ...(info && info.worktreePath && s.cwd !== info.worktreePath
+            ? { cwd: info.worktreePath }
+            : {})
         }))
       }
     }),
@@ -1836,14 +2188,20 @@ export const useSessionStore = create<SessionState>((set) => ({
     set((state) => {
       const session = state.sessions[routingId]
       if (!session?.gitStatus) {
-        return { sessions: updateSession(state.sessions, routingId, () => ({
-          gitSelectedFile: null, gitFileDiff: null
-        })) }
+        return {
+          sessions: updateSession(state.sessions, routingId, () => ({
+            gitSelectedFile: null,
+            gitFileDiff: null
+          }))
+        }
       }
       const next = session.gitStatus.files[0]?.path ?? null
-      return { sessions: updateSession(state.sessions, routingId, () => ({
-        gitSelectedFile: next, gitFileDiff: null
-      })) }
+      return {
+        sessions: updateSession(state.sessions, routingId, () => ({
+          gitSelectedFile: next,
+          gitFileDiff: null
+        }))
+      }
     }),
 
   openGitPanel: (routingId) =>
@@ -1947,9 +2305,12 @@ export const useSessionStore = create<SessionState>((set) => ({
     set((state) => ({
       sessions: updateSession(state.sessions, routingId, (s) => ({
         planReview: s.planReview
-          ? { ...s.planReview, comments: s.planReview.comments.map((c) =>
-              c.id === commentId ? { ...c, comment: text } : c
-            ) }
+          ? {
+              ...s.planReview,
+              comments: s.planReview.comments.map((c) =>
+                c.id === commentId ? { ...c, comment: text } : c
+              )
+            }
           : null
       }))
     })),
@@ -1966,9 +2327,7 @@ export const useSessionStore = create<SessionState>((set) => ({
   clearPlanComments: (routingId) =>
     set((state) => ({
       sessions: updateSession(state.sessions, routingId, (s) => ({
-        planReview: s.planReview
-          ? { ...s.planReview, comments: [] }
-          : null
+        planReview: s.planReview ? { ...s.planReview, comments: [] } : null
       }))
     })),
 
@@ -2107,7 +2466,7 @@ export const useSessionStore = create<SessionState>((set) => ({
 
 function getActiveCwd(state: SessionState): string | null {
   const id = state.activeSessionId
-  return id ? state.sessions[id]?.cwd ?? null : null
+  return id ? (state.sessions[id]?.cwd ?? null) : null
 }
 
 /** Terminal tabs for the active session's cwd. */
@@ -2156,20 +2515,28 @@ const EMPTY_MESSAGES: ChatMessage[] = []
  * Uses useShallow for shallow equality to avoid infinite re-render loops.
  */
 export function useFocusedAgentData(): FocusedAgentData {
-  return useSessionStore(useShallow((state) => {
-    const id = state.activeSessionId
-    if (!id || !state.sessions[id]) {
-      return { isMain: true, messages: EMPTY_MESSAGES, streamingText: '', streamingThinking: '', thinkingStartedAt: null }
-    }
-    const session = state.sessions[id]
-    return {
-      isMain: true,
-      messages: session.messages,
-      streamingText: session.streamingText,
-      streamingThinking: session.streamingThinking,
-      thinkingStartedAt: session.thinkingStartedAt
-    }
-  }))
+  return useSessionStore(
+    useShallow((state) => {
+      const id = state.activeSessionId
+      if (!id || !state.sessions[id]) {
+        return {
+          isMain: true,
+          messages: EMPTY_MESSAGES,
+          streamingText: '',
+          streamingThinking: '',
+          thinkingStartedAt: null
+        }
+      }
+      const session = state.sessions[id]
+      return {
+        isMain: true,
+        messages: session.messages,
+        streamingText: session.streamingText,
+        streamingThinking: session.streamingThinking,
+        thinkingStartedAt: session.thinkingStartedAt
+      }
+    })
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -2181,28 +2548,31 @@ export function useFocusedAgentData(): FocusedAgentData {
  * Strips UI-only fields (draft text, git diffs, etc.) to keep the payload lean.
  */
 export function getRemoteStateSnapshot(): {
-  sessions: Record<string, {
-    routingId: string
-    cwd: string
-    messages: ChatMessage[]
-    streamingText: string
-    streamingThinking: string
-    status: SessionStatus
-    pendingApprovals: PendingApproval[]
-    todos: TodoItem[]
-    taskNotifications: TaskNotification[]
-    taskProgressMap: Record<string, TaskProgress>
-    subagentMessages: Record<string, ChatMessage[]>
-    subagentStreamingText: Record<string, string>
-    subagentStreamingThinking: Record<string, string>
-    permissionMode: string
-    effort: string
-    thinkingMode: string
-    statusLine: StatusLineData | null
-    slashCommands: SlashCommandInfo[]
-    customCommands: SlashCommandInfo[]
-    sdkSkillNames: string[]
-  }>
+  sessions: Record<
+    string,
+    {
+      routingId: string
+      cwd: string
+      messages: ChatMessage[]
+      streamingText: string
+      streamingThinking: string
+      status: SessionStatus
+      pendingApprovals: PendingApproval[]
+      todos: TodoItem[]
+      taskNotifications: TaskNotification[]
+      taskProgressMap: Record<string, TaskProgress>
+      subagentMessages: Record<string, ChatMessage[]>
+      subagentStreamingText: Record<string, string>
+      subagentStreamingThinking: Record<string, string>
+      permissionMode: string
+      effort: string
+      thinkingMode: string
+      statusLine: StatusLineData | null
+      slashCommands: SlashCommandInfo[]
+      customCommands: SlashCommandInfo[]
+      sdkSkillNames: string[]
+    }
+  >
   directories: DirectoryGroup[]
   activeSessionId: string | null
   settings: Record<string, unknown>

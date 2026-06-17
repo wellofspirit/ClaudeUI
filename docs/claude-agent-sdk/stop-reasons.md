@@ -31,15 +31,15 @@ asyncio.run(check_stop_reason())
 ```
 
 ```typescript TypeScript
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { query } from '@anthropic-ai/claude-agent-sdk'
 
 for await (const message of query({
-  prompt: "Write a poem about the ocean",
+  prompt: 'Write a poem about the ocean'
 })) {
-  if (message.type === "result") {
-    console.log("Stop reason:", message.stop_reason);
-    if (message.stop_reason === "refusal") {
-      console.log("The model declined this request.");
+  if (message.type === 'result') {
+    console.log('Stop reason:', message.stop_reason)
+    if (message.stop_reason === 'refusal') {
+      console.log('The model declined this request.')
     }
   }
 }
@@ -49,26 +49,26 @@ for await (const message of query({
 
 ## Available stop reasons
 
-| Stop reason | Meaning |
-|:------------|:--------|
-| `end_turn` | The model finished generating its response normally. |
-| `max_tokens` | The response reached the maximum output token limit. |
-| `stop_sequence` | The model generated a configured stop sequence. |
-| `refusal` | The model declined to fulfill the request. |
-| `tool_use` | The model's final output was a tool call. This is uncommon in SDK results because tool calls are normally executed before the result is returned. |
-| `null` | No API response was received; for example, an error occurred before the first request, or the result was replayed from a cached session. |
+| Stop reason     | Meaning                                                                                                                                           |
+| :-------------- | :------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `end_turn`      | The model finished generating its response normally.                                                                                              |
+| `max_tokens`    | The response reached the maximum output token limit.                                                                                              |
+| `stop_sequence` | The model generated a configured stop sequence.                                                                                                   |
+| `refusal`       | The model declined to fulfill the request.                                                                                                        |
+| `tool_use`      | The model's final output was a tool call. This is uncommon in SDK results because tool calls are normally executed before the result is returned. |
+| `null`          | No API response was received; for example, an error occurred before the first request, or the result was replayed from a cached session.          |
 
 ## Stop reasons on error results
 
 Error results (such as `error_max_turns` or `error_during_execution`) also carry `stop_reason`. The value reflects the last assistant message received before the error occurred:
 
-| Result variant | `stop_reason` value |
-|:---------------|:-------------------|
-| `success` | The stop reason from the final assistant message. |
-| `error_max_turns` | The stop reason from the last assistant message before the turn limit was hit. |
-| `error_max_budget_usd` | The stop reason from the last assistant message before the budget was exceeded. |
-| `error_max_structured_output_retries` | The stop reason from the last assistant message before the retry limit was hit. |
-| `error_during_execution` | The last stop reason seen, or `null` if the error occurred before any API response. |
+| Result variant                        | `stop_reason` value                                                                 |
+| :------------------------------------ | :---------------------------------------------------------------------------------- |
+| `success`                             | The stop reason from the final assistant message.                                   |
+| `error_max_turns`                     | The stop reason from the last assistant message before the turn limit was hit.      |
+| `error_max_budget_usd`                | The stop reason from the last assistant message before the budget was exceeded.     |
+| `error_max_structured_output_retries` | The stop reason from the last assistant message before the retry limit was hit.     |
+| `error_during_execution`              | The last stop reason seen, or `null` if the error occurred before any API response. |
 
 <CodeGroup>
 
@@ -90,14 +90,14 @@ asyncio.run(handle_max_turns())
 ```
 
 ```typescript TypeScript
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { query } from '@anthropic-ai/claude-agent-sdk'
 
 for await (const message of query({
-  prompt: "Refactor this module",
-  options: { maxTurns: 3 },
+  prompt: 'Refactor this module',
+  options: { maxTurns: 3 }
 })) {
-  if (message.type === "result" && message.subtype === "error_max_turns") {
-    console.log("Hit turn limit. Last stop reason:", message.stop_reason);
+  if (message.type === 'result' && message.subtype === 'error_max_turns') {
+    console.log('Hit turn limit. Last stop reason:', message.stop_reason)
     // stop_reason might be "end_turn" or "tool_use"
     // depending on what the model was doing when the limit hit
   }
@@ -129,22 +129,22 @@ asyncio.run(safe_query("Summarize this article"))
 ```
 
 ```typescript TypeScript
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { query } from '@anthropic-ai/claude-agent-sdk'
 
 async function safeQuery(prompt: string): Promise<string | null> {
   for await (const message of query({ prompt })) {
-    if (message.type === "result") {
-      if (message.stop_reason === "refusal") {
-        console.log("Request was declined. Please revise your prompt.");
-        return null;
+    if (message.type === 'result') {
+      if (message.stop_reason === 'refusal') {
+        console.log('Request was declined. Please revise your prompt.')
+        return null
       }
-      if (message.subtype === "success") {
-        return message.result;
+      if (message.subtype === 'success') {
+        return message.result
       }
-      return null;
+      return null
     }
   }
-  return null;
+  return null
 }
 ```
 

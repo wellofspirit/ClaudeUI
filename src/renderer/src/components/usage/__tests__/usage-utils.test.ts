@@ -7,7 +7,7 @@ import {
   formatTime,
   formatShortDate,
   formatDuration,
-  getModelColor,
+  getModelColor
 } from '../usage-utils'
 
 describe('formatTokenCount', () => {
@@ -60,21 +60,25 @@ describe('formatCost', () => {
 
 describe('sumTokens', () => {
   it('sums all token fields', () => {
-    expect(sumTokens({
-      inputTokens: 100,
-      outputTokens: 200,
-      cacheCreationTokens: 50,
-      cacheReadTokens: 25,
-    })).toBe(375)
+    expect(
+      sumTokens({
+        inputTokens: 100,
+        outputTokens: 200,
+        cacheCreationTokens: 50,
+        cacheReadTokens: 25
+      })
+    ).toBe(375)
   })
 
   it('returns 0 for all-zero counts', () => {
-    expect(sumTokens({
-      inputTokens: 0,
-      outputTokens: 0,
-      cacheCreationTokens: 0,
-      cacheReadTokens: 0,
-    })).toBe(0)
+    expect(
+      sumTokens({
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheCreationTokens: 0,
+        cacheReadTokens: 0
+      })
+    ).toBe(0)
   })
 })
 
@@ -89,6 +93,11 @@ describe('shortModelName', () => {
 
   it('formats haiku with major.minor version', () => {
     expect(shortModelName('claude-haiku-4-5-20251001')).toBe('Haiku 4.5')
+  })
+
+  it('formats fable, including the [1m] context suffix', () => {
+    expect(shortModelName('claude-fable-5')).toBe('Fable 5')
+    expect(shortModelName('claude-fable-5[1m]')).toBe('Fable 5')
   })
 
   it('formats opus 4.5 distinctly from 4.6', () => {
@@ -191,16 +200,21 @@ describe('getModelColor', () => {
     // The first call sets the cache. This is intentional and tests the caching.
   })
 
-  it('returns purple for opus models', () => {
-    expect(getModelColor('claude-opus-4-6')).toBe('#8b5fcc')
+  it('returns electric indigo for opus models', () => {
+    expect(getModelColor('claude-opus-4-6')).toBe('#7c5cff')
   })
 
-  it('returns blue for sonnet models', () => {
-    expect(getModelColor('claude-sonnet-4-6')).toBe('#6c9eff')
+  it('returns terracotta coral for fable models', () => {
+    expect(getModelColor('claude-fable-5')).toBe('#d97757')
+    expect(getModelColor('claude-fable-5[1m]')).toBe('#d97757')
   })
 
-  it('returns green for haiku models', () => {
-    expect(getModelColor('claude-haiku-4-5')).toBe('#4ade80')
+  it('returns amber for sonnet models', () => {
+    expect(getModelColor('claude-sonnet-4-6')).toBe('#e8a728')
+  })
+
+  it('returns cyan for haiku models', () => {
+    expect(getModelColor('claude-haiku-4-5')).toBe('#06b6d4')
   })
 
   it('returns a fallback color for unknown models', () => {

@@ -88,10 +88,7 @@ export function BlockTimeline({
 
   // Visible x-axis range
   const firstSnapTs = blockSnaps[0].timestamp
-  const visibleStart = Math.max(
-    blockStartTime,
-    Math.floor(firstSnapTs / MS_PER_HOUR) * MS_PER_HOUR
-  )
+  const visibleStart = Math.max(blockStartTime, Math.floor(firstSnapTs / MS_PER_HOUR) * MS_PER_HOUR)
   const visibleEnd = blockEndTime
   const timeRange = visibleEnd - visibleStart
 
@@ -105,8 +102,7 @@ export function BlockTimeline({
   // X-axis time labels (every hour)
   const hourLabels: Array<{ x: number; label: string }> = []
   const firstHourLabel = Math.ceil(visibleStart / MS_PER_HOUR) * MS_PER_HOUR
-  const xScale = (ts: number): number =>
-    padL + ((ts - visibleStart) / timeRange) * chartW
+  const xScale = (ts: number): number => padL + ((ts - visibleStart) / timeRange) * chartW
   for (let t = firstHourLabel; t <= visibleEnd; t += MS_PER_HOUR) {
     hourLabels.push({ x: xScale(t), label: formatTime(t) })
   }
@@ -251,10 +247,8 @@ function AreaChart({
   }
   if (maxTokens === 0) maxTokens = 1
 
-  const yScale = (val: number): number =>
-    padT + chartH - (val / maxTokens) * chartH
-  const apiYScale = (pct: number): number =>
-    padT + chartH - (pct / 100) * chartH
+  const yScale = (val: number): number => padT + chartH - (val / maxTokens) * chartH
+  const apiYScale = (pct: number): number => padT + chartH - (pct / 100) * chartH
 
   // Build stacked area paths per model
   const modelPaths: Array<{ model: string; color: string; path: string }> = []
@@ -282,8 +276,7 @@ function AreaChart({
       lowerPoints.push(`${x},${yScale(lowerSum)}`)
     }
 
-    const pathD =
-      `M ${upperPoints.join(' L ')} L ${lowerPoints.reverse().join(' L ')} Z`
+    const pathD = `M ${upperPoints.join(' L ')} L ${lowerPoints.reverse().join(' L ')} Z`
     modelPaths.push({ model, color: getModelColor(model), path: pathD })
   }
 
@@ -426,9 +419,7 @@ function AreaChart({
       </svg>
 
       {/* Hover tooltip */}
-      {hoverSnap && (
-        <SnapTooltip snap={hoverSnap} modelList={modelList} />
-      )}
+      {hoverSnap && <SnapTooltip snap={hoverSnap} modelList={modelList} />}
     </>
   )
 }
@@ -525,10 +516,8 @@ function BarChart({
   }
   if (maxDelta === 0) maxDelta = 1
 
-  const yScale = (val: number): number =>
-    padT + chartH - (val / maxDelta) * chartH
-  const apiYScale = (pct: number): number =>
-    padT + chartH - (pct / 100) * chartH
+  const yScale = (val: number): number => padT + chartH - (val / maxDelta) * chartH
+  const apiYScale = (pct: number): number => padT + chartH - (pct / 100) * chartH
 
   // Bar geometry
   const barWidthFrac = BUCKET_MS / timeRange
@@ -694,7 +683,8 @@ function BarChart({
             {formatTime(hoverBucket.startTs)} – {formatTime(hoverBucket.endTs)}
           </div>
           <div className="text-text-muted">
-            API: <span className="text-red-400 font-mono">{Math.round(hoverBucket.avgApiPercent)}%</span>
+            API:{' '}
+            <span className="text-red-400 font-mono">{Math.round(hoverBucket.avgApiPercent)}%</span>
           </div>
           <div className="text-text-muted">
             Δ Tokens:{' '}
@@ -712,9 +702,7 @@ function BarChart({
                   style={{ backgroundColor: getModelColor(model) }}
                 />
                 <span className="text-text-muted">{shortModelName(model)}:</span>
-                <span className="text-text-primary font-mono">
-                  +{formatTokenCount(delta)}
-                </span>
+                <span className="text-text-primary font-mono">+{formatTokenCount(delta)}</span>
               </div>
             )
           })}
@@ -756,14 +744,13 @@ function SnapTooltip({
             style={{ backgroundColor: getModelColor(m.model) }}
           />
           <span className="text-text-muted">{shortModelName(m.model)}:</span>
-          <span className="text-text-primary font-mono">
-            {formatTokenCount(totalFromModel(m))}
-          </span>
+          <span className="text-text-primary font-mono">{formatTokenCount(totalFromModel(m))}</span>
         </div>
       ))}
       {snap.burnRate && (
         <div className="text-text-muted">
-          Burn: <span className="font-mono">{formatTokenCount(snap.burnRate.tokensPerMin)} tok/min</span>
+          Burn:{' '}
+          <span className="font-mono">{formatTokenCount(snap.burnRate.tokensPerMin)} tok/min</span>
         </div>
       )}
     </div>
