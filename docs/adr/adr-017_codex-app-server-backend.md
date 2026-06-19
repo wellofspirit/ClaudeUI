@@ -1,7 +1,11 @@
 # ADR-017: Codex backend via app-server protocol
 
-**Status:** Accepted
+**Status:** Superseded by [ADR-019](adr-019_opencode-engine-backend.md) (opencode engine backend)
 **Date:** 2026-06-17
+
+> Superseded: ClaudeUI pivots its second engine from Codex to opencode (a meta-harness that subsumes
+> OpenAI models). The Codex backend is removed (recoverable from `codex-sup` git history) and demoted
+> to a dormant fallback should OpenAI ever de-support opencode. See ADR-019.
 
 ## Context
 

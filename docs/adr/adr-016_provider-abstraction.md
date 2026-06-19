@@ -1,7 +1,12 @@
 # ADR-016: Provider abstraction — ISession / BaseSession / ProviderRegistry
 
-**Status:** Accepted
+**Status:** Superseded by [ADR-018](adr-018_v2-engine-vendor-account-model.md) (V2 engine/vendor/account model)
 **Date:** 2026-06-17
+
+> Superseded: the `ISession`/`BaseSession`/`ProviderRegistry` seam and the "ContentBlock is the
+> neutral model" decision are retained, but `ProviderId`→`EngineId` and the frozen per-provider
+> `SessionCapabilities` constant is replaced by the computed engine+model capability model. See
+> ADR-018.
 
 ## Context
 
