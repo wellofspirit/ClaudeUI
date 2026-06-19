@@ -14,7 +14,6 @@ import type {
 import { logger } from './logger'
 import { getContextWindowSize } from './context-window'
 import { findForkAnchorUuid } from './fork-anchor'
-import { listCodexSessions } from '../codex/codexSessions'
 
 const CLAUDE_PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects')
 const CACHE_DIR = path.join(os.homedir(), '.claude', 'ui')
@@ -300,53 +299,6 @@ export async function listDirectories(): Promise<DirectoryGroup[]> {
   // Persist cache if anything changed
   if (cacheChanged) {
     saveDiskCache(cache)
-  }
-
-  // ── Merge Codex sessions into the same DirectoryGroup subtree ─────────────
-  // Build a map from cwd → group for O(1) lookup. Codex sessions with a cwd
-  // matching an existing Claude group are folded in; new cwds get their own group.
-  let codexSessions: SessionInfo[] = []
-  try {
-    codexSessions = await listCodexSessions()
-  } catch (err) {
-    logger.warn('SessionHistory', 'Failed to scan Codex sessions', err)
-  }
-
-  if (codexSessions.length > 0) {
-    // Index existing groups by their canonical cwd
-    const groupByCwd = new Map<string, DirectoryGroup>()
-    for (const g of groups) {
-      if (g.cwd) groupByCwd.set(g.cwd, g)
-    }
-
-    for (const cs of codexSessions) {
-      if (!cs.cwd) continue
-      const existing = groupByCwd.get(cs.cwd)
-      if (existing) {
-        // Fold into existing group — avoid duplicates (same sessionId from prior run)
-        const alreadyPresent = existing.sessions.some((s) => s.sessionId === cs.sessionId)
-        if (!alreadyPresent) {
-          existing.sessions.push(cs)
-        }
-      } else {
-        // New group: cwd only has Codex sessions
-        const folderName = cs.cwd.split(/[\\/]/).pop() || cs.cwd
-        const newGroup: DirectoryGroup = {
-          cwd: cs.cwd,
-          projectKey: cs.projectKey,
-          folderName,
-          sessions: [cs]
-        }
-        groups.push(newGroup)
-        groupByCwd.set(cs.cwd, newGroup)
-      }
-    }
-
-    // Re-sort each group's sessions by lastActivityAt desc (Codex entries may
-    // have changed the order within mixed groups)
-    for (const g of groups) {
-      g.sessions.sort((a, b) => b.lastActivityAt - a.lastActivityAt)
-    }
   }
 
   groups.sort((a, b) => {

@@ -7,7 +7,6 @@ import type {
   SessionInfo,
   WorktreeInfo
 } from '../../../../shared/types'
-import { CODEX_CAPABILITIES } from '../../../../shared/types'
 import { useAutomationStore } from '../../stores/automation-store'
 import { useIsMobile } from '../../hooks/useIsMobile'
 import { SidebarView, type DeleteTarget } from './View'
@@ -269,42 +268,7 @@ export function Sidebar({
       return
     }
 
-    // Route history loading by provider. Prefer `info.provider` (authoritative from
-    // the directory scan) over the persisted sessionProviders map (which may be absent
-    // for sessions loaded from disk that were never opened in this run).
-    const provider = info.provider ?? sessionProviders[info.sessionId] ?? 'claude'
-
-    if (provider === 'codex') {
-      // Codex: load via thread/read. threadId === sessionId for Codex sessions.
-      const { messages } = await window.api.loadCodexHistory(info.sessionId, info.cwd)
-      loadHistoricalSession(routingId, messages, info.cwd, [], {}, null, [])
-      // Patch selectedProvider + status.provider/capabilities so the session
-      // spawns as Codex on next send and capability gating is correct immediately
-      // on history load (before the first spawn's session:status arrives).
-      useSessionStore.setState((state) => {
-        const existing = state.sessions[routingId]
-        if (!existing) return state
-        return {
-          sessions: {
-            ...state.sessions,
-            [routingId]: {
-              ...existing,
-              selectedProvider: 'codex' as const,
-              status: {
-                ...existing.status,
-                provider: 'codex' as const,
-                capabilities: CODEX_CAPABILITIES
-              }
-            }
-          }
-        }
-      })
-      switchSession(routingId)
-      if (isMobile && onToggleCollapse) onToggleCollapse()
-      return
-    }
-
-    // Claude: Load from JSONL
+    // Load from JSONL
     const { messages, taskNotifications, customTitle, agentIdToToolUseId, statusLine, warnings } =
       await window.api.loadSessionHistory(info.sessionId, info.projectKey)
 
@@ -361,52 +325,31 @@ export function Sidebar({
   const handleToggleWatch = (info: SessionInfo): void => {
     const routingId = info.sessionId
     const session = useSessionStore.getState().sessions[routingId]
-    const isCodex = info.provider === 'codex'
     if (session?.isWatching) {
-      if (isCodex) {
-        window.api.unwatchCodexSession(routingId)
-      } else {
-        window.api.unwatchSession(routingId)
-      }
+      window.api.unwatchSession(routingId)
       setWatching(routingId, false)
     } else {
-      if (isCodex) {
-        // Codex: load via app-server thread/read, then start watching the rollout file
-        if (!session) {
-          window.api
-            .loadCodexHistory(info.sessionId, info.cwd)
-            .then(({ messages }) => {
-              loadHistoricalSession(routingId, messages, info.cwd, [], {}, null, [])
-              window.api.watchCodexSession(routingId, info.sessionId, info.cwd)
-              setWatching(routingId, true)
-            })
-        } else {
-          window.api.watchCodexSession(routingId, info.sessionId, info.cwd)
-          setWatching(routingId, true)
-        }
+      // Load JSONL history if not already in memory, then watch the .jsonl file
+      if (!session) {
+        window.api
+          .loadSessionHistory(info.sessionId, info.projectKey)
+          .then(({ messages, taskNotifications, customTitle: ct, statusLine: sl, warnings }) => {
+            loadHistoricalSession(
+              routingId,
+              messages,
+              info.cwd,
+              taskNotifications,
+              {},
+              sl,
+              warnings
+            )
+            if (ct) setCustomTitle(routingId, ct)
+            window.api.watchSession(routingId, info.sessionId, info.projectKey)
+            setWatching(routingId, true)
+          })
       } else {
-        // Claude: load JSONL history, then watch the .jsonl file
-        if (!session) {
-          window.api
-            .loadSessionHistory(info.sessionId, info.projectKey)
-            .then(({ messages, taskNotifications, customTitle: ct, statusLine: sl, warnings }) => {
-              loadHistoricalSession(
-                routingId,
-                messages,
-                info.cwd,
-                taskNotifications,
-                {},
-                sl,
-                warnings
-              )
-              if (ct) setCustomTitle(routingId, ct)
-              window.api.watchSession(routingId, info.sessionId, info.projectKey)
-              setWatching(routingId, true)
-            })
-        } else {
-          window.api.watchSession(routingId, info.sessionId, info.projectKey)
-          setWatching(routingId, true)
-        }
+        window.api.watchSession(routingId, info.sessionId, info.projectKey)
+        setWatching(routingId, true)
       }
     }
   }
@@ -522,9 +465,7 @@ export function Sidebar({
   )
 
   const handleDeleteSessionRequest = useCallback((info: SessionInfo) => {
-    // Codex sessions don't use ~/.claude/projects/ paths — allow them through
-    // even when projectKey is empty. Claude sessions still require a projectKey.
-    if (!info.projectKey && info.provider !== 'codex') return
+    if (!info.projectKey) return
     setDeleteTarget({
       kind: 'session',
       sessionId: info.sessionId,
@@ -547,8 +488,6 @@ export function Sidebar({
   const confirmDelete = useCallback(async (): Promise<void> => {
     if (!deleteTarget) return
     if (deleteTarget.kind === 'session') {
-      // Store action is provider-aware: routes to the Codex or Claude delete IPC
-      // and performs the same in-memory + persisted-config scrub for both.
       await deleteSessionAction(
         deleteTarget.sessionId,
         deleteTarget.projectKey,

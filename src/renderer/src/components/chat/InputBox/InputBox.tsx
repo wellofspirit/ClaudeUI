@@ -179,7 +179,6 @@ export function InputBox(): React.JSX.Element {
 
   // Capability gating — use status.capabilities (authoritative after spawn;
   // seeded from selectedProvider before spawn via createNewSession).
-  const selectedProvider = useActiveSession((s) => s.selectedProvider)
   const capabilities = useActiveSession((s) => s.status.capabilities)
 
   // Voice input
@@ -189,47 +188,23 @@ export function InputBox(): React.JSX.Element {
   const voiceInterimTranscript = useActiveSession((s) => s.voiceInterimTranscript)
   const clearVoiceTranscript = useSessionStore((s) => s.clearVoiceTranscript)
 
-  // Load models: Claude models via getModels(), Codex models via getCodexModels(cwd).
-  // Re-fetches whenever the active session's provider or cwd changes.
-  // `loadedModelsKey` tracks the provider:cwd the current list was loaded for.
+  // Load Claude models via getModels(). Re-fetches when cwd changes.
   const loadedModelsKey = useRef<string | null>(null)
   useEffect(() => {
-    const key = `${selectedProvider}:${cwd ?? ''}`
-    // Clear synchronously ONLY when the provider/cwd actually changes from what
-    // the list was last loaded for, so switching from a Codex session to a
-    // Claude one (or vice versa) can't briefly show the previous provider's
-    // list — which would let a stray model pick set an invalid model on the new
-    // provider. (Skipping the first run avoids wiping a pre-populated list.)
+    const key = cwd ?? ''
     if (loadedModelsKey.current !== null && loadedModelsKey.current !== key) {
       setAvailableModels([])
     }
     loadedModelsKey.current = key
 
-    // `ignore` discards a late resolution from a now-superseded provider/cwd.
     let ignore = false
-    if (selectedProvider === 'codex') {
-      if (!cwd) {
-        setAvailableModels([])
-        return
-      }
-      window.api
-        .getCodexModels(cwd)
-        .then((models) => {
-          // Fall back gracefully if empty (not authed / not installed)
-          if (!ignore) setAvailableModels(models)
-        })
-        .catch(() => {
-          if (!ignore) setAvailableModels([])
-        })
-    } else {
-      window.api.getModels().then((models) => {
-        if (!ignore) setAvailableModels(models)
-      })
-    }
+    window.api.getModels().then((models) => {
+      if (!ignore) setAvailableModels(models)
+    })
     return () => {
       ignore = true
     }
-  }, [selectedProvider, cwd, setAvailableModels])
+  }, [cwd, setAvailableModels])
 
   useEffect(() => {
     if (!isRunning) textareaRef.current?.focus()
@@ -706,9 +681,7 @@ export function InputBox(): React.JSX.Element {
       thinkingMode={effectiveThinking}
       adaptiveSupported={adaptiveSupported}
       showThinkingPicker={capabilities.thinkingModes}
-      // Show the model picker for both Claude and Codex (hide only when Codex
-      // returned no models — not installed / not authenticated).
-      showModelPicker={selectedProvider === 'claude' || models.length > 0}
+      showModelPicker={true}
       showCostInStatusLine={capabilities.costUsd}
       sandboxEnabled={sandboxEnabled}
       voiceEnabled={voiceEnabled && capabilities.voice}

@@ -15,7 +15,8 @@ export interface ApprovalCardViewProps {
   checkedSuggestions: boolean[]
   onToggleSuggestion: (index: number) => void
   onRespond: (decision: ApprovalDecision) => void
-  /** When true, renders the "Allow for session" button (Codex-only feature). */
+  /** When true, renders the "Allow for session" button. No current producer —
+   *  will be re-wired when opencode is integrated in Phase 5. */
   showAllowForSession?: boolean
 }
 
@@ -203,7 +204,6 @@ function ApprovalCard({ approval }: { approval: PendingApproval }): React.JSX.El
   const updateSettings = useSessionStore((s) => s.updateSettings)
   const sandboxSettings = useSessionStore((s) => s.settings.sandbox)
   const permissionMode = useActiveSession((s) => s.permissionMode)
-  const isCodex = useActiveSession((s) => s.selectedProvider === 'codex')
   const [alwaysAllow, setAlwaysAllow] = useState(false)
   const [checkedSuggestions, setCheckedSuggestions] = useState<boolean[]>(() =>
     (approval.suggestions || []).map(() => false)
@@ -254,7 +254,6 @@ function ApprovalCard({ approval }: { approval: PendingApproval }): React.JSX.El
         setCheckedSuggestions((prev) => prev.map((v, j) => (j === i ? !v : v)))
       }
       onRespond={handleRespond}
-      showAllowForSession={isCodex}
     />
   )
 }

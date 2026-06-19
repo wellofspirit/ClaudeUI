@@ -1,8 +1,14 @@
-import type { ChatMessage, SessionCapabilities, ProviderId, ApprovalDecision, PermissionSuggestion } from '../../shared/types'
+import type {
+  ChatMessage,
+  SessionCapabilities,
+  ProviderId,
+  ApprovalDecision,
+  PermissionSuggestion
+} from '../../shared/types'
 
 /**
  * Provider-neutral session interface. All methods here are implemented by
- * every backend (Claude, future Codex, etc.). Claude-specific capabilities
+ * every backend (Claude, opencode, etc.). Engine-specific capabilities
  * (voice, MCP, background tasks, etc.) live on ClaudeSession directly and
  * are gated behind `capabilities` flags.
  */

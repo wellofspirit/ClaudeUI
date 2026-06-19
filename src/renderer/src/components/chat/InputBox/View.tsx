@@ -78,11 +78,11 @@ export interface InputBoxViewProps {
   allowedEffortLevels: readonly EffortLevel[]
   thinkingMode: ThinkingMode
   adaptiveSupported: boolean
-  /** Show/hide the thinking-mode picker (false for Codex). */
+  /** Show/hide the thinking-mode picker. Gated on capabilities.thinkingModes. */
   showThinkingPicker?: boolean
-  /** Show/hide the Claude model picker (false for Codex — deferred follow-up). */
+  /** Show/hide the model picker. Always shown for Claude; the picker tolerates an empty/loading model list. */
   showModelPicker?: boolean
-  /** Whether to include cost in the status line (false for Codex). */
+  /** Whether to include cost in the status line. Gated on capabilities.costUsd. */
   showCostInStatusLine?: boolean
   sandboxEnabled: boolean
   voiceEnabled: boolean
@@ -122,7 +122,7 @@ function StatusLine({
   const align = useSessionStore((s) => s.settings.statusLineAlign)
   const rawTemplate = useSessionStore((s) => s.settings.statusLineTemplate)
 
-  // Strip the cost placeholder when the provider doesn't report cost (e.g. Codex).
+  // Strip the cost placeholder when the provider doesn't report cost.
   const template = showCost ? rawTemplate : rawTemplate.replace(/\{cost\}/g, '')
 
   // usedPercentage/remainingPercentage are computed in the main process (live:
@@ -552,7 +552,10 @@ export function InputBoxView(props: InputBoxViewProps): React.JSX.Element {
             </div>
           </div>
         </div>
-        <StatusLine data={statusLine ?? DEFAULT_STATUS_LINE} showCost={props.showCostInStatusLine ?? true} />
+        <StatusLine
+          data={statusLine ?? DEFAULT_STATUS_LINE}
+          showCost={props.showCostInStatusLine ?? true}
+        />
       </div>
     </div>
   )

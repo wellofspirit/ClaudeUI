@@ -148,10 +148,6 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
         ClaudeAPI['loadSessionHistory']
       >,
 
-    // Codex history loader — not tunnelled via remote bridge (desktop-only operation).
-    loadCodexHistory: (_threadId, _cwd) =>
-      Promise.resolve({ messages: [] }),
-
     loadSubagentHistory: (sessionId, projectKey, agentId) =>
       connection.invoke(
         'session:load-subagent-history',
@@ -184,13 +180,6 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     deleteSession: (sessionId, projectKey) =>
       unwrap('session:delete-session', sessionId, projectKey),
     deleteProject: (projectKey) => unwrap('session:delete-project', projectKey),
-
-    // Codex session delete — mirrors the desktop safeHandler envelope.
-    deleteCodexSession: (sessionId) => unwrap('session:delete-codex-session', sessionId),
-    // Codex watch needs a BrowserWindow and isn't tunnelled via remote-handlers —
-    // desktop-only no-ops on the web client (v1).
-    watchCodexSession: (_routingId, _sessionId, _cwd) => Promise.resolve(),
-    unwatchCodexSession: (_routingId) => Promise.resolve(),
 
     // Routed session events
     onSessionCreated: on('session:created') as ClaudeAPI['onSessionCreated'],
@@ -282,11 +271,6 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     setThinkingMode: (routingId, mode) =>
       connection.invoke('session:set-thinking-mode', routingId, mode) as Promise<void>,
     getModels: () => connection.invoke('session:get-models') as ReturnType<ClaudeAPI['getModels']>,
-
-    // Codex-specific — desktop-only operations, not tunnelled via remote bridge.
-    getCodexModels: (_cwd) => Promise.resolve([]),
-    getCodexStatus: (_cwd) =>
-      Promise.resolve({ authenticated: false, requiresLogin: false, notInstalled: true }),
 
     // Generation
     generateTitle: (conversationText) =>

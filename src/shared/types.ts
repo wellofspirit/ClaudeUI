@@ -38,7 +38,7 @@ export interface ChatMessage {
   planContent?: string
 }
 
-export type ProviderId = 'claude' | 'codex'
+export type ProviderId = 'claude'
 
 export interface SessionCapabilities {
   thinkingModes: boolean
@@ -68,23 +68,9 @@ export const CLAUDE_CAPABILITIES: SessionCapabilities = Object.freeze({
   sideQuestion: true
 })
 
-/** Capability set for the Codex backend. Frozen for the same reason. */
-export const CODEX_CAPABILITIES: SessionCapabilities = Object.freeze({
-  thinkingModes: false,
-  effortLevels: true,
-  voice: false,
-  hostedMcp: false,
-  backgroundTasks: false,
-  subagents: false,
-  plan: true,
-  costUsd: false,
-  fork: true,
-  sideQuestion: false
-})
-
 /** Return the frozen capabilities constant for a given provider. */
-export function capabilitiesFor(provider: ProviderId): SessionCapabilities {
-  return provider === 'codex' ? CODEX_CAPABILITIES : CLAUDE_CAPABILITIES
+export function capabilitiesFor(_provider: ProviderId): SessionCapabilities {
+  return CLAUDE_CAPABILITIES
 }
 
 export interface SessionStatus {
@@ -348,25 +334,6 @@ export interface ModelInfo {
   supportsAdaptiveThinking?: boolean
 }
 
-/** Result of a Codex auth probe (getCodexStatus IPC). */
-export interface CodexStatus {
-  /** True when account/read returned an account object. */
-  authenticated: boolean
-  /** ChatGPT account email — only present when account.type === 'chatgpt'. */
-  email?: string
-  /** Human-readable plan description (e.g. "ChatGPT Plus"). */
-  planLabel?: string
-  /**
-   * True when unauthenticated AND requiresOpenaiAuth — user should run
-   * `codex login`.
-   */
-  requiresLogin: boolean
-  /** True when the codex binary was not found or could not be spawned. */
-  notInstalled?: boolean
-  /** Error message from an unexpected failure (timeout, RPC error, etc.). */
-  error?: string
-}
-
 export interface SessionInfo {
   sessionId: string
   cwd: string
@@ -452,21 +419,6 @@ interface SessionAPI {
     taskPrompts: Record<string, string>
     warnings: string[]
   }>
-  /** Codex-specific history loader: spawns app-server, calls thread/read. */
-  loadCodexHistory(
-    threadId: string,
-    cwd: string
-  ): Promise<{ messages: ChatMessage[] }>
-  /**
-   * Load the list of models available in a Codex app-server for the given
-   * working directory. Returns [] if Codex is not installed or not authed.
-   */
-  getCodexModels(cwd: string): Promise<ModelInfo[]>
-  /**
-   * Probe the Codex auth state (account/read). Distinguishes "not installed"
-   * from "not authenticated" from "authenticated".
-   */
-  getCodexStatus(cwd: string): Promise<CodexStatus>
   loadSubagentHistory(
     sessionId: string,
     projectKey: string,
@@ -548,12 +500,6 @@ interface SessionAPI {
   getSessionLogPath(routingId: string): Promise<string | null>
   watchSession(routingId: string, sessionId: string, projectKey: string): Promise<void>
   unwatchSession(routingId: string): Promise<void>
-  /** Permanently delete a Codex session's rollout-*.jsonl from CODEX_HOME/sessions/ */
-  deleteCodexSession(sessionId: string): Promise<void>
-  /** Start watching a Codex session's rollout file for live reload */
-  watchCodexSession(routingId: string, sessionId: string, cwd: string): Promise<void>
-  /** Stop watching a Codex session's rollout file */
-  unwatchCodexSession(routingId: string): Promise<void>
   onWatchUpdate(cb: (data: WatchUpdate) => void): () => void
   onDirectoriesChanged(cb: () => void): () => void
   onSlashCommands(cb: (routingId: string, commands: SlashCommandInfo[]) => void): () => void
@@ -568,7 +514,7 @@ interface SessionAPI {
   saveSettings(settings: Record<string, unknown>): Promise<void>
   loadSessionConfig(): Promise<UISessionConfig>
   saveSessionConfig(config: UISessionConfig): Promise<void>
-  /** Permanently delete a Claude session's JSONL + subagent directory from disk */
+  /** Permanently delete a session's JSONL + subagent directory from disk */
   deleteSession(sessionId: string, projectKey: string): Promise<void>
   /** Permanently delete an entire Claude project directory (all sessions) from disk */
   deleteProject(projectKey: string): Promise<void>

@@ -1,10 +1,9 @@
 /**
- * Unit tests for provider persistence in session-store (Phase 6).
+ * Unit tests for provider persistence in session-store.
  *
  * Validates that:
- *   - selectedProvider is written to sessionProviders on createNewSession
- *   - Claude ('claude') is the default and is NOT written to sessionProviders
- *   - sessionProviders is carried over through rekeySession
+ *   - selectedProvider is NOT written to sessionProviders when it's the default ('claude')
+ *   - sessionProviders is carried over correctly through rekeySession
  *   - applyExternalSessionConfig restores sessionProviders from disk config
  *
  * Pattern: pure store state transitions, no React, no TestIpcBridge.
@@ -19,7 +18,6 @@ let saveSessionConfigSpy: ReturnType<typeof vi.fn>
 
 beforeEach(() => {
   saveSessionConfigSpy = vi.fn()
-
   ;(globalThis as any).window = globalThis.window || {}
   ;(globalThis as any).window.api = {
     saveSessionConfig: saveSessionConfigSpy,
@@ -55,42 +53,15 @@ describe('provider persistence: createNewSession', () => {
     expect(lastCall?.sessionProviders).toEqual({})
   })
 
-  it('writes to sessionProviders when provider is codex', () => {
-    useSessionStore.setState({ lastSelectedProvider: 'codex' as ProviderId })
-    store().createNewSession('r2', '/tmp/proj')
-    expect(store().sessionProviders['r2']).toBe('codex')
-    const lastCall = saveSessionConfigSpy.mock.calls.at(-1)?.[0] as Record<string, unknown>
-    expect((lastCall?.sessionProviders as Record<string, string>)?.['r2']).toBe('codex')
-  })
-
-  it('sets selectedProvider on the created session state', () => {
-    useSessionStore.setState({ lastSelectedProvider: 'codex' as ProviderId })
-    store().createNewSession('r3', '/tmp/proj')
-    expect(store().sessions['r3']?.selectedProvider).toBe('codex')
-    expect(store().sessions['r3']?.status.provider).toBe('codex')
-  })
-
   it('selectedProvider defaults to claude on newly created session when lastSelectedProvider is claude', () => {
     useSessionStore.setState({ lastSelectedProvider: 'claude' as ProviderId })
     store().createNewSession('r4', '/tmp/proj')
     expect(store().sessions['r4']?.selectedProvider).toBe('claude')
+    expect(store().sessions['r4']?.status.provider).toBe('claude')
   })
 })
 
 describe('provider persistence: rekeySession', () => {
-  it('carries over codex provider from temporary routingId to canonical threadId', () => {
-    // Set up: routingId 'temp' with codex provider
-    useSessionStore.setState({
-      lastSelectedProvider: 'codex' as ProviderId,
-      sessionProviders: { temp: 'codex' as ProviderId }
-    })
-    store().createNewSession('temp', '/tmp/proj')
-    // Rekey: temp → real-thread-id
-    store().rekeySession('temp', 'real-thread-id')
-    expect(store().sessionProviders['temp']).toBeUndefined()
-    expect(store().sessionProviders['real-thread-id']).toBe('codex')
-  })
-
   it('does not create a sessionProviders entry when rekying a claude session', () => {
     useSessionStore.setState({ lastSelectedProvider: 'claude' as ProviderId })
     store().createNewSession('claude-temp', '/tmp/proj')
@@ -102,11 +73,10 @@ describe('provider persistence: rekeySession', () => {
 
   it('is a no-op when oldId === newId', () => {
     useSessionStore.setState({
-      sessionProviders: { same: 'codex' as ProviderId }
+      sessionProviders: { same: 'claude' as ProviderId }
     })
     store().rekeySession('same', 'same')
-    // State should be unchanged
-    expect(store().sessionProviders['same']).toBe('codex')
+    expect(store().sessionProviders['same']).toBe('claude')
   })
 })
 
@@ -114,9 +84,9 @@ describe('provider persistence: applyExternalSessionConfig', () => {
   it('restores sessionProviders from the config snapshot', () => {
     store().applyExternalSessionConfig({
       recentSessions: ['s1', 's2'],
-      sessionProviders: { s1: 'codex' as ProviderId }
+      sessionProviders: { s1: 'claude' as ProviderId }
     })
-    expect(store().sessionProviders['s1']).toBe('codex')
+    expect(store().sessionProviders['s1']).toBe('claude')
     expect(store().sessionProviders['s2']).toBeUndefined()
   })
 

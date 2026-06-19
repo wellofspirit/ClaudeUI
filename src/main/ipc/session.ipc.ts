@@ -71,11 +71,6 @@ import { setEndpointEnv } from '../sdk/endpoint-env'
 import { setModelEnv } from '../sdk/model-env'
 import { invalidateMockupSecuritySettings } from '../services/mockup-settings'
 import type { ISession } from '../providers/ISession'
-import { loadCodexHistory } from '../codex/CodexHistory'
-import { loadCodexModels } from '../codex/codexModels'
-import { getCodexStatus } from '../codex/codexStatus'
-import { deleteCodexSession } from '../codex/codexSessions'
-import { watchCodexSession, unwatchCodexSession } from '../codex/codex-watcher'
 
 /** Type guard: narrows ISession to ClaudeSession when provider === 'claude'. */
 function isClaudeSession(session: ISession): session is ClaudeSession {
@@ -272,17 +267,11 @@ const SESSION_IPC_CHANNELS = [
   'session:delete-project',
   'session:list-directories',
   'session:load-history',
-  'session:load-codex-history',
-  'session:get-codex-models',
-  'session:get-codex-status',
   'session:load-subagent-history',
   'session:build-subagent-file-map',
   'session:load-background-output',
   'session:watch-session',
   'session:unwatch-session',
-  'session:delete-codex-session',
-  'session:watch-codex-session',
-  'session:unwatch-codex-session',
   'config:load-settings',
   'config:save-settings',
   'config:load-sessions',
@@ -1036,42 +1025,6 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     return await loadSessionHistory(sessionId, projectKey)
   })
 
-  /**
-   * Codex history loader — calls thread/read via a short-lived app-server spawn.
-   * The renderer routes here when the session's persisted provider is 'codex'.
-   * Returns { messages: ChatMessage[] } — same shape as the messages field of
-   * loadSessionHistory so Sidebar/useClaudeEvents can call loadHistoricalSession
-   * with the same arguments.
-   */
-  ipcMain.handle(
-    'session:load-codex-history',
-    async (_e, threadId: string, cwd: string) => {
-      return await loadCodexHistory(threadId, cwd)
-    }
-  )
-
-  /**
-   * Codex model list: spawns a short-lived app-server, calls model/list
-   * (with pagination), and returns ModelInfo[]. Returns [] gracefully if
-   * Codex is not installed or not authenticated.
-   */
-  ipcMain.handle('session:get-codex-models', async (_e, cwd: string) => {
-    try {
-      return await loadCodexModels(cwd)
-    } catch {
-      // Not installed, not authed, or timed out — fall back gracefully.
-      return []
-    }
-  })
-
-  /**
-   * Codex auth status probe: spawns a short-lived app-server, calls
-   * account/read {}, and returns a CodexStatus object.
-   */
-  ipcMain.handle('session:get-codex-status', async (_e, cwd: string) => {
-    return await getCodexStatus(cwd)
-  })
-
   ipcMain.handle(
     'session:load-subagent-history',
     async (_e, sessionId: string, projectKey: string, agentId: string) => {
@@ -1102,24 +1055,6 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
 
   ipcMain.handle('session:unwatch-session', (_e, routingId: string) => {
     unwatchSession(routingId)
-  })
-
-  ipcMain.handle(
-    'session:delete-codex-session',
-    safeHandler(async (_e: unknown, sessionId: string) => {
-      await deleteCodexSession(sessionId)
-    })
-  )
-
-  ipcMain.handle(
-    'session:watch-codex-session',
-    (_e, routingId: string, sessionId: string, cwd: string) => {
-      return watchCodexSession(routingId, sessionId, cwd, win)
-    }
-  )
-
-  ipcMain.handle('session:unwatch-codex-session', (_e, routingId: string) => {
-    unwatchCodexSession(routingId)
   })
 
   // UI config persistence (~/.claude/ui/)

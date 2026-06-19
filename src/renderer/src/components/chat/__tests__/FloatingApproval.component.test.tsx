@@ -524,34 +524,17 @@ describe('FloatingApproval rendered component', () => {
 })
 
 // ---------------------------------------------------------------------------
-// "Allow for session" button — Codex-only gating
+// "Allow for session" button — not shown (no producer until opencode Phase 5)
 // ---------------------------------------------------------------------------
 
-describe('FloatingApproval "Allow for session" button gating', () => {
-  const ROUTE_CODEX = 'route-codex'
-  const ROUTE_CLAUDE = 'route-claude'
-
-  function setupWithProvider(routingId: string, provider: 'claude' | 'codex'): PendingApproval {
-    // Set the provider before creating the session so createNewSession picks it up.
-    useSessionStore.setState({ lastSelectedProvider: provider })
-    useSessionStore.getState().createNewSession(routingId, '/test')
-    useSessionStore.setState({ activeSessionId: routingId })
+describe('FloatingApproval "Allow for session" button', () => {
+  it('does NOT render "Allow for session" button for a Claude session (no producer)', () => {
+    useSessionStore.setState({ lastSelectedProvider: 'claude' })
+    useSessionStore.getState().createNewSession('route-claude', '/test')
+    useSessionStore.setState({ activeSessionId: 'route-claude' })
 
     const approval = makePendingApproval({ toolName: 'Shell', input: { command: 'ls' } })
-    useSessionStore.getState().addPendingApproval(routingId, approval)
-    return approval
-  }
-
-  it('renders "Allow for session" button when the active session is Codex', () => {
-    setupWithProvider(ROUTE_CODEX, 'codex')
-
-    render(<FloatingApproval />)
-
-    expect(screen.getByText('Allow for session')).toBeInTheDocument()
-  })
-
-  it('does NOT render "Allow for session" button for a Claude session', () => {
-    setupWithProvider(ROUTE_CLAUDE, 'claude')
+    useSessionStore.getState().addPendingApproval('route-claude', approval)
 
     render(<FloatingApproval />)
 
@@ -559,25 +542,5 @@ describe('FloatingApproval "Allow for session" button gating', () => {
     // Normal Allow + Deny still present
     expect(screen.getByText('Allow')).toBeInTheDocument()
     expect(screen.getByText('Deny')).toBeInTheDocument()
-  })
-
-  it('clicking "Allow for session" sends allowForSession decision via IPC', async () => {
-    const approval = setupWithProvider(ROUTE_CODEX, 'codex')
-
-    render(<FloatingApproval />)
-
-    await act(async () => {
-      fireEvent.click(screen.getByText('Allow for session'))
-    })
-
-    expect(lastApprovalResponse).toEqual({
-      routingId: ROUTE_CODEX,
-      requestId: approval.requestId,
-      decision: 'allowForSession',
-      answers: undefined,
-      suggestions: undefined
-    })
-
-    expect(useSessionStore.getState().sessions[ROUTE_CODEX].pendingApprovals).toHaveLength(0)
   })
 })

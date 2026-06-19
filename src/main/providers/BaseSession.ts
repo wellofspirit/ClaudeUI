@@ -11,7 +11,7 @@ import type { ISession } from './ISession'
 
 /**
  * Abstract base class holding provider-neutral plumbing shared by all session
- * implementations (ClaudeSession, future CodexSession, etc.).
+ * implementations (ClaudeSession, future opencode session, etc.).
  *
  * Owns:
  *  - The extraWindows static set (broadcast to remote clients)
@@ -113,7 +113,8 @@ export abstract class BaseSession implements ISession {
     }
   }
 
-  protected clearInactivityTimer(): void {  // accessible from ClaudeSession.cancel()
+  protected clearInactivityTimer(): void {
+    // accessible from ClaudeSession.cancel()
     if (this.inactivityTimer) {
       clearTimeout(this.inactivityTimer)
       this.inactivityTimer = null

@@ -1709,10 +1709,9 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
   ): void {
     const entry = this.pendingApprovals.get(requestId)
     if (entry) {
-      // cli.js's canUseTool only understands 'allow' | 'deny'. The widened
-      // ApprovalDecision union now includes 'allowForSession' (Codex-only),
-      // so coerce it to 'allow' here. Claude never shows the button, but the
-      // type union must be handled safely.
+      // cli.js's canUseTool only understands 'allow' | 'deny'. Coerce
+      // 'allowForSession' to 'allow' so the ApprovalDecision union is handled
+      // safely (opencode may produce it in Phase 5).
       const coerced: 'allow' | 'deny' = decision === 'allowForSession' ? 'allow' : decision
       entry.resolve({ decision: coerced, answers, updatedPermissions })
     }

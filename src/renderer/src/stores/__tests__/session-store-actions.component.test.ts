@@ -7,7 +7,7 @@
 
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { useSessionStore } from '../session-store'
-import { CLAUDE_CAPABILITIES, CODEX_CAPABILITIES, capabilitiesFor } from '../../../../shared/types'
+import { CLAUDE_CAPABILITIES, capabilitiesFor } from '../../../../shared/types'
 import {
   makeChatMessage,
   makeAssistantMessage,
@@ -1739,8 +1739,6 @@ describe('openMockupPanel / closeMockupPanel', () => {
 describe('setLastSelectedProvider', () => {
   it('updates lastSelectedProvider in store', () => {
     expect(store().lastSelectedProvider).toBe('claude')
-    store().setLastSelectedProvider('codex')
-    expect(store().lastSelectedProvider).toBe('codex')
     store().setLastSelectedProvider('claude')
     expect(store().lastSelectedProvider).toBe('claude')
   })
@@ -1752,62 +1750,24 @@ describe('createNewSession inherits lastSelectedProvider', () => {
     expect(store().sessions['r1'].selectedProvider).toBe('claude')
   })
 
-  it('after switching to codex — new session selectedProvider is codex', () => {
-    store().setLastSelectedProvider('codex')
+  it('new session status.provider is claude', () => {
+    store().setLastSelectedProvider('claude')
     store().createNewSession('r1', '/path')
-    expect(store().sessions['r1'].selectedProvider).toBe('codex')
+    expect(store().sessions['r1'].status.provider).toBe('claude')
   })
 
-  it('new session status.provider matches selectedProvider', () => {
-    store().setLastSelectedProvider('codex')
-    store().createNewSession('r1', '/path')
-    expect(store().sessions['r1'].status.provider).toBe('codex')
-  })
-
-  it('new session status.capabilities matches codex capabilities when codex', () => {
-    store().setLastSelectedProvider('codex')
-    store().createNewSession('r1', '/path')
-    const caps = store().sessions['r1'].status.capabilities
-    expect(caps.thinkingModes).toBe(false)
-    expect(caps.costUsd).toBe(false)
-    expect(caps.effortLevels).toBe(true)
-  })
-
-  it('new session status.capabilities matches claude capabilities when claude', () => {
+  it('new session status.capabilities matches claude capabilities', () => {
     store().setLastSelectedProvider('claude')
     store().createNewSession('r1', '/path')
     const caps = store().sessions['r1'].status.capabilities
     expect(caps.thinkingModes).toBe(true)
     expect(caps.costUsd).toBe(true)
   })
-
-  it('two sequential sessions inherit the currently-set provider', () => {
-    store().setLastSelectedProvider('codex')
-    store().createNewSession('r1', '/path1')
-    store().setLastSelectedProvider('claude')
-    store().createNewSession('r2', '/path2')
-    expect(store().sessions['r1'].selectedProvider).toBe('codex')
-    expect(store().sessions['r2'].selectedProvider).toBe('claude')
-  })
 })
 
 describe('capabilitiesFor helper', () => {
   it('returns CLAUDE_CAPABILITIES for claude', () => {
     expect(capabilitiesFor('claude')).toBe(CLAUDE_CAPABILITIES)
-  })
-
-  it('returns CODEX_CAPABILITIES for codex', () => {
-    expect(capabilitiesFor('codex')).toBe(CODEX_CAPABILITIES)
-  })
-
-  it('codex has no thinkingModes, costUsd, voice, hostedMcp, backgroundTasks', () => {
-    const caps = capabilitiesFor('codex')
-    expect(caps.thinkingModes).toBe(false)
-    expect(caps.costUsd).toBe(false)
-    expect(caps.voice).toBe(false)
-    expect(caps.hostedMcp).toBe(false)
-    expect(caps.backgroundTasks).toBe(false)
-    expect(caps.effortLevels).toBe(true)
   })
 
   it('claude has all capabilities enabled', () => {
@@ -1817,113 +1777,5 @@ describe('capabilitiesFor helper', () => {
     expect(caps.voice).toBe(true)
     expect(caps.hostedMcp).toBe(true)
     expect(caps.backgroundTasks).toBe(true)
-  })
-})
-
-// ---------------------------------------------------------------------------
-// forkFromMessage — Codex path
-// ---------------------------------------------------------------------------
-
-describe('forkFromMessage (Codex provider)', () => {
-  /**
-   * Set up a Codex session by using setLastSelectedProvider + createNewSession, then
-   * manually patch messages/status so it looks like a live rekeyed Codex session.
-   */
-  function makeCodexSession(
-    routingId: string,
-    messages: ReturnType<typeof makeAssistantMessage>[],
-    cwd = '/codex-proj'
-  ): void {
-    store().setLastSelectedProvider('codex')
-    store().createNewSession(routingId, cwd)
-    useSessionStore.setState((s) => ({
-      sessions: {
-        ...s.sessions,
-        [routingId]: {
-          ...s.sessions[routingId],
-          messages,
-          isHistorical: true,
-          status: makeSessionStatus({ sessionId: routingId + '-threadId' })
-        }
-      }
-    }))
-  }
-
-  it('does NOT call resolveForkAnchor for a Codex session', async () => {
-    const messages = [makeAssistantMessage('hello', { id: 'msg-a' })]
-    makeCodexSession('src-codex', messages)
-    ;(window.api as any).resolveForkAnchor = vi.fn()
-
-    await store().forkFromMessage('src-codex', 'msg-a')
-
-    expect(window.api.resolveForkAnchor).not.toHaveBeenCalled()
-  })
-
-  it('sets forkOrigin.anchorUuid to the source threadId (status.sessionId)', async () => {
-    const messages = [makeAssistantMessage('hello', { id: 'msg-a' })]
-    makeCodexSession('src-codex', messages)
-
-    const newId = await store().forkFromMessage('src-codex', 'msg-a')
-
-    expect(newId).toBeTruthy()
-    const branch = store().sessions[newId!]
-    expect(branch.forkOrigin).toEqual({
-      sourceSessionId: 'src-codex-threadId',
-      anchorUuid: 'src-codex-threadId'
-    })
-  })
-
-  it('seeds the branch with the FULL message history (not sliced)', async () => {
-    const messages = [
-      makeAssistantMessage('first', { id: 'msg-1' }),
-      makeChatMessage({ id: 'u2' }),
-      makeAssistantMessage('second', { id: 'msg-2' })
-    ]
-    makeCodexSession('src-codex', messages)
-
-    const newId = await store().forkFromMessage('src-codex', 'msg-1')
-
-    expect(newId).toBeTruthy()
-    const branch = store().sessions[newId!]
-    // All three messages, not just up to msg-1
-    expect(branch.messages.map((m) => m.id)).toEqual(['msg-1', 'u2', 'msg-2'])
-  })
-
-  it('deep-copies messages so branch and source do not alias', async () => {
-    const messages = [makeAssistantMessage('only', { id: 'msg-1' })]
-    makeCodexSession('src-codex', messages)
-
-    const newId = await store().forkFromMessage('src-codex', 'msg-1')
-    const branch = store().sessions[newId!]
-    expect(branch.messages[0]).not.toBe(store().sessions['src-codex'].messages[0])
-    expect(branch.messages[0].content).not.toBe(store().sessions['src-codex'].messages[0].content)
-  })
-
-  it('sets selectedProvider to codex on the branch', async () => {
-    const messages = [makeAssistantMessage('hello', { id: 'msg-a' })]
-    makeCodexSession('src-codex', messages)
-
-    const newId = await store().forkFromMessage('src-codex', 'msg-a')
-    expect(newId).toBeTruthy()
-    expect(store().sessions[newId!].selectedProvider).toBe('codex')
-  })
-
-  it('seeds status.provider and capabilities for codex on the branch', async () => {
-    const messages = [makeAssistantMessage('hello', { id: 'msg-a' })]
-    makeCodexSession('src-codex', messages)
-
-    const newId = await store().forkFromMessage('src-codex', 'msg-a')
-    expect(newId).toBeTruthy()
-    const branch = store().sessions[newId!]
-    expect(branch.status.provider).toBe('codex')
-    expect(branch.status.capabilities).toBe(CODEX_CAPABILITIES)
-  })
-
-  it('switches active session to the new branch', async () => {
-    const messages = [makeAssistantMessage('hello', { id: 'msg-a' })]
-    makeCodexSession('src-codex', messages)
-
-    const newId = await store().forkFromMessage('src-codex', 'msg-a')
-    expect(store().activeSessionId).toBe(newId)
   })
 })

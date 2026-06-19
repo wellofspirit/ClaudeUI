@@ -20,9 +20,9 @@ export interface UISessionConfig {
   customTitles?: Record<string, string>
   worktreeInfoMap?: Record<string, import('../../shared/types').WorktreeInfo>
   /**
-   * Persisted provider per session. Maps sessionId → ProviderId so that on
-   * app restart a historical Codex session can be reopened as Codex (not Claude).
+   * Persisted provider per session. Maps sessionId → ProviderId.
    * Claude sessions are the default — absent entries are treated as 'claude'.
+   * Any legacy non-'claude' values (e.g. 'codex') are read-mapped to 'claude'.
    */
   sessionProviders?: Record<string, import('../../shared/types').ProviderId>
   hiddenSessions?: string[]
@@ -112,7 +112,18 @@ export function saveSettings(settings: UISettings): void {
 
 export function loadSessionConfig(): UISessionConfig {
   ensureMigrated()
-  return readJson<UISessionConfig>(SESSIONS_FILE) ?? {}
+  const config = readJson<UISessionConfig>(SESSIONS_FILE) ?? {}
+  // Migrate any legacy non-'claude' provider values (e.g. 'codex') to 'claude'
+  // so users who had Codex sessions in the sidebar don't see a broken state.
+  if (config.sessionProviders) {
+    const providers = config.sessionProviders as Record<string, string>
+    for (const [id, val] of Object.entries(providers)) {
+      if (val !== 'claude') {
+        providers[id] = 'claude'
+      }
+    }
+  }
+  return config
 }
 
 export function saveSessionConfig(config: UISessionConfig): void {

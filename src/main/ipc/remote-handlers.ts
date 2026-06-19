@@ -11,7 +11,6 @@ import {
   resolveForkAnchor
 } from '../services/session-history'
 import { deleteSessionFiles, deleteProjectFiles } from '../services/delete-session-files'
-import { deleteCodexSession } from '../codex/codexSessions'
 import {
   loadSettings,
   saveSettings,
@@ -318,14 +317,6 @@ export function registerRemoteHandlers(
   dispatcher.register('session:delete-project', async (projectKey: string) => {
     await deleteProjectFiles(projectKey)
   })
-
-  dispatcher.register('session:delete-codex-session', async (sessionId: string) => {
-    await deleteCodexSession(sessionId)
-  })
-
-  // session:watch-codex-session and session:unwatch-codex-session are desktop-
-  // only (they use a BrowserWindow reference for webContents.send), mirroring
-  // how session:watch-session / session:unwatch-session are not registered here.
 
   // -------------------------------------------------------------------------
   // Config (read-write, synced bidirectionally)

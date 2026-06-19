@@ -30,7 +30,6 @@ export const MessageBubble = memo(function MessageBubble({
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const forkFromMessage = useSessionStore((s) => s.forkFromMessage)
   const forkCapability = useActiveSession((s) => s.status.capabilities.fork)
-  const isCodexSession = useActiveSession((s) => s.selectedProvider === 'codex')
   const [forking, setForking] = useState(false)
 
   const handleFork = async (): Promise<void> => {
@@ -302,11 +301,7 @@ export const MessageBubble = memo(function MessageBubble({
           <button
             onClick={handleFork}
             disabled={forking}
-            title={
-              isCodexSession
-                ? 'Fork this conversation into a new session'
-                : 'Fork a new session from this point'
-            }
+            title="Fork a new session from this point"
             className="flex items-center gap-1 text-[10px] text-text-muted hover:text-text-primary transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-default"
           >
             <svg

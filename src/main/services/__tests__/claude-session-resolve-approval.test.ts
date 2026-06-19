@@ -36,8 +36,8 @@ class TestSession {
     const entry = this.pendingApprovals.get(requestId)
     if (entry) {
       // cli.js's canUseTool only understands 'allow' | 'deny'. Coerce
-      // 'allowForSession' (Codex-only) to 'allow' so the widened union
-      // is handled safely in the Claude path.
+      // 'allowForSession' to 'allow' so the ApprovalDecision union is
+      // handled safely in the Claude path (opencode may produce it in Phase 5).
       const coerced: 'allow' | 'deny' = decision === 'allowForSession' ? 'allow' : decision
       entry.resolve({ decision: coerced, answers })
     }

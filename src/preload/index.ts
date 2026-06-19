@@ -92,8 +92,6 @@ const api: ClaudeAPI = {
   listDirectories: () => ipcRenderer.invoke('session:list-directories'),
   loadSessionHistory: (sessionId: string, projectKey: string) =>
     ipcRenderer.invoke('session:load-history', sessionId, projectKey),
-  loadCodexHistory: (threadId: string, cwd: string) =>
-    ipcRenderer.invoke('session:load-codex-history', threadId, cwd),
   loadSubagentHistory: (sessionId: string, projectKey: string, agentId: string) =>
     ipcRenderer.invoke('session:load-subagent-history', sessionId, projectKey, agentId),
   buildSubagentFileMap: (
@@ -178,8 +176,6 @@ const api: ClaudeAPI = {
   setThinkingMode: (routingId: string, mode: string) =>
     ipcRenderer.invoke('session:set-thinking-mode', routingId, mode),
   getModels: () => ipcRenderer.invoke('session:get-models'),
-  getCodexModels: (cwd: string) => ipcRenderer.invoke('session:get-codex-models', cwd),
-  getCodexStatus: (cwd: string) => ipcRenderer.invoke('session:get-codex-status', cwd),
   generateTitle: (conversationText: string) =>
     ipcRenderer.invoke('session:generate-title', conversationText),
   generateCommitMessage: (diff: string) =>
@@ -192,12 +188,6 @@ const api: ClaudeAPI = {
   watchSession: (routingId: string, sessionId: string, projectKey: string) =>
     ipcRenderer.invoke('session:watch-session', routingId, sessionId, projectKey),
   unwatchSession: (routingId: string) => ipcRenderer.invoke('session:unwatch-session', routingId),
-  deleteCodexSession: (sessionId: string) =>
-    unwrap<void>('session:delete-codex-session', sessionId),
-  watchCodexSession: (routingId: string, sessionId: string, cwd: string) =>
-    ipcRenderer.invoke('session:watch-codex-session', routingId, sessionId, cwd),
-  unwatchCodexSession: (routingId: string) =>
-    ipcRenderer.invoke('session:unwatch-codex-session', routingId),
   // Terminal (PTY) operations
   createTerminal: (cwd: string) => ipcRenderer.invoke('terminal:create', cwd),
   writeTerminal: (id: string, data: string) => ipcRenderer.invoke('terminal:write', id, data),
