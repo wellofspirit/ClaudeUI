@@ -12,21 +12,29 @@
  * without `security` trust prompts. See ADR-014 / ADR-015.
  *
  * How it works: cli.js's credential store is a facade
- *   p1() => COMPOSE(keychain, file)
- * where COMPOSE (minified `ev9`) builds a "keychain-with-plaintext-fallback"
- * object: keychain is primary, the plaintext file is the fallback. We rewrite
- * the `p1()` getter so that, when `SKIP_SECURESTORAGE` is set, it returns the
- * file backend directly. The file backend (`lK6`, name:"plaintext") implements
- * read/readAsync/mutate/update/delete; the only methods it lacks
- * (readAsyncStrict/invalidateCache) are called exclusively via optional
- * chaining (`?.`) inside the mutate helper, so the bare backend is sufficient.
+ *   getter() => COMPOSE(<secure store>, file)
+ * where COMPOSE builds a "<store>-with-plaintext-fallback" object: the OS
+ * secure store is primary, the plaintext file is the fallback. The plaintext
+ * backend (name:"plaintext") implements read/readAsync/mutate/update/delete;
+ * the only methods it lacks (readAsyncStrict/invalidateCache) are called
+ * exclusively via optional chaining (`?.`) inside the mutate helper, so the
+ * bare backend is sufficient. We prepend a SKIP_SECURESTORAGE short-circuit to
+ * the getter that returns the file backend directly.
  *
- * Anchors (both content-based; minified names vary by version):
+ * The getter body is PLATFORM-SPECIFIC (verified on 2.1.177):
+ *   macOS:   function p1(){return ev9(oM8,lK6)}                       // keychain
+ *   Windows: function pf(){if(v21())return cy$(OXq,s_6);return s_6}    // windows-credman, gated
+ * The original patch matched only the macOS unconditional body and aborted on
+ * Windows. We now capture the WHOLE body and prepend the short-circuit, so the
+ * gate (and any future shape) is preserved. See README "Anchor 2".
+ *
+ * Anchors (both content-based; minified names + body shape vary by platform):
  *   1. The facade composer, via its `${X.name}-with-${Y.name}-fallback`
  *      template literal — captures the composer fn name.
- *   2. The zero-arg getter `function P(){return COMPOSER(keychain,file)}`
- *      — captures the getter name + the two backend identifiers. The file
- *      backend is the SECOND arg (fallback).
+ *   2. The zero-arg getter: the only `function NAME(){…COMPOSER(primary,file)…}`
+ *      with a brace-free body — captures the getter name, the original body,
+ *      and the two backend identifiers. The file backend is the SECOND
+ *      COMPOSER arg (fallback).
  *
  * Usage: node patch/skip-securestorage/apply.mjs
  */
@@ -74,9 +82,20 @@ if (!composerMatch) {
 const composer = composerMatch[1]
 console.log(`Facade composer: ${composer}()`)
 
-// --- 2. Find & rewrite the getter: function P(){return COMPOSER(keychain,file)}
+// --- 2. Find & rewrite the getter. Its body shape varies by version/platform:
+//   old (macOS):  function P(){return COMPOSER(keychain,file)}
+//   new (2.1.x):  function pf(){if(v21())return COMPOSER(windows-credman,file);return file}
+// Both are a zero-arg getter whose brace-free body contains COMPOSER(primary,file)
+// where `file` is the SECOND (fallback) arg. Rather than matching the exact body
+// (which broke when the `if(<credman-gate>())` prefix was added), we capture the
+// whole body and inject a SKIP_SECURESTORAGE short-circuit at the top that returns
+// the file backend directly — the original gate logic is preserved for the unset
+// case. The body is brace-free in every observed shape, so [^{}]* is safe and also
+// excludes the composer DEFINITION (which takes args and has a braced body).
 const composerLit = composer.replace(/[$]/g, '\\$&') // escape $ for regex
-const siteRe = new RegExp(`function (${V})\\(\\)\\{return ${composerLit}\\((${V}),(${V})\\)\\}`)
+const siteRe = new RegExp(
+  `function (${V})\\(\\)\\{([^{}]*?${composerLit}\\((${V}),(${V})\\)[^{}]*?)\\}`
+)
 const matches = [...src.matchAll(new RegExp(siteRe, 'g'))]
 if (matches.length !== 1) {
   console.error(
@@ -85,16 +104,16 @@ if (matches.length !== 1) {
   process.exit(1)
 }
 
-// $1 = getter name, $2 = keychain (primary), $3 = file (fallback).
-const composerRepl = composer.replace(/[$]/g, '$$$$') // escape $ for replacement
-const replacement =
-  `function $1(){${MARKER}return process.env.SKIP_SECURESTORAGE?$3:${composerRepl}($2,$3)}`
+// $1 = getter name, $2 = original body, $3 = primary (secure store), $4 = file (fallback).
+// `$2` interpolates the captured body verbatim — its literal `$` chars (e.g. `cy$`)
+// are NOT re-interpreted by replace(), so no escaping is needed.
+const replacement = `function $1(){${MARKER}if(process.env.SKIP_SECURESTORAGE)return $4;$2}`
 
 src = src.replace(siteRe, replacement)
 
 writeFileSync(cliPath, src, 'utf-8')
 const m = matches[0]
 console.log(
-  `Patched ${m[1]}(): SKIP_SECURESTORAGE -> file backend "${m[3]}" (bypassing keychain "${m[2]}").`
+  `Patched ${m[1]}(): SKIP_SECURESTORAGE -> file backend "${m[4]}" (bypassing secure store "${m[3]}").`
 )
 console.log('skip-securestorage applied.')

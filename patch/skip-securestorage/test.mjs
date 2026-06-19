@@ -35,40 +35,47 @@ function main() {
   const markerCount = src.split('/*PATCHED:skip-securestorage*/').length - 1
   t.assert('patch marker present exactly once', markerCount === 1)
 
-  // 2. The patched getter has the env-gated ternary.
-  //    function P(){<marker>return process.env.SKIP_SECURESTORAGE?FILE:COMPOSER(KEYCHAIN,FILE2)}
+  // 2. The patched getter short-circuits to the file backend when the env var
+  //    is set, then falls through to the original body (which still references
+  //    the COMPOSER(primary,file) facade). Shape:
+  //    function P(){<marker>if(process.env.SKIP_SECURESTORAGE)return FILE;<body…COMPOSER(PRIMARY,FILE2)…>}
+  //    The body is brace-free, so [^{}] keeps the match scoped to this getter.
   const getterRe = new RegExp(
-    `function ${V}\\(\\)\\{/\\*PATCHED:skip-securestorage\\*/return process\\.env\\.SKIP_SECURESTORAGE\\?(${V}):(${V})\\((${V}),(${V})\\)\\}`
+    `function ${V}\\(\\)\\{/\\*PATCHED:skip-securestorage\\*/if\\(process\\.env\\.SKIP_SECURESTORAGE\\)return (${V});[^{}]*?(${V})\\((${V}),(${V})\\)[^{}]*?\\}`
   )
   const m = src.match(getterRe)
   t.assert('patched store getter matches expected shape', !!m)
 
   if (m) {
-    const [, fileBranch, composer, keychainArg, fileArg] = m
+    const [, fileBranch, composer, primaryArg, fileArg] = m
 
     // 3. The SKIP branch returns the SECOND composer arg (the fallback/file),
-    //    never the keychain (primary). Guards against inverting the branches.
+    //    never the primary secure store. Guards against inverting the branches.
     t.assert(
       `SKIP branch returns the fallback backend (${fileBranch} === composer arg2 ${fileArg})`,
       fileBranch === fileArg
     )
     t.assert(
-      `SKIP branch is NOT the keychain (primary) backend ${keychainArg}`,
-      fileBranch !== keychainArg
+      `SKIP branch is NOT the primary secure-store backend ${primaryArg}`,
+      fileBranch !== primaryArg
     )
 
     // 4. Tie the returned identifier to the plaintext backend definition, and
-    //    the bypassed one to the keychain definition. Definitive correctness.
+    //    the bypassed one to a real secure-store backend (keychain on macOS,
+    //    windows-credman on Windows). Definitive correctness.
     t.assert(
       `returned backend "${fileBranch}" is the plaintext file backend`,
       src.includes(`${fileBranch}={name:"plaintext"`)
     )
+    const primaryRe = new RegExp(
+      `${primaryArg.replace(/[$]/g, '\\$&')}=\\{name:"(keychain|windows-credman)"`
+    )
     t.assert(
-      `bypassed backend "${keychainArg}" is the keychain backend`,
-      src.includes(`${keychainArg}={name:"keychain"`)
+      `bypassed backend "${primaryArg}" is a secure-store backend (keychain/windows-credman)`,
+      primaryRe.test(src)
     )
 
-    // 5. The composer is the keychain-with-plaintext-fallback facade.
+    // 5. The composer is the secure-store-with-plaintext-fallback facade.
     const composerRe = new RegExp(
       `function ${composer.replace(/[$]/g, '\\$&')}\\(${V},${V}\\)\\{let ${V}=\\{name:\`\\$\\{${V}\\.name\\}-with-`
     )
