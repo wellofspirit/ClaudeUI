@@ -24,6 +24,9 @@ and `docs/codex/`. **Keep** the provider scaffolding (`ISession`/`BaseSession`/`
 `ApprovalDecision`, `session:plan`, the provider-tagging mechanism). Unregister `'codex'`. ADR-017
 superseded; code recoverable from `codex-sup` history. Leaves a clean Claude-only app.
 
+> **Detailed kickoff for a fresh session: [phase-0-rip-codex.md](phase-0-rip-codex.md)** — verified
+> delete/edit/keep lists + step-by-step + verification. Point the new session at that file.
+
 ### Phase 1 — Data model + rename
 Introduce `EngineId`/`VendorId`/`ModelRef`/`AccountRef`/`SessionDescriptor`; eager rename
 `ProviderId`→`EngineId`, `provider`→`engine(Id)` across main/renderer/shared/remote; read-time
