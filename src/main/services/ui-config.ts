@@ -3,6 +3,12 @@ import * as path from 'path'
 import * as os from 'os'
 import type { BrowserWindow } from 'electron'
 import { logger } from './logger'
+import {
+  allSessionMeta,
+  setSessionMeta,
+  deleteSessionMeta,
+  importSessionEnginesOnce
+} from './db'
 
 const CONFIG_DIR = path.join(os.homedir(), '.claude', 'ui')
 const SETTINGS_FILE = path.join(CONFIG_DIR, 'settings.json')
@@ -119,34 +125,64 @@ export function loadSessionConfig(): UISessionConfig {
   // Read raw so we can inspect legacy keys before full parse
   const raw = readJson<Record<string, unknown>>(SESSIONS_FILE) ?? {}
 
-  // Migrate legacy sessionProviders → sessionEngines (one-time, in-place, deleted on write-back)
-  if (!raw.sessionEngines && raw.sessionProviders) {
+  // --- One-time import: sessionEngines from sessions.json → DB ---
+  // Handle legacy sessionProviders → sessionEngines normalisation first so the
+  // import sees a consistent shape.
+  let fileSessionEngines: Record<string, { engineId: string; model?: import('../../shared/types').ModelRef }> | undefined
+
+  if (raw.sessionProviders && !raw.sessionEngines) {
     const legacy = raw.sessionProviders as Record<string, unknown>
-    const migrated: Record<string, { engineId: 'claude' }> = {}
+    const normalised: Record<string, { engineId: 'claude' }> = {}
     for (const id of Object.keys(legacy)) {
-      // Every legacy value (incl. 'codex') maps to 'claude'
-      migrated[id] = { engineId: 'claude' }
+      normalised[id] = { engineId: 'claude' }
     }
-    raw.sessionEngines = migrated
-    delete raw.sessionProviders
+    fileSessionEngines = normalised
+  } else if (raw.sessionEngines) {
+    fileSessionEngines = raw.sessionEngines as typeof fileSessionEngines
   }
+
+  if (fileSessionEngines && Object.keys(fileSessionEngines).length > 0) {
+    importSessionEnginesOnce(fileSessionEngines)
+  }
+
+  // Strip sessionEngines + sessionProviders from the JSON-sourced config;
+  // authoritative copy now lives in the DB.
+  delete raw.sessionEngines
+  delete raw.sessionProviders
 
   const config = raw as UISessionConfig
 
-  // Clamp any unknown engineId values to 'claude' for forward-compat
-  if (config.sessionEngines) {
-    for (const [id, entry] of Object.entries(config.sessionEngines)) {
-      if (entry.engineId !== 'claude' && entry.engineId !== 'opencode') {
-        config.sessionEngines[id] = { engineId: 'claude' }
-      }
-    }
-  }
+  // Source sessionEngines from DB, reconstructing ModelRef on read
+  config.sessionEngines = allSessionMeta()
 
   return config
 }
 
 export function saveSessionConfig(config: UISessionConfig): void {
-  writeJson(SESSIONS_FILE, config)
+  // Persist sessionEngines to the DB, not the JSON file.
+  // The renderer sends the full UISessionConfig (including sessionEngines) so we
+  // extract it here, write it to the DB, and strip it before writing the JSON.
+  if (config.sessionEngines) {
+    const currentMeta = allSessionMeta()
+    const incoming = config.sessionEngines
+
+    // Add/update entries present in the incoming map
+    for (const [sessionId, meta] of Object.entries(incoming)) {
+      setSessionMeta(sessionId, meta)
+    }
+
+    // Remove entries that were deleted from the store
+    for (const sessionId of Object.keys(currentMeta)) {
+      if (!(sessionId in incoming)) {
+        deleteSessionMeta(sessionId)
+      }
+    }
+  }
+
+  // Write the rest (recentSessions, pinnedSessions, customTitles, etc.) to JSON
+  // without sessionEngines — the DB is now the authoritative source.
+  const { sessionEngines: _dropped, ...rest } = config
+  writeJson(SESSIONS_FILE, rest)
 }
 
 export interface SlashCommandCache {

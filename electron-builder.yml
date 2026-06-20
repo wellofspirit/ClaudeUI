@@ -26,6 +26,7 @@ extraResources:
 asarUnpack:
   - resources/**
   - node_modules/node-pty/**
+  - node_modules/better-sqlite3/**
 win:
   executableName: claudui
   signAndEditExecutable: false
