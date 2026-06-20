@@ -181,7 +181,7 @@ export function InputBox(): React.JSX.Element {
   const setEffort = useSessionStore((s) => s.setEffort)
   const thinkingMode = useActiveSession((s) => s.thinkingMode)
   const setThinkingMode = useSessionStore((s) => s.setThinkingMode)
-  const sandboxEnabled = useSessionStore((s) => s.settings.sandbox.enabled)
+  const sandboxEnabled = useSessionStore((s) => s.engineConfig.sandbox?.enabled ?? false)
 
   // Voice input
   const voiceEnabled = useSessionStore((s) => s.settings.voiceEnabled)

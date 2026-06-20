@@ -277,6 +277,12 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
       ipcRenderer.invoke('automation:send-message', id, prompt),
 
     testProxyConnection: (proxy) => unwrap('proxy:test-connection', proxy),
+    loadEngineConfig: (engineId) => ipcRenderer.invoke('config:load-engine-config', engineId),
+    saveEngineConfig: (engineId, config) =>
+      ipcRenderer.invoke('config:save-engine-config', engineId, config),
+    loadVendorConfig: (vendorId) => ipcRenderer.invoke('config:load-vendor-config', vendorId),
+    saveVendorConfig: (vendorId, config) =>
+      ipcRenderer.invoke('config:save-vendor-config', vendorId, config),
 
     logError: (source, message) => {
       ipcRenderer.send('log:error', source, message)
@@ -349,6 +355,10 @@ export async function bootTestApp(): Promise<TestApp> {
     'config:save-slash-commands',
     'config:load-slash-commands',
     'config:scan-custom-commands',
+    'config:load-engine-config',
+    'config:save-engine-config',
+    'config:load-vendor-config',
+    'config:save-vendor-config',
     'usage:fetch',
     'usage:fetch-block',
     'plugin:views',

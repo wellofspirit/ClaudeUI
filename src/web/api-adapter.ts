@@ -511,6 +511,10 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       latencyMs: 0,
       error: 'Not available in remote mode'
     }),
+    loadEngineConfig: async () => ({}),
+    saveEngineConfig: async () => {},
+    loadVendorConfig: async () => ({}),
+    saveVendorConfig: async () => {},
 
     // Plugin system — desktop-only, stubbed out on web
     listPlugins: async () => [],

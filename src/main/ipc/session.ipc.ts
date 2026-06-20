@@ -22,7 +22,11 @@ import {
   saveSessionConfig,
   loadSlashCommands,
   saveSlashCommands,
-  startConfigWatcher
+  startConfigWatcher,
+  loadEngineConfig,
+  saveEngineConfig,
+  loadVendorConfig,
+  saveVendorConfig
 } from '../services/ui-config'
 import {
   loadClaudePermissions,
@@ -55,13 +59,14 @@ import { accountManager } from '../services/account-manager'
 import type {
   ApprovalDecision,
   ModelInfo,
-  SandboxSettings,
   ProxySettings,
   AnthropicEndpointSettings,
   ModelOverrideSettings,
   PermissionSuggestion,
   IpcResult,
-  EngineId
+  EngineId,
+  EngineConfig,
+  VendorConfig
 } from '../../shared/types'
 import { logger } from '../services/logger'
 import { deleteSessionFiles, deleteProjectFiles } from '../services/delete-session-files'
@@ -725,11 +730,14 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
       forkSession?: boolean,
       engineId?: EngineId
     ) => {
-      const settings = loadSettings() as Record<string, unknown>
-      const sandboxConfig = (settings.sandbox as SandboxSettings) || undefined
-      await applyProxyEnv((settings.proxy as ProxySettings) || undefined)
-      applyEndpointEnv((settings.anthropicEndpoint as AnthropicEndpointSettings) || undefined)
-      applyModelEnv((settings.modelOverride as ModelOverrideSettings) || undefined)
+      const engineCfg = loadEngineConfig(engineId ?? 'claude')
+      // Phase 5: derive vendor from the current model's ModelRef. For Claude the
+      // engine is 1:1 with the 'anthropic' vendor, so this is always correct now.
+      const vendorCfg = loadVendorConfig('anthropic')
+      const sandboxConfig = engineCfg.sandbox
+      await applyProxyEnv(engineCfg.proxy)
+      applyEndpointEnv(vendorCfg.endpoint)
+      applyModelEnv(vendorCfg.modelOverride)
       manager.create(
         routingId,
         win,
@@ -1059,7 +1067,15 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
 
   // UI config persistence (~/.claude/ui/)
   ipcMain.handle('config:load-settings', () => loadSettings())
-  ipcMain.handle('config:save-settings', (_e, settings: UISettings) => {
+  ipcMain.handle('config:save-settings', (_e, incomingSettings: UISettings) => {
+    // Strip engine/vendor-owned fields (sandbox, proxy, anthropicEndpoint, modelOverride)
+    // that have moved to engines/claude.json and vendors/anthropic.json
+    const raw = incomingSettings as Record<string, unknown>
+    const settings: UISettings = Object.fromEntries(
+      Object.entries(raw).filter(
+        ([k]) => !['sandbox', 'proxy', 'anthropicEndpoint', 'modelOverride'].includes(k)
+      )
+    )
     saveSettings(settings)
     // Next mockup request re-reads settings to pick up CSP changes.
     invalidateMockupSecuritySettings()
@@ -1075,27 +1091,23 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     }
     // Apply log level + filter changes immediately
     {
-      const raw = settings as Record<string, unknown>
-      const level = typeof raw.logLevel === 'string' ? raw.logLevel : undefined
-      const filter = typeof raw.logFilter === 'string' ? raw.logFilter : undefined
+      const raw2 = settings as Record<string, unknown>
+      const level = typeof raw2.logLevel === 'string' ? raw2.logLevel : undefined
+      const filter = typeof raw2.logFilter === 'string' ? raw2.logFilter : undefined
       if (level !== undefined || filter !== undefined) {
         logger.applyFilter(filter ?? '', level as 'debug' | 'info' | 'warn' | 'error' | undefined)
       }
     }
-    // Apply proxy env var changes immediately (async — bridge start/stop)
-    applyProxyEnv((settings as Record<string, unknown>).proxy as ProxySettings | undefined).catch(
-      (err) => logger.error('Proxy', `Failed to apply proxy settings: ${err}`)
-    )
-    // Apply custom Anthropic endpoint env vars immediately
-    applyEndpointEnv(
-      (settings as Record<string, unknown>).anthropicEndpoint as
-        | AnthropicEndpointSettings
-        | undefined
-    )
-    // Apply model override env vars immediately
-    applyModelEnv(
-      (settings as Record<string, unknown>).modelOverride as ModelOverrideSettings | undefined
-    )
+    // Apply proxy/endpoint/model from engine/vendor stores (source of truth is now there)
+    {
+      const engCfg = loadEngineConfig('claude')
+      const venCfg = loadVendorConfig('anthropic')
+      applyProxyEnv(engCfg.proxy).catch(
+        (err) => logger.error('Proxy', `Failed to apply proxy settings: ${err}`)
+      )
+      applyEndpointEnv(venCfg.endpoint)
+      applyModelEnv(venCfg.modelOverride)
+    }
     // Propagate session idle timeout change
     const timeoutMins = (settings as Record<string, unknown>).sessionTimeoutMins
     if (typeof timeoutMins === 'number') {
@@ -1120,6 +1132,18 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
   )
   ipcMain.handle('config:scan-custom-commands', (_e, cwd: string) => scanCustomCommands(cwd))
   ipcMain.handle('config:load-skill-details', (_e, cwd: string) => scanSkills(cwd))
+  ipcMain.handle('config:load-engine-config', (_e, engineId: string) =>
+    loadEngineConfig(engineId)
+  )
+  ipcMain.handle('config:save-engine-config', (_e, engineId: string, cfg: EngineConfig) =>
+    saveEngineConfig(engineId, cfg)
+  )
+  ipcMain.handle('config:load-vendor-config', (_e, vendorId: string) =>
+    loadVendorConfig(vendorId)
+  )
+  ipcMain.handle('config:save-vendor-config', (_e, vendorId: string, cfg: VendorConfig) =>
+    saveVendorConfig(vendorId, cfg)
+  )
 
   // Claude permission settings (allow/deny/ask rules)
   ipcMain.handle('claude:load-permissions', (_e, scope: string, cwd?: string) =>

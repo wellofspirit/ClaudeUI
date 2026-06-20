@@ -308,6 +308,14 @@ const api: ClaudeAPI = {
     ipcRenderer.invoke('automation:send-message', id, prompt),
 
   testProxyConnection: (proxy: ProxySettings) => unwrap('proxy:test-connection', proxy),
+  loadEngineConfig: (engineId: string) =>
+    ipcRenderer.invoke('config:load-engine-config', engineId),
+  saveEngineConfig: (engineId: string, config: import('../shared/types').EngineConfig) =>
+    ipcRenderer.invoke('config:save-engine-config', engineId, config),
+  loadVendorConfig: (vendorId: string) =>
+    ipcRenderer.invoke('config:load-vendor-config', vendorId),
+  saveVendorConfig: (vendorId: string, config: import('../shared/types').VendorConfig) =>
+    ipcRenderer.invoke('config:save-vendor-config', vendorId, config),
 
   logError: (source: string, message: string) => {
     ipcRenderer.send('log:error', source, message)

@@ -1,6 +1,7 @@
 import { useRef, useEffect, useCallback } from 'react'
 import type { AppSettings } from '../../stores/session-store'
-import { SECTIONS, type Section } from './settings-sections'
+import type { EngineConfig, VendorConfig } from '../../../../shared/types'
+import { NAV_GROUPS, type Section } from './settings-sections'
 
 export interface VersionInfo {
   appVersion: string
@@ -11,6 +12,10 @@ export interface VersionInfo {
 export interface SettingsDialogViewProps {
   settings: AppSettings
   updateSettings: (patch: Partial<AppSettings>) => void
+  engineConfig: EngineConfig
+  updateEngineConfig: (patch: Partial<EngineConfig>) => void
+  vendorConfig: VendorConfig
+  updateVendorConfig: (patch: Partial<VendorConfig>) => void
   versionInfo: VersionInfo | null
   search: string
   activeSection: string
@@ -24,6 +29,10 @@ export interface SettingsDialogViewProps {
 export function SettingsDialogView({
   settings,
   updateSettings,
+  engineConfig,
+  updateEngineConfig,
+  vendorConfig,
+  updateVendorConfig,
   versionInfo,
   search,
   activeSection,
@@ -112,26 +121,62 @@ export function SettingsDialogView({
 
         {/* Body */}
         <div className="flex flex-1 overflow-hidden">
-          {/* Left nav */}
+          {/* Left nav — two-level tree */}
           <nav className="w-[180px] border-r border-border/50 py-2 px-2 shrink-0 overflow-y-auto">
-            {SECTIONS.map((section) => {
-              const hasMatches = !search.trim() || filteredSections.some((s) => s.id === section.id)
+            {NAV_GROUPS.map((group) => {
+              // Collect all sections for this group (flat list)
+              const groupSections: Section[] = [
+                ...(group.sections ?? []),
+                ...(group.children?.flatMap((c) => c.sections) ?? [])
+              ]
+              const groupHasMatches =
+                !search.trim() || groupSections.some((s) => filteredSections.some((f) => f.id === s.id))
+              const firstSectionId = groupSections[0]?.id ?? ''
+              const groupActive = groupSections.some((s) => s.id === activeSection)
+
               return (
-                <button
-                  key={section.id}
-                  onClick={() => scrollToSection(section.id)}
-                  className={`w-full flex items-center gap-2 px-3 py-1.5 rounded-md text-[13px] transition-colors cursor-default ${
-                    activeSection === section.id
-                      ? 'bg-accent/10 text-accent'
-                      : hasMatches
-                        ? 'text-text-secondary hover:bg-bg-hover'
-                        : 'text-text-muted/40'
-                  }`}
-                  disabled={!hasMatches}
-                >
-                  <span className="shrink-0 opacity-70">{section.icon}</span>
-                  {section.label}
-                </button>
+                <div key={group.id}>
+                  {/* Group header */}
+                  <button
+                    onClick={() => firstSectionId && scrollToSection(firstSectionId)}
+                    disabled={!groupHasMatches || !firstSectionId}
+                    className={`w-full flex items-center gap-2 px-3 py-1.5 rounded-md text-[13px] font-medium transition-colors cursor-default ${
+                      groupActive && !group.children
+                        ? 'bg-accent/10 text-accent'
+                        : groupHasMatches
+                          ? 'text-text-secondary hover:bg-bg-hover'
+                          : 'text-text-muted/40'
+                    }`}
+                  >
+                    <span className="shrink-0 opacity-70">{group.icon}</span>
+                    {group.label}
+                  </button>
+
+                  {/* Children (e.g. Claude under Engines, Anthropic under Vendors) */}
+                  {group.children?.map((child) => {
+                    const childHasMatches =
+                      !search.trim() ||
+                      child.sections.some((s) => filteredSections.some((f) => f.id === s.id))
+                    const childFirstId = child.sections[0]?.id ?? ''
+                    const childActive = child.sections.some((s) => s.id === activeSection)
+                    return (
+                      <button
+                        key={child.id}
+                        onClick={() => childFirstId && scrollToSection(childFirstId)}
+                        disabled={!childHasMatches || !childFirstId}
+                        className={`w-full flex items-center gap-2 pl-7 pr-3 py-1.5 rounded-md text-[13px] transition-colors cursor-default ${
+                          childActive
+                            ? 'bg-accent/10 text-accent'
+                            : childHasMatches
+                              ? 'text-text-secondary hover:bg-bg-hover'
+                              : 'text-text-muted/40'
+                        }`}
+                      >
+                        {child.label}
+                      </button>
+                    )
+                  })}
+                </div>
               )
             })}
           </nav>
@@ -190,7 +235,14 @@ export function SettingsDialogView({
                     <div>
                       {section.items.map((item) => (
                         <div key={item.key} className="px-1">
-                          {item.render(settings, updateSettings)}
+                          {item.render(
+                            settings,
+                            updateSettings,
+                            engineConfig,
+                            updateEngineConfig,
+                            vendorConfig,
+                            updateVendorConfig
+                          )}
                         </div>
                       ))}
                     </div>

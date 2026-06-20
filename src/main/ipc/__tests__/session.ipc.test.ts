@@ -127,7 +127,11 @@ vi.mock('../../services/ui-config', () => ({
   saveSessionConfig: vi.fn(),
   loadSlashCommands: vi.fn(() => []),
   saveSlashCommands: vi.fn(),
-  startConfigWatcher: vi.fn()
+  startConfigWatcher: vi.fn(),
+  loadEngineConfig: vi.fn(() => ({})),
+  saveEngineConfig: vi.fn(),
+  loadVendorConfig: vi.fn(() => ({})),
+  saveVendorConfig: vi.fn()
 }))
 
 vi.mock('../../services/claude-settings', () => ({

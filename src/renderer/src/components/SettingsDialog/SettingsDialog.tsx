@@ -1,15 +1,27 @@
 import { useState, useEffect, useMemo, useCallback } from 'react'
 import { useSessionStore } from '../../stores/session-store'
 import { SettingsDialogView, type VersionInfo } from './View'
-import { SECTIONS, type Section } from './settings-sections'
+import { SECTIONS, NAV_GROUPS, type Section } from './settings-sections'
+import type { EngineConfig, VendorConfig } from '../../../../shared/types'
 export { SettingsToggle } from './settings-controls'
+
+/** Get the first section id across all nav groups */
+function firstSectionId(): string {
+  const firstGroup = NAV_GROUPS[0]
+  if (firstGroup?.sections?.[0]) return firstGroup.sections[0].id
+  if (firstGroup?.children?.[0]?.sections?.[0]) return firstGroup.children[0].sections[0].id
+  return SECTIONS[0]?.id ?? ''
+}
 
 export function SettingsDialog({ onClose }: { onClose: () => void }): React.JSX.Element {
   const settings = useSessionStore((s) => s.settings)
   const updateSettings = useSessionStore((s) => s.updateSettings)
+  const setStoreEngineConfig = useSessionStore((s) => s.setEngineConfig)
   const [versionInfo, setVersionInfo] = useState<VersionInfo | null>(null)
   const [search, setSearch] = useState('')
-  const [activeSection, setActiveSection] = useState(SECTIONS[0].id)
+  const [activeSection, setActiveSection] = useState(firstSectionId)
+  const [engineConfig, setEngineConfig] = useState<EngineConfig>({})
+  const [vendorConfig, setVendorConfig] = useState<VendorConfig>({})
 
   // Fetch version info on mount
   useEffect(() => {
@@ -17,6 +29,12 @@ export function SettingsDialog({ onClose }: { onClose: () => void }): React.JSX.
       .getVersionInfo()
       .then(setVersionInfo)
       .catch(() => {})
+  }, [])
+
+  // Load engine and vendor config on mount
+  useEffect(() => {
+    window.api.loadEngineConfig('claude').then(setEngineConfig).catch(() => {})
+    window.api.loadVendorConfig('anthropic').then(setVendorConfig).catch(() => {})
   }, [])
 
   // Close on Escape
@@ -47,10 +65,31 @@ export function SettingsDialog({ onClose }: { onClose: () => void }): React.JSX.
   // onSelectSection as the user scrolls the content container.
   const handleSelectSection = useCallback((id: string) => setActiveSection(id), [])
 
+  const handleUpdateEngineConfig = useCallback((patch: Partial<EngineConfig>) => {
+    setEngineConfig((prev) => {
+      const next = { ...prev, ...patch }
+      window.api.saveEngineConfig('claude', next).catch(() => {})
+      setStoreEngineConfig(next)
+      return next
+    })
+  }, [setStoreEngineConfig])
+
+  const handleUpdateVendorConfig = useCallback((patch: Partial<VendorConfig>) => {
+    setVendorConfig((prev) => {
+      const next = { ...prev, ...patch }
+      window.api.saveVendorConfig('anthropic', next).catch(() => {})
+      return next
+    })
+  }, [])
+
   return (
     <SettingsDialogView
       settings={settings}
       updateSettings={updateSettings}
+      engineConfig={engineConfig}
+      updateEngineConfig={handleUpdateEngineConfig}
+      vendorConfig={vendorConfig}
+      updateVendorConfig={handleUpdateVendorConfig}
       versionInfo={versionInfo}
       search={search}
       activeSection={activeSection}

@@ -222,6 +222,16 @@ export interface SandboxSettings {
   excludedCommands: string[]
 }
 
+export interface EngineConfig {
+  sandbox?: SandboxSettings
+  proxy?: ProxySettings
+}
+
+export interface VendorConfig {
+  endpoint?: AnthropicEndpointSettings
+  modelOverride?: ModelOverrideSettings
+}
+
 // ---------------------------------------------------------------------------
 // Claude permissions (allow/deny/ask rules from settings.json files)
 // ---------------------------------------------------------------------------
@@ -529,6 +539,10 @@ interface SessionAPI {
   testProxyConnection(
     proxy: ProxySettings
   ): Promise<{ ok: boolean; latencyMs: number; error?: string }>
+  loadEngineConfig(engineId: string): Promise<EngineConfig>
+  saveEngineConfig(engineId: string, config: EngineConfig): Promise<void>
+  loadVendorConfig(vendorId: string): Promise<VendorConfig>
+  saveVendorConfig(vendorId: string, config: VendorConfig): Promise<void>
   logError(source: string, message: string): void
 }
 

@@ -28,16 +28,13 @@ import type {
   BlockUsageData,
   TerminalTab,
   WorktreeInfo,
-  SandboxSettings,
-  ProxySettings,
-  AnthropicEndpointSettings,
-  ModelOverrideSettings,
   VoiceState,
   VoiceLanguageCode,
   ActiveView,
   PluginViewWithOwner,
   EngineId,
-  ModelRef
+  ModelRef,
+  EngineConfig
 } from '../../../shared/types'
 
 /** Normalize cwd for use as a terminal group key (strip trailing slash). */
@@ -143,10 +140,6 @@ export interface AppSettings {
   remoteFollowActions: boolean // follow remote client's session switches & messages
   voiceEnabled: boolean
   voiceLanguage: VoiceLanguageCode
-  sandbox: SandboxSettings
-  proxy: ProxySettings
-  anthropicEndpoint: AnthropicEndpointSettings
-  modelOverride: ModelOverrideSettings
   /**
    * Per-model default effort overrides. Keyed by canonical model id
    * (`claude-sonnet-4-6`, `claude-opus-4-7`, `claude-opus-4-8`,
@@ -188,42 +181,6 @@ const DEFAULT_SETTINGS: AppSettings = {
   voiceEnabled: false,
   voiceLanguage: 'en' as VoiceLanguageCode,
   remoteFollowActions: true,
-  sandbox: {
-    enabled: false,
-    autoAllowBashIfSandboxed: false,
-    allowUnsandboxedCommands: false,
-    network: {
-      restrictNetwork: false,
-      allowLocalBinding: false,
-      allowedDomains: [],
-      allowManagedDomainsOnly: false,
-      allowAllUnixSockets: false,
-      allowUnixSockets: []
-    },
-    filesystem: { allowWrite: [], denyWrite: [], denyRead: [] },
-    excludedCommands: []
-  },
-  proxy: {
-    enabled: false,
-    type: 'http',
-    hostname: '',
-    port: 8080,
-    username: '',
-    password: '',
-    proxySubprocesses: false
-  },
-  anthropicEndpoint: {
-    enabled: false,
-    baseUrl: '',
-    authToken: ''
-  },
-  modelOverride: {
-    enabled: false,
-    model: '',
-    sonnetModel: '',
-    opusModel: '',
-    haikuModel: ''
-  },
   modelEffortDefaults: {},
   mermaidTheme: 'auto',
   logLevel: 'warn',
@@ -290,10 +247,11 @@ function saveSessionConfig(
  * Called once at startup; migrates from localStorage on first run.
  */
 export async function hydrateConfigFromDisk(): Promise<void> {
-  let [savedSettings, sessionConfig, slashCommands] = await Promise.all([
+  let [savedSettings, sessionConfig, slashCommands, loadedEngineConfig] = await Promise.all([
     window.api.loadSettings(),
     window.api.loadSessionConfig(),
-    window.api.loadSlashCommands()
+    window.api.loadSlashCommands(),
+    window.api.loadEngineConfig('claude')
   ])
 
   // One-time migration from localStorage → disk
@@ -324,32 +282,7 @@ export async function hydrateConfigFromDisk(): Promise<void> {
     Object.keys(saved).length > 0
       ? {
           ...DEFAULT_SETTINGS,
-          ...saved,
-          // Deep-merge nested objects so new fields get defaults even if parent was persisted
-          sandbox: {
-            ...DEFAULT_SETTINGS.sandbox,
-            ...saved.sandbox,
-            filesystem: {
-              ...DEFAULT_SETTINGS.sandbox.filesystem,
-              ...saved.sandbox?.filesystem
-            },
-            network: {
-              ...DEFAULT_SETTINGS.sandbox.network,
-              ...saved.sandbox?.network
-            }
-          },
-          proxy: {
-            ...DEFAULT_SETTINGS.proxy,
-            ...saved.proxy
-          },
-          anthropicEndpoint: {
-            ...DEFAULT_SETTINGS.anthropicEndpoint,
-            ...saved.anthropicEndpoint
-          },
-          modelOverride: {
-            ...DEFAULT_SETTINGS.modelOverride,
-            ...saved.modelOverride
-          }
+          ...saved
         }
       : DEFAULT_SETTINGS
 
@@ -361,6 +294,7 @@ export async function hydrateConfigFromDisk(): Promise<void> {
   applyTheme(settings.theme)
 
   useSessionStore.setState({
+    engineConfig: loadedEngineConfig,
     settings,
     recentSessionIds: sessionConfig.recentSessions ?? [],
     pinnedSessionIds: sessionConfig.pinnedSessions ?? [],
@@ -619,6 +553,7 @@ interface SessionState {
   lastSelectedEngineId: EngineId
 
   // Global (not per-session)
+  engineConfig: EngineConfig
   settings: AppSettings
   availableModels: ModelInfo[]
   slashCommands: SlashCommandInfo[]
@@ -769,6 +704,7 @@ interface SessionState {
     taskNotifications: TaskNotification[]
   ) => void
   updateSettings: (partial: Partial<AppSettings>) => void
+  setEngineConfig: (config: EngineConfig) => void
   applyExternalSettings: (settings: Record<string, unknown>) => void
   applyExternalSessionConfig: (config: {
     recentSessions?: string[]
@@ -889,6 +825,7 @@ export const useSessionStore = create<SessionState>((set) => ({
   lastSelectedEngineId:
     ((localStorage.getItem('lastSelectedEngineId') ??
       localStorage.getItem('lastSelectedProvider')) as EngineId | null) ?? 'claude',
+  engineConfig: {},
   settings: DEFAULT_SETTINGS,
   availableModels: [],
   slashCommands: [],
@@ -1892,6 +1829,8 @@ export const useSessionStore = create<SessionState>((set) => ({
       if (partial.theme) applyTheme(partial.theme)
       return { settings }
     }),
+
+  setEngineConfig: (config) => set({ engineConfig: config }),
 
   // Apply settings from an external source (another instance) — no save back to disk
   applyExternalSettings: (raw) =>

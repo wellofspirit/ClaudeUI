@@ -201,8 +201,9 @@ function useUnmatchedApprovals(): PendingApproval[] {
 function ApprovalCard({ approval }: { approval: PendingApproval }): React.JSX.Element {
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const removePendingApproval = useSessionStore((s) => s.removePendingApproval)
-  const updateSettings = useSessionStore((s) => s.updateSettings)
-  const sandboxSettings = useSessionStore((s) => s.settings.sandbox)
+  const setEngineConfig = useSessionStore((s) => s.setEngineConfig)
+  const engineConfig = useSessionStore((s) => s.engineConfig)
+  const sandboxSettings = engineConfig.sandbox
   const permissionMode = useActiveSession((s) => s.permissionMode)
   const [alwaysAllow, setAlwaysAllow] = useState(false)
   const [checkedSuggestions, setCheckedSuggestions] = useState<boolean[]>(() =>
@@ -217,13 +218,14 @@ function ApprovalCard({ approval }: { approval: PendingApproval }): React.JSX.El
     // If allowing with "always allow" checked, add command to excluded list
     if (decision === 'allow' && alwaysAllow && isSandboxEscape && approval.input?.command) {
       const cmd = String(approval.input.command)
-      if (!sandboxSettings.excludedCommands.includes(cmd)) {
-        updateSettings({
-          sandbox: {
-            ...sandboxSettings,
-            excludedCommands: [...sandboxSettings.excludedCommands, cmd]
-          }
-        })
+      const currentExcluded = sandboxSettings?.excludedCommands ?? []
+      if (!currentExcluded.includes(cmd)) {
+        const nextSandbox = sandboxSettings
+          ? { ...sandboxSettings, excludedCommands: [...currentExcluded, cmd] }
+          : { enabled: false, autoAllowBashIfSandboxed: false, allowUnsandboxedCommands: false, network: { restrictNetwork: false, allowLocalBinding: false, allowedDomains: [], allowManagedDomainsOnly: false, allowAllUnixSockets: false, allowUnixSockets: [] }, filesystem: { allowWrite: [], denyWrite: [], denyRead: [] }, excludedCommands: [cmd] }
+        const nextConfig = { ...engineConfig, sandbox: nextSandbox }
+        setEngineConfig(nextConfig)
+        window.api.saveEngineConfig('claude', nextConfig).catch(() => {})
       }
     }
 
