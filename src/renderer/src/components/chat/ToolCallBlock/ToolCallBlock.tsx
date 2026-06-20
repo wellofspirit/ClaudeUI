@@ -29,6 +29,7 @@ export const ToolCallBlock = memo(function ToolCallBlock({
   const clearTaskStopping = useSessionStore((s) => s.clearTaskStopping)
   const isHistorical = useActiveSession((s) => s.isHistorical)
   const permissionMode = useActiveSession((s) => s.permissionMode)
+  const backgroundTasksEnabled = useActiveSession((s) => s.status.capabilities.backgroundTasks)
   const expandToolCalls = useSessionStore((s) => s.settings.expandToolCalls)
   const expandReadResults = useSessionStore((s) => s.settings.expandReadResults)
   const hideToolInput = useSessionStore((s) => s.settings.hideToolInput)
@@ -131,6 +132,7 @@ export const ToolCallBlock = memo(function ToolCallBlock({
       isStopping={isStopping}
       isBackgrounding={isBackgrounding}
       hasActiveSession={activeSessionId !== null}
+      backgroundTasksEnabled={backgroundTasksEnabled}
       onApproval={handleApproval}
       onBackgroundTask={handleBackgroundTask}
       onStopTask={handleStopTask}

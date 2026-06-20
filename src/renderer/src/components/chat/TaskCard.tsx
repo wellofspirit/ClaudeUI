@@ -74,6 +74,7 @@ export function TaskCard({ block, result }: Props): React.JSX.Element {
   const stoppingTaskIds = useActiveSession((s) => s.stoppingTaskIds)
   const setTaskStopping = useSessionStore((s) => s.setTaskStopping)
   const clearTaskStopping = useSessionStore((s) => s.clearTaskStopping)
+  const backgroundTasksEnabled = useActiveSession((s) => s.status.capabilities.backgroundTasks)
   const [expanded, setExpanded] = useState(false)
 
   const toolUseId = block.toolUseId
@@ -122,7 +123,9 @@ export function TaskCard({ block, result }: Props): React.JSX.Element {
 
   const isCompleted = !isRunning && !isError
   const isStopping = stoppingTaskIds.includes(toolUseId)
-  const canBackground = isRunning && !isBackground && !isStopping
+  // Gated on capabilities.backgroundTasks — engines without background execution
+  // never offer "Send to background". Claude: true → unchanged.
+  const canBackground = isRunning && !isBackground && !isStopping && backgroundTasksEnabled
   const [isBackgrounding, setIsBackgrounding] = useState(false)
 
   const handleBackgroundTask = async (): Promise<void> => {

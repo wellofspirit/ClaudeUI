@@ -7,7 +7,8 @@
 
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { useSessionStore } from '../session-store'
-import { CLAUDE_CAPABILITIES, capabilitiesFor, claudeModel } from '../../../../shared/types'
+import { claudeModel } from '../../../../shared/types'
+import { resolveClaudeCapabilities } from '../../../../shared/model-capabilities'
 import {
   makeChatMessage,
   makeAssistantMessage,
@@ -1760,22 +1761,32 @@ describe('createNewSession inherits lastSelectedEngineId', () => {
     store().setLastSelectedEngineId('claude')
     store().createNewSession('r1', '/path')
     const caps = store().sessions['r1'].status.capabilities
-    expect(caps.thinkingModes).toBe(true)
-    expect(caps.costUsd).toBe(true)
-  })
-})
-
-describe('capabilitiesFor helper (engineId)', () => {
-  it('returns CLAUDE_CAPABILITIES for claude', () => {
-    expect(capabilitiesFor('claude')).toBe(CLAUDE_CAPABILITIES)
-  })
-
-  it('claude has all capabilities enabled', () => {
-    const caps = capabilitiesFor('claude')
-    expect(caps.thinkingModes).toBe(true)
-    expect(caps.costUsd).toBe(true)
+    // reasoning.thinking present for default (resolves to opus alias → adaptive thinking)
+    // voice, hostedMcp etc. are engine-level — always true for Claude
     expect(caps.voice).toBe(true)
     expect(caps.hostedMcp).toBe(true)
     expect(caps.backgroundTasks).toBe(true)
+    expect(caps.canUseMcp).toBe(true)
+    expect(caps.isAgentCapable).toBe(true)
+  })
+})
+
+describe('resolveClaudeCapabilities (Phase 2 replacement for capabilitiesFor)', () => {
+  it('claude has all engine-level capabilities enabled', () => {
+    const caps = resolveClaudeCapabilities('claude-opus-4-8')
+    expect(caps.voice).toBe(true)
+    expect(caps.hostedMcp).toBe(true)
+    expect(caps.backgroundTasks).toBe(true)
+    expect(caps.subagents).toBe(true)
+    expect(caps.plan).toBe(true)
+    expect(caps.fork).toBe(true)
+    expect(caps.forkFromMessage).toBe(true)
+  })
+
+  it('AND-derived gates are correct for Claude + tool-capable model', () => {
+    const caps = resolveClaudeCapabilities('claude-opus-4-8')
+    expect(caps.canUseMcp).toBe(true)
+    expect(caps.canUseSubagents).toBe(true)
+    expect(caps.isAgentCapable).toBe(true)
   })
 })

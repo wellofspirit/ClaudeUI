@@ -921,12 +921,12 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
 
   ipcMain.handle('session:set-effort', (_e, routingId: string, effort: string) => {
     const s = manager.get(routingId)
-    if (s?.capabilities.effortLevels && isClaudeSession(s)) s.setEffort(effort)
+    if (s?.capabilities.reasoning.effort != null && isClaudeSession(s)) s.setEffort(effort)
   })
 
   ipcMain.handle('session:set-thinking-mode', (_e, routingId: string, mode: string) => {
     const s = manager.get(routingId)
-    if (s?.capabilities.thinkingModes && isClaudeSession(s)) s.setThinkingMode(mode)
+    if (s?.capabilities.reasoning.thinking != null && isClaudeSession(s)) s.setThinkingMode(mode)
   })
 
   ipcMain.handle('session:get-models', async () => {

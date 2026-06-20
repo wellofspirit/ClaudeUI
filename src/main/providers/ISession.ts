@@ -1,10 +1,10 @@
 import type {
   ChatMessage,
-  SessionCapabilities,
   EngineId,
   ApprovalDecision,
   PermissionSuggestion
 } from '../../shared/types'
+import type { ResolvedCapabilities } from '../../shared/model-capabilities'
 
 /**
  * Engine-neutral session interface. All methods here are implemented by
@@ -16,7 +16,7 @@ export interface ISession {
   readonly engineId: EngineId
   readonly routingId: string
   readonly cwd: string
-  readonly capabilities: SessionCapabilities
+  readonly capabilities: ResolvedCapabilities
 
   /** Whether a prompt sent now will be queued (session actively processing a turn) */
   readonly willQueue: boolean

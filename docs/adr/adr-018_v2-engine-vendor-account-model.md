@@ -42,8 +42,8 @@ auth.
 - `EngineCapabilities` (vendor-independent: voice, hostedMcp, backgroundTasks, subagents, plan,
   fork, steer/queue, slashCommands, skills, sideQuestion, `autonomyModes`, `auth{canDriveLogin,
   multiAccount}`).
-- `ModelCapabilities` (per model: `reasoning` as a structured `ReasoningCapability` union —
-  none/anthropicThinking/effortTiers/googleThinking — plus vision, toolCalling, contextWindow…).
+- `ModelCapabilities` (per model: `reasoning` as **two independent axes** `{ thinking?, effort? }`
+  — a model may expose both, as Claude does — plus vision, toolCalling, contextWindow…).
 - `ResolvedCapabilities = resolve(engine, model)` — a field merge plus AND-of-both for
   tool-dependent features (`canUseMcp = hostedMcp && toolCalling`). **Recomputed on session start
   and every model switch.**

@@ -78,12 +78,16 @@ export interface InputBoxViewProps {
   allowedEffortLevels: readonly EffortLevel[]
   thinkingMode: ThinkingMode
   adaptiveSupported: boolean
-  /** Show/hide the thinking-mode picker. Gated on capabilities.thinkingModes. */
+  /** Show/hide the thinking-mode picker. Gated on capabilities.reasoning.thinking. */
   showThinkingPicker?: boolean
   /** Show/hide the model picker. Always shown for Claude; the picker tolerates an empty/loading model list. */
   showModelPicker?: boolean
-  /** Whether to include cost in the status line. Gated on capabilities.costUsd. */
+  /** Whether to include cost in the status line. Always true for Claude; Phase 7 will gate on Account.billingType. */
   showCostInStatusLine?: boolean
+  /** Show the context-usage meter in the status line. Gated on capabilities.contextWindow > 0. */
+  showContextMeter?: boolean
+  /** Show/hide the image/PDF attach affordance (button + drag/drop + paste). Gated on capabilities.vision. */
+  visionEnabled?: boolean
   sandboxEnabled: boolean
   voiceEnabled: boolean
   voiceState: VoiceState
@@ -114,16 +118,23 @@ export interface InputBoxViewProps {
 
 function StatusLine({
   data,
-  showCost = true
+  showCost = true,
+  showContextMeter = true
 }: {
   data: StatusLineData
   showCost?: boolean
+  showContextMeter?: boolean
 }): React.JSX.Element {
   const align = useSessionStore((s) => s.settings.statusLineAlign)
   const rawTemplate = useSessionStore((s) => s.settings.statusLineTemplate)
 
-  // Strip the cost placeholder when the provider doesn't report cost.
-  const template = showCost ? rawTemplate : rawTemplate.replace(/\{cost\}/g, '')
+  // Strip the cost placeholder when the engine doesn't report cost, and the
+  // context-usage placeholders when the model has no known context window
+  // (contextWindow === 0 — the meter would be meaningless).
+  let template = showCost ? rawTemplate : rawTemplate.replace(/\{cost\}/g, '')
+  if (!showContextMeter) {
+    template = template.replace(/\{used\}/g, '').replace(/\{remaining\}/g, '')
+  }
 
   // usedPercentage/remainingPercentage are computed in the main process (live:
   // claude-session, history: session-history), keyed on the *resolved* model id
@@ -482,7 +493,9 @@ export function InputBoxView(props: InputBoxViewProps): React.JSX.Element {
           <div className="flex items-center justify-between px-1.5 pb-1.5">
             {/* Left controls */}
             <div className="flex items-center gap-1">
-              <AttachMenu fileInputRef={props.fileInputRef} onFileChange={props.onFileChange} />
+              {(props.visionEnabled ?? true) && (
+                <AttachMenu fileInputRef={props.fileInputRef} onFileChange={props.onFileChange} />
+              )}
               {(props.showModelPicker ?? true) && (
                 <ModelPicker
                   models={props.models}
@@ -555,6 +568,7 @@ export function InputBoxView(props: InputBoxViewProps): React.JSX.Element {
         <StatusLine
           data={statusLine ?? DEFAULT_STATUS_LINE}
           showCost={props.showCostInStatusLine ?? true}
+          showContextMeter={props.showContextMeter ?? true}
         />
       </div>
     </div>

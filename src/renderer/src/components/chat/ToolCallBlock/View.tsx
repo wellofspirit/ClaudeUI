@@ -48,6 +48,8 @@ export interface ToolCallBlockViewProps {
   isStopping: boolean
   isBackgrounding: boolean
   hasActiveSession: boolean
+  /** Show the "Send to background" affordance. Gated on capabilities.backgroundTasks. */
+  backgroundTasksEnabled: boolean
   onApproval: (
     decision: 'allow' | 'deny',
     selectedSuggestions?: PermissionSuggestion[]
@@ -74,6 +76,7 @@ export function ToolCallBlockView({
   isStopping,
   isBackgrounding,
   hasActiveSession,
+  backgroundTasksEnabled,
   onApproval,
   onBackgroundTask,
   onStopTask,
@@ -336,7 +339,7 @@ export function ToolCallBlockView({
           </span>
         )}
         {isLoaded && <span className="text-[10px] text-text-muted shrink-0">loaded</span>}
-        {isForegroundBashRunning && !isBackgrounding && (
+        {isForegroundBashRunning && !isBackgrounding && backgroundTasksEnabled && (
           <button
             onClick={(e) => {
               e.stopPropagation()

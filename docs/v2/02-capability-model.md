@@ -78,14 +78,16 @@ Crucially **not all booleans** — reasoning is a structured descriptor, because
 know the *shape* and *levels* of the control, not just that it exists:
 
 ```ts
-type ReasoningCapability =
-  | { kind: 'none' }
-  | { kind: 'anthropicThinking'; supportsBudget: boolean }                          // extended thinking + token budget
-  | { kind: 'effortTiers'; levels: ('minimal'|'low'|'medium'|'high'|'xhigh')[] }    // openai-style
-  | { kind: 'googleThinking'; levels: ('low'|'high')[] }
+// Reasoning is TWO independent axes — a model may have BOTH (Claude: thinking modes AND effort
+// tiers), one (OpenAI: effort only; Google: thinking only), or neither (local). A single-kind
+// union can't represent Claude, which exposes both controls at once.
+interface ReasoningCapability {
+  thinking?: { modes: ThinkingMode[]; supportsBudget?: boolean }  // adaptive|enabled|disabled — anthropic, google
+  effort?:   { levels: EffortLevel[] }                            // minimal…xhigh|max — anthropic, openai
+}                                                                 // both absent ⇒ no reasoning controls
 
 interface ModelCapabilities {
-  reasoning: ReasoningCapability   // drives the thinking/effort control's shape + levels
+  reasoning: ReasoningCapability   // thinking picker iff .thinking; effort picker iff .effort
   vision: boolean                  // image input
   toolCalling: boolean             // function/tool calling — REQUIRED for agentic use
   contextWindow: number            // max input tokens (context-usage display)
@@ -93,6 +95,11 @@ interface ModelCapabilities {
   promptCaching: boolean           // affects metering display (05)
 }
 ```
+
+> `ThinkingMode`/`EffortLevel` reuse the existing `src/shared/model-capabilities.ts` types
+> (`EffortLevel` gains `'minimal'` for OpenAI when opencode lands). **That module is the single
+> source of truth** and becomes the **Claude normalizer** feeding this neutral shape (§5) — do not
+> re-derive thinking/effort anywhere else.
 
 ### 3.3 `ResolvedCapabilities` — what the UI consumes
 
@@ -124,7 +131,8 @@ the renderer audits against.
 
 | UI feature / affordance | gated by | level |
 | --- | --- | --- |
-| thinking / effort control (+ its levels) | `reasoning.kind !== 'none'` (shape & levels from `reasoning`) | model |
+| thinking-mode picker | `reasoning.thinking` (modes from it) | model |
+| effort picker (+ its levels) | `reasoning.effort` (levels from it) | model |
 | image-attach button | `vision` | model |
 | context-usage meter | `contextWindow` (value) | model |
 | voice button | `voice` | engine |
@@ -144,9 +152,11 @@ the renderer audits against.
 
 - **EngineCapabilities** — static, hardcoded per engine (the §3.1 table → the registry).
 - **ModelCapabilities** —
-  - **Claude**: cli.js `supportedModels()` already provides `supportsEffort` /
-    `supportedEffortLevels` / `supportsAdaptiveThinking` (today's `ModelInfo`). Map:
-    `supportsAdaptiveThinking → anthropicThinking`; `supportsEffort` + levels → `effortTiers`.
+  - **Claude**: the existing `src/shared/model-capabilities.ts` is the source of truth (SDK
+    `ModelInfo` fields + cli.js-mirroring heuristics). It becomes the **Claude normalizer** →
+    map `modelSupportsAdaptiveThinking → reasoning.thinking`, `modelSupportedEffortLevels →
+    reasoning.effort`, `resolveContextWindow → contextWindow`. **Reuse it — do not re-derive
+    thinking/effort in a parallel module.**
   - **opencode**: `GET /config/providers` returns per-model metadata sourced from **models.dev**,
     which carries `reasoning`, `tool_call`, `attachment` (→ vision), `limit.context` /
     `limit.output`, `cost.*`. Normalize into `ModelCapabilities`.
@@ -184,8 +194,9 @@ availability, not a capability. Hence it moves to foundation 5.
 
 ## 8. Decisions
 
-1. **Unified `reasoning` descriptor** ✓ — one `ReasoningCapability` union; the control reads
-   `reasoning.kind` to choose its shape and `levels` to populate.
+1. **`reasoning` is two independent axes** ✓ (corrected during Phase-2 impl) — `{ thinking?, effort? }`,
+   not a single-kind union: Claude exposes *both* thinking modes and effort tiers at once. Sourced
+   from `src/shared/model-capabilities.ts` (the Claude normalizer); no parallel module (§3.2/§5).
 2. **Tool-dependent resolution** ✓ — AND-logic (`engine ∧ model.toolCalling`). Non-tool-calling
    agents are rare today, but the gate is the correct guard.
 3. **No-tool-calling models** ✓ — **keep, don't filter.** A no-tool-calling model (opencode-only)

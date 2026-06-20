@@ -25,6 +25,13 @@ export interface SendContext {
   isDisabled: boolean
   activeSessionId: string | null
   isRunning: boolean
+  /** Whether the engine supports out-of-band side questions (capabilities.sideQuestion).
+   *  When false, `/btw ...` is treated as ordinary prompt text. Defaults to true. */
+  sideQuestionEnabled?: boolean
+  /** Whether the engine can queue a message while a turn runs (capabilities.queue).
+   *  When false, a send during a running turn is a no-op (input is retained).
+   *  Defaults to true. */
+  queueEnabled?: boolean
 }
 
 /**
@@ -39,8 +46,8 @@ export function resolveSendAction(ctx: SendContext): SendAction {
     return { type: 'noop' }
   }
 
-  // /btw side question
-  if (prompt.startsWith('/btw ')) {
+  // /btw side question — only when the engine exposes the side-question channel.
+  if ((ctx.sideQuestionEnabled ?? true) && prompt.startsWith('/btw ')) {
     const question = prompt.slice(5).trim()
     if (question) return { type: 'side-question', question }
   }
@@ -60,6 +67,9 @@ export function resolveSendAction(ctx: SendContext): SendAction {
     : undefined
 
   if (ctx.isRunning) {
+    // Engines without queue support can't accept a message mid-turn — retain the
+    // input (no-op) rather than dropping or mis-sending it. Claude: queue → unchanged.
+    if (!(ctx.queueEnabled ?? true)) return { type: 'noop' }
     return { type: 'queue-prompt', prompt }
   }
 

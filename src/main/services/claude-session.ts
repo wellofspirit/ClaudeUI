@@ -35,7 +35,12 @@ import {
   buildTranscript,
   type TranscriptMessage
 } from './auto-classifier'
-import { resolveThinkingMode, type ThinkingMode } from '../../shared/model-capabilities'
+import {
+  resolveThinkingMode,
+  resolveClaudeCapabilities,
+  type ThinkingMode
+} from '../../shared/model-capabilities'
+import type { ResolvedCapabilities } from '../../shared/model-capabilities'
 
 import { locateBunClaude, getCliVersion } from '../sdk'
 
@@ -86,7 +91,7 @@ import type {
   SandboxSettings,
   PermissionSuggestion
 } from '../../shared/types'
-import { CLAUDE_CAPABILITIES, claudeModel } from '../../shared/types'
+import { claudeModel } from '../../shared/types'
 import { BaseSession } from '../providers/BaseSession'
 
 interface ApprovalResult {
@@ -174,7 +179,10 @@ export class ClaudeSession extends BaseSession {
   }
 
   readonly engineId = 'claude' as const
-  readonly capabilities = CLAUDE_CAPABILITIES
+
+  get capabilities(): ResolvedCapabilities {
+    return resolveClaudeCapabilities(this.model)
+  }
 
   private sessionId: string | null = null
   /**
@@ -1258,6 +1266,8 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
     if (this.activeQuery) {
       await this.activeQuery.setModel(model)
     }
+    // Re-emit status so capabilities (derived from model) are up to date in the renderer.
+    this.sendStatus()
     // Recalculate status line with new context window size
     this.send('session:status-line', this.buildStatusLineFromAccumulators())
   }

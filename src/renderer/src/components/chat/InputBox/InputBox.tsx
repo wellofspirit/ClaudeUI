@@ -9,9 +9,7 @@ import { useFileMention } from '../../../hooks/useFileMention'
 import { useIsMobile } from '../../../hooks/useIsMobile'
 import { InputBoxView } from './View'
 import {
-  modelSupportsAdaptiveThinking,
-  modelSupportsEffort,
-  modelSupportedEffortLevels,
+  claudeModelCapabilities,
   modelResolveThinkingMode,
   modelResolveEffort,
   modelDefaultEffort,
@@ -89,6 +87,10 @@ export function InputBox(): React.JSX.Element {
   const setDraftText = useSessionStore((s) => s.setDraftText)
   const setText = setDraftText
 
+  // Capability gating — use status.capabilities (authoritative after spawn;
+  // seeded from selectedEngineId before spawn via createNewSession).
+  const capabilities = useActiveSession((s) => s.status.capabilities)
+
   const cwd = useActiveSession((s) => s.cwd)
   const status = useActiveSession((s) => s.status)
   const sdkActive = useActiveSession((s) => s.sdkActive)
@@ -107,9 +109,13 @@ export function InputBox(): React.JSX.Element {
   const slashCommands = useSessionStore((s) => s.slashCommands)
   const customCommands = useSessionStore((s) => s.customCommands)
   const setCustomCommands = useSessionStore((s) => s.setCustomCommands)
+  // Slash-command menu is gated on capabilities.slashCommands: when the engine
+  // doesn't support slash commands, the menu offers nothing (engine + filesystem
+  // commands alike) and `/` types as literal text. Claude: true → unchanged.
   const mergedSlashCommands = useMemo(
-    () => mergeSlashCommands(slashCommands, customCommands),
-    [slashCommands, customCommands]
+    () =>
+      capabilities.slashCommands ? mergeSlashCommands(slashCommands, customCommands) : [],
+    [capabilities.slashCommands, slashCommands, customCommands]
   )
 
   // Eagerly scan custom commands when cwd changes
@@ -176,10 +182,6 @@ export function InputBox(): React.JSX.Element {
   const thinkingMode = useActiveSession((s) => s.thinkingMode)
   const setThinkingMode = useSessionStore((s) => s.setThinkingMode)
   const sandboxEnabled = useSessionStore((s) => s.settings.sandbox.enabled)
-
-  // Capability gating — use status.capabilities (authoritative after spawn;
-  // seeded from selectedEngineId before spawn via createNewSession).
-  const capabilities = useActiveSession((s) => s.status.capabilities)
 
   // Voice input
   const voiceEnabled = useSessionStore((s) => s.settings.voiceEnabled)
@@ -359,7 +361,9 @@ export function InputBox(): React.JSX.Element {
       attachedFiles,
       isDisabled,
       activeSessionId,
-      isRunning
+      isRunning,
+      sideQuestionEnabled: capabilities.sideQuestion,
+      queueEnabled: capabilities.queue
     })
     if (action.type === 'noop') return
 
@@ -486,30 +490,38 @@ export function InputBox(): React.JSX.Element {
     fileMentionHandleInput(value, el.selectionStart ?? value.length)
   }
 
-  const addFiles = useCallback(async (files: File[]) => {
-    const accepted = files.filter((f) => ACCEPTED_FILE_TYPES.includes(f.type))
-    if (accepted.length === 0) return
-    const newAttachments: FileAttachment[] = []
-    for (const file of accepted) {
-      try {
-        const isPdf = file.type === 'application/pdf'
-        const { mediaType, base64Data } = isPdf
-          ? await readFileAsBase64(file)
-          : await processImageFile(file)
-        newAttachments.push({
-          id: uuid(),
-          fileName: file.name,
-          fileType: isPdf ? 'pdf' : 'image',
-          mediaType: mediaType as FileAttachment['mediaType'],
-          base64Data,
-          previewUrl: isPdf ? '' : `data:${mediaType};base64,${base64Data}`
-        })
-      } catch (err) {
-        window.api.logError('InputBox', `Failed to process file ${file.name}: ${err}`)
+  // Single funnel for both the attach-menu file picker and clipboard paste.
+  // Gated on capabilities.vision so engines/models without image input can't
+  // attach via either path (the AttachMenu button is also hidden in View).
+  const visionEnabled = capabilities.vision
+  const addFiles = useCallback(
+    async (files: File[]) => {
+      if (!visionEnabled) return
+      const accepted = files.filter((f) => ACCEPTED_FILE_TYPES.includes(f.type))
+      if (accepted.length === 0) return
+      const newAttachments: FileAttachment[] = []
+      for (const file of accepted) {
+        try {
+          const isPdf = file.type === 'application/pdf'
+          const { mediaType, base64Data } = isPdf
+            ? await readFileAsBase64(file)
+            : await processImageFile(file)
+          newAttachments.push({
+            id: uuid(),
+            fileName: file.name,
+            fileType: isPdf ? 'pdf' : 'image',
+            mediaType: mediaType as FileAttachment['mediaType'],
+            base64Data,
+            previewUrl: isPdf ? '' : `data:${mediaType};base64,${base64Data}`
+          })
+        } catch (err) {
+          window.api.logError('InputBox', `Failed to process file ${file.name}: ${err}`)
+        }
       }
-    }
-    if (newAttachments.length > 0) setAttachedFiles((prev) => [...prev, ...newAttachments])
-  }, [])
+      if (newAttachments.length > 0) setAttachedFiles((prev) => [...prev, ...newAttachments])
+    },
+    [visionEnabled]
+  )
 
   const handleFileChange = useCallback(
     async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -629,15 +641,20 @@ export function InputBox(): React.JSX.Element {
       ? 'text-[var(--text-secondary)] italic'
       : 'text-text-primary'
 
-  const adaptiveSupported = useMemo(
-    () => modelSupportsAdaptiveThinking(selectedModel),
+  // Reasoning controls are derived through the SAME normalizer that builds the
+  // session's ResolvedCapabilities (claudeModelCapabilities, 02 §3.2 single
+  // source of truth) — but keyed on the dropdown's `selectedModel` (a ModelInfo
+  // carrying authoritative SDK capability fields) so the pickers track the
+  // user's model selection live, before any spawn/setModel round-trip. No
+  // parallel modelSupports* derivation here.
+  const reasoning = useMemo(
+    () => claudeModelCapabilities(selectedModel).reasoning,
     [selectedModel]
   )
-  const effortSupported = useMemo(() => modelSupportsEffort(selectedModel), [selectedModel])
-  const allowedEffortLevels = useMemo(
-    () => modelSupportedEffortLevels(selectedModel),
-    [selectedModel]
-  )
+  const thinkingCap = reasoning.thinking
+  const effortCap = reasoning.effort
+  const adaptiveSupported = !!thinkingCap?.modes.includes('adaptive')
+  const allowedEffortLevels = useMemo(() => effortCap?.levels ?? [], [effortCap])
 
   // Effective display values: show the user's explicit pick when set,
   // otherwise fall back to the current model's default so new sessions
@@ -676,13 +693,15 @@ export function InputBox(): React.JSX.Element {
       models={models}
       selectedModel={selectedModel}
       effort={effectiveEffort}
-      effortSupported={effortSupported && capabilities.effortLevels}
+      effortSupported={effortCap != null}
       allowedEffortLevels={allowedEffortLevels}
       thinkingMode={effectiveThinking}
       adaptiveSupported={adaptiveSupported}
-      showThinkingPicker={capabilities.thinkingModes}
+      showThinkingPicker={thinkingCap != null}
       showModelPicker={true}
-      showCostInStatusLine={capabilities.costUsd}
+      showCostInStatusLine={true /* Phase 7: gate on Account.billingType */}
+      showContextMeter={capabilities.contextWindow > 0}
+      visionEnabled={capabilities.vision}
       sandboxEnabled={sandboxEnabled}
       voiceEnabled={voiceEnabled && capabilities.voice}
       voiceState={voiceState}

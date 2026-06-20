@@ -1,3 +1,5 @@
+import type { ResolvedCapabilities } from './model-capabilities'
+
 export type IpcResult<T> = { ok: true; data: T } | { ok: false; error: string; code?: string }
 
 /** SDK sends "Agent" (canonical, v0.2.63+) or "Task" (alias for backward compat) */
@@ -72,39 +74,6 @@ export interface AccountRef {
   accountId?: string
 }
 
-export interface SessionCapabilities {
-  thinkingModes: boolean
-  effortLevels: boolean
-  voice: boolean
-  hostedMcp: boolean
-  backgroundTasks: boolean
-  subagents: boolean
-  plan: boolean
-  costUsd: boolean
-  fork: boolean
-  sideQuestion: boolean
-}
-
-/** Full capability set for the Claude backend — every feature enabled. Frozen
- *  so the single shared reference can't be mutated by any consumer. */
-export const CLAUDE_CAPABILITIES: SessionCapabilities = Object.freeze({
-  thinkingModes: true,
-  effortLevels: true,
-  voice: true,
-  hostedMcp: true,
-  backgroundTasks: true,
-  subagents: true,
-  plan: true,
-  costUsd: true,
-  fork: true,
-  sideQuestion: true
-})
-
-/** Return the frozen capabilities constant for a given engineId. */
-export function capabilitiesFor(_engineId: EngineId): SessionCapabilities {
-  return CLAUDE_CAPABILITIES
-}
-
 export interface SessionStatus {
   state: 'idle' | 'running' | 'error' | 'disconnected'
   sessionId: string | null
@@ -113,7 +82,7 @@ export interface SessionStatus {
   cwd: string | null
   totalCostUsd: number
   engineId: EngineId
-  capabilities: SessionCapabilities
+  capabilities: ResolvedCapabilities
 }
 
 export interface PermissionSuggestion {

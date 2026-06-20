@@ -114,7 +114,7 @@ vi.mock('../../services/logger', () => ({
 // Import AFTER mocks.
 import { RemoteDispatcher } from '../../services/remote-dispatcher'
 import { registerRemoteHandlers, registerRemoteVersionInfo } from '../remote-handlers'
-import { CLAUDE_CAPABILITIES } from '../../../shared/types'
+import { resolveClaudeCapabilities } from '../../../shared/model-capabilities'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -134,7 +134,7 @@ function makeFakeWindow(): any {
 const sessionStub: any = {
   willQueue: false,
   engineId: 'claude',
-  capabilities: CLAUDE_CAPABILITIES,
+  capabilities: resolveClaudeCapabilities('default'),
   run: vi.fn(),
   resolveApproval: vi.fn(),
   watchBackground: vi.fn(),

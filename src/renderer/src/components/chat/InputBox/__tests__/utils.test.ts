@@ -42,6 +42,24 @@ describe('resolveSendAction', () => {
     expect(result.type).not.toBe('side-question')
   })
 
+  it('treats /btw as ordinary prompt when sideQuestion capability is off', () => {
+    const result = resolveSendAction({
+      ...baseCtx,
+      text: '/btw what is this?',
+      sideQuestionEnabled: false
+    })
+    expect(result).toEqual({ type: 'send-prompt', prompt: '/btw what is this?', attachments: undefined })
+  })
+
+  it('still routes /btw to side-question when sideQuestion capability is on', () => {
+    const result = resolveSendAction({
+      ...baseCtx,
+      text: '/btw what is this?',
+      sideQuestionEnabled: true
+    })
+    expect(result).toEqual({ type: 'side-question', question: 'what is this?' })
+  })
+
   it('returns clear-session for /clear', () => {
     expect(resolveSendAction({ ...baseCtx, text: '/clear' })).toEqual({ type: 'clear-session' })
   })
@@ -53,6 +71,16 @@ describe('resolveSendAction', () => {
 
   it('queues prompt when session is running', () => {
     const result = resolveSendAction({ ...baseCtx, isRunning: true })
+    expect(result).toEqual({ type: 'queue-prompt', prompt: 'Hello Claude' })
+  })
+
+  it('returns noop (retains input) when running but queue capability is off', () => {
+    const result = resolveSendAction({ ...baseCtx, isRunning: true, queueEnabled: false })
+    expect(result).toEqual({ type: 'noop' })
+  })
+
+  it('queues when running and queue capability is on', () => {
+    const result = resolveSendAction({ ...baseCtx, isRunning: true, queueEnabled: true })
     expect(result).toEqual({ type: 'queue-prompt', prompt: 'Hello Claude' })
   })
 

@@ -16,6 +16,8 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
   const statusLine = useActiveSession((s) => s.statusLine)
   const fallbackCost = useActiveSession((s) => s.status.totalCostUsd)
   const engineId = useActiveSession((s) => s.status.engineId)
+  const canUseMcp = useActiveSession((s) => s.status.capabilities.canUseMcp)
+  const capSkills = useActiveSession((s) => s.status.capabilities.skills)
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const customTitle = useSessionStore((s) =>
     activeSessionId ? s.customTitles[activeSessionId] : undefined
@@ -287,7 +289,7 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
             <span>VSCode</span>
           </button>
         )}
-        {!isMobileCtx && cwd && (
+        {!isMobileCtx && cwd && capSkills && (
           <button
             onClick={() => setSkillsOpen(true)}
             className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[12px] text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
@@ -308,7 +310,7 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
             </svg>
           </button>
         )}
-        {!isMobileCtx && cwd && (
+        {!isMobileCtx && cwd && canUseMcp && (
           <button
             onClick={() => setMcpOpen(true)}
             className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[12px] text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"

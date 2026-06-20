@@ -233,12 +233,12 @@ export function registerRemoteHandlers(
 
   dispatcher.register('session:set-effort', async (routingId: string, effort: string) => {
     const s = manager.get(routingId)
-    if (s?.capabilities.effortLevels && isClaudeSession(s)) s.setEffort(effort)
+    if (s?.capabilities.reasoning.effort != null && isClaudeSession(s)) s.setEffort(effort)
   })
 
   dispatcher.register('session:set-thinking-mode', async (routingId: string, mode: string) => {
     const s = manager.get(routingId)
-    if (s?.capabilities.thinkingModes && isClaudeSession(s)) s.setThinkingMode(mode)
+    if (s?.capabilities.reasoning.thinking != null && isClaudeSession(s)) s.setThinkingMode(mode)
   })
 
   dispatcher.register('session:ask-side-question', async (routingId: string, question: string) => {

@@ -1,7 +1,8 @@
 import { create } from 'zustand'
 import { useShallow } from 'zustand/react/shallow'
 import { mergeContentBlocks } from '../utils/content-blocks'
-import { VOICE_LANGUAGES, CLAUDE_CAPABILITIES, capabilitiesFor, claudeModel } from '../../../shared/types'
+import { VOICE_LANGUAGES, claudeModel } from '../../../shared/types'
+import { resolveClaudeCapabilities } from '../../../shared/model-capabilities'
 import type { EffortLevel } from '../../../shared/model-capabilities'
 import type {
   ChatMessage,
@@ -497,7 +498,7 @@ const EMPTY_SESSION_STATE: PerSessionState = {
     cwd: null,
     totalCostUsd: 0,
     engineId: 'claude',
-    capabilities: CLAUDE_CAPABILITIES
+    capabilities: resolveClaudeCapabilities('default')
   },
   pendingApprovals: [],
   errors: [],
@@ -957,7 +958,7 @@ export const useSessionStore = create<SessionState>((set) => ({
       newSession.status = {
         ...newSession.status,
         engineId,
-        capabilities: capabilitiesFor(engineId)
+        capabilities: resolveClaudeCapabilities('default')
       }
       return {
         ...(switchTo

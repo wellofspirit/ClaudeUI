@@ -1,12 +1,12 @@
 import type { BrowserWindow } from 'electron'
 import type {
   ChatMessage,
-  SessionCapabilities,
   SessionStatus,
   EngineId,
   ApprovalDecision,
   PermissionSuggestion
 } from '../../shared/types'
+import type { ResolvedCapabilities } from '../../shared/model-capabilities'
 import type { ISession } from './ISession'
 
 /**
@@ -22,7 +22,7 @@ import type { ISession } from './ISession'
  *
  * Subclasses must implement:
  *  - abstract readonly engineId: EngineId
- *  - abstract readonly capabilities: SessionCapabilities
+ *  - abstract readonly capabilities: ResolvedCapabilities
  *  - All remaining ISession methods (run, interrupt, cancel, resolveApproval, etc.)
  *  - dispose() — resource teardown
  */
@@ -68,7 +68,7 @@ export abstract class BaseSession implements ISession {
   // ---------------------------------------------------------------------------
 
   abstract readonly engineId: EngineId
-  abstract readonly capabilities: SessionCapabilities
+  abstract readonly capabilities: ResolvedCapabilities
   abstract readonly willQueue: boolean
   abstract getSessionId(): string | null
   abstract run(

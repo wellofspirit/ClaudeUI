@@ -29,7 +29,7 @@ export const MessageBubble = memo(function MessageBubble({
   // Hooks must run unconditionally — declared before the role-based early returns.
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const forkFromMessage = useSessionStore((s) => s.forkFromMessage)
-  const forkCapability = useActiveSession((s) => s.status.capabilities.fork)
+  const forkCapability = useActiveSession((s) => s.status.capabilities.forkFromMessage)
   const [forking, setForking] = useState(false)
 
   const handleFork = async (): Promise<void> => {
@@ -294,8 +294,8 @@ export const MessageBubble = memo(function MessageBubble({
       })}
       {/* Branch off: hidden until the message is hovered. Spins a new session
           seeded with everything up to and including this assistant turn.
-          Gated on capabilities.fork so providers that don't support forking
-          never show this button. */}
+          Gated on capabilities.forkFromMessage so engines that don't support
+          turn-granular forking never show this button. */}
       {activeSessionId && forkCapability && (
         <div className="opacity-0 group-hover/msg:opacity-100 focus-within:opacity-100 transition-opacity">
           <button
