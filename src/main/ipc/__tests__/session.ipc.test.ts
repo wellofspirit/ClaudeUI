@@ -45,7 +45,7 @@ const { gitSvcSpies, sessionManagerSpies, sessionStub } = vi.hoisted(() => {
   const sessionStub: any = {
     willQueue: false,
     cwd: '/tmp/cwd',
-    provider: 'claude',
+    engineId: 'claude',
     // capabilities assigned at module scope below (CLAUDE_CAPABILITIES needs the
     // top-level import, which isn't available inside the hoisted factory).
     capabilities: undefined,

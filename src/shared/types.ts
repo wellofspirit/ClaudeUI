@@ -38,7 +38,39 @@ export interface ChatMessage {
   planContent?: string
 }
 
-export type ProviderId = 'claude'
+export type EngineId = 'claude' | 'opencode'
+
+/** Open-ended union: known vendors are named; unknown ones fall through as plain strings. */
+export type VendorId = 'anthropic' | 'openai' | 'google' | 'local' | (string & {})
+
+/** Vendor-qualified model identity — the canonical key for model selection and persistence. */
+export interface ModelRef {
+  engineId: EngineId
+  vendorId: VendorId
+  /** Model name string, e.g. 'claude-opus-4-8', 'default' */
+  modelId: string
+}
+
+/** Construct a Claude ModelRef (engine 'claude' is 1:1 with vendor 'anthropic'). */
+export function claudeModel(modelId: string): ModelRef {
+  return { engineId: 'claude', vendorId: 'anthropic', modelId }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4 identity types — declared here for vocabulary; wired in Phase 4
+// ---------------------------------------------------------------------------
+
+export type BillingType = 'subscription' | 'apiKey' | 'free' | 'unknown'
+
+/** Resolved account descriptor held on the session. Wired in Phase 4. */
+export interface AccountRef {
+  engineId: EngineId
+  vendorId: VendorId
+  billingType: BillingType
+  authState: 'authenticated' | 'unauthenticated' | 'unknown'
+  label?: string
+  accountId?: string
+}
 
 export interface SessionCapabilities {
   thinkingModes: boolean
@@ -68,18 +100,19 @@ export const CLAUDE_CAPABILITIES: SessionCapabilities = Object.freeze({
   sideQuestion: true
 })
 
-/** Return the frozen capabilities constant for a given provider. */
-export function capabilitiesFor(_provider: ProviderId): SessionCapabilities {
+/** Return the frozen capabilities constant for a given engineId. */
+export function capabilitiesFor(_engineId: EngineId): SessionCapabilities {
   return CLAUDE_CAPABILITIES
 }
 
 export interface SessionStatus {
   state: 'idle' | 'running' | 'error' | 'disconnected'
   sessionId: string | null
-  model: string | null
+  /** Vendor-qualified model identity. Null until the engine reports a model. */
+  model: ModelRef | null
   cwd: string | null
   totalCostUsd: number
-  provider: ProviderId
+  engineId: EngineId
   capabilities: SessionCapabilities
 }
 
@@ -343,8 +376,8 @@ export interface SessionInfo {
   lastActivityAt: number
   /** cli.js-generated session title (from `{type:"ai-title"}` JSONL records). */
   aiTitle?: string | null
-  /** Which backend produced this session. Defaults to 'claude' when absent (legacy records). */
-  provider?: ProviderId
+  /** Which engine produced this session. Defaults to 'claude' when absent (legacy records). */
+  engineId?: EngineId
 }
 
 export interface DirEntry {
@@ -383,7 +416,7 @@ interface SessionAPI {
     thinkingMode?: string,
     resumeSessionAt?: string,
     forkSession?: boolean,
-    providerId?: ProviderId
+    engineId?: EngineId
   ): Promise<void>
   rekeySession(oldId: string, newId: string): Promise<void>
   /** Resolve the balanced JSONL line uuid to fork ("branch off") from, given
@@ -1063,11 +1096,13 @@ export interface UISessionConfig {
   /** Project keys the user has chosen to hide from the sidebar */
   hiddenProjects?: string[]
   /**
-   * Provider per session. Maps sessionId → ProviderId for sessions that used a
-   * non-default provider. Absent keys are treated as 'claude'. Written at
-   * session-creation time and carried over on rekey.
+   * Engine + model per session. Maps sessionId → { engineId, model? }.
+   * Absent keys are treated as claude. The entry is written at session-creation
+   * time, updated whenever the user switches model, and carried over on rekey.
+   * On reopen, the optional `model` field seeds `selectedModel` so the last
+   * model choice is restored (Phase 1 behavior addition).
    */
-  sessionProviders?: Record<string, ProviderId>
+  sessionEngines?: Record<string, { engineId: EngineId; model?: ModelRef }>
 }
 
 export interface SlashCommandInfo {

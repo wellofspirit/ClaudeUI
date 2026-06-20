@@ -1,17 +1,20 @@
 /**
- * Unit tests for provider persistence in session-store.
+ * Unit tests for engine persistence in session-store.
  *
  * Validates that:
- *   - selectedProvider is NOT written to sessionProviders when it's the default ('claude')
- *   - sessionProviders is carried over correctly through rekeySession
- *   - applyExternalSessionConfig restores sessionProviders from disk config
+ *   - selectedEngineId is written to sessionEngines on createNewSession
+ *   - sessionEngines is carried over correctly through rekeySession
+ *   - applyExternalSessionConfig restores sessionEngines from disk config
+ *   - SessionStatus.model is a ModelRef and claudeModel() builds anthropic-vendored refs
+ *   - The sessionProviders→sessionEngines read-migration path works correctly (incl. 'codex')
  *
  * Pattern: pure store state transitions, no React, no TestIpcBridge.
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { useSessionStore } from '../session-store'
-import type { ProviderId } from '../../../../shared/types'
+import type { EngineId } from '../../../../shared/types'
+import { claudeModel } from '../../../../shared/types'
 
 const store = () => useSessionStore.getState()
 let saveSessionConfigSpy: ReturnType<typeof vi.fn>
@@ -36,62 +39,165 @@ beforeEach(() => {
     worktreeInfoMap: {},
     hiddenSessionIds: [],
     hiddenProjectKeys: [],
-    sessionProviders: {},
-    lastSelectedProvider: 'claude' as ProviderId,
+    sessionEngines: {},
+    lastSelectedEngineId: 'claude' as EngineId,
     terminalGroups: {},
     activeView: { type: 'chat' }
   })
 })
 
-describe('provider persistence: createNewSession', () => {
-  it('does NOT write to sessionProviders when provider is claude (default)', () => {
-    useSessionStore.setState({ lastSelectedProvider: 'claude' })
-    store().createNewSession('r1', '/tmp/proj')
-    expect(store().sessionProviders).toEqual({})
-    // saveSessionConfig should still be called but without sessionProviders key for 'r1'
-    const lastCall = saveSessionConfigSpy.mock.calls.at(-1)?.[0] as Record<string, unknown>
-    expect(lastCall?.sessionProviders).toEqual({})
+// ---------------------------------------------------------------------------
+// claudeModel() / ModelRef
+// ---------------------------------------------------------------------------
+
+describe('claudeModel helper', () => {
+  it('builds an anthropic-vendored ModelRef', () => {
+    const ref = claudeModel('claude-opus-4-8')
+    expect(ref).toEqual({ engineId: 'claude', vendorId: 'anthropic', modelId: 'claude-opus-4-8' })
   })
 
-  it('selectedProvider defaults to claude on newly created session when lastSelectedProvider is claude', () => {
-    useSessionStore.setState({ lastSelectedProvider: 'claude' as ProviderId })
-    store().createNewSession('r4', '/tmp/proj')
-    expect(store().sessions['r4']?.selectedProvider).toBe('claude')
-    expect(store().sessions['r4']?.status.provider).toBe('claude')
+  it('builds a default ModelRef', () => {
+    const ref = claudeModel('default')
+    expect(ref.engineId).toBe('claude')
+    expect(ref.vendorId).toBe('anthropic')
+    expect(ref.modelId).toBe('default')
   })
 })
 
-describe('provider persistence: rekeySession', () => {
-  it('does not create a sessionProviders entry when rekying a claude session', () => {
-    useSessionStore.setState({ lastSelectedProvider: 'claude' as ProviderId })
+// ---------------------------------------------------------------------------
+// Engine persistence: createNewSession
+// ---------------------------------------------------------------------------
+
+describe('engine persistence: createNewSession', () => {
+  it('writes engineId to sessionEngines for the new session', () => {
+    useSessionStore.setState({ lastSelectedEngineId: 'claude' as EngineId })
+    store().createNewSession('r1', '/tmp/proj')
+    // sessionEngines should have an entry for r1
+    expect(store().sessionEngines['r1']).toBeDefined()
+    expect(store().sessionEngines['r1'].engineId).toBe('claude')
+  })
+
+  it('selectedEngineId defaults to claude on newly created session when lastSelectedEngineId is claude', () => {
+    useSessionStore.setState({ lastSelectedEngineId: 'claude' as EngineId })
+    store().createNewSession('r4', '/tmp/proj')
+    expect(store().sessions['r4']?.selectedEngineId).toBe('claude')
+    expect(store().sessions['r4']?.status.engineId).toBe('claude')
+  })
+
+  it('SessionStatus.model seed is a ModelRef', () => {
+    store().createNewSession('r1', '/tmp/proj')
+    // The session starts with model: null in status (set before any session status arrives)
+    // The seed persisted in sessionEngines.model is a ModelRef
+    const modelEntry = store().sessionEngines['r1']?.model
+    expect(modelEntry).toBeDefined()
+    if (modelEntry) {
+      expect(typeof modelEntry.engineId).toBe('string')
+      expect(typeof modelEntry.vendorId).toBe('string')
+      expect(typeof modelEntry.modelId).toBe('string')
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Engine persistence: rekeySession
+// ---------------------------------------------------------------------------
+
+describe('engine persistence: rekeySession', () => {
+  it('carries sessionEngines entry over to the new key', () => {
+    useSessionStore.setState({ lastSelectedEngineId: 'claude' as EngineId })
     store().createNewSession('claude-temp', '/tmp/proj')
     store().rekeySession('claude-temp', 'claude-real')
-    // claude sessions should not appear in sessionProviders
-    expect(store().sessionProviders['claude-real']).toBeUndefined()
-    expect(store().sessionProviders['claude-temp']).toBeUndefined()
+    // entry should be under the new key, not the old one
+    expect(store().sessionEngines['claude-real']).toBeDefined()
+    expect(store().sessionEngines['claude-temp']).toBeUndefined()
   })
 
   it('is a no-op when oldId === newId', () => {
     useSessionStore.setState({
-      sessionProviders: { same: 'claude' as ProviderId }
+      sessionEngines: { same: { engineId: 'claude' as EngineId } }
     })
     store().rekeySession('same', 'same')
-    expect(store().sessionProviders['same']).toBe('claude')
+    expect(store().sessionEngines['same']?.engineId).toBe('claude')
   })
 })
 
-describe('provider persistence: applyExternalSessionConfig', () => {
-  it('restores sessionProviders from the config snapshot', () => {
+// ---------------------------------------------------------------------------
+// Engine persistence: applyExternalSessionConfig
+// ---------------------------------------------------------------------------
+
+describe('engine persistence: applyExternalSessionConfig', () => {
+  it('restores sessionEngines from the config snapshot', () => {
     store().applyExternalSessionConfig({
       recentSessions: ['s1', 's2'],
-      sessionProviders: { s1: 'claude' as ProviderId }
+      sessionEngines: { s1: { engineId: 'claude' as EngineId } }
     })
-    expect(store().sessionProviders['s1']).toBe('claude')
-    expect(store().sessionProviders['s2']).toBeUndefined()
+    expect(store().sessionEngines['s1']?.engineId).toBe('claude')
+    expect(store().sessionEngines['s2']).toBeUndefined()
   })
 
-  it('defaults sessionProviders to empty object when absent from config', () => {
+  it('defaults sessionEngines to empty object when absent from config', () => {
     store().applyExternalSessionConfig({ recentSessions: [] })
-    expect(store().sessionProviders).toEqual({})
+    expect(store().sessionEngines).toEqual({})
+  })
+})
+
+// ---------------------------------------------------------------------------
+// sessionProviders→sessionEngines migration (tested via ui-config migration,
+// but we verify the store correctly accepts the post-migration sessionEngines shape)
+// ---------------------------------------------------------------------------
+
+describe('sessionEngines migration shape acceptance', () => {
+  it('accepts migrated sessionEngines with engineId:claude (formerly codex or any value)', () => {
+    // Simulate what loadSessionConfig() returns after migrating 'codex' → { engineId: 'claude' }
+    store().applyExternalSessionConfig({
+      sessionEngines: {
+        'old-codex-session': { engineId: 'claude' as EngineId }
+      }
+    })
+    expect(store().sessionEngines['old-codex-session']?.engineId).toBe('claude')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Model persistence: full write→rekey→reopen loop
+// ---------------------------------------------------------------------------
+
+describe('model persistence loop', () => {
+  it('setSelectedModel records the real model into sessionEngines', () => {
+    store().createNewSession('r1', '/tmp/proj') // sets activeSessionId = 'r1'
+    store().setSelectedModel('claude-opus-4-8')
+    expect(store().sessionEngines['r1']?.model?.modelId).toBe('claude-opus-4-8')
+    expect(store().sessionEngines['r1']?.model?.engineId).toBe('claude')
+    expect(store().sessionEngines['r1']?.model?.vendorId).toBe('anthropic')
+  })
+
+  it('rekeySession carries the chosen model to the canonical id', () => {
+    store().createNewSession('r-temp', '/tmp/proj')
+    store().setSelectedModel('claude-opus-4-8')
+    store().rekeySession('r-temp', 'sess-uuid')
+    expect(store().sessionEngines['sess-uuid']?.model?.modelId).toBe('claude-opus-4-8')
+    expect(store().sessionEngines['r-temp']).toBeUndefined()
+  })
+
+  it('reopen (loadHistoricalSession) seeds selectedModel from the persisted model', () => {
+    // Full loop: create → setModel → rekey → simulate fresh reopen
+    store().createNewSession('r-temp', '/tmp/proj')
+    store().setSelectedModel('claude-opus-4-8')
+    store().rekeySession('r-temp', 'sess-uuid')
+
+    // Simulate a fresh launch: clear in-memory sessions but keep persisted config
+    const persisted = store().sessionEngines
+    useSessionStore.setState({ sessions: {}, activeSessionId: null, sessionEngines: persisted })
+
+    store().loadHistoricalSession('sess-uuid', [], '/tmp/proj')
+    expect(store().sessions['sess-uuid']?.selectedModel).toBe('claude-opus-4-8')
+  })
+
+  it('reopen falls back to default when no persisted model exists', () => {
+    useSessionStore.setState({
+      sessionEngines: { 'sess-x': { engineId: 'claude' as EngineId } }
+    })
+    store().loadHistoricalSession('sess-x', [], '/tmp/proj')
+    expect(store().sessions['sess-x']?.selectedModel).toBe('default')
   })
 })

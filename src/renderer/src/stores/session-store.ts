@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import { useShallow } from 'zustand/react/shallow'
 import { mergeContentBlocks } from '../utils/content-blocks'
-import { VOICE_LANGUAGES, CLAUDE_CAPABILITIES, capabilitiesFor } from '../../../shared/types'
+import { VOICE_LANGUAGES, CLAUDE_CAPABILITIES, capabilitiesFor, claudeModel } from '../../../shared/types'
 import type { EffortLevel } from '../../../shared/model-capabilities'
 import type {
   ChatMessage,
@@ -35,7 +35,8 @@ import type {
   VoiceLanguageCode,
   ActiveView,
   PluginViewWithOwner,
-  ProviderId
+  EngineId,
+  ModelRef
 } from '../../../shared/types'
 
 /** Normalize cwd for use as a terminal group key (strip trailing slash). */
@@ -258,8 +259,8 @@ type PersistedSessionFields = {
   worktreeInfoMap: Record<string, WorktreeInfo>
   hiddenSessionIds: string[]
   hiddenProjectKeys: string[]
-  /** Maps sessionId → ProviderId for sessions that used a non-default provider. */
-  sessionProviders: Record<string, ProviderId>
+  /** Maps sessionId → { engineId, model? } for session engine persistence. */
+  sessionEngines: Record<string, { engineId: EngineId; model?: ModelRef }>
 }
 
 /**
@@ -279,7 +280,7 @@ function saveSessionConfig(
     worktreeInfoMap: merged.worktreeInfoMap,
     hiddenSessions: merged.hiddenSessionIds,
     hiddenProjects: merged.hiddenProjectKeys,
-    sessionProviders: merged.sessionProviders
+    sessionEngines: merged.sessionEngines
   })
 }
 
@@ -366,7 +367,7 @@ export async function hydrateConfigFromDisk(): Promise<void> {
     worktreeInfoMap: sessionConfig.worktreeInfoMap ?? {},
     hiddenSessionIds: sessionConfig.hiddenSessions ?? [],
     hiddenProjectKeys: sessionConfig.hiddenProjects ?? [],
-    sessionProviders: sessionConfig.sessionProviders ?? {},
+    sessionEngines: sessionConfig.sessionEngines ?? {},
     slashCommands: slashCommands ?? []
   })
 }
@@ -441,8 +442,8 @@ export interface PerSessionState {
   queuedText: string
   draftText: string
   selectedModel: string
-  /** Provider chosen at session-creation time. Immutable after the session spawns. */
-  selectedProvider: ProviderId
+  /** Engine chosen at session-creation time. Immutable after the session spawns. */
+  selectedEngineId: EngineId
   // Worktree state
   worktreeInfo: WorktreeInfo | null
   // Git state
@@ -495,7 +496,7 @@ const EMPTY_SESSION_STATE: PerSessionState = {
     model: null,
     cwd: null,
     totalCostUsd: 0,
-    provider: 'claude',
+    engineId: 'claude',
     capabilities: CLAUDE_CAPABILITIES
   },
   pendingApprovals: [],
@@ -522,7 +523,7 @@ const EMPTY_SESSION_STATE: PerSessionState = {
   queuedText: '',
   draftText: '',
   selectedModel: 'default',
-  selectedProvider: 'claude' as ProviderId,
+  selectedEngineId: 'claude' as EngineId,
   worktreeInfo: null,
   isGitRepo: false,
   gitStatus: null,
@@ -610,12 +611,11 @@ interface SessionState {
   hiddenSessionIds: string[]
   /** Project keys hidden from the sidebar */
   hiddenProjectKeys: string[]
-  /** Maps sessionId → ProviderId for non-default-provider sessions. Used to route
-   *  history loading and resume correctly on app restart. */
-  sessionProviders: Record<string, ProviderId>
+  /** Maps sessionId → { engineId, model? } for engine persistence across restarts. */
+  sessionEngines: Record<string, { engineId: EngineId; model?: ModelRef }>
 
-  /** Remembered provider choice — pre-fills provider for newly created sessions. */
-  lastSelectedProvider: ProviderId
+  /** Remembered engine choice — pre-fills engine for newly created sessions. */
+  lastSelectedEngineId: EngineId
 
   // Global (not per-session)
   settings: AppSettings
@@ -647,8 +647,8 @@ interface SessionState {
   showWelcome: () => void
   switchSession: (routingId: string) => void
   createNewSession: (routingId: string, cwd: string, switchTo?: boolean) => void
-  /** Set the remembered provider choice. Persisted in localStorage (lightweight). */
-  setLastSelectedProvider: (provider: ProviderId) => void
+  /** Set the remembered engine choice. Persisted in localStorage (lightweight). */
+  setLastSelectedEngineId: (engineId: EngineId) => void
   loadHistoricalSession: (
     routingId: string,
     messages: ChatMessage[],
@@ -676,7 +676,7 @@ interface SessionState {
   unhideSession: (sessionId: string) => void
   hideProject: (projectKey: string) => void
   unhideProject: (projectKey: string) => void
-  deleteSession: (sessionId: string, projectKey: string, provider?: ProviderId) => Promise<void>
+  deleteSession: (sessionId: string, projectKey: string, engineId?: EngineId) => Promise<void>
   deleteProject: (projectKey: string) => Promise<void>
 
   // Per-session actions (all take routingId)
@@ -776,7 +776,7 @@ interface SessionState {
     worktreeInfoMap?: Record<string, WorktreeInfo>
     hiddenSessions?: string[]
     hiddenProjects?: string[]
-    sessionProviders?: Record<string, ProviderId>
+    sessionEngines?: Record<string, { engineId: EngineId; model?: ModelRef }>
   }) => void
   applyRemoteSnapshot: (
     snapshot: import('../../../shared/remote-protocol').FullStateSnapshot
@@ -884,9 +884,10 @@ export const useSessionStore = create<SessionState>((set) => ({
   customTitles: {},
   hiddenSessionIds: [],
   hiddenProjectKeys: [],
-  sessionProviders: {},
-  lastSelectedProvider:
-    (localStorage.getItem('lastSelectedProvider') as ProviderId | null) ?? 'claude',
+  sessionEngines: {},
+  lastSelectedEngineId:
+    ((localStorage.getItem('lastSelectedEngineId') ??
+      localStorage.getItem('lastSelectedProvider')) as EngineId | null) ?? 'claude',
   settings: DEFAULT_SETTINGS,
   availableModels: [],
   slashCommands: [],
@@ -942,20 +943,21 @@ export const useSessionStore = create<SessionState>((set) => ({
         routingId,
         ...state.recentSessionIds.filter((id) => id !== routingId)
       ].slice(0, state.settings.maxRecentSessions)
-      const provider = state.lastSelectedProvider
-      // Only persist non-default provider values; 'claude' is the implicit default.
-      const sessionProviders =
-        provider !== 'claude'
-          ? { ...state.sessionProviders, [routingId]: provider }
-          : state.sessionProviders
-      saveSessionConfig(state, { recentSessionIds, sessionProviders })
+      const engineId = state.lastSelectedEngineId
+      // Write model into sessionEngines so it can be seeded on reopen (spec §3).
+      // Always write the entry so the engine is recorded; model is set on first model event.
+      const sessionEngines = {
+        ...state.sessionEngines,
+        [routingId]: { engineId, model: claudeModel('default') }
+      }
+      saveSessionConfig(state, { recentSessionIds, sessionEngines })
       const newSession = createEmptySession(cwd)
-      newSession.selectedProvider = provider
-      // Seed status.provider/capabilities to match so they're correct before spawn
+      newSession.selectedEngineId = engineId
+      // Seed status.engineId/capabilities to match so they're correct before spawn
       newSession.status = {
         ...newSession.status,
-        provider,
-        capabilities: capabilitiesFor(provider)
+        engineId,
+        capabilities: capabilitiesFor(engineId)
       }
       return {
         ...(switchTo
@@ -963,13 +965,13 @@ export const useSessionStore = create<SessionState>((set) => ({
           : {}),
         sessions: { ...state.sessions, [routingId]: newSession },
         recentSessionIds,
-        sessionProviders
+        sessionEngines
       }
     }),
 
-  setLastSelectedProvider: (provider) => {
-    localStorage.setItem('lastSelectedProvider', provider)
-    set({ lastSelectedProvider: provider })
+  setLastSelectedEngineId: (engineId) => {
+    localStorage.setItem('lastSelectedEngineId', engineId)
+    set({ lastSelectedEngineId: engineId })
   },
 
   loadHistoricalSession: (
@@ -981,21 +983,28 @@ export const useSessionStore = create<SessionState>((set) => ({
     statusLine?,
     warnings?
   ) =>
-    set((state) => ({
-      sessions: {
-        ...state.sessions,
-        [routingId]: {
-          ...createEmptySession(cwd),
-          messages,
-          isHistorical: true,
-          taskNotifications: taskNotifications || [],
-          subagentMessages: subagentMessages || {},
-          statusLine: statusLine ?? null,
-          warnings: warnings || [],
-          worktreeInfo: state.worktreeInfoMap[routingId] ?? null
+    set((state) => {
+      const base = createEmptySession(cwd)
+      // Seed selectedModel from the persisted per-session model when present, so
+      // reopening a session restores the user's last model choice (data-model §3).
+      const persistedModel = state.sessionEngines[routingId]?.model?.modelId
+      return {
+        sessions: {
+          ...state.sessions,
+          [routingId]: {
+            ...base,
+            messages,
+            isHistorical: true,
+            taskNotifications: taskNotifications || [],
+            subagentMessages: subagentMessages || {},
+            statusLine: statusLine ?? null,
+            warnings: warnings || [],
+            worktreeInfo: state.worktreeInfoMap[routingId] ?? null,
+            ...(persistedModel ? { selectedModel: persistedModel } : {})
+          }
         }
       }
-    })),
+    }),
 
   forkFromMessage: async (sourceRoutingId, messageId) => {
     const src = useSessionStore.getState().sessions[sourceRoutingId]
@@ -1165,7 +1174,7 @@ export const useSessionStore = create<SessionState>((set) => ({
       return { hiddenProjectKeys }
     }),
 
-  deleteSession: async (sessionId, projectKey, _provider) => {
+  deleteSession: async (sessionId, projectKey, _engineId) => {
     await window.api.deleteSession(sessionId, projectKey)
     // Also scrub any references to this session from persisted config + in-memory state
     useSessionStore.setState((state) => {
@@ -1900,7 +1909,7 @@ export const useSessionStore = create<SessionState>((set) => ({
       worktreeInfoMap: config.worktreeInfoMap ?? {},
       hiddenSessionIds: config.hiddenSessions ?? [],
       hiddenProjectKeys: config.hiddenProjects ?? [],
-      sessionProviders: config.sessionProviders ?? {}
+      sessionEngines: config.sessionEngines ?? {}
     })),
 
   // Apply a full state snapshot from the remote server (initial sync)
@@ -2045,7 +2054,18 @@ export const useSessionStore = create<SessionState>((set) => ({
     set((state) => {
       const id = state.activeSessionId
       if (!id) return {}
-      return { sessions: updateSession(state.sessions, id, () => ({ selectedModel: model })) }
+      // Persist the real model into sessionEngines so it can seed selectedModel
+      // when the session is reopened from disk. Only record for sessions that
+      // already have an engine entry (created via createNewSession).
+      const existing = state.sessionEngines[id]
+      const sessionEngines = existing
+        ? { ...state.sessionEngines, [id]: { ...existing, model: claudeModel(model) } }
+        : state.sessionEngines
+      if (existing) saveSessionConfig(state, { sessionEngines })
+      return {
+        sessions: updateSession(state.sessions, id, () => ({ selectedModel: model })),
+        sessionEngines
+      }
     }),
 
   setSlashCommands: (commands) => set({ slashCommands: commands }),
@@ -2100,7 +2120,7 @@ export const useSessionStore = create<SessionState>((set) => ({
       session.thinkingMode ?? undefined,
       undefined,
       undefined,
-      session.selectedProvider
+      session.selectedEngineId
     )
     set((s) => ({ sessions: updateSession(s.sessions, routingId, () => ({ sdkActive: true })) }))
     await window.api.sendPrompt(routingId, prompt)
@@ -2132,13 +2152,17 @@ export const useSessionStore = create<SessionState>((set) => ({
         worktreeInfoMap[newId] = worktreeInfoMap[oldId]
         delete worktreeInfoMap[oldId]
       }
-      // Carry over persisted provider mapping to the canonical session ID
-      const sessionProviders = { ...state.sessionProviders }
-      if (sessionProviders[oldId]) {
-        sessionProviders[newId] = sessionProviders[oldId]
-        delete sessionProviders[oldId]
-      } else if (session.selectedProvider !== 'claude') {
-        sessionProviders[newId] = session.selectedProvider
+      // Carry over persisted engine mapping to the canonical session ID
+      const sessionEngines = { ...state.sessionEngines }
+      if (sessionEngines[oldId]) {
+        sessionEngines[newId] = sessionEngines[oldId]
+        delete sessionEngines[oldId]
+      } else {
+        // Always record the engine + current model, defaulting to the session's choices
+        sessionEngines[newId] = {
+          engineId: session.selectedEngineId,
+          model: claudeModel(session.selectedModel)
+        }
       }
       saveSessionConfig(state, {
         recentSessionIds,
@@ -2146,7 +2170,7 @@ export const useSessionStore = create<SessionState>((set) => ({
         hiddenSessionIds,
         customTitles,
         worktreeInfoMap,
-        sessionProviders
+        sessionEngines
       })
       return {
         sessions,
@@ -2156,7 +2180,7 @@ export const useSessionStore = create<SessionState>((set) => ({
         hiddenSessionIds,
         customTitles,
         worktreeInfoMap,
-        sessionProviders
+        sessionEngines
       }
     })
   },

@@ -529,7 +529,7 @@ describe('FloatingApproval rendered component', () => {
 
 describe('FloatingApproval "Allow for session" button', () => {
   it('does NOT render "Allow for session" button for a Claude session (no producer)', () => {
-    useSessionStore.setState({ lastSelectedProvider: 'claude' })
+    useSessionStore.setState({ lastSelectedEngineId: 'claude' })
     useSessionStore.getState().createNewSession('route-claude', '/test')
     useSessionStore.setState({ activeSessionId: 'route-claude' })
 

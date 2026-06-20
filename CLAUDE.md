@@ -51,11 +51,11 @@ src/
     sdk/                   — In-house cli.js harness, replaces @anthropic-ai/claude-agent-sdk
                              query(), tool(), createSdkMcpServer() + 9 modules
                              Full details: docs/sdk-layer.md
-    providers/             — Provider abstraction layer (ADR-016)
-      ISession.ts          — Provider-neutral session interface + ProviderSessionFactory type
+    providers/             — Engine abstraction layer (ADR-016 → ADR-018)
+      ISession.ts          — Engine-neutral session interface + EngineSessionFactory type
       BaseSession.ts       — Abstract base: extraWindows, send(), inactivity timer, getMessages()
-      ProviderRegistry.ts  — Singleton factory (providerRegistry.createSession)
-      register-providers.ts — Side-effect bootstrap: registers the 'claude' factory
+      EngineRegistry.ts    — Singleton factory (engineRegistry.createSession)
+      register-engines.ts  — Side-effect bootstrap: registers the 'claude' factory
     ipc/
       session.ipc.ts       — Core IPC: sessions, git, config, MCP, usage, worktrees, voice, proxy
       terminal.ipc.ts      — PTY create/write/resize/kill
@@ -286,12 +286,13 @@ The terminal panel uses `display: none` (closed) / `display: contents` (open) in
 
 The `/api/oauth/usage` API returns utilization as 0–100 (percentage), while rate-limit HTTP headers return 0–1 (fraction). Both are stored as 0–100 in `RateWindow.usedPercent`. The `toUsedPercent()` helper in `usage-fetcher.ts` makes this conversion explicit.
 
-## Provider Abstraction
+## Engine Abstraction
 
-ClaudeUI uses a provider-neutral session layer (`src/main/providers/`) as scaffolding for future engine backends. The V2 re-platform design is in `docs/v2/` and ADR-018/019/020/021.
+ClaudeUI uses an engine-neutral session layer (`src/main/providers/`) as scaffolding for future engine backends. The V2 re-platform design is in `docs/v2/` and ADR-018/019/020/021.
 
-- **`src/main/providers/`** — `ISession`/`BaseSession`/`ProviderRegistry`. `SessionManager` holds `Map<routingId, ISession>`; all backends implement `ISession`. The renderer consumes the same `session:*` events regardless of provider.
-- **`ProviderId`** — currently the one-member union `'claude'`. Will be widened to include opencode in Phase 1 (see ADR-018).
+- **`src/main/providers/`** — `ISession`/`BaseSession`/`EngineRegistry`. `SessionManager` holds `Map<routingId, ISession>`; all backends implement `ISession`. The renderer consumes the same `session:*` events regardless of engine.
+- **`EngineId`** — `'claude' | 'opencode'`. Only `'claude'` has a registered factory in Phase 1; opencode backend arrives in Phase 5. **`ModelRef`** — vendor-qualified model identity `{ engineId, vendorId, modelId }`; `SessionStatus.model` is `ModelRef | null`. `claudeModel(id)` builds anthropic-vendored refs.
+- Persisted: `sessionEngines?: Record<sessionId, { engineId: EngineId; model?: ModelRef }>`. `ui-config.loadSessionConfig()` migrates legacy `sessionProviders` (any value → `{ engineId: 'claude' }`).
 - The Codex backend (`codex-sup` branch) was removed in Phase 0 — it is recoverable from git history and documented as a dormant fallback in ADR-019.
 
 ## cli.js Integration

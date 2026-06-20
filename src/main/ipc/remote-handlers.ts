@@ -38,9 +38,9 @@ import { query as sdkQuery } from '../sdk'
 import { logger } from '../services/logger'
 import type { ISession } from '../providers/ISession'
 
-/** Type guard: narrows ISession to ClaudeSession when provider === 'claude'. */
+/** Type guard: narrows ISession to ClaudeSession when engineId === 'claude'. */
 function isClaudeSession(session: ISession): session is ClaudeSession {
-  return session.provider === 'claude'
+  return session.engineId === 'claude'
 }
 
 /**

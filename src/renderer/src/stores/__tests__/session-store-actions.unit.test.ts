@@ -22,6 +22,7 @@ import {
   makeSessionStatus,
   resetFactoryCounter
 } from '@test/factories/messages'
+import { claudeModel } from '../../../../shared/types'
 import { renderHook } from '@testing-library/react'
 
 const store = () => useSessionStore.getState()
@@ -661,13 +662,13 @@ describe('clearConversation', () => {
 describe('setStatus cwd follow-through', () => {
   it('updates session.cwd when status.cwd differs from current', () => {
     store().createNewSession('r1', '/original')
-    store().setStatus('r1', makeSessionStatus({ state: 'idle', sessionId: 'sdk-id', model: 'claude-sonnet-4-6', cwd: '/worktree/branch' }))
+    store().setStatus('r1', makeSessionStatus({ state: 'idle', sessionId: 'sdk-id', model: claudeModel('claude-sonnet-4-6'), cwd: '/worktree/branch' }))
     expect(store().sessions['r1'].cwd).toBe('/worktree/branch')
   })
 
   it('leaves cwd untouched when status.cwd matches current', () => {
     store().createNewSession('r1', '/same')
-    store().setStatus('r1', makeSessionStatus({ state: 'idle', sessionId: 'sdk-id', model: 'claude-sonnet-4-6', cwd: '/same' }))
+    store().setStatus('r1', makeSessionStatus({ state: 'idle', sessionId: 'sdk-id', model: claudeModel('claude-sonnet-4-6'), cwd: '/same' }))
     expect(store().sessions['r1'].cwd).toBe('/same')
   })
 

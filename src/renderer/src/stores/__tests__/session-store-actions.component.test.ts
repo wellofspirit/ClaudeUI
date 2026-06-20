@@ -7,7 +7,7 @@
 
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { useSessionStore } from '../session-store'
-import { CLAUDE_CAPABILITIES, capabilitiesFor } from '../../../../shared/types'
+import { CLAUDE_CAPABILITIES, capabilitiesFor, claudeModel } from '../../../../shared/types'
 import {
   makeChatMessage,
   makeAssistantMessage,
@@ -940,9 +940,9 @@ describe('addTaskNotification', () => {
 describe('setStatus', () => {
   it('updates status fields', () => {
     store().createNewSession('r1', '/test')
-    store().setStatus('r1', makeSessionStatus({ state: 'running', model: 'claude-opus-4-7' }))
+    store().setStatus('r1', makeSessionStatus({ state: 'running', model: claudeModel('claude-opus-4-7') }))
     expect(store().sessions['r1'].status.state).toBe('running')
-    expect(store().sessions['r1'].status.model).toBe('claude-opus-4-7')
+    expect(store().sessions['r1'].status.model?.modelId).toBe('claude-opus-4-7')
   })
 
   it('mirrors a new cwd into the top-level session cwd', () => {
@@ -1733,31 +1733,31 @@ describe('openMockupPanel / closeMockupPanel', () => {
 })
 
 // ---------------------------------------------------------------------------
-// Provider selection (Phase 5)
+// Engine selection (Phase 5)
 // ---------------------------------------------------------------------------
 
-describe('setLastSelectedProvider', () => {
-  it('updates lastSelectedProvider in store', () => {
-    expect(store().lastSelectedProvider).toBe('claude')
-    store().setLastSelectedProvider('claude')
-    expect(store().lastSelectedProvider).toBe('claude')
+describe('setLastSelectedEngineId', () => {
+  it('updates lastSelectedEngineId in store', () => {
+    expect(store().lastSelectedEngineId).toBe('claude')
+    store().setLastSelectedEngineId('claude')
+    expect(store().lastSelectedEngineId).toBe('claude')
   })
 })
 
-describe('createNewSession inherits lastSelectedProvider', () => {
-  it('default is claude — new session selectedProvider is claude', () => {
+describe('createNewSession inherits lastSelectedEngineId', () => {
+  it('default is claude — new session selectedEngineId is claude', () => {
     store().createNewSession('r1', '/path')
-    expect(store().sessions['r1'].selectedProvider).toBe('claude')
+    expect(store().sessions['r1'].selectedEngineId).toBe('claude')
   })
 
-  it('new session status.provider is claude', () => {
-    store().setLastSelectedProvider('claude')
+  it('new session status.engineId is claude', () => {
+    store().setLastSelectedEngineId('claude')
     store().createNewSession('r1', '/path')
-    expect(store().sessions['r1'].status.provider).toBe('claude')
+    expect(store().sessions['r1'].status.engineId).toBe('claude')
   })
 
   it('new session status.capabilities matches claude capabilities', () => {
-    store().setLastSelectedProvider('claude')
+    store().setLastSelectedEngineId('claude')
     store().createNewSession('r1', '/path')
     const caps = store().sessions['r1'].status.capabilities
     expect(caps.thinkingModes).toBe(true)
@@ -1765,7 +1765,7 @@ describe('createNewSession inherits lastSelectedProvider', () => {
   })
 })
 
-describe('capabilitiesFor helper', () => {
+describe('capabilitiesFor helper (engineId)', () => {
   it('returns CLAUDE_CAPABILITIES for claude', () => {
     expect(capabilitiesFor('claude')).toBe(CLAUDE_CAPABILITIES)
   })

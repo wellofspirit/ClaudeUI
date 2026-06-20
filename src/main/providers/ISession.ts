@@ -1,19 +1,19 @@
 import type {
   ChatMessage,
   SessionCapabilities,
-  ProviderId,
+  EngineId,
   ApprovalDecision,
   PermissionSuggestion
 } from '../../shared/types'
 
 /**
- * Provider-neutral session interface. All methods here are implemented by
+ * Engine-neutral session interface. All methods here are implemented by
  * every backend (Claude, opencode, etc.). Engine-specific capabilities
  * (voice, MCP, background tasks, etc.) live on ClaudeSession directly and
  * are gated behind `capabilities` flags.
  */
 export interface ISession {
-  readonly provider: ProviderId
+  readonly engineId: EngineId
   readonly routingId: string
   readonly cwd: string
   readonly capabilities: SessionCapabilities
@@ -61,10 +61,10 @@ export interface ISession {
 }
 
 /**
- * Factory type for provider-session construction, registered in ProviderRegistry.
- * Args are the same as SessionManager.create() minus the leading providerId.
+ * Factory type for engine-session construction, registered in EngineRegistry.
+ * Args are the same as SessionManager.create() minus the leading engineId.
  */
-export type ProviderSessionFactory = (
+export type EngineSessionFactory = (
   routingId: string,
   win: import('electron').BrowserWindow,
   cwd: string,

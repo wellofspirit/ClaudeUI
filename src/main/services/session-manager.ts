@@ -1,9 +1,9 @@
 import type { BrowserWindow } from 'electron'
-import type { ChatMessage, SandboxSettings, ProviderId } from '../../shared/types'
+import type { ChatMessage, SandboxSettings, EngineId } from '../../shared/types'
 import type { ISession } from '../providers/ISession'
-import { providerRegistry } from '../providers/ProviderRegistry'
-// Side-effect: registers all provider factories (claude, …) at module load time
-import '../providers/register-providers'
+import { engineRegistry } from '../providers/EngineRegistry'
+// Side-effect: registers all engine factories (claude, …) at module load time
+import '../providers/register-engines'
 import { loadSessionHistory } from './session-history'
 import { ClaudeSession } from './claude-session'
 
@@ -29,7 +29,7 @@ export class SessionManager {
     thinkingMode?: string,
     resumeSessionAt?: string,
     forkSession?: boolean,
-    providerId: ProviderId = 'claude'
+    engineId: EngineId = 'claude'
   ): ISession {
     // Clean up existing session with same routingId
     const existing = this.sessions.get(routingId)
@@ -37,8 +37,8 @@ export class SessionManager {
       existing.cancel()
     }
 
-    const session = providerRegistry.createSession(
-      providerId,
+    const session = engineRegistry.createSession(
+      engineId,
       routingId,
       win,
       cwd,
@@ -124,14 +124,14 @@ export class SessionManager {
     return result.messages
   }
 
-  /** Iterate all active sessions (provider-neutral). */
+  /** Iterate all active sessions (engine-neutral). */
   forEach(fn: (session: ISession) => void): void {
     this.sessions.forEach(fn)
   }
 
   /**
    * Iterate only ClaudeSession instances. Use for Claude-only operations
-   * (e.g. notifySettingsChanged) that must not run on other provider sessions.
+   * (e.g. notifySettingsChanged) that must not run on other engine sessions.
    */
   forEachClaude(fn: (session: ClaudeSession) => void): void {
     this.sessions.forEach((session) => {

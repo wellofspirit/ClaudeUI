@@ -61,7 +61,7 @@ import type {
   ModelOverrideSettings,
   PermissionSuggestion,
   IpcResult,
-  ProviderId
+  EngineId
 } from '../../shared/types'
 import { logger } from '../services/logger'
 import { deleteSessionFiles, deleteProjectFiles } from '../services/delete-session-files'
@@ -72,9 +72,9 @@ import { setModelEnv } from '../sdk/model-env'
 import { invalidateMockupSecuritySettings } from '../services/mockup-settings'
 import type { ISession } from '../providers/ISession'
 
-/** Type guard: narrows ISession to ClaudeSession when provider === 'claude'. */
+/** Type guard: narrows ISession to ClaudeSession when engineId === 'claude'. */
 function isClaudeSession(session: ISession): session is ClaudeSession {
-  return session.provider === 'claude'
+  return session.engineId === 'claude'
 }
 
 /**
@@ -723,7 +723,7 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
       thinkingMode?: string,
       resumeSessionAt?: string,
       forkSession?: boolean,
-      providerId?: ProviderId
+      engineId?: EngineId
     ) => {
       const settings = loadSettings() as Record<string, unknown>
       const sandboxConfig = (settings.sandbox as SandboxSettings) || undefined
@@ -742,7 +742,7 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
         thinkingMode,
         resumeSessionAt,
         forkSession,
-        providerId
+        engineId
       )
       // Notify all extra windows (remote bridge) that a session was created
       for (const w of ClaudeSession.getExtraWindows()) {

@@ -86,7 +86,7 @@ import type {
   SandboxSettings,
   PermissionSuggestion
 } from '../../shared/types'
-import { CLAUDE_CAPABILITIES } from '../../shared/types'
+import { CLAUDE_CAPABILITIES, claudeModel } from '../../shared/types'
 import { BaseSession } from '../providers/BaseSession'
 
 interface ApprovalResult {
@@ -173,7 +173,7 @@ export class ClaudeSession extends BaseSession {
     return BaseSession.getExtraWindows()
   }
 
-  readonly provider = 'claude' as const
+  readonly engineId = 'claude' as const
   readonly capabilities = CLAUDE_CAPABILITIES
 
   private sessionId: string | null = null
@@ -273,7 +273,7 @@ export class ClaudeSession extends BaseSession {
     return {
       state: this.isProcessing ? 'running' : 'idle',
       sessionId: this.sessionId,
-      model: this.model,
+      model: this.model ? claudeModel(this.model) : null,
       cwd: this.cwd,
       totalCostUsd: this.totalCostUsd,
       ...this.baseStatusFields()

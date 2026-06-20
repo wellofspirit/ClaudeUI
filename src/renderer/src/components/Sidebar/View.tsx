@@ -13,7 +13,7 @@ import { SessionItem } from './SessionItem'
 import { PinnedSessionList } from './PinnedSessionList'
 import { SettingsPanel } from './SettingsPanel'
 import { DeleteConfirmModal } from './DeleteConfirmModal'
-import { ProviderToggle } from '../shared/ProviderToggle'
+import { EngineToggle } from '../shared/EngineToggle'
 
 export type DeleteTarget =
   | {
@@ -21,7 +21,7 @@ export type DeleteTarget =
       sessionId: string
       projectKey: string
       title: string
-      provider?: import('../../../../shared/types').ProviderId
+      engineId?: import('../../../../shared/types').EngineId
     }
   | { kind: 'project'; projectKey: string; folderName: string; sessionCount: number }
 
@@ -195,7 +195,7 @@ export function SidebarView(props: SidebarViewProps): React.JSX.Element {
               onClick={(e) => e.stopPropagation()}
               onDoubleClick={(e) => e.stopPropagation()}
             >
-              <ProviderToggle compact />
+              <EngineToggle compact />
             </div>
           }
         />

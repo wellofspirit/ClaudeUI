@@ -19,7 +19,7 @@ export function ExitPlanModeCard({ block, approval }: ExitPlanModeCardProps): Re
   const markSdkActive = useSessionStore((s) => s.markSdkActive)
   const openPlanPanel = useSessionStore((s) => s.openPlanPanel)
   const cwd = useActiveSession((s) => s.cwd)
-  const selectedProvider = useActiveSession((s) => s.selectedProvider)
+  const selectedEngineId = useActiveSession((s) => s.selectedEngineId)
 
   const [expanded, setExpanded] = useState(true)
   const [showFeedback, setShowFeedback] = useState(false)
@@ -53,7 +53,7 @@ export function ExitPlanModeCard({ block, approval }: ExitPlanModeCardProps): Re
       undefined,
       undefined,
       undefined,
-      selectedProvider
+      selectedEngineId
     )
     markSdkActive(activeSessionId)
     setPermissionMode('acceptEdits', activeSessionId)

@@ -103,7 +103,7 @@ export function Sidebar({
   const setActiveView = useSessionStore((s) => s.setActiveView)
   const pluginViews = useSessionStore((s) => s.pluginViews)
   const addRecentSession = useSessionStore((s) => s.addRecentSession)
-  const sessionProviders = useSessionStore((s) => s.sessionProviders)
+  const sessionEngines = useSessionStore((s) => s.sessionEngines)
   const automationBadge = useAutomationStore((s) => s.notificationBadge)
 
   const isMobile = useIsMobile()
@@ -471,7 +471,7 @@ export function Sidebar({
       sessionId: info.sessionId,
       projectKey: info.projectKey,
       title: info.title,
-      provider: info.provider
+      engineId: info.engineId
     })
   }, [])
 
@@ -491,7 +491,7 @@ export function Sidebar({
       await deleteSessionAction(
         deleteTarget.sessionId,
         deleteTarget.projectKey,
-        deleteTarget.provider
+        deleteTarget.engineId
       )
     } else {
       await deleteProjectAction(deleteTarget.projectKey)
@@ -512,7 +512,7 @@ export function Sidebar({
     const inMemoryByDir: Record<string, SessionInfo[]> = {}
     for (const [rid, data] of Object.entries(sidebarSessions)) {
       if (dirSessionIds.has(rid) || !data.cwd) continue
-      const sessionProvider = sessionProviders[rid] ?? 'claude'
+      const sessionEngineId = (sessionEngines[rid]?.engineId ?? 'claude') as import('../../../../shared/types').EngineId
       const info: SessionInfo = {
         sessionId: rid,
         cwd: data.cwd,
@@ -520,7 +520,7 @@ export function Sidebar({
         title: data.firstUserText || 'New session',
         timestamp: Date.now(),
         lastActivityAt: Date.now(),
-        provider: sessionProvider
+        engineId: sessionEngineId
       }
       const key = data.cwd
       if (!inMemoryByDir[key]) inMemoryByDir[key] = []

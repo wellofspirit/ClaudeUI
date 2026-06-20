@@ -133,7 +133,7 @@ function makeFakeWindow(): any {
 
 const sessionStub: any = {
   willQueue: false,
-  provider: 'claude',
+  engineId: 'claude',
   capabilities: CLAUDE_CAPABILITIES,
   run: vi.fn(),
   resolveApproval: vi.fn(),

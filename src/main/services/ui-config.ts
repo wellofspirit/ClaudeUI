@@ -20,11 +20,15 @@ export interface UISessionConfig {
   customTitles?: Record<string, string>
   worktreeInfoMap?: Record<string, import('../../shared/types').WorktreeInfo>
   /**
-   * Persisted provider per session. Maps sessionId → ProviderId.
-   * Claude sessions are the default — absent entries are treated as 'claude'.
-   * Any legacy non-'claude' values (e.g. 'codex') are read-mapped to 'claude'.
+   * Engine + model per session. Maps sessionId → { engineId, model? }.
+   * Absent keys are treated as claude. Written at session-creation time, updated
+   * on model switch, and carried over on rekey. The `model` field seeds
+   * `selectedModel` when the session is reopened (see session-store).
    */
-  sessionProviders?: Record<string, import('../../shared/types').ProviderId>
+  sessionEngines?: Record<
+    string,
+    { engineId: import('../../shared/types').EngineId; model?: import('../../shared/types').ModelRef }
+  >
   hiddenSessions?: string[]
   hiddenProjects?: string[]
 }
@@ -112,17 +116,32 @@ export function saveSettings(settings: UISettings): void {
 
 export function loadSessionConfig(): UISessionConfig {
   ensureMigrated()
-  const config = readJson<UISessionConfig>(SESSIONS_FILE) ?? {}
-  // Migrate any legacy non-'claude' provider values (e.g. 'codex') to 'claude'
-  // so users who had Codex sessions in the sidebar don't see a broken state.
-  if (config.sessionProviders) {
-    const providers = config.sessionProviders as Record<string, string>
-    for (const [id, val] of Object.entries(providers)) {
-      if (val !== 'claude') {
-        providers[id] = 'claude'
+  // Read raw so we can inspect legacy keys before full parse
+  const raw = readJson<Record<string, unknown>>(SESSIONS_FILE) ?? {}
+
+  // Migrate legacy sessionProviders → sessionEngines (one-time, in-place, deleted on write-back)
+  if (!raw.sessionEngines && raw.sessionProviders) {
+    const legacy = raw.sessionProviders as Record<string, unknown>
+    const migrated: Record<string, { engineId: 'claude' }> = {}
+    for (const id of Object.keys(legacy)) {
+      // Every legacy value (incl. 'codex') maps to 'claude'
+      migrated[id] = { engineId: 'claude' }
+    }
+    raw.sessionEngines = migrated
+    delete raw.sessionProviders
+  }
+
+  const config = raw as UISessionConfig
+
+  // Clamp any unknown engineId values to 'claude' for forward-compat
+  if (config.sessionEngines) {
+    for (const [id, entry] of Object.entries(config.sessionEngines)) {
+      if (entry.engineId !== 'claude' && entry.engineId !== 'opencode') {
+        config.sessionEngines[id] = { engineId: 'claude' }
       }
     }
   }
+
   return config
 }
 

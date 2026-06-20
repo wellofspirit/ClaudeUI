@@ -14,7 +14,7 @@ export function ReviewBar({ comments }: Props): React.JSX.Element | null {
   const sessions = useSessionStore((s) => s.sessions)
   const markSdkActive = useSessionStore((s) => s.markSdkActive)
   const clearDiffComments = useSessionStore((s) => s.clearDiffComments)
-  const selectedProvider = useActiveSession((s) => s.selectedProvider)
+  const selectedEngineId = useActiveSession((s) => s.selectedEngineId)
 
   const fileCount = new Set(comments.map((c) => c.filePath)).size
 
@@ -38,7 +38,7 @@ export function ReviewBar({ comments }: Props): React.JSX.Element | null {
         undefined,
         undefined,
         undefined,
-        selectedProvider
+        selectedEngineId
       )
       markSdkActive(activeSessionId)
     }

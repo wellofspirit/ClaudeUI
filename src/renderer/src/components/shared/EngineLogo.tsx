@@ -1,26 +1,26 @@
 /**
- * ProviderLogo — a small inline SVG mark identifying a session's backend.
+ * EngineLogo — a small inline SVG mark identifying a session's engine.
  *
  * Claude: simplified Anthropic logomark, tinted #D97757 (Claude orange)
  *
  * Sizes: 'sm' (12px, sidebar rows), 'md' (14px, TopBar), 'lg' (16px, other uses)
  */
 
-import type { ProviderId } from '../../../../shared/types'
+import type { EngineId } from '../../../../shared/types'
 
-interface ProviderLogoProps {
-  provider: ProviderId
+interface EngineLogoProps {
+  engineId: EngineId
   /** Tailwind/inline class passthrough for positioning, margin, etc. */
   className?: string
   /** px size of the icon. Default: 12 */
   size?: number
 }
 
-export function ProviderLogo({
-  provider: _provider,
+export function EngineLogo({
+  engineId: _engineId,
   className = '',
   size = 12
-}: ProviderLogoProps): React.JSX.Element {
+}: EngineLogoProps): React.JSX.Element {
   return <ClaudeMark size={size} className={className} />
 }
 

@@ -1,4 +1,4 @@
-import { ProviderToggle } from '../shared/ProviderToggle'
+import { EngineToggle } from '../shared/EngineToggle'
 
 export interface WelcomeScreenViewProps {
   loading: boolean
@@ -31,7 +31,7 @@ export function WelcomeScreenView({ loading, onOpen }: WelcomeScreenViewProps): 
         <p className="text-text-secondary text-[15px] mb-10">Desktop interface for Claude Code</p>
 
         <div className="mb-6">
-          <ProviderToggle />
+          <EngineToggle />
         </div>
 
         <button

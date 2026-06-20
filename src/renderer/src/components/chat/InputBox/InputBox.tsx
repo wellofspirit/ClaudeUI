@@ -178,7 +178,7 @@ export function InputBox(): React.JSX.Element {
   const sandboxEnabled = useSessionStore((s) => s.settings.sandbox.enabled)
 
   // Capability gating — use status.capabilities (authoritative after spawn;
-  // seeded from selectedProvider before spawn via createNewSession).
+  // seeded from selectedEngineId before spawn via createNewSession).
   const capabilities = useActiveSession((s) => s.status.capabilities)
 
   // Voice input
@@ -262,7 +262,7 @@ export function InputBox(): React.JSX.Element {
             opts.thinkingMode,
             fork.anchorUuid,
             true,
-            session?.selectedProvider
+            session?.selectedEngineId
           )
         } else {
           const isHistorical = session && session.messages.length > 0
@@ -277,7 +277,7 @@ export function InputBox(): React.JSX.Element {
             opts.thinkingMode,
             undefined,
             undefined,
-            session?.selectedProvider
+            session?.selectedEngineId
           )
         }
         markSdkActive(activeSessionId)
@@ -305,7 +305,7 @@ export function InputBox(): React.JSX.Element {
           opts.thinkingMode,
           fork.anchorUuid,
           true,
-          session?.selectedProvider
+          session?.selectedEngineId
         )
       } else {
         const isHistorical = session && session.messages.length > 0 && !session.sdkActive
@@ -320,7 +320,7 @@ export function InputBox(): React.JSX.Element {
           opts.thinkingMode,
           undefined,
           undefined,
-          session?.selectedProvider
+          session?.selectedEngineId
         )
       }
       markSdkActive(activeSessionId)
@@ -576,7 +576,7 @@ export function InputBox(): React.JSX.Element {
       opts.thinkingMode,
       undefined,
       undefined,
-      session?.selectedProvider
+      session?.selectedEngineId
     )
     markSdkActive(activeSessionId)
   }, [activeSessionId, sdkActive, markSdkActive])

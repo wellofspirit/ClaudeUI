@@ -3,14 +3,14 @@ import type {
   ChatMessage,
   SessionCapabilities,
   SessionStatus,
-  ProviderId,
+  EngineId,
   ApprovalDecision,
   PermissionSuggestion
 } from '../../shared/types'
 import type { ISession } from './ISession'
 
 /**
- * Abstract base class holding provider-neutral plumbing shared by all session
+ * Abstract base class holding engine-neutral plumbing shared by all session
  * implementations (ClaudeSession, future opencode session, etc.).
  *
  * Owns:
@@ -18,10 +18,10 @@ import type { ISession } from './ISession'
  *  - Instance fields: win, routingId, cwd, messageHistory, inactivity timer
  *  - protected send() — IPC broadcast to win + extraWindows
  *  - getMessages() / setInactivityTimeout() — common ISession implementations
- *  - baseStatusFields() — injects provider + capabilities into a SessionStatus object
+ *  - baseStatusFields() — injects engineId + capabilities into a SessionStatus object
  *
  * Subclasses must implement:
- *  - abstract readonly provider: ProviderId
+ *  - abstract readonly engineId: EngineId
  *  - abstract readonly capabilities: SessionCapabilities
  *  - All remaining ISession methods (run, interrupt, cancel, resolveApproval, etc.)
  *  - dispose() — resource teardown
@@ -67,7 +67,7 @@ export abstract class BaseSession implements ISession {
   // Abstract members — subclasses must implement
   // ---------------------------------------------------------------------------
 
-  abstract readonly provider: ProviderId
+  abstract readonly engineId: EngineId
   abstract readonly capabilities: SessionCapabilities
   abstract readonly willQueue: boolean
   abstract getSessionId(): string | null
@@ -135,12 +135,12 @@ export abstract class BaseSession implements ISession {
   }
 
   /**
-   * Returns the provider + capabilities fields that every subclass must merge
+   * Returns the engineId + capabilities fields that every subclass must merge
    * into its SessionStatus object. Keeps status construction DRY.
    */
-  protected baseStatusFields(): Pick<SessionStatus, 'provider' | 'capabilities'> {
+  protected baseStatusFields(): Pick<SessionStatus, 'engineId' | 'capabilities'> {
     return {
-      provider: this.provider,
+      engineId: this.engineId,
       capabilities: this.capabilities
     }
   }

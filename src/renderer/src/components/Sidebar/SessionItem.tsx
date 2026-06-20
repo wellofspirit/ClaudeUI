@@ -4,7 +4,7 @@ import { useShallow } from 'zustand/react/shallow'
 import type { SessionInfo } from '../../../../shared/types'
 import { PermissionsDialog } from '../PermissionsDialog'
 import { useContextMenu } from '../../hooks/useContextMenu'
-import { ProviderLogo } from '../shared/ProviderLogo'
+import { EngineLogo } from '../shared/EngineLogo'
 
 export const SessionItem = memo(function SessionItem({
   info,
@@ -184,8 +184,8 @@ export const SessionItem = memo(function SessionItem({
             }}
             title={info.title}
           >
-            {info.provider && info.provider !== 'claude' && (
-              <ProviderLogo provider={info.provider} size={10} className="shrink-0 opacity-80" />
+            {info.engineId && info.engineId !== 'claude' && (
+              <EngineLogo engineId={info.engineId} size={10} className="shrink-0 opacity-80" />
             )}
             {info.title}
           </span>
