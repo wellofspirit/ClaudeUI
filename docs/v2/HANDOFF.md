@@ -6,9 +6,9 @@
 
 ## TL;DR — where we are
 
-**7 phases done and pushed; we're mid–Phase 5 (the opencode MVP).** Next up: **Phase 5b** (opencode
-chat MVP). The whole V2 is being built as **stacked branches on `origin`**, one per phase, each
-reviewed + verified + committed before the next.
+**8 phases done and pushed; the opencode chat MVP (5b) just landed.** Next up: **Phase 5c**
+(opencode auth + hosted-MCP). The whole V2 is being built as **stacked branches on `origin`**, one
+per phase, each reviewed + verified + committed before the next.
 
 | Phase | What | Branch (pushed) | Status |
 | --- | --- | --- | --- |
@@ -19,15 +19,15 @@ reviewed + verified + committed before the next.
 | 3b | Config-plane (tier/plane split, per-engine/vendor stores) + SettingsDialog re-IA + autonomy modes | `v2-phase-3b-config-plane` | ✅ |
 | 4 | Auth providers (`EngineAuthProvider`/`ClaudeAuthProvider`, neutral probe, `AuthState`→`AuthFlowState`, accounts→DB) | `v2-phase-4-auth-providers` | ✅ |
 | 5a | opencode infra: `ensure-opencode` + `OpencodeServerManager` + v1 HTTP/SSE `OpencodeClient` + smoke | `v2-phase-5a-opencode-server` | ✅ |
-| **5b** | **opencode chat MVP** (see Next steps) | — | ⬜ **next** |
-| 5c | `OpencodeAuthProvider` + hosted-MCP injection | — | ⬜ |
+| 5b | opencode chat MVP: `OpencodeSession` + event mapper + grouped model picker + approvals | `v2-phase-5b-opencode-chat` | ✅ |
+| **5c** | **`OpencodeAuthProvider` + hosted-MCP injection** (see Next steps) | — | ⬜ **next** |
 | 6 | Tool registry (`ToolKind` taxonomy + renderer registry) | — | ⬜ |
 | 7 | Metering (usage recorder, pricing, dashboard → SQL) | — | ⬜ |
 
-Branches are stacked: each off the previous (`5a` off `4` off `3b` off `3a` off `2` off `1` off `0`
-off `codex-sup`). **No PRs opened yet** — the plan's review gates are after Phase 1 (passed) and Phase 5
-(upcoming); the user has chosen to keep building. Base/integration branch is `codex-sup` (where the V2
-design lives).
+Branches are stacked: each off the previous (`5b` off `5a` off `4` off `3b` off `3a` off `2` off `1`
+off `0` off `codex-sup`). **No PRs opened yet** — the plan's review gates are after Phase 1 (passed) and
+Phase 5; with 5b (the MVP milestone) landed, the Phase-5 PR gate is now due (or keep building 5c — the
+user's call). Base/integration branch is `codex-sup` (where the V2 design lives).
 
 ## The workflow (follow this exactly)
 
@@ -81,31 +81,31 @@ memory → ask. The agent never commits; I commit after the review loop is clean
   expects real-app self-verification for UI changes, not just tests.
 - Screenshots land in `.cache/screenshots/` (gitignored). `playwright` is a committed devDep.
 
-## Next steps — Phase 5b (opencode chat MVP)
+## What 5b shipped (done — see `phase-5b-opencode-chat.md`)
 
-**Goal (the plan's milestone): an opencode session chats, renders tools, handles approvals.** Build on
-5a's `OpencodeServerManager` + `OpencodeClient`:
-- **`OpencodeSession`** under `src/main/opencode/` implementing `ISession`/extending `BaseSession`
-  (the same neutral contract `ClaudeSession` uses). `acquire()` the per-cwd server on start; `dispose()`
-  → `release()`. Drives prompt/abort/fork via `OpencodeClient`.
-- **Event→ContentBlock mapper**: `message.part.updated` (snapshot, upsert by part id) → blocks;
-  `session.idle` → turn-complete; `permission.asked` → `PendingApproval`; `AssistantMessage.tokens/cost`
-  → metering. Reuse the existing `session:*` IPC contract (renderer consumes it engine-agnostically).
-- **Register `'opencode'`** in `engineRegistry` (`register-engines.ts`) + an `EngineCapabilities` entry
-  (02 §3.1 has the researched opencode column — verify vs the binary) + vendor descriptors. The model
-  picker should surface opencode's vendors/models from `getConfigProviders()` (caps already map:
-  reasoning/attachment→vision/toolcall→toolCalling).
-- **opencode tool→`ToolKind` map** (basic for MVP; the full registry is Phase 6).
-- **Windows tree-kill** (5a flag): `OpencodeServerManager.release()`/`dispose()` use `kill('SIGTERM')`,
-  which doesn't reap opencode's child tree on Windows → leaked `opencode.exe`. Wire a job object on spawn
-  or `taskkill /T /PID` on teardown.
-- Then **5c** (`OpencodeAuthProvider`: probe via `/config/providers`+`/provider/auth`, **API-key via
-  `PUT /auth/{vendor}` + paste-code OAuth in-app** — both chosen; loopback OAuth delegated; ToS caveat
-  on subscription OAuth, see 04 §4) + hosted-MCP via `OPENCODE_CONFIG_CONTENT`.
+`OpencodeSession` (ISession) + pure event→ContentBlock mapper + grouped model picker (Claude +
+opencode, `getEngineModels`) + EngineToggle re-enabled + per-session autonomy→permission
+(`PATCH /session/{id}`: full→allow, ask→ask→`permission.asked`→approval UI, plan→plan agent) +
+`'opencode'` engine registered + `OPENCODE_ENGINE_CAPABILITIES`. **Verified against the real 1.17.9
+binary** with the free no-auth OpenCode-Zen model: text turn + bash-tool-turn-with-approval; app-shot
+showed the live picker; `dispose()` wired into app `before-quit` reaps servers (0 orphans).
+**5b gotchas (now baked into code, carry forward):** binary locator uses `app.getAppPath()` not
+`__dirname` (mirror `src/main/sdk/locate.ts`); the shared `/event` stream multiplexes all sessions →
+filter by `properties.sessionID`; `import {app} from 'electron'` fails under plain `bun`.
 
-5b needs a real opencode auth to chat end-to-end. For the smoke, an API key for a cheap vendor (or the
-free `opencode`/OpenCode-Zen `mimo-v2.5-free` model seen in the probe) lets you verify a turn without
-spending much.
+## Next steps — Phase 5c (opencode auth + hosted-MCP)
+
+- **`OpencodeAuthProvider`** (register in `engineAuthRegistry` as `'opencode'`): probe via
+  `/config/providers` (configured/usable vendors) + `/provider/auth` (the auth-option catalog —
+  api/oauth per vendor, captured shapes in `phase-5a` notes). **API-key** via `PUT /auth/{vendor}`
+  (`OpencodeClient.setAuth` exists); **paste-code OAuth in-app** (loopback delegated; ToS caveat on
+  subscription OAuth, see 04 §4). Surface per-vendor auth in Settings › Vendors (the tier tree already
+  has the slot). On auth change, call `invalidateOpencodeModelCache()` so new vendors appear in the picker.
+- **Hosted-MCP injection** via `OPENCODE_CONFIG_CONTENT` at server spawn (mermaid/mockup servers) — flip
+  `OPENCODE_ENGINE_CAPABILITIES.hostedMcp`→`true` (and `canUseMcp` resolves on toolCalling). The server
+  is shared per-cwd, so inject at `OpencodeServerManager` spawn env.
+- Then **6** (tool registry / ToolKind taxonomy — opencode tools currently render via the generic block),
+  **7** (metering — opencode `info.tokens`/`cost` are already parsed in the mapper).
 
 ## Gotchas / conventions (carry these forward)
 
