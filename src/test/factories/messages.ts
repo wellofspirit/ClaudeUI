@@ -89,6 +89,7 @@ export function makeSessionStatus(overrides?: Partial<SessionStatus>): SessionSt
     totalCostUsd: 0,
     engineId: 'claude',
     capabilities: resolveClaudeCapabilities('claude-sonnet-4-6'),
+    account: null,
     ...overrides
   }
 }

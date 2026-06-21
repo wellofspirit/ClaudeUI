@@ -64,12 +64,35 @@ export function claudeModel(modelId: string): ModelRef {
 
 export type BillingType = 'subscription' | 'apiKey' | 'free' | 'unknown'
 
-/** Resolved account descriptor held on the session. Wired in Phase 4. */
+/**
+ * Resolved tri-state auth status for a single (engine, vendor) pair.
+ * 'authenticated'   — engine has confirmed valid credentials
+ * 'unauthenticated' — engine has confirmed no / expired credentials
+ * 'unknown'         — not yet probed (e.g. first render before init completes)
+ */
+export type AuthState = 'authenticated' | 'unauthenticated' | 'unknown'
+
+/** Per-(engine, vendor) auth probe result.  Used by EngineAuthProvider.probe(). */
+export interface AuthStatus {
+  authState: AuthState
+  billingType: BillingType
+  label?: string // email / org / 'ChatGPT Plus'
+  requiresLogin?: boolean // delegated engines: "run <engine> login"
+  notInstalled?: boolean
+  error?: string
+}
+
+/** Map from VendorId string to its auth status; returned by EngineAuthProvider.probe().
+ *  Engines only include vendors they know about (Claude: { anthropic: ... };
+ *  opencode: one entry per configured provider). */
+export type VendorAuthMap = Record<string, AuthStatus>
+
+/** Resolved account descriptor held on the session. Populated by ClaudeAuthProvider.probe(). */
 export interface AccountRef {
   engineId: EngineId
   vendorId: VendorId
   billingType: BillingType
-  authState: 'authenticated' | 'unauthenticated' | 'unknown'
+  authState: AuthState
   label?: string
   accountId?: string
 }
@@ -83,6 +106,8 @@ export interface SessionStatus {
   totalCostUsd: number
   engineId: EngineId
   capabilities: ResolvedCapabilities
+  /** Resolved account descriptor from the engine auth provider. Null until probed. */
+  account: AccountRef | null
 }
 
 export interface PermissionSuggestion {
@@ -516,7 +541,9 @@ interface SessionAPI {
   onDirectoriesChanged(cb: () => void): () => void
   onSlashCommands(cb: (routingId: string, commands: SlashCommandInfo[]) => void): () => void
   onSkills(cb: (routingId: string, names: string[]) => void): () => void
-  /** cli.js auth source from session init: 'oauth' | 'api_key' | 'none' (ADR-014). */
+  /** Login status from session init: 'authenticated' | 'none' (logged-in vs not).
+   *  The oauth-vs-api-key distinction now lives only in the auth probe's
+   *  billingType (via OAuthAccount). See ADR-014 / Phase 4 (ADR-021). */
   onAuthSource(cb: (routingId: string, source: string) => void): () => void
   onStatusLine(cb: (routingId: string, data: StatusLineData) => void): () => void
   onPlanSteps(cb: (routingId: string, todos: TodoItem[]) => void): () => void
@@ -664,14 +691,14 @@ interface AccountAPI {
   // --- Native Anthropic OAuth (ADR-014) ---
   /** Start the subscription login flow: opens the browser and awaits the
    *  loopback redirect. Resolves once cli.js has stored fresh credentials. */
-  signIn(): Promise<AuthState>
+  signIn(): Promise<AuthFlowState>
   /** Manual fallback: submit the authorization code pasted by the user.
    *  `state` is recovered internally from the login URL. */
-  submitOAuthCode(code: string): Promise<AuthState>
+  submitOAuthCode(code: string): Promise<AuthFlowState>
   /** Abort an in-flight login flow. */
   cancelSignIn(): Promise<void>
   /** Subscribe to login-flow state transitions. */
-  onAuthState(cb: (state: AuthState) => void): () => void
+  onAuthState(cb: (state: AuthFlowState) => void): () => void
   // --- Multiple-account support (ADR-015) ---
   /** Current accounts + active id + enabled flag. */
   getAccounts(): Promise<AccountsState>
@@ -880,8 +907,11 @@ export interface AccountsState {
 
 export type AuthFlowStatus = 'idle' | 'authorizing' | 'success' | 'error'
 
-/** Broadcast to the renderer on every transition of the native login flow. */
-export interface AuthState {
+/**
+ * Broadcast to the renderer on every transition of the native login flow (ADR-014).
+ * Renamed from AuthState in Phase 4 to free that name for the resolved tri-state.
+ */
+export interface AuthFlowState {
   status: AuthFlowStatus
   account: OAuthAccount | null
   error: string | null

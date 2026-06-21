@@ -126,15 +126,19 @@ describe('migration framework — user_version guard', () => {
     }
   })
 
-  it('applies the real production migration set (v1 creates session_meta)', () => {
+  it('applies the real production migration set (v1 + v2 create session_meta + account)', () => {
     const db = openRawDb()
     try {
       // Default migration list (production MIGRATIONS).
       runMigrations(db)
-      expect(userVersion(db)).toBe(1)
+      // v1: session_meta, v2: account — user_version advances to latest migration.
+      expect(userVersion(db)).toBe(2)
       // session_meta must exist and be queryable.
       const rows = db.prepare('SELECT * FROM session_meta').all()
       expect(rows).toEqual([])
+      // account table must exist and be queryable (Phase 4 v2 migration).
+      const accRows = db.prepare('SELECT * FROM account').all()
+      expect(accRows).toEqual([])
     } finally {
       db.close()
     }

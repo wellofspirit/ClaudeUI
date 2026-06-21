@@ -28,6 +28,8 @@ import { getContextWindowSize } from './context-window'
 import { usageFetcher } from './usage-fetcher'
 import { createMermaidServer } from './mermaid-tool'
 import { createMockupServer } from './mockup-tool'
+import { claudeAuthProvider } from '../auth/ClaudeAuthProvider'
+import { accountManager } from './account-manager'
 import {
   getClassifier,
   stopClassifier,
@@ -89,7 +91,8 @@ import type {
   ApprovalDecision,
   PendingApproval,
   SandboxSettings,
-  PermissionSuggestion
+  PermissionSuggestion,
+  AccountRef
 } from '../../shared/types'
 import { claudeModel } from '../../shared/types'
 import { BaseSession } from '../providers/BaseSession'
@@ -278,13 +281,29 @@ export class ClaudeSession extends BaseSession {
   }
 
   get status(): SessionStatus {
+    // Resolve session.account from the auth provider probe + active accountId (ADR-021 / Phase 4).
+    // The provider caches the cli.js init signal — no credential-file reads.
+    const activeAccountId = this.resolveActiveAccountId()
+    const account: AccountRef | null = claudeAuthProvider.buildAccountRef(activeAccountId)
+
     return {
       state: this.isProcessing ? 'running' : 'idle',
       sessionId: this.sessionId,
       model: this.model ? claudeModel(this.model) : null,
       cwd: this.cwd,
       totalCostUsd: this.totalCostUsd,
+      account,
       ...this.baseStatusFields()
+    }
+  }
+
+  /** Resolve the active multi-account ID for the current session, if any. */
+  private resolveActiveAccountId(): string | null {
+    try {
+      const st = accountManager.getState()
+      return st.enabled ? st.activeId : null
+    } catch {
+      return null
     }
   }
 
@@ -703,7 +722,26 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
           // "none"); an expired-but-cached login still has an email — that 401s
           // on send and is handled by the reactive auth card, not this banner.
           const loggedIn = !!(account && account.email)
-          this.send('session:auth-source', loggedIn ? 'authenticated' : 'none')
+          const authSource = loggedIn ? 'authenticated' : 'none'
+
+          // Update the ClaudeAuthProvider probe cache from the cli.js init signal.
+          // This is the ONLY source of auth detection — no credential-file reads
+          // (preserves ADR-014 Keychain-prompt avoidance).
+          const oauthAccount = account
+            ? {
+                email: (account.email as string | null) ?? null,
+                organization: (account.organization as string | null) ?? null,
+                subscriptionType: (account.subscriptionType as string | null) ?? null,
+                tokenSource: (account.tokenSource as string | null) ?? null,
+                apiKeySource: (account.apiKeySource as string | null) ?? null,
+                apiProvider: (account.apiProvider as string | null) ?? null
+              }
+            : null
+          claudeAuthProvider.updateAuthSource(authSource, oauthAccount)
+
+          this.send('session:auth-source', authSource)
+          // Re-emit status with the freshly-resolved account field.
+          this.sendStatus()
         })
         .catch(() => {
           /* leave banner state unchanged on init-result failure */

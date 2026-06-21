@@ -23,7 +23,8 @@ import type {
   PlanComment,
   PlanReviewData,
   AccountUsage,
-  AuthState,
+  AuthFlowState,
+  VendorAuthMap,
   AccountsState,
   BlockUsageData,
   TerminalTab,
@@ -432,7 +433,8 @@ const EMPTY_SESSION_STATE: PerSessionState = {
     cwd: null,
     totalCostUsd: 0,
     engineId: 'claude',
-    capabilities: resolveClaudeCapabilities('default')
+    capabilities: resolveClaudeCapabilities('default'),
+    account: null
   },
   pendingApprovals: [],
   errors: [],
@@ -562,9 +564,13 @@ interface SessionState {
   accountUsage: AccountUsage | null
   blockUsage: BlockUsageData | null
   /** Native OAuth login-flow state (ADR-014). Null until first event/status. */
-  authState: AuthState | null
-  /** cli.js auth source from session init: 'oauth'|'api_key'|'none'|null (ADR-014). */
+  authState: AuthFlowState | null
+  /** Login status from session init: 'authenticated'|'none'|null (logged-in vs not).
+   *  The oauth-vs-api-key distinction lives only in vendorAuth's billingType.
+   *  See ADR-014 / Phase 4 (ADR-021). */
   authSource: string | null
+  /** Vendor auth map from the engine auth probe (Phase 4). Null until first probe. */
+  vendorAuth: VendorAuthMap | null
   /** Multi-account state (ADR-015). Null until first load/event. */
   accountsState: AccountsState | null
   activeView: ActiveView
@@ -760,8 +766,9 @@ interface SessionState {
   // Account usage
   setAccountUsage: (data: AccountUsage) => void
   // Native OAuth (ADR-014)
-  setAuthState: (data: AuthState) => void
+  setAuthState: (data: AuthFlowState) => void
   setAuthSource: (source: string) => void
+  setVendorAuth: (map: VendorAuthMap) => void
   setAccountsState: (data: AccountsState) => void
   /** Mark every session SDK-inactive so the next send respawns cli.js (ADR-015). */
   respawnAllSessions: () => void
@@ -834,6 +841,7 @@ export const useSessionStore = create<SessionState>((set) => ({
   accountUsage: null,
   authState: null,
   authSource: null,
+  vendorAuth: null,
   accountsState: null,
   blockUsage: null,
   activeView: { type: 'chat' } as ActiveView,
@@ -2020,6 +2028,7 @@ export const useSessionStore = create<SessionState>((set) => ({
   // snapshot synchronously; the terminal transition arrives via onAuthState.
   setAuthState: (data) => set({ authState: data }),
   setAuthSource: (source) => set({ authSource: source }),
+  setVendorAuth: (map) => set({ vendorAuth: map }),
   setAccountsState: (data) => set({ accountsState: data }),
   respawnAllSessions: () =>
     set((s) => ({

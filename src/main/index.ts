@@ -39,6 +39,7 @@ import { RemoteDispatcher } from './services/remote-dispatcher'
 import { serviceSession } from './services/service-session'
 import { authManager } from './services/auth-manager'
 import { accountManager } from './services/account-manager'
+import { claudeAuthProvider } from './auth/ClaudeAuthProvider'
 import { PluginManager } from './services/plugin-manager'
 import { LogViewer } from './services/log-viewer'
 import { logger } from './services/logger'
@@ -187,6 +188,7 @@ function createWindow(): void {
   const sessionManager = registerSessionIpc(mainWindow)
   authManager.setWindow(mainWindow)
   accountManager.init(mainWindow)
+  claudeAuthProvider.init(mainWindow)
   registerTerminalIpc(mainWindow)
   const automationManager = registerAutomationIpc(mainWindow)
 

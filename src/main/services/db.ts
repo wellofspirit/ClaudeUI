@@ -13,7 +13,7 @@ import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
 import BetterSqlite3 from 'better-sqlite3'
-import type { EngineId, ModelRef } from '../../shared/types'
+import type { EngineId, ModelRef, AccountInfo } from '../../shared/types'
 
 // Infer the Database instance type from the constructor return so we don't
 // need the `BetterSqlite3.Database` namespace (not available with `export =`).
@@ -56,6 +56,23 @@ const MIGRATIONS: Migration[] = [
           vendor_id  TEXT,
           model_id   TEXT,
           updated_at INTEGER NOT NULL
+        );
+      `)
+    }
+  },
+  {
+    // v2 — Phase 4: account metadata (AccountInfo) migrated from accounts.json.
+    // Credentials NEVER enter the DB (ADR-015). enabled/activeId pointer stays
+    // in accounts.json (simplest: avoids a DB query on every spawn-env resolve).
+    version: 2,
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS account (
+          id                TEXT PRIMARY KEY,
+          email             TEXT,
+          subscription_type TEXT,
+          organization      TEXT,
+          created_at        INTEGER NOT NULL
         );
       `)
     }
@@ -278,5 +295,79 @@ export function importSessionEnginesOnce(
       entry.model?.modelId ?? null,
       Date.now()
     )
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Account repository (Phase 4 — ADR-021)
+// Stores AccountInfo metadata only. Credentials stay file-based (ADR-015).
+// enabled / activeId pointer stays in accounts.json (simpler; no DB query
+// needed on every spawn-env resolve in the hot path).
+// ---------------------------------------------------------------------------
+
+interface AccountRow {
+  id: string
+  email: string | null
+  subscription_type: string | null
+  organization: string | null
+  created_at: number
+}
+
+function rowToAccountInfo(row: AccountRow): AccountInfo {
+  return {
+    id: row.id,
+    email: row.email,
+    subscriptionType: row.subscription_type,
+    organization: row.organization,
+    createdAt: row.created_at
+  }
+}
+
+/** Return all accounts from the DB, ordered by created_at ascending. */
+export function getAllAccounts(): AccountInfo[] {
+  const db = getDb()
+  const rows = db
+    .prepare('SELECT * FROM account ORDER BY created_at ASC')
+    .all() as AccountRow[]
+  return rows.map(rowToAccountInfo)
+}
+
+/** Insert or replace account metadata. Does NOT touch credentials. */
+export function upsertAccount(info: AccountInfo): void {
+  const db = getDb()
+  db.prepare(
+    `INSERT INTO account (id, email, subscription_type, organization, created_at)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       email             = excluded.email,
+       subscription_type = excluded.subscription_type,
+       organization      = excluded.organization`
+  ).run(info.id, info.email, info.subscriptionType, info.organization, info.createdAt)
+}
+
+/** Delete account metadata row. Credentials directory removal is handled by AccountManager. */
+export function deleteAccountRow(id: string): void {
+  const db = getDb()
+  db.prepare('DELETE FROM account WHERE id = ?').run(id)
+}
+
+/**
+ * One-time import from accounts.json AccountInfo array.
+ * Only runs if the account table is empty (idempotent).
+ * Call this at app start after the DB is open.
+ */
+export function importAccountsOnce(accounts: AccountInfo[]): void {
+  const db = getDb()
+  const count = (db.prepare('SELECT COUNT(*) as n FROM account').get() as { n: number }).n
+  if (count > 0) return // already populated — skip
+
+  if (accounts.length === 0) return
+
+  const insert = db.prepare(
+    `INSERT OR IGNORE INTO account (id, email, subscription_type, organization, created_at)
+     VALUES (?, ?, ?, ?, ?)`
+  )
+  for (const acc of accounts) {
+    insert.run(acc.id, acc.email, acc.subscriptionType, acc.organization, acc.createdAt)
   }
 }

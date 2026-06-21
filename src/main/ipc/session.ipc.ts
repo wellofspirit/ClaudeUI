@@ -54,6 +54,9 @@ import {
 import { usageFetcher } from '../services/usage-fetcher'
 import { serviceSession } from '../services/service-session'
 import { blockUsageService } from '../services/block-usage'
+import '../auth/register-auth-providers'
+import { engineAuthRegistry } from '../auth/EngineAuthRegistry'
+import { claudeAuthProvider } from '../auth/ClaudeAuthProvider'
 import { authManager } from '../services/auth-manager'
 import { accountManager } from '../services/account-manager'
 import type {
@@ -234,7 +237,22 @@ async function fetchModels(): Promise<ModelInfo[]> {
     // session is opened. Resolves immediately (init already completed). ADR-014.
     try {
       const init = await handle.initializationResult()
+      // reportLoginStatus broadcasts session:auth-source to the window (legacy path).
       authManager.reportLoginStatus(init?.account)
+      // Also update the ClaudeAuthProvider probe cache so probe() and session.account
+      // are accurate from the first model-fetch, before any chat session opens.
+      const acc = init?.account as Record<string, unknown> | undefined
+      if (acc) {
+        const loggedIn = !!(acc.email)
+        claudeAuthProvider.updateAuthSource(loggedIn ? 'authenticated' : 'none', {
+          email: (acc.email as string | null) ?? null,
+          organization: (acc.organization as string | null) ?? null,
+          subscriptionType: (acc.subscriptionType as string | null) ?? null,
+          tokenSource: (acc.tokenSource as string | null) ?? null,
+          apiKeySource: (acc.apiKeySource as string | null) ?? null,
+          apiProvider: (acc.apiProvider as string | null) ?? null
+        })
+      }
     } catch {
       /* non-fatal — per-session init will still report status */
     }
@@ -1619,20 +1637,22 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     blockUsageService.setAccountFilter(account)
   })
 
-  // Native Anthropic OAuth (ADR-014). signIn resolves at "authorizing"; the
-  // terminal result is broadcast via the 'auth:state' event.
-  ipcMain.handle('auth:sign-in', async () => authManager.signIn())
-  ipcMain.handle('auth:submit-code', async (_e, code: string) => authManager.submitOAuthCode(code))
-  ipcMain.handle('auth:cancel', async () => authManager.cancelSignIn())
+  // Native Anthropic OAuth (ADR-014) — routed through EngineAuthProvider.
+  // Channels and payloads are unchanged; the registry defaults to 'claude'.
+  const claudeAuth = engineAuthRegistry.require('claude')
+  ipcMain.handle('auth:sign-in', async () => claudeAuth.signIn?.())
+  ipcMain.handle('auth:submit-code', async (_e, code: string) => claudeAuth.submitCode?.(code))
+  ipcMain.handle('auth:cancel', async () => claudeAuth.cancelSignIn?.())
 
-  // Multiple-account support (ADR-015).
+  // Multiple-account support (ADR-015) — routed through EngineAuthProvider for
+  // add/switch/delete; setEnabled stays direct on AccountManager (not on the interface).
   ipcMain.handle('account:get', async () => accountManager.getState())
   ipcMain.handle('account:set-enabled', async (_e, enabled: boolean) =>
     accountManager.setEnabled(enabled)
   )
-  ipcMain.handle('account:add', async () => accountManager.addAccount())
-  ipcMain.handle('account:switch', async (_e, id: string) => accountManager.switchAccount(id))
-  ipcMain.handle('account:delete', async (_e, id: string) => accountManager.deleteAccount(id))
+  ipcMain.handle('account:add', async () => claudeAuth.addAccount?.())
+  ipcMain.handle('account:switch', async (_e, id: string) => claudeAuth.switchAccount?.(id))
+  ipcMain.handle('account:delete', async (_e, id: string) => claudeAuth.deleteAccount?.(id))
 
   // Mockup preview — read HTML from mockup directory
   ipcMain.handle(

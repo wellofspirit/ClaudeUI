@@ -382,8 +382,19 @@ export function useClaudeEvents(): void {
         }
       }),
       // Auth source from session init ('none' = logged out) — drives the banner
+      // Also updates the vendorAuth probe so AuthBanner reads from the probe.
       window.api.onAuthSource((_routingId, source) => {
-        useSessionStore.getState().setAuthSource(source)
+        const store = useSessionStore.getState()
+        store.setAuthSource(source)
+        // Mirror the auth-source into vendorAuth so AuthBanner can consume the probe
+        // (AuthState tri-state) instead of the raw string — behavior-equivalent.
+        store.setVendorAuth({
+          anthropic: {
+            authState: source === 'authenticated' ? 'authenticated' : 'unauthenticated',
+            billingType: 'unknown',
+            label: undefined
+          }
+        })
       }),
       // Multi-account state changes (ADR-015)
       window.api.onAccountsChanged((state) => {
