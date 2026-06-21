@@ -3,13 +3,14 @@
  * AutomationConfig form. Sharing keeps capability-awareness (effort levels,
  * adaptive-thinking support) consistent wherever the user picks a model.
  */
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   EFFORT_LEVELS,
   THINKING_MODES,
   type EffortLevel,
   type ThinkingMode
 } from '../../../../shared/model-capabilities'
+import type { EngineId, VendorId } from '../../../../shared/types'
 
 export interface ModelDisplay {
   value: string
@@ -19,6 +20,10 @@ export interface ModelDisplay {
   supportsEffort?: boolean
   supportedEffortLevels?: EffortLevel[]
   supportsAdaptiveThinking?: boolean
+  /** Engine that owns this model (used for group header rendering). */
+  engineId?: EngineId
+  /** Vendor id within the engine (used for group header rendering). */
+  vendorId?: VendorId
 }
 
 function useClickOutside(
@@ -43,6 +48,26 @@ function unsupportedTooltip(level: EffortLevel): string {
   return 'Not supported on this model'
 }
 
+/** Derive groups from a flat model list by (engineId, vendorId) pairing. */
+function deriveModelGroups(
+  models: ModelDisplay[]
+): Array<{ key: string; label: string; items: ModelDisplay[] }> {
+  const groupMap = new Map<string, { label: string; items: ModelDisplay[] }>()
+  for (const m of models) {
+    const engineId = m.engineId ?? 'claude'
+    const vendorId = m.vendorId ?? 'anthropic'
+    const key = `${engineId}:${vendorId}`
+    if (!groupMap.has(key)) {
+      // Build a human label: "Claude · Anthropic" or "opencode · <vendorName>"
+      const vendorLabel = vendorId.charAt(0).toUpperCase() + vendorId.slice(1)
+      const engineLabel = engineId === 'claude' ? 'Claude' : engineId
+      groupMap.set(key, { label: `${engineLabel} · ${vendorLabel}`, items: [] })
+    }
+    groupMap.get(key)!.items.push(m)
+  }
+  return Array.from(groupMap.entries()).map(([key, g]) => ({ key, ...g }))
+}
+
 export function ModelPicker({
   models,
   selectedModel,
@@ -55,6 +80,10 @@ export function ModelPicker({
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement | null>(null)
   useClickOutside(ref, open, () => setOpen(false))
+
+  // Derive groups only when models change (avoids re-grouping every render)
+  const groups = useMemo(() => deriveModelGroups(models), [models])
+  const isGrouped = groups.length > 1
 
   return (
     <div className="relative" ref={ref}>
@@ -80,26 +109,35 @@ export function ModelPicker({
       </button>
       {open && (
         <div className="absolute bottom-full mb-1 left-0 w-56 bg-bg-tertiary border border-border rounded-lg overflow-hidden shadow-lg shadow-black/30 z-20">
-          {models.map((m) => (
-            <button
-              key={m.value}
-              onClick={() => {
-                onSelectModel(m.value)
-                setOpen(false)
-              }}
-              className={`w-full flex flex-col px-3 py-1.5 transition-colors cursor-pointer text-left ${
-                m.value === selectedModel.value
-                  ? 'text-text-primary bg-bg-hover'
-                  : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary'
-              }`}
-            >
-              <span className="text-[12px]">{m.shortName}</span>
-              {m.description && (
-                <span className="text-text-muted text-[10px]">
-                  {m.description.split('·')[1]?.trim()}
-                </span>
+          {groups.map((group) => (
+            <div key={group.key}>
+              {isGrouped && (
+                <div className="px-3 pt-2 pb-0.5 text-[10px] text-text-muted font-medium uppercase tracking-wider">
+                  {group.label}
+                </div>
               )}
-            </button>
+              {group.items.map((m) => (
+                <button
+                  key={m.value}
+                  onClick={() => {
+                    onSelectModel(m.value)
+                    setOpen(false)
+                  }}
+                  className={`w-full flex flex-col px-3 py-1.5 transition-colors cursor-pointer text-left ${
+                    m.value === selectedModel.value
+                      ? 'text-text-primary bg-bg-hover'
+                      : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary'
+                  }`}
+                >
+                  <span className="text-[12px]">{m.shortName}</span>
+                  {m.description && (
+                    <span className="text-text-muted text-[10px]">
+                      {m.description.split('·')[1]?.trim()}
+                    </span>
+                  )}
+                </button>
+              ))}
+            </div>
           ))}
         </div>
       )}

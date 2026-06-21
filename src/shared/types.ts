@@ -58,6 +58,11 @@ export function claudeModel(modelId: string): ModelRef {
   return { engineId: 'claude', vendorId: 'anthropic', modelId }
 }
 
+/** Construct an opencode ModelRef (engine 'opencode', vendor = providerId). */
+export function opencodeModel(vendorId: VendorId, modelId: string): ModelRef {
+  return { engineId: 'opencode', vendorId, modelId }
+}
+
 // ---------------------------------------------------------------------------
 // Phase 4 identity types — declared here for vocabulary; wired in Phase 4
 // ---------------------------------------------------------------------------
@@ -369,6 +374,22 @@ export interface ModelInfo {
   supportsEffort?: boolean
   supportedEffortLevels?: ('low' | 'medium' | 'high' | 'xhigh' | 'max')[]
   supportsAdaptiveThinking?: boolean
+  /** Engine that owns this model entry. Defaults to 'claude' when absent (legacy). */
+  engineId?: EngineId
+  /** Vendor id within the engine. */
+  vendorId?: VendorId
+  /** Whether this model supports vision/image input. */
+  vision?: boolean
+  /** Whether this model supports tool calling. */
+  toolCalling?: boolean
+}
+
+/** Grouped model list for the engine-aware picker. */
+export interface EngineModelGroup {
+  engineId: EngineId
+  vendorId: VendorId
+  vendorName: string
+  models: ModelInfo[]
 }
 
 export interface SessionInfo {
@@ -530,6 +551,7 @@ interface SessionAPI {
   setEffort(routingId: string, effort: string): Promise<void>
   setThinkingMode(routingId: string, mode: string): Promise<void>
   getModels(): Promise<ModelInfo[]>
+  getEngineModels(): Promise<EngineModelGroup[]>
   generateTitle(conversationText: string): Promise<string | null>
   generateCommitMessage(diff: string): Promise<string | null>
   writeCustomTitle(sessionId: string, projectKey: string, title: string): Promise<void>

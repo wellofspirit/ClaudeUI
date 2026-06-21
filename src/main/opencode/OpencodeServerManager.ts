@@ -1,8 +1,9 @@
 import { randomBytes } from 'node:crypto'
 import { existsSync } from 'node:fs'
-import { join, resolve as resolvePath } from 'node:path'
+import { join, dirname, resolve as resolvePath } from 'node:path'
 import { spawn } from 'node:child_process'
 import type { ChildProcess } from 'node:child_process'
+import { app } from 'electron'
 
 /** Connection details handed back to callers (and to OpencodeClient). */
 export interface ServerConnection {
@@ -38,26 +39,38 @@ const PORT_PATTERN = /opencode server listening on http:\/\/127\.0\.0\.1:(\d+)/
 const BINARY_NAME = process.platform === 'win32' ? 'opencode.exe' : 'opencode'
 
 function locateBinary(): string {
-  // 1. Packaged: resources/opencode-cli/ (Electron extraResources)
-  const resourcesDir = process.resourcesPath
-  if (resourcesDir) {
-    const packaged = join(resourcesDir, 'opencode-cli', BINARY_NAME)
-    if (existsSync(packaged)) return packaged
+  // Mirror the claude-cli locator (src/main/sdk/locate.ts): resolve via
+  // app.getAppPath() — `__dirname` points at the bundled out/main in built/dev
+  // Electron, so it can't find <projectRoot>/vendor. Outside Electron (smoke
+  // scripts, integration tests) `app` is undefined → fall back to cwd, which is
+  // the project root in those contexts.
+  const appPath = app?.getAppPath ? app.getAppPath() : process.cwd()
+
+  if (!appPath.includes('app.asar')) {
+    // Dev/built — appPath is the project root.
+    const vendor = join(appPath, 'vendor', 'opencode-cli', BINARY_NAME)
+    if (existsSync(vendor)) return vendor
+
+    // Dev fallback: the pre-existing probe binary.
+    const probe = join(appPath, '.cache', 'opencode-probe', 'package', 'bin', BINARY_NAME)
+    if (existsSync(probe)) return probe
+
+    throw new Error(
+      `opencode binary not found at ${vendor}. Run \`bun run ensure-opencode\` to vendor it.`
+    )
   }
 
-  // 2. Dev: vendor/opencode-cli/ (built by ensure-opencode)
-  const appRoot = join(__dirname, '..', '..', '..')
-  const vendor = join(appRoot, 'vendor', 'opencode-cli', BINARY_NAME)
-  if (existsSync(vendor)) return vendor
-
-  // 3. Dev fallback: .cache/opencode-probe/package/bin/ (pre-existing probe binary)
-  const probe = join(appRoot, '.cache', 'opencode-probe', 'package', 'bin', BINARY_NAME)
-  if (existsSync(probe)) return probe
-
-  throw new Error(
-    `opencode binary not found. Run \`bun run ensure-opencode\` to vendor it, ` +
-      `or ensure the probe binary exists at ${probe}`
-  )
+  // Production — extraResources copies vendor/opencode-cli → <Resources>/opencode-cli.
+  // dirname(appPath) is the Resources directory (where app.asar lives).
+  const candidates = [
+    join(dirname(appPath), 'opencode-cli', BINARY_NAME),
+    join(appPath.replace('app.asar', 'app.asar.unpacked'), 'vendor', 'opencode-cli', BINARY_NAME)
+  ]
+  for (const c of candidates) {
+    if (existsSync(c)) return c
+  }
+  // Return the primary candidate; the caller surfaces the missing-file error.
+  return candidates[0]
 }
 
 /**
@@ -234,17 +247,29 @@ export class OpencodeServerManager {
     handle.refCount--
     if (handle.refCount <= 0) {
       this.handles.delete(key)
-      handle.process.kill('SIGTERM')
+      this.killProcess(handle.process)
     }
   }
 
   /** Kill all servers — call on app shutdown. */
   dispose(): void {
     for (const handle of this.handles.values()) {
-      handle.process.kill('SIGTERM')
+      this.killProcess(handle.process)
     }
     this.handles.clear()
     this.pending.clear()
+  }
+
+  private killProcess(child: ChildProcess): void {
+    if (process.platform === 'win32' && child.pid != null) {
+      // SIGTERM on Windows only kills the parent; taskkill /T /F reaps the whole tree.
+      // We still call child.kill() so the in-process 'exit' event fires (needed for
+      // the handle-drop listener wired in resolveHandle).
+      child.kill()
+      spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore' })
+    } else {
+      child.kill('SIGTERM')
+    }
   }
 
   /** For testing: the count of live (resolved) servers. */

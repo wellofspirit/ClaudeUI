@@ -484,3 +484,67 @@ export function resolveClaudeCapabilities(modelValue?: string | null): ResolvedC
     claudeModelCapabilities({ value: modelValue ?? 'default' })
   )
 }
+
+/**
+ * opencode engine capabilities — 5b-conservative.
+ * Flips true in later phases: hostedMcp (5c), backgroundTasks/subagents/steer/queue/
+ * slashCommands/skills/sideQuestion (Phase 6+), voice (deferred).
+ */
+export const OPENCODE_ENGINE_CAPABILITIES: EngineCapabilities = {
+  voice: false,
+  hostedMcp: false,
+  backgroundTasks: false,
+  subagents: false,
+  plan: true,
+  fork: true,
+  forkFromMessage: true,
+  steer: false,
+  queue: false,
+  slashCommands: false,
+  skills: false,
+  sideQuestion: false,
+  interactiveApprovals: true,
+  autonomyModes: ['plan', 'ask', 'full'],
+  auth: { canDriveLogin: true, multiAccount: false }
+}
+
+/**
+ * Derive ModelCapabilities for an opencode model from its discovered caps.
+ * reasoning: empty object (opencode reasoning is a per-model boolean, not a
+ * modes/levels control — no thinking/effort picker in 5b; follow-up phase).
+ */
+export function opencodeModelCapabilities(
+  m?: {
+    // Local structural type (a subset of opencode's protocol ModelCapabilities)
+    // so shared/ stays self-contained — no import from main/.
+    capabilities?: {
+      attachment?: boolean
+      toolcall?: boolean
+      reasoning?: boolean
+      input?: { image?: boolean }
+    }
+    limit?: { context?: number; output?: number }
+    cost?: { cache?: { read: number; write: number } }
+  }
+): ModelCapabilities {
+  const caps = m?.capabilities
+  const limit = m?.limit
+  const cost = m?.cost
+  return {
+    reasoning: {},
+    vision: !!(caps?.attachment || caps?.input?.image),
+    toolCalling: !!caps?.toolcall,
+    contextWindow: limit?.context ?? 200_000,
+    maxOutput: limit?.output ?? 8192,
+    promptCaching: !!(cost?.cache)
+  }
+}
+
+/**
+ * Convenience: compute ResolvedCapabilities for an opencode session.
+ */
+export function resolveOpencodeCapabilities(
+  m?: Parameters<typeof opencodeModelCapabilities>[0]
+): ResolvedCapabilities {
+  return resolveCapabilities(OPENCODE_ENGINE_CAPABILITIES, opencodeModelCapabilities(m))
+}

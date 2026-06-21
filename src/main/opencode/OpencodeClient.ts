@@ -52,6 +52,9 @@ export class OpencodeClient {
   private del<T>(path: string) {
     return this.request<T>('DELETE', path)
   }
+  private patch<T>(path: string, body?: unknown) {
+    return this.request<T>('PATCH', path, body)
+  }
 
   // ── Config / Providers ────────────────────────────────────────────────────
 
@@ -127,6 +130,19 @@ export class OpencodeClient {
    */
   promptAsync(sessionId: string, req: PromptRequest): Promise<unknown> {
     return this.post(`/session/${encodeURIComponent(sessionId)}/prompt_async`, req)
+  }
+
+  /** PATCH /session/{id} — update per-session settings (permission ruleset, title, agent) */
+  patchSession(
+    sessionId: string,
+    patch: { permission?: Array<{ permission: string; pattern: string; action: string }>; title?: string; agent?: string }
+  ): Promise<unknown> {
+    return this.patch(`/session/${encodeURIComponent(sessionId)}`, patch)
+  }
+
+  /** POST /permission/{id}/reply — reply to a permission.asked event */
+  replyPermission(requestId: string, reply: 'once' | 'always' | 'reject'): Promise<unknown> {
+    return this.post(`/permission/${encodeURIComponent(requestId)}/reply`, { reply })
   }
 
   // ── SSE Event Stream ──────────────────────────────────────────────────────

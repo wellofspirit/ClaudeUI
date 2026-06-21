@@ -40,6 +40,7 @@ import { serviceSession } from './services/service-session'
 import { authManager } from './services/auth-manager'
 import { accountManager } from './services/account-manager'
 import { claudeAuthProvider } from './auth/ClaudeAuthProvider'
+import { opencodeServerManager } from './opencode/OpencodeServerManager'
 import { PluginManager } from './services/plugin-manager'
 import { LogViewer } from './services/log-viewer'
 import { logger } from './services/logger'
@@ -254,6 +255,9 @@ function createWindow(): void {
     stopAllClassifiers()
     // Stop the service session (lightweight CLI subprocess for usage polling)
     serviceSession.stop()
+    // Reap any shared opencode servers (Windows tree-kill) so opencode.exe
+    // children don't orphan on quit. Idempotent — safe to run on every invocation.
+    opencodeServerManager.dispose()
     if (quitConfirmed) return
     e.preventDefault()
     if (!mainWindow.isDestroyed()) {

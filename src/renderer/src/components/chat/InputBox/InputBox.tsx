@@ -190,7 +190,8 @@ export function InputBox(): React.JSX.Element {
   const voiceInterimTranscript = useActiveSession((s) => s.voiceInterimTranscript)
   const clearVoiceTranscript = useSessionStore((s) => s.clearVoiceTranscript)
 
-  // Load Claude models via getModels(). Re-fetches when cwd changes.
+  // Load models from all engines via getEngineModels(). Re-fetches when cwd changes.
+  // Flattens the EngineModelGroup[] into ModelInfo[] (each entry has engineId/vendorId set).
   const loadedModelsKey = useRef<string | null>(null)
   useEffect(() => {
     const key = cwd ?? ''
@@ -200,8 +201,16 @@ export function InputBox(): React.JSX.Element {
     loadedModelsKey.current = key
 
     let ignore = false
-    window.api.getModels().then((models) => {
-      if (!ignore) setAvailableModels(models)
+    window.api.getEngineModels().then((groups) => {
+      if (!ignore) {
+        const flat = groups.flatMap((g) => g.models)
+        setAvailableModels(flat)
+      }
+    }).catch(() => {
+      // Fallback to Claude-only models if getEngineModels fails
+      window.api.getModels().then((models) => {
+        if (!ignore) setAvailableModels(models)
+      }).catch(() => {/* non-fatal */})
     })
     return () => {
       ignore = true
@@ -549,13 +558,27 @@ export function InputBox(): React.JSX.Element {
 
   const handleSelectModel = useCallback(
     (value: string) => {
-      setSelectedModel(value)
-      if (activeSessionId) window.api.setModel(activeSessionId, value)
-      // Auto-coerce the user's explicit picks against the new model. Leave
-      // `null` store values alone — they auto-track the new model's defaults.
       const state = useSessionStore.getState()
       const session = state.sessions[activeSessionId ?? '']
       const newModel = state.availableModels.find((m) => m.value === value)
+      // The picked entry carries engineId/vendorId (from getEngineModels). The
+      // store action switches the session's engine when it differs (valid only
+      // for a not-yet-started session — guarded below before any IPC).
+      const pickedEngine = newModel?.engineId ?? session?.selectedEngineId ?? 'claude'
+      setSelectedModel(value, pickedEngine)
+
+      // A "started" session has a backend sessionId. Only push a live model
+      // switch to the backend when the picked engine MATCHES the running
+      // engine — never send an opencode model string to a live Claude process
+      // (or vice versa). Cross-engine picks take effect on the next/new session.
+      const started = !!session?.status.sessionId
+      const sameEngine = (session?.selectedEngineId ?? 'claude') === pickedEngine
+      if (activeSessionId && started && sameEngine) {
+        window.api.setModel(activeSessionId, value)
+      }
+
+      // Auto-coerce the user's explicit picks against the new model. Leave
+      // `null` store values alone — they auto-track the new model's defaults.
       if (session?.thinkingMode !== null && session?.thinkingMode !== undefined) {
         const coerced = modelResolveThinkingMode(newModel, session.thinkingMode)
         if (coerced !== session.thinkingMode) setThinkingMode(coerced)

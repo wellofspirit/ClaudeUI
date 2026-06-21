@@ -1,8 +1,8 @@
 import { create } from 'zustand'
 import { useShallow } from 'zustand/react/shallow'
 import { mergeContentBlocks } from '../utils/content-blocks'
-import { VOICE_LANGUAGES, claudeModel } from '../../../shared/types'
-import { resolveClaudeCapabilities } from '../../../shared/model-capabilities'
+import { VOICE_LANGUAGES, claudeModel, opencodeModel } from '../../../shared/types'
+import { resolveClaudeCapabilities, resolveOpencodeCapabilities } from '../../../shared/model-capabilities'
 import type { EffortLevel } from '../../../shared/model-capabilities'
 import type {
   ChatMessage,
@@ -42,6 +42,27 @@ import type {
 export function normalizeCwd(cwd: string): string {
   if (cwd.length > 1 && cwd.endsWith('/')) return cwd.slice(0, -1)
   return cwd || '.'
+}
+
+/**
+ * The default model picker VALUE for a given engine. opencode must never get
+ * `'default'` (a Claude alias) — the free no-auth model is the 5b default.
+ * The opencode value convention is `"<providerID>/<modelID>"`.
+ */
+export const OPENCODE_DEFAULT_MODEL = 'opencode/mimo-v2.5-free'
+export function defaultModelForEngine(engineId: EngineId): string {
+  return engineId === 'opencode' ? OPENCODE_DEFAULT_MODEL : 'default'
+}
+
+/** Build the engine-correct ModelRef from a picker value string. */
+export function modelRefForEngine(engineId: EngineId, value: string): ModelRef {
+  if (engineId === 'opencode') {
+    const slash = value.indexOf('/')
+    return slash >= 0
+      ? opencodeModel(value.slice(0, slash), value.slice(slash + 1))
+      : opencodeModel('opencode', value)
+  }
+  return claudeModel(value)
 }
 
 const TASK_TOOL_NAMES = new Set(['TaskCreate', 'TaskUpdate', 'TodoWrite'])
@@ -736,7 +757,11 @@ interface SessionState {
   clearQueuedText: () => void
   consumeQueuedText: (routingId: string) => void
   setDraftText: (text: string) => void
-  setSelectedModel: (model: string) => void
+  /** Set the active session's model picker value. When `engineId` is provided
+   *  and differs from the session's current engine, switches the session's
+   *  engine too (only valid for a not-yet-started session — the caller guards
+   *  this). Persists the engine-correct ModelRef. */
+  setSelectedModel: (model: string, engineId?: EngineId) => void
   setSlashCommands: (commands: SlashCommandInfo[]) => void
   setCustomCommands: (commands: SlashCommandInfo[]) => void
   setSdkSkillNames: (names: string[]) => void
@@ -890,20 +915,24 @@ export const useSessionStore = create<SessionState>((set) => ({
         ...state.recentSessionIds.filter((id) => id !== routingId)
       ].slice(0, state.settings.maxRecentSessions)
       const engineId = state.lastSelectedEngineId
+      const defaultModel = defaultModelForEngine(engineId)
       // Write model into sessionEngines so it can be seeded on reopen (spec §3).
       // Always write the entry so the engine is recorded; model is set on first model event.
       const sessionEngines = {
         ...state.sessionEngines,
-        [routingId]: { engineId, model: claudeModel('default') }
+        [routingId]: { engineId, model: modelRefForEngine(engineId, defaultModel) }
       }
       saveSessionConfig(state, { recentSessionIds, sessionEngines })
       const newSession = createEmptySession(cwd)
       newSession.selectedEngineId = engineId
+      newSession.selectedModel = defaultModel
       // Seed status.engineId/capabilities to match so they're correct before spawn
       newSession.status = {
         ...newSession.status,
         engineId,
-        capabilities: resolveClaudeCapabilities('default')
+        capabilities: engineId === 'opencode'
+          ? resolveOpencodeCapabilities()
+          : resolveClaudeCapabilities('default')
       }
       return {
         ...(switchTo
@@ -933,7 +962,18 @@ export const useSessionStore = create<SessionState>((set) => ({
       const base = createEmptySession(cwd)
       // Seed selectedModel from the persisted per-session model when present, so
       // reopening a session restores the user's last model choice (data-model §3).
-      const persistedModel = state.sessionEngines[routingId]?.model?.modelId
+      const persistedEntry = state.sessionEngines[routingId]
+      const persistedEngineId = persistedEntry?.engineId ?? 'claude'
+      const persistedModelRef = persistedEntry?.model
+      // For opencode, the picker value is "vendorId/modelId"; for claude it's just modelId.
+      let persistedModel: string | undefined
+      if (persistedModelRef) {
+        if (persistedEngineId === 'opencode') {
+          persistedModel = `${persistedModelRef.vendorId}/${persistedModelRef.modelId}`
+        } else {
+          persistedModel = persistedModelRef.modelId
+        }
+      }
       return {
         sessions: {
           ...state.sessions,
@@ -946,6 +986,7 @@ export const useSessionStore = create<SessionState>((set) => ({
             statusLine: statusLine ?? null,
             warnings: warnings || [],
             worktreeInfo: state.worktreeInfoMap[routingId] ?? null,
+            selectedEngineId: persistedEngineId,
             ...(persistedModel ? { selectedModel: persistedModel } : {})
           }
         }
@@ -1998,21 +2039,51 @@ export const useSessionStore = create<SessionState>((set) => ({
       return { sessions: updateSession(state.sessions, id, () => ({ draftText: text })) }
     }),
 
-  setSelectedModel: (model) =>
+  setSelectedModel: (model, engineId) =>
     set((state) => {
       const id = state.activeSessionId
       if (!id) return {}
-      // Persist the real model into sessionEngines so it can seed selectedModel
-      // when the session is reopened from disk. Only record for sessions that
-      // already have an engine entry (created via createNewSession).
+      const session = state.sessions[id]
+      // Resolve the engine this model belongs to: explicit arg wins, else keep
+      // the session's current engine.
+      const targetEngine: EngineId = engineId ?? session?.selectedEngineId ?? 'claude'
+      const engineChanged = !!session && session.selectedEngineId !== targetEngine
+
+      // Persist the engine-correct ModelRef into sessionEngines so it seeds
+      // selectedModel + engine on reopen. Update the engineId too when it changed.
       const existing = state.sessionEngines[id]
+      const modelRef = modelRefForEngine(targetEngine, model)
       const sessionEngines = existing
-        ? { ...state.sessionEngines, [id]: { ...existing, model: claudeModel(model) } }
+        ? {
+            ...state.sessionEngines,
+            [id]: { ...existing, engineId: targetEngine, model: modelRef }
+          }
         : state.sessionEngines
       if (existing) saveSessionConfig(state, { sessionEngines })
+
+      // Mirror the engine choice into localStorage (matches setLastSelectedEngineId).
+      if (engineChanged) localStorage.setItem('lastSelectedEngineId', targetEngine)
+
+      // When the engine changed, also update the session's selectedEngineId,
+      // status.engineId, and capabilities so pre-spawn gating is correct.
+      const patch: Partial<PerSessionState> = { selectedModel: model }
+      if (engineChanged && session) {
+        patch.selectedEngineId = targetEngine
+        patch.status = {
+          ...session.status,
+          engineId: targetEngine,
+          capabilities:
+            targetEngine === 'opencode'
+              ? resolveOpencodeCapabilities()
+              : resolveClaudeCapabilities(model)
+        }
+      }
+
       return {
-        sessions: updateSession(state.sessions, id, () => ({ selectedModel: model })),
-        sessionEngines
+        sessions: updateSession(state.sessions, id, () => patch),
+        sessionEngines,
+        // Remember the engine for the next new session.
+        ...(engineChanged ? { lastSelectedEngineId: targetEngine } : {})
       }
     }),
 
@@ -2108,9 +2179,18 @@ export const useSessionStore = create<SessionState>((set) => ({
         delete sessionEngines[oldId]
       } else {
         // Always record the engine + current model, defaulting to the session's choices
+        let modelRef = claudeModel(session.selectedModel)
+        if (session.selectedEngineId === 'opencode') {
+          const slash = session.selectedModel.indexOf('/')
+          if (slash >= 0) {
+            modelRef = opencodeModel(session.selectedModel.slice(0, slash), session.selectedModel.slice(slash + 1))
+          } else {
+            modelRef = opencodeModel('opencode', session.selectedModel)
+          }
+        }
         sessionEngines[newId] = {
           engineId: session.selectedEngineId,
-          model: claudeModel(session.selectedModel)
+          model: modelRef
         }
       }
       saveSessionConfig(state, {

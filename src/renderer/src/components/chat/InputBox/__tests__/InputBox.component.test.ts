@@ -393,6 +393,7 @@ describe('InputBox FC — rendered', () => {
       return null
     })
     app.bridge.ipcMain.handle('session:get-models', () => [])
+    app.bridge.ipcMain.handle('session:get-engine-models', () => [{ engineId: 'claude', vendorId: 'anthropic', vendorName: 'Anthropic', models: [] }])
     app.bridge.ipcMain.handle('voice:start-recording', (_e: unknown, ...args: unknown[]) => {
       record('voice:start-recording', ...args)
       return null
@@ -504,8 +505,19 @@ describe('InputBox FC — rendered', () => {
     expect(ipcCalls['session:interrupt'][0][0]).toBe(FC_ROUTE)
   })
 
-  it('onSelectModel: calls setModel IPC and updates selectedModel in store', async () => {
+  it('onSelectModel (started same-engine session): calls setModel IPC and updates store', async () => {
     renderFC()
+    // A live model switch only goes to the backend when the session has STARTED
+    // (has a backend sessionId) and the picked engine matches the running engine.
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [FC_ROUTE]: {
+          ...state.sessions[FC_ROUTE],
+          status: { ...state.sessions[FC_ROUTE].status, sessionId: 'ses_started' }
+        }
+      }
+    }))
 
     viewProps.onSelectModel('claude-opus-4-5')
 
@@ -514,6 +526,16 @@ describe('InputBox FC — rendered', () => {
     expect(ipcCalls['session:set-model'][0][1]).toBe('claude-opus-4-5')
 
     // Store updated
+    expect(useSessionStore.getState().sessions[FC_ROUTE].selectedModel).toBe('claude-opus-4-5')
+  })
+
+  it('onSelectModel (not-yet-started session): updates store but does NOT call setModel IPC', async () => {
+    renderFC()
+    // Fresh FC session has no backend sessionId — a model pick must only update
+    // the store (takes effect on spawn), never send to a not-started backend.
+    viewProps.onSelectModel('claude-opus-4-5')
+
+    expect(ipcCalls['session:set-model']).toBeUndefined()
     expect(useSessionStore.getState().sessions[FC_ROUTE].selectedModel).toBe('claude-opus-4-5')
   })
 

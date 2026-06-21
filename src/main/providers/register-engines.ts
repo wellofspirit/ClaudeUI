@@ -4,6 +4,7 @@
  * Adding a new engine = add a factory registration here.
  */
 import { ClaudeSession } from '../services/claude-session'
+import { OpencodeSession } from '../opencode/OpencodeSession'
 import { engineRegistry } from './EngineRegistry'
 
 engineRegistry.register(
@@ -22,6 +23,36 @@ engineRegistry.register(
     forkSession
   ) =>
     new ClaudeSession(
+      routingId,
+      win,
+      cwd,
+      effort,
+      resumeSessionId,
+      permissionMode,
+      model,
+      sandboxConfig,
+      thinkingMode,
+      resumeSessionAt,
+      forkSession
+    )
+)
+
+engineRegistry.register(
+  'opencode',
+  (
+    routingId,
+    win,
+    cwd,
+    effort,
+    resumeSessionId,
+    permissionMode,
+    model,
+    sandboxConfig,
+    thinkingMode,
+    resumeSessionAt,
+    forkSession
+  ) =>
+    new OpencodeSession(
       routingId,
       win,
       cwd,

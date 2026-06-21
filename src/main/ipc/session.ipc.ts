@@ -62,6 +62,7 @@ import { accountManager } from '../services/account-manager'
 import type {
   ApprovalDecision,
   ModelInfo,
+  EngineModelGroup,
   ProxySettings,
   AnthropicEndpointSettings,
   ModelOverrideSettings,
@@ -71,6 +72,7 @@ import type {
   EngineConfig,
   VendorConfig
 } from '../../shared/types'
+import { discoverOpencodeModels } from '../opencode/model-discovery'
 import { logger } from '../services/logger'
 import { deleteSessionFiles, deleteProjectFiles } from '../services/delete-session-files'
 import { startSocksBridge, stopSocksBridge } from '../services/socks-bridge'
@@ -281,6 +283,7 @@ const SESSION_IPC_CHANNELS = [
   'session:set-model',
   'session:set-effort',
   'session:get-models',
+  'session:get-engine-models',
   'session:generate-title',
   'session:generate-commit-message',
   'session:write-custom-title',
@@ -749,13 +752,15 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
       engineId?: EngineId
     ) => {
       const engineCfg = loadEngineConfig(engineId ?? 'claude')
-      // Phase 5: derive vendor from the current model's ModelRef. For Claude the
-      // engine is 1:1 with the 'anthropic' vendor, so this is always correct now.
-      const vendorCfg = loadVendorConfig('anthropic')
       const sandboxConfig = engineCfg.sandbox
-      await applyProxyEnv(engineCfg.proxy)
-      applyEndpointEnv(vendorCfg.endpoint)
-      applyModelEnv(vendorCfg.modelOverride)
+      if (engineId !== 'opencode') {
+        // Phase 5: derive vendor from the current model's ModelRef. For Claude the
+        // engine is 1:1 with the 'anthropic' vendor, so this is always correct now.
+        const vendorCfg = loadVendorConfig('anthropic')
+        await applyProxyEnv(engineCfg.proxy)
+        applyEndpointEnv(vendorCfg.endpoint)
+        applyModelEnv(vendorCfg.modelOverride)
+      }
       manager.create(
         routingId,
         win,
@@ -957,6 +962,20 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
 
   ipcMain.handle('session:get-models', async () => {
     return await fetchModels()
+  })
+
+  ipcMain.handle('session:get-engine-models', async (): Promise<EngineModelGroup[]> => {
+    // Claude models as a flat group
+    const claudeModels = await fetchModels()
+    const claudeGroup: EngineModelGroup = {
+      engineId: 'claude',
+      vendorId: 'anthropic',
+      vendorName: 'Anthropic',
+      models: claudeModels
+    }
+    // opencode models — returns [] if binary not present or discovery fails
+    const opencodeGroups = await discoverOpencodeModels()
+    return [claudeGroup, ...opencodeGroups]
   })
 
   ipcMain.handle('session:generate-title', async (_e, conversationText: string) => {
