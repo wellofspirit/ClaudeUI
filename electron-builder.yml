@@ -21,6 +21,11 @@ extraResources:
       - bun-claude*
       - version.json
       - vendor/**/*.node
+  - from: vendor/opencode-cli
+    to: opencode-cli
+    filter:
+      - opencode*
+      - version.json
   - from: out/web
     to: web
 asarUnpack:
