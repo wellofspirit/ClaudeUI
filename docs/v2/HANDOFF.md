@@ -6,11 +6,11 @@
 
 ## TL;DR — where we are
 
-**10 phases done and pushed; Phase 6 (tool-kind registry) just landed.** Next up: **Phase 7
-(metering) — the LAST V2 plan phase.** The whole V2 is being built as **stacked branches on
-`origin`**, one per phase, each reviewed + verified + committed before the next. **The plan's PR
-review gate after Phase 5 (the opencode MVP) is now overdue** — open it, or keep building 7 (the
-user's call).
+**V2 IS FEATURE-COMPLETE — all plan phases (0–7) are done and pushed.** Phase 7 (metering, DB-backed
+full-SQL) just landed. The whole V2 was built as **stacked branches on `origin`**, one per phase,
+each reviewed + verified + committed. **Remaining work is process, not phases:** the plan's PR review
+gates (after Phase 1 [passed] and Phase 5 [the whole opencode engine — still OPEN/overdue]) — open the
+stacked PR(s) when ready. Plus optional, non-blocking follow-ups (see end).
 
 | Phase | What | Branch (pushed) | Status |
 | --- | --- | --- | --- |
@@ -24,12 +24,14 @@ user's call).
 | 5b | opencode chat MVP: `OpencodeSession` + event mapper + grouped model picker + approvals | `v2-phase-5b-opencode-chat` | ✅ |
 | 5c | `OpencodeAuthProvider` (per-vendor auth) + hosted-tools opencode plugin (mermaid/mockup) | `v2-phase-5c-opencode-auth-mcp` | ✅ |
 | 6 | Tool-kind registry (`ToolCard` + kind bodies + `EngineToolMap`s, ApprovalButtons extracted) | `v2-phase-6-tool-registry` | ✅ |
-| **7** | **Metering (usage recorder, pricing, dashboard → SQL)** (see Next steps) — LAST plan phase | — | ⬜ **next** |
+| 7 | Metering — DB-backed full-SQL: `usage_event` recorder + reconciler + SQL dashboard + cross-engine cost | `v2-phase-7-metering` | ✅ |
 
-Branches are stacked: each off the previous (`6` off `5c` off `5b` off `5a` off `4` off `3b` off `3a`
-off `2` off `1` off `0` off `codex-sup`). **No PRs opened yet** — the plan's review gates are after
-Phase 1 (passed) and Phase 5. **Phase 5 is complete, so the Phase-5 PR gate is overdue** (or keep
-building Phase 7, the last plan phase — the user's call). Base/integration branch is `codex-sup`.
+**All V2 plan phases complete.**
+
+Branches are stacked: each off the previous (`7` off `6` off `5c` off `5b` off `5a` off `4` off `3b`
+off `3a` off `2` off `1` off `0` off `codex-sup`). **No PRs opened yet** — the plan's review gates are
+after Phase 1 (passed) and Phase 5. **All phases are now built; the Phase-5 PR gate (the whole opencode
+engine) is overdue** — open the stacked PR(s) when ready. Base/integration branch is `codex-sup`.
 
 ## The workflow (follow this exactly)
 
@@ -115,14 +117,33 @@ switching) — the real decomposition needs ToolCard + kind bodies consuming Too
 coverage polish (search match-list, structured web, single-diff, configurable truncation), FloatingApproval
 dedup, engine-neutral lifting. opencode-render end-to-end is unit-verified only (app-shot can't type a prompt).
 
-## Next steps — Phase 7 (metering — LAST plan phase)
+## What Phase 7 shipped (done — see `phase-7-metering.md`)
 
-- `usage_event` recorder (live events) + ongoing backfill reconciler (Claude JSONL scan; opencode via
-  API — `info.tokens`/`cost` are already parsed in the 5b mapper) + an internal pricing table (external
-  models.dev opt-in) + **equivalent API cost** as the primary metric + subscription windows behind the
-  per-account usage provider (Claude provider = ADR-011 logic) + the usage dashboard rewired to SQL
-  queries (the DB substrate from Phase 3a; add the `usage_event` table via the migrations framework).
-  Foundation: `docs/v2/05-metering-usage.md` + ADR-020. After 7, V2 is feature-complete.
+DB-backed metering, **full SQL** (user's choice over hybrid). DB v3 `usage_event` (UNIQUE(message_id)
+dedup) + v4 `usage_window_sample` + v5 `daily_usage` (durable >7d, seeded from legacy JSON);
+`src/shared/pricing.ts` multi-vendor table + `equivalentCostUsd`; `usage-recorder.ts`,
+`usage-reconciler.ts`, `usage-aggregation.ts` (block grouping + WLS math extracted verbatim),
+`usage-provider.ts` (per-account, subscription-gated windows). **opencode live-records** per message;
+**Claude is NOT live-recorded** (streaming usage is approximate — review caught a per-frame `+=`
+overcount; Claude rows come from block-usage self-upserting its JSONL parse into `usage_event` on
+recalculate, so claude-session.ts is behavior-unchanged). **Dashboard → SQL:** blocks/daily/per-model/
+per-engine query `usage_event`/`daily_usage`. **WLS apiPercent sample source stays the in-memory ring
+buffer** (timing-dependent admission can't be DB-reproduced bit-identically → projection-drift risk;
+`usage_window_sample` populated for a future re-source). Equivalence tests guard SQL==old. **Verified
+live** (usage-wheel→Details): `usage_event` self-populates on launch (3191 rows), `daily_usage` seeded
+(137 days), Usage view renders blocks/per-model/timeline + the WLS Window Capacity projection identically.
+**Gotcha:** the daily chart now aggregates ALL engines (one-line filter reverts to Claude-only).
+
+## Next steps — V2 is feature-complete
+
+No plan phases remain. Open the stacked PR(s) (the Phase-5 gate — the whole opencode engine — is overdue).
+**Optional, non-blocking follow-ups** (all noted in code/docs): scope the opencode hosted-tools plugin to
+ClaudeUI-spawned servers (vs the global `~/.config/opencode/plugin/` install); coverage polish (foundation
+§9 — search match-list, structured web, single-diff, error renderer, configurable truncation); fully
+engine-neutral lifting of plan/question/todo/task (foundation 6 §7); WLS samples DB-sourced
+(`usage_window_sample` is ready); a daily-chart Claude-only filter; fold `FloatingApproval` into the
+shared `<ApprovalButtons>`. **To see opencode usage in the dashboard's "By Engine" section, run an
+opencode turn** (it records a `usage_event`; the section is empty only because no opencode turn has run).
 
 ## Gotchas / conventions (carry these forward)
 
