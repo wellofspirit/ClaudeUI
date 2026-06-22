@@ -265,6 +265,22 @@ export interface SandboxSettings {
 export interface EngineConfig {
   sandbox?: SandboxSettings
   proxy?: ProxySettings
+  /** opencode auto-mode (LLM permission gatekeeper) settings. See ADR-023. */
+  autoMode?: AutoModeConfig
+}
+
+/**
+ * opencode auto-mode (`full` autonomy) LLM permission-gatekeeper config (ADR-023).
+ * Only consumed by the opencode engine; Claude uses cli.js's own classifier.
+ */
+export interface AutoModeConfig {
+  /** Master switch. When false, `full` falls back to human approval prompts
+   *  (the interim gated-like-default behavior). Defaults to true. */
+  enabled?: boolean
+  /** `providerID/modelID` for the judge. Defaults to the session's own model. */
+  judgeModel?: string
+  /** Two-stage classifier mode. Defaults to 'both'. */
+  twoStageMode?: 'both' | 'fast' | 'thinking'
 }
 
 export interface VendorConfig {

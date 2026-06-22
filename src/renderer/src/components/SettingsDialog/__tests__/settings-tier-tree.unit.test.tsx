@@ -59,6 +59,14 @@ describe('NAV_GROUPS tier tree structure', () => {
       expect(sectionIds).toContain('sandbox')
       expect(sectionIds).toContain('proxy')
     })
+
+    it('has an opencode child with the auto-mode section', () => {
+      const engines = NAV_GROUPS.find((g) => g.id === 'engines')
+      const opencode = engines?.children?.find((c) => c.id === 'engine-opencode')
+      expect(opencode).toBeDefined()
+      expect(opencode?.label).toBe('opencode')
+      expect(opencode?.sections.map((s) => s.id)).toContain('opencode-automode')
+    })
   })
 
   describe('Vendors group', () => {

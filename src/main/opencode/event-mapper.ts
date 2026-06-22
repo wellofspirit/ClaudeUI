@@ -1,6 +1,7 @@
 import { v4 as uuid } from 'uuid'
 import type { OpencodeEvent } from './protocol/types'
 import type { ChatMessage, ContentBlock, PendingApproval, SessionResult } from '../../shared/types'
+import { suggestOpencodeAllowRule } from './permission-compiler'
 
 // Phase 6: the 5c tool-name normalization hack (OPENCODE_TOOL_NAME_MAP /
 // normalizeOpencodeToolName, which rewrote the hosted-tools plugin names to the
@@ -169,11 +170,18 @@ export function mapEvent(
       const tool = props.tool as { messageID?: string; callID?: string } | undefined
       if (!id || !permission) return { kind: 'ignore' }
 
+      // Offer an "always allow" suggestion (Claude addRules form) so the dialog
+      // can persist a rule for this tool/pattern. patterns carries the matched
+      // argument(s) (command / path / subagent type). See ADR-022 write-back.
+      const patterns = props.patterns as string[] | undefined
+      const suggestion = suggestOpencodeAllowRule(permission, patterns)
+
       const approval: PendingApproval = {
         requestId: id,
         toolUseId: tool?.callID,
         toolName: permission,
-        input: (props.metadata as Record<string, unknown>) ?? {}
+        input: (props.metadata as Record<string, unknown>) ?? {},
+        ...(suggestion ? { suggestions: [suggestion] } : {})
       }
       return { kind: 'approval', approval }
     }

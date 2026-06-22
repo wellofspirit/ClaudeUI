@@ -423,5 +423,7 @@ ADRs live in `docs/adr/`. See `docs/adr/adr.md` for the index.
 | 019 | opencode engine backend — multi-vendor meta-harness replaces Codex as second backend               | Accepted              |
 | 020 | V2 persistence + config-plane — per-session ModelRef, engine config, account attribution           | Accepted              |
 | 021 | V2 auth / account model — EngineAuthProvider abstraction, multi-account per engine                 | Accepted              |
+| 022 | opencode permission model — autonomy-mode → last-match-wins ruleset mapping                        | Accepted              |
+| 023 | opencode auto-mode — LLM permission gatekeeper (parity w/ Claude), configurable judge model        | Accepted              |
 
 When a design or implementation decision is made during a conversation, prompt the user about whether it should be recorded as a new ADR entry. When adding a new ADR, proactively scan existing ADRs to check if the new decision supersedes or conflicts with a previous one — if so, update the old ADR's status to "Superseded by ADR-XXX" and note it in the new ADR.

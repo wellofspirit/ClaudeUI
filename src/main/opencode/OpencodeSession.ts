@@ -11,8 +11,10 @@ import type {
   SessionStatus,
   ApprovalDecision,
   PermissionSuggestion,
+  PendingApproval,
   AccountRef,
-  MeteringSnapshot
+  MeteringSnapshot,
+  AutoModeConfig
 } from '../../shared/types'
 import { opencodeModel } from '../../shared/types'
 import { equivalentCostUsd } from '../../shared/pricing'
@@ -21,6 +23,15 @@ import { mapEvent, extractToolResult } from './event-mapper'
 import type { MapperOutput, MessageAccumulator } from './event-mapper'
 import { opencodeAuthProvider } from '../auth/OpencodeAuthProvider'
 import { recordUsageEvent } from '../services/usage-recorder'
+import { loadClaudePermissions, saveClaudePermissions } from '../services/claude-settings'
+import {
+  compileClaudeRulesToOpencode,
+  suggestionDestinationToScope,
+  suggestionRuleToClaudeString
+} from './permission-compiler'
+import { classify, isAutoModeFastPathAllowed, type JudgeFn } from './auto-mode-classifier'
+import { loadEngineConfig } from '../services/ui-config'
+import type { ClaudePermissions, PermissionScope } from '../../shared/types'
 
 // Permission ruleset helper
 type PermissionAction = 'allow' | 'ask' | 'deny'
@@ -31,8 +42,77 @@ interface PermissionRule {
   action: PermissionAction
 }
 
-function buildRuleset(action: PermissionAction): PermissionRule[] {
-  return [{ permission: '*', pattern: '*', action }]
+/**
+ * Map a neutral autonomy mode → an opencode session permission ruleset.
+ *
+ * opencode permissions are an ORDERED rule array evaluated LAST-MATCH-WINS
+ * (verified against 1.17.9), where `permission` is a tool/category name
+ * (`*`, `edit`, `bash`, `webfetch`, `task`, `read`, `glob`, `grep`, …) and
+ * `pattern` matches the tool argument. Read-class tools (`read`/`glob`/`grep`/
+ * `list`) and `task` are allow-by-default — they only prompt if we make them.
+ *
+ * We therefore start from a permissive `{*:allow}` baseline (mirroring how
+ * opencode's own built-in agents are structured) and LAYER mode-specific
+ * `ask`/`deny` overrides for the write-class tools on top. This preserves
+ * Claude-equivalent semantics — reads + `task` auto-allowed; edits/bash/webfetch
+ * gated — instead of the old wildcard `{*:* ask|allow}` that forced EVERY tool
+ * (including `task`, which hung the turn) to prompt and clobbered opencode's
+ * own protections. See ADR-022.
+ *
+ * `mode` is the Claude-style permission-mode string the renderer already speaks
+ * (autonomy plan→'plan', ask→'default', autoEdit→'acceptEdits', full→'auto').
+ */
+function buildRuleset(mode: string): PermissionRule[] {
+  const allowAll: PermissionRule = { permission: '*', pattern: '*', action: 'allow' }
+  const rule = (permission: string, action: PermissionAction): PermissionRule => ({
+    permission,
+    pattern: '*',
+    action
+  })
+  // Portable subset of opencode's own built-in guards (its agents keep these even
+  // in permissive mode): a doom-loop ask + secret-file read protection. Layered
+  // after the `{*:allow}` baseline (last-match-wins). We omit opencode's
+  // `external_directory` guard — its safe form needs an env-specific allow-list
+  // for opencode's own tool-output/temp dirs, so a bare `{external_directory:ask}`
+  // would spuriously prompt on opencode's internal writes. See ADR-022.
+  const guards: PermissionRule[] = [
+    { permission: 'doom_loop', pattern: '*', action: 'ask' },
+    { permission: 'read', pattern: '*.env', action: 'ask' },
+    { permission: 'read', pattern: '*.env.*', action: 'ask' },
+    { permission: 'read', pattern: '*.env.example', action: 'allow' }
+  ]
+  switch (mode) {
+    case 'acceptEdits':
+    case 'autoEdit':
+      // Auto-accept file edits; still gate command execution + network fetch.
+      return [allowAll, ...guards, rule('bash', 'ask'), rule('webfetch', 'ask')]
+    case 'plan':
+      // Read-only planning. Pairs with opencode's `plan` agent (set in
+      // applyPermissionMode). Mirrors that agent's own rules (verified in the
+      // opencode source — plan = merge(base, { edit:{'*':deny, …plan files…},
+      // task:{general:deny} })): deny edits, and deny ONLY the mutating
+      // `general` subagent. Read-only subagents (e.g. `explore`) stay allowed
+      // via the baseline, so plan-mode research/`task` still works. `deny`
+      // refuses without prompting → no approval round-trip, no hang.
+      // (We don't reproduce opencode's plan-file edit allow-list — minor.)
+      return [allowAll, ...guards, rule('edit', 'deny'), { permission: 'task', pattern: 'general', action: 'deny' }]
+    case 'auto':
+    case 'full':
+    case 'default':
+    case 'ask':
+    default:
+      // Claude default — read-only autonomy + ask for write-class tools.
+      //
+      // `full`/`auto` are INTENTIONALLY gated identically to `default` for now.
+      // ClaudeUI's `full` autonomy maps to Claude's `auto` permission mode — an
+      // LLM-gated "security monitor", NOT `bypassPermissions`. We haven't ported
+      // that gatekeeper to opencode yet, so a raw `{*:allow}` here would make
+      // opencode `full` strictly LESS safe than Claude `full`. Interim: gate
+      // `full` like `default` (never less safe than Claude) until the classifier
+      // lands, at which point `full` switches risky tools to classifier-decided.
+      // See ADR-022.
+      return [allowAll, ...guards, rule('edit', 'ask'), rule('bash', 'ask'), rule('webfetch', 'ask')]
+  }
 }
 
 /** Parse "providerID/modelID" → { providerID, modelID } */
@@ -72,6 +152,9 @@ export class OpencodeSession extends BaseSession {
   // prior messages; the DB UNIQUE(message_id) already dedups, this just avoids
   // the repeated round-trips on long sessions).
   private recordedUsageMessageIds = new Set<string>()
+  // Auto-mode (full) LLM gatekeeper state (ADR-023).
+  private _autoModeConfig: AutoModeConfig | undefined
+  private autoDenials = { consecutive: 0, total: 0 }
 
   constructor(
     routingId: string,
@@ -267,7 +350,14 @@ export class OpencodeSession extends BaseSession {
 
       case 'approval':
         this.pendingApprovals.set(output.approval.requestId, true)
-        this.send('session:approval-request', output.approval)
+        // Auto mode (full): route to the LLM gatekeeper instead of the human;
+        // fall back to a human prompt on uncertain/unavailable/cap. Otherwise
+        // emit the approval to the UI as normal. See ADR-023.
+        if (this.isAutoMode(this.permissionMode)) {
+          void this.handleAutoModeApproval(output.approval)
+        } else {
+          this.send('session:approval-request', output.approval)
+        }
         break
 
       case 'result':
@@ -326,21 +416,51 @@ export class OpencodeSession extends BaseSession {
     requestId: string,
     decision: ApprovalDecision,
     _answers?: Record<string, string>,
-    _updatedPermissions?: PermissionSuggestion[]
+    updatedPermissions?: PermissionSuggestion[]
   ): void {
     this.pendingApprovals.delete(requestId)
     if (!this.client) return
 
-    const reply =
-      decision === 'allow'
-        ? ('once' as const)
-        : decision === 'allowForSession'
-          ? ('always' as const)
-          : ('reject' as const)
+    const allow = decision === 'allow' || decision === 'allowForSession'
+    // "always allow" = the user checked persist-rule suggestions in the dialog.
+    const persist = allow && !!updatedPermissions && updatedPermissions.length > 0
+    // 'always' tells opencode to remember the allow for this session; we send it
+    // for an explicit allowForSession OR when the user checked "always allow".
+    const reply = !allow ? 'reject' : persist || decision === 'allowForSession' ? 'always' : 'once'
 
     this.client.replyPermission(requestId, reply).catch((err) => {
       logger.warn('OpencodeSession', `replyPermission failed: ${err instanceof Error ? err.message : String(err)}`)
     })
+
+    // Persist the rule to the shared store so it recompiles onto opencode next
+    // spawn + shows in PermissionsDialog (session + shared store — ADR-022).
+    if (persist) this.persistAllowRules(updatedPermissions!)
+  }
+
+  /** Write "always allow" suggestions to the shared Claude permission store. */
+  private persistAllowRules(suggestions: PermissionSuggestion[]): void {
+    try {
+      const byScope = new Map<'user' | 'project' | 'local', string[]>()
+      for (const s of suggestions) {
+        if (s.type !== 'addRules' || s.behavior !== 'allow' || !s.rules) continue
+        const scope = suggestionDestinationToScope(s.destination)
+        if (!scope) continue // 'session' → opencode's 'always' reply already covers it
+        const arr = byScope.get(scope) ?? []
+        for (const r of s.rules) arr.push(suggestionRuleToClaudeString(r))
+        byScope.set(scope, arr)
+      }
+      for (const [scope, ruleStrings] of byScope) {
+        const perms = loadClaudePermissions(scope, this.cwd)
+        const allowSet = new Set(perms.allow)
+        for (const r of ruleStrings) allowSet.add(r)
+        saveClaudePermissions(scope, { ...perms, allow: [...allowSet] }, this.cwd)
+      }
+    } catch (err) {
+      logger.warn(
+        'OpencodeSession',
+        `persisting allow rules failed: ${err instanceof Error ? err.message : String(err)}`
+      )
+    }
   }
 
   async setModel(model: string): Promise<void> {
@@ -359,19 +479,168 @@ export class OpencodeSession extends BaseSession {
 
   private async applyPermissionMode(mode: string): Promise<void> {
     if (!this.client || !this.openSessionId) return
-    if (mode === 'plan') {
-      // Plan mode: use opencode's plan agent
-      this.agent = 'plan'
-      // No permission ruleset change needed
-    } else {
-      this.agent = null
-      const action: PermissionAction = mode === 'auto' || mode === 'full' || mode === 'acceptEdits' ? 'allow' : 'ask'
+    // Plan mode additionally switches to opencode's read-only `plan` agent
+    // (its planning system prompt + plan_exit flow); all other modes use the
+    // default `build` agent. We ALWAYS patch a ruleset (including plan) so the
+    // session's effective permissions are deterministic and never inherit a
+    // stale override from a previous mode. See buildRuleset / ADR-022.
+    this.agent = mode === 'plan' ? 'plan' : null
+    // In auto mode (full + classifier enabled) we use the acceptEdits base so the
+    // ruleset auto-allows reads + edits and only bash/webfetch raise
+    // `permission.asked` → the classifier judges just those (the acceptEdits-
+    // equivalence fast-path, parity with cli.js). Classifier-disabled `full`
+    // falls through to buildRuleset('full') = the gated `default` (ADR-023).
+    const baseMode = this.isAutoMode(mode) ? 'acceptEdits' : mode
+    // Compose: autonomy-mode base ruleset + the user's neutral permission rules
+    // (Claude's allow/ask/deny + additionalDirectories) compiled to opencode and
+    // appended AFTER the base so they override it (last-match-wins). This makes
+    // the SAME configured rules apply to opencode as to Claude. See ADR-022.
+    const ruleset = [...buildRuleset(baseMode), ...this.compiledUserRules()]
+    try {
+      await this.client.patchSession(this.openSessionId, { permission: ruleset })
+    } catch (err) {
+      logger.warn('OpencodeSession', `patchSession failed: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+
+  /** Merge the user/project/local permission scopes and compile them to opencode
+   *  rules (allow→ask→deny). Best-effort: a load/parse failure yields no rules
+   *  rather than breaking the turn. */
+  private compiledUserRules(): ReturnType<typeof compileClaudeRulesToOpencode> {
+    try {
+      const scopes: PermissionScope[] = ['user', 'project', 'local']
+      const merged: ClaudePermissions = {
+        allow: [],
+        deny: [],
+        ask: [],
+        additionalDirectories: [],
+        defaultMode: undefined
+      }
+      for (const scope of scopes) {
+        const p = loadClaudePermissions(scope, this.cwd)
+        merged.allow.push(...p.allow)
+        merged.ask.push(...p.ask)
+        merged.deny.push(...p.deny)
+        merged.additionalDirectories.push(...p.additionalDirectories)
+      }
+      return compileClaudeRulesToOpencode(merged)
+    } catch (err) {
+      logger.warn(
+        'OpencodeSession',
+        `compiling user permission rules failed: ${err instanceof Error ? err.message : String(err)}`
+      )
+      return []
+    }
+  }
+
+  // ── Auto mode (full) LLM permission gatekeeper (ADR-023) ──────────────────
+
+  private autoModeConfig(): AutoModeConfig {
+    if (this._autoModeConfig === undefined) {
       try {
-        await this.client.patchSession(this.openSessionId, { permission: buildRuleset(action) })
-      } catch (err) {
-        logger.warn('OpencodeSession', `patchSession failed: ${err instanceof Error ? err.message : String(err)}`)
+        this._autoModeConfig = loadEngineConfig('opencode').autoMode ?? {}
+      } catch {
+        this._autoModeConfig = {}
       }
     }
+    return this._autoModeConfig
+  }
+
+  /** Auto mode is active for `full`/`auto` autonomy unless explicitly disabled. */
+  private isAutoMode(mode: string): boolean {
+    return (mode === 'full' || mode === 'auto') && this.autoModeConfig().enabled !== false
+  }
+
+  /** A JudgeFn backed by a fresh, stateless opencode judge session per call
+   *  (so the judge never accumulates prior Q&As; we trade cache for correctness).
+   *  Judge model defaults to the session's own model (ADR-023), override via config. */
+  private makeJudgeFn(): JudgeFn | null {
+    const client = this.client
+    if (!client) return null
+    const parsed = parseModelString(this.autoModeConfig().judgeModel ?? this._model)
+    return async (system, user) => {
+      const js = await client.createSession({ title: 'auto-mode-judge' })
+      try {
+        const resp = (await client.prompt(js.id, {
+          model: { providerID: parsed.providerID, modelID: parsed.modelID },
+          system,
+          parts: [{ type: 'text', text: user }]
+        })) as { parts?: Array<{ type?: string; text?: string }> }
+        return (resp?.parts ?? [])
+          .filter((p) => p?.type === 'text')
+          .map((p) => p?.text ?? '')
+          .join('')
+      } finally {
+        client.deleteSession(js.id).catch(() => {})
+      }
+    }
+  }
+
+  private async handleAutoModeApproval(approval: PendingApproval): Promise<void> {
+    const category = approval.toolName
+    // Fast-path: read-only/safe tools never need the judge.
+    if (isAutoModeFastPathAllowed(category)) {
+      this.autoReply(approval.requestId, 'once')
+      return
+    }
+    const judge = this.makeJudgeFn()
+    if (!judge) {
+      this.fallbackToHuman(approval)
+      return
+    }
+    try {
+      const result = await classify(
+        {
+          messages: this.messageHistory,
+          action: { toolName: category, input: approval.input },
+          environment: `cwd: ${this.cwd}`,
+          twoStageMode: this.autoModeConfig().twoStageMode ?? 'both'
+        },
+        judge
+      )
+      logger.info(
+        'OpencodeSession',
+        `auto-mode ${result.block ? 'BLOCK' : 'allow'} (stage=${result.stage}) ${category}` +
+          (result.reason ? ` — ${result.reason}` : '')
+      )
+      if (result.unavailable) {
+        this.fallbackToHuman(approval)
+        return
+      }
+      if (result.block) {
+        this.autoDenials.consecutive++
+        this.autoDenials.total++
+        // Denial caps (parity 3/20): too many blocks → hand control to the human.
+        if (this.autoDenials.consecutive >= 3 || this.autoDenials.total >= 20) {
+          this.autoDenials.consecutive = 0
+          this.fallbackToHuman(approval)
+          return
+        }
+        this.autoReply(approval.requestId, 'reject')
+      } else {
+        this.autoDenials.consecutive = 0
+        this.autoReply(approval.requestId, 'once')
+      }
+    } catch (err) {
+      logger.warn(
+        'OpencodeSession',
+        `auto-mode classify failed: ${err instanceof Error ? err.message : String(err)}`
+      )
+      this.fallbackToHuman(approval)
+    }
+  }
+
+  /** Resolve a pending approval programmatically (the classifier's decision). */
+  private autoReply(requestId: string, reply: 'once' | 'reject'): void {
+    this.pendingApprovals.delete(requestId)
+    this.client?.replyPermission(requestId, reply).catch((err) => {
+      logger.warn('OpencodeSession', `replyPermission failed: ${err instanceof Error ? err.message : String(err)}`)
+    })
+  }
+
+  /** Classifier couldn't decide (unavailable / cap / error) → ask the human. */
+  private fallbackToHuman(approval: PendingApproval): void {
+    this.send('session:approval-request', approval)
   }
 
   sendStatus(): void {

@@ -54,7 +54,7 @@ function renderToolBlock(
     return <TodoToolBlock key={key} block={block} result={result} />
   }
   if (kind === 'task') {
-    return <TaskCard key={key} block={block} result={result} />
+    return <TaskCard key={key} block={block} result={result} approval={approval} />
   }
 
   // Passive kinds → ToolCallBlock host → ToolCard + kind body

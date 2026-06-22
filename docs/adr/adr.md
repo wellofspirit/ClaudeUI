@@ -23,3 +23,5 @@
 | [019](adr-019_opencode-engine-backend.md)                         | opencode engine backend — shared HTTP/SSE server, legacy API, tool maps *(supersedes 017)*          |
 | [020](adr-020_v2-persistence-and-config-plane.md)                 | V2 persistence & config-plane — files for config, SQLite for operational data *(amends 009/011)*    |
 | [021](adr-021_neutral-auth-account-model.md)                      | Neutral auth/account model — EngineAuthProvider, per-vendor probe *(amends 014/015)*                |
+| [022](adr-022_opencode-permission-mapping.md)                     | opencode permission model — autonomy-mode → last-match-wins ruleset mapping *(relates to 018/019)*  |
+| [023](adr-023_opencode-automode-classifier.md)                    | opencode auto-mode — LLM permission gatekeeper, configurable judge model *(relates to 022)* |

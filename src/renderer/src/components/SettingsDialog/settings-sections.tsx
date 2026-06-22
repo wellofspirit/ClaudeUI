@@ -11,7 +11,9 @@ import type {
   VendorConfig,
   SandboxSettings,
   VendorAuthMap,
-  VendorAuthOption
+  VendorAuthOption,
+  AutoModeConfig,
+  ModelInfo
 } from '../../../../shared/types'
 import { VOICE_LANGUAGES } from '../../../../shared/types'
 import {
@@ -27,7 +29,8 @@ import {
   SettingsSelect,
   SettingsTextarea,
   SandboxListSetting,
-  ChatRetentionSetting
+  ChatRetentionSetting,
+  InfoTooltip
 } from './settings-controls'
 
 // ── Section definitions ──────────────────────────────────────────────
@@ -399,6 +402,106 @@ function AutonomyModePicker(): React.JSX.Element {
           </label>
         ))}
       </div>
+    </div>
+  )
+}
+
+// ── opencode auto-mode (Full) LLM gatekeeper settings (ADR-023) ──────
+
+const TWO_STAGE_OPTIONS: { value: 'both' | 'fast' | 'thinking'; label: string }[] = [
+  { value: 'both', label: 'Both' },
+  { value: 'fast', label: 'Fast' },
+  { value: 'thinking', label: 'Thinking' }
+]
+
+/**
+ * Self-contained (loads/saves its own opencode EngineConfig via window.api —
+ * SettingsDialog only wires the 'claude' engine config). Configures the auto-mode
+ * LLM permission gatekeeper that runs in Full autonomy on opencode. See ADR-023.
+ */
+function OpencodeAutoModeSection(): React.JSX.Element {
+  const [engineCfg, setEngineCfg] = useState<EngineConfig | null>(null)
+  const [models, setModels] = useState<ModelInfo[]>([])
+  const [available, setAvailable] = useState(false)
+
+  useEffect(() => {
+    window.api
+      .loadEngineConfig('opencode')
+      .then(setEngineCfg)
+      .catch(() => setEngineCfg({}))
+    window.api
+      .getEngineModels()
+      .then((groups) => {
+        const oc = groups.filter((g) => g.engineId === 'opencode')
+        setAvailable(oc.length > 0)
+        setModels(oc.flatMap((g) => g.models))
+      })
+      .catch(() => {})
+  }, [])
+
+  if (engineCfg === null) {
+    return <div className="px-3 py-1.5 text-[13px] text-text-muted">Loading…</div>
+  }
+  if (!available) {
+    return (
+      <div className="px-3 py-2 text-[12px] text-text-muted/70 leading-relaxed">
+        opencode is not installed. Auto mode gates risky tool calls for opencode sessions in Full
+        autonomy.
+      </div>
+    )
+  }
+
+  const auto = engineCfg.autoMode ?? {}
+  const enabled = auto.enabled !== false // default ON
+  const judgeModel = auto.judgeModel ?? ''
+  const twoStageMode = auto.twoStageMode ?? 'both'
+
+  const update = (patch: Partial<AutoModeConfig>): void => {
+    const next: EngineConfig = { ...engineCfg, autoMode: { ...auto, ...patch } }
+    setEngineCfg(next)
+    window.api.saveEngineConfig('opencode', next).catch(() => {})
+  }
+
+  return (
+    <div className="space-y-1">
+      <SettingsToggle
+        label="Auto mode (LLM gatekeeper)"
+        checked={enabled}
+        onChange={(v) => update({ enabled: v })}
+        tooltip="In Full autonomy, an LLM judges each risky tool call (bash / web fetch) instead of prompting you; reads and edits are auto-allowed. Fails closed to a human prompt when unsure or unavailable. When off, Full prompts you like Ask mode. See ADR-023."
+      />
+      {enabled && (
+        <>
+          <div className="px-3 py-1.5 text-[13px] text-text-secondary">
+            <div className="mb-1 flex items-center gap-1">
+              Judge model
+              <InfoTooltip text="The model that decides allow/block. Defaults to the session's own model. Pick a cheaper model to reduce cost, or a stronger one for safety-critical work." />
+            </div>
+            <select
+              value={judgeModel}
+              onChange={(e) => update({ judgeModel: e.target.value || undefined })}
+              className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors"
+            >
+              <option value="">Same as session model (default)</option>
+              {models.map((m) => (
+                <option key={m.value} value={m.value}>
+                  {m.displayName || m.value}
+                </option>
+              ))}
+            </select>
+          </div>
+          <SettingsSelect
+            label="Two-stage judging"
+            value={twoStageMode}
+            options={TWO_STAGE_OPTIONS}
+            onChange={(v) => update({ twoStageMode: v })}
+          />
+          <div className="px-3 pb-1 text-[10px] text-text-muted/50 leading-relaxed">
+            Applies to Full autonomy on opencode. The judge sees tool calls, not their output. No
+            per-turn call cap (parity with Claude) — pick a cheaper judge model if cost matters.
+          </div>
+        </>
+      )}
     </div>
   )
 }
@@ -2237,6 +2340,25 @@ export const SECTIONS: Section[] = [
         )
       }
     ]
+  },
+  {
+    id: 'opencode-automode',
+    label: 'Auto mode',
+    icon: (
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+        <path d="M9 12l2 2 4-4" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'opencodeAutoMode',
+        label: 'Auto mode',
+        keywords:
+          'opencode auto mode full autonomy classifier gatekeeper judge llm permission bash security monitor',
+        render: () => <OpencodeAutoModeSection />
+      }
+    ]
   }
 ]
 
@@ -2252,6 +2374,9 @@ const APP_SECTION_IDS = new Set([
 const ENGINE_CLAUDE_SECTION_IDS = new Set([
   'permissions', 'sandbox', 'proxy'
 ])
+
+/** Section ids that belong to Engines > opencode (content self-gates on install) */
+const ENGINE_OPENCODE_SECTION_IDS = new Set(['opencode-automode'])
 
 /** Section ids that belong to Vendors > Anthropic */
 const VENDOR_ANTHROPIC_SECTION_IDS = new Set([
@@ -2297,6 +2422,11 @@ export const NAV_GROUPS: NavGroup[] = [
         id: 'engine-claude',
         label: 'Claude',
         sections: getSectionsForIds(ENGINE_CLAUDE_SECTION_IDS)
+      },
+      {
+        id: 'engine-opencode',
+        label: 'opencode',
+        sections: getSectionsForIds(ENGINE_OPENCODE_SECTION_IDS)
       }
     ]
   },

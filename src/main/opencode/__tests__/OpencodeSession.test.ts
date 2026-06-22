@@ -37,6 +37,11 @@ const {
   mockPatchSession,
   mockReplyPermission,
   mockSubscribeEvents,
+  mockLoadClaudePermissions,
+  mockSaveClaudePermissions,
+  mockLoadEngineConfig,
+  mockPrompt,
+  mockDeleteSession,
   MockOpencodeClient
 } = vi.hoisted(() => {
   const mockAcquire = vi.fn()
@@ -47,6 +52,11 @@ const {
   const mockPatchSession = vi.fn()
   const mockReplyPermission = vi.fn()
   const mockSubscribeEvents = vi.fn()
+  const mockLoadClaudePermissions = vi.fn()
+  const mockSaveClaudePermissions = vi.fn()
+  const mockLoadEngineConfig = vi.fn()
+  const mockPrompt = vi.fn()
+  const mockDeleteSession = vi.fn()
 
   // Constructor mock — we build the instance here so clearAllMocks doesn't
   // kill the implementation.
@@ -61,6 +71,11 @@ const {
     mockPatchSession,
     mockReplyPermission,
     mockSubscribeEvents,
+    mockLoadClaudePermissions,
+    mockSaveClaudePermissions,
+    mockLoadEngineConfig,
+    mockPrompt,
+    mockDeleteSession,
     MockOpencodeClient
   }
 })
@@ -74,6 +89,19 @@ vi.mock('../OpencodeServerManager', () => ({
 
 vi.mock('../OpencodeClient', () => ({
   OpencodeClient: MockOpencodeClient
+}))
+
+// Permission rules are loaded from Claude's settings; mock so the ruleset tests
+// are hermetic (no dependence on the dev's ~/.claude/settings.json). Default =
+// empty rules; individual tests override mockLoadClaudePermissions.
+vi.mock('../../services/claude-settings', () => ({
+  loadClaudePermissions: mockLoadClaudePermissions,
+  saveClaudePermissions: mockSaveClaudePermissions
+}))
+
+// Engine config drives auto-mode (full); mock so tests control it hermetically.
+vi.mock('../../services/ui-config', () => ({
+  loadEngineConfig: mockLoadEngineConfig
 }))
 
 // ---------------------------------------------------------------------------
@@ -99,6 +127,24 @@ function setupMocks(): void {
   mockPatchSession.mockReset()
   mockReplyPermission.mockReset()
   mockSubscribeEvents.mockReset()
+  mockLoadClaudePermissions.mockReset()
+  mockSaveClaudePermissions.mockReset()
+  mockLoadEngineConfig.mockReset()
+  mockPrompt.mockReset()
+  mockDeleteSession.mockReset()
+  // Default: no user-configured rules (hermetic — don't read the dev's settings).
+  mockLoadClaudePermissions.mockReturnValue({
+    allow: [],
+    deny: [],
+    ask: [],
+    additionalDirectories: [],
+    defaultMode: undefined
+  })
+  // Default engine config: auto-mode DISABLED (so the existing ruleset/lifecycle
+  // tests keep the interim 'gate full like default' behavior). Auto-mode tests
+  // override this to enable + set a judge model.
+  mockLoadEngineConfig.mockReturnValue({ autoMode: { enabled: false } })
+  mockDeleteSession.mockResolvedValue(undefined)
 
   // Set default implementations
   mockAcquire.mockResolvedValue({ baseUrl: 'http://127.0.0.1:9999', authHeader: 'Basic test' })
@@ -118,6 +164,8 @@ function setupMocks(): void {
     return {
       createSession: mockCreateSession,
       promptAsync: mockPromptAsync,
+      prompt: mockPrompt,
+      deleteSession: mockDeleteSession,
       abortSession: mockAbortSession,
       patchSession: mockPatchSession,
       replyPermission: mockReplyPermission,
@@ -484,6 +532,298 @@ describe('OpencodeSession — usage_event recording', () => {
     // Row exists exactly once (DB dedups + the recordedUsageMessageIds guard).
     const row = getUsageEventByMessageId('msg_once')!
     expect(row.outputTokens).toBe(10)
+    session.dispose()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Permission mode → opencode ruleset mapping (ADR-022)
+//
+// opencode permissions are an ordered LAST-MATCH-WINS rule array. We layer
+// per-mode `ask`/`deny` overrides on a `{*:allow}` baseline so reads + `task`
+// stay auto-allowed (no prompt → no hang) while write-class tools are gated.
+// These pin the exact ruleset emitted via patchSession + the agent selection.
+// ---------------------------------------------------------------------------
+
+interface Rule {
+  permission: string
+  pattern: string
+  action: string
+}
+
+const ALLOW_ALL: Rule = { permission: '*', pattern: '*', action: 'allow' }
+// Portable opencode guards restored after the baseline (doom-loop + secret-file reads).
+const GUARDS: Rule[] = [
+  { permission: 'doom_loop', pattern: '*', action: 'ask' },
+  { permission: 'read', pattern: '*.env', action: 'ask' },
+  { permission: 'read', pattern: '*.env.*', action: 'ask' },
+  { permission: 'read', pattern: '*.env.example', action: 'allow' }
+]
+
+describe('OpencodeSession — permission mode → ruleset mapping (ADR-022)', () => {
+  beforeEach(setupMocks)
+
+  /** Run a turn in the given mode and return the ruleset handed to patchSession. */
+  async function rulesetFor(mode: string): Promise<Rule[]> {
+    const session = makeSession(undefined, mode)
+    await session.run('hi')
+    const lastPatch = mockPatchSession.mock.calls.at(-1)
+    session.dispose()
+    return (lastPatch?.[1] as { permission: Rule[] }).permission
+  }
+
+  it('default/ask → reads + task auto-allowed; edit/bash/webfetch ask (no task gate → no hang)', async () => {
+    const rs = await rulesetFor('default')
+    expect(rs).toEqual([
+      ALLOW_ALL,
+      ...GUARDS,
+      { permission: 'edit', pattern: '*', action: 'ask' },
+      { permission: 'bash', pattern: '*', action: 'ask' },
+      { permission: 'webfetch', pattern: '*', action: 'ask' }
+    ])
+    // Regression for the subagent hang: `task` must NOT be forced to ask.
+    expect(rs.some((r) => r.permission === 'task')).toBe(false)
+  })
+
+  it('acceptEdits → edits auto; bash/webfetch still ask', async () => {
+    expect(await rulesetFor('acceptEdits')).toEqual([
+      ALLOW_ALL,
+      ...GUARDS,
+      { permission: 'bash', pattern: '*', action: 'ask' },
+      { permission: 'webfetch', pattern: '*', action: 'ask' }
+    ])
+  })
+
+  it('auto/full are INTERIM-gated like default (not raw allow-all) until the classifier lands', async () => {
+    // ClaudeUI `full` → Claude `auto` (LLM-gated), NOT bypassPermissions. Until
+    // we port that gatekeeper to opencode, `full`/`auto` must not be less safe
+    // than `default` — so they emit the same gated ruleset.
+    const dflt = await rulesetFor('default')
+    expect(await rulesetFor('full')).toEqual(dflt)
+    expect(await rulesetFor('auto')).toEqual(dflt)
+    // Specifically: NOT a bare allow-all.
+    expect(await rulesetFor('full')).not.toEqual([ALLOW_ALL])
+  })
+
+  it('secret-file reads are guarded in the gated modes', async () => {
+    const dflt = await rulesetFor('default')
+    expect(dflt).toContainEqual({ permission: 'read', pattern: '*.env', action: 'ask' })
+    expect(await rulesetFor('acceptEdits')).toContainEqual({ permission: 'read', pattern: '*.env', action: 'ask' })
+  })
+
+  it('plan → deny edits + ONLY the general subagent (explore/research task still works); selects plan agent', async () => {
+    const session = makeSession(undefined, 'plan')
+    await session.run('hi')
+    const rs = (mockPatchSession.mock.calls.at(-1)?.[1] as { permission: Rule[] }).permission
+    // Mirrors opencode's built-in plan agent: edit denied, task denied for the
+    // `general` subagent ONLY (read-only subagents stay allowed via baseline).
+    expect(rs).toEqual([
+      ALLOW_ALL,
+      ...GUARDS,
+      { permission: 'edit', pattern: '*', action: 'deny' },
+      { permission: 'task', pattern: 'general', action: 'deny' }
+    ])
+    // Regression for the over-restriction: there must be NO blanket task deny.
+    expect(rs.some((r) => r.permission === 'task' && r.pattern === '*')).toBe(false)
+    expect(mockPromptAsync.mock.calls.at(-1)?.[1]?.agent).toBe('plan')
+    session.dispose()
+  })
+
+  it('non-plan modes use the default build agent (no agent override)', async () => {
+    const session = makeSession(undefined, 'default')
+    await session.run('hi')
+    expect(mockPromptAsync.mock.calls.at(-1)?.[1]?.agent).toBeUndefined()
+    session.dispose()
+  })
+
+  it('appends the user’s configured rules (compiled) AFTER the base ruleset', async () => {
+    // user scope returns one allow + one deny; project/local empty.
+    mockLoadClaudePermissions.mockImplementation((scope: string) =>
+      scope === 'user'
+        ? { allow: ['Bash(git diff:*)'], deny: ['Edit(secrets/**)'], ask: [], additionalDirectories: [], defaultMode: undefined }
+        : { allow: [], deny: [], ask: [], additionalDirectories: [], defaultMode: undefined }
+    )
+    const rs = await rulesetFor('default')
+    // base ruleset comes first…
+    expect(rs[0]).toEqual(ALLOW_ALL)
+    // …then the compiled user rules are appended (so they override the base).
+    expect(rs).toContainEqual({ permission: 'bash', pattern: 'git diff*', action: 'allow' })
+    // deny is emitted last so it wins under last-match-wins.
+    expect(rs[rs.length - 1]).toEqual({ permission: 'edit', pattern: 'secrets/**', action: 'deny' })
+    // all three scopes are consulted.
+    expect(mockLoadClaudePermissions).toHaveBeenCalledWith('user', expect.any(String))
+    expect(mockLoadClaudePermissions).toHaveBeenCalledWith('project', expect.any(String))
+    expect(mockLoadClaudePermissions).toHaveBeenCalledWith('local', expect.any(String))
+  })
+
+  it('switching plan → default re-patches deterministically (no stale override)', async () => {
+    const session = makeSession(undefined, 'plan')
+    await session.run('hi') // establishes openSessionId so setPermissionMode patches
+    await session.setPermissionMode('default')
+    const rs = (mockPatchSession.mock.calls.at(-1)?.[1] as { permission: Rule[] }).permission
+    expect(rs.find((r) => r.permission === 'edit')?.action).toBe('ask')
+    expect(rs.some((r) => r.permission === 'task')).toBe(false)
+    session.dispose()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Always-allow write-back (ADR-022): resolveApproval → reply 'always' + persist
+// the rule to the shared Claude permission store so it recompiles next spawn.
+// ---------------------------------------------------------------------------
+
+describe('OpencodeSession — always-allow write-back (ADR-022)', () => {
+  beforeEach(setupMocks)
+
+  async function started(): Promise<OpencodeSession> {
+    const session = makeSession()
+    await session.run('hi') // sets client + openSessionId
+    return session
+  }
+
+  it('allow without suggestions → replyPermission(once), no persist', async () => {
+    const session = await started()
+    session.resolveApproval('per-1', 'allow')
+    expect(mockReplyPermission).toHaveBeenCalledWith('per-1', 'once')
+    expect(mockSaveClaudePermissions).not.toHaveBeenCalled()
+    session.dispose()
+  })
+
+  it('allow WITH always-allow suggestions → replyPermission(always) + persists to shared store', async () => {
+    const session = await started()
+    const suggestions = [
+      { type: 'addRules', behavior: 'allow', destination: 'localSettings', rules: [{ toolName: 'Bash', ruleContent: 'echo hi' }] }
+    ]
+    session.resolveApproval('per-2', 'allow', undefined, suggestions as never)
+    expect(mockReplyPermission).toHaveBeenCalledWith('per-2', 'always')
+    expect(mockSaveClaudePermissions).toHaveBeenCalledWith(
+      'local',
+      expect.objectContaining({ allow: expect.arrayContaining(['Bash(echo hi)']) }),
+      expect.any(String)
+    )
+    session.dispose()
+  })
+
+  it('deny → replyPermission(reject), no persist', async () => {
+    const session = await started()
+    session.resolveApproval('per-3', 'deny')
+    expect(mockReplyPermission).toHaveBeenCalledWith('per-3', 'reject')
+    expect(mockSaveClaudePermissions).not.toHaveBeenCalled()
+    session.dispose()
+  })
+
+  it('session-scoped suggestions are NOT written to the store (opencode native always covers it)', async () => {
+    const session = await started()
+    const suggestions = [
+      { type: 'addRules', behavior: 'allow', destination: 'session', rules: [{ toolName: 'Bash', ruleContent: 'ls' }] }
+    ]
+    session.resolveApproval('per-4', 'allow', undefined, suggestions as never)
+    expect(mockReplyPermission).toHaveBeenCalledWith('per-4', 'always')
+    expect(mockSaveClaudePermissions).not.toHaveBeenCalled()
+    session.dispose()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Auto-mode (full) LLM gatekeeper wiring (ADR-023). Auto-mode is enabled via the
+// engine-config mock; a permission.asked event is fed through the SSE consumer.
+// ---------------------------------------------------------------------------
+
+describe('OpencodeSession — auto-mode classifier wiring (ADR-023)', () => {
+  beforeEach(setupMocks)
+
+  const SES = 'ses_auto_1'
+
+  function enableAutoMode(extra: Record<string, unknown> = {}): void {
+    mockLoadEngineConfig.mockReturnValue({ autoMode: { enabled: true, twoStageMode: 'fast', ...extra } })
+    mockCreateSession.mockResolvedValue({ id: SES })
+  }
+
+  function feedPermissionAsked(permission: string, id = 'per_a', callID = 'c1'): void {
+    mockSubscribeEvents.mockImplementation(async function* () {
+      yield {
+        id: 'e1',
+        type: 'permission.asked',
+        properties: { sessionID: SES, id, permission, patterns: ['x'], tool: { callID } }
+      } as OpencodeEvent
+    })
+  }
+
+  it('full + enabled → acceptEdits base ruleset (edits auto; only bash/webfetch ask → classified)', async () => {
+    enableAutoMode()
+    const session = makeSession(undefined, 'full')
+    await session.run('go')
+    const rs = (mockPatchSession.mock.calls.at(-1)?.[1] as { permission: { permission: string; action: string }[] })
+      .permission
+    expect(rs.some((r) => r.permission === 'bash' && r.action === 'ask')).toBe(true)
+    expect(rs.some((r) => r.permission === 'webfetch' && r.action === 'ask')).toBe(true)
+    // edits are auto-allowed (no edit:ask rule) — they never reach the classifier.
+    expect(rs.some((r) => r.permission === 'edit')).toBe(false)
+    session.dispose()
+  })
+
+  it('classifier ALLOW → replyPermission(once)', async () => {
+    enableAutoMode()
+    mockPrompt.mockResolvedValue({ parts: [{ type: 'text', text: '<block>no</block>' }] })
+    feedPermissionAsked('bash', 'per_allow')
+    const session = makeSession(undefined, 'full')
+    await session.run('go')
+    await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('per_allow', 'once'))
+    expect(mockPrompt).toHaveBeenCalled()
+    session.dispose()
+  })
+
+  it('classifier BLOCK → replyPermission(reject)', async () => {
+    enableAutoMode()
+    mockPrompt.mockResolvedValue({ parts: [{ type: 'text', text: '<block>yes</block>' }] })
+    feedPermissionAsked('bash', 'per_block')
+    const session = makeSession(undefined, 'full')
+    await session.run('go')
+    await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('per_block', 'reject'))
+    session.dispose()
+  })
+
+  it('read-only fast-path → allow WITHOUT calling the judge', async () => {
+    enableAutoMode()
+    feedPermissionAsked('read', 'per_read')
+    const session = makeSession(undefined, 'full')
+    await session.run('go')
+    await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('per_read', 'once'))
+    expect(mockPrompt).not.toHaveBeenCalled()
+    session.dispose()
+  })
+
+  it('fail-closed: judge error → fall back to human (session:approval-request), no auto-reply', async () => {
+    enableAutoMode()
+    mockPrompt.mockRejectedValue(new Error('judge down'))
+    feedPermissionAsked('bash', 'per_fail')
+    const win = new MockWindow() as unknown as BrowserWindow
+    const session = new OpencodeSession('r_fail', win, '/tmp', undefined, undefined, 'full')
+    await session.run('go')
+    await vi.waitFor(() => {
+      const sent = (win as unknown as MockWindow).webContents.send.mock.calls.some(
+        (c) => c[0] === 'session:approval-request'
+      )
+      expect(sent).toBe(true)
+    })
+    expect(mockReplyPermission).not.toHaveBeenCalledWith('per_fail', 'reject')
+    session.dispose()
+  })
+
+  it('disabled auto-mode in full → emits approval to the human (no judge call)', async () => {
+    mockLoadEngineConfig.mockReturnValue({ autoMode: { enabled: false } })
+    mockCreateSession.mockResolvedValue({ id: SES })
+    feedPermissionAsked('bash', 'per_disabled')
+    const win = new MockWindow() as unknown as BrowserWindow
+    const session = new OpencodeSession('r_dis', win, '/tmp', undefined, undefined, 'full')
+    await session.run('go')
+    await vi.waitFor(() => {
+      const sent = (win as unknown as MockWindow).webContents.send.mock.calls.some(
+        (c) => c[0] === 'session:approval-request'
+      )
+      expect(sent).toBe(true)
+    })
+    expect(mockPrompt).not.toHaveBeenCalled()
     session.dispose()
   })
 })

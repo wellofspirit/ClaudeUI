@@ -1,8 +1,9 @@
 import { useState, useMemo } from 'react'
-import type { ContentBlock } from '../../../../shared/types'
+import type { ContentBlock, PendingApproval, PermissionSuggestion } from '../../../../shared/types'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
 import { MarkdownRenderer } from './MarkdownRenderer'
 import { SubagentMessages } from './SubagentMessages'
+import { ApprovalButtons } from './ApprovalButtons'
 
 type ToolUseBlock = Extract<ContentBlock, { type: 'tool_use' }>
 type ToolResultBlock = Extract<ContentBlock, { type: 'tool_result' }>
@@ -10,6 +11,16 @@ type ToolResultBlock = Extract<ContentBlock, { type: 'tool_result' }>
 interface Props {
   block: ToolUseBlock
   result?: ToolResultBlock
+  /**
+   * Pending approval for THIS task tool call, matched by toolUseId in
+   * MessageBubble. opencode (and any engine that gates the subagent-spawning
+   * tool) raises a `permission.asked` for the `task` tool itself; without
+   * rendering the decision here the subagent is never spawned and the turn
+   * hangs forever with no actionable UI (FloatingApproval excludes it because
+   * the toolUseId matches a rendered tool_use block). Mirrors the
+   * plan/question lifted cards, which also consume `approval`.
+   */
+  approval?: PendingApproval
 }
 
 export interface ParsedUsage {
@@ -63,9 +74,11 @@ export function formatTokens(n: number): string {
   return String(n)
 }
 
-export function TaskCard({ block, result }: Props): React.JSX.Element {
+export function TaskCard({ block, result, approval }: Props): React.JSX.Element {
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const taskProgressMap = useActiveSession((s) => s.taskProgressMap)
+  const removePendingApproval = useSessionStore((s) => s.removePendingApproval)
+  const permissionMode = useActiveSession((s) => s.permissionMode)
   const openTaskPanel = useSessionStore((s) => s.openTaskPanel)
   const subagentMsgs = useActiveSession((s) => s.subagentMessages)
   const subagentText = useActiveSession((s) => s.subagentStreamingText)
@@ -115,11 +128,14 @@ export function TaskCard({ block, result }: Props): React.JSX.Element {
       }
     : parsedUsage
 
-  const borderColor = isRunning
-    ? 'border-accent/30'
-    : isError
-      ? 'border-danger/30'
-      : 'border-success/30'
+  const isPendingApproval = !!approval
+  const borderColor = isPendingApproval
+    ? 'border-warning/40'
+    : isRunning
+      ? 'border-accent/30'
+      : isError
+        ? 'border-danger/30'
+        : 'border-success/30'
 
   const isCompleted = !isRunning && !isError
   const isStopping = stoppingTaskIds.includes(toolUseId)
@@ -136,6 +152,21 @@ export function TaskCard({ block, result }: Props): React.JSX.Element {
       window.api.logError('TaskCard', `Failed to background task: ${bgResult.error}`)
       setIsBackgrounding(false)
     }
+  }
+
+  const handleApproval = async (
+    decision: 'allow' | 'deny',
+    selectedSuggestions?: PermissionSuggestion[]
+  ): Promise<void> => {
+    if (!approval || !activeSessionId) return
+    await window.api.respondApproval(
+      activeSessionId,
+      approval.requestId,
+      decision,
+      undefined,
+      selectedSuggestions
+    )
+    removePendingApproval(activeSessionId, approval.requestId)
   }
 
   const handleStopTask = async (): Promise<void> => {
@@ -234,7 +265,7 @@ export function TaskCard({ block, result }: Props): React.JSX.Element {
             sending to background…
           </span>
         )}
-        {isRunning && !isStopping && !isHistorical && (
+        {isRunning && !isStopping && !isHistorical && !isPendingApproval && (
           <button
             onClick={(e) => {
               e.stopPropagation()
@@ -401,6 +432,17 @@ export function TaskCard({ block, result }: Props): React.JSX.Element {
             </div>
           )}
         </>
+      )}
+
+      {/* Pending approval — opencode (ask mode) gates the `task` tool itself.
+          Render the decision inline so the subagent can actually be spawned;
+          without this the turn hangs with no actionable UI. */}
+      {isPendingApproval && (
+        <ApprovalButtons
+          approval={approval!}
+          permissionMode={permissionMode}
+          onApproval={handleApproval}
+        />
       )}
     </div>
   )

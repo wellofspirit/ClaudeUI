@@ -191,6 +191,45 @@ describe('mapEvent — permission.asked', () => {
       expect(out.approval.toolUseId).toBe('call_1')
     }
   })
+
+  it('attaches an "always allow" suggestion derived from the matched pattern', () => {
+    const ev = makeEvent('permission.asked', {
+      sessionID: SESSION_ID,
+      id: 'perm_2',
+      permission: 'bash',
+      patterns: ['echo hi'],
+      tool: { callID: 'call_2' }
+    })
+    const out = mapEvent(ev, SESSION_ID, new Map(), START_TIME, { value: 0 })
+    if (out.kind === 'approval') {
+      expect(out.approval.suggestions).toEqual([
+        {
+          type: 'addRules',
+          behavior: 'allow',
+          destination: 'localSettings',
+          rules: [{ toolName: 'Bash', ruleContent: 'echo hi' }]
+        }
+      ])
+    } else {
+      throw new Error('expected approval')
+    }
+  })
+
+  it('omits suggestions for an unmappable permission category', () => {
+    const ev = makeEvent('permission.asked', {
+      sessionID: SESSION_ID,
+      id: 'perm_3',
+      permission: 'doom_loop',
+      patterns: ['*'],
+      tool: { callID: 'call_3' }
+    })
+    const out = mapEvent(ev, SESSION_ID, new Map(), START_TIME, { value: 0 })
+    if (out.kind === 'approval') {
+      expect(out.approval.suggestions).toBeUndefined()
+    } else {
+      throw new Error('expected approval')
+    }
+  })
 })
 
 describe('mapEvent — session.idle', () => {
