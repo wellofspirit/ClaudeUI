@@ -6,10 +6,11 @@
 
 ## TL;DR — where we are
 
-**9 phases done and pushed; Phase 5 (the whole opencode engine) is COMPLETE (5a+5b+5c).** Next up:
-**Phase 6** (tool registry). The whole V2 is being built as **stacked branches on `origin`**, one
-per phase, each reviewed + verified + committed before the next. **The plan's PR review gate after
-Phase 5 (the opencode MVP) is now due** — open it, or keep building 6 (the user's call).
+**10 phases done and pushed; Phase 6 (tool-kind registry) just landed.** Next up: **Phase 7
+(metering) — the LAST V2 plan phase.** The whole V2 is being built as **stacked branches on
+`origin`**, one per phase, each reviewed + verified + committed before the next. **The plan's PR
+review gate after Phase 5 (the opencode MVP) is now overdue** — open it, or keep building 7 (the
+user's call).
 
 | Phase | What | Branch (pushed) | Status |
 | --- | --- | --- | --- |
@@ -22,13 +23,13 @@ Phase 5 (the opencode MVP) is now due** — open it, or keep building 6 (the use
 | 5a | opencode infra: `ensure-opencode` + `OpencodeServerManager` + v1 HTTP/SSE `OpencodeClient` + smoke | `v2-phase-5a-opencode-server` | ✅ |
 | 5b | opencode chat MVP: `OpencodeSession` + event mapper + grouped model picker + approvals | `v2-phase-5b-opencode-chat` | ✅ |
 | 5c | `OpencodeAuthProvider` (per-vendor auth) + hosted-tools opencode plugin (mermaid/mockup) | `v2-phase-5c-opencode-auth-mcp` | ✅ |
-| **6** | **Tool registry (`ToolKind` taxonomy + renderer registry)** (see Next steps) | — | ⬜ **next** |
-| 7 | Metering (usage recorder, pricing, dashboard → SQL) | — | ⬜ |
+| 6 | Tool-kind registry (`ToolCard` + kind bodies + `EngineToolMap`s, ApprovalButtons extracted) | `v2-phase-6-tool-registry` | ✅ |
+| **7** | **Metering (usage recorder, pricing, dashboard → SQL)** (see Next steps) — LAST plan phase | — | ⬜ **next** |
 
-Branches are stacked: each off the previous (`5c` off `5b` off `5a` off `4` off `3b` off `3a` off `2`
-off `1` off `0` off `codex-sup`). **No PRs opened yet** — the plan's review gates are after Phase 1
-(passed) and Phase 5. **Phase 5 is now complete (5a+5b+5c), so the Phase-5 PR gate is due** (or keep
-building Phase 6 — the user's call). Base/integration branch is `codex-sup` (where the V2 design lives).
+Branches are stacked: each off the previous (`6` off `5c` off `5b` off `5a` off `4` off `3b` off `3a`
+off `2` off `1` off `0` off `codex-sup`). **No PRs opened yet** — the plan's review gates are after
+Phase 1 (passed) and Phase 5. **Phase 5 is complete, so the Phase-5 PR gate is overdue** (or keep
+building Phase 7, the last plan phase — the user's call). Base/integration branch is `codex-sup`.
 
 ## The workflow (follow this exactly)
 
@@ -100,15 +101,28 @@ load — only the auto-load dirs do**; **opencode's plugin loader rejects any no
 plugin's mockup writes; opencode `session.error` shape = `{name, data:{providerID,message}}`. The hosted
 plugin installs **globally** (affects standalone opencode too) — a config-dir-scoping follow-up is possible.
 
-## Next steps — Phase 6 (tool registry)
+## What Phase 6 shipped (done — see `phase-6-tool-registry.md`)
 
-- `ToolKind` taxonomy + a `TOOL_RENDERERS` registry; unify the three tool dispatch sites
-  (`MessageBubble.tsx` + `ToolCallBlock/View.tsx` special-cases); a shared `ToolCard` shell + extracted
-  `<ApprovalButtons>`; port existing cards (mermaid/mockup/todo/task/exit-plan/ask-question) to kinds
-  (behavior-preserving for Claude). opencode tools currently render via name-normalization + the generic
-  block — Phase 6 makes that first-class. Lift `question`/`plan`/`todo` to the interaction layer.
-- Then **7** (metering — opencode `info.tokens`/`cost` are already parsed in the 5b mapper; the recorder
-  + pricing + dashboard→SQL land here).
+The 3 hardcoded Claude-name dispatch sites collapsed into ONE kind-based registry. `ToolKind`/`ToolView`/
+`EngineToolMap` (`src/shared/tool-kinds.ts`); `ToolCallBlock/View.tsx` decomposed → `<ToolCard>` shell +
+kind bodies (`tool-registry/kinds/`, verbatim code-moves of the diff/code/terminal/bash-streaming
+rendering); `<ApprovalButtons>` extracted (3×→1); Claude + opencode `EngineToolMap`s (kindOf+normalize→
+ToolView); the 5c mapper name-normalization hack retired (renderer classifies raw opencode names).
+**Behavior-preserving for Claude — app-shot confirmed the bash/terminal card is pixel-identical.** Lifted
+kinds (plan/question/todo/task) still route to their existing components (full neutral lifting deferred).
+**Gotcha:** the first agent pass under-delivered (a kind-dispatch *facade*, ToolCallBlock still name-
+switching) — the real decomposition needs ToolCard + kind bodies consuming ToolView. **Deferred (§9):**
+coverage polish (search match-list, structured web, single-diff, configurable truncation), FloatingApproval
+dedup, engine-neutral lifting. opencode-render end-to-end is unit-verified only (app-shot can't type a prompt).
+
+## Next steps — Phase 7 (metering — LAST plan phase)
+
+- `usage_event` recorder (live events) + ongoing backfill reconciler (Claude JSONL scan; opencode via
+  API — `info.tokens`/`cost` are already parsed in the 5b mapper) + an internal pricing table (external
+  models.dev opt-in) + **equivalent API cost** as the primary metric + subscription windows behind the
+  per-account usage provider (Claude provider = ADR-011 logic) + the usage dashboard rewired to SQL
+  queries (the DB substrate from Phase 3a; add the `usage_event` table via the migrations framework).
+  Foundation: `docs/v2/05-metering-usage.md` + ADR-020. After 7, V2 is feature-complete.
 
 ## Gotchas / conventions (carry these forward)
 
