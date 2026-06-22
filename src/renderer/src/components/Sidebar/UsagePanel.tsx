@@ -30,6 +30,11 @@ export function formatPlanName(tier: string | null): string {
     const plan = m[1].charAt(0).toUpperCase() + m[1].slice(1)
     return m[2] ? `${plan} ${m[2]}` : plan
   }
+  // Bare subscription_type from the structured usage shape: 'pro' | 'max' |
+  // 'team' | 'enterprise'. Title-case it for display.
+  if (/^(pro|max|team|enterprise)$/i.test(tier)) {
+    return tier.charAt(0).toUpperCase() + tier.slice(1).toLowerCase()
+  }
   return tier
 }
 

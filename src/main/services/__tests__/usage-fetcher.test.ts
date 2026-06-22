@@ -45,9 +45,22 @@ function defaultUsage(): AccountUsage {
   }
 }
 
+// Mirror of UsageFetcher.parseResponse (this file replicates pure logic by
+// convention). Accepts both the flat /api/oauth/usage HTTP body and the
+// structured `get_usage` SDK-relay shape (windows nested under rate_limits).
 function parseResponse(data: Record<string, unknown>): AccountUsage {
+  const isStructured = 'rate_limits' in data || 'rate_limits_available' in data
+  const rateLimits =
+    isStructured && data.rate_limits && typeof data.rate_limits === 'object'
+      ? (data.rate_limits as Record<string, unknown>)
+      : null
+  const windowSource: Record<string, unknown> = isStructured ? (rateLimits ?? {}) : data
+
   const parseWindow = (key: string): RateWindow | null => {
-    const w = data[key] as { utilization?: number; resets_at?: string } | undefined
+    const w = windowSource[key] as
+      | { utilization?: number | null; resets_at?: string | null }
+      | undefined
+      | null
     if (!w || typeof w.utilization !== 'number') return null
     return {
       usedPercent: w.utilization,
@@ -58,7 +71,7 @@ function parseResponse(data: Record<string, unknown>): AccountUsage {
   const fiveHour = parseWindow('five_hour')
 
   let extraUsage: ExtraUsage | null = null
-  const eu = data['extra_usage'] as
+  const eu = windowSource['extra_usage'] as
     | {
         is_enabled?: boolean
         monthly_limit?: number | null
@@ -76,13 +89,15 @@ function parseResponse(data: Record<string, unknown>): AccountUsage {
     }
   }
 
+  const planName = typeof data.subscription_type === 'string' ? data.subscription_type : null
+
   return {
     fiveHour: fiveHour ?? { usedPercent: 0, resetsAt: null },
     sevenDay: parseWindow('seven_day'),
     sevenDaySonnet: parseWindow('seven_day_sonnet'),
     sevenDayOpus: parseWindow('seven_day_opus'),
     extraUsage,
-    planName: null,
+    planName,
     fetchedAt: Date.now(),
     error: null
   }
@@ -235,6 +250,74 @@ describe('parseResponse', () => {
     })
     expect(result.fiveHour.usedPercent).toBe(0) // fallback
     expect(result.sevenDay).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Structured `get_usage` shape (SDK-relay fallback).
+//
+// cli.js v2.1.177 added a native `get_usage` control that supersedes the
+// usage-relay patch. Its response nests the rate-limit windows (and
+// extra_usage) under `rate_limits`, and adds session / subscription_type /
+// behaviors / rate_limits_available. parseResponse must read windows from
+// `rate_limits` for this shape — the old flat-shape parser silently produced
+// 0% (the "API response missing five_hour utilization" warning the user hit).
+// ---------------------------------------------------------------------------
+
+describe('parseResponse — structured get_usage shape', () => {
+  const structured = (rateLimits: Record<string, unknown> | null) => ({
+    session: { total_cost_usd: 1.23, model_usage: {} },
+    subscription_type: 'team',
+    rate_limits_available: rateLimits !== null,
+    rate_limits: rateLimits,
+    behaviors: null
+  })
+
+  it('reads windows nested under rate_limits', () => {
+    const result = parseResponse(
+      structured({
+        five_hour: { utilization: 5, resets_at: '2026-06-22T11:59:59Z' },
+        seven_day: { utilization: 32, resets_at: '2026-06-25T10:59:59Z' },
+        seven_day_sonnet: { utilization: 8, resets_at: '2026-06-25T10:59:59Z' },
+        seven_day_opus: null
+      })
+    )
+    expect(result.fiveHour.usedPercent).toBe(5)
+    expect(result.fiveHour.resetsAt).toBe('2026-06-22T11:59:59Z')
+    expect(result.sevenDay!.usedPercent).toBe(32)
+    expect(result.sevenDaySonnet!.usedPercent).toBe(8)
+    expect(result.sevenDayOpus).toBeNull()
+    expect(result.error).toBeNull()
+  })
+
+  it('maps subscription_type to planName', () => {
+    const result = parseResponse(structured({ five_hour: { utilization: 5 } }))
+    expect(result.planName).toBe('team')
+  })
+
+  it('parses extra_usage nested under rate_limits', () => {
+    const result = parseResponse(
+      structured({
+        five_hour: { utilization: 5 },
+        extra_usage: { is_enabled: true, monthly_limit: 20000, used_credits: 0, utilization: null }
+      })
+    )
+    expect(result.extraUsage).not.toBeNull()
+    expect(result.extraUsage!.isEnabled).toBe(true)
+    expect(result.extraUsage!.monthlyLimit).toBe(20000)
+  })
+
+  it('defaults to 0% (without crashing) when rate_limits is null — API-key / 3P sessions', () => {
+    const result = parseResponse(structured(null))
+    expect(result.fiveHour.usedPercent).toBe(0)
+    expect(result.fiveHour.resetsAt).toBeNull()
+    expect(result.sevenDay).toBeNull()
+    expect(result.planName).toBe('team')
+  })
+
+  it('utilization stays 0-100 verbatim (no fraction conversion)', () => {
+    const result = parseResponse(structured({ five_hour: { utilization: 50, resets_at: null } }))
+    expect(result.fiveHour.usedPercent).toBe(50) // not 5000, not 0.5
   })
 })
 
