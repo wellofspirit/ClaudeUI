@@ -3,8 +3,6 @@ import {
   mapEvent,
   buildChatMessage,
   extractToolResult,
-  normalizeOpencodeToolName,
-  OPENCODE_TOOL_NAME_MAP,
   type MessageAccumulator
 } from '../event-mapper'
 import type { OpencodeEvent } from '../protocol/types'
@@ -374,37 +372,13 @@ describe('buildChatMessage', () => {
   })
 })
 
-// ── Hosted-tools plugin tool-name normalization (Phase 5c Part B) ────────────
+// ── Hosted-tools plugin tool names — RAW pass-through (Phase 6) ───────────────
+// Phase 6 retired the 5c name-normalization hack (OPENCODE_TOOL_NAME_MAP). The
+// mapper now emits the RAW opencode tool name; the renderer's OpencodeEngineToolMap
+// classifies render_mermaid→diagram, create_mockup/show_mockup→mockup, bash→command.
 
-describe('normalizeOpencodeToolName', () => {
-  it('maps render_mermaid → mcp__claude-ui__render_mermaid', () => {
-    expect(normalizeOpencodeToolName('render_mermaid')).toBe('mcp__claude-ui__render_mermaid')
-  })
-
-  it('maps create_mockup → mcp__claude-ui-mockup__create_mockup', () => {
-    expect(normalizeOpencodeToolName('create_mockup')).toBe('mcp__claude-ui-mockup__create_mockup')
-  })
-
-  it('maps show_mockup → mcp__claude-ui-mockup__show_mockup', () => {
-    expect(normalizeOpencodeToolName('show_mockup')).toBe('mcp__claude-ui-mockup__show_mockup')
-  })
-
-  it('passes through unmapped tool names unchanged', () => {
-    expect(normalizeOpencodeToolName('bash')).toBe('bash')
-    expect(normalizeOpencodeToolName('read')).toBe('read')
-  })
-
-  it('OPENCODE_TOOL_NAME_MAP has exactly the three hosted tools', () => {
-    expect(Object.keys(OPENCODE_TOOL_NAME_MAP).sort()).toEqual([
-      'create_mockup',
-      'render_mermaid',
-      'show_mockup'
-    ])
-  })
-})
-
-describe('buildChatMessage — tool-name normalization', () => {
-  it('normalizes render_mermaid in tool_use block, preserving callID + toolInput', () => {
+describe('buildChatMessage — raw tool names (no normalization)', () => {
+  it('keeps render_mermaid as the raw name, preserving callID + toolInput', () => {
     const acc: MessageAccumulator = {
       messageId: 'msg_m',
       partOrder: ['p1'],
@@ -425,16 +399,16 @@ describe('buildChatMessage — tool-name normalization', () => {
     const block = msg.content[0]
     expect(block.type).toBe('tool_use')
     if (block.type === 'tool_use') {
-      // toolName normalized to the canonical renderer name
-      expect(block.toolName).toBe('mcp__claude-ui__render_mermaid')
+      // RAW name preserved — the renderer's OpencodeEngineToolMap maps it to 'diagram'
+      expect(block.toolName).toBe('render_mermaid')
       // callID / toolUseId preserved
       expect(block.toolUseId).toBe('call_abc')
-      // toolInput untouched (arg names already match the renderer)
+      // toolInput untouched (arg names already match the diagram body)
       expect(block.toolInput).toEqual({ source: 'graph TD; A-->B;', title: 'Flow' })
     }
   })
 
-  it('normalizes create_mockup + show_mockup tool names', () => {
+  it('keeps create_mockup + show_mockup as raw names', () => {
     const acc: MessageAccumulator = {
       messageId: 'msg_n',
       partOrder: ['p1', 'p2'],
@@ -445,10 +419,7 @@ describe('buildChatMessage — tool-name normalization', () => {
     }
     const msg = buildChatMessage('msg_n', acc)
     const names = msg.content.map((b) => (b.type === 'tool_use' ? b.toolName : null))
-    expect(names).toEqual([
-      'mcp__claude-ui-mockup__create_mockup',
-      'mcp__claude-ui-mockup__show_mockup'
-    ])
+    expect(names).toEqual(['create_mockup', 'show_mockup'])
   })
 
   it('leaves a native opencode tool name (bash) unchanged', () => {

@@ -2,24 +2,12 @@ import { v4 as uuid } from 'uuid'
 import type { OpencodeEvent } from './protocol/types'
 import type { ChatMessage, ContentBlock, PendingApproval, SessionResult } from '../../shared/types'
 
-/**
- * Maps our hosted-tools opencode plugin tool names (Part B) to the canonical
- * `mcp__claude-ui*` names the renderer's cards dispatch on (ToolCallBlock/View.tsx).
- * Applied to the tool_use block's `toolName` only — callID/toolUseId and toolInput
- * are left untouched (the plugin's arg names already match: source/title, html/title,
- * directory). This makes the existing mermaid/mockup cards + `mockup-asset://`
- * serving work for opencode with ZERO renderer changes.
- */
-export const OPENCODE_TOOL_NAME_MAP: Record<string, string> = {
-  render_mermaid: 'mcp__claude-ui__render_mermaid',
-  create_mockup: 'mcp__claude-ui-mockup__create_mockup',
-  show_mockup: 'mcp__claude-ui-mockup__show_mockup'
-}
-
-/** Normalize a plugin tool name to its canonical renderer name (identity if unmapped). */
-export function normalizeOpencodeToolName(toolName: string): string {
-  return OPENCODE_TOOL_NAME_MAP[toolName] ?? toolName
-}
+// Phase 6: the 5c tool-name normalization hack (OPENCODE_TOOL_NAME_MAP /
+// normalizeOpencodeToolName, which rewrote the hosted-tools plugin names to the
+// canonical `mcp__claude-ui*` forms) is RETIRED. tool_use blocks now carry the
+// engine's RAW tool name (e.g. `bash`, `render_mermaid`); the renderer's
+// kind-keyed registry (OpencodeEngineToolMap.kindOf) maps them to diagram/mockup/
+// command/etc. and the engine-agnostic kind bodies render them.
 
 // ── Part accumulator ─────────────────────────────────────────────────────────
 
@@ -285,9 +273,10 @@ export function buildChatMessage(messageId: string, acc: MessageAccumulator): Ch
       content.push({
         type: 'tool_use',
         toolUseId,
-        // Normalize our hosted-tools plugin names → canonical renderer names so
-        // the mermaid/mockup cards render. callID/toolInput stay untouched.
-        toolName: normalizeOpencodeToolName(snap.toolName ?? 'unknown'),
+        // RAW opencode tool name — the renderer's OpencodeEngineToolMap classifies
+        // it to a ToolKind (bash→command, render_mermaid→diagram, …). callID +
+        // toolInput stay untouched (plugin arg names already match the bodies).
+        toolName: snap.toolName ?? 'unknown',
         toolInput: snap.state?.input ?? {}
       })
     }

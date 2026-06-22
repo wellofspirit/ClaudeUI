@@ -1,9 +1,11 @@
 /**
- * Layer 2: Component tests for ToolCallBlock FC.
+ * Layer 2: Component tests for the ToolCallBlock host FC.
  *
- * The FC lifts approval / background / stop / open-panel handlers from the
- * monolith and hands them to <ToolCallBlockView>. We mock the View to capture
- * props and verify the IPC + store side effects.
+ * Phase 6: the FC now renders the shared <ToolCard> shell (was <ToolCallBlockView>).
+ * It still lifts the approval / background / stop / open-panel handlers and hands
+ * them to the presentational layer. We mock ToolCard to capture props and verify
+ * the IPC + store side effects — every assertion's INTENT is unchanged from the
+ * pre-Phase-6 test; only the mocked component and props type moved.
  *
  * Tested flows:
  *   1. onApproval('allow') → respondApproval IPC + removePendingApproval
@@ -20,12 +22,12 @@ import { render, act } from '@testing-library/react'
 import { useSessionStore } from '../../../../stores/session-store'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
 import { makePendingApproval } from '@test/factories/messages'
-import type { ToolCallBlockViewProps } from '../View'
+import type { ToolCardProps } from '../../tool-registry/ToolCard'
 import type { ContentBlock, PermissionSuggestion } from '../../../../../../shared/types'
 
-let viewProps: ToolCallBlockViewProps
-vi.mock('../View', () => ({
-  ToolCallBlockView: (props: ToolCallBlockViewProps) => {
+let viewProps: ToolCardProps
+vi.mock('../../tool-registry/ToolCard', () => ({
+  ToolCard: (props: ToolCardProps) => {
     viewProps = props
     return null
   }

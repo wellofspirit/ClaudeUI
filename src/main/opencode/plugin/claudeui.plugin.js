@@ -5,10 +5,12 @@
  * (installed + version-stamped by ensureOpencodePlugin() — see ../ensure-plugin.ts).
  *
  * Registers three tools that mirror ClaudeUI's in-process MCP tools so the
- * existing renderer cards (ToolCallBlock/View.tsx) + the `mockup-asset://`
- * protocol serving work unchanged. The event-mapper normalizes the tool names
- * to the canonical `mcp__claude-ui*` forms (OPENCODE_TOOL_NAME_MAP), so the
- * arg names here MUST stay in sync with what the renderer reads:
+ * existing renderer cards (the diagram/mockup kind bodies) + the `mockup-asset://`
+ * protocol serving work unchanged. As of Phase 6 the renderer's
+ * OpencodeEngineToolMap classifies these RAW tool names to ToolKinds
+ * (render_mermaid→diagram, create_mockup/show_mockup→mockup) and its `normalize`
+ * reads the args below — so the arg names here MUST stay in sync with what the
+ * diagram/mockup bodies consume (source/title, directory/title):
  *   - render_mermaid : { source, title? }
  *   - create_mockup  : { html, title? }   → result text + on-disk layout MUST match mockup-tool.ts
  *   - show_mockup    : { directory }

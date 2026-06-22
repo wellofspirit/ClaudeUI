@@ -1,6 +1,5 @@
 import { memo, useState } from 'react'
 import type { ChatMessage, ContentBlock, PendingApproval } from '../../../../shared/types'
-import { isAgentTool } from '../../../../shared/types'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
 import { MarkdownRenderer } from './MarkdownRenderer'
 import { ToolCallBlock } from './ToolCallBlock'
@@ -9,9 +8,59 @@ import { AskUserQuestionBlock } from './AskUserQuestionBlock'
 import { ThinkingBlock } from './ThinkingBlock'
 import { TodoToolBlock } from './TodoToolBlock'
 import { TaskCard } from './TaskCard'
+import { hostedMcpKind } from '../../../../shared/tool-kinds'
+import type { EngineToolMap } from '../../../../shared/tool-kinds'
+import { engineToolMap } from './tool-registry/engine-tool-maps'
 
-const TODO_TOOLS = new Set(['TodoWrite'])
-const HIDDEN_TOOLS = new Set(['EnterPlanMode', 'TaskCreate', 'TaskUpdate', 'TaskList', 'TaskGet'])
+// ---------------------------------------------------------------------------
+// Unified tool-block dispatch
+// ---------------------------------------------------------------------------
+
+type ToolUseBlockForDispatch = Extract<ContentBlock, { type: 'tool_use' }>
+type ToolResultBlockForDispatch = Extract<ContentBlock, { type: 'tool_result' }>
+
+/**
+ * Unified tool-block renderer. Replaces the per-toolName switch that previously
+ * lived in each of MessageBubble's single + grouped render paths.
+ *
+ * Resolution order:
+ *   1. `hostedMcpKind` — engine-independent MCP tool classification
+ *   2. `toolMap.kindOf` — engine's own classification
+ *   3. Lifted kinds (plan/question/todo/task) → their interaction components
+ *   4. All passive kinds → ToolCallBlock (which computes the same kind + the
+ *      neutral ToolView and renders the shared ToolCard shell + kind body)
+ *
+ * The `toolMap.hidden` suppression has already been applied by the caller
+ * (filtered out before grouping). This function does NOT need to re-check it.
+ */
+function renderToolBlock(
+  toolMap: EngineToolMap,
+  block: ToolUseBlockForDispatch,
+  result: ToolResultBlockForDispatch | undefined,
+  approval: PendingApproval | undefined,
+  key: number | string
+): React.JSX.Element {
+  const kind = hostedMcpKind(block.toolName) ?? toolMap.kindOf(block.toolName)
+
+  // Lifted interaction components — route to their dedicated cards.
+  // These keep consuming block directly (fully engine-neutral lifting is a fast-follow).
+  if (kind === 'plan') {
+    return <ExitPlanModeCard key={key} block={block} approval={approval} />
+  }
+  if (kind === 'question') {
+    return <AskUserQuestionBlock key={key} block={block} result={result} approval={approval} />
+  }
+  if (kind === 'todo') {
+    return <TodoToolBlock key={key} block={block} result={result} />
+  }
+  if (kind === 'task') {
+    return <TaskCard key={key} block={block} result={result} />
+  }
+
+  // Passive kinds → ToolCallBlock host → ToolCard + kind body
+  // (command/fileEdit/fileWrite/fileRead/search/web/diagram/mockup/mcp/unknown).
+  return <ToolCallBlock key={key} block={block} result={result} approval={approval} />
+}
 
 interface MessageBubbleProps {
   message: ChatMessage
@@ -30,6 +79,7 @@ export const MessageBubble = memo(function MessageBubble({
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const forkFromMessage = useSessionStore((s) => s.forkFromMessage)
   const forkCapability = useActiveSession((s) => s.status.capabilities.forkFromMessage)
+  const engineId = useActiveSession((s) => s.status.engineId)
   const [forking, setForking] = useState(false)
 
   const handleFork = async (): Promise<void> => {
@@ -195,10 +245,12 @@ export const MessageBubble = memo(function MessageBubble({
     | { kind: 'other'; block: ContentBlock; index: number }
   const items: RenderItem[] = []
 
+  const toolMap = engineToolMap(engineId)
+
   const visible = message.content.filter(
     (b) =>
       b.type !== 'tool_result' &&
-      !(b.type === 'tool_use' && b.toolName && HIDDEN_TOOLS.has(b.toolName))
+      !(b.type === 'tool_use' && b.toolName && toolMap.hidden.has(b.toolName))
   )
   for (let i = 0; i < visible.length; i++) {
     const block = visible[i]
@@ -243,21 +295,7 @@ export const MessageBubble = memo(function MessageBubble({
           const { block, index } = item.blocks[0]
           const result = resultMap.get(block.toolUseId)
           const approval = approvalMap.get(block.toolUseId)
-          if (block.toolName === 'ExitPlanMode') {
-            return <ExitPlanModeCard key={index} block={block} approval={approval} />
-          }
-          if (block.toolName === 'AskUserQuestion') {
-            return (
-              <AskUserQuestionBlock key={index} block={block} result={result} approval={approval} />
-            )
-          }
-          if (TODO_TOOLS.has(block.toolName)) {
-            return <TodoToolBlock key={index} block={block} result={result} />
-          }
-          if (isAgentTool(block.toolName)) {
-            return <TaskCard key={index} block={block} result={result} />
-          }
-          return <ToolCallBlock key={index} block={block} result={result} approval={approval} />
+          return renderToolBlock(toolMap, block, result, approval, index)
         }
         // Multiple tool calls — wrap in bordered group
         return (
@@ -268,26 +306,7 @@ export const MessageBubble = memo(function MessageBubble({
             {item.blocks.map(({ block, index }) => {
               const result = block.toolUseId ? resultMap.get(block.toolUseId) : undefined
               const approval = block.toolUseId ? approvalMap.get(block.toolUseId) : undefined
-              if (block.toolName === 'ExitPlanMode') {
-                return <ExitPlanModeCard key={index} block={block} approval={approval} />
-              }
-              if (block.toolName === 'AskUserQuestion') {
-                return (
-                  <AskUserQuestionBlock
-                    key={index}
-                    block={block}
-                    result={result}
-                    approval={approval}
-                  />
-                )
-              }
-              if (TODO_TOOLS.has(block.toolName)) {
-                return <TodoToolBlock key={index} block={block} result={result} />
-              }
-              if (isAgentTool(block.toolName)) {
-                return <TaskCard key={index} block={block} result={result} />
-              }
-              return <ToolCallBlock key={index} block={block} result={result} approval={approval} />
+              return renderToolBlock(toolMap, block, result, approval, index)
             })}
           </div>
         )
