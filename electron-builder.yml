@@ -26,6 +26,13 @@ extraResources:
     filter:
       - opencode*
       - version.json
+  # Hosted-tools opencode plugin (Phase 5c Part B) — copied at runtime into
+  # ~/.config/opencode/plugin/ by ensureOpencodePlugin(). Shipped as a plain
+  # .js so opencode's Bun runtime loads it directly.
+  - from: src/main/opencode/plugin
+    to: opencode-plugin
+    filter:
+      - claudeui.plugin.js
   - from: out/web
     to: web
 asarUnpack:

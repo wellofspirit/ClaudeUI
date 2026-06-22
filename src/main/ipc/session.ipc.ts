@@ -70,7 +70,9 @@ import type {
   IpcResult,
   EngineId,
   EngineConfig,
-  VendorConfig
+  VendorConfig,
+  VendorAuthMap,
+  VendorAuthOption
 } from '../../shared/types'
 import { discoverOpencodeModels } from '../opencode/model-discovery'
 import { logger } from '../services/logger'
@@ -360,7 +362,13 @@ const SESSION_IPC_CHANNELS = [
   'voice:stop-server',
   'voice:start-recording',
   'voice:stop-recording',
-  'proxy:test-connection'
+  'proxy:test-connection',
+  'vendor-auth:probe',
+  'vendor-auth:list-options',
+  'vendor-auth:set-key',
+  'vendor-auth:oauth-authorize',
+  'vendor-auth:oauth-callback',
+  'vendor-auth:remove'
 ]
 
 // ---------------------------------------------------------------------------
@@ -1672,6 +1680,94 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
   ipcMain.handle('account:add', async () => claudeAuth.addAccount?.())
   ipcMain.handle('account:switch', async (_e, id: string) => claudeAuth.switchAccount?.(id))
   ipcMain.handle('account:delete', async (_e, id: string) => claudeAuth.deleteAccount?.(id))
+
+  // -------------------------------------------------------------------------
+  // Engine-routed per-vendor auth channels (opencode multi-vendor auth, Phase 5c)
+  // Each handler dispatches to engineAuthRegistry.require(engineId) and guards
+  // the optional per-vendor method — throws a clear error if the provider lacks it.
+  // Claude auth is unchanged: auth:* / account:* above stay byte-identical.
+  // -------------------------------------------------------------------------
+
+  ipcMain.handle(
+    'vendor-auth:probe',
+    safeHandler(async (_e: unknown, engineId: EngineId): Promise<VendorAuthMap> => {
+      const provider = engineAuthRegistry.require(engineId)
+      return provider.probe()
+    })
+  )
+
+  ipcMain.handle(
+    'vendor-auth:list-options',
+    safeHandler(
+      async (_e: unknown, engineId: EngineId): Promise<Record<string, VendorAuthOption[]>> => {
+        const provider = engineAuthRegistry.require(engineId)
+        if (!provider.listVendorAuthOptions) {
+          throw new Error(`Engine "${engineId}" does not support listVendorAuthOptions`)
+        }
+        return provider.listVendorAuthOptions()
+      }
+    )
+  )
+
+  ipcMain.handle(
+    'vendor-auth:set-key',
+    safeHandler(async (_e: unknown, engineId: EngineId, vendorId: string, key: string): Promise<void> => {
+      const provider = engineAuthRegistry.require(engineId)
+      if (!provider.setVendorApiKey) {
+        throw new Error(`Engine "${engineId}" does not support setVendorApiKey`)
+      }
+      return provider.setVendorApiKey(vendorId, key)
+    })
+  )
+
+  ipcMain.handle(
+    'vendor-auth:oauth-authorize',
+    safeHandler(
+      async (
+        _e: unknown,
+        engineId: EngineId,
+        vendorId: string,
+        method: number,
+        inputs?: Record<string, string>
+      ): Promise<{ url: string; method: 'auto' | 'code'; instructions: string }> => {
+        const provider = engineAuthRegistry.require(engineId)
+        if (!provider.oauthAuthorize) {
+          throw new Error(`Engine "${engineId}" does not support oauthAuthorize`)
+        }
+        return provider.oauthAuthorize(vendorId, method, inputs)
+      }
+    )
+  )
+
+  ipcMain.handle(
+    'vendor-auth:oauth-callback',
+    safeHandler(
+      async (
+        _e: unknown,
+        engineId: EngineId,
+        vendorId: string,
+        method: number,
+        code: string
+      ): Promise<boolean> => {
+        const provider = engineAuthRegistry.require(engineId)
+        if (!provider.oauthCallback) {
+          throw new Error(`Engine "${engineId}" does not support oauthCallback`)
+        }
+        return provider.oauthCallback(vendorId, method, code)
+      }
+    )
+  )
+
+  ipcMain.handle(
+    'vendor-auth:remove',
+    safeHandler(async (_e: unknown, engineId: EngineId, vendorId: string): Promise<void> => {
+      const provider = engineAuthRegistry.require(engineId)
+      if (!provider.removeVendorAuth) {
+        throw new Error(`Engine "${engineId}" does not support removeVendorAuth`)
+      }
+      return provider.removeVendorAuth(vendorId)
+    })
+  )
 
   // Mockup preview — read HTML from mockup directory
   ipcMain.handle(

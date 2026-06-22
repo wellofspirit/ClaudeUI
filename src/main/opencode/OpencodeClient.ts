@@ -83,6 +83,33 @@ export class OpencodeClient {
     return this.del(`/auth/${encodeURIComponent(providerId)}`)
   }
 
+  /**
+   * POST /provider/{providerID}/oauth/authorize
+   * Starts an OAuth flow for the provider. Returns the URL to open + method + instructions.
+   * `method` is the array index from GET /provider/auth.
+   */
+  oauthAuthorize(
+    providerId: string,
+    method: number,
+    inputs?: Record<string, string>
+  ): Promise<{ url: string; method: 'auto' | 'code'; instructions: string }> {
+    return this.post(`/provider/${encodeURIComponent(providerId)}/oauth/authorize`, {
+      method,
+      ...(inputs ? { inputs } : {})
+    })
+  }
+
+  /**
+   * POST /provider/{providerID}/oauth/callback
+   * Submit the paste code (method:'code' flow). Returns true on success.
+   */
+  oauthCallback(providerId: string, method: number, code: string): Promise<boolean> {
+    return this.post(`/provider/${encodeURIComponent(providerId)}/oauth/callback`, {
+      method,
+      code
+    })
+  }
+
   // ── Sessions ──────────────────────────────────────────────────────────────
 
   /** GET /session */

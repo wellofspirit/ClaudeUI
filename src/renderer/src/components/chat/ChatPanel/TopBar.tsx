@@ -310,7 +310,11 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
             </svg>
           </button>
         )}
-        {!isMobileCtx && cwd && canUseMcp && (
+        {/* MCP config dialog manages Claude's .mcp.json servers — Claude-native
+            config, not "hosted tools". Scoped to engineId==='claude' so flipping
+            opencode's hostedMcp capability (Phase 5c, for our injected plugin
+            tools) does NOT surface this Claude-only config UI for opencode. */}
+        {!isMobileCtx && cwd && canUseMcp && engineId === 'claude' && (
           <button
             onClick={() => setMcpOpen(true)}
             className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[12px] text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"

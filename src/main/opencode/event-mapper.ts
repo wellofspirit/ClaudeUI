@@ -2,6 +2,25 @@ import { v4 as uuid } from 'uuid'
 import type { OpencodeEvent } from './protocol/types'
 import type { ChatMessage, ContentBlock, PendingApproval, SessionResult } from '../../shared/types'
 
+/**
+ * Maps our hosted-tools opencode plugin tool names (Part B) to the canonical
+ * `mcp__claude-ui*` names the renderer's cards dispatch on (ToolCallBlock/View.tsx).
+ * Applied to the tool_use block's `toolName` only — callID/toolUseId and toolInput
+ * are left untouched (the plugin's arg names already match: source/title, html/title,
+ * directory). This makes the existing mermaid/mockup cards + `mockup-asset://`
+ * serving work for opencode with ZERO renderer changes.
+ */
+export const OPENCODE_TOOL_NAME_MAP: Record<string, string> = {
+  render_mermaid: 'mcp__claude-ui__render_mermaid',
+  create_mockup: 'mcp__claude-ui-mockup__create_mockup',
+  show_mockup: 'mcp__claude-ui-mockup__show_mockup'
+}
+
+/** Normalize a plugin tool name to its canonical renderer name (identity if unmapped). */
+export function normalizeOpencodeToolName(toolName: string): string {
+  return OPENCODE_TOOL_NAME_MAP[toolName] ?? toolName
+}
+
 // ── Part accumulator ─────────────────────────────────────────────────────────
 
 /**
@@ -50,6 +69,7 @@ export type MapperOutput =
   | { kind: 'approval'; approval: PendingApproval }
   | { kind: 'result'; result: Pick<SessionResult, 'totalCostUsd' | 'durationMs' | 'result'> & { sessionId: string | null } }
   | { kind: 'cost_update'; totalCostUsd: number }
+  | { kind: 'error'; message: string }
   | { kind: 'ignore' }
 
 // ── Mapper ────────────────────────────────────────────────────────────────────
@@ -165,6 +185,26 @@ export function mapEvent(
       }
     }
 
+    case 'session.error': {
+      // Map opencode session.error → session:error.
+      // ProviderAuthError surfaces as a re-login hint so the user knows to re-auth.
+      // Wire shape (verified vs 1.17.9 /doc): properties.error =
+      //   { name: 'ProviderAuthError'|'UnknownError'|…, data: { providerID?, message } }
+      const err = props.error as { name?: string; data?: Record<string, unknown> } | undefined
+      const name = err?.name
+      const data = err?.data ?? {}
+      let errorMsg: string
+      if (name === 'ProviderAuthError') {
+        const vendor = (data.providerID as string | undefined) ?? ''
+        errorMsg = vendor
+          ? `Authentication required for ${vendor}. Re-authorize in Settings › Vendors or run \`opencode auth login\` in a terminal.`
+          : 'Authentication required. Re-authorize in Settings › Vendors or run `opencode auth login` in a terminal.'
+      } else {
+        errorMsg = (data.message as string | undefined) ?? 'An error occurred'
+      }
+      return { kind: 'error', message: errorMsg }
+    }
+
     case 'message.updated': {
       const info = props.info as Record<string, unknown> | undefined
       if (!info) return { kind: 'ignore' }
@@ -245,7 +285,9 @@ export function buildChatMessage(messageId: string, acc: MessageAccumulator): Ch
       content.push({
         type: 'tool_use',
         toolUseId,
-        toolName: snap.toolName ?? 'unknown',
+        // Normalize our hosted-tools plugin names → canonical renderer names so
+        // the mermaid/mockup cards render. callID/toolInput stay untouched.
+        toolName: normalizeOpencodeToolName(snap.toolName ?? 'unknown'),
         toolInput: snap.state?.input ?? {}
       })
     }

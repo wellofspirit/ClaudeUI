@@ -47,8 +47,12 @@ function makeSpawnFn(delayMs = 0): {
 }
 
 function makeManager(spawnFn: SpawnServerFn): OpencodeServerManager {
-  // Stub the binary locator so tests never touch the filesystem.
-  return new OpencodeServerManager({ spawnFn, locateBinaryFn: () => '/fake/opencode' })
+  // Stub the binary locator + plugin installer so tests never touch the filesystem.
+  return new OpencodeServerManager({
+    spawnFn,
+    locateBinaryFn: () => '/fake/opencode',
+    ensurePluginFn: async () => {}
+  })
 }
 
 // The key test: port parsing regex

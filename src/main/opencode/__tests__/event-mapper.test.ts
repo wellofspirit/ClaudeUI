@@ -3,6 +3,8 @@ import {
   mapEvent,
   buildChatMessage,
   extractToolResult,
+  normalizeOpencodeToolName,
+  OPENCODE_TOOL_NAME_MAP,
   type MessageAccumulator
 } from '../event-mapper'
 import type { OpencodeEvent } from '../protocol/types'
@@ -372,6 +374,100 @@ describe('buildChatMessage', () => {
   })
 })
 
+// ── Hosted-tools plugin tool-name normalization (Phase 5c Part B) ────────────
+
+describe('normalizeOpencodeToolName', () => {
+  it('maps render_mermaid → mcp__claude-ui__render_mermaid', () => {
+    expect(normalizeOpencodeToolName('render_mermaid')).toBe('mcp__claude-ui__render_mermaid')
+  })
+
+  it('maps create_mockup → mcp__claude-ui-mockup__create_mockup', () => {
+    expect(normalizeOpencodeToolName('create_mockup')).toBe('mcp__claude-ui-mockup__create_mockup')
+  })
+
+  it('maps show_mockup → mcp__claude-ui-mockup__show_mockup', () => {
+    expect(normalizeOpencodeToolName('show_mockup')).toBe('mcp__claude-ui-mockup__show_mockup')
+  })
+
+  it('passes through unmapped tool names unchanged', () => {
+    expect(normalizeOpencodeToolName('bash')).toBe('bash')
+    expect(normalizeOpencodeToolName('read')).toBe('read')
+  })
+
+  it('OPENCODE_TOOL_NAME_MAP has exactly the three hosted tools', () => {
+    expect(Object.keys(OPENCODE_TOOL_NAME_MAP).sort()).toEqual([
+      'create_mockup',
+      'render_mermaid',
+      'show_mockup'
+    ])
+  })
+})
+
+describe('buildChatMessage — tool-name normalization', () => {
+  it('normalizes render_mermaid in tool_use block, preserving callID + toolInput', () => {
+    const acc: MessageAccumulator = {
+      messageId: 'msg_m',
+      partOrder: ['p1'],
+      parts: new Map([
+        [
+          'p1',
+          {
+            type: 'tool',
+            toolName: 'render_mermaid',
+            callID: 'call_abc',
+            state: { status: 'completed', input: { source: 'graph TD; A-->B;', title: 'Flow' } }
+          }
+        ]
+      ])
+    }
+    const msg = buildChatMessage('msg_m', acc)
+    expect(msg.content).toHaveLength(1)
+    const block = msg.content[0]
+    expect(block.type).toBe('tool_use')
+    if (block.type === 'tool_use') {
+      // toolName normalized to the canonical renderer name
+      expect(block.toolName).toBe('mcp__claude-ui__render_mermaid')
+      // callID / toolUseId preserved
+      expect(block.toolUseId).toBe('call_abc')
+      // toolInput untouched (arg names already match the renderer)
+      expect(block.toolInput).toEqual({ source: 'graph TD; A-->B;', title: 'Flow' })
+    }
+  })
+
+  it('normalizes create_mockup + show_mockup tool names', () => {
+    const acc: MessageAccumulator = {
+      messageId: 'msg_n',
+      partOrder: ['p1', 'p2'],
+      parts: new Map([
+        ['p1', { type: 'tool', toolName: 'create_mockup', callID: 'c1', state: { status: 'completed', input: { html: '<div/>' } } }],
+        ['p2', { type: 'tool', toolName: 'show_mockup', callID: 'c2', state: { status: 'completed', input: { directory: 'abc12345' } } }]
+      ])
+    }
+    const msg = buildChatMessage('msg_n', acc)
+    const names = msg.content.map((b) => (b.type === 'tool_use' ? b.toolName : null))
+    expect(names).toEqual([
+      'mcp__claude-ui-mockup__create_mockup',
+      'mcp__claude-ui-mockup__show_mockup'
+    ])
+  })
+
+  it('leaves a native opencode tool name (bash) unchanged', () => {
+    const acc: MessageAccumulator = {
+      messageId: 'msg_o',
+      partOrder: ['p1'],
+      parts: new Map([
+        ['p1', { type: 'tool', toolName: 'bash', callID: 'c1', state: { status: 'completed', input: { command: 'ls' } } }]
+      ])
+    }
+    const msg = buildChatMessage('msg_o', acc)
+    const block = msg.content[0]
+    if (block.type === 'tool_use') {
+      expect(block.toolName).toBe('bash')
+      expect(block.toolUseId).toBe('c1')
+    }
+  })
+})
+
 describe('extractToolResult', () => {
   it('returns null for non-tool parts', () => {
     expect(extractToolResult('p1', { type: 'text', text: 'hi' })).toBeNull()
@@ -401,5 +497,64 @@ describe('extractToolResult', () => {
     })
     expect(res?.isError).toBe(true)
     expect(res?.result).toBe('permission denied')
+  })
+})
+
+// ── session.error / ProviderAuthError (Phase 5c) ─────────────────────────────
+
+describe('mapEvent — session.error', () => {
+  const SESSION_ID = 'ses_abc123'
+  const accumulators = new Map()
+  const totalCostRef = { value: 0 }
+
+  // Wire shape verified vs 1.17.9 /doc: properties.error =
+  //   { name, data: { providerID?, message } }  (ProviderAuthError / UnknownError / …)
+  it('maps ProviderAuthError to error kind with re-login hint including vendor name', () => {
+    const ev = makeEvent('session.error', {
+      sessionID: SESSION_ID,
+      error: {
+        name: 'ProviderAuthError',
+        data: { providerID: 'openai', message: 'Token expired' }
+      }
+    })
+    const out = mapEvent(ev, SESSION_ID, accumulators, START_TIME, totalCostRef)
+    expect(out.kind).toBe('error')
+    if (out.kind === 'error') {
+      expect(out.message).toContain('openai')
+      expect(out.message).toContain('Settings')
+    }
+  })
+
+  it('maps ProviderAuthError without providerID to generic re-login hint', () => {
+    const ev = makeEvent('session.error', {
+      sessionID: SESSION_ID,
+      error: { name: 'ProviderAuthError', data: { message: 'Token expired' } }
+    })
+    const out = mapEvent(ev, SESSION_ID, accumulators, START_TIME, totalCostRef)
+    expect(out.kind).toBe('error')
+    if (out.kind === 'error') {
+      expect(out.message).toContain('Authentication required')
+    }
+  })
+
+  it('maps a non-auth session.error to its error data.message', () => {
+    const ev = makeEvent('session.error', {
+      sessionID: SESSION_ID,
+      error: { name: 'UnknownError', data: { message: 'connection refused' } }
+    })
+    const out = mapEvent(ev, SESSION_ID, accumulators, START_TIME, totalCostRef)
+    expect(out.kind).toBe('error')
+    if (out.kind === 'error') {
+      expect(out.message).toBe('connection refused')
+    }
+  })
+
+  it('cross-session filter still applies for session.error', () => {
+    const ev = makeEvent('session.error', {
+      sessionID: 'ses_OTHER',
+      error: { name: 'ProviderAuthError', data: { message: 'Token expired' } }
+    })
+    const out = mapEvent(ev, SESSION_ID, accumulators, START_TIME, totalCostRef)
+    expect(out.kind).toBe('ignore')
   })
 })

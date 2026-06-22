@@ -92,6 +92,16 @@ export interface AuthStatus {
  *  opencode: one entry per configured provider). */
 export type VendorAuthMap = Record<string, AuthStatus>
 
+/**
+ * A single auth method option for a vendor, as returned by GET /provider/auth.
+ * The array index of the option is the `method` arg for OAuth authorize/callback.
+ */
+export interface VendorAuthOption {
+  type: 'api' | 'oauth'
+  label: string
+  prompts?: Array<{ type: string; key: string; message: string; secret?: boolean }>
+}
+
 /** Resolved account descriptor held on the session. Populated by ClaudeAuthProvider.probe(). */
 export interface AccountRef {
   engineId: EngineId
@@ -703,6 +713,32 @@ interface FileAPI {
   listWorktrees(cwd: string): Promise<WorktreeEntry[]>
 }
 
+/** Engine-routed per-vendor auth API (opencode's multi-vendor auth model). */
+interface VendorAuthAPI {
+  /** Probe all vendors for a given engine. */
+  vendorAuthProbe(engineId: EngineId): Promise<VendorAuthMap>
+  /** List per-vendor auth options (GET /provider/auth). */
+  vendorAuthListOptions(engineId: EngineId): Promise<Record<string, VendorAuthOption[]>>
+  /** Set an API key for a vendor. */
+  vendorAuthSetKey(engineId: EngineId, vendorId: string, key: string): Promise<void>
+  /** Start an OAuth flow for a vendor. Returns the URL to open + instructions. */
+  vendorAuthOauthAuthorize(
+    engineId: EngineId,
+    vendorId: string,
+    method: number,
+    inputs?: Record<string, string>
+  ): Promise<{ url: string; method: 'auto' | 'code'; instructions: string }>
+  /** Submit the OAuth code (paste-code flow). */
+  vendorAuthOauthCallback(
+    engineId: EngineId,
+    vendorId: string,
+    method: number,
+    code: string
+  ): Promise<boolean>
+  /** Remove auth credentials for a vendor. */
+  vendorAuthRemove(engineId: EngineId, vendorId: string): Promise<void>
+}
+
 interface AccountAPI {
   fetchAccountUsage(): Promise<AccountUsage>
   onAccountUsage(cb: (data: AccountUsage) => void): () => void
@@ -858,6 +894,7 @@ export interface ClaudeAPI
     AutomationAPI,
     FileAPI,
     AccountAPI,
+    VendorAuthAPI,
     RemoteAPI,
     VoiceAPI,
     PluginAPI {

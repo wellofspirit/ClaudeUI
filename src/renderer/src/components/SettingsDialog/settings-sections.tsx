@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useActiveSession, useSessionStore } from '../../stores/session-store'
 import type { AppSettings } from '../../stores/session-store'
 import { PermissionsDialog } from '../PermissionsDialog'
@@ -9,7 +9,9 @@ import type {
   AccountsState,
   EngineConfig,
   VendorConfig,
-  SandboxSettings
+  SandboxSettings,
+  VendorAuthMap,
+  VendorAuthOption
 } from '../../../../shared/types'
 import { VOICE_LANGUAGES } from '../../../../shared/types'
 import {
@@ -443,6 +445,289 @@ function VendorAnthropicDisplaySection(): React.JSX.Element {
       </div>
       <div className="text-[10px] text-text-muted/50 leading-relaxed">
         Edit these in engines/claude.json and vendors/anthropic.json under ~/.claude/ui/. Changes apply on next session start.
+      </div>
+    </div>
+  )
+}
+
+// ── Vendor opencode auth UI ──────────────────────────────────────────
+
+type VendorOAuthFlowState =
+  | { stage: 'idle' }
+  | { stage: 'instructions'; url: string; instructions: string; method: number; vendorId: string }
+  | { stage: 'submitting'; vendorId: string }
+
+function VendorOpencodeSection(): React.JSX.Element {
+  const [authMap, setAuthMap] = useState<VendorAuthMap | null>(null)
+  const [options, setOptions] = useState<Record<string, VendorAuthOption[]>>({})
+  const [loading, setLoading] = useState(true)
+  const [apiKeys, setApiKeys] = useState<Record<string, string>>({})
+  const [saving, setSaving] = useState<Record<string, boolean>>({})
+  const [removing, setRemoving] = useState<Record<string, boolean>>({})
+  const [oauthFlow, setOauthFlow] = useState<VendorOAuthFlowState>({ stage: 'idle' })
+  const [oauthCode, setOauthCode] = useState('')
+  const [oauthError, setOauthError] = useState<string | null>(null)
+  // Track if opencode is installed (non-empty probe result)
+  const [opencodeAvailable, setOpencodeAvailable] = useState(false)
+  const mountedRef = useRef(true)
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    Promise.all([
+      window.api.vendorAuthProbe('opencode').catch(() => ({})) as Promise<VendorAuthMap>,
+      window.api.vendorAuthListOptions('opencode').catch(() => ({})) as Promise<Record<string, VendorAuthOption[]>>
+    ]).then(([map, opts]) => {
+      if (cancelled) return
+      const available = Object.keys(map).length > 0
+      setOpencodeAvailable(available)
+      setAuthMap(map)
+      setOptions(opts)
+      setLoading(false)
+    })
+    return () => { cancelled = true }
+  }, [])
+
+  const refresh = (): void => {
+    Promise.all([
+      window.api.vendorAuthProbe('opencode').catch(() => ({})) as Promise<VendorAuthMap>,
+      window.api.vendorAuthListOptions('opencode').catch(() => ({})) as Promise<Record<string, VendorAuthOption[]>>
+    ]).then(([map, opts]) => {
+      if (!mountedRef.current) return
+      setAuthMap(map)
+      setOptions(opts)
+    })
+  }
+
+  const handleSaveKey = async (vendorId: string): Promise<void> => {
+    const key = (apiKeys[vendorId] ?? '').trim()
+    if (!key) return
+    setSaving((prev) => ({ ...prev, [vendorId]: true }))
+    try {
+      await window.api.vendorAuthSetKey('opencode', vendorId, key)
+      setApiKeys((prev) => ({ ...prev, [vendorId]: '' }))
+      refresh()
+    } catch (err) {
+      // silent failure — user can retry
+    } finally {
+      if (mountedRef.current) setSaving((prev) => ({ ...prev, [vendorId]: false }))
+    }
+  }
+
+  const handleRemove = async (vendorId: string): Promise<void> => {
+    setRemoving((prev) => ({ ...prev, [vendorId]: true }))
+    try {
+      await window.api.vendorAuthRemove('opencode', vendorId)
+      refresh()
+    } catch (err) {
+      // silent failure
+    } finally {
+      if (mountedRef.current) setRemoving((prev) => ({ ...prev, [vendorId]: false }))
+    }
+  }
+
+  const handleOAuthStart = async (
+    vendorId: string,
+    methodIdx: number
+  ): Promise<void> => {
+    setOauthError(null)
+    try {
+      const result = await window.api.vendorAuthOauthAuthorize('opencode', vendorId, methodIdx)
+      if (result.method === 'auto') {
+        // Delegated: open browser, instruct user to run `opencode auth login`
+        window.open(result.url, '_blank')
+        // Show instructions but do not try to drive the loopback completion
+        setOauthFlow({
+          stage: 'instructions',
+          url: result.url,
+          instructions: result.instructions + '\n\nFor loopback OAuth, complete the flow in the browser then run `opencode auth login` in a terminal.',
+          method: methodIdx,
+          vendorId
+        })
+      } else {
+        // method:'code' — paste-code flow
+        window.open(result.url, '_blank')
+        setOauthFlow({
+          stage: 'instructions',
+          url: result.url,
+          instructions: result.instructions,
+          method: methodIdx,
+          vendorId
+        })
+      }
+    } catch (err) {
+      setOauthError(err instanceof Error ? err.message : 'Failed to start OAuth flow')
+    }
+  }
+
+  const handleOAuthSubmit = async (): Promise<void> => {
+    if (oauthFlow.stage !== 'instructions') return
+    const { vendorId, method } = oauthFlow
+    const code = oauthCode.trim()
+    if (!code) return
+    setOauthFlow({ stage: 'submitting', vendorId })
+    try {
+      await window.api.vendorAuthOauthCallback('opencode', vendorId, method, code)
+      setOauthFlow({ stage: 'idle' })
+      setOauthCode('')
+      refresh()
+    } catch (err) {
+      setOauthError(err instanceof Error ? err.message : 'OAuth callback failed')
+      setOauthFlow({ stage: 'idle' })
+    }
+  }
+
+  if (loading) {
+    return (
+      <div className="px-3 py-1.5 text-[11px] text-text-muted/60">Loading...</div>
+    )
+  }
+
+  if (!opencodeAvailable) {
+    return (
+      <div className="px-3 py-1.5 text-[11px] text-text-muted/60 leading-relaxed">
+        opencode is not installed or not running. Install it to configure vendor authentication.
+      </div>
+    )
+  }
+
+  const vendorIds = Array.from(
+    new Set([...Object.keys(authMap ?? {}), ...Object.keys(options)])
+  ).sort()
+
+  return (
+    <div className="px-3 py-1.5 space-y-4 text-[13px] text-text-secondary">
+      {oauthError && (
+        <div className="text-[11px] text-red-400 leading-relaxed">{oauthError}</div>
+      )}
+      {vendorIds.map((vendorId) => {
+        const status = authMap?.[vendorId]
+        const vendorOptions = options[vendorId] ?? []
+        const isAuth = status?.authState === 'authenticated'
+        const isFree = status?.billingType === 'free'
+        const apiOption = vendorOptions.find((o) => o.type === 'api')
+        const oauthOptions = vendorOptions.filter((o) => o.type === 'oauth')
+        const firstOauthIdx = vendorOptions.indexOf(oauthOptions[0] ?? vendorOptions[0])
+
+        return (
+          <div key={vendorId} className="border border-border/30 rounded-md p-2 space-y-1.5">
+            <div className="flex items-center justify-between">
+              <div className="font-medium text-[12px]">{vendorId}</div>
+              <div className="flex items-center gap-1.5">
+                {status && (
+                  <span
+                    className={`text-[10px] px-1.5 py-0.5 rounded ${
+                      isAuth
+                        ? 'bg-green-500/10 text-green-400'
+                        : 'bg-yellow-500/10 text-yellow-500'
+                    }`}
+                  >
+                    {isAuth ? 'Authenticated' : 'Not configured'}
+                  </span>
+                )}
+                {isFree && (
+                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-400">
+                    Free
+                  </span>
+                )}
+              </div>
+            </div>
+
+            {!isFree && (
+              <>
+                {/* API key form */}
+                {apiOption && (
+                  <div className="flex items-center gap-1.5">
+                    <input
+                      type="password"
+                      placeholder={apiOption.prompts?.[0]?.message ?? 'API key'}
+                      value={apiKeys[vendorId] ?? ''}
+                      onChange={(e) =>
+                        setApiKeys((prev) => ({ ...prev, [vendorId]: e.target.value }))
+                      }
+                      className="flex-1 px-2 py-1 text-[11px] rounded bg-bg-input border border-border/40 text-text-primary placeholder:text-text-muted/50 focus:outline-none focus:border-accent/60"
+                    />
+                    <button
+                      onClick={() => void handleSaveKey(vendorId)}
+                      disabled={saving[vendorId] || !(apiKeys[vendorId] ?? '').trim()}
+                      className="px-2 py-1 text-[11px] rounded bg-accent/20 hover:bg-accent/30 text-accent disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                    >
+                      {saving[vendorId] ? 'Saving…' : 'Save'}
+                    </button>
+                  </div>
+                )}
+
+                {/* OAuth button (paste-code flow only in-app) */}
+                {oauthOptions.length > 0 && (
+                  <div>
+                    <button
+                      onClick={() => void handleOAuthStart(vendorId, firstOauthIdx)}
+                      className="px-2 py-1 text-[11px] rounded bg-accent/20 hover:bg-accent/30 text-accent transition-colors"
+                    >
+                      {oauthOptions[0]?.label ?? 'Sign in with OAuth'}
+                    </button>
+                  </div>
+                )}
+
+                {/* OAuth paste-code input */}
+                {oauthFlow.stage === 'instructions' &&
+                  oauthFlow.vendorId === vendorId && (
+                    <div className="space-y-1.5 mt-1">
+                      <div className="text-[10px] text-text-muted/70 leading-relaxed whitespace-pre-wrap">
+                        {oauthFlow.instructions}
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <input
+                          type="text"
+                          placeholder="Paste code here"
+                          value={oauthCode}
+                          onChange={(e) => setOauthCode(e.target.value)}
+                          className="flex-1 px-2 py-1 text-[11px] rounded bg-bg-input border border-border/40 text-text-primary placeholder:text-text-muted/50 focus:outline-none focus:border-accent/60"
+                        />
+                        <button
+                          onClick={() => void handleOAuthSubmit()}
+                          disabled={!oauthCode.trim()}
+                          className="px-2 py-1 text-[11px] rounded bg-accent/20 hover:bg-accent/30 text-accent disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                        >
+                          Submit
+                        </button>
+                        <button
+                          onClick={() => { setOauthFlow({ stage: 'idle' }); setOauthCode('') }}
+                          className="px-2 py-1 text-[11px] rounded hover:bg-bg-hover text-text-muted transition-colors"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                {oauthFlow.stage === 'submitting' && oauthFlow.vendorId === vendorId && (
+                  <div className="text-[10px] text-text-muted/60">Submitting code…</div>
+                )}
+
+                {/* Remove button */}
+                {isAuth && (
+                  <button
+                    onClick={() => void handleRemove(vendorId)}
+                    disabled={removing[vendorId]}
+                    className="text-[10px] text-text-muted/60 hover:text-red-400 transition-colors disabled:opacity-40"
+                  >
+                    {removing[vendorId] ? 'Removing…' : 'Remove credentials'}
+                  </button>
+                )}
+              </>
+            )}
+          </div>
+        )
+      })}
+
+      <div className="text-[10px] text-text-muted/50 leading-relaxed">
+        Credentials are stored in opencode&apos;s own auth.json. For subscription OAuth (loopback),
+        use <span className="font-mono">opencode auth login</span> in a terminal.
       </div>
     </div>
   )
@@ -1255,6 +1540,33 @@ export const SECTIONS: Section[] = [
     ]
   },
   {
+    id: 'vendor-opencode',
+    label: 'opencode Vendors',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <circle cx="12" cy="12" r="3" />
+        <path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'vendorOpencodeAuth',
+        label: 'opencode vendor auth',
+        keywords: 'opencode vendor auth api key oauth login openai google anthropic provider',
+        render: () => <VendorOpencodeSection />
+      }
+    ]
+  },
+  {
     id: 'mockup',
     label: 'Mockups',
     icon: (
@@ -1946,6 +2258,9 @@ const VENDOR_ANTHROPIC_SECTION_IDS = new Set([
   'vendor-anthropic', 'effortDefaults'
 ])
 
+/** Section ids that belong to Vendors > opencode (gated: only shown when opencode engine installs) */
+const VENDOR_OPENCODE_SECTION_IDS = new Set(['vendor-opencode'])
+
 /** Section ids that belong to Accounts (flat) */
 const ACCOUNTS_SECTION_IDS = new Set(['accounts'])
 
@@ -2000,6 +2315,11 @@ export const NAV_GROUPS: NavGroup[] = [
         id: 'vendor-anthropic-nav',
         label: 'Anthropic',
         sections: getSectionsForIds(VENDOR_ANTHROPIC_SECTION_IDS)
+      },
+      {
+        id: 'vendor-opencode-nav',
+        label: 'opencode',
+        sections: getSectionsForIds(VENDOR_OPENCODE_SECTION_IDS)
       }
     ]
   },

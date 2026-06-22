@@ -486,13 +486,18 @@ export function resolveClaudeCapabilities(modelValue?: string | null): ResolvedC
 }
 
 /**
- * opencode engine capabilities — 5b-conservative.
- * Flips true in later phases: hostedMcp (5c), backgroundTasks/subagents/steer/queue/
+ * opencode engine capabilities — 5c.
+ * hostedMcp:true (Phase 5c) means "this engine hosts ClaudeUI's injected tools"
+ * (render_mermaid / create_mockup / show_mockup via the auto-loaded plugin). It
+ * does NOT mean opencode exposes Claude's `.mcp.json` server-config UI — that
+ * dialog (McpDialog) is scoped to engineId==='claude' in TopBar.tsx, so this flip
+ * only enables our hosted tools, not the Claude MCP config surface.
+ * Flips true in later phases: backgroundTasks/subagents/steer/queue/
  * slashCommands/skills/sideQuestion (Phase 6+), voice (deferred).
  */
 export const OPENCODE_ENGINE_CAPABILITIES: EngineCapabilities = {
   voice: false,
-  hostedMcp: false,
+  hostedMcp: true,
   backgroundTasks: false,
   subagents: false,
   plan: true,

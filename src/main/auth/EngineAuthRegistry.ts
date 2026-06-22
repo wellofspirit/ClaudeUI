@@ -8,7 +8,7 @@
 import type { EngineId } from '../../shared/types'
 import type { EngineAuthProvider } from './EngineAuthProvider'
 
-class EngineAuthRegistry {
+export class EngineAuthRegistry {
   private providers = new Map<EngineId, EngineAuthProvider>()
 
   register(engineId: EngineId, provider: EngineAuthProvider): void {

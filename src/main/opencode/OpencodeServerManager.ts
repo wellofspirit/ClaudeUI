@@ -4,6 +4,7 @@ import { join, dirname, resolve as resolvePath } from 'node:path'
 import { spawn } from 'node:child_process'
 import type { ChildProcess } from 'node:child_process'
 import { app } from 'electron'
+import { ensureOpencodePlugin } from './ensure-plugin'
 
 /** Connection details handed back to callers (and to OpencodeClient). */
 export interface ServerConnection {
@@ -81,7 +82,15 @@ function spawnServer(binary: string, cwd: string, password: string): Promise<Spa
   return new Promise((resolve, reject) => {
     const child = spawn(binary, ['serve', '--port', '0', '--hostname', '127.0.0.1'], {
       cwd,
-      env: { ...process.env, OPENCODE_SERVER_PASSWORD: password },
+      env: {
+        ...process.env,
+        OPENCODE_SERVER_PASSWORD: password,
+        // The hosted-tools plugin (Part B) writes mockups to <cwd>/.claude/ui/mockups;
+        // the renderer serves them from the session cwd. opencode's ToolContext.directory
+        // resolves to the git root (≠ session cwd for subdirs), so we pass the exact
+        // spawn cwd explicitly and the plugin prefers it. See plugin/claudeui.plugin.js.
+        CLAUDEUI_SESSION_CWD: cwd,
+      },
       stdio: ['ignore', 'pipe', 'pipe'],
     })
 
@@ -137,6 +146,12 @@ export interface OpencodeServerManagerOptions {
   spawnFn?: SpawnServerFn
   /** Override the binary locator. Defaults to the real on-disk resolver. */
   locateBinaryFn?: () => string
+  /**
+   * Override the hosted-tools plugin installer. Defaults to ensureOpencodePlugin
+   * (lazy + memoized + idempotent). Tests inject a no-op/spy to avoid touching
+   * ~/.config/opencode.
+   */
+  ensurePluginFn?: () => Promise<void>
 }
 
 /**
@@ -155,10 +170,12 @@ export class OpencodeServerManager {
   private binary: string | null = null
   private readonly spawnFn: SpawnServerFn
   private readonly locateBinaryFn: () => string
+  private readonly ensurePluginFn: () => Promise<void>
 
   constructor(opts: OpencodeServerManagerOptions = {}) {
     this.spawnFn = opts.spawnFn ?? spawnServer
     this.locateBinaryFn = opts.locateBinaryFn ?? locateBinary
+    this.ensurePluginFn = opts.ensurePluginFn ?? ensureOpencodePlugin
   }
 
   private getBinary(): string {
@@ -230,6 +247,10 @@ export class OpencodeServerManager {
    */
   async acquire(cwd: string): Promise<ServerConnection> {
     const key = resolvePath(cwd)
+    // Ensure the hosted-tools plugin is installed before opencode spawns + loads
+    // its plugin dir. Memoized + idempotent, so this is a cheap no-op after the
+    // first call. Never throws (opencode optional).
+    await this.ensurePluginFn()
     const handle = await this.resolveHandle(key)
     handle.refCount++
     return { baseUrl: handle.baseUrl, password: handle.password, authHeader: handle.authHeader }

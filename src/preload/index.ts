@@ -309,6 +309,32 @@ const api: ClaudeAPI = {
     ipcRenderer.invoke('automation:send-message', id, prompt),
 
   testProxyConnection: (proxy: ProxySettings) => unwrap('proxy:test-connection', proxy),
+
+  // Engine-routed per-vendor auth (opencode multi-vendor auth, Phase 5c)
+  vendorAuthProbe: (engineId: import('../shared/types').EngineId) =>
+    unwrap('vendor-auth:probe', engineId),
+  vendorAuthListOptions: (engineId: import('../shared/types').EngineId) =>
+    unwrap('vendor-auth:list-options', engineId),
+  vendorAuthSetKey: (
+    engineId: import('../shared/types').EngineId,
+    vendorId: string,
+    key: string
+  ) => unwrap('vendor-auth:set-key', engineId, vendorId, key),
+  vendorAuthOauthAuthorize: (
+    engineId: import('../shared/types').EngineId,
+    vendorId: string,
+    method: number,
+    inputs?: Record<string, string>
+  ) => unwrap('vendor-auth:oauth-authorize', engineId, vendorId, method, inputs),
+  vendorAuthOauthCallback: (
+    engineId: import('../shared/types').EngineId,
+    vendorId: string,
+    method: number,
+    code: string
+  ) => unwrap('vendor-auth:oauth-callback', engineId, vendorId, method, code),
+  vendorAuthRemove: (engineId: import('../shared/types').EngineId, vendorId: string) =>
+    unwrap('vendor-auth:remove', engineId, vendorId),
+
   loadEngineConfig: (engineId: string) =>
     ipcRenderer.invoke('config:load-engine-config', engineId),
   saveEngineConfig: (engineId: string, config: import('../shared/types').EngineConfig) =>

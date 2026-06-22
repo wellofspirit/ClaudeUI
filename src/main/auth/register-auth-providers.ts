@@ -5,5 +5,7 @@
  */
 import { engineAuthRegistry } from './EngineAuthRegistry'
 import { claudeAuthProvider } from './ClaudeAuthProvider'
+import { opencodeAuthProvider } from './OpencodeAuthProvider'
 
 engineAuthRegistry.register('claude', claudeAuthProvider)
+engineAuthRegistry.register('opencode', opencodeAuthProvider)

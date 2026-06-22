@@ -10,12 +10,14 @@ import type {
   ChatMessage,
   SessionStatus,
   ApprovalDecision,
-  PermissionSuggestion
+  PermissionSuggestion,
+  AccountRef
 } from '../../shared/types'
 import { opencodeModel } from '../../shared/types'
 import { logger } from '../services/logger'
 import { mapEvent, extractToolResult } from './event-mapper'
 import type { MapperOutput, MessageAccumulator } from './event-mapper'
+import { opencodeAuthProvider } from '../auth/OpencodeAuthProvider'
 
 // Permission ruleset helper
 type PermissionAction = 'allow' | 'ask' | 'deny'
@@ -81,6 +83,10 @@ export class OpencodeSession extends BaseSession {
     this.permissionMode = permissionMode ?? 'default'
     this._capabilities = resolveOpencodeCapabilities()
     this.sendStatus()
+    // Warm the auth provider cache asynchronously so account is populated on
+    // the next status emit (e.g. when run() begins). A cross-vendor model switch
+    // re-reads from the cached map, so this only needs to warm once per session.
+    opencodeAuthProvider.warmCache().then(() => this.sendStatus()).catch(() => {})
   }
 
   get willQueue(): boolean {
@@ -89,13 +95,14 @@ export class OpencodeSession extends BaseSession {
 
   get status(): SessionStatus {
     const parsed = parseModelString(this._model)
+    const account: AccountRef | null = opencodeAuthProvider.buildAccountRef(parsed.providerID)
     return {
       state: this.isProcessing ? 'running' : 'idle',
       sessionId: this.openSessionId,
       model: opencodeModel(parsed.providerID, parsed.modelID),
       cwd: this.cwd,
       totalCostUsd: this.totalCostUsd,
-      account: null,
+      account,
       ...this.baseStatusFields()
     }
   }
@@ -264,6 +271,13 @@ export class OpencodeSession extends BaseSession {
 
       case 'cost_update':
         // totalCostUsd already updated via ref; status update is deferred to result
+        break
+
+      case 'error':
+        this.isProcessing = false
+        this.send('session:error', output.message)
+        this.sendStatus()
+        this.resetInactivityTimer()
         break
 
       case 'ignore':

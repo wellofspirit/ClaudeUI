@@ -42,6 +42,29 @@ over both. Detail: `docs/v2/04-auth-accounts.md`.
   deleted; new `OpencodeAuthProvider`; account metadata migrates file → DB.
 - The model picker grays out models whose vendor is `unauthenticated` (from the per-vendor probe).
 
+## Implementation note (Phase 5c)
+
+The design above modeled opencode login as `signIn(vendorId)` / `submitCode(code)` (Claude's shape). In
+implementation that shape didn't fit opencode's **per-vendor, method-indexed** flow, so
+`EngineAuthProvider` gained explicit optional, `canDriveLogin`-gated **per-vendor** methods (Claude does
+not implement them; it keeps `signIn`/`submitCode`):
+
+- `listVendorAuthOptions(): Record<VendorId, VendorAuthOption[]>` (`GET /provider/auth`)
+- `setVendorApiKey(vendorId, key)` (`PUT /auth/{vendor} {type:'api',key}`)
+- `oauthAuthorize(vendorId, method, inputs?) → {url, method:'auto'|'code', instructions}` and
+  `oauthCallback(vendorId, method, code)` (`POST /provider/{vendor}/oauth/{authorize,callback}`)
+- `removeVendorAuth(vendorId)` (`DELETE /auth/{vendor}`)
+
+Routed by new engine-keyed `vendor-auth:*` IPC channels (the Claude `auth:*`/`account:*` channels are
+untouched). `OpencodeAuthProvider` runs these against a transient server (acquire/release
+`PERSISTED_SESSIONS_DIR`, like model discovery) since opencode auth is global, and invalidates the model
+cache after mutations. Settings › Vendors gained a per-vendor opencode section (API-key forms +
+paste-code OAuth; loopback OAuth = delegated hint). **Hosted tools** (ADR-019's "MCP injection") shipped
+as an **opencode plugin** (`~/.config/opencode/plugin/`, auto-loaded in opencode's process) registering
+`render_mermaid`/`create_mockup`/`show_mockup`, name-normalized to the canonical `mcp__claude-ui*` forms
+in the event mapper — `config.plugin` paths don't load and in-process MCP servers can't cross the process
+boundary, so a plugin is the in-process mechanism.
+
 ## Relation to existing ADRs
 
 - **Amends ADR-014** — Claude's native OAuth becomes one `EngineAuthProvider` implementation;
