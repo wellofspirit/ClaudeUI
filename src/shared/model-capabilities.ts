@@ -493,7 +493,7 @@ export function resolveClaudeCapabilities(modelValue?: string | null): ResolvedC
  * dialog (McpDialog) is scoped to engineId==='claude' in TopBar.tsx, so this flip
  * only enables our hosted tools, not the Claude MCP config surface.
  * Flips true in later phases: backgroundTasks/subagents/steer/queue/
- * slashCommands/skills/sideQuestion (Phase 6+), voice (deferred).
+ * sideQuestion (Phase 6+), voice (deferred).
  */
 export const OPENCODE_ENGINE_CAPABILITIES: EngineCapabilities = {
   voice: false,
@@ -505,8 +505,8 @@ export const OPENCODE_ENGINE_CAPABILITIES: EngineCapabilities = {
   forkFromMessage: true,
   steer: false,
   queue: false,
-  slashCommands: false,
-  skills: false,
+  slashCommands: true,
+  skills: true,
   sideQuestion: false,
   interactiveApprovals: true,
   autonomyModes: ['plan', 'ask', 'full'],

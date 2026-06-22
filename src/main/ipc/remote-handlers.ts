@@ -27,6 +27,8 @@ import {
 } from '../services/claude-settings'
 import { loadMcpServers, readDisabledMcpServers } from '../services/claude-mcp'
 import { scanSkills } from '../services/skill-scanner'
+import { discoverOpencodeSkills } from '../opencode/command-skill-discovery'
+import { OpencodeSession } from '../opencode/OpencodeSession'
 import { scanCustomCommands } from '../services/custom-command-scanner'
 import { usageFetcher } from '../services/usage-fetcher'
 import { blockUsageService } from '../services/block-usage'
@@ -347,7 +349,18 @@ export function registerRemoteHandlers(
   })
   dispatcher.register('config:load-slash-commands', async () => loadSlashCommands())
   dispatcher.register('config:scan-custom-commands', async (cwd: string) => scanCustomCommands(cwd))
-  dispatcher.register('config:load-skill-details', async (cwd: string) => scanSkills(cwd))
+  dispatcher.register('config:load-skill-details', async (cwd: string) => {
+    // Engine-dispatch: mirror the IPC handler — opencode sessions use the
+    // transient-server skill discovery; Claude falls back to scanSkills.
+    let hasOpencode = false
+    manager.forEach((session) => {
+      if (session.cwd === cwd && session instanceof OpencodeSession) {
+        hasOpencode = true
+      }
+    })
+    if (hasOpencode) return discoverOpencodeSkills(cwd)
+    return scanSkills(cwd)
+  })
 
   // Claude permissions (read-only)
   dispatcher.register('claude:load-permissions', async (scope: string, cwd?: string) =>

@@ -155,6 +155,17 @@ export class OpencodeSession extends BaseSession {
   // Auto-mode (full) LLM gatekeeper state (ADR-023).
   private _autoModeConfig: AutoModeConfig | undefined
   private autoDenials = { consecutive: 0, total: 0 }
+  // Discovered command names (populated in run(null) eager connect). Used by
+  // run(prompt) to route /command tokens to runCommand instead of promptAsync.
+  private knownCommandNames = new Set<string>()
+  // Set true by cancel()/dispose(), reset to false at the top of each run(), so
+  // ensureConnected() can detect a cancel that landed mid-acquire (during THIS
+  // run's connect window) and release the freshly-acquired ref.
+  private _cancelled = false
+  // Memoized in-flight connection acquire. Both run(null)'s eagerConnect and
+  // run(prompt) await the SAME promise, so a prompt sent before the eager
+  // acquire resolves does NOT trigger a second acquire (ref-count stays 1).
+  private connectingPromise: Promise<void> | null = null
 
   constructor(
     routingId: string,
@@ -217,21 +228,43 @@ export class OpencodeSession extends BaseSession {
     attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
   ): Promise<void> {
     this.clearInactivityTimer()
-    if (prompt === null) return // spawn-only not applicable for opencode
+    // Reset the cancel flag so it only guards THIS run's connect window. cancel()
+    // is also fired by the idle timeout; without this reset a session that
+    // idle-timed-out would refuse to reconnect on a subsequent prompt.
+    this._cancelled = false
+
+    // ── Eager connect (parity with Claude's spawn-only path) ─────────────────
+    // run(null) is called at session creation to warm the connection + discover
+    // slash commands / skills before the first prompt arrives. We acquire the
+    // server, fetch commands + skills (instance/cwd-scoped, no opencode session
+    // needed), emit the two events, and keep the connection for reuse.
+    // Any failure degrades silently — opencode is optional. Arm the inactivity
+    // timer so an opened-but-never-prompted session still releases its server ref.
+    if (prompt === null) {
+      void this.eagerConnect()
+      this.resetInactivityTimer()
+      return
+    }
 
     this.isProcessing = true
     this.sendStatus()
 
     try {
-      // 1. Acquire server connection
-      if (!this.conn) {
-        this.conn = await opencodeServerManager.acquire(this.cwd)
-        this.client = new OpencodeClient(this.conn.baseUrl, this.conn.authHeader)
+      // 1. Connect (memoized — shares the in-flight acquire with eagerConnect so
+      //    a prompt sent before the eager acquire resolves never double-acquires).
+      await this.ensureConnected()
+      // Cancelled mid-connect (e.g. idle timeout or user cancel) — bail cleanly
+      // instead of dereferencing a null client/session below.
+      if (!this.client || this._cancelled) {
+        this.isProcessing = false
+        this.sendStatus()
+        this.resetInactivityTimer()
+        return
       }
 
       // 2. Create opencode session if needed
       if (!this.openSessionId) {
-        const s = await this.client!.createSession({ title: '' })
+        const s = await this.client.createSession({ title: '' })
         this.openSessionId = s.id
         // Emit status with new sessionId so renderer can rekey
         this.sendStatus()
@@ -255,23 +288,9 @@ export class OpencodeSession extends BaseSession {
       }
       this.messageHistory.push(userMsg)
 
-      // 6. Send prompt to opencode
-      const parsed = parseModelString(this._model)
-      const parts: Array<{ type: 'text'; text: string } | { type: 'file'; mime: string; url: string }> = [
-        { type: 'text', text: prompt }
-      ]
-      if (attachments) {
-        for (const att of attachments) {
-          parts.push({ type: 'file', mime: att.mediaType, url: `data:${att.mediaType};base64,${att.base64Data}` })
-        }
-      }
-
+      // 6. Send prompt — route slash commands to runCommand when the name is known
       this.startTimeMs = Date.now()
-      await this.client!.promptAsync(this.openSessionId, {
-        model: { providerID: parsed.providerID, modelID: parsed.modelID },
-        agent: this.agent ?? undefined,
-        parts
-      })
+      await this.sendPrompt(prompt, attachments)
     } catch (err) {
       logger.error('OpencodeSession', `run() error: ${err instanceof Error ? err.message : String(err)}`)
       this.isProcessing = false
@@ -279,6 +298,137 @@ export class OpencodeSession extends BaseSession {
       this.sendStatus()
       this.resetInactivityTimer()
     }
+  }
+
+  /**
+   * Acquire the opencode server connection + build the client, exactly once.
+   * Memoized via `connectingPromise`: concurrent callers (run(null)'s eagerConnect
+   * and a racing run(prompt)) await the SAME acquire, so the ref count is always 1.
+   * Race safety: if cancel() lands while acquire() is awaiting, the freshly
+   * acquired ref is released immediately and conn/client stay null.
+   */
+  private async ensureConnected(): Promise<void> {
+    if (this.conn) return
+    if (!this.connectingPromise) {
+      this.connectingPromise = (async () => {
+        const c = await opencodeServerManager.acquire(this.cwd)
+        if (this._cancelled) {
+          opencodeServerManager.release(this.cwd)
+          return
+        }
+        this.conn = c
+        this.client = new OpencodeClient(c.baseUrl, c.authHeader)
+      })().finally(() => {
+        this.connectingPromise = null
+      })
+    }
+    await this.connectingPromise
+  }
+
+  /**
+   * Eager connect: acquire the server (memoized) + discover commands/skills +
+   * emit events. Called from run(null); fires and is caught internally (never
+   * throws to caller). Degrades silently — opencode is optional.
+   */
+  private async eagerConnect(): Promise<void> {
+    try {
+      await this.ensureConnected()
+      // Cancelled mid-connect, or connect produced no client — bail (no discovery).
+      if (!this.client || this._cancelled) return
+
+      // Fetch commands + skills in parallel — both are cwd/instance-scoped,
+      // no opencode session needed.
+      const [commands, skills] = await Promise.all([
+        this.client.listCommands().catch((err) => {
+          logger.warn('OpencodeSession', `listCommands failed: ${err instanceof Error ? err.message : String(err)}`)
+          return []
+        }),
+        this.client.listSkills().catch((err) => {
+          logger.warn('OpencodeSession', `listSkills failed: ${err instanceof Error ? err.message : String(err)}`)
+          return []
+        })
+      ])
+
+      // Store command names for slash routing in run(prompt)
+      this.knownCommandNames = new Set(commands.map((c) => c.name))
+
+      // Emit session:slash-commands — names prefixed with '/' to match Claude's
+      // contract (claude-session.ts:883-887). Renderer slash menu is engine-neutral.
+      const slashCommands = commands.map((c) => ({
+        name: '/' + c.name,
+        description: c.description
+      }))
+      this.send('session:slash-commands', slashCommands)
+
+      // Emit session:skills — name list only (renderer's SkillsDialog calls the
+      // IPC to get full details; this just tells it skills are available).
+      const skillNames = skills.map((s) => s.name)
+      this.send('session:skills', skillNames)
+    } catch (err) {
+      // Any failure degrades silently — opencode is optional
+      logger.warn(
+        'OpencodeSession',
+        `eagerConnect failed (opencode optional): ${err instanceof Error ? err.message : String(err)}`
+      )
+    }
+  }
+
+  /**
+   * Route the prompt to runCommand (slash routing) or promptAsync.
+   * If prompt starts with /known-command, invoke via the command API.
+   * Unknown slash tokens fall through to promptAsync (model sees the literal text).
+   * On BadRequest from runCommand, fall back to promptAsync so a name mismatch
+   * never wedges the turn.
+   */
+  private async sendPrompt(
+    prompt: string,
+    attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
+  ): Promise<void> {
+    const parsed = parseModelString(this._model)
+
+    // Build file parts once — they ride along with BOTH the runCommand and the
+    // promptAsync path so attachments are never dropped on a slash command.
+    const fileParts: Array<{ type: 'file'; mime: string; url: string }> = (attachments ?? []).map(
+      (att) => ({ type: 'file', mime: att.mediaType, url: `data:${att.mediaType};base64,${att.base64Data}` })
+    )
+
+    // Slash command routing — only when we have a live connection + session
+    const slashMatch = prompt.match(/^\/(\S+)\s*([\s\S]*)$/)
+    if (slashMatch && this.client && this.openSessionId) {
+      const commandName = slashMatch[1]
+      const commandArgs = (slashMatch[2] ?? '').trim()
+      if (this.knownCommandNames.has(commandName)) {
+        try {
+          await this.client.runCommand(this.openSessionId, {
+            command: commandName,
+            arguments: commandArgs,
+            // Carry any file attachments into the command turn.
+            ...(fileParts.length > 0 ? { parts: fileParts } : {})
+          })
+          // Success — SSE consumer handles the streaming output + session.idle
+          return
+        } catch (err) {
+          // BadRequest ("Available commands: …") or other error — fall back to
+          // promptAsync so the turn isn't wedged by an edge-case name mismatch.
+          logger.warn(
+            'OpencodeSession',
+            `runCommand(${commandName}) failed, falling back to promptAsync: ${err instanceof Error ? err.message : String(err)}`
+          )
+          // Fall through to promptAsync below
+        }
+      }
+    }
+
+    // Default path: send via promptAsync (model sees literal prompt text)
+    const parts: Array<{ type: 'text'; text: string } | { type: 'file'; mime: string; url: string }> = [
+      { type: 'text', text: prompt },
+      ...fileParts
+    ]
+    await this.client!.promptAsync(this.openSessionId!, {
+      model: { providerID: parsed.providerID, modelID: parsed.modelID },
+      agent: this.agent ?? undefined,
+      parts
+    })
   }
 
   private ensureSSEConsumer(): void {
@@ -401,6 +551,7 @@ export class OpencodeSession extends BaseSession {
 
   cancel(): void {
     this.clearInactivityTimer()
+    this._cancelled = true
     this.isProcessing = false
     this.sseAbort?.abort()
     this.sseAbort = null

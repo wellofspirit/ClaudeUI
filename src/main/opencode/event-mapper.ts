@@ -273,6 +273,13 @@ export function mapEvent(
       return { kind: 'ignore' }
     }
 
+    case 'command.executed':
+      // Informational — the command's output has already streamed via the normal
+      // message.updated / message.part.updated events. Completion is still marked
+      // by session.idle, not this event. Nothing to do here. (Phase A note:
+      // subtask command child-session events stay filtered until Phase D.)
+      return { kind: 'ignore' }
+
     default:
       return { kind: 'ignore' }
   }

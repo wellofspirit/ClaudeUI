@@ -163,4 +163,89 @@ describe('OpencodeClient', () => {
       expect(mock).toHaveBeenCalledWith(`${BASE_URL}/session`, expect.anything())
     })
   })
+
+  describe('listCommands', () => {
+    it('sends GET /command with auth header', async () => {
+      const commands = [
+        { name: 'init', description: 'Initialize project', template: '/init' },
+        { name: 'review', description: 'Code review', template: '/review $ARGUMENTS', subtask: true }
+      ]
+      const mock = mockFetch(200, commands)
+      vi.stubGlobal('fetch', mock)
+
+      const result = await client.listCommands()
+      expect(result).toEqual(commands)
+      expect(mock).toHaveBeenCalledWith(
+        `${BASE_URL}/command`,
+        expect.objectContaining({
+          method: 'GET',
+          headers: expect.objectContaining({ Authorization: AUTH })
+        })
+      )
+    })
+  })
+
+  describe('runCommand', () => {
+    it('sends POST /session/{id}/command with correct body', async () => {
+      const response = { info: { id: 'msg_1', role: 'assistant' }, parts: [] }
+      const mock = mockFetch(200, response)
+      vi.stubGlobal('fetch', mock)
+
+      const result = await client.runCommand('ses_abc', { command: 'review', arguments: 'pr 42' })
+      expect(result).toEqual(response)
+      expect(mock).toHaveBeenCalledWith(
+        `${BASE_URL}/session/ses_abc/command`,
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({ command: 'review', arguments: 'pr 42' })
+        })
+      )
+    })
+
+    it('encodes session ID in URL', async () => {
+      const mock = mockFetch(200, {})
+      vi.stubGlobal('fetch', mock)
+
+      await client.runCommand('ses with spaces', { command: 'init', arguments: '' })
+      expect(mock).toHaveBeenCalledWith(
+        `${BASE_URL}/session/ses%20with%20spaces/command`,
+        expect.anything()
+      )
+    })
+
+    it('throws on 400 BadRequest (unknown command)', async () => {
+      const mock = mockFetch(400, 'Available commands: init, review')
+      vi.stubGlobal('fetch', mock)
+
+      await expect(client.runCommand('ses_1', { command: 'nonexistent', arguments: '' })).rejects.toThrow('400')
+    })
+  })
+
+  describe('listSkills', () => {
+    it('sends GET /skill with auth header', async () => {
+      const skills = [
+        { name: 'my-skill', description: 'Does something', location: '/home/user/.claude/skills/my-skill/SKILL.md', content: '# My Skill\nContent here.' }
+      ]
+      const mock = mockFetch(200, skills)
+      vi.stubGlobal('fetch', mock)
+
+      const result = await client.listSkills()
+      expect(result).toEqual(skills)
+      expect(mock).toHaveBeenCalledWith(
+        `${BASE_URL}/skill`,
+        expect.objectContaining({
+          method: 'GET',
+          headers: expect.objectContaining({ Authorization: AUTH })
+        })
+      )
+    })
+
+    it('returns empty array when no skills', async () => {
+      const mock = mockFetch(200, [])
+      vi.stubGlobal('fetch', mock)
+
+      const result = await client.listSkills()
+      expect(result).toEqual([])
+    })
+  })
 })

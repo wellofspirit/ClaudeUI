@@ -111,6 +111,38 @@ export interface OpencodeEvent {
 }
 
 // Known event type string constants (from /doc EventMessage* schemas)
+// Command entry from GET /command
+export interface Command {
+  name: string
+  description?: string
+  agent?: string
+  model?: string
+  template: string
+  subtask?: boolean
+  // source and hints may not serialize through the v1 OpenAPI — treat as optional/best-effort
+  source?: 'command' | 'mcp' | 'skill'
+  hints?: string[]
+}
+
+// Command invocation body for POST /session/{id}/command
+export interface RunCommandRequest {
+  command: string
+  arguments: string
+  agent?: string
+  model?: string
+  variant?: string
+  messageID?: string
+  parts?: unknown[]
+}
+
+// Skill entry from GET /skill
+export interface Skill {
+  name: string
+  description?: string
+  location: string
+  content: string
+}
+
 export const EVENT_TYPES = {
   SERVER_CONNECTED: 'server.connected',
   SESSION_CREATED: 'session.created',
@@ -133,6 +165,7 @@ export const EVENT_TYPES = {
   SESSION_NEXT_TOOL_FAILED: 'session.next.tool.failed',
   PERMISSION_ASKED: 'permission.asked',
   PERMISSION_REPLIED: 'permission.replied',
+  COMMAND_EXECUTED: 'command.executed',
 } as const
 
 export type KnownEventType = (typeof EVENT_TYPES)[keyof typeof EVENT_TYPES]

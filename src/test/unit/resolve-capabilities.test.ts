@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import {
   resolveCapabilities,
   resolveClaudeCapabilities,
+  resolveOpencodeCapabilities,
   CLAUDE_ENGINE_CAPABILITIES,
   claudeModelCapabilities
 } from '../../shared/model-capabilities'
@@ -72,5 +73,21 @@ describe('resolveCapabilities — Claude engine × thinking+effort model', () =>
     const modelCaps = claudeModelCapabilities(model)
     expect(modelCaps.reasoning.thinking).toBeUndefined()
     expect(modelCaps.reasoning.effort).toBeUndefined()
+  })
+})
+
+describe('resolveOpencodeCapabilities — Phase 8a capability gates', () => {
+  it('slashCommands + skills are true for opencode (Phase 8a flip)', () => {
+    const caps = resolveOpencodeCapabilities()
+    expect(caps.slashCommands).toBe(true)
+    expect(caps.skills).toBe(true)
+  })
+
+  it('still has plan=true, voice=false, backgroundTasks=false, subagents=false', () => {
+    const caps = resolveOpencodeCapabilities()
+    expect(caps.plan).toBe(true)
+    expect(caps.voice).toBe(false)
+    expect(caps.backgroundTasks).toBe(false)
+    expect(caps.subagents).toBe(false)
   })
 })

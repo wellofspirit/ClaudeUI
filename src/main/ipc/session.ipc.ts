@@ -76,6 +76,8 @@ import type {
   VendorAuthOption
 } from '../../shared/types'
 import { discoverOpencodeModels } from '../opencode/model-discovery'
+import { discoverOpencodeSkills } from '../opencode/command-skill-discovery'
+import { OpencodeSession } from '../opencode/OpencodeSession'
 import { logger } from '../services/logger'
 import { deleteSessionFiles, deleteProjectFiles } from '../services/delete-session-files'
 import { startSocksBridge, stopSocksBridge } from '../services/socks-bridge'
@@ -1177,7 +1179,21 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     saveSlashCommands(commands)
   )
   ipcMain.handle('config:scan-custom-commands', (_e, cwd: string) => scanCustomCommands(cwd))
-  ipcMain.handle('config:load-skill-details', (_e, cwd: string) => scanSkills(cwd))
+  ipcMain.handle('config:load-skill-details', (_e, cwd: string) => {
+    // Engine-dispatch: if the active session for this cwd is an opencode session,
+    // source skills from opencode's GET /skill API (cached, transient-server).
+    // Otherwise fall back to the Claude skill scanner — unchanged for Claude.
+    if (sharedManager) {
+      let hasOpencode = false
+      sharedManager.forEach((session) => {
+        if (session.cwd === cwd && session instanceof OpencodeSession) {
+          hasOpencode = true
+        }
+      })
+      if (hasOpencode) return discoverOpencodeSkills(cwd)
+    }
+    return scanSkills(cwd)
+  })
   ipcMain.handle('config:load-engine-config', (_e, engineId: string) =>
     loadEngineConfig(engineId)
   )

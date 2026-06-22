@@ -8,6 +8,9 @@ import type {
   PromptRequest,
   ForkRequest,
   OpencodeEvent,
+  Command,
+  RunCommandRequest,
+  Skill,
 } from './protocol/types'
 
 export class OpencodeClient {
@@ -180,6 +183,28 @@ export class OpencodeClient {
   /** POST /permission/{id}/reply — reply to a permission.asked event */
   replyPermission(requestId: string, reply: 'once' | 'always' | 'reject'): Promise<unknown> {
     return this.post(`/permission/${encodeURIComponent(requestId)}/reply`, { reply })
+  }
+
+  // ── Commands + Skills ─────────────────────────────────────────────────────
+
+  /** GET /command — list all available commands (built-in, config, MCP, slash-skills). */
+  listCommands(): Promise<Command[]> {
+    return this.get('/command')
+  }
+
+  /**
+   * POST /session/{id}/command — invoke a named command.
+   * Runs a full turn server-side (template expansion, inline cmd, @file mentions).
+   * Output also streams via GET /event as normal message.updated / message.part.updated;
+   * completion is marked by session.idle (not the command.executed informational event).
+   */
+  runCommand(sessionId: string, body: RunCommandRequest): Promise<unknown> {
+    return this.post(`/session/${encodeURIComponent(sessionId)}/command`, body)
+  }
+
+  /** GET /skill — list all discovered skills (project, user, built-in). */
+  listSkills(): Promise<Skill[]> {
+    return this.get('/skill')
   }
 
   // ── SSE Event Stream ──────────────────────────────────────────────────────

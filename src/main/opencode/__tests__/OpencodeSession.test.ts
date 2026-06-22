@@ -42,6 +42,9 @@ const {
   mockLoadEngineConfig,
   mockPrompt,
   mockDeleteSession,
+  mockListCommands,
+  mockListSkills,
+  mockRunCommand,
   MockOpencodeClient
 } = vi.hoisted(() => {
   const mockAcquire = vi.fn()
@@ -57,6 +60,9 @@ const {
   const mockLoadEngineConfig = vi.fn()
   const mockPrompt = vi.fn()
   const mockDeleteSession = vi.fn()
+  const mockListCommands = vi.fn()
+  const mockListSkills = vi.fn()
+  const mockRunCommand = vi.fn()
 
   // Constructor mock — we build the instance here so clearAllMocks doesn't
   // kill the implementation.
@@ -76,6 +82,9 @@ const {
     mockLoadEngineConfig,
     mockPrompt,
     mockDeleteSession,
+    mockListCommands,
+    mockListSkills,
+    mockRunCommand,
     MockOpencodeClient
   }
 })
@@ -132,6 +141,9 @@ function setupMocks(): void {
   mockLoadEngineConfig.mockReset()
   mockPrompt.mockReset()
   mockDeleteSession.mockReset()
+  mockListCommands.mockReset()
+  mockListSkills.mockReset()
+  mockRunCommand.mockReset()
   // Default: no user-configured rules (hermetic — don't read the dev's settings).
   mockLoadClaudePermissions.mockReturnValue({
     allow: [],
@@ -145,6 +157,10 @@ function setupMocks(): void {
   // override this to enable + set a judge model.
   mockLoadEngineConfig.mockReturnValue({ autoMode: { enabled: false } })
   mockDeleteSession.mockResolvedValue(undefined)
+  // Default: empty command/skill lists (tests that need specific commands override)
+  mockListCommands.mockResolvedValue([])
+  mockListSkills.mockResolvedValue([])
+  mockRunCommand.mockResolvedValue(undefined)
 
   // Set default implementations
   mockAcquire.mockResolvedValue({ baseUrl: 'http://127.0.0.1:9999', authHeader: 'Basic test' })
@@ -169,7 +185,10 @@ function setupMocks(): void {
       abortSession: mockAbortSession,
       patchSession: mockPatchSession,
       replyPermission: mockReplyPermission,
-      subscribeEvents: mockSubscribeEvents
+      subscribeEvents: mockSubscribeEvents,
+      listCommands: mockListCommands,
+      listSkills: mockListSkills,
+      runCommand: mockRunCommand
     }
   })
 }
@@ -289,10 +308,46 @@ describe('OpencodeSession — run()', () => {
     session.dispose()
   })
 
-  it('does nothing for null prompt (spawn-only)', async () => {
-    const session = makeSession()
-    await session.run(null)
-    expect(mockAcquire).not.toHaveBeenCalled()
+  it('eager connect on null prompt — acquires server, fetches commands+skills, emits events', async () => {
+    const win = new MockWindow() as unknown as BrowserWindow
+    mockListCommands.mockResolvedValue([
+      { name: 'init', description: 'Initialize', template: '/init' },
+      { name: 'review', description: 'Code review', template: '/review', subtask: true }
+    ])
+    mockListSkills.mockResolvedValue([
+      { name: 'my-skill', description: 'Does stuff', location: '/home/user/.claude/skills/my-skill/SKILL.md', content: '# My Skill' }
+    ])
+    const session = new OpencodeSession('r_eager', win, '/tmp')
+    session.run(null) // fire-and-forget; eagerConnect runs asynchronously
+
+    // Wait for the session:slash-commands event, which is emitted after both
+    // listCommands + listSkills resolve inside eagerConnect.
+    const sendMock = (win as unknown as MockWindow).webContents.send
+    await vi.waitFor(() => {
+      const found = sendMock.mock.calls.some((c) => c[0] === 'session:slash-commands')
+      expect(found).toBe(true)
+    })
+
+    const calls = sendMock.mock.calls
+
+    // session:slash-commands emitted with '/'-prefixed names
+    const slashCall = calls.find((c) => c[0] === 'session:slash-commands')
+    expect(slashCall).toBeDefined()
+    expect(slashCall![2]).toEqual([
+      { name: '/init', description: 'Initialize' },
+      { name: '/review', description: 'Code review' }
+    ])
+
+    // session:skills emitted with name list
+    const skillsCall = calls.find((c) => c[0] === 'session:skills')
+    expect(skillsCall).toBeDefined()
+    expect(skillsCall![2]).toEqual(['my-skill'])
+
+    // No opencode session created (commands/skills are instance-scoped, not session-scoped)
+    expect(mockCreateSession).not.toHaveBeenCalled()
+    // No prompt sent
+    expect(mockPromptAsync).not.toHaveBeenCalled()
+
     session.dispose()
   })
 
@@ -302,6 +357,227 @@ describe('OpencodeSession — run()', () => {
     await session.run('second')
     expect(mockAcquire).toHaveBeenCalledTimes(1)
     expect(mockCreateSession).toHaveBeenCalledTimes(1)
+    session.dispose()
+  })
+
+  it('does NOT double-acquire when a prompt arrives before the eager acquire resolves (ref leak guard)', async () => {
+    // Manually-controlled acquire: run(null)'s eagerConnect awaits this; we then
+    // fire run(prompt) BEFORE resolving it. With the memoized ensureConnected,
+    // both callers await the SAME in-flight acquire → exactly ONE acquire/ref.
+    // (Against the pre-fix code, run(prompt)'s own inline acquire ran while
+    // this.conn was still null → TWO acquires → leaked server ref on cancel.)
+    let resolveAcquire!: (conn: { baseUrl: string; authHeader: string }) => void
+    const acquireGate = new Promise<{ baseUrl: string; authHeader: string }>((res) => {
+      resolveAcquire = res
+    })
+    mockAcquire.mockReturnValue(acquireGate)
+    mockListCommands.mockResolvedValue([])
+    mockListSkills.mockResolvedValue([])
+
+    const session = makeSession()
+    session.run(null) // eagerConnect → ensureConnected → awaits acquireGate
+    const promptRun = session.run('hello before connect') // races; must reuse the in-flight acquire
+
+    // Both are blocked on the same gate; let microtasks settle to prove neither
+    // bypassed the memoized promise with a second acquire.
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(mockAcquire).toHaveBeenCalledTimes(1)
+
+    // Resolve the acquire — both paths proceed off the single connection.
+    resolveAcquire({ baseUrl: 'http://127.0.0.1:9999', authHeader: 'Basic test' })
+    await promptRun
+
+    // Still exactly one acquire after completion; one session created.
+    expect(mockAcquire).toHaveBeenCalledTimes(1)
+    expect(mockCreateSession).toHaveBeenCalledTimes(1)
+
+    // Ref balance: dispose() releases exactly once (acquire 1 ↔ release 1).
+    session.dispose()
+    expect(mockRelease).toHaveBeenCalledTimes(1)
+  })
+
+  it('reconnects after a cancel (idle timeout) — _cancelled resets per run', async () => {
+    // cancel() sets _cancelled=true and is also fired by the idle timeout. A new
+    // prompt after that must reconnect: run() resets _cancelled at the top so the
+    // memoized connect is not refused.
+    // NOTE: the constructor's warmCache() also calls acquire() but with
+    // PERSISTED_SESSIONS_DIR — we count only acquires for THIS session's cwd.
+    const CWD = '/tmp/test-cwd'
+    const acquiresForCwd = () => mockAcquire.mock.calls.filter((c) => c[0] === CWD).length
+
+    const session = makeSession()
+    await session.run('first')
+    expect(acquiresForCwd()).toBe(1)
+    session.cancel() // releases; _cancelled = true
+    expect(mockRelease).toHaveBeenCalledWith(CWD)
+    await session.run('second') // must re-acquire, not silently no-op
+    expect(acquiresForCwd()).toBe(2)
+    expect(mockPromptAsync).toHaveBeenCalledTimes(2)
+    session.dispose()
+  })
+
+  it('eager connect arms the inactivity timer → idle session releases its server ref', async () => {
+    // run(null) holds a server ref now; without a timer an opened-but-never-
+    // prompted session would leak it until app quit. Assert the timer fires
+    // cancel() → release.
+    vi.useFakeTimers()
+    try {
+      mockListCommands.mockResolvedValue([])
+      mockListSkills.mockResolvedValue([])
+      const session = makeSession()
+      session.setInactivityTimeout(5_000) // short timeout for the test
+      session.run(null)
+      // Flush the eager connect's promise chain (acquire + discovery) AND the
+      // 5s timer in one advance.
+      await vi.advanceTimersByTimeAsync(5_000)
+      // The inactivity timer fired cancel() → released the acquired server ref.
+      expect(mockRelease).toHaveBeenCalledWith('/tmp/test-cwd')
+      session.dispose()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Slash command routing (Phase 8a)
+//
+// run(prompt) routes to runCommand when the prompt is /known-command [args],
+// otherwise sends via promptAsync unchanged. The known command set is populated
+// by eagerConnect (run(null)); tests that need routing must seed it first.
+// ---------------------------------------------------------------------------
+
+describe('OpencodeSession — slash command routing (Phase 8a)', () => {
+  beforeEach(setupMocks)
+
+  /** Helper: run(null) to populate knownCommandNames, then run(prompt). */
+  async function runWithCommands(
+    session: OpencodeSession,
+    commands: Array<{ name: string; template: string }>,
+    prompt: string
+  ): Promise<void> {
+    mockListCommands.mockResolvedValue(commands)
+    mockListSkills.mockResolvedValue([])
+    // run(null) fires eagerConnect; wait for listCommands to be called so
+    // knownCommandNames is populated before we send the prompt.
+    session.run(null)
+    await vi.waitFor(() => expect(mockListCommands).toHaveBeenCalled())
+    // Give the Promise chain (after listCommands resolves) a microtask tick so
+    // knownCommandNames.add() completes before we call run(prompt).
+    await new Promise<void>((r) => setTimeout(r, 0))
+    // Now run the actual prompt (server + session already warm from eagerConnect)
+    await session.run(prompt)
+  }
+
+  it('/known-command → routes to runCommand with parsed name + arguments', async () => {
+    mockCreateSession.mockResolvedValue({ id: 'ses_slash_1' })
+    const session = makeSession()
+    await runWithCommands(
+      session,
+      [{ name: 'review', template: '/review $ARGUMENTS' }],
+      '/review pr 1'
+    )
+    expect(mockRunCommand).toHaveBeenCalledWith(
+      'ses_slash_1',
+      { command: 'review', arguments: 'pr 1' }
+    )
+    expect(mockPromptAsync).not.toHaveBeenCalled()
+    session.dispose()
+  })
+
+  it('/known-command with no args passes empty arguments string', async () => {
+    mockCreateSession.mockResolvedValue({ id: 'ses_slash_2' })
+    const session = makeSession()
+    await runWithCommands(
+      session,
+      [{ name: 'init', template: '/init' }],
+      '/init'
+    )
+    expect(mockRunCommand).toHaveBeenCalledWith(
+      'ses_slash_2',
+      { command: 'init', arguments: '' }
+    )
+    expect(mockPromptAsync).not.toHaveBeenCalled()
+    session.dispose()
+  })
+
+  it('/unknown-command → falls through to promptAsync (model sees literal text)', async () => {
+    mockCreateSession.mockResolvedValue({ id: 'ses_slash_3' })
+    const session = makeSession()
+    await runWithCommands(
+      session,
+      [{ name: 'init', template: '/init' }],
+      '/nonexistent foo bar'
+    )
+    // Not a known command → promptAsync with the raw prompt
+    expect(mockRunCommand).not.toHaveBeenCalled()
+    expect(mockPromptAsync).toHaveBeenCalledWith(
+      'ses_slash_3',
+      expect.objectContaining({
+        parts: expect.arrayContaining([{ type: 'text', text: '/nonexistent foo bar' }])
+      })
+    )
+    session.dispose()
+  })
+
+  it('plain prompt (no slash) → promptAsync always', async () => {
+    mockCreateSession.mockResolvedValue({ id: 'ses_plain' })
+    const session = makeSession()
+    await runWithCommands(
+      session,
+      [{ name: 'review', template: '/review' }],
+      'please review my code'
+    )
+    expect(mockRunCommand).not.toHaveBeenCalled()
+    expect(mockPromptAsync).toHaveBeenCalledWith(
+      'ses_plain',
+      expect.objectContaining({
+        parts: expect.arrayContaining([{ type: 'text', text: 'please review my code' }])
+      })
+    )
+    session.dispose()
+  })
+
+  it('runCommand BadRequest falls back to promptAsync (no wedge on name mismatch)', async () => {
+    mockCreateSession.mockResolvedValue({ id: 'ses_fallback' })
+    mockRunCommand.mockRejectedValue(new Error('opencode POST /session/ses_fallback/command → 400: Available commands: init'))
+    const session = makeSession()
+    await runWithCommands(
+      session,
+      [{ name: 'review', template: '/review' }],
+      '/review broken'
+    )
+    expect(mockRunCommand).toHaveBeenCalled()
+    // Fell back to promptAsync after the 400 error
+    expect(mockPromptAsync).toHaveBeenCalledWith(
+      'ses_fallback',
+      expect.objectContaining({
+        parts: expect.arrayContaining([{ type: 'text', text: '/review broken' }])
+      })
+    )
+    session.dispose()
+  })
+
+  it('forwards file attachments into the runCommand body (not dropped on slash commands)', async () => {
+    mockCreateSession.mockResolvedValue({ id: 'ses_att' })
+    mockListCommands.mockResolvedValue([{ name: 'review', template: '/review' }])
+    mockListSkills.mockResolvedValue([])
+    const session = makeSession()
+    session.run(null)
+    await vi.waitFor(() => expect(mockListCommands).toHaveBeenCalled())
+    await new Promise<void>((r) => setTimeout(r, 0))
+    await session.run('/review this', [
+      { mediaType: 'image/png', base64Data: 'AAAA', fileName: 'shot.png' }
+    ])
+    expect(mockRunCommand).toHaveBeenCalledWith(
+      'ses_att',
+      expect.objectContaining({
+        command: 'review',
+        arguments: 'this',
+        parts: [{ type: 'file', mime: 'image/png', url: 'data:image/png;base64,AAAA' }]
+      })
+    )
     session.dispose()
   })
 })
@@ -391,6 +667,14 @@ describe('OpencodeSession — capabilities', () => {
     expect(caps.backgroundTasks).toBe(false)
     expect(caps.subagents).toBe(false)
     expect(caps.interactiveApprovals).toBe(true)
+    session.dispose()
+  })
+
+  it('slashCommands + skills are true for opencode (Phase 8a)', () => {
+    const session = makeSession()
+    const caps = session.capabilities
+    expect(caps.slashCommands).toBe(true)
+    expect(caps.skills).toBe(true)
     session.dispose()
   })
 })
