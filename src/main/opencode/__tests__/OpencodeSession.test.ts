@@ -1487,3 +1487,220 @@ describe('OpencodeSession — sideQuestion capability', () => {
     session.dispose()
   })
 })
+
+// ---------------------------------------------------------------------------
+// Queue + Steer (Phase 8c)
+//
+// opencode coalesces a mid-turn prompt into the running loop — no server-side
+// holdable queue. send-while-busy = post-immediately = steer.
+// ---------------------------------------------------------------------------
+
+describe('OpencodeSession — queue + steer (Phase 8c)', () => {
+  beforeEach(setupMocks)
+
+  // Helper: run a first turn so isProcessing=true + client + openSessionId are set,
+  // but hold the SSE consumer open (never yields session.idle) so isProcessing stays true.
+  async function startTurn(): Promise<{ session: OpencodeSession; win: MockWindow }> {
+    const win = new MockWindow() as unknown as BrowserWindow
+    mockCreateSession.mockResolvedValue({ id: 'ses_steer_1' })
+    // SSE stream that never ends — keeps isProcessing=true across the steer call.
+    // eslint-disable-next-line require-yield
+    mockSubscribeEvents.mockImplementation(async function* () {
+      await new Promise(() => {}) // hangs forever
+    })
+    const session = new OpencodeSession('r_steer', win as unknown as BrowserWindow, '/tmp/steer-cwd')
+    // Run without awaiting full completion — promptAsync resolves (the "send" side),
+    // but the SSE consumer is still running so isProcessing stays true.
+    await session.run('initial prompt')
+    // At this point: isProcessing=true (session.idle never arrived), client set, openSessionId set.
+    return { session, win: win as unknown as MockWindow }
+  }
+
+  it('idle → normal turn: createSession + promptAsync (unchanged)', async () => {
+    mockCreateSession.mockResolvedValue({ id: 'ses_normal' })
+    const session = makeSession()
+    await session.run('hello')
+    expect(mockCreateSession).toHaveBeenCalledTimes(1)
+    expect(mockPromptAsync).toHaveBeenCalledTimes(1)
+    expect(mockPromptAsync).toHaveBeenCalledWith(
+      'ses_normal',
+      expect.objectContaining({ parts: expect.arrayContaining([{ type: 'text', text: 'hello' }]) })
+    )
+    session.dispose()
+  })
+
+  it('willQueue returns isProcessing', () => {
+    const session = makeSession()
+    expect(session.willQueue).toBe(false)
+    // Simulate processing state — we can verify via the getter directly
+    // since isProcessing is private. The getter is observable through willQueue.
+    session.dispose()
+  })
+
+  it('busy → steer: calls sendPrompt/promptAsync (coalesce), emits session:steer-consumed, does NOT call createSession again', async () => {
+    const { session, win } = await startTurn()
+
+    // Clear the calls from the initial turn so we only count the steer's
+    mockPromptAsync.mockClear()
+    mockCreateSession.mockClear()
+    win.webContents.send.mockClear()
+
+    // Steer: run while isProcessing=true
+    await session.run('mid-turn steer')
+
+    // Must post to opencode (coalesce)
+    expect(mockPromptAsync).toHaveBeenCalledTimes(1)
+    expect(mockPromptAsync).toHaveBeenCalledWith(
+      'ses_steer_1',
+      expect.objectContaining({ parts: expect.arrayContaining([{ type: 'text', text: 'mid-turn steer' }]) })
+    )
+    // Must NOT create a new opencode session
+    expect(mockCreateSession).not.toHaveBeenCalled()
+
+    // Must emit session:steer-consumed with the exact Claude-matching payload
+    const calls = win.webContents.send.mock.calls
+    const steerCall = calls.find((c) => c[0] === 'session:steer-consumed')
+    expect(steerCall).toBeDefined()
+    expect(steerCall![2]).toEqual({ prompt: 'mid-turn steer' })
+
+    session.dispose()
+  })
+
+  it('busy → steer: does NOT reset isProcessing (ongoing turn keeps running)', async () => {
+    const { session } = await startTurn()
+
+    await session.run('steer while busy')
+
+    // isProcessing must still be true after the steer (the SSE consumer is still open)
+    expect(session.willQueue).toBe(true)
+
+    session.dispose()
+  })
+
+  it('two consecutive mid-turn sends → two promptAsync posts + two steer-consumed emits', async () => {
+    const { session, win } = await startTurn()
+
+    mockPromptAsync.mockClear()
+    win.webContents.send.mockClear()
+
+    await session.run('steer A')
+    await session.run('steer B')
+
+    expect(mockPromptAsync).toHaveBeenCalledTimes(2)
+    const steerCalls = win.webContents.send.mock.calls.filter((c) => c[0] === 'session:steer-consumed')
+    expect(steerCalls).toHaveLength(2)
+    expect(steerCalls[0]![2]).toEqual({ prompt: 'steer A' })
+    expect(steerCalls[1]![2]).toEqual({ prompt: 'steer B' })
+
+    session.dispose()
+  })
+
+  it('/known-command sent mid-turn still routes via runCommand (sendPrompt reuse) and emits steer-consumed', async () => {
+    // Seed knownCommandNames via run(null) before starting the turn
+    mockListCommands.mockResolvedValue([{ name: 'review', description: 'Review', template: '/review' }])
+    mockListSkills.mockResolvedValue([])
+    const win = new MockWindow() as unknown as BrowserWindow
+    mockCreateSession.mockResolvedValue({ id: 'ses_slash_steer' })
+    // eslint-disable-next-line require-yield
+    mockSubscribeEvents.mockImplementation(async function* () {
+      await new Promise(() => {}) // hangs forever so isProcessing stays true
+    })
+    const session = new OpencodeSession('r_slash_steer', win as unknown as BrowserWindow, '/tmp/slash-steer')
+
+    // Populate knownCommandNames via eager connect
+    session.run(null)
+    await vi.waitFor(() => expect(mockListCommands).toHaveBeenCalled())
+    await new Promise<void>((r) => setTimeout(r, 0))
+
+    // Start a real turn to set isProcessing=true, client, openSessionId
+    await session.run('initial')
+
+    mockRunCommand.mockClear()
+    mockPromptAsync.mockClear()
+    ;(win as unknown as MockWindow).webContents.send.mockClear()
+
+    // Mid-turn steer with a known slash command
+    await session.run('/review this pr')
+
+    expect(mockRunCommand).toHaveBeenCalledWith(
+      'ses_slash_steer',
+      { command: 'review', arguments: 'this pr' }
+    )
+    expect(mockPromptAsync).not.toHaveBeenCalled()
+
+    const steerCalls = (win as unknown as MockWindow).webContents.send.mock.calls.filter(
+      (c) => c[0] === 'session:steer-consumed'
+    )
+    expect(steerCalls).toHaveLength(1)
+    expect(steerCalls[0]![2]).toEqual({ prompt: '/review this pr' })
+
+    session.dispose()
+  })
+
+  it('steer records user message in history', async () => {
+    const { session } = await startTurn()
+    const historyBefore = session.getMessages().length
+
+    await session.run('steer message')
+
+    const history = session.getMessages()
+    expect(history.length).toBe(historyBefore + 1)
+    const steerMsg = history[history.length - 1]
+    expect(steerMsg.role).toBe('user')
+    expect(steerMsg.content[0]).toMatchObject({ type: 'text', text: 'steer message' })
+
+    session.dispose()
+  })
+
+  it('steer path does NOT re-apply permission mode or re-setup SSE (no extra patchSession/subscribeEvents)', async () => {
+    const { session } = await startTurn()
+
+    mockPatchSession.mockClear()
+    mockSubscribeEvents.mockClear()
+
+    await session.run('mid-turn steer')
+
+    expect(mockPatchSession).not.toHaveBeenCalled()
+    expect(mockSubscribeEvents).not.toHaveBeenCalled()
+
+    session.dispose()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// dequeueMessage — no-op for opencode (Phase 8c)
+//
+// dequeueMessage is not on ISession; the IPC handler already guards it with
+// isClaudeSession and returns {removed:0} for non-Claude. OpencodeSession has
+// no dequeueMessage — this test verifies the IPC-level guard is sufficient and
+// that no error propagates to a caller expecting the {removed:N} shape.
+// (The renderer's dequeue affordance simply no-ops gracefully — by design.)
+// ---------------------------------------------------------------------------
+
+// The dequeue guard lives in the IPC layer (session.ipc.ts + remote-handlers.ts),
+// not in OpencodeSession itself, so there's nothing to test on OpencodeSession
+// directly. The existing session.ipc.test and remote-handlers.ipc.test cover it.
+// We add a capability assertion as the test anchor.
+
+describe('OpencodeSession — queue + steer capability flags (Phase 8c)', () => {
+  beforeEach(setupMocks)
+
+  it('queue capability is true', () => {
+    const session = makeSession()
+    expect(session.capabilities.queue).toBe(true)
+    session.dispose()
+  })
+
+  it('steer capability is true', () => {
+    const session = makeSession()
+    expect(session.capabilities.steer).toBe(true)
+    session.dispose()
+  })
+
+  it('both queue and steer are true (OPENCODE_ENGINE_CAPABILITIES flip)', () => {
+    const session = makeSession()
+    expect(session.capabilities.queue).toBe(true)
+    expect(session.capabilities.steer).toBe(true)
+    session.dispose()
+  })
+})

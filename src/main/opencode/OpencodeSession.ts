@@ -250,6 +250,29 @@ export class OpencodeSession extends BaseSession {
       return
     }
 
+    // ── Steer path: prompt arriving mid-turn coalesces into the running opencode
+    // loop (Phase 8c — see docs/v2/phase-8c-opencode-queue-steer.md). We post immediately — opencode's
+    // runLoop re-reads the message list each step and picks it up — then emit
+    // session:steer-consumed so the renderer moves the queued card into chat.
+    // We do NOT touch isProcessing / startTimeMs / createSession / ensureSSEConsumer /
+    // applyPermissionMode — the ongoing turn already owns all of that.
+    if (this.isProcessing && this.client && this.openSessionId) {
+      const userMsg: ChatMessage = {
+        id: uuid(),
+        role: 'user',
+        content: [{ type: 'text', text: prompt }],
+        timestamp: Date.now()
+      }
+      this.messageHistory.push(userMsg)
+      try {
+        await this.sendPrompt(prompt, attachments)
+      } catch (err) {
+        logger.warn('OpencodeSession', `steer send failed: ${err instanceof Error ? err.message : String(err)}`)
+      }
+      this.send('session:steer-consumed', { prompt })
+      return
+    }
+
     this.isProcessing = true
     this.sendStatus()
 
