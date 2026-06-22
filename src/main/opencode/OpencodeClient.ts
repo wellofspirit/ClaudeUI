@@ -185,6 +185,16 @@ export class OpencodeClient {
     return this.post(`/permission/${encodeURIComponent(requestId)}/reply`, { reply })
   }
 
+  /** POST /question/{id}/reply — submit answers to a question.asked event */
+  replyQuestion(requestId: string, answers: string[][]): Promise<unknown> {
+    return this.post(`/question/${encodeURIComponent(requestId)}/reply`, { answers })
+  }
+
+  /** POST /question/{id}/reject — dismiss a question.asked event */
+  rejectQuestion(requestId: string): Promise<unknown> {
+    return this.post(`/question/${encodeURIComponent(requestId)}/reject`)
+  }
+
   // ── Commands + Skills ─────────────────────────────────────────────────────
 
   /** GET /command — list all available commands (built-in, config, MCP, slash-skills). */

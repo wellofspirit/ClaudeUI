@@ -284,6 +284,7 @@ const SESSION_IPC_CHANNELS = [
   'session:stop-task',
   'session:background-task',
   'session:dequeue-message',
+  'session:ask-side-question',
   'session:set-permission-mode',
   'session:set-model',
   'session:set-effort',
@@ -899,7 +900,7 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
   ipcMain.handle('session:ask-side-question', async (_e, routingId: string, question: string) => {
     const session = manager.get(routingId)
     if (!session) return null
-    if (!session.capabilities.sideQuestion || !isClaudeSession(session)) return null
+    if (!session.capabilities.sideQuestion) return null
     return await session.askSideQuestion(question)
   })
 

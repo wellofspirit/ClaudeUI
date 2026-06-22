@@ -14,7 +14,8 @@ import type {
   PendingApproval,
   AccountRef,
   MeteringSnapshot,
-  AutoModeConfig
+  AutoModeConfig,
+  AskUserQuestion
 } from '../../shared/types'
 import { opencodeModel } from '../../shared/types'
 import { equivalentCostUsd } from '../../shared/pricing'
@@ -143,6 +144,9 @@ export class OpencodeSession extends BaseSession {
   private permissionMode: string
   private agent: string | null = null
   private pendingApprovals = new Map<string, unknown>()
+  // Pending model-elicitation questions (question.asked) keyed by requestId.
+  // Stored so resolveApproval can map the ordered answers Record→string[][].
+  private pendingQuestions = new Map<string, AskUserQuestion[]>()
   // Per-message part accumulator keyed by messageId
   private accumulators = new Map<string, MessageAccumulator>()
   // Track last emitted tool completion per partId to avoid double-emitting
@@ -498,17 +502,29 @@ export class OpencodeSession extends BaseSession {
         break
       }
 
-      case 'approval':
-        this.pendingApprovals.set(output.approval.requestId, true)
-        // Auto mode (full): route to the LLM gatekeeper instead of the human;
-        // fall back to a human prompt on uncertain/unavailable/cap. Otherwise
-        // emit the approval to the UI as normal. See ADR-023.
-        if (this.isAutoMode(this.permissionMode)) {
-          void this.handleAutoModeApproval(output.approval)
+      case 'approval': {
+        const approval = output.approval
+        this.pendingApprovals.set(approval.requestId, true)
+
+        if (approval.toolName === 'AskUserQuestion') {
+          // Model-elicitation questions (question.asked) must ALWAYS go to the
+          // human regardless of autonomy mode — the auto-mode classifier judges
+          // tool PERMISSIONS, not user-facing structured questions. Store the
+          // question list so resolveApproval can map answers in order.
+          const input = approval.input as { questions?: AskUserQuestion[] }
+          this.pendingQuestions.set(approval.requestId, input.questions ?? [])
+          this.send('session:approval-request', approval)
         } else {
-          this.send('session:approval-request', output.approval)
+          // Permission approval: auto mode (full) → LLM gatekeeper; else → human.
+          // See ADR-023.
+          if (this.isAutoMode(this.permissionMode)) {
+            void this.handleAutoModeApproval(approval)
+          } else {
+            this.send('session:approval-request', approval)
+          }
         }
         break
+      }
 
       case 'result':
         this.isProcessing = false
@@ -566,12 +582,50 @@ export class OpencodeSession extends BaseSession {
   resolveApproval(
     requestId: string,
     decision: ApprovalDecision,
-    _answers?: Record<string, string>,
+    answers?: Record<string, string>,
     updatedPermissions?: PermissionSuggestion[]
   ): void {
     this.pendingApprovals.delete(requestId)
     if (!this.client) return
 
+    // ── Model-elicitation question (question.asked) ──────────────────────────
+    // These are entirely separate from permission approvals: we reply via
+    // /question/{id}/reply (with answers) or /question/{id}/reject, NOT
+    // /permission/{id}/reply. The stored pendingQuestions list provides the
+    // ordered question objects so we can reconstruct the string[][] answers
+    // that opencode expects.
+    if (this.pendingQuestions.has(requestId)) {
+      const questions = this.pendingQuestions.get(requestId)!
+      this.pendingQuestions.delete(requestId)
+
+      const allow = decision === 'allow' || decision === 'allowForSession'
+      if (allow && answers) {
+        // Map answers: Record<string,string> → string[][] in question ORDER.
+        // Key: q.question || 'q' + index  (mirrors AskUserQuestionBlock View.tsx keyOf)
+        // MultiSelect values: comma-space joined → split back to string[]
+        // Single-select: wrap as [value]
+        const mapped: string[][] = questions.map((q, i) => {
+          const key = q.question || `q${i}`
+          const raw = answers[key] ?? ''
+          if (q.multiSelect) {
+            // AskUserQuestionBlock joins selections with ', '
+            return raw ? raw.split(', ') : []
+          }
+          return raw ? [raw] : []
+        })
+        this.client.replyQuestion(requestId, mapped).catch((err) => {
+          logger.warn('OpencodeSession', `replyQuestion failed: ${err instanceof Error ? err.message : String(err)}`)
+        })
+      } else {
+        // deny or allow without answers → reject the question
+        this.client.rejectQuestion(requestId).catch((err) => {
+          logger.warn('OpencodeSession', `rejectQuestion failed: ${err instanceof Error ? err.message : String(err)}`)
+        })
+      }
+      return
+    }
+
+    // ── Permission approval (permission.asked) ───────────────────────────────
     const allow = decision === 'allow' || decision === 'allowForSession'
     // "always allow" = the user checked persist-rule suggestions in the dialog.
     const persist = allow && !!updatedPermissions && updatedPermissions.length > 0
@@ -792,6 +846,63 @@ export class OpencodeSession extends BaseSession {
   /** Classifier couldn't decide (unavailable / cap / error) → ask the human. */
   private fallbackToHuman(approval: PendingApproval): void {
     this.send('session:approval-request', approval)
+  }
+
+  /**
+   * Ask a one-off question outside the main conversation history (the `/btw`
+   * command). Uses a fresh throwaway opencode session so the question never
+   * pollutes the main session's history. Mirrors the `makeJudgeFn` pattern.
+   * Returns the joined assistant text, or null on any failure. Never throws.
+   *
+   * `client.prompt` runs a SYNCHRONOUS server-side turn (POST /session/{id}/message
+   * blocks until the turn fully completes). Claude's `/btw` is tool-less; ours
+   * must match — and critically, must be HANG-PROOF: if the model called a tool
+   * that needed approval, opencode would emit `permission.asked` for THIS
+   * throwaway session, which our main SSE consumer filters out (foreign
+   * sessionID) and never answers → the synchronous prompt would hang forever
+   * (spinner stuck). So we patch a deny-all ruleset on the throwaway session
+   * BEFORE prompting: opencode's permission evaluator short-circuits a matching
+   * `deny` WITHOUT publishing `permission.asked` (verified vs 1.17.9 —
+   * permission/index.ts `ask()` returns DeniedError before the Event.Asked path;
+   * `{permission:'*', pattern:'*'}` matches every tool via Wildcard.match → regex
+   * `.*`). The model therefore just answers in text — tool-less, hang-proof. The
+   * system prompt is a belt-and-suspenders nudge. (We deliberately avoid the
+   * prompt body's `tools` field, which opencode marks @deprecated.)
+   */
+  override async askSideQuestion(question: string): Promise<string | null> {
+    try {
+      await this.ensureConnected()
+      if (!this.client || this._cancelled) return null
+
+      const parsed = parseModelString(this._model)
+      const js = await this.client.createSession({ title: 'side-question' })
+      try {
+        // Deny every tool so a synchronous prompt can never block on an
+        // unanswerable permission.asked (see method doc). Best-effort; the
+        // system prompt still discourages tools if the patch were to fail.
+        await this.client.patchSession(js.id, {
+          permission: [{ permission: '*', pattern: '*', action: 'deny' }]
+        })
+        const resp = (await this.client.prompt(js.id, {
+          model: { providerID: parsed.providerID, modelID: parsed.modelID },
+          system: 'Answer the following question concisely and directly. Do not use tools.',
+          parts: [{ type: 'text', text: question }]
+        })) as { parts?: Array<{ type?: string; text?: string }> }
+        const text = (resp?.parts ?? [])
+          .filter((p) => p?.type === 'text')
+          .map((p) => p?.text ?? '')
+          .join('')
+        return text || null
+      } finally {
+        this.client.deleteSession(js.id).catch(() => {})
+      }
+    } catch (err) {
+      logger.warn(
+        'OpencodeSession',
+        `askSideQuestion failed: ${err instanceof Error ? err.message : String(err)}`
+      )
+      return null
+    }
   }
 
   sendStatus(): void {

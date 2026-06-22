@@ -606,6 +606,123 @@ describe('extractToolResult', () => {
 
 // ── session.error / ProviderAuthError (Phase 5c) ─────────────────────────────
 
+// ── question.asked / question.replied / question.rejected (Phase 8b) ─────────
+
+describe('mapEvent — question.asked', () => {
+  const accumulators = new Map()
+  const totalCostRef = { value: 0 }
+
+  it('maps question.asked to approval with toolName AskUserQuestion', () => {
+    const ev = makeEvent('question.asked', {
+      sessionID: SESSION_ID,
+      id: 'que_1',
+      questions: [
+        {
+          question: 'Which language?',
+          header: 'Language',
+          options: [{ label: 'TypeScript', description: 'TS' }, { label: 'Python', description: 'PY' }],
+          multiple: false,
+          custom: true
+        }
+      ],
+      tool: { callID: 'call_q1' }
+    })
+    const out = mapEvent(ev, SESSION_ID, accumulators, START_TIME, totalCostRef)
+    expect(out.kind).toBe('approval')
+    if (out.kind === 'approval') {
+      expect(out.approval.requestId).toBe('que_1')
+      expect(out.approval.toolName).toBe('AskUserQuestion')
+      expect(out.approval.toolUseId).toBe('call_q1')
+      const input = out.approval.input as { questions: unknown[] }
+      expect(input.questions).toHaveLength(1)
+      const q = (input.questions[0]) as { question: string; header: string; multiSelect: boolean; options: unknown[] }
+      expect(q.question).toBe('Which language?')
+      expect(q.header).toBe('Language')
+      expect(q.multiSelect).toBe(false)
+      expect(q.options).toEqual([
+        { label: 'TypeScript', description: 'TS' },
+        { label: 'Python', description: 'PY' }
+      ])
+    }
+  })
+
+  it('maps multiple:true to multiSelect:true', () => {
+    const ev = makeEvent('question.asked', {
+      sessionID: SESSION_ID,
+      id: 'que_2',
+      questions: [
+        {
+          question: 'Select features',
+          header: 'Features',
+          options: [{ label: 'A', description: '' }, { label: 'B', description: '' }],
+          multiple: true
+        }
+      ]
+    })
+    const out = mapEvent(ev, SESSION_ID, accumulators, START_TIME, totalCostRef)
+    expect(out.kind).toBe('approval')
+    if (out.kind === 'approval') {
+      const input = out.approval.input as { questions: Array<{ multiSelect: boolean }> }
+      expect(input.questions[0].multiSelect).toBe(true)
+    }
+  })
+
+  it('multiple:undefined → multiSelect:false', () => {
+    const ev = makeEvent('question.asked', {
+      sessionID: SESSION_ID,
+      id: 'que_3',
+      questions: [{ question: 'Q?', header: 'H', options: [] }]
+    })
+    const out = mapEvent(ev, SESSION_ID, accumulators, START_TIME, totalCostRef)
+    if (out.kind === 'approval') {
+      const input = out.approval.input as { questions: Array<{ multiSelect: boolean }> }
+      expect(input.questions[0].multiSelect).toBe(false)
+    }
+  })
+
+  it('ignores question.asked from a foreign session', () => {
+    const ev = makeEvent('question.asked', {
+      sessionID: 'ses_OTHER',
+      id: 'que_4',
+      questions: [{ question: 'Q?', header: 'H', options: [] }]
+    })
+    const out = mapEvent(ev, SESSION_ID, new Map(), START_TIME, { value: 0 })
+    expect(out.kind).toBe('ignore')
+  })
+
+  it('ignores question.asked when id or questions is missing', () => {
+    const noId = makeEvent('question.asked', {
+      sessionID: SESSION_ID,
+      questions: [{ question: 'Q?', header: 'H', options: [] }]
+    })
+    const noQ = makeEvent('question.asked', {
+      sessionID: SESSION_ID,
+      id: 'que_5'
+    })
+    expect(mapEvent(noId, SESSION_ID, new Map(), START_TIME, { value: 0 }).kind).toBe('ignore')
+    expect(mapEvent(noQ, SESSION_ID, new Map(), START_TIME, { value: 0 }).kind).toBe('ignore')
+  })
+
+  it('maps question.replied to ignore', () => {
+    const ev = makeEvent('question.replied', {
+      sessionID: SESSION_ID,
+      requestID: 'que_1',
+      answers: [['TypeScript']]
+    })
+    const out = mapEvent(ev, SESSION_ID, new Map(), START_TIME, { value: 0 })
+    expect(out.kind).toBe('ignore')
+  })
+
+  it('maps question.rejected to ignore', () => {
+    const ev = makeEvent('question.rejected', {
+      sessionID: SESSION_ID,
+      requestID: 'que_1'
+    })
+    const out = mapEvent(ev, SESSION_ID, new Map(), START_TIME, { value: 0 })
+    expect(out.kind).toBe('ignore')
+  })
+})
+
 describe('mapEvent — session.error', () => {
   const SESSION_ID = 'ses_abc123'
   const accumulators = new Map()

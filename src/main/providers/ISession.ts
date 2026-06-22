@@ -56,6 +56,13 @@ export interface ISession {
   /** Update the inactivity timeout. Pass 0 to disable. */
   setInactivityTimeout(ms: number): void
 
+  /**
+   * Ask a one-off question outside the main conversation history (the `/btw`
+   * command). Returns the assistant's answer, or null if the engine does not
+   * support the capability or encounters an error.
+   */
+  askSideQuestion(question: string): Promise<string | null>
+
   /** Tear down all resources held by this session. */
   dispose(): void
 }

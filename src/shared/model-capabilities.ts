@@ -507,7 +507,7 @@ export const OPENCODE_ENGINE_CAPABILITIES: EngineCapabilities = {
   queue: false,
   slashCommands: true,
   skills: true,
-  sideQuestion: false,
+  sideQuestion: true,
   interactiveApprovals: true,
   autonomyModes: ['plan', 'ask', 'full'],
   auth: { canDriveLogin: true, multiAccount: false }

@@ -246,7 +246,7 @@ export function registerRemoteHandlers(
   dispatcher.register('session:ask-side-question', async (routingId: string, question: string) => {
     const session = manager.get(routingId)
     if (!session) return null
-    if (!session.capabilities.sideQuestion || !isClaudeSession(session)) return null
+    if (!session.capabilities.sideQuestion) return null
     return await session.askSideQuestion(question)
   })
 

@@ -36,6 +36,8 @@ const {
   mockAbortSession,
   mockPatchSession,
   mockReplyPermission,
+  mockReplyQuestion,
+  mockRejectQuestion,
   mockSubscribeEvents,
   mockLoadClaudePermissions,
   mockSaveClaudePermissions,
@@ -54,6 +56,8 @@ const {
   const mockAbortSession = vi.fn()
   const mockPatchSession = vi.fn()
   const mockReplyPermission = vi.fn()
+  const mockReplyQuestion = vi.fn()
+  const mockRejectQuestion = vi.fn()
   const mockSubscribeEvents = vi.fn()
   const mockLoadClaudePermissions = vi.fn()
   const mockSaveClaudePermissions = vi.fn()
@@ -76,6 +80,8 @@ const {
     mockAbortSession,
     mockPatchSession,
     mockReplyPermission,
+    mockReplyQuestion,
+    mockRejectQuestion,
     mockSubscribeEvents,
     mockLoadClaudePermissions,
     mockSaveClaudePermissions,
@@ -135,6 +141,8 @@ function setupMocks(): void {
   mockAbortSession.mockReset()
   mockPatchSession.mockReset()
   mockReplyPermission.mockReset()
+  mockReplyQuestion.mockReset()
+  mockRejectQuestion.mockReset()
   mockSubscribeEvents.mockReset()
   mockLoadClaudePermissions.mockReset()
   mockSaveClaudePermissions.mockReset()
@@ -157,6 +165,8 @@ function setupMocks(): void {
   // override this to enable + set a judge model.
   mockLoadEngineConfig.mockReturnValue({ autoMode: { enabled: false } })
   mockDeleteSession.mockResolvedValue(undefined)
+  mockReplyQuestion.mockResolvedValue(undefined)
+  mockRejectQuestion.mockResolvedValue(undefined)
   // Default: empty command/skill lists (tests that need specific commands override)
   mockListCommands.mockResolvedValue([])
   mockListSkills.mockResolvedValue([])
@@ -185,6 +195,8 @@ function setupMocks(): void {
       abortSession: mockAbortSession,
       patchSession: mockPatchSession,
       replyPermission: mockReplyPermission,
+      replyQuestion: mockReplyQuestion,
+      rejectQuestion: mockRejectQuestion,
       subscribeEvents: mockSubscribeEvents,
       listCommands: mockListCommands,
       listSkills: mockListSkills,
@@ -1108,6 +1120,370 @@ describe('OpencodeSession — auto-mode classifier wiring (ADR-023)', () => {
       expect(sent).toBe(true)
     })
     expect(mockPrompt).not.toHaveBeenCalled()
+    session.dispose()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// askSideQuestion (Phase 8b Part A)
+// ---------------------------------------------------------------------------
+
+describe('OpencodeSession — askSideQuestion', () => {
+  beforeEach(setupMocks)
+
+  it('creates a throwaway session, prompts, returns joined text, deletes the session', async () => {
+    const SIDE_SES = { id: 'ses_side_q' }
+    // First createSession call = the main session (from run()); second = the side-question session.
+    mockCreateSession
+      .mockResolvedValueOnce({ id: 'ses_main' })
+      .mockResolvedValueOnce(SIDE_SES)
+    mockPrompt.mockResolvedValue({
+      parts: [
+        { type: 'text', text: 'This is ' },
+        { type: 'text', text: 'the answer.' }
+      ]
+    })
+
+    const session = makeSession()
+    await session.run('hello') // establishes the connection
+    const answer = await session.askSideQuestion('What is 2+2?')
+
+    expect(answer).toBe('This is the answer.')
+    // Must have created a throwaway session titled 'side-question'
+    expect(mockCreateSession).toHaveBeenCalledWith({ title: 'side-question' })
+    // Must have prompted the throwaway session
+    expect(mockPrompt).toHaveBeenCalledWith(
+      SIDE_SES.id,
+      expect.objectContaining({
+        parts: [{ type: 'text', text: 'What is 2+2?' }]
+      })
+    )
+    // Must have deleted the throwaway session (fire-and-forget)
+    await vi.waitFor(() => expect(mockDeleteSession).toHaveBeenCalledWith(SIDE_SES.id))
+    // Main session id is unaffected
+    expect(session.getSessionId()).toBe('ses_main')
+    session.dispose()
+  })
+
+  it('patches a deny-all ruleset on the throwaway session BEFORE prompting (hang-proof, tool-less)', async () => {
+    const SIDE_SES = { id: 'ses_side_deny' }
+    mockCreateSession
+      .mockResolvedValueOnce({ id: 'ses_main_deny' })
+      .mockResolvedValueOnce(SIDE_SES)
+    mockPrompt.mockResolvedValue({ parts: [{ type: 'text', text: 'ok' }] })
+
+    const session = makeSession()
+    await session.run('hello')
+    // Clear the run()-time patchSession call so we only inspect the side-question's.
+    mockPatchSession.mockClear()
+
+    await session.askSideQuestion('aside?')
+
+    // The throwaway session got a deny-all ruleset (no tool can raise an
+    // unanswerable permission.asked that would hang the synchronous prompt).
+    expect(mockPatchSession).toHaveBeenCalledWith(SIDE_SES.id, {
+      permission: [{ permission: '*', pattern: '*', action: 'deny' }]
+    })
+
+    // And the deny-all patch happened BEFORE the prompt (order matters — the
+    // ruleset must be in place before the model can call a tool).
+    const patchCallOrder = mockPatchSession.mock.invocationCallOrder.at(-1)!
+    const promptCallOrder = mockPrompt.mock.invocationCallOrder.at(-1)!
+    expect(patchCallOrder).toBeLessThan(promptCallOrder)
+
+    // No deprecated `tools` field on the prompt body.
+    const promptBody = mockPrompt.mock.calls.at(-1)![1] as Record<string, unknown>
+    expect(promptBody).not.toHaveProperty('tools')
+    session.dispose()
+  })
+
+  it('does NOT emit any session:message for the side-question (no history pollution)', async () => {
+    mockCreateSession
+      .mockResolvedValueOnce({ id: 'ses_main2' })
+      .mockResolvedValueOnce({ id: 'ses_side2' })
+    mockPrompt.mockResolvedValue({ parts: [{ type: 'text', text: 'Answer' }] })
+
+    const win = new MockWindow() as unknown as BrowserWindow
+    const session = new OpencodeSession('r_sq', win, '/tmp')
+    await session.run('hi')
+    ;(win as unknown as MockWindow).webContents.send.mockClear()
+
+    await session.askSideQuestion('aside?')
+
+    const sent = (win as unknown as MockWindow).webContents.send.mock.calls
+    const msgEmitted = sent.some((c) => c[0] === 'session:message')
+    expect(msgEmitted).toBe(false)
+    // Also not in getMessages()
+    expect(session.getMessages().some((m) => m.role === 'assistant')).toBe(false)
+    session.dispose()
+  })
+
+  it('returns null when prompt fails (never throws)', async () => {
+    mockCreateSession
+      .mockResolvedValueOnce({ id: 'ses_main3' })
+      .mockResolvedValueOnce({ id: 'ses_side3' })
+    mockPrompt.mockRejectedValue(new Error('network error'))
+
+    const session = makeSession()
+    await session.run('hi')
+    const answer = await session.askSideQuestion('will fail?')
+
+    expect(answer).toBeNull()
+    // deleteSession should still be called in finally
+    await vi.waitFor(() => expect(mockDeleteSession).toHaveBeenCalledWith('ses_side3'))
+    session.dispose()
+  })
+
+  it('returns null when not connected (before run)', async () => {
+    const session = makeSession()
+    // No run() call — client is null
+    const answer = await session.askSideQuestion('no connection')
+    expect(answer).toBeNull()
+    session.dispose()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// question.asked routing — always human, never auto-mode (Phase 8b Part B)
+// ---------------------------------------------------------------------------
+
+describe('OpencodeSession — question.asked routing', () => {
+  beforeEach(setupMocks)
+
+  const SES = 'ses_q_routing'
+
+  function feedQuestionAsked(id = 'que_r1', callID = 'call_q1'): void {
+    mockCreateSession.mockResolvedValue({ id: SES })
+    mockSubscribeEvents.mockImplementation(async function* () {
+      yield {
+        id: 'eq1',
+        type: 'question.asked',
+        properties: {
+          sessionID: SES,
+          id,
+          questions: [
+            {
+              question: 'Pick one',
+              header: 'Choice',
+              options: [{ label: 'A', description: '' }],
+              multiple: false
+            }
+          ],
+          tool: { callID }
+        }
+      } as OpencodeEvent
+    })
+  }
+
+  it('question.asked always → session:approval-request to the human, NOT the classifier', async () => {
+    // Enable auto-mode: permissions should go to the classifier, but questions must not.
+    mockLoadEngineConfig.mockReturnValue({ autoMode: { enabled: true, twoStageMode: 'fast' } })
+    feedQuestionAsked('que_human')
+    const win = new MockWindow() as unknown as BrowserWindow
+    const session = new OpencodeSession('r_qh', win, '/tmp', undefined, undefined, 'full')
+    await session.run('go')
+
+    await vi.waitFor(() => {
+      const sent = (win as unknown as MockWindow).webContents.send.mock.calls.some(
+        (c) => c[0] === 'session:approval-request' && c[2]?.toolName === 'AskUserQuestion'
+      )
+      expect(sent).toBe(true)
+    })
+
+    // The LLM judge (mockPrompt) must NOT have been called for the question
+    expect(mockPrompt).not.toHaveBeenCalled()
+    // Nor should replyPermission have been called
+    expect(mockReplyPermission).not.toHaveBeenCalled()
+    session.dispose()
+  })
+
+  it('question.asked in non-auto mode also → human (no regression)', async () => {
+    mockLoadEngineConfig.mockReturnValue({ autoMode: { enabled: false } })
+    feedQuestionAsked('que_default')
+    const win = new MockWindow() as unknown as BrowserWindow
+    const session = new OpencodeSession('r_qd', win, '/tmp', undefined, undefined, 'default')
+    await session.run('go')
+
+    await vi.waitFor(() => {
+      const sent = (win as unknown as MockWindow).webContents.send.mock.calls.some(
+        (c) => c[0] === 'session:approval-request' && c[2]?.toolName === 'AskUserQuestion'
+      )
+      expect(sent).toBe(true)
+    })
+    expect(mockPrompt).not.toHaveBeenCalled()
+    session.dispose()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// resolveApproval — question branch (Phase 8b Part B)
+// ---------------------------------------------------------------------------
+
+describe('OpencodeSession — resolveApproval question branch', () => {
+  beforeEach(setupMocks)
+
+  const SES = 'ses_qa_1'
+
+  /** Feed a question.asked SSE event and run a turn. Returns the session after
+   *  the event has been consumed (waits for approval-request to be emitted). */
+  async function runWithQuestion(
+    win: BrowserWindow,
+    session: OpencodeSession,
+    questions: Array<{
+      question: string
+      header: string
+      options: Array<{ label: string; description: string }>
+      multiple?: boolean
+    }>
+  ): Promise<void> {
+    mockCreateSession.mockResolvedValue({ id: SES })
+    mockSubscribeEvents.mockImplementation(async function* () {
+      yield {
+        id: 'eq',
+        type: 'question.asked',
+        properties: {
+          sessionID: SES,
+          id: 'que_test',
+          questions,
+          tool: { callID: 'call_test' }
+        }
+      } as OpencodeEvent
+    })
+    await session.run('go')
+    // Wait for the approval to reach the UI
+    await vi.waitFor(() => {
+      const sent = (win as unknown as MockWindow).webContents.send.mock.calls.some(
+        (c) => c[0] === 'session:approval-request'
+      )
+      expect(sent).toBe(true)
+    })
+  }
+
+  it('allow with answers → replyQuestion with correct string[][], NOT replyPermission', async () => {
+    const win = new MockWindow() as unknown as BrowserWindow
+    const session = new OpencodeSession('r_qa_allow', win, '/tmp')
+
+    await runWithQuestion(win, session, [
+      {
+        question: 'Which framework?',
+        header: 'Framework',
+        options: [{ label: 'React', description: '' }, { label: 'Vue', description: '' }]
+      }
+    ])
+
+    session.resolveApproval('que_test', 'allow', {
+      'Which framework?': 'React'
+    })
+
+    await vi.waitFor(() => expect(mockReplyQuestion).toHaveBeenCalledWith(
+      'que_test',
+      [['React']]
+    ))
+    expect(mockReplyPermission).not.toHaveBeenCalled()
+    session.dispose()
+  })
+
+  it('deny → rejectQuestion, NOT replyPermission', async () => {
+    const win = new MockWindow() as unknown as BrowserWindow
+    const session = new OpencodeSession('r_qa_deny', win, '/tmp')
+
+    await runWithQuestion(win, session, [
+      { question: 'Q?', header: 'H', options: [{ label: 'A', description: '' }] }
+    ])
+
+    session.resolveApproval('que_test', 'deny')
+
+    await vi.waitFor(() => expect(mockRejectQuestion).toHaveBeenCalledWith('que_test'))
+    expect(mockReplyQuestion).not.toHaveBeenCalled()
+    expect(mockReplyPermission).not.toHaveBeenCalled()
+    session.dispose()
+  })
+
+  it('maps answers in QUESTION ORDER by q.question key', async () => {
+    const win = new MockWindow() as unknown as BrowserWindow
+    const session = new OpencodeSession('r_qa_order', win, '/tmp')
+
+    await runWithQuestion(win, session, [
+      { question: 'First Q', header: 'H1', options: [{ label: 'X', description: '' }] },
+      { question: 'Second Q', header: 'H2', options: [{ label: 'Y', description: '' }] }
+    ])
+
+    session.resolveApproval('que_test', 'allow', {
+      'Second Q': 'Y',
+      'First Q': 'X'
+    })
+
+    await vi.waitFor(() => expect(mockReplyQuestion).toHaveBeenCalledWith(
+      'que_test',
+      [['X'], ['Y']]   // order from the questions array, not the Record iteration order
+    ))
+    session.dispose()
+  })
+
+  it('multiSelect: splits comma-space joined string into string[]', async () => {
+    const win = new MockWindow() as unknown as BrowserWindow
+    const session = new OpencodeSession('r_qa_multi', win, '/tmp')
+
+    await runWithQuestion(win, session, [
+      {
+        question: 'Pick many',
+        header: 'Multi',
+        options: [
+          { label: 'A', description: '' },
+          { label: 'B', description: '' },
+          { label: 'C', description: '' }
+        ],
+        multiple: true
+      }
+    ])
+
+    // AskUserQuestionBlock joins multiSelect selections with ', '
+    session.resolveApproval('que_test', 'allow', {
+      'Pick many': 'A, C'
+    })
+
+    await vi.waitFor(() => expect(mockReplyQuestion).toHaveBeenCalledWith(
+      'que_test',
+      [['A', 'C']]
+    ))
+    session.dispose()
+  })
+
+  it('question key falls back to q0, q1, … when question text is empty', async () => {
+    const win = new MockWindow() as unknown as BrowserWindow
+    const session = new OpencodeSession('r_qa_fallback', win, '/tmp')
+
+    await runWithQuestion(win, session, [
+      { question: '', header: 'H', options: [{ label: 'X', description: '' }] }
+    ])
+
+    session.resolveApproval('que_test', 'allow', { q0: 'X' })
+
+    await vi.waitFor(() => expect(mockReplyQuestion).toHaveBeenCalledWith('que_test', [['X']]))
+    session.dispose()
+  })
+
+  it('permission requestId still uses replyPermission (existing path unchanged)', async () => {
+    const session = makeSession()
+    await session.run('hi')
+    session.resolveApproval('perm_unchanged', 'allow')
+    await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('perm_unchanged', 'once'))
+    expect(mockReplyQuestion).not.toHaveBeenCalled()
+    expect(mockRejectQuestion).not.toHaveBeenCalled()
+    session.dispose()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// sideQuestion capability flag (Phase 8b Part A)
+// ---------------------------------------------------------------------------
+
+describe('OpencodeSession — sideQuestion capability', () => {
+  beforeEach(setupMocks)
+
+  it('sideQuestion capability is true for opencode (Phase 8b)', () => {
+    const session = makeSession()
+    expect(session.capabilities.sideQuestion).toBe(true)
     session.dispose()
   })
 })

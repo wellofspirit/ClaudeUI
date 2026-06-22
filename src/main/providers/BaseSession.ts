@@ -95,6 +95,15 @@ export abstract class BaseSession implements ISession {
     return this.messageHistory
   }
 
+  /**
+   * Default implementation for engines that do not support the sideQuestion
+   * capability. Always returns null — callers check `capabilities.sideQuestion`
+   * before invoking.
+   */
+  async askSideQuestion(_question: string): Promise<string | null> {
+    return null
+  }
+
   setInactivityTimeout(ms: number): void {
     this.inactivityTimeoutMs = ms
     if (!this.willQueue) this.resetInactivityTimer()

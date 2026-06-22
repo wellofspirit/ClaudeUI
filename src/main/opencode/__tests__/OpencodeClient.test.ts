@@ -221,6 +221,49 @@ describe('OpencodeClient', () => {
     })
   })
 
+  describe('replyQuestion', () => {
+    it('sends POST /question/{id}/reply with answers body', async () => {
+      const mock = mockFetch(200, {})
+      vi.stubGlobal('fetch', mock)
+
+      await client.replyQuestion('que_abc', [['Option A'], ['Option B', 'Option C']])
+      expect(mock).toHaveBeenCalledWith(
+        `${BASE_URL}/question/que_abc/reply`,
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({ answers: [['Option A'], ['Option B', 'Option C']] })
+        })
+      )
+    })
+
+    it('encodes question ID in URL', async () => {
+      const mock = mockFetch(200, {})
+      vi.stubGlobal('fetch', mock)
+
+      await client.replyQuestion('que/with/slashes', [['yes']])
+      expect(mock).toHaveBeenCalledWith(
+        `${BASE_URL}/question/que%2Fwith%2Fslashes/reply`,
+        expect.anything()
+      )
+    })
+  })
+
+  describe('rejectQuestion', () => {
+    it('sends POST /question/{id}/reject with no body', async () => {
+      const mock = mockFetch(200, {})
+      vi.stubGlobal('fetch', mock)
+
+      await client.rejectQuestion('que_xyz')
+      expect(mock).toHaveBeenCalledWith(
+        `${BASE_URL}/question/que_xyz/reject`,
+        expect.objectContaining({
+          method: 'POST',
+          body: undefined
+        })
+      )
+    })
+  })
+
   describe('listSkills', () => {
     it('sends GET /skill with auth header', async () => {
       const skills = [

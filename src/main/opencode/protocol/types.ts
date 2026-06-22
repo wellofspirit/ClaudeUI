@@ -143,6 +143,18 @@ export interface Skill {
   content: string
 }
 
+/**
+ * A single question item from opencode's `question.asked` SSE event.
+ * Mirrors QInfo from opencode 1.17.9 /doc.
+ */
+export interface QuestionInfo {
+  question: string
+  header: string
+  options: Array<{ label: string; description: string }>
+  multiple?: boolean
+  custom?: boolean
+}
+
 export const EVENT_TYPES = {
   SERVER_CONNECTED: 'server.connected',
   SESSION_CREATED: 'session.created',
@@ -165,6 +177,9 @@ export const EVENT_TYPES = {
   SESSION_NEXT_TOOL_FAILED: 'session.next.tool.failed',
   PERMISSION_ASKED: 'permission.asked',
   PERMISSION_REPLIED: 'permission.replied',
+  QUESTION_ASKED: 'question.asked',
+  QUESTION_REPLIED: 'question.replied',
+  QUESTION_REJECTED: 'question.rejected',
   COMMAND_EXECUTED: 'command.executed',
 } as const
 

@@ -1,6 +1,6 @@
 import { v4 as uuid } from 'uuid'
-import type { OpencodeEvent } from './protocol/types'
-import type { ChatMessage, ContentBlock, PendingApproval, SessionResult } from '../../shared/types'
+import type { OpencodeEvent, QuestionInfo } from './protocol/types'
+import type { ChatMessage, ContentBlock, PendingApproval, SessionResult, AskUserQuestion } from '../../shared/types'
 import { suggestOpencodeAllowRule } from './permission-compiler'
 
 // Phase 6: the 5c tool-name normalization hack (OPENCODE_TOOL_NAME_MAP /
@@ -272,6 +272,39 @@ export function mapEvent(
       }
       return { kind: 'ignore' }
     }
+
+    case 'question.asked': {
+      // The model is asking the user a structured question (opencode's analog of
+      // Claude's AskUserQuestion tool). This is BLOCKING — the model suspends
+      // until we reply or reject; an unanswered question hangs the turn.
+      // Map to a PendingApproval with toolName:'AskUserQuestion' so the existing
+      // AskUserQuestionBlock UI handles it engine-neutrally.
+      const id = props.id as string | undefined
+      const rawQuestions = props.questions as QuestionInfo[] | undefined
+      const tool = props.tool as { messageID?: string; callID?: string } | undefined
+      if (!id || !rawQuestions) return { kind: 'ignore' }
+
+      const questions: AskUserQuestion[] = rawQuestions.map((q) => ({
+        question: q.question,
+        header: q.header,
+        options: (q.options ?? []).map((o) => ({ label: o.label, description: o.description })),
+        multiSelect: !!q.multiple
+      }))
+
+      const approval: PendingApproval = {
+        requestId: id,
+        toolUseId: tool?.callID,
+        toolName: 'AskUserQuestion',
+        input: { questions }
+      }
+      return { kind: 'approval', approval }
+    }
+
+    case 'question.replied':
+    case 'question.rejected':
+      // Ack events — we originate the reply/reject from resolveApproval; the
+      // server echo is redundant for a single client. Ignore silently.
+      return { kind: 'ignore' }
 
     case 'command.executed':
       // Informational — the command's output has already streamed via the normal
