@@ -486,7 +486,7 @@ export function resolveClaudeCapabilities(modelValue?: string | null): ResolvedC
 }
 
 /**
- * opencode engine capabilities — 8c.
+ * opencode engine capabilities — 8d.
  * hostedMcp:true (Phase 5c) means "this engine hosts ClaudeUI's injected tools"
  * (render_mermaid / create_mockup / show_mockup via the auto-loaded plugin). It
  * does NOT mean opencode exposes Claude's `.mcp.json` server-config UI — that
@@ -495,12 +495,15 @@ export function resolveClaudeCapabilities(modelValue?: string | null): ResolvedC
  * queue+steer:true (Phase 8c) — opencode coalesces a mid-turn prompt into the
  * running loop (no server-side holdable queue), so send-while-busy = post-immediately
  * = steer. dequeue is a no-op (can't un-send once coalesced). voice deferred.
+ * subagents:true (Phase 8d) — opencode's `task` tool spawns child sessions whose
+ * transcripts stream on the shared SSE; the event-mapper routes them to
+ * session:subagent-* events keyed by the parent task part's callID.
  */
 export const OPENCODE_ENGINE_CAPABILITIES: EngineCapabilities = {
   voice: false,
   hostedMcp: true,
   backgroundTasks: false,
-  subagents: false,
+  subagents: true,
   plan: true,
   fork: true,
   forkFromMessage: true,

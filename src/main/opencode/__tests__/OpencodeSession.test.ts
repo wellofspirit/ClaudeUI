@@ -677,7 +677,8 @@ describe('OpencodeSession — capabilities', () => {
     expect(caps.plan).toBe(true)
     expect(caps.voice).toBe(false)
     expect(caps.backgroundTasks).toBe(false)
-    expect(caps.subagents).toBe(false)
+    // subagents flipped to true in Phase 8d (opencode task tool spawns child sessions)
+    expect(caps.subagents).toBe(true)
     expect(caps.interactiveApprovals).toBe(true)
     session.dispose()
   })
@@ -1701,6 +1702,458 @@ describe('OpencodeSession — queue + steer capability flags (Phase 8c)', () => 
     const session = makeSession()
     expect(session.capabilities.queue).toBe(true)
     expect(session.capabilities.steer).toBe(true)
+    session.dispose()
+  })
+
+  it('subagents capability is true (Phase 8d flip)', () => {
+    const session = makeSession()
+    expect(session.capabilities.subagents).toBe(true)
+    session.dispose()
+  })
+
+  it('canUseSubagents reflects the AND-gate (subagents && toolCalling)', () => {
+    // makeSession() uses the default model (no toolCalling in ModelCapabilities
+    // — it defaults to false for an unresolved model). The session must still
+    // expose the raw subagents flag as true. canUseSubagents follows subagents && toolCalling.
+    // We verify the raw capability flag here; the AND-gate is tested in model-capabilities.
+    const session = makeSession()
+    expect(session.capabilities.subagents).toBe(true)
+    session.dispose()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Phase 8d — subagent (task child-session) dispatch
+//
+// Drives SSE streams containing child-session events through the full
+// OpencodeSession dispatch path and asserts that:
+//   (i)  child session.idle → session:task-notification (NOT session:result)
+//   (ii) task part registers the child (mapping present before child events)
+//   (iii) child message → session:subagent-message keyed by parent callID
+//   (iv) child delta → session:subagent-stream
+//   (v)  child tool-result → session:subagent-tool-result
+//   (vi) child user message → no subagent-message emitted
+//   (vii) unknown foreign session → no subagent-* emitted
+// ---------------------------------------------------------------------------
+
+describe('OpencodeSession — Phase 8d: subagent dispatch', () => {
+  const PARENT_SES = 'ses_parent_8d'
+  const CHILD_SES = 'ses_child_8d'
+  const TASK_CALL_ID = 'call_task_8d'
+
+  beforeEach(() => {
+    setupMocks()
+    closeDb()
+  })
+  afterEach(() => closeDb())
+
+  it('(i) child session.idle → session:task-notification, NOT session:result', async () => {
+    mockCreateSession.mockResolvedValue({ id: PARENT_SES })
+    mockSubscribeEvents.mockImplementation(
+      streamOf([
+        // Own-session task part — registers child
+        {
+          id: 'e1', type: 'message.part.updated',
+          properties: {
+            sessionID: PARENT_SES,
+            part: {
+              id: 'p_task', messageID: 'msg_parent',
+              type: 'tool', tool: 'task', callID: TASK_CALL_ID,
+              state: { status: 'running', input: { description: 'subtask' }, metadata: { sessionId: CHILD_SES } }
+            }
+          }
+        } as OpencodeEvent,
+        // Child session.idle — must emit task-notification, not result
+        { id: 'e2', type: 'session.idle', properties: { sessionID: CHILD_SES } } as OpencodeEvent,
+        // Parent session.idle — ends the parent turn normally
+        { id: 'e3', type: 'session.idle', properties: { sessionID: PARENT_SES } } as OpencodeEvent
+      ])
+    )
+
+    const win = new MockWindow() as unknown as BrowserWindow
+    const session = new OpencodeSession('r_8d_i', win, '/tmp')
+    await session.run('go')
+
+    await vi.waitFor(() => {
+      const calls = (win as unknown as MockWindow).webContents.send.mock.calls
+      return calls.some((c) => c[0] === 'session:result')
+    })
+
+    const calls = (win as unknown as MockWindow).webContents.send.mock.calls
+
+    // session:task-notification must have been emitted for the child
+    const taskNotifCall = calls.find((c) => c[0] === 'session:task-notification')
+    expect(taskNotifCall).toBeDefined()
+    expect(taskNotifCall![2].toolUseId).toBe(TASK_CALL_ID)
+    expect(taskNotifCall![2].taskId).toBe(CHILD_SES)
+    expect(taskNotifCall![2].status).toBe('completed')
+
+    // session:result must still have been emitted (parent turn ended normally)
+    const resultCall = calls.find((c) => c[0] === 'session:result')
+    expect(resultCall).toBeDefined()
+
+    // CRITICAL GUARD: the child's session.idle must NOT have emitted a session:result
+    // before the parent's — there should be exactly ONE session:result (from the parent).
+    const resultCalls = calls.filter((c) => c[0] === 'session:result')
+    expect(resultCalls).toHaveLength(1)
+
+    session.dispose()
+  })
+
+  it('(iii) child assistant message → session:subagent-message keyed by parent callID', async () => {
+    mockCreateSession.mockResolvedValue({ id: PARENT_SES })
+    mockSubscribeEvents.mockImplementation(
+      streamOf([
+        // Register child
+        {
+          id: 'e1', type: 'message.part.updated',
+          properties: {
+            sessionID: PARENT_SES,
+            part: {
+              id: 'p_task2', messageID: 'msg_p2',
+              type: 'tool', tool: 'task', callID: TASK_CALL_ID,
+              state: { status: 'running', input: {}, metadata: { sessionId: CHILD_SES } }
+            }
+          }
+        } as OpencodeEvent,
+        // Child message.updated (role=assistant)
+        {
+          id: 'e2', type: 'message.updated',
+          properties: { sessionID: CHILD_SES, info: { id: 'child_msg_a', role: 'assistant' } }
+        } as OpencodeEvent,
+        // Child message.part.updated (text)
+        {
+          id: 'e3', type: 'message.part.updated',
+          properties: {
+            sessionID: CHILD_SES,
+            part: { id: 'cp_a', messageID: 'child_msg_a', type: 'text', text: 'done' }
+          }
+        } as OpencodeEvent,
+        // End parent turn
+        { id: 'e4', type: 'session.idle', properties: { sessionID: CHILD_SES } } as OpencodeEvent,
+        { id: 'e5', type: 'session.idle', properties: { sessionID: PARENT_SES } } as OpencodeEvent
+      ])
+    )
+
+    const win = new MockWindow() as unknown as BrowserWindow
+    const session = new OpencodeSession('r_8d_iii', win, '/tmp')
+    await session.run('go')
+
+    await vi.waitFor(() =>
+      (win as unknown as MockWindow).webContents.send.mock.calls.some((c) => c[0] === 'session:result')
+    )
+
+    const calls = (win as unknown as MockWindow).webContents.send.mock.calls
+    const subagentMsgCall = calls.find((c) => c[0] === 'session:subagent-message')
+    expect(subagentMsgCall).toBeDefined()
+    expect(subagentMsgCall![2].toolUseId).toBe(TASK_CALL_ID)
+    expect(subagentMsgCall![2].message.id).toBe('child_msg_a')
+    expect(subagentMsgCall![2].message.content[0]).toMatchObject({ type: 'text', text: 'done' })
+
+    session.dispose()
+  })
+
+  it('(iv) child delta → session:subagent-stream with correct toolUseId and type', async () => {
+    mockCreateSession.mockResolvedValue({ id: PARENT_SES })
+    mockSubscribeEvents.mockImplementation(
+      streamOf([
+        // Register child
+        {
+          id: 'e1', type: 'message.part.updated',
+          properties: {
+            sessionID: PARENT_SES,
+            part: {
+              id: 'p_task3', messageID: 'msg_p3',
+              type: 'tool', tool: 'task', callID: TASK_CALL_ID,
+              state: { status: 'running', input: {}, metadata: { sessionId: CHILD_SES } }
+            }
+          }
+        } as OpencodeEvent,
+        // Child delta
+        {
+          id: 'e2', type: 'message.part.delta',
+          properties: {
+            sessionID: CHILD_SES,
+            messageID: 'child_msg_delta',
+            partID: 'cp_delta',
+            field: 'text',
+            delta: 'streaming child'
+          }
+        } as OpencodeEvent,
+        { id: 'e3', type: 'session.idle', properties: { sessionID: CHILD_SES } } as OpencodeEvent,
+        { id: 'e4', type: 'session.idle', properties: { sessionID: PARENT_SES } } as OpencodeEvent
+      ])
+    )
+
+    const win = new MockWindow() as unknown as BrowserWindow
+    const session = new OpencodeSession('r_8d_iv', win, '/tmp')
+    await session.run('go')
+
+    await vi.waitFor(() =>
+      (win as unknown as MockWindow).webContents.send.mock.calls.some((c) => c[0] === 'session:result')
+    )
+
+    const calls = (win as unknown as MockWindow).webContents.send.mock.calls
+    const streamCall = calls.find((c) => c[0] === 'session:subagent-stream')
+    expect(streamCall).toBeDefined()
+    expect(streamCall![2].toolUseId).toBe(TASK_CALL_ID)
+    expect(streamCall![2].type).toBe('text')
+    expect(streamCall![2].text).toBe('streaming child')
+
+    session.dispose()
+  })
+
+  it('(v) child completed tool part → session:subagent-tool-result', async () => {
+    mockCreateSession.mockResolvedValue({ id: PARENT_SES })
+    mockSubscribeEvents.mockImplementation(
+      streamOf([
+        // Register child
+        {
+          id: 'e1', type: 'message.part.updated',
+          properties: {
+            sessionID: PARENT_SES,
+            part: {
+              id: 'p_task4', messageID: 'msg_p4',
+              type: 'tool', tool: 'task', callID: TASK_CALL_ID,
+              state: { status: 'running', input: {}, metadata: { sessionId: CHILD_SES } }
+            }
+          }
+        } as OpencodeEvent,
+        // Child tool part (completed) — triggers subagent-tool-result extraction
+        {
+          id: 'e2', type: 'message.part.updated',
+          properties: {
+            sessionID: CHILD_SES,
+            part: {
+              id: 'cp_tool', messageID: 'child_msg_tool2',
+              type: 'tool', tool: 'bash', callID: 'child_bash_call',
+              state: { status: 'completed', output: 'hello world' }
+            }
+          }
+        } as OpencodeEvent,
+        { id: 'e3', type: 'session.idle', properties: { sessionID: CHILD_SES } } as OpencodeEvent,
+        { id: 'e4', type: 'session.idle', properties: { sessionID: PARENT_SES } } as OpencodeEvent
+      ])
+    )
+
+    const win = new MockWindow() as unknown as BrowserWindow
+    const session = new OpencodeSession('r_8d_v', win, '/tmp')
+    await session.run('go')
+
+    await vi.waitFor(() =>
+      (win as unknown as MockWindow).webContents.send.mock.calls.some((c) => c[0] === 'session:result')
+    )
+
+    const calls = (win as unknown as MockWindow).webContents.send.mock.calls
+    const toolResultCall = calls.find((c) => c[0] === 'session:subagent-tool-result')
+    expect(toolResultCall).toBeDefined()
+    expect(toolResultCall![2].toolUseId).toBe(TASK_CALL_ID)
+    expect(toolResultCall![2].toolResultToolUseId).toBe('child_bash_call')
+    expect(toolResultCall![2].result).toBe('hello world')
+    expect(toolResultCall![2].isError).toBe(false)
+
+    session.dispose()
+  })
+
+  it('(vi) child user message → no session:subagent-message emitted', async () => {
+    mockCreateSession.mockResolvedValue({ id: PARENT_SES })
+    mockSubscribeEvents.mockImplementation(
+      streamOf([
+        // Register child
+        {
+          id: 'e1', type: 'message.part.updated',
+          properties: {
+            sessionID: PARENT_SES,
+            part: {
+              id: 'p_task5', messageID: 'msg_p5',
+              type: 'tool', tool: 'task', callID: TASK_CALL_ID,
+              state: { status: 'running', input: {}, metadata: { sessionId: CHILD_SES } }
+            }
+          }
+        } as OpencodeEvent,
+        // Child message.updated (role=user — the task prompt)
+        {
+          id: 'e2', type: 'message.updated',
+          properties: { sessionID: CHILD_SES, info: { id: 'child_msg_user', role: 'user' } }
+        } as OpencodeEvent,
+        // Child user message part
+        {
+          id: 'e3', type: 'message.part.updated',
+          properties: {
+            sessionID: CHILD_SES,
+            part: { id: 'cp_user', messageID: 'child_msg_user', type: 'text', text: 'the task prompt' }
+          }
+        } as OpencodeEvent,
+        { id: 'e4', type: 'session.idle', properties: { sessionID: CHILD_SES } } as OpencodeEvent,
+        { id: 'e5', type: 'session.idle', properties: { sessionID: PARENT_SES } } as OpencodeEvent
+      ])
+    )
+
+    const win = new MockWindow() as unknown as BrowserWindow
+    const session = new OpencodeSession('r_8d_vi', win, '/tmp')
+    await session.run('go')
+
+    await vi.waitFor(() =>
+      (win as unknown as MockWindow).webContents.send.mock.calls.some((c) => c[0] === 'session:result')
+    )
+
+    const calls = (win as unknown as MockWindow).webContents.send.mock.calls
+    const subagentMsgCalls = calls.filter((c) => c[0] === 'session:subagent-message')
+    // The user role message must not have been emitted as subagent-message
+    expect(subagentMsgCalls).toHaveLength(0)
+
+    session.dispose()
+  })
+
+  it('(vii) unknown foreign session → no subagent-* events emitted', async () => {
+    mockCreateSession.mockResolvedValue({ id: PARENT_SES })
+    mockSubscribeEvents.mockImplementation(
+      streamOf([
+        // STRANGER session (not a known child) — must be ignored entirely
+        {
+          id: 'e1', type: 'message.part.delta',
+          properties: {
+            sessionID: 'ses_STRANGER_8d',
+            messageID: 'stranger_msg',
+            partID: 'sp1',
+            field: 'text',
+            delta: 'alien'
+          }
+        } as OpencodeEvent,
+        { id: 'e2', type: 'session.idle', properties: { sessionID: PARENT_SES } } as OpencodeEvent
+      ])
+    )
+
+    const win = new MockWindow() as unknown as BrowserWindow
+    const session = new OpencodeSession('r_8d_vii', win, '/tmp')
+    await session.run('go')
+
+    await vi.waitFor(() =>
+      (win as unknown as MockWindow).webContents.send.mock.calls.some((c) => c[0] === 'session:result')
+    )
+
+    const calls = (win as unknown as MockWindow).webContents.send.mock.calls
+    expect(calls.some((c) => c[0] === 'session:subagent-stream')).toBe(false)
+    expect(calls.some((c) => c[0] === 'session:subagent-message')).toBe(false)
+    expect(calls.some((c) => c[0] === 'session:task-notification')).toBe(false)
+
+    session.dispose()
+  })
+
+  it('childSessions cleared on cancel() — a previously known child is no longer routed', async () => {
+    mockCreateSession.mockResolvedValue({ id: PARENT_SES })
+    // First turn: register the child via the task part
+    mockSubscribeEvents.mockImplementationOnce(
+      streamOf([
+        {
+          id: 'e1', type: 'message.part.updated',
+          properties: {
+            sessionID: PARENT_SES,
+            part: {
+              id: 'p_task_clear', messageID: 'msg_pc',
+              type: 'tool', tool: 'task', callID: TASK_CALL_ID,
+              state: { status: 'running', input: {}, metadata: { sessionId: CHILD_SES } }
+            }
+          }
+        } as OpencodeEvent,
+        { id: 'e2', type: 'session.idle', properties: { sessionID: PARENT_SES } } as OpencodeEvent
+      ])
+    )
+    // Second turn: the child session.idle should be ignored (childSessions cleared)
+    mockSubscribeEvents.mockImplementationOnce(
+      streamOf([
+        { id: 'e3', type: 'session.idle', properties: { sessionID: CHILD_SES } } as OpencodeEvent,
+        { id: 'e4', type: 'session.idle', properties: { sessionID: PARENT_SES } } as OpencodeEvent
+      ])
+    )
+
+    const win = new MockWindow() as unknown as BrowserWindow
+    const session = new OpencodeSession('r_8d_clear', win, '/tmp')
+    await session.run('go')
+
+    await vi.waitFor(() =>
+      (win as unknown as MockWindow).webContents.send.mock.calls.some((c) => c[0] === 'session:result')
+    )
+
+    // Cancel clears childSessions
+    session.cancel()
+    ;(win as unknown as MockWindow).webContents.send.mockClear()
+
+    // Second turn — child session.idle must not produce task-notification since child is cleared
+    await session.run('go again')
+    await vi.waitFor(() =>
+      (win as unknown as MockWindow).webContents.send.mock.calls.some((c) => c[0] === 'session:result')
+    )
+
+    const calls2 = (win as unknown as MockWindow).webContents.send.mock.calls
+    expect(calls2.some((c) => c[0] === 'session:task-notification')).toBe(false)
+
+    session.dispose()
+  })
+
+  it('does NOT meter child (subagent) tokens against the parent model', async () => {
+    // A child assistant message.updated carrying tokens, then the PARENT
+    // session.idle. The child's tokens must NOT be recorded as a usage_event
+    // (they belong to the child, not the parent model) — only parent messages
+    // are metered. Guards the silent attribution leak from the shared
+    // accumulators map (acc.isChild skip in recordTurnUsage / sendMetering).
+    mockCreateSession.mockResolvedValue({ id: PARENT_SES })
+    mockSubscribeEvents.mockImplementation(
+      streamOf([
+        // Own-session task part — registers the child
+        {
+          id: 'e1', type: 'message.part.updated',
+          properties: {
+            sessionID: PARENT_SES,
+            part: {
+              id: 'p_task_m', messageID: 'msg_parent_m',
+              type: 'tool', tool: 'task', callID: TASK_CALL_ID,
+              state: { status: 'running', input: {}, metadata: { sessionId: CHILD_SES } }
+            }
+          }
+        } as OpencodeEvent,
+        // Parent assistant message WITH tokens — SHOULD be metered
+        {
+          id: 'e2', type: 'message.updated',
+          properties: {
+            sessionID: PARENT_SES,
+            info: { id: 'msg_parent_metered', role: 'assistant', cost: 0.01, tokens: { input: 100, output: 50 } }
+          }
+        } as OpencodeEvent,
+        // Child assistant message WITH tokens — must NOT be metered against parent
+        {
+          id: 'e3', type: 'message.updated',
+          properties: {
+            sessionID: CHILD_SES,
+            info: { id: 'msg_child_tokens', role: 'assistant', cost: 0.99, tokens: { input: 9999, output: 8888 } }
+          }
+        } as OpencodeEvent,
+        // Child needs a part.updated too (so the child accumulator is fully marked isChild)
+        {
+          id: 'e4', type: 'message.part.updated',
+          properties: {
+            sessionID: CHILD_SES,
+            part: { id: 'cp_m', messageID: 'msg_child_tokens', type: 'text', text: 'child work' }
+          }
+        } as OpencodeEvent,
+        // Child idle (task-notification), then parent idle (records parent usage)
+        { id: 'e5', type: 'session.idle', properties: { sessionID: CHILD_SES } } as OpencodeEvent,
+        { id: 'e6', type: 'session.idle', properties: { sessionID: PARENT_SES } } as OpencodeEvent
+      ])
+    )
+
+    const session = makeSession('openai/gpt-4o')
+    await session.run('go')
+
+    // Parent message must be recorded
+    await vi.waitFor(() => expect(getUsageEventByMessageId('msg_parent_metered')).toBeDefined())
+    const parentRow = getUsageEventByMessageId('msg_parent_metered')!
+    expect(parentRow.inputTokens).toBe(100)
+    expect(parentRow.outputTokens).toBe(50)
+
+    // CHILD message tokens must NOT have been recorded under the parent model.
+    expect(getUsageEventByMessageId('msg_child_tokens')).toBeUndefined()
+
     session.dispose()
   })
 })

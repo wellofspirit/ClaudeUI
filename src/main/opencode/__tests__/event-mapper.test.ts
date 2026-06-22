@@ -15,7 +15,7 @@ function makeEvent(type: string, properties: Record<string, unknown>): OpencodeE
 }
 
 describe('mapEvent — cross-session filter', () => {
-  it('ignores events from a different session', () => {
+  it('ignores events from an UNKNOWN foreign session', () => {
     const ev = makeEvent('message.part.delta', {
       sessionID: 'ses_OTHER',
       messageID: 'msg_1',
@@ -25,7 +25,8 @@ describe('mapEvent — cross-session filter', () => {
     })
     const accumulators = new Map<string, MessageAccumulator>()
     const totalCostRef = { value: 0 }
-    const out = mapEvent(ev, SESSION_ID, accumulators, START_TIME, totalCostRef)
+    // No childSessions entry for 'ses_OTHER' — must be ignored.
+    const out = mapEvent(ev, SESSION_ID, accumulators, START_TIME, totalCostRef, new Map())
     expect(out.kind).toBe('ignore')
   })
 
@@ -39,8 +40,29 @@ describe('mapEvent — cross-session filter', () => {
     })
     const accumulators = new Map<string, MessageAccumulator>()
     const totalCostRef = { value: 0 }
-    const out = mapEvent(ev, SESSION_ID, accumulators, START_TIME, totalCostRef)
+    const out = mapEvent(ev, SESSION_ID, accumulators, START_TIME, totalCostRef, new Map())
     expect(out.kind).toBe('stream')
+  })
+
+  it('passes events from a KNOWN child session (no longer ignored)', () => {
+    // A child session that was registered via a task tool part must be routed,
+    // not ignored. Its delta → subagent-stream, not stream.
+    const CHILD_ID = 'ses_CHILD'
+    const PARENT_CALL_ID = 'call_task_1'
+    const childSessions = new Map([[CHILD_ID, PARENT_CALL_ID]])
+    const ev = makeEvent('message.part.delta', {
+      sessionID: CHILD_ID,
+      messageID: 'child_msg_1',
+      partID: 'cp1',
+      field: 'text',
+      delta: 'child text'
+    })
+    const out = mapEvent(ev, SESSION_ID, new Map(), START_TIME, { value: 0 }, childSessions)
+    expect(out.kind).toBe('subagent-stream')
+    if (out.kind === 'subagent-stream') {
+      expect(out.toolUseId).toBe(PARENT_CALL_ID)
+      expect(out.delta).toBe('child text')
+    }
   })
 })
 
@@ -776,6 +798,276 @@ describe('mapEvent — session.error', () => {
       error: { name: 'ProviderAuthError', data: { message: 'Token expired' } }
     })
     const out = mapEvent(ev, SESSION_ID, accumulators, START_TIME, totalCostRef)
+    expect(out.kind).toBe('ignore')
+  })
+})
+
+// ── Phase 8d — child session subagent routing ─────────────────────────────────
+
+const CHILD_SESSION_ID = 'ses_CHILD_001'
+const PARENT_CALL_ID = 'call_task_parent_1'
+
+describe('mapEvent — Phase 8d: child-session registration (task tool part)', () => {
+  it('registers child session when own-session task part has state.metadata.sessionId', () => {
+    const childSessions = new Map<string, string>()
+    const accumulators = new Map<string, MessageAccumulator>()
+    const ev = makeEvent('message.part.updated', {
+      sessionID: SESSION_ID,
+      part: {
+        id: 'p_task',
+        messageID: 'msg_parent_1',
+        type: 'tool',
+        tool: 'task',
+        callID: PARENT_CALL_ID,
+        state: {
+          status: 'running',
+          input: { description: 'do something' },
+          metadata: { sessionId: CHILD_SESSION_ID }
+        }
+      }
+    })
+    const out = mapEvent(ev, SESSION_ID, accumulators, START_TIME, { value: 0 }, childSessions)
+    // Must still emit the parent message (parent tool_use block with toolUseId=PARENT_CALL_ID)
+    expect(out.kind).toBe('message')
+    if (out.kind === 'message') {
+      const taskBlock = out.message.content.find((b) => b.type === 'tool_use')
+      expect(taskBlock?.type).toBe('tool_use')
+      if (taskBlock?.type === 'tool_use') {
+        expect(taskBlock.toolName).toBe('task')
+        expect(taskBlock.toolUseId).toBe(PARENT_CALL_ID)
+      }
+    }
+    // Child session must now be registered
+    expect(childSessions.get(CHILD_SESSION_ID)).toBe(PARENT_CALL_ID)
+  })
+
+  it('does NOT register when task part has no state.metadata.sessionId', () => {
+    const childSessions = new Map<string, string>()
+    const accumulators = new Map<string, MessageAccumulator>()
+    const ev = makeEvent('message.part.updated', {
+      sessionID: SESSION_ID,
+      part: {
+        id: 'p_task2',
+        messageID: 'msg_parent_2',
+        type: 'tool',
+        tool: 'task',
+        callID: 'call_task_2',
+        state: { status: 'running', input: { description: 'pending' } }
+      }
+    })
+    mapEvent(ev, SESSION_ID, accumulators, START_TIME, { value: 0 }, childSessions)
+    expect(childSessions.size).toBe(0)
+  })
+
+  it('does NOT register for non-task tool parts', () => {
+    const childSessions = new Map<string, string>()
+    const accumulators = new Map<string, MessageAccumulator>()
+    const ev = makeEvent('message.part.updated', {
+      sessionID: SESSION_ID,
+      part: {
+        id: 'p_bash',
+        messageID: 'msg_bash',
+        type: 'tool',
+        tool: 'bash',
+        callID: 'call_bash',
+        state: { status: 'running', input: { command: 'ls' }, metadata: { sessionId: 'fake' } }
+      }
+    })
+    mapEvent(ev, SESSION_ID, accumulators, START_TIME, { value: 0 }, childSessions)
+    expect(childSessions.size).toBe(0)
+  })
+})
+
+describe('mapEvent — Phase 8d: parent session.idle still → result (not task-notification)', () => {
+  it('parent session.idle (no childSessions entry for it) → result, NOT task-notification', () => {
+    // The PARENT session's own session.idle must still end the turn normally.
+    // This is the most critical guard: a child's session.idle must not be routed
+    // here. The parent's own idle IS routed here (eventSessionId === ownSessionId).
+    const childSessions = new Map([[CHILD_SESSION_ID, PARENT_CALL_ID]])
+    const ev = makeEvent('session.idle', { sessionID: SESSION_ID })
+    const out = mapEvent(ev, SESSION_ID, new Map(), START_TIME, { value: 0.5 }, childSessions)
+    expect(out.kind).toBe('result')
+    if (out.kind === 'result') {
+      expect(out.result.totalCostUsd).toBe(0.5)
+      expect(out.result.sessionId).toBe(SESSION_ID)
+    }
+  })
+})
+
+describe('mapEvent — Phase 8d: child message.part.delta → subagent-stream', () => {
+  it('child text delta → subagent-stream with correct toolUseId', () => {
+    const childSessions = new Map([[CHILD_SESSION_ID, PARENT_CALL_ID]])
+    const ev = makeEvent('message.part.delta', {
+      sessionID: CHILD_SESSION_ID,
+      messageID: 'child_msg_1',
+      partID: 'cp1',
+      field: 'text',
+      delta: 'hello from child'
+    })
+    const out = mapEvent(ev, SESSION_ID, new Map(), START_TIME, { value: 0 }, childSessions)
+    expect(out.kind).toBe('subagent-stream')
+    if (out.kind === 'subagent-stream') {
+      expect(out.toolUseId).toBe(PARENT_CALL_ID)
+      expect(out.streamType).toBe('text')
+      expect(out.delta).toBe('hello from child')
+    }
+  })
+
+  it('child reasoning delta → subagent-stream with streamType=thinking when acc has reasoning part', () => {
+    const childSessions = new Map([[CHILD_SESSION_ID, PARENT_CALL_ID]])
+    const accumulators = new Map<string, MessageAccumulator>()
+    // Pre-seed accumulator with a reasoning part so the peek returns 'thinking'
+    const acc: MessageAccumulator = {
+      messageId: 'child_msg_think',
+      partOrder: ['cp_think'],
+      parts: new Map([['cp_think', { type: 'reasoning', text: '' }]])
+    }
+    accumulators.set('child_msg_think', acc)
+    const ev = makeEvent('message.part.delta', {
+      sessionID: CHILD_SESSION_ID,
+      messageID: 'child_msg_think',
+      partID: 'cp_think',
+      field: 'reasoning',
+      delta: '<thought>'
+    })
+    const out = mapEvent(ev, SESSION_ID, accumulators, START_TIME, { value: 0 }, childSessions)
+    expect(out.kind).toBe('subagent-stream')
+    if (out.kind === 'subagent-stream') {
+      expect(out.streamType).toBe('thinking')
+    }
+  })
+
+  it('child delta with unknown field → ignore', () => {
+    const childSessions = new Map([[CHILD_SESSION_ID, PARENT_CALL_ID]])
+    const ev = makeEvent('message.part.delta', {
+      sessionID: CHILD_SESSION_ID,
+      messageID: 'child_msg_2',
+      partID: 'cp2',
+      field: 'unknown',
+      delta: 'x'
+    })
+    const out = mapEvent(ev, SESSION_ID, new Map(), START_TIME, { value: 0 }, childSessions)
+    expect(out.kind).toBe('ignore')
+  })
+})
+
+describe('mapEvent — Phase 8d: child message.part.updated → subagent-message / ignore for user', () => {
+  it('child assistant message → subagent-message keyed by parent callID', () => {
+    const childSessions = new Map([[CHILD_SESSION_ID, PARENT_CALL_ID]])
+    const accumulators = new Map<string, MessageAccumulator>()
+    // Set up role=assistant via a message.updated first
+    mapEvent(
+      makeEvent('message.updated', {
+        sessionID: CHILD_SESSION_ID,
+        info: { id: 'child_msg_a', role: 'assistant' }
+      }),
+      SESSION_ID, accumulators, START_TIME, { value: 0 }, childSessions
+    )
+    const ev = makeEvent('message.part.updated', {
+      sessionID: CHILD_SESSION_ID,
+      part: { id: 'cp_a', messageID: 'child_msg_a', type: 'text', text: 'I found it.' }
+    })
+    const out = mapEvent(ev, SESSION_ID, accumulators, START_TIME, { value: 0 }, childSessions)
+    expect(out.kind).toBe('subagent-message')
+    if (out.kind === 'subagent-message') {
+      expect(out.toolUseId).toBe(PARENT_CALL_ID)
+      expect(out.message.id).toBe('child_msg_a')
+      expect(out.message.role).toBe('assistant')
+      expect(out.message.content[0]).toMatchObject({ type: 'text', text: 'I found it.' })
+    }
+  })
+
+  it('child user message (task prompt text) → ignore (not rendered in subagent transcript)', () => {
+    const childSessions = new Map([[CHILD_SESSION_ID, PARENT_CALL_ID]])
+    const accumulators = new Map<string, MessageAccumulator>()
+    // Establish user role
+    mapEvent(
+      makeEvent('message.updated', {
+        sessionID: CHILD_SESSION_ID,
+        info: { id: 'child_msg_u', role: 'user' }
+      }),
+      SESSION_ID, accumulators, START_TIME, { value: 0 }, childSessions
+    )
+    const ev = makeEvent('message.part.updated', {
+      sessionID: CHILD_SESSION_ID,
+      part: { id: 'cp_u', messageID: 'child_msg_u', type: 'text', text: 'the task prompt' }
+    })
+    const out = mapEvent(ev, SESSION_ID, accumulators, START_TIME, { value: 0 }, childSessions)
+    expect(out.kind).toBe('ignore')
+  })
+
+  it('child tool part → subagent-message containing a tool_use block', () => {
+    const childSessions = new Map([[CHILD_SESSION_ID, PARENT_CALL_ID]])
+    const accumulators = new Map<string, MessageAccumulator>()
+    const ev = makeEvent('message.part.updated', {
+      sessionID: CHILD_SESSION_ID,
+      part: {
+        id: 'cp_tool',
+        messageID: 'child_msg_tool',
+        type: 'tool',
+        tool: 'bash',
+        callID: 'child_call_1',
+        state: { status: 'running', input: { command: 'ls /tmp' } }
+      }
+    })
+    const out = mapEvent(ev, SESSION_ID, accumulators, START_TIME, { value: 0 }, childSessions)
+    expect(out.kind).toBe('subagent-message')
+    if (out.kind === 'subagent-message') {
+      expect(out.toolUseId).toBe(PARENT_CALL_ID)
+      const block = out.message.content[0]
+      expect(block.type).toBe('tool_use')
+      if (block.type === 'tool_use') {
+        expect(block.toolName).toBe('bash')
+        expect(block.toolUseId).toBe('child_call_1')
+      }
+    }
+  })
+})
+
+describe('mapEvent — Phase 8d: child session.idle → task-notification (NOT result)', () => {
+  it('child session.idle → task-notification with status=completed, NOT result', () => {
+    const childSessions = new Map([[CHILD_SESSION_ID, PARENT_CALL_ID]])
+    const ev = makeEvent('session.idle', { sessionID: CHILD_SESSION_ID })
+    const out = mapEvent(ev, SESSION_ID, new Map(), START_TIME, { value: 0 }, childSessions)
+    // CRITICAL GUARD: must NOT be 'result' — that would end the parent turn early.
+    expect(out.kind).not.toBe('result')
+    expect(out.kind).toBe('task-notification')
+    if (out.kind === 'task-notification') {
+      expect(out.notification.toolUseId).toBe(PARENT_CALL_ID)
+      expect(out.notification.taskId).toBe(CHILD_SESSION_ID)
+      expect(out.notification.status).toBe('completed')
+    }
+  })
+
+  it('child session.error → task-notification with status=failed', () => {
+    const childSessions = new Map([[CHILD_SESSION_ID, PARENT_CALL_ID]])
+    const ev = makeEvent('session.error', {
+      sessionID: CHILD_SESSION_ID,
+      error: { name: 'UnknownError', data: { message: 'child crashed' } }
+    })
+    const out = mapEvent(ev, SESSION_ID, new Map(), START_TIME, { value: 0 }, childSessions)
+    expect(out.kind).not.toBe('result')
+    expect(out.kind).not.toBe('error') // child errors must not surface as parent errors
+    expect(out.kind).toBe('task-notification')
+    if (out.kind === 'task-notification') {
+      expect(out.notification.status).toBe('failed')
+      expect(out.notification.toolUseId).toBe(PARENT_CALL_ID)
+    }
+  })
+})
+
+describe('mapEvent — Phase 8d: unknown foreign session → ignore', () => {
+  it('event from a session not in childSessions and not own → ignore', () => {
+    const childSessions = new Map([[CHILD_SESSION_ID, PARENT_CALL_ID]])
+    // 'ses_STRANGER' is neither ownSessionId nor a known child
+    const ev = makeEvent('message.part.delta', {
+      sessionID: 'ses_STRANGER',
+      messageID: 'x_msg',
+      partID: 'xp1',
+      field: 'text',
+      delta: 'alien text'
+    })
+    const out = mapEvent(ev, SESSION_ID, new Map(), START_TIME, { value: 0 }, childSessions)
     expect(out.kind).toBe('ignore')
   })
 })

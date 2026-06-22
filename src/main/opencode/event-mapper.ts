@@ -45,6 +45,12 @@ export interface MessageAccumulator {
   /** Latest cumulative token snapshot for this message (`info.tokens`). Same
    *  cumulative semantics as cost — store, do not add. */
   tokens?: MessageTokens
+  /** True when this accumulator belongs to a `task`-tool CHILD session (Phase 8d).
+   *  Child messages share the parent's `accumulators` map (distinct messageIds),
+   *  so the parent's metering loops (recordTurnUsage / sendMetering) must SKIP
+   *  these — otherwise the child's tokens are silently attributed to the parent
+   *  model. Subagent usage stays unmetered for now (spec: best-effort/omit). */
+  isChild?: boolean
   /** Ordered part ids for block ordering. */
   partOrder: string[]
   /** Current snapshot per part.id */
@@ -77,6 +83,10 @@ export type MapperOutput =
   | { kind: 'result'; result: Pick<SessionResult, 'totalCostUsd' | 'durationMs' | 'result'> & { sessionId: string | null } }
   | { kind: 'cost_update'; totalCostUsd: number; messageId: string; tokens?: MessageTokens; engineCostUsd?: number }
   | { kind: 'error'; message: string }
+  | { kind: 'subagent-stream'; toolUseId: string; streamType: 'text' | 'thinking'; delta: string }
+  | { kind: 'subagent-message'; toolUseId: string; message: ChatMessage }
+  | { kind: 'subagent-tool-result'; toolUseId: string; toolResultToolUseId: string; result: string; isError: boolean }
+  | { kind: 'task-notification'; notification: import('../../shared/types').TaskNotification }
   | { kind: 'ignore' }
 
 // ── Mapper ────────────────────────────────────────────────────────────────────
@@ -88,23 +98,60 @@ export type MapperOutput =
  * message.updated / part.updated). The caller owns the map and passes it on
  * every call so this module stays pure and unit-testable.
  *
- * Cross-session filter: returns `{ kind: 'ignore' }` when the event's
- * `properties.sessionID` does not match `ownSessionId`.
+ * `childSessions` is a caller-owned Map<childSessionId, parentToolUseId> that
+ * the mapper both reads (to route child events) and mutates (to register new
+ * child sessions when a task tool part appears with state.metadata.sessionId).
+ *
+ * Routing logic (CRITICAL — order matters):
+ *   1. eventSessionId === ownSessionId → own-session handler (existing switch)
+ *      — also registers child sessions when a task tool part is seen.
+ *   2. eventSessionId is a known child → child handler.
+ *      A child's session.idle MUST be handled here and MUST NOT fall through to
+ *      the own-session switch (where it would emit {kind:'result'} and end the
+ *      parent turn early — the worst bug here).
+ *   3. Unknown foreign session → ignore.
  */
 export function mapEvent(
   ev: OpencodeEvent,
   ownSessionId: string,
   accumulators: Map<string, MessageAccumulator>,
   startTimeMs: number,
-  totalCostUsd: { value: number }
+  totalCostUsd: { value: number },
+  childSessions: Map<string, string> = new Map()
 ): MapperOutput {
   const props = ev.properties as Record<string, unknown>
 
-  // Cross-session filter — CRITICAL: the shared server streams all sessions in the cwd
   const eventSessionId = props.sessionID as string | undefined
-  if (eventSessionId && eventSessionId !== ownSessionId) {
-    return { kind: 'ignore' }
+
+  // ── Route: own session ───────────────────────────────────────────────────
+  if (eventSessionId === ownSessionId) {
+    return handleOwnEvent(ev, ownSessionId, accumulators, startTimeMs, totalCostUsd, childSessions)
   }
+
+  // ── Route: known child session ────────────────────────────────────────────
+  // CRITICAL: this branch must be reached BEFORE the own-session switch so that
+  // a child's session.idle emits task-notification, NOT {kind:'result'}.
+  if (eventSessionId && childSessions.has(eventSessionId)) {
+    return handleChildEvent(ev, eventSessionId, accumulators, childSessions)
+  }
+
+  // ── Route: unknown foreign session → ignore ───────────────────────────────
+  return { kind: 'ignore' }
+}
+
+/**
+ * Handle events from the parent (own) session. This is the existing switch —
+ * plus child-session registration when we see a task tool part.
+ */
+function handleOwnEvent(
+  ev: OpencodeEvent,
+  ownSessionId: string,
+  accumulators: Map<string, MessageAccumulator>,
+  startTimeMs: number,
+  totalCostUsd: { value: number },
+  childSessions: Map<string, string>
+): MapperOutput {
+  const props = ev.properties as Record<string, unknown>
 
   switch (ev.type) {
     case 'message.part.delta': {
@@ -149,6 +196,19 @@ export function mapEvent(
         snap.callID = part.callID as string
         const state = part.state as ToolPartState | undefined
         snap.state = state
+
+        // Child-session registration: when a task tool part reports its child
+        // sessionId, register it so future events from that child are routed to
+        // handleChildEvent with the correct parent toolUseId (= callID).
+        // Race note: child events that arrive before this registration are dropped
+        // (acceptable for MVP — noted as a follow-up in the spec).
+        if (partType === 'tool' && (part.tool as string) === 'task') {
+          const childSessionId = (state?.metadata as Record<string, unknown> | undefined)?.sessionId as string | undefined
+          const callId = part.callID as string | undefined
+          if (childSessionId && callId) {
+            childSessions.set(childSessionId, callId)
+          }
+        }
       }
       acc.parts.set(partId, snap)
 
@@ -312,6 +372,146 @@ export function mapEvent(
       // by session.idle, not this event. Nothing to do here. (Phase A note:
       // subtask command child-session events stay filtered until Phase D.)
       return { kind: 'ignore' }
+
+    default:
+      return { kind: 'ignore' }
+  }
+}
+
+/**
+ * Handle events from a known child session (spawned by the parent's `task` tool).
+ *
+ * `toolUseId` = the parent task part's callID (from childSessions map).
+ * The child's session.idle → task-notification (NEVER result — that would end
+ * the parent turn early, the critical guard of this phase).
+ */
+function handleChildEvent(
+  ev: OpencodeEvent,
+  childSessionId: string,
+  accumulators: Map<string, MessageAccumulator>,
+  childSessions: Map<string, string>
+): MapperOutput {
+  const props = ev.properties as Record<string, unknown>
+  const toolUseId = childSessions.get(childSessionId)!
+
+  switch (ev.type) {
+    case 'message.part.delta': {
+      const messageId = props.messageID as string | undefined
+      const field = props.field as string | undefined
+      const delta = props.delta as string | undefined
+      if (!delta || (field !== 'text' && field !== 'reasoning')) return { kind: 'ignore' }
+      let streamType: 'text' | 'thinking' = 'text'
+      if (messageId) {
+        const acc = accumulators.get(messageId)
+        if (acc) {
+          const partId = props.partID as string | undefined
+          if (partId) {
+            const snap = acc.parts.get(partId)
+            if (snap?.type === 'reasoning') streamType = 'thinking'
+          }
+        }
+      }
+      return { kind: 'subagent-stream', toolUseId, streamType, delta }
+    }
+
+    case 'message.part.updated': {
+      const part = props.part as Record<string, unknown> | undefined
+      if (!part) return { kind: 'ignore' }
+
+      const partId = part.id as string | undefined
+      const messageId = (part.messageID ?? part.messageId) as string | undefined
+      if (!partId || !messageId) return { kind: 'ignore' }
+
+      const acc = ensureAccumulator(accumulators, messageId)
+      // Mark as a child accumulator so the parent's metering loops skip it
+      // (otherwise the child's tokens are attributed to the parent model).
+      acc.isChild = true
+      const isNew = !acc.parts.has(partId)
+      if (isNew) acc.partOrder.push(partId)
+
+      const partType = part.type as string
+      const snap: PartSnapshot = { type: partType }
+
+      if (partType === 'text' || partType === 'reasoning') {
+        snap.text = (part.text as string) ?? ''
+      } else if (partType === 'tool') {
+        snap.toolName = part.tool as string
+        snap.callID = part.callID as string
+        const state = part.state as ToolPartState | undefined
+        snap.state = state
+      }
+      acc.parts.set(partId, snap)
+
+      // Skip child user-role messages (the task prompt text) — mirrors the own path.
+      // message.updated (with info.role) always precedes the message's part.updated.
+      if (acc.role === 'user') return { kind: 'ignore' }
+
+      const message = buildChatMessage(messageId, acc)
+      return { kind: 'subagent-message', toolUseId, message }
+    }
+
+    case 'message.updated': {
+      // Record role so part.updated can gate on it (same ordering contract as own path).
+      // Also accumulate tokens best-effort for potential notification usage summary.
+      // No cost_update emitted for child messages — children use parent's cost context.
+      const info = props.info as Record<string, unknown> | undefined
+      if (!info) return { kind: 'ignore' }
+
+      const infoId = (info.id as string | undefined) ?? (props.messageID ?? props.messageId) as string | undefined
+      if (!infoId) return { kind: 'ignore' }
+
+      const acc = ensureAccumulator(accumulators, infoId)
+      // Mark as a child accumulator so the parent's metering loops skip it.
+      acc.isChild = true
+
+      const role = info.role as 'user' | 'assistant' | 'system' | undefined
+      if (role === 'user' || role === 'assistant' || role === 'system') acc.role = role
+
+      const rawTokens = info.tokens as Record<string, unknown> | undefined
+      if (rawTokens) {
+        const cacheRaw = rawTokens.cache as Record<string, unknown> | undefined
+        acc.tokens = {
+          input: typeof rawTokens.input === 'number' ? rawTokens.input : undefined,
+          output: typeof rawTokens.output === 'number' ? rawTokens.output : undefined,
+          reasoning: typeof rawTokens.reasoning === 'number' ? rawTokens.reasoning : undefined,
+          cache: cacheRaw
+            ? {
+                read: typeof cacheRaw.read === 'number' ? cacheRaw.read : undefined,
+                write: typeof cacheRaw.write === 'number' ? cacheRaw.write : undefined
+              }
+            : undefined
+        }
+      }
+
+      return { kind: 'ignore' }
+    }
+
+    case 'session.idle': {
+      // CRITICAL GUARD: child session.idle → task-notification, NOT {kind:'result'}.
+      // {kind:'result'} would flip isProcessing=false and end the parent turn early.
+      // The child's toolUseId is deleted from childSessions in the dispatcher after
+      // this notification is emitted (tidy cleanup).
+      const notification: import('../../shared/types').TaskNotification = {
+        taskId: childSessionId,
+        toolUseId,
+        status: 'completed',
+        outputFile: '',
+        summary: ''
+      }
+      return { kind: 'task-notification', notification }
+    }
+
+    case 'session.error': {
+      // Child session error → task-notification with status:'failed'.
+      const notification: import('../../shared/types').TaskNotification = {
+        taskId: childSessionId,
+        toolUseId,
+        status: 'failed',
+        outputFile: '',
+        summary: ''
+      }
+      return { kind: 'task-notification', notification }
+    }
 
     default:
       return { kind: 'ignore' }

@@ -156,6 +156,12 @@ export class OpencodeSession extends BaseSession {
   // prior messages; the DB UNIQUE(message_id) already dedups, this just avoids
   // the repeated round-trips on long sessions).
   private recordedUsageMessageIds = new Set<string>()
+  // Phase 8d — child session routing for the `task` tool.
+  // Maps childSessionId → parentToolUseId (the task part's callID).
+  // Populated by the event-mapper when it sees a task tool part with
+  // state.metadata.sessionId; entries are deleted after the child's
+  // session.idle (task-notification dispatch). Cleared in cancel()/dispose().
+  private childSessions = new Map<string, string>()
   // Auto-mode (full) LLM gatekeeper state (ADR-023).
   private _autoModeConfig: AutoModeConfig | undefined
   private autoDenials = { consecutive: 0, total: 0 }
@@ -479,7 +485,7 @@ export class OpencodeSession extends BaseSession {
         if (signal.aborted) break
         if (!this.openSessionId) continue
 
-        const output = mapEvent(ev, this.openSessionId, this.accumulators, this.startTimeMs, totalCostRef)
+        const output = mapEvent(ev, this.openSessionId, this.accumulators, this.startTimeMs, totalCostRef, this.childSessions)
         this.totalCostUsd = totalCostRef.value
 
         this.dispatchMapperOutput(output)
@@ -573,6 +579,51 @@ export class OpencodeSession extends BaseSession {
         this.resetInactivityTimer()
         break
 
+      case 'subagent-stream':
+        this.send('session:subagent-stream', {
+          toolUseId: output.toolUseId,
+          type: output.streamType,
+          text: output.delta
+        })
+        break
+
+      case 'subagent-message': {
+        const { toolUseId, message } = output
+        this.send('session:subagent-message', { toolUseId, message })
+
+        // Extract newly completed child tool parts → session:subagent-tool-result.
+        // Mirrors the own 'message' case's extractToolResult + emittedToolResults dedup.
+        const childAcc = this.accumulators.get(message.id)
+        if (childAcc) {
+          for (const [partId, snap] of childAcc.parts) {
+            const cacheKey = `${message.id}:${partId}`
+            if (!this.emittedToolResults.has(cacheKey)) {
+              const toolRes = extractToolResult(partId, snap)
+              if (toolRes) {
+                this.emittedToolResults.add(cacheKey)
+                this.send('session:subagent-tool-result', {
+                  toolUseId,
+                  toolResultToolUseId: toolRes.toolUseId,
+                  result: toolRes.result,
+                  isError: toolRes.isError
+                })
+              }
+            }
+          }
+        }
+        break
+      }
+
+      case 'task-notification':
+        this.send('session:task-notification', output.notification)
+        // Tidy: remove the completed/failed child mapping so its sessionId is no
+        // longer tracked (also prevents a future session with the same id from
+        // being misrouted if opencode reuses ids).
+        if (output.notification.toolUseId) {
+          this.childSessions.delete(output.notification.taskId)
+        }
+        break
+
       case 'ignore':
         break
     }
@@ -594,6 +645,7 @@ export class OpencodeSession extends BaseSession {
     this.isProcessing = false
     this.sseAbort?.abort()
     this.sseAbort = null
+    this.childSessions.clear()
     if (this.conn) {
       opencodeServerManager.release(this.cwd)
       this.conn = null
@@ -944,6 +996,9 @@ export class OpencodeSession extends BaseSession {
     for (const [messageId, acc] of this.accumulators) {
       // Only record assistant messages that have cost or token data
       if (acc.role === 'user' || acc.role === 'system') continue
+      // Skip subagent (task child-session) messages — their tokens belong to the
+      // child, not the parent model (Phase 8d). Subagent usage stays unmetered.
+      if (acc.isChild) continue
       if (!acc.cost && !acc.tokens) continue
       // Skip messages already recorded in a prior session.idle this session
       // (the DB dedups anyway; this avoids the redundant round-trip).
@@ -988,6 +1043,8 @@ export class OpencodeSession extends BaseSession {
       let cacheRead = 0
       for (const acc of this.accumulators.values()) {
         if (acc.role === 'user' || acc.role === 'system') continue
+        // Skip subagent (task child-session) messages (Phase 8d) — see recordTurnUsage.
+        if (acc.isChild) continue
         const t = acc.tokens
         if (!t) continue
         input += t.input ?? 0
