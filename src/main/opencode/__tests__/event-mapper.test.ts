@@ -280,6 +280,100 @@ describe('mapEvent — message.updated cost (S1: cumulative snapshot, not additi
   })
 })
 
+// ── message.updated info.tokens — cumulative-per-message (store, not sum) ──────
+// These guard the Phase 7 metering recorder: opencode re-emits message.updated
+// for the same message with a growing CUMULATIVE token snapshot, so the
+// accumulator must STORE the latest (final) tokens, not sum across events.
+describe('mapEvent — message.updated info.tokens (Phase 7 metering)', () => {
+  it('stores info.tokens on the accumulator (final snapshot, replace not sum)', () => {
+    const accumulators = new Map<string, MessageAccumulator>()
+    const totalCostRef = { value: 0 }
+    // Two updates for the SAME message id with growing cumulative tokens.
+    mapEvent(
+      makeEvent('message.updated', {
+        sessionID: SESSION_ID,
+        info: {
+          id: 'msg_tok',
+          role: 'assistant',
+          cost: 0.1,
+          tokens: { input: 100, output: 20, reasoning: 5, cache: { read: 10, write: 4 } }
+        }
+      }),
+      SESSION_ID,
+      accumulators,
+      START_TIME,
+      totalCostRef
+    )
+    mapEvent(
+      makeEvent('message.updated', {
+        sessionID: SESSION_ID,
+        info: {
+          id: 'msg_tok',
+          role: 'assistant',
+          cost: 0.2,
+          tokens: { input: 100, output: 80, reasoning: 12, cache: { read: 10, write: 4 } }
+        }
+      }),
+      SESSION_ID,
+      accumulators,
+      START_TIME,
+      totalCostRef
+    )
+    const acc = accumulators.get('msg_tok')
+    // Latest snapshot wins — output 80, NOT 20+80=100
+    expect(acc?.tokens?.input).toBe(100)
+    expect(acc?.tokens?.output).toBe(80)
+    expect(acc?.tokens?.reasoning).toBe(12)
+    expect(acc?.tokens?.cache?.read).toBe(10)
+    expect(acc?.tokens?.cache?.write).toBe(4)
+  })
+
+  it('carries tokens + messageId + engineCostUsd on the cost_update output', () => {
+    const accumulators = new Map<string, MessageAccumulator>()
+    const out = mapEvent(
+      makeEvent('message.updated', {
+        sessionID: SESSION_ID,
+        info: {
+          id: 'msg_co',
+          role: 'assistant',
+          cost: 0.33,
+          tokens: { input: 7, output: 3, cache: { read: 1, write: 2 } }
+        }
+      }),
+      SESSION_ID,
+      accumulators,
+      START_TIME,
+      { value: 0 }
+    )
+    expect(out.kind).toBe('cost_update')
+    if (out.kind === 'cost_update') {
+      expect(out.messageId).toBe('msg_co')
+      expect(out.engineCostUsd).toBeCloseTo(0.33)
+      expect(out.tokens?.input).toBe(7)
+      expect(out.tokens?.output).toBe(3)
+      expect(out.tokens?.cache?.write).toBe(2)
+    }
+  })
+
+  it('tolerates missing/partial info.tokens (undefined fields, no cache)', () => {
+    const accumulators = new Map<string, MessageAccumulator>()
+    mapEvent(
+      makeEvent('message.updated', {
+        sessionID: SESSION_ID,
+        info: { id: 'msg_partial', role: 'assistant', cost: 0.01, tokens: { input: 50 } }
+      }),
+      SESSION_ID,
+      accumulators,
+      START_TIME,
+      { value: 0 }
+    )
+    const acc = accumulators.get('msg_partial')
+    expect(acc?.tokens?.input).toBe(50)
+    expect(acc?.tokens?.output).toBeUndefined()
+    expect(acc?.tokens?.cache).toBeUndefined()
+  })
+})
+
 describe('mapEvent — R3: user-role part.updated is not rendered as assistant', () => {
   it('ignores a part.updated whose message role is user', () => {
     const accumulators = new Map<string, MessageAccumulator>()

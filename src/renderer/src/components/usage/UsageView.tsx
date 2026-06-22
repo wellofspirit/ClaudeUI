@@ -1,5 +1,5 @@
 import { useSessionStore } from '../../stores/session-store'
-import type { UsageBlock, AccountUsage } from '../../../../shared/types'
+import type { UsageBlock, AccountUsage, EngineUsageSummary } from '../../../../shared/types'
 import { TokenDonut } from './TokenDonut'
 import { BlockTimeline } from './BlockTimeline'
 import { DailyUsageChart } from './DailyUsageChart'
@@ -32,8 +32,15 @@ export function UsageView({ onClose }: UsageViewProps): React.JSX.Element {
     )
   }
 
-  const { currentBlock, recentBlocks, todaySnapshots, dailyHistory, accounts, accountFilter } =
-    blockUsage
+  const {
+    currentBlock,
+    recentBlocks,
+    todaySnapshots,
+    dailyHistory,
+    accounts,
+    accountFilter,
+    perEngine
+  } = blockUsage
 
   return (
     <div className="flex flex-col h-full bg-bg-primary overflow-y-auto">
@@ -62,6 +69,13 @@ export function UsageView({ onClose }: UsageViewProps): React.JSX.Element {
 
         {/* 5hr API Usage Bar */}
         {accountUsage && !accountUsage.error && <ApiUsageBar usage={accountUsage} />}
+
+        {/* Per-Engine breakdown (Phase 7 — opencode appears here) */}
+        {perEngine && perEngine.length > 0 && (
+          <Section title="By Engine" subtitle="Last 7 days · all engines">
+            <PerEngineTable perEngine={perEngine} />
+          </Section>
+        )}
 
         {/* Recent Blocks */}
         {recentBlocks.length > 0 && (
@@ -348,6 +362,45 @@ function ApiUsageBar({ usage }: { usage: AccountUsage }): React.JSX.Element {
         </span>
       </div>
     </div>
+  )
+}
+
+/** Friendly label for an engine id. */
+function engineLabel(engineId: string): string {
+  if (engineId === 'claude') return 'Claude'
+  if (engineId === 'opencode') return 'opencode'
+  return engineId
+}
+
+function PerEngineTable({ perEngine }: { perEngine: EngineUsageSummary[] }): React.JSX.Element {
+  const grandTotal = perEngine.reduce((sum, e) => sum + sumTokens(e.tokens), 0)
+  return (
+    <table className="w-full text-[10px]">
+      <thead>
+        <tr className="text-text-muted">
+          <th className="text-left font-medium pb-1">Engine</th>
+          <th className="text-right font-medium pb-1">Tokens</th>
+          <th className="text-right font-medium pb-1">Cost</th>
+          <th className="text-right font-medium pb-1">Reqs</th>
+          <th className="text-right font-medium pb-1">Share</th>
+        </tr>
+      </thead>
+      <tbody>
+        {perEngine.map((e) => {
+          const tot = sumTokens(e.tokens)
+          const pct = grandTotal > 0 ? Math.round((tot / grandTotal) * 100) : 0
+          return (
+            <tr key={e.engineId} className="text-text-secondary">
+              <td className="py-0.5">{engineLabel(e.engineId)}</td>
+              <td className="text-right font-mono">{formatTokenCount(tot)}</td>
+              <td className="text-right font-mono">{formatCost(e.costUsd)}</td>
+              <td className="text-right font-mono">{e.requestCount}</td>
+              <td className="text-right font-mono">{pct}%</td>
+            </tr>
+          )
+        })}
+      </tbody>
+    </table>
   )
 }
 

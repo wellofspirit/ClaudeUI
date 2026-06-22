@@ -119,6 +119,7 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     onSkills: onEvent('session:skills'),
     onAuthSource: onEvent('session:auth-source'),
     onStatusLine: onEvent('session:status-line'),
+    onMetering: onEvent('session:metering'),
     onMcpServers: onEvent('session:mcp-servers'),
     onPlanSteps: onEvent('session:plan'),
 

@@ -16,6 +16,7 @@ import type {
   ModelInfo,
   DirectoryGroup,
   StatusLineData,
+  MeteringSnapshot,
   SlashCommandInfo,
   GitStatusData,
   GitBranchData,
@@ -396,6 +397,8 @@ export interface PerSessionState {
   /** null = use model default; non-null = user explicitly chose this mode */
   thinkingMode: 'adaptive' | 'enabled' | 'disabled' | null
   statusLine: StatusLineData | null
+  /** Engine-neutral metering snapshot (Phase 7 Pass 2). Additive to statusLine. */
+  metering: MeteringSnapshot | null
   queuedText: string
   draftText: string
   selectedModel: string
@@ -478,6 +481,7 @@ const EMPTY_SESSION_STATE: PerSessionState = {
   effort: null,
   thinkingMode: null,
   statusLine: null,
+  metering: null,
   queuedText: '',
   draftText: '',
   selectedModel: 'default',
@@ -752,6 +756,7 @@ interface SessionState {
   ) => void
   setThinkingMode: (mode: 'adaptive' | 'enabled' | 'disabled' | null, routingId?: string) => void
   setStatusLine: (routingId: string, data: StatusLineData) => void
+  setMetering: (routingId: string, data: MeteringSnapshot) => void
   appendQueuedText: (text: string) => void
   setQueuedText: (routingId: string, text: string) => void
   clearQueuedText: () => void
@@ -1978,6 +1983,21 @@ export const useSessionStore = create<SessionState>((set) => ({
       const newId = rekeyMap.get(routingId)
       if (newId && state.sessions[newId]) {
         return { sessions: updateSession(state.sessions, newId, () => ({ statusLine: data })) }
+      }
+      return {}
+    }),
+
+  // Phase 7 Pass 2 — engine-neutral metering snapshot. Mirrors setStatusLine
+  // (including the pre-rekey routingId fallback). Additive: does not touch
+  // statusLine, so the Claude status-line rendering is unchanged.
+  setMetering: (routingId, data) =>
+    set((state) => {
+      if (state.sessions[routingId]) {
+        return { sessions: updateSession(state.sessions, routingId, () => ({ metering: data })) }
+      }
+      const newId = rekeyMap.get(routingId)
+      if (newId && state.sessions[newId]) {
+        return { sessions: updateSession(state.sessions, newId, () => ({ metering: data })) }
       }
       return {}
     }),

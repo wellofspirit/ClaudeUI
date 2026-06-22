@@ -126,19 +126,29 @@ describe('migration framework — user_version guard', () => {
     }
   })
 
-  it('applies the real production migration set (v1 + v2 create session_meta + account)', () => {
+  it('applies the real production migration set (v1–v5)', () => {
     const db = openRawDb()
     try {
       // Default migration list (production MIGRATIONS).
       runMigrations(db)
-      // v1: session_meta, v2: account — user_version advances to latest migration.
-      expect(userVersion(db)).toBe(2)
+      // v1: session_meta, v2: account, v3: usage_event, v4: usage_window_sample,
+      // v5: daily_usage
+      expect(userVersion(db)).toBe(5)
       // session_meta must exist and be queryable.
       const rows = db.prepare('SELECT * FROM session_meta').all()
       expect(rows).toEqual([])
       // account table must exist and be queryable (Phase 4 v2 migration).
       const accRows = db.prepare('SELECT * FROM account').all()
       expect(accRows).toEqual([])
+      // usage_event must exist (Phase 7 v3 migration).
+      const usageRows = db.prepare('SELECT * FROM usage_event').all()
+      expect(usageRows).toEqual([])
+      // usage_window_sample must exist (Phase 7 v4 migration).
+      const wsRows = db.prepare('SELECT * FROM usage_window_sample').all()
+      expect(wsRows).toEqual([])
+      // daily_usage must exist (Phase 7 v5 migration — Full SQL).
+      const duRows = db.prepare('SELECT * FROM daily_usage').all()
+      expect(duRows).toEqual([])
     } finally {
       db.close()
     }

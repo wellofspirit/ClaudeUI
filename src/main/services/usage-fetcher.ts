@@ -21,10 +21,13 @@ import { readFile, writeFile, mkdir, appendFile } from 'node:fs/promises'
 import { execFile } from 'node:child_process'
 import { join } from 'node:path'
 import { homedir, platform } from 'node:os'
+import { randomUUID } from 'node:crypto'
 import type { BrowserWindow } from 'electron'
 import { ClaudeSession, getSdkVersion } from './claude-session'
 import type { AccountUsage, ExtraUsage, RateWindow } from '../../shared/types'
 import { logger } from './logger'
+import { recordWindowSample } from './db'
+import { canonicalizeWindowEnd } from './usage-windows'
 
 /** The currently authenticated Claude account (from ~/.claude.json). */
 export interface ActiveAccount {
@@ -134,6 +137,10 @@ export class UsageFetcher {
   /** Last account written to the account log (avoid duplicate records). */
   private lastLoggedAccountUuid: string | null = null
   private accountLogSeeded = false
+  /** Known canonical 5h window ends, for snap-dedup of window samples (Phase 7). */
+  private knownCanonicalEnds: number[] = []
+  /** Last (accountUuid, usedPercent, canonicalEnd) recorded — dedup identical samples. */
+  private lastWindowSampleKey: string | null = null
   /** One-shot timer firing shortly after the 5h window expires. */
   private expiryTimer: ReturnType<typeof setTimeout> | null = null
   private lastFetchStartedAt = 0
@@ -479,6 +486,9 @@ export class UsageFetcher {
   // -------------------------------------------------------------------------
 
   private pushToRenderer(usage: AccountUsage): void {
+    // Phase 7: record a window-utilization sample so the WLS apiPercent
+    // time-series + 5h block alignment can be sourced from the DB. Best-effort.
+    this.recordWindowSampleFromUsage(usage)
     try {
       if (this.window && !this.window.isDestroyed()) {
         this.window.webContents.send('usage:data', usage)
@@ -488,6 +498,47 @@ export class UsageFetcher {
       }
     } catch {
       /* Window may have been closed */
+    }
+  }
+
+  /**
+   * Record one usage_window_sample from the current 5h-window observation.
+   * The canonical_end is snap-deduped via canonicalizeWindowEnd (same algorithm
+   * block-usage uses), so one real window registers under one canonical end.
+   * Skips when there's no account UUID, no/expired window, or the sample is a
+   * duplicate of the last (no new information since the previous push).
+   * Failures are swallowed — this is advisory.
+   */
+  private recordWindowSampleFromUsage(usage: AccountUsage): void {
+    try {
+      if (usage.error) return
+      const accountUuid = this.activeAccount?.uuid
+      if (!accountUuid) return
+      const resetsAt = usage.fiveHour.resetsAt
+      if (!resetsAt) return
+      const resetMs = new Date(resetsAt).getTime()
+      if (isNaN(resetMs) || resetMs <= Date.now()) return
+
+      const canonicalEnd = canonicalizeWindowEnd(resetMs, this.knownCanonicalEnds)
+      if (!this.knownCanonicalEnds.includes(canonicalEnd)) {
+        this.knownCanonicalEnds.push(canonicalEnd)
+        this.knownCanonicalEnds.sort((a, b) => a - b)
+      }
+
+      const usedPercent = usage.fiveHour.usedPercent
+      const key = `${accountUuid}:${usedPercent}:${canonicalEnd}`
+      if (key === this.lastWindowSampleKey) return // no new info since last push
+      this.lastWindowSampleKey = key
+
+      recordWindowSample({
+        id: randomUUID(),
+        ts: Date.now(),
+        accountUuid,
+        usedPercent,
+        canonicalEnd
+      })
+    } catch (err) {
+      logger.debug('UsageFetcher', `recordWindowSample failed: ${err}`)
     }
   }
 

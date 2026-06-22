@@ -350,3 +350,149 @@ describe('updateFromHeaderUtilization', () => {
     expect(result).toBeNull()
   })
 })
+
+// ---------------------------------------------------------------------------
+// Window-sample population (Phase 7 Pass 2)
+// Replicates recordWindowSampleFromUsage's decision logic (the class has heavy
+// deps; this file's convention is to replicate the pure logic). Verifies the
+// canonicalize + snap-dedup + skip-when-no-account/expired + key-dedup gate.
+// ---------------------------------------------------------------------------
+
+describe('recordWindowSampleFromUsage decision logic', () => {
+  const WINDOW_SNAP_TOLERANCE_MS = 2 * 60_000
+  const MS_PER_MINUTE = 60_000
+
+  function canonicalizeWindowEnd(resetMs: number, knownEnds: number[]): number {
+    const rounded = Math.round(resetMs / MS_PER_MINUTE) * MS_PER_MINUTE
+    for (const end of knownEnds) {
+      if (Math.abs(end - rounded) <= WINDOW_SNAP_TOLERANCE_MS) return end
+    }
+    return rounded
+  }
+
+  /** Returns the sample to record (or null to skip), updating knownEnds/lastKey. */
+  function decide(
+    usage: { error: string | null; fiveHour: { usedPercent: number; resetsAt: string | null } },
+    accountUuid: string | undefined,
+    knownEnds: number[],
+    lastKey: string | null,
+    now: number
+  ): { sample: { accountUuid: string; usedPercent: number; canonicalEnd: number } | null; key: string | null } {
+    if (usage.error) return { sample: null, key: lastKey }
+    if (!accountUuid) return { sample: null, key: lastKey }
+    const resetsAt = usage.fiveHour.resetsAt
+    if (!resetsAt) return { sample: null, key: lastKey }
+    const resetMs = new Date(resetsAt).getTime()
+    if (isNaN(resetMs) || resetMs <= now) return { sample: null, key: lastKey }
+    const canonicalEnd = canonicalizeWindowEnd(resetMs, knownEnds)
+    if (!knownEnds.includes(canonicalEnd)) {
+      knownEnds.push(canonicalEnd)
+      knownEnds.sort((a, b) => a - b)
+    }
+    const usedPercent = usage.fiveHour.usedPercent
+    const key = `${accountUuid}:${usedPercent}:${canonicalEnd}`
+    if (key === lastKey) return { sample: null, key } // dedup
+    return { sample: { accountUuid, usedPercent, canonicalEnd }, key }
+  }
+
+  const NOW = new Date('2026-06-22T10:00:00.000Z').getTime()
+  const FUTURE = new Date('2026-06-22T13:00:00.000Z').toISOString()
+
+  it('records a sample for a valid future window with an account', () => {
+    const { sample } = decide(
+      { error: null, fiveHour: { usedPercent: 42, resetsAt: FUTURE } },
+      'uuid_1',
+      [],
+      null,
+      NOW
+    )
+    expect(sample).not.toBeNull()
+    expect(sample!.usedPercent).toBe(42)
+    expect(sample!.accountUuid).toBe('uuid_1')
+  })
+
+  it('skips when there is no active account', () => {
+    const { sample } = decide(
+      { error: null, fiveHour: { usedPercent: 42, resetsAt: FUTURE } },
+      undefined,
+      [],
+      null,
+      NOW
+    )
+    expect(sample).toBeNull()
+  })
+
+  it('skips on error', () => {
+    const { sample } = decide(
+      { error: 'no creds', fiveHour: { usedPercent: 0, resetsAt: FUTURE } },
+      'uuid_1',
+      [],
+      null,
+      NOW
+    )
+    expect(sample).toBeNull()
+  })
+
+  it('skips an expired window', () => {
+    const past = new Date('2026-06-22T09:00:00.000Z').toISOString()
+    const { sample } = decide(
+      { error: null, fiveHour: { usedPercent: 42, resetsAt: past } },
+      'uuid_1',
+      [],
+      null,
+      NOW
+    )
+    expect(sample).toBeNull()
+  })
+
+  it('dedups an identical consecutive sample (same account/percent/window)', () => {
+    const knownEnds: number[] = []
+    const first = decide(
+      { error: null, fiveHour: { usedPercent: 42, resetsAt: FUTURE } },
+      'uuid_1',
+      knownEnds,
+      null,
+      NOW
+    )
+    expect(first.sample).not.toBeNull()
+    const second = decide(
+      { error: null, fiveHour: { usedPercent: 42, resetsAt: FUTURE } },
+      'uuid_1',
+      knownEnds,
+      first.key,
+      NOW
+    )
+    expect(second.sample).toBeNull() // identical → deduped
+  })
+
+  it('records again when used_percent changes within the same window', () => {
+    const knownEnds: number[] = []
+    const first = decide(
+      { error: null, fiveHour: { usedPercent: 42, resetsAt: FUTURE } },
+      'uuid_1',
+      knownEnds,
+      null,
+      NOW
+    )
+    const second = decide(
+      { error: null, fiveHour: { usedPercent: 55, resetsAt: FUTURE } },
+      'uuid_1',
+      knownEnds,
+      first.key,
+      NOW
+    )
+    expect(second.sample).not.toBeNull()
+    expect(second.sample!.usedPercent).toBe(55)
+    // canonical end is reused (same window) via snap-dedup
+    expect(knownEnds).toHaveLength(1)
+  })
+
+  it('snap-dedups a jittered resets_at to the same canonical end', () => {
+    const knownEnds: number[] = []
+    const t1 = new Date('2026-06-22T13:00:00.578Z').toISOString()
+    const t2 = new Date('2026-06-22T13:00:30.000Z').toISOString() // 30s later, within tolerance
+    decide({ error: null, fiveHour: { usedPercent: 42, resetsAt: t1 } }, 'uuid_1', knownEnds, null, NOW)
+    decide({ error: null, fiveHour: { usedPercent: 50, resetsAt: t2 } }, 'uuid_1', knownEnds, null, NOW)
+    expect(knownEnds).toHaveLength(1) // both snapped to one canonical end
+  })
+})

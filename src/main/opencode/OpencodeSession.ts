@@ -11,13 +11,16 @@ import type {
   SessionStatus,
   ApprovalDecision,
   PermissionSuggestion,
-  AccountRef
+  AccountRef,
+  MeteringSnapshot
 } from '../../shared/types'
 import { opencodeModel } from '../../shared/types'
+import { equivalentCostUsd } from '../../shared/pricing'
 import { logger } from '../services/logger'
 import { mapEvent, extractToolResult } from './event-mapper'
 import type { MapperOutput, MessageAccumulator } from './event-mapper'
 import { opencodeAuthProvider } from '../auth/OpencodeAuthProvider'
+import { recordUsageEvent } from '../services/usage-recorder'
 
 // Permission ruleset helper
 type PermissionAction = 'allow' | 'ask' | 'deny'
@@ -64,6 +67,11 @@ export class OpencodeSession extends BaseSession {
   private accumulators = new Map<string, MessageAccumulator>()
   // Track last emitted tool completion per partId to avoid double-emitting
   private emittedToolResults = new Set<string>()
+  // Metering: message ids already recorded to usage_event (the accumulators map
+  // persists across turns, so without this every session.idle re-iterates all
+  // prior messages; the DB UNIQUE(message_id) already dedups, this just avoids
+  // the repeated round-trips on long sessions).
+  private recordedUsageMessageIds = new Set<string>()
 
   constructor(
     routingId: string,
@@ -264,6 +272,12 @@ export class OpencodeSession extends BaseSession {
 
       case 'result':
         this.isProcessing = false
+        // Metering (Phase 7 Pass 1) — record one usage_event per assistant
+        // message in this turn. We record at session.idle (result) so we have
+        // the final cumulative token + cost state for each message_id.
+        this.recordTurnUsage()
+        // Metering (Phase 7 Pass 2) — emit the engine-neutral MeteringSnapshot.
+        this.sendMetering()
         this.send('session:result', output.result)
         this.sendStatus()
         this.resetInactivityTimer()
@@ -362,6 +376,92 @@ export class OpencodeSession extends BaseSession {
 
   sendStatus(): void {
     this.send('session:status', this.status)
+  }
+
+  /**
+   * Record one usage_event per accumulated assistant message at turn end.
+   * Called at session.idle so we have final cumulative token + cost state.
+   * Failures are swallowed by recordUsageEvent — never breaks a turn.
+   */
+  private recordTurnUsage(): void {
+    const parsed = parseModelString(this._model)
+    const account = opencodeAuthProvider.buildAccountRef(parsed.providerID)
+
+    for (const [messageId, acc] of this.accumulators) {
+      // Only record assistant messages that have cost or token data
+      if (acc.role === 'user' || acc.role === 'system') continue
+      if (!acc.cost && !acc.tokens) continue
+      // Skip messages already recorded in a prior session.idle this session
+      // (the DB dedups anyway; this avoids the redundant round-trip).
+      if (this.recordedUsageMessageIds.has(messageId)) continue
+      this.recordedUsageMessageIds.add(messageId)
+
+      const tokens = acc.tokens
+      recordUsageEvent({
+        engineId: 'opencode',
+        vendorId: parsed.providerID,
+        accountId: account?.accountId ?? null,
+        accountUuid: null, // opencode does not expose an OAuth account UUID yet
+        modelId: parsed.modelID,
+        tokens: {
+          input: tokens?.input ?? 0,
+          output: tokens?.output ?? 0,
+          cacheWrite: tokens?.cache?.write ?? 0,
+          cacheWrite1h: 0, // opencode does not distinguish 1h cache writes
+          cacheRead: tokens?.cache?.read ?? 0
+        },
+        engineCostUsd: acc.cost ?? null,
+        sessionId: this.openSessionId,
+        messageId,
+        source: 'live'
+      })
+    }
+  }
+
+  /**
+   * Emit the engine-neutral MeteringSnapshot (Phase 7 Pass 2). opencode has no
+   * window (no usage provider yet — foundation §7), so window is omitted; this
+   * is the cumulative-meter case. Tokens summed across the turn's assistant
+   * messages; equivalentCostUsd from the internal pricing table. Best-effort.
+   */
+  private sendMetering(): void {
+    try {
+      const parsed = parseModelString(this._model)
+      const account = opencodeAuthProvider.buildAccountRef(parsed.providerID)
+      let input = 0
+      let output = 0
+      let cacheWrite = 0
+      let cacheRead = 0
+      for (const acc of this.accumulators.values()) {
+        if (acc.role === 'user' || acc.role === 'system') continue
+        const t = acc.tokens
+        if (!t) continue
+        input += t.input ?? 0
+        output += t.output ?? 0
+        cacheWrite += t.cache?.write ?? 0
+        cacheRead += t.cache?.read ?? 0
+      }
+      const equiv = equivalentCostUsd(parsed.providerID, parsed.modelID, {
+        inputTokens: input,
+        outputTokens: output,
+        cacheWriteTokens: cacheWrite,
+        cacheWrite1hTokens: 0,
+        cacheReadTokens: cacheRead
+      })
+      const snapshot: MeteringSnapshot = {
+        engineId: 'opencode',
+        vendorId: parsed.providerID,
+        billingType: account?.billingType ?? 'unknown',
+        tokens: { input, output, cacheWrite, cacheRead, total: input + output + cacheWrite + cacheRead },
+        equivalentCostUsd: equiv,
+        engineReportedCostUsd: this.totalCostUsd,
+        contextWindow: { used: 0, size: 0 }
+        // window omitted — opencode has no usage provider (cumulative meter)
+      }
+      this.send('session:metering', snapshot)
+    } catch {
+      /* advisory — never breaks the turn */
+    }
   }
 
   dispose(): void {

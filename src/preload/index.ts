@@ -128,6 +128,7 @@ const api: ClaudeAPI = {
   onSteerConsumed: onEvent('session:steer-consumed'),
   onSkills: onEvent('session:skills'),
   onStatusLine: onEvent('session:status-line'),
+  onMetering: onEvent('session:metering'),
   onPlanSteps: onEvent('session:plan'),
   onMcpServers: onEvent('session:mcp-servers'),
 

@@ -578,6 +578,9 @@ interface SessionAPI {
    *  billingType (via OAuthAccount). See ADR-014 / Phase 4 (ADR-021). */
   onAuthSource(cb: (routingId: string, source: string) => void): () => void
   onStatusLine(cb: (routingId: string, data: StatusLineData) => void): () => void
+  /** Engine-neutral metering snapshot (Phase 7 Pass 2). Emitted alongside
+   *  onStatusLine; both engines send it. The status line itself is unchanged. */
+  onMetering(cb: (routingId: string, data: MeteringSnapshot) => void): () => void
   onPlanSteps(cb: (routingId: string, todos: TodoItem[]) => void): () => void
   onSettingsChanged(cb: (settings: Record<string, unknown>) => void): () => void
   onSessionConfigChanged(cb: (config: UISessionConfig) => void): () => void
@@ -989,6 +992,41 @@ export interface StatusLineData {
   remainingPercentage: number | null
 }
 
+/**
+ * MeteringSnapshot — engine-neutral session-level usage metric (foundation §3,
+ * Phase 7 Pass 2). Emitted by BOTH engines on `session:metering` ALONGSIDE the
+ * existing StatusLineData (which is unchanged — behavior-preserving for the
+ * Claude status line). The headline metric is `equivalentCostUsd` (tokens ×
+ * the internal pricing table); `engineReportedCostUsd` is the engine's own cost
+ * (real spend for apiKey accounts). `window` is present only for subscription
+ * accounts that expose a usage provider (Claude); apiKey/free get a cumulative
+ * meter with no window. Per-billingType behavior is driven by `billingType`.
+ */
+export interface MeteringSnapshot {
+  engineId: EngineId
+  vendorId: VendorId
+  billingType: BillingType
+  tokens: {
+    input: number
+    output: number
+    cacheWrite: number
+    cacheRead: number
+    total: number
+  }
+  /** tokens × internal pricing — the primary metric; null when the model is unpriced. */
+  equivalentCostUsd: number | null
+  /** cli.js total_cost_usd / opencode info.cost — real spend when billingType==='apiKey'. */
+  engineReportedCostUsd?: number
+  contextWindow: { used: number; size: number }
+  /** Subscription-only; absent for apiKey/free/unknown. */
+  window?: {
+    usedPercent: number
+    resetsAt: string | null
+    /** The WLS capacity projection (subscription windows with a usage provider). */
+    projection?: { maxTokens: number; costUsd: number }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Block usage types (ccusage-inspired token tracking per 5hr window)
 // ---------------------------------------------------------------------------
@@ -1083,6 +1121,20 @@ export interface BlockUsageData {
   accounts: string[]
   /** Active account filter (email), or null for all accounts */
   accountFilter: string | null
+  /**
+   * Per-engine usage breakdown over the scan window (Phase 7 Pass 2).
+   * Sourced from usage_event across ALL engines — this is how opencode usage
+   * surfaces in the dashboard. Absent/empty when only Claude has data.
+   */
+  perEngine?: EngineUsageSummary[]
+}
+
+/** Per-engine usage summary for the dashboard (Phase 7 Pass 2). */
+export interface EngineUsageSummary {
+  engineId: string
+  tokens: TokenCounts
+  costUsd: number
+  requestCount: number
 }
 
 // ---------------------------------------------------------------------------

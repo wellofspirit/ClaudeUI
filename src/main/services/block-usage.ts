@@ -16,7 +16,6 @@ import { watch, type FSWatcher } from 'node:fs'
 import type { BrowserWindow } from 'electron'
 import type {
   TokenCounts,
-  ModelTokenBreakdown,
   UsageBlock,
   UsageSnapshot,
   DailyUsageFile,
@@ -26,6 +25,26 @@ import { ClaudeSession } from './claude-session'
 import { usageFetcher } from './usage-fetcher'
 import { logger } from './logger'
 import { canonicalizeWindowEnd, accountForTimestamp, type AccountLogRecord } from './usage-windows'
+import {
+  groupEntriesIntoBlocks,
+  computeProjectionWLS as computeWLS,
+  perEngineBreakdown,
+  type AggEntry,
+  type ApiWindow as AggApiWindow,
+  type ProjectionSample as AggProjectionSample
+} from './usage-aggregation'
+import {
+  getUsageEventsSince,
+  insertUsageEvents,
+  upsertDailyUsage,
+  seedDailyUsageIfAbsent,
+  getAllDailyUsage,
+  hasDailyUsage,
+  type UsageEventRow,
+  type DailyUsageRow
+} from './db'
+import { v4 as uuid } from 'uuid'
+import { equivalentCostUsd } from '../../shared/pricing'
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -40,8 +59,7 @@ const MS_PER_HOUR = 3600_000
 const MS_PER_MINUTE = 60_000
 const RECALC_DEBOUNCE_MS = 30_000 // 30 seconds — debounce after file change events
 
-/** Grace for attaching entries that slightly precede a window's derived start. */
-const WINDOW_START_GRACE_MS = 30 * MS_PER_MINUTE
+// WINDOW_START_GRACE_MS moved to usage-aggregation.ts (grace-zone window lookup).
 
 /** A 5h rate-limit window observed via resets_at. */
 interface ApiWindow {
@@ -262,96 +280,15 @@ function normalizeModelName(model: string): string | null {
   return model
 }
 
-/**
- * A generic model name has no version digits after the family.
- * e.g. "claude-opus", "claude-sonnet" are generic; "claude-opus-4-6" is specific.
- */
-function isGenericModelName(model: string): boolean {
-  return /^claude-(opus|sonnet|haiku)$/i.test(model)
-}
-
-/**
- * Merge generic model names (e.g. "claude-sonnet") into their specific versioned
- * counterparts (e.g. "claude-sonnet-4-6"), but keep distinct versions separate.
- *
- * Generic names appear when the SDK uses short forms in JSONL entries. They should
- * be folded into the specific variant with the most requests. Distinct versioned
- * models (e.g. "claude-opus-4-5" vs "claude-opus-4-6") are kept separate because
- * they have different pricing and the user should see the breakdown.
- */
-function mergeModelFamilies(
-  modelMap: Map<string, { tokens: TokenCounts; costUsd: number; requestCount: number }>
-): Map<string, { tokens: TokenCounts; costUsd: number; requestCount: number }> {
-  // Group by family: opus, sonnet, haiku, other
-  const families = new Map<string, string[]>() // family → model names
-  for (const model of modelMap.keys()) {
-    const lower = model.toLowerCase()
-    let family = 'other'
-    if (lower.includes('opus')) family = 'opus'
-    else if (lower.includes('sonnet')) family = 'sonnet'
-    else if (lower.includes('haiku')) family = 'haiku'
-    const existing = families.get(family) ?? []
-    existing.push(model)
-    families.set(family, existing)
-  }
-
-  const merged = new Map<string, { tokens: TokenCounts; costUsd: number; requestCount: number }>()
-  for (const [, models] of families) {
-    if (models.length === 1) {
-      merged.set(models[0], modelMap.get(models[0])!)
-      continue
-    }
-
-    // Split into generic ("claude-sonnet") and specific ("claude-sonnet-4-6")
-    const generic = models.filter(isGenericModelName)
-    const specific = models.filter((m) => !isGenericModelName(m))
-
-    // Keep each specific version as its own entry
-    for (const m of specific) {
-      merged.set(m, { ...modelMap.get(m)! })
-    }
-
-    // Merge generic counts into the most-requested specific variant,
-    // or keep the generic entry if there are no specific variants.
-    if (generic.length > 0) {
-      // Sum all generic entries
-      const genericData = { tokens: emptyTokenCounts(), costUsd: 0, requestCount: 0 }
-      for (const m of generic) {
-        const data = modelMap.get(m)!
-        genericData.tokens = addTokens(genericData.tokens, data.tokens)
-        genericData.costUsd += data.costUsd
-        genericData.requestCount += data.requestCount
-      }
-
-      if (specific.length > 0) {
-        // Find the specific variant with the most requests and merge generic into it
-        let target = specific[0]
-        let maxReqs = 0
-        for (const m of specific) {
-          const data = merged.get(m)!
-          if (data.requestCount > maxReqs) {
-            maxReqs = data.requestCount
-            target = m
-          }
-        }
-        const existing = merged.get(target)!
-        existing.tokens = addTokens(existing.tokens, genericData.tokens)
-        existing.costUsd += genericData.costUsd
-        existing.requestCount += genericData.requestCount
-      } else {
-        // Only generic entries — keep as-is
-        merged.set(generic[0], genericData)
-      }
-    }
-  }
-  return merged
-}
+// isGenericModelName + mergeModelFamilies were extracted into
+// usage-aggregation.ts (Phase 7 Pass 2) — used by the shared block builder.
+// loadDailyHistory keeps its own inline family-merge for the daily chart.
 
 // ---------------------------------------------------------------------------
 // Internal types
 // ---------------------------------------------------------------------------
 
-interface ParsedEntry {
+export interface ParsedEntry {
   timestamp: number
   model: string
   inputTokens: number
@@ -371,21 +308,42 @@ interface FileCache {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function emptyTokenCounts(): TokenCounts {
-  return { inputTokens: 0, outputTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0 }
-}
-
 function totalTokens(t: TokenCounts): number {
   return t.inputTokens + t.outputTokens + t.cacheCreationTokens + t.cacheReadTokens
 }
 
-function addTokens(a: TokenCounts, b: TokenCounts): TokenCounts {
-  return {
-    inputTokens: a.inputTokens + b.inputTokens,
-    outputTokens: a.outputTokens + b.outputTokens,
-    cacheCreationTokens: a.cacheCreationTokens + b.cacheCreationTokens,
-    cacheReadTokens: a.cacheReadTokens + b.cacheReadTokens
+/**
+ * Merge a day's per-model token map (model → tokens) by family, resolving each
+ * family back to the most-token specific model name. Verbatim extraction of the
+ * inline merge in loadDailyHistory, shared with the SQL daily path so both
+ * produce identical model maps. Pure.
+ */
+function mergeDailyModelFamilies(models: Record<string, number>): Record<string, number> {
+  const familyOf = (model: string): string => {
+    const lower = model.toLowerCase()
+    if (lower.includes('opus')) return 'opus'
+    if (lower.includes('sonnet')) return 'sonnet'
+    if (lower.includes('haiku')) return 'haiku'
+    return model
   }
+  const modelMap = new Map<string, number>()
+  for (const [model, tok] of Object.entries(models)) {
+    const family = familyOf(model)
+    modelMap.set(family, (modelMap.get(family) || 0) + tok)
+  }
+  const resolved: Record<string, number> = {}
+  for (const [family, tok] of modelMap) {
+    let bestModel = family
+    let bestTok = 0
+    for (const [model, mTok] of Object.entries(models)) {
+      if (familyOf(model) === family && mTok > bestTok) {
+        bestModel = model
+        bestTok = mTok
+      }
+    }
+    resolved[bestModel] = tok
+  }
+  return resolved
 }
 
 function todayDateStr(): string {
@@ -398,9 +356,7 @@ function dateStrFromTimestamp(ts: number): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 }
 
-function floorToHour(ts: number): number {
-  return Math.floor(ts / MS_PER_HOUR) * MS_PER_HOUR
-}
+// floorToHour was extracted into usage-aggregation.ts (Phase 7 Pass 2).
 
 // ---------------------------------------------------------------------------
 // BlockUsageService
@@ -417,12 +373,10 @@ interface ProjectionSample {
   apiPercent: number // API 5hr usage % at this snapshot
 }
 
-/** Exponential decay half-life for weighting projection samples. */
-const PROJECTION_HALF_LIFE_MS = 5 * MS_PER_MINUTE
+// PROJECTION_HALF_LIFE_MS + MIN_REGRESSION_SAMPLES moved to usage-aggregation.ts
+// (Phase 7 Pass 2) — the WLS math lives there now.
 /** Max samples to keep in the ring buffer (~1hr at 2-min polling). */
 const MAX_PROJECTION_SAMPLES = 30
-/** Minimum samples before using regression (below this, use single-point). */
-const MIN_REGRESSION_SAMPLES = 3
 /** Don't include samples with apiPercent below this threshold (too noisy). */
 const MIN_API_PERCENT_FOR_SAMPLE = 0.5
 
@@ -477,6 +431,31 @@ export class BlockUsageService {
 
   getData(): BlockUsageData | null {
     return this.lastData
+  }
+
+  /**
+   * Parse all Claude JSONL entries within the scan window (reusing the exact
+   * parse + calculateCostFromTokens), each tagged with its time-attributed
+   * account (email + uuid from the account log). The Phase 7 reconciler calls
+   * this to import Claude usage_event rows — there is NO second JSONL parser.
+   */
+  async getClaudeEntriesForReconcile(): Promise<
+    Array<ParsedEntry & { accountEmail: string | null; accountUuid: string | null }>
+  > {
+    const cutoff = Date.now() - SCAN_WINDOW_MS
+    const entries = await this.scanJsonlWithCutoff(cutoff)
+    const accountLog = this.loadAccountLog()
+    // Build email → uuid from the log (latest wins).
+    const emailToUuid = new Map<string, string>()
+    for (const rec of accountLog) emailToUuid.set(rec.email, rec.accountUuid)
+    return entries.map((e) => {
+      const email = accountForTimestamp(accountLog, e.timestamp)
+      return {
+        ...e,
+        accountEmail: email,
+        accountUuid: email ? (emailToUuid.get(email) ?? null) : null
+      }
+    })
   }
 
   /** Set the account filter (email, null = all) and rebuild the view. */
@@ -545,24 +524,6 @@ export class BlockUsageService {
     }
   }
 
-  /**
-   * Find the window an entry belongs to. Prefers a window containing the
-   * timestamp (account-matching first when two accounts' windows overlap);
-   * falls back to the next window when the entry slightly precedes its
-   * derived start (resets_at − 5h is an estimate of the true start).
-   */
-  private findWindowFor(ts: number, account: string | null): ApiWindow | null {
-    const containing = this.knownWindows.filter((w) => ts >= w.start && ts < w.end)
-    if (containing.length > 0) {
-      const matching = containing.find((w) => w.account === null || w.account === account)
-      return matching ?? containing[0]
-    }
-    // Dead zone between windows: attach to the next window within grace
-    for (const w of this.knownWindows) {
-      if (ts < w.start && w.start - ts <= WINDOW_START_GRACE_MS) return w
-    }
-    return null
-  }
 
   // -------------------------------------------------------------------------
   // Account log
@@ -752,11 +713,24 @@ export class BlockUsageService {
     }
     const windowKnown = currentWindowEnd !== null && currentWindowEnd > now
 
-    // Apply the account filter for the view (persisted summaries stay unfiltered)
     const accountLog = this.loadAccountLog()
+
+    // Full SQL (Phase 7 Pass 2): the dashboard blocks are now sourced from
+    // usage_event, not the in-memory JSONL ParsedEntry list. We first upsert the
+    // freshly-parsed JSONL entries into usage_event (idempotent on message_id —
+    // converges with the reconciler + live opencode rows), then read Claude
+    // entries BACK from the DB for grouping. The reconciler keeps usage_event
+    // complete for out-of-tool sessions; this inline upsert guarantees block-
+    // usage's own JSONL data is present before it reads (no flash of empty).
+    this.upsertClaudeEntriesToDb(entries, accountLog)
+    const dbEntries = this.claudeEntriesFromDb(now)
+
+    // Apply the account filter for the view (persisted summaries stay unfiltered)
     const viewEntries = this.accountFilter
-      ? entries.filter((e) => accountForTimestamp(accountLog, e.timestamp) === this.accountFilter)
-      : entries
+      ? dbEntries.filter(
+          (e) => accountForTimestamp(accountLog, e.timestamp) === this.accountFilter
+        )
+      : dbEntries
 
     const blocks = this.groupIntoBlocks(viewEntries)
 
@@ -799,8 +773,27 @@ export class BlockUsageService {
     const snapshot = windowKnown ? this.buildSnapshot(currentBlock) : null
     const todaySnapshots = await this.persistSnapshot(snapshot, newlyCompleted)
 
-    // Load history — unfiltered entries drive persistence, view entries drive display
-    const dailyHistory = await this.loadDailyHistory(entries, viewEntries)
+    // Daily history (Full SQL): roll up usage_event per day into daily_usage,
+    // then read the 30-day chart from daily_usage (durable past the 7-day
+    // usage_event window — older days were seeded once from the legacy JSON
+    // files). The legacy JSON-file daily summaries keep being written for a
+    // release as a fallback — drive that from the JSONL `entries` exactly as
+    // before (allEntries === viewEntries when unfiltered) so persistDailySummary
+    // behavior is unchanged. The chart itself now reads SQL.
+    const jsonlViewEntries = this.accountFilter
+      ? entries.filter((e) => accountForTimestamp(accountLog, e.timestamp) === this.accountFilter)
+      : entries
+    const filteredDailyHistory = await this.loadDailyHistory(entries, jsonlViewEntries)
+    this.rollupDailyUsageFromDb(now)
+    // Account-filtered views can't read the all-account daily_usage rollup, so
+    // they use the entry-derived (account-attributable) history; unfiltered
+    // views read the durable SQL rollup.
+    const dailyHistory = this.accountFilter ? filteredDailyHistory : this.dailyHistoryFromDb()
+
+    // Per-engine breakdown over the scan window from usage_event (ALL engines).
+    // This is how opencode usage surfaces — the Claude blocks above stay
+    // Claude-only (5h windows are a Claude-subscription concept). Best-effort.
+    const perEngine = this.computePerEngine(now)
 
     const data: BlockUsageData = {
       currentBlock,
@@ -808,12 +801,336 @@ export class BlockUsageService {
       todaySnapshots,
       dailyHistory,
       accounts: this.knownAccounts(),
-      accountFilter: this.accountFilter
+      accountFilter: this.accountFilter,
+      perEngine
     }
 
     this.lastData = data
     this.pushToRenderer(data)
     return data
+  }
+
+  /**
+   * Per-engine usage breakdown over the scan window, from usage_event (Phase 7
+   * Pass 2). Both engines appear. Failures degrade to undefined (Claude-only
+   * dashboard unaffected). Uses each row's equiv_cost_usd (falling back to
+   * engine_cost_usd) so the cost matches the dashboard's equivalent-cost metric.
+   */
+  private computePerEngine(now: number): BlockUsageData['perEngine'] {
+    try {
+      const cutoff = now - SCAN_WINDOW_MS
+      const rows: UsageEventRow[] = getUsageEventsSince(cutoff)
+      if (rows.length === 0) return undefined
+      const aggEntries: AggEntry[] = rows.map((r) => ({
+        timestamp: r.ts,
+        model: r.modelId,
+        inputTokens: r.inputTokens,
+        outputTokens: r.outputTokens,
+        cacheCreationTokens: r.cacheWriteTokens,
+        cacheReadTokens: r.cacheReadTokens,
+        costUsd: r.equivCostUsd ?? r.engineCostUsd ?? 0,
+        messageId: r.messageId,
+        engineId: r.engineId
+      }))
+      const breakdown = perEngineBreakdown(aggEntries)
+      return breakdown.length > 0 ? breakdown : undefined
+    } catch (err) {
+      logger.debug('BlockUsage', `per-engine breakdown failed: ${err}`)
+      return undefined
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Full SQL: usage_event-sourced blocks + daily_usage-sourced chart (Pass 2)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Upsert freshly-parsed Claude JSONL entries into usage_event (idempotent on
+   * message_id). This makes block-usage self-sufficient: its own JSONL data is
+   * present in the DB before it reads blocks back, so there's no flash of empty
+   * even if the external reconciler hasn't run yet. equiv_cost from the pricing
+   * table; engine_cost carries the exact calculateCostFromTokens value (so the
+   * SQL-sourced block costs == the old JSONL block costs byte-for-byte).
+   */
+  private upsertClaudeEntriesToDb(entries: ParsedEntry[], accountLog: AccountLogRecord[]): void {
+    try {
+      const emailToUuid = new Map<string, string>()
+      for (const rec of accountLog) emailToUuid.set(rec.email, rec.accountUuid)
+      const rows: UsageEventRow[] = []
+      for (const e of entries) {
+        if (!e.messageId) continue
+        const email = accountForTimestamp(accountLog, e.timestamp)
+        const equiv = equivalentCostUsd('anthropic', e.model, {
+          inputTokens: e.inputTokens,
+          outputTokens: e.outputTokens,
+          cacheWriteTokens: e.cacheCreationTokens,
+          cacheWrite1hTokens: 0,
+          cacheReadTokens: e.cacheReadTokens
+        })
+        rows.push({
+          id: uuid(),
+          ts: e.timestamp,
+          engineId: 'claude',
+          vendorId: 'anthropic',
+          accountId: null,
+          accountUuid: email ? (emailToUuid.get(email) ?? null) : null,
+          modelId: e.model,
+          inputTokens: e.inputTokens,
+          outputTokens: e.outputTokens,
+          cacheWriteTokens: e.cacheCreationTokens,
+          cacheWrite1hTokens: 0,
+          cacheReadTokens: e.cacheReadTokens,
+          equivCostUsd: equiv ?? e.costUsd,
+          engineCostUsd: e.costUsd,
+          sessionId: null,
+          messageId: e.messageId,
+          source: 'backfill'
+        })
+      }
+      insertUsageEvents(rows)
+    } catch (err) {
+      logger.debug('BlockUsage', `upsertClaudeEntriesToDb failed: ${err}`)
+    }
+  }
+
+  /**
+   * Read Claude entries back from usage_event as the ParsedEntry shape the block
+   * grouping consumes. costUsd is sourced from engine_cost_usd (= the original
+   * calculateCostFromTokens value) so blocks are byte-identical to the old
+   * JSONL-sourced blocks. cacheCreationTokens = cache_write_tokens (combined
+   * 5m+1h, matching the JSONL ParsedEntry).
+   */
+  private claudeEntriesFromDb(now: number): ParsedEntry[] {
+    const cutoff = now - SCAN_WINDOW_MS
+    const rows = getUsageEventsSince(cutoff, 'claude')
+    return rows.map((r) => ({
+      timestamp: r.ts,
+      model: r.modelId,
+      inputTokens: r.inputTokens,
+      outputTokens: r.outputTokens,
+      cacheCreationTokens: r.cacheWriteTokens,
+      cacheReadTokens: r.cacheReadTokens,
+      costUsd: r.engineCostUsd ?? r.equivCostUsd ?? 0,
+      messageId: r.messageId
+    }))
+  }
+
+  /**
+   * Roll up usage_event (last 7d, ALL engines) into daily_usage per
+   * (date, engine, vendor, model). Day bucketing uses dateStrFromTimestamp
+   * (LOCAL time) to match the historical chart exactly. Recomputed each
+   * rebuild (source 'rollup', REPLACE) — older seeded days are untouched.
+   * peak_api_percent is carried from the daily JSON snapshots when available.
+   */
+  private rollupDailyUsageFromDb(now: number): void {
+    try {
+      const cutoff = now - SCAN_WINDOW_MS
+      const rows = getUsageEventsSince(cutoff)
+      if (rows.length === 0) return
+
+      // Bucket by (date, engineId, vendorId, modelId).
+      const buckets = new Map<string, DailyUsageRow>()
+      for (const r of rows) {
+        const date = dateStrFromTimestamp(r.ts)
+        const key = `${date}|${r.engineId}|${r.vendorId}|${r.modelId}`
+        let b = buckets.get(key)
+        if (!b) {
+          b = {
+            date,
+            engineId: r.engineId,
+            vendorId: r.vendorId,
+            modelId: r.modelId,
+            inputTokens: 0,
+            outputTokens: 0,
+            cacheWriteTokens: 0,
+            cacheReadTokens: 0,
+            costUsd: 0,
+            requestCount: 0,
+            peakApiPercent: 0,
+            source: 'rollup'
+          }
+          buckets.set(key, b)
+        }
+        b.inputTokens += r.inputTokens
+        b.outputTokens += r.outputTokens
+        b.cacheWriteTokens += r.cacheWriteTokens
+        b.cacheReadTokens += r.cacheReadTokens
+        // Claude daily cost matches the historical entry-derived total (engine
+        // cost = calculateCostFromTokens). opencode rows use equiv (or engine).
+        b.costUsd += (r.engineId === 'claude' ? r.engineCostUsd : r.equivCostUsd ?? r.engineCostUsd) ?? 0
+        b.requestCount += 1
+      }
+
+      // Attach peak API % per date from the daily JSON snapshots (Claude only).
+      const peakByDate = this.peakApiPercentByDate()
+      for (const b of buckets.values()) {
+        if (b.engineId === 'claude') b.peakApiPercent = peakByDate.get(b.date) ?? 0
+      }
+
+      upsertDailyUsage([...buckets.values()])
+    } catch (err) {
+      logger.debug('BlockUsage', `rollupDailyUsageFromDb failed: ${err}`)
+    }
+  }
+
+  /** Peak API % per date from the daily JSON snapshot files (for the chart). */
+  private peakApiPercentByDate(): Map<string, number> {
+    const out = new Map<string, number>()
+    try {
+      if (!fs.existsSync(USAGE_DIR)) return out
+      for (const file of fs.readdirSync(USAGE_DIR)) {
+        if (!file.endsWith('.json')) continue
+        const date = file.replace('.json', '')
+        try {
+          const daily = JSON.parse(
+            fs.readFileSync(path.join(USAGE_DIR, file), 'utf-8')
+          ) as DailyUsageFile
+          let peak = 0
+          for (const snap of daily.snapshots) {
+            if (snap.apiUsagePercent > peak) peak = snap.apiUsagePercent
+          }
+          out.set(date, peak)
+        } catch {
+          // skip corrupt
+        }
+      }
+    } catch {
+      // usage dir missing
+    }
+    return out
+  }
+
+  /**
+   * Build the dashboard's dailyHistory from daily_usage (SQL). Per-model token
+   * maps merge generic→specific families (same as the old loadDailyHistory).
+   * costUsd rounded to cents to match the legacy output.
+   */
+  private dailyHistoryFromDb(): BlockUsageData['dailyHistory'] {
+    const rows = getAllDailyUsage()
+    // Group rows by date.
+    const byDate = new Map<
+      string,
+      { tokens: number; cost: number; models: Record<string, number>; peak: number; reqs: number }
+    >()
+    for (const r of rows) {
+      let d = byDate.get(r.date)
+      if (!d) {
+        d = { tokens: 0, cost: 0, models: {}, peak: 0, reqs: 0 }
+        byDate.set(r.date, d)
+      }
+      const tok = r.inputTokens + r.outputTokens + r.cacheWriteTokens + r.cacheReadTokens
+      d.tokens += tok
+      d.cost += r.costUsd
+      d.reqs += r.requestCount
+      if (r.peakApiPercent > d.peak) d.peak = r.peakApiPercent
+      const normalized = normalizeModelName(r.modelId)
+      if (normalized) d.models[normalized] = (d.models[normalized] || 0) + tok
+    }
+
+    const history: BlockUsageData['dailyHistory'] = []
+    for (const date of [...byDate.keys()].sort()) {
+      const d = byDate.get(date)!
+      if (d.tokens === 0 && d.cost === 0) continue
+      history.push({
+        date,
+        totalTokens: d.tokens,
+        costUsd: Math.round(d.cost * 100) / 100,
+        models: mergeDailyModelFamilies(d.models),
+        peakApiPercent: d.peak,
+        blockCount: 0
+      })
+    }
+    return history
+  }
+
+  /**
+   * One-time seed of daily_usage from the legacy daily JSON files, so historical
+   * days BEYOND the 7-day usage_event window aren't lost. Idempotent: only
+   * inserts (date, engine, vendor, model) keys not already present, and only
+   * runs when daily_usage is empty (first launch after this migration). Legacy
+   * files have a single all-Claude dailySummary (no per-model vendor split), so
+   * each seeded row is engine 'claude' / vendor 'anthropic' / model = the
+   * summary's model key.
+   */
+  seedDailyUsageFromFilesOnce(): void {
+    try {
+      if (hasDailyUsage()) return // already seeded / has rollups
+      if (!fs.existsSync(USAGE_DIR)) return
+      const seedRows: DailyUsageRow[] = []
+      for (const file of fs.readdirSync(USAGE_DIR)) {
+        if (!file.endsWith('.json')) continue
+        const date = file.replace('.json', '')
+        try {
+          const daily = JSON.parse(
+            fs.readFileSync(path.join(USAGE_DIR, file), 'utf-8')
+          ) as DailyUsageFile
+          const summary = daily.dailySummary
+          if (!summary) continue
+          let peak = 0
+          for (const snap of daily.snapshots) {
+            if (snap.apiUsagePercent > peak) peak = snap.apiUsagePercent
+          }
+          // The legacy summary has per-model TOTAL tokens (models: Record<model, tokens>)
+          // but no per-model cost/request split — attribute total cost/requests to
+          // the largest model, and 0 to the rest (cost is summed per day anyway).
+          const modelEntries = Object.entries(summary.models)
+          if (modelEntries.length === 0) {
+            // No per-model breakdown — single synthetic row carrying the totals.
+            seedRows.push({
+              date,
+              engineId: 'claude',
+              vendorId: 'anthropic',
+              modelId: 'claude',
+              inputTokens: summary.totalTokens,
+              outputTokens: 0,
+              cacheWriteTokens: 0,
+              cacheReadTokens: 0,
+              costUsd: summary.costUsd,
+              requestCount: summary.requestCount ?? 0,
+              peakApiPercent: peak,
+              source: 'seed'
+            })
+            continue
+          }
+          // Largest model carries cost + requests + peak; others carry tokens only.
+          let largest = modelEntries[0][0]
+          let largestTok = -1
+          for (const [m, tok] of modelEntries) {
+            if (tok > largestTok) {
+              largestTok = tok
+              largest = m
+            }
+          }
+          for (const [model, tok] of modelEntries) {
+            seedRows.push({
+              date,
+              engineId: 'claude',
+              vendorId: 'anthropic',
+              modelId: model,
+              // Store the day's total tokens for this model on input_tokens — the
+              // chart only sums the four token columns, so attributing the whole
+              // model total to input_tokens preserves the per-day + per-model totals.
+              inputTokens: tok,
+              outputTokens: 0,
+              cacheWriteTokens: 0,
+              cacheReadTokens: 0,
+              costUsd: model === largest ? summary.costUsd : 0,
+              requestCount: model === largest ? (summary.requestCount ?? 0) : 0,
+              peakApiPercent: model === largest ? peak : 0,
+              source: 'seed'
+            })
+          }
+        } catch {
+          // skip corrupt
+        }
+      }
+      if (seedRows.length > 0) {
+        seedDailyUsageIfAbsent(seedRows)
+        logger.info('BlockUsage', `Seeded daily_usage from ${seedRows.length} legacy file rows`)
+      }
+    } catch (err) {
+      logger.debug('BlockUsage', `seedDailyUsageFromFilesOnce failed: ${err}`)
+    }
   }
 
   /** Main entry point — full scan on first call, incremental thereafter. */
@@ -831,6 +1148,10 @@ export class BlockUsageService {
         this.cachedMessageIds = new Set(entries.filter((e) => e.messageId).map((e) => e.messageId))
         this.initialScanDone = true
         logger.debug('BlockUsage', `Initial scan complete: ${entries.length} entries cached`)
+        // Full SQL (Pass 2): one-time seed of daily_usage from the legacy daily
+        // JSON files so historical >7d days aren't lost. Idempotent + gated on
+        // an empty daily_usage table; runs before the first daily read below.
+        this.seedDailyUsageFromFilesOnce()
       }
 
       // On first run, backfill daily summaries for days beyond the 7-day scan
@@ -923,58 +1244,23 @@ export class BlockUsageService {
 
   /**
    * Compute the projection from the sample buffer using WLS regression.
-   * Falls back to single-point estimate when not enough samples exist.
+   *
+   * Phase 7 Pass 2: the WLS MATH was extracted VERBATIM into
+   * `usage-aggregation.ts` computeProjectionWLS (proven identical by the
+   * equivalence test). This method holds the SAME in-memory ring buffer
+   * (`projectionSamples`, {timestamp, tokens, apiPercent}) as before and
+   * delegates the math. The sample SOURCE is intentionally unchanged (the
+   * per-poll ring buffer) to preserve the projection byte-for-byte — see the
+   * Phase 7 note in updateProjection. `usage_window_sample` is populated for
+   * Pass-2 DB consumers but is not re-sourced into the live WLS here.
    */
   private computeProjectionWLS(block: UsageBlock): UsageBlock['projectedUsage'] {
-    const samples = this.projectionSamples
-    if (samples.length === 0) return null
-
-    const now = Date.now()
-    const currentTok = totalTokens(block.tokens)
-    if (currentTok <= 0) return null
-
-    // Compute cost-per-token ratio from current block (always fresh). This is
-    // a blended rate over the block's actual model + cache-TTL mix — per-entry
-    // costs already price 5m vs 1h cache writes separately, so the projection
-    // inherits the split without modeling TTLs itself.
-    const costPerToken = block.costUsd / currentTok
-
-    // ---- Single-point fallback ----
-    if (samples.length < MIN_REGRESSION_SAMPLES) {
-      const latest = samples[samples.length - 1]
-      if (latest.apiPercent <= 0) return null
-      const maxTokens = latest.tokens / (latest.apiPercent / 100)
-      return {
-        tokens: Math.round(maxTokens),
-        costUsd: Math.round(maxTokens * costPerToken * 100) / 100
-      }
-    }
-
-    // ---- Weighted Least Squares: tokens = k × percent ----
-    // k = Σ(wᵢ · tᵢ · pᵢ) / Σ(wᵢ · pᵢ²)
-    let sumWTP = 0 // weighted tokens × percent
-    let sumWPP = 0 // weighted percent²
-
-    for (const s of samples) {
-      if (s.apiPercent <= 0) continue
-      const age = now - s.timestamp
-      const w = Math.exp((-age * Math.LN2) / PROJECTION_HALF_LIFE_MS)
-      sumWTP += w * s.tokens * s.apiPercent
-      sumWPP += w * s.apiPercent * s.apiPercent
-    }
-
-    if (sumWPP === 0) return null
-
-    const k = sumWTP / sumWPP // tokens per percent-point
-    const maxTokens = k * 100
-
-    // Sanity check: projection should be >= current tokens
-    if (maxTokens < currentTok) return null
-
-    return {
-      tokens: Math.round(maxTokens),
-      costUsd: Math.round(maxTokens * costPerToken * 100) / 100
-    }
+    return computeWLS(
+      this.projectionSamples as AggProjectionSample[],
+      totalTokens(block.tokens),
+      block.costUsd,
+      Date.now()
+    )
   }
 
   /**
@@ -1176,177 +1462,40 @@ export class BlockUsageService {
   // Block Grouping (ccusage algorithm)
   // -------------------------------------------------------------------------
 
+  /**
+   * Group entries into 5h blocks.
+   *
+   * Phase 7 Pass 2: the grouping walk + buildBlock + mergeModelFamilies were
+   * extracted VERBATIM into `usage-aggregation.ts` (proven byte-for-byte
+   * identical by usage-aggregation-equivalence.test.ts). This method now maps
+   * the Claude-shaped ParsedEntry list to the engine-tagged AggEntry shape and
+   * delegates. The window registry + account log (instance state) are passed in.
+   */
   private groupIntoBlocks(entries: ParsedEntry[]): UsageBlock[] {
     if (entries.length === 0) return []
-
     const accountLog = this.loadAccountLog()
-
-    /** Authoritative block start for a timestamp + whether window-derived. */
-    const blockStartFor = (ts: number): { start: number; aligned: boolean } => {
-      const win = this.findWindowFor(ts, accountForTimestamp(accountLog, ts))
-      if (win) return { start: win.start, aligned: true }
-      return { start: floorToHour(ts), aligned: false }
-    }
-
-    const blocks: UsageBlock[] = []
-    let blockEntries: ParsedEntry[] = []
-    let blockStart = 0
-    let blockAligned = false
-
-    for (const entry of entries) {
-      if (blockEntries.length === 0) {
-        const ideal = blockStartFor(entry.timestamp)
-        blockStart = ideal.start
-        blockAligned = ideal.aligned
-        blockEntries = [entry]
-        continue
-      }
-
-      const ideal = blockStartFor(entry.timestamp)
-      const timeSinceBlockStart = entry.timestamp - blockStart
-      const lastEntry = blockEntries[blockEntries.length - 1]
-      const timeSinceLastEntry = entry.timestamp - lastEntry.timestamp
-
-      // Start a new block when:
-      // 1. Entry exceeds 5hr from block start or last entry (gap logic), OR
-      // 2. Entry maps to a known API window different from the current block
-      //    (window boundaries are authoritative). Fallback floorToHour starts
-      //    change every hour and must NOT split blocks on their own.
-      const windowMismatch = ideal.aligned && ideal.start !== blockStart
-
-      if (
-        timeSinceBlockStart > SESSION_DURATION_MS ||
-        timeSinceLastEntry > SESSION_DURATION_MS ||
-        windowMismatch
-      ) {
-        blocks.push(this.buildBlock(blockEntries, blockStart, blockAligned))
-        blockStart = ideal.start
-        blockAligned = ideal.aligned
-        blockEntries = [entry]
-      } else {
-        blockEntries.push(entry)
-        // A provisional block upgrades in place when a later entry resolves
-        // to a window whose start matches the block's
-        if (!blockAligned && ideal.aligned && ideal.start === blockStart) {
-          blockAligned = true
-        }
-      }
-    }
-
-    // Close final block
-    if (blockEntries.length > 0) {
-      blocks.push(this.buildBlock(blockEntries, blockStart, blockAligned))
-    }
-
-    // Clamp isActive = false for blocks that precede the current API window.
-    // When the API rolls to a new 5hr window, old blocks may still have
-    // endTime > now (due to floorToHour misalignment), but the API boundary
-    // is authoritative — those blocks are no longer active.
-    const now = Date.now()
-    const currentWindow = this.knownWindows.find((w) => now >= w.start && now < w.end)
-    if (currentWindow) {
-      for (const block of blocks) {
-        if (block.isActive && block.startTime < currentWindow.start) {
-          block.isActive = false
-        }
-      }
-    }
-
-    return blocks
-  }
-
-  private buildBlock(
-    entries: ParsedEntry[],
-    blockStart: number,
-    windowAligned: boolean
-  ): UsageBlock {
-    const now = Date.now()
-    const endTime = blockStart + SESSION_DURATION_MS
-    const actualEndTime = entries[entries.length - 1].timestamp
-
-    // Aggregate totals
-    const tokens = emptyTokenCounts()
-    let costUsd = 0
-    const modelMap = new Map<
-      string,
-      { tokens: TokenCounts; costUsd: number; requestCount: number }
-    >()
-
-    for (const entry of entries) {
-      tokens.inputTokens += entry.inputTokens
-      tokens.outputTokens += entry.outputTokens
-      tokens.cacheCreationTokens += entry.cacheCreationTokens
-      tokens.cacheReadTokens += entry.cacheReadTokens
-      costUsd += entry.costUsd
-
-      const existing = modelMap.get(entry.model)
-      if (existing) {
-        existing.tokens = addTokens(existing.tokens, {
-          inputTokens: entry.inputTokens,
-          outputTokens: entry.outputTokens,
-          cacheCreationTokens: entry.cacheCreationTokens,
-          cacheReadTokens: entry.cacheReadTokens
-        })
-        existing.costUsd += entry.costUsd
-        existing.requestCount += 1
-      } else {
-        modelMap.set(entry.model, {
-          tokens: {
-            inputTokens: entry.inputTokens,
-            outputTokens: entry.outputTokens,
-            cacheCreationTokens: entry.cacheCreationTokens,
-            cacheReadTokens: entry.cacheReadTokens
-          },
-          costUsd: entry.costUsd,
-          requestCount: 1
-        })
-      }
-    }
-
-    // Merge model families (e.g. "sonnet" + "claude-sonnet-4-6" → canonical name)
-    const mergedMap = mergeModelFamilies(modelMap)
-    const models: ModelTokenBreakdown[] = Array.from(mergedMap.entries()).map(([model, data]) => ({
-      model,
-      tokens: data.tokens,
-      costUsd: data.costUsd,
-      requestCount: data.requestCount
+    const aggEntries: AggEntry[] = entries.map((e) => ({
+      timestamp: e.timestamp,
+      model: e.model,
+      inputTokens: e.inputTokens,
+      outputTokens: e.outputTokens,
+      cacheCreationTokens: e.cacheCreationTokens,
+      cacheReadTokens: e.cacheReadTokens,
+      costUsd: e.costUsd,
+      messageId: e.messageId,
+      engineId: 'claude'
     }))
-
-    // Determine if active
-    const isActive = now < endTime && now - actualEndTime < SESSION_DURATION_MS
-
-    // Burn rate (only meaningful if duration > 0)
-    let burnRate: UsageBlock['burnRate'] = null
-    const durationMs = actualEndTime - entries[0].timestamp
-    if (durationMs > 0) {
-      const durationMin = durationMs / MS_PER_MINUTE
-      const tok = totalTokens(tokens)
-      burnRate = {
-        tokensPerMin: Math.round(tok / durationMin),
-        costPerHour: Math.round((costUsd / durationMin) * 60 * 100) / 100
-      }
-    }
-
-    // Projection is computed in recalculate() using regression over multiple
-    // samples — not here in buildBlock() which only sees a single point.
-    const projectedUsage: UsageBlock['projectedUsage'] = null
-
-    return {
-      id: new Date(blockStart).toISOString(),
-      startTime: blockStart,
-      endTime,
-      actualEndTime,
-      isActive,
-      tokens,
-      costUsd: Math.round(costUsd * 10000) / 10000,
-      requestCount: entries.length,
-      models,
-      burnRate,
-      projectedUsage,
-      finalApiPercent: null,
-      windowAligned
-    }
+    // knownWindows is structurally identical to AggApiWindow.
+    return groupEntriesIntoBlocks(
+      aggEntries,
+      this.knownWindows as AggApiWindow[],
+      accountLog,
+      Date.now()
+    )
   }
+
+  // buildBlock + mergeModelFamilies + the grouping walk were extracted VERBATIM
+  // into usage-aggregation.ts (Phase 7 Pass 2) — groupIntoBlocks delegates there.
 
   // -------------------------------------------------------------------------
   // Time-Series Persistence
@@ -1507,40 +1656,10 @@ export class BlockUsageService {
     const persistBuckets = this.bucketEntriesByDay(allEntries)
     const entryBuckets = filtered ? this.bucketEntriesByDay(viewEntries) : persistBuckets
 
-    // Merge model families in entry buckets (same logic as block building)
+    // Merge model families in entry buckets (shared helper — identical logic
+    // to the SQL daily path's mergeDailyModelFamilies).
     for (const bucket of entryBuckets.values()) {
-      const modelMap = new Map<string, number>()
-      for (const [model, tok] of Object.entries(bucket.models)) {
-        const lower = model.toLowerCase()
-        let family = model
-        if (lower.includes('opus')) family = 'opus'
-        else if (lower.includes('sonnet')) family = 'sonnet'
-        else if (lower.includes('haiku')) family = 'haiku'
-        modelMap.set(family, (modelMap.get(family) || 0) + tok)
-      }
-      // Resolve family keys back to the most specific model name
-      const resolved: Record<string, number> = {}
-      for (const [family, tok] of modelMap) {
-        // Find the original model name that contributed most tokens
-        let bestModel = family
-        let bestTok = 0
-        for (const [model, mTok] of Object.entries(bucket.models)) {
-          const lower = model.toLowerCase()
-          const mFamily = lower.includes('opus')
-            ? 'opus'
-            : lower.includes('sonnet')
-              ? 'sonnet'
-              : lower.includes('haiku')
-                ? 'haiku'
-                : model
-          if (mFamily === family && mTok > bestTok) {
-            bestModel = model
-            bestTok = mTok
-          }
-        }
-        resolved[bestModel] = tok
-      }
-      bucket.models = resolved
+      bucket.models = mergeDailyModelFamilies(bucket.models)
     }
 
     // Phase 2: Load ALL daily files for peak API % and older-day summaries.

@@ -314,6 +314,9 @@ export function useClaudeEvents(): void {
       window.api.onStatusLine((routingId, data) => {
         setStatusLine(routingId, data)
       }),
+      window.api.onMetering((routingId, data) => {
+        useSessionStore.getState().setMetering(routingId, data)
+      }),
       window.api.onPlanSteps((routingId, todos) => {
         useSessionStore.getState().setTodos(routingId, todos)
       }),

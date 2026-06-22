@@ -30,6 +30,8 @@ import { createMermaidServer } from './mermaid-tool'
 import { createMockupServer } from './mockup-tool'
 import { claudeAuthProvider } from '../auth/ClaudeAuthProvider'
 import { accountManager } from './account-manager'
+import { equivalentCostUsd } from '../../shared/pricing'
+import { resolveUsageProvider } from './usage-provider'
 import {
   getClassifier,
   stopClassifier,
@@ -1194,6 +1196,13 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
     this.totalCostUsd += cost
     this.isProcessing = false
 
+    // NOTE (Phase 7): Claude usage_event rows are NOT recorded live here.
+    // The streaming `usage` is cumulative-within-a-message and the JSONL is the
+    // codebase's source of truth for Claude tokens (accInputTokens is overwritten
+    // from computeTokenMetrics below). Claude usage_event rows come from the
+    // Pass-2 reconciler (block-usage JSONL parse → insertUsageEvents per message,
+    // source 'backfill', dedup by message_id) — authoritative + per-message.
+
     // Handle error results
     const subtype = msg.subtype
     if (subtype && subtype !== 'success') {
@@ -1238,6 +1247,7 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
     // Send accumulator-based status line immediately so the UI updates
     // without waiting for the JSONL read (which may not be fully flushed yet).
     this.send('session:status-line', this.buildStatusLineFromAccumulators())
+    this.sendMetering()
 
     // Then reconcile from JSONL with a delay to let the SDK flush. Only
     // overwrite accumulators if JSONL returns meaningful data.
@@ -1254,10 +1264,20 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
             this.accTotalApiDurationMs = metrics.totalApiDurationMs
             this.lastContextLength = metrics.contextWindowSize
             this.send('session:status-line', metrics)
+            this.sendMetering()
           })
           .catch((err) => {
             logger.warn('ClaudeSession', 'JSONL reconciliation failed', err)
           })
+
+        // Phase 7 Pass 2 — near-live metering: now that the JSONL is flushed,
+        // re-run the Claude reconciler so this turn's messages land in
+        // usage_event (authoritative per-message parse, dedup by message_id).
+        // Lazy import to avoid a static import cycle (usage-reconciler →
+        // block-usage → claude-session). Best-effort; never breaks the turn.
+        import('./usage-reconciler')
+          .then(({ usageReconciler }) => usageReconciler.reconcileClaude())
+          .catch(() => {})
       }, 500) // delay to let SDK flush JSONL to disk
     }
   }
@@ -1308,6 +1328,7 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
     this.sendStatus()
     // Recalculate status line with new context window size
     this.send('session:status-line', this.buildStatusLineFromAccumulators())
+    this.sendMetering()
   }
 
   setEffort(effort: string): void {
@@ -1699,12 +1720,76 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
     }
   }
 
+  /**
+   * Build the engine-neutral MeteringSnapshot (Phase 7 Pass 2). Emitted
+   * ALONGSIDE StatusLineData — additive, never replaces it. equivalentCostUsd
+   * comes from the internal pricing table over the accumulator tokens (the cache
+   * split isn't available live, so cacheRead carries the combined cache figure
+   * and cacheWrite is 0 — best-effort live metric; the dashboard is the
+   * authoritative cost source). window + projection are subscription-gated.
+   */
+  private buildMeteringSnapshot(): import('../../shared/types').MeteringSnapshot {
+    const effectiveModel =
+      this.model === 'default' && this.resolvedModelId ? this.resolvedModelId : this.model
+    const account = claudeAuthProvider.buildAccountRef(this.resolveActiveAccountId())
+    const billingType = account?.billingType ?? 'unknown'
+
+    const tokens = {
+      input: this.accInputTokens,
+      output: this.accOutputTokens,
+      cacheWrite: 0,
+      cacheRead: this.accCachedTokens,
+      total: this.accInputTokens + this.accOutputTokens + this.accCachedTokens
+    }
+    const equiv = equivalentCostUsd('anthropic', effectiveModel, {
+      inputTokens: tokens.input,
+      outputTokens: tokens.output,
+      cacheWriteTokens: 0,
+      cacheWrite1hTokens: 0,
+      cacheReadTokens: tokens.cacheRead
+    })
+
+    const snapshot: import('../../shared/types').MeteringSnapshot = {
+      engineId: 'claude',
+      vendorId: 'anthropic',
+      billingType,
+      tokens,
+      equivalentCostUsd: equiv,
+      engineReportedCostUsd: this.totalCostUsd,
+      contextWindow: { used: this.lastContextLength, size: this.contextWindowSize }
+    }
+
+    // Window is a subscription concept (foundation §7), gated behind a per-account
+    // usage provider. Claude/anthropic + subscription → the provider yields the
+    // window; apiKey/free/unknown → null (cumulative meter, no window).
+    // (The WLS projection stays surfaced via the dashboard's BlockUsageData; it
+    // is intentionally omitted here to avoid a block-usage↔claude-session import
+    // cycle — the projection field is reserved for a later wiring.)
+    const provider = resolveUsageProvider('claude', 'anthropic', billingType)
+    const window = provider?.getWindow()
+    if (window) {
+      snapshot.window = { usedPercent: window.usedPercent, resetsAt: window.resetsAt }
+    }
+
+    return snapshot
+  }
+
+  /** Emit the metering snapshot. Swallows errors — advisory, never breaks flow. */
+  private sendMetering(): void {
+    try {
+      this.send('session:metering', this.buildMeteringSnapshot())
+    } catch {
+      /* advisory */
+    }
+  }
+
   /** Throttled status line update from in-memory accumulators (zero I/O) */
   private scheduleStatusLineUpdate(): void {
     if (this.statusLineTimer) return // already scheduled
     this.statusLineTimer = setTimeout(() => {
       this.statusLineTimer = null
       this.send('session:status-line', this.buildStatusLineFromAccumulators())
+      this.sendMetering()
     }, 50)
   }
 

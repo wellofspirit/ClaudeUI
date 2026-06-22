@@ -127,6 +127,16 @@ export class OpencodeClient {
     return this.get(`/session/${encodeURIComponent(sessionId)}`)
   }
 
+  /**
+   * GET /session/{id}/message — list all messages for a session.
+   * Used by the Phase 7 reconciler to import out-of-tool opencode usage.
+   * Shape: Array<{ info: {...}, parts: [...] }>. We type the info loosely since
+   * the reconciler only needs id/role/tokens/cost/providerID/modelID/time.
+   */
+  listMessages(sessionId: string): Promise<Array<{ info?: Record<string, unknown> }>> {
+    return this.get(`/session/${encodeURIComponent(sessionId)}/message`)
+  }
+
   /** DELETE /session/{id} */
   deleteSession(sessionId: string): Promise<boolean> {
     return this.del(`/session/${encodeURIComponent(sessionId)}`)

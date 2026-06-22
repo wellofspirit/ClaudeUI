@@ -15,6 +15,56 @@ import * as os from 'os'
 import BetterSqlite3 from 'better-sqlite3'
 import type { EngineId, ModelRef, AccountInfo } from '../../shared/types'
 
+// ---------------------------------------------------------------------------
+// Metering types (Phase 7 — Pass 1)
+// ---------------------------------------------------------------------------
+
+/** One recorded usage turn. source 'live' = recorded as it happened; 'backfill' = reconciler. */
+export interface UsageEventRow {
+  id: string
+  ts: number
+  engineId: string
+  vendorId: string
+  accountId: string | null
+  accountUuid: string | null
+  modelId: string
+  inputTokens: number
+  outputTokens: number
+  cacheWriteTokens: number
+  cacheWrite1hTokens: number
+  cacheReadTokens: number
+  equivCostUsd: number | null
+  engineCostUsd: number | null
+  sessionId: string | null
+  messageId: string
+  source: 'live' | 'backfill'
+}
+
+/** One window-utilization sample (feeds WLS apiPercent series + block alignment). */
+export interface WindowSampleRow {
+  id: string
+  ts: number
+  accountUuid: string
+  usedPercent: number
+  canonicalEnd: number
+}
+
+/** One per-day per-model usage rollup row (the durable 30-day-chart store). */
+export interface DailyUsageRow {
+  date: string
+  engineId: string
+  vendorId: string
+  modelId: string
+  inputTokens: number
+  outputTokens: number
+  cacheWriteTokens: number
+  cacheReadTokens: number
+  costUsd: number
+  requestCount: number
+  peakApiPercent: number
+  source: 'rollup' | 'seed'
+}
+
 // Infer the Database instance type from the constructor return so we don't
 // need the `BetterSqlite3.Database` namespace (not available with `export =`).
 export type Db = ReturnType<typeof BetterSqlite3>
@@ -74,6 +124,103 @@ const MIGRATIONS: Migration[] = [
           organization      TEXT,
           created_at        INTEGER NOT NULL
         );
+      `)
+    }
+  },
+  {
+    // v3 — Phase 7 Pass 1: live usage_event recorder.
+    //
+    // UNIQUE(message_id) is the dedup key — INSERT … ON CONFLICT DO NOTHING
+    // ensures live turns and the Pass-2 reconciler never double-count the same
+    // turn even when both paths observe it.
+    //
+    // Indexes:
+    //   (ts, engine_id) — time-range queries per engine (dashboard blocks)
+    //   (session_id)    — per-session aggregation (MeteringSnapshot in Pass 2)
+    //   (account_uuid, ts) — per-account window queries (WLS + blocks)
+    version: 3,
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS usage_event (
+          id                   TEXT PRIMARY KEY,
+          ts                   INTEGER NOT NULL,
+          engine_id            TEXT NOT NULL,
+          vendor_id            TEXT NOT NULL,
+          account_id           TEXT,
+          account_uuid         TEXT,
+          model_id             TEXT NOT NULL,
+          input_tokens         INTEGER NOT NULL DEFAULT 0,
+          output_tokens        INTEGER NOT NULL DEFAULT 0,
+          cache_write_tokens   INTEGER NOT NULL DEFAULT 0,
+          cache_write_1h_tokens INTEGER NOT NULL DEFAULT 0,
+          cache_read_tokens    INTEGER NOT NULL DEFAULT 0,
+          equiv_cost_usd       REAL,
+          engine_cost_usd      REAL,
+          session_id           TEXT,
+          message_id           TEXT NOT NULL,
+          source               TEXT NOT NULL DEFAULT 'live',
+          UNIQUE(message_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_usage_event_ts_engine
+          ON usage_event(ts, engine_id);
+        CREATE INDEX IF NOT EXISTS idx_usage_event_session
+          ON usage_event(session_id);
+        CREATE INDEX IF NOT EXISTS idx_usage_event_account_ts
+          ON usage_event(account_uuid, ts);
+      `)
+    }
+  },
+  {
+    // v4 — Phase 7 Pass 1: window-utilization samples for WLS / block alignment.
+    // Each sample is one observation of a 5h rate-limit window (account_uuid + ts +
+    // used_percent + the canonical window end). Index on (account_uuid, ts) for
+    // the WLS regression over the ring buffer.
+    version: 4,
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS usage_window_sample (
+          id            TEXT PRIMARY KEY,
+          ts            INTEGER NOT NULL,
+          account_uuid  TEXT NOT NULL,
+          used_percent  REAL NOT NULL,
+          canonical_end INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_window_sample_account_ts
+          ON usage_window_sample(account_uuid, ts);
+      `)
+    }
+  },
+  {
+    // v5 — Phase 7 Pass 2 (Full SQL): per-day usage rollup for the 30-day chart.
+    //
+    // The daily chart's history must survive past the 7-day usage_event window
+    // (usage_event only holds ~7d of reconciled JSONL + live turns), so daily_usage
+    // is a durable rollup keyed by (date, engine_id, vendor_id, model_id). Recent
+    // days are recomputed from usage_event on each reconcile (REPLACE); older days
+    // are seeded once from the legacy daily JSON files and never recomputed (their
+    // JSONL is gone). peak_api_percent + request_count are carried for the chart.
+    //
+    // `cost_usd` stores block-usage's calculateCostFromTokens value (engine cost)
+    // so the daily chart's $ matches the historical entry-derived totals exactly.
+    version: 5,
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS daily_usage (
+          date              TEXT NOT NULL,
+          engine_id         TEXT NOT NULL,
+          vendor_id         TEXT NOT NULL,
+          model_id          TEXT NOT NULL,
+          input_tokens      INTEGER NOT NULL DEFAULT 0,
+          output_tokens     INTEGER NOT NULL DEFAULT 0,
+          cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+          cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+          cost_usd          REAL NOT NULL DEFAULT 0,
+          request_count     INTEGER NOT NULL DEFAULT 0,
+          peak_api_percent  REAL NOT NULL DEFAULT 0,
+          source            TEXT NOT NULL DEFAULT 'rollup',
+          PRIMARY KEY (date, engine_id, vendor_id, model_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_daily_usage_date ON daily_usage(date);
       `)
     }
   }
@@ -370,4 +517,362 @@ export function importAccountsOnce(accounts: AccountInfo[]): void {
   for (const acc of accounts) {
     insert.run(acc.id, acc.email, acc.subscriptionType, acc.organization, acc.createdAt)
   }
+}
+
+// ---------------------------------------------------------------------------
+// Usage event repository (Phase 7 — Pass 1)
+// Records one usage_event per turn from either engine. message_id is the dedup
+// key — ON CONFLICT DO NOTHING ensures live + reconciler paths converge safely.
+// ---------------------------------------------------------------------------
+
+interface UsageEventDbRow {
+  id: string
+  ts: number
+  engine_id: string
+  vendor_id: string
+  account_id: string | null
+  account_uuid: string | null
+  model_id: string
+  input_tokens: number
+  output_tokens: number
+  cache_write_tokens: number
+  cache_write_1h_tokens: number
+  cache_read_tokens: number
+  equiv_cost_usd: number | null
+  engine_cost_usd: number | null
+  session_id: string | null
+  message_id: string
+  source: string
+}
+
+function rowToUsageEvent(row: UsageEventDbRow): UsageEventRow {
+  return {
+    id: row.id,
+    ts: row.ts,
+    engineId: row.engine_id,
+    vendorId: row.vendor_id,
+    accountId: row.account_id,
+    accountUuid: row.account_uuid,
+    modelId: row.model_id,
+    inputTokens: row.input_tokens,
+    outputTokens: row.output_tokens,
+    cacheWriteTokens: row.cache_write_tokens,
+    cacheWrite1hTokens: row.cache_write_1h_tokens,
+    cacheReadTokens: row.cache_read_tokens,
+    equivCostUsd: row.equiv_cost_usd,
+    engineCostUsd: row.engine_cost_usd,
+    sessionId: row.session_id,
+    messageId: row.message_id,
+    source: row.source as 'live' | 'backfill'
+  }
+}
+
+const INSERT_USAGE_EVENT_SQL = `
+  INSERT INTO usage_event (
+    id, ts, engine_id, vendor_id, account_id, account_uuid,
+    model_id, input_tokens, output_tokens,
+    cache_write_tokens, cache_write_1h_tokens, cache_read_tokens,
+    equiv_cost_usd, engine_cost_usd,
+    session_id, message_id, source
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  ON CONFLICT(message_id) DO NOTHING
+`
+
+/**
+ * Insert a single usage event. Idempotent on message_id — duplicate inserts
+ * (live turn + reconciler for the same turn) are silently dropped.
+ */
+export function insertUsageEvent(event: UsageEventRow): void {
+  const db = getDb()
+  db.prepare(INSERT_USAGE_EVENT_SQL).run(
+    event.id,
+    event.ts,
+    event.engineId,
+    event.vendorId,
+    event.accountId ?? null,
+    event.accountUuid ?? null,
+    event.modelId,
+    event.inputTokens,
+    event.outputTokens,
+    event.cacheWriteTokens,
+    event.cacheWrite1hTokens,
+    event.cacheReadTokens,
+    event.equivCostUsd ?? null,
+    event.engineCostUsd ?? null,
+    event.sessionId ?? null,
+    event.messageId,
+    event.source
+  )
+}
+
+/**
+ * Batch-insert usage events. Each event is inserted idempotently; the batch
+ * runs in a single transaction for efficiency.
+ */
+export function insertUsageEvents(events: UsageEventRow[]): void {
+  if (events.length === 0) return
+  const db = getDb()
+  const stmt = db.prepare(INSERT_USAGE_EVENT_SQL)
+  const insertOne = (event: UsageEventRow): void => {
+    stmt.run(
+      event.id,
+      event.ts,
+      event.engineId,
+      event.vendorId,
+      event.accountId ?? null,
+      event.accountUuid ?? null,
+      event.modelId,
+      event.inputTokens,
+      event.outputTokens,
+      event.cacheWriteTokens,
+      event.cacheWrite1hTokens,
+      event.cacheReadTokens,
+      event.equivCostUsd ?? null,
+      event.engineCostUsd ?? null,
+      event.sessionId ?? null,
+      event.messageId,
+      event.source
+    )
+  }
+  // Wrap in a manual BEGIN/COMMIT for bulk efficiency. This is the same pattern
+  // the reconciler will use in Pass 2 (bulk JSONL backfill).
+  db.prepare('BEGIN').run()
+  try {
+    for (const event of events) insertOne(event)
+    db.prepare('COMMIT').run()
+  } catch (err) {
+    db.prepare('ROLLBACK').run()
+    throw err
+  }
+}
+
+/** Retrieve a single usage event by message_id (used in tests). */
+export function getUsageEventByMessageId(messageId: string): UsageEventRow | undefined {
+  const db = getDb()
+  const row = db
+    .prepare('SELECT * FROM usage_event WHERE message_id = ?')
+    .get(messageId) as UsageEventDbRow | undefined
+  return row ? rowToUsageEvent(row) : undefined
+}
+
+/**
+ * Retrieve all usage events with ts >= cutoff, ordered by ts ascending.
+ * This is the source for the SQL-backed dashboard aggregation (Pass 2): the
+ * block-grouping walk consumes a chronologically-sorted list, exactly like the
+ * old JSONL scan did. Optionally filter by engineId.
+ */
+export function getUsageEventsSince(cutoffTs: number, engineId?: string): UsageEventRow[] {
+  const db = getDb()
+  const rows = engineId
+    ? (db
+        .prepare(
+          'SELECT * FROM usage_event WHERE ts >= ? AND engine_id = ? ORDER BY ts ASC'
+        )
+        .all(cutoffTs, engineId) as UsageEventDbRow[])
+    : (db
+        .prepare('SELECT * FROM usage_event WHERE ts >= ? ORDER BY ts ASC')
+        .all(cutoffTs) as UsageEventDbRow[])
+  return rows.map(rowToUsageEvent)
+}
+
+/** Count usage events (used in tests + reconciler diagnostics). */
+export function countUsageEvents(): number {
+  const db = getDb()
+  return (db.prepare('SELECT COUNT(*) as n FROM usage_event').get() as { n: number }).n
+}
+
+// ---------------------------------------------------------------------------
+// Window sample repository (Phase 7 — Pass 1)
+// One row per usage-window observation (account_uuid + ts + used_percent +
+// canonical_end). Used in Pass 2 for the WLS regression and block alignment.
+// ---------------------------------------------------------------------------
+
+interface WindowSampleDbRow {
+  id: string
+  ts: number
+  account_uuid: string
+  used_percent: number
+  canonical_end: number
+}
+
+function rowToWindowSample(row: WindowSampleDbRow): WindowSampleRow {
+  return {
+    id: row.id,
+    ts: row.ts,
+    accountUuid: row.account_uuid,
+    usedPercent: row.used_percent,
+    canonicalEnd: row.canonical_end
+  }
+}
+
+/**
+ * Record a window-utilization sample. Each row captures one observation of
+ * account_uuid + used_percent + canonical_end at timestamp ts.
+ * No dedup key — multiple samples per window are normal (one per poll cycle).
+ */
+export function recordWindowSample(sample: WindowSampleRow): void {
+  const db = getDb()
+  db.prepare(
+    `INSERT INTO usage_window_sample (id, ts, account_uuid, used_percent, canonical_end)
+     VALUES (?, ?, ?, ?, ?)`
+  ).run(sample.id, sample.ts, sample.accountUuid, sample.usedPercent, sample.canonicalEnd)
+}
+
+/** Retrieve window samples for an account ordered by ts ascending (used in tests + Pass 2 WLS). */
+export function getWindowSamples(accountUuid: string, limit = 100): WindowSampleRow[] {
+  const db = getDb()
+  const rows = db
+    .prepare(
+      'SELECT * FROM usage_window_sample WHERE account_uuid = ? ORDER BY ts ASC LIMIT ?'
+    )
+    .all(accountUuid, limit) as WindowSampleDbRow[]
+  return rows.map(rowToWindowSample)
+}
+
+// ---------------------------------------------------------------------------
+// Daily usage rollup repository (Phase 7 Pass 2 — Full SQL)
+// Durable per-(date, engine, vendor, model) rollup for the 30-day chart. Recent
+// days are recomputed from usage_event (source 'rollup', REPLACE); older days
+// are seeded once from the legacy daily JSON files (source 'seed', never
+// recomputed — their JSONL is gone). NEVER expose the raw db.
+// ---------------------------------------------------------------------------
+
+interface DailyUsageDbRow {
+  date: string
+  engine_id: string
+  vendor_id: string
+  model_id: string
+  input_tokens: number
+  output_tokens: number
+  cache_write_tokens: number
+  cache_read_tokens: number
+  cost_usd: number
+  request_count: number
+  peak_api_percent: number
+  source: string
+}
+
+function rowToDailyUsage(row: DailyUsageDbRow): DailyUsageRow {
+  return {
+    date: row.date,
+    engineId: row.engine_id,
+    vendorId: row.vendor_id,
+    modelId: row.model_id,
+    inputTokens: row.input_tokens,
+    outputTokens: row.output_tokens,
+    cacheWriteTokens: row.cache_write_tokens,
+    cacheReadTokens: row.cache_read_tokens,
+    costUsd: row.cost_usd,
+    requestCount: row.request_count,
+    peakApiPercent: row.peak_api_percent,
+    source: row.source as 'rollup' | 'seed'
+  }
+}
+
+const UPSERT_DAILY_USAGE_SQL = `
+  INSERT INTO daily_usage (
+    date, engine_id, vendor_id, model_id,
+    input_tokens, output_tokens, cache_write_tokens, cache_read_tokens,
+    cost_usd, request_count, peak_api_percent, source
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  ON CONFLICT(date, engine_id, vendor_id, model_id) DO UPDATE SET
+    input_tokens      = excluded.input_tokens,
+    output_tokens     = excluded.output_tokens,
+    cache_write_tokens = excluded.cache_write_tokens,
+    cache_read_tokens = excluded.cache_read_tokens,
+    cost_usd          = excluded.cost_usd,
+    request_count     = excluded.request_count,
+    peak_api_percent  = excluded.peak_api_percent,
+    source            = excluded.source
+`
+
+/** Upsert (replace) a set of daily_usage rows in one transaction. */
+export function upsertDailyUsage(rows: DailyUsageRow[]): void {
+  if (rows.length === 0) return
+  const db = getDb()
+  const stmt = db.prepare(UPSERT_DAILY_USAGE_SQL)
+  db.prepare('BEGIN').run()
+  try {
+    for (const r of rows) {
+      stmt.run(
+        r.date,
+        r.engineId,
+        r.vendorId,
+        r.modelId,
+        r.inputTokens,
+        r.outputTokens,
+        r.cacheWriteTokens,
+        r.cacheReadTokens,
+        r.costUsd,
+        r.requestCount,
+        r.peakApiPercent,
+        r.source
+      )
+    }
+    db.prepare('COMMIT').run()
+  } catch (err) {
+    db.prepare('ROLLBACK').run()
+    throw err
+  }
+}
+
+/**
+ * Seed daily_usage rows ONLY for (date, engine, vendor, model) keys not already
+ * present (idempotent). Used by the one-time JSON-file import — never clobbers a
+ * rollup row. INSERT OR IGNORE on the composite PK.
+ */
+export function seedDailyUsageIfAbsent(rows: DailyUsageRow[]): void {
+  if (rows.length === 0) return
+  const db = getDb()
+  const stmt = db.prepare(`
+    INSERT OR IGNORE INTO daily_usage (
+      date, engine_id, vendor_id, model_id,
+      input_tokens, output_tokens, cache_write_tokens, cache_read_tokens,
+      cost_usd, request_count, peak_api_percent, source
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `)
+  db.prepare('BEGIN').run()
+  try {
+    for (const r of rows) {
+      stmt.run(
+        r.date,
+        r.engineId,
+        r.vendorId,
+        r.modelId,
+        r.inputTokens,
+        r.outputTokens,
+        r.cacheWriteTokens,
+        r.cacheReadTokens,
+        r.costUsd,
+        r.requestCount,
+        r.peakApiPercent,
+        r.source
+      )
+    }
+    db.prepare('COMMIT').run()
+  } catch (err) {
+    db.prepare('ROLLBACK').run()
+    throw err
+  }
+}
+
+/** Delete all daily_usage rows for a given date (used before re-rolling a day). */
+export function deleteDailyUsageForDate(date: string): void {
+  const db = getDb()
+  db.prepare('DELETE FROM daily_usage WHERE date = ?').run(date)
+}
+
+/** All daily_usage rows ordered by date asc (the chart's source). */
+export function getAllDailyUsage(): DailyUsageRow[] {
+  const db = getDb()
+  const rows = db
+    .prepare('SELECT * FROM daily_usage ORDER BY date ASC')
+    .all() as DailyUsageDbRow[]
+  return rows.map(rowToDailyUsage)
+}
+
+/** Whether the daily_usage table has any rows (gates the one-time seed). */
+export function hasDailyUsage(): boolean {
+  const db = getDb()
+  return (db.prepare('SELECT COUNT(*) as n FROM daily_usage').get() as { n: number }).n > 0
 }

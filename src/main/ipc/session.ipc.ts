@@ -54,6 +54,7 @@ import {
 import { usageFetcher } from '../services/usage-fetcher'
 import { serviceSession } from '../services/service-session'
 import { blockUsageService } from '../services/block-usage'
+import { usageReconciler } from '../services/usage-reconciler'
 import '../auth/register-auth-providers'
 import { engineAuthRegistry } from '../auth/EngineAuthRegistry'
 import { claudeAuthProvider } from '../auth/ClaudeAuthProvider'
@@ -1640,9 +1641,22 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
   const skipUsageInDev = !app.isPackaged && !process.env.CLAUDE_UI_DEV_USAGE
   blockUsageService.setWindow(win)
   if (!skipUsageInDev) {
-    blockUsageService.recalculate().catch((err) => {
-      logger.error('BlockUsage', 'Initial recalculation failed', err)
-    })
+    // Phase 7 Pass 2 (Full SQL): run the backfill reconciler FIRST so usage_event
+    // holds out-of-tool Claude + opencode usage before the first dashboard
+    // emission (no flash of missing per-engine/opencode data). recalculate() is
+    // itself self-sufficient for the Claude dashboard — it seeds daily_usage from
+    // the legacy JSON files, self-upserts its freshly-parsed JSONL into
+    // usage_event, then reads SQL-sourced blocks + daily — so even if reconcile
+    // is slow/fails, the Claude blocks + history are never empty.
+    usageReconciler
+      .reconcileAll()
+      .catch(() => {})
+      .finally(() => {
+        blockUsageService.recalculate().catch((err) => {
+          logger.error('BlockUsage', 'Initial recalculation failed', err)
+        })
+      })
+    usageReconciler.start()
     blockUsageService.startWatching()
   } else {
     logger.info(

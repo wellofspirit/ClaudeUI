@@ -210,6 +210,7 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     onSkills: on('session:skills') as ClaudeAPI['onSkills'],
     onAuthSource: on('session:auth-source') as ClaudeAPI['onAuthSource'],
     onStatusLine: on('session:status-line') as ClaudeAPI['onStatusLine'],
+    onMetering: on('session:metering') as ClaudeAPI['onMetering'],
     onMcpServers: on('session:mcp-servers') as ClaudeAPI['onMcpServers'],
     onPlanSteps: on('session:plan') as ClaudeAPI['onPlanSteps'],
 

@@ -12,6 +12,21 @@ import type { ChatMessage, ContentBlock, PendingApproval, SessionResult } from '
 // ── Part accumulator ─────────────────────────────────────────────────────────
 
 /**
+ * Token counts as reported by opencode's message.updated info.tokens.
+ * All fields are optional — opencode may not populate all of them.
+ */
+export interface MessageTokens {
+  input?: number
+  output?: number
+  /** Reasoning/thinking tokens (maps to a cache-write slot in billing) */
+  reasoning?: number
+  cache?: {
+    read?: number
+    write?: number
+  }
+}
+
+/**
  * Live state for an in-progress assistant message.
  * Parts arrive as snapshots (upsert by part.id).
  */
@@ -26,6 +41,9 @@ export interface MessageAccumulator {
    *  re-emits `message.updated` multiple times per turn with a CUMULATIVE cost,
    *  so we store-not-add and sum across messages to get the turn total. */
   cost?: number
+  /** Latest cumulative token snapshot for this message (`info.tokens`). Same
+   *  cumulative semantics as cost — store, do not add. */
+  tokens?: MessageTokens
   /** Ordered part ids for block ordering. */
   partOrder: string[]
   /** Current snapshot per part.id */
@@ -56,7 +74,7 @@ export type MapperOutput =
   | { kind: 'tool_result'; toolUseId: string; result: string; isError: boolean }
   | { kind: 'approval'; approval: PendingApproval }
   | { kind: 'result'; result: Pick<SessionResult, 'totalCostUsd' | 'durationMs' | 'result'> & { sessionId: string | null } }
-  | { kind: 'cost_update'; totalCostUsd: number }
+  | { kind: 'cost_update'; totalCostUsd: number; messageId: string; tokens?: MessageTokens; engineCostUsd?: number }
   | { kind: 'error'; message: string }
   | { kind: 'ignore' }
 
@@ -208,6 +226,24 @@ export function mapEvent(
       const role = info.role as 'user' | 'assistant' | 'system' | undefined
       if (role === 'user' || role === 'assistant' || role === 'system') acc.role = role
 
+      // info.tokens is a per-message CUMULATIVE snapshot (store, do not add).
+      // Shape (from opencode 1.17.9 /doc): { input, output, reasoning, cache: { read, write } }
+      const rawTokens = info.tokens as Record<string, unknown> | undefined
+      if (rawTokens) {
+        const cacheRaw = rawTokens.cache as Record<string, unknown> | undefined
+        acc.tokens = {
+          input: typeof rawTokens.input === 'number' ? rawTokens.input : undefined,
+          output: typeof rawTokens.output === 'number' ? rawTokens.output : undefined,
+          reasoning: typeof rawTokens.reasoning === 'number' ? rawTokens.reasoning : undefined,
+          cache: cacheRaw
+            ? {
+                read: typeof cacheRaw.read === 'number' ? cacheRaw.read : undefined,
+                write: typeof cacheRaw.write === 'number' ? cacheRaw.write : undefined
+              }
+            : undefined
+        }
+      }
+
       // info.cost is a per-message CUMULATIVE snapshot that re-emits multiple
       // times per turn. Store (not add) it on the accumulator, then sum across
       // all messages so the turn total is correct and never double-counts.
@@ -217,7 +253,13 @@ export function mapEvent(
         acc.cost = cost
         if (cost !== prev) {
           totalCostUsd.value = sumAccumulatorCosts(accumulators)
-          return { kind: 'cost_update', totalCostUsd: totalCostUsd.value }
+          return {
+            kind: 'cost_update',
+            totalCostUsd: totalCostUsd.value,
+            messageId: infoId,
+            tokens: acc.tokens,
+            engineCostUsd: cost
+          }
         }
       }
       return { kind: 'ignore' }

@@ -7,7 +7,7 @@
  * Strategy: stub OpencodeClient and OpencodeServerManager so no real HTTP or
  * process spawning occurs. The tests exercise OpencodeSession directly.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { EventEmitter } from 'node:events'
 
 // ---------------------------------------------------------------------------
@@ -81,6 +81,8 @@ vi.mock('../OpencodeClient', () => ({
 // ---------------------------------------------------------------------------
 
 import { OpencodeSession } from '../OpencodeSession'
+import { closeDb, getUsageEventByMessageId } from '../../services/db'
+import type { OpencodeEvent } from '../protocol/types'
 import type { BrowserWindow } from 'electron'
 
 // ---------------------------------------------------------------------------
@@ -341,6 +343,147 @@ describe('OpencodeSession — capabilities', () => {
     expect(caps.backgroundTasks).toBe(false)
     expect(caps.subagents).toBe(false)
     expect(caps.interactiveApprovals).toBe(true)
+    session.dispose()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Metering — usage_event recording at session.idle (Phase 7 Pass 1)
+//
+// Drives a full turn through the SSE consumer: message.updated (×2, cumulative
+// tokens) → session.idle. Asserts exactly ONE usage_event row keyed by the
+// opencode message id, with the FINAL tokens (not the sum of the two snapshots).
+// ---------------------------------------------------------------------------
+
+/** Build an async-iterable SSE stream from a fixed list of events. */
+function streamOf(events: OpencodeEvent[]): () => AsyncGenerator<OpencodeEvent> {
+  return async function* () {
+    for (const ev of events) yield ev
+  }
+}
+
+describe('OpencodeSession — usage_event recording', () => {
+  beforeEach(() => {
+    setupMocks()
+    closeDb() // fresh in-memory DB per test (stub singleton reset)
+  })
+  afterEach(() => closeDb())
+
+  it('records ONE usage_event per assistant message with FINAL cumulative tokens', async () => {
+    const SES = 'ses_metering_1'
+    mockCreateSession.mockResolvedValue({ id: SES })
+    // Two message.updated for the SAME message id (cumulative output growth),
+    // then session.idle to end the turn.
+    mockSubscribeEvents.mockImplementation(
+      streamOf([
+        {
+          id: 'e1',
+          type: 'message.updated',
+          properties: {
+            sessionID: SES,
+            info: {
+              id: 'msg_meter',
+              role: 'assistant',
+              cost: 0.001,
+              tokens: { input: 100, output: 20, reasoning: 5, cache: { read: 10, write: 4 } }
+            }
+          }
+        },
+        {
+          id: 'e2',
+          type: 'message.updated',
+          properties: {
+            sessionID: SES,
+            info: {
+              id: 'msg_meter',
+              role: 'assistant',
+              cost: 0.002,
+              tokens: { input: 100, output: 90, reasoning: 12, cache: { read: 10, write: 4 } }
+            }
+          }
+        },
+        { id: 'e3', type: 'session.idle', properties: { sessionID: SES } }
+      ])
+    )
+
+    const session = makeSession('openai/gpt-4o')
+    await session.run('go')
+    // The SSE consumer runs in the background; wait for the row to appear.
+    await vi.waitFor(() => {
+      const row = getUsageEventByMessageId('msg_meter')
+      expect(row).toBeDefined()
+    })
+
+    const row = getUsageEventByMessageId('msg_meter')!
+    expect(row.engineId).toBe('opencode')
+    expect(row.vendorId).toBe('openai')
+    expect(row.modelId).toBe('gpt-4o')
+    // FINAL snapshot — output 90, NOT 20+90=110
+    expect(row.inputTokens).toBe(100)
+    expect(row.outputTokens).toBe(90)
+    expect(row.cacheWriteTokens).toBe(4)
+    expect(row.cacheReadTokens).toBe(10)
+    // reasoning is NOT folded into input/output
+    // engine cost is the per-message cumulative cost snapshot
+    expect(row.engineCostUsd).toBeCloseTo(0.002)
+    // equiv cost via pricing table: gpt-4o input $2.5/MTok, output $10/MTok, cacheRead $1.25/MTok
+    const expectedEquiv =
+      (100 / 1_000_000) * 2.5 + (90 / 1_000_000) * 10 + (4 / 1_000_000) * 2.5 + (10 / 1_000_000) * 1.25
+    expect(row.equivCostUsd!).toBeCloseTo(expectedEquiv)
+    expect(row.source).toBe('live')
+    session.dispose()
+  })
+
+  it('does not record user-role messages', async () => {
+    const SES = 'ses_metering_user'
+    mockCreateSession.mockResolvedValue({ id: SES })
+    mockSubscribeEvents.mockImplementation(
+      streamOf([
+        {
+          id: 'u1',
+          type: 'message.updated',
+          properties: {
+            sessionID: SES,
+            info: { id: 'msg_user_only', role: 'user', cost: 0, tokens: { input: 5 } }
+          }
+        },
+        { id: 'u2', type: 'session.idle', properties: { sessionID: SES } }
+      ])
+    )
+    const session = makeSession('openai/gpt-4o')
+    await session.run('hi')
+    // Give the consumer a tick to process session.idle
+    await vi.waitFor(() => expect(mockSubscribeEvents).toHaveBeenCalled())
+    // A user-role message must not produce a usage_event row.
+    expect(getUsageEventByMessageId('msg_user_only')).toBeUndefined()
+    session.dispose()
+  })
+
+  it('does not double-record across multiple session.idle events in one session', async () => {
+    const SES = 'ses_metering_dup'
+    mockCreateSession.mockResolvedValue({ id: SES })
+    // Same message finalized, then TWO session.idle events (e.g. a follow-up
+    // turn produced no new assistant message). The row must stay singular.
+    mockSubscribeEvents.mockImplementation(
+      streamOf([
+        {
+          id: 'd1',
+          type: 'message.updated',
+          properties: {
+            sessionID: SES,
+            info: { id: 'msg_once', role: 'assistant', cost: 0.005, tokens: { input: 10, output: 10 } }
+          }
+        },
+        { id: 'd2', type: 'session.idle', properties: { sessionID: SES } },
+        { id: 'd3', type: 'session.idle', properties: { sessionID: SES } }
+      ])
+    )
+    const session = makeSession('openai/gpt-4o')
+    await session.run('go')
+    await vi.waitFor(() => expect(getUsageEventByMessageId('msg_once')).toBeDefined())
+    // Row exists exactly once (DB dedups + the recordedUsageMessageIds guard).
+    const row = getUsageEventByMessageId('msg_once')!
+    expect(row.outputTokens).toBe(10)
     session.dispose()
   })
 })

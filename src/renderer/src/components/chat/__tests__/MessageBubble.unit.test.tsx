@@ -75,6 +75,7 @@ beforeEach(() => {
         effort: 'medium',
         thinkingMode: 'adaptive',
         statusLine: null,
+        metering: null,
         queuedText: '',
         draftText: '',
         selectedModel: 'default',
