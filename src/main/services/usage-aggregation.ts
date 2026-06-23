@@ -17,7 +17,7 @@
  * not "improve" them — the equivalence test is the guard.
  */
 
-import type { TokenCounts, ModelTokenBreakdown, UsageBlock } from '../../shared/types'
+import type { TokenCounts, ModelTokenBreakdown, UsageBlock, EngineUsageSummary } from '../../shared/types'
 import { accountForTimestamp, type AccountLogRecord } from './usage-windows'
 
 // ---------------------------------------------------------------------------
@@ -423,28 +423,38 @@ export function computeProjectionWLS(
 }
 
 // ---------------------------------------------------------------------------
-// Per-engine breakdown (NEW in Pass 2 — opencode now appears)
+// Per-engine breakdown (Pass 2 — opencode now appears; Phase 9b — per-model)
 // ---------------------------------------------------------------------------
 
-export interface EngineUsageBreakdown {
-  engineId: string
-  tokens: TokenCounts
-  costUsd: number
-  requestCount: number
-}
+/**
+ * Re-exported so block-usage.ts can use one type (no local alias needed).
+ * Identical to EngineUsageSummary from shared/types.ts.
+ */
+export type EngineUsageBreakdown = EngineUsageSummary
 
 /**
- * Aggregate entries by engineId. NEW for the per-engine dashboard view — this is
- * how opencode usage surfaces. Cost uses each entry's costUsd (equivalent cost
- * for priced models; opencode entries carry the pricing-table or engine cost).
+ * Aggregate entries by engineId, then by modelId within each engine.
+ * Each engine summary carries a `models[]` array (tokens/costUsd/requestCount
+ * per model) sorted by total tokens desc (Phase 9b).
+ *
+ * opencode model ids are kept RAW — no family-merge. mergeModelFamilies is
+ * Claude-specific and the Claude section of the UI does not use this path.
+ *
+ * Cost uses each entry's costUsd (equivalent cost for priced models; opencode
+ * entries carry the engine-reported or pricing-table cost via computePerEngine).
  */
-export function perEngineBreakdown(entries: AggEntry[]): EngineUsageBreakdown[] {
-  const byEngine = new Map<string, EngineUsageBreakdown>()
+export function perEngineBreakdown(entries: AggEntry[]): EngineUsageSummary[] {
+  // Two-level map: engineId → modelId → accumulator
+  const byEngine = new Map<string, EngineUsageSummary>()
+  const byModel = new Map<string, Map<string, ModelTokenBreakdown>>()
+
   for (const e of entries) {
+    // Engine-level accumulator
     let agg = byEngine.get(e.engineId)
     if (!agg) {
-      agg = { engineId: e.engineId, tokens: emptyTokenCounts(), costUsd: 0, requestCount: 0 }
+      agg = { engineId: e.engineId, tokens: emptyTokenCounts(), costUsd: 0, requestCount: 0, models: [] }
       byEngine.set(e.engineId, agg)
+      byModel.set(e.engineId, new Map())
     }
     agg.tokens.inputTokens += e.inputTokens
     agg.tokens.outputTokens += e.outputTokens
@@ -452,6 +462,29 @@ export function perEngineBreakdown(entries: AggEntry[]): EngineUsageBreakdown[] 
     agg.tokens.cacheReadTokens += e.cacheReadTokens
     agg.costUsd += e.costUsd
     agg.requestCount += 1
+
+    // Model-level accumulator within this engine
+    const modelMap = byModel.get(e.engineId)!
+    let mbd = modelMap.get(e.model)
+    if (!mbd) {
+      mbd = { model: e.model, tokens: emptyTokenCounts(), costUsd: 0, requestCount: 0 }
+      modelMap.set(e.model, mbd)
+    }
+    mbd.tokens.inputTokens += e.inputTokens
+    mbd.tokens.outputTokens += e.outputTokens
+    mbd.tokens.cacheCreationTokens += e.cacheCreationTokens
+    mbd.tokens.cacheReadTokens += e.cacheReadTokens
+    mbd.costUsd += e.costUsd
+    mbd.requestCount += 1
   }
+
+  // Attach sorted models[] to each engine summary
+  for (const [engineId, agg] of byEngine) {
+    const modelMap = byModel.get(engineId)!
+    agg.models = Array.from(modelMap.values()).sort(
+      (a, b) => totalTokens(b.tokens) - totalTokens(a.tokens)
+    )
+  }
+
   return Array.from(byEngine.values()).sort((a, b) => totalTokens(b.tokens) - totalTokens(a.tokens))
 }

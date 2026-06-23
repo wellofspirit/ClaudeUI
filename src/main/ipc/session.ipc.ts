@@ -77,6 +77,7 @@ import type {
 } from '../../shared/types'
 import { discoverOpencodeModels } from '../opencode/model-discovery'
 import { discoverOpencodeSkills } from '../opencode/command-skill-discovery'
+import { refreshPrices } from '../services/opencode-pricing'
 import { OpencodeSession } from '../opencode/OpencodeSession'
 import { logger } from '../services/logger'
 import { deleteSessionFiles, deleteProjectFiles } from '../services/delete-session-files'
@@ -335,6 +336,7 @@ const SESSION_IPC_CHANNELS = [
   'usage:fetch',
   'usage:fetch-block',
   'usage:set-account-filter',
+  'usage:refresh-prices',
   'auth:sign-in',
   'auth:submit-code',
   'auth:cancel',
@@ -1694,6 +1696,13 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
   ipcMain.handle('usage:set-account-filter', async (_e, account: string | null) => {
     blockUsageService.setAccountFilter(account)
   })
+
+  // Phase 9b: fetch opencode pricing from /config/providers, persist + register.
+  // Desktop-only — spawns a local opencode server; blocked from remote dispatch.
+  ipcMain.handle(
+    'usage:refresh-prices',
+    safeHandler(async () => refreshPrices())
+  )
 
   // Native Anthropic OAuth (ADR-014) — routed through EngineAuthProvider.
   // Channels and payloads are unchanged; the registry defaults to 'claude'.

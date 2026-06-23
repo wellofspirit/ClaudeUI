@@ -384,6 +384,9 @@ const api: ClaudeAPI = {
   getPluginPreloadPath: () => ipcRenderer.invoke('plugin:preload-path') as Promise<string>,
   onPluginViewsChanged: onEvent('plugin:views-changed'),
 
+  // Usage pricing refresh (Phase 9b — desktop-only, spawns local opencode server)
+  refreshPrices: () => unwrap<{ count: number; refreshedAt: number }>('usage:refresh-prices'),
+
   // Mockup preview
   readMockupHtml: (cwd: string, directory: string) => unwrap('mockup:read-html', cwd, directory),
   watchMockup: (cwd: string, directory: string) =>

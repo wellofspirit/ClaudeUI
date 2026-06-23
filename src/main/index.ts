@@ -47,6 +47,7 @@ import { logger } from './services/logger'
 import { stopAllClassifiers } from './services/auto-classifier'
 import { getSdkVersion } from './services/claude-session'
 import { registerMockupAssetScheme, registerMockupAssetHandler } from './services/mockup-protocol'
+import { loadPersistedPrices } from './services/opencode-pricing'
 import icon from '../../resources/icon.png?asset'
 
 // Privileged scheme registration MUST happen before app.whenReady fires.
@@ -413,6 +414,11 @@ app.whenReady().then(() => {
   app.on('browser-window-created', (_, window) => {
     optimizer.watchWindowShortcuts(window)
   })
+
+  // Phase 9b: register any previously-fetched opencode pricing entries so
+  // equivalentCostUsd resolves opencode model costs from the very first recalc.
+  // No server spin-up — reads the persisted ~/.claude/ui/opencode-prices.json if present.
+  loadPersistedPrices()
 
   createWindow()
 

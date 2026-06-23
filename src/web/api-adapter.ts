@@ -536,7 +536,10 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     reloadPlugin: async () => {},
     getPluginViews: async () => [],
     getPluginPreloadPath: async () => '',
-    onPluginViewsChanged: () => () => {}
+    onPluginViewsChanged: () => () => {},
+
+    // Desktop-only: spawns a local opencode server — not available in remote mode (Phase 9b)
+    refreshPrices: async () => ({ count: 0, refreshedAt: Date.now() })
   }
 
   return api

@@ -1,10 +1,12 @@
 /**
  * Internal pricing table — equivalent API cost (USD) per model.
  *
- * Resolution order per foundation §4:
- *   1. Internal table (this file) — exact equivalent cost for supported models.
- *   2. Engine-reported cost (fallback/real-spend) — used by the recorder as engine_cost_usd.
- *   3. External (models.dev) — opt-in only; wired as a guarded stub (default OFF).
+ * Resolution order:
+ *   1. Built-in table (this file) — exact equivalent cost for Anthropic/OpenAI/Google models.
+ *      Authoritative; supplemental entries never override these.
+ *   2. Supplemental table — registered at runtime by main via registerSupplementalPricing()
+ *      (opencode /config/providers prices, persisted to ~/.claude/ui/opencode-prices.json).
+ *   3. Engine-reported cost (fallback/real-spend) — used by the recorder as engine_cost_usd.
  *
  * shared/ — no DB imports, no electron, no node-only APIs. Pure computation.
  */
@@ -26,7 +28,7 @@ export interface ModelPricing {
 }
 
 /** A pricing entry: match string is tested with String.includes (case-insensitive). */
-interface PricingEntry {
+export interface PricingEntry {
   vendorId: VendorId
   match: string
   pricing: ModelPricing
@@ -385,15 +387,53 @@ const PRICING_TABLE: PricingEntry[] = [
   ...GOOGLE_PRICING
 ]
 
+// ---------------------------------------------------------------------------
+// Supplemental pricing (registered at runtime by main — pure; no I/O here)
+// ---------------------------------------------------------------------------
+
+/**
+ * Runtime-registered supplemental entries, populated by opencode-pricing.ts
+ * from the opencode /config/providers price table (models.dev data).
+ * Replace-all semantics: each registerSupplementalPricing() call replaces the
+ * previous batch (one source of truth per refresh).
+ * Built-in PRICING_TABLE entries take precedence — supplemental is consulted
+ * only when the built-in table returns null.
+ */
+let supplementalPricing: PricingEntry[] = []
+
+/**
+ * Register opencode-sourced (or any external) pricing entries.
+ * Called by main/services/opencode-pricing.ts after fetching + persisting prices.
+ * Pure: no I/O, no electron — main owns file persistence and calls this.
+ *
+ * Replace-all semantics: the entire supplemental batch is replaced on each call.
+ * Built-in Anthropic/OpenAI/Google entries remain authoritative and are never replaced.
+ */
+export function registerSupplementalPricing(entries: PricingEntry[]): void {
+  supplementalPricing = entries
+}
+
 /**
  * Look up ModelPricing for a (vendorId, modelId) pair.
- * Matches entries where entry.vendorId === vendorId AND modelId.toLowerCase().includes(entry.match).
- * Returns null when no entry matches (model is unpriced — equivalentCostUsd will return null).
+ * Resolution order:
+ *   1. Built-in PRICING_TABLE (authoritative — Anthropic/OpenAI/Google).
+ *      Matched by SUBSTRING (entry.match) so a single family entry (`sonnet`)
+ *      covers every dated variant (`claude-sonnet-4-6`).
+ *   2. Supplemental table (opencode /config/providers prices, registered at runtime).
+ *      Matched by EXACT equality — entries are full opencode model ids, so a
+ *      shorter id (`claude-haiku-4-5`) must NOT shadow a longer variant
+ *      (`claude-haiku-4-5-20251001`) the way substring matching would.
+ * Returns null when no entry matches (caller falls back to engine-reported cost).
  */
 function findPricing(vendorId: VendorId, modelId: string): ModelPricing | null {
   const lower = modelId.toLowerCase()
   for (const entry of PRICING_TABLE) {
     if (entry.vendorId === vendorId && lower.includes(entry.match)) {
+      return entry.pricing
+    }
+  }
+  for (const entry of supplementalPricing) {
+    if (entry.vendorId === vendorId && lower === entry.match) {
       return entry.pricing
     }
   }
@@ -439,26 +479,3 @@ export function equivalentCostUsd(
   )
 }
 
-// ---------------------------------------------------------------------------
-// External pricing (models.dev) — opt-in only, OFF by default
-// ---------------------------------------------------------------------------
-
-/**
- * Guarded path for external pricing from models.dev.
- * This is intentionally a no-op stub — Pass 1 wires the toggle but does NOT
- * fetch network data by default. When the opt-in toggle is enabled in Pass 2+,
- * this function will be replaced with a real implementation.
- *
- * @param _vendorId  Vendor identifier
- * @param _modelId   Model identifier
- * @param _enabled   Whether external pricing is opted in
- * @returns null always (stub)
- */
-export function externalPricingStub(
-  _vendorId: VendorId,
-  _modelId: string,
-  _enabled: boolean
-): ModelPricing | null {
-  // External pricing (models.dev) is opt-in only — no phoning home by default.
-  return null
-}

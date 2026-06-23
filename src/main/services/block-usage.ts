@@ -831,7 +831,11 @@ export class BlockUsageService {
         outputTokens: r.outputTokens,
         cacheCreationTokens: r.cacheWriteTokens,
         cacheReadTokens: r.cacheReadTokens,
-        costUsd: r.equivCostUsd ?? r.engineCostUsd ?? 0,
+        // Phase 9b cost fix: engineCostUsd is authoritative for all engines.
+        // For opencode, 0 is a valid real cost (free model) — only null falls back
+        // to equivCostUsd. Previously equivCostUsd was preferred, which wrongly
+        // shadowed opencode's real cost with the pricing-table estimate.
+        costUsd: r.engineCostUsd ?? r.equivCostUsd ?? 0,
         messageId: r.messageId,
         engineId: r.engineId
       }))
@@ -958,9 +962,11 @@ export class BlockUsageService {
         b.outputTokens += r.outputTokens
         b.cacheWriteTokens += r.cacheWriteTokens
         b.cacheReadTokens += r.cacheReadTokens
-        // Claude daily cost matches the historical entry-derived total (engine
-        // cost = calculateCostFromTokens). opencode rows use equiv (or engine).
-        b.costUsd += (r.engineId === 'claude' ? r.engineCostUsd : r.equivCostUsd ?? r.engineCostUsd) ?? 0
+        // Phase 9b cost fix: engineCostUsd is authoritative for all engines.
+        // For opencode, 0 is a valid real cost (free model) — only null falls back
+        // to equivCostUsd. Claude's engineCostUsd = calculateCostFromTokens so this
+        // continues to match the historical entry-derived total.
+        b.costUsd += r.engineCostUsd ?? r.equivCostUsd ?? 0
         b.requestCount += 1
       }
 

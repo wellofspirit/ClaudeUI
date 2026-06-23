@@ -1,8 +1,7 @@
 /**
  * @vitest-environment node
  *
- * Per-engine breakdown (Phase 7 Pass 2) — the headline new value: opencode
- * usage surfacing alongside Claude in the dashboard.
+ * Per-engine breakdown (Phase 7 Pass 2 / Phase 9b) — engine + per-model grouping.
  */
 
 import { describe, it, expect } from 'vitest'
@@ -71,5 +70,76 @@ describe('perEngineBreakdown', () => {
     const [agg] = perEngineBreakdown([e])
     expect(agg.tokens.cacheCreationTokens).toBe(30)
     expect(agg.tokens.cacheReadTokens).toBe(20)
+  })
+
+  // ---------------------------------------------------------------------------
+  // Phase 9b: per-engine-per-model breakdown (models[] array)
+  // ---------------------------------------------------------------------------
+
+  it('populates models[] with per-model breakdown for each engine', () => {
+    const entries: AggEntry[] = [
+      entry('claude', 'claude-sonnet-4-6', 1000, 500, 0.01),
+      entry('claude', 'claude-opus-4-8', 2000, 800, 0.05),
+      entry('claude', 'claude-sonnet-4-6', 500, 200, 0.005), // second sonnet entry
+      entry('opencode', 'gpt-4o', 300, 100, 0.001),
+      entry('opencode', 'gpt-4o-mini', 50, 20, 0.0001)
+    ]
+    const result = perEngineBreakdown(entries)
+
+    const claude = result.find((r) => r.engineId === 'claude')!
+    expect(claude.models).toHaveLength(2)
+    const sonnet = claude.models.find((m) => m.model === 'claude-sonnet-4-6')!
+    expect(sonnet).toBeDefined()
+    expect(sonnet.tokens.inputTokens).toBe(1500)  // 1000 + 500
+    expect(sonnet.tokens.outputTokens).toBe(700)   // 500 + 200
+    expect(sonnet.costUsd).toBeCloseTo(0.015)
+    expect(sonnet.requestCount).toBe(2)
+
+    const opus = claude.models.find((m) => m.model === 'claude-opus-4-8')!
+    expect(opus).toBeDefined()
+    expect(opus.tokens.inputTokens).toBe(2000)
+    expect(opus.requestCount).toBe(1)
+
+    const opencode = result.find((r) => r.engineId === 'opencode')!
+    expect(opencode.models).toHaveLength(2)
+    const gpt4o = opencode.models.find((m) => m.model === 'gpt-4o')!
+    expect(gpt4o.tokens.inputTokens).toBe(300)
+    const gpt4oMini = opencode.models.find((m) => m.model === 'gpt-4o-mini')!
+    expect(gpt4oMini.tokens.inputTokens).toBe(50)
+  })
+
+  it('models[] sorted by total tokens descending within each engine', () => {
+    const entries: AggEntry[] = [
+      entry('opencode', 'cheap-model', 10, 5, 0.001),       // fewer tokens
+      entry('opencode', 'expensive-model', 5000, 2000, 0.1) // more tokens
+    ]
+    const [opencode] = perEngineBreakdown(entries)
+    expect(opencode.models[0].model).toBe('expensive-model')
+    expect(opencode.models[1].model).toBe('cheap-model')
+  })
+
+  it('opencode model ids are kept raw (no family-merge)', () => {
+    const entries: AggEntry[] = [
+      entry('opencode', 'anthropic/claude-sonnet-4-5-20251022', 100, 50, 0.001),
+      entry('opencode', 'anthropic/claude-sonnet-4-6-20260415', 200, 80, 0.002)
+    ]
+    const [opencode] = perEngineBreakdown(entries)
+    // Two distinct model ids — not merged into a "sonnet" family
+    expect(opencode.models).toHaveLength(2)
+    expect(opencode.models.map((m) => m.model)).toContain('anthropic/claude-sonnet-4-5-20251022')
+    expect(opencode.models.map((m) => m.model)).toContain('anthropic/claude-sonnet-4-6-20260415')
+  })
+
+  it('single-model engine has models[] with one entry matching the engine totals', () => {
+    const entries: AggEntry[] = [
+      entry('opencode', 'gpt-4o', 500, 200, 0.01),
+      entry('opencode', 'gpt-4o', 300, 100, 0.005)
+    ]
+    const [opencode] = perEngineBreakdown(entries)
+    expect(opencode.models).toHaveLength(1)
+    const m = opencode.models[0]
+    expect(m.tokens.inputTokens).toBe(opencode.tokens.inputTokens)
+    expect(m.costUsd).toBeCloseTo(opencode.costUsd)
+    expect(m.requestCount).toBe(opencode.requestCount)
   })
 })

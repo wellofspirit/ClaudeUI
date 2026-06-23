@@ -791,6 +791,12 @@ interface AccountAPI {
   onAccountsChanged(cb: (state: AccountsState) => void): () => void
   /** Fired when the active account changed — renderer should respawn sessions. */
   onAccountRespawnSessions(cb: () => void): () => void
+  /**
+   * Fetch opencode's live /config/providers price table, persist it, and register
+   * it as supplemental pricing so equivalentCostUsd resolves opencode model costs.
+   * Desktop-only (spawns a local opencode server). Phase 9b.
+   */
+  refreshPrices(): Promise<{ count: number; refreshedAt: number }>
 }
 
 export interface NetworkInterfaceInfo {
@@ -1145,12 +1151,14 @@ export interface BlockUsageData {
   perEngine?: EngineUsageSummary[]
 }
 
-/** Per-engine usage summary for the dashboard (Phase 7 Pass 2). */
+/** Per-engine usage summary for the dashboard (Phase 7 Pass 2 / Phase 9b). */
 export interface EngineUsageSummary {
   engineId: string
   tokens: TokenCounts
   costUsd: number
   requestCount: number
+  /** Per-model breakdown within this engine, sorted by total tokens desc (Phase 9b). */
+  models: ModelTokenBreakdown[]
 }
 
 // ---------------------------------------------------------------------------

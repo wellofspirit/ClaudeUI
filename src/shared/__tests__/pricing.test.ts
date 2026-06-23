@@ -4,9 +4,9 @@
  * null for unpriced models, and that the external-pricing stub is always OFF.
  */
 
-import { describe, it, expect } from 'vitest'
-import { equivalentCostUsd, externalPricingStub } from '../pricing'
-import type { TokenCostInput } from '../pricing'
+import { describe, it, expect, afterEach } from 'vitest'
+import { equivalentCostUsd, registerSupplementalPricing } from '../pricing'
+import type { TokenCostInput, PricingEntry } from '../pricing'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -229,15 +229,103 @@ describe('equivalentCostUsd — case insensitivity', () => {
 })
 
 // ---------------------------------------------------------------------------
-// External pricing stub — always OFF
+// Supplemental pricing — registerSupplementalPricing (Phase 9b)
 // ---------------------------------------------------------------------------
 
-describe('externalPricingStub — always returns null', () => {
-  it('returns null when disabled', () => {
-    expect(externalPricingStub('anthropic', 'claude-sonnet-4-6', false)).toBeNull()
+describe('registerSupplementalPricing', () => {
+  // Reset supplemental table after each test so we don't pollute other suites
+  afterEach(() => {
+    registerSupplementalPricing([])
   })
 
-  it('returns null even when enabled (stub — no network)', () => {
-    expect(externalPricingStub('anthropic', 'claude-sonnet-4-6', true)).toBeNull()
+  it('resolves a previously-unknown opencode model after registration', () => {
+    // Use a vendor+model that has no match in the built-in table
+    registerSupplementalPricing([])
+    expect(equivalentCostUsd('mistral', 'mistral-large-3', { inputTokens: 1_000_000, outputTokens: 0, cacheWriteTokens: 0, cacheWrite1hTokens: 0, cacheReadTokens: 0 })).toBeNull()
+
+    const entries: PricingEntry[] = [
+      { vendorId: 'mistral', match: 'mistral-large-3', pricing: { inputPerMTok: 5, outputPerMTok: 20, cacheWritePerMTok: 5, cacheWrite1hPerMTok: 5, cacheReadPerMTok: 1.25 } }
+    ]
+    registerSupplementalPricing(entries)
+
+    const cost = equivalentCostUsd('mistral', 'mistral-large-3', { inputTokens: 1_000_000, outputTokens: 0, cacheWriteTokens: 0, cacheWrite1hTokens: 0, cacheReadTokens: 0 })
+    expect(cost).toBeCloseTo(5.0)
+  })
+
+  it('built-in entries remain authoritative — supplemental does NOT override anthropic sonnet', () => {
+    // Register a wrong rate for sonnet
+    const entries: PricingEntry[] = [
+      { vendorId: 'anthropic', match: 'sonnet', pricing: { inputPerMTok: 999, outputPerMTok: 999, cacheWritePerMTok: 999, cacheWrite1hPerMTok: 999, cacheReadPerMTok: 999 } }
+    ]
+    registerSupplementalPricing(entries)
+
+    // Should still use the built-in $3/MTok rate
+    const cost = equivalentCostUsd('anthropic', 'claude-sonnet-4-6', { inputTokens: 1_000_000, outputTokens: 0, cacheWriteTokens: 0, cacheWrite1hTokens: 0, cacheReadTokens: 0 })
+    expect(cost).toBeCloseTo(3.0)
+  })
+
+  it('replace-all semantics — second call replaces the first batch', () => {
+    registerSupplementalPricing([
+      { vendorId: 'custom', match: 'model-v1', pricing: { inputPerMTok: 1, outputPerMTok: 2, cacheWritePerMTok: 1, cacheWrite1hPerMTok: 1, cacheReadPerMTok: 0.5 } }
+    ])
+    // Replace with a different entry — model-v1 should be gone
+    registerSupplementalPricing([
+      { vendorId: 'custom', match: 'model-v2', pricing: { inputPerMTok: 2, outputPerMTok: 4, cacheWritePerMTok: 2, cacheWrite1hPerMTok: 2, cacheReadPerMTok: 1 } }
+    ])
+
+    expect(equivalentCostUsd('custom', 'model-v1', { inputTokens: 1_000_000, outputTokens: 0, cacheWriteTokens: 0, cacheWrite1hTokens: 0, cacheReadTokens: 0 })).toBeNull()
+    expect(equivalentCostUsd('custom', 'model-v2', { inputTokens: 1_000_000, outputTokens: 0, cacheWriteTokens: 0, cacheWrite1hTokens: 0, cacheReadTokens: 0 })).toBeCloseTo(2.0)
+  })
+
+  it('empty registration clears supplemental table', () => {
+    registerSupplementalPricing([
+      { vendorId: 'custom', match: 'ephemeral', pricing: { inputPerMTok: 10, outputPerMTok: 10, cacheWritePerMTok: 10, cacheWrite1hPerMTok: 10, cacheReadPerMTok: 10 } }
+    ])
+    registerSupplementalPricing([])
+    expect(equivalentCostUsd('custom', 'ephemeral', { inputTokens: 1_000_000, outputTokens: 0, cacheWriteTokens: 0, cacheWrite1hTokens: 0, cacheReadTokens: 0 })).toBeNull()
+  })
+
+  // ---------------------------------------------------------------------------
+  // Supplemental entries match by EXACT id — a shorter id must NOT shadow a
+  // longer variant (would happen with substring `includes` matching). Phase 9b.
+  // ---------------------------------------------------------------------------
+
+  it('supplemental: shorter model id does NOT shadow a longer variant (exact match)', () => {
+    const oneMInput = { inputTokens: 1_000_000, outputTokens: 0, cacheWriteTokens: 0, cacheWrite1hTokens: 0, cacheReadTokens: 0 }
+    // Both ids share the prefix "claude-haiku-4-5". With substring `includes`,
+    // a lookup for the dated variant would match the base entry first
+    // ("…20251001".includes("claude-haiku-4-5") === true) → WRONG pricing.
+    registerSupplementalPricing([
+      { vendorId: 'opencode', match: 'claude-haiku-4-5', pricing: { inputPerMTok: 1, outputPerMTok: 5, cacheWritePerMTok: 1, cacheWrite1hPerMTok: 1, cacheReadPerMTok: 0.1 } },
+      { vendorId: 'opencode', match: 'claude-haiku-4-5-20251001', pricing: { inputPerMTok: 2, outputPerMTok: 10, cacheWritePerMTok: 2, cacheWrite1hPerMTok: 2, cacheReadPerMTok: 0.2 } }
+    ])
+
+    // Each id must resolve to ITS OWN pricing, not the shorter id's.
+    expect(equivalentCostUsd('opencode', 'claude-haiku-4-5', oneMInput)).toBeCloseTo(1.0)
+    expect(equivalentCostUsd('opencode', 'claude-haiku-4-5-20251001', oneMInput)).toBeCloseTo(2.0)
+  })
+
+  it('supplemental: exact match is order-independent (longer entry registered first)', () => {
+    const oneMInput = { inputTokens: 1_000_000, outputTokens: 0, cacheWriteTokens: 0, cacheWrite1hTokens: 0, cacheReadTokens: 0 }
+    // Reverse insertion order vs the test above — with `includes` the result
+    // would depend on order; with `===` it must not.
+    registerSupplementalPricing([
+      { vendorId: 'opencode', match: 'glm-4.6-air', pricing: { inputPerMTok: 3, outputPerMTok: 12, cacheWritePerMTok: 3, cacheWrite1hPerMTok: 3, cacheReadPerMTok: 0.3 } },
+      { vendorId: 'opencode', match: 'glm-4.6', pricing: { inputPerMTok: 6, outputPerMTok: 24, cacheWritePerMTok: 6, cacheWrite1hPerMTok: 6, cacheReadPerMTok: 0.6 } }
+    ])
+
+    expect(equivalentCostUsd('opencode', 'glm-4.6', oneMInput)).toBeCloseTo(6.0)
+    expect(equivalentCostUsd('opencode', 'glm-4.6-air', oneMInput)).toBeCloseTo(3.0)
+  })
+
+  it('supplemental: a model id that is a SUPERSTRING of a registered id does not match (exact only)', () => {
+    const oneMInput = { inputTokens: 1_000_000, outputTokens: 0, cacheWriteTokens: 0, cacheWrite1hTokens: 0, cacheReadTokens: 0 }
+    // Only the base id is registered; a longer unregistered variant must miss.
+    registerSupplementalPricing([
+      { vendorId: 'opencode', match: 'gpt-5', pricing: { inputPerMTok: 8, outputPerMTok: 32, cacheWritePerMTok: 8, cacheWrite1hPerMTok: 8, cacheReadPerMTok: 0.8 } }
+    ])
+    expect(equivalentCostUsd('opencode', 'gpt-5', oneMInput)).toBeCloseTo(8.0)
+    // "gpt-5-codex" is NOT registered → null (not the gpt-5 pricing)
+    expect(equivalentCostUsd('opencode', 'gpt-5-codex', oneMInput)).toBeNull()
   })
 })

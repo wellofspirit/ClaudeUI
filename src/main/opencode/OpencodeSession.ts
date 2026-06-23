@@ -33,6 +33,7 @@ import {
 import { classify, isAutoModeFastPathAllowed, type JudgeFn } from './auto-mode-classifier'
 import { loadEngineConfig } from '../services/ui-config'
 import type { ClaudePermissions, PermissionScope } from '../../shared/types'
+import { blockUsageService } from '../services/block-usage'
 
 // Permission ruleset helper
 type PermissionAction = 'allow' | 'ask' | 'deny'
@@ -563,6 +564,12 @@ export class OpencodeSession extends BaseSession {
         this.recordTurnUsage()
         // Metering (Phase 7 Pass 2) — emit the engine-neutral MeteringSnapshot.
         this.sendMetering()
+        // Phase 9b — refresh the per-engine dashboard immediately when an opencode
+        // turn ends. Without this, the opencode section only updates on the Claude
+        // usage poll (which may not fire at all in opencode-only sessions).
+        // recalculate() is self-guarded with a concurrency flag, so back-to-back
+        // turns queue safely.
+        blockUsageService.recalculate().catch(() => {})
         this.send('session:result', output.result)
         this.sendStatus()
         this.resetInactivityTimer()
