@@ -25,3 +25,4 @@
 | [021](adr-021_neutral-auth-account-model.md)                      | Neutral auth/account model — EngineAuthProvider, per-vendor probe *(amends 014/015)*                |
 | [022](adr-022_opencode-permission-mapping.md)                     | opencode permission model — autonomy-mode → last-match-wins ruleset mapping *(relates to 018/019)*  |
 | [023](adr-023_opencode-automode-classifier.md)                    | opencode auto-mode — LLM permission gatekeeper, configurable judge model *(relates to 022)* |
+| [024](adr-024_opencode-interaction-parity.md)                     | opencode interaction-feature parity — slash commands, skills, side-questions, queue/steer, subagents *(relates to 019/022/023)* |
