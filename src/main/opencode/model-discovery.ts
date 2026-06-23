@@ -6,6 +6,9 @@ import { logger } from '../services/logger'
 
 let cachedGroups: EngineModelGroup[] | null = null
 
+/** Per-model context-window cache: key = "providerID/modelID", value = tokens. */
+const contextWindowCache = new Map<string, number>()
+
 /**
  * Discover opencode providers + models by spinning up a transient server in
  * PERSISTED_SESSIONS_DIR, calling GET /config/providers, then releasing.
@@ -34,6 +37,10 @@ export async function discoverOpencodeModels(): Promise<EngineModelGroup[]> {
           const toolCalling = !!caps?.toolcall
           // Build a human-friendly description: "providerName · modelId"
           const description = `${provider.name} · ${m.name || modelId}`
+          // Cache the context window size for status-line usage (% used).
+          if (m.limit?.context) {
+            contextWindowCache.set(`${provider.id}/${modelId}`, m.limit.context)
+          }
           return {
             value: `${provider.id}/${modelId}`,
             displayName: m.name || modelId,
@@ -68,7 +75,17 @@ export async function discoverOpencodeModels(): Promise<EngineModelGroup[]> {
   }
 }
 
+/**
+ * Returns the context-window token count for a specific model as reported by
+ * /config/providers (`model.limit.context`). Returns 0 if the model is not in
+ * the discovery cache (discovery hasn't run yet, or the model has no limit).
+ */
+export function getOpencodeModelContextWindow(providerID: string, modelID: string): number {
+  return contextWindowCache.get(`${providerID}/${modelID}`) ?? 0
+}
+
 /** Invalidate the model discovery cache (call on auth change). */
 export function invalidateOpencodeModelCache(): void {
   cachedGroups = null
+  contextWindowCache.clear()
 }

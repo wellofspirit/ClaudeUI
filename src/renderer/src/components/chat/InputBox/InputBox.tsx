@@ -177,6 +177,7 @@ export function InputBox(): React.JSX.Element {
     [models, selectedModelValue]
   )
   const statusLine = useActiveSession((s) => s.statusLine)
+  const billingType = useActiveSession((s) => s.status?.account?.billingType)
   const effort = useActiveSession((s) => s.effort)
   const setEffort = useSessionStore((s) => s.setEffort)
   const thinkingMode = useActiveSession((s) => s.thinkingMode)
@@ -722,7 +723,7 @@ export function InputBox(): React.JSX.Element {
       adaptiveSupported={adaptiveSupported}
       showThinkingPicker={thinkingCap != null}
       showModelPicker={true}
-      showCostInStatusLine={true /* Phase 7: gate on Account.billingType */}
+      showCostInStatusLine={billingType !== 'free'}
       showContextMeter={capabilities.contextWindow > 0}
       visionEnabled={capabilities.vision}
       sandboxEnabled={sandboxEnabled}

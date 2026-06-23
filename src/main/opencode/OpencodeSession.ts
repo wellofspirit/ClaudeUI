@@ -15,9 +15,11 @@ import type {
   AccountRef,
   MeteringSnapshot,
   AutoModeConfig,
-  AskUserQuestion
+  AskUserQuestion,
+  StatusLineData
 } from '../../shared/types'
 import { opencodeModel } from '../../shared/types'
+import { getOpencodeModelContextWindow } from './model-discovery'
 import { equivalentCostUsd } from '../../shared/pricing'
 import { logger } from '../services/logger'
 import { mapEvent, extractToolResult } from './event-mapper'
@@ -141,6 +143,8 @@ export class OpencodeSession extends BaseSession {
   private isProcessing = false
   private totalCostUsd = 0
   private startTimeMs = 0
+  /** Latest assistant prompt size (input + cacheRead) for context-used % in the status line. */
+  private lastContextLength = 0
   private _model: string
   private permissionMode: string
   private agent: string | null = null
@@ -196,10 +200,11 @@ export class OpencodeSession extends BaseSession {
     this.permissionMode = permissionMode ?? 'default'
     this._capabilities = resolveOpencodeCapabilities()
     this.sendStatus()
+    this.sendStatusLine()
     // Warm the auth provider cache asynchronously so account is populated on
     // the next status emit (e.g. when run() begins). A cross-vendor model switch
     // re-reads from the cached map, so this only needs to warm once per session.
-    opencodeAuthProvider.warmCache().then(() => this.sendStatus()).catch(() => {})
+    opencodeAuthProvider.warmCache().then(() => { this.sendStatus(); this.sendStatusLine() }).catch(() => {})
   }
 
   get willQueue(): boolean {
@@ -564,6 +569,8 @@ export class OpencodeSession extends BaseSession {
         this.recordTurnUsage()
         // Metering (Phase 7 Pass 2) — emit the engine-neutral MeteringSnapshot.
         this.sendMetering()
+        // Status line — emit final values at turn end (parity with Claude's result emit).
+        this.sendStatusLine()
         // Phase 9b — refresh the per-engine dashboard immediately when an opencode
         // turn ends. Without this, the opencode section only updates on the Claude
         // usage poll (which may not fire at all in opencode-only sessions).
@@ -576,7 +583,14 @@ export class OpencodeSession extends BaseSession {
         break
 
       case 'cost_update':
-        // totalCostUsd already updated via ref; status update is deferred to result
+        // totalCostUsd already updated via ref. Update lastContextLength from the
+        // latest assistant message's cumulative token snapshot (input + cacheRead is
+        // the running prompt size — the "context used" dimension). Then emit the
+        // status line live so the renderer updates during the turn (parity with Claude).
+        if (output.tokens) {
+          this.lastContextLength = (output.tokens.input ?? 0) + (output.tokens.cache?.read ?? 0)
+        }
+        this.sendStatusLine()
         break
 
       case 'auth-required':
@@ -657,6 +671,7 @@ export class OpencodeSession extends BaseSession {
     this.clearInactivityTimer()
     this._cancelled = true
     this.isProcessing = false
+    this.lastContextLength = 0
     this.sseAbort?.abort()
     this.sseAbort = null
     this.childSessions.clear()
@@ -761,6 +776,7 @@ export class OpencodeSession extends BaseSession {
     this._model = model
     this._capabilities = resolveOpencodeCapabilities()
     this.sendStatus()
+    this.sendStatusLine()
   }
 
   async setPermissionMode(mode: string): Promise<void> {
@@ -1073,6 +1089,67 @@ export class OpencodeSession extends BaseSession {
   }
 
   /**
+   * Sum the cumulative tokens from all own (non-child) assistant accumulators.
+   * Returns { input, output, cacheWrite, cacheRead }.
+   * Extracted from sendMetering for reuse in buildStatusLine (DRY).
+   */
+  private sumSessionTokens(): { input: number; output: number; cacheWrite: number; cacheRead: number } {
+    let input = 0
+    let output = 0
+    let cacheWrite = 0
+    let cacheRead = 0
+    for (const acc of this.accumulators.values()) {
+      if (acc.role === 'user' || acc.role === 'system') continue
+      if (acc.isChild) continue
+      const t = acc.tokens
+      if (!t) continue
+      input += t.input ?? 0
+      output += t.output ?? 0
+      cacheWrite += t.cache?.write ?? 0
+      cacheRead += t.cache?.read ?? 0
+    }
+    return { input, output, cacheWrite, cacheRead }
+  }
+
+  /**
+   * Build a StatusLineData snapshot for the current session state.
+   * Context "used" = lastContextLength (latest turn's input+cacheRead, NOT
+   * the cumulative In/Out/Total sum). Context window size from the discovery
+   * cache. usedPercentage is null when the window size is unknown (acceptable —
+   * status line shows tokens, omits the %).
+   */
+  private buildStatusLine(): StatusLineData {
+    const parsed = parseModelString(this._model)
+    const sum = this.sumSessionTokens()
+    const ctx = getOpencodeModelContextWindow(parsed.providerID, parsed.modelID)
+    const usedPercentage =
+      ctx > 0 && this.lastContextLength > 0
+        ? Math.round((this.lastContextLength / ctx) * 100)
+        : null
+    const remainingPercentage = usedPercentage !== null ? 100 - usedPercentage : null
+    const cachedTokens = sum.cacheRead + sum.cacheWrite
+    const totalTokens = sum.input + sum.output + cachedTokens
+    const totalDurationMs = this.startTimeMs > 0 ? Date.now() - this.startTimeMs : 0
+    return {
+      totalCostUsd: this.totalCostUsd,
+      totalDurationMs,
+      totalApiDurationMs: 0,
+      totalInputTokens: sum.input,
+      totalOutputTokens: sum.output,
+      cachedTokens,
+      totalTokens,
+      contextWindowSize: ctx,
+      usedPercentage,
+      remainingPercentage
+    }
+  }
+
+  /** Emit the status line to the renderer (parity with Claude's session:status-line). */
+  private sendStatusLine(): void {
+    this.send('session:status-line', this.buildStatusLine())
+  }
+
+  /**
    * Emit the engine-neutral MeteringSnapshot (Phase 7 Pass 2). opencode has no
    * window (no usage provider yet — foundation §7), so window is omitted; this
    * is the cumulative-meter case. Tokens summed across the turn's assistant
@@ -1082,23 +1159,7 @@ export class OpencodeSession extends BaseSession {
     try {
       const parsed = parseModelString(this._model)
       const account = opencodeAuthProvider.buildAccountRef(parsed.providerID)
-      let input = 0
-      let output = 0
-      let cacheWrite = 0
-      let cacheRead = 0
-      for (const acc of this.accumulators.values()) {
-        if (acc.role === 'user' || acc.role === 'system') continue
-        // Intentional: skip child accumulators here. The live MeteringSnapshot is the
-        // parent turn's per-model meter. Children are metered separately via
-        // recordUsageEvent in recordTurnUsage, not via the snapshot.
-        if (acc.isChild) continue
-        const t = acc.tokens
-        if (!t) continue
-        input += t.input ?? 0
-        output += t.output ?? 0
-        cacheWrite += t.cache?.write ?? 0
-        cacheRead += t.cache?.read ?? 0
-      }
+      const { input, output, cacheWrite, cacheRead } = this.sumSessionTokens()
       const equiv = equivalentCostUsd(parsed.providerID, parsed.modelID, {
         inputTokens: input,
         outputTokens: output,
@@ -1106,6 +1167,7 @@ export class OpencodeSession extends BaseSession {
         cacheWrite1hTokens: 0,
         cacheReadTokens: cacheRead
       })
+      const ctx = getOpencodeModelContextWindow(parsed.providerID, parsed.modelID)
       const snapshot: MeteringSnapshot = {
         engineId: 'opencode',
         vendorId: parsed.providerID,
@@ -1113,7 +1175,7 @@ export class OpencodeSession extends BaseSession {
         tokens: { input, output, cacheWrite, cacheRead, total: input + output + cacheWrite + cacheRead },
         equivalentCostUsd: equiv,
         engineReportedCostUsd: this.totalCostUsd,
-        contextWindow: { used: 0, size: 0 }
+        contextWindow: { used: this.lastContextLength, size: ctx }
         // window omitted — opencode has no usage provider (cumulative meter)
       }
       this.send('session:metering', snapshot)

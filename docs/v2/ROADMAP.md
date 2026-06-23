@@ -71,7 +71,6 @@ Every item below was re-verified against current code on 2026-06-23. Status lege
 
 | # | Item | Risk | Area | Effort |
 | --- | --- | --- | --- | --- |
-| 3 | **Cost display** not gated on `Account.billingType` (hardcoded on) | 🟠 | InputBox / metering | S |
 | 4 | opencode hosted-tools plugin installs **globally** | 🟠 | opencode plugin | S–M |
 | 5 | opencode **reasoning** toggle not surfaced | 🟠 | capabilities + model picker | M |
 | 6 | **Vendor editing UI** + ModelRef-derived vendor at spawn | 🟠 | config plane | M |
@@ -85,35 +84,14 @@ Every item below was re-verified against current code on 2026-06-23. Status lege
 | 15 | Consolidate opencode `/event` to **one subscription per server** | ⚪ | opencode transport | S |
 | 16 | Open the **V2 PR stack** (process, not code) | ⚪ | process | — |
 
-> ✅ **#1, #2, #7 shipped 2026-06-23** — subagent questions (#1, `v2-followup-subagent-questions`); the
-> opencode auth-UX cluster (#2 interactive re-login card + #7 native browser OAuth,
-> `v2-followup-opencode-auth-ux`). See *Verified resolved*. Those IDs are retired (remaining rows are
-> **not** renumbered).
+> ✅ **#1, #2, #3, #7 shipped 2026-06-23** — subagent questions (#1, `v2-followup-subagent-questions`);
+> the opencode auth-UX cluster (#2 re-login card + #7 native browser OAuth, `v2-followup-opencode-auth-ux`);
+> opencode status-line usage + cost gating (#3, `v2-followup-opencode-statusline`). See *Verified
+> resolved*. Those IDs are retired (remaining rows are **not** renumbered).
 >
 > Background/detached opencode subagents are **not** listed: opencode itself gates them behind
 > `OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS` (`tool/task.ts:98-102`), so it's upstream-experimental,
 > not our deferral. Revisit only if opencode promotes it.
-
----
-
-### 3 — Cost display not gated on `Account.billingType` 🟠
-
-**What.** The status-line cost/spend readout is hardcoded on: `showCostInStatusLine={true /* Phase 7:
-gate on Account.billingType */}` (`InputBox.tsx:725`); `View.tsx` honors the flag
-(`showCost={props.showCostInStatusLine ?? true}`, ~:570) but nothing computes it from billing. Per
-foundation 5 / §6, the cost metric should be conditioned on the account: subscription → utilization% +
-window; apiKey → real spend; free → tokens only; unknown → tokens + equivalent$. Today a free-model or
-subscription user sees a dollar figure that may be meaningless or misleading.
-
-**Why deferred.** Phase 7 landed the metering substrate but left the per-`billingType` *presentation*
-gating as a TODO (the comment names it explicitly).
-
-**Definition of done.** Drive `showCostInStatusLine` (and ideally the metric shown) from the active
-session's `AccountRef.billingType`. Subscription/Claude behavior unchanged; free opencode models stop
-showing a misleading "$"; apiKey shows real spend. Small, well-scoped.
-
-**References.** `InputBox.tsx:725`, `InputBox/View.tsx:85-86,~570`, `05-metering-usage.md §6`,
-`phase-7-metering.md` (per-billingType reporting).
 
 ---
 
@@ -358,6 +336,16 @@ squash/integration strategy for landing the stack. Not code — a process decisi
 Prior session inventories (pre-Phase-8/9) listed these as deferred; the 2026-06-23 sweep confirms they
 shipped. Recorded here so they're not re-raised:
 
+- **opencode status-line usage + cost gating** (was ROADMAP #3 🟠, shipped 2026-06-23,
+  `v2-followup-opencode-statusline`) — fixed opencode sessions showing In:0 / Out:0 / Total:0 · 0%
+  context: `OpencodeSession` now builds + emits `session:status-line` (StatusLineData) live on
+  `cost_update` and at result — cumulative In/Out/Total from the accumulators, context-used % from the
+  latest turn's `input + cacheRead` over the model's `limit.context` (captured in model-discovery), and
+  the metering `contextWindow` is populated too. The status-line **cost** segment is gated on
+  `Account.billingType` (hidden when `'free'`), so free models (e.g. OpenCode Zen) no longer show a
+  misleading "$". Claude byte-identical. (Per-billingType *metric semantics* — subscription
+  utilization%/window — remain a separate foundation-5 §6 item.) Spec:
+  `docs/v2/followup-opencode-statusline.md`.
 - **opencode auth-UX: native browser OAuth + interactive re-login card** (was ROADMAP #7 🟡 + #2 🟠,
   shipped 2026-06-23, `v2-followup-opencode-auth-ux`) — `method:'auto'` is driven in-app (open browser →
   await `oauthCallback` with **no code**; opencode's vendor plugin hosts the loopback/device flow, we

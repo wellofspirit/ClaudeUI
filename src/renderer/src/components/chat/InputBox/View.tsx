@@ -82,7 +82,7 @@ export interface InputBoxViewProps {
   showThinkingPicker?: boolean
   /** Show/hide the model picker. Always shown for Claude; the picker tolerates an empty/loading model list. */
   showModelPicker?: boolean
-  /** Whether to include cost in the status line. Always true for Claude; Phase 7 will gate on Account.billingType. */
+  /** Whether to include cost in the status line. Hidden when billingType === 'free' (ROADMAP #3). */
   showCostInStatusLine?: boolean
   /** Show the context-usage meter in the status line. Gated on capabilities.contextWindow > 0. */
   showContextMeter?: boolean

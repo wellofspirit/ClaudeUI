@@ -880,3 +880,103 @@ describe('InputBox FC — rendered', () => {
     expect(session.effort).toBe('high') // xhigh coerced to model's default
   })
 })
+
+// ---------------------------------------------------------------------------
+// billingType cost gating — ROADMAP #3 (followup-opencode-statusline)
+//
+// showCostInStatusLine is true for all billingTypes EXCEPT 'free'.
+// Claude is never free, so this change is behavior-preserving for it.
+// ---------------------------------------------------------------------------
+
+describe('InputBox FC — billingType cost gating (ROADMAP #3)', () => {
+  const BT_ROUTE = 'bt-route-1'
+
+  let app: Awaited<ReturnType<typeof import('@test/helpers/boot-test-app').bootTestApp>>
+
+  function renderFC(): void {
+    render(createElement(InputBox))
+  }
+
+  beforeEach(async () => {
+    const { bootTestApp } = await import('@test/helpers/boot-test-app')
+    app = await bootTestApp()
+
+    app.bridge.ipcMain.handle('session:get-models', () => [])
+    app.bridge.ipcMain.handle('session:get-engine-models', () => [{
+      engineId: 'claude',
+      vendorId: 'anthropic',
+      vendorName: 'Anthropic',
+      models: []
+    }])
+    app.bridge.ipcMain.handle('session:scan-custom-commands', () => [])
+    app.bridge.ipcMain.handle('file:list-dir', () => [])
+
+    useSessionStore.setState({
+      activeSessionId: null,
+      sessions: {},
+      recentSessionIds: []
+    })
+    useSessionStore.getState().createNewSession(BT_ROUTE, '/tmp/bt')
+    useSessionStore.setState({ activeSessionId: BT_ROUTE })
+  })
+
+  afterEach(() => {
+    app.teardown()
+    vi.clearAllMocks()
+  })
+
+  /** Helper: set the active session's status.account.billingType. */
+  function setBillingType(billingType: string | undefined): void {
+    const state = useSessionStore.getState()
+    const session = state.sessions[BT_ROUTE]
+    useSessionStore.setState({
+      sessions: {
+        ...state.sessions,
+        [BT_ROUTE]: {
+          ...session,
+          status: {
+            ...session.status,
+            account: billingType !== undefined
+              ? {
+                  engineId: 'opencode' as const,
+                  vendorId: 'opencode',
+                  billingType: billingType as import('../../../../../../shared/types').BillingType,
+                  authState: 'authenticated' as const
+                }
+              : null
+          }
+        }
+      }
+    })
+  }
+
+  it('billingType undefined (no account) → showCostInStatusLine=true (Claude-safe default)', () => {
+    setBillingType(undefined)
+    renderFC()
+    expect(viewProps.showCostInStatusLine).toBe(true)
+  })
+
+  it("billingType 'unknown' → showCostInStatusLine=true (Claude-safe default)", () => {
+    setBillingType('unknown')
+    renderFC()
+    expect(viewProps.showCostInStatusLine).toBe(true)
+  })
+
+  it("billingType 'subscription' → showCostInStatusLine=true (Claude subscription unchanged)", () => {
+    setBillingType('subscription')
+    renderFC()
+    expect(viewProps.showCostInStatusLine).toBe(true)
+  })
+
+  it("billingType 'apiKey' → showCostInStatusLine=true (API key users see cost)", () => {
+    setBillingType('apiKey')
+    renderFC()
+    expect(viewProps.showCostInStatusLine).toBe(true)
+  })
+
+  it("billingType 'free' → showCostInStatusLine=false (opencode free models hide the $)", () => {
+    setBillingType('free')
+    renderFC()
+    expect(viewProps.showCostInStatusLine).toBe(false)
+  })
+})

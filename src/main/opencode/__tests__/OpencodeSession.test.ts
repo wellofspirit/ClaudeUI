@@ -119,6 +119,14 @@ vi.mock('../../services/ui-config', () => ({
   loadEngineConfig: mockLoadEngineConfig
 }))
 
+// Model-discovery provides context-window sizes; mock so tests can control the
+// returned value without spinning up a real opencode server.
+const mockGetOpencodeModelContextWindow = vi.hoisted(() => vi.fn().mockReturnValue(0))
+vi.mock('../model-discovery', () => ({
+  getOpencodeModelContextWindow: mockGetOpencodeModelContextWindow,
+  invalidateOpencodeModelCache: vi.fn()
+}))
+
 // ---------------------------------------------------------------------------
 // Import the system under test AFTER mocking
 // ---------------------------------------------------------------------------
@@ -2653,6 +2661,380 @@ describe('OpencodeSession — child question.asked dispatch (floating AskUserQue
     expect(mockPrompt).not.toHaveBeenCalled()
     // Nor should replyPermission have been called
     expect(mockReplyPermission).not.toHaveBeenCalled()
+
+    session.dispose()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Status-line emission (followup-opencode-statusline)
+//
+// OpencodeSession must emit session:status-line LIVE on cost_update AND at
+// result. The status line carries cumulative In/Out/Total tokens, context %,
+// and cost. Context "used" = lastContextLength (latest turn's input+cacheRead),
+// NOT the cumulative sum. Free models still emit tokens (cost is in the data;
+// InputBox hides it based on billingType, not here).
+// ---------------------------------------------------------------------------
+
+describe('OpencodeSession — status-line emission', () => {
+  const SES = 'ses_sl_1'
+
+  beforeEach(() => {
+    setupMocks()
+    closeDb()
+    mockGetOpencodeModelContextWindow.mockReset()
+    mockGetOpencodeModelContextWindow.mockReturnValue(0)
+  })
+  afterEach(() => closeDb())
+
+  it('emits session:status-line on construction (initial zeros, no context window)', () => {
+    const win = new MockWindow() as unknown as BrowserWindow
+    const session = new OpencodeSession('r_sl_init', win, '/tmp')
+    const calls = (win as unknown as MockWindow).webContents.send.mock.calls
+    const slCall = calls.find((c) => c[0] === 'session:status-line')
+    expect(slCall).toBeDefined()
+    const data = slCall![2]
+    expect(data.totalInputTokens).toBe(0)
+    expect(data.totalOutputTokens).toBe(0)
+    expect(data.totalTokens).toBe(0)
+    expect(data.contextWindowSize).toBe(0)
+    expect(data.usedPercentage).toBeNull()
+    session.dispose()
+  })
+
+  it('emits session:status-line on setModel (once after model switch)', async () => {
+    const win = new MockWindow() as unknown as BrowserWindow
+    const session = new OpencodeSession('r_sl_model', win, '/tmp')
+    ;(win as unknown as MockWindow).webContents.send.mockClear()
+    await session.setModel('openai/gpt-4o')
+    const calls = (win as unknown as MockWindow).webContents.send.mock.calls
+    const slCall = calls.find((c) => c[0] === 'session:status-line')
+    expect(slCall).toBeDefined()
+    session.dispose()
+  })
+
+  it('emits session:status-line LIVE on cost_update with correct tokens and usedPercentage', async () => {
+    // context window = 128000 for openai/gpt-4o
+    mockGetOpencodeModelContextWindow.mockReturnValue(128000)
+    mockCreateSession.mockResolvedValue({ id: SES })
+
+    // A message.updated with tokens; cost changes on second update → cost_update emitted.
+    mockSubscribeEvents.mockImplementation(
+      streamOf([
+        {
+          id: 'e1',
+          type: 'message.updated',
+          properties: {
+            sessionID: SES,
+            info: {
+              id: 'msg_sl_1',
+              role: 'assistant',
+              cost: 0.001,
+              tokens: { input: 1000, output: 50, cache: { read: 200, write: 10 } }
+            }
+          }
+        },
+        // Second update — cost changes → cost_update is emitted by event-mapper
+        {
+          id: 'e2',
+          type: 'message.updated',
+          properties: {
+            sessionID: SES,
+            info: {
+              id: 'msg_sl_1',
+              role: 'assistant',
+              cost: 0.002,
+              tokens: { input: 1000, output: 100, cache: { read: 200, write: 10 } }
+            }
+          }
+        },
+        { id: 'e3', type: 'session.idle', properties: { sessionID: SES } }
+      ])
+    )
+
+    const win = new MockWindow() as unknown as BrowserWindow
+    const session = new OpencodeSession('r_sl_live', win, '/tmp')
+    await session.run('go')
+
+    // Wait for session:result so the full pipeline has run
+    await vi.waitFor(() => {
+      const calls = (win as unknown as MockWindow).webContents.send.mock.calls
+      return calls.some((c) => c[0] === 'session:result')
+    })
+
+    const calls = (win as unknown as MockWindow).webContents.send.mock.calls
+    // At least one session:status-line must have been emitted during the turn
+    // (live, on cost_update) BEFORE session:result
+    const slCalls = calls.filter((c) => c[0] === 'session:status-line')
+    expect(slCalls.length).toBeGreaterThanOrEqual(2) // at least: cost_update + result
+
+    // Find the one emitted before result (live on cost_update)
+    const resultIdx = calls.findIndex((c) => c[0] === 'session:result')
+    const priorSl = calls.slice(0, resultIdx).filter((c) => c[0] === 'session:status-line')
+    expect(priorSl.length).toBeGreaterThanOrEqual(1)
+
+    // The final status-line (emitted at result) should carry the accumulated tokens
+    const finalSl = slCalls[slCalls.length - 1]![2]
+    // totalInputTokens = sum of input across own assistant messages (= 1000)
+    expect(finalSl.totalInputTokens).toBe(1000)
+    // totalOutputTokens = sum of output (= 100 final)
+    expect(finalSl.totalOutputTokens).toBe(100)
+    // cachedTokens = cacheRead + cacheWrite = 200 + 10 = 210
+    expect(finalSl.cachedTokens).toBe(210)
+    // totalTokens = input + output + cached = 1000 + 100 + 210 = 1310
+    expect(finalSl.totalTokens).toBe(1310)
+    // contextWindowSize = 128000 (from mock)
+    expect(finalSl.contextWindowSize).toBe(128000)
+    // usedPercentage = round(lastContextLength / 128000 * 100)
+    // lastContextLength = input + cacheRead = 1000 + 200 = 1200
+    expect(finalSl.usedPercentage).toBe(Math.round(1200 / 128000 * 100))
+    expect(finalSl.remainingPercentage).toBe(100 - Math.round(1200 / 128000 * 100))
+
+    session.dispose()
+  })
+
+  it('emits session:status-line at result (turn end)', async () => {
+    mockCreateSession.mockResolvedValue({ id: SES })
+    mockSubscribeEvents.mockImplementation(
+      streamOf([
+        {
+          id: 'e1',
+          type: 'message.updated',
+          properties: {
+            sessionID: SES,
+            info: { id: 'msg_sl_r', role: 'assistant', cost: 0.001,
+              tokens: { input: 500, output: 30 } }
+          }
+        },
+        { id: 'e2', type: 'session.idle', properties: { sessionID: SES } }
+      ])
+    )
+
+    const win = new MockWindow() as unknown as BrowserWindow
+    const session = new OpencodeSession('r_sl_result', win, '/tmp')
+    await session.run('go')
+
+    await vi.waitFor(() =>
+      (win as unknown as MockWindow).webContents.send.mock.calls.some((c) => c[0] === 'session:result')
+    )
+
+    const calls = (win as unknown as MockWindow).webContents.send.mock.calls
+    // The status-line emitted AT result must come just before session:result
+    const resultIdx = calls.findIndex((c) => c[0] === 'session:result')
+    // status-line should appear in the calls before or at result position
+    const hasSlBeforeResult = calls.slice(0, resultIdx + 1).some((c) => c[0] === 'session:status-line')
+    expect(hasSlBeforeResult).toBe(true)
+
+    session.dispose()
+  })
+
+  it('context "used" = latest turn input+cacheRead (NOT the cumulative In/Out/Total sum)', async () => {
+    mockGetOpencodeModelContextWindow.mockReturnValue(100000)
+    mockCreateSession.mockResolvedValue({ id: SES })
+    mockSubscribeEvents.mockImplementation(
+      streamOf([
+        {
+          id: 'e1',
+          type: 'message.updated',
+          properties: {
+            sessionID: SES,
+            info: {
+              id: 'msg_ctx',
+              role: 'assistant',
+              cost: 0.003,
+              tokens: { input: 5000, output: 800, cache: { read: 1200, write: 50 } }
+            }
+          }
+        },
+        { id: 'e2', type: 'session.idle', properties: { sessionID: SES } }
+      ])
+    )
+
+    const win = new MockWindow() as unknown as BrowserWindow
+    const session = new OpencodeSession('r_ctx_used', win, '/tmp')
+    await session.run('go')
+
+    await vi.waitFor(() =>
+      (win as unknown as MockWindow).webContents.send.mock.calls.some((c) => c[0] === 'session:result')
+    )
+
+    const calls = (win as unknown as MockWindow).webContents.send.mock.calls
+    const slCalls = calls.filter((c) => c[0] === 'session:status-line')
+    const finalSl = slCalls[slCalls.length - 1]![2]
+
+    // lastContextLength = input(5000) + cacheRead(1200) = 6200
+    // NOT input+output+cacheWrite+cacheRead = 7050
+    const expectedUsed = Math.round(6200 / 100000 * 100)
+    expect(finalSl.usedPercentage).toBe(expectedUsed)
+    // totalInputTokens is the cumulative sum (5000), distinct from lastContextLength
+    expect(finalSl.totalInputTokens).toBe(5000)
+
+    session.dispose()
+  })
+
+  it('usedPercentage is null when contextWindowSize is 0 (unknown model)', async () => {
+    // mock returns 0 = unknown
+    mockGetOpencodeModelContextWindow.mockReturnValue(0)
+    mockCreateSession.mockResolvedValue({ id: SES })
+    mockSubscribeEvents.mockImplementation(
+      streamOf([
+        {
+          id: 'e1',
+          type: 'message.updated',
+          properties: {
+            sessionID: SES,
+            info: { id: 'msg_unknown_ctx', role: 'assistant', cost: 0.001,
+              tokens: { input: 1000, output: 100 } }
+          }
+        },
+        { id: 'e2', type: 'session.idle', properties: { sessionID: SES } }
+      ])
+    )
+
+    const win = new MockWindow() as unknown as BrowserWindow
+    const session = new OpencodeSession('r_ctx_zero', win, '/tmp')
+    await session.run('go')
+
+    await vi.waitFor(() =>
+      (win as unknown as MockWindow).webContents.send.mock.calls.some((c) => c[0] === 'session:result')
+    )
+
+    const calls = (win as unknown as MockWindow).webContents.send.mock.calls
+    const slCalls = calls.filter((c) => c[0] === 'session:status-line')
+    const finalSl = slCalls[slCalls.length - 1]![2]
+    expect(finalSl.contextWindowSize).toBe(0)
+    expect(finalSl.usedPercentage).toBeNull()
+    expect(finalSl.remainingPercentage).toBeNull()
+
+    session.dispose()
+  })
+
+  it('MeteringSnapshot.contextWindow is populated (not 0/0) after a turn', async () => {
+    mockGetOpencodeModelContextWindow.mockReturnValue(64000)
+    mockCreateSession.mockResolvedValue({ id: SES })
+    mockSubscribeEvents.mockImplementation(
+      streamOf([
+        {
+          id: 'e1',
+          type: 'message.updated',
+          properties: {
+            sessionID: SES,
+            info: {
+              id: 'msg_meter_ctx',
+              role: 'assistant',
+              cost: 0.002,
+              tokens: { input: 2000, output: 200, cache: { read: 500, write: 20 } }
+            }
+          }
+        },
+        { id: 'e2', type: 'session.idle', properties: { sessionID: SES } }
+      ])
+    )
+
+    const win = new MockWindow() as unknown as BrowserWindow
+    const session = new OpencodeSession('r_meter_ctx', win, '/tmp')
+    await session.run('go')
+
+    await vi.waitFor(() =>
+      (win as unknown as MockWindow).webContents.send.mock.calls.some((c) => c[0] === 'session:metering')
+    )
+
+    const calls = (win as unknown as MockWindow).webContents.send.mock.calls
+    const meterCall = calls.find((c) => c[0] === 'session:metering')
+    expect(meterCall).toBeDefined()
+    const snapshot = meterCall![2]
+    // used = input(2000) + cacheRead(500) = 2500
+    expect(snapshot.contextWindow.used).toBe(2500)
+    // size = 64000 from mock
+    expect(snapshot.contextWindow.size).toBe(64000)
+
+    session.dispose()
+  })
+
+  it('free-model session still emits session:status-line with token data (cost field unchanged)', async () => {
+    // Cost gating is renderer-side (InputBox billingType); the status-line data itself
+    // always carries the cost. This test verifies the main-process side is unaffected
+    // by billingType.
+    mockGetOpencodeModelContextWindow.mockReturnValue(0)
+    mockCreateSession.mockResolvedValue({ id: SES })
+    mockSubscribeEvents.mockImplementation(
+      streamOf([
+        {
+          id: 'e1',
+          type: 'message.updated',
+          properties: {
+            sessionID: SES,
+            info: { id: 'msg_free', role: 'assistant', cost: 0,
+              tokens: { input: 300, output: 40 } }
+          }
+        },
+        { id: 'e2', type: 'session.idle', properties: { sessionID: SES } }
+      ])
+    )
+
+    const win = new MockWindow() as unknown as BrowserWindow
+    const session = new OpencodeSession('r_free', win, '/tmp')
+    await session.run('go')
+
+    await vi.waitFor(() =>
+      (win as unknown as MockWindow).webContents.send.mock.calls.some((c) => c[0] === 'session:result')
+    )
+
+    const calls = (win as unknown as MockWindow).webContents.send.mock.calls
+    const slCalls = calls.filter((c) => c[0] === 'session:status-line')
+    expect(slCalls.length).toBeGreaterThanOrEqual(1)
+    const finalSl = slCalls[slCalls.length - 1]![2]
+    // Token data is present regardless of billingType
+    expect(finalSl.totalInputTokens).toBe(300)
+    expect(finalSl.totalOutputTokens).toBe(40)
+
+    session.dispose()
+  })
+
+  it('lastContextLength resets to 0 on cancel()', async () => {
+    mockGetOpencodeModelContextWindow.mockReturnValue(100000)
+    mockCreateSession.mockResolvedValue({ id: SES })
+    mockSubscribeEvents.mockImplementation(
+      streamOf([
+        {
+          id: 'e1',
+          type: 'message.updated',
+          properties: {
+            sessionID: SES,
+            info: { id: 'msg_cancel', role: 'assistant', cost: 0.001,
+              tokens: { input: 2000, output: 50, cache: { read: 300 } } }
+          }
+        },
+        { id: 'e2', type: 'session.idle', properties: { sessionID: SES } }
+      ])
+    )
+
+    const win = new MockWindow() as unknown as BrowserWindow
+    const session = new OpencodeSession('r_cancel_ctx', win, '/tmp')
+    await session.run('go')
+
+    await vi.waitFor(() =>
+      (win as unknown as MockWindow).webContents.send.mock.calls.some((c) => c[0] === 'session:result')
+    )
+
+    // After the turn, status-line should show a non-zero usedPercentage
+    const preCancel = (win as unknown as MockWindow).webContents.send.mock.calls
+      .filter((c) => c[0] === 'session:status-line')
+    const lastBefore = preCancel[preCancel.length - 1]![2]
+    expect(lastBefore.usedPercentage).not.toBeNull()
+
+    // Cancel: lastContextLength should reset to 0
+    ;(win as unknown as MockWindow).webContents.send.mockClear()
+    session.cancel()
+
+    // The cancel emits a final sendStatus — we're testing that lastContextLength
+    // was reset. Next sendStatusLine call (e.g. on model switch) should show 0.
+    await session.setModel('openai/gpt-4o')
+    const postCancel = (win as unknown as MockWindow).webContents.send.mock.calls
+      .filter((c) => c[0] === 'session:status-line')
+    const afterSl = postCancel[postCancel.length - 1]![2]
+    // lastContextLength was reset to 0 by cancel(), so usedPercentage is null
+    expect(afterSl.usedPercentage).toBeNull()
 
     session.dispose()
   })
