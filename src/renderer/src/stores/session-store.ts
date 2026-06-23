@@ -396,6 +396,9 @@ export interface PerSessionState {
   effort: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null
   /** null = use model default; non-null = user explicitly chose this mode */
   thinkingMode: 'adaptive' | 'enabled' | 'disabled' | null
+  /** null = opencode default (variant omitted); non-null = user chose a reasoning variant.
+   *  Only meaningful for opencode models with reasoningVariants. Claude: always null. */
+  reasoningVariant: string | null
   statusLine: StatusLineData | null
   /** Engine-neutral metering snapshot (Phase 7 Pass 2). Additive to statusLine. */
   metering: MeteringSnapshot | null
@@ -482,6 +485,7 @@ const EMPTY_SESSION_STATE: PerSessionState = {
   permissionMode: 'default',
   effort: null,
   thinkingMode: null,
+  reasoningVariant: null,
   statusLine: null,
   metering: null,
   queuedText: '',
@@ -771,6 +775,7 @@ interface SessionState {
     routingId?: string
   ) => void
   setThinkingMode: (mode: 'adaptive' | 'enabled' | 'disabled' | null, routingId?: string) => void
+  setReasoningVariant: (variant: string | null, routingId?: string) => void
   setStatusLine: (routingId: string, data: StatusLineData) => void
   setMetering: (routingId: string, data: MeteringSnapshot) => void
   appendQueuedText: (text: string) => void
@@ -1073,7 +1078,8 @@ export const useSessionStore = create<SessionState>((set) => ({
             selectedModel: src.selectedModel,
             permissionMode: src.permissionMode,
             effort: src.effort,
-            thinkingMode: src.thinkingMode
+            thinkingMode: src.thinkingMode,
+            reasoningVariant: src.reasoningVariant
           }
         },
         activeSessionId: newRoutingId,
@@ -1951,6 +1957,7 @@ export const useSessionStore = create<SessionState>((set) => ({
           permissionMode: snap.permissionMode as PermissionMode,
           effort: (snap.effort ?? null) as 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null,
           thinkingMode: (snap.thinkingMode ?? null) as 'adaptive' | 'enabled' | 'disabled' | null,
+          reasoningVariant: (snap.reasoningVariant ?? null) as string | null,
           statusLine: snap.statusLine
         }
       }
@@ -1990,6 +1997,13 @@ export const useSessionStore = create<SessionState>((set) => ({
       const id = routingId ?? state.activeSessionId
       if (!id) return {}
       return { sessions: updateSession(state.sessions, id, () => ({ thinkingMode: mode })) }
+    }),
+
+  setReasoningVariant: (variant, routingId) =>
+    set((state) => {
+      const id = routingId ?? state.activeSessionId
+      if (!id) return {}
+      return { sessions: updateSession(state.sessions, id, () => ({ reasoningVariant: variant })) }
     }),
 
   setStatusLine: (routingId, data) =>
@@ -2108,7 +2122,8 @@ export const useSessionStore = create<SessionState>((set) => ({
 
       // When the engine changed, also update the session's selectedEngineId,
       // status.engineId, and capabilities so pre-spawn gating is correct.
-      const patch: Partial<PerSessionState> = { selectedModel: model }
+      // Always reset reasoningVariant on model change — different models have different variants.
+      const patch: Partial<PerSessionState> = { selectedModel: model, reasoningVariant: null }
       if (engineChanged && session) {
         patch.selectedEngineId = targetEngine
         patch.status = {
@@ -2795,6 +2810,7 @@ export function getRemoteStateSnapshot(): {
       permissionMode: string
       effort: string
       thinkingMode: string
+      reasoningVariant: string | null
       statusLine: StatusLineData | null
       slashCommands: SlashCommandInfo[]
       customCommands: SlashCommandInfo[]
@@ -2830,6 +2846,7 @@ export function getRemoteStateSnapshot(): {
       permissionMode: s.permissionMode,
       effort: s.effort,
       thinkingMode: s.thinkingMode,
+      reasoningVariant: s.reasoningVariant,
       statusLine: s.statusLine,
       slashCommands: state.slashCommands,
       customCommands: state.customCommands,

@@ -15,6 +15,7 @@ import {
   ModelPicker,
   EffortPicker,
   ThinkingPicker,
+  ReasoningPicker,
   type ModelDisplay
 } from '../../shared/InlinePickers'
 
@@ -107,6 +108,11 @@ export interface InputBoxViewProps {
   onSelectModel: (value: string) => void
   onSelectEffort: (level: EffortLevel) => void
   onSelectThinking: (mode: ThinkingMode) => void
+  /** Available reasoning variant keys for the selected opencode model. Empty = hide picker. */
+  reasoningVariants?: string[]
+  /** Current reasoning variant selection, or null for the opencode default. */
+  reasoningVariant?: string | null
+  onSelectReasoningVariant?: (variant: string | null) => void
   onOpenSandboxSettings: () => void
   onVoiceStart: () => void
   onVoiceStop: () => void
@@ -508,6 +514,13 @@ export function InputBoxView(props: InputBoxViewProps): React.JSX.Element {
                   thinkingMode={props.thinkingMode}
                   adaptiveSupported={props.adaptiveSupported}
                   onSelectThinking={props.onSelectThinking}
+                />
+              )}
+              {(props.reasoningVariants?.length ?? 0) > 0 && (
+                <ReasoningPicker
+                  variants={props.reasoningVariants!}
+                  selected={props.reasoningVariant ?? null}
+                  onSelect={props.onSelectReasoningVariant ?? (() => {})}
                 />
               )}
               <EffortPicker

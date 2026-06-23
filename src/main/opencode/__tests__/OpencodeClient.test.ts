@@ -291,4 +291,42 @@ describe('OpencodeClient', () => {
       expect(result).toEqual([])
     })
   })
+
+  describe('promptAsync — reasoning variant', () => {
+    it('includes variant in POST body when present', async () => {
+      const mock = mockFetch(200, {})
+      vi.stubGlobal('fetch', mock)
+
+      const req = {
+        parts: [{ type: 'text' as const, text: 'Hello' }],
+        model: { providerID: 'minimax', modelID: 'minimax-01' },
+        variant: 'thinking'
+      }
+      await client.promptAsync('ses_abc', req)
+
+      expect(mock).toHaveBeenCalledWith(
+        `${BASE_URL}/session/ses_abc/prompt_async`,
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify(req)
+        })
+      )
+      const body = JSON.parse((mock.mock.calls[0][1] as RequestInit).body as string)
+      expect(body).toHaveProperty('variant', 'thinking')
+    })
+
+    it('omits variant from POST body when not provided', async () => {
+      const mock = mockFetch(200, {})
+      vi.stubGlobal('fetch', mock)
+
+      const req = {
+        parts: [{ type: 'text' as const, text: 'Hello' }],
+        model: { providerID: 'openai', modelID: 'gpt-4o' }
+      }
+      await client.promptAsync('ses_abc', req)
+
+      const body = JSON.parse((mock.mock.calls[0][1] as RequestInit).body as string)
+      expect(body).not.toHaveProperty('variant')
+    })
+  })
 })

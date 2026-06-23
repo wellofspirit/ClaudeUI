@@ -182,6 +182,8 @@ export function InputBox(): React.JSX.Element {
   const setEffort = useSessionStore((s) => s.setEffort)
   const thinkingMode = useActiveSession((s) => s.thinkingMode)
   const setThinkingMode = useSessionStore((s) => s.setThinkingMode)
+  const reasoningVariant = useActiveSession((s) => s.reasoningVariant)
+  const setReasoningVariant = useSessionStore((s) => s.setReasoningVariant)
   const sandboxEnabled = useSessionStore((s) => s.engineConfig.sandbox?.enabled ?? false)
 
   // Voice input
@@ -590,6 +592,11 @@ export function InputBox(): React.JSX.Element {
         if (coerced === null) setEffort(null)
         else if (coerced !== session.effort) setEffort(coerced)
       }
+      // Reset reasoning variant — the new model has different variants.
+      // setSelectedModel already resets it in the store; also notify the backend.
+      if (activeSessionId && started && sameEngine) {
+        window.api.setReasoningVariant(activeSessionId, null)
+      }
     },
     [activeSessionId, setSelectedModel, setThinkingMode, setEffort]
   )
@@ -623,6 +630,16 @@ export function InputBox(): React.JSX.Element {
       await restartSdkSession()
     },
     [setEffort, restartSdkSession]
+  )
+
+  const handleSelectReasoningVariant = useCallback(
+    (variant: string | null) => {
+      setReasoningVariant(variant)
+      if (activeSessionId) {
+        window.api.setReasoningVariant(activeSessionId, variant)
+      }
+    },
+    [activeSessionId, setReasoningVariant]
   )
 
   const handleSelectThinking = useCallback(
@@ -677,6 +694,14 @@ export function InputBox(): React.JSX.Element {
   )
   const thinkingCap = reasoning.thinking
   const effortCap = reasoning.effort
+
+  // opencode per-model reasoning variant picker: derived from the selected
+  // model's reasoningVariants (populated by model-discovery). Claude models have
+  // none → empty array → picker hidden.
+  const reasoningVariants = useMemo(
+    () => selectedModel.reasoningVariants ?? [],
+    [selectedModel]
+  )
   const adaptiveSupported = !!thinkingCap?.modes.includes('adaptive')
   const allowedEffortLevels = useMemo(() => effortCap?.levels ?? [], [effortCap])
 
@@ -743,6 +768,9 @@ export function InputBox(): React.JSX.Element {
       onSelectModel={handleSelectModel}
       onSelectEffort={handleSelectEffort}
       onSelectThinking={handleSelectThinking}
+      reasoningVariants={reasoningVariants}
+      reasoningVariant={reasoningVariant}
+      onSelectReasoningVariant={handleSelectReasoningVariant}
       onOpenSandboxSettings={handleOpenSandboxSettings}
       onVoiceStart={handleVoiceStart}
       onVoiceStop={handleVoiceStop}

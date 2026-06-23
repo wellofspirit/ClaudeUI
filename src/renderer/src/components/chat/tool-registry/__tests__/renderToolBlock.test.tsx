@@ -88,6 +88,7 @@ beforeEach(() => {
         permissionMode: 'default',
         effort: 'medium',
         thinkingMode: 'adaptive',
+        reasoningVariant: null,
         statusLine: null,
         metering: null,
         queuedText: '',

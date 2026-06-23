@@ -20,6 +20,9 @@ export interface Model {
   cost?: { input: number; output: number; cache?: { read: number; write: number } }
   limit?: { context: number; output?: number; input?: number }
   status?: string
+  /** Effort variants keyed by variant name (e.g. 'none', 'thinking', 'low', 'high').
+   *  Present only when capabilities.reasoning === true. */
+  variants?: Record<string, Record<string, unknown>>
 }
 
 export interface Provider {
@@ -86,6 +89,8 @@ export interface PromptRequest {
   tools?: Record<string, boolean>
   system?: string
   parts: Array<TextPartInput | FilePartInput>
+  /** Effort variant name to use for this prompt (e.g. 'none', 'thinking', 'low'). Omit to use opencode default. */
+  variant?: string
 }
 
 export interface TextPartInput {

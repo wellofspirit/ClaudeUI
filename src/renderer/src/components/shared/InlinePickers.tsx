@@ -217,6 +217,81 @@ export function EffortPicker({
   )
 }
 
+/**
+ * Reasoning variant picker for opencode models.
+ * Renders when the selected model has `reasoningVariants.length > 0`.
+ * Options: "Default" (null) + the model's variant keys.
+ * Claude models have no variants → hidden.
+ */
+export function ReasoningPicker({
+  variants,
+  selected,
+  onSelect
+}: {
+  /** The available variant keys for the currently selected model. */
+  variants: string[]
+  /** The currently selected variant, or null for the opencode default. */
+  selected: string | null
+  onSelect: (variant: string | null) => void
+}): React.JSX.Element | null {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement | null>(null)
+  useClickOutside(ref, open, () => setOpen(false))
+
+  if (variants.length === 0) return null
+
+  const displayLabel = selected ?? 'Default'
+
+  return (
+    <div className="relative" ref={ref}>
+      <button
+        onClick={(e) => {
+          e.stopPropagation()
+          setOpen(!open)
+        }}
+        className="h-7 px-2 flex items-center gap-1 rounded-lg text-[11px] text-text-muted hover:text-text-secondary hover:bg-bg-hover transition-colors cursor-pointer capitalize"
+        title="Reasoning variant"
+      >
+        <span>{displayLabel}</span>
+        <svg
+          width="8"
+          height="8"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2.5"
+        >
+          <polyline points="6 9 12 15 18 9" />
+        </svg>
+      </button>
+      {open && (
+        <div className="absolute bottom-full mb-1 left-0 w-28 bg-bg-tertiary border border-border rounded-lg overflow-hidden shadow-lg shadow-black/30 z-20">
+          {(['Default', ...variants] as const).map((option) => {
+            const value = option === 'Default' ? null : (option as string)
+            const isActive = value === selected
+            return (
+              <button
+                key={option}
+                onClick={() => {
+                  onSelect(value)
+                  setOpen(false)
+                }}
+                className={`w-full flex items-center px-3 h-8 text-[12px] transition-colors text-left capitalize cursor-pointer ${
+                  isActive
+                    ? 'text-text-primary bg-bg-hover'
+                    : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary'
+                }`}
+              >
+                {option}
+              </button>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export function ThinkingPicker({
   thinkingMode,
   adaptiveSupported,

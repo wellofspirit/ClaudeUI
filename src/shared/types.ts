@@ -408,6 +408,10 @@ export interface ModelInfo {
   vision?: boolean
   /** Whether this model supports tool calling. */
   toolCalling?: boolean
+  /** Available reasoning effort variant names for opencode models (from model.variants).
+   *  Non-empty only when the model's capabilities.reasoning === true and variants are present.
+   *  Claude models always have this undefined/empty — picker hidden. */
+  reasoningVariants?: string[]
 }
 
 /** Grouped model list for the engine-aware picker. */
@@ -577,6 +581,7 @@ interface SessionAPI {
   setModel(routingId: string, model: string): Promise<void>
   setEffort(routingId: string, effort: string): Promise<void>
   setThinkingMode(routingId: string, mode: string): Promise<void>
+  setReasoningVariant(routingId: string, variant: string | null): Promise<void>
   getModels(): Promise<ModelInfo[]>
   getEngineModels(): Promise<EngineModelGroup[]>
   generateTitle(conversationText: string): Promise<string | null>

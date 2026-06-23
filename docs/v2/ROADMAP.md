@@ -72,7 +72,6 @@ Every item below was re-verified against current code on 2026-06-23. Status lege
 | # | Item | Risk | Area | Effort |
 | --- | --- | --- | --- | --- |
 | 4 | opencode hosted-tools plugin installs **globally** | 🟠 | opencode plugin | S–M |
-| 5 | opencode **reasoning** toggle not surfaced | 🟠 | capabilities + model picker | M |
 | 6 | **Vendor editing UI** + ModelRef-derived vendor at spawn | 🟠 | config plane | M |
 | 8 | opencode **voice** input | 🟡 | voice | M |
 | 9 | Fully **engine-neutral lifting** of plan/question/todo/task | 🟡 | tool rendering | M–L |
@@ -84,10 +83,11 @@ Every item below was re-verified against current code on 2026-06-23. Status lege
 | 15 | Consolidate opencode `/event` to **one subscription per server** | ⚪ | opencode transport | S |
 | 16 | Open the **V2 PR stack** (process, not code) | ⚪ | process | — |
 
-> ✅ **#1, #2, #3, #7 shipped 2026-06-23** — subagent questions (#1, `v2-followup-subagent-questions`);
+> ✅ **#1, #2, #3, #5, #7 shipped 2026-06-23** — subagent questions (#1, `v2-followup-subagent-questions`);
 > the opencode auth-UX cluster (#2 re-login card + #7 native browser OAuth, `v2-followup-opencode-auth-ux`);
-> opencode status-line usage + cost gating (#3, `v2-followup-opencode-statusline`). See *Verified
-> resolved*. Those IDs are retired (remaining rows are **not** renumbered).
+> opencode status-line usage + cost gating (#3, `v2-followup-opencode-statusline`); opencode reasoning
+> (effort-variant) picker (#5, `v2-followup-opencode-reasoning`). See *Verified resolved*. Those IDs are
+> retired (remaining rows are **not** renumbered).
 >
 > Background/detached opencode subagents are **not** listed: opencode itself gates them behind
 > `OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS` (`tool/task.ts:98-102`), so it's upstream-experimental,
@@ -114,26 +114,6 @@ absolute `config.plugin` silently ignored). Verify standalone opencode no longer
 ClaudeUI sessions still render mermaid/mockup.
 
 **References.** `phase-5c-opencode-auth-mcp.md`, `ensure-plugin.ts`, Phase-5 gotchas.
-
----
-
-### 5 — opencode reasoning toggle not surfaced 🟠
-
-**What.** opencode models expose reasoning as a **per-model boolean** (vs Claude's thinking/effort
-axes). ClaudeUI surfaces no control: `discoverOpencodeModels()` hardcodes
-`supportsEffort:false, supportsAdaptiveThinking:false` (`model-discovery.ts:45-46`),
-`OPENCODE_ENGINE_CAPABILITIES.reasoning` is `{}` (`model-capabilities.ts`), and the thinking picker is
-gated on Claude's `capabilities.reasoning.thinking` (`InputBox/View.tsx:81`).
-
-**Why deferred.** Phase 5b noted opencode reasoning is "a boolean, not a modes control" and punted it.
-
-**Definition of done.** Extend the capability model so an engine can declare a boolean reasoning
-capability (vs Claude's two-axis `reasoning`); discover it per-model from opencode (`/config/providers`
-metadata); render a simple on/off reasoning toggle for opencode models that support it; wire it through
-to the prompt request. Behavior-preserving for Claude's existing picker.
-
-**References.** `phase-5b-opencode-chat.md:150,284`, `02-capability-model.md`, `model-capabilities.ts`,
-`model-discovery.ts`.
 
 ---
 
@@ -336,6 +316,16 @@ squash/integration strategy for landing the stack. Not code — a process decisi
 Prior session inventories (pre-Phase-8/9) listed these as deferred; the 2026-06-23 sweep confirms they
 shipped. Recorded here so they're not re-raised:
 
+- **opencode reasoning (effort-variant) picker** (was ROADMAP #5 🟠, shipped 2026-06-23,
+  `v2-followup-opencode-reasoning`) — the ROADMAP framed this as a "boolean toggle," but opencode
+  reasoning is actually per-model effort **variants** (`model.variants`, exposed via `/config/providers`,
+  gated on `capabilities.reasoning`): minimax → `none`/`thinking`, OpenAI → `none`/`low`/`medium`/`high`/
+  `xhigh`, etc. model-discovery carries each model's variant keys on `ModelInfo.reasoningVariants`; the
+  input box shows a `ReasoningPicker` (Default + the model's variants) for opencode reasoning models; the
+  selected variant is sent as `variant` in the prompt (Default = omitted = opencode's own default),
+  threaded via a `session:set-reasoning-variant` IPC + `OpencodeSession`, and reset on model change.
+  Claude byte-identical (picker hidden for models without variants). Spec:
+  `docs/v2/followup-opencode-reasoning.md`.
 - **opencode status-line usage + cost gating** (was ROADMAP #3 🟠, shipped 2026-06-23,
   `v2-followup-opencode-statusline`) — fixed opencode sessions showing In:0 / Out:0 / Total:0 · 0%
   context: `OpencodeSession` now builds + emits `session:status-line` (StatusLineData) live on

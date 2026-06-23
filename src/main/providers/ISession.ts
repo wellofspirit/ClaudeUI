@@ -53,6 +53,13 @@ export interface ISession {
   /** Set the permission mode. */
   setPermissionMode(mode: string): Promise<void>
 
+  /**
+   * Set the reasoning effort variant for opencode models (e.g. 'none', 'thinking', 'low').
+   * Optional — Claude and other engines that do not support per-model variants ignore it.
+   * Pass null to revert to opencode's default (variant omitted from the prompt body).
+   */
+  setReasoningVariant?(variant: string | null): void
+
   /** Update the inactivity timeout. Pass 0 to disable. */
   setInactivityTimeout(ms: number): void
 

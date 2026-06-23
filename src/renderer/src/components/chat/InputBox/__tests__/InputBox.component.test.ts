@@ -388,6 +388,10 @@ describe('InputBox FC — rendered', () => {
       record('session:set-thinking-mode', ...args)
       return null
     })
+    app.bridge.ipcMain.handle('session:set-reasoning-variant', (_e: unknown, ...args: unknown[]) => {
+      record('session:set-reasoning-variant', ...args)
+      return null
+    })
     app.bridge.ipcMain.handle('session:cancel', (_e: unknown, ...args: unknown[]) => {
       record('session:cancel', ...args)
       return null
@@ -978,5 +982,199 @@ describe('InputBox FC — billingType cost gating (ROADMAP #3)', () => {
     setBillingType('free')
     renderFC()
     expect(viewProps.showCostInStatusLine).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// ReasoningPicker — opencode per-model reasoning variant support
+// ---------------------------------------------------------------------------
+
+describe('InputBox FC — ReasoningPicker (opencode reasoning variants)', () => {
+  const RV_ROUTE = 'rv-route-1'
+
+  const ipcCalls: Record<string, unknown[][]> = {}
+  let app: Awaited<ReturnType<typeof import('@test/helpers/boot-test-app').bootTestApp>>
+
+  function renderFC(): void {
+    render(createElement(InputBox))
+  }
+
+  beforeEach(async () => {
+    const { bootTestApp } = await import('@test/helpers/boot-test-app')
+    app = await bootTestApp()
+
+    for (const key of Object.keys(ipcCalls)) delete ipcCalls[key]
+    function record(channel: string, ...args: unknown[]): void {
+      if (!ipcCalls[channel]) ipcCalls[channel] = []
+      ipcCalls[channel].push(args)
+    }
+
+    app.bridge.ipcMain.handle('session:get-models', () => [])
+    app.bridge.ipcMain.handle('session:get-engine-models', () => [{
+      engineId: 'opencode',
+      vendorId: 'minimax',
+      vendorName: 'MiniMax',
+      models: [
+        {
+          value: 'minimax/minimax-01',
+          displayName: 'MiniMax-01',
+          description: 'MiniMax · MiniMax-01',
+          engineId: 'opencode',
+          vendorId: 'minimax',
+          supportsEffort: false,
+          supportsAdaptiveThinking: false,
+          reasoningVariants: ['none', 'thinking']
+        }
+      ]
+    }])
+    app.bridge.ipcMain.handle('session:set-reasoning-variant', (_e: unknown, ...args: unknown[]) => {
+      record('session:set-reasoning-variant', ...args)
+      return null
+    })
+    app.bridge.ipcMain.handle('session:set-model', (_e: unknown, ...args: unknown[]) => {
+      record('session:set-model', ...args)
+      return null
+    })
+    app.bridge.ipcMain.handle('session:create', (_e: unknown, ...args: unknown[]) => {
+      record('session:create', ...args)
+      return null
+    })
+    app.bridge.ipcMain.handle('file:list-dir', () => [])
+
+    useSessionStore.setState({
+      activeSessionId: null,
+      sessions: {},
+      recentSessionIds: []
+    })
+    useSessionStore.getState().createNewSession(RV_ROUTE, '/test/cwd')
+    useSessionStore.setState({ activeSessionId: RV_ROUTE })
+  })
+
+  afterEach(() => {
+    app.teardown()
+    vi.clearAllMocks()
+  })
+
+  const MINIMAX_MODEL = {
+    value: 'minimax/minimax-01',
+    displayName: 'MiniMax-01',
+    description: 'MiniMax · MiniMax-01',
+    engineId: 'opencode' as const,
+    vendorId: 'minimax',
+    supportsEffort: false,
+    supportsAdaptiveThinking: false,
+    reasoningVariants: ['none', 'thinking'] as string[]
+  }
+
+  it('passes reasoningVariants from the selected opencode model to View', async () => {
+    // Pre-populate availableModels so the FC can resolve the selected model synchronously.
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [RV_ROUTE]: {
+          ...state.sessions[RV_ROUTE],
+          selectedModel: 'minimax/minimax-01',
+          selectedEngineId: 'opencode' as const
+        }
+      },
+      availableModels: [MINIMAX_MODEL]
+    }))
+
+    renderFC()
+
+    expect(viewProps.reasoningVariants).toEqual(['none', 'thinking'])
+  })
+
+  it('passes reasoningVariant (null = Default) to View initially', () => {
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [RV_ROUTE]: {
+          ...state.sessions[RV_ROUTE],
+          selectedModel: 'minimax/minimax-01',
+          selectedEngineId: 'opencode' as const
+        }
+      },
+      availableModels: [MINIMAX_MODEL]
+    }))
+
+    renderFC()
+
+    expect(viewProps.reasoningVariant).toBeNull()
+  })
+
+  it('onSelectReasoningVariant: updates store + calls set-reasoning-variant IPC', async () => {
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [RV_ROUTE]: {
+          ...state.sessions[RV_ROUTE],
+          selectedModel: 'minimax/minimax-01',
+          selectedEngineId: 'opencode' as const
+        }
+      },
+      availableModels: [MINIMAX_MODEL]
+    }))
+
+    renderFC()
+
+    viewProps.onSelectReasoningVariant?.('thinking')
+
+    expect(useSessionStore.getState().sessions[RV_ROUTE].reasoningVariant).toBe('thinking')
+    expect(ipcCalls['session:set-reasoning-variant']).toHaveLength(1)
+    expect(ipcCalls['session:set-reasoning-variant'][0][0]).toBe(RV_ROUTE)
+    expect(ipcCalls['session:set-reasoning-variant'][0][1]).toBe('thinking')
+  })
+
+  it('onSelectReasoningVariant with null: resets store + IPC to null', async () => {
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [RV_ROUTE]: {
+          ...state.sessions[RV_ROUTE],
+          selectedModel: 'minimax/minimax-01',
+          selectedEngineId: 'opencode' as const,
+          reasoningVariant: 'none'
+        }
+      },
+      availableModels: [MINIMAX_MODEL]
+    }))
+
+    renderFC()
+
+    viewProps.onSelectReasoningVariant?.(null)
+
+    expect(useSessionStore.getState().sessions[RV_ROUTE].reasoningVariant).toBeNull()
+    expect(ipcCalls['session:set-reasoning-variant'][0][1]).toBeNull()
+  })
+
+  it('Claude model with no reasoningVariants → reasoningVariants is empty array', () => {
+    // Default session: claude model, no reasoningVariants
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [RV_ROUTE]: {
+          ...state.sessions[RV_ROUTE],
+          selectedModel: 'default',
+          selectedEngineId: 'claude' as const
+        }
+      },
+      availableModels: [
+        {
+          value: 'default',
+          displayName: 'Default',
+          description: 'Claude Default',
+          supportsEffort: true,
+          supportedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max'] as const,
+          supportsAdaptiveThinking: true
+          // no reasoningVariants
+        }
+      ]
+    }))
+
+    renderFC()
+
+    // No reasoningVariants on Claude model → empty or absent
+    expect(viewProps.reasoningVariants ?? []).toEqual([])
   })
 })

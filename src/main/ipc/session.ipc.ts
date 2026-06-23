@@ -289,6 +289,7 @@ const SESSION_IPC_CHANNELS = [
   'session:set-permission-mode',
   'session:set-model',
   'session:set-effort',
+  'session:set-reasoning-variant',
   'session:get-models',
   'session:get-engine-models',
   'session:generate-title',
@@ -967,6 +968,10 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
   ipcMain.handle('session:set-effort', (_e, routingId: string, effort: string) => {
     const s = manager.get(routingId)
     if (s?.capabilities.reasoning.effort != null && isClaudeSession(s)) s.setEffort(effort)
+  })
+
+  ipcMain.handle('session:set-reasoning-variant', (_e, routingId: string, variant: string | null) => {
+    manager.get(routingId)?.setReasoningVariant?.(variant)
   })
 
   ipcMain.handle('session:set-thinking-mode', (_e, routingId: string, mode: string) => {

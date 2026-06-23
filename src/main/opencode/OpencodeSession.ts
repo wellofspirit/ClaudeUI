@@ -147,6 +147,7 @@ export class OpencodeSession extends BaseSession {
   private lastContextLength = 0
   private _model: string
   private permissionMode: string
+  private reasoningVariant: string | null = null
   private agent: string | null = null
   private pendingApprovals = new Map<string, unknown>()
   // Pending model-elicitation questions (question.asked) keyed by requestId.
@@ -466,7 +467,8 @@ export class OpencodeSession extends BaseSession {
     await this.client!.promptAsync(this.openSessionId!, {
       model: { providerID: parsed.providerID, modelID: parsed.modelID },
       agent: this.agent ?? undefined,
-      parts
+      parts,
+      ...(this.reasoningVariant != null ? { variant: this.reasoningVariant } : {})
     })
   }
 
@@ -775,8 +777,14 @@ export class OpencodeSession extends BaseSession {
   async setModel(model: string): Promise<void> {
     this._model = model
     this._capabilities = resolveOpencodeCapabilities()
+    // Reset the reasoning variant — the new model may have different variants.
+    this.reasoningVariant = null
     this.sendStatus()
     this.sendStatusLine()
+  }
+
+  setReasoningVariant(variant: string | null): void {
+    this.reasoningVariant = variant
   }
 
   async setPermissionMode(mode: string): Promise<void> {

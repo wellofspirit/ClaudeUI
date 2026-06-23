@@ -165,6 +165,8 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     setEffort: (routingId, effort) => ipcRenderer.invoke('session:set-effort', routingId, effort),
     setThinkingMode: (routingId, mode) =>
       ipcRenderer.invoke('session:set-thinking-mode', routingId, mode),
+    setReasoningVariant: (routingId, variant) =>
+      ipcRenderer.invoke('session:set-reasoning-variant', routingId, variant),
     getModels: () => ipcRenderer.invoke('session:get-models'),
     getEngineModels: () => ipcRenderer.invoke('session:get-engine-models'),
     generateTitle: (conversationText) =>

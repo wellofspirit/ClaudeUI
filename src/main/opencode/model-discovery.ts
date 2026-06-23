@@ -41,6 +41,11 @@ export async function discoverOpencodeModels(): Promise<EngineModelGroup[]> {
           if (m.limit?.context) {
             contextWindowCache.set(`${provider.id}/${modelId}`, m.limit.context)
           }
+          // Compute reasoning variant keys: only when reasoning is true and variants exist.
+          const reasoningVariants =
+            caps?.reasoning && m.variants && Object.keys(m.variants).length > 0
+              ? Object.keys(m.variants)
+              : []
           return {
             value: `${provider.id}/${modelId}`,
             displayName: m.name || modelId,
@@ -50,7 +55,8 @@ export async function discoverOpencodeModels(): Promise<EngineModelGroup[]> {
             vision,
             toolCalling,
             supportsEffort: false,
-            supportsAdaptiveThinking: false
+            supportsAdaptiveThinking: false,
+            ...(reasoningVariants.length > 0 ? { reasoningVariants } : {})
           }
         })
 

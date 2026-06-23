@@ -140,6 +140,7 @@ export interface PerSessionSnapshot {
   permissionMode: string
   effort: string
   thinkingMode?: string
+  reasoningVariant?: string | null
   statusLine: StatusLineData | null
   slashCommands: SlashCommandInfo[]
   sdkSkillNames: string[]

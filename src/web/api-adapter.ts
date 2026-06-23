@@ -272,6 +272,8 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       connection.invoke('session:set-effort', routingId, effort) as Promise<void>,
     setThinkingMode: (routingId, mode) =>
       connection.invoke('session:set-thinking-mode', routingId, mode) as Promise<void>,
+    setReasoningVariant: (routingId, variant) =>
+      connection.invoke('session:set-reasoning-variant', routingId, variant) as Promise<void>,
     getModels: () => connection.invoke('session:get-models') as ReturnType<ClaudeAPI['getModels']>,
     getEngineModels: () =>
       connection.invoke('session:get-engine-models') as ReturnType<ClaudeAPI['getEngineModels']>,

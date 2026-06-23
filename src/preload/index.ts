@@ -177,6 +177,8 @@ const api: ClaudeAPI = {
     ipcRenderer.invoke('session:set-effort', routingId, effort),
   setThinkingMode: (routingId: string, mode: string) =>
     ipcRenderer.invoke('session:set-thinking-mode', routingId, mode),
+  setReasoningVariant: (routingId: string, variant: string | null) =>
+    ipcRenderer.invoke('session:set-reasoning-variant', routingId, variant),
   getModels: () => ipcRenderer.invoke('session:get-models'),
   getEngineModels: () => ipcRenderer.invoke('session:get-engine-models'),
   generateTitle: (conversationText: string) =>
