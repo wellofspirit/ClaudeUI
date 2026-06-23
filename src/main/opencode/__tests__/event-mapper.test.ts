@@ -1353,3 +1353,150 @@ describe('Phase 9a — child message.updated captures model + childSessionId + c
     }
   })
 })
+
+// ── Child question.asked (floating AskUserQuestion hang-fix) ──────────────────
+
+describe('mapEvent — child question.asked → floating approval (hang-fix)', () => {
+  const CHILD_Q_ID = 'ses_child_q'
+  const PARENT_Q_CALL = 'call_task_q'
+  const CHILD_Q_CALL = 'child_call_question'
+
+  it('child question.asked → {kind:approval} with toolName AskUserQuestion and child callID', () => {
+    // Core regression: a child subagent calling the `question` tool emits
+    // question.asked under the child sessionId. Without this case it falls through
+    // to handleChildEvent default:ignore → child blocks → parent turn hangs.
+    const childSessions = new Map([[CHILD_Q_ID, PARENT_Q_CALL]])
+    const ev = makeEvent('question.asked', {
+      sessionID: CHILD_Q_ID,
+      id: 'que_child_1',
+      questions: [
+        {
+          question: 'Which approach?',
+          header: 'Strategy',
+          options: [
+            { label: 'Fast', description: 'Quick but rough' },
+            { label: 'Safe', description: 'Slow but correct' }
+          ],
+          multiple: false
+        }
+      ],
+      tool: { callID: CHILD_Q_CALL }
+    })
+    const out = mapEvent(ev, SESSION_ID, new Map(), START_TIME, { value: 0 }, childSessions)
+
+    expect(out.kind).toBe('approval')
+    if (out.kind !== 'approval') throw new Error('expected approval')
+
+    expect(out.approval.requestId).toBe('que_child_1')
+    expect(out.approval.toolName).toBe('AskUserQuestion')
+
+    // CRITICAL — toolUseId must be the CHILD question tool's callID, NOT the
+    // parent task callID. The parent callID is already in the rendered main
+    // assistant blocks → FloatingApproval would hide the card. The child callID
+    // only appears in subagent blocks → card shows correctly.
+    expect(out.approval.toolUseId).toBe(CHILD_Q_CALL)
+    expect(out.approval.toolUseId).not.toBe(PARENT_Q_CALL)
+
+    const input = out.approval.input as { questions: Array<{ question: string; header: string; multiSelect: boolean; options: unknown[] }> }
+    expect(input.questions).toHaveLength(1)
+    expect(input.questions[0].question).toBe('Which approach?')
+    expect(input.questions[0].header).toBe('Strategy')
+    expect(input.questions[0].multiSelect).toBe(false)
+    expect(input.questions[0].options).toEqual([
+      { label: 'Fast', description: 'Quick but rough' },
+      { label: 'Safe', description: 'Slow but correct' }
+    ])
+  })
+
+  it('child question.asked with multiple:true → multiSelect:true', () => {
+    const childSessions = new Map([[CHILD_Q_ID, PARENT_Q_CALL]])
+    const ev = makeEvent('question.asked', {
+      sessionID: CHILD_Q_ID,
+      id: 'que_child_multi',
+      questions: [
+        {
+          question: 'Pick features',
+          header: 'Features',
+          options: [{ label: 'A', description: '' }, { label: 'B', description: '' }],
+          multiple: true
+        }
+      ],
+      tool: { callID: CHILD_Q_CALL }
+    })
+    const out = mapEvent(ev, SESSION_ID, new Map(), START_TIME, { value: 0 }, childSessions)
+    expect(out.kind).toBe('approval')
+    if (out.kind !== 'approval') throw new Error('expected approval')
+    const input = out.approval.input as { questions: Array<{ multiSelect: boolean }> }
+    expect(input.questions[0].multiSelect).toBe(true)
+  })
+
+  it('child question.asked with no tool field → toolUseId undefined', () => {
+    const childSessions = new Map([[CHILD_Q_ID, PARENT_Q_CALL]])
+    const ev = makeEvent('question.asked', {
+      sessionID: CHILD_Q_ID,
+      id: 'que_child_notool',
+      questions: [{ question: 'Q?', header: 'H', options: [] }]
+      // no `tool` field
+    })
+    const out = mapEvent(ev, SESSION_ID, new Map(), START_TIME, { value: 0 }, childSessions)
+    expect(out.kind).toBe('approval')
+    if (out.kind !== 'approval') throw new Error('expected approval')
+    expect(out.approval.toolUseId).toBeUndefined()
+  })
+
+  it('child question.asked missing id or questions → ignore', () => {
+    const childSessions = new Map([[CHILD_Q_ID, PARENT_Q_CALL]])
+    const noId = makeEvent('question.asked', {
+      sessionID: CHILD_Q_ID,
+      questions: [{ question: 'Q?', header: 'H', options: [] }]
+    })
+    const noQ = makeEvent('question.asked', {
+      sessionID: CHILD_Q_ID,
+      id: 'que_child_noq'
+    })
+    expect(mapEvent(noId, SESSION_ID, new Map(), START_TIME, { value: 0 }, childSessions).kind).toBe('ignore')
+    expect(mapEvent(noQ, SESSION_ID, new Map(), START_TIME, { value: 0 }, childSessions).kind).toBe('ignore')
+  })
+
+  it('child question.asked from UNREGISTERED session → ignore (foreign session filter)', () => {
+    // A question.asked from a session not in childSessions is treated as a foreign
+    // session and ignored before handleChildEvent is ever reached.
+    const childSessions = new Map([[CHILD_Q_ID, PARENT_Q_CALL]])
+    const ev = makeEvent('question.asked', {
+      sessionID: 'ses_UNREGISTERED',
+      id: 'que_unregistered',
+      questions: [{ question: 'Q?', header: 'H', options: [] }],
+      tool: { callID: 'call_x' }
+    })
+    const out = mapEvent(ev, SESSION_ID, new Map(), START_TIME, { value: 0 }, childSessions)
+    expect(out.kind).toBe('ignore')
+  })
+
+  it('own-session question.asked regression — still returns correct approval (helper shared, behavior unchanged)', () => {
+    // Guard: extracting buildQuestionApproval must not change the own-session path.
+    // Re-runs the key assertions from the Phase 8b test suite to catch helper drift.
+    const ev = makeEvent('question.asked', {
+      sessionID: SESSION_ID,
+      id: 'que_own_regression',
+      questions: [
+        {
+          question: 'Which language?',
+          header: 'Language',
+          options: [{ label: 'TypeScript', description: 'TS' }],
+          multiple: false
+        }
+      ],
+      tool: { callID: 'call_own_q' }
+    })
+    const out = mapEvent(ev, SESSION_ID, new Map(), START_TIME, { value: 0 })
+    expect(out.kind).toBe('approval')
+    if (out.kind !== 'approval') throw new Error('expected approval')
+    expect(out.approval.requestId).toBe('que_own_regression')
+    expect(out.approval.toolName).toBe('AskUserQuestion')
+    expect(out.approval.toolUseId).toBe('call_own_q')
+    const input = out.approval.input as { questions: Array<{ question: string; header: string; multiSelect: boolean }> }
+    expect(input.questions).toHaveLength(1)
+    expect(input.questions[0].question).toBe('Which language?')
+    expect(input.questions[0].multiSelect).toBe(false)
+  })
+})

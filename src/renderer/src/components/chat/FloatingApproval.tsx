@@ -1,7 +1,8 @@
 import { useState } from 'react'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
-import type { ApprovalDecision, PendingApproval } from '../../../../shared/types'
+import type { ApprovalDecision, ContentBlock, PendingApproval } from '../../../../shared/types'
 import { AlwaysAllowSection } from './PermissionSuggestions'
+import { AskUserQuestionBlock } from './AskUserQuestionBlock/AskUserQuestionBlock'
 
 // ---------------------------------------------------------------------------
 // View layer — pure render, zero business logic
@@ -260,6 +261,27 @@ function ApprovalCard({ approval }: { approval: PendingApproval }): React.JSX.El
   )
 }
 
+type ToolUseBlock = Extract<ContentBlock, { type: 'tool_use' }>
+
+/**
+ * Renders an unmatched AskUserQuestion approval as a floating interactive
+ * question card. Used for child (subagent) questions whose callID is not in
+ * the main message blocks, so they cannot be rendered inline.
+ *
+ * Builds a synthetic ToolUseBlock from the approval's input so that
+ * AskUserQuestionBlock can read toolInput.questions. Submit / dismiss still
+ * go through the approval's requestId via respondApproval.
+ */
+function FloatingQuestionCard({ approval }: { approval: PendingApproval }): React.JSX.Element {
+  const synthetic: ToolUseBlock = {
+    type: 'tool_use',
+    toolUseId: approval.toolUseId ?? approval.requestId,
+    toolName: 'AskUserQuestion',
+    toolInput: approval.input as Record<string, unknown>
+  }
+  return <AskUserQuestionBlock block={synthetic} approval={approval} />
+}
+
 export function FloatingApproval(): React.JSX.Element | null {
   const unmatched = useUnmatchedApprovals()
 
@@ -267,9 +289,13 @@ export function FloatingApproval(): React.JSX.Element | null {
 
   return (
     <div className="absolute bottom-32 left-1/2 -translate-x-1/2 z-20 w-full max-w-[500px] px-4 flex flex-col gap-2 pointer-events-auto">
-      {unmatched.map((approval) => (
-        <ApprovalCard key={approval.requestId} approval={approval} />
-      ))}
+      {unmatched.map((approval) =>
+        approval.toolName === 'AskUserQuestion' ? (
+          <FloatingQuestionCard key={approval.requestId} approval={approval} />
+        ) : (
+          <ApprovalCard key={approval.requestId} approval={approval} />
+        )
+      )}
     </div>
   )
 }

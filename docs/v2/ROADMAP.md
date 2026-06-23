@@ -71,7 +71,6 @@ Every item below was re-verified against current code on 2026-06-23. Status lege
 
 | # | Item | Risk | Area | Effort |
 | --- | --- | --- | --- | --- |
-| 1 | opencode subagent **questions** hang the turn → surface via floating card | 🔴 | opencode mapper + renderer | M |
 | 2 | opencode **401 re-login** card parity (hint-only today) | 🟠 | opencode auth UI | M |
 | 3 | **Cost display** not gated on `Account.billingType` (hardcoded on) | 🟠 | InputBox / metering | S |
 | 4 | opencode hosted-tools plugin installs **globally** | 🟠 | opencode plugin | S–M |
@@ -88,74 +87,13 @@ Every item below was re-verified against current code on 2026-06-23. Status lege
 | 15 | Consolidate opencode `/event` to **one subscription per server** | ⚪ | opencode transport | S |
 | 16 | Open the **V2 PR stack** (process, not code) | ⚪ | process | — |
 
+> ✅ **#1 shipped 2026-06-23** (`v2-followup-subagent-questions`) — opencode subagent questions now
+> surface as floating `AskUserQuestion` cards; see *Verified resolved*. #1 is retired as a stable ID
+> (the remaining rows are **not** renumbered).
+>
 > Background/detached opencode subagents are **not** listed: opencode itself gates them behind
 > `OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS` (`tool/task.ts:98-102`), so it's upstream-experimental,
 > not our deferral. Revisit only if opencode promotes it.
-
----
-
-### 1 — opencode subagent questions hang the turn (surface via floating card) 🔴
-
-**What.** An opencode **subagent** (a `task` child session) can call the `question` tool. ClaudeUI
-drops the resulting child `question.asked`: `handleChildEvent` (`src/main/opencode/event-mapper.ts:406-589`)
-has cases for child `message.part.{delta,updated}`, `message.updated`, `session.idle`, `session.error`,
-and (since 8e) `permission.asked`, but **none for `question.asked`** → it falls through to
-`default → ignore`. The child fiber then blocks indefinitely and the synchronous parent turn hangs
-until cancelled.
-
-**Confirmed mechanism** (verified against `D:\WorkPlace\opencode-src` v1.17.9):
-- The `question` tool is in **every** session's toolset, subagents included. It's gated once,
-  instance-wide, by `questionEnabled` (`tool/registry.ts:196`) — ON for ClaudeUI (8b own-session
-  questions prove it; same flag/instance). The per-agent filter `registry.tools({agent})`
-  (`tool/registry.ts:267-279`) gates only by model/provider and **never consults the agent**.
-- It **can't be suppressed via permissions**: the tool calls `Question.Service.ask()` directly
-  (`tool/question.ts:24`), bypassing the permission-gated `ctx.ask()`; `task.ts`'s `childToolDenies`
-  (`tool/task.ts:129-141`) doesn't list `question` anyway, and `deriveSubagentSessionPermission` only
-  copies parent *deny* rules.
-- `Question.ask` publishes `question.asked` then blocks on `Deferred.await` until reply/reject
-  (`question/index.ts:170-177`); a foreground child task is awaited synchronously by the parent
-  (`tool/task.ts:303-321`). Child blocked → parent turn hung. **Identical shape to the 8e permission
-  hang.** Low-probability (model-dependent; subagents rarely ask), severe-impact (hard turn-hang).
-
-**Fix (decided): surface the child question in the floating layer (opencode special case).** Subagent
-questions are honored, not defused. Three coordinated changes, all reusing existing machinery:
-- **Mapper** (`event-mapper.ts handleChildEvent`): add a `case 'question.asked'` that, for a *registered
-  child* session, builds the SAME approval as the own-session case (`event-mapper.ts:354-378`) —
-  `toolName:'AskUserQuestion'`, `toolUseId = tool?.callID` (the child question tool's callID),
-  `input:{questions}` — and returns `{kind:'approval', approval}`. Unregistered/foreign session → ignore.
-- **Dispatch** (`OpencodeSession`): the `'approval'` case already stores `pendingQuestions[requestId]`
-  and emits `session:approval-request` (`OpencodeSession.ts:535-545`); let child questions through. The
-  reply path is unchanged — `resolveApproval` routes `AskUserQuestion → replyQuestion(requestId, answers)`
-  / reject (`:664-718`), and opencode keys replies by `requestId` **globally** (no child handle).
-- **Renderer** (floating layer): a child question's `toolUseId` lives in the subagent thread, not the
-  main messages, so it arrives **unmatched** → the floating layer. Branch it: when
-  `approval.toolName === 'AskUserQuestion'`, render `AskUserQuestionBlock` (options UI + reply) instead
-  of the permission `ApprovalCardView`. Own-session questions stay *matched* → render inline, unaffected;
-  only child (unmatched) questions float. (Bonus: this upgrades any other unmatched-question edge case
-  from the degraded permission card to the real question UI.)
-
-**Why floating, not inline.** A blocking prompt must be visible; the subagent thread
-(TaskCard/TaskDetailPanel) can be collapsed and the question missed → turn re-hangs. Floating mirrors how
-8e child *permissions* already surface. On dismiss/deny → `resolveApproval` rejects the question (child
-turn fails cleanly), so there's still no hang.
-
-**Definition of done.**
-- `handleChildEvent` surfaces a registered child's `question.asked` as an `AskUserQuestion` approval
-  (child callID); unregistered → ignore; the own-session question path (8b) is untouched.
-- The floating layer renders `AskUserQuestionBlock` for `AskUserQuestion` approvals (options + reply);
-  permission approvals still render the permission card.
-- Answering → `replyQuestion(requestId, …)` (answers mapped in question order); dismiss/deny → question
-  reject; the parent turn unblocks either way.
-- Tests (mocked): child `question.asked` (registered) → approval with `toolName:'AskUserQuestion'` +
-  child callID; floating layer renders the question UI for it; reply maps answers in order via
-  `replyQuestion`; reject on dismiss; unregistered child → ignore; own-session questions still inline.
-- Live drive: a subagent prompted to ask surfaces a floating question; answering continues the subagent,
-  dismissing fails it cleanly — no hang either way.
-
-**References.** opencode `tool/question.ts`, `question/index.ts`, `tool/registry.ts:196,267-279`,
-`tool/task.ts:303-321`; ClaudeUI `event-mapper.ts:354-378` (own question) `:406-589` (handleChildEvent),
-`OpencodeSession.ts:535-545,664-718` (dispatch + reply), `FloatingApproval.tsx`,
-`AskUserQuestionBlock.tsx`; `phase-8b/8e`.
 
 ---
 
@@ -464,6 +402,11 @@ squash/integration strategy for landing the stack. Not code — a process decisi
 Prior session inventories (pre-Phase-8/9) listed these as deferred; the 2026-06-23 sweep confirms they
 shipped. Recorded here so they're not re-raised:
 
+- **opencode subagent questions surfaced** (was ROADMAP #1 🔴, shipped 2026-06-23) — a child
+  `question.asked` is mapped to an `AskUserQuestion` approval under the **child** tool's callID and
+  rendered as a floating `AskUserQuestionBlock`; answering replies via `replyQuestion(requestId)`,
+  dismissing rejects — fixing the subagent-question turn-hang (same class as the 8e permission hang).
+  Spec: `docs/v2/followup-subagent-questions.md`.
 - **opencode interaction caps** — `steer`, `queue`, `slashCommands`, `skills`, `subagents` are all
   `true` (`model-capabilities.ts`); built in Phases 8a (commands/skills), 8c (queue/steer), 8d
   (subagents). The old "all false in 5b" note is stale.

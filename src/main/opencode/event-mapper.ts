@@ -361,21 +361,7 @@ function handleOwnEvent(
       const rawQuestions = props.questions as QuestionInfo[] | undefined
       const tool = props.tool as { messageID?: string; callID?: string } | undefined
       if (!id || !rawQuestions) return { kind: 'ignore' }
-
-      const questions: AskUserQuestion[] = rawQuestions.map((q) => ({
-        question: q.question,
-        header: q.header,
-        options: (q.options ?? []).map((o) => ({ label: o.label, description: o.description })),
-        multiSelect: !!q.multiple
-      }))
-
-      const approval: PendingApproval = {
-        requestId: id,
-        toolUseId: tool?.callID,
-        toolName: 'AskUserQuestion',
-        input: { questions }
-      }
-      return { kind: 'approval', approval }
+      return buildQuestionApproval(id, rawQuestions, tool?.callID)
     }
 
     case 'question.replied':
@@ -571,6 +557,26 @@ function handleChildEvent(
       return { kind: 'approval', approval }
     }
 
+    case 'question.asked': {
+      // A child subagent called the `question` tool. Surface it as a PendingApproval
+      // so the user can answer it in the floating layer — otherwise the child fiber
+      // stays suspended and the synchronous parent turn hangs.
+      //
+      // Key differences from the own-session question.asked case:
+      //   1. toolUseId = tool?.callID (THE CHILD TOOL'S own callID, NOT the parent
+      //      task part's toolUseId stored in `toolUseId` above). This keeps the
+      //      card unmatched in FloatingApproval's filter — the child callID only
+      //      appears inside subagent blocks, not the main assistant blocks.
+      //   2. No `suggestions` field — question approvals never carry suggestions.
+      // Everything else is shared via buildQuestionApproval.
+      const id = props.id as string | undefined
+      const rawQuestions = props.questions as QuestionInfo[] | undefined
+      const tool = props.tool as { messageID?: string; callID?: string } | undefined
+      if (!id || !rawQuestions) return { kind: 'ignore' }
+      // Use tool?.callID (child question tool's callID), not the parent `toolUseId`.
+      return buildQuestionApproval(id, rawQuestions, tool?.callID)
+    }
+
     case 'session.error': {
       // Child session error → task-notification with status:'failed'.
       const notification: import('../../shared/types').TaskNotification = {
@@ -586,6 +592,36 @@ function handleChildEvent(
     default:
       return { kind: 'ignore' }
   }
+}
+
+/**
+ * Build a {kind:'approval'} output for a question.asked event (own-session or child).
+ *
+ * Shared by both handleOwnEvent and handleChildEvent to keep the QuestionInfo[]→
+ * AskUserQuestion[] mapping and PendingApproval construction in one place.
+ *
+ * @param id        The question request id (props.id)
+ * @param rawQuestions The raw QuestionInfo array from the event
+ * @param callID    The tool callID to use as toolUseId (own or child question tool's callID)
+ */
+function buildQuestionApproval(
+  id: string,
+  rawQuestions: QuestionInfo[],
+  callID: string | undefined
+): MapperOutput {
+  const questions: AskUserQuestion[] = rawQuestions.map((q) => ({
+    question: q.question,
+    header: q.header,
+    options: (q.options ?? []).map((o) => ({ label: o.label, description: o.description })),
+    multiSelect: !!q.multiple
+  }))
+  const approval: PendingApproval = {
+    requestId: id,
+    toolUseId: callID,
+    toolName: 'AskUserQuestion',
+    input: { questions }
+  }
+  return { kind: 'approval', approval }
 }
 
 /** Get-or-create the accumulator for a messageId. */

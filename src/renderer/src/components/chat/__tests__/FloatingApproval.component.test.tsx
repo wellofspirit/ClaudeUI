@@ -548,3 +548,111 @@ describe('FloatingApproval "Allow for session" button', () => {
     expect(screen.getByText('Deny')).toBeInTheDocument()
   })
 })
+
+// ---------------------------------------------------------------------------
+// AskUserQuestion floating card (child subagent question hang-fix)
+//
+// An unmatched AskUserQuestion approval must render the question UI (not
+// ApprovalCard), and submit/dismiss must call respondApproval correctly.
+// A non-question approval must still render ApprovalCard.
+// ---------------------------------------------------------------------------
+
+describe('FloatingApproval — AskUserQuestion floating card (child question)', () => {
+  const ROUTE = 'route-float-q'
+
+  function makeQuestionApproval(requestId = 'req-q-float'): PendingApproval {
+    return {
+      requestId,
+      toolName: 'AskUserQuestion',
+      toolUseId: 'child_q_call_float',
+      input: {
+        questions: [
+          {
+            question: 'Pick one',
+            header: 'Choice',
+            options: [{ label: 'Option A', description: '' }, { label: 'Option B', description: '' }],
+            multiSelect: false
+          }
+        ]
+      }
+    }
+  }
+
+  function setup(overrides?: Partial<PendingApproval>): PendingApproval {
+    useSessionStore.getState().createNewSession(ROUTE, '/test')
+    useSessionStore.setState({ activeSessionId: ROUTE })
+    const approval = makeQuestionApproval()
+    const merged = { ...approval, ...overrides }
+    useSessionStore.getState().addPendingApproval(ROUTE, merged)
+    return merged
+  }
+
+  it('renders question UI (Question label) for an AskUserQuestion approval, NOT ApprovalCard', () => {
+    setup()
+    render(<FloatingApproval />)
+    // AskUserQuestionBlockView renders a "Question" heading — not "Permission" or "Allow"/"Deny"
+    expect(screen.getByText('Question')).toBeInTheDocument()
+    // ApprovalCard's "Permission" label must NOT appear
+    expect(screen.queryByText('Permission')).toBeNull()
+  })
+
+  it('options are visible in the rendered question card', () => {
+    setup()
+    render(<FloatingApproval />)
+    expect(screen.getByText('Option A')).toBeInTheDocument()
+    expect(screen.getByText('Option B')).toBeInTheDocument()
+  })
+
+  it('submitting an answer calls respondApproval(allow, answers) and removes approval', async () => {
+    const approval = setup()
+    render(<FloatingApproval />)
+
+    // Select Option A
+    await act(async () => {
+      fireEvent.click(screen.getByText('Option A'))
+    })
+
+    // Click Submit
+    await act(async () => {
+      fireEvent.click(screen.getByText('Submit'))
+    })
+
+    expect(lastApprovalResponse).toEqual({
+      routingId: ROUTE,
+      requestId: approval.requestId,
+      decision: 'allow',
+      answers: { 'Pick one': 'Option A' },
+      suggestions: undefined
+    })
+    expect(useSessionStore.getState().sessions[ROUTE].pendingApprovals).toHaveLength(0)
+  })
+
+  it('clicking Dismiss calls respondApproval(deny) and removes approval', async () => {
+    const approval = setup()
+    render(<FloatingApproval />)
+
+    await act(async () => {
+      fireEvent.click(screen.getByText('Dismiss'))
+    })
+
+    expect(lastApprovalResponse).toEqual({
+      routingId: ROUTE,
+      requestId: approval.requestId,
+      decision: 'deny',
+      answers: undefined,
+      suggestions: undefined
+    })
+    expect(useSessionStore.getState().sessions[ROUTE].pendingApprovals).toHaveLength(0)
+  })
+
+  it('a permission approval still renders ApprovalCard (Allow/Deny buttons, no Question label)', () => {
+    useSessionStore.getState().createNewSession(ROUTE, '/test')
+    useSessionStore.setState({ activeSessionId: ROUTE })
+    const permApproval = makePendingApproval({ toolName: 'Bash', input: { command: 'ls' } })
+    useSessionStore.getState().addPendingApproval(ROUTE, permApproval)
+    render(<FloatingApproval />)
+    expect(screen.getByText('Allow')).toBeInTheDocument()
+    expect(screen.getByText('Deny')).toBeInTheDocument()
+    expect(screen.queryByText('Question')).toBeNull()
+  })
+})

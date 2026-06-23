@@ -2496,3 +2496,164 @@ describe('OpencodeSession — Phase 9a: meter subagent under child model', () =>
     session.dispose()
   })
 })
+
+// ---------------------------------------------------------------------------
+// Child question.asked dispatch (floating AskUserQuestion hang-fix)
+//
+// A registered child subagent calls the `question` tool → question.asked emitted
+// under child sessionId → mapper returns {kind:'approval', toolName:'AskUserQuestion'}
+// → dispatchMapperOutput stores pendingQuestions + emits session:approval-request.
+// resolveApproval(requestId, 'allow', answers) → replyQuestion with mapped answers.
+// resolveApproval(requestId, 'deny') → rejectQuestion.
+// Full/auto mode: child question still goes to the human (never the classifier).
+// ---------------------------------------------------------------------------
+
+describe('OpencodeSession — child question.asked dispatch (floating AskUserQuestion)', () => {
+  const PARENT_SES = 'ses_cq_parent'
+  const CHILD_SES = 'ses_cq_child'
+  const TASK_CALL_ID = 'call_task_cq'
+  const CHILD_Q_CALL = 'child_q_call_1'
+  const QUESTION_ID = 'que_child_floating_1'
+
+  beforeEach(() => {
+    setupMocks()
+    closeDb()
+  })
+  afterEach(() => closeDb())
+
+  /** Feed a stream that registers a child, emits a child question.asked, and
+   *  keeps the parent turn open (never closes — child question blocks the fiber). */
+  function feedChildQuestion(): void {
+    mockCreateSession.mockResolvedValue({ id: PARENT_SES })
+    mockSubscribeEvents.mockImplementation(async function* () {
+      // Register child via own-session task part
+      yield {
+        id: 'eq1', type: 'message.part.updated',
+        properties: {
+          sessionID: PARENT_SES,
+          part: {
+            id: 'p_task_cq', messageID: 'msg_parent_cq',
+            type: 'tool', tool: 'task', callID: TASK_CALL_ID,
+            state: { status: 'running', input: {}, metadata: { sessionId: CHILD_SES } }
+          }
+        }
+      } as OpencodeEvent
+      // Child question.asked — the hang trigger
+      yield {
+        id: 'eq2', type: 'question.asked',
+        properties: {
+          sessionID: CHILD_SES,
+          id: QUESTION_ID,
+          questions: [
+            {
+              question: 'Which strategy?',
+              header: 'Strategy',
+              options: [{ label: 'A', description: 'Fast' }, { label: 'B', description: 'Safe' }],
+              multiple: false
+            }
+          ],
+          tool: { callID: CHILD_Q_CALL }
+        }
+      } as OpencodeEvent
+      // Hang the stream (blocked waiting for reply) — simulates the fiber suspension
+      await new Promise(() => {})
+    })
+  }
+
+  it('child question.asked → session:approval-request emitted with toolName AskUserQuestion', async () => {
+    feedChildQuestion()
+    const win = new MockWindow() as unknown as BrowserWindow
+    const session = new OpencodeSession('r_cq_dispatch', win, '/tmp')
+    await session.run('go')
+
+    await vi.waitFor(() => {
+      const sent = (win as unknown as MockWindow).webContents.send.mock.calls.some(
+        (c) => c[0] === 'session:approval-request' && c[2]?.toolName === 'AskUserQuestion'
+      )
+      expect(sent).toBe(true)
+    })
+
+    // Verify the approval carries the child question callID as toolUseId
+    const calls = (win as unknown as MockWindow).webContents.send.mock.calls
+    const approvalCall = calls.find(
+      (c) => c[0] === 'session:approval-request' && c[2]?.toolName === 'AskUserQuestion'
+    )
+    expect(approvalCall![2].requestId).toBe(QUESTION_ID)
+    expect(approvalCall![2].toolUseId).toBe(CHILD_Q_CALL)
+    expect(approvalCall![2].toolUseId).not.toBe(TASK_CALL_ID)
+
+    session.dispose()
+  })
+
+  it('resolveApproval allow → replyQuestion with mapped answers (not replyPermission)', async () => {
+    feedChildQuestion()
+    const win = new MockWindow() as unknown as BrowserWindow
+    const session = new OpencodeSession('r_cq_allow', win, '/tmp')
+    await session.run('go')
+
+    // Wait for the approval to be emitted
+    await vi.waitFor(() => {
+      const sent = (win as unknown as MockWindow).webContents.send.mock.calls.some(
+        (c) => c[0] === 'session:approval-request' && c[2]?.toolName === 'AskUserQuestion'
+      )
+      expect(sent).toBe(true)
+    })
+
+    // Reply with answers keyed by question text (mirrors AskUserQuestionBlock View.tsx keyOf)
+    session.resolveApproval(QUESTION_ID, 'allow', { 'Which strategy?': 'A' })
+
+    await vi.waitFor(() => expect(mockReplyQuestion).toHaveBeenCalledWith(
+      QUESTION_ID,
+      [['A']]
+    ))
+    expect(mockReplyPermission).not.toHaveBeenCalled()
+    expect(mockRejectQuestion).not.toHaveBeenCalled()
+
+    session.dispose()
+  })
+
+  it('resolveApproval deny → rejectQuestion (not replyPermission)', async () => {
+    feedChildQuestion()
+    const win = new MockWindow() as unknown as BrowserWindow
+    const session = new OpencodeSession('r_cq_deny', win, '/tmp')
+    await session.run('go')
+
+    await vi.waitFor(() => {
+      const sent = (win as unknown as MockWindow).webContents.send.mock.calls.some(
+        (c) => c[0] === 'session:approval-request' && c[2]?.toolName === 'AskUserQuestion'
+      )
+      expect(sent).toBe(true)
+    })
+
+    session.resolveApproval(QUESTION_ID, 'deny')
+
+    await vi.waitFor(() => expect(mockRejectQuestion).toHaveBeenCalledWith(QUESTION_ID))
+    expect(mockReplyQuestion).not.toHaveBeenCalled()
+    expect(mockReplyPermission).not.toHaveBeenCalled()
+
+    session.dispose()
+  })
+
+  it('full/auto mode: child question still goes to the human (NOT the auto-mode classifier)', async () => {
+    // Enable auto-mode — permissions would go to the classifier, questions must not.
+    mockLoadEngineConfig.mockReturnValue({ autoMode: { enabled: true, twoStageMode: 'fast' } })
+    feedChildQuestion()
+    const win = new MockWindow() as unknown as BrowserWindow
+    const session = new OpencodeSession('r_cq_auto', win, '/tmp', undefined, undefined, 'full')
+    await session.run('go')
+
+    await vi.waitFor(() => {
+      const sent = (win as unknown as MockWindow).webContents.send.mock.calls.some(
+        (c) => c[0] === 'session:approval-request' && c[2]?.toolName === 'AskUserQuestion'
+      )
+      expect(sent).toBe(true)
+    })
+
+    // The LLM judge (mockPrompt) must NOT have been called for a question
+    expect(mockPrompt).not.toHaveBeenCalled()
+    // Nor should replyPermission have been called
+    expect(mockReplyPermission).not.toHaveBeenCalled()
+
+    session.dispose()
+  })
+})
