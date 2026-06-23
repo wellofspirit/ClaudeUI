@@ -165,7 +165,7 @@ try {
     const finalHasHello = /hello world/i.test(finalHtml)
 
     if (responseFound || finalHasHello) {
-      const snippet = finalHtml.match(/hello world/i)?.[0]
+      const _snippet = finalHtml.match(/hello world/i)?.[0]
       scenarioA = { status: 'VERIFIED', detail: `"hello world" found in DOM. responseFound=${responseFound}` }
     } else {
       // Capture what's in the chat area
@@ -271,7 +271,7 @@ try {
         const hasBtwMarker = /btw|side.question|by.the.way/i.test(html)
         const btwCards = await win.locator('[class*="btw"], [class*="Btw"], [class*="BtwCard"]').count()
         // Look for the answer "4" in a btw context, or just look for BtwCard text
-        const answerText = await win.locator('text=/\\b4\\b/').count()
+        const _answerText = await win.locator('text=/\\b4\\b/').count()
         console.log(`[C] t+${(i+1)*2}s: hasBtwMarker=${hasBtwMarker}, btwCards=${btwCards}`)
         if (hasBtwMarker || btwCards > 0) {
           btwFound = true

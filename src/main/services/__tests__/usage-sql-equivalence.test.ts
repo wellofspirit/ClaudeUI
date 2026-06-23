@@ -14,14 +14,18 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { randomUUID } from 'node:crypto'
 import {
   closeDb,
   insertUsageEvents,
   getUsageEventsSince,
+  getWindowSamples,
+  recordWindowSample,
   upsertDailyUsage,
   getAllDailyUsage,
   type UsageEventRow,
-  type DailyUsageRow
+  type DailyUsageRow,
+  type WindowSampleRow
 } from '../db'
 import {
   groupEntriesIntoBlocks,
@@ -461,5 +465,265 @@ describe('WLS projection preserved across the SQL block-token round-trip', () =>
     expect(computeProjectionWLS(samplesSql, sqlTok, cost, NOW)).toEqual(
       computeProjectionWLS(samples, jsonlTok, cost, NOW)
     )
+  })
+})
+
+// ===========================================================================
+// Phase 9a — DB-sourced WLS projection (usage_window_sample + cumTokensAt)
+//
+// The BlockUsageService.buildDbProjectionSamples method reconstructs
+// ProjectionSample[] from (a) usage_window_sample rows for the active window
+// and (b) cumulative token counts from the current block's ParsedEntries.
+// These tests verify:
+//   1. The DB-sourced samples produce the same WLS result as in-memory samples
+//      when the token-at-ts reconstruction matches (deterministic fixture).
+//   2. A projection is produced when the in-memory ring is empty but the DB has
+//      samples (simulates a cold restart).
+// ===========================================================================
+
+const WINDOW_END_9A = BASE + 5 * MS_PER_HOUR
+
+/**
+ * Simulate buildDbProjectionSamples inline (mirrors the BlockUsageService private method).
+ * Takes window samples from the DB for `canonicalEnd === windowEnd` and reconstructs
+ * cumTokensAt(ts) from the CURRENT block's entries (scoped to `>= blockStart`, sorted by
+ * timestamp). Entries before blockStart belong to prior blocks and MUST be excluded —
+ * the through-origin WLS would otherwise inflate the projected capacity.
+ */
+function buildProjectionSamplesFromDb(
+  accountUuid: string,
+  windowEnd: number,
+  blockStart: number,
+  blockEntries: ParsedEntry[]
+): ProjectionSample[] {
+  const dbSamples = getWindowSamples(accountUuid).filter((s) => s.canonicalEnd === windowEnd)
+  if (dbSamples.length === 0) return []
+  const sorted = blockEntries
+    .filter((e) => e.timestamp >= blockStart)
+    .sort((a, b) => a.timestamp - b.timestamp)
+  const cumTokensAt = (ts: number): number => {
+    let total = 0
+    for (const e of sorted) {
+      if (e.timestamp > ts) break
+      total += e.inputTokens + e.outputTokens + e.cacheCreationTokens + e.cacheReadTokens
+    }
+    return total
+  }
+  return dbSamples.map((s) => ({
+    timestamp: s.ts,
+    tokens: cumTokensAt(s.ts),
+    apiPercent: s.usedPercent
+  }))
+}
+
+describe('Phase 9a — DB-sourced WLS projection', () => {
+  const ACCOUNT_UUID = 'test-uuid-9a'
+
+  beforeEach(() => closeDb())
+  afterEach(() => closeDb())
+
+  it('DB-sourced samples produce identical WLS result to in-memory samples (token-at-ts match)', () => {
+    // Build a set of block entries
+    const blockEntries: ParsedEntry[] = [
+      entry(BASE, 'claude-sonnet-4-6', 10_000, 5_000, 2_000, 1_000, 0.12, 'e1'),
+      entry(BASE + 30 * MS_PER_MINUTE, 'claude-sonnet-4-6', 20_000, 8_000, 4_000, 1_500, 0.24, 'e2'),
+      entry(BASE + 60 * MS_PER_MINUTE, 'claude-opus-4-8', 5_000, 3_000, 500, 0, 0.5, 'e3')
+    ]
+
+    // Compute cumulative tokens at each timestamp (exactly what buildDbProjectionSamples does)
+    function cumAt(ts: number): number {
+      let total = 0
+      for (const e of blockEntries) {
+        if (e.timestamp > ts) break
+        total += e.inputTokens + e.outputTokens + e.cacheCreationTokens + e.cacheReadTokens
+      }
+      return total
+    }
+
+    // Build in-memory samples (what the ring buffer would hold)
+    const inMemorySamples: ProjectionSample[] = [
+      { timestamp: BASE, tokens: cumAt(BASE), apiPercent: 5 },
+      { timestamp: BASE + 30 * MS_PER_MINUTE, tokens: cumAt(BASE + 30 * MS_PER_MINUTE), apiPercent: 11 },
+      { timestamp: BASE + 60 * MS_PER_MINUTE, tokens: cumAt(BASE + 60 * MS_PER_MINUTE), apiPercent: 16 }
+    ]
+
+    // Write matching window samples to the DB
+    for (const s of inMemorySamples) {
+      recordWindowSample({
+        id: randomUUID(),
+        ts: s.timestamp,
+        accountUuid: ACCOUNT_UUID,
+        usedPercent: s.apiPercent,
+        canonicalEnd: WINDOW_END_9A
+      } as WindowSampleRow)
+    }
+
+    // Reconstruct samples from DB (block starts at BASE)
+    const dbSamples = buildProjectionSamplesFromDb(ACCOUNT_UUID, WINDOW_END_9A, BASE, blockEntries)
+
+    // DB-reconstructed samples must match in-memory samples
+    expect(dbSamples).toHaveLength(inMemorySamples.length)
+    for (let i = 0; i < inMemorySamples.length; i++) {
+      expect(dbSamples[i].tokens).toBe(inMemorySamples[i].tokens)
+      expect(dbSamples[i].apiPercent).toBe(inMemorySamples[i].apiPercent)
+    }
+
+    // WLS projection must be identical
+    const blockTokens = cumAt(BASE + 60 * MS_PER_MINUTE)
+    const cost = 0.86
+    const now = BASE + 90 * MS_PER_MINUTE
+    expect(computeProjectionWLS(dbSamples, blockTokens, cost, now)).toEqual(
+      computeProjectionWLS(inMemorySamples, blockTokens, cost, now)
+    )
+  })
+
+  it('projection produced when in-memory ring is empty but DB has samples (cold restart case)', () => {
+    // This simulates: app restarted, ring buffer is empty, but usage_window_sample
+    // was written before the restart and is present in the DB.
+    const blockEntries: ParsedEntry[] = [
+      entry(BASE, 'claude-sonnet-4-6', 10_000, 5_000, 0, 0, 0.1, 'r1'),
+      entry(BASE + 20 * MS_PER_MINUTE, 'claude-sonnet-4-6', 15_000, 7_000, 0, 0, 0.15, 'r2'),
+      entry(BASE + 40 * MS_PER_MINUTE, 'claude-opus-4-8', 8_000, 4_000, 0, 0, 0.2, 'r3')
+    ]
+
+    function cumAt(ts: number): number {
+      let total = 0
+      for (const e of blockEntries) {
+        if (e.timestamp > ts) break
+        total += e.inputTokens + e.outputTokens + e.cacheCreationTokens + e.cacheReadTokens
+      }
+      return total
+    }
+
+    // Write 3 window samples to the DB (enough for WLS regression)
+    const sampleTimes = [BASE, BASE + 20 * MS_PER_MINUTE, BASE + 40 * MS_PER_MINUTE]
+    const apiPercents = [5, 10, 15]
+    for (let i = 0; i < 3; i++) {
+      recordWindowSample({
+        id: randomUUID(),
+        ts: sampleTimes[i],
+        accountUuid: ACCOUNT_UUID,
+        usedPercent: apiPercents[i],
+        canonicalEnd: WINDOW_END_9A
+      } as WindowSampleRow)
+    }
+
+    // DB samples must be found even when the ring is empty (block starts at BASE)
+    const dbSamples = buildProjectionSamplesFromDb(ACCOUNT_UUID, WINDOW_END_9A, BASE, blockEntries)
+    expect(dbSamples.length).toBeGreaterThanOrEqual(3)
+
+    // Projection must be non-null (sufficient samples for regression)
+    const blockTokens = cumAt(BASE + 40 * MS_PER_MINUTE)
+    const cost = 0.45
+    const now = BASE + 90 * MS_PER_MINUTE
+    const proj = computeProjectionWLS(dbSamples, blockTokens, cost, now)
+    expect(proj).not.toBeNull()
+    expect(proj!.tokens).toBeGreaterThan(blockTokens)
+  })
+
+  it('cumTokensAt is scoped to the CURRENT block — prior blocks do NOT inflate the projection', () => {
+    // GUARD (Phase 9a review fix): viewEntries spans the FULL 7-day scan window
+    // across ALL blocks. buildDbProjectionSamples must scope to the current block
+    // (>= blockStart) so prior blocks' tokens don't leak into the through-origin
+    // WLS fit. A constant token offset C from earlier blocks inflates k = Σwtp/Σwpp
+    // and thus the projected window capacity.
+    //
+    // Fixture: a PRIOR block (~6h before) with large token counts, plus the CURRENT
+    // block. Window samples + projection are for the CURRENT block only.
+    const CURRENT_START = BASE
+    const PRIOR_START = BASE - 6 * MS_PER_HOUR // gap > 5h → a distinct earlier block
+
+    // Entries: 2 huge prior-block entries + 3 current-block entries.
+    const priorBlockEntries: ParsedEntry[] = [
+      entry(PRIOR_START, 'claude-opus-4-8', 500_000, 200_000, 0, 0, 5.0, 'prior1'),
+      entry(PRIOR_START + 30 * MS_PER_MINUTE, 'claude-opus-4-8', 400_000, 150_000, 0, 0, 4.0, 'prior2')
+    ]
+    const currentBlockEntries: ParsedEntry[] = [
+      entry(CURRENT_START, 'claude-sonnet-4-6', 10_000, 5_000, 0, 0, 0.1, 'cur1'),
+      entry(CURRENT_START + 20 * MS_PER_MINUTE, 'claude-sonnet-4-6', 15_000, 7_000, 0, 0, 0.15, 'cur2'),
+      entry(CURRENT_START + 40 * MS_PER_MINUTE, 'claude-opus-4-8', 8_000, 4_000, 0, 0, 0.2, 'cur3')
+    ]
+    // viewEntries = the FULL scan (both blocks), exactly as block-usage passes it.
+    const viewEntries = [...priorBlockEntries, ...currentBlockEntries]
+
+    // Window samples (current block only)
+    const sampleTimes = [CURRENT_START, CURRENT_START + 20 * MS_PER_MINUTE, CURRENT_START + 40 * MS_PER_MINUTE]
+    const apiPercents = [5, 10, 15]
+    for (let i = 0; i < 3; i++) {
+      recordWindowSample({
+        id: randomUUID(),
+        ts: sampleTimes[i],
+        accountUuid: ACCOUNT_UUID,
+        usedPercent: apiPercents[i],
+        canonicalEnd: WINDOW_END_9A
+      } as WindowSampleRow)
+    }
+
+    const now = CURRENT_START + 90 * MS_PER_MINUTE
+
+    // Expected (SCOPED): cumTokensAt over current-block entries only.
+    const scopedSamples = buildProjectionSamplesFromDb(ACCOUNT_UUID, WINDOW_END_9A, CURRENT_START, viewEntries)
+    // The first scoped sample's tokens must be the FIRST current entry only (15_000),
+    // NOT current + prior (which would be 15_000 + 1_250_000).
+    expect(scopedSamples[0].tokens).toBe(15_000)
+    const currentBlockTokens =
+      currentBlockEntries.reduce(
+        (acc, e) => acc + e.inputTokens + e.outputTokens + e.cacheCreationTokens + e.cacheReadTokens,
+        0
+      )
+    const scopedProj = computeProjectionWLS(scopedSamples, currentBlockTokens, 0.45, now)
+    expect(scopedProj).not.toBeNull()
+
+    // UNSCOPED (the pre-fix bug): cumTokensAt over the FULL viewEntries.
+    // Replicate the OLD unscoped reconstruction inline.
+    const sortedAll = [...viewEntries].sort((a, b) => a.timestamp - b.timestamp)
+    const cumAllAt = (ts: number): number => {
+      let total = 0
+      for (const e of sortedAll) {
+        if (e.timestamp > ts) break
+        total += e.inputTokens + e.outputTokens + e.cacheCreationTokens + e.cacheReadTokens
+      }
+      return total
+    }
+    const unscopedSamples: ProjectionSample[] = sampleTimes.map((ts, i) => ({
+      timestamp: ts,
+      tokens: cumAllAt(ts),
+      apiPercent: apiPercents[i]
+    }))
+    // The unscoped first sample includes the 1.25M prior-block tokens — the bug.
+    expect(unscopedSamples[0].tokens).toBe(1_250_000 + 15_000)
+    const unscopedProj = computeProjectionWLS(unscopedSamples, currentBlockTokens, 0.45, now)
+
+    // PROOF: the unscoped projection is grossly inflated vs the scoped one.
+    // (The prior-block offset pushes projected capacity far higher.)
+    expect(unscopedProj).not.toBeNull()
+    expect(unscopedProj!.tokens).toBeGreaterThan(scopedProj!.tokens * 5)
+  })
+
+  it('account-filter mismatch (samples for active account, no current-block entries) → no throw, null projection', () => {
+    // accept-with-note: when the user filters to an account != the active one, the
+    // window samples (keyed by the active account uuid) and the filtered viewEntries
+    // can mismatch. With no current-block entries surviving the filter, cumTokensAt
+    // returns 0 for every sample. This must NOT throw — computeWLS safely returns null
+    // (k=0 → maxTokens=0 < currentTok). Same safe-degrade as the in-memory ring.
+    for (let i = 0; i < 3; i++) {
+      recordWindowSample({
+        id: randomUUID(),
+        ts: BASE + i * 10 * MS_PER_MINUTE,
+        accountUuid: ACCOUNT_UUID,
+        usedPercent: 5 + i * 5,
+        canonicalEnd: WINDOW_END_9A
+      } as WindowSampleRow)
+    }
+
+    // viewEntries filtered to a DIFFERENT account → empty current-block slice.
+    const emptySlice: ParsedEntry[] = []
+    expect(() => {
+      const samples = buildProjectionSamplesFromDb(ACCOUNT_UUID, WINDOW_END_9A, BASE, emptySlice)
+      // All sample tokens are 0 (no entries to sum).
+      expect(samples.every((s) => s.tokens === 0)).toBe(true)
+      // blockTokens 0 → computeWLS short-circuits to null without throwing.
+      expect(computeProjectionWLS(samples, 0, 0, BASE + 90 * MS_PER_MINUTE)).toBeNull()
+    }).not.toThrow()
   })
 })

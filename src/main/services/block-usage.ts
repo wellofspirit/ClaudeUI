@@ -35,6 +35,7 @@ import {
 } from './usage-aggregation'
 import {
   getUsageEventsSince,
+  getWindowSamples,
   insertUsageEvents,
   upsertDailyUsage,
   seedDailyUsageIfAbsent,
@@ -752,9 +753,11 @@ export class BlockUsageService {
     const currentBlock = blocks.find((b) => b.isActive) ?? null
     const recentBlocks = blocks.filter((b) => !b.isActive && now - b.endTime < 48 * MS_PER_HOUR)
 
-    // Compute projection for the active block (paused while no window is known)
+    // Compute projection for the active block (paused while no window is known).
+    // Phase 9a: pass viewEntries so updateProjection can reconstruct cumTokensAt(ts)
+    // from the DB window samples (survives app restart).
     if (currentBlock) {
-      currentBlock.projectedUsage = this.updateProjection(currentBlock, currentWindowEnd, now)
+      currentBlock.projectedUsage = this.updateProjection(currentBlock, currentWindowEnd, now, viewEntries)
     }
 
     // Carry projections to newly completed blocks
@@ -1177,21 +1180,90 @@ export class BlockUsageService {
   // -------------------------------------------------------------------------
 
   /**
-   * Add a new sample to the projection buffer and compute the projected
-   * window capacity using weighted least squares regression.
+   * Build a ProjectionSample from DB window samples for the current block.
    *
-   * Model:   tokens = k × apiPercent   (proportional, through origin)
-   * Solve:   k = Σ(wᵢ·tᵢ·pᵢ) / Σ(wᵢ·pᵢ²)   (weighted least squares)
-   * Result:  projectedMax = k × 100
+   * Phase 9a: re-sources the WLS input from `usage_window_sample` (DB) instead of
+   * only the in-memory ring. This survives app restart since the DB persists across
+   * sessions.
    *
-   * Weights use exponential decay (half-life 5 min) so recent observations
-   * dominate while older ones still smooth out noise. When fewer than 3
-   * samples exist, falls back to the single most recent point.
+   * `cumTokensAt(ts)` reconstructs the CURRENT block's cumulative tokens at each
+   * sample timestamp — entries are scoped to `[blockStart, ts]`. This must NOT
+   * include tokens from prior blocks: the in-memory ring tracked
+   * `totalTokens(block.tokens)` (which resets to 0 at each block boundary), and the
+   * WLS fits `tokens = k·apiPercent` through the ORIGIN — a constant token offset
+   * from earlier blocks would inflate `k` (and the projected capacity) substantially.
+   *
+   * Note: recordWindowSampleFromUsage (usage-fetcher.ts) writes to the DB inside
+   * pushToRenderer BEFORE sending usage:data, so the freshest sample may lag one
+   * recalc cycle. This is acceptable per the drift decision.
+   *
+   * @param currentWindowEnd  Canonical end of the active 5h window.
+   * @param blockStart        Start of the current block — entries before this are excluded.
+   * @param blockEntries      ParsedEntries (may span multiple blocks) — scoped to the
+   *                          current block before computing cumTokensAt(sample.ts).
    */
+  private buildDbProjectionSamples(
+    currentWindowEnd: number,
+    blockStart: number,
+    blockEntries: ParsedEntry[]
+  ): AggProjectionSample[] {
+    const accountUuid = usageFetcher.getActiveAccountUuid()
+    if (!accountUuid) return []
+    try {
+      const dbSamples = getWindowSamples(accountUuid)
+      // Filter to samples for the current window only.
+      const windowSamples = dbSamples.filter((s) => s.canonicalEnd === currentWindowEnd)
+      if (windowSamples.length === 0) return []
+
+      // Scope to the CURRENT block (drop entries before blockStart) and sort by ts
+      // — entries from prior blocks must not leak into this block's cumulative count.
+      const blockOnly = blockEntries
+        .filter((e) => e.timestamp >= blockStart)
+        .sort((a, b) => a.timestamp - b.timestamp)
+
+      // Single prefix-sum pass: prefixTokens[i] = Σ tokens of blockOnly[0..i].
+      const tokensOf = (e: ParsedEntry): number =>
+        e.inputTokens + e.outputTokens + e.cacheCreationTokens + e.cacheReadTokens
+      const prefixTokens: number[] = []
+      let running = 0
+      for (const e of blockOnly) {
+        running += tokensOf(e)
+        prefixTokens.push(running)
+      }
+      // cumTokensAt(ts) = Σ tokens of block entries with timestamp ≤ ts (binary search
+      // for the last entry at or before ts, then read its prefix sum).
+      const cumTokensAt = (ts: number): number => {
+        let lo = 0
+        let hi = blockOnly.length - 1
+        let idx = -1
+        while (lo <= hi) {
+          const mid = (lo + hi) >> 1
+          if (blockOnly[mid].timestamp <= ts) {
+            idx = mid
+            lo = mid + 1
+          } else {
+            hi = mid - 1
+          }
+        }
+        return idx >= 0 ? prefixTokens[idx] : 0
+      }
+
+      return windowSamples.map((s) => ({
+        timestamp: s.ts,
+        tokens: cumTokensAt(s.ts),
+        apiPercent: s.usedPercent
+      }))
+    } catch (err) {
+      logger.debug('BlockUsage', `buildDbProjectionSamples failed: ${err}`)
+      return []
+    }
+  }
+
   private updateProjection(
     block: UsageBlock,
     currentWindowEnd: number | null,
-    now: number
+    now: number,
+    blockEntries: ParsedEntry[] = []
   ): UsageBlock['projectedUsage'] {
     const apiUsage = usageFetcher.getLastUsage()
     if (!apiUsage || apiUsage.error) return null
@@ -1220,7 +1292,7 @@ export class BlockUsageService {
     }
 
     // Don't add a sample if API data is stale or values are too small
-    if (apiAge > 5 * MS_PER_MINUTE) return this.computeProjectionWLS(block)
+    if (apiAge > 5 * MS_PER_MINUTE) return this.computeProjectionWLS(block, currentWindowEnd, blockEntries)
     if (apiPercent < MIN_API_PERCENT_FOR_SAMPLE || currentTok <= 0) return null
 
     // Deduplicate: skip if the latest sample has the same tokens AND percent
@@ -1239,24 +1311,42 @@ export class BlockUsageService {
       this.projectionSamples = this.projectionSamples.slice(-MAX_PROJECTION_SAMPLES)
     }
 
-    return this.computeProjectionWLS(block)
+    return this.computeProjectionWLS(block, currentWindowEnd, blockEntries)
   }
 
   /**
-   * Compute the projection from the sample buffer using WLS regression.
+   * Compute the projection from samples using WLS regression.
    *
    * Phase 7 Pass 2: the WLS MATH was extracted VERBATIM into
    * `usage-aggregation.ts` computeProjectionWLS (proven identical by the
-   * equivalence test). This method holds the SAME in-memory ring buffer
-   * (`projectionSamples`, {timestamp, tokens, apiPercent}) as before and
-   * delegates the math. The sample SOURCE is intentionally unchanged (the
-   * per-poll ring buffer) to preserve the projection byte-for-byte — see the
-   * Phase 7 note in updateProjection. `usage_window_sample` is populated for
-   * Pass-2 DB consumers but is not re-sourced into the live WLS here.
+   * equivalence test). This method delegates the math unchanged.
+   *
+   * Phase 9a: the sample SOURCE is now the DB (`usage_window_sample`) when
+   * available, with the in-memory ring as fallback when the DB has no samples
+   * for the current window (e.g. first boot before any poll has written to DB).
+   * Minor numerical drift vs the ring-only approach is accepted — see docs/v2/
+   * phase-9-usage-analytics.md §WLS projection.
    */
-  private computeProjectionWLS(block: UsageBlock): UsageBlock['projectedUsage'] {
+  private computeProjectionWLS(
+    block: UsageBlock,
+    currentWindowEnd?: number | null,
+    blockEntries: ParsedEntry[] = []
+  ): UsageBlock['projectedUsage'] {
+    let samples: AggProjectionSample[]
+
+    // Prefer DB samples (survive restart); fall back to in-memory ring when the
+    // DB has no samples for this window (e.g. first launch before any poll).
+    // Entries are scoped to this block (block.startTime) inside buildDbProjectionSamples
+    // so prior blocks' tokens don't inflate the through-origin WLS fit.
+    if (currentWindowEnd) {
+      const dbSamples = this.buildDbProjectionSamples(currentWindowEnd, block.startTime, blockEntries)
+      samples = dbSamples.length > 0 ? dbSamples : (this.projectionSamples as AggProjectionSample[])
+    } else {
+      samples = this.projectionSamples as AggProjectionSample[]
+    }
+
     return computeWLS(
-      this.projectionSamples as AggProjectionSample[],
+      samples,
       totalTokens(block.tokens),
       block.costUsd,
       Date.now()

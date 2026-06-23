@@ -270,6 +270,11 @@ export class UsageFetcher {
     return this.activeAccount
   }
 
+  /** The active account's UUID, or undefined if not yet known. */
+  getActiveAccountUuid(): string | undefined {
+    return this.activeAccount?.uuid
+  }
+
   // -------------------------------------------------------------------------
   // Account tracking
   // -------------------------------------------------------------------------

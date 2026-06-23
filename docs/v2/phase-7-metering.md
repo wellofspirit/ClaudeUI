@@ -118,13 +118,15 @@ Two review passes under one `v2-phase-7-metering` branch + one commit:
 External models.dev pricing fetch beyond the opt-in toggle/stub; richer per-engine dashboard polish
 beyond the per-engine breakdown; retiring the JSONL files (kept a release as fallback).
 
-**opencode subagent (task child-session) usage metering** (added Phase 8d, ADR-024): child/subagent
-token usage is intentionally **excluded** from the parent's `recordTurnUsage`/`sendMetering` (child
-accumulators are tagged `isChild` and skipped) so subagent tokens are never mis-attributed to the
-parent's model. Metering subagent usage *properly* means recording a per-child `usage_event` under the
-**child's own model** (which can differ from the parent — `task` part `metadata.model` / the child's
-`message.updated.info.model`) with the child sessionId. Deferred to a metering follow-up; this is the
-same state as pre-Phase-8 (child usage was never metered) so it's a reporting gap, not a regression.
+**opencode subagent (task child-session) usage metering** (added Phase 8d, ADR-024): **RESOLVED in
+Phase 9a.** Child/subagent token usage is now recorded as its own `usage_event` under the **child's
+own model** (`info.providerID` / `info.modelID` from the child `message.updated`) + child sessionId.
+`MessageAccumulator` was extended with `childSessionId` and `model` fields; `handleChildEvent`
+`message.updated` now captures both; `sumAccumulatorCosts` skips `isChild` accumulators (critical guard
+against child cost leaking into the parent turn's `totalCostUsd`); `recordTurnUsage` now meters child
+accumulators under their own model (skipping those with no `model` info rather than attributing to the
+parent). `sendMetering` continues to skip children intentionally — the live MeteringSnapshot is the
+parent turn's per-model meter; children are metered via `recordUsageEvent`, not the snapshot.
 
 ## Testing
 - Pass 1: DB migration + usage_event/window_sample repos (idempotent message_id dedup); pricing table

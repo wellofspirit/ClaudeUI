@@ -988,17 +988,18 @@ export class OpencodeSession extends BaseSession {
    * Record one usage_event per accumulated assistant message at turn end.
    * Called at session.idle so we have final cumulative token + cost state.
    * Failures are swallowed by recordUsageEvent — never breaks a turn.
+   *
+   * Phase 9a: child accumulators (isChild) are now also metered, but under the
+   * CHILD's own model + childSessionId — not the parent's. If a child accumulator
+   * has no model info, it is skipped (never attributed to the parent model).
    */
   private recordTurnUsage(): void {
     const parsed = parseModelString(this._model)
-    const account = opencodeAuthProvider.buildAccountRef(parsed.providerID)
+    const ownAccount = opencodeAuthProvider.buildAccountRef(parsed.providerID)
 
     for (const [messageId, acc] of this.accumulators) {
       // Only record assistant messages that have cost or token data
       if (acc.role === 'user' || acc.role === 'system') continue
-      // Skip subagent (task child-session) messages — their tokens belong to the
-      // child, not the parent model (Phase 8d). Subagent usage stays unmetered.
-      if (acc.isChild) continue
       if (!acc.cost && !acc.tokens) continue
       // Skip messages already recorded in a prior session.idle this session
       // (the DB dedups anyway; this avoids the redundant round-trip).
@@ -1006,24 +1007,54 @@ export class OpencodeSession extends BaseSession {
       this.recordedUsageMessageIds.add(messageId)
 
       const tokens = acc.tokens
-      recordUsageEvent({
-        engineId: 'opencode',
-        vendorId: parsed.providerID,
-        accountId: account?.accountId ?? null,
-        accountUuid: null, // opencode does not expose an OAuth account UUID yet
-        modelId: parsed.modelID,
-        tokens: {
-          input: tokens?.input ?? 0,
-          output: tokens?.output ?? 0,
-          cacheWrite: tokens?.cache?.write ?? 0,
-          cacheWrite1h: 0, // opencode does not distinguish 1h cache writes
-          cacheRead: tokens?.cache?.read ?? 0
-        },
-        engineCostUsd: acc.cost ?? null,
-        sessionId: this.openSessionId,
-        messageId,
-        source: 'live'
-      })
+
+      if (!acc.isChild) {
+        // Own (parent) message — attribute to this session's model.
+        recordUsageEvent({
+          engineId: 'opencode',
+          vendorId: parsed.providerID,
+          accountId: ownAccount?.accountId ?? null,
+          accountUuid: null, // opencode does not expose an OAuth account UUID yet
+          modelId: parsed.modelID,
+          tokens: {
+            input: tokens?.input ?? 0,
+            output: tokens?.output ?? 0,
+            cacheWrite: tokens?.cache?.write ?? 0,
+            cacheWrite1h: 0, // opencode does not distinguish 1h cache writes
+            cacheRead: tokens?.cache?.read ?? 0
+          },
+          engineCostUsd: acc.cost ?? null,
+          sessionId: this.openSessionId,
+          messageId,
+          source: 'live'
+        })
+      } else {
+        // Child (subagent) message — attribute to the CHILD's own model + session.
+        // If model info is absent, skip: never record a child under the parent model.
+        if (!acc.model) {
+          logger.debug('OpencodeSession', `Child accumulator ${messageId} has no model info — skipping metering`)
+          continue
+        }
+        const childAccount = opencodeAuthProvider.buildAccountRef(acc.model.providerID)
+        recordUsageEvent({
+          engineId: 'opencode',
+          vendorId: acc.model.providerID,
+          accountId: childAccount?.accountId ?? null,
+          accountUuid: null,
+          modelId: acc.model.modelID,
+          tokens: {
+            input: tokens?.input ?? 0,
+            output: tokens?.output ?? 0,
+            cacheWrite: tokens?.cache?.write ?? 0,
+            cacheWrite1h: 0,
+            cacheRead: tokens?.cache?.read ?? 0
+          },
+          engineCostUsd: acc.cost ?? null,
+          sessionId: acc.childSessionId ?? null,
+          messageId,
+          source: 'live'
+        })
+      }
     }
   }
 
@@ -1043,7 +1074,9 @@ export class OpencodeSession extends BaseSession {
       let cacheRead = 0
       for (const acc of this.accumulators.values()) {
         if (acc.role === 'user' || acc.role === 'system') continue
-        // Skip subagent (task child-session) messages (Phase 8d) — see recordTurnUsage.
+        // Intentional: skip child accumulators here. The live MeteringSnapshot is the
+        // parent turn's per-model meter. Children are metered separately via
+        // recordUsageEvent in recordTurnUsage, not via the snapshot.
         if (acc.isChild) continue
         const t = acc.tokens
         if (!t) continue

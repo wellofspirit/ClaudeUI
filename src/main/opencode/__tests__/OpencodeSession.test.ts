@@ -2341,3 +2341,158 @@ describe('OpencodeSession — Phase 8d: subagent dispatch', () => {
     session.dispose()
   })
 })
+
+// ---------------------------------------------------------------------------
+// Phase 9a — subagent metering under child's own model
+// ---------------------------------------------------------------------------
+
+describe('OpencodeSession — Phase 9a: meter subagent under child model', () => {
+  const PARENT_SES = 'ses_parent_9a'
+  const CHILD_SES = 'ses_child_9a'
+  const TASK_CALL_ID = 'call_task_9a'
+
+  beforeEach(setupMocks)
+  afterEach(() => {
+    closeDb()
+  })
+
+  it('child accumulator WITH model → recorded under child model + child sessionId', async () => {
+    // Phase 9a: a child message.updated that carries providerID + modelID + cost + tokens
+    // MUST produce a usage_event row attributed to the CHILD's own model (not the parent).
+    mockCreateSession.mockResolvedValue({ id: PARENT_SES })
+    mockSubscribeEvents.mockImplementation(
+      streamOf([
+        // Register child via task part on own session
+        {
+          id: 'e1', type: 'message.part.updated',
+          properties: {
+            sessionID: PARENT_SES,
+            part: {
+              id: 'p_task_9a', messageID: 'msg_par_9a',
+              type: 'tool', tool: 'task', callID: TASK_CALL_ID,
+              state: { status: 'running', input: {}, metadata: { sessionId: CHILD_SES } }
+            }
+          }
+        } as OpencodeEvent,
+        // Parent assistant message — metered under parent model (anthropic/gpt-4o)
+        {
+          id: 'e2', type: 'message.updated',
+          properties: {
+            sessionID: PARENT_SES,
+            info: { id: 'msg_par_9a_cost', role: 'assistant', cost: 0.01,
+                    tokens: { input: 100, output: 50 } }
+          }
+        } as OpencodeEvent,
+        // Child assistant message WITH model info — must be metered under child model
+        {
+          id: 'e3', type: 'message.updated',
+          properties: {
+            sessionID: CHILD_SES,
+            info: {
+              id: 'msg_child_9a_model',
+              role: 'assistant',
+              providerID: 'anthropic',
+              modelID: 'claude-sonnet-4-6',
+              cost: 0.007,
+              tokens: { input: 200, output: 100 }
+            }
+          }
+        } as OpencodeEvent,
+        // Child part.updated (ensures isChild is set)
+        {
+          id: 'e4', type: 'message.part.updated',
+          properties: {
+            sessionID: CHILD_SES,
+            part: { id: 'cp_9a', messageID: 'msg_child_9a_model', type: 'text', text: 'done' }
+          }
+        } as OpencodeEvent,
+        // Child idle → task-notification, parent idle → result + recordTurnUsage
+        { id: 'e5', type: 'session.idle', properties: { sessionID: CHILD_SES } } as OpencodeEvent,
+        { id: 'e6', type: 'session.idle', properties: { sessionID: PARENT_SES } } as OpencodeEvent
+      ])
+    )
+
+    const session = makeSession('openai/gpt-4o')
+    await session.run('go')
+
+    // Wait for parent row to ensure recordTurnUsage has run
+    await vi.waitFor(() => expect(getUsageEventByMessageId('msg_par_9a_cost')).toBeDefined())
+
+    // CHILD row must exist — Phase 9a meters it under the child's own model
+    const childRow = getUsageEventByMessageId('msg_child_9a_model')
+    expect(childRow).toBeDefined()
+    expect(childRow!.vendorId).toBe('anthropic')
+    expect(childRow!.modelId).toBe('claude-sonnet-4-6')
+    // sessionId must be the CHILD session, not the parent
+    expect(childRow!.sessionId).toBe(CHILD_SES)
+    expect(childRow!.inputTokens).toBe(200)
+    expect(childRow!.outputTokens).toBe(100)
+
+    // Parent row must be attributed to parent model (openai/gpt-4o)
+    const parentRow = getUsageEventByMessageId('msg_par_9a_cost')!
+    expect(parentRow.vendorId).toBe('openai')
+    expect(parentRow.modelId).toBe('gpt-4o')
+    expect(parentRow.sessionId).toBe(PARENT_SES)
+
+    session.dispose()
+  })
+
+  it('child accumulator WITHOUT model → NOT recorded (no row under parent model)', async () => {
+    // Guard: a child message.updated that has NO providerID/modelID must be silently
+    // skipped by recordTurnUsage — never attributed to the parent model.
+    mockCreateSession.mockResolvedValue({ id: PARENT_SES })
+    mockSubscribeEvents.mockImplementation(
+      streamOf([
+        {
+          id: 'e1', type: 'message.part.updated',
+          properties: {
+            sessionID: PARENT_SES,
+            part: {
+              id: 'p_task_nm', messageID: 'msg_par_nm',
+              type: 'tool', tool: 'task', callID: TASK_CALL_ID,
+              state: { status: 'running', input: {}, metadata: { sessionId: CHILD_SES } }
+            }
+          }
+        } as OpencodeEvent,
+        // Parent message (so we have a row to wait for)
+        {
+          id: 'e2', type: 'message.updated',
+          properties: {
+            sessionID: PARENT_SES,
+            info: { id: 'msg_par_nm_anchor', role: 'assistant', cost: 0.001,
+                    tokens: { input: 10, output: 5 } }
+          }
+        } as OpencodeEvent,
+        // Child message WITHOUT model fields — must be skipped by recordTurnUsage
+        {
+          id: 'e3', type: 'message.updated',
+          properties: {
+            sessionID: CHILD_SES,
+            info: { id: 'msg_child_no_model', role: 'assistant', cost: 0.5,
+                    tokens: { input: 1000, output: 500 } }
+            // No providerID / modelID
+          }
+        } as OpencodeEvent,
+        {
+          id: 'e4', type: 'message.part.updated',
+          properties: {
+            sessionID: CHILD_SES,
+            part: { id: 'cp_nm', messageID: 'msg_child_no_model', type: 'text', text: 'x' }
+          }
+        } as OpencodeEvent,
+        { id: 'e5', type: 'session.idle', properties: { sessionID: CHILD_SES } } as OpencodeEvent,
+        { id: 'e6', type: 'session.idle', properties: { sessionID: PARENT_SES } } as OpencodeEvent
+      ])
+    )
+
+    const session = makeSession('openai/gpt-4o')
+    await session.run('go')
+
+    await vi.waitFor(() => expect(getUsageEventByMessageId('msg_par_nm_anchor')).toBeDefined())
+
+    // Child without model → NOT recorded (no row at all)
+    expect(getUsageEventByMessageId('msg_child_no_model')).toBeUndefined()
+
+    session.dispose()
+  })
+})

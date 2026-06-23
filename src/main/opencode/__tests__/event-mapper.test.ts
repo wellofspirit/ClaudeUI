@@ -1245,3 +1245,111 @@ describe('mapEvent — Phase 8e Part 2: child-event ordering (registration befor
     expect(childOut.message.content[0]).toMatchObject({ type: 'text', text: 'child result' })
   })
 })
+
+// ============================================================================
+// Phase 9a — subagent metering field capture + sumAccumulatorCosts guard
+// ============================================================================
+
+describe('Phase 9a — child message.updated captures model + childSessionId + cost', () => {
+  const PARENT_SES = 'ses_parent9a'
+  const CHILD_SES = 'ses_child9a'
+  const TASK_CALL = 'call_task_9a'
+
+  function setup() {
+    const accumulators = new Map<string, MessageAccumulator>()
+    const childSessions = new Map([[CHILD_SES, TASK_CALL]])
+    const totalCostRef = { value: 0 }
+    return { accumulators, childSessions, totalCostRef }
+  }
+
+  it('child message.updated with providerID + modelID + cost → acc.model, acc.childSessionId, acc.cost', () => {
+    const { accumulators, childSessions, totalCostRef } = setup()
+
+    mapEvent(
+      makeEvent('message.updated', {
+        sessionID: CHILD_SES,
+        info: {
+          id: 'child_msg_9a',
+          role: 'assistant',
+          providerID: 'openai',
+          modelID: 'gpt-4o',
+          cost: 0.42,
+          tokens: { input: 100, output: 50 }
+        }
+      }),
+      PARENT_SES, accumulators, START_TIME, totalCostRef, childSessions
+    )
+
+    const acc = accumulators.get('child_msg_9a')!
+    expect(acc).toBeDefined()
+    expect(acc.isChild).toBe(true)
+    expect(acc.childSessionId).toBe(CHILD_SES)
+    expect(acc.model).toEqual({ providerID: 'openai', modelID: 'gpt-4o' })
+    expect(acc.cost).toBe(0.42)
+    expect(acc.tokens).toMatchObject({ input: 100, output: 50 })
+  })
+
+  it('child message.updated WITHOUT providerID/modelID → acc.model undefined', () => {
+    const { accumulators, childSessions, totalCostRef } = setup()
+
+    mapEvent(
+      makeEvent('message.updated', {
+        sessionID: CHILD_SES,
+        info: { id: 'child_msg_no_model', role: 'assistant', cost: 0.1, tokens: { input: 10, output: 5 } }
+      }),
+      PARENT_SES, accumulators, START_TIME, totalCostRef, childSessions
+    )
+
+    const acc = accumulators.get('child_msg_no_model')!
+    expect(acc).toBeDefined()
+    expect(acc.isChild).toBe(true)
+    expect(acc.model).toBeUndefined()
+  })
+
+  it('sumAccumulatorCosts guard — child cost does NOT inflate parent totalCostUsd (Phase 9a)', () => {
+    // This is the CRITICAL guard. Before Phase 9a, sumAccumulatorCosts summed ALL
+    // accumulators. Now that children capture cost, it MUST skip isChild.
+    //
+    // Scenario: parent has cost 0.5, child has cost 0.99.
+    // Expected: totalCostUsd.value after parent update = 0.5, NOT 0.5 + 0.99 = 1.49.
+    //
+    // We test this indirectly: fire the parent message.updated AFTER the child has
+    // already set acc.cost = 0.99. The own-session cost_update path calls
+    // sumAccumulatorCosts to recompute totalCostUsd.value.
+    const { accumulators, childSessions, totalCostRef } = setup()
+
+    // First: child message.updated sets acc.cost = 0.99
+    mapEvent(
+      makeEvent('message.updated', {
+        sessionID: CHILD_SES,
+        info: {
+          id: 'child_cost_guard',
+          role: 'assistant',
+          providerID: 'openai', modelID: 'gpt-4o',
+          cost: 0.99,
+          tokens: { input: 100, output: 50 }
+        }
+      }),
+      PARENT_SES, accumulators, START_TIME, totalCostRef, childSessions
+    )
+    // Child event returns ignore — totalCostUsd must still be 0 (child doesn't update it)
+    expect(totalCostRef.value).toBe(0)
+
+    // Second: parent message.updated fires with cost 0.5 → triggers sumAccumulatorCosts
+    const out = mapEvent(
+      makeEvent('message.updated', {
+        sessionID: PARENT_SES,
+        info: { id: 'parent_cost_9a', role: 'assistant', cost: 0.5 }
+      }),
+      PARENT_SES, accumulators, START_TIME, totalCostRef, childSessions
+    )
+
+    // Must be a cost_update (own path, cost changed)
+    expect(out.kind).toBe('cost_update')
+    // GUARD: totalCostUsd must be 0.5 (parent only), NOT 1.49 (parent + child)
+    expect(totalCostRef.value).toBeCloseTo(0.5, 6)
+    if (out.kind === 'cost_update') {
+      expect(out.totalCostUsd).toBeCloseTo(0.5, 6)
+    }
+  })
+})
