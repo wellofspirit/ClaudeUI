@@ -1,7 +1,8 @@
 # ClaudeUI V2 — Multi-Engine Redesign
 
-> **Status: design in progress.** These are working design docs, not yet locked.
-> Nothing here is implemented. Claude continues to work unchanged throughout.
+> **Status: implemented & feature-complete.** The foundations below are locked and shipped (all plan
+> phases + the opencode engine + usage analytics). Remaining follow-ups and the build workflow live in
+> **[ROADMAP.md](ROADMAP.md)**. Claude continued to work unchanged throughout.
 
 ## Why this exists
 
@@ -67,7 +68,9 @@ The locked foundations are recorded as ADRs:
 - [ADR-020](../adr/adr-020_v2-persistence-and-config-plane.md) — persistence & config-plane *(amends ADR-009/011)*
 - [ADR-021](../adr/adr-021_neutral-auth-account-model.md) — neutral auth/account model *(amends ADR-014/015)*
 
-Rollout sequencing (design fully, build incrementally): **[implementation-plan.md](implementation-plan.md)**.
+V2 is feature-complete (all plan phases + the opencode interaction series + usage-analytics
+follow-ups landed). Remaining follow-ups, the build workflow, and standing constraints are tracked in
+the north-star doc: **[ROADMAP.md](ROADMAP.md)**.
 
 ## Decision log (the pivot)
 

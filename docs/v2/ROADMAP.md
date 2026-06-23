@@ -1,0 +1,549 @@
+# ClaudeUI V2 — Roadmap & Pending Work (North Star)
+
+> **Single source of truth for what's left.** Replaces the old `HANDOFF.md` (stale at Phase 7) and
+> `implementation-plan.md` (sequencing complete). V2 is **feature-complete**: all plan phases (0–7)
+> plus the opencode interaction series (8a–8e) and the usage-analytics follow-ups (9a–9b) landed and
+> are pushed. What remains is the set of explicitly-deferred follow-ups tracked below — each verified
+> against the current code (2026-06-23 reconciliation sweep) — and the **workflow** we follow to clear
+> them.
+>
+> Read this first, then the relevant `0X-*.md` foundation doc and any `phase-*.md` kickoff for the
+> area you're touching. The foundation docs (`01..06`, `persistence.md`) + ADR-018..024 remain the
+> locked design spec; this doc only tracks the delta.
+
+---
+
+## How we work (follow this exactly)
+
+This is the loop that built all of V2 and is the loop we keep using. **The main model (Opus) is the
+orchestrator and reviewer; a Sonnet sub-agent writes the code.** Never let the implementing agent
+self-certify — the main model owns correctness.
+
+1. **Scope.** Main model reads the relevant foundation doc(s) + ADR(s), recons the current code
+   (grep/read) to ground the change and gauge blast radius, and **de-risks external/native
+   dependencies first** (probe the opencode binary, the cli.js wire, the DB ABI — don't design around
+   assumptions).
+2. **Decide the forks with the user.** For genuine forks (depth, behavior-preserving vs
+   structure-ready, library choices), use `AskUserQuestion` with a clear recommendation. The user has
+   consistently chosen the fuller, structure-ready option — design for the V2 target, not a shim.
+   Don't re-ask settled things.
+3. **Write a kickoff spec** (mirror an existing `phase-*.md`): scope decisions with the chosen forks,
+   a precise file/seam map, verified facts so the agent doesn't re-discover, an explicit out-of-scope
+   list, step-by-step, verify gates, gotchas, and a suggested commit message.
+4. **Branch** off the current integration tip.
+5. **Dispatch the Sonnet agent** (`Agent` tool, `subagent_type: general-purpose`, `model: sonnet`).
+   Point it at the spec. Tell it explicitly: **do NOT commit / `git add` / create branches; do NOT
+   `bun install`** (see Standing constraints); leave the working tree for review; report deltas, exact
+   verify-gate output, and any deviations from the spec.
+6. **Review every single line** of the agent's diff (`git diff <base>`). Read the actual code, not the
+   agent's summary. Run independent checks (re-run gates, grep, probe the wire). Hunt the subtle bugs —
+   every phase surfaced at least one real one (a model-picker regression, dead persisted data, a vacuous
+   migration test, an `acquire()` race, a per-frame token overcount, a wrong auth-source mapping).
+   **Verify the agent's tests actually test what they claim** — make it prove a guard test fails against
+   the pre-fix code.
+7. **Send fixes back** via `SendMessage` to the agent's id (it resumes with context). Categorize:
+   required / minor / accept-with-note. The agent fixes; **re-review the fixes**; iterate until clean
+   (1–3 rounds is typical).
+8. **Verify against the real dev build.** All gates must pass:
+   `bun run typecheck && bun run test && bun run test:ci && bun run lint && bun run build`
+   (0 lint errors; 3 pre-existing `exhaustive-deps` warnings in Sidebar/ExitPlanModeCard/ReviewBar are
+   OK). Then, for any UI/behavior change, the main model **dispatches a subagent to drive the real
+   Electron app** via the `verifier-electron` skill (`node scripts/app-shot.mjs`): launch the built
+   app, screenshot it, assert the live DOM, drive clicks — and **read the PNG** to confirm the behavior.
+   Headless/infra changes get a gated or integration smoke instead. Tests passing is necessary but not
+   sufficient; we confirm it works in the actual app.
+9. **Commit + push** — one commit per item, after review is clean. `git add -A`, descriptive
+   multi-paragraph message (subject + body), **no AI attribution / no Co-Authored-By**.
+   `git push -u origin <branch>`.
+10. **Update memory + this doc** — record the result, mark the item done here (move it to *Verified
+    resolved*), and capture any new gotcha. Then `AskUserQuestion`: next item / open PR / pause.
+
+**Cadence:** spec → branch → dispatch → review↔fix loop → verify (gates + real-app drive) → commit+push
+→ update doc. The implementing agent never commits; the main model commits only after the review loop
+and the real-build verification are both clean.
+
+---
+
+## Pending items
+
+Every item below was re-verified against current code on 2026-06-23. Status legend:
+🔴 correctness risk · 🟠 user-visible gap · 🟡 structural/feature · ⚪ cosmetic / cleanup / test / process.
+
+| # | Item | Risk | Area | Effort |
+| --- | --- | --- | --- | --- |
+| 1 | opencode subagent **questions** hang the turn → surface via floating card | 🔴 | opencode mapper + renderer | M |
+| 2 | opencode **401 re-login** card parity (hint-only today) | 🟠 | opencode auth UI | M |
+| 3 | **Cost display** not gated on `Account.billingType` (hardcoded on) | 🟠 | InputBox / metering | S |
+| 4 | opencode hosted-tools plugin installs **globally** | 🟠 | opencode plugin | S–M |
+| 5 | opencode **reasoning** toggle not surfaced | 🟠 | capabilities + model picker | M |
+| 6 | **Vendor editing UI** + ModelRef-derived vendor at spawn | 🟠 | config plane | M |
+| 7 | opencode in-app **OAuth loopback** (`method:'auto'`) | 🟡 | opencode auth | M |
+| 8 | opencode **voice** input | 🟡 | voice | M |
+| 9 | Fully **engine-neutral lifting** of plan/question/todo/task | 🟡 | tool rendering | M–L |
+| 10 | Fold **FloatingApproval** into shared `<ApprovalButtons>` | ⚪ | tool rendering | S |
+| 11 | Tool-rendering **coverage polish** (search/web/single-diff/truncation) | ⚪ | tool rendering | M |
+| 12 | **Per-section capability gating** in Settings (blocked on caps model) | ⚪ | config plane | M |
+| 13 | opencode **end-to-end render** verification (test gap) | ⚪ | testing | M |
+| 14 | Retire legacy **JSONL usage** parse path | ⚪ | metering | M |
+| 15 | Consolidate opencode `/event` to **one subscription per server** | ⚪ | opencode transport | S |
+| 16 | Open the **V2 PR stack** (process, not code) | ⚪ | process | — |
+
+> Background/detached opencode subagents are **not** listed: opencode itself gates them behind
+> `OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS` (`tool/task.ts:98-102`), so it's upstream-experimental,
+> not our deferral. Revisit only if opencode promotes it.
+
+---
+
+### 1 — opencode subagent questions hang the turn (surface via floating card) 🔴
+
+**What.** An opencode **subagent** (a `task` child session) can call the `question` tool. ClaudeUI
+drops the resulting child `question.asked`: `handleChildEvent` (`src/main/opencode/event-mapper.ts:406-589`)
+has cases for child `message.part.{delta,updated}`, `message.updated`, `session.idle`, `session.error`,
+and (since 8e) `permission.asked`, but **none for `question.asked`** → it falls through to
+`default → ignore`. The child fiber then blocks indefinitely and the synchronous parent turn hangs
+until cancelled.
+
+**Confirmed mechanism** (verified against `D:\WorkPlace\opencode-src` v1.17.9):
+- The `question` tool is in **every** session's toolset, subagents included. It's gated once,
+  instance-wide, by `questionEnabled` (`tool/registry.ts:196`) — ON for ClaudeUI (8b own-session
+  questions prove it; same flag/instance). The per-agent filter `registry.tools({agent})`
+  (`tool/registry.ts:267-279`) gates only by model/provider and **never consults the agent**.
+- It **can't be suppressed via permissions**: the tool calls `Question.Service.ask()` directly
+  (`tool/question.ts:24`), bypassing the permission-gated `ctx.ask()`; `task.ts`'s `childToolDenies`
+  (`tool/task.ts:129-141`) doesn't list `question` anyway, and `deriveSubagentSessionPermission` only
+  copies parent *deny* rules.
+- `Question.ask` publishes `question.asked` then blocks on `Deferred.await` until reply/reject
+  (`question/index.ts:170-177`); a foreground child task is awaited synchronously by the parent
+  (`tool/task.ts:303-321`). Child blocked → parent turn hung. **Identical shape to the 8e permission
+  hang.** Low-probability (model-dependent; subagents rarely ask), severe-impact (hard turn-hang).
+
+**Fix (decided): surface the child question in the floating layer (opencode special case).** Subagent
+questions are honored, not defused. Three coordinated changes, all reusing existing machinery:
+- **Mapper** (`event-mapper.ts handleChildEvent`): add a `case 'question.asked'` that, for a *registered
+  child* session, builds the SAME approval as the own-session case (`event-mapper.ts:354-378`) —
+  `toolName:'AskUserQuestion'`, `toolUseId = tool?.callID` (the child question tool's callID),
+  `input:{questions}` — and returns `{kind:'approval', approval}`. Unregistered/foreign session → ignore.
+- **Dispatch** (`OpencodeSession`): the `'approval'` case already stores `pendingQuestions[requestId]`
+  and emits `session:approval-request` (`OpencodeSession.ts:535-545`); let child questions through. The
+  reply path is unchanged — `resolveApproval` routes `AskUserQuestion → replyQuestion(requestId, answers)`
+  / reject (`:664-718`), and opencode keys replies by `requestId` **globally** (no child handle).
+- **Renderer** (floating layer): a child question's `toolUseId` lives in the subagent thread, not the
+  main messages, so it arrives **unmatched** → the floating layer. Branch it: when
+  `approval.toolName === 'AskUserQuestion'`, render `AskUserQuestionBlock` (options UI + reply) instead
+  of the permission `ApprovalCardView`. Own-session questions stay *matched* → render inline, unaffected;
+  only child (unmatched) questions float. (Bonus: this upgrades any other unmatched-question edge case
+  from the degraded permission card to the real question UI.)
+
+**Why floating, not inline.** A blocking prompt must be visible; the subagent thread
+(TaskCard/TaskDetailPanel) can be collapsed and the question missed → turn re-hangs. Floating mirrors how
+8e child *permissions* already surface. On dismiss/deny → `resolveApproval` rejects the question (child
+turn fails cleanly), so there's still no hang.
+
+**Definition of done.**
+- `handleChildEvent` surfaces a registered child's `question.asked` as an `AskUserQuestion` approval
+  (child callID); unregistered → ignore; the own-session question path (8b) is untouched.
+- The floating layer renders `AskUserQuestionBlock` for `AskUserQuestion` approvals (options + reply);
+  permission approvals still render the permission card.
+- Answering → `replyQuestion(requestId, …)` (answers mapped in question order); dismiss/deny → question
+  reject; the parent turn unblocks either way.
+- Tests (mocked): child `question.asked` (registered) → approval with `toolName:'AskUserQuestion'` +
+  child callID; floating layer renders the question UI for it; reply maps answers in order via
+  `replyQuestion`; reject on dismiss; unregistered child → ignore; own-session questions still inline.
+- Live drive: a subagent prompted to ask surfaces a floating question; answering continues the subagent,
+  dismissing fails it cleanly — no hang either way.
+
+**References.** opencode `tool/question.ts`, `question/index.ts`, `tool/registry.ts:196,267-279`,
+`tool/task.ts:303-321`; ClaudeUI `event-mapper.ts:354-378` (own question) `:406-589` (handleChildEvent),
+`OpencodeSession.ts:535-545,664-718` (dispatch + reply), `FloatingApproval.tsx`,
+`AskUserQuestionBlock.tsx`; `phase-8b/8e`.
+
+---
+
+### 2 — opencode 401 re-login card parity 🟠
+
+**What.** When an opencode vendor's credential expires (401 / `ProviderAuthError`), the mapper emits a
+plain `session:error` with a text hint — *"Authentication required for &lt;vendor&gt;. Re-authorize in
+Settings › Vendors or run `opencode auth login`"* (`event-mapper.ts:289-293`). Claude, by contrast,
+gets a rich **inline re-login card** (`AuthErrorBlock`, `MessageBubble.tsx:547+`) wired to the OAuth
+flow with a one-click Login + "Retry message" (ADR-014). opencode has **no equivalent card** — the
+user must leave the conversation, open Settings › Vendors, re-auth, and re-send manually.
+
+**Why deferred.** Phase 5c explicitly scoped this out ("Full 401-card parity is deferred; just don't
+swallow it"). The non-swallowed hint shipped; the card didn't. *(Note: my earlier audit wrongly called
+this resolved — `AuthErrorBlock` is Claude-only; opencode 401s never reach it.)*
+
+**Definition of done.** A re-login affordance for opencode 401s comparable to Claude's: surface the
+`ProviderAuthError` as a structured auth card (vendor name + a "Re-authenticate" action that opens the
+opencode vendor-auth flow inline, then a "Retry message"), rather than a flat error string. Reuse the
+5c `vendor-auth:*` IPC. Behavior-preserving for Claude's `AuthErrorBlock`.
+
+**References.** `phase-5c-opencode-auth-mcp.md:104-110`, `event-mapper.ts:280-297`,
+`MessageBubble.tsx:547+` (Claude `AuthErrorBlock`), `OpencodeAuthProvider.ts`.
+
+---
+
+### 3 — Cost display not gated on `Account.billingType` 🟠
+
+**What.** The status-line cost/spend readout is hardcoded on: `showCostInStatusLine={true /* Phase 7:
+gate on Account.billingType */}` (`InputBox.tsx:725`); `View.tsx` honors the flag
+(`showCost={props.showCostInStatusLine ?? true}`, ~:570) but nothing computes it from billing. Per
+foundation 5 / §6, the cost metric should be conditioned on the account: subscription → utilization% +
+window; apiKey → real spend; free → tokens only; unknown → tokens + equivalent$. Today a free-model or
+subscription user sees a dollar figure that may be meaningless or misleading.
+
+**Why deferred.** Phase 7 landed the metering substrate but left the per-`billingType` *presentation*
+gating as a TODO (the comment names it explicitly).
+
+**Definition of done.** Drive `showCostInStatusLine` (and ideally the metric shown) from the active
+session's `AccountRef.billingType`. Subscription/Claude behavior unchanged; free opencode models stop
+showing a misleading "$"; apiKey shows real spend. Small, well-scoped.
+
+**References.** `InputBox.tsx:725`, `InputBox/View.tsx:85-86,~570`, `05-metering-usage.md §6`,
+`phase-7-metering.md` (per-billingType reporting).
+
+---
+
+### 4 — opencode hosted-tools plugin installs globally 🟠
+
+**What.** The ClaudeUI hosted-tools plugin (render_mermaid / create_mockup / show_mockup) installs into
+opencode's **global** auto-load dir, `~/.config/opencode/plugin/` (`ensure-plugin.ts:57-60`,
+`opencodePluginDir()`). It therefore loads for the user's **standalone** opencode too, not just
+ClaudeUI-spawned servers — we pollute a tool the user may run independently.
+
+**Why deferred.** Phase 5c found opencode's `config.plugin` absolute paths don't load — only the
+auto-load dirs do — and the plugin loader rejects any non-function module export. The global auto-load
+dir was the only thing that worked.
+
+**Definition of done.** Scope the plugin to ClaudeUI-spawned servers. Likely path: spawn the server
+with a ClaudeUI-private config dir (an `XDG_CONFIG_HOME`-style override pointing at a ClaudeUI-managed
+plugin dir) so the user's global `~/.config/opencode/plugin/` is untouched. **De-risk first** by
+probing the real 1.17.9 binary: confirm the relocation mechanism actually takes effect (5c found
+absolute `config.plugin` silently ignored). Verify standalone opencode no longer sees the plugin, and
+ClaudeUI sessions still render mermaid/mockup.
+
+**References.** `phase-5c-opencode-auth-mcp.md`, `ensure-plugin.ts`, Phase-5 gotchas.
+
+---
+
+### 5 — opencode reasoning toggle not surfaced 🟠
+
+**What.** opencode models expose reasoning as a **per-model boolean** (vs Claude's thinking/effort
+axes). ClaudeUI surfaces no control: `discoverOpencodeModels()` hardcodes
+`supportsEffort:false, supportsAdaptiveThinking:false` (`model-discovery.ts:45-46`),
+`OPENCODE_ENGINE_CAPABILITIES.reasoning` is `{}` (`model-capabilities.ts`), and the thinking picker is
+gated on Claude's `capabilities.reasoning.thinking` (`InputBox/View.tsx:81`).
+
+**Why deferred.** Phase 5b noted opencode reasoning is "a boolean, not a modes control" and punted it.
+
+**Definition of done.** Extend the capability model so an engine can declare a boolean reasoning
+capability (vs Claude's two-axis `reasoning`); discover it per-model from opencode (`/config/providers`
+metadata); render a simple on/off reasoning toggle for opencode models that support it; wire it through
+to the prompt request. Behavior-preserving for Claude's existing picker.
+
+**References.** `phase-5b-opencode-chat.md:150,284`, `02-capability-model.md`, `model-capabilities.ts`,
+`model-discovery.ts`.
+
+---
+
+### 6 — Vendor editing UI + ModelRef-derived vendor at spawn 🟠
+
+**What.** Two coupled config-plane gaps:
+- **Vendor editing is display-only.** Vendors › Anthropic shows `endpoint` + `modelOverride` read-only
+  (`settings-sections.tsx:511-554`); users must hand-edit `vendors/anthropic.json`.
+  `handleUpdateVendorConfig` (`SettingsDialog.tsx:77-83`) calls `saveVendorConfig` but is **wired and
+  never invoked** — a Phase-5 stub.
+- **Vendor at spawn is hardcoded.** `session:create` loads `loadVendorConfig('anthropic')` unconditionally
+  (`session.ipc.ts:773`, guarded `if (engineId !== 'opencode')`); the comment flags deriving the vendor
+  from the model's `ModelRef.vendorId` as a Phase-5 TODO. Correct for Claude (engine 1:1 anthropic), but
+  opencode is multi-vendor and gets no per-vendor launch params at spawn.
+
+**Why deferred.** Phase 3b shipped the read/display IA and Claude's 1:1 path; full per-vendor editing +
+ModelRef-driven derivation was scoped to Phase 5 and not picked up. These become real once opencode
+needs per-vendor endpoint/override.
+
+**Definition of done.** Make the vendor section editable (re-enable the edit form + `saveVendorConfig`
+round-trip), and derive vendor launch params from the active model's `ModelRef.vendorId` at spawn for
+both engines. Migration/back-compat preserved.
+
+**References.** `03-settings-config.md §8.5`, `settings-sections.tsx:511-554`, `SettingsDialog.tsx:77-83`,
+`session.ipc.ts:768-777`.
+
+---
+
+### 7 — opencode in-app OAuth loopback (`method:'auto'`) 🟡
+
+**What.** opencode's per-vendor OAuth can return `method:'auto'` (loopback: open browser, listen on
+localhost) or `method:'code'` (paste-code). ClaudeUI passes the method through
+(`OpencodeAuthProvider`/`OpencodeClient`) and handles the **paste-code** path in Settings › Vendors,
+but does not drive the **loopback** flow in-app — for `auto` the user is effectively pushed to the
+paste-code fallback / CLI. Claude's native loopback (ADR-014) has no opencode equivalent.
+
+**Why deferred.** Phase 5c explicitly out-of-scoped loopback ("show a 'use opencode auth' hint";
+in-app: API-key + paste-code only).
+
+**Definition of done.** Drive the `method:'auto'` loopback inside the app for opencode vendors that
+support it (spawn browser, await the server's callback completion, reflect success), falling back to
+paste-code when loopback isn't available. Pairs naturally with #2 (the re-login card).
+
+**References.** `phase-5c-opencode-auth-mcp.md:104`, `04-auth-accounts.md`, `OpencodeAuthProvider.ts`,
+`OpencodeClient.ts` (oauthAuthorize/oauthCallback).
+
+---
+
+### 8 — opencode voice input 🟡
+
+**What.** Voice input is Claude-only. `OPENCODE_ENGINE_CAPABILITIES.voice` is `false`
+(`model-capabilities.ts`) and there's no opencode voice wiring; the voice-capture path
+(`voice-capture.ts`/`voice-client.ts`) only feeds the Claude input flow.
+
+**Why deferred.** Phase 5b set non-core opencode caps false for the chat MVP.
+
+**Definition of done.** Route transcribed voice into the opencode prompt path (it's engine-neutral text
+input once transcribed), flip the capability true, and gate the mic UI on `capabilities.voice` so it
+appears for opencode sessions. Mostly wiring — the transcription stack is engine-agnostic.
+
+**References.** `phase-5b-opencode-chat.md:283`, `model-capabilities.ts`, `voice-capture.ts`,
+`voice-client.ts`, `OpencodeSession.ts` (prompt path).
+
+---
+
+### 9 — Fully engine-neutral lifting of plan/question/todo/task 🟡
+
+**What.** Phase 6 unified the *passive* tool kinds behind the kind registry, but the four **lifted**
+interaction kinds still route directly to legacy components — `MessageBubble.tsx:45-58` dispatches to
+`ExitPlanModeCard` / `AskUserQuestionBlock` / `TodoToolBlock` / `TaskCard`, each consuming the
+engine-specific `block` rather than a normalized neutral shape. The comment at `MessageBubble.tsx:46`
+calls full lifting a "fast-follow."
+
+**Why deferred.** Foundation 06 §7 / decision #3 lifted these conceptually (question → approval/
+elicitation, plan → plan-review state-gate, todo → Todo widget) but Phase 6 scoped the build to the
+passive-kind registry + behavior-preserving Claude port.
+
+**Definition of done.** Normalize each of the four into an engine-neutral interaction contract fed from
+either transport (Claude tool blocks or opencode events), so components consume a neutral shape, not
+`block`. Behavior-preserving for Claude (app-shot the cards as pixel-equivalent); opencode equivalents
+drive the same components. The larger structural item — worth its own kickoff spec. *(The #1 subagent-
+question hang is a symptom of this seam being only half-lifted on the opencode side.)*
+
+**References.** `06-tool-rendering.md §7`, `phase-6-tool-registry.md`, `MessageBubble.tsx`,
+`tool-registry/ClaudeEngineToolMap.ts`.
+
+---
+
+### 10 — Fold FloatingApproval into shared `<ApprovalButtons>` ⚪
+
+**What.** Phase 6 extracted `<ApprovalButtons>` (3 call-sites → 1) for in-line tool-card approvals, but
+`FloatingApproval`'s `ApprovalCardView` still has its **own** inline Deny / Allow-for-session / Allow
+button JSX (`FloatingApproval.tsx:138-163`) — it does not consume the shared component. So there are two
+approval-button renderers to keep in sync. *(My earlier audit wrongly called this resolved; the file
+confirms FloatingApproval stands apart.)*
+
+**Why deferred.** Phase 6 noted it as a dedup follow-up; the floating *card* (positioning + the
+unmatched-approval filter, `FloatingApproval.tsx:172-199`) is genuinely separate, but the *buttons*
+inside it can still share `<ApprovalButtons>`.
+
+**Definition of done.** Replace the inline button block in `ApprovalCardView` with `<ApprovalButtons>`
+(threading `showAllowForSession` + the decision handler), keeping the floating container and filter.
+Pure refactor; app-shot the floating card as pixel-equivalent.
+
+**References.** `FloatingApproval.tsx:138-163`, `ApprovalButtons.tsx`, `phase-6-tool-registry.md`.
+
+---
+
+### 11 — Tool-rendering coverage polish ⚪
+
+**What.** The "weak" tool kinds still use `GenericBody` / hardcoded rendering (foundation 06 §9):
+- **(a) search** (Grep/Glob/list) — JSON-dump input + generic terminal output, not a structured match
+  list (file · line · highlighted text). `tool-registry/kinds/index.ts:28` → `GenericBody`.
+- **(b) web** (WebFetch/WebSearch) — raw, not structured title/url/snippet. Same `GenericBody`.
+- **(c) fileEdit** — renders the diff **twice** (input AND result), `FileEditBody.tsx:43-77`.
+- **(d) truncation** — hardcoded `trunc(text, 2000)`; no configurable / "show more" affordance.
+- *(Error rendering is now consistent across `GenericBody`/`FileEditBody` (red `<pre>` styling) — the
+  "consistent error renderer with context" ambition remains but the inconsistency is gone.)*
+
+**Why deferred.** Foundation decision #4: explicitly cosmetic and low-priority; the generic fallback
+renders weak tools acceptably.
+
+**Definition of done.** Structured `search` match-list, structured `web` results, single-diff for
+`fileEdit`, and a configurable truncate-with-expand applied uniformly. Per-kind; can be split. Folding
+the hardcoded name/icon lists in `utils.ts` into per-kind metadata (06 §8) is part of the same cleanup.
+
+**References.** `06-tool-rendering.md §8,§9`, `phase-6-tool-registry.md §9`, `tool-registry/kinds/`.
+
+---
+
+### 12 — Per-section capability gating in Settings ⚪ (blocked)
+
+**What.** Settings sections (e.g. sandbox/proxy under Engines › Claude) are listed in static sets
+(`settings-sections.tsx` `ENGINE_CLAUDE_SECTION_IDS` etc.) with no capability-based hiding. The intent
+(03 / ADR-018) is to hide e.g. sandbox on a no-sandbox engine. **Blocked:** `EngineCapabilities`
+(`model-capabilities.ts`) has no `sandbox`/`proxy` flags yet, so there's nothing to gate on. Today only
+*installed-engine* gating exists (opencode vendor section appears only when opencode is present).
+
+**Why deferred.** Phase 3b deferred per-section gating to Phase 5 ("zero-benefit until the caps model
+grows"); the caps model never grew those flags.
+
+**Definition of done.** Add `sandbox`/`proxy` (and any other launch-param) flags to `EngineCapabilities`,
+then gate section visibility on them. Zero user-visible change for Claude (all-true); real benefit only
+when a no-sandbox/no-proxy engine lands. Low priority until then.
+
+**References.** `03-settings-config.md`, `model-capabilities.ts` (`EngineCapabilities`),
+`settings-sections.tsx`.
+
+---
+
+### 13 — opencode end-to-end render verification ⚪ (test gap)
+
+**What.** opencode tool rendering is **unit-verified only** — the `verifier-electron` app-shot can't
+type a prompt, and no e2e/integration test drives a live opencode turn and asserts the rendered tool
+cards in the DOM. `src/integration/opencode/` covers server lifecycle, not rendering.
+
+**Why deferred.** Phase 5b/6 verified opencode mapping at the unit level; a full driven e2e was out of
+scope.
+
+**Definition of done.** An integration test (gated, real binary) that runs an opencode free-model turn
+producing a tool call and asserts the correct kind body renders, plus an approval round-trip. Closes the
+"opencode chat is only unit-verified" gap noted since 5b.
+
+**References.** `phase-5b-opencode-chat.md`, `phase-6-tool-registry.md`, `src/integration/opencode/`,
+`docs/testing-strategy.md`.
+
+---
+
+### 14 — Retire the legacy JSONL usage parse path ⚪
+
+**What.** Phase 7/9 moved metering onto the SQLite `usage_event` table but kept the legacy ingestion "a
+release as fallback." The Claude JSONL scan (`block-usage.ts:1442+`, `~/.claude/projects/**/*.jsonl`)
+is still the **primary intake** — it parses, upserts into `usage_event`, then reads back via SQL — and
+legacy JSON daily-summary files are still written (`block-usage.ts:~1879`).
+
+**Why deferred.** Intentional safety margin while the DB path proves out.
+
+**Definition of done.** Once the DB path is field-proven, make the reconciler the only JSONL reader
+(first-run backfill) and the steady-state read path pure SQL; stop writing legacy daily JSON. Confirm
+dashboard + sidebar wheel + WLS projection unaffected. Lowest urgency — it's the safety net.
+
+**References.** `phase-7-metering.md`, `phase-9-usage-analytics.md:200`, `block-usage.ts`,
+`usage-reconciler.ts`, `usage-aggregation.ts`.
+
+---
+
+### 15 — Consolidate opencode `/event` to one subscription per server ⚪
+
+**What.** The opencode server is shared per-cwd (ref-counted, `OpencodeServerManager`), and the
+`/event` stream already multiplexes all sessions (filtered by `properties.sessionID`). But each
+`OpencodeSession` consumes events through its own client subscription rather than a single shared
+server-level subscription fanned out to sessions. Functionally correct (and the original "per-session,
+optimize later" note overstated the cost); a single shared subscription per server is a minor
+efficiency/cleanliness win.
+
+**Why deferred.** 5b MVP — correctness over optimization.
+
+**Definition of done.** One `/event` subscription per server process, demultiplexed to the registered
+sessions/children by `sessionID`. No behavior change; fewer open streams under many concurrent sessions
+on one cwd. Genuinely optional.
+
+**References.** `phase-5b-opencode-chat.md`, `OpencodeServerManager.ts`, `OpencodeClient.ts` (`/event`),
+`event-mapper.ts` (sessionID routing).
+
+---
+
+### 16 — Open the V2 PR stack ⚪ (process)
+
+**What.** The entire V2 work is built as **stacked branches** (`v2-phase-N-…`), each off the previous,
+all pushed — but **no PRs are open**. The plan's review gates were after Phase 1 (passed) and Phase 5
+(the whole opencode engine, overdue). Integration base is `codex-sup`.
+
+**Definition of done.** Open the stacked PR(s) for review (at minimum the Phase-5 gate), or decide on a
+squash/integration strategy for landing the stack. Not code — a process decision for you.
+
+---
+
+## Verified resolved since the original inventories (stale follow-ups — now closed)
+
+Prior session inventories (pre-Phase-8/9) listed these as deferred; the 2026-06-23 sweep confirms they
+shipped. Recorded here so they're not re-raised:
+
+- **opencode interaction caps** — `steer`, `queue`, `slashCommands`, `skills`, `subagents` are all
+  `true` (`model-capabilities.ts`); built in Phases 8a (commands/skills), 8c (queue/steer), 8d
+  (subagents). The old "all false in 5b" note is stale.
+- **Subagent streaming** — live child output works: `handleChildEvent` emits `subagent-stream` /
+  `subagent-message`, dispatched as `session:subagent-*` (8d, `event-mapper.ts`).
+- **Subagent permission surfacing + child-event pre-registration race** — 8e surfaces child
+  `permission.asked` and **verified the ordering guarantee** (registration always precedes child
+  transcript events) so no buffering is needed.
+- **WLS projection DB-sourced** — `block-usage.ts` builds projection samples from `usage_window_sample`
+  via `getWindowSamples` (DB **primary**), with the in-memory ring retained only as a first-boot
+  fallback (9a). The "still reads the ring" note is stale.
+- **models.dev network fetch removed** — no `externalPricingStub`; pricing = built-in Anthropic table +
+  opencode `/config/providers` (`pricing.ts`, `opencode-pricing.ts`) (9b).
+- **opencode usage in the dashboard** — per-engine + per-model breakdown, opencode cost from its own
+  reported `engineCostUsd`, opencode-idle recompute trigger (9b); subagent usage metered under the
+  child's own model (9a).
+- **vision/attachment** — auto-detected per opencode model caps and sent as fileParts (5b/discovery);
+  works today. A *richer explicit control* is the only (low-value) remainder, folded into #5's area.
+- **Error-render consistency** — `GenericBody`/`FileEditBody` now share consistent error styling (the
+  "red `<pre>` inconsistency" is gone; structured-error ambition tracked under #11).
+
+---
+
+## Explicitly NOT doing (folded away — recorded so they're not re-litigated)
+
+- **Daily-chart Claude-only filter** — folded away; the daily chart is intentionally all-engine per the
+  locked Phase-9 layout (`UsageView.tsx:90`).
+- **ChatGPT-via-opencode usage windows** — no usage API is exposed to us; cumulative meter only.
+- **opencode stage-and-edit dequeue** — moot per the Phase-8c design note.
+- **Claude subagent re-metering** — already correct via the JSONL per-message model.
+- **Background/detached opencode subagents** — upstream-experimental (`OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS`);
+  not our deferral. Revisit only if opencode promotes it.
+- **Multi-account for opencode** — opencode has no multi-account concept; N/A.
+
+---
+
+## Standing constraints (carry these forward — they have bitten us)
+
+- **NEVER `bun install` / `bun add` / `bun remove` casually.** bun's postinstall leaves `better-sqlite3`
+  **Node-ABI**, which crashes the Electron app on boot (`ERR_DLOPEN_FAILED`). After any dep change run
+  **`bun run rebuild:native`** (`electron-builder install-app-deps`, rebuilds to the Electron ABI).
+- **Dual-ABI testing.** vitest runs in plain Node and can't load the Electron-ABI `better-sqlite3`, so
+  `vitest.config.ts` aliases it → `src/test/stubs/better-sqlite3-stub.ts` (a `node:sqlite` adapter).
+  DB-touching code is tested through that. Electron is **41.0.3 / Node 24.14.0** (node:sqlite is
+  built-in, flagless). Never import `better-sqlite3` from renderer/shared — main process only.
+- **Don't break Claude.** Claude is the daily driver and the live login path (the user is actively
+  logged in — an auth-detection bug = lockout). Every change touching shared seams must be confirmed
+  behavior-preserving for Claude via the real-app drive.
+- **opencode specifics.** Binary (~165 MB) is gitignored (`vendor/opencode-cli/`), vendored by
+  `ensure-opencode`, shipped via electron-builder `extraResources`. HTTP **Basic auth**
+  (`opencode:<generated-password>`). Target the **v1** API (`/session`, `/event`, `/auth/{id}`) — NOT
+  the `/api/*` v2 family. The shared `/event` stream multiplexes all sessions → filter by
+  `properties.sessionID`. Binary/plugin locators use `app.getAppPath()`, not `__dirname`.
+- **cli.js wire.** For any cli.js-integration question, consult `docs/protocol/` first, then probe the
+  real `bun-claude` binary — cheaper and more reliable than reading minified cli.js. Use
+  `/bundle-analyzer` to navigate the bundle.
+- **Commits.** One per item, no AI attribution, multi-paragraph body. Branch `v2-…`, stacked, push `-u`.
+- **Pre-existing lint.** 3 `exhaustive-deps` warnings (Sidebar / ExitPlanModeCard / ReviewBar) — leave
+  them.
+
+---
+
+## Key files / entry points
+
+- **Design spec:** `docs/v2/01..06-*.md`, `docs/v2/persistence.md`, ADRs `docs/adr/adr-018..024`,
+  per-area kickoffs `docs/v2/phase-*.md`.
+- **Engine seam:** `src/main/providers/` (`ISession`, `BaseSession`, `EngineRegistry`,
+  `register-engines.ts`).
+- **Capabilities:** `src/shared/model-capabilities.ts` (single source of truth).
+- **DB:** `src/main/services/db.ts` (only better-sqlite3 importer; `user_version` migrations).
+- **Auth:** `src/main/auth/` (`EngineAuthProvider`, `ClaudeAuthProvider`, `OpencodeAuthProvider`,
+  `engineAuthRegistry`).
+- **opencode:** `src/main/opencode/` (`OpencodeServerManager`, `OpencodeClient`, `OpencodeSession`,
+  `event-mapper.ts`, `ensure-plugin.ts`, `model-discovery.ts`, `protocol/`).
+- **Metering:** `src/main/services/{block-usage,usage-recorder,usage-reconciler,usage-aggregation,usage-provider,opencode-pricing}.ts`,
+  `src/shared/pricing.ts`, renderer `components/usage/`.
+- **Tool rendering:** `src/renderer/src/components/chat/tool-registry/` + `src/shared/tool-kinds.ts`;
+  `MessageBubble.tsx`, `FloatingApproval.tsx`, `ApprovalButtons.tsx`.
+- **Settings:** `src/renderer/src/components/SettingsDialog/` (`settings-sections.tsx`, `SettingsDialog.tsx`).
+- **Types:** `src/shared/types.ts` (`EngineId`, `ModelRef`, `AccountRef`, `SessionStatus`,
+  `AuthFlowState`, `BlockUsageData`…).
+- **Verification:** `verifier-electron` skill + `scripts/app-shot.mjs` (Playwright-Electron, real-build
+  drive).
