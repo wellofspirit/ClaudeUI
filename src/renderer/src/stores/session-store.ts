@@ -437,6 +437,8 @@ export interface PerSessionState {
   btwQuestion: string | null
   btwResponse: string | null
   btwLoading: boolean
+  // Vendor auth required (opencode ProviderAuthError)
+  vendorAuthRequired: { vendorId: string; message: string } | null
 }
 
 const EMPTY_SESSION_STATE: PerSessionState = {
@@ -506,7 +508,8 @@ const EMPTY_SESSION_STATE: PerSessionState = {
   voiceInterimTranscript: '',
   btwQuestion: null,
   btwResponse: null,
-  btwLoading: false
+  btwLoading: false,
+  vendorAuthRequired: null
 }
 
 function createEmptySession(cwd: string): PerSessionState {
@@ -525,6 +528,17 @@ function createEmptySession(cwd: string): PerSessionState {
  * This map lets setStatusLine (and potentially other handlers) resolve them.
  */
 const rekeyMap = new Map<string, string>()
+
+/**
+ * Monotonic token for the in-flight vendor-OAuth `auto` flow. Each
+ * authorizeVendorOAuth() captures the current token; cancelVendorOAuth()
+ * bumps it. The long-lived `oauthCallback` await checks its captured token
+ * before any post-await state-set, so a callback that resolves AFTER the user
+ * cancelled (opencode's plugin times out server-side, but the promise may still
+ * settle) cannot resurrect a stale waiting/error card. Module-level (not store
+ * state) — it's control-flow bookkeeping, never rendered.
+ */
+let vendorOAuthFlowToken = 0
 
 /**
  * Global git status cache keyed by cwd.
@@ -598,6 +612,8 @@ interface SessionState {
   vendorAuth: VendorAuthMap | null
   /** Multi-account state (ADR-015). Null until first load/event. */
   accountsState: AccountsState | null
+  /** Global vendor OAuth flow state (auto/loopback OAuth in progress). */
+  vendorOAuth: { engineId: string; vendorId: string; stage: 'waiting' | 'error'; instructions: string } | null
   activeView: ActiveView
   pluginViews: PluginViewWithOwner[]
 
@@ -805,6 +821,11 @@ interface SessionState {
   signIn: () => Promise<void>
   submitOAuthCode: (code: string) => Promise<void>
   cancelSignIn: () => Promise<void>
+  setVendorOAuth(state: { engineId: string; vendorId: string; stage: 'waiting' | 'error'; instructions: string } | null): void
+  cancelVendorOAuth(): void
+  setVendorAuthRequired(routingId: string, data: { vendorId: string; message: string } | null): void
+  clearVendorAuthRequired(routingId: string): void
+  authorizeVendorOAuth(engineId: EngineId, vendorId: string): Promise<{ ok: boolean; needsPaste?: { url: string; method: number; instructions: string } }>
   /** Respawn the session's cli.js process (so it re-reads freshly-stored
    *  credentials) and resend a prompt. Used by the post-login Retry. */
   retrySend: (routingId: string, prompt: string) => Promise<void>
@@ -873,6 +894,7 @@ export const useSessionStore = create<SessionState>((set) => ({
   authSource: null,
   vendorAuth: null,
   accountsState: null,
+  vendorOAuth: null,
   blockUsage: null,
   activeView: { type: 'chat' } as ActiveView,
   pluginViews: [],
@@ -2142,13 +2164,81 @@ export const useSessionStore = create<SessionState>((set) => ({
       authState: s.authState ? { ...s.authState, status: 'idle', error: null } : null
     }))
   },
+  setVendorOAuth: (state) => set({ vendorOAuth: state }),
+  cancelVendorOAuth: () => {
+    // Invalidate any in-flight `auto` flow so its late-resolving callback can't
+    // re-set vendorOAuth after the user cancelled (SHOULD-FIX 4).
+    vendorOAuthFlowToken++
+    set({ vendorOAuth: null })
+  },
+  setVendorAuthRequired: (routingId, data) =>
+    set((s) => ({ sessions: updateSession(s.sessions, routingId, () => ({ vendorAuthRequired: data })) })),
+  clearVendorAuthRequired: (routingId) =>
+    set((s) => ({ sessions: updateSession(s.sessions, routingId, () => ({ vendorAuthRequired: null })) })),
+  authorizeVendorOAuth: async (engineId, vendorId) => {
+    try {
+      const allOptions = await window.api.vendorAuthListOptions(engineId)
+      const vendorOptions = allOptions[vendorId] ?? []
+      const firstOAuthOption = vendorOptions.find((o) => o.type === 'oauth')
+      if (!firstOAuthOption) return { ok: false }
+      const methodIdx = vendorOptions.indexOf(firstOAuthOption)
+      const result = await window.api.vendorAuthOauthAuthorize(engineId, vendorId, methodIdx)
+      window.open(result.url, '_blank')
+      if (result.method === 'auto') {
+        // Capture the flow token AFTER authorize so a Cancel during authorize is
+        // honored too. Any post-await state-set bails if the token moved.
+        const token = ++vendorOAuthFlowToken
+        const superseded = (): boolean => vendorOAuthFlowToken !== token
+        useSessionStore.getState().setVendorOAuth({
+          engineId,
+          vendorId,
+          stage: 'waiting',
+          instructions: result.instructions
+        })
+        try {
+          // Long-lived: opencode's vendor plugin hosts the loopback/device flow
+          // and we await its completion WITHOUT supplying a code.
+          const ok = await window.api.vendorAuthOauthCallback(engineId, vendorId, methodIdx)
+          if (superseded()) return { ok: false }
+          if (ok) {
+            useSessionStore.getState().setVendorOAuth(null)
+            // NOTE: do NOT write into the global `vendorAuth` map here — it is
+            // Claude/anthropic-specific (AuthBanner reads vendorAuth.anthropic).
+            // The opencode Settings section re-probes its own local state via
+            // refresh(), and OpencodeAuthProvider.oauthCallback already
+            // invalidates the model cache main-side. (REQUIRED 1.)
+            return { ok: true }
+          }
+          useSessionStore.getState().setVendorOAuth({ engineId, vendorId, stage: 'error', instructions: result.instructions })
+          return { ok: false }
+        } catch {
+          if (superseded()) return { ok: false }
+          useSessionStore.getState().setVendorOAuth({ engineId, vendorId, stage: 'error', instructions: result.instructions })
+          return { ok: false }
+        }
+      } else {
+        // method === 'code': return needsPaste so the caller can show paste box
+        return { ok: false, needsPaste: { url: result.url, method: methodIdx, instructions: result.instructions } }
+      }
+    } catch {
+      return { ok: false }
+    }
+  },
   retrySend: async (routingId, prompt) => {
     const session = useSessionStore.getState().sessions[routingId]
     if (!session) return
-    // The persistent cli.js process caches credentials for its lifetime, so a
-    // post-login retry MUST respawn it (createSession → session-manager cancels
-    // the old process and spawns a fresh one that re-reads the new credential).
-    // Plain sendPrompt would just push to the stale, still-401ing process.
+    // Both engines cache vendor credentials for their process's lifetime, so a
+    // post-login retry MUST respawn (createSession → session-manager cancels the
+    // old session and spawns a fresh backend that re-reads the new credential):
+    //   - Claude: the persistent cli.js process caches the OAuth token.
+    //   - opencode: the `opencode serve` process caches the instantiated AI-SDK
+    //     provider (auth baked in) for its lifetime — verified in opencode-src
+    //     provider/provider.ts (InstanceState reads auth.all() once at init; the
+    //     /oauth/callback + PUT /auth handlers persist to disk but never
+    //     invalidate that cache). cancel() releases the server ref; when it's the
+    //     last ref the process is killed, so the recreate spawns a fresh server
+    //     that re-reads auth.json. Plain sendPrompt would re-hit the stale,
+    //     still-401ing backend.
     const resumeId = session.messages.length > 0 ? routingId : undefined
     await window.api.createSession(
       routingId,

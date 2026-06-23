@@ -202,6 +202,8 @@ export function useClaudeEvents(): void {
           const allDone = session.todos.every((t) => t.status === 'completed')
           if (allDone) state.setTodos(routingId, [])
         }
+        // Clear any pending vendor auth required card when a turn succeeds
+        useSessionStore.getState().clearVendorAuthRequired(routingId)
         // Mark attention + notify when Claude's turn ends (user's turn)
         if (session?.sdkActive) {
           if (state.activeSessionId !== routingId || !document.hasFocus()) {
@@ -209,6 +211,9 @@ export function useClaudeEvents(): void {
           }
           notifyIfNeeded(routingId, 'Ready for input', 'Claude has finished — your turn')
         }
+      }),
+      window.api.onVendorAuthRequired((routingId, data) => {
+        useSessionStore.getState().setVendorAuthRequired(routingId, data)
       }),
       window.api.onError((routingId, error) => {
         addError(routingId, error)

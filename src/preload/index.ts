@@ -111,6 +111,7 @@ const api: ClaudeAPI = {
   onStatus: onEvent('session:status'),
   onResult: onEvent('session:result'),
   onError: onEvent('session:error'),
+  onVendorAuthRequired: onEvent('session:vendor-auth-required'),
   onWarning: onEvent('session:warning'),
   onMessagesRetracted: onEvent('session:messages-retracted'),
   onToolResult: onEvent('session:tool-result'),
@@ -331,7 +332,7 @@ const api: ClaudeAPI = {
     engineId: import('../shared/types').EngineId,
     vendorId: string,
     method: number,
-    code: string
+    code?: string
   ) => unwrap('vendor-auth:oauth-callback', engineId, vendorId, method, code),
   vendorAuthRemove: (engineId: import('../shared/types').EngineId, vendorId: string) =>
     unwrap('vendor-auth:remove', engineId, vendorId),

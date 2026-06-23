@@ -172,7 +172,7 @@ export class OpencodeAuthProvider implements EngineAuthProvider {
     }
   }
 
-  async oauthCallback(vendorId: string, method: number, code: string): Promise<boolean> {
+  async oauthCallback(vendorId: string, method: number, code?: string): Promise<boolean> {
     const conn = await opencodeServerManager.acquire(PERSISTED_SESSIONS_DIR)
     const client = new OpencodeClient(conn.baseUrl, conn.authHeader)
     try {

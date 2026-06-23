@@ -12,6 +12,7 @@ import { TodoWidget } from '../../TodoWidget'
 import { FloatingApproval } from '../FloatingApproval'
 import { BtwCard } from '../BtwCard'
 import { FloatingError } from '../FloatingError'
+import { VendorAuthRequiredCard } from '../VendorAuthRequiredCard'
 import { AuthBanner } from '../AuthBanner'
 import { SandboxViolationToast } from '../SandboxViolationToast'
 import { useIsMobile } from '../../../hooks/useIsMobile'
@@ -305,6 +306,7 @@ export function ChatPanel(): React.JSX.Element {
 
       <TodoWidget />
       <FloatingApproval />
+      <VendorAuthRequiredCard />
       <FloatingError />
       <SandboxViolationToast />
     </div>

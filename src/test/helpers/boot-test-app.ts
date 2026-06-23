@@ -101,6 +101,7 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     onStatus: onEvent('session:status'),
     onResult: onEvent('session:result'),
     onError: onEvent('session:error'),
+    onVendorAuthRequired: onEvent('session:vendor-auth-required'),
     onWarning: onEvent('session:warning'),
     onMessagesRetracted: onEvent('session:messages-retracted'),
     onToolResult: onEvent('session:tool-result'),

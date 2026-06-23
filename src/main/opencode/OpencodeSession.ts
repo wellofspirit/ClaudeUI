@@ -579,6 +579,13 @@ export class OpencodeSession extends BaseSession {
         // totalCostUsd already updated via ref; status update is deferred to result
         break
 
+      case 'auth-required':
+        this.isProcessing = false
+        this.send('session:vendor-auth-required', { vendorId: output.vendorId, message: output.message })
+        this.sendStatus()
+        this.resetInactivityTimer()
+        break
+
       case 'error':
         this.isProcessing = false
         this.send('session:error', output.message)

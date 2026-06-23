@@ -52,7 +52,7 @@ export interface EngineAuthProvider {
    * POST /provider/{vendorId}/oauth/callback — submit the paste code.
    * Returns true on success.
    */
-  oauthCallback?(vendorId: VendorId, method: number, code: string): Promise<boolean>
+  oauthCallback?(vendorId: VendorId, method: number, code?: string): Promise<boolean>
 
   /** DELETE /auth/{vendorId} — remove credentials for a vendor. */
   removeVendorAuth?(vendorId: VendorId): Promise<void>

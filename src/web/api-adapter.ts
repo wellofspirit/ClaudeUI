@@ -190,6 +190,7 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     onStatus: on('session:status') as ClaudeAPI['onStatus'],
     onResult: on('session:result') as ClaudeAPI['onResult'],
     onError: on('session:error') as ClaudeAPI['onError'],
+    onVendorAuthRequired: on('session:vendor-auth-required') as ClaudeAPI['onVendorAuthRequired'],
     onWarning: on('session:warning') as ClaudeAPI['onWarning'],
     onMessagesRetracted: on('session:messages-retracted') as ClaudeAPI['onMessagesRetracted'],
     onToolResult: on('session:tool-result') as ClaudeAPI['onToolResult'],

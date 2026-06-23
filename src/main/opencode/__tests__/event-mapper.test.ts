@@ -752,7 +752,7 @@ describe('mapEvent — session.error', () => {
 
   // Wire shape verified vs 1.17.9 /doc: properties.error =
   //   { name, data: { providerID?, message } }  (ProviderAuthError / UnknownError / …)
-  it('maps ProviderAuthError to error kind with re-login hint including vendor name', () => {
+  it('maps ProviderAuthError with providerID to auth-required kind (structured re-login card)', () => {
     const ev = makeEvent('session.error', {
       sessionID: SESSION_ID,
       error: {
@@ -761,10 +761,10 @@ describe('mapEvent — session.error', () => {
       }
     })
     const out = mapEvent(ev, SESSION_ID, accumulators, START_TIME, totalCostRef)
-    expect(out.kind).toBe('error')
-    if (out.kind === 'error') {
-      expect(out.message).toContain('openai')
-      expect(out.message).toContain('Settings')
+    expect(out.kind).toBe('auth-required')
+    if (out.kind === 'auth-required') {
+      expect(out.vendorId).toBe('openai')
+      expect(out.message).toBe('Token expired')
     }
   })
 

@@ -114,7 +114,8 @@ beforeEach(() => {
         voiceInterimTranscript: '',
         btwQuestion: null,
         btwResponse: null,
-        btwLoading: false
+        btwLoading: false,
+        vendorAuthRequired: null
       }
     },
     settings: {

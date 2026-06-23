@@ -106,10 +106,10 @@ export class OpencodeClient {
    * POST /provider/{providerID}/oauth/callback
    * Submit the paste code (method:'code' flow). Returns true on success.
    */
-  oauthCallback(providerId: string, method: number, code: string): Promise<boolean> {
+  oauthCallback(providerId: string, method: number, code?: string): Promise<boolean> {
     return this.post(`/provider/${encodeURIComponent(providerId)}/oauth/callback`, {
       method,
-      code
+      ...(code !== undefined ? { code } : {})
     })
   }
 

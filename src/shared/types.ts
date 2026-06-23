@@ -537,6 +537,7 @@ interface SessionAPI {
   onStatus(cb: (routingId: string, status: SessionStatus) => void): () => void
   onResult(cb: (routingId: string, result: SessionResult) => void): () => void
   onError(cb: (routingId: string, error: string) => void): () => void
+  onVendorAuthRequired(cb: (routingId: string, data: { vendorId: string; message: string }) => void): () => void
   onWarning(cb: (routingId: string, warning: string) => void): () => void
   /** Refusal-fallback retraction — remove these messages from the transcript (docs/protocol/04-system-subtypes.md §4.20) */
   onMessagesRetracted(cb: (routingId: string, data: { messageIds: string[] }) => void): () => void
@@ -747,12 +748,12 @@ interface VendorAuthAPI {
     method: number,
     inputs?: Record<string, string>
   ): Promise<{ url: string; method: 'auto' | 'code'; instructions: string }>
-  /** Submit the OAuth code (paste-code flow). */
+  /** Submit the OAuth code (paste-code flow). Omit code for auto/loopback flow. */
   vendorAuthOauthCallback(
     engineId: EngineId,
     vendorId: string,
     method: number,
-    code: string
+    code?: string
   ): Promise<boolean>
   /** Remove auth credentials for a vendor. */
   vendorAuthRemove(engineId: EngineId, vendorId: string): Promise<void>

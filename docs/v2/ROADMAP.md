@@ -71,12 +71,10 @@ Every item below was re-verified against current code on 2026-06-23. Status lege
 
 | # | Item | Risk | Area | Effort |
 | --- | --- | --- | --- | --- |
-| 2 | opencode **401 re-login** card parity (hint-only today) | 🟠 | opencode auth UI | M |
 | 3 | **Cost display** not gated on `Account.billingType` (hardcoded on) | 🟠 | InputBox / metering | S |
 | 4 | opencode hosted-tools plugin installs **globally** | 🟠 | opencode plugin | S–M |
 | 5 | opencode **reasoning** toggle not surfaced | 🟠 | capabilities + model picker | M |
 | 6 | **Vendor editing UI** + ModelRef-derived vendor at spawn | 🟠 | config plane | M |
-| 7 | opencode in-app **OAuth loopback** (`method:'auto'`) | 🟡 | opencode auth | M |
 | 8 | opencode **voice** input | 🟡 | voice | M |
 | 9 | Fully **engine-neutral lifting** of plan/question/todo/task | 🟡 | tool rendering | M–L |
 | 10 | Fold **FloatingApproval** into shared `<ApprovalButtons>` | ⚪ | tool rendering | S |
@@ -87,36 +85,14 @@ Every item below was re-verified against current code on 2026-06-23. Status lege
 | 15 | Consolidate opencode `/event` to **one subscription per server** | ⚪ | opencode transport | S |
 | 16 | Open the **V2 PR stack** (process, not code) | ⚪ | process | — |
 
-> ✅ **#1 shipped 2026-06-23** (`v2-followup-subagent-questions`) — opencode subagent questions now
-> surface as floating `AskUserQuestion` cards; see *Verified resolved*. #1 is retired as a stable ID
-> (the remaining rows are **not** renumbered).
+> ✅ **#1, #2, #7 shipped 2026-06-23** — subagent questions (#1, `v2-followup-subagent-questions`); the
+> opencode auth-UX cluster (#2 interactive re-login card + #7 native browser OAuth,
+> `v2-followup-opencode-auth-ux`). See *Verified resolved*. Those IDs are retired (remaining rows are
+> **not** renumbered).
 >
 > Background/detached opencode subagents are **not** listed: opencode itself gates them behind
 > `OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS` (`tool/task.ts:98-102`), so it's upstream-experimental,
 > not our deferral. Revisit only if opencode promotes it.
-
----
-
-### 2 — opencode 401 re-login card parity 🟠
-
-**What.** When an opencode vendor's credential expires (401 / `ProviderAuthError`), the mapper emits a
-plain `session:error` with a text hint — *"Authentication required for &lt;vendor&gt;. Re-authorize in
-Settings › Vendors or run `opencode auth login`"* (`event-mapper.ts:289-293`). Claude, by contrast,
-gets a rich **inline re-login card** (`AuthErrorBlock`, `MessageBubble.tsx:547+`) wired to the OAuth
-flow with a one-click Login + "Retry message" (ADR-014). opencode has **no equivalent card** — the
-user must leave the conversation, open Settings › Vendors, re-auth, and re-send manually.
-
-**Why deferred.** Phase 5c explicitly scoped this out ("Full 401-card parity is deferred; just don't
-swallow it"). The non-swallowed hint shipped; the card didn't. *(Note: my earlier audit wrongly called
-this resolved — `AuthErrorBlock` is Claude-only; opencode 401s never reach it.)*
-
-**Definition of done.** A re-login affordance for opencode 401s comparable to Claude's: surface the
-`ProviderAuthError` as a structured auth card (vendor name + a "Re-authenticate" action that opens the
-opencode vendor-auth flow inline, then a "Retry message"), rather than a flat error string. Reuse the
-5c `vendor-auth:*` IPC. Behavior-preserving for Claude's `AuthErrorBlock`.
-
-**References.** `phase-5c-opencode-auth-mcp.md:104-110`, `event-mapper.ts:280-297`,
-`MessageBubble.tsx:547+` (Claude `AuthErrorBlock`), `OpencodeAuthProvider.ts`.
 
 ---
 
@@ -205,26 +181,6 @@ both engines. Migration/back-compat preserved.
 
 **References.** `03-settings-config.md §8.5`, `settings-sections.tsx:511-554`, `SettingsDialog.tsx:77-83`,
 `session.ipc.ts:768-777`.
-
----
-
-### 7 — opencode in-app OAuth loopback (`method:'auto'`) 🟡
-
-**What.** opencode's per-vendor OAuth can return `method:'auto'` (loopback: open browser, listen on
-localhost) or `method:'code'` (paste-code). ClaudeUI passes the method through
-(`OpencodeAuthProvider`/`OpencodeClient`) and handles the **paste-code** path in Settings › Vendors,
-but does not drive the **loopback** flow in-app — for `auto` the user is effectively pushed to the
-paste-code fallback / CLI. Claude's native loopback (ADR-014) has no opencode equivalent.
-
-**Why deferred.** Phase 5c explicitly out-of-scoped loopback ("show a 'use opencode auth' hint";
-in-app: API-key + paste-code only).
-
-**Definition of done.** Drive the `method:'auto'` loopback inside the app for opencode vendors that
-support it (spawn browser, await the server's callback completion, reflect success), falling back to
-paste-code when loopback isn't available. Pairs naturally with #2 (the re-login card).
-
-**References.** `phase-5c-opencode-auth-mcp.md:104`, `04-auth-accounts.md`, `OpencodeAuthProvider.ts`,
-`OpencodeClient.ts` (oauthAuthorize/oauthCallback).
 
 ---
 
@@ -402,6 +358,16 @@ squash/integration strategy for landing the stack. Not code — a process decisi
 Prior session inventories (pre-Phase-8/9) listed these as deferred; the 2026-06-23 sweep confirms they
 shipped. Recorded here so they're not re-raised:
 
+- **opencode auth-UX: native browser OAuth + interactive re-login card** (was ROADMAP #7 🟡 + #2 🟠,
+  shipped 2026-06-23, `v2-followup-opencode-auth-ux`) — `method:'auto'` is driven in-app (open browser →
+  await `oauthCallback` with **no code**; opencode's vendor plugin hosts the loopback/device flow, we
+  host nothing), and an opencode `ProviderAuthError` now surfaces an interactive `VendorAuthRequiredCard`
+  (Re-authenticate runs the native flow; Retry re-sends the last prompt). **Finding:** opencode caches
+  vendor creds per server process (provider `InstanceState` reads `auth.all()` once at init; no
+  invalidation on `setAuth` / `/oauth/callback`), so the post-auth Retry recreates the session to bounce
+  the per-cwd `opencode serve` and re-read `auth.json` — effective for the one-session-per-cwd case; a
+  shared-cwd sibling keeps the server alive so the retry rejoins the cached process (documented
+  limitation). Spec: `docs/v2/followup-opencode-auth-ux.md`.
 - **opencode subagent questions surfaced** (was ROADMAP #1 🔴, shipped 2026-06-23) — a child
   `question.asked` is mapped to an `AskUserQuestion` approval under the **child** tool's callID and
   rendered as a floating `AskUserQuestionBlock`; answering replies via `replyQuestion(requestId)`,

@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
+import { useShallow } from 'zustand/react/shallow'
 import { useActiveSession, useSessionStore } from '../../stores/session-store'
 import type { AppSettings } from '../../stores/session-store'
 import { PermissionsDialog } from '../PermissionsDialog'
@@ -573,6 +574,13 @@ function VendorOpencodeSection(): React.JSX.Element {
   // Track if opencode is installed (non-empty probe result)
   const [opencodeAvailable, setOpencodeAvailable] = useState(false)
   const mountedRef = useRef(true)
+  const { vendorOAuth, authorizeVendorOAuth, cancelVendorOAuth } = useSessionStore(
+    useShallow((s) => ({
+      vendorOAuth: s.vendorOAuth,
+      authorizeVendorOAuth: s.authorizeVendorOAuth,
+      cancelVendorOAuth: s.cancelVendorOAuth
+    }))
+  )
 
   useEffect(() => {
     mountedRef.current = true
@@ -635,33 +643,25 @@ function VendorOpencodeSection(): React.JSX.Element {
 
   const handleOAuthStart = async (
     vendorId: string,
-    methodIdx: number
+    _methodIdx: number
   ): Promise<void> => {
     setOauthError(null)
     try {
-      const result = await window.api.vendorAuthOauthAuthorize('opencode', vendorId, methodIdx)
-      if (result.method === 'auto') {
-        // Delegated: open browser, instruct user to run `opencode auth login`
-        window.open(result.url, '_blank')
-        // Show instructions but do not try to drive the loopback completion
+      const result = await authorizeVendorOAuth('opencode', vendorId)
+      if (result.ok) {
+        // auto flow succeeded — refresh local auth state
+        refresh()
+      } else if (result.needsPaste) {
+        // method:'code' — show paste-code input
         setOauthFlow({
           stage: 'instructions',
-          url: result.url,
-          instructions: result.instructions + '\n\nFor loopback OAuth, complete the flow in the browser then run `opencode auth login` in a terminal.',
-          method: methodIdx,
-          vendorId
-        })
-      } else {
-        // method:'code' — paste-code flow
-        window.open(result.url, '_blank')
-        setOauthFlow({
-          stage: 'instructions',
-          url: result.url,
-          instructions: result.instructions,
-          method: methodIdx,
+          url: result.needsPaste.url,
+          instructions: result.needsPaste.instructions,
+          method: result.needsPaste.method,
           vendorId
         })
       }
+      // If !ok and !needsPaste: auto flow is in progress or failed (shown via vendorOAuth state)
     } catch (err) {
       setOauthError(err instanceof Error ? err.message : 'Failed to start OAuth flow')
     }
@@ -776,6 +776,22 @@ function VendorOpencodeSection(): React.JSX.Element {
                   </div>
                 )}
 
+                {/* Auto OAuth waiting/error state */}
+                {vendorOAuth?.vendorId === vendorId && vendorOAuth.stage === 'waiting' && (
+                  <div className="flex items-center gap-1.5 mt-1">
+                    <span className="text-[10px] text-text-muted/80">Waiting for browser authorization…</span>
+                    <button
+                      onClick={() => cancelVendorOAuth()}
+                      className="px-2 py-0.5 text-[10px] rounded hover:bg-bg-hover text-text-muted/70 transition-colors"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                )}
+                {vendorOAuth?.vendorId === vendorId && vendorOAuth.stage === 'error' && (
+                  <div className="text-[10px] text-red-400 mt-1">Authentication failed. Try again.</div>
+                )}
+
                 {/* OAuth paste-code input */}
                 {oauthFlow.stage === 'instructions' &&
                   oauthFlow.vendorId === vendorId && (
@@ -829,8 +845,8 @@ function VendorOpencodeSection(): React.JSX.Element {
       })}
 
       <div className="text-[10px] text-text-muted/50 leading-relaxed">
-        Credentials are stored in opencode&apos;s own auth.json. For subscription OAuth (loopback),
-        use <span className="font-mono">opencode auth login</span> in a terminal.
+        Credentials are stored in opencode&apos;s own auth.json. OAuth flows open your browser
+        and complete automatically when available.
       </div>
     </div>
   )

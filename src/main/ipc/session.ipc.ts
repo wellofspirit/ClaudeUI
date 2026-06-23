@@ -1787,7 +1787,7 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
         engineId: EngineId,
         vendorId: string,
         method: number,
-        code: string
+        code?: string
       ): Promise<boolean> => {
         const provider = engineAuthRegistry.require(engineId)
         if (!provider.oauthCallback) {

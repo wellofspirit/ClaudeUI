@@ -90,6 +90,7 @@ export type MapperOutput =
   | { kind: 'result'; result: Pick<SessionResult, 'totalCostUsd' | 'durationMs' | 'result'> & { sessionId: string | null } }
   | { kind: 'cost_update'; totalCostUsd: number; messageId: string; tokens?: MessageTokens; engineCostUsd?: number }
   | { kind: 'error'; message: string }
+  | { kind: 'auth-required'; vendorId: string; message: string }
   | { kind: 'subagent-stream'; toolUseId: string; streamType: 'text' | 'thinking'; delta: string }
   | { kind: 'subagent-message'; toolUseId: string; message: ChatMessage }
   | { kind: 'subagent-tool-result'; toolUseId: string; toolResultToolUseId: string; result: string; isError: boolean }
@@ -278,23 +279,28 @@ function handleOwnEvent(
     }
 
     case 'session.error': {
-      // Map opencode session.error → session:error.
-      // ProviderAuthError surfaces as a re-login hint so the user knows to re-auth.
+      // Map opencode session.error → session:error or session:vendor-auth-required.
       // Wire shape (verified vs 1.17.9 /doc): properties.error =
       //   { name: 'ProviderAuthError'|'UnknownError'|…, data: { providerID?, message } }
       const err = props.error as { name?: string; data?: Record<string, unknown> } | undefined
       const name = err?.name
       const data = err?.data ?? {}
-      let errorMsg: string
       if (name === 'ProviderAuthError') {
-        const vendor = (data.providerID as string | undefined) ?? ''
-        errorMsg = vendor
-          ? `Authentication required for ${vendor}. Re-authorize in Settings › Vendors or run \`opencode auth login\` in a terminal.`
-          : 'Authentication required. Re-authorize in Settings › Vendors or run `opencode auth login` in a terminal.'
-      } else {
-        errorMsg = (data.message as string | undefined) ?? 'An error occurred'
+        const vendorId = data.providerID as string | undefined
+        if (vendorId) {
+          return {
+            kind: 'auth-required',
+            vendorId,
+            message: (data.message as string | undefined) ?? 'Authentication required'
+          }
+        }
+        // No providerID — fall back to generic error hint
+        return {
+          kind: 'error',
+          message: 'Authentication required. Re-authorize in Settings › Vendors.'
+        }
       }
-      return { kind: 'error', message: errorMsg }
+      return { kind: 'error', message: (data.message as string | undefined) ?? 'An error occurred' }
     }
 
     case 'message.updated': {
