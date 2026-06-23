@@ -118,6 +118,14 @@ Two review passes under one `v2-phase-7-metering` branch + one commit:
 External models.dev pricing fetch beyond the opt-in toggle/stub; richer per-engine dashboard polish
 beyond the per-engine breakdown; retiring the JSONL files (kept a release as fallback).
 
+**opencode subagent (task child-session) usage metering** (added Phase 8d, ADR-024): child/subagent
+token usage is intentionally **excluded** from the parent's `recordTurnUsage`/`sendMetering` (child
+accumulators are tagged `isChild` and skipped) so subagent tokens are never mis-attributed to the
+parent's model. Metering subagent usage *properly* means recording a per-child `usage_event` under the
+**child's own model** (which can differ from the parent — `task` part `metadata.model` / the child's
+`message.updated.info.model`) with the child sessionId. Deferred to a metering follow-up; this is the
+same state as pre-Phase-8 (child usage was never metered) so it's a reporting gap, not a regression.
+
 ## Testing
 - Pass 1: DB migration + usage_event/window_sample repos (idempotent message_id dedup); pricing table
   `equivalentCostUsd` (per vendor/model + cache split + null for unpriced); the recorder building a

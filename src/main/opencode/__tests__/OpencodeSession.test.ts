@@ -2091,6 +2091,190 @@ describe('OpencodeSession — Phase 8d: subagent dispatch', () => {
     session.dispose()
   })
 
+  // ── Phase 8e: child permission.asked dispatch ────────────────────────────────
+
+  it('(8e) child permission.asked in ask/default mode → session:approval-request (human)', async () => {
+    // The hang-fix path: child emits permission.asked → handleChildEvent surfaces
+    // it as {kind:'approval'} → dispatchMapperOutput routes it to human (ask mode).
+    mockCreateSession.mockResolvedValue({ id: PARENT_SES })
+    mockSubscribeEvents.mockImplementation(
+      streamOf([
+        // Register child via task part
+        {
+          id: 'e1', type: 'message.part.updated',
+          properties: {
+            sessionID: PARENT_SES,
+            part: {
+              id: 'p_task_8e_ask', messageID: 'msg_par_8e_ask',
+              type: 'tool', tool: 'task', callID: TASK_CALL_ID,
+              state: { status: 'running', input: {}, metadata: { sessionId: CHILD_SES } }
+            }
+          }
+        } as OpencodeEvent,
+        // Child permission.asked (e.g. child tries to run bash — ask-gated)
+        {
+          id: 'e2', type: 'permission.asked',
+          properties: {
+            sessionID: CHILD_SES,
+            id: 'perm_child_ask_8e',
+            permission: 'bash',
+            patterns: ['ls'],
+            tool: { callID: 'child_bash_call_8e' },
+            metadata: { command: 'ls' }
+          }
+        } as OpencodeEvent
+        // (No session.idle — we just want to observe the approval-request event)
+      ])
+    )
+
+    const win = new MockWindow() as unknown as BrowserWindow
+    // ask/default mode — auto-mode disabled
+    mockLoadEngineConfig.mockReturnValue({ autoMode: { enabled: false } })
+    const session = new OpencodeSession('r_8e_ask', win, '/tmp', undefined, undefined, 'default')
+    await session.run('go')
+
+    // Wait for session:approval-request to be emitted to the human
+    await vi.waitFor(() => {
+      const calls = (win as unknown as MockWindow).webContents.send.mock.calls
+      return calls.some((c) => c[0] === 'session:approval-request')
+    })
+
+    const approvalCall = (win as unknown as MockWindow).webContents.send.mock.calls
+      .find((c) => c[0] === 'session:approval-request')
+    expect(approvalCall).toBeDefined()
+    // toolName is the permission category ('bash'), NOT 'AskUserQuestion'
+    expect(approvalCall![2].toolName).toBe('bash')
+    // toolUseId is the CHILD tool's callID
+    expect(approvalCall![2].toolUseId).toBe('child_bash_call_8e')
+    // no suggestions
+    expect('suggestions' in approvalCall![2]).toBe(false)
+
+    session.dispose()
+  })
+
+  it('(8e) resolveApproval on child permission allow → replyPermission(once)', async () => {
+    // The child's requestId flows through the existing resolveApproval → replyPermission
+    // path unchanged (opencode routes replyPermission by requestId globally — no child
+    // session handle needed).
+    mockCreateSession.mockResolvedValue({ id: PARENT_SES })
+    mockSubscribeEvents.mockImplementation(
+      streamOf([
+        {
+          id: 'e1', type: 'message.part.updated',
+          properties: {
+            sessionID: PARENT_SES,
+            part: {
+              id: 'p_task_8e_allow', messageID: 'msg_par_8e_allow',
+              type: 'tool', tool: 'task', callID: TASK_CALL_ID,
+              state: { status: 'running', input: {}, metadata: { sessionId: CHILD_SES } }
+            }
+          }
+        } as OpencodeEvent,
+        {
+          id: 'e2', type: 'permission.asked',
+          properties: {
+            sessionID: CHILD_SES,
+            id: 'perm_child_allow_8e',
+            permission: 'read',
+            tool: { callID: 'child_read_call_8e' }
+          }
+        } as OpencodeEvent
+      ])
+    )
+
+    const session = makeSession()
+    await session.run('go')
+
+    // resolveApproval routes by requestId — call it directly and assert the downstream reply.
+    session.resolveApproval('perm_child_allow_8e', 'allow')
+    await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('perm_child_allow_8e', 'once'))
+
+    session.dispose()
+  })
+
+  it('(8e) resolveApproval on child permission deny → replyPermission(reject)', async () => {
+    mockCreateSession.mockResolvedValue({ id: PARENT_SES })
+    mockSubscribeEvents.mockImplementation(
+      streamOf([
+        {
+          id: 'e1', type: 'message.part.updated',
+          properties: {
+            sessionID: PARENT_SES,
+            part: {
+              id: 'p_task_8e_deny', messageID: 'msg_par_8e_deny',
+              type: 'tool', tool: 'task', callID: TASK_CALL_ID,
+              state: { status: 'running', input: {}, metadata: { sessionId: CHILD_SES } }
+            }
+          }
+        } as OpencodeEvent,
+        {
+          id: 'e2', type: 'permission.asked',
+          properties: {
+            sessionID: CHILD_SES,
+            id: 'perm_child_deny_8e',
+            permission: 'bash',
+            tool: { callID: 'child_deny_call_8e' }
+          }
+        } as OpencodeEvent
+      ])
+    )
+
+    const session = makeSession()
+    await session.run('go')
+
+    session.resolveApproval('perm_child_deny_8e', 'deny')
+    await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('perm_child_deny_8e', 'reject'))
+
+    session.dispose()
+  })
+
+  it('(8e) child permission.asked in full/auto mode with auto-mode enabled → handleAutoModeApproval (classifier path)', async () => {
+    // In full+auto-mode, child permission for a non-read-only tool should be
+    // sent to the LLM classifier (handleAutoModeApproval), NOT directly to the human.
+    mockCreateSession.mockResolvedValue({ id: PARENT_SES })
+    // Enable auto-mode
+    mockLoadEngineConfig.mockReturnValue({ autoMode: { enabled: true, twoStageMode: 'fast' } })
+    // Classifier returns 'allow' (no <block>yes</block>)
+    mockPrompt.mockResolvedValue({ parts: [{ type: 'text', text: '<block>no</block>' }] })
+
+    mockSubscribeEvents.mockImplementation(
+      streamOf([
+        {
+          id: 'e1', type: 'message.part.updated',
+          properties: {
+            sessionID: PARENT_SES,
+            part: {
+              id: 'p_task_8e_auto', messageID: 'msg_par_8e_auto',
+              type: 'tool', tool: 'task', callID: TASK_CALL_ID,
+              state: { status: 'running', input: {}, metadata: { sessionId: CHILD_SES } }
+            }
+          }
+        } as OpencodeEvent,
+        {
+          id: 'e2', type: 'permission.asked',
+          properties: {
+            sessionID: CHILD_SES,
+            id: 'perm_child_auto_8e',
+            permission: 'bash',
+            patterns: ['ls'],
+            tool: { callID: 'child_auto_call_8e' }
+          }
+        } as OpencodeEvent
+      ])
+    )
+
+    const win = new MockWindow() as unknown as BrowserWindow
+    const session = new OpencodeSession('r_8e_auto', win, '/tmp', undefined, undefined, 'full')
+    await session.run('go')
+
+    // In auto mode the classifier is invoked (mockPrompt), then replyPermission(once)
+    await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('perm_child_auto_8e', 'once'))
+    // The classifier (mockPrompt) must have been called — NOT auto-sent to the human
+    expect(mockPrompt).toHaveBeenCalled()
+
+    session.dispose()
+  })
+
   it('does NOT meter child (subagent) tokens against the parent model', async () => {
     // A child assistant message.updated carrying tokens, then the PARENT
     // session.idle. The child's tokens must NOT be recorded as a usage_event

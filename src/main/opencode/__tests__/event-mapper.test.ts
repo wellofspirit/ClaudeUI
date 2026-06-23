@@ -1071,3 +1071,177 @@ describe('mapEvent — Phase 8d: unknown foreign session → ignore', () => {
     expect(out.kind).toBe('ignore')
   })
 })
+
+// ── Phase 8e — child session permission.asked (hang fix) ─────────────────────
+
+describe('mapEvent — Phase 8e: child permission.asked → approval (hang fix)', () => {
+  const CHILD_ID = 'ses_child_8e'
+  const CHILD_CALL_ID = 'child_call_8e'
+
+  it('child permission.asked → {kind:approval} with child tool callID and no suggestions', () => {
+    // The key hang fix: a child subagent hitting an ask-gated tool emits
+    // permission.asked under the child sessionId. Without this case it would
+    // fall through to handleChildEvent default:ignore → child blocks → parent hangs.
+    const childSessions = new Map([[CHILD_ID, PARENT_CALL_ID]])
+    const ev = makeEvent('permission.asked', {
+      sessionID: CHILD_ID,
+      id: 'perm_child_1',
+      permission: 'bash',
+      patterns: ['echo hi'],
+      tool: { callID: CHILD_CALL_ID },
+      metadata: { command: 'echo hi' }
+    })
+    const out = mapEvent(ev, SESSION_ID, new Map(), START_TIME, { value: 0 }, childSessions)
+
+    expect(out.kind).toBe('approval')
+    if (out.kind !== 'approval') throw new Error('expected approval')
+
+    // requestId from props.id
+    expect(out.approval.requestId).toBe('perm_child_1')
+    // toolName from props.permission
+    expect(out.approval.toolName).toBe('bash')
+    // input from props.metadata
+    expect(out.approval.input).toEqual({ command: 'echo hi' })
+
+    // CRITICAL — toolUseId must be the CHILD tool's callID, NOT the parent task callID.
+    // FloatingApproval's unmatched-approval filter hides the card when toolUseId matches
+    // a callID already in the rendered main assistant blocks (the parent task part is there).
+    // The child callID only appears inside subagent blocks → card shows.
+    expect(out.approval.toolUseId).toBe(CHILD_CALL_ID)
+    expect(out.approval.toolUseId).not.toBe(PARENT_CALL_ID)
+
+    // CRITICAL — no suggestions field. A persisted allow rule compiles into the
+    // parent's ruleset only; deriveSubagentSessionPermission propagates parent *deny*
+    // rules, NOT allows, so the persisted allow would never stop the child re-asking.
+    // Including it would be misleading — omit it entirely.
+    expect('suggestions' in out.approval).toBe(false)
+  })
+
+  it('child permission.asked for doom_loop category → approval with no suggestions (unmappable category)', () => {
+    const childSessions = new Map([[CHILD_ID, PARENT_CALL_ID]])
+    const ev = makeEvent('permission.asked', {
+      sessionID: CHILD_ID,
+      id: 'perm_child_dl',
+      permission: 'doom_loop',
+      patterns: ['*'],
+      tool: { callID: CHILD_CALL_ID }
+    })
+    const out = mapEvent(ev, SESSION_ID, new Map(), START_TIME, { value: 0 }, childSessions)
+
+    expect(out.kind).toBe('approval')
+    if (out.kind !== 'approval') throw new Error('expected approval')
+    expect(out.approval.toolName).toBe('doom_loop')
+    expect('suggestions' in out.approval).toBe(false)
+  })
+
+  it('child permission.asked with no tool → approval with toolUseId=undefined', () => {
+    // tool field may be absent in some opencode versions — must not crash.
+    const childSessions = new Map([[CHILD_ID, PARENT_CALL_ID]])
+    const ev = makeEvent('permission.asked', {
+      sessionID: CHILD_ID,
+      id: 'perm_child_notool',
+      permission: 'read'
+      // no `tool` field
+    })
+    const out = mapEvent(ev, SESSION_ID, new Map(), START_TIME, { value: 0 }, childSessions)
+
+    expect(out.kind).toBe('approval')
+    if (out.kind !== 'approval') throw new Error('expected approval')
+    expect(out.approval.toolUseId).toBeUndefined()
+  })
+
+  it('child permission.asked for UNREGISTERED child session → ignore (treated as foreign)', () => {
+    // A permission.asked from a session not in childSessions must be ignored —
+    // the cross-session filter catches it before handleChildEvent is called.
+    const childSessions = new Map([[CHILD_ID, PARENT_CALL_ID]])
+    const ev = makeEvent('permission.asked', {
+      sessionID: 'ses_UNREGISTERED',
+      id: 'perm_unregistered',
+      permission: 'bash',
+      tool: { callID: 'call_x' }
+    })
+    const out = mapEvent(ev, SESSION_ID, new Map(), START_TIME, { value: 0 }, childSessions)
+    expect(out.kind).toBe('ignore')
+  })
+
+  it('own-session permission.asked still emits suggestions (unchanged)', () => {
+    // Guard: adding the child case must not break the own-session path.
+    const ev = makeEvent('permission.asked', {
+      sessionID: SESSION_ID,
+      id: 'perm_own_1',
+      permission: 'bash',
+      patterns: ['echo hi'],
+      tool: { callID: 'own_call_1' }
+    })
+    const out = mapEvent(ev, SESSION_ID, new Map(), START_TIME, { value: 0 })
+
+    expect(out.kind).toBe('approval')
+    if (out.kind !== 'approval') throw new Error('expected approval')
+    // Own-session approval DOES get suggestions (persist-rule offer is valid for the parent).
+    expect(out.approval.suggestions).toBeDefined()
+    expect(out.approval.suggestions!.length).toBeGreaterThan(0)
+  })
+})
+
+// ── Phase 8e Part 2 — child-event ordering guarantee (no buffering needed) ───
+
+describe('mapEvent — Phase 8e Part 2: child-event ordering (registration before transcript)', () => {
+  // Verified vs opencode 1.17.9 task.ts:
+  //   sessions.create(child) →
+  //   ctx.metadata({ metadata: { sessionId } })  ← publishes message.part.updated (this event)
+  //   → background.start(runTask)                ← runTask → ops.prompt(child) → child transcript
+  //
+  // ctx.metadata is yield*-ed (Effect fiber await) before ops.prompt is ever scheduled.
+  // The SSE stream is a single FIFO queue. Therefore:
+  //   Registration event (task part with state.metadata.sessionId) ALWAYS precedes
+  //   any child transcript events (message.updated / permission.asked / session.idle).
+  // No buffering needed — the happy-path ordering is structurally guaranteed.
+
+  it('task-part event registers the child, then a child message.part.updated routes to subagent-message (happy-path order)', () => {
+    const childSessions = new Map<string, string>()
+    const accumulators = new Map<string, import('../event-mapper').MessageAccumulator>()
+
+    // Step 1: own-session task part arrives — registers the child (simulates ctx.metadata publish)
+    const regEvent = makeEvent('message.part.updated', {
+      sessionID: SESSION_ID,
+      part: {
+        id: 'p_task_8e',
+        messageID: 'msg_parent_8e',
+        type: 'tool',
+        tool: 'task',
+        callID: PARENT_CALL_ID,
+        state: {
+          status: 'running',
+          input: { description: 'subwork' },
+          metadata: { sessionId: CHILD_SESSION_ID }
+        }
+      }
+    })
+    const regOut = mapEvent(regEvent, SESSION_ID, accumulators, START_TIME, { value: 0 }, childSessions)
+    // Registration must succeed (parent message emitted + child registered)
+    expect(regOut.kind).toBe('message')
+    expect(childSessions.has(CHILD_SESSION_ID)).toBe(true)
+
+    // Step 2: child transcript event arrives AFTER registration (FIFO guarantee from task.ts)
+    // This is what used to be at risk of a race — confirmed not a race.
+    mapEvent(
+      makeEvent('message.updated', {
+        sessionID: CHILD_SESSION_ID,
+        info: { id: 'child_msg_8e', role: 'assistant' }
+      }),
+      SESSION_ID, accumulators, START_TIME, { value: 0 }, childSessions
+    )
+    const childMsgEvent = makeEvent('message.part.updated', {
+      sessionID: CHILD_SESSION_ID,
+      part: { id: 'cp_8e', messageID: 'child_msg_8e', type: 'text', text: 'child result' }
+    })
+    const childOut = mapEvent(childMsgEvent, SESSION_ID, accumulators, START_TIME, { value: 0 }, childSessions)
+
+    // Must route to subagent-message (not ignored) — proves registration preceded the transcript event
+    expect(childOut.kind).toBe('subagent-message')
+    if (childOut.kind !== 'subagent-message') throw new Error('expected subagent-message')
+    expect(childOut.toolUseId).toBe(PARENT_CALL_ID)
+    expect(childOut.message.id).toBe('child_msg_8e')
+    expect(childOut.message.content[0]).toMatchObject({ type: 'text', text: 'child result' })
+  })
+})

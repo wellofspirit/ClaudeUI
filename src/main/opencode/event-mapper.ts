@@ -200,8 +200,19 @@ function handleOwnEvent(
         // Child-session registration: when a task tool part reports its child
         // sessionId, register it so future events from that child are routed to
         // handleChildEvent with the correct parent toolUseId (= callID).
-        // Race note: child events that arrive before this registration are dropped
-        // (acceptable for MVP — noted as a follow-up in the spec).
+        //
+        // Ordering guarantee (verified vs opencode 1.17.9 task.ts):
+        //   sessions.create(child)
+        //   → ctx.metadata({ metadata: { sessionId } })   ← publishes this event (yield*)
+        //   → background.start(runTask)                    ← runTask calls ops.prompt(child)
+        //
+        // ctx.metadata is yield*-ed (awaited synchronously in the Effect fiber) before
+        // ops.prompt(child) is ever scheduled, so the registration event is emitted
+        // and flushed to the single FIFO SSE stream BEFORE the child can emit any
+        // transcript events (message.updated / message.part.updated / permission.asked).
+        // No buffering is needed: child transcript events are always processed after
+        // this registration is in place. (opencode/packages/opencode/src/tool/task.ts
+        // lines 178–259 are the authoritative reference.)
         if (partType === 'tool' && (part.tool as string) === 'task') {
           const childSessionId = (state?.metadata as Record<string, unknown> | undefined)?.sessionId as string | undefined
           const callId = part.callID as string | undefined
@@ -499,6 +510,43 @@ function handleChildEvent(
         summary: ''
       }
       return { kind: 'task-notification', notification }
+    }
+
+    case 'permission.asked': {
+      // A child subagent hit an ask-gated tool. Surface it as a PendingApproval so
+      // the user can unblock it — otherwise the child fiber stays suspended and the
+      // synchronous parent turn hangs.
+      //
+      // Two deliberate differences from the own-session permission.asked case:
+      //
+      //   1. toolUseId = tool?.callID (THE CHILD TOOL'S own callID, NOT the parent
+      //      task part's toolUseId stored in `toolUseId` above). The parent task
+      //      toolUseId is already inside the rendered main assistant blocks, so
+      //      FloatingApproval's unmatched-approval filter would immediately hide the
+      //      card. The child tool's callID only appears inside the subagent blocks,
+      //      so the card shows correctly.
+      //
+      //   2. `suggestions` (persist-rule) field is OMITTED. An "always allow" rule
+      //      would be persisted to the shared Claude permission store → compiled into
+      //      the parent's ruleset next spawn, but `deriveSubagentSessionPermission`
+      //      (opencode 1.17.9) only copies parent *deny* rules to children — so the
+      //      persisted allow would NOT stop the child re-asking. Including the
+      //      suggestion would be misleading. Child approvals are once / session / deny
+      //      only.
+      const id = props.id as string | undefined
+      const permission = props.permission as string | undefined
+      const tool = props.tool as { messageID?: string; callID?: string } | undefined
+      if (!id || !permission) return { kind: 'ignore' }
+
+      const approval: import('../../shared/types').PendingApproval = {
+        requestId: id,
+        // Child tool's own callID — see note 1 above.
+        toolUseId: tool?.callID,
+        toolName: permission,
+        input: (props.metadata as Record<string, unknown>) ?? {}
+        // No `suggestions` — see note 2 above.
+      }
+      return { kind: 'approval', approval }
     }
 
     case 'session.error': {
