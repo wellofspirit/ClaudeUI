@@ -1,4 +1,5 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
+import { useShallow } from 'zustand/react/shallow'
 import { useActiveSession, useSessionStore } from '../../stores/session-store'
 import type { AppSettings } from '../../stores/session-store'
 import { PermissionsDialog } from '../PermissionsDialog'
@@ -6,13 +7,22 @@ import type {
   ClaudePermissions,
   ProxySettings,
   VoiceLanguageCode,
-  AccountsState
+  AccountsState,
+  EngineConfig,
+  VendorConfig,
+  SandboxSettings,
+  VendorAuthMap,
+  VendorAuthOption,
+  AutoModeConfig,
+  ModelInfo
 } from '../../../../shared/types'
 import { VOICE_LANGUAGES } from '../../../../shared/types'
 import {
   supportedEffortLevels,
   defaultEffort,
-  type EffortLevel
+  type EffortLevel,
+  type AutonomyMode,
+  CLAUDE_ENGINE_CAPABILITIES
 } from '../../../../shared/model-capabilities'
 import {
   SettingsToggle,
@@ -20,7 +30,8 @@ import {
   SettingsSelect,
   SettingsTextarea,
   SandboxListSetting,
-  ChatRetentionSetting
+  ChatRetentionSetting,
+  InfoTooltip
 } from './settings-controls'
 
 // ── Section definitions ──────────────────────────────────────────────
@@ -29,7 +40,14 @@ export interface SettingItem {
   key: string
   label: string
   keywords?: string // extra search terms
-  render: (settings: AppSettings, update: (p: Partial<AppSettings>) => void) => React.JSX.Element
+  render: (
+    settings: AppSettings,
+    update: (p: Partial<AppSettings>) => void,
+    engineConfig: EngineConfig,
+    updateEngineConfig: (p: Partial<EngineConfig>) => void,
+    vendorConfig: VendorConfig,
+    updateVendorConfig: (p: Partial<VendorConfig>) => void
+  ) => React.JSX.Element
 }
 
 export interface Section {
@@ -37,6 +55,34 @@ export interface Section {
   label: string
   icon: React.JSX.Element
   items: SettingItem[]
+}
+
+// ── Default engine/vendor config values ─────────────────────────────
+
+const DEFAULT_SANDBOX: SandboxSettings = {
+  enabled: false,
+  autoAllowBashIfSandboxed: false,
+  allowUnsandboxedCommands: false,
+  network: {
+    restrictNetwork: false,
+    allowLocalBinding: false,
+    allowedDomains: [],
+    allowManagedDomainsOnly: false,
+    allowAllUnixSockets: false,
+    allowUnixSockets: []
+  },
+  filesystem: { allowWrite: [], denyWrite: [], denyRead: [] },
+  excludedCommands: []
+}
+
+const DEFAULT_PROXY: ProxySettings = {
+  enabled: false,
+  type: 'http',
+  hostname: '',
+  port: 8080,
+  username: '',
+  password: '',
+  proxySubprocesses: false
 }
 
 // ── Proxy test connection button ─────────────────────────────────────
@@ -288,6 +334,539 @@ function AccountsSetting(): React.JSX.Element {
       )}
     </div>
   )
+}
+
+// ── Autonomy mode picker ─────────────────────────────────────────────
+
+const AUTONOMY_TO_PERMISSION: Record<AutonomyMode, string> = {
+  plan: 'plan',
+  ask: 'default',
+  autoEdit: 'acceptEdits',
+  full: 'auto'
+}
+
+const PERMISSION_TO_AUTONOMY: Record<string, AutonomyMode> = {
+  plan: 'plan',
+  default: 'ask',
+  acceptEdits: 'autoEdit',
+  auto: 'full',
+  localAuto: 'full'
+}
+
+const AUTONOMY_LABELS: Record<AutonomyMode, string> = {
+  plan: 'Read-only (Plan)',
+  ask: 'Ask (default)',
+  autoEdit: 'Auto-edit files',
+  full: 'Full auto'
+}
+
+function AutonomyModePicker(): React.JSX.Element {
+  const [perms, setPerms] = useState<ClaudePermissions | null>(null)
+  const availableModes = CLAUDE_ENGINE_CAPABILITIES.autonomyModes
+
+  useEffect(() => {
+    window.api
+      .loadClaudePermissions('user')
+      .then(setPerms)
+      .catch(() => {})
+  }, [])
+
+  const currentMode: AutonomyMode = perms?.defaultMode
+    ? (PERMISSION_TO_AUTONOMY[perms.defaultMode] ?? 'ask')
+    : 'ask'
+
+  const handleChange = async (mode: AutonomyMode): Promise<void> => {
+    if (!perms) return
+    const next: ClaudePermissions = { ...perms, defaultMode: AUTONOMY_TO_PERMISSION[mode] }
+    setPerms(next)
+    await window.api.saveClaudePermissions('user', next)
+  }
+
+  return (
+    <div className="px-3 py-1.5 text-[13px] text-text-secondary">
+      <div className="mb-1.5">Autonomy mode</div>
+      <div className="space-y-1">
+        {availableModes.map((mode) => (
+          <label
+            key={mode}
+            className="flex items-center gap-2 cursor-pointer rounded-md px-2 py-1 hover:bg-bg-hover"
+          >
+            <input
+              type="radio"
+              name="autonomyMode"
+              value={mode}
+              checked={currentMode === mode}
+              onChange={() => void handleChange(mode)}
+              className="accent-accent"
+            />
+            <span className="text-[12px] text-text-secondary">{AUTONOMY_LABELS[mode]}</span>
+          </label>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+// ── opencode auto-mode (Full) LLM gatekeeper settings (ADR-023) ──────
+
+const TWO_STAGE_OPTIONS: { value: 'both' | 'fast' | 'thinking'; label: string }[] = [
+  { value: 'both', label: 'Both' },
+  { value: 'fast', label: 'Fast' },
+  { value: 'thinking', label: 'Thinking' }
+]
+
+/**
+ * Self-contained (loads/saves its own opencode EngineConfig via window.api —
+ * SettingsDialog only wires the 'claude' engine config). Configures the auto-mode
+ * LLM permission gatekeeper that runs in Full autonomy on opencode. See ADR-023.
+ */
+function OpencodeAutoModeSection(): React.JSX.Element {
+  const [engineCfg, setEngineCfg] = useState<EngineConfig | null>(null)
+  const [models, setModels] = useState<ModelInfo[]>([])
+  const [available, setAvailable] = useState(false)
+
+  useEffect(() => {
+    window.api
+      .loadEngineConfig('opencode')
+      .then(setEngineCfg)
+      .catch(() => setEngineCfg({}))
+    window.api
+      .getEngineModels()
+      .then((groups) => {
+        const oc = groups.filter((g) => g.engineId === 'opencode')
+        setAvailable(oc.length > 0)
+        setModels(oc.flatMap((g) => g.models))
+      })
+      .catch(() => {})
+  }, [])
+
+  if (engineCfg === null) {
+    return <div className="px-3 py-1.5 text-[13px] text-text-muted">Loading…</div>
+  }
+  if (!available) {
+    return (
+      <div className="px-3 py-2 text-[12px] text-text-muted/70 leading-relaxed">
+        opencode is not installed. Auto mode gates risky tool calls for opencode sessions in Full
+        autonomy.
+      </div>
+    )
+  }
+
+  const auto = engineCfg.autoMode ?? {}
+  const enabled = auto.enabled !== false // default ON
+  const judgeModel = auto.judgeModel ?? ''
+  const twoStageMode = auto.twoStageMode ?? 'both'
+
+  const update = (patch: Partial<AutoModeConfig>): void => {
+    const next: EngineConfig = { ...engineCfg, autoMode: { ...auto, ...patch } }
+    setEngineCfg(next)
+    window.api.saveEngineConfig('opencode', next).catch(() => {})
+  }
+
+  return (
+    <div className="space-y-1">
+      <SettingsToggle
+        label="Auto mode (LLM gatekeeper)"
+        checked={enabled}
+        onChange={(v) => update({ enabled: v })}
+        tooltip="In Full autonomy, an LLM judges each risky tool call (bash / web fetch) instead of prompting you; reads and edits are auto-allowed. Fails closed to a human prompt when unsure or unavailable. When off, Full prompts you like Ask mode. See ADR-023."
+      />
+      {enabled && (
+        <>
+          <div className="px-3 py-1.5 text-[13px] text-text-secondary">
+            <div className="mb-1 flex items-center gap-1">
+              Judge model
+              <InfoTooltip text="The model that decides allow/block. Defaults to the session's own model. Pick a cheaper model to reduce cost, or a stronger one for safety-critical work." />
+            </div>
+            <select
+              value={judgeModel}
+              onChange={(e) => update({ judgeModel: e.target.value || undefined })}
+              className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors"
+            >
+              <option value="">Same as session model (default)</option>
+              {models.map((m) => (
+                <option key={m.value} value={m.value}>
+                  {m.displayName || m.value}
+                </option>
+              ))}
+            </select>
+          </div>
+          <SettingsSelect
+            label="Two-stage judging"
+            value={twoStageMode}
+            options={TWO_STAGE_OPTIONS}
+            onChange={(v) => update({ twoStageMode: v })}
+          />
+          <div className="px-3 pb-1 text-[10px] text-text-muted/50 leading-relaxed">
+            Applies to Full autonomy on opencode. The judge sees tool calls, not their output. No
+            per-turn call cap (parity with Claude) — pick a cheaper judge model if cost matters.
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
+// ── Vendor Anthropic display (read-only) ─────────────────────────────
+
+function VendorAnthropicDisplaySection(): React.JSX.Element {
+  const [vendorCfg, setVendorCfg] = useState<VendorConfig | null>(null)
+
+  useEffect(() => {
+    window.api
+      .loadVendorConfig('anthropic')
+      .then(setVendorCfg)
+      .catch(() => {})
+  }, [])
+
+  const endpoint = vendorCfg?.endpoint
+  const modelOverride = vendorCfg?.modelOverride
+
+  return (
+    <div className="px-3 py-1.5 text-[13px] text-text-secondary space-y-2">
+      <div>
+        <div className="text-[11px] text-text-muted uppercase tracking-wide mb-1">Endpoint</div>
+        {endpoint?.enabled ? (
+          <div className="text-[12px] font-mono text-text-secondary truncate">
+            {endpoint.baseUrl || '(none)'}
+          </div>
+        ) : (
+          <div className="text-[11px] text-text-muted/60">Default Anthropic API</div>
+        )}
+      </div>
+      <div>
+        <div className="text-[11px] text-text-muted uppercase tracking-wide mb-1">Model override</div>
+        {modelOverride?.enabled ? (
+          <div className="text-[11px] text-text-muted space-y-0.5">
+            {modelOverride.model && <div>Model: <span className="font-mono text-text-secondary">{modelOverride.model}</span></div>}
+            {modelOverride.sonnetModel && <div>Sonnet: <span className="font-mono text-text-secondary">{modelOverride.sonnetModel}</span></div>}
+            {modelOverride.opusModel && <div>Opus: <span className="font-mono text-text-secondary">{modelOverride.opusModel}</span></div>}
+            {modelOverride.haikuModel && <div>Haiku: <span className="font-mono text-text-secondary">{modelOverride.haikuModel}</span></div>}
+          </div>
+        ) : (
+          <div className="text-[11px] text-text-muted/60">No override</div>
+        )}
+      </div>
+      <div className="text-[10px] text-text-muted/50 leading-relaxed">
+        Edit these in engines/claude.json and vendors/anthropic.json under ~/.claude/ui/. Changes apply on next session start.
+      </div>
+    </div>
+  )
+}
+
+// ── Vendor opencode auth UI ──────────────────────────────────────────
+
+type VendorOAuthFlowState =
+  | { stage: 'idle' }
+  | { stage: 'instructions'; url: string; instructions: string; method: number; vendorId: string }
+  | { stage: 'submitting'; vendorId: string }
+
+function VendorOpencodeSection(): React.JSX.Element {
+  const [authMap, setAuthMap] = useState<VendorAuthMap | null>(null)
+  const [options, setOptions] = useState<Record<string, VendorAuthOption[]>>({})
+  const [loading, setLoading] = useState(true)
+  const [apiKeys, setApiKeys] = useState<Record<string, string>>({})
+  const [saving, setSaving] = useState<Record<string, boolean>>({})
+  const [removing, setRemoving] = useState<Record<string, boolean>>({})
+  const [oauthFlow, setOauthFlow] = useState<VendorOAuthFlowState>({ stage: 'idle' })
+  const [oauthCode, setOauthCode] = useState('')
+  const [oauthError, setOauthError] = useState<string | null>(null)
+  // Track if opencode is installed (non-empty probe result)
+  const [opencodeAvailable, setOpencodeAvailable] = useState(false)
+  const mountedRef = useRef(true)
+  const { vendorOAuth, authorizeVendorOAuth, cancelVendorOAuth } = useSessionStore(
+    useShallow((s) => ({
+      vendorOAuth: s.vendorOAuth,
+      authorizeVendorOAuth: s.authorizeVendorOAuth,
+      cancelVendorOAuth: s.cancelVendorOAuth
+    }))
+  )
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    Promise.all([
+      window.api.vendorAuthProbe('opencode').catch(() => ({})) as Promise<VendorAuthMap>,
+      window.api.vendorAuthListOptions('opencode').catch(() => ({})) as Promise<Record<string, VendorAuthOption[]>>
+    ]).then(([map, opts]) => {
+      if (cancelled) return
+      const available = Object.keys(map).length > 0
+      setOpencodeAvailable(available)
+      setAuthMap(map)
+      setOptions(opts)
+      setLoading(false)
+    })
+    return () => { cancelled = true }
+  }, [])
+
+  const refresh = (): void => {
+    Promise.all([
+      window.api.vendorAuthProbe('opencode').catch(() => ({})) as Promise<VendorAuthMap>,
+      window.api.vendorAuthListOptions('opencode').catch(() => ({})) as Promise<Record<string, VendorAuthOption[]>>
+    ]).then(([map, opts]) => {
+      if (!mountedRef.current) return
+      setAuthMap(map)
+      setOptions(opts)
+    })
+  }
+
+  const handleSaveKey = async (vendorId: string): Promise<void> => {
+    const key = (apiKeys[vendorId] ?? '').trim()
+    if (!key) return
+    setSaving((prev) => ({ ...prev, [vendorId]: true }))
+    try {
+      await window.api.vendorAuthSetKey('opencode', vendorId, key)
+      setApiKeys((prev) => ({ ...prev, [vendorId]: '' }))
+      refresh()
+    } catch (err) {
+      // silent failure — user can retry
+    } finally {
+      if (mountedRef.current) setSaving((prev) => ({ ...prev, [vendorId]: false }))
+    }
+  }
+
+  const handleRemove = async (vendorId: string): Promise<void> => {
+    setRemoving((prev) => ({ ...prev, [vendorId]: true }))
+    try {
+      await window.api.vendorAuthRemove('opencode', vendorId)
+      refresh()
+    } catch (err) {
+      // silent failure
+    } finally {
+      if (mountedRef.current) setRemoving((prev) => ({ ...prev, [vendorId]: false }))
+    }
+  }
+
+  const handleOAuthStart = async (
+    vendorId: string,
+    _methodIdx: number
+  ): Promise<void> => {
+    setOauthError(null)
+    try {
+      const result = await authorizeVendorOAuth('opencode', vendorId)
+      if (result.ok) {
+        // auto flow succeeded — refresh local auth state
+        refresh()
+      } else if (result.needsPaste) {
+        // method:'code' — show paste-code input
+        setOauthFlow({
+          stage: 'instructions',
+          url: result.needsPaste.url,
+          instructions: result.needsPaste.instructions,
+          method: result.needsPaste.method,
+          vendorId
+        })
+      }
+      // If !ok and !needsPaste: auto flow is in progress or failed (shown via vendorOAuth state)
+    } catch (err) {
+      setOauthError(err instanceof Error ? err.message : 'Failed to start OAuth flow')
+    }
+  }
+
+  const handleOAuthSubmit = async (): Promise<void> => {
+    if (oauthFlow.stage !== 'instructions') return
+    const { vendorId, method } = oauthFlow
+    const code = oauthCode.trim()
+    if (!code) return
+    setOauthFlow({ stage: 'submitting', vendorId })
+    try {
+      await window.api.vendorAuthOauthCallback('opencode', vendorId, method, code)
+      setOauthFlow({ stage: 'idle' })
+      setOauthCode('')
+      refresh()
+    } catch (err) {
+      setOauthError(err instanceof Error ? err.message : 'OAuth callback failed')
+      setOauthFlow({ stage: 'idle' })
+    }
+  }
+
+  if (loading) {
+    return (
+      <div className="px-3 py-1.5 text-[11px] text-text-muted/60">Loading...</div>
+    )
+  }
+
+  if (!opencodeAvailable) {
+    return (
+      <div className="px-3 py-1.5 text-[11px] text-text-muted/60 leading-relaxed">
+        opencode is not installed or not running. Install it to configure vendor authentication.
+      </div>
+    )
+  }
+
+  const vendorIds = Array.from(
+    new Set([...Object.keys(authMap ?? {}), ...Object.keys(options)])
+  ).sort()
+
+  return (
+    <div className="px-3 py-1.5 space-y-4 text-[13px] text-text-secondary">
+      {oauthError && (
+        <div className="text-[11px] text-red-400 leading-relaxed">{oauthError}</div>
+      )}
+      {vendorIds.map((vendorId) => {
+        const status = authMap?.[vendorId]
+        const vendorOptions = options[vendorId] ?? []
+        const isAuth = status?.authState === 'authenticated'
+        const isFree = status?.billingType === 'free'
+        const apiOption = vendorOptions.find((o) => o.type === 'api')
+        const oauthOptions = vendorOptions.filter((o) => o.type === 'oauth')
+        const firstOauthIdx = vendorOptions.indexOf(oauthOptions[0] ?? vendorOptions[0])
+
+        return (
+          <div key={vendorId} className="border border-border/30 rounded-md p-2 space-y-1.5">
+            <div className="flex items-center justify-between">
+              <div className="font-medium text-[12px]">{vendorId}</div>
+              <div className="flex items-center gap-1.5">
+                {status && (
+                  <span
+                    className={`text-[10px] px-1.5 py-0.5 rounded ${
+                      isAuth
+                        ? 'bg-green-500/10 text-green-400'
+                        : 'bg-yellow-500/10 text-yellow-500'
+                    }`}
+                  >
+                    {isAuth ? 'Authenticated' : 'Not configured'}
+                  </span>
+                )}
+                {isFree && (
+                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-400">
+                    Free
+                  </span>
+                )}
+              </div>
+            </div>
+
+            {!isFree && (
+              <>
+                {/* API key form */}
+                {apiOption && (
+                  <div className="flex items-center gap-1.5">
+                    <input
+                      type="password"
+                      placeholder={apiOption.prompts?.[0]?.message ?? 'API key'}
+                      value={apiKeys[vendorId] ?? ''}
+                      onChange={(e) =>
+                        setApiKeys((prev) => ({ ...prev, [vendorId]: e.target.value }))
+                      }
+                      className="flex-1 px-2 py-1 text-[11px] rounded bg-bg-input border border-border/40 text-text-primary placeholder:text-text-muted/50 focus:outline-none focus:border-accent/60"
+                    />
+                    <button
+                      onClick={() => void handleSaveKey(vendorId)}
+                      disabled={saving[vendorId] || !(apiKeys[vendorId] ?? '').trim()}
+                      className="px-2 py-1 text-[11px] rounded bg-accent/20 hover:bg-accent/30 text-accent disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                    >
+                      {saving[vendorId] ? 'Saving…' : 'Save'}
+                    </button>
+                  </div>
+                )}
+
+                {/* OAuth button (paste-code flow only in-app) */}
+                {oauthOptions.length > 0 && (
+                  <div>
+                    <button
+                      onClick={() => void handleOAuthStart(vendorId, firstOauthIdx)}
+                      className="px-2 py-1 text-[11px] rounded bg-accent/20 hover:bg-accent/30 text-accent transition-colors"
+                    >
+                      {oauthOptions[0]?.label ?? 'Sign in with OAuth'}
+                    </button>
+                  </div>
+                )}
+
+                {/* Auto OAuth waiting/error state */}
+                {vendorOAuth?.vendorId === vendorId && vendorOAuth.stage === 'waiting' && (
+                  <div className="flex items-center gap-1.5 mt-1">
+                    <span className="text-[10px] text-text-muted/80">Waiting for browser authorization…</span>
+                    <button
+                      onClick={() => cancelVendorOAuth()}
+                      className="px-2 py-0.5 text-[10px] rounded hover:bg-bg-hover text-text-muted/70 transition-colors"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                )}
+                {vendorOAuth?.vendorId === vendorId && vendorOAuth.stage === 'error' && (
+                  <div className="text-[10px] text-red-400 mt-1">Authentication failed. Try again.</div>
+                )}
+
+                {/* OAuth paste-code input */}
+                {oauthFlow.stage === 'instructions' &&
+                  oauthFlow.vendorId === vendorId && (
+                    <div className="space-y-1.5 mt-1">
+                      <div className="text-[10px] text-text-muted/70 leading-relaxed whitespace-pre-wrap">
+                        {oauthFlow.instructions}
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <input
+                          type="text"
+                          placeholder="Paste code here"
+                          value={oauthCode}
+                          onChange={(e) => setOauthCode(e.target.value)}
+                          className="flex-1 px-2 py-1 text-[11px] rounded bg-bg-input border border-border/40 text-text-primary placeholder:text-text-muted/50 focus:outline-none focus:border-accent/60"
+                        />
+                        <button
+                          onClick={() => void handleOAuthSubmit()}
+                          disabled={!oauthCode.trim()}
+                          className="px-2 py-1 text-[11px] rounded bg-accent/20 hover:bg-accent/30 text-accent disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                        >
+                          Submit
+                        </button>
+                        <button
+                          onClick={() => { setOauthFlow({ stage: 'idle' }); setOauthCode('') }}
+                          className="px-2 py-1 text-[11px] rounded hover:bg-bg-hover text-text-muted transition-colors"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                {oauthFlow.stage === 'submitting' && oauthFlow.vendorId === vendorId && (
+                  <div className="text-[10px] text-text-muted/60">Submitting code…</div>
+                )}
+
+                {/* Remove button */}
+                {isAuth && (
+                  <button
+                    onClick={() => void handleRemove(vendorId)}
+                    disabled={removing[vendorId]}
+                    className="text-[10px] text-text-muted/60 hover:text-red-400 transition-colors disabled:opacity-40"
+                  >
+                    {removing[vendorId] ? 'Removing…' : 'Remove credentials'}
+                  </button>
+                )}
+              </>
+            )}
+          </div>
+        )
+      })}
+
+      <div className="text-[10px] text-text-muted/50 leading-relaxed">
+        Credentials are stored in opencode&apos;s own auth.json. OAuth flows open your browser
+        and complete automatically when available.
+      </div>
+    </div>
+  )
+}
+
+// ── Nav tree types ───────────────────────────────────────────────────
+
+export interface NavChild {
+  id: string
+  label: string
+  badge?: string
+  sections: Section[]
+}
+
+export interface NavGroup {
+  id: string
+  label: string
+  icon: React.JSX.Element
+  sections?: Section[]
+  children?: NavChild[]
 }
 
 // ── SECTIONS data ────────────────────────────────────────────────────
@@ -1015,6 +1594,12 @@ export const SECTIONS: Section[] = [
         label: 'Global permissions',
         keywords: 'allow deny ask rules tools bash edit read write permissions security',
         render: () => <GlobalPermissionsSummary />
+      },
+      {
+        key: 'autonomyMode',
+        label: 'Autonomy mode',
+        keywords: 'autonomy mode plan ask auto edit full permission mode default',
+        render: () => <AutonomyModePicker />
       }
     ]
   },
@@ -1043,6 +1628,60 @@ export const SECTIONS: Section[] = [
         label: 'Multiple account support',
         keywords: 'account login subscription switch multi keychain credentials sign in',
         render: () => <AccountsSetting />
+      }
+    ]
+  },
+  {
+    id: 'vendor-anthropic',
+    label: 'Anthropic',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <path d="M4 17l6-6-6-6" />
+        <line x1="12" y1="19" x2="20" y2="19" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'vendorAnthropicDisplay',
+        label: 'Anthropic vendor config',
+        keywords: 'anthropic endpoint model override vendor gateway custom url api token',
+        render: () => <VendorAnthropicDisplaySection />
+      }
+    ]
+  },
+  {
+    id: 'vendor-opencode',
+    label: 'opencode Vendors',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <circle cx="12" cy="12" r="3" />
+        <path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'vendorOpencodeAuth',
+        label: 'opencode vendor auth',
+        keywords: 'opencode vendor auth api key oauth login openai google anthropic provider',
+        render: () => <VendorOpencodeSection />
       }
     ]
   },
@@ -1137,312 +1776,310 @@ export const SECTIONS: Section[] = [
         key: 'sandboxEnabled',
         label: 'Command sandbox',
         keywords: 'sandbox isolate secure bash commands safety',
-        render: (s, u) => (
-          <div>
-            <SettingsToggle
-              label="Command sandbox"
-              checked={s.sandbox.enabled}
-              onChange={(v) => u({ sandbox: { ...s.sandbox, enabled: v } })}
-              tooltip="Uses macOS sandbox-exec (Seatbelt profiles) or Linux bubblewrap (bwrap) to restrict filesystem and process access. Commands run in a sandboxed shell with deny-by-default policies. Only macOS and Linux are supported — Windows is not."
-            />
-            <div className="text-[10px] text-text-muted/50 mt-0.5 pl-3">
-              Run bash commands in an isolated environment
+        render: (_s, _u, e, ue) => {
+          const sb = e.sandbox ?? DEFAULT_SANDBOX
+          return (
+            <div>
+              <SettingsToggle
+                label="Command sandbox"
+                checked={sb.enabled}
+                onChange={(v) => ue({ sandbox: { ...sb, enabled: v } })}
+                tooltip="Uses macOS sandbox-exec (Seatbelt profiles) or Linux bubblewrap (bwrap) to restrict filesystem and process access. Commands run in a sandboxed shell with deny-by-default policies. Only macOS and Linux are supported — Windows is not."
+              />
+              <div className="text-[10px] text-text-muted/50 mt-0.5 pl-3">
+                Run bash commands in an isolated environment
+              </div>
             </div>
-          </div>
-        )
+          )
+        }
       },
       {
         key: 'sandboxAutoAllow',
         label: 'Auto-approve sandboxed commands',
         keywords: 'auto allow approve bash',
-        render: (s, u) => (
-          <div className={s.sandbox.enabled ? '' : 'opacity-40 pointer-events-none'}>
-            <div className="pl-4">
-              <SettingsToggle
-                label="Auto-approve sandboxed commands"
-                checked={s.sandbox.autoAllowBashIfSandboxed}
-                onChange={(v) => u({ sandbox: { ...s.sandbox, autoAllowBashIfSandboxed: v } })}
-                tooltip="When enabled, bash commands that run inside the sandbox are automatically approved without prompting. Commands matching deny or ask permission rules are still blocked. This is the main UX benefit of sandbox mode."
-              />
-              <div className="text-[10px] text-text-muted/50 mt-0.5 pl-3">
-                Skip permission prompts for sandboxed bash
+        render: (_s, _u, e, ue) => {
+          const sb = e.sandbox ?? DEFAULT_SANDBOX
+          return (
+            <div className={sb.enabled ? '' : 'opacity-40 pointer-events-none'}>
+              <div className="pl-4">
+                <SettingsToggle
+                  label="Auto-approve sandboxed commands"
+                  checked={sb.autoAllowBashIfSandboxed}
+                  onChange={(v) => ue({ sandbox: { ...sb, autoAllowBashIfSandboxed: v } })}
+                  tooltip="When enabled, bash commands that run inside the sandbox are automatically approved without prompting. Commands matching deny or ask permission rules are still blocked. This is the main UX benefit of sandbox mode."
+                />
+                <div className="text-[10px] text-text-muted/50 mt-0.5 pl-3">
+                  Skip permission prompts for sandboxed bash
+                </div>
               </div>
             </div>
-          </div>
-        )
+          )
+        }
       },
       {
         key: 'sandboxAllowUnsandboxed',
         label: 'Allow unsandboxed escape',
         keywords: 'unsandboxed escape bypass',
-        render: (s, u) => (
-          <div className={s.sandbox.enabled ? '' : 'opacity-40 pointer-events-none'}>
-            <div className="pl-4">
-              <SettingsToggle
-                label="Allow unsandboxed escape"
-                checked={s.sandbox.allowUnsandboxedCommands}
-                onChange={(v) => u({ sandbox: { ...s.sandbox, allowUnsandboxedCommands: v } })}
-                tooltip="When a sandboxed command fails due to restrictions, the model can retry it outside the sandbox. You'll still be prompted to approve the unsandboxed execution. Disable this to enforce strict sandbox-only execution."
-              />
-              <div className="text-[10px] text-text-muted/50 mt-0.5 pl-3">
-                Let the model retry outside sandbox on failure
+        render: (_s, _u, e, ue) => {
+          const sb = e.sandbox ?? DEFAULT_SANDBOX
+          return (
+            <div className={sb.enabled ? '' : 'opacity-40 pointer-events-none'}>
+              <div className="pl-4">
+                <SettingsToggle
+                  label="Allow unsandboxed escape"
+                  checked={sb.allowUnsandboxedCommands}
+                  onChange={(v) => ue({ sandbox: { ...sb, allowUnsandboxedCommands: v } })}
+                  tooltip="When a sandboxed command fails due to restrictions, the model can retry it outside the sandbox. You'll still be prompted to approve the unsandboxed execution. Disable this to enforce strict sandbox-only execution."
+                />
+                <div className="text-[10px] text-text-muted/50 mt-0.5 pl-3">
+                  Let the model retry outside sandbox on failure
+                </div>
               </div>
             </div>
-          </div>
-        )
+          )
+        }
       },
       {
         key: 'sandboxLocalBinding',
         label: 'Allow local port binding',
         keywords: 'network port listen bind',
-        render: (s, u) => (
-          <div className={s.sandbox.enabled ? '' : 'opacity-40 pointer-events-none'}>
-            <div className="pl-4">
-              <SettingsToggle
-                label="Allow local port binding"
-                checked={s.sandbox.network.allowLocalBinding}
-                onChange={(v) =>
-                  u({
-                    sandbox: {
-                      ...s.sandbox,
-                      network: { ...s.sandbox.network, allowLocalBinding: v }
-                    }
-                  })
-                }
-                tooltip="Lets processes inside the sandbox listen on localhost ports (e.g. webpack-dev-server, vite, flask). Without this, dev servers started by the model will fail to bind."
-              />
-              <div className="text-[10px] text-text-muted/50 mt-0.5 pl-3">
-                Allow sandboxed processes to bind to local ports
+        render: (_s, _u, e, ue) => {
+          const sb = e.sandbox ?? DEFAULT_SANDBOX
+          return (
+            <div className={sb.enabled ? '' : 'opacity-40 pointer-events-none'}>
+              <div className="pl-4">
+                <SettingsToggle
+                  label="Allow local port binding"
+                  checked={sb.network.allowLocalBinding}
+                  onChange={(v) =>
+                    ue({ sandbox: { ...sb, network: { ...sb.network, allowLocalBinding: v } } })
+                  }
+                  tooltip="Lets processes inside the sandbox listen on localhost ports (e.g. webpack-dev-server, vite, flask). Without this, dev servers started by the model will fail to bind."
+                />
+                <div className="text-[10px] text-text-muted/50 mt-0.5 pl-3">
+                  Allow sandboxed processes to bind to local ports
+                </div>
               </div>
             </div>
-          </div>
-        )
+          )
+        }
       },
       {
         key: 'sandboxRestrictNetwork',
         label: 'Restrict network access',
         keywords: 'network restrict domain whitelist proxy',
-        render: (s, u) => (
-          <div className={s.sandbox.enabled ? '' : 'opacity-40 pointer-events-none'}>
-            <div className="pl-4">
-              <SettingsToggle
-                label="Restrict network access"
-                checked={s.sandbox.network.restrictNetwork}
-                onChange={(v) =>
-                  u({
-                    sandbox: { ...s.sandbox, network: { ...s.sandbox.network, restrictNetwork: v } }
-                  })
-                }
-                tooltip="When enabled, sandboxed commands can only reach explicitly whitelisted domains via a local proxy. All other network access is blocked. When disabled, sandboxed commands have unrestricted network access."
-              />
-              <div className="text-[10px] text-text-muted/50 mt-0.5 pl-3">
-                Only allow connections to whitelisted domains
+        render: (_s, _u, e, ue) => {
+          const sb = e.sandbox ?? DEFAULT_SANDBOX
+          return (
+            <div className={sb.enabled ? '' : 'opacity-40 pointer-events-none'}>
+              <div className="pl-4">
+                <SettingsToggle
+                  label="Restrict network access"
+                  checked={sb.network.restrictNetwork}
+                  onChange={(v) =>
+                    ue({ sandbox: { ...sb, network: { ...sb.network, restrictNetwork: v } } })
+                  }
+                  tooltip="When enabled, sandboxed commands can only reach explicitly whitelisted domains via a local proxy. All other network access is blocked. When disabled, sandboxed commands have unrestricted network access."
+                />
+                <div className="text-[10px] text-text-muted/50 mt-0.5 pl-3">
+                  Only allow connections to whitelisted domains
+                </div>
               </div>
             </div>
-          </div>
-        )
+          )
+        }
       },
       {
         key: 'sandboxAllowedDomains',
         label: 'Allowed domains',
         keywords: 'network domain whitelist url',
-        render: (s, u) => (
-          <div
-            className={
-              s.sandbox.enabled && s.sandbox.network.restrictNetwork
-                ? ''
-                : 'opacity-40 pointer-events-none'
-            }
-          >
-            <div className="pl-8">
-              <SandboxListSetting
-                label="Allowed domains"
-                labelColor="text-success"
-                items={s.sandbox.network.allowedDomains}
-                placeholder="e.g. registry.npmjs.org"
-                onUpdate={(items) =>
-                  u({
-                    sandbox: {
-                      ...s.sandbox,
-                      network: { ...s.sandbox.network, allowedDomains: items }
-                    }
-                  })
-                }
-                tooltip="Domains that sandboxed commands can reach. Supports wildcards like *.npmjs.org. Traffic is routed through a local HTTP/SOCKS proxy. Leave empty to block all outbound network access."
-              />
+        render: (_s, _u, e, ue) => {
+          const sb = e.sandbox ?? DEFAULT_SANDBOX
+          return (
+            <div
+              className={
+                sb.enabled && sb.network.restrictNetwork ? '' : 'opacity-40 pointer-events-none'
+              }
+            >
+              <div className="pl-8">
+                <SandboxListSetting
+                  label="Allowed domains"
+                  labelColor="text-success"
+                  items={sb.network.allowedDomains}
+                  placeholder="e.g. registry.npmjs.org"
+                  onUpdate={(items) =>
+                    ue({ sandbox: { ...sb, network: { ...sb.network, allowedDomains: items } } })
+                  }
+                  tooltip="Domains that sandboxed commands can reach. Supports wildcards like *.npmjs.org. Traffic is routed through a local HTTP/SOCKS proxy. Leave empty to block all outbound network access."
+                />
+              </div>
             </div>
-          </div>
-        )
+          )
+        }
       },
       {
         key: 'sandboxManagedDomainsOnly',
         label: 'Managed domains only',
         keywords: 'enterprise managed policy domains',
-        render: (s, u) => (
-          <div
-            className={
-              s.sandbox.enabled && s.sandbox.network.restrictNetwork
-                ? ''
-                : 'opacity-40 pointer-events-none'
-            }
-          >
-            <div className="pl-8">
-              <SettingsToggle
-                label="Managed domains only"
-                checked={s.sandbox.network.allowManagedDomainsOnly}
-                onChange={(v) =>
-                  u({
-                    sandbox: {
-                      ...s.sandbox,
-                      network: { ...s.sandbox.network, allowManagedDomainsOnly: v }
-                    }
-                  })
-                }
-                tooltip="Enterprise feature. When enabled, only allowedDomains from managed settings and WebFetch(domain:...) allow rules from managed settings are used. Domains from user, project, local, and flag settings are ignored. Denied domains are still respected from all sources."
-              />
-              <div className="text-[10px] text-text-muted/50 mt-0.5 pl-3">
-                Ignore user/project domain settings, only respect managed policy
+        render: (_s, _u, e, ue) => {
+          const sb = e.sandbox ?? DEFAULT_SANDBOX
+          return (
+            <div
+              className={
+                sb.enabled && sb.network.restrictNetwork ? '' : 'opacity-40 pointer-events-none'
+              }
+            >
+              <div className="pl-8">
+                <SettingsToggle
+                  label="Managed domains only"
+                  checked={sb.network.allowManagedDomainsOnly}
+                  onChange={(v) =>
+                    ue({
+                      sandbox: { ...sb, network: { ...sb.network, allowManagedDomainsOnly: v } }
+                    })
+                  }
+                  tooltip="Enterprise feature. When enabled, only allowedDomains from managed settings and WebFetch(domain:...) allow rules from managed settings are used. Domains from user, project, local, and flag settings are ignored. Denied domains are still respected from all sources."
+                />
+                <div className="text-[10px] text-text-muted/50 mt-0.5 pl-3">
+                  Ignore user/project domain settings, only respect managed policy
+                </div>
               </div>
             </div>
-          </div>
-        )
+          )
+        }
       },
       {
         key: 'sandboxAllowAllUnixSockets',
         label: 'Allow all Unix sockets',
         keywords: 'unix socket docker ipc',
-        render: (s, u) => (
-          <div className={s.sandbox.enabled ? '' : 'opacity-40 pointer-events-none'}>
-            <div className="pl-4">
-              <SettingsToggle
-                label="Allow all Unix sockets"
-                checked={s.sandbox.network.allowAllUnixSockets}
-                onChange={(v) =>
-                  u({
-                    sandbox: {
-                      ...s.sandbox,
-                      network: { ...s.sandbox.network, allowAllUnixSockets: v }
-                    }
-                  })
-                }
-                tooltip="Disables Unix socket blocking on both macOS and Linux. This grants access to all Unix sockets including the Docker socket, which effectively gives full host access. Only enable if you trust the commands being run."
-              />
-              <div className="text-[10px] text-text-muted/50 mt-0.5 pl-3">
-                Disable Unix socket blocking (allows Docker, etc.)
+        render: (_s, _u, e, ue) => {
+          const sb = e.sandbox ?? DEFAULT_SANDBOX
+          return (
+            <div className={sb.enabled ? '' : 'opacity-40 pointer-events-none'}>
+              <div className="pl-4">
+                <SettingsToggle
+                  label="Allow all Unix sockets"
+                  checked={sb.network.allowAllUnixSockets}
+                  onChange={(v) =>
+                    ue({ sandbox: { ...sb, network: { ...sb.network, allowAllUnixSockets: v } } })
+                  }
+                  tooltip="Disables Unix socket blocking on both macOS and Linux. This grants access to all Unix sockets including the Docker socket, which effectively gives full host access. Only enable if you trust the commands being run."
+                />
+                <div className="text-[10px] text-text-muted/50 mt-0.5 pl-3">
+                  Disable Unix socket blocking (allows Docker, etc.)
+                </div>
               </div>
             </div>
-          </div>
-        )
+          )
+        }
       },
       {
         key: 'sandboxUnixSockets',
         label: 'Unix socket paths',
         keywords: 'unix socket path docker',
-        render: (s, u) => (
-          <div
-            className={
-              s.sandbox.enabled && !s.sandbox.network.allowAllUnixSockets
-                ? ''
-                : 'opacity-40 pointer-events-none'
-            }
-          >
-            <div className="pl-8">
-              <SandboxListSetting
-                label="Unix socket paths"
-                labelColor="text-warning"
-                items={s.sandbox.network.allowUnixSockets}
-                placeholder="e.g. /var/run/docker.sock"
-                onUpdate={(items) =>
-                  u({
-                    sandbox: {
-                      ...s.sandbox,
-                      network: { ...s.sandbox.network, allowUnixSockets: items }
-                    }
-                  })
-                }
-                tooltip="macOS only — specific Unix socket paths to allow. Linux uses seccomp which cannot filter by path. Allowing /var/run/docker.sock grants full host access through the Docker API."
-              />
+        render: (_s, _u, e, ue) => {
+          const sb = e.sandbox ?? DEFAULT_SANDBOX
+          return (
+            <div
+              className={
+                sb.enabled && !sb.network.allowAllUnixSockets
+                  ? ''
+                  : 'opacity-40 pointer-events-none'
+              }
+            >
+              <div className="pl-8">
+                <SandboxListSetting
+                  label="Unix socket paths"
+                  labelColor="text-warning"
+                  items={sb.network.allowUnixSockets}
+                  placeholder="e.g. /var/run/docker.sock"
+                  onUpdate={(items) =>
+                    ue({ sandbox: { ...sb, network: { ...sb.network, allowUnixSockets: items } } })
+                  }
+                  tooltip="macOS only — specific Unix socket paths to allow. Linux uses seccomp which cannot filter by path. Allowing /var/run/docker.sock grants full host access through the Docker API."
+                />
+              </div>
             </div>
-          </div>
-        )
+          )
+        }
       },
       {
         key: 'sandboxAllowWrite',
         label: 'Additional write paths',
         keywords: 'filesystem write allow path writable',
-        render: (s, u) => (
-          <div className={s.sandbox.enabled ? '' : 'opacity-40 pointer-events-none'}>
-            <div className="pl-4">
-              <SandboxListSetting
-                label="Additional write paths"
-                labelColor="text-success"
-                items={s.sandbox.filesystem.allowWrite}
-                placeholder="e.g. /usr/local/bin"
-                onUpdate={(items) =>
-                  u({
-                    sandbox: {
-                      ...s.sandbox,
-                      filesystem: { ...s.sandbox.filesystem, allowWrite: items }
-                    }
-                  })
-                }
-                tooltip="Paths outside the project directory where sandboxed commands can write files. The project directory and $TMPDIR are always writable."
-              />
+        render: (_s, _u, e, ue) => {
+          const sb = e.sandbox ?? DEFAULT_SANDBOX
+          return (
+            <div className={sb.enabled ? '' : 'opacity-40 pointer-events-none'}>
+              <div className="pl-4">
+                <SandboxListSetting
+                  label="Additional write paths"
+                  labelColor="text-success"
+                  items={sb.filesystem.allowWrite}
+                  placeholder="e.g. /usr/local/bin"
+                  onUpdate={(items) =>
+                    ue({
+                      sandbox: { ...sb, filesystem: { ...sb.filesystem, allowWrite: items } }
+                    })
+                  }
+                  tooltip="Paths outside the project directory where sandboxed commands can write files. The project directory and $TMPDIR are always writable."
+                />
+              </div>
             </div>
-          </div>
-        )
+          )
+        }
       },
       {
         key: 'sandboxDenyWrite',
         label: 'Read-only paths',
         keywords: 'filesystem deny write readonly protect',
-        render: (s, u) => (
-          <div className={s.sandbox.enabled ? '' : 'opacity-40 pointer-events-none'}>
-            <div className="pl-4">
-              <SandboxListSetting
-                label="Read-only paths"
-                labelColor="text-warning"
-                items={s.sandbox.filesystem.denyWrite}
-                placeholder="e.g. /etc"
-                onUpdate={(items) =>
-                  u({
-                    sandbox: {
-                      ...s.sandbox,
-                      filesystem: { ...s.sandbox.filesystem, denyWrite: items }
-                    }
-                  })
-                }
-                tooltip="Paths that should be read-only even within writable areas. Useful for protecting config files or build artifacts from accidental modification."
-              />
+        render: (_s, _u, e, ue) => {
+          const sb = e.sandbox ?? DEFAULT_SANDBOX
+          return (
+            <div className={sb.enabled ? '' : 'opacity-40 pointer-events-none'}>
+              <div className="pl-4">
+                <SandboxListSetting
+                  label="Read-only paths"
+                  labelColor="text-warning"
+                  items={sb.filesystem.denyWrite}
+                  placeholder="e.g. /etc"
+                  onUpdate={(items) =>
+                    ue({
+                      sandbox: { ...sb, filesystem: { ...sb.filesystem, denyWrite: items } }
+                    })
+                  }
+                  tooltip="Paths that should be read-only even within writable areas. Useful for protecting config files or build artifacts from accidental modification."
+                />
+              </div>
             </div>
-          </div>
-        )
+          )
+        }
       },
       {
         key: 'sandboxDenyRead',
         label: 'Hidden paths',
         keywords: 'filesystem deny block read path hidden',
-        render: (s, u) => (
-          <div className={s.sandbox.enabled ? '' : 'opacity-40 pointer-events-none'}>
-            <div className="pl-4">
-              <SandboxListSetting
-                label="Hidden paths"
-                labelColor="text-danger"
-                items={s.sandbox.filesystem.denyRead}
-                placeholder="e.g. ~/.ssh"
-                onUpdate={(items) =>
-                  u({
-                    sandbox: {
-                      ...s.sandbox,
-                      filesystem: { ...s.sandbox.filesystem, denyRead: items }
-                    }
-                  })
-                }
-                tooltip="Paths completely hidden from sandboxed commands — they cannot read or detect these files exist. Good for credentials, SSH keys, cloud configs."
-              />
+        render: (_s, _u, e, ue) => {
+          const sb = e.sandbox ?? DEFAULT_SANDBOX
+          return (
+            <div className={sb.enabled ? '' : 'opacity-40 pointer-events-none'}>
+              <div className="pl-4">
+                <SandboxListSetting
+                  label="Hidden paths"
+                  labelColor="text-danger"
+                  items={sb.filesystem.denyRead}
+                  placeholder="e.g. ~/.ssh"
+                  onUpdate={(items) =>
+                    ue({
+                      sandbox: { ...sb, filesystem: { ...sb.filesystem, denyRead: items } }
+                    })
+                  }
+                  tooltip="Paths completely hidden from sandboxed commands — they cannot read or detect these files exist. Good for credentials, SSH keys, cloud configs."
+                />
+              </div>
             </div>
-          </div>
-        )
+          )
+        }
       },
       {
         key: 'sandboxFooter',
@@ -1481,160 +2118,182 @@ export const SECTIONS: Section[] = [
         key: 'proxyEnabled',
         label: 'Enable proxy',
         keywords: 'proxy http socks5 network tunnel',
-        render: (s, u) => (
-          <div>
-            <SettingsToggle
-              label="Enable proxy"
-              checked={s.proxy.enabled}
-              onChange={(v) => u({ proxy: { ...s.proxy, enabled: v } })}
-              tooltip="Route all SDK traffic through a proxy server. Applies to new sessions."
-            />
-            <div className="text-[10px] text-text-muted/50 mt-0.5 pl-3">
-              Route Claude API traffic through a proxy server
+        render: (_s, _u, e, ue) => {
+          const px = e.proxy ?? DEFAULT_PROXY
+          return (
+            <div>
+              <SettingsToggle
+                label="Enable proxy"
+                checked={px.enabled}
+                onChange={(v) => ue({ proxy: { ...px, enabled: v } })}
+                tooltip="Route all SDK traffic through a proxy server. Applies to new sessions."
+              />
+              <div className="text-[10px] text-text-muted/50 mt-0.5 pl-3">
+                Route Claude API traffic through a proxy server
+              </div>
             </div>
-          </div>
-        )
+          )
+        }
       },
       {
         key: 'proxyType',
         label: 'Proxy type',
         keywords: 'http socks5 protocol',
-        render: (s, u) => (
-          <div className={s.proxy.enabled ? '' : 'opacity-40 pointer-events-none'}>
-            <div className="pl-4">
-              <SettingsSelect
-                label="Proxy type"
-                value={s.proxy.type}
-                options={[
-                  { value: 'http' as const, label: 'HTTP' },
-                  { value: 'socks5' as const, label: 'SOCKS5' }
-                ]}
-                onChange={(v) => u({ proxy: { ...s.proxy, type: v } })}
-              />
+        render: (_s, _u, e, ue) => {
+          const px = e.proxy ?? DEFAULT_PROXY
+          return (
+            <div className={px.enabled ? '' : 'opacity-40 pointer-events-none'}>
+              <div className="pl-4">
+                <SettingsSelect
+                  label="Proxy type"
+                  value={px.type}
+                  options={[
+                    { value: 'http' as const, label: 'HTTP' },
+                    { value: 'socks5' as const, label: 'SOCKS5' }
+                  ]}
+                  onChange={(v) => ue({ proxy: { ...px, type: v } })}
+                />
+              </div>
             </div>
-          </div>
-        )
+          )
+        }
       },
       {
         key: 'proxyHostname',
         label: 'Proxy hostname',
         keywords: 'host address server url',
-        render: (s, u) => (
-          <div className={s.proxy.enabled ? '' : 'opacity-40 pointer-events-none'}>
-            <div className="pl-4 px-3 py-1.5 text-[13px] text-text-secondary">
-              <div className="mb-1">Hostname</div>
-              <input
-                type="text"
-                value={s.proxy.hostname}
-                onChange={(e) => u({ proxy: { ...s.proxy, hostname: e.target.value } })}
-                className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors"
-                placeholder="e.g. proxy.company.com"
-              />
+        render: (_s, _u, e, ue) => {
+          const px = e.proxy ?? DEFAULT_PROXY
+          return (
+            <div className={px.enabled ? '' : 'opacity-40 pointer-events-none'}>
+              <div className="pl-4 px-3 py-1.5 text-[13px] text-text-secondary">
+                <div className="mb-1">Hostname</div>
+                <input
+                  type="text"
+                  value={px.hostname}
+                  onChange={(ev) => ue({ proxy: { ...px, hostname: ev.target.value } })}
+                  className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors"
+                  placeholder="e.g. proxy.company.com"
+                />
+              </div>
             </div>
-          </div>
-        )
+          )
+        }
       },
       {
         key: 'proxyPort',
         label: 'Proxy port',
         keywords: 'port number',
-        render: (s, u) => (
-          <div className={s.proxy.enabled ? '' : 'opacity-40 pointer-events-none'}>
-            <div className="pl-4 px-3 py-1.5 text-[13px] text-text-secondary">
-              <div className="mb-1">Port</div>
-              <input
-                type="number"
-                value={s.proxy.port}
-                min={1}
-                max={65535}
-                onChange={(e) => {
-                  const v = parseInt(e.target.value, 10)
-                  if (!isNaN(v) && v >= 1 && v <= 65535) u({ proxy: { ...s.proxy, port: v } })
-                }}
-                className="w-24 bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors"
-                placeholder="8080"
-              />
+        render: (_s, _u, e, ue) => {
+          const px = e.proxy ?? DEFAULT_PROXY
+          return (
+            <div className={px.enabled ? '' : 'opacity-40 pointer-events-none'}>
+              <div className="pl-4 px-3 py-1.5 text-[13px] text-text-secondary">
+                <div className="mb-1">Port</div>
+                <input
+                  type="number"
+                  value={px.port}
+                  min={1}
+                  max={65535}
+                  onChange={(ev) => {
+                    const n = parseInt(ev.target.value, 10)
+                    if (!isNaN(n) && n >= 1 && n <= 65535) ue({ proxy: { ...px, port: n } })
+                  }}
+                  className="w-24 bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors"
+                  placeholder="8080"
+                />
+              </div>
             </div>
-          </div>
-        )
+          )
+        }
       },
       {
         key: 'proxyUsername',
         label: 'Proxy username',
         keywords: 'auth authentication user credentials',
-        render: (s, u) => (
-          <div className={s.proxy.enabled ? '' : 'opacity-40 pointer-events-none'}>
-            <div className="pl-4 px-3 py-1.5 text-[13px] text-text-secondary">
-              <div className="mb-1">
-                <span>Username</span>
-                <span className="text-[10px] text-text-muted/50 ml-1.5">optional</span>
+        render: (_s, _u, e, ue) => {
+          const px = e.proxy ?? DEFAULT_PROXY
+          return (
+            <div className={px.enabled ? '' : 'opacity-40 pointer-events-none'}>
+              <div className="pl-4 px-3 py-1.5 text-[13px] text-text-secondary">
+                <div className="mb-1">
+                  <span>Username</span>
+                  <span className="text-[10px] text-text-muted/50 ml-1.5">optional</span>
+                </div>
+                <input
+                  type="text"
+                  value={px.username}
+                  onChange={(ev) => ue({ proxy: { ...px, username: ev.target.value } })}
+                  className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors"
+                  placeholder="username"
+                  autoComplete="off"
+                />
               </div>
-              <input
-                type="text"
-                value={s.proxy.username}
-                onChange={(e) => u({ proxy: { ...s.proxy, username: e.target.value } })}
-                className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors"
-                placeholder="username"
-                autoComplete="off"
-              />
             </div>
-          </div>
-        )
+          )
+        }
       },
       {
         key: 'proxyPassword',
         label: 'Proxy password',
         keywords: 'auth authentication pass credentials secret',
-        render: (s, u) => (
-          <div className={s.proxy.enabled ? '' : 'opacity-40 pointer-events-none'}>
-            <div className="pl-4 px-3 py-1.5 text-[13px] text-text-secondary">
-              <div className="mb-1">
-                <span>Password</span>
-                <span className="text-[10px] text-text-muted/50 ml-1.5">optional</span>
+        render: (_s, _u, e, ue) => {
+          const px = e.proxy ?? DEFAULT_PROXY
+          return (
+            <div className={px.enabled ? '' : 'opacity-40 pointer-events-none'}>
+              <div className="pl-4 px-3 py-1.5 text-[13px] text-text-secondary">
+                <div className="mb-1">
+                  <span>Password</span>
+                  <span className="text-[10px] text-text-muted/50 ml-1.5">optional</span>
+                </div>
+                <input
+                  type="password"
+                  value={px.password}
+                  onChange={(ev) => ue({ proxy: { ...px, password: ev.target.value } })}
+                  className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors"
+                  placeholder="password"
+                  autoComplete="off"
+                />
               </div>
-              <input
-                type="password"
-                value={s.proxy.password}
-                onChange={(e) => u({ proxy: { ...s.proxy, password: e.target.value } })}
-                className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors"
-                placeholder="password"
-                autoComplete="off"
-              />
             </div>
-          </div>
-        )
+          )
+        }
       },
       {
         key: 'proxyTestConnection',
         label: 'Test proxy connection',
         keywords: 'test verify check ping connectivity',
-        render: (s) => (
-          <div
-            className={s.proxy.enabled && s.proxy.hostname ? '' : 'opacity-40 pointer-events-none'}
-          >
-            <div className="pl-4">
-              <ProxyTestButton proxy={s.proxy} />
+        render: (_s, _u, e) => {
+          const px = e.proxy ?? DEFAULT_PROXY
+          return (
+            <div className={px.enabled && px.hostname ? '' : 'opacity-40 pointer-events-none'}>
+              <div className="pl-4">
+                <ProxyTestButton proxy={px} />
+              </div>
             </div>
-          </div>
-        )
+          )
+        }
       },
       {
         key: 'proxySubprocesses',
         label: 'Proxy shell commands',
         keywords: 'proxy bash subprocess shell git curl npm everything all',
-        render: (s, u) => (
-          <div className={s.proxy.enabled ? '' : 'opacity-40 pointer-events-none'}>
-            <SettingsToggle
-              label="Also proxy shell commands"
-              checked={s.proxy.proxySubprocesses === true}
-              onChange={(v) => u({ proxy: { ...s.proxy, proxySubprocesses: v } })}
-              tooltip="When on, git/curl/npm and other commands Claude runs in the shell also route through the proxy. When off (default), only Claude's API traffic is proxied."
-            />
-            <div className="text-[10px] text-text-muted/50 mt-0.5 pl-3">
-              Off by default — shell commands stay direct
+        render: (_s, _u, e, ue) => {
+          const px = e.proxy ?? DEFAULT_PROXY
+          return (
+            <div className={px.enabled ? '' : 'opacity-40 pointer-events-none'}>
+              <SettingsToggle
+                label="Also proxy shell commands"
+                checked={px.proxySubprocesses === true}
+                onChange={(v) => ue({ proxy: { ...px, proxySubprocesses: v } })}
+                tooltip="When on, git/curl/npm and other commands Claude runs in the shell also route through the proxy. When off (default), only Claude's API traffic is proxied."
+              />
+              <div className="text-[10px] text-text-muted/50 mt-0.5 pl-3">
+                Off by default — shell commands stay direct
+              </div>
             </div>
-          </div>
-        )
+          )
+        }
       },
       {
         key: 'proxyFooter',
@@ -1643,264 +2302,6 @@ export const SECTIONS: Section[] = [
         render: () => (
           <div className="px-3 py-1.5 text-[11px] text-text-muted/60">
             Sets HTTP_PROXY/HTTPS_PROXY environment variables. Changes apply to new sessions.
-          </div>
-        )
-      }
-    ]
-  },
-  {
-    id: 'apiEndpoint',
-    label: 'API Endpoint',
-    icon: (
-      <svg
-        width="14"
-        height="14"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      >
-        <path d="M4 17l6-6-6-6" />
-        <line x1="12" y1="19" x2="20" y2="19" />
-      </svg>
-    ),
-    items: [
-      {
-        key: 'anthropicEndpointEnabled',
-        label: 'Use custom Anthropic endpoint',
-        keywords: 'anthropic api base url endpoint custom gateway lmstudio openrouter relay',
-        render: (s, u) => (
-          <div>
-            <SettingsToggle
-              label="Use custom Anthropic endpoint"
-              checked={s.anthropicEndpoint.enabled}
-              onChange={(v) => u({ anthropicEndpoint: { ...s.anthropicEndpoint, enabled: v } })}
-              tooltip="Override the Anthropic API base URL for cli.js spawns. Useful for self-hosted gateways, LM Studio, or any Anthropic-compatible endpoint."
-            />
-            <div className="text-[10px] text-text-muted/50 mt-0.5 pl-3">
-              Sets ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN on the cli.js spawn env
-            </div>
-          </div>
-        )
-      },
-      {
-        key: 'anthropicBaseUrl',
-        label: 'Base URL',
-        keywords: 'anthropic api base url endpoint host',
-        render: (s, u) => (
-          <div className={s.anthropicEndpoint.enabled ? '' : 'opacity-40 pointer-events-none'}>
-            <div className="pl-4 px-3 py-1.5 text-[13px] text-text-secondary">
-              <div className="mb-1">Base URL</div>
-              <input
-                type="text"
-                value={s.anthropicEndpoint.baseUrl}
-                onChange={(e) =>
-                  u({ anthropicEndpoint: { ...s.anthropicEndpoint, baseUrl: e.target.value } })
-                }
-                className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors"
-                placeholder="e.g. http://localhost:1234"
-                spellCheck={false}
-                autoComplete="off"
-              />
-            </div>
-          </div>
-        )
-      },
-      {
-        key: 'anthropicAuthToken',
-        label: 'Auth token',
-        keywords: 'anthropic api token auth key bearer credential secret',
-        render: (s, u) => (
-          <div className={s.anthropicEndpoint.enabled ? '' : 'opacity-40 pointer-events-none'}>
-            <div className="pl-4 px-3 py-1.5 text-[13px] text-text-secondary">
-              <div className="mb-1">Auth token</div>
-              <input
-                type="password"
-                value={s.anthropicEndpoint.authToken}
-                onChange={(e) =>
-                  u({ anthropicEndpoint: { ...s.anthropicEndpoint, authToken: e.target.value } })
-                }
-                className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors"
-                placeholder="e.g. lmstudio"
-                spellCheck={false}
-                autoComplete="off"
-              />
-            </div>
-          </div>
-        )
-      },
-      {
-        key: 'anthropicEndpointFooter',
-        label: 'Endpoint info',
-        keywords: 'anthropic endpoint info env environment variable',
-        render: () => (
-          <div className="px-3 py-1.5 text-[11px] text-text-muted/60">
-            Overrides cli.js&apos;s API target. Changes apply to new sessions. Leave the auth token
-            empty if your gateway doesn&apos;t require one.
-          </div>
-        )
-      }
-    ]
-  },
-  {
-    id: 'modelOverride',
-    label: 'Model',
-    icon: (
-      <svg
-        width="14"
-        height="14"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      >
-        <path d="M12 2L4 6v12l8 4 8-4V6z" />
-        <path d="M4 6l8 4 8-4" />
-        <line x1="12" y1="22" x2="12" y2="10" />
-      </svg>
-    ),
-    items: [
-      {
-        key: 'modelOverrideEnabled',
-        label: 'Override model',
-        keywords: 'model override anthropic_model alias sonnet opus haiku custom gateway',
-        render: (s, u) => (
-          <div>
-            <SettingsToggle
-              label="Override model"
-              checked={s.modelOverride.enabled}
-              onChange={(v) => u({ modelOverride: { ...s.modelOverride, enabled: v } })}
-              tooltip="Pin which model cli.js uses by setting ANTHROPIC_MODEL and the per-alias ANTHROPIC_DEFAULT_*_MODEL env vars on the spawn."
-            />
-            <div className="text-[10px] text-text-muted/50 mt-0.5 pl-3">
-              Useful when a custom endpoint expects different model identifiers
-            </div>
-          </div>
-        )
-      },
-      {
-        key: 'modelOverrideModel',
-        label: 'Model (ANTHROPIC_MODEL)',
-        keywords: 'anthropic_model alias sonnet opus haiku default best opusplan',
-        render: (s, u) => (
-          <div className={s.modelOverride.enabled ? '' : 'opacity-40 pointer-events-none'}>
-            <div className="pl-4 px-3 py-1.5 text-[13px] text-text-secondary">
-              <div className="mb-1">
-                <span>Initial model</span>
-                <span className="text-[10px] text-text-muted/50 ml-1.5">ANTHROPIC_MODEL</span>
-              </div>
-              <input
-                type="text"
-                value={s.modelOverride.model}
-                onChange={(e) =>
-                  u({ modelOverride: { ...s.modelOverride, model: e.target.value } })
-                }
-                className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors"
-                placeholder="alias (sonnet/opus/haiku/opusplan) or full model name"
-                spellCheck={false}
-                autoComplete="off"
-              />
-            </div>
-          </div>
-        )
-      },
-      {
-        key: 'modelOverrideSonnet',
-        label: 'Sonnet alias (ANTHROPIC_DEFAULT_SONNET_MODEL)',
-        keywords: 'anthropic_default_sonnet_model sonnet alias',
-        render: (s, u) => (
-          <div className={s.modelOverride.enabled ? '' : 'opacity-40 pointer-events-none'}>
-            <div className="pl-4 px-3 py-1.5 text-[13px] text-text-secondary">
-              <div className="mb-1">
-                <span>Sonnet → resolves to</span>
-                <span className="text-[10px] text-text-muted/50 ml-1.5">
-                  ANTHROPIC_DEFAULT_SONNET_MODEL
-                </span>
-              </div>
-              <input
-                type="text"
-                value={s.modelOverride.sonnetModel}
-                onChange={(e) =>
-                  u({ modelOverride: { ...s.modelOverride, sonnetModel: e.target.value } })
-                }
-                className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors"
-                placeholder="e.g. claude-sonnet-4-6 or my-gateway/sonnet"
-                spellCheck={false}
-                autoComplete="off"
-              />
-            </div>
-          </div>
-        )
-      },
-      {
-        key: 'modelOverrideOpus',
-        label: 'Opus alias (ANTHROPIC_DEFAULT_OPUS_MODEL)',
-        keywords: 'anthropic_default_opus_model opus alias',
-        render: (s, u) => (
-          <div className={s.modelOverride.enabled ? '' : 'opacity-40 pointer-events-none'}>
-            <div className="pl-4 px-3 py-1.5 text-[13px] text-text-secondary">
-              <div className="mb-1">
-                <span>Opus → resolves to</span>
-                <span className="text-[10px] text-text-muted/50 ml-1.5">
-                  ANTHROPIC_DEFAULT_OPUS_MODEL
-                </span>
-              </div>
-              <input
-                type="text"
-                value={s.modelOverride.opusModel}
-                onChange={(e) =>
-                  u({ modelOverride: { ...s.modelOverride, opusModel: e.target.value } })
-                }
-                className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors"
-                placeholder="e.g. claude-opus-4-8 or my-gateway/opus"
-                spellCheck={false}
-                autoComplete="off"
-              />
-            </div>
-          </div>
-        )
-      },
-      {
-        key: 'modelOverrideHaiku',
-        label: 'Haiku alias (ANTHROPIC_DEFAULT_HAIKU_MODEL)',
-        keywords:
-          'anthropic_default_haiku_model haiku alias background small fast deprecated anthropic_small_fast_model',
-        render: (s, u) => (
-          <div className={s.modelOverride.enabled ? '' : 'opacity-40 pointer-events-none'}>
-            <div className="pl-4 px-3 py-1.5 text-[13px] text-text-secondary">
-              <div className="mb-1">
-                <span>Haiku → resolves to</span>
-                <span className="text-[10px] text-text-muted/50 ml-1.5">
-                  ANTHROPIC_DEFAULT_HAIKU_MODEL
-                </span>
-              </div>
-              <input
-                type="text"
-                value={s.modelOverride.haikuModel}
-                onChange={(e) =>
-                  u({ modelOverride: { ...s.modelOverride, haikuModel: e.target.value } })
-                }
-                className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors"
-                placeholder="e.g. claude-haiku-4-5 or my-gateway/haiku"
-                spellCheck={false}
-                autoComplete="off"
-              />
-            </div>
-          </div>
-        )
-      },
-      {
-        key: 'modelOverrideFooter',
-        label: 'Model override info',
-        keywords: 'model override info env environment variable',
-        render: () => (
-          <div className="px-3 py-1.5 text-[11px] text-text-muted/60">
-            Each field maps to an Anthropic env var. Empty fields keep cli.js&apos;s defaults for
-            that family. Changes apply to new sessions.
           </div>
         )
       }
@@ -1955,5 +2356,129 @@ export const SECTIONS: Section[] = [
         )
       }
     ]
+  },
+  {
+    id: 'opencode-automode',
+    label: 'Auto mode',
+    icon: (
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+        <path d="M9 12l2 2 4-4" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'opencodeAutoMode',
+        label: 'Auto mode',
+        keywords:
+          'opencode auto mode full autonomy classifier gatekeeper judge llm permission bash security monitor',
+        render: () => <OpencodeAutoModeSection />
+      }
+    ]
+  }
+]
+
+// ── Navigation groups tree ───────────────────────────────────────────
+
+/** Section ids that belong to the App group (flat, directly visible) */
+const APP_SECTION_IDS = new Set([
+  'appearance', 'chat', 'session', 'tool-output', 'diff', 'git',
+  'status-line', 'usage', 'logging', 'voice', 'remote', 'mockup'
+])
+
+/** Section ids that belong to Engines > Claude */
+const ENGINE_CLAUDE_SECTION_IDS = new Set([
+  'permissions', 'sandbox', 'proxy'
+])
+
+/** Section ids that belong to Engines > opencode (content self-gates on install) */
+const ENGINE_OPENCODE_SECTION_IDS = new Set(['opencode-automode'])
+
+/** Section ids that belong to Vendors > Anthropic */
+const VENDOR_ANTHROPIC_SECTION_IDS = new Set([
+  'vendor-anthropic', 'effortDefaults'
+])
+
+/** Section ids that belong to Vendors > opencode (gated: only shown when opencode engine installs) */
+const VENDOR_OPENCODE_SECTION_IDS = new Set(['vendor-opencode'])
+
+/** Section ids that belong to Accounts (flat) */
+const ACCOUNTS_SECTION_IDS = new Set(['accounts'])
+
+function getSectionsForIds(ids: Set<string>): Section[] {
+  return SECTIONS.filter((s) => ids.has(s.id))
+}
+
+export const NAV_GROUPS: NavGroup[] = [
+  {
+    id: 'app',
+    label: 'App',
+    icon: (
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        <rect x="3" y="3" width="7" height="7" />
+        <rect x="14" y="3" width="7" height="7" />
+        <rect x="14" y="14" width="7" height="7" />
+        <rect x="3" y="14" width="7" height="7" />
+      </svg>
+    ),
+    sections: getSectionsForIds(APP_SECTION_IDS)
+  },
+  {
+    id: 'engines',
+    label: 'Engines',
+    icon: (
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M12 2L4 6v12l8 4 8-4V6z" />
+        <path d="M4 6l8 4 8-4" />
+        <line x1="12" y1="22" x2="12" y2="10" />
+      </svg>
+    ),
+    children: [
+      {
+        id: 'engine-claude',
+        label: 'Claude',
+        sections: getSectionsForIds(ENGINE_CLAUDE_SECTION_IDS)
+      },
+      {
+        id: 'engine-opencode',
+        label: 'opencode',
+        sections: getSectionsForIds(ENGINE_OPENCODE_SECTION_IDS)
+      }
+    ]
+  },
+  {
+    id: 'vendors',
+    label: 'Vendors',
+    icon: (
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        <circle cx="12" cy="12" r="10" />
+        <line x1="2" y1="12" x2="22" y2="12" />
+        <path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z" />
+      </svg>
+    ),
+    children: [
+      {
+        id: 'vendor-anthropic-nav',
+        label: 'Anthropic',
+        sections: getSectionsForIds(VENDOR_ANTHROPIC_SECTION_IDS)
+      },
+      {
+        id: 'vendor-opencode-nav',
+        label: 'opencode',
+        sections: getSectionsForIds(VENDOR_OPENCODE_SECTION_IDS)
+      }
+    ]
+  },
+  {
+    id: 'accounts-group',
+    label: 'Accounts',
+    icon: (
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M16 21v-2a4 4 0 00-4-4H6a4 4 0 00-4 4v2" />
+        <circle cx="9" cy="7" r="4" />
+        <path d="M22 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75" />
+      </svg>
+    ),
+    sections: getSectionsForIds(ACCOUNTS_SECTION_IDS)
   }
 ]

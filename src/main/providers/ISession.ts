@@ -1,0 +1,93 @@
+import type {
+  ChatMessage,
+  EngineId,
+  ApprovalDecision,
+  PermissionSuggestion
+} from '../../shared/types'
+import type { ResolvedCapabilities } from '../../shared/model-capabilities'
+
+/**
+ * Engine-neutral session interface. All methods here are implemented by
+ * every backend (Claude, opencode, etc.). Engine-specific capabilities
+ * (voice, MCP, background tasks, etc.) live on ClaudeSession directly and
+ * are gated behind `capabilities` flags.
+ */
+export interface ISession {
+  readonly engineId: EngineId
+  readonly routingId: string
+  readonly cwd: string
+  readonly capabilities: ResolvedCapabilities
+
+  /** Whether a prompt sent now will be queued (session actively processing a turn) */
+  readonly willQueue: boolean
+
+  /** Get the backend session UUID (available after first message exchange). */
+  getSessionId(): string | null
+
+  /** Get all messages exchanged in this session. */
+  getMessages(): ChatMessage[]
+
+  /** Run a prompt turn. Passing null spawns the process without sending a message. */
+  run(
+    prompt: string | null,
+    attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
+  ): Promise<void>
+
+  /** Interrupt the current turn without killing the session. */
+  interrupt(): Promise<void>
+
+  /** Cancel (tear down) the session entirely. */
+  cancel(): void
+
+  /** Resolve a pending tool-use approval. */
+  resolveApproval(
+    requestId: string,
+    decision: ApprovalDecision,
+    answers?: Record<string, string>,
+    updatedPermissions?: PermissionSuggestion[]
+  ): void
+
+  /** Set the model for future turns. */
+  setModel(model: string): Promise<void>
+
+  /** Set the permission mode. */
+  setPermissionMode(mode: string): Promise<void>
+
+  /**
+   * Set the reasoning effort variant for opencode models (e.g. 'none', 'thinking', 'low').
+   * Optional — Claude and other engines that do not support per-model variants ignore it.
+   * Pass null to revert to opencode's default (variant omitted from the prompt body).
+   */
+  setReasoningVariant?(variant: string | null): void
+
+  /** Update the inactivity timeout. Pass 0 to disable. */
+  setInactivityTimeout(ms: number): void
+
+  /**
+   * Ask a one-off question outside the main conversation history (the `/btw`
+   * command). Returns the assistant's answer, or null if the engine does not
+   * support the capability or encounters an error.
+   */
+  askSideQuestion(question: string): Promise<string | null>
+
+  /** Tear down all resources held by this session. */
+  dispose(): void
+}
+
+/**
+ * Factory type for engine-session construction, registered in EngineRegistry.
+ * Args are the same as SessionManager.create() minus the leading engineId.
+ */
+export type EngineSessionFactory = (
+  routingId: string,
+  win: import('electron').BrowserWindow,
+  cwd: string,
+  effort?: string,
+  resumeSessionId?: string,
+  permissionMode?: string,
+  model?: string,
+  sandboxConfig?: import('../../shared/types').SandboxSettings,
+  thinkingMode?: string,
+  resumeSessionAt?: string,
+  forkSession?: boolean
+) => ISession

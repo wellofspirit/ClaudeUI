@@ -21,11 +21,17 @@ extraResources:
       - bun-claude*
       - version.json
       - vendor/**/*.node
+  - from: vendor/opencode-cli
+    to: opencode-cli
+    filter:
+      - opencode*
+      - version.json
   - from: out/web
     to: web
 asarUnpack:
   - resources/**
   - node_modules/node-pty/**
+  - node_modules/better-sqlite3/**
 win:
   executableName: claudui
   signAndEditExecutable: false

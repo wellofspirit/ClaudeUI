@@ -28,6 +28,10 @@ import { getContextWindowSize } from './context-window'
 import { usageFetcher } from './usage-fetcher'
 import { createMermaidServer } from './mermaid-tool'
 import { createMockupServer } from './mockup-tool'
+import { claudeAuthProvider } from '../auth/ClaudeAuthProvider'
+import { accountManager } from './account-manager'
+import { equivalentCostUsd } from '../../shared/pricing'
+import { resolveUsageProvider } from './usage-provider'
 import {
   getClassifier,
   stopClassifier,
@@ -35,7 +39,12 @@ import {
   buildTranscript,
   type TranscriptMessage
 } from './auto-classifier'
-import { resolveThinkingMode, type ThinkingMode } from '../../shared/model-capabilities'
+import {
+  resolveThinkingMode,
+  resolveClaudeCapabilities,
+  type ThinkingMode
+} from '../../shared/model-capabilities'
+import type { ResolvedCapabilities } from '../../shared/model-capabilities'
 
 import { locateBunClaude, getCliVersion } from '../sdk'
 
@@ -84,8 +93,11 @@ import type {
   ApprovalDecision,
   PendingApproval,
   SandboxSettings,
-  PermissionSuggestion
+  PermissionSuggestion,
+  AccountRef
 } from '../../shared/types'
+import { claudeModel } from '../../shared/types'
+import { BaseSession } from '../providers/BaseSession'
 
 interface ApprovalResult {
   decision: ApprovalDecision
@@ -158,20 +170,26 @@ interface BackgroundPoller {
   done: boolean
 }
 
-export class ClaudeSession {
-  private static extraWindows = new Set<BrowserWindow>()
-  static addExtraWindow(win: BrowserWindow): void {
-    this.extraWindows.add(win)
+export class ClaudeSession extends BaseSession {
+  // Static pass-throughs to BaseSession so existing call sites in session.ipc.ts
+  // and remote-handlers.ts keep compiling without modification.
+  static override addExtraWindow(win: BrowserWindow): void {
+    BaseSession.addExtraWindow(win)
   }
-  static removeExtraWindow(win: BrowserWindow): void {
-    this.extraWindows.delete(win)
+  static override removeExtraWindow(win: BrowserWindow): void {
+    BaseSession.removeExtraWindow(win)
   }
-  static getExtraWindows(): Set<BrowserWindow> {
-    return this.extraWindows
+  static override getExtraWindows(): Set<BrowserWindow> {
+    return BaseSession.getExtraWindows()
+  }
+
+  readonly engineId = 'claude' as const
+
+  get capabilities(): ResolvedCapabilities {
+    return resolveClaudeCapabilities(this.model)
   }
 
   private sessionId: string | null = null
-  private messageHistory: ChatMessage[] = []
   /**
    * Wire-frame uuid → ChatMessage id, keyed by the first 24 chars of the uuid
    * (cli.js's own retraction matching truncates to 24 so per-block derived
@@ -190,9 +208,6 @@ export class ClaudeSession {
   private _initMcpServers: Array<{ name: string; status: string }> = [] // cached from init message
   private _mcpAllServers: Record<string, McpServerConfig> = {} // full config loaded at session start
   private _mcpDisabledServers = new Set<string>() // servers disabled via toggle
-  private win: BrowserWindow
-  routingId: string
-  readonly cwd: string
   private totalCostUsd = 0
   private messageChannel: MessageChannel<unknown> | null = null
   /** Single source of truth for query method signatures: the SDK layer's
@@ -223,8 +238,6 @@ export class ClaudeSession {
   private resumeSessionAt: string | undefined
   private forkSession = false
   private statusLineTimer: ReturnType<typeof setTimeout> | null = null
-  private inactivityTimer: ReturnType<typeof setTimeout> | null = null
-  private inactivityTimeoutMs = 15 * 60 * 1000 // default 15 min, 0 = disabled
   private sandboxConfig: SandboxSettings | null = null
   private voiceClient: VoiceClient | null = null
   private voiceServerPort: number | null = null
@@ -250,9 +263,7 @@ export class ClaudeSession {
     resumeSessionAt?: string,
     forkSession?: boolean
   ) {
-    this.routingId = routingId
-    this.win = win
-    this.cwd = cwd
+    super(routingId, win, cwd)
     this.effort = effort || 'medium'
     this.thinkingMode =
       thinkingMode === 'adaptive' || thinkingMode === 'enabled' || thinkingMode === 'disabled'
@@ -267,13 +278,34 @@ export class ClaudeSession {
     this.sendStatus()
   }
 
+  get willQueue(): boolean {
+    return this.isProcessing
+  }
+
   get status(): SessionStatus {
+    // Resolve session.account from the auth provider probe + active accountId (ADR-021 / Phase 4).
+    // The provider caches the cli.js init signal — no credential-file reads.
+    const activeAccountId = this.resolveActiveAccountId()
+    const account: AccountRef | null = claudeAuthProvider.buildAccountRef(activeAccountId)
+
     return {
       state: this.isProcessing ? 'running' : 'idle',
       sessionId: this.sessionId,
-      model: this.model,
+      model: this.model ? claudeModel(this.model) : null,
       cwd: this.cwd,
-      totalCostUsd: this.totalCostUsd
+      totalCostUsd: this.totalCostUsd,
+      account,
+      ...this.baseStatusFields()
+    }
+  }
+
+  /** Resolve the active multi-account ID for the current session, if any. */
+  private resolveActiveAccountId(): string | null {
+    try {
+      const st = accountManager.getState()
+      return st.enabled ? st.activeId : null
+    } catch {
+      return null
     }
   }
 
@@ -282,19 +314,7 @@ export class ClaudeSession {
     return this.sessionId
   }
 
-  /** Get all main-thread messages exchanged in this session. */
-  getMessages(): ChatMessage[] {
-    return this.messageHistory
-  }
-
-  /** Update the inactivity timeout. Pass 0 to disable. */
-  setInactivityTimeout(ms: number): void {
-    this.inactivityTimeoutMs = ms
-    // Re-evaluate: if idle, restart timer with new duration; if active, timer is already cleared
-    if (!this.isProcessing) this.resetInactivityTimer()
-  }
-
-  private resetInactivityTimer(): void {
+  protected override resetInactivityTimer(): void {
     this.clearInactivityTimer()
     if (this.inactivityTimeoutMs > 0) {
       this.inactivityTimer = setTimeout(() => {
@@ -305,18 +325,6 @@ export class ClaudeSession {
         this.cancel()
       }, this.inactivityTimeoutMs)
     }
-  }
-
-  private clearInactivityTimer(): void {
-    if (this.inactivityTimer) {
-      clearTimeout(this.inactivityTimer)
-      this.inactivityTimer = null
-    }
-  }
-
-  /** Whether a prompt sent now will be queued (session actively processing a turn) */
-  get willQueue(): boolean {
-    return this.isProcessing
   }
 
   async run(
@@ -716,7 +724,26 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
           // "none"); an expired-but-cached login still has an email — that 401s
           // on send and is handled by the reactive auth card, not this banner.
           const loggedIn = !!(account && account.email)
-          this.send('session:auth-source', loggedIn ? 'authenticated' : 'none')
+          const authSource = loggedIn ? 'authenticated' : 'none'
+
+          // Update the ClaudeAuthProvider probe cache from the cli.js init signal.
+          // This is the ONLY source of auth detection — no credential-file reads
+          // (preserves ADR-014 Keychain-prompt avoidance).
+          const oauthAccount = account
+            ? {
+                email: (account.email as string | null) ?? null,
+                organization: (account.organization as string | null) ?? null,
+                subscriptionType: (account.subscriptionType as string | null) ?? null,
+                tokenSource: (account.tokenSource as string | null) ?? null,
+                apiKeySource: (account.apiKeySource as string | null) ?? null,
+                apiProvider: (account.apiProvider as string | null) ?? null
+              }
+            : null
+          claudeAuthProvider.updateAuthSource(authSource, oauthAccount)
+
+          this.send('session:auth-source', authSource)
+          // Re-emit status with the freshly-resolved account field.
+          this.sendStatus()
         })
         .catch(() => {
           /* leave banner state unchanged on init-result failure */
@@ -1169,6 +1196,13 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
     this.totalCostUsd += cost
     this.isProcessing = false
 
+    // NOTE (Phase 7): Claude usage_event rows are NOT recorded live here.
+    // The streaming `usage` is cumulative-within-a-message and the JSONL is the
+    // codebase's source of truth for Claude tokens (accInputTokens is overwritten
+    // from computeTokenMetrics below). Claude usage_event rows come from the
+    // Pass-2 reconciler (block-usage JSONL parse → insertUsageEvents per message,
+    // source 'backfill', dedup by message_id) — authoritative + per-message.
+
     // Handle error results
     const subtype = msg.subtype
     if (subtype && subtype !== 'success') {
@@ -1213,6 +1247,7 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
     // Send accumulator-based status line immediately so the UI updates
     // without waiting for the JSONL read (which may not be fully flushed yet).
     this.send('session:status-line', this.buildStatusLineFromAccumulators())
+    this.sendMetering()
 
     // Then reconcile from JSONL with a delay to let the SDK flush. Only
     // overwrite accumulators if JSONL returns meaningful data.
@@ -1229,10 +1264,20 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
             this.accTotalApiDurationMs = metrics.totalApiDurationMs
             this.lastContextLength = metrics.contextWindowSize
             this.send('session:status-line', metrics)
+            this.sendMetering()
           })
           .catch((err) => {
             logger.warn('ClaudeSession', 'JSONL reconciliation failed', err)
           })
+
+        // Phase 7 Pass 2 — near-live metering: now that the JSONL is flushed,
+        // re-run the Claude reconciler so this turn's messages land in
+        // usage_event (authoritative per-message parse, dedup by message_id).
+        // Lazy import to avoid a static import cycle (usage-reconciler →
+        // block-usage → claude-session). Best-effort; never breaks the turn.
+        import('./usage-reconciler')
+          .then(({ usageReconciler }) => usageReconciler.reconcileClaude())
+          .catch(() => {})
       }, 500) // delay to let SDK flush JSONL to disk
     }
   }
@@ -1279,8 +1324,11 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
     if (this.activeQuery) {
       await this.activeQuery.setModel(model)
     }
+    // Re-emit status so capabilities (derived from model) are up to date in the renderer.
+    this.sendStatus()
     // Recalculate status line with new context window size
     this.send('session:status-line', this.buildStatusLineFromAccumulators())
+    this.sendMetering()
   }
 
   setEffort(effort: string): void {
@@ -1672,12 +1720,76 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
     }
   }
 
+  /**
+   * Build the engine-neutral MeteringSnapshot (Phase 7 Pass 2). Emitted
+   * ALONGSIDE StatusLineData — additive, never replaces it. equivalentCostUsd
+   * comes from the internal pricing table over the accumulator tokens (the cache
+   * split isn't available live, so cacheRead carries the combined cache figure
+   * and cacheWrite is 0 — best-effort live metric; the dashboard is the
+   * authoritative cost source). window + projection are subscription-gated.
+   */
+  private buildMeteringSnapshot(): import('../../shared/types').MeteringSnapshot {
+    const effectiveModel =
+      this.model === 'default' && this.resolvedModelId ? this.resolvedModelId : this.model
+    const account = claudeAuthProvider.buildAccountRef(this.resolveActiveAccountId())
+    const billingType = account?.billingType ?? 'unknown'
+
+    const tokens = {
+      input: this.accInputTokens,
+      output: this.accOutputTokens,
+      cacheWrite: 0,
+      cacheRead: this.accCachedTokens,
+      total: this.accInputTokens + this.accOutputTokens + this.accCachedTokens
+    }
+    const equiv = equivalentCostUsd('anthropic', effectiveModel, {
+      inputTokens: tokens.input,
+      outputTokens: tokens.output,
+      cacheWriteTokens: 0,
+      cacheWrite1hTokens: 0,
+      cacheReadTokens: tokens.cacheRead
+    })
+
+    const snapshot: import('../../shared/types').MeteringSnapshot = {
+      engineId: 'claude',
+      vendorId: 'anthropic',
+      billingType,
+      tokens,
+      equivalentCostUsd: equiv,
+      engineReportedCostUsd: this.totalCostUsd,
+      contextWindow: { used: this.lastContextLength, size: this.contextWindowSize }
+    }
+
+    // Window is a subscription concept (foundation §7), gated behind a per-account
+    // usage provider. Claude/anthropic + subscription → the provider yields the
+    // window; apiKey/free/unknown → null (cumulative meter, no window).
+    // (The WLS projection stays surfaced via the dashboard's BlockUsageData; it
+    // is intentionally omitted here to avoid a block-usage↔claude-session import
+    // cycle — the projection field is reserved for a later wiring.)
+    const provider = resolveUsageProvider('claude', 'anthropic', billingType)
+    const window = provider?.getWindow()
+    if (window) {
+      snapshot.window = { usedPercent: window.usedPercent, resetsAt: window.resetsAt }
+    }
+
+    return snapshot
+  }
+
+  /** Emit the metering snapshot. Swallows errors — advisory, never breaks flow. */
+  private sendMetering(): void {
+    try {
+      this.send('session:metering', this.buildMeteringSnapshot())
+    } catch {
+      /* advisory */
+    }
+  }
+
   /** Throttled status line update from in-memory accumulators (zero I/O) */
   private scheduleStatusLineUpdate(): void {
     if (this.statusLineTimer) return // already scheduled
     this.statusLineTimer = setTimeout(() => {
       this.statusLineTimer = null
       this.send('session:status-line', this.buildStatusLineFromAccumulators())
+      this.sendMetering()
     }, 50)
   }
 
@@ -1730,7 +1842,11 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
   ): void {
     const entry = this.pendingApprovals.get(requestId)
     if (entry) {
-      entry.resolve({ decision, answers, updatedPermissions })
+      // cli.js's canUseTool only understands 'allow' | 'deny'. Coerce
+      // 'allowForSession' to 'allow' so the ApprovalDecision union is handled
+      // safely (opencode may produce it in Phase 5).
+      const coerced: 'allow' | 'deny' = decision === 'allowForSession' ? 'allow' : decision
+      entry.resolve({ decision: coerced, answers, updatedPermissions })
     }
   }
 
@@ -2253,16 +2369,12 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
     }
   }
 
-  private send(channel: string, data: unknown): void {
-    if (!this.win.isDestroyed()) {
-      this.win.webContents.send(channel, this.routingId, data)
-    }
-    for (const w of ClaudeSession.extraWindows) {
-      if (!w.isDestroyed()) w.webContents.send(channel, this.routingId, data)
-    }
-  }
-
   private sendStatus(): void {
     this.send('session:status', this.status)
+  }
+
+  /** Dispose: cancel the session and release all resources. */
+  dispose(): void {
+    this.cancel()
   }
 }

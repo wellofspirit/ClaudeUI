@@ -107,7 +107,6 @@ describe('Sidebar FC', () => {
     app.bridge.ipcMain.handle('session:generate-title', async () => 'auto-title')
     app.bridge.ipcMain.handle('session:delete-session' as any, async () => undefined)
     app.bridge.ipcMain.handle('session:delete-project' as any, async () => undefined)
-
     useSessionStore.setState({
       activeSessionId: null,
       sessions: {},
@@ -160,7 +159,8 @@ describe('Sidebar FC', () => {
     })
 
     await act(async () => {
-      await viewProps.onNewSessionDblClick()
+      viewProps.onNewSessionDblClick()
+      await new Promise((r) => setTimeout(r, 0))
     })
 
     const sessions = Object.values(useSessionStore.getState().sessions)
@@ -192,7 +192,8 @@ describe('Sidebar FC', () => {
     })
 
     await act(async () => {
-      await viewProps.onClickSession(makeSessionInfo('already-loaded'))
+      viewProps.onClickSession(makeSessionInfo('already-loaded'))
+      await new Promise((r) => setTimeout(r, 0))
     })
 
     expect(loadHistoryCalls).toBe(0)
@@ -221,7 +222,8 @@ describe('Sidebar FC', () => {
     })
 
     await act(async () => {
-      await viewProps.onClickSession(makeSessionInfo('disk-sess'))
+      viewProps.onClickSession(makeSessionInfo('disk-sess'))
+      await new Promise((r) => setTimeout(r, 0))
     })
 
     expect(historyCalls).toHaveLength(1)

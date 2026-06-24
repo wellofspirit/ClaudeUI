@@ -103,6 +103,7 @@ export function Sidebar({
   const setActiveView = useSessionStore((s) => s.setActiveView)
   const pluginViews = useSessionStore((s) => s.pluginViews)
   const addRecentSession = useSessionStore((s) => s.addRecentSession)
+  const sessionEngines = useSessionStore((s) => s.sessionEngines)
   const automationBadge = useAutomationStore((s) => s.notificationBadge)
 
   const isMobile = useIsMobile()
@@ -266,6 +267,7 @@ export function Sidebar({
       switchSession(routingId)
       return
     }
+
     // Load from JSONL
     const { messages, taskNotifications, customTitle, agentIdToToolUseId, statusLine, warnings } =
       await window.api.loadSessionHistory(info.sessionId, info.projectKey)
@@ -327,7 +329,7 @@ export function Sidebar({
       window.api.unwatchSession(routingId)
       setWatching(routingId, false)
     } else {
-      // Need to load historical session first if not in memory
+      // Load JSONL history if not already in memory, then watch the .jsonl file
       if (!session) {
         window.api
           .loadSessionHistory(info.sessionId, info.projectKey)
@@ -468,7 +470,8 @@ export function Sidebar({
       kind: 'session',
       sessionId: info.sessionId,
       projectKey: info.projectKey,
-      title: info.title
+      title: info.title,
+      engineId: info.engineId
     })
   }, [])
 
@@ -485,7 +488,11 @@ export function Sidebar({
   const confirmDelete = useCallback(async (): Promise<void> => {
     if (!deleteTarget) return
     if (deleteTarget.kind === 'session') {
-      await deleteSessionAction(deleteTarget.sessionId, deleteTarget.projectKey)
+      await deleteSessionAction(
+        deleteTarget.sessionId,
+        deleteTarget.projectKey,
+        deleteTarget.engineId
+      )
     } else {
       await deleteProjectAction(deleteTarget.projectKey)
     }
@@ -505,13 +512,15 @@ export function Sidebar({
     const inMemoryByDir: Record<string, SessionInfo[]> = {}
     for (const [rid, data] of Object.entries(sidebarSessions)) {
       if (dirSessionIds.has(rid) || !data.cwd) continue
+      const sessionEngineId = (sessionEngines[rid]?.engineId ?? 'claude') as import('../../../../shared/types').EngineId
       const info: SessionInfo = {
         sessionId: rid,
         cwd: data.cwd,
         projectKey: '',
         title: data.firstUserText || 'New session',
         timestamp: Date.now(),
-        lastActivityAt: Date.now()
+        lastActivityAt: Date.now(),
+        engineId: sessionEngineId
       }
       const key = data.cwd
       if (!inMemoryByDir[key]) inMemoryByDir[key] = []

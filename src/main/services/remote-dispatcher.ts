@@ -34,7 +34,9 @@ export class RemoteDispatcher {
     'account:set-enabled',
     'account:add',
     'account:switch',
-    'account:delete'
+    'account:delete',
+    // Spawns a local opencode server — meaningless and unsafe over remote (Phase 9b).
+    'usage:refresh-prices'
   ])
 
   /** Register a handler for a channel. Blocked channels are silently skipped. */

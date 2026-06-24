@@ -22,7 +22,11 @@ import {
   saveSessionConfig,
   loadSlashCommands,
   saveSlashCommands,
-  startConfigWatcher
+  startConfigWatcher,
+  loadEngineConfig,
+  saveEngineConfig,
+  loadVendorConfig,
+  saveVendorConfig
 } from '../services/ui-config'
 import {
   loadClaudePermissions,
@@ -50,18 +54,31 @@ import {
 import { usageFetcher } from '../services/usage-fetcher'
 import { serviceSession } from '../services/service-session'
 import { blockUsageService } from '../services/block-usage'
+import { usageReconciler } from '../services/usage-reconciler'
+import '../auth/register-auth-providers'
+import { engineAuthRegistry } from '../auth/EngineAuthRegistry'
+import { claudeAuthProvider } from '../auth/ClaudeAuthProvider'
 import { authManager } from '../services/auth-manager'
 import { accountManager } from '../services/account-manager'
 import type {
   ApprovalDecision,
   ModelInfo,
-  SandboxSettings,
+  EngineModelGroup,
   ProxySettings,
   AnthropicEndpointSettings,
   ModelOverrideSettings,
   PermissionSuggestion,
-  IpcResult
+  IpcResult,
+  EngineId,
+  EngineConfig,
+  VendorConfig,
+  VendorAuthMap,
+  VendorAuthOption
 } from '../../shared/types'
+import { discoverOpencodeModels } from '../opencode/model-discovery'
+import { discoverOpencodeSkills } from '../opencode/command-skill-discovery'
+import { refreshPrices } from '../services/opencode-pricing'
+import { OpencodeSession } from '../opencode/OpencodeSession'
 import { logger } from '../services/logger'
 import { deleteSessionFiles, deleteProjectFiles } from '../services/delete-session-files'
 import { startSocksBridge, stopSocksBridge } from '../services/socks-bridge'
@@ -69,6 +86,12 @@ import { setProxyEnv, setProxyAllSubprocesses } from '../sdk/proxy'
 import { setEndpointEnv } from '../sdk/endpoint-env'
 import { setModelEnv } from '../sdk/model-env'
 import { invalidateMockupSecuritySettings } from '../services/mockup-settings'
+import type { ISession } from '../providers/ISession'
+
+/** Type guard: narrows ISession to ClaudeSession when engineId === 'claude'. */
+function isClaudeSession(session: ISession): session is ClaudeSession {
+  return session.engineId === 'claude'
+}
 
 /**
  * Wraps an async IPC handler with try-catch, returning a standardized IpcResult envelope.
@@ -222,7 +245,22 @@ async function fetchModels(): Promise<ModelInfo[]> {
     // session is opened. Resolves immediately (init already completed). ADR-014.
     try {
       const init = await handle.initializationResult()
+      // reportLoginStatus broadcasts session:auth-source to the window (legacy path).
       authManager.reportLoginStatus(init?.account)
+      // Also update the ClaudeAuthProvider probe cache so probe() and session.account
+      // are accurate from the first model-fetch, before any chat session opens.
+      const acc = init?.account as Record<string, unknown> | undefined
+      if (acc) {
+        const loggedIn = !!(acc.email)
+        claudeAuthProvider.updateAuthSource(loggedIn ? 'authenticated' : 'none', {
+          email: (acc.email as string | null) ?? null,
+          organization: (acc.organization as string | null) ?? null,
+          subscriptionType: (acc.subscriptionType as string | null) ?? null,
+          tokenSource: (acc.tokenSource as string | null) ?? null,
+          apiKeySource: (acc.apiKeySource as string | null) ?? null,
+          apiProvider: (acc.apiProvider as string | null) ?? null
+        })
+      }
     } catch {
       /* non-fatal — per-session init will still report status */
     }
@@ -247,10 +285,13 @@ const SESSION_IPC_CHANNELS = [
   'session:stop-task',
   'session:background-task',
   'session:dequeue-message',
+  'session:ask-side-question',
   'session:set-permission-mode',
   'session:set-model',
   'session:set-effort',
+  'session:set-reasoning-variant',
   'session:get-models',
+  'session:get-engine-models',
   'session:generate-title',
   'session:generate-commit-message',
   'session:write-custom-title',
@@ -296,6 +337,7 @@ const SESSION_IPC_CHANNELS = [
   'usage:fetch',
   'usage:fetch-block',
   'usage:set-account-filter',
+  'usage:refresh-prices',
   'auth:sign-in',
   'auth:submit-code',
   'auth:cancel',
@@ -327,7 +369,13 @@ const SESSION_IPC_CHANNELS = [
   'voice:stop-server',
   'voice:start-recording',
   'voice:stop-recording',
-  'proxy:test-connection'
+  'proxy:test-connection',
+  'vendor-auth:probe',
+  'vendor-auth:list-options',
+  'vendor-auth:set-key',
+  'vendor-auth:oauth-authorize',
+  'vendor-auth:oauth-callback',
+  'vendor-auth:remove'
 ]
 
 // ---------------------------------------------------------------------------
@@ -715,13 +763,19 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
       model?: string,
       thinkingMode?: string,
       resumeSessionAt?: string,
-      forkSession?: boolean
+      forkSession?: boolean,
+      engineId?: EngineId
     ) => {
-      const settings = loadSettings() as Record<string, unknown>
-      const sandboxConfig = (settings.sandbox as SandboxSettings) || undefined
-      await applyProxyEnv((settings.proxy as ProxySettings) || undefined)
-      applyEndpointEnv((settings.anthropicEndpoint as AnthropicEndpointSettings) || undefined)
-      applyModelEnv((settings.modelOverride as ModelOverrideSettings) || undefined)
+      const engineCfg = loadEngineConfig(engineId ?? 'claude')
+      const sandboxConfig = engineCfg.sandbox
+      if (engineId !== 'opencode') {
+        // Phase 5: derive vendor from the current model's ModelRef. For Claude the
+        // engine is 1:1 with the 'anthropic' vendor, so this is always correct now.
+        const vendorCfg = loadVendorConfig('anthropic')
+        await applyProxyEnv(engineCfg.proxy)
+        applyEndpointEnv(vendorCfg.endpoint)
+        applyModelEnv(vendorCfg.modelOverride)
+      }
       manager.create(
         routingId,
         win,
@@ -733,7 +787,8 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
         sandboxConfig,
         thinkingMode,
         resumeSessionAt,
-        forkSession
+        forkSession,
+        engineId
       )
       // Notify all extra windows (remote bridge) that a session was created
       for (const w of ClaudeSession.getExtraWindows()) {
@@ -804,45 +859,51 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
   )
 
   ipcMain.handle('session:watch-background', (_e, routingId: string, toolUseId: string) => {
-    manager.get(routingId)?.watchBackground(toolUseId)
+    const s = manager.get(routingId)
+    if (s?.capabilities.backgroundTasks && isClaudeSession(s)) s.watchBackground(toolUseId)
   })
 
   ipcMain.handle('session:unwatch-background', (_e, routingId: string, toolUseId: string) => {
-    manager.get(routingId)?.unwatchBackground(toolUseId)
+    const s = manager.get(routingId)
+    if (s?.capabilities.backgroundTasks && isClaudeSession(s)) s.unwatchBackground(toolUseId)
   })
 
   ipcMain.handle(
     'session:read-background-range',
     (_e, routingId: string, toolUseId: string, offset: number, length: number) => {
-      return manager.get(routingId)?.readBackgroundRange(toolUseId, offset, length) ?? ''
+      const s = manager.get(routingId)
+      if (s?.capabilities.backgroundTasks && isClaudeSession(s))
+        return s.readBackgroundRange(toolUseId, offset, length)
+      return ''
     }
   )
 
   ipcMain.handle('session:stop-task', async (_e, routingId: string, toolUseId: string) => {
     const session = manager.get(routingId)
-    if (!session) {
-      return { success: false, error: 'No active session' }
-    }
+    if (!session) return { success: false, error: 'No active session' }
+    if (!session.capabilities.backgroundTasks || !isClaudeSession(session))
+      return { success: false, error: 'Provider does not support background tasks' }
     return await session.stopTask(toolUseId)
   })
 
   ipcMain.handle('session:background-task', async (_e, routingId: string, toolUseId: string) => {
     const session = manager.get(routingId)
-    if (!session) {
-      return { success: false, error: 'No active session' }
-    }
+    if (!session) return { success: false, error: 'No active session' }
+    if (!session.capabilities.backgroundTasks || !isClaudeSession(session))
+      return { success: false, error: 'Provider does not support background tasks' }
     return await session.backgroundTask(toolUseId)
   })
 
   ipcMain.handle('session:dequeue-message', async (_e, routingId: string, value: string) => {
     const session = manager.get(routingId)
-    if (!session) return { removed: 0 }
+    if (!session || !isClaudeSession(session)) return { removed: 0 }
     return await session.dequeueMessage(value)
   })
 
   ipcMain.handle('session:ask-side-question', async (_e, routingId: string, question: string) => {
     const session = manager.get(routingId)
     if (!session) return null
+    if (!session.capabilities.sideQuestion) return null
     return await session.askSideQuestion(question)
   })
 
@@ -850,12 +911,14 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     await manager.get(routingId)?.setPermissionMode(mode)
   })
 
-  // Voice input handlers
+  // Voice input handlers (Claude-only: capabilities.voice)
   ipcMain.handle(
     'voice:start-server',
     safeHandler(async (_e: unknown, routingId: string) => {
       const session = manager.get(routingId)
       if (!session) throw new Error('No active session')
+      if (!session.capabilities.voice || !isClaudeSession(session))
+        throw new Error('Provider does not support voice')
       await session.voiceStartServer()
     })
   )
@@ -865,6 +928,7 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     safeHandler(async (_e: unknown, routingId: string) => {
       const session = manager.get(routingId)
       if (!session) throw new Error('No active session')
+      if (!session.capabilities.voice || !isClaudeSession(session)) return
       await session.voiceStopServer()
     })
   )
@@ -874,6 +938,8 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     safeHandler(async (_e: unknown, routingId: string, language: string) => {
       const session = manager.get(routingId)
       if (!session) throw new Error('No active session')
+      if (!session.capabilities.voice || !isClaudeSession(session))
+        throw new Error('Provider does not support voice')
       await session.voiceStartRecording(language)
     })
   )
@@ -882,7 +948,7 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     'voice:stop-recording',
     safeHandler(async (_e: unknown, routingId: string) => {
       const session = manager.get(routingId)
-      if (!session) throw new Error('No active session')
+      if (!session || !session.capabilities.voice || !isClaudeSession(session)) return
       await session.voiceStopRecording()
     })
   )
@@ -900,15 +966,35 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
   })
 
   ipcMain.handle('session:set-effort', (_e, routingId: string, effort: string) => {
-    manager.get(routingId)?.setEffort(effort)
+    const s = manager.get(routingId)
+    if (s?.capabilities.reasoning.effort != null && isClaudeSession(s)) s.setEffort(effort)
+  })
+
+  ipcMain.handle('session:set-reasoning-variant', (_e, routingId: string, variant: string | null) => {
+    manager.get(routingId)?.setReasoningVariant?.(variant)
   })
 
   ipcMain.handle('session:set-thinking-mode', (_e, routingId: string, mode: string) => {
-    manager.get(routingId)?.setThinkingMode(mode)
+    const s = manager.get(routingId)
+    if (s?.capabilities.reasoning.thinking != null && isClaudeSession(s)) s.setThinkingMode(mode)
   })
 
   ipcMain.handle('session:get-models', async () => {
     return await fetchModels()
+  })
+
+  ipcMain.handle('session:get-engine-models', async (): Promise<EngineModelGroup[]> => {
+    // Claude models as a flat group
+    const claudeModels = await fetchModels()
+    const claudeGroup: EngineModelGroup = {
+      engineId: 'claude',
+      vendorId: 'anthropic',
+      vendorName: 'Anthropic',
+      models: claudeModels
+    }
+    // opencode models — returns [] if binary not present or discovery fails
+    const opencodeGroups = await discoverOpencodeModels()
+    return [claudeGroup, ...opencodeGroups]
   })
 
   ipcMain.handle('session:generate-title', async (_e, conversationText: string) => {
@@ -949,11 +1035,15 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
   )
 
   ipcMain.handle('session:get-plan-content', (_e, routingId: string) => {
-    return manager.get(routingId)?.getPlanContent() ?? null
+    const s = manager.get(routingId)
+    if (s?.capabilities.plan && isClaudeSession(s)) return s.getPlanContent() ?? null
+    return null
   })
 
   ipcMain.handle('session:get-session-log-path', (_e, routingId: string) => {
-    return manager.get(routingId)?.getSessionLogPath() ?? null
+    const s = manager.get(routingId)
+    if (s && isClaudeSession(s)) return s.getSessionLogPath() ?? null
+    return null
   })
 
   ipcMain.handle('session:list-directories', async () => {
@@ -1033,7 +1123,15 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
 
   // UI config persistence (~/.claude/ui/)
   ipcMain.handle('config:load-settings', () => loadSettings())
-  ipcMain.handle('config:save-settings', (_e, settings: UISettings) => {
+  ipcMain.handle('config:save-settings', (_e, incomingSettings: UISettings) => {
+    // Strip engine/vendor-owned fields (sandbox, proxy, anthropicEndpoint, modelOverride)
+    // that have moved to engines/claude.json and vendors/anthropic.json
+    const raw = incomingSettings as Record<string, unknown>
+    const settings: UISettings = Object.fromEntries(
+      Object.entries(raw).filter(
+        ([k]) => !['sandbox', 'proxy', 'anthropicEndpoint', 'modelOverride'].includes(k)
+      )
+    )
     saveSettings(settings)
     // Next mockup request re-reads settings to pick up CSP changes.
     invalidateMockupSecuritySettings()
@@ -1049,27 +1147,23 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     }
     // Apply log level + filter changes immediately
     {
-      const raw = settings as Record<string, unknown>
-      const level = typeof raw.logLevel === 'string' ? raw.logLevel : undefined
-      const filter = typeof raw.logFilter === 'string' ? raw.logFilter : undefined
+      const raw2 = settings as Record<string, unknown>
+      const level = typeof raw2.logLevel === 'string' ? raw2.logLevel : undefined
+      const filter = typeof raw2.logFilter === 'string' ? raw2.logFilter : undefined
       if (level !== undefined || filter !== undefined) {
         logger.applyFilter(filter ?? '', level as 'debug' | 'info' | 'warn' | 'error' | undefined)
       }
     }
-    // Apply proxy env var changes immediately (async — bridge start/stop)
-    applyProxyEnv((settings as Record<string, unknown>).proxy as ProxySettings | undefined).catch(
-      (err) => logger.error('Proxy', `Failed to apply proxy settings: ${err}`)
-    )
-    // Apply custom Anthropic endpoint env vars immediately
-    applyEndpointEnv(
-      (settings as Record<string, unknown>).anthropicEndpoint as
-        | AnthropicEndpointSettings
-        | undefined
-    )
-    // Apply model override env vars immediately
-    applyModelEnv(
-      (settings as Record<string, unknown>).modelOverride as ModelOverrideSettings | undefined
-    )
+    // Apply proxy/endpoint/model from engine/vendor stores (source of truth is now there)
+    {
+      const engCfg = loadEngineConfig('claude')
+      const venCfg = loadVendorConfig('anthropic')
+      applyProxyEnv(engCfg.proxy).catch(
+        (err) => logger.error('Proxy', `Failed to apply proxy settings: ${err}`)
+      )
+      applyEndpointEnv(venCfg.endpoint)
+      applyModelEnv(venCfg.modelOverride)
+    }
     // Propagate session idle timeout change
     const timeoutMins = (settings as Record<string, unknown>).sessionTimeoutMins
     if (typeof timeoutMins === 'number') {
@@ -1093,7 +1187,33 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     saveSlashCommands(commands)
   )
   ipcMain.handle('config:scan-custom-commands', (_e, cwd: string) => scanCustomCommands(cwd))
-  ipcMain.handle('config:load-skill-details', (_e, cwd: string) => scanSkills(cwd))
+  ipcMain.handle('config:load-skill-details', (_e, cwd: string) => {
+    // Engine-dispatch: if the active session for this cwd is an opencode session,
+    // source skills from opencode's GET /skill API (cached, transient-server).
+    // Otherwise fall back to the Claude skill scanner — unchanged for Claude.
+    if (sharedManager) {
+      let hasOpencode = false
+      sharedManager.forEach((session) => {
+        if (session.cwd === cwd && session instanceof OpencodeSession) {
+          hasOpencode = true
+        }
+      })
+      if (hasOpencode) return discoverOpencodeSkills(cwd)
+    }
+    return scanSkills(cwd)
+  })
+  ipcMain.handle('config:load-engine-config', (_e, engineId: string) =>
+    loadEngineConfig(engineId)
+  )
+  ipcMain.handle('config:save-engine-config', (_e, engineId: string, cfg: EngineConfig) =>
+    saveEngineConfig(engineId, cfg)
+  )
+  ipcMain.handle('config:load-vendor-config', (_e, vendorId: string) =>
+    loadVendorConfig(vendorId)
+  )
+  ipcMain.handle('config:save-vendor-config', (_e, vendorId: string, cfg: VendorConfig) =>
+    saveVendorConfig(vendorId, cfg)
+  )
 
   // Claude permission settings (allow/deny/ask rules)
   ipcMain.handle('claude:load-permissions', (_e, scope: string, cwd?: string) =>
@@ -1110,7 +1230,7 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
       // apply_flag_settings({}) which triggers the CLI's settings-change
       // subscriber to invalidate its cache and re-read all sources from disk,
       // respecting managed policies and the normal priority hierarchy.
-      manager.forEach((session) => {
+      manager.forEachClaude((session) => {
         if (!cwd || session.cwd === cwd || scope === 'user') {
           session.notifySettingsChanged().catch(() => {})
         }
@@ -1123,15 +1243,15 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
   ipcMain.handle('claude:set-cleanup-period', async (_e, days: number) => {
     saveCleanupPeriodDays(days)
     // Hot-reload running CLI sessions so the new retention applies immediately.
-    manager.forEach((session) => {
+    manager.forEachClaude((session) => {
       session.notifySettingsChanged().catch(() => {})
     })
   })
 
-  // MCP server management (via SDK Query object)
+  // MCP server management (Claude-only: capabilities.hostedMcp)
   ipcMain.handle('mcp:status', async (_e, routingId: string) => {
     const session = manager.get(routingId)
-    if (!session) return []
+    if (!session || !session.capabilities.hostedMcp || !isClaudeSession(session)) return []
     return await session.mcpServerStatus()
   })
 
@@ -1140,6 +1260,8 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     safeHandler(async (_e: unknown, routingId: string, serverName: string, enabled: boolean) => {
       const session = manager.get(routingId)
       if (!session) throw new Error('No active session')
+      if (!session.capabilities.hostedMcp || !isClaudeSession(session))
+        throw new Error('Provider does not support hosted MCP')
       await session.mcpToggleServer(serverName, enabled)
     })
   )
@@ -1149,6 +1271,8 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     safeHandler(async (_e: unknown, routingId: string, serverName: string) => {
       const session = manager.get(routingId)
       if (!session) throw new Error('No active session')
+      if (!session.capabilities.hostedMcp || !isClaudeSession(session))
+        throw new Error('Provider does not support hosted MCP')
       await session.mcpReconnectServer(serverName)
     })
   )
@@ -1158,6 +1282,8 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     safeHandler(async (_e: unknown, routingId: string, servers: Record<string, unknown>) => {
       const session = manager.get(routingId)
       if (!session) throw new Error('No active session')
+      if (!session.capabilities.hostedMcp || !isClaudeSession(session))
+        throw new Error('Provider does not support hosted MCP')
       return await session.mcpSetServers(servers)
     })
   )
@@ -1512,10 +1638,10 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
   // Wire up SDK usage relay — tries active user sessions first, then
   // the always-on service session as fallback.
   usageFetcher.setSessionGetter(async () => {
-    // Try active user sessions first (they're already running)
-    const sessions: import('../services/claude-session').ClaudeSession[] = []
-    manager.forEach((s) => sessions.push(s))
-    for (const session of sessions) {
+    // Try active Claude sessions first (they're already running; costUsd capability implies getUsage)
+    const claudeSessions: ClaudeSession[] = []
+    manager.forEachClaude((s) => claudeSessions.push(s))
+    for (const session of claudeSessions) {
       try {
         const data = await session.getUsage()
         if (data !== null) return data
@@ -1539,9 +1665,22 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
   const skipUsageInDev = !app.isPackaged && !process.env.CLAUDE_UI_DEV_USAGE
   blockUsageService.setWindow(win)
   if (!skipUsageInDev) {
-    blockUsageService.recalculate().catch((err) => {
-      logger.error('BlockUsage', 'Initial recalculation failed', err)
-    })
+    // Phase 7 Pass 2 (Full SQL): run the backfill reconciler FIRST so usage_event
+    // holds out-of-tool Claude + opencode usage before the first dashboard
+    // emission (no flash of missing per-engine/opencode data). recalculate() is
+    // itself self-sufficient for the Claude dashboard — it seeds daily_usage from
+    // the legacy JSON files, self-upserts its freshly-parsed JSONL into
+    // usage_event, then reads SQL-sourced blocks + daily — so even if reconcile
+    // is slow/fails, the Claude blocks + history are never empty.
+    usageReconciler
+      .reconcileAll()
+      .catch(() => {})
+      .finally(() => {
+        blockUsageService.recalculate().catch((err) => {
+          logger.error('BlockUsage', 'Initial recalculation failed', err)
+        })
+      })
+    usageReconciler.start()
     blockUsageService.startWatching()
   } else {
     logger.info(
@@ -1563,20 +1702,117 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     blockUsageService.setAccountFilter(account)
   })
 
-  // Native Anthropic OAuth (ADR-014). signIn resolves at "authorizing"; the
-  // terminal result is broadcast via the 'auth:state' event.
-  ipcMain.handle('auth:sign-in', async () => authManager.signIn())
-  ipcMain.handle('auth:submit-code', async (_e, code: string) => authManager.submitOAuthCode(code))
-  ipcMain.handle('auth:cancel', async () => authManager.cancelSignIn())
+  // Phase 9b: fetch opencode pricing from /config/providers, persist + register.
+  // Desktop-only — spawns a local opencode server; blocked from remote dispatch.
+  ipcMain.handle(
+    'usage:refresh-prices',
+    safeHandler(async () => refreshPrices())
+  )
 
-  // Multiple-account support (ADR-015).
+  // Native Anthropic OAuth (ADR-014) — routed through EngineAuthProvider.
+  // Channels and payloads are unchanged; the registry defaults to 'claude'.
+  const claudeAuth = engineAuthRegistry.require('claude')
+  ipcMain.handle('auth:sign-in', async () => claudeAuth.signIn?.())
+  ipcMain.handle('auth:submit-code', async (_e, code: string) => claudeAuth.submitCode?.(code))
+  ipcMain.handle('auth:cancel', async () => claudeAuth.cancelSignIn?.())
+
+  // Multiple-account support (ADR-015) — routed through EngineAuthProvider for
+  // add/switch/delete; setEnabled stays direct on AccountManager (not on the interface).
   ipcMain.handle('account:get', async () => accountManager.getState())
   ipcMain.handle('account:set-enabled', async (_e, enabled: boolean) =>
     accountManager.setEnabled(enabled)
   )
-  ipcMain.handle('account:add', async () => accountManager.addAccount())
-  ipcMain.handle('account:switch', async (_e, id: string) => accountManager.switchAccount(id))
-  ipcMain.handle('account:delete', async (_e, id: string) => accountManager.deleteAccount(id))
+  ipcMain.handle('account:add', async () => claudeAuth.addAccount?.())
+  ipcMain.handle('account:switch', async (_e, id: string) => claudeAuth.switchAccount?.(id))
+  ipcMain.handle('account:delete', async (_e, id: string) => claudeAuth.deleteAccount?.(id))
+
+  // -------------------------------------------------------------------------
+  // Engine-routed per-vendor auth channels (opencode multi-vendor auth, Phase 5c)
+  // Each handler dispatches to engineAuthRegistry.require(engineId) and guards
+  // the optional per-vendor method — throws a clear error if the provider lacks it.
+  // Claude auth is unchanged: auth:* / account:* above stay byte-identical.
+  // -------------------------------------------------------------------------
+
+  ipcMain.handle(
+    'vendor-auth:probe',
+    safeHandler(async (_e: unknown, engineId: EngineId): Promise<VendorAuthMap> => {
+      const provider = engineAuthRegistry.require(engineId)
+      return provider.probe()
+    })
+  )
+
+  ipcMain.handle(
+    'vendor-auth:list-options',
+    safeHandler(
+      async (_e: unknown, engineId: EngineId): Promise<Record<string, VendorAuthOption[]>> => {
+        const provider = engineAuthRegistry.require(engineId)
+        if (!provider.listVendorAuthOptions) {
+          throw new Error(`Engine "${engineId}" does not support listVendorAuthOptions`)
+        }
+        return provider.listVendorAuthOptions()
+      }
+    )
+  )
+
+  ipcMain.handle(
+    'vendor-auth:set-key',
+    safeHandler(async (_e: unknown, engineId: EngineId, vendorId: string, key: string): Promise<void> => {
+      const provider = engineAuthRegistry.require(engineId)
+      if (!provider.setVendorApiKey) {
+        throw new Error(`Engine "${engineId}" does not support setVendorApiKey`)
+      }
+      return provider.setVendorApiKey(vendorId, key)
+    })
+  )
+
+  ipcMain.handle(
+    'vendor-auth:oauth-authorize',
+    safeHandler(
+      async (
+        _e: unknown,
+        engineId: EngineId,
+        vendorId: string,
+        method: number,
+        inputs?: Record<string, string>
+      ): Promise<{ url: string; method: 'auto' | 'code'; instructions: string }> => {
+        const provider = engineAuthRegistry.require(engineId)
+        if (!provider.oauthAuthorize) {
+          throw new Error(`Engine "${engineId}" does not support oauthAuthorize`)
+        }
+        return provider.oauthAuthorize(vendorId, method, inputs)
+      }
+    )
+  )
+
+  ipcMain.handle(
+    'vendor-auth:oauth-callback',
+    safeHandler(
+      async (
+        _e: unknown,
+        engineId: EngineId,
+        vendorId: string,
+        method: number,
+        code?: string
+      ): Promise<boolean> => {
+        const provider = engineAuthRegistry.require(engineId)
+        if (!provider.oauthCallback) {
+          throw new Error(`Engine "${engineId}" does not support oauthCallback`)
+        }
+        return provider.oauthCallback(vendorId, method, code)
+      }
+    )
+  )
+
+  ipcMain.handle(
+    'vendor-auth:remove',
+    safeHandler(async (_e: unknown, engineId: EngineId, vendorId: string): Promise<void> => {
+      const provider = engineAuthRegistry.require(engineId)
+      if (!provider.removeVendorAuth) {
+        throw new Error(`Engine "${engineId}" does not support removeVendorAuth`)
+      }
+      return provider.removeVendorAuth(vendorId)
+    })
+  )
 
   // Mockup preview — read HTML from mockup directory
   ipcMain.handle(

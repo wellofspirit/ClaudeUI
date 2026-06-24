@@ -101,6 +101,7 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     onStatus: onEvent('session:status'),
     onResult: onEvent('session:result'),
     onError: onEvent('session:error'),
+    onVendorAuthRequired: onEvent('session:vendor-auth-required'),
     onWarning: onEvent('session:warning'),
     onMessagesRetracted: onEvent('session:messages-retracted'),
     onToolResult: onEvent('session:tool-result'),
@@ -119,7 +120,9 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     onSkills: onEvent('session:skills'),
     onAuthSource: onEvent('session:auth-source'),
     onStatusLine: onEvent('session:status-line'),
+    onMetering: onEvent('session:metering'),
     onMcpServers: onEvent('session:mcp-servers'),
+    onPlanSteps: onEvent('session:plan'),
 
     // Non-routed events
     onMaximizeChange: onEvent('window:maximized-change'),
@@ -162,7 +165,10 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     setEffort: (routingId, effort) => ipcRenderer.invoke('session:set-effort', routingId, effort),
     setThinkingMode: (routingId, mode) =>
       ipcRenderer.invoke('session:set-thinking-mode', routingId, mode),
+    setReasoningVariant: (routingId, variant) =>
+      ipcRenderer.invoke('session:set-reasoning-variant', routingId, variant),
     getModels: () => ipcRenderer.invoke('session:get-models'),
+    getEngineModels: () => ipcRenderer.invoke('session:get-engine-models'),
     generateTitle: (conversationText) =>
       ipcRenderer.invoke('session:generate-title', conversationText),
     generateCommitMessage: (diff) => ipcRenderer.invoke('session:generate-commit-message', diff),
@@ -276,6 +282,12 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
       ipcRenderer.invoke('automation:send-message', id, prompt),
 
     testProxyConnection: (proxy) => unwrap('proxy:test-connection', proxy),
+    loadEngineConfig: (engineId) => ipcRenderer.invoke('config:load-engine-config', engineId),
+    saveEngineConfig: (engineId, config) =>
+      ipcRenderer.invoke('config:save-engine-config', engineId, config),
+    loadVendorConfig: (vendorId) => ipcRenderer.invoke('config:load-vendor-config', vendorId),
+    saveVendorConfig: (vendorId, config) =>
+      ipcRenderer.invoke('config:save-vendor-config', vendorId, config),
 
     logError: (source, message) => {
       ipcRenderer.send('log:error', source, message)
@@ -348,6 +360,10 @@ export async function bootTestApp(): Promise<TestApp> {
     'config:save-slash-commands',
     'config:load-slash-commands',
     'config:scan-custom-commands',
+    'config:load-engine-config',
+    'config:save-engine-config',
+    'config:load-vendor-config',
+    'config:save-vendor-config',
     'usage:fetch',
     'usage:fetch-block',
     'plugin:views',

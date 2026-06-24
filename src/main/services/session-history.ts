@@ -277,7 +277,8 @@ export async function listDirectories(): Promise<DirectoryGroup[]> {
         title: displayTitle,
         timestamp: meta.timestamp || f.mtime,
         lastActivityAt: f.mtime,
-        aiTitle: meta.aiTitle || null
+        aiTitle: meta.aiTitle || null,
+        engineId: 'claude'
       })
     }
 

@@ -388,11 +388,16 @@ describe('InputBox FC — rendered', () => {
       record('session:set-thinking-mode', ...args)
       return null
     })
+    app.bridge.ipcMain.handle('session:set-reasoning-variant', (_e: unknown, ...args: unknown[]) => {
+      record('session:set-reasoning-variant', ...args)
+      return null
+    })
     app.bridge.ipcMain.handle('session:cancel', (_e: unknown, ...args: unknown[]) => {
       record('session:cancel', ...args)
       return null
     })
     app.bridge.ipcMain.handle('session:get-models', () => [])
+    app.bridge.ipcMain.handle('session:get-engine-models', () => [{ engineId: 'claude', vendorId: 'anthropic', vendorName: 'Anthropic', models: [] }])
     app.bridge.ipcMain.handle('voice:start-recording', (_e: unknown, ...args: unknown[]) => {
       record('voice:start-recording', ...args)
       return null
@@ -504,8 +509,19 @@ describe('InputBox FC — rendered', () => {
     expect(ipcCalls['session:interrupt'][0][0]).toBe(FC_ROUTE)
   })
 
-  it('onSelectModel: calls setModel IPC and updates selectedModel in store', async () => {
+  it('onSelectModel (started same-engine session): calls setModel IPC and updates store', async () => {
     renderFC()
+    // A live model switch only goes to the backend when the session has STARTED
+    // (has a backend sessionId) and the picked engine matches the running engine.
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [FC_ROUTE]: {
+          ...state.sessions[FC_ROUTE],
+          status: { ...state.sessions[FC_ROUTE].status, sessionId: 'ses_started' }
+        }
+      }
+    }))
 
     viewProps.onSelectModel('claude-opus-4-5')
 
@@ -514,6 +530,16 @@ describe('InputBox FC — rendered', () => {
     expect(ipcCalls['session:set-model'][0][1]).toBe('claude-opus-4-5')
 
     // Store updated
+    expect(useSessionStore.getState().sessions[FC_ROUTE].selectedModel).toBe('claude-opus-4-5')
+  })
+
+  it('onSelectModel (not-yet-started session): updates store but does NOT call setModel IPC', async () => {
+    renderFC()
+    // Fresh FC session has no backend sessionId — a model pick must only update
+    // the store (takes effect on spawn), never send to a not-started backend.
+    viewProps.onSelectModel('claude-opus-4-5')
+
+    expect(ipcCalls['session:set-model']).toBeUndefined()
     expect(useSessionStore.getState().sessions[FC_ROUTE].selectedModel).toBe('claude-opus-4-5')
   })
 
@@ -856,5 +882,299 @@ describe('InputBox FC — rendered', () => {
     const session = useSessionStore.getState().sessions[FC_ROUTE]
     expect(session.thinkingMode).toBe('adaptive') // both support adaptive
     expect(session.effort).toBe('high') // xhigh coerced to model's default
+  })
+})
+
+// ---------------------------------------------------------------------------
+// billingType cost gating — ROADMAP #3 (followup-opencode-statusline)
+//
+// showCostInStatusLine is true for all billingTypes EXCEPT 'free'.
+// Claude is never free, so this change is behavior-preserving for it.
+// ---------------------------------------------------------------------------
+
+describe('InputBox FC — billingType cost gating (ROADMAP #3)', () => {
+  const BT_ROUTE = 'bt-route-1'
+
+  let app: Awaited<ReturnType<typeof import('@test/helpers/boot-test-app').bootTestApp>>
+
+  function renderFC(): void {
+    render(createElement(InputBox))
+  }
+
+  beforeEach(async () => {
+    const { bootTestApp } = await import('@test/helpers/boot-test-app')
+    app = await bootTestApp()
+
+    app.bridge.ipcMain.handle('session:get-models', () => [])
+    app.bridge.ipcMain.handle('session:get-engine-models', () => [{
+      engineId: 'claude',
+      vendorId: 'anthropic',
+      vendorName: 'Anthropic',
+      models: []
+    }])
+    app.bridge.ipcMain.handle('session:scan-custom-commands', () => [])
+    app.bridge.ipcMain.handle('file:list-dir', () => [])
+
+    useSessionStore.setState({
+      activeSessionId: null,
+      sessions: {},
+      recentSessionIds: []
+    })
+    useSessionStore.getState().createNewSession(BT_ROUTE, '/tmp/bt')
+    useSessionStore.setState({ activeSessionId: BT_ROUTE })
+  })
+
+  afterEach(() => {
+    app.teardown()
+    vi.clearAllMocks()
+  })
+
+  /** Helper: set the active session's status.account.billingType. */
+  function setBillingType(billingType: string | undefined): void {
+    const state = useSessionStore.getState()
+    const session = state.sessions[BT_ROUTE]
+    useSessionStore.setState({
+      sessions: {
+        ...state.sessions,
+        [BT_ROUTE]: {
+          ...session,
+          status: {
+            ...session.status,
+            account: billingType !== undefined
+              ? {
+                  engineId: 'opencode' as const,
+                  vendorId: 'opencode',
+                  billingType: billingType as import('../../../../../../shared/types').BillingType,
+                  authState: 'authenticated' as const
+                }
+              : null
+          }
+        }
+      }
+    })
+  }
+
+  it('billingType undefined (no account) → showCostInStatusLine=true (Claude-safe default)', () => {
+    setBillingType(undefined)
+    renderFC()
+    expect(viewProps.showCostInStatusLine).toBe(true)
+  })
+
+  it("billingType 'unknown' → showCostInStatusLine=true (Claude-safe default)", () => {
+    setBillingType('unknown')
+    renderFC()
+    expect(viewProps.showCostInStatusLine).toBe(true)
+  })
+
+  it("billingType 'subscription' → showCostInStatusLine=true (Claude subscription unchanged)", () => {
+    setBillingType('subscription')
+    renderFC()
+    expect(viewProps.showCostInStatusLine).toBe(true)
+  })
+
+  it("billingType 'apiKey' → showCostInStatusLine=true (API key users see cost)", () => {
+    setBillingType('apiKey')
+    renderFC()
+    expect(viewProps.showCostInStatusLine).toBe(true)
+  })
+
+  it("billingType 'free' → showCostInStatusLine=false (opencode free models hide the $)", () => {
+    setBillingType('free')
+    renderFC()
+    expect(viewProps.showCostInStatusLine).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// ReasoningPicker — opencode per-model reasoning variant support
+// ---------------------------------------------------------------------------
+
+describe('InputBox FC — ReasoningPicker (opencode reasoning variants)', () => {
+  const RV_ROUTE = 'rv-route-1'
+
+  const ipcCalls: Record<string, unknown[][]> = {}
+  let app: Awaited<ReturnType<typeof import('@test/helpers/boot-test-app').bootTestApp>>
+
+  function renderFC(): void {
+    render(createElement(InputBox))
+  }
+
+  beforeEach(async () => {
+    const { bootTestApp } = await import('@test/helpers/boot-test-app')
+    app = await bootTestApp()
+
+    for (const key of Object.keys(ipcCalls)) delete ipcCalls[key]
+    function record(channel: string, ...args: unknown[]): void {
+      if (!ipcCalls[channel]) ipcCalls[channel] = []
+      ipcCalls[channel].push(args)
+    }
+
+    app.bridge.ipcMain.handle('session:get-models', () => [])
+    app.bridge.ipcMain.handle('session:get-engine-models', () => [{
+      engineId: 'opencode',
+      vendorId: 'minimax',
+      vendorName: 'MiniMax',
+      models: [
+        {
+          value: 'minimax/minimax-01',
+          displayName: 'MiniMax-01',
+          description: 'MiniMax · MiniMax-01',
+          engineId: 'opencode',
+          vendorId: 'minimax',
+          supportsEffort: false,
+          supportsAdaptiveThinking: false,
+          reasoningVariants: ['none', 'thinking']
+        }
+      ]
+    }])
+    app.bridge.ipcMain.handle('session:set-reasoning-variant', (_e: unknown, ...args: unknown[]) => {
+      record('session:set-reasoning-variant', ...args)
+      return null
+    })
+    app.bridge.ipcMain.handle('session:set-model', (_e: unknown, ...args: unknown[]) => {
+      record('session:set-model', ...args)
+      return null
+    })
+    app.bridge.ipcMain.handle('session:create', (_e: unknown, ...args: unknown[]) => {
+      record('session:create', ...args)
+      return null
+    })
+    app.bridge.ipcMain.handle('file:list-dir', () => [])
+
+    useSessionStore.setState({
+      activeSessionId: null,
+      sessions: {},
+      recentSessionIds: []
+    })
+    useSessionStore.getState().createNewSession(RV_ROUTE, '/test/cwd')
+    useSessionStore.setState({ activeSessionId: RV_ROUTE })
+  })
+
+  afterEach(() => {
+    app.teardown()
+    vi.clearAllMocks()
+  })
+
+  const MINIMAX_MODEL = {
+    value: 'minimax/minimax-01',
+    displayName: 'MiniMax-01',
+    description: 'MiniMax · MiniMax-01',
+    engineId: 'opencode' as const,
+    vendorId: 'minimax',
+    supportsEffort: false,
+    supportsAdaptiveThinking: false,
+    reasoningVariants: ['none', 'thinking'] as string[]
+  }
+
+  it('passes reasoningVariants from the selected opencode model to View', async () => {
+    // Pre-populate availableModels so the FC can resolve the selected model synchronously.
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [RV_ROUTE]: {
+          ...state.sessions[RV_ROUTE],
+          selectedModel: 'minimax/minimax-01',
+          selectedEngineId: 'opencode' as const
+        }
+      },
+      availableModels: [MINIMAX_MODEL]
+    }))
+
+    renderFC()
+
+    expect(viewProps.reasoningVariants).toEqual(['none', 'thinking'])
+  })
+
+  it('passes reasoningVariant (null = Default) to View initially', () => {
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [RV_ROUTE]: {
+          ...state.sessions[RV_ROUTE],
+          selectedModel: 'minimax/minimax-01',
+          selectedEngineId: 'opencode' as const
+        }
+      },
+      availableModels: [MINIMAX_MODEL]
+    }))
+
+    renderFC()
+
+    expect(viewProps.reasoningVariant).toBeNull()
+  })
+
+  it('onSelectReasoningVariant: updates store + calls set-reasoning-variant IPC', async () => {
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [RV_ROUTE]: {
+          ...state.sessions[RV_ROUTE],
+          selectedModel: 'minimax/minimax-01',
+          selectedEngineId: 'opencode' as const
+        }
+      },
+      availableModels: [MINIMAX_MODEL]
+    }))
+
+    renderFC()
+
+    viewProps.onSelectReasoningVariant?.('thinking')
+
+    expect(useSessionStore.getState().sessions[RV_ROUTE].reasoningVariant).toBe('thinking')
+    expect(ipcCalls['session:set-reasoning-variant']).toHaveLength(1)
+    expect(ipcCalls['session:set-reasoning-variant'][0][0]).toBe(RV_ROUTE)
+    expect(ipcCalls['session:set-reasoning-variant'][0][1]).toBe('thinking')
+  })
+
+  it('onSelectReasoningVariant with null: resets store + IPC to null', async () => {
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [RV_ROUTE]: {
+          ...state.sessions[RV_ROUTE],
+          selectedModel: 'minimax/minimax-01',
+          selectedEngineId: 'opencode' as const,
+          reasoningVariant: 'none'
+        }
+      },
+      availableModels: [MINIMAX_MODEL]
+    }))
+
+    renderFC()
+
+    viewProps.onSelectReasoningVariant?.(null)
+
+    expect(useSessionStore.getState().sessions[RV_ROUTE].reasoningVariant).toBeNull()
+    expect(ipcCalls['session:set-reasoning-variant'][0][1]).toBeNull()
+  })
+
+  it('Claude model with no reasoningVariants → reasoningVariants is empty array', () => {
+    // Default session: claude model, no reasoningVariants
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [RV_ROUTE]: {
+          ...state.sessions[RV_ROUTE],
+          selectedModel: 'default',
+          selectedEngineId: 'claude' as const
+        }
+      },
+      availableModels: [
+        {
+          value: 'default',
+          displayName: 'Default',
+          description: 'Claude Default',
+          supportsEffort: true,
+          supportedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max'] as const,
+          supportsAdaptiveThinking: true
+          // no reasoningVariants
+        }
+      ]
+    }))
+
+    renderFC()
+
+    // No reasoningVariants on Claude model → empty or absent
+    expect(viewProps.reasoningVariants ?? []).toEqual([])
   })
 })

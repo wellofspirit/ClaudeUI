@@ -3,7 +3,10 @@ import { resolve } from 'path'
 
 const sharedAlias = {
   '@renderer': resolve(__dirname, 'src/renderer/src'),
-  '@test': resolve(__dirname, 'src/test')
+  '@test': resolve(__dirname, 'src/test'),
+  // Redirect better-sqlite3 to a node:sqlite-backed shim so vitest (plain Node)
+  // never loads the Electron-ABI native .node binary (ERR_DLOPEN_FAILED).
+  'better-sqlite3': resolve(__dirname, 'src/test/stubs/better-sqlite3-stub.ts')
 }
 
 export default defineConfig({

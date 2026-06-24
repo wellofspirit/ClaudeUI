@@ -14,4 +14,6 @@ bin/
 # scripts/extract-cli.mjs. Cached locally, rebuilt when claudeCliVersion
 # bumps in package.json.
 /vendor/claude-cli/
+# Vendored opencode binary — downloaded via scripts/ensure-opencode.mjs.
+/vendor/opencode-cli/
 /.cache/

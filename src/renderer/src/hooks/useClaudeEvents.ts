@@ -202,6 +202,8 @@ export function useClaudeEvents(): void {
           const allDone = session.todos.every((t) => t.status === 'completed')
           if (allDone) state.setTodos(routingId, [])
         }
+        // Clear any pending vendor auth required card when a turn succeeds
+        useSessionStore.getState().clearVendorAuthRequired(routingId)
         // Mark attention + notify when Claude's turn ends (user's turn)
         if (session?.sdkActive) {
           if (state.activeSessionId !== routingId || !document.hasFocus()) {
@@ -209,6 +211,9 @@ export function useClaudeEvents(): void {
           }
           notifyIfNeeded(routingId, 'Ready for input', 'Claude has finished — your turn')
         }
+      }),
+      window.api.onVendorAuthRequired((routingId, data) => {
+        useSessionStore.getState().setVendorAuthRequired(routingId, data)
       }),
       window.api.onError((routingId, error) => {
         addError(routingId, error)
@@ -314,6 +319,12 @@ export function useClaudeEvents(): void {
       window.api.onStatusLine((routingId, data) => {
         setStatusLine(routingId, data)
       }),
+      window.api.onMetering((routingId, data) => {
+        useSessionStore.getState().setMetering(routingId, data)
+      }),
+      window.api.onPlanSteps((routingId, todos) => {
+        useSessionStore.getState().setTodos(routingId, todos)
+      }),
       window.api.onPermissionMode((routingId, mode) => {
         setPermissionMode(mode, routingId)
       }),
@@ -379,8 +390,19 @@ export function useClaudeEvents(): void {
         }
       }),
       // Auth source from session init ('none' = logged out) — drives the banner
+      // Also updates the vendorAuth probe so AuthBanner reads from the probe.
       window.api.onAuthSource((_routingId, source) => {
-        useSessionStore.getState().setAuthSource(source)
+        const store = useSessionStore.getState()
+        store.setAuthSource(source)
+        // Mirror the auth-source into vendorAuth so AuthBanner can consume the probe
+        // (AuthState tri-state) instead of the raw string — behavior-equivalent.
+        store.setVendorAuth({
+          anthropic: {
+            authState: source === 'authenticated' ? 'authenticated' : 'unauthenticated',
+            billingType: 'unknown',
+            label: undefined
+          }
+        })
       }),
       // Multi-account state changes (ADR-015)
       window.api.onAccountsChanged((state) => {

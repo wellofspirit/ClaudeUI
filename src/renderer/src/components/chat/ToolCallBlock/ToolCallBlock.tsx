@@ -1,3 +1,17 @@
+/**
+ * ToolCallBlock — the stateful host for a passive tool card.
+ *
+ * Phase 6: this FC now computes the tool's `kind` (via the session's
+ * EngineToolMap + engine-independent hostedMcpKind) and the neutral `ToolView`,
+ * then renders the shared <ToolCard> shell. It still wires every store/IPC
+ * handler (approval, background-task, stop, open-panel, background-watch) exactly
+ * as before — only the presentational layer changed (ToolCallBlockView → ToolCard
+ * + kind bodies).
+ *
+ * Kept as the public entry point so MessageBubble's renderToolBlock and
+ * SubagentMessages keep importing `ToolCallBlock` unchanged.
+ */
+
 import { memo, useEffect, useState } from 'react'
 import type {
   ContentBlock,
@@ -5,7 +19,9 @@ import type {
   PermissionSuggestion
 } from '../../../../../shared/types'
 import { useSessionStore, useActiveSession } from '../../../stores/session-store'
-import { ToolCallBlockView } from './View'
+import { hostedMcpKind } from '../../../../../shared/tool-kinds'
+import { engineToolMap } from '../tool-registry/engine-tool-maps'
+import { ToolCard } from '../tool-registry/ToolCard'
 
 type ToolUseBlock = Extract<ContentBlock, { type: 'tool_use' }>
 type ToolResultBlock = Extract<ContentBlock, { type: 'tool_result' }>
@@ -29,6 +45,8 @@ export const ToolCallBlock = memo(function ToolCallBlock({
   const clearTaskStopping = useSessionStore((s) => s.clearTaskStopping)
   const isHistorical = useActiveSession((s) => s.isHistorical)
   const permissionMode = useActiveSession((s) => s.permissionMode)
+  const engineId = useActiveSession((s) => s.status.engineId)
+  const backgroundTasksEnabled = useActiveSession((s) => s.status.capabilities.backgroundTasks)
   const expandToolCalls = useSessionStore((s) => s.settings.expandToolCalls)
   const expandReadResults = useSessionStore((s) => s.settings.expandReadResults)
   const hideToolInput = useSessionStore((s) => s.settings.hideToolInput)
@@ -48,6 +66,12 @@ export const ToolCallBlock = memo(function ToolCallBlock({
 
   const isStopping = stoppingTaskIds.includes(toolUseId)
   const [isBackgrounding, setIsBackgrounding] = useState(false)
+
+  // Compute the semantic kind + neutral view from the session's engine tool map.
+  // hostedMcpKind (mermaid/mockup/mcp) is engine-independent and resolves first.
+  const toolMap = engineToolMap(engineId)
+  const kind = hostedMcpKind(block.toolName) ?? toolMap.kindOf(block.toolName)
+  const view = toolMap.normalize(kind, block.toolInput, result)
 
   // Start file polling as soon as a background bash tool_use renders, independent of
   // expanded state. BackgroundBashOutput only mounts when expanded, but auto-expand
@@ -114,7 +138,9 @@ export const ToolCallBlock = memo(function ToolCallBlock({
   }
 
   return (
-    <ToolCallBlockView
+    <ToolCard
+      kind={kind}
+      view={view}
       block={block}
       result={result}
       approval={approval}
@@ -131,6 +157,7 @@ export const ToolCallBlock = memo(function ToolCallBlock({
       isStopping={isStopping}
       isBackgrounding={isBackgrounding}
       hasActiveSession={activeSessionId !== null}
+      backgroundTasksEnabled={backgroundTasksEnabled}
       onApproval={handleApproval}
       onBackgroundTask={handleBackgroundTask}
       onStopTask={handleStopTask}

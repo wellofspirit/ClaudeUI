@@ -45,6 +45,10 @@ const { gitSvcSpies, sessionManagerSpies, sessionStub } = vi.hoisted(() => {
   const sessionStub: any = {
     willQueue: false,
     cwd: '/tmp/cwd',
+    engineId: 'claude',
+    // capabilities assigned at module scope below (resolveClaudeCapabilities needs the
+    // top-level import, which isn't available inside the hoisted factory).
+    capabilities: undefined,
     run: vi.fn(),
     resolveApproval: vi.fn(),
     watchBackground: vi.fn(),
@@ -78,6 +82,7 @@ const { gitSvcSpies, sessionManagerSpies, sessionStub } = vi.hoisted(() => {
     cancel: vi.fn(),
     interrupt: vi.fn(async () => {}),
     forEach: vi.fn((cb: (s: any) => void) => cb(sessionStub)),
+    forEachClaude: vi.fn((cb: (s: any) => void) => cb(sessionStub)),
     setSessionTimeout: vi.fn()
   }
   return { gitSvcSpies, sessionManagerSpies, sessionStub }
@@ -122,7 +127,11 @@ vi.mock('../../services/ui-config', () => ({
   saveSessionConfig: vi.fn(),
   loadSlashCommands: vi.fn(() => []),
   saveSlashCommands: vi.fn(),
-  startConfigWatcher: vi.fn()
+  startConfigWatcher: vi.fn(),
+  loadEngineConfig: vi.fn(() => ({})),
+  saveEngineConfig: vi.fn(),
+  loadVendorConfig: vi.fn(() => ({})),
+  saveVendorConfig: vi.fn()
 }))
 
 vi.mock('../../services/claude-settings', () => ({
@@ -246,6 +255,11 @@ vi.mock('../../services/logger', () => ({
 // Import AFTER mocks.
 import { registerSessionIpc } from '../session.ipc'
 import { gitServiceManager } from '../../services/git-service'
+import { resolveClaudeCapabilities } from '../../../shared/model-capabilities'
+
+// Fill in the stub's capabilities now that the top-level import is available
+// (it can't be referenced inside the vi.hoisted() factory above).
+sessionStub.capabilities = resolveClaudeCapabilities('default')
 
 describe('session.ipc', () => {
   let harness: IpcHarness

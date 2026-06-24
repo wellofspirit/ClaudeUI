@@ -7,6 +7,8 @@
 
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { useSessionStore } from '../session-store'
+import { claudeModel } from '../../../../shared/types'
+import { resolveClaudeCapabilities } from '../../../../shared/model-capabilities'
 import {
   makeChatMessage,
   makeAssistantMessage,
@@ -939,9 +941,9 @@ describe('addTaskNotification', () => {
 describe('setStatus', () => {
   it('updates status fields', () => {
     store().createNewSession('r1', '/test')
-    store().setStatus('r1', makeSessionStatus({ state: 'running', model: 'claude-opus-4-7' }))
+    store().setStatus('r1', makeSessionStatus({ state: 'running', model: claudeModel('claude-opus-4-7') }))
     expect(store().sessions['r1'].status.state).toBe('running')
-    expect(store().sessions['r1'].status.model).toBe('claude-opus-4-7')
+    expect(store().sessions['r1'].status.model?.modelId).toBe('claude-opus-4-7')
   })
 
   it('mirrors a new cwd into the top-level session cwd', () => {
@@ -1728,5 +1730,63 @@ describe('openMockupPanel / closeMockupPanel', () => {
     store().openMockupPanel('r1', 'abc12345', 'Page A')
     expect(store().sessions['r2'].rightPanel).toBe('none')
     expect(store().sessions['r2'].mockupDir).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Engine selection (Phase 5)
+// ---------------------------------------------------------------------------
+
+describe('setLastSelectedEngineId', () => {
+  it('updates lastSelectedEngineId in store', () => {
+    expect(store().lastSelectedEngineId).toBe('claude')
+    store().setLastSelectedEngineId('claude')
+    expect(store().lastSelectedEngineId).toBe('claude')
+  })
+})
+
+describe('createNewSession inherits lastSelectedEngineId', () => {
+  it('default is claude — new session selectedEngineId is claude', () => {
+    store().createNewSession('r1', '/path')
+    expect(store().sessions['r1'].selectedEngineId).toBe('claude')
+  })
+
+  it('new session status.engineId is claude', () => {
+    store().setLastSelectedEngineId('claude')
+    store().createNewSession('r1', '/path')
+    expect(store().sessions['r1'].status.engineId).toBe('claude')
+  })
+
+  it('new session status.capabilities matches claude capabilities', () => {
+    store().setLastSelectedEngineId('claude')
+    store().createNewSession('r1', '/path')
+    const caps = store().sessions['r1'].status.capabilities
+    // reasoning.thinking present for default (resolves to opus alias → adaptive thinking)
+    // voice, hostedMcp etc. are engine-level — always true for Claude
+    expect(caps.voice).toBe(true)
+    expect(caps.hostedMcp).toBe(true)
+    expect(caps.backgroundTasks).toBe(true)
+    expect(caps.canUseMcp).toBe(true)
+    expect(caps.isAgentCapable).toBe(true)
+  })
+})
+
+describe('resolveClaudeCapabilities (Phase 2 replacement for capabilitiesFor)', () => {
+  it('claude has all engine-level capabilities enabled', () => {
+    const caps = resolveClaudeCapabilities('claude-opus-4-8')
+    expect(caps.voice).toBe(true)
+    expect(caps.hostedMcp).toBe(true)
+    expect(caps.backgroundTasks).toBe(true)
+    expect(caps.subagents).toBe(true)
+    expect(caps.plan).toBe(true)
+    expect(caps.fork).toBe(true)
+    expect(caps.forkFromMessage).toBe(true)
+  })
+
+  it('AND-derived gates are correct for Claude + tool-capable model', () => {
+    const caps = resolveClaudeCapabilities('claude-opus-4-8')
+    expect(caps.canUseMcp).toBe(true)
+    expect(caps.canUseSubagents).toBe(true)
+    expect(caps.isAgentCapable).toBe(true)
   })
 })

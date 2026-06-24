@@ -12,7 +12,7 @@ export default defineConfig({
     plugins: [externalizeDepsPlugin({ exclude: ['electron-context-menu'] })],
     build: {
       rollupOptions: {
-        external: ['node-pty', 'ws']
+        external: ['node-pty', 'ws', 'better-sqlite3']
       }
     }
   },

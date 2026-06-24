@@ -10,6 +10,8 @@ import type {
   TaskNotification,
   TodoItem
 } from '../../shared/types'
+import { claudeModel } from '../../shared/types'
+import { resolveClaudeCapabilities } from '../../shared/model-capabilities'
 
 let messageCounter = 0
 
@@ -82,9 +84,12 @@ export function makeSessionStatus(overrides?: Partial<SessionStatus>): SessionSt
   return {
     state: 'idle',
     sessionId: null,
-    model: 'claude-sonnet-4-6',
+    model: claudeModel('claude-sonnet-4-6'),
     cwd: '/test/project',
     totalCostUsd: 0,
+    engineId: 'claude',
+    capabilities: resolveClaudeCapabilities('claude-sonnet-4-6'),
+    account: null,
     ...overrides
   }
 }

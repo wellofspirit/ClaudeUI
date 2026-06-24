@@ -2,22 +2,24 @@ import { useState } from 'react'
 import { useSessionStore } from '../../stores/session-store'
 
 /**
- * Proactive sign-in banner (ADR-014). Shown when cli.js reports it has no
- * credentials — `authSource === 'none'` from the session init event. We use the
- * init signal rather than reading the credential store ourselves, which would
- * trigger macOS Keychain `security` trust prompts. Expired-but-refreshable
- * tokens are intentionally not surfaced here (cli.js refreshes lazily); a truly
- * dead session is caught reactively by the inline 401 auth card.
+ * Proactive sign-in banner (ADR-014 / Phase 4). Shown when the engine auth
+ * probe reports `unauthenticated` for the `anthropic` vendor. The probe itself
+ * derives from the same cli.js init signal (`session:auth-source`) — no
+ * credential-file reads (preserves Keychain-prompt avoidance). Expired-but-
+ * refreshable tokens are intentionally not surfaced here (cli.js refreshes
+ * lazily); a truly dead session is caught reactively by the inline 401 auth card.
  */
 export function AuthBanner(): React.JSX.Element | null {
-  const authSource = useSessionStore((s) => s.authSource)
+  const vendorAuth = useSessionStore((s) => s.vendorAuth)
   const authState = useSessionStore((s) => s.authState)
   const signIn = useSessionStore((s) => s.signIn)
   const cancelSignIn = useSessionStore((s) => s.cancelSignIn)
   const [dismissed, setDismissed] = useState(false)
 
-  // Hide once logged in (init said oauth/api_key) or a login just succeeded.
-  const loggedOut = authSource === 'none' && authState?.status !== 'success'
+  // Hide once logged in (probe says authenticated) or a login just succeeded.
+  // vendorAuth null = not yet probed → don't show the banner yet.
+  const probeState = vendorAuth?.anthropic?.authState
+  const loggedOut = probeState === 'unauthenticated' && authState?.status !== 'success'
   if (dismissed || !loggedOut) return null
 
   const authorizing = authState?.status === 'authorizing'

@@ -23,7 +23,7 @@
 
 import { shell } from 'electron'
 import type { BrowserWindow } from 'electron'
-import type { AuthState, OAuthAccount } from '../../shared/types'
+import type { AuthFlowState, OAuthAccount } from '../../shared/types'
 import { serviceSession } from './service-session'
 import { logger } from './logger'
 
@@ -43,7 +43,7 @@ interface OAuthResult {
   }
 }
 
-const IDLE: AuthState = { status: 'idle', account: null, error: null }
+const IDLE: AuthFlowState = { status: 'idle', account: null, error: null }
 
 class AuthManager {
   private window: BrowserWindow | null = null
@@ -95,7 +95,7 @@ class AuthManager {
    * redirect in the background. Resolves with the "authorizing" snapshot; the
    * success/error transition is broadcast via `auth:state`.
    */
-  async signIn(): Promise<AuthState> {
+  async signIn(): Promise<AuthFlowState> {
     const handle = await serviceSession.getControlHandle()
     if (!handle) {
       return this.broadcastError('Could not start the login service session.')
@@ -123,13 +123,13 @@ class AuthManager {
       .then((res) => this.finalize(myFlow, res as OAuthResult))
       .catch((err) => this.fail(myFlow, err))
 
-    const authorizing: AuthState = { status: 'authorizing', account: null, error: null }
+    const authorizing: AuthFlowState = { status: 'authorizing', account: null, error: null }
     this.broadcast(authorizing)
     return authorizing
   }
 
   /** Manual fallback: complete the flow with a pasted authorization code. */
-  async submitOAuthCode(code: string): Promise<AuthState> {
+  async submitOAuthCode(code: string): Promise<AuthFlowState> {
     const handle = await serviceSession.getControlHandle()
     if (!handle || !this.pendingState) {
       return this.broadcastError('No active login flow. Start login again.')
@@ -155,7 +155,7 @@ class AuthManager {
   // Internal
   // ---------------------------------------------------------------------------
 
-  private finalize(flow: number, res: OAuthResult): AuthState {
+  private finalize(flow: number, res: OAuthResult): AuthFlowState {
     if (flow !== this.flowId || this.settled) return IDLE
     this.settled = true
     this.pendingState = null
@@ -171,7 +171,7 @@ class AuthManager {
         }
       : null
 
-    const state: AuthState = { status: 'success', account, error: null }
+    const state: AuthFlowState = { status: 'success', account, error: null }
     logger.info('AuthManager', `Login succeeded${account?.email ? ` (${account.email})` : ''}`)
     this.broadcast(state)
     for (const cb of this.onSuccessCbs) {
@@ -184,21 +184,21 @@ class AuthManager {
     return state
   }
 
-  private fail(flow: number, err: unknown): AuthState {
+  private fail(flow: number, err: unknown): AuthFlowState {
     if (flow !== this.flowId || this.settled) return IDLE
     this.settled = true
     this.pendingState = null
     return this.broadcastError(errText(err))
   }
 
-  private broadcastError(message: string): AuthState {
-    const state: AuthState = { status: 'error', account: null, error: message }
+  private broadcastError(message: string): AuthFlowState {
+    const state: AuthFlowState = { status: 'error', account: null, error: message }
     logger.error('AuthManager', `Login failed: ${message}`)
     this.broadcast(state)
     return state
   }
 
-  private broadcast(state: AuthState): void {
+  private broadcast(state: AuthFlowState): void {
     if (this.window && !this.window.isDestroyed()) {
       this.window.webContents.send('auth:state', state)
     }

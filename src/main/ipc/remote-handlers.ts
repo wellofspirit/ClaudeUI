@@ -27,6 +27,8 @@ import {
 } from '../services/claude-settings'
 import { loadMcpServers, readDisabledMcpServers } from '../services/claude-mcp'
 import { scanSkills } from '../services/skill-scanner'
+import { discoverOpencodeSkills } from '../opencode/command-skill-discovery'
+import { OpencodeSession } from '../opencode/OpencodeSession'
 import { scanCustomCommands } from '../services/custom-command-scanner'
 import { usageFetcher } from '../services/usage-fetcher'
 import { blockUsageService } from '../services/block-usage'
@@ -36,6 +38,12 @@ import { ClaudeSession, getSdkExecutableOpts } from '../services/claude-session'
 import { PERSISTED_SESSIONS_DIR } from '../services/persisted-sessions-dir'
 import { query as sdkQuery } from '../sdk'
 import { logger } from '../services/logger'
+import type { ISession } from '../providers/ISession'
+
+/** Type guard: narrows ISession to ClaudeSession when engineId === 'claude'. */
+function isClaudeSession(session: ISession): session is ClaudeSession {
+  return session.engineId === 'claude'
+}
 
 /**
  * Registers handler functions on the RemoteDispatcher.
@@ -173,38 +181,47 @@ export function registerRemoteHandlers(
   // -------------------------------------------------------------------------
 
   dispatcher.register('session:watch-background', async (routingId: string, toolUseId: string) => {
-    manager.get(routingId)?.watchBackground(toolUseId)
+    const s = manager.get(routingId)
+    if (s?.capabilities.backgroundTasks && isClaudeSession(s)) s.watchBackground(toolUseId)
   })
 
   dispatcher.register(
     'session:unwatch-background',
     async (routingId: string, toolUseId: string) => {
-      manager.get(routingId)?.unwatchBackground(toolUseId)
+      const s = manager.get(routingId)
+      if (s?.capabilities.backgroundTasks && isClaudeSession(s)) s.unwatchBackground(toolUseId)
     }
   )
 
   dispatcher.register(
     'session:read-background-range',
     async (routingId: string, toolUseId: string, offset: number, length: number) => {
-      return manager.get(routingId)?.readBackgroundRange(toolUseId, offset, length) ?? ''
+      const s = manager.get(routingId)
+      if (s?.capabilities.backgroundTasks && isClaudeSession(s))
+        return s.readBackgroundRange(toolUseId, offset, length)
+      return ''
     }
   )
 
   dispatcher.register('session:stop-task', async (routingId: string, toolUseId: string) => {
     const session = manager.get(routingId)
     if (!session) return { success: false, error: 'No active session' }
+    if (!session.capabilities.backgroundTasks || !isClaudeSession(session))
+      return { success: false, error: 'Provider does not support background tasks' }
     return await session.stopTask(toolUseId)
   })
 
   dispatcher.register('session:background-task', async (routingId: string, toolUseId: string) => {
     const session = manager.get(routingId)
     if (!session) return { success: false, error: 'No active session' }
+    if (!session.capabilities.backgroundTasks || !isClaudeSession(session))
+      return { success: false, error: 'Provider does not support background tasks' }
     return await session.backgroundTask(toolUseId)
   })
 
   dispatcher.register('session:dequeue-message', async (routingId: string, value: string) => {
     const session = manager.get(routingId)
-    if (!session) return { removed: 0 }
+    if (!session || !isClaudeSession(session)) return { removed: 0 }
     return await session.dequeueMessage(value)
   })
 
@@ -217,16 +234,19 @@ export function registerRemoteHandlers(
   })
 
   dispatcher.register('session:set-effort', async (routingId: string, effort: string) => {
-    manager.get(routingId)?.setEffort(effort)
+    const s = manager.get(routingId)
+    if (s?.capabilities.reasoning.effort != null && isClaudeSession(s)) s.setEffort(effort)
   })
 
   dispatcher.register('session:set-thinking-mode', async (routingId: string, mode: string) => {
-    manager.get(routingId)?.setThinkingMode(mode)
+    const s = manager.get(routingId)
+    if (s?.capabilities.reasoning.thinking != null && isClaudeSession(s)) s.setThinkingMode(mode)
   })
 
   dispatcher.register('session:ask-side-question', async (routingId: string, question: string) => {
     const session = manager.get(routingId)
     if (!session) return null
+    if (!session.capabilities.sideQuestion) return null
     return await session.askSideQuestion(question)
   })
 
@@ -252,11 +272,15 @@ export function registerRemoteHandlers(
   })
 
   dispatcher.register('session:get-plan-content', async (routingId: string) => {
-    return manager.get(routingId)?.getPlanContent() ?? null
+    const s = manager.get(routingId)
+    if (s?.capabilities.plan && isClaudeSession(s)) return s.getPlanContent() ?? null
+    return null
   })
 
   dispatcher.register('session:get-session-log-path', async (routingId: string) => {
-    return manager.get(routingId)?.getSessionLogPath() ?? null
+    const s = manager.get(routingId)
+    if (s && isClaudeSession(s)) return s.getSessionLogPath() ?? null
+    return null
   })
 
   dispatcher.register('session:list-directories', async () => {
@@ -325,7 +349,18 @@ export function registerRemoteHandlers(
   })
   dispatcher.register('config:load-slash-commands', async () => loadSlashCommands())
   dispatcher.register('config:scan-custom-commands', async (cwd: string) => scanCustomCommands(cwd))
-  dispatcher.register('config:load-skill-details', async (cwd: string) => scanSkills(cwd))
+  dispatcher.register('config:load-skill-details', async (cwd: string) => {
+    // Engine-dispatch: mirror the IPC handler — opencode sessions use the
+    // transient-server skill discovery; Claude falls back to scanSkills.
+    let hasOpencode = false
+    manager.forEach((session) => {
+      if (session.cwd === cwd && session instanceof OpencodeSession) {
+        hasOpencode = true
+      }
+    })
+    if (hasOpencode) return discoverOpencodeSkills(cwd)
+    return scanSkills(cwd)
+  })
 
   // Claude permissions (read-only)
   dispatcher.register('claude:load-permissions', async (scope: string, cwd?: string) =>
@@ -336,7 +371,7 @@ export function registerRemoteHandlers(
   dispatcher.register('claude:get-cleanup-period', async () => loadCleanupPeriodDays())
   dispatcher.register('claude:set-cleanup-period', async (days: number) => {
     saveCleanupPeriodDays(days)
-    manager.forEach((session) => session.notifySettingsChanged().catch(() => {}))
+    manager.forEachClaude((session) => session.notifySettingsChanged().catch(() => {}))
   })
 
   // MCP config (read-only)
@@ -345,10 +380,10 @@ export function registerRemoteHandlers(
   )
   dispatcher.register('mcp:read-disabled', async (cwd: string) => readDisabledMcpServers(cwd))
 
-  // MCP runtime (via session)
+  // MCP runtime (Claude-only: capabilities.hostedMcp)
   dispatcher.register('mcp:status', async (routingId: string) => {
     const session = manager.get(routingId)
-    if (!session) return []
+    if (!session || !session.capabilities.hostedMcp || !isClaudeSession(session)) return []
     return await session.mcpServerStatus()
   })
 

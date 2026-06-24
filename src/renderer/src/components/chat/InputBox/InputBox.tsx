@@ -9,9 +9,7 @@ import { useFileMention } from '../../../hooks/useFileMention'
 import { useIsMobile } from '../../../hooks/useIsMobile'
 import { InputBoxView } from './View'
 import {
-  modelSupportsAdaptiveThinking,
-  modelSupportsEffort,
-  modelSupportedEffortLevels,
+  claudeModelCapabilities,
   modelResolveThinkingMode,
   modelResolveEffort,
   modelDefaultEffort,
@@ -89,6 +87,10 @@ export function InputBox(): React.JSX.Element {
   const setDraftText = useSessionStore((s) => s.setDraftText)
   const setText = setDraftText
 
+  // Capability gating — use status.capabilities (authoritative after spawn;
+  // seeded from selectedEngineId before spawn via createNewSession).
+  const capabilities = useActiveSession((s) => s.status.capabilities)
+
   const cwd = useActiveSession((s) => s.cwd)
   const status = useActiveSession((s) => s.status)
   const sdkActive = useActiveSession((s) => s.sdkActive)
@@ -107,9 +109,13 @@ export function InputBox(): React.JSX.Element {
   const slashCommands = useSessionStore((s) => s.slashCommands)
   const customCommands = useSessionStore((s) => s.customCommands)
   const setCustomCommands = useSessionStore((s) => s.setCustomCommands)
+  // Slash-command menu is gated on capabilities.slashCommands: when the engine
+  // doesn't support slash commands, the menu offers nothing (engine + filesystem
+  // commands alike) and `/` types as literal text. Claude: true → unchanged.
   const mergedSlashCommands = useMemo(
-    () => mergeSlashCommands(slashCommands, customCommands),
-    [slashCommands, customCommands]
+    () =>
+      capabilities.slashCommands ? mergeSlashCommands(slashCommands, customCommands) : [],
+    [capabilities.slashCommands, slashCommands, customCommands]
   )
 
   // Eagerly scan custom commands when cwd changes
@@ -171,11 +177,14 @@ export function InputBox(): React.JSX.Element {
     [models, selectedModelValue]
   )
   const statusLine = useActiveSession((s) => s.statusLine)
+  const billingType = useActiveSession((s) => s.status?.account?.billingType)
   const effort = useActiveSession((s) => s.effort)
   const setEffort = useSessionStore((s) => s.setEffort)
   const thinkingMode = useActiveSession((s) => s.thinkingMode)
   const setThinkingMode = useSessionStore((s) => s.setThinkingMode)
-  const sandboxEnabled = useSessionStore((s) => s.settings.sandbox.enabled)
+  const reasoningVariant = useActiveSession((s) => s.reasoningVariant)
+  const setReasoningVariant = useSessionStore((s) => s.setReasoningVariant)
+  const sandboxEnabled = useSessionStore((s) => s.engineConfig.sandbox?.enabled ?? false)
 
   // Voice input
   const voiceEnabled = useSessionStore((s) => s.settings.voiceEnabled)
@@ -184,9 +193,32 @@ export function InputBox(): React.JSX.Element {
   const voiceInterimTranscript = useActiveSession((s) => s.voiceInterimTranscript)
   const clearVoiceTranscript = useSessionStore((s) => s.clearVoiceTranscript)
 
+  // Load models from all engines via getEngineModels(). Re-fetches when cwd changes.
+  // Flattens the EngineModelGroup[] into ModelInfo[] (each entry has engineId/vendorId set).
+  const loadedModelsKey = useRef<string | null>(null)
   useEffect(() => {
-    window.api.getModels().then(setAvailableModels)
-  }, [setAvailableModels])
+    const key = cwd ?? ''
+    if (loadedModelsKey.current !== null && loadedModelsKey.current !== key) {
+      setAvailableModels([])
+    }
+    loadedModelsKey.current = key
+
+    let ignore = false
+    window.api.getEngineModels().then((groups) => {
+      if (!ignore) {
+        const flat = groups.flatMap((g) => g.models)
+        setAvailableModels(flat)
+      }
+    }).catch(() => {
+      // Fallback to Claude-only models if getEngineModels fails
+      window.api.getModels().then((models) => {
+        if (!ignore) setAvailableModels(models)
+      }).catch(() => {/* non-fatal */})
+    })
+    return () => {
+      ignore = true
+    }
+  }, [cwd, setAvailableModels])
 
   useEffect(() => {
     if (!isRunning) textareaRef.current?.focus()
@@ -243,7 +275,8 @@ export function InputBox(): React.JSX.Element {
             session?.selectedModel,
             opts.thinkingMode,
             fork.anchorUuid,
-            true
+            true,
+            session?.selectedEngineId
           )
         } else {
           const isHistorical = session && session.messages.length > 0
@@ -255,7 +288,10 @@ export function InputBox(): React.JSX.Element {
             resumeId,
             session?.permissionMode,
             session?.selectedModel,
-            opts.thinkingMode
+            opts.thinkingMode,
+            undefined,
+            undefined,
+            session?.selectedEngineId
           )
         }
         markSdkActive(activeSessionId)
@@ -282,7 +318,8 @@ export function InputBox(): React.JSX.Element {
           session?.selectedModel,
           opts.thinkingMode,
           fork.anchorUuid,
-          true
+          true,
+          session?.selectedEngineId
         )
       } else {
         const isHistorical = session && session.messages.length > 0 && !session.sdkActive
@@ -294,7 +331,10 @@ export function InputBox(): React.JSX.Element {
           resumeId,
           session?.permissionMode,
           session?.selectedModel,
-          opts.thinkingMode
+          opts.thinkingMode,
+          undefined,
+          undefined,
+          session?.selectedEngineId
         )
       }
       markSdkActive(activeSessionId)
@@ -333,7 +373,9 @@ export function InputBox(): React.JSX.Element {
       attachedFiles,
       isDisabled,
       activeSessionId,
-      isRunning
+      isRunning,
+      sideQuestionEnabled: capabilities.sideQuestion,
+      queueEnabled: capabilities.queue
     })
     if (action.type === 'noop') return
 
@@ -460,30 +502,38 @@ export function InputBox(): React.JSX.Element {
     fileMentionHandleInput(value, el.selectionStart ?? value.length)
   }
 
-  const addFiles = useCallback(async (files: File[]) => {
-    const accepted = files.filter((f) => ACCEPTED_FILE_TYPES.includes(f.type))
-    if (accepted.length === 0) return
-    const newAttachments: FileAttachment[] = []
-    for (const file of accepted) {
-      try {
-        const isPdf = file.type === 'application/pdf'
-        const { mediaType, base64Data } = isPdf
-          ? await readFileAsBase64(file)
-          : await processImageFile(file)
-        newAttachments.push({
-          id: uuid(),
-          fileName: file.name,
-          fileType: isPdf ? 'pdf' : 'image',
-          mediaType: mediaType as FileAttachment['mediaType'],
-          base64Data,
-          previewUrl: isPdf ? '' : `data:${mediaType};base64,${base64Data}`
-        })
-      } catch (err) {
-        window.api.logError('InputBox', `Failed to process file ${file.name}: ${err}`)
+  // Single funnel for both the attach-menu file picker and clipboard paste.
+  // Gated on capabilities.vision so engines/models without image input can't
+  // attach via either path (the AttachMenu button is also hidden in View).
+  const visionEnabled = capabilities.vision
+  const addFiles = useCallback(
+    async (files: File[]) => {
+      if (!visionEnabled) return
+      const accepted = files.filter((f) => ACCEPTED_FILE_TYPES.includes(f.type))
+      if (accepted.length === 0) return
+      const newAttachments: FileAttachment[] = []
+      for (const file of accepted) {
+        try {
+          const isPdf = file.type === 'application/pdf'
+          const { mediaType, base64Data } = isPdf
+            ? await readFileAsBase64(file)
+            : await processImageFile(file)
+          newAttachments.push({
+            id: uuid(),
+            fileName: file.name,
+            fileType: isPdf ? 'pdf' : 'image',
+            mediaType: mediaType as FileAttachment['mediaType'],
+            base64Data,
+            previewUrl: isPdf ? '' : `data:${mediaType};base64,${base64Data}`
+          })
+        } catch (err) {
+          window.api.logError('InputBox', `Failed to process file ${file.name}: ${err}`)
+        }
       }
-    }
-    if (newAttachments.length > 0) setAttachedFiles((prev) => [...prev, ...newAttachments])
-  }, [])
+      if (newAttachments.length > 0) setAttachedFiles((prev) => [...prev, ...newAttachments])
+    },
+    [visionEnabled]
+  )
 
   const handleFileChange = useCallback(
     async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -511,13 +561,27 @@ export function InputBox(): React.JSX.Element {
 
   const handleSelectModel = useCallback(
     (value: string) => {
-      setSelectedModel(value)
-      if (activeSessionId) window.api.setModel(activeSessionId, value)
-      // Auto-coerce the user's explicit picks against the new model. Leave
-      // `null` store values alone — they auto-track the new model's defaults.
       const state = useSessionStore.getState()
       const session = state.sessions[activeSessionId ?? '']
       const newModel = state.availableModels.find((m) => m.value === value)
+      // The picked entry carries engineId/vendorId (from getEngineModels). The
+      // store action switches the session's engine when it differs (valid only
+      // for a not-yet-started session — guarded below before any IPC).
+      const pickedEngine = newModel?.engineId ?? session?.selectedEngineId ?? 'claude'
+      setSelectedModel(value, pickedEngine)
+
+      // A "started" session has a backend sessionId. Only push a live model
+      // switch to the backend when the picked engine MATCHES the running
+      // engine — never send an opencode model string to a live Claude process
+      // (or vice versa). Cross-engine picks take effect on the next/new session.
+      const started = !!session?.status.sessionId
+      const sameEngine = (session?.selectedEngineId ?? 'claude') === pickedEngine
+      if (activeSessionId && started && sameEngine) {
+        window.api.setModel(activeSessionId, value)
+      }
+
+      // Auto-coerce the user's explicit picks against the new model. Leave
+      // `null` store values alone — they auto-track the new model's defaults.
       if (session?.thinkingMode !== null && session?.thinkingMode !== undefined) {
         const coerced = modelResolveThinkingMode(newModel, session.thinkingMode)
         if (coerced !== session.thinkingMode) setThinkingMode(coerced)
@@ -527,6 +591,11 @@ export function InputBox(): React.JSX.Element {
         // Effort unsupported on new model → clear the user's pick (fall back to default).
         if (coerced === null) setEffort(null)
         else if (coerced !== session.effort) setEffort(coerced)
+      }
+      // Reset reasoning variant — the new model has different variants.
+      // setSelectedModel already resets it in the store; also notify the backend.
+      if (activeSessionId && started && sameEngine) {
+        window.api.setReasoningVariant(activeSessionId, null)
       }
     },
     [activeSessionId, setSelectedModel, setThinkingMode, setEffort]
@@ -547,7 +616,10 @@ export function InputBox(): React.JSX.Element {
       activeSessionId,
       session?.permissionMode,
       session?.selectedModel,
-      opts.thinkingMode
+      opts.thinkingMode,
+      undefined,
+      undefined,
+      session?.selectedEngineId
     )
     markSdkActive(activeSessionId)
   }, [activeSessionId, sdkActive, markSdkActive])
@@ -558,6 +630,16 @@ export function InputBox(): React.JSX.Element {
       await restartSdkSession()
     },
     [setEffort, restartSdkSession]
+  )
+
+  const handleSelectReasoningVariant = useCallback(
+    (variant: string | null) => {
+      setReasoningVariant(variant)
+      if (activeSessionId) {
+        window.api.setReasoningVariant(activeSessionId, variant)
+      }
+    },
+    [activeSessionId, setReasoningVariant]
   )
 
   const handleSelectThinking = useCallback(
@@ -600,15 +682,28 @@ export function InputBox(): React.JSX.Element {
       ? 'text-[var(--text-secondary)] italic'
       : 'text-text-primary'
 
-  const adaptiveSupported = useMemo(
-    () => modelSupportsAdaptiveThinking(selectedModel),
+  // Reasoning controls are derived through the SAME normalizer that builds the
+  // session's ResolvedCapabilities (claudeModelCapabilities, 02 §3.2 single
+  // source of truth) — but keyed on the dropdown's `selectedModel` (a ModelInfo
+  // carrying authoritative SDK capability fields) so the pickers track the
+  // user's model selection live, before any spawn/setModel round-trip. No
+  // parallel modelSupports* derivation here.
+  const reasoning = useMemo(
+    () => claudeModelCapabilities(selectedModel).reasoning,
     [selectedModel]
   )
-  const effortSupported = useMemo(() => modelSupportsEffort(selectedModel), [selectedModel])
-  const allowedEffortLevels = useMemo(
-    () => modelSupportedEffortLevels(selectedModel),
+  const thinkingCap = reasoning.thinking
+  const effortCap = reasoning.effort
+
+  // opencode per-model reasoning variant picker: derived from the selected
+  // model's reasoningVariants (populated by model-discovery). Claude models have
+  // none → empty array → picker hidden.
+  const reasoningVariants = useMemo(
+    () => selectedModel.reasoningVariants ?? [],
     [selectedModel]
   )
+  const adaptiveSupported = !!thinkingCap?.modes.includes('adaptive')
+  const allowedEffortLevels = useMemo(() => effortCap?.levels ?? [], [effortCap])
 
   // Effective display values: show the user's explicit pick when set,
   // otherwise fall back to the current model's default so new sessions
@@ -647,12 +742,17 @@ export function InputBox(): React.JSX.Element {
       models={models}
       selectedModel={selectedModel}
       effort={effectiveEffort}
-      effortSupported={effortSupported}
+      effortSupported={effortCap != null}
       allowedEffortLevels={allowedEffortLevels}
       thinkingMode={effectiveThinking}
       adaptiveSupported={adaptiveSupported}
+      showThinkingPicker={thinkingCap != null}
+      showModelPicker={true}
+      showCostInStatusLine={billingType !== 'free'}
+      showContextMeter={capabilities.contextWindow > 0}
+      visionEnabled={capabilities.vision}
       sandboxEnabled={sandboxEnabled}
-      voiceEnabled={voiceEnabled}
+      voiceEnabled={voiceEnabled && capabilities.voice}
       voiceState={voiceState}
       statusLine={statusLine}
       onSend={handleSend}
@@ -668,6 +768,9 @@ export function InputBox(): React.JSX.Element {
       onSelectModel={handleSelectModel}
       onSelectEffort={handleSelectEffort}
       onSelectThinking={handleSelectThinking}
+      reasoningVariants={reasoningVariants}
+      reasoningVariant={reasoningVariant}
+      onSelectReasoningVariant={handleSelectReasoningVariant}
       onOpenSandboxSettings={handleOpenSandboxSettings}
       onVoiceStart={handleVoiceStart}
       onVoiceStop={handleVoiceStop}
