@@ -71,7 +71,7 @@ Every item below was re-verified against current code on 2026-06-23. Status lege
 
 | # | Item | Risk | Area | Effort |
 | --- | --- | --- | --- | --- |
-| 6 | **Vendor editing UI** + ModelRef-derived vendor at spawn | 🟠 | config plane | M |
+| 6 | ModelRef-derived **vendor at spawn** (vendor-editing UI shipped) | 🟠 | config plane | S |
 | 8 | opencode **voice** input | 🟡 | voice | M |
 | 10 | Fold **FloatingApproval** into shared `<ApprovalButtons>` | ⚪ | tool rendering | S |
 | 11 | Tool-rendering **coverage polish** — structured **search/web** only (a/b); c/d/e shipped | ⚪ | tool rendering | S |
@@ -98,13 +98,12 @@ Every item below was re-verified against current code on 2026-06-23. Status lege
 
 ---
 
-### 6 — Vendor editing UI + ModelRef-derived vendor at spawn 🟠
+### 6 — ModelRef-derived vendor at spawn 🟠 (vendor-editing UI shipped)
 
-**What.** Two coupled config-plane gaps:
-- **Vendor editing is display-only.** Vendors › Anthropic shows `endpoint` + `modelOverride` read-only
-  (`settings-sections.tsx:511-554`); users must hand-edit `vendors/anthropic.json`.
-  `handleUpdateVendorConfig` (`SettingsDialog.tsx:77-83`) calls `saveVendorConfig` but is **wired and
-  never invoked** — a Phase-5 stub.
+**What.** ~~Vendor editing is display-only.~~ **SHIPPED 2026-06-25** (`v2-followup-settings-ia`): the
+Vendors › Anthropic section is now an editable form (`VendorAnthropicEditableForm`) wired to the
+`saveVendorConfig` round-trip — endpoint (enable/baseUrl/authToken) + model override (enable + 4 model
+ids). See *Verified resolved*. **Remaining:**
 - **Vendor at spawn is hardcoded.** `session:create` loads `loadVendorConfig('anthropic')` unconditionally
   (`session.ipc.ts:773`, guarded `if (engineId !== 'opencode')`); the comment flags deriving the vendor
   from the model's `ModelRef.vendorId` as a Phase-5 TODO. Correct for Claude (engine 1:1 anthropic), but
@@ -114,9 +113,10 @@ Every item below was re-verified against current code on 2026-06-23. Status lege
 ModelRef-driven derivation was scoped to Phase 5 and not picked up. These become real once opencode
 needs per-vendor endpoint/override.
 
-**Definition of done.** Make the vendor section editable (re-enable the edit form + `saveVendorConfig`
-round-trip), and derive vendor launch params from the active model's `ModelRef.vendorId` at spawn for
-both engines. Migration/back-compat preserved.
+**Definition of done (remaining).** Derive vendor launch params from the active model's
+`ModelRef.vendorId` at spawn for both engines (not the hardcoded `'anthropic'`). Migration/back-compat
+preserved. This is the **Phase-2** follow to the settings IA refactor (alongside #12 + new opencode
+settings).
 
 **References.** `03-settings-config.md §8.5`, `settings-sections.tsx:511-554`, `SettingsDialog.tsx:77-83`,
 `session.ipc.ts:768-777`.
@@ -279,6 +279,21 @@ squash/integration strategy for landing the stack. Not code — a process decisi
 Prior session inventories (pre-Phase-8/9) listed these as deferred; the 2026-06-23 sweep confirms they
 shipped. Recorded here so they're not re-raised:
 
+- **Settings IA refactor — tabbed scopes + Anthropic vendor editable** (settings refactor phase 1 +
+  ROADMAP #6 UI-half, shipped 2026-06-25, `v2-followup-settings-ia`) — the dialog was broken: a single
+  unified scroll with a tier-tree nav whose flat `SECTIONS` order had **diverged from the grouping**
+  (App's `mockup` sat between Claude's `permissions`/`sandbox`; accounts/vendor interleaved Claude's
+  sandbox/proxy), so the left nav no longer filtered. Replaced with **Option A** — a `SCOPES` model
+  (Common / Claude / opencode tabs) where each tab renders only its sections (explicit order = the bug
+  fix) in a scoped left list, with a **single focused section pane** (no unified cross-section scroll);
+  scroll-spy machinery deleted. Per-item `render(...)` contract unchanged, so all section content is
+  behavior-preserving. Folded in **#6's UI half**: `VendorAnthropicEditableForm` (endpoint + model
+  override, nested-merge writes via `saveVendorConfig`). Dead `NAV_GROUPS`/`NavGroup` tier-tree removed.
+  New `settings-scopes.unit.test.tsx` guards "every section in exactly one scope" (the bug class).
+  Real-app verified: 3 tabs filter correctly, Anthropic form editable, opencode tab renders, old
+  interleaving gone. **Phase 2** (separate) = ModelRef-derived vendor at spawn (rest of #6), #12
+  capability-gating, and new opencode settings (custom-provider base URL, default model). Spec:
+  `docs/v2/followup-settings-ia-refactor.md`.
 - **Tool-rendering polish c/d/e** (ROADMAP #11 partial, shipped 2026-06-24,
   `v2-followup-tool-rendering-polish`) — (c) fileEdit renders the diff once not twice; (d) a reusable
   `<ExpandableText>` + `AppSettings.toolOutputMaxChars` (default 5000) replace the hardcoded

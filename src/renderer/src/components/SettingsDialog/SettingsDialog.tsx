@@ -1,16 +1,13 @@
-import { useState, useEffect, useMemo, useCallback } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { useSessionStore } from '../../stores/session-store'
 import { SettingsDialogView, type VersionInfo } from './View'
-import { SECTIONS, NAV_GROUPS, type Section } from './settings-sections'
+import { SCOPES, type SettingsScope } from './settings-sections'
 import type { EngineConfig, VendorConfig } from '../../../../shared/types'
 export { SettingsToggle } from './settings-controls'
 
-/** Get the first section id across all nav groups */
-function firstSectionId(): string {
-  const firstGroup = NAV_GROUPS[0]
-  if (firstGroup?.sections?.[0]) return firstGroup.sections[0].id
-  if (firstGroup?.children?.[0]?.sections?.[0]) return firstGroup.children[0].sections[0].id
-  return SECTIONS[0]?.id ?? ''
+function firstSectionOfScope(scope: SettingsScope): string {
+  const scopeDef = SCOPES.find((s) => s.id === scope)
+  return scopeDef?.subgroups[0]?.sections[0]?.id ?? ''
 }
 
 export function SettingsDialog({ onClose }: { onClose: () => void }): React.JSX.Element {
@@ -18,8 +15,9 @@ export function SettingsDialog({ onClose }: { onClose: () => void }): React.JSX.
   const updateSettings = useSessionStore((s) => s.updateSettings)
   const setStoreEngineConfig = useSessionStore((s) => s.setEngineConfig)
   const [versionInfo, setVersionInfo] = useState<VersionInfo | null>(null)
+  const [activeScope, setActiveScope] = useState<SettingsScope>('common')
+  const [activeSectionId, setActiveSectionId] = useState(() => firstSectionOfScope('common'))
   const [search, setSearch] = useState('')
-  const [activeSection, setActiveSection] = useState(firstSectionId)
   const [engineConfig, setEngineConfig] = useState<EngineConfig>({})
   const [vendorConfig, setVendorConfig] = useState<VendorConfig>({})
 
@@ -46,33 +44,28 @@ export function SettingsDialog({ onClose }: { onClose: () => void }): React.JSX.
     return () => document.removeEventListener('keydown', handler)
   }, [onClose])
 
-  const filteredSections = useMemo<Section[]>(() => {
-    if (!search.trim()) return SECTIONS
-    const q = search.toLowerCase()
-    return SECTIONS.map((section) => ({
-      ...section,
-      items: section.items.filter(
-        (item) =>
-          item.label.toLowerCase().includes(q) ||
-          (item.keywords && item.keywords.toLowerCase().includes(q)) ||
-          section.label.toLowerCase().includes(q)
-      )
-    })).filter((section) => section.items.length > 0)
-  }, [search])
+  // Switching scope → reset to first section of that scope, clear search
+  const handleSelectScope = useCallback((scope: SettingsScope): void => {
+    setActiveScope(scope)
+    setActiveSectionId(firstSectionOfScope(scope))
+    setSearch('')
+  }, [])
 
-  // The View calls onScrollTo to notify the FC that a specific section was
-  // clicked; mirror that into activeSection. Scroll-spy updates via
-  // onSelectSection as the user scrolls the content container.
-  const handleSelectSection = useCallback((id: string) => setActiveSection(id), [])
+  const handleSelectSection = useCallback((id: string): void => {
+    setActiveSectionId(id)
+  }, [])
 
-  const handleUpdateEngineConfig = useCallback((patch: Partial<EngineConfig>) => {
-    setEngineConfig((prev) => {
-      const next = { ...prev, ...patch }
-      window.api.saveEngineConfig('claude', next).catch(() => {})
-      setStoreEngineConfig(next)
-      return next
-    })
-  }, [setStoreEngineConfig])
+  const handleUpdateEngineConfig = useCallback(
+    (patch: Partial<EngineConfig>) => {
+      setEngineConfig((prev) => {
+        const next = { ...prev, ...patch }
+        window.api.saveEngineConfig('claude', next).catch(() => {})
+        setStoreEngineConfig(next)
+        return next
+      })
+    },
+    [setStoreEngineConfig]
+  )
 
   const handleUpdateVendorConfig = useCallback((patch: Partial<VendorConfig>) => {
     setVendorConfig((prev) => {
@@ -91,12 +84,12 @@ export function SettingsDialog({ onClose }: { onClose: () => void }): React.JSX.
       vendorConfig={vendorConfig}
       updateVendorConfig={handleUpdateVendorConfig}
       versionInfo={versionInfo}
-      search={search}
-      activeSection={activeSection}
-      filteredSections={filteredSections}
-      onSearchChange={setSearch}
+      activeScope={activeScope}
+      onSelectScope={handleSelectScope}
+      activeSectionId={activeSectionId}
       onSelectSection={handleSelectSection}
-      onScrollTo={handleSelectSection}
+      search={search}
+      onSearchChange={setSearch}
       onClose={onClose}
     />
   )

@@ -10,6 +10,8 @@ import type {
   AccountsState,
   EngineConfig,
   VendorConfig,
+  AnthropicEndpointSettings,
+  ModelOverrideSettings,
   SandboxSettings,
   VendorAuthMap,
   VendorAuthOption,
@@ -507,48 +509,113 @@ function OpencodeAutoModeSection(): React.JSX.Element {
   )
 }
 
-// ── Vendor Anthropic display (read-only) ─────────────────────────────
+// ── Vendor Anthropic editable form ───────────────────────────────────
 
-function VendorAnthropicDisplaySection(): React.JSX.Element {
-  const [vendorCfg, setVendorCfg] = useState<VendorConfig | null>(null)
+const DEFAULT_ENDPOINT: AnthropicEndpointSettings = { enabled: false, baseUrl: '', authToken: '' }
+const DEFAULT_MODEL_OVERRIDE: ModelOverrideSettings = {
+  enabled: false,
+  model: '',
+  sonnetModel: '',
+  opusModel: '',
+  haikuModel: ''
+}
 
-  useEffect(() => {
-    window.api
-      .loadVendorConfig('anthropic')
-      .then(setVendorCfg)
-      .catch(() => {})
-  }, [])
+function VendorAnthropicEditableForm({
+  vendorConfig,
+  updateVendorConfig
+}: {
+  vendorConfig: VendorConfig
+  updateVendorConfig: (p: Partial<VendorConfig>) => void
+}): React.JSX.Element {
+  const endpoint: AnthropicEndpointSettings = vendorConfig.endpoint ?? DEFAULT_ENDPOINT
+  const modelOverride: ModelOverrideSettings = vendorConfig.modelOverride ?? DEFAULT_MODEL_OVERRIDE
 
-  const endpoint = vendorCfg?.endpoint
-  const modelOverride = vendorCfg?.modelOverride
+  const inputClass =
+    'bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors'
+
+  const modelFields: { field: keyof ModelOverrideSettings; label: string }[] = [
+    { field: 'model', label: 'Model (default)' },
+    { field: 'sonnetModel', label: 'Sonnet model' },
+    { field: 'opusModel', label: 'Opus model' },
+    { field: 'haikuModel', label: 'Haiku model' }
+  ]
 
   return (
-    <div className="px-3 py-1.5 text-[13px] text-text-secondary space-y-2">
-      <div>
-        <div className="text-[11px] text-text-muted uppercase tracking-wide mb-1">Endpoint</div>
-        {endpoint?.enabled ? (
-          <div className="text-[12px] font-mono text-text-secondary truncate">
-            {endpoint.baseUrl || '(none)'}
+    <div className="px-3 py-1.5 text-[13px] text-text-secondary space-y-4">
+      {/* Endpoint */}
+      <div className="space-y-2">
+        <div className="text-[11px] text-text-muted uppercase tracking-wide">Endpoint</div>
+        <SettingsToggle
+          label="Enable custom endpoint"
+          checked={endpoint.enabled}
+          onChange={(v) =>
+            updateVendorConfig({ endpoint: { ...endpoint, enabled: v } })
+          }
+        />
+        {endpoint.enabled && (
+          <div className="space-y-1.5 pl-1">
+            <div>
+              <div className="text-[10px] text-text-muted mb-0.5">Base URL</div>
+              <input
+                type="text"
+                className={`${inputClass} w-full`}
+                placeholder="https://api.anthropic.com"
+                value={endpoint.baseUrl}
+                onChange={(e) =>
+                  updateVendorConfig({ endpoint: { ...endpoint, baseUrl: e.target.value } })
+                }
+              />
+            </div>
+            <div>
+              <div className="text-[10px] text-text-muted mb-0.5">Auth token</div>
+              <input
+                type="password"
+                className={`${inputClass} w-full`}
+                placeholder="sk-ant-..."
+                value={endpoint.authToken}
+                onChange={(e) =>
+                  updateVendorConfig({ endpoint: { ...endpoint, authToken: e.target.value } })
+                }
+              />
+            </div>
           </div>
-        ) : (
-          <div className="text-[11px] text-text-muted/60">Default Anthropic API</div>
         )}
       </div>
-      <div>
-        <div className="text-[11px] text-text-muted uppercase tracking-wide mb-1">Model override</div>
-        {modelOverride?.enabled ? (
-          <div className="text-[11px] text-text-muted space-y-0.5">
-            {modelOverride.model && <div>Model: <span className="font-mono text-text-secondary">{modelOverride.model}</span></div>}
-            {modelOverride.sonnetModel && <div>Sonnet: <span className="font-mono text-text-secondary">{modelOverride.sonnetModel}</span></div>}
-            {modelOverride.opusModel && <div>Opus: <span className="font-mono text-text-secondary">{modelOverride.opusModel}</span></div>}
-            {modelOverride.haikuModel && <div>Haiku: <span className="font-mono text-text-secondary">{modelOverride.haikuModel}</span></div>}
+
+      {/* Model override */}
+      <div className="space-y-2">
+        <div className="text-[11px] text-text-muted uppercase tracking-wide">Model override</div>
+        <SettingsToggle
+          label="Enable model override"
+          checked={modelOverride.enabled}
+          onChange={(v) =>
+            updateVendorConfig({ modelOverride: { ...modelOverride, enabled: v } })
+          }
+        />
+        {modelOverride.enabled && (
+          <div className="space-y-1.5 pl-1">
+            {modelFields.map(({ field, label }) => (
+              <div key={String(field)}>
+                <div className="text-[10px] text-text-muted mb-0.5">{label}</div>
+                <input
+                  type="text"
+                  className={`${inputClass} w-full`}
+                  placeholder={`e.g. claude-${field === 'model' ? '3-5-sonnet-latest' : String(field).replace('Model', '-latest')}`}
+                  value={modelOverride[field] as string}
+                  onChange={(e) =>
+                    updateVendorConfig({
+                      modelOverride: { ...modelOverride, [field]: e.target.value }
+                    })
+                  }
+                />
+              </div>
+            ))}
           </div>
-        ) : (
-          <div className="text-[11px] text-text-muted/60">No override</div>
         )}
       </div>
+
       <div className="text-[10px] text-text-muted/50 leading-relaxed">
-        Edit these in engines/claude.json and vendors/anthropic.json under ~/.claude/ui/. Changes apply on next session start.
+        Changes apply on next session start. Persists to vendors/anthropic.json.
       </div>
     </div>
   )
@@ -850,23 +917,6 @@ function VendorOpencodeSection(): React.JSX.Element {
       </div>
     </div>
   )
-}
-
-// ── Nav tree types ───────────────────────────────────────────────────
-
-export interface NavChild {
-  id: string
-  label: string
-  badge?: string
-  sections: Section[]
-}
-
-export interface NavGroup {
-  id: string
-  label: string
-  icon: React.JSX.Element
-  sections?: Section[]
-  children?: NavChild[]
 }
 
 // ── SECTIONS data ────────────────────────────────────────────────────
@@ -1667,10 +1717,12 @@ export const SECTIONS: Section[] = [
     ),
     items: [
       {
-        key: 'vendorAnthropicDisplay',
-        label: 'Anthropic vendor config',
+        key: 'vendorAnthropicEndpoint',
+        label: 'Endpoint & model override',
         keywords: 'anthropic endpoint model override vendor gateway custom url api token',
-        render: () => <VendorAnthropicDisplaySection />
+        render: (_s, _u, _e, _ue, v, uv) => (
+          <VendorAnthropicEditableForm vendorConfig={v} updateVendorConfig={uv} />
+        )
       }
     ]
   },
@@ -2421,80 +2473,93 @@ const VENDOR_OPENCODE_SECTION_IDS = new Set(['vendor-opencode'])
 /** Section ids that belong to Accounts (flat) */
 const ACCOUNTS_SECTION_IDS = new Set(['accounts'])
 
-function getSectionsForIds(ids: Set<string>): Section[] {
-  return SECTIONS.filter((s) => ids.has(s.id))
+function getSectionsForIds(ids: Set<string>, order?: string[]): Section[] {
+  if (!order) return SECTIONS.filter((s) => ids.has(s.id))
+  return order
+    .filter((id) => ids.has(id))
+    .map((id) => SECTIONS.find((s) => s.id === id)!)
+    .filter(Boolean)
 }
 
-export const NAV_GROUPS: NavGroup[] = [
+// ── Scoped navigation (Option A, ADR settings-ia-refactor) ──────────
+
+export type SettingsScope = 'common' | 'claude' | 'opencode'
+
+export interface ScopeSubgroup {
+  id: string
+  label?: string // undefined = flat (no header)
+  sections: Section[]
+}
+
+export interface ScopeDef {
+  id: SettingsScope
+  label: string
+  subgroups: ScopeSubgroup[]
+}
+
+/**
+ * Ordered scope→section mapping. This is the authoritative section order
+ * within each scope (fixes the flat SECTIONS order divergence bug).
+ */
+export const SCOPES: ScopeDef[] = [
   {
-    id: 'app',
-    label: 'App',
-    icon: (
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-        <rect x="3" y="3" width="7" height="7" />
-        <rect x="14" y="3" width="7" height="7" />
-        <rect x="14" y="14" width="7" height="7" />
-        <rect x="3" y="14" width="7" height="7" />
-      </svg>
-    ),
-    sections: getSectionsForIds(APP_SECTION_IDS)
-  },
-  {
-    id: 'engines',
-    label: 'Engines',
-    icon: (
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M12 2L4 6v12l8 4 8-4V6z" />
-        <path d="M4 6l8 4 8-4" />
-        <line x1="12" y1="22" x2="12" y2="10" />
-      </svg>
-    ),
-    children: [
+    id: 'common',
+    label: 'Common',
+    subgroups: [
       {
-        id: 'engine-claude',
-        label: 'Claude',
-        sections: getSectionsForIds(ENGINE_CLAUDE_SECTION_IDS)
-      },
-      {
-        id: 'engine-opencode',
-        label: 'opencode',
-        sections: getSectionsForIds(ENGINE_OPENCODE_SECTION_IDS)
+        id: 'common-app',
+        label: undefined,
+        sections: getSectionsForIds(APP_SECTION_IDS, [
+          'appearance', 'chat', 'session', 'tool-output', 'diff', 'git',
+          'status-line', 'usage', 'logging', 'voice', 'remote', 'mockup'
+        ])
       }
     ]
   },
   {
-    id: 'vendors',
-    label: 'Vendors',
-    icon: (
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-        <circle cx="12" cy="12" r="10" />
-        <line x1="2" y1="12" x2="22" y2="12" />
-        <path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z" />
-      </svg>
-    ),
-    children: [
+    id: 'claude',
+    label: 'Claude',
+    subgroups: [
       {
-        id: 'vendor-anthropic-nav',
-        label: 'Anthropic',
-        sections: getSectionsForIds(VENDOR_ANTHROPIC_SECTION_IDS)
+        id: 'claude-engine',
+        label: 'Engine',
+        sections: getSectionsForIds(ENGINE_CLAUDE_SECTION_IDS, ['permissions', 'sandbox', 'proxy'])
       },
       {
-        id: 'vendor-opencode-nav',
-        label: 'opencode',
-        sections: getSectionsForIds(VENDOR_OPENCODE_SECTION_IDS)
+        id: 'claude-vendor',
+        label: 'Vendor · Anthropic',
+        sections: getSectionsForIds(VENDOR_ANTHROPIC_SECTION_IDS, ['vendor-anthropic', 'effortDefaults'])
+      },
+      {
+        id: 'claude-account',
+        label: 'Account',
+        sections: getSectionsForIds(ACCOUNTS_SECTION_IDS, ['accounts'])
       }
     ]
   },
   {
-    id: 'accounts-group',
-    label: 'Accounts',
-    icon: (
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M16 21v-2a4 4 0 00-4-4H6a4 4 0 00-4 4v2" />
-        <circle cx="9" cy="7" r="4" />
-        <path d="M22 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75" />
-      </svg>
-    ),
-    sections: getSectionsForIds(ACCOUNTS_SECTION_IDS)
+    id: 'opencode',
+    label: 'opencode',
+    subgroups: [
+      {
+        id: 'opencode-engine',
+        label: 'Engine',
+        sections: getSectionsForIds(ENGINE_OPENCODE_SECTION_IDS, ['opencode-automode'])
+      },
+      {
+        id: 'opencode-vendor',
+        label: 'Vendor',
+        sections: getSectionsForIds(VENDOR_OPENCODE_SECTION_IDS, ['vendor-opencode'])
+      }
+    ]
   }
 ]
+
+/** Map from section id → scope id, for search + selection logic */
+export const SECTION_SCOPE_MAP: ReadonlyMap<string, SettingsScope> = new Map(
+  SCOPES.flatMap((scope) =>
+    scope.subgroups.flatMap((sg) =>
+      sg.sections.map((sec): [string, SettingsScope] => [sec.id, scope.id])
+    )
+  )
+)
