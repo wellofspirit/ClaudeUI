@@ -654,6 +654,12 @@ export class OpencodeSession extends BaseSession {
         }
         break
 
+      case 'todos':
+        // Feed the floating Todo widget via the existing session:plan channel,
+        // which is already wired through preload → useClaudeEvents.onPlanSteps → setTodos.
+        this.send('session:plan', output.items)
+        break
+
       case 'ignore':
         break
     }

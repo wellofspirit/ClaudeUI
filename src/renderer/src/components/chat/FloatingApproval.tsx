@@ -268,8 +268,8 @@ type ToolUseBlock = Extract<ContentBlock, { type: 'tool_use' }>
  * question card. Used for child (subagent) questions whose callID is not in
  * the main message blocks, so they cannot be rendered inline.
  *
- * Builds a synthetic ToolUseBlock from the approval's input so that
- * AskUserQuestionBlock can read toolInput.questions. Submit / dismiss still
+ * Builds a synthetic ToolUseBlock + ToolView from the approval's input so that
+ * AskUserQuestionBlock can render typed questions. Submit / dismiss still
  * go through the approval's requestId via respondApproval.
  */
 function FloatingQuestionCard({ approval }: { approval: PendingApproval }): React.JSX.Element {
@@ -279,7 +279,12 @@ function FloatingQuestionCard({ approval }: { approval: PendingApproval }): Reac
     toolName: 'AskUserQuestion',
     toolInput: approval.input as Record<string, unknown>
   }
-  return <AskUserQuestionBlock block={synthetic} approval={approval} />
+  // approval.input is {questions: AskUserQuestion[]} — already normalized by event-mapper
+  const questionView = {
+    kind: 'question' as const,
+    questions: ((approval.input as Record<string, unknown>).questions as import('../../../../shared/types').AskUserQuestion[]) ?? []
+  }
+  return <AskUserQuestionBlock block={synthetic} view={questionView} approval={approval} />
 }
 
 export function FloatingApproval(): React.JSX.Element | null {

@@ -8,7 +8,7 @@
 import type { EngineToolMap, ToolKind, ToolView } from '../../../../../shared/tool-kinds'
 import { hostedMcpKind } from '../../../../../shared/tool-kinds'
 import { isAgentTool } from '../../../../../shared/types'
-import type { ContentBlock } from '../../../../../shared/types'
+import type { AskUserQuestion, ContentBlock } from '../../../../../shared/types'
 
 type ToolResultBlock = Extract<ContentBlock, { type: 'tool_result' }>
 
@@ -110,7 +110,15 @@ function claudeNormalize(
       return {
         kind: 'task',
         description: inp.description != null ? String(inp.description) : '',
-        prompt: inp.prompt != null ? String(inp.prompt) : ''
+        prompt: inp.prompt != null ? String(inp.prompt) : '',
+        // Claude uses snake_case subagent_type; fall back to camelCase for older transcripts
+        subagent: inp.subagent_type != null
+          ? String(inp.subagent_type)
+          : inp.subagentType != null
+            ? String(inp.subagentType)
+            : undefined,
+        model: inp.model != null ? String(inp.model) : undefined,
+        background: inp.run_in_background != null ? Boolean(inp.run_in_background) : undefined
       }
 
     case 'todo': {
@@ -119,7 +127,8 @@ function claudeNormalize(
         kind: 'todo',
         items: rawTodos.map((t: Record<string, unknown>) => ({
           status: String(t.status ?? 'pending'),
-          text: String(t.content ?? '')
+          text: String(t.content ?? ''),
+          activeForm: t.activeForm != null ? String(t.activeForm) : undefined
         }))
       }
     }
@@ -130,11 +139,22 @@ function claudeNormalize(
         plan: inp.plan != null ? String(inp.plan) : ''
       }
 
-    case 'question':
-      return {
-        kind: 'question',
-        questions: Array.isArray(inp.questions) ? inp.questions : []
-      }
+    case 'question': {
+      // Claude's AskUserQuestion already uses `multiSelect` — pass through typed
+      const rawQuestions = Array.isArray(inp.questions) ? inp.questions : []
+      const questions: AskUserQuestion[] = rawQuestions.map((q: Record<string, unknown>) => ({
+        question: q.question != null ? String(q.question) : '',
+        header: q.header != null ? String(q.header) : '',
+        options: Array.isArray(q.options)
+          ? (q.options as Record<string, unknown>[]).map((o) => ({
+              label: o.label != null ? String(o.label) : '',
+              description: o.description != null ? String(o.description) : ''
+            }))
+          : [],
+        multiSelect: !!q.multiSelect
+      }))
+      return { kind: 'question', questions }
+    }
 
     case 'diagram':
       return {

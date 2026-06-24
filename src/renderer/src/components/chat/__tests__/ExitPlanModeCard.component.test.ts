@@ -267,6 +267,7 @@ const block = {
   toolInput: { plan: planText },
   toolUseId: 'tu-1'
 }
+const planView = { kind: 'plan' as const, plan: planText }
 const approval = {
   requestId: 'req-1',
   toolName: 'ExitPlanMode',
@@ -331,7 +332,7 @@ describe('ExitPlanModeCard FC', () => {
   })
 
   function renderFC(): ReturnType<typeof render> {
-    return render(React.createElement(ExitPlanModeCard, { block, approval }))
+    return render(React.createElement(ExitPlanModeCard, { block, view: planView, approval }))
   }
 
   // -------------------------------------------------------------------------
@@ -376,7 +377,7 @@ describe('ExitPlanModeCard FC', () => {
   })
 
   it('onStartFresh: does nothing when approval is undefined', async () => {
-    const { unmount } = render(React.createElement(ExitPlanModeCard, { block }))
+    const { unmount } = render(React.createElement(ExitPlanModeCard, { block, view: planView }))
 
     await act(async () => {
       await viewProps.onStartFresh()
@@ -468,7 +469,7 @@ describe('ExitPlanModeCard FC', () => {
       viewProps.onFeedbackChange('refine the plan')
     })
     // Re-render so the FC picks up the new feedback state and passes it to the View
-    rerender(React.createElement(ExitPlanModeCard, { block, approval }))
+    rerender(React.createElement(ExitPlanModeCard, { block, view: planView, approval }))
 
     expect(viewProps.feedback).toBe('refine the plan')
 
@@ -487,7 +488,7 @@ describe('ExitPlanModeCard FC', () => {
     expect(useSessionStore.getState().sessions[ROUTE_FC].pendingApprovals).toHaveLength(0)
 
     // Feedback reset — next render should show empty string
-    rerender(React.createElement(ExitPlanModeCard, { block, approval }))
+    rerender(React.createElement(ExitPlanModeCard, { block, view: planView, approval }))
     expect(viewProps.feedback).toBe('')
 
     unmount()
@@ -519,7 +520,7 @@ describe('ExitPlanModeCard FC', () => {
   // View props sanity
   // -------------------------------------------------------------------------
 
-  it('passes planContent from block.toolInput.plan to the View', () => {
+  it('passes planContent from view.plan to the View', () => {
     const { unmount } = renderFC()
 
     expect(viewProps.planContent).toBe(planText)

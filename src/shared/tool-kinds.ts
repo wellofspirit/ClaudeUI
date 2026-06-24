@@ -6,7 +6,7 @@
  * the 'command' kind renderer. See docs/v2/06-tool-rendering.md §3.
  */
 
-import type { ContentBlock } from './types'
+import type { AskUserQuestion, ContentBlock } from './types'
 
 type ToolResultBlock = Extract<ContentBlock, { type: 'tool_result' }>
 
@@ -44,10 +44,10 @@ export type ToolView =
   // polish (§9) but unused by the current generic renderer.
   | { kind: 'search'; query: string }
   | { kind: 'web'; target: string }
-  | { kind: 'task'; description: string; prompt: string }
-  | { kind: 'todo'; items: { status: string; text: string }[] }
+  | { kind: 'task'; description: string; prompt: string; subagent?: string; model?: string; background?: boolean }
+  | { kind: 'todo'; items: { status: string; text: string; activeForm?: string }[] }
   | { kind: 'plan'; plan: string }
-  | { kind: 'question'; questions: unknown[] }
+  | { kind: 'question'; questions: AskUserQuestion[] }
   | { kind: 'diagram'; source: string; title?: string }
   | { kind: 'mockup'; directory?: string; title?: string }
   | { kind: 'mcp'; input: unknown }

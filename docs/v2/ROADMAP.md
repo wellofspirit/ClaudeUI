@@ -73,7 +73,6 @@ Every item below was re-verified against current code on 2026-06-23. Status lege
 | --- | --- | --- | --- | --- |
 | 6 | **Vendor editing UI** + ModelRef-derived vendor at spawn | 🟠 | config plane | M |
 | 8 | opencode **voice** input | 🟡 | voice | M |
-| 9 | Fully **engine-neutral lifting** of plan/question/todo/task | 🟡 | tool rendering | M–L |
 | 10 | Fold **FloatingApproval** into shared `<ApprovalButtons>` | ⚪ | tool rendering | S |
 | 11 | Tool-rendering **coverage polish** (search/web/single-diff/truncation) | ⚪ | tool rendering | M |
 | 12 | **Per-section capability gating** in Settings (blocked on caps model) | ⚪ | config plane | M |
@@ -82,6 +81,9 @@ Every item below was re-verified against current code on 2026-06-23. Status lege
 | 15 | Consolidate opencode `/event` to **one subscription per server** | ⚪ | opencode transport | S |
 | 16 | Open the **V2 PR stack** (process, not code) | ⚪ | process | — |
 
+> ✅ **#9 shipped 2026-06-24** (`v2-followup-tool-rendering-lift`) — engine-neutral lifting of
+> plan/question/todo/task + opencode todo fix. See *Verified resolved*.
+>
 > ✅ **#1, #2, #3, #5, #7 shipped 2026-06-23; #4 shipped 2026-06-24** — subagent questions (#1,
 > `v2-followup-subagent-questions`); the opencode auth-UX cluster (#2 re-login card + #7 native browser
 > OAuth, `v2-followup-opencode-auth-ux`); opencode status-line usage + cost gating (#3,
@@ -135,29 +137,6 @@ appears for opencode sessions. Mostly wiring — the transcription stack is engi
 
 **References.** `phase-5b-opencode-chat.md:283`, `model-capabilities.ts`, `voice-capture.ts`,
 `voice-client.ts`, `OpencodeSession.ts` (prompt path).
-
----
-
-### 9 — Fully engine-neutral lifting of plan/question/todo/task 🟡
-
-**What.** Phase 6 unified the *passive* tool kinds behind the kind registry, but the four **lifted**
-interaction kinds still route directly to legacy components — `MessageBubble.tsx:45-58` dispatches to
-`ExitPlanModeCard` / `AskUserQuestionBlock` / `TodoToolBlock` / `TaskCard`, each consuming the
-engine-specific `block` rather than a normalized neutral shape. The comment at `MessageBubble.tsx:46`
-calls full lifting a "fast-follow."
-
-**Why deferred.** Foundation 06 §7 / decision #3 lifted these conceptually (question → approval/
-elicitation, plan → plan-review state-gate, todo → Todo widget) but Phase 6 scoped the build to the
-passive-kind registry + behavior-preserving Claude port.
-
-**Definition of done.** Normalize each of the four into an engine-neutral interaction contract fed from
-either transport (Claude tool blocks or opencode events), so components consume a neutral shape, not
-`block`. Behavior-preserving for Claude (app-shot the cards as pixel-equivalent); opencode equivalents
-drive the same components. The larger structural item — worth its own kickoff spec. *(The #1 subagent-
-question hang is a symptom of this seam being only half-lifted on the opencode side.)*
-
-**References.** `06-tool-rendering.md §7`, `phase-6-tool-registry.md`, `MessageBubble.tsx`,
-`tool-registry/ClaudeEngineToolMap.ts`.
 
 ---
 
@@ -295,6 +274,24 @@ squash/integration strategy for landing the stack. Not code — a process decisi
 Prior session inventories (pre-Phase-8/9) listed these as deferred; the 2026-06-23 sweep confirms they
 shipped. Recorded here so they're not re-raised:
 
+- **Engine-neutral lifting of plan/question/todo/task** (was ROADMAP #9 🟡, shipped 2026-06-24,
+  `v2-followup-tool-rendering-lift`) — the four lifted interaction kinds now consume an engine-neutral
+  `ToolView` (extended with `task.subagent/model/background`, typed `question.questions: AskUserQuestion[]`,
+  `todo` items + optional `activeForm`), not engine-specific `block.toolInput`. `renderToolBlock`
+  computes the view once via `toolMap.normalize` and threads it to `ExitPlanModeCard`/`AskUserQuestionBlock`/
+  `TodoToolBlock`/`TaskCard` (+ the `FloatingApproval` question card + the synthetic-plan user path).
+  **Root-caused the reported opencode-todo no-op:** `OpencodeEngineToolMap.kindOf('todowrite')` fell to
+  `unknown` (dead `list`/`patch` cases, missing `todowrite`/`websearch`/`apply_patch`/`question`/`plan_exit`),
+  and the floating Todo widget was Claude-name-hardcoded (`buildTodosFromMessages`) with the
+  `session:plan`/`onPlanSteps` event channel **dead — no emitter**. Fix: completed the opencode tool→kind
+  map (verified every id against `opencode-src/.../tool/registry.ts`), and fed the widget from opencode's
+  **`todo.updated`** bus event (`event-mapper` `case 'todo.updated'` → `{kind:'todos'}` →
+  `OpencodeSession` revives `session:plan` → `setTodos`). `TodoStatus` extended with `'cancelled'` (opencode
+  emits it; rendered muted/strikethrough). Claude byte-identical (app-shot: compact `TodoWrite N/M tasks`
+  rows + widget unchanged; opencode todowrite now renders the same card + populates the widget). The
+  question→`AskUserQuestion` mapping is currently mirrored in both normalizers + `buildQuestionApproval`
+  (a small DRY debt, noted). A fully-**driven** opencode todo turn remains ROADMAP #13's gated e2e. Spec:
+  `docs/v2/followup-tool-rendering-lift.md`.
 - **opencode hosted tools via on-the-fly MCP** (was ROADMAP #4 🟠, shipped 2026-06-24,
   `v2-followup-opencode-mcp-onthefly`) — replaced the GLOBAL plugin install (`~/.config/opencode/plugin/`)
   with an in-process **per-cwd HTTP MCP server** (session-mode `StreamableHTTPServerTransport`, bearer

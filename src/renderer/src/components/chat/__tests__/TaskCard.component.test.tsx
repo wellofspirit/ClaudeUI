@@ -43,6 +43,13 @@ function makeTaskBlock(overrides: Partial<ToolUseBlock> = {}): ToolUseBlock {
   } as ToolUseBlock
 }
 
+const defaultTaskView = {
+  kind: 'task' as const,
+  description: 'Explore ChatView components',
+  prompt: '',
+  subagent: 'explore'
+}
+
 describe('TaskCard — inline task approval', () => {
   let app: TestApp
   let respondCalls: Array<{ requestId: string; decision: string }>
@@ -69,14 +76,14 @@ describe('TaskCard — inline task approval', () => {
     const approval = makePendingApproval({ requestId: 'per-1', toolUseId: 'call_task_1', toolName: 'task' })
     useSessionStore.getState().addPendingApproval(ROUTE, approval)
 
-    render(<TaskCard block={makeTaskBlock()} approval={approval} />)
+    render(<TaskCard block={makeTaskBlock()} view={defaultTaskView} approval={approval} />)
 
     expect(screen.getByText('Allow')).toBeInTheDocument()
     expect(screen.getByText('Deny')).toBeInTheDocument()
   })
 
   it('does NOT render decision controls when there is no pending approval', () => {
-    render(<TaskCard block={makeTaskBlock()} />)
+    render(<TaskCard block={makeTaskBlock()} view={defaultTaskView} />)
     expect(screen.queryByText('Allow')).not.toBeInTheDocument()
     expect(screen.queryByText('Deny')).not.toBeInTheDocument()
   })
@@ -85,7 +92,7 @@ describe('TaskCard — inline task approval', () => {
     const approval = makePendingApproval({ requestId: 'per-2', toolUseId: 'call_task_1', toolName: 'task' })
     useSessionStore.getState().addPendingApproval(ROUTE, approval)
 
-    render(<TaskCard block={makeTaskBlock()} approval={approval} />)
+    render(<TaskCard block={makeTaskBlock()} view={defaultTaskView} approval={approval} />)
 
     await act(async () => {
       fireEvent.click(screen.getByText('Allow'))
@@ -99,7 +106,7 @@ describe('TaskCard — inline task approval', () => {
     const approval = makePendingApproval({ requestId: 'per-3', toolUseId: 'call_task_1', toolName: 'task' })
     useSessionStore.getState().addPendingApproval(ROUTE, approval)
 
-    render(<TaskCard block={makeTaskBlock()} approval={approval} />)
+    render(<TaskCard block={makeTaskBlock()} view={defaultTaskView} approval={approval} />)
 
     await act(async () => {
       fireEvent.click(screen.getByText('Deny'))

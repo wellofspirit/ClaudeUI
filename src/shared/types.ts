@@ -324,7 +324,7 @@ export interface StreamDelta {
   text: string
 }
 
-export type TodoStatus = 'pending' | 'in_progress' | 'completed'
+export type TodoStatus = 'pending' | 'in_progress' | 'completed' | 'cancelled'
 
 export interface TodoItem {
   content: string
