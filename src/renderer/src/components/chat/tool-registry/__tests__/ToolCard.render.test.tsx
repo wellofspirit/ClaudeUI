@@ -9,13 +9,13 @@
  *
  * Behavior-preservation specifics covered:
  *  - command: `$ {command}` input + TerminalView(output) result; error → red-pre.
- *  - fileEdit: DiffViewer in BOTH input and result (the preserved double-diff);
- *    MultiEdit (no before/after) → generic JSON fallback.
+ *  - fileEdit: DiffViewer once (input; result shows TerminalView); hideToolInput
+ *    moves the diff to result; MultiEdit (no before/after) → generic JSON fallback.
  *  - fileWrite: WriteResult (CodeView) on the written content.
  *  - fileRead: CodeView(content) result; path input.
  *  - search/web/mcp/unknown: JSON input + TerminalView result.
  *  - diagram/mockup: custom card (MermaidDiagram / MockupPreviewCard).
- *  - getSummary header + expand/collapse.
+ *  - summarizeTool header + expand/collapse.
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest'
@@ -164,7 +164,7 @@ describe('ToolCard — command kind', () => {
     expect(screen.getByText('boom')).toBeInTheDocument()
   })
 
-  it('shows the command name header + getSummary', () => {
+  it('shows the command name header + summarizeTool summary', () => {
     render(
       <ToolCard
         {...baseProps({
@@ -175,14 +175,14 @@ describe('ToolCard — command kind', () => {
       />
     )
     expect(screen.getByText('Bash')).toBeInTheDocument()
-    // getSummary returns the command for Bash — appears in the header summary
+    // summarizeTool returns the command for Bash — appears in the header summary
     // AND in the `$ ls -la` input pre.
     expect(screen.getAllByText('ls -la').length).toBeGreaterThanOrEqual(1)
   })
 })
 
 describe('ToolCard — fileEdit kind', () => {
-  it('renders DiffViewer in BOTH input and result (preserved double-diff)', () => {
+  it('renders DiffViewer exactly once in Input, TerminalView for result (single-diff)', () => {
     const view: ToolView = {
       kind: 'fileEdit',
       path: '/a.ts',
@@ -199,8 +199,36 @@ describe('ToolCard — fileEdit kind', () => {
         })}
       />
     )
+    // Single diff only (was two before ROADMAP #11c)
     const diffs = screen.getAllByTestId('DiffViewer')
-    expect(diffs).toHaveLength(2)
+    expect(diffs).toHaveLength(1)
+    expect(diffs[0]).toHaveAttribute('data-old', 'old')
+    expect(diffs[0]).toHaveAttribute('data-new', 'new')
+    // Result shows the result text via TerminalView instead of a duplicate diff
+    expect(screen.getByTestId('TerminalView')).toHaveAttribute('data-text', 'Edited')
+  })
+
+  it('renders DiffViewer in Result when hideToolInput=true (diff still shows once)', () => {
+    const view: ToolView = {
+      kind: 'fileEdit',
+      path: '/a.ts',
+      before: 'old',
+      after: 'new'
+    }
+    render(
+      <ToolCard
+        {...baseProps({
+          kind: 'fileEdit',
+          view,
+          block: block('Edit', { file_path: '/a.ts', old_string: 'old', new_string: 'new' }),
+          result: result('Edited'),
+          hideToolInput: true
+        })}
+      />
+    )
+    // Input is hidden, so diff must appear in Result
+    const diffs = screen.getAllByTestId('DiffViewer')
+    expect(diffs).toHaveLength(1)
     expect(diffs[0]).toHaveAttribute('data-old', 'old')
     expect(diffs[0]).toHaveAttribute('data-new', 'new')
   })

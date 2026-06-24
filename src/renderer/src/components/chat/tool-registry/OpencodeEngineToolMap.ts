@@ -195,8 +195,32 @@ function extractMockupDirectory(result?: ToolResultBlock): string | undefined {
   return match ? match[1] : undefined
 }
 
+/** Prettify map for opencode's lowercase/underscore tool names. */
+const OPENCODE_DISPLAY_NAMES: Record<string, string> = {
+  bash: 'Bash',
+  read: 'Read',
+  write: 'Write',
+  edit: 'Edit',
+  apply_patch: 'Patch',
+  glob: 'Glob',
+  grep: 'Grep',
+  webfetch: 'WebFetch',
+  websearch: 'WebSearch',
+  todowrite: 'TodoWrite',
+  task: 'Task',
+  question: 'AskUserQuestion',
+  claudeui_render_mermaid: 'Mermaid',
+  claudeui_create_mockup: 'Mockup',
+  claudeui_show_mockup: 'Mockup'
+}
+
+function opencodeDisplayName(toolName: string): string {
+  return OPENCODE_DISPLAY_NAMES[toolName] ?? toolName
+}
+
 export const OpencodeEngineToolMap: EngineToolMap = {
   kindOf: opencodeKindOf,
   normalize: opencodeNormalize,
+  displayName: opencodeDisplayName,
   hidden: HIDDEN_TOOLS
 }

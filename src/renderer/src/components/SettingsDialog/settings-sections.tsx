@@ -1162,6 +1162,22 @@ export const SECTIONS: Section[] = [
             onChange={(v) => u({ expandThinking: v })}
           />
         )
+      },
+      {
+        key: 'toolOutputMaxChars',
+        label: 'Max output chars',
+        keywords: 'truncate show more limit tool output chars characters',
+        render: (s, u) => (
+          <SettingsSlider
+            label="Max output chars"
+            value={s.toolOutputMaxChars}
+            min={500}
+            max={50000}
+            step={500}
+            onChange={(v) => u({ toolOutputMaxChars: v })}
+            formatValue={(v) => `${v.toLocaleString()} chars`}
+          />
+        )
       }
     ]
   },

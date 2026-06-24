@@ -185,8 +185,18 @@ function extractMockupDirectory(result?: ToolResultBlock): string | undefined {
   return match ? match[1] : undefined
 }
 
+/**
+ * Claude's tool names are already display-ready — passthrough.
+ * For hosted MCP tools (mcp__*) and agent tools (Agent/Task/…), return as-is.
+ * This must be byte-identical to the old `block.toolName` header for every Claude tool.
+ */
+function claudeDisplayName(toolName: string): string {
+  return toolName
+}
+
 export const ClaudeEngineToolMap: EngineToolMap = {
   kindOf: claudeKindOf,
   normalize: claudeNormalize,
+  displayName: claudeDisplayName,
   hidden: HIDDEN_TOOLS
 }

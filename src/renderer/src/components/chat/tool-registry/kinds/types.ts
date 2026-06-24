@@ -66,6 +66,11 @@ export interface KindBodyProps {
   borderColor: string
   /** Status icon element from the resolved visual state (custom bodies reuse it). */
   statusIcon: React.JSX.Element
+  /**
+   * Max chars to show before the "Show more" toggle. From AppSettings.toolOutputMaxChars.
+   * Passed through from ToolCallBlock → ToolCard → body props.
+   */
+  toolOutputMaxChars?: number
 }
 
 /**

@@ -51,6 +51,7 @@ export const ToolCallBlock = memo(function ToolCallBlock({
   const expandReadResults = useSessionStore((s) => s.settings.expandReadResults)
   const hideToolInput = useSessionStore((s) => s.settings.hideToolInput)
   const theme = useSessionStore((s) => s.settings.theme)
+  const toolOutputMaxChars = useSessionStore((s) => s.settings.toolOutputMaxChars)
 
   const toolUseId = block.toolUseId || ''
   const isBackgroundBash = block.toolName === 'Bash' && !!block.toolInput?.run_in_background
@@ -72,6 +73,7 @@ export const ToolCallBlock = memo(function ToolCallBlock({
   const toolMap = engineToolMap(engineId)
   const kind = hostedMcpKind(block.toolName) ?? toolMap.kindOf(block.toolName)
   const view = toolMap.normalize(kind, block.toolInput, result)
+  const toolDisplayName = toolMap.displayName(block.toolName)
 
   // Start file polling as soon as a background bash tool_use renders, independent of
   // expanded state. BackgroundBashOutput only mounts when expanded, but auto-expand
@@ -158,6 +160,8 @@ export const ToolCallBlock = memo(function ToolCallBlock({
       isBackgrounding={isBackgrounding}
       hasActiveSession={activeSessionId !== null}
       backgroundTasksEnabled={backgroundTasksEnabled}
+      displayName={toolDisplayName}
+      toolOutputMaxChars={toolOutputMaxChars}
       onApproval={handleApproval}
       onBackgroundTask={handleBackgroundTask}
       onStopTask={handleStopTask}

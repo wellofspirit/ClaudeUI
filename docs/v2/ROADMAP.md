@@ -74,7 +74,7 @@ Every item below was re-verified against current code on 2026-06-23. Status lege
 | 6 | **Vendor editing UI** + ModelRef-derived vendor at spawn | 🟠 | config plane | M |
 | 8 | opencode **voice** input | 🟡 | voice | M |
 | 10 | Fold **FloatingApproval** into shared `<ApprovalButtons>` | ⚪ | tool rendering | S |
-| 11 | Tool-rendering **coverage polish** (search/web/single-diff/truncation) | ⚪ | tool rendering | M |
+| 11 | Tool-rendering **coverage polish** — structured **search/web** only (a/b); c/d/e shipped | ⚪ | tool rendering | S |
 | 12 | **Per-section capability gating** in Settings (blocked on caps model) | ⚪ | config plane | M |
 | 13 | opencode **end-to-end render** verification (test gap) | ⚪ | testing | M |
 | 14 | Retire legacy **JSONL usage** parse path | ⚪ | metering | M |
@@ -160,25 +160,30 @@ Pure refactor; app-shot the floating card as pixel-equivalent.
 
 ---
 
-### 11 — Tool-rendering coverage polish ⚪
+### 11 — Tool-rendering coverage polish ⚪ (c/d/e shipped; a/b remain)
 
-**What.** The "weak" tool kinds still use `GenericBody` / hardcoded rendering (foundation 06 §9):
-- **(a) search** (Grep/Glob/list) — JSON-dump input + generic terminal output, not a structured match
-  list (file · line · highlighted text). `tool-registry/kinds/index.ts:28` → `GenericBody`.
-- **(b) web** (WebFetch/WebSearch) — raw, not structured title/url/snippet. Same `GenericBody`.
-- **(c) fileEdit** — renders the diff **twice** (input AND result), `FileEditBody.tsx:43-77`.
-- **(d) truncation** — hardcoded `trunc(text, 2000)`; no configurable / "show more" affordance.
-- *(Error rendering is now consistent across `GenericBody`/`FileEditBody` (red `<pre>` styling) — the
-  "consistent error renderer with context" ambition remains but the inconsistency is gone.)*
+**Shipped 2026-06-24** (`v2-followup-tool-rendering-polish`, see *Verified resolved*):
+- **(c) fileEdit single-diff** — the diff renders exactly once (was twice: input + result).
+- **(d) truncation + show-more** — `<ExpandableText>` + a `toolOutputMaxChars` setting (default 5000)
+  replace the hardcoded `trunc(2000/5000)` cuts; full text revealed on expand (no data loss).
+- **(e) per-kind display metadata** — card name + summary come from `EngineToolMap.displayName` +
+  `summarizeTool(kind, view)` instead of the Claude-hardcoded `getSummary`/raw `toolName`. Fixes
+  opencode's raw lowercase labels + JSON-blob summaries. Claude byte-identical (equivalence-tested).
 
-**Why deferred.** Foundation decision #4: explicitly cosmetic and low-priority; the generic fallback
-renders weak tools acceptably.
+**Still deferred — (a)/(b) structured results:**
+- **(a) search** (Grep/Glob) — JSON-dump input + generic terminal output, not a structured match list
+  (file · line · highlighted text). Still `GenericBody`.
+- **(b) web** (WebFetch/WebSearch) — raw, not structured title/url/snippet. Still `GenericBody`.
 
-**Definition of done.** Structured `search` match-list, structured `web` results, single-diff for
-`fileEdit`, and a configurable truncate-with-expand applied uniformly. Per-kind; can be split. Folding
-the hardcoded name/icon lists in `utils.ts` into per-kind metadata (06 §8) is part of the same cleanup.
+**Why a/b deferred.** Most cosmetic + brittle (parsing freeform result text across engines/output
+modes); lowest value-per-risk. The generic fallback renders them acceptably.
 
-**References.** `06-tool-rendering.md §8,§9`, `phase-6-tool-registry.md §9`, `tool-registry/kinds/`.
+**Definition of done (remaining).** Structured `search` match-list + structured `web` results, with the
+generic body as fallback. Per-kind; can be split. Requires extending the `search`/`web` ToolViews to
+carry parsed matches/results (today they carry only the input `query`/`target`).
+
+**References.** `06-tool-rendering.md §9`, `tool-registry/kinds/{GenericBody}.tsx`,
+`followup-tool-rendering-polish.md`.
 
 ---
 
@@ -274,6 +279,16 @@ squash/integration strategy for landing the stack. Not code — a process decisi
 Prior session inventories (pre-Phase-8/9) listed these as deferred; the 2026-06-23 sweep confirms they
 shipped. Recorded here so they're not re-raised:
 
+- **Tool-rendering polish c/d/e** (ROADMAP #11 partial, shipped 2026-06-24,
+  `v2-followup-tool-rendering-polish`) — (c) fileEdit renders the diff once not twice; (d) a reusable
+  `<ExpandableText>` + `AppSettings.toolOutputMaxChars` (default 5000) replace the hardcoded
+  `trunc(2000/5000)` cuts (full text on expand, no data loss); (e) the card name + summary come from
+  `EngineToolMap.displayName` (Claude passthrough / opencode prettify map) + `summarizeTool(kind, view)`
+  instead of the Claude-name-hardcoded `getSummary`/raw `toolName` — fixing opencode's raw lowercase
+  labels + `JSON.stringify(input)` summaries. Claude byte-identical: a `summarizeTool === getSummary`
+  equivalence guard test covers every kind, and `displayName` is a passthrough (real-app: 33 Edit cards
+  one-diff each, Read/Bash/Glob/Grep/Edit headers unchanged). Structured search/web (a/b) stay deferred.
+  Spec: `docs/v2/followup-tool-rendering-polish.md`.
 - **Engine-neutral lifting of plan/question/todo/task** (was ROADMAP #9 🟡, shipped 2026-06-24,
   `v2-followup-tool-rendering-lift`) — the four lifted interaction kinds now consume an engine-neutral
   `ToolView` (extended with `task.subagent/model/background`, typed `question.questions: AskUserQuestion[]`,
