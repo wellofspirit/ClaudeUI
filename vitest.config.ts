@@ -6,11 +6,7 @@ const sharedAlias = {
   '@test': resolve(__dirname, 'src/test'),
   // Redirect better-sqlite3 to a node:sqlite-backed shim so vitest (plain Node)
   // never loads the Electron-ABI native .node binary (ERR_DLOPEN_FAILED).
-  'better-sqlite3': resolve(__dirname, 'src/test/stubs/better-sqlite3-stub.ts'),
-  // `@opencode-ai/plugin` is provided by the opencode binary at plugin-load time
-  // (NOT a ClaudeUI dep). vitest can't resolve it, so alias it to a tiny stub so
-  // the hosted-tools plugin module is importable in tests.
-  '@opencode-ai/plugin': resolve(__dirname, 'src/test/stubs/opencode-plugin-stub.ts')
+  'better-sqlite3': resolve(__dirname, 'src/test/stubs/better-sqlite3-stub.ts')
 }
 
 export default defineConfig({

@@ -5,12 +5,13 @@
  *
  * See docs/v2/06-tool-rendering.md §6 for the canonical opencode→kind table.
  *
- * Hosted-tools plugin names: this map classifies the BARE plugin tool names
- * (`render_mermaid` / `create_mockup` / `show_mockup`) directly to diagram/mockup
- * — the 5c event-mapper name-normalization hack (OPENCODE_TOOL_NAME_MAP) is
- * retired, so these arrive un-prefixed and hostedMcpKind (which only matches
- * `mcp__*`) won't catch them. opencode field names match the plugin's args
- * (source/title, directory/title), so the diagram/mockup normalizers are shared.
+ * Hosted-tools MCP names: the in-process HTTP MCP server is named 'claudeui'.
+ * opencode sanitizes tool names as `sanitize(serverName)_sanitize(toolName)`,
+ * so our tools arrive prefixed: `claudeui_render_mermaid`, `claudeui_create_mockup`,
+ * `claudeui_show_mockup`. hostedMcpKind (which matches `mcp__*`) does NOT catch
+ * these — they have the claudeui_ prefix, not mcp__. opencode field names match
+ * the MCP tool args (source/title, directory/title), so the diagram/mockup
+ * normalizers are shared.
  */
 
 import type { EngineToolMap, ToolKind, ToolView } from '../../../../../shared/tool-kinds'
@@ -45,12 +46,12 @@ function opencodeKindOf(toolName: string): ToolKind {
       return 'web'
     case 'task':
       return 'task'
-    // Hosted-tools plugin names (bare — see file header). Their args match the
-    // diagram/mockup normalizers, so they render the same engine-agnostic cards.
-    case 'render_mermaid':
+    // Hosted-tools MCP names (claudeui_ prefixed — see file header). Their args
+    // match the diagram/mockup normalizers, rendering the same engine-agnostic cards.
+    case 'claudeui_render_mermaid':
       return 'diagram'
-    case 'create_mockup':
-    case 'show_mockup':
+    case 'claudeui_create_mockup':
+    case 'claudeui_show_mockup':
       return 'mockup'
     default:
       return 'unknown'

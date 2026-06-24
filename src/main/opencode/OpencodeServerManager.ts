@@ -4,7 +4,10 @@ import { join, dirname, resolve as resolvePath } from 'node:path'
 import { spawn } from 'node:child_process'
 import type { ChildProcess } from 'node:child_process'
 import { app } from 'electron'
-import { ensureOpencodePlugin } from './ensure-plugin'
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
+import type { McpHttpHost } from './mcp-http-host'
+import { startMcpHttpHost } from './mcp-http-host'
+import { createOpencodeHostedToolsServer } from './opencode-hosted-tools'
 
 /** Connection details handed back to callers (and to OpencodeClient). */
 export interface ServerConnection {
@@ -17,6 +20,7 @@ export interface ServerConnection {
 export interface ServerHandle extends ServerConnection {
   refCount: number
   process: ChildProcess
+  mcpHost: McpHttpHost
 }
 
 /**
@@ -32,7 +36,9 @@ export interface SpawnResult {
 export type SpawnServerFn = (
   binary: string,
   cwd: string,
-  password: string
+  password: string,
+  mcpPort: number,
+  mcpToken: string
 ) => Promise<SpawnResult>
 
 const PORT_PATTERN = /opencode server listening on http:\/\/127\.0\.0\.1:(\d+)/
@@ -75,23 +81,52 @@ function locateBinary(): string {
 }
 
 /**
+ * Build the OPENCODE_CONFIG_CONTENT JSON string that wires opencode's MCP
+ * client to our per-cwd in-process HTTP host.
+ *
+ * opencode parses this env var as JSON and merges it into its config, so
+ * the `mcp` key is treated identically to mcp entries in opencode.json.
+ * The `claudeui` server name drives tool-name prefixing in opencode:
+ *   claudeui_render_mermaid, claudeui_create_mockup, claudeui_show_mockup.
+ */
+function buildOpencodeConfigContent(mcpPort: number, mcpToken: string): string {
+  const config = {
+    mcp: {
+      claudeui: {
+        type: 'remote',
+        url: `http://127.0.0.1:${mcpPort}/mcp`,
+        headers: {
+          Authorization: `Bearer ${mcpToken}`
+        },
+        enabled: true
+      }
+    }
+  }
+  return JSON.stringify(config)
+}
+
+/**
  * Spawn `opencode serve` and resolve once it prints the listening port to stdout.
  * Rejects on spawn error, early exit, or a 15s timeout.
  */
-function spawnServer(binary: string, cwd: string, password: string): Promise<SpawnResult> {
+function spawnServer(
+  binary: string,
+  cwd: string,
+  password: string,
+  mcpPort: number,
+  mcpToken: string
+): Promise<SpawnResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(binary, ['serve', '--port', '0', '--hostname', '127.0.0.1'], {
       cwd,
       env: {
         ...process.env,
         OPENCODE_SERVER_PASSWORD: password,
-        // The hosted-tools plugin (Part B) writes mockups to <cwd>/.claude/ui/mockups;
-        // the renderer serves them from the session cwd. opencode's ToolContext.directory
-        // resolves to the git root (≠ session cwd for subdirs), so we pass the exact
-        // spawn cwd explicitly and the plugin prefers it. See plugin/claudeui.plugin.js.
-        CLAUDEUI_SESSION_CWD: cwd,
+        // Inject the per-cwd in-process MCP server so opencode connects to it
+        // without requiring any global plugin installation.
+        OPENCODE_CONFIG_CONTENT: buildOpencodeConfigContent(mcpPort, mcpToken)
       },
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['ignore', 'pipe', 'pipe']
     })
 
     let stdout = ''
@@ -147,11 +182,11 @@ export interface OpencodeServerManagerOptions {
   /** Override the binary locator. Defaults to the real on-disk resolver. */
   locateBinaryFn?: () => string
   /**
-   * Override the hosted-tools plugin installer. Defaults to ensureOpencodePlugin
-   * (lazy + memoized + idempotent). Tests inject a no-op/spy to avoid touching
-   * ~/.config/opencode.
+   * Override the MCP host starter. Defaults to startMcpHttpHost + the real
+   * createOpencodeHostedToolsServer. Tests inject a fake to avoid binding real
+   * ports.
    */
-  ensurePluginFn?: () => Promise<void>
+  startMcpHostFn?: (mcpServer: McpServer) => Promise<McpHttpHost>
 }
 
 /**
@@ -170,12 +205,12 @@ export class OpencodeServerManager {
   private binary: string | null = null
   private readonly spawnFn: SpawnServerFn
   private readonly locateBinaryFn: () => string
-  private readonly ensurePluginFn: () => Promise<void>
+  private readonly startMcpHostFn: (mcpServer: McpServer) => Promise<McpHttpHost>
 
   constructor(opts: OpencodeServerManagerOptions = {}) {
     this.spawnFn = opts.spawnFn ?? spawnServer
     this.locateBinaryFn = opts.locateBinaryFn ?? locateBinary
-    this.ensurePluginFn = opts.ensurePluginFn ?? ensureOpencodePlugin
+    this.startMcpHostFn = opts.startMcpHostFn ?? startMcpHttpHost
   }
 
   private getBinary(): string {
@@ -199,7 +234,22 @@ export class OpencodeServerManager {
       const password = randomBytes(24).toString('base64url')
       const authHeader = 'Basic ' + Buffer.from('opencode:' + password).toString('base64')
       const binary = this.getBinary()
-      const { process: child, baseUrl } = await this.spawnFn(binary, key, password)
+
+      // Start the per-cwd MCP host BEFORE spawning opencode so we have the
+      // port + token to inject via OPENCODE_CONFIG_CONTENT.
+      const mcpHost = await this.startMcpHostFn(createOpencodeHostedToolsServer(key))
+
+      let child: ChildProcess
+      let baseUrl: string
+      try {
+        const result = await this.spawnFn(binary, key, password, mcpHost.port, mcpHost.token)
+        child = result.process
+        baseUrl = result.baseUrl
+      } catch (err) {
+        // If spawn fails, tear down the MCP host we already started.
+        await mcpHost.close().catch(() => {})
+        throw err
+      }
 
       const handle: ServerHandle = {
         baseUrl,
@@ -207,14 +257,17 @@ export class OpencodeServerManager {
         authHeader,
         refCount: 0,
         process: child,
+        mcpHost
       }
       this.handles.set(key, handle)
 
       // If the server dies unexpectedly (crash, external kill), drop the handle
-      // so the next acquire re-spawns instead of handing out a dead server.
+      // and close the MCP host so the next acquire re-spawns instead of handing
+      // out a dead server.
       child.on('exit', () => {
         if (this.handles.get(key) === handle) {
           this.handles.delete(key)
+          mcpHost.close().catch(() => {})
         }
       })
 
@@ -247,10 +300,6 @@ export class OpencodeServerManager {
    */
   async acquire(cwd: string): Promise<ServerConnection> {
     const key = resolvePath(cwd)
-    // Ensure the hosted-tools plugin is installed before opencode spawns + loads
-    // its plugin dir. Memoized + idempotent, so this is a cheap no-op after the
-    // first call. Never throws (opencode optional).
-    await this.ensurePluginFn()
     const handle = await this.resolveHandle(key)
     handle.refCount++
     return { baseUrl: handle.baseUrl, password: handle.password, authHeader: handle.authHeader }
@@ -258,7 +307,7 @@ export class OpencodeServerManager {
 
   /**
    * Release a previously-acquired server. Decrements the refcount; at 0 the
-   * process is killed and the handle dropped.
+   * process is killed, the MCP host is closed, and the handle is dropped.
    */
   release(cwd: string): void {
     const key = resolvePath(cwd)
@@ -269,6 +318,7 @@ export class OpencodeServerManager {
     if (handle.refCount <= 0) {
       this.handles.delete(key)
       this.killProcess(handle.process)
+      handle.mcpHost.close().catch(() => {})
     }
   }
 
@@ -276,6 +326,7 @@ export class OpencodeServerManager {
   dispose(): void {
     for (const handle of this.handles.values()) {
       this.killProcess(handle.process)
+      handle.mcpHost.close().catch(() => {})
     }
     this.handles.clear()
     this.pending.clear()

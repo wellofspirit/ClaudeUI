@@ -3,6 +3,8 @@ import { EventEmitter } from 'node:events'
 import type { ChildProcess } from 'node:child_process'
 import { OpencodeServerManager } from '../OpencodeServerManager'
 import type { SpawnResult, SpawnServerFn } from '../OpencodeServerManager'
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
+import type { McpHttpHost } from '../mcp-http-host'
 
 // ── Fake spawn harness ─────────────────────────────────────────────────────────
 //
@@ -25,20 +27,43 @@ function makeFakeChild(): FakeChild {
   return emitter
 }
 
+// ── Fake MCP host harness ─────────────────────────────────────────────────────
+//
+// A fake McpHttpHost that tracks close() calls without binding a real port.
+
+interface FakeMcpHost extends McpHttpHost {
+  closed: boolean
+}
+
+function makeFakeMcpHost(port = 19999): FakeMcpHost {
+  const host: FakeMcpHost = {
+    port,
+    token: 'test-token-' + Math.random().toString(36).slice(2),
+    closed: false,
+    async close() {
+      this.closed = true
+    }
+  }
+  return host
+}
+
 /**
  * Build an injectable spawnFn that records invocations and returns a fresh
  * fake child per call. `delayMs` lets us widen the async window so concurrent
  * acquires genuinely overlap (proving the pending-promise dedupe).
+ *
+ * The spawnFn now receives 5 args: binary, cwd, password, mcpPort, mcpToken.
+ * The recorded calls include mcpPort and mcpToken so tests can assert on them.
  */
 function makeSpawnFn(delayMs = 0): {
   spawnFn: SpawnServerFn
-  calls: Array<{ cwd: string; child: FakeChild }>
+  calls: Array<{ cwd: string; mcpPort: number; mcpToken: string; child: FakeChild }>
 } {
-  const calls: Array<{ cwd: string; child: FakeChild }> = []
+  const calls: Array<{ cwd: string; mcpPort: number; mcpToken: string; child: FakeChild }> = []
   let port = 40000
-  const spawnFn: SpawnServerFn = async (_binary, cwd) => {
+  const spawnFn: SpawnServerFn = async (_binary, cwd, _password, mcpPort, mcpToken) => {
     const child = makeFakeChild()
-    calls.push({ cwd, child })
+    calls.push({ cwd, mcpPort, mcpToken, child })
     if (delayMs > 0) await new Promise((r) => setTimeout(r, delayMs))
     const result: SpawnResult = { process: child, baseUrl: `http://127.0.0.1:${port++}` }
     return result
@@ -46,12 +71,33 @@ function makeSpawnFn(delayMs = 0): {
   return { spawnFn, calls }
 }
 
-function makeManager(spawnFn: SpawnServerFn): OpencodeServerManager {
-  // Stub the binary locator + plugin installer so tests never touch the filesystem.
+let fakeHostPort = 20000
+
+/**
+ * Build an injectable startMcpHostFn that records calls and returns fake hosts.
+ */
+function makeMcpHostFn(): {
+  startMcpHostFn: (mcpServer: McpServer) => Promise<McpHttpHost>
+  hosts: FakeMcpHost[]
+} {
+  const hosts: FakeMcpHost[] = []
+  const startMcpHostFn = async (_mcpServer: McpServer): Promise<McpHttpHost> => {
+    const host = makeFakeMcpHost(fakeHostPort++)
+    hosts.push(host)
+    return host
+  }
+  return { startMcpHostFn, hosts }
+}
+
+function makeManager(
+  spawnFn: SpawnServerFn,
+  startMcpHostFn: (mcpServer: McpServer) => Promise<McpHttpHost>
+): OpencodeServerManager {
+  // Stub the binary locator + MCP host starter so tests never touch the filesystem or network.
   return new OpencodeServerManager({
     spawnFn,
     locateBinaryFn: () => '/fake/opencode',
-    ensurePluginFn: async () => {}
+    startMcpHostFn
   })
 }
 
@@ -84,7 +130,7 @@ describe('SSE block parsing', () => {
       start(c) {
         c.enqueue(encoded)
         c.close()
-      },
+      }
     })
 
     const events: unknown[] = []
@@ -110,7 +156,7 @@ describe('SSE block parsing', () => {
         if (i < chunks.length) {
           c.enqueue(enc.encode(chunks[i++]))
         } else c.close()
-      },
+      }
     })
 
     const events: unknown[] = []
@@ -132,7 +178,7 @@ describe('SSE block parsing', () => {
       start(c) {
         c.enqueue(enc.encode(raw))
         c.close()
-      },
+      }
     })
 
     const events: unknown[] = []
@@ -160,7 +206,7 @@ describe('SSE block parsing', () => {
       start(c) {
         c.enqueue(enc.encode(raw))
         c.close()
-      },
+      }
     })
 
     const events: unknown[] = []
@@ -180,7 +226,7 @@ describe('SSE block parsing', () => {
       start(c) {
         c.enqueue(enc.encode(raw))
         c.close()
-      },
+      }
     })
 
     const events: unknown[] = []
@@ -206,7 +252,7 @@ describe('SSE block parsing', () => {
         } else {
           c.close()
         }
-      },
+      }
     })
 
     const events: unknown[] = []
@@ -228,7 +274,7 @@ describe('SSE block parsing', () => {
           new TextEncoder().encode('data: {"id":"e1","type":"server.connected","properties":{}}\n\n')
         )
         c.close()
-      },
+      }
     })
 
     const events: unknown[] = []
@@ -257,7 +303,7 @@ describe('SSE block parsing', () => {
       },
       cancel() {
         cancelled = true
-      },
+      }
     })
 
     const events: unknown[] = []
@@ -272,7 +318,7 @@ describe('SSE block parsing', () => {
       })(),
       new Promise((_, reject) =>
         setTimeout(() => reject(new Error('parseSSEStream did not abort an idle stream')), 1000)
-      ),
+      )
     ])
 
     expect(events).toHaveLength(1) // got the one event before going idle
@@ -286,7 +332,8 @@ describe('SSE block parsing', () => {
 describe('OpencodeServerManager lifecycle', () => {
   it('sequential: acquire×2 same cwd spawns once (refCount 2); release×2 kills once', async () => {
     const { spawnFn, calls } = makeSpawnFn()
-    const mgr = makeManager(spawnFn)
+    const { startMcpHostFn, hosts } = makeMcpHostFn()
+    const mgr = makeManager(spawnFn, startMcpHostFn)
     const cwd = '/work/proj'
 
     const c1 = await mgr.acquire(cwd)
@@ -296,14 +343,17 @@ describe('OpencodeServerManager lifecycle', () => {
     expect(c1.baseUrl).toBe(c2.baseUrl) // same server
     expect(c1.authHeader).toBe(c2.authHeader)
     expect(mgr.activeCount).toBe(1)
+    expect(hosts).toHaveLength(1) // one MCP host for one cwd
 
     const child = calls[0].child
     mgr.release(cwd)
     expect(child.killed).toBe(false) // still one ref outstanding
+    expect(hosts[0].closed).toBe(false)
     expect(mgr.activeCount).toBe(1)
 
     mgr.release(cwd)
     expect(child.killed).toBe(true) // last-out kill
+    expect(hosts[0].closed).toBe(true) // MCP host also closed
     expect(mgr.activeCount).toBe(0)
   })
 
@@ -311,7 +361,8 @@ describe('OpencodeServerManager lifecycle', () => {
     // A spawn delay forces the two acquires to overlap — without the pending
     // promise, both would see no handle and each spawn a server (the race).
     const { spawnFn, calls } = makeSpawnFn(25)
-    const mgr = makeManager(spawnFn)
+    const { startMcpHostFn, hosts } = makeMcpHostFn()
+    const mgr = makeManager(spawnFn, startMcpHostFn)
     const cwd = '/work/proj'
 
     const [c1, c2] = await Promise.all([mgr.acquire(cwd), mgr.acquire(cwd)])
@@ -319,24 +370,29 @@ describe('OpencodeServerManager lifecycle', () => {
     expect(calls).toHaveLength(1) // <-- the assertion that fails pre-fix
     expect(c1.baseUrl).toBe(c2.baseUrl)
     expect(mgr.activeCount).toBe(1)
+    expect(hosts).toHaveLength(1) // one MCP host
 
     // refCount must be 2 — both releases needed before teardown.
     const child = calls[0].child
     mgr.release(cwd)
     expect(child.killed).toBe(false)
+    expect(hosts[0].closed).toBe(false)
     mgr.release(cwd)
     expect(child.killed).toBe(true)
+    expect(hosts[0].closed).toBe(true)
     expect(mgr.activeCount).toBe(0)
   })
 
   it('higher concurrency: 5 simultaneous acquires share one server, 5 releases tear down', async () => {
     const { spawnFn, calls } = makeSpawnFn(15)
-    const mgr = makeManager(spawnFn)
+    const { startMcpHostFn, hosts } = makeMcpHostFn()
+    const mgr = makeManager(spawnFn, startMcpHostFn)
     const cwd = '/work/proj'
 
     const conns = await Promise.all(Array.from({ length: 5 }, () => mgr.acquire(cwd)))
     expect(calls).toHaveLength(1)
     expect(new Set(conns.map((c) => c.baseUrl)).size).toBe(1)
+    expect(hosts).toHaveLength(1)
 
     const child = calls[0].child
     for (let i = 0; i < 4; i++) {
@@ -345,12 +401,14 @@ describe('OpencodeServerManager lifecycle', () => {
     }
     mgr.release(cwd)
     expect(child.killed).toBe(true)
+    expect(hosts[0].closed).toBe(true)
     expect(mgr.activeCount).toBe(0)
   })
 
   it('different cwds get separate servers', async () => {
     const { spawnFn, calls } = makeSpawnFn()
-    const mgr = makeManager(spawnFn)
+    const { startMcpHostFn, hosts } = makeMcpHostFn()
+    const mgr = makeManager(spawnFn, startMcpHostFn)
 
     const a = await mgr.acquire('/work/a')
     const b = await mgr.acquire('/work/b')
@@ -358,6 +416,7 @@ describe('OpencodeServerManager lifecycle', () => {
     expect(calls).toHaveLength(2)
     expect(a.baseUrl).not.toBe(b.baseUrl)
     expect(mgr.activeCount).toBe(2)
+    expect(hosts).toHaveLength(2) // one MCP host per cwd
 
     mgr.release('/work/a')
     expect(mgr.activeCount).toBe(1)
@@ -367,7 +426,8 @@ describe('OpencodeServerManager lifecycle', () => {
 
   it('normalizes cwd: relative + absolute forms of the same dir share a server', async () => {
     const { spawnFn, calls } = makeSpawnFn()
-    const mgr = makeManager(spawnFn)
+    const { startMcpHostFn } = makeMcpHostFn()
+    const mgr = makeManager(spawnFn, startMcpHostFn)
 
     // resolvePath() collapses these to the same absolute key.
     const a = await mgr.acquire('/work/proj')
@@ -383,7 +443,8 @@ describe('OpencodeServerManager lifecycle', () => {
 
   it('re-acquire after full release spawns a fresh server', async () => {
     const { spawnFn, calls } = makeSpawnFn()
-    const mgr = makeManager(spawnFn)
+    const { startMcpHostFn } = makeMcpHostFn()
+    const mgr = makeManager(spawnFn, startMcpHostFn)
     const cwd = '/work/proj'
 
     await mgr.acquire(cwd)
@@ -399,16 +460,19 @@ describe('OpencodeServerManager lifecycle', () => {
   it('spawn failure rejects acquire and leaves no handle (retry can re-spawn)', async () => {
     let attempt = 0
     const goodSpawn = makeSpawnFn()
-    const spawnFn: SpawnServerFn = async (binary, cwd, password) => {
+    const { startMcpHostFn, hosts } = makeMcpHostFn()
+    const spawnFn: SpawnServerFn = async (binary, cwd, password, mcpPort, mcpToken) => {
       attempt++
       if (attempt === 1) throw new Error('boom: serve failed to start')
-      return goodSpawn.spawnFn(binary, cwd, password)
+      return goodSpawn.spawnFn(binary, cwd, password, mcpPort, mcpToken)
     }
-    const mgr = makeManager(spawnFn)
+    const mgr = makeManager(spawnFn, startMcpHostFn)
     const cwd = '/work/proj'
 
     await expect(mgr.acquire(cwd)).rejects.toThrow('boom')
     expect(mgr.activeCount).toBe(0)
+    // The MCP host that was started before the spawn attempt must be closed on failure.
+    expect(hosts[0].closed).toBe(true)
 
     // A subsequent acquire must be able to re-spawn (pending entry was cleared).
     const conn = await mgr.acquire(cwd)
@@ -418,21 +482,25 @@ describe('OpencodeServerManager lifecycle', () => {
   })
 
   it('concurrent acquires that all fail each reject; the cwd stays clean', async () => {
+    const { startMcpHostFn, hosts } = makeMcpHostFn()
     const spawnFn: SpawnServerFn = async () => {
       await new Promise((r) => setTimeout(r, 10))
       throw new Error('boom')
     }
-    const mgr = makeManager(spawnFn)
+    const mgr = makeManager(spawnFn, startMcpHostFn)
     const cwd = '/work/proj'
 
     const results = await Promise.allSettled([mgr.acquire(cwd), mgr.acquire(cwd)])
     expect(results.every((r) => r.status === 'rejected')).toBe(true)
     expect(mgr.activeCount).toBe(0)
+    // The MCP host started before the failed spawn must be closed.
+    expect(hosts[0].closed).toBe(true)
   })
 
-  it('unexpected server death drops the handle so the next acquire re-spawns', async () => {
+  it('unexpected server death drops the handle and closes MCP host', async () => {
     const { spawnFn, calls } = makeSpawnFn()
-    const mgr = makeManager(spawnFn)
+    const { startMcpHostFn, hosts } = makeMcpHostFn()
+    const mgr = makeManager(spawnFn, startMcpHostFn)
     const cwd = '/work/proj'
 
     await mgr.acquire(cwd)
@@ -441,6 +509,9 @@ describe('OpencodeServerManager lifecycle', () => {
     // Simulate a crash: the child emits 'exit' without us calling release().
     calls[0].child.emit('exit', 1, null)
     expect(mgr.activeCount).toBe(0)
+    // MCP host must be cleaned up on unexpected death.
+    await new Promise((r) => setTimeout(r, 10)) // give close() a tick
+    expect(hosts[0].closed).toBe(true)
 
     // Next acquire spawns fresh rather than handing back the dead handle.
     await mgr.acquire(cwd)
@@ -450,13 +521,15 @@ describe('OpencodeServerManager lifecycle', () => {
 
   it('release on an unknown cwd is a no-op (no throw)', () => {
     const { spawnFn } = makeSpawnFn()
-    const mgr = makeManager(spawnFn)
+    const { startMcpHostFn } = makeMcpHostFn()
+    const mgr = makeManager(spawnFn, startMcpHostFn)
     expect(() => mgr.release('/never/acquired')).not.toThrow()
   })
 
-  it('dispose() kills all live servers and clears state', async () => {
+  it('dispose() kills all live servers, closes all MCP hosts, and clears state', async () => {
     const { spawnFn, calls } = makeSpawnFn()
-    const mgr = makeManager(spawnFn)
+    const { startMcpHostFn, hosts } = makeMcpHostFn()
+    const mgr = makeManager(spawnFn, startMcpHostFn)
 
     await mgr.acquire('/work/a')
     await mgr.acquire('/work/b')
@@ -466,11 +539,16 @@ describe('OpencodeServerManager lifecycle', () => {
     expect(calls[0].child.killed).toBe(true)
     expect(calls[1].child.killed).toBe(true)
     expect(mgr.activeCount).toBe(0)
+    // Allow async close() callbacks a tick to run.
+    await new Promise((r) => setTimeout(r, 10))
+    expect(hosts[0].closed).toBe(true)
+    expect(hosts[1].closed).toBe(true)
   })
 
   it('generates a distinct random password (Basic auth header) per server', async () => {
     const { spawnFn } = makeSpawnFn()
-    const mgr = makeManager(spawnFn)
+    const { startMcpHostFn } = makeMcpHostFn()
+    const mgr = makeManager(spawnFn, startMcpHostFn)
 
     const a = await mgr.acquire('/work/a')
     const b = await mgr.acquire('/work/b')
@@ -484,5 +562,18 @@ describe('OpencodeServerManager lifecycle', () => {
 
     mgr.release('/work/a')
     mgr.release('/work/b')
+  })
+
+  it('spawnFn receives the mcpPort and mcpToken from the started MCP host', async () => {
+    const { spawnFn, calls } = makeSpawnFn()
+    const { startMcpHostFn, hosts } = makeMcpHostFn()
+    const mgr = makeManager(spawnFn, startMcpHostFn)
+
+    await mgr.acquire('/work/proj')
+
+    expect(calls[0].mcpPort).toBe(hosts[0].port)
+    expect(calls[0].mcpToken).toBe(hosts[0].token)
+
+    mgr.release('/work/proj')
   })
 })

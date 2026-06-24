@@ -2,9 +2,9 @@
  * Unit tests for OpencodeEngineToolMap — kindOf + normalize field-mapping.
  *
  * opencode uses different tool names + input field names than Claude; this map
- * must produce the SAME ToolView the kind bodies consume. The hosted-tools
- * plugin names (render_mermaid / create_mockup / show_mockup) arrive BARE
- * (the 5c normalization hack is retired) and must classify to diagram/mockup.
+ * must produce the SAME ToolView the kind bodies consume. The hosted-tools MCP
+ * names arrive with the `claudeui_` prefix (opencode sanitizes server+tool names)
+ * and must classify to diagram/mockup.
  */
 
 import { describe, it, expect } from 'vitest'
@@ -23,10 +23,10 @@ describe('OpencodeEngineToolMap.kindOf', () => {
     ['list', 'search'],
     ['webfetch', 'web'],
     ['task', 'task'],
-    // Hosted-tools plugin names — BARE (5c normalization retired)
-    ['render_mermaid', 'diagram'],
-    ['create_mockup', 'mockup'],
-    ['show_mockup', 'mockup'],
+    // Hosted-tools MCP names — claudeui_ prefixed (opencode sanitizes server+tool name)
+    ['claudeui_render_mermaid', 'diagram'],
+    ['claudeui_create_mockup', 'mockup'],
+    ['claudeui_show_mockup', 'mockup'],
     // Real MCP tools resolve engine-independently
     ['mcp__some-server__tool', 'mcp'],
     // Unknown

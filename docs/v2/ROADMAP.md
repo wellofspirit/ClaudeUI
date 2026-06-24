@@ -71,7 +71,6 @@ Every item below was re-verified against current code on 2026-06-23. Status lege
 
 | # | Item | Risk | Area | Effort |
 | --- | --- | --- | --- | --- |
-| 4 | opencode hosted-tools plugin installs **globally** | 🟠 | opencode plugin | S–M |
 | 6 | **Vendor editing UI** + ModelRef-derived vendor at spawn | 🟠 | config plane | M |
 | 8 | opencode **voice** input | 🟡 | voice | M |
 | 9 | Fully **engine-neutral lifting** of plan/question/todo/task | 🟡 | tool rendering | M–L |
@@ -83,37 +82,17 @@ Every item below was re-verified against current code on 2026-06-23. Status lege
 | 15 | Consolidate opencode `/event` to **one subscription per server** | ⚪ | opencode transport | S |
 | 16 | Open the **V2 PR stack** (process, not code) | ⚪ | process | — |
 
-> ✅ **#1, #2, #3, #5, #7 shipped 2026-06-23** — subagent questions (#1, `v2-followup-subagent-questions`);
-> the opencode auth-UX cluster (#2 re-login card + #7 native browser OAuth, `v2-followup-opencode-auth-ux`);
-> opencode status-line usage + cost gating (#3, `v2-followup-opencode-statusline`); opencode reasoning
-> (effort-variant) picker (#5, `v2-followup-opencode-reasoning`). See *Verified resolved*. Those IDs are
-> retired (remaining rows are **not** renumbered).
+> ✅ **#1, #2, #3, #5, #7 shipped 2026-06-23; #4 shipped 2026-06-24** — subagent questions (#1,
+> `v2-followup-subagent-questions`); the opencode auth-UX cluster (#2 re-login card + #7 native browser
+> OAuth, `v2-followup-opencode-auth-ux`); opencode status-line usage + cost gating (#3,
+> `v2-followup-opencode-statusline`); opencode reasoning (effort-variant) picker (#5,
+> `v2-followup-opencode-reasoning`); opencode hosted tools via on-the-fly MCP (#4,
+> `v2-followup-opencode-mcp-onthefly`). See *Verified resolved*. Those IDs are retired (remaining rows
+> are **not** renumbered).
 >
 > Background/detached opencode subagents are **not** listed: opencode itself gates them behind
 > `OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS` (`tool/task.ts:98-102`), so it's upstream-experimental,
 > not our deferral. Revisit only if opencode promotes it.
-
----
-
-### 4 — opencode hosted-tools plugin installs globally 🟠
-
-**What.** The ClaudeUI hosted-tools plugin (render_mermaid / create_mockup / show_mockup) installs into
-opencode's **global** auto-load dir, `~/.config/opencode/plugin/` (`ensure-plugin.ts:57-60`,
-`opencodePluginDir()`). It therefore loads for the user's **standalone** opencode too, not just
-ClaudeUI-spawned servers — we pollute a tool the user may run independently.
-
-**Why deferred.** Phase 5c found opencode's `config.plugin` absolute paths don't load — only the
-auto-load dirs do — and the plugin loader rejects any non-function module export. The global auto-load
-dir was the only thing that worked.
-
-**Definition of done.** Scope the plugin to ClaudeUI-spawned servers. Likely path: spawn the server
-with a ClaudeUI-private config dir (an `XDG_CONFIG_HOME`-style override pointing at a ClaudeUI-managed
-plugin dir) so the user's global `~/.config/opencode/plugin/` is untouched. **De-risk first** by
-probing the real 1.17.9 binary: confirm the relocation mechanism actually takes effect (5c found
-absolute `config.plugin` silently ignored). Verify standalone opencode no longer sees the plugin, and
-ClaudeUI sessions still render mermaid/mockup.
-
-**References.** `phase-5c-opencode-auth-mcp.md`, `ensure-plugin.ts`, Phase-5 gotchas.
 
 ---
 
@@ -316,6 +295,19 @@ squash/integration strategy for landing the stack. Not code — a process decisi
 Prior session inventories (pre-Phase-8/9) listed these as deferred; the 2026-06-23 sweep confirms they
 shipped. Recorded here so they're not re-raised:
 
+- **opencode hosted tools via on-the-fly MCP** (was ROADMAP #4 🟠, shipped 2026-06-24,
+  `v2-followup-opencode-mcp-onthefly`) — replaced the GLOBAL plugin install (`~/.config/opencode/plugin/`)
+  with an in-process **per-cwd HTTP MCP server** (session-mode `StreamableHTTPServerTransport`, bearer
+  auth) re-hosting the real `mermaid-tool.ts`/`mockup-tool.ts` impls (no duplication), injected per-spawn
+  via `OPENCODE_CONFIG_CONTENT` (`{mcp:{claudeui:{type:'remote',url,headers}}}`) and lifecycle-paired with
+  the ref-counted `OpencodeServerManager` (started before spawn, closed on last release/exit/dispose).
+  opencode names the tools `claudeui_*`; `OpencodeEngineToolMap` classifies them → diagram/mockup. The
+  global plugin + call site + electron-builder extraResources are deleted — the user's standalone opencode
+  is no longer polluted. **Stateless transport mode was a trap** (review caught it: the
+  `notifications/initialized` follow-up 500s with no session id) → session mode. Verified by a unit
+  round-trip through opencode's exact SDK client (listTools + callTool) AND a gated integration test where
+  **real opencode connects** (`claudeui.status === 'connected'`). Spec:
+  `docs/v2/followup-opencode-mcp-onthefly.md`.
 - **opencode reasoning (effort-variant) picker** (was ROADMAP #5 🟠, shipped 2026-06-23,
   `v2-followup-opencode-reasoning`) — the ROADMAP framed this as a "boolean toggle," but opencode
   reasoning is actually per-model effort **variants** (`model.variants`, exposed via `/config/providers`,
