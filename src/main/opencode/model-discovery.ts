@@ -35,8 +35,13 @@ export async function discoverOpencodeModels(): Promise<EngineModelGroup[]> {
           const caps = m.capabilities
           const vision = !!(caps?.attachment || caps?.input?.image)
           const toolCalling = !!caps?.toolcall
-          // Build a human-friendly description: "providerName · modelId"
-          const description = `${provider.name} · ${m.name || modelId}`
+          // description follows the picker convention "shortName · subLabel":
+          // split[0] renders as the primary label, split[1] as the muted sub-label
+          // (see InputBox shortName derivation + InlinePickers). Model name first,
+          // provider second — matching Claude's "<model> · <hint>" order — so an
+          // OpenCode Zen model reads "MiMo V2.5 Free" (primary) / "OpenCode Zen" (sub),
+          // not the inverted provider-first form.
+          const description = `${m.name || modelId} · ${provider.name}`
           // Cache the context window size for status-line usage (% used).
           if (m.limit?.context) {
             contextWindowCache.set(`${provider.id}/${modelId}`, m.limit.context)

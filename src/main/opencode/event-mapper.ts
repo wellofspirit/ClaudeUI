@@ -1,5 +1,5 @@
 import { v4 as uuid } from 'uuid'
-import type { OpencodeEvent, QuestionInfo } from './protocol/types'
+import type { OpencodeEvent, QuestionInfo, StoredMessage, StoredMessagePart } from './protocol/types'
 import type { ChatMessage, ContentBlock, PendingApproval, SessionResult, AskUserQuestion, TodoItem } from '../../shared/types'
 import { suggestOpencodeAllowRule } from './permission-compiler'
 
@@ -739,4 +739,73 @@ export function extractToolResult(
 // Helper: generate a stable uuid for user messages
 export function makeUserMessageId(): string {
   return uuid()
+}
+
+/**
+ * Convert a single stored opencode message (from GET /session/{id}/message) into
+ * a `ChatMessage` for history replay.
+ *
+ * Mirrors `buildChatMessage`'s part→block mapping for parity with live turns:
+ *   text      → { type:'text', text }
+ *   reasoning → { type:'thinking', text }
+ *   tool      → { type:'tool_use', toolUseId, toolName, toolInput }
+ *              + { type:'tool_result', toolUseId, toolResult, isError } when completed/error
+ *
+ * Step-start, step-finish, file, agent, subtask, compaction, and any unknown
+ * part types are silently skipped (same treatment as buildChatMessage).
+ *
+ * Returns null if the message has no displayable content (so the caller can skip it).
+ *
+ * Spec: docs/v2/followup-opencode-session-persistence.md §3c
+ */
+export function convertStoredMessage(stored: StoredMessage): ChatMessage | null {
+  const { info, parts } = stored
+  if (!info?.id) return null
+
+  const role = info.role ?? 'assistant'
+  // Only user/assistant messages are renderable; skip system messages.
+  if (role !== 'user' && role !== 'assistant') return null
+
+  const content: ContentBlock[] = []
+
+  for (const part of (parts ?? []) as StoredMessagePart[]) {
+    const type = part.type
+
+    if (type === 'text') {
+      const text = part.text ?? ''
+      if (text) content.push({ type: 'text', text })
+    } else if (type === 'reasoning') {
+      const text = part.text ?? ''
+      if (text) content.push({ type: 'thinking', text })
+    } else if (type === 'tool') {
+      const toolUseId = part.callID ?? part.id ?? uuid()
+      const toolName = part.tool ?? 'unknown'
+      const input = (part.state?.input ?? {}) as Record<string, unknown>
+      content.push({ type: 'tool_use', toolUseId, toolName, toolInput: input })
+
+      // Add tool_result if the tool completed or errored.
+      const status = part.state?.status
+      if (status === 'completed' || status === 'error') {
+        const rawOutput = part.state?.output ?? part.state?.error ?? ''
+        content.push({
+          type: 'tool_result',
+          toolUseId,
+          toolResult: rawOutput ?? '',
+          isError: status === 'error'
+        })
+      }
+    }
+    // step-start, step-finish, file, agent, subtask, compaction → skip
+  }
+
+  // If there's no renderable content, skip this message entirely.
+  if (content.length === 0) return null
+
+  const timestamp = (info.time as { created?: number } | undefined)?.created ?? Date.now()
+  return {
+    id: info.id,
+    role: role as 'user' | 'assistant',
+    content,
+    timestamp
+  }
 }

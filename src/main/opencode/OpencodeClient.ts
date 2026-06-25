@@ -4,6 +4,7 @@ import type {
   AuthCredentials,
   AuthOption,
   Session,
+  StoredMessage,
   CreateSessionRequest,
   PromptRequest,
   ForkRequest,
@@ -115,7 +116,15 @@ export class OpencodeClient {
 
   // ── Sessions ──────────────────────────────────────────────────────────────
 
-  /** GET /session */
+  /**
+   * GET /session — list sessions for THIS server's project (git-root) scope.
+   *
+   * NOTE: this is PROJECT-scoped, not global — opencode only returns sessions whose
+   * `directory` is under the project the server was started in. The sidebar's
+   * cross-cwd list therefore does NOT use this (it reads opencode's DB directly via
+   * `readOpencodeSessionRows`); this stays for the usage reconciler, which runs
+   * within a given cwd's project.
+   */
   listSessions(): Promise<Session[]> {
     return this.get('/session')
   }
@@ -132,11 +141,14 @@ export class OpencodeClient {
 
   /**
    * GET /session/{id}/message — list all messages for a session.
-   * Used by the Phase 7 reconciler to import out-of-tool opencode usage.
-   * Shape: Array<{ info: {...}, parts: [...] }>. We type the info loosely since
-   * the reconciler only needs id/role/tokens/cost/providerID/modelID/time.
+   * Returns `Array<StoredMessage>` where each item has:
+   *   `info`  — message metadata (role, id, cost, tokens, providerID, modelID, time, …)
+   *   `parts` — ordered content parts (text, reasoning, tool, step-start, …)
+   *
+   * The usage reconciler (sole prior caller) only reads `info`, so widening the
+   * return type to expose `parts` is backward-compatible.
    */
-  listMessages(sessionId: string): Promise<Array<{ info?: Record<string, unknown> }>> {
+  listMessages(sessionId: string): Promise<StoredMessage[]> {
     return this.get(`/session/${encodeURIComponent(sessionId)}/message`)
   }
 
