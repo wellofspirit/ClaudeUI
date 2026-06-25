@@ -1,13 +1,25 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useSessionStore } from '../../stores/session-store'
 import { SettingsDialogView, type VersionInfo } from './View'
-import { SCOPES, type SettingsScope } from './settings-sections'
+import {
+  SCOPES,
+  scopeCapabilities,
+  isSectionVisible,
+  type SettingsScope
+} from './settings-sections'
 import type { EngineConfig, VendorConfig } from '../../../../shared/types'
 export { SettingsToggle } from './settings-controls'
 
 function firstSectionOfScope(scope: SettingsScope): string {
   const scopeDef = SCOPES.find((s) => s.id === scope)
-  return scopeDef?.subgroups[0]?.sections[0]?.id ?? ''
+  if (!scopeDef) return ''
+  // First capability-visible section (don't default to a gated-out one).
+  const caps = scopeCapabilities(scope)
+  for (const sg of scopeDef.subgroups) {
+    const sec = sg.sections.find((s) => isSectionVisible(s.id, caps))
+    if (sec) return sec.id
+  }
+  return ''
 }
 
 export function SettingsDialog({ onClose }: { onClose: () => void }): React.JSX.Element {

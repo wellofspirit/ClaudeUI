@@ -9,7 +9,19 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import { SECTIONS, SCOPES, SECTION_SCOPE_MAP } from '../settings-sections'
+import {
+  SECTIONS,
+  SCOPES,
+  SECTION_SCOPE_MAP,
+  SECTION_CAPABILITY,
+  scopeCapabilities,
+  isSectionVisible
+} from '../settings-sections'
+import {
+  CLAUDE_ENGINE_CAPABILITIES,
+  OPENCODE_ENGINE_CAPABILITIES,
+  type EngineCapabilities
+} from '../../../../../shared/model-capabilities'
 
 describe('SCOPES structure', () => {
   it('has exactly 3 scopes', () => {
@@ -188,5 +200,54 @@ describe('Anthropic vendor section', () => {
     expect(() =>
       item.render(mockSettings, mockUpdate, mockEngineConfig as never, mockUpdate as never, mockVendorConfig as never, mockUpdateVendor)
     ).not.toThrow()
+  })
+})
+
+describe('Per-section capability gating (#12)', () => {
+  it('scopeCapabilities maps scope → static engine caps (common = null)', () => {
+    expect(scopeCapabilities('claude')).toBe(CLAUDE_ENGINE_CAPABILITIES)
+    expect(scopeCapabilities('opencode')).toBe(OPENCODE_ENGINE_CAPABILITIES)
+    expect(scopeCapabilities('common')).toBeNull()
+  })
+
+  it('Claude declares the sandbox + proxy launch-param capabilities', () => {
+    expect(CLAUDE_ENGINE_CAPABILITIES.sandbox).toBe(true)
+    expect(CLAUDE_ENGINE_CAPABILITIES.proxy).toBe(true)
+  })
+
+  it('opencode declares no sandbox / proxy (it uses its own provider config)', () => {
+    expect(OPENCODE_ENGINE_CAPABILITIES.sandbox).toBe(false)
+    expect(OPENCODE_ENGINE_CAPABILITIES.proxy).toBe(false)
+  })
+
+  it('SECTION_CAPABILITY gates the sandbox + proxy sections', () => {
+    expect(SECTION_CAPABILITY.sandbox).toBe('sandbox')
+    expect(SECTION_CAPABILITY.proxy).toBe('proxy')
+  })
+
+  it('ungated sections + the common scope (caps=null) are always visible', () => {
+    expect(isSectionVisible('appearance', null)).toBe(true)
+    expect(isSectionVisible('appearance', CLAUDE_ENGINE_CAPABILITIES)).toBe(true)
+    expect(isSectionVisible('permissions', CLAUDE_ENGINE_CAPABILITIES)).toBe(true)
+    // Even a gated section id is visible under the engine-agnostic 'common' scope.
+    expect(isSectionVisible('sandbox', null)).toBe(true)
+  })
+
+  it('Claude shows sandbox + proxy (both caps true) — no user-visible change today', () => {
+    expect(isSectionVisible('sandbox', CLAUDE_ENGINE_CAPABILITIES)).toBe(true)
+    expect(isSectionVisible('proxy', CLAUDE_ENGINE_CAPABILITIES)).toBe(true)
+  })
+
+  it('GATING PROOF: a gated section hides when the engine lacks the capability', () => {
+    // Structure-ready: a hypothetical no-sandbox/no-proxy engine hides those sections.
+    const noLaunchParams: EngineCapabilities = {
+      ...CLAUDE_ENGINE_CAPABILITIES,
+      sandbox: false,
+      proxy: false
+    }
+    expect(isSectionVisible('sandbox', noLaunchParams)).toBe(false)
+    expect(isSectionVisible('proxy', noLaunchParams)).toBe(false)
+    // Ungated sections still show on that engine.
+    expect(isSectionVisible('permissions', noLaunchParams)).toBe(true)
   })
 })

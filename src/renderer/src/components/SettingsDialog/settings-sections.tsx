@@ -27,7 +27,9 @@ import {
   defaultEffort,
   type EffortLevel,
   type AutonomyMode,
-  CLAUDE_ENGINE_CAPABILITIES
+  type EngineCapabilities,
+  CLAUDE_ENGINE_CAPABILITIES,
+  OPENCODE_ENGINE_CAPABILITIES
 } from '../../../../shared/model-capabilities'
 import {
   SettingsToggle,
@@ -3159,3 +3161,38 @@ export const SECTION_SCOPE_MAP: ReadonlyMap<string, SettingsScope> = new Map(
     )
   )
 )
+
+// ── Per-section capability gating (ROADMAP #12) ──────────────────────
+//
+// A section listed here renders only when the scope's engine has the named
+// EngineCapabilities flag. Sections NOT listed are always visible. Today only
+// the Claude launch-param sections are gated; Claude has both flags true, so
+// there is no user-visible change — the gating is structure-ready for an engine
+// that lacks sandbox/proxy (or for surfacing one of these under opencode later).
+
+/** Boolean EngineCapabilities keys that can gate a section. */
+type GatingCapability = 'sandbox' | 'proxy'
+
+/** sectionId → the EngineCapabilities flag it requires (absent = always shown). */
+export const SECTION_CAPABILITY: Readonly<Record<string, GatingCapability>> = {
+  sandbox: 'sandbox',
+  proxy: 'proxy'
+}
+
+/** Static per-engine capabilities for a settings scope ('common' = engine-agnostic → null). */
+export function scopeCapabilities(scope: SettingsScope): EngineCapabilities | null {
+  if (scope === 'claude') return CLAUDE_ENGINE_CAPABILITIES
+  if (scope === 'opencode') return OPENCODE_ENGINE_CAPABILITIES
+  return null
+}
+
+/**
+ * Whether a section should render, given the scope's engine capabilities.
+ * Gated sections hide when the engine lacks the capability; ungated sections
+ * (and the engine-agnostic 'common' scope, caps=null) always show.
+ */
+export function isSectionVisible(sectionId: string, caps: EngineCapabilities | null): boolean {
+  const flag = SECTION_CAPABILITY[sectionId]
+  if (!flag || !caps) return true
+  return caps[flag] === true
+}

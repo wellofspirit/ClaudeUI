@@ -1,7 +1,13 @@
 import { useRef, useCallback } from 'react'
 import type { AppSettings } from '../../stores/session-store'
 import type { EngineConfig, VendorConfig } from '../../../../shared/types'
-import { SCOPES, type ScopeDef, type SettingsScope } from './settings-sections'
+import {
+  SCOPES,
+  scopeCapabilities,
+  isSectionVisible,
+  type ScopeDef,
+  type SettingsScope
+} from './settings-sections'
 
 export interface VersionInfo {
   appVersion: string
@@ -54,8 +60,14 @@ export function SettingsDialogView({
   // Resolve the active scope definition
   const scopeDef: ScopeDef = SCOPES.find((s) => s.id === activeScope) ?? SCOPES[0]
 
-  // All sections for the active scope, flattened
-  const allScopeSections = scopeDef.subgroups.flatMap((sg) => sg.sections)
+  // Capability gating (ROADMAP #12): hide sections the scope's engine doesn't
+  // support (e.g. sandbox/proxy on a no-sandbox engine). caps=null for 'common'.
+  const caps = scopeCapabilities(scopeDef.id)
+
+  // All sections for the active scope, flattened (capability-gated)
+  const allScopeSections = scopeDef.subgroups
+    .flatMap((sg) => sg.sections)
+    .filter((sec) => isSectionVisible(sec.id, caps))
 
   // Apply search filter within scope
   const q = search.trim().toLowerCase()
@@ -87,11 +99,13 @@ export function SettingsDialogView({
   // The section to render in the right pane
   const activeSection = allScopeSections.find((s) => s.id === visibleSectionId)
 
-  // Subgroups with filtered sections (for left nav)
+  // Subgroups with filtered sections (for left nav) — capability-gated + search
   const visibleSubgroups = scopeDef.subgroups
     .map((sg) => ({
       ...sg,
-      sections: sg.sections.filter((s) => !filteredIds || filteredIds.has(s.id))
+      sections: sg.sections.filter(
+        (s) => isSectionVisible(s.id, caps) && (!filteredIds || filteredIds.has(s.id))
+      )
     }))
     .filter((sg) => sg.sections.length > 0)
 

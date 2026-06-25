@@ -74,7 +74,6 @@ Every item below was re-verified against current code on 2026-06-23. Status lege
 | 8 | opencode **voice** input | 🟡 | voice | M |
 | 10 | Fold **FloatingApproval** into shared `<ApprovalButtons>` | ⚪ | tool rendering | S |
 | 11 | Tool-rendering **coverage polish** — structured **search/web** only (a/b); c/d/e shipped | ⚪ | tool rendering | S |
-| 12 | **Per-section capability gating** in Settings (blocked on caps model) | ⚪ | config plane | M |
 | 13 | opencode **end-to-end render** verification (test gap) | ⚪ | testing | M |
 | 14 | Retire legacy **JSONL usage** parse path | ⚪ | metering | M |
 | 15 | Consolidate opencode `/event` to **one subscription per server** | ⚪ | opencode transport | S |
@@ -168,23 +167,12 @@ carry parsed matches/results (today they carry only the input `query`/`target`).
 
 ---
 
-### 12 — Per-section capability gating in Settings ⚪ (blocked)
+### 12 — ✅ DONE — Per-section capability gating in Settings
 
-**What.** Settings sections (e.g. sandbox/proxy under Engines › Claude) are listed in static sets
-(`settings-sections.tsx` `ENGINE_CLAUDE_SECTION_IDS` etc.) with no capability-based hiding. The intent
-(03 / ADR-018) is to hide e.g. sandbox on a no-sandbox engine. **Blocked:** `EngineCapabilities`
-(`model-capabilities.ts`) has no `sandbox`/`proxy` flags yet, so there's nothing to gate on. Today only
-*installed-engine* gating exists (opencode vendor section appears only when opencode is present).
-
-**Why deferred.** Phase 3b deferred per-section gating to Phase 5 ("zero-benefit until the caps model
-grows"); the caps model never grew those flags.
-
-**Definition of done.** Add `sandbox`/`proxy` (and any other launch-param) flags to `EngineCapabilities`,
-then gate section visibility on them. Zero user-visible change for Claude (all-true); real benefit only
-when a no-sandbox/no-proxy engine lands. Low priority until then.
-
-**References.** `03-settings-config.md`, `model-capabilities.ts` (`EngineCapabilities`),
-`settings-sections.tsx`.
+Shipped 2026-06-25 (`v2-followup-settings-12-caps`). `EngineCapabilities` grew `sandbox`/`proxy` flags
+(Claude both true, opencode both false), and the settings shell gates each scope's section visibility on
+the scope-engine's caps via `SECTION_CAPABILITY` + `isSectionVisible`. Zero user-visible change today
+(Claude all-true; opencode has no sandbox/proxy sections) — structure-ready. See *Verified resolved*.
 
 ---
 
@@ -260,6 +248,16 @@ squash/integration strategy for landing the stack. Not code — a process decisi
 Prior session inventories (pre-Phase-8/9) listed these as deferred; the 2026-06-23 sweep confirms they
 shipped. Recorded here so they're not re-raised:
 
+- **Per-section capability gating in Settings** (ROADMAP #12, shipped 2026-06-25,
+  `v2-followup-settings-12-caps`) — `EngineCapabilities` grew `sandbox` + `proxy` boolean flags (Claude
+  both true, opencode both false — it has its own provider config), threaded through
+  `resolveCapabilities`. The settings shell now gates each scope's section visibility on the scope-engine's
+  static caps: `SECTION_CAPABILITY` (sectionId → required flag) + `scopeCapabilities(scope)` +
+  `isSectionVisible(id, caps)`, applied in `View.tsx` (left list + active-section resolution) and
+  `firstSectionOfScope`. **Zero user-visible change today** (Claude is all-true so sandbox/proxy still
+  show; opencode's scope has no sandbox/proxy sections) — it's structure-ready for an engine that lacks a
+  launch-param surface. Guarded by a non-vacuous unit test (a hypothetical no-sandbox engine hides those
+  sections while ungated sections stay). Closes the settings-refactor chapter. Spec: ROADMAP §12.
 - **opencode settings in the UI (no-JSON) + ModelRef vendor-at-spawn** (settings refactor phase 2 +
   ROADMAP #6 completion, shipped 2026-06-25, `v2-followup-opencode-settings`) — the opencode tab now
   carries native opencode config so users stop hand-editing JSON: **Models** (default + small model),
