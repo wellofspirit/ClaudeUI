@@ -22,7 +22,7 @@ import { opencodeModel } from '../../shared/types'
 import { getOpencodeModelContextWindow } from './model-discovery'
 import { equivalentCostUsd } from '../../shared/pricing'
 import { logger } from '../services/logger'
-import { mapEvent, extractToolResult } from './event-mapper'
+import { mapEvent, extractToolResult, convertStoredMessage } from './event-mapper'
 import type { MapperOutput, MessageAccumulator } from './event-mapper'
 import { opencodeAuthProvider } from '../auth/OpencodeAuthProvider'
 import { recordUsageEvent } from '../services/usage-recorder'
@@ -183,12 +183,17 @@ export class OpencodeSession extends BaseSession {
   // acquire resolves does NOT trigger a second acquire (ref-count stays 1).
   private connectingPromise: Promise<void> | null = null
 
+  // The opencode session id to resume (passed from sidebar when clicking a
+  // persisted opencode session). When set, we skip createSession and replay
+  // the stored message history before accepting new prompts.
+  private resumeSessionId: string | undefined
+
   constructor(
     routingId: string,
     win: BrowserWindow,
     cwd: string,
     _effort?: string,
-    _resumeSessionId?: string,
+    resumeSessionId?: string,
     permissionMode?: string,
     model?: string,
     _sandboxConfig?: unknown,
@@ -199,6 +204,7 @@ export class OpencodeSession extends BaseSession {
     super(routingId, win, cwd)
     this._model = model ?? DEFAULT_MODEL
     this.permissionMode = permissionMode ?? 'default'
+    this.resumeSessionId = resumeSessionId || undefined
     this._capabilities = resolveOpencodeCapabilities()
     this.sendStatus()
     this.sendStatusLine()
@@ -302,12 +308,35 @@ export class OpencodeSession extends BaseSession {
         return
       }
 
-      // 2. Create opencode session if needed
+      // 2. Create or resume opencode session
       if (!this.openSessionId) {
-        const s = await this.client.createSession({ title: '' })
-        this.openSessionId = s.id
-        // Emit status with new sessionId so renderer can rekey
+        if (this.resumeSessionId) {
+          // Resume: reuse the prior session id (skip createSession).
+          // Verify the session exists first — if not, fall back to creating fresh.
+          try {
+            await this.client.getSession(this.resumeSessionId)
+            this.openSessionId = this.resumeSessionId
+            logger.info('OpencodeSession', `Resuming opencode session ${this.openSessionId}`)
+          } catch {
+            logger.warn(
+              'OpencodeSession',
+              `Resume session ${this.resumeSessionId} not found — creating fresh session`
+            )
+            this.resumeSessionId = undefined
+          }
+        }
+        if (!this.openSessionId) {
+          const s = await this.client.createSession({ title: '' })
+          this.openSessionId = s.id
+        }
+        // Emit status with the session id so the renderer can rekey
         this.sendStatus()
+
+        // 2a. On resume: replay stored history BEFORE accepting new prompts.
+        // This paints the prior transcript in the chat view so the user sees context.
+        if (this.resumeSessionId && this.openSessionId === this.resumeSessionId) {
+          await this.replayStoredHistory(this.openSessionId)
+        }
       }
 
       // 3. Start SSE consumer BEFORE sending prompt (so no events are missed)
@@ -341,6 +370,58 @@ export class OpencodeSession extends BaseSession {
   }
 
   /**
+   * Load stored messages for a resumed session and replay them to the renderer
+   * as `session:message` (and `session:tool-result`) events, in order, BEFORE the
+   * first new prompt.  This populates the chat view with the prior transcript.
+   *
+   * Uses `convertStoredMessage` from the event-mapper for part→block mapping
+   * (parity with live turns — no divergent renderer path).
+   *
+   * Best-effort: any failure is swallowed and logged; it NEVER blocks the new prompt.
+   *
+   * Spec: docs/v2/followup-opencode-session-persistence.md §3c
+   */
+  private async replayStoredHistory(sessionId: string): Promise<void> {
+    if (!this.client) return
+    try {
+      const storedMessages = await this.client.listMessages(sessionId)
+      logger.info('OpencodeSession', `Replaying ${storedMessages.length} stored messages for ${sessionId}`)
+      for (const stored of storedMessages) {
+        const msg = convertStoredMessage(stored)
+        if (!msg) continue
+
+        // Add to local history (for getMessages() and future turns)
+        const idx = this.messageHistory.findIndex((m) => m.id === msg.id)
+        if (idx >= 0) {
+          this.messageHistory[idx] = msg
+        } else {
+          this.messageHistory.push(msg)
+        }
+
+        // Emit to renderer
+        this.send('session:message', msg)
+
+        // Emit tool_result events for completed tool parts so the renderer
+        // can display tool output blocks. Mirrors dispatchMapperOutput 'message' case.
+        for (const block of msg.content) {
+          if (block.type === 'tool_result') {
+            this.send('session:tool-result', {
+              toolUseId: block.toolUseId,
+              result: block.toolResult,
+              isError: block.isError ?? false
+            })
+          }
+        }
+      }
+    } catch (err) {
+      logger.warn(
+        'OpencodeSession',
+        `replayStoredHistory failed for ${sessionId}: ${err instanceof Error ? err.message : String(err)}`
+      )
+    }
+  }
+
+  /**
    * Acquire the opencode server connection + build the client, exactly once.
    * Memoized via `connectingPromise`: concurrent callers (run(null)'s eagerConnect
    * and a racing run(prompt)) await the SAME acquire, so the ref count is always 1.
@@ -369,6 +450,9 @@ export class OpencodeSession extends BaseSession {
    * Eager connect: acquire the server (memoized) + discover commands/skills +
    * emit events. Called from run(null); fires and is caught internally (never
    * throws to caller). Degrades silently — opencode is optional.
+   *
+   * On resume (resumeSessionId set): also replays stored history so the chat
+   * view is populated before the user sends a new prompt.
    */
   private async eagerConnect(): Promise<void> {
     try {
@@ -404,6 +488,26 @@ export class OpencodeSession extends BaseSession {
       // IPC to get full details; this just tells it skills are available).
       const skillNames = skills.map((s) => s.name)
       this.send('session:skills', skillNames)
+
+      // Resume path: verify + replay stored history so the chat view is populated
+      // before the user sends a new prompt. This mirrors Claude's historical
+      // session load (which reads JSONL from disk at sidebar click time).
+      if (this.resumeSessionId && !this.openSessionId) {
+        try {
+          await this.client.getSession(this.resumeSessionId)
+          this.openSessionId = this.resumeSessionId
+          this.sendStatus()
+          await this.replayStoredHistory(this.openSessionId)
+        } catch {
+          // Session not found on server — clear the resumeSessionId so run(prompt)
+          // will create a fresh session instead of attempting to resume.
+          logger.warn(
+            'OpencodeSession',
+            `eagerConnect: resume session ${this.resumeSessionId} not found — will create fresh`
+          )
+          this.resumeSessionId = undefined
+        }
+      }
     } catch (err) {
       // Any failure degrades silently — opencode is optional
       logger.warn(

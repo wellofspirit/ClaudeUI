@@ -2260,7 +2260,10 @@ export const useSessionStore = create<SessionState>((set) => ({
     //     last ref the process is killed, so the recreate spawns a fresh server
     //     that re-reads auth.json. Plain sendPrompt would re-hit the stale,
     //     still-401ing backend.
-    const resumeId = session.messages.length > 0 ? routingId : undefined
+    // opencode sessions always pass routingId as resumeSessionId (the server resumes
+    // the prior opencode session regardless of whether messages are preloaded locally).
+    const isOpencode = session.selectedEngineId === 'opencode'
+    const resumeId = (session.messages.length > 0 || isOpencode) ? routingId : undefined
     await window.api.createSession(
       routingId,
       session.cwd || '',

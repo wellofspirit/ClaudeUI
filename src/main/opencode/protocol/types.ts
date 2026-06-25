@@ -74,6 +74,61 @@ export interface Session {
   parentID?: string
   title?: string
   summary?: { additions: number; deletions: number; files: number }
+  time?: {
+    created: number
+    updated: number
+    compacting?: number
+    archived?: number
+  }
+}
+
+/**
+ * A stored message returned by GET /session/{id}/message.
+ * `info` carries the message metadata (role, cost, tokens, etc.).
+ * `parts` carries the ordered content parts (text, reasoning, tool, step-start, etc.).
+ */
+export interface StoredMessagePart {
+  /** 'text' | 'reasoning' | 'tool' | 'step-start' | 'step-finish' | 'file' | 'agent' | 'subtask' | ... */
+  type: string
+  /** Present for text and reasoning parts */
+  text?: string
+  /** Present for tool parts: the tool name */
+  tool?: string
+  /** Present for tool parts: the call/invocation id */
+  callID?: string
+  /** Present for tool parts: state carrying input, output, status */
+  state?: {
+    status?: string
+    input?: Record<string, unknown>
+    output?: string
+    error?: string
+    title?: string
+    metadata?: Record<string, unknown>
+  }
+  /** Part ids and message linkage */
+  id?: string
+  messageID?: string
+  sessionID?: string
+}
+
+export interface StoredMessage {
+  info: {
+    id: string
+    role: 'user' | 'assistant' | 'system'
+    sessionID?: string
+    time?: { created?: number; updated?: number }
+    cost?: number
+    tokens?: {
+      input?: number
+      output?: number
+      reasoning?: number
+      cache?: { read?: number; write?: number }
+    }
+    providerID?: string
+    modelID?: string
+    [key: string]: unknown
+  }
+  parts: StoredMessagePart[]
 }
 
 export interface CreateSessionRequest {

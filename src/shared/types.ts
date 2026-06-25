@@ -535,6 +535,11 @@ interface SessionAPI {
   maximizeWindow(): Promise<void>
   closeWindow(): Promise<void>
   listDirectories(): Promise<DirectoryGroup[]>
+  /** Fetch the global opencode session list (all cwds). Best-effort: returns [] on error. */
+  listOpencodeSessionsGlobal(): Promise<SessionInfo[]>
+  /** Load a persisted opencode session's transcript as ChatMessage[] (read-only,
+   *  for painting history on sidebar click). Best-effort: returns [] on error. */
+  loadOpencodeHistory(sessionId: string): Promise<ChatMessage[]>
   loadSessionHistory(
     sessionId: string,
     projectKey: string

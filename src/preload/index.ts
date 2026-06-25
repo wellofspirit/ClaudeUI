@@ -90,6 +90,9 @@ const api: ClaudeAPI = {
   maximizeWindow: () => ipcRenderer.invoke('window:maximize'),
   closeWindow: () => ipcRenderer.invoke('window:close'),
   listDirectories: () => ipcRenderer.invoke('session:list-directories'),
+  listOpencodeSessionsGlobal: () => ipcRenderer.invoke('session:list-opencode'),
+  loadOpencodeHistory: (sessionId: string) =>
+    ipcRenderer.invoke('session:load-opencode-history', sessionId),
   loadSessionHistory: (sessionId: string, projectKey: string) =>
     ipcRenderer.invoke('session:load-history', sessionId, projectKey),
   loadSubagentHistory: (sessionId: string, projectKey: string, agentId: string) =>

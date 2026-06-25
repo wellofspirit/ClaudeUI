@@ -142,6 +142,12 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
 
     listDirectories: () =>
       connection.invoke('session:list-directories') as ReturnType<ClaudeAPI['listDirectories']>,
+    listOpencodeSessionsGlobal: () =>
+      connection.invoke('session:list-opencode') as ReturnType<ClaudeAPI['listOpencodeSessionsGlobal']>,
+    loadOpencodeHistory: (sessionId: string) =>
+      connection.invoke('session:load-opencode-history', sessionId) as ReturnType<
+        ClaudeAPI['loadOpencodeHistory']
+      >,
 
     loadSessionHistory: (sessionId, projectKey) =>
       connection.invoke('session:load-history', sessionId, projectKey) as ReturnType<

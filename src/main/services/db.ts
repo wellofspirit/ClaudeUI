@@ -286,6 +286,58 @@ export function closeDb(): void {
 }
 
 // ---------------------------------------------------------------------------
+// Foreign read: opencode's own session DB
+// ---------------------------------------------------------------------------
+//
+// opencode persists every session (across all cwds) in a single global SQLite DB
+// (~/.local/share/opencode/opencode.db). Its HTTP `GET /session` is PROJECT-scoped
+// (only the serve-cwd's git-root), so to enumerate ALL opencode sessions for the
+// sidebar we read that DB directly — one cheap query, every cwd. opencode runs it
+// in WAL mode, so a read-only connection never blocks opencode's writes and sees a
+// consistent snapshot. We open read-only, never write. This lives in db.ts to keep
+// better-sqlite3 to a single importer (ADR-020 / the native-ABI invariant).
+
+/** A top-level opencode session row (the subset the sidebar needs). */
+export interface OpencodeSessionRow {
+  id: string
+  directory: string
+  title: string
+  timeCreated: number | null
+  timeUpdated: number | null
+}
+
+/**
+ * Read top-level, non-archived opencode sessions from opencode's own DB.
+ * Best-effort + read-only: returns [] if the file is absent or any error occurs
+ * (e.g. opencode not installed, schema drift on an opencode upgrade) — never throws.
+ */
+export function readOpencodeSessionRows(opencodeDbPath: string): OpencodeSessionRow[] {
+  let foreign: Db | null = null
+  try {
+    foreign = new BetterSqlite3(opencodeDbPath, { readonly: true, fileMustExist: true })
+    foreign.pragma('busy_timeout = 3000')
+    const rows = foreign
+      .prepare(
+        `SELECT id, directory, title, time_created AS timeCreated, time_updated AS timeUpdated
+         FROM session
+         WHERE parent_id IS NULL AND time_archived IS NULL
+         ORDER BY time_updated DESC`
+      )
+      .all() as OpencodeSessionRow[]
+    return rows
+  } catch {
+    // Absent file / locked / schema drift → degrade to empty (sidebar shows none).
+    return []
+  } finally {
+    try {
+      foreign?.close()
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Row ↔ SessionMeta mapping
 // ---------------------------------------------------------------------------
 

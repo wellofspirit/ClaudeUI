@@ -82,6 +82,10 @@ import { refreshPrices } from '../services/opencode-pricing'
 import { OpencodeSession } from '../opencode/OpencodeSession'
 import { logger } from '../services/logger'
 import { deleteSessionFiles, deleteProjectFiles } from '../services/delete-session-files'
+import {
+  listOpencodeSessionsGlobal,
+  loadOpencodeSessionHistory
+} from '../services/opencode-session-list'
 import { startSocksBridge, stopSocksBridge } from '../services/socks-bridge'
 import { setProxyEnv, setProxyAllSubprocesses } from '../sdk/proxy'
 import { setEndpointEnv } from '../sdk/endpoint-env'
@@ -301,6 +305,8 @@ const SESSION_IPC_CHANNELS = [
   'session:delete-session',
   'session:delete-project',
   'session:list-directories',
+  'session:list-opencode',
+  'session:load-opencode-history',
   'session:load-history',
   'session:load-subagent-history',
   'session:build-subagent-file-map',
@@ -1051,6 +1057,14 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
 
   ipcMain.handle('session:list-directories', async () => {
     return await listDirectories()
+  })
+
+  ipcMain.handle('session:list-opencode', async () => {
+    return await listOpencodeSessionsGlobal()
+  })
+
+  ipcMain.handle('session:load-opencode-history', async (_e, sessionId: string) => {
+    return await loadOpencodeSessionHistory(sessionId)
   })
 
   ipcMain.handle('file:list-dir', async (_e, dirPath: string) => {

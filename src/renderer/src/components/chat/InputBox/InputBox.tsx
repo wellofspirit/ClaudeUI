@@ -280,7 +280,13 @@ export function InputBox(): React.JSX.Element {
           )
         } else {
           const isHistorical = session && session.messages.length > 0
-          const resumeId = isHistorical ? activeSessionId : undefined
+          // For opencode sessions, always pass the routingId as resumeSessionId so
+          // OpencodeSession can resume a prior session even when messages are empty
+          // (history is replayed from the server, not preloaded into the store).
+          // OpencodeSession.run() verifies the id via getSession and falls back to
+          // createSession if it doesn't exist (e.g. first-ever prompt on that slot).
+          const isOpencode = session?.selectedEngineId === 'opencode'
+          const resumeId = (isHistorical || isOpencode) ? activeSessionId : undefined
           await window.api.createSession(
             activeSessionId,
             session?.cwd || '',

@@ -11,6 +11,71 @@ import { useAutomationStore } from '../../stores/automation-store'
 import { useIsMobile } from '../../hooks/useIsMobile'
 import { SidebarView, type DeleteTarget } from './View'
 
+/**
+ * Merge opencode SessionInfo[] into an existing DirectoryGroup[] (Claude sessions).
+ * opencode sessions are grouped by cwd: if a group for that cwd already exists
+ * (from Claude), the opencode sessions are appended (avoiding duplicates by sessionId).
+ * If no group exists for that cwd, a new group is created.
+ *
+ * Called on each poll; produces a new array without mutating the input.
+ */
+function mergeOpencodeIntoDirectories(
+  current: DirectoryGroup[],
+  opencodeInfos: SessionInfo[]
+): DirectoryGroup[] {
+  // Build a mutable copy indexed by cwd (forward-slash normalized for comparison).
+  const byProjectKey = new Map<string, DirectoryGroup>()
+  const order: string[] = []
+  for (const g of current) {
+    byProjectKey.set(g.projectKey, { ...g, sessions: [...g.sessions] })
+    order.push(g.projectKey)
+  }
+
+  // Remove all existing opencode sessions first (so we replace on every poll
+  // rather than accumulating stale entries). They're identified by engineId.
+  for (const [key, group] of byProjectKey) {
+    const filtered = group.sessions.filter((s) => s.engineId !== 'opencode')
+    byProjectKey.set(key, { ...group, sessions: filtered })
+  }
+
+  // Insert opencode sessions grouped by cwd
+  for (const info of opencodeInfos) {
+    const projectKey = info.projectKey
+    let group = byProjectKey.get(projectKey)
+    if (!group) {
+      const folderName = info.cwd.split(/[\\/]/).pop() || info.cwd
+      group = { cwd: info.cwd, projectKey, folderName, sessions: [] }
+      byProjectKey.set(projectKey, group)
+      order.push(projectKey)
+    }
+    group.sessions.push(info)
+  }
+
+  // Re-sort each group's sessions newest-first
+  for (const group of byProjectKey.values()) {
+    group.sessions.sort((a, b) => b.lastActivityAt - a.lastActivityAt)
+  }
+
+  // Re-assemble in original order, skip groups that ended up empty
+  const result: DirectoryGroup[] = []
+  const seen = new Set<string>()
+  for (const key of order) {
+    if (seen.has(key)) continue
+    seen.add(key)
+    const group = byProjectKey.get(key)
+    if (group && group.sessions.length > 0) result.push(group)
+  }
+
+  // Sort groups by most recent activity (mirror listDirectories sort)
+  result.sort((a, b) => {
+    const aMax = a.sessions[0]?.lastActivityAt ?? 0
+    const bMax = b.sessions[0]?.lastActivityAt ?? 0
+    return bMax - aMax
+  })
+
+  return result
+}
+
 /** Lightweight projection of session data needed by the sidebar for structural/display decisions */
 type SidebarSessionData = {
   cwd: string
@@ -237,14 +302,37 @@ export function Sidebar({
     [handleRename]
   )
 
-  // Load directories on mount and auto-refresh when JSONL files change on disk
+  // Build the session list from BOTH engines in one shot so they never clobber
+  // each other: fetch Claude directories (JSONL) + the global opencode session
+  // list, merge, and set once. Runs on mount, whenever Claude JSONL files change,
+  // and on a 30s poll (so new opencode sessions made elsewhere show up). The
+  // opencode side is best-effort — any error (not installed / server down) just
+  // yields the Claude-only list. Doing this as ONE effect avoids the race where a
+  // Claude refresh would wipe the merged opencode sessions until the next poll.
   useEffect(() => {
-    const refresh = (): void => {
-      window.api.listDirectories().then(setDirectories)
+    let cancelled = false
+    const refresh = async (): Promise<void> => {
+      const claude = await window.api.listDirectories()
+      if (cancelled) return
+      let merged = claude
+      try {
+        const opencodeInfos = await window.api.listOpencodeSessionsGlobal()
+        if (!cancelled && opencodeInfos.length > 0) {
+          merged = mergeOpencodeIntoDirectories(claude, opencodeInfos)
+        }
+      } catch {
+        // Best-effort — opencode not installed or server down → Claude-only list.
+      }
+      if (!cancelled) setDirectories(merged)
     }
-    refresh()
-    const cleanup = window.api.onDirectoriesChanged(refresh)
-    return cleanup
+    void refresh()
+    const cleanup = window.api.onDirectoriesChanged(() => void refresh())
+    const interval = setInterval(() => void refresh(), 30_000)
+    return () => {
+      cancelled = true
+      cleanup?.()
+      clearInterval(interval)
+    }
   }, [setDirectories])
 
   const handleNewSession = (): void => {
@@ -265,10 +353,38 @@ export function Sidebar({
     // Already loaded?
     if (useSessionStore.getState().sessions[routingId]) {
       switchSession(routingId)
+      if (isMobile && onToggleCollapse) onToggleCollapse()
       return
     }
 
-    // Load from JSONL
+    // opencode sessions: load the prior transcript from opencode's own store
+    // (read-only, via the global session id) so the chat view paints immediately
+    // on click — parity with Claude's JSONL load. The OpencodeSession is created
+    // only when the user sends a prompt; it then resumes the same session id (and
+    // re-replays the same messages, idempotent by id). We seed sessionEngines with
+    // engineId:'opencode' so loadHistoricalSession sets selectedEngineId, which
+    // InputBox uses to pass routingId as resumeSessionId on the first createSession.
+    if (info.engineId === 'opencode') {
+      // Seed sessionEngines BEFORE loadHistoricalSession so it reads the right engine.
+      const storeState = useSessionStore.getState()
+      const sessionEngines = {
+        ...storeState.sessionEngines,
+        [routingId]: { engineId: 'opencode' as const }
+      }
+      useSessionStore.setState({ sessionEngines })
+      window.api.saveSessionConfig({ sessionEngines })
+      // Best-effort history load (returns [] if opencode is down) — paints the
+      // transcript immediately rather than waiting for the first new prompt.
+      const messages = await window.api.loadOpencodeHistory(info.sessionId).catch(() => [])
+      loadHistoricalSession(routingId, messages, info.cwd)
+      if (info.title && info.title !== 'Untitled') setCustomTitle(routingId, info.title)
+      addRecentSession(routingId)
+      switchSession(routingId)
+      if (isMobile && onToggleCollapse) onToggleCollapse()
+      return
+    }
+
+    // Claude sessions: load from JSONL transcript
     const { messages, taskNotifications, customTitle, agentIdToToolUseId, statusLine, warnings } =
       await window.api.loadSessionHistory(info.sessionId, info.projectKey)
 
