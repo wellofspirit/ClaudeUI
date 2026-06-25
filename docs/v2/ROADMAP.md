@@ -71,7 +71,6 @@ Every item below was re-verified against current code on 2026-06-23. Status lege
 
 | # | Item | Risk | Area | Effort |
 | --- | --- | --- | --- | --- |
-| 6 | ModelRef-derived **vendor at spawn** (vendor-editing UI shipped) | 🟠 | config plane | S |
 | 8 | opencode **voice** input | 🟡 | voice | M |
 | 10 | Fold **FloatingApproval** into shared `<ApprovalButtons>` | ⚪ | tool rendering | S |
 | 11 | Tool-rendering **coverage polish** — structured **search/web** only (a/b); c/d/e shipped | ⚪ | tool rendering | S |
@@ -98,28 +97,10 @@ Every item below was re-verified against current code on 2026-06-23. Status lege
 
 ---
 
-### 6 — ModelRef-derived vendor at spawn 🟠 (vendor-editing UI shipped)
+### 6 — ✅ DONE — Vendor editing UI + ModelRef-derived vendor at spawn
 
-**What.** ~~Vendor editing is display-only.~~ **SHIPPED 2026-06-25** (`v2-followup-settings-ia`): the
-Vendors › Anthropic section is now an editable form (`VendorAnthropicEditableForm`) wired to the
-`saveVendorConfig` round-trip — endpoint (enable/baseUrl/authToken) + model override (enable + 4 model
-ids). See *Verified resolved*. **Remaining:**
-- **Vendor at spawn is hardcoded.** `session:create` loads `loadVendorConfig('anthropic')` unconditionally
-  (`session.ipc.ts:773`, guarded `if (engineId !== 'opencode')`); the comment flags deriving the vendor
-  from the model's `ModelRef.vendorId` as a Phase-5 TODO. Correct for Claude (engine 1:1 anthropic), but
-  opencode is multi-vendor and gets no per-vendor launch params at spawn.
-
-**Why deferred.** Phase 3b shipped the read/display IA and Claude's 1:1 path; full per-vendor editing +
-ModelRef-driven derivation was scoped to Phase 5 and not picked up. These become real once opencode
-needs per-vendor endpoint/override.
-
-**Definition of done (remaining).** Derive vendor launch params from the active model's
-`ModelRef.vendorId` at spawn for both engines (not the hardcoded `'anthropic'`). Migration/back-compat
-preserved. This is the **Phase-2** follow to the settings IA refactor (alongside #12 + new opencode
-settings).
-
-**References.** `03-settings-config.md §8.5`, `settings-sections.tsx:511-554`, `SettingsDialog.tsx:77-83`,
-`session.ipc.ts:768-777`.
+Both halves shipped: the Anthropic vendor-editing UI (`v2-followup-settings-ia`, 2026-06-25) and the
+ModelRef-derived vendor at spawn (`v2-followup-opencode-settings`, 2026-06-25). See *Verified resolved*.
 
 ---
 
@@ -279,6 +260,24 @@ squash/integration strategy for landing the stack. Not code — a process decisi
 Prior session inventories (pre-Phase-8/9) listed these as deferred; the 2026-06-23 sweep confirms they
 shipped. Recorded here so they're not re-raised:
 
+- **opencode settings in the UI (no-JSON) + ModelRef vendor-at-spawn** (settings refactor phase 2 +
+  ROADMAP #6 completion, shipped 2026-06-25, `v2-followup-opencode-settings`) — the opencode tab now
+  carries native opencode config so users stop hand-editing JSON: **Models** (default + small model),
+  **Providers** (custom OpenAI-compatible providers — id + base URL + model list — plus disabled/
+  enabled-only provider lists), and **Agents** (per-agent model + temperature). Stored in
+  `engines/opencode.json` (`EngineConfig.opencodeConfig`) and merged into opencode at spawn via
+  `OPENCODE_CONFIG_CONTENT` — `buildOpencodeConfigContent` now **spreads in only the fields the user set**
+  (clobber-safe: opencode deep-merges at priority above the user's `opencode.jsonc`, so unset fields are
+  omitted and a set field intentionally overrides; `provider[id].models` mapped array→object-keyed-by-id;
+  credentials never injected — API keys stay in the existing vendor-opencode auth UI / `auth.json`).
+  Threaded through the ref-counted per-cwd `OpencodeServerManager` (captured at spawn). Also finishes
+  **#6**: `session:create` derives the Claude vendor from the active model's `ModelRef` (`claudeModel(...)
+  .vendorId` → `'anthropic'`) instead of the hardcode (no-op for Claude, structure-ready). Review caught a
+  real UI bug — the provider-id input used the editable id as the React `key`, so each keystroke remounted
+  the row and dropped focus (+ a UUID leaked into new rows); fixed by decoupling a stable `_key` from the
+  editable `_id`, guarded by a node-identity focus test. Real-app verified: all three new sections render,
+  typing a multi-char provider id keeps focus, no regression to Auto mode / Vendors. **#12
+  capability-gating** remains the one deferred settings follow. Spec: `docs/v2/followup-opencode-settings.md`.
 - **Settings IA refactor — tabbed scopes + Anthropic vendor editable** (settings refactor phase 1 +
   ROADMAP #6 UI-half, shipped 2026-06-25, `v2-followup-settings-ia`) — the dialog was broken: a single
   unified scroll with a tier-tree nav whose flat `SECTIONS` order had **diverged from the grouping**

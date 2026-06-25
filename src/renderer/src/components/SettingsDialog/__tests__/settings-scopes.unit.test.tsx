@@ -81,18 +81,23 @@ describe('SCOPES structure', () => {
 
     it('exists', () => expect(opencode).toBeDefined())
 
-    it('has 2 subgroups: Engine, Vendor', () => {
-      expect(opencode.subgroups.map((sg) => sg.label)).toEqual(['Engine', 'Vendor'])
+    it('has 3 subgroups: Engine, Vendor, Agents', () => {
+      expect(opencode.subgroups.map((sg) => sg.label)).toEqual(['Engine', 'Vendor', 'Agents'])
     })
 
-    it('Engine subgroup contains opencode-automode', () => {
+    it('Engine subgroup contains opencode-automode, opencode-models in order', () => {
       const engine = opencode.subgroups.find((sg) => sg.label === 'Engine')!
-      expect(engine.sections.map((s) => s.id)).toEqual(['opencode-automode'])
+      expect(engine.sections.map((s) => s.id)).toEqual(['opencode-automode', 'opencode-models'])
     })
 
-    it('Vendor subgroup contains vendor-opencode', () => {
+    it('Vendor subgroup contains vendor-opencode, opencode-providers in order', () => {
       const vendor = opencode.subgroups.find((sg) => sg.label === 'Vendor')!
-      expect(vendor.sections.map((s) => s.id)).toEqual(['vendor-opencode'])
+      expect(vendor.sections.map((s) => s.id)).toEqual(['vendor-opencode', 'opencode-providers'])
+    })
+
+    it('Agents subgroup contains opencode-agents', () => {
+      const agents = opencode.subgroups.find((sg) => sg.label === 'Agents')!
+      expect(agents.sections.map((s) => s.id)).toEqual(['opencode-agents'])
     })
   })
 
@@ -141,6 +146,18 @@ describe('SECTION_SCOPE_MAP', () => {
 
   it('opencode-automode → opencode', () => {
     expect(SECTION_SCOPE_MAP.get('opencode-automode')).toBe('opencode')
+  })
+
+  it('opencode-models → opencode', () => {
+    expect(SECTION_SCOPE_MAP.get('opencode-models')).toBe('opencode')
+  })
+
+  it('opencode-providers → opencode', () => {
+    expect(SECTION_SCOPE_MAP.get('opencode-providers')).toBe('opencode')
+  })
+
+  it('opencode-agents → opencode', () => {
+    expect(SECTION_SCOPE_MAP.get('opencode-agents')).toBe('opencode')
   })
 
   it('vendor-anthropic → claude', () => {
