@@ -176,6 +176,11 @@ export interface AppSettings {
   logFilter: string // per-source overrides: "UsageFetcher:debug,BlockUsage:debug"
   mockupConnectAllowlist: string // newline-separated origin allowlist for mockup iframe `connect-src`
   mockupAllowHttp: boolean // when true, mockup iframes may connect over plaintext http:/ws:
+  /**
+   * Maximum characters shown in a tool output before the "Show more" toggle
+   * appears. 0 = no truncation. Default 5000.
+   */
+  toolOutputMaxChars: number
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -209,7 +214,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   logLevel: 'warn',
   logFilter: '',
   mockupConnectAllowlist: '',
-  mockupAllowHttp: false
+  mockupAllowHttp: false,
+  toolOutputMaxChars: 5000
 }
 
 export function applyTheme(theme: ThemeId): void {

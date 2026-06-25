@@ -42,19 +42,22 @@ function renderToolBlock(
 ): React.JSX.Element {
   const kind = hostedMcpKind(block.toolName) ?? toolMap.kindOf(block.toolName)
 
-  // Lifted interaction components — route to their dedicated cards.
-  // These keep consuming block directly (fully engine-neutral lifting is a fast-follow).
-  if (kind === 'plan') {
-    return <ExitPlanModeCard key={key} block={block} approval={approval} />
+  // Compute the engine-neutral ToolView once and pass it to lifted components.
+  // Passive kinds (command/fileEdit/…) still compute their view inside ToolCallBlock.
+  const view = toolMap.normalize(kind, block.toolInput, result)
+
+  // Lifted interaction components — consume the neutral view, not block.toolInput.
+  if (kind === 'plan' && view.kind === 'plan') {
+    return <ExitPlanModeCard key={key} block={block} view={view} approval={approval} />
   }
-  if (kind === 'question') {
-    return <AskUserQuestionBlock key={key} block={block} result={result} approval={approval} />
+  if (kind === 'question' && view.kind === 'question') {
+    return <AskUserQuestionBlock key={key} block={block} result={result} view={view} approval={approval} />
   }
-  if (kind === 'todo') {
-    return <TodoToolBlock key={key} block={block} result={result} />
+  if (kind === 'todo' && view.kind === 'todo') {
+    return <TodoToolBlock key={key} block={block} result={result} view={view} />
   }
-  if (kind === 'task') {
-    return <TaskCard key={key} block={block} result={result} approval={approval} />
+  if (kind === 'task' && view.kind === 'task') {
+    return <TaskCard key={key} block={block} result={result} view={view} approval={approval} />
   }
 
   // Passive kinds → ToolCallBlock host → ToolCard + kind body
@@ -125,9 +128,10 @@ export const MessageBubble = memo(function MessageBubble({
         toolInput: { plan: message.planContent },
         toolUseId: `plan-${message.id}`
       }
+      const syntheticPlanView = { kind: 'plan' as const, plan: message.planContent }
       return (
         <div className="animate-fade-in">
-          <ExitPlanModeCard block={planBlock} />
+          <ExitPlanModeCard block={planBlock} view={syntheticPlanView} />
         </div>
       )
     }

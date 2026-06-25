@@ -347,6 +347,12 @@ export interface EngineCapabilities {
   skills: boolean
   sideQuestion: boolean
   interactiveApprovals: boolean
+  /** Engine launch-param config surfaces (gate the Settings sections of the same
+   *  name). `sandbox`/`proxy` are Claude cli.js launch params; opencode doesn't
+   *  use them (it has its own provider config), so its flags are false and the
+   *  Settings tab hides those sections. See ROADMAP #12. */
+  sandbox: boolean
+  proxy: boolean
   autonomyModes: AutonomyMode[]
   auth: { canDriveLogin: boolean; multiAccount: boolean }
 }
@@ -402,6 +408,8 @@ export const CLAUDE_ENGINE_CAPABILITIES: EngineCapabilities = {
   skills: true,
   sideQuestion: true,
   interactiveApprovals: true,
+  sandbox: true,
+  proxy: true,
   autonomyModes: ['plan', 'ask', 'autoEdit', 'full'],
   auth: { canDriveLogin: true, multiAccount: true }
 }
@@ -458,6 +466,8 @@ export function resolveCapabilities(
     skills: engine.skills,
     sideQuestion: engine.sideQuestion,
     interactiveApprovals: engine.interactiveApprovals,
+    sandbox: engine.sandbox,
+    proxy: engine.proxy,
     autonomyModes: engine.autonomyModes,
     auth: engine.auth,
     // Model fields
@@ -513,6 +523,8 @@ export const OPENCODE_ENGINE_CAPABILITIES: EngineCapabilities = {
   skills: true,
   sideQuestion: true,
   interactiveApprovals: true,
+  sandbox: false,
+  proxy: false,
   autonomyModes: ['plan', 'ask', 'full'],
   auth: { canDriveLogin: true, multiAccount: false }
 }

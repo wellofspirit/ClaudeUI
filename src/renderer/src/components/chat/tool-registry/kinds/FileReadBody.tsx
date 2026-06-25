@@ -5,23 +5,34 @@
  * (trunc 5000) on success, red-pre on error (trunc 2000).
  */
 
+import { useState } from 'react'
 import { CodeView } from '../../CodeView'
-import { shorten, trunc } from '../../ToolCallBlock/utils'
+import { shorten } from '../../ToolCallBlock/utils'
+import { ExpandableText } from './ExpandableText'
 import type { KindBodyProps } from './types'
+
+const DEFAULT_MAX_CHARS = 5000
 
 export function FileReadBody({
   view,
   block,
   result,
   hideToolInput,
-  isError
+  isError,
+  toolOutputMaxChars = DEFAULT_MAX_CHARS
 }: KindBodyProps): React.JSX.Element | null {
+  // CodeView show-more state must be declared before any early return (Rules of Hooks).
+  const [codeExpanded, setCodeExpanded] = useState(false)
+
   if (view.kind !== 'fileRead') return null
   const path = view.path
   const text = result?.toolResult ?? ''
   const hasResult = !!result
   const showResult = hasResult && !!result?.toolResult
   const resultIsError = !!result?.isError
+
+  const codeIsLong = !resultIsError && text.length > toolOutputMaxChars
+  const codeText = codeIsLong && !codeExpanded ? text.slice(0, toolOutputMaxChars) : text
 
   return (
     <>
@@ -53,10 +64,20 @@ export function FileReadBody({
           )}
           {resultIsError ? (
             <pre className="text-[12px] font-mono whitespace-pre-wrap break-words overflow-y-auto leading-[1.3] bg-bg-primary rounded-md p-2 border border-border text-danger">
-              {trunc(text, 2000)}
+              <ExpandableText text={text} limit={toolOutputMaxChars} />
             </pre>
           ) : (
-            <CodeView code={trunc(text, 5000)} filePath={path || undefined} />
+            <div className="flex flex-col gap-1">
+              <CodeView code={codeText} filePath={path || undefined} />
+              {codeIsLong && (
+                <button
+                  onClick={() => setCodeExpanded(!codeExpanded)}
+                  className="text-[11px] text-accent hover:underline cursor-pointer text-left"
+                >
+                  {codeExpanded ? 'Show less' : 'Show more'}
+                </button>
+              )}
+            </div>
           )}
         </div>
       )}

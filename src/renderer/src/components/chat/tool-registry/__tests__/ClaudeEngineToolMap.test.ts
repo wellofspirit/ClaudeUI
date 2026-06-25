@@ -189,6 +189,42 @@ describe('ClaudeEngineToolMap.normalize', () => {
         prompt: 'Find all usages of X'
       })
     })
+
+    it('maps subagent_type → subagent, model, run_in_background → background', () => {
+      const view = ClaudeEngineToolMap.normalize('task', {
+        description: 'Explore code',
+        prompt: 'Find all...',
+        subagent_type: 'claude',
+        model: 'claude-sonnet-4',
+        run_in_background: true
+      })
+      expect(view).toMatchObject({
+        kind: 'task',
+        subagent: 'claude',
+        model: 'claude-sonnet-4',
+        background: true
+      })
+    })
+
+    it('falls back to subagentType (camelCase) for older transcripts', () => {
+      const view = ClaudeEngineToolMap.normalize('task', {
+        description: 'Explore',
+        prompt: 'Do X',
+        subagentType: 'general-purpose'
+      })
+      if (view.kind === 'task') {
+        expect(view.subagent).toBe('general-purpose')
+      }
+    })
+
+    it('subagent/model/background undefined when not in input', () => {
+      const view = ClaudeEngineToolMap.normalize('task', { description: 'x', prompt: 'y' })
+      if (view.kind === 'task') {
+        expect(view.subagent).toBeUndefined()
+        expect(view.model).toBeUndefined()
+        expect(view.background).toBeUndefined()
+      }
+    })
   })
 
   describe('todo (TodoWrite)', () => {
@@ -206,6 +242,27 @@ describe('ClaudeEngineToolMap.normalize', () => {
           { status: 'completed', text: 'Do B' }
         ]
       })
+    })
+
+    it('includes activeForm from todo item when present', () => {
+      const view = ClaudeEngineToolMap.normalize('todo', {
+        todos: [
+          { content: 'Write tests', status: 'in_progress', activeForm: 'src/foo.test.ts' }
+        ]
+      })
+      expect(view).toMatchObject({
+        kind: 'todo',
+        items: [{ status: 'in_progress', text: 'Write tests', activeForm: 'src/foo.test.ts' }]
+      })
+    })
+
+    it('activeForm undefined when not present (opencode compat)', () => {
+      const view = ClaudeEngineToolMap.normalize('todo', {
+        todos: [{ content: 'Task', status: 'pending' }]
+      })
+      if (view.kind === 'todo') {
+        expect(view.items[0].activeForm).toBeUndefined()
+      }
     })
 
     it('handles missing todos gracefully', () => {

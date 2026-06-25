@@ -2,7 +2,7 @@
  * ToolCard — the shared shell for passive tool cards.
  *
  * Decomposed from ToolCallBlock/View.tsx (behavior-preserving for Claude). Owns:
- *  - the card div + the header (status icon, tool name, getSummary, the
+ *  - the card div + the header (status icon, displayName, summarizeTool, the
  *    background-task controls: Send-to-background / Stop / stopping pills, and
  *    the expand chevron);
  *  - the expand-region wrapper, with the kind body (TOOL_RENDERERS[kind].Body)
@@ -28,7 +28,8 @@ import type {
 } from '../../../../../shared/types'
 import type { ToolKind, ToolView } from '../../../../../shared/tool-kinds'
 import type { ThemeId } from '../../../stores/session-store'
-import { resolveToolVisualState, TOOL_BORDER_CLASSES, getSummary } from '../ToolCallBlock/utils'
+import { resolveToolVisualState, TOOL_BORDER_CLASSES } from '../ToolCallBlock/utils'
+import { summarizeTool } from './summary'
 import { ApprovalButtons } from '../ApprovalButtons'
 import { TOOL_RENDERERS, type PassiveToolKind } from './kinds'
 import { GenericBody } from './kinds/GenericBody'
@@ -61,6 +62,14 @@ export interface ToolCardProps {
   hasActiveSession: boolean
   /** Show the "Send to background" affordance. Gated on capabilities.backgroundTasks. */
   backgroundTasksEnabled: boolean
+  /**
+   * Human-readable display name for the card header. Precomputed by the caller
+   * from `engineToolMap(engineId).displayName(block.toolName)`. Defaults to
+   * `block.toolName` when omitted (safety fallback).
+   */
+  displayName?: string
+  /** Max chars to show in expandable text before truncation. From AppSettings. */
+  toolOutputMaxChars?: number
   onApproval: (
     decision: 'allow' | 'deny',
     selectedSuggestions?: PermissionSuggestion[]
@@ -90,6 +99,8 @@ export function ToolCard({
   isBackgrounding,
   hasActiveSession,
   backgroundTasksEnabled,
+  displayName,
+  toolOutputMaxChars,
   onApproval,
   onBackgroundTask,
   onStopTask,
@@ -113,7 +124,8 @@ export function ToolCard({
     if ((bashOutput || bgOutput) && !expanded) setExpanded(true)
   }, [bashOutput, bgOutput]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  const summary = getSummary(block)
+  const summary = summarizeTool(kind, view)
+  const headerName = displayName ?? block.toolName
   const hasResult = !!result
   const isPendingApproval = !isHistorical && !!approval
 
@@ -218,7 +230,8 @@ export function ToolCard({
     permissionMode,
     onApproval,
     borderColor,
-    statusIcon
+    statusIcon,
+    toolOutputMaxChars
   }
 
   // Custom-layout kinds (diagram/mockup) render their own full card.
@@ -235,7 +248,7 @@ export function ToolCard({
         className="w-full flex items-center gap-2 px-3 h-9 text-[13px] hover:bg-bg-hover transition-colors cursor-pointer"
       >
         {statusIcon}
-        <span className="font-mono font-medium text-accent">{block.toolName}</span>
+        <span className="font-mono font-medium text-accent">{headerName}</span>
         <span className="text-text-secondary truncate flex-1 text-left font-mono text-[12px]">
           {summary}
         </span>

@@ -16,7 +16,7 @@
 
 import type { EngineToolMap, ToolKind, ToolView } from '../../../../../shared/tool-kinds'
 import { hostedMcpKind } from '../../../../../shared/tool-kinds'
-import type { ContentBlock } from '../../../../../shared/types'
+import type { AskUserQuestion, ContentBlock } from '../../../../../shared/types'
 
 type ToolResultBlock = Extract<ContentBlock, { type: 'tool_result' }>
 
@@ -32,7 +32,7 @@ function opencodeKindOf(toolName: string): ToolKind {
     case 'bash':
       return 'command'
     case 'edit':
-    case 'patch':
+    case 'apply_patch':
       return 'fileEdit'
     case 'write':
       return 'fileWrite'
@@ -40,12 +40,18 @@ function opencodeKindOf(toolName: string): ToolKind {
       return 'fileRead'
     case 'glob':
     case 'grep':
-    case 'list':
       return 'search'
     case 'webfetch':
+    case 'websearch':
       return 'web'
     case 'task':
       return 'task'
+    case 'todowrite':
+      return 'todo'
+    case 'question':
+      return 'question'
+    case 'plan_exit':
+      return 'plan'
     // Hosted-tools MCP names (claudeui_ prefixed — see file header). Their args
     // match the diagram/mockup normalizers, rendering the same engine-agnostic cards.
     case 'claudeui_render_mermaid':
@@ -53,6 +59,7 @@ function opencodeKindOf(toolName: string): ToolKind {
     case 'claudeui_create_mockup':
     case 'claudeui_show_mockup':
       return 'mockup'
+    // skill/lsp/invalid → unknown (graceful; dedicated kinds are out of scope)
     default:
       return 'unknown'
   }
@@ -116,7 +123,45 @@ function opencodeNormalize(
       return {
         kind: 'task',
         description: inp.description != null ? String(inp.description) : '',
-        prompt: inp.prompt != null ? String(inp.prompt) : ''
+        prompt: inp.prompt != null ? String(inp.prompt) : '',
+        subagent: inp.subagent_type != null ? String(inp.subagent_type) : undefined,
+        model: inp.model != null ? String(inp.model) : undefined,
+        background: inp.background != null ? Boolean(inp.background) : undefined
+      }
+
+    case 'todo': {
+      const rawTodos = Array.isArray(inp.todos) ? inp.todos : []
+      return {
+        kind: 'todo',
+        items: rawTodos.map((t: Record<string, unknown>) => ({
+          status: String(t.status ?? 'pending'),
+          text: String(t.content ?? '')
+          // opencode todowrite has no activeForm — leave absent
+        }))
+      }
+    }
+
+    case 'question': {
+      const rawQuestions = Array.isArray(inp.questions) ? inp.questions : []
+      const questions: AskUserQuestion[] = rawQuestions.map((q: Record<string, unknown>) => ({
+        question: q.question != null ? String(q.question) : '',
+        header: q.header != null ? String(q.header) : '',
+        options: Array.isArray(q.options)
+          ? (q.options as Record<string, unknown>[]).map((o) => ({
+              label: o.label != null ? String(o.label) : '',
+              description: o.description != null ? String(o.description) : ''
+            }))
+          : [],
+        // opencode uses `multiple`; AskUserQuestion uses `multiSelect` — map here
+        multiSelect: !!q.multiple
+      }))
+      return { kind: 'question', questions }
+    }
+
+    case 'plan':
+      return {
+        kind: 'plan',
+        plan: inp.plan != null ? String(inp.plan) : ''
       }
 
     case 'diagram':
@@ -150,8 +195,32 @@ function extractMockupDirectory(result?: ToolResultBlock): string | undefined {
   return match ? match[1] : undefined
 }
 
+/** Prettify map for opencode's lowercase/underscore tool names. */
+const OPENCODE_DISPLAY_NAMES: Record<string, string> = {
+  bash: 'Bash',
+  read: 'Read',
+  write: 'Write',
+  edit: 'Edit',
+  apply_patch: 'Patch',
+  glob: 'Glob',
+  grep: 'Grep',
+  webfetch: 'WebFetch',
+  websearch: 'WebSearch',
+  todowrite: 'TodoWrite',
+  task: 'Task',
+  question: 'AskUserQuestion',
+  claudeui_render_mermaid: 'Mermaid',
+  claudeui_create_mockup: 'Mockup',
+  claudeui_show_mockup: 'Mockup'
+}
+
+function opencodeDisplayName(toolName: string): string {
+  return OPENCODE_DISPLAY_NAMES[toolName] ?? toolName
+}
+
 export const OpencodeEngineToolMap: EngineToolMap = {
   kindOf: opencodeKindOf,
   normalize: opencodeNormalize,
+  displayName: opencodeDisplayName,
   hidden: HIDDEN_TOOLS
 }

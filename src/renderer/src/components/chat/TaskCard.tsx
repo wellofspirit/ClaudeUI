@@ -1,5 +1,6 @@
 import { useState, useMemo } from 'react'
 import type { ContentBlock, PendingApproval, PermissionSuggestion } from '../../../../shared/types'
+import type { ToolView } from '../../../../shared/tool-kinds'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
 import { MarkdownRenderer } from './MarkdownRenderer'
 import { SubagentMessages } from './SubagentMessages'
@@ -7,10 +8,12 @@ import { ApprovalButtons } from './ApprovalButtons'
 
 type ToolUseBlock = Extract<ContentBlock, { type: 'tool_use' }>
 type ToolResultBlock = Extract<ContentBlock, { type: 'tool_result' }>
+type TaskView = Extract<ToolView, { kind: 'task' }>
 
 interface Props {
   block: ToolUseBlock
   result?: ToolResultBlock
+  view: TaskView
   /**
    * Pending approval for THIS task tool call, matched by toolUseId in
    * MessageBubble. opencode (and any engine that gates the subagent-spawning
@@ -74,7 +77,7 @@ export function formatTokens(n: number): string {
   return String(n)
 }
 
-export function TaskCard({ block, result, approval }: Props): React.JSX.Element {
+export function TaskCard({ block, result, view, approval }: Props): React.JSX.Element {
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const taskProgressMap = useActiveSession((s) => s.taskProgressMap)
   const removePendingApproval = useSessionStore((s) => s.removePendingApproval)
@@ -91,7 +94,6 @@ export function TaskCard({ block, result, approval }: Props): React.JSX.Element 
   const [expanded, setExpanded] = useState(false)
 
   const toolUseId = block.toolUseId
-  const input = block.toolInput || {}
   const isHistorical = useActiveSession((s) => s.isHistorical)
   const hasResult = !!result
   const msgs = subagentMsgs[toolUseId] || []
@@ -99,17 +101,18 @@ export function TaskCard({ block, result, approval }: Props): React.JSX.Element 
   const streamThinking = subagentThinking[toolUseId] || ''
   const bgNotification = taskNotifications.find((n) => n.toolUseId === toolUseId)
   const hasSubagentOutput = msgs.length > 0 || !!streamText || !!streamThinking
-  const isBackground = !!input.run_in_background
+  const isBackground = !!view.background
   // Background tasks get a tool_result immediately ("agent launched") but keep running until task_notification
   const isError = bgNotification ? bgNotification.status === 'failed' : (result?.isError ?? false)
   const isRunning = isHistorical ? false : isBackground ? !bgNotification : !hasResult
   // In historical mode, tasks without results show as "loaded" (neutral state)
   const isLoaded = isHistorical && !hasResult && !bgNotification
 
-  const description = String(input.description || input.prompt || '').slice(0, 120)
-  const prompt = String(input.prompt || '')
-  const subagentType = String(input.subagent_type || input.subagentType || '')
-  const model = input.model ? String(input.model) : null
+  // Read display fields from the engine-neutral view (not block.toolInput)
+  const description = (view.description || view.prompt || '').slice(0, 120)
+  const prompt = view.prompt
+  const subagentType = view.subagent ?? ''
+  const model = view.model ?? null
 
   const progress = taskProgressMap[toolUseId]
   const elapsed = progress?.elapsedTimeSeconds

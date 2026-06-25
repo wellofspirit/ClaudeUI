@@ -73,8 +73,19 @@ describe('AskUserQuestionBlock FC', () => {
   async function renderFC(approval = makePendingApproval({ requestId: 'req-1' })): Promise<void> {
     useSessionStore.getState().addPendingApproval(ROUTE, approval)
     const { AskUserQuestionBlock } = await import('../AskUserQuestionBlock')
+    const questionView = {
+      kind: 'question' as const,
+      questions: [
+        {
+          header: 'Color',
+          question: 'Pick a color',
+          options: [{ label: 'red', description: '' }, { label: 'blue', description: '' }],
+          multiSelect: false
+        }
+      ]
+    }
     await act(async () => {
-      render(React.createElement(AskUserQuestionBlock, { block: makeBlock(), approval } as any))
+      render(React.createElement(AskUserQuestionBlock, { block: makeBlock(), view: questionView, approval } as any))
     })
   }
 

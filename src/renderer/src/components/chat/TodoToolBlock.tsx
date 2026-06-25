@@ -1,17 +1,19 @@
 import type { ContentBlock } from '../../../../shared/types'
+import type { ToolView } from '../../../../shared/tool-kinds'
 
 type ToolUseBlock = Extract<ContentBlock, { type: 'tool_use' }>
 type ToolResultBlock = Extract<ContentBlock, { type: 'tool_result' }>
+type TodoView = Extract<ToolView, { kind: 'todo' }>
 
 interface Props {
   block: ToolUseBlock
   result?: ToolResultBlock
+  view: TodoView
 }
 
-export function TodoToolBlock({ block, result }: Props): React.JSX.Element {
+export function TodoToolBlock({ result, view }: Props): React.JSX.Element {
   const hasResult = !!result
   const isError = result?.isError ?? false
-  const input = block.toolInput || {}
 
   const statusIcon = isError ? (
     <svg
@@ -42,11 +44,19 @@ export function TodoToolBlock({ block, result }: Props): React.JSX.Element {
     <span className="w-[11px] h-[11px] rounded-full border-[1.5px] border-text-muted border-t-transparent shrink-0 animate-spin-slow" />
   )
 
-  // Summarize: count of todos by status
-  const todos = Array.isArray(input.todos) ? input.todos : []
-  const total = todos.length
-  const completed = todos.filter((t: Record<string, unknown>) => t.status === 'completed').length
-  const summary = total > 0 ? `${completed}/${total} tasks` : 'update tasks'
+  // Summarize: count of todos by status from the engine-neutral view
+  const items = view.items
+  const total = items.length
+  const completed = items.filter((t) => t.status === 'completed').length
+  const cancelled = items.filter((t) => t.status === 'cancelled').length
+  // Cancelled items are excluded from active count (they're done/abandoned)
+  const activeDenominator = total - cancelled
+  const summary =
+    total > 0
+      ? cancelled > 0 && activeDenominator > 0
+        ? `${completed}/${activeDenominator} tasks (${cancelled} cancelled)`
+        : `${completed}/${total} tasks`
+      : 'update tasks'
 
   return (
     <div className="flex items-center gap-2 px-2 h-7 text-[12px] text-text-secondary rounded-md bg-bg-secondary/50">

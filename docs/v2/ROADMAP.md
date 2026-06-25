@@ -71,17 +71,17 @@ Every item below was re-verified against current code on 2026-06-23. Status lege
 
 | # | Item | Risk | Area | Effort |
 | --- | --- | --- | --- | --- |
-| 6 | **Vendor editing UI** + ModelRef-derived vendor at spawn | 🟠 | config plane | M |
 | 8 | opencode **voice** input | 🟡 | voice | M |
-| 9 | Fully **engine-neutral lifting** of plan/question/todo/task | 🟡 | tool rendering | M–L |
 | 10 | Fold **FloatingApproval** into shared `<ApprovalButtons>` | ⚪ | tool rendering | S |
-| 11 | Tool-rendering **coverage polish** (search/web/single-diff/truncation) | ⚪ | tool rendering | M |
-| 12 | **Per-section capability gating** in Settings (blocked on caps model) | ⚪ | config plane | M |
+| 11 | Tool-rendering **coverage polish** — structured **search/web** only (a/b); c/d/e shipped | ⚪ | tool rendering | S |
 | 13 | opencode **end-to-end render** verification (test gap) | ⚪ | testing | M |
 | 14 | Retire legacy **JSONL usage** parse path | ⚪ | metering | M |
 | 15 | Consolidate opencode `/event` to **one subscription per server** | ⚪ | opencode transport | S |
 | 16 | Open the **V2 PR stack** (process, not code) | ⚪ | process | — |
 
+> ✅ **#9 shipped 2026-06-24** (`v2-followup-tool-rendering-lift`) — engine-neutral lifting of
+> plan/question/todo/task + opencode todo fix. See *Verified resolved*.
+>
 > ✅ **#1, #2, #3, #5, #7 shipped 2026-06-23; #4 shipped 2026-06-24** — subagent questions (#1,
 > `v2-followup-subagent-questions`); the opencode auth-UX cluster (#2 re-login card + #7 native browser
 > OAuth, `v2-followup-opencode-auth-ux`); opencode status-line usage + cost gating (#3,
@@ -96,28 +96,10 @@ Every item below was re-verified against current code on 2026-06-23. Status lege
 
 ---
 
-### 6 — Vendor editing UI + ModelRef-derived vendor at spawn 🟠
+### 6 — ✅ DONE — Vendor editing UI + ModelRef-derived vendor at spawn
 
-**What.** Two coupled config-plane gaps:
-- **Vendor editing is display-only.** Vendors › Anthropic shows `endpoint` + `modelOverride` read-only
-  (`settings-sections.tsx:511-554`); users must hand-edit `vendors/anthropic.json`.
-  `handleUpdateVendorConfig` (`SettingsDialog.tsx:77-83`) calls `saveVendorConfig` but is **wired and
-  never invoked** — a Phase-5 stub.
-- **Vendor at spawn is hardcoded.** `session:create` loads `loadVendorConfig('anthropic')` unconditionally
-  (`session.ipc.ts:773`, guarded `if (engineId !== 'opencode')`); the comment flags deriving the vendor
-  from the model's `ModelRef.vendorId` as a Phase-5 TODO. Correct for Claude (engine 1:1 anthropic), but
-  opencode is multi-vendor and gets no per-vendor launch params at spawn.
-
-**Why deferred.** Phase 3b shipped the read/display IA and Claude's 1:1 path; full per-vendor editing +
-ModelRef-driven derivation was scoped to Phase 5 and not picked up. These become real once opencode
-needs per-vendor endpoint/override.
-
-**Definition of done.** Make the vendor section editable (re-enable the edit form + `saveVendorConfig`
-round-trip), and derive vendor launch params from the active model's `ModelRef.vendorId` at spawn for
-both engines. Migration/back-compat preserved.
-
-**References.** `03-settings-config.md §8.5`, `settings-sections.tsx:511-554`, `SettingsDialog.tsx:77-83`,
-`session.ipc.ts:768-777`.
+Both halves shipped: the Anthropic vendor-editing UI (`v2-followup-settings-ia`, 2026-06-25) and the
+ModelRef-derived vendor at spawn (`v2-followup-opencode-settings`, 2026-06-25). See *Verified resolved*.
 
 ---
 
@@ -135,29 +117,6 @@ appears for opencode sessions. Mostly wiring — the transcription stack is engi
 
 **References.** `phase-5b-opencode-chat.md:283`, `model-capabilities.ts`, `voice-capture.ts`,
 `voice-client.ts`, `OpencodeSession.ts` (prompt path).
-
----
-
-### 9 — Fully engine-neutral lifting of plan/question/todo/task 🟡
-
-**What.** Phase 6 unified the *passive* tool kinds behind the kind registry, but the four **lifted**
-interaction kinds still route directly to legacy components — `MessageBubble.tsx:45-58` dispatches to
-`ExitPlanModeCard` / `AskUserQuestionBlock` / `TodoToolBlock` / `TaskCard`, each consuming the
-engine-specific `block` rather than a normalized neutral shape. The comment at `MessageBubble.tsx:46`
-calls full lifting a "fast-follow."
-
-**Why deferred.** Foundation 06 §7 / decision #3 lifted these conceptually (question → approval/
-elicitation, plan → plan-review state-gate, todo → Todo widget) but Phase 6 scoped the build to the
-passive-kind registry + behavior-preserving Claude port.
-
-**Definition of done.** Normalize each of the four into an engine-neutral interaction contract fed from
-either transport (Claude tool blocks or opencode events), so components consume a neutral shape, not
-`block`. Behavior-preserving for Claude (app-shot the cards as pixel-equivalent); opencode equivalents
-drive the same components. The larger structural item — worth its own kickoff spec. *(The #1 subagent-
-question hang is a symptom of this seam being only half-lifted on the opencode side.)*
-
-**References.** `06-tool-rendering.md §7`, `phase-6-tool-registry.md`, `MessageBubble.tsx`,
-`tool-registry/ClaudeEngineToolMap.ts`.
 
 ---
 
@@ -181,45 +140,39 @@ Pure refactor; app-shot the floating card as pixel-equivalent.
 
 ---
 
-### 11 — Tool-rendering coverage polish ⚪
+### 11 — Tool-rendering coverage polish ⚪ (c/d/e shipped; a/b remain)
 
-**What.** The "weak" tool kinds still use `GenericBody` / hardcoded rendering (foundation 06 §9):
-- **(a) search** (Grep/Glob/list) — JSON-dump input + generic terminal output, not a structured match
-  list (file · line · highlighted text). `tool-registry/kinds/index.ts:28` → `GenericBody`.
-- **(b) web** (WebFetch/WebSearch) — raw, not structured title/url/snippet. Same `GenericBody`.
-- **(c) fileEdit** — renders the diff **twice** (input AND result), `FileEditBody.tsx:43-77`.
-- **(d) truncation** — hardcoded `trunc(text, 2000)`; no configurable / "show more" affordance.
-- *(Error rendering is now consistent across `GenericBody`/`FileEditBody` (red `<pre>` styling) — the
-  "consistent error renderer with context" ambition remains but the inconsistency is gone.)*
+**Shipped 2026-06-24** (`v2-followup-tool-rendering-polish`, see *Verified resolved*):
+- **(c) fileEdit single-diff** — the diff renders exactly once (was twice: input + result).
+- **(d) truncation + show-more** — `<ExpandableText>` + a `toolOutputMaxChars` setting (default 5000)
+  replace the hardcoded `trunc(2000/5000)` cuts; full text revealed on expand (no data loss).
+- **(e) per-kind display metadata** — card name + summary come from `EngineToolMap.displayName` +
+  `summarizeTool(kind, view)` instead of the Claude-hardcoded `getSummary`/raw `toolName`. Fixes
+  opencode's raw lowercase labels + JSON-blob summaries. Claude byte-identical (equivalence-tested).
 
-**Why deferred.** Foundation decision #4: explicitly cosmetic and low-priority; the generic fallback
-renders weak tools acceptably.
+**Still deferred — (a)/(b) structured results:**
+- **(a) search** (Grep/Glob) — JSON-dump input + generic terminal output, not a structured match list
+  (file · line · highlighted text). Still `GenericBody`.
+- **(b) web** (WebFetch/WebSearch) — raw, not structured title/url/snippet. Still `GenericBody`.
 
-**Definition of done.** Structured `search` match-list, structured `web` results, single-diff for
-`fileEdit`, and a configurable truncate-with-expand applied uniformly. Per-kind; can be split. Folding
-the hardcoded name/icon lists in `utils.ts` into per-kind metadata (06 §8) is part of the same cleanup.
+**Why a/b deferred.** Most cosmetic + brittle (parsing freeform result text across engines/output
+modes); lowest value-per-risk. The generic fallback renders them acceptably.
 
-**References.** `06-tool-rendering.md §8,§9`, `phase-6-tool-registry.md §9`, `tool-registry/kinds/`.
+**Definition of done (remaining).** Structured `search` match-list + structured `web` results, with the
+generic body as fallback. Per-kind; can be split. Requires extending the `search`/`web` ToolViews to
+carry parsed matches/results (today they carry only the input `query`/`target`).
+
+**References.** `06-tool-rendering.md §9`, `tool-registry/kinds/{GenericBody}.tsx`,
+`followup-tool-rendering-polish.md`.
 
 ---
 
-### 12 — Per-section capability gating in Settings ⚪ (blocked)
+### 12 — ✅ DONE — Per-section capability gating in Settings
 
-**What.** Settings sections (e.g. sandbox/proxy under Engines › Claude) are listed in static sets
-(`settings-sections.tsx` `ENGINE_CLAUDE_SECTION_IDS` etc.) with no capability-based hiding. The intent
-(03 / ADR-018) is to hide e.g. sandbox on a no-sandbox engine. **Blocked:** `EngineCapabilities`
-(`model-capabilities.ts`) has no `sandbox`/`proxy` flags yet, so there's nothing to gate on. Today only
-*installed-engine* gating exists (opencode vendor section appears only when opencode is present).
-
-**Why deferred.** Phase 3b deferred per-section gating to Phase 5 ("zero-benefit until the caps model
-grows"); the caps model never grew those flags.
-
-**Definition of done.** Add `sandbox`/`proxy` (and any other launch-param) flags to `EngineCapabilities`,
-then gate section visibility on them. Zero user-visible change for Claude (all-true); real benefit only
-when a no-sandbox/no-proxy engine lands. Low priority until then.
-
-**References.** `03-settings-config.md`, `model-capabilities.ts` (`EngineCapabilities`),
-`settings-sections.tsx`.
+Shipped 2026-06-25 (`v2-followup-settings-12-caps`). `EngineCapabilities` grew `sandbox`/`proxy` flags
+(Claude both true, opencode both false), and the settings shell gates each scope's section visibility on
+the scope-engine's caps via `SECTION_CAPABILITY` + `isSectionVisible`. Zero user-visible change today
+(Claude all-true; opencode has no sandbox/proxy sections) — structure-ready. See *Verified resolved*.
 
 ---
 
@@ -295,6 +248,77 @@ squash/integration strategy for landing the stack. Not code — a process decisi
 Prior session inventories (pre-Phase-8/9) listed these as deferred; the 2026-06-23 sweep confirms they
 shipped. Recorded here so they're not re-raised:
 
+- **Per-section capability gating in Settings** (ROADMAP #12, shipped 2026-06-25,
+  `v2-followup-settings-12-caps`) — `EngineCapabilities` grew `sandbox` + `proxy` boolean flags (Claude
+  both true, opencode both false — it has its own provider config), threaded through
+  `resolveCapabilities`. The settings shell now gates each scope's section visibility on the scope-engine's
+  static caps: `SECTION_CAPABILITY` (sectionId → required flag) + `scopeCapabilities(scope)` +
+  `isSectionVisible(id, caps)`, applied in `View.tsx` (left list + active-section resolution) and
+  `firstSectionOfScope`. **Zero user-visible change today** (Claude is all-true so sandbox/proxy still
+  show; opencode's scope has no sandbox/proxy sections) — it's structure-ready for an engine that lacks a
+  launch-param surface. Guarded by a non-vacuous unit test (a hypothetical no-sandbox engine hides those
+  sections while ungated sections stay). Closes the settings-refactor chapter. Spec: ROADMAP §12.
+- **opencode settings in the UI (no-JSON) + ModelRef vendor-at-spawn** (settings refactor phase 2 +
+  ROADMAP #6 completion, shipped 2026-06-25, `v2-followup-opencode-settings`) — the opencode tab now
+  carries native opencode config so users stop hand-editing JSON: **Models** (default + small model),
+  **Providers** (custom OpenAI-compatible providers — id + base URL + model list — plus disabled/
+  enabled-only provider lists), and **Agents** (per-agent model + temperature). Stored in
+  `engines/opencode.json` (`EngineConfig.opencodeConfig`) and merged into opencode at spawn via
+  `OPENCODE_CONFIG_CONTENT` — `buildOpencodeConfigContent` now **spreads in only the fields the user set**
+  (clobber-safe: opencode deep-merges at priority above the user's `opencode.jsonc`, so unset fields are
+  omitted and a set field intentionally overrides; `provider[id].models` mapped array→object-keyed-by-id;
+  credentials never injected — API keys stay in the existing vendor-opencode auth UI / `auth.json`).
+  Threaded through the ref-counted per-cwd `OpencodeServerManager` (captured at spawn). Also finishes
+  **#6**: `session:create` derives the Claude vendor from the active model's `ModelRef` (`claudeModel(...)
+  .vendorId` → `'anthropic'`) instead of the hardcode (no-op for Claude, structure-ready). Review caught a
+  real UI bug — the provider-id input used the editable id as the React `key`, so each keystroke remounted
+  the row and dropped focus (+ a UUID leaked into new rows); fixed by decoupling a stable `_key` from the
+  editable `_id`, guarded by a node-identity focus test. Real-app verified: all three new sections render,
+  typing a multi-char provider id keeps focus, no regression to Auto mode / Vendors. **#12
+  capability-gating** remains the one deferred settings follow. Spec: `docs/v2/followup-opencode-settings.md`.
+- **Settings IA refactor — tabbed scopes + Anthropic vendor editable** (settings refactor phase 1 +
+  ROADMAP #6 UI-half, shipped 2026-06-25, `v2-followup-settings-ia`) — the dialog was broken: a single
+  unified scroll with a tier-tree nav whose flat `SECTIONS` order had **diverged from the grouping**
+  (App's `mockup` sat between Claude's `permissions`/`sandbox`; accounts/vendor interleaved Claude's
+  sandbox/proxy), so the left nav no longer filtered. Replaced with **Option A** — a `SCOPES` model
+  (Common / Claude / opencode tabs) where each tab renders only its sections (explicit order = the bug
+  fix) in a scoped left list, with a **single focused section pane** (no unified cross-section scroll);
+  scroll-spy machinery deleted. Per-item `render(...)` contract unchanged, so all section content is
+  behavior-preserving. Folded in **#6's UI half**: `VendorAnthropicEditableForm` (endpoint + model
+  override, nested-merge writes via `saveVendorConfig`). Dead `NAV_GROUPS`/`NavGroup` tier-tree removed.
+  New `settings-scopes.unit.test.tsx` guards "every section in exactly one scope" (the bug class).
+  Real-app verified: 3 tabs filter correctly, Anthropic form editable, opencode tab renders, old
+  interleaving gone. **Phase 2** (separate) = ModelRef-derived vendor at spawn (rest of #6), #12
+  capability-gating, and new opencode settings (custom-provider base URL, default model). Spec:
+  `docs/v2/followup-settings-ia-refactor.md`.
+- **Tool-rendering polish c/d/e** (ROADMAP #11 partial, shipped 2026-06-24,
+  `v2-followup-tool-rendering-polish`) — (c) fileEdit renders the diff once not twice; (d) a reusable
+  `<ExpandableText>` + `AppSettings.toolOutputMaxChars` (default 5000) replace the hardcoded
+  `trunc(2000/5000)` cuts (full text on expand, no data loss); (e) the card name + summary come from
+  `EngineToolMap.displayName` (Claude passthrough / opencode prettify map) + `summarizeTool(kind, view)`
+  instead of the Claude-name-hardcoded `getSummary`/raw `toolName` — fixing opencode's raw lowercase
+  labels + `JSON.stringify(input)` summaries. Claude byte-identical: a `summarizeTool === getSummary`
+  equivalence guard test covers every kind, and `displayName` is a passthrough (real-app: 33 Edit cards
+  one-diff each, Read/Bash/Glob/Grep/Edit headers unchanged). Structured search/web (a/b) stay deferred.
+  Spec: `docs/v2/followup-tool-rendering-polish.md`.
+- **Engine-neutral lifting of plan/question/todo/task** (was ROADMAP #9 🟡, shipped 2026-06-24,
+  `v2-followup-tool-rendering-lift`) — the four lifted interaction kinds now consume an engine-neutral
+  `ToolView` (extended with `task.subagent/model/background`, typed `question.questions: AskUserQuestion[]`,
+  `todo` items + optional `activeForm`), not engine-specific `block.toolInput`. `renderToolBlock`
+  computes the view once via `toolMap.normalize` and threads it to `ExitPlanModeCard`/`AskUserQuestionBlock`/
+  `TodoToolBlock`/`TaskCard` (+ the `FloatingApproval` question card + the synthetic-plan user path).
+  **Root-caused the reported opencode-todo no-op:** `OpencodeEngineToolMap.kindOf('todowrite')` fell to
+  `unknown` (dead `list`/`patch` cases, missing `todowrite`/`websearch`/`apply_patch`/`question`/`plan_exit`),
+  and the floating Todo widget was Claude-name-hardcoded (`buildTodosFromMessages`) with the
+  `session:plan`/`onPlanSteps` event channel **dead — no emitter**. Fix: completed the opencode tool→kind
+  map (verified every id against `opencode-src/.../tool/registry.ts`), and fed the widget from opencode's
+  **`todo.updated`** bus event (`event-mapper` `case 'todo.updated'` → `{kind:'todos'}` →
+  `OpencodeSession` revives `session:plan` → `setTodos`). `TodoStatus` extended with `'cancelled'` (opencode
+  emits it; rendered muted/strikethrough). Claude byte-identical (app-shot: compact `TodoWrite N/M tasks`
+  rows + widget unchanged; opencode todowrite now renders the same card + populates the widget). The
+  question→`AskUserQuestion` mapping is currently mirrored in both normalizers + `buildQuestionApproval`
+  (a small DRY debt, noted). A fully-**driven** opencode todo turn remains ROADMAP #13's gated e2e. Spec:
+  `docs/v2/followup-tool-rendering-lift.md`.
 - **opencode hosted tools via on-the-fly MCP** (was ROADMAP #4 🟠, shipped 2026-06-24,
   `v2-followup-opencode-mcp-onthefly`) — replaced the GLOBAL plugin install (`~/.config/opencode/plugin/`)
   with an in-process **per-cwd HTTP MCP server** (session-mode `StreamableHTTPServerTransport`, bearer

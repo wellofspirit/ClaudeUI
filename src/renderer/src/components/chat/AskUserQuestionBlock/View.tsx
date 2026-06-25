@@ -2,13 +2,14 @@ import { useState } from 'react'
 import type {
   ContentBlock,
   AskUserQuestion,
-  AskUserQuestionInput
 } from '../../../../../shared/types'
 
 type ToolUseBlock = Extract<ContentBlock, { type: 'tool_use' }>
 
 export interface AskUserQuestionBlockViewProps {
   block: ToolUseBlock
+  /** Normalized questions from the engine-neutral ToolView (not block.toolInput). */
+  questions: AskUserQuestion[]
   isCompleted: boolean
   isPending: boolean
   onSubmit: (answers: Record<string, string>) => Promise<void>
@@ -16,14 +17,15 @@ export interface AskUserQuestionBlockViewProps {
 }
 
 export function AskUserQuestionBlockView({
-  block,
+  // block is kept in the prop interface for callers (e.g. tests) but not read here
+  // after the view-based lift; toolInput is now consumed by the parent FC.
+  block: _block,
+  questions,
   isCompleted,
   isPending,
   onSubmit,
   onDeny
 }: AskUserQuestionBlockViewProps): React.JSX.Element {
-  const input = block.toolInput as unknown as AskUserQuestionInput | undefined
-  const questions = input?.questions ?? []
 
   const [currentStep, setCurrentStep] = useState(0)
   const [answers, setAnswers] = useState<Record<string, string>>({})

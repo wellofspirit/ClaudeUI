@@ -1,18 +1,21 @@
 import { useState } from 'react'
 import type { ContentBlock, PendingApproval } from '../../../../../shared/types'
+import type { ToolView } from '../../../../../shared/tool-kinds'
 import { useSessionStore } from '../../../stores/session-store'
 import { AskUserQuestionBlockView } from './View'
 
 type ToolUseBlock = Extract<ContentBlock, { type: 'tool_use' }>
 type ToolResultBlock = Extract<ContentBlock, { type: 'tool_result' }>
+type QuestionView = Extract<ToolView, { kind: 'question' }>
 
 interface Props {
   block: ToolUseBlock
   result?: ToolResultBlock
+  view: QuestionView
   approval?: PendingApproval
 }
 
-export function AskUserQuestionBlock({ block, result, approval }: Props): React.JSX.Element {
+export function AskUserQuestionBlock({ block, result, view, approval }: Props): React.JSX.Element {
   const routingId = useSessionStore((s) => s.activeSessionId)
   const removePendingApproval = useSessionStore((s) => s.removePendingApproval)
   const [submitted, setSubmitted] = useState(false)
@@ -37,6 +40,7 @@ export function AskUserQuestionBlock({ block, result, approval }: Props): React.
   return (
     <AskUserQuestionBlockView
       block={block}
+      questions={view.questions}
       isCompleted={isCompleted}
       isPending={isPending}
       onSubmit={handleSubmit}

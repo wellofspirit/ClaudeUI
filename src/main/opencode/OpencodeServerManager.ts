@@ -8,6 +8,8 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import type { McpHttpHost } from './mcp-http-host'
 import { startMcpHttpHost } from './mcp-http-host'
 import { createOpencodeHostedToolsServer } from './opencode-hosted-tools'
+import type { OpencodeConfigSettings } from '../../shared/types'
+import { loadEngineConfig } from '../services/ui-config'
 
 /** Connection details handed back to callers (and to OpencodeClient). */
 export interface ServerConnection {
@@ -38,7 +40,8 @@ export type SpawnServerFn = (
   cwd: string,
   password: string,
   mcpPort: number,
-  mcpToken: string
+  mcpToken: string,
+  cfg?: OpencodeConfigSettings
 ) => Promise<SpawnResult>
 
 const PORT_PATTERN = /opencode server listening on http:\/\/127\.0\.0\.1:(\d+)/
@@ -82,15 +85,60 @@ function locateBinary(): string {
 
 /**
  * Build the OPENCODE_CONFIG_CONTENT JSON string that wires opencode's MCP
- * client to our per-cwd in-process HTTP host.
+ * client to our per-cwd in-process HTTP host, and optionally injects user-set
+ * opencode config fields (model, providers, agents, etc.).
  *
  * opencode parses this env var as JSON and merges it into its config, so
  * the `mcp` key is treated identically to mcp entries in opencode.json.
  * The `claudeui` server name drives tool-name prefixing in opencode:
  *   claudeui_render_mermaid, claudeui_create_mockup, claudeui_show_mockup.
+ *
+ * CLOBBER-SAFETY: only fields the user has explicitly set are emitted.
+ * Unset fields are omitted so they do not override the user's own opencode.jsonc.
+ * API keys are NEVER injected — credentials stay in auth.json.
+ *
+ * Per-cwd servers capture settings at spawn; a settings change applies to the
+ * NEXT cwd spawn (mirrors the auth-caching behaviour).
  */
-function buildOpencodeConfigContent(mcpPort: number, mcpToken: string): string {
-  const config = {
+export function buildOpencodeConfigContent(
+  mcpPort: number,
+  mcpToken: string,
+  cfg?: OpencodeConfigSettings
+): string {
+  // Build provider object: map {id, name?, baseURL?, models?[]} → opencode's
+  // Record<id, { name?, options?: {baseURL?}, models?: Record<modelId, {name?}> }>.
+  // Only emitted when at least one provider is configured.
+  let providerObj: Record<string, unknown> | undefined
+  if (cfg?.providers && Object.keys(cfg.providers).length > 0) {
+    providerObj = {}
+    for (const [id, p] of Object.entries(cfg.providers)) {
+      const entry: Record<string, unknown> = {}
+      if (p.name) entry.name = p.name
+      if (p.baseURL) entry.options = { baseURL: p.baseURL }
+      if (p.models && p.models.length > 0) {
+        // opencode expects models as an object keyed by model id, not an array.
+        entry.models = Object.fromEntries(
+          p.models.map((m) => [m.id, m.name ? { name: m.name } : {}])
+        )
+      }
+      providerObj[id] = entry
+    }
+  }
+
+  // Build agent object: map {[name]: {model?, temperature?}} → opencode's agent record.
+  // Only emitted when at least one agent override is configured.
+  let agentObj: Record<string, unknown> | undefined
+  if (cfg?.agents && Object.keys(cfg.agents).length > 0) {
+    agentObj = {}
+    for (const [name, a] of Object.entries(cfg.agents)) {
+      const entry: Record<string, unknown> = {}
+      if (a.model) entry.model = a.model
+      if (a.temperature != null) entry.temperature = a.temperature
+      agentObj[name] = entry
+    }
+  }
+
+  const config: Record<string, unknown> = {
     mcp: {
       claudeui: {
         type: 'remote',
@@ -102,6 +150,17 @@ function buildOpencodeConfigContent(mcpPort: number, mcpToken: string): string {
       }
     }
   }
+
+  // Spread only set fields (clobber-safety).
+  if (cfg?.model) config.model = cfg.model
+  if (cfg?.smallModel) config.small_model = cfg.smallModel
+  if (cfg?.disabledProviders && cfg.disabledProviders.length > 0)
+    config.disabled_providers = cfg.disabledProviders
+  if (cfg?.enabledProviders && cfg.enabledProviders.length > 0)
+    config.enabled_providers = cfg.enabledProviders
+  if (providerObj) config.provider = providerObj
+  if (agentObj) config.agent = agentObj
+
   return JSON.stringify(config)
 }
 
@@ -114,7 +173,8 @@ function spawnServer(
   cwd: string,
   password: string,
   mcpPort: number,
-  mcpToken: string
+  mcpToken: string,
+  cfg?: OpencodeConfigSettings
 ): Promise<SpawnResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(binary, ['serve', '--port', '0', '--hostname', '127.0.0.1'], {
@@ -124,7 +184,8 @@ function spawnServer(
         OPENCODE_SERVER_PASSWORD: password,
         // Inject the per-cwd in-process MCP server so opencode connects to it
         // without requiring any global plugin installation.
-        OPENCODE_CONFIG_CONTENT: buildOpencodeConfigContent(mcpPort, mcpToken)
+        // User-set opencode config fields are merged in here as well.
+        OPENCODE_CONFIG_CONTENT: buildOpencodeConfigContent(mcpPort, mcpToken, cfg)
       },
       stdio: ['ignore', 'pipe', 'pipe']
     })
@@ -235,6 +296,10 @@ export class OpencodeServerManager {
       const authHeader = 'Basic ' + Buffer.from('opencode:' + password).toString('base64')
       const binary = this.getBinary()
 
+      // Load opencode config settings (captured at spawn; a settings change applies
+      // to the next cwd spawn, mirroring the auth-caching behaviour).
+      const opencodeCfg = loadEngineConfig('opencode').opencodeConfig
+
       // Start the per-cwd MCP host BEFORE spawning opencode so we have the
       // port + token to inject via OPENCODE_CONFIG_CONTENT.
       const mcpHost = await this.startMcpHostFn(createOpencodeHostedToolsServer(key))
@@ -242,7 +307,14 @@ export class OpencodeServerManager {
       let child: ChildProcess
       let baseUrl: string
       try {
-        const result = await this.spawnFn(binary, key, password, mcpHost.port, mcpHost.token)
+        const result = await this.spawnFn(
+          binary,
+          key,
+          password,
+          mcpHost.port,
+          mcpHost.token,
+          opencodeCfg
+        )
         child = result.process
         baseUrl = result.baseUrl
       } catch (err) {

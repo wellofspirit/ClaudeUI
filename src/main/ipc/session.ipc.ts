@@ -75,6 +75,7 @@ import type {
   VendorAuthMap,
   VendorAuthOption
 } from '../../shared/types'
+import { claudeModel } from '../../shared/types'
 import { discoverOpencodeModels } from '../opencode/model-discovery'
 import { discoverOpencodeSkills } from '../opencode/command-skill-discovery'
 import { refreshPrices } from '../services/opencode-pricing'
@@ -769,9 +770,11 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
       const engineCfg = loadEngineConfig(engineId ?? 'claude')
       const sandboxConfig = engineCfg.sandbox
       if (engineId !== 'opencode') {
-        // Phase 5: derive vendor from the current model's ModelRef. For Claude the
-        // engine is 1:1 with the 'anthropic' vendor, so this is always correct now.
-        const vendorCfg = loadVendorConfig('anthropic')
+        // Derive vendor id from the active model's ModelRef. claudeModel() maps
+        // any Claude model to the 'anthropic' vendor (1:1 today; structured-ready
+        // for multi-vendor Claude engines in future phases).
+        const vendorId = claudeModel(model ?? '').vendorId
+        const vendorCfg = loadVendorConfig(vendorId)
         await applyProxyEnv(engineCfg.proxy)
         applyEndpointEnv(vendorCfg.endpoint)
         applyModelEnv(vendorCfg.modelOverride)

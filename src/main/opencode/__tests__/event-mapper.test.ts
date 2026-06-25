@@ -1500,3 +1500,58 @@ describe('mapEvent — child question.asked → floating approval (hang-fix)', (
     expect(input.questions[0].multiSelect).toBe(false)
   })
 })
+
+// ---------------------------------------------------------------------------
+// mapEvent — todo.updated (own session → {kind:'todos'}; child → ignored)
+// ---------------------------------------------------------------------------
+
+describe('mapEvent — todo.updated (own session)', () => {
+  it('maps todos array to {kind:"todos", items} with cancelled preserved', () => {
+    const ev = makeEvent('todo.updated', {
+      sessionID: SESSION_ID,
+      todos: [
+        { content: 'Task A', status: 'pending', priority: 'high' },
+        { content: 'Task B', status: 'in_progress', priority: 'medium' },
+        { content: 'Task C', status: 'completed', priority: 'low' },
+        { content: 'Task D', status: 'cancelled', priority: 'low' }
+      ]
+    })
+    const out = mapEvent(ev, SESSION_ID, new Map(), START_TIME, { value: 0 })
+    expect(out.kind).toBe('todos')
+    if (out.kind !== 'todos') throw new Error('expected todos')
+    expect(out.items).toHaveLength(4)
+    expect(out.items[0]).toMatchObject({ content: 'Task A', status: 'pending' })
+    expect(out.items[1]).toMatchObject({ content: 'Task B', status: 'in_progress' })
+    expect(out.items[2]).toMatchObject({ content: 'Task C', status: 'completed' })
+    // cancelled status must be preserved (opencode emits it; TodoStatus now includes it)
+    expect(out.items[3]).toMatchObject({ content: 'Task D', status: 'cancelled' })
+  })
+
+  it('ignores todo.updated with missing todos field', () => {
+    const ev = makeEvent('todo.updated', { sessionID: SESSION_ID })
+    const out = mapEvent(ev, SESSION_ID, new Map(), START_TIME, { value: 0 })
+    expect(out.kind).toBe('ignore')
+  })
+
+  it('ignores todo.updated with non-array todos', () => {
+    const ev = makeEvent('todo.updated', { sessionID: SESSION_ID, todos: null })
+    const out = mapEvent(ev, SESSION_ID, new Map(), START_TIME, { value: 0 })
+    expect(out.kind).toBe('ignore')
+  })
+})
+
+describe('mapEvent — todo.updated (child session → ignored, not handled)', () => {
+  it('child todo.updated falls through to default ignore in handleChildEvent', () => {
+    const CHILD_ID = 'ses_child_todo'
+    const PARENT_CALL_ID = 'call_task_todo'
+    const childSessions = new Map([[CHILD_ID, PARENT_CALL_ID]])
+
+    const ev = makeEvent('todo.updated', {
+      sessionID: CHILD_ID,
+      todos: [{ content: 'Child task', status: 'pending', priority: 'medium' }]
+    })
+    const out = mapEvent(ev, SESSION_ID, new Map(), START_TIME, { value: 0 }, childSessions)
+    // Children do NOT drive the parent widget — child todo.updated is ignored
+    expect(out.kind).toBe('ignore')
+  })
+})

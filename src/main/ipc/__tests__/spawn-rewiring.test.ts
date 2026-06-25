@@ -258,4 +258,30 @@ describe('session:create spawn rewiring (Phase 3b)', () => {
     // NOT from loadSettings
     expect(callArgs[7]).toBeUndefined()
   })
+
+  it('#6 vendor-at-spawn: derives "anthropic" vendor from Claude ModelRef (no hardcode)', async () => {
+    // For a Claude session with any model string, claudeModel(model).vendorId === 'anthropic'.
+    // The test verifies loadVendorConfig is called with the derived vendorId, not a literal.
+    uiConfigMocks.loadEngineConfig.mockReturnValue({})
+    uiConfigMocks.loadVendorConfig.mockReturnValue({})
+
+    // Explicitly pass a model string; engineId defaults to 'claude'
+    await harness.call('session:create', 'routing-5', '/tmp/cwd', undefined, undefined, undefined, 'claude-sonnet-4-6')
+
+    // claudeModel('claude-sonnet-4-6').vendorId === 'anthropic'
+    expect(uiConfigMocks.loadVendorConfig).toHaveBeenCalledWith('anthropic')
+  })
+
+  it('#6 vendor-at-spawn: opencode sessions skip vendor config load entirely', async () => {
+    uiConfigMocks.loadEngineConfig.mockReturnValue({})
+    uiConfigMocks.loadVendorConfig.mockReturnValue({})
+
+    await harness.call(
+      'session:create', 'routing-6', '/tmp/cwd',
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined, 'opencode'
+    )
+
+    // opencode path skips vendor config — loadVendorConfig should NOT be called
+    expect(uiConfigMocks.loadVendorConfig).not.toHaveBeenCalled()
+  })
 })

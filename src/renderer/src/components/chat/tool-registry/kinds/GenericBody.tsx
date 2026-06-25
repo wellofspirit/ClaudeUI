@@ -10,14 +10,17 @@
  */
 
 import { TerminalView } from '../../TerminalView'
-import { trunc } from '../../ToolCallBlock/utils'
+import { ExpandableText } from './ExpandableText'
 import type { KindBodyProps } from './types'
+
+const DEFAULT_MAX_CHARS = 5000
 
 export function GenericBody({
   block,
   result,
   hideToolInput,
-  isError
+  isError,
+  toolOutputMaxChars = DEFAULT_MAX_CHARS
 }: KindBodyProps): React.JSX.Element | null {
   const text = result?.toolResult ?? ''
   const hasResult = !!result
@@ -48,7 +51,7 @@ export function GenericBody({
           )}
           {resultIsError ? (
             <pre className="text-[12px] font-mono whitespace-pre-wrap break-words overflow-y-auto leading-[1.3] bg-bg-primary rounded-md p-2 border border-border text-danger">
-              {trunc(text, 2000)}
+              <ExpandableText text={text} limit={toolOutputMaxChars} />
             </pre>
           ) : (
             <TerminalView text={text} />

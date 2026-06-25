@@ -10,11 +10,16 @@ import type {
   AccountsState,
   EngineConfig,
   VendorConfig,
+  AnthropicEndpointSettings,
+  ModelOverrideSettings,
   SandboxSettings,
   VendorAuthMap,
   VendorAuthOption,
   AutoModeConfig,
-  ModelInfo
+  ModelInfo,
+  OpencodeProviderSettings,
+  OpencodeAgentSettings,
+  OpencodeConfigSettings
 } from '../../../../shared/types'
 import { VOICE_LANGUAGES } from '../../../../shared/types'
 import {
@@ -22,7 +27,9 @@ import {
   defaultEffort,
   type EffortLevel,
   type AutonomyMode,
-  CLAUDE_ENGINE_CAPABILITIES
+  type EngineCapabilities,
+  CLAUDE_ENGINE_CAPABILITIES,
+  OPENCODE_ENGINE_CAPABILITIES
 } from '../../../../shared/model-capabilities'
 import {
   SettingsToggle,
@@ -507,48 +514,113 @@ function OpencodeAutoModeSection(): React.JSX.Element {
   )
 }
 
-// ── Vendor Anthropic display (read-only) ─────────────────────────────
+// ── Vendor Anthropic editable form ───────────────────────────────────
 
-function VendorAnthropicDisplaySection(): React.JSX.Element {
-  const [vendorCfg, setVendorCfg] = useState<VendorConfig | null>(null)
+const DEFAULT_ENDPOINT: AnthropicEndpointSettings = { enabled: false, baseUrl: '', authToken: '' }
+const DEFAULT_MODEL_OVERRIDE: ModelOverrideSettings = {
+  enabled: false,
+  model: '',
+  sonnetModel: '',
+  opusModel: '',
+  haikuModel: ''
+}
 
-  useEffect(() => {
-    window.api
-      .loadVendorConfig('anthropic')
-      .then(setVendorCfg)
-      .catch(() => {})
-  }, [])
+function VendorAnthropicEditableForm({
+  vendorConfig,
+  updateVendorConfig
+}: {
+  vendorConfig: VendorConfig
+  updateVendorConfig: (p: Partial<VendorConfig>) => void
+}): React.JSX.Element {
+  const endpoint: AnthropicEndpointSettings = vendorConfig.endpoint ?? DEFAULT_ENDPOINT
+  const modelOverride: ModelOverrideSettings = vendorConfig.modelOverride ?? DEFAULT_MODEL_OVERRIDE
 
-  const endpoint = vendorCfg?.endpoint
-  const modelOverride = vendorCfg?.modelOverride
+  const inputClass =
+    'bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors'
+
+  const modelFields: { field: keyof ModelOverrideSettings; label: string }[] = [
+    { field: 'model', label: 'Model (default)' },
+    { field: 'sonnetModel', label: 'Sonnet model' },
+    { field: 'opusModel', label: 'Opus model' },
+    { field: 'haikuModel', label: 'Haiku model' }
+  ]
 
   return (
-    <div className="px-3 py-1.5 text-[13px] text-text-secondary space-y-2">
-      <div>
-        <div className="text-[11px] text-text-muted uppercase tracking-wide mb-1">Endpoint</div>
-        {endpoint?.enabled ? (
-          <div className="text-[12px] font-mono text-text-secondary truncate">
-            {endpoint.baseUrl || '(none)'}
+    <div className="px-3 py-1.5 text-[13px] text-text-secondary space-y-4">
+      {/* Endpoint */}
+      <div className="space-y-2">
+        <div className="text-[11px] text-text-muted uppercase tracking-wide">Endpoint</div>
+        <SettingsToggle
+          label="Enable custom endpoint"
+          checked={endpoint.enabled}
+          onChange={(v) =>
+            updateVendorConfig({ endpoint: { ...endpoint, enabled: v } })
+          }
+        />
+        {endpoint.enabled && (
+          <div className="space-y-1.5 pl-1">
+            <div>
+              <div className="text-[10px] text-text-muted mb-0.5">Base URL</div>
+              <input
+                type="text"
+                className={`${inputClass} w-full`}
+                placeholder="https://api.anthropic.com"
+                value={endpoint.baseUrl}
+                onChange={(e) =>
+                  updateVendorConfig({ endpoint: { ...endpoint, baseUrl: e.target.value } })
+                }
+              />
+            </div>
+            <div>
+              <div className="text-[10px] text-text-muted mb-0.5">Auth token</div>
+              <input
+                type="password"
+                className={`${inputClass} w-full`}
+                placeholder="sk-ant-..."
+                value={endpoint.authToken}
+                onChange={(e) =>
+                  updateVendorConfig({ endpoint: { ...endpoint, authToken: e.target.value } })
+                }
+              />
+            </div>
           </div>
-        ) : (
-          <div className="text-[11px] text-text-muted/60">Default Anthropic API</div>
         )}
       </div>
-      <div>
-        <div className="text-[11px] text-text-muted uppercase tracking-wide mb-1">Model override</div>
-        {modelOverride?.enabled ? (
-          <div className="text-[11px] text-text-muted space-y-0.5">
-            {modelOverride.model && <div>Model: <span className="font-mono text-text-secondary">{modelOverride.model}</span></div>}
-            {modelOverride.sonnetModel && <div>Sonnet: <span className="font-mono text-text-secondary">{modelOverride.sonnetModel}</span></div>}
-            {modelOverride.opusModel && <div>Opus: <span className="font-mono text-text-secondary">{modelOverride.opusModel}</span></div>}
-            {modelOverride.haikuModel && <div>Haiku: <span className="font-mono text-text-secondary">{modelOverride.haikuModel}</span></div>}
+
+      {/* Model override */}
+      <div className="space-y-2">
+        <div className="text-[11px] text-text-muted uppercase tracking-wide">Model override</div>
+        <SettingsToggle
+          label="Enable model override"
+          checked={modelOverride.enabled}
+          onChange={(v) =>
+            updateVendorConfig({ modelOverride: { ...modelOverride, enabled: v } })
+          }
+        />
+        {modelOverride.enabled && (
+          <div className="space-y-1.5 pl-1">
+            {modelFields.map(({ field, label }) => (
+              <div key={String(field)}>
+                <div className="text-[10px] text-text-muted mb-0.5">{label}</div>
+                <input
+                  type="text"
+                  className={`${inputClass} w-full`}
+                  placeholder={`e.g. claude-${field === 'model' ? '3-5-sonnet-latest' : String(field).replace('Model', '-latest')}`}
+                  value={modelOverride[field] as string}
+                  onChange={(e) =>
+                    updateVendorConfig({
+                      modelOverride: { ...modelOverride, [field]: e.target.value }
+                    })
+                  }
+                />
+              </div>
+            ))}
           </div>
-        ) : (
-          <div className="text-[11px] text-text-muted/60">No override</div>
         )}
       </div>
+
       <div className="text-[10px] text-text-muted/50 leading-relaxed">
-        Edit these in engines/claude.json and vendors/anthropic.json under ~/.claude/ui/. Changes apply on next session start.
+        Changes apply on next session start. Persists to vendors/anthropic.json.
       </div>
     </div>
   )
@@ -852,21 +924,534 @@ function VendorOpencodeSection(): React.JSX.Element {
   )
 }
 
-// ── Nav tree types ───────────────────────────────────────────────────
+// ── opencode Models section ──────────────────────────────────────────
 
-export interface NavChild {
-  id: string
-  label: string
-  badge?: string
-  sections: Section[]
+/** Known primary agent names exposed by opencode. */
+const KNOWN_AGENT_NAMES = ['build', 'plan', 'general', 'explore', 'title', 'summary', 'compaction']
+
+/**
+ * Default model + small model selects for the opencode engine.
+ * Self-gates on opencode availability (mirrors OpencodeAutoModeSection).
+ */
+function OpencodeModelsSection(): React.JSX.Element {
+  const [engineCfg, setEngineCfg] = useState<EngineConfig | null>(null)
+  const [models, setModels] = useState<ModelInfo[]>([])
+  const [available, setAvailable] = useState(false)
+
+  useEffect(() => {
+    window.api
+      .loadEngineConfig('opencode')
+      .then(setEngineCfg)
+      .catch(() => setEngineCfg({}))
+    window.api
+      .getEngineModels()
+      .then((groups) => {
+        const oc = groups.filter((g) => g.engineId === 'opencode')
+        setAvailable(oc.length > 0)
+        setModels(oc.flatMap((g) => g.models))
+      })
+      .catch(() => {})
+  }, [])
+
+  if (engineCfg === null) {
+    return <div className="px-3 py-1.5 text-[13px] text-text-muted">Loading…</div>
+  }
+  if (!available) {
+    return (
+      <div className="px-3 py-2 text-[12px] text-text-muted/70 leading-relaxed">
+        opencode is not installed. Model settings apply to opencode sessions.
+      </div>
+    )
+  }
+
+  const cfg = engineCfg.opencodeConfig ?? {}
+
+  const update = (patch: Partial<OpencodeConfigSettings>): void => {
+    const next: EngineConfig = { ...engineCfg, opencodeConfig: { ...cfg, ...patch } }
+    setEngineCfg(next)
+    window.api.saveEngineConfig('opencode', next).catch(() => {})
+  }
+
+  const modelOptions = [
+    { value: '', label: 'Default (use opencode default)' },
+    ...models.map((m) => ({ value: m.value, label: m.displayName || m.value }))
+  ]
+
+  return (
+    <div className="space-y-1">
+      <div className="px-3 py-1.5 text-[13px] text-text-secondary">
+        <div className="mb-1 flex items-center gap-1">
+          Default model
+          <InfoTooltip text="The primary model for opencode sessions. Format: provider/model-id, e.g. anthropic/claude-sonnet-4-6. Applies on next cwd spawn." />
+        </div>
+        <select
+          value={cfg.model ?? ''}
+          onChange={(e) => update({ model: e.target.value || undefined })}
+          className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors"
+        >
+          {modelOptions.map((o) => (
+            <option key={o.value} value={o.value}>
+              {o.label}
+            </option>
+          ))}
+        </select>
+      </div>
+      <div className="px-3 py-1.5 text-[13px] text-text-secondary">
+        <div className="mb-1 flex items-center gap-1">
+          Small model
+          <InfoTooltip text="A cheaper/faster model used by opencode for lightweight tasks (titles, summaries). Format: provider/model-id." />
+        </div>
+        <select
+          value={cfg.smallModel ?? ''}
+          onChange={(e) => update({ smallModel: e.target.value || undefined })}
+          className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors"
+        >
+          {modelOptions.map((o) => (
+            <option key={o.value} value={o.value}>
+              {o.label}
+            </option>
+          ))}
+        </select>
+      </div>
+      <div className="px-3 pb-1 text-[10px] text-text-muted/50 leading-relaxed">
+        Changes apply on the next opencode server start for each working directory.
+      </div>
+    </div>
+  )
 }
 
-export interface NavGroup {
-  id: string
-  label: string
-  icon: React.JSX.Element
-  sections?: Section[]
-  children?: NavChild[]
+// ── opencode Providers section ───────────────────────────────────────
+
+const inputClass =
+  'bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors'
+
+/**
+ * A provider row carries two distinct identities:
+ *   _key — stable React/list key + modelTexts map key; never changes during the
+ *          session, so editing the provider id doesn't remount the row.
+ *   _id  — the EDITABLE opencode provider id (the map key used at save time).
+ */
+type ProviderRow = OpencodeProviderSettings & { _key: string; _id: string }
+
+/** Empty provider row factory — stable _key, blank editable id. */
+function newProvider(): ProviderRow {
+  return { _key: crypto.randomUUID(), _id: '', name: '', baseURL: '', models: [] }
+}
+
+/**
+ * Custom OpenAI-compatible provider editor + disabled/enabled provider toggles.
+ * API keys are NOT managed here — those live in the "opencode Vendors" auth section.
+ */
+function OpencodeProvidersSection(): React.JSX.Element {
+  const [engineCfg, setEngineCfg] = useState<EngineConfig | null>(null)
+  const [available, setAvailable] = useState(false)
+  const [knownProviders, setKnownProviders] = useState<string[]>([])
+  // Local editing state for provider rows (has a transient _id key for React diffing)
+  const [providerRows, setProviderRows] = useState<ProviderRow[]>([])
+  // Per-row model-id textarea string
+  const [modelTexts, setModelTexts] = useState<Record<string, string>>({})
+
+  useEffect(() => {
+    window.api
+      .loadEngineConfig('opencode')
+      .then((cfg) => {
+        setEngineCfg(cfg)
+        // Hydrate provider rows from saved config. The saved provider id becomes
+        // both the stable _key and the editable _id.
+        const saved = cfg.opencodeConfig?.providers ?? {}
+        const rows: ProviderRow[] = Object.entries(saved).map(([id, p]) => ({
+          _key: id,
+          _id: id,
+          name: p.name ?? '',
+          baseURL: p.baseURL ?? '',
+          models: p.models ?? []
+        }))
+        setProviderRows(rows)
+        setModelTexts(
+          Object.fromEntries(
+            rows.map((r) => [r._key, (r.models ?? []).map((m) => m.id).join('\n')])
+          )
+        )
+      })
+      .catch(() => setEngineCfg({}))
+    window.api
+      .getEngineModels()
+      .then((groups) => {
+        const oc = groups.filter((g) => g.engineId === 'opencode')
+        setAvailable(oc.length > 0)
+        // Derive known provider ids from model value prefixes (e.g. "anthropic/...")
+        const prefixes = new Set(
+          oc
+            .flatMap((g) => g.models)
+            .map((m) => m.value.split('/')[0])
+            .filter(Boolean)
+        )
+        setKnownProviders([...prefixes].sort())
+      })
+      .catch(() => {})
+  }, [])
+
+  if (engineCfg === null) {
+    return <div className="px-3 py-1.5 text-[13px] text-text-muted">Loading…</div>
+  }
+  if (!available) {
+    return (
+      <div className="px-3 py-2 text-[12px] text-text-muted/70 leading-relaxed">
+        opencode is not installed. Provider settings apply to opencode sessions.
+      </div>
+    )
+  }
+
+  const cfg = engineCfg.opencodeConfig ?? {}
+
+  const saveProviders = (rows: ProviderRow[], texts: Record<string, string>): void => {
+    // Reconstruct providers Record from rows, mapping model text → {id,name?}[].
+    // The Record is keyed by the editable provider id (_id); model text is read
+    // by the stable row key (_key). Rows with an empty id are skipped.
+    const providers: Record<string, OpencodeProviderSettings> = {}
+    for (const row of rows) {
+      if (!row._id.trim()) continue
+      const modelIds = (texts[row._key] ?? '')
+        .split('\n')
+        .map((s) => s.trim())
+        .filter(Boolean)
+      const entry: OpencodeProviderSettings = {}
+      if (row.name) entry.name = row.name
+      if (row.baseURL) entry.baseURL = row.baseURL
+      if (modelIds.length > 0) entry.models = modelIds.map((id) => ({ id }))
+      providers[row._id] = entry
+    }
+    const next: EngineConfig = {
+      ...engineCfg,
+      opencodeConfig: {
+        ...cfg,
+        providers: Object.keys(providers).length > 0 ? providers : undefined
+      }
+    }
+    setEngineCfg(next)
+    window.api.saveEngineConfig('opencode', next).catch(() => {})
+  }
+
+  const updateRow = (key: string, patch: Partial<ProviderRow>): void => {
+    const next = providerRows.map((r) => (r._key === key ? { ...r, ...patch } : r))
+    setProviderRows(next)
+    saveProviders(next, modelTexts)
+  }
+
+  const updateModelText = (key: string, text: string): void => {
+    const next = { ...modelTexts, [key]: text }
+    setModelTexts(next)
+    saveProviders(providerRows, next)
+  }
+
+  const addRow = (): void => {
+    const row = newProvider()
+    const next = [...providerRows, row]
+    setProviderRows(next)
+    setModelTexts((prev) => ({ ...prev, [row._key]: '' }))
+  }
+
+  const removeRow = (key: string): void => {
+    const next = providerRows.filter((r) => r._key !== key)
+    setProviderRows(next)
+    const nextTexts = { ...modelTexts }
+    delete nextTexts[key]
+    setModelTexts(nextTexts)
+    saveProviders(next, nextTexts)
+  }
+
+  const saveProviderLists = (patch: Partial<OpencodeConfigSettings>): void => {
+    const next: EngineConfig = { ...engineCfg, opencodeConfig: { ...cfg, ...patch } }
+    setEngineCfg(next)
+    window.api.saveEngineConfig('opencode', next).catch(() => {})
+  }
+
+  const disabledProviders = cfg.disabledProviders ?? []
+  const enabledProviders = cfg.enabledProviders ?? []
+
+  return (
+    <div className="space-y-3 px-3 py-1.5 text-[13px] text-text-secondary">
+      {/* Custom providers editor */}
+      <div className="space-y-2">
+        <div className="text-[11px] text-text-muted uppercase tracking-wide">
+          Custom providers (OpenAI-compatible)
+        </div>
+        <div className="text-[10px] text-text-muted/60 leading-relaxed">
+          Add self-hosted or compatible endpoints. Set API keys in the <em>Vendor</em> section above.
+        </div>
+        {providerRows.map((row) => (
+          <div key={row._key} className="border border-border/30 rounded-md p-2 space-y-1.5">
+            <div className="flex items-center gap-1.5">
+              <input
+                type="text"
+                placeholder="Provider id (e.g. my-ollama)"
+                value={row._id}
+                onChange={(e) => updateRow(row._key, { _id: e.target.value })}
+                className={`${inputClass} flex-1`}
+              />
+              <button
+                onClick={() => removeRow(row._key)}
+                className="text-[10px] text-text-muted/60 hover:text-red-400 transition-colors px-1"
+                title="Remove provider"
+              >
+                ✕
+              </button>
+            </div>
+            <input
+              type="text"
+              placeholder="Display name (optional)"
+              value={row.name ?? ''}
+              onChange={(e) => updateRow(row._key, { name: e.target.value })}
+              className={`${inputClass} w-full`}
+            />
+            <input
+              type="url"
+              placeholder="Base URL (e.g. http://localhost:11434/v1)"
+              value={row.baseURL ?? ''}
+              onChange={(e) => updateRow(row._key, { baseURL: e.target.value })}
+              className={`${inputClass} w-full`}
+            />
+            <div>
+              <div className="text-[10px] text-text-muted mb-0.5">
+                Model ids (one per line, optional)
+              </div>
+              <textarea
+                placeholder={'llama3.2\nmistral-7b'}
+                value={modelTexts[row._key] ?? ''}
+                onChange={(e) => updateModelText(row._key, e.target.value)}
+                rows={3}
+                className={`${inputClass} w-full resize-none`}
+              />
+            </div>
+          </div>
+        ))}
+        <button
+          onClick={addRow}
+          className="text-[11px] text-accent hover:text-accent/80 transition-colors"
+        >
+          + Add provider
+        </button>
+      </div>
+
+      {/* Disabled providers */}
+      {knownProviders.length > 0 && (
+        <div className="space-y-1.5">
+          <div className="text-[11px] text-text-muted uppercase tracking-wide">
+            Disable providers
+          </div>
+          <div className="text-[10px] text-text-muted/60 leading-relaxed">
+            Disabled providers are hidden from model pickers.
+          </div>
+          {knownProviders.map((id) => (
+            <SettingsToggle
+              key={id}
+              label={id}
+              checked={!disabledProviders.includes(id)}
+              onChange={(enabled) => {
+                const next = enabled
+                  ? disabledProviders.filter((p) => p !== id)
+                  : [...disabledProviders, id]
+                saveProviderLists({
+                  disabledProviders: next.length > 0 ? next : undefined
+                })
+              }}
+            />
+          ))}
+        </div>
+      )}
+
+      {/* Enabled (allowlist) providers */}
+      <div className="space-y-1.5">
+        <div className="text-[11px] text-text-muted uppercase tracking-wide">
+          Enable-only providers (allowlist)
+        </div>
+        <div className="text-[10px] text-text-muted/60 leading-relaxed">
+          When set, only these providers are available (overrides the disable list). One provider id per
+          line.
+        </div>
+        <textarea
+          placeholder={'anthropic\nopenai'}
+          value={enabledProviders.join('\n')}
+          onChange={(e) => {
+            const next = e.target.value
+              .split('\n')
+              .map((s) => s.trim())
+              .filter(Boolean)
+            saveProviderLists({ enabledProviders: next.length > 0 ? next : undefined })
+          }}
+          rows={3}
+          className={`${inputClass} w-full resize-none`}
+        />
+      </div>
+
+      <div className="text-[10px] text-text-muted/50 leading-relaxed">
+        Changes apply on the next opencode server start for each working directory.
+      </div>
+    </div>
+  )
+}
+
+// ── opencode Agents section ──────────────────────────────────────────
+
+function OpencodeAgentsSection(): React.JSX.Element {
+  const [engineCfg, setEngineCfg] = useState<EngineConfig | null>(null)
+  const [models, setModels] = useState<ModelInfo[]>([])
+  const [available, setAvailable] = useState(false)
+  const [newAgentName, setNewAgentName] = useState('')
+
+  useEffect(() => {
+    window.api
+      .loadEngineConfig('opencode')
+      .then(setEngineCfg)
+      .catch(() => setEngineCfg({}))
+    window.api
+      .getEngineModels()
+      .then((groups) => {
+        const oc = groups.filter((g) => g.engineId === 'opencode')
+        setAvailable(oc.length > 0)
+        setModels(oc.flatMap((g) => g.models))
+      })
+      .catch(() => {})
+  }, [])
+
+  if (engineCfg === null) {
+    return <div className="px-3 py-1.5 text-[13px] text-text-muted">Loading…</div>
+  }
+  if (!available) {
+    return (
+      <div className="px-3 py-2 text-[12px] text-text-muted/70 leading-relaxed">
+        opencode is not installed. Agent settings apply to opencode sessions.
+      </div>
+    )
+  }
+
+  const cfg = engineCfg.opencodeConfig ?? {}
+  const agents = cfg.agents ?? {}
+
+  const saveAgents = (next: Record<string, OpencodeAgentSettings>): void => {
+    const nextCfg: EngineConfig = {
+      ...engineCfg,
+      opencodeConfig: {
+        ...cfg,
+        agents: Object.keys(next).length > 0 ? next : undefined
+      }
+    }
+    setEngineCfg(nextCfg)
+    window.api.saveEngineConfig('opencode', nextCfg).catch(() => {})
+  }
+
+  const updateAgent = (name: string, patch: Partial<OpencodeAgentSettings>): void => {
+    saveAgents({ ...agents, [name]: { ...agents[name], ...patch } })
+  }
+
+  const removeAgent = (name: string): void => {
+    const next = { ...agents }
+    delete next[name]
+    saveAgents(next)
+  }
+
+  const addAgent = (): void => {
+    const name = newAgentName.trim()
+    if (!name || agents[name]) return
+    saveAgents({ ...agents, [name]: {} })
+    setNewAgentName('')
+  }
+
+  // All configured + suggestions for unconfigured known agents
+  const configuredNames = Object.keys(agents)
+  const suggestedNames = KNOWN_AGENT_NAMES.filter((n) => !configuredNames.includes(n))
+
+  const modelOptions = [
+    { value: '', label: 'Default (inherit session model)' },
+    ...models.map((m) => ({ value: m.value, label: m.displayName || m.value }))
+  ]
+
+  return (
+    <div className="space-y-3 px-3 py-1.5 text-[13px] text-text-secondary">
+      <div className="text-[10px] text-text-muted/60 leading-relaxed">
+        Override the model and temperature for specific opencode agents. Known agents: {KNOWN_AGENT_NAMES.join(', ')}.
+      </div>
+
+      {/* Configured agent overrides */}
+      {configuredNames.map((name) => {
+        const a = agents[name]
+        return (
+          <div key={name} className="border border-border/30 rounded-md p-2 space-y-1.5">
+            <div className="flex items-center justify-between">
+              <span className="text-[12px] font-medium">{name}</span>
+              <button
+                onClick={() => removeAgent(name)}
+                className="text-[10px] text-text-muted/60 hover:text-red-400 transition-colors"
+              >
+                Remove
+              </button>
+            </div>
+            <div>
+              <div className="text-[10px] text-text-muted mb-0.5">Model</div>
+              <select
+                value={a.model ?? ''}
+                onChange={(e) => updateAgent(name, { model: e.target.value || undefined })}
+                className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors"
+              >
+                {modelOptions.map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <SettingsSlider
+              label="Temperature"
+              value={a.temperature ?? 0}
+              min={0}
+              max={2}
+              step={0.05}
+              onChange={(v) => updateAgent(name, { temperature: v > 0 ? v : undefined })}
+              formatValue={(v) => v.toFixed(2)}
+            />
+          </div>
+        )
+      })}
+
+      {/* Add agent row */}
+      <div className="space-y-1.5">
+        <div className="text-[11px] text-text-muted uppercase tracking-wide">Add agent override</div>
+        <div className="flex items-center gap-1.5">
+          <select
+            value={newAgentName}
+            onChange={(e) => setNewAgentName(e.target.value)}
+            className={`${inputClass} flex-1`}
+          >
+            <option value="">Select or type agent name…</option>
+            {suggestedNames.map((n) => (
+              <option key={n} value={n}>
+                {n}
+              </option>
+            ))}
+          </select>
+          <input
+            type="text"
+            placeholder="custom name"
+            value={newAgentName}
+            onChange={(e) => setNewAgentName(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && addAgent()}
+            className={`${inputClass} flex-1`}
+          />
+          <button
+            onClick={addAgent}
+            disabled={!newAgentName.trim() || !!agents[newAgentName.trim()]}
+            className="px-2 py-1 text-[11px] rounded bg-accent/20 hover:bg-accent/30 text-accent disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+          >
+            Add
+          </button>
+        </div>
+      </div>
+
+      <div className="text-[10px] text-text-muted/50 leading-relaxed">
+        Changes apply on the next opencode server start for each working directory.
+      </div>
+    </div>
+  )
 }
 
 // ── SECTIONS data ────────────────────────────────────────────────────
@@ -1160,6 +1745,22 @@ export const SECTIONS: Section[] = [
             label="Expand thinking"
             checked={s.expandThinking}
             onChange={(v) => u({ expandThinking: v })}
+          />
+        )
+      },
+      {
+        key: 'toolOutputMaxChars',
+        label: 'Max output chars',
+        keywords: 'truncate show more limit tool output chars characters',
+        render: (s, u) => (
+          <SettingsSlider
+            label="Max output chars"
+            value={s.toolOutputMaxChars}
+            min={500}
+            max={50000}
+            step={500}
+            onChange={(v) => u({ toolOutputMaxChars: v })}
+            formatValue={(v) => `${v.toLocaleString()} chars`}
           />
         )
       }
@@ -1651,10 +2252,12 @@ export const SECTIONS: Section[] = [
     ),
     items: [
       {
-        key: 'vendorAnthropicDisplay',
-        label: 'Anthropic vendor config',
+        key: 'vendorAnthropicEndpoint',
+        label: 'Endpoint & model override',
         keywords: 'anthropic endpoint model override vendor gateway custom url api token',
-        render: () => <VendorAnthropicDisplaySection />
+        render: (_s, _u, _e, _ue, v, uv) => (
+          <VendorAnthropicEditableForm vendorConfig={v} updateVendorConfig={uv} />
+        )
       }
     ]
   },
@@ -2375,6 +2978,61 @@ export const SECTIONS: Section[] = [
         render: () => <OpencodeAutoModeSection />
       }
     ]
+  },
+  {
+    id: 'opencode-models',
+    label: 'Models',
+    icon: (
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        <ellipse cx="12" cy="5" rx="9" ry="3" />
+        <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3" />
+        <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'opencodeModels',
+        label: 'Default model',
+        keywords: 'opencode model default small fast cheap provider',
+        render: () => <OpencodeModelsSection />
+      }
+    ]
+  },
+  {
+    id: 'opencode-providers',
+    label: 'Providers',
+    icon: (
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        <rect x="2" y="7" width="20" height="14" rx="2" ry="2" />
+        <path d="M16 21V5a2 2 0 00-2-2h-4a2 2 0 00-2 2v16" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'opencodeProviders',
+        label: 'Custom providers',
+        keywords: 'opencode provider custom openai compatible self-hosted disable enable base url ollama',
+        render: () => <OpencodeProvidersSection />
+      }
+    ]
+  },
+  {
+    id: 'opencode-agents',
+    label: 'Agents',
+    icon: (
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        <circle cx="12" cy="8" r="4" />
+        <path d="M20 21a8 8 0 10-16 0" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'opencodeAgents',
+        label: 'Agent overrides',
+        keywords: 'opencode agent model temperature build plan general explore override',
+        render: () => <OpencodeAgentsSection />
+      }
+    ]
   }
 ]
 
@@ -2392,7 +3050,7 @@ const ENGINE_CLAUDE_SECTION_IDS = new Set([
 ])
 
 /** Section ids that belong to Engines > opencode (content self-gates on install) */
-const ENGINE_OPENCODE_SECTION_IDS = new Set(['opencode-automode'])
+const ENGINE_OPENCODE_SECTION_IDS = new Set(['opencode-automode', 'opencode-models'])
 
 /** Section ids that belong to Vendors > Anthropic */
 const VENDOR_ANTHROPIC_SECTION_IDS = new Set([
@@ -2400,85 +3058,141 @@ const VENDOR_ANTHROPIC_SECTION_IDS = new Set([
 ])
 
 /** Section ids that belong to Vendors > opencode (gated: only shown when opencode engine installs) */
-const VENDOR_OPENCODE_SECTION_IDS = new Set(['vendor-opencode'])
+const VENDOR_OPENCODE_SECTION_IDS = new Set(['vendor-opencode', 'opencode-providers'])
+
+/** Section ids that belong to opencode Agents subgroup */
+const AGENTS_OPENCODE_SECTION_IDS = new Set(['opencode-agents'])
 
 /** Section ids that belong to Accounts (flat) */
 const ACCOUNTS_SECTION_IDS = new Set(['accounts'])
 
-function getSectionsForIds(ids: Set<string>): Section[] {
-  return SECTIONS.filter((s) => ids.has(s.id))
+function getSectionsForIds(ids: Set<string>, order?: string[]): Section[] {
+  if (!order) return SECTIONS.filter((s) => ids.has(s.id))
+  return order
+    .filter((id) => ids.has(id))
+    .map((id) => SECTIONS.find((s) => s.id === id)!)
+    .filter(Boolean)
 }
 
-export const NAV_GROUPS: NavGroup[] = [
+// ── Scoped navigation (Option A, ADR settings-ia-refactor) ──────────
+
+export type SettingsScope = 'common' | 'claude' | 'opencode'
+
+export interface ScopeSubgroup {
+  id: string
+  label?: string // undefined = flat (no header)
+  sections: Section[]
+}
+
+export interface ScopeDef {
+  id: SettingsScope
+  label: string
+  subgroups: ScopeSubgroup[]
+}
+
+/**
+ * Ordered scope→section mapping. This is the authoritative section order
+ * within each scope (fixes the flat SECTIONS order divergence bug).
+ */
+export const SCOPES: ScopeDef[] = [
   {
-    id: 'app',
-    label: 'App',
-    icon: (
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-        <rect x="3" y="3" width="7" height="7" />
-        <rect x="14" y="3" width="7" height="7" />
-        <rect x="14" y="14" width="7" height="7" />
-        <rect x="3" y="14" width="7" height="7" />
-      </svg>
-    ),
-    sections: getSectionsForIds(APP_SECTION_IDS)
-  },
-  {
-    id: 'engines',
-    label: 'Engines',
-    icon: (
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M12 2L4 6v12l8 4 8-4V6z" />
-        <path d="M4 6l8 4 8-4" />
-        <line x1="12" y1="22" x2="12" y2="10" />
-      </svg>
-    ),
-    children: [
+    id: 'common',
+    label: 'Common',
+    subgroups: [
       {
-        id: 'engine-claude',
-        label: 'Claude',
-        sections: getSectionsForIds(ENGINE_CLAUDE_SECTION_IDS)
-      },
-      {
-        id: 'engine-opencode',
-        label: 'opencode',
-        sections: getSectionsForIds(ENGINE_OPENCODE_SECTION_IDS)
+        id: 'common-app',
+        label: undefined,
+        sections: getSectionsForIds(APP_SECTION_IDS, [
+          'appearance', 'chat', 'session', 'tool-output', 'diff', 'git',
+          'status-line', 'usage', 'logging', 'voice', 'remote', 'mockup'
+        ])
       }
     ]
   },
   {
-    id: 'vendors',
-    label: 'Vendors',
-    icon: (
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-        <circle cx="12" cy="12" r="10" />
-        <line x1="2" y1="12" x2="22" y2="12" />
-        <path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z" />
-      </svg>
-    ),
-    children: [
+    id: 'claude',
+    label: 'Claude',
+    subgroups: [
       {
-        id: 'vendor-anthropic-nav',
-        label: 'Anthropic',
-        sections: getSectionsForIds(VENDOR_ANTHROPIC_SECTION_IDS)
+        id: 'claude-engine',
+        label: 'Engine',
+        sections: getSectionsForIds(ENGINE_CLAUDE_SECTION_IDS, ['permissions', 'sandbox', 'proxy'])
       },
       {
-        id: 'vendor-opencode-nav',
-        label: 'opencode',
-        sections: getSectionsForIds(VENDOR_OPENCODE_SECTION_IDS)
+        id: 'claude-vendor',
+        label: 'Vendor · Anthropic',
+        sections: getSectionsForIds(VENDOR_ANTHROPIC_SECTION_IDS, ['vendor-anthropic', 'effortDefaults'])
+      },
+      {
+        id: 'claude-account',
+        label: 'Account',
+        sections: getSectionsForIds(ACCOUNTS_SECTION_IDS, ['accounts'])
       }
     ]
   },
   {
-    id: 'accounts-group',
-    label: 'Accounts',
-    icon: (
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M16 21v-2a4 4 0 00-4-4H6a4 4 0 00-4 4v2" />
-        <circle cx="9" cy="7" r="4" />
-        <path d="M22 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75" />
-      </svg>
-    ),
-    sections: getSectionsForIds(ACCOUNTS_SECTION_IDS)
+    id: 'opencode',
+    label: 'opencode',
+    subgroups: [
+      {
+        id: 'opencode-engine',
+        label: 'Engine',
+        sections: getSectionsForIds(ENGINE_OPENCODE_SECTION_IDS, ['opencode-automode', 'opencode-models'])
+      },
+      {
+        id: 'opencode-vendor',
+        label: 'Vendor',
+        sections: getSectionsForIds(VENDOR_OPENCODE_SECTION_IDS, ['vendor-opencode', 'opencode-providers'])
+      },
+      {
+        id: 'opencode-agents',
+        label: 'Agents',
+        sections: getSectionsForIds(AGENTS_OPENCODE_SECTION_IDS, ['opencode-agents'])
+      }
+    ]
   }
 ]
+
+/** Map from section id → scope id, for search + selection logic */
+export const SECTION_SCOPE_MAP: ReadonlyMap<string, SettingsScope> = new Map(
+  SCOPES.flatMap((scope) =>
+    scope.subgroups.flatMap((sg) =>
+      sg.sections.map((sec): [string, SettingsScope] => [sec.id, scope.id])
+    )
+  )
+)
+
+// ── Per-section capability gating (ROADMAP #12) ──────────────────────
+//
+// A section listed here renders only when the scope's engine has the named
+// EngineCapabilities flag. Sections NOT listed are always visible. Today only
+// the Claude launch-param sections are gated; Claude has both flags true, so
+// there is no user-visible change — the gating is structure-ready for an engine
+// that lacks sandbox/proxy (or for surfacing one of these under opencode later).
+
+/** Boolean EngineCapabilities keys that can gate a section. */
+type GatingCapability = 'sandbox' | 'proxy'
+
+/** sectionId → the EngineCapabilities flag it requires (absent = always shown). */
+export const SECTION_CAPABILITY: Readonly<Record<string, GatingCapability>> = {
+  sandbox: 'sandbox',
+  proxy: 'proxy'
+}
+
+/** Static per-engine capabilities for a settings scope ('common' = engine-agnostic → null). */
+export function scopeCapabilities(scope: SettingsScope): EngineCapabilities | null {
+  if (scope === 'claude') return CLAUDE_ENGINE_CAPABILITIES
+  if (scope === 'opencode') return OPENCODE_ENGINE_CAPABILITIES
+  return null
+}
+
+/**
+ * Whether a section should render, given the scope's engine capabilities.
+ * Gated sections hide when the engine lacks the capability; ungated sections
+ * (and the engine-agnostic 'common' scope, caps=null) always show.
+ */
+export function isSectionVisible(sectionId: string, caps: EngineCapabilities | null): boolean {
+  const flag = SECTION_CAPABILITY[sectionId]
+  if (!flag || !caps) return true
+  return caps[flag] === true
+}

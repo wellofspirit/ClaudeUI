@@ -262,11 +262,51 @@ export interface SandboxSettings {
   excludedCommands: string[]
 }
 
+// ---------------------------------------------------------------------------
+// opencode native config passthrough (stored in engines/opencode.json)
+// ---------------------------------------------------------------------------
+
+/** Per-provider customization injected via OPENCODE_CONFIG_CONTENT. Credentials stay in auth.json. */
+export interface OpencodeProviderSettings {
+  name?: string
+  baseURL?: string
+  models?: { id: string; name?: string }[]
+}
+
+/** Per-agent override injected via OPENCODE_CONFIG_CONTENT. */
+export interface OpencodeAgentSettings {
+  model?: string
+  temperature?: number
+}
+
+/**
+ * opencode-native config stored in engines/opencode.json under `opencodeConfig`.
+ * These fields are injected via OPENCODE_CONFIG_CONTENT at spawn (deep-merge, only
+ * set fields injected — never clobbers the user's own opencode.jsonc).
+ * API credentials stay in auth.json; never inject apiKey here.
+ */
+export interface OpencodeConfigSettings {
+  /** Default model in "provider/model" format, e.g. "anthropic/claude-sonnet-4-6" */
+  model?: string
+  /** Small/fast model in "provider/model" format */
+  smallModel?: string
+  /** Provider ids to disable */
+  disabledProviders?: string[]
+  /** Provider ids to enable (allowlist — others are ignored when set) */
+  enabledProviders?: string[]
+  /** Custom provider definitions keyed by provider id (base URL + optional model list) */
+  providers?: Record<string, OpencodeProviderSettings>
+  /** Per-agent model/temperature overrides keyed by agent name */
+  agents?: Record<string, OpencodeAgentSettings>
+}
+
 export interface EngineConfig {
   sandbox?: SandboxSettings
   proxy?: ProxySettings
   /** opencode auto-mode (LLM permission gatekeeper) settings. See ADR-023. */
   autoMode?: AutoModeConfig
+  /** opencode native config passthrough (injected at spawn via OPENCODE_CONFIG_CONTENT). */
+  opencodeConfig?: OpencodeConfigSettings
 }
 
 /**
@@ -324,7 +364,7 @@ export interface StreamDelta {
   text: string
 }
 
-export type TodoStatus = 'pending' | 'in_progress' | 'completed'
+export type TodoStatus = 'pending' | 'in_progress' | 'completed' | 'cancelled'
 
 export interface TodoItem {
   content: string

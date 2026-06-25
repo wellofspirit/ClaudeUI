@@ -1,6 +1,6 @@
 import { v4 as uuid } from 'uuid'
 import type { OpencodeEvent, QuestionInfo } from './protocol/types'
-import type { ChatMessage, ContentBlock, PendingApproval, SessionResult, AskUserQuestion } from '../../shared/types'
+import type { ChatMessage, ContentBlock, PendingApproval, SessionResult, AskUserQuestion, TodoItem } from '../../shared/types'
 import { suggestOpencodeAllowRule } from './permission-compiler'
 
 // Phase 6: the 5c tool-name normalization hack (OPENCODE_TOOL_NAME_MAP /
@@ -95,6 +95,7 @@ export type MapperOutput =
   | { kind: 'subagent-message'; toolUseId: string; message: ChatMessage }
   | { kind: 'subagent-tool-result'; toolUseId: string; toolResultToolUseId: string; result: string; isError: boolean }
   | { kind: 'task-notification'; notification: import('../../shared/types').TaskNotification }
+  | { kind: 'todos'; items: TodoItem[] }
   | { kind: 'ignore' }
 
 // ── Mapper ────────────────────────────────────────────────────────────────────
@@ -382,6 +383,21 @@ function handleOwnEvent(
       // by session.idle, not this event. Nothing to do here. (Phase A note:
       // subtask command child-session events stay filtered until Phase D.)
       return { kind: 'ignore' }
+
+    case 'todo.updated': {
+      // opencode publishes todo.updated when the agent writes its TodoWrite tool.
+      // Map to a {kind:'todos'} output so OpencodeSession can feed the floating widget.
+      // Shape: { sessionID, todos: [{content, status, priority}] }
+      const rawTodos = props.todos as Array<Record<string, unknown>> | undefined
+      if (!Array.isArray(rawTodos)) return { kind: 'ignore' }
+      const items: TodoItem[] = rawTodos.map((t) => ({
+        content: t.content != null ? String(t.content) : '',
+        // opencode adds 'cancelled'; TodoStatus now includes it — pass through
+        status: (t.status as TodoItem['status']) ?? 'pending',
+        activeForm: '' // opencode todowrite has no activeForm concept
+      }))
+      return { kind: 'todos', items }
+    }
 
     default:
       return { kind: 'ignore' }
