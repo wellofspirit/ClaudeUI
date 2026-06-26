@@ -248,6 +248,25 @@ squash/integration strategy for landing the stack. Not code — a process decisi
 Prior session inventories (pre-Phase-8/9) listed these as deferred; the 2026-06-23 sweep confirms they
 shipped. Recorded here so they're not re-raised:
 
+- **Cross-engine project merge + engine-neutral session delete** (shipped 2026-06-26,
+  `v2-followup-engine-ux-polish`, ADR-025) — the sidebar listed the same physical directory twice when
+  it held both Claude and opencode sessions, because the two engines derived incompatible `projectKey`s
+  for one cwd (Claude = the lossy on-disk dir name `D--WorkPlace-ClaudeUI`; opencode = forward-slashed
+  `D:/WorkPlace/ClaudeUI`). Probed both sources to confirm (Claude's `~/.claude/projects` dir names +
+  opencode's `session.directory` column). Fix: a shared `cwdToProjectKey` (`src/shared/project-key.ts`,
+  `[^A-Za-z0-9]→-`) replicates Claude Code's encoding; opencode derives its key through it and the
+  renderer's in-memory grouping matches on the canonical key (exact-cwd kept as a non-regressing
+  fallback). `projectKey` is now a **derived, one-way render/identity token** — backends keep native
+  identity (opencode stores the real cwd). Deletion became **engine-neutral**: one
+  `deleteSessionByEngine(sessionId, projectKey, engineId?)` dispatcher (called by both the IPC handler
+  and the remote dispatcher) routes opencode → HTTP `DELETE /session/{id}` (engine-owned sessionId,
+  no DB write) and Claude → JSONL/subagent removal; `deleteProject` also clears opencode members so
+  they don't reappear. Review caught a vacuous delete-routing test (a local re-implementation of the
+  dispatch) → replaced by extracting the real dispatcher and testing it (mutation-verified). Real-app
+  verified: `ClaudeUI` collapses to one project (count 53 = the previously-split 24 + 29), the merged
+  group holds both engines' sessions, clean boot. **Deferred follow-up:** the narrower Claude
+  spawn-path encoders (`claude-session.ts:1799` et al., `[/.]→-`) weren't reconciled with the shared
+  helper (daily-driver risk). Spec: `docs/v2/followup-project-merge-delete.md`.
 - **Per-engine session UX polish** (shipped 2026-06-26, `v2-followup-engine-ux-polish`) — three
   user-spotted gaps in the engine UX. **(1)** Removed the explicit `EngineToggle` from all three sites
   (sidebar new-session `rightSlot`, `WelcomeScreen`, empty-chat `WelcomeState`) and deleted the

@@ -245,8 +245,8 @@ const api: ClaudeAPI = {
   saveSettings: (settings) => ipcRenderer.invoke('config:save-settings', settings),
   loadSessionConfig: () => ipcRenderer.invoke('config:load-sessions'),
   saveSessionConfig: (config) => ipcRenderer.invoke('config:save-sessions', config),
-  deleteSession: (sessionId: string, projectKey: string) =>
-    unwrap<void>('session:delete-session', sessionId, projectKey),
+  deleteSession: (sessionId: string, projectKey: string, engineId?: import('../shared/types').EngineId) =>
+    unwrap<void>('session:delete-session', sessionId, projectKey, engineId),
   deleteProject: (projectKey: string) => unwrap<void>('session:delete-project', projectKey),
   loadSlashCommands: () => ipcRenderer.invoke('config:load-slash-commands'),
   saveSlashCommands: (commands) => ipcRenderer.invoke('config:save-slash-commands', commands),

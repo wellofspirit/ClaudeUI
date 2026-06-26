@@ -183,8 +183,8 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
         ClaudeAPI['askSideQuestion']
       >,
 
-    deleteSession: (sessionId, projectKey) =>
-      unwrap('session:delete-session', sessionId, projectKey),
+    deleteSession: (sessionId, projectKey, engineId?) =>
+      unwrap('session:delete-session', sessionId, projectKey, engineId),
     deleteProject: (projectKey) => unwrap('session:delete-project', projectKey),
 
     // Routed session events

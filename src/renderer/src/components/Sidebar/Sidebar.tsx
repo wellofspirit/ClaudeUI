@@ -10,6 +10,7 @@ import type {
 import { useAutomationStore } from '../../stores/automation-store'
 import { useIsMobile } from '../../hooks/useIsMobile'
 import { SidebarView, type DeleteTarget } from './View'
+import { cwdToProjectKey } from '../../../../shared/project-key'
 
 /**
  * Merge opencode SessionInfo[] into an existing DirectoryGroup[] (Claude sessions).
@@ -19,7 +20,7 @@ import { SidebarView, type DeleteTarget } from './View'
  *
  * Called on each poll; produces a new array without mutating the input.
  */
-function mergeOpencodeIntoDirectories(
+export function mergeOpencodeIntoDirectories(
   current: DirectoryGroup[],
   opencodeInfos: SessionInfo[]
 ): DirectoryGroup[] {
@@ -624,23 +625,23 @@ export function Sidebar({
       for (const s of group.sessions) dirSessionIds.add(s.sessionId)
     }
 
-    // Collect in-memory sessions not yet on disk
-    const inMemoryByDir: Record<string, SessionInfo[]> = {}
+    // Collect in-memory sessions not yet on disk, grouped by canonical projectKey
+    const inMemoryByPk: Record<string, SessionInfo[]> = {}
     for (const [rid, data] of Object.entries(sidebarSessions)) {
       if (dirSessionIds.has(rid) || !data.cwd) continue
       const sessionEngineId = (sessionEngines[rid]?.engineId ?? 'claude') as import('../../../../shared/types').EngineId
+      const pk = cwdToProjectKey(data.cwd)
       const info: SessionInfo = {
         sessionId: rid,
         cwd: data.cwd,
-        projectKey: '',
+        projectKey: pk,
         title: data.firstUserText || 'New session',
         timestamp: Date.now(),
         lastActivityAt: Date.now(),
         engineId: sessionEngineId
       }
-      const key = data.cwd
-      if (!inMemoryByDir[key]) inMemoryByDir[key] = []
-      inMemoryByDir[key].push(info)
+      if (!inMemoryByPk[pk]) inMemoryByPk[pk] = []
+      inMemoryByPk[pk].push(info)
     }
 
     // Apply custom titles to a session list
@@ -649,27 +650,44 @@ export function Sidebar({
         customTitles[s.sessionId] ? { ...s, title: customTitles[s.sessionId] } : s
       )
 
-    // Merge in-memory sessions into existing groups or create new groups
+    // Track which in-memory pkGroups were merged into an existing group
+    const mergedPks = new Set<string>()
+
+    // Merge in-memory sessions into existing groups (match by projectKey OR exact cwd)
     const result: DirectoryGroup[] = directories.map((group) => {
-      const extra = inMemoryByDir[group.cwd]
+      const pk = group.projectKey || cwdToProjectKey(group.cwd)
+      const extra = inMemoryByPk[pk]
       if (!extra) {
-        return { ...group, sessions: applyCustomTitles(group.sessions) }
+        // Also try matching in-memory sessions whose cwd exactly matches this group's cwd
+        // (fallback for the case where canonicalization diverges)
+        const cwdExtra = Object.entries(inMemoryByPk).find(
+          ([, sessions]) => sessions.length > 0 && sessions[0].cwd === group.cwd
+        )
+        if (!cwdExtra) {
+          return { ...group, sessions: applyCustomTitles(group.sessions) }
+        }
+        const [cwdPk, cwdSessions] = cwdExtra
+        mergedPks.add(cwdPk)
+        return { ...group, sessions: applyCustomTitles([...cwdSessions, ...group.sessions]) }
       }
-      delete inMemoryByDir[group.cwd]
+      mergedPks.add(pk)
       return { ...group, sessions: applyCustomTitles([...extra, ...group.sessions]) }
     })
-    // Create new groups for cwds not matching any existing directory
-    for (const [cwd, extraSessions] of Object.entries(inMemoryByDir)) {
+
+    // Create new groups for in-memory sessions that don't match any existing directory
+    for (const [pk, extraSessions] of Object.entries(inMemoryByPk)) {
+      if (mergedPks.has(pk)) continue
+      const cwd = extraSessions[0].cwd
       const folderName = cwd.split(/[\\/]/).pop() || cwd
       result.unshift({
         cwd,
-        projectKey: '',
+        projectKey: pk,
         folderName,
         sessions: applyCustomTitles(extraSessions)
       })
     }
     return result
-  }, [directories, sidebarSessions, customTitles])
+  }, [directories, sidebarSessions, customTitles, sessionEngines])
 
   return (
     <SidebarView

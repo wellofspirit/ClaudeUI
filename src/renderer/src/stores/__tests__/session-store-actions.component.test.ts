@@ -513,10 +513,15 @@ describe('hideProject / unhideProject', () => {
 // ---------------------------------------------------------------------------
 
 describe('deleteSession', () => {
-  it('invokes window.api.deleteSession with sessionId + projectKey', async () => {
+  it('invokes window.api.deleteSession with sessionId + projectKey (+ optional engineId)', async () => {
     const spy = window.api.deleteSession as any
+    // No engineId (legacy / claude path) — undefined is forwarded
     await store().deleteSession('s1', 'proj-key')
-    expect(spy).toHaveBeenCalledWith('s1', 'proj-key')
+    expect(spy).toHaveBeenCalledWith('s1', 'proj-key', undefined)
+    // With engineId
+    spy.mockClear()
+    await store().deleteSession('s2', 'proj-key', 'opencode')
+    expect(spy).toHaveBeenCalledWith('s2', 'proj-key', 'opencode')
   })
 
   it('scrubs session from recent, pinned, hidden, customTitles, worktreeInfoMap', async () => {
