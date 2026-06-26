@@ -568,6 +568,39 @@ describe('InputBox FC — rendered', () => {
     expect(ipcCalls['session:set-model']).toBeUndefined()
   })
 
+  it('opencode session with an unavailable model falls back to an opencode model, not Claude', async () => {
+    // Regression: when the session's selectedModel isn't in availableModels (e.g.
+    // its provider was disabled), the displayed model must fall back to a model of
+    // the SESSION's engine — never the global models[0] (a Claude entry), which
+    // is how an opencode session used to surface a Claude model in the picker.
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [FC_ROUTE]: {
+          ...state.sessions[FC_ROUTE],
+          selectedEngineId: 'opencode',
+          isHistorical: true, // engine-locked → picker filters to opencode
+          selectedModel: 'opencode/mimo-v2.5-free' // provider disabled → absent below
+        }
+      },
+      availableModels: [
+        { value: 'default', displayName: 'Default', description: '', engineId: 'claude' },
+        {
+          value: 'qwen-sandbox/qwen3.6:27b',
+          displayName: 'Qwen 3.6',
+          description: '',
+          engineId: 'opencode',
+          vendorId: 'qwen-sandbox'
+        }
+      ]
+    }))
+
+    renderFC()
+
+    expect(viewProps.selectedModel.value).toBe('qwen-sandbox/qwen3.6:27b')
+    expect(viewProps.selectedModel.engineId).toBe('opencode')
+  })
+
   it('onVoiceStop: calls voiceStopRecording IPC with active session id', async () => {
     renderFC()
 

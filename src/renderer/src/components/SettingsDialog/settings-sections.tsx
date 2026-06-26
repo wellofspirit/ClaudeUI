@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { useShallow } from 'zustand/react/shallow'
-import { useActiveSession, useSessionStore } from '../../stores/session-store'
+import { useActiveSession, useSessionStore, OPENCODE_DEFAULT_MODEL } from '../../stores/session-store'
 import type { AppSettings } from '../../stores/session-store'
 import { PermissionsDialog } from '../PermissionsDialog'
 import type {
@@ -970,6 +970,12 @@ function OpencodeModelsSection(): React.JSX.Element {
     const next: EngineConfig = { ...engineCfg, opencodeConfig: { ...cfg, ...patch } }
     setEngineCfg(next)
     window.api.saveEngineConfig('opencode', next).catch(() => {})
+    // Mirror the default-model choice into the store so new/reopened opencode
+    // sessions pick it up immediately, and refresh the picker model list.
+    if ('model' in patch) {
+      useSessionStore.getState().setOpencodeDefaultModel(patch.model || OPENCODE_DEFAULT_MODEL)
+    }
+    useSessionStore.getState().reloadModels()
   }
 
   const modelOptions = [
@@ -1137,6 +1143,8 @@ function OpencodeProvidersSection(): React.JSX.Element {
     }
     setEngineCfg(next)
     window.api.saveEngineConfig('opencode', next).catch(() => {})
+    // Custom-provider edits change the discoverable model set — reload the picker.
+    useSessionStore.getState().reloadModels()
   }
 
   const updateRow = (key: string, patch: Partial<ProviderRow>): void => {
@@ -1175,6 +1183,8 @@ function OpencodeProvidersSection(): React.JSX.Element {
       // Re-discover so a newly disabled/re-enabled provider reflects immediately.
       .then(() => refreshDiscoveredProviders())
       .catch(() => {})
+    // Refresh the global model picker too (InputBox), not just this settings list.
+    useSessionStore.getState().reloadModels()
   }
 
   const disabledProviders = cfg.disabledProviders ?? []

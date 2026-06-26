@@ -47,12 +47,20 @@ export function normalizeCwd(cwd: string): string {
 
 /**
  * The default model picker VALUE for a given engine. opencode must never get
- * `'default'` (a Claude alias) — the free no-auth model is the 5b default.
+ * `'default'` (a Claude alias) — the free no-auth model is the hard fallback.
  * The opencode value convention is `"<providerID>/<modelID>"`.
+ *
+ * The opencode default is user-configurable (Settings › opencode › Models →
+ * "Default model", stored in engines/opencode.json `opencodeConfig.model`),
+ * threaded in via `opencodeDefault`. A session's picker always loads its
+ * engine's default — there is no per-session "sticky" model memory.
  */
 export const OPENCODE_DEFAULT_MODEL = 'opencode/mimo-v2.5-free'
-export function defaultModelForEngine(engineId: EngineId): string {
-  return engineId === 'opencode' ? OPENCODE_DEFAULT_MODEL : 'default'
+export function defaultModelForEngine(
+  engineId: EngineId,
+  opencodeDefault: string = OPENCODE_DEFAULT_MODEL
+): string {
+  return engineId === 'opencode' ? opencodeDefault || OPENCODE_DEFAULT_MODEL : 'default'
 }
 
 /** Build the engine-correct ModelRef from a picker value string. */
@@ -276,12 +284,14 @@ function saveSessionConfig(
  * Called once at startup; migrates from localStorage on first run.
  */
 export async function hydrateConfigFromDisk(): Promise<void> {
-  let [savedSettings, sessionConfig, slashCommands, loadedEngineConfig] = await Promise.all([
-    window.api.loadSettings(),
-    window.api.loadSessionConfig(),
-    window.api.loadSlashCommands(),
-    window.api.loadEngineConfig('claude')
-  ])
+  let [savedSettings, sessionConfig, slashCommands, loadedEngineConfig, opencodeEngineConfig] =
+    await Promise.all([
+      window.api.loadSettings(),
+      window.api.loadSessionConfig(),
+      window.api.loadSlashCommands(),
+      window.api.loadEngineConfig('claude'),
+      window.api.loadEngineConfig('opencode').catch(() => ({}) as EngineConfig)
+    ])
 
   // One-time migration from localStorage → disk
   const MIGRATION_FLAG = 'claudeui-migrated-to-disk'
@@ -324,6 +334,7 @@ export async function hydrateConfigFromDisk(): Promise<void> {
 
   useSessionStore.setState({
     engineConfig: loadedEngineConfig,
+    opencodeDefaultModel: opencodeEngineConfig?.opencodeConfig?.model || OPENCODE_DEFAULT_MODEL,
     settings,
     recentSessionIds: sessionConfig.recentSessions ?? [],
     pinnedSessionIds: sessionConfig.pinnedSessions ?? [],
@@ -602,6 +613,12 @@ interface SessionState {
 
   /** Remembered engine choice — pre-fills engine for newly created sessions. */
   lastSelectedEngineId: EngineId
+  /** Configurable opencode default model (engines/opencode.json `opencodeConfig.model`).
+   *  The opencode-engine value `defaultModelForEngine('opencode')` resolves to. */
+  opencodeDefaultModel: string
+  /** Bumped to force the model picker to re-fetch getEngineModels() — e.g. after
+   *  an opencode provider/default-model change in Settings. */
+  modelReloadNonce: number
 
   // Global (not per-session)
   engineConfig: EngineConfig
@@ -642,6 +659,10 @@ interface SessionState {
   createNewSession: (routingId: string, cwd: string, switchTo?: boolean) => void
   /** Set the remembered engine choice. Persisted in localStorage (lightweight). */
   setLastSelectedEngineId: (engineId: EngineId) => void
+  /** Update the configurable opencode default model (mirrors opencodeConfig.model). */
+  setOpencodeDefaultModel: (model: string) => void
+  /** Force the model picker to re-fetch the engine model list. */
+  reloadModels: () => void
   loadHistoricalSession: (
     routingId: string,
     messages: ChatMessage[],
@@ -894,6 +915,8 @@ export const useSessionStore = create<SessionState>((set) => ({
   lastSelectedEngineId:
     ((localStorage.getItem('lastSelectedEngineId') ??
       localStorage.getItem('lastSelectedProvider')) as EngineId | null) ?? 'claude',
+  opencodeDefaultModel: OPENCODE_DEFAULT_MODEL,
+  modelReloadNonce: 0,
   engineConfig: {},
   settings: DEFAULT_SETTINGS,
   availableModels: [],
@@ -953,7 +976,7 @@ export const useSessionStore = create<SessionState>((set) => ({
         ...state.recentSessionIds.filter((id) => id !== routingId)
       ].slice(0, state.settings.maxRecentSessions)
       const engineId = state.lastSelectedEngineId
-      const defaultModel = defaultModelForEngine(engineId)
+      const defaultModel = defaultModelForEngine(engineId, state.opencodeDefaultModel)
       // Write model into sessionEngines so it can be seeded on reopen (spec §3).
       // Always write the entry so the engine is recorded; model is set on first model event.
       const sessionEngines = {
@@ -987,6 +1010,11 @@ export const useSessionStore = create<SessionState>((set) => ({
     set({ lastSelectedEngineId: engineId })
   },
 
+  setOpencodeDefaultModel: (model) =>
+    set({ opencodeDefaultModel: model || OPENCODE_DEFAULT_MODEL }),
+
+  reloadModels: () => set((s) => ({ modelReloadNonce: s.modelReloadNonce + 1 })),
+
   loadHistoricalSession: (
     routingId,
     messages,
@@ -998,20 +1026,14 @@ export const useSessionStore = create<SessionState>((set) => ({
   ) =>
     set((state) => {
       const base = createEmptySession(cwd)
-      // Seed selectedModel from the persisted per-session model when present, so
-      // reopening a session restores the user's last model choice (data-model §3).
+      // Always seed the picker with the session ENGINE's default model — there is
+      // no per-session "sticky" model memory. The engine is persisted (so an
+      // opencode session reopens as opencode), but the model resets to that
+      // engine's configurable default rather than carrying a stale/cross-engine
+      // value (which is how an opencode session used to show Claude's "default").
       const persistedEntry = state.sessionEngines[routingId]
       const persistedEngineId = persistedEntry?.engineId ?? 'claude'
-      const persistedModelRef = persistedEntry?.model
-      // For opencode, the picker value is "vendorId/modelId"; for claude it's just modelId.
-      let persistedModel: string | undefined
-      if (persistedModelRef) {
-        if (persistedEngineId === 'opencode') {
-          persistedModel = `${persistedModelRef.vendorId}/${persistedModelRef.modelId}`
-        } else {
-          persistedModel = persistedModelRef.modelId
-        }
-      }
+      const defaultModel = defaultModelForEngine(persistedEngineId, state.opencodeDefaultModel)
       return {
         sessions: {
           ...state.sessions,
@@ -1025,7 +1047,7 @@ export const useSessionStore = create<SessionState>((set) => ({
             warnings: warnings || [],
             worktreeInfo: state.worktreeInfoMap[routingId] ?? null,
             selectedEngineId: persistedEngineId,
-            ...(persistedModel ? { selectedModel: persistedModel } : {})
+            selectedModel: defaultModel
           }
         }
       }

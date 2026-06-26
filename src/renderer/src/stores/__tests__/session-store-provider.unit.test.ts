@@ -179,8 +179,9 @@ describe('model persistence loop', () => {
     expect(store().sessionEngines['r-temp']).toBeUndefined()
   })
 
-  it('reopen (loadHistoricalSession) seeds selectedModel from the persisted model', () => {
-    // Full loop: create → setModel → rekey → simulate fresh reopen
+  it('reopen (loadHistoricalSession) loads the ENGINE default, not the persisted model', () => {
+    // No per-session sticky model: reopening always resets to the engine default.
+    // Full loop: create → setModel → rekey → simulate fresh reopen.
     store().createNewSession('r-temp', '/tmp/proj')
     store().setSelectedModel('claude-opus-4-8')
     store().rekeySession('r-temp', 'sess-uuid')
@@ -190,7 +191,19 @@ describe('model persistence loop', () => {
     useSessionStore.setState({ sessions: {}, activeSessionId: null, sessionEngines: persisted })
 
     store().loadHistoricalSession('sess-uuid', [], '/tmp/proj')
-    expect(store().sessions['sess-uuid']?.selectedModel).toBe('claude-opus-4-8')
+    // Engine is restored (claude), model resets to claude's default — NOT opus.
+    expect(store().sessions['sess-uuid']?.selectedEngineId).toBe('claude')
+    expect(store().sessions['sess-uuid']?.selectedModel).toBe('default')
+  })
+
+  it('reopening an opencode session loads the configured opencode default (never a Claude model)', () => {
+    useSessionStore.setState({
+      sessionEngines: { 'oc-x': { engineId: 'opencode' as EngineId } },
+      opencodeDefaultModel: 'anthropic/claude-sonnet-4-6'
+    })
+    store().loadHistoricalSession('oc-x', [], '/tmp/proj')
+    expect(store().sessions['oc-x']?.selectedEngineId).toBe('opencode')
+    expect(store().sessions['oc-x']?.selectedModel).toBe('anthropic/claude-sonnet-4-6')
   })
 
   it('reopen falls back to default when no persisted model exists', () => {

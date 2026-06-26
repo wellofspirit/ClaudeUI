@@ -164,19 +164,6 @@ export function InputBox(): React.JSX.Element {
   const selectedModelValue = useActiveSession((s) => s.selectedModel)
   const setSelectedModel = useSessionStore((s) => s.setSelectedModel)
   const setLastSelectedEngineId = useSessionStore((s) => s.setLastSelectedEngineId)
-  // Memoized so its identity is stable across renders (it feeds several
-  // downstream useMemo dependency lists).
-  const selectedModel = useMemo(
-    () =>
-      models.find((m) => m.value === selectedModelValue) ||
-      models[0] || {
-        value: 'default',
-        displayName: 'Default',
-        shortName: 'Default',
-        description: ''
-      },
-    [models, selectedModelValue]
-  )
   // Once the session is committed to an engine the engine is immutable — only
   // show that engine's models in the picker. A session is engine-locked when it
   // is running (has a backend sessionId) OR is loaded/forked from history
@@ -189,6 +176,23 @@ export function InputBox(): React.JSX.Element {
   const pickerModels = useMemo(
     () => filterModelsForEngine(models, engineLocked, sessionEngineId),
     [models, engineLocked, sessionEngineId]
+  )
+  // Memoized so its identity is stable across renders (it feeds several
+  // downstream useMemo dependency lists). The fallback is engine-aware: when the
+  // session's selectedModel isn't in the list (e.g. its provider was disabled),
+  // fall back to the FIRST model of the session's own engine — never the global
+  // models[0], which would surface a Claude model on an opencode session.
+  const selectedModel = useMemo(
+    () =>
+      models.find((m) => m.value === selectedModelValue) ||
+      pickerModels[0] ||
+      models[0] || {
+        value: 'default',
+        displayName: 'Default',
+        shortName: 'Default',
+        description: ''
+      },
+    [models, pickerModels, selectedModelValue]
   )
 
   const statusLine = useActiveSession((s) => s.statusLine)
@@ -208,8 +212,12 @@ export function InputBox(): React.JSX.Element {
   const voiceInterimTranscript = useActiveSession((s) => s.voiceInterimTranscript)
   const clearVoiceTranscript = useSessionStore((s) => s.clearVoiceTranscript)
 
-  // Load models from all engines via getEngineModels(). Re-fetches when cwd changes.
-  // Flattens the EngineModelGroup[] into ModelInfo[] (each entry has engineId/vendorId set).
+  // Load models from all engines via getEngineModels(). Re-fetches when cwd
+  // changes, and whenever modelReloadNonce is bumped (e.g. an opencode provider
+  // or default-model change in Settings) so newly-available models show up in
+  // the picker without an app restart. Flattens EngineModelGroup[] → ModelInfo[]
+  // (each entry has engineId/vendorId set).
+  const modelReloadNonce = useSessionStore((s) => s.modelReloadNonce)
   const loadedModelsKey = useRef<string | null>(null)
   useEffect(() => {
     const key = cwd ?? ''
@@ -233,7 +241,7 @@ export function InputBox(): React.JSX.Element {
     return () => {
       ignore = true
     }
-  }, [cwd, setAvailableModels])
+  }, [cwd, modelReloadNonce, setAvailableModels])
 
   useEffect(() => {
     if (!isRunning) textareaRef.current?.focus()
