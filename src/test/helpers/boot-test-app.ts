@@ -83,6 +83,7 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     maximizeWindow: () => ipcRenderer.invoke('window:maximize'),
     closeWindow: () => ipcRenderer.invoke('window:close'),
     listDirectories: () => ipcRenderer.invoke('session:list-directories'),
+    listOpencodeSessionsGlobal: () => ipcRenderer.invoke('session:list-opencode'),
     loadSessionHistory: (sessionId, projectKey) =>
       ipcRenderer.invoke('session:load-history', sessionId, projectKey),
     loadSubagentHistory: (sessionId, projectKey, agentId) =>

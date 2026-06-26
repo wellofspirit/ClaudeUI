@@ -305,36 +305,40 @@ export function Sidebar({
 
   // Build the session list from BOTH engines in one shot so they never clobber
   // each other: fetch Claude directories (JSONL) + the global opencode session
-  // list, merge, and set once. Runs on mount, whenever Claude JSONL files change,
-  // and on a 30s poll (so new opencode sessions made elsewhere show up). The
-  // opencode side is best-effort — any error (not installed / server down) just
-  // yields the Claude-only list. Doing this as ONE effect avoids the race where a
-  // Claude refresh would wipe the merged opencode sessions until the next poll.
+  // list, merge, and set once. The opencode side is best-effort — any error (not
+  // installed / server down) just yields the Claude-only list. Every code path
+  // that refreshes the sidebar MUST go through this (never `listDirectories`
+  // alone) or it wipes the merged opencode sessions until the next poll.
+  const refreshDirectories = useCallback(async (): Promise<void> => {
+    const claude = await window.api.listDirectories()
+    let merged = claude
+    try {
+      const opencodeInfos = await window.api.listOpencodeSessionsGlobal()
+      if (opencodeInfos.length > 0) {
+        merged = mergeOpencodeIntoDirectories(claude, opencodeInfos)
+      }
+    } catch {
+      // Best-effort — opencode not installed or server down → Claude-only list.
+    }
+    setDirectories(merged)
+  }, [setDirectories])
+
+  // Runs on mount, whenever Claude JSONL files change, and on a 30s poll (so new
+  // opencode sessions made elsewhere show up).
   useEffect(() => {
     let cancelled = false
-    const refresh = async (): Promise<void> => {
-      const claude = await window.api.listDirectories()
-      if (cancelled) return
-      let merged = claude
-      try {
-        const opencodeInfos = await window.api.listOpencodeSessionsGlobal()
-        if (!cancelled && opencodeInfos.length > 0) {
-          merged = mergeOpencodeIntoDirectories(claude, opencodeInfos)
-        }
-      } catch {
-        // Best-effort — opencode not installed or server down → Claude-only list.
-      }
-      if (!cancelled) setDirectories(merged)
+    const run = (): void => {
+      if (!cancelled) void refreshDirectories()
     }
-    void refresh()
-    const cleanup = window.api.onDirectoriesChanged(() => void refresh())
-    const interval = setInterval(() => void refresh(), 30_000)
+    run()
+    const cleanup = window.api.onDirectoriesChanged(run)
+    const interval = setInterval(run, 30_000)
     return () => {
       cancelled = true
       cleanup?.()
       clearInterval(interval)
     }
-  }, [setDirectories])
+  }, [refreshDirectories])
 
   const handleNewSession = (): void => {
     showWelcome()
@@ -614,9 +618,11 @@ export function Sidebar({
       await deleteProjectAction(deleteTarget.projectKey)
     }
     setDeleteTarget(null)
-    // Refresh sidebar from disk so the deleted entries disappear immediately
-    window.api.listDirectories().then(setDirectories)
-  }, [deleteTarget, deleteSessionAction, deleteProjectAction, setDirectories])
+    // Refresh from BOTH engines so the deleted entry disappears immediately
+    // without wiping the other engine's sessions (a Claude-only refresh here
+    // dropped every opencode session until the next 30s poll).
+    await refreshDirectories()
+  }, [deleteTarget, deleteSessionAction, deleteProjectAction, refreshDirectories])
 
   const augmentedDirs = useMemo(() => {
     // Build set of session IDs already on disk
