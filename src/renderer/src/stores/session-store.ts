@@ -52,8 +52,9 @@ export function normalizeCwd(cwd: string): string {
  *
  * The opencode default is user-configurable (Settings › opencode › Models →
  * "Default model", stored in engines/opencode.json `opencodeConfig.model`),
- * threaded in via `opencodeDefault`. A session's picker always loads its
- * engine's default — there is no per-session "sticky" model memory.
+ * threaded in via `opencodeDefault`. Used as the fallback when a session has no
+ * remembered model (fresh load) — loadHistoricalSession restores the persisted
+ * per-session model when one exists.
  */
 export const OPENCODE_DEFAULT_MODEL = 'opencode/mimo-v2.5-free'
 export function defaultModelForEngine(
@@ -1026,14 +1027,24 @@ export const useSessionStore = create<SessionState>((set) => ({
   ) =>
     set((state) => {
       const base = createEmptySession(cwd)
-      // Always seed the picker with the session ENGINE's default model — there is
-      // no per-session "sticky" model memory. The engine is persisted (so an
-      // opencode session reopens as opencode), but the model resets to that
-      // engine's configurable default rather than carrying a stale/cross-engine
-      // value (which is how an opencode session used to show Claude's "default").
+      // Per-session model memory: restore the persisted model when present, so
+      // reopening a session brings back the model you last used in it. The engine
+      // is restored too (an opencode session reopens as opencode). When NO model
+      // was persisted (fresh load), fall back to the session ENGINE's default —
+      // engine-aware, never Claude's "default" on an opencode session (the bug).
       const persistedEntry = state.sessionEngines[routingId]
       const persistedEngineId = persistedEntry?.engineId ?? 'claude'
-      const defaultModel = defaultModelForEngine(persistedEngineId, state.opencodeDefaultModel)
+      const persistedModelRef = persistedEntry?.model
+      // For opencode the picker value is "vendorId/modelId"; for claude it's the modelId.
+      let persistedModel: string | undefined
+      if (persistedModelRef) {
+        persistedModel =
+          persistedEngineId === 'opencode'
+            ? `${persistedModelRef.vendorId}/${persistedModelRef.modelId}`
+            : persistedModelRef.modelId
+      }
+      const selectedModel =
+        persistedModel ?? defaultModelForEngine(persistedEngineId, state.opencodeDefaultModel)
       return {
         sessions: {
           ...state.sessions,
@@ -1047,7 +1058,7 @@ export const useSessionStore = create<SessionState>((set) => ({
             warnings: warnings || [],
             worktreeInfo: state.worktreeInfoMap[routingId] ?? null,
             selectedEngineId: persistedEngineId,
-            selectedModel: defaultModel
+            selectedModel
           }
         }
       }

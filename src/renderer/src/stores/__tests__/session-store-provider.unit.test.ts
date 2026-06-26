@@ -179,8 +179,8 @@ describe('model persistence loop', () => {
     expect(store().sessionEngines['r-temp']).toBeUndefined()
   })
 
-  it('reopen (loadHistoricalSession) loads the ENGINE default, not the persisted model', () => {
-    // No per-session sticky model: reopening always resets to the engine default.
+  it('reopen (loadHistoricalSession) restores the persisted per-session model', () => {
+    // Per-session memory: reopening brings back the model last used in it.
     // Full loop: create → setModel → rekey → simulate fresh reopen.
     store().createNewSession('r-temp', '/tmp/proj')
     store().setSelectedModel('claude-opus-4-8')
@@ -191,26 +191,40 @@ describe('model persistence loop', () => {
     useSessionStore.setState({ sessions: {}, activeSessionId: null, sessionEngines: persisted })
 
     store().loadHistoricalSession('sess-uuid', [], '/tmp/proj')
-    // Engine is restored (claude), model resets to claude's default — NOT opus.
     expect(store().sessions['sess-uuid']?.selectedEngineId).toBe('claude')
-    expect(store().sessions['sess-uuid']?.selectedModel).toBe('default')
+    expect(store().sessions['sess-uuid']?.selectedModel).toBe('claude-opus-4-8')
   })
 
-  it('reopening an opencode session loads the configured opencode default (never a Claude model)', () => {
+  it('reopening an opencode session restores its persisted opencode model', () => {
     useSessionStore.setState({
-      sessionEngines: { 'oc-x': { engineId: 'opencode' as EngineId } },
-      opencodeDefaultModel: 'anthropic/claude-sonnet-4-6'
+      sessionEngines: {
+        'oc-x': {
+          engineId: 'opencode' as EngineId,
+          model: { engineId: 'opencode', vendorId: 'qwen-sandbox', modelId: 'qwen3.6:27b' }
+        }
+      }
     })
     store().loadHistoricalSession('oc-x', [], '/tmp/proj')
     expect(store().sessions['oc-x']?.selectedEngineId).toBe('opencode')
-    expect(store().sessions['oc-x']?.selectedModel).toBe('anthropic/claude-sonnet-4-6')
+    expect(store().sessions['oc-x']?.selectedModel).toBe('qwen-sandbox/qwen3.6:27b')
   })
 
-  it('reopen falls back to default when no persisted model exists', () => {
+  it('reopen with NO persisted model falls back to the engine default (never Claude on opencode)', () => {
+    // Fresh load: a Claude session with no stored model → claude default.
     useSessionStore.setState({
       sessionEngines: { 'sess-x': { engineId: 'claude' as EngineId } }
     })
     store().loadHistoricalSession('sess-x', [], '/tmp/proj')
     expect(store().sessions['sess-x']?.selectedModel).toBe('default')
+
+    // An opencode session with no stored model → the configured opencode default,
+    // NOT Claude's 'default' (the original bug).
+    useSessionStore.setState({
+      sessionEngines: { 'oc-y': { engineId: 'opencode' as EngineId } },
+      opencodeDefaultModel: 'anthropic/claude-sonnet-4-6'
+    })
+    store().loadHistoricalSession('oc-y', [], '/tmp/proj')
+    expect(store().sessions['oc-y']?.selectedEngineId).toBe('opencode')
+    expect(store().sessions['oc-y']?.selectedModel).toBe('anthropic/claude-sonnet-4-6')
   })
 })

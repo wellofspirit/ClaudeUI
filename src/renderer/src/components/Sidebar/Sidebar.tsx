@@ -370,11 +370,13 @@ export function Sidebar({
     // engineId:'opencode' so loadHistoricalSession sets selectedEngineId, which
     // InputBox uses to pass routingId as resumeSessionId on the first createSession.
     if (info.engineId === 'opencode') {
-      // Seed sessionEngines BEFORE loadHistoricalSession so it reads the right engine.
+      // Seed sessionEngines BEFORE loadHistoricalSession so it reads the right
+      // engine. Preserve any persisted model (from the DB) — overwriting it would
+      // wipe the session's remembered model so it'd reopen on the engine default.
       const storeState = useSessionStore.getState()
       const sessionEngines = {
         ...storeState.sessionEngines,
-        [routingId]: { engineId: 'opencode' as const }
+        [routingId]: { ...storeState.sessionEngines[routingId], engineId: 'opencode' as const }
       }
       useSessionStore.setState({ sessionEngines })
       window.api.saveSessionConfig({ sessionEngines })
