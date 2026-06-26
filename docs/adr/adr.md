@@ -26,3 +26,4 @@
 | [022](adr-022_opencode-permission-mapping.md)                     | opencode permission model — autonomy-mode → last-match-wins ruleset mapping *(relates to 018/019)*  |
 | [023](adr-023_opencode-automode-classifier.md)                    | opencode auto-mode — LLM permission gatekeeper, configurable judge model *(relates to 022)* |
 | [024](adr-024_opencode-interaction-parity.md)                     | opencode interaction-feature parity — slash commands, skills, side-questions, queue/steer, subagents *(relates to 019/022/023)* |
+| [025](adr-025_project-key-identity-and-engine-neutral-delete.md)  | projectKey as a derived lossy render-identity + engine-neutral persisted-session delete dispatcher *(relates to 018/019/020)* |

@@ -1200,8 +1200,8 @@ export const useSessionStore = create<SessionState>((set) => ({
       return { hiddenProjectKeys }
     }),
 
-  deleteSession: async (sessionId, projectKey, _engineId) => {
-    await window.api.deleteSession(sessionId, projectKey)
+  deleteSession: async (sessionId, projectKey, engineId) => {
+    await window.api.deleteSession(sessionId, projectKey, engineId)
     // Also scrub any references to this session from persisted config + in-memory state
     useSessionStore.setState((state) => {
       const recentSessionIds = state.recentSessionIds.filter((id) => id !== sessionId)
@@ -1244,6 +1244,16 @@ export const useSessionStore = create<SessionState>((set) => ({
 
   deleteProject: async (projectKey) => {
     await window.api.deleteProject(projectKey)
+    // Also delete any opencode sessions in this group so they don't reappear on the next poll.
+    const opencodeSessions = useSessionStore
+      .getState()
+      .directories.find((g) => g.projectKey === projectKey)
+      ?.sessions.filter((s) => s.engineId === 'opencode') ?? []
+    if (opencodeSessions.length > 0) {
+      await Promise.allSettled(
+        opencodeSessions.map((s) => window.api.deleteSession(s.sessionId, projectKey, 'opencode'))
+      )
+    }
     // Collect all session IDs in this project (both on-disk group members and live in-memory
     // sessions sharing the project's cwd) so we can purge them from every piece of state.
     useSessionStore.setState((state) => {

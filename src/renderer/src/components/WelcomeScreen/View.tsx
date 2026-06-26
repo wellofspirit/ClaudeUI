@@ -1,4 +1,3 @@
-import { EngineToggle } from '../shared/EngineToggle'
 
 export interface WelcomeScreenViewProps {
   loading: boolean
@@ -29,10 +28,6 @@ export function WelcomeScreenView({ loading, onOpen }: WelcomeScreenViewProps): 
 
         <h1 className="text-[28px] font-bold text-text-primary tracking-tight mb-2">ClaudeUI</h1>
         <p className="text-text-secondary text-[15px] mb-10">Desktop interface for Claude Code</p>
-
-        <div className="mb-6">
-          <EngineToggle />
-        </div>
 
         <button
           onClick={onOpen}

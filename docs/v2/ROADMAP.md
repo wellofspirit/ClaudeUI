@@ -248,6 +248,47 @@ squash/integration strategy for landing the stack. Not code — a process decisi
 Prior session inventories (pre-Phase-8/9) listed these as deferred; the 2026-06-23 sweep confirms they
 shipped. Recorded here so they're not re-raised:
 
+- **Cross-engine project merge + engine-neutral session delete** (shipped 2026-06-26,
+  `v2-followup-engine-ux-polish`, ADR-025) — the sidebar listed the same physical directory twice when
+  it held both Claude and opencode sessions, because the two engines derived incompatible `projectKey`s
+  for one cwd (Claude = the lossy on-disk dir name `D--WorkPlace-ClaudeUI`; opencode = forward-slashed
+  `D:/WorkPlace/ClaudeUI`). Probed both sources to confirm (Claude's `~/.claude/projects` dir names +
+  opencode's `session.directory` column). Fix: a shared `cwdToProjectKey` (`src/shared/project-key.ts`,
+  `[^A-Za-z0-9]→-`) replicates Claude Code's encoding; opencode derives its key through it and the
+  renderer's in-memory grouping matches on the canonical key (exact-cwd kept as a non-regressing
+  fallback). `projectKey` is now a **derived, one-way render/identity token** — backends keep native
+  identity (opencode stores the real cwd). Deletion became **engine-neutral**: one
+  `deleteSessionByEngine(sessionId, projectKey, engineId?)` dispatcher (called by both the IPC handler
+  and the remote dispatcher) routes opencode → HTTP `DELETE /session/{id}` (engine-owned sessionId,
+  no DB write) and Claude → JSONL/subagent removal; `deleteProject` also clears opencode members so
+  they don't reappear. Review caught a vacuous delete-routing test (a local re-implementation of the
+  dispatch) → replaced by extracting the real dispatcher and testing it (mutation-verified). Real-app
+  verified: `ClaudeUI` collapses to one project (count 53 = the previously-split 24 + 29), the merged
+  group holds both engines' sessions, clean boot. **Deferred follow-up:** the narrower Claude
+  spawn-path encoders (`claude-session.ts:1799` et al., `[/.]→-`) weren't reconciled with the shared
+  helper (daily-driver risk). Spec: `docs/v2/followup-project-merge-delete.md`.
+- **Per-engine session UX polish** (shipped 2026-06-26, `v2-followup-engine-ux-polish`) — three
+  user-spotted gaps in the engine UX. **(1)** Removed the explicit `EngineToggle` from all three sites
+  (sidebar new-session `rightSlot`, `WelcomeScreen`, empty-chat `WelcomeState`) and deleted the
+  component: the engine is decided by the first message's model pick (`InputBox.onSelectModel` already
+  derives `pickedEngine` from the model's `engineId` and switches the session engine pre-spawn), so the
+  toggle was redundant. Engine stickiness is preserved by having the model picker also write
+  `lastSelectedEngineId` (the toggle's old job), so the next new session inherits the last-used engine.
+  **(2)** The model picker now hides other engines' models once a session is engine-committed — gated on
+  `engineLocked = !!status.sessionId || !!isHistorical` via a pure `filterModelsForEngine` helper. Review
+  caught the first cut keying on `status.sessionId` alone, which left a historical (loaded-from-disk,
+  not-yet-resumed) session showing both engine groups; since `setSelectedModel` applies engine switches
+  unconditionally, the picker's visibility is the only guard, so a cross-engine pick there would corrupt
+  an engine-committed session. `isHistorical` (set on `loadHistoricalSession`/fork) closes it for both
+  engines. **(3)** Every sidebar row now renders its engine's logomark: `EngineLogo` switches on
+  `engineId` (it previously ignored the prop and always drew the Claude mark) — Claude keeps the orange
+  sunburst, opencode gets its official monochrome geometric mark (`currentColor`, theme-adaptive); and
+  `SessionItem` renders the mark for claude rows too (was non-claude only, so Claude rows showed nothing
+  and opencode rows wrongly showed the Claude mark). Real-app verified: toggle gone from all three
+  locations; historical Claude session's picker shows only Claude models, historical opencode session's
+  shows only opencode models; sidebar marks render per engine (2 Claude + 4 opencode) with zero console
+  errors. Guarded by `filterModelsForEngine` unit tests (incl. an explicit historical-session regression
+  guard) + `EngineLogo` per-engine render tests.
 - **Per-section capability gating in Settings** (ROADMAP #12, shipped 2026-06-25,
   `v2-followup-settings-12-caps`) — `EngineCapabilities` grew `sandbox` + `proxy` boolean flags (Claude
   both true, opencode both false — it has its own provider config), threaded through

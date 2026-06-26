@@ -23,9 +23,11 @@ import { opencodeServerManager } from '../opencode/OpencodeServerManager'
 import { OpencodeClient } from '../opencode/OpencodeClient'
 import { convertStoredMessage } from '../opencode/event-mapper'
 import { readOpencodeSessionRows } from './db'
+import { deleteSessionFiles } from './delete-session-files'
 import { PERSISTED_SESSIONS_DIR } from './persisted-sessions-dir'
 import { logger } from './logger'
-import type { ChatMessage, SessionInfo } from '../../shared/types'
+import { cwdToProjectKey } from '../../shared/project-key'
+import type { ChatMessage, SessionInfo, EngineId } from '../../shared/types'
 
 /**
  * Resolve the path to opencode's global session DB. Mirrors opencode's own
@@ -57,17 +59,6 @@ function resolveOpencodeDbPath(): string {
     /* dir missing → opencode not installed */
   }
   return preferred
-}
-
-/**
- * Derive a projectKey from a cwd path — same heuristic as Claude JSONL
- * (encodes the path so it's safe as a filesystem key). We use the cwd
- * itself as the key for opencode sessions since there are no project dirs.
- */
-function cwdToProjectKey(cwd: string): string {
-  // Mirror Claude's session-history.ts normalization: use the cwd as-is,
-  // forward-slashing so the renderer's cwd-based grouping is cross-platform.
-  return cwd.replace(/\\/g, '/')
 }
 
 /**
@@ -148,5 +139,52 @@ export async function loadOpencodeSessionHistory(sessionId: string): Promise<Cha
     if (acquired) {
       opencodeServerManager.release(PERSISTED_SESSIONS_DIR)
     }
+  }
+}
+
+/**
+ * Delete an opencode session via the shared HTTP server (DELETE /session/{id}).
+ *
+ * The delete endpoint is global-by-id — the sessionId is sufficient, no cwd
+ * needed. Mirrors the acquire/release pattern of loadOpencodeSessionHistory.
+ *
+ * Best-effort: logs + swallows on any error (server may be down). Never throws
+ * to the IPC layer.
+ */
+export async function deleteOpencodeSession(sessionId: string): Promise<void> {
+  let acquired = false
+  try {
+    const conn = await opencodeServerManager.acquire(PERSISTED_SESSIONS_DIR)
+    acquired = true
+    const client = new OpencodeClient(conn.baseUrl, conn.authHeader)
+    await client.deleteSession(sessionId)
+  } catch (err) {
+    logger.debug(
+      'OpencodeSessionList',
+      `deleteOpencodeSession(${sessionId}) skipped: ${err instanceof Error ? err.message : String(err)}`
+    )
+  } finally {
+    if (acquired) {
+      opencodeServerManager.release(PERSISTED_SESSIONS_DIR)
+    }
+  }
+}
+
+/**
+ * Engine-neutral persisted-session delete. Each engine owns its mechanism:
+ *  - opencode → DELETE /session/{id} via the shared server (deleteOpencodeSession)
+ *  - claude / undefined → remove the JSONL + subagent dir (deleteSessionFiles)
+ * The lossy projectKey is only used for the Claude filesystem path; opencode
+ * deletes by its engine-owned sessionId.
+ */
+export async function deleteSessionByEngine(
+  sessionId: string,
+  projectKey: string,
+  engineId?: EngineId
+): Promise<void> {
+  if (engineId === 'opencode') {
+    await deleteOpencodeSession(sessionId)
+  } else {
+    await deleteSessionFiles(sessionId, projectKey)
   }
 }

@@ -655,8 +655,8 @@ interface SessionAPI {
   saveSettings(settings: Record<string, unknown>): Promise<void>
   loadSessionConfig(): Promise<UISessionConfig>
   saveSessionConfig(config: UISessionConfig): Promise<void>
-  /** Permanently delete a session's JSONL + subagent directory from disk */
-  deleteSession(sessionId: string, projectKey: string): Promise<void>
+  /** Permanently delete a session's JSONL + subagent directory from disk (claude), or via HTTP API (opencode) */
+  deleteSession(sessionId: string, projectKey: string, engineId?: EngineId): Promise<void>
   /** Permanently delete an entire Claude project directory (all sessions) from disk */
   deleteProject(projectKey: string): Promise<void>
   loadSlashCommands(): Promise<SlashCommandInfo[]>

@@ -221,8 +221,8 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     gitStartWatching: (cwd) => unwrap('git:start-watching', cwd),
     gitStopWatching: (cwd) => unwrap('git:stop-watching', cwd),
 
-    deleteSession: (sessionId, projectKey) =>
-      ipcRenderer.invoke('session:delete-session', sessionId, projectKey),
+    deleteSession: (sessionId, projectKey, engineId?) =>
+      ipcRenderer.invoke('session:delete-session', sessionId, projectKey, engineId),
     deleteProject: (projectKey) => ipcRenderer.invoke('session:delete-project', projectKey),
 
     listDir: (dirPath) => ipcRenderer.invoke('file:list-dir', dirPath),

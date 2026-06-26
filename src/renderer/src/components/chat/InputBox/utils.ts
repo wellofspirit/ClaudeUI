@@ -1,8 +1,40 @@
 /**
- * Pure helper functions for InputBox — prompt routing state machine.
+ * Pure helper functions for InputBox — prompt routing state machine and model
+ * picker utilities.
  */
 
 import type { FileAttachment } from '../../../../../shared/types'
+
+// ---------------------------------------------------------------------------
+// Model picker filtering
+// ---------------------------------------------------------------------------
+
+export interface ModelEntry {
+  value: string
+  engineId?: string
+  [key: string]: unknown
+}
+
+/**
+ * Filter the model list for the picker based on session state.
+ *
+ * engineLocked: true once the session is committed to an engine (running OR
+ * loaded-from-history) — then only that engine's models are shown, to prevent
+ * offering a cross-engine pick that would corrupt an engine-committed session.
+ *
+ * When not locked (brand-new empty session): return all models so the user can
+ * cross-engine pick (which switches the session engine). Defaults 'claude' when
+ * engineId is absent on either the model entry or the session itself.
+ */
+export function filterModelsForEngine<T extends ModelEntry>(
+  models: T[],
+  engineLocked: boolean,
+  sessionEngineId: string | null | undefined
+): T[] {
+  if (!engineLocked) return models
+  const runningEngine = sessionEngineId ?? 'claude'
+  return models.filter((m) => (m.engineId ?? 'claude') === runningEngine)
+}
 
 // ---------------------------------------------------------------------------
 // Prompt routing

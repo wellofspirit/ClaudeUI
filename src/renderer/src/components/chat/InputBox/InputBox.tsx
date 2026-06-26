@@ -2,7 +2,7 @@ import { useState, useRef, useCallback, useEffect, useMemo } from 'react'
 import { useSessionStore, useActiveSession } from '../../../stores/session-store'
 import type { FileAttachment, VoiceState as VoiceStateType } from '../../../../../shared/types'
 import { v4 as uuid } from 'uuid'
-import { resolveSendAction } from './utils'
+import { resolveSendAction, filterModelsForEngine } from './utils'
 import { useSlashMenu } from '../../../hooks/useSlashMenu'
 import { mergeSlashCommands } from '../SlashCommandMenu'
 import { useFileMention } from '../../../hooks/useFileMention'
@@ -163,6 +163,7 @@ export function InputBox(): React.JSX.Element {
   )
   const selectedModelValue = useActiveSession((s) => s.selectedModel)
   const setSelectedModel = useSessionStore((s) => s.setSelectedModel)
+  const setLastSelectedEngineId = useSessionStore((s) => s.setLastSelectedEngineId)
   // Memoized so its identity is stable across renders (it feeds several
   // downstream useMemo dependency lists).
   const selectedModel = useMemo(
@@ -176,6 +177,20 @@ export function InputBox(): React.JSX.Element {
       },
     [models, selectedModelValue]
   )
+  // Once the session is committed to an engine the engine is immutable — only
+  // show that engine's models in the picker. A session is engine-locked when it
+  // is running (has a backend sessionId) OR is loaded/forked from history
+  // (isHistorical). A brand-new empty session is unlocked, so the user can
+  // cross-engine pick (which switches the session engine).
+  const startedSessionId = useActiveSession((s) => s.status.sessionId)
+  const isHistorical = useActiveSession((s) => s.isHistorical)
+  const sessionEngineId = useActiveSession((s) => s.selectedEngineId)
+  const engineLocked = !!startedSessionId || !!isHistorical
+  const pickerModels = useMemo(
+    () => filterModelsForEngine(models, engineLocked, sessionEngineId),
+    [models, engineLocked, sessionEngineId]
+  )
+
   const statusLine = useActiveSession((s) => s.statusLine)
   const billingType = useActiveSession((s) => s.status?.account?.billingType)
   const effort = useActiveSession((s) => s.effort)
@@ -575,6 +590,9 @@ export function InputBox(): React.JSX.Element {
       // for a not-yet-started session — guarded below before any IPC).
       const pickedEngine = newModel?.engineId ?? session?.selectedEngineId ?? 'claude'
       setSelectedModel(value, pickedEngine)
+      // Persist the chosen engine so the next new session inherits it (was
+      // previously only written by EngineToggle, which is now removed).
+      setLastSelectedEngineId(pickedEngine)
 
       // A "started" session has a backend sessionId. Only push a live model
       // switch to the backend when the picked engine MATCHES the running
@@ -604,7 +622,7 @@ export function InputBox(): React.JSX.Element {
         window.api.setReasoningVariant(activeSessionId, null)
       }
     },
-    [activeSessionId, setSelectedModel, setThinkingMode, setEffort]
+    [activeSessionId, setSelectedModel, setLastSelectedEngineId, setThinkingMode, setEffort]
   )
 
   // Effort and thinking mode are read at sdkQuery start time, so restart the
@@ -745,7 +763,7 @@ export function InputBox(): React.JSX.Element {
       fileMentionIndex={fileMentionIndex}
       filteredFileMentionEntries={filteredFileMentionEntries}
       attachedFiles={attachedFiles}
-      models={models}
+      models={pickerModels}
       selectedModel={selectedModel}
       effort={effectiveEffort}
       effortSupported={effortCap != null}

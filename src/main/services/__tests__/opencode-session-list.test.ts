@@ -5,19 +5,28 @@
  *  - listOpencodeSessionsGlobal maps opencode's DB rows (read directly, since
  *    GET /session is project-scoped) → SessionInfo[] for the sidebar.
  *  - loadOpencodeSessionHistory loads a transcript via the HTTP API (global-by-id).
+ *  - deleteOpencodeSession routes to the HTTP API (global-by-id), best-effort.
  * Both are best-effort and never throw.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
-const { mockAcquire, mockRelease, MockOpencodeClient, mockListMessages, mockReadRows } = vi.hoisted(
-  () => ({
-    mockAcquire: vi.fn(),
-    mockRelease: vi.fn(),
-    MockOpencodeClient: vi.fn(),
-    mockListMessages: vi.fn(),
-    mockReadRows: vi.fn()
-  })
-)
+const {
+  mockAcquire,
+  mockRelease,
+  MockOpencodeClient,
+  mockListMessages,
+  mockDeleteSession,
+  mockReadRows,
+  mockDeleteSessionFiles
+} = vi.hoisted(() => ({
+  mockAcquire: vi.fn(),
+  mockRelease: vi.fn(),
+  MockOpencodeClient: vi.fn(),
+  mockListMessages: vi.fn(),
+  mockDeleteSession: vi.fn(),
+  mockReadRows: vi.fn(),
+  mockDeleteSessionFiles: vi.fn()
+}))
 
 vi.mock('../../opencode/OpencodeServerManager', () => ({
   opencodeServerManager: { acquire: mockAcquire, release: mockRelease }
@@ -25,16 +34,24 @@ vi.mock('../../opencode/OpencodeServerManager', () => ({
 vi.mock('../../opencode/OpencodeClient', () => ({ OpencodeClient: MockOpencodeClient }))
 vi.mock('../persisted-sessions-dir', () => ({ PERSISTED_SESSIONS_DIR: '/tmp/persisted' }))
 vi.mock('../db', () => ({ readOpencodeSessionRows: mockReadRows }))
+vi.mock('../delete-session-files', () => ({ deleteSessionFiles: mockDeleteSessionFiles }))
 
-import { listOpencodeSessionsGlobal, loadOpencodeSessionHistory } from '../opencode-session-list'
+import {
+  listOpencodeSessionsGlobal,
+  loadOpencodeSessionHistory,
+  deleteOpencodeSession,
+  deleteSessionByEngine
+} from '../opencode-session-list'
 
 beforeEach(() => {
   mockAcquire.mockReset().mockResolvedValue({ baseUrl: 'http://127.0.0.1:1', authHeader: 'Basic x' })
   mockRelease.mockReset()
   mockListMessages.mockReset()
+  mockDeleteSession.mockReset()
   mockReadRows.mockReset()
+  mockDeleteSessionFiles.mockReset().mockResolvedValue(undefined)
   MockOpencodeClient.mockReset().mockImplementation(function () {
-    return { listMessages: mockListMessages }
+    return { listMessages: mockListMessages, deleteSession: mockDeleteSession }
   })
 })
 
@@ -93,5 +110,65 @@ describe('loadOpencodeSessionHistory (HTTP, global-by-id)', () => {
   it('returns [] (never throws) on error', async () => {
     mockListMessages.mockRejectedValueOnce(new Error('boom'))
     expect(await loadOpencodeSessionHistory('ses_a')).toEqual([])
+  })
+})
+
+describe('listOpencodeSessionsGlobal — Claude-format projectKey (merge regression guard)', () => {
+  it('emits projectKey in Claude-format (D--WorkPlace-ClaudeUI) not forward-slash format', async () => {
+    mockReadRows.mockReturnValue([
+      { id: 'ses_1', directory: 'D:/WorkPlace/ClaudeUI', title: 'Test', timeCreated: 1, timeUpdated: 2 }
+    ])
+    const infos = await listOpencodeSessionsGlobal()
+    expect(infos).toHaveLength(1)
+    expect(infos[0].projectKey).toBe('D--WorkPlace-ClaudeUI')
+    // cwd stays as the real (unmodified) path
+    expect(infos[0].cwd).toBe('D:/WorkPlace/ClaudeUI')
+    // Would fail under the old forward-slash key 'D:/WorkPlace/ClaudeUI'
+    expect(infos[0].projectKey).not.toBe('D:/WorkPlace/ClaudeUI')
+  })
+})
+
+describe('deleteOpencodeSession (HTTP, global-by-id)', () => {
+  it('calls client.deleteSession with the sessionId and releases the server', async () => {
+    mockDeleteSession.mockResolvedValueOnce(true)
+    await deleteOpencodeSession('ses_del')
+    expect(mockDeleteSession).toHaveBeenCalledWith('ses_del')
+    expect(mockRelease).toHaveBeenCalledWith('/tmp/persisted')
+  })
+
+  it('resolves without throwing when the server is down (best-effort)', async () => {
+    mockAcquire.mockRejectedValueOnce(new Error('server down'))
+    await expect(deleteOpencodeSession('ses_del')).resolves.toBeUndefined()
+  })
+
+  it('releases the server even when deleteSession rejects', async () => {
+    mockDeleteSession.mockRejectedValueOnce(new Error('not found'))
+    await expect(deleteOpencodeSession('ses_del')).resolves.toBeUndefined()
+    expect(mockRelease).toHaveBeenCalledWith('/tmp/persisted')
+  })
+})
+
+describe('deleteSessionByEngine (engine-neutral dispatch)', () => {
+  it('routes engineId=opencode → opencode HTTP delete; never touches the filesystem', async () => {
+    mockDeleteSession.mockResolvedValueOnce(true)
+    await deleteSessionByEngine('ses_oc', 'D--WorkPlace-ClaudeUI', 'opencode')
+    // opencode client delete invoked with the engine-owned sessionId
+    expect(mockDeleteSession).toHaveBeenCalledWith('ses_oc')
+    expect(mockAcquire).toHaveBeenCalledWith('/tmp/persisted')
+    // Claude filesystem delete NOT invoked
+    expect(mockDeleteSessionFiles).not.toHaveBeenCalled()
+  })
+
+  it('routes engineId=claude → deleteSessionFiles; opencode server never acquired', async () => {
+    await deleteSessionByEngine('ses_cl', 'D--WorkPlace-ClaudeUI', 'claude')
+    expect(mockDeleteSessionFiles).toHaveBeenCalledWith('ses_cl', 'D--WorkPlace-ClaudeUI')
+    expect(mockAcquire).not.toHaveBeenCalled()
+    expect(mockDeleteSession).not.toHaveBeenCalled()
+  })
+
+  it('routes engineId=undefined (legacy callers) → deleteSessionFiles', async () => {
+    await deleteSessionByEngine('ses_legacy', 'proj', undefined)
+    expect(mockDeleteSessionFiles).toHaveBeenCalledWith('ses_legacy', 'proj')
+    expect(mockAcquire).not.toHaveBeenCalled()
   })
 })

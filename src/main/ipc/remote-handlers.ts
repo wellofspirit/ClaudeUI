@@ -10,7 +10,8 @@ import {
   loadBackgroundOutput,
   resolveForkAnchor
 } from '../services/session-history'
-import { deleteSessionFiles, deleteProjectFiles } from '../services/delete-session-files'
+import { deleteProjectFiles } from '../services/delete-session-files'
+import { deleteSessionByEngine } from '../services/opencode-session-list'
 import {
   loadSettings,
   saveSettings,
@@ -32,7 +33,7 @@ import { OpencodeSession } from '../opencode/OpencodeSession'
 import { scanCustomCommands } from '../services/custom-command-scanner'
 import { usageFetcher } from '../services/usage-fetcher'
 import { blockUsageService } from '../services/block-usage'
-import type { ApprovalDecision, SandboxSettings, PermissionSuggestion } from '../../shared/types'
+import type { ApprovalDecision, SandboxSettings, PermissionSuggestion, EngineId } from '../../shared/types'
 import type { BrowserWindow } from 'electron'
 import { ClaudeSession, getSdkExecutableOpts } from '../services/claude-session'
 import { PERSISTED_SESSIONS_DIR } from '../services/persisted-sessions-dir'
@@ -312,8 +313,8 @@ export function registerRemoteHandlers(
     }
   )
 
-  dispatcher.register('session:delete-session', async (sessionId: string, projectKey: string) => {
-    await deleteSessionFiles(sessionId, projectKey)
+  dispatcher.register('session:delete-session', async (sessionId: string, projectKey: string, engineId?: EngineId) => {
+    await deleteSessionByEngine(sessionId, projectKey, engineId)
   })
 
   dispatcher.register('session:delete-project', async (projectKey: string) => {

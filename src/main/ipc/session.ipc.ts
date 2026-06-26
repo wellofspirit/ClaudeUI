@@ -81,10 +81,11 @@ import { discoverOpencodeSkills } from '../opencode/command-skill-discovery'
 import { refreshPrices } from '../services/opencode-pricing'
 import { OpencodeSession } from '../opencode/OpencodeSession'
 import { logger } from '../services/logger'
-import { deleteSessionFiles, deleteProjectFiles } from '../services/delete-session-files'
+import { deleteProjectFiles } from '../services/delete-session-files'
 import {
   listOpencodeSessionsGlobal,
-  loadOpencodeSessionHistory
+  loadOpencodeSessionHistory,
+  deleteSessionByEngine
 } from '../services/opencode-session-list'
 import { startSocksBridge, stopSocksBridge } from '../services/socks-bridge'
 import { setProxyEnv, setProxyAllSubprocesses } from '../sdk/proxy'
@@ -1031,8 +1032,8 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
 
   ipcMain.handle(
     'session:delete-session',
-    safeHandler(async (_e: unknown, sessionId: string, projectKey: string) => {
-      await deleteSessionFiles(sessionId, projectKey)
+    safeHandler(async (_e: unknown, sessionId: string, projectKey: string, engineId?: EngineId) => {
+      await deleteSessionByEngine(sessionId, projectKey, engineId)
     })
   )
 

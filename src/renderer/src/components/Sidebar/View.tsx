@@ -13,7 +13,6 @@ import { SessionItem } from './SessionItem'
 import { PinnedSessionList } from './PinnedSessionList'
 import { SettingsPanel } from './SettingsPanel'
 import { DeleteConfirmModal } from './DeleteConfirmModal'
-import { EngineToggle } from '../shared/EngineToggle'
 
 export type DeleteTarget =
   | {
@@ -188,15 +187,6 @@ export function SidebarView(props: SidebarViewProps): React.JSX.Element {
               <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" />
               <path d="M18.5 2.5a2.12 2.12 0 013 3L12 15l-4 1 1-4z" />
             </svg>
-          }
-          rightSlot={
-            <div
-              className="shrink-0"
-              onClick={(e) => e.stopPropagation()}
-              onDoubleClick={(e) => e.stopPropagation()}
-            >
-              <EngineToggle compact />
-            </div>
           }
         />
         <NavItem
