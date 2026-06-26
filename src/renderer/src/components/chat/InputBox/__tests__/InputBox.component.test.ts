@@ -543,6 +543,31 @@ describe('InputBox FC — rendered', () => {
     expect(useSessionStore.getState().sessions[FC_ROUTE].selectedModel).toBe('claude-opus-4-5')
   })
 
+  it('onSelectModel: picking a Claude model on an opencode session switches the engine to claude', async () => {
+    // Regression: Claude ModelInfo entries may lack an explicit engineId. The
+    // pick resolution must treat a missing engineId as 'claude' — NOT fall back
+    // to the session's current engine — otherwise a Claude pick on an opencode
+    // session is recorded as "opencode/<claudeModelId>" (e.g. "opencode/default")
+    // and the engine never switches, breaking the chat.
+    renderFC()
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [FC_ROUTE]: { ...state.sessions[FC_ROUTE], selectedEngineId: 'opencode' }
+      },
+      // Claude entry with engineId undefined (as supportedModels() returns it).
+      availableModels: [{ value: 'default', displayName: 'Default', description: '' }]
+    }))
+
+    viewProps.onSelectModel('default')
+
+    const s = useSessionStore.getState()
+    expect(s.sessions[FC_ROUTE].selectedEngineId).toBe('claude')
+    expect(s.sessions[FC_ROUTE].selectedModel).toBe('default')
+    // No opencode-engine attribution leaked into setModel.
+    expect(ipcCalls['session:set-model']).toBeUndefined()
+  })
+
   it('onVoiceStop: calls voiceStopRecording IPC with active session id', async () => {
     renderFC()
 

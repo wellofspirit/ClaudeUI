@@ -1074,6 +1074,13 @@ function OpencodeProvidersSection(): React.JSX.Element {
         )
       })
       .catch(() => setEngineCfg({}))
+    refreshDiscoveredProviders()
+  }, [])
+
+  // Re-discover the provider/model list from opencode. The main process drops
+  // the discovery cache on config save (config:save-engine-config), so calling
+  // this after a provider-list edit reflects the change without an app restart.
+  function refreshDiscoveredProviders(): void {
     window.api
       .getEngineModels()
       .then((groups) => {
@@ -1089,7 +1096,7 @@ function OpencodeProvidersSection(): React.JSX.Element {
         setKnownProviders([...prefixes].sort())
       })
       .catch(() => {})
-  }, [])
+  }
 
   if (engineCfg === null) {
     return <div className="px-3 py-1.5 text-[13px] text-text-muted">Loading…</div>
@@ -1163,11 +1170,23 @@ function OpencodeProvidersSection(): React.JSX.Element {
   const saveProviderLists = (patch: Partial<OpencodeConfigSettings>): void => {
     const next: EngineConfig = { ...engineCfg, opencodeConfig: { ...cfg, ...patch } }
     setEngineCfg(next)
-    window.api.saveEngineConfig('opencode', next).catch(() => {})
+    window.api
+      .saveEngineConfig('opencode', next)
+      // Re-discover so a newly disabled/re-enabled provider reflects immediately.
+      .then(() => refreshDiscoveredProviders())
+      .catch(() => {})
   }
 
   const disabledProviders = cfg.disabledProviders ?? []
   const enabledProviders = cfg.enabledProviders ?? []
+  // The disable-toggle list must include providers that are CURRENTLY disabled
+  // (and allowlisted ones), not just those returned by live discovery — a
+  // disabled provider is filtered out of /config/providers, so deriving the
+  // list from discovery alone would make its toggle vanish and strand the user
+  // with no way to re-enable it.
+  const toggleableProviders = [
+    ...new Set([...knownProviders, ...disabledProviders, ...enabledProviders])
+  ].sort()
 
   return (
     <div className="space-y-3 px-3 py-1.5 text-[13px] text-text-secondary">
@@ -1234,7 +1253,7 @@ function OpencodeProvidersSection(): React.JSX.Element {
       </div>
 
       {/* Disabled providers */}
-      {knownProviders.length > 0 && (
+      {toggleableProviders.length > 0 && (
         <div className="space-y-1.5">
           <div className="text-[11px] text-text-muted uppercase tracking-wide">
             Disable providers
@@ -1242,7 +1261,7 @@ function OpencodeProvidersSection(): React.JSX.Element {
           <div className="text-[10px] text-text-muted/60 leading-relaxed">
             Disabled providers are hidden from model pickers.
           </div>
-          {knownProviders.map((id) => (
+          {toggleableProviders.map((id) => (
             <SettingsToggle
               key={id}
               label={id}

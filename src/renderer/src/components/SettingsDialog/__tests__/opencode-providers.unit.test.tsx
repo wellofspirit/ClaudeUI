@@ -132,6 +132,31 @@ describe('opencode Providers section', () => {
     expect(last.opencodeConfig?.providers).toBeUndefined()
   })
 
+  it('still shows a re-enable toggle for a disabled provider absent from discovery', async () => {
+    // Regression: a disabled provider is filtered out of /config/providers, so
+    // deriving the toggle list from discovery alone made its toggle vanish and
+    // left no way to re-enable it. Discovery here returns only "anthropic"; the
+    // disabled "opencode" provider must still render a toggle (off), and
+    // clicking it must clear it from disabledProviders.
+    installApiStub({ opencodeConfig: { disabledProviders: ['opencode'] } })
+    await act(async () => {
+      renderProvidersSection()
+    })
+
+    const toggle = (await screen.findByRole('button', { name: /opencode/ })) as HTMLButtonElement
+    // The on/off pip span reflects state via bg-accent (on) / bg-text-muted (off).
+    expect(toggle.querySelector('.bg-accent')).toBeNull()
+
+    await act(async () => {
+      fireEvent.click(toggle)
+    })
+
+    await waitFor(() => {
+      const last = savedConfigs[savedConfigs.length - 1]
+      expect(last.opencodeConfig?.disabledProviders).toBeUndefined()
+    })
+  })
+
   it('keeps model-text when the provider id is edited (model text keyed by stable _key)', async () => {
     // Pre-seed a saved provider with one model id.
     installApiStub({

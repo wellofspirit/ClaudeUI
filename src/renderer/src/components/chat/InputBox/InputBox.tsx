@@ -588,7 +588,11 @@ export function InputBox(): React.JSX.Element {
       // The picked entry carries engineId/vendorId (from getEngineModels). The
       // store action switches the session's engine when it differs (valid only
       // for a not-yet-started session — guarded below before any IPC).
-      const pickedEngine = newModel?.engineId ?? session?.selectedEngineId ?? 'claude'
+      // A model with no engineId is a Claude model (ModelInfo.engineId defaults
+      // to 'claude' when absent) — NEVER fall back to the session's current
+      // engine, or a Claude pick on an opencode session is recorded as
+      // "opencode/<claudeModelId>" and the engine never switches.
+      const pickedEngine = newModel?.engineId ?? 'claude'
       setSelectedModel(value, pickedEngine)
       // Persist the chosen engine so the next new session inherits it (was
       // previously only written by EngineToggle, which is now removed).

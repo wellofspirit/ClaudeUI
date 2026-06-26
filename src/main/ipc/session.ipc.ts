@@ -76,7 +76,7 @@ import type {
   VendorAuthOption
 } from '../../shared/types'
 import { claudeModel } from '../../shared/types'
-import { discoverOpencodeModels } from '../opencode/model-discovery'
+import { discoverOpencodeModels, invalidateOpencodeModelCache } from '../opencode/model-discovery'
 import { discoverOpencodeSkills } from '../opencode/command-skill-discovery'
 import { refreshPrices } from '../services/opencode-pricing'
 import { OpencodeSession } from '../opencode/OpencodeSession'
@@ -994,8 +994,16 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
   })
 
   ipcMain.handle('session:get-engine-models', async (): Promise<EngineModelGroup[]> => {
-    // Claude models as a flat group
-    const claudeModels = await fetchModels()
+    // Claude models as a flat group. supportedModels() returns bare ModelInfo
+    // (no engineId/vendorId) — stamp them so the renderer can attribute a Claude
+    // pick to the 'claude' engine. Without this, picking a Claude model while on
+    // an opencode session leaves engineId undefined and the pick is mis-recorded
+    // under the session's current engine (e.g. "opencode/default").
+    const claudeModels = (await fetchModels()).map((m) => ({
+      ...m,
+      engineId: 'claude' as const,
+      vendorId: 'anthropic'
+    }))
     const claudeGroup: EngineModelGroup = {
       engineId: 'claude',
       vendorId: 'anthropic',
@@ -1223,9 +1231,14 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
   ipcMain.handle('config:load-engine-config', (_e, engineId: string) =>
     loadEngineConfig(engineId)
   )
-  ipcMain.handle('config:save-engine-config', (_e, engineId: string, cfg: EngineConfig) =>
+  ipcMain.handle('config:save-engine-config', (_e, engineId: string, cfg: EngineConfig) => {
     saveEngineConfig(engineId, cfg)
-  )
+    // Provider enable/disable + custom-provider edits change which models the
+    // discovery server returns. Drop the cache so the next getEngineModels()
+    // re-discovers (otherwise a disabled/re-enabled provider only reflects after
+    // an app restart).
+    if (engineId === 'opencode') invalidateOpencodeModelCache()
+  })
   ipcMain.handle('config:load-vendor-config', (_e, vendorId: string) =>
     loadVendorConfig(vendorId)
   )
