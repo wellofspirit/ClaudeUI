@@ -248,6 +248,28 @@ squash/integration strategy for landing the stack. Not code — a process decisi
 Prior session inventories (pre-Phase-8/9) listed these as deferred; the 2026-06-23 sweep confirms they
 shipped. Recorded here so they're not re-raised:
 
+- **Per-engine session UX polish** (shipped 2026-06-26, `v2-followup-engine-ux-polish`) — three
+  user-spotted gaps in the engine UX. **(1)** Removed the explicit `EngineToggle` from all three sites
+  (sidebar new-session `rightSlot`, `WelcomeScreen`, empty-chat `WelcomeState`) and deleted the
+  component: the engine is decided by the first message's model pick (`InputBox.onSelectModel` already
+  derives `pickedEngine` from the model's `engineId` and switches the session engine pre-spawn), so the
+  toggle was redundant. Engine stickiness is preserved by having the model picker also write
+  `lastSelectedEngineId` (the toggle's old job), so the next new session inherits the last-used engine.
+  **(2)** The model picker now hides other engines' models once a session is engine-committed — gated on
+  `engineLocked = !!status.sessionId || !!isHistorical` via a pure `filterModelsForEngine` helper. Review
+  caught the first cut keying on `status.sessionId` alone, which left a historical (loaded-from-disk,
+  not-yet-resumed) session showing both engine groups; since `setSelectedModel` applies engine switches
+  unconditionally, the picker's visibility is the only guard, so a cross-engine pick there would corrupt
+  an engine-committed session. `isHistorical` (set on `loadHistoricalSession`/fork) closes it for both
+  engines. **(3)** Every sidebar row now renders its engine's logomark: `EngineLogo` switches on
+  `engineId` (it previously ignored the prop and always drew the Claude mark) — Claude keeps the orange
+  sunburst, opencode gets its official monochrome geometric mark (`currentColor`, theme-adaptive); and
+  `SessionItem` renders the mark for claude rows too (was non-claude only, so Claude rows showed nothing
+  and opencode rows wrongly showed the Claude mark). Real-app verified: toggle gone from all three
+  locations; historical Claude session's picker shows only Claude models, historical opencode session's
+  shows only opencode models; sidebar marks render per engine (2 Claude + 4 opencode) with zero console
+  errors. Guarded by `filterModelsForEngine` unit tests (incl. an explicit historical-session regression
+  guard) + `EngineLogo` per-engine render tests.
 - **Per-section capability gating in Settings** (ROADMAP #12, shipped 2026-06-25,
   `v2-followup-settings-12-caps`) — `EngineCapabilities` grew `sandbox` + `proxy` boolean flags (Claude
   both true, opencode both false — it has its own provider config), threaded through
