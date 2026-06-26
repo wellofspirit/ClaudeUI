@@ -32,6 +32,21 @@ export class OpencodeAuthProvider implements EngineAuthProvider {
    */
   private cachedVendorMap: VendorAuthMap | null = null
 
+  /**
+   * Server ref held open across an OAuth flow (authorize → callback).
+   *
+   * Why: the loopback HTTP listener (e.g. localhost:1455) and the in-memory
+   * PKCE verifier/state live INSIDE the opencode server process that handled
+   * `oauth/authorize`. If we acquire+release per call, releasing after authorize
+   * drops the last ref and KILLS that process — so the subsequent `oauth/callback`
+   * spawns a fresh server with no pending flow and fails immediately with
+   * `ProviderAuthOauthMissing`. Holding one extra ref keeps the authorize-time
+   * server alive until the callback settles (or the flow is cancelled).
+   *
+   * `released` guards against double-release (idempotent teardown).
+   */
+  private oauthHold: { released: boolean } | null = null
+
   // -------------------------------------------------------------------------
   // EngineAuthProvider interface
   // -------------------------------------------------------------------------
@@ -163,16 +178,29 @@ export class OpencodeAuthProvider implements EngineAuthProvider {
     method: number,
     inputs?: Record<string, string>
   ): Promise<{ url: string; method: 'auto' | 'code'; instructions: string }> {
+    // Drop any stale hold from an abandoned prior flow, then acquire a ref we
+    // intentionally do NOT release here — oauthCallback / cancelVendorOauth owns
+    // its teardown. This keeps the authorize-time server (loopback + PKCE state)
+    // alive until the flow completes.
+    this.releaseOauthHold()
     const conn = await opencodeServerManager.acquire(PERSISTED_SESSIONS_DIR)
+    this.oauthHold = { released: false }
     const client = new OpencodeClient(conn.baseUrl, conn.authHeader)
     try {
       return await client.oauthAuthorize(vendorId, method, inputs)
-    } finally {
-      opencodeServerManager.release(PERSISTED_SESSIONS_DIR)
+    } catch (err) {
+      // authorize failed → no callback will come; release immediately.
+      this.releaseOauthHold()
+      throw err
     }
   }
 
   async oauthCallback(vendorId: string, method: number, code?: string): Promise<boolean> {
+    // acquire() returns the SAME server the oauthAuthorize hold is keeping alive
+    // (same PERSISTED_SESSIONS_DIR key), so the callback runs against the process
+    // that owns the loopback + PKCE state. With no active hold (stale/duplicate
+    // call) this spawns a fresh server with no pending flow — it fails with
+    // ProviderAuthOauthMissing, the correct outcome for an orphan callback.
     const conn = await opencodeServerManager.acquire(PERSISTED_SESSIONS_DIR)
     const client = new OpencodeClient(conn.baseUrl, conn.authHeader)
     try {
@@ -181,8 +209,19 @@ export class OpencodeAuthProvider implements EngineAuthProvider {
       invalidateOpencodeModelCache()
       return result
     } finally {
+      // Release this call's ref, then the authorize-time hold (flow is over).
       opencodeServerManager.release(PERSISTED_SESSIONS_DIR)
+      this.releaseOauthHold()
     }
+  }
+
+  /**
+   * Abandon an in-flight OAuth flow: release the held server ref. If this drops
+   * the last ref the process is killed, which makes any pending oauthCallback
+   * long-poll reject (connection reset) instead of hanging forever.
+   */
+  async cancelVendorOauth(): Promise<void> {
+    this.releaseOauthHold()
   }
 
   async removeVendorAuth(vendorId: string): Promise<void> {
@@ -230,6 +269,15 @@ export class OpencodeAuthProvider implements EngineAuthProvider {
 
   private invalidateCache(): void {
     this.cachedVendorMap = null
+  }
+
+  /** Release the OAuth-flow server hold exactly once (idempotent). */
+  private releaseOauthHold(): void {
+    if (this.oauthHold && !this.oauthHold.released) {
+      this.oauthHold.released = true
+      opencodeServerManager.release(PERSISTED_SESSIONS_DIR)
+    }
+    this.oauthHold = null
   }
 }
 

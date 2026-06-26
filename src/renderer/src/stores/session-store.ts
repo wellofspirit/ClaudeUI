@@ -2233,6 +2233,11 @@ export const useSessionStore = create<SessionState>((set) => ({
     // Invalidate any in-flight `auto` flow so its late-resolving callback can't
     // re-set vendorOAuth after the user cancelled (SHOULD-FIX 4).
     vendorOAuthFlowToken++
+    // Release the main-side server held open for the authorize → callback flow,
+    // otherwise an abandoned (never-completed) flow leaks the opencode process.
+    // Killing it also unblocks the pending callback long-poll.
+    const engineId = useSessionStore.getState().vendorOAuth?.engineId as EngineId | undefined
+    if (engineId) void window.api.vendorAuthOauthCancel(engineId).catch(() => {})
     set({ vendorOAuth: null })
   },
   setVendorAuthRequired: (routingId, data) =>

@@ -56,4 +56,12 @@ export interface EngineAuthProvider {
 
   /** DELETE /auth/{vendorId} — remove credentials for a vendor. */
   removeVendorAuth?(vendorId: VendorId): Promise<void>
+
+  /**
+   * Abandon an in-flight OAuth flow started via oauthAuthorize, releasing any
+   * resources held open across the authorize → callback handshake (e.g. the
+   * server process hosting the loopback redirect). Safe to call with no active
+   * flow.
+   */
+  cancelVendorOauth?(): Promise<void>
 }

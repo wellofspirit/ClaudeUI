@@ -807,6 +807,12 @@ interface VendorAuthAPI {
   ): Promise<boolean>
   /** Remove auth credentials for a vendor. */
   vendorAuthRemove(engineId: EngineId, vendorId: string): Promise<void>
+  /**
+   * Abandon an in-flight vendor OAuth flow, releasing resources held open across
+   * the authorize → callback handshake (e.g. the loopback-hosting server). Safe
+   * to call with no active flow.
+   */
+  vendorAuthOauthCancel(engineId: EngineId): Promise<void>
 }
 
 interface AccountAPI {

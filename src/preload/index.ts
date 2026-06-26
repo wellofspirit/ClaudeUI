@@ -341,6 +341,8 @@ const api: ClaudeAPI = {
   ) => unwrap('vendor-auth:oauth-callback', engineId, vendorId, method, code),
   vendorAuthRemove: (engineId: import('../shared/types').EngineId, vendorId: string) =>
     unwrap('vendor-auth:remove', engineId, vendorId),
+  vendorAuthOauthCancel: (engineId: import('../shared/types').EngineId) =>
+    unwrap('vendor-auth:oauth-cancel', engineId),
 
   loadEngineConfig: (engineId: string) =>
     ipcRenderer.invoke('config:load-engine-config', engineId),

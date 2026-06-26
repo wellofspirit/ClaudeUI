@@ -24,6 +24,7 @@ beforeEach(() => {
     vendorAuthListOptions: vi.fn(),
     vendorAuthOauthAuthorize: vi.fn(),
     vendorAuthOauthCallback: vi.fn(),
+    vendorAuthOauthCancel: vi.fn().mockResolvedValue(undefined),
     vendorAuthProbe: vi.fn().mockResolvedValue({}),
   }
 })
@@ -193,9 +194,11 @@ describe('authorizeVendorOAuth — cancel-then-late-resolve (SHOULD-FIX 4)', () 
     await Promise.resolve()
     expect(useSessionStore.getState().vendorOAuth?.stage).toBe('waiting')
 
-    // User cancels — clears vendorOAuth and bumps the flow token.
+    // User cancels — clears vendorOAuth, bumps the flow token, and releases the
+    // main-side server held open across the authorize → callback handshake.
     useSessionStore.getState().cancelVendorOAuth()
     expect(useSessionStore.getState().vendorOAuth).toBeNull()
+    expect((globalThis as any).window.api.vendorAuthOauthCancel).toHaveBeenCalledWith('opencode')
 
     // The in-flight callback resolves LATE (success). The flow guard must bail.
     resolveCallback(true)

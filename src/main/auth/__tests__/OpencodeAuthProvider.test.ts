@@ -283,6 +283,61 @@ describe('OpencodeAuthProvider — oauthCallback()', () => {
   })
 })
 
+describe('OpencodeAuthProvider — OAuth flow server continuity', () => {
+  beforeEach(setupMocks)
+
+  it('holds the server open across authorize → callback (does not release after authorize)', async () => {
+    const provider = makeProvider()
+    await provider.oauthAuthorize('openai', 0)
+    // authorize acquired but must NOT release — the loopback/PKCE state lives in
+    // that process and a release would kill it before callback runs.
+    expect(mockAcquire).toHaveBeenCalledTimes(1)
+    expect(mockRelease).not.toHaveBeenCalled()
+
+    await provider.oauthCallback('openai', 0)
+    // callback acquires its own ref then releases BOTH (its ref + the hold).
+    expect(mockAcquire).toHaveBeenCalledTimes(2)
+    expect(mockRelease).toHaveBeenCalledTimes(2)
+  })
+
+  it('releases the hold if authorize itself fails', async () => {
+    mockOauthAuthorize.mockRejectedValueOnce(new Error('authorize boom'))
+    const provider = makeProvider()
+    await expect(provider.oauthAuthorize('openai', 0)).rejects.toThrow('authorize boom')
+    // acquired then released — no dangling hold.
+    expect(mockAcquire).toHaveBeenCalledTimes(1)
+    expect(mockRelease).toHaveBeenCalledTimes(1)
+  })
+
+  it('cancelVendorOauth() releases an in-flight hold (idempotent)', async () => {
+    const provider = makeProvider()
+    await provider.oauthAuthorize('openai', 0)
+    expect(mockRelease).not.toHaveBeenCalled()
+
+    await provider.cancelVendorOauth()
+    expect(mockRelease).toHaveBeenCalledTimes(1)
+    // second cancel is a no-op (hold already released)
+    await provider.cancelVendorOauth()
+    expect(mockRelease).toHaveBeenCalledTimes(1)
+  })
+
+  it('a new authorize releases a stale hold from an abandoned prior flow', async () => {
+    const provider = makeProvider()
+    await provider.oauthAuthorize('openai', 0) // hold #1
+    await provider.oauthAuthorize('anthropic', 0) // should release #1, take #2
+    // acquire: 2 (one per authorize); release: 1 (stale #1 dropped)
+    expect(mockAcquire).toHaveBeenCalledTimes(2)
+    expect(mockRelease).toHaveBeenCalledTimes(1)
+  })
+
+  it('orphan callback (no prior authorize) acquires + releases once, no double-release', async () => {
+    const provider = makeProvider()
+    await provider.oauthCallback('openai', 0)
+    expect(mockAcquire).toHaveBeenCalledTimes(1)
+    expect(mockRelease).toHaveBeenCalledTimes(1)
+  })
+})
+
 describe('OpencodeAuthProvider — removeVendorAuth()', () => {
   beforeEach(setupMocks)
 

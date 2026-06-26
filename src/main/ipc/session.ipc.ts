@@ -383,6 +383,7 @@ const SESSION_IPC_CHANNELS = [
   'vendor-auth:set-key',
   'vendor-auth:oauth-authorize',
   'vendor-auth:oauth-callback',
+  'vendor-auth:oauth-cancel',
   'vendor-auth:remove'
 ]
 
@@ -1842,6 +1843,15 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
         throw new Error(`Engine "${engineId}" does not support removeVendorAuth`)
       }
       return provider.removeVendorAuth(vendorId)
+    })
+  )
+
+  ipcMain.handle(
+    'vendor-auth:oauth-cancel',
+    safeHandler(async (_e: unknown, engineId: EngineId): Promise<void> => {
+      const provider = engineAuthRegistry.require(engineId)
+      // No-op if the engine doesn't drive OAuth flows.
+      await provider.cancelVendorOauth?.()
     })
   )
 

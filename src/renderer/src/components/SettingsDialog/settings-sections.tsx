@@ -921,7 +921,14 @@ function VendorOpencodeSection(): React.JSX.Element {
                           Submit
                         </button>
                         <button
-                          onClick={() => { setOauthFlow({ stage: 'idle' }); setOauthCode('') }}
+                          onClick={() => {
+                            // Release the main-side server held open by authorize
+                            // (the paste flow holds it too) — otherwise abandoning
+                            // the paste step leaks the opencode process.
+                            void window.api.vendorAuthOauthCancel('opencode').catch(() => {})
+                            setOauthFlow({ stage: 'idle' })
+                            setOauthCode('')
+                          }}
                           className="px-2 py-1 text-[11px] rounded hover:bg-bg-hover text-text-muted transition-colors"
                         >
                           Cancel
