@@ -74,6 +74,22 @@ describe('listOpencodeSessionsGlobal (direct DB read)', () => {
     expect(infos[1]).toMatchObject({ sessionId: 'ses_a', title: 'Fix bug', engineId: 'opencode' })
   })
 
+  it("maps opencode's default placeholder title → 'Untitled' (real generated titles pass through)", async () => {
+    mockReadRows.mockReturnValue([
+      // opencode's un-generated placeholder — must be hidden in the sidebar
+      { id: 'ph', directory: '/d', title: 'New session - 2026-06-26T10:20:30.123Z', timeCreated: 1, timeUpdated: 3 },
+      // child-session placeholder variant
+      { id: 'ch', directory: '/d', title: 'Child session - 2026-06-26T10:20:30.123Z', timeCreated: 1, timeUpdated: 2 },
+      // a real LLM-generated title must NOT be mistaken for a placeholder
+      { id: 'real', directory: '/d', title: 'New session - notes', timeCreated: 1, timeUpdated: 1 }
+    ])
+    const infos = await listOpencodeSessionsGlobal()
+    const byId = Object.fromEntries(infos.map((i) => [i.sessionId, i.title]))
+    expect(byId.ph).toBe('Untitled')
+    expect(byId.ch).toBe('Untitled')
+    expect(byId.real).toBe('New session - notes')
+  })
+
   it('skips rows without a directory; falls back to timeCreated when timeUpdated is null', async () => {
     mockReadRows.mockReturnValue([
       { id: 'ok', directory: '/d', title: 't', timeCreated: 7, timeUpdated: null },

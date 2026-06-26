@@ -62,6 +62,23 @@ function resolveOpencodeDbPath(): string {
 }
 
 /**
+ * opencode stamps newly-created sessions with a default placeholder title
+ * ("New session - <ISO>" / "Child session - <ISO>") and only replaces it once its
+ * async LLM title generation completes (SessionPrompt.ensureTitle). Mirror
+ * opencode's own `isDefaultTitle` so we can hide that placeholder in the sidebar
+ * during the brief window before a real title lands — otherwise the raw ISO
+ * string would flash in the session list.
+ */
+const OPENCODE_DEFAULT_TITLE_RE =
+  /^(New session - |Child session - )\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
+
+function displayTitle(raw: string | null | undefined): string {
+  const t = raw?.trim()
+  if (!t || OPENCODE_DEFAULT_TITLE_RE.test(t)) return 'Untitled'
+  return t
+}
+
+/**
  * List ALL opencode sessions (across every cwd) for the sidebar, mapped to
  * SessionInfo[].
  *
@@ -88,7 +105,7 @@ export async function listOpencodeSessionsGlobal(): Promise<SessionInfo[]> {
       sessionId: row.id,
       cwd,
       projectKey: cwdToProjectKey(cwd),
-      title: row.title?.trim() || 'Untitled',
+      title: displayTitle(row.title),
       timestamp,
       lastActivityAt: timestamp,
       aiTitle: null,

@@ -326,7 +326,15 @@ export class OpencodeSession extends BaseSession {
           }
         }
         if (!this.openSessionId) {
-          const s = await this.client.createSession({ title: '' })
+          // Omit `title` so opencode stamps its default placeholder
+          // ("New session - <ISO>"). That placeholder is what gates opencode's
+          // own async title generation (SessionPrompt.ensureTitle fires only when
+          // `isDefaultTitle(session.title)` holds). Passing `title: ''` here would
+          // store an empty string — which opencode treats as a deliberate
+          // user-set title and so NEVER auto-titles — leaving the session
+          // permanently "Untitled". The placeholder is mapped back to a friendly
+          // label in opencode-session-list.ts until generation lands a real title.
+          const s = await this.client.createSession({})
           this.openSessionId = s.id
         }
         // Emit status with the session id so the renderer can rekey

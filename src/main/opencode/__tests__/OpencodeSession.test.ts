@@ -287,7 +287,9 @@ describe('OpencodeSession — run()', () => {
     const session = makeSession()
     await session.run('hello')
     expect(mockAcquire).toHaveBeenCalledWith('/tmp/test-cwd')
-    expect(mockCreateSession).toHaveBeenCalledWith({ title: '' })
+    // Title is omitted so opencode applies its default placeholder and its
+    // async title generation can fire (passing title:'' would suppress it).
+    expect(mockCreateSession).toHaveBeenCalledWith({})
     expect(mockPromptAsync).toHaveBeenCalled()
     session.dispose()
   })
