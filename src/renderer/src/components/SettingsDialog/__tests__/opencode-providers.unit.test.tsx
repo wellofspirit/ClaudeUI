@@ -28,11 +28,16 @@ const OPENCODE_GROUP: EngineModelGroup = {
   models: [{ value: 'anthropic/claude-sonnet-4-6', displayName: 'Sonnet', description: '' }]
 }
 
-function installApiStub(initial: EngineConfig): void {
+function installApiStub(initial: EngineConfig, opts?: { models?: EngineModelGroup[] }): void {
   ;(globalThis as { window: Window }).window = globalThis.window ?? ({} as Window)
   ;(window as unknown as { api: Record<string, unknown> }).api = {
     loadEngineConfig: vi.fn(async () => structuredClone(initial)),
-    getEngineModels: vi.fn(async () => [OPENCODE_GROUP]),
+    getEngineModels: vi.fn(async () => opts?.models ?? [OPENCODE_GROUP]),
+    // Availability is gated on the auth probe (the /provider/auth catalog), NOT
+    // the model count — so the section stays reachable even with zero models.
+    vendorAuthProbe: vi.fn(async () => ({
+      anthropic: { authState: 'authenticated', billingType: 'apiKey' }
+    })),
     saveEngineConfig
   }
 }
@@ -154,6 +159,34 @@ describe('opencode Providers section', () => {
     await waitFor(() => {
       const last = savedConfigs[savedConfigs.length - 1]
       expect(last.opencodeConfig?.disabledProviders).toBeUndefined()
+    })
+  })
+
+  it('stays reachable when ALL providers are disabled (zero discoverable models)', async () => {
+    // Regression: availability was gated on getEngineModels() returning ≥1 opencode
+    // group. Disabling every provider filters them all out of /config/providers, so
+    // discovery returns [] — which used to flip the section to "opencode is not
+    // installed", hiding the very toggles needed to re-enable a provider. Gating on
+    // the auth probe instead keeps the section live; the disabled provider's toggle
+    // renders (off) and can be cleared.
+    installApiStub({ opencodeConfig: { disabledProviders: ['anthropic', 'openai'] } }, { models: [] })
+    await act(async () => {
+      renderProvidersSection()
+    })
+
+    // Must NOT show the "not installed" copy.
+    expect(screen.queryByText(/opencode is not installed/)).toBeNull()
+
+    // Both disabled providers render re-enable toggles (off).
+    const toggle = (await screen.findByRole('button', { name: /openai/ })) as HTMLButtonElement
+    expect(toggle.querySelector('.bg-accent')).toBeNull()
+
+    await act(async () => {
+      fireEvent.click(toggle)
+    })
+    await waitFor(() => {
+      const last = savedConfigs[savedConfigs.length - 1]
+      expect(last.opencodeConfig?.disabledProviders).toEqual(['anthropic'])
     })
   })
 

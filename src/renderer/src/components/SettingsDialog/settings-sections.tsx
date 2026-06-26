@@ -414,6 +414,41 @@ function AutonomyModePicker(): React.JSX.Element {
   )
 }
 
+// ── opencode availability probe ──────────────────────────────────────
+
+/**
+ * Whether the opencode engine is installed/reachable.
+ *
+ * Probes `vendorAuthProbe('opencode')` — the auth-option catalog (`/provider/auth`)
+ * is the FULL known-vendor set and is independent of `disabled_providers` (which
+ * only filters `/config/providers`). So a non-empty map means opencode is installed
+ * even when every provider is disabled.
+ *
+ * Do NOT gate availability on `getEngineModels()` model count: discovery returns []
+ * both when opencode is absent AND when all providers are disabled, which would hide
+ * the very section that lets the user re-enable a provider.
+ *
+ * Returns null while probing, then true/false.
+ */
+function useOpencodeInstalled(): boolean | null {
+  const [installed, setInstalled] = useState<boolean | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    window.api
+      .vendorAuthProbe('opencode')
+      .then((map) => {
+        if (!cancelled) setInstalled(Object.keys(map).length > 0)
+      })
+      .catch(() => {
+        if (!cancelled) setInstalled(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+  return installed
+}
+
 // ── opencode auto-mode (Full) LLM gatekeeper settings (ADR-023) ──────
 
 const TWO_STAGE_OPTIONS: { value: 'both' | 'fast' | 'thinking'; label: string }[] = [
@@ -430,7 +465,7 @@ const TWO_STAGE_OPTIONS: { value: 'both' | 'fast' | 'thinking'; label: string }[
 function OpencodeAutoModeSection(): React.JSX.Element {
   const [engineCfg, setEngineCfg] = useState<EngineConfig | null>(null)
   const [models, setModels] = useState<ModelInfo[]>([])
-  const [available, setAvailable] = useState(false)
+  const installed = useOpencodeInstalled()
 
   useEffect(() => {
     window.api
@@ -441,16 +476,15 @@ function OpencodeAutoModeSection(): React.JSX.Element {
       .getEngineModels()
       .then((groups) => {
         const oc = groups.filter((g) => g.engineId === 'opencode')
-        setAvailable(oc.length > 0)
         setModels(oc.flatMap((g) => g.models))
       })
       .catch(() => {})
   }, [])
 
-  if (engineCfg === null) {
+  if (engineCfg === null || installed === null) {
     return <div className="px-3 py-1.5 text-[13px] text-text-muted">Loading…</div>
   }
-  if (!available) {
+  if (!installed) {
     return (
       <div className="px-3 py-2 text-[12px] text-text-muted/70 leading-relaxed">
         opencode is not installed. Auto mode gates risky tool calls for opencode sessions in Full
@@ -936,7 +970,7 @@ const KNOWN_AGENT_NAMES = ['build', 'plan', 'general', 'explore', 'title', 'summ
 function OpencodeModelsSection(): React.JSX.Element {
   const [engineCfg, setEngineCfg] = useState<EngineConfig | null>(null)
   const [models, setModels] = useState<ModelInfo[]>([])
-  const [available, setAvailable] = useState(false)
+  const installed = useOpencodeInstalled()
 
   useEffect(() => {
     window.api
@@ -947,16 +981,15 @@ function OpencodeModelsSection(): React.JSX.Element {
       .getEngineModels()
       .then((groups) => {
         const oc = groups.filter((g) => g.engineId === 'opencode')
-        setAvailable(oc.length > 0)
         setModels(oc.flatMap((g) => g.models))
       })
       .catch(() => {})
   }, [])
 
-  if (engineCfg === null) {
+  if (engineCfg === null || installed === null) {
     return <div className="px-3 py-1.5 text-[13px] text-text-muted">Loading…</div>
   }
-  if (!available) {
+  if (!installed) {
     return (
       <div className="px-3 py-2 text-[12px] text-text-muted/70 leading-relaxed">
         opencode is not installed. Model settings apply to opencode sessions.
@@ -1050,7 +1083,7 @@ function newProvider(): ProviderRow {
  */
 function OpencodeProvidersSection(): React.JSX.Element {
   const [engineCfg, setEngineCfg] = useState<EngineConfig | null>(null)
-  const [available, setAvailable] = useState(false)
+  const installed = useOpencodeInstalled()
   const [knownProviders, setKnownProviders] = useState<string[]>([])
   // Local editing state for provider rows (has a transient _id key for React diffing)
   const [providerRows, setProviderRows] = useState<ProviderRow[]>([])
@@ -1091,7 +1124,6 @@ function OpencodeProvidersSection(): React.JSX.Element {
       .getEngineModels()
       .then((groups) => {
         const oc = groups.filter((g) => g.engineId === 'opencode')
-        setAvailable(oc.length > 0)
         // Derive known provider ids from model value prefixes (e.g. "anthropic/...")
         const prefixes = new Set(
           oc
@@ -1104,10 +1136,10 @@ function OpencodeProvidersSection(): React.JSX.Element {
       .catch(() => {})
   }
 
-  if (engineCfg === null) {
+  if (engineCfg === null || installed === null) {
     return <div className="px-3 py-1.5 text-[13px] text-text-muted">Loading…</div>
   }
-  if (!available) {
+  if (!installed) {
     return (
       <div className="px-3 py-2 text-[12px] text-text-muted/70 leading-relaxed">
         opencode is not installed. Provider settings apply to opencode sessions.
@@ -1325,7 +1357,7 @@ function OpencodeProvidersSection(): React.JSX.Element {
 function OpencodeAgentsSection(): React.JSX.Element {
   const [engineCfg, setEngineCfg] = useState<EngineConfig | null>(null)
   const [models, setModels] = useState<ModelInfo[]>([])
-  const [available, setAvailable] = useState(false)
+  const installed = useOpencodeInstalled()
   const [newAgentName, setNewAgentName] = useState('')
 
   useEffect(() => {
@@ -1337,16 +1369,15 @@ function OpencodeAgentsSection(): React.JSX.Element {
       .getEngineModels()
       .then((groups) => {
         const oc = groups.filter((g) => g.engineId === 'opencode')
-        setAvailable(oc.length > 0)
         setModels(oc.flatMap((g) => g.models))
       })
       .catch(() => {})
   }, [])
 
-  if (engineCfg === null) {
+  if (engineCfg === null || installed === null) {
     return <div className="px-3 py-1.5 text-[13px] text-text-muted">Loading…</div>
   }
-  if (!available) {
+  if (!installed) {
     return (
       <div className="px-3 py-2 text-[12px] text-text-muted/70 leading-relaxed">
         opencode is not installed. Agent settings apply to opencode sessions.
