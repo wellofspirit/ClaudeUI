@@ -298,6 +298,57 @@ export interface OpencodeConfigSettings {
   providers?: Record<string, OpencodeProviderSettings>
   /** Per-agent model/temperature overrides keyed by agent name */
   agents?: Record<string, OpencodeAgentSettings>
+  /**
+   * Per-provider visible-model allowlist, keyed by provider id. Values are bare
+   * model ids (NOT "provider/model"). Filtered ClaudeUI-side in discovery so the
+   * model picker isn't flooded by providers exposing hundreds of models
+   * (e.g. openrouter ships 300+).
+   *
+   * Semantics by KEY PRESENCE (the array, not its length, is the gate):
+   *   - key absent  → show ALL of that provider's models (legacy / externally-authed
+   *                   providers keep working unchanged).
+   *   - key present → show ONLY the listed model ids (an empty array → none). The
+   *                   "Add provider" flow always writes a key, so a newly-added
+   *                   provider never auto-floods the picker.
+   */
+  modelAllowlist?: Record<string, string[]>
+}
+
+/**
+ * One provider in the opencode catalog (the full models.dev set, ~146 providers),
+ * surfaced to the settings UI so users can add any supported provider — including
+ * ones with no custom auth loader (e.g. openrouter, authed by a plain API key).
+ * Lightweight by design: the per-provider model list is fetched separately
+ * (getOpencodeProviderModels) so this list stays cheap even with hundreds of
+ * models per provider.
+ */
+export interface OpencodeProviderCatalogEntry {
+  id: string
+  name: string
+  /**
+   * 'authenticated' — currently usable (configured / has credentials, i.e. present
+   *   in /config/providers); 'free' — bundled, needs no credentials; 'unauthenticated'
+   *   — supported but not yet set up.
+   */
+  authState: 'authenticated' | 'unauthenticated' | 'free'
+  /**
+   * Auth methods the provider supports. 'oauth' when a custom OAuth loader exists
+   * (from /provider/auth); 'api' for a plain API key. Providers absent from the
+   * auth catalog still accept a generic API key, so this defaults to ['api'].
+   */
+  authMethods: ('api' | 'oauth')[]
+  /** Number of models the provider exposes in the catalog (for the picker hint). */
+  modelCount: number
+}
+
+/** A single catalog model for the per-provider model-allowlist dialog. */
+export interface OpencodeCatalogModel {
+  id: string
+  name: string
+  /** ISO date string when present in the catalog (sort newest-first). */
+  releaseDate?: string
+  toolCalling?: boolean
+  reasoning?: boolean
 }
 
 export interface EngineConfig {
@@ -629,6 +680,11 @@ interface SessionAPI {
   setReasoningVariant(routingId: string, variant: string | null): Promise<void>
   getModels(): Promise<ModelInfo[]>
   getEngineModels(): Promise<EngineModelGroup[]>
+  /** Full opencode provider catalog (~146 providers) for the settings provider manager.
+   *  Returns [] when opencode isn't installed or discovery fails. */
+  getOpencodeProviders(): Promise<OpencodeProviderCatalogEntry[]>
+  /** All catalog models for a single opencode provider (for the model-allowlist dialog). */
+  getOpencodeProviderModels(providerId: string): Promise<OpencodeCatalogModel[]>
   /** Deterministic "is this engine installed?" check (binary on disk). Does NOT
    *  spawn a server, so transient runtime failures can't read as "not installed". */
   engineIsInstalled(engineId: EngineId): Promise<boolean>

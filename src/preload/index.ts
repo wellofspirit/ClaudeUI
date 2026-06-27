@@ -184,6 +184,9 @@ const api: ClaudeAPI = {
     ipcRenderer.invoke('session:set-reasoning-variant', routingId, variant),
   getModels: () => ipcRenderer.invoke('session:get-models'),
   getEngineModels: () => ipcRenderer.invoke('session:get-engine-models'),
+  getOpencodeProviders: () => ipcRenderer.invoke('session:get-opencode-providers'),
+  getOpencodeProviderModels: (providerId: string) =>
+    ipcRenderer.invoke('session:get-opencode-provider-models', providerId),
   engineIsInstalled: (engineId) => ipcRenderer.invoke('engine:is-installed', engineId),
   generateTitle: (conversationText: string) =>
     ipcRenderer.invoke('session:generate-title', conversationText),

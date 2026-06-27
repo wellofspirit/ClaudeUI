@@ -136,59 +136,6 @@ describe('opencode Providers section', () => {
     expect(last.opencodeConfig?.providers).toBeUndefined()
   })
 
-  it('still shows a re-enable toggle for a disabled provider absent from discovery', async () => {
-    // Regression: a disabled provider is filtered out of /config/providers, so
-    // deriving the toggle list from discovery alone made its toggle vanish and
-    // left no way to re-enable it. Discovery here returns only "anthropic"; the
-    // disabled "opencode" provider must still render a toggle (off), and
-    // clicking it must clear it from disabledProviders.
-    installApiStub({ opencodeConfig: { disabledProviders: ['opencode'] } })
-    await act(async () => {
-      renderProvidersSection()
-    })
-
-    const toggle = (await screen.findByRole('button', { name: /opencode/ })) as HTMLButtonElement
-    // The on/off pip span reflects state via bg-accent (on) / bg-text-muted (off).
-    expect(toggle.querySelector('.bg-accent')).toBeNull()
-
-    await act(async () => {
-      fireEvent.click(toggle)
-    })
-
-    await waitFor(() => {
-      const last = savedConfigs[savedConfigs.length - 1]
-      expect(last.opencodeConfig?.disabledProviders).toBeUndefined()
-    })
-  })
-
-  it('stays reachable when ALL providers are disabled (zero discoverable models)', async () => {
-    // Regression: availability was gated on getEngineModels() returning ≥1 opencode
-    // group. Disabling every provider filters them all out of /config/providers, so
-    // discovery returns [] — which used to flip the section to "opencode is not
-    // installed", hiding the very toggles needed to re-enable a provider. Gating on
-    // the binary-on-disk check instead keeps the section live; the disabled
-    // provider's toggle renders (off) and can be cleared.
-    installApiStub({ opencodeConfig: { disabledProviders: ['anthropic', 'openai'] } }, { models: [] })
-    await act(async () => {
-      renderProvidersSection()
-    })
-
-    // Must NOT show the "not installed" copy.
-    expect(screen.queryByText(/opencode is not installed/)).toBeNull()
-
-    // Both disabled providers render re-enable toggles (off).
-    const toggle = (await screen.findByRole('button', { name: /openai/ })) as HTMLButtonElement
-    expect(toggle.querySelector('.bg-accent')).toBeNull()
-
-    await act(async () => {
-      fireEvent.click(toggle)
-    })
-    await waitFor(() => {
-      const last = savedConfigs[savedConfigs.length - 1]
-      expect(last.opencodeConfig?.disabledProviders).toEqual(['anthropic'])
-    })
-  })
-
   it('keeps model-text when the provider id is edited (model text keyed by stable _key)', async () => {
     // Pre-seed a saved provider with one model id.
     installApiStub({

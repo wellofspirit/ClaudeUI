@@ -76,7 +76,12 @@ import type {
   VendorAuthOption
 } from '../../shared/types'
 import { claudeModel } from '../../shared/types'
-import { discoverOpencodeModels, invalidateOpencodeModelCache } from '../opencode/model-discovery'
+import {
+  discoverOpencodeModels,
+  invalidateOpencodeModelCache,
+  discoverOpencodeProviderCatalog,
+  getOpencodeProviderModels
+} from '../opencode/model-discovery'
 import { opencodeServerManager } from '../opencode/OpencodeServerManager'
 import { discoverOpencodeSkills } from '../opencode/command-skill-discovery'
 import { refreshPrices } from '../services/opencode-pricing'
@@ -299,6 +304,8 @@ const SESSION_IPC_CHANNELS = [
   'session:set-reasoning-variant',
   'session:get-models',
   'session:get-engine-models',
+  'session:get-opencode-providers',
+  'session:get-opencode-provider-models',
   'session:generate-title',
   'session:generate-commit-message',
   'session:write-custom-title',
@@ -1058,6 +1065,22 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     const opencodeGroups = await discoverOpencodeModels()
     return [claudeGroup, ...opencodeGroups]
   })
+
+  // Full opencode provider catalog for the settings provider manager. Returns []
+  // when opencode isn't installed or discovery fails (opencode is optional).
+  ipcMain.handle('session:get-opencode-providers', async () => {
+    if (!opencodeServerManager.isBinaryAvailable()) return []
+    return await discoverOpencodeProviderCatalog()
+  })
+
+  // All catalog models for one provider (drives the model-allowlist dialog).
+  ipcMain.handle(
+    'session:get-opencode-provider-models',
+    async (_e, providerId: string) => {
+      if (!opencodeServerManager.isBinaryAvailable()) return []
+      return await getOpencodeProviderModels(providerId)
+    }
+  )
 
   ipcMain.handle('session:generate-title', async (_e, conversationText: string) => {
     return await generateTitle(conversationText)

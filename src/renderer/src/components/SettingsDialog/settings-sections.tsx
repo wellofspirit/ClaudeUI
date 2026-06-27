@@ -13,7 +13,6 @@ import type {
   AnthropicEndpointSettings,
   ModelOverrideSettings,
   SandboxSettings,
-  VendorAuthMap,
   VendorAuthOption,
   AutoModeConfig,
   ModelInfo,
@@ -665,18 +664,201 @@ type VendorOAuthFlowState =
   | { stage: 'instructions'; url: string; instructions: string; method: number; vendorId: string }
   | { stage: 'submitting'; vendorId: string }
 
+/**
+ * Per-provider model-allowlist dialog. Lists every catalog model for a provider
+ * so the user picks which appear in the model picker — preventing huge providers
+ * (openrouter ships 300+) from flooding it.
+ *
+ * Semantics: an undefined incoming allowlist means "all currently shown", so we
+ * pre-check every model (saving then writes an explicit list). A defined list
+ * pre-checks exactly those ids. Saving an empty selection writes [] → no models.
+ */
+function ModelAllowlistDialog({
+  providerId,
+  providerName,
+  current,
+  onSave,
+  onClose
+}: {
+  providerId: string
+  providerName: string
+  current: string[] | undefined
+  onSave: (ids: string[]) => void
+  onClose: () => void
+}): React.JSX.Element {
+  const [models, setModels] = useState<import('../../../../shared/types').OpencodeCatalogModel[] | null>(
+    null
+  )
+  const [checked, setChecked] = useState<Set<string>>(new Set(current ?? []))
+  const [search, setSearch] = useState('')
+  // When the incoming allowlist is undefined (legacy "show all"), default every
+  // model to checked once the list loads so saving doesn't silently hide them.
+  const seededRef = useRef(current !== undefined)
+
+  useEffect(() => {
+    let cancelled = false
+    window.api
+      .getOpencodeProviderModels(providerId)
+      .then((list) => {
+        if (cancelled) return
+        setModels(list)
+        if (!seededRef.current) {
+          seededRef.current = true
+          setChecked(new Set(list.map((m) => m.id)))
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setModels([])
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [providerId])
+
+  const filtered = (models ?? []).filter((m) => {
+    const q = search.trim().toLowerCase()
+    if (!q) return true
+    return m.id.toLowerCase().includes(q) || m.name.toLowerCase().includes(q)
+  })
+
+  const toggle = (id: string): void => {
+    setChecked((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 backdrop-blur-sm animate-fade-in"
+      onClick={onClose}
+    >
+      <div
+        className="w-[min(560px,92vw)] max-h-[80vh] flex flex-col bg-bg-primary border border-border rounded-lg shadow-xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="px-4 py-3 border-b border-border/50 flex items-center justify-between">
+          <div>
+            <div className="text-[13px] font-medium text-text-primary">Models · {providerName}</div>
+            <div className="text-[11px] text-text-muted/70">
+              Pick which models appear in the picker. {checked.size} selected.
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            className="text-text-muted/60 hover:text-text-primary transition-colors text-[16px] leading-none px-1"
+          >
+            ✕
+          </button>
+        </div>
+
+        <div className="px-4 py-2 border-b border-border/30 flex items-center gap-2">
+          <input
+            type="text"
+            placeholder="Search models…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="flex-1 px-2 py-1 text-[11px] rounded bg-bg-input border border-border/40 text-text-primary placeholder:text-text-muted/50 focus:outline-none focus:border-accent/60"
+          />
+          <button
+            onClick={() => setChecked(new Set((models ?? []).map((m) => m.id)))}
+            className="text-[10px] text-accent hover:text-accent/80 transition-colors whitespace-nowrap"
+          >
+            Select all
+          </button>
+          <button
+            onClick={() => setChecked(new Set())}
+            className="text-[10px] text-text-muted/70 hover:text-text-primary transition-colors whitespace-nowrap"
+          >
+            Clear
+          </button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto px-2 py-1">
+          {models === null ? (
+            <div className="px-2 py-3 text-[11px] text-text-muted/60">Loading models…</div>
+          ) : filtered.length === 0 ? (
+            <div className="px-2 py-3 text-[11px] text-text-muted/60">No models match.</div>
+          ) : (
+            filtered.map((m) => (
+              <button
+                key={m.id}
+                onClick={() => toggle(m.id)}
+                className="w-full flex items-center gap-2 px-2 py-1 rounded hover:bg-bg-hover transition-colors text-left cursor-default"
+              >
+                <span
+                  className={`w-3.5 h-3.5 rounded-sm border flex items-center justify-center text-[9px] ${
+                    checked.has(m.id)
+                      ? 'bg-accent border-accent text-white'
+                      : 'border-border/60 text-transparent'
+                  }`}
+                >
+                  ✓
+                </span>
+                <span className="flex-1 min-w-0">
+                  <span className="text-[12px] text-text-secondary truncate block">{m.name}</span>
+                  <span className="text-[10px] text-text-muted/50 truncate block">
+                    {m.id}
+                    {m.releaseDate ? ` · ${m.releaseDate}` : ''}
+                    {m.toolCalling ? ' · tools' : ''}
+                    {m.reasoning ? ' · reasoning' : ''}
+                  </span>
+                </span>
+              </button>
+            ))
+          )}
+        </div>
+
+        <div className="px-4 py-3 border-t border-border/50 flex items-center justify-end gap-2">
+          <button
+            onClick={onClose}
+            className="px-3 py-1 text-[11px] rounded hover:bg-bg-hover text-text-muted transition-colors"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={() => onSave([...checked])}
+            className="px-3 py-1 text-[11px] rounded bg-accent/20 hover:bg-accent/30 text-accent transition-colors"
+          >
+            Save
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * opencode provider manager — the catalog-driven add/auth/curate experience.
+ *
+ * Surfaces the FULL provider catalog (~146 providers, incl. ones with no custom
+ * auth loader like openrouter) so users can ADD any supported provider, authenticate
+ * it (OAuth or plain API key), and then pick which of its models appear in the
+ * picker (per-provider allowlist). Replaces the old narrow vendor-auth list that
+ * only showed providers from /provider/auth ∪ /config/providers.
+ */
 function VendorOpencodeSection(): React.JSX.Element {
-  const [authMap, setAuthMap] = useState<VendorAuthMap | null>(null)
+  const installed = useOpencodeInstalled()
+  const [catalog, setCatalog] = useState<
+    import('../../../../shared/types').OpencodeProviderCatalogEntry[] | null
+  >(null)
+  const [engineCfg, setEngineCfg] = useState<EngineConfig | null>(null)
   const [options, setOptions] = useState<Record<string, VendorAuthOption[]>>({})
-  const [loading, setLoading] = useState(true)
   const [apiKeys, setApiKeys] = useState<Record<string, string>>({})
   const [saving, setSaving] = useState<Record<string, boolean>>({})
   const [removing, setRemoving] = useState<Record<string, boolean>>({})
   const [oauthFlow, setOauthFlow] = useState<VendorOAuthFlowState>({ stage: 'idle' })
   const [oauthCode, setOauthCode] = useState('')
   const [oauthError, setOauthError] = useState<string | null>(null)
-  // Track if opencode is installed (non-empty probe result)
-  const [opencodeAvailable, setOpencodeAvailable] = useState(false)
+  // Add-provider picker state.
+  const [pickerOpen, setPickerOpen] = useState(false)
+  const [addSearch, setAddSearch] = useState('')
+  // Provider currently mid-add (auth UI expanded inline in the picker).
+  const [addingId, setAddingId] = useState<string | null>(null)
+  // Provider whose model-allowlist dialog is open.
+  const [modelDialogId, setModelDialogId] = useState<string | null>(null)
   const mountedRef = useRef(true)
   const { vendorOAuth, authorizeVendorOAuth, cancelVendorOAuth } = useSessionStore(
     useShallow((s) => ({
@@ -688,34 +870,84 @@ function VendorOpencodeSection(): React.JSX.Element {
 
   useEffect(() => {
     mountedRef.current = true
-    return () => { mountedRef.current = false }
+    return () => {
+      mountedRef.current = false
+    }
   }, [])
+
+  const reload = (): void => {
+    Promise.all([
+      window.api.getOpencodeProviders().catch(() => []),
+      window.api.loadEngineConfig('opencode').catch(() => ({}) as EngineConfig),
+      window.api.vendorAuthListOptions('opencode').catch(() => ({})) as Promise<
+        Record<string, VendorAuthOption[]>
+      >
+    ]).then(([cat, cfg, opts]) => {
+      if (!mountedRef.current) return
+      setCatalog(cat)
+      setEngineCfg(cfg)
+      setOptions(opts)
+    })
+  }
 
   useEffect(() => {
-    let cancelled = false
-    Promise.all([
-      window.api.vendorAuthProbe('opencode').catch(() => ({})) as Promise<VendorAuthMap>,
-      window.api.vendorAuthListOptions('opencode').catch(() => ({})) as Promise<Record<string, VendorAuthOption[]>>
-    ]).then(([map, opts]) => {
-      if (cancelled) return
-      const available = Object.keys(map).length > 0
-      setOpencodeAvailable(available)
-      setAuthMap(map)
-      setOptions(opts)
-      setLoading(false)
-    })
-    return () => { cancelled = true }
+    reload()
   }, [])
 
-  const refresh = (): void => {
-    Promise.all([
-      window.api.vendorAuthProbe('opencode').catch(() => ({})) as Promise<VendorAuthMap>,
-      window.api.vendorAuthListOptions('opencode').catch(() => ({})) as Promise<Record<string, VendorAuthOption[]>>
-    ]).then(([map, opts]) => {
-      if (!mountedRef.current) return
-      setAuthMap(map)
-      setOptions(opts)
+  const cfg = engineCfg?.opencodeConfig ?? {}
+  const disabled = cfg.disabledProviders ?? []
+  const allowlist = cfg.modelAllowlist ?? {}
+
+  /** Merge a patch into opencodeConfig, persist, and refresh the picker model list. */
+  const updateCfg = (
+    patch: Partial<import('../../../../shared/types').OpencodeConfigSettings>
+  ): EngineConfig => {
+    const base = engineCfg ?? {}
+    const next: EngineConfig = {
+      ...base,
+      opencodeConfig: { ...(base.opencodeConfig ?? {}), ...patch }
+    }
+    setEngineCfg(next)
+    window.api.saveEngineConfig('opencode', next).catch(() => {})
+    useSessionStore.getState().reloadModels()
+    return next
+  }
+
+  // A provider is "active" (added) when it's usable now: authenticated/free AND
+  // not explicitly removed (disabledProviders). authState already reflects
+  // /config/providers, which excludes credential-less providers.
+  const activeProviders = (catalog ?? []).filter(
+    (p) => (p.authState === 'authenticated' || p.authState === 'free') && !disabled.includes(p.id)
+  )
+  const activeIds = new Set(activeProviders.map((p) => p.id))
+  const addable = (catalog ?? [])
+    .filter((p) => !activeIds.has(p.id))
+    .filter((p) => {
+      const q = addSearch.trim().toLowerCase()
+      if (!q) return true
+      return p.id.toLowerCase().includes(q) || p.name.toLowerCase().includes(q)
     })
+
+  const allowlistLabel = (id: string): string => {
+    const a = allowlist[id]
+    if (a === undefined) return 'all models'
+    return `${a.length} model${a.length === 1 ? '' : 's'}`
+  }
+
+  // Finalize adding a provider: clear it from disabledProviders, seed an empty
+  // model allowlist (so it doesn't flood the picker), close the picker, and open
+  // the model dialog so the user curates its models.
+  const finishAdd = (id: string): void => {
+    const nextDisabled = disabled.filter((d) => d !== id)
+    updateCfg({
+      disabledProviders: nextDisabled.length > 0 ? nextDisabled : undefined,
+      modelAllowlist: { ...allowlist, [id]: allowlist[id] ?? [] }
+    })
+    setAddingId(null)
+    setPickerOpen(false)
+    setApiKeys((prev) => ({ ...prev, [id]: '' }))
+    reload()
+    setModelDialogId(id)
   }
 
   const handleSaveKey = async (vendorId: string): Promise<void> => {
@@ -724,39 +956,41 @@ function VendorOpencodeSection(): React.JSX.Element {
     setSaving((prev) => ({ ...prev, [vendorId]: true }))
     try {
       await window.api.vendorAuthSetKey('opencode', vendorId, key)
-      setApiKeys((prev) => ({ ...prev, [vendorId]: '' }))
-      refresh()
-    } catch (err) {
-      // silent failure — user can retry
+      finishAdd(vendorId)
+    } catch {
+      setOauthError(`Failed to save key for ${vendorId}`)
     } finally {
       if (mountedRef.current) setSaving((prev) => ({ ...prev, [vendorId]: false }))
     }
   }
 
-  const handleRemove = async (vendorId: string): Promise<void> => {
+  const handleRemove = async (vendorId: string, isFree: boolean): Promise<void> => {
     setRemoving((prev) => ({ ...prev, [vendorId]: true }))
     try {
-      await window.api.vendorAuthRemove('opencode', vendorId)
-      refresh()
-    } catch (err) {
-      // silent failure
+      // Free/credential-less providers have nothing to remove from auth.json;
+      // hide them via disabledProviders. Authed providers also get their creds
+      // dropped so they leave /config/providers.
+      if (!isFree) await window.api.vendorAuthRemove('opencode', vendorId).catch(() => {})
+      const nextDisabled = disabled.includes(vendorId) ? disabled : [...disabled, vendorId]
+      const nextAllow = { ...allowlist }
+      delete nextAllow[vendorId]
+      updateCfg({
+        disabledProviders: nextDisabled,
+        modelAllowlist: Object.keys(nextAllow).length > 0 ? nextAllow : undefined
+      })
+      reload()
     } finally {
       if (mountedRef.current) setRemoving((prev) => ({ ...prev, [vendorId]: false }))
     }
   }
 
-  const handleOAuthStart = async (
-    vendorId: string,
-    _methodIdx: number
-  ): Promise<void> => {
+  const handleOAuthStart = async (vendorId: string): Promise<void> => {
     setOauthError(null)
     try {
       const result = await authorizeVendorOAuth('opencode', vendorId)
       if (result.ok) {
-        // auto flow succeeded — refresh local auth state
-        refresh()
+        finishAdd(vendorId)
       } else if (result.needsPaste) {
-        // method:'code' — show paste-code input
         setOauthFlow({
           stage: 'instructions',
           url: result.needsPaste.url,
@@ -765,7 +999,6 @@ function VendorOpencodeSection(): React.JSX.Element {
           vendorId
         })
       }
-      // If !ok and !needsPaste: auto flow is in progress or failed (shown via vendorOAuth state)
     } catch (err) {
       setOauthError(err instanceof Error ? err.message : 'Failed to start OAuth flow')
     }
@@ -781,184 +1014,268 @@ function VendorOpencodeSection(): React.JSX.Element {
       await window.api.vendorAuthOauthCallback('opencode', vendorId, method, code)
       setOauthFlow({ stage: 'idle' })
       setOauthCode('')
-      refresh()
+      finishAdd(vendorId)
     } catch (err) {
       setOauthError(err instanceof Error ? err.message : 'OAuth callback failed')
       setOauthFlow({ stage: 'idle' })
     }
   }
 
-  if (loading) {
-    return (
-      <div className="px-3 py-1.5 text-[11px] text-text-muted/60">Loading...</div>
-    )
+  if (installed === null || catalog === null) {
+    return <div className="px-3 py-1.5 text-[11px] text-text-muted/60">Loading…</div>
   }
-
-  if (!opencodeAvailable) {
+  if (!installed) {
     return (
       <div className="px-3 py-1.5 text-[11px] text-text-muted/60 leading-relaxed">
-        opencode is not installed or not running. Install it to configure vendor authentication.
+        opencode is not installed. Install it to add providers and authenticate them.
       </div>
     )
   }
 
-  const vendorIds = Array.from(
-    new Set([...Object.keys(authMap ?? {}), ...Object.keys(options)])
-  ).sort()
+  const dialogProvider = modelDialogId
+    ? (catalog.find((p) => p.id === modelDialogId) ?? null)
+    : null
 
   return (
-    <div className="px-3 py-1.5 space-y-4 text-[13px] text-text-secondary">
+    <div className="px-3 py-1.5 space-y-3 text-[13px] text-text-secondary">
       {oauthError && (
         <div className="text-[11px] text-red-400 leading-relaxed">{oauthError}</div>
       )}
-      {vendorIds.map((vendorId) => {
-        const status = authMap?.[vendorId]
-        const vendorOptions = options[vendorId] ?? []
-        const isAuth = status?.authState === 'authenticated'
-        const isFree = status?.billingType === 'free'
-        const apiOption = vendorOptions.find((o) => o.type === 'api')
-        const oauthOptions = vendorOptions.filter((o) => o.type === 'oauth')
-        const firstOauthIdx = vendorOptions.indexOf(oauthOptions[0] ?? vendorOptions[0])
 
-        return (
-          <div key={vendorId} className="border border-border/30 rounded-md p-2 space-y-1.5">
-            <div className="flex items-center justify-between">
-              <div className="font-medium text-[12px]">{vendorId}</div>
-              <div className="flex items-center gap-1.5">
-                {status && (
-                  <span
-                    className={`text-[10px] px-1.5 py-0.5 rounded ${
-                      isAuth
-                        ? 'bg-green-500/10 text-green-400'
-                        : 'bg-yellow-500/10 text-yellow-500'
-                    }`}
-                  >
-                    {isAuth ? 'Authenticated' : 'Not configured'}
-                  </span>
-                )}
-                {isFree && (
-                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-400">
-                    Free
-                  </span>
-                )}
+      {/* Active (added) providers */}
+      <div className="space-y-1.5">
+        <div className="text-[11px] text-text-muted uppercase tracking-wide">Added providers</div>
+        {activeProviders.length === 0 && (
+          <div className="text-[10px] text-text-muted/60 leading-relaxed">
+            No providers added yet. Click “Add provider” to choose one.
+          </div>
+        )}
+        {activeProviders.map((p) => {
+          const isFree = p.authState === 'free'
+          return (
+            <div
+              key={p.id}
+              className="border border-border/30 rounded-md p-2 flex items-center justify-between gap-2"
+            >
+              <div className="min-w-0">
+                <div className="flex items-center gap-1.5">
+                  <span className="font-medium text-[12px] truncate">{p.name}</span>
+                  {isFree ? (
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-400">
+                      Free
+                    </span>
+                  ) : (
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-green-500/10 text-green-400">
+                      Authenticated
+                    </span>
+                  )}
+                </div>
+                <div className="text-[10px] text-text-muted/60 truncate">
+                  {p.id} · showing {allowlistLabel(p.id)}
+                </div>
+              </div>
+              <div className="flex items-center gap-1.5 shrink-0">
+                <button
+                  onClick={() => setModelDialogId(p.id)}
+                  className="px-2 py-1 text-[11px] rounded bg-accent/15 hover:bg-accent/25 text-accent transition-colors"
+                >
+                  Manage models
+                </button>
+                <button
+                  onClick={() => void handleRemove(p.id, isFree)}
+                  disabled={removing[p.id]}
+                  className="px-2 py-1 text-[11px] rounded hover:bg-bg-hover text-text-muted/70 hover:text-red-400 transition-colors disabled:opacity-40"
+                >
+                  {removing[p.id] ? '…' : 'Remove'}
+                </button>
               </div>
             </div>
+          )
+        })}
+      </div>
 
-            {!isFree && (
-              <>
-                {/* API key form */}
-                {apiOption && (
-                  <div className="flex items-center gap-1.5">
-                    <input
-                      type="password"
-                      placeholder={apiOption.prompts?.[0]?.message ?? 'API key'}
-                      value={apiKeys[vendorId] ?? ''}
-                      onChange={(e) =>
-                        setApiKeys((prev) => ({ ...prev, [vendorId]: e.target.value }))
-                      }
-                      className="flex-1 px-2 py-1 text-[11px] rounded bg-bg-input border border-border/40 text-text-primary placeholder:text-text-muted/50 focus:outline-none focus:border-accent/60"
-                    />
+      {/* Add provider */}
+      {!pickerOpen ? (
+        <button
+          onClick={() => {
+            setPickerOpen(true)
+            setAddSearch('')
+            setAddingId(null)
+          }}
+          className="text-[11px] text-accent hover:text-accent/80 transition-colors"
+        >
+          + Add provider
+        </button>
+      ) : (
+        <div className="border border-border/40 rounded-md p-2 space-y-2">
+          <div className="flex items-center gap-2">
+            <input
+              type="text"
+              autoFocus
+              placeholder="Search providers (e.g. openrouter, anthropic, google)…"
+              value={addSearch}
+              onChange={(e) => setAddSearch(e.target.value)}
+              className="flex-1 px-2 py-1 text-[11px] rounded bg-bg-input border border-border/40 text-text-primary placeholder:text-text-muted/50 focus:outline-none focus:border-accent/60"
+            />
+            <button
+              onClick={() => {
+                setPickerOpen(false)
+                setAddingId(null)
+              }}
+              className="text-[10px] text-text-muted/70 hover:text-text-primary transition-colors"
+            >
+              Close
+            </button>
+          </div>
+          <div className="max-h-[280px] overflow-y-auto -mx-1">
+            {addable.length === 0 ? (
+              <div className="px-2 py-2 text-[11px] text-text-muted/60">No providers match.</div>
+            ) : (
+              addable.slice(0, 60).map((p) => {
+                const opts = options[p.id] ?? []
+                const apiOption = opts.find((o) => o.type === 'api')
+                const oauthOptions = opts.filter((o) => o.type === 'oauth')
+                const canOauth = p.authMethods.includes('oauth') && oauthOptions.length > 0
+                const expanded = addingId === p.id
+                return (
+                  <div key={p.id} className="px-1 py-0.5">
                     <button
-                      onClick={() => void handleSaveKey(vendorId)}
-                      disabled={saving[vendorId] || !(apiKeys[vendorId] ?? '').trim()}
-                      className="px-2 py-1 text-[11px] rounded bg-accent/20 hover:bg-accent/30 text-accent disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                      onClick={() => setAddingId(expanded ? null : p.id)}
+                      className="w-full flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-bg-hover transition-colors text-left cursor-default"
                     >
-                      {saving[vendorId] ? 'Saving…' : 'Save'}
+                      <span className="min-w-0">
+                        <span className="text-[12px] text-text-secondary truncate block">
+                          {p.name}
+                        </span>
+                        <span className="text-[10px] text-text-muted/50 truncate block">
+                          {p.id} · {p.modelCount} models
+                          {canOauth ? ' · OAuth' : ''}
+                        </span>
+                      </span>
+                      <span className="text-[11px] text-accent shrink-0">
+                        {expanded ? '−' : 'Add'}
+                      </span>
                     </button>
-                  </div>
-                )}
+                    {expanded && (
+                      <div className="px-2 pb-2 pt-1 space-y-1.5">
+                        {canOauth && (
+                          <button
+                            onClick={() => void handleOAuthStart(p.id)}
+                            className="px-2 py-1 text-[11px] rounded bg-accent/20 hover:bg-accent/30 text-accent transition-colors"
+                          >
+                            {oauthOptions[0]?.label ?? 'Sign in with OAuth'}
+                          </button>
+                        )}
+                        {/* API key (always offered for non-free providers — the
+                            generic /auth path accepts a key even when the provider
+                            has no custom auth loader, e.g. openrouter). */}
+                        <div className="flex items-center gap-1.5">
+                          <input
+                            type="password"
+                            placeholder={apiOption?.prompts?.[0]?.message ?? 'API key'}
+                            value={apiKeys[p.id] ?? ''}
+                            onChange={(e) =>
+                              setApiKeys((prev) => ({ ...prev, [p.id]: e.target.value }))
+                            }
+                            className="flex-1 px-2 py-1 text-[11px] rounded bg-bg-input border border-border/40 text-text-primary placeholder:text-text-muted/50 focus:outline-none focus:border-accent/60"
+                          />
+                          <button
+                            onClick={() => void handleSaveKey(p.id)}
+                            disabled={saving[p.id] || !(apiKeys[p.id] ?? '').trim()}
+                            className="px-2 py-1 text-[11px] rounded bg-accent/20 hover:bg-accent/30 text-accent disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                          >
+                            {saving[p.id] ? 'Saving…' : 'Add'}
+                          </button>
+                        </div>
 
-                {/* OAuth button (paste-code flow only in-app) */}
-                {oauthOptions.length > 0 && (
-                  <div>
-                    <button
-                      onClick={() => void handleOAuthStart(vendorId, firstOauthIdx)}
-                      className="px-2 py-1 text-[11px] rounded bg-accent/20 hover:bg-accent/30 text-accent transition-colors"
-                    >
-                      {oauthOptions[0]?.label ?? 'Sign in with OAuth'}
-                    </button>
-                  </div>
-                )}
+                        {vendorOAuth?.vendorId === p.id && vendorOAuth.stage === 'waiting' && (
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-[10px] text-text-muted/80">
+                              Waiting for browser authorization…
+                            </span>
+                            <button
+                              onClick={() => cancelVendorOAuth()}
+                              className="px-2 py-0.5 text-[10px] rounded hover:bg-bg-hover text-text-muted/70 transition-colors"
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                        )}
+                        {vendorOAuth?.vendorId === p.id && vendorOAuth.stage === 'error' && (
+                          <div className="text-[10px] text-red-400">
+                            Authentication failed. Try again.
+                          </div>
+                        )}
 
-                {/* Auto OAuth waiting/error state */}
-                {vendorOAuth?.vendorId === vendorId && vendorOAuth.stage === 'waiting' && (
-                  <div className="flex items-center gap-1.5 mt-1">
-                    <span className="text-[10px] text-text-muted/80">Waiting for browser authorization…</span>
-                    <button
-                      onClick={() => cancelVendorOAuth()}
-                      className="px-2 py-0.5 text-[10px] rounded hover:bg-bg-hover text-text-muted/70 transition-colors"
-                    >
-                      Cancel
-                    </button>
-                  </div>
-                )}
-                {vendorOAuth?.vendorId === vendorId && vendorOAuth.stage === 'error' && (
-                  <div className="text-[10px] text-red-400 mt-1">Authentication failed. Try again.</div>
-                )}
-
-                {/* OAuth paste-code input */}
-                {oauthFlow.stage === 'instructions' &&
-                  oauthFlow.vendorId === vendorId && (
-                    <div className="space-y-1.5 mt-1">
-                      <div className="text-[10px] text-text-muted/70 leading-relaxed whitespace-pre-wrap">
-                        {oauthFlow.instructions}
+                        {oauthFlow.stage === 'instructions' && oauthFlow.vendorId === p.id && (
+                          <div className="space-y-1.5">
+                            <div className="text-[10px] text-text-muted/70 leading-relaxed whitespace-pre-wrap">
+                              {oauthFlow.instructions}
+                            </div>
+                            <div className="flex items-center gap-1.5">
+                              <input
+                                type="text"
+                                placeholder="Paste code here"
+                                value={oauthCode}
+                                onChange={(e) => setOauthCode(e.target.value)}
+                                className="flex-1 px-2 py-1 text-[11px] rounded bg-bg-input border border-border/40 text-text-primary placeholder:text-text-muted/50 focus:outline-none focus:border-accent/60"
+                              />
+                              <button
+                                onClick={() => void handleOAuthSubmit()}
+                                disabled={!oauthCode.trim()}
+                                className="px-2 py-1 text-[11px] rounded bg-accent/20 hover:bg-accent/30 text-accent disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                              >
+                                Submit
+                              </button>
+                              <button
+                                onClick={() => {
+                                  void window.api.vendorAuthOauthCancel('opencode').catch(() => {})
+                                  setOauthFlow({ stage: 'idle' })
+                                  setOauthCode('')
+                                }}
+                                className="px-2 py-1 text-[11px] rounded hover:bg-bg-hover text-text-muted transition-colors"
+                              >
+                                Cancel
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                        {oauthFlow.stage === 'submitting' && oauthFlow.vendorId === p.id && (
+                          <div className="text-[10px] text-text-muted/60">Submitting code…</div>
+                        )}
                       </div>
-                      <div className="flex items-center gap-1.5">
-                        <input
-                          type="text"
-                          placeholder="Paste code here"
-                          value={oauthCode}
-                          onChange={(e) => setOauthCode(e.target.value)}
-                          className="flex-1 px-2 py-1 text-[11px] rounded bg-bg-input border border-border/40 text-text-primary placeholder:text-text-muted/50 focus:outline-none focus:border-accent/60"
-                        />
-                        <button
-                          onClick={() => void handleOAuthSubmit()}
-                          disabled={!oauthCode.trim()}
-                          className="px-2 py-1 text-[11px] rounded bg-accent/20 hover:bg-accent/30 text-accent disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-                        >
-                          Submit
-                        </button>
-                        <button
-                          onClick={() => {
-                            // Release the main-side server held open by authorize
-                            // (the paste flow holds it too) — otherwise abandoning
-                            // the paste step leaks the opencode process.
-                            void window.api.vendorAuthOauthCancel('opencode').catch(() => {})
-                            setOauthFlow({ stage: 'idle' })
-                            setOauthCode('')
-                          }}
-                          className="px-2 py-1 text-[11px] rounded hover:bg-bg-hover text-text-muted transition-colors"
-                        >
-                          Cancel
-                        </button>
-                      </div>
-                    </div>
-                  )}
-
-                {oauthFlow.stage === 'submitting' && oauthFlow.vendorId === vendorId && (
-                  <div className="text-[10px] text-text-muted/60">Submitting code…</div>
-                )}
-
-                {/* Remove button */}
-                {isAuth && (
-                  <button
-                    onClick={() => void handleRemove(vendorId)}
-                    disabled={removing[vendorId]}
-                    className="text-[10px] text-text-muted/60 hover:text-red-400 transition-colors disabled:opacity-40"
-                  >
-                    {removing[vendorId] ? 'Removing…' : 'Remove credentials'}
-                  </button>
-                )}
-              </>
+                    )}
+                  </div>
+                )
+              })
+            )}
+            {addable.length > 60 && (
+              <div className="px-2 py-1 text-[10px] text-text-muted/50">
+                {addable.length - 60} more — refine your search.
+              </div>
             )}
           </div>
-        )
-      })}
+        </div>
+      )}
 
       <div className="text-[10px] text-text-muted/50 leading-relaxed">
-        Credentials are stored in opencode&apos;s own auth.json. OAuth flows open your browser
-        and complete automatically when available.
+        Credentials are stored in opencode&apos;s own auth.json. After adding a provider, pick
+        which of its models appear in the picker via “Manage models”.
       </div>
+
+      {dialogProvider && (
+        <ModelAllowlistDialog
+          providerId={dialogProvider.id}
+          providerName={dialogProvider.name}
+          current={allowlist[dialogProvider.id]}
+          onClose={() => setModelDialogId(null)}
+          onSave={(ids) => {
+            updateCfg({ modelAllowlist: { ...allowlist, [dialogProvider.id]: ids } })
+            setModelDialogId(null)
+            reload()
+          }}
+        />
+      )}
     </div>
   )
 }
@@ -1083,13 +1400,13 @@ function newProvider(): ProviderRow {
 }
 
 /**
- * Custom OpenAI-compatible provider editor + disabled/enabled provider toggles.
- * API keys are NOT managed here — those live in the "opencode Vendors" auth section.
+ * Custom OpenAI-compatible provider editor (self-hosted / compatible endpoints).
+ * Built-in provider add/remove/auth + per-provider model curation lives in the
+ * Providers manager (VendorOpencodeSection). API keys are set there, not here.
  */
 function OpencodeProvidersSection(): React.JSX.Element {
   const [engineCfg, setEngineCfg] = useState<EngineConfig | null>(null)
   const installed = useOpencodeInstalled()
-  const [knownProviders, setKnownProviders] = useState<string[]>([])
   // Local editing state for provider rows (has a transient _id key for React diffing)
   const [providerRows, setProviderRows] = useState<ProviderRow[]>([])
   // Per-row model-id textarea string
@@ -1118,28 +1435,7 @@ function OpencodeProvidersSection(): React.JSX.Element {
         )
       })
       .catch(() => setEngineCfg({}))
-    refreshDiscoveredProviders()
   }, [])
-
-  // Re-discover the provider/model list from opencode. The main process drops
-  // the discovery cache on config save (config:save-engine-config), so calling
-  // this after a provider-list edit reflects the change without an app restart.
-  function refreshDiscoveredProviders(): void {
-    window.api
-      .getEngineModels()
-      .then((groups) => {
-        const oc = groups.filter((g) => g.engineId === 'opencode')
-        // Derive known provider ids from model value prefixes (e.g. "anthropic/...")
-        const prefixes = new Set(
-          oc
-            .flatMap((g) => g.models)
-            .map((m) => m.value.split('/')[0])
-            .filter(Boolean)
-        )
-        setKnownProviders([...prefixes].sort())
-      })
-      .catch(() => {})
-  }
 
   if (engineCfg === null || installed === null) {
     return <div className="px-3 py-1.5 text-[13px] text-text-muted">Loading…</div>
@@ -1212,29 +1508,6 @@ function OpencodeProvidersSection(): React.JSX.Element {
     saveProviders(next, nextTexts)
   }
 
-  const saveProviderLists = (patch: Partial<OpencodeConfigSettings>): void => {
-    const next: EngineConfig = { ...engineCfg, opencodeConfig: { ...cfg, ...patch } }
-    setEngineCfg(next)
-    window.api
-      .saveEngineConfig('opencode', next)
-      // Re-discover so a newly disabled/re-enabled provider reflects immediately.
-      .then(() => refreshDiscoveredProviders())
-      .catch(() => {})
-    // Refresh the global model picker too (InputBox), not just this settings list.
-    useSessionStore.getState().reloadModels()
-  }
-
-  const disabledProviders = cfg.disabledProviders ?? []
-  const enabledProviders = cfg.enabledProviders ?? []
-  // The disable-toggle list must include providers that are CURRENTLY disabled
-  // (and allowlisted ones), not just those returned by live discovery — a
-  // disabled provider is filtered out of /config/providers, so deriving the
-  // list from discovery alone would make its toggle vanish and strand the user
-  // with no way to re-enable it.
-  const toggleableProviders = [
-    ...new Set([...knownProviders, ...disabledProviders, ...enabledProviders])
-  ].sort()
-
   return (
     <div className="space-y-3 px-3 py-1.5 text-[13px] text-text-secondary">
       {/* Custom providers editor */}
@@ -1243,7 +1516,7 @@ function OpencodeProvidersSection(): React.JSX.Element {
           Custom providers (OpenAI-compatible)
         </div>
         <div className="text-[10px] text-text-muted/60 leading-relaxed">
-          Add self-hosted or compatible endpoints. Set API keys in the <em>Vendor</em> section above.
+          Add self-hosted or compatible endpoints. Set API keys in the <em>Providers</em> section.
         </div>
         {providerRows.map((row) => (
           <div key={row._key} className="border border-border/30 rounded-md p-2 space-y-1.5">
@@ -1299,59 +1572,9 @@ function OpencodeProvidersSection(): React.JSX.Element {
         </button>
       </div>
 
-      {/* Disabled providers */}
-      {toggleableProviders.length > 0 && (
-        <div className="space-y-1.5">
-          <div className="text-[11px] text-text-muted uppercase tracking-wide">
-            Disable providers
-          </div>
-          <div className="text-[10px] text-text-muted/60 leading-relaxed">
-            Disabled providers are hidden from model pickers.
-          </div>
-          {toggleableProviders.map((id) => (
-            <SettingsToggle
-              key={id}
-              label={id}
-              checked={!disabledProviders.includes(id)}
-              onChange={(enabled) => {
-                const next = enabled
-                  ? disabledProviders.filter((p) => p !== id)
-                  : [...disabledProviders, id]
-                saveProviderLists({
-                  disabledProviders: next.length > 0 ? next : undefined
-                })
-              }}
-            />
-          ))}
-        </div>
-      )}
-
-      {/* Enabled (allowlist) providers */}
-      <div className="space-y-1.5">
-        <div className="text-[11px] text-text-muted uppercase tracking-wide">
-          Enable-only providers (allowlist)
-        </div>
-        <div className="text-[10px] text-text-muted/60 leading-relaxed">
-          When set, only these providers are available (overrides the disable list). One provider id per
-          line.
-        </div>
-        <textarea
-          placeholder={'anthropic\nopenai'}
-          value={enabledProviders.join('\n')}
-          onChange={(e) => {
-            const next = e.target.value
-              .split('\n')
-              .map((s) => s.trim())
-              .filter(Boolean)
-            saveProviderLists({ enabledProviders: next.length > 0 ? next : undefined })
-          }}
-          rows={3}
-          className={`${inputClass} w-full resize-none`}
-        />
-      </div>
-
       <div className="text-[10px] text-text-muted/50 leading-relaxed">
-        Changes apply on the next opencode server start for each working directory.
+        Add, remove, and authenticate built-in providers under <em>Providers</em>. Changes apply on
+        the next opencode server start for each working directory.
       </div>
     </div>
   )
@@ -2328,7 +2551,7 @@ export const SECTIONS: Section[] = [
   },
   {
     id: 'vendor-opencode',
-    label: 'opencode Vendors',
+    label: 'Providers',
     icon: (
       <svg
         width="14"
@@ -2347,8 +2570,9 @@ export const SECTIONS: Section[] = [
     items: [
       {
         key: 'vendorOpencodeAuth',
-        label: 'opencode vendor auth',
-        keywords: 'opencode vendor auth api key oauth login openai google anthropic provider',
+        label: 'Providers & models',
+        keywords:
+          'opencode provider add auth api key oauth login openai google anthropic openrouter model allowlist enable disable',
         render: () => <VendorOpencodeSection />
       }
     ]
@@ -3065,7 +3289,7 @@ export const SECTIONS: Section[] = [
   },
   {
     id: 'opencode-providers',
-    label: 'Providers',
+    label: 'Custom providers',
     icon: (
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
         <rect x="2" y="7" width="20" height="14" rx="2" ry="2" />
