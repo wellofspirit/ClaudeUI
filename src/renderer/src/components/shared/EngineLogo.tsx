@@ -15,24 +15,37 @@ interface EngineLogoProps {
   className?: string
   /** px size of the icon. Default: 12 */
   size?: number
+  /** data-testid override (ADR-027). Defaults to "EngineLogo"; carries data-engine. */
+  testid?: string
 }
 
 export function EngineLogo({
   engineId,
   className = '',
-  size = 12
+  size = 12,
+  testid = 'EngineLogo'
 }: EngineLogoProps): React.JSX.Element {
   if (engineId === 'opencode') {
-    return <OpencodeMark size={size} className={className} />
+    return <OpencodeMark size={size} className={className} testid={testid} engineId={engineId} />
   }
-  return <ClaudeMark size={size} className={className} />
+  return <ClaudeMark size={size} className={className} testid={testid} engineId={engineId} />
 }
 
 // ── Claude mark ───────────────────────────────────────────────────────────────
 // The Claude sunburst logomark (canonical path from Simple Icons), tinted with
 // Claude orange (#D97757).
 
-function ClaudeMark({ size, className }: { size: number; className: string }): React.JSX.Element {
+function ClaudeMark({
+  size,
+  className,
+  testid,
+  engineId
+}: {
+  size: number
+  className: string
+  testid: string
+  engineId: EngineId
+}): React.JSX.Element {
   return (
     <svg
       width={size}
@@ -42,6 +55,8 @@ function ClaudeMark({ size, className }: { size: number; className: string }): R
       xmlns="http://www.w3.org/2000/svg"
       className={className}
       aria-label="Claude"
+      data-testid={testid}
+      data-engine={engineId}
       style={{ flexShrink: 0 }}
     >
       <path
@@ -56,7 +71,17 @@ function ClaudeMark({ size, className }: { size: number; className: string }): R
 // Monochrome geometric logomark: an outer frame with a centred inset block.
 // Uses currentColor so it inherits the parent's text color (theme-adaptive).
 
-function OpencodeMark({ size, className }: { size: number; className: string }): React.JSX.Element {
+function OpencodeMark({
+  size,
+  className,
+  testid,
+  engineId
+}: {
+  size: number
+  className: string
+  testid: string
+  engineId: EngineId
+}): React.JSX.Element {
   return (
     <svg
       width={size}
@@ -66,6 +91,8 @@ function OpencodeMark({ size, className }: { size: number; className: string }):
       xmlns="http://www.w3.org/2000/svg"
       className={className}
       aria-label="opencode"
+      data-testid={testid}
+      data-engine={engineId}
       style={{ flexShrink: 0 }}
     >
       {/* Outer frame with square cutout */}

@@ -6,6 +6,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A desktop GUI for Claude Code sessions, built with Electron. Features include multi-session chat, integrated git UI, terminal emulator, automation scheduling, remote web access, voice input, plugin system, and usage analytics.
 
+## Development Workflow (read this first)
+
+For any **non-trivial change**, follow the loop in **[ADR-026](docs/adr/adr-026_development-workflow.md)** — the living step-by-step + standing constraints are in **[docs/v2/ROADMAP.md](docs/v2/ROADMAP.md) § "How we work"**:
+
+- **The main model (Opus) orchestrates, reviews, and commits; a Sonnet sub-agent implements.** Dispatch the implementer via `Agent` (`subagent_type: general-purpose`, `model: sonnet`) against a written kickoff spec.
+- **The implementing agent never self-certifies** and never commits / `git add`s / branches / runs `bun install`. It leaves the working tree for review.
+- **Review every single line** of the agent's diff (`git diff <base>`) — read the code, not the summary; re-run gates independently; verify guard tests actually fail pre-fix. Iterate fixes via `SendMessage` to the agent.
+- **Verify against the real dev build** before committing: `bun run typecheck && bun run test && bun run test:ci && bun run lint && bun run build`, then drive the real Electron app (`verifier-electron` skill / `scripts/app-shot.mjs`) — **assert the live DOM by `data-testid` (ADR-027) before reading the screenshot**.
+- **Commit precisely** (never blind `git add -A`), one commit per item, no AI attribution.
+
+Trivial one-line/mechanical edits and conversational answers are exempt. Independent slices may run as concurrent Sonnet agents, but each diff is reviewed on its own and gates run on the combined tree before any commit.
+
 ## Tech Stack
 
 - **Electron** with `electron-vite` (react-ts template)
@@ -260,6 +272,17 @@ Four-layer testing architecture. Full details in **[docs/testing-strategy.md](do
 
 **Why `git` is its own project:** On Windows each `simple-git` subprocess call costs ~150-200ms. The 48 git-backed tests add ~23s to a default run and dominate cumulative time. Excluding them from `test` keeps iteration fast while still guaranteeing coverage in CI and when developers touch git-adjacent code.
 
+### Test data attributes (`data-testid`)
+
+Components are attributed with `data-testid` so the rendered UI is **assertable structurally** (and driveable by stable selectors) — see **[ADR-027](docs/adr/adr-027_test-data-attributes.md)**. Convention (two-tier, PascalCase):
+
+- **Component root** → `data-testid="<ComponentName>"` (the rendered-component inventory).
+- **Interactive parts** → `data-testid="<ComponentName>.<partName>"` (e.g. `ModelAllowlistDialog.save`).
+- **Dynamic rows** → stable testid + a separate discriminator: `data-testid="SessionItem" data-id="<id>"` (never interpolate the id into the testid).
+- **Shared controls** (`SettingsToggle`, `SettingsSelect`, …) take an optional `testid` prop and forward it to their root DOM node — a `data-testid` on a component that doesn't forward it is dropped.
+
+**Verification order:** assert components/parts by testid first (jsdom `getByTestId`, or `scripts/app-shot.mjs --testids` / `--assert-testid <id>` against the real app), drive via testid selectors, and **read the screenshot last** to confirm the visual — not as the first resort.
+
 ## Windows Path Format in Bash Commands
 
 On Windows (Git Bash), cli.js's working directory uses POSIX format (`/d/WorkPlace/ClaudeUI`), not Windows format (`D:\WorkPlace\ClaudeUI` or `D:/WorkPlace/ClaudeUI`). This matters for permission checks:
@@ -426,5 +449,8 @@ ADRs live in `docs/adr/`. See `docs/adr/adr.md` for the index.
 | 022 | opencode permission model — autonomy-mode → last-match-wins ruleset mapping                        | Accepted              |
 | 023 | opencode auto-mode — LLM permission gatekeeper (parity w/ Claude), configurable judge model        | Accepted              |
 | 024 | opencode interaction parity — slash/skills, /btw + question.asked, queue/steer, subagents          | Accepted              |
+| 025 | projectKey as derived render-identity + engine-neutral persisted-session delete dispatcher          | Accepted              |
+| 026 | Development workflow — Opus orchestrates + reviews every line, Sonnet implements, gates + real-app verify | Accepted              |
+| 027 | Test data attributes — two-tier `data-testid` convention + DOM-assert-before-screenshot verification | Accepted              |
 
 When a design or implementation decision is made during a conversation, prompt the user about whether it should be recorded as a new ADR entry. When adding a new ADR, proactively scan existing ADRs to check if the new decision supersedes or conflicts with a previous one — if so, update the old ADR's status to "Superseded by ADR-XXX" and note it in the new ADR.

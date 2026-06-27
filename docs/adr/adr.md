@@ -27,3 +27,5 @@
 | [023](adr-023_opencode-automode-classifier.md)                    | opencode auto-mode — LLM permission gatekeeper, configurable judge model *(relates to 022)* |
 | [024](adr-024_opencode-interaction-parity.md)                     | opencode interaction-feature parity — slash commands, skills, side-questions, queue/steer, subagents *(relates to 019/022/023)* |
 | [025](adr-025_project-key-identity-and-engine-neutral-delete.md)  | projectKey as a derived lossy render-identity + engine-neutral persisted-session delete dispatcher *(relates to 018/019/020)* |
+| [026](adr-026_development-workflow.md)                            | Development workflow — Opus orchestrates + reviews every line, Sonnet implements, gates + real-app verify before commit *(relates to 027)* |
+| [027](adr-027_test-data-attributes.md)                           | Test data attributes — two-tier `data-testid` convention + DOM-assert-before-screenshot verification *(relates to 026/008)* |

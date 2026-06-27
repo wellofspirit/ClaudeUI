@@ -7,6 +7,13 @@
 // Usage:
 //   node scripts/app-shot.mjs [--out <path>] [--needle <text>] [--settle <ms>]
 //                             [--click <selector>] [--keep]
+//                             [--testids] [--assert-testid <id>]...
+//
+// --testids              dump the sorted set of [data-testid] values present in the
+//                        live DOM (with counts) — the rendered-component inventory
+//                        (ADR-027). Assert structure here BEFORE reading the PNG.
+// --assert-testid <id>   repeatable; exit non-zero (code 3) if any named testid is
+//                        absent from the DOM. Implies --testids output.
 //
 // Prereqs: `bun run build` (needs out/main + out/renderer). Reads ~/.claude, so
 // it shows your real sessions/config; it only screenshots and closes.
@@ -32,6 +39,13 @@ const clicks = []
 for (let i = 0; i < args.length; i++) {
   if (args[i] === '--click' && args[i + 1]) clicks.push(args[i + 1])
 }
+// Collect every --assert-testid <id> (repeatable). Presence is asserted after the
+// shot; any missing id fails the run (exit 3). Asserting implies dumping testids.
+const assertTestids = []
+for (let i = 0; i < args.length; i++) {
+  if (args[i] === '--assert-testid' && args[i + 1]) assertTestids.push(args[i + 1])
+}
+const dumpTestids = has('testids') || assertTestids.length > 0
 
 mkdirSync(dirname(outPath), { recursive: true })
 
@@ -64,15 +78,33 @@ try {
   const html = await win.content()
   const htmlNeedle = (html.match(new RegExp(needle, 'gi')) || []).length
 
+  // Structural inventory: every [data-testid] in the live DOM → { id: count },
+  // sorted. This is the rendered-component check that precedes the screenshot.
+  let testids
+  let missingTestids
+  if (dumpTestids) {
+    const ids = await win.$$eval('[data-testid]', (els) =>
+      els.map((e) => e.getAttribute('data-testid'))
+    )
+    const counts = {}
+    for (const id of ids) counts[id] = (counts[id] ?? 0) + 1
+    testids = Object.fromEntries(Object.entries(counts).sort(([a], [b]) => a.localeCompare(b)))
+    missingTestids = assertTestids.filter((id) => !(id in counts))
+  }
+
+  const ok = !missingTestids || missingTestids.length === 0
+
   console.log(
     JSON.stringify(
       {
-        ok: true,
+        ok,
         screenshot: outPath,
         windowTitle: await win.title(),
         needle,
         needleVisibleInDom: visibleNeedle,
         needleInRawHtml: htmlNeedle,
+        ...(testids ? { testids } : {}),
+        ...(missingTestids ? { missingTestids } : {}),
         consoleErrors
       },
       null,
@@ -81,6 +113,7 @@ try {
   )
 
   if (!has('keep')) await app.close()
+  if (!ok) process.exit(3)
 } catch (err) {
   console.error('app-shot failed:', err?.stack || err)
   try {

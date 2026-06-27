@@ -86,7 +86,7 @@ export function ModelPicker({
   const isGrouped = groups.length > 1
 
   return (
-    <div className="relative" ref={ref}>
+    <div className="relative" ref={ref} data-testid="ModelPicker">
       <button
         onClick={(e) => {
           e.stopPropagation()
@@ -94,6 +94,7 @@ export function ModelPicker({
         }}
         className="h-7 px-2 flex items-center gap-1 rounded-lg text-[11px] text-text-muted hover:text-text-secondary hover:bg-bg-hover transition-colors cursor-pointer"
         title="Model"
+        data-testid="ModelPicker.trigger"
       >
         <span>{selectedModel.shortName}</span>
         <svg
@@ -119,6 +120,8 @@ export function ModelPicker({
               {group.items.map((m) => (
                 <button
                   key={m.value}
+                  data-testid="ModelPicker.option"
+                  data-value={m.value}
                   onClick={() => {
                     onSelectModel(m.value)
                     setOpen(false)
@@ -163,7 +166,7 @@ export function EffortPicker({
   const allowed = new Set<EffortLevel>(allowedEffortLevels)
 
   return (
-    <div className="relative" ref={ref}>
+    <div className="relative" ref={ref} data-testid="EffortPicker">
       <button
         onClick={(e) => {
           e.stopPropagation()
@@ -171,6 +174,7 @@ export function EffortPicker({
         }}
         className="h-7 px-2 flex items-center gap-1 rounded-lg text-[11px] text-text-muted hover:text-text-secondary hover:bg-bg-hover transition-colors cursor-pointer capitalize"
         title="Effort level"
+        data-testid="EffortPicker.trigger"
       >
         <span>{effort}</span>
         <svg
@@ -191,6 +195,8 @@ export function EffortPicker({
             return (
               <button
                 key={level}
+                data-testid="EffortPicker.option"
+                data-value={level}
                 disabled={!enabled}
                 title={enabled ? undefined : unsupportedTooltip(level)}
                 onClick={() => {
@@ -243,7 +249,7 @@ export function ReasoningPicker({
   const displayLabel = selected ?? 'Default'
 
   return (
-    <div className="relative" ref={ref}>
+    <div className="relative" ref={ref} data-testid="ReasoningPicker">
       <button
         onClick={(e) => {
           e.stopPropagation()
@@ -251,6 +257,7 @@ export function ReasoningPicker({
         }}
         className="h-7 px-2 flex items-center gap-1 rounded-lg text-[11px] text-text-muted hover:text-text-secondary hover:bg-bg-hover transition-colors cursor-pointer capitalize"
         title="Reasoning variant"
+        data-testid="ReasoningPicker.trigger"
       >
         <span>{displayLabel}</span>
         <svg
@@ -272,6 +279,8 @@ export function ReasoningPicker({
             return (
               <button
                 key={option}
+                data-testid="ReasoningPicker.option"
+                data-value={option}
                 onClick={() => {
                   onSelect(value)
                   setOpen(false)
@@ -306,7 +315,7 @@ export function ThinkingPicker({
   useClickOutside(ref, open, () => setOpen(false))
 
   return (
-    <div className="relative" ref={ref}>
+    <div className="relative" ref={ref} data-testid="ThinkingPicker">
       <button
         onClick={(e) => {
           e.stopPropagation()
@@ -314,6 +323,7 @@ export function ThinkingPicker({
         }}
         className="h-7 px-2 flex items-center gap-1 rounded-lg text-[11px] text-text-muted hover:text-text-secondary hover:bg-bg-hover transition-colors cursor-pointer capitalize"
         title="Thinking mode"
+        data-testid="ThinkingPicker.trigger"
       >
         <span>{thinkingMode}</span>
         <svg
@@ -334,6 +344,8 @@ export function ThinkingPicker({
             return (
               <button
                 key={mode}
+                data-testid="ThinkingPicker.option"
+                data-value={mode}
                 disabled={!enabled}
                 title={
                   enabled
