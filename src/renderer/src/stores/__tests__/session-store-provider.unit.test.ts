@@ -12,9 +12,18 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { useSessionStore } from '../session-store'
-import type { EngineId } from '../../../../shared/types'
+import { useSessionStore, resolveOpencodeModel } from '../session-store'
+import type { EngineId, ModelInfo } from '../../../../shared/types'
 import { claudeModel } from '../../../../shared/types'
+
+/** Minimal opencode ModelInfo builder for picker-value resolution tests. */
+const ocModel = (vendorId: string, modelId: string): ModelInfo => ({
+  value: `${vendorId}/${modelId}`,
+  displayName: modelId,
+  description: '',
+  engineId: 'opencode',
+  vendorId
+})
 
 const store = () => useSessionStore.getState()
 let saveSessionConfigSpy: ReturnType<typeof vi.fn>
@@ -95,6 +104,78 @@ describe('engine persistence: createNewSession', () => {
       expect(typeof modelEntry.vendorId).toBe('string')
       expect(typeof modelEntry.modelId).toBe('string')
     }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// resolveOpencodeModel — picker-value resolution against available models
+// ---------------------------------------------------------------------------
+
+describe('resolveOpencodeModel', () => {
+  const models: ModelInfo[] = [
+    { value: 'default', displayName: 'Default', description: '' }, // claude (engineId undefined)
+    ocModel('opencode', 'mimo-v2.5-free'),
+    ocModel('openai', 'gpt-5.4')
+  ]
+
+  it('returns the preferred model when it is available', () => {
+    expect(resolveOpencodeModel(models, 'openai/gpt-5.4')).toBe('openai/gpt-5.4')
+  })
+
+  it('prefers a free OpenCode Zen model when the preferred is unavailable', () => {
+    // preferred points at a removed/disabled model → fall to the free zen vendor.
+    expect(resolveOpencodeModel(models, 'qwen-sandbox/qwen3.6:27b')).toBe('opencode/mimo-v2.5-free')
+  })
+
+  it('falls back to the first opencode model when no free zen vendor is present', () => {
+    const noZen = [models[0], ocModel('openai', 'gpt-5.4'), ocModel('openai', 'gpt-5.4-mini')]
+    expect(resolveOpencodeModel(noZen, 'opencode/gone')).toBe('openai/gpt-5.4')
+  })
+
+  it('returns null when there are no opencode models at all (claude-only list)', () => {
+    expect(resolveOpencodeModel([models[0]], 'opencode/mimo-v2.5-free')).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// createNewSession — engine validation + opencode default resolution
+// ---------------------------------------------------------------------------
+
+describe('createNewSession: opencode engine/model validation', () => {
+  it('falls back to claude when the remembered engine is opencode but no opencode model is available', () => {
+    // The desync regression: remembered engine = opencode (e.g. its provider was
+    // later disabled), so nothing opencode is discoverable. Seeding opencode would
+    // show a Claude model in the picker while routing send to a phantom model.
+    useSessionStore.setState({
+      lastSelectedEngineId: 'opencode' as EngineId,
+      availableModels: [{ value: 'default', displayName: 'Default', description: '' }]
+    })
+    store().createNewSession('oc-none', '/tmp/proj')
+    expect(store().sessions['oc-none']?.selectedEngineId).toBe('claude')
+    expect(store().sessions['oc-none']?.selectedModel).toBe('default')
+    expect(store().sessionEngines['oc-none']?.engineId).toBe('claude')
+  })
+
+  it('resolves to a free zen model when the configured default points at a disabled provider', () => {
+    useSessionStore.setState({
+      lastSelectedEngineId: 'opencode' as EngineId,
+      opencodeDefaultModel: 'opencode/mimo-v2.5-free', // its provider is "disabled" → absent below
+      availableModels: [ocModel('opencode', 'nemotron-3-ultra-free'), ocModel('openai', 'gpt-5.4')]
+    })
+    store().createNewSession('oc-zen', '/tmp/proj')
+    expect(store().sessions['oc-zen']?.selectedEngineId).toBe('opencode')
+    expect(store().sessions['oc-zen']?.selectedModel).toBe('opencode/nemotron-3-ultra-free')
+  })
+
+  it('honors the configured default when it is available', () => {
+    useSessionStore.setState({
+      lastSelectedEngineId: 'opencode' as EngineId,
+      opencodeDefaultModel: 'openai/gpt-5.4',
+      availableModels: [ocModel('opencode', 'mimo-v2.5-free'), ocModel('openai', 'gpt-5.4')]
+    })
+    store().createNewSession('oc-cfg', '/tmp/proj')
+    expect(store().sessions['oc-cfg']?.selectedModel).toBe('openai/gpt-5.4')
+    expect(store().sessions['oc-cfg']?.selectedEngineId).toBe('opencode')
   })
 })
 

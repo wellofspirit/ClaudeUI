@@ -283,6 +283,10 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     getModels: () => connection.invoke('session:get-models') as ReturnType<ClaudeAPI['getModels']>,
     getEngineModels: () =>
       connection.invoke('session:get-engine-models') as ReturnType<ClaudeAPI['getEngineModels']>,
+    engineIsInstalled: (engineId) =>
+      connection.invoke('engine:is-installed', engineId) as ReturnType<
+        ClaudeAPI['engineIsInstalled']
+      >,
 
     // Generation
     generateTitle: (conversationText) =>

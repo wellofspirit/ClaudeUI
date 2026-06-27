@@ -33,11 +33,10 @@ function installApiStub(initial: EngineConfig, opts?: { models?: EngineModelGrou
   ;(window as unknown as { api: Record<string, unknown> }).api = {
     loadEngineConfig: vi.fn(async () => structuredClone(initial)),
     getEngineModels: vi.fn(async () => opts?.models ?? [OPENCODE_GROUP]),
-    // Availability is gated on the auth probe (the /provider/auth catalog), NOT
-    // the model count — so the section stays reachable even with zero models.
-    vendorAuthProbe: vi.fn(async () => ({
-      anthropic: { authState: 'authenticated', billingType: 'apiKey' }
-    })),
+    // Availability is gated on a deterministic binary-on-disk check, NOT the
+    // model count or the auth probe — so the section stays reachable even with
+    // zero models and never flips on a transient server-spawn failure.
+    engineIsInstalled: vi.fn(async () => true),
     saveEngineConfig
   }
 }
@@ -167,8 +166,8 @@ describe('opencode Providers section', () => {
     // group. Disabling every provider filters them all out of /config/providers, so
     // discovery returns [] — which used to flip the section to "opencode is not
     // installed", hiding the very toggles needed to re-enable a provider. Gating on
-    // the auth probe instead keeps the section live; the disabled provider's toggle
-    // renders (off) and can be cleared.
+    // the binary-on-disk check instead keeps the section live; the disabled
+    // provider's toggle renders (off) and can be cleared.
     installApiStub({ opencodeConfig: { disabledProviders: ['anthropic', 'openai'] } }, { models: [] })
     await act(async () => {
       renderProvidersSection()

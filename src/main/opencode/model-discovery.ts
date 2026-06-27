@@ -75,7 +75,13 @@ export async function discoverOpencodeModels(): Promise<EngineModelGroup[]> {
         }
       }
 
-      cachedGroups = groups
+      // Only cache a NON-EMPTY result. An empty array is truthy, so caching it
+      // would make `if (cachedGroups) return` a permanent hit — a single transient
+      // empty discovery (server half-ready, providers momentarily unreported) would
+      // then stick until an explicit invalidation. A genuinely-empty result (all
+      // providers disabled) simply re-discovers next call; config/auth changes
+      // already invalidate, so the common case stays cheap.
+      if (groups.length > 0) cachedGroups = groups
       return groups
     } finally {
       opencodeServerManager.release(PERSISTED_SESSIONS_DIR)

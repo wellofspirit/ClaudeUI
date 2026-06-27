@@ -417,16 +417,14 @@ function AutonomyModePicker(): React.JSX.Element {
 // ── opencode availability probe ──────────────────────────────────────
 
 /**
- * Whether the opencode engine is installed/reachable.
+ * Whether the opencode engine is installed.
  *
- * Probes `vendorAuthProbe('opencode')` — the auth-option catalog (`/provider/auth`)
- * is the FULL known-vendor set and is independent of `disabled_providers` (which
- * only filters `/config/providers`). So a non-empty map means opencode is installed
- * even when every provider is disabled.
- *
- * Do NOT gate availability on `getEngineModels()` model count: discovery returns []
- * both when opencode is absent AND when all providers are disabled, which would hide
- * the very section that lets the user re-enable a provider.
+ * Uses `engineIsInstalled('opencode')` — a cheap, deterministic binary-on-disk
+ * check that NEVER spawns a server. The earlier `vendorAuthProbe`/`getEngineModels`
+ * approaches both required a successful server spawn + HTTP round-trip, so any
+ * transient spawn failure (e.g. an opencode startup crash) made the engine read as
+ * "not installed" and hid the very sections that configure it. Auth/model state is
+ * a separate, allowed-to-fail concern — not "installed".
  *
  * Returns null while probing, then true/false.
  */
@@ -435,9 +433,9 @@ function useOpencodeInstalled(): boolean | null {
   useEffect(() => {
     let cancelled = false
     window.api
-      .vendorAuthProbe('opencode')
-      .then((map) => {
-        if (!cancelled) setInstalled(Object.keys(map).length > 0)
+      .engineIsInstalled('opencode')
+      .then((v) => {
+        if (!cancelled) setInstalled(v)
       })
       .catch(() => {
         if (!cancelled) setInstalled(false)

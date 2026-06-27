@@ -64,6 +64,30 @@ export function defaultModelForEngine(
   return engineId === 'opencode' ? opencodeDefault || OPENCODE_DEFAULT_MODEL : 'default'
 }
 
+/** Free/bundled opencode vendors that never require auth (OpenCode Zen). */
+const FREE_OPENCODE_VENDORS = new Set(['opencode', 'zen'])
+
+/**
+ * Resolve a usable opencode picker VALUE against the currently-available
+ * (discovered, provider-filtered) models. Mirrors the main-process
+ * `resolveOpencodeSpawnModel` so the picker shows exactly what will spawn.
+ *
+ * Order: configured `preferred` if it is actually available → a free OpenCode
+ * Zen model → the first available opencode model → null when opencode has no
+ * usable models right now (all providers disabled, or not yet discovered).
+ *
+ * This is why a default that points at a disabled provider (e.g.
+ * `opencode/mimo-v2.5-free` after disabling OpenCode Zen) no longer leaks into
+ * the picker as a Claude-model fallback.
+ */
+export function resolveOpencodeModel(models: ModelInfo[], preferred?: string): string | null {
+  const oc = models.filter((m) => m.engineId === 'opencode')
+  if (oc.length === 0) return null
+  if (preferred && oc.some((m) => m.value === preferred)) return preferred
+  const free = oc.find((m) => FREE_OPENCODE_VENDORS.has(m.vendorId ?? ''))
+  return (free ?? oc[0]).value
+}
+
 /** Build the engine-correct ModelRef from a picker value string. */
 export function modelRefForEngine(engineId: EngineId, value: string): ModelRef {
   if (engineId === 'opencode') {
@@ -976,8 +1000,25 @@ export const useSessionStore = create<SessionState>((set) => ({
         routingId,
         ...state.recentSessionIds.filter((id) => id !== routingId)
       ].slice(0, state.settings.maxRecentSessions)
-      const engineId = state.lastSelectedEngineId
-      const defaultModel = defaultModelForEngine(engineId, state.opencodeDefaultModel)
+      // Validate the remembered engine against what is ACTUALLY usable right now.
+      // `availableModels` reflects post-discovery, provider-filtered reality. If the
+      // remembered engine is opencode but it has no usable model — its provider was
+      // disabled, discovery hasn't run yet, or opencode is unavailable — seeding it
+      // would show a Claude model in the picker while routing send to a phantom
+      // opencode model (the desync regression). Fall back to claude in that case.
+      let engineId = state.lastSelectedEngineId
+      let defaultModel: string
+      if (engineId === 'opencode') {
+        const resolved = resolveOpencodeModel(state.availableModels, state.opencodeDefaultModel)
+        if (resolved) {
+          defaultModel = resolved
+        } else {
+          engineId = 'claude'
+          defaultModel = 'default'
+        }
+      } else {
+        defaultModel = defaultModelForEngine(engineId, state.opencodeDefaultModel)
+      }
       // Write model into sessionEngines so it can be seeded on reopen (spec §3).
       // Always write the entry so the engine is recorded; model is set on first model event.
       const sessionEngines = {

@@ -1,5 +1,9 @@
 import { useState, useRef, useCallback, useEffect, useMemo } from 'react'
-import { useSessionStore, useActiveSession } from '../../../stores/session-store'
+import {
+  useSessionStore,
+  useActiveSession,
+  resolveOpencodeModel
+} from '../../../stores/session-store'
 import type { FileAttachment, VoiceState as VoiceStateType } from '../../../../../shared/types'
 import { v4 as uuid } from 'uuid'
 import { resolveSendAction, filterModelsForEngine } from './utils'
@@ -178,22 +182,32 @@ export function InputBox(): React.JSX.Element {
     [models, engineLocked, sessionEngineId]
   )
   // Memoized so its identity is stable across renders (it feeds several
-  // downstream useMemo dependency lists). The fallback is engine-aware: when the
-  // session's selectedModel isn't in the list (e.g. its provider was disabled),
-  // fall back to the FIRST model of the session's own engine — never the global
-  // models[0], which would surface a Claude model on an opencode session.
-  const selectedModel = useMemo(
-    () =>
-      models.find((m) => m.value === selectedModelValue) ||
-      pickerModels[0] ||
-      models[0] || {
-        value: 'default',
-        displayName: 'Default',
-        shortName: 'Default',
+  // downstream useMemo dependency lists). The fallback MUST stay within the
+  // session's OWN engine — never surface a Claude model on an opencode session
+  // (or vice-versa). `pickerModels` is UNFILTERED for brand-new (unlocked)
+  // sessions, so we can't use pickerModels[0] here: it would be the first Claude
+  // model. Instead filter explicitly by the session engine, and for opencode use
+  // the same resolver the spawn path uses so display == what will actually run.
+  const opencodeDefaultModel = useSessionStore((s) => s.opencodeDefaultModel)
+  const selectedModel = useMemo(() => {
+    const exact = models.find((m) => m.value === selectedModelValue)
+    if (exact) return exact
+    const engine = sessionEngineId ?? 'claude'
+    if (engine === 'opencode') {
+      const resolved = resolveOpencodeModel(models, opencodeDefaultModel)
+      const m = resolved ? models.find((mm) => mm.value === resolved) : undefined
+      if (m) return m
+    }
+    const sameEngine = models.filter((m) => (m.engineId ?? 'claude') === engine)
+    return (
+      sameEngine[0] || {
+        value: selectedModelValue || 'default',
+        displayName: engine === 'opencode' ? 'Select a model' : 'Default',
+        shortName: engine === 'opencode' ? 'Select model' : 'Default',
         description: ''
-      },
-    [models, pickerModels, selectedModelValue]
-  )
+      }
+    )
+  }, [models, sessionEngineId, selectedModelValue, opencodeDefaultModel])
 
   const statusLine = useActiveSession((s) => s.statusLine)
   const billingType = useActiveSession((s) => s.status?.account?.billingType)

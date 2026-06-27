@@ -77,6 +77,7 @@ import type {
 } from '../../shared/types'
 import { claudeModel } from '../../shared/types'
 import { discoverOpencodeModels, invalidateOpencodeModelCache } from '../opencode/model-discovery'
+import { opencodeServerManager } from '../opencode/OpencodeServerManager'
 import { discoverOpencodeSkills } from '../opencode/command-skill-discovery'
 import { refreshPrices } from '../services/opencode-pricing'
 import { OpencodeSession } from '../opencode/OpencodeSession'
@@ -461,6 +462,42 @@ export function applyModelEnv(model: ModelOverrideSettings | undefined): void {
   }
 }
 
+/**
+ * Resolve the opencode model to actually spawn with, validated against what
+ * opencode currently reports (disabled providers already excluded by discovery).
+ *
+ * This is the AUTHORITATIVE chokepoint: every session:create — first send,
+ * restart, reopened historical session, remote — flows through here, so a stale
+ * or disabled per-session model (e.g. the default `opencode/mimo-v2.5-free`
+ * after its OpenCode Zen provider was disabled) can never reach the backend and
+ * desync from what the picker shows. Resolution order mirrors the renderer's
+ * `resolveOpencodeModel`:
+ *   1. the requested model, if it is actually available
+ *   2. a free OpenCode Zen model (vendor 'opencode'/'zen'), if its provider is enabled
+ *   3. the first available opencode model
+ *   4. the requested value unchanged when discovery yields nothing — let opencode
+ *      apply its own configured default rather than guessing a substitute.
+ */
+export async function resolveOpencodeSpawnModel(requested?: string): Promise<string | undefined> {
+  try {
+    const groups = await discoverOpencodeModels()
+    const all = groups.flatMap((g) => g.models)
+    if (all.length === 0) return requested
+    if (requested && all.some((m) => m.value === requested)) return requested
+    const free = all.find((m) => m.vendorId === 'opencode' || m.vendorId === 'zen')
+    const resolved = (free ?? all[0]).value
+    if (requested && requested !== resolved) {
+      logger.warn(
+        'opencode',
+        `Requested model "${requested}" is unavailable (provider disabled or removed); spawning with "${resolved}" instead.`
+      )
+    }
+    return resolved
+  } catch {
+    return requested
+  }
+}
+
 export async function applyProxyEnv(proxy: ProxySettings | undefined): Promise<void> {
   if (proxy?.enabled && proxy.hostname) {
     if (proxy.type === 'socks5') {
@@ -777,6 +814,7 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     ) => {
       const engineCfg = loadEngineConfig(engineId ?? 'claude')
       const sandboxConfig = engineCfg.sandbox
+      let resolvedModel = model
       if (engineId !== 'opencode') {
         // Derive vendor id from the active model's ModelRef. claudeModel() maps
         // any Claude model to the 'anthropic' vendor (1:1 today; structured-ready
@@ -786,6 +824,11 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
         await applyProxyEnv(engineCfg.proxy)
         applyEndpointEnv(vendorCfg.endpoint)
         applyModelEnv(vendorCfg.modelOverride)
+      } else {
+        // Authoritative guard: never spawn opencode with a model whose provider
+        // is disabled/removed (the picker-vs-spawn desync). Resolves to a valid
+        // available model (configured → Zen free → first), logging any swap.
+        resolvedModel = await resolveOpencodeSpawnModel(model)
       }
       manager.create(
         routingId,
@@ -794,7 +837,7 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
         effort,
         resumeSessionId,
         permissionMode,
-        model,
+        resolvedModel,
         sandboxConfig,
         thinkingMode,
         resumeSessionAt,
@@ -1240,6 +1283,13 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     // an app restart).
     if (engineId === 'opencode') invalidateOpencodeModelCache()
   })
+  // Cheap, deterministic engine availability check. Backs the renderer's
+  // "is opencode installed?" gate WITHOUT spawning a server — a transient
+  // spawn/HTTP failure can no longer masquerade as "not installed". Claude is
+  // always installed (it's the bundled default engine).
+  ipcMain.handle('engine:is-installed', (_e, engineId: EngineId): boolean =>
+    engineId === 'opencode' ? opencodeServerManager.isBinaryAvailable() : true
+  )
   ipcMain.handle('config:load-vendor-config', (_e, vendorId: string) =>
     loadVendorConfig(vendorId)
   )

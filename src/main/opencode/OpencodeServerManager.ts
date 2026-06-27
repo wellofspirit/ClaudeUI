@@ -191,13 +191,22 @@ function spawnServer(
     })
 
     let stdout = ''
+    let stderr = ''
     let resolved = false
+
+    // opencode prints startup diagnostics (config-parse errors, MCP connect
+    // failures, etc.) to stderr before exiting non-zero. Capture it so an
+    // exit-before-port / timeout error is DIAGNOSABLE instead of a bare code=1.
+    const stderrTail = (): string => {
+      const t = stderr.trim()
+      return t ? ` — stderr: ${t.slice(-600)}` : ''
+    }
 
     const timeout = setTimeout(() => {
       if (!resolved) {
         resolved = true
         child.kill()
-        reject(new Error(`opencode serve did not print port within 15s (cwd: ${cwd})`))
+        reject(new Error(`opencode serve did not print port within 15s (cwd: ${cwd})${stderrTail()}`))
       }
     }, 15_000)
 
@@ -212,15 +221,17 @@ function spawnServer(
       }
     })
 
-    child.stderr?.on('data', (_chunk: Buffer) => {
-      // stderr carries warnings (e.g. about an unset password) — ignore
+    child.stderr?.on('data', (chunk: Buffer) => {
+      // Warnings (e.g. unset password) AND fatal startup errors land here. We
+      // accumulate rather than ignore so the reject paths can surface the cause.
+      stderr += chunk.toString()
     })
 
     child.on('error', (err) => {
       if (!resolved) {
         resolved = true
         clearTimeout(timeout)
-        reject(new Error(`Failed to spawn opencode: ${err.message}`))
+        reject(new Error(`Failed to spawn opencode: ${err.message}${stderrTail()}`))
       }
     })
 
@@ -228,7 +239,11 @@ function spawnServer(
       if (!resolved) {
         resolved = true
         clearTimeout(timeout)
-        reject(new Error(`opencode exited before printing port (code=${code}, signal=${signal})`))
+        reject(
+          new Error(
+            `opencode exited before printing port (code=${code}, signal=${signal})${stderrTail()}`
+          )
+        )
       }
     })
   })
@@ -277,6 +292,22 @@ export class OpencodeServerManager {
   private getBinary(): string {
     if (!this.binary) this.binary = this.locateBinaryFn()
     return this.binary
+  }
+
+  /**
+   * Cheap, deterministic "is opencode installed?" check: does the binary resolve
+   * to a file that exists on disk? This NEVER spawns a server, so a transient
+   * spawn/HTTP failure can't masquerade as "not installed" (the regression that
+   * gated the Settings opencode sections off a flaky probe). Auth/model state is
+   * a separate, allowed-to-fail concern — not "installed".
+   */
+  isBinaryAvailable(): boolean {
+    try {
+      return existsSync(this.getBinary())
+    } catch {
+      // locateBinary throws in dev when the binary isn't vendored.
+      return false
+    }
   }
 
   /**

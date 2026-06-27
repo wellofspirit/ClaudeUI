@@ -170,6 +170,7 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
       ipcRenderer.invoke('session:set-reasoning-variant', routingId, variant),
     getModels: () => ipcRenderer.invoke('session:get-models'),
     getEngineModels: () => ipcRenderer.invoke('session:get-engine-models'),
+    engineIsInstalled: (engineId) => ipcRenderer.invoke('engine:is-installed', engineId),
     generateTitle: (conversationText) =>
       ipcRenderer.invoke('session:generate-title', conversationText),
     generateCommitMessage: (diff) => ipcRenderer.invoke('session:generate-commit-message', diff),

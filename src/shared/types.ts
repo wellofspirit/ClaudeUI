@@ -629,6 +629,9 @@ interface SessionAPI {
   setReasoningVariant(routingId: string, variant: string | null): Promise<void>
   getModels(): Promise<ModelInfo[]>
   getEngineModels(): Promise<EngineModelGroup[]>
+  /** Deterministic "is this engine installed?" check (binary on disk). Does NOT
+   *  spawn a server, so transient runtime failures can't read as "not installed". */
+  engineIsInstalled(engineId: EngineId): Promise<boolean>
   generateTitle(conversationText: string): Promise<string | null>
   generateCommitMessage(diff: string): Promise<string | null>
   writeCustomTitle(sessionId: string, projectKey: string, title: string): Promise<void>
