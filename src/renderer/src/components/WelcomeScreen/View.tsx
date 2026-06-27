@@ -6,7 +6,7 @@ export interface WelcomeScreenViewProps {
 
 export function WelcomeScreenView({ loading, onOpen }: WelcomeScreenViewProps): React.JSX.Element {
   return (
-    <div className="h-screen flex flex-col bg-bg-primary">
+    <div data-testid="WelcomeScreen" className="h-screen flex flex-col bg-bg-primary">
       <div className="h-12 shrink-0 [-webkit-app-region:drag]" />
 
       <div className="flex-1 flex flex-col items-center justify-center animate-fade-in">
@@ -30,6 +30,7 @@ export function WelcomeScreenView({ loading, onOpen }: WelcomeScreenViewProps): 
         <p className="text-text-secondary text-[15px] mb-10">Desktop interface for Claude Code</p>
 
         <button
+          data-testid="WelcomeScreen.openFolder"
           onClick={onOpen}
           disabled={loading}
           className="flex items-center gap-2.5 text-[15px] text-text-primary hover:text-accent transition-colors disabled:opacity-50 cursor-pointer"

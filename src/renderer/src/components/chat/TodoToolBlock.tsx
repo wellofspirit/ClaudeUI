@@ -59,7 +59,7 @@ export function TodoToolBlock({ result, view }: Props): React.JSX.Element {
       : 'update tasks'
 
   return (
-    <div className="flex items-center gap-2 px-2 h-7 text-[12px] text-text-secondary rounded-md bg-bg-secondary/50">
+    <div data-testid="TodoToolBlock" className="flex items-center gap-2 px-2 h-7 text-[12px] text-text-secondary rounded-md bg-bg-secondary/50">
       {statusIcon}
       <span className="font-mono text-text-muted text-[11px]">TodoWrite</span>
       <span className="truncate">{summary}</span>

@@ -39,7 +39,7 @@ export function CommandBody({
   return (
     <>
       {/* Input — Bash always shows its input even when hideToolInput. Label only when !hideToolInput. */}
-      <div className="px-3 py-2.5">
+      <div data-testid="CommandBody" className="px-3 py-2.5">
         {!hideToolInput && (
           <div className="text-[11px] text-text-secondary uppercase tracking-wider mb-1.5">
             Input

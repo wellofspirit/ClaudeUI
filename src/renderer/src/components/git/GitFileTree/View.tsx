@@ -52,14 +52,14 @@ export function GitFileTreeView({
 }: GitFileTreeViewProps): React.JSX.Element {
   if (filteredFiles.length === 0) {
     return (
-      <div className="p-4 text-[12px] text-text-muted text-center">
+      <div data-testid="GitFileTree" className="p-4 text-[12px] text-text-muted text-center">
         No {gitFileFilter !== 'all' ? gitFileFilter : ''} changes
       </div>
     )
   }
 
   return (
-    <div className="py-0.5 font-mono">
+    <div data-testid="GitFileTree" className="py-0.5 font-mono">
       {tree.map((node) => (
         <TreeNodeItem
           key={node.path}
@@ -203,6 +203,8 @@ function TreeNodeItem({
     const isSelected = selectedFile === node.file.path
     return (
       <button
+        data-testid="GitFileRow"
+        data-id={node.file.path}
         onClick={() => onSelect(node.file!.path)}
         onContextMenu={(e) => onFileContextMenu(node.file!, e)}
         className={`w-full text-left flex items-center gap-1 px-1.5 py-0 text-[11px] leading-[18px] transition-colors cursor-default group ${
@@ -211,6 +213,7 @@ function TreeNodeItem({
         style={{ paddingLeft: 6 + depth * 12 }}
       >
         <button
+          data-testid="GitFileRow.stageToggle"
           onClick={(e) => onToggleStage(node.file!, e)}
           className={`w-3.5 h-3.5 shrink-0 flex items-center justify-center rounded-sm border transition-colors ${
             staged

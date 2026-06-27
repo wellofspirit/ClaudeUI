@@ -21,10 +21,11 @@ export function ExpandableText({ text, limit, className = '' }: Props): React.JS
   const displayed = isLong && !expanded ? text.slice(0, limit) + '…' : text
 
   return (
-    <span>
+    <span data-testid="ExpandableText">
       <span className={className}>{displayed}</span>
       {isLong && (
         <button
+          data-testid="ExpandableText.toggle"
           onClick={() => setExpanded(!expanded)}
           className="ml-1.5 text-[11px] text-accent hover:underline cursor-pointer shrink-0"
         >

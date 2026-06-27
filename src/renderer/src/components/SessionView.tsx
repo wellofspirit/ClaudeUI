@@ -292,6 +292,7 @@ export function SessionView(): React.JSX.Element {
       value={{ collapsed: sidebarCollapsed, toggle: toggleSidebar, isMobile }}
     >
       <div
+        data-testid="SessionView"
         style={{
           height: visualHeight
             ? `${visualHeight / uiFontScale}px`

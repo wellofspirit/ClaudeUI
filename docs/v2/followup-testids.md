@@ -30,6 +30,12 @@ Stamp each component's **outermost DOM element** with `data-testid="<LogicalComp
   returns a Fragment with multiple roots, stamp the most meaningful single child (the primary
   container), not every child.
 - A component that returns `null` in a branch gets no id in that branch (fine).
+- **Conditional / Fragment roots:** if a component returns a Fragment whose children are
+  *mutually-exclusive conditional* sections (e.g. `{!hideInput && <div…>}` then `{showResult &&
+  <div…>}`), make sure **exactly one rendered element carries the Tier-1 id in every render path** —
+  not just the first child. Use a conditional id on the secondary element, e.g.
+  `data-testid={hideInput ? 'FooBody' : undefined}`, so the id is present whether the first child
+  rendered or not, but never duplicated when both render.
 
 ### Tier 2 — interactive parts (dot-namespaced)
 

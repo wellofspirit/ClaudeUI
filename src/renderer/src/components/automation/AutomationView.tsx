@@ -13,7 +13,7 @@ export function AutomationView({ onClose }: AutomationViewProps): React.JSX.Elem
   clearBadge()
 
   return (
-    <div className="flex flex-col h-full bg-bg-primary">
+    <div data-testid="AutomationView" className="flex flex-col h-full bg-bg-primary">
       {/* Header — matches ChatView TopBar: h-12, draggable, no oversize paddingTop */}
       <div className="shrink-0 h-12 flex items-center justify-between px-4 border-b border-border [-webkit-app-region:drag]">
         <div className="flex items-center gap-2">
@@ -34,6 +34,7 @@ export function AutomationView({ onClose }: AutomationViewProps): React.JSX.Elem
           <span className="text-sm font-semibold text-text-primary">Automations</span>
         </div>
         <button
+          data-testid="AutomationView.close"
           onClick={onClose}
           className="[-webkit-app-region:no-drag] p-1 rounded hover:bg-bg-hover text-text-muted hover:text-text-primary transition-colors"
           title="Close"

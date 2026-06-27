@@ -135,12 +135,14 @@ export function SidebarView(props: SidebarViewProps): React.JSX.Element {
 
   return (
     <div
+      data-testid="Sidebar"
       style={style}
       className={`shrink-0 h-full flex flex-col select-none ${platform === 'darwin' ? 'bg-bg-secondary/60' : 'bg-bg-secondary/85'}`}
     >
       {/* Traffic light clearance + collapse toggle */}
       <div className="h-12 shrink-0 [-webkit-app-region:drag] relative">
         <button
+          data-testid="Sidebar.collapseToggle"
           onClick={onToggleCollapse}
           style={{
             position: 'absolute',
@@ -363,6 +365,7 @@ export function SidebarView(props: SidebarViewProps): React.JSX.Element {
               </span>
               {hasAnyHidden && (
                 <button
+                  data-testid="Sidebar.showHiddenToggle"
                   onClick={onShowHiddenToggle}
                   className="text-[10px] text-text-muted hover:text-text-primary transition-colors cursor-default"
                   title={showHidden ? 'Hide dimmed items' : 'Show hidden items'}

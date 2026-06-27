@@ -63,6 +63,7 @@ export function PlanCommentWidget({
 
   return (
     <div
+      data-testid="PlanCommentWidget"
       className="plan-comment-widget mx-2 my-1.5 rounded-md border border-accent/40 shadow-lg overflow-hidden bg-bg-secondary"
       data-plan-comment
     >
@@ -98,12 +99,14 @@ export function PlanCommentWidget({
         </span>
         <div className="flex items-center gap-1.5">
           <button
+            data-testid="PlanCommentWidget.cancel"
             onClick={onClose}
             className="text-[11px] px-2.5 py-1 rounded border border-border text-text-muted hover:text-text-secondary hover:border-border-hover transition-colors cursor-default"
           >
             Cancel
           </button>
           <button
+            data-testid="PlanCommentWidget.add"
             onClick={handleSave}
             disabled={!text.trim()}
             className="text-[11px] px-2.5 py-1 rounded bg-accent text-white hover:bg-accent/90 disabled:opacity-40 disabled:cursor-default transition-colors cursor-default"

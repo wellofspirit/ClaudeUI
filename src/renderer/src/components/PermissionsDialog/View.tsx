@@ -485,6 +485,7 @@ export function PermissionsDialogView({
 }: PermissionsDialogViewProps): React.JSX.Element {
   return (
     <div
+      data-testid="PermissionsDialog"
       className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 backdrop-blur-sm animate-fade-in"
       onClick={(e) => {
         if (e.target === e.currentTarget) onClose()
@@ -514,6 +515,7 @@ export function PermissionsDialogView({
             <span className="text-[14px] font-medium text-text-primary">Permissions</span>
           </div>
           <button
+            data-testid="PermissionsDialog.close"
             onClick={onClose}
             className="w-7 h-7 flex items-center justify-center rounded-md text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
           >
@@ -536,6 +538,8 @@ export function PermissionsDialogView({
           {tabs.map((scope) => (
             <button
               key={scope}
+              data-testid="PermissionsDialog.tab"
+              data-id={scope}
               onClick={() => onChangeTab(scope)}
               className={`relative px-4 py-2.5 text-[12px] font-medium transition-colors cursor-default ${
                 activeTab === scope ? 'text-accent' : 'text-text-muted hover:text-text-secondary'
@@ -639,6 +643,7 @@ export function PermissionsDialogView({
           <div className="flex items-center gap-2">
             {hasDirty && (
               <button
+                data-testid="PermissionsDialog.save"
                 onClick={onSaveAll}
                 disabled={saving}
                 className="px-3 py-1.5 text-[12px] font-medium text-bg-primary bg-accent hover:bg-accent-hover rounded-md transition-colors cursor-default disabled:opacity-50"
@@ -647,6 +652,7 @@ export function PermissionsDialogView({
               </button>
             )}
             <button
+              data-testid="PermissionsDialog.closeFooter"
               onClick={onClose}
               className="px-3 py-1.5 text-[12px] text-text-secondary hover:text-text-primary hover:bg-bg-hover rounded-md transition-colors cursor-default"
             >

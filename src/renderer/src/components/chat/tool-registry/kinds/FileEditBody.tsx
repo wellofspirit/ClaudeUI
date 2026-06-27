@@ -44,7 +44,7 @@ export function FileEditBody({
   return (
     <>
       {!hideToolInput && (
-        <div className="px-3 py-2.5">
+        <div data-testid="FileEditBody" className="px-3 py-2.5">
           <div className="text-[11px] text-text-secondary uppercase tracking-wider mb-1.5">
             Input
           </div>
@@ -62,7 +62,10 @@ export function FileEditBody({
       )}
 
       {showResult && (
-        <div className={`px-3 py-2.5 ${hideToolInput ? '' : 'border-t border-border'}`}>
+        <div
+          data-testid={hideToolInput ? 'FileEditBody' : undefined}
+          className={`px-3 py-2.5 ${hideToolInput ? '' : 'border-t border-border'}`}
+        >
           {!hideToolInput && (
             <div
               className={`text-[11px] uppercase tracking-wider mb-1.5 ${isError ? 'text-danger' : 'text-success'}`}

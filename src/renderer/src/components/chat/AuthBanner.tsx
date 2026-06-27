@@ -25,7 +25,7 @@ export function AuthBanner(): React.JSX.Element | null {
   const authorizing = authState?.status === 'authorizing'
 
   return (
-    <div className="mx-3 mt-2 rounded-lg border border-warning/40 bg-bg-secondary animate-fade-in">
+    <div data-testid="AuthBanner" className="mx-3 mt-2 rounded-lg border border-warning/40 bg-bg-secondary animate-fade-in">
       <div className="px-3 py-2 flex items-center gap-2.5">
         {authorizing ? (
           <svg
@@ -61,6 +61,7 @@ export function AuthBanner(): React.JSX.Element | null {
         </span>
         {authorizing ? (
           <button
+            data-testid="AuthBanner.cancel"
             onClick={() => void cancelSignIn()}
             className="text-[12px] text-text-secondary hover:text-text-primary cursor-pointer"
           >
@@ -69,12 +70,14 @@ export function AuthBanner(): React.JSX.Element | null {
         ) : (
           <>
             <button
+              data-testid="AuthBanner.login"
               onClick={() => void signIn()}
               className="text-[12px] font-medium rounded-md px-3 py-1 bg-accent text-bg-primary hover:bg-accent-hover transition-colors cursor-pointer"
             >
               Log in
             </button>
             <button
+              data-testid="AuthBanner.dismiss"
               onClick={() => setDismissed(true)}
               className="text-[12px] text-text-secondary hover:text-text-primary cursor-pointer"
             >

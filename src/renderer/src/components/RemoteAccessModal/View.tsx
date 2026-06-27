@@ -56,6 +56,7 @@ export function RemoteAccessModalView({
   return (
     <div
       ref={overlayRef}
+      data-testid="RemoteAccessModal"
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"
       onClick={handleOverlayClick}
     >
@@ -82,6 +83,7 @@ export function RemoteAccessModalView({
             <span className="text-text-primary font-medium text-[14px]">Remote Access</span>
           </div>
           <button
+            data-testid="RemoteAccessModal.close"
             onClick={onClose}
             className="w-7 h-7 flex items-center justify-center rounded-md hover:bg-bg-hover text-text-muted hover:text-text-primary transition-colors"
           >
@@ -204,6 +206,7 @@ export function RemoteAccessModalView({
               )}
 
               <button
+                data-testid="RemoteAccessModal.start"
                 onClick={onStart}
                 disabled={starting}
                 className="px-5 py-2 rounded-lg bg-accent text-white text-[13px] font-medium hover:bg-accent-hover transition-colors disabled:opacity-50"
@@ -285,6 +288,7 @@ export function RemoteAccessModalView({
                     {displayUrl}
                   </code>
                   <button
+                    data-testid="RemoteAccessModal.copyUrl"
                     onClick={onCopy}
                     className="shrink-0 text-text-muted hover:text-accent transition-colors"
                     title="Copy URL"
@@ -349,6 +353,7 @@ export function RemoteAccessModalView({
 
               {/* Stop button */}
               <button
+                data-testid="RemoteAccessModal.stop"
                 onClick={onStop}
                 className="px-4 py-1.5 rounded-lg border border-danger/30 text-danger text-[12px] hover:bg-danger/10 transition-colors"
               >

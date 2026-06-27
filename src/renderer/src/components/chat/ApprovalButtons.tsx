@@ -23,13 +23,16 @@ export interface ApprovalButtonsProps {
   onApproval: (decision: 'allow' | 'deny', selectedSuggestions?: PermissionSuggestion[]) => Promise<void>
   /** Whether to show decisionReason and AlwaysAllowSection. Defaults to true. */
   showSuggestions?: boolean
+  /** Optional testid for the root element. Defaults to "ApprovalButtons". */
+  testid?: string
 }
 
 export function ApprovalButtons({
   approval,
   permissionMode,
   onApproval,
-  showSuggestions = true
+  showSuggestions = true,
+  testid
 }: ApprovalButtonsProps): React.JSX.Element {
   const [checkedSuggestions, setCheckedSuggestions] = useState<boolean[]>(() =>
     (approval.suggestions || []).map(() => false)
@@ -73,8 +76,9 @@ export function ApprovalButtons({
           )}
         </div>
       )}
-      <div className="flex border-t border-warning/20">
+      <div data-testid={testid ?? 'ApprovalButtons'} className="flex border-t border-warning/20">
         <button
+          data-testid="ApprovalButtons.deny"
           onClick={() => handleDecision('deny')}
           className="flex-1 h-8 text-[12px] font-medium text-danger hover:bg-danger/5 transition-colors cursor-pointer"
         >
@@ -82,6 +86,7 @@ export function ApprovalButtons({
         </button>
         <div className="w-px bg-warning/20" />
         <button
+          data-testid="ApprovalButtons.allow"
           onClick={() => handleDecision('allow')}
           className="flex-1 h-8 text-[12px] font-medium text-success hover:bg-success/5 transition-colors cursor-pointer"
         >

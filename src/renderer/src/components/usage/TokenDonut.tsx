@@ -39,7 +39,7 @@ export function TokenDonut({
   const circumference = 2 * Math.PI * radius
 
   return (
-    <div className="flex flex-col items-center gap-1">
+    <div data-testid="TokenDonut" className="flex flex-col items-center gap-1">
       <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
         {/* Background ring */}
         <circle

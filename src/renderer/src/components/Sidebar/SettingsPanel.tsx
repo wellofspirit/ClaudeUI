@@ -52,7 +52,7 @@ export function SettingsPanel(): React.JSX.Element {
   }, [open])
 
   return (
-    <div ref={panelRef}>
+    <div data-testid="SettingsPanel" ref={panelRef}>
       {open && (
         <div className="border-t border-border/50 px-2 py-1 bg-white/5 rounded-t-lg">
           {/* Theme selector */}
@@ -97,6 +97,7 @@ export function SettingsPanel(): React.JSX.Element {
           />
           {/* All Settings button */}
           <button
+            data-testid="SettingsPanel.allSettings"
             onClick={() => {
               setOpen(false)
               setDialogOpen(true)
@@ -127,6 +128,7 @@ export function SettingsPanel(): React.JSX.Element {
         <UsageRing />
         {window.api.platform !== 'web' && (
           <button
+            data-testid="SettingsPanel.remoteAccess"
             onClick={() => setRemoteModalOpen(true)}
             className="flex items-center gap-1 h-6 rounded-md hover:bg-bg-hover transition-colors cursor-default ml-auto px-1"
             title="Remote Access"
@@ -155,6 +157,7 @@ export function SettingsPanel(): React.JSX.Element {
           </button>
         )}
         <button
+          data-testid="SettingsPanel.toggle"
           onClick={() => setOpen(!open)}
           className={`flex items-center justify-center w-6 h-6 rounded-md hover:bg-bg-hover transition-colors cursor-default ${window.api.platform === 'web' ? 'ml-auto' : ''}`}
           title="Settings"

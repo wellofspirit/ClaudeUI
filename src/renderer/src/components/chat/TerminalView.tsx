@@ -36,6 +36,7 @@ export function TerminalView({ text, maxHeight }: Props): React.JSX.Element {
 
   return (
     <pre
+      data-testid="TerminalView"
       ref={preRef}
       className="text-[12px] font-mono whitespace-pre-wrap break-words leading-[1.3] rounded-md p-2 border border-border overflow-y-auto"
       style={{

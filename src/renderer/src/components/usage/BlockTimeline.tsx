@@ -108,7 +108,7 @@ export function BlockTimeline({
   }
 
   return (
-    <div className="relative">
+    <div data-testid="BlockTimeline" className="relative">
       {/* Mode toggle */}
       <div className="flex items-center gap-1 mb-1">
         <button

@@ -293,7 +293,7 @@ export function FloatingApproval(): React.JSX.Element | null {
   if (unmatched.length === 0) return null
 
   return (
-    <div className="absolute bottom-32 left-1/2 -translate-x-1/2 z-20 w-full max-w-[500px] px-4 flex flex-col gap-2 pointer-events-auto">
+    <div data-testid="FloatingApproval" className="absolute bottom-32 left-1/2 -translate-x-1/2 z-20 w-full max-w-[500px] px-4 flex flex-col gap-2 pointer-events-auto">
       {unmatched.map((approval) =>
         approval.toolName === 'AskUserQuestion' ? (
           <FloatingQuestionCard key={approval.requestId} approval={approval} />

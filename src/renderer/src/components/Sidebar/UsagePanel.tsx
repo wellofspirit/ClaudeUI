@@ -133,7 +133,7 @@ export function UsagePanel({
   }
 
   return (
-    <div className="absolute bottom-full left-0 mb-1 w-[220px] bg-bg-secondary border border-border rounded-lg shadow-lg p-3 z-50">
+    <div data-testid="UsagePanel" className="absolute bottom-full left-0 mb-1 w-[220px] bg-bg-secondary border border-border rounded-lg shadow-lg p-3 z-50">
       {usage?.error ? (
         <div className="text-[10px] text-red-400">{usage.error}</div>
       ) : usage ? (
@@ -171,6 +171,7 @@ export function UsagePanel({
         </div>
         <div className="flex items-center gap-1">
           <button
+            data-testid="UsagePanel.details"
             onClick={(e) => {
               e.stopPropagation()
               setActiveView({ type: 'usage' })
@@ -182,6 +183,7 @@ export function UsagePanel({
           </button>
           {usage && (
             <button
+              data-testid="UsagePanel.refresh"
               onClick={(e) => {
                 e.stopPropagation()
                 onRefresh()
@@ -255,8 +257,9 @@ export function UsageRing(): React.JSX.Element {
   const displayText = usage && !usage.error ? `${Math.round(pct)}` : usage?.error ? '!' : '—'
 
   return (
-    <div ref={ringRef} className="relative flex items-center gap-2">
+    <div data-testid="UsageRing" ref={ringRef} className="relative flex items-center gap-2">
       <button
+        data-testid="UsageRing.toggle"
         onClick={() => setShowPanel(!showPanel)}
         className="relative flex items-center justify-center cursor-default hover:opacity-80 transition-opacity"
         title={usage?.error || `5hr usage: ${Math.round(pct)}%`}

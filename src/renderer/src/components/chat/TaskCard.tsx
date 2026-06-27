@@ -235,9 +235,10 @@ export function TaskCard({ block, result, view, approval }: Props): React.JSX.El
   )
 
   return (
-    <div className={`rounded-lg border ${borderColor} bg-bg-secondary overflow-hidden`}>
+    <div data-testid="TaskCard" className={`rounded-lg border ${borderColor} bg-bg-secondary overflow-hidden`}>
       {/* Header — always visible, clickable to expand/collapse */}
       <button
+        data-testid="TaskCard.expand"
         onClick={() => setExpanded(!expanded)}
         className="w-full flex items-center gap-2 px-3 h-9 border-b border-border hover:bg-bg-hover transition-colors cursor-pointer"
       >
@@ -254,6 +255,7 @@ export function TaskCard({ block, result, view, approval }: Props): React.JSX.El
         {isLoaded && <span className="text-[10px] text-text-muted shrink-0">loaded</span>}
         {canBackground && !isBackgrounding && !isHistorical && (
           <button
+            data-testid="TaskCard.sendToBackground"
             onClick={(e) => {
               e.stopPropagation()
               handleBackgroundTask()
@@ -270,6 +272,7 @@ export function TaskCard({ block, result, view, approval }: Props): React.JSX.El
         )}
         {isRunning && !isStopping && !isHistorical && !isPendingApproval && (
           <button
+            data-testid="TaskCard.stop"
             onClick={(e) => {
               e.stopPropagation()
               handleStopTask()
@@ -330,6 +333,7 @@ export function TaskCard({ block, result, view, approval }: Props): React.JSX.El
           )}
           <div className="flex-1" />
           <button
+            data-testid="TaskCard.openInPanel"
             onClick={() => activeSessionId && openTaskPanel(activeSessionId, toolUseId)}
             className="text-[11px] text-accent hover:underline cursor-pointer"
           >

@@ -252,6 +252,7 @@ function VoiceButton({
 
   return (
     <button
+      data-testid="InputBox.voice"
       onMouseDown={(e) => {
         e.preventDefault()
         onVoiceStart()
@@ -410,6 +411,7 @@ export function InputBoxView(props: InputBoxViewProps): React.JSX.Element {
 
   return (
     <div
+      data-testid="InputBox"
       style={{
         padding: isMobile ? '8px 8px 16px' : '8px 13px 16px',
         paddingBottom: isMobile ? 'max(16px, env(safe-area-inset-bottom))' : '16px'
@@ -482,6 +484,7 @@ export function InputBoxView(props: InputBoxViewProps): React.JSX.Element {
 
           {/* Textarea */}
           <textarea
+            data-testid="InputBox.textarea"
             ref={textareaRef}
             value={displayValue}
             onChange={onInput}
@@ -539,6 +542,7 @@ export function InputBoxView(props: InputBoxViewProps): React.JSX.Element {
             <div className="flex items-center gap-1.5">
               {isRunning && (
                 <button
+                  data-testid="InputBox.cancel"
                   onClick={onCancel}
                   className="h-7 px-2.5 flex items-center gap-1.5 text-[11px] text-text-secondary rounded-lg border border-border hover:border-border-bright transition-colors cursor-pointer"
                 >
@@ -556,6 +560,7 @@ export function InputBoxView(props: InputBoxViewProps): React.JSX.Element {
                 onVoiceStop={props.onVoiceStop}
               />
               <button
+                data-testid="InputBox.send"
                 onClick={onSend}
                 disabled={(!text.trim() && attachedFiles.length === 0) || isDisabled}
                 title={isRunning ? 'Queue message' : 'Send message'}

@@ -8,7 +8,7 @@ export const StreamingText = memo(function StreamingText(): React.JSX.Element | 
   if (!deferred) return null
 
   return (
-    <div className="animate-fade-in">
+    <div data-testid="StreamingText" className="animate-fade-in">
       <div className="text-[13px] text-text-primary leading-[1.6]">
         <MarkdownRenderer content={deferred} />
       </div>

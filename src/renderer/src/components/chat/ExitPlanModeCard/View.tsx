@@ -45,7 +45,7 @@ export function ExitPlanModeCardView({
   }, [showFeedback])
 
   return (
-    <div className="rounded-lg border border-accent/40 bg-bg-secondary overflow-hidden animate-fade-in">
+    <div data-testid="ExitPlanModeCard" className="rounded-lg border border-accent/40 bg-bg-secondary overflow-hidden animate-fade-in">
       {/* Header — clickable to toggle */}
       <div
         onClick={onToggleExpanded}
@@ -69,6 +69,7 @@ export function ExitPlanModeCardView({
         <span className="flex-1" />
         {hasApproval && planContent && (
           <button
+            data-testid="ExitPlanModeCard.review"
             onClick={(e) => {
               e.stopPropagation()
               if (activeSessionId) {
@@ -125,6 +126,7 @@ export function ExitPlanModeCardView({
         <div className="px-3 pb-2">
           <div className="flex flex-col gap-1">
             <button
+              data-testid="ExitPlanModeCard.startFresh"
               onClick={onStartFresh}
               className="w-full flex items-center gap-2.5 px-2.5 h-8 rounded-md text-[12px] text-text-primary bg-accent/10 hover:bg-accent/20 transition-colors cursor-pointer text-left"
             >
@@ -133,6 +135,7 @@ export function ExitPlanModeCardView({
             </button>
 
             <button
+              data-testid="ExitPlanModeCard.continueAutoEdit"
               onClick={onContinueAutoEdit}
               className="w-full flex items-center gap-2.5 px-2.5 h-8 rounded-md text-[12px] text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-colors cursor-pointer text-left"
             >
@@ -141,6 +144,7 @@ export function ExitPlanModeCardView({
             </button>
 
             <button
+              data-testid="ExitPlanModeCard.continueManual"
               onClick={onContinueManual}
               className="w-full flex items-center gap-2.5 px-2.5 h-8 rounded-md text-[12px] text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-colors cursor-pointer text-left"
             >
@@ -149,6 +153,7 @@ export function ExitPlanModeCardView({
             </button>
 
             <button
+              data-testid="ExitPlanModeCard.keepPlanning"
               onClick={onToggleFeedback}
               className="w-full flex items-center gap-2.5 px-2.5 h-8 rounded-md text-[12px] text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-colors cursor-pointer text-left"
             >
@@ -160,6 +165,7 @@ export function ExitPlanModeCardView({
           {showFeedback && (
             <div className="mt-2 flex flex-col gap-1.5">
               <textarea
+                data-testid="ExitPlanModeCard.feedback"
                 ref={feedbackRef}
                 value={feedback}
                 onChange={(e) => onFeedbackChange(e.target.value)}
@@ -179,6 +185,7 @@ export function ExitPlanModeCardView({
               />
               <div className="flex justify-end">
                 <button
+                  data-testid="ExitPlanModeCard.sendFeedback"
                   onClick={onKeepPlanning}
                   disabled={!feedback.trim()}
                   className="h-6 px-3 text-[11px] font-medium text-accent bg-accent/10 rounded-md hover:bg-accent/20 transition-colors cursor-pointer disabled:opacity-30 disabled:cursor-default"

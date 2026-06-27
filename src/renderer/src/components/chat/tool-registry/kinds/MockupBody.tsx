@@ -28,6 +28,7 @@ export function MockupBody({
 
   return (
     <div
+      data-testid="MockupBody"
       className={`rounded-lg ${borderColor === 'border-border' ? 'border' : 'border-2'} ${borderColor} bg-bg-secondary overflow-hidden`}
     >
       <div className="flex items-center gap-2 px-3 h-9 text-[13px]">

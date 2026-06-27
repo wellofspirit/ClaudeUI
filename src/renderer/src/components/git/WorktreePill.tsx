@@ -43,9 +43,10 @@ export function WorktreePill(): React.JSX.Element | null {
   }
 
   return (
-    <div className="relative">
+    <div data-testid="WorktreePill" className="relative">
       <button
         ref={buttonRef}
+        data-testid="WorktreePill.toggle"
         onClick={() => setPopoverOpen(!popoverOpen)}
         className="flex items-baseline gap-1.5 px-2 py-1 rounded-md text-[12px] text-mode-edit hover:bg-bg-hover transition-colors cursor-default"
         title={`Worktree: ${worktreeInfo.worktreeName}`}
@@ -102,6 +103,7 @@ export function WorktreePill(): React.JSX.Element | null {
                 {worktreeInfo.worktreePath}
               </span>
               <button
+                data-testid="WorktreePill.copyPath"
                 onClick={handleCopyPath}
                 className="shrink-0 px-1.5 py-0.5 rounded text-[11px] text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors"
                 title="Copy path"

@@ -33,7 +33,7 @@ export function AutomationRunHistoryView({
 
   if (!run) {
     return (
-      <div className="flex-1 flex items-center justify-center text-text-muted text-sm">
+      <div data-testid="AutomationRunHistory" className="flex-1 flex items-center justify-center text-text-muted text-sm">
         Run not found
       </div>
     )
@@ -61,9 +61,10 @@ export function AutomationRunHistoryView({
   })
 
   return (
-    <div className="flex flex-col h-full">
+    <div data-testid="AutomationRunHistory" className="flex flex-col h-full">
       <div className="flex items-center gap-3 px-4 py-2.5 border-b border-border/20 shrink-0">
         <button
+          data-testid="AutomationRunHistory.back"
           onClick={onBack}
           className="flex items-center gap-1 text-xs text-text-accent hover:text-text-primary transition-colors"
         >
@@ -89,6 +90,7 @@ export function AutomationRunHistoryView({
         )}
         {isRunning && (
           <button
+            data-testid="AutomationRunHistory.stop"
             onClick={onStop}
             className="flex items-center gap-1 px-2 py-0.5 text-xs bg-red-500/10 border border-red-500/30 text-red-400 rounded-lg hover:bg-red-500/20 transition-colors"
           >

@@ -41,7 +41,7 @@ export function UsageView({ onClose }: UsageViewProps): React.JSX.Element {
 
   if (!blockUsage) {
     return (
-      <div className="flex flex-col h-full bg-bg-primary p-4">
+      <div data-testid="UsageView" className="flex flex-col h-full bg-bg-primary p-4">
         <Header onClose={onClose} />
         <div className="flex-1 flex items-center justify-center text-text-muted text-sm">
           Loading usage data…
@@ -63,7 +63,7 @@ export function UsageView({ onClose }: UsageViewProps): React.JSX.Element {
   const opencodeEntry = perEngine?.find((e) => e.engineId === 'opencode') ?? null
 
   return (
-    <div className="flex flex-col h-full bg-bg-primary overflow-y-auto">
+    <div data-testid="UsageView" className="flex flex-col h-full bg-bg-primary overflow-y-auto">
       <div className="sticky top-0 z-10 bg-bg-primary/95 backdrop-blur-sm border-b border-border/30">
         <Header onClose={onClose}>
           {accounts.length > 1 && (
@@ -502,6 +502,7 @@ function Header({
         {children}
       </div>
       <button
+        data-testid="UsageView.close"
         onClick={onClose}
         className="[-webkit-app-region:no-drag] flex items-center justify-center w-6 h-6 rounded-md hover:bg-bg-hover transition-colors cursor-default"
         title="Close"

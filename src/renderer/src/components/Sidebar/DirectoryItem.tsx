@@ -89,7 +89,7 @@ export const DirectoryItem = memo(function DirectoryItem({
   }, [])
 
   return (
-    <div>
+    <div data-testid="DirectoryItem" data-id={group.projectKey || group.cwd}>
       <div
         onClick={handleClick}
         onDoubleClick={handleDoubleClick}

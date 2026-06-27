@@ -114,7 +114,7 @@ export function WelcomeState(): React.JSX.Element {
   }
 
   return (
-    <div className="flex flex-col items-center gap-4 -mt-16 animate-fade-in">
+    <div data-testid="WelcomeState" className="flex flex-col items-center gap-4 -mt-16 animate-fade-in">
       {/* Icon */}
       <div
         style={{ width: 56, height: 56, borderRadius: 16 }}
@@ -158,6 +158,7 @@ export function WelcomeState(): React.JSX.Element {
       {!cwd && !isCreatingWorktree && (
         <div className="relative">
           <button
+            data-testid="WelcomeState.selectDirectory"
             onClick={() => setDropdownOpen(!dropdownOpen)}
             className="flex items-center gap-1 text-[14px] text-accent hover:text-accent/80 transition-colors cursor-default"
           >
@@ -236,6 +237,7 @@ export function WelcomeState(): React.JSX.Element {
         <div className="flex flex-col items-center gap-2">
           <label className="flex items-center gap-2 cursor-default select-none">
             <button
+              data-testid="WelcomeState.worktreeToggle"
               onClick={() => setWorktreeEnabled(!worktreeEnabled)}
               className={`relative w-8 h-[18px] rounded-full transition-colors ${worktreeEnabled ? 'bg-mode-edit' : 'bg-bg-hover border border-border'}`}
             >
@@ -249,6 +251,7 @@ export function WelcomeState(): React.JSX.Element {
           {worktreeEnabled && (
             <div className="flex items-center gap-1.5 animate-fade-in">
               <input
+                data-testid="WelcomeState.worktreeName"
                 type="text"
                 value={worktreeName}
                 onChange={(e) => setWorktreeName(sanitizeWorktreeName(e.target.value))}
@@ -256,6 +259,7 @@ export function WelcomeState(): React.JSX.Element {
                 className="w-40 px-2 py-1 rounded-md bg-bg-tertiary border border-border text-[12px] text-text-primary font-mono focus:outline-none focus:border-accent"
               />
               <button
+                data-testid="WelcomeState.randomizeName"
                 onClick={() => setWorktreeName(generateRandomName())}
                 className="w-6 h-6 flex items-center justify-center rounded-md text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
                 title="Randomize name"

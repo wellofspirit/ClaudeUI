@@ -117,6 +117,8 @@ export const SessionItem = memo(function SessionItem({
   return (
     <>
       <div
+        data-testid="SessionItem"
+        data-id={info.sessionId}
         onClick={onClick}
         onDoubleClick={onDoubleClick}
         onContextMenu={menu.open}
@@ -138,6 +140,7 @@ export const SessionItem = memo(function SessionItem({
           />
           {onRemove && (
             <span
+              data-testid="SessionItem.remove"
               onClick={(e) => {
                 e.stopPropagation()
                 onRemove()
@@ -162,6 +165,7 @@ export const SessionItem = memo(function SessionItem({
         </span>
         {isRenaming ? (
           <input
+            data-testid="SessionItem.renameInput"
             ref={renameRef}
             value={renameValue}
             onChange={(e) => setRenameValue(e.target.value)}
@@ -228,6 +232,7 @@ export const SessionItem = memo(function SessionItem({
             )}
             {onPin && (
               <span
+                data-testid="SessionItem.pin"
                 onClick={(e) => {
                   e.stopPropagation()
                   onPin()
@@ -252,6 +257,7 @@ export const SessionItem = memo(function SessionItem({
             )}
             {onUnpin && (
               <span
+                data-testid="SessionItem.unpin"
                 onClick={(e) => {
                   e.stopPropagation()
                   onUnpin()
@@ -276,6 +282,7 @@ export const SessionItem = memo(function SessionItem({
             )}
             {onToggleWatch && !isSdkActive && (
               <span
+                data-testid="SessionItem.toggleWatch"
                 onClick={(e) => {
                   e.stopPropagation()
                   onToggleWatch()

@@ -47,6 +47,8 @@ export function NavItem({
 }): React.JSX.Element {
   return (
     <div
+      data-testid="NavItem"
+      data-id={label}
       style={{ padding: '0 5px' }}
       onClick={onClick}
       onDoubleClick={onDoubleClick}

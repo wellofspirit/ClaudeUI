@@ -26,6 +26,7 @@ export function GitChangesPill(): React.JSX.Element | null {
   if (totalChanges === 0) {
     return (
       <button
+        data-testid="GitChangesPill"
         onClick={handleClick}
         className={`flex items-baseline gap-1 px-2 py-1 rounded-md text-[12px] whitespace-nowrap transition-colors cursor-default ${
           isActive
@@ -41,6 +42,7 @@ export function GitChangesPill(): React.JSX.Element | null {
 
   return (
     <button
+      data-testid="GitChangesPill"
       onClick={handleClick}
       className={`flex items-baseline gap-1.5 px-2 py-1 rounded-md text-[12px] whitespace-nowrap transition-colors cursor-default ${
         isActive

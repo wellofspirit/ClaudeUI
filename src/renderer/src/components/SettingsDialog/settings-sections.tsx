@@ -116,9 +116,10 @@ function ProxyTestButton({ proxy }: { proxy: ProxySettings }): React.JSX.Element
   }
 
   return (
-    <div className="px-3 py-1.5 text-[13px] text-text-secondary">
+    <div data-testid="ProxyTestButton" className="px-3 py-1.5 text-[13px] text-text-secondary">
       <div className="flex items-center gap-2">
         <button
+          data-testid="ProxyTestButton.test"
           onClick={handleTest}
           disabled={state === 'testing'}
           className="px-2.5 py-1 text-[11px] font-medium text-accent hover:text-accent-hover bg-accent/10 hover:bg-accent/15 rounded-md transition-colors cursor-default disabled:opacity-50 disabled:cursor-not-allowed"
@@ -155,7 +156,7 @@ function GlobalPermissionsSummary(): React.JSX.Element {
   const totalRules = perms ? perms.allow.length + perms.ask.length + perms.deny.length : 0
 
   return (
-    <div className="px-3 py-1.5 text-[13px] text-text-secondary">
+    <div data-testid="GlobalPermissionsSummary" className="px-3 py-1.5 text-[13px] text-text-secondary">
       <div className="flex items-center justify-between">
         <div>
           <div className="text-text-secondary mb-0.5">Global permission rules</div>
@@ -169,6 +170,7 @@ function GlobalPermissionsSummary(): React.JSX.Element {
           )}
         </div>
         <button
+          data-testid="GlobalPermissionsSummary.edit"
           onClick={() => setDialogOpen(true)}
           className="px-2.5 py-1 text-[11px] font-medium text-accent hover:text-accent-hover bg-accent/10 hover:bg-accent/15 rounded-md transition-colors cursor-default"
         >
@@ -216,7 +218,7 @@ function ModelEffortRow({
   const levels = supportedEffortLevels(modelId)
   const fallback = defaultEffort(modelId)
   return (
-    <div className="pl-4 px-3 py-1.5 text-[13px] text-text-secondary">
+    <div data-testid="ModelEffortRow" data-id={modelId} className="pl-4 px-3 py-1.5 text-[13px] text-text-secondary">
       <div className="mb-1 flex items-baseline justify-between gap-2">
         <span>{modelLabel}</span>
         <span className="text-[10px] text-text-muted/50">{modelId}</span>
@@ -264,7 +266,7 @@ function AccountsSetting(): React.JSX.Element {
   }
 
   return (
-    <div className="px-3 py-1.5 space-y-2.5">
+    <div data-testid="AccountsSetting" className="px-3 py-1.5 space-y-2.5">
       <SettingsToggle
         label="Enable multiple account support"
         checked={enabled}
@@ -286,6 +288,8 @@ function AccountsSetting(): React.JSX.Element {
             return (
               <div
                 key={a.id}
+                data-testid="AccountsSetting.accountRow"
+                data-id={a.id}
                 className={`flex items-center gap-2.5 rounded-md border px-2.5 py-1.5 ${
                   active ? 'border-accent/50 bg-accent/5' : 'border-border'
                 }`}
@@ -330,6 +334,7 @@ function AccountsSetting(): React.JSX.Element {
             )
           })}
           <button
+            data-testid="AccountsSetting.addAccount"
             disabled={busy}
             onClick={() => void run(() => window.api.addAccount())}
             className="text-[12px] font-medium text-accent hover:text-accent-hover bg-accent/10 hover:bg-accent/15 rounded-md px-2.5 py-1.5 transition-colors disabled:opacity-50"
@@ -389,7 +394,7 @@ function AutonomyModePicker(): React.JSX.Element {
   }
 
   return (
-    <div className="px-3 py-1.5 text-[13px] text-text-secondary">
+    <div data-testid="AutonomyModePicker" className="px-3 py-1.5 text-[13px] text-text-secondary">
       <div className="mb-1.5">Autonomy mode</div>
       <div className="space-y-1">
         {availableModes.map((mode) => (
@@ -502,7 +507,7 @@ function OpencodeAutoModeSection(): React.JSX.Element {
   }
 
   return (
-    <div className="space-y-1">
+    <div data-testid="OpencodeAutoModeSection" className="space-y-1">
       <SettingsToggle
         label="Auto mode (LLM gatekeeper)"
         checked={enabled}
@@ -577,7 +582,7 @@ function VendorAnthropicEditableForm({
   ]
 
   return (
-    <div className="px-3 py-1.5 text-[13px] text-text-secondary space-y-4">
+    <div data-testid="VendorAnthropicEditableForm" className="px-3 py-1.5 text-[13px] text-text-secondary space-y-4">
       {/* Endpoint */}
       <div className="space-y-2">
         <div className="text-[11px] text-text-muted uppercase tracking-wide">Endpoint</div>
@@ -732,6 +737,7 @@ function ModelAllowlistDialog({
 
   return (
     <div
+      data-testid="ModelAllowlistDialog"
       className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 backdrop-blur-sm animate-fade-in"
       onClick={onClose}
     >
@@ -757,18 +763,21 @@ function ModelAllowlistDialog({
         <div className="px-4 py-2 border-b border-border/30 flex items-center gap-2">
           <input
             type="text"
+            data-testid="ModelAllowlistDialog.search"
             placeholder="Search models…"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             className="flex-1 px-2 py-1 text-[11px] rounded bg-bg-input border border-border/40 text-text-primary placeholder:text-text-muted/50 focus:outline-none focus:border-accent/60"
           />
           <button
+            data-testid="ModelAllowlistDialog.selectAll"
             onClick={() => setChecked(new Set((models ?? []).map((m) => m.id)))}
             className="text-[10px] text-accent hover:text-accent/80 transition-colors whitespace-nowrap"
           >
             Select all
           </button>
           <button
+            data-testid="ModelAllowlistDialog.clear"
             onClick={() => setChecked(new Set())}
             className="text-[10px] text-text-muted/70 hover:text-text-primary transition-colors whitespace-nowrap"
           >
@@ -785,6 +794,8 @@ function ModelAllowlistDialog({
             filtered.map((m) => (
               <button
                 key={m.id}
+                data-testid="ModelAllowlistDialog.modelRow"
+                data-id={m.id}
                 onClick={() => toggle(m.id)}
                 className="w-full flex items-center gap-2 px-2 py-1 rounded hover:bg-bg-hover transition-colors text-left cursor-default"
               >
@@ -813,12 +824,14 @@ function ModelAllowlistDialog({
 
         <div className="px-4 py-3 border-t border-border/50 flex items-center justify-end gap-2">
           <button
+            data-testid="ModelAllowlistDialog.cancel"
             onClick={onClose}
             className="px-3 py-1 text-[11px] rounded hover:bg-bg-hover text-text-muted transition-colors"
           >
             Cancel
           </button>
           <button
+            data-testid="ModelAllowlistDialog.save"
             onClick={() => onSave([...checked])}
             className="px-3 py-1 text-[11px] rounded bg-accent/20 hover:bg-accent/30 text-accent transition-colors"
           >
@@ -1037,7 +1050,7 @@ function VendorOpencodeSection(): React.JSX.Element {
     : null
 
   return (
-    <div className="px-3 py-1.5 space-y-3 text-[13px] text-text-secondary">
+    <div data-testid="VendorOpencodeSection" className="px-3 py-1.5 space-y-3 text-[13px] text-text-secondary">
       {oauthError && (
         <div className="text-[11px] text-red-400 leading-relaxed">{oauthError}</div>
       )}
@@ -1055,6 +1068,8 @@ function VendorOpencodeSection(): React.JSX.Element {
           return (
             <div
               key={p.id}
+              data-testid="VendorOpencodeSection.providerRow"
+              data-id={p.id}
               className="border border-border/30 rounded-md p-2 flex items-center justify-between gap-2"
             >
               <div className="min-w-0">
@@ -1097,6 +1112,7 @@ function VendorOpencodeSection(): React.JSX.Element {
       {/* Add provider */}
       {!pickerOpen ? (
         <button
+          data-testid="VendorOpencodeSection.addProvider"
           onClick={() => {
             setPickerOpen(true)
             setAddSearch('')
@@ -1138,7 +1154,7 @@ function VendorOpencodeSection(): React.JSX.Element {
                 const canOauth = p.authMethods.includes('oauth') && oauthOptions.length > 0
                 const expanded = addingId === p.id
                 return (
-                  <div key={p.id} className="px-1 py-0.5">
+                  <div key={p.id} data-testid="VendorOpencodeSection.catalogRow" data-id={p.id} className="px-1 py-0.5">
                     <button
                       onClick={() => setAddingId(expanded ? null : p.id)}
                       className="w-full flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-bg-hover transition-colors text-left cursor-default"
@@ -1339,7 +1355,7 @@ function OpencodeModelsSection(): React.JSX.Element {
   ]
 
   return (
-    <div className="space-y-1">
+    <div data-testid="OpencodeModelsSection" className="space-y-1">
       <div className="px-3 py-1.5 text-[13px] text-text-secondary">
         <div className="mb-1 flex items-center gap-1">
           Default model
@@ -1509,7 +1525,7 @@ function OpencodeProvidersSection(): React.JSX.Element {
   }
 
   return (
-    <div className="space-y-3 px-3 py-1.5 text-[13px] text-text-secondary">
+    <div data-testid="OpencodeProvidersSection" className="space-y-3 px-3 py-1.5 text-[13px] text-text-secondary">
       {/* Custom providers editor */}
       <div className="space-y-2">
         <div className="text-[11px] text-text-muted uppercase tracking-wide">
@@ -1519,7 +1535,7 @@ function OpencodeProvidersSection(): React.JSX.Element {
           Add self-hosted or compatible endpoints. Set API keys in the <em>Providers</em> section.
         </div>
         {providerRows.map((row) => (
-          <div key={row._key} className="border border-border/30 rounded-md p-2 space-y-1.5">
+          <div key={row._key} data-testid="OpencodeProvidersSection.providerRow" data-id={row._key} className="border border-border/30 rounded-md p-2 space-y-1.5">
             <div className="flex items-center gap-1.5">
               <input
                 type="text"
@@ -1565,6 +1581,7 @@ function OpencodeProvidersSection(): React.JSX.Element {
           </div>
         ))}
         <button
+          data-testid="OpencodeProvidersSection.addProvider"
           onClick={addRow}
           className="text-[11px] text-accent hover:text-accent/80 transition-colors"
         >
@@ -1655,7 +1672,7 @@ function OpencodeAgentsSection(): React.JSX.Element {
   ]
 
   return (
-    <div className="space-y-3 px-3 py-1.5 text-[13px] text-text-secondary">
+    <div data-testid="OpencodeAgentsSection" className="space-y-3 px-3 py-1.5 text-[13px] text-text-secondary">
       <div className="text-[10px] text-text-muted/60 leading-relaxed">
         Override the model and temperature for specific opencode agents. Known agents: {KNOWN_AGENT_NAMES.join(', ')}.
       </div>
@@ -1664,7 +1681,7 @@ function OpencodeAgentsSection(): React.JSX.Element {
       {configuredNames.map((name) => {
         const a = agents[name]
         return (
-          <div key={name} className="border border-border/30 rounded-md p-2 space-y-1.5">
+          <div key={name} data-testid="OpencodeAgentsSection.agentRow" data-id={name} className="border border-border/30 rounded-md p-2 space-y-1.5">
             <div className="flex items-center justify-between">
               <span className="text-[12px] font-medium">{name}</span>
               <button
@@ -1726,6 +1743,7 @@ function OpencodeAgentsSection(): React.JSX.Element {
             className={`${inputClass} flex-1`}
           />
           <button
+            data-testid="OpencodeAgentsSection.addAgent"
             onClick={addAgent}
             disabled={!newAgentName.trim() || !!agents[newAgentName.trim()]}
             className="px-2 py-1 text-[11px] rounded bg-accent/20 hover:bg-accent/30 text-accent disabled:opacity-40 disabled:cursor-not-allowed transition-colors"

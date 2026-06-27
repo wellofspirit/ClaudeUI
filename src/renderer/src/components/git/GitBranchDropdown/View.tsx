@@ -72,12 +72,14 @@ export function GitBranchDropdownView({
   return (
     <div
       ref={dropdownRef}
+      data-testid="GitBranchDropdown"
       className="absolute top-full right-0 mt-1 w-72 max-h-96 bg-bg-primary border border-border rounded-lg shadow-lg overflow-hidden z-50 flex flex-col"
     >
       {/* Search */}
       <div className="p-2 border-b border-border">
         <input
           ref={inputRef}
+          data-testid="GitBranchDropdown.search"
           type="text"
           value={search}
           onChange={(e) => onSearchChange(e.target.value)}
@@ -189,6 +191,8 @@ export function GitBranchDropdownView({
                 {localFiltered.map((b) => (
                   <button
                     key={b}
+                    data-testid="GitBranchDropdown.branchRow"
+                    data-id={b}
                     onClick={() => onCheckout(b)}
                     disabled={loading}
                     className="w-full text-left px-3 py-1.5 text-[12px] hover:bg-bg-hover transition-colors flex items-center justify-between cursor-default disabled:opacity-50"
@@ -218,6 +222,8 @@ export function GitBranchDropdownView({
                   return (
                     <button
                       key={b}
+                      data-testid="GitBranchDropdown.branchRow"
+                      data-id={b}
                       onClick={() => onCheckout(name)}
                       disabled={loading}
                       className="w-full text-left px-3 py-1.5 text-[12px] hover:bg-bg-hover transition-colors truncate cursor-default disabled:opacity-50"
@@ -238,6 +244,7 @@ export function GitBranchDropdownView({
         {creating ? (
           <div className="p-2 flex gap-1.5">
             <input
+              data-testid="GitBranchDropdown.newBranchInput"
               type="text"
               value={newBranchName}
               onChange={(e) => onNewBranchNameChange(e.target.value)}
@@ -250,6 +257,7 @@ export function GitBranchDropdownView({
               autoFocus
             />
             <button
+              data-testid="GitBranchDropdown.createBranch"
               onClick={onCreateBranch}
               disabled={!newBranchName.trim() || loading}
               className="px-2.5 py-1.5 text-[12px] bg-accent text-white rounded-md hover:bg-accent-hover transition-colors disabled:opacity-50 cursor-default"
@@ -259,6 +267,7 @@ export function GitBranchDropdownView({
           </div>
         ) : (
           <button
+            data-testid="GitBranchDropdown.startCreating"
             onClick={onStartCreating}
             className="w-full text-left px-3 py-2 text-[12px] text-accent hover:bg-bg-hover transition-colors cursor-default"
           >

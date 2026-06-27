@@ -37,7 +37,7 @@ export function FileReadBody({
   return (
     <>
       {!hideToolInput && (
-        <div className="px-3 py-2.5">
+        <div data-testid="FileReadBody" className="px-3 py-2.5">
           <div className="text-[11px] text-text-secondary uppercase tracking-wider mb-1.5">
             Input
           </div>
@@ -54,7 +54,10 @@ export function FileReadBody({
       )}
 
       {showResult && (
-        <div className={`px-3 py-2.5 ${hideToolInput ? '' : 'border-t border-border'}`}>
+        <div
+          data-testid={hideToolInput ? 'FileReadBody' : undefined}
+          className={`px-3 py-2.5 ${hideToolInput ? '' : 'border-t border-border'}`}
+        >
           {!hideToolInput && (
             <div
               className={`text-[11px] uppercase tracking-wider mb-1.5 ${isError ? 'text-danger' : 'text-success'}`}
@@ -71,6 +74,7 @@ export function FileReadBody({
               <CodeView code={codeText} filePath={path || undefined} />
               {codeIsLong && (
                 <button
+                  data-testid="FileReadBody.showMore"
                   onClick={() => setCodeExpanded(!codeExpanded)}
                   className="text-[11px] text-accent hover:underline cursor-pointer text-left"
                 >

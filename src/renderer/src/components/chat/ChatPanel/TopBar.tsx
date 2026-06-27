@@ -63,6 +63,7 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
         paddingRight: isMobileCtx ? 8 : 13,
         paddingTop: isMobileCtx ? 'env(safe-area-inset-top)' : undefined
       }}
+      data-testid="TopBar"
       className="shrink-0 h-12 flex items-center justify-between [-webkit-app-region:drag] border-b border-border relative"
     >
       <div className="flex items-center min-w-0">
@@ -70,6 +71,7 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
         {isMobileCtx && (
           <div className="[-webkit-app-region:no-drag] flex items-center gap-1 mr-2">
             <button
+              data-testid="TopBar.toggleSidebar"
               onClick={toggleSidebar}
               className="w-[30px] h-[30px] flex items-center justify-center rounded-md text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
               title="Menu"
@@ -89,6 +91,7 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
               </svg>
             </button>
             <button
+              data-testid="TopBar.newSession"
               onClick={showWelcome}
               className="w-[30px] h-[30px] flex items-center justify-center rounded-md text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
               title="New session"
@@ -124,6 +127,7 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
             className="[-webkit-app-region:no-drag] flex items-center gap-1"
           >
             <button
+              data-testid="TopBar.toggleSidebar"
               onClick={toggleSidebar}
               className="w-[26px] h-[26px] flex items-center justify-center rounded-md text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
               title="Show sidebar"
@@ -144,6 +148,7 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
               </svg>
             </button>
             <button
+              data-testid="TopBar.newSession"
               onClick={showWelcome}
               className="w-[26px] h-[26px] flex items-center justify-center rounded-md text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
               title="New session"
@@ -252,6 +257,7 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
       <div className="flex items-center gap-3 [-webkit-app-region:no-drag]">
         {!isMobileCtx && cwd && (
           <button
+            data-testid="TopBar.openVSCode"
             onClick={() => window.api.openInVSCode(cwd)}
             className="group flex items-baseline gap-1.5 px-2 py-1 rounded-md text-[12px] text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
             title="Open in VS Code"
@@ -291,6 +297,7 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
         )}
         {!isMobileCtx && cwd && capSkills && (
           <button
+            data-testid="TopBar.skills"
             onClick={() => setSkillsOpen(true)}
             className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[12px] text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
             title="Skills"
@@ -316,6 +323,7 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
             tools) does NOT surface this Claude-only config UI for opencode. */}
         {!isMobileCtx && cwd && canUseMcp && engineId === 'claude' && (
           <button
+            data-testid="TopBar.mcp"
             onClick={() => setMcpOpen(true)}
             className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[12px] text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
             title="MCP Servers"
@@ -340,6 +348,7 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
         )}
         {!isMobileCtx && cwd && (
           <button
+            data-testid="TopBar.permissions"
             onClick={() => setPermissionsOpen(true)}
             className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[12px] text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
             title="Project permissions"

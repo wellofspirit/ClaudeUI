@@ -17,10 +17,12 @@ export function FilterTabs({ stagedCount, unstagedCount }: Props): React.JSX.Ele
   ]
 
   return (
-    <div className="shrink-0 flex border-b border-border">
+    <div data-testid="FilterTabs" className="shrink-0 flex border-b border-border">
       {tabs.map((tab) => (
         <button
           key={tab.key}
+          data-testid="FilterTabs.tab"
+          data-id={tab.key}
           onClick={() => activeSessionId && setGitFileFilter(activeSessionId, tab.key)}
           className={`flex-1 px-2 py-1.5 text-[11px] font-medium transition-colors cursor-default ${
             gitFileFilter === tab.key

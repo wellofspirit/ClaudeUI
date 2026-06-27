@@ -114,8 +114,9 @@ export function AskUserQuestionBlockView({
 
   if (isCompleted) {
     return (
-      <div className="rounded-lg border border-success/30 bg-bg-secondary overflow-hidden">
+      <div data-testid="AskUserQuestionBlock" className="rounded-lg border border-success/30 bg-bg-secondary overflow-hidden">
         <button
+          data-testid="AskUserQuestionBlock.toggleSummary"
           onClick={() => setSummaryExpanded(!summaryExpanded)}
           className="w-full flex items-center gap-2 px-3 h-9 text-[13px] hover:bg-bg-hover transition-colors cursor-pointer"
         >
@@ -165,7 +166,7 @@ export function AskUserQuestionBlockView({
 
   if (!isPending || totalSteps === 0) {
     return (
-      <div className="rounded-lg border border-border bg-bg-secondary px-3 py-2.5">
+      <div data-testid="AskUserQuestionBlock" className="rounded-lg border border-border bg-bg-secondary px-3 py-2.5">
         <div className="flex items-center gap-2 text-[13px]">
           <span className="w-3 h-3 rounded-full border-2 border-text-muted border-t-transparent shrink-0 animate-spin-slow" />
           <span className="font-mono font-medium text-accent">AskUserQuestion</span>
@@ -184,7 +185,7 @@ export function AskUserQuestionBlockView({
   }
 
   return (
-    <div className="rounded-lg border border-accent/30 bg-bg-secondary overflow-hidden">
+    <div data-testid="AskUserQuestionBlock" className="rounded-lg border border-accent/30 bg-bg-secondary overflow-hidden">
       <div className="flex items-center gap-2 px-3 h-9 text-[13px] border-b border-border">
         <svg
           width="14"
@@ -317,6 +318,7 @@ export function AskUserQuestionBlockView({
 
       <div className="flex items-center border-t border-border px-3 py-2">
         <button
+          data-testid="AskUserQuestionBlock.dismiss"
           onClick={onDeny}
           className="text-[12px] text-text-secondary hover:text-danger transition-colors cursor-pointer"
         >
@@ -325,6 +327,7 @@ export function AskUserQuestionBlockView({
         <div className="flex-1" />
         {currentStep > 0 && (
           <button
+            data-testid="AskUserQuestionBlock.back"
             onClick={() => setCurrentStep(currentStep - 1)}
             className="text-[12px] text-text-secondary hover:text-text-primary transition-colors cursor-pointer mr-3"
           >
@@ -333,6 +336,7 @@ export function AskUserQuestionBlockView({
         )}
         {currentStep < totalSteps - 1 ? (
           <button
+            data-testid="AskUserQuestionBlock.next"
             onClick={() => canProceed() && setCurrentStep(currentStep + 1)}
             disabled={!canProceed()}
             className={`text-[12px] font-medium px-3 py-1 rounded-md transition-colors cursor-pointer ${
@@ -345,6 +349,7 @@ export function AskUserQuestionBlockView({
           </button>
         ) : (
           <button
+            data-testid="AskUserQuestionBlock.submit"
             onClick={handleSubmit}
             disabled={!allAnswered()}
             className={`text-[12px] font-medium px-3 py-1 rounded-md transition-colors cursor-pointer ${

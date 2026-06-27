@@ -40,7 +40,7 @@ export function LiveBashOutput({
   }, [html])
 
   return (
-    <div className="px-3 py-2.5">
+    <div data-testid="LiveBashOutput" className="px-3 py-2.5">
       <div className="flex items-center gap-2 mb-1.5">
         <div className="text-[11px] text-text-secondary uppercase tracking-wider">Live Output</div>
         <span className="text-[10px] font-mono text-text-muted">
@@ -120,10 +120,11 @@ export function BackgroundBashOutput({ toolUseId }: { toolUseId: string }): Reac
   const hasMore = bgOutput.totalSize > prependedContent.length + tailLen
 
   return (
-    <div className="border-t border-border px-3 py-2.5">
+    <div data-testid="BackgroundBashOutput" className="border-t border-border px-3 py-2.5">
       <div className="text-[11px] text-text-secondary uppercase tracking-wider mb-1.5">Output</div>
       {hasMore && (
         <button
+          data-testid="BackgroundBashOutput.loadEarlier"
           onClick={handleLoadEarlier}
           disabled={loadingMore}
           className="text-[11px] text-accent hover:underline cursor-pointer mb-1 disabled:opacity-50"

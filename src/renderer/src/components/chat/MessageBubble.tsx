@@ -98,7 +98,7 @@ export const MessageBubble = memo(function MessageBubble({
   // System messages (compact separators, CLI commands, API errors)
   if (message.role === 'system') {
     return (
-      <div className="flex flex-col gap-2 animate-fade-in">
+      <div data-testid="MessageBubble" data-id={message.id} className="flex flex-col gap-2 animate-fade-in">
         {message.content.map((block, i) => {
           if (block.type === 'compact_separator') {
             return <CompactSeparator key={i} summary={block.text} />
@@ -130,7 +130,7 @@ export const MessageBubble = memo(function MessageBubble({
       }
       const syntheticPlanView = { kind: 'plan' as const, plan: message.planContent }
       return (
-        <div className="animate-fade-in">
+        <div data-testid="MessageBubble" data-id={message.id} className="animate-fade-in">
           <ExitPlanModeCard block={planBlock} view={syntheticPlanView} />
         </div>
       )
@@ -149,7 +149,7 @@ export const MessageBubble = memo(function MessageBubble({
     const userMarkdown = textBlocks.map((b) => b.text).join('\n\n')
 
     return (
-      <div className="flex justify-end animate-fade-in">
+      <div data-testid="MessageBubble" data-id={message.id} className="flex justify-end animate-fade-in">
         <div
           className="max-w-[85%] bg-bg-tertiary rounded-2xl px-4 py-2.5 text-[13px] text-text-primary leading-[1.6]"
           data-markdown-source={userMarkdown || undefined}
@@ -276,7 +276,7 @@ export const MessageBubble = memo(function MessageBubble({
   const lastThinkingGi = items.reduce((acc, item, i) => (item.kind === 'thinking' ? i : acc), -1)
 
   return (
-    <div className="group/msg flex flex-col gap-2 animate-fade-in">
+    <div data-testid="MessageBubble" data-id={message.id} className="group/msg flex flex-col gap-2 animate-fade-in">
       {items.map((item, gi) => {
         if (item.kind === 'thinking') {
           const isLast = gi === lastThinkingGi

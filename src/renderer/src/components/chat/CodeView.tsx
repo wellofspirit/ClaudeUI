@@ -76,6 +76,7 @@ export function CodeView({ code, filePath }: Props): React.JSX.Element {
     <Highlight theme={themes.oneDark} code={trimmed} language={lang}>
       {({ tokens, getLineProps, getTokenProps }) => (
         <pre
+          data-testid="CodeView"
           className="text-[11px] font-mono leading-[1.3] rounded-md border border-border overflow-auto"
           style={{ background: 'var(--color-bg-primary)' }}
         >

@@ -12,10 +12,12 @@ export function FileAttachmentBar({
   if (attachments.length === 0) return null
 
   return (
-    <div className="flex gap-2 px-3 pt-2.5 pb-0.5 overflow-x-auto">
+    <div data-testid="FileAttachmentBar" className="flex gap-2 px-3 pt-2.5 pb-0.5 overflow-x-auto">
       {attachments.map((file) => (
         <div
           key={file.id}
+          data-testid="FileAttachmentBar.item"
+          data-id={file.id}
           className={`relative shrink-0 rounded-lg overflow-hidden border border-border group/file ${file.fileType === 'pdf' ? 'flex items-center gap-1.5 px-2.5 h-10 bg-bg-hover' : 'w-16 h-16'}`}
         >
           {file.fileType === 'pdf' ? (

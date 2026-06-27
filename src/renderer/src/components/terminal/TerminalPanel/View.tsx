@@ -24,6 +24,7 @@ export function TerminalPanelView({
 }: TerminalPanelViewProps): React.JSX.Element {
   return (
     <div
+      data-testid="TerminalPanel"
       style={style}
       className="flex flex-col bg-bg-primary border-t border-border overflow-hidden"
     >
@@ -31,6 +32,8 @@ export function TerminalPanelView({
         {visibleTabs.map((tab) => (
           <div
             key={tab.id}
+            data-testid="TerminalTab"
+            data-id={tab.id}
             onClick={() => onSelectTab(tab.id, tab.cwd)}
             className={`group flex items-center gap-1 px-2.5 h-6 rounded text-[11px] cursor-default transition-colors select-none ${
               tab.id === activeId
@@ -51,6 +54,7 @@ export function TerminalPanelView({
           </div>
         ))}
         <button
+          data-testid="TerminalPanel.newTab"
           onClick={onNewTab}
           className="w-6 h-6 flex items-center justify-center rounded text-text-muted hover:text-text-secondary hover:bg-bg-hover text-sm"
           title="New terminal"
@@ -58,6 +62,7 @@ export function TerminalPanelView({
           +
         </button>
         <button
+          data-testid="TerminalPanel.close"
           onClick={onClosePanel}
           className="ml-auto w-6 h-6 flex items-center justify-center rounded text-text-muted hover:text-text-secondary hover:bg-bg-hover text-[10px]"
           title="Close terminal panel"

@@ -245,7 +245,7 @@ export function AutomationConfigView(props: AutomationConfigViewProps): React.JS
   const lastRunLine = formatLastRunLine(automation, hasRunningRun)
 
   return (
-    <div className="flex flex-col h-full min-h-0">
+    <div data-testid="AutomationConfig" className="flex flex-col h-full min-h-0">
       {/* Header: title + status + actions */}
       <header className="px-6 pt-5 pb-4 border-b border-border/30 shrink-0">
         <div className="flex items-start justify-between gap-4">
@@ -309,6 +309,7 @@ export function AutomationConfigView(props: AutomationConfigViewProps): React.JS
 
           <div className="flex items-center gap-2 shrink-0">
             <button
+              data-testid="AutomationConfig.toggleEnabled"
               onClick={handleToggleEnabled}
               className="flex items-center gap-2 text-xs text-text-muted pr-3 border-r border-border/30"
               title={enabled ? 'Disable automation' : 'Enable automation'}
@@ -317,6 +318,7 @@ export function AutomationConfigView(props: AutomationConfigViewProps): React.JS
               <Toggle on={enabled} />
             </button>
             <button
+              data-testid="AutomationConfig.runNow"
               onClick={hasRunningRun ? onStopRun : onRunNow}
               className={`flex items-center gap-1.5 px-2.5 py-1 text-[12px] rounded-md border transition-colors ${
                 hasRunningRun
@@ -344,16 +346,17 @@ export function AutomationConfigView(props: AutomationConfigViewProps): React.JS
       {/* Tabs */}
       <div className="px-6 border-b border-border/30 shrink-0">
         <div className="flex gap-1 pt-2.5">
-          <TabButton active={detailTab === 'configure'} onClick={() => onSetDetailTab('configure')}>
+          <TabButton data-testid="AutomationConfig.tab.configure" active={detailTab === 'configure'} onClick={() => onSetDetailTab('configure')}>
             Configure
           </TabButton>
-          <TabButton active={detailTab === 'runs'} onClick={() => onSetDetailTab('runs')}>
+          <TabButton data-testid="AutomationConfig.tab.runs" active={detailTab === 'runs'} onClick={() => onSetDetailTab('runs')}>
             Runs
             {runs && runs.length > 0 && (
               <span className="ml-1.5 text-text-muted">{runs.length}</span>
             )}
           </TabButton>
           <TabButton
+            data-testid="AutomationConfig.tab.permissions"
             active={detailTab === 'permissions'}
             onClick={() => onSetDetailTab('permissions')}
           >
@@ -760,6 +763,8 @@ function RunRow({ run, onClick }: { run: AutomationRun; onClick: () => void }): 
 
   return (
     <button
+      data-testid="AutomationRunRow"
+      data-id={run.id}
       onClick={onClick}
       className="w-full text-left px-6 py-2.5 flex items-center gap-3 hover:bg-bg-hover/50 transition-colors group"
     >
@@ -1054,14 +1059,17 @@ function InspectorRow({
 function TabButton({
   active,
   onClick,
-  children
+  children,
+  'data-testid': testid
 }: {
   active: boolean
   onClick: () => void
   children: React.ReactNode
+  'data-testid'?: string
 }): React.JSX.Element {
   return (
     <button
+      data-testid={testid}
       onClick={onClick}
       className={`px-3 py-1.5 text-[13px] rounded-md transition-colors ${
         active ? 'bg-bg-hover text-text-primary' : 'text-text-muted hover:text-text-secondary'

@@ -111,6 +111,7 @@ export function SettingsDialogView({
 
   return (
     <div
+      data-testid="SettingsDialog"
       ref={overlayRef}
       onClick={handleOverlayClick}
       className="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm flex items-center justify-center"
@@ -125,6 +126,8 @@ export function SettingsDialogView({
             {SCOPES.map((scope) => (
               <button
                 key={scope.id}
+                data-testid="SettingsDialog.scopeTab"
+                data-id={scope.id}
                 onClick={() => onSelectScope(scope.id)}
                 className={`px-3 py-1 rounded-md text-[12px] transition-colors cursor-default ${
                   activeScope === scope.id
@@ -141,6 +144,7 @@ export function SettingsDialogView({
 
           {/* Close button */}
           <button
+            data-testid="SettingsDialog.close"
             onClick={onClose}
             className="flex items-center justify-center w-6 h-6 rounded-md hover:bg-bg-hover text-text-muted hover:text-text-secondary transition-colors cursor-default"
           >
@@ -183,6 +187,7 @@ export function SettingsDialogView({
                 </svg>
                 <input
                   type="text"
+                  data-testid="SettingsDialog.search"
                   value={search}
                   onChange={(e) => onSearchChange(e.target.value)}
                   placeholder="Search..."
@@ -207,6 +212,8 @@ export function SettingsDialogView({
                   {sg.sections.map((sec) => (
                     <button
                       key={sec.id}
+                      data-testid="SettingsDialog.navItem"
+                      data-id={sec.id}
                       onClick={() => onSelectSection(sec.id)}
                       className={`w-full text-left px-3 py-1.5 rounded-md transition-colors cursor-default ${
                         visibleSectionId === sec.id

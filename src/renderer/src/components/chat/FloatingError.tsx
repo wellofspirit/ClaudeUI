@@ -141,7 +141,7 @@ export function FloatingError(): React.JSX.Element | null {
   if (errors.length === 0 && warnings.length === 0) return null
 
   return (
-    <div className="absolute top-12 left-0 right-0 z-20 pointer-events-none">
+    <div data-testid="FloatingError" className="absolute top-12 left-0 right-0 z-20 pointer-events-none">
       <div className="pointer-events-auto px-4 pt-2">
         <div className={`${isMobile ? 'max-w-full' : 'max-w-[740px]'} mx-auto flex flex-col gap-2`}>
           {errors.map((error, index) => (

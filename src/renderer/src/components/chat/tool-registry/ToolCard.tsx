@@ -241,9 +241,11 @@ export function ToolCard({
 
   return (
     <div
+      data-testid="ToolCard"
       className={`rounded-lg ${borderColor === 'border-border' ? 'border' : 'border-2'} ${borderColor} bg-bg-secondary overflow-hidden`}
     >
       <button
+        data-testid="ToolCard.expand"
         onClick={() => setExpanded(!expanded)}
         className="w-full flex items-center gap-2 px-3 h-9 text-[13px] hover:bg-bg-hover transition-colors cursor-pointer"
       >
@@ -260,6 +262,7 @@ export function ToolCard({
         {isLoaded && <span className="text-[10px] text-text-muted shrink-0">loaded</span>}
         {isForegroundBashRunning && !isBackgrounding && backgroundTasksEnabled && (
           <button
+            data-testid="ToolCard.sendToBackground"
             onClick={(e) => {
               e.stopPropagation()
               onBackgroundTask()
@@ -276,6 +279,7 @@ export function ToolCard({
         )}
         {bgRunning && !isStopping && !isHistorical && (
           <button
+            data-testid="ToolCard.stop"
             onClick={(e) => {
               e.stopPropagation()
               onStopTask()
@@ -324,6 +328,7 @@ export function ToolCard({
           </span>
           <div className="flex-1" />
           <button
+            data-testid="ToolCard.openInPanel"
             onClick={() => hasActiveSession && onOpenTaskPanel()}
             className="text-[11px] text-accent hover:underline cursor-pointer"
           >
@@ -339,6 +344,7 @@ export function ToolCard({
           </span>
           <div className="flex-1" />
           <button
+            data-testid="ToolCard.openInPanel"
             onClick={() => hasActiveSession && onOpenTaskPanel()}
             className="text-[11px] text-accent hover:underline cursor-pointer"
           >

@@ -33,12 +33,15 @@ export function SlashCommandMenu({
 
   return (
     <div
+      data-testid="SlashCommandMenu"
       ref={listRef}
       className="absolute bottom-full left-0 right-0 mb-1 z-20 max-h-[240px] overflow-y-auto rounded-lg border border-border bg-bg-input shadow-lg shadow-black/30"
     >
       {filtered.map((cmd, i) => (
         <button
           key={cmd.name}
+          data-testid="SlashCommandMenu.item"
+          data-id={cmd.name}
           onMouseDown={(e) => {
             e.preventDefault() // keep textarea focused
             onSelect(cmd.name)
