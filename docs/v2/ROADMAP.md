@@ -248,6 +248,20 @@ squash/integration strategy for landing the stack. Not code — a process decisi
 Prior session inventories (pre-Phase-8/9) listed these as deferred; the 2026-06-23 sweep confirms they
 shipped. Recorded here so they're not re-raised:
 
+- **Workflow + test-data-attribute conventions formalized; renderer-wide `data-testid` rollout**
+  (shipped 2026-06-27, ADR-026 + ADR-027). The "How we work" loop above is now **ADR-026** (referenced
+  from `CLAUDE.md` § "Development Workflow"). The **two-tier `data-testid` convention** is **ADR-027**:
+  component root = `data-testid="ComponentName"` (PascalCase = the rendered-component inventory),
+  interactive parts = `"ComponentName.partName"`, dynamic rows = stable testid + a separate `data-id`,
+  shared controls forward an optional `testid` prop to a DOM node. `scripts/app-shot.mjs` gained
+  `--testids` (dump the live `[data-testid]` inventory) and `--assert-testid <id>` so component
+  presence is asserted structurally **before** reading a PNG. The convention was then rolled across the
+  whole renderer (~97 files) by one Sonnet agent per area, every diff reviewed line-by-line (review
+  caught the fragment-body conditional-id gap and vetted the MarkdownRenderer wrapper as layout-safe).
+  Attribute-only; gates green; real-app verified (37 testids on home, 61 in a live conversation, zero
+  console errors). Cross-area shared controls (`components/shared/*` — EngineLogo, InlinePickers) were
+  attributed up-front to avoid parallel-edit conflicts. Spec: `docs/v2/followup-testids.md`.
+
 - **Cross-engine project merge + engine-neutral session delete** (shipped 2026-06-26,
   `v2-followup-engine-ux-polish`, ADR-025) — the sidebar listed the same physical directory twice when
   it held both Claude and opencode sessions, because the two engines derived incompatible `projectKey`s
