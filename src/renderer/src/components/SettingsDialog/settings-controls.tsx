@@ -159,7 +159,7 @@ export function ChatRetentionSetting(): React.JSX.Element {
   }, [])
 
   if (days === null) {
-    return <div className="px-3 py-1.5 text-[13px] text-text-muted">Loading…</div>
+    return <div data-testid="ChatRetentionSetting" className="px-3 py-1.5 text-[13px] text-text-muted">Loading…</div>
   }
 
   const autoDelete = !isOff(days)

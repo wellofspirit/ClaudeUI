@@ -88,6 +88,11 @@ that doesn't explicitly forward it.
   selectors that target it.
 - **One Tier-1 id per rendered component instance type;** uniqueness of a *specific* instance comes
   from `data-id`, not from minting per-instance testids.
+- **Every DOM-producing render path carries the id** — including `loading` / `empty` / `error` /
+  `not-installed` early-return branches, so a component is assertable in those states too (not only
+  when fully loaded). Such early returns are mutually exclusive with the main return, so reusing the
+  same id never duplicates. Only a literal `return null` is exempt; a loading/empty message *nested
+  inside an already-stamped root* doesn't need its own copy.
 - **Kept in all builds.** No production stripping. This is a desktop app (DOM size is a non-issue), the
   app-shot drive runs the *built* app, and the ids aid remote-support debugging. The earlier ad-hoc
   kebab id (`mockup-console-entries`) is migrated to the convention.

@@ -484,11 +484,11 @@ function OpencodeAutoModeSection(): React.JSX.Element {
   }, [])
 
   if (engineCfg === null || installed === null) {
-    return <div className="px-3 py-1.5 text-[13px] text-text-muted">Loading…</div>
+    return <div data-testid="OpencodeAutoModeSection" className="px-3 py-1.5 text-[13px] text-text-muted">Loading…</div>
   }
   if (!installed) {
     return (
-      <div className="px-3 py-2 text-[12px] text-text-muted/70 leading-relaxed">
+      <div data-testid="OpencodeAutoModeSection" className="px-3 py-2 text-[12px] text-text-muted/70 leading-relaxed">
         opencode is not installed. Auto mode gates risky tool calls for opencode sessions in Full
         autonomy.
       </div>
@@ -1035,11 +1035,11 @@ function VendorOpencodeSection(): React.JSX.Element {
   }
 
   if (installed === null || catalog === null) {
-    return <div className="px-3 py-1.5 text-[11px] text-text-muted/60">Loading…</div>
+    return <div data-testid="VendorOpencodeSection" className="px-3 py-1.5 text-[11px] text-text-muted/60">Loading…</div>
   }
   if (!installed) {
     return (
-      <div className="px-3 py-1.5 text-[11px] text-text-muted/60 leading-relaxed">
+      <div data-testid="VendorOpencodeSection" className="px-3 py-1.5 text-[11px] text-text-muted/60 leading-relaxed">
         opencode is not installed. Install it to add providers and authenticate them.
       </div>
     )
@@ -1325,11 +1325,11 @@ function OpencodeModelsSection(): React.JSX.Element {
   }, [])
 
   if (engineCfg === null || installed === null) {
-    return <div className="px-3 py-1.5 text-[13px] text-text-muted">Loading…</div>
+    return <div data-testid="OpencodeModelsSection" className="px-3 py-1.5 text-[13px] text-text-muted">Loading…</div>
   }
   if (!installed) {
     return (
-      <div className="px-3 py-2 text-[12px] text-text-muted/70 leading-relaxed">
+      <div data-testid="OpencodeModelsSection" className="px-3 py-2 text-[12px] text-text-muted/70 leading-relaxed">
         opencode is not installed. Model settings apply to opencode sessions.
       </div>
     )
@@ -1454,11 +1454,11 @@ function OpencodeProvidersSection(): React.JSX.Element {
   }, [])
 
   if (engineCfg === null || installed === null) {
-    return <div className="px-3 py-1.5 text-[13px] text-text-muted">Loading…</div>
+    return <div data-testid="OpencodeProvidersSection" className="px-3 py-1.5 text-[13px] text-text-muted">Loading…</div>
   }
   if (!installed) {
     return (
-      <div className="px-3 py-2 text-[12px] text-text-muted/70 leading-relaxed">
+      <div data-testid="OpencodeProvidersSection" className="px-3 py-2 text-[12px] text-text-muted/70 leading-relaxed">
         opencode is not installed. Provider settings apply to opencode sessions.
       </div>
     )
@@ -1620,11 +1620,11 @@ function OpencodeAgentsSection(): React.JSX.Element {
   }, [])
 
   if (engineCfg === null || installed === null) {
-    return <div className="px-3 py-1.5 text-[13px] text-text-muted">Loading…</div>
+    return <div data-testid="OpencodeAgentsSection" className="px-3 py-1.5 text-[13px] text-text-muted">Loading…</div>
   }
   if (!installed) {
     return (
-      <div className="px-3 py-2 text-[12px] text-text-muted/70 leading-relaxed">
+      <div data-testid="OpencodeAgentsSection" className="px-3 py-2 text-[12px] text-text-muted/70 leading-relaxed">
         opencode is not installed. Agent settings apply to opencode sessions.
       </div>
     )

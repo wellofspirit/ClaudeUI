@@ -29,7 +29,13 @@ Stamp each component's **outermost DOM element** with `data-testid="<LogicalComp
   changes layout — instead stamp the nearest DOM element the component itself renders. If a component
   returns a Fragment with multiple roots, stamp the most meaningful single child (the primary
   container), not every child.
-- A component that returns `null` in a branch gets no id in that branch (fine).
+- **Every render path that produces DOM carries the Tier-1 id** — including `loading`, `empty`,
+  `error`, and `not-installed` **early-return** branches (e.g. `if (loading) return <div>Loading…</div>`).
+  These early returns are mutually exclusive with the main return, so stamping each with the SAME
+  component id never duplicates. Only a literal `return null` (or a branch that renders no DOM) is
+  exempt. NOTE: a loading/empty *message nested inside an already-stamped always-present root* does NOT
+  need its own copy — the root id already identifies the component; only standalone early-return
+  branches need it.
 - **Conditional / Fragment roots:** if a component returns a Fragment whose children are
   *mutually-exclusive conditional* sections (e.g. `{!hideInput && <div…>}` then `{showResult &&
   <div…>}`), make sure **exactly one rendered element carries the Tier-1 id in every render path** —
