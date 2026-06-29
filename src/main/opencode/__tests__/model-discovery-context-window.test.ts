@@ -33,6 +33,14 @@ vi.mock('../../services/persisted-sessions-dir', () => ({
   PERSISTED_SESSIONS_DIR: '/tmp/persisted'
 }))
 
+// Hermetic: do NOT read the developer's real ~/.claude/ui/engines/opencode.json.
+// discoverOpencodeModels() calls loadModelAllowlist() → loadEngineConfig('opencode');
+// an unmocked read leaks a real per-provider modelAllowlist that filters the fixture
+// models out of the result (env-dependent failures). An empty config = no allowlist.
+vi.mock('../../services/ui-config', () => ({
+  loadEngineConfig: () => ({})
+}))
+
 // ---------------------------------------------------------------------------
 // Import SUT after mocks
 // ---------------------------------------------------------------------------
