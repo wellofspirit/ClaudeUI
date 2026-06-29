@@ -29,3 +29,4 @@
 | [025](adr-025_project-key-identity-and-engine-neutral-delete.md)  | projectKey as a derived lossy render-identity + engine-neutral persisted-session delete dispatcher *(relates to 018/019/020)* |
 | [026](adr-026_development-workflow.md)                            | Development workflow — Opus orchestrates + reviews every line, Sonnet implements, gates + real-app verify before commit *(relates to 027)* |
 | [027](adr-027_test-data-attributes.md)                           | Test data attributes — two-tier `data-testid` convention + DOM-assert-before-screenshot verification *(relates to 026/008)* |
+| [028](adr-028_opencode-native-config-in-place.md)                | opencode engine-native config written to opencode's own files in place (jsonc, comment-safe) *(implements 020; relates to 019/022/024)* |
