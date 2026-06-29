@@ -8,6 +8,8 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import type { McpHttpHost } from './mcp-http-host'
 import { startMcpHttpHost } from './mcp-http-host'
 import { createOpencodeHostedToolsServer } from './opencode-hosted-tools'
+import type { OpencodeMcpEntry } from './claude-mcp-bridge'
+import { collectClaudeMcpForOpencode } from './claude-mcp-bridge'
 // OpencodeConfigSettings import removed — engine-native config now lives in
 // opencode's own file (opencode-config.ts). Only the MCP block is ephemeral.
 
@@ -98,7 +100,11 @@ function locateBinary(): string {
  *
  * API keys are NEVER injected — credentials stay in auth.json.
  */
-export function buildOpencodeConfigContent(mcpPort: number, mcpToken: string): string {
+export function buildOpencodeConfigContent(
+  mcpPort: number,
+  mcpToken: string,
+  bridgedMcp?: Record<string, OpencodeMcpEntry>
+): string {
   const config: Record<string, unknown> = {
     mcp: {
       claudeui: {
@@ -108,7 +114,8 @@ export function buildOpencodeConfigContent(mcpPort: number, mcpToken: string): s
           Authorization: `Bearer ${mcpToken}`
         },
         enabled: true
-      }
+      },
+      ...(bridgedMcp ?? {})
     }
   }
 
@@ -133,10 +140,16 @@ function spawnServer(
         ...process.env,
         OPENCODE_SERVER_PASSWORD: password,
         // Inject the per-cwd in-process MCP server so opencode connects to it
-        // without requiring any global plugin installation.
-        // Engine-native settings (model, providers, agents) are now written to
-        // opencode's own config file by opencode-config.ts — not injected here.
-        OPENCODE_CONFIG_CONTENT: buildOpencodeConfigContent(mcpPort, mcpToken)
+        // without requiring any global plugin installation. Bridged Claude MCP
+        // servers are also injected here so secrets (env/headers) never touch
+        // opencode's on-disk config. Engine-native settings (model, providers,
+        // agents) are now written to opencode's own config file by
+        // opencode-config.ts — not injected here.
+        OPENCODE_CONFIG_CONTENT: buildOpencodeConfigContent(
+          mcpPort,
+          mcpToken,
+          collectClaudeMcpForOpencode(cwd)
+        )
       },
       stdio: ['ignore', 'pipe', 'pipe']
     })
