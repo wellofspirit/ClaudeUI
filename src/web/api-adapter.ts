@@ -539,6 +539,8 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     saveEngineConfig: async () => {},
     loadVendorConfig: async () => ({}),
     saveVendorConfig: async () => {},
+    loadOpencodeSettings: async () => ({}),
+    saveOpencodeSettings: async () => {},
 
     // Vendor auth (opencode multi-vendor) — desktop-only; web client is read-only
     vendorAuthProbe: async () => ({}),

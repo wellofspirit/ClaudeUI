@@ -83,6 +83,12 @@ import {
   getOpencodeProviderModels
 } from '../opencode/model-discovery'
 import { opencodeServerManager } from '../opencode/OpencodeServerManager'
+import {
+  readOpencodeNativeConfig,
+  writeOpencodeNativeConfig,
+  migrateOpencodeConfigToNative
+} from '../opencode/opencode-config'
+import type { OpencodeConfigSettings } from '../../shared/types'
 import { discoverOpencodeSkills } from '../opencode/command-skill-discovery'
 import { refreshPrices } from '../services/opencode-pricing'
 import { OpencodeSession } from '../opencode/OpencodeSession'
@@ -330,6 +336,8 @@ const SESSION_IPC_CHANNELS = [
   'config:save-slash-commands',
   'config:scan-custom-commands',
   'config:load-skill-details',
+  'config:load-opencode-settings',
+  'config:save-opencode-settings',
   'git:check-repo',
   'git:status',
   'git:branches',
@@ -1318,6 +1326,50 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
   )
   ipcMain.handle('config:save-vendor-config', (_e, vendorId: string, cfg: VendorConfig) =>
     saveVendorConfig(vendorId, cfg)
+  )
+
+  // opencode engine-native settings — read/write opencode's OWN config file.
+  // The load handler triggers the one-time migration from the private store when
+  // the opencode binary is available. modelAllowlist stays ClaudeUI-private.
+  ipcMain.handle(
+    'config:load-opencode-settings',
+    safeHandler(async () => {
+      if (opencodeServerManager.isBinaryAvailable()) {
+        migrateOpencodeConfigToNative()
+      }
+      const native = readOpencodeNativeConfig()
+      const privCfg = loadEngineConfig('opencode')
+      const modelAllowlist = privCfg.opencodeConfig?.modelAllowlist
+      const result: OpencodeConfigSettings = {
+        ...native,
+        ...(modelAllowlist !== undefined ? { modelAllowlist } : {})
+      }
+      return result
+    })
+  )
+  ipcMain.handle(
+    'config:save-opencode-settings',
+    safeHandler(async (_e: unknown, settings: OpencodeConfigSettings) => {
+      // Write the six native fields to opencode's own config file.
+      const { modelAllowlist, ...nativeFields } = settings
+      writeOpencodeNativeConfig(nativeFields)
+      // Route modelAllowlist to the private EngineConfig, preserving autoMode/sandbox/proxy.
+      // The private opencodeConfig only holds modelAllowlist now (six native fields moved to disk).
+      const engCfg = loadEngineConfig('opencode')
+      const nextOpencodeConfig: OpencodeConfigSettings | undefined =
+        modelAllowlist !== undefined && Object.keys(modelAllowlist).length > 0
+          ? { modelAllowlist }
+          : engCfg.opencodeConfig?.modelAllowlist &&
+              Object.keys(engCfg.opencodeConfig.modelAllowlist).length > 0
+            ? { modelAllowlist: engCfg.opencodeConfig.modelAllowlist }
+            : undefined
+      saveEngineConfig('opencode', {
+        ...engCfg,
+        opencodeConfig: nextOpencodeConfig
+      })
+      // Provider changes affect the discoverable model set.
+      invalidateOpencodeModelCache()
+    })
   )
 
   // Claude permission settings (allow/deny/ask rules)

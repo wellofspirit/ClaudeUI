@@ -309,13 +309,13 @@ function saveSessionConfig(
  * Called once at startup; migrates from localStorage on first run.
  */
 export async function hydrateConfigFromDisk(): Promise<void> {
-  let [savedSettings, sessionConfig, slashCommands, loadedEngineConfig, opencodeEngineConfig] =
+  let [savedSettings, sessionConfig, slashCommands, loadedEngineConfig, opencodeSettings] =
     await Promise.all([
       window.api.loadSettings(),
       window.api.loadSessionConfig(),
       window.api.loadSlashCommands(),
       window.api.loadEngineConfig('claude'),
-      window.api.loadEngineConfig('opencode').catch(() => ({}) as EngineConfig)
+      window.api.loadOpencodeSettings().catch((): import('../../../shared/types').OpencodeConfigSettings => ({}))
     ])
 
   // One-time migration from localStorage → disk
@@ -359,7 +359,7 @@ export async function hydrateConfigFromDisk(): Promise<void> {
 
   useSessionStore.setState({
     engineConfig: loadedEngineConfig,
-    opencodeDefaultModel: opencodeEngineConfig?.opencodeConfig?.model || OPENCODE_DEFAULT_MODEL,
+    opencodeDefaultModel: opencodeSettings?.model || OPENCODE_DEFAULT_MODEL,
     settings,
     recentSessionIds: sessionConfig.recentSessions ?? [],
     pinnedSessionIds: sessionConfig.pinnedSessions ?? [],

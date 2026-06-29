@@ -293,6 +293,8 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     loadVendorConfig: (vendorId) => ipcRenderer.invoke('config:load-vendor-config', vendorId),
     saveVendorConfig: (vendorId, config) =>
       ipcRenderer.invoke('config:save-vendor-config', vendorId, config),
+    loadOpencodeSettings: () => unwrap('config:load-opencode-settings'),
+    saveOpencodeSettings: (settings) => unwrap('config:save-opencode-settings', settings),
 
     logError: (source, message) => {
       ipcRenderer.send('log:error', source, message)

@@ -7,16 +7,18 @@
  *  - A row with an empty provider id is skipped on save (providers → undefined).
  *  - Editing a provider's id does not drop its model-text (model text is keyed
  *    by the stable _key, not the editable id).
+ *
+ * Updated: now mocks loadOpencodeSettings/saveOpencodeSettings (not engine-config).
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { render, screen, fireEvent, act, cleanup, waitFor } from '@testing-library/react'
 import { SECTIONS } from '../settings-sections'
-import type { EngineConfig, EngineModelGroup } from '../../../../../shared/types'
+import type { OpencodeConfigSettings, EngineModelGroup } from '../../../../../shared/types'
 
 // ── window.api stub ──────────────────────────────────────────────────
-let savedConfigs: EngineConfig[] = []
-const saveEngineConfig = vi.fn(async (_engineId: string, cfg: EngineConfig) => {
+let savedConfigs: OpencodeConfigSettings[] = []
+const saveOpencodeSettings = vi.fn(async (cfg: OpencodeConfigSettings) => {
   savedConfigs.push(structuredClone(cfg))
 })
 
@@ -28,16 +30,16 @@ const OPENCODE_GROUP: EngineModelGroup = {
   models: [{ value: 'anthropic/claude-sonnet-4-6', displayName: 'Sonnet', description: '' }]
 }
 
-function installApiStub(initial: EngineConfig, opts?: { models?: EngineModelGroup[] }): void {
+function installApiStub(initial: OpencodeConfigSettings, opts?: { models?: EngineModelGroup[] }): void {
   ;(globalThis as { window: Window }).window = globalThis.window ?? ({} as Window)
   ;(window as unknown as { api: Record<string, unknown> }).api = {
-    loadEngineConfig: vi.fn(async () => structuredClone(initial)),
+    loadOpencodeSettings: vi.fn(async () => structuredClone(initial)),
     getEngineModels: vi.fn(async () => opts?.models ?? [OPENCODE_GROUP]),
     // Availability is gated on a deterministic binary-on-disk check, NOT the
     // model count or the auth probe — so the section stays reachable even with
     // zero models and never flips on a transient server-spawn failure.
     engineIsInstalled: vi.fn(async () => true),
-    saveEngineConfig
+    saveOpencodeSettings
   }
 }
 
@@ -60,7 +62,7 @@ function renderProvidersSection(): void {
 describe('opencode Providers section', () => {
   beforeEach(() => {
     savedConfigs = []
-    saveEngineConfig.mockClear()
+    saveOpencodeSettings.mockClear()
   })
 
   afterEach(() => {
@@ -131,17 +133,15 @@ describe('opencode Providers section', () => {
     })
 
     // The most recent save must carry providers: undefined (empty-id row skipped).
-    await waitFor(() => expect(saveEngineConfig).toHaveBeenCalled())
+    await waitFor(() => expect(saveOpencodeSettings).toHaveBeenCalled())
     const last = savedConfigs[savedConfigs.length - 1]
-    expect(last.opencodeConfig?.providers).toBeUndefined()
+    expect(last.providers).toBeUndefined()
   })
 
   it('keeps model-text when the provider id is edited (model text keyed by stable _key)', async () => {
     // Pre-seed a saved provider with one model id.
     installApiStub({
-      opencodeConfig: {
-        providers: { 'old-id': { models: [{ id: 'llama3.2' }] } }
-      }
+      providers: { 'old-id': { models: [{ id: 'llama3.2' }] } }
     })
     await act(async () => {
       renderProvidersSection()
@@ -160,8 +160,8 @@ describe('opencode Providers section', () => {
     // The saved config must key the provider by the new id AND retain its model.
     await waitFor(() => {
       const last = savedConfigs[savedConfigs.length - 1]
-      expect(last.opencodeConfig?.providers?.['new-id']?.models).toEqual([{ id: 'llama3.2' }])
-      expect(last.opencodeConfig?.providers?.['old-id']).toBeUndefined()
+      expect(last.providers?.['new-id']?.models).toEqual([{ id: 'llama3.2' }])
+      expect(last.providers?.['old-id']).toBeUndefined()
     })
   })
 })

@@ -857,7 +857,7 @@ function VendorOpencodeSection(): React.JSX.Element {
   const [catalog, setCatalog] = useState<
     import('../../../../shared/types').OpencodeProviderCatalogEntry[] | null
   >(null)
-  const [engineCfg, setEngineCfg] = useState<EngineConfig | null>(null)
+  const [opencodeCfg, setOpencodeCfg] = useState<OpencodeConfigSettings | null>(null)
   const [options, setOptions] = useState<Record<string, VendorAuthOption[]>>({})
   const [apiKeys, setApiKeys] = useState<Record<string, string>>({})
   const [saving, setSaving] = useState<Record<string, boolean>>({})
@@ -891,14 +891,14 @@ function VendorOpencodeSection(): React.JSX.Element {
   const reload = (): void => {
     Promise.all([
       window.api.getOpencodeProviders().catch(() => []),
-      window.api.loadEngineConfig('opencode').catch(() => ({}) as EngineConfig),
+      window.api.loadOpencodeSettings().catch(() => ({})),
       window.api.vendorAuthListOptions('opencode').catch(() => ({})) as Promise<
         Record<string, VendorAuthOption[]>
       >
-    ]).then(([cat, cfg, opts]) => {
+    ]).then(([cat, settings, opts]) => {
       if (!mountedRef.current) return
       setCatalog(cat)
-      setEngineCfg(cfg)
+      setOpencodeCfg(settings)
       setOptions(opts)
     })
   }
@@ -907,21 +907,17 @@ function VendorOpencodeSection(): React.JSX.Element {
     reload()
   }, [])
 
-  const cfg = engineCfg?.opencodeConfig ?? {}
+  const cfg = opencodeCfg ?? {}
   const disabled = cfg.disabledProviders ?? []
   const allowlist = cfg.modelAllowlist ?? {}
 
-  /** Merge a patch into opencodeConfig, persist, and refresh the picker model list. */
+  /** Merge a patch into opencode settings, persist, and refresh the picker model list. */
   const updateCfg = (
     patch: Partial<import('../../../../shared/types').OpencodeConfigSettings>
-  ): EngineConfig => {
-    const base = engineCfg ?? {}
-    const next: EngineConfig = {
-      ...base,
-      opencodeConfig: { ...(base.opencodeConfig ?? {}), ...patch }
-    }
-    setEngineCfg(next)
-    window.api.saveEngineConfig('opencode', next).catch(() => {})
+  ): OpencodeConfigSettings => {
+    const next: OpencodeConfigSettings = { ...cfg, ...patch }
+    setOpencodeCfg(next)
+    window.api.saveOpencodeSettings(next).catch(() => {})
     useSessionStore.getState().reloadModels()
     return next
   }
@@ -1306,15 +1302,15 @@ const KNOWN_AGENT_NAMES = ['build', 'plan', 'general', 'explore', 'title', 'summ
  * Self-gates on opencode availability (mirrors OpencodeAutoModeSection).
  */
 function OpencodeModelsSection(): React.JSX.Element {
-  const [engineCfg, setEngineCfg] = useState<EngineConfig | null>(null)
+  const [cfg, setCfg] = useState<OpencodeConfigSettings | null>(null)
   const [models, setModels] = useState<ModelInfo[]>([])
   const installed = useOpencodeInstalled()
 
   useEffect(() => {
     window.api
-      .loadEngineConfig('opencode')
-      .then(setEngineCfg)
-      .catch(() => setEngineCfg({}))
+      .loadOpencodeSettings()
+      .then(setCfg)
+      .catch(() => setCfg({}))
     window.api
       .getEngineModels()
       .then((groups) => {
@@ -1324,7 +1320,7 @@ function OpencodeModelsSection(): React.JSX.Element {
       .catch(() => {})
   }, [])
 
-  if (engineCfg === null || installed === null) {
+  if (cfg === null || installed === null) {
     return <div data-testid="OpencodeModelsSection" className="px-3 py-1.5 text-[13px] text-text-muted">Loading…</div>
   }
   if (!installed) {
@@ -1335,12 +1331,10 @@ function OpencodeModelsSection(): React.JSX.Element {
     )
   }
 
-  const cfg = engineCfg.opencodeConfig ?? {}
-
   const update = (patch: Partial<OpencodeConfigSettings>): void => {
-    const next: EngineConfig = { ...engineCfg, opencodeConfig: { ...cfg, ...patch } }
-    setEngineCfg(next)
-    window.api.saveEngineConfig('opencode', next).catch(() => {})
+    const next: OpencodeConfigSettings = { ...cfg, ...patch }
+    setCfg(next)
+    window.api.saveOpencodeSettings(next).catch(() => {})
     // Mirror the default-model choice into the store so new/reopened opencode
     // sessions pick it up immediately, and refresh the picker model list.
     if ('model' in patch) {
@@ -1421,7 +1415,7 @@ function newProvider(): ProviderRow {
  * Providers manager (VendorOpencodeSection). API keys are set there, not here.
  */
 function OpencodeProvidersSection(): React.JSX.Element {
-  const [engineCfg, setEngineCfg] = useState<EngineConfig | null>(null)
+  const [cfg, setCfg] = useState<OpencodeConfigSettings | null>(null)
   const installed = useOpencodeInstalled()
   // Local editing state for provider rows (has a transient _id key for React diffing)
   const [providerRows, setProviderRows] = useState<ProviderRow[]>([])
@@ -1430,12 +1424,12 @@ function OpencodeProvidersSection(): React.JSX.Element {
 
   useEffect(() => {
     window.api
-      .loadEngineConfig('opencode')
-      .then((cfg) => {
-        setEngineCfg(cfg)
+      .loadOpencodeSettings()
+      .then((settings) => {
+        setCfg(settings)
         // Hydrate provider rows from saved config. The saved provider id becomes
         // both the stable _key and the editable _id.
-        const saved = cfg.opencodeConfig?.providers ?? {}
+        const saved = settings.providers ?? {}
         const rows: ProviderRow[] = Object.entries(saved).map(([id, p]) => ({
           _key: id,
           _id: id,
@@ -1450,10 +1444,10 @@ function OpencodeProvidersSection(): React.JSX.Element {
           )
         )
       })
-      .catch(() => setEngineCfg({}))
+      .catch(() => setCfg({}))
   }, [])
 
-  if (engineCfg === null || installed === null) {
+  if (cfg === null || installed === null) {
     return <div data-testid="OpencodeProvidersSection" className="px-3 py-1.5 text-[13px] text-text-muted">Loading…</div>
   }
   if (!installed) {
@@ -1463,8 +1457,6 @@ function OpencodeProvidersSection(): React.JSX.Element {
       </div>
     )
   }
-
-  const cfg = engineCfg.opencodeConfig ?? {}
 
   const saveProviders = (rows: ProviderRow[], texts: Record<string, string>): void => {
     // Reconstruct providers Record from rows, mapping model text → {id,name?}[].
@@ -1483,15 +1475,12 @@ function OpencodeProvidersSection(): React.JSX.Element {
       if (modelIds.length > 0) entry.models = modelIds.map((id) => ({ id }))
       providers[row._id] = entry
     }
-    const next: EngineConfig = {
-      ...engineCfg,
-      opencodeConfig: {
-        ...cfg,
-        providers: Object.keys(providers).length > 0 ? providers : undefined
-      }
+    const next: OpencodeConfigSettings = {
+      ...cfg,
+      providers: Object.keys(providers).length > 0 ? providers : undefined
     }
-    setEngineCfg(next)
-    window.api.saveEngineConfig('opencode', next).catch(() => {})
+    setCfg(next)
+    window.api.saveOpencodeSettings(next).catch(() => {})
     // Custom-provider edits change the discoverable model set — reload the picker.
     useSessionStore.getState().reloadModels()
   }
@@ -1600,16 +1589,16 @@ function OpencodeProvidersSection(): React.JSX.Element {
 // ── opencode Agents section ──────────────────────────────────────────
 
 function OpencodeAgentsSection(): React.JSX.Element {
-  const [engineCfg, setEngineCfg] = useState<EngineConfig | null>(null)
+  const [cfg, setCfg] = useState<OpencodeConfigSettings | null>(null)
   const [models, setModels] = useState<ModelInfo[]>([])
   const installed = useOpencodeInstalled()
   const [newAgentName, setNewAgentName] = useState('')
 
   useEffect(() => {
     window.api
-      .loadEngineConfig('opencode')
-      .then(setEngineCfg)
-      .catch(() => setEngineCfg({}))
+      .loadOpencodeSettings()
+      .then(setCfg)
+      .catch(() => setCfg({}))
     window.api
       .getEngineModels()
       .then((groups) => {
@@ -1619,7 +1608,7 @@ function OpencodeAgentsSection(): React.JSX.Element {
       .catch(() => {})
   }, [])
 
-  if (engineCfg === null || installed === null) {
+  if (cfg === null || installed === null) {
     return <div data-testid="OpencodeAgentsSection" className="px-3 py-1.5 text-[13px] text-text-muted">Loading…</div>
   }
   if (!installed) {
@@ -1630,19 +1619,15 @@ function OpencodeAgentsSection(): React.JSX.Element {
     )
   }
 
-  const cfg = engineCfg.opencodeConfig ?? {}
   const agents = cfg.agents ?? {}
 
   const saveAgents = (next: Record<string, OpencodeAgentSettings>): void => {
-    const nextCfg: EngineConfig = {
-      ...engineCfg,
-      opencodeConfig: {
-        ...cfg,
-        agents: Object.keys(next).length > 0 ? next : undefined
-      }
+    const nextCfg: OpencodeConfigSettings = {
+      ...cfg,
+      agents: Object.keys(next).length > 0 ? next : undefined
     }
-    setEngineCfg(nextCfg)
-    window.api.saveEngineConfig('opencode', nextCfg).catch(() => {})
+    setCfg(nextCfg)
+    window.api.saveOpencodeSettings(nextCfg).catch(() => {})
   }
 
   const updateAgent = (name: string, patch: Partial<OpencodeAgentSettings>): void => {

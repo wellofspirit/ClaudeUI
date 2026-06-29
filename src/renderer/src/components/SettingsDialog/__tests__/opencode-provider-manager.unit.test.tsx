@@ -7,12 +7,14 @@
  *    "Add provider" picker — the bug the rework fixes.
  *  - Adding a provider via API key authenticates it AND seeds an (empty) model
  *    allowlist so it never auto-floods the picker; the model dialog then opens.
+ *
+ * Updated: now mocks loadOpencodeSettings/saveOpencodeSettings (not engine-config).
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { render, screen, fireEvent, act, cleanup, waitFor } from '@testing-library/react'
 import { SECTIONS } from '../settings-sections'
 import type {
-  EngineConfig,
+  OpencodeConfigSettings,
   OpencodeProviderCatalogEntry,
   OpencodeCatalogModel
 } from '../../../../../shared/types'
@@ -35,20 +37,20 @@ const OR_MODELS: OpencodeCatalogModel[] = [
   { id: 'gpt-z', name: 'GPT Z' }
 ]
 
-let savedConfigs: EngineConfig[] = []
-const saveEngineConfig = vi.fn(async (_e: string, cfg: EngineConfig) => {
+let savedConfigs: OpencodeConfigSettings[] = []
+const saveOpencodeSettings = vi.fn(async (cfg: OpencodeConfigSettings) => {
   savedConfigs.push(structuredClone(cfg))
 })
 const vendorAuthSetKey = vi.fn(async () => undefined)
 
-function installApiStub(initial: EngineConfig): void {
+function installApiStub(initial: OpencodeConfigSettings): void {
   ;(globalThis as { window: Window }).window = globalThis.window ?? ({} as Window)
   ;(window as unknown as { api: Record<string, unknown> }).api = {
     engineIsInstalled: vi.fn(async () => true),
     getOpencodeProviders: vi.fn(async () => CATALOG),
     getOpencodeProviderModels: vi.fn(async () => OR_MODELS),
-    loadEngineConfig: vi.fn(async () => structuredClone(initial)),
-    saveEngineConfig,
+    loadOpencodeSettings: vi.fn(async () => structuredClone(initial)),
+    saveOpencodeSettings,
     vendorAuthListOptions: vi.fn(async () => ({})),
     vendorAuthSetKey,
     vendorAuthRemove: vi.fn(async () => undefined),
@@ -64,7 +66,7 @@ function renderManager(): void {
 describe('opencode provider manager', () => {
   beforeEach(() => {
     savedConfigs = []
-    saveEngineConfig.mockClear()
+    saveOpencodeSettings.mockClear()
     vendorAuthSetKey.mockClear()
   })
   afterEach(() => cleanup())
@@ -125,7 +127,7 @@ describe('opencode provider manager', () => {
     await waitFor(() => expect(vendorAuthSetKey).toHaveBeenCalledWith('opencode', 'openrouter', 'sk-or-test'))
     await waitFor(() => {
       const last = savedConfigs[savedConfigs.length - 1]
-      expect(last.opencodeConfig?.modelAllowlist?.openrouter).toEqual([])
+      expect(last.modelAllowlist?.openrouter).toEqual([])
     })
   })
 })

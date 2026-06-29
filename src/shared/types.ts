@@ -731,6 +731,10 @@ interface SessionAPI {
   saveEngineConfig(engineId: string, config: EngineConfig): Promise<void>
   loadVendorConfig(vendorId: string): Promise<VendorConfig>
   saveVendorConfig(vendorId: string, config: VendorConfig): Promise<void>
+  /** Load opencode's engine-native config from opencode's own global config file. */
+  loadOpencodeSettings(): Promise<OpencodeConfigSettings>
+  /** Save opencode's engine-native config to opencode's own global config file. */
+  saveOpencodeSettings(settings: OpencodeConfigSettings): Promise<void>
   logError(source: string, message: string): void
 }
 

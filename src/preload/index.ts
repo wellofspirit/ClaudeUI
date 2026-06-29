@@ -352,6 +352,9 @@ const api: ClaudeAPI = {
     ipcRenderer.invoke('config:load-engine-config', engineId),
   saveEngineConfig: (engineId: string, config: import('../shared/types').EngineConfig) =>
     ipcRenderer.invoke('config:save-engine-config', engineId, config),
+  loadOpencodeSettings: () => unwrap('config:load-opencode-settings'),
+  saveOpencodeSettings: (settings: import('../shared/types').OpencodeConfigSettings) =>
+    unwrap('config:save-opencode-settings', settings),
   loadVendorConfig: (vendorId: string) =>
     ipcRenderer.invoke('config:load-vendor-config', vendorId),
   saveVendorConfig: (vendorId: string, config: import('../shared/types').VendorConfig) =>
