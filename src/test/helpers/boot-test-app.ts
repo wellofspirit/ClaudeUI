@@ -66,6 +66,10 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
         thinkingMode
       ),
     rekeySession: (oldId, newId) => ipcRenderer.invoke('session:rekey', oldId, newId),
+    resolveForkAnchor: (sessionId, cwd, messageId) =>
+      ipcRenderer.invoke('session:resolve-fork-anchor', sessionId, cwd, messageId),
+    loadOpencodeHistory: (sessionId) =>
+      ipcRenderer.invoke('session:load-opencode-history', sessionId),
     sendPrompt: (routingId, prompt, attachments?) =>
       ipcRenderer.invoke('session:send', routingId, prompt, attachments),
     cancelSession: (routingId) => ipcRenderer.invoke('session:cancel', routingId),
@@ -243,6 +247,8 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
 
     fetchAccountUsage: () => ipcRenderer.invoke('usage:fetch'),
     fetchBlockUsage: () => ipcRenderer.invoke('usage:fetch-block'),
+    setUsageAccountFilter: async () => {},
+    refreshPrices: async () => ({ count: 0, refreshedAt: Date.now() }),
     signIn: () => ipcRenderer.invoke('auth:sign-in'),
     submitOAuthCode: (code: string) => ipcRenderer.invoke('auth:submit-code', code),
     cancelSignIn: () => ipcRenderer.invoke('auth:cancel'),
@@ -271,6 +277,8 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     mcpReadDisabled: (cwd) => ipcRenderer.invoke('mcp:read-disabled', cwd),
     mcpToggleDisabled: (cwd, serverName, enabled) =>
       ipcRenderer.invoke('mcp:toggle-disabled', cwd, serverName, enabled),
+    getCleanupPeriodDays: () => ipcRenderer.invoke('claude:get-cleanup-period'),
+    setCleanupPeriodDays: (days) => ipcRenderer.invoke('claude:set-cleanup-period', days),
 
     listAutomations: () => ipcRenderer.invoke('automation:list'),
     saveAutomation: (automation) => ipcRenderer.invoke('automation:save', automation),
@@ -287,6 +295,17 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
       ipcRenderer.invoke('automation:send-message', id, prompt),
 
     testProxyConnection: (proxy) => unwrap('proxy:test-connection', proxy),
+    vendorAuthProbe: async () => ({}),
+    vendorAuthListOptions: async () => ({}),
+    vendorAuthSetKey: async () => {},
+    vendorAuthOauthAuthorize: async () => {
+      throw new Error('Vendor auth not available in tests')
+    },
+    vendorAuthOauthCallback: async () => {
+      throw new Error('Vendor auth not available in tests')
+    },
+    vendorAuthRemove: async () => {},
+    vendorAuthOauthCancel: async () => {},
     loadEngineConfig: (engineId) => ipcRenderer.invoke('config:load-engine-config', engineId),
     saveEngineConfig: (engineId, config) =>
       ipcRenderer.invoke('config:save-engine-config', engineId, config),
@@ -295,6 +314,12 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
       ipcRenderer.invoke('config:save-vendor-config', vendorId, config),
     loadOpencodeSettings: () => unwrap('config:load-opencode-settings'),
     saveOpencodeSettings: (settings) => unwrap('config:save-opencode-settings', settings),
+    listOpencodeAgents: async () => [],
+    readOpencodeAgent: async () => null,
+    saveOpencodeAgent: async () => {},
+    deleteOpencodeAgent: async () => {},
+    setOpencodeAgentDisabled: async () => {},
+    generateOpencodeAgent: async () => ({ identifier: '', whenToUse: '', systemPrompt: '' }),
 
     logError: (source, message) => {
       ipcRenderer.send('log:error', source, message)

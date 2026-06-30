@@ -279,6 +279,51 @@ export interface OpencodeAgentSettings {
   temperature?: number
 }
 
+// ─── opencode agent types ─────────────────────────────────────────────────────
+
+export type OpencodeAgentScope = 'global' | 'project'
+export type OpencodeAgentMode = 'primary' | 'subagent' | 'all'
+
+export interface OpencodeAgentSummary {
+  name: string
+  kind: 'custom' | 'builtin'
+  mode: OpencodeAgentMode
+  scope: OpencodeAgentScope | null
+  model?: string
+  color?: string
+  overridden?: boolean
+  disabled?: boolean
+  hidden?: boolean
+}
+
+export interface OpencodeAgentDetail extends OpencodeAgentSummary {
+  description?: string
+  prompt?: string
+  temperature?: number
+  topP?: number
+  steps?: number
+  reasoningEffort?: string
+  restrict: boolean
+  permission?: Record<string, 'allow' | 'ask' | 'deny'>
+}
+
+export interface OpencodeAgentInput {
+  name: string
+  scope: OpencodeAgentScope
+  mode: OpencodeAgentMode
+  model?: string
+  description?: string
+  prompt?: string
+  temperature?: number
+  topP?: number
+  steps?: number
+  reasoningEffort?: string
+  color?: string
+  hidden?: boolean
+  disable?: boolean
+  permission?: Record<string, 'allow' | 'ask' | 'deny'>
+}
+
 /**
  * opencode-native config stored in engines/opencode.json under `opencodeConfig`.
  * These fields are injected via OPENCODE_CONFIG_CONTENT at spawn (deep-merge, only
@@ -735,6 +780,12 @@ interface SessionAPI {
   loadOpencodeSettings(): Promise<OpencodeConfigSettings>
   /** Save opencode's engine-native config to opencode's own global config file. */
   saveOpencodeSettings(settings: OpencodeConfigSettings): Promise<void>
+  listOpencodeAgents(cwd?: string): Promise<OpencodeAgentSummary[]>
+  readOpencodeAgent(name: string, scope: OpencodeAgentScope, cwd?: string): Promise<OpencodeAgentDetail | null>
+  saveOpencodeAgent(input: OpencodeAgentInput, cwd?: string): Promise<void>
+  deleteOpencodeAgent(name: string, scope: OpencodeAgentScope, cwd?: string): Promise<void>
+  setOpencodeAgentDisabled(name: string, scope: OpencodeAgentScope, cwd: string | undefined, disabled: boolean): Promise<void>
+  generateOpencodeAgent(description: string, cwd?: string): Promise<{ identifier: string; whenToUse: string; systemPrompt: string }>
   logError(source: string, message: string): void
 }
 

@@ -541,6 +541,12 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     saveVendorConfig: async () => {},
     loadOpencodeSettings: async () => ({}),
     saveOpencodeSettings: async () => {},
+    listOpencodeAgents: async () => [],
+    readOpencodeAgent: async () => null,
+    saveOpencodeAgent: async () => {},
+    deleteOpencodeAgent: async () => {},
+    setOpencodeAgentDisabled: async () => {},
+    generateOpencodeAgent: async () => { throw new Error('Not available in remote mode') },
 
     // Vendor auth (opencode multi-vendor) — desktop-only; web client is read-only
     vendorAuthProbe: async () => ({}),

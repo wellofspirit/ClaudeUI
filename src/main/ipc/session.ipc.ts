@@ -90,6 +90,15 @@ import {
 } from '../opencode/opencode-config'
 import type { OpencodeConfigSettings } from '../../shared/types'
 import { discoverOpencodeSkills } from '../opencode/command-skill-discovery'
+import {
+  listAgents,
+  readAgent,
+  saveAgent,
+  deleteAgent,
+  setAgentDisabled,
+} from '../opencode/opencode-agents'
+import type { OpencodeAgentInput } from '../opencode/opencode-agents'
+import { generateAgent } from '../opencode/agent-generate'
 import { refreshPrices } from '../services/opencode-pricing'
 import { OpencodeSession } from '../opencode/OpencodeSession'
 import { logger } from '../services/logger'
@@ -338,6 +347,12 @@ const SESSION_IPC_CHANNELS = [
   'config:load-skill-details',
   'config:load-opencode-settings',
   'config:save-opencode-settings',
+  'opencode-agents:list',
+  'opencode-agents:read',
+  'opencode-agents:save',
+  'opencode-agents:delete',
+  'opencode-agents:set-disabled',
+  'opencode-agents:generate',
   'git:check-repo',
   'git:status',
   'git:branches',
@@ -1370,6 +1385,43 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
       // Provider changes affect the discoverable model set.
       invalidateOpencodeModelCache()
     })
+  )
+
+  // opencode agent CRUD — list/read/save/delete/disable custom + built-in agents
+  ipcMain.handle(
+    'opencode-agents:list',
+    safeHandler(async (_e: unknown, cwd?: string) => listAgents(cwd))
+  )
+  ipcMain.handle(
+    'opencode-agents:read',
+    safeHandler(async (_e: unknown, name: string, scope: string, cwd?: string) =>
+      readAgent(name, scope as 'global' | 'project', cwd)
+    )
+  )
+  ipcMain.handle(
+    'opencode-agents:save',
+    safeHandler(async (_e: unknown, input: OpencodeAgentInput, cwd?: string) =>
+      saveAgent(input, cwd)
+    )
+  )
+  ipcMain.handle(
+    'opencode-agents:delete',
+    safeHandler(async (_e: unknown, name: string, scope: string, cwd?: string) =>
+      deleteAgent(name, scope as 'global' | 'project', cwd)
+    )
+  )
+  ipcMain.handle(
+    'opencode-agents:set-disabled',
+    safeHandler(
+      async (_e: unknown, name: string, scope: string, cwd: string | undefined, disabled: boolean) =>
+        setAgentDisabled(name, scope as 'global' | 'project', cwd, disabled)
+    )
+  )
+  ipcMain.handle(
+    'opencode-agents:generate',
+    safeHandler(async (_e: unknown, description: string, cwd?: string) =>
+      generateAgent(description, cwd)
+    )
   )
 
   // Claude permission settings (allow/deny/ask rules)

@@ -355,6 +355,17 @@ const api: ClaudeAPI = {
   loadOpencodeSettings: () => unwrap('config:load-opencode-settings'),
   saveOpencodeSettings: (settings: import('../shared/types').OpencodeConfigSettings) =>
     unwrap('config:save-opencode-settings', settings),
+  listOpencodeAgents: (cwd?: string) => unwrap('opencode-agents:list', cwd),
+  readOpencodeAgent: (name: string, scope: import('../shared/types').OpencodeAgentScope, cwd?: string) =>
+    unwrap('opencode-agents:read', name, scope, cwd),
+  saveOpencodeAgent: (input: import('../shared/types').OpencodeAgentInput, cwd?: string) =>
+    unwrap('opencode-agents:save', input, cwd),
+  deleteOpencodeAgent: (name: string, scope: import('../shared/types').OpencodeAgentScope, cwd?: string) =>
+    unwrap('opencode-agents:delete', name, scope, cwd),
+  setOpencodeAgentDisabled: (name: string, scope: import('../shared/types').OpencodeAgentScope, cwd: string | undefined, disabled: boolean) =>
+    unwrap('opencode-agents:set-disabled', name, scope, cwd, disabled),
+  generateOpencodeAgent: (description: string, cwd?: string) =>
+    unwrap('opencode-agents:generate', description, cwd),
   loadVendorConfig: (vendorId: string) =>
     ipcRenderer.invoke('config:load-vendor-config', vendorId),
   saveVendorConfig: (vendorId: string, config: import('../shared/types').VendorConfig) =>
