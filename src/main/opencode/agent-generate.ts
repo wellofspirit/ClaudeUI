@@ -23,11 +23,9 @@ function parseModelString(model: string): { providerID: string; modelID: string 
 
 const AGENT_GENERATE_PROMPT = `You are an elite AI agent architect specializing in crafting high-performance agent configurations. Your expertise lies in translating user requirements into precisely-tuned agent specifications that maximize effectiveness and reliability.
 
-**Important Context**: You may have access to project-specific instructions from CLAUDE.md files and other context that may include coding standards, project structure, and custom requirements. Consider this context when creating agents to ensure they align with the project's established patterns and practices.
-
 When a user describes what they want an agent to do, you will:
 
-1. **Extract Core Intent**: Identify the fundamental purpose, key responsibilities, and success criteria for the agent. Look for both explicit requirements and implicit needs. Consider any project-specific context from CLAUDE.md files. For agents that are meant to review code, you should assume that the user is asking to review recently written code and not the whole codebase, unless the user has explicitly instructed you otherwise.
+1. **Extract Core Intent**: Identify the fundamental purpose, key responsibilities, and success criteria for the agent. Look for both explicit requirements and implicit needs. For agents that are meant to review code, you should assume that the user is asking to review recently written code and not the whole codebase, unless the user has explicitly instructed you otherwise.
 
 2. **Design Expert Persona**: Create a compelling expert identity that embodies deep domain knowledge relevant to the task. The persona should inspire confidence and guide the agent's decision-making approach.
 
@@ -38,7 +36,6 @@ When a user describes what they want an agent to do, you will:
    - Anticipates edge cases and provides guidance for handling them
    - Incorporates any specific requirements or preferences mentioned by the user
    - Defines output format expectations when relevant
-   - Aligns with project-specific coding standards and patterns from CLAUDE.md
 
 4. **Optimize for Performance**: Include:
 
@@ -121,12 +118,12 @@ export async function generateAgent(
 
   const js = await client.createSession({ title: 'agent-generate' })
   try {
-    // Deny EVERY tool before prompting. The meta-prompt nudges the model to
-    // consult CLAUDE.md / project context, which a capable model satisfies by
-    // calling a read tool → opencode emits `permission.asked` for this throwaway
-    // session. There is no SSE consumer answering it (this session is foreign to
-    // any chat session's consumer), so the synchronous prompt would hang forever
-    // — "session launched, no response ever". opencode's permission evaluator
+    // Deny EVERY tool before prompting. If the model decides to call any tool
+    // (e.g. to read project context), opencode emits `permission.asked` for this
+    // throwaway session. There is no SSE consumer answering it (this session is
+    // foreign to any chat session's consumer), so the synchronous prompt would
+    // hang forever — "session launched, no response ever". opencode's permission
+    // evaluator
     // short-circuits a matching `deny` WITHOUT publishing `permission.asked`
     // ({permission:'*', pattern:'*'} matches every tool), making the turn
     // tool-less and hang-proof. Mirrors OpencodeSession.askSideQuestion. NOT
