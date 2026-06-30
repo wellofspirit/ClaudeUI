@@ -17,7 +17,6 @@ import type {
   AutoModeConfig,
   ModelInfo,
   OpencodeProviderSettings,
-  OpencodeAgentSettings,
   OpencodeConfigSettings
 } from '../../../../shared/types'
 import { VOICE_LANGUAGES } from '../../../../shared/types'
@@ -39,6 +38,7 @@ import {
   ChatRetentionSetting,
   InfoTooltip
 } from './settings-controls'
+import { OpencodeAgentsSection } from './OpencodeAgents'
 
 // ── Section definitions ──────────────────────────────────────────────
 
@@ -1294,9 +1294,6 @@ function VendorOpencodeSection(): React.JSX.Element {
 
 // ── opencode Models section ──────────────────────────────────────────
 
-/** Known primary agent names exposed by opencode. */
-const KNOWN_AGENT_NAMES = ['build', 'plan', 'general', 'explore', 'title', 'summary', 'compaction']
-
 /**
  * Default model + small model selects for the opencode engine.
  * Self-gates on opencode availability (mirrors OpencodeAutoModeSection).
@@ -1581,165 +1578,6 @@ function OpencodeProvidersSection(): React.JSX.Element {
       <div className="text-[10px] text-text-muted/50 leading-relaxed">
         Add, remove, and authenticate built-in providers under <em>Providers</em>. Changes apply on
         the next opencode server start for each working directory.
-      </div>
-    </div>
-  )
-}
-
-// ── opencode Agents section ──────────────────────────────────────────
-
-function OpencodeAgentsSection(): React.JSX.Element {
-  const [cfg, setCfg] = useState<OpencodeConfigSettings | null>(null)
-  const [models, setModels] = useState<ModelInfo[]>([])
-  const installed = useOpencodeInstalled()
-  const [newAgentName, setNewAgentName] = useState('')
-
-  useEffect(() => {
-    window.api
-      .loadOpencodeSettings()
-      .then(setCfg)
-      .catch(() => setCfg({}))
-    window.api
-      .getEngineModels()
-      .then((groups) => {
-        const oc = groups.filter((g) => g.engineId === 'opencode')
-        setModels(oc.flatMap((g) => g.models))
-      })
-      .catch(() => {})
-  }, [])
-
-  if (cfg === null || installed === null) {
-    return <div data-testid="OpencodeAgentsSection" className="px-3 py-1.5 text-[13px] text-text-muted">Loading…</div>
-  }
-  if (!installed) {
-    return (
-      <div data-testid="OpencodeAgentsSection" className="px-3 py-2 text-[12px] text-text-muted/70 leading-relaxed">
-        opencode is not installed. Agent settings apply to opencode sessions.
-      </div>
-    )
-  }
-
-  const agents = cfg.agents ?? {}
-
-  const saveAgents = (next: Record<string, OpencodeAgentSettings>): void => {
-    const nextCfg: OpencodeConfigSettings = {
-      ...cfg,
-      agents: Object.keys(next).length > 0 ? next : undefined
-    }
-    setCfg(nextCfg)
-    window.api.saveOpencodeSettings(nextCfg).catch(() => {})
-  }
-
-  const updateAgent = (name: string, patch: Partial<OpencodeAgentSettings>): void => {
-    saveAgents({ ...agents, [name]: { ...agents[name], ...patch } })
-  }
-
-  const removeAgent = (name: string): void => {
-    const next = { ...agents }
-    delete next[name]
-    saveAgents(next)
-  }
-
-  const addAgent = (): void => {
-    const name = newAgentName.trim()
-    if (!name || agents[name]) return
-    saveAgents({ ...agents, [name]: {} })
-    setNewAgentName('')
-  }
-
-  // All configured + suggestions for unconfigured known agents
-  const configuredNames = Object.keys(agents)
-  const suggestedNames = KNOWN_AGENT_NAMES.filter((n) => !configuredNames.includes(n))
-
-  const modelOptions = [
-    { value: '', label: 'Default (inherit session model)' },
-    ...models.map((m) => ({ value: m.value, label: m.displayName || m.value }))
-  ]
-
-  return (
-    <div data-testid="OpencodeAgentsSection" className="space-y-3 px-3 py-1.5 text-[13px] text-text-secondary">
-      <div className="text-[10px] text-text-muted/60 leading-relaxed">
-        Override the model and temperature for specific opencode agents. Known agents: {KNOWN_AGENT_NAMES.join(', ')}.
-      </div>
-
-      {/* Configured agent overrides */}
-      {configuredNames.map((name) => {
-        const a = agents[name]
-        return (
-          <div key={name} data-testid="OpencodeAgentsSection.agentRow" data-id={name} className="border border-border/30 rounded-md p-2 space-y-1.5">
-            <div className="flex items-center justify-between">
-              <span className="text-[12px] font-medium">{name}</span>
-              <button
-                onClick={() => removeAgent(name)}
-                className="text-[10px] text-text-muted/60 hover:text-red-400 transition-colors"
-              >
-                Remove
-              </button>
-            </div>
-            <div>
-              <div className="text-[10px] text-text-muted mb-0.5">Model</div>
-              <select
-                value={a.model ?? ''}
-                onChange={(e) => updateAgent(name, { model: e.target.value || undefined })}
-                className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors"
-              >
-                {modelOptions.map((o) => (
-                  <option key={o.value} value={o.value}>
-                    {o.label}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <SettingsSlider
-              label="Temperature"
-              value={a.temperature ?? 0}
-              min={0}
-              max={2}
-              step={0.05}
-              onChange={(v) => updateAgent(name, { temperature: v > 0 ? v : undefined })}
-              formatValue={(v) => v.toFixed(2)}
-            />
-          </div>
-        )
-      })}
-
-      {/* Add agent row */}
-      <div className="space-y-1.5">
-        <div className="text-[11px] text-text-muted uppercase tracking-wide">Add agent override</div>
-        <div className="flex items-center gap-1.5">
-          <select
-            value={newAgentName}
-            onChange={(e) => setNewAgentName(e.target.value)}
-            className={`${inputClass} flex-1`}
-          >
-            <option value="">Select or type agent name…</option>
-            {suggestedNames.map((n) => (
-              <option key={n} value={n}>
-                {n}
-              </option>
-            ))}
-          </select>
-          <input
-            type="text"
-            placeholder="custom name"
-            value={newAgentName}
-            onChange={(e) => setNewAgentName(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && addAgent()}
-            className={`${inputClass} flex-1`}
-          />
-          <button
-            data-testid="OpencodeAgentsSection.addAgent"
-            onClick={addAgent}
-            disabled={!newAgentName.trim() || !!agents[newAgentName.trim()]}
-            className="px-2 py-1 text-[11px] rounded bg-accent/20 hover:bg-accent/30 text-accent disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-          >
-            Add
-          </button>
-        </div>
-      </div>
-
-      <div className="text-[10px] text-text-muted/50 leading-relaxed">
-        Changes apply on the next opencode server start for each working directory.
       </div>
     </div>
   )
