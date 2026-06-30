@@ -88,6 +88,9 @@ export type MapperOutput =
   | { kind: 'tool_result'; toolUseId: string; result: string; isError: boolean }
   | { kind: 'approval'; approval: PendingApproval }
   | { kind: 'result'; result: Pick<SessionResult, 'totalCostUsd' | 'durationMs' | 'result'> & { sessionId: string | null } }
+  /** Emitted when cost changes OR when a token-snapshot context advance is detected (input+cacheRead
+   *  increased on an assistant message). The latter fires even when cost=0 (free models), so that
+   *  lastContextLength / buildStatusLine can reflect a real "context used %" instead of showing "–". */
   | { kind: 'cost_update'; totalCostUsd: number; messageId: string; tokens?: MessageTokens; engineCostUsd?: number }
   | { kind: 'error'; message: string }
   | { kind: 'auth-required'; vendorId: string; message: string }
@@ -321,6 +324,9 @@ function handleOwnEvent(
 
       // info.tokens is a per-message CUMULATIVE snapshot (store, do not add).
       // Shape (from opencode 1.17.9 /doc): { input, output, reasoning, cache: { read, write } }
+      // Capture the previous context dimension (input + cacheRead) BEFORE overwriting acc.tokens,
+      // so we can detect a context-snapshot advance for free models (cost=0 never changes).
+      const prevCtxLen = (acc.tokens?.input ?? 0) + (acc.tokens?.cache?.read ?? 0)
       const rawTokens = info.tokens as Record<string, unknown> | undefined
       if (rawTokens) {
         const cacheRaw = rawTokens.cache as Record<string, unknown> | undefined
@@ -336,23 +342,32 @@ function handleOwnEvent(
             : undefined
         }
       }
+      const newCtxLen = (acc.tokens?.input ?? 0) + (acc.tokens?.cache?.read ?? 0)
+      // Gate on assistant role: only assistant messages carry a meaningful prompt size;
+      // user/system token changes would corrupt lastContextLength in the session.
+      const tokensChanged = newCtxLen !== prevCtxLen && acc.role === 'assistant'
 
       // info.cost is a per-message CUMULATIVE snapshot that re-emits multiple
       // times per turn. Store (not add) it on the accumulator, then sum across
       // all messages so the turn total is correct and never double-counts.
+      let costChanged = false
       const cost = info.cost as number | undefined
       if (typeof cost === 'number') {
         const prev = acc.cost ?? 0
         acc.cost = cost
         if (cost !== prev) {
+          costChanged = true
           totalCostUsd.value = sumAccumulatorCosts(accumulators)
-          return {
-            kind: 'cost_update',
-            totalCostUsd: totalCostUsd.value,
-            messageId: infoId,
-            tokens: acc.tokens,
-            engineCostUsd: cost
-          }
+        }
+      }
+
+      if (costChanged || tokensChanged) {
+        return {
+          kind: 'cost_update',
+          totalCostUsd: totalCostUsd.value,
+          messageId: infoId,
+          tokens: acc.tokens,
+          engineCostUsd: cost
         }
       }
       return { kind: 'ignore' }

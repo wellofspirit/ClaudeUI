@@ -1555,3 +1555,148 @@ describe('mapEvent — todo.updated (child session → ignored, not handled)', (
     expect(out.kind).toBe('ignore')
   })
 })
+
+// ── Context-token advance (free-model fix) ────────────────────────────────────
+// GUARD: free models report cost:0 on every emission — cost never changes, so the
+// old code always returned {kind:'ignore'} and lastContextLength stayed at 0,
+// rendering "–" in the status line. Fix 1 adds a tokensChanged gate: emit
+// cost_update when input+cacheRead increases (even when cost is unchanged),
+// gated on role==='assistant' to avoid corrupting lastContextLength with user
+// or system token values.
+
+describe('mapEvent — message.updated context-token advance (free-model fix)', () => {
+  it('GUARD: assistant message.updated with cost:0 unchanged but growing input emits cost_update on second event', () => {
+    // First event: establishes the accumulator (prevCtxLen=0, newCtxLen=500 → change → cost_update)
+    const accumulators = new Map<string, MessageAccumulator>()
+    const totalCostRef = { value: 0 }
+
+    // First emission — role set, tokens arrive for the first time (prevCtxLen 0 → 500)
+    const out1 = mapEvent(
+      makeEvent('message.updated', {
+        sessionID: SESSION_ID,
+        info: { id: 'msg_free_ctx', role: 'assistant', cost: 0, tokens: { input: 500, output: 10 } }
+      }),
+      SESSION_ID,
+      accumulators,
+      START_TIME,
+      totalCostRef
+    )
+    // First event: prevCtxLen was 0, newCtxLen is 500 → context changed → cost_update
+    expect(out1.kind).toBe('cost_update')
+    if (out1.kind === 'cost_update') {
+      expect(out1.tokens?.input).toBe(500)
+      expect(out1.totalCostUsd).toBe(0)
+    }
+
+    // Second emission — same cost:0 still, input grew from 500→800 (cumulative)
+    const out2 = mapEvent(
+      makeEvent('message.updated', {
+        sessionID: SESSION_ID,
+        info: { id: 'msg_free_ctx', role: 'assistant', cost: 0, tokens: { input: 800, output: 30 } }
+      }),
+      SESSION_ID,
+      accumulators,
+      START_TIME,
+      totalCostRef
+    )
+    // GUARD: this was the failing case — cost unchanged, but tokens grew → must be cost_update
+    expect(out2.kind).toBe('cost_update')
+    if (out2.kind === 'cost_update') {
+      expect(out2.tokens?.input).toBe(800)
+      expect(out2.engineCostUsd).toBe(0)
+    }
+  })
+
+  it('repeated emission with IDENTICAL tokens (no growth) still returns ignore', () => {
+    const accumulators = new Map<string, MessageAccumulator>()
+    const totalCostRef = { value: 0 }
+
+    // First: establishes tokens (prevCtxLen 0 → 300 → cost_update)
+    mapEvent(
+      makeEvent('message.updated', {
+        sessionID: SESSION_ID,
+        info: { id: 'msg_stable', role: 'assistant', cost: 0, tokens: { input: 300, output: 10 } }
+      }),
+      SESSION_ID,
+      accumulators,
+      START_TIME,
+      totalCostRef
+    )
+
+    // Second: identical tokens, identical cost — nothing changed → ignore
+    const out = mapEvent(
+      makeEvent('message.updated', {
+        sessionID: SESSION_ID,
+        info: { id: 'msg_stable', role: 'assistant', cost: 0, tokens: { input: 300, output: 10 } }
+      }),
+      SESSION_ID,
+      accumulators,
+      START_TIME,
+      totalCostRef
+    )
+    expect(out.kind).toBe('ignore')
+  })
+
+  it('user-role token change does NOT emit cost_update (would corrupt lastContextLength)', () => {
+    const accumulators = new Map<string, MessageAccumulator>()
+    const totalCostRef = { value: 0 }
+
+    // Set role=user via a first message.updated (no tokens yet)
+    mapEvent(
+      makeEvent('message.updated', {
+        sessionID: SESSION_ID,
+        info: { id: 'msg_user_tok', role: 'user', cost: 0 }
+      }),
+      SESSION_ID,
+      accumulators,
+      START_TIME,
+      totalCostRef
+    )
+
+    // Second event: user role, tokens arrive (input 0→400) — must NOT emit cost_update
+    const out = mapEvent(
+      makeEvent('message.updated', {
+        sessionID: SESSION_ID,
+        info: { id: 'msg_user_tok', role: 'user', cost: 0, tokens: { input: 400, output: 5 } }
+      }),
+      SESSION_ID,
+      accumulators,
+      START_TIME,
+      totalCostRef
+    )
+    expect(out.kind).toBe('ignore')
+  })
+
+  it('cache.read increase also triggers cost_update for assistant (cacheRead is part of context length)', () => {
+    const accumulators = new Map<string, MessageAccumulator>()
+    const totalCostRef = { value: 0 }
+
+    // First: input=200, cacheRead=50 → ctxLen=250
+    mapEvent(
+      makeEvent('message.updated', {
+        sessionID: SESSION_ID,
+        info: { id: 'msg_cache', role: 'assistant', cost: 0, tokens: { input: 200, cache: { read: 50 } } }
+      }),
+      SESSION_ID,
+      accumulators,
+      START_TIME,
+      totalCostRef
+    )
+
+    // Second: input unchanged=200, cacheRead grows to 150 → ctxLen=350 → cost_update
+    const out = mapEvent(
+      makeEvent('message.updated', {
+        sessionID: SESSION_ID,
+        info: { id: 'msg_cache', role: 'assistant', cost: 0, tokens: { input: 200, cache: { read: 150 } } }
+      }),
+      SESSION_ID,
+      accumulators,
+      START_TIME,
+      totalCostRef
+    )
+    expect(out.kind).toBe('cost_update')
+    if (out.kind === 'cost_update') {
+      expect(out.tokens?.cache?.read).toBe(150)
+    }
+  })
+})

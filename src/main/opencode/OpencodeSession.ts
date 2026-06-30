@@ -894,7 +894,9 @@ export class OpencodeSession extends BaseSession {
 
   async setModel(model: string): Promise<void> {
     this._model = model
-    this._capabilities = resolveOpencodeCapabilities()
+    const { providerID, modelID } = parseModelString(this._model)
+    const ctx = getOpencodeModelContextWindow(providerID, modelID)
+    this._capabilities = resolveOpencodeCapabilities({ limit: { context: ctx || undefined } })
     // Reset the reasoning variant — the new model may have different variants.
     this.reasoningVariant = null
     this.sendStatus()

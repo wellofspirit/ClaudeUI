@@ -3040,4 +3040,85 @@ describe('OpencodeSession — status-line emission', () => {
 
     session.dispose()
   })
+
+  it('free-model (cost:0 constant) emits session:status-line with non-null usedPercentage when ctx window is known', async () => {
+    // Regression guard for the free-model "–" bug: cost never changes → old code
+    // returned ignore from message.updated → lastContextLength stayed 0 → usedPercentage null.
+    // Fix 1 (event-mapper): emit cost_update whenever input+cacheRead grows, even at cost:0.
+    mockGetOpencodeModelContextWindow.mockReturnValue(64000)
+    mockCreateSession.mockResolvedValue({ id: SES })
+    mockSubscribeEvents.mockImplementation(
+      streamOf([
+        // Two emissions of the same message with cost:0 throughout (free model),
+        // but tokens grow on the second update to trigger the new tokensChanged path.
+        {
+          id: 'e1',
+          type: 'message.updated',
+          properties: {
+            sessionID: SES,
+            info: { id: 'msg_freemodel', role: 'assistant', cost: 0,
+              tokens: { input: 1000, output: 20 } }
+          }
+        },
+        {
+          id: 'e2',
+          type: 'message.updated',
+          properties: {
+            sessionID: SES,
+            info: { id: 'msg_freemodel', role: 'assistant', cost: 0,
+              tokens: { input: 1500, output: 80 } }
+          }
+        },
+        { id: 'e3', type: 'session.idle', properties: { sessionID: SES } }
+      ])
+    )
+
+    const win = new MockWindow() as unknown as BrowserWindow
+    const session = new OpencodeSession('r_freemodel_ctx', win, '/tmp')
+    await session.run('go')
+
+    await vi.waitFor(() =>
+      (win as unknown as MockWindow).webContents.send.mock.calls.some((c) => c[0] === 'session:result')
+    )
+
+    const calls = (win as unknown as MockWindow).webContents.send.mock.calls
+    const slCalls = calls.filter((c) => c[0] === 'session:status-line')
+    expect(slCalls.length).toBeGreaterThanOrEqual(1)
+    const finalSl = slCalls[slCalls.length - 1]![2]
+    // lastContextLength = input(1500) + cacheRead(0) = 1500
+    // usedPercentage must be non-null (the regression value was null → "–")
+    expect(finalSl.usedPercentage).not.toBeNull()
+    expect(finalSl.usedPercentage).toBe(Math.round(1500 / 64000 * 100))
+    expect(finalSl.contextWindowSize).toBe(64000)
+
+    session.dispose()
+  })
+})
+
+describe('OpencodeSession — setModel() context window in capabilities', () => {
+  beforeEach(() => {
+    setupMocks()
+    mockGetOpencodeModelContextWindow.mockReset()
+    mockGetOpencodeModelContextWindow.mockReturnValue(0)
+  })
+
+  it('setModel with a known ctx window (64000) sets capabilities.contextWindow === 64000', async () => {
+    mockGetOpencodeModelContextWindow.mockReturnValue(64000)
+    const win = new MockWindow() as unknown as BrowserWindow
+    const session = new OpencodeSession('r_setmodel_ctx', win, '/tmp')
+    await session.setModel('openai/gpt-4o-mini')
+    expect(session.capabilities.contextWindow).toBe(64000)
+    session.dispose()
+  })
+
+  it('setModel with ctx window === 0 (cache miss) falls back to 200_000 optimistic default', async () => {
+    mockGetOpencodeModelContextWindow.mockReturnValue(0)
+    const win = new MockWindow() as unknown as BrowserWindow
+    const session = new OpencodeSession('r_setmodel_ctx_miss', win, '/tmp')
+    await session.setModel('openai/unknown-model')
+    // ctx || undefined → resolveOpencodeCapabilities({ limit: { context: undefined } })
+    // opencodeModelCapabilities uses limit?.context ?? 200_000 → 200_000
+    expect(session.capabilities.contextWindow).toBe(200_000)
+    session.dispose()
+  })
 })
