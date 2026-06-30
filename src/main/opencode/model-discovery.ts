@@ -267,6 +267,41 @@ export async function discoverOpencodeModels(): Promise<EngineModelGroup[]> {
 }
 
 /**
+ * Resolve the opencode model to actually use, validated against what opencode
+ * currently reports (disabled providers already excluded by discovery).
+ *
+ * This is the AUTHORITATIVE chokepoint shared by session:create (spawn) and the
+ * standalone agent-generate transport, so a stale or disabled per-session model
+ * (e.g. the default `opencode/mimo-v2.5-free` after its OpenCode Zen provider
+ * was disabled) can never reach the backend and desync from what the picker
+ * shows. Resolution order mirrors the renderer's `resolveOpencodeModel`:
+ *   1. the requested model, if it is actually available
+ *   2. a free OpenCode Zen model (vendor 'opencode'/'zen'), if its provider is enabled
+ *   3. the first available opencode model
+ *   4. the requested value unchanged when discovery yields nothing — let opencode
+ *      apply its own configured default rather than guessing a substitute.
+ */
+export async function resolveOpencodeSpawnModel(requested?: string): Promise<string | undefined> {
+  try {
+    const groups = await discoverOpencodeModels()
+    const all = groups.flatMap((g) => g.models)
+    if (all.length === 0) return requested
+    if (requested && all.some((m) => m.value === requested)) return requested
+    const free = all.find((m) => m.vendorId === 'opencode' || m.vendorId === 'zen')
+    const resolved = (free ?? all[0]).value
+    if (requested && requested !== resolved) {
+      logger.warn(
+        'opencode',
+        `Requested model "${requested}" is unavailable (provider disabled or removed); spawning with "${resolved}" instead.`
+      )
+    }
+    return resolved
+  } catch {
+    return requested
+  }
+}
+
+/**
  * Returns the context-window token count for a specific model as reported by
  * /config/providers (`model.limit.context`). Returns 0 if the model is not in
  * the discovery cache (discovery hasn't run yet, or the model has no limit).

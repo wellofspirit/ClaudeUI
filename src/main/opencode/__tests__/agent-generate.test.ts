@@ -14,15 +14,28 @@ const {
   MockOpencodeClient,
   mockCreateSession,
   mockPrompt,
+  mockPatchSession,
   mockDeleteSession,
+  mockResolveModel,
 } = vi.hoisted(() => {
   const mockCreateSession = vi.fn()
   const mockPrompt = vi.fn()
+  const mockPatchSession = vi.fn()
   const mockDeleteSession = vi.fn()
   const MockOpencodeClient = vi.fn()
   const mockAcquire = vi.fn()
   const mockRelease = vi.fn()
-  return { mockAcquire, mockRelease, MockOpencodeClient, mockCreateSession, mockPrompt, mockDeleteSession }
+  const mockResolveModel = vi.fn()
+  return {
+    mockAcquire,
+    mockRelease,
+    MockOpencodeClient,
+    mockCreateSession,
+    mockPrompt,
+    mockPatchSession,
+    mockDeleteSession,
+    mockResolveModel,
+  }
 })
 
 vi.mock('../OpencodeServerManager', () => ({
@@ -34,6 +47,11 @@ vi.mock('../OpencodeServerManager', () => ({
 
 vi.mock('../OpencodeClient', () => ({
   OpencodeClient: MockOpencodeClient,
+}))
+
+// Keep the model-discovery dependency hermetic — no transient server spawn.
+vi.mock('../model-discovery', () => ({
+  resolveOpencodeSpawnModel: mockResolveModel,
 }))
 
 vi.mock('../../services/persisted-sessions-dir', () => ({
@@ -68,13 +86,16 @@ beforeEach(() => {
   })
   mockRelease.mockResolvedValue(undefined)
   mockCreateSession.mockResolvedValue({ id: 'session-abc-123' })
+  mockPatchSession.mockResolvedValue(undefined)
   mockDeleteSession.mockResolvedValue(true)
+  mockResolveModel.mockResolvedValue('anthropic/claude-sonnet-4')
   // Wire MockOpencodeClient to return the per-test mock functions.
   // Must use `function` (not arrow) so `new MockOpencodeClient()` works correctly.
   MockOpencodeClient.mockImplementation(function () {
     return {
       createSession: mockCreateSession,
       prompt: mockPrompt,
+      patchSession: mockPatchSession,
       deleteSession: mockDeleteSession,
     }
   })
@@ -232,5 +253,57 @@ describe('generateAgent', () => {
         ]),
       })
     )
+  })
+
+  // ─── Hang-proofing (the bug this fix addresses) ──────────────────────────────
+
+  it('patches a deny-all ruleset on the throwaway session BEFORE prompting', async () => {
+    mockPrompt.mockResolvedValue(makePartResponse(VALID_JSON_TEXT))
+
+    await generateAgent('Review agent')
+
+    expect(mockPatchSession).toHaveBeenCalledWith('session-abc-123', {
+      permission: [{ permission: '*', pattern: '*', action: 'deny' }],
+    })
+    // Ordering matters: a tool-call permission.asked between patch and prompt is
+    // exactly the hang we prevent — the deny ruleset must land first.
+    expect(mockPatchSession.mock.invocationCallOrder[0]).toBeLessThan(
+      mockPrompt.mock.invocationCallOrder[0]
+    )
+  })
+
+  it('passes the resolved model to the prompt request', async () => {
+    mockResolveModel.mockResolvedValue('anthropic/claude-sonnet-4')
+    mockPrompt.mockResolvedValue(makePartResponse(VALID_JSON_TEXT))
+
+    await generateAgent('Review agent')
+
+    expect(mockPrompt).toHaveBeenCalledWith(
+      'session-abc-123',
+      expect.objectContaining({
+        model: { providerID: 'anthropic', modelID: 'claude-sonnet-4' },
+      })
+    )
+  })
+
+  it('omits the model field when no model can be resolved', async () => {
+    mockResolveModel.mockResolvedValue(undefined)
+    mockPrompt.mockResolvedValue(makePartResponse(VALID_JSON_TEXT))
+
+    await generateAgent('Review agent')
+
+    const [, req] = mockPrompt.mock.calls[0]
+    expect(req).not.toHaveProperty('model')
+  })
+
+  it('fails loudly (and never prompts) if the deny ruleset cannot be applied', async () => {
+    mockPatchSession.mockRejectedValue(new Error('patch failed'))
+
+    await expect(generateAgent('Review agent')).rejects.toThrow('patch failed')
+
+    // Must not have sent the prompt without the deny ruleset in place.
+    expect(mockPrompt).not.toHaveBeenCalled()
+    // Cleanup still runs.
+    expect(mockDeleteSession).toHaveBeenCalledWith('session-abc-123')
   })
 })

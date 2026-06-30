@@ -9,7 +9,15 @@
 
 import { opencodeServerManager } from './OpencodeServerManager'
 import { OpencodeClient } from './OpencodeClient'
+import { resolveOpencodeSpawnModel } from './model-discovery'
 import { PERSISTED_SESSIONS_DIR } from '../services/persisted-sessions-dir'
+
+/** Parse "providerID/modelID" → { providerID, modelID } (mirrors OpencodeSession). */
+function parseModelString(model: string): { providerID: string; modelID: string } {
+  const slash = model.indexOf('/')
+  if (slash < 0) return { providerID: 'opencode', modelID: model }
+  return { providerID: model.slice(0, slash), modelID: model.slice(slash + 1) }
+}
 
 // ─── Meta-prompt ──────────────────────────────────────────────────────────────
 
@@ -104,9 +112,32 @@ export async function generateAgent(
   const conn = await opencodeServerManager.acquire(dir)
   const client = new OpencodeClient(conn.baseUrl, conn.authHeader)
 
+  // Resolve a concrete model up front. client.prompt() is a SYNCHRONOUS turn
+  // (POST /session/{id}/message blocks until completion); opencode needs to know
+  // which provider/model to run, and this throwaway session — unlike a chat
+  // session — has no per-session model configured, so we must pass one explicitly.
+  const modelStr = await resolveOpencodeSpawnModel()
+  const model = modelStr ? parseModelString(modelStr) : undefined
+
   const js = await client.createSession({ title: 'agent-generate' })
   try {
+    // Deny EVERY tool before prompting. The meta-prompt nudges the model to
+    // consult CLAUDE.md / project context, which a capable model satisfies by
+    // calling a read tool → opencode emits `permission.asked` for this throwaway
+    // session. There is no SSE consumer answering it (this session is foreign to
+    // any chat session's consumer), so the synchronous prompt would hang forever
+    // — "session launched, no response ever". opencode's permission evaluator
+    // short-circuits a matching `deny` WITHOUT publishing `permission.asked`
+    // ({permission:'*', pattern:'*'} matches every tool), making the turn
+    // tool-less and hang-proof. Mirrors OpencodeSession.askSideQuestion. NOT
+    // swallowed: if the deny ruleset can't be applied we must fail loudly rather
+    // than risk the hang it exists to prevent.
+    await client.patchSession(js.id, {
+      permission: [{ permission: '*', pattern: '*', action: 'deny' }],
+    })
+
     const resp = await client.prompt(js.id, {
+      ...(model ? { model } : {}),
       system: AGENT_GENERATE_PROMPT,
       parts: [
         {
