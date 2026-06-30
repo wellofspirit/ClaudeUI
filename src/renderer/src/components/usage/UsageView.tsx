@@ -1,5 +1,12 @@
+import { useState } from 'react'
 import { useSessionStore } from '../../stores/session-store'
-import type { UsageBlock, AccountUsage } from '../../../../shared/types'
+import type {
+  UsageBlock,
+  UsageSnapshot,
+  AccountUsage,
+  EngineUsageSummary,
+  ModelTokenBreakdown
+} from '../../../../shared/types'
 import { TokenDonut } from './TokenDonut'
 import { BlockTimeline } from './BlockTimeline'
 import { DailyUsageChart } from './DailyUsageChart'
@@ -13,17 +20,28 @@ import {
   getModelColor
 } from './usage-utils'
 
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+type ClaudeTab = 'block' | 'timeline' | 'window' | 'recent'
+
 interface UsageViewProps {
   onClose: () => void
 }
 
+// ---------------------------------------------------------------------------
+// Root component
+// ---------------------------------------------------------------------------
+
 export function UsageView({ onClose }: UsageViewProps): React.JSX.Element {
   const blockUsage = useSessionStore((s) => s.blockUsage)
   const accountUsage = useSessionStore((s) => s.accountUsage)
+  const [activeTab, setActiveTab] = useState<ClaudeTab>('block')
 
   if (!blockUsage) {
     return (
-      <div className="flex flex-col h-full bg-bg-primary p-4">
+      <div data-testid="UsageView" className="flex flex-col h-full bg-bg-primary p-4">
         <Header onClose={onClose} />
         <div className="flex-1 flex items-center justify-center text-text-muted text-sm">
           Loading usage data…
@@ -32,11 +50,20 @@ export function UsageView({ onClose }: UsageViewProps): React.JSX.Element {
     )
   }
 
-  const { currentBlock, recentBlocks, todaySnapshots, dailyHistory, accounts, accountFilter } =
-    blockUsage
+  const {
+    currentBlock,
+    recentBlocks,
+    todaySnapshots,
+    dailyHistory,
+    accounts,
+    accountFilter,
+    perEngine
+  } = blockUsage
+
+  const opencodeEntry = perEngine?.find((e) => e.engineId === 'opencode') ?? null
 
   return (
-    <div className="flex flex-col h-full bg-bg-primary overflow-y-auto">
+    <div data-testid="UsageView" className="flex flex-col h-full bg-bg-primary overflow-y-auto">
       <div className="sticky top-0 z-10 bg-bg-primary/95 backdrop-blur-sm border-b border-border/30">
         <Header onClose={onClose}>
           {accounts.length > 1 && (
@@ -46,36 +73,21 @@ export function UsageView({ onClose }: UsageViewProps): React.JSX.Element {
       </div>
 
       <div className="p-4 space-y-4">
-        {/* Current Block Card */}
-        <CurrentBlockCard block={currentBlock} />
+        {/* Claude card — tabbed */}
+        <ClaudeCard
+          currentBlock={currentBlock}
+          recentBlocks={recentBlocks}
+          todaySnapshots={todaySnapshots}
+          accountUsage={accountUsage}
+          activeTab={activeTab}
+          onTabChange={setActiveTab}
+        />
 
-        {/* Block Timeline */}
-        {currentBlock && todaySnapshots.length >= 2 && (
-          <Section title="Block Timeline" subtitle="Token accumulation + API %">
-            <BlockTimeline
-              snapshots={todaySnapshots}
-              blockStartTime={currentBlock.startTime}
-              blockEndTime={currentBlock.endTime}
-            />
-          </Section>
-        )}
+        {/* opencode section — only when data exists */}
+        {opencodeEntry && <OpencodeSection entry={opencodeEntry} />}
 
-        {/* 5hr API Usage Bar */}
-        {accountUsage && !accountUsage.error && <ApiUsageBar usage={accountUsage} />}
-
-        {/* Recent Blocks */}
-        {recentBlocks.length > 0 && (
-          <Section title="Recent Blocks" subtitle="Last 48 hours">
-            <div className="space-y-1">
-              {recentBlocks.map((block) => (
-                <BlockRow key={block.id} block={block} />
-              ))}
-            </div>
-          </Section>
-        )}
-
-        {/* Daily Usage Chart */}
-        <Section title="Daily Usage" subtitle={`Last ${dailyHistory.length} days`}>
+        {/* Daily Usage (all engines) */}
+        <Section title="Daily Usage" subtitle={`Last ${dailyHistory.length} days · all engines`}>
           <DailyUsageChart dailyHistory={dailyHistory} />
         </Section>
       </div>
@@ -84,7 +96,383 @@ export function UsageView({ onClose }: UsageViewProps): React.JSX.Element {
 }
 
 // ---------------------------------------------------------------------------
-// Sub-components
+// Claude card with 4-tab group
+// ---------------------------------------------------------------------------
+
+const CLAUDE_TABS: { id: ClaudeTab; label: string }[] = [
+  { id: 'block', label: 'Current Block' },
+  { id: 'timeline', label: 'Block Timeline' },
+  { id: 'window', label: '5hr Window' },
+  { id: 'recent', label: 'Recent Blocks' }
+]
+
+function ClaudeCard({
+  currentBlock,
+  recentBlocks,
+  todaySnapshots,
+  accountUsage,
+  activeTab,
+  onTabChange
+}: {
+  currentBlock: UsageBlock | null
+  recentBlocks: UsageBlock[]
+  todaySnapshots: UsageSnapshot[]
+  accountUsage: AccountUsage | null
+  activeTab: ClaudeTab
+  onTabChange: (tab: ClaudeTab) => void
+}): React.JSX.Element {
+  return (
+    <div className="bg-bg-secondary rounded-xl border border-border/50">
+      {/* Card header */}
+      <div className="flex items-center gap-2 px-3 pt-3">
+        <h3 className="text-[11px] font-semibold uppercase tracking-wider text-text-secondary">
+          Claude
+        </h3>
+        <span className="text-[9px] px-1.5 py-0.5 rounded bg-violet-500/15 text-violet-300 font-medium">
+          subscription
+        </span>
+        <span className="text-[9px] text-text-muted">5-hour windows · blocks · API quota</span>
+      </div>
+
+      {/* Tab bar */}
+      <div className="flex gap-0 px-3 mt-2 border-b border-border/30 text-[11px]">
+        {CLAUDE_TABS.map((tab) => (
+          <button
+            key={tab.id}
+            onClick={() => onTabChange(tab.id)}
+            className={`px-2.5 py-1.5 border-b-2 transition-colors cursor-default [-webkit-app-region:no-drag] ${
+              activeTab === tab.id
+                ? 'border-accent text-text-primary'
+                : 'border-transparent text-text-muted hover:text-text-secondary'
+            }`}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
+
+      {/* Tab panels */}
+      <div className="p-3">
+        {activeTab === 'block' && <CurrentBlockPanel block={currentBlock} />}
+        {activeTab === 'timeline' && (
+          <TimelinePanel
+            currentBlock={currentBlock}
+            todaySnapshots={todaySnapshots}
+          />
+        )}
+        {activeTab === 'window' && <WindowPanel accountUsage={accountUsage} />}
+        {activeTab === 'recent' && <RecentBlocksPanel recentBlocks={recentBlocks} />}
+      </div>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Tab panels (content only — no card chrome / no redundant section title)
+// ---------------------------------------------------------------------------
+
+function CurrentBlockPanel({ block }: { block: UsageBlock | null }): React.JSX.Element {
+  if (!block) {
+    return (
+      <div className="text-text-muted text-[11px]">
+        No active block — start using Claude to begin tracking
+      </div>
+    )
+  }
+
+  const total = sumTokens(block.tokens)
+  const elapsed = Date.now() - block.startTime
+  const remaining = block.endTime - Date.now()
+
+  return (
+    <>
+      <div className="flex items-center gap-2 mb-3">
+        {block.isActive && (
+          <span className="text-[9px] px-1.5 py-0.5 rounded bg-green-500/15 text-green-400 font-medium">
+            active
+          </span>
+        )}
+        <span className="text-[10px] text-text-muted">
+          {formatTime(block.startTime)} – {formatTime(block.endTime)}
+          <span className="ml-2 text-text-muted/60">
+            ({formatDuration(elapsed)} in
+            {remaining > 0 ? `, ${formatDuration(remaining)} left` : ''})
+          </span>
+        </span>
+      </div>
+
+      <div className="flex gap-4">
+        {/* Donut */}
+        <TokenDonut models={block.models} totalTokens={total} size={100} />
+
+        {/* Stats */}
+        <div className="flex-1 space-y-1.5 text-[11px]">
+          <StatRow label="Total Tokens" value={formatTokenCount(total)} />
+          <StatRow label="Cost" value={formatCost(block.costUsd)} />
+          {block.burnRate && (
+            <StatRow
+              label="Burn Rate"
+              value={`${formatTokenCount(block.burnRate.tokensPerMin)}/min · ${formatCost(block.burnRate.costPerHour)}/hr`}
+            />
+          )}
+          {block.projectedUsage && (
+            <StatRow
+              label="Window Capacity"
+              value={`~${formatTokenCount(block.projectedUsage.tokens)} · ${formatCost(block.projectedUsage.costUsd)}`}
+              tooltip="Maximum tokens this 5hr window can handle, derived from current tokens ÷ API usage %"
+              className="text-accent"
+            />
+          )}
+        </div>
+      </div>
+
+      {/* Model breakdown table */}
+      {block.models.length > 0 && (
+        <div className="mt-3 border-t border-border/30 pt-2">
+          <table className="w-full text-[10px]">
+            <thead>
+              <tr className="text-text-muted">
+                <th className="text-left font-medium pb-1">Model</th>
+                <th className="text-right font-medium pb-1">Tokens</th>
+                <th className="text-right font-medium pb-1">Cost</th>
+                <th className="text-right font-medium pb-1">Reqs</th>
+                <th className="text-right font-medium pb-1">Share</th>
+              </tr>
+            </thead>
+            <tbody>
+              {block.models
+                .sort((a, b) => sumTokens(b.tokens) - sumTokens(a.tokens))
+                .map((m) => {
+                  const mTotal = sumTokens(m.tokens)
+                  const pct = total > 0 ? Math.round((mTotal / total) * 100) : 0
+                  return (
+                    <tr key={m.model} className="text-text-secondary">
+                      <td className="py-0.5 flex items-center gap-1.5">
+                        <span
+                          className="inline-block w-2 h-2 rounded-full"
+                          style={{ backgroundColor: getModelColor(m.model) }}
+                        />
+                        {shortModelName(m.model)}
+                      </td>
+                      <td className="text-right font-mono">{formatTokenCount(mTotal)}</td>
+                      <td className="text-right font-mono">{formatCost(m.costUsd)}</td>
+                      <td className="text-right font-mono">{m.requestCount}</td>
+                      <td className="text-right font-mono">{pct}%</td>
+                    </tr>
+                  )
+                })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </>
+  )
+}
+
+function TimelinePanel({
+  currentBlock,
+  todaySnapshots
+}: {
+  currentBlock: UsageBlock | null
+  todaySnapshots: UsageSnapshot[]
+}): React.JSX.Element {
+  if (!currentBlock || todaySnapshots.length < 2) {
+    return (
+      <div className="text-text-muted text-[11px]">Not enough data yet</div>
+    )
+  }
+
+  return (
+    <BlockTimeline
+      snapshots={todaySnapshots}
+      blockStartTime={currentBlock.startTime}
+      blockEndTime={currentBlock.endTime}
+    />
+  )
+}
+
+function WindowPanel({ accountUsage }: { accountUsage: AccountUsage | null }): React.JSX.Element {
+  if (!accountUsage || accountUsage.error) {
+    return (
+      <div className="text-text-muted text-[11px]">No window data</div>
+    )
+  }
+
+  const pct = accountUsage.fiveHour.usedPercent
+  const color = pct > 80 ? '#ef4444' : pct > 50 ? '#eab308' : '#22c55e'
+
+  let resetStr = ''
+  if (accountUsage.fiveHour.resetsAt) {
+    const ms = new Date(accountUsage.fiveHour.resetsAt).getTime() - Date.now()
+    if (ms > 0) {
+      const min = Math.round(ms / 60_000)
+      if (min >= 60) {
+        resetStr = `resets in ${Math.floor(min / 60)}h ${min % 60}m`
+      } else {
+        resetStr = `resets in ${min}m`
+      }
+    }
+  }
+
+  return (
+    <>
+      {resetStr && (
+        <div className="flex items-baseline gap-2 mb-2">
+          <span className="text-[10px] text-text-muted">{resetStr}</span>
+        </div>
+      )}
+      <div className="flex items-center gap-3">
+        <div className="flex-1 h-2 rounded-full bg-white/5 overflow-hidden">
+          <div
+            className="h-full rounded-full transition-all duration-500"
+            style={{ width: `${Math.min(100, pct)}%`, backgroundColor: color }}
+          />
+        </div>
+        <span className="text-[11px] font-mono font-medium" style={{ color }}>
+          {Math.round(pct)}%
+        </span>
+      </div>
+    </>
+  )
+}
+
+function RecentBlocksPanel({ recentBlocks }: { recentBlocks: UsageBlock[] }): React.JSX.Element {
+  if (recentBlocks.length === 0) {
+    return (
+      <div className="text-text-muted text-[11px]">No recent blocks</div>
+    )
+  }
+
+  return (
+    <div className="space-y-1">
+      {recentBlocks.map((block) => (
+        <BlockRow key={block.id} block={block} />
+      ))}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// opencode section
+// ---------------------------------------------------------------------------
+
+function OpencodeSection({ entry }: { entry: EngineUsageSummary }): React.JSX.Element {
+  const [refreshing, setRefreshing] = useState(false)
+  const [note, setNote] = useState<string | null>(null)
+
+  const totalTokens = sumTokens(entry.tokens)
+
+  async function handleRefresh(): Promise<void> {
+    setRefreshing(true)
+    setNote(null)
+    try {
+      const r = await window.api.refreshPrices()
+      setNote(`Updated ${r.count} model prices`)
+    } catch {
+      setNote('Refresh failed')
+    } finally {
+      setRefreshing(false)
+    }
+    setTimeout(() => setNote(null), 4000)
+  }
+
+  return (
+    <div className="bg-bg-secondary rounded-xl border border-border/50 p-3">
+      {/* Header row */}
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-2">
+          <h3 className="text-[11px] font-semibold uppercase tracking-wider text-text-secondary">
+            opencode
+          </h3>
+          <span className="text-[9px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 font-medium">
+            pay-per-token
+          </span>
+          <span className="text-[9px] text-text-muted">last 7 days · no window</span>
+        </div>
+        <div className="flex items-center gap-2">
+          {note && <span className="text-[9px] text-text-muted">{note}</span>}
+          <button
+            onClick={handleRefresh}
+            disabled={refreshing}
+            className="[-webkit-app-region:no-drag] text-[10px] text-text-secondary hover:text-text-primary border border-border/50 rounded px-2 py-0.5 flex items-center gap-1 disabled:opacity-50 transition-colors cursor-default"
+          >
+            {refreshing ? 'Refreshing…' : '↻ refresh prices'}
+          </button>
+        </div>
+      </div>
+
+      {/* Summary row */}
+      <div className="flex gap-5 text-[11px] mb-3">
+        <div>
+          <div className="text-text-muted text-[10px]">Tokens</div>
+          <div className="font-mono text-text-primary">{formatTokenCount(totalTokens)}</div>
+        </div>
+        <div>
+          <div className="text-text-muted text-[10px]">Cost</div>
+          <div className="font-mono text-text-primary">{formatCost(entry.costUsd)}</div>
+        </div>
+        <div>
+          <div className="text-text-muted text-[10px]">Requests</div>
+          <div className="font-mono text-text-primary">{entry.requestCount}</div>
+        </div>
+      </div>
+
+      {/* Per-model table */}
+      {entry.models.length > 0 && (
+        <table className="w-full text-[10px]">
+          <thead>
+            <tr className="text-text-muted">
+              <th className="text-left font-medium pb-1">Model</th>
+              <th className="text-right font-medium pb-1">Tokens</th>
+              <th className="text-right font-medium pb-1">Cost</th>
+              <th className="text-right font-medium pb-1">Reqs</th>
+              <th className="text-right font-medium pb-1">Share</th>
+            </tr>
+          </thead>
+          <tbody>
+            {entry.models.map((m) => (
+              <OpencodeModelRow key={m.model} model={m} engineTotalTokens={totalTokens} />
+            ))}
+          </tbody>
+        </table>
+      )}
+
+      {/* Footnote */}
+      <p className="text-[9px] text-text-muted mt-2">
+        Cost reported by opencode (models.dev pricing). No 5-hour window — pay-per-token.
+      </p>
+    </div>
+  )
+}
+
+function OpencodeModelRow({
+  model,
+  engineTotalTokens
+}: {
+  model: ModelTokenBreakdown
+  engineTotalTokens: number
+}): React.JSX.Element {
+  const mTotal = sumTokens(model.tokens)
+  const pct = engineTotalTokens > 0 ? Math.round((mTotal / engineTotalTokens) * 100) : 0
+  return (
+    <tr className="text-text-secondary">
+      <td className="py-0.5 flex items-center gap-1.5">
+        <span
+          className="inline-block w-2 h-2 rounded-full"
+          style={{ backgroundColor: getModelColor(model.model) }}
+        />
+        {shortModelName(model.model)}
+      </td>
+      <td className="text-right font-mono">{formatTokenCount(mTotal)}</td>
+      <td className="text-right font-mono">{formatCost(model.costUsd)}</td>
+      <td className="text-right font-mono">{model.requestCount}</td>
+      <td className="text-right font-mono">{pct}%</td>
+    </tr>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Shared sub-components (unchanged from original)
 // ---------------------------------------------------------------------------
 
 function Header({
@@ -114,6 +502,7 @@ function Header({
         {children}
       </div>
       <button
+        data-testid="UsageView.close"
         onClick={onClose}
         className="[-webkit-app-region:no-drag] flex items-center justify-center w-6 h-6 rounded-md hover:bg-bg-hover transition-colors cursor-default"
         title="Close"
@@ -184,114 +573,6 @@ function Section({
   )
 }
 
-function CurrentBlockCard({ block }: { block: UsageBlock | null }): React.JSX.Element {
-  if (!block) {
-    return (
-      <div className="bg-bg-secondary rounded-xl border border-border/50 p-4">
-        <h3 className="text-[11px] font-semibold text-text-secondary uppercase tracking-wider mb-2">
-          Current Block
-        </h3>
-        <div className="text-text-muted text-[11px]">
-          No active block — start using Claude to begin tracking
-        </div>
-      </div>
-    )
-  }
-
-  const total = sumTokens(block.tokens)
-  const elapsed = Date.now() - block.startTime
-  const remaining = block.endTime - Date.now()
-
-  return (
-    <div className="bg-bg-secondary rounded-xl border border-border/50 p-3">
-      <div className="flex items-baseline gap-2 mb-3">
-        <h3 className="text-[11px] font-semibold text-text-secondary uppercase tracking-wider">
-          Current Block
-        </h3>
-        {block.isActive && (
-          <span className="text-[9px] px-1.5 py-0.5 rounded bg-green-500/15 text-green-400 font-medium">
-            active
-          </span>
-        )}
-      </div>
-
-      <div className="flex gap-4">
-        {/* Donut */}
-        <TokenDonut models={block.models} totalTokens={total} size={100} />
-
-        {/* Stats */}
-        <div className="flex-1 space-y-1.5 text-[11px]">
-          <StatRow label="Total Tokens" value={formatTokenCount(total)} />
-          <StatRow label="Cost" value={formatCost(block.costUsd)} />
-          {block.burnRate && (
-            <>
-              <StatRow
-                label="Burn Rate"
-                value={`${formatTokenCount(block.burnRate.tokensPerMin)}/min · ${formatCost(block.burnRate.costPerHour)}/hr`}
-              />
-            </>
-          )}
-          {block.projectedUsage && (
-            <StatRow
-              label="Window Capacity"
-              value={`~${formatTokenCount(block.projectedUsage.tokens)} · ${formatCost(block.projectedUsage.costUsd)}`}
-              tooltip="Maximum tokens this 5hr window can handle, derived from current tokens ÷ API usage %"
-              className="text-accent"
-            />
-          )}
-          <div className="text-[10px] text-text-muted pt-1">
-            {formatTime(block.startTime)} – {formatTime(block.endTime)}
-            <span className="ml-2 text-text-muted/60">
-              ({formatDuration(elapsed)} in
-              {remaining > 0 ? `, ${formatDuration(remaining)} left` : ''})
-            </span>
-          </div>
-        </div>
-      </div>
-
-      {/* Model breakdown table */}
-      {block.models.length > 0 && (
-        <div className="mt-3 border-t border-border/30 pt-2">
-          <table className="w-full text-[10px]">
-            <thead>
-              <tr className="text-text-muted">
-                <th className="text-left font-medium pb-1">Model</th>
-                <th className="text-right font-medium pb-1">Tokens</th>
-                <th className="text-right font-medium pb-1">Cost</th>
-                <th className="text-right font-medium pb-1">Reqs</th>
-                <th className="text-right font-medium pb-1">Share</th>
-              </tr>
-            </thead>
-            <tbody>
-              {block.models
-                .sort((a, b) => sumTokens(b.tokens) - sumTokens(a.tokens))
-                .map((m) => {
-                  const mTotal = sumTokens(m.tokens)
-                  const pct = total > 0 ? Math.round((mTotal / total) * 100) : 0
-                  return (
-                    <tr key={m.model} className="text-text-secondary">
-                      <td className="py-0.5 flex items-center gap-1.5">
-                        <span
-                          className="inline-block w-2 h-2 rounded-full"
-                          style={{ backgroundColor: getModelColor(m.model) }}
-                        />
-                        {shortModelName(m.model)}
-                      </td>
-                      <td className="text-right font-mono">{formatTokenCount(mTotal)}</td>
-                      <td className="text-right font-mono">{formatCost(m.costUsd)}</td>
-                      <td className="text-right font-mono">{m.requestCount}</td>
-                      <td className="text-right font-mono">{pct}%</td>
-                    </tr>
-                  )
-                })}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </div>
-  )
-}
-
 function StatRow({
   label,
   value,
@@ -311,57 +592,14 @@ function StatRow({
   )
 }
 
-function ApiUsageBar({ usage }: { usage: AccountUsage }): React.JSX.Element {
-  const pct = usage.fiveHour.usedPercent
-  const color = pct > 80 ? '#ef4444' : pct > 50 ? '#eab308' : '#22c55e'
-
-  let resetStr = ''
-  if (usage.fiveHour.resetsAt) {
-    const ms = new Date(usage.fiveHour.resetsAt).getTime() - Date.now()
-    if (ms > 0) {
-      const min = Math.round(ms / 60_000)
-      if (min >= 60) {
-        resetStr = `resets in ${Math.floor(min / 60)}h ${min % 60}m`
-      } else {
-        resetStr = `resets in ${min}m`
-      }
-    }
-  }
-
-  return (
-    <div className="bg-bg-secondary rounded-xl border border-border/50 p-3">
-      <div className="flex items-baseline gap-2 mb-2">
-        <h3 className="text-[11px] font-semibold text-text-secondary uppercase tracking-wider">
-          5hr API Usage
-        </h3>
-        {resetStr && <span className="text-[9px] text-text-muted">{resetStr}</span>}
-      </div>
-      <div className="flex items-center gap-3">
-        <div className="flex-1 h-2 rounded-full bg-white/5 overflow-hidden">
-          <div
-            className="h-full rounded-full transition-all duration-500"
-            style={{ width: `${Math.min(100, pct)}%`, backgroundColor: color }}
-          />
-        </div>
-        <span className="text-[11px] font-mono font-medium" style={{ color }}>
-          {Math.round(pct)}%
-        </span>
-      </div>
-    </div>
-  )
-}
-
 function BlockRow({ block }: { block: UsageBlock }): React.JSX.Element {
   const total = sumTokens(block.tokens)
 
   // Prefer finalApiPercent (actual API %) over computing from projectedUsage.
-  // For the projected total, derive from apiPercent to ensure consistency
-  // (projected is always >= actual when apiPercent <= 100).
   const apiPct = block.finalApiPercent
   const pct = apiPct != null && apiPct > 0 ? Math.min(100, Math.round(apiPct)) : null
 
-  // Derive projected total from API %: if we used `total` tokens at `apiPct`%,
-  // the window capacity is `total / (apiPct / 100)`.
+  // Derive projected total from API %
   const projTokens = apiPct != null && apiPct > 0 ? Math.round(total / (apiPct / 100)) : null
   const projCost =
     apiPct != null && apiPct > 0 && total > 0

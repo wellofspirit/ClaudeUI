@@ -9,6 +9,10 @@
  *   2. Escape key fires onClose
  *   3. updateSettings prop is wired to the store
  *   4. versionInfo is passed to the View after resolve
+ *   5. activeScope defaults to 'common'
+ *   6. onSelectScope switches scope and resets section to first of that scope
+ *   7. onSelectSection updates activeSectionId
+ *   8. search state is wired through onSearchChange
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
@@ -100,38 +104,58 @@ describe('SettingsDialog FC', () => {
     expect(viewProps.versionInfo).toBeNull()
   })
 
-  it('onSearchChange filters sections by keyword', async () => {
+  it('activeScope defaults to common', async () => {
     await act(async () => {
       await renderFC()
     })
 
-    const allCount = viewProps.filteredSections.length
-
-    act(() => {
-      viewProps.onSearchChange('this-should-match-nothing-xyzzy')
-    })
-
-    expect(viewProps.filteredSections.length).toBe(0)
-    expect(viewProps.search).toBe('this-should-match-nothing-xyzzy')
-
-    act(() => {
-      viewProps.onSearchChange('')
-    })
-    expect(viewProps.filteredSections.length).toBe(allCount)
+    expect(viewProps.activeScope).toBe('common')
   })
 
-  it('onSelectSection updates activeSection', async () => {
+  it('activeSectionId defaults to first section of common scope', async () => {
     await act(async () => {
       await renderFC()
     })
 
-    const target = viewProps.filteredSections[1]?.id
-    if (!target) throw new Error('expected more than one section')
+    // First section of common is 'appearance'
+    expect(viewProps.activeSectionId).toBe('appearance')
+  })
 
-    act(() => {
-      viewProps.onSelectSection(target)
+  it('onSelectScope switches scope and resets to first section of that scope', async () => {
+    await act(async () => {
+      await renderFC()
     })
 
-    expect(viewProps.activeSection).toBe(target)
+    act(() => {
+      viewProps.onSelectScope('claude')
+    })
+
+    expect(viewProps.activeScope).toBe('claude')
+    // First section of claude is 'permissions'
+    expect(viewProps.activeSectionId).toBe('permissions')
+  })
+
+  it('onSelectSection updates activeSectionId', async () => {
+    await act(async () => {
+      await renderFC()
+    })
+
+    act(() => {
+      viewProps.onSelectSection('chat')
+    })
+
+    expect(viewProps.activeSectionId).toBe('chat')
+  })
+
+  it('search is wired through onSearchChange', async () => {
+    await act(async () => {
+      await renderFC()
+    })
+
+    act(() => {
+      viewProps.onSearchChange('sandbox')
+    })
+
+    expect(viewProps.search).toBe('sandbox')
   })
 })

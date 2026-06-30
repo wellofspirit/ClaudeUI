@@ -80,6 +80,7 @@ export function PlanReviewPanelView({
 
   return (
     <div
+      data-testid="PlanReviewPanel"
       ref={panelRef}
       style={style}
       className="h-full flex flex-col bg-bg-primary border-l border-border relative"
@@ -87,6 +88,7 @@ export function PlanReviewPanelView({
       <div className="shrink-0 flex items-center justify-between px-4 h-12 border-b border-border">
         <span className="text-[13px] font-medium text-text-primary">Plan Review</span>
         <button
+          data-testid="PlanReviewPanel.close"
           onClick={onClose}
           className="w-6 h-6 flex items-center justify-center rounded text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
           title="Close"

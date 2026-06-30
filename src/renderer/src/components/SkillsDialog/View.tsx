@@ -74,6 +74,8 @@ function SkillRow({
 
   return (
     <button
+      data-testid="SkillsDialog.skillRow"
+      data-id={skill.name}
       onClick={onSelect}
       className={`w-full text-left px-3 py-2 rounded-lg transition-colors cursor-default ${
         selected
@@ -196,6 +198,7 @@ export function SkillsDialogView({
 
   return (
     <div
+      data-testid="SkillsDialog"
       className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 backdrop-blur-sm animate-fade-in"
       onClick={handleBackdropClick}
     >
@@ -223,6 +226,7 @@ export function SkillsDialogView({
             <span className="text-[11px] text-text-muted">{skills.length} loaded</span>
           </div>
           <button
+            data-testid="SkillsDialog.close"
             onClick={onClose}
             className="w-7 h-7 flex items-center justify-center rounded-md text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
           >
@@ -259,6 +263,7 @@ export function SkillsDialogView({
                   <path d="m21 21-4.3-4.3" />
                 </svg>
                 <input
+                  data-testid="SkillsDialog.filter"
                   type="text"
                   placeholder="Filter skills..."
                   value={filter}
@@ -351,6 +356,7 @@ export function SkillsDialogView({
             )}
           </span>
           <button
+            data-testid="SkillsDialog.closeFooter"
             onClick={onClose}
             className="px-3 py-1 rounded-md bg-bg-secondary hover:bg-bg-hover border border-border text-text-secondary hover:text-text-primary transition-colors cursor-default"
           >

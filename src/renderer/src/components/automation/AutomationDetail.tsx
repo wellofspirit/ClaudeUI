@@ -12,7 +12,7 @@ export function AutomationDetail({ className }: AutomationDetailProps): React.JS
 
   if (!selectedAutomationId) {
     return (
-      <div className={`flex items-center justify-center ${className}`}>
+      <div data-testid="AutomationDetail" className={`flex items-center justify-center ${className}`}>
         <div className="text-center text-text-muted">
           <svg
             width="40"
@@ -37,14 +37,14 @@ export function AutomationDetail({ className }: AutomationDetailProps): React.JS
 
   if (selectedRunId) {
     return (
-      <div className={className}>
+      <div data-testid="AutomationDetail" className={className}>
         <AutomationRunHistory />
       </div>
     )
   }
 
   return (
-    <div className={className}>
+    <div data-testid="AutomationDetail" className={className}>
       <AutomationConfig />
     </div>
   )

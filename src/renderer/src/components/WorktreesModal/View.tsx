@@ -18,12 +18,13 @@ export function WorktreesModalView({
   onClose
 }: WorktreesModalViewProps): React.JSX.Element {
   return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center">
+    <div data-testid="WorktreesModal" className="fixed inset-0 z-[100] flex items-center justify-center">
       <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={onClose} />
       <div className="relative bg-bg-primary border border-border rounded-xl shadow-2xl w-[480px] max-h-[500px] flex flex-col animate-fade-in">
         <div className="flex items-center justify-between px-5 py-4 border-b border-border">
           <h3 className="text-[15px] font-medium text-text-primary">Worktrees</h3>
           <button
+            data-testid="WorktreesModal.close"
             onClick={onClose}
             className="w-6 h-6 flex items-center justify-center rounded-md text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
           >
@@ -57,6 +58,8 @@ export function WorktreesModalView({
                 return (
                   <div
                     key={entry.name}
+                    data-testid="WorktreesModal.worktreeRow"
+                    data-id={entry.name}
                     className="flex items-center justify-between px-3 py-2 rounded-lg bg-bg-tertiary border border-border"
                   >
                     <div className="min-w-0 flex-1">
@@ -89,6 +92,8 @@ export function WorktreesModalView({
                       </div>
                     </div>
                     <button
+                      data-testid="WorktreesModal.removeWorktree"
+                      data-id={entry.name}
                       onClick={() => onRemove(entry)}
                       disabled={isRemoving}
                       className="shrink-0 ml-3 px-2.5 py-1 rounded-md text-[11px] text-red-400 hover:text-red-300 hover:bg-red-400/10 disabled:opacity-50 transition-colors cursor-default"

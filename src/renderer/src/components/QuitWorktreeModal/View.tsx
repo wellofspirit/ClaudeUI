@@ -21,7 +21,7 @@ export function QuitWorktreeModalView({
   onRemoveAll
 }: QuitWorktreeModalViewProps): React.JSX.Element {
   return (
-    <div className="fixed inset-0 z-[200] flex items-center justify-center">
+    <div data-testid="QuitWorktreeModal" className="fixed inset-0 z-[200] flex items-center justify-center">
       <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" />
       <div className="relative bg-bg-primary border border-border rounded-xl shadow-2xl w-[420px] p-5 animate-fade-in">
         <h3 className="text-[15px] font-medium text-text-primary mb-3">Active worktrees</h3>
@@ -35,6 +35,8 @@ export function QuitWorktreeModalView({
           {quitWorktrees.map(({ worktreeInfo }) => (
             <div
               key={worktreeInfo.worktreeName}
+              data-testid="QuitWorktreeModal.worktreeRow"
+              data-id={worktreeInfo.worktreeName}
               className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-bg-tertiary border border-border"
             >
               <svg
@@ -63,18 +65,21 @@ export function QuitWorktreeModalView({
 
         <div className="flex justify-end gap-2">
           <button
+            data-testid="QuitWorktreeModal.cancel"
             onClick={onCancel}
             className="px-3 py-1.5 rounded-md text-[12px] text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
           >
             Cancel
           </button>
           <button
+            data-testid="QuitWorktreeModal.keepAll"
             onClick={onKeepAll}
             className="px-3 py-1.5 rounded-md text-[12px] text-text-secondary bg-bg-tertiary hover:bg-bg-hover border border-border transition-colors cursor-default"
           >
             Keep all & quit
           </button>
           <button
+            data-testid="QuitWorktreeModal.removeAll"
             onClick={onRemoveAll}
             disabled={removing}
             className="px-3 py-1.5 rounded-md text-[12px] text-white bg-red-600 hover:bg-red-700 disabled:opacity-50 transition-colors cursor-default"

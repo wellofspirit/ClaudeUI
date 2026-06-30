@@ -1,7 +1,8 @@
 import { create } from 'zustand'
 import { useShallow } from 'zustand/react/shallow'
 import { mergeContentBlocks } from '../utils/content-blocks'
-import { VOICE_LANGUAGES } from '../../../shared/types'
+import { VOICE_LANGUAGES, claudeModel, opencodeModel } from '../../../shared/types'
+import { resolveClaudeCapabilities, resolveOpencodeCapabilities } from '../../../shared/model-capabilities'
 import type { EffortLevel } from '../../../shared/model-capabilities'
 import type {
   ChatMessage,
@@ -15,6 +16,7 @@ import type {
   ModelInfo,
   DirectoryGroup,
   StatusLineData,
+  MeteringSnapshot,
   SlashCommandInfo,
   GitStatusData,
   GitBranchData,
@@ -22,25 +24,79 @@ import type {
   PlanComment,
   PlanReviewData,
   AccountUsage,
-  AuthState,
+  AuthFlowState,
+  VendorAuthMap,
   AccountsState,
   BlockUsageData,
   TerminalTab,
   WorktreeInfo,
-  SandboxSettings,
-  ProxySettings,
-  AnthropicEndpointSettings,
-  ModelOverrideSettings,
   VoiceState,
   VoiceLanguageCode,
   ActiveView,
-  PluginViewWithOwner
+  PluginViewWithOwner,
+  EngineId,
+  ModelRef,
+  EngineConfig
 } from '../../../shared/types'
 
 /** Normalize cwd for use as a terminal group key (strip trailing slash). */
 export function normalizeCwd(cwd: string): string {
   if (cwd.length > 1 && cwd.endsWith('/')) return cwd.slice(0, -1)
   return cwd || '.'
+}
+
+/**
+ * The default model picker VALUE for a given engine. opencode must never get
+ * `'default'` (a Claude alias) — the free no-auth model is the hard fallback.
+ * The opencode value convention is `"<providerID>/<modelID>"`.
+ *
+ * The opencode default is user-configurable (Settings › opencode › Models →
+ * "Default model", stored in engines/opencode.json `opencodeConfig.model`),
+ * threaded in via `opencodeDefault`. Used as the fallback when a session has no
+ * remembered model (fresh load) — loadHistoricalSession restores the persisted
+ * per-session model when one exists.
+ */
+export const OPENCODE_DEFAULT_MODEL = 'opencode/mimo-v2.5-free'
+export function defaultModelForEngine(
+  engineId: EngineId,
+  opencodeDefault: string = OPENCODE_DEFAULT_MODEL
+): string {
+  return engineId === 'opencode' ? opencodeDefault || OPENCODE_DEFAULT_MODEL : 'default'
+}
+
+/** Free/bundled opencode vendors that never require auth (OpenCode Zen). */
+const FREE_OPENCODE_VENDORS = new Set(['opencode', 'zen'])
+
+/**
+ * Resolve a usable opencode picker VALUE against the currently-available
+ * (discovered, provider-filtered) models. Mirrors the main-process
+ * `resolveOpencodeSpawnModel` so the picker shows exactly what will spawn.
+ *
+ * Order: configured `preferred` if it is actually available → a free OpenCode
+ * Zen model → the first available opencode model → null when opencode has no
+ * usable models right now (all providers disabled, or not yet discovered).
+ *
+ * This is why a default that points at a disabled provider (e.g.
+ * `opencode/mimo-v2.5-free` after disabling OpenCode Zen) no longer leaks into
+ * the picker as a Claude-model fallback.
+ */
+export function resolveOpencodeModel(models: ModelInfo[], preferred?: string): string | null {
+  const oc = models.filter((m) => m.engineId === 'opencode')
+  if (oc.length === 0) return null
+  if (preferred && oc.some((m) => m.value === preferred)) return preferred
+  const free = oc.find((m) => FREE_OPENCODE_VENDORS.has(m.vendorId ?? ''))
+  return (free ?? oc[0]).value
+}
+
+/** Build the engine-correct ModelRef from a picker value string. */
+export function modelRefForEngine(engineId: EngineId, value: string): ModelRef {
+  if (engineId === 'opencode') {
+    const slash = value.indexOf('/')
+    return slash >= 0
+      ? opencodeModel(value.slice(0, slash), value.slice(slash + 1))
+      : opencodeModel('opencode', value)
+  }
+  return claudeModel(value)
 }
 
 const TASK_TOOL_NAMES = new Set(['TaskCreate', 'TaskUpdate', 'TodoWrite'])
@@ -140,10 +196,6 @@ export interface AppSettings {
   remoteFollowActions: boolean // follow remote client's session switches & messages
   voiceEnabled: boolean
   voiceLanguage: VoiceLanguageCode
-  sandbox: SandboxSettings
-  proxy: ProxySettings
-  anthropicEndpoint: AnthropicEndpointSettings
-  modelOverride: ModelOverrideSettings
   /**
    * Per-model default effort overrides. Keyed by canonical model id
    * (`claude-sonnet-4-6`, `claude-opus-4-7`, `claude-opus-4-8`,
@@ -157,6 +209,11 @@ export interface AppSettings {
   logFilter: string // per-source overrides: "UsageFetcher:debug,BlockUsage:debug"
   mockupConnectAllowlist: string // newline-separated origin allowlist for mockup iframe `connect-src`
   mockupAllowHttp: boolean // when true, mockup iframes may connect over plaintext http:/ws:
+  /**
+   * Maximum characters shown in a tool output before the "Show more" toggle
+   * appears. 0 = no truncation. Default 5000.
+   */
+  toolOutputMaxChars: number
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -185,48 +242,13 @@ const DEFAULT_SETTINGS: AppSettings = {
   voiceEnabled: false,
   voiceLanguage: 'en' as VoiceLanguageCode,
   remoteFollowActions: true,
-  sandbox: {
-    enabled: false,
-    autoAllowBashIfSandboxed: false,
-    allowUnsandboxedCommands: false,
-    network: {
-      restrictNetwork: false,
-      allowLocalBinding: false,
-      allowedDomains: [],
-      allowManagedDomainsOnly: false,
-      allowAllUnixSockets: false,
-      allowUnixSockets: []
-    },
-    filesystem: { allowWrite: [], denyWrite: [], denyRead: [] },
-    excludedCommands: []
-  },
-  proxy: {
-    enabled: false,
-    type: 'http',
-    hostname: '',
-    port: 8080,
-    username: '',
-    password: '',
-    proxySubprocesses: false
-  },
-  anthropicEndpoint: {
-    enabled: false,
-    baseUrl: '',
-    authToken: ''
-  },
-  modelOverride: {
-    enabled: false,
-    model: '',
-    sonnetModel: '',
-    opusModel: '',
-    haikuModel: ''
-  },
   modelEffortDefaults: {},
   mermaidTheme: 'auto',
   logLevel: 'warn',
   logFilter: '',
   mockupConnectAllowlist: '',
-  mockupAllowHttp: false
+  mockupAllowHttp: false,
+  toolOutputMaxChars: 5000
 }
 
 export function applyTheme(theme: ThemeId): void {
@@ -257,6 +279,8 @@ type PersistedSessionFields = {
   worktreeInfoMap: Record<string, WorktreeInfo>
   hiddenSessionIds: string[]
   hiddenProjectKeys: string[]
+  /** Maps sessionId → { engineId, model? } for session engine persistence. */
+  sessionEngines: Record<string, { engineId: EngineId; model?: ModelRef }>
 }
 
 /**
@@ -275,7 +299,8 @@ function saveSessionConfig(
     customTitles: merged.customTitles,
     worktreeInfoMap: merged.worktreeInfoMap,
     hiddenSessions: merged.hiddenSessionIds,
-    hiddenProjects: merged.hiddenProjectKeys
+    hiddenProjects: merged.hiddenProjectKeys,
+    sessionEngines: merged.sessionEngines
   })
 }
 
@@ -284,11 +309,14 @@ function saveSessionConfig(
  * Called once at startup; migrates from localStorage on first run.
  */
 export async function hydrateConfigFromDisk(): Promise<void> {
-  let [savedSettings, sessionConfig, slashCommands] = await Promise.all([
-    window.api.loadSettings(),
-    window.api.loadSessionConfig(),
-    window.api.loadSlashCommands()
-  ])
+  let [savedSettings, sessionConfig, slashCommands, loadedEngineConfig, opencodeSettings] =
+    await Promise.all([
+      window.api.loadSettings(),
+      window.api.loadSessionConfig(),
+      window.api.loadSlashCommands(),
+      window.api.loadEngineConfig('claude'),
+      window.api.loadOpencodeSettings().catch((): import('../../../shared/types').OpencodeConfigSettings => ({}))
+    ])
 
   // One-time migration from localStorage → disk
   const MIGRATION_FLAG = 'claudeui-migrated-to-disk'
@@ -318,32 +346,7 @@ export async function hydrateConfigFromDisk(): Promise<void> {
     Object.keys(saved).length > 0
       ? {
           ...DEFAULT_SETTINGS,
-          ...saved,
-          // Deep-merge nested objects so new fields get defaults even if parent was persisted
-          sandbox: {
-            ...DEFAULT_SETTINGS.sandbox,
-            ...saved.sandbox,
-            filesystem: {
-              ...DEFAULT_SETTINGS.sandbox.filesystem,
-              ...saved.sandbox?.filesystem
-            },
-            network: {
-              ...DEFAULT_SETTINGS.sandbox.network,
-              ...saved.sandbox?.network
-            }
-          },
-          proxy: {
-            ...DEFAULT_SETTINGS.proxy,
-            ...saved.proxy
-          },
-          anthropicEndpoint: {
-            ...DEFAULT_SETTINGS.anthropicEndpoint,
-            ...saved.anthropicEndpoint
-          },
-          modelOverride: {
-            ...DEFAULT_SETTINGS.modelOverride,
-            ...saved.modelOverride
-          }
+          ...saved
         }
       : DEFAULT_SETTINGS
 
@@ -355,6 +358,8 @@ export async function hydrateConfigFromDisk(): Promise<void> {
   applyTheme(settings.theme)
 
   useSessionStore.setState({
+    engineConfig: loadedEngineConfig,
+    opencodeDefaultModel: opencodeSettings?.model || OPENCODE_DEFAULT_MODEL,
     settings,
     recentSessionIds: sessionConfig.recentSessions ?? [],
     pinnedSessionIds: sessionConfig.pinnedSessions ?? [],
@@ -362,6 +367,7 @@ export async function hydrateConfigFromDisk(): Promise<void> {
     worktreeInfoMap: sessionConfig.worktreeInfoMap ?? {},
     hiddenSessionIds: sessionConfig.hiddenSessions ?? [],
     hiddenProjectKeys: sessionConfig.hiddenProjects ?? [],
+    sessionEngines: sessionConfig.sessionEngines ?? {},
     slashCommands: slashCommands ?? []
   })
 }
@@ -432,10 +438,17 @@ export interface PerSessionState {
   effort: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null
   /** null = use model default; non-null = user explicitly chose this mode */
   thinkingMode: 'adaptive' | 'enabled' | 'disabled' | null
+  /** null = opencode default (variant omitted); non-null = user chose a reasoning variant.
+   *  Only meaningful for opencode models with reasoningVariants. Claude: always null. */
+  reasoningVariant: string | null
   statusLine: StatusLineData | null
+  /** Engine-neutral metering snapshot (Phase 7 Pass 2). Additive to statusLine. */
+  metering: MeteringSnapshot | null
   queuedText: string
   draftText: string
   selectedModel: string
+  /** Engine chosen at session-creation time. Immutable after the session spawns. */
+  selectedEngineId: EngineId
   // Worktree state
   worktreeInfo: WorktreeInfo | null
   // Git state
@@ -469,6 +482,8 @@ export interface PerSessionState {
   btwQuestion: string | null
   btwResponse: string | null
   btwLoading: boolean
+  // Vendor auth required (opencode ProviderAuthError)
+  vendorAuthRequired: { vendorId: string; message: string } | null
 }
 
 const EMPTY_SESSION_STATE: PerSessionState = {
@@ -481,7 +496,17 @@ const EMPTY_SESSION_STATE: PerSessionState = {
   streamingThinking: '',
   thinkingStartedAt: null,
   thinkingDurationMs: null,
-  status: { state: 'idle', sessionId: null, model: null, cwd: null, totalCostUsd: 0 },
+  // Full caps assumed for new sessions before the first status event.
+  status: {
+    state: 'idle',
+    sessionId: null,
+    model: null,
+    cwd: null,
+    totalCostUsd: 0,
+    engineId: 'claude',
+    capabilities: resolveClaudeCapabilities('default'),
+    account: null
+  },
   pendingApprovals: [],
   errors: [],
   warnings: [],
@@ -502,10 +527,13 @@ const EMPTY_SESSION_STATE: PerSessionState = {
   permissionMode: 'default',
   effort: null,
   thinkingMode: null,
+  reasoningVariant: null,
   statusLine: null,
+  metering: null,
   queuedText: '',
   draftText: '',
   selectedModel: 'default',
+  selectedEngineId: 'claude' as EngineId,
   worktreeInfo: null,
   isGitRepo: false,
   gitStatus: null,
@@ -526,7 +554,8 @@ const EMPTY_SESSION_STATE: PerSessionState = {
   voiceInterimTranscript: '',
   btwQuestion: null,
   btwResponse: null,
-  btwLoading: false
+  btwLoading: false,
+  vendorAuthRequired: null
 }
 
 function createEmptySession(cwd: string): PerSessionState {
@@ -545,6 +574,17 @@ function createEmptySession(cwd: string): PerSessionState {
  * This map lets setStatusLine (and potentially other handlers) resolve them.
  */
 const rekeyMap = new Map<string, string>()
+
+/**
+ * Monotonic token for the in-flight vendor-OAuth `auto` flow. Each
+ * authorizeVendorOAuth() captures the current token; cancelVendorOAuth()
+ * bumps it. The long-lived `oauthCallback` await checks its captured token
+ * before any post-await state-set, so a callback that resolves AFTER the user
+ * cancelled (opencode's plugin times out server-side, but the promise may still
+ * settle) cannot resurrect a stale waiting/error card. Module-level (not store
+ * state) — it's control-flow bookkeeping, never rendered.
+ */
+let vendorOAuthFlowToken = 0
 
 /**
  * Global git status cache keyed by cwd.
@@ -593,8 +633,20 @@ interface SessionState {
   hiddenSessionIds: string[]
   /** Project keys hidden from the sidebar */
   hiddenProjectKeys: string[]
+  /** Maps sessionId → { engineId, model? } for engine persistence across restarts. */
+  sessionEngines: Record<string, { engineId: EngineId; model?: ModelRef }>
+
+  /** Remembered engine choice — pre-fills engine for newly created sessions. */
+  lastSelectedEngineId: EngineId
+  /** Configurable opencode default model (engines/opencode.json `opencodeConfig.model`).
+   *  The opencode-engine value `defaultModelForEngine('opencode')` resolves to. */
+  opencodeDefaultModel: string
+  /** Bumped to force the model picker to re-fetch getEngineModels() — e.g. after
+   *  an opencode provider/default-model change in Settings. */
+  modelReloadNonce: number
 
   // Global (not per-session)
+  engineConfig: EngineConfig
   settings: AppSettings
   availableModels: ModelInfo[]
   slashCommands: SlashCommandInfo[]
@@ -603,11 +655,17 @@ interface SessionState {
   accountUsage: AccountUsage | null
   blockUsage: BlockUsageData | null
   /** Native OAuth login-flow state (ADR-014). Null until first event/status. */
-  authState: AuthState | null
-  /** cli.js auth source from session init: 'oauth'|'api_key'|'none'|null (ADR-014). */
+  authState: AuthFlowState | null
+  /** Login status from session init: 'authenticated'|'none'|null (logged-in vs not).
+   *  The oauth-vs-api-key distinction lives only in vendorAuth's billingType.
+   *  See ADR-014 / Phase 4 (ADR-021). */
   authSource: string | null
+  /** Vendor auth map from the engine auth probe (Phase 4). Null until first probe. */
+  vendorAuth: VendorAuthMap | null
   /** Multi-account state (ADR-015). Null until first load/event. */
   accountsState: AccountsState | null
+  /** Global vendor OAuth flow state (auto/loopback OAuth in progress). */
+  vendorOAuth: { engineId: string; vendorId: string; stage: 'waiting' | 'error'; instructions: string } | null
   activeView: ActiveView
   pluginViews: PluginViewWithOwner[]
 
@@ -624,6 +682,12 @@ interface SessionState {
   showWelcome: () => void
   switchSession: (routingId: string) => void
   createNewSession: (routingId: string, cwd: string, switchTo?: boolean) => void
+  /** Set the remembered engine choice. Persisted in localStorage (lightweight). */
+  setLastSelectedEngineId: (engineId: EngineId) => void
+  /** Update the configurable opencode default model (mirrors opencodeConfig.model). */
+  setOpencodeDefaultModel: (model: string) => void
+  /** Force the model picker to re-fetch the engine model list. */
+  reloadModels: () => void
   loadHistoricalSession: (
     routingId: string,
     messages: ChatMessage[],
@@ -651,7 +715,7 @@ interface SessionState {
   unhideSession: (sessionId: string) => void
   hideProject: (projectKey: string) => void
   unhideProject: (projectKey: string) => void
-  deleteSession: (sessionId: string, projectKey: string) => Promise<void>
+  deleteSession: (sessionId: string, projectKey: string, engineId?: EngineId) => Promise<void>
   deleteProject: (projectKey: string) => Promise<void>
 
   // Per-session actions (all take routingId)
@@ -743,6 +807,7 @@ interface SessionState {
     taskNotifications: TaskNotification[]
   ) => void
   updateSettings: (partial: Partial<AppSettings>) => void
+  setEngineConfig: (config: EngineConfig) => void
   applyExternalSettings: (settings: Record<string, unknown>) => void
   applyExternalSessionConfig: (config: {
     recentSessions?: string[]
@@ -751,6 +816,7 @@ interface SessionState {
     worktreeInfoMap?: Record<string, WorktreeInfo>
     hiddenSessions?: string[]
     hiddenProjects?: string[]
+    sessionEngines?: Record<string, { engineId: EngineId; model?: ModelRef }>
   }) => void
   applyRemoteSnapshot: (
     snapshot: import('../../../shared/remote-protocol').FullStateSnapshot
@@ -761,13 +827,19 @@ interface SessionState {
     routingId?: string
   ) => void
   setThinkingMode: (mode: 'adaptive' | 'enabled' | 'disabled' | null, routingId?: string) => void
+  setReasoningVariant: (variant: string | null, routingId?: string) => void
   setStatusLine: (routingId: string, data: StatusLineData) => void
+  setMetering: (routingId: string, data: MeteringSnapshot) => void
   appendQueuedText: (text: string) => void
   setQueuedText: (routingId: string, text: string) => void
   clearQueuedText: () => void
   consumeQueuedText: (routingId: string) => void
   setDraftText: (text: string) => void
-  setSelectedModel: (model: string) => void
+  /** Set the active session's model picker value. When `engineId` is provided
+   *  and differs from the session's current engine, switches the session's
+   *  engine too (only valid for a not-yet-started session — the caller guards
+   *  this). Persists the engine-correct ModelRef. */
+  setSelectedModel: (model: string, engineId?: EngineId) => void
   setSlashCommands: (commands: SlashCommandInfo[]) => void
   setCustomCommands: (commands: SlashCommandInfo[]) => void
   setSdkSkillNames: (names: string[]) => void
@@ -797,14 +869,20 @@ interface SessionState {
   // Account usage
   setAccountUsage: (data: AccountUsage) => void
   // Native OAuth (ADR-014)
-  setAuthState: (data: AuthState) => void
+  setAuthState: (data: AuthFlowState) => void
   setAuthSource: (source: string) => void
+  setVendorAuth: (map: VendorAuthMap) => void
   setAccountsState: (data: AccountsState) => void
   /** Mark every session SDK-inactive so the next send respawns cli.js (ADR-015). */
   respawnAllSessions: () => void
   signIn: () => Promise<void>
   submitOAuthCode: (code: string) => Promise<void>
   cancelSignIn: () => Promise<void>
+  setVendorOAuth(state: { engineId: string; vendorId: string; stage: 'waiting' | 'error'; instructions: string } | null): void
+  cancelVendorOAuth(): void
+  setVendorAuthRequired(routingId: string, data: { vendorId: string; message: string } | null): void
+  clearVendorAuthRequired(routingId: string): void
+  authorizeVendorOAuth(engineId: EngineId, vendorId: string): Promise<{ ok: boolean; needsPaste?: { url: string; method: number; instructions: string } }>
   /** Respawn the session's cli.js process (so it re-reads freshly-stored
    *  credentials) and resend a prompt. Used by the post-login Retry. */
   retrySend: (routingId: string, prompt: string) => Promise<void>
@@ -858,6 +936,13 @@ export const useSessionStore = create<SessionState>((set) => ({
   customTitles: {},
   hiddenSessionIds: [],
   hiddenProjectKeys: [],
+  sessionEngines: {},
+  lastSelectedEngineId:
+    ((localStorage.getItem('lastSelectedEngineId') ??
+      localStorage.getItem('lastSelectedProvider')) as EngineId | null) ?? 'claude',
+  opencodeDefaultModel: OPENCODE_DEFAULT_MODEL,
+  modelReloadNonce: 0,
+  engineConfig: {},
   settings: DEFAULT_SETTINGS,
   availableModels: [],
   slashCommands: [],
@@ -866,7 +951,9 @@ export const useSessionStore = create<SessionState>((set) => ({
   accountUsage: null,
   authState: null,
   authSource: null,
+  vendorAuth: null,
   accountsState: null,
+  vendorOAuth: null,
   blockUsage: null,
   activeView: { type: 'chat' } as ActiveView,
   pluginViews: [],
@@ -913,15 +1000,62 @@ export const useSessionStore = create<SessionState>((set) => ({
         routingId,
         ...state.recentSessionIds.filter((id) => id !== routingId)
       ].slice(0, state.settings.maxRecentSessions)
-      saveSessionConfig(state, { recentSessionIds })
+      // Validate the remembered engine against what is ACTUALLY usable right now.
+      // `availableModels` reflects post-discovery, provider-filtered reality. If the
+      // remembered engine is opencode but it has no usable model — its provider was
+      // disabled, discovery hasn't run yet, or opencode is unavailable — seeding it
+      // would show a Claude model in the picker while routing send to a phantom
+      // opencode model (the desync regression). Fall back to claude in that case.
+      let engineId = state.lastSelectedEngineId
+      let defaultModel: string
+      if (engineId === 'opencode') {
+        const resolved = resolveOpencodeModel(state.availableModels, state.opencodeDefaultModel)
+        if (resolved) {
+          defaultModel = resolved
+        } else {
+          engineId = 'claude'
+          defaultModel = 'default'
+        }
+      } else {
+        defaultModel = defaultModelForEngine(engineId, state.opencodeDefaultModel)
+      }
+      // Write model into sessionEngines so it can be seeded on reopen (spec §3).
+      // Always write the entry so the engine is recorded; model is set on first model event.
+      const sessionEngines = {
+        ...state.sessionEngines,
+        [routingId]: { engineId, model: modelRefForEngine(engineId, defaultModel) }
+      }
+      saveSessionConfig(state, { recentSessionIds, sessionEngines })
+      const newSession = createEmptySession(cwd)
+      newSession.selectedEngineId = engineId
+      newSession.selectedModel = defaultModel
+      // Seed status.engineId/capabilities to match so they're correct before spawn
+      newSession.status = {
+        ...newSession.status,
+        engineId,
+        capabilities: engineId === 'opencode'
+          ? resolveOpencodeCapabilities()
+          : resolveClaudeCapabilities('default')
+      }
       return {
         ...(switchTo
           ? { activeSessionId: routingId, activeView: { type: 'chat' } as ActiveView }
           : {}),
-        sessions: { ...state.sessions, [routingId]: createEmptySession(cwd) },
-        recentSessionIds
+        sessions: { ...state.sessions, [routingId]: newSession },
+        recentSessionIds,
+        sessionEngines
       }
     }),
+
+  setLastSelectedEngineId: (engineId) => {
+    localStorage.setItem('lastSelectedEngineId', engineId)
+    set({ lastSelectedEngineId: engineId })
+  },
+
+  setOpencodeDefaultModel: (model) =>
+    set({ opencodeDefaultModel: model || OPENCODE_DEFAULT_MODEL }),
+
+  reloadModels: () => set((s) => ({ modelReloadNonce: s.modelReloadNonce + 1 })),
 
   loadHistoricalSession: (
     routingId,
@@ -932,21 +1066,44 @@ export const useSessionStore = create<SessionState>((set) => ({
     statusLine?,
     warnings?
   ) =>
-    set((state) => ({
-      sessions: {
-        ...state.sessions,
-        [routingId]: {
-          ...createEmptySession(cwd),
-          messages,
-          isHistorical: true,
-          taskNotifications: taskNotifications || [],
-          subagentMessages: subagentMessages || {},
-          statusLine: statusLine ?? null,
-          warnings: warnings || [],
-          worktreeInfo: state.worktreeInfoMap[routingId] ?? null
+    set((state) => {
+      const base = createEmptySession(cwd)
+      // Per-session model memory: restore the persisted model when present, so
+      // reopening a session brings back the model you last used in it. The engine
+      // is restored too (an opencode session reopens as opencode). When NO model
+      // was persisted (fresh load), fall back to the session ENGINE's default —
+      // engine-aware, never Claude's "default" on an opencode session (the bug).
+      const persistedEntry = state.sessionEngines[routingId]
+      const persistedEngineId = persistedEntry?.engineId ?? 'claude'
+      const persistedModelRef = persistedEntry?.model
+      // For opencode the picker value is "vendorId/modelId"; for claude it's the modelId.
+      let persistedModel: string | undefined
+      if (persistedModelRef) {
+        persistedModel =
+          persistedEngineId === 'opencode'
+            ? `${persistedModelRef.vendorId}/${persistedModelRef.modelId}`
+            : persistedModelRef.modelId
+      }
+      const selectedModel =
+        persistedModel ?? defaultModelForEngine(persistedEngineId, state.opencodeDefaultModel)
+      return {
+        sessions: {
+          ...state.sessions,
+          [routingId]: {
+            ...base,
+            messages,
+            isHistorical: true,
+            taskNotifications: taskNotifications || [],
+            subagentMessages: subagentMessages || {},
+            statusLine: statusLine ?? null,
+            warnings: warnings || [],
+            worktreeInfo: state.worktreeInfoMap[routingId] ?? null,
+            selectedEngineId: persistedEngineId,
+            selectedModel
+          }
         }
       }
-    })),
+    }),
 
   forkFromMessage: async (sourceRoutingId, messageId) => {
     const src = useSessionStore.getState().sessions[sourceRoutingId]
@@ -955,6 +1112,7 @@ export const useSessionStore = create<SessionState>((set) => ({
     // carry it as the routingId; a still-streaming session exposes it on status.
     const sourceSessionId = src.status.sessionId ?? sourceRoutingId
 
+    // Claude: resolve the JSONL-flushed uuid for the chosen message.
     const result = await window.api.resolveForkAnchor(sourceSessionId, src.cwd, messageId)
     if (!result?.anchorUuid) {
       // The message isn't flushed to the transcript yet (or vanished). Surface
@@ -967,13 +1125,13 @@ export const useSessionStore = create<SessionState>((set) => ({
         )
       return null
     }
-    const anchorUuid: string = result.anchorUuid
+    const anchorUuid = result.anchorUuid
 
     // Optimistically seed the branch with messages 1..N (deep-ish copy so edits
     // to one session never mutate the other). cli.js performs the same slice by
     // uuid when it materializes the fork, so the displayed history will match.
     const idx = src.messages.findIndex((m) => m.id === messageId)
-    const sliced = (idx >= 0 ? src.messages.slice(0, idx + 1) : src.messages).map((m) => ({
+    const seeded = (idx >= 0 ? src.messages.slice(0, idx + 1) : src.messages).map((m) => ({
       ...m,
       content: m.content.map((b) => ({ ...b }))
     }))
@@ -985,12 +1143,13 @@ export const useSessionStore = create<SessionState>((set) => ({
         ...s.recentSessionIds.filter((id) => id !== newRoutingId)
       ].slice(0, s.settings.maxRecentSessions)
       saveSessionConfig(s, { recentSessionIds })
+      const baseSession = createEmptySession(src.cwd)
       return {
         sessions: {
           ...s.sessions,
           [newRoutingId]: {
-            ...createEmptySession(src.cwd),
-            messages: sliced,
+            ...baseSession,
+            messages: seeded,
             // Render the seeded history immediately; the fork-spawn path in
             // InputBox (gated on forkOrigin) overrides the resume target.
             isHistorical: true,
@@ -999,7 +1158,8 @@ export const useSessionStore = create<SessionState>((set) => ({
             selectedModel: src.selectedModel,
             permissionMode: src.permissionMode,
             effort: src.effort,
-            thinkingMode: src.thinkingMode
+            thinkingMode: src.thinkingMode,
+            reasoningVariant: src.reasoningVariant
           }
         },
         activeSessionId: newRoutingId,
@@ -1114,8 +1274,8 @@ export const useSessionStore = create<SessionState>((set) => ({
       return { hiddenProjectKeys }
     }),
 
-  deleteSession: async (sessionId, projectKey) => {
-    await window.api.deleteSession(sessionId, projectKey)
+  deleteSession: async (sessionId, projectKey, engineId) => {
+    await window.api.deleteSession(sessionId, projectKey, engineId)
     // Also scrub any references to this session from persisted config + in-memory state
     useSessionStore.setState((state) => {
       const recentSessionIds = state.recentSessionIds.filter((id) => id !== sessionId)
@@ -1158,6 +1318,16 @@ export const useSessionStore = create<SessionState>((set) => ({
 
   deleteProject: async (projectKey) => {
     await window.api.deleteProject(projectKey)
+    // Also delete any opencode sessions in this group so they don't reappear on the next poll.
+    const opencodeSessions = useSessionStore
+      .getState()
+      .directories.find((g) => g.projectKey === projectKey)
+      ?.sessions.filter((s) => s.engineId === 'opencode') ?? []
+    if (opencodeSessions.length > 0) {
+      await Promise.allSettled(
+        opencodeSessions.map((s) => window.api.deleteSession(s.sessionId, projectKey, 'opencode'))
+      )
+    }
     // Collect all session IDs in this project (both on-disk group members and live in-memory
     // sessions sharing the project's cwd) so we can purge them from every piece of state.
     useSessionStore.setState((state) => {
@@ -1832,6 +2002,8 @@ export const useSessionStore = create<SessionState>((set) => ({
       return { settings }
     }),
 
+  setEngineConfig: (config) => set({ engineConfig: config }),
+
   // Apply settings from an external source (another instance) — no save back to disk
   applyExternalSettings: (raw) =>
     set(() => {
@@ -1848,7 +2020,8 @@ export const useSessionStore = create<SessionState>((set) => ({
       customTitles: config.customTitles ?? {},
       worktreeInfoMap: config.worktreeInfoMap ?? {},
       hiddenSessionIds: config.hiddenSessions ?? [],
-      hiddenProjectKeys: config.hiddenProjects ?? []
+      hiddenProjectKeys: config.hiddenProjects ?? [],
+      sessionEngines: config.sessionEngines ?? {}
     })),
 
   // Apply a full state snapshot from the remote server (initial sync)
@@ -1874,6 +2047,7 @@ export const useSessionStore = create<SessionState>((set) => ({
           permissionMode: snap.permissionMode as PermissionMode,
           effort: (snap.effort ?? null) as 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null,
           thinkingMode: (snap.thinkingMode ?? null) as 'adaptive' | 'enabled' | 'disabled' | null,
+          reasoningVariant: (snap.reasoningVariant ?? null) as string | null,
           statusLine: snap.statusLine
         }
       }
@@ -1915,6 +2089,13 @@ export const useSessionStore = create<SessionState>((set) => ({
       return { sessions: updateSession(state.sessions, id, () => ({ thinkingMode: mode })) }
     }),
 
+  setReasoningVariant: (variant, routingId) =>
+    set((state) => {
+      const id = routingId ?? state.activeSessionId
+      if (!id) return {}
+      return { sessions: updateSession(state.sessions, id, () => ({ reasoningVariant: variant })) }
+    }),
+
   setStatusLine: (routingId, data) =>
     set((state) => {
       // Direct match — fast path
@@ -1928,6 +2109,21 @@ export const useSessionStore = create<SessionState>((set) => ({
       const newId = rekeyMap.get(routingId)
       if (newId && state.sessions[newId]) {
         return { sessions: updateSession(state.sessions, newId, () => ({ statusLine: data })) }
+      }
+      return {}
+    }),
+
+  // Phase 7 Pass 2 — engine-neutral metering snapshot. Mirrors setStatusLine
+  // (including the pre-rekey routingId fallback). Additive: does not touch
+  // statusLine, so the Claude status-line rendering is unchanged.
+  setMetering: (routingId, data) =>
+    set((state) => {
+      if (state.sessions[routingId]) {
+        return { sessions: updateSession(state.sessions, routingId, () => ({ metering: data })) }
+      }
+      const newId = rekeyMap.get(routingId)
+      if (newId && state.sessions[newId]) {
+        return { sessions: updateSession(state.sessions, newId, () => ({ metering: data })) }
       }
       return {}
     }),
@@ -1989,11 +2185,53 @@ export const useSessionStore = create<SessionState>((set) => ({
       return { sessions: updateSession(state.sessions, id, () => ({ draftText: text })) }
     }),
 
-  setSelectedModel: (model) =>
+  setSelectedModel: (model, engineId) =>
     set((state) => {
       const id = state.activeSessionId
       if (!id) return {}
-      return { sessions: updateSession(state.sessions, id, () => ({ selectedModel: model })) }
+      const session = state.sessions[id]
+      // Resolve the engine this model belongs to: explicit arg wins, else keep
+      // the session's current engine.
+      const targetEngine: EngineId = engineId ?? session?.selectedEngineId ?? 'claude'
+      const engineChanged = !!session && session.selectedEngineId !== targetEngine
+
+      // Persist the engine-correct ModelRef into sessionEngines so it seeds
+      // selectedModel + engine on reopen. Update the engineId too when it changed.
+      const existing = state.sessionEngines[id]
+      const modelRef = modelRefForEngine(targetEngine, model)
+      const sessionEngines = existing
+        ? {
+            ...state.sessionEngines,
+            [id]: { ...existing, engineId: targetEngine, model: modelRef }
+          }
+        : state.sessionEngines
+      if (existing) saveSessionConfig(state, { sessionEngines })
+
+      // Mirror the engine choice into localStorage (matches setLastSelectedEngineId).
+      if (engineChanged) localStorage.setItem('lastSelectedEngineId', targetEngine)
+
+      // When the engine changed, also update the session's selectedEngineId,
+      // status.engineId, and capabilities so pre-spawn gating is correct.
+      // Always reset reasoningVariant on model change — different models have different variants.
+      const patch: Partial<PerSessionState> = { selectedModel: model, reasoningVariant: null }
+      if (engineChanged && session) {
+        patch.selectedEngineId = targetEngine
+        patch.status = {
+          ...session.status,
+          engineId: targetEngine,
+          capabilities:
+            targetEngine === 'opencode'
+              ? resolveOpencodeCapabilities()
+              : resolveClaudeCapabilities(model)
+        }
+      }
+
+      return {
+        sessions: updateSession(state.sessions, id, () => patch),
+        sessionEngines,
+        // Remember the engine for the next new session.
+        ...(engineChanged ? { lastSelectedEngineId: targetEngine } : {})
+      }
     }),
 
   setSlashCommands: (commands) => set({ slashCommands: commands }),
@@ -2008,6 +2246,7 @@ export const useSessionStore = create<SessionState>((set) => ({
   // snapshot synchronously; the terminal transition arrives via onAuthState.
   setAuthState: (data) => set({ authState: data }),
   setAuthSource: (source) => set({ authSource: source }),
+  setVendorAuth: (map) => set({ vendorAuth: map }),
   setAccountsState: (data) => set({ accountsState: data }),
   respawnAllSessions: () =>
     set((s) => ({
@@ -2030,14 +2269,90 @@ export const useSessionStore = create<SessionState>((set) => ({
       authState: s.authState ? { ...s.authState, status: 'idle', error: null } : null
     }))
   },
+  setVendorOAuth: (state) => set({ vendorOAuth: state }),
+  cancelVendorOAuth: () => {
+    // Invalidate any in-flight `auto` flow so its late-resolving callback can't
+    // re-set vendorOAuth after the user cancelled (SHOULD-FIX 4).
+    vendorOAuthFlowToken++
+    // Release the main-side server held open for the authorize → callback flow,
+    // otherwise an abandoned (never-completed) flow leaks the opencode process.
+    // Killing it also unblocks the pending callback long-poll.
+    const engineId = useSessionStore.getState().vendorOAuth?.engineId as EngineId | undefined
+    if (engineId) void window.api.vendorAuthOauthCancel(engineId).catch(() => {})
+    set({ vendorOAuth: null })
+  },
+  setVendorAuthRequired: (routingId, data) =>
+    set((s) => ({ sessions: updateSession(s.sessions, routingId, () => ({ vendorAuthRequired: data })) })),
+  clearVendorAuthRequired: (routingId) =>
+    set((s) => ({ sessions: updateSession(s.sessions, routingId, () => ({ vendorAuthRequired: null })) })),
+  authorizeVendorOAuth: async (engineId, vendorId) => {
+    try {
+      const allOptions = await window.api.vendorAuthListOptions(engineId)
+      const vendorOptions = allOptions[vendorId] ?? []
+      const firstOAuthOption = vendorOptions.find((o) => o.type === 'oauth')
+      if (!firstOAuthOption) return { ok: false }
+      const methodIdx = vendorOptions.indexOf(firstOAuthOption)
+      const result = await window.api.vendorAuthOauthAuthorize(engineId, vendorId, methodIdx)
+      window.open(result.url, '_blank')
+      if (result.method === 'auto') {
+        // Capture the flow token AFTER authorize so a Cancel during authorize is
+        // honored too. Any post-await state-set bails if the token moved.
+        const token = ++vendorOAuthFlowToken
+        const superseded = (): boolean => vendorOAuthFlowToken !== token
+        useSessionStore.getState().setVendorOAuth({
+          engineId,
+          vendorId,
+          stage: 'waiting',
+          instructions: result.instructions
+        })
+        try {
+          // Long-lived: opencode's vendor plugin hosts the loopback/device flow
+          // and we await its completion WITHOUT supplying a code.
+          const ok = await window.api.vendorAuthOauthCallback(engineId, vendorId, methodIdx)
+          if (superseded()) return { ok: false }
+          if (ok) {
+            useSessionStore.getState().setVendorOAuth(null)
+            // NOTE: do NOT write into the global `vendorAuth` map here — it is
+            // Claude/anthropic-specific (AuthBanner reads vendorAuth.anthropic).
+            // The opencode Settings section re-probes its own local state via
+            // refresh(), and OpencodeAuthProvider.oauthCallback already
+            // invalidates the model cache main-side. (REQUIRED 1.)
+            return { ok: true }
+          }
+          useSessionStore.getState().setVendorOAuth({ engineId, vendorId, stage: 'error', instructions: result.instructions })
+          return { ok: false }
+        } catch {
+          if (superseded()) return { ok: false }
+          useSessionStore.getState().setVendorOAuth({ engineId, vendorId, stage: 'error', instructions: result.instructions })
+          return { ok: false }
+        }
+      } else {
+        // method === 'code': return needsPaste so the caller can show paste box
+        return { ok: false, needsPaste: { url: result.url, method: methodIdx, instructions: result.instructions } }
+      }
+    } catch {
+      return { ok: false }
+    }
+  },
   retrySend: async (routingId, prompt) => {
     const session = useSessionStore.getState().sessions[routingId]
     if (!session) return
-    // The persistent cli.js process caches credentials for its lifetime, so a
-    // post-login retry MUST respawn it (createSession → session-manager cancels
-    // the old process and spawns a fresh one that re-reads the new credential).
-    // Plain sendPrompt would just push to the stale, still-401ing process.
-    const resumeId = session.messages.length > 0 ? routingId : undefined
+    // Both engines cache vendor credentials for their process's lifetime, so a
+    // post-login retry MUST respawn (createSession → session-manager cancels the
+    // old session and spawns a fresh backend that re-reads the new credential):
+    //   - Claude: the persistent cli.js process caches the OAuth token.
+    //   - opencode: the `opencode serve` process caches the instantiated AI-SDK
+    //     provider (auth baked in) for its lifetime — verified in opencode-src
+    //     provider/provider.ts (InstanceState reads auth.all() once at init; the
+    //     /oauth/callback + PUT /auth handlers persist to disk but never
+    //     invalidate that cache). cancel() releases the server ref; when it's the
+    //     last ref the process is killed, so the recreate spawns a fresh server
+    //     that re-reads auth.json. Plain sendPrompt would re-hit the stale,
+    //     still-401ing backend.
+    // opencode sessions always pass routingId as resumeSessionId (the server resumes
+    // the prior opencode session regardless of whether messages are preloaded locally).
+    const isOpencode = session.selectedEngineId === 'opencode'
+    const resumeId = (session.messages.length > 0 || isOpencode) ? routingId : undefined
     await window.api.createSession(
       routingId,
       session.cwd || '',
@@ -2045,7 +2360,10 @@ export const useSessionStore = create<SessionState>((set) => ({
       resumeId,
       session.permissionMode,
       session.selectedModel,
-      session.thinkingMode ?? undefined
+      session.thinkingMode ?? undefined,
+      undefined,
+      undefined,
+      session.selectedEngineId
     )
     set((s) => ({ sessions: updateSession(s.sessions, routingId, () => ({ sdkActive: true })) }))
     await window.api.sendPrompt(routingId, prompt)
@@ -2077,12 +2395,34 @@ export const useSessionStore = create<SessionState>((set) => ({
         worktreeInfoMap[newId] = worktreeInfoMap[oldId]
         delete worktreeInfoMap[oldId]
       }
+      // Carry over persisted engine mapping to the canonical session ID
+      const sessionEngines = { ...state.sessionEngines }
+      if (sessionEngines[oldId]) {
+        sessionEngines[newId] = sessionEngines[oldId]
+        delete sessionEngines[oldId]
+      } else {
+        // Always record the engine + current model, defaulting to the session's choices
+        let modelRef = claudeModel(session.selectedModel)
+        if (session.selectedEngineId === 'opencode') {
+          const slash = session.selectedModel.indexOf('/')
+          if (slash >= 0) {
+            modelRef = opencodeModel(session.selectedModel.slice(0, slash), session.selectedModel.slice(slash + 1))
+          } else {
+            modelRef = opencodeModel('opencode', session.selectedModel)
+          }
+        }
+        sessionEngines[newId] = {
+          engineId: session.selectedEngineId,
+          model: modelRef
+        }
+      }
       saveSessionConfig(state, {
         recentSessionIds,
         pinnedSessionIds,
         hiddenSessionIds,
         customTitles,
-        worktreeInfoMap
+        worktreeInfoMap,
+        sessionEngines
       })
       return {
         sessions,
@@ -2091,7 +2431,8 @@ export const useSessionStore = create<SessionState>((set) => ({
         pinnedSessionIds,
         hiddenSessionIds,
         customTitles,
-        worktreeInfoMap
+        worktreeInfoMap,
+        sessionEngines
       }
     })
   },
@@ -2567,6 +2908,7 @@ export function getRemoteStateSnapshot(): {
       permissionMode: string
       effort: string
       thinkingMode: string
+      reasoningVariant: string | null
       statusLine: StatusLineData | null
       slashCommands: SlashCommandInfo[]
       customCommands: SlashCommandInfo[]
@@ -2602,6 +2944,7 @@ export function getRemoteStateSnapshot(): {
       permissionMode: s.permissionMode,
       effort: s.effort,
       thinkingMode: s.thinkingMode,
+      reasoningVariant: s.reasoningVariant,
       statusLine: s.statusLine,
       slashCommands: state.slashCommands,
       customCommands: state.customCommands,

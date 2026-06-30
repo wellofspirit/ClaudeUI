@@ -34,7 +34,7 @@ export function PluginWebView({ pluginId, onClose }: PluginWebViewProps): React.
 
   if (!view) {
     return (
-      <div className="flex flex-col h-full bg-bg-primary items-center justify-center text-text-muted">
+      <div data-testid="PluginWebView" className="flex flex-col h-full bg-bg-primary items-center justify-center text-text-muted">
         Plugin view not found
       </div>
     )
@@ -44,7 +44,7 @@ export function PluginWebView({ pluginId, onClose }: PluginWebViewProps): React.
   const srcUrl = `file://${view.htmlFile.replace(/\\/g, '/')}?pluginId=${encodeURIComponent(pluginId)}`
 
   return (
-    <div className="flex flex-col h-full bg-bg-primary">
+    <div data-testid="PluginWebView" className="flex flex-col h-full bg-bg-primary">
       {/* Header — matches AutomationView / UsageView pattern */}
       <div className="sticky top-0 z-10 bg-bg-primary/95 backdrop-blur-sm border-b border-border/30">
         <div
@@ -77,6 +77,7 @@ export function PluginWebView({ pluginId, onClose }: PluginWebViewProps): React.
             <span className="text-sm font-semibold text-text-primary">{view.label}</span>
           </div>
           <button
+            data-testid="PluginWebView.close"
             onClick={onClose}
             className="p-1 rounded hover:bg-bg-hover text-text-muted hover:text-text-primary transition-colors"
             title="Close"

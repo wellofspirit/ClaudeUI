@@ -15,6 +15,7 @@ import {
   ModelPicker,
   EffortPicker,
   ThinkingPicker,
+  ReasoningPicker,
   type ModelDisplay
 } from '../../shared/InlinePickers'
 
@@ -78,6 +79,16 @@ export interface InputBoxViewProps {
   allowedEffortLevels: readonly EffortLevel[]
   thinkingMode: ThinkingMode
   adaptiveSupported: boolean
+  /** Show/hide the thinking-mode picker. Gated on capabilities.reasoning.thinking. */
+  showThinkingPicker?: boolean
+  /** Show/hide the model picker. Always shown for Claude; the picker tolerates an empty/loading model list. */
+  showModelPicker?: boolean
+  /** Whether to include cost in the status line. Hidden when billingType === 'free' (ROADMAP #3). */
+  showCostInStatusLine?: boolean
+  /** Show the context-usage meter in the status line. Gated on capabilities.contextWindow > 0. */
+  showContextMeter?: boolean
+  /** Show/hide the image/PDF attach affordance (button + drag/drop + paste). Gated on capabilities.vision. */
+  visionEnabled?: boolean
   sandboxEnabled: boolean
   voiceEnabled: boolean
   voiceState: VoiceState
@@ -97,6 +108,11 @@ export interface InputBoxViewProps {
   onSelectModel: (value: string) => void
   onSelectEffort: (level: EffortLevel) => void
   onSelectThinking: (mode: ThinkingMode) => void
+  /** Available reasoning variant keys for the selected opencode model. Empty = hide picker. */
+  reasoningVariants?: string[]
+  /** Current reasoning variant selection, or null for the opencode default. */
+  reasoningVariant?: string | null
+  onSelectReasoningVariant?: (variant: string | null) => void
   onOpenSandboxSettings: () => void
   onVoiceStart: () => void
   onVoiceStop: () => void
@@ -106,9 +122,25 @@ export interface InputBoxViewProps {
 // StatusLine (reads its own store slices — not part of InputBox props)
 // ---------------------------------------------------------------------------
 
-function StatusLine({ data }: { data: StatusLineData }): React.JSX.Element {
+function StatusLine({
+  data,
+  showCost = true,
+  showContextMeter = true
+}: {
+  data: StatusLineData
+  showCost?: boolean
+  showContextMeter?: boolean
+}): React.JSX.Element {
   const align = useSessionStore((s) => s.settings.statusLineAlign)
-  const template = useSessionStore((s) => s.settings.statusLineTemplate)
+  const rawTemplate = useSessionStore((s) => s.settings.statusLineTemplate)
+
+  // Strip the cost placeholder when the engine doesn't report cost, and the
+  // context-usage placeholders when the model has no known context window
+  // (contextWindow === 0 — the meter would be meaningless).
+  let template = showCost ? rawTemplate : rawTemplate.replace(/\{cost\}/g, '')
+  if (!showContextMeter) {
+    template = template.replace(/\{used\}/g, '').replace(/\{remaining\}/g, '')
+  }
 
   // usedPercentage/remainingPercentage are computed in the main process (live:
   // claude-session, history: session-history), keyed on the *resolved* model id
@@ -220,6 +252,7 @@ function VoiceButton({
 
   return (
     <button
+      data-testid="InputBox.voice"
       onMouseDown={(e) => {
         e.preventDefault()
         onVoiceStart()
@@ -378,6 +411,7 @@ export function InputBoxView(props: InputBoxViewProps): React.JSX.Element {
 
   return (
     <div
+      data-testid="InputBox"
       style={{
         padding: isMobile ? '8px 8px 16px' : '8px 13px 16px',
         paddingBottom: isMobile ? 'max(16px, env(safe-area-inset-bottom))' : '16px'
@@ -450,6 +484,7 @@ export function InputBoxView(props: InputBoxViewProps): React.JSX.Element {
 
           {/* Textarea */}
           <textarea
+            data-testid="InputBox.textarea"
             ref={textareaRef}
             value={displayValue}
             onChange={onInput}
@@ -467,17 +502,30 @@ export function InputBoxView(props: InputBoxViewProps): React.JSX.Element {
           <div className="flex items-center justify-between px-1.5 pb-1.5">
             {/* Left controls */}
             <div className="flex items-center gap-1">
-              <AttachMenu fileInputRef={props.fileInputRef} onFileChange={props.onFileChange} />
-              <ModelPicker
-                models={props.models}
-                selectedModel={props.selectedModel}
-                onSelectModel={props.onSelectModel}
-              />
-              <ThinkingPicker
-                thinkingMode={props.thinkingMode}
-                adaptiveSupported={props.adaptiveSupported}
-                onSelectThinking={props.onSelectThinking}
-              />
+              {(props.visionEnabled ?? true) && (
+                <AttachMenu fileInputRef={props.fileInputRef} onFileChange={props.onFileChange} />
+              )}
+              {(props.showModelPicker ?? true) && (
+                <ModelPicker
+                  models={props.models}
+                  selectedModel={props.selectedModel}
+                  onSelectModel={props.onSelectModel}
+                />
+              )}
+              {(props.showThinkingPicker ?? true) && (
+                <ThinkingPicker
+                  thinkingMode={props.thinkingMode}
+                  adaptiveSupported={props.adaptiveSupported}
+                  onSelectThinking={props.onSelectThinking}
+                />
+              )}
+              {(props.reasoningVariants?.length ?? 0) > 0 && (
+                <ReasoningPicker
+                  variants={props.reasoningVariants!}
+                  selected={props.reasoningVariant ?? null}
+                  onSelect={props.onSelectReasoningVariant ?? (() => {})}
+                />
+              )}
               <EffortPicker
                 effort={props.effort}
                 allowedEffortLevels={props.allowedEffortLevels}
@@ -494,6 +542,7 @@ export function InputBoxView(props: InputBoxViewProps): React.JSX.Element {
             <div className="flex items-center gap-1.5">
               {isRunning && (
                 <button
+                  data-testid="InputBox.cancel"
                   onClick={onCancel}
                   className="h-7 px-2.5 flex items-center gap-1.5 text-[11px] text-text-secondary rounded-lg border border-border hover:border-border-bright transition-colors cursor-pointer"
                 >
@@ -511,6 +560,7 @@ export function InputBoxView(props: InputBoxViewProps): React.JSX.Element {
                 onVoiceStop={props.onVoiceStop}
               />
               <button
+                data-testid="InputBox.send"
                 onClick={onSend}
                 disabled={(!text.trim() && attachedFiles.length === 0) || isDisabled}
                 title={isRunning ? 'Queue message' : 'Send message'}
@@ -533,7 +583,11 @@ export function InputBoxView(props: InputBoxViewProps): React.JSX.Element {
             </div>
           </div>
         </div>
-        <StatusLine data={statusLine ?? DEFAULT_STATUS_LINE} />
+        <StatusLine
+          data={statusLine ?? DEFAULT_STATUS_LINE}
+          showCost={props.showCostInStatusLine ?? true}
+          showContextMeter={props.showContextMeter ?? true}
+        />
       </div>
     </div>
   )

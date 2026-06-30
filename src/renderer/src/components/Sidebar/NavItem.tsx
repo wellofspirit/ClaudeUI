@@ -33,7 +33,8 @@ export function NavItem({
   active,
   onClick,
   onDoubleClick,
-  badge
+  badge,
+  rightSlot
 }: {
   label: string
   icon: React.ReactNode
@@ -41,9 +42,13 @@ export function NavItem({
   onClick?: () => void
   onDoubleClick?: () => void
   badge?: number
+  /** Optional right-aligned content (e.g. an inline toggle). */
+  rightSlot?: React.ReactNode
 }): React.JSX.Element {
   return (
     <div
+      data-testid="NavItem"
+      data-id={label}
       style={{ padding: '0 5px' }}
       onClick={onClick}
       onDoubleClick={onDoubleClick}
@@ -54,6 +59,7 @@ export function NavItem({
     >
       <span className="shrink-0 text-text-muted">{icon}</span>
       <span className="truncate flex-1">{label}</span>
+      {rightSlot}
       {badge != null && badge > 0 && (
         <span className="shrink-0 min-w-[16px] h-4 px-1 flex items-center justify-center rounded-full bg-red-500 text-white text-[10px] font-semibold leading-none">
           {badge > 99 ? '99+' : badge}

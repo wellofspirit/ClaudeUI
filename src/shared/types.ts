@@ -1,3 +1,5 @@
+import type { ResolvedCapabilities } from './model-capabilities'
+
 export type IpcResult<T> = { ok: true; data: T } | { ok: false; error: string; code?: string }
 
 /** SDK sends "Agent" (canonical, v0.2.63+) or "Task" (alias for backward compat) */
@@ -38,12 +40,89 @@ export interface ChatMessage {
   planContent?: string
 }
 
+export type EngineId = 'claude' | 'opencode'
+
+/** Open-ended union: known vendors are named; unknown ones fall through as plain strings. */
+export type VendorId = 'anthropic' | 'openai' | 'google' | 'local' | (string & {})
+
+/** Vendor-qualified model identity — the canonical key for model selection and persistence. */
+export interface ModelRef {
+  engineId: EngineId
+  vendorId: VendorId
+  /** Model name string, e.g. 'claude-opus-4-8', 'default' */
+  modelId: string
+}
+
+/** Construct a Claude ModelRef (engine 'claude' is 1:1 with vendor 'anthropic'). */
+export function claudeModel(modelId: string): ModelRef {
+  return { engineId: 'claude', vendorId: 'anthropic', modelId }
+}
+
+/** Construct an opencode ModelRef (engine 'opencode', vendor = providerId). */
+export function opencodeModel(vendorId: VendorId, modelId: string): ModelRef {
+  return { engineId: 'opencode', vendorId, modelId }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4 identity types — declared here for vocabulary; wired in Phase 4
+// ---------------------------------------------------------------------------
+
+export type BillingType = 'subscription' | 'apiKey' | 'free' | 'unknown'
+
+/**
+ * Resolved tri-state auth status for a single (engine, vendor) pair.
+ * 'authenticated'   — engine has confirmed valid credentials
+ * 'unauthenticated' — engine has confirmed no / expired credentials
+ * 'unknown'         — not yet probed (e.g. first render before init completes)
+ */
+export type AuthState = 'authenticated' | 'unauthenticated' | 'unknown'
+
+/** Per-(engine, vendor) auth probe result.  Used by EngineAuthProvider.probe(). */
+export interface AuthStatus {
+  authState: AuthState
+  billingType: BillingType
+  label?: string // email / org / 'ChatGPT Plus'
+  requiresLogin?: boolean // delegated engines: "run <engine> login"
+  notInstalled?: boolean
+  error?: string
+}
+
+/** Map from VendorId string to its auth status; returned by EngineAuthProvider.probe().
+ *  Engines only include vendors they know about (Claude: { anthropic: ... };
+ *  opencode: one entry per configured provider). */
+export type VendorAuthMap = Record<string, AuthStatus>
+
+/**
+ * A single auth method option for a vendor, as returned by GET /provider/auth.
+ * The array index of the option is the `method` arg for OAuth authorize/callback.
+ */
+export interface VendorAuthOption {
+  type: 'api' | 'oauth'
+  label: string
+  prompts?: Array<{ type: string; key: string; message: string; secret?: boolean }>
+}
+
+/** Resolved account descriptor held on the session. Populated by ClaudeAuthProvider.probe(). */
+export interface AccountRef {
+  engineId: EngineId
+  vendorId: VendorId
+  billingType: BillingType
+  authState: AuthState
+  label?: string
+  accountId?: string
+}
+
 export interface SessionStatus {
   state: 'idle' | 'running' | 'error' | 'disconnected'
   sessionId: string | null
-  model: string | null
+  /** Vendor-qualified model identity. Null until the engine reports a model. */
+  model: ModelRef | null
   cwd: string | null
   totalCostUsd: number
+  engineId: EngineId
+  capabilities: ResolvedCapabilities
+  /** Resolved account descriptor from the engine auth provider. Null until probed. */
+  account: AccountRef | null
 }
 
 export interface PermissionSuggestion {
@@ -112,7 +191,7 @@ export interface PluginStreamEvent extends PluginSessionEvent {
   text: string
 }
 
-export type ApprovalDecision = 'allow' | 'deny'
+export type ApprovalDecision = 'allow' | 'allowForSession' | 'deny'
 
 export type PermissionMode = 'default' | 'acceptEdits' | 'plan' | 'auto' | 'localAuto'
 
@@ -184,6 +263,168 @@ export interface SandboxSettings {
 }
 
 // ---------------------------------------------------------------------------
+// opencode native config passthrough (stored in engines/opencode.json)
+// ---------------------------------------------------------------------------
+
+/** Per-provider customization injected via OPENCODE_CONFIG_CONTENT. Credentials stay in auth.json. */
+export interface OpencodeProviderSettings {
+  name?: string
+  baseURL?: string
+  models?: { id: string; name?: string }[]
+}
+
+/** Per-agent override injected via OPENCODE_CONFIG_CONTENT. */
+export interface OpencodeAgentSettings {
+  model?: string
+  temperature?: number
+}
+
+// ─── opencode agent types ─────────────────────────────────────────────────────
+
+export type OpencodeAgentScope = 'global' | 'project'
+export type OpencodeAgentMode = 'primary' | 'subagent' | 'all'
+
+export interface OpencodeAgentSummary {
+  name: string
+  kind: 'custom' | 'builtin'
+  mode: OpencodeAgentMode
+  scope: OpencodeAgentScope | null
+  model?: string
+  color?: string
+  overridden?: boolean
+  disabled?: boolean
+  hidden?: boolean
+}
+
+export interface OpencodeAgentDetail extends OpencodeAgentSummary {
+  description?: string
+  prompt?: string
+  temperature?: number
+  topP?: number
+  steps?: number
+  reasoningEffort?: string
+  restrict: boolean
+  permission?: Record<string, 'allow' | 'ask' | 'deny'>
+}
+
+export interface OpencodeAgentInput {
+  name: string
+  scope: OpencodeAgentScope
+  mode: OpencodeAgentMode
+  model?: string
+  description?: string
+  prompt?: string
+  temperature?: number
+  topP?: number
+  steps?: number
+  reasoningEffort?: string
+  color?: string
+  hidden?: boolean
+  disable?: boolean
+  permission?: Record<string, 'allow' | 'ask' | 'deny'>
+}
+
+/**
+ * opencode-native config stored in engines/opencode.json under `opencodeConfig`.
+ * These fields are injected via OPENCODE_CONFIG_CONTENT at spawn (deep-merge, only
+ * set fields injected — never clobbers the user's own opencode.jsonc).
+ * API credentials stay in auth.json; never inject apiKey here.
+ */
+export interface OpencodeConfigSettings {
+  /** Default model in "provider/model" format, e.g. "anthropic/claude-sonnet-4-6" */
+  model?: string
+  /** Small/fast model in "provider/model" format */
+  smallModel?: string
+  /** Provider ids to disable */
+  disabledProviders?: string[]
+  /** Provider ids to enable (allowlist — others are ignored when set) */
+  enabledProviders?: string[]
+  /** Custom provider definitions keyed by provider id (base URL + optional model list) */
+  providers?: Record<string, OpencodeProviderSettings>
+  /** Per-agent model/temperature overrides keyed by agent name */
+  agents?: Record<string, OpencodeAgentSettings>
+  /**
+   * Per-provider visible-model allowlist, keyed by provider id. Values are bare
+   * model ids (NOT "provider/model"). Filtered ClaudeUI-side in discovery so the
+   * model picker isn't flooded by providers exposing hundreds of models
+   * (e.g. openrouter ships 300+).
+   *
+   * Semantics by KEY PRESENCE (the array, not its length, is the gate):
+   *   - key absent  → show ALL of that provider's models (legacy / externally-authed
+   *                   providers keep working unchanged).
+   *   - key present → show ONLY the listed model ids (an empty array → none). The
+   *                   "Add provider" flow always writes a key, so a newly-added
+   *                   provider never auto-floods the picker.
+   */
+  modelAllowlist?: Record<string, string[]>
+}
+
+/**
+ * One provider in the opencode catalog (the full models.dev set, ~146 providers),
+ * surfaced to the settings UI so users can add any supported provider — including
+ * ones with no custom auth loader (e.g. openrouter, authed by a plain API key).
+ * Lightweight by design: the per-provider model list is fetched separately
+ * (getOpencodeProviderModels) so this list stays cheap even with hundreds of
+ * models per provider.
+ */
+export interface OpencodeProviderCatalogEntry {
+  id: string
+  name: string
+  /**
+   * 'authenticated' — currently usable (configured / has credentials, i.e. present
+   *   in /config/providers); 'free' — bundled, needs no credentials; 'unauthenticated'
+   *   — supported but not yet set up.
+   */
+  authState: 'authenticated' | 'unauthenticated' | 'free'
+  /**
+   * Auth methods the provider supports. 'oauth' when a custom OAuth loader exists
+   * (from /provider/auth); 'api' for a plain API key. Providers absent from the
+   * auth catalog still accept a generic API key, so this defaults to ['api'].
+   */
+  authMethods: ('api' | 'oauth')[]
+  /** Number of models the provider exposes in the catalog (for the picker hint). */
+  modelCount: number
+}
+
+/** A single catalog model for the per-provider model-allowlist dialog. */
+export interface OpencodeCatalogModel {
+  id: string
+  name: string
+  /** ISO date string when present in the catalog (sort newest-first). */
+  releaseDate?: string
+  toolCalling?: boolean
+  reasoning?: boolean
+}
+
+export interface EngineConfig {
+  sandbox?: SandboxSettings
+  proxy?: ProxySettings
+  /** opencode auto-mode (LLM permission gatekeeper) settings. See ADR-023. */
+  autoMode?: AutoModeConfig
+  /** opencode native config passthrough (injected at spawn via OPENCODE_CONFIG_CONTENT). */
+  opencodeConfig?: OpencodeConfigSettings
+}
+
+/**
+ * opencode auto-mode (`full` autonomy) LLM permission-gatekeeper config (ADR-023).
+ * Only consumed by the opencode engine; Claude uses cli.js's own classifier.
+ */
+export interface AutoModeConfig {
+  /** Master switch. When false, `full` falls back to human approval prompts
+   *  (the interim gated-like-default behavior). Defaults to true. */
+  enabled?: boolean
+  /** `providerID/modelID` for the judge. Defaults to the session's own model. */
+  judgeModel?: string
+  /** Two-stage classifier mode. Defaults to 'both'. */
+  twoStageMode?: 'both' | 'fast' | 'thinking'
+}
+
+export interface VendorConfig {
+  endpoint?: AnthropicEndpointSettings
+  modelOverride?: ModelOverrideSettings
+}
+
+// ---------------------------------------------------------------------------
 // Claude permissions (allow/deny/ask rules from settings.json files)
 // ---------------------------------------------------------------------------
 
@@ -219,7 +460,7 @@ export interface StreamDelta {
   text: string
 }
 
-export type TodoStatus = 'pending' | 'in_progress' | 'completed'
+export type TodoStatus = 'pending' | 'in_progress' | 'completed' | 'cancelled'
 
 export interface TodoItem {
   content: string
@@ -295,6 +536,26 @@ export interface ModelInfo {
   supportsEffort?: boolean
   supportedEffortLevels?: ('low' | 'medium' | 'high' | 'xhigh' | 'max')[]
   supportsAdaptiveThinking?: boolean
+  /** Engine that owns this model entry. Defaults to 'claude' when absent (legacy). */
+  engineId?: EngineId
+  /** Vendor id within the engine. */
+  vendorId?: VendorId
+  /** Whether this model supports vision/image input. */
+  vision?: boolean
+  /** Whether this model supports tool calling. */
+  toolCalling?: boolean
+  /** Available reasoning effort variant names for opencode models (from model.variants).
+   *  Non-empty only when the model's capabilities.reasoning === true and variants are present.
+   *  Claude models always have this undefined/empty — picker hidden. */
+  reasoningVariants?: string[]
+}
+
+/** Grouped model list for the engine-aware picker. */
+export interface EngineModelGroup {
+  engineId: EngineId
+  vendorId: VendorId
+  vendorName: string
+  models: ModelInfo[]
 }
 
 export interface SessionInfo {
@@ -306,6 +567,8 @@ export interface SessionInfo {
   lastActivityAt: number
   /** cli.js-generated session title (from `{type:"ai-title"}` JSONL records). */
   aiTitle?: string | null
+  /** Which engine produced this session. Defaults to 'claude' when absent (legacy records). */
+  engineId?: EngineId
 }
 
 export interface DirEntry {
@@ -343,7 +606,8 @@ interface SessionAPI {
     model?: string,
     thinkingMode?: string,
     resumeSessionAt?: string,
-    forkSession?: boolean
+    forkSession?: boolean,
+    engineId?: EngineId
   ): Promise<void>
   rekeySession(oldId: string, newId: string): Promise<void>
   /** Resolve the balanced JSONL line uuid to fork ("branch off") from, given
@@ -367,6 +631,11 @@ interface SessionAPI {
   maximizeWindow(): Promise<void>
   closeWindow(): Promise<void>
   listDirectories(): Promise<DirectoryGroup[]>
+  /** Fetch the global opencode session list (all cwds). Best-effort: returns [] on error. */
+  listOpencodeSessionsGlobal(): Promise<SessionInfo[]>
+  /** Load a persisted opencode session's transcript as ChatMessage[] (read-only,
+   *  for painting history on sidebar click). Best-effort: returns [] on error. */
+  loadOpencodeHistory(sessionId: string): Promise<ChatMessage[]>
   loadSessionHistory(
     sessionId: string,
     projectKey: string
@@ -413,6 +682,7 @@ interface SessionAPI {
   onStatus(cb: (routingId: string, status: SessionStatus) => void): () => void
   onResult(cb: (routingId: string, result: SessionResult) => void): () => void
   onError(cb: (routingId: string, error: string) => void): () => void
+  onVendorAuthRequired(cb: (routingId: string, data: { vendorId: string; message: string }) => void): () => void
   onWarning(cb: (routingId: string, warning: string) => void): () => void
   /** Refusal-fallback retraction — remove these messages from the transcript (docs/protocol/04-system-subtypes.md §4.20) */
   onMessagesRetracted(cb: (routingId: string, data: { messageIds: string[] }) => void): () => void
@@ -452,7 +722,17 @@ interface SessionAPI {
   setModel(routingId: string, model: string): Promise<void>
   setEffort(routingId: string, effort: string): Promise<void>
   setThinkingMode(routingId: string, mode: string): Promise<void>
+  setReasoningVariant(routingId: string, variant: string | null): Promise<void>
   getModels(): Promise<ModelInfo[]>
+  getEngineModels(): Promise<EngineModelGroup[]>
+  /** Full opencode provider catalog (~146 providers) for the settings provider manager.
+   *  Returns [] when opencode isn't installed or discovery fails. */
+  getOpencodeProviders(): Promise<OpencodeProviderCatalogEntry[]>
+  /** All catalog models for a single opencode provider (for the model-allowlist dialog). */
+  getOpencodeProviderModels(providerId: string): Promise<OpencodeCatalogModel[]>
+  /** Deterministic "is this engine installed?" check (binary on disk). Does NOT
+   *  spawn a server, so transient runtime failures can't read as "not installed". */
+  engineIsInstalled(engineId: EngineId): Promise<boolean>
   generateTitle(conversationText: string): Promise<string | null>
   generateCommitMessage(diff: string): Promise<string | null>
   writeCustomTitle(sessionId: string, projectKey: string, title: string): Promise<void>
@@ -464,18 +744,24 @@ interface SessionAPI {
   onDirectoriesChanged(cb: () => void): () => void
   onSlashCommands(cb: (routingId: string, commands: SlashCommandInfo[]) => void): () => void
   onSkills(cb: (routingId: string, names: string[]) => void): () => void
-  /** cli.js auth source from session init: 'oauth' | 'api_key' | 'none' (ADR-014). */
+  /** Login status from session init: 'authenticated' | 'none' (logged-in vs not).
+   *  The oauth-vs-api-key distinction now lives only in the auth probe's
+   *  billingType (via OAuthAccount). See ADR-014 / Phase 4 (ADR-021). */
   onAuthSource(cb: (routingId: string, source: string) => void): () => void
   onStatusLine(cb: (routingId: string, data: StatusLineData) => void): () => void
+  /** Engine-neutral metering snapshot (Phase 7 Pass 2). Emitted alongside
+   *  onStatusLine; both engines send it. The status line itself is unchanged. */
+  onMetering(cb: (routingId: string, data: MeteringSnapshot) => void): () => void
+  onPlanSteps(cb: (routingId: string, todos: TodoItem[]) => void): () => void
   onSettingsChanged(cb: (settings: Record<string, unknown>) => void): () => void
   onSessionConfigChanged(cb: (config: UISessionConfig) => void): () => void
   loadSettings(): Promise<Record<string, unknown>>
   saveSettings(settings: Record<string, unknown>): Promise<void>
   loadSessionConfig(): Promise<UISessionConfig>
   saveSessionConfig(config: UISessionConfig): Promise<void>
-  /** Permanently delete a session's JSONL + subagent directory from disk */
-  deleteSession(sessionId: string, projectKey: string): Promise<void>
-  /** Permanently delete an entire project directory (all sessions) from disk */
+  /** Permanently delete a session's JSONL + subagent directory from disk (claude), or via HTTP API (opencode) */
+  deleteSession(sessionId: string, projectKey: string, engineId?: EngineId): Promise<void>
+  /** Permanently delete an entire Claude project directory (all sessions) from disk */
   deleteProject(projectKey: string): Promise<void>
   loadSlashCommands(): Promise<SlashCommandInfo[]>
   saveSlashCommands(commands: SlashCommandInfo[]): Promise<void>
@@ -486,6 +772,20 @@ interface SessionAPI {
   testProxyConnection(
     proxy: ProxySettings
   ): Promise<{ ok: boolean; latencyMs: number; error?: string }>
+  loadEngineConfig(engineId: string): Promise<EngineConfig>
+  saveEngineConfig(engineId: string, config: EngineConfig): Promise<void>
+  loadVendorConfig(vendorId: string): Promise<VendorConfig>
+  saveVendorConfig(vendorId: string, config: VendorConfig): Promise<void>
+  /** Load opencode's engine-native config from opencode's own global config file. */
+  loadOpencodeSettings(): Promise<OpencodeConfigSettings>
+  /** Save opencode's engine-native config to opencode's own global config file. */
+  saveOpencodeSettings(settings: OpencodeConfigSettings): Promise<void>
+  listOpencodeAgents(cwd?: string): Promise<OpencodeAgentSummary[]>
+  readOpencodeAgent(name: string, scope: OpencodeAgentScope, cwd?: string): Promise<OpencodeAgentDetail | null>
+  saveOpencodeAgent(input: OpencodeAgentInput, cwd?: string): Promise<void>
+  deleteOpencodeAgent(name: string, scope: OpencodeAgentScope, cwd?: string): Promise<void>
+  setOpencodeAgentDisabled(name: string, scope: OpencodeAgentScope, cwd: string | undefined, disabled: boolean): Promise<void>
+  generateOpencodeAgent(description: string, cwd?: string): Promise<{ identifier: string; whenToUse: string; systemPrompt: string }>
   logError(source: string, message: string): void
 }
 
@@ -597,6 +897,38 @@ interface FileAPI {
   listWorktrees(cwd: string): Promise<WorktreeEntry[]>
 }
 
+/** Engine-routed per-vendor auth API (opencode's multi-vendor auth model). */
+interface VendorAuthAPI {
+  /** Probe all vendors for a given engine. */
+  vendorAuthProbe(engineId: EngineId): Promise<VendorAuthMap>
+  /** List per-vendor auth options (GET /provider/auth). */
+  vendorAuthListOptions(engineId: EngineId): Promise<Record<string, VendorAuthOption[]>>
+  /** Set an API key for a vendor. */
+  vendorAuthSetKey(engineId: EngineId, vendorId: string, key: string): Promise<void>
+  /** Start an OAuth flow for a vendor. Returns the URL to open + instructions. */
+  vendorAuthOauthAuthorize(
+    engineId: EngineId,
+    vendorId: string,
+    method: number,
+    inputs?: Record<string, string>
+  ): Promise<{ url: string; method: 'auto' | 'code'; instructions: string }>
+  /** Submit the OAuth code (paste-code flow). Omit code for auto/loopback flow. */
+  vendorAuthOauthCallback(
+    engineId: EngineId,
+    vendorId: string,
+    method: number,
+    code?: string
+  ): Promise<boolean>
+  /** Remove auth credentials for a vendor. */
+  vendorAuthRemove(engineId: EngineId, vendorId: string): Promise<void>
+  /**
+   * Abandon an in-flight vendor OAuth flow, releasing resources held open across
+   * the authorize → callback handshake (e.g. the loopback-hosting server). Safe
+   * to call with no active flow.
+   */
+  vendorAuthOauthCancel(engineId: EngineId): Promise<void>
+}
+
 interface AccountAPI {
   fetchAccountUsage(): Promise<AccountUsage>
   onAccountUsage(cb: (data: AccountUsage) => void): () => void
@@ -607,14 +939,14 @@ interface AccountAPI {
   // --- Native Anthropic OAuth (ADR-014) ---
   /** Start the subscription login flow: opens the browser and awaits the
    *  loopback redirect. Resolves once cli.js has stored fresh credentials. */
-  signIn(): Promise<AuthState>
+  signIn(): Promise<AuthFlowState>
   /** Manual fallback: submit the authorization code pasted by the user.
    *  `state` is recovered internally from the login URL. */
-  submitOAuthCode(code: string): Promise<AuthState>
+  submitOAuthCode(code: string): Promise<AuthFlowState>
   /** Abort an in-flight login flow. */
   cancelSignIn(): Promise<void>
   /** Subscribe to login-flow state transitions. */
-  onAuthState(cb: (state: AuthState) => void): () => void
+  onAuthState(cb: (state: AuthFlowState) => void): () => void
   // --- Multiple-account support (ADR-015) ---
   /** Current accounts + active id + enabled flag. */
   getAccounts(): Promise<AccountsState>
@@ -630,6 +962,12 @@ interface AccountAPI {
   onAccountsChanged(cb: (state: AccountsState) => void): () => void
   /** Fired when the active account changed — renderer should respawn sessions. */
   onAccountRespawnSessions(cb: () => void): () => void
+  /**
+   * Fetch opencode's live /config/providers price table, persist it, and register
+   * it as supplemental pricing so equivalentCostUsd resolves opencode model costs.
+   * Desktop-only (spawns a local opencode server). Phase 9b.
+   */
+  refreshPrices(): Promise<{ count: number; refreshedAt: number }>
 }
 
 export interface NetworkInterfaceInfo {
@@ -752,6 +1090,7 @@ export interface ClaudeAPI
     AutomationAPI,
     FileAPI,
     AccountAPI,
+    VendorAuthAPI,
     RemoteAPI,
     VoiceAPI,
     PluginAPI {
@@ -823,8 +1162,11 @@ export interface AccountsState {
 
 export type AuthFlowStatus = 'idle' | 'authorizing' | 'success' | 'error'
 
-/** Broadcast to the renderer on every transition of the native login flow. */
-export interface AuthState {
+/**
+ * Broadcast to the renderer on every transition of the native login flow (ADR-014).
+ * Renamed from AuthState in Phase 4 to free that name for the resolved tri-state.
+ */
+export interface AuthFlowState {
   status: AuthFlowStatus
   account: OAuthAccount | null
   error: string | null
@@ -841,6 +1183,41 @@ export interface StatusLineData {
   contextWindowSize: number
   usedPercentage: number | null
   remainingPercentage: number | null
+}
+
+/**
+ * MeteringSnapshot — engine-neutral session-level usage metric (foundation §3,
+ * Phase 7 Pass 2). Emitted by BOTH engines on `session:metering` ALONGSIDE the
+ * existing StatusLineData (which is unchanged — behavior-preserving for the
+ * Claude status line). The headline metric is `equivalentCostUsd` (tokens ×
+ * the internal pricing table); `engineReportedCostUsd` is the engine's own cost
+ * (real spend for apiKey accounts). `window` is present only for subscription
+ * accounts that expose a usage provider (Claude); apiKey/free get a cumulative
+ * meter with no window. Per-billingType behavior is driven by `billingType`.
+ */
+export interface MeteringSnapshot {
+  engineId: EngineId
+  vendorId: VendorId
+  billingType: BillingType
+  tokens: {
+    input: number
+    output: number
+    cacheWrite: number
+    cacheRead: number
+    total: number
+  }
+  /** tokens × internal pricing — the primary metric; null when the model is unpriced. */
+  equivalentCostUsd: number | null
+  /** cli.js total_cost_usd / opencode info.cost — real spend when billingType==='apiKey'. */
+  engineReportedCostUsd?: number
+  contextWindow: { used: number; size: number }
+  /** Subscription-only; absent for apiKey/free/unknown. */
+  window?: {
+    usedPercent: number
+    resetsAt: string | null
+    /** The WLS capacity projection (subscription windows with a usage provider). */
+    projection?: { maxTokens: number; costUsd: number }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -937,6 +1314,22 @@ export interface BlockUsageData {
   accounts: string[]
   /** Active account filter (email), or null for all accounts */
   accountFilter: string | null
+  /**
+   * Per-engine usage breakdown over the scan window (Phase 7 Pass 2).
+   * Sourced from usage_event across ALL engines — this is how opencode usage
+   * surfaces in the dashboard. Absent/empty when only Claude has data.
+   */
+  perEngine?: EngineUsageSummary[]
+}
+
+/** Per-engine usage summary for the dashboard (Phase 7 Pass 2 / Phase 9b). */
+export interface EngineUsageSummary {
+  engineId: string
+  tokens: TokenCounts
+  costUsd: number
+  requestCount: number
+  /** Per-model breakdown within this engine, sorted by total tokens desc (Phase 9b). */
+  models: ModelTokenBreakdown[]
 }
 
 // ---------------------------------------------------------------------------
@@ -1021,6 +1414,14 @@ export interface UISessionConfig {
   hiddenSessions?: string[]
   /** Project keys the user has chosen to hide from the sidebar */
   hiddenProjects?: string[]
+  /**
+   * Engine + model per session. Maps sessionId → { engineId, model? }.
+   * Absent keys are treated as claude. The entry is written at session-creation
+   * time, updated whenever the user switches model, and carried over on rekey.
+   * On reopen, the optional `model` field seeds `selectedModel` so the last
+   * model choice is restored (Phase 1 behavior addition).
+   */
+  sessionEngines?: Record<string, { engineId: EngineId; model?: ModelRef }>
 }
 
 export interface SlashCommandInfo {

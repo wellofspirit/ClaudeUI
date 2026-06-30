@@ -114,6 +114,7 @@ vi.mock('../../services/logger', () => ({
 // Import AFTER mocks.
 import { RemoteDispatcher } from '../../services/remote-dispatcher'
 import { registerRemoteHandlers, registerRemoteVersionInfo } from '../remote-handlers'
+import { resolveClaudeCapabilities } from '../../../shared/model-capabilities'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -132,6 +133,8 @@ function makeFakeWindow(): any {
 
 const sessionStub: any = {
   willQueue: false,
+  engineId: 'claude',
+  capabilities: resolveClaudeCapabilities('default'),
   run: vi.fn(),
   resolveApproval: vi.fn(),
   watchBackground: vi.fn(),
@@ -146,6 +149,7 @@ const sessionStub: any = {
   setThinkingMode: vi.fn(),
   askSideQuestion: vi.fn(async () => 'answer'),
   mcpServerStatus: vi.fn(async () => [{ name: 'srv', connected: true }]),
+  notifySettingsChanged: vi.fn(async () => {}),
   getPlanContent: vi.fn(() => null),
   getSessionLogPath: vi.fn(() => '/tmp/log')
 }
@@ -155,7 +159,9 @@ const sessionManagerStub: any = {
   rekey: vi.fn(),
   get: vi.fn(() => sessionStub),
   cancel: vi.fn(),
-  interrupt: vi.fn(async () => {})
+  interrupt: vi.fn(async () => {}),
+  forEach: vi.fn((cb: (s: any) => void) => cb(sessionStub)),
+  forEachClaude: vi.fn((cb: (s: any) => void) => cb(sessionStub))
 }
 
 describe('RemoteDispatcher', () => {

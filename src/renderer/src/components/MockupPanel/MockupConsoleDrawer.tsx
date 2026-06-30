@@ -41,9 +41,10 @@ export function MockupConsoleDrawer({
   ].sort((a, b) => a.entry.id - b.entry.id)
 
   return (
-    <div className="shrink-0 border-t border-border bg-bg-primary/50">
+    <div data-testid="MockupConsoleDrawer" className="shrink-0 border-t border-border bg-bg-primary/50">
       <div className="flex items-center gap-2 px-3 h-8">
         <button
+          data-testid="MockupConsoleDrawer.toggle"
           onClick={onToggle}
           className="flex items-center gap-1.5 text-[11px] text-text-muted hover:text-text-secondary cursor-default"
         >
@@ -71,6 +72,7 @@ export function MockupConsoleDrawer({
         <div className="flex-1" />
         {total > 0 && (
           <button
+            data-testid="MockupConsoleDrawer.clear"
             onClick={onClear}
             className="text-[11px] text-text-muted hover:text-text-secondary cursor-default"
             title="Clear console"
@@ -82,7 +84,7 @@ export function MockupConsoleDrawer({
       {expanded && (
         <div
           className="max-h-[200px] overflow-auto px-3 py-1.5 font-mono text-[11px] leading-relaxed border-t border-border"
-          data-testid="mockup-console-entries"
+          data-testid="MockupConsoleDrawer.entries"
         >
           {combined.length === 0 ? (
             <div className="text-text-muted/60 italic py-1">No console output.</div>

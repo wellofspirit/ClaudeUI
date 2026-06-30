@@ -39,12 +39,15 @@ import { RemoteDispatcher } from './services/remote-dispatcher'
 import { serviceSession } from './services/service-session'
 import { authManager } from './services/auth-manager'
 import { accountManager } from './services/account-manager'
+import { claudeAuthProvider } from './auth/ClaudeAuthProvider'
+import { opencodeServerManager } from './opencode/OpencodeServerManager'
 import { PluginManager } from './services/plugin-manager'
 import { LogViewer } from './services/log-viewer'
 import { logger } from './services/logger'
 import { stopAllClassifiers } from './services/auto-classifier'
 import { getSdkVersion } from './services/claude-session'
 import { registerMockupAssetScheme, registerMockupAssetHandler } from './services/mockup-protocol'
+import { loadPersistedPrices } from './services/opencode-pricing'
 import icon from '../../resources/icon.png?asset'
 
 // Privileged scheme registration MUST happen before app.whenReady fires.
@@ -187,6 +190,7 @@ function createWindow(): void {
   const sessionManager = registerSessionIpc(mainWindow)
   authManager.setWindow(mainWindow)
   accountManager.init(mainWindow)
+  claudeAuthProvider.init(mainWindow)
   registerTerminalIpc(mainWindow)
   const automationManager = registerAutomationIpc(mainWindow)
 
@@ -252,6 +256,9 @@ function createWindow(): void {
     stopAllClassifiers()
     // Stop the service session (lightweight CLI subprocess for usage polling)
     serviceSession.stop()
+    // Reap any shared opencode servers (Windows tree-kill) so opencode.exe
+    // children don't orphan on quit. Idempotent — safe to run on every invocation.
+    opencodeServerManager.dispose()
     if (quitConfirmed) return
     e.preventDefault()
     if (!mainWindow.isDestroyed()) {
@@ -407,6 +414,11 @@ app.whenReady().then(() => {
   app.on('browser-window-created', (_, window) => {
     optimizer.watchWindowShortcuts(window)
   })
+
+  // Phase 9b: register any previously-fetched opencode pricing entries so
+  // equivalentCostUsd resolves opencode model costs from the very first recalc.
+  // No server spin-up — reads the persisted ~/.claude/ui/opencode-prices.json if present.
+  loadPersistedPrices()
 
   createWindow()
 

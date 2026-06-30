@@ -28,9 +28,10 @@ export function GitBranchPill(): React.JSX.Element | null {
   }
 
   return (
-    <div className="relative">
+    <div data-testid="GitBranchPill" className="relative">
       <button
         ref={buttonRef}
+        data-testid="GitBranchPill.toggle"
         onClick={() => setDropdownOpen(!dropdownOpen)}
         className="flex items-baseline gap-1.5 px-2 py-1 rounded-md text-[12px] text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
         title={tooltipParts.join(' \u00b7 ')}

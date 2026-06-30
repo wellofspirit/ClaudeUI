@@ -69,7 +69,7 @@ export function AlwaysAllowSection({
   if (visible.length === 0) return null
 
   return (
-    <div className="mt-2 space-y-1">
+    <div data-testid="PermissionSuggestions" className="mt-2 space-y-1">
       <div className="text-[10px] text-text-muted/60 uppercase tracking-wider font-semibold">
         Permission rules
       </div>

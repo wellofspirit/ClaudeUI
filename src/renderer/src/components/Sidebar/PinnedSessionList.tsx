@@ -81,7 +81,7 @@ export const PinnedSessionList = memo(function PinnedSessionList({
   }, [])
 
   return (
-    <nav className="flex flex-col gap-px">
+    <nav data-testid="PinnedSessionList" className="flex flex-col gap-px">
       {pinnedSessions.map((info, idx) => {
         const sessionHidden = !!hiddenSessionIds?.has(info.sessionId)
         return (

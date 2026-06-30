@@ -60,7 +60,7 @@ export const MockupPanelView = forwardRef<HTMLIFrameElement, MockupPanelViewProp
     const iframeWidth = DEVICE_WIDTHS[device]
 
     return (
-      <div style={style} className="h-full flex flex-col bg-bg-primary border-l border-border">
+      <div data-testid="MockupPanel" style={style} className="h-full flex flex-col bg-bg-primary border-l border-border">
         {/* Header */}
         <div className="shrink-0 flex items-center gap-2 px-3 h-11 border-b border-border">
           <svg
@@ -91,6 +91,7 @@ export const MockupPanelView = forwardRef<HTMLIFrameElement, MockupPanelViewProp
           <div className="flex-1" />
 
           <button
+            data-testid="MockupPanel.close"
             onClick={onClose}
             className="w-6 h-6 flex items-center justify-center rounded text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
             title="Close"
@@ -202,6 +203,7 @@ export const MockupPanelView = forwardRef<HTMLIFrameElement, MockupPanelViewProp
           <div className="flex-1" />
 
           <button
+            data-testid="MockupPanel.copyHtml"
             onClick={onCopyHtml}
             className="text-[11px] h-6 px-2 rounded text-text-muted hover:text-text-secondary hover:bg-bg-hover transition-colors cursor-default"
             title="Copy HTML source"
@@ -210,6 +212,7 @@ export const MockupPanelView = forwardRef<HTMLIFrameElement, MockupPanelViewProp
           </button>
 
           <button
+            data-testid="MockupPanel.refresh"
             onClick={onRefresh}
             className="h-6 w-6 flex items-center justify-center rounded text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
             title="Reload mockup"

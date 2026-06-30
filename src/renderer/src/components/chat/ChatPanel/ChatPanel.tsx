@@ -12,6 +12,7 @@ import { TodoWidget } from '../../TodoWidget'
 import { FloatingApproval } from '../FloatingApproval'
 import { BtwCard } from '../BtwCard'
 import { FloatingError } from '../FloatingError'
+import { VendorAuthRequiredCard } from '../VendorAuthRequiredCard'
 import { AuthBanner } from '../AuthBanner'
 import { SandboxViolationToast } from '../SandboxViolationToast'
 import { useIsMobile } from '../../../hooks/useIsMobile'
@@ -223,7 +224,7 @@ export function ChatPanel(): React.JSX.Element {
   }, [messages])
 
   return (
-    <div className="flex-1 flex flex-col min-h-0 min-w-0 relative">
+    <div data-testid="ChatPanel" className="flex-1 flex flex-col min-h-0 min-w-0 relative">
       <TopBar hasContent={hasContent} />
       <AuthBanner />
 
@@ -278,6 +279,7 @@ export function ChatPanel(): React.JSX.Element {
           {!isAtBottom && hasContent && (
             <div className="absolute -top-10 left-0 right-0 flex justify-center pointer-events-none z-[1]">
               <button
+                data-testid="ChatPanel.scrollToBottom"
                 onClick={scrollToBottom}
                 className="pointer-events-auto w-8 h-8 flex items-center justify-center rounded-full bg-bg-tertiary border border-border text-text-muted hover:text-text-primary hover:bg-bg-hover shadow-lg transition-all cursor-default animate-fade-in"
                 title="Scroll to bottom"
@@ -305,6 +307,7 @@ export function ChatPanel(): React.JSX.Element {
 
       <TodoWidget />
       <FloatingApproval />
+      <VendorAuthRequiredCard />
       <FloatingError />
       <SandboxViolationToast />
     </div>

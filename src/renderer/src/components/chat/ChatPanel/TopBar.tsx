@@ -8,12 +8,16 @@ import { GitChangesPill } from '../../git/GitChangesPill'
 import { PermissionsDialog } from '../../PermissionsDialog'
 import { SkillsDialog } from '../../SkillsDialog'
 import { McpDialog } from '../../McpDialog'
+import { EngineLogo } from '../../shared/EngineLogo'
 
 export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Element {
   const cwd = useActiveSession((s) => s.cwd)
   const sdkSessionId = useActiveSession((s) => s.status.sessionId)
   const statusLine = useActiveSession((s) => s.statusLine)
   const fallbackCost = useActiveSession((s) => s.status.totalCostUsd)
+  const engineId = useActiveSession((s) => s.status.engineId)
+  const canUseMcp = useActiveSession((s) => s.status.capabilities.canUseMcp)
+  const capSkills = useActiveSession((s) => s.status.capabilities.skills)
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const customTitle = useSessionStore((s) =>
     activeSessionId ? s.customTitles[activeSessionId] : undefined
@@ -59,6 +63,7 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
         paddingRight: isMobileCtx ? 8 : 13,
         paddingTop: isMobileCtx ? 'env(safe-area-inset-top)' : undefined
       }}
+      data-testid="TopBar"
       className="shrink-0 h-12 flex items-center justify-between [-webkit-app-region:drag] border-b border-border relative"
     >
       <div className="flex items-center min-w-0">
@@ -66,6 +71,7 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
         {isMobileCtx && (
           <div className="[-webkit-app-region:no-drag] flex items-center gap-1 mr-2">
             <button
+              data-testid="TopBar.toggleSidebar"
               onClick={toggleSidebar}
               className="w-[30px] h-[30px] flex items-center justify-center rounded-md text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
               title="Menu"
@@ -85,6 +91,7 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
               </svg>
             </button>
             <button
+              data-testid="TopBar.newSession"
               onClick={showWelcome}
               className="w-[30px] h-[30px] flex items-center justify-center rounded-md text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
               title="New session"
@@ -120,6 +127,7 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
             className="[-webkit-app-region:no-drag] flex items-center gap-1"
           >
             <button
+              data-testid="TopBar.toggleSidebar"
               onClick={toggleSidebar}
               className="w-[26px] h-[26px] flex items-center justify-center rounded-md text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
               title="Show sidebar"
@@ -140,6 +148,7 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
               </svg>
             </button>
             <button
+              data-testid="TopBar.newSession"
               onClick={showWelcome}
               className="w-[26px] h-[26px] flex items-center justify-center rounded-md text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
               title="New session"
@@ -164,7 +173,10 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
           onMouseEnter={infoMouseEnter}
           onMouseLeave={infoMouseLeave}
         >
-          <span className="text-[13px] text-text-secondary font-normal truncate cursor-default">
+          <span className="flex items-center gap-1 text-[13px] text-text-secondary font-normal truncate cursor-default">
+            {cwd && hasContent && engineId && engineId !== 'claude' && (
+              <EngineLogo engineId={engineId} size={11} className="shrink-0 opacity-75" />
+            )}
             {!cwd ? 'New session' : hasContent ? customTitle || 'Session' : 'New session'}
           </span>
           {(cwd || displaySessionId) && (
@@ -245,6 +257,7 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
       <div className="flex items-center gap-3 [-webkit-app-region:no-drag]">
         {!isMobileCtx && cwd && (
           <button
+            data-testid="TopBar.openVSCode"
             onClick={() => window.api.openInVSCode(cwd)}
             className="group flex items-baseline gap-1.5 px-2 py-1 rounded-md text-[12px] text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
             title="Open in VS Code"
@@ -282,8 +295,9 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
             <span>VSCode</span>
           </button>
         )}
-        {!isMobileCtx && cwd && (
+        {!isMobileCtx && cwd && capSkills && (
           <button
+            data-testid="TopBar.skills"
             onClick={() => setSkillsOpen(true)}
             className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[12px] text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
             title="Skills"
@@ -303,8 +317,13 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
             </svg>
           </button>
         )}
-        {!isMobileCtx && cwd && (
+        {/* MCP config dialog manages Claude's .mcp.json servers — Claude-native
+            config, not "hosted tools". Scoped to engineId==='claude' so flipping
+            opencode's hostedMcp capability (Phase 5c, for our injected plugin
+            tools) does NOT surface this Claude-only config UI for opencode. */}
+        {!isMobileCtx && cwd && canUseMcp && engineId === 'claude' && (
           <button
+            data-testid="TopBar.mcp"
             onClick={() => setMcpOpen(true)}
             className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[12px] text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
             title="MCP Servers"
@@ -329,6 +348,7 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
         )}
         {!isMobileCtx && cwd && (
           <button
+            data-testid="TopBar.permissions"
             onClick={() => setPermissionsOpen(true)}
             className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[12px] text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
             title="Project permissions"

@@ -651,11 +651,17 @@ Convert a running foreground task to background. Added by `patch/background-task
 
 ---
 
-### `get_usage` (patched)
+### `get_usage` (native as of v2.1.177; previously patched)
 
-Expose cli.js's internal `/api/oauth/usage` API. Added by `patch/usage-relay/`.
+Expose cli.js's `/usage` data. Originally added by `patch/usage-relay/` (a
+patch-injected `else if` branch returning the raw `/api/oauth/usage` body).
 
-**Anchor:** `~12859013`. **No Zod schema** (patch-injected).
+**As of cli.js v2.1.177 this is a _native_ control** with its own Zod schema
+(subtype `get_usage`, described "Requests the structured /usage data… the
+response shape may change"). The native handler runs ahead of the patch's
+injected branch, so the patch is now effectively dead code — retire it on the
+next patch sweep. The response is **no longer the flat API body**; it is a
+structured envelope.
 
 **Request:**
 
@@ -663,20 +669,32 @@ Expose cli.js's internal `/api/oauth/usage` API. Added by `patch/usage-relay/`.
 { "subtype": "get_usage" }
 ```
 
-**Response (success):** raw `/api/oauth/usage` body:
+**Response (success):** structured envelope (NOT the raw API body):
 
 ```json
 {
-  "five_hour": {...},
-  "seven_day": {...},
-  "seven_day_sonnet": {...},
-  "extra": {...}                    // optional
+  "session": { "total_cost_usd": 0, "model_usage": {}, "...": "session totals" },
+  "subscription_type": "pro | max | team | enterprise | null",
+  "rate_limits_available": true,           // false for API-key / Bedrock / Vertex
+  "rate_limits": {                          // null when rate_limits_available is false
+    "five_hour":        { "utilization": 0, "resets_at": "ISO" },  // 0-100 percent
+    "seven_day":        { "utilization": 0, "resets_at": "ISO" },
+    "seven_day_opus":   { "...": "or null" },
+    "seven_day_sonnet": { "...": "or null" },
+    "seven_day_oauth_apps": null,
+    "extra_usage":      { "is_enabled": true, "monthly_limit": 0, "used_credits": 0, "utilization": null }
+  },
+  "behaviors": { "day": {...}, "week": {...} }  // local-transcript scan; null for non-subscribers
 }
 ```
 
+Per-window `utilization` is 0–100 (percentage), same scale as the direct
+`/api/oauth/usage` body. `UsageFetcher.parseResponse()` reads windows from
+`rate_limits` for this shape and from the top level for the direct-HTTP shape.
+
 Empty `{}` when the user isn't OAuth-authenticated.
 
-**Timing:** slow (HTTPS, 5 s timeout inside patch).
+**Timing:** slow (HTTPS, 5 s timeout).
 
 **QueryHandle:** `q.getUsage()`.
 

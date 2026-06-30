@@ -66,6 +66,10 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
         thinkingMode
       ),
     rekeySession: (oldId, newId) => ipcRenderer.invoke('session:rekey', oldId, newId),
+    resolveForkAnchor: (sessionId, cwd, messageId) =>
+      ipcRenderer.invoke('session:resolve-fork-anchor', sessionId, cwd, messageId),
+    loadOpencodeHistory: (sessionId) =>
+      ipcRenderer.invoke('session:load-opencode-history', sessionId),
     sendPrompt: (routingId, prompt, attachments?) =>
       ipcRenderer.invoke('session:send', routingId, prompt, attachments),
     cancelSession: (routingId) => ipcRenderer.invoke('session:cancel', routingId),
@@ -83,6 +87,7 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     maximizeWindow: () => ipcRenderer.invoke('window:maximize'),
     closeWindow: () => ipcRenderer.invoke('window:close'),
     listDirectories: () => ipcRenderer.invoke('session:list-directories'),
+    listOpencodeSessionsGlobal: () => ipcRenderer.invoke('session:list-opencode'),
     loadSessionHistory: (sessionId, projectKey) =>
       ipcRenderer.invoke('session:load-history', sessionId, projectKey),
     loadSubagentHistory: (sessionId, projectKey, agentId) =>
@@ -101,6 +106,7 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     onStatus: onEvent('session:status'),
     onResult: onEvent('session:result'),
     onError: onEvent('session:error'),
+    onVendorAuthRequired: onEvent('session:vendor-auth-required'),
     onWarning: onEvent('session:warning'),
     onMessagesRetracted: onEvent('session:messages-retracted'),
     onToolResult: onEvent('session:tool-result'),
@@ -119,7 +125,9 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     onSkills: onEvent('session:skills'),
     onAuthSource: onEvent('session:auth-source'),
     onStatusLine: onEvent('session:status-line'),
+    onMetering: onEvent('session:metering'),
     onMcpServers: onEvent('session:mcp-servers'),
+    onPlanSteps: onEvent('session:plan'),
 
     // Non-routed events
     onMaximizeChange: onEvent('window:maximized-change'),
@@ -162,7 +170,14 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     setEffort: (routingId, effort) => ipcRenderer.invoke('session:set-effort', routingId, effort),
     setThinkingMode: (routingId, mode) =>
       ipcRenderer.invoke('session:set-thinking-mode', routingId, mode),
+    setReasoningVariant: (routingId, variant) =>
+      ipcRenderer.invoke('session:set-reasoning-variant', routingId, variant),
     getModels: () => ipcRenderer.invoke('session:get-models'),
+    getEngineModels: () => ipcRenderer.invoke('session:get-engine-models'),
+    getOpencodeProviders: () => ipcRenderer.invoke('session:get-opencode-providers'),
+    getOpencodeProviderModels: (providerId) =>
+      ipcRenderer.invoke('session:get-opencode-provider-models', providerId),
+    engineIsInstalled: (engineId) => ipcRenderer.invoke('engine:is-installed', engineId),
     generateTitle: (conversationText) =>
       ipcRenderer.invoke('session:generate-title', conversationText),
     generateCommitMessage: (diff) => ipcRenderer.invoke('session:generate-commit-message', diff),
@@ -215,8 +230,8 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     gitStartWatching: (cwd) => unwrap('git:start-watching', cwd),
     gitStopWatching: (cwd) => unwrap('git:stop-watching', cwd),
 
-    deleteSession: (sessionId, projectKey) =>
-      ipcRenderer.invoke('session:delete-session', sessionId, projectKey),
+    deleteSession: (sessionId, projectKey, engineId?) =>
+      ipcRenderer.invoke('session:delete-session', sessionId, projectKey, engineId),
     deleteProject: (projectKey) => ipcRenderer.invoke('session:delete-project', projectKey),
 
     listDir: (dirPath) => ipcRenderer.invoke('file:list-dir', dirPath),
@@ -232,6 +247,8 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
 
     fetchAccountUsage: () => ipcRenderer.invoke('usage:fetch'),
     fetchBlockUsage: () => ipcRenderer.invoke('usage:fetch-block'),
+    setUsageAccountFilter: async () => {},
+    refreshPrices: async () => ({ count: 0, refreshedAt: Date.now() }),
     signIn: () => ipcRenderer.invoke('auth:sign-in'),
     submitOAuthCode: (code: string) => ipcRenderer.invoke('auth:submit-code', code),
     cancelSignIn: () => ipcRenderer.invoke('auth:cancel'),
@@ -260,6 +277,8 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     mcpReadDisabled: (cwd) => ipcRenderer.invoke('mcp:read-disabled', cwd),
     mcpToggleDisabled: (cwd, serverName, enabled) =>
       ipcRenderer.invoke('mcp:toggle-disabled', cwd, serverName, enabled),
+    getCleanupPeriodDays: () => ipcRenderer.invoke('claude:get-cleanup-period'),
+    setCleanupPeriodDays: (days) => ipcRenderer.invoke('claude:set-cleanup-period', days),
 
     listAutomations: () => ipcRenderer.invoke('automation:list'),
     saveAutomation: (automation) => ipcRenderer.invoke('automation:save', automation),
@@ -276,6 +295,31 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
       ipcRenderer.invoke('automation:send-message', id, prompt),
 
     testProxyConnection: (proxy) => unwrap('proxy:test-connection', proxy),
+    vendorAuthProbe: async () => ({}),
+    vendorAuthListOptions: async () => ({}),
+    vendorAuthSetKey: async () => {},
+    vendorAuthOauthAuthorize: async () => {
+      throw new Error('Vendor auth not available in tests')
+    },
+    vendorAuthOauthCallback: async () => {
+      throw new Error('Vendor auth not available in tests')
+    },
+    vendorAuthRemove: async () => {},
+    vendorAuthOauthCancel: async () => {},
+    loadEngineConfig: (engineId) => ipcRenderer.invoke('config:load-engine-config', engineId),
+    saveEngineConfig: (engineId, config) =>
+      ipcRenderer.invoke('config:save-engine-config', engineId, config),
+    loadVendorConfig: (vendorId) => ipcRenderer.invoke('config:load-vendor-config', vendorId),
+    saveVendorConfig: (vendorId, config) =>
+      ipcRenderer.invoke('config:save-vendor-config', vendorId, config),
+    loadOpencodeSettings: () => unwrap('config:load-opencode-settings'),
+    saveOpencodeSettings: (settings) => unwrap('config:save-opencode-settings', settings),
+    listOpencodeAgents: async () => [],
+    readOpencodeAgent: async () => null,
+    saveOpencodeAgent: async () => {},
+    deleteOpencodeAgent: async () => {},
+    setOpencodeAgentDisabled: async () => {},
+    generateOpencodeAgent: async () => ({ identifier: '', whenToUse: '', systemPrompt: '' }),
 
     logError: (source, message) => {
       ipcRenderer.send('log:error', source, message)
@@ -348,6 +392,10 @@ export async function bootTestApp(): Promise<TestApp> {
     'config:save-slash-commands',
     'config:load-slash-commands',
     'config:scan-custom-commands',
+    'config:load-engine-config',
+    'config:save-engine-config',
+    'config:load-vendor-config',
+    'config:save-vendor-config',
     'usage:fetch',
     'usage:fetch-block',
     'plugin:views',

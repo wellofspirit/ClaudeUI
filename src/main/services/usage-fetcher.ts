@@ -21,10 +21,14 @@ import { readFile, writeFile, mkdir, appendFile } from 'node:fs/promises'
 import { execFile } from 'node:child_process'
 import { join } from 'node:path'
 import { homedir, platform } from 'node:os'
+import { randomUUID } from 'node:crypto'
 import type { BrowserWindow } from 'electron'
 import { ClaudeSession, getSdkVersion } from './claude-session'
 import type { AccountUsage, ExtraUsage, RateWindow } from '../../shared/types'
 import { logger } from './logger'
+import { recordWindowSample } from './db'
+import { canonicalizeWindowEnd } from './usage-windows'
+import { getSecurestorageEnv } from '../sdk/securestorage-env'
 
 /** The currently authenticated Claude account (from ~/.claude.json). */
 export interface ActiveAccount {
@@ -134,6 +138,10 @@ export class UsageFetcher {
   /** Last account written to the account log (avoid duplicate records). */
   private lastLoggedAccountUuid: string | null = null
   private accountLogSeeded = false
+  /** Known canonical 5h window ends, for snap-dedup of window samples (Phase 7). */
+  private knownCanonicalEnds: number[] = []
+  /** Last (accountUuid, usedPercent, canonicalEnd) recorded — dedup identical samples. */
+  private lastWindowSampleKey: string | null = null
   /** One-shot timer firing shortly after the 5h window expires. */
   private expiryTimer: ReturnType<typeof setTimeout> | null = null
   private lastFetchStartedAt = 0
@@ -260,6 +268,11 @@ export class UsageFetcher {
   /** The currently authenticated account, if known. */
   getActiveAccount(): ActiveAccount | null {
     return this.activeAccount
+  }
+
+  /** The active account's UUID, or undefined if not yet known. */
+  getActiveAccountUuid(): string | undefined {
+    return this.activeAccount?.uuid
   }
 
   // -------------------------------------------------------------------------
@@ -479,6 +492,9 @@ export class UsageFetcher {
   // -------------------------------------------------------------------------
 
   private pushToRenderer(usage: AccountUsage): void {
+    // Phase 7: record a window-utilization sample so the WLS apiPercent
+    // time-series + 5h block alignment can be sourced from the DB. Best-effort.
+    this.recordWindowSampleFromUsage(usage)
     try {
       if (this.window && !this.window.isDestroyed()) {
         this.window.webContents.send('usage:data', usage)
@@ -488,6 +504,47 @@ export class UsageFetcher {
       }
     } catch {
       /* Window may have been closed */
+    }
+  }
+
+  /**
+   * Record one usage_window_sample from the current 5h-window observation.
+   * The canonical_end is snap-deduped via canonicalizeWindowEnd (same algorithm
+   * block-usage uses), so one real window registers under one canonical end.
+   * Skips when there's no account UUID, no/expired window, or the sample is a
+   * duplicate of the last (no new information since the previous push).
+   * Failures are swallowed — this is advisory.
+   */
+  private recordWindowSampleFromUsage(usage: AccountUsage): void {
+    try {
+      if (usage.error) return
+      const accountUuid = this.activeAccount?.uuid
+      if (!accountUuid) return
+      const resetsAt = usage.fiveHour.resetsAt
+      if (!resetsAt) return
+      const resetMs = new Date(resetsAt).getTime()
+      if (isNaN(resetMs) || resetMs <= Date.now()) return
+
+      const canonicalEnd = canonicalizeWindowEnd(resetMs, this.knownCanonicalEnds)
+      if (!this.knownCanonicalEnds.includes(canonicalEnd)) {
+        this.knownCanonicalEnds.push(canonicalEnd)
+        this.knownCanonicalEnds.sort((a, b) => a - b)
+      }
+
+      const usedPercent = usage.fiveHour.usedPercent
+      const key = `${accountUuid}:${usedPercent}:${canonicalEnd}`
+      if (key === this.lastWindowSampleKey) return // no new info since last push
+      this.lastWindowSampleKey = key
+
+      recordWindowSample({
+        id: randomUUID(),
+        ts: Date.now(),
+        accountUuid,
+        usedPercent,
+        canonicalEnd
+      })
+    } catch (err) {
+      logger.debug('UsageFetcher', `recordWindowSample failed: ${err}`)
     }
   }
 
@@ -601,11 +658,30 @@ export class UsageFetcher {
   // Credential management
   // -------------------------------------------------------------------------
 
+  /**
+   * Resolve the `.credentials.json` cli.js is actually reading from.
+   *
+   * Multi-account (ADR-015) points cli.js at a per-account directory via
+   * `CLAUDE_SECURESTORAGE_CONFIG_DIR` (set by AccountManager.applyActive()),
+   * and the running session refreshes/rotates the token in THAT file — the
+   * root `~/.claude/.credentials.json` goes stale and its refresh token gets
+   * invalidated. Reading the same dir cli.js uses keeps the direct usage call
+   * on the live access token instead of silently failing into the SDK relay.
+   * Returns the root path in single-account / Keychain mode (env unset).
+   */
+  private credentialsPath(): string {
+    const dir = getSecurestorageEnv()?.dir
+    return dir ? join(dir, '.credentials.json') : CREDENTIALS_PATH
+  }
+
   private async readCredentials(): Promise<OAuthCredentials | null> {
     const fileCreds = await this.readCredentialsFromFile()
     if (fileCreds) return fileCreds
 
-    if (IS_MACOS) {
+    // Keychain only applies in single-account mode. When multi-account is
+    // active, credentials are file-based per ADR-015 (SKIP_SECURESTORAGE) —
+    // never the Keychain — so don't consult it.
+    if (IS_MACOS && !getSecurestorageEnv()) {
       return this.readCredentialsFromKeychain()
     }
 
@@ -614,7 +690,7 @@ export class UsageFetcher {
 
   private async readCredentialsFromFile(): Promise<OAuthCredentials | null> {
     try {
-      const raw = await readFile(CREDENTIALS_PATH, 'utf-8')
+      const raw = await readFile(this.credentialsPath(), 'utf-8')
       const parsed = JSON.parse(raw) as CredentialsFile
       if (!parsed.claudeAiOauth?.accessToken) return null
       return parsed.claudeAiOauth
@@ -681,10 +757,11 @@ export class UsageFetcher {
       expiresAt: Date.now() + (data.expires_in ?? 3600) * 1000
     }
     try {
-      const raw = await readFile(CREDENTIALS_PATH, 'utf-8')
+      const path = this.credentialsPath()
+      const raw = await readFile(path, 'utf-8')
       const file = JSON.parse(raw) as CredentialsFile
       file.claudeAiOauth = newCreds
-      await writeFile(CREDENTIALS_PATH, JSON.stringify(file, null, 2), 'utf-8')
+      await writeFile(path, JSON.stringify(file, null, 2), 'utf-8')
     } catch {
       /* best effort */
     }
@@ -696,14 +773,38 @@ export class UsageFetcher {
   // Response parsing
   // -------------------------------------------------------------------------
 
+  /**
+   * Parse a usage response into AccountUsage. Two shapes are accepted:
+   *
+   *   1. `/api/oauth/usage` HTTP body — windows at the top level
+   *      (`five_hour`, `seven_day`, …) with `extra_usage` alongside.
+   *   2. SDK-relay fallback — cli.js's structured `get_usage` control response,
+   *      which nests the same windows (and `extra_usage`) under `rate_limits`
+   *      (null when `rate_limits_available` is false), and adds `session` /
+   *      `subscription_type` / `behaviors`. cli.js restructured this shape in a
+   *      recent release; before, the relay mirrored the flat HTTP body.
+   *
+   * Window utilization is 0–100 (percentage) in both shapes — unlike the
+   * rate_limit_event headers (0–1 fraction); see toUsedPercent().
+   */
   private parseResponse(data: Record<string, unknown>): AccountUsage {
+    // The structured relay shape is distinguished by its top-level keys.
+    const isStructured = 'rate_limits' in data || 'rate_limits_available' in data
+    const rateLimits =
+      isStructured && data.rate_limits && typeof data.rate_limits === 'object'
+        ? (data.rate_limits as Record<string, unknown>)
+        : null
+    // Where the per-window objects live: nested under rate_limits for the
+    // structured shape, top-level for the HTTP shape.
+    const windowSource: Record<string, unknown> = isStructured ? (rateLimits ?? {}) : data
+
     const parseWindow = (key: string): RateWindow | null => {
-      const w = data[key] as { utilization?: number; resets_at?: string } | undefined
+      const w = windowSource[key] as
+        | { utilization?: number | null; resets_at?: string | null }
+        | undefined
+        | null
       if (!w || typeof w.utilization !== 'number') return null
       return {
-        // API returns utilization as 0–100 (percentage), not 0–1 (fraction).
-        // This differs from rate_limit_event headers which use 0–1 — see
-        // toUsedPercent() in updateFromRateLimitEvent for the conversion.
         usedPercent: w.utilization,
         resetsAt: w.resets_at ?? null
       }
@@ -711,16 +812,21 @@ export class UsageFetcher {
 
     const fiveHour = parseWindow('five_hour')
 
-    if (!fiveHour && Object.keys(data).length > 0) {
+    // Warn only on a genuinely unrecognized HTTP shape. The structured fallback
+    // legitimately reports no five_hour when rate_limits is unavailable (API key
+    // / Bedrock / Vertex sessions) — that's not an error.
+    if (!fiveHour && !isStructured && Object.keys(data).length > 0) {
       logger.warn('UsageFetcher', 'API response missing five_hour utilization — defaulting to 0%', {
         keys: Object.keys(data),
         five_hour: data['five_hour']
       })
     }
 
-    // Parse extra_usage: { is_enabled, monthly_limit, used_credits, utilization }
+    // extra_usage: { is_enabled, monthly_limit, used_credits, utilization }.
+    // Top-level in the HTTP shape, nested under rate_limits in the structured one
+    // (windowSource resolves to the right object for both).
     let extraUsage: ExtraUsage | null = null
-    const eu = data['extra_usage'] as
+    const eu = windowSource['extra_usage'] as
       | {
           is_enabled?: boolean
           monthly_limit?: number | null
@@ -738,13 +844,17 @@ export class UsageFetcher {
       }
     }
 
+    // subscription_type ('pro' | 'max' | 'team' | 'enterprise') is only present
+    // in the structured shape; the HTTP body has no plan name.
+    const planName = typeof data.subscription_type === 'string' ? data.subscription_type : null
+
     return {
       fiveHour: fiveHour ?? { usedPercent: 0, resetsAt: null },
       sevenDay: parseWindow('seven_day'),
       sevenDaySonnet: parseWindow('seven_day_sonnet'),
       sevenDayOpus: parseWindow('seven_day_opus'),
       extraUsage,
-      planName: null,
+      planName,
       fetchedAt: Date.now(),
       error: null
     }

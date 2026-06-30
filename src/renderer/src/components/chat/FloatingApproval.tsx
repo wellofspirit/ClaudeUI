@@ -1,7 +1,8 @@
 import { useState } from 'react'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
-import type { PendingApproval } from '../../../../shared/types'
+import type { ApprovalDecision, ContentBlock, PendingApproval } from '../../../../shared/types'
 import { AlwaysAllowSection } from './PermissionSuggestions'
+import { AskUserQuestionBlock } from './AskUserQuestionBlock/AskUserQuestionBlock'
 
 // ---------------------------------------------------------------------------
 // View layer — pure render, zero business logic
@@ -14,7 +15,10 @@ export interface ApprovalCardViewProps {
   onAlwaysAllowChange: (checked: boolean) => void
   checkedSuggestions: boolean[]
   onToggleSuggestion: (index: number) => void
-  onRespond: (decision: 'allow' | 'deny') => void
+  onRespond: (decision: ApprovalDecision) => void
+  /** When true, renders the "Allow for session" button. No current producer —
+   *  will be re-wired when opencode is integrated in Phase 5. */
+  showAllowForSession?: boolean
 }
 
 export function ApprovalCardView({
@@ -24,7 +28,8 @@ export function ApprovalCardView({
   onAlwaysAllowChange,
   checkedSuggestions,
   onToggleSuggestion,
-  onRespond
+  onRespond,
+  showAllowForSession = false
 }: ApprovalCardViewProps): React.JSX.Element {
   const input = approval.input
   const toolName = approval.toolName
@@ -138,6 +143,17 @@ export function ApprovalCardView({
         >
           Deny
         </button>
+        {showAllowForSession && (
+          <>
+            <div className={`w-px ${dividerColor.replace('border-', 'bg-')}`} />
+            <button
+              onClick={() => onRespond('allowForSession')}
+              className="flex-1 h-8 text-[12px] font-medium text-accent/80 hover:bg-accent/5 transition-colors cursor-pointer"
+            >
+              Allow for session
+            </button>
+          </>
+        )}
         <div className={`w-px ${dividerColor.replace('border-', 'bg-')}`} />
         <button
           onClick={() => onRespond('allow')}
@@ -186,15 +202,16 @@ function useUnmatchedApprovals(): PendingApproval[] {
 function ApprovalCard({ approval }: { approval: PendingApproval }): React.JSX.Element {
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const removePendingApproval = useSessionStore((s) => s.removePendingApproval)
-  const updateSettings = useSessionStore((s) => s.updateSettings)
-  const sandboxSettings = useSessionStore((s) => s.settings.sandbox)
+  const setEngineConfig = useSessionStore((s) => s.setEngineConfig)
+  const engineConfig = useSessionStore((s) => s.engineConfig)
+  const sandboxSettings = engineConfig.sandbox
   const permissionMode = useActiveSession((s) => s.permissionMode)
   const [alwaysAllow, setAlwaysAllow] = useState(false)
   const [checkedSuggestions, setCheckedSuggestions] = useState<boolean[]>(() =>
     (approval.suggestions || []).map(() => false)
   )
 
-  const handleRespond = async (decision: 'allow' | 'deny'): Promise<void> => {
+  const handleRespond = async (decision: ApprovalDecision): Promise<void> => {
     if (!activeSessionId) return
 
     const isSandboxEscape = !!approval.input?.dangerouslyDisableSandbox
@@ -202,13 +219,14 @@ function ApprovalCard({ approval }: { approval: PendingApproval }): React.JSX.El
     // If allowing with "always allow" checked, add command to excluded list
     if (decision === 'allow' && alwaysAllow && isSandboxEscape && approval.input?.command) {
       const cmd = String(approval.input.command)
-      if (!sandboxSettings.excludedCommands.includes(cmd)) {
-        updateSettings({
-          sandbox: {
-            ...sandboxSettings,
-            excludedCommands: [...sandboxSettings.excludedCommands, cmd]
-          }
-        })
+      const currentExcluded = sandboxSettings?.excludedCommands ?? []
+      if (!currentExcluded.includes(cmd)) {
+        const nextSandbox = sandboxSettings
+          ? { ...sandboxSettings, excludedCommands: [...currentExcluded, cmd] }
+          : { enabled: false, autoAllowBashIfSandboxed: false, allowUnsandboxedCommands: false, network: { restrictNetwork: false, allowLocalBinding: false, allowedDomains: [], allowManagedDomainsOnly: false, allowAllUnixSockets: false, allowUnixSockets: [] }, filesystem: { allowWrite: [], denyWrite: [], denyRead: [] }, excludedCommands: [cmd] }
+        const nextConfig = { ...engineConfig, sandbox: nextSandbox }
+        setEngineConfig(nextConfig)
+        window.api.saveEngineConfig('claude', nextConfig).catch(() => {})
       }
     }
 
@@ -243,16 +261,46 @@ function ApprovalCard({ approval }: { approval: PendingApproval }): React.JSX.El
   )
 }
 
+type ToolUseBlock = Extract<ContentBlock, { type: 'tool_use' }>
+
+/**
+ * Renders an unmatched AskUserQuestion approval as a floating interactive
+ * question card. Used for child (subagent) questions whose callID is not in
+ * the main message blocks, so they cannot be rendered inline.
+ *
+ * Builds a synthetic ToolUseBlock + ToolView from the approval's input so that
+ * AskUserQuestionBlock can render typed questions. Submit / dismiss still
+ * go through the approval's requestId via respondApproval.
+ */
+function FloatingQuestionCard({ approval }: { approval: PendingApproval }): React.JSX.Element {
+  const synthetic: ToolUseBlock = {
+    type: 'tool_use',
+    toolUseId: approval.toolUseId ?? approval.requestId,
+    toolName: 'AskUserQuestion',
+    toolInput: approval.input as Record<string, unknown>
+  }
+  // approval.input is {questions: AskUserQuestion[]} — already normalized by event-mapper
+  const questionView = {
+    kind: 'question' as const,
+    questions: ((approval.input as Record<string, unknown>).questions as import('../../../../shared/types').AskUserQuestion[]) ?? []
+  }
+  return <AskUserQuestionBlock block={synthetic} view={questionView} approval={approval} />
+}
+
 export function FloatingApproval(): React.JSX.Element | null {
   const unmatched = useUnmatchedApprovals()
 
   if (unmatched.length === 0) return null
 
   return (
-    <div className="absolute bottom-32 left-1/2 -translate-x-1/2 z-20 w-full max-w-[500px] px-4 flex flex-col gap-2 pointer-events-auto">
-      {unmatched.map((approval) => (
-        <ApprovalCard key={approval.requestId} approval={approval} />
-      ))}
+    <div data-testid="FloatingApproval" className="absolute bottom-32 left-1/2 -translate-x-1/2 z-20 w-full max-w-[500px] px-4 flex flex-col gap-2 pointer-events-auto">
+      {unmatched.map((approval) =>
+        approval.toolName === 'AskUserQuestion' ? (
+          <FloatingQuestionCard key={approval.requestId} approval={approval} />
+        ) : (
+          <ApprovalCard key={approval.requestId} approval={approval} />
+        )
+      )}
     </div>
   )
 }

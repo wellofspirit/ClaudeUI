@@ -57,6 +57,7 @@ export function GitCommitBoxView({
 }: GitCommitBoxViewProps): React.JSX.Element {
   return (
     <div
+      data-testid="GitCommitBox"
       className="shrink-0 border-t border-border relative flex flex-col"
       style={{ height: commitBoxHeight, maxHeight: '50%' }}
     >
@@ -69,6 +70,7 @@ export function GitCommitBoxView({
       <div className="relative flex-1 min-h-0 p-2 pb-0">
         <textarea
           ref={textareaRef}
+          data-testid="GitCommitBox.message"
           value={gitCommitMessage}
           onChange={(e) => onCommitMessageChange(e.target.value)}
           onKeyDown={(e) => {
@@ -81,6 +83,7 @@ export function GitCommitBoxView({
           className="w-full h-full bg-bg-tertiary text-text-primary text-[12px] px-2.5 py-2 pr-8 rounded-md outline-none placeholder:text-text-muted resize-none font-mono"
         />
         <button
+          data-testid="GitCommitBox.generateMessage"
           onClick={onGenerateMessage}
           disabled={generating || stagedCount === 0}
           className="absolute top-3.5 right-3.5 w-6 h-6 flex items-center justify-center rounded text-text-muted/50 hover:text-accent hover:bg-bg-hover transition-colors cursor-default disabled:opacity-30 disabled:hover:text-text-muted/50 disabled:hover:bg-transparent"
@@ -161,6 +164,7 @@ export function GitCommitBoxView({
         {/* Action buttons */}
         <div className="flex items-center gap-1.5">
           <button
+            data-testid="GitCommitBox.stageAll"
             onClick={onToggleStageAll}
             disabled={loading || totalChanges === 0}
             className="px-2.5 py-1.5 text-[11px] font-medium rounded-md border border-border text-text-secondary hover:bg-bg-hover transition-colors cursor-default disabled:opacity-50"
@@ -171,6 +175,7 @@ export function GitCommitBoxView({
           {/* Commit split button */}
           <div className="flex-1 flex relative" ref={dropdownRef}>
             <button
+              data-testid="GitCommitBox.commit"
               onClick={onPrimaryCommit}
               disabled={commitDisabled}
               className="flex-1 px-2.5 py-1.5 text-[11px] font-medium rounded-l-md bg-accent text-white hover:bg-accent-hover transition-colors cursor-default disabled:opacity-50"
@@ -180,6 +185,7 @@ export function GitCommitBoxView({
               {stagedCount > 0 ? ` (${stagedCount})` : ''}
             </button>
             <button
+              data-testid="GitCommitBox.dropdownToggle"
               onClick={onToggleDropdown}
               disabled={loading}
               className="px-1.5 py-1.5 rounded-r-md bg-accent text-white hover:bg-accent-hover transition-colors cursor-default disabled:opacity-50 border-l border-white/20"
@@ -193,6 +199,7 @@ export function GitCommitBoxView({
             {dropdownOpen && (
               <div className="absolute bottom-full left-0 right-0 mb-1 bg-bg-primary border border-border rounded-md shadow-lg overflow-hidden z-50">
                 <button
+                  data-testid="GitCommitBox.secondaryCommit"
                   onClick={onSecondaryCommit}
                   disabled={commitDisabled}
                   className="w-full text-left px-3 py-1.5 text-[11px] text-text-primary hover:bg-bg-hover transition-colors cursor-default disabled:opacity-50"
@@ -200,6 +207,7 @@ export function GitCommitBoxView({
                   {isPushMode ? 'Commit' : 'Commit & Push'}
                 </button>
                 <button
+                  data-testid="GitCommitBox.push"
                   onClick={onPush}
                   disabled={loading}
                   className="w-full text-left px-3 py-1.5 text-[11px] text-text-primary hover:bg-bg-hover transition-colors cursor-default disabled:opacity-50 border-t border-border"

@@ -150,8 +150,9 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
   }
 
   return (
-    <div className="flex flex-col min-h-0 h-full overflow-hidden">
+    <div data-testid="TaskEntry" data-id={toolUseId} className="flex flex-col min-h-0 h-full overflow-hidden">
       <button
+        data-testid="TaskEntry.toggle"
         onClick={() => setExpanded(!expanded)}
         className="w-full flex items-center px-4 h-10 shrink-0 gap-2 hover:bg-bg-hover transition-colors cursor-pointer"
       >
@@ -181,6 +182,7 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
         )}
         {isRunning && !isStopping && (
           <button
+            data-testid="TaskEntry.stop"
             onClick={handleStopTask}
             className="text-[11px] px-2 py-0.5 rounded bg-danger/10 text-danger hover:bg-danger/20 transition-colors shrink-0"
           >
@@ -193,6 +195,7 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
           </span>
         )}
         <button
+          data-testid="TaskEntry.close"
           onClick={(e) => {
             e.stopPropagation()
             activeSessionId && removeTaskFromPanel(activeSessionId, toolUseId)
@@ -269,6 +272,7 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
           </div>
           {!following && (
             <button
+              data-testid="TaskEntry.scrollToBottom"
               onClick={scrollToBottom}
               className="absolute bottom-2 left-1/2 -translate-x-1/2 bg-bg-tertiary border border-border rounded-full p-1.5 shadow-md shadow-black/20 hover:bg-bg-hover transition-colors cursor-pointer z-10"
             >

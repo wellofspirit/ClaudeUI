@@ -62,7 +62,7 @@ export function GitFileDiffViewView({
   if (!gitSelectedFile) {
     const hasFiles = (gitStatus?.files.length ?? 0) > 0
     return (
-      <div className="flex-1 flex items-center justify-center text-[12px] text-text-muted">
+      <div data-testid="GitFileDiffView" className="flex-1 flex items-center justify-center text-[12px] text-text-muted">
         {hasFiles ? 'Select a file to view diff' : '\u2728 All clean \u2014 nothing to diff!'}
       </div>
     )
@@ -70,7 +70,7 @@ export function GitFileDiffViewView({
 
   if (!gitFileDiff) {
     return (
-      <div className="flex-1 flex items-center justify-center text-[12px] text-text-muted">
+      <div data-testid="GitFileDiffView" className="flex-1 flex items-center justify-center text-[12px] text-text-muted">
         Loading diff...
       </div>
     )
@@ -78,7 +78,7 @@ export function GitFileDiffViewView({
 
   if (!gitFileDiff.patch) {
     return (
-      <div className="flex-1 flex items-center justify-center text-[12px] text-text-muted">
+      <div data-testid="GitFileDiffView" className="flex-1 flex items-center justify-center text-[12px] text-text-muted">
         No changes in this view
       </div>
     )
@@ -86,7 +86,7 @@ export function GitFileDiffViewView({
 
   if (gitFileDiff.isBinary) {
     return (
-      <div className="flex-1 flex flex-col min-h-0 p-2">
+      <div data-testid="GitFileDiffView" className="flex-1 flex flex-col min-h-0 p-2">
         <div className="shrink-0 flex items-center mb-2 px-1">
           <div className="text-[11px] text-text-muted font-mono truncate" title={gitSelectedFile}>
             {gitSelectedFile}
@@ -142,7 +142,7 @@ export function GitFileDiffViewView({
   }
 
   return (
-    <div className="flex-1 flex flex-col min-h-0 p-2">
+    <div data-testid="GitFileDiffView" className="flex-1 flex flex-col min-h-0 p-2">
       {/* Fixed header */}
       <div className="shrink-0 flex items-center justify-between mb-2 px-1">
         <div className="text-[11px] text-text-muted font-mono truncate" title={gitSelectedFile}>
@@ -150,6 +150,7 @@ export function GitFileDiffViewView({
         </div>
         <div className="flex items-center gap-1 shrink-0 ml-2">
           <button
+            data-testid="GitFileDiffView.toggleWrap"
             className={`text-[10px] px-2 py-0.5 rounded border transition-colors ${
               diffWrapLines
                 ? 'bg-accent/20 border-accent/40 text-accent'
@@ -161,6 +162,7 @@ export function GitFileDiffViewView({
             Wrap
           </button>
           <button
+            data-testid="GitFileDiffView.toggleIgnoreWhitespace"
             className={`text-[10px] px-2 py-0.5 rounded border transition-colors ${
               diffIgnoreWhitespace
                 ? 'bg-accent/20 border-accent/40 text-accent'

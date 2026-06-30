@@ -58,7 +58,7 @@ export function DailyUsageChart({
   const yScale = (val: number): number => padT + chartH - (val / maxTokens) * chartH
 
   return (
-    <div className="relative">
+    <div data-testid="DailyUsageChart" className="relative">
       <svg
         viewBox={`0 0 ${width} ${height}`}
         className="w-full"

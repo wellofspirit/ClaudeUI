@@ -4,6 +4,7 @@ import { useShallow } from 'zustand/react/shallow'
 import type { SessionInfo } from '../../../../shared/types'
 import { PermissionsDialog } from '../PermissionsDialog'
 import { useContextMenu } from '../../hooks/useContextMenu'
+import { EngineLogo } from '../shared/EngineLogo'
 
 export const SessionItem = memo(function SessionItem({
   info,
@@ -116,6 +117,8 @@ export const SessionItem = memo(function SessionItem({
   return (
     <>
       <div
+        data-testid="SessionItem"
+        data-id={info.sessionId}
         onClick={onClick}
         onDoubleClick={onDoubleClick}
         onContextMenu={menu.open}
@@ -137,6 +140,7 @@ export const SessionItem = memo(function SessionItem({
           />
           {onRemove && (
             <span
+              data-testid="SessionItem.remove"
               onClick={(e) => {
                 e.stopPropagation()
                 onRemove()
@@ -161,6 +165,7 @@ export const SessionItem = memo(function SessionItem({
         </span>
         {isRenaming ? (
           <input
+            data-testid="SessionItem.renameInput"
             ref={renameRef}
             value={renameValue}
             onChange={(e) => setRenameValue(e.target.value)}
@@ -175,7 +180,7 @@ export const SessionItem = memo(function SessionItem({
           />
         ) : (
           <span
-            className="overflow-hidden whitespace-nowrap flex-1 min-w-0"
+            className="overflow-hidden whitespace-nowrap flex-1 min-w-0 flex items-center gap-1"
             style={{
               WebkitMaskImage:
                 'linear-gradient(to right, black calc(100% - 12px), transparent 100%)',
@@ -183,6 +188,7 @@ export const SessionItem = memo(function SessionItem({
             }}
             title={info.title}
           >
+            <EngineLogo engineId={info.engineId ?? 'claude'} size={10} className="shrink-0 opacity-80" />
             {info.title}
           </span>
         )}
@@ -226,6 +232,7 @@ export const SessionItem = memo(function SessionItem({
             )}
             {onPin && (
               <span
+                data-testid="SessionItem.pin"
                 onClick={(e) => {
                   e.stopPropagation()
                   onPin()
@@ -250,6 +257,7 @@ export const SessionItem = memo(function SessionItem({
             )}
             {onUnpin && (
               <span
+                data-testid="SessionItem.unpin"
                 onClick={(e) => {
                   e.stopPropagation()
                   onUnpin()
@@ -274,6 +282,7 @@ export const SessionItem = memo(function SessionItem({
             )}
             {onToggleWatch && !isSdkActive && (
               <span
+                data-testid="SessionItem.toggleWatch"
                 onClick={(e) => {
                   e.stopPropagation()
                   onToggleWatch()

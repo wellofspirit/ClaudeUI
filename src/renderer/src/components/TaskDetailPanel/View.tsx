@@ -100,12 +100,14 @@ export function TaskDetailPanelView({
 
   return (
     <div
+      data-testid="TaskDetailPanel"
       style={style}
       className="shrink-0 border-l border-border bg-bg-secondary flex flex-col h-full"
     >
       <div className="shrink-0 flex items-center px-4 h-12 border-b border-border [-webkit-app-region:drag]">
         <span className="text-[13px] text-text-secondary font-medium flex-1">Tasks</span>
         <button
+          data-testid="TaskDetailPanel.close"
           onClick={onClose}
           className="[-webkit-app-region:no-drag] text-text-muted hover:text-text-primary transition-colors cursor-pointer"
         >

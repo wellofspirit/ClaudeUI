@@ -1,15 +1,29 @@
 import { useState, useMemo } from 'react'
-import type { ContentBlock } from '../../../../shared/types'
+import type { ContentBlock, PendingApproval, PermissionSuggestion } from '../../../../shared/types'
+import type { ToolView } from '../../../../shared/tool-kinds'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
 import { MarkdownRenderer } from './MarkdownRenderer'
 import { SubagentMessages } from './SubagentMessages'
+import { ApprovalButtons } from './ApprovalButtons'
 
 type ToolUseBlock = Extract<ContentBlock, { type: 'tool_use' }>
 type ToolResultBlock = Extract<ContentBlock, { type: 'tool_result' }>
+type TaskView = Extract<ToolView, { kind: 'task' }>
 
 interface Props {
   block: ToolUseBlock
   result?: ToolResultBlock
+  view: TaskView
+  /**
+   * Pending approval for THIS task tool call, matched by toolUseId in
+   * MessageBubble. opencode (and any engine that gates the subagent-spawning
+   * tool) raises a `permission.asked` for the `task` tool itself; without
+   * rendering the decision here the subagent is never spawned and the turn
+   * hangs forever with no actionable UI (FloatingApproval excludes it because
+   * the toolUseId matches a rendered tool_use block). Mirrors the
+   * plan/question lifted cards, which also consume `approval`.
+   */
+  approval?: PendingApproval
 }
 
 export interface ParsedUsage {
@@ -63,9 +77,11 @@ export function formatTokens(n: number): string {
   return String(n)
 }
 
-export function TaskCard({ block, result }: Props): React.JSX.Element {
+export function TaskCard({ block, result, view, approval }: Props): React.JSX.Element {
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const taskProgressMap = useActiveSession((s) => s.taskProgressMap)
+  const removePendingApproval = useSessionStore((s) => s.removePendingApproval)
+  const permissionMode = useActiveSession((s) => s.permissionMode)
   const openTaskPanel = useSessionStore((s) => s.openTaskPanel)
   const subagentMsgs = useActiveSession((s) => s.subagentMessages)
   const subagentText = useActiveSession((s) => s.subagentStreamingText)
@@ -74,10 +90,10 @@ export function TaskCard({ block, result }: Props): React.JSX.Element {
   const stoppingTaskIds = useActiveSession((s) => s.stoppingTaskIds)
   const setTaskStopping = useSessionStore((s) => s.setTaskStopping)
   const clearTaskStopping = useSessionStore((s) => s.clearTaskStopping)
+  const backgroundTasksEnabled = useActiveSession((s) => s.status.capabilities.backgroundTasks)
   const [expanded, setExpanded] = useState(false)
 
   const toolUseId = block.toolUseId
-  const input = block.toolInput || {}
   const isHistorical = useActiveSession((s) => s.isHistorical)
   const hasResult = !!result
   const msgs = subagentMsgs[toolUseId] || []
@@ -85,17 +101,18 @@ export function TaskCard({ block, result }: Props): React.JSX.Element {
   const streamThinking = subagentThinking[toolUseId] || ''
   const bgNotification = taskNotifications.find((n) => n.toolUseId === toolUseId)
   const hasSubagentOutput = msgs.length > 0 || !!streamText || !!streamThinking
-  const isBackground = !!input.run_in_background
+  const isBackground = !!view.background
   // Background tasks get a tool_result immediately ("agent launched") but keep running until task_notification
   const isError = bgNotification ? bgNotification.status === 'failed' : (result?.isError ?? false)
   const isRunning = isHistorical ? false : isBackground ? !bgNotification : !hasResult
   // In historical mode, tasks without results show as "loaded" (neutral state)
   const isLoaded = isHistorical && !hasResult && !bgNotification
 
-  const description = String(input.description || input.prompt || '').slice(0, 120)
-  const prompt = String(input.prompt || '')
-  const subagentType = String(input.subagent_type || input.subagentType || '')
-  const model = input.model ? String(input.model) : null
+  // Read display fields from the engine-neutral view (not block.toolInput)
+  const description = (view.description || view.prompt || '').slice(0, 120)
+  const prompt = view.prompt
+  const subagentType = view.subagent ?? ''
+  const model = view.model ?? null
 
   const progress = taskProgressMap[toolUseId]
   const elapsed = progress?.elapsedTimeSeconds
@@ -114,15 +131,20 @@ export function TaskCard({ block, result }: Props): React.JSX.Element {
       }
     : parsedUsage
 
-  const borderColor = isRunning
-    ? 'border-accent/30'
-    : isError
-      ? 'border-danger/30'
-      : 'border-success/30'
+  const isPendingApproval = !!approval
+  const borderColor = isPendingApproval
+    ? 'border-warning/40'
+    : isRunning
+      ? 'border-accent/30'
+      : isError
+        ? 'border-danger/30'
+        : 'border-success/30'
 
   const isCompleted = !isRunning && !isError
   const isStopping = stoppingTaskIds.includes(toolUseId)
-  const canBackground = isRunning && !isBackground && !isStopping
+  // Gated on capabilities.backgroundTasks — engines without background execution
+  // never offer "Send to background". Claude: true → unchanged.
+  const canBackground = isRunning && !isBackground && !isStopping && backgroundTasksEnabled
   const [isBackgrounding, setIsBackgrounding] = useState(false)
 
   const handleBackgroundTask = async (): Promise<void> => {
@@ -133,6 +155,21 @@ export function TaskCard({ block, result }: Props): React.JSX.Element {
       window.api.logError('TaskCard', `Failed to background task: ${bgResult.error}`)
       setIsBackgrounding(false)
     }
+  }
+
+  const handleApproval = async (
+    decision: 'allow' | 'deny',
+    selectedSuggestions?: PermissionSuggestion[]
+  ): Promise<void> => {
+    if (!approval || !activeSessionId) return
+    await window.api.respondApproval(
+      activeSessionId,
+      approval.requestId,
+      decision,
+      undefined,
+      selectedSuggestions
+    )
+    removePendingApproval(activeSessionId, approval.requestId)
   }
 
   const handleStopTask = async (): Promise<void> => {
@@ -198,9 +235,10 @@ export function TaskCard({ block, result }: Props): React.JSX.Element {
   )
 
   return (
-    <div className={`rounded-lg border ${borderColor} bg-bg-secondary overflow-hidden`}>
+    <div data-testid="TaskCard" className={`rounded-lg border ${borderColor} bg-bg-secondary overflow-hidden`}>
       {/* Header — always visible, clickable to expand/collapse */}
       <button
+        data-testid="TaskCard.expand"
         onClick={() => setExpanded(!expanded)}
         className="w-full flex items-center gap-2 px-3 h-9 border-b border-border hover:bg-bg-hover transition-colors cursor-pointer"
       >
@@ -217,6 +255,7 @@ export function TaskCard({ block, result }: Props): React.JSX.Element {
         {isLoaded && <span className="text-[10px] text-text-muted shrink-0">loaded</span>}
         {canBackground && !isBackgrounding && !isHistorical && (
           <button
+            data-testid="TaskCard.sendToBackground"
             onClick={(e) => {
               e.stopPropagation()
               handleBackgroundTask()
@@ -231,8 +270,9 @@ export function TaskCard({ block, result }: Props): React.JSX.Element {
             sending to background…
           </span>
         )}
-        {isRunning && !isStopping && !isHistorical && (
+        {isRunning && !isStopping && !isHistorical && !isPendingApproval && (
           <button
+            data-testid="TaskCard.stop"
             onClick={(e) => {
               e.stopPropagation()
               handleStopTask()
@@ -293,6 +333,7 @@ export function TaskCard({ block, result }: Props): React.JSX.Element {
           )}
           <div className="flex-1" />
           <button
+            data-testid="TaskCard.openInPanel"
             onClick={() => activeSessionId && openTaskPanel(activeSessionId, toolUseId)}
             className="text-[11px] text-accent hover:underline cursor-pointer"
           >
@@ -398,6 +439,17 @@ export function TaskCard({ block, result }: Props): React.JSX.Element {
             </div>
           )}
         </>
+      )}
+
+      {/* Pending approval — opencode (ask mode) gates the `task` tool itself.
+          Render the decision inline so the subagent can actually be spawned;
+          without this the turn hangs with no actionable UI. */}
+      {isPendingApproval && (
+        <ApprovalButtons
+          approval={approval!}
+          permissionMode={permissionMode}
+          onApproval={handleApproval}
+        />
       )}
     </div>
   )

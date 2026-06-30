@@ -11,10 +11,12 @@ const btnClass =
 
 export function DiffCommentBadge({ comments, onEdit, onRemove }: Props): React.JSX.Element {
   return (
-    <div className="diff-comment-badges mx-2 my-1 flex flex-col gap-1">
+    <div data-testid="DiffCommentBadge" className="diff-comment-badges mx-2 my-1 flex flex-col gap-1">
       {comments.map((c) => (
         <div
           key={c.id}
+          data-testid="DiffCommentBadge.item"
+          data-id={c.id}
           className="diff-comment-badge flex items-start gap-2 rounded-md border border-border-bright border-l-2 border-l-accent/60 px-3 py-1.5 group"
         >
           <div className="flex-1 min-w-0">
@@ -28,7 +30,7 @@ export function DiffCommentBadge({ comments, onEdit, onRemove }: Props): React.J
             </span>
           </div>
           <div className="flex items-center gap-0.5">
-            <button onClick={() => onEdit(c)} className={btnClass} title="Edit comment">
+            <button data-testid="DiffCommentBadge.edit" onClick={() => onEdit(c)} className={btnClass} title="Edit comment">
               <svg
                 width="10"
                 height="10"
@@ -42,7 +44,7 @@ export function DiffCommentBadge({ comments, onEdit, onRemove }: Props): React.J
                 <path d="M17 3a2.85 2.85 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
               </svg>
             </button>
-            <button onClick={() => onRemove(c.id)} className={btnClass} title="Remove comment">
+            <button data-testid="DiffCommentBadge.remove" onClick={() => onRemove(c.id)} className={btnClass} title="Remove comment">
               <svg
                 width="10"
                 height="10"

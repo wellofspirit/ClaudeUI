@@ -1,5 +1,5 @@
 /**
- * Multiple-account support (ADR-015).
+ * Multiple-account support (ADR-015 / Phase 4 ADR-021).
  *
  * Each account is a directory `~/.claude/ui/accounts/<id>/` holding only its
  * own `.credentials.json`. cli.js is pointed at the active account's dir via
@@ -7,10 +7,13 @@
  * skip-securestorage patch forces file-based storage), so credentials are
  * per-account while settings / history stay shared in `~/.claude`.
  *
- * We own the account list + active pointer (`accounts.json`) and orchestrate
- * add/switch/delete; cli.js still owns all token read/write/refresh inside the
- * active dir (we never parse tokens). On any change we re-point the spawn env,
- * restart the service session, and tell the renderer to respawn chat sessions.
+ * Phase 4 change: AccountInfo metadata (email, subscriptionType, organization,
+ * createdAt) moves into the operational DB (v2 migration). Credentials NEVER
+ * enter the DB (ADR-015 unchanged). enabled/activeId stay in accounts.json as
+ * a lightweight pointer file — avoids a DB read on the hot spawn-env path.
+ * accounts.json is kept as a one-release fallback (data imported to DB on init).
+ *
+ * Switch mechanism (env re-point + respawn) is unchanged.
  */
 
 import type { BrowserWindow } from 'electron'
@@ -23,15 +26,34 @@ import { setSecurestorageEnv } from '../sdk/securestorage-env'
 import { serviceSession } from './service-session'
 import { authManager } from './auth-manager'
 import { logger } from './logger'
+import {
+  getAllAccounts,
+  upsertAccount,
+  deleteAccountRow,
+  importAccountsOnce
+} from './db'
 
 const ACCOUNTS_DIR = join(homedir(), '.claude', 'ui', 'accounts')
 const ACCOUNTS_FILE = join(ACCOUNTS_DIR, 'accounts.json')
 
-const EMPTY: AccountsState = { enabled: false, activeId: null, accounts: [] }
+/**
+ * Pointer file shape — only enabled/activeId. accounts array is kept for
+ * one-release fallback compatibility and legacy file reads. After migration
+ * the DB is the source of truth for AccountInfo; this file is secondary.
+ */
+interface AccountsPointer {
+  enabled: boolean
+  activeId: string | null
+  /** Legacy field — kept for one-release fallback; DB is primary after import. */
+  accounts?: AccountInfo[]
+}
+
+const EMPTY_POINTER: AccountsPointer = { enabled: false, activeId: null }
 
 class AccountManager {
   private window: BrowserWindow | null = null
-  private state: AccountsState = EMPTY
+  /** In-memory cache of the current state. Always consistent with DB + pointer file. */
+  private state: AccountsState = { enabled: false, activeId: null, accounts: [] }
 
   /** Wire up at app start: load state, apply active env, capture login emails. */
   init(win: BrowserWindow): void {
@@ -61,7 +83,8 @@ class AccountManager {
    *  spawn env always resolves to a real dir while multi-account is on. */
   private ensureActiveAccount(): void {
     if (this.state.accounts.length === 0) {
-      this.state.accounts.push(this.createAccount('Account 1'))
+      const acc = this.createAccount('Account 1')
+      this.state.accounts.push(acc)
     }
     if (!this.state.accounts.some((a) => a.id === this.state.activeId)) {
       this.state.activeId = this.state.accounts[0].id
@@ -93,6 +116,12 @@ class AccountManager {
     const idx = this.state.accounts.findIndex((a) => a.id === id)
     if (idx === -1) return this.state
     this.state.accounts.splice(idx, 1)
+    // Remove DB row + credentials directory.
+    try {
+      deleteAccountRow(id)
+    } catch (err) {
+      logger.warn('AccountManager', `Failed to delete account row ${id}: ${err}`)
+    }
     try {
       rmSync(this.accountDir(id), { recursive: true, force: true })
     } catch (err) {
@@ -117,20 +146,33 @@ class AccountManager {
     acc.email = account.email ?? acc.email
     acc.subscriptionType = account.subscriptionType ?? acc.subscriptionType
     acc.organization = account.organization ?? acc.organization
-    this.save()
+    // Persist new info to DB (source of truth) + pointer file.
+    try {
+      upsertAccount(acc)
+    } catch (err) {
+      logger.warn('AccountManager', `Failed to upsert account ${acc.id} to DB: ${err}`)
+    }
+    this.savePointer()
     this.broadcast()
   }
 
   private createAccount(label: string): AccountInfo {
     const id = randomUUID()
     mkdirSync(this.accountDir(id), { recursive: true, mode: 0o700 })
-    return {
+    const acc: AccountInfo = {
       id,
       email: label, // placeholder until the first successful login fills it in
       subscriptionType: null,
       organization: null,
       createdAt: Date.now()
     }
+    // Write to DB immediately.
+    try {
+      upsertAccount(acc)
+    } catch (err) {
+      logger.warn('AccountManager', `Failed to insert account ${id} to DB: ${err}`)
+    }
+    return acc
   }
 
   private accountDir(id: string): string {
@@ -148,9 +190,18 @@ class AccountManager {
     }
   }
 
-  /** Persist + re-point env + restart sessions so the change takes effect. */
+  /** Persist pointer file + re-point env + restart sessions so the change takes effect. */
   private persistAndApply(): void {
-    this.save()
+    // Upsert all accounts to DB (handles any new ones from createAccount → already done,
+    // but re-syncing here ensures consistency after setEnabled/switch mutations).
+    for (const acc of this.state.accounts) {
+      try {
+        upsertAccount(acc)
+      } catch (err) {
+        logger.warn('AccountManager', `Failed to sync account ${acc.id} to DB: ${err}`)
+      }
+    }
+    this.savePointer()
     this.applyActive()
     // The service session caches its credential for its process lifetime; stop
     // it so the next use respawns against the new account dir.
@@ -168,25 +219,67 @@ class AccountManager {
     }
   }
 
+  /**
+   * Load state: DB is the primary source for AccountInfo; pointer file provides
+   * enabled/activeId. One-time import from accounts.json runs if DB is empty.
+   */
   private load(): AccountsState {
+    mkdirSync(ACCOUNTS_DIR, { recursive: true, mode: 0o700 })
+
+    // Read the pointer file (enabled + activeId + legacy accounts array).
+    let pointer: AccountsPointer = { ...EMPTY_POINTER }
     try {
-      const raw = JSON.parse(readFileSync(ACCOUNTS_FILE, 'utf-8')) as Partial<AccountsState>
-      return {
+      const raw = JSON.parse(readFileSync(ACCOUNTS_FILE, 'utf-8')) as Partial<AccountsPointer>
+      pointer = {
         enabled: !!raw.enabled,
         activeId: raw.activeId ?? null,
         accounts: Array.isArray(raw.accounts) ? raw.accounts : []
       }
     } catch {
-      return { ...EMPTY }
+      // File absent = first run; pointer stays empty.
+    }
+
+    // One-time import: if DB table is empty and the legacy JSON has accounts, import them.
+    if (pointer.accounts && pointer.accounts.length > 0) {
+      try {
+        importAccountsOnce(pointer.accounts)
+      } catch (err) {
+        logger.warn('AccountManager', `Failed to import accounts.json to DB: ${err}`)
+      }
+    }
+
+    // Read authoritative list from DB.
+    let accounts: AccountInfo[] = []
+    try {
+      accounts = getAllAccounts()
+    } catch (err) {
+      // DB unavailable (e.g. during tests with a stub that errors) — fall back to JSON.
+      logger.warn('AccountManager', `Failed to read accounts from DB, using JSON fallback: ${err}`)
+      accounts = pointer.accounts ?? []
+    }
+
+    return {
+      enabled: pointer.enabled,
+      activeId: pointer.activeId,
+      accounts
     }
   }
 
-  private save(): void {
+  /**
+   * Persist the pointer file (enabled + activeId only). AccountInfo is in the DB.
+   * Keep a legacy accounts array for one-release fallback compatibility.
+   */
+  private savePointer(): void {
     try {
       mkdirSync(ACCOUNTS_DIR, { recursive: true, mode: 0o700 })
-      writeFileSync(ACCOUNTS_FILE, JSON.stringify(this.state, null, 2), { mode: 0o600 })
+      const pointer: AccountsPointer = {
+        enabled: this.state.enabled,
+        activeId: this.state.activeId,
+        accounts: this.state.accounts // legacy fallback — remove in next release
+      }
+      writeFileSync(ACCOUNTS_FILE, JSON.stringify(pointer, null, 2), { mode: 0o600 })
     } catch (err) {
-      logger.error('AccountManager', `Failed to persist accounts.json: ${err}`)
+      logger.error('AccountManager', `Failed to persist accounts.json pointer: ${err}`)
     }
   }
 }

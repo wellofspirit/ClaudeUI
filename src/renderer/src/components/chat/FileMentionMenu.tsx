@@ -65,12 +65,15 @@ export function FileMentionMenu({
 
   return (
     <div
+      data-testid="FileMentionMenu"
       ref={listRef}
       className="absolute bottom-full left-0 right-0 mb-1 z-20 max-h-[240px] overflow-y-auto rounded-lg border border-border bg-bg-input shadow-lg shadow-black/30"
     >
       {entries.map((entry, i) => (
         <button
           key={entry.name === '..' ? '..' : entry.name}
+          data-testid="FileMentionMenu.item"
+          data-id={entry.name}
           onMouseDown={(e) => {
             e.preventDefault() // keep textarea focused
             onSelect(entry)

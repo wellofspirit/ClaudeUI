@@ -40,7 +40,7 @@ export function DeleteConfirmModal({
       : 'Delete'
 
   return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center">
+    <div data-testid="DeleteConfirmModal" className="fixed inset-0 z-[100] flex items-center justify-center">
       <div
         className="absolute inset-0 bg-black/40 backdrop-blur-sm"
         onClick={busy ? undefined : onCancel}
@@ -85,6 +85,7 @@ export function DeleteConfirmModal({
         )}
         <div className="flex justify-end gap-2">
           <button
+            data-testid="DeleteConfirmModal.cancel"
             onClick={onCancel}
             disabled={busy}
             className="px-3 py-1.5 rounded-md text-[12px] text-text-muted hover:text-text-primary hover:bg-bg-hover disabled:opacity-50 transition-colors cursor-default"
@@ -92,6 +93,7 @@ export function DeleteConfirmModal({
             {error ? 'Close' : 'Cancel'}
           </button>
           <button
+            data-testid="DeleteConfirmModal.confirm"
             onClick={handleConfirm}
             disabled={busy}
             className="px-3 py-1.5 rounded-md text-[12px] text-white bg-red-600 hover:bg-red-700 disabled:opacity-50 transition-colors cursor-default"

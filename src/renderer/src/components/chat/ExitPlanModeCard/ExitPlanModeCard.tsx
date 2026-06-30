@@ -1,17 +1,20 @@
 import { useState, useCallback } from 'react'
 import { useSessionStore, useActiveSession } from '../../../stores/session-store'
 import type { PendingApproval, ContentBlock as _ContentBlock } from '../../../../../shared/types'
+import type { ToolView } from '../../../../../shared/tool-kinds'
 import { waitForModeChange } from './utils'
 import { ExitPlanModeCardView } from './View'
 
 type ToolUseBlock = Extract<_ContentBlock, { type: 'tool_use' }>
+type PlanView = Extract<ToolView, { kind: 'plan' }>
 
 interface ExitPlanModeCardProps {
   block: ToolUseBlock
+  view: PlanView
   approval?: PendingApproval
 }
 
-export function ExitPlanModeCard({ block, approval }: ExitPlanModeCardProps): React.JSX.Element {
+export function ExitPlanModeCard({ view, approval }: ExitPlanModeCardProps): React.JSX.Element {
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const removePendingApproval = useSessionStore((s) => s.removePendingApproval)
   const clearConversation = useSessionStore((s) => s.clearConversation)
@@ -19,13 +22,14 @@ export function ExitPlanModeCard({ block, approval }: ExitPlanModeCardProps): Re
   const markSdkActive = useSessionStore((s) => s.markSdkActive)
   const openPlanPanel = useSessionStore((s) => s.openPlanPanel)
   const cwd = useActiveSession((s) => s.cwd)
+  const selectedEngineId = useActiveSession((s) => s.selectedEngineId)
 
   const [expanded, setExpanded] = useState(true)
   const [showFeedback, setShowFeedback] = useState(false)
   const [feedback, setFeedback] = useState('')
 
-  // Plan content comes from the ExitPlanMode tool input
-  const planContent = (block.toolInput?.plan as string) || null
+  // Plan content comes from the engine-neutral view (not block.toolInput)
+  const planContent = view.plan || null
 
   // Option 1: Start fresh, auto-accept edits
   const handleStartFresh = useCallback(async () => {
@@ -47,7 +51,12 @@ export function ExitPlanModeCard({ block, approval }: ExitPlanModeCardProps): Re
       cwd,
       session?.effort ?? 'medium',
       undefined,
-      'acceptEdits'
+      'acceptEdits',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      selectedEngineId
     )
     markSdkActive(activeSessionId)
     setPermissionMode('acceptEdits', activeSessionId)

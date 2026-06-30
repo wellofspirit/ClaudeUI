@@ -1,0 +1,48 @@
+{
+  "_note": "Trimmed OpenAPI snapshot for opencode 1.17.9. Full /doc is ~390KB; we keep only the contract-relevant fields the smoke test validates.",
+  "info": {
+    "title": "opencode",
+    "version": "1.0.0",
+    "description": "opencode api"
+  },
+  "apiVersion": "1.0.0",
+  "knownEventTypes": [
+    "server.connected",
+    "session.created",
+    "session.updated",
+    "session.deleted",
+    "session.status",
+    "message.updated",
+    "message.removed",
+    "message.part.updated",
+    "message.part.removed",
+    "message.part.delta",
+    "session.next.step.started",
+    "session.next.step.ended",
+    "session.next.step.failed",
+    "session.next.text.started",
+    "session.next.text.delta",
+    "session.next.text.ended",
+    "session.next.tool.called",
+    "session.next.tool.success",
+    "session.next.tool.failed",
+    "permission.asked",
+    "permission.replied"
+  ],
+  "v1OperationIds": [
+    "session.list",
+    "session.create",
+    "session.get",
+    "session.delete",
+    "session.prompt",
+    "session.prompt_async",
+    "session.abort",
+    "session.fork",
+    "event.subscribe",
+    "config.providers",
+    "provider.list",
+    "provider.auth",
+    "auth.set",
+    "auth.remove"
+  ]
+}

@@ -20,7 +20,7 @@ export const MockupPreviewCardView = forwardRef<HTMLIFrameElement, MockupPreview
     const [tab, setTab] = useState<'preview' | 'code'>('preview')
 
     return (
-      <div className="mt-1">
+      <div data-testid="MockupPreviewCard" className="mt-1">
         {/* Tab bar — the tool-call block above us already shows the mockup's
             name/directory, so this is the only row the card itself needs. */}
         <div className="flex items-center gap-1 mb-1.5">
@@ -41,6 +41,7 @@ export const MockupPreviewCardView = forwardRef<HTMLIFrameElement, MockupPreview
           <div className="flex-1" />
 
           <button
+            data-testid="MockupPreviewCard.copyHtml"
             onClick={onCopyHtml}
             className="text-[11px] h-6 px-2 rounded text-text-muted hover:text-text-secondary transition-colors cursor-pointer hover:bg-bg-hover"
             title="Copy HTML"
@@ -49,6 +50,7 @@ export const MockupPreviewCardView = forwardRef<HTMLIFrameElement, MockupPreview
           </button>
 
           <button
+            data-testid="MockupPreviewCard.refresh"
             onClick={onRefresh}
             className="h-6 w-6 flex items-center justify-center rounded text-text-muted hover:text-text-secondary transition-colors cursor-pointer hover:bg-bg-hover"
             title="Reload mockup"
@@ -70,6 +72,7 @@ export const MockupPreviewCardView = forwardRef<HTMLIFrameElement, MockupPreview
           </button>
 
           <button
+            data-testid="MockupPreviewCard.expand"
             onClick={onExpand}
             className="h-6 w-6 flex items-center justify-center rounded text-text-muted hover:text-text-secondary transition-colors cursor-pointer hover:bg-bg-hover"
             title="Open in side panel"

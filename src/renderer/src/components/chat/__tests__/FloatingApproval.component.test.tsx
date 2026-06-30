@@ -93,9 +93,10 @@ beforeEach(() => {
     customTitles: {}
   })
   // Reset sandbox exclusions (mutated by sandbox escape tests)
-  useSessionStore.getState().updateSettings({
-    sandbox: { ...useSessionStore.getState().settings.sandbox, excludedCommands: [] }
-  })
+  const currentSandbox = useSessionStore.getState().engineConfig.sandbox
+  if (currentSandbox) {
+    useSessionStore.getState().setEngineConfig({ sandbox: { ...currentSandbox, excludedCommands: [] } })
+  }
 })
 
 afterEach(() => {
@@ -116,7 +117,7 @@ async function simulateApprovalResponse(
     checkedSuggestions?: boolean[]
   } = {}
 ): Promise<void> {
-  const { activeSessionId, sessions, removePendingApproval, updateSettings, settings } =
+  const { activeSessionId, sessions, removePendingApproval, engineConfig, setEngineConfig } =
     useSessionStore.getState()
   if (!activeSessionId) return
 
@@ -127,19 +128,18 @@ async function simulateApprovalResponse(
   const alwaysAllow = opts.alwaysAllow ?? false
   const checkedSuggestions =
     opts.checkedSuggestions ?? (approval.suggestions || []).map(() => false)
-  const sandboxSettings = settings.sandbox
+  const sandboxSettings = engineConfig.sandbox
   const isSandboxEscape = !!approval.input?.dangerouslyDisableSandbox
 
   // Sandbox exclusion logic
   if (decision === 'allow' && alwaysAllow && isSandboxEscape && approval.input?.command) {
     const cmd = String(approval.input.command)
-    if (!sandboxSettings.excludedCommands.includes(cmd)) {
-      updateSettings({
-        sandbox: {
-          ...sandboxSettings,
-          excludedCommands: [...sandboxSettings.excludedCommands, cmd]
-        }
-      })
+    const currentExcluded = sandboxSettings?.excludedCommands ?? []
+    if (!currentExcluded.includes(cmd)) {
+      const nextSandbox = sandboxSettings
+        ? { ...sandboxSettings, excludedCommands: [...currentExcluded, cmd] }
+        : { enabled: false, autoAllowBashIfSandboxed: false, allowUnsandboxedCommands: false, network: { restrictNetwork: false, allowLocalBinding: false, allowedDomains: [], allowManagedDomainsOnly: false, allowAllUnixSockets: false, allowUnixSockets: [] }, filesystem: { allowWrite: [], denyWrite: [], denyRead: [] }, excludedCommands: [cmd] }
+      setEngineConfig({ ...engineConfig, sandbox: nextSandbox })
     }
   }
 
@@ -267,8 +267,8 @@ describe('FloatingApproval approval response flow', () => {
 
     await simulateApprovalResponse('allow', { alwaysAllow: true })
 
-    const sandbox = useSessionStore.getState().settings.sandbox
-    expect(sandbox.excludedCommands).toContain('dangerous-cmd')
+    const sandbox = useSessionStore.getState().engineConfig.sandbox
+    expect(sandbox?.excludedCommands).toContain('dangerous-cmd')
   })
 
   it('does not add to sandbox exclusions on deny', async () => {
@@ -279,8 +279,8 @@ describe('FloatingApproval approval response flow', () => {
 
     await simulateApprovalResponse('deny', { alwaysAllow: true })
 
-    const sandbox = useSessionStore.getState().settings.sandbox
-    expect(sandbox.excludedCommands).not.toContain('dangerous-cmd')
+    const sandbox = useSessionStore.getState().engineConfig.sandbox
+    expect(sandbox?.excludedCommands ?? []).not.toContain('dangerous-cmd')
   })
 
   it('does not add to sandbox exclusions when alwaysAllow is false', async () => {
@@ -291,15 +291,19 @@ describe('FloatingApproval approval response flow', () => {
 
     await simulateApprovalResponse('allow', { alwaysAllow: false })
 
-    const sandbox = useSessionStore.getState().settings.sandbox
-    expect(sandbox.excludedCommands).not.toContain('dangerous-cmd')
+    const sandbox = useSessionStore.getState().engineConfig.sandbox
+    expect(sandbox?.excludedCommands ?? []).not.toContain('dangerous-cmd')
   })
 
   it('does not duplicate command in sandbox exclusion list', async () => {
     // Pre-populate exclusion list
     const store = useSessionStore.getState()
-    store.updateSettings({
-      sandbox: { ...store.settings.sandbox, excludedCommands: ['dangerous-cmd'] }
+    const existing = store.engineConfig.sandbox
+    store.setEngineConfig({
+      ...store.engineConfig,
+      sandbox: existing
+        ? { ...existing, excludedCommands: ['dangerous-cmd'] }
+        : { enabled: false, autoAllowBashIfSandboxed: false, allowUnsandboxedCommands: false, network: { restrictNetwork: false, allowLocalBinding: false, allowedDomains: [], allowManagedDomainsOnly: false, allowAllUnixSockets: false, allowUnixSockets: [] }, filesystem: { allowWrite: [], denyWrite: [], denyRead: [] }, excludedCommands: ['dangerous-cmd'] }
     })
 
     setup({
@@ -309,8 +313,8 @@ describe('FloatingApproval approval response flow', () => {
 
     await simulateApprovalResponse('allow', { alwaysAllow: true })
 
-    const sandbox = useSessionStore.getState().settings.sandbox
-    expect(sandbox.excludedCommands.filter((c: string) => c === 'dangerous-cmd')).toHaveLength(1)
+    const sandbox = useSessionStore.getState().engineConfig.sandbox
+    expect((sandbox?.excludedCommands ?? []).filter((c: string) => c === 'dangerous-cmd')).toHaveLength(1)
   })
 
   it('does not modify sandbox exclusions for non-sandbox-escape approvals', async () => {
@@ -321,8 +325,8 @@ describe('FloatingApproval approval response flow', () => {
 
     await simulateApprovalResponse('allow', { alwaysAllow: true })
 
-    const sandbox = useSessionStore.getState().settings.sandbox
-    expect(sandbox.excludedCommands).not.toContain('echo hello')
+    const sandbox = useSessionStore.getState().engineConfig.sandbox
+    expect(sandbox?.excludedCommands ?? []).not.toContain('echo hello')
   })
 
   it('does nothing when no active session', async () => {
@@ -520,5 +524,135 @@ describe('FloatingApproval rendered component', () => {
     const remaining = useSessionStore.getState().sessions[ROUTE].pendingApprovals
     expect(remaining).toHaveLength(1)
     expect(remaining[0].requestId).toBe(approval2.requestId)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// "Allow for session" button — not shown (no producer until opencode Phase 5)
+// ---------------------------------------------------------------------------
+
+describe('FloatingApproval "Allow for session" button', () => {
+  it('does NOT render "Allow for session" button for a Claude session (no producer)', () => {
+    useSessionStore.setState({ lastSelectedEngineId: 'claude' })
+    useSessionStore.getState().createNewSession('route-claude', '/test')
+    useSessionStore.setState({ activeSessionId: 'route-claude' })
+
+    const approval = makePendingApproval({ toolName: 'Shell', input: { command: 'ls' } })
+    useSessionStore.getState().addPendingApproval('route-claude', approval)
+
+    render(<FloatingApproval />)
+
+    expect(screen.queryByText('Allow for session')).toBeNull()
+    // Normal Allow + Deny still present
+    expect(screen.getByText('Allow')).toBeInTheDocument()
+    expect(screen.getByText('Deny')).toBeInTheDocument()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// AskUserQuestion floating card (child subagent question hang-fix)
+//
+// An unmatched AskUserQuestion approval must render the question UI (not
+// ApprovalCard), and submit/dismiss must call respondApproval correctly.
+// A non-question approval must still render ApprovalCard.
+// ---------------------------------------------------------------------------
+
+describe('FloatingApproval — AskUserQuestion floating card (child question)', () => {
+  const ROUTE = 'route-float-q'
+
+  function makeQuestionApproval(requestId = 'req-q-float'): PendingApproval {
+    return {
+      requestId,
+      toolName: 'AskUserQuestion',
+      toolUseId: 'child_q_call_float',
+      input: {
+        questions: [
+          {
+            question: 'Pick one',
+            header: 'Choice',
+            options: [{ label: 'Option A', description: '' }, { label: 'Option B', description: '' }],
+            multiSelect: false
+          }
+        ]
+      }
+    }
+  }
+
+  function setup(overrides?: Partial<PendingApproval>): PendingApproval {
+    useSessionStore.getState().createNewSession(ROUTE, '/test')
+    useSessionStore.setState({ activeSessionId: ROUTE })
+    const approval = makeQuestionApproval()
+    const merged = { ...approval, ...overrides }
+    useSessionStore.getState().addPendingApproval(ROUTE, merged)
+    return merged
+  }
+
+  it('renders question UI (Question label) for an AskUserQuestion approval, NOT ApprovalCard', () => {
+    setup()
+    render(<FloatingApproval />)
+    // AskUserQuestionBlockView renders a "Question" heading — not "Permission" or "Allow"/"Deny"
+    expect(screen.getByText('Question')).toBeInTheDocument()
+    // ApprovalCard's "Permission" label must NOT appear
+    expect(screen.queryByText('Permission')).toBeNull()
+  })
+
+  it('options are visible in the rendered question card', () => {
+    setup()
+    render(<FloatingApproval />)
+    expect(screen.getByText('Option A')).toBeInTheDocument()
+    expect(screen.getByText('Option B')).toBeInTheDocument()
+  })
+
+  it('submitting an answer calls respondApproval(allow, answers) and removes approval', async () => {
+    const approval = setup()
+    render(<FloatingApproval />)
+
+    // Select Option A
+    await act(async () => {
+      fireEvent.click(screen.getByText('Option A'))
+    })
+
+    // Click Submit
+    await act(async () => {
+      fireEvent.click(screen.getByText('Submit'))
+    })
+
+    expect(lastApprovalResponse).toEqual({
+      routingId: ROUTE,
+      requestId: approval.requestId,
+      decision: 'allow',
+      answers: { 'Pick one': 'Option A' },
+      suggestions: undefined
+    })
+    expect(useSessionStore.getState().sessions[ROUTE].pendingApprovals).toHaveLength(0)
+  })
+
+  it('clicking Dismiss calls respondApproval(deny) and removes approval', async () => {
+    const approval = setup()
+    render(<FloatingApproval />)
+
+    await act(async () => {
+      fireEvent.click(screen.getByText('Dismiss'))
+    })
+
+    expect(lastApprovalResponse).toEqual({
+      routingId: ROUTE,
+      requestId: approval.requestId,
+      decision: 'deny',
+      answers: undefined,
+      suggestions: undefined
+    })
+    expect(useSessionStore.getState().sessions[ROUTE].pendingApprovals).toHaveLength(0)
+  })
+
+  it('a permission approval still renders ApprovalCard (Allow/Deny buttons, no Question label)', () => {
+    useSessionStore.getState().createNewSession(ROUTE, '/test')
+    useSessionStore.setState({ activeSessionId: ROUTE })
+    const permApproval = makePendingApproval({ toolName: 'Bash', input: { command: 'ls' } })
+    useSessionStore.getState().addPendingApproval(ROUTE, permApproval)
+    render(<FloatingApproval />)
+    expect(screen.getByText('Allow')).toBeInTheDocument()
+    expect(screen.getByText('Deny')).toBeInTheDocument()
+    expect(screen.queryByText('Question')).toBeNull()
   })
 })

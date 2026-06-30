@@ -29,7 +29,7 @@ export function QueuedMessageCard({ isMobile }: { isMobile: boolean }): React.JS
   }
 
   return (
-    <div style={{ padding: '0 13px 4px' }}>
+    <div data-testid="QueuedMessageCard" style={{ padding: '0 13px 4px' }}>
       <div className={`${isMobile ? 'max-w-full' : 'max-w-[740px]'} mx-auto`}>
         <div className="px-2.5 py-1.5 rounded-lg bg-bg-hover/60 border border-border/50 flex items-start gap-2">
           <div className="flex-1 min-w-0">
@@ -41,6 +41,7 @@ export function QueuedMessageCard({ isMobile }: { isMobile: boolean }): React.JS
             </div>
           </div>
           <button
+            data-testid="QueuedMessageCard.edit"
             onClick={handleEdit}
             className="shrink-0 w-6 h-6 flex items-center justify-center rounded-md text-text-muted hover:text-text-secondary hover:bg-bg-hover transition-colors cursor-pointer mt-0.5"
             title="Edit queued message"

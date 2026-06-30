@@ -12,8 +12,9 @@ export function WindowControlsView({
   onClose
 }: WindowControlsViewProps): React.JSX.Element {
   return (
-    <div className="flex items-center [-webkit-app-region:no-drag]">
+    <div data-testid="WindowControls" className="flex items-center [-webkit-app-region:no-drag]">
       <button
+        data-testid="WindowControls.minimize"
         onClick={onMinimize}
         className="w-[46px] h-12 flex items-center justify-center text-text-secondary hover:bg-white/10 transition-colors"
       >
@@ -22,6 +23,7 @@ export function WindowControlsView({
         </svg>
       </button>
       <button
+        data-testid="WindowControls.maximize"
         onClick={onMaximize}
         className="w-[46px] h-12 flex items-center justify-center text-text-secondary hover:bg-white/10 transition-colors"
       >
@@ -51,6 +53,7 @@ export function WindowControlsView({
         )}
       </button>
       <button
+        data-testid="WindowControls.close"
         onClick={onClose}
         className="w-[46px] h-12 flex items-center justify-center text-text-secondary hover:bg-[#e81123] hover:text-white transition-colors"
       >

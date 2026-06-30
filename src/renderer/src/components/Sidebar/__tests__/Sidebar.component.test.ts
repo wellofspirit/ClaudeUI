@@ -107,7 +107,6 @@ describe('Sidebar FC', () => {
     app.bridge.ipcMain.handle('session:generate-title', async () => 'auto-title')
     app.bridge.ipcMain.handle('session:delete-session' as any, async () => undefined)
     app.bridge.ipcMain.handle('session:delete-project' as any, async () => undefined)
-
     useSessionStore.setState({
       activeSessionId: null,
       sessions: {},
@@ -160,7 +159,8 @@ describe('Sidebar FC', () => {
     })
 
     await act(async () => {
-      await viewProps.onNewSessionDblClick()
+      viewProps.onNewSessionDblClick()
+      await new Promise((r) => setTimeout(r, 0))
     })
 
     const sessions = Object.values(useSessionStore.getState().sessions)
@@ -192,7 +192,8 @@ describe('Sidebar FC', () => {
     })
 
     await act(async () => {
-      await viewProps.onClickSession(makeSessionInfo('already-loaded'))
+      viewProps.onClickSession(makeSessionInfo('already-loaded'))
+      await new Promise((r) => setTimeout(r, 0))
     })
 
     expect(loadHistoryCalls).toBe(0)
@@ -221,7 +222,8 @@ describe('Sidebar FC', () => {
     })
 
     await act(async () => {
-      await viewProps.onClickSession(makeSessionInfo('disk-sess'))
+      viewProps.onClickSession(makeSessionInfo('disk-sess'))
+      await new Promise((r) => setTimeout(r, 0))
     })
 
     expect(historyCalls).toHaveLength(1)
@@ -389,6 +391,46 @@ describe('Sidebar FC', () => {
     expect(deleteCalls).toHaveLength(1)
     expect(deleteCalls[0][1]).toBe('del-sess')
     expect(deleteCalls[0][2]).toBe(PROJECT_KEY)
+  })
+
+  it('deleting one session keeps the OTHER engine’s sessions (no Claude-only clobber)', async () => {
+    // Regression: confirmDelete used to refresh with listDirectories() alone
+    // (Claude only), overwriting the merged list and wiping every opencode
+    // session until the next 30s poll. The post-delete refresh must merge both
+    // engines, so the surviving opencode session stays visible.
+    const ocA: SessionInfo = { ...makeSessionInfo('oc-a', 'OC A'), engineId: 'opencode' }
+    const ocB: SessionInfo = { ...makeSessionInfo('oc-b', 'OC B'), engineId: 'opencode' }
+    let opencodeList: SessionInfo[] = [ocA, ocB]
+    app.bridge.ipcMain.handle('session:list-directories', async () => [])
+    app.bridge.ipcMain.handle('session:list-opencode' as any, async () => opencodeList)
+    app.bridge.ipcMain.handle('session:delete-session' as any, async () => {
+      // The server drops the deleted session from the global list.
+      opencodeList = opencodeList.filter((s) => s.sessionId !== 'oc-a')
+    })
+
+    await act(async () => {
+      await renderFC()
+      // Flush the second await (opencode list) inside refreshDirectories.
+      await new Promise((r) => setTimeout(r, 0))
+    })
+    // Both opencode sessions are merged in on mount.
+    expect(
+      useSessionStore.getState().directories.flatMap((g) => g.sessions).map((s) => s.sessionId)
+    ).toEqual(expect.arrayContaining(['oc-a', 'oc-b']))
+
+    act(() => {
+      viewProps.onDeleteSession(ocA)
+    })
+    await act(async () => {
+      await viewProps.onConfirmDelete()
+    })
+
+    const remaining = useSessionStore
+      .getState()
+      .directories.flatMap((g) => g.sessions)
+      .map((s) => s.sessionId)
+    expect(remaining).toContain('oc-b') // survivor stays — not wiped
+    expect(remaining).not.toContain('oc-a') // deleted one is gone
   })
 
   // -------------------------------------------------------------------------

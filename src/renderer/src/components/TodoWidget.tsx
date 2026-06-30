@@ -23,6 +23,22 @@ function StatusIndicator({ status }: { status: TodoItem['status'] }): React.JSX.
       </svg>
     )
   }
+  if (status === 'cancelled') {
+    return (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+        className="text-text-muted shrink-0"
+      >
+        <line x1="18" y1="6" x2="6" y2="18" />
+        <line x1="6" y1="6" x2="18" y2="18" />
+      </svg>
+    )
+  }
   return <span className="w-3.5 h-3.5 rounded-full border-[1.5px] border-text-secondary shrink-0" />
 }
 
@@ -60,14 +76,18 @@ export function TodoWidget(): React.JSX.Element | null {
   const [expanded, setExpanded] = useState(false)
 
   if (todos.length === 0) return null
-  if (todos.every((t) => t.status === 'completed')) return null
+  // Hide when all items are done (completed or cancelled)
+  if (todos.every((t) => t.status === 'completed' || t.status === 'cancelled')) return null
 
   const completedCount = todos.filter((t) => t.status === 'completed').length
   const totalCount = todos.length
-  const progressPct = totalCount > 0 ? (completedCount / totalCount) * 100 : 0
+  // Exclude cancelled items from the progress denominator — they're not active work
+  const activeCount = todos.filter((t) => t.status !== 'cancelled').length
+  const progressPct = activeCount > 0 ? (completedCount / activeCount) * 100 : 0
 
   return (
     <div
+      data-testid="TodoWidget"
       className="absolute top-14 right-4 z-10 bg-bg-tertiary border border-border light-no-border shadow-lg shadow-black/30 overflow-hidden transition-all duration-200 ease-out"
       style={{
         width: expanded ? 'min(400px, 45%)' : 155,
@@ -76,6 +96,7 @@ export function TodoWidget(): React.JSX.Element | null {
     >
       {/* Header — always visible */}
       <button
+        data-testid="TodoWidget.toggle"
         onClick={() => setExpanded(!expanded)}
         className="w-full flex items-center px-3 h-9 hover:bg-bg-hover transition-colors cursor-pointer"
       >
@@ -125,7 +146,9 @@ export function TodoWidget(): React.JSX.Element | null {
                     className={`text-[12px] leading-tight whitespace-nowrap overflow-hidden text-ellipsis ${
                       todo.status === 'completed'
                         ? 'text-text-secondary line-through'
-                        : 'text-text-primary'
+                        : todo.status === 'cancelled'
+                          ? 'text-text-muted line-through opacity-60'
+                          : 'text-text-primary'
                     }`}
                   >
                     {todo.content}

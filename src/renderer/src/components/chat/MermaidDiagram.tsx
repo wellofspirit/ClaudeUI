@@ -651,12 +651,13 @@ export const MermaidDiagram = memo(function MermaidDiagram({
   }, [source, themeConfig])
 
   return (
-    <div>
+    <div data-testid="MermaidDiagram">
       {/* Tab bar */}
       <div className="flex gap-1 mb-2">
         {(['rendered', 'source'] as const).map((t) => (
           <button
             key={t}
+            data-testid={t === 'rendered' ? 'MermaidDiagram.tabRendered' : 'MermaidDiagram.tabSource'}
             onClick={() => setTab(t)}
             className={`text-[11px] h-6 px-2 rounded transition-colors cursor-pointer capitalize ${
               tab === t

@@ -142,6 +142,12 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
 
     listDirectories: () =>
       connection.invoke('session:list-directories') as ReturnType<ClaudeAPI['listDirectories']>,
+    listOpencodeSessionsGlobal: () =>
+      connection.invoke('session:list-opencode') as ReturnType<ClaudeAPI['listOpencodeSessionsGlobal']>,
+    loadOpencodeHistory: (sessionId: string) =>
+      connection.invoke('session:load-opencode-history', sessionId) as ReturnType<
+        ClaudeAPI['loadOpencodeHistory']
+      >,
 
     loadSessionHistory: (sessionId, projectKey) =>
       connection.invoke('session:load-history', sessionId, projectKey) as ReturnType<
@@ -177,8 +183,8 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
         ClaudeAPI['askSideQuestion']
       >,
 
-    deleteSession: (sessionId, projectKey) =>
-      unwrap('session:delete-session', sessionId, projectKey),
+    deleteSession: (sessionId, projectKey, engineId?) =>
+      unwrap('session:delete-session', sessionId, projectKey, engineId),
     deleteProject: (projectKey) => unwrap('session:delete-project', projectKey),
 
     // Routed session events
@@ -190,6 +196,7 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     onStatus: on('session:status') as ClaudeAPI['onStatus'],
     onResult: on('session:result') as ClaudeAPI['onResult'],
     onError: on('session:error') as ClaudeAPI['onError'],
+    onVendorAuthRequired: on('session:vendor-auth-required') as ClaudeAPI['onVendorAuthRequired'],
     onWarning: on('session:warning') as ClaudeAPI['onWarning'],
     onMessagesRetracted: on('session:messages-retracted') as ClaudeAPI['onMessagesRetracted'],
     onToolResult: on('session:tool-result') as ClaudeAPI['onToolResult'],
@@ -210,7 +217,9 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     onSkills: on('session:skills') as ClaudeAPI['onSkills'],
     onAuthSource: on('session:auth-source') as ClaudeAPI['onAuthSource'],
     onStatusLine: on('session:status-line') as ClaudeAPI['onStatusLine'],
+    onMetering: on('session:metering') as ClaudeAPI['onMetering'],
     onMcpServers: on('session:mcp-servers') as ClaudeAPI['onMcpServers'],
+    onPlanSteps: on('session:plan') as ClaudeAPI['onPlanSteps'],
 
     // Non-routed events
     onMaximizeChange: on('window:maximized-change') as ClaudeAPI['onMaximizeChange'],
@@ -269,7 +278,23 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       connection.invoke('session:set-effort', routingId, effort) as Promise<void>,
     setThinkingMode: (routingId, mode) =>
       connection.invoke('session:set-thinking-mode', routingId, mode) as Promise<void>,
+    setReasoningVariant: (routingId, variant) =>
+      connection.invoke('session:set-reasoning-variant', routingId, variant) as Promise<void>,
     getModels: () => connection.invoke('session:get-models') as ReturnType<ClaudeAPI['getModels']>,
+    getEngineModels: () =>
+      connection.invoke('session:get-engine-models') as ReturnType<ClaudeAPI['getEngineModels']>,
+    getOpencodeProviders: () =>
+      connection.invoke('session:get-opencode-providers') as ReturnType<
+        ClaudeAPI['getOpencodeProviders']
+      >,
+    getOpencodeProviderModels: (providerId) =>
+      connection.invoke('session:get-opencode-provider-models', providerId) as ReturnType<
+        ClaudeAPI['getOpencodeProviderModels']
+      >,
+    engineIsInstalled: (engineId) =>
+      connection.invoke('engine:is-installed', engineId) as ReturnType<
+        ClaudeAPI['engineIsInstalled']
+      >,
 
     // Generation
     generateTitle: (conversationText) =>
@@ -510,13 +535,41 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       latencyMs: 0,
       error: 'Not available in remote mode'
     }),
+    loadEngineConfig: async () => ({}),
+    saveEngineConfig: async () => {},
+    loadVendorConfig: async () => ({}),
+    saveVendorConfig: async () => {},
+    loadOpencodeSettings: async () => ({}),
+    saveOpencodeSettings: async () => {},
+    listOpencodeAgents: async () => [],
+    readOpencodeAgent: async () => null,
+    saveOpencodeAgent: async () => {},
+    deleteOpencodeAgent: async () => {},
+    setOpencodeAgentDisabled: async () => {},
+    generateOpencodeAgent: async () => { throw new Error('Not available in remote mode') },
+
+    // Vendor auth (opencode multi-vendor) — desktop-only; web client is read-only
+    vendorAuthProbe: async () => ({}),
+    vendorAuthListOptions: async () => ({}),
+    vendorAuthSetKey: async () => {},
+    vendorAuthOauthAuthorize: async () => {
+      throw new Error('Vendor auth is only available on the desktop app.')
+    },
+    vendorAuthOauthCallback: async () => {
+      throw new Error('Vendor auth is only available on the desktop app.')
+    },
+    vendorAuthRemove: async () => {},
+    vendorAuthOauthCancel: async () => {},
 
     // Plugin system — desktop-only, stubbed out on web
     listPlugins: async () => [],
     reloadPlugin: async () => {},
     getPluginViews: async () => [],
     getPluginPreloadPath: async () => '',
-    onPluginViewsChanged: () => () => {}
+    onPluginViewsChanged: () => () => {},
+
+    // Desktop-only: spawns a local opencode server — not available in remote mode (Phase 9b)
+    refreshPrices: async () => ({ count: 0, refreshedAt: Date.now() })
   }
 
   return api

@@ -118,8 +118,14 @@ describe('shortModelName', () => {
     expect(shortModelName('haiku')).toBe('Haiku')
   })
 
-  it('falls back for unknown model', () => {
-    expect(shortModelName('some-model-name')).toBe('model-name')
+  it('returns unknown (non-Claude) model ids as-is — does not mangle', () => {
+    expect(shortModelName('some-model-name')).toBe('some-model-name')
+  })
+
+  it('does not mangle opencode model ids (regression: mimo-v2.5-free → was "v2.5-free")', () => {
+    expect(shortModelName('mimo-v2.5-free')).toBe('mimo-v2.5-free')
+    expect(shortModelName('grok-code-fast')).toBe('grok-code-fast')
+    expect(shortModelName('glm-4.6')).toBe('glm-4.6')
   })
 
   it('returns model as-is for short names', () => {

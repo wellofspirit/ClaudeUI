@@ -145,7 +145,7 @@ function EditableComment({
 
 export function PlanCommentBadge({ comments, onUpdate, onRemove }: Props): React.JSX.Element {
   return (
-    <div className="plan-comment-badges mx-2 my-1.5 flex flex-col gap-1" data-plan-comment>
+    <div data-testid="PlanCommentBadge" className="plan-comment-badges mx-2 my-1.5 flex flex-col gap-1" data-plan-comment>
       {comments.map((c) => (
         <EditableComment key={c.id} comment={c} onUpdate={onUpdate} onRemove={onRemove} />
       ))}

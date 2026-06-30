@@ -75,8 +75,10 @@ export const MarkdownRenderer = memo(function MarkdownRenderer({
   content: string
 }): React.JSX.Element {
   return (
-    <ReactMarkdown remarkPlugins={plugins} components={components}>
-      {content}
-    </ReactMarkdown>
+    <div data-testid="MarkdownRenderer">
+      <ReactMarkdown remarkPlugins={plugins} components={components}>
+        {content}
+      </ReactMarkdown>
+    </div>
   )
 })

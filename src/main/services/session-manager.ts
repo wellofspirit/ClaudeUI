@@ -1,10 +1,14 @@
 import type { BrowserWindow } from 'electron'
-import { ClaudeSession } from './claude-session'
+import type { ChatMessage, SandboxSettings, EngineId } from '../../shared/types'
+import type { ISession } from '../providers/ISession'
+import { engineRegistry } from '../providers/EngineRegistry'
+// Side-effect: registers all engine factories (claude, …) at module load time
+import '../providers/register-engines'
 import { loadSessionHistory } from './session-history'
-import type { ChatMessage, SandboxSettings } from '../../shared/types'
+import { ClaudeSession } from './claude-session'
 
 export class SessionManager {
-  private sessions = new Map<string, ClaudeSession>()
+  private sessions = new Map<string, ISession>()
   private _sessionTimeoutMs = 15 * 60 * 1000 // default 15 min, 0 = disabled
 
   /** Update the idle timeout for all current and future sessions. */
@@ -24,15 +28,17 @@ export class SessionManager {
     sandboxConfig?: SandboxSettings,
     thinkingMode?: string,
     resumeSessionAt?: string,
-    forkSession?: boolean
-  ): ClaudeSession {
+    forkSession?: boolean,
+    engineId: EngineId = 'claude'
+  ): ISession {
     // Clean up existing session with same routingId
     const existing = this.sessions.get(routingId)
     if (existing) {
       existing.cancel()
     }
 
-    const session = new ClaudeSession(
+    const session = engineRegistry.createSession(
+      engineId,
       routingId,
       win,
       cwd,
@@ -50,7 +56,7 @@ export class SessionManager {
     return session
   }
 
-  get(routingId: string): ClaudeSession | undefined {
+  get(routingId: string): ISession | undefined {
     return this.sessions.get(routingId)
   }
 
@@ -61,7 +67,10 @@ export class SessionManager {
   rekey(oldId: string, newId: string): void {
     const session = this.sessions.get(oldId)
     if (!session) return
-    session.routingId = newId
+    // routingId is readonly on ISession (callers must not mutate it), but the
+    // concrete BaseSession field is mutable. Cast here is safe — this is the
+    // one legitimate place that updates the routing id after session-uuid arrival.
+    ;(session as { routingId: string }).routingId = newId
     this.sessions.delete(oldId)
     this.sessions.set(newId, session)
   }
@@ -101,7 +110,6 @@ export class SessionManager {
   /**
    * Get message history for a session by sessionId.
    * Returns in-memory messages if the session is active, otherwise loads from disk.
-   * The plugin provides `cwd` (same value used in `create()`) to locate the JSONL file.
    */
   async getMessages(sessionId: string, cwd: string): Promise<ChatMessage[]> {
     // Try in-memory first
@@ -116,8 +124,20 @@ export class SessionManager {
     return result.messages
   }
 
-  /** Iterate all active sessions */
-  forEach(fn: (session: ClaudeSession) => void): void {
+  /** Iterate all active sessions (engine-neutral). */
+  forEach(fn: (session: ISession) => void): void {
     this.sessions.forEach(fn)
+  }
+
+  /**
+   * Iterate only ClaudeSession instances. Use for Claude-only operations
+   * (e.g. notifySettingsChanged) that must not run on other engine sessions.
+   */
+  forEachClaude(fn: (session: ClaudeSession) => void): void {
+    this.sessions.forEach((session) => {
+      if (session instanceof ClaudeSession) {
+        fn(session)
+      }
+    })
   }
 }

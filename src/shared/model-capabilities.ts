@@ -324,3 +324,248 @@ export function resolveContextWindow(modelValue: string | undefined | null): num
   if (IMPLICIT_1M_ALIASES.has(value)) return CONTEXT_WINDOW_1M
   return CONTEXT_WINDOW_DEFAULT
 }
+
+// ---------------------------------------------------------------------------
+// V2 Capability Model (Phase 2)
+// ---------------------------------------------------------------------------
+
+/** Supported autonomy modes per engine. */
+export type AutonomyMode = 'plan' | 'ask' | 'autoEdit' | 'full'
+
+/** Static per-engine capabilities (vendor-independent). */
+export interface EngineCapabilities {
+  voice: boolean
+  hostedMcp: boolean
+  backgroundTasks: boolean
+  subagents: boolean
+  plan: boolean
+  fork: boolean
+  forkFromMessage: boolean
+  steer: boolean
+  queue: boolean
+  slashCommands: boolean
+  skills: boolean
+  sideQuestion: boolean
+  interactiveApprovals: boolean
+  /** Engine launch-param config surfaces (gate the Settings sections of the same
+   *  name). `sandbox`/`proxy` are Claude cli.js launch params; opencode doesn't
+   *  use them (it has its own provider config), so its flags are false and the
+   *  Settings tab hides those sections. See ROADMAP #12. */
+  sandbox: boolean
+  proxy: boolean
+  autonomyModes: AutonomyMode[]
+  auth: { canDriveLogin: boolean; multiAccount: boolean }
+}
+
+/**
+ * Reasoning is TWO independent axes. A model may have both (Claude: thinking
+ * modes AND effort tiers), one, or neither. Not a single-kind union.
+ * ThinkingMode/EffortLevel come from this module (the single source of truth).
+ */
+export interface ReasoningCapability {
+  /** Thinking mode picker (adaptive|enabled|disabled). Present when model supports thinking. */
+  thinking?: { modes: readonly ThinkingMode[]; supportsBudget?: boolean }
+  /** Effort tier picker. Present when model supports effort levels. */
+  effort?: { levels: EffortLevel[] }
+}
+
+/** Per (engine, vendor, model) capabilities. */
+export interface ModelCapabilities {
+  reasoning: ReasoningCapability
+  vision: boolean
+  toolCalling: boolean
+  contextWindow: number
+  maxOutput: number
+  promptCaching: boolean
+}
+
+/** What the UI consumes — merge of engine + model caps with AND-derived gates. */
+export interface ResolvedCapabilities extends EngineCapabilities {
+  reasoning: ReasoningCapability
+  vision: boolean
+  toolCalling: boolean
+  contextWindow: number
+  maxOutput: number
+  promptCaching: boolean
+  // AND-of-both derived gates
+  canUseMcp: boolean // hostedMcp && toolCalling
+  canUseSubagents: boolean // subagents && toolCalling
+  isAgentCapable: boolean // toolCalling
+}
+
+/** Claude engine capabilities — all true, full autonomy modes. */
+export const CLAUDE_ENGINE_CAPABILITIES: EngineCapabilities = {
+  voice: true,
+  hostedMcp: true,
+  backgroundTasks: true,
+  subagents: true,
+  plan: true,
+  fork: true,
+  forkFromMessage: true,
+  steer: true,
+  queue: true,
+  slashCommands: true,
+  skills: true,
+  sideQuestion: true,
+  interactiveApprovals: true,
+  sandbox: true,
+  proxy: true,
+  autonomyModes: ['plan', 'ask', 'autoEdit', 'full'],
+  auth: { canDriveLogin: true, multiAccount: true }
+}
+
+/**
+ * Derive ModelCapabilities for a Claude model from the existing capability
+ * helpers. This is the single normalizer — do not re-derive thinking/effort
+ * in any other module.
+ *
+ * reasoning.thinking: present when modelSupportsAdaptiveThinking (THINKING_MODES with budget).
+ * reasoning.effort: present when modelSupportsEffort (supported levels from modelSupportedEffortLevels).
+ * Both may be present simultaneously (e.g. claude-opus-4-8 and claude-sonnet-4-6).
+ */
+export function claudeModelCapabilities(
+  model: ModelCapabilityInput | undefined | null
+): ModelCapabilities {
+  const reasoning: ReasoningCapability = {}
+  if (modelSupportsAdaptiveThinking(model)) {
+    reasoning.thinking = { modes: THINKING_MODES, supportsBudget: true }
+  }
+  if (modelSupportsEffort(model)) {
+    reasoning.effort = { levels: modelSupportedEffortLevels(model) }
+  }
+  return {
+    reasoning,
+    vision: true,
+    toolCalling: true,
+    contextWindow: resolveContextWindow(model?.value ?? null),
+    maxOutput: 32768,
+    promptCaching: true
+  }
+}
+
+/**
+ * Merge engine + model capabilities into ResolvedCapabilities.
+ * Called on session start and on every model switch.
+ */
+export function resolveCapabilities(
+  engine: EngineCapabilities,
+  model: ModelCapabilities
+): ResolvedCapabilities {
+  return {
+    // Engine fields (spread individually for explicit typing)
+    voice: engine.voice,
+    hostedMcp: engine.hostedMcp,
+    backgroundTasks: engine.backgroundTasks,
+    subagents: engine.subagents,
+    plan: engine.plan,
+    fork: engine.fork,
+    forkFromMessage: engine.forkFromMessage,
+    steer: engine.steer,
+    queue: engine.queue,
+    slashCommands: engine.slashCommands,
+    skills: engine.skills,
+    sideQuestion: engine.sideQuestion,
+    interactiveApprovals: engine.interactiveApprovals,
+    sandbox: engine.sandbox,
+    proxy: engine.proxy,
+    autonomyModes: engine.autonomyModes,
+    auth: engine.auth,
+    // Model fields
+    reasoning: model.reasoning,
+    vision: model.vision,
+    toolCalling: model.toolCalling,
+    contextWindow: model.contextWindow,
+    maxOutput: model.maxOutput,
+    promptCaching: model.promptCaching,
+    // AND-derived gates
+    canUseMcp: engine.hostedMcp && model.toolCalling,
+    canUseSubagents: engine.subagents && model.toolCalling,
+    isAgentCapable: model.toolCalling
+  }
+}
+
+/**
+ * Convenience: compute ResolvedCapabilities for a Claude session by model value string.
+ * Primary entry point for ClaudeSession, store seeds, and test factories.
+ */
+export function resolveClaudeCapabilities(modelValue?: string | null): ResolvedCapabilities {
+  return resolveCapabilities(
+    CLAUDE_ENGINE_CAPABILITIES,
+    claudeModelCapabilities({ value: modelValue ?? 'default' })
+  )
+}
+
+/**
+ * opencode engine capabilities — 8d.
+ * hostedMcp:true (Phase 5c) means "this engine hosts ClaudeUI's injected tools"
+ * (render_mermaid / create_mockup / show_mockup via the auto-loaded plugin). It
+ * does NOT mean opencode exposes Claude's `.mcp.json` server-config UI — that
+ * dialog (McpDialog) is scoped to engineId==='claude' in TopBar.tsx, so this flip
+ * only enables our hosted tools, not the Claude MCP config surface.
+ * queue+steer:true (Phase 8c) — opencode coalesces a mid-turn prompt into the
+ * running loop (no server-side holdable queue), so send-while-busy = post-immediately
+ * = steer. dequeue is a no-op (can't un-send once coalesced). voice deferred.
+ * subagents:true (Phase 8d) — opencode's `task` tool spawns child sessions whose
+ * transcripts stream on the shared SSE; the event-mapper routes them to
+ * session:subagent-* events keyed by the parent task part's callID.
+ */
+export const OPENCODE_ENGINE_CAPABILITIES: EngineCapabilities = {
+  voice: false,
+  hostedMcp: true,
+  backgroundTasks: false,
+  subagents: true,
+  plan: true,
+  fork: true,
+  forkFromMessage: true,
+  steer: true,
+  queue: true,
+  slashCommands: true,
+  skills: true,
+  sideQuestion: true,
+  interactiveApprovals: true,
+  sandbox: false,
+  proxy: false,
+  autonomyModes: ['plan', 'ask', 'full'],
+  auth: { canDriveLogin: true, multiAccount: false }
+}
+
+/**
+ * Derive ModelCapabilities for an opencode model from its discovered caps.
+ * reasoning: empty object (opencode reasoning is a per-model boolean, not a
+ * modes/levels control — no thinking/effort picker in 5b; follow-up phase).
+ */
+export function opencodeModelCapabilities(
+  m?: {
+    // Local structural type (a subset of opencode's protocol ModelCapabilities)
+    // so shared/ stays self-contained — no import from main/.
+    capabilities?: {
+      attachment?: boolean
+      toolcall?: boolean
+      reasoning?: boolean
+      input?: { image?: boolean }
+    }
+    limit?: { context?: number; output?: number }
+    cost?: { cache?: { read: number; write: number } }
+  }
+): ModelCapabilities {
+  const caps = m?.capabilities
+  const limit = m?.limit
+  const cost = m?.cost
+  return {
+    reasoning: {},
+    vision: !!(caps?.attachment || caps?.input?.image),
+    toolCalling: !!caps?.toolcall,
+    contextWindow: limit?.context ?? 200_000,
+    maxOutput: limit?.output ?? 8192,
+    promptCaching: !!(cost?.cache)
+  }
+}
+
+/**
+ * Convenience: compute ResolvedCapabilities for an opencode session.
+ */
+export function resolveOpencodeCapabilities(
+  m?: Parameters<typeof opencodeModelCapabilities>[0]
+): ResolvedCapabilities {
+  return resolveCapabilities(OPENCODE_ENGINE_CAPABILITIES, opencodeModelCapabilities(m))
+}

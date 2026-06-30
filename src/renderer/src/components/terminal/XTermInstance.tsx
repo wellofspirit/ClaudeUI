@@ -165,5 +165,5 @@ export function XTermInstance({ terminalId, isActive }: Props): React.JSX.Elemen
     }
   }, [theme])
 
-  return <div ref={containerRef} className="h-full w-full" style={{ padding: '4px 8px' }} />
+  return <div data-testid="XTermInstance" ref={containerRef} className="h-full w-full" style={{ padding: '4px 8px' }} />
 }

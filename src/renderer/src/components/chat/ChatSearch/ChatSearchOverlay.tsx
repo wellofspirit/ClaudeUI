@@ -96,11 +96,13 @@ export function ChatSearchOverlay({
 
   return (
     <div
+      data-testid="ChatSearchOverlay"
       data-search="skip"
       className="absolute top-2 right-4 z-50 flex items-center gap-1 bg-bg-secondary border border-border rounded-md shadow-lg px-2 py-1.5"
       style={{ width: 340 }}
     >
       <input
+        data-testid="ChatSearchOverlay.query"
         ref={inputRef}
         type="text"
         value={query}
@@ -113,6 +115,7 @@ export function ChatSearchOverlay({
         {counter}
       </span>
       <button
+        data-testid="ChatSearchOverlay.prev"
         onClick={() => engineRef.current?.prev()}
         title="Previous match (Shift+Enter)"
         className="w-6 h-6 flex items-center justify-center rounded text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
@@ -131,6 +134,7 @@ export function ChatSearchOverlay({
         </svg>
       </button>
       <button
+        data-testid="ChatSearchOverlay.next"
         onClick={() => engineRef.current?.next()}
         title="Next match (Enter)"
         className="w-6 h-6 flex items-center justify-center rounded text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
@@ -149,6 +153,7 @@ export function ChatSearchOverlay({
         </svg>
       </button>
       <button
+        data-testid="ChatSearchOverlay.caseToggle"
         onClick={toggleCase}
         title="Case sensitive"
         className={`w-6 h-6 flex items-center justify-center rounded text-[11px] font-mono transition-colors cursor-default ${
@@ -160,6 +165,7 @@ export function ChatSearchOverlay({
         Aa
       </button>
       <button
+        data-testid="ChatSearchOverlay.close"
         onClick={handleClose}
         title="Close (Esc)"
         className="w-6 h-6 flex items-center justify-center rounded text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"

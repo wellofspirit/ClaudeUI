@@ -24,6 +24,7 @@ export function GitPanelView({
 
   return (
     <div
+      data-testid="GitPanel"
       style={style}
       className="shrink-0 border-l border-border bg-bg-secondary flex flex-col h-full overflow-hidden"
     >
@@ -32,6 +33,7 @@ export function GitPanelView({
         <span className="text-[13px] text-text-secondary font-medium flex-1">Git Changes</span>
         <div className="flex items-center gap-1 [-webkit-app-region:no-drag]">
           <button
+            data-testid="GitPanel.toggleLayout"
             onClick={onToggleLayout}
             className="w-6 h-6 flex items-center justify-center rounded text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
             title={isDouble ? 'Switch to single pane' : 'Switch to double pane'}
@@ -65,6 +67,7 @@ export function GitPanelView({
             )}
           </button>
           <button
+            data-testid="GitPanel.close"
             onClick={onClose}
             className="w-6 h-6 flex items-center justify-center rounded text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
             title="Close"

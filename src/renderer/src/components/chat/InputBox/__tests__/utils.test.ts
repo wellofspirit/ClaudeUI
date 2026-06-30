@@ -1,9 +1,10 @@
 /**
- * Unit tests for InputBox pure helpers — prompt routing state machine.
+ * Unit tests for InputBox pure helpers — prompt routing state machine and
+ * model picker filter.
  */
 
 import { describe, it, expect } from 'vitest'
-import { resolveSendAction, type SendContext } from '../utils'
+import { resolveSendAction, filterModelsForEngine, type SendContext, type ModelEntry } from '../utils'
 
 // ---------------------------------------------------------------------------
 // resolveSendAction
@@ -42,6 +43,24 @@ describe('resolveSendAction', () => {
     expect(result.type).not.toBe('side-question')
   })
 
+  it('treats /btw as ordinary prompt when sideQuestion capability is off', () => {
+    const result = resolveSendAction({
+      ...baseCtx,
+      text: '/btw what is this?',
+      sideQuestionEnabled: false
+    })
+    expect(result).toEqual({ type: 'send-prompt', prompt: '/btw what is this?', attachments: undefined })
+  })
+
+  it('still routes /btw to side-question when sideQuestion capability is on', () => {
+    const result = resolveSendAction({
+      ...baseCtx,
+      text: '/btw what is this?',
+      sideQuestionEnabled: true
+    })
+    expect(result).toEqual({ type: 'side-question', question: 'what is this?' })
+  })
+
   it('returns clear-session for /clear', () => {
     expect(resolveSendAction({ ...baseCtx, text: '/clear' })).toEqual({ type: 'clear-session' })
   })
@@ -53,6 +72,16 @@ describe('resolveSendAction', () => {
 
   it('queues prompt when session is running', () => {
     const result = resolveSendAction({ ...baseCtx, isRunning: true })
+    expect(result).toEqual({ type: 'queue-prompt', prompt: 'Hello Claude' })
+  })
+
+  it('returns noop (retains input) when running but queue capability is off', () => {
+    const result = resolveSendAction({ ...baseCtx, isRunning: true, queueEnabled: false })
+    expect(result).toEqual({ type: 'noop' })
+  })
+
+  it('queues when running and queue capability is on', () => {
+    const result = resolveSendAction({ ...baseCtx, isRunning: true, queueEnabled: true })
     expect(result).toEqual({ type: 'queue-prompt', prompt: 'Hello Claude' })
   })
 
@@ -109,5 +138,62 @@ describe('resolveSendAction', () => {
     const result = resolveSendAction({ ...baseCtx, isRunning: true, attachedFiles: files })
     // Queue only sends text, not attachments
     expect(result).toEqual({ type: 'queue-prompt', prompt: 'Hello Claude' })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// filterModelsForEngine
+// ---------------------------------------------------------------------------
+
+describe('filterModelsForEngine', () => {
+  const claudeModel: ModelEntry = { value: 'claude-opus-4', engineId: 'claude' }
+  const opencodeModel: ModelEntry = { value: 'gpt-4o', engineId: 'opencode' }
+  const legacyModel: ModelEntry = { value: 'legacy-model' } // no engineId — treated as claude
+
+  const allModels = [claudeModel, opencodeModel, legacyModel]
+
+  it('returns all models when not engine-locked (claude default)', () => {
+    const result = filterModelsForEngine(allModels, false, 'claude')
+    expect(result).toEqual(allModels)
+  })
+
+  it('returns all models when not engine-locked (opencode default)', () => {
+    const result = filterModelsForEngine(allModels, false, 'opencode')
+    expect(result).toEqual(allModels)
+  })
+
+  it('returns only claude models when engine-locked to claude', () => {
+    const result = filterModelsForEngine(allModels, true, 'claude')
+    expect(result).toContain(claudeModel)
+    expect(result).toContain(legacyModel) // no engineId defaults to 'claude'
+    expect(result).not.toContain(opencodeModel)
+  })
+
+  it('returns only opencode models when engine-locked to opencode', () => {
+    const result = filterModelsForEngine(allModels, true, 'opencode')
+    expect(result).toContain(opencodeModel)
+    expect(result).not.toContain(claudeModel)
+    expect(result).not.toContain(legacyModel)
+  })
+
+  it('excludes opencode models from a locked claude session (historical-session regression guard)', () => {
+    // A historical Claude session (status.sessionId null but engine-committed)
+    // is engine-locked; opencode models must never appear in its picker, or a
+    // cross-engine pick would corrupt the engine-committed session.
+    const result = filterModelsForEngine(allModels, true, 'claude')
+    expect(result.some((m) => m.engineId === 'opencode')).toBe(false)
+  })
+
+  it('defaults sessionEngineId to claude when null/undefined while locked', () => {
+    const result = filterModelsForEngine(allModels, true, null)
+    expect(result).toContain(claudeModel)
+    expect(result).toContain(legacyModel)
+    expect(result).not.toContain(opencodeModel)
+  })
+
+  it('returns an empty list when no models match the locked engine', () => {
+    const onlyOpencode = [opencodeModel]
+    const result = filterModelsForEngine(onlyOpencode, true, 'claude')
+    expect(result).toHaveLength(0)
   })
 })

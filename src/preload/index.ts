@@ -45,7 +45,8 @@ const api: ClaudeAPI = {
     model?: string,
     thinkingMode?: string,
     resumeSessionAt?: string,
-    forkSession?: boolean
+    forkSession?: boolean,
+    engineId?: import('../shared/types').EngineId
   ) =>
     ipcRenderer.invoke(
       'session:create',
@@ -57,7 +58,8 @@ const api: ClaudeAPI = {
       model,
       thinkingMode,
       resumeSessionAt,
-      forkSession
+      forkSession,
+      engineId
     ),
   rekeySession: (oldId: string, newId: string) => ipcRenderer.invoke('session:rekey', oldId, newId),
   resolveForkAnchor: (sessionId: string, cwd: string, messageId: string) =>
@@ -88,6 +90,9 @@ const api: ClaudeAPI = {
   maximizeWindow: () => ipcRenderer.invoke('window:maximize'),
   closeWindow: () => ipcRenderer.invoke('window:close'),
   listDirectories: () => ipcRenderer.invoke('session:list-directories'),
+  listOpencodeSessionsGlobal: () => ipcRenderer.invoke('session:list-opencode'),
+  loadOpencodeHistory: (sessionId: string) =>
+    ipcRenderer.invoke('session:load-opencode-history', sessionId),
   loadSessionHistory: (sessionId: string, projectKey: string) =>
     ipcRenderer.invoke('session:load-history', sessionId, projectKey),
   loadSubagentHistory: (sessionId: string, projectKey: string, agentId: string) =>
@@ -109,6 +114,7 @@ const api: ClaudeAPI = {
   onStatus: onEvent('session:status'),
   onResult: onEvent('session:result'),
   onError: onEvent('session:error'),
+  onVendorAuthRequired: onEvent('session:vendor-auth-required'),
   onWarning: onEvent('session:warning'),
   onMessagesRetracted: onEvent('session:messages-retracted'),
   onToolResult: onEvent('session:tool-result'),
@@ -126,6 +132,8 @@ const api: ClaudeAPI = {
   onSteerConsumed: onEvent('session:steer-consumed'),
   onSkills: onEvent('session:skills'),
   onStatusLine: onEvent('session:status-line'),
+  onMetering: onEvent('session:metering'),
+  onPlanSteps: onEvent('session:plan'),
   onMcpServers: onEvent('session:mcp-servers'),
 
   // Non-routed events (no routingId prefix)
@@ -172,7 +180,14 @@ const api: ClaudeAPI = {
     ipcRenderer.invoke('session:set-effort', routingId, effort),
   setThinkingMode: (routingId: string, mode: string) =>
     ipcRenderer.invoke('session:set-thinking-mode', routingId, mode),
+  setReasoningVariant: (routingId: string, variant: string | null) =>
+    ipcRenderer.invoke('session:set-reasoning-variant', routingId, variant),
   getModels: () => ipcRenderer.invoke('session:get-models'),
+  getEngineModels: () => ipcRenderer.invoke('session:get-engine-models'),
+  getOpencodeProviders: () => ipcRenderer.invoke('session:get-opencode-providers'),
+  getOpencodeProviderModels: (providerId: string) =>
+    ipcRenderer.invoke('session:get-opencode-provider-models', providerId),
+  engineIsInstalled: (engineId) => ipcRenderer.invoke('engine:is-installed', engineId),
   generateTitle: (conversationText: string) =>
     ipcRenderer.invoke('session:generate-title', conversationText),
   generateCommitMessage: (diff: string) =>
@@ -234,8 +249,8 @@ const api: ClaudeAPI = {
   saveSettings: (settings) => ipcRenderer.invoke('config:save-settings', settings),
   loadSessionConfig: () => ipcRenderer.invoke('config:load-sessions'),
   saveSessionConfig: (config) => ipcRenderer.invoke('config:save-sessions', config),
-  deleteSession: (sessionId: string, projectKey: string) =>
-    unwrap<void>('session:delete-session', sessionId, projectKey),
+  deleteSession: (sessionId: string, projectKey: string, engineId?: import('../shared/types').EngineId) =>
+    unwrap<void>('session:delete-session', sessionId, projectKey, engineId),
   deleteProject: (projectKey: string) => unwrap<void>('session:delete-project', projectKey),
   loadSlashCommands: () => ipcRenderer.invoke('config:load-slash-commands'),
   saveSlashCommands: (commands) => ipcRenderer.invoke('config:save-slash-commands', commands),
@@ -306,6 +321,56 @@ const api: ClaudeAPI = {
 
   testProxyConnection: (proxy: ProxySettings) => unwrap('proxy:test-connection', proxy),
 
+  // Engine-routed per-vendor auth (opencode multi-vendor auth, Phase 5c)
+  vendorAuthProbe: (engineId: import('../shared/types').EngineId) =>
+    unwrap('vendor-auth:probe', engineId),
+  vendorAuthListOptions: (engineId: import('../shared/types').EngineId) =>
+    unwrap('vendor-auth:list-options', engineId),
+  vendorAuthSetKey: (
+    engineId: import('../shared/types').EngineId,
+    vendorId: string,
+    key: string
+  ) => unwrap('vendor-auth:set-key', engineId, vendorId, key),
+  vendorAuthOauthAuthorize: (
+    engineId: import('../shared/types').EngineId,
+    vendorId: string,
+    method: number,
+    inputs?: Record<string, string>
+  ) => unwrap('vendor-auth:oauth-authorize', engineId, vendorId, method, inputs),
+  vendorAuthOauthCallback: (
+    engineId: import('../shared/types').EngineId,
+    vendorId: string,
+    method: number,
+    code?: string
+  ) => unwrap('vendor-auth:oauth-callback', engineId, vendorId, method, code),
+  vendorAuthRemove: (engineId: import('../shared/types').EngineId, vendorId: string) =>
+    unwrap('vendor-auth:remove', engineId, vendorId),
+  vendorAuthOauthCancel: (engineId: import('../shared/types').EngineId) =>
+    unwrap('vendor-auth:oauth-cancel', engineId),
+
+  loadEngineConfig: (engineId: string) =>
+    ipcRenderer.invoke('config:load-engine-config', engineId),
+  saveEngineConfig: (engineId: string, config: import('../shared/types').EngineConfig) =>
+    ipcRenderer.invoke('config:save-engine-config', engineId, config),
+  loadOpencodeSettings: () => unwrap('config:load-opencode-settings'),
+  saveOpencodeSettings: (settings: import('../shared/types').OpencodeConfigSettings) =>
+    unwrap('config:save-opencode-settings', settings),
+  listOpencodeAgents: (cwd?: string) => unwrap('opencode-agents:list', cwd),
+  readOpencodeAgent: (name: string, scope: import('../shared/types').OpencodeAgentScope, cwd?: string) =>
+    unwrap('opencode-agents:read', name, scope, cwd),
+  saveOpencodeAgent: (input: import('../shared/types').OpencodeAgentInput, cwd?: string) =>
+    unwrap('opencode-agents:save', input, cwd),
+  deleteOpencodeAgent: (name: string, scope: import('../shared/types').OpencodeAgentScope, cwd?: string) =>
+    unwrap('opencode-agents:delete', name, scope, cwd),
+  setOpencodeAgentDisabled: (name: string, scope: import('../shared/types').OpencodeAgentScope, cwd: string | undefined, disabled: boolean) =>
+    unwrap('opencode-agents:set-disabled', name, scope, cwd, disabled),
+  generateOpencodeAgent: (description: string, cwd?: string) =>
+    unwrap('opencode-agents:generate', description, cwd),
+  loadVendorConfig: (vendorId: string) =>
+    ipcRenderer.invoke('config:load-vendor-config', vendorId),
+  saveVendorConfig: (vendorId: string, config: import('../shared/types').VendorConfig) =>
+    ipcRenderer.invoke('config:save-vendor-config', vendorId, config),
+
   logError: (source: string, message: string) => {
     ipcRenderer.send('log:error', source, message)
   },
@@ -344,6 +409,9 @@ const api: ClaudeAPI = {
   getPluginViews: () => ipcRenderer.invoke('plugin:views'),
   getPluginPreloadPath: () => ipcRenderer.invoke('plugin:preload-path') as Promise<string>,
   onPluginViewsChanged: onEvent('plugin:views-changed'),
+
+  // Usage pricing refresh (Phase 9b — desktop-only, spawns local opencode server)
+  refreshPrices: () => unwrap<{ count: number; refreshedAt: number }>('usage:refresh-prices'),
 
   // Mockup preview
   readMockupHtml: (cwd: string, directory: string) => unwrap('mockup:read-html', cwd, directory),

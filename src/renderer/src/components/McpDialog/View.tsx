@@ -75,15 +75,21 @@ function StatusDot({ status }: { status: McpServerConnectionStatus }): React.JSX
 function ServerRow({
   server,
   selected,
-  onSelect
+  onSelect,
+  testid,
+  dataId
 }: {
   server: McpServerInfo
   selected: boolean
   onSelect: () => void
+  testid?: string
+  dataId?: string
 }): React.JSX.Element {
   const toolCount = server.tools?.length ?? 0
   return (
     <button
+      data-testid={testid}
+      data-id={dataId}
       onClick={onSelect}
       className={`w-full text-left px-3 py-2 rounded-lg transition-colors cursor-default ${
         selected
@@ -625,6 +631,7 @@ export function McpDialogView({
 
   return (
     <div
+      data-testid="McpDialog"
       className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 backdrop-blur-sm animate-fade-in"
       onClick={(e) => {
         if (e.target === e.currentTarget) onClose()
@@ -661,6 +668,7 @@ export function McpDialogView({
           </div>
           <div className="flex items-center gap-2">
             <button
+              data-testid="McpDialog.addServer"
               onClick={onOpenAddForm}
               className="flex items-center gap-1 px-2.5 py-1 rounded-md bg-accent/15 hover:bg-accent/25 border border-accent/30 text-[11px] text-accent font-medium transition-colors cursor-default"
             >
@@ -678,6 +686,7 @@ export function McpDialogView({
               Add Server
             </button>
             <button
+              data-testid="McpDialog.close"
               onClick={onClose}
               className="w-7 h-7 flex items-center justify-center rounded-md text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
             >
@@ -716,6 +725,7 @@ export function McpDialogView({
                   <path d="m21 21-4.3-4.3" />
                 </svg>
                 <input
+                  data-testid="McpDialog.filter"
                   type="text"
                   placeholder="Filter servers..."
                   value={filter}
@@ -756,6 +766,8 @@ export function McpDialogView({
                         server={server}
                         selected={selected === server.name && !showAddForm}
                         onSelect={() => onSelect(server.name)}
+                        testid="McpDialog.serverRow"
+                        dataId={server.name}
                       />
                     ))}
                   </div>
@@ -791,6 +803,7 @@ export function McpDialogView({
             )}
           </span>
           <button
+            data-testid="McpDialog.closeFooter"
             onClick={onClose}
             className="px-3 py-1 rounded-md bg-bg-secondary hover:bg-bg-hover border border-border text-text-secondary hover:text-text-primary transition-colors cursor-default"
           >

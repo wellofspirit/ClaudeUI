@@ -1,7 +1,6 @@
 import { memo, useState } from 'react'
 import type { ChatMessage, ContentBlock, PendingApproval } from '../../../../shared/types'
-import { isAgentTool } from '../../../../shared/types'
-import { useSessionStore } from '../../stores/session-store'
+import { useSessionStore, useActiveSession } from '../../stores/session-store'
 import { MarkdownRenderer } from './MarkdownRenderer'
 import { ToolCallBlock } from './ToolCallBlock'
 import { ExitPlanModeCard } from './ExitPlanModeCard'
@@ -9,9 +8,62 @@ import { AskUserQuestionBlock } from './AskUserQuestionBlock'
 import { ThinkingBlock } from './ThinkingBlock'
 import { TodoToolBlock } from './TodoToolBlock'
 import { TaskCard } from './TaskCard'
+import { hostedMcpKind } from '../../../../shared/tool-kinds'
+import type { EngineToolMap } from '../../../../shared/tool-kinds'
+import { engineToolMap } from './tool-registry/engine-tool-maps'
 
-const TODO_TOOLS = new Set(['TodoWrite'])
-const HIDDEN_TOOLS = new Set(['EnterPlanMode', 'TaskCreate', 'TaskUpdate', 'TaskList', 'TaskGet'])
+// ---------------------------------------------------------------------------
+// Unified tool-block dispatch
+// ---------------------------------------------------------------------------
+
+type ToolUseBlockForDispatch = Extract<ContentBlock, { type: 'tool_use' }>
+type ToolResultBlockForDispatch = Extract<ContentBlock, { type: 'tool_result' }>
+
+/**
+ * Unified tool-block renderer. Replaces the per-toolName switch that previously
+ * lived in each of MessageBubble's single + grouped render paths.
+ *
+ * Resolution order:
+ *   1. `hostedMcpKind` — engine-independent MCP tool classification
+ *   2. `toolMap.kindOf` — engine's own classification
+ *   3. Lifted kinds (plan/question/todo/task) → their interaction components
+ *   4. All passive kinds → ToolCallBlock (which computes the same kind + the
+ *      neutral ToolView and renders the shared ToolCard shell + kind body)
+ *
+ * The `toolMap.hidden` suppression has already been applied by the caller
+ * (filtered out before grouping). This function does NOT need to re-check it.
+ */
+function renderToolBlock(
+  toolMap: EngineToolMap,
+  block: ToolUseBlockForDispatch,
+  result: ToolResultBlockForDispatch | undefined,
+  approval: PendingApproval | undefined,
+  key: number | string
+): React.JSX.Element {
+  const kind = hostedMcpKind(block.toolName) ?? toolMap.kindOf(block.toolName)
+
+  // Compute the engine-neutral ToolView once and pass it to lifted components.
+  // Passive kinds (command/fileEdit/…) still compute their view inside ToolCallBlock.
+  const view = toolMap.normalize(kind, block.toolInput, result)
+
+  // Lifted interaction components — consume the neutral view, not block.toolInput.
+  if (kind === 'plan' && view.kind === 'plan') {
+    return <ExitPlanModeCard key={key} block={block} view={view} approval={approval} />
+  }
+  if (kind === 'question' && view.kind === 'question') {
+    return <AskUserQuestionBlock key={key} block={block} result={result} view={view} approval={approval} />
+  }
+  if (kind === 'todo' && view.kind === 'todo') {
+    return <TodoToolBlock key={key} block={block} result={result} view={view} />
+  }
+  if (kind === 'task' && view.kind === 'task') {
+    return <TaskCard key={key} block={block} result={result} view={view} approval={approval} />
+  }
+
+  // Passive kinds → ToolCallBlock host → ToolCard + kind body
+  // (command/fileEdit/fileWrite/fileRead/search/web/diagram/mockup/mcp/unknown).
+  return <ToolCallBlock key={key} block={block} result={result} approval={approval} />
+}
 
 interface MessageBubbleProps {
   message: ChatMessage
@@ -29,6 +81,8 @@ export const MessageBubble = memo(function MessageBubble({
   // Hooks must run unconditionally — declared before the role-based early returns.
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const forkFromMessage = useSessionStore((s) => s.forkFromMessage)
+  const forkCapability = useActiveSession((s) => s.status.capabilities.forkFromMessage)
+  const engineId = useActiveSession((s) => s.status.engineId)
   const [forking, setForking] = useState(false)
 
   const handleFork = async (): Promise<void> => {
@@ -44,7 +98,7 @@ export const MessageBubble = memo(function MessageBubble({
   // System messages (compact separators, CLI commands, API errors)
   if (message.role === 'system') {
     return (
-      <div className="flex flex-col gap-2 animate-fade-in">
+      <div data-testid="MessageBubble" data-id={message.id} className="flex flex-col gap-2 animate-fade-in">
         {message.content.map((block, i) => {
           if (block.type === 'compact_separator') {
             return <CompactSeparator key={i} summary={block.text} />
@@ -74,9 +128,10 @@ export const MessageBubble = memo(function MessageBubble({
         toolInput: { plan: message.planContent },
         toolUseId: `plan-${message.id}`
       }
+      const syntheticPlanView = { kind: 'plan' as const, plan: message.planContent }
       return (
-        <div className="animate-fade-in">
-          <ExitPlanModeCard block={planBlock} />
+        <div data-testid="MessageBubble" data-id={message.id} className="animate-fade-in">
+          <ExitPlanModeCard block={planBlock} view={syntheticPlanView} />
         </div>
       )
     }
@@ -94,7 +149,7 @@ export const MessageBubble = memo(function MessageBubble({
     const userMarkdown = textBlocks.map((b) => b.text).join('\n\n')
 
     return (
-      <div className="flex justify-end animate-fade-in">
+      <div data-testid="MessageBubble" data-id={message.id} className="flex justify-end animate-fade-in">
         <div
           className="max-w-[85%] bg-bg-tertiary rounded-2xl px-4 py-2.5 text-[13px] text-text-primary leading-[1.6]"
           data-markdown-source={userMarkdown || undefined}
@@ -194,10 +249,12 @@ export const MessageBubble = memo(function MessageBubble({
     | { kind: 'other'; block: ContentBlock; index: number }
   const items: RenderItem[] = []
 
+  const toolMap = engineToolMap(engineId)
+
   const visible = message.content.filter(
     (b) =>
       b.type !== 'tool_result' &&
-      !(b.type === 'tool_use' && b.toolName && HIDDEN_TOOLS.has(b.toolName))
+      !(b.type === 'tool_use' && b.toolName && toolMap.hidden.has(b.toolName))
   )
   for (let i = 0; i < visible.length; i++) {
     const block = visible[i]
@@ -219,7 +276,7 @@ export const MessageBubble = memo(function MessageBubble({
   const lastThinkingGi = items.reduce((acc, item, i) => (item.kind === 'thinking' ? i : acc), -1)
 
   return (
-    <div className="group/msg flex flex-col gap-2 animate-fade-in">
+    <div data-testid="MessageBubble" data-id={message.id} className="group/msg flex flex-col gap-2 animate-fade-in">
       {items.map((item, gi) => {
         if (item.kind === 'thinking') {
           const isLast = gi === lastThinkingGi
@@ -242,21 +299,7 @@ export const MessageBubble = memo(function MessageBubble({
           const { block, index } = item.blocks[0]
           const result = resultMap.get(block.toolUseId)
           const approval = approvalMap.get(block.toolUseId)
-          if (block.toolName === 'ExitPlanMode') {
-            return <ExitPlanModeCard key={index} block={block} approval={approval} />
-          }
-          if (block.toolName === 'AskUserQuestion') {
-            return (
-              <AskUserQuestionBlock key={index} block={block} result={result} approval={approval} />
-            )
-          }
-          if (TODO_TOOLS.has(block.toolName)) {
-            return <TodoToolBlock key={index} block={block} result={result} />
-          }
-          if (isAgentTool(block.toolName)) {
-            return <TaskCard key={index} block={block} result={result} />
-          }
-          return <ToolCallBlock key={index} block={block} result={result} approval={approval} />
+          return renderToolBlock(toolMap, block, result, approval, index)
         }
         // Multiple tool calls — wrap in bordered group
         return (
@@ -267,33 +310,16 @@ export const MessageBubble = memo(function MessageBubble({
             {item.blocks.map(({ block, index }) => {
               const result = block.toolUseId ? resultMap.get(block.toolUseId) : undefined
               const approval = block.toolUseId ? approvalMap.get(block.toolUseId) : undefined
-              if (block.toolName === 'ExitPlanMode') {
-                return <ExitPlanModeCard key={index} block={block} approval={approval} />
-              }
-              if (block.toolName === 'AskUserQuestion') {
-                return (
-                  <AskUserQuestionBlock
-                    key={index}
-                    block={block}
-                    result={result}
-                    approval={approval}
-                  />
-                )
-              }
-              if (TODO_TOOLS.has(block.toolName)) {
-                return <TodoToolBlock key={index} block={block} result={result} />
-              }
-              if (isAgentTool(block.toolName)) {
-                return <TaskCard key={index} block={block} result={result} />
-              }
-              return <ToolCallBlock key={index} block={block} result={result} approval={approval} />
+              return renderToolBlock(toolMap, block, result, approval, index)
             })}
           </div>
         )
       })}
       {/* Branch off: hidden until the message is hovered. Spins a new session
-          seeded with everything up to and including this assistant turn. */}
-      {activeSessionId && (
+          seeded with everything up to and including this assistant turn.
+          Gated on capabilities.forkFromMessage so engines that don't support
+          turn-granular forking never show this button. */}
+      {activeSessionId && forkCapability && (
         <div className="opacity-0 group-hover/msg:opacity-100 focus-within:opacity-100 transition-opacity">
           <button
             onClick={handleFork}

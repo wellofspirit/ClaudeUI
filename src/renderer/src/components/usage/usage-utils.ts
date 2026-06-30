@@ -80,9 +80,11 @@ export function shortModelName(model: string): string {
     return family
   }
 
-  // Fallback: last segment
-  const parts = model.split('-')
-  return parts.length > 2 ? parts.slice(1, 3).join('-') : model
+  // Fallback: the family regex above covers every Claude model; any other id
+  // (e.g. opencode model ids like "mimo-v2.5-free" or "grok-code-fast") is shown
+  // as-is. This previously sliced off the first segment to strip a "claude-"
+  // prefix, which mangled opencode names ("mimo-v2.5-free" → "v2.5-free").
+  return model
 }
 
 /** Format time as h:mm AM/PM */

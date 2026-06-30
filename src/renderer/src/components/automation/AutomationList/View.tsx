@@ -22,12 +22,13 @@ export function AutomationListView({
   const paused = automations.filter((a) => !a.enabled)
 
   return (
-    <div className={className}>
+    <div data-testid="AutomationList" className={className}>
       <div className="flex items-center justify-between px-3 py-2.5 border-b border-border/20">
         <span className="text-xs font-semibold text-text-muted uppercase tracking-wider">
           Automations
         </span>
         <button
+          data-testid="AutomationList.new"
           onClick={onCreate}
           className="flex items-center gap-1 text-xs text-text-accent hover:text-text-primary transition-colors px-1.5 py-0.5 rounded hover:bg-bg-hover"
         >
@@ -130,6 +131,8 @@ function ListItem({
 
   return (
     <button
+      data-testid="AutomationListItem"
+      data-id={automation.id}
       onClick={onSelect}
       className={`w-full text-left flex items-start gap-2.5 px-3 py-2 rounded-md border transition-colors ${
         isSelected

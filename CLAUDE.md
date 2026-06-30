@@ -6,6 +6,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A desktop GUI for Claude Code sessions, built with Electron. Features include multi-session chat, integrated git UI, terminal emulator, automation scheduling, remote web access, voice input, plugin system, and usage analytics.
 
+## Development Workflow (read this first)
+
+For any **non-trivial change**, follow the loop in **[ADR-026](docs/adr/adr-026_development-workflow.md)** — the living step-by-step + standing constraints are in **[docs/v2/ROADMAP.md](docs/v2/ROADMAP.md) § "How we work"**:
+
+- **The main model (Opus) orchestrates, reviews, and commits; a Sonnet sub-agent implements.** Dispatch the implementer via `Agent` (`subagent_type: general-purpose`, `model: sonnet`) against a written kickoff spec.
+- **The implementing agent never self-certifies** and never commits / `git add`s / branches / runs `bun install`. It leaves the working tree for review.
+- **Review every single line** of the agent's diff (`git diff <base>`) — read the code, not the summary; re-run gates independently; verify guard tests actually fail pre-fix. Iterate fixes via `SendMessage` to the agent.
+- **Verify against the real dev build** before committing: `bun run typecheck && bun run test && bun run test:ci && bun run lint && bun run build`, then drive the real Electron app (`verifier-electron` skill / `scripts/app-shot.mjs`) — **assert the live DOM by `data-testid` (ADR-027) before reading the screenshot**.
+- **Commit precisely** (never blind `git add -A`), one commit per item, no AI attribution.
+
+Trivial one-line/mechanical edits and conversational answers are exempt. Independent slices may run as concurrent Sonnet agents, but each diff is reviewed on its own and gates run on the combined tree before any commit.
+
 ## Tech Stack
 
 - **Electron** with `electron-vite` (react-ts template)
@@ -17,6 +29,7 @@ A desktop GUI for Claude Code sessions, built with Electron. Features include mu
 - **@modelcontextprotocol/sdk** for in-process MCP server hosting
 - **simple-git** for git operations
 - **node-pty** + **@xterm/xterm** for terminal emulator
+- **better-sqlite3** for the operational DB (`~/.claude/ui/operational.db`) — native module, Electron-ABI. Holds operational/derived state (currently per-session `{engineId, model}`). See **[Persistence model](#persistence-model)** and ADR-020.
 - **mermaid** for diagram rendering
 - **cron-parser** for automation scheduling
 - **Prism.js** for syntax highlighting in diffs
@@ -35,6 +48,7 @@ A desktop GUI for Claude Code sessions, built with Electron. Features include mu
 - `bun run typecheck` — run TypeScript checks (node + web)
 - `bun run lint` — ESLint
 - `bun run format` — Prettier
+- `bun run rebuild:native` — rebuild native modules (better-sqlite3) to the **Electron ABI** via `electron-builder install-app-deps`. **Run after every `bun install`/`bun add`/`bun remove`** — bun's postinstall leaves a Node-ABI build of better-sqlite3, which crashes the app on boot with `ERR_DLOPEN_FAILED`. Fresh clones: `bun install && bun run rebuild:native`.
 
 The upstream CLI version is pinned via `package.json#claudeCliVersion`. `ensure-cli` is wired into `postinstall`, `dev`, and every `build:*` script.
 
@@ -43,7 +57,10 @@ The upstream CLI version is pinned via `package.json#claudeCliVersion`. `ensure-
 ```
 src/
   shared/
-    types.ts               — All shared TypeScript types (ContentBlock, ChatMessage, ClaudeAPI, etc.)
+    types.ts               — All shared TypeScript types (ContentBlock, ChatMessage, ClaudeAPI,
+                             EngineConfig/VendorConfig for the config-plane stores, etc.)
+    model-capabilities.ts  — Capability model (EngineCapabilities/ResolvedCapabilities), AutonomyMode,
+                             effort/thinking/context-window helpers
     remote-protocol.ts     — WebSocket message types for remote access
     e2e-crypto.ts          — AES-256-GCM E2E encryption (isomorphic Node + browser)
   main/
@@ -51,12 +68,18 @@ src/
     sdk/                   — In-house cli.js harness, replaces @anthropic-ai/claude-agent-sdk
                              query(), tool(), createSdkMcpServer() + 9 modules
                              Full details: docs/sdk-layer.md
+    providers/             — Engine abstraction layer (ADR-016 → ADR-018)
+      ISession.ts          — Engine-neutral session interface + EngineSessionFactory type
+      BaseSession.ts       — Abstract base: extraWindows, send(), inactivity timer, getMessages()
+      EngineRegistry.ts    — Singleton factory (engineRegistry.createSession)
+      register-engines.ts  — Side-effect bootstrap: registers the 'claude' factory
     ipc/
       session.ipc.ts       — Core IPC: sessions, git, config, MCP, usage, worktrees, voice, proxy
       terminal.ipc.ts      — PTY create/write/resize/kill
       automation.ipc.ts    — Automation CRUD + run management
       remote-handlers.ts   — WebSocket dispatch bridge (same handlers as session.ipc)
-    services/              — 29 service modules (see Services section below)
+    services/              — 30 service modules (see Services section below)
+      db.ts                — Operational SQLite DB (better-sqlite3) — the ONLY importer of the native module
   preload/
     index.ts               — Context bridge (ClaudeAPI → window.api, 280+ lines)
     plugin-preload.ts      — Plugin sandbox bridge (window.pluginApi)
@@ -79,7 +102,11 @@ src/
       SessionView.tsx      — Root layout (sidebar + main + right panel + terminal)
       Sidebar.tsx          — Session list, directory browser, pinning, custom titles
       WelcomeScreen.tsx    — Initial folder picker
-      SettingsDialog.tsx   — Full settings UI (theme, fonts, diff, sandbox, proxy, voice)
+      SettingsDialog/      — Settings UI, organized as a tier tree (App / Engines › Claude /
+                             Vendors › Anthropic / Accounts). SettingsDialog.tsx (FC, loads
+                             engine/vendor config), View.tsx (two-level nav + scroll-spy),
+                             settings-sections.tsx (SECTIONS + NAV_GROUPS + autonomy-mode picker
+                             + vendor display-only), settings-controls.tsx. See Settings & Config.
       PermissionsDialog.tsx — Claude permission rule management
       McpDialog.tsx        — MCP server configuration
       SkillsDialog.tsx     — Available skills listing
@@ -120,7 +147,7 @@ src/
     main.tsx, connection.ts, api-adapter.ts, components/ConnectionOverlay.tsx
   test/                      — Shared test infrastructure
     bridges/                 — TestIpcBridge (Electron IPC replacement)
-    stubs/                   — electron-shim, sdk-stub
+    stubs/                   — electron-shim, sdk-stub, better-sqlite3-stub (node:sqlite adapter — see Persistence)
     factories/               — messages.ts, sdk-events.ts (test data builders)
     helpers/                 — boot-test-app.ts, wait-for-store.ts, render-with-store.ts
     setup/                   — jsdom.setup.ts, node.setup.ts
@@ -156,9 +183,10 @@ All services live in `src/main/services/`. Key modules:
 | `block-usage.ts`            | Parses JSONL for token analytics, 5hr billing windows, per-model breakdown                                |
 | `logger.ts`                 | File + ring buffer logging, per-source levels, subscriber pattern                                         |
 | `log-viewer.ts`             | Spawns debug window, streams logs                                                                         |
-| `ui-config.ts`              | Manages `~/.claude/ui/config/` (settings, sessions, slash commands)                                       |
-| `claude-settings.ts`        | Claude permission rules (allow/deny/ask) per scope                                                        |
-| `claude-mcp.ts`             | MCP server config merge from `.mcp.json` + `settings.json`                                                |
+| `db.ts`                     | Operational SQLite DB (better-sqlite3): versioned migrations + `session_meta` repo. ONLY native importer  |
+| `ui-config.ts`              | Plain-text config: `settings.json` (plane ①), `engines/<id>.json` + `vendors/<id>.json` (plane ③), sessions, slash commands; session metadata is DB-backed |
+| `claude-settings.ts`        | Claude permission rules (allow/deny/ask) per scope — engine-native config (plane ②)                       |
+| `claude-mcp.ts`             | MCP server config merge from `.mcp.json` + `settings.json` — engine-native config (plane ②)               |
 | `skill-scanner.ts`          | Scans project/user/plugin skill directories, YAML frontmatter parser                                      |
 | `event-log.ts`              | Ring buffer of all events for remote client catchup                                                       |
 | `mermaid-tool.ts`           | MCP server for Mermaid diagram rendering                                                                  |
@@ -244,6 +272,17 @@ Four-layer testing architecture. Full details in **[docs/testing-strategy.md](do
 
 **Why `git` is its own project:** On Windows each `simple-git` subprocess call costs ~150-200ms. The 48 git-backed tests add ~23s to a default run and dominate cumulative time. Excluding them from `test` keeps iteration fast while still guaranteeing coverage in CI and when developers touch git-adjacent code.
 
+### Test data attributes (`data-testid`)
+
+Components are attributed with `data-testid` so the rendered UI is **assertable structurally** (and driveable by stable selectors) — see **[ADR-027](docs/adr/adr-027_test-data-attributes.md)**. Convention (two-tier, PascalCase):
+
+- **Component root** → `data-testid="<ComponentName>"` (the rendered-component inventory).
+- **Interactive parts** → `data-testid="<ComponentName>.<partName>"` (e.g. `ModelAllowlistDialog.save`).
+- **Dynamic rows** → stable testid + a separate discriminator: `data-testid="SessionItem" data-id="<id>"` (never interpolate the id into the testid).
+- **Shared controls** (`SettingsToggle`, `SettingsSelect`, …) take an optional `testid` prop and forward it to their root DOM node — a `data-testid` on a component that doesn't forward it is dropped.
+
+**Verification order:** assert components/parts by testid first (jsdom `getByTestId`, or `scripts/app-shot.mjs --testids` / `--assert-testid <id>` against the real app), drive via testid selectors, and **read the screenshot last** to confirm the visual — not as the first resort.
+
 ## Windows Path Format in Bash Commands
 
 On Windows (Git Bash), cli.js's working directory uses POSIX format (`/d/WorkPlace/ClaudeUI`), not Windows format (`D:\WorkPlace\ClaudeUI` or `D:/WorkPlace/ClaudeUI`). This matters for permission checks:
@@ -280,6 +319,71 @@ The terminal panel uses `display: none` (closed) / `display: contents` (open) in
 ### Usage Utilization Scales
 
 The `/api/oauth/usage` API returns utilization as 0–100 (percentage), while rate-limit HTTP headers return 0–1 (fraction). Both are stored as 0–100 in `RateWindow.usedPercent`. The `toUsedPercent()` helper in `usage-fetcher.ts` makes this conversion explicit.
+
+## Engine Abstraction
+
+ClaudeUI uses an engine-neutral session layer (`src/main/providers/`) as scaffolding for future engine backends. The V2 re-platform design is in `docs/v2/` and ADR-018/019/020/021.
+
+- **`src/main/providers/`** — `ISession`/`BaseSession`/`EngineRegistry`. `SessionManager` holds `Map<routingId, ISession>`; all backends implement `ISession`. The renderer consumes the same `session:*` events regardless of engine.
+- **`EngineId`** — `'claude' | 'opencode'`. Only `'claude'` has a registered factory in Phase 1; opencode backend arrives in Phase 5. **`ModelRef`** — vendor-qualified model identity `{ engineId, vendorId, modelId }`; `SessionStatus.model` is `ModelRef | null`. `claudeModel(id)` builds anthropic-vendored refs.
+- Persisted: per-session `{ engineId, model? }` lives in the **operational DB** (`session_meta` table, Phase 3a) — not `sessions.json` anymore. The renderer-facing contract is unchanged: `loadSessionConfig()` still returns `sessionEngines?: Record<sessionId, { engineId; model? }>`, but it's sourced from `db.allSessionMeta()`. Legacy `sessions.json.sessionEngines` is imported once on first DB open (codex/unknown → `'claude'`), then left as a one-release fallback. See [Persistence model](#persistence-model).
+- **Capabilities** — `EngineCapabilities` (static per-engine) + `ResolvedCapabilities` (merged with the model's caps), in `shared/model-capabilities.ts` (Phase 2). `SessionStatus.capabilities` carries the resolved set; the renderer gates features on it. `CLAUDE_ENGINE_CAPABILITIES` is all-true with `autonomyModes: ['plan','ask','autoEdit','full']`.
+- The Codex backend (`codex-sup` branch) was removed in Phase 0 — it is recoverable from git history and documented as a dormant fallback in ADR-019.
+
+## Auth / Accounts (Phase 4 — ADR-021)
+
+**`EngineAuthProvider`** (`src/main/auth/`) is the per-engine auth abstraction, mirroring `EngineRegistry` for auth. The interface has three optional capability-gated method groups: `probe()` (always), `signIn/submitCode/cancelSignIn` (canDriveLogin), and `addAccount/switchAccount/deleteAccount` (multiAccount).
+
+**`ClaudeAuthProvider`** (`src/main/auth/ClaudeAuthProvider.ts`) wraps `AuthManager` + `AccountManager` with **no behavior change** — it is registered as `'claude'` in `engineAuthRegistry`. IPC channels `auth:sign-in / auth:submit-code / auth:cancel / account:add / account:switch / account:delete` route through `engineAuthRegistry.require('claude')`. `account:get / account:set-enabled` delegate directly to `AccountManager` (not on the `EngineAuthProvider` interface).
+
+**Probe / detection** — `ClaudeAuthProvider.probe()` returns `VendorAuthMap { anthropic: AuthStatus }`. It derives its `authState` (`'authenticated' | 'unauthenticated' | 'unknown'`) from the cached `session:auth-source` signal set by `ClaudeSession` at init — **no credential-file reads** (preserves ADR-014 Keychain-prompt avoidance). `ClaudeSession` calls `claudeAuthProvider.updateAuthSource(authSource, oauthAccount)` after `initializationResult()` resolves. The `fetchModels()` model-detection query also calls `updateAuthSource` so the probe is warm before any chat session opens.
+
+**`AuthBanner`** reads `vendorAuth.anthropic.authState` (from the store) instead of the raw `authSource` string — **identical banner states and actions**. The `onAuthSource` event handler in `useClaudeEvents.ts` mirrors the raw source into `vendorAuth` via `setVendorAuth()` so both store fields remain consistent.
+
+**`session.account: AccountRef | null`** is populated on every `SessionStatus` emission by `ClaudeSession.status` getter, built from `claudeAuthProvider.buildAccountRef(activeAccountId)`. It is re-emitted on model switch via `sendStatus()`.
+
+**`AuthState` → `AuthFlowState` rename** — the login-flow object `{ status, account, error }` is now `AuthFlowState`. `AuthState` is the new tri-state `'authenticated' | 'unauthenticated' | 'unknown'` (used by `AuthStatus.authState` and `AccountRef.authState`).
+
+**Account metadata → DB** — Phase 4 adds a DB v2 migration (`account` table with `id / email / subscription_type / organization / created_at`). `AccountManager` reads/writes via `getAllAccounts / upsertAccount / deleteAccountRow / importAccountsOnce` from `db.ts`. One-time import from `accounts.json` runs if the DB table is empty. `enabled` / `activeId` pointer stays in `accounts.json` (lightweight; avoids a DB read on the hot spawn-env path). `accounts.json` is kept as a one-release fallback (legacy `accounts` array in the pointer file). Credentials stay file-based per-account dirs (ADR-015 — never in the DB).
+
+## Persistence model
+
+Two distinct planes of on-disk state (Phase 3a/3b — persistence.md, ADR-020):
+
+- **Config = plain-text files** (hand-editable, no private copies of engine-native config):
+  - `~/.claude/ui/settings.json` — APP-tier (cosmetic + ClaudeUI's own behavior) + session app-consumed fields. **Plane ①.**
+  - `~/.claude/ui/engines/<engineId>.json` — ENGINE launch params `{ sandbox, proxy }` (e.g. `claude.json`). **Plane ③.**
+  - `~/.claude/ui/vendors/<vendorId>.json` — VENDOR launch params `{ endpoint, modelOverride }` (e.g. `anthropic.json`). **Plane ③.**
+  - Claude's own `settings.json` / `.mcp.json` (user/project/local scopes) — permissions, MCP servers, cleanup period. ClaudeUI edits these in place via `claude-settings.ts`/`claude-mcp.ts`; keeps **no** private copy. **Plane ②** (engine-native).
+- **Operational / derived = the SQLite DB** (`~/.claude/ui/operational.db`, better-sqlite3):
+  - The DB holds operational state, not config. Currently: `session_meta(session_id, engine_id, vendor_id, model_id, updated_at)` — per-session engine + model; `account(id, email, subscription_type, organization, created_at)` — account metadata (Phase 4). Later phases add tables (usage = Phase 7) via the migrations framework.
+  - `src/main/services/db.ts` is the **only** importer of better-sqlite3. Lazy singleton, `journal_mode=WAL`, `foreign_keys=ON`, versioned migrations keyed off SQLite's `user_version` pragma (an ordered `[{version, up(db)}]` list; apply those above the current version, bump after each). Exposes typed repositories: session repo (`getSessionMeta`/`setSessionMeta`/`deleteSessionMeta`/`allSessionMeta`/`renameSessionMeta`/`importSessionEnginesOnce`) and account repo (`getAllAccounts`/`upsertAccount`/`deleteAccountRow`/`importAccountsOnce`) — never the raw db.
+- **Credentials = file-based** when multi-account is on (ADR-015, SKIP_SECURESTORAGE patch) — separate from the OS keychain.
+
+**Dual-ABI gotcha (better-sqlite3).** The app runs under Electron (its Node ABI ≠ standalone Node's). better-sqlite3 must be built **Electron-ABI** to load in the main process; `bun install`/`bun add`/`bun remove` leave a **Node-ABI** build that crashes the app on boot with `ERR_DLOPEN_FAILED`. **Always run `bun run rebuild:native` (`electron-builder install-app-deps`) after touching deps.** Conversely, vitest runs in plain Node and **cannot** load the Electron-ABI binary, so `vitest.config.ts` aliases `better-sqlite3` → `src/test/stubs/better-sqlite3-stub.ts`, a ~thin adapter over Node 24's built-in `node:sqlite` (`DatabaseSync`). Tests therefore exercise the real DB/migration/repository logic against an in-memory SQLite without ever loading the native `.node`. **Never import `better-sqlite3` from renderer or shared code** — main process only; if a test transitively pulls in `db.ts`, it must hit the stub. electron-builder `asarUnpack` includes `node_modules/better-sqlite3/**` so the packaged app ships the unpacked binary.
+
+## Settings & Config
+
+The SettingsDialog (`src/renderer/src/components/SettingsDialog/`) is organized as a **tier tree** (Phase 3b — ADR-018, docs/v2/03-settings-config.md), not a flat list. Two orthogonal axes: **tier** (who the setting conceptually belongs to: App / Engine / Vendor / Session) and **config plane** (who stores + consumes it: ① app store / ② engine-native / ③ launch params — see [Persistence model](#persistence-model)).
+
+```
+Settings
+├── App            appearance, chat, session, tool output, diff, git, status line, usage, logging,
+│                  voice, remote, mockups        (plane ①, always present, engine-agnostic)
+├── Engines
+│   └── Claude     permissions (+ neutral autonomy modes), sandbox, proxy   (plane ③ + plane ② permissions)
+├── Vendors
+│   └── Anthropic  endpoint + model override (DISPLAY-ONLY in v1), effort defaults (editable)
+└── Accounts       multi-account (ADR-015)
+```
+
+- **`settings-sections.tsx`** exports `SECTIONS` (flat list, drives the scroll content + search filter) and `NAV_GROUPS` (the two-level nav tree: top-level groups + children like Claude/Anthropic). `SettingItem.render` takes `(settings, update, engineConfig, updateEngineConfig, vendorConfig, updateVendorConfig)` — App items use only the first pair; Engine items use the engine pair; the vendor section is display-only and ignores the setters.
+- **`SettingsDialog.tsx`** (FC) loads engine config (`window.api.loadEngineConfig('claude')`) and vendor config (`loadVendorConfig('anthropic')`) on mount; saves engine edits via `saveEngineConfig`. **`View.tsx`** renders the nav tree + scroll-spy + search.
+- **Engine/Vendor branches are gated to installed engines** — only Claude/Anthropic render now (opencode = Phase 5). Per-*section* capability-gating (hiding e.g. sandbox on a no-sandbox engine) is **deferred to Phase 5**: the Phase-2 `EngineCapabilities` model has no `sandbox`/`proxy` flags and is all-true for Claude, so gating today is zero-benefit until that model grows.
+- **Neutral autonomy modes** — ClaudeUI owns the labels; internal ids `AutonomyMode = 'plan' | 'ask' | 'autoEdit' | 'full'`. Mapped to Claude's permission mode: `plan↔plan`, `ask↔default`, `autoEdit↔acceptEdits`, `full↔auto`. The available set is gated on `capabilities.autonomyModes`. The picker reads/writes user-scope Claude permissions (`loadClaudePermissions`/`saveClaudePermissions`), generalizing the mode picker so opencode (`[plan,ask,full]`) drops in.
+- **Vendor display-only (§8.5)** — Vendors › Anthropic shows endpoint + modelOverride **read-only**; the edit forms were removed. Values still migrate and apply at spawn; users hand-edit `vendors/anthropic.json` until full vendor editing ships. `saveVendorConfig` exists in the IPC/preload (used by migration) but the UI never calls it — `handleUpdateVendorConfig` in `SettingsDialog.tsx` is wired but intentionally unused (a Phase-5 stub).
+- **Spawn rewiring** — `session.ipc.ts session:create` sources `sandbox`/`proxy` from `loadEngineConfig(engineId ?? 'claude')` and `endpoint`/`modelOverride` from `loadVendorConfig('anthropic')` (vendor derivation from the model's ModelRef is a Phase-5 TODO). The `sdk/{proxy,endpoint-env,model-env}.ts` consumers are unchanged — only the source moved. `config:save-settings` strips the four engine/vendor-owned fields from any incoming payload and re-applies env from the engine/vendor stores.
+- **Migration (read-time, one-time, idempotent)** — `ui-config.migrateConfigPlane()` runs on `loadSettings()`: moves `sandbox`/`proxy` from the flat `settings.json` → `engines/claude.json`, `anthropicEndpoint`/`modelOverride` → `vendors/anthropic.json`, deleting them from `settings.json`. Skips fields already present in the target (won't clobber hand-edits). ClaudeUI-consumed settings (`logLevel`/`logFilter`/`usageRefreshSecs`/`analyticsRefreshSecs`) are APP-tier and stay in `settings.json`.
 
 ## cli.js Integration
 
@@ -319,22 +423,36 @@ Register new patches in the `patches` array in `patch/apply-all.mjs`.
 
 ADRs live in `docs/adr/`. See `docs/adr/adr.md` for the index.
 
-| ADR | Title                                                                                              | Status   |
-| --- | -------------------------------------------------------------------------------------------------- | -------- |
-| 001 | Preserve `@` file mentions in user prompt text sent to SDK                                         | Accepted |
-| 002 | Always mount TerminalPanel to preserve xterm scrollback buffers                                    | Accepted |
-| 003 | Group terminal tabs by session cwd with 10-minute cold cleanup                                     | Accepted |
-| 004 | VS Code-style plugin system for extensibility                                                      | Accepted |
-| 005 | Plugin session API — sessionId-based events and history                                            | Accepted |
-| 006 | Rebundle Bun standalone binary instead of running cli.js under Node                                | Accepted |
-| 007 | Serve mockup previews over HTTP with a sandboxed iframe for the remote web client                  | Accepted |
-| 008 | Type-check the remote web client (`src/web`) against `ClaudeAPI`                                   | Accepted |
-| 009 | Store cli.js-consumed settings in Claude's settings.json, not UISettings                           | Accepted |
-| 010 | Fork ("branch off") sessions via cli.js's native `--resume-session-at` + `--fork-session`          | Accepted |
-| 011 | Canonical 5h-window identity from `resets_at` + time-based account attribution for usage analytics | Accepted |
-| 012 | Mermaid HTML labels (`antiscript` + DOMPurify `html` profile) and dark-theme ER contrast           | Accepted |
-| 013 | ESLint flat-config rework — Prettier decoupling, scoped React rules, pragmatic strictness          | Accepted |
-| 014 | Native Anthropic OAuth via cli.js control requests, hosted on the service session                  | Accepted |
-| 015 | Multiple-account support via file-based credentials (SKIP_SECURESTORAGE patch)                      | Accepted |
+| ADR | Title                                                                                              | Status                |
+| --- | -------------------------------------------------------------------------------------------------- | --------------------- |
+| 001 | Preserve `@` file mentions in user prompt text sent to SDK                                         | Accepted              |
+| 002 | Always mount TerminalPanel to preserve xterm scrollback buffers                                    | Accepted              |
+| 003 | Group terminal tabs by session cwd with 10-minute cold cleanup                                     | Accepted              |
+| 004 | VS Code-style plugin system for extensibility                                                      | Accepted              |
+| 005 | Plugin session API — sessionId-based events and history                                            | Accepted              |
+| 006 | Rebundle Bun standalone binary instead of running cli.js under Node                                | Accepted              |
+| 007 | Serve mockup previews over HTTP with a sandboxed iframe for the remote web client                  | Accepted              |
+| 008 | Type-check the remote web client (`src/web`) against `ClaudeAPI`                                   | Accepted              |
+| 009 | Store cli.js-consumed settings in Claude's settings.json, not UISettings                           | Accepted              |
+| 010 | Fork ("branch off") sessions via cli.js's native `--resume-session-at` + `--fork-session`          | Accepted              |
+| 011 | Canonical 5h-window identity from `resets_at` + time-based account attribution for usage analytics | Accepted              |
+| 012 | Mermaid HTML labels (`antiscript` + DOMPurify `html` profile) and dark-theme ER contrast           | Accepted              |
+| 013 | ESLint flat-config rework — Prettier decoupling, scoped React rules, pragmatic strictness          | Accepted              |
+| 014 | Native Anthropic OAuth via cli.js control requests, hosted on the service session                  | Accepted              |
+| 015 | Multiple-account support via file-based credentials (SKIP_SECURESTORAGE patch)                     | Accepted              |
+| 016 | Provider abstraction — ISession / BaseSession / ProviderRegistry (Strategy B)                      | Superseded by ADR-018 |
+| 017 | Codex backend via app-server protocol — bundled binary, generated types, delegated auth            | Superseded by ADR-019 |
+| 018 | V2 multi-engine model — engine / vendor / account split + capability model                         | Accepted              |
+| 019 | opencode engine backend — multi-vendor meta-harness replaces Codex as second backend               | Accepted              |
+| 020 | V2 persistence + config-plane — per-session ModelRef, engine config, account attribution           | Accepted              |
+| 021 | V2 auth / account model — EngineAuthProvider abstraction, multi-account per engine                 | Accepted              |
+| 022 | opencode permission model — autonomy-mode → last-match-wins ruleset mapping                        | Accepted              |
+| 023 | opencode auto-mode — LLM permission gatekeeper (parity w/ Claude), configurable judge model        | Accepted              |
+| 024 | opencode interaction parity — slash/skills, /btw + question.asked, queue/steer, subagents          | Accepted              |
+| 025 | projectKey as derived render-identity + engine-neutral persisted-session delete dispatcher          | Accepted              |
+| 026 | Development workflow — Opus orchestrates + reviews every line, Sonnet implements, gates + real-app verify | Accepted              |
+| 027 | Test data attributes — two-tier `data-testid` convention + DOM-assert-before-screenshot verification | Accepted              |
+| 028 | opencode engine-native config written to opencode's own files in place (jsonc, comment-safe) — implements ADR-020 | Accepted              |
+| 029 | opencode custom-agent CRUD — markdown agent files (global/project), opt-in permissions, AI-assisted authoring | Accepted              |
 
 When a design or implementation decision is made during a conversation, prompt the user about whether it should be recorded as a new ADR entry. When adding a new ADR, proactively scan existing ADRs to check if the new decision supersedes or conflicts with a previous one — if so, update the old ADR's status to "Superseded by ADR-XXX" and note it in the new ADR.
