@@ -235,8 +235,12 @@ export function ToolCard({
   }
 
   // Custom-layout kinds (diagram/mockup) render their own full card.
+  // Render Body as a JSX element (not Body(props)) so its hooks live in their
+  // own fiber — calling it as a function folds its hooks into ToolCard, and the
+  // conditional `expanded && Body(...)` below would then change ToolCard's hook
+  // count on expand/collapse (React error #310).
   if (renderer?.layout === 'custom') {
-    return Body(bodyProps) ?? <></>
+    return <Body {...bodyProps} />
   }
 
   return (
@@ -307,7 +311,11 @@ export function ToolCard({
         </svg>
       </button>
 
-      {expanded && <div className="border-t border-border">{Body(bodyProps)}</div>}
+      {expanded && (
+        <div className="border-t border-border">
+          <Body {...bodyProps} />
+        </div>
+      )}
 
       {expanded && isCommand && (isBackgroundBash || isForegroundBashRunning) && (
         <BackgroundBashOutput toolUseId={toolUseId} />

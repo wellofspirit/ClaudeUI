@@ -303,6 +303,36 @@ describe('ToolCard — fileRead kind', () => {
     )
     expect(screen.getByTestId('CodeView')).toHaveAttribute('data-code', 'file body')
   })
+
+  // Regression: ToolCard must render the body as <Body /> (own fiber), not call
+  // Body(props). FileReadBody calls useState; calling it as a function folded that
+  // hook into ToolCard, so toggling `expanded` changed ToolCard's hook count and
+  // crashed with React error #310 ("rendered fewer hooks than expected").
+  it('survives expand → collapse → expand without a hooks-order crash (#310)', () => {
+    const view: ToolView = { kind: 'fileRead', path: '/a.ts', content: 'file body' }
+    const props = baseProps({
+      kind: 'fileRead',
+      view,
+      block: block('Read', { file_path: '/a.ts' }),
+      result: result('file body'),
+      expandToolCalls: false
+    })
+    const { rerender } = render(<ToolCard {...props} />)
+    // collapsed → no body
+    expect(screen.queryByTestId('CodeView')).not.toBeInTheDocument()
+    // expand via header — FileReadBody (useState) mounts
+    fireEvent.click(screen.getByText('Read'))
+    expect(screen.getByTestId('CodeView')).toBeInTheDocument()
+    // collapse — body (and its hook) unmounts; must not throw #310
+    fireEvent.click(screen.getByText('Read'))
+    expect(screen.queryByTestId('CodeView')).not.toBeInTheDocument()
+    // expand once more for good measure
+    fireEvent.click(screen.getByText('Read'))
+    expect(screen.getByTestId('CodeView')).toBeInTheDocument()
+    // a forced re-render after toggling must also be stable
+    rerender(<ToolCard {...props} expandToolCalls={true} />)
+    expect(screen.getByTestId('CodeView')).toBeInTheDocument()
+  })
 })
 
 describe('ToolCard — generic kinds (search/web/mcp/unknown)', () => {
