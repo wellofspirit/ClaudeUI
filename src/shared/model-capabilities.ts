@@ -52,8 +52,8 @@ function normaliseModelId(model: string | undefined | null): string {
 
 /**
  * Map a model picker value to its canonical id. Mirrors cli.js's `i8_`
- * alias table at the time of writing (2.1.154):
- *   `opus` → `claude-opus-4-8`, `sonnet` → `claude-sonnet-4-6`,
+ * alias table at the time of writing (2.1.197):
+ *   `opus` → `claude-opus-4-8`, `sonnet` → `claude-sonnet-5`,
  *   `haiku` → `claude-haiku-4-5`.
  *
  * The `default` alias intentionally has no mapping — it resolves at the cli.js
@@ -68,9 +68,9 @@ export function canonicalizeModelValue(value: string | undefined | null): string
     case 'opus[1m]':
       return 'claude-opus-4-8'
     case 'sonnet':
-      return 'claude-sonnet-4-6'
+      return 'claude-sonnet-5'
     case 'sonnet[1m]':
-      return 'claude-sonnet-4-6'
+      return 'claude-sonnet-5'
     case 'haiku':
       return 'claude-haiku-4-5'
     default:
@@ -177,7 +177,8 @@ export function supportsAdaptiveThinking(model: string | undefined | null): bool
     id.includes('opus-4-8') ||
     id.includes('opus-4-7') ||
     id.includes('opus-4-6') ||
-    id.includes('sonnet-4-6')
+    id.includes('sonnet-4-6') ||
+    id.includes('sonnet-5')
   )
     return true
   if (id.includes('opus') || id.includes('sonnet') || id.includes('haiku')) return false
@@ -192,7 +193,8 @@ export function supportsEffort(model: string | undefined | null): boolean {
     id.includes('opus-4-8') ||
     id.includes('opus-4-7') ||
     id.includes('opus-4-6') ||
-    id.includes('sonnet-4-6')
+    id.includes('sonnet-4-6') ||
+    id.includes('sonnet-5')
   )
     return true
   if (id.includes('opus') || id.includes('sonnet') || id.includes('haiku')) return false
@@ -200,10 +202,10 @@ export function supportsEffort(model: string | undefined | null): boolean {
 }
 
 /**
- * Mirrors cli.js's xhigh gate (2.1.170): explicit true for fable-5, mythos-5,
- * opus-4-8, opus-4-7; explicit false for sonnet-4-6 / haiku-4-5 (covered here
- * by the legacy-family branch). Unknown families are assumed modern and
- * allowed, consistent with `supportsEffort`.
+ * Mirrors cli.js's xhigh gate (2.1.197): explicit true for fable-5, mythos-5,
+ * opus-4-8, opus-4-7, sonnet-5; explicit false for sonnet-4-6 / haiku-4-5
+ * (covered here by the legacy-family branch). Unknown families are assumed
+ * modern and allowed, consistent with `supportsEffort`.
  */
 export function supportsXhighEffort(model: string | undefined | null): boolean {
   const id = normaliseModelId(model)
@@ -211,7 +213,8 @@ export function supportsXhighEffort(model: string | undefined | null): boolean {
     id.includes('opus-4-7') ||
     id.includes('opus-4-8') ||
     id.includes('fable-5') ||
-    id.includes('mythos-5')
+    id.includes('mythos-5') ||
+    id.includes('sonnet-5')
   ) {
     return true
   }
@@ -280,6 +283,52 @@ export function resolveEffort(
 }
 
 // ---------------------------------------------------------------------------
+// Max output tokens
+// ---------------------------------------------------------------------------
+
+/**
+ * Maximum output tokens a model can produce. Mirrors cli.js `N0e(e)`, which
+ * returns `{default, upperLimit}` per base model; we expose the `upperLimit`
+ * (the model's true output ceiling, achievable with the max-tokens override /
+ * beta) so it lines up with the opencode side's `limit.output` semantic.
+ *
+ * Values are keyed on the canonical base id, so picker aliases are resolved
+ * first (`haiku` → claude-haiku-4-5 → 64000, not the default). Unknown / future
+ * ids fall back to cli.js's `tLd` default of 128000.
+ */
+export function maxOutputTokens(model: string | undefined | null): number {
+  const id = normaliseModelId(canonicalizeModelValue(model))
+  // 128K ceiling — Fable/Mythos 5, Sonnet 5, Opus 4.6/4.7/4.8, Sonnet 4.6
+  if (
+    id.includes('fable-5') ||
+    id.includes('mythos-5') ||
+    id.includes('sonnet-5') ||
+    id.includes('opus-4-8') ||
+    id.includes('opus-4-7') ||
+    id.includes('opus-4-6') ||
+    id.includes('sonnet-4-6')
+  )
+    return 128_000
+  // 64K — Opus 4.5, Sonnet 4.0/4.5, Haiku 4.5, Claude 3.7 Sonnet
+  if (
+    id.includes('opus-4-5') ||
+    id.includes('sonnet-4-5') ||
+    id.includes('sonnet-4-0') ||
+    id.includes('haiku-4-5') ||
+    id.includes('3-7-sonnet')
+  )
+    return 64_000
+  // 32K — Opus 4.1 / 4.0
+  if (id.includes('opus-4-1') || id.includes('opus-4-0')) return 32_000
+  // Legacy 3.x
+  if (id.includes('3-5-sonnet') || id.includes('3-5-haiku') || id.includes('claude-3-sonnet'))
+    return 8_192
+  if (id.includes('claude-3-opus') || id.includes('claude-3-haiku')) return 4_096
+  // Unknown / future — cli.js's tLd default.
+  return 128_000
+}
+
+// ---------------------------------------------------------------------------
 // Context window
 // ---------------------------------------------------------------------------
 
@@ -295,15 +344,18 @@ const IMPLICIT_1M_BASE_MODELS = [
   'claude-fable-5',
   'claude-mythos-5',
   'claude-opus-4-7',
-  'claude-opus-4-8'
+  'claude-opus-4-8',
+  'claude-sonnet-5'
 ]
 
 /**
  * Picker aliases that cli.js currently resolves to an implicit-1M base model:
- * "fable" → claude-fable-5, "opus" → claude-opus-4-8. Aliases track the latest
- * model generation, so re-verify this set on claudeCliVersion bumps.
+ * "fable" → claude-fable-5, "opus" → claude-opus-4-8,
+ * "sonnet" → claude-sonnet-5 (native-1M since 2.1.197).
+ * Aliases track the latest model generation, so re-verify this set on
+ * claudeCliVersion bumps.
  */
-const IMPLICIT_1M_ALIASES = new Set(['fable', 'opus'])
+const IMPLICIT_1M_ALIASES = new Set(['fable', 'opus', 'sonnet'])
 
 /**
  * Resolve a model value (picker alias or full id) to its context-window size,
@@ -438,7 +490,7 @@ export function claudeModelCapabilities(
     vision: true,
     toolCalling: true,
     contextWindow: resolveContextWindow(model?.value ?? null),
-    maxOutput: 32768,
+    maxOutput: maxOutputTokens(model?.value ?? null),
     promptCaching: true
   }
 }
@@ -487,11 +539,19 @@ export function resolveCapabilities(
 /**
  * Convenience: compute ResolvedCapabilities for a Claude session by model value string.
  * Primary entry point for ClaudeSession, store seeds, and test factories.
+ *
+ * Canonicalizes the incoming value before building caps so that aliases like
+ * 'sonnet' resolve to their current canonical id ('claude-sonnet-5') and the
+ * id-based heuristics (effort, thinking, context window) key on that id rather
+ * than the alias string. The 'default' alias has no canonicalization, preserving
+ * its pass-through behaviour.
  */
 export function resolveClaudeCapabilities(modelValue?: string | null): ResolvedCapabilities {
+  const raw = modelValue ?? 'default'
+  const canonical = canonicalizeModelValue(raw) || raw
   return resolveCapabilities(
     CLAUDE_ENGINE_CAPABILITIES,
-    claudeModelCapabilities({ value: modelValue ?? 'default' })
+    claudeModelCapabilities({ value: canonical })
   )
 }
 

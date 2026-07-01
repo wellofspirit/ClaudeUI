@@ -198,10 +198,10 @@ export interface AppSettings {
   voiceLanguage: VoiceLanguageCode
   /**
    * Per-model default effort overrides. Keyed by canonical model id
-   * (`claude-sonnet-4-6`, `claude-opus-4-7`, `claude-opus-4-8`,
-   * `claude-fable-5`). When set,
-   * overrides the cli.js-derived default for that model; a per-session
-   * explicit pick still wins.
+   * (`claude-sonnet-5`, `claude-sonnet-4-6`, `claude-opus-4-7`,
+   * `claude-opus-4-8`, `claude-fable-5`). When set, overrides the
+   * cli.js-derived default for that model; a per-session explicit pick
+   * still wins.
    */
   modelEffortDefaults: Partial<Record<string, EffortLevel>>
   mermaidTheme: 'auto' | 'dark' | 'default' | 'neutral' | 'forest' // mermaid diagram theme

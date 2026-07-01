@@ -16,15 +16,19 @@ import {
   modelDefaultThinkingMode,
   modelResolveEffort,
   canonicalizeModelValue,
-  resolveContextWindow
+  resolveContextWindow,
+  resolveClaudeCapabilities,
+  maxOutputTokens,
+  CONTEXT_WINDOW_1M
 } from '../model-capabilities'
 
 describe('supportsAdaptiveThinking', () => {
-  it('is true for opus-4-8 / opus-4-7 / opus-4-6 / sonnet-4-6', () => {
+  it('is true for opus-4-8 / opus-4-7 / opus-4-6 / sonnet-4-6 / sonnet-5', () => {
     expect(supportsAdaptiveThinking('claude-opus-4-8')).toBe(true)
     expect(supportsAdaptiveThinking('claude-opus-4-7')).toBe(true)
     expect(supportsAdaptiveThinking('claude-opus-4-6')).toBe(true)
     expect(supportsAdaptiveThinking('claude-sonnet-4-6')).toBe(true)
+    expect(supportsAdaptiveThinking('claude-sonnet-5')).toBe(true)
   })
   it('is false for legacy / haiku models', () => {
     expect(supportsAdaptiveThinking('claude-opus-4-1')).toBe(false)
@@ -46,18 +50,20 @@ describe('supportsEffort', () => {
     expect(supportsEffort('claude-opus-4-8')).toBe(true)
     expect(supportsEffort('claude-opus-4-7')).toBe(true)
     expect(supportsEffort('claude-sonnet-4-6')).toBe(true)
+    expect(supportsEffort('claude-sonnet-5')).toBe(true)
     expect(supportsEffort('claude-opus-4-5')).toBe(false)
     expect(supportsEffort('claude-haiku-4-5')).toBe(false)
   })
 })
 
 describe('supportsXhighEffort', () => {
-  it('is fable-5, mythos-5, opus-4-7 and opus-4-8', () => {
+  it('is fable-5, mythos-5, opus-4-7, opus-4-8, and sonnet-5', () => {
     expect(supportsXhighEffort('claude-opus-4-7')).toBe(true)
     expect(supportsXhighEffort('claude-opus-4-8')).toBe(true)
     expect(supportsXhighEffort('claude-fable-5')).toBe(true)
     expect(supportsXhighEffort('claude-fable-5[1m]')).toBe(true)
     expect(supportsXhighEffort('claude-mythos-5')).toBe(true)
+    expect(supportsXhighEffort('claude-sonnet-5')).toBe(true)
     expect(supportsXhighEffort('claude-opus-4-6')).toBe(false)
     expect(supportsXhighEffort('claude-sonnet-4-6')).toBe(false)
     expect(supportsXhighEffort('claude-haiku-4-5')).toBe(false)
@@ -109,6 +115,15 @@ describe('supportedEffortLevels', () => {
   it('drops xhigh for opus-4-6 / sonnet-4-6', () => {
     expect(supportedEffortLevels('claude-opus-4-6')).toEqual(['low', 'medium', 'high', 'max'])
     expect(supportedEffortLevels('claude-sonnet-4-6')).toEqual(['low', 'medium', 'high', 'max'])
+  })
+  it('returns full set with xhigh for sonnet-5', () => {
+    expect(supportedEffortLevels('claude-sonnet-5')).toEqual([
+      'low',
+      'medium',
+      'high',
+      'xhigh',
+      'max'
+    ])
   })
   it('returns empty array for models without effort support', () => {
     expect(supportedEffortLevels('claude-sonnet-4-5')).toEqual([])
@@ -291,11 +306,11 @@ describe('modelDefaultThinkingMode', () => {
 })
 
 describe('canonicalizeModelValue', () => {
-  it('maps known aliases to current canonical ids (mirrors cli.js i8_)', () => {
+  it('maps known aliases to current canonical ids (mirrors cli.js i8_ 2.1.197)', () => {
     expect(canonicalizeModelValue('opus')).toBe('claude-opus-4-8')
     expect(canonicalizeModelValue('opus[1m]')).toBe('claude-opus-4-8')
-    expect(canonicalizeModelValue('sonnet')).toBe('claude-sonnet-4-6')
-    expect(canonicalizeModelValue('sonnet[1m]')).toBe('claude-sonnet-4-6')
+    expect(canonicalizeModelValue('sonnet')).toBe('claude-sonnet-5')
+    expect(canonicalizeModelValue('sonnet[1m]')).toBe('claude-sonnet-5')
     expect(canonicalizeModelValue('haiku')).toBe('claude-haiku-4-5')
   })
   it('passes canonical ids through (normalised, date stripped)', () => {
@@ -330,6 +345,132 @@ describe('modelResolveEffort', () => {
   })
 })
 
+// ---------------------------------------------------------------------------
+// Sonnet 5 — full capability suite
+// ---------------------------------------------------------------------------
+
+describe('claude-sonnet-5 capabilities (authoritative from cli.js 2.1.197)', () => {
+  it('supportsAdaptiveThinking', () => {
+    expect(supportsAdaptiveThinking('claude-sonnet-5')).toBe(true)
+  })
+  it('supportsEffort', () => {
+    expect(supportsEffort('claude-sonnet-5')).toBe(true)
+  })
+  it('supportsXhighEffort', () => {
+    expect(supportsXhighEffort('claude-sonnet-5')).toBe(true)
+  })
+  it('supportsMaxEffort (not in NO_MAX_EFFORT list)', () => {
+    expect(supportsMaxEffort('claude-sonnet-5')).toBe(true)
+  })
+  it('supportedEffortLevels includes xhigh and max', () => {
+    expect(supportedEffortLevels('claude-sonnet-5')).toEqual([
+      'low',
+      'medium',
+      'high',
+      'xhigh',
+      'max'
+    ])
+  })
+  it('defaultEffort is high', () => {
+    expect(defaultEffort('claude-sonnet-5')).toBe('high')
+  })
+  it('defaultThinkingMode is adaptive', () => {
+    expect(defaultThinkingMode('claude-sonnet-5')).toBe('adaptive')
+  })
+  it('resolveContextWindow returns 1M (native-1M model)', () => {
+    expect(resolveContextWindow('claude-sonnet-5')).toBe(CONTEXT_WINDOW_1M)
+  })
+  it('maxOutputTokens is 128000', () => {
+    expect(maxOutputTokens('claude-sonnet-5')).toBe(128_000)
+  })
+})
+
+describe('maxOutputTokens (mirrors cli.js N0e upperLimit)', () => {
+  it('128K models: Fable/Mythos 5, Sonnet 5, Opus 4.6/4.7/4.8, Sonnet 4.6', () => {
+    for (const m of [
+      'claude-fable-5',
+      'claude-mythos-5',
+      'claude-sonnet-5',
+      'claude-opus-4-6',
+      'claude-opus-4-7',
+      'claude-opus-4-8',
+      'claude-sonnet-4-6'
+    ]) {
+      expect(maxOutputTokens(m)).toBe(128_000)
+    }
+  })
+  it('64K models: Opus 4.5, Sonnet 4.0/4.5, Haiku 4.5, Claude 3.7 Sonnet', () => {
+    for (const m of [
+      'claude-opus-4-5',
+      'claude-sonnet-4-0',
+      'claude-sonnet-4-5',
+      'claude-haiku-4-5',
+      'claude-3-7-sonnet'
+    ]) {
+      expect(maxOutputTokens(m)).toBe(64_000)
+    }
+  })
+  it('32K models: Opus 4.1 / 4.0', () => {
+    expect(maxOutputTokens('claude-opus-4-1')).toBe(32_000)
+    expect(maxOutputTokens('claude-opus-4-0')).toBe(32_000)
+  })
+  it('legacy 3.x: 3-opus/3-haiku → 4096, 3-sonnet/3-5-sonnet/3-5-haiku → 8192', () => {
+    expect(maxOutputTokens('claude-3-opus')).toBe(4_096)
+    expect(maxOutputTokens('claude-3-haiku')).toBe(4_096)
+    expect(maxOutputTokens('claude-3-sonnet')).toBe(8_192)
+    expect(maxOutputTokens('claude-3-5-sonnet')).toBe(8_192)
+    expect(maxOutputTokens('claude-3-5-haiku')).toBe(8_192)
+  })
+  it('resolves picker aliases via canonicalization (haiku → 64K, not the default)', () => {
+    expect(maxOutputTokens('sonnet')).toBe(128_000) // → claude-sonnet-5
+    expect(maxOutputTokens('opus')).toBe(128_000) // → claude-opus-4-8
+    expect(maxOutputTokens('haiku')).toBe(64_000) // → claude-haiku-4-5
+  })
+  it('resolves dated / provider-prefixed ids by substring', () => {
+    expect(maxOutputTokens('claude-sonnet-5-20260115')).toBe(128_000)
+    expect(maxOutputTokens('us.anthropic.claude-haiku-4-5-20251001-v1:0')).toBe(64_000)
+  })
+  it('unknown / future ids fall back to the 128K default', () => {
+    expect(maxOutputTokens('claude-something-9')).toBe(128_000)
+    expect(maxOutputTokens('default')).toBe(128_000)
+    expect(maxOutputTokens(null)).toBe(128_000)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// resolveClaudeCapabilities — alias canonicalization guard
+// ---------------------------------------------------------------------------
+
+describe('resolveClaudeCapabilities alias canonicalization', () => {
+  it("'sonnet' resolves to claude-sonnet-5 capabilities (effort + thinking + 1M context)", () => {
+    const caps = resolveClaudeCapabilities('sonnet')
+    // Effort picker must be present with full levels including xhigh
+    expect(caps.reasoning.effort).toBeDefined()
+    expect(caps.reasoning.effort?.levels).toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
+    // Thinking picker must be present
+    expect(caps.reasoning.thinking).toBeDefined()
+    // Context window must be 1M (native-1M Sonnet 5)
+    expect(caps.contextWindow).toBe(CONTEXT_WINDOW_1M)
+  })
+
+  it("'default' seed path is unchanged (no canonicalization side-effects)", () => {
+    const caps = resolveClaudeCapabilities('default')
+    // 'default' has no canonical mapping → falls back to unknown-family heuristic.
+    // The key assertion: it must NOT be null/throw, and reasoning is present
+    // (unknown family assumes modern in both heuristics).
+    expect(caps).toBeDefined()
+    expect(caps.reasoning).toBeDefined()
+  })
+
+  it("'claude-sonnet-5' (canonical id) produces the same result as 'sonnet'", () => {
+    const fromAlias = resolveClaudeCapabilities('sonnet')
+    const fromCanonical = resolveClaudeCapabilities('claude-sonnet-5')
+    expect(fromAlias.reasoning.effort?.levels).toEqual(fromCanonical.reasoning.effort?.levels)
+    expect(fromAlias.contextWindow).toBe(fromCanonical.contextWindow)
+    expect(fromAlias.reasoning.thinking).toEqual(fromCanonical.reasoning.thinking)
+  })
+})
+
 describe('resolveContextWindow', () => {
   const ONE_M = 1_000_000
   const DEFAULT = 200_000
@@ -342,17 +483,20 @@ describe('resolveContextWindow', () => {
   it('resolves implicit-1M picker aliases (the regression: no "1m" marker)', () => {
     expect(resolveContextWindow('fable')).toBe(ONE_M)
     expect(resolveContextWindow('opus')).toBe(ONE_M)
+    // sonnet now resolves to claude-sonnet-5 (native-1M since 2.1.197)
+    expect(resolveContextWindow('sonnet')).toBe(ONE_M)
   })
 
   it('resolves implicit-1M full ids by substring (dated / Bedrock)', () => {
     expect(resolveContextWindow('claude-fable-5')).toBe(ONE_M)
     expect(resolveContextWindow('claude-opus-4-8-20251201')).toBe(ONE_M)
     expect(resolveContextWindow('us.anthropic.claude-opus-4-8-20251201-v1:0')).toBe(ONE_M)
+    expect(resolveContextWindow('claude-sonnet-5')).toBe(ONE_M)
   })
 
   it('keeps 200K models and aliases at the default', () => {
-    expect(resolveContextWindow('sonnet')).toBe(DEFAULT)
     expect(resolveContextWindow('haiku')).toBe(DEFAULT)
+    expect(resolveContextWindow('claude-sonnet-4-6')).toBe(DEFAULT)
     expect(resolveContextWindow('claude-opus-4-6')).toBe(DEFAULT)
   })
 
