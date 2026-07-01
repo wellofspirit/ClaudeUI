@@ -13,8 +13,13 @@ import { logger } from '../services/logger'
 
 let cachedGroups: EngineModelGroup[] | null = null
 
-/** Per-model context-window cache: key = "providerID/modelID", value = tokens. */
-const contextWindowCache = new Map<string, number>()
+/** Cached per-model capability input (the subset opencodeModelCapabilities consumes). */
+type OpencodeModelCapInput = {
+  capabilities?: { attachment?: boolean; toolcall?: boolean; reasoning?: boolean; input?: { image?: boolean } }
+  limit?: { context?: number; output?: number }
+  cost?: { cache?: { read: number; write: number } }
+}
+const modelCapsCache = new Map<string, OpencodeModelCapInput>()
 
 /** Free/bundled opencode providers that never require auth credentials. */
 const FREE_VENDOR_IDS = new Set(['opencode', 'zen'])
@@ -216,10 +221,18 @@ export async function discoverOpencodeModels(): Promise<EngineModelGroup[]> {
             // OpenCode Zen model reads "MiMo V2.5 Free" (primary) / "OpenCode Zen" (sub),
             // not the inverted provider-first form.
             const description = `${m.name || modelId} · ${provider.name}`
-            // Cache the context window size for status-line usage (% used).
-            if (m.limit?.context) {
-              contextWindowCache.set(`${provider.id}/${modelId}`, m.limit.context)
-            }
+            // Cache the full capability input for status-line context-window lookups AND
+            // for resolveOpencodeCapabilities (session vision/toolCalling/promptCaching).
+            modelCapsCache.set(`${provider.id}/${modelId}`, {
+              capabilities: {
+                attachment: caps?.attachment,
+                toolcall: caps?.toolcall,
+                reasoning: caps?.reasoning,
+                input: caps?.input ? { image: caps.input.image } : undefined
+              },
+              limit: m.limit ? { context: m.limit.context, output: m.limit.output } : undefined,
+              cost: m.cost?.cache ? { cache: m.cost.cache } : undefined
+            })
             // Compute reasoning variant keys: only when reasoning is true and variants exist.
             const reasoningVariants =
               caps?.reasoning && m.variants && Object.keys(m.variants).length > 0
@@ -307,12 +320,23 @@ export async function resolveOpencodeSpawnModel(requested?: string): Promise<str
  * the discovery cache (discovery hasn't run yet, or the model has no limit).
  */
 export function getOpencodeModelContextWindow(providerID: string, modelID: string): number {
-  return contextWindowCache.get(`${providerID}/${modelID}`) ?? 0
+  return modelCapsCache.get(`${providerID}/${modelID}`)?.limit?.context ?? 0
+}
+
+/**
+ * Return the cached capability input for a model (attachment/vision, toolcall,
+ * limit, cost) as reported by /config/providers, or undefined if the model is
+ * not in the discovery cache (discovery hasn't run yet). Feeds
+ * resolveOpencodeCapabilities so a session's vision/toolCalling/contextWindow
+ * reflect the actual model.
+ */
+export function getOpencodeModelCapabilities(providerID: string, modelID: string): OpencodeModelCapInput | undefined {
+  return modelCapsCache.get(`${providerID}/${modelID}`)
 }
 
 /** Invalidate the model + catalog discovery caches (call on auth/config change). */
 export function invalidateOpencodeModelCache(): void {
   cachedGroups = null
   cachedCatalog = null
-  contextWindowCache.clear()
+  modelCapsCache.clear()
 }

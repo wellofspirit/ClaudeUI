@@ -18,6 +18,7 @@ import {
   canonicalizeModelValue,
   resolveContextWindow,
   resolveClaudeCapabilities,
+  resolveOpencodeCapabilitiesFromModel,
   maxOutputTokens,
   CONTEXT_WINDOW_1M
 } from '../model-capabilities'
@@ -505,5 +506,12 @@ describe('resolveContextWindow', () => {
     expect(resolveContextWindow('')).toBe(DEFAULT)
     expect(resolveContextWindow(undefined)).toBe(DEFAULT)
     expect(resolveContextWindow(null)).toBe(DEFAULT)
+  })
+})
+
+describe('resolveOpencodeCapabilitiesFromModel', () => {
+  it('resolveOpencodeCapabilitiesFromModel seeds vision from ModelInfo flags', () => {
+    expect(resolveOpencodeCapabilitiesFromModel({ vision: true }).vision).toBe(true)
+    expect(resolveOpencodeCapabilitiesFromModel(undefined).vision).toBe(false)
   })
 })

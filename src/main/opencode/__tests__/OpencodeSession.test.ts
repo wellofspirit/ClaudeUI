@@ -119,11 +119,16 @@ vi.mock('../../services/ui-config', () => ({
   loadEngineConfig: mockLoadEngineConfig
 }))
 
-// Model-discovery provides context-window sizes; mock so tests can control the
-// returned value without spinning up a real opencode server.
+// Model-discovery provides context-window sizes + per-model capabilities;
+// mock so tests can control the returned values without spinning up a real
+// opencode server.
 const mockGetOpencodeModelContextWindow = vi.hoisted(() => vi.fn().mockReturnValue(0))
+const mockGetOpencodeModelCapabilities = vi.hoisted(() => vi.fn().mockReturnValue(undefined))
+const mockDiscoverOpencodeModels = vi.hoisted(() => vi.fn().mockResolvedValue([]))
 vi.mock('../model-discovery', () => ({
   getOpencodeModelContextWindow: mockGetOpencodeModelContextWindow,
+  getOpencodeModelCapabilities: mockGetOpencodeModelCapabilities,
+  discoverOpencodeModels: mockDiscoverOpencodeModels,
   invalidateOpencodeModelCache: vi.fn()
 }))
 
@@ -160,6 +165,12 @@ function setupMocks(): void {
   mockListCommands.mockReset()
   mockListSkills.mockReset()
   mockRunCommand.mockReset()
+  mockGetOpencodeModelContextWindow.mockReset()
+  mockGetOpencodeModelContextWindow.mockReturnValue(0)
+  mockGetOpencodeModelCapabilities.mockReset()
+  mockGetOpencodeModelCapabilities.mockReturnValue(undefined)
+  mockDiscoverOpencodeModels.mockReset()
+  mockDiscoverOpencodeModels.mockResolvedValue([])
   // Default: no user-configured rules (hermetic — don't read the dev's settings).
   mockLoadClaudePermissions.mockReturnValue({
     allow: [],
@@ -460,6 +471,15 @@ describe('OpencodeSession — run()', () => {
       vi.useRealTimers()
     }
   })
+
+  it('eager connect warms the model discovery cache (cold-cache capability guard)', async () => {
+    const session = makeSession()
+    session.run(null) // fire-and-forget; eagerConnect runs asynchronously
+
+    await vi.waitFor(() => expect(mockDiscoverOpencodeModels).toHaveBeenCalled())
+
+    session.dispose()
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -698,6 +718,27 @@ describe('OpencodeSession — capabilities', () => {
     const caps = session.capabilities
     expect(caps.slashCommands).toBe(true)
     expect(caps.skills).toBe(true)
+    session.dispose()
+  })
+
+  it('constructor seeds capabilities.vision=true from a discovered model with attachment support', () => {
+    mockGetOpencodeModelCapabilities.mockReturnValue({ capabilities: { attachment: true } })
+    const session = makeSession('openai/gpt-4o-vision')
+    expect(session.capabilities.vision).toBe(true)
+    session.dispose()
+  })
+
+  it('constructor seeds capabilities.vision=false for a model without image caps', () => {
+    mockGetOpencodeModelCapabilities.mockReturnValue({ capabilities: { attachment: false } })
+    const session = makeSession('openai/gpt-3.5-turbo')
+    expect(session.capabilities.vision).toBe(false)
+    session.dispose()
+  })
+
+  it('constructor seeds capabilities.vision=false when the discovery cache is cold (undefined)', () => {
+    mockGetOpencodeModelCapabilities.mockReturnValue(undefined)
+    const session = makeSession()
+    expect(session.capabilities.vision).toBe(false)
     session.dispose()
   })
 })
@@ -3095,15 +3136,15 @@ describe('OpencodeSession — status-line emission', () => {
   })
 })
 
-describe('OpencodeSession — setModel() context window in capabilities', () => {
+describe('OpencodeSession — setModel() capabilities from discovery cache', () => {
   beforeEach(() => {
     setupMocks()
-    mockGetOpencodeModelContextWindow.mockReset()
-    mockGetOpencodeModelContextWindow.mockReturnValue(0)
+    mockGetOpencodeModelCapabilities.mockReset()
+    mockGetOpencodeModelCapabilities.mockReturnValue(undefined)
   })
 
   it('setModel with a known ctx window (64000) sets capabilities.contextWindow === 64000', async () => {
-    mockGetOpencodeModelContextWindow.mockReturnValue(64000)
+    mockGetOpencodeModelCapabilities.mockReturnValue({ limit: { context: 64000 } })
     const win = new MockWindow() as unknown as BrowserWindow
     const session = new OpencodeSession('r_setmodel_ctx', win, '/tmp')
     await session.setModel('openai/gpt-4o-mini')
@@ -3112,13 +3153,29 @@ describe('OpencodeSession — setModel() context window in capabilities', () => 
   })
 
   it('setModel with ctx window === 0 (cache miss) falls back to 200_000 optimistic default', async () => {
-    mockGetOpencodeModelContextWindow.mockReturnValue(0)
+    mockGetOpencodeModelCapabilities.mockReturnValue(undefined)
     const win = new MockWindow() as unknown as BrowserWindow
     const session = new OpencodeSession('r_setmodel_ctx_miss', win, '/tmp')
     await session.setModel('openai/unknown-model')
-    // ctx || undefined → resolveOpencodeCapabilities({ limit: { context: undefined } })
+    // getOpencodeModelCapabilities(...) → undefined → resolveOpencodeCapabilities(undefined)
     // opencodeModelCapabilities uses limit?.context ?? 200_000 → 200_000
     expect(session.capabilities.contextWindow).toBe(200_000)
+    session.dispose()
+  })
+
+  it('setModel to a vision-capable model flips capabilities.vision to true', async () => {
+    mockGetOpencodeModelCapabilities.mockReturnValue(undefined)
+    const win = new MockWindow() as unknown as BrowserWindow
+    const session = new OpencodeSession('r_setmodel_vision', win, '/tmp')
+    expect(session.capabilities.vision).toBe(false)
+
+    mockGetOpencodeModelCapabilities.mockImplementation((providerID: string, modelID: string) =>
+      providerID === 'openai' && modelID === 'gpt-4o-vision'
+        ? { capabilities: { attachment: true } }
+        : undefined
+    )
+    await session.setModel('openai/gpt-4o-vision')
+    expect(session.capabilities.vision).toBe(true)
     session.dispose()
   })
 })

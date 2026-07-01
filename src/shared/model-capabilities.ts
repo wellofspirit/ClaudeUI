@@ -629,3 +629,17 @@ export function resolveOpencodeCapabilities(
 ): ResolvedCapabilities {
   return resolveCapabilities(OPENCODE_ENGINE_CAPABILITIES, opencodeModelCapabilities(m))
 }
+
+/**
+ * Seed ResolvedCapabilities for an opencode session from a discovered ModelInfo's
+ * flat capability flags (renderer pre-spawn gating, before status.capabilities
+ * becomes authoritative on connect). ModelInfo carries no limit/cost, so
+ * contextWindow/promptCaching fall back to defaults until the session connects.
+ */
+export function resolveOpencodeCapabilitiesFromModel(
+  m?: { vision?: boolean; toolCalling?: boolean }
+): ResolvedCapabilities {
+  return resolveOpencodeCapabilities(
+    m ? { capabilities: { attachment: m.vision, toolcall: m.toolCalling } } : undefined
+  )
+}

@@ -2,7 +2,7 @@ import { create } from 'zustand'
 import { useShallow } from 'zustand/react/shallow'
 import { mergeContentBlocks } from '../utils/content-blocks'
 import { VOICE_LANGUAGES, claudeModel, opencodeModel } from '../../../shared/types'
-import { resolveClaudeCapabilities, resolveOpencodeCapabilities } from '../../../shared/model-capabilities'
+import { resolveClaudeCapabilities, resolveOpencodeCapabilitiesFromModel } from '../../../shared/model-capabilities'
 import type { EffortLevel } from '../../../shared/model-capabilities'
 import type {
   ChatMessage,
@@ -1034,7 +1034,7 @@ export const useSessionStore = create<SessionState>((set) => ({
         ...newSession.status,
         engineId,
         capabilities: engineId === 'opencode'
-          ? resolveOpencodeCapabilities()
+          ? resolveOpencodeCapabilitiesFromModel(state.availableModels.find((m) => m.value === defaultModel))
           : resolveClaudeCapabilities('default')
       }
       return {
@@ -2221,7 +2221,7 @@ export const useSessionStore = create<SessionState>((set) => ({
           engineId: targetEngine,
           capabilities:
             targetEngine === 'opencode'
-              ? resolveOpencodeCapabilities()
+              ? resolveOpencodeCapabilitiesFromModel(state.availableModels.find((m) => m.value === model))
               : resolveClaudeCapabilities(model)
         }
       }

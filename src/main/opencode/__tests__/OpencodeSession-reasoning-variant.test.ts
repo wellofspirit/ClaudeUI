@@ -91,8 +91,12 @@ vi.mock('../../services/ui-config', () => ({
 }))
 
 const mockGetOpencodeModelContextWindow = vi.hoisted(() => vi.fn().mockReturnValue(0))
+const mockGetOpencodeModelCapabilities = vi.hoisted(() => vi.fn().mockReturnValue(undefined))
+const mockDiscoverOpencodeModels = vi.hoisted(() => vi.fn().mockResolvedValue([]))
 vi.mock('../model-discovery', () => ({
   getOpencodeModelContextWindow: mockGetOpencodeModelContextWindow,
+  getOpencodeModelCapabilities: mockGetOpencodeModelCapabilities,
+  discoverOpencodeModels: mockDiscoverOpencodeModels,
   invalidateOpencodeModelCache: vi.fn()
 }))
 

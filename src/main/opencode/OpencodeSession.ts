@@ -8,6 +8,7 @@ import type { ResolvedCapabilities } from '../../shared/model-capabilities'
 import { resolveOpencodeCapabilities } from '../../shared/model-capabilities'
 import type {
   ChatMessage,
+  ContentBlock,
   SessionStatus,
   ApprovalDecision,
   PermissionSuggestion,
@@ -19,7 +20,7 @@ import type {
   StatusLineData
 } from '../../shared/types'
 import { opencodeModel } from '../../shared/types'
-import { getOpencodeModelContextWindow } from './model-discovery'
+import { getOpencodeModelContextWindow, getOpencodeModelCapabilities, discoverOpencodeModels } from './model-discovery'
 import { equivalentCostUsd } from '../../shared/pricing'
 import { logger } from '../services/logger'
 import { mapEvent, extractToolResult, convertStoredMessage } from './event-mapper'
@@ -188,6 +189,12 @@ export class OpencodeSession extends BaseSession {
   // the stored message history before accepting new prompts.
   private resumeSessionId: string | undefined
 
+  /** Resolve capabilities for the current model from the discovery cache. */
+  private resolveCapsForModel(): ResolvedCapabilities {
+    const { providerID, modelID } = parseModelString(this._model)
+    return resolveOpencodeCapabilities(getOpencodeModelCapabilities(providerID, modelID))
+  }
+
   constructor(
     routingId: string,
     win: BrowserWindow,
@@ -205,7 +212,7 @@ export class OpencodeSession extends BaseSession {
     this._model = model ?? DEFAULT_MODEL
     this.permissionMode = permissionMode ?? 'default'
     this.resumeSessionId = resumeSessionId || undefined
-    this._capabilities = resolveOpencodeCapabilities()
+    this._capabilities = this.resolveCapsForModel()
     this.sendStatus()
     this.sendStatusLine()
     // Warm the auth provider cache asynchronously so account is populated on
@@ -246,6 +253,38 @@ export class OpencodeSession extends BaseSession {
     }
   }
 
+  /**
+   * Build the ContentBlock[] for a locally-recorded user ChatMessage, mirroring
+   * the renderer's optimistic addUserMessage (session-store.ts): attachments
+   * first (image/document blocks), then a trailing text block. Keeps
+   * getMessages() / replay fidelity for image/PDF attachments sent via opencode.
+   */
+  private buildUserContent(
+    prompt: string,
+    attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
+  ): ContentBlock[] {
+    const content: ContentBlock[] = []
+    for (const att of attachments ?? []) {
+      if (att.mediaType === 'application/pdf') {
+        content.push({
+          type: 'document',
+          mediaType: 'application/pdf',
+          base64Data: att.base64Data,
+          fileName: att.fileName
+        })
+      } else {
+        content.push({
+          type: 'image',
+          mediaType: att.mediaType as 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp',
+          base64Data: att.base64Data,
+          fileName: att.fileName
+        })
+      }
+    }
+    if (prompt) content.push({ type: 'text', text: prompt })
+    return content
+  }
+
   async run(
     prompt: string | null,
     attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
@@ -279,7 +318,7 @@ export class OpencodeSession extends BaseSession {
       const userMsg: ChatMessage = {
         id: uuid(),
         role: 'user',
-        content: [{ type: 'text', text: prompt }],
+        content: this.buildUserContent(prompt, attachments),
         timestamp: Date.now()
       }
       this.messageHistory.push(userMsg)
@@ -360,7 +399,7 @@ export class OpencodeSession extends BaseSession {
       const userMsg: ChatMessage = {
         id: uuid(),
         role: 'user',
-        content: [{ type: 'text', text: prompt }],
+        content: this.buildUserContent(prompt, attachments),
         timestamp: Date.now()
       }
       this.messageHistory.push(userMsg)
@@ -515,6 +554,17 @@ export class OpencodeSession extends BaseSession {
           )
           this.resumeSessionId = undefined
         }
+      }
+
+      // Discovery may not have run before this session was constructed (cold cache),
+      // in which case capabilities.vision (etc.) defaulted to false. Ensure the model
+      // catalog is warm, then recompute + re-emit so image-capable models enable paste.
+      await discoverOpencodeModels().catch(() => [])
+      const nextCaps = this.resolveCapsForModel()
+      if (nextCaps.vision !== this._capabilities.vision || nextCaps.contextWindow !== this._capabilities.contextWindow) {
+        this._capabilities = nextCaps
+        this.sendStatus()
+        this.sendStatusLine()
       }
     } catch (err) {
       // Any failure degrades silently — opencode is optional
@@ -894,9 +944,7 @@ export class OpencodeSession extends BaseSession {
 
   async setModel(model: string): Promise<void> {
     this._model = model
-    const { providerID, modelID } = parseModelString(this._model)
-    const ctx = getOpencodeModelContextWindow(providerID, modelID)
-    this._capabilities = resolveOpencodeCapabilities({ limit: { context: ctx || undefined } })
+    this._capabilities = this.resolveCapsForModel()
     // Reset the reasoning variant — the new model may have different variants.
     this.reasoningVariant = null
     this.sendStatus()
