@@ -86,7 +86,7 @@ describe('opencodeConfigDir', () => {
   it('XDG_CONFIG_HOME/opencode when OPENCODE_CONFIG_DIR unset', () => {
     withEnv('OPENCODE_CONFIG_DIR', undefined, () => {
       withEnv('XDG_CONFIG_HOME', '/xdg-home', () => {
-        expect(opencodeConfigDir()).toBe('/xdg-home/opencode')
+        expect(opencodeConfigDir()).toBe(path.join('/xdg-home', 'opencode'))
       })
     })
   })
