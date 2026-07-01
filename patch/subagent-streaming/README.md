@@ -14,13 +14,14 @@ directory. This file is executed by the SDK via `node` or `bun` when you call
 `query()`. It is **independent** of the native `claude` binary installed on
 your system, and may trail behind in version.
 
-| Component              | Version at time of discovery               |
-| ---------------------- | ------------------------------------------ |
-| SDK package            | 0.2.38 → 0.2.39 → 0.2.41 → 0.2.42 → 0.2.49 |
-| Bundled CLI (`cli.js`) | 2.1.38 → 2.1.39 → 2.1.41 → 2.1.42 → 2.1.49 |
+| Component              | Version at time of discovery                                    |
+| ---------------------- | --------------------------------------------------------------- |
+| SDK package            | 0.2.38 → 0.2.39 → 0.2.41 → 0.2.42 → 0.2.49                    |
+| Bundled CLI (`cli.js`) | 2.1.38 → 2.1.39 → 2.1.41 → 2.1.42 → 2.1.49                    |
+| Last re-anchored       | 2.1.197                                                         |
 
 All versions exhibit the same behavior. Function names change between
-versions but the architecture is identical.
+versions but the architecture is stable through v2.1.196. **v2.1.197 introduced a significant refactor** (BVe unification — see below) that required new patches F2 and changes to B and E; the logical problem and fix strategy are identical.
 
 ## The Problem
 
@@ -55,31 +56,76 @@ reaches the SDK consumer via `transport.readMessages()`.
 
 ### How the Task tool executes a sub-agent
 
+**v2.1.196 and earlier:**
 ```
-NMq.submitMessage() iterates the query loop
-  │
-  ▼
-Tool executor encounters Task tool_use
-  │
-  ▼
 Task.call(input, context, canUseTool, message, progressCallback)
   │
-  ├─ Creates dR() generator (sub-agent execution loop)
-  ├─ Iterates dR() collecting messages in O1[]
-  │     │
-  │     ├─ Sub-agent assistant messages (text, thinking, tool_use)
-  │     ├─ Sub-agent user messages (tool_result)
-  │     └─ Sub-agent stream_events (deltas)
+  ├─ Creates dR()/cR()/Wy() generator (sub-agent execution loop)
+  ├─ for-await loop collects messages in O1[]
+  │     (Filter #1: only tool_use/tool_result call progressCallback j)
+  │     (Filter #2: stream_events dropped by type guard before push)
   │
-  ├─ Calls progressCallback(j) for SOME messages
-  │     └─ Only tool_use and tool_result blocks (see Filter #1)
-  │
-  └─ Returns UEA() result with text-only content (see Filter #2)
+  └─ Returns UEA()/Mg8() result with text-only content
 ```
 
-The sub-agent's `dR()` generator yields full messages with all content block
-types. But these messages are consumed entirely within `Task.call()` — they
-are never yielded back to the parent's `NMq.submitMessage()` generator.
+**v2.1.197+ (BVe unification):**
+```
+Task.call(input, context, canUseTool, message, progressCallback)
+  │
+  ├─ Creates nt=(MSG)=>{...} onMessage callback in Task.call() scope
+  │     nt receives every message from the sub-agent generator
+  │
+  ├─ Calls BVe({..., onMessage:nt, shouldNotifyOwner:p, toolUseContext:s})
+  │     BVe runs the for-await loop internally
+  │     BVe calls u?.(ce) (=nt) as first statement for EVERY message
+  │     BVe collects messages in h[] for its own processing
+  │
+  └─ nt callback:
+        if(DONE_FLAG)return;
+        if(MSG.type==="spinner_mode")return;
+        if(MSG.type!=="api_metrics"&&MSG.type!=="set_in_progress_tool_use_ids")Ye.push(MSG);  ← Patch B target
+        if(!CALLBACK)return;
+        ...bash_progress forward...
+        if(MSG.type!=="assistant"&&MSG.type!=="user")return;  ← stream_event dropped here
+        ...agent_progress forward...
+```
+
+The sub-agent generator yields full messages with all content block types.
+In the v2.1.197 architecture, `BVe()` is the unified runner for both sync
+and background sub-agents (formerly separate paths). `iu8()` — the standalone
+background runner — was merged into `BVe()`.
+
+### BVe function signature (v2.1.197)
+
+```js
+async function BVe({
+  onMessage: u,           // nt callback from Task.call() — called for EVERY message
+  shouldNotifyOwner: d,   // p = () => Fe (returns true when backgrounded)
+  toolUseContext: s,      // s.toolUseId = parent_tool_use_id
+  // ... other fields
+}) {
+  for await (let ce of <generator>) {
+    u?.(ce)               // ← call nt for every message (Patch E injects here)
+    if(W(), ce.type==="system"&&ce.subtype==="api_error")continue;
+    h.push(ce)            // ← collection array (Patch E's BVe anchor)
+    // ...
+  }
+}
+```
+
+Key variables:
+| Variable | Source | Value |
+| -------- | ------ | ----- |
+| `u` | `BVe` destructured param | `nt` onMessage callback from Task.call() |
+| `d` | `BVe` destructured param | `shouldNotifyOwner = () => Fe` |
+| `s` | `BVe` destructured param | toolUseContext; `s.toolUseId` = parent tool use ID |
+| `p` | same as `d` — local alias used in Patch E injection | `() => Fe` |
+| `h` | local to BVe | message collection array |
+| `ce` | loop variable | current message from sub-agent generator |
+| `W` | watchdog callback | called once per iteration |
+| `Fe` | Task.call() local | true when task is backgrounded |
+| `nt` | Task.call() local | `(MSG)=>{...}` onMessage callback |
+| `Ye` | Task.call() local | collection array fed to Tko/FVe |
 
 ### How progress messages flow to the SDK
 
@@ -435,46 +481,66 @@ tool (Patch B). This prevents "Cannot read properties of undefined
 (reading 'type')" errors from downstream functions (`UEA`, `_kA`, `dP`)
 that iterate these arrays and access `.message.content`.
 
-## Message Flow Diagram — After Patching (Async Path, Patches F+E)
+## Message Flow Diagram — After Patching (Async Path, Patches F+F2+E)
+
+### v2.1.196 and earlier (legacy re-background loops)
 
 ```
-Background sub-agent cR() generator (inside q01 async context)
+Background sub-agent cR()/Wy() generator (inside q01 async context)
   │  (Patch F applies here too — cR yields stream_events without collecting)
   │
   ├── stream_event
   │     │
-  │     └── (Patch E) intercepted BEFORE N1.push — NOT collected
+  │     └── (Patch E legacy) intercepted BEFORE N1.push — NOT collected
   │           → process.stdout.write(JSON + "\n")
   │           → {type:"stream_event", event:..., parent_tool_use_id:_ptu}
   │           → SDK readline → q4() parse → consumer ✓
   │
-  ├── assistant msg
+  ├── assistant/user msg
   │     │
   │     ├── N1.push(msg)              ← collected (has .message, safe for _kA)
-  │     └── (Patch E) process.stdout.write(JSON + "\n")
-  │           → {type:"assistant", message:..., parent_tool_use_id:_ptu}
-  │           → SDK readline → q4() parse → consumer ✓
+  │     └── (Patch E legacy) process.stdout.write(JSON + "\n") → consumer ✓
   │
-  ├── user msg
-  │     │
-  │     ├── N1.push(msg)              ← collected
-  │     └── (Patch E) process.stdout.write(JSON + "\n")
-  │           → {type:"user", message:..., parent_tool_use_id:_ptu}
-  │           → SDK readline → q4() parse → consumer ✓
-  │
-  ├── result                          ← not forwarded (no streaming value)
-  │
-  └── (loop ends)
-        │
-        ▼
-      _kA(N1) → text-only result     ← N1 contains only assistant/user msgs (safe)
+  └── (loop ends) → _kA(N1) → text-only result
 ```
 
-Note: `_ptu` is the `parent_tool_use_id`, resolved by searching
-`D.message.content` for the `tool_use` block matching this Task call's
-description. The progress callback `j()` is dead in the async path, so
-Patch E bypasses the entire O6q/ZhA pipeline and writes directly to
-stdout.
+### v2.1.197+ (BVe unified path)
+
+```
+Sub-agent generator → BVe() for-await loop
+  │
+  │  BVe calls u?.(ce) (=nt) first for EVERY message
+  │  nt = Task.call()'s onMessage callback
+  │
+  ├── stream_event
+  │     │
+  │     ├── (Patch F2) yield MSG past IVe/fHo pre-filter in sub-agent generator
+  │     │     (without F2, IVe catches stream_event first, fHo() consumes it, continues — dead)
+  │     │
+  │     ├── BVe calls u?.(ce) → nt receives MSG
+  │     │     (Patch B) nt: intercept BEFORE Ye.push → forward via CALLBACK → continue/return
+  │     │
+  │     └── (Patch E BVe) BVe for-await: injected BEFORE h.push:
+  │           if(ce.type==="stream_event"){if(p())try{process.stdout.write(...)}catch{}; continue}
+  │           → {type:"stream_event", event:..., parent_tool_use_id:s.toolUseId}
+  │           → SDK readline → q4() parse → consumer ✓  (when backgrounded: p()=true)
+  │
+  ├── assistant/user msg
+  │     │
+  │     ├── BVe calls u?.(ce) → nt receives MSG
+  │     │     (Patch B) nt: forwarded via CALLBACK (agent_progress path)
+  │     │
+  │     ├── (Patch E BVe) if(p()) process.stdout.write(...) → consumer ✓ (when backgrounded)
+  │     │
+  │     └── h.push(ce) ← collected (has .message, safe for downstream processing)
+  │
+  └── (loop ends) → text-only result
+```
+
+Note: In v2.1.197+:
+- `p` = `shouldNotifyOwner` = `() => Fe`. Returns `true` when `Fe=true` (backgrounded); `false` when sync.
+- `s.toolUseId` = parent_tool_use_id (no description-search needed — available directly from `toolUseContext`).
+- Patch G is no longer needed: `iu8()` was merged into `BVe()`, which Patch E's BVe injection already covers.
 
 ## The Patches
 
@@ -602,15 +668,82 @@ Search for the unique pattern of nested for-loops with a `tool_use`/
 type!=="tool_use"&&.*type!=="tool_result".*continue.*agent_progress
 ```
 
-### Patch B — Stream event forwarding (before O1.push)
+### Patch F2 — Yield stream_event past IVe/fHo streaming pre-filter (v2.1.197+)
+
+**New in v2.1.197.** Fixes a pre-filter ABOVE Patch F's RVY gate that caused Patch F to become dead code for stream_events.
+
+**Marker**: `/*PATCHED:subagent-F2*/`
+
+**Background:** In v2.1.197, the sub-agent query generator gained a pre-filter loop body:
+
+```js
+for await (let MSG of b4({...})) {
+  if(CB?.(), IVe(MSG)) {
+    FHO(MSG, CFG, N), yield*BUF, BUF.length=0; continue
+  }
+  // ... rest of loop including Patch F's RVY gate
+}
+```
+
+`IVe(MSG)` = `Bam.has(MSG.type)` where `Bam` is a set that **includes `"stream_event"`**. So stream_events hit the `IVe` branch first: `FHO()` (the streaming display handler) consumes them for side effects (`onStreamingText`, etc.) and the branch `continue`s — stream_events never reach Patch F's `yield`. Patch F became dead code for stream_events on v2.1.197+.
+
+**Fix:** Inside the `IVe` branch, after the `FHO()` side-effect call and before the BUF flush, yield the message when it is a `stream_event`. This lets it flow through to `nt`/BVe as designed.
+
+**Anchor** (unique, 1 match):
+```
+if(CB?.(),IVe(MSG)){FHO(MSG,CFG,N),yield*BUF,BUF.length=0;continue}
+```
+
+More precisely as a regex (minified names vary):
+```
+if(<CB>?.(),<IVe>(<MSG>)){<FHO>(<MSG>,<CFG1>,<CFG2>),yield*<BUF>,<BUF>.length=0;continue}
+```
+
+**Before:**
+```js
+if(CB?.(), IVe(MSG)){FHO(MSG, CFG, N), yield*BUF, BUF.length=0; continue}
+```
+
+**After:**
+```js
+if(CB?.(), IVe(MSG)){/*PATCHED:subagent-F2*/FHO(MSG, CFG, N),
+  MSG.type==="stream_event"&&(yield MSG),
+  yield*BUF, BUF.length=0; continue}
+```
+
+The `(yield MSG)` expression is valid inside a generator body. It is wrapped in `&&` short-circuit so it only runs when `MSG.type==="stream_event"`.
+
+**Safety check:** `apply.mjs` verifies that Patch F's marker is within 6000 chars downstream of the F2 injection site (confirms we're inside the correct sub-agent generator, not a different for-await loop).
+
+**Applicability:** F2 auto-skips on pre-2.1.197 CLIs where the `IVe/fHo` pre-filter does not exist. Patch F alone was sufficient there.
+
+**How to find this code:**
+```bash
+bundle-analyzer find cli.js "IVe(MSG)){FHO" --compact
+# Or search for the buffer flush pattern unique to this generator:
+bundle-analyzer find cli.js "yield*BUF,BUF.length=0;continue" --compact
+```
+
+The `IVe` function is `Bam.has(MSG.type)` — find it by:
+```bash
+bundle-analyzer find cli.js '"stream_event"' --compact
+# Look for a Set that includes "stream_event" among other streaming message types
+```
+
+---
+
+### Patch B — Stream event forwarding (before O1.push / Ye.push)
 
 **Removes Filter #2.** Intercepts `stream_event` messages **before** the
-`O1.push()` call and forwards them through the progress callback as a new
-`agent_stream_event` data type. Stream events never enter the `O1`
-collection array.
+collection array push and forwards them through the progress callback as a
+new `agent_stream_event` data type. Stream events never enter the collection
+array.
+
+**Marker**: `/*PATCHED:subagent-B*/`
+
+#### v2.1.196 and earlier (for-await with push)
 
 Before:
-
 ```js
 if (O1.push(Y1),
     Y1.type !== "assistant" && Y1.type !== "user")
@@ -618,56 +751,73 @@ if (O1.push(Y1),
 ```
 
 After:
-
 ```js
+/*PATCHED:subagent-B*/
 if (Y1.type === "stream_event") {
     if (j) j({
         toolUseID: `agent_${D.message.id}`,
         data: {type: "agent_stream_event", event: Y1.event, agentId: r}
     });
-    continue
+    continue  // ← continue: valid in for-loop body
 }
 if (O1.push(Y1),
     Y1.type !== "assistant" && Y1.type !== "user")
     continue;
 ```
 
-The stream_event check is a separate `if` block that runs **before** the
-original `if(O1.push(Y1),...)` statement. When a stream_event is
-detected, it's forwarded and skipped via `continue` — the `O1.push()`
-line is never reached.
+#### v2.1.197+ (nt-callback architecture)
 
-**Why stream_events must NOT enter O1:**
+In v2.1.197, the old for-await loop is gone. Instead `Task.call()` creates an `nt=(MSG)=>{...}` arrow-function callback and passes it as `onMessage:nt` to `BVe()`. The callback receives every message. The Patch B target is now the `Ye.push()` statement inside `nt`:
 
-- `O1` is passed to `UEA()` when the Task tool finishes
-- `UEA()` calls `GN(O1)` to get the last assistant message, then
-  iterates `.message.content` to extract text blocks
-- Stream events have `{type, event}` structure — no `.message` property
-- If stream_events are in O1, downstream processing crashes with
-  "Cannot read properties of undefined (reading 'type')" when
-  `_kA()` or `dP()` access `.message.content` on a stream_event
+```
+nt callback structure (v2.1.197):
+  if(DONE_FLAG)return;
+  if(MSG.type==="spinner_mode")return;
+  if(MSG.type!=="api_metrics"&&MSG.type!=="set_in_progress_tool_use_ids")Ye.push(MSG);  ← TARGET
+  if(!CALLBACK)return;
+  ...bash_progress forward...
+  if(MSG.type!=="assistant"&&MSG.type!=="user")return;  ← stream_event dropped here
+  ...agent_progress forward...
+```
 
-**Why this is safe:**
+The `ntCallbackRe` pattern matches the push line:
+```js
+const ntCallbackRe = new RegExp(
+  `if\\((%V%)\\.type!=="api_metrics"&&\\1\\.type!=="set_in_progress_tool_use_ids"\\)(%V%)\\.push\\(\\1\\)`
+)
+```
 
-- Stream events are forwarded via the progress callback before being
-  skipped — they reach the SDK consumer via Patch C
-- All other message types (assistant, user, system, progress) follow the
-  original code path and are pushed to O1 normally
-- The `U1q()` wrapper adds `uuid`, `timestamp`, and `parentToolUseID`
-  automatically
+After (v2.1.197 nt-callback shape):
+```js
+/*PATCHED:subagent-B*/
+if (MSG.type === "stream_event") {
+    if (CALLBACK) CALLBACK({type:"progress",toolUseID:`agent_${parentVar.message.id}`,
+        data:{type:"agent_stream_event",event:MSG.event,agentId:agentVar}});
+    return  // ← return: arrow function, not a loop body — NOT continue
+}
+if(MSG.type!=="api_metrics"&&MSG.type!=="set_in_progress_tool_use_ids")Ye.push(MSG);
+```
+
+**Critical:** the old path used `continue` (valid in a for-loop). The v2.1.197 path uses `return` (arrow function body, no loop). `apply.mjs` detects which shape was matched (`isNtCallback` flag) and selects the correct exit keyword.
+
+**Why stream_events must NOT enter Ye:**
+
+`Ye[]` (formerly `O1[]`) is passed to `Tko`/`FVe` (formerly `UEA`) which calls `NAe()` on the last non-system/progress message. `NAe` accesses `.message.content` — stream_events have `{type, event}` structure with no `.message`. Downstream crash: "Cannot read properties of undefined (reading 'type')".
 
 **How to find this code in a new version:**
-Search for the comma-expression pattern that pushes to an array and checks
-for progress type with bash/powershell progress:
 
-```
-\.push\(.*\.type==="progress"&&.*bash_progress
+For v2.1.197+ nt-callback:
+```bash
+bundle-analyzer find cli.js '"api_metrics"&&' --compact
+# The nt callback is the only location that checks both api_metrics AND
+# set_in_progress_tool_use_ids before a .push() call
 ```
 
-Or the assistant/user type check that follows:
-
-```
-\.push\(.*\.type!=="assistant"&&.*\.type!=="user"\)continue
+For older for-await loop shape:
+```bash
+bundle-analyzer find cli.js '.push\(.*bash_progress' --regex --compact
+# Or:
+bundle-analyzer find cli.js '.type!=="assistant"&&.*type!=="user")continue' --regex --compact
 ```
 
 ### Patch C — ZhA/ihA handler for agent_stream_event
@@ -813,69 +963,83 @@ For the background polling map, search for:
 This pattern is unique — it's the only place that maps over messages,
 extracts text from assistant messages, and JSON-stringifies everything else.
 
-### Patch E — Background agent stdout streaming
+### Patch E — Background agent streaming (BVe injection in v2.1.197+, legacy re-background loops in v2.1.196-)
 
 **Bypasses the dead progress callback for async (background) agents.**
-When the Task tool runs with `run_in_background: true`, the tool executor
-returns immediately with an `async_launched` result. The actual sub-agent
-runs inside a `q01()` async context. At this point the progress callback
-`j()` is dead — its output queue has been closed by the tool executor.
+When the Task tool runs with `run_in_background: true` or is backgrounded
+mid-execution, the progress callback `j()` is dead (output queue closed).
+Patch E writes sub-agent messages directly to stdout as newline-delimited JSON.
 
-Patch E injects code into the background agent's `for await` loop to
-write sub-agent messages directly to stdout as newline-delimited JSON.
-Like Patch B, stream_events are intercepted **before** the collection
-array push (`N1.push`) to prevent downstream crashes.
+**Marker**: `/*PATCHED:subagent-E*/`
 
-Before (async for-await body is a single statement):
+#### v2.1.197+ — BVe for-await injection
 
-```js
-for await (let D1 of cR({...}))
-    N1.push(D1), s01(...), s0A(agentId, ...);
+In v2.1.197, `iu8()` and both re-background loops were unified into `BVe()`.
+BVe takes `shouldNotifyOwner:d` (called `p` locally — a function returning `Fe`,
+the done/backgrounded flag). When `Fe=true` (task backgrounded), `p()=true`.
+
+**Anchor** (unique in BVe's for-await body):
+```
+if(WATCHDOG(), MSG.type==="system"&&MSG.subtype==="api_error")continue;ARR.push(MSG)
 ```
 
-After (wrapped in block with stdout writes):
+Injection is inserted **before** the watchdog call:
+```js
+/*PATCHED:subagent-E*/
+if(ce.type==="stream_event"){
+  if(p())try{process.stdout.write(JSON.stringify({
+    type:"stream_event", event:ce.event,
+    parent_tool_use_id:s.toolUseId, session_id:<sessFn>(), uuid:globalThis.crypto.randomUUID()
+  })+"\n")}catch(_e){}
+  continue  // ← skip h.push for stream_events regardless of sync/async state
+}
+if(ce.type==="assistant"||ce.type==="user")
+  if(p())try{process.stdout.write(JSON.stringify({
+    type:ce.type, message:ce.message,
+    parent_tool_use_id:s.toolUseId, session_id:<sessFn>(), uuid:globalThis.crypto.randomUUID()
+  })+"\n")}catch(_e){}
+// Original: if(W(),ce.type==="system"&&ce.subtype==="api_error")continue; h.push(ce) follows
+```
+
+- **stream_events**: always `continue` (skip `h.push`) to prevent `NAe` crash; write stdout only when `p()=true`.
+- **assistant/user**: write stdout when `p()=true`; fall through to original `h.push` (they're safe in `h[]`).
+- **When sync** (`Fe=false`, `p()=false`): no stdout writes — `nt`/progress-callback handles it. Stream events still skip `h[]` via `continue`.
+
+`s.toolUseId` provides `parent_tool_use_id` directly from `toolUseContext` — no description-search lookup needed (unlike legacy Patch E).
+
+**Verify anchor uniqueness:**
+```bash
+bundle-analyzer find cli.js 'ce.type==="system"&&ce.subtype==="api_error")continue' --compact
+# Should match exactly once (inside BVe's for-await loop body)
+```
+
+Also verify `s.toolUseId` appears within 2000 chars before the anchor (confirms BVe scope).
+
+#### v2.1.196 and earlier — Legacy re-background for-await loops
 
 ```js
-for await (let D1 of cR({...})) {
-    if (D1.type === "stream_event") {
-        // Stream events: forward directly, do NOT push to N1
-        let _ptu = null;
-        for (let _b of D.message.content) {
-            if (_b.type === "tool_use" && _b.input && _b.input.description === K) {
-                _ptu = _b.id; break;
-            }
-        }
-        process.stdout.write(JSON.stringify({
-            type: "stream_event", event: D1.event,
-            parent_tool_use_id: _ptu, session_id: p6(), uuid: _f()
-        }) + "\n");
-    } else {
-        // Non-stream: original push + stats + state, then forward
-        N1.push(D1), s01(...), s0A(agentId, ...);
+// Old shape (one of two loops, braced or unbraced):
+for await (let D1 of cR({...}))
+    N1.push(D1), s01(...), s0A(agentId, ...);
 
-        let _ptu = null;
-        for (let _b of D.message.content) {
-            if (_b.type === "tool_use" && _b.input && _b.input.description === K) {
-                _ptu = _b.id; break;
-            }
-        }
-        if (D1.type === "assistant")
-            process.stdout.write(JSON.stringify({
-                type: "assistant", message: D1.message,
-                parent_tool_use_id: _ptu, session_id: p6(), uuid: _f()
-            }) + "\n");
-        else if (D1.type === "user")
-            process.stdout.write(JSON.stringify({
-                type: "user", message: D1.message,
-                parent_tool_use_id: _ptu, session_id: p6(), uuid: _f()
-            }) + "\n");
+// After patching (stream_event: forward + skip push; assistant/user: original + forward):
+for await (let D1 of cR({...})) {
+  /*PATCHED:subagent-E*/
+  if (D1.type === "stream_event") {
+    // _ptu lookup by description match (no toolUseContext available in old path)
+    let _ptu=null; for(let _b of D.message.content){
+      if(_b.type==="tool_use"&&_b.input&&_b.input.description===K){_ptu=_b.id;break}
     }
+    process.stdout.write(JSON.stringify({type:"stream_event",event:D1.event,
+      parent_tool_use_id:_ptu,session_id:<sessFn>(),uuid:globalThis.crypto.randomUUID()})+"\n")
+  } else {
+    N1.push(D1), s01(...), s0A(agentId, ...);
+    // ... assistant/user stdout writes ...
+  }
 }
 ```
 
-There are **two** async for-await loops patched — one in the initial
-async launch path, and one in the "backgrounded from sync" path (where
-a sync task transitions to background mid-execution).
+Two patterns tried (newest-first): `bracedAsyncBodyRe` (v2.1.76+, uses braces), `unbracedAsyncBodyRe` (v2.1.41+, single-statement). Both require `for await` in the 1000-char prefix context to avoid false matches.
 
 **Key design decisions and pitfalls:**
 
@@ -1024,39 +1188,33 @@ Fix: Changed the filter to use a 1000-char window and only require
 `))ARR.push(MSG),STATS(...)` pattern is specific enough to only match
 the two background agent loops.
 
-### Patch G — iu8() background agent stdout streaming (run_in_background)
+### Patch G — iu8() background agent stdout streaming (≤v2.1.196 only)
 
 **Covers agents launched with `run_in_background: true` from the start.**
-
-Patch E targets the _re-background_ path — where a foreground agent is
-backgrounded mid-execution via the `backgroundSignal` race. However,
-agents launched directly as background (`run_in_background: true` in the
-Agent tool input) take a completely different path: the Tool's `call()`
-returns `{ isAsync: true, status: "async_launched" }` immediately and
-delegates execution to `iu8()`.
-
-`iu8()` is a standalone async function that runs the background agent's
-full conversation loop. Its `for await` loop collects messages into an
-array and updates task state, but **never forwards anything to stdout**.
-The progress callback is dead (same as Patch E's scenario), and no other
-forwarding mechanism exists.
+**In v2.1.197+, `iu8()` was merged into `BVe()`. Patch G auto-skips gracefully on v2.1.197+; Patch E's BVe injection covers this path.**
 
 **Marker**: `/*PATCHED:subagent-G*/`
 
-**Anchor**: The `iu8` function signature is unique:
+**Applicability flag**: `patchGApplicable` in `apply.mjs`. Set to `false` when `iu8()` signature is not found. Final marker verification only requires Patch G when `patchGApplicable=true`.
 
+#### v2.1.196 and earlier: standalone iu8() function
+
+Patch E targets the _re-background_ path (foreground agent backgrounded mid-execution). Agents launched directly as background (`run_in_background: true`) took a completely different path: `Task.call()` returned `{ isAsync: true, status: "async_launched" }` immediately and delegated to `iu8()`.
+
+`iu8()` was a standalone async function whose `for await` loop collected messages but never forwarded anything to stdout.
+
+**Anchor** (the `iu8` function signature — no longer present in v2.1.197+):
 ```
 async function iu8({taskId:VAR,abortController:VAR,makeStream:VAR,metadata:VAR,description:VAR,toolUseContext:VAR,taskRegistry:VAR,agentIdForCleanup:VAR,enableSummarization:VAR,getWorktreeResult:VAR})
 ```
 
 Find it with:
-
 ```bash
 bundle-analyzer find cli.js "taskId:.*abortController:.*makeStream:.*metadata:.*description:.*toolUseContext:.*taskRegistry:.*agentIdForCleanup" --regex --compact
+# Returns nothing in v2.1.197+ (merged into BVe)
 ```
 
-**Before** (loop body just collects):
-
+**Before** (≤v2.1.196, loop body just collects):
 ```js
 for await (let G of _(P)) {
     J.push(G), O.update(q, ...), G36(X, G, M, A.options.tools), q78(q, ...);
@@ -1065,7 +1223,6 @@ for await (let G of _(P)) {
 ```
 
 **After** (stream_event forwarded + continue, assistant/user forwarded then fall through):
-
 ```js
 for await (let G of _(P)) {
     /*PATCHED:subagent-G*/
@@ -1073,7 +1230,7 @@ for await (let G of _(P)) {
         try { process.stdout.write(JSON.stringify({
             type: "stream_event", event: G.event,
             parent_tool_use_id: A.toolUseId,
-            session_id: E8(), uuid: yf()
+            session_id: E8(), uuid: globalThis.crypto.randomUUID()
         }) + "\n") } catch(_ge) {}
         continue
     }
@@ -1081,36 +1238,34 @@ for await (let G of _(P)) {
         try { process.stdout.write(JSON.stringify({
             type: G.type, message: G.message,
             parent_tool_use_id: A.toolUseId,
-            session_id: E8(), uuid: yf()
+            session_id: E8(), uuid: globalThis.crypto.randomUUID()
         }) + "\n") } catch(_ge) {}
-
-    // Original body follows (push, stats, state update)
+    // Original body follows
     J.push(G), O.update(q, ...), G36(X, G, M, A.options.tools), ...
 }
 ```
 
-**Key differences from Patch E:**
+**Key differences from legacy Patch E (≤v2.1.196):**
 
-| Aspect                      | Patch E                                                       | Patch G                                                     |
-| --------------------------- | ------------------------------------------------------------- | ----------------------------------------------------------- |
-| Code path                   | Re-background loop (after `backgroundSignal`)                 | `iu8()` (agents launched as background)                     |
-| `parent_tool_use_id` source | Looked up from parent message content by matching description | Direct: `toolUseContext.toolUseId` (available as parameter) |
-| Loop pattern                | `for await` with `isAsync:!0` in override                     | `for await(let G of _(P))` in standalone function           |
+| Aspect                      | Patch E (legacy)                                   | Patch G                                                    |
+| --------------------------- | -------------------------------------------------- | ---------------------------------------------------------- |
+| Code path                   | Re-background loop (after `backgroundSignal`)       | `iu8()` (agents launched directly as background)           |
+| `parent_tool_use_id` source | Looked up from parent message by description match  | Direct: `toolUseContext.toolUseId` (parameter available)   |
+| Loop pattern                | `for await` with `isAsync:!0` in context            | `for await(let G of _(P))` in standalone function          |
 
-Patch G is simpler than Patch E because `iu8()` receives `toolUseContext`
-as a parameter, which contains `.toolUseId` — the parent Agent tool's ID.
-No parent message lookup is needed.
-
-**Dynamic function extraction**: Session ID (`E8`) and UUID (`yf`) functions
-are re-discovered using the same patterns as Patch E (not shared variables).
+In v2.1.197+: Patch E's BVe injection handles all paths (sync, re-background, and directly-backgrounded agents). `patchGApplicable=false` so the final marker check is skipped.
 
 ## What's NOT Changed
 
-**UEA (task result)** — The final result returned to the parent model from
+**UEA/Tko/FVe (task result)** — The final result returned to the parent model from
 a sub-agent still contains text-only content. Thinking tokens are not
 included in the task result, as they would waste the parent model's context
 window. The parent doesn't need the sub-agent's internal reasoning — it
 just needs the final answer.
+
+**BVe collection array `h[]`** — Patch E's BVe injection makes stream_events `continue` past `h.push(ce)`. Non-stream-event messages (assistant, user) still fall through to `h[]` normally. `h[]` is used by BVe's downstream processing and must only contain messages with `.message` structure.
+
+**Patch F (cR RVY gate)** — Still present and required for pre-v2.1.197 CLIs. In v2.1.197+, the Patch F2 fix is what makes stream_events survive the IVe pre-filter; F's RVY injection is then no longer reachable for stream_events but is harmless (its marker is still verified).
 
 ## What the SDK Consumer Now Receives
 
@@ -1177,45 +1332,38 @@ node patch/subagent-streaming/apply.mjs
 ```
 
 The script locates functions by **content pattern** rather than minified
-names, since function names change between versions. It will:
+names, since function names change between versions. It will (v2.1.197 order):
 
-1. Find `cli.js` in the SDK package
-2. Locate the cR yield filter function by type-check pattern (Patch F)
-3. Locate the content-block filter by nested for-loop pattern (Patch A)
-4. Locate the type filter by push+type-check pattern (Patch B)
-5. Locate the message converter by `bash_progress`/`powershell_progress` anchor (Patch C)
-6. Locate the text extraction function by "Execution completed" pattern (Patch D)
-7. Locate the background polling map by assistant/text/stringify pattern (Patch D)
-8. Locate the session ID function from ZhA/ihA yields (Patch E)
-9. Locate async for-await+cR loops by body pattern (Patch E)
-10. Apply all patches and verify markers
+1. Find `cli.js` in the vendor directory
+2. **Patch F** — RVY gate bypass (cR stream_event yield before type filter)
+3. **Patch F2** — IVe/fHo pre-filter bypass (v2.1.197+; auto-skip if not found)
+4. **Patch A** — Content-block filter removal in nt-callback / for-await
+5. **Patch B** — stream_event intercept before Ye.push (nt-callback shape in v2.1.197+)
+6. **Patch C** — agent_stream_event handler in ZhA/ihA/ATt
+7. **Patch D** — .output file thinking inclusion
+8. **Patch E** — Background agent stdout (BVe anchor in v2.1.197+; legacy loops in v2.1.196-)
+9. **Patch G** — iu8() background agent (≤v2.1.196; auto-skips in v2.1.197+)
+10. Verify all applicable markers present
 
-### Re-applying after SDK updates
+### Re-applying after CLI version bumps
 
-After running `bun install` or updating `@anthropic-ai/claude-agent-sdk`, the
-patch needs to be re-applied since `cli.js` will be replaced. Run:
+After running `bun run ensure-cli` or `bun run update-cli`, re-apply patches:
 
 ```bash
-node patch/task-notification/apply.mjs
-node patch/subagent-streaming/apply.mjs
+node patch/apply-all.mjs
 ```
 
-Both patches coexist safely. Apply order doesn't matter.
-
-The script is idempotent — it detects if patches are already applied and
-skips them.
+The script is idempotent — detects if patches are already applied and skips them.
 
 ### When the patch breaks
 
-If a future SDK version changes the code structure enough that pattern
-matching fails, the script will exit with an error explaining what it
-couldn't find. In that case:
+If a future CLI version changes the code structure enough that pattern
+matching fails, the script exits with an error. In that case:
 
-1. Check if the bug is fixed upstream — test if sub-agent thinking/text/
-   stream events appear in the SDK stream without patching
-2. If not fixed, extract and inspect the new `cli.js` to find equivalent
-   functions using the search patterns listed in each patch section above
-3. Update the regex patterns in `apply.mjs`
+1. Check if the bug is fixed upstream — test if sub-agent thinking/text/stream events appear in the SDK stream without patching.
+2. If not fixed, use `/bundle-analyzer` to find equivalent functions using the search patterns in each patch section above.
+3. Update regex patterns in `apply.mjs`. Follow the conventions: `const V = '[\\w$]+'` for minified identifiers, content-pattern anchors not name-based.
+4. Update this README with the new shapes and version progression.
 
 ## Verification
 
@@ -1237,19 +1385,33 @@ Where the message content includes `type:"thinking"` blocks.
 
 ## Key Functions Reference
 
-| Name (v2.1.38 → v2.1.39 → v2.1.41 → v2.1.42 → v2.1.49) | Purpose                                                            |
-| ------------------------------------------------------ | ------------------------------------------------------------------ |
-| `RVY()` → `RVY()` → `BRY()` → `myY()` → `T7z()`        | cR/jy/Wy yield filter (gates what the generator yields to callers) |
-| `dR()` → `dR()` → ? → (merged into Wy)                 | Sub-agent execution generator                                      |
-| `UEA()` → `UEA()` → `NR8()` → `uRA()` → `Mg8()`        | Extract text-only result from agent messages                       |
-| `FM6()` → `sM6()` → `QW6()` → `tW6()` → `r_1()`        | Extract text from last assistant message                           |
-| `ZhA()` → `ihA()` → `mI8()` → ? → `if8()`              | Convert internal messages to SDK output format                     |
-| `U1q()` → `O6q()` → ? → ?                              | Wrap progress data into progress message format                    |
-| `iO()` → `rO()` → `lO()` → `j$()` → `W_()`             | Normalize messages to individual content blocks                    |
-| `_f()` → `_f()` → `Gf()` → `Zf()` → `nk()`             | UUID generator for message wrapping                                |
-| `cR()` → `cR()` → `jy()` → `Wy()`                      | Sub-agent query function (async generator)                         |
-| `s0A()` → `s0A()` → `XW8()` → `kWA()` → `zT8()`        | Task state updater (in async loops)                                |
-| `s01()` → `s01()` → `QM1()` → `tM1()` → `GP6()`        | Stats updater (in async loops)                                     |
+| Name (v2.1.38 → v2.1.49 → v2.1.197)              | Purpose                                                            |
+| ------------------------------------------------- | ------------------------------------------------------------------ |
+| `RVY()` → `T7z()` → (still present, RVY-gate)    | cR/jy/Wy yield filter (gates what the generator yields to callers) |
+| `dR()` → (merged) → BVe()                         | Sub-agent execution generator / unified runner (v2.1.197+)         |
+| `UEA()` → `Mg8()` → `Tko()`/`FVe()`              | Extract text-only result from agent messages                       |
+| `FM6()` → `r_1()` → (varies)                      | Extract text from last assistant message                           |
+| `ZhA()` → `if8()` → `ATt()`                       | Convert internal messages to SDK output format                     |
+| `U1q()` → `O6q()` → (varies)                      | Wrap progress data into progress message format                    |
+| `iO()` → `W_()` → (varies)                        | Normalize messages to individual content blocks                    |
+| `_f()` → `nk()` → `globalThis.crypto.randomUUID` | UUID generator for message wrapping (web crypto in v2.1.197+)      |
+| `iu8()` → `iu8()` → (merged into BVe)             | Standalone background agent runner (removed in v2.1.197)           |
+| `IVe()` / `Bam`                                   | Pre-filter in sub-agent generator (v2.1.197+): `Bam.has(MSG.type)` |
+| `FHO()` / `fHo()`                                 | Streaming display handler called inside IVe branch (v2.1.197+)     |
+| `BVe()`                                           | Unified sub-agent runner (sync + background) (v2.1.197+)           |
+
+**v2.1.197 patch inventory (A–G + F2):**
+
+| Patch | Marker | What it does | v2.1.197 notes |
+| ----- | ------ | ------------ | -------------- |
+| F     | `subagent-F` | RVY gate bypass — yield stream_event before it's filtered in cR | Still present; now unreachable for stream_events (F2 catches them upstream), but harmless |
+| F2    | `subagent-F2` | Yield stream_event past IVe/fHo pre-filter in sub-agent generator | NEW in v2.1.197; auto-skips on older CLIs |
+| A     | `subagent-A` | Remove content-block type filter from progress callback | No structural change in v2.1.197 |
+| B     | `subagent-B` | Intercept stream_event before Ye.push in nt-callback / O1.push in for-await | v2.1.197: targets nt-callback (`ntCallbackRe`); uses `return` not `continue` |
+| C     | `subagent-C` | Add agent_stream_event handler in ZhA/ihA/ATt | No structural change in v2.1.197 |
+| D     | `subagent-D` | Include thinking blocks in .output file | No structural change in v2.1.197 |
+| E     | `subagent-E` | Background agent stdout (BVe for-await in v2.1.197+; legacy loops in v2.1.196-) | v2.1.197: targets BVe anchor; uses `s.toolUseId` |
+| G     | `subagent-G` | iu8() standalone background stdout (≤v2.1.196) | Auto-skips in v2.1.197+ (iu8 merged into BVe) |
 
 **Note:** Names change between versions — always use content patterns, not
 names. Use `bundle-analyzer find` with string literals as anchors.
@@ -1395,7 +1557,18 @@ handles all content types. No change needed to `et()`.
   individual messages (thinking, text, stream events) never being forwarded
   through the progress callback.
 
-## Discovery Method
+## Discovery Method (v2.1.197 re-anchor)
+
+1. **Applied patch, tests failed** — behavioral tests reported zero `stream_event` messages from sub-agents despite patches appearing to apply. All existing markers (A–G) were present.
+2. **Found the pre-filter** — searched for `IVe` and `Bam` near the sub-agent generator. Found a new branch `if(CB?.(),IVe(MSG)){FHO(MSG,CFG,N),yield*BUF,BUF.length=0;continue}` above Patch F's RVY gate. `IVe=Bam.has` and `Bam` includes `"stream_event"` — so stream_events were consumed by `FHO()` and `continue`d before reaching Patch F. Patch F was dead code for stream_events.
+3. **Added Patch F2** — injects `MSG.type==="stream_event"&&(yield MSG)` inside the `IVe` branch, after FHO() side-effects, before the BUF flush. Stream_events now flow through to `nt`/BVe.
+4. **Found BVe unification** — the old for-await loop in Task.call() with `O1.push()` was gone. Task.call() now creates `nt=(MSG)=>{...}` and calls `BVe({...,onMessage:nt,...})`. BVe runs the for-await loop internally and calls `u?.(ce)` (=nt) for every message.
+5. **Updated Patch B for nt-callback** — the old push+bash_progress patterns no longer exist. New anchor: `if(MSG.type!=="api_metrics"&&MSG.type!=="set_in_progress_tool_use_ids")Ye.push(MSG)` (unique to nt). Injection uses `return` not `continue` (arrow function body). `isNtCallback` flag selects the correct exit keyword.
+6. **Updated Patch E for BVe** — the old `bracedAsyncBodyRe`/`unbracedAsyncBodyRe` patterns didn't match. Found BVe's for-await body via unique anchor: `if(W(),ce.type==="system"&&ce.subtype==="api_error")continue;h.push(ce)`. Verified `s.toolUseId` in nearby context (BVe has toolUseContext directly — no description-search needed). Injection before the watchdog call; `p()` guards stdout writes.
+7. **Patch G auto-skips** — `iu8()` signature (`async function iu8({taskId:...}`) not found; `patchGApplicable=false`; final marker check skips G. Log: `iu8() not found — merged into BVe() in v2.1.197+`.
+8. **Applied cleanly**, all behavioral tests pass.
+
+## Discovery Method (original, v2.1.38–v2.1.49)
 
 1. Traced the Task tool's `call()` function in `cli.js` by searching for
    `agent_progress` string literal (3 occurrences — one in forked slash

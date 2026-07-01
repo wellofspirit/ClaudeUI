@@ -10,6 +10,7 @@ Exposes the CLI's "send to background" feature (foreground → background task c
 | ---------------------- | ---------------------------- |
 | SDK package            | 0.2.63                       |
 | Bundled CLI (`cli.js`) | 2.1.63                       |
+| Last re-anchored       | 2.1.197                      |
 
 ## The Problem
 
@@ -169,16 +170,20 @@ else O6(r,`Unsupported control request subtype: ${r.request.subtype}`)
 
 Six symbols are extracted at apply time from content patterns:
 
-| Symbol          | Pattern                                                                                                      | Example (v2.1.63) |
-| --------------- | ------------------------------------------------------------------------------------------------------------ | ----------------- |
-| `errorFn`       | From anchor: `else <fn>(<msg>,\`Unsupported...`                                                              | `O6`              |
-| `msgVar`        | From anchor: backreference `\2`                                                                              | `r`               |
-| `successFn`     | `),<fn>(<msg>,{})}catch` near anchor                                                                         | `t`               |
-| `getAppStateFn` | `getAppState:<var>,setAppState:<var>`                                                                        | `$`               |
-| `setAppStateFn` | Same pattern, second capture                                                                                 | `f`               |
-| `wiFn`          | `function <fn>(...){...A.type==="local_bash"}`                                                               | `wi`              |
-| `yiFn`          | `function <fn>(...){...A.type==="local_agent"}`                                                              | `Yi`              |
-| `bgSignalMap`   | `<map>.set(A,<var>),<fn>(<state>,<setter>);let <var>;if(<var>!==void 0&&<var>>0)` + verified `<map>=new Map` | `Ff6`             |
+| Symbol          | Pattern                                                                                                      | Example (v2.1.63) | Example (v2.1.197) |
+| --------------- | ------------------------------------------------------------------------------------------------------------ | ----------------- | ------------------ |
+| `errorFn`       | From anchor: `else <fn>(<msg>,\`Unsupported...`                                                              | `O6`              | `qn`               |
+| `msgVar`        | From anchor: backreference `\2`                                                                              | `r`               | `Ht`               |
+| `successFn`     | `),<fn>(<msg>,{})}catch` near anchor                                                                         | `t`               | `$t`               |
+| `getAppStateFn` | `getAppState:<var>,setAppState:<var>`                                                                        | `$`               | (varies)           |
+| `setAppStateFn` | Same pattern, second capture                                                                                 | `f`               | (varies)           |
+| `wiFn`          | `function <fn>(...){...A.type==="local_bash"}`                                                               | `wi`              | (varies)           |
+| `yiFn`          | `function <fn>(...){...A.type==="local_agent"}`                                                              | `Yi`              | (varies)           |
+| `bgSignalMap`   | `<map>.set(A,<var>),<fn>(<state>,<setter>);let <var>;if(<var>!==void 0&&<var>>0)` + verified `<map>=new Map` | `Ff6`             | (varies)           |
+
+**v2.1.197 change:** The search window for the success-response helper was extended from 5000 → 8000 characters before the anchor. In v2.1.197 the `stop_task` handler (which contains the `),<fn>(<msg>,{})}}catch` pattern used to find `successFn`) moved to 5647 chars before the fallback anchor, just outside the old 5000-char window. The 8000-char margin accommodates this and future similar drift.
+
+Known names in v2.1.197: `errorFn=qn`, `msgVar=Ht`, `successFn=$t`.
 
 ### Part B: `backgroundTask()` method (sdk.mjs)
 
@@ -362,7 +367,9 @@ renderer: window.api.backgroundTask(routingId, toolUseId)
 | `Wo4`          | Agent task factory (creates task state + `Ff6` entry) | `"local_agent"` + `backgroundSignal` |
 | `uv1`          | `stop_task` implementation (reference)                | `"No task found with ID"`            |
 
-**Note:** All minified names will change in future SDK versions. Use
+Known names in v2.1.197: `errorFn=qn` (the anchor-extracted error function), `msgVar=Ht` (the control message variable), `successFn=$t` (the success response helper).
+
+**Note:** All other minified names will change in future SDK versions. Use
 content patterns (string literals, structural shapes) to relocate code.
 
 ## Related Patches

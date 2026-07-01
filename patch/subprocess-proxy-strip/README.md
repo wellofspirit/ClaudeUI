@@ -9,7 +9,7 @@ Strip proxy env vars from the env handed to cli.js subprocesses (Bash tool, MCP 
 | Component            | Version               |
 | -------------------- | --------------------- |
 | At time of discovery | bundled CLI `2.1.114` |
-| Last re-anchored     | bundled CLI `2.1.170` |
+| Last re-anchored     | bundled CLI `2.1.197` |
 
 ## The Problem
 
@@ -87,9 +87,103 @@ The body grows roughly every few releases. `apply.mjs` carries one regex+rebuild
 | v143     | `VS`        | + extra global env source (`ifq`), + `CLAUDE_BG_AUTH_SNAPSHOT_PATH`                                                                                                                                                                |
 | v150     | `dT`        | + `CLAUDE_BG_SESSION_PERMISSION_RULES`, `CLAUDE_BG_MEMORY_TOGGLED_OFF`                                                                                                                                                             |
 | v163     | `wN`        | + one unconditional `delete <merged>.CLAUDE_CODE_RESUME_PROMPT` (inserted after `CLAUDE_CODE_RESUME_INTERRUPTED_TURN`; no matching `!==void 0` detection check, not in the early-return guard)                                     |
-| **v170** | **`ek`**    | **+ 3 background-session auth vars (`CLAUDE_BG_SOCKET_TOKENS_PATH`, `CLAUDE_BG_RV_AUTH`, `CLAUDE_BG_PTY_AUTH`)** — appended to the OAuth detection flag and to the unconditional delete chain after `CLAUDE_BG_AUTH_SNAPSHOT_PATH` |
+| v170     | `ek`        | + 3 background-session auth vars (`CLAUDE_BG_SOCKET_TOKENS_PATH`, `CLAUDE_BG_RV_AUTH`, `CLAUDE_BG_PTY_AUTH`) — appended to the OAuth detection flag and to the unconditional delete chain after `CLAUDE_BG_AUTH_SNAPSHOT_PATH`     |
+| **v197** | **`oM`**   | **Major refactor** — flagBg detection changed from hardcoded `\|\|`-chain to `DYr.some(...)` (array), per-var deletes replaced by loop, OTEL check extended, guard before block-list loop changed — see below                     |
 
 **v170 gotcha:** the three new detection terms read off a **module-level env-snapshot global** (`$_` in 2.1.170: `$_.CLAUDE_BG_SOCKET_TOKENS_PATH!==void 0||...`), NOT `process.env` like every other term in the flag. The regex captures this global as its own group and the rebuild re-emits it by captured name. See the inline header comment in `apply.mjs` for the full v170 verbatim shape.
+
+### v2.1.197 shape — `oM()` — major refactor
+
+The v197 shape is a substantial refactor of the background-session detection and delete chain. The env-builder function in v2.1.197 is named `oM()`. Key differences from v170:
+
+**a) `flagBg` detection: `||`-chain → `DYr.some()`**
+
+Old (v170 and earlier): a hardcoded `||`-chain of `process.env.CLAUDE_CODE_SESSION_KIND!==void 0||process.env.CLAUDE_BG_TASK_TASK_ID!==void 0||...` for each background-session variable.
+
+New (v197): a module-level array `DYr` holds all background-session var names. Detection is:
+```js
+a = DYr.some((u) => process.env[u] !== void 0)
+```
+The `DYr` array name (captured as `bgArray`) is used for both the detection `.some()` and the delete loop below.
+
+**b) Per-var BG deletes: individual `delete` → `for` loop**
+
+Old (v170): individual `delete <merged>.CLAUDE_CODE_SESSION_KIND, delete <merged>.CLAUDE_BG_TASK_TASK_ID, ...` for each name.
+
+New (v197): a single loop over the same `DYr` array:
+```js
+for (let u of DYr) delete c[u]
+```
+
+**c) OTEL `.some()` check extended**
+
+Old (v170): `Object.keys(process.env).some((u) => u.startsWith("OTEL_"))`
+
+New (v197): `Object.keys(process.env).some((u) => u.startsWith("OTEL_") || u === "CLAUDE_CODE_OTEL_DIAG_STDERR")`
+
+**d) Guard before block-list loop changed**
+
+Old (v170): `if(!T)return Y` (simple boolean guard)
+
+New (v197): `if(delete c.CLAUDE_CODE_OTEL_DIAG_STDERR,!s)return c`
+
+The `CLAUDE_CODE_OTEL_DIAG_STDERR` delete is now part of the guard expression (comma operator), ensuring it's always deleted when this code path is reached.
+
+**Verbatim v197 shape (for reference):**
+```js
+function oM(){
+  let e=Zit(),
+      t=Object.keys(e).length>0,
+      n=Object.keys(LYr).length>0,
+      r=ct(process.env.CLAUDE_CODE_REMOTE)?R2i(t?{...process.env,...e}:process.env):{},
+      o=Object.keys(r).length>0,
+      s=v$d(),
+      i=process.env.CLAUDE_CODE_OAUTH_TOKEN!==void 0||
+        process.env.CLAUDE_CODE_SUBSCRIPTION_TYPE!==void 0||
+        process.env.CLAUDE_CODE_RATE_LIMIT_TIER!==void 0||
+        process.env.CLAUDE_BG_AUTH_SNAPSHOT_PATH!==void 0||
+        Ne.CLAUDE_BG_SOCKET_TOKENS_PATH!==void 0||
+        Ne.CLAUDE_BG_RV_AUTH!==void 0||
+        Ne.CLAUDE_BG_PTY_AUTH!==void 0,
+      a=!1;
+  a=DYr.some((u)=>process.env[u]!==void 0);
+  let l=Object.keys(process.env).some((u)=>u.startsWith("OTEL_")||u==="CLAUDE_CODE_OTEL_DIAG_STDERR");
+  if(!t&&!o&&!s&&!a&&!i&&!l&&!n)return process.env;
+  let c={...process.env,...LYr,...e,...r};
+  delete c.CLAUDE_CODE_OAUTH_TOKEN,
+  delete c.CLAUDE_CODE_SUBSCRIPTION_TYPE,
+  delete c.CLAUDE_CODE_RATE_LIMIT_TIER,
+  delete c.CLAUDE_BG_AUTH_SNAPSHOT_PATH,
+  delete c.CLAUDE_BG_SOCKET_TOKENS_PATH,
+  delete c.CLAUDE_BG_RV_AUTH,
+  delete c.CLAUDE_BG_PTY_AUTH;
+  for(let u of DYr)delete c[u];
+  for(let u of Object.keys(c))if(u.startsWith("OTEL_"))delete c[u];
+  if(delete c.CLAUDE_CODE_OTEL_DIAG_STDERR,!s)return c;
+  for(let u of k$d)delete c[u],delete c[`INPUT_${u}`];
+  return c
+}
+```
+
+The patch replaces the whole function verbatim (same strategy as all prior shapes), wrapping every `return <expr>` with `return __cuPS(<expr>)` and inserting the strip helper at the top. The v197 pattern `fnReV197` is tried first (newest-first dispatch); v170, v163, … remain as fallbacks.
+
+**v197 variable map:**
+
+| Captured group | Example name | Role |
+| -------------- | ------------ | ---- |
+| `H`            | `e`          | User env binding (`Zit()` result) |
+| `flagUserNotEmpty` | `t`      | `Object.keys(e).length > 0` |
+| `extraGlobal`  | `LYr`        | Module-level extra env global |
+| `flagExtraNotEmpty` | `n`     | `Object.keys(LYr).length > 0` |
+| `qRemote`      | `r`          | Remote env merge result |
+| `flagScrub`    | `s`          | `v$d()` block-list gate |
+| `flagOAuth`    | `i`          | OAuth/session token detection |
+| `envSnap`      | `Ne`         | Module-level env snapshot (reads `CLAUDE_BG_SOCKET_TOKENS_PATH` etc.) |
+| `flagBg`       | `a`          | Background-session detection |
+| `bgArray`      | `DYr`        | Module-level array of BG session var names |
+| `flagOtel`     | `l`          | OTEL flag |
+| `merged`       | `c`          | Merged env object |
+| `blockList`    | `k$d`        | Block-list array for scrub loop |
 
 ## Locating the function in a new CLI version
 
@@ -129,7 +223,7 @@ When the body changes again: extract the verbatim `function <name>(){...}` (from
 
 ## Verification
 
-1. `node patch/subprocess-proxy-strip/apply.mjs` — reports `Found <fn>() [v170 shape]` and wraps every return.
+1. `node patch/subprocess-proxy-strip/apply.mjs` — reports `Found <fn>() [v197 shape]` (or `[v170 shape]` etc.) and wraps every return.
 2. Run again — reports "Patch already applied. Nothing to do."
 3. `node patch/apply-all.mjs` — `node --check` passes.
 4. `node patch/subagent-streaming/test.mjs` / `bash-output-streaming/test.mjs` — confirm subprocesses still spawn (indirect coverage; there is no dedicated proxy-strip behavioral harness yet).
@@ -152,9 +246,23 @@ Always run `node --check cli.js` after applying.
 4. **Added `fnReV170`** as the first branch; v163 kept as fallback.
 5. **Applied cleanly** (`Found ek() [v170 shape]`), `node --check` passed, rebundle + codesign succeeded.
 
+## Discovery Method (2.1.197 re-anchor)
+
+1. **Apply failed:** `Cannot locate env-builder function by v114, v118, v119, v129, v143, v150, v163, or v170 structural shape`.
+2. **Located via `INPUT_${`** (unique template literal) → `function oM(){...}`.
+3. **Diffed against v170:** the function was substantially refactored:
+   - Background-session variable detection changed from a hardcoded `||`-chain to `DYr.some((u)=>process.env[u]!==void 0)` where `DYr` is a module-level array.
+   - Per-var `delete c[VARNAME]` statements replaced by `for(let u of DYr)delete c[u]`.
+   - OTEL `.some()` extended to include `||u==="CLAUDE_CODE_OTEL_DIAG_STDERR"`.
+   - Guard before block-list loop changed from `if(!T)return Y` to `if(delete c.CLAUDE_CODE_OTEL_DIAG_STDERR,!s)return c`.
+4. **Added `fnReV197`** as the first (newest) branch. Pattern uses 24 capture groups; group numbering must match the destructuring in the rebuild block exactly. Backreferences `\\14`–`\\24` shift accordingly vs the v170 pattern.
+5. **Applied cleanly** (`Found oM() [v197 shape]`), `node --check` passed, rebundle + codesign succeeded.
+
+**Tip for next re-anchor:** extract the function with `bundle-analyzer find cli.js 'INPUT_${'` to get the offset, then `bundle-analyzer extract-fn cli.js <offset>` to get the full body. Diff against the v197 verbatim shape in this README. If a new scrub variable was added to the `DYr` array, only the array itself needs updating — the loop-based delete logic adapts automatically.
+
 ## Files
 
-| File        | Purpose                                                   |
-| ----------- | --------------------------------------------------------- |
-| `README.md` | This document                                             |
-| `apply.mjs` | Patch script (per-version shapes v114→v170, newest-first) |
+| File        | Purpose                                                    |
+| ----------- | ---------------------------------------------------------- |
+| `README.md` | This document                                              |
+| `apply.mjs` | Patch script (per-version shapes v114→v197, newest-first)  |

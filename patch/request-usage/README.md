@@ -10,7 +10,7 @@ Emits a `request_usage` JSON message to stdout after each API response completes
 | -------------------- | ----------------------------------------------------------------- |
 | At time of discovery | bundled CLI `2.1.4x` (flat `if`-chain era)                        |
 | Redesigned           | bundled CLI `2.1.163`                                             |
-| Last re-anchored     | bundled CLI `2.1.170` (message_stop case gained a telemetry call) |
+| Last re-anchored     | bundled CLI `2.1.197` (message_start case gained a boolean flag before message assignment) |
 
 ## The Problem
 
@@ -47,15 +47,17 @@ The old patch captured the model into `this._patchModel` at `message_start` and 
 
 So the patch could not be re-anchored; it was **redesigned**.
 
-### Variable mapping (v2.1.163 — names WILL change)
+### Variable mapping (v2.1.197 — names WILL change)
 
 | Var   | Role                                                                        | Where set                                                                                                                                    |
 | ----- | --------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| `p_`  | the stream event (discriminator is bare `p_.type`, **not** `p_.event.type`) | switch scrutinee                                                                                                                             |
-| `sH`  | the message object; `sH.model` is the model that served the request         | `case"message_start":{sH=p_.message,...}`                                                                                                    |
-| `QH`  | per-request usage accumulator                                               | init `QH=ZM` once at generator top; merged at message*start (`QH=O7H(QH,p*.message?.usage)`) and each message_delta (`QH=O7H(QH,p\_.usage)`) |
-| `O7H` | usage merge fn                                                              | —                                                                                                                                            |
-| `ZM`  | zero-usage constant                                                         | —                                                                                                                                            |
+| `In`  | the stream event (discriminator is bare `In.type`, **not** `In.event.type`) | switch scrutinee                                                                                                                             |
+| `ma`  | per-request in-flight boolean flag                                          | `case"message_start":{ma=!0,...}` / `case"message_stop":ma=!1,...`                                                                          |
+| `An`  | the message object; `An.model` is the model that served the request         | `case"message_start":{ma=!0,An=In.message,...}`                                                                                              |
+| `gn`  | per-request usage accumulator                                               | init `gn=<zero>` once at generator top; merged at message_start (`gn=Fse(gn,In.message?.usage)`) and each message_delta                     |
+| `Fse` | usage merge fn                                                              | —                                                                                                                                            |
+| `ae`  | TTFT / timing var (used in message_stop telemetry call)                     | —                                                                                                                                            |
+| `Ct`  | telemetry emit fn (was `eH` in 2.1.170)                                     | `case"message_stop":ma=!1,Ct("stream_completed",ae??null,gn);`                                                                               |
 
 Both `sH` and `QH` are `let`-declared at the generator top and **reset per request** (`...sH=void 0,...QH=ZM` between requests), so at `message_stop` they hold the just-completed request's values — exactly the semantics the old `message_stop` inject point had.
 
@@ -85,19 +87,19 @@ The `message_stop` case is a **bare** (brace-free) case body ending in `break}` 
 
 The `[^{}]` restriction keeps it out of the two block-bodied `case"message_stop":{this._addMessageParam(...)` sites in the Anthropic SDK MessageStream classes and the two `case"message_stop":return q;...` accumulator sites (no `break`). Verified to match exactly once. Our stdout write is appended **after** the preserved statements, before `break`.
 
-**Before (2.1.170):**
+**Before (2.1.197):**
 
 ```js
-case"message_stop":eH("stream_completed",jH??null,r_);break}
+case"message_stop":ma=!1,Ct("stream_completed",ae??null,gn);break}
 ```
 
 **After:**
 
 ```js
-case"message_stop":eH("stream_completed",jH??null,r_);/*PATCHED:request-usage*/process.stdout.write(JSON.stringify({type:"request_usage",usage:r_,model:W_?.model||""})+"\n");break}
+case"message_stop":ma=!1,Ct("stream_completed",ae??null,gn);/*PATCHED:request-usage*/process.stdout.write(JSON.stringify({type:"request_usage",usage:gn,model:An?.model||""})+"\n");break}
 ```
 
-(2.1.163 names: `usage:QH,model:sH?.model` — same shape, empty preserved-statements group.)
+(2.1.163 names: `usage:QH,model:sH?.model` — same shape, empty preserved-statements group. 2.1.170 names: `usage:r_,model:W_?.model`.)
 
 ### Why it's safe
 

@@ -10,6 +10,7 @@ Forwards real-time per-window rate limit utilization data (from inference respon
 | ---------------------- | ---------------------------- |
 | SDK package            | 0.2.97                       |
 | Bundled CLI (`cli.js`) | 2.1.97                       |
+| Last re-anchored       | 2.1.197                      |
 
 The SDK bundles its own `cli.js`, independent of the native `claude` binary.
 
@@ -88,15 +89,19 @@ Anthropic API response
 
 ### Key functions
 
-| Function (v2.1.97) | Char offset      | Purpose                                                                                       |
-| ------------------ | ---------------- | --------------------------------------------------------------------------------------------- |
-| `LR4()`            | ~6485791         | Getter for `kh8` (cached parsed header utilization)                                           |
-| `hR4(q)`           | ~6485817         | Parses `anthropic-ratelimit-unified-*-utilization/reset` headers → `{ five_hour, seven_day }` |
-| `pF1(q)`           | ~6488865         | Main handler: calls `hR4` + `SR4` + conditionally `BF1`                                       |
-| `SR4(q)`           | ~6487750         | Full unified rate limit status parser → status object                                         |
-| `BF1(q)`           | ~6486087         | Broadcaster: updates `aV`, calls `d46.forEach(cb => cb(q))`, fires telemetry                  |
-| `NJ`               | (lodash isEqual) | Deep equality — `NJ(aV, z)` gates `BF1`                                                       |
-| `XiK(...)`         | ~11714504        | Async generator stream loop — calls `pF1` after streaming completes                           |
+| Function (v2.1.97) | Function (v2.1.197) | Char offset (v2.1.97) | Purpose                                                                                       |
+| ------------------ | ------------------- | --------------------- | --------------------------------------------------------------------------------------------- |
+| `LR4()`            | `r5e()`             | ~6485791              | Getter for `kh8` / `n5e` (cached parsed header utilization)                                   |
+| `hR4(q)`           | `zda(q)`            | ~6485817              | Parses `anthropic-ratelimit-unified-*-utilization/reset` headers → `{ five_hour, seven_day }` |
+| `pF1(q)`           | `xBn(e,t,n,r)`      | ~6488865              | Main handler: calls `hR4` + `SR4` + conditionally `BF1` (4-param in v2.1.197)                |
+| `SR4(q)`           | `Jda(q)`            | ~6487750              | Full unified rate limit status parser → status object                                         |
+| `BF1(q)`           | `Q3t(q)`            | ~6486087              | Broadcaster: updates `aV`, calls `d46.forEach(cb => cb(q))`, fires telemetry                  |
+| `NJ`               | `YDe`               | (lodash isEqual)      | Deep equality — gates `BF1`                                                                    |
+| `XiK(...)`         | —                   | ~11714504             | Async generator stream loop — calls `pF1` after streaming completes                           |
+
+**Name map v2.1.97 → v2.1.197:** `pF1→xBn`, `LR4→r5e`, `kh8→n5e`, `hR4→zda`, `SR4→Jda`, `BF1→Q3t`, `d46→YDe`.
+
+**All minified names will change again in future versions.** Use content patterns, not names.
 
 ### Why `d46` piggybacking doesn't work
 
@@ -213,13 +218,41 @@ Two minified names are extracted at apply time:
    // Captures: [1]=LR4 fn name, [2]=kh8 var name
    ```
 
-2. **`pF1`** (rate limit handler) — found by matching its definition that resets `kh8`:
-   ```js
-   const pf1DefRe = /function (%V%)(%V%){let %V%=(%V%)();if(!%V%(%V%)){if(<kh8>={}/
-   // Captures: [1]=pF1 fn name
+2. **`pF1`** (rate limit handler) — the function signature changed between versions:
+
+   ```
+   v2.1.97 signature:
+   function <pF1>(<q>){let <K>=<I7>();if(!<mN6>(<K>)){if(<kh8>={} ...
+   (1 param, "let K = I7()" pattern)
+
+   v2.1.197 signature:
+   function <pF1>(<e>,<t>,<n>=!1,<r>=Date.now()){let <o>=<Eo>();if(!<ndt>(<o>)){if(<kh8>={} ...
+   (4 params, 2 defaulted; uses kh8 var name found from step 1 as a stable discriminator)
    ```
 
-The call site is then located by searching for `pF1` with the `.headers` access pattern.
+   The `apply.mjs` pattern for v2.1.197 matches the 4-param+defaults signature anchored on the `kh8` reset inside the guard:
+   ```js
+   const pf1DefRe = new RegExp(
+     `function (%V%)(%V%,%V%,%V%=!1,%V%=Date\\.now\\(\\))\\{let %V%=%V%\\(\\);if\\(!%V%\\(%V%\\)\\)\\{if\\(<kh8>=\\{\\}`
+   )
+   ```
+
+3. **Call site** — also changed in v2.1.197. The `pF1` call site gained additional arguments with nested parens:
+
+   ```
+   v2.1.97:  if(<U1>)<pF1>(<U1>.headers),<k8>=<U1>.headers
+   v2.1.197: if(<Hn>)<pF1>(<Hn>.headers,<model>,(fg(model)||Sx(model))&&...,<we>),<Je>=<Hn>.headers
+   ```
+
+   The call-site regex was updated to allow a variable-length argument list after `.headers,` using a nested-paren-tolerant pattern (up to 2 levels deep):
+   ```js
+   const argPat = `(?:[^)(]|\\((?:[^)(]|\\([^)(]*\\))*\\))*`
+   const callSiteRe = new RegExp(
+     `if\\((%V%)\\)<pF1>\\(\\1\\.headers,${argPat}\\),(%V%)=\\1\\.headers`
+   )
+   ```
+
+   This matches both the old 1-arg call and the new multi-arg call with nested parens. The injected `process.stdout.write(...)` is appended as an additional comma-expression at the end of the existing `if(U1)` guard — the overall shape is unchanged.
 
 ### Why it's safe
 
@@ -413,20 +446,49 @@ Inference response headers
 
 7. **Verified the injection point**: `if(U1)pF1(U1.headers),k8=U1.headers` appears exactly once in cli.js and runs after every successful streaming API call.
 
+## Version Progression
+
+| What changed                | v2.1.97                                 | v2.1.197                                                                                              |
+| --------------------------- | --------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `pF1` param count           | 1 (`(q)`)                               | 4 (`(e,t,n=!1,r=Date.now())`) — model, boolean flag, timestamp added                                 |
+| `pF1` scope init            | `let K=I7()` (assigns then guards)      | `let o=Eo()` (same structure, different names)                                                        |
+| `pF1` call site args        | `pF1(U1.headers)` (1 arg)               | `pF1(Hn.headers,<model>,(fg(model)\|\|Sx(model))&&...,<we>)` (4 args, nested parens)                |
+| `kh8` store name            | `kh8` / `LR4()` getter                  | `n5e` / `r5e()` getter (content patterns still unique)                                               |
+| Patch injection shape       | `,process.stdout.write(...)` appended   | Same — appended as trailing comma-expression inside `if(Hn)` guard; unchanged                        |
+
 ## Key Functions Reference
 
-| Name (v2.1.97)     | Purpose                                                                     | Char offset |
-| ------------------ | --------------------------------------------------------------------------- | ----------- |
-| `LR4()`            | Getter for `kh8` (parsed header utilization)                                | ~6485791    |
-| `hR4(q)`           | Header parser → `{ five_hour: {utilization, resets_at}, seven_day: {...} }` | ~6485817    |
-| `pF1(q)`           | Main rate limit handler (calls `hR4`, `SR4`, conditionally `BF1`)           | ~6488865    |
-| `SR4(q)`           | Unified status parser → `{ status, resetsAt, rateLimitType, ... }`          | ~6487750    |
-| `BF1(q)`           | Broadcaster: `aV=q, d46.forEach(cb => cb(q))` + telemetry                   | ~6486087    |
-| `NJ`               | Deep equality (lodash `isEqual`) — gates `BF1`                              | (lazy var)  |
-| `XiK(q,K,_,z,Y,A)` | Async generator stream loop — injection site                                | ~11714504   |
-| `I7()`             | OAuth + `user:inference` scope check                                        | ~3493920    |
+| Name (v2.1.97) | Name (v2.1.197) | Purpose                                                                     | Char offset (v2.1.97) |
+| -------------- | --------------- | --------------------------------------------------------------------------- | --------------------- |
+| `LR4()`        | `r5e()`         | Getter for `kh8`/`n5e` (parsed header utilization)                          | ~6485791              |
+| `hR4(q)`       | `zda(q)`        | Header parser → `{ five_hour: {utilization, resets_at}, seven_day: {...} }` | ~6485817              |
+| `pF1(q)`       | `xBn(e,t,n,r)`  | Main rate limit handler (calls `hR4`, `SR4`, conditionally `BF1`)           | ~6488865              |
+| `SR4(q)`       | `Jda(q)`        | Unified status parser → `{ status, resetsAt, rateLimitType, ... }`          | ~6487750              |
+| `BF1(q)`       | `Q3t(q)`        | Broadcaster: `aV=q, d46.forEach(cb => cb(q))` + telemetry                   | ~6486087              |
+| `NJ`           | `YDe`           | Deep equality (lodash `isEqual`) — gates `BF1`                              | (lazy var)            |
+| `XiK(...)`     | —               | Async generator stream loop — injection site                                | ~11714504             |
+| `I7()`         | —               | OAuth + `user:inference` scope check                                        | ~3493920              |
 
 **Note:** All minified names will change in future SDK versions. Use content patterns (string literals, structural shapes) to relocate code.
+
+### How to re-find `pF1` when names change
+
+The function is uniquely identified by two properties:
+1. It is the function that resets `kh8`/`n5e` to `{}` inside its guard body
+2. It contains the string `"anthropic-ratelimit-unified-status"` (via its call to `SR4`/`Jda`)
+
+Search strategy:
+```bash
+# Primary: find the status-header string (in SR4/Jda), then navigate to pF1's caller
+bundle-analyzer find cli.js "anthropic-ratelimit-unified-status" --compact
+
+# The kh8 store is found via the getter+parser pair:
+bundle-analyzer find cli.js '"five_hour","5h"' --compact
+# The tiny getter function immediately before this is LR4/r5e; its return value is kh8/n5e.
+
+# The call site is unique: pF1(<var>.headers,<args...>),<headers_var>=<response_var>.headers
+# Use the dynamic extraction in apply.mjs (searches for pF1 name extracted above + .headers pattern)
+```
 
 ## Related Patches
 

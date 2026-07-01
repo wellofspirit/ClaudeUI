@@ -2,6 +2,14 @@
 
 Manages the CLI's output queue mid-agent-turn: dequeue by value, and notification when a queued command is consumed.
 
+## Affected Component
+
+`@anthropic-ai/claude-agent-sdk` — bundled `cli.js` file.
+
+| Component          | Version              |
+| ------------------ | -------------------- |
+| Last re-anchored   | bundled CLI `2.1.197` |
+
 ## Background: Native Steer Mechanism
 
 The CLI natively supports mid-turn message injection via the steer mechanism (see `docs/cli-message-loop-internals.md`):
@@ -96,11 +104,34 @@ All minified function names are extracted **dynamically** from content patterns.
 | Injection point (A1)         | `else <fn>(c,\`Unsupported control request subtype: ...\`);continue}else if(c.type==="control_response")` |
 | Success response helper      | `),<fn>(c,{})}}catch` — in the stop_task handler                                                          |
 | Queue push + loop starter    | `<fn>({mode:"prompt",value:<v>.message.content,uuid:<v>.uuid}),<fn>()`                                    |
+| Queue push definition (A1)   | `function <fn>(<A>){<arr>.push({...<A>,priority:<A>.priority??"next",timestamp:` — see v2.1.197 note     |
 | Queue remove-by-predicate    | `function <fn>(<v>){let <v>=[];for(let <v>=<queue>.length-1`                                              |
 | Extract queue text           | `<fn>(<var>.value)` — near popAllEditable                                                                 |
 | queued_command handler (A2)  | `else if(G&&<var>.attachment.type==="queued_command")yield{`                                              |
 | Session ID / UUID generators | `session_id:<fn>(),uuid:<fn>()` within the yield                                                          |
 | sdk.mjs stopTask             | `async stopTask(<v>){await this.request({subtype:"stop_task",task_id:<v>})}`                              |
+
+### v2.1.197 changes
+
+Two anchors changed between v2.1.97 and v2.1.197:
+
+**1. Success-response-helper search window: 5000 → 8000 chars**
+
+The `stop_task` handler that contains the `),<successFn>(c,{})}}catch` pattern moved to 6578 chars before the "Unsupported" fallback anchor in v2.1.197. The old 5000-char window no longer reached it. The window was extended to 8000 characters to give a comfortable margin. This mirrors the identical change in `background-task/apply.mjs`.
+
+**2. Queue-push regex now anchors on `timestamp:` trailing field**
+
+Before v2.1.197, the push function was:
+```js
+function <pushFn>(<A>){<arr>.push({...<A>,priority:<A>.priority??"next"}), ...}
+```
+
+In v2.1.197, a `timestamp:` field was appended to the push object:
+```js
+function <pushFn>(<A>){<arr>.push({...<A>,priority:<A>.priority??"next",timestamp:...}), ...}
+```
+
+The `apply.mjs` `pushDefRe` now uses `priority:<A>.priority??"next",timestamp:` as its terminal anchor instead of the closing `}`. This is more specific and unique; the old pattern would have matched spuriously without the trailing field.
 
 ## Race Condition Window
 
