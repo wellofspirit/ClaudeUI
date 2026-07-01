@@ -68,7 +68,10 @@ describe.skipIf(!cliJsExists())('patches', () => {
         '/*PATCHED:subagent-D*/',
         '/*PATCHED:subagent-E*/',
         '/*PATCHED:subagent-F*/',
-        '/*PATCHED:subagent-G*/',
+        // subagent-F2 forwards stream_events past the v2.1.197 IVe/fHo pre-filter.
+        '/*PATCHED:subagent-F2*/',
+        // subagent-G (iu8 background streaming) was merged into BVe() in 2.1.197
+        // and is now covered by Patch E — its marker is intentionally absent.
         '/*PATCHED:queue-control-dequeue*/',
         '/*PATCHED:queue-control-consumed*/',
         '/*PATCHED:mcp-status-store-promise*/',
@@ -86,10 +89,13 @@ describe.skipIf(!cliJsExists())('patches', () => {
   })
 
   // ---------------------------------------------------------------------------
-  // subagent-streaming — 7 markers A..G
+  // subagent-streaming — markers A..F + F2. Patch G (iu8 standalone background
+  // loop) was merged into BVe() upstream in 2.1.197, so its marker is absent
+  // and Patch E covers that path; F2 forwards stream_events past the 2.1.197
+  // IVe/fHo streaming pre-filter.
   // ---------------------------------------------------------------------------
   describe('subagent-streaming', () => {
-    for (const letter of ['A', 'B', 'C', 'D', 'E', 'F', 'G']) {
+    for (const letter of ['A', 'B', 'C', 'D', 'E', 'F', 'F2']) {
       const name = `subagent-${letter}`
       it(`marker ${name} present in cli.js`, () => {
         expect(hasMarker(src, name)).toBe(true)

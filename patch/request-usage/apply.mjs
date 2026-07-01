@@ -63,15 +63,18 @@ if (src.includes(PATCH_MARKER)) {
 
 console.log('\n--- Locating streaming message_start case ---')
 
+// As of 2.1.197 the case gained a boolean flag assignment before the message:
+//   case"message_start":{ma=!0,An=In.message,xn=Math.max(...),gn=Fse(gn,In.message?.usage),...
+// Group layout: g1=flagVar, g2=msgVar, g3=eventVar, g4=ttftVar, g5=timerVar, g6=usageVar, g7=mergeFn
 const startRe = new RegExp(
-  `case"message_start":\\{(${V})=(${V})\\.message,` +
+  `case"message_start":\\{(${V})=!0,(${V})=(${V})\\.message,` +
     `(${V})=Math\\.max\\(0,Math\\.round\\(performance\\.now\\(\\)-(${V})\\)\\),` +
-    `(${V})=(${V})\\(\\5,\\2\\.message\\?\\.usage\\)`
+    `(${V})=(${V})\\(${V},${V}\\.message\\?\\.usage\\)`
 )
 const startMatch = startRe.exec(src)
 if (!startMatch) {
   console.error(
-    'ERROR: Cannot locate streaming message_start case (sH=<p>.message, QH=<merge>(QH,...)).'
+    'ERROR: Cannot locate streaming message_start case (flagVar=!0, msgVar=<p>.message, usageVar=<merge>(usageVar,...)).'
   )
   process.exit(1)
 }
@@ -84,10 +87,10 @@ if (allStart.length > 1) {
   process.exit(1)
 }
 
-const msgVar = startMatch[1] // sH — the message object (carries .model)
-const eventVar = startMatch[2] // p_ — the stream event
-const usageVar = startMatch[5] // QH — per-request usage accumulator
-const mergeFn = startMatch[6] // O7H — usage merge function
+const msgVar = startMatch[2] // An — the message object (carries .model); g2 (was g1 pre-2.1.197)
+const eventVar = startMatch[3] // In — the stream event; g3 (was g2 pre-2.1.197)
+const usageVar = startMatch[6] // gn — per-request usage accumulator; g6 (was g5 pre-2.1.197)
+const mergeFn = startMatch[7] // Fse — usage merge function; g7 (was g6 pre-2.1.197)
 
 console.log(`Found message_start case at char ${startMatch.index}`)
 console.log(`  Message var: ${msgVar}`)

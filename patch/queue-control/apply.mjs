@@ -99,7 +99,9 @@ if (!skipA1) {
   // ---------------------------------------------------------------------------
   console.log('\n--- Extracting function names from content patterns ---')
 
-  const nearbyCtx = src.slice(Math.max(0, anchorIdx - 5000), anchorIdx + 2000)
+  // Window extended from 5000→8000: in 2.1.197 the stop_task handler (which contains the
+  // success-response-helper anchor) moved to 6578 chars before the fallback, outside 5000.
+  const nearbyCtx = src.slice(Math.max(0, anchorIdx - 8000), anchorIdx + 2000)
 
   // --- Success response helper ---
   const successRe = new RegExp(`\\),(${V})\\(${msgVar.replace(/\$/g, '\\$')},\\{\\}\\)\\}catch`)
@@ -116,7 +118,9 @@ if (!skipA1) {
   //   function <pushFn>(<A>){<arr>.push({...<A>,priority:<A>.priority??"next"}),...}
   // We search for the priority??"next" literal and extract the surrounding function.
   const pushDefRe = new RegExp(
-    `function (${V})\\((${V})\\)\\{(${V})\\.push\\(\\{\\.\\.\\.(${V}),priority:\\4\\.priority\\?\\?"next"\\}\\)`
+    // 2.1.197+: push call now includes a trailing `timestamp:` field after priority??"next"
+    // Old: {...A,priority:A.priority??"next"}   New: {...A,priority:A.priority??"next",timestamp:...}
+    `function (${V})\\((${V})\\)\\{(${V})\\.push\\(\\{\\.\\.\\.(${V}),priority:\\4\\.priority\\?\\?"next",timestamp:`
   )
   const pushDefMatch = pushDefRe.exec(src)
   if (!pushDefMatch) {

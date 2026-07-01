@@ -87,7 +87,10 @@ if (src.includes(PATCH_MARKER)) {
   // ---------------------------------------------------------------------------
   console.log('\n--- Extracting function names from content patterns ---')
 
-  const nearbyCtx = src.slice(Math.max(0, anchorIdx - 5000), anchorIdx + 2000)
+  // Window extended from 5000 → 8000: in v2.1.197 the stop_task handler (source
+  // of the success-response-helper pattern) moved to 5647 chars before the anchor,
+  // just outside the old 5000-char window.  8000 gives a comfortable margin.
+  const nearbyCtx = src.slice(Math.max(0, anchorIdx - 8000), anchorIdx + 2000)
 
   // --- Success response helper (called after stop_task success) ---
   const successRe = new RegExp(`\\),(${V})\\(${msgVar.replace(/\$/g, '\\$')},\\{\\}\\)\\}catch`)
