@@ -1,5 +1,10 @@
 # Engine-hardening series — kickoff specs
 
+> **STATUS: ALL SIX ITEMS SHIPPED 2026-07-02** on branch `multi-engine-hardening`
+> (Items 1–5 one commit each; Item 6 as two commits, 6a mirror + 6b placement).
+> One new 🔴 follow-up discovered during 6a — see the follow-up section at the bottom
+> (tracked as ROADMAP #17).
+>
 > Source: multi-engine architecture review (2026-07-02). Six sequential work items, each
 > implemented by an Opus orchestrator driving Sonnet implementer(s) per ADR-026, reviewed
 > by the top-level session, one commit per item on branch `multi-engine-hardening`.
@@ -223,6 +228,24 @@ session lifecycle is already shared; sweep the rest of the overlap.
 
 **Deferred (do NOT do in this series):** folding `usage-fetcher.ts` behind `resolveUsageProvider`
 (couples to roadmap #14 legacy-JSONL retirement); opencode voice; per-spawn env overlays.
+
+---
+
+## Follow-up discovered during Item 6a — remote `config:save-settings` divergence 🔴
+
+Found while building the 6a extraction inventory (documented in `handlers-core.ts`'s module
+header): the remote `config:save-settings` handler is a **stale simplified copy** of the desktop
+one. It does NOT strip the four engine/vendor-owned fields (`sandbox`/`proxy`/
+`anthropicEndpoint`/`modelOverride`) from the incoming payload, does NOT re-apply
+proxy/endpoint/model env from the engine/vendor stores, and does NOT propagate
+usage/analytics/log/timeout settings the desktop handler applies. Same class of bug as Item 2's
+`session:create` drift — a remote client saving settings can reintroduce migrated-away fields
+into `settings.json` and leave spawn env stale.
+
+Not fixed in 6a because converging is a behavior change deserving its own guard tests, not a
+rider on a refactor commit. Fix Item-2-style: extract the desktop body into `handlers-core.ts`
+(or a dedicated module), have remote delegate, with a guard test proving the remote path strips
+engine/vendor fields (fails pre-fix).
 
 **Tests.** Existing suites; for (a) a test that a shared handler registered on both surfaces
 produces identical results for the same args.

@@ -78,6 +78,21 @@ Every item below was re-verified against current code on 2026-06-23. Status lege
 | 14 | Retire legacy **JSONL usage** parse path | ⚪ | metering | M |
 | 15 | Consolidate opencode `/event` to **one subscription per server** | ⚪ | opencode transport | S |
 | 16 | Open the **V2 PR stack** (process, not code) | ⚪ | process | — |
+| 17 | Remote **config:save-settings** divergence — stale copy skips engine/vendor field-stripping + env application | 🔴 | remote parity | S |
+
+> ✅ **Engine-hardening series shipped 2026-07-02** (branch `multi-engine-hardening`, 7 commits) —
+> from the multi-engine architecture review: opencode fork capability honesty + **ADR-030**
+> (capability flags true only when the end-to-end path works); remote `session:create` parity
+> (engineId threading + engine-config sandbox, shared `create-session.ts`); ISession optional-method
+> hoist (all 31 `isClaudeSession` casts + `forEachClaude` + duplicate `instanceof` skills dispatch
+> removed); `SpawnPrepRegistry` (unknown engine throws — no silent else-is-claude env application);
+> `shared/engine-meta.ts` EngineMeta descriptor table (`satisfies Record<EngineId, …>` — a new
+> EngineId is a compile error until its meta/tool-map/logo exist); shared `handlers-core.ts` for the
+> 17 duplicated desktop/remote handler bodies; placement cleanups (neutral `session-delete.ts`,
+> `BaseSession` statics, `EngineSpawnOptions` object, parseModelString/free-vendor dedup). Specs:
+> `docs/v2/engine-hardening-plan.md`. **#17 was discovered during the 6a extraction inventory** —
+> same drift class as the fixed `session:create`; details in the plan doc's follow-up section and
+> `handlers-core.ts`'s module header.
 
 > ✅ **#9 shipped 2026-06-24** (`v2-followup-tool-rendering-lift`) — engine-neutral lifting of
 > plan/question/todo/task + opencode todo fix. See *Verified resolved*.
