@@ -12,13 +12,7 @@ import {
 } from '../services/session-history'
 import { deleteProjectFiles } from '../services/delete-session-files'
 import { deleteSessionByEngine } from '../services/session-delete'
-import {
-  loadSettings,
-  saveSettings,
-  loadSessionConfig,
-  loadSlashCommands
-} from '../services/ui-config'
-import { invalidateMockupSecuritySettings } from '../services/mockup-settings'
+import { loadSettings, loadSessionConfig, loadSlashCommands } from '../services/ui-config'
 import type { UISettings, UISessionConfig } from '../services/ui-config'
 import { loadClaudePermissions, loadCleanupPeriodDays } from '../services/claude-settings'
 import { loadMcpServers, readDisabledMcpServers } from '../services/claude-mcp'
@@ -50,6 +44,7 @@ import {
   setCleanupPeriod,
   loadSkillDetails,
   saveSessions,
+  saveUiSettings,
   listDirEntries
 } from './handlers-core'
 
@@ -287,17 +282,9 @@ export function registerRemoteHandlers(
   // -------------------------------------------------------------------------
 
   dispatcher.register('config:load-settings', async () => loadSettings())
-  dispatcher.register('config:save-settings', async (settings: UISettings) => {
-    saveSettings(settings)
-    invalidateMockupSecuritySettings()
-    // Notify local desktop + all extra windows (remote bridge → other remote clients)
-    if (!win.isDestroyed()) {
-      win.webContents.send('config:settings-changed', settings)
-    }
-    for (const w of BaseSession.getExtraWindows()) {
-      if (!w.isDestroyed()) w.webContents.send('config:settings-changed', settings)
-    }
-  })
+  dispatcher.register('config:save-settings', async (settings: UISettings) =>
+    saveUiSettings(manager, win, settings, { notifyMainWindow: true })
+  )
   dispatcher.register('config:load-sessions', async () => loadSessionConfig())
   dispatcher.register('config:save-sessions', async (config: UISessionConfig) =>
     saveSessions(win, config, { notifyMainWindow: true })
