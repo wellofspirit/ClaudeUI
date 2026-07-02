@@ -18,7 +18,6 @@ import {
 import { watchSession, unwatchSession } from '../services/session-watcher'
 import {
   loadSettings,
-  saveSettings,
   loadSessionConfig,
   loadSlashCommands,
   saveSlashCommands,
@@ -101,10 +100,8 @@ import {
   loadOpencodeSessionHistory
 } from '../services/opencode-session-list'
 import { deleteSessionByEngine } from '../services/session-delete'
-import { invalidateMockupSecuritySettings } from '../services/mockup-settings'
 import type { ISession } from '../providers/ISession'
 import { prepareAndCreateSession } from './create-session'
-import { applyProxyEnv, applyEndpointEnv, applyModelEnv } from '../providers/claude-spawn-prep'
 import {
   sendPrompt,
   watchBackground,
@@ -122,6 +119,7 @@ import {
   setCleanupPeriod,
   loadSkillDetails,
   saveSessions,
+  saveUiSettings,
   listDirEntries
 } from './handlers-core'
 
@@ -1013,57 +1011,9 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
 
   // UI config persistence (~/.claude/ui/)
   ipcMain.handle('config:load-settings', () => loadSettings())
-  ipcMain.handle('config:save-settings', (_e, incomingSettings: UISettings) => {
-    // Strip engine/vendor-owned fields (sandbox, proxy, anthropicEndpoint, modelOverride)
-    // that have moved to engines/claude.json and vendors/anthropic.json
-    const raw = incomingSettings as Record<string, unknown>
-    const settings: UISettings = Object.fromEntries(
-      Object.entries(raw).filter(
-        ([k]) => !['sandbox', 'proxy', 'anthropicEndpoint', 'modelOverride'].includes(k)
-      )
-    )
-    saveSettings(settings)
-    // Next mockup request re-reads settings to pick up CSP changes.
-    invalidateMockupSecuritySettings()
-    // Propagate usage refresh interval change
-    if (typeof (settings as Record<string, unknown>).usageRefreshSecs === 'number') {
-      usageFetcher.setIntervalSecs((settings as Record<string, unknown>).usageRefreshSecs as number)
-    }
-    // Propagate analytics refresh interval change
-    if (typeof (settings as Record<string, unknown>).analyticsRefreshSecs === 'number') {
-      blockUsageService.setDebounceSecs(
-        (settings as Record<string, unknown>).analyticsRefreshSecs as number
-      )
-    }
-    // Apply log level + filter changes immediately
-    {
-      const raw2 = settings as Record<string, unknown>
-      const level = typeof raw2.logLevel === 'string' ? raw2.logLevel : undefined
-      const filter = typeof raw2.logFilter === 'string' ? raw2.logFilter : undefined
-      if (level !== undefined || filter !== undefined) {
-        logger.applyFilter(filter ?? '', level as 'debug' | 'info' | 'warn' | 'error' | undefined)
-      }
-    }
-    // Apply proxy/endpoint/model from engine/vendor stores (source of truth is now there)
-    {
-      const engCfg = loadEngineConfig('claude')
-      const venCfg = loadVendorConfig('anthropic')
-      applyProxyEnv(engCfg.proxy).catch(
-        (err) => logger.error('Proxy', `Failed to apply proxy settings: ${err}`)
-      )
-      applyEndpointEnv(venCfg.endpoint)
-      applyModelEnv(venCfg.modelOverride)
-    }
-    // Propagate session idle timeout change
-    const timeoutMins = (settings as Record<string, unknown>).sessionTimeoutMins
-    if (typeof timeoutMins === 'number') {
-      manager.setSessionTimeout(timeoutMins * 60 * 1000)
-    }
-    // Notify remote clients of settings change
-    for (const w of BaseSession.getExtraWindows()) {
-      if (!w.isDestroyed()) w.webContents.send('config:settings-changed', settings)
-    }
-  })
+  ipcMain.handle('config:save-settings', (_e, incomingSettings: UISettings) =>
+    saveUiSettings(manager, win, incomingSettings, { notifyMainWindow: false })
+  )
   ipcMain.handle('config:load-sessions', () => loadSessionConfig())
   ipcMain.handle('config:save-sessions', (_e, config: UISessionConfig) =>
     saveSessions(win, config, { notifyMainWindow: false })

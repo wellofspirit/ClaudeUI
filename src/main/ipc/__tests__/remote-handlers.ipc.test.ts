@@ -87,13 +87,14 @@ vi.mock('../../services/custom-command-scanner', () => ({
 }))
 
 vi.mock('../../services/usage-fetcher', () => ({
-  usageFetcher: { fetch: vi.fn(async () => ({ a: 1 })) }
+  usageFetcher: { fetch: vi.fn(async () => ({ a: 1 })), setIntervalSecs: vi.fn() }
 }))
 
 vi.mock('../../services/block-usage', () => ({
   blockUsageService: {
     getData: vi.fn(() => null),
-    recalculate: vi.fn(async () => ({ blocks: [] }))
+    recalculate: vi.fn(async () => ({ blocks: [] })),
+    setDebounceSecs: vi.fn()
   }
 }))
 
@@ -135,7 +136,8 @@ vi.mock('../../services/logger', () => ({
     debug: vi.fn(),
     info: vi.fn(),
     warn: vi.fn(),
-    error: vi.fn()
+    error: vi.fn(),
+    applyFilter: vi.fn()
   }
 }))
 
@@ -144,6 +146,12 @@ import { RemoteDispatcher } from '../../services/remote-dispatcher'
 import { registerRemoteHandlers, registerRemoteVersionInfo } from '../remote-handlers'
 import { resolveClaudeCapabilities } from '../../../shared/model-capabilities'
 import { resolveOpencodeSpawnModel } from '../../opencode/model-discovery'
+import { setProxyEnv } from '../../sdk/proxy'
+import { setEndpointEnv } from '../../sdk/endpoint-env'
+import { setModelEnv } from '../../sdk/model-env'
+import { usageFetcher } from '../../services/usage-fetcher'
+import { blockUsageService } from '../../services/block-usage'
+import { logger } from '../../services/logger'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -190,7 +198,8 @@ const sessionManagerStub: any = {
   get: vi.fn(() => sessionStub),
   cancel: vi.fn(),
   interrupt: vi.fn(async () => {}),
-  forEach: vi.fn((cb: (s: any) => void) => cb(sessionStub))
+  forEach: vi.fn((cb: (s: any) => void) => cb(sessionStub)),
+  setSessionTimeout: vi.fn()
 }
 
 describe('RemoteDispatcher', () => {
@@ -545,6 +554,84 @@ describe('registerRemoteHandlers', () => {
         'session:created',
         'rid-broadcast',
         expect.objectContaining({ cwd: '/tmp/proj' })
+      )
+    })
+  })
+
+  // Remote/desktop config:save-settings parity — the remote handler now
+  // delegates to the shared saveUiSettings() (handlers-core.ts), so field
+  // stripping, env re-application, interval/log/timeout propagation, and
+  // broadcast targeting must match the desktop IPC handler.
+  describe('config:save-settings parity', () => {
+    it('strips engine/vendor-owned fields before persisting (GUARD — fails pre-fix)', async () => {
+      await dispatcher.handle(
+        makeRequest('config:save-settings', {
+          theme: 'light',
+          sandbox: { enabled: true, marker: 'sentinel' },
+          proxy: { enabled: true, marker: 'sentinel' },
+          anthropicEndpoint: { enabled: true, marker: 'sentinel' },
+          modelOverride: { enabled: true, marker: 'sentinel' }
+        })
+      )
+
+      expect(uiConfigMocks.saveSettings).toHaveBeenCalled()
+      const persisted = uiConfigMocks.saveSettings.mock.calls[0][0]
+      expect(persisted).toEqual(expect.objectContaining({ theme: 'light' }))
+      expect(persisted).not.toHaveProperty('sandbox')
+      expect(persisted).not.toHaveProperty('proxy')
+      expect(persisted).not.toHaveProperty('anthropicEndpoint')
+      expect(persisted).not.toHaveProperty('modelOverride')
+    })
+
+    it('applies endpoint/model env sourced from the vendor store (GUARD — fails pre-fix)', async () => {
+      uiConfigMocks.loadEngineConfig.mockReturnValueOnce({})
+      uiConfigMocks.loadVendorConfig.mockReturnValueOnce({
+        endpoint: { enabled: true, baseUrl: 'https://sentinel.example' },
+        modelOverride: { enabled: true, model: 'sentinel-model' }
+      })
+
+      await dispatcher.handle(makeRequest('config:save-settings', { theme: 'dark' }))
+      // applyProxyEnv is fire-and-forget (`.catch(...)`) — flush the microtask queue.
+      await new Promise((r) => setImmediate(r))
+
+      expect(setEndpointEnv).toHaveBeenCalledWith(
+        expect.objectContaining({ ANTHROPIC_BASE_URL: 'https://sentinel.example' })
+      )
+      expect(setModelEnv).toHaveBeenCalledWith(
+        expect.objectContaining({ ANTHROPIC_MODEL: 'sentinel-model' })
+      )
+      // Proxy disabled (loadEngineConfig has no `proxy` key) → cleared to null.
+      expect(setProxyEnv).toHaveBeenCalledWith(null)
+    })
+
+    it('propagates usage/analytics intervals, log filter, and session timeout (GUARD — fails pre-fix)', async () => {
+      await dispatcher.handle(
+        makeRequest('config:save-settings', {
+          usageRefreshSecs: 77,
+          analyticsRefreshSecs: 88,
+          logLevel: 'debug',
+          logFilter: 'Proxy',
+          sessionTimeoutMins: 5
+        })
+      )
+
+      expect(usageFetcher.setIntervalSecs).toHaveBeenCalledWith(77)
+      expect(blockUsageService.setDebounceSecs).toHaveBeenCalledWith(88)
+      expect(logger.applyFilter).toHaveBeenCalledWith('Proxy', 'debug')
+      expect(sessionManagerStub.setSessionTimeout).toHaveBeenCalledWith(300000)
+    })
+
+    it('broadcasts the stripped settings to the main window (remote notifies desktop)', async () => {
+      await dispatcher.handle(
+        makeRequest('config:save-settings', {
+          theme: 'light',
+          sandbox: { enabled: true, marker: 'sentinel' }
+        })
+      )
+
+      expect(win.webContents.send).toHaveBeenCalledWith(
+        'config:settings-changed',
+        expect.not.objectContaining({ sandbox: expect.anything() })
       )
     })
   })

@@ -4,8 +4,18 @@ import type { BrowserWindow } from 'electron'
 import type { SessionManager } from '../services/session-manager'
 import { scanSkills } from '../services/skill-scanner'
 import { saveCleanupPeriodDays } from '../services/claude-settings'
-import { saveSessionConfig } from '../services/ui-config'
-import type { UISessionConfig } from '../services/ui-config'
+import {
+  saveSessionConfig,
+  saveSettings,
+  loadEngineConfig,
+  loadVendorConfig
+} from '../services/ui-config'
+import type { UISessionConfig, UISettings } from '../services/ui-config'
+import { invalidateMockupSecuritySettings } from '../services/mockup-settings'
+import { usageFetcher } from '../services/usage-fetcher'
+import { blockUsageService } from '../services/block-usage'
+import { logger } from '../services/logger'
+import { applyProxyEnv, applyEndpointEnv, applyModelEnv } from '../providers/claude-spawn-prep'
 import type { ISession } from '../providers/ISession'
 import { BaseSession } from '../providers/BaseSession'
 
@@ -31,11 +41,6 @@ import { BaseSession } from '../providers/BaseSession'
 //    query. Converging would change behavior and drag `authManager`/
 //    `claudeAuthProvider` imports into a module the remote-handlers test
 //    does not mock.
-//  - `config:save-settings` — remote is a stale simplified copy missing
-//    field-stripping (sandbox/proxy/anthropicEndpoint/modelOverride) + env
-//    application (proxy/endpoint/model) + interval/timeout propagation — a
-//    latent divergence needing its own behavior-changing fix, out of scope
-//    here.
 //  - `mockup:*` — per-registration stateful fs watchers (a `Map` closed over
 //    per `registerXxxHandlers` call) + differing broadcast targets (desktop
 //    mockup:watch only notifies `win`; remote notifies `win` + extra
@@ -235,6 +240,79 @@ export function saveSessions(
   }
   for (const w of BaseSession.getExtraWindows()) {
     if (!w.isDestroyed()) w.webContents.send('config:sessions-changed', config)
+  }
+}
+
+/**
+ * Persist UI settings and replicate every desktop side effect, regardless of
+ * which surface (desktop IPC or remote WebSocket) originated the save.
+ * `settings.json` is a single shared store — the main process must honor
+ * persisted settings the same way no matter who wrote them, so ALL of the
+ * following run unconditionally: stripping the engine/vendor-owned fields
+ * (sandbox/proxy/anthropicEndpoint/modelOverride — they live in
+ * engines/claude.json / vendors/anthropic.json now), persisting, mockup CSP
+ * cache invalidation, usage/analytics interval propagation, log filter
+ * application, re-applying proxy/endpoint/model env from the engine/vendor
+ * stores, and session idle timeout propagation. The only per-surface
+ * difference is broadcast targeting via `notifyMainWindow`, same rationale as
+ * `saveSessions` above.
+ */
+export function saveUiSettings(
+  manager: SessionManager,
+  win: BrowserWindow,
+  incomingSettings: UISettings,
+  opts: { notifyMainWindow: boolean }
+): void {
+  // Strip engine/vendor-owned fields (sandbox, proxy, anthropicEndpoint, modelOverride)
+  // that have moved to engines/claude.json and vendors/anthropic.json
+  const raw = incomingSettings as Record<string, unknown>
+  const settings: UISettings = Object.fromEntries(
+    Object.entries(raw).filter(
+      ([k]) => !['sandbox', 'proxy', 'anthropicEndpoint', 'modelOverride'].includes(k)
+    )
+  )
+  saveSettings(settings)
+  // Next mockup request re-reads settings to pick up CSP changes.
+  invalidateMockupSecuritySettings()
+  // Propagate usage refresh interval change
+  if (typeof (settings as Record<string, unknown>).usageRefreshSecs === 'number') {
+    usageFetcher.setIntervalSecs((settings as Record<string, unknown>).usageRefreshSecs as number)
+  }
+  // Propagate analytics refresh interval change
+  if (typeof (settings as Record<string, unknown>).analyticsRefreshSecs === 'number') {
+    blockUsageService.setDebounceSecs(
+      (settings as Record<string, unknown>).analyticsRefreshSecs as number
+    )
+  }
+  // Apply log level + filter changes immediately
+  {
+    const raw2 = settings as Record<string, unknown>
+    const level = typeof raw2.logLevel === 'string' ? raw2.logLevel : undefined
+    const filter = typeof raw2.logFilter === 'string' ? raw2.logFilter : undefined
+    if (level !== undefined || filter !== undefined) {
+      logger.applyFilter(filter ?? '', level as 'debug' | 'info' | 'warn' | 'error' | undefined)
+    }
+  }
+  // Apply proxy/endpoint/model from engine/vendor stores (source of truth is now there)
+  {
+    const engCfg = loadEngineConfig('claude')
+    const venCfg = loadVendorConfig('anthropic')
+    applyProxyEnv(engCfg.proxy).catch(
+      (err) => logger.error('Proxy', `Failed to apply proxy settings: ${err}`)
+    )
+    applyEndpointEnv(venCfg.endpoint)
+    applyModelEnv(venCfg.modelOverride)
+  }
+  // Propagate session idle timeout change
+  const timeoutMins = (settings as Record<string, unknown>).sessionTimeoutMins
+  if (typeof timeoutMins === 'number') {
+    manager.setSessionTimeout(timeoutMins * 60 * 1000)
+  }
+  if (opts.notifyMainWindow && !win.isDestroyed()) {
+    win.webContents.send('config:settings-changed', settings)
+  }
+  for (const w of BaseSession.getExtraWindows()) {
+    if (!w.isDestroyed()) w.webContents.send('config:settings-changed', settings)
   }
 }
 
