@@ -213,7 +213,9 @@ function OpencodeSection({ entry }: { entry: EngineUsageSummary }): React.JSX.El
 
       {/* Footnote */}
       <p className="text-[9px] text-text-muted mt-2">
-        Cost reported by opencode (models.dev pricing). No 5-hour window — pay-per-token.
+        Cost reported by opencode; when the engine reports $0 (subscription/pooled
+        billing), estimated list-price cost is shown. No 5-hour window —
+        pay-per-token.
       </p>
     </div>
   )

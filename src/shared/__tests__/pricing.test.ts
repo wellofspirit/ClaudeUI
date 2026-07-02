@@ -329,3 +329,66 @@ describe('registerSupplementalPricing', () => {
     expect(equivalentCostUsd('opencode', 'gpt-5-codex', oneMInput)).toBeNull()
   })
 })
+
+// ---------------------------------------------------------------------------
+// Vendor-agnostic fallback — custom/gateway opencode providers (company
+// enterprise proxy ids etc.) whose vendorId is unrecognized (no entry, built-in
+// or supplemental, is registered under it at all).
+// ---------------------------------------------------------------------------
+
+describe('equivalentCostUsd — vendor-agnostic fallback for unrecognized vendorIds', () => {
+  afterEach(() => {
+    registerSupplementalPricing([])
+  })
+
+  it('custom vendorId + known OpenAI modelId resolves via built-in substring fallback', () => {
+    // vendorId is a made-up company gateway id — not 'openai' — but the model id
+    // is a real OpenAI model, so the fallback should still price it.
+    const cost = equivalentCostUsd('acme-corp-openai-proxy', 'gpt-4o', {
+      inputTokens: 1_000_000,
+      outputTokens: 0,
+      cacheWriteTokens: 0,
+      cacheWrite1hTokens: 0,
+      cacheReadTokens: 0
+    })
+    expect(cost).toBeCloseTo(2.5) // openai gpt-4o input rate
+  })
+
+  it('custom vendorId + unknown modelId → null (no fallback match)', () => {
+    const cost = equivalentCostUsd('acme-corp-openai-proxy', 'some-internal-model-xyz', {
+      inputTokens: 1_000_000,
+      outputTokens: 0,
+      cacheWriteTokens: 0,
+      cacheWrite1hTokens: 0,
+      cacheReadTokens: 0
+    })
+    expect(cost).toBeNull()
+  })
+
+  it('custom vendorId + exact supplemental modelId (registered under a different vendor) resolves via fallback', () => {
+    registerSupplementalPricing([
+      { vendorId: 'opencode', match: 'zen/glm-4.6', pricing: { inputPerMTok: 2, outputPerMTok: 8, cacheWritePerMTok: 2, cacheWrite1hPerMTok: 2, cacheReadPerMTok: 0.2 } }
+    ])
+    const cost = equivalentCostUsd('acme-corp-gateway', 'zen/glm-4.6', {
+      inputTokens: 1_000_000,
+      outputTokens: 0,
+      cacheWriteTokens: 0,
+      cacheWrite1hTokens: 0,
+      cacheReadTokens: 0
+    })
+    expect(cost).toBeCloseTo(2.0)
+  })
+
+  it('a KNOWN vendor with an unpriced model does NOT fall back (existing vendor-scoped isolation unchanged)', () => {
+    // 'openai' already has entries in the built-in table — a miss for it must
+    // stay a genuine miss, not spill into other vendors' tables.
+    const cost = equivalentCostUsd('openai', 'claude-sonnet-4-6', {
+      inputTokens: 1000,
+      outputTokens: 0,
+      cacheWriteTokens: 0,
+      cacheWrite1hTokens: 0,
+      cacheReadTokens: 0
+    })
+    expect(cost).toBeNull()
+  })
+})

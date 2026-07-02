@@ -19,6 +19,7 @@
 
 import type { TokenCounts, ModelTokenBreakdown, UsageBlock, EngineUsageSummary } from '../../shared/types'
 import { accountForTimestamp, type AccountLogRecord } from './usage-windows'
+import { equivalentCostUsd } from '../../shared/pricing'
 
 // ---------------------------------------------------------------------------
 // Constants (mirror block-usage.ts)
@@ -63,6 +64,23 @@ export interface ProjectionSample {
   timestamp: number
   tokens: number
   apiPercent: number
+}
+
+/**
+ * Row shape needed to select a display cost — mirrors the usage_event columns
+ * consumed here. Kept local (not imported from db.ts) to preserve this module's
+ * "no DB imports" contract; db.ts's UsageEventRow is structurally assignable.
+ */
+export interface UsageCostRow {
+  vendorId: string
+  modelId: string
+  inputTokens: number
+  outputTokens: number
+  cacheWriteTokens: number
+  cacheWrite1hTokens: number
+  cacheReadTokens: number
+  equivCostUsd: number | null
+  engineCostUsd: number | null
 }
 
 // ---------------------------------------------------------------------------
@@ -420,6 +438,35 @@ export function computeProjectionWLS(
     tokens: Math.round(maxTokens),
     costUsd: Math.round(maxTokens * costPerToken * 100) / 100
   }
+}
+
+// ---------------------------------------------------------------------------
+// Cost selection (opencode pooled/enterprise-billing estimate)
+// ---------------------------------------------------------------------------
+
+/**
+ * Select the display cost for a usage_event row. `engineCostUsd` stays
+ * authoritative when it reflects a real, nonzero spend. When the engine reports
+ * null OR 0 — which for opencode on a company enterprise/pooled plan means
+ * "billed elsewhere", not "free" — fall back to the best available list-price
+ * estimate: the row's stored `equivCostUsd` (computed at record time by
+ * recordUsageEvent), or, if that's null (row predates the pricing entry, or the
+ * row's vendorId is a custom/gateway id that wasn't priced at insert time), a
+ * fresh recompute against the current pricing tables. Genuinely-free models
+ * (opencode zen free tier) still show $0 because their list price is 0 — both
+ * equivCostUsd and the recompute resolve to 0 for those.
+ */
+export function selectRowCostUsd(row: UsageCostRow): number {
+  if (typeof row.engineCostUsd === 'number' && row.engineCostUsd > 0) return row.engineCostUsd
+  if (row.equivCostUsd !== null) return row.equivCostUsd
+  const recomputed = equivalentCostUsd(row.vendorId, row.modelId, {
+    inputTokens: row.inputTokens,
+    outputTokens: row.outputTokens,
+    cacheWriteTokens: row.cacheWriteTokens,
+    cacheWrite1hTokens: row.cacheWrite1hTokens,
+    cacheReadTokens: row.cacheReadTokens
+  })
+  return recomputed ?? row.engineCostUsd ?? 0
 }
 
 // ---------------------------------------------------------------------------

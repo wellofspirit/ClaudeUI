@@ -275,7 +275,7 @@ describe('UsageView — opencode section present', () => {
   it('renders the footnote text', () => {
     render(<UsageView onClose={vi.fn()} />)
     expect(
-      screen.getByText(/Cost reported by opencode.*models\.dev pricing/)
+      screen.getByText(/Cost reported by opencode.*estimated list-price cost is shown/)
     ).toBeInTheDocument()
   })
 

@@ -423,19 +423,45 @@ export function registerSupplementalPricing(entries: PricingEntry[]): void {
  *      Matched by EXACT equality — entries are full opencode model ids, so a
  *      shorter id (`claude-haiku-4-5`) must NOT shadow a longer variant
  *      (`claude-haiku-4-5-20251001`) the way substring matching would.
+ *   3. Vendor-agnostic fallback — ONLY when vendorId itself is unrecognized (no
+ *      entry, built-in or supplemental, is registered under it at all). This
+ *      covers routing a model through a custom/gateway opencode provider (e.g. a
+ *      company's internal OpenAI proxy, vendorId = the provider's own id) whose
+ *      models are otherwise priced identically to a known vendor's. It does NOT
+ *      run for a known vendor with an unpriced model (e.g. `openai` + a brand-new
+ *      model id) — that stays a genuine miss, preserving existing vendor-scoped
+ *      resolution:
+ *        a. Exact modelId match across ALL supplemental entries (any vendor) —
+ *           models.dev ids are specific enough that a cross-vendor exact match
+ *           is safe.
+ *        b. Substring match across ALL built-in tables, in PRICING_TABLE's
+ *           declared order (anthropic → openai → google). If the same match
+ *           string existed under multiple vendors this picks the first
+ *           declared — deterministic, documented here rather than disambiguated.
  * Returns null when no entry matches (caller falls back to engine-reported cost).
  */
 function findPricing(vendorId: VendorId, modelId: string): ModelPricing | null {
   const lower = modelId.toLowerCase()
+  let vendorRecognized = false
   for (const entry of PRICING_TABLE) {
-    if (entry.vendorId === vendorId && lower.includes(entry.match)) {
-      return entry.pricing
+    if (entry.vendorId === vendorId) {
+      vendorRecognized = true
+      if (lower.includes(entry.match)) return entry.pricing
     }
   }
   for (const entry of supplementalPricing) {
-    if (entry.vendorId === vendorId && lower === entry.match) {
-      return entry.pricing
+    if (entry.vendorId === vendorId) {
+      vendorRecognized = true
+      if (lower === entry.match) return entry.pricing
     }
+  }
+  if (vendorRecognized) return null
+
+  for (const entry of supplementalPricing) {
+    if (lower === entry.match) return entry.pricing
+  }
+  for (const entry of PRICING_TABLE) {
+    if (lower.includes(entry.match)) return entry.pricing
   }
   return null
 }
