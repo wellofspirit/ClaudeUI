@@ -231,7 +231,14 @@ session lifecycle is already shared; sweep the rest of the overlap.
 
 ---
 
-## Follow-up discovered during Item 6a — remote `config:save-settings` divergence 🔴
+## Follow-up discovered during Item 6a — remote `config:save-settings` divergence ✅ FIXED
+
+> **Status: fixed 2026-07-02** (branch `remote-save-settings-parity`, ROADMAP #17). Desktop body
+> extracted verbatim into `saveUiSettings()` in `handlers-core.ts`; both surfaces delegate, with
+> broadcast targeting per surface via `notifyMainWindow` (the `saveSessions` pattern). All desktop
+> side effects replicated remotely by design — settings.json is a single shared store. Guard tests
+> (field-stripping, env application, interval/log/timeout propagation, stripped broadcast) verified
+> to fail against the pre-fix code.
 
 Found while building the 6a extraction inventory (documented in `handlers-core.ts`'s module
 header): the remote `config:save-settings` handler is a **stale simplified copy** of the desktop

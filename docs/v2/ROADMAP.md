@@ -78,7 +78,6 @@ Every item below was re-verified against current code on 2026-06-23. Status lege
 | 14 | Retire legacy **JSONL usage** parse path | ⚪ | metering | M |
 | 15 | Consolidate opencode `/event` to **one subscription per server** | ⚪ | opencode transport | S |
 | 16 | Open the **V2 PR stack** (process, not code) | ⚪ | process | — |
-| 17 | Remote **config:save-settings** divergence — stale copy skips engine/vendor field-stripping + env application | 🔴 | remote parity | S |
 
 > ✅ **Engine-hardening series shipped 2026-07-02** (branch `multi-engine-hardening`, 7 commits) —
 > from the multi-engine architecture review: opencode fork capability honesty + **ADR-030**
@@ -91,8 +90,15 @@ Every item below was re-verified against current code on 2026-06-23. Status lege
 > 17 duplicated desktop/remote handler bodies; placement cleanups (neutral `session-delete.ts`,
 > `BaseSession` statics, `EngineSpawnOptions` object, parseModelString/free-vendor dedup). Specs:
 > `docs/v2/engine-hardening-plan.md`. **#17 was discovered during the 6a extraction inventory** —
-> same drift class as the fixed `session:create`; details in the plan doc's follow-up section and
-> `handlers-core.ts`'s module header.
+> same drift class as the fixed `session:create`; details in the plan doc's follow-up section.
+
+> ✅ **#17 shipped 2026-07-02** (`remote-save-settings-parity`) — remote `config:save-settings` now
+> delegates to a shared `saveUiSettings()` in `handlers-core.ts` (same extraction pattern as
+> `session:create`'s `prepareAndCreateSession`): engine/vendor field-stripping, proxy/endpoint/model
+> env re-application, usage/analytics/log/timeout propagation, and stripped-payload broadcast all run
+> for remote-originated saves. All desktop side effects are deliberately replicated (settings.json is
+> one shared store); the only per-surface difference is broadcast targeting (`notifyMainWindow`).
+> Guard tests in `remote-handlers.ipc.test.ts` proven to fail pre-fix.
 
 > ✅ **#9 shipped 2026-06-24** (`v2-followup-tool-rendering-lift`) — engine-neutral lifting of
 > plan/question/todo/task + opencode todo fix. See *Verified resolved*.
