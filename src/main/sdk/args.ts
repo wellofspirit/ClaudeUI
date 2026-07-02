@@ -274,8 +274,16 @@ let cachedNodeModules: string | null | undefined
 export function buildEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const env = { ...base }
   if (env.DEBUG_CLAUDE_AGENT_SDK) env.DEBUG = '1'
-  if (!env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC)
-    env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = '1'
+  // We do NOT force CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC here. It is not a
+  // subscription-vs-API billing signal (attribution rides on
+  // CLAUDE_CODE_ENTRYPOINT=claude-desktop + OAuth + interactive stream-json mode,
+  // none of which this touches). The official Claude Desktop app leaves it UNSET
+  // on its main/interactive sessions and only sets it on throwaway `-p` background
+  // jobs — and ClaudeUI has no `-p` spawns (every cli.js launch goes through the
+  // stream-json harness in query.ts). Forcing it here suppressed cli.js's bootstrap
+  // fetch (GET /api/claude_cli/bootstrap), which is what discovers gated models like
+  // Fable and writes them to ~/.claude.json's additionalModelOptionsCache. Mirror
+  // Desktop: leave it to whatever the inherited env specifies (default: unset).
   delete env.NODE_OPTIONS
 
   // Override so that a developer running `bun run dev` from inside a Claude

@@ -141,7 +141,14 @@ function safeHandler<T>(handler: (...args: any[]) => Promise<T>) {
   }
 }
 
-let cachedModels: ModelInfo[] | null = null
+// The model list is derived from cli.js's initialize response, which reflects
+// ~/.claude.json's additionalModelOptionsCache. That cache is warmed by cli.js's
+// bootstrap fetch a few seconds AFTER a spawn's init resolves (fire-and-forget),
+// so newly-entitled models (e.g. Fable) can be absent from the very first fetch on
+// a cold cache. A short TTL lets a subsequent picker fetch (the renderer re-fetches
+// on cwd change / modelReloadNonce) pick them up without an app restart.
+const MODELS_CACHE_TTL_MS = 2 * 60_000
+let cachedModels: { models: ModelInfo[]; at: number } | null = null
 
 const COMMIT_MSG_SYSTEM_PROMPT =
   'You are a commit message generator. Given a git diff of staged changes, write a concise conventional commit message. Output ONLY the commit message — no explanation, no quotes, no markdown. Use imperative mood. First line should be a short summary (max 72 chars). If needed, add a blank line followed by bullet points for details. Focus on the "why" not the "what".'
@@ -249,7 +256,9 @@ async function generateCommitMessage(diff: string): Promise<string | null> {
 }
 
 async function fetchModels(): Promise<ModelInfo[]> {
-  if (cachedModels) return cachedModels
+  if (cachedModels && Date.now() - cachedModels.at < MODELS_CACHE_TTL_MS) {
+    return cachedModels.models
+  }
 
   const abort = new AbortController()
   const q = sdkQuery({
@@ -267,7 +276,7 @@ async function fetchModels(): Promise<ModelInfo[]> {
       initializationResult(): Promise<Record<string, unknown>>
     }
     const models = await handle.supportedModels()
-    cachedModels = models
+    cachedModels = { models, at: Date.now() }
     // The same initialize response carries the user's account — report login
     // status at app load so the sign-in banner is accurate before any chat
     // session is opened. Resolves immediately (init already completed). ADR-014.
