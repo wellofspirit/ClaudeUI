@@ -4,7 +4,9 @@ import {
   formatCost,
   sumTokens,
   shortModelName,
+  formatTime,
   formatShortDate,
+  formatDuration,
   getModelColor
 } from '../usage-utils'
 
@@ -131,6 +133,33 @@ describe('shortModelName', () => {
   })
 })
 
+describe('formatTime', () => {
+  it('formats morning time', () => {
+    const ts = new Date('2025-01-15T09:05:00').getTime()
+    expect(formatTime(ts)).toBe('9:05 AM')
+  })
+
+  it('formats afternoon time', () => {
+    const ts = new Date('2025-01-15T14:30:00').getTime()
+    expect(formatTime(ts)).toBe('2:30 PM')
+  })
+
+  it('formats midnight as 12:00 AM', () => {
+    const ts = new Date('2025-01-15T00:00:00').getTime()
+    expect(formatTime(ts)).toBe('12:00 AM')
+  })
+
+  it('formats noon as 12:00 PM', () => {
+    const ts = new Date('2025-01-15T12:00:00').getTime()
+    expect(formatTime(ts)).toBe('12:00 PM')
+  })
+
+  it('pads minutes with leading zero', () => {
+    const ts = new Date('2025-01-15T08:03:00').getTime()
+    expect(formatTime(ts)).toBe('8:03 AM')
+  })
+})
+
 describe('formatShortDate', () => {
   it('formats a date string', () => {
     expect(formatShortDate('2025-01-15')).toBe('Jan 15')
@@ -142,6 +171,32 @@ describe('formatShortDate', () => {
 
   it('formats February', () => {
     expect(formatShortDate('2025-02-28')).toBe('Feb 28')
+  })
+})
+
+describe('formatDuration', () => {
+  it('formats minutes only', () => {
+    expect(formatDuration(5 * 60_000)).toBe('5m')
+  })
+
+  it('formats hours and minutes', () => {
+    expect(formatDuration(90 * 60_000)).toBe('1h 30m')
+  })
+
+  it('formats zero as seconds', () => {
+    expect(formatDuration(0)).toBe('0s')
+  })
+
+  it('formats sub-minute durations as seconds', () => {
+    expect(formatDuration(45_000)).toBe('45s')
+  })
+
+  it('formats exact hours', () => {
+    expect(formatDuration(2 * 60 * 60_000)).toBe('2h 0m')
+  })
+
+  it('floors partial minutes', () => {
+    expect(formatDuration(5.5 * 60_000)).toBe('5m')
   })
 })
 

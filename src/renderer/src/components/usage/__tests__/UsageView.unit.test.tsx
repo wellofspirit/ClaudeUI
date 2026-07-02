@@ -1,15 +1,14 @@
 /**
- * Layer 1 unit tests for the engine-split UsageView.
+ * Layer 1 unit tests for the new engine-split UsageView (Phase 9b).
  *
  * Covers:
- * - Claude card renders flat (no tabs) with quota bar sourced from accountUsage
- * - Claude card summary + per-model table sourced from perEngine's 'claude' entry
- * - Claude card empty states (no window data, no Claude usage)
+ * - Claude tab group renders (4 tabs present)
+ * - Default tab is "Current Block"
+ * - Clicking each tab shows/hides its panel
  * - opencode section renders per-model rows when perEngine has an opencode entry
  * - opencode section is absent when there's no opencode entry in perEngine
  * - Refresh button calls window.api.refreshPrices
  * - Loading state renders when blockUsage is null
- * - "By Engine" table removal guard
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest'
@@ -74,10 +73,10 @@ describe('UsageView — loading state', () => {
 })
 
 // ---------------------------------------------------------------------------
-// Claude card — flat, no tabs
+// Claude tab group
 // ---------------------------------------------------------------------------
 
-describe('UsageView — Claude card (flat, no tabs)', () => {
+describe('UsageView — Claude tab group', () => {
   beforeEach(() => {
     useSessionStore.setState({
       blockUsage: makeBlockUsage(),
@@ -85,97 +84,82 @@ describe('UsageView — Claude card (flat, no tabs)', () => {
     } as any)
   })
 
-  it('renders the Claude card root by testid', () => {
+  it('renders the three tab buttons (no 5hr Window tab)', () => {
     render(<UsageView onClose={vi.fn()} />)
-    expect(screen.getByTestId('ClaudeUsageCard')).toBeInTheDocument()
-  })
-
-  it('does not render a tab bar — the old tab buttons are gone', () => {
-    render(<UsageView onClose={vi.fn()} />)
-    expect(screen.queryByRole('button', { name: 'Current Block' })).not.toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'Block Timeline' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Current Block' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Block Timeline' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Recent Blocks' })).toBeInTheDocument()
+    // The 5hr Window tab is gone — the sidebar UsagePanel already shows the
+    // live 5h/7d quota bars, so the tab duplicated it.
     expect(screen.queryByRole('button', { name: '5hr Window' })).not.toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'Recent Blocks' })).not.toBeInTheDocument()
   })
 
-  it('shows "No window data" when there is no accountUsage', () => {
+  it('shows "Current Block" panel by default (no active block empty state)', () => {
     render(<UsageView onClose={vi.fn()} />)
-    expect(screen.getByText('No window data')).toBeInTheDocument()
+    expect(
+      screen.getByText('No active block — start using Claude to begin tracking')
+    ).toBeInTheDocument()
   })
 
-  it('shows "No Claude usage in the last 7 days" when perEngine has no claude entry', () => {
+  it('shows "Not enough data yet" when Block Timeline tab is clicked and no snapshots', () => {
     render(<UsageView onClose={vi.fn()} />)
-    expect(screen.getByText('No Claude usage in the last 7 days')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Block Timeline' }))
+    expect(screen.getByText('Not enough data yet')).toBeInTheDocument()
   })
 
-  it('renders the subscription badge and subtitle copy', () => {
+  it('shows "No recent blocks" when Recent Blocks tab is clicked and recentBlocks is empty', () => {
     render(<UsageView onClose={vi.fn()} />)
-    expect(screen.getByText('subscription')).toBeInTheDocument()
-    expect(screen.getByText('last 7 days · API quota')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Recent Blocks' }))
+    expect(screen.getByText('No recent blocks')).toBeInTheDocument()
+  })
+
+  it('clicking back to Current Block restores that panel', () => {
+    render(<UsageView onClose={vi.fn()} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Block Timeline' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Current Block' }))
+    expect(
+      screen.getByText('No active block — start using Claude to begin tracking')
+    ).toBeInTheDocument()
   })
 })
 
 // ---------------------------------------------------------------------------
-// Claude card — quota bar from accountUsage
+// Claude section — with an active block
 // ---------------------------------------------------------------------------
 
-describe('UsageView — Claude card quota bar', () => {
-  it('renders the 5hr utilization percentage and reset string from accountUsage', () => {
-    const resetsAt = new Date(Date.now() + 90 * 60_000).toISOString() // 1h 30m from now
-    useSessionStore.setState({
-      blockUsage: makeBlockUsage(),
-      accountUsage: {
-        fiveHour: { usedPercent: 42, resetsAt },
-        sevenDay: null,
-        sevenDaySonnet: null,
-        sevenDayOpus: null,
-        extraUsage: null,
-        planName: 'claude_max_5x',
-        fetchedAt: Date.now(),
-        error: null
-      }
-    } as any)
-
-    render(<UsageView onClose={vi.fn()} />)
-    expect(screen.getByText('42%')).toBeInTheDocument()
-    expect(screen.getByText('resets in 1h 30m')).toBeInTheDocument()
-  })
-})
-
-// ---------------------------------------------------------------------------
-// Claude card — summary + per-model table from perEngine's claude entry
-// ---------------------------------------------------------------------------
-
-describe('UsageView — Claude card summary + per-model table', () => {
-  it('renders tokens/cost/requests summary and per-model rows from the claude perEngine entry', () => {
+describe('UsageView — Current Block tab with active block', () => {
+  it('renders active badge and model table when block has models', () => {
+    const now = Date.now()
     useSessionStore.setState({
       blockUsage: makeBlockUsage({
-        perEngine: [
-          {
-            engineId: 'claude',
-            tokens: { inputTokens: 10_000, outputTokens: 5_000, cacheCreationTokens: 0, cacheReadTokens: 0 },
-            costUsd: 0.05,
-            requestCount: 2,
-            models: [
-              {
-                model: 'claude-opus-4-6-20250514',
-                tokens: { inputTokens: 10_000, outputTokens: 5_000, cacheCreationTokens: 0, cacheReadTokens: 0 },
-                costUsd: 0.05,
-                requestCount: 2
-              }
-            ]
-          }
-        ]
+        currentBlock: {
+          id: 'block-1',
+          startTime: now - 3_600_000,
+          endTime: now + 3_600_000,
+          actualEndTime: now + 3_600_000,
+          tokens: { inputTokens: 10_000, outputTokens: 5_000, cacheCreationTokens: 0, cacheReadTokens: 0 },
+          costUsd: 0.05,
+          requestCount: 2,
+          isActive: true,
+          models: [
+            {
+              model: 'claude-opus-4-6-20250514',
+              tokens: { inputTokens: 10_000, outputTokens: 5_000, cacheCreationTokens: 0, cacheReadTokens: 0 },
+              costUsd: 0.05,
+              requestCount: 2
+            }
+          ],
+          burnRate: null,
+          projectedUsage: null,
+          finalApiPercent: null
+        }
       }),
       accountUsage: null
     } as any)
 
     render(<UsageView onClose={vi.fn()} />)
-    // Total tokens = 10K + 5K = 15K → formatTokenCount → "15.0K"
-    // (appears twice: once in the summary row, once in the model row — single model)
-    expect(screen.getAllByText('15.0K')).toHaveLength(2)
-    expect(screen.getAllByText('$0.05')).toHaveLength(2)
-    expect(screen.getAllByText('2')).toHaveLength(2)
+    expect(screen.getByText('active')).toBeInTheDocument()
+    // Model should be in the table
     expect(screen.getByText('Opus 4.6')).toBeInTheDocument()
   })
 })

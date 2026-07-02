@@ -1,14 +1,29 @@
 import { useState } from 'react'
 import { useSessionStore } from '../../stores/session-store'
-import type { AccountUsage, EngineUsageSummary, ModelTokenBreakdown } from '../../../../shared/types'
+import type {
+  UsageBlock,
+  UsageSnapshot,
+  EngineUsageSummary,
+  ModelTokenBreakdown
+} from '../../../../shared/types'
+import { TokenDonut } from './TokenDonut'
+import { BlockTimeline } from './BlockTimeline'
 import { DailyUsageChart } from './DailyUsageChart'
 import {
   formatTokenCount,
   formatCost,
+  formatTime,
+  formatDuration,
   sumTokens,
   shortModelName,
   getModelColor
 } from './usage-utils'
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+type ClaudeTab = 'block' | 'timeline' | 'recent'
 
 interface UsageViewProps {
   onClose: () => void
@@ -20,7 +35,7 @@ interface UsageViewProps {
 
 export function UsageView({ onClose }: UsageViewProps): React.JSX.Element {
   const blockUsage = useSessionStore((s) => s.blockUsage)
-  const accountUsage = useSessionStore((s) => s.accountUsage)
+  const [activeTab, setActiveTab] = useState<ClaudeTab>('block')
 
   if (!blockUsage) {
     return (
@@ -33,9 +48,16 @@ export function UsageView({ onClose }: UsageViewProps): React.JSX.Element {
     )
   }
 
-  const { dailyHistory, accounts, accountFilter, perEngine } = blockUsage
+  const {
+    currentBlock,
+    recentBlocks,
+    todaySnapshots,
+    dailyHistory,
+    accounts,
+    accountFilter,
+    perEngine
+  } = blockUsage
 
-  const claudeEntry = perEngine?.find((e) => e.engineId === 'claude') ?? null
   const opencodeEntry = perEngine?.find((e) => e.engineId === 'opencode') ?? null
 
   return (
@@ -49,8 +71,14 @@ export function UsageView({ onClose }: UsageViewProps): React.JSX.Element {
       </div>
 
       <div className="p-4 space-y-4">
-        {/* Claude card — subscription quota + usage summary */}
-        <ClaudeCard accountUsage={accountUsage} claudeEntry={claudeEntry} />
+        {/* Claude card — tabbed */}
+        <ClaudeCard
+          currentBlock={currentBlock}
+          recentBlocks={recentBlocks}
+          todaySnapshots={todaySnapshots}
+          activeTab={activeTab}
+          onTabChange={setActiveTab}
+        />
 
         {/* opencode section — only when data exists */}
         {opencodeEntry && <OpencodeSection entry={opencodeEntry} />}
@@ -65,93 +93,210 @@ export function UsageView({ onClose }: UsageViewProps): React.JSX.Element {
 }
 
 // ---------------------------------------------------------------------------
-// Claude card — flat card, structurally parallel to OpencodeSection
+// Claude card with 4-tab group
 // ---------------------------------------------------------------------------
 
-function ClaudeCard({
-  accountUsage,
-  claudeEntry
-}: {
-  accountUsage: AccountUsage | null
-  claudeEntry: EngineUsageSummary | null
-}): React.JSX.Element {
-  const totalTokens = claudeEntry ? sumTokens(claudeEntry.tokens) : 0
+const CLAUDE_TABS: { id: ClaudeTab; label: string }[] = [
+  { id: 'block', label: 'Current Block' },
+  { id: 'timeline', label: 'Block Timeline' },
+  { id: 'recent', label: 'Recent Blocks' }
+]
 
+function ClaudeCard({
+  currentBlock,
+  recentBlocks,
+  todaySnapshots,
+  activeTab,
+  onTabChange
+}: {
+  currentBlock: UsageBlock | null
+  recentBlocks: UsageBlock[]
+  todaySnapshots: UsageSnapshot[]
+  activeTab: ClaudeTab
+  onTabChange: (tab: ClaudeTab) => void
+}): React.JSX.Element {
   return (
-    <div data-testid="ClaudeUsageCard" className="bg-bg-secondary rounded-xl border border-border/50 p-3">
-      {/* Header row */}
-      <div className="flex items-center gap-2 mb-3">
+    <div className="bg-bg-secondary rounded-xl border border-border/50">
+      {/* Card header */}
+      <div className="flex items-center gap-2 px-3 pt-3">
         <h3 className="text-[11px] font-semibold uppercase tracking-wider text-text-secondary">
           Claude
         </h3>
         <span className="text-[9px] px-1.5 py-0.5 rounded bg-violet-500/15 text-violet-300 font-medium">
           subscription
         </span>
-        <span className="text-[9px] text-text-muted">last 7 days · API quota</span>
+        <span className="text-[9px] text-text-muted">5-hour windows · blocks · API quota</span>
       </div>
 
-      {/* Quota block — real subscription data from accountUsage (OAuth 5h window) */}
-      <div className="mb-3 pb-3 border-b border-border/30">
-        <WindowPanel accountUsage={accountUsage} />
+      {/* Tab bar */}
+      <div className="flex gap-0 px-3 mt-2 border-b border-border/30 text-[11px]">
+        {CLAUDE_TABS.map((tab) => (
+          <button
+            key={tab.id}
+            onClick={() => onTabChange(tab.id)}
+            className={`px-2.5 py-1.5 border-b-2 transition-colors cursor-default [-webkit-app-region:no-drag] ${
+              activeTab === tab.id
+                ? 'border-accent text-text-primary'
+                : 'border-transparent text-text-muted hover:text-text-secondary'
+            }`}
+          >
+            {tab.label}
+          </button>
+        ))}
       </div>
 
-      {/* Summary + per-model table */}
-      {claudeEntry ? (
-        <>
-          <EngineSummaryStats
-            totalTokens={totalTokens}
-            costUsd={claudeEntry.costUsd}
-            requestCount={claudeEntry.requestCount}
+      {/* Tab panels */}
+      <div className="p-3">
+        {activeTab === 'block' && <CurrentBlockPanel block={currentBlock} />}
+        {activeTab === 'timeline' && (
+          <TimelinePanel
+            currentBlock={currentBlock}
+            todaySnapshots={todaySnapshots}
           />
-          <EngineModelTable models={claudeEntry.models} engineTotalTokens={totalTokens} />
-        </>
-      ) : (
-        <div className="text-text-muted text-[11px]">No Claude usage in the last 7 days</div>
-      )}
+        )}
+        {activeTab === 'recent' && <RecentBlocksPanel recentBlocks={recentBlocks} />}
+      </div>
     </div>
   )
 }
 
-function WindowPanel({ accountUsage }: { accountUsage: AccountUsage | null }): React.JSX.Element {
-  if (!accountUsage || accountUsage.error) {
-    return <div className="text-text-muted text-[11px]">No window data</div>
+// ---------------------------------------------------------------------------
+// Tab panels (content only — no card chrome / no redundant section title)
+// ---------------------------------------------------------------------------
+
+function CurrentBlockPanel({ block }: { block: UsageBlock | null }): React.JSX.Element {
+  if (!block) {
+    return (
+      <div className="text-text-muted text-[11px]">
+        No active block — start using Claude to begin tracking
+      </div>
+    )
   }
 
-  const pct = accountUsage.fiveHour.usedPercent
-  const color = pct > 80 ? '#ef4444' : pct > 50 ? '#eab308' : '#22c55e'
-
-  let resetStr = ''
-  if (accountUsage.fiveHour.resetsAt) {
-    const ms = new Date(accountUsage.fiveHour.resetsAt).getTime() - Date.now()
-    if (ms > 0) {
-      const min = Math.round(ms / 60_000)
-      if (min >= 60) {
-        resetStr = `resets in ${Math.floor(min / 60)}h ${min % 60}m`
-      } else {
-        resetStr = `resets in ${min}m`
-      }
-    }
-  }
+  const total = sumTokens(block.tokens)
+  const elapsed = Date.now() - block.startTime
+  const remaining = block.endTime - Date.now()
 
   return (
     <>
-      {resetStr && (
-        <div className="flex items-baseline gap-2 mb-2">
-          <span className="text-[10px] text-text-muted">{resetStr}</span>
-        </div>
-      )}
-      <div className="flex items-center gap-3">
-        <div className="flex-1 h-2 rounded-full bg-white/5 overflow-hidden">
-          <div
-            className="h-full rounded-full transition-all duration-500"
-            style={{ width: `${Math.min(100, pct)}%`, backgroundColor: color }}
-          />
-        </div>
-        <span className="text-[11px] font-mono font-medium" style={{ color }}>
-          {Math.round(pct)}%
+      <div className="flex items-center gap-2 mb-3">
+        {block.isActive && (
+          <span className="text-[9px] px-1.5 py-0.5 rounded bg-green-500/15 text-green-400 font-medium">
+            active
+          </span>
+        )}
+        <span className="text-[10px] text-text-muted">
+          {formatTime(block.startTime)} – {formatTime(block.endTime)}
+          <span className="ml-2 text-text-muted/60">
+            ({formatDuration(elapsed)} in
+            {remaining > 0 ? `, ${formatDuration(remaining)} left` : ''})
+          </span>
         </span>
       </div>
+
+      <div className="flex gap-4">
+        {/* Donut */}
+        <TokenDonut models={block.models} totalTokens={total} size={100} />
+
+        {/* Stats */}
+        <div className="flex-1 space-y-1.5 text-[11px]">
+          <StatRow label="Total Tokens" value={formatTokenCount(total)} />
+          <StatRow label="Cost" value={formatCost(block.costUsd)} />
+          {block.burnRate && (
+            <StatRow
+              label="Burn Rate"
+              value={`${formatTokenCount(block.burnRate.tokensPerMin)}/min · ${formatCost(block.burnRate.costPerHour)}/hr`}
+            />
+          )}
+          {block.projectedUsage && (
+            <StatRow
+              label="Window Capacity"
+              value={`~${formatTokenCount(block.projectedUsage.tokens)} · ${formatCost(block.projectedUsage.costUsd)}`}
+              tooltip="Maximum tokens this 5hr window can handle, derived from current tokens ÷ API usage %"
+              className="text-accent"
+            />
+          )}
+        </div>
+      </div>
+
+      {/* Model breakdown table */}
+      {block.models.length > 0 && (
+        <div className="mt-3 border-t border-border/30 pt-2">
+          <table className="w-full text-[10px]">
+            <thead>
+              <tr className="text-text-muted">
+                <th className="text-left font-medium pb-1">Model</th>
+                <th className="text-right font-medium pb-1">Tokens</th>
+                <th className="text-right font-medium pb-1">Cost</th>
+                <th className="text-right font-medium pb-1">Reqs</th>
+                <th className="text-right font-medium pb-1">Share</th>
+              </tr>
+            </thead>
+            <tbody>
+              {block.models
+                .sort((a, b) => sumTokens(b.tokens) - sumTokens(a.tokens))
+                .map((m) => {
+                  const mTotal = sumTokens(m.tokens)
+                  const pct = total > 0 ? Math.round((mTotal / total) * 100) : 0
+                  return (
+                    <tr key={m.model} className="text-text-secondary">
+                      <td className="py-0.5 flex items-center gap-1.5">
+                        <span
+                          className="inline-block w-2 h-2 rounded-full"
+                          style={{ backgroundColor: getModelColor(m.model) }}
+                        />
+                        {shortModelName(m.model)}
+                      </td>
+                      <td className="text-right font-mono">{formatTokenCount(mTotal)}</td>
+                      <td className="text-right font-mono">{formatCost(m.costUsd)}</td>
+                      <td className="text-right font-mono">{m.requestCount}</td>
+                      <td className="text-right font-mono">{pct}%</td>
+                    </tr>
+                  )
+                })}
+            </tbody>
+          </table>
+        </div>
+      )}
     </>
+  )
+}
+
+function TimelinePanel({
+  currentBlock,
+  todaySnapshots
+}: {
+  currentBlock: UsageBlock | null
+  todaySnapshots: UsageSnapshot[]
+}): React.JSX.Element {
+  if (!currentBlock || todaySnapshots.length < 2) {
+    return (
+      <div className="text-text-muted text-[11px]">Not enough data yet</div>
+    )
+  }
+
+  return (
+    <BlockTimeline
+      snapshots={todaySnapshots}
+      blockStartTime={currentBlock.startTime}
+      blockEndTime={currentBlock.endTime}
+    />
+  )
+}
+
+function RecentBlocksPanel({ recentBlocks }: { recentBlocks: UsageBlock[] }): React.JSX.Element {
+  if (recentBlocks.length === 0) {
+    return (
+      <div className="text-text-muted text-[11px]">No recent blocks</div>
+    )
+  }
+
+  return (
+    <div className="space-y-1">
+      {recentBlocks.map((block) => (
+        <BlockRow key={block.id} block={block} />
+      ))}
+    </div>
   )
 }
 
@@ -204,12 +349,41 @@ function OpencodeSection({ entry }: { entry: EngineUsageSummary }): React.JSX.El
         </div>
       </div>
 
-      <EngineSummaryStats
-        totalTokens={totalTokens}
-        costUsd={entry.costUsd}
-        requestCount={entry.requestCount}
-      />
-      <EngineModelTable models={entry.models} engineTotalTokens={totalTokens} />
+      {/* Summary row */}
+      <div className="flex gap-5 text-[11px] mb-3">
+        <div>
+          <div className="text-text-muted text-[10px]">Tokens</div>
+          <div className="font-mono text-text-primary">{formatTokenCount(totalTokens)}</div>
+        </div>
+        <div>
+          <div className="text-text-muted text-[10px]">Cost</div>
+          <div className="font-mono text-text-primary">{formatCost(entry.costUsd)}</div>
+        </div>
+        <div>
+          <div className="text-text-muted text-[10px]">Requests</div>
+          <div className="font-mono text-text-primary">{entry.requestCount}</div>
+        </div>
+      </div>
+
+      {/* Per-model table */}
+      {entry.models.length > 0 && (
+        <table className="w-full text-[10px]">
+          <thead>
+            <tr className="text-text-muted">
+              <th className="text-left font-medium pb-1">Model</th>
+              <th className="text-right font-medium pb-1">Tokens</th>
+              <th className="text-right font-medium pb-1">Cost</th>
+              <th className="text-right font-medium pb-1">Reqs</th>
+              <th className="text-right font-medium pb-1">Share</th>
+            </tr>
+          </thead>
+          <tbody>
+            {entry.models.map((m) => (
+              <OpencodeModelRow key={m.model} model={m} engineTotalTokens={totalTokens} />
+            ))}
+          </tbody>
+        </table>
+      )}
 
       {/* Footnote */}
       <p className="text-[9px] text-text-muted mt-2">
@@ -221,67 +395,7 @@ function OpencodeSection({ entry }: { entry: EngineUsageSummary }): React.JSX.El
   )
 }
 
-// ---------------------------------------------------------------------------
-// Shared engine summary + per-model table (used by ClaudeCard + OpencodeSection)
-// ---------------------------------------------------------------------------
-
-function EngineSummaryStats({
-  totalTokens,
-  costUsd,
-  requestCount
-}: {
-  totalTokens: number
-  costUsd: number
-  requestCount: number
-}): React.JSX.Element {
-  return (
-    <div className="flex gap-5 text-[11px] mb-3">
-      <div>
-        <div className="text-text-muted text-[10px]">Tokens</div>
-        <div className="font-mono text-text-primary">{formatTokenCount(totalTokens)}</div>
-      </div>
-      <div>
-        <div className="text-text-muted text-[10px]">Cost</div>
-        <div className="font-mono text-text-primary">{formatCost(costUsd)}</div>
-      </div>
-      <div>
-        <div className="text-text-muted text-[10px]">Requests</div>
-        <div className="font-mono text-text-primary">{requestCount}</div>
-      </div>
-    </div>
-  )
-}
-
-function EngineModelTable({
-  models,
-  engineTotalTokens
-}: {
-  models: ModelTokenBreakdown[]
-  engineTotalTokens: number
-}): React.JSX.Element | null {
-  if (models.length === 0) return null
-
-  return (
-    <table className="w-full text-[10px]">
-      <thead>
-        <tr className="text-text-muted">
-          <th className="text-left font-medium pb-1">Model</th>
-          <th className="text-right font-medium pb-1">Tokens</th>
-          <th className="text-right font-medium pb-1">Cost</th>
-          <th className="text-right font-medium pb-1">Reqs</th>
-          <th className="text-right font-medium pb-1">Share</th>
-        </tr>
-      </thead>
-      <tbody>
-        {models.map((m) => (
-          <EngineModelRow key={m.model} model={m} engineTotalTokens={engineTotalTokens} />
-        ))}
-      </tbody>
-    </table>
-  )
-}
-
-function EngineModelRow({
+function OpencodeModelRow({
   model,
   engineTotalTokens
 }: {
@@ -405,6 +519,94 @@ function Section({
         {subtitle && <span className="text-[9px] text-text-muted">{subtitle}</span>}
       </div>
       {children}
+    </div>
+  )
+}
+
+function StatRow({
+  label,
+  value,
+  className,
+  tooltip
+}: {
+  label: string
+  value: string
+  className?: string
+  tooltip?: string
+}): React.JSX.Element {
+  return (
+    <div className="flex items-center justify-between" title={tooltip}>
+      <span className="text-text-muted">{label}</span>
+      <span className={`font-mono text-text-primary ${className ?? ''}`}>{value}</span>
+    </div>
+  )
+}
+
+function BlockRow({ block }: { block: UsageBlock }): React.JSX.Element {
+  const total = sumTokens(block.tokens)
+
+  // Prefer finalApiPercent (actual API %) over computing from projectedUsage.
+  const apiPct = block.finalApiPercent
+  const pct = apiPct != null && apiPct > 0 ? Math.min(100, Math.round(apiPct)) : null
+
+  // Derive projected total from API %
+  const projTokens = apiPct != null && apiPct > 0 ? Math.round(total / (apiPct / 100)) : null
+  const projCost =
+    apiPct != null && apiPct > 0 && total > 0
+      ? Math.round((block.costUsd / (apiPct / 100)) * 100) / 100
+      : null
+
+  return (
+    <div className="flex items-center gap-2 text-[10px] py-1.5 px-1 rounded hover:bg-bg-hover/30 transition-colors">
+      {/* Time range */}
+      <span className="text-text-muted w-[120px] shrink-0">
+        {formatTime(block.startTime)} – {formatTime(block.actualEndTime)}
+      </span>
+      {/* Tokens: used / projected */}
+      <span className="font-mono w-[140px] text-right shrink-0">
+        <span className="text-text-primary">{formatTokenCount(total)}</span>
+        {projTokens != null && (
+          <span className="text-text-muted"> / {formatTokenCount(projTokens)}</span>
+        )}
+      </span>
+      {/* Cost: used / projected */}
+      <span className="font-mono w-[120px] text-right shrink-0">
+        <span className="text-text-muted">{formatCost(block.costUsd)}</span>
+        {projCost != null && <span className="text-text-muted/50"> / {formatCost(projCost)}</span>}
+      </span>
+      {/* Utilization bar + percentage */}
+      {pct !== null ? (
+        <div
+          className="flex-1 flex items-center gap-1.5"
+          title={`Used ${pct}% of 5hr window capacity`}
+        >
+          <div className="flex-1 h-[5px] rounded-full bg-white/5 overflow-hidden">
+            <div
+              className={`h-full rounded-full transition-all ${
+                pct >= 80 ? 'bg-red-400/70' : pct >= 50 ? 'bg-yellow-400/60' : 'bg-green-400/50'
+              }`}
+              style={{ width: `${pct}%` }}
+            />
+          </div>
+          <span className="text-text-muted font-mono text-[9px] w-[28px] text-right">{pct}%</span>
+        </div>
+      ) : (
+        <div className="flex-1 flex items-center gap-1">
+          {block.models.map((m) => (
+            <span
+              key={m.model}
+              className="inline-block w-2 h-2 rounded-full"
+              style={{ backgroundColor: getModelColor(m.model) }}
+              title={`${shortModelName(m.model)}: ${formatTokenCount(sumTokens(m.tokens))}`}
+            />
+          ))}
+        </div>
+      )}
+      {block.isActive && (
+        <span className="text-[8px] px-1 py-0.5 rounded bg-green-500/15 text-green-400">
+          active
+        </span>
+      )}
     </div>
   )
 }
