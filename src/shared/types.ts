@@ -905,6 +905,11 @@ interface VendorAuthAPI {
   vendorAuthProbe(engineId: EngineId): Promise<VendorAuthMap>
   /** List per-vendor auth options (GET /provider/auth). */
   vendorAuthListOptions(engineId: EngineId): Promise<Record<string, VendorAuthOption[]>>
+  /**
+   * Which vendor ids have stored credentials in the engine's own auth store
+   * (read-only file peek — ids + credential kind only, never key material).
+   */
+  vendorAuthListKeys(engineId: EngineId): Promise<Record<string, 'api' | 'oauth'>>
   /** Set an API key for a vendor. */
   vendorAuthSetKey(engineId: EngineId, vendorId: string, key: string): Promise<void>
   /** Start an OAuth flow for a vendor. Returns the URL to open + instructions. */

@@ -297,6 +297,7 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     testProxyConnection: (proxy) => unwrap('proxy:test-connection', proxy),
     vendorAuthProbe: async () => ({}),
     vendorAuthListOptions: async () => ({}),
+    vendorAuthListKeys: async () => ({}),
     vendorAuthSetKey: async () => {},
     vendorAuthOauthAuthorize: async () => {
       throw new Error('Vendor auth not available in tests')
