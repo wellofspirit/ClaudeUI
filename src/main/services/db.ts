@@ -14,6 +14,7 @@ import * as path from 'path'
 import * as os from 'os'
 import BetterSqlite3 from 'better-sqlite3'
 import type { EngineId, ModelRef, AccountInfo } from '../../shared/types'
+import { engineMeta } from '../../shared/engine-meta'
 
 // ---------------------------------------------------------------------------
 // Metering types (Phase 7 — Pass 1)
@@ -356,7 +357,9 @@ function rowToMeta(row: SessionMetaRow): SessionMeta {
       engineId,
       model: {
         engineId,
-        vendorId: row.vendor_id ?? (engineId === 'claude' ? 'anthropic' : 'openai'),
+        // Legacy-row hydration fallback: rows written before vendor_id tracking
+        // have no persisted vendor, so fall back to the engine's historical default.
+        vendorId: row.vendor_id ?? engineMeta(engineId).defaultVendorId,
         modelId: row.model_id
       }
     }

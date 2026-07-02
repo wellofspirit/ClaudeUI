@@ -7,7 +7,13 @@ import type { EngineToolMap } from '../../../../../shared/tool-kinds'
 import { ClaudeEngineToolMap } from './ClaudeEngineToolMap'
 import { OpencodeEngineToolMap } from './OpencodeEngineToolMap'
 
+// `satisfies Record<EngineId, …>` makes a new engine a compile error until its
+// tool map is added (rather than silently falling back to Claude's).
+const ENGINE_TOOL_MAP = {
+  claude: ClaudeEngineToolMap,
+  opencode: OpencodeEngineToolMap
+} satisfies Record<EngineId, EngineToolMap>
+
 export function engineToolMap(engineId: EngineId): EngineToolMap {
-  if (engineId === 'opencode') return OpencodeEngineToolMap
-  return ClaudeEngineToolMap
+  return ENGINE_TOOL_MAP[engineId]
 }

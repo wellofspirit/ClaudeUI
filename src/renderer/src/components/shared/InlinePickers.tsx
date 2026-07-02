@@ -11,6 +11,7 @@ import {
   type ThinkingMode
 } from '../../../../shared/model-capabilities'
 import type { EngineId, VendorId } from '../../../../shared/types'
+import { engineMeta } from '../../../../shared/engine-meta'
 
 export interface ModelDisplay {
   value: string
@@ -60,7 +61,7 @@ function deriveModelGroups(
     if (!groupMap.has(key)) {
       // Build a human label: "Claude · Anthropic" or "opencode · <vendorName>"
       const vendorLabel = vendorId.charAt(0).toUpperCase() + vendorId.slice(1)
-      const engineLabel = engineId === 'claude' ? 'Claude' : engineId
+      const engineLabel = engineMeta(engineId).label
       groupMap.set(key, { label: `${engineLabel} · ${vendorLabel}`, items: [] })
     }
     groupMap.get(key)!.items.push(m)

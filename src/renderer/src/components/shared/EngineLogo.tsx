@@ -25,10 +25,8 @@ export function EngineLogo({
   size = 12,
   testid = 'EngineLogo'
 }: EngineLogoProps): React.JSX.Element {
-  if (engineId === 'opencode') {
-    return <OpencodeMark size={size} className={className} testid={testid} engineId={engineId} />
-  }
-  return <ClaudeMark size={size} className={className} testid={testid} engineId={engineId} />
+  const Mark = ENGINE_MARK[engineId]
+  return <Mark size={size} className={className} testid={testid} engineId={engineId} />
 }
 
 // ── Claude mark ───────────────────────────────────────────────────────────────
@@ -107,3 +105,11 @@ function OpencodeMark({
     </svg>
   )
 }
+
+// Engine → SVG mark. `satisfies Record<EngineId, …>` makes a new engine a
+// compile error until its mark is added (rather than silently rendering Claude).
+type EngineMarkProps = { size: number; className: string; testid: string; engineId: EngineId }
+const ENGINE_MARK = {
+  claude: ClaudeMark,
+  opencode: OpencodeMark
+} satisfies Record<EngineId, (props: EngineMarkProps) => React.JSX.Element>
