@@ -36,6 +36,9 @@ export default defineConfig(
       '**/out/**',
       'vendor/**',
       '.cache/**',
+      // Agent worktrees (full repo copies) live under .claude/worktrees — four
+      // of them once made a repo-wide lint OOM at the default heap size.
+      '.claude/**',
       'coverage/**'
     ]
   },
