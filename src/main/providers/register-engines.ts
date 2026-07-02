@@ -6,6 +6,9 @@
 import { ClaudeSession } from '../services/claude-session'
 import { OpencodeSession } from '../opencode/OpencodeSession'
 import { engineRegistry } from './EngineRegistry'
+import { claudeSpawnPrep } from './claude-spawn-prep'
+import { opencodeSpawnPrep } from '../opencode/opencode-spawn-prep'
+import { spawnPrepRegistry } from './SpawnPrepRegistry'
 
 engineRegistry.register(
   'claude',
@@ -66,3 +69,6 @@ engineRegistry.register(
       forkSession
     )
 )
+
+spawnPrepRegistry.register('claude', claudeSpawnPrep)
+spawnPrepRegistry.register('opencode', opencodeSpawnPrep)

@@ -105,7 +105,8 @@ import {
 } from '../services/opencode-session-list'
 import { invalidateMockupSecuritySettings } from '../services/mockup-settings'
 import type { ISession } from '../providers/ISession'
-import { prepareAndCreateSession, applyProxyEnv, applyEndpointEnv, applyModelEnv } from './create-session'
+import { prepareAndCreateSession } from './create-session'
+import { applyProxyEnv, applyEndpointEnv, applyModelEnv } from '../providers/claude-spawn-prep'
 
 /**
  * Wraps an async IPC handler with try-catch, returning a standardized IpcResult envelope.

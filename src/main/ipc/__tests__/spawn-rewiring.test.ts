@@ -9,6 +9,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { bootIpcHarness, type IpcHarness } from '../../../test/helpers/boot-ipc-harness'
+import type { EngineId } from '../../../shared/types'
 
 // hoisted spies
 const { sessionManagerSpies } = vi.hoisted(() => {
@@ -280,6 +281,21 @@ describe('session:create spawn rewiring (Phase 3b)', () => {
     )
 
     // opencode path skips vendor config — loadVendorConfig should NOT be called
+    expect(uiConfigMocks.loadVendorConfig).not.toHaveBeenCalled()
+  })
+
+  it('Item 4 GUARD: unknown engineId throws from prepareAndCreateSession and never applies Claude vendor/env (fails pre-fix)', async () => {
+    uiConfigMocks.loadEngineConfig.mockReturnValue({})
+    uiConfigMocks.loadVendorConfig.mockReturnValue({})
+    await expect(
+      harness.call(
+        'session:create', 'routing-unknown', '/tmp/cwd',
+        undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+        'gemini' as unknown as EngineId
+      )
+    ).rejects.toThrow(/No spawn-prep registered for engine "gemini"/)
+    // Pre-fix, the else-is-claude branch applied Anthropic vendor config + env for
+    // any non-'opencode' id (including bogus ones). Post-fix, require() throws first.
     expect(uiConfigMocks.loadVendorConfig).not.toHaveBeenCalled()
   })
 })
