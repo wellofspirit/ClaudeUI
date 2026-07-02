@@ -697,6 +697,7 @@ function ModelAllowlistDialog({
   )
   const [checked, setChecked] = useState<Set<string>>(new Set(current ?? []))
   const [search, setSearch] = useState('')
+  const [freeOnly, setFreeOnly] = useState(false)
   // When the incoming allowlist is undefined (legacy "show all"), default every
   // model to checked once the list loads so saving doesn't silently hide them.
   const seededRef = useRef(current !== undefined)
@@ -721,7 +722,12 @@ function ModelAllowlistDialog({
     }
   }, [providerId])
 
+  const hasFreeModels = (models ?? []).some((m) => m.free)
   const filtered = (models ?? []).filter((m) => {
+    // Ignore a stale toggle when the loaded entries contain no free models — the
+    // chip is unmounted then, so an active filter would otherwise leave a
+    // permanently empty list (same dead-end guard as ModelPicker.displayedGroups).
+    if (freeOnly && hasFreeModels && !m.free) return false
     const q = search.trim().toLowerCase()
     if (!q) return true
     return m.id.toLowerCase().includes(q) || m.name.toLowerCase().includes(q)
@@ -784,6 +790,21 @@ function ModelAllowlistDialog({
           >
             Clear
           </button>
+          {hasFreeModels && (
+            <button
+              type="button"
+              data-testid="ModelAllowlistDialog.freeFilter"
+              aria-pressed={freeOnly}
+              onClick={() => setFreeOnly((v) => !v)}
+              className={`text-[10px] px-2 py-0.5 rounded-full font-medium uppercase tracking-wide transition-colors cursor-pointer border whitespace-nowrap ${
+                freeOnly
+                  ? 'bg-emerald-500/25 text-emerald-300 border-emerald-500/40'
+                  : 'bg-bg-hover text-text-muted border-border hover:text-text-secondary'
+              }`}
+            >
+              Free only
+            </button>
+          )}
         </div>
 
         <div className="flex-1 overflow-y-auto px-2 py-1">
@@ -810,7 +831,17 @@ function ModelAllowlistDialog({
                   ✓
                 </span>
                 <span className="flex-1 min-w-0">
-                  <span className="text-[12px] text-text-secondary truncate block">{m.name}</span>
+                  <span className="flex items-center gap-1.5">
+                    <span className="text-[12px] text-text-secondary truncate">{m.name}</span>
+                    {m.free && (
+                      <span
+                        data-testid="ModelAllowlistDialog.freeBadge"
+                        className="text-[9px] px-1 py-0.5 rounded bg-emerald-500/15 text-emerald-300 font-medium uppercase tracking-wide shrink-0"
+                      >
+                        Free
+                      </span>
+                    )}
+                  </span>
                   <span className="text-[10px] text-text-muted/50 truncate block">
                     {m.id}
                     {m.releaseDate ? ` · ${m.releaseDate}` : ''}

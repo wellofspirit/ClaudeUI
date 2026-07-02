@@ -158,15 +158,20 @@ export async function getOpencodeProviderModels(
     const { all } = await fetchCatalogSnapshot()
     const provider = all.find((p) => p.id === providerId)
     if (!provider) return []
+    // Same zen-gated free derivation as discoverOpencodeModels — see its comment.
+    const providerIsFreeGateway = FREE_OPENCODE_VENDOR_IDS.has(providerId)
     return Object.entries(provider.models ?? {})
       .map(([modelId, m]): OpencodeCatalogModel => {
         const rec = m as Provider['models'][string] & { release_date?: string }
+        const isFree =
+          providerIsFreeGateway && !!rec.cost && rec.cost.input === 0 && rec.cost.output === 0
         return {
           id: modelId,
           name: rec.name || modelId,
           releaseDate: rec.release_date,
           toolCalling: !!rec.capabilities?.toolcall,
-          reasoning: !!rec.capabilities?.reasoning
+          reasoning: !!rec.capabilities?.reasoning,
+          ...(isFree ? { free: true } : {})
         }
       })
       .sort((a, b) => {
@@ -246,9 +251,17 @@ export async function discoverOpencodeModels(): Promise<EngineModelGroup[]> {
               caps?.reasoning && m.variants && Object.keys(m.variants).length > 0
                 ? Object.keys(m.variants)
                 : []
-            // A model is free iff the catalog reports cost AND both input/output are zero.
+            // A model is free iff the catalog reports cost AND both input/output are zero
+            // AND the provider is a credential-free zen gateway (FREE_OPENCODE_VENDOR_IDS).
+            // Subscription/OAuth-authenticated providers (e.g. openai) report zeroed catalog
+            // costs for models the USER pays for elsewhere — that's not "free", it's a
+            // pricing-catalog blind spot, so gate on provider identity, not just cost.
             // Missing cost is treated as unknown, not free.
-            const isFree = !!m.cost && m.cost.input === 0 && m.cost.output === 0
+            const isFree =
+              !!m.cost &&
+              m.cost.input === 0 &&
+              m.cost.output === 0 &&
+              FREE_OPENCODE_VENDOR_IDS.has(provider.id)
             return {
               value: `${provider.id}/${modelId}`,
               displayName: m.name || modelId,

@@ -394,6 +394,8 @@ export interface OpencodeCatalogModel {
   releaseDate?: string
   toolCalling?: boolean
   reasoning?: boolean
+  /** Same zen-gated free derivation as ModelInfo.free — see its doc comment. */
+  free?: boolean
 }
 
 export interface EngineConfig {
@@ -548,7 +550,12 @@ export interface ModelInfo {
    *  Non-empty only when the model's capabilities.reasoning === true and variants are present.
    *  Claude models always have this undefined/empty — picker hidden. */
   reasoningVariants?: string[]
-  /** true when the provider catalog reports zero input+output cost (e.g. opencode zen free tier). */
+  /** true when the model belongs to a credential-free zen gateway provider
+   *  (FREE_OPENCODE_VENDOR_IDS) AND the catalog reports zero input+output cost —
+   *  i.e. an actual free tier (e.g. opencode zen's *-free models). Deliberately
+   *  NOT set from cost alone: subscription/OAuth-authenticated providers (e.g.
+   *  openai) report zeroed catalog costs for models the user pays for elsewhere,
+   *  which is a pricing-catalog blind spot, not free-ness. */
   free?: boolean
 }
 
