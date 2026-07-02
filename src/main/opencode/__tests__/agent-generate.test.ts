@@ -50,8 +50,17 @@ vi.mock('../OpencodeClient', () => ({
 }))
 
 // Keep the model-discovery dependency hermetic — no transient server spawn.
+// parseModelString is re-supplied here (mirroring its real "providerID/modelID"
+// split, bare id → 'opencode') since agent-generate.ts now imports the shared
+// copy from model-discovery.ts instead of defining it locally (Item 6b dedup).
 vi.mock('../model-discovery', () => ({
   resolveOpencodeSpawnModel: mockResolveModel,
+  parseModelString: (model: string) => {
+    const slash = model.indexOf('/')
+    return slash < 0
+      ? { providerID: 'opencode', modelID: model }
+      : { providerID: model.slice(0, slash), modelID: model.slice(slash + 1) }
+  },
 }))
 
 vi.mock('../../services/persisted-sessions-dir', () => ({

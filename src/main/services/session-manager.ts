@@ -1,11 +1,10 @@
 import type { BrowserWindow } from 'electron'
-import type { ChatMessage, SandboxSettings, EngineId } from '../../shared/types'
-import type { ISession } from '../providers/ISession'
+import type { ChatMessage, EngineId } from '../../shared/types'
+import type { ISession, EngineSpawnOptions } from '../providers/ISession'
 import { engineRegistry } from '../providers/EngineRegistry'
 // Side-effect: registers all engine factories (claude, …) at module load time
 import '../providers/register-engines'
 import { loadSessionHistory } from './session-history'
-import { ClaudeSession } from './claude-session'
 
 export class SessionManager {
   private sessions = new Map<string, ISession>()
@@ -21,14 +20,7 @@ export class SessionManager {
     routingId: string,
     win: BrowserWindow,
     cwd: string,
-    effort?: string,
-    resumeSessionId?: string,
-    permissionMode?: string,
-    model?: string,
-    sandboxConfig?: SandboxSettings,
-    thinkingMode?: string,
-    resumeSessionAt?: string,
-    forkSession?: boolean,
+    opts: EngineSpawnOptions = {},
     engineId: EngineId = 'claude'
   ): ISession {
     // Clean up existing session with same routingId
@@ -37,20 +29,7 @@ export class SessionManager {
       existing.cancel()
     }
 
-    const session = engineRegistry.createSession(
-      engineId,
-      routingId,
-      win,
-      cwd,
-      effort,
-      resumeSessionId,
-      permissionMode,
-      model,
-      sandboxConfig,
-      thinkingMode,
-      resumeSessionAt,
-      forkSession
-    )
+    const session = engineRegistry.createSession(engineId, routingId, win, cwd, opts)
     session.setInactivityTimeout(this._sessionTimeoutMs)
     this.sessions.set(routingId, session)
     return session
@@ -127,17 +106,5 @@ export class SessionManager {
   /** Iterate all active sessions (engine-neutral). */
   forEach(fn: (session: ISession) => void): void {
     this.sessions.forEach(fn)
-  }
-
-  /**
-   * Iterate only ClaudeSession instances. Use for Claude-only operations
-   * (e.g. notifySettingsChanged) that must not run on other engine sessions.
-   */
-  forEachClaude(fn: (session: ClaudeSession) => void): void {
-    this.sessions.forEach((session) => {
-      if (session instanceof ClaudeSession) {
-        fn(session)
-      }
-    })
   }
 }

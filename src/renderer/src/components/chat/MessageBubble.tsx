@@ -322,6 +322,7 @@ export const MessageBubble = memo(function MessageBubble({
       {activeSessionId && forkCapability && (
         <div className="opacity-0 group-hover/msg:opacity-100 focus-within:opacity-100 transition-opacity">
           <button
+            data-testid="MessageBubble.fork"
             onClick={handleFork}
             disabled={forking}
             title="Fork a new session from this point"

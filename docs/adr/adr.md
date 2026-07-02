@@ -31,3 +31,4 @@
 | [027](adr-027_test-data-attributes.md)                           | Test data attributes — two-tier `data-testid` convention + DOM-assert-before-screenshot verification *(relates to 026/008)* |
 | [028](adr-028_opencode-native-config-in-place.md)                | opencode engine-native config written to opencode's own files in place (jsonc, comment-safe) *(implements 020; relates to 019/022/024)* |
 | [029](adr-029_opencode-custom-agent-crud.md)                     | opencode custom-agent CRUD — markdown agent files (global/project), opt-in permissions, AI-assisted authoring *(builds on 028; relates to 022/023/024)* |
+| [030](adr-030_capability-honesty.md)                             | Capability honesty — a capability flag is true only when the full engine path works; opencode fork demoted *(relates to 018/019)* |

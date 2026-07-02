@@ -20,7 +20,10 @@ import {
   resolveClaudeCapabilities,
   resolveOpencodeCapabilitiesFromModel,
   maxOutputTokens,
-  CONTEXT_WINDOW_1M
+  CONTEXT_WINDOW_1M,
+  resolveCapabilities,
+  OPENCODE_ENGINE_CAPABILITIES,
+  CLAUDE_ENGINE_CAPABILITIES
 } from '../model-capabilities'
 
 describe('supportsAdaptiveThinking', () => {
@@ -513,5 +516,35 @@ describe('resolveOpencodeCapabilitiesFromModel', () => {
   it('resolveOpencodeCapabilitiesFromModel seeds vision from ModelInfo flags', () => {
     expect(resolveOpencodeCapabilitiesFromModel({ vision: true }).vision).toBe(true)
     expect(resolveOpencodeCapabilitiesFromModel(undefined).vision).toBe(false)
+  })
+})
+
+describe('engine capability honesty (ADR-030)', () => {
+  it('opencode fork/forkFromMessage are false — the end-to-end path is unwired', () => {
+    expect(OPENCODE_ENGINE_CAPABILITIES.fork).toBe(false)
+    expect(OPENCODE_ENGINE_CAPABILITIES.forkFromMessage).toBe(false)
+  })
+
+  it('claude fork/forkFromMessage stay true — the flip is engine-specific, not global', () => {
+    expect(CLAUDE_ENGINE_CAPABILITIES.fork).toBe(true)
+    expect(CLAUDE_ENGINE_CAPABILITIES.forkFromMessage).toBe(true)
+  })
+
+  it('degraded path: no-toolCalling model → canUseMcp/canUseSubagents/isAgentCapable false, engine gates unaffected', () => {
+    const noToolModel = {
+      reasoning: {},
+      vision: true,
+      toolCalling: false,
+      contextWindow: 200000,
+      maxOutput: 4096,
+      promptCaching: false
+    }
+    const caps = resolveCapabilities(CLAUDE_ENGINE_CAPABILITIES, noToolModel)
+    expect(caps.canUseMcp).toBe(false)
+    expect(caps.canUseSubagents).toBe(false)
+    expect(caps.isAgentCapable).toBe(false)
+    // Engine gates still true
+    expect(caps.voice).toBe(true)
+    expect(caps.hostedMcp).toBe(true)
   })
 })

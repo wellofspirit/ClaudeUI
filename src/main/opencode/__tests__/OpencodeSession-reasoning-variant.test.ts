@@ -93,11 +93,20 @@ vi.mock('../../services/ui-config', () => ({
 const mockGetOpencodeModelContextWindow = vi.hoisted(() => vi.fn().mockReturnValue(0))
 const mockGetOpencodeModelCapabilities = vi.hoisted(() => vi.fn().mockReturnValue(undefined))
 const mockDiscoverOpencodeModels = vi.hoisted(() => vi.fn().mockResolvedValue([]))
+// parseModelString mirrors the real "providerID/modelID" split (bare id →
+// 'opencode') since OpencodeSession.ts now imports the shared copy from
+// model-discovery.ts instead of defining it locally (Item 6b dedup).
 vi.mock('../model-discovery', () => ({
   getOpencodeModelContextWindow: mockGetOpencodeModelContextWindow,
   getOpencodeModelCapabilities: mockGetOpencodeModelCapabilities,
   discoverOpencodeModels: mockDiscoverOpencodeModels,
-  invalidateOpencodeModelCache: vi.fn()
+  invalidateOpencodeModelCache: vi.fn(),
+  parseModelString: (model: string) => {
+    const slash = model.indexOf('/')
+    return slash < 0
+      ? { providerID: 'opencode', modelID: model }
+      : { providerID: model.slice(0, slash), modelID: model.slice(slash + 1) }
+  }
 }))
 
 // ---------------------------------------------------------------------------
@@ -174,7 +183,7 @@ function setupMocks(): void {
 
 function makeSession(model = 'minimax/minimax-01'): OpencodeSession {
   const win = new MockWindow() as unknown as BrowserWindow
-  return new OpencodeSession('r-variant-1', win, '/tmp/test-cwd', undefined, undefined, 'default', model)
+  return new OpencodeSession('r-variant-1', win, '/tmp/test-cwd', { permissionMode: 'default', model })
 }
 
 // ---------------------------------------------------------------------------

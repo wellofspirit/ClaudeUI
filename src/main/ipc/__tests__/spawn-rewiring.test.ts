@@ -9,6 +9,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { bootIpcHarness, type IpcHarness } from '../../../test/helpers/boot-ipc-harness'
+import type { EngineId } from '../../../shared/types'
 
 // hoisted spies
 const { sessionManagerSpies } = vi.hoisted(() => {
@@ -50,7 +51,6 @@ const { sessionManagerSpies } = vi.hoisted(() => {
     cancel: vi.fn(),
     interrupt: vi.fn(async () => {}),
     forEach: vi.fn(),
-    forEachClaude: vi.fn((cb: (s: unknown) => void) => cb(sessionStub)),
     setSessionTimeout: vi.fn()
   }
   return { sessionManagerSpies, sessionStub }
@@ -156,7 +156,6 @@ vi.mock('../../services/session-manager', () => ({
     cancel = sessionManagerSpies.cancel
     interrupt = sessionManagerSpies.interrupt
     forEach = sessionManagerSpies.forEach
-    forEachClaude = sessionManagerSpies.forEachClaude
     setSessionTimeout = sessionManagerSpies.setSessionTimeout
   }
 }))
@@ -230,9 +229,9 @@ describe('session:create spawn rewiring (Phase 3b)', () => {
     await harness.call('session:create', 'routing-2', '/tmp/cwd')
 
     expect(sessionManagerSpies.create).toHaveBeenCalled()
-    // 8th argument (index 7) is sandboxConfig in the create() call
+    // 4th argument (index 3) is the EngineSpawnOptions object in the create() call
     const callArgs = sessionManagerSpies.create.mock.calls[0]
-    expect(callArgs[7]).toEqual(sandboxConfig)
+    expect(callArgs[3].sandboxConfig).toEqual(sandboxConfig)
   })
 
   it('passes undefined sandbox when engine config has no sandbox', async () => {
@@ -243,7 +242,7 @@ describe('session:create spawn rewiring (Phase 3b)', () => {
 
     expect(sessionManagerSpies.create).toHaveBeenCalled()
     const callArgs = sessionManagerSpies.create.mock.calls[0]
-    expect(callArgs[7]).toBeUndefined()
+    expect(callArgs[3].sandboxConfig).toBeUndefined()
   })
 
   it('does NOT read sandbox from loadSettings()', async () => {
@@ -256,7 +255,7 @@ describe('session:create spawn rewiring (Phase 3b)', () => {
     const callArgs = sessionManagerSpies.create.mock.calls[0]
     // sandbox should be undefined because it came from engine config (which returned {})
     // NOT from loadSettings
-    expect(callArgs[7]).toBeUndefined()
+    expect(callArgs[3].sandboxConfig).toBeUndefined()
   })
 
   it('#6 vendor-at-spawn: derives "anthropic" vendor from Claude ModelRef (no hardcode)', async () => {
@@ -282,6 +281,21 @@ describe('session:create spawn rewiring (Phase 3b)', () => {
     )
 
     // opencode path skips vendor config — loadVendorConfig should NOT be called
+    expect(uiConfigMocks.loadVendorConfig).not.toHaveBeenCalled()
+  })
+
+  it('Item 4 GUARD: unknown engineId throws from prepareAndCreateSession and never applies Claude vendor/env (fails pre-fix)', async () => {
+    uiConfigMocks.loadEngineConfig.mockReturnValue({})
+    uiConfigMocks.loadVendorConfig.mockReturnValue({})
+    await expect(
+      harness.call(
+        'session:create', 'routing-unknown', '/tmp/cwd',
+        undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+        'gemini' as unknown as EngineId
+      )
+    ).rejects.toThrow(/No spawn-prep registered for engine "gemini"/)
+    // Pre-fix, the else-is-claude branch applied Anthropic vendor config + env for
+    // any non-'opencode' id (including bogus ones). Post-fix, require() throws first.
     expect(uiConfigMocks.loadVendorConfig).not.toHaveBeenCalled()
   })
 })

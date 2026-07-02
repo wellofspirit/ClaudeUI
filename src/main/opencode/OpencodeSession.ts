@@ -4,6 +4,7 @@ import { opencodeServerManager } from './OpencodeServerManager'
 import type { ServerConnection } from './OpencodeServerManager'
 import { OpencodeClient } from './OpencodeClient'
 import { BaseSession } from '../providers/BaseSession'
+import type { EngineSpawnOptions } from '../providers/ISession'
 import type { ResolvedCapabilities } from '../../shared/model-capabilities'
 import { resolveOpencodeCapabilities } from '../../shared/model-capabilities'
 import type {
@@ -17,14 +18,21 @@ import type {
   MeteringSnapshot,
   AutoModeConfig,
   AskUserQuestion,
-  StatusLineData
+  StatusLineData,
+  SkillInfo
 } from '../../shared/types'
 import { opencodeModel } from '../../shared/types'
-import { getOpencodeModelContextWindow, getOpencodeModelCapabilities, discoverOpencodeModels } from './model-discovery'
+import {
+  getOpencodeModelContextWindow,
+  getOpencodeModelCapabilities,
+  discoverOpencodeModels,
+  parseModelString
+} from './model-discovery'
 import { equivalentCostUsd } from '../../shared/pricing'
 import { logger } from '../services/logger'
 import { mapEvent, extractToolResult, convertStoredMessage } from './event-mapper'
 import type { MapperOutput, MessageAccumulator } from './event-mapper'
+import { discoverOpencodeSkills } from './command-skill-discovery'
 import { opencodeAuthProvider } from '../auth/OpencodeAuthProvider'
 import { recordUsageEvent } from '../services/usage-recorder'
 import { loadClaudePermissions, saveClaudePermissions } from '../services/claude-settings'
@@ -120,13 +128,6 @@ function buildRuleset(mode: string): PermissionRule[] {
   }
 }
 
-/** Parse "providerID/modelID" → { providerID, modelID } */
-function parseModelString(model: string): { providerID: string; modelID: string } {
-  const slash = model.indexOf('/')
-  if (slash < 0) return { providerID: 'opencode', modelID: model }
-  return { providerID: model.slice(0, slash), modelID: model.slice(slash + 1) }
-}
-
 const DEFAULT_MODEL = 'opencode/mimo-v2.5-free'
 
 export class OpencodeSession extends BaseSession {
@@ -195,23 +196,13 @@ export class OpencodeSession extends BaseSession {
     return resolveOpencodeCapabilities(getOpencodeModelCapabilities(providerID, modelID))
   }
 
-  constructor(
-    routingId: string,
-    win: BrowserWindow,
-    cwd: string,
-    _effort?: string,
-    resumeSessionId?: string,
-    permissionMode?: string,
-    model?: string,
-    _sandboxConfig?: unknown,
-    _thinkingMode?: string,
-    _resumeSessionAt?: string,
-    _forkSession?: boolean
-  ) {
+  constructor(routingId: string, win: BrowserWindow, cwd: string, opts: EngineSpawnOptions = {}) {
     super(routingId, win, cwd)
-    this._model = model ?? DEFAULT_MODEL
-    this.permissionMode = permissionMode ?? 'default'
-    this.resumeSessionId = resumeSessionId || undefined
+    // effort/sandboxConfig/thinkingMode/resumeSessionAt/forkSession are intentionally
+    // unread — Claude-only options per EngineSpawnOptions' docs / ADR-030.
+    this._model = opts.model ?? DEFAULT_MODEL
+    this.permissionMode = opts.permissionMode ?? 'default'
+    this.resumeSessionId = opts.resumeSessionId || undefined
     this._capabilities = this.resolveCapsForModel()
     this.sendStatus()
     this.sendStatusLine()
@@ -1148,7 +1139,7 @@ export class OpencodeSession extends BaseSession {
    * `{permission:'*', pattern:'*'}` matches every tool via Wildcard.match → regex
    * `.*`). The model therefore just answers in text — tool-less, hang-proof. The
    * system prompt is a belt-and-suspenders nudge. (We deliberately avoid the
-   * prompt body's `tools` field, which opencode marks @deprecated.)
+   * prompt body's `tools` field, which opencode marks as deprecated.)
    */
   override async askSideQuestion(question: string): Promise<string | null> {
     try {
@@ -1358,6 +1349,11 @@ export class OpencodeSession extends BaseSession {
     } catch {
       /* advisory — never breaks the turn */
     }
+  }
+
+  /** ISession.discoverSkills — opencode sources skills from its GET /skill API. */
+  discoverSkills(cwd: string): Promise<SkillInfo[]> {
+    return discoverOpencodeSkills(cwd)
   }
 
   dispose(): void {

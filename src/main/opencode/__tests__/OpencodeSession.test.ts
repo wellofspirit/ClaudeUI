@@ -125,11 +125,29 @@ vi.mock('../../services/ui-config', () => ({
 const mockGetOpencodeModelContextWindow = vi.hoisted(() => vi.fn().mockReturnValue(0))
 const mockGetOpencodeModelCapabilities = vi.hoisted(() => vi.fn().mockReturnValue(undefined))
 const mockDiscoverOpencodeModels = vi.hoisted(() => vi.fn().mockResolvedValue([]))
+// parseModelString mirrors the real "providerID/modelID" split (bare id →
+// 'opencode') since OpencodeSession.ts now imports the shared copy from
+// model-discovery.ts instead of defining it locally (Item 6b dedup).
 vi.mock('../model-discovery', () => ({
   getOpencodeModelContextWindow: mockGetOpencodeModelContextWindow,
   getOpencodeModelCapabilities: mockGetOpencodeModelCapabilities,
   discoverOpencodeModels: mockDiscoverOpencodeModels,
-  invalidateOpencodeModelCache: vi.fn()
+  invalidateOpencodeModelCache: vi.fn(),
+  parseModelString: (model: string) => {
+    const slash = model.indexOf('/')
+    return slash < 0
+      ? { providerID: 'opencode', modelID: model }
+      : { providerID: model.slice(0, slash), modelID: model.slice(slash + 1) }
+  }
+}))
+
+// discoverSkills (Item 3 — ISession.discoverSkills) delegates to
+// discoverOpencodeSkills; mock it directly so the test doesn't depend on the
+// module's internal per-cwd cache or the OpencodeServerManager/OpencodeClient
+// mocks above.
+const mockDiscoverOpencodeSkills = vi.hoisted(() => vi.fn().mockResolvedValue([]))
+vi.mock('../command-skill-discovery', () => ({
+  discoverOpencodeSkills: mockDiscoverOpencodeSkills
 }))
 
 // ---------------------------------------------------------------------------
@@ -171,6 +189,8 @@ function setupMocks(): void {
   mockGetOpencodeModelCapabilities.mockReturnValue(undefined)
   mockDiscoverOpencodeModels.mockReset()
   mockDiscoverOpencodeModels.mockResolvedValue([])
+  mockDiscoverOpencodeSkills.mockReset()
+  mockDiscoverOpencodeSkills.mockResolvedValue([])
   // Default: no user-configured rules (hermetic — don't read the dev's settings).
   mockLoadClaudePermissions.mockReturnValue({
     allow: [],
@@ -226,15 +246,7 @@ function setupMocks(): void {
 
 function makeSession(model?: string, permissionMode?: string): OpencodeSession {
   const win = new MockWindow() as unknown as BrowserWindow
-  return new OpencodeSession(
-    'routing_id_1',
-    win,
-    '/tmp/test-cwd',
-    undefined,
-    undefined,
-    permissionMode,
-    model
-  )
+  return new OpencodeSession('routing_id_1', win, '/tmp/test-cwd', { permissionMode, model })
 }
 
 // ---------------------------------------------------------------------------
@@ -1146,7 +1158,7 @@ describe('OpencodeSession — auto-mode classifier wiring (ADR-023)', () => {
     mockPrompt.mockRejectedValue(new Error('judge down'))
     feedPermissionAsked('bash', 'per_fail')
     const win = new MockWindow() as unknown as BrowserWindow
-    const session = new OpencodeSession('r_fail', win, '/tmp', undefined, undefined, 'full')
+    const session = new OpencodeSession('r_fail', win, '/tmp', { permissionMode: 'full' })
     await session.run('go')
     await vi.waitFor(() => {
       const sent = (win as unknown as MockWindow).webContents.send.mock.calls.some(
@@ -1163,7 +1175,7 @@ describe('OpencodeSession — auto-mode classifier wiring (ADR-023)', () => {
     mockCreateSession.mockResolvedValue({ id: SES })
     feedPermissionAsked('bash', 'per_disabled')
     const win = new MockWindow() as unknown as BrowserWindow
-    const session = new OpencodeSession('r_dis', win, '/tmp', undefined, undefined, 'full')
+    const session = new OpencodeSession('r_dis', win, '/tmp', { permissionMode: 'full' })
     await session.run('go')
     await vi.waitFor(() => {
       const sent = (win as unknown as MockWindow).webContents.send.mock.calls.some(
@@ -1332,7 +1344,7 @@ describe('OpencodeSession — question.asked routing', () => {
     mockLoadEngineConfig.mockReturnValue({ autoMode: { enabled: true, twoStageMode: 'fast' } })
     feedQuestionAsked('que_human')
     const win = new MockWindow() as unknown as BrowserWindow
-    const session = new OpencodeSession('r_qh', win, '/tmp', undefined, undefined, 'full')
+    const session = new OpencodeSession('r_qh', win, '/tmp', { permissionMode: 'full' })
     await session.run('go')
 
     await vi.waitFor(() => {
@@ -1353,7 +1365,7 @@ describe('OpencodeSession — question.asked routing', () => {
     mockLoadEngineConfig.mockReturnValue({ autoMode: { enabled: false } })
     feedQuestionAsked('que_default')
     const win = new MockWindow() as unknown as BrowserWindow
-    const session = new OpencodeSession('r_qd', win, '/tmp', undefined, undefined, 'default')
+    const session = new OpencodeSession('r_qd', win, '/tmp', { permissionMode: 'default' })
     await session.run('go')
 
     await vi.waitFor(() => {
@@ -1722,17 +1734,49 @@ describe('OpencodeSession — queue + steer (Phase 8c)', () => {
 // ---------------------------------------------------------------------------
 // dequeueMessage — no-op for opencode (Phase 8c)
 //
-// dequeueMessage is not on ISession; the IPC handler already guards it with
-// isClaudeSession and returns {removed:0} for non-Claude. OpencodeSession has
-// no dequeueMessage — this test verifies the IPC-level guard is sufficient and
-// that no error propagates to a caller expecting the {removed:N} shape.
-// (The renderer's dequeue affordance simply no-ops gracefully — by design.)
+// dequeueMessage is an OPTIONAL member of ISession (Item 3 — no capability flag
+// gates it; the absence of the method is the gate). The IPC handler guards via
+// optional-call: `session?.dequeueMessage?.(value) ?? { removed: 0 }`.
+// OpencodeSession does not implement dequeueMessage — this test verifies the
+// IPC-level guard is sufficient and that no error propagates to a caller
+// expecting the {removed:N} shape. (The renderer's dequeue affordance simply
+// no-ops gracefully — by design.)
 // ---------------------------------------------------------------------------
 
 // The dequeue guard lives in the IPC layer (session.ipc.ts + remote-handlers.ts),
 // not in OpencodeSession itself, so there's nothing to test on OpencodeSession
 // directly. The existing session.ipc.test and remote-handlers.ipc.test cover it.
 // We add a capability assertion as the test anchor.
+
+// ---------------------------------------------------------------------------
+// discoverSkills — ISession.discoverSkills (Item 3)
+// ---------------------------------------------------------------------------
+
+describe('OpencodeSession — discoverSkills (Item 3)', () => {
+  beforeEach(setupMocks)
+
+  it('delegates to discoverOpencodeSkills with the session cwd', async () => {
+    const skills = [
+      {
+        name: 'sk1',
+        displayName: 'sk1',
+        description: '',
+        source: 'project' as const,
+        path: '/tmp/test-cwd/.claude/skills/sk1',
+        content: ''
+      }
+    ]
+    mockDiscoverOpencodeSkills.mockResolvedValueOnce(skills)
+
+    const session = makeSession()
+    const result = await session.discoverSkills('/tmp/test-cwd')
+
+    expect(mockDiscoverOpencodeSkills).toHaveBeenCalledWith('/tmp/test-cwd')
+    expect(result).toEqual(skills)
+
+    session.dispose()
+  })
+})
 
 describe('OpencodeSession — queue + steer capability flags (Phase 8c)', () => {
   beforeEach(setupMocks)
@@ -2181,7 +2225,7 @@ describe('OpencodeSession — Phase 8d: subagent dispatch', () => {
     const win = new MockWindow() as unknown as BrowserWindow
     // ask/default mode — auto-mode disabled
     mockLoadEngineConfig.mockReturnValue({ autoMode: { enabled: false } })
-    const session = new OpencodeSession('r_8e_ask', win, '/tmp', undefined, undefined, 'default')
+    const session = new OpencodeSession('r_8e_ask', win, '/tmp', { permissionMode: 'default' })
     await session.run('go')
 
     // Wait for session:approval-request to be emitted to the human
@@ -2315,7 +2359,7 @@ describe('OpencodeSession — Phase 8d: subagent dispatch', () => {
     )
 
     const win = new MockWindow() as unknown as BrowserWindow
-    const session = new OpencodeSession('r_8e_auto', win, '/tmp', undefined, undefined, 'full')
+    const session = new OpencodeSession('r_8e_auto', win, '/tmp', { permissionMode: 'full' })
     await session.run('go')
 
     // In auto mode the classifier is invoked (mockPrompt), then replyPermission(once)
@@ -2690,7 +2734,7 @@ describe('OpencodeSession — child question.asked dispatch (floating AskUserQue
     mockLoadEngineConfig.mockReturnValue({ autoMode: { enabled: true, twoStageMode: 'fast' } })
     feedChildQuestion()
     const win = new MockWindow() as unknown as BrowserWindow
-    const session = new OpencodeSession('r_cq_auto', win, '/tmp', undefined, undefined, 'full')
+    const session = new OpencodeSession('r_cq_auto', win, '/tmp', { permissionMode: 'full' })
     await session.run('go')
 
     await vi.waitFor(() => {

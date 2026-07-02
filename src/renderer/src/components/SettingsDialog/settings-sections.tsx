@@ -26,9 +26,9 @@ import {
   type EffortLevel,
   type AutonomyMode,
   type EngineCapabilities,
-  CLAUDE_ENGINE_CAPABILITIES,
-  OPENCODE_ENGINE_CAPABILITIES
+  CLAUDE_ENGINE_CAPABILITIES
 } from '../../../../shared/model-capabilities'
+import { engineMeta } from '../../../../shared/engine-meta'
 import {
   SettingsToggle,
   SettingsSlider,
@@ -3312,9 +3312,7 @@ export const SECTION_CAPABILITY: Readonly<Record<string, GatingCapability>> = {
 
 /** Static per-engine capabilities for a settings scope ('common' = engine-agnostic → null). */
 export function scopeCapabilities(scope: SettingsScope): EngineCapabilities | null {
-  if (scope === 'claude') return CLAUDE_ENGINE_CAPABILITIES
-  if (scope === 'opencode') return OPENCODE_ENGINE_CAPABILITIES
-  return null
+  return scope === 'common' ? null : engineMeta(scope).capabilities
 }
 
 /**

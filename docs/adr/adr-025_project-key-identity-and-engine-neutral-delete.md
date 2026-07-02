@@ -47,8 +47,8 @@ The Claude **spawn/history-path** encoders (`claude-session.ts`, `session-manage
 ### 2. Persisted-session deletion is engine-neutral
 
 A single dispatcher `deleteSessionByEngine(sessionId, projectKey, engineId?)`
-(`opencode-session-list.ts`) routes by the owning engine; both the IPC handler and the remote
-dispatcher call it (no duplicated branch):
+(`session-delete.ts`, moved from opencode-session-list.ts by engine-hardening Item 6b) routes by the
+owning engine; both the IPC handler and the remote dispatcher call it (no duplicated branch):
 
 - **opencode** → `DELETE /session/{id}` over its HTTP API via the shared server (global-by-id), keyed
   by the engine-owned `sessionId`. The lossy `projectKey` is not used. No opencode DB writes.

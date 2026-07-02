@@ -33,16 +33,44 @@ vi.mock('../../services/delete-session-files', () => ({
   deleteProjectFiles: vi.fn(async () => {})
 }))
 
-vi.mock('../../services/ui-config', () => ({
+const uiConfigMocks = vi.hoisted(() => ({
   loadSettings: vi.fn(() => ({ theme: 'dark' })),
   saveSettings: vi.fn(),
   loadSessionConfig: vi.fn(() => ({})),
   saveSessionConfig: vi.fn(),
-  loadSlashCommands: vi.fn(() => [])
+  loadSlashCommands: vi.fn(() => []),
+  loadEngineConfig: vi.fn(() => ({})),
+  loadVendorConfig: vi.fn(() => ({}))
+}))
+
+vi.mock('../../services/ui-config', () => uiConfigMocks)
+
+vi.mock('../../opencode/model-discovery', () => ({
+  resolveOpencodeSpawnModel: vi.fn(async (m?: string) => m ?? 'opencode/zen-free')
+}))
+
+vi.mock('../../sdk/proxy', () => ({
+  setProxyEnv: vi.fn(),
+  setProxyAllSubprocesses: vi.fn()
+}))
+
+vi.mock('../../sdk/endpoint-env', () => ({
+  setEndpointEnv: vi.fn()
+}))
+
+vi.mock('../../sdk/model-env', () => ({
+  setModelEnv: vi.fn()
+}))
+
+vi.mock('../../services/socks-bridge', () => ({
+  startSocksBridge: vi.fn(async () => 1080),
+  stopSocksBridge: vi.fn(async () => {})
 }))
 
 vi.mock('../../services/claude-settings', () => ({
-  loadClaudePermissions: vi.fn(() => ({ allow: [], deny: [], ask: [] }))
+  loadClaudePermissions: vi.fn(() => ({ allow: [], deny: [], ask: [] })),
+  loadCleanupPeriodDays: vi.fn(() => 30),
+  saveCleanupPeriodDays: vi.fn()
 }))
 
 vi.mock('../../services/claude-mcp', () => ({
@@ -115,6 +143,7 @@ vi.mock('../../services/logger', () => ({
 import { RemoteDispatcher } from '../../services/remote-dispatcher'
 import { registerRemoteHandlers, registerRemoteVersionInfo } from '../remote-handlers'
 import { resolveClaudeCapabilities } from '../../../shared/model-capabilities'
+import { resolveOpencodeSpawnModel } from '../../opencode/model-discovery'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -151,7 +180,8 @@ const sessionStub: any = {
   mcpServerStatus: vi.fn(async () => [{ name: 'srv', connected: true }]),
   notifySettingsChanged: vi.fn(async () => {}),
   getPlanContent: vi.fn(() => null),
-  getSessionLogPath: vi.fn(() => '/tmp/log')
+  getSessionLogPath: vi.fn(() => '/tmp/log'),
+  discoverSkills: vi.fn(async () => [])
 }
 
 const sessionManagerStub: any = {
@@ -160,8 +190,7 @@ const sessionManagerStub: any = {
   get: vi.fn(() => sessionStub),
   cancel: vi.fn(),
   interrupt: vi.fn(async () => {}),
-  forEach: vi.fn((cb: (s: any) => void) => cb(sessionStub)),
-  forEachClaude: vi.fn((cb: (s: any) => void) => cb(sessionStub))
+  forEach: vi.fn((cb: (s: any) => void) => cb(sessionStub))
 }
 
 describe('RemoteDispatcher', () => {
@@ -304,6 +333,25 @@ describe('registerRemoteHandlers', () => {
     expect(sessionStub.mcpServerStatus).toHaveBeenCalled()
   })
 
+  // ISession optional-member safety (Item 3) — isClaudeSession casts were
+  // replaced with capability checks + optional-call (`?.`) + neutral forEach.
+  describe('ISession optional-member safety (Item 3)', () => {
+    it('claude:set-cleanup-period triggers notifySettingsChanged via the neutral forEach', async () => {
+      await dispatcher.handle(makeRequest('claude:set-cleanup-period', 30))
+      expect(sessionStub.notifySettingsChanged).toHaveBeenCalled()
+    })
+
+    it('mcp:status returns [] without throwing for a capability-true session lacking mcpServerStatus', async () => {
+      sessionManagerStub.get.mockReturnValueOnce({
+        engineId: 'claude',
+        capabilities: resolveClaudeCapabilities('default')
+        // No mcpServerStatus method.
+      })
+      const res = await dispatcher.handle(makeRequest('mcp:status', 'rid-min'))
+      expect(res).toEqual([])
+    })
+  })
+
   it('file:list-dir returns structured result on error (no throw)', async () => {
     // Invalid path → handler catches internally and returns default shape.
     const res: any = await dispatcher.handle(
@@ -415,6 +463,89 @@ describe('registerRemoteHandlers', () => {
       await expect(
         dispatcher.handle(makeRequest('mockup:unwatch', cwd, 'm1'))
       ).resolves.toBeUndefined()
+    })
+  })
+
+  // Remote/desktop session:create parity — the remote handler now delegates to
+  // the shared prepareAndCreateSession() (create-session.ts), so engineId
+  // threading and engine-config sourcing must match the desktop IPC handler.
+  describe('session:create parity', () => {
+    it('threads engineId through to manager.create (GUARD — fails pre-fix)', async () => {
+      await dispatcher.handle(
+        makeRequest(
+          'session:create',
+          'rid-engine',
+          '/tmp/proj',
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          'opencode'
+        )
+      )
+      expect(sessionManagerStub.create).toHaveBeenCalled()
+      // manager.create's 5th positional arg (index 4) is engineId.
+      expect(sessionManagerStub.create.mock.calls[0][4]).toBe('opencode')
+    })
+
+    it('sources sandbox from loadEngineConfig, not loadSettings', async () => {
+      const SENTINEL = { enabled: true, marker: 'sentinel' }
+      uiConfigMocks.loadEngineConfig.mockReturnValueOnce({ sandbox: SENTINEL })
+      uiConfigMocks.loadSettings.mockReturnValueOnce({
+        sandbox: { enabled: true, DIFFERENT: true }
+      } as unknown as ReturnType<typeof uiConfigMocks.loadSettings>)
+
+      await dispatcher.handle(makeRequest('session:create', 'rid-sandbox', '/tmp/proj'))
+
+      expect(sessionManagerStub.create).toHaveBeenCalled()
+      // manager.create's 4th positional arg (index 3) is the EngineSpawnOptions object.
+      expect(sessionManagerStub.create.mock.calls[0][3].sandboxConfig).toEqual(SENTINEL)
+    })
+
+    it('claude path (default engineId) applies vendor config and skips opencode resolution', async () => {
+      await dispatcher.handle(makeRequest('session:create', 'rid-claude', '/tmp/proj'))
+
+      expect(uiConfigMocks.loadVendorConfig).toHaveBeenCalledWith('anthropic')
+      expect(resolveOpencodeSpawnModel).not.toHaveBeenCalled()
+    })
+
+    it('opencode path resolves the spawn model and skips vendor config', async () => {
+      await dispatcher.handle(
+        makeRequest(
+          'session:create',
+          'rid-opencode',
+          '/tmp/proj',
+          undefined,
+          undefined,
+          undefined,
+          'opencode/some-model',
+          undefined,
+          undefined,
+          undefined,
+          'opencode'
+        )
+      )
+
+      expect(resolveOpencodeSpawnModel).toHaveBeenCalledWith('opencode/some-model')
+      expect(uiConfigMocks.loadVendorConfig).not.toHaveBeenCalled()
+      const resolvedModel = await (
+        resolveOpencodeSpawnModel as unknown as ReturnType<typeof vi.fn>
+      ).mock.results[0].value
+      // manager.create's 4th positional arg (index 3) is the EngineSpawnOptions object.
+      expect(sessionManagerStub.create.mock.calls[0][3].model).toBe(resolvedModel)
+    })
+
+    it('broadcasts session:created to the main window (remote notifies desktop)', async () => {
+      await dispatcher.handle(makeRequest('session:create', 'rid-broadcast', '/tmp/proj'))
+
+      expect(win.webContents.send).toHaveBeenCalledWith(
+        'session:created',
+        'rid-broadcast',
+        expect.objectContaining({ cwd: '/tmp/proj' })
+      )
     })
   })
 })

@@ -21,9 +21,7 @@ import { invalidateOpencodeModelCache } from '../opencode/model-discovery'
 import { logger } from '../services/logger'
 import type { VendorAuthMap, VendorAuthOption, AccountRef, AuthState } from '../../shared/types'
 import type { EngineAuthProvider } from './EngineAuthProvider'
-
-/** Free/bundled opencode providers that never require auth credentials. */
-const FREE_VENDOR_IDS = new Set(['opencode', 'zen'])
+import { FREE_OPENCODE_VENDOR_IDS } from '../../shared/engine-meta'
 
 export class OpencodeAuthProvider implements EngineAuthProvider {
   /**
@@ -83,7 +81,7 @@ export class OpencodeAuthProvider implements EngineAuthProvider {
         // Build the map from the auth catalog (the complete vendor set)
         for (const [vendorId, options] of Object.entries(authCatalog)) {
           const isConfigured = configuredIds.has(vendorId)
-          const isFree = FREE_VENDOR_IDS.has(vendorId)
+          const isFree = FREE_OPENCODE_VENDOR_IDS.has(vendorId)
 
           let authState: AuthState
           if (isFree || isConfigured) {

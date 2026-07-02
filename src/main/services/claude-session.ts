@@ -23,6 +23,7 @@ import { startRecording, stopRecording } from './voice-capture'
 import { unwatchAllSubagents } from './subagent-watcher'
 import { saveSlashCommands } from './ui-config'
 import { loadMcpServers, readDisabledMcpServers } from './claude-mcp'
+import { scanSkills } from './skill-scanner'
 import { logger } from './logger'
 import { getContextWindowSize } from './context-window'
 import { usageFetcher } from './usage-fetcher'
@@ -98,6 +99,7 @@ import type {
 } from '../../shared/types'
 import { claudeModel } from '../../shared/types'
 import { BaseSession } from '../providers/BaseSession'
+import type { EngineSpawnOptions } from '../providers/ISession'
 
 interface ApprovalResult {
   decision: ApprovalDecision
@@ -171,18 +173,6 @@ interface BackgroundPoller {
 }
 
 export class ClaudeSession extends BaseSession {
-  // Static pass-throughs to BaseSession so existing call sites in session.ipc.ts
-  // and remote-handlers.ts keep compiling without modification.
-  static override addExtraWindow(win: BrowserWindow): void {
-    BaseSession.addExtraWindow(win)
-  }
-  static override removeExtraWindow(win: BrowserWindow): void {
-    BaseSession.removeExtraWindow(win)
-  }
-  static override getExtraWindows(): Set<BrowserWindow> {
-    return BaseSession.getExtraWindows()
-  }
-
   readonly engineId = 'claude' as const
 
   get capabilities(): ResolvedCapabilities {
@@ -250,19 +240,17 @@ export class ClaudeSession extends BaseSession {
   private accTotalApiDurationMs = 0
   private lastContextLength = 0
 
-  constructor(
-    routingId: string,
-    win: BrowserWindow,
-    cwd: string,
-    effort?: string,
-    resumeSessionId?: string,
-    permissionMode?: string,
-    model?: string,
-    sandboxConfig?: SandboxSettings,
-    thinkingMode?: string,
-    resumeSessionAt?: string,
-    forkSession?: boolean
-  ) {
+  constructor(routingId: string, win: BrowserWindow, cwd: string, opts: EngineSpawnOptions = {}) {
+    const {
+      effort,
+      resumeSessionId,
+      permissionMode,
+      model,
+      sandboxConfig,
+      thinkingMode,
+      resumeSessionAt,
+      forkSession
+    } = opts
     super(routingId, win, cwd)
     this.effort = effort || 'medium'
     this.thinkingMode =
@@ -1635,6 +1623,11 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
     )
     logger.debug('ClaudeSession', `mcpSetServers result: ${JSON.stringify(result).slice(0, 500)}`)
     return result
+  }
+
+  /** ISession.discoverSkills — Claude scans project/user/plugin skill dirs. */
+  discoverSkills(cwd: string): Promise<import('../../shared/types').SkillInfo[]> {
+    return scanSkills(cwd)
   }
 
   /**

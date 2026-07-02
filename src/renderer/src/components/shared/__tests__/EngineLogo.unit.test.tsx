@@ -4,10 +4,8 @@
  * Asserts that the correct SVG mark is rendered for each engineId:
  * - 'claude' → svg with aria-label="Claude"
  * - 'opencode' → svg with aria-label="opencode"
- * - default (undefined/unknown engineId) → falls back to Claude mark
  *
- * Each test would fail against the old code that always rendered ClaudeMark
- * regardless of the engineId prop.
+ * The mark is selected via the ENGINE_MARK table keyed by engineId.
  */
 
 import { describe, it, expect } from 'vitest'

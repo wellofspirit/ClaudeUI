@@ -162,7 +162,12 @@ export class OpencodeClient {
     return this.post(`/session/${encodeURIComponent(sessionId)}/abort`)
   }
 
-  /** POST /session/{id}/fork */
+  /**
+   * POST /session/{id}/fork
+   * Intentionally unwired for now — no production caller. opencode fork is not
+   * exposed (see OPENCODE_ENGINE_CAPABILITIES.fork = false, engine-hardening-plan.md
+   * Item 1 / ADR-030). Kept for a future native-fork implementation.
+   */
   forkSession(sessionId: string, req?: ForkRequest): Promise<Session> {
     return this.post(`/session/${encodeURIComponent(sessionId)}/fork`, req ?? {})
   }

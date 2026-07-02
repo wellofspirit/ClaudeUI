@@ -8,7 +8,10 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { useSessionStore } from '../session-store'
 import { claudeModel } from '../../../../shared/types'
-import { resolveClaudeCapabilities } from '../../../../shared/model-capabilities'
+import {
+  resolveClaudeCapabilities,
+  resolveOpencodeCapabilities
+} from '../../../../shared/model-capabilities'
 import {
   makeChatMessage,
   makeAssistantMessage,
@@ -346,6 +349,34 @@ describe('forkFromMessage', () => {
   it('returns null when the source session does not exist', async () => {
     const newId = await store().forkFromMessage('nope', 'msg_1')
     expect(newId).toBeNull()
+  })
+
+  it('returns null + records an error and does NOT resolve an anchor when the engine lacks forkFromMessage', async () => {
+    store().loadHistoricalSession(
+      'src-session',
+      [makeAssistantMessage('x', { id: 'msg_1' })],
+      '/proj'
+    )
+    useSessionStore.setState((s) => ({
+      sessions: {
+        ...s.sessions,
+        'src-session': {
+          ...s.sessions['src-session'],
+          status: makeSessionStatus({
+            engineId: 'opencode',
+            capabilities: resolveOpencodeCapabilities()
+          })
+        }
+      }
+    }))
+    const anchorSpy = vi.fn()
+    ;(window.api as any).resolveForkAnchor = anchorSpy
+
+    const newId = await store().forkFromMessage('src-session', 'msg_1')
+
+    expect(newId).toBeNull()
+    expect(anchorSpy).not.toHaveBeenCalled()
+    expect(store().sessions['src-session'].errors.length).toBeGreaterThan(0)
   })
 })
 
