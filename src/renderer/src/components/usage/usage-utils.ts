@@ -87,16 +87,6 @@ export function shortModelName(model: string): string {
   return model
 }
 
-/** Format time as h:mm AM/PM */
-export function formatTime(ts: number): string {
-  const d = new Date(ts)
-  const h = d.getHours()
-  const m = d.getMinutes()
-  const ampm = h >= 12 ? 'PM' : 'AM'
-  const hour = h % 12 || 12
-  return `${hour}:${String(m).padStart(2, '0')} ${ampm}`
-}
-
 /** Format a date as "Mon DD" */
 export function formatShortDate(dateStr: string): string {
   const d = new Date(dateStr + 'T00:00:00')
@@ -115,15 +105,4 @@ export function formatShortDate(dateStr: string): string {
     'Dec'
   ]
   return `${months[d.getMonth()]} ${d.getDate()}`
-}
-
-/** Format duration in ms as human-readable */
-export function formatDuration(ms: number): string {
-  const totalSec = Math.floor(ms / 1_000)
-  if (totalSec < 60) return `${totalSec}s`
-  const totalMin = Math.floor(totalSec / 60)
-  const h = Math.floor(totalMin / 60)
-  const m = totalMin % 60
-  if (h > 0) return `${h}h ${m}m`
-  return `${m}m`
 }
