@@ -454,5 +454,6 @@ ADRs live in `docs/adr/`. See `docs/adr/adr.md` for the index.
 | 027 | Test data attributes — two-tier `data-testid` convention + DOM-assert-before-screenshot verification | Accepted              |
 | 028 | opencode engine-native config written to opencode's own files in place (jsonc, comment-safe) — implements ADR-020 | Accepted              |
 | 029 | opencode custom-agent CRUD — markdown agent files (global/project), opt-in permissions, AI-assisted authoring | Accepted              |
+| 030 | Capability honesty — a capability flag is only true when the full end-to-end path works for that engine (opencode fork demoted) | Accepted              |
 
 When a design or implementation decision is made during a conversation, prompt the user about whether it should be recorded as a new ADR entry. When adding a new ADR, proactively scan existing ADRs to check if the new decision supersedes or conflicts with a previous one — if so, update the old ADR's status to "Superseded by ADR-XXX" and note it in the new ADR.

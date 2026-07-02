@@ -10,6 +10,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { render, screen, act } from '@testing-library/react'
 import { MessageBubble } from '../MessageBubble'
 import { useSessionStore } from '../../../stores/session-store'
+import { resolveOpencodeCapabilities } from '../../../../../shared/model-capabilities'
 import {
   makeChatMessage,
   makeTextBlock,
@@ -528,6 +529,54 @@ describe('MessageBubble', () => {
       )
       expect(screen.getByText(/First point/)).toBeInTheDocument()
       expect(screen.getByText(/Second point/)).toBeInTheDocument()
+    })
+  })
+
+  describe('fork affordance (capability-gated)', () => {
+    it('shows Fork for a Claude session', () => {
+      const msg = makeChatMessage({
+        role: 'assistant',
+        content: [makeTextBlock('hi')]
+      })
+      render(
+        <MessageBubble
+          message={msg}
+          pendingApprovals={[]}
+          isLastAssistant={true}
+          thinkingStartedAt={null}
+        />
+      )
+      expect(screen.queryByTestId('MessageBubble.fork')).toBeInTheDocument()
+    })
+
+    it('hides Fork for an opencode session', () => {
+      act(() => {
+        useSessionStore.setState((s) => ({
+          sessions: {
+            ...s.sessions,
+            'test-session': {
+              ...s.sessions['test-session'],
+              status: makeSessionStatus({
+                engineId: 'opencode',
+                capabilities: resolveOpencodeCapabilities()
+              })
+            }
+          }
+        }))
+      })
+      const msg = makeChatMessage({
+        role: 'assistant',
+        content: [makeTextBlock('hi')]
+      })
+      render(
+        <MessageBubble
+          message={msg}
+          pendingApprovals={[]}
+          isLastAssistant={true}
+          thinkingStartedAt={null}
+        />
+      )
+      expect(screen.queryByTestId('MessageBubble.fork')).not.toBeInTheDocument()
     })
   })
 })

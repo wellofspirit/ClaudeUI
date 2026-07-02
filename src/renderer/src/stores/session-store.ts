@@ -1108,6 +1108,19 @@ export const useSessionStore = create<SessionState>((set) => ({
   forkFromMessage: async (sourceRoutingId, messageId) => {
     const src = useSessionStore.getState().sessions[sourceRoutingId]
     if (!src) return null
+    // Last-resort guard: MessageBubble already gates the Fork button on this
+    // same flag, but resolveForkAnchor below is Claude-JSONL-only, so if a
+    // stale/true capability flag ever reached here for a non-Claude engine it
+    // would call into a path that can't work for it.
+    if (!src.status.capabilities.forkFromMessage) {
+      useSessionStore
+        .getState()
+        .addError(
+          sourceRoutingId,
+          'This engine does not support branching a session from a specific message.'
+        )
+      return null
+    }
     // The on-disk session id: a rekeyed live session or a historical load both
     // carry it as the routingId; a still-streaming session exposes it on status.
     const sourceSessionId = src.status.sessionId ?? sourceRoutingId

@@ -568,6 +568,11 @@ export function resolveClaudeCapabilities(modelValue?: string | null): ResolvedC
  * subagents:true (Phase 8d) — opencode's `task` tool spawns child sessions whose
  * transcripts stream on the shared SSE; the event-mapper routes them to
  * session:subagent-* events keyed by the parent task part's callID.
+ * fork:false / forkFromMessage:false — the end-to-end path is unwired:
+ * `OpencodeClient.forkSession()` exists but has no production caller,
+ * `OpencodeSession` ignores its `_resumeSessionAt`/`_forkSession` spawn params,
+ * and fork-anchor resolution (`resolveForkAnchor`) is Claude-JSONL-only. See
+ * engine-hardening-plan.md Item 1 / ADR-030 (capability honesty).
  */
 export const OPENCODE_ENGINE_CAPABILITIES: EngineCapabilities = {
   voice: false,
@@ -575,8 +580,8 @@ export const OPENCODE_ENGINE_CAPABILITIES: EngineCapabilities = {
   backgroundTasks: false,
   subagents: true,
   plan: true,
-  fork: true,
-  forkFromMessage: true,
+  fork: false,
+  forkFromMessage: false,
   steer: true,
   queue: true,
   slashCommands: true,
