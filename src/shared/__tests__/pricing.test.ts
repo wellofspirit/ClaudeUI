@@ -175,6 +175,32 @@ describe('equivalentCostUsd — openai pricing', () => {
     const cost = equivalentCostUsd('openai', 'o3-mini', oneMTok({ inputTokens: 1_000_000 }))
     expect(cost).toBeCloseTo(1.1)
   })
+
+  // GPT-5.x — source: developers.openai.com/api/docs/pricing, fetched 2026-07.
+  it('gpt-5.5: input rate = $5/MTok', () => {
+    const cost = equivalentCostUsd('openai', 'gpt-5.5', oneMTok({ inputTokens: 1_000_000 }))
+    expect(cost).toBeCloseTo(5.0)
+  })
+
+  // Ordering guard: 'gpt-5.5-pro' must NOT be shadowed by the 'gpt-5.5' entry
+  // (substring matching means the more specific -pro entry has to be checked first).
+  it('gpt-5.5-pro: input rate = $30/MTok (ordering guard — must NOT match the gpt-5.5 entry)', () => {
+    const cost = equivalentCostUsd('openai', 'gpt-5.5-pro', oneMTok({ inputTokens: 1_000_000 }))
+    expect(cost).toBeCloseTo(30.0)
+  })
+
+  it('gpt-5.4-mini: input rate = $0.75/MTok, not the gpt-5.4 base rate ($2.50)', () => {
+    const cost = equivalentCostUsd('openai', 'gpt-5.4-mini', oneMTok({ inputTokens: 1_000_000 }))
+    expect(cost).toBeCloseTo(0.75)
+    expect(cost).not.toBeCloseTo(2.5)
+  })
+
+  // '-fast' variants have no dedicated entry and intentionally fall back to
+  // substring-matching their base model (documented behavior — see OPENAI_PRICING).
+  it('gpt-5.5-fast: substring-falls-back to the gpt-5.5 base rate ($5/MTok)', () => {
+    const cost = equivalentCostUsd('openai', 'gpt-5.5-fast', oneMTok({ inputTokens: 1_000_000 }))
+    expect(cost).toBeCloseTo(5.0)
+  })
 })
 
 // ---------------------------------------------------------------------------

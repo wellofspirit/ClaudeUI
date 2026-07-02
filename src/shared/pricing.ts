@@ -201,6 +201,94 @@ const ANTHROPIC_PRICING: PricingEntry[] = [
 // ---------------------------------------------------------------------------
 
 const OPENAI_PRICING: PricingEntry[] = [
+  // GPT-5.x — source: developers.openai.com/api/docs/pricing, fetched 2026-07.
+  // Order matters: substring matching means '-pro'/'-mini'/'-nano' variants MUST
+  // precede their base entry (e.g. 'gpt-5.4-mini' before 'gpt-5.4'), mirroring the
+  // existing gpt-4o-mini-before-gpt-4o pattern below. '-fast' / '-spark' variants
+  // intentionally have NO entries here and fall through to substring-match their
+  // base model — a notional estimate only (OpenAI's priority-tier multiplier is
+  // 2.5×, but the opencode model id ↔ tier mapping is unconfirmed, so we don't
+  // guess a separate rate). gpt-5.2 is left unpriced — no authoritative source found.
+  {
+    vendorId: 'openai',
+    match: 'gpt-5.5-pro',
+    pricing: {
+      inputPerMTok: 30,
+      outputPerMTok: 180,
+      cacheWritePerMTok: 30,
+      cacheWrite1hPerMTok: 30,
+      // No official cached-input price for -pro models — 0.5× input per this
+      // file's stated cache-read convention (see OPENAI_PRICING block comment).
+      cacheReadPerMTok: 15
+    }
+  },
+  {
+    vendorId: 'openai',
+    match: 'gpt-5.5',
+    pricing: {
+      inputPerMTok: 5,
+      outputPerMTok: 30,
+      cacheWritePerMTok: 5,
+      cacheWrite1hPerMTok: 5,
+      cacheReadPerMTok: 0.5
+    }
+  },
+  {
+    vendorId: 'openai',
+    match: 'gpt-5.4-pro',
+    pricing: {
+      inputPerMTok: 30,
+      outputPerMTok: 180,
+      cacheWritePerMTok: 30,
+      cacheWrite1hPerMTok: 30,
+      // No official cached-input price for -pro models — 0.5× input (see above).
+      cacheReadPerMTok: 15
+    }
+  },
+  {
+    vendorId: 'openai',
+    match: 'gpt-5.4-mini',
+    pricing: {
+      inputPerMTok: 0.75,
+      outputPerMTok: 4.5,
+      cacheWritePerMTok: 0.75,
+      cacheWrite1hPerMTok: 0.75,
+      cacheReadPerMTok: 0.075
+    }
+  },
+  {
+    vendorId: 'openai',
+    match: 'gpt-5.4-nano',
+    pricing: {
+      inputPerMTok: 0.2,
+      outputPerMTok: 1.25,
+      cacheWritePerMTok: 0.2,
+      cacheWrite1hPerMTok: 0.2,
+      cacheReadPerMTok: 0.02
+    }
+  },
+  {
+    vendorId: 'openai',
+    match: 'gpt-5.4',
+    pricing: {
+      inputPerMTok: 2.5,
+      outputPerMTok: 15,
+      cacheWritePerMTok: 2.5,
+      cacheWrite1hPerMTok: 2.5,
+      cacheReadPerMTok: 0.25
+    }
+  },
+  {
+    vendorId: 'openai',
+    match: 'gpt-5.3-codex',
+    pricing: {
+      inputPerMTok: 1.75,
+      outputPerMTok: 14,
+      cacheWritePerMTok: 1.75,
+      cacheWrite1hPerMTok: 1.75,
+      cacheReadPerMTok: 0.175
+    }
+  },
   // GPT-4o
   {
     vendorId: 'openai',
