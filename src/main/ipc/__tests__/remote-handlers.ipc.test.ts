@@ -33,12 +33,38 @@ vi.mock('../../services/delete-session-files', () => ({
   deleteProjectFiles: vi.fn(async () => {})
 }))
 
-vi.mock('../../services/ui-config', () => ({
+const uiConfigMocks = vi.hoisted(() => ({
   loadSettings: vi.fn(() => ({ theme: 'dark' })),
   saveSettings: vi.fn(),
   loadSessionConfig: vi.fn(() => ({})),
   saveSessionConfig: vi.fn(),
-  loadSlashCommands: vi.fn(() => [])
+  loadSlashCommands: vi.fn(() => []),
+  loadEngineConfig: vi.fn(() => ({})),
+  loadVendorConfig: vi.fn(() => ({}))
+}))
+
+vi.mock('../../services/ui-config', () => uiConfigMocks)
+
+vi.mock('../../opencode/model-discovery', () => ({
+  resolveOpencodeSpawnModel: vi.fn(async (m?: string) => m ?? 'opencode/zen-free')
+}))
+
+vi.mock('../../sdk/proxy', () => ({
+  setProxyEnv: vi.fn(),
+  setProxyAllSubprocesses: vi.fn()
+}))
+
+vi.mock('../../sdk/endpoint-env', () => ({
+  setEndpointEnv: vi.fn()
+}))
+
+vi.mock('../../sdk/model-env', () => ({
+  setModelEnv: vi.fn()
+}))
+
+vi.mock('../../services/socks-bridge', () => ({
+  startSocksBridge: vi.fn(async () => 1080),
+  stopSocksBridge: vi.fn(async () => {})
 }))
 
 vi.mock('../../services/claude-settings', () => ({
@@ -115,6 +141,7 @@ vi.mock('../../services/logger', () => ({
 import { RemoteDispatcher } from '../../services/remote-dispatcher'
 import { registerRemoteHandlers, registerRemoteVersionInfo } from '../remote-handlers'
 import { resolveClaudeCapabilities } from '../../../shared/model-capabilities'
+import { resolveOpencodeSpawnModel } from '../../opencode/model-discovery'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -415,6 +442,89 @@ describe('registerRemoteHandlers', () => {
       await expect(
         dispatcher.handle(makeRequest('mockup:unwatch', cwd, 'm1'))
       ).resolves.toBeUndefined()
+    })
+  })
+
+  // Remote/desktop session:create parity — the remote handler now delegates to
+  // the shared prepareAndCreateSession() (create-session.ts), so engineId
+  // threading and engine-config sourcing must match the desktop IPC handler.
+  describe('session:create parity', () => {
+    it('threads engineId through to manager.create (GUARD — fails pre-fix)', async () => {
+      await dispatcher.handle(
+        makeRequest(
+          'session:create',
+          'rid-engine',
+          '/tmp/proj',
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          'opencode'
+        )
+      )
+      expect(sessionManagerStub.create).toHaveBeenCalled()
+      // manager.create's 12th positional arg (index 11) is engineId.
+      expect(sessionManagerStub.create.mock.calls[0][11]).toBe('opencode')
+    })
+
+    it('sources sandbox from loadEngineConfig, not loadSettings', async () => {
+      const SENTINEL = { enabled: true, marker: 'sentinel' }
+      uiConfigMocks.loadEngineConfig.mockReturnValueOnce({ sandbox: SENTINEL })
+      uiConfigMocks.loadSettings.mockReturnValueOnce({
+        sandbox: { enabled: true, DIFFERENT: true }
+      } as unknown as ReturnType<typeof uiConfigMocks.loadSettings>)
+
+      await dispatcher.handle(makeRequest('session:create', 'rid-sandbox', '/tmp/proj'))
+
+      expect(sessionManagerStub.create).toHaveBeenCalled()
+      // manager.create's 8th positional arg (index 7) is sandboxConfig.
+      expect(sessionManagerStub.create.mock.calls[0][7]).toEqual(SENTINEL)
+    })
+
+    it('claude path (default engineId) applies vendor config and skips opencode resolution', async () => {
+      await dispatcher.handle(makeRequest('session:create', 'rid-claude', '/tmp/proj'))
+
+      expect(uiConfigMocks.loadVendorConfig).toHaveBeenCalledWith('anthropic')
+      expect(resolveOpencodeSpawnModel).not.toHaveBeenCalled()
+    })
+
+    it('opencode path resolves the spawn model and skips vendor config', async () => {
+      await dispatcher.handle(
+        makeRequest(
+          'session:create',
+          'rid-opencode',
+          '/tmp/proj',
+          undefined,
+          undefined,
+          undefined,
+          'opencode/some-model',
+          undefined,
+          undefined,
+          undefined,
+          'opencode'
+        )
+      )
+
+      expect(resolveOpencodeSpawnModel).toHaveBeenCalledWith('opencode/some-model')
+      expect(uiConfigMocks.loadVendorConfig).not.toHaveBeenCalled()
+      const resolvedModel = await (
+        resolveOpencodeSpawnModel as unknown as ReturnType<typeof vi.fn>
+      ).mock.results[0].value
+      // manager.create's 7th positional arg (index 6) is the resolved model.
+      expect(sessionManagerStub.create.mock.calls[0][6]).toBe(resolvedModel)
+    })
+
+    it('broadcasts session:created to the main window (remote notifies desktop)', async () => {
+      await dispatcher.handle(makeRequest('session:create', 'rid-broadcast', '/tmp/proj'))
+
+      expect(win.webContents.send).toHaveBeenCalledWith(
+        'session:created',
+        'rid-broadcast',
+        expect.objectContaining({ cwd: '/tmp/proj' })
+      )
     })
   })
 })

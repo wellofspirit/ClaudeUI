@@ -33,13 +33,14 @@ import { OpencodeSession } from '../opencode/OpencodeSession'
 import { scanCustomCommands } from '../services/custom-command-scanner'
 import { usageFetcher } from '../services/usage-fetcher'
 import { blockUsageService } from '../services/block-usage'
-import type { ApprovalDecision, SandboxSettings, PermissionSuggestion, EngineId } from '../../shared/types'
+import type { ApprovalDecision, PermissionSuggestion, EngineId } from '../../shared/types'
 import type { BrowserWindow } from 'electron'
 import { ClaudeSession, getSdkExecutableOpts } from '../services/claude-session'
 import { PERSISTED_SESSIONS_DIR } from '../services/persisted-sessions-dir'
 import { query as sdkQuery } from '../sdk'
 import { logger } from '../services/logger'
 import type { ISession } from '../providers/ISession'
+import { prepareAndCreateSession } from './create-session'
 
 /** Type guard: narrows ISession to ClaudeSession when engineId === 'claude'. */
 function isClaudeSession(session: ISession): session is ClaudeSession {
@@ -94,31 +95,26 @@ export function registerRemoteHandlers(
       model?: string,
       thinkingMode?: string,
       resumeSessionAt?: string,
-      forkSession?: boolean
+      forkSession?: boolean,
+      engineId?: EngineId
     ) => {
-      const settings = loadSettings() as Record<string, unknown>
-      const sandboxConfig = (settings.sandbox as SandboxSettings) || undefined
-      manager.create(
-        routingId,
+      await prepareAndCreateSession(
+        manager,
         win,
-        cwd,
-        effort,
-        resumeSessionId,
-        permissionMode,
-        model,
-        sandboxConfig,
-        thinkingMode,
-        resumeSessionAt,
-        forkSession
+        {
+          routingId,
+          cwd,
+          effort,
+          resumeSessionId,
+          permissionMode,
+          model,
+          thinkingMode,
+          resumeSessionAt,
+          forkSession,
+          engineId
+        },
+        { notifyMainWindow: true }
       )
-      // Notify local desktop + all extra windows (remote bridge → other remote clients)
-      if (!win.isDestroyed()) {
-        win.webContents.send('session:created', routingId, { cwd, resumeSessionId })
-      }
-      for (const w of ClaudeSession.getExtraWindows()) {
-        if (!w.isDestroyed())
-          w.webContents.send('session:created', routingId, { cwd, resumeSessionId })
-      }
     }
   )
 
