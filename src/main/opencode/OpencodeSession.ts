@@ -17,7 +17,8 @@ import type {
   MeteringSnapshot,
   AutoModeConfig,
   AskUserQuestion,
-  StatusLineData
+  StatusLineData,
+  SkillInfo
 } from '../../shared/types'
 import { opencodeModel } from '../../shared/types'
 import { getOpencodeModelContextWindow, getOpencodeModelCapabilities, discoverOpencodeModels } from './model-discovery'
@@ -25,6 +26,7 @@ import { equivalentCostUsd } from '../../shared/pricing'
 import { logger } from '../services/logger'
 import { mapEvent, extractToolResult, convertStoredMessage } from './event-mapper'
 import type { MapperOutput, MessageAccumulator } from './event-mapper'
+import { discoverOpencodeSkills } from './command-skill-discovery'
 import { opencodeAuthProvider } from '../auth/OpencodeAuthProvider'
 import { recordUsageEvent } from '../services/usage-recorder'
 import { loadClaudePermissions, saveClaudePermissions } from '../services/claude-settings'
@@ -1148,7 +1150,7 @@ export class OpencodeSession extends BaseSession {
    * `{permission:'*', pattern:'*'}` matches every tool via Wildcard.match → regex
    * `.*`). The model therefore just answers in text — tool-less, hang-proof. The
    * system prompt is a belt-and-suspenders nudge. (We deliberately avoid the
-   * prompt body's `tools` field, which opencode marks @deprecated.)
+   * prompt body's `tools` field, which opencode marks as deprecated.)
    */
   override async askSideQuestion(question: string): Promise<string | null> {
     try {
@@ -1358,6 +1360,11 @@ export class OpencodeSession extends BaseSession {
     } catch {
       /* advisory — never breaks the turn */
     }
+  }
+
+  /** ISession.discoverSkills — opencode sources skills from its GET /skill API. */
+  discoverSkills(cwd: string): Promise<SkillInfo[]> {
+    return discoverOpencodeSkills(cwd)
   }
 
   dispose(): void {

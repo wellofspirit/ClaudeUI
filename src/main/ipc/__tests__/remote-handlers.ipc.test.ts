@@ -68,7 +68,9 @@ vi.mock('../../services/socks-bridge', () => ({
 }))
 
 vi.mock('../../services/claude-settings', () => ({
-  loadClaudePermissions: vi.fn(() => ({ allow: [], deny: [], ask: [] }))
+  loadClaudePermissions: vi.fn(() => ({ allow: [], deny: [], ask: [] })),
+  loadCleanupPeriodDays: vi.fn(() => 30),
+  saveCleanupPeriodDays: vi.fn()
 }))
 
 vi.mock('../../services/claude-mcp', () => ({
@@ -178,7 +180,8 @@ const sessionStub: any = {
   mcpServerStatus: vi.fn(async () => [{ name: 'srv', connected: true }]),
   notifySettingsChanged: vi.fn(async () => {}),
   getPlanContent: vi.fn(() => null),
-  getSessionLogPath: vi.fn(() => '/tmp/log')
+  getSessionLogPath: vi.fn(() => '/tmp/log'),
+  discoverSkills: vi.fn(async () => [])
 }
 
 const sessionManagerStub: any = {
@@ -187,8 +190,7 @@ const sessionManagerStub: any = {
   get: vi.fn(() => sessionStub),
   cancel: vi.fn(),
   interrupt: vi.fn(async () => {}),
-  forEach: vi.fn((cb: (s: any) => void) => cb(sessionStub)),
-  forEachClaude: vi.fn((cb: (s: any) => void) => cb(sessionStub))
+  forEach: vi.fn((cb: (s: any) => void) => cb(sessionStub))
 }
 
 describe('RemoteDispatcher', () => {
@@ -329,6 +331,25 @@ describe('registerRemoteHandlers', () => {
     const res = await dispatcher.handle(makeRequest('mcp:status', 'rid-1'))
     expect(res).toEqual([{ name: 'srv', connected: true }])
     expect(sessionStub.mcpServerStatus).toHaveBeenCalled()
+  })
+
+  // ISession optional-member safety (Item 3) — isClaudeSession casts were
+  // replaced with capability checks + optional-call (`?.`) + neutral forEach.
+  describe('ISession optional-member safety (Item 3)', () => {
+    it('claude:set-cleanup-period triggers notifySettingsChanged via the neutral forEach', async () => {
+      await dispatcher.handle(makeRequest('claude:set-cleanup-period', 30))
+      expect(sessionStub.notifySettingsChanged).toHaveBeenCalled()
+    })
+
+    it('mcp:status returns [] without throwing for a capability-true session lacking mcpServerStatus', async () => {
+      sessionManagerStub.get.mockReturnValueOnce({
+        engineId: 'claude',
+        capabilities: resolveClaudeCapabilities('default')
+        // No mcpServerStatus method.
+      })
+      const res = await dispatcher.handle(makeRequest('mcp:status', 'rid-min'))
+      expect(res).toEqual([])
+    })
   })
 
   it('file:list-dir returns structured result on error (no throw)', async () => {

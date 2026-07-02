@@ -23,6 +23,7 @@ import { startRecording, stopRecording } from './voice-capture'
 import { unwatchAllSubagents } from './subagent-watcher'
 import { saveSlashCommands } from './ui-config'
 import { loadMcpServers, readDisabledMcpServers } from './claude-mcp'
+import { scanSkills } from './skill-scanner'
 import { logger } from './logger'
 import { getContextWindowSize } from './context-window'
 import { usageFetcher } from './usage-fetcher'
@@ -1635,6 +1636,11 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
     )
     logger.debug('ClaudeSession', `mcpSetServers result: ${JSON.stringify(result).slice(0, 500)}`)
     return result
+  }
+
+  /** ISession.discoverSkills — Claude scans project/user/plugin skill dirs. */
+  discoverSkills(cwd: string): Promise<import('../../shared/types').SkillInfo[]> {
+    return scanSkills(cwd)
   }
 
   /**

@@ -86,7 +86,6 @@ import {
   migrateOpencodeConfigToNative
 } from '../opencode/opencode-config'
 import type { OpencodeConfigSettings } from '../../shared/types'
-import { discoverOpencodeSkills } from '../opencode/command-skill-discovery'
 import {
   listAgents,
   readAgent,
@@ -97,7 +96,6 @@ import {
 import type { OpencodeAgentInput } from '../opencode/opencode-agents'
 import { generateAgent } from '../opencode/agent-generate'
 import { refreshPrices } from '../services/opencode-pricing'
-import { OpencodeSession } from '../opencode/OpencodeSession'
 import { logger } from '../services/logger'
 import { deleteProjectFiles } from '../services/delete-session-files'
 import {
@@ -108,11 +106,6 @@ import {
 import { invalidateMockupSecuritySettings } from '../services/mockup-settings'
 import type { ISession } from '../providers/ISession'
 import { prepareAndCreateSession, applyProxyEnv, applyEndpointEnv, applyModelEnv } from './create-session'
-
-/** Type guard: narrows ISession to ClaudeSession when engineId === 'claude'. */
-function isClaudeSession(session: ISession): session is ClaudeSession {
-  return session.engineId === 'claude'
-}
 
 /**
  * Wraps an async IPC handler with try-catch, returning a standardized IpcResult envelope.
@@ -782,20 +775,20 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
 
   ipcMain.handle('session:watch-background', (_e, routingId: string, toolUseId: string) => {
     const s = manager.get(routingId)
-    if (s?.capabilities.backgroundTasks && isClaudeSession(s)) s.watchBackground(toolUseId)
+    if (s?.capabilities.backgroundTasks) s.watchBackground?.(toolUseId)
   })
 
   ipcMain.handle('session:unwatch-background', (_e, routingId: string, toolUseId: string) => {
     const s = manager.get(routingId)
-    if (s?.capabilities.backgroundTasks && isClaudeSession(s)) s.unwatchBackground(toolUseId)
+    if (s?.capabilities.backgroundTasks) s.unwatchBackground?.(toolUseId)
   })
 
   ipcMain.handle(
     'session:read-background-range',
     (_e, routingId: string, toolUseId: string, offset: number, length: number) => {
       const s = manager.get(routingId)
-      if (s?.capabilities.backgroundTasks && isClaudeSession(s))
-        return s.readBackgroundRange(toolUseId, offset, length)
+      if (s?.capabilities.backgroundTasks)
+        return s.readBackgroundRange?.(toolUseId, offset, length) ?? ''
       return ''
     }
   )
@@ -803,23 +796,32 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
   ipcMain.handle('session:stop-task', async (_e, routingId: string, toolUseId: string) => {
     const session = manager.get(routingId)
     if (!session) return { success: false, error: 'No active session' }
-    if (!session.capabilities.backgroundTasks || !isClaudeSession(session))
+    if (!session.capabilities.backgroundTasks)
       return { success: false, error: 'Provider does not support background tasks' }
-    return await session.stopTask(toolUseId)
+    return (
+      (await session.stopTask?.(toolUseId)) ?? {
+        success: false,
+        error: 'Provider does not support background tasks'
+      }
+    )
   })
 
   ipcMain.handle('session:background-task', async (_e, routingId: string, toolUseId: string) => {
     const session = manager.get(routingId)
     if (!session) return { success: false, error: 'No active session' }
-    if (!session.capabilities.backgroundTasks || !isClaudeSession(session))
+    if (!session.capabilities.backgroundTasks)
       return { success: false, error: 'Provider does not support background tasks' }
-    return await session.backgroundTask(toolUseId)
+    return (
+      (await session.backgroundTask?.(toolUseId)) ?? {
+        success: false,
+        error: 'Provider does not support background tasks'
+      }
+    )
   })
 
   ipcMain.handle('session:dequeue-message', async (_e, routingId: string, value: string) => {
     const session = manager.get(routingId)
-    if (!session || !isClaudeSession(session)) return { removed: 0 }
-    return await session.dequeueMessage(value)
+    return (await session?.dequeueMessage?.(value)) ?? { removed: 0 }
   })
 
   ipcMain.handle('session:ask-side-question', async (_e, routingId: string, question: string) => {
@@ -839,9 +841,8 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     safeHandler(async (_e: unknown, routingId: string) => {
       const session = manager.get(routingId)
       if (!session) throw new Error('No active session')
-      if (!session.capabilities.voice || !isClaudeSession(session))
-        throw new Error('Provider does not support voice')
-      await session.voiceStartServer()
+      if (!session.capabilities.voice) throw new Error('Provider does not support voice')
+      await session.voiceStartServer?.()
     })
   )
 
@@ -850,8 +851,8 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     safeHandler(async (_e: unknown, routingId: string) => {
       const session = manager.get(routingId)
       if (!session) throw new Error('No active session')
-      if (!session.capabilities.voice || !isClaudeSession(session)) return
-      await session.voiceStopServer()
+      if (!session.capabilities.voice) return
+      await session.voiceStopServer?.()
     })
   )
 
@@ -860,9 +861,8 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     safeHandler(async (_e: unknown, routingId: string, language: string) => {
       const session = manager.get(routingId)
       if (!session) throw new Error('No active session')
-      if (!session.capabilities.voice || !isClaudeSession(session))
-        throw new Error('Provider does not support voice')
-      await session.voiceStartRecording(language)
+      if (!session.capabilities.voice) throw new Error('Provider does not support voice')
+      await session.voiceStartRecording?.(language)
     })
   )
 
@@ -870,8 +870,8 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     'voice:stop-recording',
     safeHandler(async (_e: unknown, routingId: string) => {
       const session = manager.get(routingId)
-      if (!session || !session.capabilities.voice || !isClaudeSession(session)) return
-      await session.voiceStopRecording()
+      if (!session || !session.capabilities.voice) return
+      await session.voiceStopRecording?.()
     })
   )
 
@@ -889,7 +889,7 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
 
   ipcMain.handle('session:set-effort', (_e, routingId: string, effort: string) => {
     const s = manager.get(routingId)
-    if (s?.capabilities.reasoning.effort != null && isClaudeSession(s)) s.setEffort(effort)
+    if (s?.capabilities.reasoning.effort != null) s.setEffort?.(effort)
   })
 
   ipcMain.handle('session:set-reasoning-variant', (_e, routingId: string, variant: string | null) => {
@@ -898,7 +898,7 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
 
   ipcMain.handle('session:set-thinking-mode', (_e, routingId: string, mode: string) => {
     const s = manager.get(routingId)
-    if (s?.capabilities.reasoning.thinking != null && isClaudeSession(s)) s.setThinkingMode(mode)
+    if (s?.capabilities.reasoning.thinking != null) s.setThinkingMode?.(mode)
   })
 
   ipcMain.handle('session:get-models', async () => {
@@ -982,14 +982,13 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
 
   ipcMain.handle('session:get-plan-content', (_e, routingId: string) => {
     const s = manager.get(routingId)
-    if (s?.capabilities.plan && isClaudeSession(s)) return s.getPlanContent() ?? null
+    if (s?.capabilities.plan) return s.getPlanContent?.() ?? null
     return null
   })
 
   ipcMain.handle('session:get-session-log-path', (_e, routingId: string) => {
     const s = manager.get(routingId)
-    if (s && isClaudeSession(s)) return s.getSessionLogPath() ?? null
-    return null
+    return s?.getSessionLogPath?.() ?? null
   })
 
   ipcMain.handle('session:list-directories', async () => {
@@ -1142,19 +1141,17 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
   )
   ipcMain.handle('config:scan-custom-commands', (_e, cwd: string) => scanCustomCommands(cwd))
   ipcMain.handle('config:load-skill-details', (_e, cwd: string) => {
-    // Engine-dispatch: if the active session for this cwd is an opencode session,
-    // source skills from opencode's GET /skill API (cached, transient-server).
-    // Otherwise fall back to the Claude skill scanner — unchanged for Claude.
-    if (sharedManager) {
-      let hasOpencode = false
-      sharedManager.forEach((session) => {
-        if (session.cwd === cwd && session instanceof OpencodeSession) {
-          hasOpencode = true
-        }
-      })
-      if (hasOpencode) return discoverOpencodeSkills(cwd)
-    }
-    return scanSkills(cwd)
+    // Delegate skill discovery to an active session for this cwd via the neutral
+    // ISession.discoverSkills seam. Preserve historical precedence: an opencode
+    // session on this cwd wins over Claude. With no active session (or only a
+    // Claude one) fall back to the Claude scanner — identical to
+    // ClaudeSession.discoverSkills, so behavior is unchanged.
+    let delegate: ISession | undefined
+    manager.forEach((session) => {
+      if (session.cwd !== cwd) return
+      if (!delegate || session.engineId === 'opencode') delegate = session
+    })
+    return delegate?.discoverSkills?.(cwd) ?? scanSkills(cwd)
   })
   ipcMain.handle('config:load-engine-config', (_e, engineId: string) =>
     loadEngineConfig(engineId)
@@ -1277,9 +1274,9 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
       // apply_flag_settings({}) which triggers the CLI's settings-change
       // subscriber to invalidate its cache and re-read all sources from disk,
       // respecting managed policies and the normal priority hierarchy.
-      manager.forEachClaude((session) => {
+      manager.forEach((session) => {
         if (!cwd || session.cwd === cwd || scope === 'user') {
-          session.notifySettingsChanged().catch(() => {})
+          session.notifySettingsChanged?.().catch(() => {})
         }
       })
     }
@@ -1290,15 +1287,16 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
   ipcMain.handle('claude:set-cleanup-period', async (_e, days: number) => {
     saveCleanupPeriodDays(days)
     // Hot-reload running CLI sessions so the new retention applies immediately.
-    manager.forEachClaude((session) => {
-      session.notifySettingsChanged().catch(() => {})
+    manager.forEach((session) => {
+      session.notifySettingsChanged?.().catch(() => {})
     })
   })
 
-  // MCP server management (Claude-only: capabilities.hostedMcp)
+  // MCP server management (Claude-only: capabilities.hostedMcp AND method presence —
+  // opencode advertises hostedMcp:true but does not implement the MCP methods)
   ipcMain.handle('mcp:status', async (_e, routingId: string) => {
     const session = manager.get(routingId)
-    if (!session || !session.capabilities.hostedMcp || !isClaudeSession(session)) return []
+    if (!session || !session.capabilities.hostedMcp || !session.mcpServerStatus) return []
     return await session.mcpServerStatus()
   })
 
@@ -1307,7 +1305,7 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     safeHandler(async (_e: unknown, routingId: string, serverName: string, enabled: boolean) => {
       const session = manager.get(routingId)
       if (!session) throw new Error('No active session')
-      if (!session.capabilities.hostedMcp || !isClaudeSession(session))
+      if (!session.capabilities.hostedMcp || !session.mcpToggleServer)
         throw new Error('Provider does not support hosted MCP')
       await session.mcpToggleServer(serverName, enabled)
     })
@@ -1318,7 +1316,7 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     safeHandler(async (_e: unknown, routingId: string, serverName: string) => {
       const session = manager.get(routingId)
       if (!session) throw new Error('No active session')
-      if (!session.capabilities.hostedMcp || !isClaudeSession(session))
+      if (!session.capabilities.hostedMcp || !session.mcpReconnectServer)
         throw new Error('Provider does not support hosted MCP')
       await session.mcpReconnectServer(serverName)
     })
@@ -1329,7 +1327,7 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     safeHandler(async (_e: unknown, routingId: string, servers: Record<string, unknown>) => {
       const session = manager.get(routingId)
       if (!session) throw new Error('No active session')
-      if (!session.capabilities.hostedMcp || !isClaudeSession(session))
+      if (!session.capabilities.hostedMcp || !session.mcpSetServers)
         throw new Error('Provider does not support hosted MCP')
       return await session.mcpSetServers(servers)
     })
@@ -1685,13 +1683,13 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
   // Wire up SDK usage relay — tries active user sessions first, then
   // the always-on service session as fallback.
   usageFetcher.setSessionGetter(async () => {
-    // Try active Claude sessions first (they're already running; costUsd capability implies getUsage)
-    const claudeSessions: ClaudeSession[] = []
-    manager.forEachClaude((s) => claudeSessions.push(s))
-    for (const session of claudeSessions) {
+    // Try active sessions first (they're already running; costUsd capability implies getUsage)
+    const sessions: ISession[] = []
+    manager.forEach((s) => sessions.push(s))
+    for (const session of sessions) {
       try {
-        const data = await session.getUsage()
-        if (data !== null) return data
+        const data = await session.getUsage?.()
+        if (data != null) return data
       } catch {
         /* try next session */
       }

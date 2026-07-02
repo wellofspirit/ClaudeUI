@@ -2,7 +2,8 @@ import type {
   ChatMessage,
   EngineId,
   ApprovalDecision,
-  PermissionSuggestion
+  PermissionSuggestion,
+  SkillInfo
 } from '../../shared/types'
 import type { ResolvedCapabilities } from '../../shared/model-capabilities'
 
@@ -59,6 +60,58 @@ export interface ISession {
    * Pass null to revert to opencode's default (variant omitted from the prompt body).
    */
   setReasoningVariant?(variant: string | null): void
+
+  // ---------------------------------------------------------------------------
+  // Optional capability-gated members. Implemented by engines that advertise the
+  // named capability flag (or, where noted, are Claude-only with no flag —
+  // absence of the method is the gate). Callers MUST check the flag and/or use
+  // optional-call (`?.`) before invoking. Mirrors the setReasoningVariant?
+  // precedent above.
+  // ---------------------------------------------------------------------------
+
+  /** Background tasks (gated by capabilities.backgroundTasks). */
+  watchBackground?(toolUseId: string): void
+  unwatchBackground?(toolUseId: string): void
+  readBackgroundRange?(toolUseId: string, offset: number, length: number): string
+  stopTask?(toolUseId: string): Promise<{ success: boolean; error?: string }>
+  backgroundTask?(toolUseId: string): Promise<{ success: boolean; error?: string }>
+
+  /** Message-queue dequeue. Claude-only; no capability flag gates it — the
+   *  absence of the method is the gate (opencode has no dequeue). */
+  dequeueMessage?(value: string): Promise<{ removed: number }>
+
+  /** Voice input (gated by capabilities.voice). */
+  voiceStartServer?(): Promise<{ port: number }>
+  voiceStopServer?(): Promise<void>
+  voiceStartRecording?(language: string): Promise<void>
+  voiceStopRecording?(): Promise<void>
+
+  /** Reasoning-effort tier (gated by capabilities.reasoning.effort != null). */
+  setEffort?(effort: string): void
+  /** Thinking mode (gated by capabilities.reasoning.thinking != null). */
+  setThinkingMode?(mode: string): void
+
+  /** Current ExitPlanMode plan content (gated by capabilities.plan). */
+  getPlanContent?(): string | null
+  /** Path to this session's cli.js log. Claude-only; no capability flag. */
+  getSessionLogPath?(): string | null
+
+  /** Hosted-MCP runtime control (gated by capabilities.hostedMcp AND method
+   *  presence — opencode advertises hostedMcp:true but does not host MCP). */
+  mcpServerStatus?(): Promise<unknown[]>
+  mcpToggleServer?(serverName: string, enabled: boolean): Promise<void>
+  mcpReconnectServer?(serverName: string): Promise<void>
+  mcpSetServers?(servers: Record<string, unknown>): Promise<unknown>
+
+  /** Hot-reload settings from disk. Claude-only; no capability flag. */
+  notifySettingsChanged?(): Promise<void>
+  /** Live token-usage snapshot. Claude-only; no capability flag. */
+  getUsage?(): Promise<Record<string, unknown> | null>
+
+  /** Discover skills for a cwd. Implemented by ALL engines (Claude → scanSkills,
+   *  opencode → discoverOpencodeSkills). Optional so callers use optional-call +
+   *  scanSkills fallback for the no-active-session case. */
+  discoverSkills?(cwd: string): Promise<SkillInfo[]>
 
   /** Update the inactivity timeout. Pass 0 to disable. */
   setInactivityTimeout(ms: number): void

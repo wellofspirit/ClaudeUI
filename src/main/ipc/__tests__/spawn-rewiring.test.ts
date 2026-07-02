@@ -50,7 +50,6 @@ const { sessionManagerSpies } = vi.hoisted(() => {
     cancel: vi.fn(),
     interrupt: vi.fn(async () => {}),
     forEach: vi.fn(),
-    forEachClaude: vi.fn((cb: (s: unknown) => void) => cb(sessionStub)),
     setSessionTimeout: vi.fn()
   }
   return { sessionManagerSpies, sessionStub }
@@ -156,7 +155,6 @@ vi.mock('../../services/session-manager', () => ({
     cancel = sessionManagerSpies.cancel
     interrupt = sessionManagerSpies.interrupt
     forEach = sessionManagerSpies.forEach
-    forEachClaude = sessionManagerSpies.forEachClaude
     setSessionTimeout = sessionManagerSpies.setSessionTimeout
   }
 }))

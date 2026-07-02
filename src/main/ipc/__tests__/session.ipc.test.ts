@@ -73,7 +73,8 @@ const { gitSvcSpies, sessionManagerSpies, sessionStub } = vi.hoisted(() => {
     notifySettingsChanged: vi.fn(async () => {}),
     getPlanContent: vi.fn(() => null),
     getSessionLogPath: vi.fn(() => null),
-    getUsage: vi.fn(async () => null)
+    getUsage: vi.fn(async () => null),
+    discoverSkills: vi.fn(async () => [])
   }
   const sessionManagerSpies = {
     create: vi.fn(),
@@ -82,7 +83,6 @@ const { gitSvcSpies, sessionManagerSpies, sessionStub } = vi.hoisted(() => {
     cancel: vi.fn(),
     interrupt: vi.fn(async () => {}),
     forEach: vi.fn((cb: (s: any) => void) => cb(sessionStub)),
-    forEachClaude: vi.fn((cb: (s: any) => void) => cb(sessionStub)),
     setSessionTimeout: vi.fn()
   }
   return { gitSvcSpies, sessionManagerSpies, sessionStub }
@@ -534,6 +534,72 @@ describe('session.ipc', () => {
     it('session:set-effort routes to session.setEffort', async () => {
       await harness.call('session:set-effort', 'rid-1', 'high')
       expect(sessionStub.setEffort).toHaveBeenCalledWith('high')
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // ISession optional-member safety (Item 3)
+  //
+  // These handlers cast ISession to ClaudeSession before Item 3; the refactor
+  // replaced the cast with capability checks + optional-call (`?.`). Verify a
+  // session that advertises the capability but doesn't implement the optional
+  // method (e.g. a future/partial engine) degrades to the documented fallback
+  // instead of throwing "not a function".
+  // -------------------------------------------------------------------------
+
+  describe('ISession optional-member safety (Item 3)', () => {
+    it('handlers fall back safely when a capability-true session lacks the optional method', async () => {
+      const minimalStub: any = {
+        engineId: 'claude',
+        capabilities: resolveClaudeCapabilities('default'),
+        willQueue: false,
+        cwd: '/tmp/cwd',
+        run: vi.fn(),
+        resolveApproval: vi.fn(),
+        setPermissionMode: vi.fn(async () => {}),
+        setModel: vi.fn(async () => {})
+        // Deliberately no optional members: no watchBackground, stopTask,
+        // dequeueMessage, getPlanContent, getSessionLogPath, mcpServerStatus,
+        // mcpToggleServer, setEffort, etc.
+      }
+      sessionManagerSpies.get.mockReturnValue(minimalStub)
+
+      await expect(harness.call<unknown[]>('mcp:status', 'rid-min')).resolves.toEqual([])
+
+      await expect(
+        harness.call<{ removed: number }>('session:dequeue-message', 'rid-min', 'val')
+      ).resolves.toEqual({ removed: 0 })
+
+      await expect(
+        harness.call<string | null>('session:get-plan-content', 'rid-min')
+      ).resolves.toBeNull()
+
+      await expect(
+        harness.call<string | null>('session:get-session-log-path', 'rid-min')
+      ).resolves.toBeNull()
+
+      await expect(
+        harness.call<{ success: boolean; error?: string }>('session:stop-task', 'rid-min', 'tool-1')
+      ).resolves.toEqual({
+        success: false,
+        error: 'Provider does not support background tasks'
+      })
+
+      // mcp:toggle: capability is true but the method is absent — this is the
+      // guard that proves the method-presence check (not just the capability
+      // flag) gates the call.
+      const mcpToggle = await harness.call<any>('mcp:toggle', 'rid-min', 'srv', true)
+      expect(mcpToggle).toEqual({ ok: false, error: 'Provider does not support hosted MCP' })
+
+      await expect(harness.call('session:set-effort', 'rid-min', 'high')).resolves.toBeUndefined()
+
+      // Restore the default stub for any subsequent tests in this file.
+      sessionManagerSpies.get.mockReturnValue(sessionStub)
+    })
+
+    it('claude:save-permissions invokes notifySettingsChanged via the neutral forEach iteration', async () => {
+      await harness.call('claude:save-permissions', 'user', { allow: [], deny: [], ask: [] })
+      expect(sessionStub.notifySettingsChanged).toHaveBeenCalled()
     })
   })
 })

@@ -132,6 +132,15 @@ vi.mock('../model-discovery', () => ({
   invalidateOpencodeModelCache: vi.fn()
 }))
 
+// discoverSkills (Item 3 — ISession.discoverSkills) delegates to
+// discoverOpencodeSkills; mock it directly so the test doesn't depend on the
+// module's internal per-cwd cache or the OpencodeServerManager/OpencodeClient
+// mocks above.
+const mockDiscoverOpencodeSkills = vi.hoisted(() => vi.fn().mockResolvedValue([]))
+vi.mock('../command-skill-discovery', () => ({
+  discoverOpencodeSkills: mockDiscoverOpencodeSkills
+}))
+
 // ---------------------------------------------------------------------------
 // Import the system under test AFTER mocking
 // ---------------------------------------------------------------------------
@@ -171,6 +180,8 @@ function setupMocks(): void {
   mockGetOpencodeModelCapabilities.mockReturnValue(undefined)
   mockDiscoverOpencodeModels.mockReset()
   mockDiscoverOpencodeModels.mockResolvedValue([])
+  mockDiscoverOpencodeSkills.mockReset()
+  mockDiscoverOpencodeSkills.mockResolvedValue([])
   // Default: no user-configured rules (hermetic — don't read the dev's settings).
   mockLoadClaudePermissions.mockReturnValue({
     allow: [],
@@ -1722,17 +1733,49 @@ describe('OpencodeSession — queue + steer (Phase 8c)', () => {
 // ---------------------------------------------------------------------------
 // dequeueMessage — no-op for opencode (Phase 8c)
 //
-// dequeueMessage is not on ISession; the IPC handler already guards it with
-// isClaudeSession and returns {removed:0} for non-Claude. OpencodeSession has
-// no dequeueMessage — this test verifies the IPC-level guard is sufficient and
-// that no error propagates to a caller expecting the {removed:N} shape.
-// (The renderer's dequeue affordance simply no-ops gracefully — by design.)
+// dequeueMessage is an OPTIONAL member of ISession (Item 3 — no capability flag
+// gates it; the absence of the method is the gate). The IPC handler guards via
+// optional-call: `session?.dequeueMessage?.(value) ?? { removed: 0 }`.
+// OpencodeSession does not implement dequeueMessage — this test verifies the
+// IPC-level guard is sufficient and that no error propagates to a caller
+// expecting the {removed:N} shape. (The renderer's dequeue affordance simply
+// no-ops gracefully — by design.)
 // ---------------------------------------------------------------------------
 
 // The dequeue guard lives in the IPC layer (session.ipc.ts + remote-handlers.ts),
 // not in OpencodeSession itself, so there's nothing to test on OpencodeSession
 // directly. The existing session.ipc.test and remote-handlers.ipc.test cover it.
 // We add a capability assertion as the test anchor.
+
+// ---------------------------------------------------------------------------
+// discoverSkills — ISession.discoverSkills (Item 3)
+// ---------------------------------------------------------------------------
+
+describe('OpencodeSession — discoverSkills (Item 3)', () => {
+  beforeEach(setupMocks)
+
+  it('delegates to discoverOpencodeSkills with the session cwd', async () => {
+    const skills = [
+      {
+        name: 'sk1',
+        displayName: 'sk1',
+        description: '',
+        source: 'project' as const,
+        path: '/tmp/test-cwd/.claude/skills/sk1',
+        content: ''
+      }
+    ]
+    mockDiscoverOpencodeSkills.mockResolvedValueOnce(skills)
+
+    const session = makeSession()
+    const result = await session.discoverSkills('/tmp/test-cwd')
+
+    expect(mockDiscoverOpencodeSkills).toHaveBeenCalledWith('/tmp/test-cwd')
+    expect(result).toEqual(skills)
+
+    session.dispose()
+  })
+})
 
 describe('OpencodeSession — queue + steer capability flags (Phase 8c)', () => {
   beforeEach(setupMocks)

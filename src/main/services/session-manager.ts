@@ -5,7 +5,6 @@ import { engineRegistry } from '../providers/EngineRegistry'
 // Side-effect: registers all engine factories (claude, …) at module load time
 import '../providers/register-engines'
 import { loadSessionHistory } from './session-history'
-import { ClaudeSession } from './claude-session'
 
 export class SessionManager {
   private sessions = new Map<string, ISession>()
@@ -127,17 +126,5 @@ export class SessionManager {
   /** Iterate all active sessions (engine-neutral). */
   forEach(fn: (session: ISession) => void): void {
     this.sessions.forEach(fn)
-  }
-
-  /**
-   * Iterate only ClaudeSession instances. Use for Claude-only operations
-   * (e.g. notifySettingsChanged) that must not run on other engine sessions.
-   */
-  forEachClaude(fn: (session: ClaudeSession) => void): void {
-    this.sessions.forEach((session) => {
-      if (session instanceof ClaudeSession) {
-        fn(session)
-      }
-    })
   }
 }
