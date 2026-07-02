@@ -16,18 +16,12 @@ import {
   loadSettings,
   saveSettings,
   loadSessionConfig,
-  saveSessionConfig,
   loadSlashCommands
 } from '../services/ui-config'
 import { invalidateMockupSecuritySettings } from '../services/mockup-settings'
 import type { UISettings, UISessionConfig } from '../services/ui-config'
-import {
-  loadClaudePermissions,
-  loadCleanupPeriodDays,
-  saveCleanupPeriodDays
-} from '../services/claude-settings'
+import { loadClaudePermissions, loadCleanupPeriodDays } from '../services/claude-settings'
 import { loadMcpServers, readDisabledMcpServers } from '../services/claude-mcp'
-import { scanSkills } from '../services/skill-scanner'
 import { scanCustomCommands } from '../services/custom-command-scanner'
 import { usageFetcher } from '../services/usage-fetcher'
 import { blockUsageService } from '../services/block-usage'
@@ -37,8 +31,26 @@ import { ClaudeSession, getSdkExecutableOpts } from '../services/claude-session'
 import { PERSISTED_SESSIONS_DIR } from '../services/persisted-sessions-dir'
 import { query as sdkQuery } from '../sdk'
 import { logger } from '../services/logger'
-import type { ISession } from '../providers/ISession'
 import { prepareAndCreateSession } from './create-session'
+import {
+  sendPrompt,
+  watchBackground,
+  unwatchBackground,
+  readBackgroundRange,
+  stopTask,
+  backgroundTask,
+  dequeueMessage,
+  askSideQuestion,
+  setEffort,
+  setThinkingMode,
+  getPlanContent,
+  getSessionLogPath,
+  mcpStatus,
+  setCleanupPeriod,
+  loadSkillDetails,
+  saveSessions,
+  listDirEntries
+} from './handlers-core'
 
 /**
  * Registers handler functions on the RemoteDispatcher.
@@ -128,21 +140,7 @@ export function registerRemoteHandlers(
       routingId: string,
       prompt: string,
       attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
-    ) => {
-      const session = manager.get(routingId)
-      if (!session) throw new Error(`No session for routingId: ${routingId}`)
-      // Check before run() — if session already active, the message will be queued
-      const queued = session.willQueue
-      session.run(prompt, attachments)
-      // Notify local desktop + all extra windows (remote bridge → other remote clients)
-      const payload = { prompt, attachments, queued }
-      if (!win.isDestroyed()) {
-        win.webContents.send('session:user-message', routingId, payload)
-      }
-      for (const w of ClaudeSession.getExtraWindows()) {
-        if (!w.isDestroyed()) w.webContents.send('session:user-message', routingId, payload)
-      }
-    }
+    ) => sendPrompt(manager, win, routingId, prompt, attachments)
   )
 
   dispatcher.register('session:cancel', async (routingId: string) => {
@@ -170,59 +168,32 @@ export function registerRemoteHandlers(
   // Session control
   // -------------------------------------------------------------------------
 
-  dispatcher.register('session:watch-background', async (routingId: string, toolUseId: string) => {
-    const s = manager.get(routingId)
-    if (s?.capabilities.backgroundTasks) s.watchBackground?.(toolUseId)
-  })
+  dispatcher.register('session:watch-background', async (routingId: string, toolUseId: string) =>
+    watchBackground(manager, routingId, toolUseId)
+  )
 
   dispatcher.register(
     'session:unwatch-background',
-    async (routingId: string, toolUseId: string) => {
-      const s = manager.get(routingId)
-      if (s?.capabilities.backgroundTasks) s.unwatchBackground?.(toolUseId)
-    }
+    async (routingId: string, toolUseId: string) => unwatchBackground(manager, routingId, toolUseId)
   )
 
   dispatcher.register(
     'session:read-background-range',
-    async (routingId: string, toolUseId: string, offset: number, length: number) => {
-      const s = manager.get(routingId)
-      if (s?.capabilities.backgroundTasks)
-        return s.readBackgroundRange?.(toolUseId, offset, length) ?? ''
-      return ''
-    }
+    async (routingId: string, toolUseId: string, offset: number, length: number) =>
+      readBackgroundRange(manager, routingId, toolUseId, offset, length)
   )
 
-  dispatcher.register('session:stop-task', async (routingId: string, toolUseId: string) => {
-    const session = manager.get(routingId)
-    if (!session) return { success: false, error: 'No active session' }
-    if (!session.capabilities.backgroundTasks)
-      return { success: false, error: 'Provider does not support background tasks' }
-    return (
-      (await session.stopTask?.(toolUseId)) ?? {
-        success: false,
-        error: 'Provider does not support background tasks'
-      }
-    )
-  })
+  dispatcher.register('session:stop-task', async (routingId: string, toolUseId: string) =>
+    stopTask(manager, routingId, toolUseId)
+  )
 
-  dispatcher.register('session:background-task', async (routingId: string, toolUseId: string) => {
-    const session = manager.get(routingId)
-    if (!session) return { success: false, error: 'No active session' }
-    if (!session.capabilities.backgroundTasks)
-      return { success: false, error: 'Provider does not support background tasks' }
-    return (
-      (await session.backgroundTask?.(toolUseId)) ?? {
-        success: false,
-        error: 'Provider does not support background tasks'
-      }
-    )
-  })
+  dispatcher.register('session:background-task', async (routingId: string, toolUseId: string) =>
+    backgroundTask(manager, routingId, toolUseId)
+  )
 
-  dispatcher.register('session:dequeue-message', async (routingId: string, value: string) => {
-    const session = manager.get(routingId)
-    return (await session?.dequeueMessage?.(value)) ?? { removed: 0 }
-  })
+  dispatcher.register('session:dequeue-message', async (routingId: string, value: string) =>
+    dequeueMessage(manager, routingId, value)
+  )
 
   dispatcher.register('session:set-permission-mode', async (routingId: string, mode: string) => {
     await manager.get(routingId)?.setPermissionMode(mode)
@@ -232,22 +203,17 @@ export function registerRemoteHandlers(
     await manager.get(routingId)?.setModel(model)
   })
 
-  dispatcher.register('session:set-effort', async (routingId: string, effort: string) => {
-    const s = manager.get(routingId)
-    if (s?.capabilities.reasoning.effort != null) s.setEffort?.(effort)
-  })
+  dispatcher.register('session:set-effort', async (routingId: string, effort: string) =>
+    setEffort(manager, routingId, effort)
+  )
 
-  dispatcher.register('session:set-thinking-mode', async (routingId: string, mode: string) => {
-    const s = manager.get(routingId)
-    if (s?.capabilities.reasoning.thinking != null) s.setThinkingMode?.(mode)
-  })
+  dispatcher.register('session:set-thinking-mode', async (routingId: string, mode: string) =>
+    setThinkingMode(manager, routingId, mode)
+  )
 
-  dispatcher.register('session:ask-side-question', async (routingId: string, question: string) => {
-    const session = manager.get(routingId)
-    if (!session) return null
-    if (!session.capabilities.sideQuestion) return null
-    return await session.askSideQuestion(question)
-  })
+  dispatcher.register('session:ask-side-question', async (routingId: string, question: string) =>
+    askSideQuestion(manager, routingId, question)
+  )
 
   // -------------------------------------------------------------------------
   // Session queries
@@ -270,16 +236,13 @@ export function registerRemoteHandlers(
     }
   })
 
-  dispatcher.register('session:get-plan-content', async (routingId: string) => {
-    const s = manager.get(routingId)
-    if (s?.capabilities.plan) return s.getPlanContent?.() ?? null
-    return null
-  })
+  dispatcher.register('session:get-plan-content', async (routingId: string) =>
+    getPlanContent(manager, routingId)
+  )
 
-  dispatcher.register('session:get-session-log-path', async (routingId: string) => {
-    const s = manager.get(routingId)
-    return s?.getSessionLogPath?.() ?? null
-  })
+  dispatcher.register('session:get-session-log-path', async (routingId: string) =>
+    getSessionLogPath(manager, routingId)
+  )
 
   dispatcher.register('session:list-directories', async () => {
     return await listDirectories()
@@ -335,31 +298,14 @@ export function registerRemoteHandlers(
     }
   })
   dispatcher.register('config:load-sessions', async () => loadSessionConfig())
-  dispatcher.register('config:save-sessions', async (config: UISessionConfig) => {
-    saveSessionConfig(config)
-    // Notify local desktop + all extra windows (remote bridge → other remote clients)
-    if (!win.isDestroyed()) {
-      win.webContents.send('config:sessions-changed', config)
-    }
-    for (const w of ClaudeSession.getExtraWindows()) {
-      if (!w.isDestroyed()) w.webContents.send('config:sessions-changed', config)
-    }
-  })
+  dispatcher.register('config:save-sessions', async (config: UISessionConfig) =>
+    saveSessions(win, config, { notifyMainWindow: true })
+  )
   dispatcher.register('config:load-slash-commands', async () => loadSlashCommands())
   dispatcher.register('config:scan-custom-commands', async (cwd: string) => scanCustomCommands(cwd))
-  dispatcher.register('config:load-skill-details', async (cwd: string) => {
-    // Delegate skill discovery to an active session for this cwd via the neutral
-    // ISession.discoverSkills seam. Preserve historical precedence: an opencode
-    // session on this cwd wins over Claude. With no active session (or only a
-    // Claude one) fall back to the Claude scanner — identical to
-    // ClaudeSession.discoverSkills, so behavior is unchanged.
-    let delegate: ISession | undefined
-    manager.forEach((session) => {
-      if (session.cwd !== cwd) return
-      if (!delegate || session.engineId === 'opencode') delegate = session
-    })
-    return delegate?.discoverSkills?.(cwd) ?? scanSkills(cwd)
-  })
+  dispatcher.register('config:load-skill-details', async (cwd: string) =>
+    loadSkillDetails(manager, cwd)
+  )
 
   // Claude permissions (read-only)
   dispatcher.register('claude:load-permissions', async (scope: string, cwd?: string) =>
@@ -368,10 +314,9 @@ export function registerRemoteHandlers(
 
   // Transcript retention window (~/.claude/settings.json#cleanupPeriodDays)
   dispatcher.register('claude:get-cleanup-period', async () => loadCleanupPeriodDays())
-  dispatcher.register('claude:set-cleanup-period', async (days: number) => {
-    saveCleanupPeriodDays(days)
-    manager.forEach((session) => session.notifySettingsChanged?.().catch(() => {}))
-  })
+  dispatcher.register('claude:set-cleanup-period', async (days: number) =>
+    setCleanupPeriod(manager, days)
+  )
 
   // MCP config (read-only)
   dispatcher.register('mcp:load-servers', async (scope: string, cwd?: string) =>
@@ -381,47 +326,13 @@ export function registerRemoteHandlers(
 
   // MCP runtime (Claude-only: capabilities.hostedMcp AND method presence —
   // opencode advertises hostedMcp:true but does not implement mcpServerStatus)
-  dispatcher.register('mcp:status', async (routingId: string) => {
-    const session = manager.get(routingId)
-    if (!session || !session.capabilities.hostedMcp || !session.mcpServerStatus) return []
-    return await session.mcpServerStatus()
-  })
+  dispatcher.register('mcp:status', async (routingId: string) => mcpStatus(manager, routingId))
 
   // -------------------------------------------------------------------------
   // File listing (for folder browser on web)
   // -------------------------------------------------------------------------
 
-  dispatcher.register('file:list-dir', async (dirPath: string) => {
-    try {
-      const entries = await fs.promises.readdir(dirPath, { withFileTypes: true })
-      const HIDDEN_NAMES = new Set([
-        'node_modules',
-        '.git',
-        '.DS_Store',
-        '__pycache__',
-        '.next',
-        '.cache'
-      ])
-      const result: Array<{ name: string; isDirectory: boolean }> = []
-      for (const entry of entries) {
-        if (entry.name.startsWith('.') || HIDDEN_NAMES.has(entry.name)) continue
-        result.push({
-          name: entry.name,
-          isDirectory: entry.isDirectory() || entry.isSymbolicLink()
-        })
-      }
-      result.sort((a, b) => {
-        if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1
-        return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })
-      })
-      const resolved = path.resolve(dirPath)
-      const isRoot = path.dirname(resolved) === resolved
-      const resolvedPosix = resolved.replace(/\\/g, '/').replace(/\/$/, '')
-      return { entries: result, isRoot, resolvedPath: resolvedPosix }
-    } catch {
-      return { entries: [], isRoot: false, resolvedPath: '' }
-    }
-  })
+  dispatcher.register('file:list-dir', async (dirPath: string) => listDirEntries(dirPath))
 
   // -------------------------------------------------------------------------
   // Usage

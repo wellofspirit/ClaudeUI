@@ -19,7 +19,6 @@ import {
   loadSettings,
   saveSettings,
   loadSessionConfig,
-  saveSessionConfig,
   loadSlashCommands,
   saveSlashCommands,
   startConfigWatcher,
@@ -31,8 +30,7 @@ import {
 import {
   loadClaudePermissions,
   saveClaudePermissions,
-  loadCleanupPeriodDays,
-  saveCleanupPeriodDays
+  loadCleanupPeriodDays
 } from '../services/claude-settings'
 import {
   loadMcpServers,
@@ -41,7 +39,6 @@ import {
   readDisabledMcpServers,
   writeDisabledMcpServers
 } from '../services/claude-mcp'
-import { scanSkills } from '../services/skill-scanner'
 import { scanCustomCommands } from '../services/custom-command-scanner'
 import type { UISettings, UISessionConfig, SlashCommandCache } from '../services/ui-config'
 import { gitServiceManager } from '../services/git-service'
@@ -107,6 +104,25 @@ import { invalidateMockupSecuritySettings } from '../services/mockup-settings'
 import type { ISession } from '../providers/ISession'
 import { prepareAndCreateSession } from './create-session'
 import { applyProxyEnv, applyEndpointEnv, applyModelEnv } from '../providers/claude-spawn-prep'
+import {
+  sendPrompt,
+  watchBackground,
+  unwatchBackground,
+  readBackgroundRange,
+  stopTask,
+  backgroundTask,
+  dequeueMessage,
+  askSideQuestion,
+  setEffort,
+  setThinkingMode,
+  getPlanContent,
+  getSessionLogPath,
+  mcpStatus,
+  setCleanupPeriod,
+  loadSkillDetails,
+  saveSessions,
+  listDirEntries
+} from './handlers-core'
 
 /**
  * Wraps an async IPC handler with try-catch, returning a standardized IpcResult envelope.
@@ -734,22 +750,7 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
       routingId: string,
       prompt: string,
       attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
-    ) => {
-      const session = manager.get(routingId)
-      if (!session) throw new Error(`No session for routingId: ${routingId}`)
-      // Check before run() — if session already active, the message will be queued
-      const queued = session.willQueue
-      session.run(prompt, attachments)
-      // Relay user message back to all renderers (local + remote) as the single source of truth.
-      // Include queued flag so renderers show it as pending (not in chat) until consumed.
-      const payload = { prompt, attachments, queued }
-      if (!win.isDestroyed()) {
-        win.webContents.send('session:user-message', routingId, payload)
-      }
-      for (const w of ClaudeSession.getExtraWindows()) {
-        if (!w.isDestroyed()) w.webContents.send('session:user-message', routingId, payload)
-      }
-    }
+    ) => sendPrompt(manager, win, routingId, prompt, attachments)
   )
 
   ipcMain.handle('session:cancel', (_event, routingId: string) => {
@@ -774,63 +775,35 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     }
   )
 
-  ipcMain.handle('session:watch-background', (_e, routingId: string, toolUseId: string) => {
-    const s = manager.get(routingId)
-    if (s?.capabilities.backgroundTasks) s.watchBackground?.(toolUseId)
-  })
+  ipcMain.handle('session:watch-background', (_e, routingId: string, toolUseId: string) =>
+    watchBackground(manager, routingId, toolUseId)
+  )
 
-  ipcMain.handle('session:unwatch-background', (_e, routingId: string, toolUseId: string) => {
-    const s = manager.get(routingId)
-    if (s?.capabilities.backgroundTasks) s.unwatchBackground?.(toolUseId)
-  })
+  ipcMain.handle('session:unwatch-background', (_e, routingId: string, toolUseId: string) =>
+    unwatchBackground(manager, routingId, toolUseId)
+  )
 
   ipcMain.handle(
     'session:read-background-range',
-    (_e, routingId: string, toolUseId: string, offset: number, length: number) => {
-      const s = manager.get(routingId)
-      if (s?.capabilities.backgroundTasks)
-        return s.readBackgroundRange?.(toolUseId, offset, length) ?? ''
-      return ''
-    }
+    (_e, routingId: string, toolUseId: string, offset: number, length: number) =>
+      readBackgroundRange(manager, routingId, toolUseId, offset, length)
   )
 
-  ipcMain.handle('session:stop-task', async (_e, routingId: string, toolUseId: string) => {
-    const session = manager.get(routingId)
-    if (!session) return { success: false, error: 'No active session' }
-    if (!session.capabilities.backgroundTasks)
-      return { success: false, error: 'Provider does not support background tasks' }
-    return (
-      (await session.stopTask?.(toolUseId)) ?? {
-        success: false,
-        error: 'Provider does not support background tasks'
-      }
-    )
-  })
+  ipcMain.handle('session:stop-task', async (_e, routingId: string, toolUseId: string) =>
+    stopTask(manager, routingId, toolUseId)
+  )
 
-  ipcMain.handle('session:background-task', async (_e, routingId: string, toolUseId: string) => {
-    const session = manager.get(routingId)
-    if (!session) return { success: false, error: 'No active session' }
-    if (!session.capabilities.backgroundTasks)
-      return { success: false, error: 'Provider does not support background tasks' }
-    return (
-      (await session.backgroundTask?.(toolUseId)) ?? {
-        success: false,
-        error: 'Provider does not support background tasks'
-      }
-    )
-  })
+  ipcMain.handle('session:background-task', async (_e, routingId: string, toolUseId: string) =>
+    backgroundTask(manager, routingId, toolUseId)
+  )
 
-  ipcMain.handle('session:dequeue-message', async (_e, routingId: string, value: string) => {
-    const session = manager.get(routingId)
-    return (await session?.dequeueMessage?.(value)) ?? { removed: 0 }
-  })
+  ipcMain.handle('session:dequeue-message', async (_e, routingId: string, value: string) =>
+    dequeueMessage(manager, routingId, value)
+  )
 
-  ipcMain.handle('session:ask-side-question', async (_e, routingId: string, question: string) => {
-    const session = manager.get(routingId)
-    if (!session) return null
-    if (!session.capabilities.sideQuestion) return null
-    return await session.askSideQuestion(question)
-  })
+  ipcMain.handle('session:ask-side-question', async (_e, routingId: string, question: string) =>
+    askSideQuestion(manager, routingId, question)
+  )
 
   ipcMain.handle('session:set-permission-mode', async (_e, routingId: string, mode: string) => {
     await manager.get(routingId)?.setPermissionMode(mode)
@@ -888,19 +861,17 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     await manager.get(routingId)?.setModel(model)
   })
 
-  ipcMain.handle('session:set-effort', (_e, routingId: string, effort: string) => {
-    const s = manager.get(routingId)
-    if (s?.capabilities.reasoning.effort != null) s.setEffort?.(effort)
-  })
+  ipcMain.handle('session:set-effort', (_e, routingId: string, effort: string) =>
+    setEffort(manager, routingId, effort)
+  )
 
   ipcMain.handle('session:set-reasoning-variant', (_e, routingId: string, variant: string | null) => {
     manager.get(routingId)?.setReasoningVariant?.(variant)
   })
 
-  ipcMain.handle('session:set-thinking-mode', (_e, routingId: string, mode: string) => {
-    const s = manager.get(routingId)
-    if (s?.capabilities.reasoning.thinking != null) s.setThinkingMode?.(mode)
-  })
+  ipcMain.handle('session:set-thinking-mode', (_e, routingId: string, mode: string) =>
+    setThinkingMode(manager, routingId, mode)
+  )
 
   ipcMain.handle('session:get-models', async () => {
     return await fetchModels()
@@ -981,16 +952,13 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     })
   )
 
-  ipcMain.handle('session:get-plan-content', (_e, routingId: string) => {
-    const s = manager.get(routingId)
-    if (s?.capabilities.plan) return s.getPlanContent?.() ?? null
-    return null
-  })
+  ipcMain.handle('session:get-plan-content', (_e, routingId: string) =>
+    getPlanContent(manager, routingId)
+  )
 
-  ipcMain.handle('session:get-session-log-path', (_e, routingId: string) => {
-    const s = manager.get(routingId)
-    return s?.getSessionLogPath?.() ?? null
-  })
+  ipcMain.handle('session:get-session-log-path', (_e, routingId: string) =>
+    getSessionLogPath(manager, routingId)
+  )
 
   ipcMain.handle('session:list-directories', async () => {
     return await listDirectories()
@@ -1004,40 +972,7 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     return await loadOpencodeSessionHistory(sessionId)
   })
 
-  ipcMain.handle('file:list-dir', async (_e, dirPath: string) => {
-    try {
-      const entries = await fs.promises.readdir(dirPath, { withFileTypes: true })
-      const HIDDEN_NAMES = new Set([
-        'node_modules',
-        '.git',
-        '.DS_Store',
-        '__pycache__',
-        '.next',
-        '.cache'
-      ])
-      const result: Array<{ name: string; isDirectory: boolean }> = []
-      for (const entry of entries) {
-        if (entry.name.startsWith('.') || HIDDEN_NAMES.has(entry.name)) continue
-        result.push({
-          name: entry.name,
-          isDirectory: entry.isDirectory() || entry.isSymbolicLink()
-        })
-      }
-      // Sort: directories first, then alphabetical within each group
-      result.sort((a, b) => {
-        if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1
-        return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })
-      })
-      // Check if this directory is a filesystem root (parent resolves to itself)
-      // Return resolved path in POSIX format so renderer can rewrite relative dirs
-      const resolved = path.resolve(dirPath)
-      const isRoot = path.dirname(resolved) === resolved
-      const resolvedPosix = resolved.replace(/\\/g, '/').replace(/\/$/, '')
-      return { entries: result, isRoot, resolvedPath: resolvedPosix }
-    } catch {
-      return { entries: [], isRoot: false, resolvedPath: '' }
-    }
-  })
+  ipcMain.handle('file:list-dir', async (_e, dirPath: string) => listDirEntries(dirPath))
 
   ipcMain.handle('session:load-history', async (_e, sessionId: string, projectKey: string) => {
     return await loadSessionHistory(sessionId, projectKey)
@@ -1129,31 +1064,15 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     }
   })
   ipcMain.handle('config:load-sessions', () => loadSessionConfig())
-  ipcMain.handle('config:save-sessions', (_e, config: UISessionConfig) => {
-    saveSessionConfig(config)
-    // Notify remote clients of session config change
-    for (const w of ClaudeSession.getExtraWindows()) {
-      if (!w.isDestroyed()) w.webContents.send('config:sessions-changed', config)
-    }
-  })
+  ipcMain.handle('config:save-sessions', (_e, config: UISessionConfig) =>
+    saveSessions(win, config, { notifyMainWindow: false })
+  )
   ipcMain.handle('config:load-slash-commands', () => loadSlashCommands())
   ipcMain.handle('config:save-slash-commands', (_e, commands: SlashCommandCache[]) =>
     saveSlashCommands(commands)
   )
   ipcMain.handle('config:scan-custom-commands', (_e, cwd: string) => scanCustomCommands(cwd))
-  ipcMain.handle('config:load-skill-details', (_e, cwd: string) => {
-    // Delegate skill discovery to an active session for this cwd via the neutral
-    // ISession.discoverSkills seam. Preserve historical precedence: an opencode
-    // session on this cwd wins over Claude. With no active session (or only a
-    // Claude one) fall back to the Claude scanner — identical to
-    // ClaudeSession.discoverSkills, so behavior is unchanged.
-    let delegate: ISession | undefined
-    manager.forEach((session) => {
-      if (session.cwd !== cwd) return
-      if (!delegate || session.engineId === 'opencode') delegate = session
-    })
-    return delegate?.discoverSkills?.(cwd) ?? scanSkills(cwd)
-  })
+  ipcMain.handle('config:load-skill-details', (_e, cwd: string) => loadSkillDetails(manager, cwd))
   ipcMain.handle('config:load-engine-config', (_e, engineId: string) =>
     loadEngineConfig(engineId)
   )
@@ -1285,21 +1204,13 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
 
   // Transcript retention window (~/.claude/settings.json#cleanupPeriodDays)
   ipcMain.handle('claude:get-cleanup-period', () => loadCleanupPeriodDays())
-  ipcMain.handle('claude:set-cleanup-period', async (_e, days: number) => {
-    saveCleanupPeriodDays(days)
-    // Hot-reload running CLI sessions so the new retention applies immediately.
-    manager.forEach((session) => {
-      session.notifySettingsChanged?.().catch(() => {})
-    })
-  })
+  ipcMain.handle('claude:set-cleanup-period', async (_e, days: number) =>
+    setCleanupPeriod(manager, days)
+  )
 
   // MCP server management (Claude-only: capabilities.hostedMcp AND method presence —
   // opencode advertises hostedMcp:true but does not implement the MCP methods)
-  ipcMain.handle('mcp:status', async (_e, routingId: string) => {
-    const session = manager.get(routingId)
-    if (!session || !session.capabilities.hostedMcp || !session.mcpServerStatus) return []
-    return await session.mcpServerStatus()
-  })
+  ipcMain.handle('mcp:status', async (_e, routingId: string) => mcpStatus(manager, routingId))
 
   ipcMain.handle(
     'mcp:toggle',
