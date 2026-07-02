@@ -548,6 +548,8 @@ export interface ModelInfo {
    *  Non-empty only when the model's capabilities.reasoning === true and variants are present.
    *  Claude models always have this undefined/empty — picker hidden. */
   reasoningVariants?: string[]
+  /** true when the provider catalog reports zero input+output cost (e.g. opencode zen free tier). */
+  free?: boolean
 }
 
 /** Grouped model list for the engine-aware picker. */

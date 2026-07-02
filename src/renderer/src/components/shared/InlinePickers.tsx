@@ -25,6 +25,8 @@ export interface ModelDisplay {
   engineId?: EngineId
   /** Vendor id within the engine (used for group header rendering). */
   vendorId?: VendorId
+  /** true when the provider catalog reports zero input+output cost (e.g. opencode zen free tier). */
+  free?: boolean
 }
 
 function useClickOutside(
@@ -82,9 +84,24 @@ export function ModelPicker({
   const ref = useRef<HTMLDivElement | null>(null)
   useClickOutside(ref, open, () => setOpen(false))
 
+  // Local-only filter toggle — intentionally not persisted across dropdown
+  // open/close (or model list changes); it simply resets on remount.
+  const [freeOnly, setFreeOnly] = useState(false)
+
   // Derive groups only when models change (avoids re-grouping every render)
   const groups = useMemo(() => deriveModelGroups(models), [models])
   const isGrouped = groups.length > 1
+  const hasFreeModels = useMemo(() => models.some((m) => m.free), [models])
+  const displayedGroups = useMemo(() => {
+    // Ignore a stale toggle when the list no longer contains free models
+    // (e.g. the session became engine-locked to Claude and upstream filtering
+    // stripped all opencode models) — the chip is unmounted then, so an active
+    // filter would otherwise leave a permanently empty dropdown.
+    if (!freeOnly || !hasFreeModels) return groups
+    return groups
+      .map((g) => ({ ...g, items: g.items.filter((m) => m.free) }))
+      .filter((g) => g.items.length > 0)
+  }, [groups, freeOnly, hasFreeModels])
 
   return (
     <div className="relative" ref={ref} data-testid="ModelPicker">
@@ -111,7 +128,27 @@ export function ModelPicker({
       </button>
       {open && (
         <div className="absolute bottom-full mb-1 left-0 w-56 bg-bg-tertiary border border-border rounded-lg overflow-hidden shadow-lg shadow-black/30 z-20">
-          {groups.map((group) => (
+          {hasFreeModels && (
+            <div className="px-2 pt-2 pb-1 flex items-center border-b border-border/50">
+              <button
+                type="button"
+                data-testid="ModelPicker.freeFilter"
+                aria-pressed={freeOnly}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  setFreeOnly((v) => !v)
+                }}
+                className={`text-[10px] px-2 py-0.5 rounded-full font-medium uppercase tracking-wide transition-colors cursor-pointer border ${
+                  freeOnly
+                    ? 'bg-emerald-500/25 text-emerald-300 border-emerald-500/40'
+                    : 'bg-bg-hover text-text-muted border-border hover:text-text-secondary'
+                }`}
+              >
+                Free
+              </button>
+            </div>
+          )}
+          {displayedGroups.map((group) => (
             <div key={group.key}>
               {isGrouped && (
                 <div className="px-3 pt-2 pb-0.5 text-[10px] text-text-muted font-medium uppercase tracking-wider">
@@ -133,7 +170,17 @@ export function ModelPicker({
                       : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary'
                   }`}
                 >
-                  <span className="text-[12px]">{m.shortName}</span>
+                  <span className="flex items-center gap-1.5">
+                    <span className="text-[12px]">{m.shortName}</span>
+                    {m.free && (
+                      <span
+                        data-testid="ModelPicker.freeBadge"
+                        className="text-[9px] px-1 py-0.5 rounded bg-emerald-500/15 text-emerald-300 font-medium uppercase tracking-wide"
+                      >
+                        Free
+                      </span>
+                    )}
+                  </span>
                   {m.description && (
                     <span className="text-text-muted text-[10px]">
                       {m.description.split('·')[1]?.trim()}

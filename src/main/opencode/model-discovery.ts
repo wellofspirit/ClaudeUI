@@ -246,6 +246,9 @@ export async function discoverOpencodeModels(): Promise<EngineModelGroup[]> {
               caps?.reasoning && m.variants && Object.keys(m.variants).length > 0
                 ? Object.keys(m.variants)
                 : []
+            // A model is free iff the catalog reports cost AND both input/output are zero.
+            // Missing cost is treated as unknown, not free.
+            const isFree = !!m.cost && m.cost.input === 0 && m.cost.output === 0
             return {
               value: `${provider.id}/${modelId}`,
               displayName: m.name || modelId,
@@ -256,7 +259,8 @@ export async function discoverOpencodeModels(): Promise<EngineModelGroup[]> {
               toolCalling,
               supportsEffort: false,
               supportsAdaptiveThinking: false,
-              ...(reasoningVariants.length > 0 ? { reasoningVariants } : {})
+              ...(reasoningVariants.length > 0 ? { reasoningVariants } : {}),
+              ...(isFree ? { free: true } : {})
             }
           })
 
