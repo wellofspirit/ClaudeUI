@@ -39,9 +39,9 @@ vi.mock('../delete-session-files', () => ({ deleteSessionFiles: mockDeleteSessio
 import {
   listOpencodeSessionsGlobal,
   loadOpencodeSessionHistory,
-  deleteOpencodeSession,
-  deleteSessionByEngine
+  deleteOpencodeSession
 } from '../opencode-session-list'
+import { deleteSessionByEngine } from '../session-delete'
 
 beforeEach(() => {
   mockAcquire.mockReset().mockResolvedValue({ baseUrl: 'http://127.0.0.1:1', authHeader: 'Basic x' })

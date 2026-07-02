@@ -99,6 +99,7 @@ import type {
 } from '../../shared/types'
 import { claudeModel } from '../../shared/types'
 import { BaseSession } from '../providers/BaseSession'
+import type { EngineSpawnOptions } from '../providers/ISession'
 
 interface ApprovalResult {
   decision: ApprovalDecision
@@ -172,18 +173,6 @@ interface BackgroundPoller {
 }
 
 export class ClaudeSession extends BaseSession {
-  // Static pass-throughs to BaseSession so existing call sites in session.ipc.ts
-  // and remote-handlers.ts keep compiling without modification.
-  static override addExtraWindow(win: BrowserWindow): void {
-    BaseSession.addExtraWindow(win)
-  }
-  static override removeExtraWindow(win: BrowserWindow): void {
-    BaseSession.removeExtraWindow(win)
-  }
-  static override getExtraWindows(): Set<BrowserWindow> {
-    return BaseSession.getExtraWindows()
-  }
-
   readonly engineId = 'claude' as const
 
   get capabilities(): ResolvedCapabilities {
@@ -251,19 +240,17 @@ export class ClaudeSession extends BaseSession {
   private accTotalApiDurationMs = 0
   private lastContextLength = 0
 
-  constructor(
-    routingId: string,
-    win: BrowserWindow,
-    cwd: string,
-    effort?: string,
-    resumeSessionId?: string,
-    permissionMode?: string,
-    model?: string,
-    sandboxConfig?: SandboxSettings,
-    thinkingMode?: string,
-    resumeSessionAt?: string,
-    forkSession?: boolean
-  ) {
+  constructor(routingId: string, win: BrowserWindow, cwd: string, opts: EngineSpawnOptions = {}) {
+    const {
+      effort,
+      resumeSessionId,
+      permissionMode,
+      model,
+      sandboxConfig,
+      thinkingMode,
+      resumeSessionAt,
+      forkSession
+    } = opts
     super(routingId, win, cwd)
     this.effort = effort || 'medium'
     this.thinkingMode =

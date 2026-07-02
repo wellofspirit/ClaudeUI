@@ -12,62 +12,12 @@ import { spawnPrepRegistry } from './SpawnPrepRegistry'
 
 engineRegistry.register(
   'claude',
-  (
-    routingId,
-    win,
-    cwd,
-    effort,
-    resumeSessionId,
-    permissionMode,
-    model,
-    sandboxConfig,
-    thinkingMode,
-    resumeSessionAt,
-    forkSession
-  ) =>
-    new ClaudeSession(
-      routingId,
-      win,
-      cwd,
-      effort,
-      resumeSessionId,
-      permissionMode,
-      model,
-      sandboxConfig,
-      thinkingMode,
-      resumeSessionAt,
-      forkSession
-    )
+  (routingId, win, cwd, opts) => new ClaudeSession(routingId, win, cwd, opts)
 )
 
 engineRegistry.register(
   'opencode',
-  (
-    routingId,
-    win,
-    cwd,
-    effort,
-    resumeSessionId,
-    permissionMode,
-    model,
-    sandboxConfig,
-    thinkingMode,
-    resumeSessionAt,
-    forkSession
-  ) =>
-    new OpencodeSession(
-      routingId,
-      win,
-      cwd,
-      effort,
-      resumeSessionId,
-      permissionMode,
-      model,
-      sandboxConfig,
-      thinkingMode,
-      resumeSessionAt,
-      forkSession
-    )
+  (routingId, win, cwd, opts) => new OpencodeSession(routingId, win, cwd, opts)
 )
 
 spawnPrepRegistry.register('claude', claudeSpawnPrep)

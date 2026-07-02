@@ -5,7 +5,8 @@ import { app, ipcMain, dialog, BrowserWindow } from 'electron'
 import { query as sdkQuery } from '../sdk'
 import { PERSISTED_SESSIONS_DIR } from '../services/persisted-sessions-dir'
 import { SessionManager } from '../services/session-manager'
-import { getSdkExecutableOpts, ClaudeSession } from '../services/claude-session'
+import { getSdkExecutableOpts } from '../services/claude-session'
+import { BaseSession } from '../providers/BaseSession'
 import {
   listDirectories,
   loadSessionHistory,
@@ -97,9 +98,9 @@ import { logger } from '../services/logger'
 import { deleteProjectFiles } from '../services/delete-session-files'
 import {
   listOpencodeSessionsGlobal,
-  loadOpencodeSessionHistory,
-  deleteSessionByEngine
+  loadOpencodeSessionHistory
 } from '../services/opencode-session-list'
+import { deleteSessionByEngine } from '../services/session-delete'
 import { invalidateMockupSecuritySettings } from '../services/mockup-settings'
 import type { ISession } from '../providers/ISession'
 import { prepareAndCreateSession } from './create-session'
@@ -1059,7 +1060,7 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
       manager.setSessionTimeout(timeoutMins * 60 * 1000)
     }
     // Notify remote clients of settings change
-    for (const w of ClaudeSession.getExtraWindows()) {
+    for (const w of BaseSession.getExtraWindows()) {
       if (!w.isDestroyed()) w.webContents.send('config:settings-changed', settings)
     }
   })
@@ -1508,7 +1509,7 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
       if (!win.isDestroyed()) {
         win.webContents.send('git:status-update', { cwd, status })
       }
-      for (const w of ClaudeSession.getExtraWindows()) {
+      for (const w of BaseSession.getExtraWindows()) {
         if (!w.isDestroyed()) w.webContents.send('git:status-update', { cwd, status })
       }
     }, 5000)
@@ -1562,7 +1563,7 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
   startProjectsWatcher(win)
 
   // Watch ~/.claude/ui/ config files for cross-instance sync
-  startConfigWatcher(win, () => ClaudeSession.getExtraWindows())
+  startConfigWatcher(win, () => BaseSession.getExtraWindows())
 
   const savedSettings = loadSettings() as Record<string, unknown>
 
@@ -1848,7 +1849,7 @@ function startProjectsWatcher(win: BrowserWindow): void {
       if (!win.isDestroyed()) {
         win.webContents.send('session:directories-changed')
       }
-      for (const w of ClaudeSession.getExtraWindows()) {
+      for (const w of BaseSession.getExtraWindows()) {
         if (!w.isDestroyed()) w.webContents.send('session:directories-changed')
       }
     }, 500)

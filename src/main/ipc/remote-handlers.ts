@@ -11,7 +11,7 @@ import {
   resolveForkAnchor
 } from '../services/session-history'
 import { deleteProjectFiles } from '../services/delete-session-files'
-import { deleteSessionByEngine } from '../services/opencode-session-list'
+import { deleteSessionByEngine } from '../services/session-delete'
 import {
   loadSettings,
   saveSettings,
@@ -27,7 +27,8 @@ import { usageFetcher } from '../services/usage-fetcher'
 import { blockUsageService } from '../services/block-usage'
 import type { ApprovalDecision, PermissionSuggestion, EngineId } from '../../shared/types'
 import type { BrowserWindow } from 'electron'
-import { ClaudeSession, getSdkExecutableOpts } from '../services/claude-session'
+import { getSdkExecutableOpts } from '../services/claude-session'
+import { BaseSession } from '../providers/BaseSession'
 import { PERSISTED_SESSIONS_DIR } from '../services/persisted-sessions-dir'
 import { query as sdkQuery } from '../sdk'
 import { logger } from '../services/logger'
@@ -293,7 +294,7 @@ export function registerRemoteHandlers(
     if (!win.isDestroyed()) {
       win.webContents.send('config:settings-changed', settings)
     }
-    for (const w of ClaudeSession.getExtraWindows()) {
+    for (const w of BaseSession.getExtraWindows()) {
       if (!w.isDestroyed()) w.webContents.send('config:settings-changed', settings)
     }
   })
@@ -384,7 +385,7 @@ export function registerRemoteHandlers(
       if (entry.debounceTimer) clearTimeout(entry.debounceTimer)
       entry.debounceTimer = setTimeout(() => {
         if (!win.isDestroyed()) win.webContents.send('mockup:file-changed', directory)
-        for (const w of ClaudeSession.getExtraWindows()) {
+        for (const w of BaseSession.getExtraWindows()) {
           if (!w.isDestroyed()) w.webContents.send('mockup:file-changed', directory)
         }
       }, 200)

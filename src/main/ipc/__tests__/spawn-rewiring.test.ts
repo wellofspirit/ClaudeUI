@@ -229,9 +229,9 @@ describe('session:create spawn rewiring (Phase 3b)', () => {
     await harness.call('session:create', 'routing-2', '/tmp/cwd')
 
     expect(sessionManagerSpies.create).toHaveBeenCalled()
-    // 8th argument (index 7) is sandboxConfig in the create() call
+    // 4th argument (index 3) is the EngineSpawnOptions object in the create() call
     const callArgs = sessionManagerSpies.create.mock.calls[0]
-    expect(callArgs[7]).toEqual(sandboxConfig)
+    expect(callArgs[3].sandboxConfig).toEqual(sandboxConfig)
   })
 
   it('passes undefined sandbox when engine config has no sandbox', async () => {
@@ -242,7 +242,7 @@ describe('session:create spawn rewiring (Phase 3b)', () => {
 
     expect(sessionManagerSpies.create).toHaveBeenCalled()
     const callArgs = sessionManagerSpies.create.mock.calls[0]
-    expect(callArgs[7]).toBeUndefined()
+    expect(callArgs[3].sandboxConfig).toBeUndefined()
   })
 
   it('does NOT read sandbox from loadSettings()', async () => {
@@ -255,7 +255,7 @@ describe('session:create spawn rewiring (Phase 3b)', () => {
     const callArgs = sessionManagerSpies.create.mock.calls[0]
     // sandbox should be undefined because it came from engine config (which returned {})
     // NOT from loadSettings
-    expect(callArgs[7]).toBeUndefined()
+    expect(callArgs[3].sandboxConfig).toBeUndefined()
   })
 
   it('#6 vendor-at-spawn: derives "anthropic" vendor from Claude ModelRef (no hardcode)', async () => {

@@ -4,7 +4,11 @@ import { mergeContentBlocks } from '../utils/content-blocks'
 import { VOICE_LANGUAGES } from '../../../shared/types'
 import { resolveClaudeCapabilities } from '../../../shared/model-capabilities'
 import type { EffortLevel } from '../../../shared/model-capabilities'
-import { engineMeta, OPENCODE_DEFAULT_MODEL } from '../../../shared/engine-meta'
+import {
+  engineMeta,
+  OPENCODE_DEFAULT_MODEL,
+  FREE_OPENCODE_VENDOR_IDS
+} from '../../../shared/engine-meta'
 export { OPENCODE_DEFAULT_MODEL } from '../../../shared/engine-meta'
 import type {
   ChatMessage,
@@ -47,9 +51,6 @@ export function normalizeCwd(cwd: string): string {
   return cwd || '.'
 }
 
-/** Free/bundled opencode vendors that never require auth (OpenCode Zen). */
-const FREE_OPENCODE_VENDORS = new Set(['opencode', 'zen'])
-
 /**
  * Resolve a usable opencode picker VALUE against the currently-available
  * (discovered, provider-filtered) models. Mirrors the main-process
@@ -67,7 +68,7 @@ export function resolveOpencodeModel(models: ModelInfo[], preferred?: string): s
   const oc = models.filter((m) => m.engineId === 'opencode')
   if (oc.length === 0) return null
   if (preferred && oc.some((m) => m.value === preferred)) return preferred
-  const free = oc.find((m) => FREE_OPENCODE_VENDORS.has(m.vendorId ?? ''))
+  const free = oc.find((m) => FREE_OPENCODE_VENDOR_IDS.has(m.vendorId ?? ''))
   return (free ?? oc[0]).value
 }
 

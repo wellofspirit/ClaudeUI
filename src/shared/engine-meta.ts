@@ -28,6 +28,9 @@ import {
  */
 export const OPENCODE_DEFAULT_MODEL = 'opencode/mimo-v2.5-free'
 
+/** Free/bundled opencode vendors (OpenCode Zen) that never require auth credentials. */
+export const FREE_OPENCODE_VENDOR_IDS: ReadonlySet<string> = new Set(['opencode', 'zen'])
+
 export interface EngineMeta {
   id: EngineId
   /** Human display label (e.g. group headers). Claude → 'Claude', opencode → 'opencode'. */

@@ -1,6 +1,6 @@
 import type { BrowserWindow } from 'electron'
 import type { SessionManager } from '../services/session-manager'
-import { ClaudeSession } from '../services/claude-session'
+import { BaseSession } from '../providers/BaseSession'
 import { loadEngineConfig } from '../services/ui-config'
 import { spawnPrepRegistry } from '../providers/SpawnPrepRegistry'
 // Side-effect: guarantees the spawn-prep + session-factory registries are
@@ -8,6 +8,7 @@ import { spawnPrepRegistry } from '../providers/SpawnPrepRegistry'
 // register-engines import).
 import '../providers/register-engines'
 import type { EngineId } from '../../shared/types'
+import type { EngineSpawnOptions } from '../providers/ISession'
 
 // ---------------------------------------------------------------------------
 // Shared session:create implementation (desktop IPC + remote WebSocket)
@@ -57,27 +58,26 @@ export async function prepareAndCreateSession(
   const engineCfg = loadEngineConfig(resolvedEngineId)
   const prep = spawnPrepRegistry.require(resolvedEngineId)
   const { resolvedModel } = await prep(model, engineCfg)
-  manager.create(
-    routingId,
-    win,
-    cwd,
+  const spawnOpts: EngineSpawnOptions = {
     effort,
     resumeSessionId,
     permissionMode,
-    resolvedModel,
-    engineCfg.sandbox,
+    model: resolvedModel,
+    sandboxConfig: engineCfg.sandbox,
     thinkingMode,
     resumeSessionAt,
-    forkSession,
-    engineId
-  )
+    forkSession
+  }
+  // engineId (not resolvedEngineId) — SessionManager.create()'s own `= 'claude'`
+  // default preserves the legacy claude-default boundary at that layer.
+  manager.create(routingId, win, cwd, spawnOpts, engineId)
   // Desktop (notifyMainWindow=false) notifies only extra windows: the initiating
   // renderer already knows locally. Remote (notifyMainWindow=true) also notifies
   // the main window because the request arrived over WebSocket, not IPC.
   if (opts.notifyMainWindow && !win.isDestroyed()) {
     win.webContents.send('session:created', routingId, { cwd, resumeSessionId })
   }
-  for (const w of ClaudeSession.getExtraWindows()) {
+  for (const w of BaseSession.getExtraWindows()) {
     if (!w.isDestroyed()) w.webContents.send('session:created', routingId, { cwd, resumeSessionId })
   }
 }

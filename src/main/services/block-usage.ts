@@ -21,7 +21,6 @@ import type {
   DailyUsageFile,
   BlockUsageData
 } from '../../shared/types'
-import { ClaudeSession } from './claude-session'
 import { usageFetcher } from './usage-fetcher'
 import { logger } from './logger'
 import { canonicalizeWindowEnd, accountForTimestamp, type AccountLogRecord } from './usage-windows'
@@ -46,6 +45,7 @@ import {
 } from './db'
 import { v4 as uuid } from 'uuid'
 import { equivalentCostUsd } from '../../shared/pricing'
+import { BaseSession } from '../providers/BaseSession'
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -2009,7 +2009,7 @@ export class BlockUsageService {
       if (this.window && !this.window.isDestroyed()) {
         this.window.webContents.send('usage:block-data', data)
       }
-      for (const w of ClaudeSession.getExtraWindows()) {
+      for (const w of BaseSession.getExtraWindows()) {
         if (!w.isDestroyed()) w.webContents.send('usage:block-data', data)
       }
     } catch {

@@ -2,12 +2,12 @@ import * as fs from 'fs'
 import * as path from 'path'
 import type { BrowserWindow } from 'electron'
 import type { SessionManager } from '../services/session-manager'
-import { ClaudeSession } from '../services/claude-session'
 import { scanSkills } from '../services/skill-scanner'
 import { saveCleanupPeriodDays } from '../services/claude-settings'
 import { saveSessionConfig } from '../services/ui-config'
 import type { UISessionConfig } from '../services/ui-config'
 import type { ISession } from '../providers/ISession'
+import { BaseSession } from '../providers/BaseSession'
 
 // ---------------------------------------------------------------------------
 // Shared session-domain IPC handler bodies (desktop IPC + remote WebSocket)
@@ -74,7 +74,7 @@ export function sendPrompt(
   if (!win.isDestroyed()) {
     win.webContents.send('session:user-message', routingId, payload)
   }
-  for (const w of ClaudeSession.getExtraWindows()) {
+  for (const w of BaseSession.getExtraWindows()) {
     if (!w.isDestroyed()) w.webContents.send('session:user-message', routingId, payload)
   }
 }
@@ -233,7 +233,7 @@ export function saveSessions(
   if (opts.notifyMainWindow && !win.isDestroyed()) {
     win.webContents.send('config:sessions-changed', config)
   }
-  for (const w of ClaudeSession.getExtraWindows()) {
+  for (const w of BaseSession.getExtraWindows()) {
     if (!w.isDestroyed()) w.webContents.send('config:sessions-changed', config)
   }
 }

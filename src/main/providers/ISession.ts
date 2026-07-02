@@ -3,7 +3,8 @@ import type {
   EngineId,
   ApprovalDecision,
   PermissionSuggestion,
-  SkillInfo
+  SkillInfo,
+  SandboxSettings
 } from '../../shared/types'
 import type { ResolvedCapabilities } from '../../shared/model-capabilities'
 
@@ -128,19 +129,36 @@ export interface ISession {
 }
 
 /**
+ * Named spawn options for engine-session construction. Replaces the former
+ * 11-positional-parameter factory tuple. All members are optional; engines
+ * ignore options they do not consume (noted per member).
+ */
+export interface EngineSpawnOptions {
+  /** Reasoning-effort tier. Claude-only — opencode uses per-model reasoning variants instead. */
+  effort?: string
+  /** Engine session id to resume. Consumed by both engines. */
+  resumeSessionId?: string
+  /** Initial permission mode. Consumed by both engines. */
+  permissionMode?: string
+  /** Model value in the engine's convention (Claude alias / opencode "vendorId/modelId"). Both engines. */
+  model?: string
+  /** Sandbox settings. Claude-only — opencode's permission model is ADR-022. */
+  sandboxConfig?: SandboxSettings
+  /** Thinking mode ('adaptive' | 'enabled' | 'disabled'). Claude-only. */
+  thinkingMode?: string
+  /** Transcript line uuid to resume at (branch-off anchor, ADR-010). Claude-only. */
+  resumeSessionAt?: string
+  /** Fork at resumeSessionAt into a new session (ADR-010). Claude-only — opencode fork is unwired (ADR-030). */
+  forkSession?: boolean
+}
+
+/**
  * Factory type for engine-session construction, registered in EngineRegistry.
- * Args are the same as SessionManager.create() minus the leading engineId.
+ * Args are the same as SessionManager.create() minus the trailing engineId.
  */
 export type EngineSessionFactory = (
   routingId: string,
   win: import('electron').BrowserWindow,
   cwd: string,
-  effort?: string,
-  resumeSessionId?: string,
-  permissionMode?: string,
-  model?: string,
-  sandboxConfig?: import('../../shared/types').SandboxSettings,
-  thinkingMode?: string,
-  resumeSessionAt?: string,
-  forkSession?: boolean
+  opts: EngineSpawnOptions
 ) => ISession

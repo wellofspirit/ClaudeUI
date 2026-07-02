@@ -15,23 +15,6 @@ import { describe, it, expect, vi } from 'vitest'
 import { RemoteDispatcher } from '../../services/remote-dispatcher'
 import { resolveClaudeCapabilities } from '../../../shared/model-capabilities'
 
-vi.mock('../../services/claude-session', () => {
-  const extraWindows = new Set<any>()
-  return {
-    ClaudeSession: class {
-      static addExtraWindow(w: any): void {
-        extraWindows.add(w)
-      }
-      static removeExtraWindow(w: any): void {
-        extraWindows.delete(w)
-      }
-      static getExtraWindows(): Set<any> {
-        return extraWindows
-      }
-    }
-  }
-})
-
 vi.mock('../../services/skill-scanner', () => ({
   scanSkills: vi.fn(async () => [])
 }))

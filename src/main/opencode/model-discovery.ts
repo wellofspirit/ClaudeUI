@@ -10,6 +10,7 @@ import type {
 } from '../../shared/types'
 import type { Provider, AuthOption } from './protocol/types'
 import { logger } from '../services/logger'
+import { engineMeta, FREE_OPENCODE_VENDOR_IDS } from '../../shared/engine-meta'
 
 let cachedGroups: EngineModelGroup[] | null = null
 
@@ -21,8 +22,15 @@ type OpencodeModelCapInput = {
 }
 const modelCapsCache = new Map<string, OpencodeModelCapInput>()
 
-/** Free/bundled opencode providers that never require auth credentials. */
-const FREE_VENDOR_IDS = new Set(['opencode', 'zen'])
+/**
+ * Parse an opencode model VALUE ("providerID/modelID", bare id → provider
+ * 'opencode') into its parts. Canonical single copy — delegates to the
+ * EngineMeta decode so the string convention lives in ONE place (Item 5).
+ */
+export function parseModelString(model: string): { providerID: string; modelID: string } {
+  const ref = engineMeta('opencode').decodeModelValue(model)
+  return { providerID: ref.vendorId, modelID: ref.modelId }
+}
 
 /**
  * Raw catalog snapshot (the full models.dev provider set + which providers are
@@ -98,7 +106,7 @@ export async function discoverOpencodeProviderCatalog(): Promise<OpencodeProvide
     const { all, configuredIds, authCatalog } = await fetchCatalogSnapshot()
     return all
       .map((provider): OpencodeProviderCatalogEntry => {
-        const isFree = FREE_VENDOR_IDS.has(provider.id)
+        const isFree = FREE_OPENCODE_VENDOR_IDS.has(provider.id)
         const isConfigured = configuredIds.has(provider.id)
         const authState: OpencodeProviderCatalogEntry['authState'] = isFree
           ? 'free'

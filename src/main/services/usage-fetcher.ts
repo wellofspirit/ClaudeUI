@@ -23,7 +23,8 @@ import { join } from 'node:path'
 import { homedir, platform } from 'node:os'
 import { randomUUID } from 'node:crypto'
 import type { BrowserWindow } from 'electron'
-import { ClaudeSession, getSdkVersion } from './claude-session'
+import { getSdkVersion } from './claude-session'
+import { BaseSession } from '../providers/BaseSession'
 import type { AccountUsage, ExtraUsage, RateWindow } from '../../shared/types'
 import { logger } from './logger'
 import { recordWindowSample } from './db'
@@ -499,7 +500,7 @@ export class UsageFetcher {
       if (this.window && !this.window.isDestroyed()) {
         this.window.webContents.send('usage:data', usage)
       }
-      for (const w of ClaudeSession.getExtraWindows()) {
+      for (const w of BaseSession.getExtraWindows()) {
         if (!w.isDestroyed()) w.webContents.send('usage:data', usage)
       }
     } catch {

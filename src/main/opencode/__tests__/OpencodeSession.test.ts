@@ -125,11 +125,20 @@ vi.mock('../../services/ui-config', () => ({
 const mockGetOpencodeModelContextWindow = vi.hoisted(() => vi.fn().mockReturnValue(0))
 const mockGetOpencodeModelCapabilities = vi.hoisted(() => vi.fn().mockReturnValue(undefined))
 const mockDiscoverOpencodeModels = vi.hoisted(() => vi.fn().mockResolvedValue([]))
+// parseModelString mirrors the real "providerID/modelID" split (bare id →
+// 'opencode') since OpencodeSession.ts now imports the shared copy from
+// model-discovery.ts instead of defining it locally (Item 6b dedup).
 vi.mock('../model-discovery', () => ({
   getOpencodeModelContextWindow: mockGetOpencodeModelContextWindow,
   getOpencodeModelCapabilities: mockGetOpencodeModelCapabilities,
   discoverOpencodeModels: mockDiscoverOpencodeModels,
-  invalidateOpencodeModelCache: vi.fn()
+  invalidateOpencodeModelCache: vi.fn(),
+  parseModelString: (model: string) => {
+    const slash = model.indexOf('/')
+    return slash < 0
+      ? { providerID: 'opencode', modelID: model }
+      : { providerID: model.slice(0, slash), modelID: model.slice(slash + 1) }
+  }
 }))
 
 // discoverSkills (Item 3 — ISession.discoverSkills) delegates to
@@ -237,15 +246,7 @@ function setupMocks(): void {
 
 function makeSession(model?: string, permissionMode?: string): OpencodeSession {
   const win = new MockWindow() as unknown as BrowserWindow
-  return new OpencodeSession(
-    'routing_id_1',
-    win,
-    '/tmp/test-cwd',
-    undefined,
-    undefined,
-    permissionMode,
-    model
-  )
+  return new OpencodeSession('routing_id_1', win, '/tmp/test-cwd', { permissionMode, model })
 }
 
 // ---------------------------------------------------------------------------
@@ -1157,7 +1158,7 @@ describe('OpencodeSession — auto-mode classifier wiring (ADR-023)', () => {
     mockPrompt.mockRejectedValue(new Error('judge down'))
     feedPermissionAsked('bash', 'per_fail')
     const win = new MockWindow() as unknown as BrowserWindow
-    const session = new OpencodeSession('r_fail', win, '/tmp', undefined, undefined, 'full')
+    const session = new OpencodeSession('r_fail', win, '/tmp', { permissionMode: 'full' })
     await session.run('go')
     await vi.waitFor(() => {
       const sent = (win as unknown as MockWindow).webContents.send.mock.calls.some(
@@ -1174,7 +1175,7 @@ describe('OpencodeSession — auto-mode classifier wiring (ADR-023)', () => {
     mockCreateSession.mockResolvedValue({ id: SES })
     feedPermissionAsked('bash', 'per_disabled')
     const win = new MockWindow() as unknown as BrowserWindow
-    const session = new OpencodeSession('r_dis', win, '/tmp', undefined, undefined, 'full')
+    const session = new OpencodeSession('r_dis', win, '/tmp', { permissionMode: 'full' })
     await session.run('go')
     await vi.waitFor(() => {
       const sent = (win as unknown as MockWindow).webContents.send.mock.calls.some(
@@ -1343,7 +1344,7 @@ describe('OpencodeSession — question.asked routing', () => {
     mockLoadEngineConfig.mockReturnValue({ autoMode: { enabled: true, twoStageMode: 'fast' } })
     feedQuestionAsked('que_human')
     const win = new MockWindow() as unknown as BrowserWindow
-    const session = new OpencodeSession('r_qh', win, '/tmp', undefined, undefined, 'full')
+    const session = new OpencodeSession('r_qh', win, '/tmp', { permissionMode: 'full' })
     await session.run('go')
 
     await vi.waitFor(() => {
@@ -1364,7 +1365,7 @@ describe('OpencodeSession — question.asked routing', () => {
     mockLoadEngineConfig.mockReturnValue({ autoMode: { enabled: false } })
     feedQuestionAsked('que_default')
     const win = new MockWindow() as unknown as BrowserWindow
-    const session = new OpencodeSession('r_qd', win, '/tmp', undefined, undefined, 'default')
+    const session = new OpencodeSession('r_qd', win, '/tmp', { permissionMode: 'default' })
     await session.run('go')
 
     await vi.waitFor(() => {
@@ -2224,7 +2225,7 @@ describe('OpencodeSession — Phase 8d: subagent dispatch', () => {
     const win = new MockWindow() as unknown as BrowserWindow
     // ask/default mode — auto-mode disabled
     mockLoadEngineConfig.mockReturnValue({ autoMode: { enabled: false } })
-    const session = new OpencodeSession('r_8e_ask', win, '/tmp', undefined, undefined, 'default')
+    const session = new OpencodeSession('r_8e_ask', win, '/tmp', { permissionMode: 'default' })
     await session.run('go')
 
     // Wait for session:approval-request to be emitted to the human
@@ -2358,7 +2359,7 @@ describe('OpencodeSession — Phase 8d: subagent dispatch', () => {
     )
 
     const win = new MockWindow() as unknown as BrowserWindow
-    const session = new OpencodeSession('r_8e_auto', win, '/tmp', undefined, undefined, 'full')
+    const session = new OpencodeSession('r_8e_auto', win, '/tmp', { permissionMode: 'full' })
     await session.run('go')
 
     // In auto mode the classifier is invoked (mockPrompt), then replyPermission(once)
@@ -2733,7 +2734,7 @@ describe('OpencodeSession — child question.asked dispatch (floating AskUserQue
     mockLoadEngineConfig.mockReturnValue({ autoMode: { enabled: true, twoStageMode: 'fast' } })
     feedChildQuestion()
     const win = new MockWindow() as unknown as BrowserWindow
-    const session = new OpencodeSession('r_cq_auto', win, '/tmp', undefined, undefined, 'full')
+    const session = new OpencodeSession('r_cq_auto', win, '/tmp', { permissionMode: 'full' })
     await session.run('go')
 
     await vi.waitFor(() => {

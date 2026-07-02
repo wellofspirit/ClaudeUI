@@ -487,8 +487,8 @@ describe('registerRemoteHandlers', () => {
         )
       )
       expect(sessionManagerStub.create).toHaveBeenCalled()
-      // manager.create's 12th positional arg (index 11) is engineId.
-      expect(sessionManagerStub.create.mock.calls[0][11]).toBe('opencode')
+      // manager.create's 5th positional arg (index 4) is engineId.
+      expect(sessionManagerStub.create.mock.calls[0][4]).toBe('opencode')
     })
 
     it('sources sandbox from loadEngineConfig, not loadSettings', async () => {
@@ -501,8 +501,8 @@ describe('registerRemoteHandlers', () => {
       await dispatcher.handle(makeRequest('session:create', 'rid-sandbox', '/tmp/proj'))
 
       expect(sessionManagerStub.create).toHaveBeenCalled()
-      // manager.create's 8th positional arg (index 7) is sandboxConfig.
-      expect(sessionManagerStub.create.mock.calls[0][7]).toEqual(SENTINEL)
+      // manager.create's 4th positional arg (index 3) is the EngineSpawnOptions object.
+      expect(sessionManagerStub.create.mock.calls[0][3].sandboxConfig).toEqual(SENTINEL)
     })
 
     it('claude path (default engineId) applies vendor config and skips opencode resolution', async () => {
@@ -534,8 +534,8 @@ describe('registerRemoteHandlers', () => {
       const resolvedModel = await (
         resolveOpencodeSpawnModel as unknown as ReturnType<typeof vi.fn>
       ).mock.results[0].value
-      // manager.create's 7th positional arg (index 6) is the resolved model.
-      expect(sessionManagerStub.create.mock.calls[0][6]).toBe(resolvedModel)
+      // manager.create's 4th positional arg (index 3) is the EngineSpawnOptions object.
+      expect(sessionManagerStub.create.mock.calls[0][3].model).toBe(resolvedModel)
     })
 
     it('broadcasts session:created to the main window (remote notifies desktop)', async () => {

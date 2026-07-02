@@ -7,7 +7,7 @@ import { logger } from './logger'
 import { SessionManager } from './session-manager'
 import { AutomationManager } from './automation-manager'
 import { RemoteDispatcher } from './remote-dispatcher'
-import { ClaudeSession } from './claude-session'
+import { BaseSession } from '../providers/BaseSession'
 import type {
   ClaudeUIPlugin,
   PluginContext,
@@ -95,7 +95,7 @@ export class PluginManager {
     this.remoteDispatcher = opts.remoteDispatcher
 
     // Create bridge and wire it to the event bus.
-    // Session events arrive as (channel, routingId, data) from ClaudeSession.send().
+    // Session events arrive as (channel, routingId, data) from BaseSession.send().
     // We wrap them into an object with { routingId, sessionId, ...data } so plugins
     // get a stable, self-documenting event shape (see ADR-005).
     this.bridge = new PluginBridge()
@@ -116,7 +116,7 @@ export class PluginManager {
         this.fireEvent(channel, ...args)
       }
     })
-    ClaudeSession.addExtraWindow(this.bridge as unknown as BrowserWindow)
+    BaseSession.addExtraWindow(this.bridge as unknown as BrowserWindow)
   }
 
   // -------------------------------------------------------------------------
@@ -169,7 +169,7 @@ export class PluginManager {
         logger.error(LOG_SOURCE, `Error deactivating plugin "${id}" during shutdown`, err)
       }
     }
-    ClaudeSession.removeExtraWindow(this.bridge as unknown as BrowserWindow)
+    BaseSession.removeExtraWindow(this.bridge as unknown as BrowserWindow)
     this.bridge.destroy()
   }
 
