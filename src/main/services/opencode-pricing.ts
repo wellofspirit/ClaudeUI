@@ -31,6 +31,22 @@ const PRICES_FILE = path.join(os.homedir(), '.claude', 'ui', 'opencode-prices.js
 // Helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * Drop pricing entries with a $0 list price (both input and output). A $0 list
+ * price carries no estimation signal: opencode zeroes catalog costs for
+ * subscription/OAuth-authenticated providers (e.g. every openai model when the
+ * user is subscription-authenticated, not just its genuine free tier), so a
+ * blanket $0 entry would poison equivalentCostUsd into returning 0 (blocking the
+ * pooled-billing estimate feature — see selectRowCostUsd) instead of null. Zen's
+ * actual free-tier models still display $0 correctly via selectRowCostUsd's
+ * fallthrough; they simply don't need a supplemental pricing ROW to do that.
+ * Shared by buildEntries (skip at build time) and loadPersistedPrices (self-heal
+ * an already-poisoned opencode-prices.json written before this filter existed).
+ */
+function isZeroCost(entry: PricingEntry): boolean {
+  return entry.pricing.inputPerMTok === 0 && entry.pricing.outputPerMTok === 0
+}
+
 /** Build PricingEntry[] from a /config/providers response. */
 function buildEntries(providers: import('../opencode/protocol/types').Provider[]): PricingEntry[] {
   const entries: PricingEntry[] = []
@@ -42,7 +58,7 @@ function buildEntries(providers: import('../opencode/protocol/types').Provider[]
       // divides by 1e6), so ModelPricing's per-MTok fields take cost.* directly.
       // cache.write maps to both 5m and 1h write rates (opencode doesn't distinguish TTLs).
       const cacheWrite = cost.cache?.write ?? 0
-      entries.push({
+      const entry: PricingEntry = {
         vendorId: provider.id,
         // Use exact modelId as the match string (lower-cased at lookup time).
         // findPricing matches supplemental entries by EXACT equality, so a shorter
@@ -55,7 +71,9 @@ function buildEntries(providers: import('../opencode/protocol/types').Provider[]
           cacheWrite1hPerMTok: cacheWrite,
           cacheReadPerMTok: cost.cache?.read ?? 0
         }
-      })
+      }
+      if (isZeroCost(entry)) continue // see isZeroCost doc comment
+      entries.push(entry)
     }
   }
   return entries
@@ -112,8 +130,11 @@ export function loadPersistedPrices(): void {
   try {
     if (!fs.existsSync(PRICES_FILE)) return
     const raw = fs.readFileSync(PRICES_FILE, 'utf-8')
-    const entries = JSON.parse(raw) as PricingEntry[]
-    if (!Array.isArray(entries)) return
+    const parsed = JSON.parse(raw) as PricingEntry[]
+    if (!Array.isArray(parsed)) return
+    // Self-heal: a file persisted before the $0-entry filter existed may still
+    // carry poisoned zero-cost rows — filter them on read too (see isZeroCost).
+    const entries = parsed.filter((entry) => !isZeroCost(entry))
     registerSupplementalPricing(entries)
     logger.info('opencode-pricing', `Loaded ${entries.length} persisted opencode pricing entries`)
   } catch (err) {

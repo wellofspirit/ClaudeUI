@@ -18,7 +18,7 @@ import { EngineAuthRegistry } from '../EngineAuthRegistry'
 // ---------------------------------------------------------------------------
 
 function makeOpencodeProvider(): EngineAuthProvider & Required<Pick<EngineAuthProvider,
-  'listVendorAuthOptions' | 'setVendorApiKey' | 'oauthAuthorize' | 'oauthCallback' | 'removeVendorAuth'
+  'listVendorAuthOptions' | 'listVendorCredentialIds' | 'setVendorApiKey' | 'oauthAuthorize' | 'oauthCallback' | 'removeVendorAuth'
 >> {
   const probeResult: VendorAuthMap = {
     openai: { authState: 'unauthenticated', billingType: 'unknown' }
@@ -26,10 +26,12 @@ function makeOpencodeProvider(): EngineAuthProvider & Required<Pick<EngineAuthPr
   const optionsResult: Record<string, VendorAuthOption[]> = {
     openai: [{ type: 'api', label: 'OpenAI API key' }]
   }
+  const credIdsResult: Record<string, 'api' | 'oauth'> = { openai: 'api' }
 
   return {
     probe: vi.fn().mockResolvedValue(probeResult),
     listVendorAuthOptions: vi.fn().mockResolvedValue(optionsResult),
+    listVendorCredentialIds: vi.fn().mockResolvedValue(credIdsResult),
     setVendorApiKey: vi.fn().mockResolvedValue(undefined),
     oauthAuthorize: vi.fn().mockResolvedValue({
       url: 'https://auth.example.com/oauth',
@@ -71,6 +73,17 @@ async function dispatchVendorAuthListOptions(
     throw new Error(`Engine "${engineId}" does not support listVendorAuthOptions`)
   }
   return provider.listVendorAuthOptions()
+}
+
+async function dispatchVendorAuthListKeys(
+  registry: EngineAuthRegistry,
+  engineId: string
+): Promise<Record<string, 'api' | 'oauth'>> {
+  const provider = registry.require(engineId as never)
+  if (!provider.listVendorCredentialIds) {
+    throw new Error(`Engine "${engineId}" does not support listVendorCredentialIds`)
+  }
+  return provider.listVendorCredentialIds()
 }
 
 async function dispatchVendorAuthSetKey(
@@ -153,6 +166,12 @@ describe('vendor-auth IPC routing — opencode provider', () => {
     expect(result).toHaveProperty('openai')
   })
 
+  it('vendor-auth:list-keys routes to opencode and returns credential ids', async () => {
+    const result = await dispatchVendorAuthListKeys(registry, 'opencode')
+    expect(opencodeProvider.listVendorCredentialIds).toHaveBeenCalledTimes(1)
+    expect(result).toEqual({ openai: 'api' })
+  })
+
   it('vendor-auth:set-key routes to opencode with correct args', async () => {
     await dispatchVendorAuthSetKey(registry, 'opencode', 'openai', 'sk-abc')
     expect(opencodeProvider.setVendorApiKey).toHaveBeenCalledWith('openai', 'sk-abc')
@@ -187,6 +206,12 @@ describe('vendor-auth IPC routing — Claude provider lacks per-vendor methods',
   it('vendor-auth:list-options throws clear error for claude', async () => {
     await expect(dispatchVendorAuthListOptions(registry, 'claude')).rejects.toThrow(
       'Engine "claude" does not support listVendorAuthOptions'
+    )
+  })
+
+  it('vendor-auth:list-keys throws clear error for claude', async () => {
+    await expect(dispatchVendorAuthListKeys(registry, 'claude')).rejects.toThrow(
+      'Engine "claude" does not support listVendorCredentialIds'
     )
   })
 

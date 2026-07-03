@@ -553,6 +553,7 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     // Vendor auth (opencode multi-vendor) — desktop-only; web client is read-only
     vendorAuthProbe: async () => ({}),
     vendorAuthListOptions: async () => ({}),
+    vendorAuthListKeys: async () => ({}),
     vendorAuthSetKey: async () => {},
     vendorAuthOauthAuthorize: async () => {
       throw new Error('Vendor auth is only available on the desktop app.')

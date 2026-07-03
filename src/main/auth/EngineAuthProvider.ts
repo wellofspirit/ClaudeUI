@@ -39,6 +39,12 @@ export interface EngineAuthProvider {
   setVendorApiKey?(vendorId: VendorId, key: string): Promise<void>
 
   /**
+   * Which vendor ids have stored credentials, read from the engine's own auth
+   * store. READ-ONLY: returns only ids + credential kind, never key material.
+   */
+  listVendorCredentialIds?(): Promise<Record<VendorId, 'api' | 'oauth'>>
+
+  /**
    * POST /provider/{vendorId}/oauth/authorize — start an OAuth flow.
    * Returns the URL to open plus instructions for the user.
    */

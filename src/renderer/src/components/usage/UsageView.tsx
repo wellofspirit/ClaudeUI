@@ -3,7 +3,6 @@ import { useSessionStore } from '../../stores/session-store'
 import type {
   UsageBlock,
   UsageSnapshot,
-  AccountUsage,
   EngineUsageSummary,
   ModelTokenBreakdown
 } from '../../../../shared/types'
@@ -24,7 +23,7 @@ import {
 // Types
 // ---------------------------------------------------------------------------
 
-type ClaudeTab = 'block' | 'timeline' | 'window' | 'recent'
+type ClaudeTab = 'block' | 'timeline' | 'recent'
 
 interface UsageViewProps {
   onClose: () => void
@@ -36,7 +35,6 @@ interface UsageViewProps {
 
 export function UsageView({ onClose }: UsageViewProps): React.JSX.Element {
   const blockUsage = useSessionStore((s) => s.blockUsage)
-  const accountUsage = useSessionStore((s) => s.accountUsage)
   const [activeTab, setActiveTab] = useState<ClaudeTab>('block')
 
   if (!blockUsage) {
@@ -78,7 +76,6 @@ export function UsageView({ onClose }: UsageViewProps): React.JSX.Element {
           currentBlock={currentBlock}
           recentBlocks={recentBlocks}
           todaySnapshots={todaySnapshots}
-          accountUsage={accountUsage}
           activeTab={activeTab}
           onTabChange={setActiveTab}
         />
@@ -102,7 +99,6 @@ export function UsageView({ onClose }: UsageViewProps): React.JSX.Element {
 const CLAUDE_TABS: { id: ClaudeTab; label: string }[] = [
   { id: 'block', label: 'Current Block' },
   { id: 'timeline', label: 'Block Timeline' },
-  { id: 'window', label: '5hr Window' },
   { id: 'recent', label: 'Recent Blocks' }
 ]
 
@@ -110,14 +106,12 @@ function ClaudeCard({
   currentBlock,
   recentBlocks,
   todaySnapshots,
-  accountUsage,
   activeTab,
   onTabChange
 }: {
   currentBlock: UsageBlock | null
   recentBlocks: UsageBlock[]
   todaySnapshots: UsageSnapshot[]
-  accountUsage: AccountUsage | null
   activeTab: ClaudeTab
   onTabChange: (tab: ClaudeTab) => void
 }): React.JSX.Element {
@@ -160,7 +154,6 @@ function ClaudeCard({
             todaySnapshots={todaySnapshots}
           />
         )}
-        {activeTab === 'window' && <WindowPanel accountUsage={accountUsage} />}
         {activeTab === 'recent' && <RecentBlocksPanel recentBlocks={recentBlocks} />}
       </div>
     </div>
@@ -291,51 +284,6 @@ function TimelinePanel({
   )
 }
 
-function WindowPanel({ accountUsage }: { accountUsage: AccountUsage | null }): React.JSX.Element {
-  if (!accountUsage || accountUsage.error) {
-    return (
-      <div className="text-text-muted text-[11px]">No window data</div>
-    )
-  }
-
-  const pct = accountUsage.fiveHour.usedPercent
-  const color = pct > 80 ? '#ef4444' : pct > 50 ? '#eab308' : '#22c55e'
-
-  let resetStr = ''
-  if (accountUsage.fiveHour.resetsAt) {
-    const ms = new Date(accountUsage.fiveHour.resetsAt).getTime() - Date.now()
-    if (ms > 0) {
-      const min = Math.round(ms / 60_000)
-      if (min >= 60) {
-        resetStr = `resets in ${Math.floor(min / 60)}h ${min % 60}m`
-      } else {
-        resetStr = `resets in ${min}m`
-      }
-    }
-  }
-
-  return (
-    <>
-      {resetStr && (
-        <div className="flex items-baseline gap-2 mb-2">
-          <span className="text-[10px] text-text-muted">{resetStr}</span>
-        </div>
-      )}
-      <div className="flex items-center gap-3">
-        <div className="flex-1 h-2 rounded-full bg-white/5 overflow-hidden">
-          <div
-            className="h-full rounded-full transition-all duration-500"
-            style={{ width: `${Math.min(100, pct)}%`, backgroundColor: color }}
-          />
-        </div>
-        <span className="text-[11px] font-mono font-medium" style={{ color }}>
-          {Math.round(pct)}%
-        </span>
-      </div>
-    </>
-  )
-}
-
 function RecentBlocksPanel({ recentBlocks }: { recentBlocks: UsageBlock[] }): React.JSX.Element {
   if (recentBlocks.length === 0) {
     return (
@@ -439,7 +387,9 @@ function OpencodeSection({ entry }: { entry: EngineUsageSummary }): React.JSX.El
 
       {/* Footnote */}
       <p className="text-[9px] text-text-muted mt-2">
-        Cost reported by opencode (models.dev pricing). No 5-hour window — pay-per-token.
+        Cost reported by opencode; when the engine reports $0 (subscription/pooled
+        billing), estimated list-price cost is shown. No 5-hour window —
+        pay-per-token.
       </p>
     </div>
   )

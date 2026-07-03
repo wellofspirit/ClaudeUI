@@ -175,6 +175,32 @@ describe('equivalentCostUsd — openai pricing', () => {
     const cost = equivalentCostUsd('openai', 'o3-mini', oneMTok({ inputTokens: 1_000_000 }))
     expect(cost).toBeCloseTo(1.1)
   })
+
+  // GPT-5.x — source: developers.openai.com/api/docs/pricing, fetched 2026-07.
+  it('gpt-5.5: input rate = $5/MTok', () => {
+    const cost = equivalentCostUsd('openai', 'gpt-5.5', oneMTok({ inputTokens: 1_000_000 }))
+    expect(cost).toBeCloseTo(5.0)
+  })
+
+  // Ordering guard: 'gpt-5.5-pro' must NOT be shadowed by the 'gpt-5.5' entry
+  // (substring matching means the more specific -pro entry has to be checked first).
+  it('gpt-5.5-pro: input rate = $30/MTok (ordering guard — must NOT match the gpt-5.5 entry)', () => {
+    const cost = equivalentCostUsd('openai', 'gpt-5.5-pro', oneMTok({ inputTokens: 1_000_000 }))
+    expect(cost).toBeCloseTo(30.0)
+  })
+
+  it('gpt-5.4-mini: input rate = $0.75/MTok, not the gpt-5.4 base rate ($2.50)', () => {
+    const cost = equivalentCostUsd('openai', 'gpt-5.4-mini', oneMTok({ inputTokens: 1_000_000 }))
+    expect(cost).toBeCloseTo(0.75)
+    expect(cost).not.toBeCloseTo(2.5)
+  })
+
+  // '-fast' variants have no dedicated entry and intentionally fall back to
+  // substring-matching their base model (documented behavior — see OPENAI_PRICING).
+  it('gpt-5.5-fast: substring-falls-back to the gpt-5.5 base rate ($5/MTok)', () => {
+    const cost = equivalentCostUsd('openai', 'gpt-5.5-fast', oneMTok({ inputTokens: 1_000_000 }))
+    expect(cost).toBeCloseTo(5.0)
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -327,5 +353,68 @@ describe('registerSupplementalPricing', () => {
     expect(equivalentCostUsd('opencode', 'gpt-5', oneMInput)).toBeCloseTo(8.0)
     // "gpt-5-codex" is NOT registered → null (not the gpt-5 pricing)
     expect(equivalentCostUsd('opencode', 'gpt-5-codex', oneMInput)).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Vendor-agnostic fallback — custom/gateway opencode providers (company
+// enterprise proxy ids etc.) whose vendorId is unrecognized (no entry, built-in
+// or supplemental, is registered under it at all).
+// ---------------------------------------------------------------------------
+
+describe('equivalentCostUsd — vendor-agnostic fallback for unrecognized vendorIds', () => {
+  afterEach(() => {
+    registerSupplementalPricing([])
+  })
+
+  it('custom vendorId + known OpenAI modelId resolves via built-in substring fallback', () => {
+    // vendorId is a made-up company gateway id — not 'openai' — but the model id
+    // is a real OpenAI model, so the fallback should still price it.
+    const cost = equivalentCostUsd('acme-corp-openai-proxy', 'gpt-4o', {
+      inputTokens: 1_000_000,
+      outputTokens: 0,
+      cacheWriteTokens: 0,
+      cacheWrite1hTokens: 0,
+      cacheReadTokens: 0
+    })
+    expect(cost).toBeCloseTo(2.5) // openai gpt-4o input rate
+  })
+
+  it('custom vendorId + unknown modelId → null (no fallback match)', () => {
+    const cost = equivalentCostUsd('acme-corp-openai-proxy', 'some-internal-model-xyz', {
+      inputTokens: 1_000_000,
+      outputTokens: 0,
+      cacheWriteTokens: 0,
+      cacheWrite1hTokens: 0,
+      cacheReadTokens: 0
+    })
+    expect(cost).toBeNull()
+  })
+
+  it('custom vendorId + exact supplemental modelId (registered under a different vendor) resolves via fallback', () => {
+    registerSupplementalPricing([
+      { vendorId: 'opencode', match: 'zen/glm-4.6', pricing: { inputPerMTok: 2, outputPerMTok: 8, cacheWritePerMTok: 2, cacheWrite1hPerMTok: 2, cacheReadPerMTok: 0.2 } }
+    ])
+    const cost = equivalentCostUsd('acme-corp-gateway', 'zen/glm-4.6', {
+      inputTokens: 1_000_000,
+      outputTokens: 0,
+      cacheWriteTokens: 0,
+      cacheWrite1hTokens: 0,
+      cacheReadTokens: 0
+    })
+    expect(cost).toBeCloseTo(2.0)
+  })
+
+  it('a KNOWN vendor with an unpriced model does NOT fall back (existing vendor-scoped isolation unchanged)', () => {
+    // 'openai' already has entries in the built-in table — a miss for it must
+    // stay a genuine miss, not spill into other vendors' tables.
+    const cost = equivalentCostUsd('openai', 'claude-sonnet-4-6', {
+      inputTokens: 1000,
+      outputTokens: 0,
+      cacheWriteTokens: 0,
+      cacheWrite1hTokens: 0,
+      cacheReadTokens: 0
+    })
+    expect(cost).toBeNull()
   })
 })

@@ -27,6 +27,13 @@ vi.mock('../../services/persisted-sessions-dir', () => ({
   PERSISTED_SESSIONS_DIR: '/tmp/persisted'
 }))
 
+// Hermetic: do NOT read the developer's real ~/.claude/ui/engines/opencode.json —
+// a machine-local modelAllowlist would filter the mocked catalog and break the
+// label assertions below.
+vi.mock('../../services/ui-config', () => ({
+  loadEngineConfig: () => ({})
+}))
+
 import { discoverOpencodeModels, invalidateOpencodeModelCache } from '../model-discovery'
 
 const PROVIDERS = {

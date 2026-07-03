@@ -697,6 +697,7 @@ function ModelAllowlistDialog({
   )
   const [checked, setChecked] = useState<Set<string>>(new Set(current ?? []))
   const [search, setSearch] = useState('')
+  const [freeOnly, setFreeOnly] = useState(false)
   // When the incoming allowlist is undefined (legacy "show all"), default every
   // model to checked once the list loads so saving doesn't silently hide them.
   const seededRef = useRef(current !== undefined)
@@ -721,7 +722,12 @@ function ModelAllowlistDialog({
     }
   }, [providerId])
 
+  const hasFreeModels = (models ?? []).some((m) => m.free)
   const filtered = (models ?? []).filter((m) => {
+    // Ignore a stale toggle when the loaded entries contain no free models — the
+    // chip is unmounted then, so an active filter would otherwise leave a
+    // permanently empty list (same dead-end guard as ModelPicker.displayedGroups).
+    if (freeOnly && hasFreeModels && !m.free) return false
     const q = search.trim().toLowerCase()
     if (!q) return true
     return m.id.toLowerCase().includes(q) || m.name.toLowerCase().includes(q)
@@ -784,6 +790,21 @@ function ModelAllowlistDialog({
           >
             Clear
           </button>
+          {hasFreeModels && (
+            <button
+              type="button"
+              data-testid="ModelAllowlistDialog.freeFilter"
+              aria-pressed={freeOnly}
+              onClick={() => setFreeOnly((v) => !v)}
+              className={`text-[10px] px-2 py-0.5 rounded-full font-medium uppercase tracking-wide transition-colors cursor-pointer border whitespace-nowrap ${
+                freeOnly
+                  ? 'bg-emerald-500/25 text-emerald-300 border-emerald-500/40'
+                  : 'bg-bg-hover text-text-muted border-border hover:text-text-secondary'
+              }`}
+            >
+              Free only
+            </button>
+          )}
         </div>
 
         <div className="flex-1 overflow-y-auto px-2 py-1">
@@ -810,7 +831,17 @@ function ModelAllowlistDialog({
                   ✓
                 </span>
                 <span className="flex-1 min-w-0">
-                  <span className="text-[12px] text-text-secondary truncate block">{m.name}</span>
+                  <span className="flex items-center gap-1.5">
+                    <span className="text-[12px] text-text-secondary truncate">{m.name}</span>
+                    {m.free && (
+                      <span
+                        data-testid="ModelAllowlistDialog.freeBadge"
+                        className="text-[9px] px-1 py-0.5 rounded bg-emerald-500/15 text-emerald-300 font-medium uppercase tracking-wide shrink-0"
+                      >
+                        Free
+                      </span>
+                    )}
+                  </span>
                   <span className="text-[10px] text-text-muted/50 truncate block">
                     {m.id}
                     {m.releaseDate ? ` · ${m.releaseDate}` : ''}
@@ -1161,7 +1192,8 @@ function VendorOpencodeSection(): React.JSX.Element {
                           {p.name}
                         </span>
                         <span className="text-[10px] text-text-muted/50 truncate block">
-                          {p.id} · {p.modelCount} models
+                          {p.id}
+                          {p.modelCount > 0 ? ` · ${p.modelCount} models` : ''}
                           {canOauth ? ' · OAuth' : ''}
                         </span>
                       </span>
@@ -1169,7 +1201,21 @@ function VendorOpencodeSection(): React.JSX.Element {
                         {expanded ? '−' : 'Add'}
                       </span>
                     </button>
-                    {expanded && (
+                    {/* Free (credential-less) providers only ever show up here after
+                        being removed (disabledProviders) — re-adding just needs the
+                        un-disable in finishAdd, no OAuth / API key. */}
+                    {expanded && p.authState === 'free' && (
+                      <div className="px-2 pb-2 pt-1">
+                        <button
+                          data-testid="VendorOpencodeSection.addFree"
+                          onClick={() => finishAdd(p.id)}
+                          className="px-2 py-1 text-[11px] rounded bg-accent/20 hover:bg-accent/30 text-accent transition-colors"
+                        >
+                          Add — no credentials needed
+                        </button>
+                      </div>
+                    )}
+                    {expanded && p.authState !== 'free' && (
                       <div className="px-2 pb-2 pt-1 space-y-1.5">
                         {canOauth && (
                           <button
@@ -1419,6 +1465,25 @@ function OpencodeProvidersSection(): React.JSX.Element {
   const [providerRows, setProviderRows] = useState<ProviderRow[]>([])
   // Per-row model-id textarea string
   const [modelTexts, setModelTexts] = useState<Record<string, string>>({})
+  // Per-row API key input — TRANSIENT UI state only, keyed by the stable _key.
+  // Never merged into the OpencodeConfigSettings payload (ADR-028: opencode.json
+  // stays credential-free); saved separately to opencode's own auth.json via
+  // vendor-auth:set-key, the same mechanism the Providers (catalog) section uses.
+  const [apiKeys, setApiKeys] = useState<Record<string, string>>({})
+  const [keyBusy, setKeyBusy] = useState<Record<string, boolean>>({})
+  const [keyError, setKeyError] = useState<Record<string, string>>({})
+  // Which vendor ids have stored credentials in opencode's auth.json — a
+  // read-only file peek (vendor-auth:list-keys), NOT the auth probe: the probe
+  // reports any declared custom provider as 'authenticated' whether or not it
+  // has a key, which would hide the key input for fresh providers.
+  const [credIds, setCredIds] = useState<Record<string, 'api' | 'oauth'>>({})
+
+  const reloadCredIds = (): void => {
+    window.api
+      .vendorAuthListKeys('opencode')
+      .then((ids) => setCredIds(ids))
+      .catch(() => {})
+  }
 
   useEffect(() => {
     window.api
@@ -1443,6 +1508,7 @@ function OpencodeProvidersSection(): React.JSX.Element {
         )
       })
       .catch(() => setCfg({}))
+    reloadCredIds()
   }, [])
 
   if (cfg === null || installed === null) {
@@ -1509,6 +1575,63 @@ function OpencodeProvidersSection(): React.JSX.Element {
     delete nextTexts[key]
     setModelTexts(nextTexts)
     saveProviders(next, nextTexts)
+    setApiKeys((prev) => {
+      const n = { ...prev }
+      delete n[key]
+      return n
+    })
+    setKeyBusy((prev) => {
+      const n = { ...prev }
+      delete n[key]
+      return n
+    })
+    setKeyError((prev) => {
+      const n = { ...prev }
+      delete n[key]
+      return n
+    })
+  }
+
+  /** Save the transient per-row API key to opencode's own auth.json (never opencode.json). */
+  const saveProviderKey = async (row: ProviderRow): Promise<void> => {
+    const id = row._id.trim()
+    const key = (apiKeys[row._key] ?? '').trim()
+    if (!id || !key) return
+    setKeyBusy((prev) => ({ ...prev, [row._key]: true }))
+    setKeyError((prev) => {
+      const n = { ...prev }
+      delete n[row._key]
+      return n
+    })
+    try {
+      await window.api.vendorAuthSetKey('opencode', id, key)
+      setApiKeys((prev) => ({ ...prev, [row._key]: '' }))
+      reloadCredIds()
+    } catch {
+      setKeyError((prev) => ({ ...prev, [row._key]: 'Failed to save key.' }))
+    } finally {
+      setKeyBusy((prev) => ({ ...prev, [row._key]: false }))
+    }
+  }
+
+  /** Remove credentials for a custom provider id from opencode's auth.json. */
+  const removeProviderKey = async (row: ProviderRow): Promise<void> => {
+    const id = row._id.trim()
+    if (!id) return
+    setKeyBusy((prev) => ({ ...prev, [row._key]: true }))
+    setKeyError((prev) => {
+      const n = { ...prev }
+      delete n[row._key]
+      return n
+    })
+    try {
+      await window.api.vendorAuthRemove('opencode', id)
+      reloadCredIds()
+    } catch {
+      setKeyError((prev) => ({ ...prev, [row._key]: 'Failed to remove key.' }))
+    } finally {
+      setKeyBusy((prev) => ({ ...prev, [row._key]: false }))
+    }
   }
 
   return (
@@ -1519,54 +1642,107 @@ function OpencodeProvidersSection(): React.JSX.Element {
           Custom providers (OpenAI-compatible)
         </div>
         <div className="text-[10px] text-text-muted/60 leading-relaxed">
-          Add self-hosted or compatible endpoints. Set API keys in the <em>Providers</em> section.
+          Add self-hosted or compatible endpoints. API keys entered here are stored in
+          opencode&apos;s own auth.json — the <em>Providers</em> section remains the place to add
+          and authenticate catalog providers.
         </div>
-        {providerRows.map((row) => (
-          <div key={row._key} data-testid="OpencodeProvidersSection.providerRow" data-id={row._key} className="border border-border/30 rounded-md p-2 space-y-1.5">
-            <div className="flex items-center gap-1.5">
+        {providerRows.map((row) => {
+          const id = row._id.trim()
+          const hasKey = id.length > 0 && credIds[id] !== undefined
+          const busy = keyBusy[row._key] ?? false
+          const error = keyError[row._key]
+          return (
+            <div key={row._key} data-testid="OpencodeProvidersSection.providerRow" data-id={row._key} className="border border-border/30 rounded-md p-2 space-y-1.5">
+              <div className="flex items-center gap-1.5">
+                <input
+                  type="text"
+                  placeholder="Provider id (e.g. my-ollama)"
+                  value={row._id}
+                  onChange={(e) => updateRow(row._key, { _id: e.target.value })}
+                  className={`${inputClass} flex-1`}
+                />
+                <button
+                  onClick={() => removeRow(row._key)}
+                  className="text-[10px] text-text-muted/60 hover:text-red-400 transition-colors px-1"
+                  title="Remove provider"
+                >
+                  ✕
+                </button>
+              </div>
               <input
                 type="text"
-                placeholder="Provider id (e.g. my-ollama)"
-                value={row._id}
-                onChange={(e) => updateRow(row._key, { _id: e.target.value })}
-                className={`${inputClass} flex-1`}
+                placeholder="Display name (optional)"
+                value={row.name ?? ''}
+                onChange={(e) => updateRow(row._key, { name: e.target.value })}
+                className={`${inputClass} w-full`}
               />
-              <button
-                onClick={() => removeRow(row._key)}
-                className="text-[10px] text-text-muted/60 hover:text-red-400 transition-colors px-1"
-                title="Remove provider"
-              >
-                ✕
-              </button>
-            </div>
-            <input
-              type="text"
-              placeholder="Display name (optional)"
-              value={row.name ?? ''}
-              onChange={(e) => updateRow(row._key, { name: e.target.value })}
-              className={`${inputClass} w-full`}
-            />
-            <input
-              type="url"
-              placeholder="Base URL (e.g. http://localhost:11434/v1)"
-              value={row.baseURL ?? ''}
-              onChange={(e) => updateRow(row._key, { baseURL: e.target.value })}
-              className={`${inputClass} w-full`}
-            />
-            <div>
-              <div className="text-[10px] text-text-muted mb-0.5">
-                Model ids (one per line, optional)
+              <input
+                type="url"
+                placeholder="Base URL (e.g. http://localhost:11434/v1)"
+                value={row.baseURL ?? ''}
+                onChange={(e) => updateRow(row._key, { baseURL: e.target.value })}
+                className={`${inputClass} w-full`}
+              />
+              <div>
+                <div className="text-[10px] text-text-muted mb-0.5">API key (optional)</div>
+                {hasKey ? (
+                  <div className="flex items-center gap-1.5">
+                    <span
+                      data-testid="OpencodeProvidersSection.keyStatus"
+                      data-id={row._key}
+                      className="text-[10px] px-1.5 py-0.5 rounded bg-green-500/10 text-green-400"
+                    >
+                      Key set
+                    </span>
+                    <button
+                      data-testid="OpencodeProvidersSection.removeKey"
+                      data-id={row._key}
+                      onClick={() => void removeProviderKey(row)}
+                      disabled={busy}
+                      className="text-[10px] text-text-muted/60 hover:text-red-400 transition-colors disabled:opacity-40"
+                    >
+                      {busy ? 'Removing…' : 'Remove key'}
+                    </button>
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-1.5">
+                    <input
+                      type="password"
+                      data-testid="OpencodeProvidersSection.apiKey"
+                      data-id={row._key}
+                      placeholder="API key"
+                      value={apiKeys[row._key] ?? ''}
+                      onChange={(e) =>
+                        setApiKeys((prev) => ({ ...prev, [row._key]: e.target.value }))
+                      }
+                      className={`${inputClass} flex-1`}
+                    />
+                    <button
+                      onClick={() => void saveProviderKey(row)}
+                      disabled={busy || !id || !(apiKeys[row._key] ?? '').trim()}
+                      className="px-2 py-1 text-[11px] rounded bg-accent/20 hover:bg-accent/30 text-accent disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                    >
+                      {busy ? 'Saving…' : 'Save key'}
+                    </button>
+                  </div>
+                )}
+                {error && <div className="text-[10px] text-red-400 mt-0.5">{error}</div>}
               </div>
-              <textarea
-                placeholder={'llama3.2\nmistral-7b'}
-                value={modelTexts[row._key] ?? ''}
-                onChange={(e) => updateModelText(row._key, e.target.value)}
-                rows={3}
-                className={`${inputClass} w-full resize-none`}
-              />
+              <div>
+                <div className="text-[10px] text-text-muted mb-0.5">
+                  Model ids (one per line, optional)
+                </div>
+                <textarea
+                  placeholder={'llama3.2\nmistral-7b'}
+                  value={modelTexts[row._key] ?? ''}
+                  onChange={(e) => updateModelText(row._key, e.target.value)}
+                  rows={3}
+                  className={`${inputClass} w-full resize-none`}
+                />
+              </div>
             </div>
-          </div>
-        ))}
+          )
+        })}
         <button
           data-testid="OpencodeProvidersSection.addProvider"
           onClick={addRow}

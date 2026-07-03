@@ -14,6 +14,9 @@
  * Degrades to {} on any failure — opencode is optional.
  */
 
+import os from 'os'
+import path from 'path'
+import fs from 'fs'
 import { opencodeServerManager } from '../opencode/OpencodeServerManager'
 import { OpencodeClient } from '../opencode/OpencodeClient'
 import { PERSISTED_SESSIONS_DIR } from '../services/persisted-sessions-dir'
@@ -22,6 +25,18 @@ import { logger } from '../services/logger'
 import type { VendorAuthMap, VendorAuthOption, AccountRef, AuthState } from '../../shared/types'
 import type { EngineAuthProvider } from './EngineAuthProvider'
 import { FREE_OPENCODE_VENDOR_IDS } from '../../shared/engine-meta'
+
+/**
+ * opencode's auth store: `<dataDir>/auth.json`, where the data dir mirrors
+ * opencode's own resolution — `$XDG_DATA_HOME/opencode`, falling back to
+ * `~/.local/share/opencode` (opencode uses XDG paths even on Windows; same
+ * resolution as resolveOpencodeDbPath in services/opencode-session-list.ts).
+ * Env is read at call time so tests can point it at a temp dir.
+ */
+function resolveOpencodeAuthJsonPath(): string {
+  const dataHome = process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share')
+  return path.join(dataHome, 'opencode', 'auth.json')
+}
 
 export class OpencodeAuthProvider implements EngineAuthProvider {
   /**
@@ -168,6 +183,36 @@ export class OpencodeAuthProvider implements EngineAuthProvider {
       invalidateOpencodeModelCache()
     } finally {
       opencodeServerManager.release(PERSISTED_SESSIONS_DIR)
+    }
+  }
+
+  /**
+   * Which vendor ids currently have stored credentials — a READ-ONLY peek at
+   * opencode's own auth.json (no server spawn; cheap file read).
+   *
+   * Why not probe()/config-providers: opencode has no endpoint to read stored
+   * credentials (only PUT/DELETE /auth/{id}), and GET /config/providers reports
+   * a custom provider as "configured" the moment it's declared in opencode.json —
+   * with or without a key — so the auth store file is the only truthful source.
+   *
+   * Returns ONLY `{ vendorId: 'api' | 'oauth' }` — never key/token material.
+   * Missing or unparseable file → {} (opencode optional).
+   */
+  async listVendorCredentialIds(): Promise<Record<string, 'api' | 'oauth'>> {
+    try {
+      const raw = await fs.promises.readFile(resolveOpencodeAuthJsonPath(), 'utf-8')
+      const parsed: unknown = JSON.parse(raw)
+      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return {}
+      const out: Record<string, 'api' | 'oauth'> = {}
+      for (const [vendorId, entry] of Object.entries(parsed)) {
+        if (typeof entry !== 'object' || entry === null) continue
+        // opencode auth entry types: 'api' | 'oauth' | 'wellknown'. Anything
+        // non-oauth is reported as 'api' (a stored secret of some kind).
+        out[vendorId] = (entry as { type?: unknown }).type === 'oauth' ? 'oauth' : 'api'
+      }
+      return out
+    } catch {
+      return {}
     }
   }
 

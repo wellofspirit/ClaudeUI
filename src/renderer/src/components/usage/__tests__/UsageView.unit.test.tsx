@@ -84,12 +84,14 @@ describe('UsageView — Claude tab group', () => {
     } as any)
   })
 
-  it('renders all four tab buttons', () => {
+  it('renders the three tab buttons (no 5hr Window tab)', () => {
     render(<UsageView onClose={vi.fn()} />)
     expect(screen.getByRole('button', { name: 'Current Block' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Block Timeline' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '5hr Window' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Recent Blocks' })).toBeInTheDocument()
+    // The 5hr Window tab is gone — the sidebar UsagePanel already shows the
+    // live 5h/7d quota bars, so the tab duplicated it.
+    expect(screen.queryByRole('button', { name: '5hr Window' })).not.toBeInTheDocument()
   })
 
   it('shows "Current Block" panel by default (no active block empty state)', () => {
@@ -103,12 +105,6 @@ describe('UsageView — Claude tab group', () => {
     render(<UsageView onClose={vi.fn()} />)
     fireEvent.click(screen.getByRole('button', { name: 'Block Timeline' }))
     expect(screen.getByText('Not enough data yet')).toBeInTheDocument()
-  })
-
-  it('shows "No window data" when 5hr Window tab is clicked and no accountUsage', () => {
-    render(<UsageView onClose={vi.fn()} />)
-    fireEvent.click(screen.getByRole('button', { name: '5hr Window' }))
-    expect(screen.getByText('No window data')).toBeInTheDocument()
   })
 
   it('shows "No recent blocks" when Recent Blocks tab is clicked and recentBlocks is empty', () => {
@@ -263,7 +259,7 @@ describe('UsageView — opencode section present', () => {
   it('renders the footnote text', () => {
     render(<UsageView onClose={vi.fn()} />)
     expect(
-      screen.getByText(/Cost reported by opencode.*models\.dev pricing/)
+      screen.getByText(/Cost reported by opencode.*estimated list-price cost is shown/)
     ).toBeInTheDocument()
   })
 

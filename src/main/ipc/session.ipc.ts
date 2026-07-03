@@ -423,6 +423,7 @@ const SESSION_IPC_CHANNELS = [
   'proxy:test-connection',
   'vendor-auth:probe',
   'vendor-auth:list-options',
+  'vendor-auth:list-keys',
   'vendor-auth:set-key',
   'vendor-auth:oauth-authorize',
   'vendor-auth:oauth-callback',
@@ -1658,6 +1659,19 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
           throw new Error(`Engine "${engineId}" does not support listVendorAuthOptions`)
         }
         return provider.listVendorAuthOptions()
+      }
+    )
+  )
+
+  ipcMain.handle(
+    'vendor-auth:list-keys',
+    safeHandler(
+      async (_e: unknown, engineId: EngineId): Promise<Record<string, 'api' | 'oauth'>> => {
+        const provider = engineAuthRegistry.require(engineId)
+        if (!provider.listVendorCredentialIds) {
+          throw new Error(`Engine "${engineId}" does not support listVendorCredentialIds`)
+        }
+        return provider.listVendorCredentialIds()
       }
     )
   )

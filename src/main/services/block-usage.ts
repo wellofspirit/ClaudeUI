@@ -28,6 +28,7 @@ import {
   groupEntriesIntoBlocks,
   computeProjectionWLS as computeWLS,
   perEngineBreakdown,
+  selectRowCostUsd,
   type AggEntry,
   type ApiWindow as AggApiWindow,
   type ProjectionSample as AggProjectionSample
@@ -816,8 +817,8 @@ export class BlockUsageService {
   /**
    * Per-engine usage breakdown over the scan window, from usage_event (Phase 7
    * Pass 2). Both engines appear. Failures degrade to undefined (Claude-only
-   * dashboard unaffected). Uses each row's equiv_cost_usd (falling back to
-   * engine_cost_usd) so the cost matches the dashboard's equivalent-cost metric.
+   * dashboard unaffected). Uses selectRowCostUsd per row — real engine spend when
+   * nonzero, otherwise the best available list-price estimate.
    */
   private computePerEngine(now: number): BlockUsageData['perEngine'] {
     try {
@@ -831,11 +832,11 @@ export class BlockUsageService {
         outputTokens: r.outputTokens,
         cacheCreationTokens: r.cacheWriteTokens,
         cacheReadTokens: r.cacheReadTokens,
-        // Phase 9b cost fix: engineCostUsd is authoritative for all engines.
-        // For opencode, 0 is a valid real cost (free model) — only null falls back
-        // to equivCostUsd. Previously equivCostUsd was preferred, which wrongly
-        // shadowed opencode's real cost with the pricing-table estimate.
-        costUsd: r.engineCostUsd ?? r.equivCostUsd ?? 0,
+        // Cost fix: engineCostUsd is authoritative when it's a real nonzero spend.
+        // Null OR 0 (e.g. opencode on a pooled/enterprise plan that bills $0 per
+        // call) falls back to selectRowCostUsd's list-price estimate — see its
+        // doc comment. Genuinely-free models still show $0.
+        costUsd: selectRowCostUsd(r),
         messageId: r.messageId,
         engineId: r.engineId
       }))
@@ -902,10 +903,11 @@ export class BlockUsageService {
 
   /**
    * Read Claude entries back from usage_event as the ParsedEntry shape the block
-   * grouping consumes. costUsd is sourced from engine_cost_usd (= the original
-   * calculateCostFromTokens value) so blocks are byte-identical to the old
-   * JSONL-sourced blocks. cacheCreationTokens = cache_write_tokens (combined
-   * 5m+1h, matching the JSONL ParsedEntry).
+   * grouping consumes. costUsd is sourced via selectRowCostUsd — for Claude rows
+   * engine_cost_usd (= the original calculateCostFromTokens value) is always the
+   * real nonzero spend, so blocks stay byte-identical to the old JSONL-sourced
+   * blocks. cacheCreationTokens = cache_write_tokens (combined 5m+1h, matching the
+   * JSONL ParsedEntry).
    */
   private claudeEntriesFromDb(now: number): ParsedEntry[] {
     const cutoff = now - SCAN_WINDOW_MS
@@ -917,7 +919,7 @@ export class BlockUsageService {
       outputTokens: r.outputTokens,
       cacheCreationTokens: r.cacheWriteTokens,
       cacheReadTokens: r.cacheReadTokens,
-      costUsd: r.engineCostUsd ?? r.equivCostUsd ?? 0,
+      costUsd: selectRowCostUsd(r),
       messageId: r.messageId
     }))
   }
@@ -962,11 +964,11 @@ export class BlockUsageService {
         b.outputTokens += r.outputTokens
         b.cacheWriteTokens += r.cacheWriteTokens
         b.cacheReadTokens += r.cacheReadTokens
-        // Phase 9b cost fix: engineCostUsd is authoritative for all engines.
-        // For opencode, 0 is a valid real cost (free model) — only null falls back
-        // to equivCostUsd. Claude's engineCostUsd = calculateCostFromTokens so this
-        // continues to match the historical entry-derived total.
-        b.costUsd += r.engineCostUsd ?? r.equivCostUsd ?? 0
+        // Cost fix: selectRowCostUsd keeps real nonzero engine spend authoritative
+        // (Claude's engineCostUsd = calculateCostFromTokens, so this continues to
+        // match the historical entry-derived total) and falls back to a list-price
+        // estimate when the engine reports null/0 — see its doc comment.
+        b.costUsd += selectRowCostUsd(r)
         b.requestCount += 1
       }
 

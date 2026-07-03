@@ -326,6 +326,8 @@ const api: ClaudeAPI = {
     unwrap('vendor-auth:probe', engineId),
   vendorAuthListOptions: (engineId: import('../shared/types').EngineId) =>
     unwrap('vendor-auth:list-options', engineId),
+  vendorAuthListKeys: (engineId: import('../shared/types').EngineId) =>
+    unwrap('vendor-auth:list-keys', engineId),
   vendorAuthSetKey: (
     engineId: import('../shared/types').EngineId,
     vendorId: string,
