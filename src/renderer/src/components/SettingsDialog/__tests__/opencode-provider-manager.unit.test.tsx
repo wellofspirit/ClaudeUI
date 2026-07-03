@@ -160,6 +160,56 @@ describe('opencode provider manager', () => {
     })
   })
 
+  describe('re-adding a removed free provider (keyless path)', () => {
+    // A free provider only ever appears in the Add picker after being removed
+    // (disabledProviders) — otherwise it's auto-active. The expanded row must
+    // offer a single keyless enable button instead of OAuth / API-key inputs.
+    async function expandFreeAddableRow(): Promise<void> {
+      installApiStub({ disabledProviders: ['opencode'] })
+      await act(async () => {
+        renderManager()
+      })
+      // Wait for load (openai renders as added), then: disabled → zen is NOT added.
+      expect(await screen.findByText('OpenAI')).toBeTruthy()
+      expect(screen.queryByText('OpenCode Zen')).toBeNull()
+      await act(async () => {
+        fireEvent.click(await screen.findByText('+ Add provider'))
+      })
+      const search = await screen.findByPlaceholderText(/Search providers/)
+      await act(async () => {
+        fireEvent.change(search, { target: { value: 'zen' } })
+      })
+      // Expand the free provider's row.
+      await act(async () => {
+        fireEvent.click(await screen.findByText('OpenCode Zen'))
+      })
+    }
+
+    it('shows the keyless add button and hides OAuth / API-key inputs', async () => {
+      await expandFreeAddableRow()
+      expect(screen.getByTestId('VendorOpencodeSection.addFree')).toBeTruthy()
+      // The non-free auth affordances must NOT render for a free provider.
+      expect(screen.queryByPlaceholderText('API key')).toBeNull()
+      expect(screen.queryByText(/Sign in with OAuth/)).toBeNull()
+    })
+
+    it('clicking it clears the id from disabledProviders and seeds an empty model allowlist', async () => {
+      await expandFreeAddableRow()
+      await act(async () => {
+        fireEvent.click(screen.getByTestId('VendorOpencodeSection.addFree'))
+      })
+      await waitFor(() => {
+        const last = savedConfigs[savedConfigs.length - 1]
+        expect(last).toBeDefined()
+        // finishAdd's contract: [] collapses to undefined, allowlist seeded empty.
+        expect(last.disabledProviders).toBeUndefined()
+        expect(last.modelAllowlist?.opencode).toEqual([])
+      })
+      // No credential call — the free path never touches auth.json.
+      expect(vendorAuthSetKey).not.toHaveBeenCalled()
+    })
+  })
+
   describe('Manage models dialog — free badge + filter', () => {
     it('renders the Free badge only for flagged entries, and no Free-only chip for a provider with none', async () => {
       installApiStub({})

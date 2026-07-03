@@ -1192,7 +1192,8 @@ function VendorOpencodeSection(): React.JSX.Element {
                           {p.name}
                         </span>
                         <span className="text-[10px] text-text-muted/50 truncate block">
-                          {p.id} · {p.modelCount} models
+                          {p.id}
+                          {p.modelCount > 0 ? ` · ${p.modelCount} models` : ''}
                           {canOauth ? ' · OAuth' : ''}
                         </span>
                       </span>
@@ -1200,7 +1201,21 @@ function VendorOpencodeSection(): React.JSX.Element {
                         {expanded ? '−' : 'Add'}
                       </span>
                     </button>
-                    {expanded && (
+                    {/* Free (credential-less) providers only ever show up here after
+                        being removed (disabledProviders) — re-adding just needs the
+                        un-disable in finishAdd, no OAuth / API key. */}
+                    {expanded && p.authState === 'free' && (
+                      <div className="px-2 pb-2 pt-1">
+                        <button
+                          data-testid="VendorOpencodeSection.addFree"
+                          onClick={() => finishAdd(p.id)}
+                          className="px-2 py-1 text-[11px] rounded bg-accent/20 hover:bg-accent/30 text-accent transition-colors"
+                        >
+                          Add — no credentials needed
+                        </button>
+                      </div>
+                    )}
+                    {expanded && p.authState !== 'free' && (
                       <div className="px-2 pb-2 pt-1 space-y-1.5">
                         {canOauth && (
                           <button

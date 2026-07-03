@@ -36,6 +36,7 @@ import {
   opencodeConfigDir,
   resolveOpencodeConfigFile,
   readOpencodeNativeConfig,
+  readDeclaredProviderIds,
   writeOpencodeNativeConfig,
   computeMigrationPatch,
   migrateOpencodeConfigToNative,
@@ -258,6 +259,65 @@ describe('readOpencodeNativeConfig', () => {
       )
       const result = readOpencodeNativeConfig()
       expect(result.model).toBe('anthropic/claude-sonnet-4-6')
+    })
+  })
+})
+
+// ── readDeclaredProviderIds ────────────────────────────────────────────────────
+//
+// opencode MERGES both global config files at load (verified via GET /config),
+// while resolveOpencodeConfigFile picks ONE write target (jsonc-first). The
+// declared-custom-provider guard must therefore union `provider` keys from BOTH
+// files — a split layout (jsonc holding disabled_providers, json holding the
+// provider map) previously read as "no declared providers".
+
+describe('readDeclaredProviderIds', () => {
+  it('unions provider ids across a split layout (jsonc: disabled only; json: provider map)', () => {
+    withEnv('OPENCODE_CONFIG_DIR', tmpDir, () => {
+      fs.writeFileSync(
+        path.join(tmpDir, 'opencode.jsonc'),
+        '{\n  // ClaudeUI-managed\n  "disabled_providers": ["openai"]\n}'
+      )
+      fs.writeFileSync(
+        path.join(tmpDir, 'opencode.json'),
+        JSON.stringify({
+          provider: {
+            llamacpp: { options: { baseURL: 'http://localhost:8080/v1' } },
+            mtplx: { name: 'MTPLX' }
+          }
+        })
+      )
+      expect(readDeclaredProviderIds().sort()).toEqual(['llamacpp', 'mtplx'])
+      // Sanity: the single-file reader (jsonc precedence) sees NO providers here —
+      // that's exactly the gap the union helper closes.
+      expect(readOpencodeNativeConfig().providers).toBeUndefined()
+    })
+  })
+
+  it('returns provider ids from a jsonc-only layout', () => {
+    withEnv('OPENCODE_CONFIG_DIR', tmpDir, () => {
+      fs.writeFileSync(
+        path.join(tmpDir, 'opencode.jsonc'),
+        '{\n  // custom local provider\n  "provider": { "llamacpp": {} }\n}'
+      )
+      expect(readDeclaredProviderIds()).toEqual(['llamacpp'])
+    })
+  })
+
+  it('returns [] when neither file exists', () => {
+    withEnv('OPENCODE_CONFIG_DIR', tmpDir, () => {
+      expect(readDeclaredProviderIds()).toEqual([])
+    })
+  })
+
+  it('tolerates a malformed file — the other file ids are still returned', () => {
+    withEnv('OPENCODE_CONFIG_DIR', tmpDir, () => {
+      fs.writeFileSync(path.join(tmpDir, 'opencode.json'), '%%% not json at all')
+      fs.writeFileSync(
+        path.join(tmpDir, 'opencode.jsonc'),
+        '{ "provider": { "mtplx": { "name": "MTPLX" } } }'
+      )
+      expect(readDeclaredProviderIds()).toEqual(['mtplx'])
     })
   })
 })

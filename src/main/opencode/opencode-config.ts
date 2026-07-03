@@ -180,6 +180,47 @@ export function readOpencodeNativeConfig(): NativeOpencodeFields {
   return result
 }
 
+/**
+ * Return the union of provider ids declared in the `provider` object of BOTH
+ * global config files (`opencode.jsonc` AND `opencode.json`) when present.
+ *
+ * Why not readOpencodeNativeConfig()? That reader (and the writer) deliberately
+ * operate on ONE resolved file — resolveOpencodeConfigFile()'s jsonc-first
+ * precedence — because the Custom providers editor depends on read/write
+ * symmetry. But opencode itself MERGES both global files at load (verified via
+ * GET /config: `provider` from opencode.json and `disabled_providers` from
+ * opencode.jsonc surface simultaneously), so a user with a split layout can
+ * declare custom providers in the file ClaudeUI does NOT resolve. Read-side
+ * guards about "is this id a declared custom provider?" must therefore union
+ * both files, not trust the single write target.
+ *
+ * Missing or unparseable files contribute nothing. Never creates files.
+ */
+export function readDeclaredProviderIds(): string[] {
+  const dir = opencodeConfigDir()
+  const ids = new Set<string>()
+  for (const fileName of ['opencode.jsonc', 'opencode.json']) {
+    const filePath = path.join(dir, fileName)
+    let text: string
+    try {
+      text = fs.readFileSync(filePath, 'utf8')
+    } catch {
+      continue
+    }
+    let native: Record<string, unknown>
+    try {
+      native = (jsoncParse(text) ?? {}) as Record<string, unknown>
+    } catch {
+      continue
+    }
+    const prov = native.provider
+    if (prov && typeof prov === 'object' && !Array.isArray(prov)) {
+      for (const id of Object.keys(prov as Record<string, unknown>)) ids.add(id)
+    }
+  }
+  return [...ids]
+}
+
 // ─── Write ────────────────────────────────────────────────────────────────────
 
 /**

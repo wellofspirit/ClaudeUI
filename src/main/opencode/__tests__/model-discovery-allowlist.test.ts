@@ -26,6 +26,14 @@ vi.mock('../../services/persisted-sessions-dir', () => ({
   PERSISTED_SESSIONS_DIR: '/tmp/persisted'
 }))
 vi.mock('../../services/ui-config', () => ({ loadEngineConfig: mockLoadEngineConfig }))
+// Hermetic: discoverOpencodeProviderCatalog() reads opencode's own config files
+// (disabledProviders re-synthesis, see model-discovery.ts) directly — not via
+// ui-config — so it needs its own mock to avoid hitting the developer's real
+// ~/.config/opencode/opencode.json(c).
+vi.mock('../opencode-config', () => ({
+  readOpencodeNativeConfig: () => ({}),
+  readDeclaredProviderIds: () => []
+}))
 
 import {
   discoverOpencodeModels,
