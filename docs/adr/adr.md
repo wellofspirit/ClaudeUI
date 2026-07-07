@@ -32,3 +32,4 @@
 | [028](adr-028_opencode-native-config-in-place.md)                | opencode engine-native config written to opencode's own files in place (jsonc, comment-safe) *(implements 020; relates to 019/022/024)* |
 | [029](adr-029_opencode-custom-agent-crud.md)                     | opencode custom-agent CRUD — markdown agent files (global/project), opt-in permissions, AI-assisted authoring *(builds on 028; relates to 022/023/024)* |
 | [030](adr-030_capability-honesty.md)                             | Capability honesty — a capability flag is true only when the full engine path works; opencode fork demoted *(relates to 018/019)* |
+| [031](adr-031_opencode-config-leaf-merge-writes.md)              | opencode config writes are diff-driven leaf merges, never subtree replacements — preserves unmodelled hand-edits *(refines 028)* |

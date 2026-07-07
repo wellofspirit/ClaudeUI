@@ -111,28 +111,19 @@ export type NativeOpencodeFields = Pick<
 >
 
 /**
- * Read opencode's native config file and map the six managed keys to the
- * ClaudeUI shape. Returns {} if the file is absent or unparseable.
- * NEVER creates the file — reading is always harmless.
+ * Project a parsed opencode-native config object down to the six managed keys in
+ * ClaudeUI's shape. This is the SINGLE source of the read mapping — both the
+ * public reader and the diff-driven writer project through it so the write diff
+ * base is computed identically to what the UI reads.
+ *
+ * The projection is deliberately LOSSY: it models only `{name?, baseURL?,
+ * models:{id,name?}[]}` per provider and `{model?, temperature?}` per agent.
+ * Everything else opencode understands (model-level attachment/modalities/
+ * tool_call/cost/limit, provider-level npm/options.apiKey, unknown agent fields)
+ * is invisible here — which is exactly why the writer must never round-trip a
+ * whole subtree from this projection.
  */
-export function readOpencodeNativeConfig(): NativeOpencodeFields {
-  const { path: filePath, existed } = resolveOpencodeConfigFile()
-  if (!existed) return {}
-
-  let text: string
-  try {
-    text = fs.readFileSync(filePath, 'utf8')
-  } catch {
-    return {}
-  }
-
-  let native: Record<string, unknown>
-  try {
-    native = (jsoncParse(text) ?? {}) as Record<string, unknown>
-  } catch {
-    return {}
-  }
-
+function projectNativeToFields(native: Record<string, unknown>): NativeOpencodeFields {
   const result: NativeOpencodeFields = {}
 
   if (typeof native.model === 'string' && native.model) result.model = native.model
@@ -178,6 +169,37 @@ export function readOpencodeNativeConfig(): NativeOpencodeFields {
   }
 
   return result
+}
+
+/**
+ * Read opencode's native config file and map the six managed keys to the
+ * ClaudeUI shape. Returns {} if the file is absent or unparseable.
+ * NEVER creates the file — reading is always harmless.
+ */
+export function readOpencodeNativeConfig(): NativeOpencodeFields {
+  const parsed = readResolvedNative()
+  return parsed ? projectNativeToFields(parsed) : {}
+}
+
+/**
+ * Parse the resolved config file into a raw native object, or return null when
+ * the file is absent / unreadable / unparseable. Shared by the reader and the
+ * writer's diff base. NEVER creates the file.
+ */
+function readResolvedNative(): Record<string, unknown> | null {
+  const { path: filePath, existed } = resolveOpencodeConfigFile()
+  if (!existed) return null
+  let text: string
+  try {
+    text = fs.readFileSync(filePath, 'utf8')
+  } catch {
+    return null
+  }
+  try {
+    return (jsoncParse(text) ?? {}) as Record<string, unknown>
+  } catch {
+    return null
+  }
 }
 
 /**
@@ -230,103 +252,207 @@ function detectEol(text: string): '\r\n' | '\n' {
   return text.includes('\r\n') ? '\r\n' : '\n'
 }
 
-/**
- * Determine if a value is "empty" for purposes of deletion:
- * undefined, '', [], or {}
- */
-function isEmpty(v: unknown): boolean {
-  if (v === undefined || v === null || v === '') return true
-  if (Array.isArray(v)) return v.length === 0
-  if (typeof v === 'object') return Object.keys(v as object).length === 0
-  return false
+/** Normalise a scalar to undefined when it is an empty string. */
+function normScalar(v: string | undefined): string | undefined {
+  return v ? v : undefined
+}
+
+/** Normalise a string[] to undefined when it is empty. */
+function normArray(v: string[] | undefined): string[] | undefined {
+  return v && v.length > 0 ? v : undefined
+}
+
+/** Order-sensitive array equality (undefined-tolerant). */
+function arraysEqual(a: string[] | undefined, b: string[] | undefined): boolean {
+  if (a === b) return true
+  if (!a || !b) return false
+  if (a.length !== b.length) return false
+  return a.every((v, i) => v === b[i])
 }
 
 /**
- * Write (reconcile) the six managed native keys into opencode's config file,
- * leaving all other keys (theme, keybinds, mcp, etc.) byte-for-byte unchanged.
+ * Write (reconcile) the six managed native keys into opencode's config file via
+ * DIFF-DRIVEN leaf merges (ADR-031), leaving every other key AND every field
+ * ClaudeUI doesn't model byte-preserved.
  *
- * If a field is absent/empty in `fields`, the corresponding native key is
- * DELETED from the file (so removing a provider in the UI removes it from the
- * file). Fields not in the six managed set are never touched.
+ * The incoming `fields` are diffed against the projection of the CURRENT file
+ * (via projectNativeToFields — the same mapping readOpencodeNativeConfig uses),
+ * and only CHANGED leaves are emitted as jsonc-parser `modify()` edits:
  *
- * Always writes to the same file we read (no new file created if .jsonc exists).
- * Ensures the config directory exists before writing.
+ *   - model / small_model: set when changed, delete when emptied.
+ *   - disabled_providers / enabled_providers: atomic arrays — replace when
+ *     different, delete when emptied.
+ *   - provider: per id — add (whole native shape), remove (delete subtree, which
+ *     IS user intent), or keep with per-field leaf edits (name, options.baseURL,
+ *     models per id). Never touches unmodelled fields (npm, options.apiKey,
+ *     model attachment/modalities/tool_call/cost/limit/…).
+ *   - agent: per name — add/remove/keep; keep touches only model/temperature and
+ *     preserves unknown entry fields (prompt, mode, permission, …).
+ *
+ * A no-op save produces ZERO edits and no write (byte-compare gate). Always
+ * writes to the same file we read (no new file created if .jsonc exists).
+ *
+ * Note: the diff base is the SAME resolved file we write. A provider declared
+ * only in the OTHER global file (json vs jsonc split — see readDeclaredProviderIds)
+ * is invisible to both the projection and the UI's incoming set, so it appears in
+ * neither side of the diff and is therefore never deleted.
  */
 export function writeOpencodeNativeConfig(fields: NativeOpencodeFields): void {
-  const { path: filePath } = resolveOpencodeConfigFile()
+  const { path: filePath, existed } = resolveOpencodeConfigFile()
 
-  // Ensure the directory exists.
-  fs.mkdirSync(path.dirname(filePath), { recursive: true })
+  const originalText = existed ? safeRead(filePath) : undefined
+  const baseText = originalText ?? '{}'
 
-  // Start with the existing content, or empty object for a new file.
-  let text: string
-  try {
-    text = fs.readFileSync(filePath, 'utf8')
-  } catch {
-    text = '{}'
-  }
-
-  const eol = detectEol(text)
+  const eol = detectEol(baseText)
   const fmt: FormattingOptions = { insertSpaces: true, tabSize: 2, eol }
 
-  // The six managed native keys and their corresponding values.
-  // Order: apply each key sequentially, re-applying edits per key.
+  const current = projectNativeToFields((jsoncParseSafe(baseText) ?? {}) as Record<string, unknown>)
 
-  type ManagedKey = {
-    nativeKey: string
-    value: unknown
+  let text = baseText
+  const set = (jsonPath: (string | number)[], value: unknown): void => {
+    text = applyEdits(text, modify(text, jsonPath, value, { formattingOptions: fmt }))
   }
-
-  // Build provider native object
-  let providerValue: Record<string, unknown> | undefined
-  if (!isEmpty(fields.providers)) {
-    providerValue = {}
-    for (const [id, p] of Object.entries(fields.providers!)) {
-      providerValue[id] = settingsProviderToNative(p)
+  // INVARIANT: only call del() for paths the projection saw in THIS text (a
+  // defined `current.*` leaf). jsonc-parser's modify() throws when deleting
+  // under a missing parent; a projection-witnessed key guarantees the parent
+  // chain exists. Diffing against any other base would break this.
+  const del = (jsonPath: (string | number)[]): void => {
+    text = applyEdits(text, modify(text, jsonPath, undefined, { formattingOptions: fmt }))
+  }
+  const reconcileScalar = (
+    key: string,
+    incoming: string | undefined,
+    cur: string | undefined
+  ): void => {
+    if (incoming === cur) return
+    if (incoming === undefined) {
+      if (cur !== undefined) del([key])
+    } else {
+      set([key], incoming)
+    }
+  }
+  const reconcileArray = (
+    key: string,
+    incoming: string[] | undefined,
+    cur: string[] | undefined
+  ): void => {
+    if (arraysEqual(incoming, cur)) return
+    if (incoming === undefined) {
+      if (cur !== undefined) del([key])
+    } else {
+      set([key], incoming)
     }
   }
 
-  // Build agent native object
-  let agentValue: Record<string, unknown> | undefined
-  if (!isEmpty(fields.agents)) {
-    agentValue = {}
-    for (const [name, a] of Object.entries(fields.agents!)) {
+  // ── model / small_model (scalars) ──────────────────────────────────────────
+  reconcileScalar('model', normScalar(fields.model), current.model)
+  reconcileScalar('small_model', normScalar(fields.smallModel), current.smallModel)
+
+  // ── disabled_providers / enabled_providers (atomic arrays) ──────────────────
+  reconcileArray('disabled_providers', normArray(fields.disabledProviders), current.disabledProviders)
+  reconcileArray('enabled_providers', normArray(fields.enabledProviders), current.enabledProviders)
+
+  // ── provider (per id, per field) ────────────────────────────────────────────
+  const inProviders = fields.providers ?? {}
+  const curProviders = current.providers ?? {}
+  for (const id of new Set([...Object.keys(inProviders), ...Object.keys(curProviders)])) {
+    const incoming = inProviders[id]
+    const cur = curProviders[id]
+    if (incoming && !cur) {
+      // Added → set the whole native shape.
+      set(['provider', id], settingsProviderToNative(incoming))
+    } else if (!incoming && cur) {
+      // Removed → delete the whole subtree (that IS the user's intent).
+      del(['provider', id])
+    } else if (incoming && cur) {
+      // Kept → per-field leaf edits only.
+      const inName = normScalar(incoming.name)
+      const curName = normScalar(cur.name)
+      if (inName !== curName) {
+        if (inName === undefined) del(['provider', id, 'name'])
+        else set(['provider', id, 'name'], inName)
+      }
+      const inBase = normScalar(incoming.baseURL)
+      const curBase = normScalar(cur.baseURL)
+      if (inBase !== curBase) {
+        // NEVER replace the whole options object — preserve sibling apiKey etc.
+        if (inBase === undefined) del(['provider', id, 'options', 'baseURL'])
+        else set(['provider', id, 'options', 'baseURL'], inBase)
+      }
+      // Models, per id.
+      const inModels = new Map((incoming.models ?? []).map((m) => [m.id, m]))
+      const curModels = new Map((cur.models ?? []).map((m) => [m.id, m]))
+      for (const modelId of new Set([...inModels.keys(), ...curModels.keys()])) {
+        const im = inModels.get(modelId)
+        const cm = curModels.get(modelId)
+        if (im && !cm) {
+          set(['provider', id, 'models', modelId], im.name ? { name: im.name } : {})
+        } else if (!im && cm) {
+          del(['provider', id, 'models', modelId])
+        } else if (im && cm) {
+          const inMName = normScalar(im.name)
+          const curMName = normScalar(cm.name)
+          if (inMName !== curMName) {
+            if (inMName === undefined) del(['provider', id, 'models', modelId, 'name'])
+            else set(['provider', id, 'models', modelId, 'name'], inMName)
+          }
+        }
+      }
+    }
+  }
+
+  // ── agent (per name, per field) ──────────────────────────────────────────────
+  const inAgents = fields.agents ?? {}
+  const curAgents = current.agents ?? {}
+  for (const name of new Set([...Object.keys(inAgents), ...Object.keys(curAgents)])) {
+    const incoming = inAgents[name]
+    const cur = curAgents[name]
+    if (incoming && !cur) {
       const entry: Record<string, unknown> = {}
-      if (a.model) entry.model = a.model
-      if (a.temperature != null) entry.temperature = a.temperature
-      agentValue[name] = entry
+      if (incoming.model) entry.model = incoming.model
+      if (incoming.temperature != null) entry.temperature = incoming.temperature
+      set(['agent', name], entry)
+    } else if (!incoming && cur) {
+      del(['agent', name])
+    } else if (incoming && cur) {
+      const inModel = normScalar(incoming.model)
+      const curModel = normScalar(cur.model)
+      if (inModel !== curModel) {
+        if (inModel === undefined) del(['agent', name, 'model'])
+        else set(['agent', name, 'model'], inModel)
+      }
+      const inTemp = incoming.temperature ?? undefined
+      const curTemp = cur.temperature ?? undefined
+      if (inTemp !== curTemp) {
+        if (inTemp === undefined) del(['agent', name, 'temperature'])
+        else set(['agent', name, 'temperature'], inTemp)
+      }
     }
   }
 
-  const managedKeys: ManagedKey[] = [
-    { nativeKey: 'model', value: fields.model || undefined },
-    { nativeKey: 'small_model', value: fields.smallModel || undefined },
-    {
-      nativeKey: 'disabled_providers',
-      value:
-        fields.disabledProviders && fields.disabledProviders.length > 0
-          ? fields.disabledProviders
-          : undefined
-    },
-    {
-      nativeKey: 'enabled_providers',
-      value:
-        fields.enabledProviders && fields.enabledProviders.length > 0
-          ? fields.enabledProviders
-          : undefined
-    },
-    { nativeKey: 'provider', value: providerValue },
-    { nativeKey: 'agent', value: agentValue }
-  ]
+  // Byte-compare gate: only write when something actually changed.
+  if (text === originalText) return
 
-  for (const { nativeKey, value } of managedKeys) {
-    const edits = modify(text, [nativeKey], value === undefined ? undefined : value, {
-      formattingOptions: fmt
-    })
-    text = applyEdits(text, edits)
-  }
-
+  fs.mkdirSync(path.dirname(filePath), { recursive: true })
   fs.writeFileSync(filePath, text, 'utf8')
+}
+
+/** Read a file, returning undefined on any error. */
+function safeRead(filePath: string): string | undefined {
+  try {
+    return fs.readFileSync(filePath, 'utf8')
+  } catch {
+    return undefined
+  }
+}
+
+/** jsonc-parse that never throws (returns undefined on error). */
+function jsoncParseSafe(text: string): unknown {
+  try {
+    return jsoncParse(text)
+  } catch {
+    return undefined
+  }
 }
 
 // ─── Migration ────────────────────────────────────────────────────────────────

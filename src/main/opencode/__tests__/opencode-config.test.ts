@@ -19,6 +19,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
+import { parse as jsoncParse } from 'jsonc-parser'
 import type { EngineConfig } from '../../../shared/types'
 
 // Mock ui-config so the migration's load/save are controllable and we don't drag
@@ -42,6 +43,7 @@ import {
   migrateOpencodeConfigToNative,
   __resetMigrationGuardForTests
 } from '../opencode-config'
+import type { NativeOpencodeFields } from '../opencode-config'
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -442,6 +444,226 @@ describe('writeOpencodeNativeConfig', () => {
       expect(parsed.model).toBe('anthropic/claude-sonnet-4-6')
       // No new .json created alongside
       expect(fs.existsSync(path.join(tmpDir, 'opencode.json'))).toBe(false)
+    })
+  })
+})
+
+// ── writeOpencodeNativeConfig: diff-driven leaf-merge (ADR-031) ─────────────────
+//
+// The writer must touch ONLY the keys it models AND that actually changed, and
+// must NEVER delete keys it does not model (attachment/modalities/npm/apiKey/…).
+// These guard the real-world clobber: a hand-added `attachment: true` on a model
+// (to enable image input) survives a UI save that touches an unrelated field.
+
+describe('writeOpencodeNativeConfig — diff-driven leaf merge', () => {
+  /** Seed a .jsonc file and return its path. */
+  function seed(content: string): string {
+    const p = path.join(tmpDir, 'opencode.jsonc')
+    fs.writeFileSync(p, content)
+    return p
+  }
+
+  it('preserves model-level attachment + modalities across a provider display-name rename', () => {
+    withEnv('OPENCODE_CONFIG_DIR', tmpDir, () => {
+      const p = seed(
+        [
+          '{',
+          '  "provider": {',
+          '    "myprov": {',
+          '      "name": "Old Name",',
+          '      "options": { "baseURL": "http://x/v1" },',
+          '      "models": {',
+          '        "qwen3.6:27b": {',
+          '          "attachment": true,',
+          '          "modalities": { "input": ["text", "image"] }',
+          '        }',
+          '      }',
+          '    }',
+          '  }',
+          '}'
+        ].join('\n')
+      )
+      // The UI reads the (lossy) projection, renames the display name, and saves.
+      const cur = readOpencodeNativeConfig()
+      const incoming: NativeOpencodeFields = {
+        ...cur,
+        providers: {
+          myprov: { ...cur.providers!.myprov, name: 'New Name' }
+        }
+      }
+      writeOpencodeNativeConfig(incoming)
+
+      const parsed = jsoncParse(fs.readFileSync(p, 'utf8'))
+      const model = parsed.provider.myprov.models['qwen3.6:27b']
+      expect(model.attachment).toBe(true)
+      expect(model.modalities).toEqual({ input: ['text', 'image'] })
+      expect(parsed.provider.myprov.name).toBe('New Name')
+    })
+  })
+
+  it('preserves provider-level npm + options.apiKey across a baseURL change', () => {
+    withEnv('OPENCODE_CONFIG_DIR', tmpDir, () => {
+      const p = seed(
+        JSON.stringify(
+          {
+            provider: {
+              myprov: {
+                npm: '@ai-sdk/openai-compatible',
+                options: { baseURL: 'http://old/v1', apiKey: 'secret-key' }
+              }
+            }
+          },
+          null,
+          2
+        )
+      )
+      const cur = readOpencodeNativeConfig()
+      const incoming: NativeOpencodeFields = {
+        providers: {
+          myprov: { ...cur.providers!.myprov, baseURL: 'http://new/v1' }
+        }
+      }
+      writeOpencodeNativeConfig(incoming)
+
+      const parsed = jsoncParse(fs.readFileSync(p, 'utf8'))
+      expect(parsed.provider.myprov.npm).toBe('@ai-sdk/openai-compatible')
+      expect(parsed.provider.myprov.options.apiKey).toBe('secret-key')
+      expect(parsed.provider.myprov.options.baseURL).toBe('http://new/v1')
+    })
+  })
+
+  it('preserves comments across a provider edit', () => {
+    withEnv('OPENCODE_CONFIG_DIR', tmpDir, () => {
+      const p = seed(
+        [
+          '// keep me',
+          '{',
+          '  "provider": {',
+          '    // provider-level comment',
+          '    "myprov": { "name": "Old", "options": { "baseURL": "http://x/v1" } }',
+          '  }',
+          '}'
+        ].join('\n')
+      )
+      const cur = readOpencodeNativeConfig()
+      writeOpencodeNativeConfig({
+        providers: { myprov: { ...cur.providers!.myprov, name: 'New' } }
+      })
+      const written = fs.readFileSync(p, 'utf8')
+      expect(written).toContain('// keep me')
+      expect(written).toContain('// provider-level comment')
+    })
+  })
+
+  it('removing one provider deletes only its subtree; a sibling exotic field survives', () => {
+    withEnv('OPENCODE_CONFIG_DIR', tmpDir, () => {
+      const p = seed(
+        JSON.stringify(
+          {
+            provider: {
+              keepme: {
+                npm: '@custom/pkg',
+                options: { baseURL: 'http://keep/v1', apiKey: 'k' },
+                models: { 'm1': { attachment: true } }
+              },
+              dropme: { name: 'Drop', options: { baseURL: 'http://drop/v1' } }
+            }
+          },
+          null,
+          2
+        )
+      )
+      const cur = readOpencodeNativeConfig()
+      // Save with `dropme` removed from the projection.
+      writeOpencodeNativeConfig({
+        providers: { keepme: cur.providers!.keepme }
+      })
+      const parsed = jsoncParse(fs.readFileSync(p, 'utf8'))
+      expect(parsed.provider.dropme).toBeUndefined()
+      expect(parsed.provider.keepme.npm).toBe('@custom/pkg')
+      expect(parsed.provider.keepme.options.apiKey).toBe('k')
+      expect(parsed.provider.keepme.models.m1.attachment).toBe(true)
+    })
+  })
+
+  it('removing one model id deletes only that model; a sibling model attachment survives', () => {
+    withEnv('OPENCODE_CONFIG_DIR', tmpDir, () => {
+      const p = seed(
+        JSON.stringify(
+          {
+            provider: {
+              myprov: {
+                options: { baseURL: 'http://x/v1' },
+                models: {
+                  keep: { attachment: true },
+                  drop: { name: 'Drop Me' }
+                }
+              }
+            }
+          },
+          null,
+          2
+        )
+      )
+      const cur = readOpencodeNativeConfig()
+      const keptModels = cur.providers!.myprov.models!.filter((m) => m.id === 'keep')
+      writeOpencodeNativeConfig({
+        providers: { myprov: { ...cur.providers!.myprov, models: keptModels } }
+      })
+      const parsed = jsoncParse(fs.readFileSync(p, 'utf8'))
+      expect(parsed.provider.myprov.models.drop).toBeUndefined()
+      expect(parsed.provider.myprov.models.keep.attachment).toBe(true)
+    })
+  })
+
+  it('preserves an unknown agent field (prompt) across a temperature change', () => {
+    withEnv('OPENCODE_CONFIG_DIR', tmpDir, () => {
+      const p = seed(
+        JSON.stringify(
+          {
+            agent: {
+              build: {
+                model: 'anthropic/claude-haiku-3',
+                temperature: 0.2,
+                prompt: 'You are a builder.'
+              }
+            }
+          },
+          null,
+          2
+        )
+      )
+      const cur = readOpencodeNativeConfig()
+      writeOpencodeNativeConfig({
+        agents: { build: { ...cur.agents!.build, temperature: 0.9 } }
+      })
+      const parsed = jsoncParse(fs.readFileSync(p, 'utf8'))
+      expect(parsed.agent.build.prompt).toBe('You are a builder.')
+      expect(parsed.agent.build.temperature).toBe(0.9)
+      expect(parsed.agent.build.model).toBe('anthropic/claude-haiku-3')
+    })
+  })
+
+  it('no-op save leaves the file byte-identical', () => {
+    withEnv('OPENCODE_CONFIG_DIR', tmpDir, () => {
+      const original = [
+        '// header',
+        '{',
+        '  "theme": "dark",',
+        '  "provider": {',
+        '    "myprov": {',
+        '      "name": "Prov",',
+        '      "options": { "baseURL": "http://x/v1", "apiKey": "k" },',
+        '      "models": { "qwen": { "attachment": true } }',
+        '    }',
+        '  },',
+        '  "agent": { "build": { "model": "anthropic/claude-haiku-3", "temperature": 0.3 } }',
+        '}'
+      ].join('\n')
+      const p = seed(original)
+      const cur = readOpencodeNativeConfig()
+      writeOpencodeNativeConfig(cur)
+      expect(fs.readFileSync(p, 'utf8')).toBe(original)
     })
   })
 })
