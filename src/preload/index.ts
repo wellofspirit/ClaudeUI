@@ -357,6 +357,9 @@ const api: ClaudeAPI = {
   loadOpencodeSettings: () => unwrap('config:load-opencode-settings'),
   saveOpencodeSettings: (settings: import('../shared/types').OpencodeConfigSettings) =>
     unwrap('config:save-opencode-settings', settings),
+  readOpencodeNativeRaw: () => unwrap('config:read-opencode-native-raw'),
+  patchOpencodeNative: (patches: import('../shared/types').RawConfigPatch[]) =>
+    unwrap('config:patch-opencode-native', patches),
   listOpencodeAgents: (cwd?: string) => unwrap('opencode-agents:list', cwd),
   readOpencodeAgent: (name: string, scope: import('../shared/types').OpencodeAgentScope, cwd?: string) =>
     unwrap('opencode-agents:read', name, scope, cwd),

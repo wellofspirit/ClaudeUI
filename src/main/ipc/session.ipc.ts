@@ -82,7 +82,11 @@ import {
   writeOpencodeNativeConfig,
   migrateOpencodeConfigToNative
 } from '../opencode/opencode-config'
-import type { OpencodeConfigSettings } from '../../shared/types'
+import {
+  readOpencodeNativeRaw,
+  patchOpencodeNativeRaw
+} from '../opencode/opencode-native-raw'
+import type { OpencodeConfigSettings, RawConfigPatch } from '../../shared/types'
 import {
   listAgents,
   readAgent,
@@ -359,6 +363,8 @@ const SESSION_IPC_CHANNELS = [
   'config:load-skill-details',
   'config:load-opencode-settings',
   'config:save-opencode-settings',
+  'config:read-opencode-native-raw',
+  'config:patch-opencode-native',
   'opencode-agents:list',
   'opencode-agents:read',
   'opencode-agents:save',
@@ -1090,6 +1096,23 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
         opencodeConfig: nextOpencodeConfig
       })
       // Provider changes affect the discoverable model set.
+      invalidateOpencodeModelCache()
+    })
+  )
+
+  // Raw (non-lossy) opencode config access for the schema-driven settings editor.
+  // Reads opencode's own config file verbatim; patches literal opencode field
+  // names as jsonc leaf edits (comment-safe). Unlike save-opencode-settings this
+  // never projects — it writes exactly the paths the UI names.
+  ipcMain.handle(
+    'config:read-opencode-native-raw',
+    safeHandler(async () => readOpencodeNativeRaw())
+  )
+  ipcMain.handle(
+    'config:patch-opencode-native',
+    safeHandler(async (_e: unknown, patches: RawConfigPatch[]) => {
+      patchOpencodeNativeRaw(patches)
+      // Capability edits (attachment/modalities/…) change model discovery.
       invalidateOpencodeModelCache()
     })
   )

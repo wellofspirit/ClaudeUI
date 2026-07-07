@@ -543,6 +543,8 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     saveVendorConfig: async () => {},
     loadOpencodeSettings: async () => ({}),
     saveOpencodeSettings: async () => {},
+    readOpencodeNativeRaw: async () => ({ config: {}, path: '' }),
+    patchOpencodeNative: async () => {},
     listOpencodeAgents: async () => [],
     readOpencodeAgent: async () => null,
     saveOpencodeAgent: async () => {},

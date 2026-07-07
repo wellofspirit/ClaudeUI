@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import { useActiveSession, useSessionStore, OPENCODE_DEFAULT_MODEL } from '../../stores/session-store'
 import type { AppSettings } from '../../stores/session-store'
@@ -39,6 +39,9 @@ import {
   InfoTooltip
 } from './settings-controls'
 import { OpencodeAgentsSection } from './OpencodeAgents'
+import { OpencodeSchemaForm, type SchemaDefs, type SchemaNode } from './OpencodeSchemaForm'
+import { diffToPatches } from '../../../../shared/opencode-config-diff'
+import opencodeConfigSchema from '../../../../shared/opencode-config-schema.1.17.14.json'
 
 // ── Section definitions ──────────────────────────────────────────────
 
@@ -1442,8 +1445,9 @@ const inputClass =
 
 /**
  * A provider row carries two distinct identities:
- *   _key — stable React/list key + modelTexts map key; never changes during the
- *          session, so editing the provider id doesn't remount the row.
+ *   _key — stable React/list key + transient-state map key (apiKeys, expandedCaps);
+ *          never changes during the session, so editing the provider id doesn't
+ *          remount the row.
  *   _id  — the EDITABLE opencode provider id (the map key used at save time).
  */
 type ProviderRow = OpencodeProviderSettings & { _key: string; _id: string }
@@ -1463,8 +1467,8 @@ function OpencodeProvidersSection(): React.JSX.Element {
   const installed = useOpencodeInstalled()
   // Local editing state for provider rows (has a transient _id key for React diffing)
   const [providerRows, setProviderRows] = useState<ProviderRow[]>([])
-  // Per-row model-id textarea string
-  const [modelTexts, setModelTexts] = useState<Record<string, string>>({})
+  // Which "provider._key / modelId" capability editors are expanded.
+  const [expandedCaps, setExpandedCaps] = useState<Set<string>>(new Set())
   // Per-row API key input — TRANSIENT UI state only, keyed by the stable _key.
   // Never merged into the OpencodeConfigSettings payload (ADR-028: opencode.json
   // stays credential-free); saved separately to opencode's own auth.json via
@@ -1501,11 +1505,6 @@ function OpencodeProvidersSection(): React.JSX.Element {
           models: p.models ?? []
         }))
         setProviderRows(rows)
-        setModelTexts(
-          Object.fromEntries(
-            rows.map((r) => [r._key, (r.models ?? []).map((m) => m.id).join('\n')])
-          )
-        )
       })
       .catch(() => setCfg({}))
     reloadCredIds()
@@ -1522,21 +1521,21 @@ function OpencodeProvidersSection(): React.JSX.Element {
     )
   }
 
-  const saveProviders = (rows: ProviderRow[], texts: Record<string, string>): void => {
-    // Reconstruct providers Record from rows, mapping model text → {id,name?}[].
-    // The Record is keyed by the editable provider id (_id); model text is read
-    // by the stable row key (_key). Rows with an empty id are skipped.
+  const saveProviders = (rows: ProviderRow[]): void => {
+    // Reconstruct providers Record from rows. The Record is keyed by the editable
+    // provider id (_id). Rows with an empty id are skipped. Model id/name flow
+    // through this projection writer (ADR-031 leaf merge); model CAPABILITY fields
+    // are written separately via patchOpencodeNative and are preserved here.
     const providers: Record<string, OpencodeProviderSettings> = {}
     for (const row of rows) {
       if (!row._id.trim()) continue
-      const modelIds = (texts[row._key] ?? '')
-        .split('\n')
-        .map((s) => s.trim())
-        .filter(Boolean)
+      const models = (row.models ?? [])
+        .filter((m) => m.id.trim())
+        .map((m) => (m.name?.trim() ? { id: m.id.trim(), name: m.name.trim() } : { id: m.id.trim() }))
       const entry: OpencodeProviderSettings = {}
       if (row.name) entry.name = row.name
       if (row.baseURL) entry.baseURL = row.baseURL
-      if (modelIds.length > 0) entry.models = modelIds.map((id) => ({ id }))
+      if (models.length > 0) entry.models = models
       providers[row._id] = entry
     }
     const next: OpencodeConfigSettings = {
@@ -1552,29 +1551,54 @@ function OpencodeProvidersSection(): React.JSX.Element {
   const updateRow = (key: string, patch: Partial<ProviderRow>): void => {
     const next = providerRows.map((r) => (r._key === key ? { ...r, ...patch } : r))
     setProviderRows(next)
-    saveProviders(next, modelTexts)
+    saveProviders(next)
   }
 
-  const updateModelText = (key: string, text: string): void => {
-    const next = { ...modelTexts, [key]: text }
-    setModelTexts(next)
-    saveProviders(providerRows, next)
+  const addModel = (key: string): void => {
+    const next = providerRows.map((r) =>
+      r._key === key ? { ...r, models: [...(r.models ?? []), { id: '' }] } : r
+    )
+    setProviderRows(next)
+    // No save yet — an empty-id model is skipped by saveProviders anyway.
+  }
+
+  const updateModel = (key: string, idx: number, patch: { id?: string; name?: string }): void => {
+    const next = providerRows.map((r) =>
+      r._key === key
+        ? { ...r, models: (r.models ?? []).map((m, i) => (i === idx ? { ...m, ...patch } : m)) }
+        : r
+    )
+    setProviderRows(next)
+    saveProviders(next)
+  }
+
+  const removeModel = (key: string, idx: number): void => {
+    const next = providerRows.map((r) =>
+      r._key === key ? { ...r, models: (r.models ?? []).filter((_, i) => i !== idx) } : r
+    )
+    setProviderRows(next)
+    saveProviders(next)
+  }
+
+  const toggleCaps = (capKey: string): void => {
+    setExpandedCaps((prev) => {
+      const n = new Set(prev)
+      if (n.has(capKey)) n.delete(capKey)
+      else n.add(capKey)
+      return n
+    })
   }
 
   const addRow = (): void => {
     const row = newProvider()
     const next = [...providerRows, row]
     setProviderRows(next)
-    setModelTexts((prev) => ({ ...prev, [row._key]: '' }))
   }
 
   const removeRow = (key: string): void => {
     const next = providerRows.filter((r) => r._key !== key)
     setProviderRows(next)
-    const nextTexts = { ...modelTexts }
-    delete nextTexts[key]
-    setModelTexts(nextTexts)
-    saveProviders(next, nextTexts)
+    saveProviders(next)
     setApiKeys((prev) => {
       const n = { ...prev }
       delete n[key]
@@ -1728,17 +1752,76 @@ function OpencodeProvidersSection(): React.JSX.Element {
                 )}
                 {error && <div className="text-[10px] text-red-400 mt-0.5">{error}</div>}
               </div>
-              <div>
-                <div className="text-[10px] text-text-muted mb-0.5">
-                  Model ids (one per line, optional)
-                </div>
-                <textarea
-                  placeholder={'llama3.2\nmistral-7b'}
-                  value={modelTexts[row._key] ?? ''}
-                  onChange={(e) => updateModelText(row._key, e.target.value)}
-                  rows={3}
-                  className={`${inputClass} w-full resize-none`}
-                />
+              <div className="space-y-1.5">
+                <div className="text-[10px] text-text-muted">Models (optional)</div>
+                {(row.models ?? []).map((m, idx) => {
+                  const modelId = m.id.trim()
+                  const capKey = `${row._key}/${idx}`
+                  const capsOpen = expandedCaps.has(capKey)
+                  const canEditCaps = id.length > 0 && modelId.length > 0
+                  return (
+                    <div
+                      key={idx}
+                      data-testid="OpencodeProvidersSection.modelRow"
+                      data-id={capKey}
+                      className="border border-border/20 rounded p-1.5 space-y-1"
+                    >
+                      <div className="flex items-center gap-1.5">
+                        <input
+                          type="text"
+                          placeholder="Model id (e.g. llama3.2)"
+                          value={m.id}
+                          onChange={(e) => updateModel(row._key, idx, { id: e.target.value })}
+                          className={`${inputClass} flex-1`}
+                        />
+                        <input
+                          type="text"
+                          placeholder="Display name"
+                          value={m.name ?? ''}
+                          onChange={(e) => updateModel(row._key, idx, { name: e.target.value })}
+                          className={`${inputClass} flex-1`}
+                        />
+                        <button
+                          type="button"
+                          data-testid="OpencodeProvidersSection.removeModel"
+                          data-id={capKey}
+                          onClick={() => removeModel(row._key, idx)}
+                          className="text-[10px] text-text-muted/60 hover:text-red-400 transition-colors px-1"
+                          title="Remove model"
+                        >
+                          ✕
+                        </button>
+                      </div>
+                      {canEditCaps ? (
+                        <button
+                          type="button"
+                          data-testid="OpencodeProvidersSection.toggleCaps"
+                          data-id={capKey}
+                          onClick={() => toggleCaps(capKey)}
+                          className="text-[10px] text-accent hover:text-accent/80 transition-colors"
+                        >
+                          {capsOpen ? '▾ Capabilities' : '▸ Capabilities'}
+                        </button>
+                      ) : (
+                        <div className="text-[10px] text-text-muted/50">
+                          Set a provider id and model id to edit capabilities.
+                        </div>
+                      )}
+                      {canEditCaps && capsOpen && (
+                        <ModelCapabilityEditor providerId={row._id.trim()} modelId={modelId} />
+                      )}
+                    </div>
+                  )
+                })}
+                <button
+                  type="button"
+                  data-testid="OpencodeProvidersSection.addModel"
+                  data-id={row._key}
+                  onClick={() => addModel(row._key)}
+                  className="text-[11px] text-accent hover:text-accent/80 transition-colors"
+                >
+                  + Add model
+                </button>
               </div>
             </div>
           )
@@ -1755,6 +1838,268 @@ function OpencodeProvidersSection(): React.JSX.Element {
       <div className="text-[10px] text-text-muted/50 leading-relaxed">
         Add, remove, and authenticate built-in providers under <em>Providers</em>. Changes apply on
         the next opencode server start for each working directory.
+      </div>
+    </div>
+  )
+}
+
+// ── opencode raw-config (schema-driven) editing ─────────────────────
+
+const OPENCODE_SCHEMA_DEFS = (opencodeConfigSchema as { $defs: SchemaDefs }).$defs
+const OPENCODE_CONFIG_NODE = OPENCODE_SCHEMA_DEFS.Config as SchemaNode
+/** The provider-model entry schema: $defs.ProviderConfig.properties.models.additionalProperties */
+const OPENCODE_MODEL_ENTRY_SCHEMA = (
+  (
+    (OPENCODE_SCHEMA_DEFS.ProviderConfig as SchemaNode).properties as Record<string, SchemaNode>
+  ).models as SchemaNode
+).additionalProperties as SchemaNode
+/** Model capability fields the provider editor exposes (raw opencode names). */
+const MODEL_CAP_KEYS = ['attachment', 'reasoning', 'temperature', 'tool_call', 'modalities', 'cost', 'limit']
+
+/**
+ * Top-level Config keys owned by a DEDICATED UI (rendered as read-only pointers in
+ * the raw editor, never editable there). `provider` is patch-writable via the
+ * per-model capability editor, but curated as a whole under Custom providers.
+ */
+const CONFIG_POINTER_KEYS: Record<string, string> = {
+  model: 'Models',
+  small_model: 'Models',
+  disabled_providers: 'Providers',
+  enabled_providers: 'Providers',
+  provider: 'Custom providers',
+  agent: 'Agents',
+  mcp: 'injected at spawn',
+  permission: 'Autonomy mode'
+}
+/** Config keys the raw editor never renders as editable fields. */
+const CONFIG_EXCLUDED_KEYS = new Set(['$schema', ...Object.keys(CONFIG_POINTER_KEYS)])
+
+/**
+ * Per-model capability editor. Reads the model's raw entry from opencode's config
+ * file, edits it via the schema-driven form, and saves ONLY changed leaves through
+ * patchOpencodeNative (e.g. ['provider','ec2','models','qwen3.6:27b','attachment']).
+ * Composes with the projection writer (saveOpencodeSettings) that owns id/name —
+ * both are leaf-scoped so neither clobbers the other.
+ */
+function ModelCapabilityEditor({
+  providerId,
+  modelId
+}: {
+  providerId: string
+  modelId: string
+}): React.JSX.Element {
+  const [original, setOriginal] = useState<Record<string, unknown> | null>(null)
+  const [draft, setDraft] = useState<Record<string, unknown>>({})
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [saved, setSaved] = useState(false)
+
+  const load = useCallback(() => {
+    window.api
+      .readOpencodeNativeRaw()
+      .then(({ config }) => {
+        const prov = (config.provider as Record<string, unknown> | undefined)?.[providerId] as
+          | Record<string, unknown>
+          | undefined
+        const models = prov?.models as Record<string, unknown> | undefined
+        const entry = (models?.[modelId] as Record<string, unknown> | undefined) ?? {}
+        setOriginal(entry)
+        setDraft(structuredClone(entry))
+      })
+      .catch(() => {
+        setOriginal({})
+        setDraft({})
+      })
+  }, [providerId, modelId])
+  useEffect(() => load(), [load])
+
+  if (original === null) {
+    return <div className="text-[10px] text-text-muted/60 px-1">Loading capabilities…</div>
+  }
+
+  const dirty = JSON.stringify(draft) !== JSON.stringify(original)
+  const handleSave = async (): Promise<void> => {
+    const patches = diffToPatches(original, draft, ['provider', providerId, 'models', modelId])
+    if (patches.length === 0) return
+    setSaving(true)
+    setError(null)
+    setSaved(false)
+    try {
+      await window.api.patchOpencodeNative(patches)
+      load()
+      setSaved(true)
+      setTimeout(() => setSaved(false), 1500)
+      useSessionStore.getState().reloadModels()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div
+      data-testid="ModelCapabilityEditor"
+      data-id={`${providerId}/${modelId}`}
+      className="rounded bg-bg-primary/30 p-1.5 space-y-1"
+    >
+      <OpencodeSchemaForm
+        schema={OPENCODE_MODEL_ENTRY_SCHEMA}
+        defs={OPENCODE_SCHEMA_DEFS}
+        value={draft}
+        onChange={setDraft}
+        pickKeys={MODEL_CAP_KEYS}
+        keyPrefix={`${providerId}.${modelId}`}
+      />
+      <div className="flex items-center gap-2 px-1">
+        <button
+          type="button"
+          data-testid="ModelCapabilityEditor.save"
+          disabled={!dirty || saving}
+          onClick={() => void handleSave()}
+          className="px-2 py-1 text-[11px] rounded bg-accent/20 hover:bg-accent/30 text-accent disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+        >
+          {saving ? 'Saving…' : 'Save capabilities'}
+        </button>
+        {saved && <span className="text-[10px] text-success">Saved</span>}
+        {error && (
+          <span
+            data-testid="ModelCapabilityEditor.error"
+            className="text-[10px] text-red-400 truncate max-w-[240px]"
+            title={error}
+          >
+            {error}
+          </span>
+        )}
+      </div>
+    </div>
+  )
+}
+
+/**
+ * "Configuration (opencode.json)" — schema-driven editor over the top-level
+ * opencode Config, EXCLUDING keys owned by dedicated UIs (rendered as pointers).
+ * Loads the raw config on mount, accumulates edits locally, and on Save computes
+ * a deep diff → leaf patches → patchOpencodeNative. ajv errors surface inline.
+ */
+function OpencodeRawConfigSection(): React.JSX.Element {
+  const installed = useOpencodeInstalled()
+  const [original, setOriginal] = useState<Record<string, unknown> | null>(null)
+  const [draft, setDraft] = useState<Record<string, unknown>>({})
+  const [filePath, setFilePath] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [saved, setSaved] = useState(false)
+
+  const load = useCallback(() => {
+    window.api
+      .readOpencodeNativeRaw()
+      .then(({ config, path }) => {
+        setOriginal(config)
+        setDraft(structuredClone(config))
+        setFilePath(path)
+      })
+      .catch(() => {
+        setOriginal({})
+        setDraft({})
+      })
+  }, [])
+  useEffect(() => load(), [load])
+
+  if (installed === null || original === null) {
+    return (
+      <div data-testid="OpencodeRawConfigSection" className="px-3 py-1.5 text-[13px] text-text-muted">
+        Loading…
+      </div>
+    )
+  }
+  if (!installed) {
+    return (
+      <div
+        data-testid="OpencodeRawConfigSection"
+        className="px-3 py-2 text-[12px] text-text-muted/70 leading-relaxed"
+      >
+        opencode is not installed. This edits opencode&apos;s own config file.
+      </div>
+    )
+  }
+
+  const configProps = (OPENCODE_CONFIG_NODE.properties as Record<string, SchemaNode>) ?? {}
+  const pickKeys = Object.keys(configProps).filter((k) => !CONFIG_EXCLUDED_KEYS.has(k))
+  const pointerKeys = Object.keys(configProps).filter((k) => k in CONFIG_POINTER_KEYS)
+
+  const dirty = JSON.stringify(draft) !== JSON.stringify(original)
+  const handleSave = async (): Promise<void> => {
+    const patches = diffToPatches(original, draft)
+    if (patches.length === 0) return
+    setSaving(true)
+    setError(null)
+    setSaved(false)
+    try {
+      await window.api.patchOpencodeNative(patches)
+      const { config } = await window.api.readOpencodeNativeRaw()
+      setOriginal(config)
+      setDraft(structuredClone(config))
+      setSaved(true)
+      setTimeout(() => setSaved(false), 1500)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div
+      data-testid="OpencodeRawConfigSection"
+      className="px-3 py-1.5 space-y-2 text-[13px] text-text-secondary"
+    >
+      <div className="text-[10px] text-text-muted/60 leading-relaxed">
+        Edit opencode&apos;s own config file directly ({filePath || 'opencode.jsonc'}). Saves touch
+        only the fields you change — comments and keys not listed here are preserved.
+      </div>
+      <OpencodeSchemaForm
+        schema={OPENCODE_CONFIG_NODE}
+        defs={OPENCODE_SCHEMA_DEFS}
+        value={draft}
+        onChange={setDraft}
+        pickKeys={pickKeys}
+      />
+      {pointerKeys.length > 0 && (
+        <div className="border-t border-border/20 pt-1.5 space-y-0.5">
+          {pointerKeys.map((k) => (
+            <div
+              key={k}
+              data-testid="OpencodeRawConfigSection.pointer"
+              data-id={k}
+              className="flex items-center justify-between text-[10px] text-text-muted/60 px-3"
+            >
+              <span className="font-mono text-text-muted">{k}</span>
+              <span>managed in {CONFIG_POINTER_KEYS[k]}</span>
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="flex items-center gap-2 px-3 pt-1">
+        <button
+          type="button"
+          data-testid="OpencodeRawConfigSection.save"
+          disabled={!dirty || saving}
+          onClick={() => void handleSave()}
+          className="px-2.5 py-1 text-[11px] font-medium text-accent hover:text-accent-hover bg-accent/10 hover:bg-accent/15 rounded-md transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          {saving ? 'Saving…' : 'Save'}
+        </button>
+        {saved && <span className="text-[11px] text-success">Saved</span>}
+        {error && (
+          <span
+            data-testid="OpencodeRawConfigSection.error"
+            className="text-[11px] text-red-400 truncate max-w-[360px]"
+            title={error}
+          >
+            {error}
+          </span>
+        )}
       </div>
     </div>
   )
@@ -3306,6 +3651,25 @@ export const SECTIONS: Section[] = [
     ]
   },
   {
+    id: 'opencode-config',
+    label: 'Configuration',
+    icon: (
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M12 15a3 3 0 100-6 3 3 0 000 6z" />
+        <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'opencodeConfig',
+        label: 'Configuration (opencode.json)',
+        keywords:
+          'opencode config raw schema attachment modalities tool_call reasoning cost limit instructions layout formatter lsp advanced',
+        render: () => <OpencodeRawConfigSection />
+      }
+    ]
+  },
+  {
     id: 'opencode-providers',
     label: 'Custom providers',
     icon: (
@@ -3357,7 +3721,7 @@ const ENGINE_CLAUDE_SECTION_IDS = new Set([
 ])
 
 /** Section ids that belong to Engines > opencode (content self-gates on install) */
-const ENGINE_OPENCODE_SECTION_IDS = new Set(['opencode-automode', 'opencode-models'])
+const ENGINE_OPENCODE_SECTION_IDS = new Set(['opencode-automode', 'opencode-models', 'opencode-config'])
 
 /** Section ids that belong to Vendors > Anthropic */
 const VENDOR_ANTHROPIC_SECTION_IDS = new Set([
@@ -3444,7 +3808,7 @@ export const SCOPES: ScopeDef[] = [
       {
         id: 'opencode-engine',
         label: 'Engine',
-        sections: getSectionsForIds(ENGINE_OPENCODE_SECTION_IDS, ['opencode-automode', 'opencode-models'])
+        sections: getSectionsForIds(ENGINE_OPENCODE_SECTION_IDS, ['opencode-automode', 'opencode-models', 'opencode-config'])
       },
       {
         id: 'opencode-vendor',

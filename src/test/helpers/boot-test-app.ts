@@ -315,6 +315,8 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
       ipcRenderer.invoke('config:save-vendor-config', vendorId, config),
     loadOpencodeSettings: () => unwrap('config:load-opencode-settings'),
     saveOpencodeSettings: (settings) => unwrap('config:save-opencode-settings', settings),
+    readOpencodeNativeRaw: async () => ({ config: {}, path: '' }),
+    patchOpencodeNative: async () => {},
     listOpencodeAgents: async () => [],
     readOpencodeAgent: async () => null,
     saveOpencodeAgent: async () => {},

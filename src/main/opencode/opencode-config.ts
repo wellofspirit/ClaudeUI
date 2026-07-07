@@ -23,6 +23,7 @@ import {
   loadEngineConfig,
   saveEngineConfig
 } from '../services/ui-config'
+import { detectEol, safeRead, jsoncParseSafe } from './opencode-jsonc-io'
 import type { OpencodeConfigSettings, OpencodeProviderSettings } from '../../shared/types'
 
 // ─── Path resolution ──────────────────────────────────────────────────────────
@@ -245,13 +246,6 @@ export function readDeclaredProviderIds(): string[] {
 
 // ─── Write ────────────────────────────────────────────────────────────────────
 
-/**
- * Detect line ending from existing content, defaulting to '\n'.
- */
-function detectEol(text: string): '\r\n' | '\n' {
-  return text.includes('\r\n') ? '\r\n' : '\n'
-}
-
 /** Normalise a scalar to undefined when it is an empty string. */
 function normScalar(v: string | undefined): string | undefined {
   return v ? v : undefined
@@ -435,24 +429,6 @@ export function writeOpencodeNativeConfig(fields: NativeOpencodeFields): void {
 
   fs.mkdirSync(path.dirname(filePath), { recursive: true })
   fs.writeFileSync(filePath, text, 'utf8')
-}
-
-/** Read a file, returning undefined on any error. */
-function safeRead(filePath: string): string | undefined {
-  try {
-    return fs.readFileSync(filePath, 'utf8')
-  } catch {
-    return undefined
-  }
-}
-
-/** jsonc-parse that never throws (returns undefined on error). */
-function jsoncParseSafe(text: string): unknown {
-  try {
-    return jsoncParse(text)
-  } catch {
-    return undefined
-  }
 }
 
 // ─── Migration ────────────────────────────────────────────────────────────────

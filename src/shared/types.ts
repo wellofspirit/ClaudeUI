@@ -360,6 +360,23 @@ export interface OpencodeConfigSettings {
 }
 
 /**
+ * A single leaf edit against opencode's raw config file, applied by the
+ * schema-driven settings editor via jsonc-parser modify(). `value` absent (or
+ * undefined) means DELETE the leaf at `path`; otherwise SET it. Paths use raw
+ * opencode key names verbatim (e.g. ['provider','ec2','models','qwen3.6:27b','attachment']).
+ */
+export interface RawConfigPatch {
+  path: (string | number)[]
+  value?: unknown
+}
+
+/** Raw (non-projected) opencode config read + its resolved file path. */
+export interface OpencodeNativeRaw {
+  config: Record<string, unknown>
+  path: string
+}
+
+/**
  * One provider in the opencode catalog (the full models.dev set, ~146 providers),
  * surfaced to the settings UI so users can add any supported provider — including
  * ones with no custom auth loader (e.g. openrouter, authed by a plain API key).
@@ -789,6 +806,10 @@ interface SessionAPI {
   loadOpencodeSettings(): Promise<OpencodeConfigSettings>
   /** Save opencode's engine-native config to opencode's own global config file. */
   saveOpencodeSettings(settings: OpencodeConfigSettings): Promise<void>
+  /** Read opencode's config file verbatim (no projection) for the schema-driven editor. */
+  readOpencodeNativeRaw(): Promise<OpencodeNativeRaw>
+  /** Apply leaf patches to opencode's config file, preserving comments + siblings. */
+  patchOpencodeNative(patches: RawConfigPatch[]): Promise<void>
   listOpencodeAgents(cwd?: string): Promise<OpencodeAgentSummary[]>
   readOpencodeAgent(name: string, scope: OpencodeAgentScope, cwd?: string): Promise<OpencodeAgentDetail | null>
   saveOpencodeAgent(input: OpencodeAgentInput, cwd?: string): Promise<void>
