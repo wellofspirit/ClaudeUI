@@ -46,7 +46,7 @@
    `{ id, type, properties }` events (handle chunked `data:` frames, reconnection optional). Types
    derived from the `/doc` snapshot — keep them in a `src/main/opencode/protocol/` module.
 4. **Pinned `/doc` snapshot + smoke test** — capture `/doc` at 1.17.9 into a committed snapshot
-   (`src/main/opencode/protocol/doc-snapshot.1.17.9.json` or a trimmed shape file). A **gated smoke
+   (`src/main/opencode/protocol/doc-snapshot.1.17.14.json` or a trimmed shape file). A **gated smoke
    test** (mirror the `integration` project — needs the binary) starts `serve`, asserts the live
    endpoints + the event-type strings (`server.connected`, and the documented `message.part.updated`/
    `session.idle`/`permission.asked` in `/doc`) match the snapshot. Guards the wire contract on bumps
