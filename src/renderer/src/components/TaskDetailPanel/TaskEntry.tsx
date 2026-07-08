@@ -3,6 +3,7 @@ import { useSessionStore, useActiveSession } from '../../stores/session-store'
 import { MarkdownRenderer } from '../chat/MarkdownRenderer'
 import { SubagentMessages } from '../chat/SubagentMessages'
 import { TerminalView } from '../chat/TerminalView'
+import { engineToolMap } from '../chat/tool-registry/engine-tool-maps'
 import { findTaskBlocks, formatElapsed } from './utils'
 
 function BashOutputPanel({
@@ -49,6 +50,7 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
   const setTaskStopping = useSessionStore((s) => s.setTaskStopping)
   const clearTaskStopping = useSessionStore((s) => s.clearTaskStopping)
   const taskNotifications = useActiveSession((s) => s.taskNotifications)
+  const engineId = useActiveSession((s) => s.status.engineId)
   const [expanded, setExpanded] = useState(true)
   const bodyRef = useRef<HTMLDivElement>(null)
   const [following, setFollowing] = useState(true)
@@ -99,7 +101,7 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
   const input = taskBlock.toolInput || {}
   const description = String(input.description || input.prompt || '')
   const hasSubagentOutput = msgs.length > 0 || !!streamText || !!streamThinking
-  const isBash = taskBlock?.toolName === 'Bash'
+  const isBash = engineToolMap(engineId).kindOf(taskBlock.toolName) === 'command'
   const isBackground = !!input.run_in_background
   const progress = taskProgressMap[toolUseId]
   const elapsed = progress?.elapsedTimeSeconds

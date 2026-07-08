@@ -7,7 +7,7 @@ import { resolveToolVisualState, TOOL_BORDER_CLASSES, type ToolStateContext } fr
 
 describe('resolveToolVisualState', () => {
   const baseCtx: ToolStateContext = {
-    toolName: 'Bash',
+    isCommandKind: true,
     hasResult: false,
     isHistorical: false,
     hasApproval: false,
@@ -42,8 +42,12 @@ describe('resolveToolVisualState', () => {
     ).toBe('error')
   })
 
-  it('returns running for foreground bash without result', () => {
-    expect(resolveToolVisualState({ ...baseCtx, toolName: 'Bash' })).toBe('running')
+  // Regression: this gate used to check `toolName === 'Bash'`, which missed
+  // opencode's raw (lowercase) 'bash' tool name. It now takes a pre-resolved
+  // `isCommandKind` boolean from the caller (kind === 'command'), so the same
+  // context shape covers both engines' bash tools without a name check here.
+  it('returns running for a command-kind tool without result', () => {
+    expect(resolveToolVisualState({ ...baseCtx, isCommandKind: true })).toBe('running')
   })
 
   it('returns running for background bash without notification', () => {
@@ -70,11 +74,11 @@ describe('resolveToolVisualState', () => {
     ).toBe('success')
   })
 
-  it('returns success for non-bash tool with result', () => {
+  it('returns success for non-command tool with result', () => {
     expect(
       resolveToolVisualState({
         ...baseCtx,
-        toolName: 'Read',
+        isCommandKind: false,
         hasResult: true
       })
     ).toBe('success')
@@ -84,14 +88,16 @@ describe('resolveToolVisualState', () => {
     expect(
       resolveToolVisualState({
         ...baseCtx,
-        toolName: 'Read',
+        isCommandKind: false,
         isHistorical: true
       })
     ).toBe('loaded')
   })
 
-  it('returns idle for non-bash tool without result or history', () => {
-    expect(resolveToolVisualState({ ...baseCtx, toolName: 'Read' })).toBe('idle')
+  // Explicit non-command-kind case: with no result and not historical, a tool
+  // that isn't kind 'command' must stay 'idle' (not fall through to 'running').
+  it('returns idle for a non-command-kind tool without result or history', () => {
+    expect(resolveToolVisualState({ ...baseCtx, isCommandKind: false })).toBe('idle')
   })
 
   it('border classes map to correct CSS', () => {

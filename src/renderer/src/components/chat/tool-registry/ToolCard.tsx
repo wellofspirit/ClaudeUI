@@ -130,9 +130,10 @@ export function ToolCard({
   const isPendingApproval = !isHistorical && !!approval
 
   const bgRunning = isBackgroundBash && !bgNotification && !isHistorical
+  const isCommand = kind === 'command'
 
   const visualState = resolveToolVisualState({
-    toolName: block.toolName,
+    isCommandKind: isCommand,
     hasResult,
     isHistorical,
     hasApproval: !!approval,
@@ -145,7 +146,6 @@ export function ToolCard({
   const isSuccess = visualState === 'success'
   const isLoaded = visualState === 'loaded'
   const isForegroundBashRunning = visualState === 'running' && !isBackgroundBash
-  const isCommand = kind === 'command'
 
   const statusIcon = isPendingApproval ? (
     <svg
