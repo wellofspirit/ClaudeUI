@@ -2,10 +2,13 @@
  * Unit tests for buildOpencodeConfigContent (OpencodeServerManager).
  *
  * Guards:
- * - Only {mcp: {claudeui: ...}} is emitted (no model/provider/agent fields).
+ * - Only {mcp: {claudeui: ...}} + the experimental block are emitted (no
+ *   model/provider/agent fields).
  * - MCP host port and token are wired in correctly.
  * - API keys are never injected.
  * - bridgedMcp arg merges Claude MCP servers alongside claudeui; claudeui is always first.
+ * - experimental.continue_loop_on_deny keeps permission rejections non-fatal
+ *   (Claude parity — Slice C).
  *
  * Model/provider/agent fields are now written to opencode's own config file by
  * opencode-config.ts; they are no longer part of OPENCODE_CONFIG_CONTENT.
@@ -23,9 +26,9 @@ function parse(bridgedMcp?: Record<string, OpencodeMcpEntry>): Record<string, un
 }
 
 describe('buildOpencodeConfigContent', () => {
-  it('emits ONLY the mcp.claudeui block — no model/provider/agent fields', () => {
+  it('emits ONLY the mcp + experimental blocks — no model/provider/agent fields', () => {
     const out = parse()
-    expect(Object.keys(out)).toEqual(['mcp'])
+    expect(Object.keys(out)).toEqual(['mcp', 'experimental'])
     expect(out).not.toHaveProperty('model')
     expect(out).not.toHaveProperty('small_model')
     expect(out).not.toHaveProperty('provider')
@@ -61,6 +64,11 @@ describe('buildOpencodeConfigContent', () => {
     const mcp = out.mcp as Record<string, unknown>
     const claudeui = mcp.claudeui as Record<string, unknown>
     expect(claudeui.type).toBe('remote')
+  })
+
+  it('sets experimental.continue_loop_on_deny: true (rejections stay non-fatal)', () => {
+    const out = parse()
+    expect(out.experimental).toEqual({ continue_loop_on_deny: true })
   })
 
   // ── bridgedMcp integration ────────────────────────────────────────────────

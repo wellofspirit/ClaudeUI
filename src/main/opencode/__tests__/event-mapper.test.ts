@@ -3,6 +3,7 @@ import {
   mapEvent,
   buildChatMessage,
   extractToolResult,
+  extractFileDiffs,
   type MessageAccumulator
 } from '../event-mapper'
 import type { OpencodeEvent } from '../protocol/types'
@@ -623,6 +624,169 @@ describe('extractToolResult', () => {
     })
     expect(res?.isError).toBe(true)
     expect(res?.result).toBe('permission denied')
+  })
+
+  it('errored tool with state.error → result is the error text (preferred over output)', () => {
+    // e.g. a permission denial: opencode fails the part with the CorrectedError
+    // feedback on state.error — that text must be visible in the tool card.
+    const res = extractToolResult('p1', {
+      type: 'tool',
+      callID: 'c1',
+      state: {
+        status: 'error',
+        output: 'stale partial output',
+        error:
+          'The user rejected permission to use this specific tool call with the following feedback: Auto mode blocked: unsafe'
+      }
+    })
+    expect(res?.isError).toBe(true)
+    expect(res?.result).toBe(
+      'The user rejected permission to use this specific tool call with the following feedback: Auto mode blocked: unsafe'
+    )
+  })
+
+  it('errored tool with only metadata.output → falls back to it (no state.error)', () => {
+    const res = extractToolResult('p1', {
+      type: 'tool',
+      callID: 'c1',
+      state: { status: 'error', metadata: { output: 'command failed' } }
+    })
+    expect(res?.isError).toBe(true)
+    expect(res?.result).toBe('command failed')
+  })
+
+  it('completed tool ignores state.error and keeps output', () => {
+    const res = extractToolResult('p1', {
+      type: 'tool',
+      callID: 'c1',
+      state: { status: 'completed', output: 'real output', error: 'leftover' }
+    })
+    expect(res?.isError).toBe(false)
+    expect(res?.result).toBe('real output')
+  })
+
+  it('apply_patch-shaped metadata (files[]) → fileDiffs mapped from relativePath/type', () => {
+    const res = extractToolResult('p1', {
+      type: 'tool',
+      callID: 'c1',
+      state: {
+        status: 'completed',
+        output: 'Success. Updated the following files:\nM a.ts',
+        metadata: {
+          diff: 'combined diff (unused)',
+          files: [
+            {
+              filePath: '/repo/a.ts',
+              relativePath: 'a.ts',
+              type: 'update',
+              patch: '@@ -1 +1 @@\n-old\n+new',
+              additions: 1,
+              deletions: 1
+            },
+            {
+              filePath: '/repo/b.ts',
+              relativePath: 'b.ts',
+              type: 'add',
+              patch: '@@ -0,0 +1 @@\n+new file',
+              additions: 1,
+              deletions: 0
+            }
+          ]
+        }
+      }
+    })
+    expect(res?.fileDiffs).toEqual([
+      { path: 'a.ts', patch: '@@ -1 +1 @@\n-old\n+new', additions: 1, deletions: 1, changeType: 'update' },
+      { path: 'b.ts', patch: '@@ -0,0 +1 @@\n+new file', additions: 1, deletions: 0, changeType: 'add' }
+    ])
+  })
+
+  it('edit-shaped metadata (filediff singular) → single-entry fileDiffs', () => {
+    const res = extractToolResult('p1', {
+      type: 'tool',
+      callID: 'c1',
+      state: {
+        status: 'completed',
+        output: 'Edit applied successfully.',
+        input: { filePath: '/repo/a.ts', oldString: 'old', newString: 'new' },
+        metadata: {
+          diagnostics: {},
+          diff: '@@ -1 +1 @@\n-old\n+new',
+          filediff: { file: '/repo/a.ts', patch: '@@ -1 +1 @@\n-old\n+new', additions: 1, deletions: 1 }
+        }
+      }
+    })
+    expect(res?.fileDiffs).toEqual([
+      { path: '/repo/a.ts', patch: '@@ -1 +1 @@\n-old\n+new', additions: 1, deletions: 1, changeType: 'update' }
+    ])
+  })
+
+  it('bash-shaped metadata (output only, no diff/files) → NO fileDiffs', () => {
+    const res = extractToolResult('p1', {
+      type: 'tool',
+      callID: 'c1',
+      state: {
+        status: 'completed',
+        output: 'stdout tail',
+        metadata: { output: 'stdout tail', exitCode: 0 }
+      }
+    })
+    expect(res?.fileDiffs).toBeUndefined()
+  })
+
+  it('write-shaped metadata (filepath/exists, no diff) → NO fileDiffs', () => {
+    const res = extractToolResult('p1', {
+      type: 'tool',
+      callID: 'c1',
+      state: {
+        status: 'completed',
+        output: 'Wrote file successfully.',
+        metadata: { diagnostics: {}, filepath: '/repo/new.ts', exists: false }
+      }
+    })
+    expect(res?.fileDiffs).toBeUndefined()
+  })
+})
+
+describe('extractFileDiffs', () => {
+  it('returns undefined when metadata is undefined', () => {
+    expect(extractFileDiffs(undefined, undefined))
+      .toBeUndefined()
+  })
+
+  it('apply_patch shape: skips entries with an empty/missing patch', () => {
+    const diffs = extractFileDiffs(
+      {
+        files: [
+          { relativePath: 'a.ts', type: 'update', patch: '' },
+          { relativePath: 'b.ts', type: 'delete', patch: '@@ -1 +0,0 @@\n-gone' }
+        ]
+      },
+      undefined
+    )
+    expect(diffs).toEqual([
+      { path: 'b.ts', patch: '@@ -1 +0,0 @@\n-gone', additions: undefined, deletions: undefined, changeType: 'delete' }
+    ])
+  })
+
+  it('apply_patch shape: falls back to filePath when relativePath is absent', () => {
+    const diffs = extractFileDiffs(
+      { files: [{ filePath: '/repo/a.ts', type: 'move', patch: '@@ -1 +1 @@\n-a\n+b' }] },
+      undefined
+    )
+    expect(diffs?.[0]).toMatchObject({ path: '/repo/a.ts', changeType: 'move' })
+  })
+
+  it('edit shape: falls back to input.filePath when filediff.file is absent', () => {
+    const diffs = extractFileDiffs(
+      { filediff: { patch: '@@ -1 +1 @@\n-a\n+b' } },
+      { filePath: '/repo/fallback.ts' }
+    )
+    expect(diffs?.[0]).toMatchObject({ path: '/repo/fallback.ts', changeType: 'update' })
+  })
+
+  it('returns undefined for metadata with neither files nor filediff', () => {
+    expect(extractFileDiffs({ output: 'text' }, undefined)).toBeUndefined()
   })
 })
 

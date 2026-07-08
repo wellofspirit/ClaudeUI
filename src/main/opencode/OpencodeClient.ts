@@ -197,9 +197,21 @@ export class OpencodeClient {
     return this.patch(`/session/${encodeURIComponent(sessionId)}`, patch)
   }
 
-  /** POST /permission/{id}/reply — reply to a permission.asked event */
-  replyPermission(requestId: string, reply: 'once' | 'always' | 'reject'): Promise<unknown> {
-    return this.post(`/permission/${encodeURIComponent(requestId)}/reply`, { reply })
+  /**
+   * POST /permission/{id}/reply — reply to a permission.asked event.
+   * On 'reject', an optional `message` becomes model-visible feedback: opencode
+   * fails the tool call with a CorrectedError (non-fatal — the loop continues
+   * and the model can adjust) instead of a bare RejectedError.
+   */
+  replyPermission(
+    requestId: string,
+    reply: 'once' | 'always' | 'reject',
+    message?: string
+  ): Promise<unknown> {
+    return this.post(`/permission/${encodeURIComponent(requestId)}/reply`, {
+      reply,
+      ...(message ? { message } : {})
+    })
   }
 
   /** POST /question/{id}/reply — submit answers to a question.asked event */

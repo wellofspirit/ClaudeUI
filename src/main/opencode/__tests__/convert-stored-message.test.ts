@@ -83,6 +83,49 @@ describe('convertStoredMessage', () => {
     ).toBeNull()
   })
 
+  it('attaches fileDiffs to the tool_result block for a completed apply_patch part', () => {
+    const r = convertStoredMessage(
+      msg('assistant', [
+        {
+          type: 'tool',
+          tool: 'apply_patch',
+          callID: 'c5',
+          state: {
+            status: 'completed',
+            input: { patchText: '*** Begin Patch ***' },
+            output: 'Success. Updated the following files:\nM a.ts',
+            metadata: {
+              files: [
+                { relativePath: 'a.ts', type: 'update', patch: '@@ -1 +1 @@\n-old\n+new', additions: 1, deletions: 1 }
+              ]
+            }
+          }
+        }
+      ])
+    )
+    const result = r!.content.find((b) => b.type === 'tool_result')
+    expect(result).toMatchObject({
+      type: 'tool_result',
+      toolUseId: 'c5',
+      fileDiffs: [{ path: 'a.ts', patch: '@@ -1 +1 @@\n-old\n+new', additions: 1, deletions: 1, changeType: 'update' }]
+    })
+  })
+
+  it('does not attach fileDiffs for a completed bash part (no files/filediff metadata)', () => {
+    const r = convertStoredMessage(
+      msg('assistant', [
+        {
+          type: 'tool',
+          tool: 'bash',
+          callID: 'c6',
+          state: { status: 'completed', input: { command: 'ls' }, output: 'a\nb', metadata: { output: 'a\nb' } }
+        }
+      ])
+    )
+    const result = r!.content.find((b) => b.type === 'tool_result') as { fileDiffs?: unknown }
+    expect(result?.fileDiffs).toBeUndefined()
+  })
+
   it('preserves block order for a mixed message and ignores unknown parts', () => {
     const r = convertStoredMessage(
       msg('assistant', [

@@ -680,11 +680,25 @@ describe('OpencodeSession — resolveApproval()', () => {
     session.dispose()
   })
 
-  it('calls replyPermission with "reject" for deny', async () => {
+  it('calls replyPermission with "reject" + default "User denied" feedback for deny', async () => {
     const session = makeSession()
     await session.run('hi')
     session.resolveApproval('perm_1', 'deny')
-    await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('perm_1', 'reject'))
+    // Deny always carries model-visible feedback → CorrectedError → the turn
+    // survives the rejection (Claude parity: claude-session.ts 'User denied').
+    await vi.waitFor(() =>
+      expect(mockReplyPermission).toHaveBeenCalledWith('perm_1', 'reject', 'User denied')
+    )
+    session.dispose()
+  })
+
+  it('deny with answers.feedback → replyPermission(reject, <feedback>)', async () => {
+    const session = makeSession()
+    await session.run('hi')
+    session.resolveApproval('perm_1', 'deny', { feedback: 'too risky' })
+    await vi.waitFor(() =>
+      expect(mockReplyPermission).toHaveBeenCalledWith('perm_1', 'reject', 'too risky')
+    )
     session.dispose()
   })
 })
@@ -1064,10 +1078,10 @@ describe('OpencodeSession — always-allow write-back (ADR-022)', () => {
     session.dispose()
   })
 
-  it('deny → replyPermission(reject), no persist', async () => {
+  it('deny → replyPermission(reject, "User denied"), no persist', async () => {
     const session = await started()
     session.resolveApproval('per-3', 'deny')
-    expect(mockReplyPermission).toHaveBeenCalledWith('per-3', 'reject')
+    expect(mockReplyPermission).toHaveBeenCalledWith('per-3', 'reject', 'User denied')
     expect(mockSaveClaudePermissions).not.toHaveBeenCalled()
     session.dispose()
   })
@@ -1133,13 +1147,39 @@ describe('OpencodeSession — auto-mode classifier wiring (ADR-023)', () => {
     session.dispose()
   })
 
-  it('classifier BLOCK → replyPermission(reject)', async () => {
+  it('classifier BLOCK with <reason> → replyPermission(reject, "Auto mode blocked: <reason>")', async () => {
     enableAutoMode()
-    mockPrompt.mockResolvedValue({ parts: [{ type: 'text', text: '<block>yes</block>' }] })
+    mockPrompt.mockResolvedValue({
+      parts: [{ type: 'text', text: '<block>yes</block><reason>touches prod secrets</reason>' }]
+    })
     feedPermissionAsked('bash', 'per_block')
     const session = makeSession(undefined, 'full')
     await session.run('go')
-    await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('per_block', 'reject'))
+    // The judge's reason rides the reject as model-visible feedback (ADR-023
+    // transparency; wording parity with claude-session.ts 'Auto mode blocked:').
+    await vi.waitFor(() =>
+      expect(mockReplyPermission).toHaveBeenCalledWith(
+        'per_block',
+        'reject',
+        'Auto mode blocked: touches prod secrets'
+      )
+    )
+    session.dispose()
+  })
+
+  it('classifier BLOCK without reason → reject with the fallback feedback text', async () => {
+    enableAutoMode()
+    mockPrompt.mockResolvedValue({ parts: [{ type: 'text', text: '<block>yes</block>' }] })
+    feedPermissionAsked('bash', 'per_block_noreason')
+    const session = makeSession(undefined, 'full')
+    await session.run('go')
+    await vi.waitFor(() =>
+      expect(mockReplyPermission).toHaveBeenCalledWith(
+        'per_block_noreason',
+        'reject',
+        'Auto mode blocked: flagged as potentially unsafe'
+      )
+    )
     session.dispose()
   })
 
@@ -2318,7 +2358,9 @@ describe('OpencodeSession — Phase 8d: subagent dispatch', () => {
     await session.run('go')
 
     session.resolveApproval('perm_child_deny_8e', 'deny')
-    await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalledWith('perm_child_deny_8e', 'reject'))
+    await vi.waitFor(() =>
+      expect(mockReplyPermission).toHaveBeenCalledWith('perm_child_deny_8e', 'reject', 'User denied')
+    )
 
     session.dispose()
   })
@@ -2589,6 +2631,199 @@ describe('OpencodeSession — Phase 9a: meter subagent under child model', () =>
     expect(getUsageEventByMessageId('msg_child_no_model')).toBeUndefined()
 
     session.dispose()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Live bash output streaming (Slice A) — parity with Claude's
+// bash-output-streaming patch. opencode's shell tool republishes a cumulative
+// stdout+stderr tail preview via state.metadata.output on every chunk while a
+// `bash` tool part is `running`; dispatchMapperOutput's 'message' case feeds
+// it through bashStreamGate (dedup + trailing-edge throttle, see
+// bash-stream-gate.ts) into session:bash-output. Own-session only — the
+// 'subagent-message' branch is untouched (verified separately in the Phase 8d
+// suite above, which never asserts session:bash-output).
+// ---------------------------------------------------------------------------
+
+describe('OpencodeSession — live bash output streaming (Slice A)', () => {
+  beforeEach(setupMocks)
+
+  const SES = 'ses_bash_stream'
+
+  function bashPartEvent(
+    id: string,
+    callID: string,
+    state: { status: string; output?: string; metadata?: Record<string, unknown> }
+  ): OpencodeEvent {
+    return {
+      id,
+      type: 'message.part.updated',
+      properties: {
+        sessionID: SES,
+        part: {
+          id: `p_${callID}`,
+          messageID: `msg_${callID}`,
+          type: 'tool',
+          tool: 'bash',
+          callID,
+          state: { input: {}, ...state }
+        }
+      }
+    } as OpencodeEvent
+  }
+
+  it('running bash part with metadata.output → session:bash-output sent with correct payload', async () => {
+    vi.useFakeTimers()
+    try {
+      mockCreateSession.mockResolvedValue({ id: SES })
+      mockSubscribeEvents.mockImplementation(
+        streamOf([bashPartEvent('e1', 'call_bash1', { status: 'running', metadata: { output: 'line1\nline2' } })])
+      )
+
+      const win = new MockWindow() as unknown as BrowserWindow
+      const session = new OpencodeSession('r_bash1', win, '/tmp')
+      await session.run('go')
+      await vi.advanceTimersByTimeAsync(150) // past the ~100ms throttle window
+
+      const calls = (win as unknown as MockWindow).webContents.send.mock.calls
+      const bashCall = calls.find((c) => c[0] === 'session:bash-output')
+      expect(bashCall).toBeDefined()
+      expect(bashCall![2]).toEqual({
+        toolUseId: 'call_bash1',
+        output: 'line1\nline2',
+        totalLines: 2,
+        totalBytes: Buffer.byteLength('line1\nline2', 'utf-8')
+      })
+      session.dispose()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('unchanged output re-delivered (same snapshot re-processed) → no duplicate emission', async () => {
+    vi.useFakeTimers()
+    try {
+      mockCreateSession.mockResolvedValue({ id: SES })
+      mockSubscribeEvents.mockImplementation(
+        streamOf([
+          bashPartEvent('e1', 'call_bash2', { status: 'running', metadata: { output: 'same-output' } }),
+          bashPartEvent('e2', 'call_bash2', { status: 'running', metadata: { output: 'same-output' } })
+        ])
+      )
+
+      const win = new MockWindow() as unknown as BrowserWindow
+      const session = new OpencodeSession('r_bash2', win, '/tmp')
+      await session.run('go')
+      await vi.advanceTimersByTimeAsync(150)
+
+      const calls = (win as unknown as MockWindow).webContents.send.mock.calls
+      const bashCalls = calls.filter((c) => c[0] === 'session:bash-output')
+      expect(bashCalls.length).toBe(1)
+      expect(bashCalls[0][2].output).toBe('same-output')
+      session.dispose()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('rapid successive updates → throttled to a single emission of the latest output', async () => {
+    vi.useFakeTimers()
+    try {
+      mockCreateSession.mockResolvedValue({ id: SES })
+      mockSubscribeEvents.mockImplementation(
+        streamOf([
+          bashPartEvent('e1', 'call_bash3', { status: 'running', metadata: { output: 'chunk1' } }),
+          bashPartEvent('e2', 'call_bash3', { status: 'running', metadata: { output: 'chunk1chunk2' } }),
+          bashPartEvent('e3', 'call_bash3', { status: 'running', metadata: { output: 'chunk1chunk2chunk3' } })
+        ])
+      )
+
+      const win = new MockWindow() as unknown as BrowserWindow
+      const session = new OpencodeSession('r_bash3', win, '/tmp')
+      await session.run('go')
+      await vi.advanceTimersByTimeAsync(200) // all three updates arrive well within one window
+
+      const calls = (win as unknown as MockWindow).webContents.send.mock.calls
+      const bashCalls = calls.filter((c) => c[0] === 'session:bash-output')
+      expect(bashCalls.length).toBe(1)
+      expect(bashCalls[0][2].output).toBe('chunk1chunk2chunk3')
+      session.dispose()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('completed part → no further emissions; pending throttle timer is cleared', async () => {
+    vi.useFakeTimers()
+    try {
+      mockCreateSession.mockResolvedValue({ id: SES })
+      mockSubscribeEvents.mockImplementation(
+        streamOf([
+          bashPartEvent('e1', 'call_bash4', { status: 'running', metadata: { output: 'partial' } }),
+          bashPartEvent('e2', 'call_bash4', { status: 'completed', output: 'final result' })
+        ])
+      )
+
+      const win = new MockWindow() as unknown as BrowserWindow
+      const session = new OpencodeSession('r_bash4', win, '/tmp')
+      await session.run('go')
+      // Completion arrives (synchronously, in the same SSE drain) before the
+      // 100ms throttle window would have elapsed — cancel() must drop the
+      // pending timer so it never fires afterward.
+      await vi.advanceTimersByTimeAsync(500)
+
+      const calls = (win as unknown as MockWindow).webContents.send.mock.calls
+      const bashCalls = calls.filter((c) => c[0] === 'session:bash-output')
+      expect(bashCalls.length).toBe(0)
+
+      // The final result still reaches the renderer via the normal tool-result path.
+      const toolResultCall = calls.find((c) => c[0] === 'session:tool-result')
+      expect(toolResultCall![2]).toEqual({
+        toolUseId: 'call_bash4',
+        result: 'final result',
+        isError: false
+      })
+      session.dispose()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('non-bash tool (e.g. read) running with metadata.output → nothing sent', async () => {
+    vi.useFakeTimers()
+    try {
+      mockCreateSession.mockResolvedValue({ id: SES })
+      mockSubscribeEvents.mockImplementation(
+        streamOf([
+          {
+            id: 'e1',
+            type: 'message.part.updated',
+            properties: {
+              sessionID: SES,
+              part: {
+                id: 'p_read1',
+                messageID: 'msg_read1',
+                type: 'tool',
+                tool: 'read',
+                callID: 'call_read1',
+                state: { status: 'running', input: {}, metadata: { output: 'should not stream' } }
+              }
+            }
+          } as OpencodeEvent
+        ])
+      )
+
+      const win = new MockWindow() as unknown as BrowserWindow
+      const session = new OpencodeSession('r_read1', win, '/tmp')
+      await session.run('go')
+      await vi.advanceTimersByTimeAsync(500)
+
+      const calls = (win as unknown as MockWindow).webContents.send.mock.calls
+      expect(calls.some((c) => c[0] === 'session:bash-output')).toBe(false)
+      session.dispose()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 

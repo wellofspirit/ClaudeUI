@@ -93,6 +93,37 @@ describe('OpencodeEngineToolMap.normalize', () => {
     expect(view).toMatchObject({ kind: 'fileEdit', path: '/src/a.ts', before: '', after: '' })
   })
 
+  it('fileEdit: result.fileDiffs (apply_patch/edit) → view.files, real per-file diffs', () => {
+    const result = {
+      type: 'tool_result' as const,
+      toolUseId: 'x',
+      toolResult: 'Success. Updated the following files:\nM a.ts',
+      isError: false,
+      fileDiffs: [
+        { path: 'a.ts', patch: '@@ -1 +1 @@\n-old\n+new', additions: 1, deletions: 1, changeType: 'update' as const }
+      ]
+    }
+    const view = OpencodeEngineToolMap.normalize('fileEdit', { patchText: '*** Begin Patch ***' }, result)
+    expect(view).toMatchObject({ kind: 'fileEdit', files: result.fileDiffs })
+  })
+
+  it('fileEdit: no result.fileDiffs → view.files stays undefined', () => {
+    const result = {
+      type: 'tool_result' as const,
+      toolUseId: 'x',
+      toolResult: 'File updated',
+      isError: false
+    }
+    const view = OpencodeEngineToolMap.normalize(
+      'fileEdit',
+      { filePath: '/src/a.ts', oldString: 'foo', newString: 'bar' },
+      result
+    )
+    if (view.kind === 'fileEdit') {
+      expect(view.files).toBeUndefined()
+    }
+  })
+
   it('fileWrite: maps opencode filePath/content → path/content', () => {
     const view = OpencodeEngineToolMap.normalize('fileWrite', {
       filePath: '/src/new.ts',

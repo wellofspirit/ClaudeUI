@@ -116,7 +116,14 @@ export function buildOpencodeConfigContent(
         enabled: true
       },
       ...(bridgedMcp ?? {})
-    }
+    },
+    // Keep permission rejections non-fatal (Claude parity: a deny is a tool
+    // error the model responds to, not a turn-killer). Reject-with-message
+    // (CorrectedError) already never breaks the loop; this flag covers the
+    // CASCADE bare-rejects opencode issues to the session's OTHER pending
+    // permissions on any reject, which carry no message. Ephemeral env-var
+    // config only — never written to a user file (ADR-031).
+    experimental: { continue_loop_on_deny: true }
   }
 
   return JSON.stringify(config)

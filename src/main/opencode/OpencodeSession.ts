@@ -32,6 +32,7 @@ import { equivalentCostUsd } from '../../shared/pricing'
 import { logger } from '../services/logger'
 import { mapEvent, extractToolResult, convertStoredMessage } from './event-mapper'
 import type { MapperOutput, MessageAccumulator } from './event-mapper'
+import { BashStreamGate } from './bash-stream-gate'
 import { discoverOpencodeSkills } from './command-skill-discovery'
 import { opencodeAuthProvider } from '../auth/OpencodeAuthProvider'
 import { recordUsageEvent } from '../services/usage-recorder'
@@ -159,6 +160,19 @@ export class OpencodeSession extends BaseSession {
   private accumulators = new Map<string, MessageAccumulator>()
   // Track last emitted tool completion per partId to avoid double-emitting
   private emittedToolResults = new Set<string>()
+  // Live bash output streaming (own-session only — parity with Claude's
+  // bash-output-streaming patch). Dedups unchanged cumulative-output snapshots
+  // and throttles emissions to the trailing edge of a ~100ms window per
+  // toolUseId; see bash-stream-gate.ts. Cancelled per-toolUseId on tool
+  // completion/error and entirely on session teardown (cancel()).
+  private bashStreamGate = new BashStreamGate((toolUseId, output) => {
+    this.send('session:bash-output', {
+      toolUseId,
+      output,
+      totalLines: output.split('\n').length,
+      totalBytes: Buffer.byteLength(output, 'utf-8')
+    })
+  })
   // Metering: message ids already recorded to usage_event (the accumulators map
   // persists across turns, so without this every session.idle re-iterates all
   // prior messages; the DB UNIQUE(message_id) already dedups, this just avoids
@@ -446,7 +460,8 @@ export class OpencodeSession extends BaseSession {
             this.send('session:tool-result', {
               toolUseId: block.toolUseId,
               result: block.toolResult,
-              isError: block.isError ?? false
+              isError: block.isError ?? false,
+              ...(block.fileDiffs ? { fileDiffs: block.fileDiffs } : {})
             })
           }
         }
@@ -688,6 +703,29 @@ export class OpencodeSession extends BaseSession {
               }
             }
           }
+
+          // Live bash output streaming (parity with Claude's bash-output-streaming
+          // patch): while a `bash` tool part is still running, opencode's shell tool
+          // republishes a cumulative stdout+stderr tail preview on state.metadata.output.
+          // Feed it through bashStreamGate so LiveBashOutput updates during the run
+          // instead of only after completion. Own-session only — subagent-message
+          // (child) dispatch never reaches this branch. On completion/error, drop the
+          // gate's tracking for this toolUseId (the final result is already covered by
+          // the session:tool-result emitted above).
+          for (const [partId, snap] of acc.parts) {
+            if (snap.type !== 'tool' || snap.toolName !== 'bash') continue
+            const toolUseId = snap.callID ?? partId
+            const status = snap.state?.status
+            if (status === 'completed' || status === 'error') {
+              this.bashStreamGate.cancel(toolUseId)
+              continue
+            }
+            if (status !== 'running') continue
+            const liveOutput = snap.state?.metadata?.output
+            if (typeof liveOutput === 'string' && liveOutput.length > 0) {
+              this.bashStreamGate.update(toolUseId, liveOutput)
+            }
+          }
         }
         break
       }
@@ -788,7 +826,8 @@ export class OpencodeSession extends BaseSession {
                   toolUseId,
                   toolResultToolUseId: toolRes.toolUseId,
                   result: toolRes.result,
-                  isError: toolRes.isError
+                  isError: toolRes.isError,
+                  ...(toolRes.fileDiffs ? { fileDiffs: toolRes.fileDiffs } : {})
                 })
               }
             }
@@ -836,6 +875,10 @@ export class OpencodeSession extends BaseSession {
     this.sseAbort?.abort()
     this.sseAbort = null
     this.childSessions.clear()
+    // Drop all pending bash-output throttle timers — nothing left to flush to
+    // once the SSE consumer stops; a firing timer after teardown would send()
+    // to a session that's going away.
+    this.bashStreamGate.cancelAll()
     if (this.conn) {
       opencodeServerManager.release(this.cwd)
       this.conn = null
@@ -897,8 +940,15 @@ export class OpencodeSession extends BaseSession {
     // 'always' tells opencode to remember the allow for this session; we send it
     // for an explicit allowForSession OR when the user checked "always allow".
     const reply = !allow ? 'reject' : persist || decision === 'allowForSession' ? 'always' : 'once'
+    // On deny, attach model-visible feedback (parity with claude-session.ts):
+    // reject-with-message → CorrectedError → the tool call fails but the turn
+    // continues, so the model can adjust and retry instead of dying.
+    const message = reply === 'reject' ? answers?.feedback || 'User denied' : undefined
 
-    this.client.replyPermission(requestId, reply).catch((err) => {
+    const replied = message
+      ? this.client.replyPermission(requestId, reply, message)
+      : this.client.replyPermission(requestId, reply)
+    replied.catch((err) => {
       logger.warn('OpencodeSession', `replyPermission failed: ${err instanceof Error ? err.message : String(err)}`)
     })
 
@@ -1093,7 +1143,11 @@ export class OpencodeSession extends BaseSession {
           this.fallbackToHuman(approval)
           return
         }
-        this.autoReply(approval.requestId, 'reject')
+        this.autoReply(
+          approval.requestId,
+          'reject',
+          `Auto mode blocked: ${result.reason ?? 'flagged as potentially unsafe'}`
+        )
       } else {
         this.autoDenials.consecutive = 0
         this.autoReply(approval.requestId, 'once')
@@ -1107,10 +1161,17 @@ export class OpencodeSession extends BaseSession {
     }
   }
 
-  /** Resolve a pending approval programmatically (the classifier's decision). */
-  private autoReply(requestId: string, reply: 'once' | 'reject'): void {
+  /**
+   * Resolve a pending approval programmatically (the classifier's decision).
+   * A reject `message` becomes model-visible feedback (CorrectedError) so the
+   * turn survives the denial and the agent can see why it was blocked.
+   */
+  private autoReply(requestId: string, reply: 'once' | 'reject', message?: string): void {
     this.pendingApprovals.delete(requestId)
-    this.client?.replyPermission(requestId, reply).catch((err) => {
+    const replied = message
+      ? this.client?.replyPermission(requestId, reply, message)
+      : this.client?.replyPermission(requestId, reply)
+    replied?.catch((err) => {
       logger.warn('OpencodeSession', `replyPermission failed: ${err instanceof Error ? err.message : String(err)}`)
     })
   }

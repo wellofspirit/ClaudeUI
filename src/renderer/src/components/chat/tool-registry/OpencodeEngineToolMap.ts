@@ -80,16 +80,21 @@ function opencodeNormalize(
         output: result?.toolResult
       }
 
-    case 'fileEdit':
-      // opencode edit input: { filePath, oldString, newString }. patch differs
-      // (it carries a `patch` string, no old/new pair) → empty before/after, so
-      // the body falls back to the generic JSON view.
+    case 'fileEdit': {
+      // opencode edit input: { filePath, oldString, newString }. apply_patch has
+      // no old/new pair on its input, but its (and edit's) tool result carries
+      // real unified diffs in metadata — extractFileDiffs (event-mapper.ts) maps
+      // those onto result.fileDiffs, which we surface as `files` here so the
+      // body renders real per-file diff cards instead of the generic JSON view.
+      const fileDiffs = result?.fileDiffs
       return {
         kind: 'fileEdit',
         path: inp.filePath != null ? String(inp.filePath) : '',
         before: inp.oldString != null ? String(inp.oldString) : '',
-        after: inp.newString != null ? String(inp.newString) : ''
+        after: inp.newString != null ? String(inp.newString) : '',
+        ...(fileDiffs && fileDiffs.length > 0 ? { files: fileDiffs } : {})
       }
+    }
 
     case 'fileWrite':
       // opencode write input: { filePath, content }.

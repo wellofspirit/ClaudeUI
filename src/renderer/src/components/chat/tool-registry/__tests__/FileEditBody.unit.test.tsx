@@ -20,8 +20,8 @@ type ToolResultBlock = Extract<ContentBlock, { type: 'tool_result' }>
 // Mock DiffViewer and TerminalView so we can count instances cleanly.
 // Paths are relative to THIS test file's location in tool-registry/__tests__/.
 vi.mock('../../../../lib/diff', () => ({
-  DiffViewer: (p: { oldStr: string; newStr: string; fileName?: string }) => (
-    <div data-testid="DiffViewer" data-old={p.oldStr} data-new={p.newStr} />
+  DiffViewer: (p: { oldStr?: string; newStr?: string; patch?: string; fileName?: string }) => (
+    <div data-testid="DiffViewer" data-old={p.oldStr} data-new={p.newStr} data-patch={p.patch} data-filename={p.fileName} />
   )
 }))
 vi.mock('../../TerminalView', () => ({
@@ -103,5 +103,66 @@ describe('FileEditBody — single-diff (ROADMAP #11c)', () => {
     )
     expect(screen.queryByTestId('DiffViewer')).not.toBeInTheDocument()
     expect(screen.getByTestId('TerminalView')).toBeInTheDocument()
+  })
+})
+
+describe('FileEditBody — multi-file diffs (opencode apply_patch view.files)', () => {
+  const files = [
+    { path: 'a.ts', patch: '@@ -1 +1 @@\n-old\n+new', additions: 1, deletions: 1, changeType: 'update' as const },
+    { path: 'b.ts', patch: '@@ -0,0 +1 @@\n+new file', additions: 1, deletions: 0, changeType: 'add' as const }
+  ]
+
+  it('renders one FileEditBody.file row + one DiffViewer per file, keyed by path', () => {
+    render(
+      <FileEditBody
+        {...baseProps({
+          view: { kind: 'fileEdit', path: '', before: '', after: '', files },
+          result: makeResult('Success. Updated the following files:\nM a.ts\nA b.ts')
+        })}
+      />
+    )
+    const rows = screen.getAllByTestId('FileEditBody.file')
+    expect(rows).toHaveLength(2)
+    expect(rows[0]).toHaveAttribute('data-path', 'a.ts')
+    expect(rows[1]).toHaveAttribute('data-path', 'b.ts')
+
+    const diffs = screen.getAllByTestId('DiffViewer')
+    expect(diffs).toHaveLength(2)
+    expect(diffs[0]).toHaveAttribute('data-patch', files[0].patch)
+    expect(diffs[1]).toHaveAttribute('data-patch', files[1].patch)
+
+    // Result section shows the tool's text output (diff already shown in Input).
+    expect(screen.getByTestId('TerminalView')).toHaveAttribute(
+      'data-text',
+      'Success. Updated the following files:\nM a.ts\nA b.ts'
+    )
+  })
+
+  it('hideToolInput: the per-file diffs move to Result, not Input', () => {
+    render(
+      <FileEditBody
+        {...baseProps({
+          view: { kind: 'fileEdit', path: '', before: '', after: '', files },
+          hideToolInput: true,
+          result: makeResult('Success. Updated the following files:\nM a.ts\nA b.ts')
+        })}
+      />
+    )
+    expect(screen.getAllByTestId('FileEditBody.file')).toHaveLength(2)
+    expect(screen.getAllByTestId('DiffViewer')).toHaveLength(2)
+    // No TerminalView — the diff occupies the Result slot instead of the text.
+    expect(screen.queryByTestId('TerminalView')).not.toBeInTheDocument()
+  })
+
+  it('empty files array falls back to the single before/after path (no rows)', () => {
+    render(
+      <FileEditBody
+        {...baseProps({
+          view: { kind: 'fileEdit', path: '/a.ts', before: '', after: '', files: [] }
+        })}
+      />
+    )
+    expect(screen.queryByTestId('FileEditBody.file')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('DiffViewer')).not.toBeInTheDocument()
   })
 })

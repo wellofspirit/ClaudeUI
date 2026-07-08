@@ -42,7 +42,8 @@ import type {
   PluginViewWithOwner,
   EngineId,
   ModelRef,
-  EngineConfig
+  EngineConfig,
+  FileDiff
 } from '../../../shared/types'
 
 /** Normalize cwd for use as a terminal group key (strip trailing slash). */
@@ -728,7 +729,13 @@ interface SessionState {
   clearErrors: (routingId: string) => void
   addSandboxViolation: (routingId: string, message: string) => void
   removeSandboxViolation: (routingId: string, index: number) => void
-  appendToolResult: (routingId: string, toolUseId: string, result: string, isError: boolean) => void
+  appendToolResult: (
+    routingId: string,
+    toolUseId: string,
+    result: string,
+    isError: boolean,
+    fileDiffs?: FileDiff[]
+  ) => void
   setTodos: (routingId: string, todos: TodoItem[]) => void
   updateTaskProgress: (routingId: string, progress: TaskProgress) => void
   addTaskNotification: (routingId: string, notification: TaskNotification) => void
@@ -749,7 +756,8 @@ interface SessionState {
     toolUseId: string,
     toolResultToolUseId: string,
     result: string,
-    isError: boolean
+    isError: boolean,
+    fileDiffs?: FileDiff[]
   ) => void
   setBashOutput: (
     routingId: string,
@@ -1651,7 +1659,7 @@ export const useSessionStore = create<SessionState>((set) => ({
       }))
     })),
 
-  appendToolResult: (routingId, toolUseId, result, isError) =>
+  appendToolResult: (routingId, toolUseId, result, isError, fileDiffs) =>
     set((state) => {
       const session = state.sessions[routingId]
       if (!session) return state
@@ -1668,7 +1676,13 @@ export const useSessionStore = create<SessionState>((set) => ({
               ...msg,
               content: [
                 ...msg.content,
-                { type: 'tool_result', toolUseId, toolResult: result, isError }
+                {
+                  type: 'tool_result',
+                  toolUseId,
+                  toolResult: result,
+                  isError,
+                  ...(fileDiffs ? { fileDiffs } : {})
+                }
               ]
             }
             break
@@ -1811,7 +1825,7 @@ export const useSessionStore = create<SessionState>((set) => ({
       }
     }),
 
-  appendSubagentToolResult: (routingId, toolUseId, toolResultToolUseId, result, isError) =>
+  appendSubagentToolResult: (routingId, toolUseId, toolResultToolUseId, result, isError, fileDiffs) =>
     set((state) => {
       const session = state.sessions[routingId]
       if (!session) return state
@@ -1829,7 +1843,13 @@ export const useSessionStore = create<SessionState>((set) => ({
             ...msg,
             content: [
               ...msg.content,
-              { type: 'tool_result', toolUseId: toolResultToolUseId, toolResult: result, isError }
+              {
+                type: 'tool_result',
+                toolUseId: toolResultToolUseId,
+                toolResult: result,
+                isError,
+                ...(fileDiffs ? { fileDiffs } : {})
+              }
             ]
           }
           break

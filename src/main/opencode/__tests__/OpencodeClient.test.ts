@@ -221,6 +221,36 @@ describe('OpencodeClient', () => {
     })
   })
 
+  describe('replyPermission', () => {
+    it('sends POST /permission/{id}/reply without message key when none given', async () => {
+      const mock = mockFetch(200, {})
+      vi.stubGlobal('fetch', mock)
+
+      await client.replyPermission('per_abc', 'once')
+      expect(mock).toHaveBeenCalledWith(
+        `${BASE_URL}/permission/per_abc/reply`,
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({ reply: 'once' })
+        })
+      )
+    })
+
+    it('includes message in the body on reject with feedback', async () => {
+      const mock = mockFetch(200, {})
+      vi.stubGlobal('fetch', mock)
+
+      await client.replyPermission('per_abc', 'reject', 'Auto mode blocked: unsafe')
+      expect(mock).toHaveBeenCalledWith(
+        `${BASE_URL}/permission/per_abc/reply`,
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({ reply: 'reject', message: 'Auto mode blocked: unsafe' })
+        })
+      )
+    })
+  })
+
   describe('replyQuestion', () => {
     it('sends POST /question/{id}/reply with answers body', async () => {
       const mock = mockFetch(200, {})

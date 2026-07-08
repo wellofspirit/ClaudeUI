@@ -6,7 +6,7 @@
  * the 'command' kind renderer. See docs/v2/06-tool-rendering.md §3.
  */
 
-import type { AskUserQuestion, ContentBlock } from './types'
+import type { AskUserQuestion, ContentBlock, FileDiff } from './types'
 
 type ToolResultBlock = Extract<ContentBlock, { type: 'tool_result' }>
 
@@ -36,7 +36,10 @@ export type ToolView =
   // no single old/new pair (e.g. Claude MultiEdit). The body falls back to the
   // generic JSON view (dumping block.toolInput) in that case — preserving today's
   // behavior where MultiEdit hit no special branch.
-  | { kind: 'fileEdit'; path: string; before: string; after: string; language?: string }
+  // `files` is set when the engine's tool result carries real per-file unified
+  // diffs (opencode apply_patch/edit — see FileDiff). When present, the body
+  // renders one diff card per file instead of the single before/after pair.
+  | { kind: 'fileEdit'; path: string; before: string; after: string; language?: string; files?: FileDiff[] }
   | { kind: 'fileWrite'; path: string; content: string; language?: string }
   | { kind: 'fileRead'; path: string; content: string; language?: string; truncated?: boolean }
   // search/web render through the generic body (JSON dump of block.toolInput +

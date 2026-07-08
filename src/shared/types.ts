@@ -7,10 +7,27 @@ export function isAgentTool(toolName: string): boolean {
   return toolName === 'Agent' || toolName === 'Task'
 }
 
+/**
+ * A single file's unified diff, surfaced by opencode's apply_patch/edit tool
+ * results (`metadata.files[]` / `metadata.filediff` — see
+ * src/main/opencode/event-mapper.ts `extractFileDiffs`). Lets the fileEdit kind
+ * body render real per-file diff cards instead of a generic JSON/text dump.
+ */
+export interface FileDiff {
+  /** Relative-to-worktree path when the engine provides one (apply_patch); otherwise the raw (often absolute) file path. */
+  path: string
+  /** Unified diff text (already trimmed by opencode's `trimDiff`). */
+  patch: string
+  additions?: number
+  deletions?: number
+  /** 'move' = apply_patch rename (patch headers carry the old/new paths); edit/write never produce it. */
+  changeType?: 'add' | 'update' | 'delete' | 'move'
+}
+
 export type ContentBlock =
   | { type: 'text'; text: string }
   | { type: 'tool_use'; toolUseId: string; toolName: string; toolInput?: Record<string, unknown> }
-  | { type: 'tool_result'; toolUseId: string; toolResult: string; isError?: boolean }
+  | { type: 'tool_result'; toolUseId: string; toolResult: string; isError?: boolean; fileDiffs?: FileDiff[] }
   | { type: 'thinking'; text: string }
   | { type: 'cli_command'; commandName: string; commandArgs?: string; commandOutput?: string }
   | { type: 'api_error'; errorType: string; errorMessage: string }
@@ -524,6 +541,7 @@ export interface SubagentToolResultData {
   toolResultToolUseId: string
   result: string
   isError: boolean
+  fileDiffs?: FileDiff[]
 }
 
 export interface BackgroundOutput {
@@ -713,7 +731,10 @@ interface SessionAPI {
   /** Refusal-fallback retraction — remove these messages from the transcript (docs/protocol/04-system-subtypes.md §4.20) */
   onMessagesRetracted(cb: (routingId: string, data: { messageIds: string[] }) => void): () => void
   onToolResult(
-    cb: (routingId: string, data: { toolUseId: string; result: string; isError: boolean }) => void
+    cb: (
+      routingId: string,
+      data: { toolUseId: string; result: string; isError: boolean; fileDiffs?: FileDiff[] }
+    ) => void
   ): () => void
   onMaximizeChange(cb: (isMaximized: boolean) => void): () => void
   onTaskProgress(cb: (routingId: string, data: TaskProgress) => void): () => void
