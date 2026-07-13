@@ -6,7 +6,7 @@
   "author": "Daniel Liu <wellofspirit@gmail.com>",
   "license": "Apache-2.0",
   "homepage": "https://github.com/wellofspirit/ClaudeUI",
-  "claudeCliVersion": "2.1.198",
+  "claudeCliVersion": "2.1.207",
   "opencodeCliVersion": "1.17.14",
   "ripgrepVersion": "14.1.1",
   "scripts": {

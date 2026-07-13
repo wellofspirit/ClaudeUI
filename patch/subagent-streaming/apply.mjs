@@ -744,7 +744,7 @@ if (src.includes(patchEMarker)) {
   //   - msg var (ce) = loop variable
   //   - arr var (h) = collection array
   //   - p() = shouldNotifyOwner callback — returns Fe (true when backgrounded)
-  //   - s = toolUseContext (s.toolUseId = parent_tool_use_id)
+  //   - toolUseContext param (.toolUseId = parent_tool_use_id)
   const bveAnchorRe = new RegExp(
     `if\\((${V})\\(\\),(${V})\\.type==="system"&&\\2\\.subtype==="api_error"\\)continue;(${V})\\.push\\(\\2\\)`
   )
@@ -763,12 +763,37 @@ if (src.includes(patchEMarker)) {
       process.exit(1)
     }
 
-    // Verify toolUseContext s is nearby (within 2000 chars before anchor)
-    const ctxBefore = src.slice(Math.max(0, anchorIdx - 2000), anchorIdx)
-    if (!ctxBefore.includes('s.toolUseId')) {
-      console.error('ERROR: s.toolUseId not found near BVe anchor. Context mismatch.')
+    // Detect the toolUseContext variable by binding structurally to the
+    // BVe function's destructured parameter. The minified name changes
+    // between versions (s in v197-v198, i in v207+).
+    //
+    // Collect ALL matching `async function NAME({...,toolUseContext:VAR,...})`
+    // signatures in the bounded prefix. Exactly one must exist — the BVe
+    // (sje/async background runner) function. If zero or multiple match,
+    // fail closed: we cannot safely distinguish the correct scope.
+    const sigBefore = src.slice(Math.max(0, anchorIdx - 15000), anchorIdx)
+    const globalSigRe = new RegExp(`async function (${V})\\([^)]*toolUseContext:(${V})[,)]`, 'g')
+    const sigCandidates = [...sigBefore.matchAll(globalSigRe)].map((m) => ({
+      fn: m[1],
+      ctxVar: m[2]
+    }))
+    if (sigCandidates.length === 0) {
+      console.error(
+        'ERROR: No `async function(...toolUseContext:VAR,...)` signature found ' +
+        'in the 15KB prefix before the BVe anchor. Cannot determine toolUseContext binding.'
+      )
       process.exit(1)
     }
+    if (sigCandidates.length > 1) {
+      const summary = sigCandidates.map((c) => `${c.fn}(toolUseContext:${c.ctxVar})`).join(', ')
+      console.error(
+        `ERROR: ${sigCandidates.length} async functions with toolUseContext found in the 15KB prefix. ` +
+        `Ambiguous — cannot determine which encloses the anchor. Candidates: ${summary}`
+      )
+      process.exit(1)
+    }
+    const toolUseCtxVar = sigCandidates[0].ctxVar
+    console.log(`  toolUseContext var: ${toolUseCtxVar} (from function sig "${sigCandidates[0].fn}", 1/1 matches)`)
 
     console.log(`Found BVe for-await anchor at char ${anchorIdx} (watchdog=${watchdogFn}, msg=${msgVar}, arr=${arrVar})`)
 
@@ -788,11 +813,11 @@ if (src.includes(patchEMarker)) {
       `${patchEMarker}` +
       `if(${msgVar}.type==="stream_event"){` +
       `if(p())try{process.stdout.write(JSON.stringify({type:"stream_event",event:${msgVar}.event,` +
-      `parent_tool_use_id:s.toolUseId,session_id:${sessFn}(),uuid:${uuidFn}()})+"\\n")}catch(_e){}` +
+      `parent_tool_use_id:${toolUseCtxVar}.toolUseId,session_id:${sessFn}(),uuid:${uuidFn}()})+"\\n")}catch(_e){}` +
       `continue}` +
       `if(${msgVar}.type==="assistant"||${msgVar}.type==="user")` +
       `if(p())try{process.stdout.write(JSON.stringify({type:${msgVar}.type,message:${msgVar}.message,` +
-      `parent_tool_use_id:s.toolUseId,session_id:${sessFn}(),uuid:${uuidFn}()})+"\\n")}catch(_e){}`
+      `parent_tool_use_id:${toolUseCtxVar}.toolUseId,session_id:${sessFn}(),uuid:${uuidFn}()})+"\\n")}catch(_e){}`
 
     src = src.slice(0, anchorIdx) + injection + src.slice(anchorIdx)
     patchCount++

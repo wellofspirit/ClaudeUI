@@ -101,7 +101,8 @@ background runner — was merged into `BVe()`.
 async function BVe({
   onMessage: u,           // nt callback from Task.call() — called for EVERY message
   shouldNotifyOwner: d,   // p = () => Fe (returns true when backgrounded)
-  toolUseContext: s,      // s.toolUseId = parent_tool_use_id
+  toolUseContext: s,      // s.toolUseId = parent_tool_use_id (v2.1.197-v2.1.198: s)
+                           // i.toolUseId (v2.1.207+: i — minified name changes)
   // ... other fields
 }) {
   for await (let ce of <generator>) {
@@ -118,7 +119,7 @@ Key variables:
 | -------- | ------ | ----- |
 | `u` | `BVe` destructured param | `nt` onMessage callback from Task.call() |
 | `d` | `BVe` destructured param | `shouldNotifyOwner = () => Fe` |
-| `s` | `BVe` destructured param | toolUseContext; `s.toolUseId` = parent tool use ID |
+| `s` (v197-v198) / `i` (v207+) | `BVe` destructured param | toolUseContext; `s.toolUseId` (or `i.toolUseId`) = parent tool use ID |
 | `p` | same as `d` — local alias used in Patch E injection | `() => Fe` |
 | `h` | local to BVe | message collection array |
 | `ce` | loop variable | current message from sub-agent generator |
@@ -989,14 +990,14 @@ Injection is inserted **before** the watchdog call:
 if(ce.type==="stream_event"){
   if(p())try{process.stdout.write(JSON.stringify({
     type:"stream_event", event:ce.event,
-    parent_tool_use_id:s.toolUseId, session_id:<sessFn>(), uuid:globalThis.crypto.randomUUID()
+    parent_tool_use_id:CTX.toolUseId, session_id:<sessFn>(), uuid:globalThis.crypto.randomUUID()
   })+"\n")}catch(_e){}
   continue  // ← skip h.push for stream_events regardless of sync/async state
 }
 if(ce.type==="assistant"||ce.type==="user")
   if(p())try{process.stdout.write(JSON.stringify({
     type:ce.type, message:ce.message,
-    parent_tool_use_id:s.toolUseId, session_id:<sessFn>(), uuid:globalThis.crypto.randomUUID()
+    parent_tool_use_id:CTX.toolUseId, session_id:<sessFn>(), uuid:globalThis.crypto.randomUUID()
   })+"\n")}catch(_e){}
 // Original: if(W(),ce.type==="system"&&ce.subtype==="api_error")continue; h.push(ce) follows
 ```
@@ -1005,7 +1006,15 @@ if(ce.type==="assistant"||ce.type==="user")
 - **assistant/user**: write stdout when `p()=true`; fall through to original `h.push` (they're safe in `h[]`).
 - **When sync** (`Fe=false`, `p()=false`): no stdout writes — `nt`/progress-callback handles it. Stream events still skip `h[]` via `continue`.
 
-`s.toolUseId` provides `parent_tool_use_id` directly from `toolUseContext` — no description-search lookup needed (unlike legacy Patch E).
+`s.toolUseId` (v2.1.197-v2.1.198) / `i.toolUseId` (v2.1.207+) provides `parent_tool_use_id` directly from `toolUseContext` — no description-search lookup needed (unlike legacy Patch E).
+
+**How `apply.mjs` extracts the variable name (v2.1.207+):** It does NOT scan for `<ident>.toolUseId` in a prefix window (fragile — can match closures from unrelated scopes). Instead, it locates `toolUseContext:` in the BVe function's destructured parameter list within ~15KB before the anchor:
+
+```
+async function BVe({...toolUseContext:VAR,...})
+```
+
+The captured `VAR` (shown as `CTX` above; `i` in v2.1.207) is then used for `.toolUseId` in the injection. The patch requires exactly one matching signature in the bounded prefix and fails closed if the binding is absent or ambiguous.
 
 **Verify anchor uniqueness:**
 ```bash
@@ -1013,7 +1022,7 @@ bundle-analyzer find cli.js 'ce.type==="system"&&ce.subtype==="api_error")contin
 # Should match exactly once (inside BVe's for-await loop body)
 ```
 
-Also verify `s.toolUseId` appears within 2000 chars before the anchor (confirms BVe scope).
+Then verify `toolUseContext:` appears in the function signature ~3.5KB before the anchor, capturing the minified variable name after the colon.
 
 #### v2.1.196 and earlier — Legacy re-background for-await loops
 
