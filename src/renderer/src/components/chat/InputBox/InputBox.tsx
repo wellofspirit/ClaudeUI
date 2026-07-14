@@ -101,7 +101,7 @@ export function InputBox(): React.JSX.Element {
   const markSdkActive = useSessionStore((s) => s.markSdkActive)
   const queuedText = useActiveSession((s) => s.queuedText)
   const clearQueuedText = useSessionStore((s) => s.clearQueuedText)
-  const consumeQueuedText = useSessionStore((s) => s.consumeQueuedText)
+
   const isRunning = status.state === 'running'
   const isDisabled = !activeSessionId || !cwd
 
@@ -456,15 +456,6 @@ export function InputBox(): React.JSX.Element {
       }
     }
   }
-
-  const prevRunningRef = useRef(false)
-  useEffect(() => {
-    const wasRunning = prevRunningRef.current
-    prevRunningRef.current = isRunning
-    if (wasRunning && !isRunning && queuedText) {
-      consumeQueuedText(activeSessionId!)
-    }
-  }, [isRunning, queuedText, activeSessionId, consumeQueuedText])
 
   const handleEditQueued = useCallback(async () => {
     const savedText = queuedText

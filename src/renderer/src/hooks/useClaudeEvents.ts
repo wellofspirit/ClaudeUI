@@ -171,15 +171,23 @@ export function useClaudeEvents(): void {
           }
         }
 
+        const priorState = useSessionStore.getState().sessions[effectiveRoutingId]?.status.state
+
         if (status.state === 'disconnected') {
           useSessionStore.getState().markSdkInactive(effectiveRoutingId)
           setStatus(effectiveRoutingId, { ...status, state: 'idle' })
           clearPendingApprovals(effectiveRoutingId)
+          if (priorState === 'running') {
+            useSessionStore.getState().consumeQueuedText(effectiveRoutingId)
+          }
           return
         }
         setStatus(effectiveRoutingId, status)
         if (status.state === 'idle') {
           clearPendingApprovals(effectiveRoutingId)
+          if (priorState === 'running') {
+            useSessionStore.getState().consumeQueuedText(effectiveRoutingId)
+          }
         }
         // Clear attention when a new turn starts
         if (status.state === 'running') {
