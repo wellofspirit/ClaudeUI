@@ -15,6 +15,7 @@ import type {
   SandboxSettings,
   VendorAuthOption,
   AutoModeConfig,
+  DispatchConfig,
   ModelInfo,
   OpencodeProviderSettings,
   OpencodeConfigSettings
@@ -550,6 +551,126 @@ function OpencodeAutoModeSection(): React.JSX.Element {
           </div>
         </>
       )}
+    </div>
+  )
+}
+
+// ── opencode cross-engine dispatch settings (ADR-033) ────────────────
+
+/**
+ * Governs `dispatch_agent` calls INTO opencode (the live Claude→opencode
+ * direction). Self-contained: loads/saves its own opencode EngineConfig via
+ * window.api, editing only the `dispatch` block (never clobbers autoMode etc.).
+ * Modeled on OpencodeAutoModeSection. The Claude twin ships with M2 — showing
+ * config nothing consumes would violate ADR-030's spirit.
+ */
+export function OpencodeDispatchSection(): React.JSX.Element {
+  const [engineCfg, setEngineCfg] = useState<EngineConfig | null>(null)
+  const [models, setModels] = useState<ModelInfo[]>([])
+  const installed = useOpencodeInstalled()
+
+  useEffect(() => {
+    window.api
+      .loadEngineConfig('opencode')
+      .then(setEngineCfg)
+      .catch(() => setEngineCfg({}))
+    window.api
+      .getEngineModels()
+      .then((groups) => {
+        const oc = groups.filter((g) => g.engineId === 'opencode')
+        setModels(oc.flatMap((g) => g.models))
+      })
+      .catch(() => {})
+  }, [])
+
+  if (engineCfg === null || installed === null) {
+    return <div data-testid="OpencodeDispatchSection" className="px-3 py-1.5 text-[13px] text-text-muted">Loading…</div>
+  }
+  if (!installed) {
+    return (
+      <div data-testid="OpencodeDispatchSection" className="px-3 py-2 text-[12px] text-text-muted/70 leading-relaxed">
+        opencode is not installed. Cross-engine dispatch lets a Claude session delegate a task to
+        an opencode agent (e.g. a GPT-backed review).
+      </div>
+    )
+  }
+
+  const dispatch = engineCfg.dispatch ?? {}
+  const defaultModel = dispatch.defaultModel ?? ''
+  const allowedModels = dispatch.allowedModels ?? []
+
+  const update = (patch: Partial<DispatchConfig>): void => {
+    const next: EngineConfig = { ...engineCfg, dispatch: { ...dispatch, ...patch } }
+    setEngineCfg(next)
+    window.api.saveEngineConfig('opencode', next).catch(() => {})
+  }
+
+  const toggleAllowed = (model: string): void => {
+    const nextList = allowedModels.includes(model)
+      ? allowedModels.filter((m) => m !== model)
+      : [...allowedModels, model]
+    // Drop the key entirely when empty — empty and absent both mean "all
+    // models allowed", and the absent form keeps the hand-editable file clean.
+    update({ allowedModels: nextList.length > 0 ? nextList : undefined })
+  }
+
+  return (
+    <div data-testid="OpencodeDispatchSection" className="space-y-1">
+      <div className="px-3 py-1.5 text-[13px] text-text-secondary">
+        <div className="mb-1 flex items-center gap-1">
+          Default model
+          <InfoTooltip text="Used when the dispatching agent doesn't request a model. Format: provider/model-id. With no default set, dispatch_agent calls without an explicit model are rejected." />
+        </div>
+        <select
+          data-testid="OpencodeDispatchSection.defaultModel"
+          value={defaultModel}
+          onChange={(e) => update({ defaultModel: e.target.value || undefined })}
+          className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors"
+        >
+          <option value="">(not set)</option>
+          {models.map((m) => (
+            <option key={m.value} value={m.value}>
+              {m.displayName || m.value}
+            </option>
+          ))}
+        </select>
+      </div>
+      <div className="px-3 py-1.5 text-[13px] text-text-secondary">
+        <div className="mb-1 flex items-center gap-1">
+          Allowed models
+          <InfoTooltip text="Models a dispatching agent may request explicitly. With NONE checked, all models are allowed." />
+        </div>
+        <div className="space-y-0.5">
+          {models.length === 0 && (
+            <div className="text-[11px] text-text-muted/70">No opencode models detected.</div>
+          )}
+          {models.map((m) => {
+            const checked = allowedModels.includes(m.value)
+            return (
+              <button
+                key={m.value}
+                data-testid="OpencodeDispatchSection.allowedModel"
+                data-id={m.value}
+                onClick={() => toggleAllowed(m.value)}
+                className="w-full flex items-center justify-between py-1 text-[12px] text-text-secondary hover:bg-bg-hover rounded transition-colors cursor-default"
+              >
+                <span className="truncate">{m.displayName || m.value}</span>
+                <span
+                  className={`w-7 h-4 shrink-0 rounded-full relative transition-colors ${checked ? 'bg-accent' : 'bg-text-muted/30'}`}
+                >
+                  <span
+                    className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform ${checked ? 'left-3.5' : 'left-0.5'}`}
+                  />
+                </span>
+              </button>
+            )
+          })}
+        </div>
+      </div>
+      <div className="px-3 pb-1 text-[10px] text-text-muted/50 leading-relaxed">
+        Governs dispatch_agent calls INTO opencode (e.g. a Claude session asking a GPT-backed
+        agent for a second opinion). Empty allowed-models list = any model may be requested.
+      </div>
     </div>
   )
 }
@@ -3651,6 +3772,27 @@ export const SECTIONS: Section[] = [
     ]
   },
   {
+    id: 'opencode-dispatch',
+    label: 'Cross-engine dispatch',
+    icon: (
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M17 3l4 4-4 4" />
+        <path d="M21 7H9a4 4 0 00-4 4v1" />
+        <path d="M7 21l-4-4 4-4" />
+        <path d="M3 17h12a4 4 0 004-4v-1" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'opencodeDispatch',
+        label: 'Cross-engine dispatch',
+        keywords:
+          'opencode dispatch cross engine agent delegate collab gpt gemini model allowlist default',
+        render: () => <OpencodeDispatchSection />
+      }
+    ]
+  },
+  {
     id: 'opencode-config',
     label: 'Configuration',
     icon: (
@@ -3721,7 +3863,7 @@ const ENGINE_CLAUDE_SECTION_IDS = new Set([
 ])
 
 /** Section ids that belong to Engines > opencode (content self-gates on install) */
-const ENGINE_OPENCODE_SECTION_IDS = new Set(['opencode-automode', 'opencode-models', 'opencode-config'])
+const ENGINE_OPENCODE_SECTION_IDS = new Set(['opencode-automode', 'opencode-models', 'opencode-dispatch', 'opencode-config'])
 
 /** Section ids that belong to Vendors > Anthropic */
 const VENDOR_ANTHROPIC_SECTION_IDS = new Set([
@@ -3808,7 +3950,7 @@ export const SCOPES: ScopeDef[] = [
       {
         id: 'opencode-engine',
         label: 'Engine',
-        sections: getSectionsForIds(ENGINE_OPENCODE_SECTION_IDS, ['opencode-automode', 'opencode-models', 'opencode-config'])
+        sections: getSectionsForIds(ENGINE_OPENCODE_SECTION_IDS, ['opencode-automode', 'opencode-models', 'opencode-dispatch', 'opencode-config'])
       },
       {
         id: 'opencode-vendor',

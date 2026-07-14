@@ -97,11 +97,12 @@ describe('SCOPES structure', () => {
       expect(opencode.subgroups.map((sg) => sg.label)).toEqual(['Engine', 'Vendor', 'Agents'])
     })
 
-    it('Engine subgroup contains opencode-automode, opencode-models, opencode-config in order', () => {
+    it('Engine subgroup contains opencode-automode, opencode-models, opencode-dispatch, opencode-config in order', () => {
       const engine = opencode.subgroups.find((sg) => sg.label === 'Engine')!
       expect(engine.sections.map((s) => s.id)).toEqual([
         'opencode-automode',
         'opencode-models',
+        'opencode-dispatch',
         'opencode-config'
       ])
     })
@@ -166,6 +167,10 @@ describe('SECTION_SCOPE_MAP', () => {
 
   it('opencode-models → opencode', () => {
     expect(SECTION_SCOPE_MAP.get('opencode-models')).toBe('opencode')
+  })
+
+  it('opencode-dispatch → opencode', () => {
+    expect(SECTION_SCOPE_MAP.get('opencode-dispatch')).toBe('opencode')
   })
 
   it('opencode-providers → opencode', () => {
