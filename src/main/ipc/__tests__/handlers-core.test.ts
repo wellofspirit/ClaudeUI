@@ -24,7 +24,10 @@ vi.mock('../../services/claude-settings', () => ({
 }))
 
 vi.mock('../../services/ui-config', () => ({
-  saveSessionConfig: vi.fn()
+  saveSessionConfig: vi.fn(),
+  // Pulled in transitively via claude-session → collab-tool →
+  // cross-engine-dispatcher (ADR-033).
+  loadEngineConfig: vi.fn(() => ({}))
 }))
 
 // Import AFTER mocks.

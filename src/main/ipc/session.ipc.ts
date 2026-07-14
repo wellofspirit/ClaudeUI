@@ -52,6 +52,7 @@ import { usageFetcher } from '../services/usage-fetcher'
 import { serviceSession } from '../services/service-session'
 import { blockUsageService } from '../services/block-usage'
 import { usageReconciler } from '../services/usage-reconciler'
+import { crossEngineDispatcher, XENG_REQUEST_PREFIX } from '../services/cross-engine-dispatcher'
 import '../auth/register-auth-providers'
 import { engineAuthRegistry } from '../auth/EngineAuthRegistry'
 import { claudeAuthProvider } from '../auth/ClaudeAuthProvider'
@@ -777,6 +778,13 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
       answers?: Record<string, string>,
       updatedPermissions?: PermissionSuggestion[]
     ) => {
+      // Reserved `xeng:` prefix → forwarded cross-engine dispatch approval (ADR-033).
+      if (
+        requestId.startsWith(XENG_REQUEST_PREFIX) &&
+        crossEngineDispatcher.resolveApproval(requestId, decision, answers, updatedPermissions)
+      ) {
+        return
+      }
       manager.get(routingId)?.resolveApproval(requestId, decision, answers, updatedPermissions)
     }
   )

@@ -103,6 +103,7 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     onMessage: onEvent('session:message'),
     onStreamEvent: onEvent('session:stream'),
     onApprovalRequest: onEvent('session:approval-request'),
+    onApprovalDismiss: onEvent('session:approval-dismiss'),
     onStatus: onEvent('session:status'),
     onResult: onEvent('session:result'),
     onError: onEvent('session:error'),

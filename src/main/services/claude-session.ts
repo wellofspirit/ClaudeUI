@@ -29,6 +29,9 @@ import { getContextWindowSize } from './context-window'
 import { usageFetcher } from './usage-fetcher'
 import { createMermaidServer } from './mermaid-tool'
 import { createMockupServer } from './mockup-tool'
+import { createCollabServer } from './collab-tool'
+import { crossEngineDispatcher } from './cross-engine-dispatcher'
+import { opencodeServerManager } from '../opencode/OpencodeServerManager'
 import { claudeAuthProvider } from '../auth/ClaudeAuthProvider'
 import { accountManager } from './account-manager'
 import { equivalentCostUsd } from '../../shared/pricing'
@@ -448,6 +451,19 @@ export class ClaudeSession extends BaseSession {
       // Create in-process MCP servers for UI tools
       const uiMcpServer = createMermaidServer()
       const mockupMcpServer = createMockupServer(this.cwd)
+      // Cross-engine dispatch (ADR-033): a SEPARATE server so dispatch_agent
+      // does NOT ride the auto-allowed `mcp__claude-ui__` prefix — it goes
+      // through canUseTool like an ordinary tool. Only registered when the
+      // opencode binary is vendored (no target engine → no tool).
+      const collabServer = opencodeServerManager.isBinaryAvailable()
+        ? createCollabServer({
+            engineId: this.engineId,
+            getRoutingId: () => this.routingId,
+            cwd: this.cwd,
+            getAutonomyMode: () => this.permissionMode,
+            emit: (channel, data) => this.send(channel, data)
+          })
+        : null
 
       const q = sdkQuery({
         prompt: channel as AsyncIterable<never>,
@@ -481,7 +497,14 @@ You have mockup tools for creating visual UI prototypes that render inline in th
 - \`directory\` (required): The directory ID from create_mockup.
 
 Workflow: create_mockup → Edit the HTML file for changes (the preview auto-refreshes on file change — no need to call show_mockup after edits).
-The mockup appears as an interactive preview card with preview/code tabs and expand-to-panel support.`
+The mockup appears as an interactive preview card with preview/code tabs and expand-to-panel support.${
+              collabServer
+                ? `
+
+## Cross-Engine Agent Dispatch
+You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task to an agent on a different engine (opencode, fronting non-Anthropic models such as GPT or Gemini). Useful when the user asks for another model's perspective (e.g. a second review of a diff). The result includes a session_id — pass it back to continue the same agent. The model list is user-configured; requires user approval per call.`
+                : ''
+            }`
           },
           ...(this.sandboxConfig?.enabled
             ? {
@@ -552,7 +575,13 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
           mcpServers: {
             ...(this._mcpAllServers as Record<string, never>),
             'claude-ui': uiMcpServer as never,
-            'claude-ui-mockup': mockupMcpServer as never
+            'claude-ui-mockup': mockupMcpServer as never,
+            // Deliberately NOT in allowedTools and NOT auto-allowed in
+            // canUseTool — dispatch_agent must hit the normal approval path.
+            ...((collabServer ? { 'claude-ui-collab': collabServer } : {}) as Record<
+              string,
+              never
+            >)
           },
           allowedTools: ['mcp__claude-ui__*', 'mcp__claude-ui-mockup__*'],
           abortController: this.abortController,
@@ -1854,6 +1883,9 @@ The mockup appears as an interactive preview card with preview/code tabs and exp
     this.clearInactivityTimer()
     this.stopAllBackgroundPollers()
     unwatchAllSubagents()
+
+    // Tear down any cross-engine dispatch targets owned by this session (ADR-033).
+    crossEngineDispatcher.disposeFor(this.routingId)
 
     // Clean up voice resources
     if (this.voiceClient) {

@@ -50,7 +50,7 @@ import { blockUsageService } from '../services/block-usage'
 // Permission ruleset helper
 type PermissionAction = 'allow' | 'ask' | 'deny'
 
-interface PermissionRule {
+export interface PermissionRule {
   permission: string
   pattern: string
   action: PermissionAction
@@ -76,7 +76,7 @@ interface PermissionRule {
  * `mode` is the Claude-style permission-mode string the renderer already speaks
  * (autonomy plan→'plan', ask→'default', autoEdit→'acceptEdits', full→'auto').
  */
-function buildRuleset(mode: string): PermissionRule[] {
+export function buildRuleset(mode: string): PermissionRule[] {
   const allowAll: PermissionRule = { permission: '*', pattern: '*', action: 'allow' }
   const rule = (permission: string, action: PermissionAction): PermissionRule => ({
     permission,

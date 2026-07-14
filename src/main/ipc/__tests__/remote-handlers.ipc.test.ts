@@ -131,6 +131,19 @@ vi.mock('../../sdk', () => ({
   })
 }))
 
+// Cross-engine dispatcher (ADR-033) — the real singleton pulls the opencode
+// client graph (electron at runtime); stub it for the prefix-routing tests.
+const crossEngineSpies = vi.hoisted(() => ({
+  resolveApproval: vi.fn((requestId: string) => requestId.startsWith('xeng:')),
+  dispatch: vi.fn(),
+  disposeFor: vi.fn()
+}))
+
+vi.mock('../../services/cross-engine-dispatcher', () => ({
+  crossEngineDispatcher: crossEngineSpies,
+  XENG_REQUEST_PREFIX: 'xeng:'
+}))
+
 vi.mock('../../services/logger', () => ({
   logger: {
     debug: vi.fn(),
@@ -274,6 +287,25 @@ describe('registerRemoteHandlers', () => {
 
   afterEach(() => {
     vi.clearAllMocks()
+  })
+
+  it("routes 'xeng:'-prefixed approval responses to the cross-engine dispatcher (ADR-033)", async () => {
+    await dispatcher.handle(
+      makeRequest('session:approval-response', 'rid-1', 'xeng:perm-7', 'deny', { feedback: 'no' })
+    )
+    expect(crossEngineSpies.resolveApproval).toHaveBeenCalledWith(
+      'xeng:perm-7',
+      'deny',
+      { feedback: 'no' },
+      undefined
+    )
+    expect(sessionStub.resolveApproval).not.toHaveBeenCalled()
+  })
+
+  it('routes ordinary approval responses to the session', async () => {
+    await dispatcher.handle(makeRequest('session:approval-response', 'rid-1', 'req-1', 'allow'))
+    expect(sessionStub.resolveApproval).toHaveBeenCalledWith('req-1', 'allow', undefined, undefined)
+    expect(crossEngineSpies.resolveApproval).not.toHaveBeenCalled()
   })
 
   it('registers the expected set of allowed channels', () => {

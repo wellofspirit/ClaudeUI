@@ -195,6 +195,7 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     onMessage: on('session:message') as ClaudeAPI['onMessage'],
     onStreamEvent: on('session:stream') as ClaudeAPI['onStreamEvent'],
     onApprovalRequest: on('session:approval-request') as ClaudeAPI['onApprovalRequest'],
+    onApprovalDismiss: on('session:approval-dismiss') as ClaudeAPI['onApprovalDismiss'],
     onStatus: on('session:status') as ClaudeAPI['onStatus'],
     onResult: on('session:result') as ClaudeAPI['onResult'],
     onError: on('session:error') as ClaudeAPI['onError'],

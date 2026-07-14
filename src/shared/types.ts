@@ -439,6 +439,20 @@ export interface EngineConfig {
   autoMode?: AutoModeConfig
   /** opencode native config passthrough (injected at spawn via OPENCODE_CONFIG_CONTENT). */
   opencodeConfig?: OpencodeConfigSettings
+  /** Cross-engine dispatch INTO this engine (ADR-033). */
+  dispatch?: DispatchConfig
+}
+
+/**
+ * Governs `dispatch_agent` calls targeting an engine (ADR-033). Lives in
+ * `engines/<engineId>.json` (plane ③). Edited in Settings › opencode ›
+ * Cross-engine dispatch (the Claude-side twin ships with M2).
+ */
+export interface DispatchConfig {
+  /** When non-empty, only these models may be requested for dispatched agents. */
+  allowedModels?: string[]
+  /** Model used when the caller doesn't request one. */
+  defaultModel?: string
 }
 
 /**
@@ -723,6 +737,8 @@ interface SessionAPI {
   onMessage(cb: (routingId: string, msg: ChatMessage) => void): () => void
   onStreamEvent(cb: (routingId: string, delta: StreamDelta) => void): () => void
   onApprovalRequest(cb: (routingId: string, approval: PendingApproval) => void): () => void
+  /** Externally-resolved approval (e.g. opencode's deny-cascade on a dispatch target, ADR-033) — remove the card. */
+  onApprovalDismiss(cb: (routingId: string, data: { requestId: string }) => void): () => void
   onStatus(cb: (routingId: string, status: SessionStatus) => void): () => void
   onResult(cb: (routingId: string, result: SessionResult) => void): () => void
   onError(cb: (routingId: string, error: string) => void): () => void

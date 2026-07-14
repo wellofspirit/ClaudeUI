@@ -22,6 +22,7 @@ import { blockUsageService } from '../services/block-usage'
 import type { ApprovalDecision, PermissionSuggestion, EngineId } from '../../shared/types'
 import type { BrowserWindow } from 'electron'
 import { getSdkExecutableOpts } from '../services/claude-session'
+import { crossEngineDispatcher, XENG_REQUEST_PREFIX } from '../services/cross-engine-dispatcher'
 import { BaseSession } from '../providers/BaseSession'
 import { PERSISTED_SESSIONS_DIR } from '../services/persisted-sessions-dir'
 import { query as sdkQuery } from '../sdk'
@@ -156,6 +157,13 @@ export function registerRemoteHandlers(
       answers?: Record<string, string>,
       updatedPermissions?: PermissionSuggestion[]
     ) => {
+      // Reserved `xeng:` prefix → forwarded cross-engine dispatch approval (ADR-033).
+      if (
+        requestId.startsWith(XENG_REQUEST_PREFIX) &&
+        crossEngineDispatcher.resolveApproval(requestId, decision, answers, updatedPermissions)
+      ) {
+        return
+      }
       manager.get(routingId)?.resolveApproval(requestId, decision, answers, updatedPermissions)
     }
   )

@@ -195,6 +195,19 @@ vi.mock('../../services/persisted-sessions-dir', () => ({
   PERSISTED_SESSIONS_DIR: '/tmp/persisted-sessions'
 }))
 
+// Cross-engine dispatcher (ADR-033) — the real singleton pulls the opencode
+// client graph; stub it and let tests control resolveApproval's return.
+const crossEngineSpies = vi.hoisted(() => ({
+  resolveApproval: vi.fn((requestId: string) => requestId.startsWith('xeng:')),
+  dispatch: vi.fn(),
+  disposeFor: vi.fn()
+}))
+
+vi.mock('../../services/cross-engine-dispatcher', () => ({
+  crossEngineDispatcher: crossEngineSpies,
+  XENG_REQUEST_PREFIX: 'xeng:'
+}))
+
 vi.mock('../../services/session-manager', () => ({
   SessionManager: class {
     constructor() {
@@ -404,6 +417,42 @@ describe('session.ipc', () => {
     it('session:rekey is registered and calls manager.rekey', async () => {
       await harness.call('session:rekey', 'temp-1', 'uuid-2')
       expect(sessionManagerSpies.rekey).toHaveBeenCalledWith('temp-1', 'uuid-2')
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // Approval routing — xeng: prefix → cross-engine dispatcher (ADR-033)
+  // -------------------------------------------------------------------------
+
+  describe('session:approval-response prefix routing', () => {
+    it("routes 'xeng:'-prefixed requestIds to the dispatcher, NOT the session", async () => {
+      await harness.call('session:approval-response', 'rid-1', 'xeng:perm-1', 'allow', {
+        feedback: 'ok'
+      })
+      expect(crossEngineSpies.resolveApproval).toHaveBeenCalledWith(
+        'xeng:perm-1',
+        'allow',
+        { feedback: 'ok' },
+        undefined
+      )
+      expect(sessionStub.resolveApproval).not.toHaveBeenCalled()
+    })
+
+    it('still routes ordinary requestIds to the session (dispatcher untouched)', async () => {
+      await harness.call('session:approval-response', 'rid-1', 'req-9', 'deny')
+      expect(sessionStub.resolveApproval).toHaveBeenCalledWith('req-9', 'deny', undefined, undefined)
+      expect(crossEngineSpies.resolveApproval).not.toHaveBeenCalled()
+    })
+
+    it('falls through to the session when the dispatcher declines to consume', async () => {
+      crossEngineSpies.resolveApproval.mockReturnValueOnce(false)
+      await harness.call('session:approval-response', 'rid-1', 'xeng:stale', 'allow')
+      expect(sessionStub.resolveApproval).toHaveBeenCalledWith(
+        'xeng:stale',
+        'allow',
+        undefined,
+        undefined
+      )
     })
   })
 

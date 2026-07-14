@@ -74,6 +74,12 @@ function wireEventHandlers(): void {
     }
   )
 
+  onEvent<(routingId: string, data: { requestId: string }) => void>('session:approval-dismiss')(
+    (routingId, { requestId }) => {
+      store().removePendingApproval(routingId, requestId)
+    }
+  )
+
   onEvent<(routingId: string, status: SessionStatus) => void>('session:status')(
     (routingId, status) => {
       // Rekey logic from useClaudeEvents
@@ -328,6 +334,27 @@ describe('useClaudeEvents component tests', () => {
       const session = useSessionStore.getState().sessions[routingId]
       expect(session.pendingApprovals).toHaveLength(1)
       expect(session.pendingApprovals[0].toolName).toBe('Bash')
+    })
+
+    it('removes ONLY the dismissed approval on session:approval-dismiss (ADR-033)', () => {
+      const routingId = 'route-1'
+      useSessionStore.getState().createNewSession(routingId, '/test')
+
+      const dispatched = makePendingApproval({
+        requestId: 'xeng:perm-1',
+        toolName: 'dispatch:bash'
+      })
+      const ordinary = makePendingApproval({ requestId: 'req-2', toolName: 'Bash' })
+      bridge.webContents.send('session:approval-request', routingId, dispatched)
+      bridge.webContents.send('session:approval-request', routingId, ordinary)
+      expect(useSessionStore.getState().sessions[routingId].pendingApprovals).toHaveLength(2)
+
+      // opencode cascade-rejected the forwarded approval — main dismisses it.
+      bridge.webContents.send('session:approval-dismiss', routingId, { requestId: 'xeng:perm-1' })
+
+      const remaining = useSessionStore.getState().sessions[routingId].pendingApprovals
+      expect(remaining).toHaveLength(1)
+      expect(remaining[0].requestId).toBe('req-2')
     })
 
     it('clears pending approvals when status becomes idle', () => {

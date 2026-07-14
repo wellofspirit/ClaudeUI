@@ -31,6 +31,7 @@ export function useClaudeEvents(): void {
   const appendStreamingThinking = useSessionStore((s) => s.appendStreamingThinking)
   const addPendingApproval = useSessionStore((s) => s.addPendingApproval)
   const clearPendingApprovals = useSessionStore((s) => s.clearPendingApprovals)
+  const removePendingApproval = useSessionStore((s) => s.removePendingApproval)
   const removePendingApprovalByToolUse = useSessionStore((s) => s.removePendingApprovalByToolUse)
   const setStatus = useSessionStore((s) => s.setStatus)
   const addError = useSessionStore((s) => s.addError)
@@ -158,6 +159,11 @@ export function useClaudeEvents(): void {
           'Permission required',
           `${approval.toolName || 'Tool'} needs approval`
         )
+      }),
+      // Externally-resolved approval (e.g. opencode's deny-cascade on a
+      // dispatch target, ADR-033) — remove the stale card.
+      window.api.onApprovalDismiss((routingId, { requestId }) => {
+        removePendingApproval(routingId, requestId)
       }),
       window.api.onStatus((routingId, status) => {
         // Re-key session when SDK provides its stable session ID
@@ -486,6 +492,7 @@ export function useClaudeEvents(): void {
     appendStreamingThinking,
     addPendingApproval,
     clearPendingApprovals,
+    removePendingApproval,
     removePendingApprovalByToolUse,
     setStatus,
     addError,
