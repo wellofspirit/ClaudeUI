@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useSessionStore } from '../../stores/session-store'
 import type {
+  BlockUsageData,
   UsageBlock,
   UsageSnapshot,
   EngineUsageSummary,
@@ -24,6 +25,12 @@ import {
 // ---------------------------------------------------------------------------
 
 type ClaudeTab = 'block' | 'timeline' | 'recent'
+
+function calendarDaySpan(history: BlockUsageData['dailyHistory']): number {
+  if (history.length === 0) return 0
+  const dates = history.map((day) => day.date).sort()
+  return Math.round((Date.parse(dates[dates.length - 1]) - Date.parse(dates[0])) / 86_400_000) + 1
+}
 
 interface UsageViewProps {
   onClose: () => void
@@ -59,6 +66,7 @@ export function UsageView({ onClose }: UsageViewProps): React.JSX.Element {
   } = blockUsage
 
   const opencodeEntry = perEngine?.find((e) => e.engineId === 'opencode') ?? null
+  const historyDays = calendarDaySpan(dailyHistory)
 
   return (
     <div data-testid="UsageView" className="flex flex-col h-full bg-bg-primary overflow-y-auto">
@@ -84,7 +92,7 @@ export function UsageView({ onClose }: UsageViewProps): React.JSX.Element {
         {opencodeEntry && <OpencodeSection entry={opencodeEntry} />}
 
         {/* Daily Usage (all engines) */}
-        <Section title="Daily Usage" subtitle={`Last ${dailyHistory.length} days · all engines`}>
+        <Section title="Daily Usage" subtitle={`Last ${historyDays} calendar days · all engines`}>
           <DailyUsageChart dailyHistory={dailyHistory} />
         </Section>
       </div>
