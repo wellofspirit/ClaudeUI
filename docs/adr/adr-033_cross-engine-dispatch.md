@@ -86,12 +86,20 @@ De-risked against opencode v1.17.14 source (pinned clone in git-ignored `vendor/
 - Per ADR-030, a `crossEngineDispatch` capability flag is only set true for an engine once the full
   path (tool visible → gated → dispatch → stream → result) works end-to-end for that engine.
 
-## Open questions (deferred, tracked for the opencode→Claude phase)
+## M2 (opencode→Claude) — decisions + kickoff
 
-- **Caller-session identity on the shared opencode MCP host**: the `claudeui` server is per-cwd and
-  MCP tool calls carry no session id, so the dispatcher cannot know *which* opencode session called
-  it (needed for approval forwarding target + mode inheritance). Candidates: a small opencode
-  plugin injecting `sessionID` into args via `tool.execute.before`, or correlation with the
-  gating `permission.asked` event (carries sessionID + callID). Decide in phase M2.
+Full standalone implementation spec: **`docs/v2/m2-cross-engine-reverse-kickoff.md`**.
+
+- **Caller-session identity on the shared opencode MCP host** — RESOLVED: a ClaudeUI-provided
+  opencode **plugin** stamps the caller `sessionID` into the dispatch tool's args via
+  `tool.execute.before` (deterministic; opencode passes `args` by reference before `execute`, so
+  the mutation reaches our MCP handler — `vendor/opencode-src/.../session/tools.ts:402-409`).
+  Chosen over FIFO temporal correlation off `permission.asked` (racy across concurrent same-cwd
+  sessions) and over fixed-mode/no-forwarding (breaks subtask parity). #1 de-risk for M2 is
+  confirming local-file plugin loading via `OPENCODE_CONFIG_CONTENT`.
+
+## Still-open questions
+
 - Whether cli.js imposes a timeout on in-process (`mcp_message`) tool calls — verify and, if so,
-  mitigate via env or heartbeats.
+  mitigate via env or heartbeats. (Not observed in M1's short dispatches; matters for long
+  Claude-target turns in M2.)
