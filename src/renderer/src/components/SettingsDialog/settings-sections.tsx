@@ -8,6 +8,7 @@ import type {
   ProxySettings,
   VoiceLanguageCode,
   AccountsState,
+  EngineId,
   EngineConfig,
   VendorConfig,
   AnthropicEndpointSettings,
@@ -555,42 +556,61 @@ function OpencodeAutoModeSection(): React.JSX.Element {
   )
 }
 
-// ── opencode cross-engine dispatch settings (ADR-033) ────────────────
+// ── cross-engine dispatch settings (ADR-033) ─────────────────────────
 
 /**
- * Governs `dispatch_agent` calls INTO opencode (the live Claude→opencode
- * direction). Self-contained: loads/saves its own opencode EngineConfig via
- * window.api, editing only the `dispatch` block (never clobbers autoMode etc.).
- * Modeled on OpencodeAutoModeSection. The Claude twin ships with M2 — showing
- * config nothing consumes would violate ADR-030's spirit.
+ * Shared render/load/save core for the per-engine dispatch-config editor.
+ * Both `OpencodeDispatchSection` and `ClaudeDispatchSection` are thin
+ * copy/gating wrappers around this — the load/merge/toggle logic and markup
+ * are otherwise identical (DRY per CLAUDE.md), so they keep distinct root
+ * testids via the `testid` prop while sharing everything else.
+ *
+ * `installed`: null = still probing (shows Loading), false = gate closed
+ * (shows `notInstalledMessage`), true = render the editor. Claude has no
+ * "not installed" state (it's the bundled default engine — `engine:is-installed`
+ * always returns true for it), so `ClaudeDispatchSection` passes a literal `true`.
  */
-export function OpencodeDispatchSection(): React.JSX.Element {
+function DispatchSection({
+  engineId,
+  testid,
+  installed,
+  notInstalledMessage,
+  defaultModelTooltip,
+  noModelsMessage,
+  footerText
+}: {
+  engineId: EngineId
+  testid: string
+  installed: boolean | null
+  notInstalledMessage?: string
+  defaultModelTooltip: string
+  noModelsMessage: string
+  footerText: string
+}): React.JSX.Element {
   const [engineCfg, setEngineCfg] = useState<EngineConfig | null>(null)
   const [models, setModels] = useState<ModelInfo[]>([])
-  const installed = useOpencodeInstalled()
 
   useEffect(() => {
     window.api
-      .loadEngineConfig('opencode')
+      .loadEngineConfig(engineId)
       .then(setEngineCfg)
       .catch(() => setEngineCfg({}))
     window.api
       .getEngineModels()
       .then((groups) => {
-        const oc = groups.filter((g) => g.engineId === 'opencode')
-        setModels(oc.flatMap((g) => g.models))
+        const own = groups.filter((g) => g.engineId === engineId)
+        setModels(own.flatMap((g) => g.models))
       })
       .catch(() => {})
-  }, [])
+  }, [engineId])
 
   if (engineCfg === null || installed === null) {
-    return <div data-testid="OpencodeDispatchSection" className="px-3 py-1.5 text-[13px] text-text-muted">Loading…</div>
+    return <div data-testid={testid} className="px-3 py-1.5 text-[13px] text-text-muted">Loading…</div>
   }
   if (!installed) {
     return (
-      <div data-testid="OpencodeDispatchSection" className="px-3 py-2 text-[12px] text-text-muted/70 leading-relaxed">
-        opencode is not installed. Cross-engine dispatch lets a Claude session delegate a task to
-        an opencode agent (e.g. a GPT-backed review).
+      <div data-testid={testid} className="px-3 py-2 text-[12px] text-text-muted/70 leading-relaxed">
+        {notInstalledMessage}
       </div>
     )
   }
@@ -602,7 +622,7 @@ export function OpencodeDispatchSection(): React.JSX.Element {
   const update = (patch: Partial<DispatchConfig>): void => {
     const next: EngineConfig = { ...engineCfg, dispatch: { ...dispatch, ...patch } }
     setEngineCfg(next)
-    window.api.saveEngineConfig('opencode', next).catch(() => {})
+    window.api.saveEngineConfig(engineId, next).catch(() => {})
   }
 
   const toggleAllowed = (model: string): void => {
@@ -615,14 +635,14 @@ export function OpencodeDispatchSection(): React.JSX.Element {
   }
 
   return (
-    <div data-testid="OpencodeDispatchSection" className="space-y-1">
+    <div data-testid={testid} className="space-y-1">
       <div className="px-3 py-1.5 text-[13px] text-text-secondary">
         <div className="mb-1 flex items-center gap-1">
           Default model
-          <InfoTooltip text="Used when the dispatching agent doesn't request a model. Format: provider/model-id. With no default set, dispatch_agent calls without an explicit model are rejected." />
+          <InfoTooltip text={defaultModelTooltip} />
         </div>
         <select
-          data-testid="OpencodeDispatchSection.defaultModel"
+          data-testid={`${testid}.defaultModel`}
           value={defaultModel}
           onChange={(e) => update({ defaultModel: e.target.value || undefined })}
           className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors"
@@ -642,14 +662,14 @@ export function OpencodeDispatchSection(): React.JSX.Element {
         </div>
         <div className="space-y-0.5">
           {models.length === 0 && (
-            <div className="text-[11px] text-text-muted/70">No opencode models detected.</div>
+            <div className="text-[11px] text-text-muted/70">{noModelsMessage}</div>
           )}
           {models.map((m) => {
             const checked = allowedModels.includes(m.value)
             return (
               <button
                 key={m.value}
-                data-testid="OpencodeDispatchSection.allowedModel"
+                data-testid={`${testid}.allowedModel`}
                 data-id={m.value}
                 onClick={() => toggleAllowed(m.value)}
                 className="w-full flex items-center justify-between py-1 text-[12px] text-text-secondary hover:bg-bg-hover rounded transition-colors cursor-default"
@@ -667,11 +687,48 @@ export function OpencodeDispatchSection(): React.JSX.Element {
           })}
         </div>
       </div>
-      <div className="px-3 pb-1 text-[10px] text-text-muted/50 leading-relaxed">
-        Governs dispatch_agent calls INTO opencode (e.g. a Claude session asking a GPT-backed
-        agent for a second opinion). Empty allowed-models list = any model may be requested.
-      </div>
+      <div className="px-3 pb-1 text-[10px] text-text-muted/50 leading-relaxed">{footerText}</div>
     </div>
+  )
+}
+
+/**
+ * Governs `dispatch_agent` calls INTO opencode (the live Claude→opencode
+ * direction). Self-contained: loads/saves its own opencode EngineConfig via
+ * window.api, editing only the `dispatch` block (never clobbers autoMode etc.).
+ */
+export function OpencodeDispatchSection(): React.JSX.Element {
+  const installed = useOpencodeInstalled()
+  return (
+    <DispatchSection
+      engineId="opencode"
+      testid="OpencodeDispatchSection"
+      installed={installed}
+      notInstalledMessage="opencode is not installed. Cross-engine dispatch lets a Claude session delegate a task to an opencode agent (e.g. a GPT-backed review)."
+      defaultModelTooltip="Used when the dispatching agent doesn't request a model. Format: provider/model-id. With no default set, dispatch_agent calls without an explicit model are rejected."
+      noModelsMessage="No opencode models detected."
+      footerText="Governs dispatch_agent calls INTO opencode (e.g. a Claude session asking a GPT-backed agent for a second opinion). Empty allowed-models list = any model may be requested."
+    />
+  )
+}
+
+/**
+ * Governs `dispatch_agent` calls INTO Claude (the M2 opencode→Claude
+ * direction, plus any future engine). Self-contained: loads/saves its own
+ * Claude EngineConfig via window.api, editing only the `dispatch` block
+ * (never clobbers `sandbox`/`proxy`). Claude is always installed (bundled
+ * default engine), so there's no "not installed" gate — see DispatchSection.
+ */
+export function ClaudeDispatchSection(): React.JSX.Element {
+  return (
+    <DispatchSection
+      engineId="claude"
+      testid="ClaudeDispatchSection"
+      installed={true}
+      defaultModelTooltip="Used when the dispatching agent doesn't request a model. Claude model aliases (e.g. sonnet, haiku, opus). With no default set, dispatch_agent calls without an explicit model are rejected."
+      noModelsMessage="No Claude models detected."
+      footerText="Governs dispatch_agent calls INTO Claude from other engines (e.g. an opencode session asking Claude for a second opinion). Empty allowed-models list = any model may be requested."
+    />
   )
 }
 
@@ -3684,6 +3741,27 @@ export const SECTIONS: Section[] = [
     ]
   },
   {
+    id: 'claude-dispatch',
+    label: 'Cross-engine dispatch',
+    icon: (
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M17 3l4 4-4 4" />
+        <path d="M21 7H9a4 4 0 00-4 4v1" />
+        <path d="M7 21l-4-4 4-4" />
+        <path d="M3 17h12a4 4 0 004-4v-1" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'claudeDispatch',
+        label: 'Cross-engine dispatch',
+        keywords:
+          'claude dispatch cross engine agent delegate collab model allowlist default sonnet haiku opus',
+        render: () => <ClaudeDispatchSection />
+      }
+    ]
+  },
+  {
     id: 'effortDefaults',
     label: 'Default effort',
     icon: (
@@ -3859,7 +3937,7 @@ const APP_SECTION_IDS = new Set([
 
 /** Section ids that belong to Engines > Claude */
 const ENGINE_CLAUDE_SECTION_IDS = new Set([
-  'permissions', 'sandbox', 'proxy'
+  'permissions', 'sandbox', 'proxy', 'claude-dispatch'
 ])
 
 /** Section ids that belong to Engines > opencode (content self-gates on install) */
@@ -3929,7 +4007,9 @@ export const SCOPES: ScopeDef[] = [
       {
         id: 'claude-engine',
         label: 'Engine',
-        sections: getSectionsForIds(ENGINE_CLAUDE_SECTION_IDS, ['permissions', 'sandbox', 'proxy'])
+        sections: getSectionsForIds(ENGINE_CLAUDE_SECTION_IDS, [
+          'permissions', 'sandbox', 'proxy', 'claude-dispatch'
+        ])
       },
       {
         id: 'claude-vendor',

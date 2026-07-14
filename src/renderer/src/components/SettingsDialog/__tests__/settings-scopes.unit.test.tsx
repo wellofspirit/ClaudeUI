@@ -72,9 +72,11 @@ describe('SCOPES structure', () => {
       ])
     })
 
-    it('Engine subgroup contains permissions, sandbox, proxy in order', () => {
+    it('Engine subgroup contains permissions, sandbox, proxy, claude-dispatch in order', () => {
       const engine = claude.subgroups.find((sg) => sg.label === 'Engine')!
-      expect(engine.sections.map((s) => s.id)).toEqual(['permissions', 'sandbox', 'proxy'])
+      expect(engine.sections.map((s) => s.id)).toEqual([
+        'permissions', 'sandbox', 'proxy', 'claude-dispatch'
+      ])
     })
 
     it('Vendor subgroup contains vendor-anthropic, effortDefaults in order', () => {
@@ -171,6 +173,10 @@ describe('SECTION_SCOPE_MAP', () => {
 
   it('opencode-dispatch → opencode', () => {
     expect(SECTION_SCOPE_MAP.get('opencode-dispatch')).toBe('opencode')
+  })
+
+  it('claude-dispatch → claude', () => {
+    expect(SECTION_SCOPE_MAP.get('claude-dispatch')).toBe('claude')
   })
 
   it('opencode-providers → opencode', () => {
