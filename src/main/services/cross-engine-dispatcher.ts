@@ -303,7 +303,25 @@ export class CrossEngineDispatcher {
         return errorResult(`Dispatched turn failed: ${msg}`, entry.sessionId)
       }
 
-      const resp = winner.resp as { parts?: Array<{ type?: string; text?: string }> } | undefined
+      const resp = winner.resp as
+        | {
+            info?: { error?: { name?: string; data?: { message?: string } } }
+            parts?: Array<{ type?: string; text?: string }>
+          }
+        | undefined
+      // opencode's POST /session/{id}/message RESOLVES even when the model turn
+      // errors — the failure lives on info.error (a named-error union, each
+      // { name, data?: { message? } }). Surface it as an isError instead of
+      // silently returning the empty-text fallback (hiding a hard failure like
+      // "Key limit exceeded" as an apparent success). Target stays alive for
+      // continuation, so return its sessionId (parity with other error paths).
+      const turnError = resp?.info?.error
+      if (turnError) {
+        this.dismissPendingForTarget(entry.sessionId)
+        const detail =
+          turnError.data?.message || turnError.name || 'the dispatched agent reported an error'
+        return errorResult(`Dispatched turn failed: ${detail}`, entry.sessionId)
+      }
       const text = (resp?.parts ?? [])
         .filter((p) => p?.type === 'text')
         .map((p) => p?.text ?? '')

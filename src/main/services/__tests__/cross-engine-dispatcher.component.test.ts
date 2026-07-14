@@ -389,6 +389,34 @@ describe('CrossEngineDispatcher — target lifecycle', () => {
     expect(result.text).toContain('server exploded')
   })
 
+  it('a RESOLVED turn carrying info.error → isError with the error detail (session stays alive)', async () => {
+    // opencode's POST /session/{id}/message resolves even on turn failure — the
+    // error lives on info.error, not a rejection. This must surface as isError,
+    // NOT the empty-text success fallback.
+    const { dispatcher, client } = makeHarness()
+    client.prompt.mockResolvedValueOnce({
+      info: { error: { name: 'UnknownError', data: { message: 'Key limit exceeded' } } },
+      parts: []
+    })
+    const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain('Key limit exceeded')
+    // Target survives for continuation — sessionId is the created target's id.
+    expect(result.sessionId).toBe('oc-sess-1')
+  })
+
+  it('a turn error with only a name (no data.message) → isError with the name', async () => {
+    const { dispatcher, client } = makeHarness()
+    client.prompt.mockResolvedValueOnce({
+      info: { error: { name: 'ContextOverflowError' } },
+      parts: []
+    })
+    const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain('ContextOverflowError')
+    expect(result.sessionId).toBe('oc-sess-1')
+  })
+
   it('a failed createSession rolls back the server ref and returns isError', async () => {
     const { dispatcher, client, deps } = makeHarness()
     client.createSession.mockRejectedValueOnce(new Error('cannot create'))
