@@ -7,7 +7,7 @@
  * waiting for upstream SDK releases.
  */
 export { query } from './query'
-export { createSdkMcpServer, tool } from './create-sdk-mcp'
+export { createSdkMcpServer, tool, sendProgress } from './create-sdk-mcp'
 export { locateBunClaude, locateCliJs, getCliVersion } from './locate'
 export type {
   SDKMessage,
@@ -37,6 +37,7 @@ export type {
   McpServerSse,
   SdkMcpServer,
   SdkMcpTool,
+  SdkToolExtra,
   ToolResultContent,
   SettingSource,
   SystemPrompt,

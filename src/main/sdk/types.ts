@@ -405,15 +405,32 @@ export interface SdkMcpServer {
 export type McpServerConfig = McpServerStdio | McpServerHttp | McpServerSse | SdkMcpServer
 
 /**
+ * Extra context passed alongside a tool call's parsed input — mirrors the
+ * MCP SDK's `RequestHandlerExtra` but trimmed to what our tool handlers
+ * need. `signal` fires when the caller (cli.js control channel or an MCP
+ * client) cancels the in-flight call; `sendNotification` lets a long-running
+ * handler emit progress (see `sendProgress()` in create-sdk-mcp.ts).
+ */
+export interface SdkToolExtra {
+  signal: AbortSignal
+  progressToken?: string | number
+  sendNotification: (notification: {
+    method: string
+    params?: Record<string, unknown>
+  }) => Promise<void>
+}
+
+/**
  * A tool registered on an in-process SDK MCP server. The schema is a record
  * of Zod validators (or any runtime with `.parse()`), matching the upstream
- * `tool()` helper's signature.
+ * `tool()` helper's signature. `extra` is optional so existing one-arg
+ * handlers (mermaid, mockup, auto-classifier) keep compiling unchanged.
  */
 export interface SdkMcpTool {
   name: string
   description: string
   inputSchema: Record<string, ZodLike>
-  handler: (input: Record<string, unknown>) => Promise<ToolResultContent>
+  handler: (input: Record<string, unknown>, extra?: SdkToolExtra) => Promise<ToolResultContent>
 }
 
 /** Minimal Zod-shaped interface — we only need parsing and JSON schema conversion. */
