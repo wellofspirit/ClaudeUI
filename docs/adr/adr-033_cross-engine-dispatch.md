@@ -86,9 +86,10 @@ De-risked against opencode v1.17.14 source (pinned clone in git-ignored `vendor/
 - Per ADR-030, a `crossEngineDispatch` capability flag is only set true for an engine once the full
   path (tool visible → gated → dispatch → stream → result) works end-to-end for that engine.
 
-## M2 (opencode→Claude) — decisions + kickoff
+## M2–M4 — decisions + full plan
 
-Full standalone implementation spec: **`docs/v2/m2-cross-engine-reverse-kickoff.md`**.
+Full standalone implementation plan (M2 reverse direction, M3 streaming UX, M4 usage/capability/
+hardening): **`docs/v2/cross-engine-dispatch-implementation-plan.md`**.
 
 - **Caller-session identity on the shared opencode MCP host** — RESOLVED: a ClaudeUI-provided
   opencode **plugin** stamps the caller `sessionID` into the dispatch tool's args via
