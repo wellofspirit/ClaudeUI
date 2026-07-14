@@ -27,6 +27,7 @@ export type {
   UnknownSDKMessage,
   PermissionMode,
   CanUseTool,
+  CanUseToolContext,
   CanUseToolResult,
   QueryOptions,
   QueryInput,

@@ -118,6 +118,25 @@ export interface ISession {
   setInactivityTimeout(ms: number): void
 
   /**
+   * Re-broadcast an IPC event under this session's routing (same wire shape
+   * as the session's own internal `send()`). Used by cross-engine dispatch
+   * (ADR-033 M2) to forward a dispatched Claude target's approval requests
+   * into the dispatching opencode session's chat, from OUTSIDE the session
+   * class (the opencode-hosted `dispatch_agent` tool handler has no other
+   * access to the protected `send()`).
+   */
+  emit(channel: string, data: unknown): void
+
+  /**
+   * Current permission-mode string (Claude-style — 'default'|'plan'|
+   * 'acceptEdits'|'auto'|...). Optional: only engines whose sessions are a
+   * cross-engine dispatch CALLER need it (opencode, for ADR-033 M2 autonomy
+   * inheritance). Claude sessions build the dispatch context inline instead
+   * (see collab-tool.ts) and don't implement this.
+   */
+  getAutonomyMode?(): string
+
+  /**
    * Ask a one-off question outside the main conversation history (the `/btw`
    * command). Returns the assistant's answer, or null if the engine does not
    * support the capability or encounters an error.

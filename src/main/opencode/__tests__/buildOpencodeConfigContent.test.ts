@@ -21,8 +21,13 @@ import type { OpencodeMcpEntry } from '../claude-mcp-bridge'
 const PORT = 19000
 const TOKEN = 'test-token'
 
-function parse(bridgedMcp?: Record<string, OpencodeMcpEntry>): Record<string, unknown> {
-  return JSON.parse(buildOpencodeConfigContent(PORT, TOKEN, bridgedMcp)) as Record<string, unknown>
+function parse(
+  bridgedMcp?: Record<string, OpencodeMcpEntry>,
+  pluginPath?: string | null
+): Record<string, unknown> {
+  return JSON.parse(
+    buildOpencodeConfigContent(PORT, TOKEN, bridgedMcp, pluginPath)
+  ) as Record<string, unknown>
 }
 
 describe('buildOpencodeConfigContent', () => {
@@ -69,6 +74,30 @@ describe('buildOpencodeConfigContent', () => {
   it('sets experimental.continue_loop_on_deny: true (rejections stay non-fatal)', () => {
     const out = parse()
     expect(out.experimental).toEqual({ continue_loop_on_deny: true })
+  })
+
+  // ── ADR-033 M2: dispatch timeout + caller-identity plugin ──────────────────
+
+  it('sets mcp.claudeui.timeout to a generous value (exceeds the dispatcher 10-min DISPATCH_TIMEOUT_MS)', () => {
+    const out = parse()
+    const mcp = out.mcp as Record<string, unknown>
+    const claudeui = mcp.claudeui as Record<string, unknown>
+    expect(claudeui.timeout).toBeGreaterThan(10 * 60 * 1000)
+  })
+
+  it('omits `plugin` when no pluginPath is provided', () => {
+    const out = parse()
+    expect(out).not.toHaveProperty('plugin')
+  })
+
+  it('emits plugin: [path] when a pluginPath is provided', () => {
+    const out = parse(undefined, '/abs/path/to/claudeui-xeng-plugin.ts')
+    expect(out.plugin).toEqual(['/abs/path/to/claudeui-xeng-plugin.ts'])
+  })
+
+  it('omits `plugin` when pluginPath is explicitly null (not found)', () => {
+    const out = parse(undefined, null)
+    expect(out).not.toHaveProperty('plugin')
   })
 
   // ── bridgedMcp integration ────────────────────────────────────────────────

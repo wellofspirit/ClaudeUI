@@ -1,6 +1,6 @@
 /**
- * Single McpServer ('claudeui') that exposes all three hosted tools:
- *   render_mermaid, create_mockup, show_mockup
+ * Single McpServer ('claudeui') that exposes all four hosted tools:
+ *   render_mermaid, create_mockup, show_mockup, dispatch_agent
  *
  * Reuses the real tool handler logic from mermaid-tool.ts and
  * mockup-tool.ts — no duplication. Tool definitions are extracted from
@@ -10,20 +10,102 @@
  * opencode sanitizes tool names as `sanitize(serverName)_sanitize(toolName)`
  * where sanitize = `s.replace(/[^a-zA-Z0-9_-]/g, "_")`. With server name
  * 'claudeui' the resulting names are:
- *   claudeui_render_mermaid, claudeui_create_mockup, claudeui_show_mockup
+ *   claudeui_render_mermaid, claudeui_create_mockup, claudeui_show_mockup,
+ *   claudeui_dispatch_agent
+ *
+ * `dispatch_agent` (ADR-033 M2, opencode → Claude) is registered directly
+ * (not extracted from an SdkMcpServer factory) because it needs the raw MCP
+ * SDK `extra` (RequestHandlerExtra) adapted into our SdkToolExtra shape, and
+ * because it depends on TWO things this module must NOT import directly —
+ * see the cycle note on `CallerSessionLookup`/`DispatchAgentFn` below.
  */
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
-import type { z } from 'zod'
+import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/protocol.js'
+import type { ServerNotification, ServerRequest } from '@modelcontextprotocol/sdk/types.js'
+import { z } from 'zod'
 import { createMermaidServer } from '../services/mermaid-tool'
 import { createMockupServer } from '../services/mockup-tool'
-import type { SdkMcpTool } from '../sdk/types'
+import type { SdkMcpTool, SdkToolExtra } from '../sdk/types'
+// `import type` only: DispatchContext/DispatchRequest/DispatchResult are
+// ERASED at compile time, so this does NOT create a runtime import cycle
+// even though cross-engine-dispatcher.ts (at runtime) imports
+// OpencodeServerManager.ts, which imports THIS module.
+import type { DispatchContext, DispatchRequest, DispatchResult } from '../services/cross-engine-dispatcher'
 
 /**
- * Create a single McpServer (name 'claudeui') that exposes all three hosted
+ * What the dispatch tool needs to know about the CALLING opencode session.
+ * Deliberately structural/minimal (not `OpencodeSession` itself) — see the
+ * cycle note below.
+ */
+export interface CallerSessionHandle {
+  cwd: string
+  /** Claude-style permission-mode string (buildRuleset's `mode` param). */
+  autonomyMode: string
+  /** Re-emits an event under the caller session's routing (ISession.emit). */
+  emit: (channel: string, data: unknown) => void
+}
+
+/**
+ * Resolves the live OpencodeSession for a caller session id (routingId,
+ * post-rekey — see collab-tool.ts's identical convention on the Claude
+ * side) into the minimal handle above, or undefined if no such session is
+ * currently live.
+ *
+ * CYCLE NOTE: this module is imported by OpencodeServerManager.ts (to build
+ * the hosted tools server), which is in turn imported by
+ * cross-engine-dispatcher.ts (for opencode targets) AND by OpencodeSession.ts
+ * (its own server connection). If this module imported `sessionManager`
+ * (session-manager.ts → register-engines.ts → OpencodeSession.ts →
+ * OpencodeServerManager.ts → **this module**) or `crossEngineDispatcher`
+ * (cross-engine-dispatcher.ts → OpencodeServerManager.ts → **this module**)
+ * directly, both would form a require-cycle. Instead, the lookup (and the
+ * dispatch function below) are threaded in as a constructor-injected
+ * dependency: OpencodeServerManager holds a settable field, wired ONCE at
+ * app bootstrap in main/index.ts (which sits above both cycles and can
+ * safely import sessionManager + crossEngineDispatcher).
+ */
+export type CallerSessionLookup = (sessionId: string) => CallerSessionHandle | undefined
+
+/** Same cycle-avoidance rationale as CallerSessionLookup above. */
+export type DispatchAgentFn = (req: DispatchRequest, ctx: DispatchContext) => Promise<DispatchResult>
+
+const dispatchAgentInputSchema = {
+  engine: z.enum(['claude']).describe('Target engine to dispatch to'),
+  prompt: z.string().describe('Task for the dispatched agent'),
+  model: z
+    .string()
+    .optional()
+    .describe(
+      'Target model as a Claude alias (e.g. "haiku", "sonnet") — must be user-allowed. Omit for the configured default.'
+    ),
+  session_id: z
+    .string()
+    .optional()
+    .describe('session_id from a previous dispatch_agent result — continues that agent'),
+  // Internal — see resources/opencode/claudeui-xeng-plugin.ts. Declared
+  // explicitly so our Zod validator does not STRIP it (z.object() drops
+  // unknown keys by default); the handler reads then removes it before any
+  // other use.
+  __xeng_caller_session: z
+    .string()
+    .optional()
+    .describe('internal — set automatically by the ClaudeUI plugin; never set this yourself')
+}
+
+/**
+ * Create a single McpServer (name 'claudeui') that exposes all hosted
  * tools. Cwd is baked into the mockup tool's path resolution at creation time
  * (mockups land under `<cwd>/.claude/ui/mockups`).
+ *
+ * `lookupCallerSession`/`dispatch` are optional so existing callers (and
+ * lifecycle tests that only exercise server spawn/teardown) keep working
+ * unchanged; when omitted, `dispatch_agent` degrades to a safe isError
+ * instead of throwing or silently misrouting.
  */
-export function createOpencodeHostedToolsServer(cwd: string): McpServer {
+export function createOpencodeHostedToolsServer(
+  cwd: string,
+  deps: { lookupCallerSession?: CallerSessionLookup; dispatch?: DispatchAgentFn } = {}
+): McpServer {
   const server = new McpServer(
     { name: 'claudeui', version: '1.0.0' },
     { capabilities: { tools: {} } }
@@ -44,6 +126,96 @@ export function createOpencodeHostedToolsServer(cwd: string): McpServer {
       t.handler as unknown as (...args: any[]) => any
     )
   }
+
+  server.registerTool(
+    'dispatch_agent',
+    {
+      description:
+        'Delegate a task to an agent running on a DIFFERENT engine (Claude, Anthropic\'s models). ' +
+        'The agent runs headless in the same working directory and its final answer is returned as ' +
+        'this tool result. The result includes a session_id — pass it back as `session_id` to ' +
+        'continue the same agent with its context intact (multi-turn collaboration). The available ' +
+        'model list is user-configured; omit `model` to use the configured default.',
+      inputSchema: dispatchAgentInputSchema
+    },
+    async (
+      args: Record<string, unknown>,
+      extra: RequestHandlerExtra<ServerRequest, ServerNotification>
+    ) => {
+      const { engine, prompt, model, session_id, __xeng_caller_session } = args as {
+        engine: 'claude'
+        prompt: string
+        model?: string
+        session_id?: string
+        __xeng_caller_session?: string
+      }
+
+      if (!__xeng_caller_session) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text:
+                'dispatch_agent could not identify the calling session. The ClaudeUI caller-identity ' +
+                'plugin (claudeui-xeng-plugin) must be loaded by opencode for cross-engine dispatch to ' +
+                'work — ask the user to check their opencode configuration.'
+            }
+          ],
+          isError: true
+        }
+      }
+
+      const caller = deps.lookupCallerSession?.(__xeng_caller_session)
+      if (!caller) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: `dispatch_agent could not find the calling session (${__xeng_caller_session}) — it may have ended. Start a fresh dispatch from an active session.`
+            }
+          ],
+          isError: true
+        }
+      }
+
+      if (!deps.dispatch) {
+        return {
+          content: [
+            { type: 'text' as const, text: 'Cross-engine dispatch is not wired up in this build.' }
+          ],
+          isError: true
+        }
+      }
+
+      const toolExtra: SdkToolExtra = {
+        signal: extra.signal,
+        progressToken: extra._meta?.progressToken,
+        sendNotification: (notification) =>
+          extra.sendNotification(notification as ServerNotification)
+      }
+
+      const result = await deps.dispatch(
+        { engine, prompt, model, sessionId: session_id },
+        {
+          fromEngine: 'opencode',
+          fromRoutingId: __xeng_caller_session,
+          cwd: caller.cwd,
+          autonomyMode: caller.autonomyMode,
+          emit: caller.emit,
+          extra: toolExtra
+        }
+      )
+
+      const text = result.isError
+        ? result.text
+        : `${result.text}\n\n[dispatch session_id: ${result.sessionId} — pass it as session_id to continue this agent]`
+
+      return {
+        content: [{ type: 'text' as const, text }],
+        ...(result.isError ? { isError: true } : {})
+      }
+    }
+  )
 
   return server
 }

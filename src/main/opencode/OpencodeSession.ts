@@ -46,90 +46,31 @@ import { classify, isAutoModeFastPathAllowed, type JudgeFn } from './auto-mode-c
 import { loadEngineConfig } from '../services/ui-config'
 import type { ClaudePermissions, PermissionScope } from '../../shared/types'
 import { blockUsageService } from '../services/block-usage'
-
-// Permission ruleset helper
-type PermissionAction = 'allow' | 'ask' | 'deny'
-
-export interface PermissionRule {
-  permission: string
-  pattern: string
-  action: PermissionAction
-}
-
-/**
- * Map a neutral autonomy mode → an opencode session permission ruleset.
- *
- * opencode permissions are an ORDERED rule array evaluated LAST-MATCH-WINS
- * (verified against 1.17.9), where `permission` is a tool/category name
- * (`*`, `edit`, `bash`, `webfetch`, `task`, `read`, `glob`, `grep`, …) and
- * `pattern` matches the tool argument. Read-class tools (`read`/`glob`/`grep`/
- * `list`) and `task` are allow-by-default — they only prompt if we make them.
- *
- * We therefore start from a permissive `{*:allow}` baseline (mirroring how
- * opencode's own built-in agents are structured) and LAYER mode-specific
- * `ask`/`deny` overrides for the write-class tools on top. This preserves
- * Claude-equivalent semantics — reads + `task` auto-allowed; edits/bash/webfetch
- * gated — instead of the old wildcard `{*:* ask|allow}` that forced EVERY tool
- * (including `task`, which hung the turn) to prompt and clobbered opencode's
- * own protections. See ADR-022.
- *
- * `mode` is the Claude-style permission-mode string the renderer already speaks
- * (autonomy plan→'plan', ask→'default', autoEdit→'acceptEdits', full→'auto').
- */
-export function buildRuleset(mode: string): PermissionRule[] {
-  const allowAll: PermissionRule = { permission: '*', pattern: '*', action: 'allow' }
-  const rule = (permission: string, action: PermissionAction): PermissionRule => ({
-    permission,
-    pattern: '*',
-    action
-  })
-  // Portable subset of opencode's own built-in guards (its agents keep these even
-  // in permissive mode): a doom-loop ask + secret-file read protection. Layered
-  // after the `{*:allow}` baseline (last-match-wins). We omit opencode's
-  // `external_directory` guard — its safe form needs an env-specific allow-list
-  // for opencode's own tool-output/temp dirs, so a bare `{external_directory:ask}`
-  // would spuriously prompt on opencode's internal writes. See ADR-022.
-  const guards: PermissionRule[] = [
-    { permission: 'doom_loop', pattern: '*', action: 'ask' },
-    { permission: 'read', pattern: '*.env', action: 'ask' },
-    { permission: 'read', pattern: '*.env.*', action: 'ask' },
-    { permission: 'read', pattern: '*.env.example', action: 'allow' }
-  ]
-  switch (mode) {
-    case 'acceptEdits':
-    case 'autoEdit':
-      // Auto-accept file edits; still gate command execution + network fetch.
-      return [allowAll, ...guards, rule('bash', 'ask'), rule('webfetch', 'ask')]
-    case 'plan':
-      // Read-only planning. Pairs with opencode's `plan` agent (set in
-      // applyPermissionMode). Mirrors that agent's own rules (verified in the
-      // opencode source — plan = merge(base, { edit:{'*':deny, …plan files…},
-      // task:{general:deny} })): deny edits, and deny ONLY the mutating
-      // `general` subagent. Read-only subagents (e.g. `explore`) stay allowed
-      // via the baseline, so plan-mode research/`task` still works. `deny`
-      // refuses without prompting → no approval round-trip, no hang.
-      // (We don't reproduce opencode's plan-file edit allow-list — minor.)
-      return [allowAll, ...guards, rule('edit', 'deny'), { permission: 'task', pattern: 'general', action: 'deny' }]
-    case 'auto':
-    case 'full':
-    case 'default':
-    case 'ask':
-    default:
-      // Claude default — read-only autonomy + ask for write-class tools.
-      //
-      // `full`/`auto` are INTENTIONALLY gated identically to `default` for now.
-      // ClaudeUI's `full` autonomy maps to Claude's `auto` permission mode — an
-      // LLM-gated "security monitor", NOT `bypassPermissions`. We haven't ported
-      // that gatekeeper to opencode yet, so a raw `{*:allow}` here would make
-      // opencode `full` strictly LESS safe than Claude `full`. Interim: gate
-      // `full` like `default` (never less safe than Claude) until the classifier
-      // lands, at which point `full` switches risky tools to classifier-decided.
-      // See ADR-022.
-      return [allowAll, ...guards, rule('edit', 'ask'), rule('bash', 'ask'), rule('webfetch', 'ask')]
-  }
-}
+import { crossEngineDispatcher } from '../services/cross-engine-dispatcher'
+// Permission ruleset helper — extracted to permission-ruleset.ts so
+// cross-engine-dispatcher.ts can depend on it without importing THIS module
+// (which would cycle back now that this file imports crossEngineDispatcher
+// above). Re-exported here for back-compat with any other existing importer.
+import { buildRuleset } from './permission-ruleset'
+import type { PermissionRule } from './permission-ruleset'
+export { buildRuleset } from './permission-ruleset'
+export type { PermissionRule } from './permission-ruleset'
 
 const DEFAULT_MODEL = 'opencode/mimo-v2.5-free'
+
+/**
+ * Gates the ClaudeUI-hosted `claudeui_dispatch_agent` tool (ADR-033 M2) in
+ * EVERY autonomy mode, appended LAST (after buildRuleset + the user's own
+ * compiled rules) so last-match-wins can't accidentally auto-allow it via a
+ * blanket user rule. In `auto`/`full` mode the ADR-023 LLM gatekeeper fields
+ * the resulting permission.asked like any other gated tool — intended parity,
+ * not a special case.
+ */
+const DISPATCH_AGENT_ASK_RULE: PermissionRule = {
+  permission: 'claudeui_dispatch_agent',
+  pattern: '*',
+  action: 'ask'
+}
 
 export class OpencodeSession extends BaseSession {
   readonly engineId = 'opencode' as const
@@ -246,6 +187,13 @@ export class OpencodeSession extends BaseSession {
 
   getSessionId(): string | null {
     return this.openSessionId
+  }
+
+  /** Public accessor for cross-engine dispatch (ADR-033 M2) — the caller-session
+   *  lookup wired in main/index.ts reads this to inherit autonomy into a
+   *  dispatched Claude target. `permissionMode` itself stays private. */
+  getAutonomyMode(): string {
+    return this.permissionMode
   }
 
   protected override resetInactivityTimer(): void {
@@ -875,6 +823,9 @@ export class OpencodeSession extends BaseSession {
     this.sseAbort?.abort()
     this.sseAbort = null
     this.childSessions.clear()
+    // Tear down any cross-engine dispatch targets owned by this session
+    // (ADR-033 M2 — mirrors ClaudeSession.cancel()'s identical call).
+    crossEngineDispatcher.disposeFor(this.routingId)
     // Drop all pending bash-output throttle timers — nothing left to flush to
     // once the SSE consumer stops; a firing timer after teardown would send()
     // to a session that's going away.
@@ -1022,7 +973,7 @@ export class OpencodeSession extends BaseSession {
     // (Claude's allow/ask/deny + additionalDirectories) compiled to opencode and
     // appended AFTER the base so they override it (last-match-wins). This makes
     // the SAME configured rules apply to opencode as to Claude. See ADR-022.
-    const ruleset = [...buildRuleset(baseMode), ...this.compiledUserRules()]
+    const ruleset = [...buildRuleset(baseMode), ...this.compiledUserRules(), DISPATCH_AGENT_ASK_RULE]
     try {
       await this.client.patchSession(this.openSessionId, { permission: ruleset })
     } catch (err) {

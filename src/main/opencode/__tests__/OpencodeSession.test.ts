@@ -933,6 +933,10 @@ const GUARDS: Rule[] = [
   { permission: 'read', pattern: '*.env.*', action: 'ask' },
   { permission: 'read', pattern: '*.env.example', action: 'allow' }
 ]
+// ADR-033 M2: gates the dispatch_agent tool in EVERY mode, appended LAST
+// (after buildRuleset + the user's compiled rules) so last-match-wins can't
+// accidentally auto-allow it via a blanket user rule.
+const DISPATCH_ASK_RULE: Rule = { permission: 'claudeui_dispatch_agent', pattern: '*', action: 'ask' }
 
 describe('OpencodeSession — permission mode → ruleset mapping (ADR-022)', () => {
   beforeEach(setupMocks)
@@ -953,7 +957,8 @@ describe('OpencodeSession — permission mode → ruleset mapping (ADR-022)', ()
       ...GUARDS,
       { permission: 'edit', pattern: '*', action: 'ask' },
       { permission: 'bash', pattern: '*', action: 'ask' },
-      { permission: 'webfetch', pattern: '*', action: 'ask' }
+      { permission: 'webfetch', pattern: '*', action: 'ask' },
+      DISPATCH_ASK_RULE
     ])
     // Regression for the subagent hang: `task` must NOT be forced to ask.
     expect(rs.some((r) => r.permission === 'task')).toBe(false)
@@ -964,7 +969,8 @@ describe('OpencodeSession — permission mode → ruleset mapping (ADR-022)', ()
       ALLOW_ALL,
       ...GUARDS,
       { permission: 'bash', pattern: '*', action: 'ask' },
-      { permission: 'webfetch', pattern: '*', action: 'ask' }
+      { permission: 'webfetch', pattern: '*', action: 'ask' },
+      DISPATCH_ASK_RULE
     ])
   })
 
@@ -995,7 +1001,8 @@ describe('OpencodeSession — permission mode → ruleset mapping (ADR-022)', ()
       ALLOW_ALL,
       ...GUARDS,
       { permission: 'edit', pattern: '*', action: 'deny' },
-      { permission: 'task', pattern: 'general', action: 'deny' }
+      { permission: 'task', pattern: 'general', action: 'deny' },
+      DISPATCH_ASK_RULE
     ])
     // Regression for the over-restriction: there must be NO blanket task deny.
     expect(rs.some((r) => r.permission === 'task' && r.pattern === '*')).toBe(false)
@@ -1022,8 +1029,12 @@ describe('OpencodeSession — permission mode → ruleset mapping (ADR-022)', ()
     expect(rs[0]).toEqual(ALLOW_ALL)
     // …then the compiled user rules are appended (so they override the base).
     expect(rs).toContainEqual({ permission: 'bash', pattern: 'git diff*', action: 'allow' })
-    // deny is emitted last so it wins under last-match-wins.
-    expect(rs[rs.length - 1]).toEqual({ permission: 'edit', pattern: 'secrets/**', action: 'deny' })
+    // deny wins over the base ruleset for `edit` under last-match-wins — it's
+    // second-to-last because the dispatch_agent ask rule (a DIFFERENT
+    // permission namespace, so it never conflicts with this one) is always
+    // appended last of all (ADR-033 M2).
+    expect(rs[rs.length - 2]).toEqual({ permission: 'edit', pattern: 'secrets/**', action: 'deny' })
+    expect(rs[rs.length - 1]).toEqual(DISPATCH_ASK_RULE)
     // all three scopes are consulted.
     expect(mockLoadClaudePermissions).toHaveBeenCalledWith('user', expect.any(String))
     expect(mockLoadClaudePermissions).toHaveBeenCalledWith('project', expect.any(String))

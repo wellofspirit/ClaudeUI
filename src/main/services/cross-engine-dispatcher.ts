@@ -6,22 +6,43 @@
  * approval forwarding, result await, and cancellation.
  *
  * Targets are headless dispatcher-owned mini-sessions built on engine client
- * primitives — NOT SessionManager/ISession. The v1 direction is Claude →
- * opencode: targets use OpencodeClient directly (the askSideQuestion / judge
- * precedent), with a synchronous `POST /session/{id}/message` per turn.
+ * primitives — NOT SessionManager/ISession. Two directions are supported:
+ *  - Claude → opencode (M1): targets use OpencodeClient directly (the
+ *    askSideQuestion / judge precedent), with a synchronous
+ *    `POST /session/{id}/message` per turn.
+ *  - opencode → Claude (M2): targets use a raw `sdkQuery()` (the
+ *    service-session.ts precedent) kept alive across turns via a pushable
+ *    streaming-input channel, driven by a manual iterator loop (see the
+ *    `.return()`-kills-the-process hazard noted on `driveClaudeTurn`).
  *
  * All failures come back as `isError` tool text — nothing throws across the
  * MCP boundary.
  */
 import { resolve as resolvePath } from 'node:path'
+import { v4 as uuidv4 } from 'uuid'
 import { opencodeServerManager } from '../opencode/OpencodeServerManager'
 import { OpencodeClient } from '../opencode/OpencodeClient'
-import { buildRuleset } from '../opencode/OpencodeSession'
-import type { PermissionRule } from '../opencode/OpencodeSession'
+// NOT imported from OpencodeSession.ts — that module now imports
+// crossEngineDispatcher (ADR-033 M2 — cancel() disposes owned targets), so
+// importing it here would form a require-cycle. permission-ruleset.ts holds
+// the same buildRuleset/PermissionRule, re-exported from OpencodeSession.ts
+// for any other existing importer.
+import { buildRuleset } from '../opencode/permission-ruleset'
+import type { PermissionRule } from '../opencode/permission-ruleset'
 import { parseModelString } from '../opencode/model-discovery'
+import { claudeSpawnPrep } from '../providers/claude-spawn-prep'
 import { loadEngineConfig } from './ui-config'
-import { sendProgress } from '../sdk'
-import type { SdkToolExtra } from '../sdk'
+import { query as sdkQuery, locateBunClaude, sendProgress } from '../sdk'
+import type {
+  CanUseTool,
+  CanUseToolContext,
+  CanUseToolResult,
+  PermissionMode,
+  QueryHandle,
+  ResultMessage,
+  SDKMessage,
+  SdkToolExtra
+} from '../sdk'
 import { logger } from './logger'
 import type {
   ApprovalDecision,
@@ -86,6 +107,25 @@ export interface DispatchTargetClient {
   ): AsyncGenerator<{ id: string; type: string; properties: Record<string, unknown> }>
 }
 
+/** Spawn opts for a headless Claude dispatch target (ADR-033 M2). */
+export interface ClaudeQuerySpawnOpts {
+  cwd: string
+  model: string
+  permissionMode: PermissionMode
+  allowDangerouslySkipPermissions: boolean
+  canUseTool: CanUseTool
+  abortController: AbortController
+  prompt: AsyncIterable<Record<string, unknown>>
+}
+
+/**
+ * Spawns the headless Claude target's `sdkQuery()`. Injectable so tests
+ * exercise the dispatcher without touching real cli.js / process env
+ * (claudeSpawnPrep mutates module-scoped proxy/endpoint/model env slots —
+ * see claude-spawn-prep.ts's HAZARD comment).
+ */
+export type SpawnClaudeQueryFn = (opts: ClaudeQuerySpawnOpts) => Promise<QueryHandle>
+
 export interface DispatcherDeps {
   serverManager: {
     acquire(cwd: string): Promise<{ baseUrl: string; authHeader: string }>
@@ -93,6 +133,8 @@ export interface DispatcherDeps {
   }
   makeClient: (baseUrl: string, authHeader: string) => DispatchTargetClient
   loadEngineConfig: (engineId: string) => EngineConfig
+  /** Defaults to the real sdkQuery + claudeSpawnPrep. */
+  spawnClaudeQuery?: SpawnClaudeQueryFn
   maxConcurrent?: number
   dispatchTimeoutMs?: number
   heartbeatMs?: number
@@ -107,8 +149,9 @@ const MAX_CONCURRENT = 3
 const DISPATCH_TIMEOUT_MS = 10 * 60 * 1000
 const HEARTBEAT_MS = 15 * 1000
 
-/** A live dispatch target — persists across turns for `session_id` continuation. */
-interface TargetEntry {
+/** A live opencode dispatch target — persists across turns for `session_id` continuation. */
+interface OpencodeTargetEntry {
+  kind: 'opencode'
   sessionId: string
   fromRoutingId: string
   cwd: string
@@ -118,14 +161,58 @@ interface TargetEntry {
   ctx: DispatchContext
 }
 
-/** One shared server connection (+ SSE loop) per cwd with live targets. */
+/**
+ * A live Claude dispatch target (ADR-033 M2). The `sdkQuery()` process stays
+ * alive across turns (persistSession:false → no transcript, so re-spawning
+ * would lose context — see the plan doc's M2-A analysis); `channel` feeds the
+ * streaming-input mode and `iterator` is the ONE iterator obtained from the
+ * query handle for its whole lifetime.
+ *
+ * HAZARD: `QueryHandle[Symbol.asyncIterator]().return()` KILLS the child
+ * process (see sdk/query.ts `makeHandle` — `return: async () => { killChild(); ... }`).
+ * A `for await...of` loop that `break`s early triggers `.return()` via the
+ * language's iterator-closing protocol. We therefore NEVER use `for await` on
+ * `entry.query` — `driveClaudeTurn` calls `entry.iterator.next()` manually in
+ * a plain loop, so ending a turn early (we stop as soon as we see `result`)
+ * never closes the iterator or kills the process.
+ */
+interface ClaudeTargetEntry {
+  kind: 'claude'
+  /** Claude session UUID from `system/init` — null until the first turn's init arrives. */
+  sessionId: string | null
+  fromRoutingId: string
+  cwd: string
+  channel: ClaudeInputChannel
+  query: QueryHandle
+  iterator: AsyncIterator<SDKMessage>
+  abortController: AbortController
+  /**
+   * True while a turn is being driven on `iterator`. There is exactly ONE
+   * iterator per target for its whole lifetime, so two concurrent
+   * `driveClaudeTurn` loops would each steal the other's messages via
+   * `next()` (turn A could consume turn B's `result` — answers cross). A
+   * model CAN issue two dispatch_agent calls with the same session_id in one
+   * assistant turn (their MCP handlers run concurrently — the same race the
+   * activeDispatches slot reservation guards), so a busy target REJECTS the
+   * second call instead of interleaving (reject, don't queue: queueing hides
+   * latency and muddies timeout attribution; the model can just retry).
+   */
+  busy: boolean
+  /** Latest dispatching context — used to forward approvals mid-turn. */
+  ctx: DispatchContext
+}
+
+type TargetEntry = OpencodeTargetEntry | ClaudeTargetEntry
+
+/** One shared opencode server connection (+ SSE loop) per cwd with live targets. */
 interface ConnRecord {
   client: DispatchTargetClient
   sseAbort: AbortController
   targetCount: number
 }
 
-interface PendingForwardedApproval {
+interface OpencodePendingApproval {
+  kind: 'opencode'
   /** Raw opencode permission id (no prefix). */
   permissionId: string
   targetSessionId: string
@@ -133,8 +220,143 @@ interface PendingForwardedApproval {
   emit: (channel: string, data: unknown) => void
 }
 
+interface ClaudePendingApproval {
+  kind: 'claude'
+  /** Null only in the vanishingly unlikely case a tool call landed before
+   *  session_id was known — dismissPendingForTarget matches by string, so
+   *  such an entry simply never gets swept by target-scoped dismissal (it
+   *  still resolves via the abort-listener / explicit resolveApproval). */
+  targetSessionId: string | null
+  emit: (channel: string, data: unknown) => void
+  resolve: (decision: ApprovalDecision, answers?: Record<string, string>) => void
+}
+
+type PendingForwardedApproval = OpencodePendingApproval | ClaudePendingApproval
+
 function errorResult(text: string, sessionId = ''): DispatchResult {
   return { text, sessionId, isError: true }
+}
+
+/**
+ * Minimal pushable async iterable feeding Claude's streaming-input mode —
+ * mirrors claude-session.ts's private `MessageChannel` (duplicated rather
+ * than imported: importing from claude-session.ts here would form a
+ * require-cycle, since claude-session.ts imports THIS module for
+ * `crossEngineDispatcher`/`createCollabServer` wiring).
+ */
+class ClaudeInputChannel implements AsyncIterable<Record<string, unknown>> {
+  private queue: Record<string, unknown>[] = []
+  private waiting: ((result: IteratorResult<Record<string, unknown>>) => void) | null = null
+  private isDone = false
+
+  push(msg: Record<string, unknown>): void {
+    if (this.isDone) return
+    if (this.waiting) {
+      const resolve = this.waiting
+      this.waiting = null
+      resolve({ value: msg, done: false })
+    } else {
+      this.queue.push(msg)
+    }
+  }
+
+  end(): void {
+    this.isDone = true
+    if (this.waiting) {
+      const resolve = this.waiting
+      this.waiting = null
+      resolve({ value: undefined as unknown as Record<string, unknown>, done: true })
+    }
+  }
+
+  [Symbol.asyncIterator](): AsyncIterator<Record<string, unknown>> {
+    return this as unknown as AsyncIterator<Record<string, unknown>>
+  }
+
+  async next(): Promise<IteratorResult<Record<string, unknown>>> {
+    if (this.queue.length > 0) {
+      return { value: this.queue.shift()!, done: false }
+    }
+    if (this.isDone) {
+      return { value: undefined as unknown as Record<string, unknown>, done: true }
+    }
+    return new Promise((resolve) => {
+      this.waiting = resolve
+    })
+  }
+}
+
+/** Build the `{type:'user', ...}` SDK message shape cli.js expects on the
+ *  streaming-input channel — mirrors claude-session.ts's `run()`. */
+function buildClaudeDispatchMessage(
+  prompt: string,
+  sessionId: string | null
+): Record<string, unknown> {
+  return {
+    type: 'user' as const,
+    session_id: sessionId ?? '',
+    message: { role: 'user' as const, content: prompt },
+    parent_tool_use_id: null
+  }
+}
+
+/**
+ * Map the dispatching session's inherited autonomy (a Claude-style
+ * permission-mode string) to the Claude TARGET's permissionMode (ADR-033 M2
+ * item 5).
+ *  - 'auto' / 'bypassPermissions' → bypassPermissions + allowDangerouslySkipPermissions:
+ *    no LLM judge is spun up for dispatched targets in v1 (ADR-033 §5) —
+ *    "full" autonomy on the caller means allow-all on the target too.
+ *  - 'plan' → 'default': a strictly read-only dispatched agent can't do any
+ *    useful work, so we fall back to the conservative ask-everything mode
+ *    instead of inheriting plan's refusal-by-default.
+ *  - anything else passes through unchanged ('default', 'acceptEdits', ...).
+ */
+function mapAutonomyToClaudeTargetMode(autonomyMode: string): {
+  permissionMode: PermissionMode
+  allowDangerouslySkipPermissions: boolean
+} {
+  switch (autonomyMode) {
+    case 'auto':
+    case 'bypassPermissions':
+      return { permissionMode: 'bypassPermissions', allowDangerouslySkipPermissions: true }
+    case 'plan':
+      return { permissionMode: 'default', allowDangerouslySkipPermissions: false }
+    default:
+      return { permissionMode: autonomyMode as PermissionMode, allowDangerouslySkipPermissions: false }
+  }
+}
+
+/**
+ * Real default for `DispatcherDeps.spawnClaudeQuery`. Duplicates
+ * `getSdkExecutableOpts()` (claude-session.ts) inline rather than importing
+ * it — claude-session.ts imports THIS module (for the collab server /
+ * disposeFor wiring), so importing back would form a require-cycle. The
+ * duplicated shape is 5 fields wide and changes only if the Bun-binary spawn
+ * pipeline itself changes (ADR-006).
+ */
+async function defaultSpawnClaudeQuery(opts: ClaudeQuerySpawnOpts): Promise<QueryHandle> {
+  const engineCfg = loadEngineConfig('claude')
+  await claudeSpawnPrep(opts.model, engineCfg)
+  const bunClaude = locateBunClaude()
+  return sdkQuery({
+    prompt: opts.prompt as AsyncIterable<never>,
+    options: {
+      pathToClaudeCodeExecutable: bunClaude,
+      executable: bunClaude,
+      executableArgs: [],
+      standaloneExecutable: true,
+      env: {},
+      cwd: opts.cwd,
+      model: opts.model,
+      permissionMode: opts.permissionMode,
+      ...(opts.allowDangerouslySkipPermissions ? { allowDangerouslySkipPermissions: true } : {}),
+      persistSession: false,
+      settingSources: [],
+      abortController: opts.abortController,
+      canUseTool: opts.canUseTool
+    }
+  })
 }
 
 export class CrossEngineDispatcher {
@@ -142,12 +364,13 @@ export class CrossEngineDispatcher {
   private readonly maxConcurrent: number
   private readonly dispatchTimeoutMs: number
   private readonly heartbeatMs: number
+  private readonly spawnClaudeQuery: SpawnClaudeQueryFn
 
-  /** Keyed by target (opencode) session id. */
+  /** Keyed by target session id (opencode session id, or Claude session UUID). */
   private targets = new Map<string, TargetEntry>()
-  /** Keyed by resolved cwd. */
+  /** Keyed by resolved cwd — opencode connections only. */
   private connections = new Map<string, ConnRecord>()
-  /** Keyed by prefixed requestId ('xeng:<permission id>'). */
+  /** Keyed by prefixed requestId ('xeng:<id>'). */
   private pendingApprovals = new Map<string, PendingForwardedApproval>()
   private activeDispatches = 0
 
@@ -156,6 +379,7 @@ export class CrossEngineDispatcher {
     this.maxConcurrent = deps.maxConcurrent ?? MAX_CONCURRENT
     this.dispatchTimeoutMs = deps.dispatchTimeoutMs ?? DISPATCH_TIMEOUT_MS
     this.heartbeatMs = deps.heartbeatMs ?? HEARTBEAT_MS
+    this.spawnClaudeQuery = deps.spawnClaudeQuery ?? defaultSpawnClaudeQuery
   }
 
   /** For tests: current in-flight dispatch count. */
@@ -181,7 +405,7 @@ export class CrossEngineDispatcher {
           'Use your own tools (or a native subagent) for same-engine work.'
       )
     }
-    if (req.engine !== 'opencode') {
+    if (req.engine !== 'opencode' && req.engine !== 'claude') {
       return errorResult(`Dispatching into engine "${req.engine}" is not supported yet.`)
     }
     if (this.activeDispatches >= this.maxConcurrent) {
@@ -196,14 +420,78 @@ export class CrossEngineDispatcher {
     // pass. Every path from here on releases the slot via the finally below.
     this.activeDispatches++
     try {
-      return await this.resolveAndRun(req, ctx)
+      return req.engine === 'claude'
+        ? await this.resolveAndRunClaude(req, ctx)
+        : await this.resolveAndRunOpencode(req, ctx)
     } finally {
       this.activeDispatches--
     }
   }
 
-  /** Everything past the guards — runs with an activeDispatches slot held. */
-  private async resolveAndRun(req: DispatchRequest, ctx: DispatchContext): Promise<DispatchResult> {
+  /**
+   * Resolve a forwarded approval coming back from the approve IPC. Returns
+   * true when the requestId belongs to the dispatcher (the reserved `xeng:`
+   * prefix) — the IPC handler then skips the session's own resolveApproval.
+   */
+  resolveApproval(
+    requestId: string,
+    decision: ApprovalDecision,
+    answers?: Record<string, string>,
+    _updatedPermissions?: PermissionSuggestion[]
+  ): boolean {
+    if (!requestId.startsWith(XENG_REQUEST_PREFIX)) return false
+    const pending = this.pendingApprovals.get(requestId)
+    // Prefixed ids are exclusively dispatcher-owned: consume even when stale
+    // (e.g. already cascade-rejected) so no session ever sees an xeng id.
+    if (!pending) return true
+    this.pendingApprovals.delete(requestId)
+
+    if (pending.kind === 'claude') {
+      pending.resolve(decision, answers)
+      return true
+    }
+
+    const allow = decision === 'allow' || decision === 'allowForSession'
+    const reply = !allow ? 'reject' : decision === 'allowForSession' ? 'always' : 'once'
+    // Deny feedback is model-visible (CorrectedError, non-fatal) — parity with
+    // OpencodeSession.resolveApproval.
+    const message = !allow ? answers?.feedback || 'User denied' : undefined
+    const replied = message
+      ? pending.client.replyPermission(pending.permissionId, reply, message)
+      : pending.client.replyPermission(pending.permissionId, reply)
+    replied.catch((err) => {
+      logger.warn(
+        'CrossEngineDispatcher',
+        `replyPermission failed: ${err instanceof Error ? err.message : String(err)}`
+      )
+    })
+    return true
+  }
+
+  /** Tear down every target (+ SSE subs / server refs) owned by a dispatching session. */
+  disposeFor(routingId: string): void {
+    for (const [sessionId, entry] of [...this.targets]) {
+      if (entry.fromRoutingId !== routingId) continue
+      this.targets.delete(sessionId)
+      this.dismissPendingForTarget(sessionId)
+      if (entry.kind === 'opencode') {
+        entry.client.deleteSession(sessionId).catch(() => {})
+        this.releaseConnection(entry)
+      } else {
+        // Killing the process is the only teardown a Claude target needs —
+        // no server ref, no remote session to delete.
+        entry.abortController.abort()
+      }
+    }
+  }
+
+  // ── opencode direction (M1) ───────────────────────────────────────────────
+
+  /** Everything past the guards for engine:'opencode' — runs with an activeDispatches slot held. */
+  private async resolveAndRunOpencode(
+    req: DispatchRequest,
+    ctx: DispatchContext
+  ): Promise<DispatchResult> {
     // ── Model resolution ──────────────────────────────────────────────────
     const dispatchCfg = this.deps.loadEngineConfig(req.engine).dispatch
     const model = req.model ?? dispatchCfg?.defaultModel
@@ -223,10 +511,10 @@ export class CrossEngineDispatcher {
     }
 
     // ── Target resolution ─────────────────────────────────────────────────
-    let entry: TargetEntry
+    let entry: OpencodeTargetEntry
     if (req.sessionId) {
       const existing = this.targets.get(req.sessionId)
-      if (!existing || existing.fromRoutingId !== ctx.fromRoutingId) {
+      if (!existing || existing.kind !== 'opencode' || existing.fromRoutingId !== ctx.fromRoutingId) {
         return errorResult(
           `Unknown dispatch session "${req.sessionId}" — it may have been disposed. ` +
             'Start a fresh dispatch without session_id.'
@@ -235,7 +523,7 @@ export class CrossEngineDispatcher {
       existing.ctx = ctx
       entry = existing
     } else {
-      entry = await this.createTarget(ctx)
+      entry = await this.createOpencodeTarget(ctx)
     }
 
     // ── Run the turn ──────────────────────────────────────────────────────
@@ -334,55 +622,7 @@ export class CrossEngineDispatcher {
     }
   }
 
-  /**
-   * Resolve a forwarded approval coming back from the approve IPC. Returns
-   * true when the requestId belongs to the dispatcher (the reserved `xeng:`
-   * prefix) — the IPC handler then skips the session's own resolveApproval.
-   */
-  resolveApproval(
-    requestId: string,
-    decision: ApprovalDecision,
-    answers?: Record<string, string>,
-    _updatedPermissions?: PermissionSuggestion[]
-  ): boolean {
-    if (!requestId.startsWith(XENG_REQUEST_PREFIX)) return false
-    const pending = this.pendingApprovals.get(requestId)
-    // Prefixed ids are exclusively dispatcher-owned: consume even when stale
-    // (e.g. already cascade-rejected) so no session ever sees an xeng id.
-    if (!pending) return true
-    this.pendingApprovals.delete(requestId)
-
-    const allow = decision === 'allow' || decision === 'allowForSession'
-    const reply = !allow ? 'reject' : decision === 'allowForSession' ? 'always' : 'once'
-    // Deny feedback is model-visible (CorrectedError, non-fatal) — parity with
-    // OpencodeSession.resolveApproval.
-    const message = !allow ? answers?.feedback || 'User denied' : undefined
-    const replied = message
-      ? pending.client.replyPermission(pending.permissionId, reply, message)
-      : pending.client.replyPermission(pending.permissionId, reply)
-    replied.catch((err) => {
-      logger.warn(
-        'CrossEngineDispatcher',
-        `replyPermission failed: ${err instanceof Error ? err.message : String(err)}`
-      )
-    })
-    return true
-  }
-
-  /** Tear down every target (+ SSE subs / server refs) owned by a dispatching session. */
-  disposeFor(routingId: string): void {
-    for (const [sessionId, entry] of [...this.targets]) {
-      if (entry.fromRoutingId !== routingId) continue
-      this.targets.delete(sessionId)
-      this.dismissPendingForTarget(sessionId)
-      entry.client.deleteSession(sessionId).catch(() => {})
-      this.releaseConnection(entry)
-    }
-  }
-
-  // ── Target / connection lifecycle ────────────────────────────────────────
-
-  private async createTarget(ctx: DispatchContext): Promise<TargetEntry> {
+  private async createOpencodeTarget(ctx: DispatchContext): Promise<OpencodeTargetEntry> {
     const cwdKey = resolvePath(ctx.cwd)
     // One serverManager ref per target; the per-cwd client + SSE loop are shared.
     const conn = await this.deps.serverManager.acquire(ctx.cwd)
@@ -408,7 +648,8 @@ export class CrossEngineDispatcher {
       ]
       await rec.client.patchSession(session.id, { permission: ruleset })
 
-      const entry: TargetEntry = {
+      const entry: OpencodeTargetEntry = {
+        kind: 'opencode',
         sessionId: session.id,
         fromRoutingId: ctx.fromRoutingId,
         cwd: ctx.cwd,
@@ -425,7 +666,7 @@ export class CrossEngineDispatcher {
     }
   }
 
-  private releaseConnection(entry: Pick<TargetEntry, 'cwd' | 'cwdKey'>): void {
+  private releaseConnection(entry: Pick<OpencodeTargetEntry, 'cwd' | 'cwdKey'>): void {
     this.deps.serverManager.release(entry.cwd)
     const rec = this.connections.get(entry.cwdKey)
     if (!rec) return
@@ -436,7 +677,7 @@ export class CrossEngineDispatcher {
     }
   }
 
-  // ── SSE approval forwarding ──────────────────────────────────────────────
+  // ── SSE approval forwarding (opencode targets only) ──────────────────────
 
   private async runSseLoop(rec: ConnRecord): Promise<void> {
     try {
@@ -463,7 +704,7 @@ export class CrossEngineDispatcher {
       const id = props.id as string | undefined
       if (!sessionID || !id) return
       const entry = this.targets.get(sessionID)
-      if (!entry) return // foreign session — not a dispatch target
+      if (!entry || entry.kind !== 'opencode') return // foreign session — not an opencode dispatch target
 
       const requestId = XENG_REQUEST_PREFIX + id
       const permission = (props.permission as string | undefined) ?? 'tool'
@@ -475,6 +716,7 @@ export class CrossEngineDispatcher {
         input: { ...metadata, ...(patterns ? { patterns } : {}) }
       }
       this.pendingApprovals.set(requestId, {
+        kind: 'opencode',
         permissionId: id,
         targetSessionId: sessionID,
         client: entry.client,
@@ -501,12 +743,289 @@ export class CrossEngineDispatcher {
     }
   }
 
-  /** Dismiss all forwarded approvals for one target (timeout/abort/dispose). */
+  // ── Claude direction (M2) ─────────────────────────────────────────────────
+
+  /** Everything past the guards for engine:'claude' — runs with an activeDispatches slot held. */
+  private async resolveAndRunClaude(
+    req: DispatchRequest,
+    ctx: DispatchContext
+  ): Promise<DispatchResult> {
+    // ── Model resolution ──────────────────────────────────────────────────
+    const dispatchCfg = this.deps.loadEngineConfig('claude').dispatch
+    const model = req.model ?? dispatchCfg?.defaultModel
+    if (!model) {
+      return errorResult(
+        'No model is configured for cross-engine dispatch into Claude. Ask the user to set ' +
+          'Engines › Claude › Cross-engine dispatch (the `dispatch.defaultModel` field in ' +
+          '~/.claude/ui/engines/claude.json), or pass `model` explicitly.'
+      )
+    }
+    const allowed = dispatchCfg?.allowedModels
+    if (allowed && allowed.length > 0 && !allowed.includes(model)) {
+      return errorResult(
+        `Model "${model}" is not in the user-configured allowlist for Claude dispatch. ` +
+          `Allowed models: ${allowed.join(', ')}`
+      )
+    }
+
+    // ── Target resolution ─────────────────────────────────────────────────
+    let entry: ClaudeTargetEntry
+    if (req.sessionId) {
+      const existing = this.targets.get(req.sessionId)
+      if (!existing || existing.kind !== 'claude' || existing.fromRoutingId !== ctx.fromRoutingId) {
+        return errorResult(
+          `Unknown dispatch session "${req.sessionId}" — it may have been disposed. ` +
+            'Start a fresh dispatch without session_id.'
+        )
+      }
+      // Busy-reject BEFORE pushing a prompt or touching entry state (see the
+      // `busy` doc comment on ClaudeTargetEntry). The running turn is left
+      // completely undisturbed — no abort, no entry removal, no ctx swap.
+      if (existing.busy) {
+        return errorResult(
+          `Dispatch session "${req.sessionId}" is already running a turn — wait for it to finish before continuing it.`,
+          req.sessionId
+        )
+      }
+      existing.ctx = ctx
+      entry = existing
+    } else {
+      const shell = this.createClaudeTargetShell(ctx)
+      entry = shell.entry
+      try {
+        const mode = mapAutonomyToClaudeTargetMode(ctx.autonomyMode)
+        entry.query = await this.spawnClaudeQuery({
+          cwd: ctx.cwd,
+          model,
+          permissionMode: mode.permissionMode,
+          allowDangerouslySkipPermissions: mode.allowDangerouslySkipPermissions,
+          canUseTool: shell.canUseTool,
+          abortController: entry.abortController,
+          prompt: entry.channel
+        })
+        entry.iterator = entry.query[Symbol.asyncIterator]()
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        return errorResult(`Failed to start dispatched Claude agent: ${msg}`)
+      }
+    }
+
+    // Mark busy BEFORE the push: driveClaudeTurn registers the entry in
+    // this.targets as soon as session_id arrives (mid-turn), making it
+    // continuable — a concurrent same-session_id dispatch must already see
+    // busy=true at that point. Cleared in the finally below on EVERY path
+    // (success, turn error, timeout, abort) — including the paths that
+    // remove the entry, where it's harmless.
+    entry.busy = true
+    entry.channel.push(buildClaudeDispatchMessage(req.prompt, entry.sessionId))
+
+    // ── Run the turn ──────────────────────────────────────────────────────
+    let beats = 0
+    const heartbeat = setInterval(() => {
+      beats++
+      void sendProgress(ctx.extra, {
+        progress: beats,
+        message: 'Dispatched agent is still working…'
+      }).catch(() => {})
+    }, this.heartbeatMs)
+
+    let timeoutTimer: ReturnType<typeof setTimeout> | undefined
+    const signal = ctx.extra?.signal
+    let abortListener: (() => void) | undefined
+
+    type Raced =
+      | { kind: 'ok'; msg: ResultMessage }
+      | { kind: 'err'; err: unknown }
+      | { kind: 'timeout' }
+      | { kind: 'abort' }
+
+    const turnPromise: Promise<Raced> = this.driveClaudeTurn(entry).then(
+      (msg): Raced => ({ kind: 'ok', msg }),
+      (err): Raced => ({ kind: 'err', err })
+    )
+    const timeoutPromise = new Promise<Raced>((resolve) => {
+      timeoutTimer = setTimeout(() => resolve({ kind: 'timeout' }), this.dispatchTimeoutMs)
+    })
+    const abortPromise: Promise<Raced> = signal
+      ? signal.aborted
+        ? Promise.resolve({ kind: 'abort' })
+        : new Promise((resolve) => {
+            abortListener = (): void => resolve({ kind: 'abort' })
+            signal.addEventListener('abort', abortListener, { once: true })
+          })
+      : new Promise(() => {})
+
+    try {
+      const winner = await Promise.race([turnPromise, timeoutPromise, abortPromise])
+
+      if (winner.kind === 'timeout' || winner.kind === 'abort') {
+        // Unlike opencode (abortSession stops the turn, session survives),
+        // aborting a Claude target's AbortController KILLS THE PROCESS — so
+        // continuation is impossible either way. Remove the entry entirely.
+        entry.abortController.abort()
+        if (entry.sessionId) {
+          this.dismissPendingForTarget(entry.sessionId)
+          this.targets.delete(entry.sessionId)
+        }
+        return errorResult(
+          winner.kind === 'timeout'
+            ? `Dispatch timed out after ${Math.round(this.dispatchTimeoutMs / 60000)} minutes — the target agent was aborted.`
+            : 'Dispatch cancelled.',
+          entry.sessionId ?? ''
+        )
+      }
+      if (winner.kind === 'err') {
+        entry.abortController.abort()
+        if (entry.sessionId) {
+          this.dismissPendingForTarget(entry.sessionId)
+          this.targets.delete(entry.sessionId)
+        }
+        const msg = winner.err instanceof Error ? winner.err.message : String(winner.err)
+        return errorResult(`Dispatched turn failed: ${msg}`, entry.sessionId ?? '')
+      }
+
+      const result = winner.msg
+      // A turn-level error (see docs/protocol/03-inbound-messages.md §result
+      // subtypes) does NOT kill the process — the target stays alive for
+      // continuation, parity with the opencode info.error handling above.
+      if (result.subtype && result.subtype !== 'success') {
+        const detail =
+          (result.errors && result.errors.length > 0 && result.errors.join('; ')) ||
+          result.subtype ||
+          'the dispatched agent reported an error'
+        return errorResult(`Dispatched turn failed: ${detail}`, entry.sessionId ?? '')
+      }
+      return {
+        text: result.result || '(the dispatched agent returned no text)',
+        sessionId: entry.sessionId ?? ''
+      }
+    } finally {
+      entry.busy = false
+      clearInterval(heartbeat)
+      if (timeoutTimer) clearTimeout(timeoutTimer)
+      if (signal && abortListener) signal.removeEventListener('abort', abortListener)
+    }
+  }
+
+  /**
+   * Read messages from the target's ONE iterator until `result` arrives,
+   * capturing session_id (and registering the entry in `this.targets`) the
+   * first time it's seen. NEVER uses `for await` — see the `.return()`
+   * hazard documented on `ClaudeTargetEntry`.
+   */
+  private async driveClaudeTurn(entry: ClaudeTargetEntry): Promise<ResultMessage> {
+    for (;;) {
+      const { value, done } = await entry.iterator.next()
+      if (done) {
+        throw new Error('Claude target process ended unexpectedly')
+      }
+      const msg = value as SDKMessage
+      if (msg.session_id && !entry.sessionId) {
+        entry.sessionId = msg.session_id
+        this.targets.set(msg.session_id, entry)
+      }
+      if (msg.type === 'result') {
+        return msg as ResultMessage
+      }
+    }
+  }
+
+  /**
+   * Build the entry shell + its canUseTool BEFORE spawning: canUseTool must
+   * exist to pass into spawnClaudeQuery, but it needs to read the entry's
+   * LIVE fields (sessionId, ctx) — which aren't known until after spawn. The
+   * closure below captures `entry` by reference (not by value), so by the
+   * time a real tool call fires (always after spawn completes), the shell's
+   * `query`/`iterator` fields are already populated by the caller.
+   */
+  private createClaudeTargetShell(ctx: DispatchContext): {
+    entry: ClaudeTargetEntry
+    canUseTool: CanUseTool
+  } {
+    const abortController = new AbortController()
+    const channel = new ClaudeInputChannel()
+    const entry: ClaudeTargetEntry = {
+      kind: 'claude',
+      sessionId: null,
+      fromRoutingId: ctx.fromRoutingId,
+      cwd: ctx.cwd,
+      channel,
+      // Populated by the caller immediately after spawnClaudeQuery resolves.
+      query: undefined as unknown as QueryHandle,
+      iterator: undefined as unknown as AsyncIterator<SDKMessage>,
+      abortController,
+      busy: false,
+      ctx
+    }
+    const canUseTool: CanUseTool = async (
+      toolName: string,
+      input: Record<string, unknown>,
+      opts: CanUseToolContext
+    ): Promise<CanUseToolResult> => this.awaitClaudeTargetApproval(entry, toolName, input, opts)
+    return { entry, canUseTool }
+  }
+
+  /**
+   * Forward a Claude target's tool-approval request into the dispatching
+   * session's chat (ADR-033 M2 item 7) — the Claude-target mirror of the SSE
+   * loop's `permission.asked` handling for opencode targets.
+   */
+  private awaitClaudeTargetApproval(
+    entry: ClaudeTargetEntry,
+    toolName: string,
+    input: Record<string, unknown>,
+    opts: CanUseToolContext
+  ): Promise<CanUseToolResult> {
+    return new Promise<CanUseToolResult>((resolve) => {
+      const requestId = XENG_REQUEST_PREFIX + uuidv4()
+      const approval: PendingApproval = {
+        requestId,
+        toolName,
+        input,
+        toolUseId: opts.toolUseId,
+        suggestions: opts.suggestions as PendingApproval['suggestions'],
+        decisionReason: opts.decisionReason,
+        blockedPath: opts.blockedPath
+      }
+      this.pendingApprovals.set(requestId, {
+        kind: 'claude',
+        targetSessionId: entry.sessionId,
+        emit: entry.ctx.emit,
+        resolve: (decision, answers) => {
+          if (decision === 'allow' || decision === 'allowForSession') {
+            resolve({ behavior: 'allow', updatedInput: input })
+          } else {
+            resolve({ behavior: 'deny', message: answers?.feedback || 'User denied' })
+          }
+        }
+      })
+      entry.ctx.emit('session:approval-request', approval)
+
+      opts.signal.addEventListener(
+        'abort',
+        () => {
+          const pending = this.pendingApprovals.get(requestId)
+          if (!pending) return
+          this.pendingApprovals.delete(requestId)
+          entry.ctx.emit('session:approval-dismiss', { requestId })
+          resolve({ behavior: 'deny', message: 'Dispatch cancelled' })
+        },
+        { once: true }
+      )
+    })
+  }
+
+  /** Dismiss all forwarded approvals for one target (timeout/abort/dispose).
+   *  Claude-kind resolvers are ALSO resolved with deny — never leave a
+   *  hanging canUseTool promise (ADR-033 M2 item 7). */
   private dismissPendingForTarget(targetSessionId: string): void {
     for (const [key, pending] of [...this.pendingApprovals]) {
       if (pending.targetSessionId !== targetSessionId) continue
       this.pendingApprovals.delete(key)
       pending.emit('session:approval-dismiss', { requestId: key })
+      if (pending.kind === 'claude') {
+        pending.resolve('deny')
+      }
     }
   }
 }

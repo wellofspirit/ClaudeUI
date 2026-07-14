@@ -28,13 +28,16 @@ export function createCollabServer(ctx: CollabServerContext): SdkMcpServer {
     tools: [
       tool(
         'dispatch_agent',
-        'Delegate a task to an agent running on a DIFFERENT engine (opencode, which fronts ' +
-          'non-Anthropic model vendors — e.g. GPT or Gemini models). The agent runs headless in ' +
+        'Delegate a task to an agent running on a DIFFERENT engine — opencode (fronts ' +
+          'non-Anthropic model vendors, e.g. GPT or Gemini models). The agent runs headless in ' +
           'the same working directory and its final answer is returned as this tool result. ' +
           'The result includes a session_id — pass it back as `session_id` to continue the same ' +
           'agent with its context intact (multi-turn collaboration). The available model list is ' +
           'user-configured; omit `model` to use the configured default.',
         {
+          // Only 'opencode' is listed: dispatching to 'claude' from a Claude
+          // session is same-engine and already guard-rejected by the
+          // dispatcher — listing it here would be misleading (ADR-033 M2).
           engine: z.enum(['opencode']).describe('Target engine to dispatch to'),
           prompt: z.string().describe('Task for the dispatched agent'),
           model: z

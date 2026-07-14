@@ -109,6 +109,11 @@ export abstract class BaseSession implements ISession {
     if (!this.willQueue) this.resetInactivityTimer()
   }
 
+  /** Public wrapper over the protected send() — see ISession.emit doc comment. */
+  emit(channel: string, data: unknown): void {
+    this.send(channel, data)
+  }
+
   // ---------------------------------------------------------------------------
   // Protected helpers
   // ---------------------------------------------------------------------------

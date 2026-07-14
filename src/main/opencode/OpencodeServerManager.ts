@@ -8,6 +8,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import type { McpHttpHost } from './mcp-http-host'
 import { startMcpHttpHost } from './mcp-http-host'
 import { createOpencodeHostedToolsServer } from './opencode-hosted-tools'
+import type { CallerSessionLookup, DispatchAgentFn } from './opencode-hosted-tools'
 import type { OpencodeMcpEntry } from './claude-mcp-bridge'
 import { collectClaudeMcpForOpencode } from './claude-mcp-bridge'
 // OpencodeConfigSettings import removed — engine-native config now lives in
@@ -84,6 +85,37 @@ function locateBinary(): string {
   return candidates[0]
 }
 
+/** ~20 minutes — must exceed the dispatcher's 10-min DISPATCH_TIMEOUT_MS so a
+ *  long-running Claude target never gets cut off by opencode's OWN per-server
+ *  MCP callTool timeout (config default 5s — see
+ *  src/shared/opencode-config-schema.1.17.14.json `McpRemoteConfig.timeout`,
+ *  read by `requestTimeout()` in vendor/opencode-src/packages/opencode/src/mcp/index.ts:661-663).
+ *  The dispatcher's own heartbeat (sendProgress) ALSO resets this — belt and
+ *  suspenders, since opencode may not always ride a progressToken. */
+const DISPATCH_MCP_TIMEOUT_MS = 20 * 60 * 1000
+
+/**
+ * Locate the caller-identity plugin (ADR-033 M2) that must be loaded by the
+ * EXTERNAL opencode process — mirrors locateBinary()'s dev/packaged split.
+ * The file lives under `resources/opencode/` (not `vendor/opencode-cli/`
+ * like the binary): it ships via electron-builder's `asarUnpack: resources/**`
+ * rather than `extraResources`, so the packaged path swaps `app.asar` →
+ * `app.asar.unpacked` IN PLACE instead of moving to a new Resources subdir.
+ * Returns null (never throws) when the file isn't found — the plugin is a
+ * best-effort feature; its absence just means `dispatch_agent` (opencode →
+ * Claude direction) fails loud with a clear message (see
+ * opencode-hosted-tools.ts's missing-caller-identity branch) instead of
+ * opencode itself refusing to start.
+ */
+function locatePluginFile(): string | null {
+  const appPath = app?.getAppPath ? app.getAppPath() : process.cwd()
+  const rel = ['resources', 'opencode', 'claudeui-xeng-plugin.ts']
+  const candidate = appPath.includes('app.asar')
+    ? join(appPath.replace('app.asar', 'app.asar.unpacked'), ...rel)
+    : join(appPath, ...rel)
+  return existsSync(candidate) ? candidate : null
+}
+
 /**
  * Build the OPENCODE_CONFIG_CONTENT JSON string that wires opencode's MCP
  * client to our per-cwd in-process HTTP host, and optionally injects user-set
@@ -103,7 +135,8 @@ function locateBinary(): string {
 export function buildOpencodeConfigContent(
   mcpPort: number,
   mcpToken: string,
-  bridgedMcp?: Record<string, OpencodeMcpEntry>
+  bridgedMcp?: Record<string, OpencodeMcpEntry>,
+  pluginPath?: string | null
 ): string {
   const config: Record<string, unknown> = {
     mcp: {
@@ -113,7 +146,12 @@ export function buildOpencodeConfigContent(
         headers: {
           Authorization: `Bearer ${mcpToken}`
         },
-        enabled: true
+        enabled: true,
+        // ADR-033 M2: a dispatched Claude target can run far longer than
+        // opencode's 5s MCP-request default (McpRemoteConfig.timeout) — a
+        // long dispatch would otherwise have its callTool cancelled out from
+        // under it. See DISPATCH_MCP_TIMEOUT_MS doc comment above.
+        timeout: DISPATCH_MCP_TIMEOUT_MS
       },
       ...(bridgedMcp ?? {})
     },
@@ -123,7 +161,13 @@ export function buildOpencodeConfigContent(
     // CASCADE bare-rejects opencode issues to the session's OTHER pending
     // permissions on any reject, which carry no message. Ephemeral env-var
     // config only — never written to a user file (ADR-031).
-    experimental: { continue_loop_on_deny: true }
+    experimental: { continue_loop_on_deny: true },
+    // ADR-033 M2: the caller-identity plugin, loaded ONLY when vendored (dev
+    // and packaged builds both resolve it via locatePluginFile()). Absent in
+    // any context where the file isn't found — opencode itself never fails
+    // to start over this; the dispatch tool just fails loud instead (see
+    // opencode-hosted-tools.ts).
+    ...(pluginPath ? { plugin: [pluginPath] } : {})
   }
 
   return JSON.stringify(config)
@@ -155,7 +199,8 @@ function spawnServer(
         OPENCODE_CONFIG_CONTENT: buildOpencodeConfigContent(
           mcpPort,
           mcpToken,
-          collectClaudeMcpForOpencode(cwd)
+          collectClaudeMcpForOpencode(cwd),
+          locatePluginFile()
         )
       },
       stdio: ['ignore', 'pipe', 'pipe']
@@ -253,11 +298,35 @@ export class OpencodeServerManager {
   private readonly spawnFn: SpawnServerFn
   private readonly locateBinaryFn: () => string
   private readonly startMcpHostFn: (mcpServer: McpServer) => Promise<McpHttpHost>
+  /**
+   * Cross-engine dispatch (ADR-033 M2) dependencies, threaded in from OUTSIDE
+   * this module (main/index.ts, at app bootstrap) rather than imported
+   * directly — importing `sessionManager` or `crossEngineDispatcher` here
+   * would form a require-cycle (see the cycle note on CallerSessionLookup in
+   * opencode-hosted-tools.ts). Bound via setter so callers set once, read
+   * live on every server spawn (createOpencodeHostedToolsServer is only
+   * invoked per-cwd-spawn, but the closures below always read the CURRENT
+   * field value, not a stale one captured at construction time).
+   */
+  private callerSessionLookup: CallerSessionLookup = () => undefined
+  private dispatchAgentFn: DispatchAgentFn | undefined
 
   constructor(opts: OpencodeServerManagerOptions = {}) {
     this.spawnFn = opts.spawnFn ?? spawnServer
     this.locateBinaryFn = opts.locateBinaryFn ?? locateBinary
     this.startMcpHostFn = opts.startMcpHostFn ?? startMcpHttpHost
+  }
+
+  /** Wire the caller-session lookup used by the opencode-hosted `dispatch_agent`
+   *  tool (ADR-033 M2). Call once at app bootstrap. */
+  setCallerSessionLookup(fn: CallerSessionLookup): void {
+    this.callerSessionLookup = fn
+  }
+
+  /** Wire the cross-engine dispatch function used by the opencode-hosted
+   *  `dispatch_agent` tool (ADR-033 M2). Call once at app bootstrap. */
+  setDispatchAgent(fn: DispatchAgentFn): void {
+    this.dispatchAgentFn = fn
   }
 
   private getBinary(): string {
@@ -302,7 +371,12 @@ export class OpencodeServerManager {
       // port + token to inject via OPENCODE_CONFIG_CONTENT.
       // Engine-native config (model, providers, agents) is read by opencode from
       // its own global config file (written by opencode-config.ts) — not injected here.
-      const mcpHost = await this.startMcpHostFn(createOpencodeHostedToolsServer(key))
+      const mcpHost = await this.startMcpHostFn(
+        createOpencodeHostedToolsServer(key, {
+          lookupCallerSession: (sessionId) => this.callerSessionLookup(sessionId),
+          dispatch: this.dispatchAgentFn && ((req, ctx) => this.dispatchAgentFn!(req, ctx))
+        })
+      )
 
       let child: ChildProcess
       let baseUrl: string
