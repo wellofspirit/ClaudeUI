@@ -1,6 +1,8 @@
 # Cross-engine dispatch — full implementation plan (M2–M4)
 
-**Status:** M1 shipped; **M2/M3/M4 not started.** This is a standalone plan — a fresh session with
+**Status:** M1 + M2 shipped (M2 verified live 2026-07-14: opencode/nemotron caller → approval-gated
+`claudeui_dispatch_agent` → headless Claude haiku target answered; plugin-injected caller identity
+observed on the wire); **M3/M4 not started.** This is a standalone plan — a fresh session with
 no prior context should be able to execute every remaining phase from here. Governing design:
 **ADR-033** (`docs/adr/adr-033_cross-engine-dispatch.md`). Workflow: **ADR-026** (Opus orchestrates
 + reviews every line, a Sonnet sub-agent implements against a written kickoff, gates + real-app
@@ -78,7 +80,34 @@ threading; dispatcher core + tool; opencode dispatch settings; turn-error fix; t
 
 ---
 
-## M2 — reverse direction (opencode → Claude)
+## M2 — reverse direction (opencode → Claude) — SHIPPED
+
+**As-built deltas from the plan below** (the plan text is kept for context; these corrections are
+what actually landed):
+
+- **Zod stripping hazard (plan missed it):** our MCP host validates tool input with `z.object()`,
+  which strips unknown keys — the plugin-injected `__xeng_caller_session` is therefore a declared
+  optional field of the opencode-side tool schema (described "internal — never set this yourself"),
+  read + stripped by the handler.
+- **Continuation = persistent process, not `--resume`:** `persistSession: false` means no
+  transcript, so `resume` is impossible. Claude targets keep one `sdkQuery()` process alive across
+  turns via a pushable input channel, driven by a **manual `iterator.next()` loop** —
+  `QueryHandle[Symbol.asyncIterator]().return()` kills the child (sdk/query.ts), so `for await`
+  + `break` would kill the target at the end of every turn.
+- **Busy guard:** concurrent same-`session_id` dispatches are rejected (`isError` "already running
+  a turn") — two drivers on one iterator would steal each other's messages.
+- **collab-tool enum NOT widened** (plan's M2-D said add `'claude'`): each side's enum lists only
+  the other engine; same-engine is guard-rejected anyway.
+- **Plugin file requirements (verified live):** file-source V1 plugins must default-export
+  `{ id, server }` (`id` mandatory), absolute path in the injected `plugin` array; ships at
+  `resources/opencode/claudeui-xeng-plugin.ts` (asarUnpack'd; `locatePluginFile()`).
+- **MCP timeout:** `mcp.claudeui.timeout` = 20 min in `OPENCODE_CONFIG_CONTENT` (schema default is
+  5 s) so long Claude-target turns survive even without progress-token resets.
+- **Cycle breaks:** hosted tool gets `sessionManager`/dispatcher via setters on
+  `OpencodeServerManager` wired in `main/index.ts`; `buildRuleset` extracted to
+  `src/main/opencode/permission-ruleset.ts` (re-exported from OpencodeSession for back-compat).
+- Gating ask-rule appended after the user's compiled rules in `applyPermissionMode`, so a blanket
+  user allow-rule can't silently un-gate dispatch.
 
 **Goal.** An opencode session calls `claudeui_dispatch_agent` (engine `"claude"`) → dispatcher
 spawns a **headless Claude target**, runs a turn, returns final text (+ `session_id`). Subtask

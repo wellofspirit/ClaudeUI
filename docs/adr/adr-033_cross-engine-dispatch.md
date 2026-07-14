@@ -91,13 +91,26 @@ De-risked against opencode v1.17.14 source (pinned clone in git-ignored `vendor/
 Full standalone implementation plan (M2 reverse direction, M3 streaming UX, M4 usage/capability/
 hardening): **`docs/v2/cross-engine-dispatch-implementation-plan.md`**.
 
-- **Caller-session identity on the shared opencode MCP host** — RESOLVED: a ClaudeUI-provided
-  opencode **plugin** stamps the caller `sessionID` into the dispatch tool's args via
-  `tool.execute.before` (deterministic; opencode passes `args` by reference before `execute`, so
-  the mutation reaches our MCP handler — `vendor/opencode-src/.../session/tools.ts:402-409`).
-  Chosen over FIFO temporal correlation off `permission.asked` (racy across concurrent same-cwd
-  sessions) and over fixed-mode/no-forwarding (breaks subtask parity). #1 de-risk for M2 is
-  confirming local-file plugin loading via `OPENCODE_CONFIG_CONTENT`.
+- **Caller-session identity on the shared opencode MCP host** — RESOLVED & SHIPPED (M2): a
+  ClaudeUI-provided opencode **plugin** (`resources/opencode/claudeui-xeng-plugin.ts`, injected as
+  an absolute path via `OPENCODE_CONFIG_CONTENT`'s `plugin` array) stamps the caller `sessionID`
+  into the dispatch tool's args via `tool.execute.before` (deterministic; opencode passes `args`
+  by reference before `execute`, so the mutation reaches our MCP handler —
+  `vendor/opencode-src/.../session/tools.ts:398-409`). Chosen over FIFO temporal correlation off
+  `permission.asked` (racy across concurrent same-cwd sessions) and over fixed-mode/no-forwarding
+  (breaks subtask parity). Local-file plugin loading was probed live against the vendored binary
+  before implementation and the full path verified in the real app (caller id visible in the tool
+  args on the wire). Two implementation constraints discovered: the injected arg must be a
+  **declared optional field** of the tool's zod schema (unknown keys are stripped), and file-source
+  V1 plugins must default-export an `id`.
+- **M2 shipped (opencode → Claude).** Headless Claude targets are one persistent `sdkQuery()`
+  process per target (pushable streaming-input channel; `persistSession: false` rules out
+  `--resume` continuation), driven by a manual `iterator.next()` loop — the handle's
+  `asyncIterator.return()` kills the child, so `for await`+`break` is forbidden. Concurrent
+  same-`session_id` dispatches are busy-rejected (one iterator per target). Target approvals
+  forward as `xeng:` `PendingApproval`s resolved back into the target's `canUseTool` promise.
+  `full`/`auto` callers map to `bypassPermissions` on the target (no judge for targets in v1,
+  per §5); `plan` maps to `default`.
 
 ## Still-open questions
 
