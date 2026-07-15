@@ -53,6 +53,7 @@ import { serviceSession } from '../services/service-session'
 import { blockUsageService } from '../services/block-usage'
 import { usageReconciler } from '../services/usage-reconciler'
 import { crossEngineDispatcher, XENG_REQUEST_PREFIX } from '../services/cross-engine-dispatcher'
+import { dispatchedUsageSummary } from '../services/db'
 import '../auth/register-auth-providers'
 import { engineAuthRegistry } from '../auth/EngineAuthRegistry'
 import { claudeAuthProvider } from '../auth/ClaudeAuthProvider'
@@ -396,6 +397,7 @@ const SESSION_IPC_CHANNELS = [
   'usage:fetch-block',
   'usage:set-account-filter',
   'usage:refresh-prices',
+  'usage:fetch-dispatched',
   'auth:sign-in',
   'auth:submit-code',
   'auth:cancel',
@@ -1659,6 +1661,12 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
 
   ipcMain.handle('usage:set-account-filter', async (_e, account: string | null) => {
     blockUsageService.setAccountFilter(account)
+  })
+
+  // ADR-033 M4-B: cross-engine dispatched usage, all-time, grouped by
+  // (targetEngine, targetModel). Backs UsageView's "Delegated" section.
+  ipcMain.handle('usage:fetch-dispatched', async () => {
+    return dispatchedUsageSummary()
   })
 
   // Phase 9b: fetch opencode pricing from /config/providers, persist + register.

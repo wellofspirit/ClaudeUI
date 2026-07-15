@@ -43,3 +43,10 @@ future native-fork implementation.
   engine-aware resolution) before flipping the corresponding flag to `true`, not after.
 - `OpencodeClient.forkSession()` remains as a documented, currently-uncalled scaffold rather than
   being deleted — it's the seam a future native-fork implementation picks up.
+
+## Capability ledger
+
+| Flag | Claude | opencode | Notes |
+| --- | --- | --- | --- |
+| `fork` / `forkFromMessage` | `true` | `false` | opencode's path is unwired (see Decision above). |
+| `crossEngineDispatch` (ADR-033 M4-A) | `true` | `true` | The only flag so far where BOTH static constants are `true` — full end-to-end dispatch is shipped and live-verified in both directions. Unlike the flags above, the static constant is not the whole story: the HONEST per-session value is a **runtime AND** — `crossEngineDispatchAvailable(engineId)` (`cross-engine-dispatcher.ts`) checks whether the OTHER engine (the only possible dispatch target) is actually installed. Claude sessions AND with `opencodeServerManager.isBinaryAvailable()`; opencode sessions AND with `true` (Claude is ClaudeUI's bundled default engine, always present). Both `ClaudeSession.capabilities` and `OpencodeSession`'s capability resolver apply this AND before the value reaches `SessionStatus.capabilities` — the static constant alone is never what the renderer/gating sees. |

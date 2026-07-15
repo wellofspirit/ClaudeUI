@@ -250,6 +250,7 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     fetchBlockUsage: () => ipcRenderer.invoke('usage:fetch-block'),
     setUsageAccountFilter: async () => {},
     refreshPrices: async () => ({ count: 0, refreshedAt: Date.now() }),
+    fetchDispatchedUsage: () => ipcRenderer.invoke('usage:fetch-dispatched'),
     signIn: () => ipcRenderer.invoke('auth:sign-in'),
     submitOAuthCode: (code: string) => ipcRenderer.invoke('auth:submit-code', code),
     cancelSignIn: () => ipcRenderer.invoke('auth:cancel'),

@@ -13,7 +13,7 @@ import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
 import BetterSqlite3 from 'better-sqlite3'
-import type { EngineId, ModelRef, AccountInfo } from '../../shared/types'
+import type { EngineId, ModelRef, AccountInfo, DispatchedUsageSummary } from '../../shared/types'
 import { engineMeta } from '../../shared/engine-meta'
 
 // ---------------------------------------------------------------------------
@@ -222,6 +222,39 @@ const MIGRATIONS: Migration[] = [
           PRIMARY KEY (date, engine_id, vendor_id, model_id)
         );
         CREATE INDEX IF NOT EXISTS idx_daily_usage_date ON daily_usage(date);
+      `)
+    }
+  },
+  {
+    // v6 — ADR-033 M4-B: one row per completed/failed dispatched-agent turn,
+    // attributed to the DISPATCHING session (from_routing_id). Dispatched
+    // turns never flow through a normal persisted session (Claude targets run
+    // persistSession:false — no transcript; opencode targets are throwaway
+    // sessions deleted after use), so ADR-011's JSONL-scanning analytics
+    // (block-usage.ts) can never see them — this table is the explicit,
+    // additive capture the plan calls for. No FK to session_meta: the
+    // dispatching session may be a headless/remote routingId not otherwise
+    // tracked, and dispatched_usage must outlive session deletion.
+    version: 6,
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS dispatched_usage (
+          id              INTEGER PRIMARY KEY AUTOINCREMENT,
+          ts              INTEGER NOT NULL,
+          from_routing_id TEXT NOT NULL,
+          from_engine     TEXT NOT NULL,
+          target_engine   TEXT NOT NULL,
+          target_model    TEXT NOT NULL,
+          target_session_id TEXT,
+          tool_use_id     TEXT,
+          total_tokens    INTEGER,
+          cost_usd        REAL,
+          duration_ms     INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS idx_dispatched_usage_ts
+          ON dispatched_usage(ts);
+        CREATE INDEX IF NOT EXISTS idx_dispatched_usage_from_routing
+          ON dispatched_usage(from_routing_id);
       `)
     }
   }
@@ -930,4 +963,126 @@ export function getAllDailyUsage(): DailyUsageRow[] {
 export function hasDailyUsage(): boolean {
   const db = getDb()
   return (db.prepare('SELECT COUNT(*) as n FROM daily_usage').get() as { n: number }).n > 0
+}
+
+// ---------------------------------------------------------------------------
+// Dispatched-usage repository (ADR-033 M4-B — cross-engine dispatch)
+// One row per completed/failed dispatched-agent turn, attributed to the
+// DISPATCHING session. See the v6 migration comment above for why this table
+// exists (dispatched turns are invisible to ADR-011's JSONL scan).
+// ---------------------------------------------------------------------------
+
+/** One recorded dispatched-agent turn. */
+export interface DispatchedUsageRow {
+  id: number
+  ts: number
+  fromRoutingId: string
+  fromEngine: string
+  targetEngine: string
+  targetModel: string
+  targetSessionId: string | null
+  toolUseId: string | null
+  totalTokens: number | null
+  costUsd: number | null
+  durationMs: number | null
+}
+
+interface DispatchedUsageDbRow {
+  id: number
+  ts: number
+  from_routing_id: string
+  from_engine: string
+  target_engine: string
+  target_model: string
+  target_session_id: string | null
+  tool_use_id: string | null
+  total_tokens: number | null
+  cost_usd: number | null
+  duration_ms: number | null
+}
+
+function rowToDispatchedUsage(row: DispatchedUsageDbRow): DispatchedUsageRow {
+  return {
+    id: row.id,
+    ts: row.ts,
+    fromRoutingId: row.from_routing_id,
+    fromEngine: row.from_engine,
+    targetEngine: row.target_engine,
+    targetModel: row.target_model,
+    targetSessionId: row.target_session_id,
+    toolUseId: row.tool_use_id,
+    totalTokens: row.total_tokens,
+    costUsd: row.cost_usd,
+    durationMs: row.duration_ms
+  }
+}
+
+/** Insert one dispatched-usage row (`id` is auto-assigned by SQLite). */
+export function insertDispatchedUsage(row: Omit<DispatchedUsageRow, 'id'>): void {
+  const db = getDb()
+  db.prepare(
+    `INSERT INTO dispatched_usage (
+       ts, from_routing_id, from_engine, target_engine, target_model,
+       target_session_id, tool_use_id, total_tokens, cost_usd, duration_ms
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    row.ts,
+    row.fromRoutingId,
+    row.fromEngine,
+    row.targetEngine,
+    row.targetModel,
+    row.targetSessionId ?? null,
+    row.toolUseId ?? null,
+    row.totalTokens ?? null,
+    row.costUsd ?? null,
+    row.durationMs ?? null
+  )
+}
+
+/** All dispatched-usage rows since `sinceTs` (default: all-time), newest first. Test/debug use. */
+export function getDispatchedUsageSince(sinceTs = 0): DispatchedUsageRow[] {
+  const db = getDb()
+  const rows = db
+    .prepare('SELECT * FROM dispatched_usage WHERE ts >= ? ORDER BY ts DESC')
+    .all(sinceTs) as DispatchedUsageDbRow[]
+  return rows.map(rowToDispatchedUsage)
+}
+
+interface DispatchedUsageSummaryDbRow {
+  target_engine: string
+  target_model: string
+  dispatches: number
+  totalTokens: number | null
+  costUsd: number | null
+}
+
+/**
+ * Aggregate dispatched_usage by (target_engine, target_model) since `sinceTs`
+ * (default: all-time). NULL total_tokens/cost_usd (best-effort captures, e.g.
+ * a timed-out turn) coalesce to 0 so a single unknown-usage row never poisons
+ * the whole aggregate.
+ */
+export function dispatchedUsageSummary(sinceTs = 0): DispatchedUsageSummary[] {
+  const db = getDb()
+  const rows = db
+    .prepare(
+      `SELECT
+         target_engine,
+         target_model,
+         COUNT(*) as dispatches,
+         SUM(COALESCE(total_tokens, 0)) as totalTokens,
+         SUM(COALESCE(cost_usd, 0)) as costUsd
+       FROM dispatched_usage
+       WHERE ts >= ?
+       GROUP BY target_engine, target_model
+       ORDER BY costUsd DESC`
+    )
+    .all(sinceTs) as DispatchedUsageSummaryDbRow[]
+  return rows.map((r) => ({
+    targetEngine: r.target_engine,
+    targetModel: r.target_model,
+    dispatches: r.dispatches,
+    totalTokens: r.totalTokens ?? 0,
+    costUsd: r.costUsd ?? 0
+  }))
 }

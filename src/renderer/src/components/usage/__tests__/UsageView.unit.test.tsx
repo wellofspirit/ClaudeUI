@@ -51,7 +51,8 @@ beforeEach(() => {
   // itself, as that breaks waitFor's container check (it loses the document ref).
   ;(window as any).api = {
     setUsageAccountFilter: vi.fn().mockResolvedValue(undefined),
-    refreshPrices: mockRefreshPrices
+    refreshPrices: mockRefreshPrices,
+    fetchDispatchedUsage: vi.fn().mockResolvedValue([])
   }
 
   useSessionStore.setState({
@@ -331,6 +332,80 @@ describe('UsageView — Daily Usage section', () => {
     } as any)
     render(<UsageView onClose={vi.fn()} />)
     expect(screen.getByText('Daily Usage')).toBeInTheDocument()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Delegated (cross-engine dispatched) usage — ADR-033 M4-B
+// ---------------------------------------------------------------------------
+
+describe('UsageView — Delegated (dispatched) usage section', () => {
+  beforeEach(() => {
+    useSessionStore.setState({
+      blockUsage: makeBlockUsage(),
+      accountUsage: null
+    } as any)
+  })
+
+  it('does not render the Delegated section when fetchDispatchedUsage resolves empty', async () => {
+    render(<UsageView onClose={vi.fn()} />)
+    await waitFor(() => expect((window as any).api.fetchDispatchedUsage).toHaveBeenCalled())
+    expect(screen.queryByTestId('DelegatedUsage')).not.toBeInTheDocument()
+  })
+
+  it('does not render the Delegated section when fetchDispatchedUsage rejects', async () => {
+    ;(window as any).api.fetchDispatchedUsage = vi.fn().mockRejectedValue(new Error('down'))
+    render(<UsageView onClose={vi.fn()} />)
+    await waitFor(() => expect((window as any).api.fetchDispatchedUsage).toHaveBeenCalled())
+    expect(screen.queryByTestId('DelegatedUsage')).not.toBeInTheDocument()
+  })
+
+  it('renders one row per (targetEngine, targetModel) once data resolves', async () => {
+    ;(window as any).api.fetchDispatchedUsage = vi.fn().mockResolvedValue([
+      { targetEngine: 'opencode', targetModel: 'openai/gpt-5', dispatches: 3, totalTokens: 1500, costUsd: 0.05 },
+      { targetEngine: 'claude', targetModel: 'haiku', dispatches: 1, totalTokens: 200, costUsd: 0.001 }
+    ])
+    render(<UsageView onClose={vi.fn()} />)
+
+    await waitFor(() => expect(screen.getByTestId('DelegatedUsage')).toBeInTheDocument())
+    const rows = screen.getAllByTestId('DelegatedUsage.row')
+    expect(rows).toHaveLength(2)
+    expect(rows.map((r) => r.getAttribute('data-id'))).toEqual([
+      'opencode/openai/gpt-5',
+      'claude/haiku'
+    ])
+    expect(screen.getByText('3')).toBeInTheDocument()
+    expect(screen.getByText('$0.05')).toBeInTheDocument()
+  })
+
+  it('renders the Delegated section AFTER the opencode section when both are present', async () => {
+    useSessionStore.setState({
+      blockUsage: makeBlockUsage({
+        perEngine: [
+          {
+            engineId: 'opencode',
+            tokens: zeroTokens(),
+            costUsd: 0,
+            requestCount: 0,
+            models: []
+          }
+        ]
+      }),
+      accountUsage: null
+    } as any)
+    ;(window as any).api.fetchDispatchedUsage = vi.fn().mockResolvedValue([
+      { targetEngine: 'claude', targetModel: 'haiku', dispatches: 1, totalTokens: 200, costUsd: 0.001 }
+    ])
+    render(<UsageView onClose={vi.fn()} />)
+    await waitFor(() => expect(screen.getByTestId('DelegatedUsage')).toBeInTheDocument())
+
+    const container = screen.getByTestId('UsageView')
+    const opencodeHeading = screen.getByText('opencode')
+    const delegatedSection = screen.getByTestId('DelegatedUsage')
+    // DOM order check: opencode section's position precedes Delegated's.
+    const position = opencodeHeading.compareDocumentPosition(delegatedSection)
+    expect(position & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(container.contains(delegatedSection)).toBe(true)
   })
 })
 

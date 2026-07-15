@@ -16,7 +16,12 @@ vi.mock('../logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 }))
 
-import { CrossEngineDispatcher, XENG_REQUEST_PREFIX } from '../cross-engine-dispatcher'
+import {
+  CrossEngineDispatcher,
+  XENG_REQUEST_PREFIX,
+  crossEngineDispatchAvailable
+} from '../cross-engine-dispatcher'
+import { opencodeServerManager } from '../../opencode/OpencodeServerManager'
 import type {
   ClaudeQuerySpawnOpts,
   DispatchContext,
@@ -1712,5 +1717,411 @@ describe('CrossEngineDispatcher — durable stop-intent (armIfUnknown)', () => {
     const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
     expect(result.isError).toBeUndefined()
     expect(result.text).toBe('target answer')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// ADR-033 M4-A — crossEngineDispatchAvailable capability helper
+// ---------------------------------------------------------------------------
+
+describe('crossEngineDispatchAvailable (ADR-030/M4-A)', () => {
+  it("'opencode' is always true — Claude is ClaudeUI's bundled default engine", () => {
+    expect(crossEngineDispatchAvailable('opencode')).toBe(true)
+  })
+
+  it("'claude' mirrors opencodeServerManager.isBinaryAvailable()", () => {
+    const spy = vi.spyOn(opencodeServerManager, 'isBinaryAvailable')
+    spy.mockReturnValue(true)
+    expect(crossEngineDispatchAvailable('claude')).toBe(true)
+    spy.mockReturnValue(false)
+    expect(crossEngineDispatchAvailable('claude')).toBe(false)
+    spy.mockRestore()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// ADR-033 M4-B — usage capture + attribution
+// ---------------------------------------------------------------------------
+
+describe('CrossEngineDispatcher — M4-B usage capture (opencode direction)', () => {
+  it('captures tokens/cost from resp.info on success — populates notification.usage and records a row', async () => {
+    const recordDispatchedUsage = vi.fn()
+    const { dispatcher, client } = makeHarness({ recordDispatchedUsage })
+    client.prompt.mockResolvedValueOnce({
+      parts: [{ type: 'text', text: 'ok' }],
+      info: { tokens: { input: 100, output: 50, reasoning: 10 }, cost: 0.02 }
+    })
+    const ctx = makeCtx({ toolUseId: 'toolu_usage_1' })
+    const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+    expect(result.isError).toBeUndefined()
+
+    const notif = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')
+    expect(notif?.[1]).toMatchObject({ status: 'completed' })
+    const usage = (notif![1] as { usage?: { totalTokens: number; toolUses: number; durationMs: number } })
+      .usage
+    expect(usage).toBeTruthy()
+    expect(usage!.totalTokens).toBe(160) // 100 + 50 + 10
+    expect(usage!.toolUses).toBe(0)
+    expect(usage!.durationMs).toEqual(expect.any(Number))
+
+    expect(recordDispatchedUsage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        fromRoutingId: 'routing-1',
+        fromEngine: 'claude',
+        targetEngine: 'opencode',
+        targetModel: 'openai/gpt-5',
+        targetSessionId: 'oc-sess-1',
+        toolUseId: 'toolu_usage_1',
+        totalTokens: 160,
+        costUsd: 0.02
+      })
+    )
+  })
+
+  it('counts DISTINCT tool_use ids as toolUses — repeated part updates for the same call do not double-count', async () => {
+    const recordDispatchedUsage = vi.fn()
+    const { dispatcher, client, stream } = makeHarness({ recordDispatchedUsage })
+    let releasePrompt!: () => void
+    client.prompt.mockImplementation(
+      () =>
+        new Promise((r) => {
+          releasePrompt = (): void =>
+            r({ parts: [{ type: 'text', text: 'done' }], info: { cost: 0 } })
+        })
+    )
+    const ctx = makeCtx({ toolUseId: 'toolu_usage_tools' })
+    const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+    await tick()
+
+    // The SAME tool part is re-emitted on every state change (pending →
+    // running → completed) — the event-mapper rebuilds the whole message each
+    // time, re-carrying the same tool_use block. Must count as ONE tool use.
+    const toolPartEvent = {
+      sessionID: 'oc-sess-1',
+      part: {
+        id: 'part-tool-1',
+        messageID: 'msg-1',
+        type: 'tool',
+        tool: 'bash',
+        callID: 'call-1',
+        state: { input: { command: 'ls' } }
+      }
+    }
+    stream.push('message.part.updated', toolPartEvent)
+    await tick()
+    stream.push('message.part.updated', toolPartEvent)
+    await tick()
+
+    releasePrompt()
+    await pending
+
+    const notif = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')
+    const usage = (notif![1] as { usage?: { toolUses: number } }).usage
+    expect(usage!.toolUses).toBe(1)
+    expect(recordDispatchedUsage).toHaveBeenCalledWith(
+      expect.objectContaining({ toolUseId: 'toolu_usage_tools' })
+    )
+  })
+
+  it('a throwing recordDispatchedUsage NEVER fails the dispatch — the successful text still returns', async () => {
+    const recordDispatchedUsage = vi.fn(() => {
+      throw new Error('SQLITE_BUSY: database is locked')
+    })
+    const { dispatcher, client } = makeHarness({ recordDispatchedUsage })
+    client.prompt.mockResolvedValueOnce({
+      parts: [{ type: 'text', text: 'the successful answer' }],
+      info: { tokens: { input: 10, output: 5 }, cost: 0.001 }
+    })
+    const ctx = makeCtx({ toolUseId: 'toolu_throwing_recorder' })
+    const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+
+    expect(recordDispatchedUsage).toHaveBeenCalled()
+    expect(result.isError).toBeUndefined()
+    expect(result.text).toBe('the successful answer')
+    // The completion notification is unaffected too.
+    const notif = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')
+    expect(notif?.[1]).toMatchObject({ status: 'completed' })
+  })
+
+  it('a turn stopped by the user is NOT recorded (no usage numbers for a turn that never returned)', async () => {
+    const recordDispatchedUsage = vi.fn()
+    const { dispatcher, client } = makeHarness({ recordDispatchedUsage })
+    client.prompt.mockImplementation(() => new Promise(() => {}))
+    const ctx = makeCtx({ toolUseId: 'toolu_stopped_norecord' })
+    const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+    await tick()
+    expect(dispatcher.stopDispatch('toolu_stopped_norecord')).toBe(true)
+    const result = await pending
+    expect(result.isError).toBe(true)
+    expect(recordDispatchedUsage).not.toHaveBeenCalled()
+  })
+
+  it('a timed-out turn IS recorded (status "failed") with null usage numbers', async () => {
+    const recordDispatchedUsage = vi.fn()
+    const { dispatcher, client } = makeHarness({
+      recordDispatchedUsage,
+      dispatchTimeoutMs: 30
+    })
+    client.prompt.mockImplementation(() => new Promise(() => {}))
+    const ctx = makeCtx({ toolUseId: 'toolu_timeout_record' })
+    const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+    expect(result.isError).toBe(true)
+    expect(recordDispatchedUsage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        toolUseId: 'toolu_timeout_record',
+        totalTokens: null,
+        costUsd: null
+      })
+    )
+  })
+
+  it('the real default (no recordDispatchedUsage injected) does not throw', async () => {
+    const { dispatcher } = makeHarness()
+    const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
+    expect(result.isError).toBeUndefined()
+  })
+})
+
+describe('CrossEngineDispatcher — M4-B usage capture (Claude direction)', () => {
+  it('captures usage/total_cost_usd/duration_ms from the result on success', async () => {
+    const recordDispatchedUsage = vi.fn()
+    const target = makeFakeClaudeTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
+      spawnClaudeQuery: target.spawnClaudeQuery,
+      recordDispatchedUsage
+    })
+    const ctx = makeCtx({ fromEngine: 'opencode', toolUseId: 'toolu_claude_usage_1' })
+    const pending = dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
+    await tick()
+    target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-1' } as SDKMessage)
+    target.push(
+      resultMsg({
+        result: 'the answer',
+        total_cost_usd: 0.03,
+        duration_ms: 4200,
+        usage: { input_tokens: 200, output_tokens: 80 }
+      })
+    )
+    const result = await pending
+    expect(result.isError).toBeUndefined()
+
+    const notif = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')
+    const usage = (notif![1] as { usage?: { totalTokens: number; toolUses: number; durationMs: number } })
+      .usage
+    expect(usage!.totalTokens).toBe(280)
+    expect(usage!.durationMs).toBe(4200)
+
+    expect(recordDispatchedUsage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        fromRoutingId: 'routing-1',
+        fromEngine: 'opencode',
+        targetEngine: 'claude',
+        targetModel: 'haiku',
+        targetSessionId: 'claude-sess-1',
+        toolUseId: 'toolu_claude_usage_1',
+        totalTokens: 280,
+        costUsd: 0.03,
+        durationMs: 4200
+      })
+    )
+  })
+
+  it('counts DISTINCT tool_use ids — the same assistant message re-forwarded as partial updates does not double-count', async () => {
+    const recordDispatchedUsage = vi.fn()
+    const target = makeFakeClaudeTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
+      spawnClaudeQuery: target.spawnClaudeQuery,
+      recordDispatchedUsage
+    })
+    const ctx = makeCtx({ fromEngine: 'opencode', toolUseId: 'toolu_claude_tools' })
+    const pending = dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
+    await tick()
+    target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-1' } as SDKMessage)
+    // includePartialMessages: the SAME assistant message (same betaMessage id,
+    // same tool_use id) arrives repeatedly as partial updates. Push it twice —
+    // it must count as ONE tool use, not two.
+    const assistantMsg = {
+      type: 'assistant',
+      message: {
+        id: 'm1',
+        role: 'assistant',
+        content: [
+          { type: 'tool_use', id: 'toolu_x', name: 'Bash', input: { command: 'ls' } },
+          { type: 'text', text: 'done' }
+        ]
+      }
+    } as unknown as SDKMessage
+    target.push(assistantMsg)
+    await tick()
+    target.push(assistantMsg)
+    await tick()
+    target.push(resultMsg({ result: 'done' }))
+    await pending
+
+    const notif = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')
+    const usage = (notif![1] as { usage?: { toolUses: number } }).usage
+    expect(usage!.toolUses).toBe(1)
+  })
+
+  it('a throwing recordDispatchedUsage NEVER fails the dispatch (Claude direction)', async () => {
+    const recordDispatchedUsage = vi.fn(() => {
+      throw new Error('disk I/O error')
+    })
+    const target = makeFakeClaudeTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
+      spawnClaudeQuery: target.spawnClaudeQuery,
+      recordDispatchedUsage
+    })
+    const ctx = makeCtx({ fromEngine: 'opencode', toolUseId: 'toolu_claude_throw' })
+    const pending = dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
+    await tick()
+    target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-1' } as SDKMessage)
+    target.push(resultMsg({ result: 'the successful answer', total_cost_usd: 0.01 }))
+    const result = await pending
+
+    expect(recordDispatchedUsage).toHaveBeenCalled()
+    expect(result.isError).toBeUndefined()
+    expect(result.text).toBe('the successful answer')
+  })
+
+  it('a stopped turn is NOT recorded; a timed-out turn IS recorded with null usage', async () => {
+    const recordDispatchedUsage = vi.fn()
+    const target = makeFakeClaudeTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
+      spawnClaudeQuery: target.spawnClaudeQuery,
+      recordDispatchedUsage,
+      dispatchTimeoutMs: 30
+    })
+    const ctx = makeCtx({ fromEngine: 'opencode', toolUseId: 'toolu_claude_timeout' })
+    const pending = dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
+    await tick()
+    target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-1' } as SDKMessage)
+    const result = await pending
+    expect(result.isError).toBe(true)
+
+    expect(recordDispatchedUsage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        toolUseId: 'toolu_claude_timeout',
+        totalTokens: null,
+        costUsd: null
+      })
+    )
+  })
+})
+
+// ---------------------------------------------------------------------------
+// ADR-033 M4-C — per-dispatch cost cap
+// ---------------------------------------------------------------------------
+
+describe('CrossEngineDispatcher — M4-C cost cap (opencode direction)', () => {
+  it('a continuation turn is rejected once cumulative cost meets the cap; target survives', async () => {
+    const { dispatcher, client } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai/gpt-5', maxCostUsd: 0.05 } }))
+    })
+    client.prompt.mockResolvedValueOnce({
+      parts: [{ type: 'text', text: 'first' }],
+      info: { cost: 0.05 }
+    })
+    const first = await dispatcher.dispatch({ engine: 'opencode', prompt: 'one' }, makeCtx())
+    expect(first.isError).toBeUndefined()
+
+    const second = await dispatcher.dispatch(
+      { engine: 'opencode', prompt: 'two', sessionId: first.sessionId },
+      makeCtx()
+    )
+    expect(second.isError).toBe(true)
+    expect(second.text).toContain('cost cap')
+    expect(second.sessionId).toBe(first.sessionId)
+    // Rejected BEFORE running a turn — no second prompt() call.
+    expect(client.prompt).toHaveBeenCalledTimes(1)
+  })
+
+  it('a completing turn that crosses the cap appends the warning note to the returned text', async () => {
+    const { dispatcher, client } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai/gpt-5', maxCostUsd: 0.05 } }))
+    })
+    client.prompt.mockResolvedValueOnce({
+      parts: [{ type: 'text', text: 'the answer' }],
+      info: { cost: 0.06 }
+    })
+    const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
+    expect(result.isError).toBeUndefined()
+    expect(result.text).toContain('the answer')
+    expect(result.text).toContain('[dispatch cost cap reached')
+  })
+
+  it('no cap configured → unlimited, no note ever appended regardless of cost', async () => {
+    const { dispatcher, client } = makeHarness()
+    client.prompt.mockResolvedValueOnce({
+      parts: [{ type: 'text', text: 'the answer' }],
+      info: { cost: 999 }
+    })
+    const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
+    expect(result.isError).toBeUndefined()
+    expect(result.text).toBe('the answer')
+  })
+})
+
+describe('CrossEngineDispatcher — M4-C cost cap (Claude direction)', () => {
+  it('a continuation turn is rejected once cumulative cost meets the cap; target survives', async () => {
+    const target = makeFakeClaudeTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku', maxCostUsd: 0.05 } })),
+      spawnClaudeQuery: target.spawnClaudeQuery
+    })
+    const ctx = makeCtx({ fromEngine: 'opencode' })
+    const first = dispatcher.dispatch({ engine: 'claude', prompt: 'one' }, ctx)
+    await tick()
+    target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-1' } as SDKMessage)
+    target.push(resultMsg({ result: 'first answer', total_cost_usd: 0.05 }))
+    const firstResult = await first
+    expect(firstResult.isError).toBeUndefined()
+
+    const second = await dispatcher.dispatch(
+      { engine: 'claude', prompt: 'two', sessionId: firstResult.sessionId },
+      ctx
+    )
+    expect(second.isError).toBe(true)
+    expect(second.text).toContain('cost cap')
+    expect(second.sessionId).toBe(firstResult.sessionId)
+    // Rejected before spawning a second turn on the iterator.
+    expect(target.spawnCalls).toHaveLength(1)
+  })
+
+  it('a completing turn that crosses the cap appends the warning note to the returned text', async () => {
+    const target = makeFakeClaudeTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku', maxCostUsd: 0.05 } })),
+      spawnClaudeQuery: target.spawnClaudeQuery
+    })
+    const ctx = makeCtx({ fromEngine: 'opencode' })
+    const pending = dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
+    await tick()
+    target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-1' } as SDKMessage)
+    target.push(resultMsg({ result: 'the answer', total_cost_usd: 0.06 }))
+    const result = await pending
+    expect(result.isError).toBeUndefined()
+    expect(result.text).toContain('the answer')
+    expect(result.text).toContain('[dispatch cost cap reached')
+  })
+
+  it('no cap configured → unlimited, no note ever appended regardless of cost', async () => {
+    const target = makeFakeClaudeTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
+      spawnClaudeQuery: target.spawnClaudeQuery
+    })
+    const ctx = makeCtx({ fromEngine: 'opencode' })
+    const pending = dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
+    await tick()
+    target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-1' } as SDKMessage)
+    target.push(resultMsg({ result: 'the answer', total_cost_usd: 999 }))
+    const result = await pending
+    expect(result.isError).toBeUndefined()
+    expect(result.text).toBe('the answer')
   })
 })

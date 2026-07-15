@@ -453,6 +453,13 @@ export interface DispatchConfig {
   allowedModels?: string[]
   /** Model used when the caller doesn't request one. */
   defaultModel?: string
+  /**
+   * Per-dispatch-target cumulative cost cap in USD (ADR-033 M4-C). When set, a
+   * continuation turn on a target whose tracked cumulative cost has already
+   * met/exceeded this value is rejected with an isError (the target survives —
+   * raising the cap or starting a fresh dispatch both work). Undefined = no cap.
+   */
+  maxCostUsd?: number
 }
 
 /**
@@ -1048,6 +1055,11 @@ interface AccountAPI {
    * Desktop-only (spawns a local opencode server). Phase 9b.
    */
   refreshPrices(): Promise<{ count: number; refreshedAt: number }>
+  /**
+   * Aggregate cross-engine dispatched usage (ADR-033 M4-B) by (targetEngine,
+   * targetModel), all-time. Backs UsageView's "Delegated" section.
+   */
+  fetchDispatchedUsage(): Promise<DispatchedUsageSummary[]>
 }
 
 export interface NetworkInterfaceInfo {
@@ -1410,6 +1422,19 @@ export interface EngineUsageSummary {
   requestCount: number
   /** Per-model breakdown within this engine, sorted by total tokens desc (Phase 9b). */
   models: ModelTokenBreakdown[]
+}
+
+/**
+ * One (targetEngine, targetModel) aggregate of cross-engine dispatched usage
+ * (ADR-033 M4-B) — the operational DB's `dispatched_usage` table grouped by
+ * target. Backs UsageView's "Delegated" section.
+ */
+export interface DispatchedUsageSummary {
+  targetEngine: string
+  targetModel: string
+  dispatches: number
+  totalTokens: number
+  costUsd: number
 }
 
 // ---------------------------------------------------------------------------

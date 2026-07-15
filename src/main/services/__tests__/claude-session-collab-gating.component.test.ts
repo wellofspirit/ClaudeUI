@@ -50,7 +50,11 @@ vi.mock('../../opencode/OpencodeServerManager', () => ({
 }))
 
 vi.mock('../cross-engine-dispatcher', () => ({
-  crossEngineDispatcher: crossEngineSpies
+  crossEngineDispatcher: crossEngineSpies,
+  // Mirrors opencodeServerManager.isBinaryAvailable() above — same underlying
+  // signal, now routed through the named capability helper (ADR-030/M4-A).
+  crossEngineDispatchAvailable: (engineId: string): boolean =>
+    engineId === 'claude' ? binaryAvailable.value : true
 }))
 
 vi.mock('../logger', () => ({

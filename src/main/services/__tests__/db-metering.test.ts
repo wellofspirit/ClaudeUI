@@ -49,7 +49,7 @@ describe('DB migrations — v3 usage_event + v4 usage_window_sample', () => {
     const db = openRawDb()
     try {
       runMigrations(db)
-      expect(userVersion(db)).toBe(5)
+      expect(userVersion(db)).toBe(6)
     } finally {
       db.close()
     }

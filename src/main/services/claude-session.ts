@@ -31,8 +31,7 @@ import { usageFetcher } from './usage-fetcher'
 import { createMermaidServer } from './mermaid-tool'
 import { createMockupServer } from './mockup-tool'
 import { createCollabServer } from './collab-tool'
-import { crossEngineDispatcher } from './cross-engine-dispatcher'
-import { opencodeServerManager } from '../opencode/OpencodeServerManager'
+import { crossEngineDispatcher, crossEngineDispatchAvailable } from './cross-engine-dispatcher'
 import { claudeAuthProvider } from '../auth/ClaudeAuthProvider'
 import { accountManager } from './account-manager'
 import { equivalentCostUsd } from '../../shared/pricing'
@@ -179,7 +178,14 @@ export class ClaudeSession extends BaseSession {
   readonly engineId = 'claude' as const
 
   get capabilities(): ResolvedCapabilities {
-    return resolveClaudeCapabilities(this.model)
+    const base = resolveClaudeCapabilities(this.model)
+    // ADR-030/ADR-033 M4-A: the static flag is true (both directions ship),
+    // but the HONEST per-session value also requires the opencode binary to
+    // actually be vendored — otherwise there is no possible dispatch target.
+    return {
+      ...base,
+      crossEngineDispatch: base.crossEngineDispatch && crossEngineDispatchAvailable('claude')
+    }
   }
 
   private sessionId: string | null = null
@@ -453,9 +459,11 @@ export class ClaudeSession extends BaseSession {
       const mockupMcpServer = createMockupServer(this.cwd)
       // Cross-engine dispatch (ADR-033): a SEPARATE server so dispatch_agent
       // does NOT ride the auto-allowed `mcp__claude-ui__` prefix — it goes
-      // through canUseTool like an ordinary tool. Only registered when the
-      // opencode binary is vendored (no target engine → no tool).
-      const collabServer = opencodeServerManager.isBinaryAvailable()
+      // through canUseTool like an ordinary tool. Gated on the named
+      // crossEngineDispatchAvailable('claude') capability (ADR-030/M4-A) —
+      // same underlying check (opencode binary vendored) as before, but now
+      // routed through the honest capability helper instead of a raw proxy.
+      const collabServer = crossEngineDispatchAvailable('claude')
         ? createCollabServer({
             engineId: this.engineId,
             getRoutingId: () => this.routingId,

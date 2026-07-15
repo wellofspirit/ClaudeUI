@@ -371,6 +371,11 @@ export class OpencodeServerManager {
       // port + token to inject via OPENCODE_CONFIG_CONTENT.
       // Engine-native config (model, providers, agents) is read by opencode from
       // its own global config file (written by opencode-config.ts) — not injected here.
+      // dispatch_agent registration here stays UNCONDITIONAL (unlike Claude's
+      // claude-ui-collab, gated on crossEngineDispatchAvailable('claude')) —
+      // ADR-030/ADR-033 M4-A: opencode's dispatch target is always Claude,
+      // ClaudeUI's bundled default engine, which is always installed. There is
+      // no "is the target engine present" question on this side to gate on.
       const mcpHost = await this.startMcpHostFn(
         createOpencodeHostedToolsServer(key, {
           lookupCallerSession: (sessionId) => this.callerSessionLookup(sessionId),

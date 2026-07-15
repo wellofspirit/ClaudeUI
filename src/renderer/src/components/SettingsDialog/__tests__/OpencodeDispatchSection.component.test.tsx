@@ -204,4 +204,31 @@ describe('OpencodeDispatchSection — saves merge, never clobber', () => {
       allowedModels: ['openai/gpt-5', 'google/gemini-3']
     })
   })
+
+  it('setting maxCost saves it alongside the rest, autoMode intact (ADR-033 M4-C)', async () => {
+    await renderLoaded()
+
+    fireEvent.change(screen.getByTestId('OpencodeDispatchSection.maxCost'), {
+      target: { value: '1' }
+    })
+
+    expect(savedConfigs[0]).toEqual({
+      autoMode: { enabled: true, judgeModel: 'openai/gpt-5-mini' },
+      dispatch: { defaultModel: 'openai/gpt-5', allowedModels: ['openai/gpt-5'], maxCostUsd: 1 }
+    })
+  })
+
+  it('clearing maxCost drops the key (undefined = no cap)', async () => {
+    await renderLoaded()
+
+    fireEvent.change(screen.getByTestId('OpencodeDispatchSection.maxCost'), {
+      target: { value: '1' }
+    })
+    fireEvent.change(screen.getByTestId('OpencodeDispatchSection.maxCost'), {
+      target: { value: '' }
+    })
+
+    expect(savedConfigs[1].dispatch?.maxCostUsd).toBeUndefined()
+    expect(savedConfigs[1].dispatch?.defaultModel).toBe('openai/gpt-5')
+  })
 })

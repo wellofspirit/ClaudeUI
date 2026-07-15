@@ -407,6 +407,19 @@ export interface EngineCapabilities {
   proxy: boolean
   autonomyModes: AutonomyMode[]
   auth: { canDriveLogin: boolean; multiAccount: boolean }
+  /**
+   * ADR-033 (cross-engine dispatch) + ADR-030 (capability honesty): "this
+   * engine can host the `dispatch_agent` tool AND at least one OTHER engine is
+   * installed as a possible target." Both static constants below are `true`
+   * (both directions' full path — tool visible → gated → dispatch → stream →
+   * result — is shipped and live-verified per ADR-033's M1/M2 notes). The
+   * HONEST per-session value is runtime-computed (target-engine-installed is
+   * inherently asymmetric) — see `crossEngineDispatchAvailable()` in
+   * `cross-engine-dispatcher.ts`, ANDed into `SessionStatus.capabilities` by
+   * each engine session, not derived here (this module is shared/renderer-safe
+   * and must not import main-process-only modules like OpencodeServerManager).
+   */
+  crossEngineDispatch: boolean
 }
 
 /**
@@ -463,7 +476,8 @@ export const CLAUDE_ENGINE_CAPABILITIES: EngineCapabilities = {
   sandbox: true,
   proxy: true,
   autonomyModes: ['plan', 'ask', 'autoEdit', 'full'],
-  auth: { canDriveLogin: true, multiAccount: true }
+  auth: { canDriveLogin: true, multiAccount: true },
+  crossEngineDispatch: true
 }
 
 /**
@@ -522,6 +536,7 @@ export function resolveCapabilities(
     proxy: engine.proxy,
     autonomyModes: engine.autonomyModes,
     auth: engine.auth,
+    crossEngineDispatch: engine.crossEngineDispatch,
     // Model fields
     reasoning: model.reasoning,
     vision: model.vision,
@@ -591,7 +606,8 @@ export const OPENCODE_ENGINE_CAPABILITIES: EngineCapabilities = {
   sandbox: false,
   proxy: false,
   autonomyModes: ['plan', 'ask', 'full'],
-  auth: { canDriveLogin: true, multiAccount: false }
+  auth: { canDriveLogin: true, multiAccount: false },
+  crossEngineDispatch: true
 }
 
 /**

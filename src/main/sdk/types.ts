@@ -151,6 +151,11 @@ export interface ResultMessage extends BaseSDKMessage {
   duration_api_ms?: number
   result?: string
   errors?: string[]
+  /** Per-turn token usage — `{input_tokens, output_tokens, cache_creation_input_tokens,
+   *  cache_read_input_tokens, ...}` (docs/protocol/03-inbound-messages.md §3.7). */
+  usage?: Record<string, unknown>
+  /** Per-model usage breakdown when the turn spanned multiple models (fallback, etc.). */
+  modelUsage?: Record<string, unknown>
 }
 
 export interface ToolProgressMessage extends BaseSDKMessage {

@@ -1,18 +1,21 @@
 /**
  * Layer 2: Component tests for ClaudeDispatchSection (ADR-033 M2-C — Claude-side twin).
  *
- * Mirrors OpencodeDispatchSection.component.test.tsx. Key difference: Claude has
- * no "not installed" gate (it's the bundled default engine — `engine:is-installed`
- * always returns true for it), so there's no not-installed test here.
+ * Mirrors OpencodeDispatchSection.component.test.tsx. Claude itself is always
+ * installed, but dispatch INTO Claude can only be called FROM opencode, so
+ * (ADR-033 M4-A) this section gates on the same opencode-installed probe as
+ * the opencode twin — hence the gated-states tests below, unlike the earlier
+ * M2-C revision of this file.
  *
  * Tested flows:
- *   1. Loading state while the config probe is pending
+ *   1. Gated states: loading (probes pending) and not-installed (no opencode)
  *   2. Load renders the current dispatch config (select value + row states),
  *      filtered to Claude models only (opencode models excluded)
  *   3. Editing the default model saves the FULL merged EngineConfig —
  *      sandbox / proxy / other fields must not be clobbered
  *   4. "(not set)" clears defaultModel (undefined, not '')
  *   5. Toggling an allowed model on/off; last-off drops the allowedModels key
+ *   6. maxCost input round-trips through the merged save (ADR-033 M4-C)
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react'
@@ -59,6 +62,7 @@ const saveEngineConfig = vi.fn(async (_engineId: string, cfg: EngineConfig) => {
 
 function installApiStub(overrides: Record<string, unknown> = {}): void {
   ;(window as unknown as { api: Record<string, unknown> }).api = {
+    engineIsInstalled: vi.fn(async () => true),
     loadEngineConfig: vi.fn(async () => structuredClone(BASE_CONFIG)),
     getEngineModels: vi.fn(async () => MODEL_GROUPS),
     saveEngineConfig,
@@ -93,14 +97,25 @@ afterEach(() => {
 
 // ── Tests ────────────────────────────────────────────────────────────
 
-describe('ClaudeDispatchSection — loading state', () => {
-  it('shows Loading while the config probe is pending', () => {
+describe('ClaudeDispatchSection — gated states', () => {
+  it('shows Loading while probes are pending', () => {
     installApiStub({
+      engineIsInstalled: vi.fn(() => new Promise(() => {})),
       loadEngineConfig: vi.fn(() => new Promise(() => {}))
     })
     render(<ClaudeDispatchSection />)
     expect(screen.getByTestId('ClaudeDispatchSection').textContent).toContain('Loading')
     expect(screen.queryByTestId('ClaudeDispatchSection.defaultModel')).toBeNull()
+  })
+
+  it('shows the not-installed message (no controls) when opencode is absent — no possible caller', async () => {
+    installApiStub({ engineIsInstalled: vi.fn(async () => false) })
+    render(<ClaudeDispatchSection />)
+    await waitFor(() =>
+      expect(screen.getByTestId('ClaudeDispatchSection').textContent).toContain('not installed')
+    )
+    expect(screen.queryByTestId('ClaudeDispatchSection.defaultModel')).toBeNull()
+    expect(screen.queryAllByTestId('ClaudeDispatchSection.allowedModel')).toHaveLength(0)
   })
 })
 
@@ -188,5 +203,33 @@ describe('ClaudeDispatchSection — saves merge, never clobber', () => {
       defaultModel: 'haiku',
       allowedModels: ['sonnet', 'haiku']
     })
+  })
+
+  it('setting maxCost saves it alongside the rest, sandbox/proxy intact (ADR-033 M4-C)', async () => {
+    await renderLoaded()
+
+    fireEvent.change(screen.getByTestId('ClaudeDispatchSection.maxCost'), {
+      target: { value: '2.5' }
+    })
+
+    expect(savedConfigs[0]).toEqual({
+      sandbox: { mode: 'workspace-write' },
+      proxy: { enabled: true },
+      dispatch: { defaultModel: 'sonnet', allowedModels: ['sonnet'], maxCostUsd: 2.5 }
+    })
+  })
+
+  it('clearing maxCost drops the key (undefined = no cap)', async () => {
+    await renderLoaded()
+
+    fireEvent.change(screen.getByTestId('ClaudeDispatchSection.maxCost'), {
+      target: { value: '2.5' }
+    })
+    fireEvent.change(screen.getByTestId('ClaudeDispatchSection.maxCost'), {
+      target: { value: '' }
+    })
+
+    expect(savedConfigs[1].dispatch?.maxCostUsd).toBeUndefined()
+    expect(savedConfigs[1].dispatch?.defaultModel).toBe('sonnet')
   })
 })

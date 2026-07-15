@@ -266,6 +266,9 @@ const api: ClaudeAPI = {
   setUsageAccountFilter: (account: string | null) =>
     ipcRenderer.invoke('usage:set-account-filter', account),
 
+  // Cross-engine dispatched usage (ADR-033 M4-B)
+  fetchDispatchedUsage: () => ipcRenderer.invoke('usage:fetch-dispatched'),
+
   // Native Anthropic OAuth (ADR-014)
   signIn: () => ipcRenderer.invoke('auth:sign-in'),
   submitOAuthCode: (code: string) => ipcRenderer.invoke('auth:submit-code', code),

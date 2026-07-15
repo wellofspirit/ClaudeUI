@@ -53,13 +53,54 @@ import type {
   SdkToolExtra
 } from '../sdk'
 import { logger } from './logger'
+import { insertDispatchedUsage } from './db'
+import type { DispatchedUsageRow } from './db'
 import type {
   ApprovalDecision,
+  ChatMessage,
   EngineConfig,
   EngineId,
   PendingApproval,
   PermissionSuggestion
 } from '../../shared/types'
+
+/**
+ * Whether cross-engine dispatch is a real, honest capability for `engineId`
+ * (ADR-030 + ADR-033 M4-A): "this engine can host the dispatch tool AND at
+ * least one OTHER installed engine can be a target." Lives here (not in
+ * shared/model-capabilities.ts, which must stay renderer-safe / import-free
+ * of main-process-only modules) — both ClaudeSession.ts and OpencodeSession.ts
+ * already import THIS module (for `crossEngineDispatcher`/`disposeFor`), so
+ * adding one more named export here forms no new import edge, let alone a
+ * cycle.
+ *  - 'claude' hosts the tool for opencode-originated dispatches into Claude;
+ *    the only other engine is opencode, so honesty requires the opencode
+ *    binary actually being vendored/available.
+ *  - 'opencode' hosts the tool for Claude-originated dispatches into opencode;
+ *    the only other engine is Claude, which is ClaudeUI's bundled default
+ *    engine — always present, so always true.
+ */
+export function crossEngineDispatchAvailable(engineId: EngineId): boolean {
+  if (engineId === 'claude') return opencodeServerManager.isBinaryAvailable()
+  return true
+}
+
+/**
+ * Collect the `tool_use` block IDS from a forwarded assistant message into the
+ * per-turn set — the best-effort `toolUses` figure in `TaskNotification.usage`
+ * (ADR-033 M4-B) is that set's size at turn end. A SET (not a counter) because
+ * the same assistant message is forwarded repeatedly: Claude targets run
+ * `includePartialMessages` (each partial re-carries the same blocks under the
+ * same betaMessage id), and the opencode SSE tap re-emits the whole rebuilt
+ * message on every `message.part.updated` (event-mapper's upsert-by-message-id
+ * model). A counter would re-count the same tool_use on every emission.
+ * Shared by both directions' streaming taps.
+ */
+function collectToolUseIds(message: ChatMessage, into: Set<string>): void {
+  for (const block of message.content) {
+    if (block.type === 'tool_use') into.add(block.toolUseId)
+  }
+}
 
 // ── Public surface ────────────────────────────────────────────────────────────
 
@@ -159,6 +200,14 @@ export interface DispatcherDeps {
   heartbeatMs?: number
   /** Clock, injectable for the pendingStops TTL tests. Defaults to Date.now. */
   now?: () => number
+  /**
+   * Persist one dispatched-agent-turn usage row (ADR-033 M4-B). Defaults to
+   * the real `insertDispatchedUsage` (db.ts) — tests inject a spy instead of
+   * exercising the (in-memory-under-vitest, but still real) operational DB.
+   * Called for 'completed'/'failed' outcomes only, never for a turn stopped
+   * before it produced any usage (see the call sites).
+   */
+  recordDispatchedUsage?: (row: Omit<DispatchedUsageRow, 'id'>) => void
 }
 
 // ── Internals ─────────────────────────────────────────────────────────────────
@@ -204,6 +253,16 @@ interface OpencodeTargetEntry {
    * message ids never collide with a previous turn's.
    */
   accumulators: Map<string, MessageAccumulator>
+  /** Cumulative cost across every turn this target has run (ADR-033 M4-C —
+   *  the per-dispatch cost cap). Never decreases; reset only by creating a
+   *  fresh target (a new session_id). */
+  cumulativeCostUsd: number
+  /** DISTINCT tool_use ids seen in the turn CURRENTLY in flight (ADR-033
+   *  M4-B). A fresh Set at every turn start, populated by the streaming tap
+   *  (`collectToolUseIds` — a Set, not a counter, because the tap re-emits the
+   *  same rebuilt message on every part update), `.size` read once at turn
+   *  end for the notification/usage-record `toolUses` figure. */
+  turnToolUseIds: Set<string>
 }
 
 /**
@@ -245,6 +304,13 @@ interface ClaudeTargetEntry {
   busy: boolean
   /** Latest dispatching context — used to forward approvals mid-turn. */
   ctx: DispatchContext
+  /** Cumulative cost across every turn this target has run (ADR-033 M4-C). */
+  cumulativeCostUsd: number
+  /** DISTINCT tool_use ids seen in the turn CURRENTLY in flight (ADR-033
+   *  M4-B) — same Set-not-counter rationale as OpencodeTargetEntry (Claude
+   *  targets run includePartialMessages, so the same assistant message is
+   *  forwarded repeatedly under the same betaMessage id). */
+  turnToolUseIds: Set<string>
 }
 
 type TargetEntry = OpencodeTargetEntry | ClaudeTargetEntry
@@ -301,14 +367,16 @@ function emitDispatchProgress(ctx: DispatchContext, elapsedTimeSeconds: number):
 /**
  * Final completion signal for a dispatch (ADR-033 M3) — mirrors
  * ClaudeSession's `session:task-notification` shape exactly (TaskCard reads
- * both identically). `usage` is left unset here; M4 populates it from the
- * target's per-turn cost/token result.
+ * both identically). `usage` (ADR-033 M4-B) is populated only on paths that
+ * have real per-turn numbers (success outcomes) — timeouts/stops/errors pass
+ * it undefined rather than fabricate zeros for a turn that never returned.
  */
 function emitDispatchNotification(
   ctx: DispatchContext,
   targetSessionId: string,
   status: 'completed' | 'failed' | 'stopped',
-  summary: string
+  summary: string,
+  usage?: { totalTokens: number; toolUses: number; durationMs: number }
 ): void {
   if (!ctx.toolUseId) return
   ctx.emit('session:task-notification', {
@@ -317,7 +385,7 @@ function emitDispatchNotification(
     status,
     outputFile: '',
     summary: summary.slice(0, 100),
-    usage: undefined
+    usage
   })
 }
 
@@ -452,6 +520,7 @@ export class CrossEngineDispatcher {
   private readonly dispatchTimeoutMs: number
   private readonly heartbeatMs: number
   private readonly spawnClaudeQuery: SpawnClaudeQueryFn
+  private readonly recordDispatchedUsage: (row: Omit<DispatchedUsageRow, 'id'>) => void
 
   /** Keyed by target session id (opencode session id, or Claude session UUID). */
   private targets = new Map<string, TargetEntry>()
@@ -492,11 +561,31 @@ export class CrossEngineDispatcher {
     this.heartbeatMs = deps.heartbeatMs ?? HEARTBEAT_MS
     this.spawnClaudeQuery = deps.spawnClaudeQuery ?? defaultSpawnClaudeQuery
     this.now = deps.now ?? Date.now
+    this.recordDispatchedUsage = deps.recordDispatchedUsage ?? insertDispatchedUsage
   }
 
   /** For tests: current in-flight dispatch count. */
   get inFlightCount(): number {
     return this.activeDispatches
+  }
+
+  /**
+   * Record one dispatched-usage row, ISOLATING failures (ADR-033 M4-B): the
+   * default `recordDispatchedUsage` is a real better-sqlite3 insert — if it
+   * throws (locked DB, disk error), the exception must never propagate into
+   * the dispatch flow, where `dispatch()`'s catch would report a COMPLETED
+   * turn back to the caller model as `Dispatch failed: …`. Usage accounting
+   * is best-effort by design; the turn result is not.
+   */
+  private safeRecordUsage(row: Omit<DispatchedUsageRow, 'id'>): void {
+    try {
+      this.recordDispatchedUsage(row)
+    } catch (err) {
+      logger.warn(
+        'CrossEngineDispatcher',
+        `recordDispatchedUsage failed (usage row dropped): ${err instanceof Error ? err.message : String(err)}`
+      )
+    }
   }
 
   /**
@@ -738,6 +827,19 @@ export class CrossEngineDispatcher {
             'Start a fresh dispatch without session_id.'
         )
       }
+      // ADR-033 M4-C: reject a continuation turn once this target's tracked
+      // cumulative cost has met/exceeded the configured cap. The target stays
+      // alive — raising dispatch.maxCostUsd or starting a fresh dispatch both
+      // recover. A brand-new target (the `else` branch below) always starts
+      // at cumulativeCostUsd 0, so no check is needed there.
+      if (dispatchCfg?.maxCostUsd !== undefined && existing.cumulativeCostUsd >= dispatchCfg.maxCostUsd) {
+        return errorResult(
+          `Dispatch cost cap ($${dispatchCfg.maxCostUsd}) reached for this session ` +
+            `(spent $${existing.cumulativeCostUsd.toFixed(4)}) — further turns are rejected. ` +
+            'Raise dispatch.maxCostUsd in engines/opencode.json, or start a fresh dispatch.',
+          existing.sessionId
+        )
+      }
       existing.ctx = ctx
       entry = existing
     } else {
@@ -765,6 +867,10 @@ export class CrossEngineDispatcher {
     // Only while a turn is actually running: gates the SSE stream tap so
     // stray events after this turn ends never emit stale deltas (ADR-033 M3).
     entry.busy = true
+    // Per-turn distinct tool_use id set (ADR-033 M4-B) — fresh at the start of
+    // every turn, populated by the SSE streaming tap, .size read at turn end.
+    entry.turnToolUseIds = new Set()
+    const turnStartedAt = this.now()
 
     type Raced =
       | { kind: 'ok'; resp: unknown }
@@ -823,24 +929,53 @@ export class CrossEngineDispatcher {
           winner.kind === 'timeout'
             ? `Dispatch timed out after ${Math.round(this.dispatchTimeoutMs / 60000)} minutes — the target agent was aborted.`
             : 'Dispatch cancelled.'
-        emitDispatchNotification(
-          ctx,
-          entry.sessionId,
-          winner.kind === 'timeout' ? 'failed' : 'stopped',
-          text
-        )
+        const status = winner.kind === 'timeout' ? 'failed' : 'stopped'
+        emitDispatchNotification(ctx, entry.sessionId, status, text)
+        // Recorded for 'failed' (timeout) only — 'stopped' (abort/cancel) is
+        // never recorded (ADR-033 M4-B: "not for stopped-before-start" — no
+        // usage numbers exist for a turn that never returned a result).
+        if (status === 'failed') {
+          this.safeRecordUsage({
+            ts: this.now(),
+            fromRoutingId: ctx.fromRoutingId,
+            fromEngine: ctx.fromEngine,
+            targetEngine: req.engine,
+            targetModel: model,
+            targetSessionId: entry.sessionId,
+            toolUseId: ctx.toolUseId ?? null,
+            totalTokens: null,
+            costUsd: null,
+            durationMs: this.now() - turnStartedAt
+          })
+        }
         return errorResult(text, entry.sessionId)
       }
       if (winner.kind === 'err') {
         this.dismissPendingForTarget(entry.sessionId)
         const msg = winner.err instanceof Error ? winner.err.message : String(winner.err)
         emitDispatchNotification(ctx, entry.sessionId, 'failed', `Dispatched turn failed: ${msg}`)
+        this.safeRecordUsage({
+          ts: this.now(),
+          fromRoutingId: ctx.fromRoutingId,
+          fromEngine: ctx.fromEngine,
+          targetEngine: req.engine,
+          targetModel: model,
+          targetSessionId: entry.sessionId,
+          toolUseId: ctx.toolUseId ?? null,
+          totalTokens: null,
+          costUsd: null,
+          durationMs: this.now() - turnStartedAt
+        })
         return errorResult(`Dispatched turn failed: ${msg}`, entry.sessionId)
       }
 
       const resp = winner.resp as
         | {
-            info?: { error?: { name?: string; data?: { message?: string } } }
+            info?: {
+              error?: { name?: string; data?: { message?: string } }
+              tokens?: { input?: number; output?: number; reasoning?: number }
+              cost?: number
+            }
             parts?: Array<{ type?: string; text?: string }>
           }
         | undefined
@@ -856,6 +991,18 @@ export class CrossEngineDispatcher {
         const detail =
           turnError.data?.message || turnError.name || 'the dispatched agent reported an error'
         emitDispatchNotification(ctx, entry.sessionId, 'failed', `Dispatched turn failed: ${detail}`)
+        this.safeRecordUsage({
+          ts: this.now(),
+          fromRoutingId: ctx.fromRoutingId,
+          fromEngine: ctx.fromEngine,
+          targetEngine: req.engine,
+          targetModel: model,
+          targetSessionId: entry.sessionId,
+          toolUseId: ctx.toolUseId ?? null,
+          totalTokens: null,
+          costUsd: null,
+          durationMs: this.now() - turnStartedAt
+        })
         return errorResult(`Dispatched turn failed: ${detail}`, entry.sessionId)
       }
       const text = (resp?.parts ?? [])
@@ -863,8 +1010,45 @@ export class CrossEngineDispatcher {
         .map((p) => p?.text ?? '')
         .join('')
       const finalText = text || '(the dispatched agent returned no text)'
-      emitDispatchNotification(ctx, entry.sessionId, 'completed', finalText)
-      return { text: finalText, sessionId: entry.sessionId }
+
+      // ── Usage capture (ADR-033 M4-B) ────────────────────────────────────
+      // opencode's `info.tokens`/`info.cost` are a per-MESSAGE (i.e. per-turn
+      // — each turn creates a new message id) cumulative snapshot, same shape
+      // event-mapper.ts reads for OpencodeSession's own metering.
+      const infoTokens = resp?.info?.tokens
+      const totalTokens = infoTokens
+        ? (infoTokens.input ?? 0) + (infoTokens.output ?? 0) + (infoTokens.reasoning ?? 0)
+        : 0
+      const turnCostUsd = resp?.info?.cost ?? 0
+      const durationMs = this.now() - turnStartedAt
+
+      // ── Cost cap crossing note (ADR-033 M4-C) ───────────────────────────
+      const maxCostUsd = dispatchCfg?.maxCostUsd
+      const wasUnderCap = maxCostUsd === undefined || entry.cumulativeCostUsd < maxCostUsd
+      entry.cumulativeCostUsd += turnCostUsd
+      let outText = finalText
+      if (maxCostUsd !== undefined && wasUnderCap && entry.cumulativeCostUsd >= maxCostUsd) {
+        outText += '\n\n[dispatch cost cap reached — further turns on this session will be rejected]'
+      }
+
+      emitDispatchNotification(ctx, entry.sessionId, 'completed', finalText, {
+        totalTokens,
+        toolUses: entry.turnToolUseIds.size,
+        durationMs
+      })
+      this.safeRecordUsage({
+        ts: this.now(),
+        fromRoutingId: ctx.fromRoutingId,
+        fromEngine: ctx.fromEngine,
+        targetEngine: req.engine,
+        targetModel: model,
+        targetSessionId: entry.sessionId,
+        toolUseId: ctx.toolUseId ?? null,
+        totalTokens,
+        costUsd: turnCostUsd,
+        durationMs
+      })
+      return { text: outText, sessionId: entry.sessionId }
     } finally {
       entry.busy = false
       clearInterval(heartbeat)
@@ -908,7 +1092,9 @@ export class CrossEngineDispatcher {
         client: rec.client,
         ctx,
         busy: false,
-        accumulators: new Map()
+        accumulators: new Map(),
+        cumulativeCostUsd: 0,
+        turnToolUseIds: new Set()
       }
       this.targets.set(session.id, entry)
       return entry
@@ -1031,6 +1217,7 @@ export class CrossEngineDispatcher {
         text: output.delta
       })
     } else if (output.kind === 'message') {
+      collectToolUseIds(output.message, entry.turnToolUseIds)
       entry.ctx.emit('session:subagent-message', { toolUseId, message: output.message })
     }
   }
@@ -1083,6 +1270,18 @@ export class CrossEngineDispatcher {
           req.sessionId
         )
       }
+      // ADR-033 M4-C: reject a continuation turn once this target's tracked
+      // cumulative cost has met/exceeded the configured cap (same semantics
+      // as the opencode direction above). A brand-new target always starts at
+      // cumulativeCostUsd 0.
+      if (dispatchCfg?.maxCostUsd !== undefined && existing.cumulativeCostUsd >= dispatchCfg.maxCostUsd) {
+        return errorResult(
+          `Dispatch cost cap ($${dispatchCfg.maxCostUsd}) reached for this session ` +
+            `(spent $${existing.cumulativeCostUsd.toFixed(4)}) — further turns are rejected. ` +
+            'Raise dispatch.maxCostUsd in engines/claude.json, or start a fresh dispatch.',
+          req.sessionId
+        )
+      }
       existing.ctx = ctx
       entry = existing
     } else {
@@ -1113,6 +1312,9 @@ export class CrossEngineDispatcher {
     // (success, turn error, timeout, abort) — including the paths that
     // remove the entry, where it's harmless.
     entry.busy = true
+    // Per-turn distinct tool_use id set (ADR-033 M4-B) — fresh at the start of
+    // every turn, populated by forwardClaudeTargetMessage, .size read at turn end.
+    entry.turnToolUseIds = new Set()
     entry.channel.push(buildClaudeDispatchMessage(req.prompt, entry.sessionId))
 
     // ── Run the turn ──────────────────────────────────────────────────────
@@ -1178,12 +1380,25 @@ export class CrossEngineDispatcher {
             : winner.kind === 'stop'
               ? 'Dispatch stopped by user.'
               : 'Dispatch cancelled.'
-        emitDispatchNotification(
-          ctx,
-          entry.sessionId ?? '',
-          winner.kind === 'timeout' ? 'failed' : 'stopped',
-          text
-        )
+        const status = winner.kind === 'timeout' ? 'failed' : 'stopped'
+        emitDispatchNotification(ctx, entry.sessionId ?? '', status, text)
+        // Recorded for 'failed' (timeout) only — 'stopped' (abort/user-stop)
+        // is never recorded (ADR-033 M4-B: no usage numbers exist for a turn
+        // that never returned a result).
+        if (status === 'failed') {
+          this.safeRecordUsage({
+            ts: this.now(),
+            fromRoutingId: ctx.fromRoutingId,
+            fromEngine: ctx.fromEngine,
+            targetEngine: 'claude',
+            targetModel: model,
+            targetSessionId: entry.sessionId,
+            toolUseId: ctx.toolUseId ?? null,
+            totalTokens: null,
+            costUsd: null,
+            durationMs: null
+          })
+        }
         return errorResult(text, entry.sessionId ?? '')
       }
       if (winner.kind === 'err') {
@@ -1199,10 +1414,36 @@ export class CrossEngineDispatcher {
           'failed',
           `Dispatched turn failed: ${msg}`
         )
+        this.safeRecordUsage({
+          ts: this.now(),
+          fromRoutingId: ctx.fromRoutingId,
+          fromEngine: ctx.fromEngine,
+          targetEngine: 'claude',
+          targetModel: model,
+          targetSessionId: entry.sessionId,
+          toolUseId: ctx.toolUseId ?? null,
+          totalTokens: null,
+          costUsd: null,
+          durationMs: null
+        })
         return errorResult(`Dispatched turn failed: ${msg}`, entry.sessionId ?? '')
       }
 
       const result = winner.msg
+      // ── Usage capture (ADR-033 M4-B) ────────────────────────────────────
+      // ResultMessage.usage/total_cost_usd/duration_ms are PER-TURN (not
+      // cumulative across the persistent process) — mirrors claude-session.ts's
+      // `this.totalCostUsd += (msg.total_cost_usd || 0)` accumulation, which
+      // only makes sense if each result's cost is a per-turn delta.
+      const usageFields = result.usage as
+        | { input_tokens?: number; output_tokens?: number }
+        | undefined
+      const totalTokens = usageFields
+        ? (usageFields.input_tokens ?? 0) + (usageFields.output_tokens ?? 0)
+        : 0
+      const turnCostUsd = result.total_cost_usd ?? 0
+      const durationMs = result.duration_ms ?? null
+
       // A turn-level error (see docs/protocol/03-inbound-messages.md §result
       // subtypes) does NOT kill the process — the target stays alive for
       // continuation, parity with the opencode info.error handling above.
@@ -1217,12 +1458,53 @@ export class CrossEngineDispatcher {
           'failed',
           `Dispatched turn failed: ${detail}`
         )
+        // Best-effort: a failed-subtype result still carries real cost/usage
+        // fields (the turn ran, it just didn't finish cleanly) — capture them
+        // rather than fabricate nulls.
+        this.safeRecordUsage({
+          ts: this.now(),
+          fromRoutingId: ctx.fromRoutingId,
+          fromEngine: ctx.fromEngine,
+          targetEngine: 'claude',
+          targetModel: model,
+          targetSessionId: entry.sessionId,
+          toolUseId: ctx.toolUseId ?? null,
+          totalTokens,
+          costUsd: turnCostUsd,
+          durationMs
+        })
         return errorResult(`Dispatched turn failed: ${detail}`, entry.sessionId ?? '')
       }
       const finalText = result.result || '(the dispatched agent returned no text)'
-      emitDispatchNotification(ctx, entry.sessionId ?? '', 'completed', finalText)
+
+      // ── Cost cap crossing note (ADR-033 M4-C) ───────────────────────────
+      const maxCostUsd = dispatchCfg?.maxCostUsd
+      const wasUnderCap = maxCostUsd === undefined || entry.cumulativeCostUsd < maxCostUsd
+      entry.cumulativeCostUsd += turnCostUsd
+      let outText = finalText
+      if (maxCostUsd !== undefined && wasUnderCap && entry.cumulativeCostUsd >= maxCostUsd) {
+        outText += '\n\n[dispatch cost cap reached — further turns on this session will be rejected]'
+      }
+
+      emitDispatchNotification(ctx, entry.sessionId ?? '', 'completed', finalText, {
+        totalTokens,
+        toolUses: entry.turnToolUseIds.size,
+        durationMs: durationMs ?? 0
+      })
+      this.safeRecordUsage({
+        ts: this.now(),
+        fromRoutingId: ctx.fromRoutingId,
+        fromEngine: ctx.fromEngine,
+        targetEngine: 'claude',
+        targetModel: model,
+        targetSessionId: entry.sessionId,
+        toolUseId: ctx.toolUseId ?? null,
+        totalTokens,
+        costUsd: turnCostUsd,
+        durationMs
+      })
       return {
-        text: finalText,
+        text: outText,
         sessionId: entry.sessionId ?? ''
       }
     } finally {
@@ -1291,7 +1573,10 @@ export class CrossEngineDispatcher {
 
     if (msg.type === 'assistant') {
       const chatMsg = transformAssistantMessage(msg as unknown as Record<string, unknown>)
-      if (chatMsg) entry.ctx.emit('session:subagent-message', { toolUseId, message: chatMsg })
+      if (chatMsg) {
+        collectToolUseIds(chatMsg, entry.turnToolUseIds)
+        entry.ctx.emit('session:subagent-message', { toolUseId, message: chatMsg })
+      }
       return
     }
 
@@ -1349,7 +1634,9 @@ export class CrossEngineDispatcher {
       iterator: undefined as unknown as AsyncIterator<SDKMessage>,
       abortController,
       busy: false,
-      ctx
+      ctx,
+      cumulativeCostUsd: 0,
+      turnToolUseIds: new Set()
     }
     const canUseTool: CanUseTool = async (
       toolName: string,

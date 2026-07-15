@@ -618,6 +618,7 @@ function DispatchSection({
   const dispatch = engineCfg.dispatch ?? {}
   const defaultModel = dispatch.defaultModel ?? ''
   const allowedModels = dispatch.allowedModels ?? []
+  const maxCostUsd = dispatch.maxCostUsd
 
   const update = (patch: Partial<DispatchConfig>): void => {
     const next: EngineConfig = { ...engineCfg, dispatch: { ...dispatch, ...patch } }
@@ -687,6 +688,25 @@ function DispatchSection({
           })}
         </div>
       </div>
+      <div className="px-3 py-1.5 text-[13px] text-text-secondary">
+        <div className="mb-1 flex items-center gap-1">
+          Max cost per dispatched agent (USD)
+          <InfoTooltip text="Per-dispatch-target cumulative cost cap (ADR-033 M4-C). Once a target's tracked cost meets/exceeds this value, further continuation turns on it are rejected — the target stays alive, so raising the cap or starting a fresh dispatch both recover. Leave blank for no cap." />
+        </div>
+        <input
+          data-testid={`${testid}.maxCost`}
+          type="number"
+          min="0"
+          step="0.01"
+          value={maxCostUsd ?? ''}
+          onChange={(e) => {
+            const raw = e.target.value
+            update({ maxCostUsd: raw === '' ? undefined : Number(raw) })
+          }}
+          placeholder="(no cap)"
+          className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors"
+        />
+      </div>
       <div className="px-3 pb-1 text-[10px] text-text-muted/50 leading-relaxed">{footerText}</div>
     </div>
   )
@@ -716,15 +736,20 @@ export function OpencodeDispatchSection(): React.JSX.Element {
  * Governs `dispatch_agent` calls INTO Claude (the M2 opencode→Claude
  * direction, plus any future engine). Self-contained: loads/saves its own
  * Claude EngineConfig via window.api, editing only the `dispatch` block
- * (never clobbers `sandbox`/`proxy`). Claude is always installed (bundled
- * default engine), so there's no "not installed" gate — see DispatchSection.
+ * (never clobbers `sandbox`/`proxy`). Claude ITSELF is always installed (the
+ * bundled default engine), but dispatch INTO Claude can only be CALLED from
+ * opencode today — so this section gates on the same opencode-installed
+ * probe as the opencode twin (ADR-030/ADR-033 M4-A: no possible caller means
+ * the config has nothing to configure).
  */
 export function ClaudeDispatchSection(): React.JSX.Element {
+  const installed = useOpencodeInstalled()
   return (
     <DispatchSection
       engineId="claude"
       testid="ClaudeDispatchSection"
-      installed={true}
+      installed={installed}
+      notInstalledMessage="opencode is not installed. Cross-engine dispatch lets an opencode session delegate a task to a Claude agent — with no other engine installed, there is no possible caller."
       defaultModelTooltip="Used when the dispatching agent doesn't request a model. Claude model aliases (e.g. sonnet, haiku, opus). With no default set, dispatch_agent calls without an explicit model are rejected."
       noModelsMessage="No Claude models detected."
       footerText="Governs dispatch_agent calls INTO Claude from other engines (e.g. an opencode session asking Claude for a second opinion). Empty allowed-models list = any model may be requested."

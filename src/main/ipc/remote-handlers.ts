@@ -23,6 +23,7 @@ import type { ApprovalDecision, PermissionSuggestion, EngineId } from '../../sha
 import type { BrowserWindow } from 'electron'
 import { getSdkExecutableOpts } from '../services/claude-session'
 import { crossEngineDispatcher, XENG_REQUEST_PREFIX } from '../services/cross-engine-dispatcher'
+import { dispatchedUsageSummary } from '../services/db'
 import { BaseSession } from '../providers/BaseSession'
 import { PERSISTED_SESSIONS_DIR } from '../services/persisted-sessions-dir'
 import { query as sdkQuery } from '../sdk'
@@ -357,6 +358,12 @@ export function registerRemoteHandlers(
 
   dispatcher.register('usage:set-account-filter', async (account: string | null) => {
     blockUsageService.setAccountFilter(account)
+  })
+
+  // ADR-033 M4-B: cross-engine dispatched usage, all-time, grouped by
+  // (targetEngine, targetModel). Read-only DB aggregate — safe over remote.
+  dispatcher.register('usage:fetch-dispatched', async () => {
+    return dispatchedUsageSummary()
   })
 
   // -------------------------------------------------------------------------

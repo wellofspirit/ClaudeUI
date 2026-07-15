@@ -46,7 +46,7 @@ import { classify, isAutoModeFastPathAllowed, type JudgeFn } from './auto-mode-c
 import { loadEngineConfig } from '../services/ui-config'
 import type { ClaudePermissions, PermissionScope } from '../../shared/types'
 import { blockUsageService } from '../services/block-usage'
-import { crossEngineDispatcher } from '../services/cross-engine-dispatcher'
+import { crossEngineDispatcher, crossEngineDispatchAvailable } from '../services/cross-engine-dispatcher'
 // Permission ruleset helper — extracted to permission-ruleset.ts so
 // cross-engine-dispatcher.ts can depend on it without importing THIS module
 // (which would cycle back now that this file imports crossEngineDispatcher
@@ -148,7 +148,15 @@ export class OpencodeSession extends BaseSession {
   /** Resolve capabilities for the current model from the discovery cache. */
   private resolveCapsForModel(): ResolvedCapabilities {
     const { providerID, modelID } = parseModelString(this._model)
-    return resolveOpencodeCapabilities(getOpencodeModelCapabilities(providerID, modelID))
+    const base = resolveOpencodeCapabilities(getOpencodeModelCapabilities(providerID, modelID))
+    // ADR-030/ADR-033 M4-A: the static flag is true (both directions ship),
+    // ANDed with the honest runtime check — always true for opencode (Claude
+    // is ClaudeUI's bundled default engine), kept explicit rather than
+    // hardcoded so the semantics stay identical to the Claude side.
+    return {
+      ...base,
+      crossEngineDispatch: base.crossEngineDispatch && crossEngineDispatchAvailable('opencode')
+    }
   }
 
   constructor(routingId: string, win: BrowserWindow, cwd: string, opts: EngineSpawnOptions = {}) {

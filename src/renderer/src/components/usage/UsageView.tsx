@@ -1,11 +1,12 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useSessionStore } from '../../stores/session-store'
 import type {
   BlockUsageData,
   UsageBlock,
   UsageSnapshot,
   EngineUsageSummary,
-  ModelTokenBreakdown
+  ModelTokenBreakdown,
+  DispatchedUsageSummary
 } from '../../../../shared/types'
 import { TokenDonut } from './TokenDonut'
 import { BlockTimeline } from './BlockTimeline'
@@ -43,6 +44,25 @@ interface UsageViewProps {
 export function UsageView({ onClose }: UsageViewProps): React.JSX.Element {
   const blockUsage = useSessionStore((s) => s.blockUsage)
   const [activeTab, setActiveTab] = useState<ClaudeTab>('block')
+  // ADR-033 M4-B: delegated (cross-engine dispatched) usage — request/response
+  // only, no live-push channel (an all-time aggregate, not a hot path). Local
+  // component state, same pattern as OpencodeSection's refresh-prices call.
+  const [dispatchedUsage, setDispatchedUsage] = useState<DispatchedUsageSummary[] | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    window.api
+      .fetchDispatchedUsage()
+      .then((rows) => {
+        if (!cancelled) setDispatchedUsage(rows)
+      })
+      .catch(() => {
+        if (!cancelled) setDispatchedUsage([])
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   if (!blockUsage) {
     return (
@@ -90,6 +110,11 @@ export function UsageView({ onClose }: UsageViewProps): React.JSX.Element {
 
         {/* opencode section — only when data exists */}
         {opencodeEntry && <OpencodeSection entry={opencodeEntry} />}
+
+        {/* Delegated (cross-engine dispatched) usage — only when data exists */}
+        {dispatchedUsage && dispatchedUsage.length > 0 && (
+          <DelegatedUsageSection rows={dispatchedUsage} />
+        )}
 
         {/* Daily Usage (all engines) */}
         <Section title="Daily Usage" subtitle={`Last ${historyDays} calendar days · all engines`}>
@@ -426,6 +451,62 @@ function OpencodeModelRow({
       <td className="text-right font-mono">{model.requestCount}</td>
       <td className="text-right font-mono">{pct}%</td>
     </tr>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Delegated (cross-engine dispatched) usage — ADR-033 M4-B
+// ---------------------------------------------------------------------------
+
+function DelegatedUsageSection({ rows }: { rows: DispatchedUsageSummary[] }): React.JSX.Element {
+  return (
+    <div data-testid="DelegatedUsage" className="bg-bg-secondary rounded-xl border border-border/50 p-3">
+      <div className="flex items-center gap-2 mb-3">
+        <h3 className="text-[11px] font-semibold uppercase tracking-wider text-text-secondary">
+          Delegated
+        </h3>
+        <span className="text-[9px] text-text-muted">
+          cross-engine dispatch_agent calls · all-time
+        </span>
+      </div>
+
+      <table className="w-full text-[10px]">
+        <thead>
+          <tr className="text-text-muted">
+            <th className="text-left font-medium pb-1">Target</th>
+            <th className="text-right font-medium pb-1">Dispatches</th>
+            <th className="text-right font-medium pb-1">Tokens</th>
+            <th className="text-right font-medium pb-1">Cost</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row) => (
+            <tr
+              key={`${row.targetEngine}/${row.targetModel}`}
+              data-testid="DelegatedUsage.row"
+              data-id={`${row.targetEngine}/${row.targetModel}`}
+              className="text-text-secondary"
+            >
+              <td className="py-0.5 flex items-center gap-1.5">
+                <span
+                  className="inline-block w-2 h-2 rounded-full"
+                  style={{ backgroundColor: getModelColor(row.targetModel) }}
+                />
+                {row.targetEngine} · {shortModelName(row.targetModel)}
+              </td>
+              <td className="text-right font-mono">{row.dispatches}</td>
+              <td className="text-right font-mono">{formatTokenCount(row.totalTokens)}</td>
+              <td className="text-right font-mono">{formatCost(row.costUsd)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+
+      <p className="text-[9px] text-text-muted mt-2">
+        Tasks this conversation delegated to the OTHER engine via dispatch_agent — attributed to
+        the dispatching session, cost/tokens from the target&apos;s own turn result.
+      </p>
+    </div>
   )
 }
 

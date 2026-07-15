@@ -417,6 +417,10 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       connection.invoke('usage:set-account-filter', account) as ReturnType<
         ClaudeAPI['setUsageAccountFilter']
       >,
+    fetchDispatchedUsage: () =>
+      connection.invoke('usage:fetch-dispatched') as ReturnType<
+        ClaudeAPI['fetchDispatchedUsage']
+      >,
 
     // Native OAuth (ADR-014) — desktop-only (opens a local browser + loopback).
     // sign-in/submit/cancel are blocklisted on the remote dispatcher; only the
