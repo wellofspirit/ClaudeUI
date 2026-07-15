@@ -60,7 +60,10 @@ vi.mock('../cross-engine-dispatcher', () => ({
 vi.mock('../logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 }))
-vi.mock('../ui-config', () => ({ saveSlashCommands: vi.fn() }))
+// loadEngineConfig is also read by collab-tool.ts (real here) to resolve the
+// dispatch_agent model hint (ADR-033 follow-up) — {} keeps that path on the
+// generic hint, hermetically, without touching the real dev machine's config.
+vi.mock('../ui-config', () => ({ saveSlashCommands: vi.fn(), loadEngineConfig: vi.fn(() => ({})) }))
 vi.mock('../claude-mcp', () => ({
   loadMcpServers: vi.fn(() => ({})),
   readDisabledMcpServers: vi.fn(() => [])

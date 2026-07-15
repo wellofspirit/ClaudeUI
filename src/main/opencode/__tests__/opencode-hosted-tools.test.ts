@@ -14,8 +14,18 @@ import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
+
+// createOpencodeHostedToolsServer reads engines/claude.json (via loadEngineConfig)
+// on EVERY call to resolve the dispatch_agent model hint (ADR-033 follow-up) —
+// mocked so tests are hermetic and don't depend on the real dev machine's
+// ~/.claude/ui/engines/claude.json.
+vi.mock('../../services/ui-config', () => ({
+  loadEngineConfig: vi.fn(() => ({}))
+}))
+
 import { createOpencodeHostedToolsServer } from '../opencode-hosted-tools'
 import type { CallerSessionHandle, DispatchAgentFn } from '../opencode-hosted-tools'
+import { loadEngineConfig } from '../../services/ui-config'
 
 let tmp: string
 
@@ -243,5 +253,49 @@ describe('createOpencodeHostedToolsServer — dispatch_agent (ADR-033 M2)', () =
     )) as { content: Array<{ type: string; text: string }>; isError?: boolean }
     expect(result.isError).toBe(true)
     expect(result.content[0].text).toBe('something broke')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// dispatch_agent model hint (ADR-033 follow-up)
+// ---------------------------------------------------------------------------
+
+function getDispatchToolDef(t: string): {
+  description: string
+  inputSchema: { shape: Record<string, { description?: string }> }
+} {
+  return (
+    createOpencodeHostedToolsServer(t) as unknown as {
+      _registeredTools: Record<
+        string,
+        { description: string; inputSchema: { shape: Record<string, { description?: string }> } }
+      >
+    }
+  )._registeredTools['dispatch_agent']
+}
+
+describe('createOpencodeHostedToolsServer — dispatch_agent model hint (ADR-033 follow-up)', () => {
+  afterEach(() => {
+    vi.mocked(loadEngineConfig).mockReturnValue({})
+  })
+
+  it('bakes the configured allowlist into both the tool description and the model param describe()', () => {
+    vi.mocked(loadEngineConfig).mockReturnValue({
+      dispatch: { allowedModels: ['sonnet', 'haiku'], defaultModel: 'sonnet' }
+    })
+    const def = getDispatchToolDef(tmp)
+    expect(def.description).toContain('sonnet')
+    expect(def.description).toContain('haiku')
+    expect(def.description).toContain('Default: sonnet')
+    expect(def.inputSchema.shape.model.description).toContain('sonnet')
+  })
+
+  it('falls back to the generic Claude-alias hint when nothing is configured', () => {
+    vi.mocked(loadEngineConfig).mockReturnValue({})
+    const def = getDispatchToolDef(tmp)
+    expect(def.description).toContain('sonnet')
+    expect(def.description).toContain('haiku')
+    expect(def.description).toContain('No default is configured')
+    expect(def.inputSchema.shape.model.description).toContain('alias')
   })
 })

@@ -421,6 +421,17 @@ export function getOpencodeModelCapabilities(providerID: string, modelID: string
   return modelCapsCache.get(`${providerID}/${modelID}`)
 }
 
+/**
+ * Synchronous, cache-only peek at the discovered opencode model groups —
+ * returns null on a cold cache. Unlike `discoverOpencodeModels`, this NEVER
+ * populates the cache or spawns a server, so it's safe to call from any
+ * registration path that must stay synchronous and side-effect-free (e.g.
+ * building the `dispatch_agent` tool description — ADR-033 follow-up).
+ */
+export function peekOpencodeModels(): EngineModelGroup[] | null {
+  return cachedGroups
+}
+
 /** Invalidate the model + catalog discovery caches (call on auth/config change). */
 export function invalidateOpencodeModelCache(): void {
   cachedGroups = null

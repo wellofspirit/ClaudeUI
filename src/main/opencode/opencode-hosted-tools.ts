@@ -25,6 +25,8 @@ import type { ServerNotification, ServerRequest } from '@modelcontextprotocol/sd
 import { z } from 'zod'
 import { createMermaidServer } from '../services/mermaid-tool'
 import { createMockupServer } from '../services/mockup-tool'
+import { loadEngineConfig } from '../services/ui-config'
+import { describeDispatchModels } from '../services/dispatch-model-hint'
 import type { SdkMcpTool, SdkToolExtra } from '../sdk/types'
 // `import type` only: DispatchContext/DispatchRequest/DispatchResult are
 // ERASED at compile time, so this does NOT create a runtime import cycle
@@ -69,36 +71,44 @@ export type CallerSessionLookup = (sessionId: string) => CallerSessionHandle | u
 /** Same cycle-avoidance rationale as CallerSessionLookup above. */
 export type DispatchAgentFn = (req: DispatchRequest, ctx: DispatchContext) => Promise<DispatchResult>
 
-const dispatchAgentInputSchema = {
-  engine: z.enum(['claude']).describe('Target engine to dispatch to'),
-  prompt: z.string().describe('Task for the dispatched agent'),
-  model: z
-    .string()
-    .optional()
-    .describe(
-      'Target model as a Claude alias (e.g. "haiku", "sonnet") — must be user-allowed. Omit for the configured default.'
-    ),
-  session_id: z
-    .string()
-    .optional()
-    .describe('session_id from a previous dispatch_agent result — continues that agent'),
-  // Internal — see resources/opencode/claudeui-xeng-plugin.ts. Declared
-  // explicitly so our Zod validator does not STRIP it (z.object() drops
-  // unknown keys by default); the handler reads then removes it before any
-  // other use.
-  __xeng_caller_session: z
-    .string()
-    .optional()
-    .describe('internal — set automatically by the ClaudeUI plugin; never set this yourself'),
-  // Internal — same zod-stripping hazard as __xeng_caller_session above. The
-  // plugin also stamps the calling tool part's own callID (ADR-033 M3) so the
-  // dispatcher can key subagent-stream/task-progress/task-notification events
-  // to the dispatching tool_use block. Missing → dispatch still works, just
-  // without live streaming (never fail a dispatch over a missing id).
-  __xeng_call_id: z
-    .string()
-    .optional()
-    .describe('internal — set automatically by the ClaudeUI plugin; never set this yourself')
+/**
+ * Built per server creation (not module-load time) so the `model` param's
+ * `.describe()` can carry the concrete model-hint resolved from the current
+ * engines/claude.json (ADR-033 follow-up — see dispatch-model-hint.ts).
+ */
+function buildDispatchAgentInputSchema(modelHintShort: string): Record<string, z.ZodTypeAny> {
+  return {
+    engine: z.enum(['claude']).describe('Target engine to dispatch to'),
+    prompt: z.string().describe('Task for the dispatched agent'),
+    model: z
+      .string()
+      .optional()
+      .describe(
+        'Target model as a Claude alias (e.g. "haiku", "sonnet") — must be user-allowed. ' +
+          `Omit for the configured default. ${modelHintShort}`
+      ),
+    session_id: z
+      .string()
+      .optional()
+      .describe('session_id from a previous dispatch_agent result — continues that agent'),
+    // Internal — see resources/opencode/claudeui-xeng-plugin.ts. Declared
+    // explicitly so our Zod validator does not STRIP it (z.object() drops
+    // unknown keys by default); the handler reads then removes it before any
+    // other use.
+    __xeng_caller_session: z
+      .string()
+      .optional()
+      .describe('internal — set automatically by the ClaudeUI plugin; never set this yourself'),
+    // Internal — same zod-stripping hazard as __xeng_caller_session above. The
+    // plugin also stamps the calling tool part's own callID (ADR-033 M3) so the
+    // dispatcher can key subagent-stream/task-progress/task-notification events
+    // to the dispatching tool_use block. Missing → dispatch still works, just
+    // without live streaming (never fail a dispatch over a missing id).
+    __xeng_call_id: z
+      .string()
+      .optional()
+      .describe('internal — set automatically by the ClaudeUI plugin; never set this yourself')
+  }
 }
 
 /**
@@ -136,6 +146,24 @@ export function createOpencodeHostedToolsServer(
     )
   }
 
+  // Model-hint snapshot (ADR-033 follow-up, see dispatch-model-hint.ts):
+  // resolved ONCE per cwd-server spawn (OpencodeServerManager.resolveHandle)
+  // from engines/claude.json. Config edits mid-lifetime aren't reflected
+  // until the NEXT spawn — cross-engine-dispatcher.ts's isError allowlist
+  // echo remains the live source of truth if the model turns out to be
+  // stale/mismatched. No cached-model peek on this side (unlike the
+  // opencode-target side in collab-tool.ts): the only synchronous main-side
+  // source of Claude's model list is a per-Claude-session service-session
+  // control handle (session.ipc.ts's fetchModels/supportedModels), which is
+  // the wrong lifecycle for a registration path — async, and may not even
+  // exist headless. Falls through to allowlist/default/generic-alias-hint.
+  const dispatchCfg = loadEngineConfig('claude').dispatch
+  const modelHint = describeDispatchModels({
+    targetEngine: 'claude',
+    allowedModels: dispatchCfg?.allowedModels,
+    defaultModel: dispatchCfg?.defaultModel
+  })
+
   server.registerTool(
     'dispatch_agent',
     {
@@ -144,8 +172,8 @@ export function createOpencodeHostedToolsServer(
         'The agent runs headless in the same working directory and its final answer is returned as ' +
         'this tool result. The result includes a session_id — pass it back as `session_id` to ' +
         'continue the same agent with its context intact (multi-turn collaboration). The available ' +
-        'model list is user-configured; omit `model` to use the configured default.',
-      inputSchema: dispatchAgentInputSchema
+        `model list is user-configured; omit \`model\` to use the configured default. ${modelHint.long}`,
+      inputSchema: buildDispatchAgentInputSchema(modelHint.short)
     },
     async (
       args: Record<string, unknown>,

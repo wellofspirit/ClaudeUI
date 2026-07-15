@@ -2,6 +2,9 @@ import { createSdkMcpServer, tool } from '../sdk'
 import type { SdkMcpServer } from '../sdk'
 import { z } from 'zod'
 import { crossEngineDispatcher } from './cross-engine-dispatcher'
+import { loadEngineConfig } from './ui-config'
+import { peekOpencodeModels } from '../opencode/model-discovery'
+import { describeDispatchModels } from './dispatch-model-hint'
 import type { EngineId } from '../../shared/types'
 
 export interface CollabServerContext {
@@ -22,6 +25,22 @@ export interface CollabServerContext {
  * canUseTool like an ordinary tool.
  */
 export function createCollabServer(ctx: CollabServerContext): SdkMcpServer {
+  // Model-hint snapshot (ADR-033 follow-up, see dispatch-model-hint.ts):
+  // resolved ONCE per Claude session spawn from engines/opencode.json plus
+  // whatever the opencode model-discovery cache happens to hold right now.
+  // Config edits or newly-discovered models mid-session are NOT reflected
+  // until the NEXT spawn — cross-engine-dispatcher.ts's isError allowlist
+  // echo remains the live source of truth if the model turns out to be
+  // stale/mismatched.
+  const dispatchCfg = loadEngineConfig('opencode').dispatch
+  const knownModelIds = peekOpencodeModels()?.flatMap((group) => group.models.map((m) => m.value))
+  const modelHint = describeDispatchModels({
+    targetEngine: 'opencode',
+    allowedModels: dispatchCfg?.allowedModels,
+    defaultModel: dispatchCfg?.defaultModel,
+    knownModelIds
+  })
+
   return createSdkMcpServer({
     name: 'claude-ui-collab',
     version: '1.0.0',
@@ -33,7 +52,7 @@ export function createCollabServer(ctx: CollabServerContext): SdkMcpServer {
           'the same working directory and its final answer is returned as this tool result. ' +
           'The result includes a session_id — pass it back as `session_id` to continue the same ' +
           'agent with its context intact (multi-turn collaboration). The available model list is ' +
-          'user-configured; omit `model` to use the configured default.',
+          `user-configured; omit \`model\` to use the configured default. ${modelHint.long}`,
         {
           // Only 'opencode' is listed: dispatching to 'claude' from a Claude
           // session is same-engine and already guard-rejected by the
@@ -44,7 +63,8 @@ export function createCollabServer(ctx: CollabServerContext): SdkMcpServer {
             .string()
             .optional()
             .describe(
-              'Target model as "providerID/modelID" (must be user-allowed). Omit for the configured default.'
+              'Target model as "providerID/modelID" (must be user-allowed). Omit for the configured default. ' +
+                modelHint.short
             ),
           session_id: z
             .string()

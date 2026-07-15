@@ -16,14 +16,34 @@ vi.mock('../logger', () => ({
 }))
 // The real singleton's loadEngineConfig — mocked so the genuine
 // "no model configured" path is exercised hermetically (it fires BEFORE any
-// server acquire, so the real opencodeServerManager is never touched).
+// server acquire, so the real opencodeServerManager is never touched). Also
+// used by createCollabServer itself to resolve the dispatch_agent model hint
+// (ADR-033 follow-up) — see the describe block below.
 vi.mock('../ui-config', () => ({
   loadEngineConfig: vi.fn(() => ({}))
+}))
+// The model-hint's cached-known-models source (ADR-033 follow-up). Mocked to
+// a controllable, synchronous stub — createCollabServer must NEVER trigger
+// real opencode discovery (which can spawn a server) just to build a tool
+// description. `parseModelString` is a passthrough stub: unused by any path
+// exercised in this file (dispatch is either mocked outright or fails before
+// reaching model parsing), included only so the real cross-engine-dispatcher
+// singleton's import binding is never `undefined`.
+vi.mock('../../opencode/model-discovery', () => ({
+  peekOpencodeModels: vi.fn(() => null),
+  parseModelString: vi.fn((model: string) => {
+    const idx = model.indexOf('/')
+    return idx === -1
+      ? { providerID: 'opencode', modelID: model }
+      : { providerID: model.slice(0, idx), modelID: model.slice(idx + 1) }
+  })
 }))
 
 import { createCollabServer } from '../collab-tool'
 import type { CollabServerContext } from '../collab-tool'
 import { crossEngineDispatcher } from '../cross-engine-dispatcher'
+import { loadEngineConfig } from '../ui-config'
+import { peekOpencodeModels } from '../../opencode/model-discovery'
 import type { SdkToolExtra } from '../../sdk'
 
 function makeCtx(overrides: Partial<CollabServerContext> = {}): CollabServerContext & {
@@ -184,5 +204,60 @@ describe('createCollabServer', () => {
     expect(result.isError).toBe(true)
     const text = (result.content[0] as { text: string }).text
     expect(text).toContain('dispatch.defaultModel')
+  })
+})
+
+describe('createCollabServer — dispatch_agent model hint (ADR-033 follow-up)', () => {
+  it('bakes the configured allowlist into both the tool description and the model param describe()', () => {
+    vi.mocked(loadEngineConfig).mockReturnValueOnce({
+      dispatch: { allowedModels: ['openai/gpt-5', 'google/gemini-pro'], defaultModel: 'openai/gpt-5' }
+    })
+    const server = createCollabServer(makeCtx())
+    const description = server.tools[0].description
+    expect(description).toContain('openai/gpt-5')
+    expect(description).toContain('google/gemini-pro')
+    expect(description).toContain('Default: openai/gpt-5')
+
+    const modelParamDescribe = (
+      server.tools[0].inputSchema.model as unknown as { description?: string }
+    ).description
+    expect(modelParamDescribe).toContain('openai/gpt-5')
+  })
+
+  it('bakes a cached-known model list into the description when no allowlist is configured', () => {
+    vi.mocked(loadEngineConfig).mockReturnValueOnce({})
+    vi.mocked(peekOpencodeModels).mockReturnValueOnce([
+      {
+        engineId: 'opencode',
+        vendorId: 'opencode',
+        vendorName: 'OpenCode Zen',
+        models: [
+          {
+            value: 'opencode/nemotron-3-ultra-free',
+            displayName: 'Nemotron 3 Ultra',
+            description: 'Nemotron 3 Ultra · OpenCode Zen'
+          }
+        ]
+      }
+    ])
+    const server = createCollabServer(makeCtx())
+    expect(server.tools[0].description).toContain('opencode/nemotron-3-ultra-free')
+  })
+
+  it('falls back to the generic "providerID/modelID" hint when nothing is configured or cached', () => {
+    vi.mocked(loadEngineConfig).mockReturnValueOnce({})
+    vi.mocked(peekOpencodeModels).mockReturnValueOnce(null)
+    const server = createCollabServer(makeCtx())
+    expect(server.tools[0].description).toContain('providerID/modelID')
+    expect(server.tools[0].description).toContain('No default is configured')
+  })
+
+  it('createCollabServer performs NO async model discovery — peekOpencodeModels is the only model source touched', () => {
+    vi.mocked(loadEngineConfig).mockReturnValueOnce({})
+    const peekSpy = vi.mocked(peekOpencodeModels)
+    peekSpy.mockClear()
+    peekSpy.mockReturnValueOnce(null)
+    createCollabServer(makeCtx())
+    expect(peekSpy).toHaveBeenCalledTimes(1)
   })
 })
