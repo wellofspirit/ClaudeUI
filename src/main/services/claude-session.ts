@@ -248,6 +248,8 @@ export class ClaudeSession extends BaseSession {
   private accTotalDurationMs = 0
   private accTotalApiDurationMs = 0
   private lastContextLength = 0
+  /** Epoch ms when the currently in-flight turn started; null while idle. */
+  private turnStartedAtMs: number | null = null
 
   constructor(routingId: string, win: BrowserWindow, cwd: string, opts: EngineSpawnOptions = {}) {
     const {
@@ -273,6 +275,21 @@ export class ClaudeSession extends BaseSession {
     if (model) this.model = model
     if (sandboxConfig) this.sandboxConfig = sandboxConfig
     this.sendStatus()
+
+    // Resume seeding: the post-result reconciliation only runs after a turn
+    // completes, so a RESUMED session's accumulators would otherwise sit at 0
+    // until then — and the turn-start status-line emission (run()/dispatch)
+    // would clobber the renderer's history-loaded statusLine with zeros (a
+    // visible backwards jump at prompt-send). Seed once from the resume
+    // target's transcript, async and non-blocking; the Math.max duration
+    // guard inside makes a late-arriving seed safe even if a turn has already
+    // started. Forks are excluded: the source transcript still contains the
+    // post-anchor turns the fork truncates away, and the max() guard would
+    // make that over-count permanent — a fork's fresh transcript reconciles
+    // normally after its first result instead.
+    if (this.resumeSessionId && !this.forkSession) {
+      void this.reconcileAccumulatorsFromTranscript(this.transcriptPathFor(this.resumeSessionId))
+    }
   }
 
   get willQueue(): boolean {
@@ -335,9 +352,20 @@ export class ClaudeSession extends BaseSession {
     const spawnOnly = prompt === null
 
     if (!spawnOnly) {
+      // Only the idle→processing transition marks a new turn start. A queued
+      // prompt sent while a turn is already in flight (run() called again
+      // before the channel push above returns) must NOT reset the in-flight
+      // turn's start time.
+      const wasIdle = !this.isProcessing
       this.isProcessing = true
       this.wasInterrupted = false
+      if (wasIdle) {
+        this.turnStartedAtMs = Date.now()
+      }
       this.sendStatus()
+      if (wasIdle) {
+        this.send('session:status-line', this.buildStatusLineFromAccumulators())
+      }
     }
 
     // Build SDK message (skip if spawn-only)
@@ -817,6 +845,7 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       this.activeQuery = null
       this.abortController = null
       this.isProcessing = false
+      this.turnStartedAtMs = null
       this.sendStatus()
       this.resetInactivityTimer()
     }
@@ -843,10 +872,16 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     // can arrive under any `type` that includes session_id.
     this.captureSessionBootstrap(msg, type)
 
-    // Any assistant or stream content means we're processing a turn.
+    // Any assistant or stream content means we're processing a turn. Covers
+    // the queued-prompt case: a second prompt pushed onto the message channel
+    // while the first was in flight doesn't get its own run() turn-start (the
+    // channel push already happened), so this is where its turn actually
+    // starts once cli.js begins working on it.
     if ((type === 'assistant' || type === 'stream_event') && !this.isProcessing) {
       this.isProcessing = true
+      this.turnStartedAtMs = Date.now()
       this.sendStatus()
+      this.send('session:status-line', this.buildStatusLineFromAccumulators())
     }
 
     switch (msg.type) {
@@ -1248,11 +1283,14 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       }
     }
 
-    // Accumulate duration from result
+    // Accumulate duration from result — this turn just completed, so it's
+    // no longer in flight (turnStartedAtMs → null) and its wall-clock cost
+    // moves from the live "in flight" delta into the completed-turns total.
     const resultDurationMs = msg.duration_ms || 0
     const resultApiDurationMs = msg.duration_api_ms || 0
     this.accTotalDurationMs += resultDurationMs
     this.accTotalApiDurationMs += resultApiDurationMs
+    this.turnStartedAtMs = null
 
     this.send('session:result', {
       totalCostUsd: this.totalCostUsd,
@@ -1279,21 +1317,7 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     const logPath = this.getSessionLogPath()
     if (logPath) {
       setTimeout(() => {
-        computeTokenMetrics(logPath, this.model)
-          .then((metrics) => {
-            if (metrics.totalTokens === 0 && metrics.totalCostUsd === 0) return
-            this.accInputTokens = metrics.totalInputTokens
-            this.accOutputTokens = metrics.totalOutputTokens
-            this.accCachedTokens = metrics.cachedTokens
-            this.accTotalDurationMs = metrics.totalDurationMs
-            this.accTotalApiDurationMs = metrics.totalApiDurationMs
-            this.lastContextLength = metrics.contextWindowSize
-            this.send('session:status-line', metrics)
-            this.sendMetering()
-          })
-          .catch((err) => {
-            logger.warn('ClaudeSession', 'JSONL reconciliation failed', err)
-          })
+        void this.reconcileAccumulatorsFromTranscript(logPath)
 
         // Phase 7 Pass 2 — near-live metering: now that the JSONL is flushed,
         // re-run the Claude reconciler so this turn's messages land in
@@ -1304,6 +1328,42 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
           .then(({ usageReconciler }) => usageReconciler.reconcileClaude())
           .catch(() => {})
       }, 500) // delay to let SDK flush JSONL to disk
+    }
+  }
+
+  /**
+   * Reconcile the in-memory accumulators from a transcript JSONL and re-emit
+   * the status line. Shared by the post-result reconciliation (500ms after
+   * each turn) and the one-time resume seeding at spawn — both need the same
+   * rules:
+   * - Skip when the transcript yields nothing (not flushed yet / missing).
+   * - Token accumulators + context length are full replacements (the
+   *   transcript is the source of truth for the whole session to date).
+   * - totalDurationMs is a full reconstruction too (turn-span sums across
+   *   every completed turn), but guarded with max() so a conservative read
+   *   (e.g. JSONL not fully flushed) can never regress a value already shown
+   *   — duration only ever moves forward.
+   * - totalApiDurationMs has no transcript-reconstruction path (real
+   *   transcripts carry no `result` lines, the only place duration_api_ms
+   *   ever appeared), so the live accumulator is left untouched instead of
+   *   being clobbered with the permanent 0 computeTokenMetrics returns.
+   * - Emit from accumulators (not the raw metrics) so the guarded duration
+   *   and preserved API duration actually reach the renderer.
+   * Best-effort: failures are logged, never thrown.
+   */
+  private async reconcileAccumulatorsFromTranscript(logPath: string): Promise<void> {
+    try {
+      const metrics = await computeTokenMetrics(logPath, this.model)
+      if (metrics.totalTokens === 0 && metrics.totalCostUsd === 0) return
+      this.accInputTokens = metrics.totalInputTokens
+      this.accOutputTokens = metrics.totalOutputTokens
+      this.accCachedTokens = metrics.cachedTokens
+      this.accTotalDurationMs = Math.max(this.accTotalDurationMs, metrics.totalDurationMs)
+      this.lastContextLength = metrics.contextWindowSize
+      this.send('session:status-line', this.buildStatusLineFromAccumulators())
+      this.sendMetering()
+    } catch (err) {
+      logger.warn('ClaudeSession', 'JSONL reconciliation failed', err)
     }
   }
 
@@ -1746,7 +1806,8 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       totalTokens: this.accInputTokens + this.accOutputTokens + this.accCachedTokens,
       contextWindowSize: this.lastContextLength,
       usedPercentage: usedPct,
-      remainingPercentage: usedPct !== null ? 100 - usedPct : null
+      remainingPercentage: usedPct !== null ? 100 - usedPct : null,
+      turnStartedAtMs: this.turnStartedAtMs
     }
   }
 
@@ -1823,11 +1884,16 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     }, 50)
   }
 
+  /** Transcript JSONL path for a given session id under this session's cwd.
+   *  Project key mirrors the SDK's derivation: replace / and . with - */
+  private transcriptPathFor(sessionId: string): string {
+    const projectKey = this.cwd.replace(/[/.]/g, '-')
+    return path.join(os.homedir(), '.claude', 'projects', projectKey, `${sessionId}.jsonl`)
+  }
+
   getSessionLogPath(): string | null {
     if (!this.sessionId) return null
-    // Project key mirrors the SDK's derivation: replace / and . with -
-    const projectKey = this.cwd.replace(/[/.]/g, '-')
-    return path.join(os.homedir(), '.claude', 'projects', projectKey, `${this.sessionId}.jsonl`)
+    return this.transcriptPathFor(this.sessionId)
   }
 
   getPlanContent(): string | null {
@@ -1911,6 +1977,7 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     this.abortController?.abort()
     this.abortController = null
     this.isProcessing = false
+    this.turnStartedAtMs = null
     this.send('session:status', { ...this.status, state: 'disconnected' })
   }
 

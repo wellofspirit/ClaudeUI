@@ -5,7 +5,11 @@ import { describe, it, expect } from 'vitest'
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
-import { computeTokenMetrics } from '../session-history'
+import {
+  computeTokenMetrics,
+  computeTurnSpanDurationMs,
+  createTurnSpanAccumulator
+} from '../session-history'
 
 // ---------------------------------------------------------------------------
 // Replicate private parser functions from session-history.ts for testing
@@ -303,5 +307,139 @@ describe('computeTokenMetrics — context window from transcript model', () => {
     const m = await computeTokenMetrics(file, 'default')
     fs.unlinkSync(file)
     expect(m.usedPercentage).toBe(50) // 100k / 200k
+  })
+})
+
+// ---------------------------------------------------------------------------
+// computeTurnSpanDurationMs — active-turn duration reconstruction.
+//
+// Guard: real Claude transcripts carry NO `type: "result"` lines (verified
+// across 46 real transcripts), so the pre-fix implementation — which only
+// summed duration_ms off result lines — always returned 0 for every real
+// session. These tests exercise the turn-span reconstruction that replaces it.
+// ---------------------------------------------------------------------------
+
+describe('computeTurnSpanDurationMs', () => {
+  function userLine(
+    ts: string,
+    opts: { isMeta?: boolean; toolUseResult?: boolean } = {}
+  ): Record<string, unknown> {
+    return {
+      type: 'user',
+      timestamp: ts,
+      ...(opts.isMeta ? { isMeta: true } : {}),
+      ...(opts.toolUseResult ? { toolUseResult: { some: 'result' } } : {})
+    }
+  }
+  function assistantLine(ts?: string): Record<string, unknown> {
+    return { type: 'assistant', ...(ts ? { timestamp: ts } : {}), message: { content: [] } }
+  }
+
+  it('returns 0 for an empty transcript', () => {
+    expect(computeTurnSpanDurationMs([])).toBe(0)
+  })
+
+  it('sums multiple turns, each bounded by a real user prompt', () => {
+    const lines = [
+      userLine('2026-01-01T00:00:00.000Z'),
+      assistantLine('2026-01-01T00:00:05.000Z'), // turn 1 span: 5s
+      userLine('2026-01-01T00:01:00.000Z'),
+      assistantLine('2026-01-01T00:01:03.000Z') // turn 2 span: 3s
+    ]
+    expect(computeTurnSpanDurationMs(lines)).toBe(8000)
+  })
+
+  it('treats tool-result user lines as part of the in-flight turn, not new boundaries', () => {
+    const lines = [
+      userLine('2026-01-01T00:00:00.000Z'),
+      assistantLine('2026-01-01T00:00:02.000Z'),
+      userLine('2026-01-01T00:00:03.000Z', { toolUseResult: true }), // NOT a boundary
+      assistantLine('2026-01-01T00:00:10.000Z')
+    ]
+    // If the tool-result line were (wrongly) treated as a new turn boundary,
+    // this would split into two short spans instead of one 10s span.
+    expect(computeTurnSpanDurationMs(lines)).toBe(10000)
+  })
+
+  it('treats isMeta user lines as part of the in-flight turn, not new boundaries', () => {
+    const lines = [
+      userLine('2026-01-01T00:00:00.000Z'),
+      userLine('2026-01-01T00:00:01.000Z', { isMeta: true }), // NOT a boundary
+      assistantLine('2026-01-01T00:00:06.000Z')
+    ]
+    expect(computeTurnSpanDurationMs(lines)).toBe(6000)
+  })
+
+  it('includes the trailing turn (no following user prompt) through EOF', () => {
+    const lines = [
+      userLine('2026-01-01T00:00:00.000Z'),
+      assistantLine('2026-01-01T00:00:04.000Z')
+    ]
+    expect(computeTurnSpanDurationMs(lines)).toBe(4000)
+  })
+
+  it('skips lines with a missing/unparseable timestamp without breaking the turn', () => {
+    const lines = [
+      userLine('2026-01-01T00:00:00.000Z'),
+      assistantLine(undefined), // no timestamp at all
+      { type: 'assistant', timestamp: 'not-a-date', message: { content: [] } }, // unparseable
+      assistantLine('2026-01-01T00:00:07.000Z')
+    ]
+    expect(computeTurnSpanDurationMs(lines)).toBe(7000)
+  })
+
+  it('clamps a negative span (out-of-order timestamps) to 0 rather than going negative', () => {
+    const lines = [
+      userLine('2026-01-01T00:00:10.000Z'),
+      assistantLine('2026-01-01T00:00:05.000Z') // earlier than the prompt itself
+    ]
+    expect(computeTurnSpanDurationMs(lines)).toBe(0)
+  })
+
+  it('incremental accumulator push-per-line equals the batch result', () => {
+    // Mixed sequence exercising every state transition: multi-turn, tool-result
+    // and isMeta lines mid-turn, missing timestamps, trailing turn.
+    const lines = [
+      userLine('2026-01-01T00:00:00.000Z'),
+      assistantLine('2026-01-01T00:00:02.000Z'),
+      userLine('2026-01-01T00:00:03.000Z', { toolUseResult: true }),
+      assistantLine(undefined),
+      assistantLine('2026-01-01T00:00:10.000Z'),
+      userLine('2026-01-01T00:01:00.000Z'),
+      userLine('2026-01-01T00:01:01.000Z', { isMeta: true }),
+      assistantLine('2026-01-01T00:01:04.000Z') // trailing turn
+    ]
+    const acc = createTurnSpanAccumulator()
+    for (const line of lines) acc.push(line)
+    expect(acc.total()).toBe(computeTurnSpanDurationMs(lines))
+    expect(acc.total()).toBe(14000) // 10s (turn 1) + 4s (trailing turn 2)
+  })
+
+  it('accumulator total() is a non-destructive read — a later push still extends the open turn', () => {
+    const acc = createTurnSpanAccumulator()
+    acc.push(userLine('2026-01-01T00:00:00.000Z'))
+    acc.push(assistantLine('2026-01-01T00:00:03.000Z'))
+    expect(acc.total()).toBe(3000)
+    acc.push(assistantLine('2026-01-01T00:00:08.000Z'))
+    expect(acc.total()).toBe(8000)
+  })
+})
+
+describe('computeTokenMetrics — duration reconstruction from turn spans', () => {
+  let seq = 0
+  function writeTranscript(lines: object[]): string {
+    const file = path.join(os.tmpdir(), `claudeui-history-dur-${process.pid}-${seq++}.jsonl`)
+    fs.writeFileSync(file, lines.map((l) => JSON.stringify(l)).join('\n'))
+    return file
+  }
+
+  it('reconstructs totalDurationMs from turn spans, not from (absent) result lines', async () => {
+    const file = writeTranscript([
+      { type: 'user', timestamp: '2026-01-01T00:00:00.000Z' },
+      { type: 'assistant', timestamp: '2026-01-01T00:00:05.000Z', message: { content: [] } }
+    ])
+    const m = await computeTokenMetrics(file)
+    fs.unlinkSync(file)
+    expect(m.totalDurationMs).toBe(5000)
   })
 })

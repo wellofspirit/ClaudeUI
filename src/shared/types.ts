@@ -1264,6 +1264,15 @@ export interface AuthFlowState {
   error: string | null
 }
 
+/**
+ * Engine-neutral session-level status metrics (cost, tokens, duration),
+ * refreshed on every turn. `totalDurationMs` is the accumulated ACTIVE
+ * (turn-processing) duration of COMPLETED turns, in milliseconds — idle time
+ * between turns (waiting on the user) never counts, and both engines share
+ * this semantic. Pair with `turnStartedAtMs` to reconstruct the live,
+ * in-flight total while a turn is still running:
+ *   totalDurationMs + (turnStartedAtMs ? Date.now() - turnStartedAtMs : 0)
+ */
 export interface StatusLineData {
   totalCostUsd: number
   totalDurationMs: number
@@ -1275,6 +1284,8 @@ export interface StatusLineData {
   contextWindowSize: number
   usedPercentage: number | null
   remainingPercentage: number | null
+  /** Epoch ms when the currently in-flight turn started; null/undefined when idle. */
+  turnStartedAtMs?: number | null
 }
 
 /**

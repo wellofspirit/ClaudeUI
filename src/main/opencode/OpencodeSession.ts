@@ -30,7 +30,12 @@ import {
 } from './model-discovery'
 import { equivalentCostUsd } from '../../shared/pricing'
 import { logger } from '../services/logger'
-import { mapEvent, extractToolResult, convertStoredMessage } from './event-mapper'
+import {
+  mapEvent,
+  extractToolResult,
+  convertStoredMessage,
+  computeStoredDurationMs
+} from './event-mapper'
 import type { MapperOutput, MessageAccumulator } from './event-mapper'
 import { BashStreamGate } from './bash-stream-gate'
 import { discoverOpencodeSkills } from './command-skill-discovery'
@@ -87,6 +92,11 @@ export class OpencodeSession extends BaseSession {
   private isProcessing = false
   private totalCostUsd = 0
   private startTimeMs = 0
+  /** Accumulated ACTIVE (turn-processing) duration of completed turns, ms.
+   *  Base is reconstructed from stored history on resume (replayStoredHistory),
+   *  then incremented per-turn from each `result` event — mirrors Claude's
+   *  accTotalDurationMs. Idle time between turns never counts. */
+  private accTotalDurationMs = 0
   /** Latest assistant prompt size (input + cacheRead) for context-used % in the status line. */
   private lastContextLength = 0
   private _model: string
@@ -394,6 +404,12 @@ export class OpencodeSession extends BaseSession {
     try {
       const storedMessages = await this.client.listMessages(sessionId)
       logger.info('OpencodeSession', `Replaying ${storedMessages.length} stored messages for ${sessionId}`)
+
+      // Reconstruct the active-duration baseline from history BEFORE any new
+      // turn runs (run() sets startTimeMs / accumulates further turns after
+      // this call returns) — see computeStoredDurationMs for the semantic.
+      this.accTotalDurationMs = computeStoredDurationMs(storedMessages)
+
       for (const stored of storedMessages) {
         const msg = convertStoredMessage(stored)
         if (!msg) continue
@@ -712,6 +728,9 @@ export class OpencodeSession extends BaseSession {
 
       case 'result':
         this.isProcessing = false
+        // Turn just completed — its wall-clock cost moves from the live
+        // "in flight" delta (turnStartedAtMs) into the completed-turns total.
+        this.accTotalDurationMs += output.result.durationMs ?? 0
         // Metering (Phase 7 Pass 1) — record one usage_event per assistant
         // message in this turn. We record at session.idle (result) so we have
         // the final cumulative token + cost state for each message_id.
@@ -1316,10 +1335,9 @@ export class OpencodeSession extends BaseSession {
     const remainingPercentage = usedPercentage !== null ? 100 - usedPercentage : null
     const cachedTokens = sum.cacheRead + sum.cacheWrite
     const totalTokens = sum.input + sum.output + cachedTokens
-    const totalDurationMs = this.startTimeMs > 0 ? Date.now() - this.startTimeMs : 0
     return {
       totalCostUsd: this.totalCostUsd,
-      totalDurationMs,
+      totalDurationMs: this.accTotalDurationMs,
       totalApiDurationMs: 0,
       totalInputTokens: sum.input,
       totalOutputTokens: sum.output,
@@ -1327,7 +1345,8 @@ export class OpencodeSession extends BaseSession {
       totalTokens,
       contextWindowSize: ctx,
       usedPercentage,
-      remainingPercentage
+      remainingPercentage,
+      turnStartedAtMs: this.isProcessing && this.startTimeMs > 0 ? this.startTimeMs : null
     }
   }
 

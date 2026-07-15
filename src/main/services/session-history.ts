@@ -71,6 +71,85 @@ function saveDiskCache(cache: DiskCache): void {
 }
 
 /**
+ * Incremental accumulator reconstructing accumulated ACTIVE (turn-processing)
+ * duration from a Claude transcript's parsed JSONL lines
+ * (StatusLineData.totalDurationMs — see shared/types.ts). Real transcripts
+ * carry no `type: "result"` lines (the historical duration source), so
+ * duration is rebuilt from line timestamps instead:
+ *
+ * A **turn boundary** is a real user prompt line — `type === 'user'` with no
+ * `toolUseResult` and not `isMeta`. Everything from a boundary up to (but not
+ * including) the next boundary belongs to that turn — including tool-result
+ * user lines and meta lines, which are part of the in-flight turn, not new
+ * turns themselves. A turn's span is its first parseable-timestamp line to
+ * its last, summed across every turn (the trailing turn runs to EOF).
+ *
+ * Lines with a missing/unparseable ISO `timestamp` are skipped for span math
+ * but do not break the current turn — the next line with a valid timestamp
+ * still extends it. Negative or NaN spans are clamped to 0.
+ *
+ * `push()` lines one at a time (streaming — no line retention; O(1) state) and
+ * read `total()` at end-of-stream. `total()` finalizes the trailing turn but
+ * does not consume the accumulator: further push/total cycles keep working.
+ */
+export function createTurnSpanAccumulator(): {
+  push(line: Record<string, unknown>): void
+  total(): number
+} {
+  let totalMs = 0
+  let turnOpen = false
+  let turnStartMs: number | null = null
+  let turnEndMs: number | null = null
+
+  const finalizeTurn = (): void => {
+    if (turnStartMs !== null && turnEndMs !== null) {
+      const span = turnEndMs - turnStartMs
+      if (Number.isFinite(span) && span > 0) totalMs += span
+    }
+    turnStartMs = null
+    turnEndMs = null
+  }
+
+  return {
+    push(line: Record<string, unknown>): void {
+      const isBoundary = line.type === 'user' && !line.toolUseResult && !line.isMeta
+      if (isBoundary) {
+        finalizeTurn()
+        turnOpen = true
+      }
+      if (!turnOpen) return
+
+      const ts = typeof line.timestamp === 'string' ? Date.parse(line.timestamp) : NaN
+      if (!Number.isFinite(ts)) return
+      if (turnStartMs === null) turnStartMs = ts
+      turnEndMs = ts
+    },
+    total(): number {
+      // Fold the trailing (unfinalized) turn in WITHOUT consuming state: keep
+      // the open turn's span live so a subsequent push can still extend it.
+      let result = totalMs
+      if (turnStartMs !== null && turnEndMs !== null) {
+        const span = turnEndMs - turnStartMs
+        if (Number.isFinite(span) && span > 0) result += span
+      }
+      return result
+    }
+  }
+}
+
+/**
+ * Batch convenience over `createTurnSpanAccumulator` — same semantics for a
+ * fully materialized line array (tests, small transcripts). Streaming callers
+ * (computeTokenMetrics) use the accumulator directly to avoid retaining every
+ * parsed line in memory.
+ */
+export function computeTurnSpanDurationMs(lines: Array<Record<string, unknown>>): number {
+  const acc = createTurnSpanAccumulator()
+  for (const line of lines) acc.push(line)
+  return acc.total()
+}
+
+/**
  * Compute token metrics from a JSONL transcript file.
  * Mirrors ccstatusline's approach: sums message.usage from every assistant entry.
  */
@@ -98,7 +177,6 @@ export async function computeTokenMetrics(
     let outputTokens = 0
     let cachedTokens = 0
     let totalCostUsd = 0
-    let totalDurationMs = 0
     let totalApiDurationMs = 0
     let contextLength = 0
 
@@ -108,6 +186,10 @@ export async function computeTokenMetrics(
     // *resolved* id (e.g. "claude-opus-4-8"), so it disambiguates aliases like
     // "default" that the caller can't resolve. Latest main-chain wins.
     let transcriptModel: string | undefined
+    // Incremental turn-span duration reconstruction — O(1) state, no line
+    // retention (transcripts run tens of MB and this function re-reads the
+    // whole file after every turn during reconciliation).
+    const turnSpanAcc = createTurnSpanAccumulator()
 
     const stream = fs.createReadStream(filePath, { encoding: 'utf-8' })
     const rl = readline.createInterface({ input: stream })
@@ -115,6 +197,7 @@ export async function computeTokenMetrics(
     rl.on('line', (line) => {
       try {
         const data = JSON.parse(line)
+        turnSpanAcc.push(data)
 
         if (data.type === 'assistant' && data.message?.usage) {
           const usage = data.message.usage
@@ -128,8 +211,13 @@ export async function computeTokenMetrics(
             if (typeof data.message.model === 'string') transcriptModel = data.message.model
           }
         } else if (data.type === 'result') {
+          // Real transcripts carry no `type: "result"` lines (verified across
+          // 46 real transcripts), so this branch is dead in practice today.
+          // Kept so a future CLI version that reintroduces result lines picks
+          // the cost figure back up automatically. duration_ms is deliberately
+          // NOT accumulated here — the turn-span accumulator (above) is the
+          // sole source for the emitted totalDurationMs.
           totalCostUsd += (data.total_cost_usd as number) || 0
-          totalDurationMs += (data.duration_ms as number) || 0
           totalApiDurationMs += (data.duration_api_ms as number) || 0
         }
       } catch (err) {
@@ -152,6 +240,9 @@ export async function computeTokenMetrics(
       const usedPercentage =
         contextLength > 0 ? Math.round((contextLength / ctxWindow) * 100) : null
       const remainingPercentage = usedPercentage !== null ? 100 - usedPercentage : null
+      // Turn-span reconstruction is the sole source for totalDurationMs — see
+      // the createTurnSpanAccumulator doc comment for why.
+      const totalDurationMs = turnSpanAcc.total()
 
       resolve({
         totalCostUsd,

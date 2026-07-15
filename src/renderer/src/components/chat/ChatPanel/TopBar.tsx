@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from 'react'
+import { useState, useRef, useCallback, useEffect } from 'react'
 import { useActiveSession, useSessionStore } from '../../../stores/session-store'
 import { useSidebarCollapsed } from '../../SessionView'
 import { WindowControls } from '../../WindowControls'
@@ -9,6 +9,14 @@ import { PermissionsDialog } from '../../PermissionsDialog'
 import { SkillsDialog } from '../../SkillsDialog'
 import { McpDialog } from '../../McpDialog'
 import { EngineLogo } from '../../shared/EngineLogo'
+
+/** Format a millisecond duration as "Ns" or "Nm Ns". Shared by the Session
+ *  time / API time tooltip rows. */
+function formatDuration(ms: number): string {
+  return ms < 60000
+    ? `${Math.floor(ms / 1000)}s`
+    : `${Math.floor(ms / 60000)}m ${Math.floor((ms % 60000) / 1000)}s`
+}
 
 export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Element {
   const cwd = useActiveSession((s) => s.cwd)
@@ -48,7 +56,23 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
 
   const displaySessionId = sdkSessionId || activeSessionId
   const cost = statusLine ? statusLine.totalCostUsd : fallbackCost
-  const durationMs = statusLine?.totalDurationMs ?? 0
+  const totalDurationMs = statusLine?.totalDurationMs ?? 0
+  const totalApiDurationMs = statusLine?.totalApiDurationMs ?? 0
+  const turnStartedAtMs = statusLine?.turnStartedAtMs ?? null
+
+  // Tick every second while the tooltip is open and a turn is in flight, so
+  // "Session time" keeps counting up live instead of freezing until the next
+  // status-line event.
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    if (!infoHover || !turnStartedAtMs) return
+    setNow(Date.now())
+    const id = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(id)
+  }, [infoHover, turnStartedAtMs])
+
+  const sessionDurationMs =
+    totalDurationMs + (turnStartedAtMs ? Math.max(0, now - turnStartedAtMs) : 0)
 
   const handleCopy = useCallback((text: string, field: string) => {
     navigator.clipboard.writeText(text)
@@ -169,6 +193,7 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
           </div>
         )}
         <div
+          data-testid="TopBar.info"
           className="flex items-center min-w-0 [-webkit-app-region:no-drag] relative"
           onMouseEnter={infoMouseEnter}
           onMouseLeave={infoMouseLeave}
@@ -225,7 +250,7 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
                         </div>
                       </button>
                     )}
-                    {(cost > 0 || durationMs > 0) && (
+                    {(cost > 0 || sessionDurationMs > 0 || totalApiDurationMs > 0) && (
                       <div className="flex gap-4">
                         {cost > 0 && (
                           <div>
@@ -235,13 +260,19 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
                             </div>
                           </div>
                         )}
-                        {durationMs > 0 && (
-                          <div>
-                            <div className="text-[10px] text-text-muted mb-0.5">Duration</div>
+                        {sessionDurationMs > 0 && (
+                          <div data-testid="TopBar.sessionTime">
+                            <div className="text-[10px] text-text-muted mb-0.5">Session time</div>
                             <div className="text-[11px] text-text-secondary font-mono">
-                              {durationMs < 60000
-                                ? `${Math.floor(durationMs / 1000)}s`
-                                : `${Math.floor(durationMs / 60000)}m ${Math.floor((durationMs % 60000) / 1000)}s`}
+                              {formatDuration(sessionDurationMs)}
+                            </div>
+                          </div>
+                        )}
+                        {totalApiDurationMs > 0 && (
+                          <div data-testid="TopBar.apiTime">
+                            <div className="text-[10px] text-text-muted mb-0.5">API time</div>
+                            <div className="text-[11px] text-text-secondary font-mono">
+                              {formatDuration(totalApiDurationMs)}
                             </div>
                           </div>
                         )}

@@ -4,9 +4,10 @@ import {
   buildChatMessage,
   extractToolResult,
   extractFileDiffs,
+  computeStoredDurationMs,
   type MessageAccumulator
 } from '../event-mapper'
-import type { OpencodeEvent } from '../protocol/types'
+import type { OpencodeEvent, StoredMessage } from '../protocol/types'
 
 const SESSION_ID = 'ses_abc123'
 const START_TIME = Date.now()
@@ -1862,5 +1863,75 @@ describe('mapEvent — message.updated context-token advance (free-model fix)', 
     if (out.kind === 'cost_update') {
       expect(out.tokens?.cache?.read).toBe(150)
     }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// computeStoredDurationMs — active-turn duration reconstruction from
+// opencode's stored-message history (durability across reloads, Slice A).
+// ---------------------------------------------------------------------------
+
+describe('computeStoredDurationMs', () => {
+  function userMsg(id: string, createdMs?: number): StoredMessage {
+    return {
+      info: { id, role: 'user', time: createdMs !== undefined ? { created: createdMs } : undefined },
+      parts: []
+    }
+  }
+  function assistantMsg(id: string, createdMs?: number, completedMs?: number): StoredMessage {
+    return {
+      info: {
+        id,
+        role: 'assistant',
+        time: {
+          ...(createdMs !== undefined ? { created: createdMs } : {}),
+          ...(completedMs !== undefined ? { completed: completedMs } : {})
+        }
+      },
+      parts: []
+    }
+  }
+
+  it('returns 0 for no messages', () => {
+    expect(computeStoredDurationMs([])).toBe(0)
+  })
+
+  it('spans from user.time.created to assistant.time.completed', () => {
+    const messages = [userMsg('u1', 1000), assistantMsg('a1', 1000, 6000)]
+    expect(computeStoredDurationMs(messages)).toBe(5000)
+  })
+
+  it('falls back to assistant.time.created when completed is absent', () => {
+    const messages = [userMsg('u1', 1000), assistantMsg('a1', 4000)]
+    expect(computeStoredDurationMs(messages)).toBe(3000)
+  })
+
+  it('uses the LATEST assistant completion when a turn has multiple assistant messages', () => {
+    const messages = [
+      userMsg('u1', 1000),
+      assistantMsg('a1', 1000, 3000),
+      assistantMsg('a2', 3000, 5000)
+    ]
+    expect(computeStoredDurationMs(messages)).toBe(4000)
+  })
+
+  it('sums multiple turns', () => {
+    const messages = [
+      userMsg('u1', 0),
+      assistantMsg('a1', 0, 5000), // turn 1 span: 5s
+      userMsg('u2', 10_000),
+      assistantMsg('a2', 10_000, 13_000) // turn 2 span: 3s
+    ]
+    expect(computeStoredDurationMs(messages)).toBe(8000)
+  })
+
+  it('drops a turn whose user message has no parseable created timestamp', () => {
+    const messages = [userMsg('u1', undefined), assistantMsg('a1', 1000, 9000)]
+    expect(computeStoredDurationMs(messages)).toBe(0)
+  })
+
+  it('clamps a negative span (assistant completed before the prompt) to 0', () => {
+    const messages = [userMsg('u1', 5000), assistantMsg('a1', 5000, 1000)]
+    expect(computeStoredDurationMs(messages)).toBe(0)
   })
 })

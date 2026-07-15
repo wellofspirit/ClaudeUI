@@ -925,3 +925,55 @@ export function convertStoredMessage(stored: StoredMessage): ChatMessage | null 
     timestamp
   }
 }
+
+/**
+ * Reconstruct accumulated ACTIVE (turn-processing) duration from opencode's
+ * stored-message history (GET /session/{id}/message), for durability across
+ * reloads. Mirrors Claude's transcript turn-span reconstruction (see
+ * session-history.ts `computeTurnSpanDurationMs`) with the same semantic:
+ * accumulated wall-clock time actively processing turns — idle time (waiting
+ * on the user) is excluded, and both engines share this definition.
+ *
+ * A turn starts at a `role: 'user'` stored message (`info.time.created`) and
+ * ends at the latest `time.completed` (fallback: `time.created`) among the
+ * assistant messages that follow it, up to the next user message. Messages
+ * are assumed to arrive in chronological order, as `listMessages` returns
+ * them. Missing/non-finite timestamps are skipped for span math (a user
+ * message with no parseable `created` drops that whole turn rather than
+ * guessing a start); negative/NaN spans are clamped to 0.
+ */
+export function computeStoredDurationMs(storedMessages: StoredMessage[]): number {
+  let totalMs = 0
+  let turnStartMs: number | null = null
+  let turnEndMs: number | null = null
+
+  const finalizeTurn = (): void => {
+    if (turnStartMs !== null && turnEndMs !== null) {
+      const span = turnEndMs - turnStartMs
+      if (Number.isFinite(span) && span > 0) totalMs += span
+    }
+    turnStartMs = null
+    turnEndMs = null
+  }
+
+  for (const stored of storedMessages) {
+    const info = stored.info
+    if (!info) continue
+    const time = info.time as { created?: number; completed?: number } | undefined
+
+    if (info.role === 'user') {
+      finalizeTurn()
+      const created = time?.created
+      turnStartMs = typeof created === 'number' && Number.isFinite(created) ? created : null
+      continue
+    }
+
+    if (info.role !== 'assistant' || turnStartMs === null) continue
+    const end = time?.completed ?? time?.created
+    if (typeof end !== 'number' || !Number.isFinite(end)) continue
+    if (turnEndMs === null || end > turnEndMs) turnEndMs = end
+  }
+  finalizeTurn()
+
+  return totalMs
+}
