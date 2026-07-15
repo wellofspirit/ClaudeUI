@@ -443,3 +443,66 @@ describe('computeTokenMetrics — duration reconstruction from turn spans', () =
     expect(m.totalDurationMs).toBe(5000)
   })
 })
+
+// ---------------------------------------------------------------------------
+// computeTokenMetrics — modelCosts (Slice B: per-model session cost breakdown,
+// recomputed from pricing-table math since real transcripts carry no cost).
+// ---------------------------------------------------------------------------
+
+describe('computeTokenMetrics — modelCosts (Slice B)', () => {
+  let seq = 0
+  function writeTranscript(lines: object[]): string {
+    const file = path.join(os.tmpdir(), `claudeui-history-cost-${process.pid}-${seq++}.jsonl`)
+    fs.writeFileSync(file, lines.map((l) => JSON.stringify(l)).join('\n'))
+    return file
+  }
+  function assistantMsg(
+    id: string,
+    model: string,
+    usage: { input_tokens: number; output_tokens: number }
+  ): object {
+    return { type: 'assistant', message: { id, model, usage } }
+  }
+
+  it('computes per-model cost using pricing-table math and sums to totalCostUsd', async () => {
+    const file = writeTranscript([
+      // sonnet: $3/MTok input → 1M input tokens = $3
+      assistantMsg('msg_1', 'claude-sonnet-4-6', { input_tokens: 1_000_000, output_tokens: 0 }),
+      // opus-4-8: $5/MTok input → 1M input tokens = $5
+      assistantMsg('msg_2', 'claude-opus-4-8', { input_tokens: 1_000_000, output_tokens: 0 })
+    ])
+    const m = await computeTokenMetrics(file)
+    fs.unlinkSync(file)
+
+    expect(m.modelCosts).toBeDefined()
+    const sonnet = m.modelCosts!.find((e) => e.modelId === 'claude-sonnet-4-6')
+    const opus = m.modelCosts!.find((e) => e.modelId === 'claude-opus-4-8')
+    expect(sonnet).toEqual({ engineId: 'claude', modelId: 'claude-sonnet-4-6', costUsd: 3 })
+    expect(opus).toEqual({ engineId: 'claude', modelId: 'claude-opus-4-8', costUsd: 5 })
+    expect(m.totalCostUsd).toBeCloseTo(8, 6)
+  })
+
+  it('dedupes repeated lines sharing the same message id (partial-update writes)', async () => {
+    const file = writeTranscript([
+      assistantMsg('msg_1', 'claude-sonnet-4-6', { input_tokens: 1_000_000, output_tokens: 0 }),
+      // Same message id re-emitted (e.g. a partial update also persisted) —
+      // must be counted once, not twice, for the cost breakdown.
+      assistantMsg('msg_1', 'claude-sonnet-4-6', { input_tokens: 1_000_000, output_tokens: 0 })
+    ])
+    const m = await computeTokenMetrics(file)
+    fs.unlinkSync(file)
+
+    const sonnet = m.modelCosts!.find((e) => e.modelId === 'claude-sonnet-4-6')
+    expect(sonnet?.costUsd).toBeCloseTo(3, 6) // NOT 6
+    expect(m.totalCostUsd).toBeCloseTo(3, 6)
+  })
+
+  it('omits synthetic/unknown models from the breakdown', async () => {
+    const file = writeTranscript([
+      { type: 'assistant', message: { id: 'msg_1', model: '<synthetic>', usage: { input_tokens: 100, output_tokens: 0 } } }
+    ])
+    const m = await computeTokenMetrics(file)
+    fs.unlinkSync(file)
+    expect(m.modelCosts).toEqual([])
+  })
+})

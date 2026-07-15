@@ -226,7 +226,7 @@ const DEFAULT_PRICING: ModelPricing = {
   cacheReadPerMTok: 0.3
 }
 
-function getPricing(model: string): ModelPricing {
+export function getPricing(model: string): ModelPricing {
   const lower = model.toLowerCase()
   for (const { match, pricing } of MODEL_PRICING) {
     if (lower.includes(match)) return pricing
@@ -242,7 +242,7 @@ function getPricing(model: string): ModelPricing {
  * JSONL usage lacks the `cache_creation` breakdown, pass 0 — everything is
  * billed at the 5m rate, matching the pre-split behavior.
  */
-function calculateCostFromTokens(
+export function calculateCostFromTokens(
   model: string,
   inputTokens: number,
   outputTokens: number,
@@ -268,7 +268,7 @@ function calculateCostFromTokens(
  * full forms ("claude-sonnet-4-6", "claude-haiku-4-5-20251001") map to
  * the same canonical key. Filters out synthetic models.
  */
-function normalizeModelName(model: string): string | null {
+export function normalizeModelName(model: string): string | null {
   const lower = model.toLowerCase()
   // Filter out synthetic / invalid models
   if (lower === '<synthetic>' || lower === 'unknown' || !model) return null
@@ -299,6 +299,28 @@ export interface ParsedEntry {
   cacheReadTokens: number
   costUsd: number
   messageId: string // for deduplication
+  /** Session UUID this entry belongs to, derived from the JSONL file path
+   *  (Slice B backfill-attribution fix). Null only if derivation somehow fails. */
+  sessionId: string | null
+}
+
+/**
+ * Derive the owning session UUID from a JSONL file path. Main session files are
+ * named `<sessionId>.jsonl` directly under the project directory; subagent files
+ * are `<projectDir>/<sessionId>/subagents/agent-<hex>.jsonl` — the session UUID
+ * is the subagents directory's PARENT directory name, not the agent file's own
+ * name. Pure — used by parseJsonlFile so every ParsedEntry can be attributed to
+ * a real session (previously always written as `sessionId: null` in the DB).
+ */
+export function deriveSessionIdFromPath(filePath: string): string | null {
+  const dir = path.dirname(filePath)
+  const dirName = path.basename(dir)
+  if (dirName === 'subagents') {
+    const parent = path.basename(path.dirname(dir))
+    return parent || null
+  }
+  const base = path.basename(filePath, '.jsonl')
+  return base || null
 }
 
 interface FileCache {
@@ -890,7 +912,7 @@ export class BlockUsageService {
           cacheReadTokens: e.cacheReadTokens,
           equivCostUsd: equiv ?? e.costUsd,
           engineCostUsd: e.costUsd,
-          sessionId: null,
+          sessionId: e.sessionId,
           messageId: e.messageId,
           source: 'backfill'
         })
@@ -920,7 +942,8 @@ export class BlockUsageService {
       cacheCreationTokens: r.cacheWriteTokens,
       cacheReadTokens: r.cacheReadTokens,
       costUsd: selectRowCostUsd(r),
-      messageId: r.messageId
+      messageId: r.messageId,
+      sessionId: r.sessionId
     }))
   }
 
@@ -1544,7 +1567,8 @@ export class BlockUsageService {
             cacheCreationTokens: cacheCreate,
             cacheReadTokens: cacheRead,
             costUsd,
-            messageId
+            messageId,
+            sessionId: deriveSessionIdFromPath(filePath)
           })
         } catch {
           // Skip malformed lines

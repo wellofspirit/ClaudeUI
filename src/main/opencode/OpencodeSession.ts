@@ -19,7 +19,8 @@ import type {
   AutoModeConfig,
   AskUserQuestion,
   StatusLineData,
-  SkillInfo
+  SkillInfo,
+  ModelCostEntry
 } from '../../shared/types'
 import { opencodeModel } from '../../shared/types'
 import {
@@ -90,7 +91,31 @@ export class OpencodeSession extends BaseSession {
   private openSessionId: string | null = null
   private sseAbort: AbortController | null = null
   private isProcessing = false
-  private totalCostUsd = 0
+  /**
+   * Cost tracking — base + live overlay (Slice B, durable across reloads,
+   * mirrors ClaudeSession's costBaseUsd/liveTotalCostUsd split).
+   *
+   * - costBaseUsd / modelCostBase: cost from stored history, seeded ONCE at
+   *   replayStoredHistory (a single OpencodeSession object only ever replays
+   *   once — replayStoredHistory is gated on `!this.openSessionId`/`!this.
+   *   openSessionId` branches that can't re-fire after openSessionId is set —
+   *   so no respawn-fold is needed here, unlike Claude's spawn-per-turn model).
+   * - liveTotalCostUsd / liveModelCosts: cost accumulated THIS live session,
+   *   since resume/creation. liveTotalCostUsd is synced from
+   *   sumAccumulatorCosts(accumulators) (event-mapper.ts) — a full recompute
+   *   over live accumulators only, which is why the historical base MUST live
+   *   in a separate field rather than seeding the same one sumAccumulatorCosts
+   *   writes to (a live cost_update would otherwise overwrite/discard the
+   *   seeded historical total).
+   *
+   * this.totalCostUsd (below) is a getter: costBaseUsd + liveTotalCostUsd.
+   */
+  private costBaseUsd = 0
+  private modelCostBase = new Map<string, number>()
+  private liveTotalCostUsd = 0
+  /** modelId → summed cost, own (non-child) messages only, populated in
+   *  recordTurnUsage at the same point each message's cost is finalized. */
+  private liveModelCosts = new Map<string, number>()
   private startTimeMs = 0
   /** Accumulated ACTIVE (turn-processing) duration of completed turns, ms.
    *  Base is reconstructed from stored history on resume (replayStoredHistory),
@@ -187,6 +212,24 @@ export class OpencodeSession extends BaseSession {
 
   get willQueue(): boolean {
     return this.isProcessing
+  }
+
+  /** costBaseUsd + liveTotalCostUsd (see the field doc comment for the split). */
+  private get totalCostUsd(): number {
+    return this.costBaseUsd + this.liveTotalCostUsd
+  }
+
+  /** modelCostBase merged with liveModelCosts, summed per model id. */
+  private get modelCostEntries(): ModelCostEntry[] {
+    const merged = new Map<string, number>(this.modelCostBase)
+    for (const [modelId, cost] of this.liveModelCosts) {
+      merged.set(modelId, (merged.get(modelId) ?? 0) + cost)
+    }
+    return [...merged.entries()].map(([modelId, costUsd]) => ({
+      engineId: 'opencode' as const,
+      modelId,
+      costUsd
+    }))
   }
 
   get status(): SessionStatus {
@@ -410,6 +453,34 @@ export class OpencodeSession extends BaseSession {
       // this call returns) — see computeStoredDurationMs for the semantic.
       this.accTotalDurationMs = computeStoredDurationMs(storedMessages)
 
+      // Slice B — cost durability across reloads: seed costBaseUsd/modelCostBase
+      // from stored history BEFORE ensureSSEConsumer() starts (run()/eagerConnect()
+      // both call replayStoredHistory before starting the SSE consumer), so the
+      // live overlay never has to catch up from zero. listMessages(sessionId)
+      // only returns THIS session's own messages — child (subagent) messages
+      // live under a distinct session id and are never included here, so no
+      // explicit child filtering is needed (mirrors sumAccumulatorCosts/
+      // recordTurnUsage excluding children from the live overlay).
+      let seededCostBase = 0
+      const seededModelCostBase = new Map<string, number>()
+      for (const stored of storedMessages) {
+        const info = stored.info
+        if (!info || info.role !== 'assistant') continue
+        const cost = typeof info.cost === 'number' ? info.cost : 0
+        seededCostBase += cost
+        const modelId = info.modelID
+        if (modelId) {
+          seededModelCostBase.set(modelId, (seededModelCostBase.get(modelId) ?? 0) + cost)
+        }
+      }
+      this.costBaseUsd = seededCostBase
+      this.modelCostBase = seededModelCostBase
+      // Push the seeded totals to the renderer NOW — otherwise the durable
+      // cost sits in memory but never reaches the TopBar tooltip until the
+      // next live cost_update/result event (which may be turns away, or never,
+      // if the user just reopens a session to look at it).
+      this.sendStatusLine()
+
       for (const stored of storedMessages) {
         const msg = convertStoredMessage(stored)
         if (!msg) continue
@@ -626,7 +697,13 @@ export class OpencodeSession extends BaseSession {
   private async consumeEvents(): Promise<void> {
     if (!this.client || !this.openSessionId) return
     const signal = this.sseAbort!.signal
-    const totalCostRef = { value: this.totalCostUsd }
+    // Starts at liveTotalCostUsd (0 for a fresh/just-resumed session) — NOT
+    // this.totalCostUsd (costBaseUsd + liveTotalCostUsd) — because
+    // sumAccumulatorCosts (event-mapper.ts) always REPLACES this ref with a
+    // full recompute over the (base-less) live accumulators map. Seeding it
+    // with the base here would just get discarded on the first cost_update;
+    // the base is combined with the live value only at the totalCostUsd getter.
+    const totalCostRef = { value: this.liveTotalCostUsd }
 
     try {
       for await (const ev of this.client.subscribeEvents(signal)) {
@@ -634,7 +711,7 @@ export class OpencodeSession extends BaseSession {
         if (!this.openSessionId) continue
 
         const output = mapEvent(ev, this.openSessionId, this.accumulators, this.startTimeMs, totalCostRef, this.childSessions)
-        this.totalCostUsd = totalCostRef.value
+        this.liveTotalCostUsd = totalCostRef.value
 
         this.dispatchMapperOutput(output)
       }
@@ -745,7 +822,11 @@ export class OpencodeSession extends BaseSession {
         // recalculate() is self-guarded with a concurrency flag, so back-to-back
         // turns queue safely.
         blockUsageService.recalculate().catch(() => {})
-        this.send('session:result', output.result)
+        // output.result.totalCostUsd is the LIVE-only value (event-mapper's
+        // totalCostUsd ref has no notion of the seeded historical base) —
+        // override with the getter so a resumed session's result payload
+        // reports the same durable total as the status line / session:status.
+        this.send('session:result', { ...output.result, totalCostUsd: this.totalCostUsd })
         this.sendStatus()
         this.resetInactivityTimer()
         break
@@ -1245,6 +1326,20 @@ export class OpencodeSession extends BaseSession {
       const tokens = acc.tokens
 
       if (!acc.isChild) {
+        // Slice B — per-model cost breakdown: attribute this message's final
+        // (now-stable) cost to the model active when it was recorded. Own
+        // accumulators don't carry a per-message model (unlike child ones),
+        // but since this loop only visits each messageId once (guarded by
+        // recordedUsageMessageIds above) and runs at turn end, `parsed.modelID`
+        // IS the model that produced this message — a mid-session model switch
+        // naturally attributes turn N's messages to whichever model was active
+        // when turn N's session.idle fired. Matches recordUsageEvent's own
+        // attribution below (same simplification, same precedent).
+        this.liveModelCosts.set(
+          parsed.modelID,
+          (this.liveModelCosts.get(parsed.modelID) ?? 0) + (acc.cost ?? 0)
+        )
+
         // Own (parent) message — attribute to this session's model.
         recordUsageEvent({
           engineId: 'opencode',
@@ -1346,7 +1441,8 @@ export class OpencodeSession extends BaseSession {
       contextWindowSize: ctx,
       usedPercentage,
       remainingPercentage,
-      turnStartedAtMs: this.isProcessing && this.startTimeMs > 0 ? this.startTimeMs : null
+      turnStartedAtMs: this.isProcessing && this.startTimeMs > 0 ? this.startTimeMs : null,
+      modelCosts: this.modelCostEntries
     }
   }
 

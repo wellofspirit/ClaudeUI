@@ -9,6 +9,7 @@ import { PermissionsDialog } from '../../PermissionsDialog'
 import { SkillsDialog } from '../../SkillsDialog'
 import { McpDialog } from '../../McpDialog'
 import { EngineLogo } from '../../shared/EngineLogo'
+import { shortModelName } from '../../usage/usage-utils'
 
 /** Format a millisecond duration as "Ns" or "Nm Ns". Shared by the Session
  *  time / API time tooltip rows. */
@@ -59,6 +60,15 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
   const totalDurationMs = statusLine?.totalDurationMs ?? 0
   const totalApiDurationMs = statusLine?.totalApiDurationMs ?? 0
   const turnStartedAtMs = statusLine?.turnStartedAtMs ?? null
+  const rawModelCosts = statusLine?.modelCosts ?? []
+  // A single-model session's breakdown is redundant with the headline Cost
+  // figure — only show it when there's actually more than one line, or a
+  // dispatched (cross-engine, Slice C) row is present.
+  const showCostBreakdown =
+    rawModelCosts.length >= 2 || rawModelCosts.some((m) => m.dispatched)
+  const sortedModelCosts = showCostBreakdown
+    ? [...rawModelCosts].sort((a, b) => b.costUsd - a.costUsd)
+    : []
 
   // Tick every second while the tooltip is open and a turn is in flight, so
   // "Session time" keeps counting up live instead of freezing until the next
@@ -258,6 +268,28 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
                             <div className="text-[11px] text-text-secondary font-mono">
                               ${cost < 0.01 ? cost.toFixed(4) : cost.toFixed(2)}
                             </div>
+                            {showCostBreakdown && (
+                              <div data-testid="TopBar.costBreakdown" className="mt-1 space-y-0.5">
+                                {sortedModelCosts.map((m) => (
+                                  <div
+                                    key={`${m.engineId}:${m.modelId}`}
+                                    data-testid="TopBar.costBreakdownRow"
+                                    data-model={m.modelId}
+                                    className="flex items-center justify-between gap-3"
+                                  >
+                                    <span className="text-[10px] text-text-muted truncate">
+                                      {shortModelName(m.modelId)}
+                                    </span>
+                                    <span className="text-[10px] text-text-secondary font-mono shrink-0">
+                                      $
+                                      {m.costUsd < 0.01
+                                        ? m.costUsd.toFixed(4)
+                                        : m.costUsd.toFixed(2)}
+                                    </span>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
                           </div>
                         )}
                         {sessionDurationMs > 0 && (

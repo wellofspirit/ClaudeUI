@@ -129,3 +129,90 @@ describe('TopBar — Session time / API time', () => {
     }
   })
 })
+
+// ---------------------------------------------------------------------------
+// Slice B — per-model cost breakdown in the Cost tooltip row.
+// ---------------------------------------------------------------------------
+
+describe('TopBar — per-model cost breakdown (Slice B)', () => {
+  let app: TestApp
+
+  beforeEach(async () => {
+    app = await bootTestApp()
+    useSessionStore.getState().createNewSession(ROUTE, '/d/repo')
+    useSessionStore.setState({ activeSessionId: ROUTE })
+  })
+
+  afterEach(() => {
+    app.teardown()
+    useSessionStore.setState({ activeSessionId: null, sessions: {} })
+  })
+
+  it('hides the breakdown for a single-model session', () => {
+    useSessionStore.getState().setStatusLine(
+      ROUTE,
+      makeStatusLine({
+        totalCostUsd: 1.23,
+        modelCosts: [{ engineId: 'claude', modelId: 'claude-fable-5', costUsd: 1.23 }]
+      })
+    )
+
+    const { unmount } = render(<TopBar hasContent />)
+    fireEvent.mouseEnter(screen.getByTestId('TopBar.info'))
+
+    expect(screen.queryByTestId('TopBar.costBreakdown')).toBeNull()
+    unmount()
+  })
+
+  it('shows the breakdown sorted by cost desc for a multi-model session', () => {
+    useSessionStore.getState().setStatusLine(
+      ROUTE,
+      makeStatusLine({
+        totalCostUsd: 1.68,
+        modelCosts: [
+          // Deliberately out of order — the smaller cost listed first — to
+          // assert the renderer sorts, rather than trusting input order.
+          { engineId: 'claude', modelId: 'claude-sonnet-4-6', costUsd: 0.45 },
+          { engineId: 'claude', modelId: 'claude-fable-5', costUsd: 1.23 }
+        ]
+      })
+    )
+
+    const { unmount } = render(<TopBar hasContent />)
+    fireEvent.mouseEnter(screen.getByTestId('TopBar.info'))
+
+    const container = screen.getByTestId('TopBar.costBreakdown')
+    expect(container).toBeInTheDocument()
+    const rows = screen.getAllByTestId('TopBar.costBreakdownRow')
+    expect(rows).toHaveLength(2)
+    // Sorted highest-cost first.
+    expect(rows[0]).toHaveAttribute('data-model', 'claude-fable-5')
+    expect(rows[0]).toHaveTextContent('Fable 5')
+    expect(rows[0]).toHaveTextContent('$1.23')
+    expect(rows[1]).toHaveAttribute('data-model', 'claude-sonnet-4-6')
+    expect(rows[1]).toHaveTextContent('Sonnet 4.6')
+    expect(rows[1]).toHaveTextContent('$0.45')
+
+    unmount()
+  })
+
+  it('shows the breakdown for a single dispatched (cross-engine) row even with just one entry', () => {
+    useSessionStore.getState().setStatusLine(
+      ROUTE,
+      makeStatusLine({
+        totalCostUsd: 0.02,
+        modelCosts: [
+          { engineId: 'opencode', modelId: 'gpt-5.4', costUsd: 0.02, dispatched: true }
+        ]
+      })
+    )
+
+    const { unmount } = render(<TopBar hasContent />)
+    fireEvent.mouseEnter(screen.getByTestId('TopBar.info'))
+
+    expect(screen.getByTestId('TopBar.costBreakdown')).toBeInTheDocument()
+    expect(screen.getAllByTestId('TopBar.costBreakdownRow')).toHaveLength(1)
+
+    unmount()
+  })
+})

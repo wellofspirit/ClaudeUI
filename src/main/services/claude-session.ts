@@ -97,7 +97,8 @@ import type {
   PendingApproval,
   SandboxSettings,
   PermissionSuggestion,
-  AccountRef
+  AccountRef,
+  ModelCostEntry
 } from '../../shared/types'
 import { claudeModel } from '../../shared/types'
 import { BaseSession } from '../providers/BaseSession'
@@ -207,7 +208,31 @@ export class ClaudeSession extends BaseSession {
   private _initMcpServers: Array<{ name: string; status: string }> = [] // cached from init message
   private _mcpAllServers: Record<string, McpServerConfig> = {} // full config loaded at session start
   private _mcpDisabledServers = new Set<string>() // servers disabled via toggle
-  private totalCostUsd = 0
+  /**
+   * Cost tracking — base + live overlay (Slice B fix for the pre-existing
+   * cumulative double-count bug: `total_cost_usd`/`modelUsage` are CUMULATIVE
+   * WITHIN one cli.js process and reset to zero on `--resume`, so a naive `+=`
+   * on every `result` re-adds the whole running total on turn 2+).
+   *
+   * - costBaseUsd / modelCostBase: everything that happened BEFORE the
+   *   CURRENT cli.js process — seeded once from the resume transcript at
+   *   construction (see reconcileAccumulatorsFromTranscript's seedCost param),
+   *   and folded forward across a same-object respawn (a ClaudeSession CAN
+   *   spawn cli.js more than once: run() takes the "first run" branch again
+   *   whenever messageChannel is null, e.g. after cancel()'s idle-timeout
+   *   teardown followed by a later session:send on the same routingId/object —
+   *   see the fold in run()'s finally block).
+   * - liveTotalCostUsd / liveModelCosts: the latest `result` message's
+   *   cumulative values for the CURRENT process — REPLACED (never added) on
+   *   every result, per the wire semantics above.
+   *
+   * Reported totalCostUsd = costBaseUsd + liveTotalCostUsd; per-model = the
+   * base map merged with the live map, summed per model id.
+   */
+  private costBaseUsd = 0
+  private modelCostBase = new Map<string, number>()
+  private liveTotalCostUsd = 0
+  private liveModelCosts = new Map<string, number>()
   private messageChannel: MessageChannel<unknown> | null = null
   /** Single source of truth for query method signatures: the SDK layer's
    *  QueryHandle. Previously duplicated here as an inline interface; drift
@@ -288,12 +313,33 @@ export class ClaudeSession extends BaseSession {
     // make that over-count permanent — a fork's fresh transcript reconciles
     // normally after its first result instead.
     if (this.resumeSessionId && !this.forkSession) {
-      void this.reconcileAccumulatorsFromTranscript(this.transcriptPathFor(this.resumeSessionId))
+      void this.reconcileAccumulatorsFromTranscript(
+        this.transcriptPathFor(this.resumeSessionId),
+        true
+      )
     }
   }
 
   get willQueue(): boolean {
     return this.isProcessing
+  }
+
+  /** costBaseUsd + liveTotalCostUsd (see the field doc comment for the split). */
+  private get totalCostUsd(): number {
+    return this.costBaseUsd + this.liveTotalCostUsd
+  }
+
+  /** modelCostBase merged with liveModelCosts, summed per model id. */
+  private get modelCosts(): ModelCostEntry[] {
+    const merged = new Map<string, number>(this.modelCostBase)
+    for (const [modelId, cost] of this.liveModelCosts) {
+      merged.set(modelId, (merged.get(modelId) ?? 0) + cost)
+    }
+    return [...merged.entries()].map(([modelId, costUsd]) => ({
+      engineId: 'claude' as const,
+      modelId,
+      costUsd
+    }))
   }
 
   get status(): SessionStatus {
@@ -846,6 +892,25 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       this.abortController = null
       this.isProcessing = false
       this.turnStartedAtMs = null
+      // Respawn-boundary fold (Slice B): a ClaudeSession object CAN spawn
+      // cli.js more than once — messageChannel is now null, so the NEXT
+      // run() call on this same object takes the "first run" branch again and
+      // spawns a fresh process that resumes via `this.sessionId`. That fresh
+      // process's modelUsage/total_cost_usd start their cumulative counting
+      // over from zero (verified wire fact), so whatever the live overlay held
+      // for the process that just ended must be folded into the base now —
+      // otherwise the next process's first `result` would REPLACE (not add to)
+      // a live overlay that's about to reset, silently dropping this session's
+      // cost so far. Folding is a no-op for the externally-visible total
+      // (costBaseUsd + liveTotalCostUsd is unchanged by moving value between
+      // the two), so this never causes a visible jump — it just protects the
+      // next spawn.
+      this.costBaseUsd += this.liveTotalCostUsd
+      for (const [modelId, cost] of this.liveModelCosts) {
+        this.modelCostBase.set(modelId, (this.modelCostBase.get(modelId) ?? 0) + cost)
+      }
+      this.liveTotalCostUsd = 0
+      this.liveModelCosts.clear()
       this.sendStatus()
       this.resetInactivityTimer()
     }
@@ -1252,8 +1317,27 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
   }
 
   private handleResultMessage(msg: ResultMessage, stderrChunks: string[]): void {
+    // total_cost_usd / modelUsage are CUMULATIVE WITHIN this cli.js process —
+    // REPLACE the live overlay, never add (see the field doc comment on
+    // liveTotalCostUsd/liveModelCosts for the full explanation of why `+=`
+    // here was a real bug: turn N would re-add the whole running total).
     const cost = msg.total_cost_usd || 0
-    this.totalCostUsd += cost
+    this.liveTotalCostUsd = cost
+
+    const modelUsage = msg.modelUsage
+    if (modelUsage && typeof modelUsage === 'object') {
+      const next = new Map<string, number>()
+      for (const [modelId, usage] of Object.entries(modelUsage)) {
+        const modelCost = typeof usage?.costUSD === 'number' ? usage.costUSD : 0
+        next.set(modelId, modelCost)
+      }
+      this.liveModelCosts = next
+    } else {
+      // No per-model breakdown on this result — attribute the whole turn's
+      // cost to the currently selected model rather than dropping it.
+      this.liveModelCosts = new Map([[this.model, cost]])
+    }
+
     this.isProcessing = false
 
     // NOTE (Phase 7): Claude usage_event rows are NOT recorded live here.
@@ -1349,9 +1433,19 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
    *   being clobbered with the permanent 0 computeTokenMetrics returns.
    * - Emit from accumulators (not the raw metrics) so the guarded duration
    *   and preserved API duration actually reach the renderer.
+   * - Cost is NEVER touched here unless `seedCost` is set — costBaseUsd /
+   *   modelCostBase are seeded ONCE, at construction, from the resume target's
+   *   transcript (the recompute path is only for seeding; a live session's
+   *   cost comes from cli.js's authoritative `result` messages). The recurring
+   *   post-result reconciliation (500ms after every turn) must NOT overwrite
+   *   them with the same pricing-table recompute — that would clobber the
+   *   authoritative live overlay with a less-precise historical estimate.
    * Best-effort: failures are logged, never thrown.
    */
-  private async reconcileAccumulatorsFromTranscript(logPath: string): Promise<void> {
+  private async reconcileAccumulatorsFromTranscript(
+    logPath: string,
+    seedCost = false
+  ): Promise<void> {
     try {
       const metrics = await computeTokenMetrics(logPath, this.model)
       if (metrics.totalTokens === 0 && metrics.totalCostUsd === 0) return
@@ -1360,6 +1454,10 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       this.accCachedTokens = metrics.cachedTokens
       this.accTotalDurationMs = Math.max(this.accTotalDurationMs, metrics.totalDurationMs)
       this.lastContextLength = metrics.contextWindowSize
+      if (seedCost) {
+        this.costBaseUsd = metrics.totalCostUsd
+        this.modelCostBase = new Map((metrics.modelCosts ?? []).map((m) => [m.modelId, m.costUsd]))
+      }
       this.send('session:status-line', this.buildStatusLineFromAccumulators())
       this.sendMetering()
     } catch (err) {
@@ -1807,7 +1905,8 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       contextWindowSize: this.lastContextLength,
       usedPercentage: usedPct,
       remainingPercentage: usedPct !== null ? 100 - usedPct : null,
-      turnStartedAtMs: this.turnStartedAtMs
+      turnStartedAtMs: this.turnStartedAtMs,
+      modelCosts: this.modelCosts
     }
   }
 

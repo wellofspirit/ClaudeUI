@@ -1286,6 +1286,26 @@ export interface StatusLineData {
   remainingPercentage: number | null
   /** Epoch ms when the currently in-flight turn started; null/undefined when idle. */
   turnStartedAtMs?: number | null
+  /** Per-model cost breakdown (Slice B). Sums to totalCostUsd (± float). Always
+   *  emitted once cost is known; the renderer hides the breakdown when a single
+   *  non-dispatched entry would just repeat the headline Cost figure. */
+  modelCosts?: ModelCostEntry[]
+}
+
+/**
+ * One session-cost line attributed to a model (Slice B — per-model session cost
+ * breakdown, durable across reloads). Sorted/labelled in the renderer (TopBar).
+ * ADR-033 cross-engine dispatch (Slice C) adds rows with `dispatched: true` for
+ * spend that happened in a dispatched call to a different engine.
+ */
+export interface ModelCostEntry {
+  /** 'claude' | 'opencode' (Slice C adds dispatch target engines) */
+  engineId: EngineId
+  /** Raw model id, e.g. 'claude-fable-5' */
+  modelId: string
+  costUsd: number
+  /** true when this spend happened in a cross-engine dispatched call (Slice C). */
+  dispatched?: boolean
 }
 
 /**

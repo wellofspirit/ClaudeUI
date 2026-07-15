@@ -9,11 +9,13 @@ import type {
   SessionInfo,
   TaskNotification,
   StatusLineData,
-  ForkAnchorResult
+  ForkAnchorResult,
+  ModelCostEntry
 } from '../../shared/types'
 import { logger } from './logger'
 import { getContextWindowSize } from './context-window'
 import { findForkAnchorUuid } from './fork-anchor'
+import { calculateCostFromTokens, normalizeModelName } from './block-usage'
 
 const CLAUDE_PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects')
 const CACHE_DIR = path.join(os.homedir(), '.claude', 'ui')
@@ -153,6 +155,17 @@ export function computeTurnSpanDurationMs(lines: Array<Record<string, unknown>>)
  * Compute token metrics from a JSONL transcript file.
  * Mirrors ccstatusline's approach: sums message.usage from every assistant entry.
  */
+/** Per-model token aggregate used only for the modelCosts cost reconstruction
+ *  (kept separate from the legacy totalInputTokens/etc sums below, which are
+ *  NOT deduplicated by message id and are left behaviorally unchanged). */
+interface ModelTokenAgg {
+  input: number
+  output: number
+  cacheCreation: number
+  cacheCreation1h: number
+  cacheRead: number
+}
+
 export async function computeTokenMetrics(
   filePath: string,
   model?: string
@@ -167,7 +180,8 @@ export async function computeTokenMetrics(
     totalTokens: 0,
     contextWindowSize: 0,
     usedPercentage: null,
-    remainingPercentage: null
+    remainingPercentage: null,
+    modelCosts: []
   }
 
   if (!fs.existsSync(filePath)) return empty
@@ -191,6 +205,14 @@ export async function computeTokenMetrics(
     // whole file after every turn during reconciliation).
     const turnSpanAcc = createTurnSpanAccumulator()
 
+    // Per-model cost reconstruction (Slice B): deduplicated by message id —
+    // same semantic as block-usage.ts's scanAllJsonl (first occurrence of a
+    // given message id wins). Unlike the legacy token sums above (unchanged,
+    // not deduplicated), this map is used ONLY to derive modelCosts/totalCostUsd
+    // via pricing-table math, so getting the dedup right here matters more.
+    const modelTokens = new Map<string, ModelTokenAgg>()
+    const seenMessageIds = new Set<string>()
+
     const stream = fs.createReadStream(filePath, { encoding: 'utf-8' })
     const rl = readline.createInterface({ input: stream })
 
@@ -210,13 +232,37 @@ export async function computeTokenMetrics(
             mostRecentMainChainUsage = usage
             if (typeof data.message.model === 'string') transcriptModel = data.message.model
           }
+
+          const rawModel = typeof data.message.model === 'string' ? data.message.model : undefined
+          const normalizedModel = rawModel ? normalizeModelName(rawModel) : null
+          if (normalizedModel) {
+            const messageId = typeof data.message.id === 'string' ? data.message.id : ''
+            const isDup = messageId !== '' && seenMessageIds.has(messageId)
+            if (!isDup) {
+              if (messageId) seenMessageIds.add(messageId)
+              const agg = modelTokens.get(normalizedModel) ?? {
+                input: 0,
+                output: 0,
+                cacheCreation: 0,
+                cacheCreation1h: 0,
+                cacheRead: 0
+              }
+              agg.input += usage.input_tokens || 0
+              agg.output += usage.output_tokens || 0
+              agg.cacheCreation += usage.cache_creation_input_tokens ?? 0
+              agg.cacheCreation1h += usage.cache_creation?.ephemeral_1h_input_tokens ?? 0
+              agg.cacheRead += usage.cache_read_input_tokens ?? 0
+              modelTokens.set(normalizedModel, agg)
+            }
+          }
         } else if (data.type === 'result') {
           // Real transcripts carry no `type: "result"` lines (verified across
           // 46 real transcripts), so this branch is dead in practice today.
           // Kept so a future CLI version that reintroduces result lines picks
-          // the cost figure back up automatically. duration_ms is deliberately
-          // NOT accumulated here — the turn-span accumulator (above) is the
-          // sole source for the emitted totalDurationMs.
+          // the cost figure back up automatically (additive with the modelCosts
+          // sum below — no realistic transcript has both). duration_ms is
+          // deliberately NOT accumulated here — the turn-span accumulator
+          // (above) is the sole source for the emitted totalDurationMs.
           totalCostUsd += (data.total_cost_usd as number) || 0
           totalApiDurationMs += (data.duration_api_ms as number) || 0
         }
@@ -244,6 +290,26 @@ export async function computeTokenMetrics(
       // the createTurnSpanAccumulator doc comment for why.
       const totalDurationMs = turnSpanAcc.total()
 
+      // Per-model cost reconstruction: real Claude transcripts carry no cost
+      // figure at all (see the dead `result` branch above), so this pricing-table
+      // recompute is the effective source for both modelCosts and totalCostUsd.
+      // Acceptable imprecision: this is pricing-table math against historical
+      // tokens, while a live session's cost comes from cli.js's authoritative
+      // costUSD (see claude-session.ts's costBaseUsd/liveTotalCostUsd seam).
+      const modelCosts: ModelCostEntry[] = []
+      for (const [modelId, agg] of modelTokens) {
+        const costUsd = calculateCostFromTokens(
+          modelId,
+          agg.input,
+          agg.output,
+          agg.cacheCreation,
+          agg.cacheCreation1h,
+          agg.cacheRead
+        )
+        modelCosts.push({ engineId: 'claude', modelId, costUsd })
+        totalCostUsd += costUsd
+      }
+
       resolve({
         totalCostUsd,
         totalDurationMs,
@@ -254,7 +320,8 @@ export async function computeTokenMetrics(
         totalTokens,
         contextWindowSize: contextLength,
         usedPercentage,
-        remainingPercentage
+        remainingPercentage,
+        modelCosts
       })
     })
 
