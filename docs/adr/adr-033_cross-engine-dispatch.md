@@ -80,11 +80,18 @@ De-risked against opencode v1.17.14 source (pinned clone in git-ignored `vendor/
   (mermaid/mockup/auto-classifier) unaffected.
 - Approval IPC gains prefix routing; renderer approval UI unchanged in v1 (approvals appear as
   ordinary tool approvals on the dispatching session).
-- Dispatched turns consume tokens on the target engine's active account — usage attribution
-  (ADR-011) follows in a hardening phase, before which dispatched usage is attributed like
-  side-questions (i.e. not itemized).
-- Per ADR-030, a `crossEngineDispatch` capability flag is only set true for an engine once the full
-  path (tool visible → gated → dispatch → stream → result) works end-to-end for that engine.
+- Dispatched turns consume tokens on the target engine's active account — SHIPPED (M4-B): every
+  completed/failed dispatched turn is captured explicitly (per-turn cost/tokens/duration from the
+  target's own result) into the operational DB's `dispatched_usage` table (migration v6),
+  attributed to the DISPATCHING session, surfaced in UsageView's "Delegated" section and in
+  `TaskNotification.usage`. Headless turns are structurally invisible to ADR-011's JSONL scan
+  (Claude targets have no transcript; opencode targets bypass OpencodeSession's metering), so
+  this explicit capture is additive with no double-counting. A per-target cumulative
+  `dispatch.maxCostUsd` cap (M4-C) rejects continuation turns once exceeded.
+- Per ADR-030, the `crossEngineDispatch` capability flag is SHIPPED (M4-A): statically true for
+  both engines (both directions live-verified), ANDed at session level with the runtime
+  target-engine-installed check (`crossEngineDispatchAvailable`) — the collab-server registration
+  and both settings sections gate on it.
 
 ## M2–M4 — decisions + full plan
 

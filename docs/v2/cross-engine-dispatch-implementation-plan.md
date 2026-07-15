@@ -1,10 +1,10 @@
 # Cross-engine dispatch — full implementation plan (M2–M4)
 
-**Status:** M1 + M2 + M3 shipped (M2 verified live 2026-07-14; M3 verified live 2026-07-15:
-dispatch TaskCard with engine·model badge, live streamed text in the expanded card, stop verified
-end-to-end incl. the pre-registration race — see M3 as-built deltas); **M4 not started.** This is a
-standalone plan — a fresh session with no prior context should be able to execute every remaining
-phase from here. Governing design:
+**Status:** ALL PHASES SHIPPED (M1–M4). M2 verified live 2026-07-14; M3 + M4 verified live
+2026-07-15 (M3: dispatch TaskCard with engine·model badge, live streamed text, stop incl. the
+pre-registration race; M4: `dispatched_usage` rows captured from a real dispatch, UsageView
+"Delegated" section rendering, cost-cap continuation rejection visible in the card). See each
+phase's "as-built deltas" block for where the implementation deviated from the plan text below. Governing design:
 **ADR-033** (`docs/adr/adr-033_cross-engine-dispatch.md`). Workflow: **ADR-026** (Opus orchestrates
 + reviews every line, a Sonnet sub-agent implements against a written kickoff, gates + real-app
 verify before each commit). Wire facts for opencode live in **`vendor/opencode-src/`** (pinned
@@ -294,7 +294,32 @@ card and stop it mid-flight.
 
 ---
 
-## M4 — usage attribution, capability honesty, hardening
+## M4 — usage attribution, capability honesty, hardening — SHIPPED
+
+**As-built deltas from the plan below:**
+
+- **Capability flag**: `crossEngineDispatch` is `true` in BOTH static engine constants (both
+  directions shipped + live-verified); the honest per-session value is the static flag ANDed with
+  `crossEngineDispatchAvailable(engineId)` (lives in cross-engine-dispatcher.ts — shared/ must
+  stay renderer-safe): claude → opencode binary vendored; opencode → always true (Claude is the
+  bundled engine). Both settings sections gate on the same opencode-installed probe — dispatch
+  INTO Claude has opencode as its only possible CALLER, so "no opencode" hides both.
+- **Usage capture**: per-turn — Claude targets from `result.usage` (input+output tokens) +
+  `total_cost_usd` + `duration_ms` (all per-turn, not cumulative); opencode targets from
+  `info.tokens {input,output,reasoning}` + `info.cost`. `toolUses` = per-turn Set of unique
+  tool_use ids (partial/re-emitted messages re-carry the same blocks — a counter overcounts).
+  Recording is failure-isolated (`safeRecordUsage`) — a DB error drops the row with a warn,
+  never fails the dispatch. Rows land in the operational DB (migration v6, `dispatched_usage`),
+  attributed to the dispatching session; `usage:fetch-dispatched` IPC → UsageView "Delegated"
+  section (renders only when rows exist). No double-counting: dispatcher-owned opencode targets
+  never flow through OpencodeSession's metering; Claude targets have no transcript
+  (persistSession:false) so ADR-011's JSONL scan can't see them.
+- **Hardening**: the cli.js mcp_message timeout + orphan questions were resolved at M3
+  (bundle-verified — see ADR-033); the only M4-C code item was the cost cap:
+  `dispatch.maxCostUsd` per target engine, cumulative per dispatch target, continuation rejected
+  once met/exceeded (target survives — raise the cap or start fresh), crossing turn gets a note
+  appended to its result text. Live-verified: a $0.000001 cap rejected the continuation with the
+  cap error visible in the card.
 
 ### Analysis
 1. **Usage is currently invisible.** Dispatched turns spend real tokens on the target engine's
