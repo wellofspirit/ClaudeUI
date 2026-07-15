@@ -88,6 +88,34 @@ describe('createCollabServer', () => {
     expect(text).toContain('session_id: oc-42')
   })
 
+  it("threads extra.meta['claudecode/toolUseId'] into ctx.toolUseId (cli.js's per-mcp-call _meta stamp)", async () => {
+    const dispatchSpy = vi
+      .spyOn(crossEngineDispatcher, 'dispatch')
+      .mockResolvedValue({ text: 'x', sessionId: 's' })
+    const server = createCollabServer(makeCtx())
+    const extra: SdkToolExtra = {
+      ...makeExtra(),
+      meta: { 'claudecode/toolUseId': 'toolu_abc' }
+    }
+    await server.tools[0].handler({ engine: 'opencode', prompt: 'a' }, extra)
+    expect(dispatchSpy).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ toolUseId: 'toolu_abc' })
+    )
+  })
+
+  it('missing extra.meta → ctx.toolUseId is undefined (dispatch still proceeds)', async () => {
+    const dispatchSpy = vi
+      .spyOn(crossEngineDispatcher, 'dispatch')
+      .mockResolvedValue({ text: 'x', sessionId: 's' })
+    const server = createCollabServer(makeCtx())
+    await server.tools[0].handler({ engine: 'opencode', prompt: 'a' }, makeExtra())
+    expect(dispatchSpy).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ toolUseId: undefined })
+    )
+  })
+
   it('passes session_id through as the continuation sessionId', async () => {
     const dispatchSpy = vi
       .spyOn(crossEngineDispatcher, 'dispatch')

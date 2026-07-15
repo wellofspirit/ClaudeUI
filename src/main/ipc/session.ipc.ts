@@ -803,8 +803,27 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
       readBackgroundRange(manager, routingId, toolUseId, offset, length)
   )
 
-  ipcMain.handle('session:stop-task', async (_e, routingId: string, toolUseId: string) =>
-    stopTask(manager, routingId, toolUseId)
+  ipcMain.handle(
+    'session:stop-task',
+    async (_e, routingId: string, toolUseId: string, isDispatch?: boolean) => {
+      // A cross-engine dispatch card's toolUseId isn't gated on the dispatching
+      // session's own backgroundTasks capability — route to the dispatcher
+      // FIRST (ADR-033 M3), same precedent as the xeng: approval-response
+      // routing above. routingId scopes the stop to the OWNING session.
+      if (isDispatch) {
+        // The renderer KNOWS this is a dispatch card: arm a durable stop-intent
+        // when the dispatch hasn't registered yet (the Stop click can beat the
+        // MCP tools/call round-trip), and NEVER fall through to the session
+        // path — its "Provider does not support background tasks" error was
+        // this race's misleading symptom.
+        crossEngineDispatcher.stopDispatch(toolUseId, routingId, { armIfUnknown: true })
+        return { success: true }
+      }
+      // Not marked: try the dispatcher without arming, fall through to the
+      // session's own stopTask when it's not a known dispatch id.
+      if (crossEngineDispatcher.stopDispatch(toolUseId, routingId)) return { success: true }
+      return stopTask(manager, routingId, toolUseId)
+    }
   )
 
   ipcMain.handle('session:background-task', async (_e, routingId: string, toolUseId: string) =>

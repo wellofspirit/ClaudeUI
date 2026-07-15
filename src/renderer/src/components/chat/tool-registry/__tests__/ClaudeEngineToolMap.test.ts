@@ -36,6 +36,9 @@ describe('ClaudeEngineToolMap.kindOf', () => {
     ['mcp__claude-ui-mockup__create_mockup', 'mockup'],
     ['mcp__claude-ui-mockup__show_mockup', 'mockup'],
     ['mcp__some-server__some-tool', 'mcp'],
+    // Cross-engine dispatch (ADR-033 M3) — hostedMcpKind maps this before the
+    // generic mcp__ fallback (see hostedMcpKind's own test coverage).
+    ['mcp__claude-ui-collab__dispatch_agent', 'task'],
     // Unknown tools fall back to 'unknown'
     ['NotARealTool', 'unknown'],
     ['SomeNewTool', 'unknown']
@@ -224,6 +227,36 @@ describe('ClaudeEngineToolMap.normalize', () => {
         expect(view.model).toBeUndefined()
         expect(view.background).toBeUndefined()
       }
+    })
+
+    // Cross-engine dispatch (ADR-033 M3): dispatch_agent's input has `engine`
+    // (never present on native Task/Agent) — the discriminator that routes
+    // to the dispatch-flavored task view instead of the native one.
+    describe('dispatch_agent (engine present)', () => {
+      it('builds "Dispatch: <engine>" description + "<engine> · <model>" badge', () => {
+        const view = ClaudeEngineToolMap.normalize('task', {
+          engine: 'opencode',
+          prompt: 'Get a second opinion',
+          model: 'openai/gpt-5'
+        })
+        expect(view).toMatchObject({
+          kind: 'task',
+          description: 'Dispatch: opencode',
+          prompt: 'Get a second opinion',
+          subagent: 'opencode · openai/gpt-5'
+        })
+      })
+
+      it('badge falls back to bare engine name when model is omitted', () => {
+        const view = ClaudeEngineToolMap.normalize('task', {
+          engine: 'opencode',
+          prompt: 'x'
+        })
+        expect(view).toMatchObject({ kind: 'task', subagent: 'opencode' })
+        if (view.kind === 'task') {
+          expect(view.model).toBeUndefined()
+        }
+      })
     })
   })
 

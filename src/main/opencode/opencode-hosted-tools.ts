@@ -89,6 +89,15 @@ const dispatchAgentInputSchema = {
   __xeng_caller_session: z
     .string()
     .optional()
+    .describe('internal — set automatically by the ClaudeUI plugin; never set this yourself'),
+  // Internal — same zod-stripping hazard as __xeng_caller_session above. The
+  // plugin also stamps the calling tool part's own callID (ADR-033 M3) so the
+  // dispatcher can key subagent-stream/task-progress/task-notification events
+  // to the dispatching tool_use block. Missing → dispatch still works, just
+  // without live streaming (never fail a dispatch over a missing id).
+  __xeng_call_id: z
+    .string()
+    .optional()
     .describe('internal — set automatically by the ClaudeUI plugin; never set this yourself')
 }
 
@@ -142,12 +151,13 @@ export function createOpencodeHostedToolsServer(
       args: Record<string, unknown>,
       extra: RequestHandlerExtra<ServerRequest, ServerNotification>
     ) => {
-      const { engine, prompt, model, session_id, __xeng_caller_session } = args as {
+      const { engine, prompt, model, session_id, __xeng_caller_session, __xeng_call_id } = args as {
         engine: 'claude'
         prompt: string
         model?: string
         session_id?: string
         __xeng_caller_session?: string
+        __xeng_call_id?: string
       }
 
       if (!__xeng_caller_session) {
@@ -191,7 +201,8 @@ export function createOpencodeHostedToolsServer(
         signal: extra.signal,
         progressToken: extra._meta?.progressToken,
         sendNotification: (notification) =>
-          extra.sendNotification(notification as ServerNotification)
+          extra.sendNotification(notification as ServerNotification),
+        meta: extra._meta as Record<string, unknown> | undefined
       }
 
       const result = await deps.dispatch(
@@ -202,6 +213,7 @@ export function createOpencodeHostedToolsServer(
           cwd: caller.cwd,
           autonomyMode: caller.autonomyMode,
           emit: caller.emit,
+          toolUseId: __xeng_call_id,
           extra: toolExtra
         }
       )

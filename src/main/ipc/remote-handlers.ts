@@ -187,8 +187,21 @@ export function registerRemoteHandlers(
       readBackgroundRange(manager, routingId, toolUseId, offset, length)
   )
 
-  dispatcher.register('session:stop-task', async (routingId: string, toolUseId: string) =>
-    stopTask(manager, routingId, toolUseId)
+  dispatcher.register(
+    'session:stop-task',
+    async (routingId: string, toolUseId: string, isDispatch?: boolean) => {
+      // Mirrors session.ipc.ts — route dispatch toolUseIds to the dispatcher
+      // FIRST (ADR-033 M3), same precedent as the xeng: approval-response
+      // routing. routingId scopes the stop to the OWNING session. isDispatch
+      // (renderer knows the card): arm a durable stop-intent, never fall
+      // through to the session path.
+      if (isDispatch) {
+        crossEngineDispatcher.stopDispatch(toolUseId, routingId, { armIfUnknown: true })
+        return { success: true }
+      }
+      if (crossEngineDispatcher.stopDispatch(toolUseId, routingId)) return { success: true }
+      return stopTask(manager, routingId, toolUseId)
+    }
   )
 
   dispatcher.register('session:background-task', async (routingId: string, toolUseId: string) =>

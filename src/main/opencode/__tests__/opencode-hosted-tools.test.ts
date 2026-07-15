@@ -183,7 +183,8 @@ describe('createOpencodeHostedToolsServer — dispatch_agent (ADR-033 M2)', () =
         engine: 'claude',
         prompt: 'review the diff',
         model: 'haiku',
-        __xeng_caller_session: 'ses_caller'
+        __xeng_caller_session: 'ses_caller',
+        __xeng_call_id: 'call_99'
       },
       extra
     )) as { content: Array<{ type: string; text: string }>; isError?: boolean }
@@ -195,16 +196,35 @@ describe('createOpencodeHostedToolsServer — dispatch_agent (ADR-033 M2)', () =
         fromRoutingId: 'ses_caller',
         cwd: '/proj',
         autonomyMode: 'acceptEdits',
-        emit
+        emit,
+        toolUseId: 'call_99'
       })
     )
-    // The internal arg never reached the dispatch call's request shape.
+    // The internal args never reached the dispatch call's request shape.
     const [reqArg] = dispatch.mock.calls[0]
     expect(reqArg).not.toHaveProperty('__xeng_caller_session')
+    expect(reqArg).not.toHaveProperty('__xeng_call_id')
 
     expect(result.isError).toBeUndefined()
     expect(result.content[0].text).toContain('the review')
     expect(result.content[0].text).toContain('session_id: claude-42')
+  })
+
+  it('missing __xeng_call_id → dispatch still proceeds, ctx.toolUseId is undefined', async () => {
+    const dispatch = vi.fn<DispatchAgentFn>(async () => ({ text: 'ok', sessionId: 'claude-1' }))
+    const tool = getDispatchTool(tmp, {
+      lookupCallerSession: () => ({ cwd: '/proj', autonomyMode: 'default', emit: vi.fn() }),
+      dispatch
+    })
+    const result = (await tool.handler(
+      { engine: 'claude', prompt: 'x', __xeng_caller_session: 'ses_1' },
+      makeExtra()
+    )) as { content: Array<{ type: string; text: string }>; isError?: boolean }
+    expect(result.isError).toBeUndefined()
+    expect(dispatch).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ toolUseId: undefined })
+    )
   })
 
   it('propagates dispatch isError as an isError tool result without a session_id suffix', async () => {

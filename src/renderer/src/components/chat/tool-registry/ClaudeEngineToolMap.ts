@@ -106,7 +106,22 @@ function claudeNormalize(
         target: inp.url != null ? String(inp.url) : inp.query != null ? String(inp.query) : JSON.stringify(inp)
       }
 
-    case 'task':
+    case 'task': {
+      // Cross-engine dispatch (ADR-033 M3) shares the 'task' kind (via
+      // hostedMcpKind's mcp__claude-ui-collab__dispatch_agent mapping) but has
+      // a DIFFERENT input shape than Claude's native Task tool:
+      // { engine, prompt, model?, session_id? } — no description/subagent_type.
+      // `engine` is the reliable discriminator (native Task never has it).
+      // The badge slot (TaskCard's `subagent`) carries "<engine> · <model>"
+      // instead of extending ToolView with dispatch-specific fields.
+      if (typeof inp.engine === 'string') {
+        return {
+          kind: 'task',
+          description: `Dispatch: ${inp.engine}`,
+          prompt: inp.prompt != null ? String(inp.prompt) : '',
+          subagent: inp.model != null ? `${inp.engine} · ${String(inp.model)}` : String(inp.engine)
+        }
+      }
       return {
         kind: 'task',
         description: inp.description != null ? String(inp.description) : '',
@@ -120,6 +135,7 @@ function claudeNormalize(
         model: inp.model != null ? String(inp.model) : undefined,
         background: inp.run_in_background != null ? Boolean(inp.run_in_background) : undefined
       }
+    }
 
     case 'todo': {
       const rawTodos = Array.isArray(inp.todos) ? inp.todos : []

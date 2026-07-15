@@ -1193,3 +1193,524 @@ describe('CrossEngineDispatcher — Claude direction (ADR-033 M2)', () => {
     })
   })
 })
+
+// ---------------------------------------------------------------------------
+// ADR-033 M3 — streaming, progress, task-notification, stop (both directions)
+// ---------------------------------------------------------------------------
+
+const RELEVANT_SUBAGENT_CHANNELS = [
+  'session:subagent-stream',
+  'session:subagent-message',
+  'session:subagent-tool-result',
+  'session:task-progress',
+  'session:task-notification'
+]
+
+describe('CrossEngineDispatcher — M3 (Claude direction: streaming/progress/notification/stop)', () => {
+  it('toolUseId set: forwards stream_event deltas + assistant messages + heartbeat progress + a final "completed" notification', async () => {
+    const target = makeFakeClaudeTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
+      spawnClaudeQuery: target.spawnClaudeQuery,
+      heartbeatMs: 20
+    })
+    const ctx = makeCtx({ fromEngine: 'opencode', toolUseId: 'toolu_disp_1' })
+    const pending = dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
+    await tick()
+    target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-1' } as SDKMessage)
+
+    target.push({
+      type: 'stream_event',
+      event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'Hello' } }
+    } as unknown as SDKMessage)
+    await tick()
+    target.push({
+      type: 'assistant',
+      message: { id: 'm1', role: 'assistant', content: [{ type: 'text', text: 'Hello' }] }
+    } as unknown as SDKMessage)
+    await tick()
+
+    // Let at least one heartbeat tick fire.
+    await new Promise((r) => setTimeout(r, 30))
+
+    target.push(resultMsg({ result: 'final answer' }))
+    const result = await pending
+    expect(result.isError).toBeUndefined()
+
+    const streamCall = ctx.emit.mock.calls.find((c) => c[0] === 'session:subagent-stream')
+    expect(streamCall?.[1]).toMatchObject({ toolUseId: 'toolu_disp_1', type: 'text', text: 'Hello' })
+
+    const msgCall = ctx.emit.mock.calls.find((c) => c[0] === 'session:subagent-message')
+    expect(msgCall?.[1]).toMatchObject({ toolUseId: 'toolu_disp_1' })
+    const forwarded = msgCall![1] as { message: { content: unknown[] } }
+    expect(forwarded.message.content).toEqual([{ type: 'text', text: 'Hello' }])
+
+    const progressCall = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-progress')
+    expect(progressCall?.[1]).toMatchObject({
+      toolUseId: 'toolu_disp_1',
+      toolName: 'dispatch_agent',
+      parentToolUseId: null
+    })
+
+    const notif = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')
+    expect(notif?.[1]).toMatchObject({
+      taskId: 'claude-sess-1',
+      toolUseId: 'toolu_disp_1',
+      status: 'completed',
+      summary: 'final answer'
+    })
+  })
+
+  it('toolUseId ABSENT: zero subagent/task emits, dispatch still succeeds', async () => {
+    const target = makeFakeClaudeTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
+      spawnClaudeQuery: target.spawnClaudeQuery,
+      heartbeatMs: 20
+    })
+    const ctx = makeCtx({ fromEngine: 'opencode' }) // no toolUseId
+    const pending = dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
+    await tick()
+    target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-1' } as SDKMessage)
+    target.push({
+      type: 'stream_event',
+      event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'Hello' } }
+    } as unknown as SDKMessage)
+    await new Promise((r) => setTimeout(r, 30))
+    target.push(resultMsg({ result: 'ok' }))
+    const result = await pending
+    expect(result.isError).toBeUndefined()
+
+    expect(
+      ctx.emit.mock.calls.filter((c) => RELEVANT_SUBAGENT_CHANNELS.includes(c[0]))
+    ).toHaveLength(0)
+  })
+
+  it('stopDispatch aborts the target, emits a "stopped" notification, and the in-flight dispatch resolves isError', async () => {
+    const target = makeFakeClaudeTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
+      spawnClaudeQuery: target.spawnClaudeQuery
+    })
+    const ctx = makeCtx({ fromEngine: 'opencode', toolUseId: 'toolu_stop_1' })
+    const pending = dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
+    await tick()
+    target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-1' } as SDKMessage)
+    await tick()
+
+    expect(dispatcher.stopDispatch('toolu_stop_1')).toBe(true)
+
+    const result = await pending
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain('stopped')
+    expect(target.lastAbortController()?.signal.aborted).toBe(true)
+
+    const notif = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')
+    expect(notif?.[1]).toMatchObject({ toolUseId: 'toolu_stop_1', status: 'stopped' })
+  })
+
+  it('stopDispatch returns false for an unknown toolUseId', async () => {
+    const { dispatcher } = makeHarness()
+    expect(dispatcher.stopDispatch('no-such-tool-use-id')).toBe(false)
+  })
+
+  it('stopDispatch with the WRONG routingId returns false and leaves the dispatch running (ownership check)', async () => {
+    const target = makeFakeClaudeTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
+      spawnClaudeQuery: target.spawnClaudeQuery
+    })
+    const ctx = makeCtx({
+      fromEngine: 'opencode',
+      fromRoutingId: 'routing-owner',
+      toolUseId: 'toolu_owned_1'
+    })
+    const pending = dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
+    await tick()
+    target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-1' } as SDKMessage)
+    await tick()
+
+    // Another session (e.g. a remote client) tries to stop a dispatch it
+    // doesn't own — must be refused, and the turn must be undisturbed.
+    expect(dispatcher.stopDispatch('toolu_owned_1', 'routing-intruder')).toBe(false)
+    expect(target.lastAbortController()?.signal.aborted).toBe(false)
+
+    // The dispatch keeps running to normal completion.
+    target.push(resultMsg({ result: 'finished normally' }))
+    const result = await pending
+    expect(result.isError).toBeUndefined()
+    expect(result.text).toBe('finished normally')
+  })
+
+  it('stopDispatch with the CORRECT routingId stops the dispatch (ownership match path)', async () => {
+    const target = makeFakeClaudeTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
+      spawnClaudeQuery: target.spawnClaudeQuery
+    })
+    const ctx = makeCtx({
+      fromEngine: 'opencode',
+      fromRoutingId: 'routing-owner',
+      toolUseId: 'toolu_owned_2'
+    })
+    const pending = dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
+    await tick()
+    target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-1' } as SDKMessage)
+    await tick()
+
+    expect(dispatcher.stopDispatch('toolu_owned_2', 'routing-owner')).toBe(true)
+    const result = await pending
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain('stopped')
+  })
+
+  it('Stop DURING spawnClaudeQuery: handle registered before any await; dispatch still ends stopped', async () => {
+    // Live-reproduced race: TaskCard's Stop is clickable the moment the tool
+    // part shows "running", potentially seconds before the target finishes
+    // spawning. The handle must be in activeByToolUseId from dispatch entry —
+    // a stop landing mid-spawn takes effect the moment the race starts (the
+    // pre-resolved `signal.aborted` race arm).
+    const target = makeFakeClaudeTarget()
+    let releaseSpawn!: () => void
+    const spawnGate = new Promise<void>((r) => {
+      releaseSpawn = r
+    })
+    const delayedSpawn: SpawnClaudeQueryFn = async (opts) => {
+      await spawnGate
+      return target.spawnClaudeQuery(opts)
+    }
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
+      spawnClaudeQuery: delayedSpawn
+    })
+    const ctx = makeCtx({
+      fromEngine: 'opencode',
+      fromRoutingId: 'routing-owner',
+      toolUseId: 'toolu_spawn_stop'
+    })
+    const pending = dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
+    await tick()
+
+    // Still inside the (gated) spawn — the Stop handle must already exist.
+    expect(dispatcher.stopDispatch('toolu_spawn_stop', 'routing-owner')).toBe(true)
+
+    releaseSpawn()
+    const result = await pending
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain('stopped')
+
+    const notif = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')
+    expect(notif?.[1]).toMatchObject({ toolUseId: 'toolu_spawn_stop', status: 'stopped' })
+  })
+
+  it('a timeout notification uses status "failed" (distinct from an explicit user stop)', async () => {
+    const target = makeFakeClaudeTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
+      dispatchTimeoutMs: 30,
+      spawnClaudeQuery: target.spawnClaudeQuery
+    })
+    const ctx = makeCtx({ fromEngine: 'opencode', toolUseId: 'toolu_timeout_1' })
+    const pending = dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
+    await tick()
+    target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-1' } as SDKMessage)
+    const result = await pending
+    expect(result.isError).toBe(true)
+
+    const notif = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')
+    expect(notif?.[1]).toMatchObject({ toolUseId: 'toolu_timeout_1', status: 'failed' })
+  })
+})
+
+describe('CrossEngineDispatcher — M3 (opencode direction: streaming/progress/notification/stop)', () => {
+  it('forwards message.part.updated as a subagent-message while the turn is busy, plus a final "completed" notification', async () => {
+    const { dispatcher, client, stream } = makeHarness({ heartbeatMs: 20 })
+    let releasePrompt!: () => void
+    client.prompt.mockImplementation(
+      () =>
+        new Promise((r) => {
+          releasePrompt = (): void => r({ parts: [{ type: 'text', text: 'done' }] })
+        })
+    )
+    const ctx = makeCtx({ toolUseId: 'toolu_oc_1' })
+    const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+    await tick()
+
+    stream.push('message.part.updated', {
+      sessionID: 'oc-sess-1',
+      part: { id: 'part-1', messageID: 'msg-1', type: 'text', text: 'partial output' }
+    })
+    await tick()
+
+    const msgCall = ctx.emit.mock.calls.find((c) => c[0] === 'session:subagent-message')
+    expect(msgCall?.[1]).toMatchObject({ toolUseId: 'toolu_oc_1' })
+    const forwarded = msgCall![1] as { message: { content: unknown[] } }
+    expect(forwarded.message.content).toEqual([{ type: 'text', text: 'partial output' }])
+
+    await new Promise((r) => setTimeout(r, 30))
+    const progressCall = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-progress')
+    expect(progressCall?.[1]).toMatchObject({ toolUseId: 'toolu_oc_1', toolName: 'dispatch_agent' })
+
+    releasePrompt()
+    const result = await pending
+    expect(result.isError).toBeUndefined()
+
+    const notif = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')
+    expect(notif?.[1]).toMatchObject({
+      taskId: 'oc-sess-1',
+      toolUseId: 'toolu_oc_1',
+      status: 'completed'
+    })
+  })
+
+  it('forwards message.part.delta as a subagent-stream text delta', async () => {
+    const { dispatcher, client, stream } = makeHarness()
+    let releasePrompt!: () => void
+    client.prompt.mockImplementation(
+      () =>
+        new Promise((r) => {
+          releasePrompt = (): void => r({ parts: [{ type: 'text', text: 'done' }] })
+        })
+    )
+    const ctx = makeCtx({ toolUseId: 'toolu_oc_2' })
+    const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+    await tick()
+
+    // A text part must exist before a delta against it is meaningful.
+    stream.push('message.part.updated', {
+      sessionID: 'oc-sess-1',
+      part: { id: 'part-1', messageID: 'msg-1', type: 'text', text: '' }
+    })
+    await tick()
+    stream.push('message.part.delta', {
+      sessionID: 'oc-sess-1',
+      messageID: 'msg-1',
+      partID: 'part-1',
+      field: 'text',
+      delta: 'streaming chunk'
+    })
+    await tick()
+
+    const streamCall = ctx.emit.mock.calls.find((c) => c[0] === 'session:subagent-stream')
+    expect(streamCall?.[1]).toMatchObject({
+      toolUseId: 'toolu_oc_2',
+      type: 'text',
+      text: 'streaming chunk'
+    })
+
+    releasePrompt()
+    await pending
+  })
+
+  it('toolUseId ABSENT: zero subagent/task emits, dispatch still succeeds', async () => {
+    const { dispatcher, stream } = makeHarness()
+    const ctx = makeCtx() // no toolUseId
+    const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+    await tick()
+    stream.push('message.part.updated', {
+      sessionID: 'oc-sess-1',
+      part: { id: 'part-1', messageID: 'msg-1', type: 'text', text: 'partial output' }
+    })
+    await tick()
+    const result = await pending
+    expect(result.isError).toBeUndefined()
+
+    expect(
+      ctx.emit.mock.calls.filter((c) => RELEVANT_SUBAGENT_CHANNELS.includes(c[0]))
+    ).toHaveLength(0)
+  })
+
+  it('a foreign session id (not a registered target) never emits stream/message events', async () => {
+    const { dispatcher, client, stream } = makeHarness()
+    let releasePrompt!: () => void
+    client.prompt.mockImplementation(
+      () =>
+        new Promise((r) => {
+          releasePrompt = (): void => r({ parts: [{ type: 'text', text: 'done' }] })
+        })
+    )
+    const ctx = makeCtx({ toolUseId: 'toolu_oc_3' })
+    const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+    await tick()
+
+    stream.push('message.part.updated', {
+      sessionID: 'some-other-session',
+      part: { id: 'part-1', messageID: 'msg-1', type: 'text', text: 'not ours' }
+    })
+    await tick()
+    expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:subagent-message')).toBe(false)
+
+    releasePrompt()
+    await pending
+  })
+
+  it('stray SSE chatter after the turn ends (busy=false) never emits stream/message events', async () => {
+    const { dispatcher, client, stream } = makeHarness()
+    const ctx = makeCtx({ toolUseId: 'toolu_oc_4' })
+    const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+    expect(result.isError).toBeUndefined()
+
+    stream.push('message.part.updated', {
+      sessionID: 'oc-sess-1',
+      part: { id: 'part-1', messageID: 'msg-1', type: 'text', text: 'late chatter' }
+    })
+    await tick()
+    expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:subagent-message')).toBe(false)
+    void client
+  })
+
+  it('stopDispatch aborts the target session server-side, emits a "stopped" notification, and the dispatch resolves isError', async () => {
+    const { dispatcher, client } = makeHarness()
+    client.prompt.mockImplementation(() => new Promise(() => {}))
+    const ctx = makeCtx({ toolUseId: 'toolu_oc_stop' })
+    const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+    await tick()
+
+    expect(dispatcher.stopDispatch('toolu_oc_stop')).toBe(true)
+
+    const result = await pending
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain('stopped')
+    expect(client.abortSession).toHaveBeenCalledWith('oc-sess-1')
+
+    const notif = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')
+    expect(notif?.[1]).toMatchObject({ toolUseId: 'toolu_oc_stop', status: 'stopped' })
+  })
+
+  it('Stop DURING createSession: handle registered before any await; dispatch still ends stopped', async () => {
+    // Mirror of the Claude-direction mid-spawn test — a cold per-cwd opencode
+    // server spawn can take ~15s, and the Stop handle used to be registered
+    // only after target creation (live-reproduced miss).
+    const { dispatcher, client } = makeHarness()
+    let releaseCreate!: () => void
+    client.createSession.mockImplementation(
+      () =>
+        new Promise((r) => {
+          releaseCreate = (): void => r({ id: 'oc-sess-1' })
+        })
+    )
+    // Deterministic race outcome: the (never-reached-in-reality) instant turn
+    // must not beat the pre-resolved stop arm.
+    client.prompt.mockImplementation(() => new Promise(() => {}))
+    const ctx = makeCtx({ fromRoutingId: 'routing-owner', toolUseId: 'toolu_oc_create_stop' })
+    const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+    await tick()
+
+    // Still inside the (gated) createSession — the Stop handle must already exist.
+    expect(dispatcher.stopDispatch('toolu_oc_create_stop', 'routing-owner')).toBe(true)
+
+    releaseCreate()
+    const result = await pending
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain('stopped')
+    expect(client.abortSession).toHaveBeenCalledWith('oc-sess-1')
+
+    const notif = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')
+    expect(notif?.[1]).toMatchObject({ toolUseId: 'toolu_oc_create_stop', status: 'stopped' })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// ADR-033 M3 — durable stop-intent (armIfUnknown): the renderer's Stop click
+// can arrive BEFORE dispatch() is even invoked (opencode marks the tool part
+// "running" milliseconds after ctx.ask resolves, while the MCP tools/call
+// round-trip takes longer). stopDispatch(…, {armIfUnknown:true}) records the
+// intent; dispatchInner consumes it at registration and aborts immediately.
+// ---------------------------------------------------------------------------
+
+describe('CrossEngineDispatcher — durable stop-intent (armIfUnknown)', () => {
+  it('arm on an unknown id returns true; the NEXT dispatch with that id+routingId stops at start; the intent is consumed', async () => {
+    const { dispatcher, client } = makeHarness()
+    // Realistic: the first turn would take a while (also keeps the race
+    // deterministic — the instant default prompt mock must not beat the
+    // pre-resolved stop arm).
+    client.prompt.mockImplementationOnce(() => new Promise(() => {}))
+
+    // Stop clicked before the dispatch reached the main process.
+    expect(
+      dispatcher.stopDispatch('toolu_pre_stop', 'routing-owner', { armIfUnknown: true })
+    ).toBe(true)
+
+    const ctx = makeCtx({ fromRoutingId: 'routing-owner', toolUseId: 'toolu_pre_stop' })
+    const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain('stopped')
+    expect(client.abortSession).toHaveBeenCalledWith('oc-sess-1')
+
+    const notif = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')
+    expect(notif?.[1]).toMatchObject({ toolUseId: 'toolu_pre_stop', status: 'stopped' })
+
+    // CONSUMED: a second dispatch reusing the id runs to normal completion.
+    const ctx2 = makeCtx({ fromRoutingId: 'routing-owner', toolUseId: 'toolu_pre_stop' })
+    const result2 = await dispatcher.dispatch({ engine: 'opencode', prompt: 'y' }, ctx2)
+    expect(result2.isError).toBeUndefined()
+    expect(result2.text).toBe('target answer')
+  })
+
+  it('a pre-armed intent also stops a Claude-direction dispatch at start', async () => {
+    const target = makeFakeClaudeTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
+      spawnClaudeQuery: target.spawnClaudeQuery
+    })
+    expect(
+      dispatcher.stopDispatch('toolu_pre_claude', 'routing-owner', { armIfUnknown: true })
+    ).toBe(true)
+
+    const ctx = makeCtx({
+      fromEngine: 'opencode',
+      fromRoutingId: 'routing-owner',
+      toolUseId: 'toolu_pre_claude'
+    })
+    const result = await dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain('stopped')
+    expect(target.lastAbortController()?.signal.aborted).toBe(true)
+
+    const notif = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')
+    expect(notif?.[1]).toMatchObject({ toolUseId: 'toolu_pre_claude', status: 'stopped' })
+  })
+
+  it('an EXPIRED intent is ignored — the dispatch runs normally (injected clock)', async () => {
+    let currentTime = 1_000_000
+    const { dispatcher } = makeHarness({ now: () => currentTime })
+    expect(
+      dispatcher.stopDispatch('toolu_expired', 'routing-owner', { armIfUnknown: true })
+    ).toBe(true)
+
+    currentTime += 61_000 // past the 60s TTL
+
+    const ctx = makeCtx({ fromRoutingId: 'routing-owner', toolUseId: 'toolu_expired' })
+    const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+    expect(result.isError).toBeUndefined()
+    expect(result.text).toBe('target answer')
+  })
+
+  it("an intent armed by a DIFFERENT session does not stop the dispatch (ownership honored at consumption)", async () => {
+    const { dispatcher } = makeHarness()
+    expect(
+      dispatcher.stopDispatch('toolu_foreign_arm', 'routing-intruder', { armIfUnknown: true })
+    ).toBe(true)
+
+    const ctx = makeCtx({ fromRoutingId: 'routing-owner', toolUseId: 'toolu_foreign_arm' })
+    const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+    expect(result.isError).toBeUndefined()
+    expect(result.text).toBe('target answer')
+  })
+
+  it('arming purges other EXPIRED intents (lazy cleanup, no timer)', async () => {
+    let currentTime = 1_000_000
+    const { dispatcher } = makeHarness({ now: () => currentTime })
+    dispatcher.stopDispatch('toolu_old', 'routing-owner', { armIfUnknown: true })
+    currentTime += 61_000
+    dispatcher.stopDispatch('toolu_new', 'routing-owner', { armIfUnknown: true })
+
+    // toolu_old expired AND was purged by the second arm — a dispatch with it
+    // runs normally (this also holds via the lazy-expiry consume check; the
+    // purge keeps the map from growing unboundedly).
+    const ctx = makeCtx({ fromRoutingId: 'routing-owner', toolUseId: 'toolu_old' })
+    const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+    expect(result.isError).toBeUndefined()
+    expect(result.text).toBe('target answer')
+  })
+})

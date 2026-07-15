@@ -32,6 +32,15 @@ import type { PermissionRule } from '../opencode/permission-ruleset'
 import { parseModelString } from '../opencode/model-discovery'
 import { claudeSpawnPrep } from '../providers/claude-spawn-prep'
 import { loadEngineConfig } from './ui-config'
+import { transformAssistantMessage } from './assistant-message'
+// event-mapper.ts is a leaf module (no cycle risk — it does not import
+// OpencodeSession.ts/OpencodeServerManager.ts/this module). Reused here so the
+// opencode-target streaming tap (ADR-033 M3) shares the exact same
+// message.part.delta/updated → {stream|message} logic OpencodeSession.ts uses
+// for its own turns, instead of a second hand-rolled implementation.
+import { mapEvent } from '../opencode/event-mapper'
+import type { MessageAccumulator } from '../opencode/event-mapper'
+import type { OpencodeEvent } from '../opencode/protocol/types'
 import { query as sdkQuery, locateBunClaude, sendProgress } from '../sdk'
 import type {
   CanUseTool,
@@ -62,6 +71,16 @@ export interface DispatchContext {
   autonomyMode: string
   /** Re-emits under the dispatching session's routing (BaseSession.send). */
   emit: (channel: string, data: unknown) => void
+  /**
+   * The dispatching assistant's own tool_use id for this `dispatch_agent`
+   * call (ADR-033 M3). Claude side: `extra.meta['claudecode/toolUseId']`
+   * (cli.js stamps this on every MCP tools/call). opencode side: the
+   * `claudeui-xeng` plugin's `__xeng_call_id` (the calling tool part's
+   * `callID`). Optional — a missing id means the dispatch still WORKS, it
+   * just runs without live streaming/progress/notification (every emit is
+   * gated on this being set; never fail a dispatch over it).
+   */
+  toolUseId?: string
   extra?: SdkToolExtra
 }
 
@@ -138,6 +157,8 @@ export interface DispatcherDeps {
   maxConcurrent?: number
   dispatchTimeoutMs?: number
   heartbeatMs?: number
+  /** Clock, injectable for the pendingStops TTL tests. Defaults to Date.now. */
+  now?: () => number
 }
 
 // ── Internals ─────────────────────────────────────────────────────────────────
@@ -148,6 +169,16 @@ export const XENG_REQUEST_PREFIX = 'xeng:'
 const MAX_CONCURRENT = 3
 const DISPATCH_TIMEOUT_MS = 10 * 60 * 1000
 const HEARTBEAT_MS = 15 * 1000
+/** How long an armed stop-intent (see `pendingStops`) stays valid. Generous —
+ *  it only needs to outlive the MCP tools/call round-trip + handler prelude. */
+const PENDING_STOP_TTL_MS = 60 * 1000
+
+/** A durable stop-intent armed BEFORE the dispatch registered (ADR-033 M3). */
+interface PendingStop {
+  /** Owning session at arm time — must match ctx.fromRoutingId to fire. */
+  routingId?: string
+  expiresAt: number
+}
 
 /** A live opencode dispatch target — persists across turns for `session_id` continuation. */
 interface OpencodeTargetEntry {
@@ -159,6 +190,20 @@ interface OpencodeTargetEntry {
   client: DispatchTargetClient
   /** Latest dispatching context — used to forward approvals mid-turn. */
   ctx: DispatchContext
+  /**
+   * True while a `prompt()` turn is in flight (ADR-033 M3). Gates the SSE
+   * stream tap (`handleOpencodeTargetStream`) — stray events from a PRIOR
+   * turn (or the server's own trailing chatter) must never emit stream
+   * deltas for a turn that already returned its result.
+   */
+  busy: boolean
+  /**
+   * Per-messageId part accumulators for the SSE streaming tap — same shape
+   * `OpencodeSession` keeps for its own turns (event-mapper.ts's
+   * `MessageAccumulator`). Scoped to this target so a fresh turn's
+   * message ids never collide with a previous turn's.
+   */
+  accumulators: Map<string, MessageAccumulator>
 }
 
 /**
@@ -235,6 +280,45 @@ type PendingForwardedApproval = OpencodePendingApproval | ClaudePendingApproval
 
 function errorResult(text: string, sessionId = ''): DispatchResult {
   return { text, sessionId, isError: true }
+}
+
+/**
+ * Piggybacks the existing per-dispatch heartbeat (ADR-033 M3): feeds
+ * TaskCard's elapsed-time display via the engine-neutral subagent/task
+ * pipeline. No-ops when `ctx.toolUseId` is unset (never fail a dispatch over
+ * a missing id).
+ */
+function emitDispatchProgress(ctx: DispatchContext, elapsedTimeSeconds: number): void {
+  if (!ctx.toolUseId) return
+  ctx.emit('session:task-progress', {
+    toolUseId: ctx.toolUseId,
+    toolName: 'dispatch_agent',
+    parentToolUseId: null,
+    elapsedTimeSeconds
+  })
+}
+
+/**
+ * Final completion signal for a dispatch (ADR-033 M3) — mirrors
+ * ClaudeSession's `session:task-notification` shape exactly (TaskCard reads
+ * both identically). `usage` is left unset here; M4 populates it from the
+ * target's per-turn cost/token result.
+ */
+function emitDispatchNotification(
+  ctx: DispatchContext,
+  targetSessionId: string,
+  status: 'completed' | 'failed' | 'stopped',
+  summary: string
+): void {
+  if (!ctx.toolUseId) return
+  ctx.emit('session:task-notification', {
+    taskId: targetSessionId,
+    toolUseId: ctx.toolUseId,
+    status,
+    outputFile: '',
+    summary: summary.slice(0, 100),
+    usage: undefined
+  })
 }
 
 /**
@@ -354,7 +438,10 @@ async function defaultSpawnClaudeQuery(opts: ClaudeQuerySpawnOpts): Promise<Quer
       persistSession: false,
       settingSources: [],
       abortController: opts.abortController,
-      canUseTool: opts.canUseTool
+      canUseTool: opts.canUseTool,
+      // ADR-033 M3: stream_event text/thinking deltas so driveClaudeTurn can
+      // forward them as session:subagent-stream for the dispatch TaskCard.
+      includePartialMessages: true
     }
   })
 }
@@ -373,6 +460,30 @@ export class CrossEngineDispatcher {
   /** Keyed by prefixed requestId ('xeng:<id>'). */
   private pendingApprovals = new Map<string, PendingForwardedApproval>()
   private activeDispatches = 0
+  /**
+   * One entry per turn currently in flight, keyed by the dispatching tool_use
+   * id (ADR-033 M3 — `stopDispatch`/TaskCard's Stop button). Populated for the
+   * duration of `resolveAndRunClaude`/`resolveAndRunOpencode` ONLY when
+   * `ctx.toolUseId` is set (an id-less dispatch cannot be targeted by Stop —
+   * there is no way to key it from the renderer either). Removed in that
+   * call's `finally`, so a stale id can never resolve to a dead turn.
+   * `fromRoutingId` scopes Stop to the OWNING session — see `stopDispatch`.
+   */
+  private activeByToolUseId = new Map<string, { fromRoutingId: string; stop: () => void }>()
+  /**
+   * Durable stop-intents (ADR-033 M3), keyed by dispatching tool_use id.
+   * Closes the LAST stop race window — the one UPSTREAM of the dispatcher:
+   * opencode marks the tool part "running" (and the renderer's Stop becomes
+   * clickable) milliseconds after `ctx.ask` resolves, while the MCP
+   * tools/call HTTP round-trip + handler prelude can take much longer, so a
+   * Stop click can arrive before `dispatch()` is even invoked and NO
+   * registration timing inside the dispatcher can win it. `stopDispatch`
+   * with `armIfUnknown` records the intent here; `dispatchInner` consumes it
+   * at stop-handle registration and aborts immediately. Entries lazy-expire
+   * (checked on consume; purged whenever a new one is armed — no timer).
+   */
+  private pendingStops = new Map<string, PendingStop>()
+  private readonly now: () => number
 
   constructor(deps: DispatcherDeps) {
     this.deps = deps
@@ -380,11 +491,74 @@ export class CrossEngineDispatcher {
     this.dispatchTimeoutMs = deps.dispatchTimeoutMs ?? DISPATCH_TIMEOUT_MS
     this.heartbeatMs = deps.heartbeatMs ?? HEARTBEAT_MS
     this.spawnClaudeQuery = deps.spawnClaudeQuery ?? defaultSpawnClaudeQuery
+    this.now = deps.now ?? Date.now
   }
 
   /** For tests: current in-flight dispatch count. */
   get inFlightCount(): number {
     return this.activeDispatches
+  }
+
+  /**
+   * Stop a running dispatch by its dispatching tool_use id (ADR-033 M3 —
+   * TaskCard's Stop button, routed here BEFORE the session's own stopTask by
+   * the `session:stop-task` IPC handler). Returns false for an unknown id
+   * (not a dispatch, or already finished) — the caller falls through to the
+   * session's normal stop path in that case.
+   *
+   * `routingId`, when provided (both IPC call sites pass it), must match the
+   * DISPATCHING session that started the turn — the native stopTask path is
+   * implicitly session-scoped via `manager.get(routingId)`, and without this
+   * check any session (including a remote client on a different session)
+   * could stop a dispatch it doesn't own. On mismatch we return false; the
+   * caller falls through to the session path, which won't know the id either.
+   *
+   * `opts.armIfUnknown` (set when the RENDERER knows the card is a dispatch —
+   * TaskCard's `isDispatch`): on a registry miss, record a durable stop-intent
+   * in `pendingStops` and return true — the dispatch may not have been invoked
+   * yet (see the pendingStops field doc); `dispatchInner` consumes the intent
+   * at registration and aborts the turn immediately.
+   */
+  stopDispatch(
+    toolUseId: string,
+    routingId?: string,
+    opts?: { armIfUnknown?: boolean }
+  ): boolean {
+    const active = this.activeByToolUseId.get(toolUseId)
+    if (!active) {
+      // Not necessarily an error (most stop-task calls target native tasks) —
+      // but when a dispatch stop misroutes, this is the breadcrumb.
+      logger.debug(
+        'CrossEngineDispatcher',
+        `stopDispatch miss: toolUseId=${toolUseId} not in [${[...this.activeByToolUseId.keys()].join(', ')}]`
+      )
+      if (opts?.armIfUnknown) {
+        // Purge expired intents whenever a new one is armed (no timer).
+        const now = this.now()
+        for (const [key, intent] of this.pendingStops) {
+          if (intent.expiresAt <= now) this.pendingStops.delete(key)
+        }
+        this.pendingStops.set(toolUseId, {
+          routingId,
+          expiresAt: now + PENDING_STOP_TTL_MS
+        })
+        logger.debug(
+          'CrossEngineDispatcher',
+          `stopDispatch armed pending stop-intent for toolUseId=${toolUseId}`
+        )
+        return true
+      }
+      return false
+    }
+    if (routingId !== undefined && active.fromRoutingId !== routingId) {
+      logger.debug(
+        'CrossEngineDispatcher',
+        `stopDispatch ownership mismatch: routingId=${routingId} owner=${active.fromRoutingId}`
+      )
+      return false
+    }
+    active.stop()
+    return true
   }
 
   async dispatch(req: DispatchRequest, ctx: DispatchContext): Promise<DispatchResult> {
@@ -419,12 +593,52 @@ export class CrossEngineDispatcher {
     // concurrently — checking the cap without reserving would let them all
     // pass. Every path from here on releases the slot via the finally below.
     this.activeDispatches++
+
+    // Register the Stop handle IMMEDIATELY — before ANY await (ADR-033 M3).
+    // TaskCard's Stop button is clickable as soon as the dispatch tool part
+    // renders "running" (opencode marks it running when ctx.ask resolves),
+    // which is potentially SECONDS before model resolution + target creation
+    // finish (a cold per-cwd opencode server spawn can take ~15s). Registering
+    // inside resolveAndRun* left that whole window unstoppable — the stop
+    // missed the registry, fell through to the session path, and the dispatch
+    // ran to completion (live-reproduced). A stop landing during target
+    // creation aborts the controller PRE-race; both directions' race arms
+    // handle that via `signal.aborted ? Promise.resolve({kind:'stop'}) : …`,
+    // so the turn still ends in the 'stopped' branch (isError + notification)
+    // the moment the race starts. Deleted in the finally below on every path.
+    const stopController = new AbortController()
+    if (ctx.toolUseId) {
+      this.activeByToolUseId.set(ctx.toolUseId, {
+        fromRoutingId: ctx.fromRoutingId,
+        stop: () => stopController.abort()
+      })
+      // Consume a durable stop-intent armed BEFORE this dispatch was invoked
+      // (the renderer's Stop can be clicked before the MCP tools/call even
+      // reaches us — see the pendingStops field doc). Consumed regardless of
+      // outcome so a LATER dispatch reusing the id is never spuriously
+      // stopped; fires only when unexpired and owned by the same session.
+      const intent = this.pendingStops.get(ctx.toolUseId)
+      if (intent) {
+        this.pendingStops.delete(ctx.toolUseId)
+        const expired = intent.expiresAt <= this.now()
+        const owned = intent.routingId === undefined || intent.routingId === ctx.fromRoutingId
+        if (!expired && owned) {
+          logger.debug(
+            'CrossEngineDispatcher',
+            `consuming pending stop-intent for toolUseId=${ctx.toolUseId} — aborting at start`
+          )
+          stopController.abort()
+        }
+      }
+    }
+
     try {
       return req.engine === 'claude'
-        ? await this.resolveAndRunClaude(req, ctx)
-        : await this.resolveAndRunOpencode(req, ctx)
+        ? await this.resolveAndRunClaude(req, ctx, stopController)
+        : await this.resolveAndRunOpencode(req, ctx, stopController)
     } finally {
       this.activeDispatches--
+      if (ctx.toolUseId) this.activeByToolUseId.delete(ctx.toolUseId)
     }
   }
 
@@ -487,10 +701,14 @@ export class CrossEngineDispatcher {
 
   // ── opencode direction (M1) ───────────────────────────────────────────────
 
-  /** Everything past the guards for engine:'opencode' — runs with an activeDispatches slot held. */
+  /** Everything past the guards for engine:'opencode' — runs with an
+   *  activeDispatches slot held and the Stop handle already registered
+   *  (`stopController` is created + registered in dispatchInner, BEFORE any
+   *  await, so a Stop click during target creation is not lost). */
   private async resolveAndRunOpencode(
     req: DispatchRequest,
-    ctx: DispatchContext
+    ctx: DispatchContext,
+    stopController: AbortController
   ): Promise<DispatchResult> {
     // ── Model resolution ──────────────────────────────────────────────────
     const dispatchCfg = this.deps.loadEngineConfig(req.engine).dispatch
@@ -537,17 +755,23 @@ export class CrossEngineDispatcher {
         progress: beats,
         message: 'Dispatched agent is still working…'
       }).catch(() => {})
+      emitDispatchProgress(ctx, (beats * this.heartbeatMs) / 1000)
     }, this.heartbeatMs)
 
     let timeoutTimer: ReturnType<typeof setTimeout> | undefined
     const signal = ctx.extra?.signal
     let abortListener: (() => void) | undefined
 
+    // Only while a turn is actually running: gates the SSE stream tap so
+    // stray events after this turn ends never emit stale deltas (ADR-033 M3).
+    entry.busy = true
+
     type Raced =
       | { kind: 'ok'; resp: unknown }
       | { kind: 'err'; err: unknown }
       | { kind: 'timeout' }
       | { kind: 'abort' }
+      | { kind: 'stop' }
 
     const promptPromise: Promise<Raced> = entry.client
       .prompt(entry.sessionId, {
@@ -569,25 +793,48 @@ export class CrossEngineDispatcher {
             signal.addEventListener('abort', abortListener, { once: true })
           })
       : new Promise(() => {})
+    const stopPromise: Promise<Raced> = stopController.signal.aborted
+      ? Promise.resolve({ kind: 'stop' })
+      : new Promise((resolve) => {
+          stopController.signal.addEventListener('abort', () => resolve({ kind: 'stop' }), {
+            once: true
+          })
+        })
 
     try {
-      const winner = await Promise.race([promptPromise, timeoutPromise, abortPromise])
+      const winner = await Promise.race([promptPromise, timeoutPromise, abortPromise, stopPromise])
+
+      if (winner.kind === 'stop') {
+        // Session survives (parity with the timeout path) — abortSession
+        // only interrupts THIS turn server-side; the still-pending prompt
+        // promise settles via its own handlers (no unhandled rejection).
+        entry.client.abortSession(entry.sessionId).catch(() => {})
+        this.dismissPendingForTarget(entry.sessionId)
+        emitDispatchNotification(ctx, entry.sessionId, 'stopped', 'Dispatch stopped by user.')
+        return errorResult('Dispatch stopped by user.', entry.sessionId)
+      }
 
       if (winner.kind === 'timeout' || winner.kind === 'abort') {
         // Interrupt the target turn server-side; the still-pending prompt
         // promise settles via its own handlers (no unhandled rejection).
         entry.client.abortSession(entry.sessionId).catch(() => {})
         this.dismissPendingForTarget(entry.sessionId)
-        return errorResult(
+        const text =
           winner.kind === 'timeout'
             ? `Dispatch timed out after ${Math.round(this.dispatchTimeoutMs / 60000)} minutes — the target agent was aborted.`
-            : 'Dispatch cancelled.',
-          entry.sessionId
+            : 'Dispatch cancelled.'
+        emitDispatchNotification(
+          ctx,
+          entry.sessionId,
+          winner.kind === 'timeout' ? 'failed' : 'stopped',
+          text
         )
+        return errorResult(text, entry.sessionId)
       }
       if (winner.kind === 'err') {
         this.dismissPendingForTarget(entry.sessionId)
         const msg = winner.err instanceof Error ? winner.err.message : String(winner.err)
+        emitDispatchNotification(ctx, entry.sessionId, 'failed', `Dispatched turn failed: ${msg}`)
         return errorResult(`Dispatched turn failed: ${msg}`, entry.sessionId)
       }
 
@@ -608,14 +855,18 @@ export class CrossEngineDispatcher {
         this.dismissPendingForTarget(entry.sessionId)
         const detail =
           turnError.data?.message || turnError.name || 'the dispatched agent reported an error'
+        emitDispatchNotification(ctx, entry.sessionId, 'failed', `Dispatched turn failed: ${detail}`)
         return errorResult(`Dispatched turn failed: ${detail}`, entry.sessionId)
       }
       const text = (resp?.parts ?? [])
         .filter((p) => p?.type === 'text')
         .map((p) => p?.text ?? '')
         .join('')
-      return { text: text || '(the dispatched agent returned no text)', sessionId: entry.sessionId }
+      const finalText = text || '(the dispatched agent returned no text)'
+      emitDispatchNotification(ctx, entry.sessionId, 'completed', finalText)
+      return { text: finalText, sessionId: entry.sessionId }
     } finally {
+      entry.busy = false
       clearInterval(heartbeat)
       if (timeoutTimer) clearTimeout(timeoutTimer)
       if (signal && abortListener) signal.removeEventListener('abort', abortListener)
@@ -655,7 +906,9 @@ export class CrossEngineDispatcher {
         cwd: ctx.cwd,
         cwdKey,
         client: rec.client,
-        ctx
+        ctx,
+        busy: false,
+        accumulators: new Map()
       }
       this.targets.set(session.id, entry)
       return entry
@@ -696,8 +949,13 @@ export class CrossEngineDispatcher {
     }
   }
 
-  private handleSseEvent(ev: { type: string; properties: Record<string, unknown> }): void {
+  private handleSseEvent(ev: OpencodeEvent): void {
     const props = ev.properties
+
+    if (ev.type === 'message.part.delta' || ev.type === 'message.part.updated') {
+      this.handleOpencodeTargetStream(ev)
+      return
+    }
 
     if (ev.type === 'permission.asked') {
       const sessionID = props.sessionID as string | undefined
@@ -743,12 +1001,50 @@ export class CrossEngineDispatcher {
     }
   }
 
+  /**
+   * Forward an opencode dispatch target's live turn output as engine-neutral
+   * subagent events (ADR-033 M3). Reuses `mapEvent` (event-mapper.ts) by
+   * treating the TARGET's session id as the "own" session — the exact same
+   * message.part.delta/updated → {stream|message} logic OpencodeSession.ts
+   * uses for its own turns, just re-keyed to the dispatching tool_use id.
+   *
+   * Gated on `entry.busy` (a completed/aborted turn's trailing SSE chatter
+   * must never emit) and `entry.ctx.toolUseId` (no id → no way to key the
+   * event on the renderer side — never fail the dispatch over it, just skip).
+   */
+  private handleOpencodeTargetStream(ev: OpencodeEvent): void {
+    const sessionID = ev.properties.sessionID as string | undefined
+    if (!sessionID) return
+    const entry = this.targets.get(sessionID)
+    if (!entry || entry.kind !== 'opencode' || !entry.busy) return
+    const toolUseId = entry.ctx.toolUseId
+    if (!toolUseId) return
+
+    // startTimeMs/totalCostUsd are only consumed by mapEvent's cost_update /
+    // result branches — irrelevant here (completion comes from the `prompt()`
+    // promise, not SSE), so dummy values are fine.
+    const output = mapEvent(ev, sessionID, entry.accumulators, Date.now(), { value: 0 })
+    if (output.kind === 'stream') {
+      entry.ctx.emit('session:subagent-stream', {
+        toolUseId,
+        type: output.streamType,
+        text: output.delta
+      })
+    } else if (output.kind === 'message') {
+      entry.ctx.emit('session:subagent-message', { toolUseId, message: output.message })
+    }
+  }
+
   // ── Claude direction (M2) ─────────────────────────────────────────────────
 
-  /** Everything past the guards for engine:'claude' — runs with an activeDispatches slot held. */
+  /** Everything past the guards for engine:'claude' — runs with an
+   *  activeDispatches slot held and the Stop handle already registered
+   *  (`stopController` is created + registered in dispatchInner, BEFORE any
+   *  await, so a Stop click during spawnClaudeQuery is not lost). */
   private async resolveAndRunClaude(
     req: DispatchRequest,
-    ctx: DispatchContext
+    ctx: DispatchContext,
+    stopController: AbortController
   ): Promise<DispatchResult> {
     // ── Model resolution ──────────────────────────────────────────────────
     const dispatchCfg = this.deps.loadEngineConfig('claude').dispatch
@@ -827,6 +1123,7 @@ export class CrossEngineDispatcher {
         progress: beats,
         message: 'Dispatched agent is still working…'
       }).catch(() => {})
+      emitDispatchProgress(ctx, (beats * this.heartbeatMs) / 1000)
     }, this.heartbeatMs)
 
     let timeoutTimer: ReturnType<typeof setTimeout> | undefined
@@ -838,6 +1135,7 @@ export class CrossEngineDispatcher {
       | { kind: 'err'; err: unknown }
       | { kind: 'timeout' }
       | { kind: 'abort' }
+      | { kind: 'stop' }
 
     const turnPromise: Promise<Raced> = this.driveClaudeTurn(entry).then(
       (msg): Raced => ({ kind: 'ok', msg }),
@@ -854,11 +1152,18 @@ export class CrossEngineDispatcher {
             signal.addEventListener('abort', abortListener, { once: true })
           })
       : new Promise(() => {})
+    const stopPromise: Promise<Raced> = stopController.signal.aborted
+      ? Promise.resolve({ kind: 'stop' })
+      : new Promise((resolve) => {
+          stopController.signal.addEventListener('abort', () => resolve({ kind: 'stop' }), {
+            once: true
+          })
+        })
 
     try {
-      const winner = await Promise.race([turnPromise, timeoutPromise, abortPromise])
+      const winner = await Promise.race([turnPromise, timeoutPromise, abortPromise, stopPromise])
 
-      if (winner.kind === 'timeout' || winner.kind === 'abort') {
+      if (winner.kind === 'timeout' || winner.kind === 'abort' || winner.kind === 'stop') {
         // Unlike opencode (abortSession stops the turn, session survives),
         // aborting a Claude target's AbortController KILLS THE PROCESS — so
         // continuation is impossible either way. Remove the entry entirely.
@@ -867,12 +1172,19 @@ export class CrossEngineDispatcher {
           this.dismissPendingForTarget(entry.sessionId)
           this.targets.delete(entry.sessionId)
         }
-        return errorResult(
+        const text =
           winner.kind === 'timeout'
             ? `Dispatch timed out after ${Math.round(this.dispatchTimeoutMs / 60000)} minutes — the target agent was aborted.`
-            : 'Dispatch cancelled.',
-          entry.sessionId ?? ''
+            : winner.kind === 'stop'
+              ? 'Dispatch stopped by user.'
+              : 'Dispatch cancelled.'
+        emitDispatchNotification(
+          ctx,
+          entry.sessionId ?? '',
+          winner.kind === 'timeout' ? 'failed' : 'stopped',
+          text
         )
+        return errorResult(text, entry.sessionId ?? '')
       }
       if (winner.kind === 'err') {
         entry.abortController.abort()
@@ -881,6 +1193,12 @@ export class CrossEngineDispatcher {
           this.targets.delete(entry.sessionId)
         }
         const msg = winner.err instanceof Error ? winner.err.message : String(winner.err)
+        emitDispatchNotification(
+          ctx,
+          entry.sessionId ?? '',
+          'failed',
+          `Dispatched turn failed: ${msg}`
+        )
         return errorResult(`Dispatched turn failed: ${msg}`, entry.sessionId ?? '')
       }
 
@@ -893,10 +1211,18 @@ export class CrossEngineDispatcher {
           (result.errors && result.errors.length > 0 && result.errors.join('; ')) ||
           result.subtype ||
           'the dispatched agent reported an error'
+        emitDispatchNotification(
+          ctx,
+          entry.sessionId ?? '',
+          'failed',
+          `Dispatched turn failed: ${detail}`
+        )
         return errorResult(`Dispatched turn failed: ${detail}`, entry.sessionId ?? '')
       }
+      const finalText = result.result || '(the dispatched agent returned no text)'
+      emitDispatchNotification(ctx, entry.sessionId ?? '', 'completed', finalText)
       return {
-        text: result.result || '(the dispatched agent returned no text)',
+        text: finalText,
         sessionId: entry.sessionId ?? ''
       }
     } finally {
@@ -924,8 +1250,76 @@ export class CrossEngineDispatcher {
         entry.sessionId = msg.session_id
         this.targets.set(msg.session_id, entry)
       }
+      this.forwardClaudeTargetMessage(entry, msg)
       if (msg.type === 'result') {
         return msg as ResultMessage
+      }
+    }
+  }
+
+  /**
+   * Forward a Claude dispatch target's live turn output as engine-neutral
+   * subagent events (ADR-033 M3), keyed by the CURRENT dispatching tool_use
+   * id (`entry.ctx.toolUseId` — refreshed on every continuation call, so a
+   * mid-turn message always lands on whichever call is actively driving it).
+   * No-ops entirely when the id is unset — never fail a dispatch over it.
+   *
+   * `includePartialMessages: true` (set in `defaultSpawnClaudeQuery`) makes
+   * cli.js emit `stream_event` deltas exactly like a native subagent's
+   * `parent_tool_use_id`-routed frames (claude-session.ts's
+   * `handleStreamEvent`) — this mirrors that mapping verbatim, just re-keyed.
+   */
+  private forwardClaudeTargetMessage(entry: ClaudeTargetEntry, msg: SDKMessage): void {
+    const toolUseId = entry.ctx.toolUseId
+    if (!toolUseId) return
+
+    if (msg.type === 'stream_event') {
+      const event = (msg as { event?: { type?: string; delta?: Record<string, unknown> } }).event
+      if (!event || event.type !== 'content_block_delta' || !event.delta) return
+      const delta = event.delta
+      if (delta.type === 'text_delta' && typeof delta.text === 'string') {
+        entry.ctx.emit('session:subagent-stream', { toolUseId, type: 'text', text: delta.text })
+      } else if (delta.type === 'thinking_delta' && typeof delta.thinking === 'string') {
+        entry.ctx.emit('session:subagent-stream', {
+          toolUseId,
+          type: 'thinking',
+          text: delta.thinking
+        })
+      }
+      return
+    }
+
+    if (msg.type === 'assistant') {
+      const chatMsg = transformAssistantMessage(msg as unknown as Record<string, unknown>)
+      if (chatMsg) entry.ctx.emit('session:subagent-message', { toolUseId, message: chatMsg })
+      return
+    }
+
+    if (msg.type === 'user') {
+      // Tool-result mirror of claude-session.ts's extractToolResultsFromContent
+      // (parentToolUseId branch) — cheap to forward alongside the message.
+      const messageParam = (msg as { message?: { content?: unknown } }).message
+      const content = messageParam?.content
+      if (!Array.isArray(content)) return
+      for (const block of content as Array<Record<string, unknown>>) {
+        if (!block || block.type !== 'tool_result') continue
+        const toolResultToolUseId = block.tool_use_id as string | undefined
+        if (!toolResultToolUseId) continue
+        let resultText = ''
+        const blockContent = block.content
+        if (typeof blockContent === 'string') {
+          resultText = blockContent
+        } else if (Array.isArray(blockContent)) {
+          resultText = (blockContent as Array<Record<string, unknown>>)
+            .map((c) => (c.text as string) || '')
+            .join('\n')
+        }
+        entry.ctx.emit('session:subagent-tool-result', {
+          toolUseId,
+          toolResultToolUseId,
+          result: resultText,
+          isError: !!block.is_error
+        })
       }
     }
   }

@@ -16,7 +16,8 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 import type { BrowserWindow } from 'electron'
-import { computeTokenMetrics, fallbackBlockText } from './session-history'
+import { computeTokenMetrics } from './session-history'
+import { transformAssistantMessage } from './assistant-message'
 import { classifyApiError } from './api-error'
 import { VoiceClient } from './voice-client'
 import { startRecording, stopRecording } from './voice-capture'
@@ -91,7 +92,6 @@ export function getSdkExecutableOpts(): Record<string, unknown> {
 }
 import type {
   ChatMessage,
-  ContentBlock,
   McpServerConfig,
   SessionStatus,
   ApprovalDecision,
@@ -959,7 +959,7 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       }
     }
 
-    const chatMsg = this.transformAssistantMessage(msg)
+    const chatMsg = transformAssistantMessage(msg)
 
     // Accumulate usage from every assistant message (main + sidechain)
     const hadUsage = this.accumulateUsage(msg, isSidechain)
@@ -2026,62 +2026,6 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       content: [
         { type: 'api_error', errorType: classifyApiError(text, msg.error), errorMessage: text }
       ],
-      timestamp: Date.now()
-    }
-  }
-
-  private transformAssistantMessage(msg: Record<string, unknown>): ChatMessage | null {
-    const betaMessage = msg.message as Record<string, unknown> | undefined
-    if (!betaMessage) return null
-
-    const content = betaMessage.content as Array<Record<string, unknown>> | undefined
-    if (!content || !Array.isArray(content)) return null
-
-    const blocks: ContentBlock[] = content.map((block) => {
-      const blockType = block.type as string
-      if (blockType === 'text') {
-        return { type: 'text' as const, text: block.text as string }
-      } else if (blockType === 'tool_use') {
-        return {
-          type: 'tool_use' as const,
-          toolName: block.name as string,
-          toolInput: block.input as Record<string, unknown>,
-          toolUseId: block.id as string
-        }
-      } else if (blockType === 'tool_result') {
-        const resultContent = block.content
-        let text = ''
-        if (typeof resultContent === 'string') {
-          text = resultContent
-        } else if (Array.isArray(resultContent)) {
-          text = resultContent
-            .map((c: Record<string, unknown>) => (c.text as string) || '')
-            .join('\n')
-        }
-        return {
-          type: 'tool_result' as const,
-          toolUseId: block.tool_use_id as string,
-          toolResult: text,
-          isError: block.is_error as boolean
-        }
-      } else if (blockType === 'thinking') {
-        return { type: 'thinking' as const, text: block.thinking as string }
-      } else if (blockType === 'fallback') {
-        // Canonical-replacement frame for a refusal-retracted partial. The
-        // whole message is normally evicted right after via
-        // retracted_message_uuids; render a readable note in case it survives.
-        return { type: 'text' as const, text: fallbackBlockText(block) }
-      }
-      return { type: 'text' as const, text: JSON.stringify(block) }
-    })
-
-    // Use the BetaMessage id for deduplication of partial messages
-    const messageId = (betaMessage.id as string) || (msg.uuid as string) || uuid()
-
-    return {
-      id: messageId,
-      role: 'assistant',
-      content: blocks,
       timestamp: Date.now()
     }
   }

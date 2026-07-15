@@ -23,6 +23,15 @@
  * `client.callTool({arguments: args})`). Mutating `output.args` here reaches
  * our MCP handler as an extra, internal-only argument.
  *
+ * ADR-033 M3 also stamps `__xeng_call_id` = `input.callID` — the calling tool
+ * part's own call id (verified against `code-mode.test.ts`'s
+ * `tool.execute.before` event shape: `{tool, callID, sessionID, ...}`). The
+ * dispatcher uses it to key `session:subagent-stream` / `session:task-progress`
+ * / `session:task-notification` events to the dispatching tool_use block, so
+ * the caller's chat can show live streaming for the dispatched work. Missing
+ * (e.g. an older opencode without `callID` on this event) → dispatch still
+ * works, just without live streaming.
+ *
  * File-source plugins must default-export `{ id, server }` — `id` is
  * required or opencode's `resolvePluginId` throws at load
  * (`plugin/shared.ts`). `server` returns the hooks object; only
@@ -37,6 +46,7 @@ export default {
       if (!input || input.tool !== 'claudeui_dispatch_agent') return
       if (!output || !output.args) return
       output.args.__xeng_caller_session = input.sessionID
+      if (input.callID) output.args.__xeng_call_id = input.callID
     }
   })
 }

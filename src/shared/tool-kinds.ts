@@ -97,6 +97,12 @@ export function hostedMcpKind(toolName: string): ToolKind | null {
     toolName === 'mcp__claude-ui-mockup__show_mockup'
   )
     return 'mockup'
+  // Cross-engine dispatch (ADR-033 M3) — Claude's dispatch_agent lives on its
+  // own 'claude-ui-collab' MCP server (collab-tool.ts, deliberately NOT the
+  // auto-allowed 'claude-ui' prefix). Reuses TaskCard via the 'task' kind so
+  // dispatched work gets the same live-streaming/progress/stop UX as a native
+  // subagent. Checked BEFORE the generic 'mcp__' fallback below.
+  if (toolName === 'mcp__claude-ui-collab__dispatch_agent') return 'task'
   if (toolName.startsWith('mcp__')) return 'mcp'
   return null
 }

@@ -52,6 +52,12 @@ export function createCollabServer(ctx: CollabServerContext): SdkMcpServer {
             .describe('session_id from a previous dispatch_agent result — continues that agent')
         },
         async ({ engine, prompt, model, session_id }, extra) => {
+          // cli.js stamps `_meta["claudecode/toolUseId"]` on EVERY MCP tools/call
+          // (the calling assistant tool_use block's id) — the Claude-side source
+          // of the dispatching tool_use id (ADR-033 M3). Missing/non-string →
+          // undefined; the dispatcher gates every subagent/task emit on its
+          // presence and never fails a dispatch over it.
+          const toolUseId = extra?.meta?.['claudecode/toolUseId']
           const result = await crossEngineDispatcher.dispatch(
             { engine, prompt, model, sessionId: session_id },
             {
@@ -60,6 +66,7 @@ export function createCollabServer(ctx: CollabServerContext): SdkMcpServer {
               cwd: ctx.cwd,
               autonomyMode: ctx.getAutonomyMode(),
               emit: ctx.emit,
+              toolUseId: typeof toolUseId === 'string' ? toolUseId : undefined,
               extra
             }
           )

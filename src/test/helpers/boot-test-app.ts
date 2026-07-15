@@ -157,8 +157,8 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
       ipcRenderer.invoke('session:unwatch-background', routingId, toolUseId),
     readBackgroundRange: (routingId, toolUseId, offset, length) =>
       ipcRenderer.invoke('session:read-background-range', routingId, toolUseId, offset, length),
-    stopTask: (routingId, toolUseId) =>
-      ipcRenderer.invoke('session:stop-task', routingId, toolUseId),
+    stopTask: (routingId, toolUseId, isDispatch) =>
+      ipcRenderer.invoke('session:stop-task', routingId, toolUseId, isDispatch),
     backgroundTask: (routingId, toolUseId) =>
       ipcRenderer.invoke('session:background-task', routingId, toolUseId),
     dequeueMessage: (routingId, value) =>

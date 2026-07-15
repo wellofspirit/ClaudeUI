@@ -257,8 +257,8 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       ) as Promise<string>,
 
     // Task control
-    stopTask: (routingId, toolUseId) =>
-      connection.invoke('session:stop-task', routingId, toolUseId) as Promise<{
+    stopTask: (routingId, toolUseId, isDispatch) =>
+      connection.invoke('session:stop-task', routingId, toolUseId, isDispatch) as Promise<{
         success: boolean
         error?: string
       }>,

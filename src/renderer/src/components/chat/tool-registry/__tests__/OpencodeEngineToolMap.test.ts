@@ -34,6 +34,9 @@ describe('OpencodeEngineToolMap.kindOf', () => {
     ['claudeui_render_mermaid', 'diagram'],
     ['claudeui_create_mockup', 'mockup'],
     ['claudeui_show_mockup', 'mockup'],
+    // Cross-engine dispatch (ADR-033 M3) — opencode sanitizes the hosted
+    // 'claudeui' server's dispatch_agent tool to this name.
+    ['claudeui_dispatch_agent', 'task'],
     // Real MCP tools resolve engine-independently
     ['mcp__some-server__tool', 'mcp'],
     // Graceful unknowns (skill/lsp/invalid stay unknown — out of scope)
@@ -178,6 +181,32 @@ describe('OpencodeEngineToolMap.normalize', () => {
       expect(view.model).toBeUndefined()
       expect(view.background).toBeUndefined()
     }
+  })
+
+  // Cross-engine dispatch (ADR-033 M3): `engine` present discriminates
+  // claudeui_dispatch_agent's input from opencode's native task tool.
+  describe('task: dispatch_agent (engine present)', () => {
+    it('builds "Dispatch: <engine>" description + "<engine> · <model>" badge', () => {
+      const view = OpencodeEngineToolMap.normalize('task', {
+        engine: 'claude',
+        prompt: 'review this',
+        model: 'haiku'
+      })
+      expect(view).toMatchObject({
+        kind: 'task',
+        description: 'Dispatch: claude',
+        prompt: 'review this',
+        subagent: 'claude · haiku'
+      })
+    })
+
+    it('badge falls back to bare engine name when model is omitted', () => {
+      const view = OpencodeEngineToolMap.normalize('task', { engine: 'claude', prompt: 'x' })
+      expect(view).toMatchObject({ kind: 'task', subagent: 'claude' })
+      if (view.kind === 'task') {
+        expect(view.model).toBeUndefined()
+      }
+    })
   })
 
   it('todo: maps opencode todos array (content→text, status preserved)', () => {

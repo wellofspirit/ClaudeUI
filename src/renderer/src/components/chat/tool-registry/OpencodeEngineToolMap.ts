@@ -59,6 +59,11 @@ function opencodeKindOf(toolName: string): ToolKind {
     case 'claudeui_create_mockup':
     case 'claudeui_show_mockup':
       return 'mockup'
+    // Cross-engine dispatch (ADR-033 M3) — opencode sanitizes the hosted
+    // 'claudeui' MCP server's dispatch_agent tool to this name (see
+    // opencode-hosted-tools.ts's file header). Reuses TaskCard via 'task'.
+    case 'claudeui_dispatch_agent':
+      return 'task'
     // skill/lsp/invalid → unknown (graceful; dedicated kinds are out of scope)
     default:
       return 'unknown'
@@ -124,7 +129,18 @@ function opencodeNormalize(
         target: inp.url != null ? String(inp.url) : JSON.stringify(inp)
       }
 
-    case 'task':
+    case 'task': {
+      // Cross-engine dispatch (ADR-033 M3) — see the identical discriminator
+      // note in ClaudeEngineToolMap.ts. `engine` is present only on the
+      // dispatch tool's input, never on opencode's native task tool.
+      if (typeof inp.engine === 'string') {
+        return {
+          kind: 'task',
+          description: `Dispatch: ${inp.engine}`,
+          prompt: inp.prompt != null ? String(inp.prompt) : '',
+          subagent: inp.model != null ? `${inp.engine} · ${String(inp.model)}` : String(inp.engine)
+        }
+      }
       return {
         kind: 'task',
         description: inp.description != null ? String(inp.description) : '',
@@ -133,6 +149,7 @@ function opencodeNormalize(
         model: inp.model != null ? String(inp.model) : undefined,
         background: inp.background != null ? Boolean(inp.background) : undefined
       }
+    }
 
     case 'todo': {
       const rawTodos = Array.isArray(inp.todos) ? inp.todos : []
@@ -216,7 +233,8 @@ const OPENCODE_DISPLAY_NAMES: Record<string, string> = {
   question: 'AskUserQuestion',
   claudeui_render_mermaid: 'Mermaid',
   claudeui_create_mockup: 'Mockup',
-  claudeui_show_mockup: 'Mockup'
+  claudeui_show_mockup: 'Mockup',
+  claudeui_dispatch_agent: 'Dispatch'
 }
 
 function opencodeDisplayName(toolName: string): string {

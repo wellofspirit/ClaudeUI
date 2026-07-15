@@ -46,7 +46,8 @@ export function createSdkMcpServer(opts: {
           signal: extra.signal,
           progressToken: extra._meta?.progressToken,
           sendNotification: (notification) =>
-            extra.sendNotification(notification as ServerNotification)
+            extra.sendNotification(notification as ServerNotification),
+          meta: extra._meta as Record<string, unknown> | undefined
         }
         const result = await t.handler(args, toolExtra)
         return result as Parameters<Parameters<typeof instance.registerTool>[2]>[0] extends never

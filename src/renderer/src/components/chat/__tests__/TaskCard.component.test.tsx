@@ -115,3 +115,149 @@ describe('TaskCard — inline task approval', () => {
     expect(respondCalls).toEqual([{ requestId: 'per-3', decision: 'deny' }])
   })
 })
+
+// ---------------------------------------------------------------------------
+// Cross-engine dispatch (ADR-033 M3) — TaskCard reused for dispatch_agent
+// ---------------------------------------------------------------------------
+//
+// dispatch_agent maps to the 'task' ToolKind via hostedMcpKind/OpencodeEngineToolMap
+// (see ClaudeEngineToolMap.test.ts / OpencodeEngineToolMap.test.ts), and its
+// ToolView normalizes to description:'Dispatch: <engine>' + subagent:'<engine> · <model>'
+// (the badge slot — no ToolView extension). This exercises TaskCard's rendering
+// of that view directly with live-streamed subagent output, mirroring how the
+// dispatcher's session:subagent-stream/session:subagent-message events land in
+// the store while a dispatch is in flight.
+
+describe('TaskCard — cross-engine dispatch card (ADR-033 M3)', () => {
+  let app: TestApp
+
+  beforeEach(async () => {
+    app = await bootTestApp()
+    useSessionStore.getState().createNewSession(ROUTE, '/d/repo')
+    useSessionStore.setState({ activeSessionId: ROUTE })
+  })
+
+  afterEach(() => {
+    app.teardown()
+    useSessionStore.setState({ activeSessionId: null, sessions: {} })
+  })
+
+  const dispatchBlock = makeTaskBlock({
+    toolUseId: 'toolu_dispatch_1',
+    toolName: 'mcp__claude-ui-collab__dispatch_agent',
+    toolInput: { engine: 'opencode', prompt: 'Get a second opinion', model: 'openai/gpt-5' }
+  })
+  const dispatchView = {
+    kind: 'task' as const,
+    description: 'Dispatch: opencode',
+    prompt: 'Get a second opinion',
+    subagent: 'opencode · openai/gpt-5'
+  }
+
+  it('shows the "<engine> · <model>" badge in the subagent slot while running', () => {
+    useSessionStore.getState().appendSubagentStreamingText(ROUTE, 'toolu_dispatch_1', 'Working on it')
+    render(<TaskCard block={dispatchBlock} view={dispatchView} />)
+
+    fireEvent.click(screen.getByTestId('TaskCard.expand'))
+    expect(screen.getByText('opencode · openai/gpt-5')).toBeInTheDocument()
+  })
+
+  it('renders live-streamed text forwarded from the dispatch target', () => {
+    useSessionStore
+      .getState()
+      .appendSubagentStreamingText(ROUTE, 'toolu_dispatch_1', 'Here is my analysis...')
+    render(<TaskCard block={dispatchBlock} view={dispatchView} />)
+
+    fireEvent.click(screen.getByTestId('TaskCard.expand'))
+    expect(screen.getByText('Here is my analysis...')).toBeInTheDocument()
+  })
+
+  it('renders forwarded subagent messages via SubagentMessages', () => {
+    useSessionStore.getState().addSubagentMessage(ROUTE, 'toolu_dispatch_1', {
+      id: 'm1',
+      role: 'assistant',
+      content: [{ type: 'text', text: 'partial answer' }],
+      timestamp: Date.now()
+    })
+    render(<TaskCard block={dispatchBlock} view={dispatchView} />)
+
+    fireEvent.click(screen.getByTestId('TaskCard.expand'))
+    expect(screen.getByTestId('subagent-msgs')).toBeInTheDocument()
+  })
+
+  it('shows Stop while the dispatch has no result yet (no background/notification gating)', () => {
+    render(<TaskCard block={dispatchBlock} view={dispatchView} />)
+    expect(screen.getByTestId('TaskCard.stop')).toBeInTheDocument()
+  })
+
+  it('hides Stop once the dispatch tool_result has arrived', () => {
+    const result = {
+      type: 'tool_result' as const,
+      toolUseId: 'toolu_dispatch_1',
+      toolResult: 'the final answer',
+      isError: false
+    }
+    render(<TaskCard block={dispatchBlock} result={result} view={dispatchView} />)
+    expect(screen.queryByTestId('TaskCard.stop')).not.toBeInTheDocument()
+  })
+
+  it('running dispatch card: Stop visible, "Send to background" absent (dispatch has no backgrounding)', () => {
+    render(<TaskCard block={dispatchBlock} view={dispatchView} />)
+    expect(screen.getByTestId('TaskCard.stop')).toBeInTheDocument()
+    expect(screen.queryByTestId('TaskCard.sendToBackground')).not.toBeInTheDocument()
+  })
+
+  it('opencode-named dispatch card (claudeui_dispatch_agent) also hides "Send to background"', () => {
+    const ocBlock = makeTaskBlock({
+      toolUseId: 'call_oc_dispatch_1',
+      toolName: 'claudeui_dispatch_agent',
+      toolInput: { engine: 'claude', prompt: 'review', model: 'haiku' }
+    })
+    render(
+      <TaskCard
+        block={ocBlock}
+        view={{ kind: 'task', description: 'Dispatch: claude', prompt: 'review', subagent: 'claude · haiku' }}
+      />
+    )
+    expect(screen.getByTestId('TaskCard.stop')).toBeInTheDocument()
+    expect(screen.queryByTestId('TaskCard.sendToBackground')).not.toBeInTheDocument()
+  })
+
+  it('native task card unchanged: running → both Stop and "Send to background" render', () => {
+    render(<TaskCard block={makeTaskBlock()} view={defaultTaskView} />)
+    expect(screen.getByTestId('TaskCard.stop')).toBeInTheDocument()
+    expect(screen.getByTestId('TaskCard.sendToBackground')).toBeInTheDocument()
+  })
+
+  it('clicking Stop on a dispatch card sends isDispatch=true (durable stop-intent routing)', async () => {
+    const stopCalls: Array<{ toolUseId: string; isDispatch?: boolean }> = []
+    app.bridge.ipcMain.handle(
+      'session:stop-task',
+      async (_e, _routingId: string, toolUseId: string, isDispatch?: boolean) => {
+        stopCalls.push({ toolUseId, isDispatch })
+        return { success: true }
+      }
+    )
+    render(<TaskCard block={dispatchBlock} view={dispatchView} />)
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('TaskCard.stop'))
+    })
+    expect(stopCalls).toEqual([{ toolUseId: 'toolu_dispatch_1', isDispatch: true }])
+  })
+
+  it('clicking Stop on a native task card sends isDispatch=false (session fall-through preserved)', async () => {
+    const stopCalls: Array<{ toolUseId: string; isDispatch?: boolean }> = []
+    app.bridge.ipcMain.handle(
+      'session:stop-task',
+      async (_e, _routingId: string, toolUseId: string, isDispatch?: boolean) => {
+        stopCalls.push({ toolUseId, isDispatch })
+        return { success: true }
+      }
+    )
+    render(<TaskCard block={makeTaskBlock()} view={defaultTaskView} />)
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('TaskCard.stop'))
+    })
+    expect(stopCalls).toEqual([{ toolUseId: 'call_task_1', isDispatch: false }])
+  })
+})

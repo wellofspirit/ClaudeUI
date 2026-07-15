@@ -418,6 +418,13 @@ export interface SdkToolExtra {
     method: string
     params?: Record<string, unknown>
   }) => Promise<void>
+  /**
+   * Raw `_meta` bag from the MCP request (`RequestHandlerExtra._meta`), when
+   * present. cli.js stamps `_meta["claudecode/toolUseId"]` on EVERY MCP
+   * `tools/call` it issues — this is the Claude-side source of the dispatching
+   * tool_use id (ADR-033 M3), read via `extra.meta?.['claudecode/toolUseId']`.
+   */
+  meta?: Record<string, unknown>
 }
 
 /**

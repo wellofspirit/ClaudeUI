@@ -773,7 +773,15 @@ interface SessionAPI {
     offset: number,
     length: number
   ): Promise<string>
-  stopTask(routingId: string, toolUseId: string): Promise<{ success: boolean; error?: string }>
+  /** `isDispatch` marks a cross-engine dispatch card's stop (ADR-033 M3):
+   *  the handler routes it to the dispatcher with a durable stop-intent
+   *  (armIfUnknown) instead of ever falling through to the session path —
+   *  the renderer can show "running" before dispatch() is even invoked. */
+  stopTask(
+    routingId: string,
+    toolUseId: string,
+    isDispatch?: boolean
+  ): Promise<{ success: boolean; error?: string }>
   backgroundTask(
     routingId: string,
     toolUseId: string

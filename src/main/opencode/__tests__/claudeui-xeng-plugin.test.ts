@@ -23,7 +23,7 @@ describe('claudeui-xeng-plugin', () => {
     expect(typeof plugin.server).toBe('function')
   })
 
-  it('sets __xeng_caller_session for the dispatch tool, from input.sessionID', async () => {
+  it('sets __xeng_caller_session AND __xeng_call_id for the dispatch tool, from input.sessionID/callID', async () => {
     const hooks = await plugin.server()
     const output = { args: { engine: 'claude', prompt: 'x' } }
     await hooks['tool.execute.before'](
@@ -33,7 +33,8 @@ describe('claudeui-xeng-plugin', () => {
     expect(output.args).toMatchObject({
       engine: 'claude',
       prompt: 'x',
-      __xeng_caller_session: 'ses_abc123'
+      __xeng_caller_session: 'ses_abc123',
+      __xeng_call_id: 'call_1'
     })
   })
 
@@ -43,6 +44,15 @@ describe('claudeui-xeng-plugin', () => {
     await hooks['tool.execute.before']({ tool: 'read', sessionID: 'ses_abc123', callID: 'call_2' }, output)
     expect(output.args).toEqual({ path: '/etc/passwd' })
     expect(output.args).not.toHaveProperty('__xeng_caller_session')
+    expect(output.args).not.toHaveProperty('__xeng_call_id')
+  })
+
+  it('sets __xeng_caller_session but omits __xeng_call_id when callID is absent', async () => {
+    const hooks = await plugin.server()
+    const output = { args: { engine: 'claude', prompt: 'x' } }
+    await hooks['tool.execute.before']({ tool: 'claudeui_dispatch_agent', sessionID: 'ses_abc123' }, output)
+    expect(output.args).toMatchObject({ __xeng_caller_session: 'ses_abc123' })
+    expect(output.args).not.toHaveProperty('__xeng_call_id')
   })
 
   it('is a no-op when output.args is missing (defensive)', async () => {

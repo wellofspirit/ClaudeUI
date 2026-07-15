@@ -200,7 +200,8 @@ vi.mock('../../services/persisted-sessions-dir', () => ({
 const crossEngineSpies = vi.hoisted(() => ({
   resolveApproval: vi.fn((requestId: string) => requestId.startsWith('xeng:')),
   dispatch: vi.fn(),
-  disposeFor: vi.fn()
+  disposeFor: vi.fn(),
+  stopDispatch: vi.fn(() => false)
 }))
 
 vi.mock('../../services/cross-engine-dispatcher', () => ({
@@ -453,6 +454,51 @@ describe('session.ipc', () => {
         undefined,
         undefined
       )
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // Stop routing — dispatch toolUseIds → cross-engine dispatcher (ADR-033 M3)
+  // -------------------------------------------------------------------------
+
+  describe('session:stop-task dispatch routing', () => {
+    it('routes a known dispatch toolUseId to the dispatcher (scoped by routingId), NOT the session', async () => {
+      crossEngineSpies.stopDispatch.mockReturnValueOnce(true)
+      const result = await harness.call<{ success: boolean }>(
+        'session:stop-task',
+        'rid-1',
+        'toolu_dispatch_1'
+      )
+      expect(crossEngineSpies.stopDispatch).toHaveBeenCalledWith('toolu_dispatch_1', 'rid-1')
+      expect(result).toEqual({ success: true })
+      expect(sessionStub.stopTask).not.toHaveBeenCalled()
+    })
+
+    it('falls through to the session stopTask when the id is not a known dispatch', async () => {
+      const result = await harness.call<{ success: boolean }>(
+        'session:stop-task',
+        'rid-1',
+        'toolu_ordinary_1'
+      )
+      expect(crossEngineSpies.stopDispatch).toHaveBeenCalledWith('toolu_ordinary_1', 'rid-1')
+      expect(sessionStub.stopTask).toHaveBeenCalledWith('toolu_ordinary_1')
+      expect(result).toEqual({ success: true })
+    })
+
+    it('isDispatch=true: arms a durable stop-intent, returns success even with no live turn, never touches the session path', async () => {
+      // Default stopDispatch mock returns false — simulating the upstream race
+      // where the Stop click beats the MCP tools/call round-trip entirely.
+      const result = await harness.call<{ success: boolean }>(
+        'session:stop-task',
+        'rid-1',
+        'toolu_disp_racy',
+        true
+      )
+      expect(crossEngineSpies.stopDispatch).toHaveBeenCalledWith('toolu_disp_racy', 'rid-1', {
+        armIfUnknown: true
+      })
+      expect(result).toEqual({ success: true })
+      expect(sessionStub.stopTask).not.toHaveBeenCalled()
     })
   })
 

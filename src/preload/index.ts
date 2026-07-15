@@ -165,8 +165,8 @@ const api: ClaudeAPI = {
     ipcRenderer.invoke('session:unwatch-background', routingId, toolUseId),
   readBackgroundRange: (routingId: string, toolUseId: string, offset: number, length: number) =>
     ipcRenderer.invoke('session:read-background-range', routingId, toolUseId, offset, length),
-  stopTask: (routingId: string, toolUseId: string) =>
-    ipcRenderer.invoke('session:stop-task', routingId, toolUseId),
+  stopTask: (routingId: string, toolUseId: string, isDispatch?: boolean) =>
+    ipcRenderer.invoke('session:stop-task', routingId, toolUseId, isDispatch),
   backgroundTask: (routingId: string, toolUseId: string) =>
     ipcRenderer.invoke('session:background-task', routingId, toolUseId),
   dequeueMessage: (routingId: string, value: string) =>
