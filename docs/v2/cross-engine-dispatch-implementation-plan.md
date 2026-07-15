@@ -1,9 +1,10 @@
 # Cross-engine dispatch — full implementation plan (M2–M4)
 
-**Status:** M1 + M2 shipped (M2 verified live 2026-07-14: opencode/nemotron caller → approval-gated
-`claudeui_dispatch_agent` → headless Claude haiku target answered; plugin-injected caller identity
-observed on the wire); **M3/M4 not started.** This is a standalone plan — a fresh session with
-no prior context should be able to execute every remaining phase from here. Governing design:
+**Status:** M1 + M2 + M3 shipped (M2 verified live 2026-07-14; M3 verified live 2026-07-15:
+dispatch TaskCard with engine·model badge, live streamed text in the expanded card, stop verified
+end-to-end incl. the pre-registration race — see M3 as-built deltas); **M4 not started.** This is a
+standalone plan — a fresh session with no prior context should be able to execute every remaining
+phase from here. Governing design:
 **ADR-033** (`docs/adr/adr-033_cross-engine-dispatch.md`). Workflow: **ADR-026** (Opus orchestrates
 + reviews every line, a Sonnet sub-agent implements against a written kickoff, gates + real-app
 verify before each commit). Wire facts for opencode live in **`vendor/opencode-src/`** (pinned
@@ -210,7 +211,37 @@ target's answer returns. Reuse the M1 Playwright `_electron` + transcript-JSONL-
 
 ---
 
-## M3 — dispatched-work UX (live streaming + engine badge), both directions
+## M3 — dispatched-work UX (live streaming + engine badge), both directions — SHIPPED
+
+**As-built deltas from the plan below:**
+
+- **Claude-side tool_use id came free from the wire** (bundle-verified): cli.js stamps
+  `_meta["claudecode/toolUseId"]` on EVERY MCP `tools/call`, surfaced as `SdkToolExtra.meta`.
+  It also always passes `onprogress`, so the MCP TS SDK auto-attaches a progressToken — the M1
+  "in-process MCP sets no progressToken" note was wrong; heartbeats reach cli.js and reset its
+  (config-only, off-by-default) idle timeout. opencode side: the plugin stamps `__xeng_call_id`
+  (= the hook's `callID`), a declared optional schema field like `__xeng_caller_session`.
+- **Card kind**: no new ToolKind — `hostedMcpKind` maps `mcp__claude-ui-collab__dispatch_agent`
+  → `'task'` (before the generic `mcp__` fallback) and both engine tool-maps discriminate the
+  dispatch input by its `engine` field, putting "&lt;engine&gt; · &lt;model&gt;" in the existing `subagent`
+  badge slot. Dispatch cards suppress the meaningless "Send to background" affordance.
+- **Streaming**: Claude targets run `includePartialMessages` and the dispatcher forwards
+  stream_event deltas / assistant messages (via `transformAssistantMessage`, factored to
+  `src/main/services/assistant-message.ts`, shared with ClaudeSession) / tool_results; opencode
+  targets are tapped from the existing per-cwd SSE loop reusing `event-mapper.ts`'s `mapEvent`,
+  gated on the entry's `busy` flag. All emits byte-match claude-session.ts's payload shapes and
+  no-op when the tool_use id is unknown.
+- **Stop — the live-only race**: the renderer's Stop is clickable milliseconds after opencode
+  marks the part running (SSE), but the MCP tools/call round-trip reaches `dispatch()` later —
+  live-measured gap 12ms–seconds; component tests can't see it. Fix: `stopTask` carries an
+  `isDispatch` flag from TaskCard; the IPC routes dispatch stops to
+  `stopDispatch(toolUseId, routingId, {armIfUnknown: true})`, which records a 60s TTL
+  **pending stop-intent** on a registry miss; `dispatchInner` consumes the intent at stop-handle
+  registration (before any await) and aborts the turn at the first race. Ownership-checked by
+  routingId both on live stops and intent consumption.
+- A stopped dispatch surfaces to the CALLER as an isError tool result ("Dispatch stopped by
+  user.") — on opencode that's a model-visible corrected error (ADR-032), not an error-state
+  part, so the card ends neutral, not danger-bordered. Expected.
 
 ### Analysis
 Today the dispatcher returns the target's whole turn as a single `tool_result` string; the user sees

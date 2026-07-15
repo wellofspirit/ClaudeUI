@@ -112,8 +112,23 @@ hardening): **`docs/v2/cross-engine-dispatch-implementation-plan.md`**.
   `full`/`auto` callers map to `bypassPermissions` on the target (no judge for targets in v1,
   per §5); `plan` maps to `default`.
 
+- **M3 shipped (subtask-parity UX).** Dispatched work renders via TaskCard ('task' kind; engine ·
+  model badge in the subagent slot), streams live keyed by the dispatching tool_use id (Claude
+  side: cli.js's `_meta["claudecode/toolUseId"]`, present on every MCP tools/call; opencode side:
+  plugin-stamped `__xeng_call_id`), and is stoppable. Stop rides `session:stop-task` with an
+  `isDispatch` flag; a registry miss arms a 60s **pending stop-intent** consumed at dispatch
+  registration — closes the live-verified race where the renderer's Stop is clickable before the
+  MCP call reaches the dispatcher (SSE beats the tools/call round-trip). See the plan doc's M3
+  as-built deltas.
+
 ## Still-open questions
 
-- Whether cli.js imposes a timeout on in-process (`mcp_message`) tool calls — verify and, if so,
-  mitigate via env or heartbeats. (Not observed in M1's short dispatches; matters for long
-  Claude-target turns in M2.)
+- ~~Whether cli.js imposes a timeout on in-process (`mcp_message`) tool calls~~ **RESOLVED
+  (bundle-verified, M3/M4):** cli.js's MCP callTool timeout is OFF by default — it exists only
+  when `MCP_TOOL_TIMEOUT` (env) or the per-server config `timeout` is set, and it is an IDLE
+  timeout that resets on progress notifications; cli.js always passes `onprogress`, so the
+  dispatcher's 15s heartbeats keep even a configured timeout at bay. Caveat: a user-set
+  `MCP_TOOL_TIMEOUT` in the app's environment applies to dispatch like any other MCP tool.
+  cli.js also threads an abort signal into every MCP call — a turn interrupt cancels the
+  in-flight call (fires our `extra.signal`), so dispatches do not outlive an interrupted
+  dispatching turn (no orphan-reaper needed).
