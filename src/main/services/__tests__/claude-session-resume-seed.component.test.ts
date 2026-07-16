@@ -50,6 +50,9 @@ vi.mock('../claude-mcp', () => ({
 }))
 vi.mock('../session-history', () => ({
   computeTokenMetrics: mockComputeTokenMetrics,
+  // Real derivation — transcriptPathFor's Windows-vs-POSIX behavior is part
+  // of what these tests guard.
+  projectKeyForCwd: (cwd: string) => cwd.replace(/[\\/:.]/g, '-'),
   fallbackBlockText: vi.fn(() => '')
 }))
 vi.mock('../skill-scanner', () => ({ scanSkills: vi.fn(async () => []) }))
@@ -137,6 +140,21 @@ describe('ClaudeSession — resume seeding of accumulators', () => {
     expect(data.contextWindowSize).toBe(5_000)
     // No turn in flight at construction.
     expect(data.turnStartedAtMs).toBeNull()
+  })
+
+  it('derives the on-disk projectKey from a WINDOWS cwd (drive colon + backslashes → -)', async () => {
+    // Real disk layout: cwd D:\WorkPlace\ClaudeUI → projects/D--WorkPlace-ClaudeUI.
+    // The pre-fix derivation only replaced / and ., producing a nonexistent
+    // path for every Windows cwd — the seed (and all reconciliation) silently
+    // no-opped on Windows while POSIX cwds worked.
+    const { win } = makeWin()
+    new ClaudeSession('routing-win', win, 'D:\\Work\\Proj', { resumeSessionId: 'sess-win' })
+    await tick()
+
+    expect(mockComputeTokenMetrics).toHaveBeenCalledTimes(1)
+    const calledPath = String(mockComputeTokenMetrics.mock.calls[0][0])
+    expect(calledPath).toContain('sess-win.jsonl')
+    expect(calledPath).toContain('D--Work-Proj')
   })
 
   it('does not seed a fresh (non-resume) session', async () => {

@@ -8,8 +8,21 @@ import * as path from 'path'
 import {
   computeTokenMetrics,
   computeTurnSpanDurationMs,
-  createTurnSpanAccumulator
+  createTurnSpanAccumulator,
+  projectKeyForCwd
 } from '../session-history'
+
+describe('projectKeyForCwd', () => {
+  it('matches the on-disk key for a Windows cwd (drive colon + backslashes → -)', () => {
+    expect(projectKeyForCwd('D:\\WorkPlace\\ClaudeUI')).toBe('D--WorkPlace-ClaudeUI')
+    expect(projectKeyForCwd('C:\\Users\\why20')).toBe('C--Users-why20')
+  })
+
+  it('matches the on-disk key for a POSIX cwd (slashes and dots → -)', () => {
+    expect(projectKeyForCwd('/home/u/proj.x')).toBe('-home-u-proj-x')
+    expect(projectKeyForCwd('/tmp/proj')).toBe('-tmp-proj')
+  })
+})
 
 // ---------------------------------------------------------------------------
 // Replicate private parser functions from session-history.ts for testing

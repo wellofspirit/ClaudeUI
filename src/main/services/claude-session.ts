@@ -16,7 +16,7 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 import type { BrowserWindow } from 'electron'
-import { computeTokenMetrics } from './session-history'
+import { computeTokenMetrics, projectKeyForCwd } from './session-history'
 import { transformAssistantMessage } from './assistant-message'
 import { classifyApiError } from './api-error'
 import { VoiceClient } from './voice-client'
@@ -1462,7 +1462,15 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
   ): Promise<void> {
     try {
       const metrics = await computeTokenMetrics(logPath, this.model)
-      if (metrics.totalTokens === 0 && metrics.totalCostUsd === 0) return
+      if (metrics.totalTokens === 0 && metrics.totalCostUsd === 0) {
+        // A resume seed that finds nothing is suspicious (the transcript we
+        // are resuming from should have content) — say so instead of silently
+        // no-opping. A wrong projectKey derivation hid behind this guard once.
+        if (seedCost) {
+          logger.warn('ClaudeSession', `Resume seed found no usable transcript at ${logPath}`)
+        }
+        return
+      }
       this.accInputTokens = metrics.totalInputTokens
       this.accOutputTokens = metrics.totalOutputTokens
       this.accCachedTokens = metrics.cachedTokens
@@ -1998,10 +2006,17 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
   }
 
   /** Transcript JSONL path for a given session id under this session's cwd.
-   *  Project key mirrors the SDK's derivation: replace / and . with - */
+   *  Project key derivation is shared with session-history (projectKeyForCwd)
+   *  — the old inline `/`+`.`-only replace produced a nonexistent path for
+   *  every Windows cwd, silently no-opping reconciliation and resume seeding. */
   private transcriptPathFor(sessionId: string): string {
-    const projectKey = this.cwd.replace(/[/.]/g, '-')
-    return path.join(os.homedir(), '.claude', 'projects', projectKey, `${sessionId}.jsonl`)
+    return path.join(
+      os.homedir(),
+      '.claude',
+      'projects',
+      projectKeyForCwd(this.cwd),
+      `${sessionId}.jsonl`
+    )
   }
 
   getSessionLogPath(): string | null {

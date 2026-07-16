@@ -20,6 +20,19 @@ import { calculateCostFromTokens, normalizeModelName } from './block-usage'
 import { dispatchedCostsByRouting } from './db'
 
 const CLAUDE_PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects')
+
+/**
+ * Derive cli.js's transcript project key from a working directory. The SDK
+ * replaces path separators, drive colons, AND dots with '-' — on disk,
+ * `D:\WorkPlace\ClaudeUI` → `D--WorkPlace-ClaudeUI` and `/home/u/proj.x` →
+ * `-home-u-proj-x`. The old inline derivations only replaced `/` and `.`,
+ * which produced a nonexistent path for every Windows cwd — so every
+ * consumer (JSONL reconciliation, resume seeding, fork-anchor resolution,
+ * the disk-fallback message loader) silently no-opped on Windows.
+ */
+export function projectKeyForCwd(cwd: string): string {
+  return cwd.replace(/[\\/:.]/g, '-')
+}
 const CACHE_DIR = path.join(os.homedir(), '.claude', 'ui')
 const CACHE_FILE = path.join(CACHE_DIR, 'directory-cache.json')
 
@@ -823,7 +836,7 @@ export async function resolveForkAnchor(
   cwd: string,
   messageId: string
 ): Promise<ForkAnchorResult> {
-  const projectKey = cwd.replace(/[/.]/g, '-')
+  const projectKey = projectKeyForCwd(cwd)
   const filePath = path.join(CLAUDE_PROJECTS_DIR, projectKey, `${sessionId}.jsonl`)
   if (!fs.existsSync(filePath)) return { anchorUuid: null, reason: 'transcript-not-found' }
 

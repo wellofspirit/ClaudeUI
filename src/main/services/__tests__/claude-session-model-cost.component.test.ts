@@ -61,6 +61,7 @@ vi.mock('../claude-mcp', () => ({
 }))
 vi.mock('../session-history', () => ({
   computeTokenMetrics: vi.fn(async () => ({ totalTokens: 0, totalCostUsd: 0 })),
+  projectKeyForCwd: (cwd: string) => cwd.replace(/[\\/:.]/g, '-'),
   fallbackBlockText: vi.fn(() => '')
 }))
 vi.mock('../skill-scanner', () => ({ scanSkills: vi.fn(async () => []) }))

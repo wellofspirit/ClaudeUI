@@ -4,7 +4,7 @@ import type { ISession, EngineSpawnOptions } from '../providers/ISession'
 import { engineRegistry } from '../providers/EngineRegistry'
 // Side-effect: registers all engine factories (claude, …) at module load time
 import '../providers/register-engines'
-import { loadSessionHistory } from './session-history'
+import { loadSessionHistory, projectKeyForCwd } from './session-history'
 import { renameDispatchedUsage } from './db'
 import { logger } from './logger'
 
@@ -113,7 +113,7 @@ export class SessionManager {
       }
     }
     // Fall back to disk
-    const projectKey = cwd.replace(/[/.]/g, '-')
+    const projectKey = projectKeyForCwd(cwd)
     const result = await loadSessionHistory(sessionId, projectKey)
     return result.messages
   }
