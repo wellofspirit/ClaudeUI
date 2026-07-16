@@ -457,5 +457,7 @@ ADRs live in `docs/adr/`. See `docs/adr/adr.md` for the index.
 | 030 | Capability honesty — a capability flag is only true when the full end-to-end path works for that engine (opencode fork demoted) | Accepted              |
 | 031 | opencode config writes are diff-driven leaf merges, never subtree replacements — preserves unmodelled hand-edits (attachment, apiKey, npm, agent prompt) | Accepted              |
 | 032 | opencode tool-experience parity from the wire — bash streaming, patch diffs, reasoned non-fatal denials; no fork | Accepted              |
+| 033 | Cross-engine agent dispatch — hosted `dispatch_agent` tool, headless subtask-style targets, dispatcher-owned approval forwarding | Accepted              |
+| 034 | Session time & per-model cost accounting — active-turn duration semantic, base+overlay cost (cumulative wire fields), dispatched spend in breakdown only | Accepted              |
 
 When a design or implementation decision is made during a conversation, prompt the user about whether it should be recorded as a new ADR entry. When adding a new ADR, proactively scan existing ADRs to check if the new decision supersedes or conflicts with a previous one — if so, update the old ADR's status to "Superseded by ADR-XXX" and note it in the new ADR.

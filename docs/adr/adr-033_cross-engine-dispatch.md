@@ -1,6 +1,6 @@
 # ADR-033: Cross-engine agent dispatch — hosted `dispatch_agent` tool, headless subtask-style targets
 
-**Status:** Accepted
+**Status:** Accepted (M4 claude-target usage-capture cost semantics amended by ADR-034)
 **Date:** 2026-07-14
 **Relates to:** ADR-018/019 (engine model), ADR-020 (config plane), ADR-022/023 (opencode permissions), ADR-026 (workflow), ADR-030 (capability honesty), ADR-032 (non-fatal denials)
 

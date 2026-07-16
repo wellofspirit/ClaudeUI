@@ -35,3 +35,4 @@
 | [031](adr-031_opencode-config-leaf-merge-writes.md)              | opencode config writes are diff-driven leaf merges, never subtree replacements — preserves unmodelled hand-edits *(refines 028)* |
 | [032](adr-032_opencode-tool-parity-no-fork.md)                   | opencode tool-experience parity from the wire — bash streaming, patch diffs, reasoned non-fatal denials; no fork *(amends 023; relates to 019/022/024/030/031)* |
 | [033](adr-033_cross-engine-dispatch.md)                          | Cross-engine agent dispatch — hosted `dispatch_agent` tool, headless subtask-style targets, dispatcher-owned approval forwarding *(relates to 018/019/020/022/030/032)* |
+| [034](adr-034_session-time-and-cost-accounting.md)               | Session time & per-model cost accounting — active-turn duration, base+overlay cost from cumulative wire fields, dispatched spend in breakdown only *(amends 033; relates to 011/020)* |
