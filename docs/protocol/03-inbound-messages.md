@@ -305,6 +305,25 @@ Emitted exactly once per turn, last message of the turn.
 }
 ```
 
+### Cumulative vs per-turn fields (probed 2026-07-15 against the pinned binary)
+
+- **`total_cost_usd` and `modelUsage` are CUMULATIVE within one cli.js process** —
+  turn 2's values include turn 1's. They reset to zero when a process is
+  respawned with `--resume` (a resumed process reports only post-resume usage;
+  no restore of the prior tracker). Consumers must REPLACE, never `+=`, per
+  process, and fold across process boundaries (see claude-session.ts's
+  `costBaseUsd`/`liveTotalCostUsd` split and cross-engine-dispatcher.ts's
+  `lastReportedTotalCostUsd` delta baseline).
+- **`usage`, `duration_ms`, `duration_api_ms` are PER-TURN.**
+- `modelUsage` entry shape (per model id key):
+  `{ inputTokens, outputTokens, cacheReadInputTokens, cacheCreationInputTokens,
+  webSearchRequests, costUSD, contextWindow, maxOutputTokens }` — `costUSD` is
+  the authoritative per-model cost (cumulative, as above).
+- **`result` records are NOT persisted to transcript JSONL** (verified across
+  46 real transcripts) — cost/duration are not recoverable from a transcript;
+  ClaudeUI reconstructs duration from line-timestamp turn spans and cost from
+  per-message `model` + `usage` × pricing tables (session-history.ts).
+
 ### Subtype detail
 
 | Subtype                                               | Trigger                                                    | Key fields                                                                                |
