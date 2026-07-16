@@ -15,6 +15,9 @@ export interface CollabServerContext {
   getAutonomyMode: () => string
   /** BaseSession.send — re-emits under the dispatching session's routing. */
   emit: (channel: string, data: unknown) => void
+  /** BaseSession.addDispatchedCost — folds a dispatched turn's spend into this
+   *  session's own cost breakdown (ADR-033 Slice C). */
+  addDispatchedCost: (engineId: EngineId, modelId: string, costUsd: number) => void
 }
 
 /**
@@ -86,6 +89,7 @@ export function createCollabServer(ctx: CollabServerContext): SdkMcpServer {
               cwd: ctx.cwd,
               autonomyMode: ctx.getAutonomyMode(),
               emit: ctx.emit,
+              addDispatchedCost: ctx.addDispatchedCost,
               toolUseId: typeof toolUseId === 'string' ? toolUseId : undefined,
               extra
             }

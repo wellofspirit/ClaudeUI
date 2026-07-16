@@ -19,6 +19,27 @@ function formatDuration(ms: number): string {
     : `${Math.floor(ms / 60000)}m ${Math.floor((ms % 60000) / 1000)}s`
 }
 
+/** Format a cost figure consistently with the existing Cost/breakdown rows. */
+function formatCost(costUsd: number): string {
+  return `$${costUsd < 0.01 ? costUsd.toFixed(4) : costUsd.toFixed(2)}`
+}
+
+/**
+ * Display label for a dispatched (cross-engine, Slice C) cost row. Reuses
+ * shortModelName — it already recognizes Claude family names anywhere in the
+ * id, so a dispatched Claude target (e.g. "anthropic/claude-opus-4-6") comes
+ * back clean. For a non-Claude id shortModelName can't shorten (e.g. an
+ * opencode "providerID/modelID" target like "openai/gpt-5-codex"), it returns
+ * the raw string unchanged (by design — see its own doc comment) — strip the
+ * redundant provider prefix here instead of teaching shortModelName about
+ * dispatch-only id shapes.
+ */
+function dispatchedModelLabel(modelId: string): string {
+  const short = shortModelName(modelId)
+  const slash = short.indexOf('/')
+  return slash === -1 ? short : short.slice(slash + 1)
+}
+
 export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Element {
   const cwd = useActiveSession((s) => s.cwd)
   const sdkSessionId = useActiveSession((s) => s.status.sessionId)
@@ -69,6 +90,15 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
   const sortedModelCosts = showCostBreakdown
     ? [...rawModelCosts].sort((a, b) => b.costUsd - a.costUsd)
     : []
+  // "Total incl. dispatched" (Slice C): headline own-engine cost + dispatched
+  // spend, NEVER sum(breakdown rows) — the headline is the authoritative
+  // own-engine figure, so summing rows instead could disagree with it if a
+  // per-model recompute ever drifts from the engine's own cumulative total.
+  const hasDispatchedCost = rawModelCosts.some((m) => m.dispatched)
+  const dispatchedCostUsd = rawModelCosts
+    .filter((m) => m.dispatched)
+    .reduce((acc, m) => acc + m.costUsd, 0)
+  const totalInclDispatchedUsd = cost + dispatchedCostUsd
 
   // Tick every second while the tooltip is open and a turn is in flight, so
   // "Session time" keeps counting up live instead of freezing until the next
@@ -260,9 +290,12 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
                         </div>
                       </button>
                     )}
-                    {(cost > 0 || sessionDurationMs > 0 || totalApiDurationMs > 0) && (
+                    {(cost > 0 ||
+                      hasDispatchedCost ||
+                      sessionDurationMs > 0 ||
+                      totalApiDurationMs > 0) && (
                       <div className="flex gap-4">
-                        {cost > 0 && (
+                        {(cost > 0 || hasDispatchedCost) && (
                           <div>
                             <div className="text-[10px] text-text-muted mb-0.5">Cost</div>
                             <div className="text-[11px] text-text-secondary font-mono">
@@ -275,19 +308,32 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
                                     key={`${m.engineId}:${m.modelId}`}
                                     data-testid="TopBar.costBreakdownRow"
                                     data-model={m.modelId}
+                                    {...(m.dispatched ? { 'data-dispatched': 'true' } : {})}
                                     className="flex items-center justify-between gap-3"
                                   >
                                     <span className="text-[10px] text-text-muted truncate">
-                                      {shortModelName(m.modelId)}
+                                      {m.dispatched
+                                        ? `${dispatchedModelLabel(m.modelId)} · dispatched`
+                                        : shortModelName(m.modelId)}
                                     </span>
                                     <span className="text-[10px] text-text-secondary font-mono shrink-0">
-                                      $
-                                      {m.costUsd < 0.01
-                                        ? m.costUsd.toFixed(4)
-                                        : m.costUsd.toFixed(2)}
+                                      {formatCost(m.costUsd)}
                                     </span>
                                   </div>
                                 ))}
+                                {hasDispatchedCost && (
+                                  <div
+                                    data-testid="TopBar.costTotalInclDispatched"
+                                    className="flex items-center justify-between gap-3 pt-0.5 mt-0.5 border-t border-border/50"
+                                  >
+                                    <span className="text-[10px] text-text-muted truncate">
+                                      Total incl. dispatched
+                                    </span>
+                                    <span className="text-[10px] text-text-secondary font-mono shrink-0">
+                                      {formatCost(totalInclDispatchedUsd)}
+                                    </span>
+                                  </div>
+                                )}
                               </div>
                             )}
                           </div>

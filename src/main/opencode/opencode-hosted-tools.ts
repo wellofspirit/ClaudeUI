@@ -28,6 +28,7 @@ import { createMockupServer } from '../services/mockup-tool'
 import { loadEngineConfig } from '../services/ui-config'
 import { describeDispatchModels } from '../services/dispatch-model-hint'
 import type { SdkMcpTool, SdkToolExtra } from '../sdk/types'
+import type { EngineId } from '../../shared/types'
 // `import type` only: DispatchContext/DispatchRequest/DispatchResult are
 // ERASED at compile time, so this does NOT create a runtime import cycle
 // even though cross-engine-dispatcher.ts (at runtime) imports
@@ -45,6 +46,9 @@ export interface CallerSessionHandle {
   autonomyMode: string
   /** Re-emits an event under the caller session's routing (ISession.emit). */
   emit: (channel: string, data: unknown) => void
+  /** ISession.addDispatchedCost — folds a dispatched turn's spend into the
+   *  caller session's own cost breakdown (ADR-033 Slice C). */
+  addDispatchedCost: (engineId: EngineId, modelId: string, costUsd: number) => void
 }
 
 /**
@@ -241,6 +245,7 @@ export function createOpencodeHostedToolsServer(
           cwd: caller.cwd,
           autonomyMode: caller.autonomyMode,
           emit: caller.emit,
+          addDispatchedCost: caller.addDispatchedCost,
           toolUseId: __xeng_call_id,
           extra: toolExtra
         }

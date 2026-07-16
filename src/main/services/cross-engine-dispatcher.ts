@@ -113,6 +113,14 @@ export interface DispatchContext {
   /** Re-emits under the dispatching session's routing (BaseSession.send). */
   emit: (channel: string, data: unknown) => void
   /**
+   * BaseSession.addDispatchedCost — folds a completed dispatch turn's spend
+   * into the dispatching session's own cost breakdown (ADR-033 Slice C).
+   * Optional (never fail a dispatch over a missing wiring, same philosophy
+   * as `toolUseId` below) — both production callers (collab-tool.ts,
+   * opencode-hosted-tools.ts) always set it; only test doubles omit it.
+   */
+  addDispatchedCost?: (engineId: EngineId, modelId: string, costUsd: number) => void
+  /**
    * The dispatching assistant's own tool_use id for this `dispatch_agent`
    * call (ADR-033 M3). Claude side: `extra.meta['claudecode/toolUseId']`
    * (cli.js stamps this on every MCP tools/call). opencode side: the
@@ -306,6 +314,20 @@ interface ClaudeTargetEntry {
   ctx: DispatchContext
   /** Cumulative cost across every turn this target has run (ADR-033 M4-C). */
   cumulativeCostUsd: number
+  /**
+   * The last `result.total_cost_usd` seen from this target's process.
+   * VERIFIED WIRE FACT: `total_cost_usd` (and `modelUsage`) are CUMULATIVE
+   * within one cli.js process — only `usage` and `duration_ms` are per-turn
+   * (see claude-session.ts's costBaseUsd/liveTotalCostUsd doc for the full
+   * story; the naive `+=` was exactly Slice B's double-count bug). This
+   * baseline converts each result's running total into a per-turn delta.
+   * Initialized to 0 at entry creation — safe because a ClaudeTargetEntry is
+   * strictly one-process for its whole lifetime: every failure path
+   * (timeout/abort/stop/err) kills the process AND deletes the entry, and a
+   * continuation with an unknown sessionId errors instead of respawning, so
+   * the cumulative counter can never restart under a live entry.
+   */
+  lastReportedTotalCostUsd: number
   /** DISTINCT tool_use ids seen in the turn CURRENTLY in flight (ADR-033
    *  M4-B) — same Set-not-counter rationale as OpencodeTargetEntry (Claude
    *  targets run includePartialMessages, so the same assistant message is
@@ -1031,6 +1053,11 @@ export class CrossEngineDispatcher {
         outText += '\n\n[dispatch cost cap reached — further turns on this session will be rejected]'
       }
 
+      // ── Fold into the dispatching session's own cost breakdown (Slice C) ──
+      if (Number.isFinite(turnCostUsd) && turnCostUsd > 0) {
+        ctx.addDispatchedCost?.(req.engine, model, turnCostUsd)
+      }
+
       emitDispatchNotification(ctx, entry.sessionId, 'completed', finalText, {
         totalTokens,
         toolUses: entry.turnToolUseIds.size,
@@ -1431,17 +1458,25 @@ export class CrossEngineDispatcher {
 
       const result = winner.msg
       // ── Usage capture (ADR-033 M4-B) ────────────────────────────────────
-      // ResultMessage.usage/total_cost_usd/duration_ms are PER-TURN (not
-      // cumulative across the persistent process) — mirrors claude-session.ts's
-      // `this.totalCostUsd += (msg.total_cost_usd || 0)` accumulation, which
-      // only makes sense if each result's cost is a per-turn delta.
+      // VERIFIED WIRE FACT: `result.total_cost_usd` (and `modelUsage`) are
+      // CUMULATIVE within one cli.js process; only `usage` and `duration_ms`
+      // are per-turn (see claude-session.ts's costBaseUsd/liveTotalCostUsd
+      // doc — the naive `+=` over the running total was exactly Slice B's
+      // double-count bug). The dispatched target is a persistent process
+      // serving multiple turns, so convert the running total into a per-turn
+      // delta against the entry's baseline HERE, at the single point the
+      // result is received — the failed-subtype capture, cap accumulation,
+      // DB record, and Slice C fold-in below all consume the same delta.
+      // Math.max(0, …) guards against a pathological backwards total.
       const usageFields = result.usage as
         | { input_tokens?: number; output_tokens?: number }
         | undefined
       const totalTokens = usageFields
         ? (usageFields.input_tokens ?? 0) + (usageFields.output_tokens ?? 0)
         : 0
-      const turnCostUsd = result.total_cost_usd ?? 0
+      const reportedTotalCostUsd = result.total_cost_usd ?? entry.lastReportedTotalCostUsd
+      const turnCostUsd = Math.max(0, reportedTotalCostUsd - entry.lastReportedTotalCostUsd)
+      entry.lastReportedTotalCostUsd = reportedTotalCostUsd
       const durationMs = result.duration_ms ?? null
 
       // A turn-level error (see docs/protocol/03-inbound-messages.md §result
@@ -1473,6 +1508,12 @@ export class CrossEngineDispatcher {
           costUsd: turnCostUsd,
           durationMs
         })
+        // Slice C — fold-in parity with the DB record above: this row IS
+        // included by seedDispatchedCosts() on reload, so the live breakdown
+        // must include it too or live vs reloaded values disagree.
+        if (Number.isFinite(turnCostUsd) && turnCostUsd > 0) {
+          ctx.addDispatchedCost?.('claude', model, turnCostUsd)
+        }
         return errorResult(`Dispatched turn failed: ${detail}`, entry.sessionId ?? '')
       }
       const finalText = result.result || '(the dispatched agent returned no text)'
@@ -1484,6 +1525,11 @@ export class CrossEngineDispatcher {
       let outText = finalText
       if (maxCostUsd !== undefined && wasUnderCap && entry.cumulativeCostUsd >= maxCostUsd) {
         outText += '\n\n[dispatch cost cap reached — further turns on this session will be rejected]'
+      }
+
+      // ── Fold into the dispatching session's own cost breakdown (Slice C) ──
+      if (Number.isFinite(turnCostUsd) && turnCostUsd > 0) {
+        ctx.addDispatchedCost?.('claude', model, turnCostUsd)
       }
 
       emitDispatchNotification(ctx, entry.sessionId ?? '', 'completed', finalText, {
@@ -1636,6 +1682,7 @@ export class CrossEngineDispatcher {
       busy: false,
       ctx,
       cumulativeCostUsd: 0,
+      lastReportedTotalCostUsd: 0,
       turnToolUseIds: new Set()
     }
     const canUseTool: CanUseTool = async (

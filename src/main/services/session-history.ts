@@ -10,12 +10,14 @@ import type {
   TaskNotification,
   StatusLineData,
   ForkAnchorResult,
-  ModelCostEntry
+  ModelCostEntry,
+  EngineId
 } from '../../shared/types'
 import { logger } from './logger'
 import { getContextWindowSize } from './context-window'
 import { findForkAnchorUuid } from './fork-anchor'
 import { calculateCostFromTokens, normalizeModelName } from './block-usage'
+import { dispatchedCostsByRouting } from './db'
 
 const CLAUDE_PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects')
 const CACHE_DIR = path.join(os.homedir(), '.claude', 'ui')
@@ -1085,6 +1087,28 @@ export async function loadSessionHistory(
 
     rl.on('close', async () => {
       const statusLine = await computeTokenMetrics(filePath)
+      // Slice C — merge durable dispatched-cost rows into the history-loaded
+      // status line. A reopened session that hasn't spawned a ClaudeSession
+      // yet has no seedDispatchedCosts() run for it, and computeTokenMetrics
+      // only knows the transcript — without this merge the tooltip would show
+      // dispatched spend only after the first prompt. Best-effort: a DB
+      // failure must never break history loading.
+      try {
+        const dispatched = dispatchedCostsByRouting(sessionId)
+        if (dispatched.length > 0) {
+          statusLine.modelCosts = [
+            ...(statusLine.modelCosts ?? []),
+            ...dispatched.map((d) => ({
+              engineId: d.targetEngine as EngineId,
+              modelId: d.targetModel,
+              costUsd: d.costUsd,
+              dispatched: true as const
+            }))
+          ]
+        }
+      } catch (err) {
+        logger.warn('SessionHistory', 'Failed to merge dispatched costs into status line', err)
+      }
       resolve({
         messages,
         taskNotifications,

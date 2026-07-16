@@ -1086,3 +1086,65 @@ export function dispatchedUsageSummary(sinceTs = 0): DispatchedUsageSummary[] {
     costUsd: r.costUsd ?? 0
   }))
 }
+
+// ---------------------------------------------------------------------------
+// Slice C — cross-engine dispatched cost in the dispatching session's own
+// cost breakdown (TopBar tooltip). Distinct from dispatchedUsageSummary above
+// (a GLOBAL all-sessions rollup, e.g. for a future usage dashboard) — this is
+// scoped to ONE dispatching session, for BaseSession.seedDispatchedCosts()'s
+// durability-across-reloads seed.
+// ---------------------------------------------------------------------------
+
+interface DispatchedCostByRoutingDbRow {
+  target_engine: string
+  target_model: string
+  costUsd: number | null
+}
+
+/**
+ * Per-(targetEngine, targetModel) cost totals for ONE dispatching session,
+ * NULL-cost rows excluded (a timed-out/errored turn recorded no real spend —
+ * see the v6 migration comment; including it would just add a spurious $0
+ * row group). Feeds BaseSession.seedDispatchedCosts() on session construction/
+ * resume so a reloaded session's dispatched-cost breakdown survives instead of
+ * resetting to zero (parity with Slice B's costBaseUsd seeding).
+ */
+export function dispatchedCostsByRouting(
+  fromRoutingId: string
+): Array<{ targetEngine: string; targetModel: string; costUsd: number }> {
+  const db = getDb()
+  const rows = db
+    .prepare(
+      `SELECT
+         target_engine,
+         target_model,
+         SUM(cost_usd) as costUsd
+       FROM dispatched_usage
+       WHERE from_routing_id = ? AND cost_usd IS NOT NULL
+       GROUP BY target_engine, target_model`
+    )
+    .all(fromRoutingId) as DispatchedCostByRoutingDbRow[]
+  return rows.map((r) => ({
+    targetEngine: r.target_engine,
+    targetModel: r.target_model,
+    costUsd: r.costUsd ?? 0
+  }))
+}
+
+/**
+ * Carry dispatched_usage rows from oldRoutingId to newRoutingId (used on
+ * session rekey — SessionManager.rekey() — mirroring renameSessionMeta's
+ * role for session_meta). Without this, a dispatch recorded under a
+ * pre-rekey routingId (e.g. a fresh session's temporary id, before the sdk
+ * session UUID arrives) becomes unreachable from seedDispatchedCosts() on a
+ * later resume, which looks up by the STABLE post-rekey id. No-op (not an
+ * error) when oldRoutingId has no rows — most rekeys happen before any
+ * dispatch occurs.
+ */
+export function renameDispatchedUsage(oldRoutingId: string, newRoutingId: string): void {
+  const db = getDb()
+  db.prepare('UPDATE dispatched_usage SET from_routing_id = ? WHERE from_routing_id = ?').run(
+    newRoutingId,
+    oldRoutingId
+  )
+}

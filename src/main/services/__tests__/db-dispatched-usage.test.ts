@@ -15,6 +15,8 @@ import {
   insertDispatchedUsage,
   getDispatchedUsageSince,
   dispatchedUsageSummary,
+  dispatchedCostsByRouting,
+  renameDispatchedUsage,
   type Db
 } from '../db'
 
@@ -264,5 +266,191 @@ describe('dispatchedUsageSummary', () => {
 
   it('returns an empty array when there are no rows', () => {
     expect(dispatchedUsageSummary(0)).toEqual([])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Slice C — dispatchedCostsByRouting / renameDispatchedUsage
+// ---------------------------------------------------------------------------
+
+describe('dispatchedCostsByRouting', () => {
+  it('aggregates cost per (targetEngine, targetModel) for ONE dispatching session', () => {
+    insertDispatchedUsage({
+      ts: 1000,
+      fromRoutingId: 'routing-A',
+      fromEngine: 'claude',
+      targetEngine: 'opencode',
+      targetModel: 'openai/gpt-5',
+      targetSessionId: null,
+      toolUseId: null,
+      totalTokens: 100,
+      costUsd: 0.1,
+      durationMs: 500
+    })
+    insertDispatchedUsage({
+      ts: 1500,
+      fromRoutingId: 'routing-A',
+      fromEngine: 'claude',
+      targetEngine: 'opencode',
+      targetModel: 'openai/gpt-5',
+      targetSessionId: null,
+      toolUseId: null,
+      totalTokens: 100,
+      costUsd: 0.05,
+      durationMs: 500
+    })
+    // A different dispatching session — must NOT be included.
+    insertDispatchedUsage({
+      ts: 1600,
+      fromRoutingId: 'routing-B',
+      fromEngine: 'claude',
+      targetEngine: 'opencode',
+      targetModel: 'openai/gpt-5',
+      targetSessionId: null,
+      toolUseId: null,
+      totalTokens: 999,
+      costUsd: 9.99,
+      durationMs: 500
+    })
+
+    const rows = dispatchedCostsByRouting('routing-A')
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({ targetEngine: 'opencode', targetModel: 'openai/gpt-5' })
+    expect(rows[0].costUsd).toBeCloseTo(0.15, 10)
+  })
+
+  it('excludes NULL-cost rows (a timed-out/errored turn recorded no real spend)', () => {
+    insertDispatchedUsage({
+      ts: 1000,
+      fromRoutingId: 'routing-C',
+      fromEngine: 'claude',
+      targetEngine: 'opencode',
+      targetModel: 'openai/gpt-5',
+      targetSessionId: null,
+      toolUseId: null,
+      totalTokens: 100,
+      costUsd: 0.2,
+      durationMs: 500
+    })
+    insertDispatchedUsage({
+      ts: 2000,
+      fromRoutingId: 'routing-C',
+      fromEngine: 'claude',
+      targetEngine: 'opencode',
+      targetModel: 'openai/gpt-5',
+      targetSessionId: null,
+      toolUseId: null,
+      totalTokens: null,
+      costUsd: null,
+      durationMs: null
+    })
+
+    const rows = dispatchedCostsByRouting('routing-C')
+    expect(rows).toEqual([{ targetEngine: 'opencode', targetModel: 'openai/gpt-5', costUsd: 0.2 }])
+  })
+
+  it('returns separate rows per distinct targetModel', () => {
+    insertDispatchedUsage({
+      ts: 1000,
+      fromRoutingId: 'routing-D',
+      fromEngine: 'claude',
+      targetEngine: 'opencode',
+      targetModel: 'openai/gpt-5',
+      targetSessionId: null,
+      toolUseId: null,
+      totalTokens: 100,
+      costUsd: 0.1,
+      durationMs: 500
+    })
+    insertDispatchedUsage({
+      ts: 1500,
+      fromRoutingId: 'routing-D',
+      fromEngine: 'claude',
+      targetEngine: 'opencode',
+      targetModel: 'openai/gpt-5-codex',
+      targetSessionId: null,
+      toolUseId: null,
+      totalTokens: 100,
+      costUsd: 0.2,
+      durationMs: 500
+    })
+
+    const rows = dispatchedCostsByRouting('routing-D')
+    expect(rows).toHaveLength(2)
+    const byModel = new Map(rows.map((r) => [r.targetModel, r.costUsd]))
+    expect(byModel.get('openai/gpt-5')).toBeCloseTo(0.1, 10)
+    expect(byModel.get('openai/gpt-5-codex')).toBeCloseTo(0.2, 10)
+  })
+
+  it('returns an empty array for a routingId with no dispatched rows', () => {
+    expect(dispatchedCostsByRouting('routing-none')).toEqual([])
+  })
+})
+
+describe('renameDispatchedUsage', () => {
+  it('moves rows from oldRoutingId to newRoutingId', () => {
+    insertDispatchedUsage({
+      ts: 1000,
+      fromRoutingId: 'tmp-routing',
+      fromEngine: 'claude',
+      targetEngine: 'opencode',
+      targetModel: 'openai/gpt-5',
+      targetSessionId: 'oc-sess-1',
+      toolUseId: 'toolu_1',
+      totalTokens: 100,
+      costUsd: 0.1,
+      durationMs: 500
+    })
+
+    renameDispatchedUsage('tmp-routing', 'canonical-session-id')
+
+    expect(getDispatchedUsageSince(0).filter((r) => r.fromRoutingId === 'tmp-routing')).toEqual([])
+    const moved = getDispatchedUsageSince(0).filter(
+      (r) => r.fromRoutingId === 'canonical-session-id'
+    )
+    expect(moved).toHaveLength(1)
+    expect(moved[0]).toMatchObject({ targetModel: 'openai/gpt-5', costUsd: 0.1 })
+
+    // seedDispatchedCosts()'s db query must find it under the NEW id.
+    expect(dispatchedCostsByRouting('canonical-session-id')).toEqual([
+      { targetEngine: 'opencode', targetModel: 'openai/gpt-5', costUsd: 0.1 }
+    ])
+  })
+
+  it('is a no-op (does not throw) when oldRoutingId has no rows', () => {
+    expect(() => renameDispatchedUsage('missing-old', 'new-id')).not.toThrow()
+    expect(dispatchedCostsByRouting('new-id')).toEqual([])
+  })
+
+  it('moves ALL rows for oldRoutingId, preserving multiple entries', () => {
+    insertDispatchedUsage({
+      ts: 1000,
+      fromRoutingId: 'multi-old',
+      fromEngine: 'claude',
+      targetEngine: 'opencode',
+      targetModel: 'openai/gpt-5',
+      targetSessionId: null,
+      toolUseId: null,
+      totalTokens: 100,
+      costUsd: 0.1,
+      durationMs: 500
+    })
+    insertDispatchedUsage({
+      ts: 1500,
+      fromRoutingId: 'multi-old',
+      fromEngine: 'claude',
+      targetEngine: 'claude',
+      targetModel: 'haiku',
+      targetSessionId: null,
+      toolUseId: null,
+      totalTokens: 50,
+      costUsd: 0.05,
+      durationMs: 300
+    })
+
+    renameDispatchedUsage('multi-old', 'multi-new')
+
+    const rows = getDispatchedUsageSince(0).filter((r) => r.fromRoutingId === 'multi-new')
+    expect(rows).toHaveLength(2)
   })
 })

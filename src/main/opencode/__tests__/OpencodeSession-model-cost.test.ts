@@ -105,6 +105,7 @@ vi.mock('../command-skill-discovery', () => ({
 }))
 
 import { OpencodeSession } from '../OpencodeSession'
+import { insertDispatchedUsage } from '../../services/db'
 import type { OpencodeEvent } from '../protocol/types'
 import type { BrowserWindow } from 'electron'
 import type { StatusLineData } from '../../../shared/types'
@@ -263,6 +264,80 @@ describe('OpencodeSession — live breakdown equals headline (Slice B)', () => {
     expect(statusLine.modelCosts).toEqual([
       { engineId: 'opencode', modelId: 'claude-sonnet-4-6', costUsd: 0.07 }
     ])
+
+    session.dispose()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Slice C — cross-engine dispatched cost in the session's own breakdown.
+// ---------------------------------------------------------------------------
+
+describe('OpencodeSession — dispatched cost (Slice C)', () => {
+  beforeEach(setupMocks)
+
+  it('addDispatchedCost accumulates and re-emits a status line with a dispatched entry', () => {
+    const win = new MockWindow() as unknown as BrowserWindow
+    const session = new OpencodeSession('r_dispatched', win, '/tmp/test-cwd', {
+      model: 'anthropic/claude-sonnet-4-6'
+    })
+
+    session.addDispatchedCost('claude', 'claude-haiku-4-5', 0.2)
+    session.addDispatchedCost('claude', 'claude-haiku-4-5', 0.1)
+
+    const sendMock = (win as unknown as MockWindow).webContents.send
+    const statusLine = lastStatusLine(sendMock as never)
+    expect(statusLine.modelCosts).toHaveLength(1)
+    expect(statusLine.modelCosts![0]).toMatchObject({
+      engineId: 'claude',
+      modelId: 'claude-haiku-4-5',
+      dispatched: true
+    })
+    expect(statusLine.modelCosts![0].costUsd).toBeCloseTo(0.3, 10)
+    // Dispatched spend must NOT fold into totalCostUsd (product decision).
+    expect(statusLine.totalCostUsd).toBe(0)
+
+    session.dispose()
+  })
+
+  it('seeds dispatched cost from durable storage on resume replay (rehydration across reloads)', async () => {
+    insertDispatchedUsage({
+      ts: 1000,
+      fromRoutingId: 'r_dispatched_resume',
+      fromEngine: 'opencode',
+      targetEngine: 'claude',
+      targetModel: 'claude-haiku-4-5',
+      targetSessionId: 'claude-sess-1',
+      toolUseId: 'toolu_1',
+      totalTokens: 300,
+      costUsd: 0.12,
+      durationMs: 1500
+    })
+    mockGetSession.mockResolvedValue({ id: 'ses_resumed' })
+    mockListMessages.mockResolvedValue([])
+
+    const win = new MockWindow() as unknown as BrowserWindow
+    const session = new OpencodeSession('r_dispatched_resume', win, '/tmp/test-cwd', {
+      resumeSessionId: 'ses_resumed'
+    })
+    await session.run(null)
+
+    const sendMock = (win as unknown as MockWindow).webContents.send
+    await vi.waitFor(() => {
+      const lines = (sendMock.mock.calls as unknown[][]).filter(
+        (c) => c[0] === 'session:status-line'
+      )
+      expect(
+        lines.some((l) => ((l[2] as StatusLineData).modelCosts ?? []).some((m) => m.dispatched))
+      ).toBe(true)
+    })
+
+    const statusLine = lastStatusLine(sendMock as never)
+    expect(statusLine.modelCosts).toEqual(
+      expect.arrayContaining([
+        { engineId: 'claude', modelId: 'claude-haiku-4-5', costUsd: 0.12, dispatched: true }
+      ])
+    )
 
     session.dispose()
   })

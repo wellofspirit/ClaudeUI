@@ -48,6 +48,7 @@ import type { SdkToolExtra } from '../../sdk'
 
 function makeCtx(overrides: Partial<CollabServerContext> = {}): CollabServerContext & {
   emit: ReturnType<typeof vi.fn>
+  addDispatchedCost: ReturnType<typeof vi.fn>
 } {
   return {
     engineId: 'claude',
@@ -55,8 +56,12 @@ function makeCtx(overrides: Partial<CollabServerContext> = {}): CollabServerCont
     cwd: '/tmp/project',
     getAutonomyMode: () => 'acceptEdits',
     emit: vi.fn(),
+    addDispatchedCost: vi.fn(),
     ...overrides
-  } as CollabServerContext & { emit: ReturnType<typeof vi.fn> }
+  } as CollabServerContext & {
+    emit: ReturnType<typeof vi.fn>
+    addDispatchedCost: ReturnType<typeof vi.fn>
+  }
 }
 
 function makeExtra(): SdkToolExtra {
@@ -99,6 +104,7 @@ describe('createCollabServer', () => {
         cwd: '/tmp/project',
         autonomyMode: 'acceptEdits',
         emit: ctx.emit,
+        addDispatchedCost: ctx.addDispatchedCost,
         extra
       }
     )
@@ -175,6 +181,19 @@ describe('createCollabServer', () => {
       fromRoutingId: 'stable-session-uuid',
       autonomyMode: 'plan'
     })
+  })
+
+  it('threads ctx.addDispatchedCost through to the dispatcher context (ADR-033 Slice C)', async () => {
+    const dispatchSpy = vi
+      .spyOn(crossEngineDispatcher, 'dispatch')
+      .mockResolvedValue({ text: 'x', sessionId: 's' })
+    const ctx = makeCtx()
+    const server = createCollabServer(ctx)
+    await server.tools[0].handler({ engine: 'opencode', prompt: 'a' }, makeExtra())
+    expect(dispatchSpy).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ addDispatchedCost: ctx.addDispatchedCost })
+    )
   })
 
   it('propagates dispatcher isError as an isError tool result without a session_id suffix', async () => {

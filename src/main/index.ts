@@ -203,7 +203,9 @@ function createWindow(): void {
     return {
       cwd: session.cwd,
       autonomyMode: session.getAutonomyMode?.() ?? 'default',
-      emit: (channel, data) => session.emit(channel, data)
+      emit: (channel, data) => session.emit(channel, data),
+      addDispatchedCost: (engineId, modelId, costUsd) =>
+        session.addDispatchedCost(engineId, modelId, costUsd)
     }
   })
   opencodeServerManager.setDispatchAgent((req, ctx) => crossEngineDispatcher.dispatch(req, ctx))

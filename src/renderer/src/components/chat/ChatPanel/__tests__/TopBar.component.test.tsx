@@ -216,3 +216,117 @@ describe('TopBar — per-model cost breakdown (Slice B)', () => {
     unmount()
   })
 })
+
+// ---------------------------------------------------------------------------
+// Slice C — dispatched-row marker + "Total incl. dispatched" line.
+// ---------------------------------------------------------------------------
+
+describe('TopBar — dispatched (cross-engine) rows and total (Slice C)', () => {
+  let app: TestApp
+
+  beforeEach(async () => {
+    app = await bootTestApp()
+    useSessionStore.getState().createNewSession(ROUTE, '/d/repo')
+    useSessionStore.setState({ activeSessionId: ROUTE })
+  })
+
+  afterEach(() => {
+    app.teardown()
+    useSessionStore.setState({ activeSessionId: null, sessions: {} })
+  })
+
+  it('marks a dispatched row with data-dispatched + a "· dispatched" suffix, own-engine rows unmarked', () => {
+    useSessionStore.getState().setStatusLine(
+      ROUTE,
+      makeStatusLine({
+        totalCostUsd: 1.0,
+        modelCosts: [
+          { engineId: 'claude', modelId: 'claude-sonnet-4-6', costUsd: 1.0 },
+          { engineId: 'opencode', modelId: 'openai/gpt-5', costUsd: 0.31, dispatched: true }
+        ]
+      })
+    )
+
+    const { unmount } = render(<TopBar hasContent />)
+    fireEvent.mouseEnter(screen.getByTestId('TopBar.info'))
+
+    const rows = screen.getAllByTestId('TopBar.costBreakdownRow')
+    expect(rows).toHaveLength(2)
+
+    const ownRow = rows.find((r) => r.getAttribute('data-model') === 'claude-sonnet-4-6')!
+    expect(ownRow).not.toHaveAttribute('data-dispatched')
+    expect(ownRow).not.toHaveTextContent('dispatched')
+
+    const dispatchedRow = rows.find((r) => r.getAttribute('data-model') === 'openai/gpt-5')!
+    expect(dispatchedRow).toHaveAttribute('data-dispatched', 'true')
+    expect(dispatchedRow).toHaveTextContent('dispatched')
+    expect(dispatchedRow).toHaveTextContent('$0.31')
+
+    unmount()
+  })
+
+  it('strips the "provider/" prefix for a dispatched opencode-style model id shortModelName cannot shorten', () => {
+    useSessionStore.getState().setStatusLine(
+      ROUTE,
+      makeStatusLine({
+        totalCostUsd: 0,
+        modelCosts: [
+          { engineId: 'opencode', modelId: 'openai/gpt-5-codex', costUsd: 0.05, dispatched: true }
+        ]
+      })
+    )
+
+    const { unmount } = render(<TopBar hasContent />)
+    fireEvent.mouseEnter(screen.getByTestId('TopBar.info'))
+
+    const row = screen.getByTestId('TopBar.costBreakdownRow')
+    expect(row).toHaveTextContent('gpt-5-codex')
+    expect(row).not.toHaveTextContent('openai/gpt-5-codex')
+
+    unmount()
+  })
+
+  it('renders "Total incl. dispatched" as headline cost + dispatched sum when a dispatched row exists', () => {
+    useSessionStore.getState().setStatusLine(
+      ROUTE,
+      makeStatusLine({
+        totalCostUsd: 1.0,
+        modelCosts: [
+          { engineId: 'claude', modelId: 'claude-sonnet-4-6', costUsd: 1.0 },
+          { engineId: 'opencode', modelId: 'openai/gpt-5', costUsd: 0.31, dispatched: true },
+          { engineId: 'claude', modelId: 'claude-haiku-4-5', costUsd: 0.05, dispatched: true }
+        ]
+      })
+    )
+
+    const { unmount } = render(<TopBar hasContent />)
+    fireEvent.mouseEnter(screen.getByTestId('TopBar.info'))
+
+    const total = screen.getByTestId('TopBar.costTotalInclDispatched')
+    // 1.00 (headline, own-engine only) + 0.31 + 0.05 dispatched = 1.36
+    expect(total).toHaveTextContent('Total incl. dispatched')
+    expect(total).toHaveTextContent('$1.36')
+
+    unmount()
+  })
+
+  it('hides "Total incl. dispatched" when there are no dispatched rows', () => {
+    useSessionStore.getState().setStatusLine(
+      ROUTE,
+      makeStatusLine({
+        totalCostUsd: 1.68,
+        modelCosts: [
+          { engineId: 'claude', modelId: 'claude-sonnet-4-6', costUsd: 0.45 },
+          { engineId: 'claude', modelId: 'claude-fable-5', costUsd: 1.23 }
+        ]
+      })
+    )
+
+    const { unmount } = render(<TopBar hasContent />)
+    fireEvent.mouseEnter(screen.getByTestId('TopBar.info'))
+
+    expect(screen.queryByTestId('TopBar.costTotalInclDispatched')).toBeNull()
+
+    unmount()
+  })
+})

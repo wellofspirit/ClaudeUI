@@ -267,6 +267,12 @@ export class OpencodeSession extends BaseSession {
     }
   }
 
+  /** Slice C — re-emit the status line so a dispatched-cost update reaches the
+   *  TopBar tooltip live (BaseSession.addDispatchedCost's hook). */
+  protected override onDispatchedCostsChanged(): void {
+    this.sendStatusLine()
+  }
+
   /**
    * Build the ContentBlock[] for a locally-recorded user ChatMessage, mirroring
    * the renderer's optimistic addUserMessage (session-store.ts): attachments
@@ -475,6 +481,11 @@ export class OpencodeSession extends BaseSession {
       }
       this.costBaseUsd = seededCostBase
       this.modelCostBase = seededModelCostBase
+      // Slice C — cross-engine dispatched cost durability: seed from
+      // dispatched_usage, keyed by this.routingId (the STABLE id a later
+      // reopen constructs this session object with — see seedDispatchedCosts'
+      // doc comment on BaseSession).
+      this.seedDispatchedCosts()
       // Push the seeded totals to the renderer NOW — otherwise the durable
       // cost sits in memory but never reaches the TopBar tooltip until the
       // next live cost_update/result event (which may be turns away, or never,
@@ -1442,7 +1453,7 @@ export class OpencodeSession extends BaseSession {
       usedPercentage,
       remainingPercentage,
       turnStartedAtMs: this.isProcessing && this.startTimeMs > 0 ? this.startTimeMs : null,
-      modelCosts: this.modelCostEntries
+      modelCosts: [...this.modelCostEntries, ...this.dispatchedCostEntries()]
     }
   }
 

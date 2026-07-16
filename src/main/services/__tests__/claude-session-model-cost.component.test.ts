@@ -87,6 +87,7 @@ vi.mock('../auto-classifier', () => ({
 
 // Import AFTER mocks.
 import { ClaudeSession } from '../claude-session'
+import { insertDispatchedUsage } from '../db'
 import type { BrowserWindow } from 'electron'
 import type { StatusLineData } from '../../../shared/types'
 
@@ -275,6 +276,77 @@ describe('ClaudeSession — respawn-boundary cost fold', () => {
     const statusLine = lastStatusLine(sent)
     expect(statusLine.modelCosts).toEqual([
       { engineId: 'claude', modelId: 'claude-sonnet-4-6', costUsd: 0.054 }
+    ])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 4. Slice C — cross-engine dispatched cost in the session's own breakdown
+// ---------------------------------------------------------------------------
+
+describe('ClaudeSession — dispatched cost (Slice C)', () => {
+  it('addDispatchedCost accumulates and re-emits a status line with a dispatched entry', () => {
+    const { win, sent } = makeWin()
+    const session = new ClaudeSession('routing-dispatched-1', win, '/tmp/proj')
+    liveSessions.push(session)
+
+    session.addDispatchedCost('opencode', 'openai/gpt-5', 0.1)
+    session.addDispatchedCost('opencode', 'openai/gpt-5', 0.05)
+
+    const statusLine = lastStatusLine(sent)
+    expect(statusLine.modelCosts).toHaveLength(1)
+    expect(statusLine.modelCosts![0]).toMatchObject({
+      engineId: 'opencode',
+      modelId: 'openai/gpt-5',
+      dispatched: true
+    })
+    expect(statusLine.modelCosts![0].costUsd).toBeCloseTo(0.15, 10)
+    // Dispatched spend must NOT fold into totalCostUsd (product decision —
+    // the headline stays own-engine-only).
+    expect(session.status.totalCostUsd).toBe(0)
+  })
+
+  it('accumulates separately per (engineId, modelId) key', () => {
+    const { win, sent } = makeWin()
+    const session = new ClaudeSession('routing-dispatched-2', win, '/tmp/proj')
+    liveSessions.push(session)
+
+    session.addDispatchedCost('opencode', 'openai/gpt-5', 0.1)
+    session.addDispatchedCost('opencode', 'openai/gpt-5-codex', 0.2)
+
+    const statusLine = lastStatusLine(sent)
+    const byModel = new Map((statusLine.modelCosts ?? []).map((m) => [m.modelId, m.costUsd]))
+    expect(byModel.get('openai/gpt-5')).toBeCloseTo(0.1, 10)
+    expect(byModel.get('openai/gpt-5-codex')).toBeCloseTo(0.2, 10)
+  })
+
+  it('seeds dispatched cost from durable storage at construction (rehydration across reloads)', () => {
+    insertDispatchedUsage({
+      ts: 1000,
+      fromRoutingId: 'routing-dispatched-seed',
+      fromEngine: 'claude',
+      targetEngine: 'opencode',
+      targetModel: 'openai/gpt-5',
+      targetSessionId: 'oc-sess-1',
+      toolUseId: 'toolu_1',
+      totalTokens: 500,
+      costUsd: 0.31,
+      durationMs: 2000
+    })
+
+    const { win, sent } = makeWin()
+    const session = new ClaudeSession('routing-dispatched-seed', win, '/tmp/proj')
+    liveSessions.push(session)
+
+    // seedDispatchedCosts() runs synchronously in the constructor, but nothing
+    // emits a status-line at construction time — nudge with a same-key,
+    // zero-cost add (a legitimate live call) purely to trigger the re-emit and
+    // observe the seeded map's contents.
+    session.addDispatchedCost('opencode', 'openai/gpt-5', 0)
+
+    const statusLine = lastStatusLine(sent)
+    expect(statusLine.modelCosts).toEqual([
+      { engineId: 'opencode', modelId: 'openai/gpt-5', costUsd: 0.31, dispatched: true }
     ])
   })
 })

@@ -168,7 +168,12 @@ describe('createOpencodeHostedToolsServer — dispatch_agent (ADR-033 M2)', () =
 
   it('no dispatch function wired → isError (never throws)', async () => {
     const tool = getDispatchTool(tmp, {
-      lookupCallerSession: () => ({ cwd: '/proj', autonomyMode: 'default', emit: vi.fn() })
+      lookupCallerSession: () => ({
+        cwd: '/proj',
+        autonomyMode: 'default',
+        emit: vi.fn(),
+        addDispatchedCost: vi.fn()
+      })
     })
     const result = (await tool.handler(
       { engine: 'claude', prompt: 'x', __xeng_caller_session: 'ses_1' },
@@ -179,11 +184,12 @@ describe('createOpencodeHostedToolsServer — dispatch_agent (ADR-033 M2)', () =
 
   it('happy path: strips the internal arg, dispatches with fromRoutingId = caller id, appends session_id', async () => {
     const emit = vi.fn()
+    const addDispatchedCost = vi.fn()
     const dispatch = vi.fn<DispatchAgentFn>(async () => ({ text: 'the review', sessionId: 'claude-42' }))
     const tool = getDispatchTool(tmp, {
       lookupCallerSession: (id) => {
         expect(id).toBe('ses_caller')
-        return { cwd: '/proj', autonomyMode: 'acceptEdits', emit }
+        return { cwd: '/proj', autonomyMode: 'acceptEdits', emit, addDispatchedCost }
       },
       dispatch
     })
@@ -207,6 +213,7 @@ describe('createOpencodeHostedToolsServer — dispatch_agent (ADR-033 M2)', () =
         cwd: '/proj',
         autonomyMode: 'acceptEdits',
         emit,
+        addDispatchedCost,
         toolUseId: 'call_99'
       })
     )
@@ -223,7 +230,12 @@ describe('createOpencodeHostedToolsServer — dispatch_agent (ADR-033 M2)', () =
   it('missing __xeng_call_id → dispatch still proceeds, ctx.toolUseId is undefined', async () => {
     const dispatch = vi.fn<DispatchAgentFn>(async () => ({ text: 'ok', sessionId: 'claude-1' }))
     const tool = getDispatchTool(tmp, {
-      lookupCallerSession: () => ({ cwd: '/proj', autonomyMode: 'default', emit: vi.fn() }),
+      lookupCallerSession: () => ({
+        cwd: '/proj',
+        autonomyMode: 'default',
+        emit: vi.fn(),
+        addDispatchedCost: vi.fn()
+      }),
       dispatch
     })
     const result = (await tool.handler(
@@ -244,7 +256,12 @@ describe('createOpencodeHostedToolsServer — dispatch_agent (ADR-033 M2)', () =
       isError: true
     }))
     const tool = getDispatchTool(tmp, {
-      lookupCallerSession: () => ({ cwd: '/proj', autonomyMode: 'default', emit: vi.fn() }),
+      lookupCallerSession: () => ({
+        cwd: '/proj',
+        autonomyMode: 'default',
+        emit: vi.fn(),
+        addDispatchedCost: vi.fn()
+      }),
       dispatch
     })
     const result = (await tool.handler(

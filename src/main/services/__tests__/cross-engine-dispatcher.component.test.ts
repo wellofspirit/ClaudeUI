@@ -138,6 +138,7 @@ function makeHarness(overrides: Partial<DispatcherDeps> = {}): {
 
 function makeCtx(overrides: Partial<DispatchContext> = {}): DispatchContext & {
   emit: ReturnType<typeof vi.fn>
+  addDispatchedCost: ReturnType<typeof vi.fn>
 } {
   return {
     fromEngine: 'claude',
@@ -145,8 +146,9 @@ function makeCtx(overrides: Partial<DispatchContext> = {}): DispatchContext & {
     cwd: '/tmp/xeng-project',
     autonomyMode: 'default',
     emit: vi.fn(),
+    addDispatchedCost: vi.fn(),
     ...overrides
-  } as DispatchContext & { emit: ReturnType<typeof vi.fn> }
+  } as DispatchContext & { emit: ReturnType<typeof vi.fn>; addDispatchedCost: ReturnType<typeof vi.fn> }
 }
 
 function makeExtra(overrides: Partial<SdkToolExtra> = {}): SdkToolExtra {
@@ -1880,6 +1882,57 @@ describe('CrossEngineDispatcher — M4-B usage capture (opencode direction)', ()
     const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
     expect(result.isError).toBeUndefined()
   })
+
+  // -------------------------------------------------------------------------
+  // Slice C — folding dispatched spend into the dispatching session's own
+  // cost breakdown (ctx.addDispatchedCost).
+  // -------------------------------------------------------------------------
+
+  it('calls ctx.addDispatchedCost with the target engine/model/cost on a successful turn', async () => {
+    const { dispatcher, client } = makeHarness()
+    client.prompt.mockResolvedValueOnce({
+      parts: [{ type: 'text', text: 'ok' }],
+      info: { tokens: { input: 10, output: 5 }, cost: 0.31 }
+    })
+    const ctx = makeCtx()
+    const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+    expect(result.isError).toBeUndefined()
+    expect(ctx.addDispatchedCost).toHaveBeenCalledWith('opencode', 'openai/gpt-5', 0.31)
+  })
+
+  it('does NOT call ctx.addDispatchedCost when turn cost is zero/absent', async () => {
+    const { dispatcher, client } = makeHarness()
+    client.prompt.mockResolvedValueOnce({
+      parts: [{ type: 'text', text: 'ok' }],
+      info: { tokens: { input: 10, output: 5 }, cost: 0 }
+    })
+    const ctx = makeCtx()
+    await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+    expect(ctx.addDispatchedCost).not.toHaveBeenCalled()
+  })
+
+  it('does NOT call ctx.addDispatchedCost when the dispatch fails (a timed-out turn)', async () => {
+    const { dispatcher, client } = makeHarness({ dispatchTimeoutMs: 30 })
+    client.prompt.mockImplementation(() => new Promise(() => {}))
+    const ctx = makeCtx()
+    const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+    expect(result.isError).toBe(true)
+    expect(ctx.addDispatchedCost).not.toHaveBeenCalled()
+  })
+
+  it('never fails the dispatch when ctx.addDispatchedCost is not provided', async () => {
+    const { dispatcher, client } = makeHarness()
+    client.prompt.mockResolvedValueOnce({
+      parts: [{ type: 'text', text: 'ok' }],
+      info: { cost: 0.02 }
+    })
+    const ctx = makeCtx()
+    // Simulate a caller that never wired the field (spec: optional, never
+    // fail a dispatch over a missing capability).
+    delete (ctx as { addDispatchedCost?: unknown }).addDispatchedCost
+    const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+    expect(result.isError).toBeUndefined()
+  })
 })
 
 describe('CrossEngineDispatcher — M4-B usage capture (Claude direction)', () => {
@@ -1925,6 +1978,116 @@ describe('CrossEngineDispatcher — M4-B usage capture (Claude direction)', () =
         durationMs: 4200
       })
     )
+    // Slice C — the dispatching session's own cost breakdown gets the fold-in.
+    expect(ctx.addDispatchedCost).toHaveBeenCalledWith('claude', 'haiku', 0.03)
+  })
+
+  it('does NOT call ctx.addDispatchedCost for a timed-out Claude-direction turn', async () => {
+    const target = makeFakeClaudeTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
+      spawnClaudeQuery: target.spawnClaudeQuery,
+      dispatchTimeoutMs: 30
+    })
+    const ctx = makeCtx({ fromEngine: 'opencode' })
+    const pending = dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
+    await tick()
+    target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-timeout' } as SDKMessage)
+    const result = await pending
+    expect(result.isError).toBe(true)
+    expect(ctx.addDispatchedCost).not.toHaveBeenCalled()
+  })
+
+  it('turn 2+ converts the CUMULATIVE total_cost_usd into a per-turn delta (record, fold-in, cap)', async () => {
+    // VERIFIED WIRE FACT: result.total_cost_usd is cumulative within one
+    // cli.js process. Two turns reporting 0.02 then 0.05 (a running total)
+    // spent 0.02 and 0.03 respectively — the pre-fix code recorded/folded/
+    // capped 0.02 and 0.05 (over-counting turn 2 by the whole turn-1 spend).
+    const recordDispatchedUsage = vi.fn()
+    const target = makeFakeClaudeTarget()
+    const { dispatcher } = makeHarness({
+      // maxCostUsd 0.06 discriminates: true per-turn accumulation is
+      // 0.02 + 0.03 = 0.05 < 0.06 (turn 3 allowed); the buggy cumulative
+      // `+=` reaches 0.02 + 0.05 = 0.07 ≥ 0.06 (turn 3 cap-rejected).
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku', maxCostUsd: 0.06 } })),
+      spawnClaudeQuery: target.spawnClaudeQuery,
+      recordDispatchedUsage
+    })
+    const ctx = makeCtx({ fromEngine: 'opencode' })
+
+    const first = dispatcher.dispatch({ engine: 'claude', prompt: 'one' }, ctx)
+    await tick()
+    target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-1' } as SDKMessage)
+    target.push(resultMsg({ result: 'first', total_cost_usd: 0.02 }))
+    expect((await first).sessionId).toBe('claude-sess-1')
+
+    const second = dispatcher.dispatch(
+      { engine: 'claude', prompt: 'two', sessionId: 'claude-sess-1' },
+      ctx
+    )
+    await tick()
+    target.push(resultMsg({ result: 'second', total_cost_usd: 0.05 }))
+    expect((await second).isError).toBeUndefined()
+
+    // DB rows: per-turn deltas, never the running total.
+    expect(recordDispatchedUsage).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ costUsd: 0.02 })
+    )
+    expect(recordDispatchedUsage).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ costUsd: expect.closeTo(0.03, 10) })
+    )
+
+    // Live fold-in: same deltas.
+    expect(ctx.addDispatchedCost).toHaveBeenNthCalledWith(1, 'claude', 'haiku', 0.02)
+    expect(ctx.addDispatchedCost).toHaveBeenNthCalledWith(
+      2,
+      'claude',
+      'haiku',
+      expect.closeTo(0.03, 10)
+    )
+
+    // Cap accumulation: 0.05 total → still under the 0.06 cap, turn 3 allowed.
+    const third = dispatcher.dispatch(
+      { engine: 'claude', prompt: 'three', sessionId: 'claude-sess-1' },
+      ctx
+    )
+    await tick()
+    target.push(resultMsg({ result: 'third', total_cost_usd: 0.05 }))
+    const thirdResult = await third
+    expect(thirdResult.isError).toBeUndefined()
+    expect(thirdResult.text).toBe('third')
+    // An UNCHANGED cumulative total (turn 3 cost the same process nothing
+    // new) is a zero delta — the row records costUsd 0 and there is no
+    // fold-in (the >0 guard).
+    expect(recordDispatchedUsage).toHaveBeenNthCalledWith(
+      3,
+      expect.objectContaining({ costUsd: 0 })
+    )
+    expect(ctx.addDispatchedCost).toHaveBeenCalledTimes(2)
+  })
+
+  it('a failed-subtype turn with real cost folds in too — parity with its DB record (seed-on-reload includes it)', async () => {
+    const recordDispatchedUsage = vi.fn()
+    const target = makeFakeClaudeTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
+      spawnClaudeQuery: target.spawnClaudeQuery,
+      recordDispatchedUsage
+    })
+    const ctx = makeCtx({ fromEngine: 'opencode' })
+    const pending = dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
+    await tick()
+    target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-1' } as SDKMessage)
+    target.push(
+      resultMsg({ subtype: 'error_max_turns', errors: ['max turns'], total_cost_usd: 0.04 })
+    )
+    const result = await pending
+    expect(result.isError).toBe(true)
+
+    expect(recordDispatchedUsage).toHaveBeenCalledWith(expect.objectContaining({ costUsd: 0.04 }))
+    expect(ctx.addDispatchedCost).toHaveBeenCalledWith('claude', 'haiku', 0.04)
   })
 
   it('counts DISTINCT tool_use ids — the same assistant message re-forwarded as partial updates does not double-count', async () => {

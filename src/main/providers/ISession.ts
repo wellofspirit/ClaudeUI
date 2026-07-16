@@ -128,6 +128,17 @@ export interface ISession {
   emit(channel: string, data: unknown): void
 
   /**
+   * Accumulate spend from a cross-engine dispatched-agent turn (ADR-033
+   * Slice C) into this session's own cost breakdown (TopBar tooltip), tagged
+   * `dispatched: true`. Implemented by BaseSession — every engine gets it.
+   * Used from OUTSIDE the session class by both dispatch directions'
+   * caller-session lookups (collab-tool.ts / opencode-hosted-tools.ts via
+   * main/index.ts), the same "reach into the dispatching session from the
+   * dispatcher" pattern as `emit` above.
+   */
+  addDispatchedCost(engineId: EngineId, modelId: string, costUsd: number): void
+
+  /**
    * Current permission-mode string (Claude-style — 'default'|'plan'|
    * 'acceptEdits'|'auto'|...). Optional: only engines whose sessions are a
    * cross-engine dispatch CALLER need it (opencode, for ADR-033 M2 autonomy

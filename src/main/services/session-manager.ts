@@ -5,6 +5,8 @@ import { engineRegistry } from '../providers/EngineRegistry'
 // Side-effect: registers all engine factories (claude, …) at module load time
 import '../providers/register-engines'
 import { loadSessionHistory } from './session-history'
+import { renameDispatchedUsage } from './db'
+import { logger } from './logger'
 
 export class SessionManager {
   private sessions = new Map<string, ISession>()
@@ -52,6 +54,19 @@ export class SessionManager {
     ;(session as { routingId: string }).routingId = newId
     this.sessions.delete(oldId)
     this.sessions.set(newId, session)
+
+    // Slice C (ADR-033 cross-engine dispatch): carry any dispatched_usage
+    // rows recorded under the pre-rekey id forward, so a later resume's
+    // seedDispatchedCosts() (keyed by the STABLE post-rekey id) can find them.
+    // Best-effort — a DB hiccup here must never break session rekeying.
+    try {
+      renameDispatchedUsage(oldId, newId)
+    } catch (err) {
+      logger.warn(
+        'SessionManager',
+        `renameDispatchedUsage failed (dispatched-cost rows may be orphaned): ${err instanceof Error ? err.message : String(err)}`
+      )
+    }
   }
 
   cancel(routingId: string): void {

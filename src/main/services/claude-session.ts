@@ -98,7 +98,8 @@ import type {
   SandboxSettings,
   PermissionSuggestion,
   AccountRef,
-  ModelCostEntry
+  ModelCostEntry,
+  EngineId
 } from '../../shared/types'
 import { claudeModel } from '../../shared/types'
 import { BaseSession } from '../providers/BaseSession'
@@ -301,6 +302,11 @@ export class ClaudeSession extends BaseSession {
     if (sandboxConfig) this.sandboxConfig = sandboxConfig
     this.sendStatus()
 
+    // Slice C (ADR-033 cross-engine dispatch): seed durable dispatched-cost
+    // rows unconditionally — a fresh session simply gets zero rows back, so
+    // this is safe regardless of whether resumeSessionId is set.
+    this.seedDispatchedCosts()
+
     // Resume seeding: the post-result reconciliation only runs after a turn
     // completes, so a RESUMED session's accumulators would otherwise sit at 0
     // until then — and the turn-start status-line emission (run()/dispatch)
@@ -385,6 +391,12 @@ export class ClaudeSession extends BaseSession {
         this.cancel()
       }, this.inactivityTimeoutMs)
     }
+  }
+
+  /** Slice C — re-emit the status line so a dispatched-cost update reaches the
+   *  TopBar tooltip live (BaseSession.addDispatchedCost's hook). */
+  protected override onDispatchedCostsChanged(): void {
+    this.send('session:status-line', this.buildStatusLineFromAccumulators())
   }
 
   async run(
@@ -543,7 +555,9 @@ export class ClaudeSession extends BaseSession {
             getRoutingId: () => this.routingId,
             cwd: this.cwd,
             getAutonomyMode: () => this.permissionMode,
-            emit: (channel, data) => this.send(channel, data)
+            emit: (channel, data) => this.send(channel, data),
+            addDispatchedCost: (engineId: EngineId, modelId: string, costUsd: number) =>
+              this.addDispatchedCost(engineId, modelId, costUsd)
           })
         : null
 
@@ -1906,7 +1920,7 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       usedPercentage: usedPct,
       remainingPercentage: usedPct !== null ? 100 - usedPct : null,
       turnStartedAtMs: this.turnStartedAtMs,
-      modelCosts: this.modelCosts
+      modelCosts: [...this.modelCosts, ...this.dispatchedCostEntries()]
     }
   }
 
