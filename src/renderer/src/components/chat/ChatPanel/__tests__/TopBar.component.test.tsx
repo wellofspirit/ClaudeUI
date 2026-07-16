@@ -67,6 +67,19 @@ describe('TopBar — Session time / API time', () => {
     unmount()
   })
 
+  it('formats hour-scale durations as "Nh Nm" (seconds dropped as noise)', () => {
+    // 1415m 20s of active time reads terribly — the hours tier kicks in at 1h.
+    useSessionStore
+      .getState()
+      .setStatusLine(ROUTE, makeStatusLine({ totalDurationMs: 84_920_000 }))
+
+    const { unmount } = render(<TopBar hasContent />)
+    fireEvent.mouseEnter(screen.getByTestId('TopBar.info'))
+
+    expect(screen.getByTestId('TopBar.sessionTime')).toHaveTextContent('23h 35m')
+    unmount()
+  })
+
   it('hides API time when totalApiDurationMs is 0 (e.g. opencode, or a reloaded Claude session)', () => {
     useSessionStore.getState().setStatusLine(ROUTE, makeStatusLine({ totalDurationMs: 5_000 }))
 

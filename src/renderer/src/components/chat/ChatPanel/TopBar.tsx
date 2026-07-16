@@ -11,12 +11,13 @@ import { McpDialog } from '../../McpDialog'
 import { EngineLogo } from '../../shared/EngineLogo'
 import { shortModelName } from '../../usage/usage-utils'
 
-/** Format a millisecond duration as "Ns" or "Nm Ns". Shared by the Session
- *  time / API time tooltip rows. */
+/** Format a millisecond duration as "Ns", "Nm Ns", or "Nh Nm" — seconds drop
+ *  out at the hour scale where they're noise. Shared by the Session time /
+ *  API time tooltip rows. */
 function formatDuration(ms: number): string {
-  return ms < 60000
-    ? `${Math.floor(ms / 1000)}s`
-    : `${Math.floor(ms / 60000)}m ${Math.floor((ms % 60000) / 1000)}s`
+  if (ms < 60000) return `${Math.floor(ms / 1000)}s`
+  if (ms < 3_600_000) return `${Math.floor(ms / 60000)}m ${Math.floor((ms % 60000) / 1000)}s`
+  return `${Math.floor(ms / 3_600_000)}h ${Math.floor((ms % 3_600_000) / 60000)}m`
 }
 
 /** Format a cost figure consistently with the existing Cost/breakdown rows. */
