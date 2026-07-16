@@ -2090,6 +2090,34 @@ describe('CrossEngineDispatcher — M4-B usage capture (Claude direction)', () =
     expect(ctx.addDispatchedCost).toHaveBeenCalledWith('claude', 'haiku', 0.04)
   })
 
+  it('a failed-subtype turn counts toward the cost cap — the cap is a spend limit, not a success limit (ADR-034)', async () => {
+    const target = makeFakeClaudeTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku', maxCostUsd: 0.05 } })),
+      spawnClaudeQuery: target.spawnClaudeQuery
+    })
+    const ctx = makeCtx({ fromEngine: 'opencode' })
+    const first = dispatcher.dispatch({ engine: 'claude', prompt: 'one' }, ctx)
+    await tick()
+    target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-1' } as SDKMessage)
+    // The turn FAILED but burned 0.05 of real spend — meeting the cap.
+    target.push(
+      resultMsg({ subtype: 'error_max_turns', errors: ['max turns'], total_cost_usd: 0.05 })
+    )
+    const firstResult = await first
+    expect(firstResult.isError).toBe(true)
+
+    // Pre-fix, failed-turn spend was invisible to the cap and this
+    // continuation ran; now it must be rejected before spawning a turn.
+    const second = await dispatcher.dispatch(
+      { engine: 'claude', prompt: 'two', sessionId: 'claude-sess-1' },
+      ctx
+    )
+    expect(second.isError).toBe(true)
+    expect(second.text).toContain('cost cap')
+    expect(target.spawnCalls).toHaveLength(1)
+  })
+
   it('counts DISTINCT tool_use ids — the same assistant message re-forwarded as partial updates does not double-count', async () => {
     const recordDispatchedUsage = vi.fn()
     const target = makeFakeClaudeTarget()

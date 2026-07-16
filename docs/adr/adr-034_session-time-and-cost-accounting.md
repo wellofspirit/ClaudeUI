@@ -81,10 +81,11 @@ engine session object exists.
 The claude-target dispatch path converts the cumulative `result.total_cost_usd` into a per-turn
 delta against a per-entry baseline (`lastReportedTotalCostUsd`; entries are strictly one-process, so
 one zero-init suffices). This fixes the cost cap, the recorded `dispatched_usage` rows, and the new
-fold-in for multi-turn dispatch sessions. **Deliberately unchanged:** failed-subtype turns' spend is
-recorded/displayed but still does not count toward the dispatch cost cap (pre-existing M4-C
-behavior) — flagged as a candidate one-line follow-up, since the cap is arguably a spend limit, not
-a success limit.
+fold-in for multi-turn dispatch sessions. Failed-subtype turns' spend now also counts toward the
+dispatch cost cap — the cap is a spend limit, not a success limit (pre-existing M4-C behavior only
+counted successful turns, so a dispatch session whose turns kept erroring could spend past the cap
+without tripping it). The cap-crossing note is still only appended to successful turns' output; a
+failed turn that crosses simply causes the next turn to be rejected.
 
 ## Consequences
 

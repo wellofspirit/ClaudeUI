@@ -1514,6 +1514,13 @@ export class CrossEngineDispatcher {
         if (Number.isFinite(turnCostUsd) && turnCostUsd > 0) {
           ctx.addDispatchedCost?.('claude', model, turnCostUsd)
         }
+        // The cap is a SPEND limit, not a success limit (ADR-034): a failed
+        // turn burned real tokens, so it counts toward maxCostUsd like any
+        // other — otherwise a dispatch session whose turns keep erroring
+        // could spend past the cap without ever tripping it. (The crossing
+        // note is only appended on success turns; a failed turn that crosses
+        // simply causes the NEXT turn to be rejected by the cap check.)
+        entry.cumulativeCostUsd += turnCostUsd
         return errorResult(`Dispatched turn failed: ${detail}`, entry.sessionId ?? '')
       }
       const finalText = result.result || '(the dispatched agent returned no text)'
