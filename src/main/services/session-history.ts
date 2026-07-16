@@ -168,6 +168,128 @@ interface ModelTokenAgg {
   cacheRead: number
 }
 
+/**
+ * Fold one parsed transcript line's assistant usage into the shared per-model
+ * cost map (Slice B state) — factored out so the SAME accumulation (and the
+ * same `seenMessageIds` dedup set) can be applied to both the main transcript
+ * and its subagent transcripts (see `foldSubagentCosts` below). No-ops for
+ * anything that isn't a priced assistant usage line.
+ */
+function foldAssistantCostLine(
+  data: Record<string, unknown>,
+  modelTokens: Map<string, ModelTokenAgg>,
+  seenMessageIds: Set<string>
+): void {
+  if (data.type !== 'assistant') return
+  const message = data.message as Record<string, unknown> | undefined
+  const usage = message?.usage as Record<string, unknown> | undefined
+  if (!usage) return
+
+  const rawModel = typeof message?.model === 'string' ? (message.model as string) : undefined
+  const normalizedModel = rawModel ? normalizeModelName(rawModel) : null
+  if (!normalizedModel) return
+
+  const messageId = typeof message?.id === 'string' ? (message.id as string) : ''
+  if (messageId !== '' && seenMessageIds.has(messageId)) return
+  if (messageId) seenMessageIds.add(messageId)
+
+  const agg = modelTokens.get(normalizedModel) ?? {
+    input: 0,
+    output: 0,
+    cacheCreation: 0,
+    cacheCreation1h: 0,
+    cacheRead: 0
+  }
+  agg.input += (usage.input_tokens as number) || 0
+  agg.output += (usage.output_tokens as number) || 0
+  agg.cacheCreation += (usage.cache_creation_input_tokens as number) ?? 0
+  const cacheCreation = usage.cache_creation as Record<string, unknown> | undefined
+  agg.cacheCreation1h += (cacheCreation?.ephemeral_1h_input_tokens as number) ?? 0
+  agg.cacheRead += (usage.cache_read_input_tokens as number) ?? 0
+  modelTokens.set(normalizedModel, agg)
+}
+
+/**
+ * Stream one subagent transcript's assistant lines into the shared per-model
+ * cost map. Cost-only — deliberately does NOT touch the legacy token sums,
+ * context length, or turn-span duration accumulator (those are main-chain
+ * semantics: context-window display and active session time).
+ */
+function foldSubagentFile(
+  filePath: string,
+  modelTokens: Map<string, ModelTokenAgg>,
+  seenMessageIds: Set<string>
+): Promise<void> {
+  return new Promise((resolve) => {
+    let stream: fs.ReadStream
+    try {
+      stream = fs.createReadStream(filePath, { encoding: 'utf-8' })
+    } catch (err) {
+      logger.warn('SessionHistory', 'Failed to open subagent transcript for cost scan', err)
+      resolve()
+      return
+    }
+    const rl = readline.createInterface({ input: stream })
+    rl.on('line', (line) => {
+      try {
+        const data = JSON.parse(line)
+        foldAssistantCostLine(data, modelTokens, seenMessageIds)
+      } catch (err) {
+        logger.warn('SessionHistory', 'Failed to parse line in subagent cost scan', err)
+      }
+    })
+    rl.on('close', () => resolve())
+    rl.on('error', () => resolve())
+  })
+}
+
+/**
+ * Task-tool subagent transcripts are stored as SEPARATE files —
+ * `<projectDir>/<sessionId>/subagents/agent-<id>.jsonl` (alongside
+ * `agent-<id>.meta.json` and a `tool-results/` dir) — not lines in the main
+ * transcript, so the main streaming pass above never sees them. A session
+ * that leans on subagents can have most of its actual spend live only in
+ * these files, invisible to the per-model cost recompute. This folds them
+ * into the SAME modelTokens map / seenMessageIds set used for the main file,
+ * sequentially (a session can have dozens of agent files — no unbounded
+ * fan-out).
+ *
+ * Not a double-count risk: the cost base this function feeds is seeded ONCE
+ * at ClaudeSession construction (transcript state at that moment), and live
+ * tracking during the running session comes from cli.js's own authoritative
+ * `result.modelUsage`, which already covers everything the current process
+ * — including its own subagent API calls — spends (see the modelCosts doc
+ * comment below for the seam with live costBaseUsd/liveTotalCostUsd).
+ */
+async function foldSubagentCosts(
+  filePath: string,
+  modelTokens: Map<string, ModelTokenAgg>,
+  seenMessageIds: Set<string>
+): Promise<void> {
+  const subagentsDir = path.join(
+    path.dirname(filePath),
+    path.basename(filePath, '.jsonl'),
+    'subagents'
+  )
+  if (!fs.existsSync(subagentsDir)) return // common case — no subagents used
+
+  let files: string[]
+  try {
+    files = fs.readdirSync(subagentsDir)
+  } catch (err) {
+    logger.warn('SessionHistory', 'Failed to read subagents directory', err)
+    return
+  }
+
+  const agentFiles = files
+    .filter((f) => f.startsWith('agent-') && f.endsWith('.jsonl'))
+    .sort()
+
+  for (const f of agentFiles) {
+    await foldSubagentFile(path.join(subagentsDir, f), modelTokens, seenMessageIds)
+  }
+}
+
 export async function computeTokenMetrics(
   filePath: string,
   model?: string
@@ -235,28 +357,7 @@ export async function computeTokenMetrics(
             if (typeof data.message.model === 'string') transcriptModel = data.message.model
           }
 
-          const rawModel = typeof data.message.model === 'string' ? data.message.model : undefined
-          const normalizedModel = rawModel ? normalizeModelName(rawModel) : null
-          if (normalizedModel) {
-            const messageId = typeof data.message.id === 'string' ? data.message.id : ''
-            const isDup = messageId !== '' && seenMessageIds.has(messageId)
-            if (!isDup) {
-              if (messageId) seenMessageIds.add(messageId)
-              const agg = modelTokens.get(normalizedModel) ?? {
-                input: 0,
-                output: 0,
-                cacheCreation: 0,
-                cacheCreation1h: 0,
-                cacheRead: 0
-              }
-              agg.input += usage.input_tokens || 0
-              agg.output += usage.output_tokens || 0
-              agg.cacheCreation += usage.cache_creation_input_tokens ?? 0
-              agg.cacheCreation1h += usage.cache_creation?.ephemeral_1h_input_tokens ?? 0
-              agg.cacheRead += usage.cache_read_input_tokens ?? 0
-              modelTokens.set(normalizedModel, agg)
-            }
-          }
+          foldAssistantCostLine(data, modelTokens, seenMessageIds)
         } else if (data.type === 'result') {
           // Real transcripts carry no `type: "result"` lines (verified across
           // 46 real transcripts), so this branch is dead in practice today.
@@ -273,7 +374,7 @@ export async function computeTokenMetrics(
       }
     })
 
-    rl.on('close', () => {
+    rl.on('close', async () => {
       if (mostRecentMainChainUsage) {
         contextLength =
           (mostRecentMainChainUsage.input_tokens || 0) +
@@ -298,6 +399,12 @@ export async function computeTokenMetrics(
       // Acceptable imprecision: this is pricing-table math against historical
       // tokens, while a live session's cost comes from cli.js's authoritative
       // costUSD (see claude-session.ts's costBaseUsd/liveTotalCostUsd seam).
+      //
+      // Task-tool subagent spend lives in separate transcript files (see
+      // foldSubagentCosts's doc comment) — fold it into the same modelTokens
+      // map before deriving modelCosts/totalCostUsd below.
+      await foldSubagentCosts(filePath, modelTokens, seenMessageIds)
+
       const modelCosts: ModelCostEntry[] = []
       for (const [modelId, agg] of modelTokens) {
         const costUsd = calculateCostFromTokens(

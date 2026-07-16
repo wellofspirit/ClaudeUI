@@ -506,3 +506,133 @@ describe('computeTokenMetrics — modelCosts (Slice B)', () => {
     expect(m.modelCosts).toEqual([])
   })
 })
+
+// ---------------------------------------------------------------------------
+// computeTokenMetrics — subagent transcripts fold into modelCosts.
+//
+// Task-tool subagent transcripts live in SEPARATE files
+// (<projectDir>/<sessionId>/subagents/agent-<id>.jsonl), not lines in the
+// main transcript. Guard: against the pre-fix implementation (main-file-only
+// scan), the multi-model fixture below fails because the subagent-only
+// model (opus, never mentioned in the main file) is entirely absent from
+// modelCosts.
+// ---------------------------------------------------------------------------
+
+describe('computeTokenMetrics — subagent transcripts fold into modelCosts', () => {
+  let seq = 0
+  function writeTranscript(lines: object[]): string {
+    const file = path.join(os.tmpdir(), `claudeui-history-subagent-${process.pid}-${seq++}.jsonl`)
+    fs.writeFileSync(file, lines.map((l) => JSON.stringify(l)).join('\n'))
+    return file
+  }
+  function assistantMsg(
+    id: string,
+    model: string,
+    usage: { input_tokens: number; output_tokens: number }
+  ): object {
+    return { type: 'assistant', message: { id, model, usage } }
+  }
+  // Mirrors production layout: <projectDir>/<sessionId>.jsonl (main file) +
+  // <projectDir>/<sessionId>/subagents/agent-<id>.jsonl (subagent files).
+  function subagentsDirFor(mainFile: string): string {
+    return path.join(path.dirname(mainFile), path.basename(mainFile, '.jsonl'), 'subagents')
+  }
+  function writeSubagentFile(mainFile: string, name: string, lines: object[]): void {
+    const dir = subagentsDirFor(mainFile)
+    fs.mkdirSync(dir, { recursive: true })
+    fs.writeFileSync(path.join(dir, name), lines.map((l) => JSON.stringify(l)).join('\n'))
+  }
+  function cleanup(mainFile: string): void {
+    fs.unlinkSync(mainFile)
+    const sessionDir = path.join(path.dirname(mainFile), path.basename(mainFile, '.jsonl'))
+    fs.rmSync(sessionDir, { recursive: true, force: true })
+  }
+
+  it('folds subagent-file spend into modelCosts/totalCostUsd, leaving legacy sums + duration main-file-only', async () => {
+    const file = writeTranscript([
+      { type: 'user', timestamp: '2026-01-01T00:00:00.000Z' },
+      {
+        ...assistantMsg('msg_main_1', 'claude-sonnet-4-6', {
+          input_tokens: 500_000,
+          output_tokens: 0
+        }),
+        timestamp: '2026-01-01T00:00:05.000Z'
+      }
+    ])
+    writeSubagentFile(file, 'agent-aaa.jsonl', [
+      assistantMsg('msg_sub_1', 'claude-opus-4-8', { input_tokens: 200_000, output_tokens: 0 })
+    ])
+    writeSubagentFile(file, 'agent-bbb.jsonl', [
+      assistantMsg('msg_sub_2', 'claude-opus-4-8', { input_tokens: 800_000, output_tokens: 0 }),
+      // Same model as the main file — must ADD to the main-file sonnet cost,
+      // not replace it.
+      assistantMsg('msg_sub_3', 'claude-sonnet-4-6', { input_tokens: 500_000, output_tokens: 0 })
+    ])
+
+    const m = await computeTokenMetrics(file)
+    cleanup(file)
+
+    const sonnet = m.modelCosts!.find((e) => e.modelId === 'claude-sonnet-4-6')
+    const opus = m.modelCosts!.find((e) => e.modelId === 'claude-opus-4-8')
+    // sonnet: main (500k → $1.5) + subagent (500k → $1.5) = $3
+    expect(sonnet?.costUsd).toBeCloseTo(3, 6)
+    // opus: entirely from subagent files (200k + 800k = 1M → $5) — this
+    // model is ABSENT from modelCosts pre-fix.
+    expect(opus?.costUsd).toBeCloseTo(5, 6)
+    expect(m.totalCostUsd).toBeCloseTo(8, 6)
+
+    // Legacy main-chain sums/duration must be untouched by subagent files —
+    // these reflect the main transcript only (500k input tokens, one turn).
+    expect(m.totalInputTokens).toBe(500_000)
+    expect(m.totalOutputTokens).toBe(0)
+    expect(m.cachedTokens).toBe(0)
+    expect(m.contextWindowSize).toBe(500_000)
+    expect(m.totalDurationMs).toBe(5000)
+  })
+
+  it('dedupes a message id repeated across two different subagent files', async () => {
+    const file = writeTranscript([{ type: 'user', timestamp: '2026-01-01T00:00:00.000Z' }])
+    writeSubagentFile(file, 'agent-aaa.jsonl', [
+      assistantMsg('msg_dup', 'claude-opus-4-8', { input_tokens: 1_000_000, output_tokens: 0 })
+    ])
+    writeSubagentFile(file, 'agent-bbb.jsonl', [
+      // Same message id re-emitted in a different subagent file — must be
+      // counted once, not twice.
+      assistantMsg('msg_dup', 'claude-opus-4-8', { input_tokens: 1_000_000, output_tokens: 0 })
+    ])
+
+    const m = await computeTokenMetrics(file)
+    cleanup(file)
+
+    const opus = m.modelCosts!.find((e) => e.modelId === 'claude-opus-4-8')
+    expect(opus?.costUsd).toBeCloseTo(5, 6) // NOT 10
+    expect(m.totalCostUsd).toBeCloseTo(5, 6)
+  })
+
+  it('ignores non-matching files in the subagents dir (.meta.json, notes.txt)', async () => {
+    const file = writeTranscript([{ type: 'user', timestamp: '2026-01-01T00:00:00.000Z' }])
+    const dir = subagentsDirFor(file)
+    fs.mkdirSync(dir, { recursive: true })
+    fs.writeFileSync(path.join(dir, 'agent-aaa.meta.json'), JSON.stringify({ some: 'meta' }))
+    fs.writeFileSync(path.join(dir, 'notes.txt'), 'not json at all')
+    writeSubagentFile(file, 'agent-aaa.jsonl', [
+      assistantMsg('msg_1', 'claude-opus-4-8', { input_tokens: 1_000_000, output_tokens: 0 })
+    ])
+
+    const m = await computeTokenMetrics(file)
+    cleanup(file)
+
+    expect(m.modelCosts!.length).toBe(1)
+    const opus = m.modelCosts!.find((e) => e.modelId === 'claude-opus-4-8')
+    expect(opus?.costUsd).toBeCloseTo(5, 6)
+  })
+
+  it('is unaffected when the subagents dir is absent (existing single-file behavior)', async () => {
+    const file = writeTranscript([
+      assistantMsg('msg_1', 'claude-sonnet-4-6', { input_tokens: 1_000_000, output_tokens: 0 })
+    ])
+    const m = await computeTokenMetrics(file)
+    fs.unlinkSync(file)
+    expect(m.modelCosts).toEqual([{ engineId: 'claude', modelId: 'claude-sonnet-4-6', costUsd: 3 }])
+  })
+})
