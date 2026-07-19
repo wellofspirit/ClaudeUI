@@ -16,6 +16,10 @@ describe('PI_BRIDGE_EXTENSION_SOURCE', () => {
     expect(PI_BRIDGE_VERSION.length).toBeGreaterThan(0)
   })
 
+  it('is version 2 (M3 bumped it for resources_discover)', () => {
+    expect(PI_BRIDGE_VERSION).toBe('2')
+  })
+
   it('contains no import statements (zero module-resolution surface for pi\'s jiti loader)', () => {
     expect(/(^|\s)import(\s|\{)/.test(PI_BRIDGE_EXTENSION_SOURCE)).toBe(false)
   })
@@ -52,6 +56,34 @@ describe('PI_BRIDGE_EXTENSION_SOURCE', () => {
     expect(PI_BRIDGE_EXTENSION_SOURCE).toMatch(/project_trust/)
     expect(PI_BRIDGE_EXTENSION_SOURCE).toMatch(/trusted:\s*'yes'/)
     expect(PI_BRIDGE_EXTENSION_SOURCE).toMatch(/remember:\s*false/)
+  })
+
+  it('registers a resources_discover handler returning skillPaths (M3 shared skills)', () => {
+    expect(PI_BRIDGE_EXTENSION_SOURCE).toMatch(/resources_discover/)
+    expect(PI_BRIDGE_EXTENSION_SOURCE).toContain('skillPaths')
+  })
+
+  it('references the skill-dirs env var', () => {
+    expect(PI_BRIDGE_EXTENSION_SOURCE).toContain('CLAUDEUI_PI_SKILL_DIRS')
+  })
+
+  it('gates resources_discover independently of the bridge URL/token check', () => {
+    // The skill-dirs env var read + its `if` guard must appear BEFORE the
+    // `if (!bridgeUrl || !bridgeToken) return` line — i.e. resources_discover
+    // can register even when the function returns early right after for the
+    // (separate) bridge gate. This is the actual independence property: the
+    // early return must not be reachable before the skill-dirs block runs.
+    const skillEnvIdx = PI_BRIDGE_EXTENSION_SOURCE.indexOf('CLAUDEUI_PI_SKILL_DIRS')
+    const earlyReturnIdx = PI_BRIDGE_EXTENSION_SOURCE.indexOf('if (!bridgeUrl || !bridgeToken) return')
+    expect(skillEnvIdx).toBeGreaterThan(-1)
+    expect(earlyReturnIdx).toBeGreaterThan(-1)
+    expect(skillEnvIdx).toBeLessThan(earlyReturnIdx)
+  })
+
+  it('splits skill dirs on a platform-appropriate delimiter without importing node:path', () => {
+    // Node's path.delimiter equivalent, spelled out inline (see the no-import
+    // constraint) rather than `require('node:path').delimiter`.
+    expect(PI_BRIDGE_EXTENSION_SOURCE).toMatch(/process\.platform === 'win32' \? ';' : ':'/)
   })
 
   it('is syntactically valid JavaScript (bonus tripwire beyond the spec\'s minimum set)', () => {

@@ -80,7 +80,7 @@ import {
 } from '../opencode/model-discovery'
 import { opencodeServerManager } from '../opencode/OpencodeServerManager'
 import { discoverPiModels, invalidatePiModelCache } from '../pi/model-discovery'
-import { piBinaryAvailable } from '../pi/pi-locate'
+import { piBinaryAvailable, locatePiBinary } from '../pi/pi-locate'
 import {
   readOpencodeNativeConfig,
   writeOpencodeNativeConfig,
@@ -1096,6 +1096,9 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     if (engineId === 'pi') return piBinaryAvailable()
     return true
   })
+  // Absolute path to the vendored pi binary, for the Settings › pi subscription
+  // hint's copyable "run this command in a terminal" block. Null if not found.
+  ipcMain.handle('pi:binary-path', (): string | null => locatePiBinary())
   ipcMain.handle('config:load-vendor-config', (_e, vendorId: string) =>
     loadVendorConfig(vendorId)
   )

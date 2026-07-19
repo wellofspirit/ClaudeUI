@@ -7,9 +7,10 @@ import type { EffortLevel } from '../../../shared/model-capabilities'
 import {
   engineMeta,
   OPENCODE_DEFAULT_MODEL,
+  PI_DEFAULT_MODEL,
   FREE_OPENCODE_VENDOR_IDS
 } from '../../../shared/engine-meta'
-export { OPENCODE_DEFAULT_MODEL } from '../../../shared/engine-meta'
+export { OPENCODE_DEFAULT_MODEL, PI_DEFAULT_MODEL } from '../../../shared/engine-meta'
 import type {
   ChatMessage,
   SessionStatus,
@@ -71,6 +72,30 @@ export function resolveOpencodeModel(models: ModelInfo[], preferred?: string): s
   if (preferred && oc.some((m) => m.value === preferred)) return preferred
   const free = oc.find((m) => FREE_OPENCODE_VENDOR_IDS.has(m.vendorId ?? ''))
   return (free ?? oc[0]).value
+}
+
+/**
+ * The engine-configurable `perEngineDefault` to feed `engineMeta(engineId).
+ * defaultModelValue(...)` — opencode's `opencodeDefaultModel` for 'opencode',
+ * pi's `piDefaultModel` for 'pi', undefined for every other engine (claude's
+ * defaultModelValue ignores the param entirely, so passing undefined is a
+ * pure no-op for it — see engine-meta.ts's doc comments).
+ *
+ * Before this helper existed, BOTH call sites below passed
+ * `state.opencodeDefaultModel` unconditionally regardless of `engineId` — a
+ * latent bug for 'pi' (a fresh/reopened pi session would seed from opencode's
+ * default model string instead of pi's own, since PI_DEFAULT_MODEL's fallback
+ * in `defaultModelValue` never triggers while `opencodeDefaultModel` is
+ * truthy, which it always is).
+ */
+function perEngineDefaultModel(
+  engineId: EngineId,
+  opencodeDefaultModel: string,
+  piDefaultModel: string
+): string | undefined {
+  if (engineId === 'opencode') return opencodeDefaultModel
+  if (engineId === 'pi') return piDefaultModel
+  return undefined
 }
 
 const TASK_TOOL_NAMES = new Set(['TaskCreate', 'TaskUpdate', 'TodoWrite'])
@@ -283,13 +308,14 @@ function saveSessionConfig(
  * Called once at startup; migrates from localStorage on first run.
  */
 export async function hydrateConfigFromDisk(): Promise<void> {
-  let [savedSettings, sessionConfig, slashCommands, loadedEngineConfig, opencodeSettings] =
+  let [savedSettings, sessionConfig, slashCommands, loadedEngineConfig, opencodeSettings, piEngineConfig] =
     await Promise.all([
       window.api.loadSettings(),
       window.api.loadSessionConfig(),
       window.api.loadSlashCommands(),
       window.api.loadEngineConfig('claude'),
-      window.api.loadOpencodeSettings().catch((): import('../../../shared/types').OpencodeConfigSettings => ({}))
+      window.api.loadOpencodeSettings().catch((): import('../../../shared/types').OpencodeConfigSettings => ({})),
+      window.api.loadEngineConfig('pi').catch((): import('../../../shared/types').EngineConfig => ({}))
     ])
 
   // One-time migration from localStorage → disk
@@ -334,6 +360,7 @@ export async function hydrateConfigFromDisk(): Promise<void> {
   useSessionStore.setState({
     engineConfig: loadedEngineConfig,
     opencodeDefaultModel: opencodeSettings?.model || OPENCODE_DEFAULT_MODEL,
+    piDefaultModel: piEngineConfig?.piConfig?.defaultModel || PI_DEFAULT_MODEL,
     settings,
     recentSessionIds: sessionConfig.recentSessions ?? [],
     pinnedSessionIds: sessionConfig.pinnedSessions ?? [],
@@ -615,6 +642,9 @@ interface SessionState {
   /** Configurable opencode default model (engines/opencode.json `opencodeConfig.model`).
    *  The opencode-engine value `engineMeta('opencode').defaultModelValue()` resolves to. */
   opencodeDefaultModel: string
+  /** Configurable pi default model (engines/pi.json `piConfig.defaultModel`, M3).
+   *  The pi-engine value `engineMeta('pi').defaultModelValue()` resolves to. */
+  piDefaultModel: string
   /** Bumped to force the model picker to re-fetch getEngineModels() — e.g. after
    *  an opencode provider/default-model change in Settings. */
   modelReloadNonce: number
@@ -660,6 +690,8 @@ interface SessionState {
   setLastSelectedEngineId: (engineId: EngineId) => void
   /** Update the configurable opencode default model (mirrors opencodeConfig.model). */
   setOpencodeDefaultModel: (model: string) => void
+  /** Update the configurable pi default model (mirrors piConfig.defaultModel, M3). */
+  setPiDefaultModel: (model: string) => void
   /** Force the model picker to re-fetch the engine model list. */
   reloadModels: () => void
   loadHistoricalSession: (
@@ -922,6 +954,7 @@ export const useSessionStore = create<SessionState>((set) => ({
     ((localStorage.getItem('lastSelectedEngineId') ??
       localStorage.getItem('lastSelectedProvider')) as EngineId | null) ?? 'claude',
   opencodeDefaultModel: OPENCODE_DEFAULT_MODEL,
+  piDefaultModel: PI_DEFAULT_MODEL,
   modelReloadNonce: 0,
   engineConfig: {},
   settings: DEFAULT_SETTINGS,
@@ -998,7 +1031,9 @@ export const useSessionStore = create<SessionState>((set) => ({
           defaultModel = 'default'
         }
       } else {
-        defaultModel = engineMeta(engineId).defaultModelValue(state.opencodeDefaultModel)
+        defaultModel = engineMeta(engineId).defaultModelValue(
+          perEngineDefaultModel(engineId, state.opencodeDefaultModel, state.piDefaultModel)
+        )
       }
       // Write model into sessionEngines so it can be seeded on reopen (spec §3).
       // Always write the entry so the engine is recorded; model is set on first model event.
@@ -1037,6 +1072,8 @@ export const useSessionStore = create<SessionState>((set) => ({
   setOpencodeDefaultModel: (model) =>
     set({ opencodeDefaultModel: model || OPENCODE_DEFAULT_MODEL }),
 
+  setPiDefaultModel: (model) => set({ piDefaultModel: model || PI_DEFAULT_MODEL }),
+
   reloadModels: () => set((s) => ({ modelReloadNonce: s.modelReloadNonce + 1 })),
 
   loadHistoricalSession: (
@@ -1063,7 +1100,10 @@ export const useSessionStore = create<SessionState>((set) => ({
         ? engineMeta(persistedEngineId).encodeModelValue(persistedModelRef)
         : undefined
       const selectedModel =
-        persistedModel ?? engineMeta(persistedEngineId).defaultModelValue(state.opencodeDefaultModel)
+        persistedModel ??
+        engineMeta(persistedEngineId).defaultModelValue(
+          perEngineDefaultModel(persistedEngineId, state.opencodeDefaultModel, state.piDefaultModel)
+        )
       return {
         sessions: {
           ...state.sessions,

@@ -304,6 +304,8 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       connection.invoke('engine:is-installed', engineId) as ReturnType<
         ClaudeAPI['engineIsInstalled']
       >,
+    getPiBinaryPath: () =>
+      connection.invoke('pi:binary-path') as ReturnType<ClaudeAPI['getPiBinaryPath']>,
 
     // Generation
     generateTitle: (conversationText) =>

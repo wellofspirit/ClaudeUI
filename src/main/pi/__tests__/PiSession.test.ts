@@ -7,6 +7,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { EventEmitter } from 'node:events'
+import { join, delimiter } from 'node:path'
 import type { PiEvent } from '../pi-protocol'
 
 class MockWindow extends EventEmitter {
@@ -35,7 +36,11 @@ const {
   mockWriteBridgeExtension,
   bridgeCaptured,
   mockLoadClaudePermissions,
-  mockSaveClaudePermissions
+  mockSaveClaudePermissions,
+  mockExistsSync,
+  mockHomedir,
+  mockPiAuthProbe,
+  mockBuildPiAccountRef
 } = vi.hoisted(() => {
   const mockStart = vi.fn().mockResolvedValue(undefined)
   const mockRequest = vi.fn()
@@ -92,7 +97,22 @@ const {
       additionalDirectories: [],
       defaultMode: undefined
     }),
-    mockSaveClaudePermissions: vi.fn()
+    mockSaveClaudePermissions: vi.fn(),
+    // Skill-dirs env var (M3): defaults to "nothing exists" so every
+    // PRE-EXISTING test's exact env assertion (no CLAUDEUI_PI_SKILL_DIRS key)
+    // stays unaffected — dedicated tests below override this per-case.
+    // Skill-dirs env var (M3): defaults to "nothing exists" so every
+    // PRE-EXISTING test's exact env assertion (no CLAUDEUI_PI_SKILL_DIRS key)
+    // stays unaffected — dedicated tests below override this per-case.
+    mockExistsSync: vi.fn().mockReturnValue(false),
+    mockHomedir: vi.fn().mockReturnValue('/fake/home'),
+    // piAuthProvider (M3): the module is mocked wholesale below (mirrors this
+    // file's existing '../../services/pi-session-list' wholesale mock) — the
+    // REAL PiAuthProvider singleton would hit real fs via piAgentDir(), which
+    // that pi-session-list mock doesn't export, and must never touch a real
+    // ~/.pi/agent/auth.json from a unit test regardless.
+    mockPiAuthProbe: vi.fn().mockResolvedValue({}),
+    mockBuildPiAccountRef: vi.fn().mockReturnValue(null)
   }
 })
 
@@ -118,6 +138,11 @@ vi.mock('../PiBridgeHost', () => ({
   PiBridgeHost: MockPiBridgeHost,
   writeBridgeExtension: mockWriteBridgeExtension
 }))
+vi.mock('../../auth/PiAuthProvider', () => ({
+  piAuthProvider: { probe: mockPiAuthProbe, buildPiAccountRef: mockBuildPiAccountRef }
+}))
+vi.mock('node:fs', () => ({ existsSync: mockExistsSync }))
+vi.mock('node:os', () => ({ homedir: mockHomedir }))
 // Hermetic gating tests: never touch the dev machine's real ~/.claude/settings.json.
 vi.mock('../../services/claude-settings', () => ({
   loadClaudePermissions: mockLoadClaudePermissions,
@@ -188,6 +213,10 @@ beforeEach(() => {
     defaultMode: undefined
   })
   mockSaveClaudePermissions.mockClear()
+  mockExistsSync.mockReset().mockReturnValue(false)
+  mockHomedir.mockClear().mockReturnValue('/fake/home')
+  mockPiAuthProbe.mockReset().mockResolvedValue({})
+  mockBuildPiAccountRef.mockReset().mockReturnValue(null)
 })
 
 /** Call the LAST captured bridge gate handler (the fake PiBridgeHost's constructor arg) directly — bypasses real HTTP, exactly mirroring what the real extension's fetch would send. */
@@ -1194,5 +1223,120 @@ describe('PiSession — live bash output streaming (M2b)', () => {
 
     await new Promise((r) => setTimeout(r, 150))
     expect(sentChannels(win)).not.toContain('session:bash-output')
+  })
+})
+
+/** Last positional-args tuple MockPiRpcClient was constructed with — `[binPath, opts]`. */
+function lastSpawnOpts(): { cwd: string; args: string[]; env: Record<string, string> } {
+  const calls = MockPiRpcClient.mock.calls
+  return calls[calls.length - 1][1]
+}
+
+describe('PiSession — skill dirs env var (M3 shared skills)', () => {
+  it('omits CLAUDEUI_PI_SKILL_DIRS entirely when neither skill dir exists', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-skills-none', win as never, '/cwd', {})
+    await session.run('hi')
+    expect(lastSpawnOpts().env).not.toHaveProperty('CLAUDEUI_PI_SKILL_DIRS')
+  })
+
+  it('sets CLAUDEUI_PI_SKILL_DIRS to the home skills dir when only it exists', async () => {
+    const homeSkills = join('/fake/home', '.claude', 'skills')
+    mockExistsSync.mockImplementation((p: string) => p === homeSkills)
+    const win = new MockWindow()
+    const session = new PiSession('rid-skills-home', win as never, '/cwd', {})
+    await session.run('hi')
+    expect(lastSpawnOpts().env.CLAUDEUI_PI_SKILL_DIRS).toBe(homeSkills)
+  })
+
+  it('sets CLAUDEUI_PI_SKILL_DIRS to the cwd skills dir when only it exists', async () => {
+    const cwdSkills = join('/cwd', '.claude', 'skills')
+    mockExistsSync.mockImplementation((p: string) => p === cwdSkills)
+    const win = new MockWindow()
+    const session = new PiSession('rid-skills-cwd', win as never, '/cwd', {})
+    await session.run('hi')
+    expect(lastSpawnOpts().env.CLAUDEUI_PI_SKILL_DIRS).toBe(cwdSkills)
+  })
+
+  it('joins BOTH dirs with path.delimiter (home first) when both exist', async () => {
+    const homeSkills = join('/fake/home', '.claude', 'skills')
+    const cwdSkills = join('/cwd', '.claude', 'skills')
+    mockExistsSync.mockReturnValue(true)
+    const win = new MockWindow()
+    const session = new PiSession('rid-skills-both', win as never, '/cwd', {})
+    await session.run('hi')
+    expect(lastSpawnOpts().env.CLAUDEUI_PI_SKILL_DIRS).toBe([homeSkills, cwdSkills].join(delimiter))
+  })
+
+  it('treats a thrown existsSync (e.g. permission error) as "does not exist" rather than failing the spawn', async () => {
+    mockExistsSync.mockImplementation(() => {
+      throw new Error('EPERM')
+    })
+    const win = new MockWindow()
+    const session = new PiSession('rid-skills-throw', win as never, '/cwd', {})
+    await expect(session.run('hi')).resolves.toBeUndefined()
+    expect(lastSpawnOpts().env).not.toHaveProperty('CLAUDEUI_PI_SKILL_DIRS')
+  })
+
+  it('still sets the bridge env vars alongside the skill dirs var (both coexist)', async () => {
+    mockExistsSync.mockReturnValue(true)
+    const win = new MockWindow()
+    const session = new PiSession('rid-skills-coexist', win as never, '/cwd', {})
+    await session.run('hi')
+    const env = lastSpawnOpts().env
+    expect(env.CLAUDEUI_PI_BRIDGE_URL).toBe('http://127.0.0.1:9999')
+    expect(env.CLAUDEUI_PI_BRIDGE_TOKEN).toBe('test-bridge-token')
+    expect(env.CLAUDEUI_PI_SKILL_DIRS).toBeTruthy()
+  })
+})
+
+describe('PiSession.status.account (M3 auth)', () => {
+  it('constructor warms the pi auth probe', () => {
+    const win = new MockWindow()
+    new PiSession('rid-account-warm', win as never, '/cwd', {})
+    expect(mockPiAuthProbe).toHaveBeenCalledTimes(1)
+  })
+
+  it('status.account reflects buildPiAccountRef for the current model vendorId', () => {
+    mockBuildPiAccountRef.mockReturnValue({
+      engineId: 'pi',
+      vendorId: 'anthropic',
+      billingType: 'apiKey',
+      authState: 'authenticated',
+      label: 'API key'
+    })
+    const win = new MockWindow()
+    const session = new PiSession('rid-account-1', win as never, '/cwd', { model: 'anthropic/claude-sonnet-4-6' })
+    expect(session.status.account).toEqual({
+      engineId: 'pi',
+      vendorId: 'anthropic',
+      billingType: 'apiKey',
+      authState: 'authenticated',
+      label: 'API key'
+    })
+  })
+
+  it('status.account is null when buildPiAccountRef has no entry for the vendor', () => {
+    mockBuildPiAccountRef.mockReturnValue(null)
+    const win = new MockWindow()
+    const session = new PiSession('rid-account-null', win as never, '/cwd', {})
+    expect(session.status.account).toBeNull()
+  })
+
+  it('passes the DECODED model vendorId (not the raw picker value) to buildPiAccountRef', () => {
+    const win = new MockWindow()
+    new PiSession('rid-account-2', win as never, '/cwd', { model: 'openai-codex/gpt-5.6-luna' })
+    expect(mockBuildPiAccountRef).toHaveBeenCalledWith('openai-codex')
+  })
+
+  it('re-sends status once the constructor-time probe() resolves, so a later probe result reaches the renderer', async () => {
+    mockBuildPiAccountRef.mockReturnValue(null)
+    const win = new MockWindow()
+    new PiSession('rid-account-resend', win as never, '/cwd', {})
+    // Flush the constructor's `piAuthProvider.probe().then(() => this.sendStatus())`
+    // — mirrors this file's existing setImmediate-flush precedent (line ~273).
+    await new Promise((r) => setImmediate(r))
+    const statusSends = sentPayloads(win, 'session:status')
+    expect(statusSends.length).toBeGreaterThanOrEqual(2)
   })
 })

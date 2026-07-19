@@ -6,6 +6,8 @@
 import { engineAuthRegistry } from './EngineAuthRegistry'
 import { claudeAuthProvider } from './ClaudeAuthProvider'
 import { opencodeAuthProvider } from './OpencodeAuthProvider'
+import { piAuthProvider } from './PiAuthProvider'
 
 engineAuthRegistry.register('claude', claudeAuthProvider)
 engineAuthRegistry.register('opencode', opencodeAuthProvider)
+engineAuthRegistry.register('pi', piAuthProvider)

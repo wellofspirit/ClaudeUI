@@ -695,9 +695,20 @@ export function resolveOpencodeCapabilitiesFromModel(
  *     `delegate?.discoverSkills?.(cwd) ?? scanSkills(cwd)` — the optional-call
  *     falls back to Claude's filesystem scanner instead of throwing.
  *     `session:skills` therefore only drives the TopBar Skills-button
- *     availability hint in M2b; surfacing pi's actual `~/.pi/agent/skills` +
- *     `.pi/skills` content through `discoverSkills` is M3.
- *   - auth.canDriveLogin → M3, once PiAuthProvider drives `~/.pi/agent/auth.json`.
+ *     availability hint. M3 (shared skills) deliberately did NOT add
+ *     `PiSession.discoverSkills` — the generic `scanSkills(cwd)` fallback
+ *     already covers the SkillsDialog's directory listing adequately, and the
+ *     actually-loaded skill set (M3's real deliverable) is driven by the
+ *     bridge extension's `resources_discover` handler (`CLAUDEUI_PI_SKILL_DIRS`,
+ *     computed in PiSession.doStart) feeding pi's OWN skill loader, which is
+ *     what surfaces as `skill:<name>` in `get_commands` above — no second
+ *     discovery path needed.
+ *   - auth.canDriveLogin → stays false PERMANENTLY, even after M3's
+ *     PiAuthProvider. pi's OAuth login (`pi /login`) is TUI-interactive —
+ *     ClaudeUI does not and will not drive it (Settings shows a
+ *     run-in-a-terminal hint instead, PiVendors.tsx). PiAuthProvider (M3)
+ *     covers probe()/api_key read-modify-write only; that is orthogonal to
+ *     this flag, which specifically gates in-app *driven* login UI.
  *   - hostedMcp → M4, once the hosted mermaid/mockup tools + cross-engine
  *     dispatch are bridged through pi's extension API.
  *   - sideQuestion, plan, fork, forkFromMessage, backgroundTasks, subagents,

@@ -1,4 +1,7 @@
 import type { BrowserWindow } from 'electron'
+import { existsSync } from 'node:fs'
+import { join, delimiter } from 'node:path'
+import { homedir } from 'node:os'
 import { v4 as uuid } from 'uuid'
 import { BaseSession } from '../providers/BaseSession'
 import type { EngineSpawnOptions } from '../providers/ISession'
@@ -16,6 +19,7 @@ import type {
 import { engineMeta } from '../../shared/engine-meta'
 import { PI_DEFAULT_MODEL } from '../../shared/engine-meta'
 import { logger } from '../services/logger'
+import { piAuthProvider } from '../auth/PiAuthProvider'
 import { locatePiBinary } from './pi-locate'
 import { PiRpcClient } from './PiRpcClient'
 import { mapPiEvent, createPiMapperState } from './event-mapper'
@@ -183,6 +187,14 @@ export class PiSession extends BaseSession {
         this.sendStatusLine()
       })
       .catch(() => {})
+    // Warm the auth probe so status.account resolves shortly after construction
+    // (mirrors OpencodeSession's opencodeAuthProvider.warmCache().then(sendStatus)
+    // constructor call) — account stays null on the very first sendStatus() above
+    // until this resolves.
+    piAuthProvider
+      .probe()
+      .then(() => this.sendStatus())
+      .catch(() => {})
   }
 
   get willQueue(): boolean {
@@ -201,8 +213,10 @@ export class PiSession extends BaseSession {
       model,
       cwd: this.cwd,
       totalCostUsd: this.totalCostUsd,
-      // pi has no auth-probe integration in M1 (PiAuthProvider is M3) — always null.
-      account: null,
+      // From the LAST piAuthProvider.probe() snapshot (constructor warms it —
+      // see below); null until that resolves or if the vendor has no auth.json
+      // entry (mirrors OpencodeSession's identical buildAccountRef usage).
+      account: piAuthProvider.buildPiAccountRef(model.vendorId),
       ...this.baseStatusFields()
     }
   }
@@ -301,6 +315,32 @@ export class PiSession extends BaseSession {
     return this.startedPromise
   }
 
+  /**
+   * Shared-skills discovery (M3): the concrete, EXISTING skill directories to
+   * hand the bridge extension's `resources_discover` handler via env var
+   * (`CLAUDEUI_PI_SKILL_DIRS`, `path.delimiter`-joined — the extension just
+   * splits it, no fs access there; see pi-bridge-source.ts). Claude skills are
+   * SKILL.md dirs under `~/.claude/skills/*` and `<cwd>/.claude/skills/*` — the
+   * same agentskills convention pi itself uses (vendor/pi-cli/docs/skills.md's
+   * "Using Skills from Other Harnesses" documents exactly this
+   * `["~/.claude/skills", "../.claude/skills"]`-style settings array).
+   *
+   * Returns `{}` (key entirely ABSENT, not an empty-string value) when neither
+   * dir exists — keeps the bridge extension's own env-var-presence gate
+   * meaningful (an empty string would still be "present").
+   */
+  private computeSkillDirsEnv(): Record<string, string> {
+    const candidates = [join(homedir(), '.claude', 'skills'), join(this.cwd, '.claude', 'skills')]
+    const existing = candidates.filter((dir) => {
+      try {
+        return existsSync(dir)
+      } catch {
+        return false
+      }
+    })
+    return existing.length > 0 ? { CLAUDEUI_PI_SKILL_DIRS: existing.join(delimiter) } : {}
+  }
+
   private async doStart(): Promise<void> {
     const bin = locatePiBinary()
     if (!bin) {
@@ -336,7 +376,11 @@ export class PiSession extends BaseSession {
     const client = new PiRpcClient(bin, {
       cwd: this.cwd,
       args,
-      env: { CLAUDEUI_PI_BRIDGE_URL: bridge.url, CLAUDEUI_PI_BRIDGE_TOKEN: bridge.token }
+      env: {
+        CLAUDEUI_PI_BRIDGE_URL: bridge.url,
+        CLAUDEUI_PI_BRIDGE_TOKEN: bridge.token,
+        ...this.computeSkillDirsEnv()
+      }
     })
     try {
       await client.start()

@@ -446,6 +446,22 @@ export interface EngineConfig {
   opencodeConfig?: OpencodeConfigSettings
   /** Cross-engine dispatch INTO this engine (ADR-033). */
   dispatch?: DispatchConfig
+  /** pi engine-configurable settings (M3). Lives in engines/pi.json. */
+  piConfig?: PiConfig
+}
+
+/**
+ * pi engine-configurable settings (M3). Mirrors opencode's `opencodeConfig.model`
+ * seam (engine-meta.ts's `defaultModelValue(perEngineDefault)`), but pi has no
+ * native-config-passthrough schema to mirror opencode's `OpencodeConfigSettings` —
+ * just the one configurable field for now.
+ */
+export interface PiConfig {
+  /** Default model picker VALUE (`"<provider>/<modelId>"`) for new pi sessions.
+   *  Free-text (validated against discoverPiModels() with a warning, not a hard
+   *  block — so a model pi has locally that ClaudeUI hasn't discovered yet still
+   *  works). Falls back to PI_DEFAULT_MODEL when unset/empty. */
+  defaultModel?: string
 }
 
 /**
@@ -1203,6 +1219,9 @@ export interface ClaudeAPI
   getVersionInfo(): Promise<{ appVersion: string; sdkVersion: string; cliVersion: string }>
   /** Open the standalone log viewer window */
   openLogViewer(): Promise<void>
+  /** Absolute path to the vendored pi binary (locatePiBinary()), or null if not
+   *  found. Settings › pi's subscription hint block (`pi /login`). */
+  getPiBinaryPath(): Promise<string | null>
 }
 
 // ---------------------------------------------------------------------------
