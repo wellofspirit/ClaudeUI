@@ -40,7 +40,15 @@ const {
   mockExistsSync,
   mockHomedir,
   mockPiAuthProbe,
-  mockBuildPiAccountRef
+  mockBuildPiAccountRef,
+  mockCreateMermaidServer,
+  mockMermaidHandler,
+  mockCreateMockupServer,
+  mockCreateMockupHandler,
+  mockShowMockupHandler,
+  mockDispatch,
+  mockDisposeFor,
+  mockCrossEngineDispatchAvailable
 } = vi.hoisted(() => {
   const mockStart = vi.fn().mockResolvedValue(undefined)
   const mockRequest = vi.fn()
@@ -63,14 +71,54 @@ const {
 
   const mockBridgeHostStart = vi.fn().mockResolvedValue({ url: 'http://127.0.0.1:9999', token: 'test-bridge-token' })
   const mockBridgeHostDispose = vi.fn()
-  // Mutable holder so tests can read the LATEST captured handler after each
+  // Mutable holder so tests can read the LATEST captured handler(s) after each
   // spawn (a fresh PiBridgeHost is constructed per doStart() call).
-  const bridgeCaptured: { handler: ((payload: unknown) => Promise<unknown>) | null } = { handler: null }
-  const MockPiBridgeHost = vi.fn().mockImplementation(function (handler: (payload: unknown) => Promise<unknown>) {
+  // hostedToolHandler (M4a+b) is the SECOND constructor arg.
+  const bridgeCaptured: {
+    handler: ((payload: unknown) => Promise<unknown>) | null
+    hostedToolHandler: ((payload: unknown) => Promise<unknown>) | null
+  } = { handler: null, hostedToolHandler: null }
+  const MockPiBridgeHost = vi.fn().mockImplementation(function (
+    handler: (payload: unknown) => Promise<unknown>,
+    hostedToolHandler?: (payload: unknown) => Promise<unknown>
+  ) {
     bridgeCaptured.handler = handler
+    bridgeCaptured.hostedToolHandler = hostedToolHandler ?? null
     return { start: mockBridgeHostStart, dispose: mockBridgeHostDispose }
   })
   const mockWriteBridgeExtension = vi.fn().mockReturnValue('/fake/tmp/claudeui-bridge.ts')
+
+  // Hosted tools (M4a): mermaid/mockup are MOCKED (per the kickoff spec) —
+  // the real tool handlers do real fs I/O (mockup-tool.ts writes under
+  // <cwd>/.claude/ui/mockups) that must never run against this file's fake
+  // '/cwd'. Each mock mirrors the REAL handler's success-shape verbatim
+  // (mermaid-tool.ts / mockup-tool.ts) so passthrough assertions stay honest.
+  const mockMermaidHandler = vi
+    .fn()
+    .mockResolvedValue({ content: [{ type: 'text', text: 'Diagram rendered successfully.' }] })
+  const mockCreateMermaidServer = vi.fn().mockImplementation(() => ({
+    tools: [{ name: 'render_mermaid', description: '', inputSchema: {}, handler: mockMermaidHandler }]
+  }))
+  const mockCreateMockupHandler = vi
+    .fn()
+    .mockResolvedValue({ content: [{ type: 'text', text: 'Mockup created successfully.\nDirectory: abc123' }] })
+  const mockShowMockupHandler = vi
+    .fn()
+    .mockResolvedValue({ content: [{ type: 'text', text: 'Mockup displayed.\nDirectory: abc123' }] })
+  const mockCreateMockupServer = vi.fn().mockImplementation(() => ({
+    tools: [
+      { name: 'create_mockup', description: '', inputSchema: {}, handler: mockCreateMockupHandler },
+      { name: 'show_mockup', description: '', inputSchema: {}, handler: mockShowMockupHandler }
+    ]
+  }))
+
+  // Cross-engine dispatch (M4b): dispatch() is mocked; disposeFor asserts
+  // PiSession.cancel() tears down owned targets; crossEngineDispatchAvailable
+  // drives the capability-flip AND (defaults to true, mirroring the real
+  // helper's non-'claude' branch — override per-test to prove the AND).
+  const mockDispatch = vi.fn()
+  const mockDisposeFor = vi.fn()
+  const mockCrossEngineDispatchAvailable = vi.fn().mockReturnValue(true)
 
   return {
     mockStart,
@@ -112,7 +160,15 @@ const {
     // that pi-session-list mock doesn't export, and must never touch a real
     // ~/.pi/agent/auth.json from a unit test regardless.
     mockPiAuthProbe: vi.fn().mockResolvedValue({}),
-    mockBuildPiAccountRef: vi.fn().mockReturnValue(null)
+    mockBuildPiAccountRef: vi.fn().mockReturnValue(null),
+    mockCreateMermaidServer,
+    mockMermaidHandler,
+    mockCreateMockupServer,
+    mockCreateMockupHandler,
+    mockShowMockupHandler,
+    mockDispatch,
+    mockDisposeFor,
+    mockCrossEngineDispatchAvailable
   }
 })
 
@@ -133,6 +189,15 @@ vi.mock('../../services/usage-recorder', () => ({
 }))
 vi.mock('../../services/logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
+}))
+// Hosted tools (M4a) — mocked per the kickoff spec (see the vi.hoisted comment
+// above for why: real fs I/O must never run against this file's fake '/cwd').
+vi.mock('../../services/mermaid-tool', () => ({ createMermaidServer: mockCreateMermaidServer }))
+vi.mock('../../services/mockup-tool', () => ({ createMockupServer: mockCreateMockupServer }))
+// Cross-engine dispatch (M4b).
+vi.mock('../../services/cross-engine-dispatcher', () => ({
+  crossEngineDispatcher: { dispatch: mockDispatch, disposeFor: mockDisposeFor },
+  crossEngineDispatchAvailable: mockCrossEngineDispatchAvailable
 }))
 vi.mock('../PiBridgeHost', () => ({
   PiBridgeHost: MockPiBridgeHost,
@@ -205,6 +270,7 @@ beforeEach(() => {
   MockPiBridgeHost.mockClear()
   mockWriteBridgeExtension.mockClear().mockReturnValue('/fake/tmp/claudeui-bridge.ts')
   bridgeCaptured.handler = null
+  bridgeCaptured.hostedToolHandler = null
   mockLoadClaudePermissions.mockReset().mockReturnValue({
     allow: [],
     deny: [],
@@ -217,6 +283,18 @@ beforeEach(() => {
   mockHomedir.mockClear().mockReturnValue('/fake/home')
   mockPiAuthProbe.mockReset().mockResolvedValue({})
   mockBuildPiAccountRef.mockReset().mockReturnValue(null)
+  mockCreateMermaidServer.mockClear()
+  mockMermaidHandler.mockReset().mockResolvedValue({ content: [{ type: 'text', text: 'Diagram rendered successfully.' }] })
+  mockCreateMockupServer.mockClear()
+  mockCreateMockupHandler
+    .mockReset()
+    .mockResolvedValue({ content: [{ type: 'text', text: 'Mockup created successfully.\nDirectory: abc123' }] })
+  mockShowMockupHandler
+    .mockReset()
+    .mockResolvedValue({ content: [{ type: 'text', text: 'Mockup displayed.\nDirectory: abc123' }] })
+  mockDispatch.mockReset()
+  mockDisposeFor.mockClear()
+  mockCrossEngineDispatchAvailable.mockReset().mockReturnValue(true)
 })
 
 /** Call the LAST captured bridge gate handler (the fake PiBridgeHost's constructor arg) directly — bypasses real HTTP, exactly mirroring what the real extension's fetch would send. */
@@ -229,6 +307,21 @@ async function gate(toolCallId: string, toolName: string, input: Record<string, 
   }>
 }
 
+/** Call the LAST captured hosted-tool handler (PiBridgeHost's SECOND constructor arg, M4a+b) directly — bypasses real HTTP, mirroring what the bridge extension's execute() would POST to /hosted-tool. */
+async function hostedTool(
+  toolName: string,
+  input: Record<string, unknown>,
+  toolCallId = 'call-hosted'
+): Promise<{ content: Array<{ type: string; text: string }>; isError?: boolean }> {
+  if (!bridgeCaptured.hostedToolHandler) {
+    throw new Error('no hosted-tool handler captured — was doStart() ever awaited?')
+  }
+  return bridgeCaptured.hostedToolHandler({ toolName, input, toolCallId }) as Promise<{
+    content: Array<{ type: string; text: string }>
+    isError?: boolean
+  }>
+}
+
 describe('PiSession.run — sends a prompt', () => {
   it('spawns the process and sends {type:"prompt", message} on the first run()', async () => {
     const win = new MockWindow()
@@ -238,11 +331,20 @@ describe('PiSession.run — sends a prompt', () => {
 
     expect(mockStart).toHaveBeenCalledTimes(1)
     // Approval bridge (M2a): -e <bridge file written by writeBridgeExtension()>
-    // plus the per-spawn loopback URL/token as env.
+    // plus the per-spawn loopback URL/token as env. Hosted tools (M4a+b): both
+    // CLAUDEUI_PI_HOSTED_TOOLS and CLAUDEUI_PI_DISPATCH_ENABLED are '1' by
+    // DEFAULT now — hostedMcp is a static-true engine capability and
+    // crossEngineDispatchAvailable('pi') defaults to true in this mock (see
+    // the vi.hoisted comment) — dedicated tests below cover the "off" paths.
     expect(MockPiRpcClient).toHaveBeenCalledWith('/fake/pi', {
       cwd: '/cwd',
       args: ['--mode', 'rpc', '-e', '/fake/tmp/claudeui-bridge.ts'],
-      env: { CLAUDEUI_PI_BRIDGE_URL: 'http://127.0.0.1:9999', CLAUDEUI_PI_BRIDGE_TOKEN: 'test-bridge-token' }
+      env: {
+        CLAUDEUI_PI_BRIDGE_URL: 'http://127.0.0.1:9999',
+        CLAUDEUI_PI_BRIDGE_TOKEN: 'test-bridge-token',
+        CLAUDEUI_PI_HOSTED_TOOLS: '1',
+        CLAUDEUI_PI_DISPATCH_ENABLED: '1'
+      }
     })
     expect(MockPiBridgeHost).toHaveBeenCalledTimes(1)
     // set_model called (opts.model was present)
@@ -401,6 +503,16 @@ describe('PiSession.cancel', () => {
     session.cancel()
 
     await expect(pending).resolves.toEqual({ behavior: 'deny', reason: 'Interrupted' })
+  })
+
+  it('disposes cross-engine dispatch targets owned by this session (M4b — mirrors ClaudeSession/OpencodeSession)', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-cancel-dispose', win as never, '/cwd', {})
+    await session.run('hi')
+
+    session.cancel()
+
+    expect(mockDisposeFor).toHaveBeenCalledWith('rid-cancel-dispose')
   })
 })
 
@@ -1338,5 +1450,260 @@ describe('PiSession.status.account (M3 auth)', () => {
     await new Promise((r) => setImmediate(r))
     const statusSends = sentPayloads(win, 'session:status')
     expect(statusSends.length).toBeGreaterThanOrEqual(2)
+  })
+})
+
+describe('PiSession.capabilities (M4a+b — hostedMcp / crossEngineDispatch)', () => {
+  it('hostedMcp is true (M4a shipped)', () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-caps-hosted', win as never, '/cwd', {})
+    expect(session.status.capabilities.hostedMcp).toBe(true)
+  })
+
+  it('crossEngineDispatch is true by default (crossEngineDispatchAvailable("pi") returns true)', () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-caps-xeng-1', win as never, '/cwd', {})
+    expect(session.status.capabilities.crossEngineDispatch).toBe(true)
+    expect(mockCrossEngineDispatchAvailable).toHaveBeenCalledWith('pi')
+  })
+
+  it('crossEngineDispatch is false when crossEngineDispatchAvailable("pi") is mocked false, even though the static flag is true (ADR-030/033 M4-A honesty)', () => {
+    mockCrossEngineDispatchAvailable.mockReturnValue(false)
+    const win = new MockWindow()
+    const session = new PiSession('rid-caps-xeng-2', win as never, '/cwd', {})
+    expect(session.status.capabilities.crossEngineDispatch).toBe(false)
+  })
+})
+
+describe('PiSession — hosted-tools/dispatch env vars at spawn (M4a+b)', () => {
+  it('sets CLAUDEUI_PI_HOSTED_TOOLS=1 and CLAUDEUI_PI_DISPATCH_ENABLED=1 by default', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-env-hosted-1', win as never, '/cwd', {})
+    await session.run('hi')
+    const env = lastSpawnOpts().env
+    expect(env.CLAUDEUI_PI_HOSTED_TOOLS).toBe('1')
+    expect(env.CLAUDEUI_PI_DISPATCH_ENABLED).toBe('1')
+  })
+
+  it('omits CLAUDEUI_PI_DISPATCH_ENABLED (but keeps CLAUDEUI_PI_HOSTED_TOOLS) when crossEngineDispatchAvailable("pi") is false', async () => {
+    mockCrossEngineDispatchAvailable.mockReturnValue(false)
+    const win = new MockWindow()
+    const session = new PiSession('rid-env-hosted-2', win as never, '/cwd', {})
+    await session.run('hi')
+    const env = lastSpawnOpts().env
+    expect(env.CLAUDEUI_PI_HOSTED_TOOLS).toBe('1')
+    expect(env).not.toHaveProperty('CLAUDEUI_PI_DISPATCH_ENABLED')
+  })
+})
+
+describe('PiSession.handleHostedTool — render_mermaid (M4a)', () => {
+  it('delegates to createMermaidServer().tools[render_mermaid].handler and passes {content} through verbatim', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-hosted-mermaid-1', win as never, '/cwd', {})
+    await session.run('hi')
+
+    const result = await hostedTool('render_mermaid', { source: 'graph TD; A-->B', title: 'Flow' }, 'call_m1')
+
+    expect(mockMermaidHandler).toHaveBeenCalledWith({ source: 'graph TD; A-->B', title: 'Flow' }, undefined)
+    expect(result).toEqual({ content: [{ type: 'text', text: 'Diagram rendered successfully.' }] })
+  })
+
+  it('memoizes the mermaid server ONCE per session — a second render_mermaid call reuses it', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-hosted-mermaid-2', win as never, '/cwd', {})
+    await session.run('hi')
+
+    await hostedTool('render_mermaid', { source: 'graph TD; A-->B' })
+    await hostedTool('render_mermaid', { source: 'graph LR; C-->D' })
+
+    expect(mockCreateMermaidServer).toHaveBeenCalledTimes(1)
+    expect(mockMermaidHandler).toHaveBeenCalledTimes(2)
+  })
+
+  it('passes through an isError result verbatim (syntax error path)', async () => {
+    mockMermaidHandler.mockResolvedValue({
+      content: [{ type: 'text', text: 'Mermaid syntax error:\nbad input' }],
+      isError: true
+    })
+    const win = new MockWindow()
+    const session = new PiSession('rid-hosted-mermaid-3', win as never, '/cwd', {})
+    await session.run('hi')
+
+    const result = await hostedTool('render_mermaid', { source: 'not a diagram' })
+    expect(result.isError).toBe(true)
+  })
+})
+
+describe('PiSession.handleHostedTool — create_mockup / show_mockup (M4a)', () => {
+  it('create_mockup delegates to createMockupServer(this.cwd) and passes {content} through verbatim', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-hosted-mockup-1', win as never, '/cwd', {})
+    await session.run('hi')
+
+    const result = await hostedTool('create_mockup', { html: '<div>hi</div>', title: 'My UI' }, 'call_mk1')
+
+    expect(mockCreateMockupServer).toHaveBeenCalledWith('/cwd')
+    expect(mockCreateMockupHandler).toHaveBeenCalledWith({ html: '<div>hi</div>', title: 'My UI' }, undefined)
+    expect(result.content[0].text).toContain('Mockup created successfully')
+  })
+
+  it('show_mockup ALSO delegates to createMockupServer(this.cwd)', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-hosted-mockup-2', win as never, '/cwd', {})
+    await session.run('hi')
+
+    const result = await hostedTool('show_mockup', { directory: 'abc123' })
+
+    expect(mockShowMockupHandler).toHaveBeenCalledWith({ directory: 'abc123' }, undefined)
+    expect(result.content[0].text).toContain('Mockup displayed')
+  })
+
+  it('does NOT memoize the mockup server — createMockupServer is called fresh on every call (unlike mermaid)', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-hosted-mockup-3', win as never, '/cwd', {})
+    await session.run('hi')
+
+    await hostedTool('create_mockup', { html: '<div>a</div>' })
+    await hostedTool('show_mockup', { directory: 'abc123' })
+
+    expect(mockCreateMockupServer).toHaveBeenCalledTimes(2)
+  })
+
+  it('passes through an isError result verbatim (e.g. show_mockup for a missing directory)', async () => {
+    mockShowMockupHandler.mockResolvedValue({
+      content: [{ type: 'text', text: 'Failed to show mockup: ENOENT' }],
+      isError: true
+    })
+    const win = new MockWindow()
+    const session = new PiSession('rid-hosted-mockup-4', win as never, '/cwd', {})
+    await session.run('hi')
+
+    const result = await hostedTool('show_mockup', { directory: 'missing' })
+    expect(result.isError).toBe(true)
+  })
+})
+
+describe('PiSession.handleHostedTool — unknown toolName (M4a+b)', () => {
+  it('an unrecognized hosted toolName returns isError without touching mermaid/mockup/dispatch', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-hosted-unknown', win as never, '/cwd', {})
+    await session.run('hi')
+
+    const result = await hostedTool('mystery_tool', {})
+
+    expect(result.isError).toBe(true)
+    expect(result.content[0].text).toContain('mystery_tool')
+    expect(mockCreateMermaidServer).not.toHaveBeenCalled()
+    expect(mockCreateMockupServer).not.toHaveBeenCalled()
+    expect(mockDispatch).not.toHaveBeenCalled()
+  })
+})
+
+describe('PiSession.handleHostedTool — dispatch_agent (M4b, ADR-033)', () => {
+  it('builds a DispatchContext mirroring collab-tool.ts (fromEngine:"pi", fromRoutingId, cwd, autonomyMode, toolUseId=payload.toolCallId) and formats the session_id suffix on success', async () => {
+    mockDispatch.mockResolvedValue({ text: 'The answer is 42.', sessionId: 'oc-sess-1' })
+    const win = new MockWindow()
+    const session = new PiSession('rid-dispatch-1', win as never, '/cwd', {})
+    await session.setPermissionMode('acceptEdits')
+    await session.run('hi')
+
+    const result = await hostedTool(
+      'dispatch_agent',
+      { engine: 'opencode', prompt: 'what is the answer' },
+      'call_dispatch_1'
+    )
+
+    expect(mockDispatch).toHaveBeenCalledWith(
+      { engine: 'opencode', prompt: 'what is the answer', model: undefined, sessionId: undefined },
+      expect.objectContaining({
+        fromEngine: 'pi',
+        fromRoutingId: 'rid-dispatch-1',
+        cwd: '/cwd',
+        autonomyMode: 'acceptEdits',
+        toolUseId: 'call_dispatch_1'
+      })
+    )
+    expect(result.content[0].text).toBe(
+      'The answer is 42.\n\n[dispatch session_id: oc-sess-1 — pass it as session_id to continue this agent]'
+    )
+    expect(result.isError).toBeFalsy()
+  })
+
+  it('passes model/session_id through to the DispatchRequest when the model supplies them', async () => {
+    mockDispatch.mockResolvedValue({ text: 'ok', sessionId: 'prev-sess' })
+    const win = new MockWindow()
+    const session = new PiSession('rid-dispatch-2', win as never, '/cwd', {})
+    await session.run('hi')
+
+    await hostedTool('dispatch_agent', {
+      engine: 'opencode',
+      prompt: 'continue',
+      model: 'openai/gpt-5',
+      session_id: 'prev-sess'
+    })
+
+    expect(mockDispatch).toHaveBeenCalledWith(
+      { engine: 'opencode', prompt: 'continue', model: 'openai/gpt-5', sessionId: 'prev-sess' },
+      expect.anything()
+    )
+  })
+
+  it('an isError dispatch result passes through WITHOUT the session_id suffix', async () => {
+    mockDispatch.mockResolvedValue({ text: 'Dispatch failed: boom', sessionId: '', isError: true })
+    const win = new MockWindow()
+    const session = new PiSession('rid-dispatch-3', win as never, '/cwd', {})
+    await session.run('hi')
+
+    const result = await hostedTool('dispatch_agent', { engine: 'claude', prompt: 'x' })
+
+    expect(result.content[0].text).toBe('Dispatch failed: boom')
+    expect(result.isError).toBe(true)
+  })
+
+  it('rejects a malformed input (missing engine) without calling the dispatcher', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-dispatch-4', win as never, '/cwd', {})
+    await session.run('hi')
+
+    const result = await hostedTool('dispatch_agent', { prompt: 'x' })
+
+    expect(result.isError).toBe(true)
+    expect(mockDispatch).not.toHaveBeenCalled()
+  })
+
+  it('rejects a malformed input (missing prompt) without calling the dispatcher', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-dispatch-5', win as never, '/cwd', {})
+    await session.run('hi')
+
+    const result = await hostedTool('dispatch_agent', { engine: 'opencode' })
+
+    expect(result.isError).toBe(true)
+    expect(mockDispatch).not.toHaveBeenCalled()
+  })
+
+  it('rejects engine:"pi" (same-engine — guard-rejected before ever reaching the dispatcher)', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-dispatch-6', win as never, '/cwd', {})
+    await session.run('hi')
+
+    const result = await hostedTool('dispatch_agent', { engine: 'pi', prompt: 'x' })
+
+    expect(result.isError).toBe(true)
+    expect(mockDispatch).not.toHaveBeenCalled()
+  })
+
+  it("emit forwards to this.send (the dispatching session's own routing) — passing ctx.emit through calls window.webContents.send", async () => {
+    mockDispatch.mockImplementation(async (_req, ctx: { emit: (channel: string, data: unknown) => void }) => {
+      ctx.emit('session:task-notification', { taskId: 'x', toolUseId: 'call_dispatch_7', status: 'completed' })
+      return { text: 'done', sessionId: 'oc-sess-2' }
+    })
+    const win = new MockWindow()
+    const session = new PiSession('rid-dispatch-7', win as never, '/cwd', {})
+    await session.run('hi')
+
+    await hostedTool('dispatch_agent', { engine: 'opencode', prompt: 'x' }, 'call_dispatch_7')
+
+    expect(sentChannels(win)).toContain('session:task-notification')
   })
 })

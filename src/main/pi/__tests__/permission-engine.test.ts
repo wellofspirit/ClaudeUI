@@ -24,7 +24,8 @@ import {
   firstMatchingRule,
   sessionAllowKey,
   normalizeWhitespace,
-  mergedClaudeRulesFor
+  mergedClaudeRulesFor,
+  PI_AUTO_ALLOW_HOSTED_TOOLS
 } from '../permission-engine'
 
 function rules(partial: Partial<MergedClaudeRules> = {}): MergedClaudeRules {
@@ -52,6 +53,13 @@ describe('piToolKind', () => {
   it('resolves hosted-MCP tool names engine-independently (M4 readiness)', () => {
     expect(piToolKind('mcp__claude-ui__render_mermaid')).toBe('diagram')
     expect(piToolKind('mcp__some-server__tool')).toBe('mcp')
+  })
+
+  it('maps hosted-tool BARE names registered via pi.registerTool (M4a+b)', () => {
+    expect(piToolKind('render_mermaid')).toBe('diagram')
+    expect(piToolKind('create_mockup')).toBe('mockup')
+    expect(piToolKind('show_mockup')).toBe('mockup')
+    expect(piToolKind('dispatch_agent')).toBe('task')
   })
 })
 
@@ -94,6 +102,58 @@ describe('decide — mode base (no rules, no sessionAllows)', () => {
 
   it.each(cases)('mode=%s toolName=%s -> %s', (mode, toolName, expected) => {
     expect(decide(toolName, {}, ctx(mode))).toBe(expected)
+  })
+})
+
+describe('decide — PI_AUTO_ALLOW_HOSTED_TOOLS (M4a)', () => {
+  it('contains exactly the three hosted LLM tools, not dispatch_agent', () => {
+    expect([...PI_AUTO_ALLOW_HOSTED_TOOLS].sort()).toEqual(['create_mockup', 'render_mermaid', 'show_mockup'])
+  })
+
+  it.each(['render_mermaid', 'create_mockup', 'show_mockup'])(
+    '%s is ALWAYS allowed in default mode (would otherwise ask — unmapped/unknown kind)',
+    (toolName) => {
+      const ctx = { mode: 'default', rules: rules(), sessionAllows: NO_SESSION_ALLOWS }
+      expect(decide(toolName, {}, ctx)).toBe('allow')
+    }
+  )
+
+  it.each(['render_mermaid', 'create_mockup', 'show_mockup'])(
+    '%s is allowed even with an unrelated ask rule present',
+    (toolName) => {
+      const ctx = { mode: 'default', rules: rules({ ask: ['Bash'] }), sessionAllows: NO_SESSION_ALLOWS }
+      expect(decide(toolName, {}, ctx)).toBe('allow')
+    }
+  )
+
+  it('dispatch_agent is NOT auto-allowed — normal mode-base gating (ask in default)', () => {
+    const ctx = { mode: 'default', rules: rules(), sessionAllows: NO_SESSION_ALLOWS }
+    expect(decide('dispatch_agent', {}, ctx)).toBe('ask')
+  })
+
+  it('dispatch_agent is NOT auto-allowed — normal mode-base gating (ask in acceptEdits too, unknown kind)', () => {
+    const ctx = { mode: 'acceptEdits', rules: rules(), sessionAllows: NO_SESSION_ALLOWS }
+    expect(decide('dispatch_agent', {}, ctx)).toBe('ask')
+  })
+
+  it('dispatch_agent is NOT auto-allowed — normal mode-base gating (allow in full)', () => {
+    const ctx = { mode: 'full', rules: rules(), sessionAllows: NO_SESSION_ALLOWS }
+    expect(decide('dispatch_agent', {}, ctx)).toBe('allow')
+  })
+
+  it('checks deny rules BEFORE the hosted-tool auto-allow short-circuit (source-order guard)', () => {
+    // No CLAUDE_TOOL_TO_KIND entry maps to diagram/mockup/task today, so a
+    // REAL conflicting deny rule can't be constructed through the public
+    // rules() shape to exercise "deny still wins" behaviorally — assert the
+    // source ordering directly instead (mirrors pi-bridge-source.test.ts's
+    // skillEnvIdx/earlyReturnIdx technique for the identical "can't observe
+    // through the public API yet" situation).
+    const src = decide.toString()
+    const denyIdx = src.indexOf('rules.deny.some')
+    const autoAllowIdx = src.indexOf('PI_AUTO_ALLOW_HOSTED_TOOLS')
+    expect(denyIdx).toBeGreaterThan(-1)
+    expect(autoAllowIdx).toBeGreaterThan(-1)
+    expect(denyIdx).toBeLessThan(autoAllowIdx)
   })
 })
 

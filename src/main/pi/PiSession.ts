@@ -29,7 +29,19 @@ import { getPiModelCatalog } from './model-discovery'
 import { findPiSessionFile, loadPiSessionHistory } from '../services/pi-session-list'
 import { recordUsageEvent } from '../services/usage-recorder'
 import { PiBridgeHost, writeBridgeExtension } from './PiBridgeHost'
-import type { GateDecision, PiToolCallPayload } from './PiBridgeHost'
+import type { GateDecision, PiHostedToolHandler, PiHostedToolPayload, PiHostedToolResult, PiToolCallPayload } from './PiBridgeHost'
+// Hosted tools (M4a) — the SAME in-process MCP tool factories Claude/opencode
+// use (mermaid-tool.ts/mockup-tool.ts); handleHostedTool below extracts
+// `.tools[].handler` and calls it directly, exactly like
+// opencode-hosted-tools.ts's identical reuse pattern.
+import { createMermaidServer } from '../services/mermaid-tool'
+import { createMockupServer } from '../services/mockup-tool'
+// Cross-engine dispatch (M4b, ADR-033) — pi as a dispatch SOURCE only (pi as
+// a TARGET is a separate later milestone). CALLED, never modified — mirrors
+// collab-tool.ts's Claude-side DispatchContext construction, NOT via MCP (pi
+// has no MCP client of its own).
+import { crossEngineDispatcher, crossEngineDispatchAvailable } from '../services/cross-engine-dispatcher'
+import type { DispatchContext, DispatchRequest } from '../services/cross-engine-dispatcher'
 import {
   decide,
   mergedClaudeRulesFor,
@@ -46,6 +58,11 @@ import { suggestionDestinationToScope, suggestionRuleToClaudeString } from '../o
 // in (verified — takes a caller-supplied emit callback and ambient
 // setTimeout/clearTimeout only).
 import { BashStreamGate } from '../opencode/bash-stream-gate'
+
+/** Fail-closed default for an unrecognized /hosted-tool toolName (defense in depth — the bridge extension only ever sends the four names it registers, but handleHostedTool must never crash on an unexpected one). */
+function unknownHostedTool(toolName: string): PiHostedToolResult {
+  return { content: [{ type: 'text', text: `Unknown hosted tool "${toolName}"` }], isError: true }
+}
 
 /**
  * PiSession — engine-neutral session backend for the pi coding agent.
@@ -70,15 +87,38 @@ import { BashStreamGate } from '../opencode/bash-stream-gate'
  * ADDS interaction parity: mid-turn `steer` (not just queued follow-up),
  * spawn-time + live effort (`set_thinking_level`), slash-command/skill
  * discovery (`get_commands`), and live bash output streaming
- * (`tool_execution_update` → BashStreamGate, imported as-is from opencode) —
- * see PI_ENGINE_CAPABILITIES' doc comment for the full per-flag flip plan.
+ * (`tool_execution_update` → BashStreamGate, imported as-is from opencode).
+ * M4a ADDS the hosted LLM tools (render_mermaid/create_mockup/show_mockup),
+ * registered via `pi.registerTool()` in the SAME bridge extension, calling
+ * back over a second PiBridgeHost route (`POST /hosted-tool`,
+ * handleHostedTool) — auto-allowed by permission-engine.ts's
+ * PI_AUTO_ALLOW_HOSTED_TOOLS. M4b ADDS pi as a cross-engine dispatch SOURCE
+ * (`dispatch_agent`, the same mechanism, NORMAL mode-base gating) — see
+ * PI_ENGINE_CAPABILITIES' doc comment for the full per-flag flip plan.
  */
 export class PiSession extends BaseSession {
   readonly engineId = 'pi' as const
 
   private _capabilities: ResolvedCapabilities
+  /**
+   * ADR-030/ADR-033 M4-A: the STATIC PI_ENGINE_CAPABILITIES.crossEngineDispatch
+   * flag is true (M4b shipped), but the HONEST per-session value additionally
+   * requires crossEngineDispatchAvailable('pi') — currently always true for
+   * the non-'claude' branch (pi-as-source only needs SOME target, and Claude
+   * is always installed), but ANDed here so a future tightening of that
+   * helper takes effect for pi automatically. ANDed at this GETTER (not
+   * baked into every `_capabilities` assignment site — the constructor's
+   * sync+async assignments, resolveCapsForModel, adoptEngineModel, setModel —
+   * since unlike OpencodeSession's single resolveCapsForModel() choke point,
+   * PiSession has several; one computed getter is the DRY single point of
+   * truth, mirroring ClaudeSession's identical live-getter pattern instead of
+   * opencode's "bake into every producer" pattern).
+   */
   get capabilities(): ResolvedCapabilities {
-    return this._capabilities
+    return {
+      ...this._capabilities,
+      crossEngineDispatch: this._capabilities.crossEngineDispatch && crossEngineDispatchAvailable('pi')
+    }
   }
 
   private client: PiRpcClient | null = null
@@ -149,6 +189,10 @@ export class PiSession extends BaseSession {
   private sessionAllows = new Set<string>()
   /** Lazily loaded, cached merge of the user/project/local Claude permission scopes. Invalidated by notifySettingsChanged() and by persistAllowRules() (so a just-persisted rule is honored on the very next gate call in this same session). */
   private cachedRules: MergedClaudeRules | null = null
+
+  // ── Hosted tools (M4a) ───────────────────────────────────────────────────────
+  /** Memoized once per session (constructing it is cheap, but there's no reason to redo it on every render_mermaid call — mockup is NOT memoized, see handleHostedTool's mockup case for why). */
+  private mermaidServer: ReturnType<typeof createMermaidServer> | null = null
 
   // ── Cost / usage accounting ────────────────────────────────────────────────
   private mapperState: PiMapperState = createPiMapperState()
@@ -225,11 +269,9 @@ export class PiSession extends BaseSession {
     return this.piSessionId
   }
 
-  /** Public accessor for cross-engine dispatch (ADR-033) — unused while
-   *  capabilities.crossEngineDispatch is false in M1 (pi is neither a
-   *  dispatch source nor target yet), kept for interface parity with
-   *  OpencodeSession's identical accessor so a future M4 wire-up is a pure
-   *  addition, not a new method. */
+  /** Public accessor for cross-engine dispatch (ADR-033) — used by
+   *  handleDispatchAgent (M4b) to build DispatchContext.autonomyMode, mirroring
+   *  OpencodeSession's identical accessor's call site (createOpencodeHostedToolsServer). */
   getAutonomyMode(): string {
     return this.permissionMode
   }
@@ -355,7 +397,15 @@ export class PiSession extends BaseSession {
     // source.ts). Started BEFORE the pi child so the URL/token are ready to
     // hand to it via env. If the child then fails to spawn, the orphaned host
     // is disposed below rather than leaked.
-    const bridgeHost = new PiBridgeHost(this.gateToolCall)
+    // Hosted tools + dispatch (M4a+b): ONE PiBridgeHost serves BOTH routes —
+    // gateToolCall (/tool-call, M2a) and handleHostedTool (/hosted-tool,
+    // M4a+b). The bridge extension registers the four hosted tools only when
+    // CLAUDEUI_PI_HOSTED_TOOLS=1 (below); dispatch_agent additionally needs
+    // CLAUDEUI_PI_DISPATCH_ENABLED=1. Both env vars are computed from the
+    // RESOLVED capability (this.capabilities — the public getter, ANDed with
+    // crossEngineDispatchAvailable('pi') for crossEngineDispatch) so the
+    // extension never registers a tool ClaudeUI itself considers unavailable.
+    const bridgeHost = new PiBridgeHost(this.gateToolCall, this.handleHostedTool)
     let bridge: { url: string; token: string }
     try {
       bridge = await bridgeHost.start()
@@ -379,6 +429,8 @@ export class PiSession extends BaseSession {
       env: {
         CLAUDEUI_PI_BRIDGE_URL: bridge.url,
         CLAUDEUI_PI_BRIDGE_TOKEN: bridge.token,
+        ...(this.capabilities.hostedMcp ? { CLAUDEUI_PI_HOSTED_TOOLS: '1' } : {}),
+        ...(this.capabilities.crossEngineDispatch ? { CLAUDEUI_PI_DISPATCH_ENABLED: '1' } : {}),
         ...this.computeSkillDirsEnv()
       }
     })
@@ -819,6 +871,11 @@ export class PiSession extends BaseSession {
       this.bridgeHost.dispose()
       this.bridgeHost = null
     }
+    // Tear down any cross-engine dispatch targets owned by this session
+    // (ADR-033 M4b — mirrors ClaudeSession.cancel()/OpencodeSession.cancel()'s
+    // identical call; without this, a pi-sourced dispatch_agent's opencode/
+    // Claude target would leak past this session's own lifetime).
+    crossEngineDispatcher.disposeFor(this.routingId)
     // Drop all pending bash-output throttle timers — nothing left to flush to
     // once the session is torn down (mirrors OpencodeSession.cancel()'s
     // identical call).
@@ -985,6 +1042,128 @@ export class PiSession extends BaseSession {
   /** Hot-reload parity with Claude: invalidate the cached rules so the NEXT gate call re-reads the (just-edited) permission files from disk. */
   async notifySettingsChanged(): Promise<void> {
     this.cachedRules = null
+  }
+
+  // ── Hosted tools + cross-engine dispatch (M4a+b) ─────────────────────────────
+
+  /**
+   * Handler passed to PiBridgeHost as the SECOND (hosted-tool) constructor
+   * arg — invoked once per `POST /hosted-tool`, i.e. only AFTER the
+   * `tool_call` gate (gateToolCall above + permission-engine.ts's
+   * PI_AUTO_ALLOW_HOSTED_TOOLS / mode-base ladder) has already allowed the
+   * call (verified — pi's tool_call hook fires for registered/extension
+   * tools too, so a registered tool is a two-stage flow: gate, then
+   * execute). Does NOT re-gate.
+   *
+   * render_mermaid/create_mockup/show_mockup delegate to the SAME in-process
+   * MCP tool handlers Claude/opencode use (mermaid-tool.ts/mockup-tool.ts —
+   * extracting `.tools[].handler`, exactly like opencode-hosted-tools.ts's
+   * reuse pattern) and pass their `{content, isError?}` result through
+   * verbatim. Mockups land under `this.cwd`/.claude/ui/mockups — parity with
+   * Claude/opencode (createMockupServer bakes `cwd` into its returned
+   * server's mockupsRoot at construction time, so cwd MUST be `this.cwd`).
+   */
+  private handleHostedTool: PiHostedToolHandler = async (
+    payload: PiHostedToolPayload
+  ): Promise<PiHostedToolResult> => {
+    const { toolName, input, toolCallId } = payload
+    switch (toolName) {
+      case 'render_mermaid': {
+        if (!this.mermaidServer) this.mermaidServer = createMermaidServer()
+        const tool = this.mermaidServer.tools.find((t) => t.name === 'render_mermaid')
+        if (!tool) return unknownHostedTool(toolName)
+        return (await tool.handler(input, undefined)) as unknown as PiHostedToolResult
+      }
+
+      case 'create_mockup':
+      case 'show_mockup': {
+        // NOT memoized (unlike the mermaid server above) — createMockupServer's
+        // only per-instance state is the mockupsRoot path derived from
+        // `this.cwd`, which never changes mid-session; re-deriving it per call
+        // is cheap (a couple of `join()` calls) and avoids caching a stale
+        // server if `this.cwd` were ever to matter differently across calls.
+        const server = createMockupServer(this.cwd)
+        const tool = server.tools.find((t) => t.name === toolName)
+        if (!tool) return unknownHostedTool(toolName)
+        return (await tool.handler(input, undefined)) as unknown as PiHostedToolResult
+      }
+
+      case 'dispatch_agent':
+        return this.handleDispatchAgent(input, toolCallId)
+
+      default:
+        return unknownHostedTool(toolName)
+    }
+  }
+
+  /**
+   * dispatch_agent (M4b, ADR-033) — pi as a dispatch SOURCE only (pi as a
+   * TARGET is a separate later milestone; the dispatcher's own engine guard
+   * already rejects 'pi' as `req.engine`). Mirrors collab-tool.ts's Claude-side
+   * DispatchContext construction verbatim (fromEngine/fromRoutingId/cwd/
+   * autonomyMode/emit/addDispatchedCost/toolUseId), NOT via MCP — pi has no
+   * MCP client of its own, so this calls crossEngineDispatcher.dispatch()
+   * directly. Result text formatting (the `[dispatch session_id: …]` success
+   * suffix) is copied verbatim from collab-tool.ts too, so a pi-sourced
+   * dispatch reads identically to a Claude-sourced one.
+   *
+   * `extra` (SdkToolExtra) is intentionally OMITTED — DispatchContext.extra is
+   * optional, and pi's execute() DOES receive its own `signal`, but
+   * PiBridgeHost's request/response contract has no channel to thread an
+   * abort through mid-flight (the POST body is just
+   * `{toolName, input, toolCallId}` — no signal). Every read site in
+   * cross-engine-dispatcher.ts already treats a missing `extra` as "no abort
+   * channel, no progress token" (`ctx.extra?.signal` → a permanently-pending
+   * race arm that never wins; `sendProgress(ctx.extra, …)` → no-op), so this
+   * is a safe, honest omission — not a fabricated never-aborting stub.
+   * Stop-from-CALLER still works regardless: TaskCard's Stop button routes
+   * through `crossEngineDispatcher.stopDispatch`, keyed by toolUseId +
+   * routingId, entirely independent of this signal. Only pi's OWN Esc-to-abort
+   * mid-turn does not propagate into an in-flight dispatch — documented v1
+   * limitation, not a bug.
+   */
+  private async handleDispatchAgent(
+    input: Record<string, unknown>,
+    toolCallId: string
+  ): Promise<PiHostedToolResult> {
+    const engine = input.engine
+    const prompt = input.prompt
+    if ((engine !== 'claude' && engine !== 'opencode') || typeof prompt !== 'string') {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: 'dispatch_agent requires "engine" (one of "claude"|"opencode") and a string "prompt".'
+          }
+        ],
+        isError: true
+      }
+    }
+
+    const req: DispatchRequest = {
+      engine,
+      prompt,
+      model: typeof input.model === 'string' ? input.model : undefined,
+      sessionId: typeof input.session_id === 'string' ? input.session_id : undefined
+    }
+    const ctx: DispatchContext = {
+      fromEngine: 'pi',
+      fromRoutingId: this.routingId,
+      cwd: this.cwd,
+      autonomyMode: this.getAutonomyMode(),
+      emit: (channel, data) => this.send(channel, data),
+      addDispatchedCost: (engineId, modelId, costUsd) => this.addDispatchedCost(engineId, modelId, costUsd),
+      toolUseId: toolCallId
+    }
+
+    const result = await crossEngineDispatcher.dispatch(req, ctx)
+    const text = result.isError
+      ? result.text
+      : `${result.text}\n\n[dispatch session_id: ${result.sessionId} — pass it as session_id to continue this agent]`
+    return {
+      content: [{ type: 'text', text }],
+      ...(result.isError ? { isError: true } : {})
+    }
   }
 
   async setModel(model: string): Promise<void> {

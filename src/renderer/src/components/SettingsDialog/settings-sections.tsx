@@ -4139,10 +4139,13 @@ const VENDOR_OPENCODE_SECTION_IDS = new Set(['vendor-opencode', 'opencode-provid
 /** Section ids that belong to opencode Agents subgroup */
 const AGENTS_OPENCODE_SECTION_IDS = new Set(['opencode-agents'])
 
-/** Section ids that belong to Engines > pi (content self-gates on install). M3
- *  scope: default model only — no auto-mode (deferred; opencode's ADR-023
- *  gatekeeper has no pi equivalent yet) and no dispatch (crossEngineDispatch
- *  false until M4), per the M3 kickoff spec. */
+/** Section ids that belong to Engines > pi (content self-gates on install).
+ *  Default model only — no auto-mode (deferred; opencode's ADR-023 gatekeeper
+ *  has no pi equivalent yet). No dispatch section: the Claude/opencode dispatch
+ *  sections configure dispatches INTO that engine (allowlist/default/cap for
+ *  incoming targets), and pi is a dispatch SOURCE only so far — nothing to
+ *  configure until pi-as-target ships (crossEngineDispatch is true for the
+ *  source direction as of M4b). */
 const ENGINE_PI_SECTION_IDS = new Set(['pi-models'])
 
 /** Section ids that belong to Vendors > pi (gated: only shown when pi engine installs) */

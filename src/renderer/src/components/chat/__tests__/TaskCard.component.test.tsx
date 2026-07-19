@@ -223,6 +223,22 @@ describe('TaskCard — cross-engine dispatch card (ADR-033 M3)', () => {
     expect(screen.queryByTestId('TaskCard.sendToBackground')).not.toBeInTheDocument()
   })
 
+  it('pi-named dispatch card (bare dispatch_agent, M4b) also hides "Send to background"', () => {
+    const piBlock = makeTaskBlock({
+      toolUseId: 'call_pi_dispatch_1',
+      toolName: 'dispatch_agent',
+      toolInput: { engine: 'claude', prompt: 'review', model: 'sonnet' }
+    })
+    render(
+      <TaskCard
+        block={piBlock}
+        view={{ kind: 'task', description: 'Dispatch: claude', prompt: 'review', subagent: 'claude · sonnet' }}
+      />
+    )
+    expect(screen.getByTestId('TaskCard.stop')).toBeInTheDocument()
+    expect(screen.queryByTestId('TaskCard.sendToBackground')).not.toBeInTheDocument()
+  })
+
   it('native task card unchanged: running → both Stop and "Send to background" render', () => {
     render(<TaskCard block={makeTaskBlock()} view={defaultTaskView} />)
     expect(screen.getByTestId('TaskCard.stop')).toBeInTheDocument()

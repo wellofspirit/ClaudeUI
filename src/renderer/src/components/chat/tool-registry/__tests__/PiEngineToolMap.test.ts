@@ -23,11 +23,17 @@ describe('PiEngineToolMap.kindOf', () => {
     ['grep', 'search'],
     ['find', 'search'],
     ['ls', 'search'],
-    // Hosted-tools MCP names resolve engine-independently (M4 — pi doesn't
-    // host them yet, but the map is ready).
+    // Hosted-tools MCP names resolve engine-independently (a future pi MCP
+    // bridge would land here — pi's OWN hosted tools use bare names below).
     ['mcp__claude-ui__render_mermaid', 'diagram'],
     ['mcp__claude-ui-mockup__create_mockup', 'mockup'],
     ['mcp__some-server__tool', 'mcp'],
+    // Hosted tools (M4a+b) registered via pi.registerTool() — BARE names
+    // (hostedMcpKind above only matches mcp__* prefixed names).
+    ['render_mermaid', 'diagram'],
+    ['create_mockup', 'mockup'],
+    ['show_mockup', 'mockup'],
+    ['dispatch_agent', 'task'],
     // Unknown tool names fall through gracefully.
     ['skill', 'unknown'],
     ['invalid', 'unknown']
@@ -127,6 +133,59 @@ describe('PiEngineToolMap.normalize', () => {
   })
 })
 
+describe('PiEngineToolMap.normalize — hosted tools (M4a+b)', () => {
+  it('diagram: maps source/title straight through (render_mermaid args)', () => {
+    const view = PiEngineToolMap.normalize('diagram', { source: 'graph TD; A-->B', title: 'Flow' })
+    expect(view).toEqual({ kind: 'diagram', source: 'graph TD; A-->B', title: 'Flow' })
+  })
+
+  it('diagram: title is optional', () => {
+    const view = PiEngineToolMap.normalize('diagram', { source: 'graph TD' })
+    expect(view).toEqual({ kind: 'diagram', source: 'graph TD', title: undefined })
+  })
+
+  it('mockup: create_mockup input has no directory field -- extracted from the tool result text', () => {
+    const result = {
+      type: 'tool_result' as const,
+      toolUseId: 'x',
+      toolResult: 'Mockup created successfully.\nDirectory: abc123\nPath: .claude/ui/mockups/abc123',
+      isError: false
+    }
+    const view = PiEngineToolMap.normalize('mockup', { html: '<div>hi</div>', title: 'My UI' }, result)
+    expect(view).toEqual({ kind: 'mockup', directory: 'abc123', title: 'My UI' })
+  })
+
+  it('mockup: show_mockup input carries directory directly (no result needed)', () => {
+    const view = PiEngineToolMap.normalize('mockup', { directory: 'abc123' })
+    expect(view).toEqual({ kind: 'mockup', directory: 'abc123', title: undefined })
+  })
+
+  it('mockup: no directory in input and no result -> undefined directory', () => {
+    const view = PiEngineToolMap.normalize('mockup', { html: '<div>hi</div>' })
+    expect(view).toEqual({ kind: 'mockup', directory: undefined, title: undefined })
+  })
+
+  it('task: dispatch_agent input (engine present) -> "Dispatch: <engine>" / "<engine> · <model>"', () => {
+    const view = PiEngineToolMap.normalize('task', { engine: 'opencode', prompt: 'do X', model: 'openai/gpt-5' })
+    expect(view).toEqual({
+      kind: 'task',
+      description: 'Dispatch: opencode',
+      prompt: 'do X',
+      subagent: 'opencode · openai/gpt-5'
+    })
+  })
+
+  it('task: dispatch_agent without a model -> subagent is just the engine name', () => {
+    const view = PiEngineToolMap.normalize('task', { engine: 'claude', prompt: 'do X' })
+    expect(view).toEqual({ kind: 'task', description: 'Dispatch: claude', prompt: 'do X', subagent: 'claude' })
+  })
+
+  it('task: no engine field (defensive fallback, unreachable for pi today) -> generic view', () => {
+    const view = PiEngineToolMap.normalize('task', { prompt: 'do X' })
+    expect(view).toMatchObject({ kind: 'task', description: '', prompt: 'do X' })
+  })
+})
+
 describe('PiEngineToolMap.displayName', () => {
   it('prettifies pi\'s lowercase built-in tool names', () => {
     expect(PiEngineToolMap.displayName('bash')).toBe('Bash')
@@ -140,5 +199,12 @@ describe('PiEngineToolMap.displayName', () => {
 
   it('passes an unrecognised name through unchanged', () => {
     expect(PiEngineToolMap.displayName('mystery_tool')).toBe('mystery_tool')
+  })
+
+  it('prettifies hosted tool bare names (M4a+b)', () => {
+    expect(PiEngineToolMap.displayName('render_mermaid')).toBe('Mermaid')
+    expect(PiEngineToolMap.displayName('create_mockup')).toBe('Mockup')
+    expect(PiEngineToolMap.displayName('show_mockup')).toBe('Mockup')
+    expect(PiEngineToolMap.displayName('dispatch_agent')).toBe('Dispatch')
   })
 })

@@ -5,10 +5,18 @@
  * but this is plain JSON, NOT MCP.
  *
  * One instance per PiSession: `start()` binds an ephemeral port on loopback
- * ONLY, mints a bearer token, and exposes the single route the bridge
- * extension calls (`POST /tool-call`). The caller supplies a `handler` that
- * makes the actual gating decision (PiSession.gateToolCall) — this class only
- * owns transport (listen/auth/body-cap/dispatch/dispose), never policy.
+ * ONLY, mints a bearer token, and exposes TWO routes the bridge extension
+ * calls:
+ *  - `POST /tool-call` — the approval gate (M2a). The caller supplies
+ *    `handler`, which makes the actual gating decision (PiSession.gateToolCall)
+ *    — this class only owns transport (listen/auth/body-cap/dispatch/dispose),
+ *    never policy.
+ *  - `POST /hosted-tool` (M4a+b) — executes a registered hosted tool
+ *    (render_mermaid/create_mockup/show_mockup/dispatch_agent) AFTER the
+ *    /tool-call gate has already allowed it (pi's tool_call hook fires for
+ *    registered tools too — verified — so this route never re-gates). The
+ *    caller supplies the optional second `hostedToolHandler`
+ *    (PiSession.handleHostedTool).
  *
  * `dispose()` MUST be called on session teardown (cancel/dispose/unexpected
  * exit) — an open server otherwise leaks a port and can keep the process
@@ -39,6 +47,21 @@ export type GateDecision =
 
 export type PiBridgeHandler = (payload: PiToolCallPayload) => Promise<GateDecision>
 
+/** Body of `POST /hosted-tool` — the bare toolName + parsed args + pi's own tool-call id (threaded into DispatchContext.toolUseId for dispatch_agent). */
+export interface PiHostedToolPayload {
+  toolName: string
+  input: Record<string, unknown>
+  toolCallId: string
+}
+
+/** MCP-shaped tool result — the SAME shape mermaid-tool/mockup-tool/the dispatch-result-formatter already produce, passed through verbatim. */
+export interface PiHostedToolResult {
+  content: Array<{ type: 'text'; text: string }>
+  isError?: boolean
+}
+
+export type PiHostedToolHandler = (payload: PiHostedToolPayload) => Promise<PiHostedToolResult>
+
 export interface PiBridgeStartResult {
   url: string
   token: string
@@ -49,7 +72,17 @@ export class PiBridgeHost {
   private readonly sockets = new Set<Socket>()
   private token = ''
 
-  constructor(private readonly handler: PiBridgeHandler) {}
+  /**
+   * `hostedToolHandler` is a SECOND, optional constructor arg (not an options
+   * bag) — keeps `handler` first-positional for back-compat with every
+   * existing single-arg `new PiBridgeHost(handler)` call site/test; omitting
+   * it just means `POST /hosted-tool` always responds with a fail-closed
+   * isError result (see processHostedToolBody) instead of crashing.
+   */
+  constructor(
+    private readonly handler: PiBridgeHandler,
+    private readonly hostedToolHandler?: PiHostedToolHandler
+  ) {}
 
   /** Bind 127.0.0.1:0 (OS-assigned ephemeral port) and mint a fresh bearer token. */
   start(): Promise<PiBridgeStartResult> {
@@ -91,7 +124,9 @@ export class PiBridgeHost {
   }
 
   private handleRequest(req: IncomingMessage, res: ServerResponse): void {
-    if (req.method !== 'POST' || req.url !== '/tool-call') {
+    const route =
+      req.url === '/tool-call' ? 'tool-call' : req.url === '/hosted-tool' ? 'hosted-tool' : null
+    if (req.method !== 'POST' || route === null) {
       res.writeHead(404).end()
       return
     }
@@ -113,14 +148,15 @@ export class PiBridgeHost {
     })
     req.on('end', () => {
       if (tooLarge) return
-      void this.processBody(body, res)
+      if (route === 'tool-call') void this.processToolCallBody(body, res)
+      else void this.processHostedToolBody(body, res)
     })
     req.on('error', () => {
       // Connection-level error mid-body (e.g. client aborted) — nothing left to respond to.
     })
   }
 
-  private async processBody(body: string, res: ServerResponse): Promise<void> {
+  private async processToolCallBody(body: string, res: ServerResponse): Promise<void> {
     let payload: PiToolCallPayload | null = null
     try {
       const parsed = JSON.parse(body) as Partial<PiToolCallPayload> | null
@@ -149,6 +185,59 @@ export class PiBridgeHost {
       decision = { behavior: 'deny', reason: 'Internal approval error' }
     }
     res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(decision))
+  }
+
+  /**
+   * M4a+b: executes a hosted tool AFTER the /tool-call gate already allowed
+   * it — never re-gates. Same transport-level validation as
+   * processToolCallBody (bearer/body-cap in handleRequest above; malformed
+   * JSON here still 400s, matching /tool-call), but past that point the
+   * "decision" is an MCP-shaped `{content, isError?}` tool result instead of
+   * an allow/deny — so a HANDLER-level failure (throws, or no
+   * hostedToolHandler configured) still responds 200 with an isError body,
+   * fail-closed defense-in-depth, since the pi extension expects a
+   * tool-result-shaped body to return verbatim from execute(), never an HTTP
+   * error status for that case.
+   */
+  private async processHostedToolBody(body: string, res: ServerResponse): Promise<void> {
+    let payload: PiHostedToolPayload | null = null
+    try {
+      const parsed = JSON.parse(body) as Partial<PiHostedToolPayload> | null
+      if (parsed && typeof parsed.toolName === 'string' && typeof parsed.toolCallId === 'string') {
+        payload = {
+          toolName: parsed.toolName,
+          toolCallId: parsed.toolCallId,
+          input: (parsed.input as Record<string, unknown>) ?? {}
+        }
+      }
+    } catch {
+      // fall through — payload stays null, handled below
+    }
+
+    if (!payload) {
+      res.writeHead(400).end()
+      return
+    }
+
+    let result: PiHostedToolResult
+    if (!this.hostedToolHandler) {
+      // No hosted-tool handler was wired (e.g. an existing /tool-call-only
+      // caller/test double) — fail closed rather than crash on a stray
+      // /hosted-tool request.
+      result = {
+        content: [{ type: 'text', text: 'ClaudeUI hosted-tool handler not configured' }],
+        isError: true
+      }
+    } else {
+      try {
+        result = await this.hostedToolHandler(payload)
+      } catch (err) {
+        // Defense in depth: a throwing handler must never hang or 500 — fail closed.
+        logger.error('PiBridgeHost', 'hosted-tool handler threw — failing closed', err)
+        result = { content: [{ type: 'text', text: 'Internal hosted-tool error' }], isError: true }
+      }
+    }
+    res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(result))
   }
 
   /** Close the server and forcibly destroy any still-open sockets (keep-alive connections would otherwise delay/prevent close). Idempotent. */

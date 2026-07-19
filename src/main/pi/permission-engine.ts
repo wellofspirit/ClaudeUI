@@ -61,10 +61,48 @@ export function piToolKind(toolName: string): ToolKind {
     case 'find':
     case 'ls':
       return 'search'
+    // Hosted tools (M4a+b) registered via pi.registerTool() in the bridge
+    // extension use BARE names — hostedMcpKind above only matches `mcp__*`
+    // prefixed names, so these need explicit cases here too. Mirrors
+    // PiEngineToolMap.kindOf's IDENTICAL cases (renderer side) — the
+    // single-source guard test (PiEngineToolMap.test.ts) asserts the two
+    // tables agree for every known pi tool name.
+    case 'render_mermaid':
+      return 'diagram'
+    case 'create_mockup':
+    case 'show_mockup':
+      return 'mockup'
+    case 'dispatch_agent':
+      return 'task'
     default:
       return 'unknown'
   }
 }
+
+// ---------------------------------------------------------------------------
+// Hosted-tool auto-allow (M4a)
+// ---------------------------------------------------------------------------
+
+/**
+ * Hosted LLM tools (M4a) — ClaudeUI's own render_mermaid/create_mockup/
+ * show_mockup, registered via pi.registerTool() over the bridge (see
+ * pi-bridge-source.ts + PiBridgeHost's /hosted-tool route). ALWAYS ALLOWED —
+ * parity with Claude's auto-allowed `mcp__claude-ui__` prefix and opencode's
+ * silent `{*:allow}` baseline for the same tools. Checked in decide() AFTER
+ * deny rules (a user's explicit deny still wins — see decide()'s doc
+ * comment) but BEFORE ask/sessionAllows/allow/mode-base, so these three
+ * never prompt or fall through the ladder.
+ *
+ * `dispatch_agent` is deliberately NOT in this set: it gets NORMAL gating
+ * (falls through to mode base), matching Claude routing dispatch_agent
+ * through its own separate, non-auto-allowed `claude-ui-collab` MCP server
+ * (collab-tool.ts) rather than the auto-allowed `claude-ui` one.
+ */
+export const PI_AUTO_ALLOW_HOSTED_TOOLS: ReadonlySet<string> = new Set([
+  'render_mermaid',
+  'create_mockup',
+  'show_mockup'
+])
 
 // ---------------------------------------------------------------------------
 // Claude rule string -> pi kind mapping (for evaluating the user's rules)
@@ -200,13 +238,17 @@ function modeBaseDecision(mode: string, kind: ToolKind): 'allow' | 'ask' {
 /**
  * Decide allow/ask/deny for one pi tool_call.
  *
- * Precedence — severity wins, deny(3) > ask(2) > allow(1): any matching deny
- * rule -> 'deny'; else any matching ask rule -> 'ask'; else sessionAllows or a
- * matching allow rule -> 'allow'; else the mode base. This mirrors Claude's
- * own deny > ask > allow precedence (ADR-022 gives opencode the identical
- * property) and keeps a deny/ask rule meaningful even in `full` mode — an
- * "allow everything" autonomy mode is still not a bypass of an explicit user
- * rule.
+ * Precedence — severity wins, deny(3) > hosted-auto-allow > ask(2) >
+ * allow(1): any matching deny rule -> 'deny'; else a hosted LLM tool
+ * (PI_AUTO_ALLOW_HOSTED_TOOLS, M4a) -> 'allow'; else any matching ask rule ->
+ * 'ask'; else sessionAllows or a matching allow rule -> 'allow'; else the
+ * mode base. This mirrors Claude's own deny > ask > allow precedence
+ * (ADR-022 gives opencode the identical property) and keeps a deny/ask rule
+ * meaningful even in `full` mode — an "allow everything" autonomy mode is
+ * still not a bypass of an explicit user rule. The hosted-tool short-circuit
+ * sits directly below deny (so an explicit user deny still wins) and above
+ * everything else (so render_mermaid/create_mockup/show_mockup never prompt
+ * or depend on mode/rules) — see PI_AUTO_ALLOW_HOSTED_TOOLS' doc comment.
  */
 export function decide(
   toolName: string,
@@ -216,6 +258,7 @@ export function decide(
   const kind = piToolKind(toolName)
 
   if (ctx.rules.deny.some((r) => ruleMatchesTool(r, kind, input))) return 'deny'
+  if (PI_AUTO_ALLOW_HOSTED_TOOLS.has(toolName)) return 'allow'
   if (ctx.rules.ask.some((r) => ruleMatchesTool(r, kind, input))) return 'ask'
   if (ctx.sessionAllows.has(sessionAllowKey(toolName, input))) return 'allow'
   if (ctx.rules.allow.some((r) => ruleMatchesTool(r, kind, input))) return 'allow'

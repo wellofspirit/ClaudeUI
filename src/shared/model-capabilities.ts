@@ -709,19 +709,29 @@ export function resolveOpencodeCapabilitiesFromModel(
  *     run-in-a-terminal hint instead, PiVendors.tsx). PiAuthProvider (M3)
  *     covers probe()/api_key read-modify-write only; that is orthogonal to
  *     this flag, which specifically gates in-app *driven* login UI.
- *   - hostedMcp → M4, once the hosted mermaid/mockup tools + cross-engine
- *     dispatch are bridged through pi's extension API.
+ *   - hostedMcp → SHIPPED in M4a: the hosted render_mermaid/create_mockup/
+ *     show_mockup tools are bridged through pi's extension API
+ *     (pi.registerTool() in pi-bridge-source.ts, calling back over
+ *     PiBridgeHost's POST /hosted-tool route to PiSession.handleHostedTool),
+ *     auto-allowed via permission-engine.ts's PI_AUTO_ALLOW_HOSTED_TOOLS.
  *   - sideQuestion, plan, fork, forkFromMessage, backgroundTasks, subagents,
  *     voice → unwired; each becomes a dedicated follow-up once its RPC
  *     surface (fork/clone, …) is wired the same way OpencodeSession's were.
  *   - sandbox, proxy → Claude cli.js launch-param concepts; pi has neither
  *     (see EngineCapabilities' own doc comment) — likely permanently false.
- *   - crossEngineDispatch → M4 (ADR-033); cross-engine-dispatcher.ts's engine
- *     guard already rejects 'pi' as a target/source, so this is honest AND safe.
+ *   - crossEngineDispatch → SHIPPED in M4b: pi as a dispatch SOURCE only
+ *     (`dispatch_agent`, same registerTool mechanism as hostedMcp above,
+ *     PiSession.handleDispatchAgent calling crossEngineDispatcher.dispatch()
+ *     directly — NOT via MCP). pi as a dispatch TARGET is a separate later
+ *     milestone; cross-engine-dispatcher.ts's engine guard still rejects
+ *     'pi' as `req.engine`, so this stays honest. The static `true` here is
+ *     ANDed with the runtime `crossEngineDispatchAvailable('pi')` check at
+ *     PiSession's `capabilities` getter (mirrors ClaudeSession/
+ *     OpencodeSession's identical AND at session build — ADR-030/033 M4-A).
  */
 export const PI_ENGINE_CAPABILITIES: EngineCapabilities = {
   voice: false,
-  hostedMcp: false,
+  hostedMcp: true,
   backgroundTasks: false,
   subagents: false,
   plan: false,
@@ -737,7 +747,7 @@ export const PI_ENGINE_CAPABILITIES: EngineCapabilities = {
   proxy: false,
   autonomyModes: ['ask', 'autoEdit', 'full'],
   auth: { canDriveLogin: false, multiAccount: false },
-  crossEngineDispatch: false
+  crossEngineDispatch: true
 }
 
 /**
