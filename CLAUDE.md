@@ -8,7 +8,7 @@ A desktop GUI for Claude Code sessions, built with Electron. Features include mu
 
 ## Development Workflow (read this first)
 
-For any **non-trivial change**, follow the loop in **[ADR-026](docs/adr/adr-026_development-workflow.md)** — the living step-by-step + standing constraints are in **[docs/v2/ROADMAP.md](docs/v2/ROADMAP.md) § "How we work"**:
+For any **non-trivial change**, follow the loop in **[ADR-026](docs/adr/adr-026_development-workflow.md)** (the full step-by-step + standing constraints live there):
 
 - **The main model (Opus) orchestrates, reviews, and commits; a Sonnet sub-agent implements.** Dispatch the implementer via `Agent` (`subagent_type: general-purpose`, `model: sonnet`) against a written kickoff spec.
 - **The implementing agent never self-certifies** and never commits / `git add`s / branches / runs `bun install`. It leaves the working tree for review.
@@ -25,7 +25,7 @@ Trivial one-line/mechanical edits and conversational answers are exempt. Indepen
 - **Tailwind CSS v4** via `@tailwindcss/vite` plugin (no postcss/tailwind config files)
 - **Zustand** for state management
 - **react-markdown** + **remark-gfm** for rendering
-- **Claude Code CLI** integrated directly — we rebundle Anthropic's official Bun standalone binary with our patched cli.js, producing `vendor/claude-cli/bun-claude[.exe]` at build time. Handles PE (Windows `.bun` section) and Mach-O (macOS `__BUN,__bun` section + ad-hoc codesign); ELF (Linux) is a follow-up. Spawned natively (no `ELECTRON_RUN_AS_NODE`, no cli.js arg injection). No `@anthropic-ai/claude-agent-sdk` dependency. See **[docs/sdk-layer.md](docs/sdk-layer.md)**.
+- **Claude Code CLI** integrated directly — we rebundle Anthropic's official Bun standalone binary with our patched cli.js, producing `vendor/claude-cli/bun-claude[.exe]` at build time. Handles PE (Windows `.bun` section) and Mach-O (macOS `__BUN,__bun` section + ad-hoc codesign); ELF (Linux) is a follow-up. Spawned natively (no `ELECTRON_RUN_AS_NODE`, no cli.js arg injection). No `@anthropic-ai/claude-agent-sdk` dependency. See **[docs/protocol/](docs/protocol/)** (build pipeline in [01-transport.md §1.12](docs/protocol/01-transport.md); rationale in [ADR-006](docs/adr/adr-006_rebundle-bun-binary.md)).
 - **@modelcontextprotocol/sdk** for in-process MCP server hosting
 - **simple-git** for git operations
 - **node-pty** + **@xterm/xterm** for terminal emulator
@@ -67,7 +67,7 @@ src/
     index.ts               — Electron BrowserWindow setup, app lifecycle, service wiring
     sdk/                   — In-house cli.js harness, replaces @anthropic-ai/claude-agent-sdk
                              query(), tool(), createSdkMcpServer() + 9 modules
-                             Full details: docs/sdk-layer.md
+                             Full details: docs/protocol/ (module map in 01-transport.md §1.13)
     providers/             — Engine abstraction layer (ADR-016 → ADR-018)
       ISession.ts          — Engine-neutral session interface + EngineSessionFactory type
       BaseSession.ts       — Abstract base: extraWindows, send(), inactivity timer, getMessages()
@@ -157,7 +157,7 @@ vendor/claude-cli/         — Rebundled bun-claude[.exe] + wrapped cli.js sourc
 scripts/                   — Build-time helpers (extract-cli.mjs, rebundle-cli.mjs, ...)
 patch/                     — cli.js content-regex patches applied before rebundle
 docs/adr/                  — Architectural Decision Records
-docs/sdk-layer.md          — Reference for the in-house cli.js harness
+docs/protocol/             — cli.js wire-protocol manual + build pipeline + harness reference
 ```
 
 ## Services
@@ -233,7 +233,7 @@ User types prompt → InputBox.handleSend()
 - **Git status polling** — `useGitWatcher` starts/stops `GitService.startPolling()` based on active session's cwd
 - **Terminal grouping** — Terminals are grouped by normalized cwd, survive session switching, cleaned up after 10 min inactivity (ADR-003)
 - **Remote dual-mode** — Same handlers serve both Electron IPC and WebSocket clients (remote-handlers.ts mirrors session.ipc.ts)
-- **cli.js integration details** — see **[docs/sdk-layer.md](docs/sdk-layer.md)** for wire protocol, control subtypes, MCP hosting, cancellation tiers, and extraction pipeline
+- **cli.js integration details** — see **[docs/protocol/](docs/protocol/)** for wire protocol, control subtypes, MCP hosting, cancellation tiers, and the extraction/rebundle pipeline
 
 ### Views
 
@@ -322,7 +322,7 @@ The `/api/oauth/usage` API returns utilization as 0–100 (percentage), while ra
 
 ## Engine Abstraction
 
-ClaudeUI uses an engine-neutral session layer (`src/main/providers/`) as scaffolding for future engine backends. The V2 re-platform design is in `docs/v2/` and ADR-018/019/020/021.
+ClaudeUI uses an engine-neutral session layer (`src/main/providers/`) as scaffolding for future engine backends. The V2 re-platform design is recorded in ADR-018/019/020/021 (the detailed `docs/v2/` design + phase docs were removed after V2 shipped — recoverable from git history).
 
 - **`src/main/providers/`** — `ISession`/`BaseSession`/`EngineRegistry`. `SessionManager` holds `Map<routingId, ISession>`; all backends implement `ISession`. The renderer consumes the same `session:*` events regardless of engine.
 - **`EngineId`** — `'claude' | 'opencode'`. Only `'claude'` has a registered factory in Phase 1; opencode backend arrives in Phase 5. **`ModelRef`** — vendor-qualified model identity `{ engineId, vendorId, modelId }`; `SessionStatus.model` is `ModelRef | null`. `claudeModel(id)` builds anthropic-vendored refs.
@@ -364,7 +364,7 @@ Two distinct planes of on-disk state (Phase 3a/3b — persistence.md, ADR-020):
 
 ## Settings & Config
 
-The SettingsDialog (`src/renderer/src/components/SettingsDialog/`) is organized as a **tier tree** (Phase 3b — ADR-018, docs/v2/03-settings-config.md), not a flat list. Two orthogonal axes: **tier** (who the setting conceptually belongs to: App / Engine / Vendor / Session) and **config plane** (who stores + consumes it: ① app store / ② engine-native / ③ launch params — see [Persistence model](#persistence-model)).
+The SettingsDialog (`src/renderer/src/components/SettingsDialog/`) is organized as a **tier tree** (Phase 3b — ADR-018/ADR-020), not a flat list. Two orthogonal axes: **tier** (who the setting conceptually belongs to: App / Engine / Vendor / Session) and **config plane** (who stores + consumes it: ① app store / ② engine-native / ③ launch params — see [Persistence model](#persistence-model)).
 
 ```
 Settings
@@ -387,7 +387,7 @@ Settings
 
 ## cli.js Integration
 
-Everything about how ClaudeUI talks to cli.js — the Bun binary extraction pipeline, the stream-json wire protocol, control request subtypes, MCP hosting, cancellation tiers, the 16 patches — lives in **[docs/sdk-layer.md](docs/sdk-layer.md)**. Read that before touching anything under `src/main/sdk/`, `scripts/extract-cli.mjs`, or `patch/`.
+Everything about how ClaudeUI talks to cli.js — the Bun binary extraction pipeline, the stream-json wire protocol, control request subtypes, MCP hosting, cancellation tiers, the patches — lives in **[docs/protocol/](docs/protocol/)**. Read the relevant chapter before touching anything under `src/main/sdk/`, `scripts/extract-cli.mjs`, or `patch/`.
 
 ### Wire protocol reference — read this before theorizing
 
@@ -401,7 +401,25 @@ cli.js is ~13MB minified. Use the `/bundle-analyzer` skill to navigate it — st
 
 ### Patches
 
-15 content-regex patches under `patch/`, applied by `bun run ensure-cli` between the extract and rebundle steps. Three auto-detect upstream fixes and no-op (`taskstop-notification`, `incomplete-session-resume-fix`, `mcp-tool-refresh`). The active 12 add stream forwarding, control subtypes, file-only credential storage (`skip-securestorage`, ADR-015), and small bug fixes — full table in `docs/sdk-layer.md#patches`. Patches operate on the wrapped Bun CJS IIFE bytes at `vendor/claude-cli/cli.js`; they run identically on the wrapped form since every anchor targets content inside the IIFE body. See **[ADR-006](docs/adr/adr-006_rebundle-bun-binary.md)** for why the pipeline now rebundles instead of unwrapping.
+14 content-regex patches under `patch/` (registry: `patch/apply-all.mjs`), applied by `bun run ensure-cli` between the extract and rebundle steps. Three auto-detect upstream fixes and no-op on recent cli.js versions (`taskstop-notification`, `incomplete-session-resume-fix`, `mcp-tool-refresh`). The active 11:
+
+| Patch                    | What it adds to cli.js                                                                                                                                                                                      |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `subagent-streaming`     | Forwards subagent stream_events + messages that would otherwise be swallowed by internal aggregation                                                                                                        |
+| `queue-control`          | `dequeue_message` control subtype + `queued_command_consumed` notification                                                                                                                                  |
+| `mcp-status`             | Awaits MCP refresh before responding so `mcpServerStatus()` returns the full list                                                                                                                           |
+| `background-task`        | `background_task` control subtype — convert foreground task to background                                                                                                                                   |
+| `usage-relay`            | `get_usage` control subtype — exposes cli.js's internal /usage API                                                                                                                                          |
+| `request-usage`          | Emits per-request token usage events after each API call                                                                                                                                                    |
+| `rate-limit-relay`       | Emits rate limit headers after each API call                                                                                                                                                                |
+| `voice-server`           | Adds internal TCP voice-transcription server, control subtypes `voice_server_start`/`stop`                                                                                                                  |
+| `bash-output-streaming`  | Pushes Bash output to stream_event immediately instead of buffering 2s                                                                                                                                      |
+| `subprocess-proxy-strip` | Strips `HTTP(S)_PROXY` / `ALL_PROXY` / `NO_PROXY` from env handed to bash/MCP/LSP/etc. subprocesses so cli.js's own proxy doesn't leak into shell tools (gated off via `CLAUDEUI_PROXY_SUBPROCESSES=1`)     |
+| `skip-securestorage`     | When `SKIP_SECURESTORAGE` is set, forces the credential store to the plaintext file backend (bypassing macOS Keychain) so per-account `.credentials.json` files can be managed/swapped. Enables multi-account (ADR-015) |
+
+Retired: `ci-path-remap` (obsolete once cli.js runs inside its native Bun runtime — ADR-006), `sandbox-network-fix` (upstream's "no allowed domains = no network" semantics kept deliberately), `team-streaming` (dir removed).
+
+Patches operate on the wrapped Bun CJS IIFE bytes at `vendor/claude-cli/cli.js`; they run identically on the wrapped form since every anchor targets content inside the IIFE body. When the minifier changes variable names between versions, a patch fails with "cannot locate anchor" — update that patch's regex using its README's bundle-analyzer anchors. See **[ADR-006](docs/adr/adr-006_rebundle-bun-binary.md)** for why the pipeline now rebundles instead of unwrapping.
 
 Skills for patch work:
 

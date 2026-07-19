@@ -2,7 +2,7 @@
  * Claude engine tool map — maps Claude's tool names to ToolKinds and normalizes
  * their input/result shapes into engine-neutral ToolView objects.
  *
- * See docs/v2/06-tool-rendering.md §6 for the canonical Claude→kind table.
+ * The kindOf switch below IS the canonical Claude→kind table.
  */
 
 import type { EngineToolMap, ToolKind, ToolView } from '../../../../../shared/tool-kinds'

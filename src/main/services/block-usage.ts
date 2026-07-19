@@ -1355,8 +1355,8 @@ export class BlockUsageService {
    * Phase 9a: the sample SOURCE is now the DB (`usage_window_sample`) when
    * available, with the in-memory ring as fallback when the DB has no samples
    * for the current window (e.g. first boot before any poll has written to DB).
-   * Minor numerical drift vs the ring-only approach is accepted — see docs/v2/
-   * phase-9-usage-analytics.md §WLS projection.
+   * Minor numerical drift vs the ring-only approach is accepted (DB samples are
+   * poll-aligned, the ring was frame-aligned).
    */
   private computeProjectionWLS(
     block: UsageBlock,

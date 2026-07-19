@@ -2,7 +2,7 @@
 
 **Status:** Accepted
 **Relates to:** ADR-027 (test data attributes — the structural-verification tier this workflow leans on)
-**Operational detail:** `docs/v2/ROADMAP.md` § "How we work" (the living, step-by-step version)
+**Operational detail:** the loop + standing constraints below. (Originally mirrored from `docs/v2/ROADMAP.md` § "How we work"; the V2 docs were removed after V2 shipped, so this ADR is now the single home.)
 
 ## Context
 
@@ -42,10 +42,9 @@ user-visible. Trivial mechanical edits and pure conversational answers are exemp
 2. **Decide the forks with the user.** For genuine forks (depth, behavior-preserving vs
    structure-ready, library choice) use `AskUserQuestion` with a clear recommendation. Don't re-ask
    settled things. The user has consistently chosen the fuller, structure-ready option.
-3. **Write a kickoff spec** (mirror an existing `docs/v2/phase-*.md` / `followup-*.md`): scope
-   decisions with the chosen forks, a precise file/seam map, verified facts so the agent doesn't
-   re-discover, an explicit out-of-scope list, step-by-step, verify gates, gotchas, a suggested commit
-   message.
+3. **Write a kickoff spec**: scope decisions with the chosen forks, a precise file/seam map,
+   verified facts so the agent doesn't re-discover, an explicit out-of-scope list, step-by-step,
+   verify gates, gotchas, a suggested commit message.
 4. **Dispatch the Sonnet agent** (`Agent` tool, `subagent_type: general-purpose`, `model: sonnet`)
    pointed at the spec, with the standing constraints (no commit / no branch / no `bun install`).
 5. **Review every single line** of the agent's diff (`git diff <base>`). Read the actual code, not the
@@ -64,7 +63,7 @@ user-visible. Trivial mechanical edits and pure conversational answers are exemp
 8. **Commit + push** — one commit per item, after review and real-build verification are both clean.
    Stage **precisely** (never blind `git add -A` — agents and verifiers leave debris scripts);
    descriptive multi-paragraph message (subject + body); **no AI attribution / no Co-Authored-By.**
-9. **Update memory + the roadmap** — record the result, capture any new gotcha, then `AskUserQuestion`
+9. **Update memory** — record the result, capture any new gotcha, then `AskUserQuestion`
    for the next step.
 
 **Cadence:** scope → forks → spec → dispatch → review↔fix loop → verify (gates + real-app drive) →
@@ -77,14 +76,38 @@ Independent slices may be dispatched as **concurrent** Sonnet agents (one per ar
 reviewed on its own and the gates run on the combined tree before any commit. Parallel dispatch never
 relaxes the review bar.
 
+### Standing constraints (they have bitten us)
+
+- **NEVER `bun install` / `bun add` / `bun remove` casually.** bun's postinstall leaves
+  `better-sqlite3` **Node-ABI**, which crashes the Electron app on boot (`ERR_DLOPEN_FAILED`). After
+  any dep change run **`bun run rebuild:native`** (`electron-builder install-app-deps`, rebuilds to
+  the Electron ABI).
+- **Dual-ABI testing.** vitest runs in plain Node and can't load the Electron-ABI `better-sqlite3`,
+  so `vitest.config.ts` aliases it → `src/test/stubs/better-sqlite3-stub.ts` (a `node:sqlite`
+  adapter). DB-touching code is tested through that. Never import `better-sqlite3` from
+  renderer/shared — main process only.
+- **Don't break Claude.** Claude is the daily driver and the live login path (the user is actively
+  logged in — an auth-detection bug = lockout). Every change touching shared seams must be confirmed
+  behavior-preserving for Claude via the real-app drive.
+- **opencode specifics.** Binary (~165 MB) is gitignored (`vendor/opencode-cli/`), vendored by
+  `ensure-opencode`, shipped via electron-builder `extraResources`. HTTP **Basic auth**
+  (`opencode:<generated-password>`). Target the **v1** API (`/session`, `/event`, `/auth/{id}`) —
+  NOT the `/api/*` v2 family. The shared `/event` stream multiplexes all sessions → filter by
+  `properties.sessionID`. Binary/plugin locators use `app.getAppPath()`, not `__dirname`.
+- **cli.js wire.** For any cli.js-integration question, consult `docs/protocol/` first, then probe
+  the real `bun-claude` binary — cheaper and more reliable than reading minified cli.js. Use
+  `/bundle-analyzer` to navigate the bundle.
+- **Commits.** One per item, no AI attribution, multi-paragraph body, stage precisely.
+- **Pre-existing lint.** 3 `exhaustive-deps` warnings (Sidebar / ExitPlanModeCard / ReviewBar) —
+  leave them.
+
 ## Consequences
 
 - **Correctness is structurally owned by review**, not by the implementer's confidence. This is the
   single most load-bearing rule — it has caught a real bug nearly every phase.
 - A fixed, referenced loop means a fresh session (or a teammate) works the same way without re-deriving
-  it. `CLAUDE.md` points here; `docs/v2/ROADMAP.md` carries the living operational detail and the
-  standing constraints (the dual-ABI `better-sqlite3` trap, "don't break Claude", opencode/cli.js
-  specifics).
+  it. `CLAUDE.md` points here; the standing constraints above (the dual-ABI `better-sqlite3` trap,
+  "don't break Claude", opencode/cli.js specifics) travel with the loop.
 - Slight overhead on small changes — hence the trivial-edit exemption. The bar scales with risk.
 
 ## Alternatives considered

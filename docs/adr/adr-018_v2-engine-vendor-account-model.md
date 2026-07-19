@@ -1,6 +1,6 @@
 # ADR-018: V2 multi-engine model — engine / vendor / account split + capability model
 
-**Status:** Accepted (V2 design; implementation sequenced in `docs/v2/implementation-plan.md`)
+**Status:** Accepted (V2 design; implementation complete. The detailed `docs/v2/` design docs were removed after V2 shipped — recoverable from git history.)
 **Date:** 2026-06-19
 **Supersedes:** [ADR-016](adr-016_provider-abstraction.md)
 
@@ -14,9 +14,9 @@ permissions, auth, persistence — hard-coded Claude. And the term "provider" co
 independent concepts, which opencode forces apart (one engine, many vendors, many billing models;
 switching model mid-session changes all three).
 
-Full design: [`docs/v2/`](../v2/README.md) (foundations 1–2 + persistence). This ADR records the
-core data + capability model; companions ADR-019/020/021 record opencode, persistence/config, and
-auth.
+This ADR records the core data + capability model; companions ADR-019/020/021 record opencode,
+persistence/config, and auth. (The full `docs/v2/` foundation docs were removed post-ship; the
+implemented model lives in `src/shared/types.ts` and `src/shared/model-capabilities.ts`.)
 
 ## Decision
 
@@ -31,12 +31,12 @@ auth.
 - **Account** — credential + metering identity per (engine × vendor); a derived `AccountRef`
   `{ billingType, authState, label?, accountId? }`.
 
-**Core entities** (`docs/v2/01-data-model.md`): `EngineDescriptor`, `VendorDescriptor`,
+**Core entities** (implemented in `src/shared/types.ts`): `EngineDescriptor`, `VendorDescriptor`,
 `ModelRef {engineId, vendorId, modelId}` (the universal selection/persistence key),
 `AccountRef`, and `SessionDescriptor` binding them. **`engineId` is immutable per session;**
 `model`/`account`/`capabilities`/`metering` are mutable mid-session (model switching re-resolves them).
 
-**Capability model** (`docs/v2/02-capability-model.md`) — replace ADR-016's frozen per-provider
+**Capability model** (implemented in `src/shared/model-capabilities.ts`) — replace ADR-016's frozen per-provider
 `SessionCapabilities` constant with a **computed** value:
 
 - `EngineCapabilities` (vendor-independent: voice, hostedMcp, backgroundTasks, subagents, plan,

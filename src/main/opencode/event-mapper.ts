@@ -869,8 +869,6 @@ export function makeUserMessageId(): string {
  * part types are silently skipped (same treatment as buildChatMessage).
  *
  * Returns null if the message has no displayable content (so the caller can skip it).
- *
- * Spec: docs/v2/followup-opencode-session-persistence.md §3c
  */
 export function convertStoredMessage(stored: StoredMessage): ChatMessage | null {
   const { info, parts } = stored

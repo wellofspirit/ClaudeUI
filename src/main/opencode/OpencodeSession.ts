@@ -329,7 +329,7 @@ export class OpencodeSession extends BaseSession {
     }
 
     // ── Steer path: prompt arriving mid-turn coalesces into the running opencode
-    // loop (Phase 8c — see docs/v2/phase-8c-opencode-queue-steer.md). We post immediately — opencode's
+    // loop. We post immediately — opencode's
     // runLoop re-reads the message list each step and picks it up — then emit
     // session:steer-consumed so the renderer moves the queued card into chat.
     // We do NOT touch isProcessing / startTimeMs / createSession / ensureSSEConsumer /
@@ -445,8 +445,6 @@ export class OpencodeSession extends BaseSession {
    * (parity with live turns — no divergent renderer path).
    *
    * Best-effort: any failure is swallowed and logged; it NEVER blocks the new prompt.
-   *
-   * Spec: docs/v2/followup-opencode-session-persistence.md §3c
    */
   private async replayStoredHistory(sessionId: string): Promise<void> {
     if (!this.client) return

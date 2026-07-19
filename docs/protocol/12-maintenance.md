@@ -90,7 +90,7 @@ Triggers: new `QueryHandle` method, new `QueryOptions` field, new inbound subtyp
 1. **Update types** in `src/main/sdk/types.ts`.
 2. **Update `query.ts`** (either `makeHandle()` for outbound, or `handleControlRequest()` for inbound).
 3. **Update `docs/protocol/07-control-outbound.md`** (outbound) or `08-control-inbound.md` (inbound).
-4. **Update `docs/sdk-layer.md`** if the change affects public API or architecture.
+4. **Update `01-transport.md` §1.13 (harness module map)** and `CLAUDE.md` § "cli.js Integration" if the change affects public API or architecture.
 5. **Add test coverage** — add or extend the appropriate test in `src/main/sdk/__tests__/` or `src/integration/`.
 
 ---

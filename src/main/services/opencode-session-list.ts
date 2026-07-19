@@ -12,8 +12,6 @@
  *
  * Best-effort throughout: any error (opencode not installed, DB absent, server down)
  * returns an empty array — it NEVER throws and NEVER breaks the Claude sidebar list.
- *
- * Spec: docs/v2/followup-opencode-session-persistence.md §3b (revised: direct-DB list)
  */
 
 import os from 'os'

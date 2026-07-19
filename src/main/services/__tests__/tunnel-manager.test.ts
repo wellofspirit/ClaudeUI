@@ -3,7 +3,6 @@
  *
  * Layer 1 unit tests for `TunnelManager`.
  *
- * Covers spec 3.3 of docs/test-coverage-proposal.md:
  * - start() spawns cloudflared with correct args and reports "connected" once
  *   stdout/stderr contains the tunnel URL.
  * - start() reports error if the binary fails to spawn (ENOENT-style).

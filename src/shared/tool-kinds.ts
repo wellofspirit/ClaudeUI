@@ -3,7 +3,8 @@
  *
  * Each engine maps its tool names onto these kinds via EngineToolMap. Renderers
  * are keyed on kind, so Claude's Bash and opencode's bash both render through
- * the 'command' kind renderer. See docs/v2/06-tool-rendering.md §3.
+ * the 'command' kind renderer. The per-engine name→kind tables live in
+ * renderer/src/components/chat/tool-registry/{Claude,Opencode}EngineToolMap.ts.
  */
 
 import type { AskUserQuestion, ContentBlock, FileDiff } from './types'

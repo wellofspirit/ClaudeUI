@@ -3,7 +3,8 @@
  * normalizes their input/result shapes into the SAME engine-neutral ToolView
  * the kind bodies consume (so opencode renders through ClaudeUI's rich cards).
  *
- * See docs/v2/06-tool-rendering.md §6 for the canonical opencode→kind table.
+ * The kindOf switch below IS the canonical opencode→kind table (tool ids
+ * verified against opencode-src tool/registry.ts).
  *
  * Hosted-tools MCP names: the in-process HTTP MCP server is named 'claudeui'.
  * opencode sanitizes tool names as `sanitize(serverName)_sanitize(toolName)`,

@@ -93,10 +93,11 @@ De-risked against opencode v1.17.14 source (pinned clone in git-ignored `vendor/
   target-engine-installed check (`crossEngineDispatchAvailable`) — the collab-server registration
   and both settings sections gate on it.
 
-## M2–M4 — decisions + full plan
+## M2–M4 — decisions + as-built record
 
-Full standalone implementation plan (M2 reverse direction, M3 streaming UX, M4 usage/capability/
-hardening): **`docs/v2/cross-engine-dispatch-implementation-plan.md`**.
+(The full standalone implementation plan, `docs/v2/cross-engine-dispatch-implementation-plan.md`,
+was removed with the V2 docs post-ship — recoverable from git history. The as-built deltas that
+matter for maintenance are folded in below.)
 
 - **Caller-session identity on the shared opencode MCP host** — RESOLVED & SHIPPED (M2): a
   ClaudeUI-provided opencode **plugin** (`resources/opencode/claudeui-xeng-plugin.ts`, injected as
@@ -125,8 +126,42 @@ hardening): **`docs/v2/cross-engine-dispatch-implementation-plan.md`**.
   plugin-stamped `__xeng_call_id`), and is stoppable. Stop rides `session:stop-task` with an
   `isDispatch` flag; a registry miss arms a 60s **pending stop-intent** consumed at dispatch
   registration — closes the live-verified race where the renderer's Stop is clickable before the
-  MCP call reaches the dispatcher (SSE beats the tools/call round-trip). See the plan doc's M3
-  as-built deltas.
+  MCP call reaches the dispatcher (SSE beats the tools/call round-trip).
+
+### As-built deltas (what differed from the plan)
+
+- **Zod stripping hazard (M2):** our MCP host validates tool input with `z.object()`, which strips
+  unknown keys — the plugin-injected `__xeng_caller_session` (and M3's `__xeng_call_id`) are
+  therefore **declared optional fields** of the opencode-side tool schema (described "internal —
+  never set this yourself"), read + stripped by the handler.
+- **Collab-tool enum NOT widened (M2):** each side's `engine` enum lists only the *other* engine;
+  same-engine dispatch is guard-rejected anyway.
+- **MCP timeout (M2):** `mcp.claudeui.timeout` = 20 min in `OPENCODE_CONFIG_CONTENT` (opencode's
+  schema default is 5 s) so long Claude-target turns survive even without progress-token resets.
+- **Cycle breaks (M2):** the hosted tool gets `sessionManager`/dispatcher via setters on
+  `OpencodeServerManager` wired in `main/index.ts`; `buildRuleset` extracted to
+  `src/main/opencode/permission-ruleset.ts`. The gating ask-rule is appended **after** the user's
+  compiled rules in `applyPermissionMode`, so a blanket user allow-rule can't silently un-gate
+  dispatch.
+- **Card kind (M3):** no new ToolKind — `hostedMcpKind` maps `mcp__claude-ui-collab__dispatch_agent`
+  → `'task'` (before the generic `mcp__` fallback); both engine tool-maps discriminate the dispatch
+  input by its `engine` field, putting "engine · model" in the existing `subagent` badge slot.
+  Dispatch cards suppress the meaningless "Send to background" affordance.
+- **Streaming (M3):** Claude targets run `includePartialMessages`; the dispatcher forwards
+  stream_event deltas / assistant messages via `transformAssistantMessage` (factored to
+  `src/main/services/assistant-message.ts`, shared with ClaudeSession) / tool_results. opencode
+  targets are tapped from the existing per-cwd SSE loop reusing `event-mapper.ts`'s `mapEvent`,
+  gated on the entry's `busy` flag. All emits byte-match claude-session.ts's payload shapes and
+  no-op when the tool_use id is unknown.
+- **Stopped dispatch surfaces to the CALLER as an isError tool result** ("Dispatch stopped by
+  user.") — on opencode that's a model-visible corrected error (ADR-032), not an error-state part,
+  so the card ends neutral, not danger-bordered. Expected.
+- **Usage capture (M4):** per-turn — Claude targets from `result.usage` + `total_cost_usd` +
+  `duration_ms` (per-turn, not cumulative — but see ADR-034's amendment); opencode targets from
+  `info.tokens {input,output,reasoning}` + `info.cost`. `toolUses` = per-turn Set of **unique**
+  tool_use ids (partial/re-emitted messages re-carry the same blocks — a counter overcounts).
+  Recording is failure-isolated (`safeRecordUsage`) — a DB error drops the row with a warn, never
+  fails the dispatch.
 
 ## Still-open questions
 

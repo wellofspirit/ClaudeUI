@@ -7,8 +7,6 @@
  *
  * Renderer-only per-engine concerns (SVG logo, tool-name maps) live in the
  * renderer near their consumers (they must not pull React into shared/).
- *
- * See docs/v2/engine-hardening-plan.md Item 5.
  */
 import type { EngineId, VendorId, ModelRef, ModelInfo } from './types'
 import { claudeModel, opencodeModel } from './types'

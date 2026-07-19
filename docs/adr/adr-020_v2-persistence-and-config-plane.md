@@ -1,6 +1,6 @@
 # ADR-020: V2 persistence & config-plane — files for config, SQLite for operational data
 
-**Status:** Accepted (V2 design; sequenced in `docs/v2/implementation-plan.md`)
+**Status:** Accepted (V2 design; implementation complete. The detailed `docs/v2/` design docs were removed after V2 shipped — recoverable from git history.)
 **Date:** 2026-06-19
 **Amends:** [ADR-009](adr-009_claude-settings-vs-uisettings.md), [ADR-011](adr-011_canonical-usage-windows-and-account-attribution.md)
 
@@ -10,7 +10,7 @@ V2 spans multiple engines (ADR-018/019), each with its own config files and cred
 adds structured operational data (multi-engine usage, account info, capability cache, session
 metadata) that outgrows scattered JSON. ADR-009 (cli.js-consumed settings live in Claude's
 `settings.json`) generalizes into a config-plane principle; ADR-011's usage windows fold into a
-broader metering store. Detail: `docs/v2/persistence.md`, `03-settings-config.md`, `05-metering-usage.md`.
+broader metering store. (The implemented layout is documented in `CLAUDE.md` § "Persistence model".)
 
 ## Decision
 
