@@ -28,7 +28,14 @@ const {
   mockGetPiModelCatalog,
   mockLoadPiSessionHistory,
   mockFindPiSessionFile,
-  mockRecordUsageEvent
+  mockRecordUsageEvent,
+  mockBridgeHostStart,
+  mockBridgeHostDispose,
+  MockPiBridgeHost,
+  mockWriteBridgeExtension,
+  bridgeCaptured,
+  mockLoadClaudePermissions,
+  mockSaveClaudePermissions
 } = vi.hoisted(() => {
   const mockStart = vi.fn().mockResolvedValue(undefined)
   const mockRequest = vi.fn()
@@ -48,6 +55,18 @@ const {
       onExit: mockOnExit
     }
   })
+
+  const mockBridgeHostStart = vi.fn().mockResolvedValue({ url: 'http://127.0.0.1:9999', token: 'test-bridge-token' })
+  const mockBridgeHostDispose = vi.fn()
+  // Mutable holder so tests can read the LATEST captured handler after each
+  // spawn (a fresh PiBridgeHost is constructed per doStart() call).
+  const bridgeCaptured: { handler: ((payload: unknown) => Promise<unknown>) | null } = { handler: null }
+  const MockPiBridgeHost = vi.fn().mockImplementation(function (handler: (payload: unknown) => Promise<unknown>) {
+    bridgeCaptured.handler = handler
+    return { start: mockBridgeHostStart, dispose: mockBridgeHostDispose }
+  })
+  const mockWriteBridgeExtension = vi.fn().mockReturnValue('/fake/tmp/claudeui-bridge.ts')
+
   return {
     mockStart,
     mockRequest,
@@ -60,7 +79,20 @@ const {
     mockGetPiModelCatalog: vi.fn().mockResolvedValue([]),
     mockLoadPiSessionHistory: vi.fn().mockResolvedValue([]),
     mockFindPiSessionFile: vi.fn().mockReturnValue(null),
-    mockRecordUsageEvent: vi.fn()
+    mockRecordUsageEvent: vi.fn(),
+    mockBridgeHostStart,
+    mockBridgeHostDispose,
+    MockPiBridgeHost,
+    mockWriteBridgeExtension,
+    bridgeCaptured,
+    mockLoadClaudePermissions: vi.fn().mockReturnValue({
+      allow: [],
+      deny: [],
+      ask: [],
+      additionalDirectories: [],
+      defaultMode: undefined
+    }),
+    mockSaveClaudePermissions: vi.fn()
   }
 })
 
@@ -81,6 +113,15 @@ vi.mock('../../services/usage-recorder', () => ({
 }))
 vi.mock('../../services/logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
+}))
+vi.mock('../PiBridgeHost', () => ({
+  PiBridgeHost: MockPiBridgeHost,
+  writeBridgeExtension: mockWriteBridgeExtension
+}))
+// Hermetic gating tests: never touch the dev machine's real ~/.claude/settings.json.
+vi.mock('../../services/claude-settings', () => ({
+  loadClaudePermissions: mockLoadClaudePermissions,
+  saveClaudePermissions: mockSaveClaudePermissions
 }))
 
 import { PiSession } from '../PiSession'
@@ -134,7 +175,30 @@ beforeEach(() => {
   mockLoadPiSessionHistory.mockReset().mockResolvedValue([])
   mockFindPiSessionFile.mockReset().mockReturnValue(null)
   mockRecordUsageEvent.mockClear()
+  mockBridgeHostStart.mockClear().mockResolvedValue({ url: 'http://127.0.0.1:9999', token: 'test-bridge-token' })
+  mockBridgeHostDispose.mockClear()
+  MockPiBridgeHost.mockClear()
+  mockWriteBridgeExtension.mockClear().mockReturnValue('/fake/tmp/claudeui-bridge.ts')
+  bridgeCaptured.handler = null
+  mockLoadClaudePermissions.mockReset().mockReturnValue({
+    allow: [],
+    deny: [],
+    ask: [],
+    additionalDirectories: [],
+    defaultMode: undefined
+  })
+  mockSaveClaudePermissions.mockClear()
 })
+
+/** Call the LAST captured bridge gate handler (the fake PiBridgeHost's constructor arg) directly — bypasses real HTTP, exactly mirroring what the real extension's fetch would send. */
+async function gate(toolCallId: string, toolName: string, input: Record<string, unknown>): Promise<{ behavior: string; reason?: string; updatedInput?: Record<string, unknown> }> {
+  if (!bridgeCaptured.handler) throw new Error('no bridge handler captured — was doStart() ever awaited?')
+  return bridgeCaptured.handler({ toolCallId, toolName, input }) as Promise<{
+    behavior: string
+    reason?: string
+    updatedInput?: Record<string, unknown>
+  }>
+}
 
 describe('PiSession.run — sends a prompt', () => {
   it('spawns the process and sends {type:"prompt", message} on the first run()', async () => {
@@ -144,7 +208,14 @@ describe('PiSession.run — sends a prompt', () => {
     await session.run('hello')
 
     expect(mockStart).toHaveBeenCalledTimes(1)
-    expect(MockPiRpcClient).toHaveBeenCalledWith('/fake/pi', { cwd: '/cwd', args: ['--mode', 'rpc'] })
+    // Approval bridge (M2a): -e <bridge file written by writeBridgeExtension()>
+    // plus the per-spawn loopback URL/token as env.
+    expect(MockPiRpcClient).toHaveBeenCalledWith('/fake/pi', {
+      cwd: '/cwd',
+      args: ['--mode', 'rpc', '-e', '/fake/tmp/claudeui-bridge.ts'],
+      env: { CLAUDEUI_PI_BRIDGE_URL: 'http://127.0.0.1:9999', CLAUDEUI_PI_BRIDGE_TOKEN: 'test-bridge-token' }
+    })
+    expect(MockPiBridgeHost).toHaveBeenCalledTimes(1)
     // set_model called (opts.model was present)
     expect(mockRequest).toHaveBeenCalledWith({ type: 'set_model', provider: 'anthropic', modelId: 'claude-sonnet-4-6' })
     // the prompt itself, no streamingBehavior on a fresh (non-busy) turn
@@ -261,10 +332,23 @@ describe('PiSession.interrupt', () => {
     await expect(session.interrupt()).resolves.toBeUndefined()
     expect(mockRequest).not.toHaveBeenCalled()
   })
+
+  it('denies any pending gate BEFORE sending abort — a hanging extension fetch never wedges the turn', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-interrupt-gate', win as never, '/cwd', {})
+    await session.run('hi')
+
+    const pending = gate('call_y', 'write', { path: 'new.ts', content: 'x' }) // default mode → write asks
+    await vi.waitFor(() => expect(sentChannels(win)).toContain('session:approval-request'))
+
+    await session.interrupt()
+
+    await expect(pending).resolves.toEqual({ behavior: 'deny', reason: 'Interrupted' })
+  })
 })
 
 describe('PiSession.cancel', () => {
-  it('disposes the client and returns state to idle', async () => {
+  it('disposes the client AND the bridge host, and returns state to idle', async () => {
     const win = new MockWindow()
     const session = new PiSession('rid-8', win as never, '/cwd', {})
     await session.run('hi')
@@ -272,8 +356,22 @@ describe('PiSession.cancel', () => {
     session.cancel()
 
     expect(mockDispose).toHaveBeenCalledTimes(1)
+    expect(mockBridgeHostDispose).toHaveBeenCalledTimes(1)
     expect(session.status.state).toBe('idle')
     expect(session.willQueue).toBe(false)
+  })
+
+  it('denies any pending gate instead of leaving it hanging forever', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-cancel-gate', win as never, '/cwd', {})
+    await session.run('hi')
+
+    const pending = gate('call_x', 'edit', { path: 'x.ts' }) // mode 'default' → edit asks
+    await vi.waitFor(() => expect(sentChannels(win)).toContain('session:approval-request'))
+
+    session.cancel()
+
+    await expect(pending).resolves.toEqual({ behavior: 'deny', reason: 'Interrupted' })
   })
 })
 
@@ -522,5 +620,229 @@ describe('PiSession — busy path uses streamingBehavior followUp', () => {
 
     resolveFirstPrompt({ type: 'response', command: 'prompt', success: true })
     await firstRun
+  })
+})
+
+describe('PiSession — approval bridge wiring (M2a)', () => {
+  it('a doStart() failure (client.start() rejects) disposes the orphaned bridge host', async () => {
+    mockStart.mockRejectedValueOnce(new Error('spawn failed'))
+    const win = new MockWindow()
+    const session = new PiSession('rid-spawn-fail', win as never, '/cwd', {})
+
+    await session.run('hi')
+
+    expect(sentChannels(win)).toContain('session:error')
+    expect(mockBridgeHostDispose).toHaveBeenCalledTimes(1)
+  })
+
+  it('an allow decision (mode=full) resolves immediately with no approval-request', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-gate-allow', win as never, '/cwd', {})
+    await session.setPermissionMode('full')
+    await session.run('hi')
+
+    const decision = await gate('call_1', 'bash', { command: 'echo hi' })
+
+    expect(decision).toEqual({ behavior: 'allow' })
+    expect(sentChannels(win)).not.toContain('session:approval-request')
+  })
+
+  it('a deny decision (matching deny rule) resolves immediately with the matched rule in the reason', async () => {
+    mockLoadClaudePermissions.mockImplementation((scope: string) =>
+      scope === 'project'
+        ? { allow: [], deny: ['Bash(rm:*)'], ask: [], additionalDirectories: [], defaultMode: undefined }
+        : { allow: [], deny: [], ask: [], additionalDirectories: [], defaultMode: undefined }
+    )
+    const win = new MockWindow()
+    const session = new PiSession('rid-gate-deny', win as never, '/cwd', {})
+    await session.run('hi')
+
+    const decision = await gate('call_2', 'bash', { command: 'rm -rf /tmp/x' })
+
+    expect(decision).toEqual({ behavior: 'deny', reason: 'Denied by permission rule: Bash(rm:*)' })
+    expect(sentChannels(win)).not.toContain('session:approval-request')
+  })
+
+  it('an ask decision emits session:approval-request with toolUseId=toolCallId, toolName, input, and suggestions', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-gate-ask', win as never, '/cwd', {})
+    await session.run('hi') // default mode
+
+    void gate('call_3', 'bash', { command: 'npm install' })
+    await vi.waitFor(() => expect(sentChannels(win)).toContain('session:approval-request'))
+
+    const [approval] = sentPayloads(win, 'session:approval-request').slice(-1) as [
+      {
+        requestId: string
+        toolUseId: string
+        toolName: string
+        input: Record<string, unknown>
+        suggestions: Array<{ destination: string; rules: Array<{ toolName: string; ruleContent?: string }> }>
+      }
+    ]
+    expect(approval.toolUseId).toBe('call_3')
+    expect(approval.toolName).toBe('bash')
+    expect(approval.input).toEqual({ command: 'npm install' })
+    expect(approval.requestId).toEqual(expect.any(String))
+    expect(approval.suggestions).toEqual([
+      { type: 'addRules', behavior: 'allow', destination: 'userSettings', rules: [{ toolName: 'Bash', ruleContent: 'npm install:*' }] },
+      { type: 'addRules', behavior: 'allow', destination: 'projectSettings', rules: [{ toolName: 'Bash', ruleContent: 'npm install:*' }] },
+      { type: 'addRules', behavior: 'allow', destination: 'localSettings', rules: [{ toolName: 'Bash', ruleContent: 'npm install:*' }] }
+    ])
+  })
+
+  it('resolveApproval("allow") resolves the matching gate and does not add a sessionAllows entry', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-resolve-allow', win as never, '/cwd', {})
+    await session.run('hi')
+
+    const pending = gate('call_4', 'edit', { path: 'x.ts' })
+    await vi.waitFor(() => expect(sentChannels(win)).toContain('session:approval-request'))
+    const [approval] = sentPayloads(win, 'session:approval-request').slice(-1) as [{ requestId: string }]
+
+    session.resolveApproval(approval.requestId, 'allow')
+    await expect(pending).resolves.toEqual({ behavior: 'allow' })
+
+    // A SECOND identical gate call still asks (no session-wide allow was recorded).
+    void gate('call_5', 'edit', { path: 'x.ts' })
+    await vi.waitFor(() => expect(sentPayloads(win, 'session:approval-request').length).toBe(2))
+  })
+
+  it('resolveApproval("deny") resolves with the feedback message (or the default)', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-resolve-deny', win as never, '/cwd', {})
+    await session.run('hi')
+
+    const pending = gate('call_6', 'edit', { path: 'x.ts' })
+    await vi.waitFor(() => expect(sentChannels(win)).toContain('session:approval-request'))
+    const [approval] = sentPayloads(win, 'session:approval-request').slice(-1) as [{ requestId: string }]
+
+    session.resolveApproval(approval.requestId, 'deny', { feedback: 'not right now' })
+    await expect(pending).resolves.toEqual({ behavior: 'deny', reason: 'not right now' })
+  })
+
+  it('resolveApproval("deny") with no feedback falls back to the default reason', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-resolve-deny-default', win as never, '/cwd', {})
+    await session.run('hi')
+
+    const pending = gate('call_6b', 'edit', { path: 'x.ts' })
+    await vi.waitFor(() => expect(sentChannels(win)).toContain('session:approval-request'))
+    const [approval] = sentPayloads(win, 'session:approval-request').slice(-1) as [{ requestId: string }]
+
+    session.resolveApproval(approval.requestId, 'deny')
+    await expect(pending).resolves.toEqual({ behavior: 'deny', reason: 'User denied' })
+  })
+
+  it('resolveApproval("allowForSession") short-circuits a SECOND identical gate without a new approval-request', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-allow-for-session', win as never, '/cwd', {})
+    await session.run('hi')
+
+    const first = gate('call_7', 'bash', { command: 'npm test' })
+    await vi.waitFor(() => expect(sentChannels(win)).toContain('session:approval-request'))
+    const [approval] = sentPayloads(win, 'session:approval-request').slice(-1) as [{ requestId: string }]
+
+    session.resolveApproval(approval.requestId, 'allowForSession')
+    await expect(first).resolves.toEqual({ behavior: 'allow' })
+
+    const requestCountBefore = sentPayloads(win, 'session:approval-request').length
+    const second = await gate('call_8', 'bash', { command: 'npm test' })
+
+    expect(second).toEqual({ behavior: 'allow' })
+    expect(sentPayloads(win, 'session:approval-request').length).toBe(requestCountBefore) // no NEW approval-request
+
+    // A DIFFERENT bash command is still gated normally (session-allow is scoped to the exact command).
+    void gate('call_9', 'bash', { command: 'npm run build' })
+    await vi.waitFor(() => expect(sentPayloads(win, 'session:approval-request').length).toBe(requestCountBefore + 1))
+  })
+
+  it('updatedPermissions on an allow resolution persists via saveClaudePermissions with the expected rule strings', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-persist', win as never, '/cwd', {})
+    await session.run('hi')
+
+    const pending = gate('call_10', 'bash', { command: 'echo hi' })
+    await vi.waitFor(() => expect(sentChannels(win)).toContain('session:approval-request'))
+    const [approval] = sentPayloads(win, 'session:approval-request').slice(-1) as [
+      { requestId: string; suggestions: unknown[] }
+    ]
+
+    session.resolveApproval(approval.requestId, 'allow', undefined, [
+      {
+        type: 'addRules',
+        behavior: 'allow',
+        destination: 'projectSettings',
+        rules: [{ toolName: 'Bash', ruleContent: 'echo hi:*' }]
+      }
+    ])
+    await expect(pending).resolves.toEqual({ behavior: 'allow' })
+
+    expect(mockSaveClaudePermissions).toHaveBeenCalledWith(
+      'project',
+      expect.objectContaining({ allow: ['Bash(echo hi:*)'] }),
+      '/cwd'
+    )
+  })
+
+  it('caches the merged rules across gate calls, and notifySettingsChanged invalidates that cache', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-hot-reload', win as never, '/cwd', {})
+    await session.setPermissionMode('full') // isolates the rules effect: only an explicit deny overrides full's allow-everything base
+    await session.run('hi')
+
+    // First call — rules are empty; mode base (full) allows. This also
+    // populates the rules cache.
+    expect(await gate('call_11', 'bash', { command: 'echo hi' })).toEqual({ behavior: 'allow' })
+
+    // The store now has a deny rule, but the cache is still populated from
+    // the call above — a second call must NOT see it yet.
+    mockLoadClaudePermissions.mockImplementation((scope: string) =>
+      scope === 'project'
+        ? { allow: [], deny: ['Bash(echo hi:*)'], ask: [], additionalDirectories: [], defaultMode: undefined }
+        : { allow: [], deny: [], ask: [], additionalDirectories: [], defaultMode: undefined }
+    )
+    expect(await gate('call_12', 'bash', { command: 'echo hi' })).toEqual({ behavior: 'allow' })
+
+    // Hot-reload parity with Claude: after notifySettingsChanged(), the NEXT
+    // gate call re-reads from disk and honors the new deny rule.
+    await session.notifySettingsChanged()
+    expect(await gate('call_13', 'bash', { command: 'echo hi' })).toEqual({
+      behavior: 'deny',
+      reason: 'Denied by permission rule: Bash(echo hi:*)'
+    })
+  })
+
+  it('persistAllowRules also invalidates the cache — a just-persisted rule is honored on the very next gate call', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-persist-invalidate', win as never, '/cwd', {})
+    await session.run('hi') // default mode: bash asks
+
+    // Populate the cache with empty rules.
+    void gate('call_14', 'bash', { command: 'npm test' })
+    await vi.waitFor(() => expect(sentChannels(win)).toContain('session:approval-request'))
+    const [approval] = sentPayloads(win, 'session:approval-request').slice(-1) as [{ requestId: string }]
+
+    // The store now has an allow rule for this exact command (simulating what
+    // saveClaudePermissions would persist), returned from the NEXT load —
+    // proving persistAllowRules' cache invalidation, not just the store write.
+    mockLoadClaudePermissions.mockImplementation((scope: string) =>
+      scope === 'project'
+        ? { allow: ['Bash(npm test:*)'], deny: [], ask: [], additionalDirectories: [], defaultMode: undefined }
+        : { allow: [], deny: [], ask: [], additionalDirectories: [], defaultMode: undefined }
+    )
+    session.resolveApproval(approval.requestId, 'allow', undefined, [
+      {
+        type: 'addRules',
+        behavior: 'allow',
+        destination: 'projectSettings',
+        rules: [{ toolName: 'Bash', ruleContent: 'npm test:*' }]
+      }
+    ])
+
+    // A DIFFERENT (but prefix-covered) command is allowed WITHOUT a new approval-request.
+    const requestCountBefore = sentPayloads(win, 'session:approval-request').length
+    expect(await gate('call_15', 'bash', { command: 'npm test unit' })).toEqual({ behavior: 'allow' })
+    expect(sentPayloads(win, 'session:approval-request').length).toBe(requestCountBefore)
   })
 })

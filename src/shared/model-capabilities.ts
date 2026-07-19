@@ -666,16 +666,22 @@ export function resolveOpencodeCapabilitiesFromModel(
 }
 
 /**
- * pi engine capabilities (M1 skeleton — ADR-030 capability honesty: every flag
- * is false except what THIS milestone fully wires end-to-end). Flip plan for
+ * pi engine capabilities (ADR-030 capability honesty: every flag is false
+ * except what a shipped milestone fully wires end-to-end). Flip plan for
  * later milestones (see the M1 kickoff spec's milestone list):
- *   - interactiveApprovals, autonomyModes (beyond 'full') → M2, once the
- *     approval-bridge extension (`pi.on('tool_call', …)`, verified in M0) lands.
+ *   - interactiveApprovals:true, autonomyModes: ['ask','autoEdit','full'] →
+ *     SHIPPED in M2a via the approval-bridge extension (`pi.on('tool_call',
+ *     …)`, verified in M0; PiBridgeHost + permission-engine.ts). 'plan' is
+ *     deliberately NOT in autonomyModes — pi has no plan-mode agent/UX of its
+ *     own (unlike opencode's read-only `plan` agent); permission-engine.ts's
+ *     modeBaseDecision defensively treats an unexpected 'plan' mode string as
+ *     'default' rather than crashing, but the picker never offers it. `steer`
+ *     (mid-turn tool gating changes) is M2b — still false.
  *   - auth.canDriveLogin → M3, once PiAuthProvider drives `~/.pi/agent/auth.json`.
  *   - hostedMcp → M4, once the hosted mermaid/mockup tools + cross-engine
  *     dispatch are bridged through pi's extension API.
  *   - sideQuestion, slashCommands, skills, plan, fork, forkFromMessage,
- *     backgroundTasks, subagents, voice → unwired in M1; each becomes a
+ *     backgroundTasks, subagents, voice → unwired; each becomes a
  *     dedicated follow-up once its RPC surface (get_commands, fork/clone, …)
  *     is wired the same way OpencodeSession's were.
  *   - sandbox, proxy → Claude cli.js launch-param concepts; pi has neither
@@ -701,10 +707,10 @@ export const PI_ENGINE_CAPABILITIES: EngineCapabilities = {
   slashCommands: false,
   skills: false,
   sideQuestion: false,
-  interactiveApprovals: false,
+  interactiveApprovals: true,
   sandbox: false,
   proxy: false,
-  autonomyModes: ['full'],
+  autonomyModes: ['ask', 'autoEdit', 'full'],
   auth: { canDriveLogin: false, multiAccount: false },
   crossEngineDispatch: false
 }

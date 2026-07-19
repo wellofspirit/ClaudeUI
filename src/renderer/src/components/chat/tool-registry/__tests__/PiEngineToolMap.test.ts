@@ -7,6 +7,12 @@
 import { describe, it, expect } from 'vitest'
 import { PiEngineToolMap } from '../PiEngineToolMap'
 import type { ToolKind } from '../../../../../../shared/tool-kinds'
+// Main can't import renderer code (separate Electron processes/bundles), so
+// permission-engine.ts (src/main/pi/) keeps its OWN small copy of this exact
+// kindOf switch for its mode-base gating decisions (see that file's doc
+// comment). This is the single-source guard: it fails if the two tables ever
+// disagree for a known pi tool name.
+import { piToolKind } from '../../../../../../main/pi/permission-engine'
 
 describe('PiEngineToolMap.kindOf', () => {
   const cases: [string, ToolKind][] = [
@@ -33,6 +39,11 @@ describe('PiEngineToolMap.kindOf', () => {
 
   it('has an empty hidden set', () => {
     expect(PiEngineToolMap.hidden.size).toBe(0)
+  })
+
+  it.each(cases)("single-source guard: main's piToolKind(%s) agrees with the renderer's kindOf", (name, kind) => {
+    expect(piToolKind(name)).toBe(kind)
+    expect(piToolKind(name)).toBe(PiEngineToolMap.kindOf(name))
   })
 })
 

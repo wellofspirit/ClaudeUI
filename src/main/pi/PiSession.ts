@@ -10,6 +10,7 @@ import type {
   SessionStatus,
   ApprovalDecision,
   PermissionSuggestion,
+  PendingApproval,
   StatusLineData
 } from '../../shared/types'
 import { engineMeta } from '../../shared/engine-meta'
@@ -23,6 +24,19 @@ import type { PiGetSessionStatsData, PiGetStateData, PiRpcCommand } from './pi-p
 import { getPiModelCatalog } from './model-discovery'
 import { findPiSessionFile, loadPiSessionHistory } from '../services/pi-session-list'
 import { recordUsageEvent } from '../services/usage-recorder'
+import { PiBridgeHost, writeBridgeExtension } from './PiBridgeHost'
+import type { GateDecision, PiToolCallPayload } from './PiBridgeHost'
+import {
+  decide,
+  mergedClaudeRulesFor,
+  sessionAllowKey,
+  firstMatchingRule,
+  normalizeWhitespace,
+  PI_TOOL_TO_CLAUDE_TOOL
+} from './permission-engine'
+import type { MergedClaudeRules } from './permission-engine'
+import { loadClaudePermissions, saveClaudePermissions } from '../services/claude-settings'
+import { suggestionDestinationToScope, suggestionRuleToClaudeString } from '../opencode/permission-compiler'
 
 /**
  * PiSession — engine-neutral session backend for the pi coding agent.
@@ -35,10 +49,16 @@ import { recordUsageEvent } from '../services/usage-recorder'
  * building) with the RPC-child-process specifics swapped in for the HTTP/SSE
  * ones.
  *
- * M1 scope only: full-auto chat (stream, tool cards, usage/cost, abort,
- * cancel, resume+replay). NO interactive approvals (pi executes tools
- * ungated until the M2 approval-bridge extension lands — see
- * PI_ENGINE_CAPABILITIES' doc comment for the full per-flag flip plan).
+ * M1 scope: full-auto chat (stream, tool cards, usage/cost, abort, cancel,
+ * resume+replay). M2a ADDS the enforcement path: every spawn also starts a
+ * PiBridgeHost (loopback HTTP, per-session bearer token) and writes the
+ * ClaudeUI-owned bridge extension (pi-bridge-source.ts) to a temp file passed
+ * via `-e`; the extension's `pi.on('tool_call', …)` hook calls back into
+ * `gateToolCall`, which runs the pure PiPermissionEngine (permission-engine.ts)
+ * against the live autonomy mode + the user's merged Claude permission rules
+ * and either answers immediately (allow/deny) or surfaces a
+ * `session:approval-request` and awaits the human via `resolveApproval` — see
+ * PI_ENGINE_CAPABILITIES' doc comment for the full per-flag flip plan.
  */
 export class PiSession extends BaseSession {
   readonly engineId = 'pi' as const
@@ -70,6 +90,19 @@ export class PiSession extends BaseSession {
   private requestedModel: string | undefined
   private permissionMode: string
   private resumeSessionId: string | undefined
+
+  // ── Approval bridge (M2a) ────────────────────────────────────────────────────
+  /** Per-session loopback HTTP host the bridge extension calls into. Started in doStart(); disposed in cancel()/dispose() and on an unexpected exit. */
+  private bridgeHost: PiBridgeHost | null = null
+  /** One entry per in-flight 'ask' gate, keyed by a freshly minted requestId (NOT toolCallId — mirrors PendingApproval.requestId's own identity). Resolved by resolveApproval() or force-denied by interrupt()/cancel()/an unexpected exit. */
+  private pendingGates = new Map<
+    string,
+    { resolve: (decision: GateDecision) => void; toolName: string; input: Record<string, unknown> }
+  >()
+  /** "Allow for this session" entries — bare pi tool name, or `bash:<normalized command>` for bash (see permission-engine.ts's sessionAllowKey). */
+  private sessionAllows = new Set<string>()
+  /** Lazily loaded, cached merge of the user/project/local Claude permission scopes. Invalidated by notifySettingsChanged() and by persistAllowRules() (so a just-persisted rule is honored on the very next gate call in this same session). */
+  private cachedRules: MergedClaudeRules | null = null
 
   // ── Cost / usage accounting ────────────────────────────────────────────────
   private mapperState: PiMapperState = createPiMapperState()
@@ -226,7 +259,21 @@ export class PiSession extends BaseSession {
       )
     }
 
-    const args = ['--mode', 'rpc']
+    // Approval bridge (M2a): a fresh loopback host + version-keyed extension
+    // file per spawn (docs/protocol-pi/README.md "Extensions"; pi-bridge-
+    // source.ts). Started BEFORE the pi child so the URL/token are ready to
+    // hand to it via env. If the child then fails to spawn, the orphaned host
+    // is disposed below rather than leaked.
+    const bridgeHost = new PiBridgeHost(this.gateToolCall)
+    let bridge: { url: string; token: string }
+    try {
+      bridge = await bridgeHost.start()
+    } catch (err) {
+      throw err instanceof Error ? err : new Error(String(err))
+    }
+    const bridgePath = writeBridgeExtension()
+
+    const args = ['--mode', 'rpc', '-e', bridgePath]
     if (this.resumeSessionId) {
       // Resolve the on-disk file for the resume id; fall back to the raw id
       // (verified: --session accepts an absolute file path) if not found —
@@ -235,8 +282,18 @@ export class PiSession extends BaseSession {
       args.push('--session', resolvedPath ?? this.resumeSessionId)
     }
 
-    const client = new PiRpcClient(bin, { cwd: this.cwd, args })
-    await client.start()
+    const client = new PiRpcClient(bin, {
+      cwd: this.cwd,
+      args,
+      env: { CLAUDEUI_PI_BRIDGE_URL: bridge.url, CLAUDEUI_PI_BRIDGE_TOKEN: bridge.token }
+    })
+    try {
+      await client.start()
+    } catch (err) {
+      bridgeHost.dispose()
+      throw err
+    }
+    this.bridgeHost = bridgeHost
     this.client = client
     this.disconnected = false
 
@@ -250,6 +307,15 @@ export class PiSession extends BaseSession {
       this.isProcessing = false
       this.disconnected = true
       this.client = null
+      // The process is gone — any pending gate can never be resolved by it;
+      // deny is the only sane resolution (also prevents a ghost approval card
+      // from silently persisting-a-rule for a tool call that no longer exists
+      // if the user later clicks it).
+      this.rejectAllPendingGates('Interrupted')
+      if (this.bridgeHost) {
+        this.bridgeHost.dispose()
+        this.bridgeHost = null
+      }
       // Allow a later run() to respawn instead of being wedged forever.
       this.startedPromise = null
       this.sendStatus()
@@ -553,6 +619,9 @@ export class PiSession extends BaseSession {
   }
 
   async interrupt(): Promise<void> {
+    // Deny FIRST (synchronous, local) — a hanging extension fetch would
+    // otherwise wedge pi's turn forever waiting on a human who just hit stop.
+    this.rejectAllPendingGates('Interrupted')
     if (!this.client) return
     try {
       await this.client.request({ type: 'abort' })
@@ -566,24 +635,177 @@ export class PiSession extends BaseSession {
     this._cancelled = true
     this.isProcessing = false
     this.disconnected = false
+    this.rejectAllPendingGates('Interrupted')
     if (this.client) {
       this.client.dispose()
       this.client = null
+    }
+    if (this.bridgeHost) {
+      this.bridgeHost.dispose()
+      this.bridgeHost = null
     }
     this.startedPromise = null
     this.sendStatus()
   }
 
+  // ── Approval bridge (M2a) ────────────────────────────────────────────────────
+
+  /**
+   * Handler passed to PiBridgeHost — invoked once per `tool_call` hook firing
+   * in the pi child. Runs the pure PiPermissionEngine against the live
+   * autonomy mode + the user's merged Claude permission rules; 'allow'/'deny'
+   * answer immediately, 'ask' surfaces a `session:approval-request` and awaits
+   * the human via resolveApproval(). Bound as a class field (not a prototype
+   * method) so passing a bare reference to `new PiBridgeHost(this.gateToolCall)`
+   * keeps `this` correct.
+   */
+  private gateToolCall = async (payload: PiToolCallPayload): Promise<GateDecision> => {
+    const { toolCallId, toolName, input } = payload
+    const rules = this.currentRules()
+    const decision = decide(toolName, input, {
+      mode: this.permissionMode,
+      rules,
+      sessionAllows: this.sessionAllows
+    })
+
+    if (decision === 'allow') return { behavior: 'allow' }
+
+    if (decision === 'deny') {
+      const matched = firstMatchingRule(rules.deny, toolName, input)
+      return {
+        behavior: 'deny',
+        reason: matched ? `Denied by permission rule: ${matched}` : 'Denied by permission rules'
+      }
+    }
+
+    // 'ask' — surface to the renderer and await the human's decision
+    // (resolveApproval resolves the stored promise below).
+    return new Promise<GateDecision>((resolve) => {
+      const requestId = uuid()
+      this.pendingGates.set(requestId, { resolve, toolName, input })
+      const suggestions = this.buildApprovalSuggestions(toolName, input)
+      const approval: PendingApproval = {
+        requestId,
+        toolUseId: toolCallId,
+        toolName,
+        input,
+        ...(suggestions ? { suggestions } : {})
+      }
+      this.send('session:approval-request', approval)
+    })
+  }
+
+  /** Resolve every in-flight 'ask' gate with a deny (used by interrupt/cancel/an unexpected exit) and clear the map. */
+  private rejectAllPendingGates(reason: string): void {
+    for (const pending of this.pendingGates.values()) {
+      pending.resolve({ behavior: 'deny', reason })
+    }
+    this.pendingGates.clear()
+  }
+
+  /** Lazily load (and cache) the merged user/project/local Claude permission rules for this session's cwd. */
+  private currentRules(): MergedClaudeRules {
+    if (!this.cachedRules) this.cachedRules = mergedClaudeRulesFor(this.cwd)
+    return this.cachedRules
+  }
+
+  /**
+   * Build "always allow" suggestions for an 'ask' approval — mirrors the
+   * opencode event-mapper's permission.asked suggestion shape (one
+   * PermissionSuggestion per destination) but offers ALL three persistable
+   * scopes (user/project/local) rather than opencode's single default, giving
+   * the user the same 3-way choice Claude's native prompts do. bash gets a
+   * PREFIX rule (`Bash(<command>:*)` — the whole typed command plus a
+   * trailing glob, matching Claude's own suggestion convention and round-
+   * tripping through permission-engine.ts's bash prefix matcher); every other
+   * mapped tool gets a bare tool rule. Returns undefined for a pi tool with no
+   * Claude analog (mcp/custom/unknown) — nothing persistable to suggest.
+   */
+  private buildApprovalSuggestions(
+    toolName: string,
+    input: Record<string, unknown>
+  ): PermissionSuggestion[] | undefined {
+    const claudeTool = PI_TOOL_TO_CLAUDE_TOOL[toolName]
+    if (!claudeTool) return undefined
+
+    const ruleContent =
+      toolName === 'bash' ? `${normalizeWhitespace(String(input.command ?? ''))}:*` : undefined
+    const rule = { toolName: claudeTool, ...(ruleContent ? { ruleContent } : {}) }
+
+    const destinations = ['userSettings', 'projectSettings', 'localSettings'] as const
+    return destinations.map((destination) => ({
+      type: 'addRules',
+      behavior: 'allow',
+      destination,
+      rules: [rule]
+    }))
+  }
+
   resolveApproval(
     requestId: string,
-    _decision: ApprovalDecision,
-    _answers?: Record<string, string>,
-    _updatedPermissions?: PermissionSuggestion[]
+    decision: ApprovalDecision,
+    answers?: Record<string, string>,
+    updatedPermissions?: PermissionSuggestion[]
   ): void {
-    // M1: interactiveApprovals is false — pi executes tools ungated, so no
-    // approval-request is ever emitted and this should never be called. Kept
-    // as a satisfying-ISession no-op stub until the M2 approval-bridge extension lands.
-    logger.warn('PiSession', `resolveApproval(${requestId}) called but pi has no pending approvals in M1`)
+    const pending = this.pendingGates.get(requestId)
+    if (!pending) {
+      logger.warn('PiSession', `resolveApproval(${requestId}) called but no matching pending gate`)
+      return
+    }
+    this.pendingGates.delete(requestId)
+
+    if (decision === 'deny') {
+      pending.resolve({ behavior: 'deny', reason: answers?.feedback || 'User denied' })
+      return
+    }
+
+    // allow / allowForSession
+    if (decision === 'allowForSession') {
+      this.sessionAllows.add(sessionAllowKey(pending.toolName, pending.input))
+    }
+    pending.resolve({ behavior: 'allow' })
+
+    if (updatedPermissions && updatedPermissions.length > 0) {
+      this.persistAllowRules(updatedPermissions)
+    }
+  }
+
+  /**
+   * Write "always allow" suggestions to the shared Claude permission store —
+   * mirrors OpencodeSession.persistAllowRules (same shared helpers
+   * `suggestionDestinationToScope`/`suggestionRuleToClaudeString` from
+   * permission-compiler.ts; the small grouping loop is intentionally
+   * duplicated here rather than extracted, per the M2a kickoff spec). Also
+   * invalidates the rules cache so the newly-persisted rule is honored on the
+   * VERY NEXT gate call in this same session, without waiting for an explicit
+   * notifySettingsChanged().
+   */
+  private persistAllowRules(suggestions: PermissionSuggestion[]): void {
+    try {
+      const byScope = new Map<'user' | 'project' | 'local', string[]>()
+      for (const s of suggestions) {
+        if (s.type !== 'addRules' || s.behavior !== 'allow' || !s.rules) continue
+        const scope = suggestionDestinationToScope(s.destination)
+        if (!scope) continue
+        const arr = byScope.get(scope) ?? []
+        for (const r of s.rules) arr.push(suggestionRuleToClaudeString(r))
+        byScope.set(scope, arr)
+      }
+      for (const [scope, ruleStrings] of byScope) {
+        const perms = loadClaudePermissions(scope, this.cwd)
+        const allowSet = new Set(perms.allow)
+        for (const r of ruleStrings) allowSet.add(r)
+        saveClaudePermissions(scope, { ...perms, allow: [...allowSet] }, this.cwd)
+      }
+      if (byScope.size > 0) this.cachedRules = null
+    } catch (err) {
+      logger.warn('PiSession', `persisting allow rules failed: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+
+  /** Hot-reload parity with Claude: invalidate the cached rules so the NEXT gate call re-reads the (just-edited) permission files from disk. */
+  async notifySettingsChanged(): Promise<void> {
+    this.cachedRules = null
   }
 
   async setModel(model: string): Promise<void> {
@@ -621,8 +843,9 @@ export class PiSession extends BaseSession {
   }
 
   async setPermissionMode(mode: string): Promise<void> {
-    // Stored only in M1 — pi has no permission-mode enforcement until the M2
-    // approval-bridge extension lands (interactiveApprovals: false).
+    // Store + broadcast only — gateToolCall reads this.permissionMode live on
+    // every tool_call, so a mode switch takes effect on the very next gate
+    // with no RPC round-trip needed (unlike opencode's patchSession).
     this.permissionMode = mode
     this.send('session:permission-mode', mode)
   }
