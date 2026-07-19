@@ -15,23 +15,41 @@ vi.mock('electron', async () => await import('../../../test/stubs/electron-shim'
 vi.mock('../logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 }))
+// piBinaryAvailable is a plain function export (unlike opencodeServerManager,
+// a singleton object whose methods vi.spyOn can target directly) — mocked so
+// crossEngineDispatchAvailable('pi') is controllable per-test. Every pi-target
+// TEST in this file injects a fake spawnPiTarget dep (bypassing
+// defaultSpawnPiTarget entirely), so mocking locatePiBinary here has no effect
+// on them either way — see buildPiTargetChildEnv's own dedicated test for the
+// real defaultSpawnPiTarget's recursion-guard property.
+vi.mock('../../pi/pi-locate', () => ({
+  locatePiBinary: vi.fn(() => null),
+  piBinaryAvailable: vi.fn(() => true)
+}))
 
 import {
   CrossEngineDispatcher,
   XENG_REQUEST_PREFIX,
-  crossEngineDispatchAvailable
+  crossEngineDispatchAvailable,
+  buildPiTargetChildEnv
 } from '../cross-engine-dispatcher'
 import { opencodeServerManager } from '../../opencode/OpencodeServerManager'
+import { piBinaryAvailable } from '../../pi/pi-locate'
 import type {
   ClaudeQuerySpawnOpts,
   DispatchContext,
   DispatcherDeps,
   DispatchResult,
   DispatchTargetClient,
-  SpawnClaudeQueryFn
+  PiTargetSpawnOpts,
+  PiTargetPrimitives,
+  SpawnClaudeQueryFn,
+  SpawnPiTargetFn
 } from '../cross-engine-dispatcher'
 import type { QueryHandle, ResultMessage, SDKMessage, SdkToolExtra } from '../../sdk'
 import type { EngineId } from '../../../shared/types'
+import type { PiRpcClient } from '../../pi/PiRpcClient'
+import type { PiBridgeHost, PiBridgeHandler } from '../../pi/PiBridgeHost'
 
 // ---------------------------------------------------------------------------
 // Fakes
@@ -131,6 +149,10 @@ function makeHarness(overrides: Partial<DispatcherDeps> = {}): {
     loadEngineConfig: () => ({ dispatch: { defaultModel: 'openai/gpt-5' } }),
     dispatchTimeoutMs: 2000,
     heartbeatMs: 50,
+    // ADR-033 M4c: keep pi's stop/timeout/abort grace-period wait (see
+    // PiTargetEntry.settled's "RACE NOTE") fast in tests by default — tests
+    // that specifically exercise the grace period's own timing override this.
+    piAbortSettleGraceMs: 20,
     ...overrides
   }
   return { dispatcher: new CrossEngineDispatcher(deps), client, stream, deps: { serverManager } }
@@ -1739,6 +1761,13 @@ describe('crossEngineDispatchAvailable (ADR-030/M4-A)', () => {
     expect(crossEngineDispatchAvailable('claude')).toBe(false)
     spy.mockRestore()
   })
+
+  it("'pi' mirrors piBinaryAvailable() (ADR-033 M4c)", () => {
+    vi.mocked(piBinaryAvailable).mockReturnValueOnce(true)
+    expect(crossEngineDispatchAvailable('pi')).toBe(true)
+    vi.mocked(piBinaryAvailable).mockReturnValueOnce(false)
+    expect(crossEngineDispatchAvailable('pi')).toBe(false)
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -2314,5 +2343,1206 @@ describe('CrossEngineDispatcher — M4-C cost cap (Claude direction)', () => {
     const result = await pending
     expect(result.isError).toBeUndefined()
     expect(result.text).toBe('the answer')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// pi direction (ADR-033 M4c — Claude/opencode → pi)
+// ---------------------------------------------------------------------------
+
+/** Loose shape covering exactly what the dispatcher calls on a pi target's client. */
+interface FakePiClient {
+  request: ReturnType<typeof vi.fn>
+  send: ReturnType<typeof vi.fn>
+  onEvent: ReturnType<typeof vi.fn>
+  onExit: ReturnType<typeof vi.fn>
+  dispose: ReturnType<typeof vi.fn>
+}
+
+type PiRequestHandler = (
+  cmd: Record<string, unknown>
+) => Record<string, unknown> | Promise<Record<string, unknown>>
+
+/** Canned responses for the fixed RPC sequence createPiTarget/drivePiTurn issue. */
+function defaultPiRequestHandler(sessionId: string): PiRequestHandler {
+  return (cmd) => {
+    switch (cmd.type) {
+      case 'get_state':
+        return {
+          type: 'response',
+          command: 'get_state',
+          success: true,
+          data: { sessionId, model: { id: 'gpt-5.6-luna', provider: 'openai-codex' }, isStreaming: false }
+        }
+      case 'set_model':
+        return { type: 'response', command: 'set_model', success: true, data: {} }
+      case 'prompt':
+        return { type: 'response', command: 'prompt', success: true }
+      case 'get_last_assistant_text':
+        return {
+          type: 'response',
+          command: 'get_last_assistant_text',
+          success: true,
+          data: { text: 'target answer' }
+        }
+      case 'abort':
+        return { type: 'response', command: 'abort', success: true }
+      default:
+        return { type: 'response', command: String(cmd.type), success: true }
+    }
+  }
+}
+
+/**
+ * Fake headless pi target: a fake PiRpcClient (request/onEvent/onExit/dispose)
+ * + a fake PiBridgeHost (dispose only). `pushEvent` feeds the SAME onEvent
+ * callback the dispatcher registers in createPiTarget (mapPiEvent runs for
+ * REAL — only the process/transport is faked, mirroring the Claude fake's
+ * "real event-mapper logic, fake iterator" precedent). `gateHandler()` exposes
+ * the per-target approval-gate closure the dispatcher builds and hands to
+ * spawnPiTarget, for driving/asserting the two-stage gate directly.
+ */
+function makeFakePiTarget(
+  overrides: { sessionId?: string; requestHandler?: PiRequestHandler } = {}
+): {
+  spawnPiTarget: SpawnPiTargetFn
+  spawnCalls: PiTargetSpawnOpts[]
+  client: FakePiClient
+  bridgeDispose: ReturnType<typeof vi.fn>
+  pushEvent: (ev: Record<string, unknown>) => void
+  triggerExit: () => void
+  gateHandler: () => PiBridgeHandler
+} {
+  const sessionId = overrides.sessionId ?? 'pi-target-1'
+  const handler = overrides.requestHandler ?? defaultPiRequestHandler(sessionId)
+  const eventHandlers: Array<(ev: Record<string, unknown>) => void> = []
+  const exitHandlers: Array<() => void> = []
+  let capturedGateHandler: PiBridgeHandler | undefined
+
+  const client: FakePiClient = {
+    request: vi.fn(async (cmd: Record<string, unknown>) => handler(cmd)),
+    send: vi.fn(),
+    onEvent: vi.fn((cb: (ev: Record<string, unknown>) => void) => {
+      eventHandlers.push(cb)
+      return () => {}
+    }),
+    onExit: vi.fn((cb: () => void) => {
+      exitHandlers.push(cb)
+      return () => {}
+    }),
+    dispose: vi.fn()
+  }
+  const bridgeDispose = vi.fn()
+
+  const spawnCalls: PiTargetSpawnOpts[] = []
+  const spawnPiTarget = vi.fn<SpawnPiTargetFn>(async (opts) => {
+    spawnCalls.push(opts)
+    capturedGateHandler = opts.gateHandler
+    const primitives: PiTargetPrimitives = {
+      client: client as unknown as PiRpcClient,
+      bridgeHost: { dispose: bridgeDispose } as unknown as PiBridgeHost
+    }
+    return primitives
+  })
+
+  return {
+    spawnPiTarget,
+    spawnCalls,
+    client,
+    bridgeDispose,
+    pushEvent: (ev) => {
+      for (const cb of eventHandlers) cb(ev)
+    },
+    triggerExit: () => {
+      for (const cb of exitHandlers) cb()
+    },
+    gateHandler: () => {
+      if (!capturedGateHandler) {
+        throw new Error('gateHandler not captured yet — spawnPiTarget must resolve first (await tick())')
+      }
+      return capturedGateHandler
+    }
+  }
+}
+
+/** A pi `message_end` (role: assistant) event — text and/or a tool_use block, plus usage/cost. */
+function piAssistantMessageEnd(opts: {
+  text?: string
+  toolUse?: { id: string; name: string; input: Record<string, unknown> }
+  cost?: number
+  input?: number
+  output?: number
+  reasoning?: number
+}): Record<string, unknown> {
+  const content: Record<string, unknown>[] = []
+  if (opts.text !== undefined) content.push({ type: 'text', text: opts.text })
+  if (opts.toolUse) {
+    content.push({ type: 'toolCall', id: opts.toolUse.id, name: opts.toolUse.name, arguments: opts.toolUse.input })
+  }
+  return {
+    type: 'message_end',
+    message: {
+      role: 'assistant',
+      content,
+      api: 'openai-codex-responses',
+      provider: 'openai-codex',
+      model: 'gpt-5.6-luna',
+      usage: {
+        input: opts.input ?? 10,
+        output: opts.output ?? 5,
+        cacheRead: 0,
+        cacheWrite: 0,
+        ...(opts.reasoning !== undefined ? { reasoning: opts.reasoning } : {}),
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: opts.cost ?? 0 }
+      },
+      stopReason: 'stop',
+      timestamp: Date.now()
+    }
+  }
+}
+
+/** A pi `message_end` (role: toolResult) event. */
+function piToolResultEnd(toolCallId: string, text: string, isError = false): Record<string, unknown> {
+  return {
+    type: 'message_end',
+    message: {
+      role: 'toolResult',
+      toolCallId,
+      toolName: 'bash',
+      content: [{ type: 'text', text }],
+      isError,
+      timestamp: Date.now()
+    }
+  }
+}
+
+const PI_AGENT_SETTLED = { type: 'agent_settled' }
+
+describe('CrossEngineDispatcher — pi direction (M4c): target lifecycle', () => {
+  it('happy path: spawns, captures session_id EAGERLY via get_state, sets model, drives the turn, returns get_last_assistant_text', async () => {
+    const target = makeFakePiTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
+      spawnPiTarget: target.spawnPiTarget
+    })
+    const pending = dispatcher.dispatch(
+      { engine: 'pi', prompt: 'review this' },
+      makeCtx({ fromEngine: 'claude', autonomyMode: 'acceptEdits' })
+    )
+    await tick()
+    target.pushEvent(piAssistantMessageEnd({ text: 'hello', cost: 0.02 }))
+    target.pushEvent(PI_AGENT_SETTLED)
+
+    const result = await pending
+    expect(result.isError).toBeUndefined()
+    expect(result.text).toBe('target answer')
+    expect(result.sessionId).toBe('pi-target-1')
+
+    expect(target.spawnCalls).toHaveLength(1)
+    expect(target.spawnCalls[0].cwd).toBe('/tmp/xeng-project')
+
+    const setModelCall = target.client.request.mock.calls.find(
+      (c: unknown[]) => (c[0] as { type?: string }).type === 'set_model'
+    )
+    expect(setModelCall?.[0]).toMatchObject({ provider: 'openai-codex', modelId: 'gpt-5.6-luna' })
+  })
+
+  it('rejects a same-engine (pi → pi) dispatch as isError, no spawn', async () => {
+    const target = makeFakePiTarget()
+    const { dispatcher } = makeHarness({ spawnPiTarget: target.spawnPiTarget })
+    const result = await dispatcher.dispatch(
+      { engine: 'pi', prompt: 'x' },
+      makeCtx({ fromEngine: 'pi' })
+    )
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain('different engine')
+    expect(target.spawnCalls).toHaveLength(0)
+  })
+
+  it('continuation: session_id reuses the SAME target (no second spawn, no second set_model)', async () => {
+    const target = makeFakePiTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
+      spawnPiTarget: target.spawnPiTarget
+    })
+    const ctx = makeCtx({ fromEngine: 'claude' })
+
+    const first = dispatcher.dispatch({ engine: 'pi', prompt: 'one' }, ctx)
+    await tick()
+    target.pushEvent(piAssistantMessageEnd({ text: 'first' }))
+    target.pushEvent(PI_AGENT_SETTLED)
+    const firstResult = await first
+    expect(firstResult.sessionId).toBe('pi-target-1')
+
+    const second = dispatcher.dispatch(
+      { engine: 'pi', prompt: 'two', sessionId: firstResult.sessionId },
+      ctx
+    )
+    await tick()
+    target.pushEvent(piAssistantMessageEnd({ text: 'second' }))
+    target.pushEvent(PI_AGENT_SETTLED)
+    const secondResult = await second
+
+    expect(secondResult.isError).toBeUndefined()
+    expect(secondResult.sessionId).toBe('pi-target-1')
+    expect(target.spawnCalls).toHaveLength(1)
+    expect(
+      target.client.request.mock.calls.filter((c: unknown[]) => (c[0] as { type?: string }).type === 'set_model')
+    ).toHaveLength(1)
+    expect(
+      target.client.request.mock.calls.filter((c: unknown[]) => (c[0] as { type?: string }).type === 'prompt')
+    ).toHaveLength(2)
+  })
+
+  it('continuation with an unknown sessionId → isError, no spawn', async () => {
+    const target = makeFakePiTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
+      spawnPiTarget: target.spawnPiTarget
+    })
+    const result = await dispatcher.dispatch(
+      { engine: 'pi', prompt: 'x', sessionId: 'no-such-pi-session' },
+      makeCtx({ fromEngine: 'claude' })
+    )
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain('no-such-pi-session')
+    expect(target.spawnCalls).toHaveLength(0)
+  })
+
+  it("continuation with another session's target → isError (scoped to fromRoutingId)", async () => {
+    const target = makeFakePiTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
+      spawnPiTarget: target.spawnPiTarget
+    })
+    const first = dispatcher.dispatch(
+      { engine: 'pi', prompt: 'one' },
+      makeCtx({ fromEngine: 'claude', fromRoutingId: 'routing-A' })
+    )
+    await tick()
+    target.pushEvent(piAssistantMessageEnd({ text: 'first' }))
+    target.pushEvent(PI_AGENT_SETTLED)
+    const firstResult = await first
+
+    const stolen = await dispatcher.dispatch(
+      { engine: 'pi', prompt: 'two', sessionId: firstResult.sessionId },
+      makeCtx({ fromEngine: 'claude', fromRoutingId: 'routing-B' })
+    )
+    expect(stolen.isError).toBe(true)
+  })
+
+  it('busy target: a concurrent same-session_id dispatch is REJECTED without disturbing the running turn', async () => {
+    const target = makeFakePiTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
+      spawnPiTarget: target.spawnPiTarget
+    })
+    const ctx = makeCtx({ fromEngine: 'claude' })
+
+    const first = dispatcher.dispatch({ engine: 'pi', prompt: 'one' }, ctx)
+    await tick()
+    target.pushEvent(piAssistantMessageEnd({ text: 'first' }))
+    target.pushEvent(PI_AGENT_SETTLED)
+    expect((await first).sessionId).toBe('pi-target-1')
+
+    const second = dispatcher.dispatch({ engine: 'pi', prompt: 'two', sessionId: 'pi-target-1' }, ctx)
+    await tick()
+
+    const third = await dispatcher.dispatch(
+      { engine: 'pi', prompt: 'three', sessionId: 'pi-target-1' },
+      ctx
+    )
+    expect(third.isError).toBe(true)
+    expect(third.text).toContain('already running')
+    expect(target.spawnCalls).toHaveLength(1)
+
+    target.pushEvent(piAssistantMessageEnd({ text: 'second' }))
+    target.pushEvent(PI_AGENT_SETTLED)
+    const secondResult = await second
+    expect(secondResult.isError).toBeUndefined()
+  })
+})
+
+describe('CrossEngineDispatcher — pi direction (M4c): model resolution', () => {
+  it('no default configured and no model requested → isError naming engines/pi.json, no spawn', async () => {
+    const target = makeFakePiTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({})),
+      spawnPiTarget: target.spawnPiTarget
+    })
+    const result = await dispatcher.dispatch(
+      { engine: 'pi', prompt: 'x' },
+      makeCtx({ fromEngine: 'claude' })
+    )
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain('engines/pi.json')
+    expect(target.spawnCalls).toHaveLength(0)
+  })
+
+  it('allowlist violation → isError, no spawn', async () => {
+    const target = makeFakePiTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { allowedModels: ['openai-codex/gpt-5.6-luna'] } })),
+      spawnPiTarget: target.spawnPiTarget
+    })
+    const result = await dispatcher.dispatch(
+      { engine: 'pi', prompt: 'x', model: 'anthropic/claude-evil' },
+      makeCtx({ fromEngine: 'claude' })
+    )
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain('allowlist')
+    expect(target.spawnCalls).toHaveLength(0)
+  })
+
+  it('a requested model present in allowedModels is decoded via engineMeta and used for set_model', async () => {
+    const target = makeFakePiTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({
+        dispatch: { allowedModels: ['openai-codex/gpt-5.6-luna', 'anthropic/claude-x'] }
+      })),
+      spawnPiTarget: target.spawnPiTarget
+    })
+    const pending = dispatcher.dispatch(
+      { engine: 'pi', prompt: 'x', model: 'anthropic/claude-x' },
+      makeCtx({ fromEngine: 'claude' })
+    )
+    await tick()
+    target.pushEvent(piAssistantMessageEnd({ text: 'ok' }))
+    target.pushEvent(PI_AGENT_SETTLED)
+    const result = await pending
+    expect(result.isError).toBeUndefined()
+    const setModelCall = target.client.request.mock.calls.find(
+      (c: unknown[]) => (c[0] as { type?: string }).type === 'set_model'
+    )
+    expect(setModelCall?.[0]).toMatchObject({ provider: 'anthropic', modelId: 'claude-x' })
+  })
+
+  it('a failed set_model → isError naming the failure; the half-built target is torn down (client + bridgeHost disposed)', async () => {
+    const target = makeFakePiTarget({
+      requestHandler: (cmd) => {
+        if (cmd.type === 'set_model') {
+          return { type: 'response', command: 'set_model', success: false, error: 'Model not found: bogus/nope' }
+        }
+        return defaultPiRequestHandler('pi-target-1')(cmd)
+      }
+    })
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'bogus/nope' } })),
+      spawnPiTarget: target.spawnPiTarget
+    })
+    const result = await dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, makeCtx({ fromEngine: 'claude' }))
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain('Model not found')
+    expect(target.client.dispose).toHaveBeenCalled()
+    expect(target.bridgeDispose).toHaveBeenCalled()
+  })
+
+  it('a get_state with no session id reported → isError; the half-built target is torn down', async () => {
+    const target = makeFakePiTarget({
+      requestHandler: (cmd) => {
+        if (cmd.type === 'get_state') return { type: 'response', command: 'get_state', success: true, data: {} }
+        return defaultPiRequestHandler('pi-target-1')(cmd)
+      }
+    })
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
+      spawnPiTarget: target.spawnPiTarget
+    })
+    const result = await dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, makeCtx({ fromEngine: 'claude' }))
+    expect(result.isError).toBe(true)
+    expect(target.client.dispose).toHaveBeenCalled()
+    expect(target.bridgeDispose).toHaveBeenCalled()
+  })
+})
+
+describe('CrossEngineDispatcher — pi direction (M4c): autonomy / two-stage approval gate', () => {
+  it("'auto' (full) autonomy auto-allows a mutating tool with NO forwarded approval — decide() short-circuits before any human round-trip", async () => {
+    const target = makeFakePiTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
+      spawnPiTarget: target.spawnPiTarget
+    })
+    const ctx = makeCtx({ fromEngine: 'claude', autonomyMode: 'auto' })
+    const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
+    await tick()
+
+    const decision = await target.gateHandler()({
+      toolCallId: 'pi-call-1',
+      toolName: 'bash',
+      input: { command: 'rm -rf x' }
+    })
+    expect(decision).toEqual({ behavior: 'allow' })
+    expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:approval-request')).toBe(false)
+
+    target.pushEvent(piAssistantMessageEnd({ text: 'done' }))
+    target.pushEvent(PI_AGENT_SETTLED)
+    await pending
+  })
+
+  it("'default' autonomy auto-allows a read-only tool (mode-base) with NO forwarded approval", async () => {
+    const target = makeFakePiTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
+      spawnPiTarget: target.spawnPiTarget
+    })
+    const ctx = makeCtx({ fromEngine: 'claude', autonomyMode: 'default' })
+    const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
+    await tick()
+
+    const decision = await target.gateHandler()({
+      toolCallId: 'pi-call-1',
+      toolName: 'read',
+      input: { path: 'a.txt' }
+    })
+    expect(decision).toEqual({ behavior: 'allow' })
+    expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:approval-request')).toBe(false)
+
+    target.pushEvent(piAssistantMessageEnd({ text: 'done' }))
+    target.pushEvent(PI_AGENT_SETTLED)
+    await pending
+  })
+
+  it("'default' autonomy ASKS for a mutating tool — forwards an xeng:-prefixed approval keyed by the pi tool call's OWN id (not ctx.toolUseId)", async () => {
+    const target = makeFakePiTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
+      spawnPiTarget: target.spawnPiTarget
+    })
+    const ctx = makeCtx({ fromEngine: 'claude', autonomyMode: 'default', toolUseId: 'toolu_dispatch_1' })
+    const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
+    await tick()
+
+    const decisionPromise = target.gateHandler()({
+      toolCallId: 'pi-call-1',
+      toolName: 'bash',
+      input: { command: 'rm -rf x' }
+    })
+    await tick()
+
+    const call = ctx.emit.mock.calls.find((c) => c[0] === 'session:approval-request')
+    expect(call).toBeTruthy()
+    const approval = call![1] as {
+      requestId: string
+      toolName: string
+      toolUseId?: string
+      input: Record<string, unknown>
+    }
+    expect(approval.requestId.startsWith(XENG_REQUEST_PREFIX)).toBe(true)
+    expect(approval.toolName).toBe('bash')
+    // The PI TOOL CALL's own id — NOT ctx.toolUseId ('toolu_dispatch_1') — see
+    // gatePiTargetToolCall's doc comment on why (FloatingApproval matching).
+    expect(approval.toolUseId).toBe('pi-call-1')
+    expect(approval.input).toEqual({ command: 'rm -rf x' })
+
+    const sentinel = Symbol('pending')
+    expect(await Promise.race([decisionPromise, Promise.resolve(sentinel)])).toBe(sentinel)
+
+    const consumed = dispatcher.resolveApproval(approval.requestId, 'allow')
+    expect(consumed).toBe(true)
+    expect(await decisionPromise).toEqual({ behavior: 'allow' })
+
+    target.pushEvent(piAssistantMessageEnd({ text: 'done' }))
+    target.pushEvent(PI_AGENT_SETTLED)
+    await pending
+  })
+
+  it("resolveApproval('deny') resolves the gate with deny + model-visible feedback", async () => {
+    const target = makeFakePiTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
+      spawnPiTarget: target.spawnPiTarget
+    })
+    const ctx = makeCtx({ fromEngine: 'claude', autonomyMode: 'default' })
+    const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
+    await tick()
+
+    const decisionPromise = target.gateHandler()({
+      toolCallId: 'pi-call-1',
+      toolName: 'bash',
+      input: { command: 'x' }
+    })
+    await tick()
+    const approval = ctx.emit.mock.calls.find((c) => c[0] === 'session:approval-request')![1] as {
+      requestId: string
+    }
+    dispatcher.resolveApproval(approval.requestId, 'deny', { feedback: 'too dangerous' })
+    expect(await decisionPromise).toEqual({ behavior: 'deny', reason: 'too dangerous' })
+
+    target.pushEvent(piAssistantMessageEnd({ text: 'done' }))
+    target.pushEvent(PI_AGENT_SETTLED)
+    await pending
+  })
+
+  it("resolveApproval(deny) without feedback → 'User denied'", async () => {
+    const target = makeFakePiTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
+      spawnPiTarget: target.spawnPiTarget
+    })
+    const ctx = makeCtx({ fromEngine: 'claude', autonomyMode: 'default' })
+    const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
+    await tick()
+    const decisionPromise = target.gateHandler()({
+      toolCallId: 'pi-call-1',
+      toolName: 'bash',
+      input: { command: 'x' }
+    })
+    await tick()
+    const approval = ctx.emit.mock.calls.find((c) => c[0] === 'session:approval-request')![1] as {
+      requestId: string
+    }
+    dispatcher.resolveApproval(approval.requestId, 'deny')
+    expect(await decisionPromise).toEqual({ behavior: 'deny', reason: 'User denied' })
+
+    target.pushEvent(piAssistantMessageEnd({ text: 'done' }))
+    target.pushEvent(PI_AGENT_SETTLED)
+    await pending
+  })
+
+  it("'allowForSession' behaves identically to a one-off 'allow' — a pi dispatch target never persists a per-tool escalation (unlike PiSession's own interactive sessionAllows)", async () => {
+    const target = makeFakePiTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
+      spawnPiTarget: target.spawnPiTarget
+    })
+    const ctx = makeCtx({ fromEngine: 'claude', autonomyMode: 'default' })
+    const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
+    await tick()
+
+    const decisionPromise = target.gateHandler()({
+      toolCallId: 'pi-call-1',
+      toolName: 'bash',
+      input: { command: 'x' }
+    })
+    await tick()
+    const approval = ctx.emit.mock.calls.find((c) => c[0] === 'session:approval-request')![1] as {
+      requestId: string
+    }
+    dispatcher.resolveApproval(approval.requestId, 'allowForSession')
+    expect(await decisionPromise).toEqual({ behavior: 'allow' })
+
+    // A SECOND identical bash call still asks — no escalation was remembered.
+    const secondDecisionPromise = target.gateHandler()({
+      toolCallId: 'pi-call-2',
+      toolName: 'bash',
+      input: { command: 'x' }
+    })
+    await tick()
+    const secondApproval = ctx.emit.mock.calls
+      .filter((c) => c[0] === 'session:approval-request')
+      .at(-1)![1] as { requestId: string }
+    expect(secondApproval.requestId).not.toBe(approval.requestId)
+    dispatcher.resolveApproval(secondApproval.requestId, 'allow')
+    await secondDecisionPromise
+
+    target.pushEvent(piAssistantMessageEnd({ text: 'done' }))
+    target.pushEvent(PI_AGENT_SETTLED)
+    await pending
+  })
+
+  it('the autonomy mode is FIXED at target creation — a continuation with a DIFFERENT autonomyMode does not change the gate', async () => {
+    const target = makeFakePiTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
+      spawnPiTarget: target.spawnPiTarget
+    })
+    const first = dispatcher.dispatch(
+      { engine: 'pi', prompt: 'one' },
+      makeCtx({ fromEngine: 'claude', autonomyMode: 'auto' })
+    )
+    await tick()
+    target.pushEvent(piAssistantMessageEnd({ text: 'first' }))
+    target.pushEvent(PI_AGENT_SETTLED)
+    const firstResult = await first
+
+    // Continuation arrives with a DIFFERENT (conservative) autonomyMode.
+    const second = dispatcher.dispatch(
+      { engine: 'pi', prompt: 'two', sessionId: firstResult.sessionId },
+      makeCtx({ fromEngine: 'claude', autonomyMode: 'default' })
+    )
+    await tick()
+
+    // The SAME gate closure (bound to 'auto', fixed at creation) still auto-allows.
+    const decision = await target.gateHandler()({
+      toolCallId: 'pi-call-2',
+      toolName: 'bash',
+      input: { command: 'x' }
+    })
+    expect(decision).toEqual({ behavior: 'allow' })
+
+    target.pushEvent(piAssistantMessageEnd({ text: 'second' }))
+    target.pushEvent(PI_AGENT_SETTLED)
+    await second
+  })
+})
+
+describe('CrossEngineDispatcher — pi direction (M4c): timeout / abort / stop (process SURVIVES — unlike Claude)', () => {
+  it('stopDispatch sends the abort RPC, emits a "stopped" notification, resolves isError — the entry is KEPT ALIVE for continuation', async () => {
+    const target = makeFakePiTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
+      spawnPiTarget: target.spawnPiTarget
+    })
+    const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_stop_1' })
+    const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
+    await tick()
+
+    expect(dispatcher.stopDispatch('toolu_stop_1')).toBe(true)
+
+    const result = await pending
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain('stopped')
+    expect(result.sessionId).toBe('pi-target-1')
+
+    const abortCall = target.client.request.mock.calls.find(
+      (c: unknown[]) => (c[0] as { type?: string }).type === 'abort'
+    )
+    expect(abortCall).toBeTruthy()
+
+    const notif = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')
+    expect(notif?.[1]).toMatchObject({ toolUseId: 'toolu_stop_1', status: 'stopped' })
+
+    // DIVERGES FROM CLAUDE: the process survives — a fresh turn on the SAME
+    // session_id works with NO re-spawn.
+    const cont = dispatcher.dispatch({ engine: 'pi', prompt: 'y', sessionId: 'pi-target-1' }, ctx)
+    await tick()
+    target.pushEvent(piAssistantMessageEnd({ text: 'recovered' }))
+    target.pushEvent(PI_AGENT_SETTLED)
+    const contResult = await cont
+    expect(contResult.isError).toBeUndefined()
+    expect(target.spawnCalls).toHaveLength(1)
+  })
+
+  it('per-dispatch timeout interrupts the turn (status "failed", recorded) — the entry is ALSO kept alive for continuation', async () => {
+    const target = makeFakePiTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
+      dispatchTimeoutMs: 30,
+      spawnPiTarget: target.spawnPiTarget
+    })
+    const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_timeout_1' })
+    const result = await dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain('timed out')
+
+    const notif = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')
+    expect(notif?.[1]).toMatchObject({ toolUseId: 'toolu_timeout_1', status: 'failed' })
+
+    const cont = dispatcher.dispatch({ engine: 'pi', prompt: 'y', sessionId: 'pi-target-1' }, ctx)
+    await tick()
+    target.pushEvent(piAssistantMessageEnd({ text: 'recovered' }))
+    target.pushEvent(PI_AGENT_SETTLED)
+    expect((await cont).isError).toBeUndefined()
+    expect(target.spawnCalls).toHaveLength(1)
+  })
+
+  it('extra.signal abort → "cancelled" text', async () => {
+    const target = makeFakePiTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
+      spawnPiTarget: target.spawnPiTarget
+    })
+    const abort = new AbortController()
+    const pending = dispatcher.dispatch(
+      { engine: 'pi', prompt: 'x' },
+      makeCtx({ fromEngine: 'claude', extra: makeExtra({ signal: abort.signal }) })
+    )
+    await tick()
+    abort.abort()
+    const result = await pending
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain('cancelled')
+  })
+
+  it('a rejected turn (extension_error) settles as isError but does NOT tear down the entry — a continuation can still be attempted', async () => {
+    const target = makeFakePiTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
+      spawnPiTarget: target.spawnPiTarget
+    })
+    const ctx = makeCtx({ fromEngine: 'claude' })
+    const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
+    await tick()
+    target.pushEvent({ type: 'extension_error', extensionPath: 'x.ts', event: 'tool_call', error: 'bridge crashed' })
+    const result = await pending
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain('bridge crashed')
+
+    const cont = dispatcher.dispatch({ engine: 'pi', prompt: 'y', sessionId: 'pi-target-1' }, ctx)
+    await tick()
+    target.pushEvent(piAssistantMessageEnd({ text: 'recovered' }))
+    target.pushEvent(PI_AGENT_SETTLED)
+    expect((await cont).isError).toBeUndefined()
+    expect(target.spawnCalls).toHaveLength(1)
+  })
+
+  it('an unexpected process exit settles the in-flight turn as an error AND disposes the bridge host (port/socket hygiene)', async () => {
+    const target = makeFakePiTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
+      spawnPiTarget: target.spawnPiTarget
+    })
+    const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, makeCtx({ fromEngine: 'claude' }))
+    await tick()
+    target.triggerExit()
+    const result = await pending
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain('exited unexpectedly')
+    expect(target.bridgeDispose).toHaveBeenCalled()
+  })
+
+  it('a continuation attempted WHILE the post-stop grace-period drain is still in progress is busy-rejected — never corrupted by a stale settle (see PiTargetEntry.settled\'s RACE NOTE)', async () => {
+    // pi's `abort` is turn-scoped (the process survives), so the STOPPED
+    // turn's own terminal event sequence is still in flight when
+    // resolveAndRunPi gives up. Without draining it before releasing `busy`,
+    // a fast-enough continuation could install a new settle wrapper while
+    // the stale one is still pending delivery — pi's wire has no per-event
+    // turn correlation to tell them apart on arrival. Proves the mechanism
+    // directly: `busy` stays true for the WHOLE grace window, so a
+    // continuation attempted inside it is busy-rejected exactly like an
+    // ordinary concurrent-turn attempt, never silently corrupted.
+    const target = makeFakePiTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
+      spawnPiTarget: target.spawnPiTarget,
+      piAbortSettleGraceMs: 200 // generous enough to reliably land a call inside the window
+    })
+    const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_race_1' })
+    const first = dispatcher.dispatch({ engine: 'pi', prompt: 'one' }, ctx)
+    await tick()
+    expect(dispatcher.stopDispatch('toolu_race_1')).toBe(true)
+    // `first` is now inside its grace-period wait — nothing settles it
+    // naturally in this test, so it resolves once the 200ms grace elapses.
+
+    const duringGrace = await dispatcher.dispatch(
+      { engine: 'pi', prompt: 'too soon', sessionId: 'pi-target-1' },
+      ctx
+    )
+    expect(duringGrace.isError).toBe(true)
+    expect(duringGrace.text).toContain('already running')
+
+    const firstResult = await first
+    expect(firstResult.isError).toBe(true)
+    expect(firstResult.text).toContain('stopped')
+
+    // NOW a continuation is safe — entry.settled was drained by the grace wait.
+    const second = dispatcher.dispatch({ engine: 'pi', prompt: 'two', sessionId: 'pi-target-1' }, ctx)
+    await tick()
+    target.pushEvent(piAssistantMessageEnd({ text: 'genuine answer' }))
+    target.pushEvent(PI_AGENT_SETTLED)
+    const secondResult = await second
+    expect(secondResult.isError).toBeUndefined()
+    expect(target.spawnCalls).toHaveLength(1) // still the same process throughout
+  })
+
+  it('the post-stop grace-period drain is bounded — resolves on its own if the target never settles (does not hang forever)', async () => {
+    const target = makeFakePiTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
+      spawnPiTarget: target.spawnPiTarget,
+      piAbortSettleGraceMs: 20
+    })
+    const pending = dispatcher.dispatch(
+      { engine: 'pi', prompt: 'x' },
+      makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_grace_timeout' })
+    )
+    await tick()
+    expect(dispatcher.stopDispatch('toolu_grace_timeout')).toBe(true)
+    // Never push any event — the grace period must still resolve on its own.
+    const result = await pending
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain('stopped')
+  })
+
+  it('a stale settle arriving DURING the grace-period drain resolves the ORIGINAL (stopped) call harmlessly — a subsequent continuation still gets a clean slate', async () => {
+    const target = makeFakePiTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
+      spawnPiTarget: target.spawnPiTarget
+      // piAbortSettleGraceMs: 20 (harness default) — plenty of time for a
+      // synchronously-pushed event to land within the window.
+    })
+    const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_race_2' })
+    const first = dispatcher.dispatch({ engine: 'pi', prompt: 'one' }, ctx)
+    await tick()
+    expect(dispatcher.stopDispatch('toolu_race_2')).toBe(true)
+    await tick() // let the grace-period wait actually start
+
+    // The stopped turn's own delayed terminal sequence arrives WHILE the
+    // grace-period wait is in progress (the realistic case — pi's real
+    // abort→agent_settled latency is single-digit ms, verified during the
+    // M4c kickoff investigation).
+    target.pushEvent(piAssistantMessageEnd({ text: 'stale, from the stopped turn' }))
+    target.pushEvent(PI_AGENT_SETTLED)
+
+    const firstResult = await first
+    expect(firstResult.isError).toBe(true)
+    expect(firstResult.text).toContain('stopped') // the ORIGINAL outcome, unaffected
+
+    const second = dispatcher.dispatch({ engine: 'pi', prompt: 'two', sessionId: 'pi-target-1' }, ctx)
+    await tick()
+    target.pushEvent(piAssistantMessageEnd({ text: 'genuine turn two answer' }))
+    target.pushEvent(PI_AGENT_SETTLED)
+    const secondResult = await second
+    expect(secondResult.isError).toBeUndefined()
+    expect(target.spawnCalls).toHaveLength(1)
+  })
+})
+
+describe('CrossEngineDispatcher — pi direction (M4c): streaming, usage, notification', () => {
+  it('forwards subagent-stream/message/tool-result with the exact payload shapes; the final notification carries usage', async () => {
+    const target = makeFakePiTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
+      heartbeatMs: 20,
+      spawnPiTarget: target.spawnPiTarget
+    })
+    const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_disp_1' })
+    const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
+    await tick()
+
+    target.pushEvent({ type: 'message_start', message: { role: 'assistant', content: [] } })
+    target.pushEvent({
+      type: 'message_update',
+      message: { role: 'assistant', content: [{ type: 'text', text: 'Hel' }] },
+      assistantMessageEvent: { type: 'text_delta', delta: 'Hello' }
+    })
+    await tick()
+
+    target.pushEvent(piToolResultEnd('pi-call-1', 'ls output'))
+    await tick()
+
+    target.pushEvent(
+      piAssistantMessageEnd({
+        toolUse: { id: 'pi-call-1', name: 'bash', input: { command: 'ls' } },
+        text: 'Hello',
+        cost: 0.02,
+        input: 100,
+        output: 50,
+        reasoning: 5
+      })
+    )
+    await new Promise((r) => setTimeout(r, 30)) // let at least one heartbeat tick fire
+    target.pushEvent(PI_AGENT_SETTLED)
+
+    const result = await pending
+    expect(result.isError).toBeUndefined()
+
+    const streamCall = ctx.emit.mock.calls.find((c) => c[0] === 'session:subagent-stream')
+    expect(streamCall?.[1]).toMatchObject({ toolUseId: 'toolu_disp_1', type: 'text', text: 'Hello' })
+
+    const msgCalls = ctx.emit.mock.calls.filter((c) => c[0] === 'session:subagent-message')
+    expect(msgCalls.length).toBeGreaterThan(0)
+    const lastMsg = msgCalls.at(-1)![1] as { toolUseId: string; message: { content: unknown[] } }
+    expect(lastMsg.toolUseId).toBe('toolu_disp_1')
+    expect(lastMsg.message.content).toEqual([
+      { type: 'text', text: 'Hello' },
+      { type: 'tool_use', toolUseId: 'pi-call-1', toolName: 'bash', toolInput: { command: 'ls' } }
+    ])
+
+    const toolResultCall = ctx.emit.mock.calls.find((c) => c[0] === 'session:subagent-tool-result')
+    expect(toolResultCall?.[1]).toEqual({
+      toolUseId: 'toolu_disp_1',
+      toolResultToolUseId: 'pi-call-1',
+      result: 'ls output',
+      isError: false
+    })
+
+    const progressCall = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-progress')
+    expect(progressCall?.[1]).toMatchObject({
+      toolUseId: 'toolu_disp_1',
+      toolName: 'dispatch_agent',
+      parentToolUseId: null
+    })
+
+    const notif = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')
+    expect(notif?.[1]).toMatchObject({ taskId: 'pi-target-1', toolUseId: 'toolu_disp_1', status: 'completed' })
+    const usage = (notif![1] as { usage?: { totalTokens: number; toolUses: number; durationMs: number } }).usage
+    expect(usage).toBeTruthy()
+    expect(usage!.totalTokens).toBe(155) // 100 + 50 + 5(reasoning)
+    expect(usage!.toolUses).toBe(1)
+    expect(usage!.durationMs).toEqual(expect.any(Number))
+  })
+
+  it('toolUseId ABSENT: zero subagent/task emits, dispatch still succeeds', async () => {
+    const target = makeFakePiTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
+      spawnPiTarget: target.spawnPiTarget
+    })
+    const ctx = makeCtx({ fromEngine: 'claude' }) // no toolUseId
+    const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
+    await tick()
+    target.pushEvent(piAssistantMessageEnd({ text: 'hi' }))
+    target.pushEvent(PI_AGENT_SETTLED)
+    const result = await pending
+    expect(result.isError).toBeUndefined()
+    expect(ctx.emit.mock.calls.filter((c) => RELEVANT_SUBAGENT_CHANNELS.includes(c[0]))).toHaveLength(0)
+  })
+
+  it('captures cost/tokens and records a dispatched-usage row on success; folds cost into ctx.addDispatchedCost', async () => {
+    const recordDispatchedUsage = vi.fn()
+    const target = makeFakePiTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
+      spawnPiTarget: target.spawnPiTarget,
+      recordDispatchedUsage
+    })
+    const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_usage_1' })
+    const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
+    await tick()
+    target.pushEvent(piAssistantMessageEnd({ text: 'ok', cost: 0.02, input: 100, output: 50 }))
+    target.pushEvent(PI_AGENT_SETTLED)
+    const result = await pending
+    expect(result.isError).toBeUndefined()
+
+    expect(recordDispatchedUsage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        fromRoutingId: 'routing-1',
+        fromEngine: 'claude',
+        targetEngine: 'pi',
+        targetModel: 'openai-codex/gpt-5.6-luna',
+        targetSessionId: 'pi-target-1',
+        toolUseId: 'toolu_usage_1',
+        totalTokens: 150,
+        costUsd: 0.02
+      })
+    )
+    expect(ctx.addDispatchedCost).toHaveBeenCalledWith('pi', 'openai-codex/gpt-5.6-luna', 0.02)
+  })
+
+  it('does NOT call ctx.addDispatchedCost when turn cost is zero', async () => {
+    const target = makeFakePiTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
+      spawnPiTarget: target.spawnPiTarget
+    })
+    const ctx = makeCtx({ fromEngine: 'claude' })
+    const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
+    await tick()
+    target.pushEvent(piAssistantMessageEnd({ text: 'ok', cost: 0 }))
+    target.pushEvent(PI_AGENT_SETTLED)
+    await pending
+    expect(ctx.addDispatchedCost).not.toHaveBeenCalled()
+  })
+
+  it('turn 2+ converts the CUMULATIVE mapper totalCostUsd into a per-turn delta (result.totalCostUsd is cumulative — same hazard as Claude)', async () => {
+    const recordDispatchedUsage = vi.fn()
+    const target = makeFakePiTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
+      spawnPiTarget: target.spawnPiTarget,
+      recordDispatchedUsage
+    })
+    const ctx = makeCtx({ fromEngine: 'claude' })
+
+    const first = dispatcher.dispatch({ engine: 'pi', prompt: 'one' }, ctx)
+    await tick()
+    target.pushEvent(piAssistantMessageEnd({ text: 'first', cost: 0.02 }))
+    target.pushEvent(PI_AGENT_SETTLED)
+    await first
+
+    const second = dispatcher.dispatch({ engine: 'pi', prompt: 'two', sessionId: 'pi-target-1' }, ctx)
+    await tick()
+    // Mapper state's totalCostUsd is CUMULATIVE (0.02 + 0.03 = 0.05) — the
+    // per-turn delta must be ~0.03, not the raw 0.05.
+    target.pushEvent(piAssistantMessageEnd({ text: 'second', cost: 0.03 }))
+    target.pushEvent(PI_AGENT_SETTLED)
+    await second
+
+    expect(recordDispatchedUsage).toHaveBeenNthCalledWith(1, expect.objectContaining({ costUsd: 0.02 }))
+    expect(recordDispatchedUsage).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ costUsd: expect.closeTo(0.03, 10) })
+    )
+    expect(ctx.addDispatchedCost).toHaveBeenNthCalledWith(1, 'pi', 'openai-codex/gpt-5.6-luna', 0.02)
+    expect(ctx.addDispatchedCost).toHaveBeenNthCalledWith(
+      2,
+      'pi',
+      'openai-codex/gpt-5.6-luna',
+      expect.closeTo(0.03, 10)
+    )
+  })
+
+  it('a throwing recordDispatchedUsage NEVER fails the dispatch', async () => {
+    const recordDispatchedUsage = vi.fn(() => {
+      throw new Error('SQLITE_BUSY: database is locked')
+    })
+    const target = makeFakePiTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
+      spawnPiTarget: target.spawnPiTarget,
+      recordDispatchedUsage
+    })
+    const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, makeCtx({ fromEngine: 'claude' }))
+    await tick()
+    target.pushEvent(piAssistantMessageEnd({ text: 'the successful answer' }))
+    target.pushEvent(PI_AGENT_SETTLED)
+    const result = await pending
+    expect(recordDispatchedUsage).toHaveBeenCalled()
+    expect(result.isError).toBeUndefined()
+  })
+
+  it('a timed-out turn IS recorded (status "failed") with null usage numbers; a stopped turn is NOT recorded', async () => {
+    const recordDispatchedUsage = vi.fn()
+    const target = makeFakePiTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
+      spawnPiTarget: target.spawnPiTarget,
+      recordDispatchedUsage,
+      dispatchTimeoutMs: 30
+    })
+    const result = await dispatcher.dispatch(
+      { engine: 'pi', prompt: 'x' },
+      makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_timeout_record' })
+    )
+    expect(result.isError).toBe(true)
+    expect(recordDispatchedUsage).toHaveBeenCalledWith(
+      expect.objectContaining({ toolUseId: 'toolu_timeout_record', totalTokens: null, costUsd: null })
+    )
+
+    recordDispatchedUsage.mockClear()
+    const target2 = makeFakePiTarget({ sessionId: 'pi-target-2' })
+    const { dispatcher: dispatcher2 } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
+      spawnPiTarget: target2.spawnPiTarget,
+      recordDispatchedUsage
+    })
+    const pending2 = dispatcher2.dispatch(
+      { engine: 'pi', prompt: 'x' },
+      makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_stopped_norecord' })
+    )
+    await tick()
+    expect(dispatcher2.stopDispatch('toolu_stopped_norecord')).toBe(true)
+    await pending2
+    expect(recordDispatchedUsage).not.toHaveBeenCalled()
+  })
+})
+
+describe('CrossEngineDispatcher — pi direction (M4c): cost cap (ADR-033 M4-C)', () => {
+  it('a continuation turn is rejected once cumulative cost meets the cap; target survives; no second prompt is sent', async () => {
+    const target = makeFakePiTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna', maxCostUsd: 0.05 } })),
+      spawnPiTarget: target.spawnPiTarget
+    })
+    const ctx = makeCtx({ fromEngine: 'claude' })
+    const first = dispatcher.dispatch({ engine: 'pi', prompt: 'one' }, ctx)
+    await tick()
+    target.pushEvent(piAssistantMessageEnd({ text: 'first', cost: 0.05 }))
+    target.pushEvent(PI_AGENT_SETTLED)
+    const firstResult = await first
+    expect(firstResult.isError).toBeUndefined()
+
+    const second = await dispatcher.dispatch(
+      { engine: 'pi', prompt: 'two', sessionId: firstResult.sessionId },
+      ctx
+    )
+    expect(second.isError).toBe(true)
+    expect(second.text).toContain('cost cap')
+    expect(second.sessionId).toBe(firstResult.sessionId)
+    expect(
+      target.client.request.mock.calls.filter((c: unknown[]) => (c[0] as { type?: string }).type === 'prompt')
+    ).toHaveLength(1)
+  })
+
+  it('a completing turn that crosses the cap appends the warning note to the returned text', async () => {
+    const target = makeFakePiTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna', maxCostUsd: 0.05 } })),
+      spawnPiTarget: target.spawnPiTarget
+    })
+    const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, makeCtx({ fromEngine: 'claude' }))
+    await tick()
+    target.pushEvent(piAssistantMessageEnd({ text: 'the answer', cost: 0.06 }))
+    target.pushEvent(PI_AGENT_SETTLED)
+    const result = await pending
+    expect(result.isError).toBeUndefined()
+    expect(result.text).toContain('[dispatch cost cap reached')
+  })
+
+  it('no cap configured → unlimited, no note ever appended regardless of cost', async () => {
+    const target = makeFakePiTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
+      spawnPiTarget: target.spawnPiTarget
+    })
+    const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, makeCtx({ fromEngine: 'claude' }))
+    await tick()
+    target.pushEvent(piAssistantMessageEnd({ text: 'the answer', cost: 999 }))
+    target.pushEvent(PI_AGENT_SETTLED)
+    const result = await pending
+    expect(result.isError).toBeUndefined()
+    expect(result.text).not.toContain('cost cap reached')
+  })
+})
+
+describe('CrossEngineDispatcher — pi direction (M4c): disposeFor', () => {
+  it('tears down: client.dispose() + bridgeHost.dispose(); the dead continuation errors; other routings are untouched', async () => {
+    const targetA = makeFakePiTarget({ sessionId: 'pi-sess-A' })
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
+      spawnPiTarget: targetA.spawnPiTarget
+    })
+    const first = dispatcher.dispatch(
+      { engine: 'pi', prompt: 'one' },
+      makeCtx({ fromEngine: 'claude', fromRoutingId: 'routing-A' })
+    )
+    await tick()
+    targetA.pushEvent(piAssistantMessageEnd({ text: 'first' }))
+    targetA.pushEvent(PI_AGENT_SETTLED)
+    await first
+
+    dispatcher.disposeFor('routing-A')
+
+    expect(targetA.client.dispose).toHaveBeenCalled()
+    expect(targetA.bridgeDispose).toHaveBeenCalled()
+
+    const cont = await dispatcher.dispatch(
+      { engine: 'pi', prompt: 'again', sessionId: 'pi-sess-A' },
+      makeCtx({ fromEngine: 'claude', fromRoutingId: 'routing-A' })
+    )
+    expect(cont.isError).toBe(true)
+  })
+
+  it('dismisses pending forwarded approvals for the disposed target', async () => {
+    const target = makeFakePiTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
+      spawnPiTarget: target.spawnPiTarget
+    })
+    const ctx = makeCtx({ fromEngine: 'claude', autonomyMode: 'default', fromRoutingId: 'routing-owner' })
+    const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
+    await tick()
+
+    const decisionPromise = target.gateHandler()({
+      toolCallId: 'pi-call-1',
+      toolName: 'bash',
+      input: { command: 'x' }
+    })
+    await tick()
+    expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:approval-request')).toBe(true)
+
+    dispatcher.disposeFor('routing-owner')
+    const dismiss = ctx.emit.mock.calls.find((c) => c[0] === 'session:approval-dismiss')
+    expect(dismiss).toBeTruthy()
+    expect(await decisionPromise).toEqual({ behavior: 'deny', reason: 'User denied' })
+
+    // Clean up the still-in-flight turn so no heartbeat timer leaks past this test.
+    target.pushEvent(piAssistantMessageEnd({ text: 'done' }))
+    target.pushEvent(PI_AGENT_SETTLED)
+    await pending
+  })
+})
+
+describe('buildPiTargetChildEnv (ADR-033 M4c — recursion guard)', () => {
+  it('NEVER includes CLAUDEUI_PI_HOSTED_TOOLS or CLAUDEUI_PI_DISPATCH_ENABLED — a dispatch target cannot itself register/call dispatch_agent', () => {
+    const env = buildPiTargetChildEnv({ url: 'http://127.0.0.1:54321', token: 'test-token' })
+    expect(env).not.toHaveProperty('CLAUDEUI_PI_HOSTED_TOOLS')
+    expect(env).not.toHaveProperty('CLAUDEUI_PI_DISPATCH_ENABLED')
+    expect(env.CLAUDEUI_PI_BRIDGE_URL).toBe('http://127.0.0.1:54321')
+    expect(env.CLAUDEUI_PI_BRIDGE_TOKEN).toBe('test-token')
+    // Exactly these two keys — nothing else sneaks in either.
+    expect(Object.keys(env).sort()).toEqual(['CLAUDEUI_PI_BRIDGE_TOKEN', 'CLAUDEUI_PI_BRIDGE_URL'])
   })
 })

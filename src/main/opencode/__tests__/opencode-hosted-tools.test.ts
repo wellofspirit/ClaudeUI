@@ -271,6 +271,46 @@ describe('createOpencodeHostedToolsServer — dispatch_agent (ADR-033 M2)', () =
     expect(result.isError).toBe(true)
     expect(result.content[0].text).toBe('something broke')
   })
+
+  // -------------------------------------------------------------------------
+  // ADR-033 M4c — pi as a second dispatch target (engine enum widening)
+  // -------------------------------------------------------------------------
+
+  it("the engine param's schema accepts 'pi' and rejects an unlisted engine value", () => {
+    const def = getDispatchToolDef(tmp)
+    const engineSchema = (def.inputSchema.shape as unknown as Record<string, { safeParse: (v: unknown) => { success: boolean } }>).engine
+    expect(engineSchema.safeParse('pi').success).toBe(true)
+    expect(engineSchema.safeParse('claude').success).toBe(true)
+    expect(engineSchema.safeParse('opencode').success).toBe(false)
+  })
+
+  it("accepts engine: 'pi' and delegates to the dispatcher (ADR-033 M4c)", async () => {
+    const emit = vi.fn()
+    const addDispatchedCost = vi.fn()
+    const dispatch = vi.fn<DispatchAgentFn>(async () => ({ text: 'pi says hi', sessionId: 'pi-sess-1' }))
+    const tool = getDispatchTool(tmp, {
+      lookupCallerSession: () => ({ cwd: '/proj', autonomyMode: 'default', emit, addDispatchedCost }),
+      dispatch
+    })
+    const result = (await tool.handler(
+      {
+        engine: 'pi',
+        prompt: 'do a thing',
+        model: 'openai-codex/gpt-5.6-luna',
+        __xeng_caller_session: 'ses_caller',
+        __xeng_call_id: 'call_99'
+      },
+      makeExtra()
+    )) as { content: Array<{ type: string; text: string }>; isError?: boolean }
+
+    expect(dispatch).toHaveBeenCalledWith(
+      { engine: 'pi', prompt: 'do a thing', model: 'openai-codex/gpt-5.6-luna', sessionId: undefined },
+      expect.objectContaining({ fromEngine: 'opencode', fromRoutingId: 'ses_caller', toolUseId: 'call_99' })
+    )
+    expect(result.isError).toBeUndefined()
+    expect(result.content[0].text).toContain('pi says hi')
+    expect(result.content[0].text).toContain('session_id: pi-sess-1')
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -314,5 +354,26 @@ describe('createOpencodeHostedToolsServer — dispatch_agent model hint (ADR-033
     expect(def.description).toContain('haiku')
     expect(def.description).toContain('No default is configured')
     expect(def.inputSchema.shape.model.description).toContain('alias')
+  })
+
+  it('bakes an independent pi model hint alongside the Claude one (ADR-033 M4c)', () => {
+    // First call is the Claude hint (loadEngineConfig('claude')), second is
+    // pi's (loadEngineConfig('pi')) — see createOpencodeHostedToolsServer's
+    // call order.
+    vi.mocked(loadEngineConfig)
+      .mockReturnValueOnce({ dispatch: { allowedModels: ['sonnet', 'haiku'], defaultModel: 'sonnet' } })
+      .mockReturnValueOnce({
+        dispatch: { allowedModels: ['openai-codex/gpt-5.6-luna'], defaultModel: 'openai-codex/gpt-5.6-luna' }
+      })
+    const def = getDispatchToolDef(tmp)
+    expect(def.description).toContain('sonnet') // Claude hint survives
+    expect(def.description).toContain('openai-codex/gpt-5.6-luna') // pi hint present too
+    expect(def.inputSchema.shape.model.description).toContain('openai-codex/gpt-5.6-luna')
+  })
+
+  it('falls back to the generic pi "provider/modelId" hint when pi has nothing configured', () => {
+    vi.mocked(loadEngineConfig).mockReturnValue({})
+    const def = getDispatchToolDef(tmp)
+    expect(def.description).toContain('provider/modelId')
   })
 })

@@ -270,7 +270,14 @@ export function decide(
 // Rule loading
 // ---------------------------------------------------------------------------
 
-const EMPTY_RULES: MergedClaudeRules = {
+/**
+ * Exported (ADR-033 M4c): a pi cross-engine dispatch TARGET's gate uses this
+ * verbatim as its `decide()` rules — a dispatched target should not inherit
+ * the user's interactive-session Claude permission rules (only the target's
+ * fixed autonomy mode governs it). See cross-engine-dispatcher.ts's
+ * `gatePiTargetToolCall`.
+ */
+export const EMPTY_RULES: MergedClaudeRules = {
   allow: [],
   deny: [],
   ask: [],

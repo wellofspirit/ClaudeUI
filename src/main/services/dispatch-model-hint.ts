@@ -58,6 +58,16 @@ function genericHint(targetEngine: EngineId): { long: string; short: string } {
       short: 'Use "providerID/modelID" format (e.g. "opencode/nemotron-3-ultra-free").'
     }
   }
+  // ADR-033 M4c: pi's picker-value convention mirrors opencode's exactly
+  // (engine-meta.ts's PI_META — "<provider>/<modelId>", e.g. its hardcoded
+  // fallback PI_DEFAULT_MODEL) — a DISTINCT case from 'claude' below, not the
+  // same generic Claude-alias phrasing (pi has no "sonnet"/"haiku" aliases).
+  if (targetEngine === 'pi') {
+    return {
+      long: 'Models use the "provider/modelId" format (e.g. "openai-codex/gpt-5.6-luna").',
+      short: 'Use "provider/modelId" format (e.g. "openai-codex/gpt-5.6-luna").'
+    }
+  }
   return {
     long: 'Claude model aliases, e.g. "sonnet", "haiku", "opus".',
     short: 'A Claude alias, e.g. "sonnet", "haiku", "opus".'

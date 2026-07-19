@@ -43,6 +43,15 @@ export function createCollabServer(ctx: CollabServerContext): SdkMcpServer {
     defaultModel: dispatchCfg?.defaultModel,
     knownModelIds
   })
+  // pi (ADR-033 M4c) — a SECOND, independent model-hint snapshot, since one
+  // tool registration now spans two possible target engines with unrelated
+  // model-id formats/allowlists. Same snapshot-at-spawn caveat as above.
+  const piDispatchCfg = loadEngineConfig('pi').dispatch
+  const piModelHint = describeDispatchModels({
+    targetEngine: 'pi',
+    allowedModels: piDispatchCfg?.allowedModels,
+    defaultModel: piDispatchCfg?.defaultModel
+  })
 
   return createSdkMcpServer({
     name: 'claude-ui-collab',
@@ -51,23 +60,25 @@ export function createCollabServer(ctx: CollabServerContext): SdkMcpServer {
       tool(
         'dispatch_agent',
         'Delegate a task to an agent running on a DIFFERENT engine — opencode (fronts ' +
-          'non-Anthropic model vendors, e.g. GPT or Gemini models). The agent runs headless in ' +
-          'the same working directory and its final answer is returned as this tool result. ' +
-          'The result includes a session_id — pass it back as `session_id` to continue the same ' +
-          'agent with its context intact (multi-turn collaboration). The available model list is ' +
-          `user-configured; omit \`model\` to use the configured default. ${modelHint.long}`,
+          'non-Anthropic model vendors, e.g. GPT or Gemini models) or pi (an alternative coding-agent ' +
+          'harness). The agent runs headless in the same working directory and its final answer is ' +
+          'returned as this tool result. The result includes a session_id — pass it back as ' +
+          '`session_id` to continue the same agent with its context intact (multi-turn collaboration). ' +
+          'The available model list is user-configured per target engine; omit `model` to use that ' +
+          `engine's configured default. For opencode: ${modelHint.long} For pi: ${piModelHint.long}`,
         {
-          // Only 'opencode' is listed: dispatching to 'claude' from a Claude
-          // session is same-engine and already guard-rejected by the
-          // dispatcher — listing it here would be misleading (ADR-033 M2).
-          engine: z.enum(['opencode']).describe('Target engine to dispatch to'),
+          // 'opencode' and 'pi' (ADR-033 M4c) are listed: dispatching to
+          // 'claude' from a Claude session is same-engine and already
+          // guard-rejected by the dispatcher — listing it here would be
+          // misleading (ADR-033 M2).
+          engine: z.enum(['opencode', 'pi']).describe('Target engine to dispatch to'),
           prompt: z.string().describe('Task for the dispatched agent'),
           model: z
             .string()
             .optional()
             .describe(
-              'Target model as "providerID/modelID" (must be user-allowed). Omit for the configured default. ' +
-                modelHint.short
+              'Target model id (format depends on the target engine — must be user-allowed). Omit for ' +
+                `that engine's configured default. For opencode: ${modelHint.short} For pi: ${piModelHint.short}`
             ),
           session_id: z
             .string()

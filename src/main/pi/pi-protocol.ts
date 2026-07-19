@@ -81,6 +81,18 @@ export interface PiGetSessionStatsData {
   // contextUsage intentionally omitted — unused in M1
 }
 
+/**
+ * `get_last_assistant_text` (ADR-033 M4c — the cross-engine dispatch TARGET's
+ * simplest reliable way to get a turn's final text, vs. accumulating `message`
+ * MapperOutputs across the turn). Doc says `{"text": null}` when no assistant
+ * messages exist yet; VERIFIED DOC DRIFT (M4c probe against v0.80.10): the
+ * real response is `data: {}` (the `text` key is entirely ABSENT, not `null`)
+ * in that case — callers must read `data?.text` defensively either way.
+ */
+export interface PiGetLastAssistantTextData {
+  text?: string | null
+}
+
 // ---------------------------------------------------------------------------
 // get_commands (rpc.md "get_commands" — M2b)
 // ---------------------------------------------------------------------------
