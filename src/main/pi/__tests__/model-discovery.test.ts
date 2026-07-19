@@ -92,7 +92,10 @@ describe('discoverPiModels', () => {
         vendorId: 'openai-codex',
         vision: true,
         toolCalling: true,
-        supportsEffort: false,
+        // CATALOG's gpt-5.6-luna carries reasoning:true — M2b flips
+        // supportsEffort/supportedEffortLevels per-model from that fact.
+        supportsEffort: true,
+        supportedEffortLevels: ['low', 'medium', 'high'],
         supportsAdaptiveThinking: false
       }
     ])
@@ -106,22 +109,53 @@ describe('discoverPiModels', () => {
     })
   })
 
-  it('every ModelInfo explicitly suppresses the Claude reasoning-picker heuristics (supportsEffort/supportsAdaptiveThinking false)', async () => {
-    // Guard for the real-app bug where a pi session showed Claude's
-    // Adaptive/High pickers: InputBox derives them via
-    // claudeModelCapabilities(selectedModel), whose id heuristics treat
-    // unknown model families as "assume modern". The explicit false flags
-    // (opencode-discovery precedent) are what keep them hidden.
+  it('every ModelInfo explicitly suppresses the Claude Adaptive-thinking heuristic (supportsAdaptiveThinking false), regardless of reasoning', async () => {
+    // Guard for the real-app bug where a pi session showed Claude's Adaptive
+    // picker: InputBox derives it via claudeModelCapabilities(selectedModel),
+    // whose id heuristics treat unknown model families as "assume modern".
+    // The explicit false flag (opencode-discovery precedent) is what keeps it
+    // hidden — UNCONDITIONALLY, even for reasoning:true models (M2b: those
+    // get an per-model EFFORT picker instead, never an Adaptive/thinking-mode
+    // one — pi has no thinking-MODE axis at all, only a level dial).
     mockRequest.mockResolvedValue({ success: true, data: { models: CATALOG } })
     const { discoverPiModels } = await importFresh()
     const groups = await discoverPiModels()
     expect(groups.length).toBeGreaterThan(0)
     for (const group of groups) {
       for (const model of group.models) {
-        expect(model.supportsEffort).toBe(false)
         expect(model.supportsAdaptiveThinking).toBe(false)
       }
     }
+  })
+
+  it('reasoning:true models get supportsEffort:true + the conservative low/medium/high levels; reasoning:false models keep supportsEffort:false (M2b)', async () => {
+    const mixedCatalog = [
+      ...CATALOG,
+      {
+        id: 'gpt-5-mini',
+        name: 'GPT-5 Mini',
+        api: 'openai-responses',
+        provider: 'openai-codex',
+        baseUrl: 'https://api.openai.com',
+        reasoning: false,
+        input: ['text'],
+        contextWindow: 128_000,
+        maxTokens: 16384,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+      }
+    ]
+    mockRequest.mockResolvedValue({ success: true, data: { models: mixedCatalog } })
+    const { discoverPiModels } = await importFresh()
+    const groups = await discoverPiModels()
+    const codex = groups.find((g) => g.vendorId === 'openai-codex')!
+
+    const luna = codex.models.find((m) => m.value === 'openai-codex/gpt-5.6-luna')!
+    expect(luna.supportsEffort).toBe(true)
+    expect(luna.supportedEffortLevels).toEqual(['low', 'medium', 'high'])
+
+    const mini = codex.models.find((m) => m.value === 'openai-codex/gpt-5-mini')!
+    expect(mini.supportsEffort).toBe(false)
+    expect(mini.supportedEffortLevels).toBeUndefined()
   })
 
   it('spawns with --mode rpc --no-session, cwd os.homedir()', async () => {

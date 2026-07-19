@@ -113,7 +113,14 @@ const PI_META: EngineMeta = {
       ? piModel(value.slice(0, slash), value.slice(slash + 1))
       : piModel('openai-codex', value)
   },
-  seedCapabilities: (_modelValue, modelInfo) => resolvePiCapabilitiesFromModel(modelInfo)
+  // ModelInfo has no `reasoning` field of its own — derive it from
+  // supportsEffort (the flag model-discovery.ts sets from the catalog's
+  // `reasoning: boolean` fact per model, M2b) so seeded capabilities agree
+  // with the effort picker the SAME ModelInfo drives in the renderer.
+  seedCapabilities: (_modelValue, modelInfo) =>
+    resolvePiCapabilitiesFromModel(
+      modelInfo ? { ...modelInfo, reasoning: modelInfo.supportsEffort } : undefined
+    )
 }
 
 /**

@@ -12,7 +12,7 @@
  * drift" section):
  *   1. AssistantMessage.usage additionally carries `reasoning` + `totalTokens`.
  *   2. get_commands entries carry `sourceInfo` rather than flat path/location
- *      (irrelevant here — M1 doesn't wire get_commands).
+ *      (see `PiCommandSourceInfo` below — wired in M2b).
  *   3. get_state with no configured model returns a placeholder Model object
  *      (`id/name/api/provider === "unknown"`), never `null`.
  */
@@ -79,6 +79,32 @@ export interface PiGetSessionStatsData {
   cost: number
   tokens: { input: number; output: number; cacheRead: number; cacheWrite: number; total: number }
   // contextUsage intentionally omitted — unused in M1
+}
+
+// ---------------------------------------------------------------------------
+// get_commands (rpc.md "get_commands" — M2b)
+// ---------------------------------------------------------------------------
+
+/**
+ * Verified doc drift (docs/protocol-pi/README.md "Verified doc drift" #2):
+ * entries carry `sourceInfo`, NOT the documented flat `path`/`location` fields.
+ */
+export interface PiCommandSourceInfo {
+  path?: string
+  source?: string
+  scope?: string
+  origin?: string
+}
+
+export interface PiCommandEntry {
+  name: string
+  description?: string
+  source: 'extension' | 'prompt' | 'skill'
+  sourceInfo?: PiCommandSourceInfo
+}
+
+export interface PiGetCommandsData {
+  commands: PiCommandEntry[]
 }
 
 // ---------------------------------------------------------------------------
@@ -162,6 +188,18 @@ export interface PiToolResultMessage {
   timestamp: number
 }
 
+/**
+ * `tool_execution_update.partialResult` shape (rpc.md "tool_execution_start /
+ * tool_execution_update / tool_execution_end", verified) — the SAME
+ * `{content, details}` shape a `PiToolResultMessage` carries, but ACCUMULATED
+ * (replace-not-append) rather than final. `details` is loosely typed (only
+ * `truncation`/`fullOutputPath` are documented; unconsumed in M2b).
+ */
+export interface PiToolExecutionPartialResult {
+  content: Array<PiTextContent | PiImageContent>
+  details?: { truncation?: unknown; fullOutputPath?: string | null; [key: string]: unknown }
+}
+
 export interface PiBashExecutionMessage {
   role: 'bashExecution'
   command: string
@@ -233,7 +271,7 @@ export type PiEvent =
       toolCallId: string
       toolName: string
       args: Record<string, unknown>
-      partialResult: unknown
+      partialResult: PiToolExecutionPartialResult
     }
   | { type: 'tool_execution_end'; toolCallId: string; toolName: string; result: unknown; isError: boolean }
   | { type: 'queue_update'; steering: string[]; followUp: string[] }

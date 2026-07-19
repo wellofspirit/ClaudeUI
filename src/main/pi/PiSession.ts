@@ -20,7 +20,7 @@ import { locatePiBinary } from './pi-locate'
 import { PiRpcClient } from './PiRpcClient'
 import { mapPiEvent, createPiMapperState } from './event-mapper'
 import type { PiMapperOutput, PiMapperState } from './event-mapper'
-import type { PiGetSessionStatsData, PiGetStateData, PiRpcCommand } from './pi-protocol'
+import type { PiGetCommandsData, PiGetSessionStatsData, PiGetStateData, PiRpcCommand } from './pi-protocol'
 import { getPiModelCatalog } from './model-discovery'
 import { findPiSessionFile, loadPiSessionHistory } from '../services/pi-session-list'
 import { recordUsageEvent } from '../services/usage-recorder'
@@ -37,6 +37,11 @@ import {
 import type { MergedClaudeRules } from './permission-engine'
 import { loadClaudePermissions, saveClaudePermissions } from '../services/claude-settings'
 import { suggestionDestinationToScope, suggestionRuleToClaudeString } from '../opencode/permission-compiler'
+// Reused AS-IS (not copied/forked — ADR-026 additive-only on shared seams):
+// pure key/value dedup+throttle gate, no opencode-specific assumption baked
+// in (verified — takes a caller-supplied emit callback and ambient
+// setTimeout/clearTimeout only).
+import { BashStreamGate } from '../opencode/bash-stream-gate'
 
 /**
  * PiSession — engine-neutral session backend for the pi coding agent.
@@ -57,8 +62,12 @@ import { suggestionDestinationToScope, suggestionRuleToClaudeString } from '../o
  * `gateToolCall`, which runs the pure PiPermissionEngine (permission-engine.ts)
  * against the live autonomy mode + the user's merged Claude permission rules
  * and either answers immediately (allow/deny) or surfaces a
- * `session:approval-request` and awaits the human via `resolveApproval` — see
- * PI_ENGINE_CAPABILITIES' doc comment for the full per-flag flip plan.
+ * `session:approval-request` and awaits the human via `resolveApproval`. M2b
+ * ADDS interaction parity: mid-turn `steer` (not just queued follow-up),
+ * spawn-time + live effort (`set_thinking_level`), slash-command/skill
+ * discovery (`get_commands`), and live bash output streaming
+ * (`tool_execution_update` → BashStreamGate, imported as-is from opencode) —
+ * see PI_ENGINE_CAPABILITIES' doc comment for the full per-flag flip plan.
  */
 export class PiSession extends BaseSession {
   readonly engineId = 'pi' as const
@@ -88,8 +97,41 @@ export class PiSession extends BaseSession {
    *  `requestedModel` triggers a `set_model` RPC call at spawn; see doStart()'s
    *  doc comment for why. */
   private requestedModel: string | undefined
+  /** The effort an explicit request actually carried (EngineSpawnOptions.effort,
+   *  or a pre-spawn setEffort() — undefined when neither happened). Mirrors
+   *  `requestedModel`'s exact pattern: only a present value triggers a
+   *  `set_thinking_level` RPC call, applied in doStart() (spawn-time) or
+   *  immediately (live setEffort() with a running client). */
+  private requestedEffort: string | undefined
   private permissionMode: string
   private resumeSessionId: string | undefined
+
+  // ── Slash commands + skills (M2b) ────────────────────────────────────────────
+  /** Command names discovered via `get_commands` (doStart(), once per spawn),
+   *  RAW as pi reports them (e.g. 'skill:brave-search' — NOT '/'-prefixed, NOT
+   *  skill:-stripped; those transforms happen only in the session:slash-commands
+   *  / session:skills emissions below). UNLIKE OpencodeSession's
+   *  identically-named field, pi needs NO routing off this set: pi's own
+   *  `prompt` command expands `/skill:name`/`/template` and executes extension
+   *  commands directly, server-side (verified — docs/protocol-pi/README.md
+   *  "Extensions") — so run(prompt) already forwards every prompt, slash-prefixed
+   *  or not, verbatim. Kept for parity/future use. */
+  private knownCommandNames = new Set<string>()
+
+  // ── Live bash output streaming (M2b) ─────────────────────────────────────────
+  /** Reused AS-IS from opencode (src/main/opencode/bash-stream-gate.ts) — pure
+   *  dedup + trailing-edge throttle, no opencode-specific assumption. Dedups
+   *  unchanged cumulative `tool_execution_update` snapshots and throttles
+   *  emissions to ~100ms per toolUseId. Cancelled per-toolUseId on the
+   *  matching tool_result, and entirely on cancel()/dispose()/an unexpected exit. */
+  private bashStreamGate = new BashStreamGate((toolUseId, output) => {
+    this.send('session:bash-output', {
+      toolUseId,
+      output,
+      totalLines: output.split('\n').length,
+      totalBytes: Buffer.byteLength(output, 'utf-8')
+    })
+  })
 
   // ── Approval bridge (M2a) ────────────────────────────────────────────────────
   /** Per-session loopback HTTP host the bridge extension calls into. Started in doStart(); disposed in cancel()/dispose() and on an unexpected exit. */
@@ -120,9 +162,11 @@ export class PiSession extends BaseSession {
 
   constructor(routingId: string, win: BrowserWindow, cwd: string, opts: EngineSpawnOptions = {}) {
     super(routingId, win, cwd)
-    // effort/sandboxConfig/thinkingMode/resumeSessionAt/forkSession are intentionally
+    // sandboxConfig/thinkingMode/resumeSessionAt/forkSession are intentionally
     // unread — Claude-only options per EngineSpawnOptions' docs / ADR-030.
+    // `effort` IS consumed (M2b) — see doStart()'s spawn-time effort application.
     this.requestedModel = opts.model
+    this.requestedEffort = opts.effort
     this._model = opts.model ?? PI_DEFAULT_MODEL
     this.permissionMode = opts.permissionMode ?? 'default'
     this.resumeSessionId = opts.resumeSessionId || undefined
@@ -191,8 +235,10 @@ export class PiSession extends BaseSession {
   }
 
   /** Resolve ResolvedCapabilities for a model VALUE from the discovery catalog
-   *  (contextWindow/maxOutput/vision) — falls back to piModelCapabilities'
-   *  bare defaults if the catalog is unavailable or has no matching entry. */
+   *  (contextWindow/maxOutput/vision/reasoning) — falls back to
+   *  piModelCapabilities' bare defaults if the catalog is unavailable or has
+   *  no matching entry. `reasoning` (M2b) drives the effort picker: true only
+   *  when the CATALOG says this specific model accepts `set_thinking_level`. */
   private async resolveCapsForModel(modelValue: string): Promise<ResolvedCapabilities> {
     try {
       const ref = engineMeta('pi').decodeModelValue(modelValue)
@@ -200,7 +246,12 @@ export class PiSession extends BaseSession {
       const match = catalog.find((m) => m.provider === ref.vendorId && m.id === ref.modelId)
       return resolvePiCapabilities(
         match
-          ? { vision: match.input.includes('image'), contextWindow: match.contextWindow, maxOutput: match.maxTokens }
+          ? {
+              vision: match.input.includes('image'),
+              contextWindow: match.contextWindow,
+              maxOutput: match.maxTokens,
+              reasoning: match.reasoning
+            }
           : undefined
       )
     } catch {
@@ -316,6 +367,9 @@ export class PiSession extends BaseSession {
         this.bridgeHost.dispose()
         this.bridgeHost = null
       }
+      // Nothing left to flush to once the process is gone — a firing timer
+      // after this would send() to a session whose engine is disconnected.
+      this.bashStreamGate.cancelAll()
       // Allow a later run() to respawn instead of being wedged forever.
       this.startedPromise = null
       this.sendStatus()
@@ -369,6 +423,66 @@ export class PiSession extends BaseSession {
         const adopted = await this.adoptEngineModel()
         if (adopted) this.sendStatus()
       }
+    }
+
+    // Spawn-time effort (M2b): apply EngineSpawnOptions.effort (or a
+    // setEffort() call that arrived before this spawn finished) once the
+    // model this session actually ended up running with is known. Re-resolve
+    // caps for `this._model` RIGHT NOW rather than trusting `this._capabilities`
+    // — the constructor's OWN resolveCapsForModel().then() runs concurrently
+    // with this whole doStart() and may not have landed yet, and the
+    // `requestedModel` branch above never re-resolves caps on a SUCCESSFUL
+    // set_model (only the "adopt" fallback does), so `this._capabilities`
+    // can still be stale for the just-applied model at this exact point.
+    if (this.requestedEffort) {
+      const effort = this.requestedEffort
+      this._capabilities = await this.resolveCapsForModel(this._model).catch(() => this._capabilities)
+      this.sendStatus()
+      if (this._capabilities.reasoning.effort != null) {
+        this.setEffort(effort)
+      }
+    }
+
+    // Slash commands + skills (M2b): get_commands lists extension commands,
+    // prompt templates, and skill:* entries (vendor/pi-cli/docs/rpc.md
+    // "get_commands"). Once per spawn, best-effort — a failure here must
+    // never block the session (discovery is optional, mirrors
+    // OpencodeSession.eagerConnect's identical treatment of
+    // listCommands/listSkills).
+    try {
+      const resp = await client.request<PiGetCommandsData>({ type: 'get_commands' })
+      if (resp.success && resp.data) {
+        // sourceInfo.scope === 'temporary' entries are per-spawn extension
+        // artifacts (verified doc drift — docs/protocol-pi/README.md
+        // "Extensions": a `-e <file.ts>` extension "appears in get_commands
+        // with sourceInfo.scope: 'temporary'"). Our OWN bridge extension
+        // (pi-bridge-source.ts) registers no commands today, so none of
+        // these are ours in practice — filtered defensively anyway, so a
+        // future bridge change (or another -e extension) never leaks a
+        // ClaudeUI-internal or otherwise-ephemeral artifact into the
+        // user-facing slash menu.
+        const persistent = resp.data.commands.filter((c) => c.sourceInfo?.scope !== 'temporary')
+
+        this.knownCommandNames = new Set(persistent.map((c) => c.name))
+        logger.debug('PiSession', `get_commands discovered ${this.knownCommandNames.size} command(s)`)
+
+        // EXACT contract as OpencodeSession.eagerConnect (names get the '/'
+        // prefix; renderer slash menu is engine-neutral).
+        const slashCommands = persistent.map((c) => ({ name: '/' + c.name, description: c.description }))
+        this.send('session:slash-commands', slashCommands)
+
+        // session:skills — name list only, `skill:` prefix stripped (same
+        // bare-name contract as OpencodeSession.eagerConnect's skillNames).
+        const skillNames = persistent
+          .filter((c) => c.source === 'skill')
+          .map((c) => c.name.replace(/^skill:/, ''))
+        this.send('session:skills', skillNames)
+      }
+    } catch (err) {
+      logger.warn(
+        'PiSession',
+        `get_commands failed (best-effort, discovery is optional): ${err instanceof Error ? err.message : String(err)}`
+      )
     }
 
     if (this.resumeSessionId) {
@@ -507,10 +621,12 @@ export class PiSession extends BaseSession {
     const command: PiRpcCommand = { type: 'prompt', message: prompt }
     if (images.length > 0) command.images = images
     // A prompt sent while already streaming REQUIRES streamingBehavior or pi
-    // rejects it (verified — README.md "Commands"). 'followUp' (queued until
-    // the current run settles), not 'steer' (mid-turn injection) — see
-    // PI_ENGINE_CAPABILITIES' doc comment for why M1 chose follow-up semantics.
-    if (wasBusy) command.streamingBehavior = 'followUp'
+    // rejects it (verified — README.md "Commands"). 'steer' (M2b — Claude
+    // parity): delivered after the CURRENT tool calls finish, before the next
+    // LLM call within the SAME turn (verified), not 'followUp' (queued until
+    // the whole run settles) — see PI_ENGINE_CAPABILITIES' doc comment for why
+    // `queue` stays true alongside `steer`.
+    if (wasBusy) command.streamingBehavior = 'steer'
 
     if (!wasBusy) this.mapperState.startTimeMs = Date.now()
     this.isProcessing = true
@@ -555,12 +671,27 @@ export class PiSession extends BaseSession {
       }
 
       case 'tool_result':
+        // Live bash output streaming (M2b): drop this toolUseId's throttle
+        // tracking now that the final result is in — a no-op for any
+        // non-bash / never-streamed toolUseId (BashStreamGate.cancel on an
+        // absent key is a harmless no-op).
+        this.bashStreamGate.cancel(output.toolUseId)
         this.send('session:tool-result', {
           toolUseId: output.toolUseId,
           result: output.result,
           isError: output.isError,
           ...(output.fileDiffs ? { fileDiffs: output.fileDiffs } : {})
         })
+        break
+
+      case 'bash_output':
+        // Mirrors OpencodeSession's own call-site guard (event-mapper.ts
+        // always emits this kind for a bash tool_execution_update — even one
+        // with empty accumulated text — so the length check belongs here,
+        // not in the pure mapper).
+        if (output.output.length > 0) {
+          this.bashStreamGate.update(output.toolUseId, output.output)
+        }
         break
 
       case 'usage':
@@ -644,6 +775,10 @@ export class PiSession extends BaseSession {
       this.bridgeHost.dispose()
       this.bridgeHost = null
     }
+    // Drop all pending bash-output throttle timers — nothing left to flush to
+    // once the session is torn down (mirrors OpencodeSession.cancel()'s
+    // identical call).
+    this.bashStreamGate.cancelAll()
     this.startedPromise = null
     this.sendStatus()
   }
@@ -840,6 +975,39 @@ export class PiSession extends BaseSession {
     this._capabilities = await this.resolveCapsForModel(this._model).catch(() => this._capabilities)
     this.sendStatus()
     this.sendStatusLine()
+  }
+
+  /**
+   * ISession.setEffort (M2b) — sends `set_thinking_level {level: effort}`.
+   * Void, not async (ISession's optional-member contract): callers
+   * (handlers-core.ts's setEffort) invoke this WITHOUT awaiting, so the RPC
+   * round-trip below is genuinely fire-and-forget from the caller's
+   * perspective — both failure paths (success:false AND a thrown/rejected
+   * request) are caught and reported internally, mirroring setModel's
+   * session:error failure shape, so neither becomes an unhandled rejection.
+   */
+  setEffort(effort: string): void {
+    if (!this.client) {
+      // Pre-spawn: record for application in doStart() (mirrors setModel's
+      // identical pre-spawn branch) — the eventual doStart() applies the
+      // user's LATEST choice, not a stale constructor value.
+      this.requestedEffort = effort
+      return
+    }
+    this.client
+      .request({ type: 'set_thinking_level', level: effort })
+      .then((resp) => {
+        if (!resp.success) {
+          this.send('session:error', resp.error ?? `Failed to set thinking level "${effort}"`)
+        }
+      })
+      .catch((err) => {
+        logger.warn(
+          'PiSession',
+          `setEffort(set_thinking_level) failed: ${err instanceof Error ? err.message : String(err)}`
+        )
+        this.send('session:error', err instanceof Error ? err.message : String(err))
+      })
   }
 
   async setPermissionMode(mode: string): Promise<void> {

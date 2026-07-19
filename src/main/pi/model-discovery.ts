@@ -94,15 +94,23 @@ export async function discoverPiModels(): Promise<EngineModelGroup[]> {
       vendorId: m.provider,
       vision: m.input.includes('image'),
       toolCalling: true,
-      // Explicitly suppress Claude's reasoning pickers: InputBox derives its
-      // thinking/effort controls via claudeModelCapabilities(selectedModel),
-      // whose id heuristics treat an unknown model family (any pi value, e.g.
-      // 'openai-codex/gpt-5.6-luna') as "assume modern" — which would paint
-      // Claude's Adaptive/High pickers on a pi session. Same explicit
-      // suppression as opencode's discovery (src/main/opencode/
-      // model-discovery.ts). A native pi thinking-level control (pi's
-      // set_thinking_level, an off…max session dial) is M2/M3 scope.
-      supportsEffort: false,
+      // Explicit capability flags are the mechanism that keeps Claude's
+      // id-heuristic pickers (claudeModelCapabilities' "unknown family =>
+      // assume modern" fallback) from painting the WRONG control on a pi
+      // session — same explicit-flag mechanism as opencode's discovery
+      // (src/main/opencode/model-discovery.ts). supportsAdaptiveThinking is
+      // unconditionally false: pi has no thinking-MODE axis (only a
+      // session-wide off…max level dial, set_thinking_level), so the
+      // Adaptive/Enabled/Disabled picker never applies to ANY pi model.
+      // supportsEffort DOES flip per-model (M2b): pi's catalog reports
+      // `reasoning: boolean` per model; true models get the conservative
+      // low/medium/high tier set (xhigh/max are model-dependent and the
+      // catalog doesn't say which — a wrong guess would surface as an error
+      // toast on every switch). M3: probe xhigh/max support.
+      supportsEffort: m.reasoning,
+      ...(m.reasoning
+        ? { supportedEffortLevels: ['low', 'medium', 'high'] as Array<'low' | 'medium' | 'high'> }
+        : {}),
       supportsAdaptiveThinking: false
     })
     byProvider.set(m.provider, list)

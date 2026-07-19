@@ -172,6 +172,23 @@ describe.skipIf(SKIP)('pi RPC smoke', () => {
     expect(found?.source).toBe('extension')
   })
 
+  it.skipIf(BINARY_MISSING)(
+    'set_thinking_level responds with a well-formed envelope, no model configured (M2b)',
+    async () => {
+      // No credentials in this probe's isolated tmpDir — pi has no model to
+      // apply a thinking level TO. We deliberately assert only shape here
+      // (success is a boolean, no crash/hang) and document what's actually
+      // observed rather than assume success or failure.
+      const resp = await sendCommand({ type: 'set_thinking_level', level: 'low' })
+      expect(resp.type).toBe('response')
+      expect(resp.command).toBe('set_thinking_level')
+      expect(typeof resp.success).toBe('boolean')
+      if (!resp.success) {
+        expect(typeof resp.error === 'string' || resp.error === undefined).toBe(true)
+      }
+    }
+  )
+
   it.skipIf(BINARY_MISSING)('stdout purity: every line emitted across the whole exchange parses as JSON', () => {
     expect(allLines.length).toBeGreaterThan(0)
     for (const line of allLines) {

@@ -13,7 +13,7 @@
  */
 import { v4 as uuid } from 'uuid'
 import type { ChatMessage, ContentBlock, FileDiff } from '../../shared/types'
-import type { PiAssistantContentBlock, PiEvent } from './pi-protocol'
+import type { PiAssistantContentBlock, PiEvent, PiToolExecutionPartialResult } from './pi-protocol'
 
 // ---------------------------------------------------------------------------
 // Caller-owned state
@@ -62,6 +62,7 @@ export type PiMapperOutput =
   | { kind: 'usage'; provider: string; modelId: string; tokens: PiUsageTokens; costUsd: number; messageId: string }
   | { kind: 'result'; totalCostUsd: number; durationMs: number; sessionId: string | null }
   | { kind: 'error'; message: string }
+  | { kind: 'bash_output'; toolUseId: string; output: string }
   | { kind: 'ignore' }
 
 // ---------------------------------------------------------------------------
@@ -205,9 +206,28 @@ export function mapPiEvent(ev: PiEvent, state: PiMapperState): PiMapperOutput[] 
       return [{ kind: 'error', message: error }]
     }
 
-    // agent_start/agent_end, turn_start/turn_end, tool_execution_* (live tool
-    // output streaming is M2), queue_update, compaction_start, auto_retry_*,
-    // extension_ui_request (M2), and any unrecognised future event type.
+    case 'tool_execution_update': {
+      // Live bash output streaming (M2b) — mirrors opencode's live tool
+      // output pattern (src/main/opencode/event-mapper.ts's own
+      // state.metadata.output handling): only the `bash` tool republishes a
+      // meaningful ACCUMULATED text preview here; every other tool's
+      // partialResult (or one carrying no text content) is not surfaced in
+      // M2b. Caller (PiSession) decides whether/how to throttle via
+      // BashStreamGate — this mapper only extracts the text, unconditionally.
+      const { toolCallId, toolName, partialResult } = ev as Extract<
+        PiEvent,
+        { type: 'tool_execution_update' }
+      >
+      if (toolName !== 'bash') return [{ kind: 'ignore' }]
+      return [{ kind: 'bash_output', toolUseId: toolCallId, output: extractPartialResultText(partialResult) }]
+    }
+
+    // agent_start/agent_end, turn_start/turn_end, tool_execution_start/end
+    // (start carries nothing new — the arguments are already in the
+    // toolcall_end message_update above; end is fully covered by the
+    // following toolResult message_end), queue_update, compaction_start,
+    // auto_retry_*, extension_ui_request (M2), and any unrecognised future
+    // event type.
     default:
       return [{ kind: 'ignore' }]
   }
@@ -223,6 +243,20 @@ export function mapPiEvent(ev: PiEvent, state: PiMapperState): PiMapperOutput[] 
 function ensureMessageId(state: PiMapperState): string {
   if (!state.currentMessageId) state.currentMessageId = uuid()
   return state.currentMessageId
+}
+
+/**
+ * Join the text blocks of a `tool_execution_update.partialResult` (the same
+ * `{content: [{type,text}]}` shape as a toolResult message's content — see
+ * the toolResult branch of `message_end` above). Non-text blocks (images) are
+ * dropped; a malformed/empty shape yields ''.
+ */
+function extractPartialResultText(partialResult: PiToolExecutionPartialResult): string {
+  if (!partialResult || !Array.isArray(partialResult.content)) return ''
+  return partialResult.content
+    .filter((b): b is Extract<typeof b, { type: 'text' }> => b.type === 'text')
+    .map((b) => b.text)
+    .join('')
 }
 
 /**

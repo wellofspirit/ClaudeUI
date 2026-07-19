@@ -164,7 +164,9 @@ export interface ISession {
  * ignore options they do not consume (noted per member).
  */
 export interface EngineSpawnOptions {
-  /** Reasoning-effort tier. Claude-only — opencode uses per-model reasoning variants instead. */
+  /** Reasoning-effort tier. Claude + pi (M2b: applied via `set_thinking_level`
+   *  at spawn when the resolved model supports it) — opencode uses per-model
+   *  reasoning variants instead. */
   effort?: string
   /** Engine session id to resume. Consumed by both engines. */
   resumeSessionId?: string

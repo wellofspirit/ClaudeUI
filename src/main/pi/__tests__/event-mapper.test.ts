@@ -307,6 +307,70 @@ describe('mapPiEvent — extension_error', () => {
   })
 })
 
+describe('mapPiEvent — tool_execution_update (M2b live bash output streaming)', () => {
+  it('bash: maps to bash_output carrying the ACCUMULATED text (joined across content blocks)', () => {
+    const state = createPiMapperState()
+    const out = mapPiEvent(
+      {
+        type: 'tool_execution_update',
+        toolCallId: 'call_1',
+        toolName: 'bash',
+        args: { command: 'ls -la' },
+        partialResult: {
+          content: [
+            { type: 'text', text: 'partial output so far' },
+            { type: 'text', text: '...' }
+          ],
+          details: { truncation: null, fullOutputPath: null }
+        }
+      },
+      state
+    )
+    expect(out).toEqual([{ kind: 'bash_output', toolUseId: 'call_1', output: 'partial output so far...' }])
+  })
+
+  it('bash with no text content blocks (e.g. only an image): maps to bash_output with an empty string, not ignore', () => {
+    const state = createPiMapperState()
+    const out = mapPiEvent(
+      {
+        type: 'tool_execution_update',
+        toolCallId: 'call_2',
+        toolName: 'bash',
+        args: {},
+        partialResult: { content: [] }
+      },
+      state
+    )
+    expect(out).toEqual([{ kind: 'bash_output', toolUseId: 'call_2', output: '' }])
+  })
+
+  it('non-bash tool (e.g. edit): ignored — live streaming is bash-only in M2b', () => {
+    const state = createPiMapperState()
+    const out = mapPiEvent(
+      {
+        type: 'tool_execution_update',
+        toolCallId: 'call_3',
+        toolName: 'edit',
+        args: { path: 'a.ts' },
+        partialResult: { content: [{ type: 'text', text: 'diff so far' }] }
+      },
+      state
+    )
+    expect(out).toEqual([{ kind: 'ignore' }])
+  })
+})
+
+describe('mapPiEvent — tool_execution_end (untouched — final result comes via toolResult message_end)', () => {
+  it('still maps to ignore regardless of toolName', () => {
+    const state = createPiMapperState()
+    const out = mapPiEvent(
+      { type: 'tool_execution_end', toolCallId: 'call_1', toolName: 'bash', result: {}, isError: false },
+      state
+    )
+    expect(out).toEqual([{ kind: 'ignore' }])
+  })
+})
+
 describe('mapPiEvent — defensive fallback when message_start was missed', () => {
   it('message_update still gets a messageId (minted + stored) even without a prior message_start', () => {
     const state: PiMapperState = createPiMapperState()

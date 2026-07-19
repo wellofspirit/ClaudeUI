@@ -675,24 +675,38 @@ export function resolveOpencodeCapabilitiesFromModel(
  *     deliberately NOT in autonomyModes — pi has no plan-mode agent/UX of its
  *     own (unlike opencode's read-only `plan` agent); permission-engine.ts's
  *     modeBaseDecision defensively treats an unexpected 'plan' mode string as
- *     'default' rather than crashing, but the picker never offers it. `steer`
- *     (mid-turn tool gating changes) is M2b — still false.
+ *     'default' rather than crashing, but the picker never offers it.
+ *   - steer:true → SHIPPED in M2b: PiSession.run()'s busy path now sends
+ *     `streamingBehavior:'steer'` (delivered after the current tool calls
+ *     finish, before the next LLM call — verified, docs/protocol-pi/README.md).
+ *     `queue` stays true alongside it: the two flags gate the SAME
+ *     send-while-busy affordance (InputBox's queueEnabled derives from
+ *     `capabilities.queue` only — `capabilities.steer` is read nowhere in the
+ *     renderer, it is a pure ADR-030 honesty/documentation flag), and the
+ *     renderer's queued-message UI resolves identically either way via the
+ *     engine-neutral `session:steer-consumed` ack.
+ *   - slashCommands:true, skills:true → SHIPPED in M2b via `get_commands`
+ *     (doStart(), once per spawn): emits `session:slash-commands` (all
+ *     non-temporary-scope entries, '/'-prefixed) and `session:skills` (source
+ *     === 'skill' entries, `skill:` prefix stripped) — same wire contract as
+ *     OpencodeSession's listCommands/listSkills emission. `skills:true` is
+ *     safe despite `discoverSkills` staying UNIMPLEMENTED here: SkillsDialog's
+ *     only data path (`loadSkillDetails` IPC handler) already does
+ *     `delegate?.discoverSkills?.(cwd) ?? scanSkills(cwd)` — the optional-call
+ *     falls back to Claude's filesystem scanner instead of throwing.
+ *     `session:skills` therefore only drives the TopBar Skills-button
+ *     availability hint in M2b; surfacing pi's actual `~/.pi/agent/skills` +
+ *     `.pi/skills` content through `discoverSkills` is M3.
  *   - auth.canDriveLogin → M3, once PiAuthProvider drives `~/.pi/agent/auth.json`.
  *   - hostedMcp → M4, once the hosted mermaid/mockup tools + cross-engine
  *     dispatch are bridged through pi's extension API.
- *   - sideQuestion, slashCommands, skills, plan, fork, forkFromMessage,
- *     backgroundTasks, subagents, voice → unwired; each becomes a
- *     dedicated follow-up once its RPC surface (get_commands, fork/clone, …)
- *     is wired the same way OpencodeSession's were.
+ *   - sideQuestion, plan, fork, forkFromMessage, backgroundTasks, subagents,
+ *     voice → unwired; each becomes a dedicated follow-up once its RPC
+ *     surface (fork/clone, …) is wired the same way OpencodeSession's were.
  *   - sandbox, proxy → Claude cli.js launch-param concepts; pi has neither
  *     (see EngineCapabilities' own doc comment) — likely permanently false.
  *   - crossEngineDispatch → M4 (ADR-033); cross-engine-dispatcher.ts's engine
  *     guard already rejects 'pi' as a target/source, so this is honest AND safe.
- *   - queue:true / steer:false — M1 DOES wire "accept a prompt sent while busy"
- *     (PiSession.run() sends it with `streamingBehavior:'followUp'`, queued
- *     until the current run settles), but NOT true mid-turn steering (pi's
- *     'steer' behavior, delivered before the next LLM call within the SAME
- *     turn) — that distinction is real on pi's wire and deliberately unwired.
  */
 export const PI_ENGINE_CAPABILITIES: EngineCapabilities = {
   voice: false,
@@ -702,10 +716,10 @@ export const PI_ENGINE_CAPABILITIES: EngineCapabilities = {
   plan: false,
   fork: false,
   forkFromMessage: false,
-  steer: false,
+  steer: true,
   queue: true,
-  slashCommands: false,
-  skills: false,
+  slashCommands: true,
+  skills: true,
   sideQuestion: false,
   interactiveApprovals: true,
   sandbox: false,
@@ -716,17 +730,24 @@ export const PI_ENGINE_CAPABILITIES: EngineCapabilities = {
 }
 
 /**
- * Derive ModelCapabilities for a pi model. reasoning is an empty object (pi's
- * `thinkingLevel` is a session-wide off/low/…/max dial, not a per-model
- * modes/levels control — no thinking/effort picker in M1; a config UI comes in
- * M3). toolCalling is always true — every pi model that can be selected has
- * tool support (pi has no text-only-model concept exposed via get_available_models).
+ * Derive ModelCapabilities for a pi model. pi's reasoning is TWO things that
+ * must not be conflated: `thinkingLevel` is a SESSION-WIDE off/low/…/max dial
+ * (`set_thinking_level`), not a per-model thinking-MODE axis like Claude's
+ * adaptive/enabled/disabled — so `reasoning.thinking` is never populated here
+ * (no Adaptive picker for any pi model, ever). `reasoning.effort` DOES flip
+ * per-model (M2b): when the catalog's `reasoning` fact is true, the model
+ * accepts `set_thinking_level`, so we grant the conservative low/medium/high
+ * tier set (xhigh/max are model-dependent and the catalog doesn't say which —
+ * a wrong guess would surface as an error toast on every switch; M3: probe
+ * xhigh/max support). toolCalling is always true — every pi model that can be
+ * selected has tool support (pi has no text-only-model concept exposed via
+ * get_available_models).
  */
 export function piModelCapabilities(
-  m?: { vision?: boolean; contextWindow?: number; maxOutput?: number }
+  m?: { vision?: boolean; contextWindow?: number; maxOutput?: number; reasoning?: boolean }
 ): ModelCapabilities {
   return {
-    reasoning: {},
+    reasoning: m?.reasoning ? { effort: { levels: ['low', 'medium', 'high'] } } : {},
     vision: !!m?.vision,
     toolCalling: true,
     contextWindow: m?.contextWindow ?? 200_000,
@@ -752,10 +773,13 @@ export function resolvePiCapabilities(
  * becomes authoritative on connect). ModelInfo carries no structured
  * contextWindow/maxOutput (model-discovery.ts encodes context size into the
  * description string instead), so those fall back to piModelCapabilities'
- * defaults until PiSession resolves the full PiModel post-connect.
+ * defaults until PiSession resolves the full PiModel post-connect. `reasoning`
+ * is likewise not a ModelInfo field — PI_META.seedCapabilities derives it from
+ * ModelInfo.supportsEffort (the flag model-discovery.ts already sets per the
+ * catalog's `reasoning` fact) before calling this.
  */
 export function resolvePiCapabilitiesFromModel(
-  m?: { vision?: boolean; contextWindow?: number; maxOutput?: number }
+  m?: { vision?: boolean; contextWindow?: number; maxOutput?: number; reasoning?: boolean }
 ): ResolvedCapabilities {
   return resolvePiCapabilities(m)
 }

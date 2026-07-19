@@ -524,6 +524,161 @@ describe('PiSession — spawn-time model honesty (FIX 3)', () => {
   })
 })
 
+describe('PiSession.setEffort (M2b)', () => {
+  it('sends {type:"set_thinking_level", level} via request()', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-effort-1', win as never, '/cwd', {})
+    await session.run('hi')
+    mockRequest.mockClear()
+
+    session.setEffort('high')
+
+    expect(mockRequest).toHaveBeenCalledWith({ type: 'set_thinking_level', level: 'high' })
+  })
+
+  it('surfaces a success:false response as session:error (mirrors setModel\'s failure shape)', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-effort-2', win as never, '/cwd', {})
+    await session.run('hi')
+    mockRequest.mockImplementation((cmd: { type: string }) =>
+      cmd.type === 'set_thinking_level'
+        ? Promise.resolve({
+            type: 'response',
+            command: 'set_thinking_level',
+            success: false,
+            error: 'Model does not support thinking levels'
+          })
+        : defaultRequestImpl(cmd)
+    )
+
+    session.setEffort('xhigh')
+
+    await vi.waitFor(() => expect(sentChannels(win)).toContain('session:error'))
+    const [error] = sentPayloads(win, 'session:error').slice(-1)
+    expect(error).toBe('Model does not support thinking levels')
+  })
+
+  it('surfaces a rejected/thrown request as session:error — fire-and-forget never becomes an unhandled rejection', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-effort-3', win as never, '/cwd', {})
+    await session.run('hi')
+    mockRequest.mockImplementation((cmd: { type: string }) =>
+      cmd.type === 'set_thinking_level' ? Promise.reject(new Error('process wedged')) : defaultRequestImpl(cmd)
+    )
+
+    session.setEffort('low')
+
+    await vi.waitFor(() => expect(sentChannels(win)).toContain('session:error'))
+    const [error] = sentPayloads(win, 'session:error').slice(-1)
+    expect(error).toBe('process wedged')
+  })
+
+  it('a pre-spawn setEffort() stashes the value; the eventual spawn applies it once the model supports it', async () => {
+    mockGetPiModelCatalog.mockResolvedValue([
+      {
+        id: 'claude-sonnet-4-6',
+        provider: 'anthropic',
+        reasoning: true,
+        name: 'Claude Sonnet 4.6',
+        api: 'anthropic-messages',
+        baseUrl: '',
+        input: ['text'],
+        contextWindow: 200_000,
+        maxTokens: 8192,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+      }
+    ])
+    const win = new MockWindow()
+    const session = new PiSession('rid-effort-4', win as never, '/cwd', { model: 'anthropic/claude-sonnet-4-6' })
+
+    session.setEffort('low') // no client yet — recorded only, no RPC sent
+    expect(mockRequest).not.toHaveBeenCalled()
+
+    await session.run('hi')
+
+    expect(mockRequest).toHaveBeenCalledWith({ type: 'set_thinking_level', level: 'low' })
+  })
+})
+
+describe('PiSession — spawn-time effort (EngineSpawnOptions.effort, M2b)', () => {
+  it('applies set_thinking_level at spawn when the resolved model supports effort', async () => {
+    mockGetPiModelCatalog.mockResolvedValue([
+      {
+        id: 'claude-sonnet-4-6',
+        provider: 'anthropic',
+        reasoning: true,
+        name: 'Claude Sonnet 4.6',
+        api: 'anthropic-messages',
+        baseUrl: '',
+        input: ['text'],
+        contextWindow: 200_000,
+        maxTokens: 8192,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+      }
+    ])
+    const win = new MockWindow()
+    const session = new PiSession('rid-spawn-effort-1', win as never, '/cwd', {
+      model: 'anthropic/claude-sonnet-4-6',
+      effort: 'high'
+    })
+
+    await session.run('hi')
+
+    expect(mockRequest).toHaveBeenCalledWith({ type: 'set_thinking_level', level: 'high' })
+  })
+
+  it('does NOT send set_thinking_level at spawn when the resolved model does not support effort', async () => {
+    mockGetPiModelCatalog.mockResolvedValue([
+      {
+        id: 'gpt-5-mini',
+        provider: 'openai-codex',
+        reasoning: false,
+        name: 'GPT-5 Mini',
+        api: 'openai-responses',
+        baseUrl: '',
+        input: ['text'],
+        contextWindow: 128_000,
+        maxTokens: 16384,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+      }
+    ])
+    const win = new MockWindow()
+    const session = new PiSession('rid-spawn-effort-2', win as never, '/cwd', {
+      model: 'openai-codex/gpt-5-mini',
+      effort: 'high'
+    })
+
+    await session.run('hi')
+
+    expect(mockRequest).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'set_thinking_level' }))
+  })
+
+  it('does NOT send set_thinking_level at spawn when no effort was requested', async () => {
+    mockGetPiModelCatalog.mockResolvedValue([
+      {
+        id: 'claude-sonnet-4-6',
+        provider: 'anthropic',
+        reasoning: true,
+        name: 'Claude Sonnet 4.6',
+        api: 'anthropic-messages',
+        baseUrl: '',
+        input: ['text'],
+        contextWindow: 200_000,
+        maxTokens: 8192,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+      }
+    ])
+    const win = new MockWindow()
+    const session = new PiSession('rid-spawn-effort-3', win as never, '/cwd', {
+      model: 'anthropic/claude-sonnet-4-6'
+    })
+
+    await session.run('hi')
+
+    expect(mockRequest).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'set_thinking_level' }))
+  })
+})
+
 describe('PiSession resume', () => {
   it('replays stored history (session:message + session:tool-result) and seeds costBaseUsd from get_session_stats', async () => {
     mockLoadPiSessionHistory.mockResolvedValue([
@@ -584,8 +739,8 @@ describe('PiSession resume', () => {
   })
 })
 
-describe('PiSession — busy path uses streamingBehavior followUp', () => {
-  it('a second run() while the first is still in flight sends streamingBehavior: followUp', async () => {
+describe('PiSession — busy path uses streamingBehavior steer (M2b)', () => {
+  it('a second run() while the first is still in flight sends streamingBehavior: steer', async () => {
     const win = new MockWindow()
     const session = new PiSession('rid-11', win as never, '/cwd', {})
 
@@ -614,7 +769,7 @@ describe('PiSession — busy path uses streamingBehavior followUp', () => {
 
     await session.run('second')
 
-    expect(mockRequest).toHaveBeenCalledWith({ type: 'prompt', message: 'second', streamingBehavior: 'followUp' })
+    expect(mockRequest).toHaveBeenCalledWith({ type: 'prompt', message: 'second', streamingBehavior: 'steer' })
     // Busy-path ack so the renderer's shared queued-message UI resolves.
     expect(sentChannels(win)).toContain('session:steer-consumed')
 
@@ -844,5 +999,200 @@ describe('PiSession — approval bridge wiring (M2a)', () => {
     const requestCountBefore = sentPayloads(win, 'session:approval-request').length
     expect(await gate('call_15', 'bash', { command: 'npm test unit' })).toEqual({ behavior: 'allow' })
     expect(sentPayloads(win, 'session:approval-request').length).toBe(requestCountBefore)
+  })
+})
+
+describe('PiSession — slash commands + skills discovery (get_commands, M2b)', () => {
+  it('emits session:slash-commands (/-prefixed) and session:skills (skill: prefix stripped), filtering sourceInfo.scope === "temporary" entries', async () => {
+    mockRequest.mockImplementation((cmd: { type: string }) =>
+      cmd.type === 'get_commands'
+        ? Promise.resolve({
+            type: 'response',
+            command: 'get_commands',
+            success: true,
+            data: {
+              commands: [
+                {
+                  name: 'session-name',
+                  description: 'Set or clear session name',
+                  source: 'extension',
+                  sourceInfo: { path: '/home/user/.pi/agent/extensions/session.ts', source: 'cli', scope: 'user' }
+                },
+                {
+                  name: 'fix-tests',
+                  description: 'Fix failing tests',
+                  source: 'prompt',
+                  sourceInfo: { path: '/proj/.pi/agent/prompts/fix-tests.md', source: 'cli', scope: 'project' }
+                },
+                {
+                  name: 'skill:brave-search',
+                  description: 'Web search via Brave API',
+                  source: 'skill',
+                  sourceInfo: { path: '/home/user/.pi/agent/skills/brave-search/SKILL.md', source: 'cli', scope: 'user' }
+                },
+                {
+                  name: 'some-ephemeral-command',
+                  source: 'extension',
+                  sourceInfo: { path: '/tmp/x.ts', source: 'cli', scope: 'temporary' }
+                }
+              ]
+            }
+          })
+        : defaultRequestImpl(cmd)
+    )
+
+    const win = new MockWindow()
+    const session = new PiSession('rid-commands-1', win as never, '/cwd', {})
+    await session.run('hi')
+
+    expect(sentChannels(win)).toContain('session:slash-commands')
+    const [slashPayload] = sentPayloads(win, 'session:slash-commands') as [
+      Array<{ name: string; description?: string }>
+    ]
+    expect(slashPayload).toEqual([
+      { name: '/session-name', description: 'Set or clear session name' },
+      { name: '/fix-tests', description: 'Fix failing tests' },
+      { name: '/skill:brave-search', description: 'Web search via Brave API' }
+    ])
+
+    expect(sentChannels(win)).toContain('session:skills')
+    const [skillsPayload] = sentPayloads(win, 'session:skills') as [string[]]
+    expect(skillsPayload).toEqual(['brave-search'])
+  })
+
+  it('a get_commands failure (success:false) never blocks the session — no slash-commands/skills emission, no crash', async () => {
+    mockRequest.mockImplementation((cmd: { type: string }) =>
+      cmd.type === 'get_commands'
+        ? Promise.resolve({ type: 'response', command: 'get_commands', success: false, error: 'not supported' })
+        : defaultRequestImpl(cmd)
+    )
+    const win = new MockWindow()
+    const session = new PiSession('rid-commands-2', win as never, '/cwd', {})
+
+    await expect(session.run('hi')).resolves.toBeUndefined()
+
+    expect(sentChannels(win)).not.toContain('session:slash-commands')
+    expect(sentChannels(win)).not.toContain('session:skills')
+  })
+
+  it('a get_commands request rejection (process hiccup) never blocks the session', async () => {
+    mockRequest.mockImplementation((cmd: { type: string }) =>
+      cmd.type === 'get_commands' ? Promise.reject(new Error('timed out')) : defaultRequestImpl(cmd)
+    )
+    const win = new MockWindow()
+    const session = new PiSession('rid-commands-3', win as never, '/cwd', {})
+
+    await expect(session.run('hi')).resolves.toBeUndefined()
+
+    expect(sentChannels(win)).not.toContain('session:slash-commands')
+  })
+})
+
+describe('PiSession.run — slash-prefixed prompt passthrough (M2b)', () => {
+  it('a "/"-prefixed prompt is sent to pi VERBATIM — pi expands /skill:name and extension commands server-side, no ClaudeUI routing change', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-slash-1', win as never, '/cwd', {})
+
+    await session.run('/skill:brave-search find something about pi')
+
+    expect(mockRequest).toHaveBeenCalledWith({
+      type: 'prompt',
+      message: '/skill:brave-search find something about pi'
+    })
+  })
+})
+
+describe('PiSession — live bash output streaming (M2b)', () => {
+  it('a bash tool_execution_update event flows through to session:bash-output with totalLines/totalBytes', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-bash-1', win as never, '/cwd', {})
+    await session.run('hi')
+
+    const handler = lastEventHandler()
+    handler({
+      type: 'tool_execution_update',
+      toolCallId: 'call_bash_1',
+      toolName: 'bash',
+      args: { command: 'ls -la' },
+      partialResult: { content: [{ type: 'text', text: 'line1\nline2' }] }
+    })
+
+    await vi.waitFor(() => expect(sentChannels(win)).toContain('session:bash-output'))
+    const [payload] = sentPayloads(win, 'session:bash-output').slice(-1) as [
+      { toolUseId: string; output: string; totalLines: number; totalBytes: number }
+    ]
+    expect(payload.toolUseId).toBe('call_bash_1')
+    expect(payload.output).toBe('line1\nline2')
+    expect(payload.totalLines).toBe(2)
+    expect(payload.totalBytes).toBe(Buffer.byteLength('line1\nline2', 'utf-8'))
+  })
+
+  it('an accumulated-empty bash_output never reaches session:bash-output (session-level guard, mirrors opencode\'s call-site check)', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-bash-2', win as never, '/cwd', {})
+    await session.run('hi')
+
+    const handler = lastEventHandler()
+    handler({
+      type: 'tool_execution_update',
+      toolCallId: 'call_bash_2',
+      toolName: 'bash',
+      args: {},
+      partialResult: { content: [] }
+    })
+
+    await new Promise((r) => setTimeout(r, 150))
+    expect(sentChannels(win)).not.toContain('session:bash-output')
+  })
+
+  it('the gate entry is cancelled on the matching tool_result — a throttled emission never fires afterwards', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-bash-3', win as never, '/cwd', {})
+    await session.run('hi')
+
+    const handler = lastEventHandler()
+    handler({
+      type: 'tool_execution_update',
+      toolCallId: 'call_bash_3',
+      toolName: 'bash',
+      args: {},
+      partialResult: { content: [{ type: 'text', text: 'partial' }] }
+    })
+    handler({
+      type: 'message_end',
+      message: {
+        role: 'toolResult',
+        toolCallId: 'call_bash_3',
+        toolName: 'bash',
+        content: [{ type: 'text', text: 'final' }],
+        isError: false,
+        timestamp: 1
+      }
+    })
+
+    // If cancel() hadn't dropped the pending throttle timer, it would still
+    // fire here and emit a STALE session:bash-output after the tool settled.
+    await new Promise((r) => setTimeout(r, 150))
+    expect(sentChannels(win)).not.toContain('session:bash-output')
+  })
+
+  it('session.cancel() clears the whole gate — a pending throttle timer never fires after teardown', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-bash-4', win as never, '/cwd', {})
+    await session.run('hi')
+
+    const handler = lastEventHandler()
+    handler({
+      type: 'tool_execution_update',
+      toolCallId: 'call_bash_4',
+      toolName: 'bash',
+      args: {},
+      partialResult: { content: [{ type: 'text', text: 'partial' }] }
+    })
+
+    session.cancel()
+
+    await new Promise((r) => setTimeout(r, 150))
+    expect(sentChannels(win)).not.toContain('session:bash-output')
   })
 })
