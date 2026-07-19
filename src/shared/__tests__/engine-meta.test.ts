@@ -1,14 +1,16 @@
 import { describe, it, expect } from 'vitest'
-import { ENGINE_META, engineMeta, OPENCODE_DEFAULT_MODEL } from '../engine-meta'
+import { ENGINE_META, engineMeta, OPENCODE_DEFAULT_MODEL, PI_DEFAULT_MODEL } from '../engine-meta'
 import {
   CLAUDE_ENGINE_CAPABILITIES,
   OPENCODE_ENGINE_CAPABILITIES,
+  PI_ENGINE_CAPABILITIES,
   resolveClaudeCapabilities,
-  resolveOpencodeCapabilitiesFromModel
+  resolveOpencodeCapabilitiesFromModel,
+  resolvePiCapabilitiesFromModel
 } from '../model-capabilities'
 import type { EngineId, ModelInfo } from '../types'
 
-const ALL_ENGINE_IDS: EngineId[] = ['claude', 'opencode']
+const ALL_ENGINE_IDS: EngineId[] = ['claude', 'opencode', 'pi']
 
 describe('ENGINE_META table completeness', () => {
   it('has an entry for every EngineId, keyed by its own id', () => {
@@ -28,9 +30,10 @@ describe('engineMeta', () => {
 })
 
 describe('label', () => {
-  it('claude → Claude, opencode → opencode', () => {
+  it('claude → Claude, opencode → opencode, pi → pi', () => {
     expect(engineMeta('claude').label).toBe('Claude')
     expect(engineMeta('opencode').label).toBe('opencode')
+    expect(engineMeta('pi').label).toBe('pi')
   })
 })
 
@@ -38,13 +41,15 @@ describe('capabilities identity', () => {
   it('references the shared capability constants, not copies', () => {
     expect(engineMeta('claude').capabilities).toBe(CLAUDE_ENGINE_CAPABILITIES)
     expect(engineMeta('opencode').capabilities).toBe(OPENCODE_ENGINE_CAPABILITIES)
+    expect(engineMeta('pi').capabilities).toBe(PI_ENGINE_CAPABILITIES)
   })
 })
 
 describe('defaultVendorId', () => {
-  it('claude → anthropic, opencode → openai', () => {
+  it('claude → anthropic, opencode → openai, pi → openai-codex', () => {
     expect(engineMeta('claude').defaultVendorId).toBe('anthropic')
     expect(engineMeta('opencode').defaultVendorId).toBe('openai')
+    expect(engineMeta('pi').defaultVendorId).toBe('openai-codex')
   })
 })
 
@@ -59,6 +64,13 @@ describe('defaultModelValue', () => {
   })
   it('opencode uses the configured default when present', () => {
     expect(engineMeta('opencode').defaultModelValue('foo/bar')).toBe('foo/bar')
+  })
+  it('pi falls back to PI_DEFAULT_MODEL when unset/empty', () => {
+    expect(engineMeta('pi').defaultModelValue(undefined)).toBe(PI_DEFAULT_MODEL)
+    expect(engineMeta('pi').defaultModelValue('')).toBe(PI_DEFAULT_MODEL)
+  })
+  it('pi uses the configured default when present', () => {
+    expect(engineMeta('pi').defaultModelValue('foo/bar')).toBe('foo/bar')
   })
 })
 
@@ -116,6 +128,37 @@ describe('opencode encode/decode', () => {
   })
 })
 
+describe('pi encode/decode', () => {
+  it('decodeModelValue splits vendor/model', () => {
+    expect(engineMeta('pi').decodeModelValue('openai-codex/gpt-5.6-luna')).toEqual({
+      engineId: 'pi',
+      vendorId: 'openai-codex',
+      modelId: 'gpt-5.6-luna'
+    })
+  })
+  it('encodeModelValue round-trips vendor/model', () => {
+    const ref = engineMeta('pi').decodeModelValue('openai-codex/gpt-5.6-luna')
+    expect(engineMeta('pi').encodeModelValue(ref)).toBe('openai-codex/gpt-5.6-luna')
+  })
+  it('splits on the FIRST slash only for multi-slash values', () => {
+    const ref = engineMeta('pi').decodeModelValue('a/b/c')
+    expect(ref.vendorId).toBe('a')
+    expect(ref.modelId).toBe('b/c')
+    expect(engineMeta('pi').encodeModelValue(ref)).toBe('a/b/c')
+  })
+  it('falls back to vendor "openai-codex" when there is no slash', () => {
+    const ref = engineMeta('pi').decodeModelValue('gpt-5.6-luna')
+    expect(ref.vendorId).toBe('openai-codex')
+    expect(ref.modelId).toBe('gpt-5.6-luna')
+  })
+  it('round-trips a handful of values through encode(decode(v)) === v', () => {
+    const values = ['anthropic/claude-sonnet-5', 'openai-codex/gpt-5.6-luna', 'a/b/c']
+    for (const v of values) {
+      expect(engineMeta('pi').encodeModelValue(engineMeta('pi').decodeModelValue(v))).toBe(v)
+    }
+  })
+})
+
 describe('seedCapabilities parity with the pre-existing resolvers', () => {
   it('claude("default") matches resolveClaudeCapabilities("default")', () => {
     expect(engineMeta('claude').seedCapabilities('default')).toEqual(resolveClaudeCapabilities('default'))
@@ -138,6 +181,21 @@ describe('seedCapabilities parity with the pre-existing resolvers', () => {
     }
     expect(engineMeta('opencode').seedCapabilities('x', modelInfo)).toEqual(
       resolveOpencodeCapabilitiesFromModel({ vision: true, toolCalling: true })
+    )
+  })
+  it('pi with no modelInfo matches resolvePiCapabilitiesFromModel(undefined)', () => {
+    expect(engineMeta('pi').seedCapabilities('x')).toEqual(resolvePiCapabilitiesFromModel(undefined))
+  })
+  it('pi with a modelInfo matches resolvePiCapabilitiesFromModel({vision})', () => {
+    const modelInfo: ModelInfo = {
+      value: 'openai-codex/gpt',
+      displayName: '',
+      description: '',
+      vision: true,
+      toolCalling: true
+    }
+    expect(engineMeta('pi').seedCapabilities('x', modelInfo)).toEqual(
+      resolvePiCapabilitiesFromModel({ vision: true })
     )
   })
 })

@@ -70,6 +70,8 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
       ipcRenderer.invoke('session:resolve-fork-anchor', sessionId, cwd, messageId),
     loadOpencodeHistory: (sessionId) =>
       ipcRenderer.invoke('session:load-opencode-history', sessionId),
+    listPiSessionsGlobal: () => ipcRenderer.invoke('session:list-pi'),
+    loadPiHistory: (sessionId) => ipcRenderer.invoke('session:load-pi-history', sessionId),
     sendPrompt: (routingId, prompt, attachments?) =>
       ipcRenderer.invoke('session:send', routingId, prompt, attachments),
     cancelSession: (routingId) => ipcRenderer.invoke('session:cancel', routingId),

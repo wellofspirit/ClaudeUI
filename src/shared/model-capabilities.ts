@@ -664,3 +664,92 @@ export function resolveOpencodeCapabilitiesFromModel(
     m ? { capabilities: { attachment: m.vision, toolcall: m.toolCalling } } : undefined
   )
 }
+
+/**
+ * pi engine capabilities (M1 skeleton — ADR-030 capability honesty: every flag
+ * is false except what THIS milestone fully wires end-to-end). Flip plan for
+ * later milestones (see the M1 kickoff spec's milestone list):
+ *   - interactiveApprovals, autonomyModes (beyond 'full') → M2, once the
+ *     approval-bridge extension (`pi.on('tool_call', …)`, verified in M0) lands.
+ *   - auth.canDriveLogin → M3, once PiAuthProvider drives `~/.pi/agent/auth.json`.
+ *   - hostedMcp → M4, once the hosted mermaid/mockup tools + cross-engine
+ *     dispatch are bridged through pi's extension API.
+ *   - sideQuestion, slashCommands, skills, plan, fork, forkFromMessage,
+ *     backgroundTasks, subagents, voice → unwired in M1; each becomes a
+ *     dedicated follow-up once its RPC surface (get_commands, fork/clone, …)
+ *     is wired the same way OpencodeSession's were.
+ *   - sandbox, proxy → Claude cli.js launch-param concepts; pi has neither
+ *     (see EngineCapabilities' own doc comment) — likely permanently false.
+ *   - crossEngineDispatch → M4 (ADR-033); cross-engine-dispatcher.ts's engine
+ *     guard already rejects 'pi' as a target/source, so this is honest AND safe.
+ *   - queue:true / steer:false — M1 DOES wire "accept a prompt sent while busy"
+ *     (PiSession.run() sends it with `streamingBehavior:'followUp'`, queued
+ *     until the current run settles), but NOT true mid-turn steering (pi's
+ *     'steer' behavior, delivered before the next LLM call within the SAME
+ *     turn) — that distinction is real on pi's wire and deliberately unwired.
+ */
+export const PI_ENGINE_CAPABILITIES: EngineCapabilities = {
+  voice: false,
+  hostedMcp: false,
+  backgroundTasks: false,
+  subagents: false,
+  plan: false,
+  fork: false,
+  forkFromMessage: false,
+  steer: false,
+  queue: true,
+  slashCommands: false,
+  skills: false,
+  sideQuestion: false,
+  interactiveApprovals: false,
+  sandbox: false,
+  proxy: false,
+  autonomyModes: ['full'],
+  auth: { canDriveLogin: false, multiAccount: false },
+  crossEngineDispatch: false
+}
+
+/**
+ * Derive ModelCapabilities for a pi model. reasoning is an empty object (pi's
+ * `thinkingLevel` is a session-wide off/low/…/max dial, not a per-model
+ * modes/levels control — no thinking/effort picker in M1; a config UI comes in
+ * M3). toolCalling is always true — every pi model that can be selected has
+ * tool support (pi has no text-only-model concept exposed via get_available_models).
+ */
+export function piModelCapabilities(
+  m?: { vision?: boolean; contextWindow?: number; maxOutput?: number }
+): ModelCapabilities {
+  return {
+    reasoning: {},
+    vision: !!m?.vision,
+    toolCalling: true,
+    contextWindow: m?.contextWindow ?? 200_000,
+    maxOutput: m?.maxOutput ?? 8192,
+    promptCaching: true
+  }
+}
+
+/**
+ * Convenience: compute ResolvedCapabilities for a pi session from the fuller
+ * PiModel-derived shape (vision/contextWindow/maxOutput) — PiSession's own
+ * call site, once connected and the model catalog is warm.
+ */
+export function resolvePiCapabilities(
+  m?: Parameters<typeof piModelCapabilities>[0]
+): ResolvedCapabilities {
+  return resolveCapabilities(PI_ENGINE_CAPABILITIES, piModelCapabilities(m))
+}
+
+/**
+ * Seed ResolvedCapabilities for a pi session from a discovered ModelInfo's flat
+ * capability flags (renderer pre-spawn gating, before status.capabilities
+ * becomes authoritative on connect). ModelInfo carries no structured
+ * contextWindow/maxOutput (model-discovery.ts encodes context size into the
+ * description string instead), so those fall back to piModelCapabilities'
+ * defaults until PiSession resolves the full PiModel post-connect.
+ */
+export function resolvePiCapabilitiesFromModel(
+  m?: { vision?: boolean; contextWindow?: number; maxOutput?: number }
+): ResolvedCapabilities {
+  return resolvePiCapabilities(m)
+}

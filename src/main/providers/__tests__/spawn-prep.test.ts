@@ -39,8 +39,14 @@ const modelDiscoveryMocks = vi.hoisted(() => ({
 }))
 vi.mock('../../opencode/model-discovery', () => modelDiscoveryMocks)
 
+const piModelDiscoveryMocks = vi.hoisted(() => ({
+  resolvePiSpawnModel: vi.fn(async (m?: string) => m)
+}))
+vi.mock('../../pi/model-discovery', () => piModelDiscoveryMocks)
+
 import { claudeSpawnPrep } from '../claude-spawn-prep'
 import { opencodeSpawnPrep } from '../../opencode/opencode-spawn-prep'
+import { piSpawnPrep } from '../../pi/pi-spawn-prep'
 import { spawnPrepRegistry } from '../SpawnPrepRegistry'
 
 describe('claudeSpawnPrep', () => {
@@ -101,6 +107,31 @@ describe('opencodeSpawnPrep', () => {
 
     expect(modelDiscoveryMocks.resolveOpencodeSpawnModel).toHaveBeenCalledWith('opencode/some-model')
     expect(result).toEqual({ resolvedModel: 'opencode/resolved-model' })
+  })
+})
+
+describe('piSpawnPrep', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('delegates to resolvePiSpawnModel and returns its result (cross-engine leak guard)', async () => {
+    // The observed real-app bug: an opencode "openai/gpt-5.5" remembered on
+    // the session slot must be resolved to a valid pi model before set_model.
+    piModelDiscoveryMocks.resolvePiSpawnModel.mockResolvedValueOnce('openai-codex/gpt-5.6-luna')
+
+    const result = await piSpawnPrep('openai/gpt-5.5', {})
+
+    expect(piModelDiscoveryMocks.resolvePiSpawnModel).toHaveBeenCalledWith('openai/gpt-5.5')
+    expect(result).toEqual({ resolvedModel: 'openai-codex/gpt-5.6-luna' })
+  })
+
+  it('returns undefined when the resolver yields none (PiSession then skips set_model)', async () => {
+    piModelDiscoveryMocks.resolvePiSpawnModel.mockResolvedValueOnce(undefined)
+
+    const result = await piSpawnPrep('anything/x', {})
+
+    expect(result).toEqual({ resolvedModel: undefined })
   })
 })
 

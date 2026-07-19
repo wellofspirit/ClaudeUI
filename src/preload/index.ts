@@ -93,6 +93,8 @@ const api: ClaudeAPI = {
   listOpencodeSessionsGlobal: () => ipcRenderer.invoke('session:list-opencode'),
   loadOpencodeHistory: (sessionId: string) =>
     ipcRenderer.invoke('session:load-opencode-history', sessionId),
+  listPiSessionsGlobal: () => ipcRenderer.invoke('session:list-pi'),
+  loadPiHistory: (sessionId: string) => ipcRenderer.invoke('session:load-pi-history', sessionId),
   loadSessionHistory: (sessionId: string, projectKey: string) =>
     ipcRenderer.invoke('session:load-history', sessionId, projectKey),
   loadSubagentHistory: (sessionId: string, projectKey: string, agentId: string) =>

@@ -150,6 +150,12 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       connection.invoke('session:load-opencode-history', sessionId) as ReturnType<
         ClaudeAPI['loadOpencodeHistory']
       >,
+    // Not yet registered on RemoteDispatcher (remote/web session listing is
+    // out of M1 scope) — mirrors the opencode pair above, same pre-existing gap.
+    listPiSessionsGlobal: () =>
+      connection.invoke('session:list-pi') as ReturnType<ClaudeAPI['listPiSessionsGlobal']>,
+    loadPiHistory: (sessionId: string) =>
+      connection.invoke('session:load-pi-history', sessionId) as ReturnType<ClaudeAPI['loadPiHistory']>,
 
     loadSessionHistory: (sessionId, projectKey) =>
       connection.invoke('session:load-history', sessionId, projectKey) as ReturnType<

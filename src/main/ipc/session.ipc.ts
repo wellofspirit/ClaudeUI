@@ -79,6 +79,8 @@ import {
   getOpencodeProviderModels
 } from '../opencode/model-discovery'
 import { opencodeServerManager } from '../opencode/OpencodeServerManager'
+import { discoverPiModels, invalidatePiModelCache } from '../pi/model-discovery'
+import { piBinaryAvailable } from '../pi/pi-locate'
 import {
   readOpencodeNativeConfig,
   writeOpencodeNativeConfig,
@@ -105,6 +107,7 @@ import {
   listOpencodeSessionsGlobal,
   loadOpencodeSessionHistory
 } from '../services/opencode-session-list'
+import { listPiSessionsGlobal, loadPiSessionHistory } from '../services/pi-session-list'
 import { deleteSessionByEngine } from '../services/session-delete'
 import type { ISession } from '../providers/ISession'
 import { prepareAndCreateSession } from './create-session'
@@ -349,6 +352,8 @@ const SESSION_IPC_CHANNELS = [
   'session:list-directories',
   'session:list-opencode',
   'session:load-opencode-history',
+  'session:list-pi',
+  'session:load-pi-history',
   'session:load-history',
   'session:load-subagent-history',
   'session:build-subagent-file-map',
@@ -931,7 +936,9 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     }
     // opencode models — returns [] if binary not present or discovery fails
     const opencodeGroups = await discoverOpencodeModels()
-    return [claudeGroup, ...opencodeGroups]
+    // pi models — returns [] if binary not present, no auth configured, or discovery fails
+    const piGroups = await discoverPiModels()
+    return [claudeGroup, ...opencodeGroups, ...piGroups]
   })
 
   // Full opencode provider catalog for the settings provider manager. Returns []
@@ -1007,6 +1014,14 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     return await loadOpencodeSessionHistory(sessionId)
   })
 
+  ipcMain.handle('session:list-pi', async () => {
+    return await listPiSessionsGlobal()
+  })
+
+  ipcMain.handle('session:load-pi-history', async (_e, sessionId: string) => {
+    return await loadPiSessionHistory(sessionId)
+  })
+
   ipcMain.handle('file:list-dir', async (_e, dirPath: string) => listDirEntries(dirPath))
 
   ipcMain.handle('session:load-history', async (_e, sessionId: string, projectKey: string) => {
@@ -1070,14 +1085,17 @@ export function registerSessionIpc(win: BrowserWindow): SessionManager {
     // re-discovers (otherwise a disabled/re-enabled provider only reflects after
     // an app restart).
     if (engineId === 'opencode') invalidateOpencodeModelCache()
+    if (engineId === 'pi') invalidatePiModelCache()
   })
   // Cheap, deterministic engine availability check. Backs the renderer's
-  // "is opencode installed?" gate WITHOUT spawning a server — a transient
-  // spawn/HTTP failure can no longer masquerade as "not installed". Claude is
-  // always installed (it's the bundled default engine).
-  ipcMain.handle('engine:is-installed', (_e, engineId: EngineId): boolean =>
-    engineId === 'opencode' ? opencodeServerManager.isBinaryAvailable() : true
-  )
+  // "is opencode/pi installed?" gate WITHOUT spawning a server/process — a
+  // transient spawn/HTTP failure can no longer masquerade as "not installed".
+  // Claude is always installed (it's the bundled default engine).
+  ipcMain.handle('engine:is-installed', (_e, engineId: EngineId): boolean => {
+    if (engineId === 'opencode') return opencodeServerManager.isBinaryAvailable()
+    if (engineId === 'pi') return piBinaryAvailable()
+    return true
+  })
   ipcMain.handle('config:load-vendor-config', (_e, vendorId: string) =>
     loadVendorConfig(vendorId)
   )

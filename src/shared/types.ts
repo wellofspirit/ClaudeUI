@@ -57,7 +57,7 @@ export interface ChatMessage {
   planContent?: string
 }
 
-export type EngineId = 'claude' | 'opencode'
+export type EngineId = 'claude' | 'opencode' | 'pi'
 
 /** Open-ended union: known vendors are named; unknown ones fall through as plain strings. */
 export type VendorId = 'anthropic' | 'openai' | 'google' | 'local' | (string & {})
@@ -78,6 +78,11 @@ export function claudeModel(modelId: string): ModelRef {
 /** Construct an opencode ModelRef (engine 'opencode', vendor = providerId). */
 export function opencodeModel(vendorId: VendorId, modelId: string): ModelRef {
   return { engineId: 'opencode', vendorId, modelId }
+}
+
+/** Construct a pi ModelRef (engine 'pi', vendor = provider id, e.g. 'openai-codex'). */
+export function piModel(vendorId: VendorId, modelId: string): ModelRef {
+  return { engineId: 'pi', vendorId, modelId }
 }
 
 // ---------------------------------------------------------------------------
@@ -701,6 +706,12 @@ interface SessionAPI {
   /** Load a persisted opencode session's transcript as ChatMessage[] (read-only,
    *  for painting history on sidebar click). Best-effort: returns [] on error. */
   loadOpencodeHistory(sessionId: string): Promise<ChatMessage[]>
+  /** Fetch the global pi session list (all cwds, read from ~/.pi/agent/sessions).
+   *  Best-effort: returns [] on error. */
+  listPiSessionsGlobal(): Promise<SessionInfo[]>
+  /** Load a persisted pi session's transcript as ChatMessage[] (read-only,
+   *  for painting history on sidebar click). Best-effort: returns [] on error. */
+  loadPiHistory(sessionId: string): Promise<ChatMessage[]>
   loadSessionHistory(
     sessionId: string,
     projectKey: string

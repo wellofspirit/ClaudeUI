@@ -106,10 +106,62 @@ function OpencodeMark({
   )
 }
 
+// ── pi mark ───────────────────────────────────────────────────────────────────
+// Simple monochrome π glyph: a top bar + two legs (the right one flicking
+// outward at the foot, like the printed character). Uses currentColor
+// (theme-adaptive), viewBox consistent with Claude's compact 24x24 mark.
+
+function PiMark({
+  size,
+  className,
+  testid,
+  engineId
+}: {
+  size: number
+  className: string
+  testid: string
+  engineId: EngineId
+}): React.JSX.Element {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      xmlns="http://www.w3.org/2000/svg"
+      className={className}
+      aria-label="pi"
+      data-testid={testid}
+      data-engine={engineId}
+      style={{ flexShrink: 0 }}
+    >
+      {/* Top bar */}
+      <path d="M4 7H20" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+      {/* Left leg, small foot flick outward */}
+      <path
+        d="M8 7V17.5C8 18.5 7.2 18.9 6.2 19.2"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        fill="none"
+      />
+      {/* Right leg, foot flicks outward (classic printed π shape) */}
+      <path
+        d="M16.5 7L15.3 17C15.1 18.3 15.7 19 17 19"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        fill="none"
+      />
+    </svg>
+  )
+}
+
 // Engine → SVG mark. `satisfies Record<EngineId, …>` makes a new engine a
 // compile error until its mark is added (rather than silently rendering Claude).
 type EngineMarkProps = { size: number; className: string; testid: string; engineId: EngineId }
 const ENGINE_MARK = {
   claude: ClaudeMark,
-  opencode: OpencodeMark
+  opencode: OpencodeMark,
+  pi: PiMark
 } satisfies Record<EngineId, (props: EngineMarkProps) => React.JSX.Element>
