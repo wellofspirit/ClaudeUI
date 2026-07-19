@@ -1,197 +1,64 @@
 # ClaudeUI
 
-A full-featured desktop GUI for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) — turning the CLI into a rich, visual development environment.
+A desktop client for coding agents. ClaudeUI runs [Claude Code](https://docs.anthropic.com/en/docs/claude-code) and [opencode](https://opencode.ai) side by side in one native app — multi-session chat, visual diffs and approvals, integrated git, terminals, automation, and usage analytics.
 
-Built with Electron, React 19, and the official `@anthropic-ai/claude-agent-sdk`.
+Built with Electron, React 19, and TypeScript. Apache-2.0.
 
-## Why ClaudeUI?
+## What it is
 
-Claude Code is powerful but lives in the terminal. ClaudeUI wraps it in a native desktop app with streaming markdown, visual diffs, tool approval workflows, multi-agent coordination, integrated terminals, and remote access — while preserving the full capability of the underlying SDK.
+Coding agents live in the terminal. ClaudeUI gives them a proper surface: streaming markdown, tool calls as structured cards, approval prompts you can actually read, plans you can comment on line by line, and a sidebar of concurrent sessions across projects. It is a client, not a wrapper script — both engines are driven over their native wire protocols, and every feature works the same way regardless of which engine (or model vendor) is behind the session.
 
-## Features
+## What makes it different
 
-### Chat & Interaction
+- **Native Claude Code integration, no SDK.** ClaudeUI rebundles Anthropic's official standalone binary with a set of content-anchored patches, then speaks the stream-json wire protocol directly from an in-house harness. The patches unlock what the stock CLI doesn't expose: live subagent streaming, unbuffered bash output, per-request token usage, rate-limit relay, and file-based credentials. The full protocol is documented in [`docs/protocol/`](docs/protocol/).
+- **True multi-engine.** opencode is a first-class second engine, bringing OpenAI, Google, and local models under the same UI — same tool cards, same approval flow, same session list, same usage dashboard. Engine capabilities are resolved per session and per model, so the UI only offers what the backend can actually do.
+- **Cross-engine dispatch.** A session on one engine can delegate a task to a headless agent on the other — ask a GPT-backed opencode agent to review a Claude session's diff, or vice versa. The dispatched work renders as a live-streaming task card in the calling chat, with approvals forwarded, a cost cap, and usage attributed back to the dispatching session.
+- **Multiple accounts.** Run several Claude accounts with per-account credentials and switch between them; usage is attributed to the right account and billing window.
+- **Serious usage analytics.** 5-hour billing windows with capacity projection, daily history, per-model and per-engine breakdowns, delegated-work costs, and a configurable status line — computed locally from transcripts and live events.
+- **Remote access.** An end-to-end-encrypted web client serves the same sessions to a browser or phone (QR pairing), locally or over a Cloudflare tunnel.
 
-- **Streaming markdown** — live-rendered responses with syntax highlighting and a blinking cursor
-- **Extended thinking** — collapsible thinking blocks showing Claude's reasoning process
-- **Model & effort selection** — switch models and effort levels (low/medium/high) per message
-- **File attachments** — drag-and-drop images (JPEG, PNG, GIF, WebP) and PDFs with compression
-- **@ mentions** — autocomplete file references with directory navigation
-- **Slash commands** — quick access to available tools and skills
-- **Draft management** — unsent messages are saved and restored
-- **Mobile-responsive** — touch-friendly layout with collapsible sidebar
+Alongside that: an integrated git panel with worktree support and AI commit messages, a plan-review panel with inline comments, an xterm terminal grouped per project, cron-scheduled automations with run history, voice input, Mermaid and UI-mockup rendering, a plugin system, and three themes.
 
-### Tool Calling & Approval
+## Getting started
 
-- **Visual tool calls** — collapsible blocks showing inputs, outputs, and execution status
-- **Approval workflow** — floating approval cards with allow/deny and permission suggestions
-- **Permission rules** — fine-grained allow/deny/ask rules at user, project, or local scope
-- **Background tasks** — send long-running tools (Bash, Agent) to the background
-- **Sandbox mode** — optional sandboxed execution with network and filesystem restrictions
-
-### Subagents & Teams
-
-- **Subagent streaming** — real-time streaming from Agent/Task tool invocations
-- **Agent tab bar** — switch between the main agent and focused subagent views
-- **Subagent history** — load and browse subagent conversation history
-- **Team coordination** — multi-agent teams with a monitoring dashboard showing agent status, streaming text, and task progress
-
-### Git Integration
-
-- **Git panel** — staged/unstaged files, diffs, and commit interface (Ctrl+Shift+G)
-- **Diff viewer** — syntax-highlighted side-by-side or unified diffs
-- **Staging controls** — stage, unstage, and discard individual files
-- **AI commit messages** — auto-generate commit messages from diffs
-- **Worktree management** — create, list, and remove git worktrees
-
-### Plan Mode
-
-- **Plan review panel** — dedicated panel for reviewing implementation plans
-- **Inline commenting** — select text in plans and attach comments
-- **Plan feedback** — compose structured feedback and choose to revise or start fresh
-
-### Terminal
-
-- **Integrated terminal** — xterm.js-based terminal panel with tabs (Ctrl+`)
-- **Per-directory grouping** — terminals organized by working directory
-- **Multi-tab** — create, close, and switch between terminal instances
-
-### Automation
-
-- **Scheduled sessions** — create automations with cron schedules
-- **Run history** — browse past automation runs with full message replay
-- **In-session messaging** — send messages to active automation runs
-
-### MCP (Model Context Protocol)
-
-- **Server management** — add, remove, enable/disable MCP servers
-- **Multiple scopes** — user, project, local, and managed server configurations
-- **Connection status** — visual indicators for server health
-- **Tool discovery** — browse and search tools from connected servers
-
-### Remote Access
-
-- **WebSocket server** — control sessions from any browser on the local network
-- **Cloudflare tunnel** — access over the internet with end-to-end encryption
-- **QR code** — scan to connect from a mobile device
-- **Client monitoring** — see connected clients and their IPs
-
-### Session Management
-
-- **Multi-session** — run concurrent sessions across different projects
-- **Pin & reorder** — pin favorite sessions to the sidebar top
-- **Custom titles** — rename sessions or let them auto-generate
-- **History loading** — browse and restore past conversation sessions
-
-### Usage & Analytics
-
-- **Token tracking** — input/output/cached token breakdown per block
-- **Cost estimation** — real-time cost display
-- **Usage charts** — daily usage history and block timeline
-- **Customizable status line** — configure what token/cost info appears in the status bar
-
-### Settings
-
-- **Theme** — dark, light, and auto themes
-- **Font scaling** — adjustable UI zoom
-- **Permission editor** — visual rule management with scope selection
-- **Sandbox config** — network rules, filesystem restrictions, excluded commands
-- **Additional directories** — grant filesystem access outside the project root
-
-### Skills
-
-- **Skill browser** — discover bundled, plugin, user, and project skills
-- **Skill filtering** — search skills by name or description
-
-## Tech Stack
-
-- **Electron** + **electron-vite** (React TypeScript template)
-- **React 19** + **TypeScript**
-- **Tailwind CSS v4**
-- **Zustand** for state management
-- **xterm.js** for terminal emulation
-- **@anthropic-ai/claude-agent-sdk** for Claude integration
-- **Cloudflare Tunnel** for remote access
-
-## Getting Started
-
-### Prerequisites
-
-- [Node.js](https://nodejs.org/) 18+
-- [Bun](https://bun.sh/) (package manager)
-- A valid Claude API key or Claude Max subscription
-
-### Install
+**Requirements:** [Bun](https://bun.sh/), and a Claude subscription or API key (sign-in happens in-app). Windows and macOS are supported; Linux is a work in progress. opencode is vendored automatically — bring your own provider keys if you use it.
 
 ```bash
-bun install
+bun install        # also rebuilds native modules and vendors both engine binaries
+bun run dev        # development mode with hot reload
 ```
 
-### Development
+Packaged builds:
 
 ```bash
-bun run dev
+bun run build:win     # Windows
+bun run build:mac     # macOS
 ```
 
-### Build
+The pinned engine versions live in `package.json` (`claudeCliVersion`, `opencodeCliVersion`); `bun run update-cli` / `update-opencode` re-vendor after a bump.
+
+## Contributing
+
+Issues and PRs are welcome. For anything non-trivial, open an issue first to discuss the approach.
+
+**Orientation.** `CLAUDE.md` is the map of the codebase — architecture, services, gotchas. Design decisions are recorded in [`docs/adr/`](docs/adr/); the Claude Code wire protocol in [`docs/protocol/`](docs/protocol/). Read the relevant ADR before changing a documented seam.
+
+**Development.**
 
 ```bash
-# macOS
-bun run build:mac
-
-# Windows
-bun run build:win
-
-# Linux
-bun run build:linux
+bun run dev          # run the app
+bun run test         # unit + component + e2e (~15s)
+bun run test:ci      # + git-backed tests (what CI runs)
+bun run typecheck && bun run lint
 ```
 
-### Web Build
+Two things that bite everyone once:
 
-ClaudeUI also builds as a web app for remote access:
+- After any `bun install`/`add`/`remove`, run `bun run rebuild:native` — bun leaves `better-sqlite3` built for Node's ABI, which crashes the Electron app on boot.
+- UI changes should be verified against the real app, not just jsdom — `scripts/app-shot.mjs` launches the built app, asserts the live DOM by `data-testid`, and screenshots it.
 
-```bash
-bun run build:web
-```
-
-## Project Structure
-
-```
-src/
-  shared/types.ts            — Shared TypeScript types
-  main/
-    index.ts                 — Electron window setup + app lifecycle
-    ipc/                     — IPC handler registration
-    services/                — Core services (Claude session, git, terminals, etc.)
-  preload/index.ts           — Context bridge (main ↔ renderer)
-  renderer/src/
-    stores/session-store.ts  — Zustand store for all session state
-    hooks/                   — React hooks for IPC events
-    components/              — UI components (chat, sidebar, settings, etc.)
-patch/                       — SDK monkey-patches applied via postinstall
-docs/adr/                    — Architectural decision records
-```
-
-## SDK Patches
-
-ClaudeUI applies several patches to the bundled `@anthropic-ai/claude-agent-sdk` to enable features not yet available upstream:
-
-| Patch                   | Purpose                                   |
-| ----------------------- | ----------------------------------------- |
-| `subagent-streaming`    | Stream events and messages from subagents |
-| `team-streaming`        | Stream events and messages from teammates |
-| `taskstop-notification` | Notify on background task stop            |
-| `queue-control`         | Expose message dequeue control            |
-| `mcp-status`            | Fix MCP status returning empty arrays     |
-| `mcp-tool-refresh`      | Refresh MCP tools after reconnection      |
-| `usage-relay`           | Relay usage API through control messages  |
-
-Patches are applied automatically via `postinstall`. See each patch's `README.md` for details.
+**Conventions.** Write tests alongside code (the suite is fast; keep it that way). Follow the two-tier `data-testid` convention for new components (ADR-027). One focused commit per change, with a descriptive message.
 
 ## License
 
 [Apache License 2.0](LICENSE)
-
-## Contributing
-
-Contributions are welcome! Please open an issue first to discuss what you'd like to change.
