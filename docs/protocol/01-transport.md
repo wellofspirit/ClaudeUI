@@ -410,6 +410,38 @@ Module inventory (confirmed at 2.1.114): Windows PE x64 carries 5 modules (cli.j
 
 **If the rebundler fails on a new Bun version**, check Bun's `src/StandaloneModuleGraph.zig` for format changes. The 52-byte module struct and 32-byte Offsets struct have been stable across recent Bun releases but have changed historically (pre-1.3.7 modules were 36 bytes).
 
+### Patch registry
+
+14 content-regex patches under `patch/` (registry: `patch/apply-all.mjs`), applied between the extract and rebundle steps. Three auto-detect upstream fixes and no-op on recent cli.js versions (`taskstop-notification`, `incomplete-session-resume-fix`, `mcp-tool-refresh`). The active 11:
+
+| Patch                    | What it adds to cli.js                                                                                                                                                                                      |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `subagent-streaming`     | Forwards subagent stream_events + messages that would otherwise be swallowed by internal aggregation                                                                                                        |
+| `queue-control`          | `dequeue_message` control subtype + `queued_command_consumed` notification                                                                                                                                  |
+| `mcp-status`             | Awaits MCP refresh before responding so `mcpServerStatus()` returns the full list                                                                                                                           |
+| `background-task`        | `background_task` control subtype — convert foreground task to background                                                                                                                                   |
+| `usage-relay`            | `get_usage` control subtype — exposes cli.js's internal /usage API                                                                                                                                          |
+| `request-usage`          | Emits per-request token usage events after each API call                                                                                                                                                    |
+| `rate-limit-relay`       | Emits rate limit headers after each API call                                                                                                                                                                |
+| `voice-server`           | Adds internal TCP voice-transcription server, control subtypes `voice_server_start`/`stop`                                                                                                                  |
+| `bash-output-streaming`  | Pushes Bash output to stream_event immediately instead of buffering 2s                                                                                                                                      |
+| `subprocess-proxy-strip` | Strips `HTTP(S)_PROXY` / `ALL_PROXY` / `NO_PROXY` from env handed to bash/MCP/LSP/etc. subprocesses so cli.js's own proxy doesn't leak into shell tools (gated off via `CLAUDEUI_PROXY_SUBPROCESSES=1`)     |
+| `skip-securestorage`     | When `SKIP_SECURESTORAGE` is set, forces the credential store to the plaintext file backend (bypassing macOS Keychain) so per-account `.credentials.json` files can be managed/swapped. Enables multi-account (ADR-015) |
+
+Retired: `ci-path-remap` (obsolete once cli.js runs inside its native Bun runtime — ADR-006), `sandbox-network-fix` (upstream's "no allowed domains = no network" semantics kept deliberately), `team-streaming` (dir removed).
+
+Patches operate on the wrapped Bun CJS IIFE bytes at `vendor/claude-cli/cli.js`; every anchor targets content inside the IIFE body. When the minifier changes variable names between versions, a patch fails with "cannot locate anchor" — update that patch's regex using its README's bundle-analyzer anchors.
+
+`apply.mjs` conventions:
+
+1. Read `vendor/claude-cli/cli.js`, check for `/*PATCHED:<name>*/` marker (idempotency).
+2. Find code by **content patterns/string literals** — never char offsets or minified names.
+3. Extract minified variable names dynamically from regex captures.
+4. Use `const V = '[\\w$]+'` for matching minified identifiers.
+5. Verify pattern matches exactly once, apply replacement with marker, write back.
+
+Register new patches in the `patches` array in `patch/apply-all.mjs`. Skills for patch work: `/bundle-analyzer` (locate targets in minified cli.js), `/patch-readme` (per-patch README with anchors), `/patch-test-harness` (behavioral tests).
+
 ---
 
 ## 1.13 Harness module map (`src/main/sdk/`)

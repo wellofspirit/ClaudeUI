@@ -10,7 +10,7 @@ V2 spans multiple engines (ADR-018/019), each with its own config files and cred
 adds structured operational data (multi-engine usage, account info, capability cache, session
 metadata) that outgrows scattered JSON. ADR-009 (cli.js-consumed settings live in Claude's
 `settings.json`) generalizes into a config-plane principle; ADR-011's usage windows fold into a
-broader metering store. (The implemented layout is documented in `CLAUDE.md` § "Persistence model".)
+broader metering store. (The implemented layout is documented in `docs/architecture.md` § "Persistence model".)
 
 ## Decision
 

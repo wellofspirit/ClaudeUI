@@ -9,7 +9,7 @@
 Auth differs by engine at the mechanism level: ClaudeUI *drives* Claude's OAuth (service session +
 control requests, ADR-014) and manages multi-account file credentials (ADR-015); opencode *delegates*
 (owns `auth.json`, multi-vendor) but exposes auth-setting endpoints. V2 needs one neutral interface
-over both. (The implemented model is documented in `CLAUDE.md` § "Auth / Accounts".)
+over both. (The implemented model is documented in `docs/architecture.md` § "Auth / accounts".)
 
 ## Decision
 
