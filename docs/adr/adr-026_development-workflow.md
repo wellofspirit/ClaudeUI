@@ -97,6 +97,14 @@ relaxes the review bar.
 - **cli.js wire.** For any cli.js-integration question, consult `docs/protocol/` first, then probe
   the real `bun-claude` binary — cheaper and more reliable than reading minified cli.js. Use
   `/bundle-analyzer` to navigate the bundle.
+- **pi wire (ADR-035).** For any pi-integration question, consult `docs/protocol-pi/` first (the
+  verified notes) + the version-exact docs shipped in the vendored payload
+  (`vendor/pi-cli/docs/*.md`), then probe the real `vendor/pi-cli/pi` binary. For source-level
+  questions, **shallow-clone the pinned tag** (`git clone --depth 1 --branch v<piCliVersion>
+  https://github.com/earendil-works/pi`) — there is deliberately **no** vendored pi source clone
+  (unlike `vendor/opencode-src/`). The bridge extension (`pi-bridge-source.ts`) must stay
+  **import-free** and **fail-closed**; product code writes only `os.tmpdir()` (the bridge file) +
+  `PiAuthProvider`'s documented `~/.pi/agent/auth.json` api_key merge — never else under `~/.pi/**`.
 - **Commits.** One per item, no AI attribution, multi-paragraph body, stage precisely.
 - **Pre-existing lint.** 3 `exhaustive-deps` warnings (Sidebar / ExitPlanModeCard / ReviewBar) —
   leave them.
