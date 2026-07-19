@@ -26,6 +26,15 @@ extraResources:
     filter:
       - opencode*
       - version.json
+  # pi standalone build resolves runtime assets (native addons, wasm, themes,
+  # export-html template) relative to the executable — ship the vendored dir
+  # minus docs/examples.
+  - from: vendor/pi-cli
+    to: pi-cli
+    filter:
+      - '**/*'
+      - '!docs/**'
+      - '!examples/**'
   - from: out/web
     to: web
 asarUnpack:

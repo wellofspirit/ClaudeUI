@@ -19,3 +19,6 @@ bin/
 # Local opencode source checkout for debugging bundled behavior.
 /vendor/opencode-src/
 /.cache/
+
+# pi coding agent standalone build (vendored by ensure-pi)
+/vendor/pi-cli/
