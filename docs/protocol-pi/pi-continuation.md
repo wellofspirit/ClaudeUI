@@ -46,12 +46,13 @@ workflow (Opus specs+reviews, Sonnet implements, gates + real-app drive before c
 | `acd3228` | audit fixes | dispatch target: failed/stopped-turn spend counts toward cap, `draining` closes the late-ask orphan race, env recursion guard overrides (not omits) the enable flags |
 | `8596223` | audit fixes | InputBox fallback ModelInfo carries explicit flags (empty-catalog pi session no longer leaks Claude pickers), pi default-model fallback branch; direct capability/store/settings test suites |
 | `5615437` | M5a | plan mode: bridge-extension `setActiveTools` switching + `exit_plan` (hidden outside plan mode), `'plan'` autonomy with per-segment read-only bash allowlist, ExitPlanModeCard/Shift+Tab wired for pi; `plan:true` |
+| `8f5a38a` | M5b | in-pi subagents: second `-e` extension porting pi's subagent example (user-level agent .md defs, child pi processes, delta streaming via onUpdate details → session:subagent-*/TaskCard, per-agent usage rows); fixed the example's upstream Windows bunfs-path bug; `subagents:true` |
 
 Full parity with opencode: chat/tools/sessions/usage, interactive approvals honoring the **same
 `~/.claude` permission rules** as Claude/opencode, auth, shared skills, hosted mermaid/mockup,
 bidirectional cross-engine dispatch.
 
-Tests at branch tip: **324 files / 5476 passing at `test:ci` scope** (the default `bun run test`
+Tests at branch tip: **324 files / 5539 passing at `test:ci` scope** (the default `bun run test`
 skips the slow 2-file/53-test `git` project) + a gated `PI_INTEGRATION_TESTS` real-binary suite
 (4 files, 9 tests — all green against the hardened bridge). Durable record: **ADR-035**
 (`docs/adr/adr-035_pi-engine-backend.md`).
@@ -100,10 +101,11 @@ them = inventing a feature pi doesn't have.
   **API keys work fully in-app today.** Workaround: shell pi's `/login` into a **PTY inside the
   app** (we already have node-pty terminals — see `pty-manager.ts`) so the user never leaves
   ClaudeUI. Medium value, moderate effort. Only the one real friction point for a subscription user.
-- **`subagents`** — pi has no *native* subagent tool emitting child-session events (unlike Claude's
-  Task tool / opencode's `task` tool streaming on the shared SSE). pi's subagents are an
-  example-extension pattern — nothing on the wire to map to `session:subagent-*`. Higher effort,
-  and partly moot since cross-engine dispatch already gives pi a delegation path.
+- **`subagents`** — ✅ SHIPPED (M5b, `8f5a38a`): in-pi extension route (user decision — faithful to
+  pi's example, agent defs in pi-native `~/.pi/agent/agents/*.md`). See ADR-035 + the M5b probe
+  notes in `docs/protocol-pi/README.md`. Users author agent defs themselves; zero defs → the tool
+  simply doesn't register. v2 candidates: project-local `.pi/agents` (needs a confirm-UI story),
+  chain/workflow mode, threading the approval bridge into children.
 
 **My recommendation for next work:** `sideQuestion` (near-free), then `fork` (exposes pi's best
 feature), then the PTY-login workaround. Everything in Bucket A: leave alone.

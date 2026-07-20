@@ -143,6 +143,23 @@ Probed for M5a (2026-07-20, same binary):
   session switch/fork reloads (fresh extension instance), which is what makes register-then-hide
   state machines safe across reloads.
 
+Probed for M5b (2026-07-20, same binary):
+
+- **Registered-tool `onUpdate({content, details})` payloads surface VERBATIM as
+  `tool_execution_update.partialResult`** on the RPC wire — arbitrary nested `details` objects
+  survive intact (the M5b subagent streaming contract rides this). `tool_execution_start` fires
+  for registered tools too. The tool's FINAL return `{content, details}` additionally arrives via
+  the toolResult `message_end`'s `.details` — two carriers for the terminal payload.
+- **`-e` is repeatable** — `-e a.ts -e b.ts` loads both extensions.
+- **Windows bunfs paths**: inside the bun-compiled `pi.exe`, `process.argv[1]` is
+  `B:/~BUN/root/pi.exe` (drive-letter form, NOT the POSIX `/$bunfs/root/` the shipped subagent
+  example checks for) and `fs.existsSync` returns TRUE for it (bun patches fs). Any
+  "am I a compiled binary" detection must handle `X:[\\/]~BUN[\\/]` — the upstream example's
+  `getPiInvocation` has this bug; our port fixes it.
+- gpt-5.6-luna's `set_model` response data includes `thinkingLevelMap` with `xhigh`/`max` — the
+  catalog DOES expose per-model higher-tier support (future: lift piModelCapabilities' conservative
+  low/medium/high cap by reading this).
+
 ## Behavior gotchas
 
 - The RPC `bash` command (user-initiated, not model tool calls) enters LLM context **on the next

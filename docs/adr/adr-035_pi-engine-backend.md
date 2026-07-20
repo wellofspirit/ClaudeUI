@@ -97,12 +97,25 @@ Two facts drove the design, both **probed against the real binary before any pro
   must match; substitution constructs deny; network commands excluded — a plan-mode bash allow is
   an auto-allow with no human gate), and `exit_plan` asks — surfacing the same engine-neutral
   ExitPlanModeCard/Shift+Tab cycle Claude uses (kind `'plan'` in the tool registry).
+- **In-pi subagents (M5b):** a SECOND ClaudeUI-owned `-e` extension (`pi-subagent-source.ts`,
+  content-verified tmp file like the bridge; this one imports node builtins — allowed, probed)
+  ports pi's shipped subagent example to v1 scope: user-level agent `.md` discovery
+  (`~/.pi/agent/agents`), single + parallel tasks, children spawned as
+  `pi --mode json -p --no-session` with NO extensions of their own (recursion structurally
+  absent). Child progress streams through the registered tool's `onUpdate` `details`
+  (`cuiSubagent` v1 contract: per-agent status + DELTA messages + usage), which surfaces verbatim
+  on RPC `tool_execution_update.partialResult` (probed); PiSession maps it onto the same
+  `session:subagent-*` payloads the dispatch target emits, so TaskCard renders both identically.
+  One usage row per agent with account attribution; parent totals untouched. The `subagent` tool
+  itself is gated as kind `'task'` (ask/allow/deny by mode) — children then run their agent-def
+  toolset ungated, the same two-stage trust posture as the M4c dispatch target, safe because
+  agent defs are user-authored files the model cannot write through this tool.
 - **Capability honesty (ADR-030):** flags flipped only as each end-to-end path shipped and was
   live-verified: M1 `queue`; M2 `steer`/`interactiveApprovals`/`autonomyModes`/`slashCommands`/
   `skills`; M4 `hostedMcp`/`crossEngineDispatch` (the latter ANDed per-session with
-  `crossEngineDispatchAvailable('pi')`); M5a `plan` (+ `'plan'` in `autonomyModes`). `fork`,
-  `subagents`, `backgroundTasks`, `voice`, `sandbox`, `proxy`, `sideQuestion`, `multiAccount`,
-  `canDriveLogin` remain false (unwired or N/A).
+  `crossEngineDispatchAvailable('pi')`); M5a `plan` (+ `'plan'` in `autonomyModes`); M5b
+  `subagents`. `fork`, `backgroundTasks`, `voice`, `sandbox`, `proxy`, `sideQuestion`,
+  `multiAccount`, `canDriveLogin` remain false (unwired or N/A).
 
 ## Consequences
 
