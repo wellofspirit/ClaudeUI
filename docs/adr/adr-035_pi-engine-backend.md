@@ -86,11 +86,23 @@ Two facts drove the design, both **probed against the real binary before any pro
     handler, so even a stray-registered tool fails closed. Spend from errored/timed-out/stopped
     target turns still counts toward the cost cap and the dispatching session's breakdown (the cap
     is a spend limit, not a success limit — same rule as the Claude target).
+- **Plan mode (M5a):** pi has no native plan mode — ClaudeUI builds it as extension-enforced
+  read-only autonomy, patterned on pi's shipped `examples/extensions/plan-mode/`. The bridge
+  extension toggles pi's own active-tool set via `pi.setActiveTools()` on
+  `/cui-plan-enter`/`/cui-plan-exit` commands (sent over the normal RPC `prompt` channel — extension
+  commands execute immediately, even mid-turn), drops `edit`/`write`, and exposes a locally-executed
+  `exit_plan` tool only while planning (registered tools auto-activate, so a `session_start` handler
+  hides it otherwise). The permission-engine's `'plan'` mode base is the second enforcement layer:
+  mutating kinds deny, bash passes only a per-segment read-only allowlist (every chained segment
+  must match; substitution constructs deny; network commands excluded — a plan-mode bash allow is
+  an auto-allow with no human gate), and `exit_plan` asks — surfacing the same engine-neutral
+  ExitPlanModeCard/Shift+Tab cycle Claude uses (kind `'plan'` in the tool registry).
 - **Capability honesty (ADR-030):** flags flipped only as each end-to-end path shipped and was
   live-verified: M1 `queue`; M2 `steer`/`interactiveApprovals`/`autonomyModes`/`slashCommands`/
   `skills`; M4 `hostedMcp`/`crossEngineDispatch` (the latter ANDed per-session with
-  `crossEngineDispatchAvailable('pi')`). `plan`, `fork`, `subagents`, `backgroundTasks`, `voice`,
-  `sandbox`, `proxy`, `sideQuestion`, `multiAccount`, `canDriveLogin` remain false (unwired or N/A).
+  `crossEngineDispatchAvailable('pi')`); M5a `plan` (+ `'plan'` in `autonomyModes`). `fork`,
+  `subagents`, `backgroundTasks`, `voice`, `sandbox`, `proxy`, `sideQuestion`, `multiAccount`,
+  `canDriveLogin` remain false (unwired or N/A).
 
 ## Consequences
 

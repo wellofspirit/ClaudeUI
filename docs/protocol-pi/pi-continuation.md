@@ -45,12 +45,13 @@ workflow (Opus specs+reviews, Sonnet implements, gates + real-app drive before c
 | `771be7e` | audit fixes | SECURITY: one-shot `/hosted-tool` grants (token-only POST can no longer bypass dispatch_agent's ask), content-verified bridge file, timing-safe token; steer/doStart/exit lifecycle fixes; usage accountId; crash-path + hook-harness tests |
 | `acd3228` | audit fixes | dispatch target: failed/stopped-turn spend counts toward cap, `draining` closes the late-ask orphan race, env recursion guard overrides (not omits) the enable flags |
 | `8596223` | audit fixes | InputBox fallback ModelInfo carries explicit flags (empty-catalog pi session no longer leaks Claude pickers), pi default-model fallback branch; direct capability/store/settings test suites |
+| `5615437` | M5a | plan mode: bridge-extension `setActiveTools` switching + `exit_plan` (hidden outside plan mode), `'plan'` autonomy with per-segment read-only bash allowlist, ExitPlanModeCard/Shift+Tab wired for pi; `plan:true` |
 
 Full parity with opencode: chat/tools/sessions/usage, interactive approvals honoring the **same
 `~/.claude` permission rules** as Claude/opencode, auth, shared skills, hosted mermaid/mockup,
 bidirectional cross-engine dispatch.
 
-Tests at branch tip: **324 files / 5385 passing at `test:ci` scope** (the default `bun run test`
+Tests at branch tip: **324 files / 5476 passing at `test:ci` scope** (the default `bun run test`
 skips the slow 2-file/53-test `git` project) + a gated `PI_INTEGRATION_TESTS` real-binary suite
 (4 files, 9 tests — all green against the hardened bridge). Durable record: **ADR-035**
 (`docs/adr/adr-035_pi-engine-backend.md`).
@@ -88,11 +89,9 @@ them = inventing a feature pi doesn't have.
   `pi --mode rpc --no-session`, ask, dispose — the exact pattern `model-discovery.ts` and the
   dispatch target already use. Implement `PiSession.askSideQuestion()` (BaseSession returns null by
   default) + flip `sideQuestion`. Low effort.
-- **`plan`** — no *native* plan mode, but pi ships plan-mode as an example extension
-  (`vendor/pi-cli/examples/extensions/plan-mode/`), so the pattern is "build it as read-only
-  autonomy." Add a `plan` autonomy to `permission-engine.ts` that denies all mutating kinds
-  (allow read/search only) + a plan-exit affordance, then add `'plan'` to `autonomyModes`. Moderate.
-  Left false rather than ship a half-version.
+- **`plan`** — ✅ SHIPPED (M5a, `5615437`): extension-enforced read-only autonomy patterned on
+  pi's example extension; see ADR-035 and the M5a probe notes in `docs/protocol-pi/README.md`
+  ("Probed for M5a").
 
 ### Bucket C — limited by pi's design (workaround or pi-upstream)
 - **`auth.canDriveLogin`** — pi's OAuth `/login` (ChatGPT/Claude Pro/Copilot subscriptions) is

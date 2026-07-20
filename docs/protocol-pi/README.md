@@ -123,6 +123,26 @@ All **verified against the standalone `pi.exe`** (this was the M0 go/no-go):
   `examples/rpc-extension-ui.ts` + `examples/extensions/rpc-demo.ts`, `examples/extensions/subagent/`,
   `examples/extensions/plan-mode/`.
 
+Probed for M5a (2026-07-20, same binary):
+
+- **Imports work in `-e` extensions** — node builtins (`node:fs`) AND relative imports
+  (`./helper.ts`) resolve from an arbitrary file path outside any package context. (The ClaudeUI
+  bridge stays import-free by choice, not necessity — its tmp-file tamper surface is smaller that way.)
+- **Action methods throw during extension load** — `getActiveTools()`/`setActiveTools()` at module
+  top level fail the whole extension with "Extension runtime not initialized". Top level is for
+  registration only (`registerTool`/`registerCommand`/`pi.on`); act inside event/command handlers.
+- **`pi.setActiveTools()` works at runtime in RPC mode** — probed `["read","bash","edit","write"]`
+  → `["read","grep","find","ls"]` round-trip via `getActiveTools()` from a command handler.
+- **`pi.registerTool()` auto-activates** the tool (the M4a hosted tools rely on this); hide-until-
+  needed requires an explicit `setActiveTools` filter afterwards.
+- **Extension commands execute via the RPC `prompt` command** (`{"type":"prompt","message":"/name"}`)
+  — "immediately even during streaming" (rpc.md) — this is ClaudeUI's inbound extension-signaling
+  channel (plan-mode enter/exit).
+- **`session_start` fires at the initial `-e` RPC spawn** with `reason: "startup"` — a value the
+  extensions.md docs don't list (they document `"new" | "resume" | "fork"`). It also re-fires after
+  session switch/fork reloads (fresh extension instance), which is what makes register-then-hide
+  state machines safe across reloads.
+
 ## Behavior gotchas
 
 - The RPC `bash` command (user-initiated, not model tool calls) enters LLM context **on the next
