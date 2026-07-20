@@ -43,14 +43,17 @@ Two facts drove the design, both **probed against the real binary before any pro
   ship in the payload; for source-level questions, shallow-clone the pinned tag — see
   `docs/protocol-pi/README.md` and the ADR-026 standing constraint added for pi).
 - **Approvals & autonomy (ADR-022 parity, as an evaluator not a ruleset):** a per-session
-  `PiBridgeHost` (loopback HTTP, per-spawn bearer token) receives the extension's `tool_call` POSTs
-  and runs a **pure `permission-engine`** — severity precedence deny > hosted-auto-allow > ask >
-  allow over the user's merged user/project/local **Claude** permission rules (bare-tool + Bash
-  prefix/exact matchers; path-glob deferred), then session-allows, then the autonomy-mode base
-  (`ask`/`autoEdit`/`full`). The **same `~/.claude` settings rules govern pi, Claude, and opencode**
-  — the "one config, all harnesses" requirement. 'ask' surfaces the standard
-  `session:approval-request`; "always allow" persists to the shared Claude store via the same
-  `permission-compiler` helpers opencode uses.
+  `PiBridgeHost` (loopback HTTP, per-spawn bearer token compared timing-safe) receives the
+  extension's `tool_call` POSTs and runs a **pure `permission-engine`** — severity precedence
+  deny > hosted-auto-allow > ask > allow over the user's merged user/project/local **Claude**
+  permission rules (bare-tool + Bash prefix/exact matchers; path-glob deferred), then
+  session-allows, then the autonomy-mode base (`ask`/`autoEdit`/`full`). The **same `~/.claude`
+  settings rules govern pi, Claude, and opencode** — the "one config, all harnesses" requirement.
+  'ask' surfaces the standard `session:approval-request`; "always allow" persists to the shared
+  Claude store via the same `permission-compiler` helpers opencode uses. The injected extension
+  file under `os.tmpdir()` is **content-verified against the compiled source on every spawn**
+  (rewrite on any mismatch) — write-if-absent alone left a preplant window on world-writable
+  POSIX `/tmp`.
 - **Interaction parity (ADR-024):** mid-turn `steer`, thinking levels → the effort picker
   (`set_thinking_level`, gated on the model's catalog `reasoning` flag), slash-command + skill
   discovery (`get_commands`), and live bash-output streaming (reusing opencode's `BashStreamGate`).
@@ -64,7 +67,11 @@ Two facts drove the design, both **probed against the real binary before any pro
 - **Hosted tools (ADR-007/019 parity):** `render_mermaid`/`create_mockup`/`show_mockup` registered
   via `pi.registerTool()` over a second `PiBridgeHost` route (`/hosted-tool`), delegating to the
   SAME `mermaid-tool.ts`/`mockup-tool.ts` handlers Claude and opencode reuse. Auto-allowed by the
-  permission-engine (parity with Claude's `mcp__claude-ui__` prefix).
+  permission-engine (parity with Claude's `mcp__claude-ui__` prefix). Execution requires a
+  **one-shot grant** (`toolCallId → toolName`) minted by the `tool_call` gate on 'allow' and
+  consumed by `/hosted-tool` — the bearer token alone must not authorize execution, since it sits
+  in the pi child's env where any already-approved bash command could replay it to bypass
+  `dispatch_agent`'s deliberate 'ask' gating.
 - **Cross-engine dispatch (ADR-033/034), both directions:**
   - **Source:** a pi session's `dispatch_agent` (registered like the hosted tools, but normally
     gated) builds the engine-neutral `DispatchContext` and calls the existing `crossEngineDispatcher`
@@ -73,8 +80,12 @@ Two facts drove the design, both **probed against the real binary before any pro
     own `PiBridgeHost` for two-stage approval forwarding). Two documented divergences from the
     Claude target: pi has no async-iterator (a settle-promise resolver is installed before the
     prompt), and pi's `abort` is turn-scoped not process-killing (targets survive for continuation,
-    like opencode). Recursion is structurally impossible — a target's child env omits the
-    hosted-tools/dispatch enable flags, so it has no `dispatch_agent` tool.
+    like opencode). Recursion is structurally impossible — a target's child env **explicitly
+    overrides** the hosted-tools/dispatch enable flags to `''` (omission alone would inherit the
+    parent process env through the spawn merge), and the target's bridge host has no hosted-tool
+    handler, so even a stray-registered tool fails closed. Spend from errored/timed-out/stopped
+    target turns still counts toward the cost cap and the dispatching session's breakdown (the cap
+    is a spend limit, not a success limit — same rule as the Claude target).
 - **Capability honesty (ADR-030):** flags flipped only as each end-to-end path shipped and was
   live-verified: M1 `queue`; M2 `steer`/`interactiveApprovals`/`autonomyModes`/`slashCommands`/
   `skills`; M4 `hostedMcp`/`crossEngineDispatch` (the latter ANDed per-session with
@@ -85,8 +96,12 @@ Two facts drove the design, both **probed against the real binary before any pro
 
 - New `src/main/pi/` (PiRpcClient, PiSession, event-mapper, model-discovery, pi-spawn-prep,
   pi-locate, pi-protocol, PiBridgeHost, pi-bridge-source, permission-engine) + `PiAuthProvider` +
-  `pi-session-list` + `PiEngineToolMap` + the five compile-enforced engine tables (EngineId union,
-  engine-meta, model-capabilities, engine-tool-maps, EngineLogo). The `ISession` seam,
+  `pi-session-list` + `PiEngineToolMap` + the engine registration surfaces keyed off the `EngineId`
+  union: three genuinely compile-enforced tables (engine-meta, engine-tool-maps, EngineLogo — each
+  `satisfies Record<EngineId, …>`), plus two that are convention-only and fail silently for a future
+  engine #4: the per-engine capability consts in model-capabilities (no exhaustive table) and the
+  db.ts engine-id string allowlists (unknown ids clamp to `'claude'` — guarded by tests, not types).
+  The `ISession` seam,
   `crossEngineDispatcher`, and the renderer's `session:*`/subagent/task pipeline were untouched
   except for additive pi branches; Claude and opencode behavior is byte-identical.
 - Persistence: `session_meta`/`usage_event` rows carry `'pi'` (db allowlists extended); sessions are
