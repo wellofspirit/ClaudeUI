@@ -189,6 +189,7 @@ export function InputBox(): React.JSX.Element {
   // model. Instead filter explicitly by the session engine, and for opencode use
   // the same resolver the spawn path uses so display == what will actually run.
   const opencodeDefaultModel = useSessionStore((s) => s.opencodeDefaultModel)
+  const piDefaultModel = useSessionStore((s) => s.piDefaultModel)
   const selectedModel = useMemo(() => {
     const exact = models.find((m) => m.value === selectedModelValue)
     if (exact) return exact
@@ -198,16 +199,36 @@ export function InputBox(): React.JSX.Element {
       const m = resolved ? models.find((mm) => mm.value === resolved) : undefined
       if (m) return m
     }
+    if (engine === 'pi') {
+      // Mirror resolvePiSpawnModel's resolution ladder (requested → default →
+      // first catalog): `exact` above already covers "requested", this covers
+      // "default", and `sameEngine[0]` below covers "first catalog". Looking the
+      // configured default up in `models` keeps display consistent with what
+      // would actually spawn — never surfaces it if pi's catalog doesn't have it.
+      const m = models.find((mm) => mm.value === piDefaultModel && (mm.engineId ?? 'claude') === 'pi')
+      if (m) return m
+    }
     const sameEngine = models.filter((m) => (m.engineId ?? 'claude') === engine)
     return (
       sameEngine[0] || {
         value: selectedModelValue || 'default',
-        displayName: engine === 'opencode' ? 'Select a model' : 'Default',
-        shortName: engine === 'opencode' ? 'Select model' : 'Default',
-        description: ''
+        displayName: engine === 'claude' ? 'Default' : 'Select a model',
+        shortName: engine === 'claude' ? 'Default' : 'Select model',
+        description: '',
+        // Non-Claude synthetic fallback: without explicit flags,
+        // claudeModelCapabilities' unknown-family heuristic (used for ALL
+        // engines, see the `reasoning` memo below) would assume a modern Claude
+        // model and paint the Adaptive-thinking + 5-tier effort pickers onto an
+        // engine that never supports them (pi: only low/medium/high, ever
+        // — see piModelCapabilities). Explicit false short-circuits the
+        // heuristic entirely (modelSupports* trust a boolean flag over the
+        // id-based guess).
+        ...(engine === 'claude'
+          ? {}
+          : { engineId: engine, supportsAdaptiveThinking: false, supportsEffort: false })
       }
     )
-  }, [models, sessionEngineId, selectedModelValue, opencodeDefaultModel])
+  }, [models, sessionEngineId, selectedModelValue, opencodeDefaultModel, piDefaultModel])
 
   const statusLine = useActiveSession((s) => s.statusLine)
   const billingType = useActiveSession((s) => s.status?.account?.billingType)

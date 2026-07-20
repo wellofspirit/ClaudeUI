@@ -199,3 +199,43 @@ describe('seedCapabilities parity with the pre-existing resolvers', () => {
     )
   })
 })
+
+// ---------------------------------------------------------------------------
+// PI_META.seedCapabilities' reasoning derivation (engine-meta.ts ~:120-123):
+// ModelInfo has no `reasoning` field of its own — it's derived from
+// `supportsEffort` (the flag model-discovery.ts sets from the catalog's
+// `reasoning: boolean` fact per model) so the seeded capabilities agree with
+// the effort picker the SAME ModelInfo drives in InputBox.
+// ---------------------------------------------------------------------------
+
+describe('pi seedCapabilities reasoning derivation from supportsEffort', () => {
+  it('supportsEffort: true → reasoning.effort is the conservative low/medium/high set', () => {
+    const modelInfo: ModelInfo = {
+      value: 'openai-codex/gpt-5.6-luna',
+      displayName: 'GPT-5.6 Luna',
+      description: '',
+      supportsEffort: true,
+      supportedEffortLevels: ['low', 'medium', 'high']
+    }
+    const caps = engineMeta('pi').seedCapabilities('openai-codex/gpt-5.6-luna', modelInfo)
+    expect(caps.reasoning.effort).toEqual({ levels: ['low', 'medium', 'high'] })
+    // pi never gets an Adaptive-thinking picker, regardless of supportsEffort.
+    expect(caps.reasoning.thinking).toBeUndefined()
+  })
+
+  it('supportsEffort: false → reasoning.effort is absent', () => {
+    const modelInfo: ModelInfo = {
+      value: 'openai-codex/gpt-5.5-mini',
+      displayName: 'GPT-5.5 Mini',
+      description: '',
+      supportsEffort: false
+    }
+    const caps = engineMeta('pi').seedCapabilities('openai-codex/gpt-5.5-mini', modelInfo)
+    expect(caps.reasoning).toEqual({})
+  })
+
+  it('supportsEffort absent (no modelInfo) → reasoning.effort is absent', () => {
+    const caps = engineMeta('pi').seedCapabilities('openai-codex/gpt-5.6-luna')
+    expect(caps.reasoning).toEqual({})
+  })
+})

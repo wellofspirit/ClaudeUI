@@ -719,12 +719,12 @@ export function resolveOpencodeCapabilitiesFromModel(
  *     surface (fork/clone, …) is wired the same way OpencodeSession's were.
  *   - sandbox, proxy → Claude cli.js launch-param concepts; pi has neither
  *     (see EngineCapabilities' own doc comment) — likely permanently false.
- *   - crossEngineDispatch → SHIPPED in M4b: pi as a dispatch SOURCE only
- *     (`dispatch_agent`, same registerTool mechanism as hostedMcp above,
+ *   - crossEngineDispatch → SHIPPED both directions: pi as a dispatch SOURCE
+ *     (M4b — `dispatch_agent`, same registerTool mechanism as hostedMcp above,
  *     PiSession.handleDispatchAgent calling crossEngineDispatcher.dispatch()
- *     directly — NOT via MCP). pi as a dispatch TARGET is a separate later
- *     milestone; cross-engine-dispatcher.ts's engine guard still rejects
- *     'pi' as `req.engine`, so this stays honest. The static `true` here is
+ *     directly — NOT via MCP) AND pi as a dispatch TARGET (M4c —
+ *     cross-engine-dispatcher.ts's engine guard accepts 'pi' as `req.engine`
+ *     and routes it through `resolveAndRunPi`). The static `true` here is
  *     ANDed with the runtime `crossEngineDispatchAvailable('pi')` check at
  *     PiSession's `capabilities` getter (mirrors ClaudeSession/
  *     OpencodeSession's identical AND at session build — ADR-030/033 M4-A).

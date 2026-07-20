@@ -145,4 +145,53 @@ describe('PiVendors', () => {
     })
     expect(screen.getByTestId('PiVendors.subscriptionHint')).toHaveTextContent('run /login in a terminal')
   })
+
+  it('setKey rejection surfaces the error message and does not clear the form', async () => {
+    vendorAuthSetKey.mockRejectedValueOnce(new Error('failed to write auth.json'))
+    render(<PiVendors />)
+    await waitFor(() => screen.getByTestId('PiVendors.addVendorSelect'))
+
+    fireEvent.change(screen.getByTestId('PiVendors.addVendorSelect'), { target: { value: 'openai' } })
+    fireEvent.change(screen.getByTestId('PiVendors.addKeyInput'), { target: { value: 'sk-test-123' } })
+    fireEvent.click(screen.getByTestId('PiVendors.addKey'))
+
+    await waitFor(() => {
+      expect(screen.getByTestId('PiVendors')).toHaveTextContent('failed to write auth.json')
+    })
+    // Reload does NOT run on failure — probe() was only called once (initial mount).
+    expect(vendorAuthProbe.mock.calls.length).toBe(1)
+  })
+
+  it('setKey rejection with a non-Error throw falls back to a generic message', async () => {
+    vendorAuthSetKey.mockRejectedValueOnce('not an Error instance')
+    render(<PiVendors />)
+    await waitFor(() => screen.getByTestId('PiVendors.addVendorSelect'))
+
+    fireEvent.change(screen.getByTestId('PiVendors.addVendorSelect'), { target: { value: 'openai' } })
+    fireEvent.change(screen.getByTestId('PiVendors.addKeyInput'), { target: { value: 'sk-test-123' } })
+    fireEvent.click(screen.getByTestId('PiVendors.addKey'))
+
+    await waitFor(() => {
+      expect(screen.getByTestId('PiVendors')).toHaveTextContent('Failed to save key for openai')
+    })
+  })
+
+  it('binaryPath null: subscription hint renders without the copyable command block', async () => {
+    getPiBinaryPath.mockResolvedValueOnce(null as unknown as string)
+    render(<PiVendors />)
+    await waitFor(() => {
+      expect(screen.getByTestId('PiVendors.subscriptionHint')).toHaveTextContent('run /login in a terminal')
+    })
+    expect(screen.queryByTestId('PiVendors.subscriptionCommand')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('PiVendors.copyCommand')).not.toBeInTheDocument()
+  })
+
+  it('getPiBinaryPath rejection: subscription hint renders without the copyable command block', async () => {
+    getPiBinaryPath.mockRejectedValueOnce(new Error('not found'))
+    render(<PiVendors />)
+    await waitFor(() => {
+      expect(screen.getByTestId('PiVendors.subscriptionHint')).toHaveTextContent('run /login in a terminal')
+    })
+    expect(screen.queryByTestId('PiVendors.subscriptionCommand')).not.toBeInTheDocument()
+  })
 })

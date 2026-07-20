@@ -5,8 +5,8 @@
  * Pattern: arrange store state → call action → assert resulting state.
  */
 
-import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { useSessionStore } from '../session-store'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { useSessionStore, OPENCODE_DEFAULT_MODEL, PI_DEFAULT_MODEL } from '../session-store'
 import { claudeModel } from '../../../../shared/types'
 import {
   resolveClaudeCapabilities,
@@ -1804,6 +1804,48 @@ describe('createNewSession inherits lastSelectedEngineId', () => {
     expect(caps.backgroundTasks).toBe(true)
     expect(caps.canUseMcp).toBe(true)
     expect(caps.isAgentCapable).toBe(true)
+  })
+
+  // -------------------------------------------------------------------------
+  // Regression: perEngineDefaultModel (session-store.ts ~:91-99). Before that
+  // helper existed, BOTH createNewSession and loadHistoricalSession passed
+  // `state.opencodeDefaultModel` unconditionally regardless of engineId — a
+  // latent bug for 'pi': a fresh/reopened pi session would seed from
+  // opencode's default model string instead of pi's own, since
+  // PI_DEFAULT_MODEL's fallback in defaultModelValue never triggers while
+  // opencodeDefaultModel is truthy (which it always is).
+  // -------------------------------------------------------------------------
+
+  afterEach(() => {
+    // Restore module-singleton store fields this describe block mutates, so
+    // later describe blocks in this file see the defaults they expect.
+    useSessionStore.setState({
+      lastSelectedEngineId: 'claude',
+      piDefaultModel: PI_DEFAULT_MODEL,
+      opencodeDefaultModel: OPENCODE_DEFAULT_MODEL
+    })
+  })
+
+  it('pi engine seeds selectedModel from piDefaultModel, NOT opencodeDefaultModel', () => {
+    useSessionStore.setState({
+      lastSelectedEngineId: 'pi',
+      piDefaultModel: 'anthropic/claude-sonnet-5',
+      opencodeDefaultModel: 'opencode/mimo-v2.5-free'
+    })
+    store().createNewSession('r-pi', '/path')
+    expect(store().sessions['r-pi'].selectedEngineId).toBe('pi')
+    expect(store().sessions['r-pi'].selectedModel).toBe('anthropic/claude-sonnet-5')
+  })
+
+  it('pi engine falls back to PI_DEFAULT_MODEL when piDefaultModel is unset — never opencodeDefaultModel', () => {
+    useSessionStore.setState({
+      lastSelectedEngineId: 'pi',
+      piDefaultModel: PI_DEFAULT_MODEL,
+      opencodeDefaultModel: 'opencode/mimo-v2.5-free'
+    })
+    store().createNewSession('r-pi-2', '/path')
+    expect(store().sessions['r-pi-2'].selectedModel).toBe(PI_DEFAULT_MODEL)
+    expect(store().sessions['r-pi-2'].selectedModel).not.toBe('opencode/mimo-v2.5-free')
   })
 })
 

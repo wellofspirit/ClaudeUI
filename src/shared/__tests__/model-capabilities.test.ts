@@ -23,7 +23,10 @@ import {
   CONTEXT_WINDOW_1M,
   resolveCapabilities,
   OPENCODE_ENGINE_CAPABILITIES,
-  CLAUDE_ENGINE_CAPABILITIES
+  CLAUDE_ENGINE_CAPABILITIES,
+  PI_ENGINE_CAPABILITIES,
+  piModelCapabilities,
+  resolvePiCapabilitiesFromModel
 } from '../model-capabilities'
 
 describe('supportsAdaptiveThinking', () => {
@@ -546,5 +549,85 @@ describe('engine capability honesty (ADR-030)', () => {
     // Engine gates still true
     expect(caps.voice).toBe(true)
     expect(caps.hostedMcp).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// piModelCapabilities — pi's reasoning is two independent things that must
+// not be conflated: thinkingLevel is a session-wide dial (never a `thinking`
+// picker), reasoning.effort flips per-model off the catalog's `reasoning` fact.
+// ---------------------------------------------------------------------------
+
+describe('piModelCapabilities', () => {
+  it('reasoning:true → effort levels exactly [low, medium, high], and reasoning.thinking is never set', () => {
+    const caps = piModelCapabilities({ reasoning: true })
+    expect(caps.reasoning.effort).toEqual({ levels: ['low', 'medium', 'high'] })
+    expect(caps.reasoning.thinking).toBeUndefined()
+  })
+
+  it('reasoning:false → reasoning is {} (no effort picker)', () => {
+    const caps = piModelCapabilities({ reasoning: false })
+    expect(caps.reasoning).toEqual({})
+    expect(caps.reasoning.thinking).toBeUndefined()
+  })
+
+  it('reasoning:undefined (no arg) → reasoning is {}', () => {
+    expect(piModelCapabilities().reasoning).toEqual({})
+    expect(piModelCapabilities(undefined).reasoning).toEqual({})
+  })
+
+  it('never populates reasoning.thinking regardless of input — no Adaptive picker for any pi model', () => {
+    expect(piModelCapabilities({ reasoning: true }).reasoning.thinking).toBeUndefined()
+    expect(piModelCapabilities({ reasoning: false }).reasoning.thinking).toBeUndefined()
+  })
+
+  it('defaults contextWindow to 200_000 and maxOutput to 8192 when absent', () => {
+    const caps = piModelCapabilities()
+    expect(caps.contextWindow).toBe(200_000)
+    expect(caps.maxOutput).toBe(8192)
+  })
+
+  it('passes through explicit contextWindow / maxOutput', () => {
+    const caps = piModelCapabilities({ contextWindow: 1_000_000, maxOutput: 64_000 })
+    expect(caps.contextWindow).toBe(1_000_000)
+    expect(caps.maxOutput).toBe(64_000)
+  })
+
+  it('toolCalling is always true, regardless of input', () => {
+    expect(piModelCapabilities().toolCalling).toBe(true)
+    expect(piModelCapabilities({ reasoning: false }).toolCalling).toBe(true)
+    expect(piModelCapabilities({ vision: false, reasoning: true }).toolCalling).toBe(true)
+  })
+
+  it('vision passes through the input flag (defaults to false when absent)', () => {
+    expect(piModelCapabilities({ vision: true }).vision).toBe(true)
+    expect(piModelCapabilities({ vision: false }).vision).toBe(false)
+    expect(piModelCapabilities().vision).toBe(false)
+  })
+
+  it('promptCaching is always true', () => {
+    expect(piModelCapabilities().promptCaching).toBe(true)
+  })
+})
+
+describe('resolvePiCapabilitiesFromModel', () => {
+  it('resolves against PI_ENGINE_CAPABILITIES (engine gates come from the pi table)', () => {
+    const caps = resolvePiCapabilitiesFromModel({ reasoning: true })
+    expect(caps.steer).toBe(PI_ENGINE_CAPABILITIES.steer)
+    expect(caps.queue).toBe(PI_ENGINE_CAPABILITIES.queue)
+    expect(caps.auth).toEqual(PI_ENGINE_CAPABILITIES.auth)
+  })
+
+  it('seeds reasoning.effort from the model shape, undefined → engine defaults + no reasoning', () => {
+    expect(resolvePiCapabilitiesFromModel(undefined).reasoning).toEqual({})
+    expect(resolvePiCapabilitiesFromModel({ reasoning: true }).reasoning.effort?.levels).toEqual([
+      'low',
+      'medium',
+      'high'
+    ])
+  })
+
+  it('isAgentCapable is true (toolCalling always true for pi)', () => {
+    expect(resolvePiCapabilitiesFromModel(undefined).isAgentCapable).toBe(true)
   })
 })

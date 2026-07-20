@@ -12,7 +12,7 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { useSessionStore, resolveOpencodeModel } from '../session-store'
+import { useSessionStore, resolveOpencodeModel, hydrateConfigFromDisk, PI_DEFAULT_MODEL } from '../session-store'
 import type { EngineId, ModelInfo } from '../../../../shared/types'
 import { claudeModel } from '../../../../shared/types'
 
@@ -307,5 +307,63 @@ describe('model persistence loop', () => {
     store().loadHistoricalSession('oc-y', [], '/tmp/proj')
     expect(store().sessions['oc-y']?.selectedEngineId).toBe('opencode')
     expect(store().sessions['oc-y']?.selectedModel).toBe('anthropic/claude-sonnet-4-6')
+  })
+
+  it('reopen with NO persisted model on a pi session uses piDefaultModel, NOT opencodeDefaultModel (perEngineDefaultModel regression)', () => {
+    // Mirrors the opencode case above, but for pi: before perEngineDefaultModel
+    // existed, this call site passed state.opencodeDefaultModel unconditionally
+    // regardless of engineId, so a reopened pi session with no stored model
+    // would seed from opencode's default model string instead of pi's own.
+    useSessionStore.setState({
+      sessionEngines: { 'pi-y': { engineId: 'pi' as EngineId } },
+      piDefaultModel: 'anthropic/claude-sonnet-5',
+      opencodeDefaultModel: 'opencode/mimo-v2.5-free'
+    })
+    store().loadHistoricalSession('pi-y', [], '/tmp/proj')
+    expect(store().sessions['pi-y']?.selectedEngineId).toBe('pi')
+    expect(store().sessions['pi-y']?.selectedModel).toBe('anthropic/claude-sonnet-5')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// hydrateConfigFromDisk — piDefaultModel load (M3: EngineConfig.piConfig.defaultModel)
+// ---------------------------------------------------------------------------
+
+describe('hydrateConfigFromDisk loads piDefaultModel', () => {
+  /** Minimal window.api stub covering exactly what hydrateConfigFromDisk reads. */
+  function stubWindowApi(piConfig?: { defaultModel?: string }): void {
+    ;(globalThis as any).window = globalThis.window || {}
+    ;(globalThis as any).window.api = {
+      loadSettings: vi.fn().mockResolvedValue({}),
+      loadSessionConfig: vi.fn().mockResolvedValue({}),
+      loadSlashCommands: vi.fn().mockResolvedValue([]),
+      loadEngineConfig: vi.fn((engineId: string) =>
+        Promise.resolve(engineId === 'pi' ? { piConfig } : {})
+      ),
+      loadOpencodeSettings: vi.fn().mockResolvedValue({}),
+      saveSettings: vi.fn(),
+      saveSessionConfig: vi.fn()
+    } as any
+  }
+
+  it('sets piDefaultModel from EngineConfig.piConfig.defaultModel when present', async () => {
+    stubWindowApi({ defaultModel: 'anthropic/claude-sonnet-5' })
+    await hydrateConfigFromDisk()
+    expect(useSessionStore.getState().piDefaultModel).toBe('anthropic/claude-sonnet-5')
+  })
+
+  it('falls back to PI_DEFAULT_MODEL when piConfig.defaultModel is unset', async () => {
+    stubWindowApi(undefined)
+    await hydrateConfigFromDisk()
+    expect(useSessionStore.getState().piDefaultModel).toBe(PI_DEFAULT_MODEL)
+  })
+
+  it('falls back to PI_DEFAULT_MODEL when loadEngineConfig("pi") rejects', async () => {
+    stubWindowApi()
+    ;(globalThis as any).window.api.loadEngineConfig = vi.fn((engineId: string) =>
+      engineId === 'pi' ? Promise.reject(new Error('no config file')) : Promise.resolve({})
+    )
+    await hydrateConfigFromDisk()
+    expect(useSessionStore.getState().piDefaultModel).toBe(PI_DEFAULT_MODEL)
   })
 })
