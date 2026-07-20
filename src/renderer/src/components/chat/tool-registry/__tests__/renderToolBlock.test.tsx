@@ -182,6 +182,25 @@ describe('renderToolBlock dispatch (via MessageBubble)', () => {
     })
   })
 
+  describe('pi engine — plan mode lifted kind (M5a)', () => {
+    it("exit_plan → ExitPlanModeCard (pi's engine-neutral 'plan' kind, same as Claude's ExitPlanMode)", () => {
+      // MessageBubble picks the tool map off status.engineId (not
+      // selectedEngineId) — switch it to 'pi' for this one test only; the
+      // shared beforeEach resets it back to 'claude' before every other test.
+      useSessionStore.setState((state) => ({
+        sessions: {
+          ...state.sessions,
+          'test-session': {
+            ...state.sessions['test-session'],
+            status: makeSessionStatus({ state: 'idle', sessionId: null, model: null, cwd: null, engineId: 'pi' })
+          }
+        }
+      }))
+      renderMsg('exit_plan', { plan: 'Do stuff' })
+      expect(screen.getByTestId('ExitPlanModeCard')).toBeInTheDocument()
+    })
+  })
+
   describe('passive kinds — route to ToolCallBlock', () => {
     it('Bash → ToolCallBlock', () => {
       renderMsg('Bash', { command: 'ls' })

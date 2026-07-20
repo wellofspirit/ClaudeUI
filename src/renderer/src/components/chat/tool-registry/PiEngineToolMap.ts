@@ -29,6 +29,12 @@
  * agree). `dispatch_agent`'s input shape/normalize output mirrors
  * OpencodeEngineToolMap's `claudeui_dispatch_agent` case (same field names —
  * only the bare-vs-prefixed tool name differs across engines).
+ *
+ * M5a: plan mode's `exit_plan` (also a bare-name `pi.registerTool()`
+ * registration, gated on CLAUDEUI_PI_PLAN_TOOLS) maps to the SAME 'plan' kind
+ * Claude's ExitPlanMode does, with the SAME `{plan}` input shape — it's a
+ * lifted kind (MessageBubble.renderToolBlock routes it to ExitPlanModeCard
+ * before ever consulting displayName), engine-agnostic by design.
  */
 
 import type { EngineToolMap, ToolKind, ToolView } from '../../../../../shared/tool-kinds'
@@ -61,6 +67,14 @@ function piKindOf(toolName: string): ToolKind {
     case 'find':
     case 'ls':
       return 'search'
+    // Plan mode (M5a) — the bridge extension's locally-executed exit_plan
+    // tool (registered via pi.registerTool(), gated on
+    // CLAUDEUI_PI_PLAN_TOOLS). Reuses the SAME 'plan' kind Claude's
+    // ExitPlanMode maps to — MessageBubble's renderToolBlock lifts it to
+    // ExitPlanModeCard regardless of engine. Mirrors permission-engine.ts's
+    // piToolKind IDENTICAL case (single-source guard test).
+    case 'exit_plan':
+      return 'plan'
     // Hosted tools (M4a+b) — pi.registerTool() uses BARE names (see file
     // header). Mirrors permission-engine.ts's piToolKind IDENTICAL cases.
     case 'render_mermaid':
@@ -134,6 +148,14 @@ function piNormalize(
             : inp.path != null
               ? String(inp.path)
               : JSON.stringify(inp)
+      }
+
+    case 'plan':
+      // exit_plan args: { plan } — same field name as Claude's ExitPlanMode
+      // (ClaudeEngineToolMap's identical 'plan' case).
+      return {
+        kind: 'plan',
+        plan: inp.plan != null ? String(inp.plan) : ''
       }
 
     case 'diagram':

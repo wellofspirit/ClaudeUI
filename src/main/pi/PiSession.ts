@@ -45,12 +45,15 @@ import { crossEngineDispatcher, crossEngineDispatchAvailable } from '../services
 import type { DispatchContext, DispatchRequest } from '../services/cross-engine-dispatcher'
 import {
   decide,
+  piToolKind,
   mergedClaudeRulesFor,
   sessionAllowKey,
   firstMatchingRule,
   normalizeWhitespace,
   PI_TOOL_TO_CLAUDE_TOOL,
-  PI_HOSTED_TOOL_NAMES
+  PI_HOSTED_TOOL_NAMES,
+  PLAN_MODE_DENY_REASON,
+  PLAN_EXIT_OUTSIDE_PLAN_REASON
 } from './permission-engine'
 import type { MergedClaudeRules } from './permission-engine'
 import { loadClaudePermissions, saveClaudePermissions } from '../services/claude-settings'
@@ -450,6 +453,12 @@ export class PiSession extends BaseSession {
           CLAUDEUI_PI_BRIDGE_TOKEN: bridge.token,
           ...(this.capabilities.hostedMcp ? { CLAUDEUI_PI_HOSTED_TOOLS: '1' } : {}),
           ...(this.capabilities.crossEngineDispatch ? { CLAUDEUI_PI_DISPATCH_ENABLED: '1' } : {}),
+          // Plan mode (M5a): registers exit_plan + the cui-plan-enter/exit
+          // commands in the bridge extension (inactive until entered) —
+          // gated on the STATIC capability, mirroring hostedMcp above, NOT
+          // on whether this session's mode happens to be 'plan' right now
+          // (that's a separate, later step — see the re-entry send below).
+          ...(this.capabilities.plan ? { CLAUDEUI_PI_PLAN_TOOLS: '1' } : {}),
           ...this.computeSkillDirsEnv()
         }
       })
@@ -574,6 +583,19 @@ export class PiSession extends BaseSession {
       if (this._capabilities.reasoning.effort != null) {
         this.setEffort(effort)
       }
+    }
+
+    // Plan-mode re-entry (M5a): a fresh process starts with fresh
+    // (non-plan) in-extension-instance state — pi restarting extensions on a
+    // respawn (crash, or this being the VERY FIRST spawn of a session
+    // constructed with permissionMode:'plan' already) loses the tool-set
+    // restriction the extension was enforcing. Re-send the enter command
+    // whenever this session's OWN mode is already 'plan' once the client is
+    // confirmed up, so the restriction is reinstated before any real prompt
+    // can reach the model. Best-effort — mirrors get_commands' identical
+    // "never block the session" treatment below.
+    if (this.permissionMode === 'plan') {
+      await this.sendPlanModeCommand('cui-plan-enter')
     }
 
     // Slash commands + skills (M2b): get_commands lists extension commands,
@@ -958,10 +980,25 @@ export class PiSession extends BaseSession {
 
     if (decision === 'deny') {
       const matched = firstMatchingRule(rules.deny, toolName, input)
-      return {
-        behavior: 'deny',
-        reason: matched ? `Denied by permission rule: ${matched}` : 'Denied by permission rules'
+      if (matched) {
+        return { behavior: 'deny', reason: `Denied by permission rule: ${matched}` }
       }
+      // exit_plan OUTSIDE plan mode (M5a addendum): registerTool
+      // auto-activates the tool, so the model can see/call exit_plan in any
+      // mode until the extension's session_start hook hides it —
+      // modeBaseDecision denies it and this attaches the distinct,
+      // model-actionable reason (there is no plan mode to exit).
+      if (piToolKind(toolName) === 'plan' && this.permissionMode !== 'plan') {
+        return { behavior: 'deny', reason: PLAN_EXIT_OUTSIDE_PLAN_REASON }
+      }
+      // Plan mode's own base denies (a mutating kind, or an unsafe bash
+      // command — permission-engine.ts's planModeBaseDecision) carry a
+      // distinct, model-actionable reason instead of the generic fallback
+      // below — still beaten by an explicit user deny RULE, checked above.
+      if (this.permissionMode === 'plan') {
+        return { behavior: 'deny', reason: PLAN_MODE_DENY_REASON }
+      }
+      return { behavior: 'deny', reason: 'Denied by permission rules' }
     }
 
     // 'ask' — surface to the renderer and await the human's decision
@@ -1063,6 +1100,27 @@ export class PiSession extends BaseSession {
     }))
   }
 
+  /**
+   * Resolve a pending 'ask' gate — the human's continuation choice from the
+   * renderer (e.g. ExitPlanModeCard's four buttons, all of which route
+   * through `session:approval-response` → here; see
+   * src/renderer/src/components/chat/ExitPlanModeCard/ExitPlanModeCard.tsx).
+   *
+   * exit_plan (M5a) contract, discovered by reading ExitPlanModeCard.tsx +
+   * its utils.ts: "Start fresh" and "Keep planning" both call
+   * respondApproval(…, 'deny') — "Start fresh" additionally cancels this
+   * WHOLE session and spins up a brand-new one, so what happens to THIS
+   * session's gate/extension state is moot; "Keep planning" sends
+   * `{feedback}` as the deny reason so the model sees it and drafts again.
+   * "Continue, auto-accept edits" / "Continue, approve manually" both call
+   * respondApproval(…, 'allow') and ONLY AFTER that resolves + a
+   * waitForModeChange() broadcast — see below — do they separately call
+   * `window.api.setPermissionMode(sessionId, 'acceptEdits'|'default')`; the
+   * two buttons are indistinguishable at THIS layer (no answers field
+   * encodes which one was clicked) — the continuation mode is carried
+   * entirely by that SEPARATE, later setPermissionMode IPC call, not by
+   * anything passed into resolveApproval.
+   */
   resolveApproval(
     requestId: string,
     decision: ApprovalDecision,
@@ -1086,6 +1144,22 @@ export class PiSession extends BaseSession {
       this.sessionAllows.add(sessionAllowKey(pending.toolName, pending.input))
     }
     pending.resolve({ behavior: 'allow' })
+
+    // exit_plan (M5a): emulate the Claude SDK's own documented behavior
+    // (ported note, ExitPlanModeCard/utils.ts: "When ExitPlanMode is
+    // allowed, the SDK sends a status change back to 'default'") — the
+    // bridge extension's exit_plan.execute() (which pi runs right after this
+    // 'allow' resolves the tool_call gate) already restores the tool set
+    // LOCALLY, so this deliberately does NOT send `/cui-plan-exit` — that
+    // would be a redundant round-trip. It's still harmless if it somehow
+    // did: setPermissionMode's own `mode === prevMode` / `prevMode ===
+    // 'plan'` checks mean the renderer's FOLLOW-UP setPermissionMode call
+    // (fired after waitForModeChange() observes this broadcast) sees
+    // `prevMode` already 'default', not 'plan', and skips re-sending exit.
+    if (pending.toolName === 'exit_plan') {
+      this.permissionMode = 'default'
+      this.send('session:permission-mode', 'default')
+    }
 
     if (updatedPermissions && updatedPermissions.length > 0) {
       this.persistAllowRules(updatedPermissions)
@@ -1342,12 +1416,58 @@ export class PiSession extends BaseSession {
       })
   }
 
+  /**
+   * Send `/cui-plan-enter` or `/cui-plan-exit` as a normal RPC `prompt`
+   * message — verified (docs/protocol-pi/README.md "Extensions" +
+   * rpc.md:67): an extension command "executes immediately even during
+   * streaming", so this needs no `streamingBehavior` and works mid-turn.
+   * Fire-and-log-failure (mirrors setEffort's identical treatment) — a
+   * dropped toggle degrades to the gate-layer bash/mutating-kind deny still
+   * doing its job (defense in depth), not a broken session.
+   */
+  private async sendPlanModeCommand(command: 'cui-plan-enter' | 'cui-plan-exit'): Promise<void> {
+    if (!this.client) return
+    try {
+      const resp = await this.client.request({ type: 'prompt', message: `/${command}` })
+      if (!resp.success) {
+        logger.warn('PiSession', `${command} rejected: ${resp.error ?? 'unknown error'}`)
+      }
+    } catch (err) {
+      logger.warn('PiSession', `${command} failed: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+
+  /**
+   * Set the live permission mode. Store + broadcast only for every mode
+   * EXCEPT plan mode transitions — gateToolCall reads this.permissionMode
+   * live on every tool_call, so a mode switch takes effect on the very next
+   * gate with no RPC round-trip needed (unlike opencode's patchSession).
+   *
+   * Plan mode (M5a) is the one exception: entering/leaving 'plan' ALSO
+   * toggles the bridge extension's tool set (pi-bridge-source.ts), which
+   * needs the `/cui-plan-enter`/`/cui-plan-exit` round-trip below. No-op
+   * transitions (mode === the current mode) are skipped entirely — a
+   * second identical `setPermissionMode('plan')` must not re-send the enter
+   * command. Exiting via the ExitPlanModeCard's "allow" path does NOT come
+   * through here (resolveApproval sets `this.permissionMode` directly and
+   * skips the RPC call — the extension's exit_plan.execute() already
+   * restored the tool set locally; see resolveApproval's doc comment) — by
+   * the time the renderer's follow-up setPermissionMode('acceptEdits'|
+   * 'default') call lands here, `prevMode` is already NOT 'plan', so the
+   * "leaving plan" branch below correctly does not fire a second time.
+   */
   async setPermissionMode(mode: string): Promise<void> {
-    // Store + broadcast only — gateToolCall reads this.permissionMode live on
-    // every tool_call, so a mode switch takes effect on the very next gate
-    // with no RPC round-trip needed (unlike opencode's patchSession).
+    const prevMode = this.permissionMode
     this.permissionMode = mode
     this.send('session:permission-mode', mode)
+
+    if (mode === prevMode) return
+
+    if (mode === 'plan') {
+      await this.sendPlanModeCommand('cui-plan-enter')
+    } else if (prevMode === 'plan') {
+      await this.sendPlanModeCommand('cui-plan-exit')
+    }
   }
 
   sendStatus(): void {

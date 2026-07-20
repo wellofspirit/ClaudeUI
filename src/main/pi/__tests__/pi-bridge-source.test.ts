@@ -7,7 +7,7 @@
  * These are cheap checks against accidental edits (e.g. someone adding an
  * `import`, which would break pi's jiti loader with zero resolution surface).
  */
-import { describe, it, expect, afterEach } from 'vitest'
+import { describe, it, expect, afterEach, vi } from 'vitest'
 import { PI_BRIDGE_EXTENSION_SOURCE, PI_BRIDGE_VERSION } from '../pi-bridge-source'
 
 describe('PI_BRIDGE_EXTENSION_SOURCE', () => {
@@ -16,8 +16,8 @@ describe('PI_BRIDGE_EXTENSION_SOURCE', () => {
     expect(PI_BRIDGE_VERSION.length).toBeGreaterThan(0)
   })
 
-  it('is version 3 (M4a+b bumped it for the four hosted-tool registrations)', () => {
-    expect(PI_BRIDGE_VERSION).toBe('3')
+  it('is version 5 (M5a addendum bumped it for the exit_plan session_start visibility guard)', () => {
+    expect(PI_BRIDGE_VERSION).toBe('5')
   })
 
   it('contains no import statements (zero module-resolution surface for pi\'s jiti loader)', () => {
@@ -153,9 +153,17 @@ interface FakeToolDef {
   execute: (toolCallId: string, params: Record<string, unknown>) => Promise<unknown>
 }
 
+interface FakeCommandDef {
+  description?: string
+  handler: (...args: unknown[]) => unknown
+}
+
 interface FakePi {
   on: (event: string, handler: (...args: unknown[]) => unknown) => void
   registerTool: (def: FakeToolDef) => void
+  registerCommand: (name: string, def: FakeCommandDef) => void
+  getActiveTools: () => string[]
+  setActiveTools: (names: string[]) => void
 }
 
 /** Load the extension's default-exported factory function via `new Function` (same technique as the "syntactically valid JavaScript" test above, extended to actually invoke the result). */
@@ -164,16 +172,46 @@ function loadExtensionFactory(): (pi: FakePi) => void {
   return new Function(body)() as (pi: FakePi) => void
 }
 
-/** Run the extension factory against a fake `pi`, capturing every registered tool + event handler by name. */
-function runExtension(): { tools: Map<string, FakeToolDef>; events: Map<string, (...args: unknown[]) => unknown> } {
+/**
+ * Run the extension factory against a fake `pi`, capturing every registered
+ * tool/command/event handler by name. `initialActiveTools` seeds
+ * getActiveTools() (M5a's plan-mode toggle reads/writes it) — defaults to a
+ * normal-mode tool set mirroring the vendored example's NORMAL_MODE_TOOLS.
+ *
+ * registerTool AUTO-ACTIVATES the tool (appends it to the active set) —
+ * mirroring the real binary's behavior, which the M4a hosted tools rely on
+ * (callable with registration alone) and which is exactly why exit_plan
+ * needs the session_start hide + gate backstop (M5a addendum). The
+ * auto-activation is NOT recorded in setActiveToolsCalls — that array
+ * tracks only the extension's own explicit setActiveTools() calls.
+ */
+function runExtension(initialActiveTools: string[] = ['read', 'bash', 'edit', 'write']): {
+  tools: Map<string, FakeToolDef>
+  events: Map<string, (...args: unknown[]) => unknown>
+  commands: Map<string, FakeCommandDef>
+  activeTools: () => string[]
+  setActiveToolsCalls: string[][]
+} {
   const tools = new Map<string, FakeToolDef>()
   const events = new Map<string, (...args: unknown[]) => unknown>()
+  const commands = new Map<string, FakeCommandDef>()
+  let active = [...initialActiveTools]
+  const setActiveToolsCalls: string[][] = []
   const pi: FakePi = {
     on: (event, handler) => events.set(event, handler),
-    registerTool: (def) => tools.set(def.name, def)
+    registerTool: (def) => {
+      tools.set(def.name, def)
+      if (!active.includes(def.name)) active = [...active, def.name] // auto-activation (see doc comment)
+    },
+    registerCommand: (name, def) => commands.set(name, def),
+    getActiveTools: () => [...active],
+    setActiveTools: (names) => {
+      setActiveToolsCalls.push([...names])
+      active = [...names]
+    }
   }
   loadExtensionFactory()(pi)
-  return { tools, events }
+  return { tools, events, commands, activeTools: () => [...active], setActiveToolsCalls }
 }
 
 /** Set env vars for the duration of `fn`, restoring the prior values (including absence) afterward — `undefined` means "ensure unset". */
@@ -443,6 +481,187 @@ describe('PI_BRIDGE_EXTENSION_SOURCE — tool_call gate hook (executed in-proces
       const result = await getToolCallHook()({ toolCallId: 'c1', toolName: 'bash', input: {} })
       expect(result?.block).toBe(true)
       expect(result?.reason).toBe('not allowed right now')
+    })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Plan mode (M5a) — exit_plan tool + cui-plan-enter/exit commands, executed
+// in-process against the fake `pi` object (same A6-pattern harness as above,
+// extended with registerCommand/getActiveTools/setActiveTools). NO bridge
+// creds are required for any of this — exit_plan's execute() makes no
+// network call — so these tests intentionally do NOT set BRIDGE_CREDS.
+// ---------------------------------------------------------------------------
+
+describe('PI_BRIDGE_EXTENSION_SOURCE — plan mode (M5a, executed in-process)', () => {
+  it('registers NEITHER exit_plan NOR the enter/exit commands when CLAUDEUI_PI_PLAN_TOOLS is unset', () => {
+    withEnv({ CLAUDEUI_PI_PLAN_TOOLS: undefined }, () => {
+      const { tools, commands } = runExtension()
+      expect(tools.has('exit_plan')).toBe(false)
+      expect(commands.has('cui-plan-enter')).toBe(false)
+      expect(commands.has('cui-plan-exit')).toBe(false)
+    })
+  })
+
+  it('registers exit_plan + both commands when CLAUDEUI_PI_PLAN_TOOLS=1 — no bridge creds needed', () => {
+    withEnv({ CLAUDEUI_PI_PLAN_TOOLS: '1' }, () => {
+      const { tools, commands } = runExtension()
+      expect(tools.has('exit_plan')).toBe(true)
+      expect(commands.has('cui-plan-enter')).toBe(true)
+      expect(commands.has('cui-plan-exit')).toBe(true)
+    })
+  })
+
+  it('exit_plan requires a string "plan" parameter (plain JSON-schema object, no typebox)', () => {
+    withEnv({ CLAUDEUI_PI_PLAN_TOOLS: '1' }, () => {
+      const { tools } = runExtension()
+      expect(tools.get('exit_plan')!.parameters).toEqual({
+        type: 'object',
+        properties: { plan: { type: 'string', description: expect.any(String) } },
+        required: ['plan']
+      })
+    })
+  })
+
+  it('cui-plan-enter drops edit/write from the active set, adds exit_plan, and keeps everything else', async () => {
+    await withEnv({ CLAUDEUI_PI_PLAN_TOOLS: '1' }, async () => {
+      const { commands, activeTools } = runExtension(['read', 'bash', 'edit', 'write', 'grep', 'render_mermaid'])
+      await commands.get('cui-plan-enter')!.handler()
+      const active = activeTools()
+      expect(active).toEqual(
+        expect.arrayContaining(['read', 'bash', 'grep', 'render_mermaid', 'exit_plan'])
+      )
+      expect(active).not.toContain('edit')
+      expect(active).not.toContain('write')
+    })
+  })
+
+  it('cui-plan-enter is idempotent — a second call while already entered does not call setActiveTools again', async () => {
+    await withEnv({ CLAUDEUI_PI_PLAN_TOOLS: '1' }, async () => {
+      const { commands, setActiveToolsCalls } = runExtension(['read', 'bash', 'edit', 'write'])
+      await commands.get('cui-plan-enter')!.handler()
+      const callsAfterFirstEnter = setActiveToolsCalls.length
+      await commands.get('cui-plan-enter')!.handler()
+      expect(setActiveToolsCalls.length).toBe(callsAfterFirstEnter)
+    })
+  })
+
+  it('cui-plan-exit restores the pre-plan active set (including edit/write) and removes exit_plan — even though registration had auto-activated it before enter captured the set', async () => {
+    await withEnv({ CLAUDEUI_PI_PLAN_TOOLS: '1' }, async () => {
+      // Registration auto-activates exit_plan (harness mirrors the real
+      // binary), so at cui-plan-enter time the active set ALREADY contains
+      // it — the capture must filter it out or the restore re-exposes it
+      // outside plan mode (the M5a-addendum bug).
+      const { commands, activeTools } = runExtension(['read', 'bash', 'edit', 'write'])
+      expect(activeTools()).toContain('exit_plan') // auto-activated at registration
+      await commands.get('cui-plan-enter')!.handler()
+      await commands.get('cui-plan-exit')!.handler()
+      expect(activeTools()).not.toContain('exit_plan')
+      expect(activeTools()).toEqual(['read', 'bash', 'edit', 'write'])
+    })
+  })
+
+  it('cui-plan-exit is idempotent — a call while not in plan mode is a no-op (no setActiveTools call)', async () => {
+    await withEnv({ CLAUDEUI_PI_PLAN_TOOLS: '1' }, async () => {
+      const { commands, setActiveToolsCalls } = runExtension(['read', 'bash'])
+      await commands.get('cui-plan-exit')!.handler()
+      expect(setActiveToolsCalls.length).toBe(0)
+    })
+  })
+
+  it('exit_plan.execute() restores the pre-plan tool set and returns an ack — does NOT fetch (no /hosted-tool POST)', async () => {
+    const originalFetch = globalThis.fetch
+    const fetchSpy = vi.fn()
+    globalThis.fetch = fetchSpy as unknown as typeof fetch
+    try {
+      await withEnv({ CLAUDEUI_PI_PLAN_TOOLS: '1' }, async () => {
+        const { commands, tools, activeTools } = runExtension(['read', 'bash', 'edit', 'write'])
+        await commands.get('cui-plan-enter')!.handler()
+        expect(activeTools()).not.toContain('edit')
+
+        const result = (await tools.get('exit_plan')!.execute('call-x', { plan: '1. Do X' })) as {
+          content: Array<{ type: string; text: string }>
+        }
+
+        expect(activeTools()).toContain('edit')
+        expect(activeTools()).toContain('write')
+        expect(activeTools()).not.toContain('exit_plan')
+        expect(result.content[0].text).toContain('Plan approved')
+        expect(fetchSpy).not.toHaveBeenCalled()
+      })
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('exit_plan.execute() is a no-op restore-wise if somehow called while already out of plan state (defensive)', async () => {
+    await withEnv({ CLAUDEUI_PI_PLAN_TOOLS: '1' }, async () => {
+      const { tools, events, activeTools, setActiveToolsCalls } = runExtension(['read', 'bash', 'edit', 'write'])
+      // session_start hides the auto-activated exit_plan; never entered plan
+      // mode after that — execute() should not blow up or call setActiveTools.
+      await events.get('session_start')!()
+      const callsAfterHide = setActiveToolsCalls.length
+      const result = (await tools.get('exit_plan')!.execute('call-y', { plan: 'x' })) as {
+        content: Array<{ type: string; text: string }>
+      }
+      expect(setActiveToolsCalls.length).toBe(callsAfterHide)
+      expect(activeTools()).toEqual(['read', 'bash', 'edit', 'write'])
+      expect(result.content[0].text).toContain('Plan approved')
+    })
+  })
+
+  // ── session_start visibility guard (M5a addendum) ──────────────────────────
+  // pi.registerTool() auto-activates the tool, so exit_plan is model-visible
+  // from spawn in EVERY mode; the extension's session_start hook hides it
+  // unless plan state is active. session_start also fires after session
+  // switch/fork reloads (extension re-instantiated, inPlan reset), which
+  // re-hides it — PiSession's doStart re-enter then re-adds it when the
+  // session's mode is 'plan'.
+
+  it('session_start hides the auto-activated exit_plan when not in plan state', async () => {
+    await withEnv({ CLAUDEUI_PI_PLAN_TOOLS: '1' }, async () => {
+      const { events, activeTools } = runExtension(['read', 'bash', 'edit', 'write'])
+      expect(activeTools()).toContain('exit_plan') // auto-activated at registration
+      await events.get('session_start')!()
+      expect(activeTools()).not.toContain('exit_plan')
+      expect(activeTools()).toEqual(expect.arrayContaining(['read', 'bash', 'edit', 'write']))
+    })
+  })
+
+  it('cui-plan-enter re-adds exit_plan after the session_start hide', async () => {
+    await withEnv({ CLAUDEUI_PI_PLAN_TOOLS: '1' }, async () => {
+      const { events, commands, activeTools } = runExtension(['read', 'bash', 'edit', 'write'])
+      await events.get('session_start')!()
+      expect(activeTools()).not.toContain('exit_plan')
+      await commands.get('cui-plan-enter')!.handler()
+      expect(activeTools()).toContain('exit_plan')
+    })
+  })
+
+  it('a session_start AFTER exiting plan mode (inPlan=false) keeps exit_plan hidden', async () => {
+    await withEnv({ CLAUDEUI_PI_PLAN_TOOLS: '1' }, async () => {
+      const { events, commands, activeTools } = runExtension(['read', 'bash', 'edit', 'write'])
+      await events.get('session_start')!()
+      await commands.get('cui-plan-enter')!.handler()
+      await commands.get('cui-plan-exit')!.handler()
+      await events.get('session_start')!()
+      expect(activeTools()).not.toContain('exit_plan')
+    })
+  })
+
+  it('a session_start while IN plan state does NOT strip exit_plan (the !inPlan guard)', async () => {
+    await withEnv({ CLAUDEUI_PI_PLAN_TOOLS: '1' }, async () => {
+      const { events, commands, activeTools } = runExtension(['read', 'bash', 'edit', 'write'])
+      await commands.get('cui-plan-enter')!.handler()
+      await events.get('session_start')!()
+      expect(activeTools()).toContain('exit_plan')
+    })
+  })
+
+  it('session_start is NOT registered when CLAUDEUI_PI_PLAN_TOOLS is unset (plan block fully gated)', () => {
+    withEnv({ CLAUDEUI_PI_PLAN_TOOLS: undefined }, () => {
+      const { events } = runExtension()
+      expect(events.has('session_start')).toBe(false)
     })
   })
 })

@@ -671,11 +671,19 @@ export function resolveOpencodeCapabilitiesFromModel(
  * later milestones (see the M1 kickoff spec's milestone list):
  *   - interactiveApprovals:true, autonomyModes: ['ask','autoEdit','full'] →
  *     SHIPPED in M2a via the approval-bridge extension (`pi.on('tool_call',
- *     …)`, verified in M0; PiBridgeHost + permission-engine.ts). 'plan' is
- *     deliberately NOT in autonomyModes — pi has no plan-mode agent/UX of its
- *     own (unlike opencode's read-only `plan` agent); permission-engine.ts's
- *     modeBaseDecision defensively treats an unexpected 'plan' mode string as
- *     'default' rather than crashing, but the picker never offers it.
+ *     …)`, verified in M0; PiBridgeHost + permission-engine.ts).
+ *   - plan:true, autonomyModes includes 'plan' → SHIPPED in M5a: extension-
+ *     enforced read-only autonomy. Unlike opencode's built-in `plan` agent,
+ *     pi has no native plan mode — ClaudeUI's bridge extension
+ *     (pi-bridge-source.ts) toggles pi's own active-tool set on
+ *     `/cui-plan-enter`/`/cui-plan-exit` (dropping edit/write, adding a
+ *     locally-executed `exit_plan` tool) while permission-engine.ts's
+ *     `planModeBaseDecision` independently gates bash to a read-only
+ *     allowlist and denies everything else — defense in depth, not either
+ *     layer alone. The autonomy↔permission-mode mapping (settings-sections.tsx)
+ *     already mapped 'plan'↔'plan' for every engine before this flip (verified
+ *     against src/shared/__tests__/autonomy-mode.test.ts) — only the
+ *     capability flags and the pi-side implementation were missing.
  *   - steer:true → SHIPPED in M2b: PiSession.run()'s busy path now sends
  *     `streamingBehavior:'steer'` (delivered after the current tool calls
  *     finish, before the next LLM call — verified, docs/protocol-pi/README.md).
@@ -714,9 +722,9 @@ export function resolveOpencodeCapabilitiesFromModel(
  *     (pi.registerTool() in pi-bridge-source.ts, calling back over
  *     PiBridgeHost's POST /hosted-tool route to PiSession.handleHostedTool),
  *     auto-allowed via permission-engine.ts's PI_AUTO_ALLOW_HOSTED_TOOLS.
- *   - sideQuestion, plan, fork, forkFromMessage, backgroundTasks, subagents,
- *     voice → unwired; each becomes a dedicated follow-up once its RPC
- *     surface (fork/clone, …) is wired the same way OpencodeSession's were.
+ *   - sideQuestion, fork, forkFromMessage, backgroundTasks, subagents, voice →
+ *     unwired; each becomes a dedicated follow-up once its RPC surface
+ *     (fork/clone, …) is wired the same way OpencodeSession's were.
  *   - sandbox, proxy → Claude cli.js launch-param concepts; pi has neither
  *     (see EngineCapabilities' own doc comment) — likely permanently false.
  *   - crossEngineDispatch → SHIPPED both directions: pi as a dispatch SOURCE
@@ -734,7 +742,7 @@ export const PI_ENGINE_CAPABILITIES: EngineCapabilities = {
   hostedMcp: true,
   backgroundTasks: false,
   subagents: false,
-  plan: false,
+  plan: true,
   fork: false,
   forkFromMessage: false,
   steer: true,
@@ -745,7 +753,7 @@ export const PI_ENGINE_CAPABILITIES: EngineCapabilities = {
   interactiveApprovals: true,
   sandbox: false,
   proxy: false,
-  autonomyModes: ['ask', 'autoEdit', 'full'],
+  autonomyModes: ['ask', 'autoEdit', 'full', 'plan'],
   auth: { canDriveLogin: false, multiAccount: false },
   crossEngineDispatch: true
 }

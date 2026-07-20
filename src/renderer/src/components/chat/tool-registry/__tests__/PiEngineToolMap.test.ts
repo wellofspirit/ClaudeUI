@@ -34,6 +34,8 @@ describe('PiEngineToolMap.kindOf', () => {
     ['create_mockup', 'mockup'],
     ['show_mockup', 'mockup'],
     ['dispatch_agent', 'task'],
+    // Plan mode (M5a) — exit_plan, also a bare-name pi.registerTool() registration.
+    ['exit_plan', 'plan'],
     // Unknown tool names fall through gracefully.
     ['skill', 'unknown'],
     ['invalid', 'unknown']
@@ -130,6 +132,16 @@ describe('PiEngineToolMap.normalize', () => {
   it('mcp / unknown: pass input through', () => {
     expect(PiEngineToolMap.normalize('mcp', { a: 1 })).toMatchObject({ kind: 'mcp', input: { a: 1 } })
     expect(PiEngineToolMap.normalize('unknown', { b: 2 })).toMatchObject({ kind: 'unknown', input: { b: 2 } })
+  })
+
+  it('plan: exit_plan maps its plan field straight through (M5a)', () => {
+    const view = PiEngineToolMap.normalize('plan', { plan: '1. Do X\n2. Do Y' })
+    expect(view).toEqual({ kind: 'plan', plan: '1. Do X\n2. Do Y' })
+  })
+
+  it('plan: a missing plan field normalizes to an empty string', () => {
+    const view = PiEngineToolMap.normalize('plan', {})
+    expect(view).toEqual({ kind: 'plan', plan: '' })
   })
 })
 

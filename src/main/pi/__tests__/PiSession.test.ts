@@ -379,6 +379,8 @@ describe('PiSession.run — sends a prompt', () => {
     // DEFAULT now — hostedMcp is a static-true engine capability and
     // crossEngineDispatchAvailable('pi') defaults to true in this mock (see
     // the vi.hoisted comment) — dedicated tests below cover the "off" paths.
+    // Plan mode (M5a): CLAUDEUI_PI_PLAN_TOOLS is '1' by default too — `plan`
+    // is a static-true engine capability, same as hostedMcp above.
     expect(MockPiRpcClient).toHaveBeenCalledWith('/fake/pi', {
       cwd: '/cwd',
       args: ['--mode', 'rpc', '-e', '/fake/tmp/claudeui-bridge.ts'],
@@ -386,7 +388,8 @@ describe('PiSession.run — sends a prompt', () => {
         CLAUDEUI_PI_BRIDGE_URL: 'http://127.0.0.1:9999',
         CLAUDEUI_PI_BRIDGE_TOKEN: 'test-bridge-token',
         CLAUDEUI_PI_HOSTED_TOOLS: '1',
-        CLAUDEUI_PI_DISPATCH_ENABLED: '1'
+        CLAUDEUI_PI_DISPATCH_ENABLED: '1',
+        CLAUDEUI_PI_PLAN_TOOLS: '1'
       }
     })
     expect(MockPiBridgeHost).toHaveBeenCalledTimes(1)
@@ -1536,6 +1539,240 @@ describe('PiSession — hosted-tools/dispatch env vars at spawn (M4a+b)', () => 
     const env = lastSpawnOpts().env
     expect(env.CLAUDEUI_PI_HOSTED_TOOLS).toBe('1')
     expect(env).not.toHaveProperty('CLAUDEUI_PI_DISPATCH_ENABLED')
+  })
+
+  it('sets CLAUDEUI_PI_PLAN_TOOLS=1 by default (plan is a static-true engine capability, M5a)', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-env-plan-1', win as never, '/cwd', {})
+    await session.run('hi')
+    expect(lastSpawnOpts().env.CLAUDEUI_PI_PLAN_TOOLS).toBe('1')
+  })
+})
+
+describe('PiSession — plan mode (M5a)', () => {
+  it("setPermissionMode('plan') sends /cui-plan-enter as a prompt command", async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-plan-enter-1', win as never, '/cwd', {})
+    await session.run('hi')
+    mockRequest.mockClear()
+
+    await session.setPermissionMode('plan')
+
+    expect(mockRequest).toHaveBeenCalledWith({ type: 'prompt', message: '/cui-plan-enter' })
+    expect(sentPayloads(win, 'session:permission-mode').slice(-1)).toEqual(['plan'])
+  })
+
+  it("leaving 'plan' for any other mode sends /cui-plan-exit", async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-plan-exit-1', win as never, '/cwd', {})
+    await session.run('hi')
+    await session.setPermissionMode('plan')
+    mockRequest.mockClear()
+
+    await session.setPermissionMode('acceptEdits')
+
+    expect(mockRequest).toHaveBeenCalledWith({ type: 'prompt', message: '/cui-plan-exit' })
+    expect(sentPayloads(win, 'session:permission-mode').slice(-1)).toEqual(['acceptEdits'])
+  })
+
+  it("switching between two NON-plan modes sends neither plan command", async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-plan-neither-1', win as never, '/cwd', {})
+    await session.run('hi')
+    mockRequest.mockClear()
+
+    await session.setPermissionMode('acceptEdits')
+    await session.setPermissionMode('full')
+
+    expect(mockRequest).not.toHaveBeenCalledWith(expect.objectContaining({ message: '/cui-plan-enter' }))
+    expect(mockRequest).not.toHaveBeenCalledWith(expect.objectContaining({ message: '/cui-plan-exit' }))
+  })
+
+  it("setting the SAME mode twice does NOT re-send /cui-plan-enter", async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-plan-noop-1', win as never, '/cwd', {})
+    await session.run('hi')
+    await session.setPermissionMode('plan')
+    mockRequest.mockClear()
+
+    await session.setPermissionMode('plan')
+
+    expect(mockRequest).not.toHaveBeenCalledWith(expect.objectContaining({ message: '/cui-plan-enter' }))
+  })
+
+  it("setting the SAME non-plan mode twice sends nothing plan-related either", async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-plan-noop-2', win as never, '/cwd', {})
+    await session.run('hi')
+    await session.setPermissionMode('acceptEdits')
+    mockRequest.mockClear()
+
+    await session.setPermissionMode('acceptEdits')
+
+    expect(mockRequest).not.toHaveBeenCalledWith(expect.objectContaining({ message: '/cui-plan-exit' }))
+    expect(mockRequest).not.toHaveBeenCalledWith(expect.objectContaining({ message: '/cui-plan-enter' }))
+  })
+
+  it('doStart() re-sends /cui-plan-enter on spawn when constructed with permissionMode: "plan"', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-plan-respawn-1', win as never, '/cwd', { permissionMode: 'plan' })
+    await session.run('hi')
+
+    expect(mockRequest).toHaveBeenCalledWith({ type: 'prompt', message: '/cui-plan-enter' })
+  })
+
+  it('doStart() does NOT send /cui-plan-enter on spawn for any other starting mode', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-plan-respawn-2', win as never, '/cwd', { permissionMode: 'default' })
+    await session.run('hi')
+
+    expect(mockRequest).not.toHaveBeenCalledWith(expect.objectContaining({ message: '/cui-plan-enter' }))
+  })
+
+  it('a mutating-kind tool call in plan mode denies immediately with PLAN_MODE_DENY_REASON', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-plan-gate-1', win as never, '/cwd', {})
+    await session.setPermissionMode('plan')
+    await session.run('hi')
+
+    const decision = await gate('call_plan_1', 'edit', { path: 'x.ts' })
+    expect(decision).toEqual({
+      behavior: 'deny',
+      reason: 'Plan mode is read-only — present a plan and call exit_plan to proceed'
+    })
+    expect(sentChannels(win)).not.toContain('session:approval-request')
+  })
+
+  it('an unsafe bash command in plan mode denies with the same reason; a safe one allows', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-plan-gate-2', win as never, '/cwd', {})
+    await session.setPermissionMode('plan')
+    await session.run('hi')
+
+    expect(await gate('call_plan_2', 'bash', { command: 'rm -rf /tmp/x' })).toEqual({
+      behavior: 'deny',
+      reason: 'Plan mode is read-only — present a plan and call exit_plan to proceed'
+    })
+    expect(await gate('call_plan_3', 'bash', { command: 'ls -la' })).toEqual({ behavior: 'allow' })
+  })
+
+  it('a matching user deny RULE in plan mode still produces its OWN, more specific reason', async () => {
+    mockLoadClaudePermissions.mockImplementation((scope: string) =>
+      scope === 'project'
+        ? { allow: [], deny: ['Edit'], ask: [], additionalDirectories: [], defaultMode: undefined }
+        : { allow: [], deny: [], ask: [], additionalDirectories: [], defaultMode: undefined }
+    )
+    const win = new MockWindow()
+    const session = new PiSession('rid-plan-gate-3', win as never, '/cwd', {})
+    await session.setPermissionMode('plan')
+    await session.run('hi')
+
+    const decision = await gate('call_plan_4', 'edit', { path: 'x.ts' })
+    expect(decision).toEqual({ behavior: 'deny', reason: 'Denied by permission rule: Edit' })
+  })
+
+  it('exit_plan itself asks (surfaces session:approval-request) in plan mode', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-plan-gate-4', win as never, '/cwd', {})
+    await session.setPermissionMode('plan')
+    await session.run('hi')
+
+    void gate('call_plan_5', 'exit_plan', { plan: '1. Do X' })
+    await vi.waitFor(() => expect(sentChannels(win)).toContain('session:approval-request'))
+    const [approval] = sentPayloads(win, 'session:approval-request').slice(-1) as [
+      { toolName: string; toolUseId: string; input: Record<string, unknown> }
+    ]
+    expect(approval.toolName).toBe('exit_plan')
+    expect(approval.toolUseId).toBe('call_plan_5')
+    expect(approval.input).toEqual({ plan: '1. Do X' })
+  })
+
+  it.each(['default', 'acceptEdits', 'full'])(
+    'exit_plan OUTSIDE plan mode (mode=%s) denies immediately with the distinct reason — no approval card, no misleading auto-allow (M5a addendum)',
+    async (mode) => {
+      const win = new MockWindow()
+      const session = new PiSession(`rid-plan-outside-${mode}`, win as never, '/cwd', {})
+      await session.setPermissionMode(mode)
+      await session.run('hi')
+
+      const decision = await gate(`call_plan_outside_${mode}`, 'exit_plan', { plan: '1. Do X' })
+
+      expect(decision).toEqual({ behavior: 'deny', reason: 'exit_plan is only available in plan mode' })
+      expect(sentChannels(win)).not.toContain('session:approval-request')
+    }
+  )
+
+  describe('resolveApproval — exit_plan continuation matrix', () => {
+    it("'allow' resolves the gate 'allow', sets permissionMode to 'default', and broadcasts it — emulating the SDK's own ExitPlanMode-allowed status change", async () => {
+      const win = new MockWindow()
+      const session = new PiSession('rid-plan-resolve-1', win as never, '/cwd', {})
+      await session.setPermissionMode('plan')
+      await session.run('hi')
+
+      const pending = gate('call_plan_6', 'exit_plan', { plan: '1. Do X' })
+      await vi.waitFor(() => expect(sentChannels(win)).toContain('session:approval-request'))
+      const [approval] = sentPayloads(win, 'session:approval-request').slice(-1) as [{ requestId: string }]
+
+      mockRequest.mockClear()
+      session.resolveApproval(approval.requestId, 'allow')
+
+      await expect(pending).resolves.toEqual({ behavior: 'allow' })
+      expect(sentPayloads(win, 'session:permission-mode').slice(-1)).toEqual(['default'])
+      // Does NOT send /cui-plan-exit — the extension's own exit_plan.execute()
+      // already restored the tool set locally (see resolveApproval's doc comment).
+      expect(mockRequest).not.toHaveBeenCalledWith(expect.objectContaining({ message: '/cui-plan-exit' }))
+    })
+
+    it("a FOLLOW-UP setPermissionMode('acceptEdits') after the allow broadcast does not ALSO send /cui-plan-exit (prevMode is already 'default', not 'plan')", async () => {
+      const win = new MockWindow()
+      const session = new PiSession('rid-plan-resolve-2', win as never, '/cwd', {})
+      await session.setPermissionMode('plan')
+      await session.run('hi')
+
+      const pending = gate('call_plan_7', 'exit_plan', { plan: '1. Do X' })
+      await vi.waitFor(() => expect(sentChannels(win)).toContain('session:approval-request'))
+      const [approval] = sentPayloads(win, 'session:approval-request').slice(-1) as [{ requestId: string }]
+      session.resolveApproval(approval.requestId, 'allow')
+      await pending
+
+      mockRequest.mockClear()
+      await session.setPermissionMode('acceptEdits') // mirrors ExitPlanModeCard's handleContinueAutoEdit
+
+      expect(mockRequest).not.toHaveBeenCalledWith(expect.objectContaining({ message: '/cui-plan-exit' }))
+      expect(sentPayloads(win, 'session:permission-mode').slice(-1)).toEqual(['acceptEdits'])
+    })
+
+    it("'deny' with feedback (Keep planning) resolves the gate 'deny' with the feedback as reason and stays in 'plan'", async () => {
+      const win = new MockWindow()
+      const session = new PiSession('rid-plan-resolve-3', win as never, '/cwd', {})
+      await session.setPermissionMode('plan')
+      await session.run('hi')
+
+      const pending = gate('call_plan_8', 'exit_plan', { plan: '1. Do X' })
+      await vi.waitFor(() => expect(sentChannels(win)).toContain('session:approval-request'))
+      const [approval] = sentPayloads(win, 'session:approval-request').slice(-1) as [{ requestId: string }]
+
+      session.resolveApproval(approval.requestId, 'deny', { feedback: 'add error handling' })
+
+      await expect(pending).resolves.toEqual({ behavior: 'deny', reason: 'add error handling' })
+      // permissionMode is untouched by a deny — still 'plan'.
+      expect(sentPayloads(win, 'session:permission-mode').slice(-1)).toEqual(['plan'])
+    })
+
+    it("'deny' with no feedback (e.g. Start Fresh tearing down this session) falls back to the default reason", async () => {
+      const win = new MockWindow()
+      const session = new PiSession('rid-plan-resolve-4', win as never, '/cwd', {})
+      await session.setPermissionMode('plan')
+      await session.run('hi')
+
+      const pending = gate('call_plan_9', 'exit_plan', { plan: '1. Do X' })
+      await vi.waitFor(() => expect(sentChannels(win)).toContain('session:approval-request'))
+      const [approval] = sentPayloads(win, 'session:approval-request').slice(-1) as [{ requestId: string }]
+
+      session.resolveApproval(approval.requestId, 'deny')
+
+      await expect(pending).resolves.toEqual({ behavior: 'deny', reason: 'User denied' })
+    })
   })
 })
 
