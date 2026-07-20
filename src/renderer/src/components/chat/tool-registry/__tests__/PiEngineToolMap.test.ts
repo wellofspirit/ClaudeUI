@@ -34,6 +34,9 @@ describe('PiEngineToolMap.kindOf', () => {
     ['create_mockup', 'mockup'],
     ['show_mockup', 'mockup'],
     ['dispatch_agent', 'task'],
+    // In-pi subagents (M5b) — the SECOND extension's bare-name registration,
+    // reusing the SAME 'task' kind as dispatch_agent.
+    ['subagent', 'task'],
     // Plan mode (M5a) — exit_plan, also a bare-name pi.registerTool() registration.
     ['exit_plan', 'plan'],
     // Unknown tool names fall through gracefully.
@@ -196,6 +199,34 @@ describe('PiEngineToolMap.normalize — hosted tools (M4a+b)', () => {
     const view = PiEngineToolMap.normalize('task', { prompt: 'do X' })
     expect(view).toMatchObject({ kind: 'task', description: '', prompt: 'do X' })
   })
+
+  it('task: subagent single mode ({agent, task}) -> "Subagent: <agent>" / subagent field is the bare agent name', () => {
+    const view = PiEngineToolMap.normalize('task', { agent: 'echoer', task: 'say hi' })
+    expect(view).toEqual({ kind: 'task', description: 'Subagent: echoer', prompt: 'say hi', subagent: 'echoer' })
+  })
+
+  it('task: subagent parallel mode ({tasks: [...]}) -> "Subagents: a, b" / prompt lists each [agent] task', () => {
+    const view = PiEngineToolMap.normalize('task', {
+      tasks: [
+        { agent: 'scout', task: 'find X' },
+        { agent: 'planner', task: 'plan Y' }
+      ]
+    })
+    expect(view).toEqual({
+      kind: 'task',
+      description: 'Subagents: scout, planner',
+      prompt: '[scout] find X\n\n[planner] plan Y',
+      subagent: 'scout, planner'
+    })
+  })
+
+  it('task: subagent takes precedence over the generic fallback but dispatch_agent\'s `engine` field is checked FIRST (never confused with subagent input)', () => {
+    // dispatch_agent's shape never carries `agent`/`tasks` -- this just proves
+    // the two branches don't cross-contaminate for a pathological input that
+    // (unrealistically) carried both.
+    const view = PiEngineToolMap.normalize('task', { engine: 'claude', prompt: 'x', agent: 'echoer', task: 'y' })
+    expect(view).toEqual({ kind: 'task', description: 'Dispatch: claude', prompt: 'x', subagent: 'claude' })
+  })
 })
 
 describe('PiEngineToolMap.displayName', () => {
@@ -218,5 +249,6 @@ describe('PiEngineToolMap.displayName', () => {
     expect(PiEngineToolMap.displayName('create_mockup')).toBe('Mockup')
     expect(PiEngineToolMap.displayName('show_mockup')).toBe('Mockup')
     expect(PiEngineToolMap.displayName('dispatch_agent')).toBe('Dispatch')
+    expect(PiEngineToolMap.displayName('subagent')).toBe('Subagent')
   })
 })

@@ -722,9 +722,21 @@ export function resolveOpencodeCapabilitiesFromModel(
  *     (pi.registerTool() in pi-bridge-source.ts, calling back over
  *     PiBridgeHost's POST /hosted-tool route to PiSession.handleHostedTool),
  *     auto-allowed via permission-engine.ts's PI_AUTO_ALLOW_HOSTED_TOOLS.
- *   - sideQuestion, fork, forkFromMessage, backgroundTasks, subagents, voice →
+ *   - sideQuestion, fork, forkFromMessage, backgroundTasks, voice →
  *     unwired; each becomes a dedicated follow-up once its RPC surface
  *     (fork/clone, …) is wired the same way OpencodeSession's were.
+ *   - subagents → SHIPPED in M5b: a SECOND ClaudeUI-owned extension
+ *     (pi-subagent-source.ts, gated on CLAUDEUI_PI_SUBAGENTS) registers a
+ *     `subagent` pi.registerTool() that spawns one child `pi --mode json -p`
+ *     process per user-level agent definition (`~/.pi/agent/agents/*.md`,
+ *     port of pi's own shipped example) and streams its progress through the
+ *     SAME `session:subagent-*`/TaskCard pipeline the cross-engine dispatch
+ *     target uses (event-mapper.ts's `subagent_update` MapperOutput →
+ *     PiSession.dispatchOutput). Flipped true only because that full path —
+ *     tool visible → gated ('task' kind) → child spawned → streamed →
+ *     result rendered — is genuinely wired, not because pi has any NATIVE
+ *     subagent concept (it has none; this is entirely a ClaudeUI construct,
+ *     same posture as hostedMcp/crossEngineDispatch above).
  *   - sandbox, proxy → Claude cli.js launch-param concepts; pi has neither
  *     (see EngineCapabilities' own doc comment) — likely permanently false.
  *   - crossEngineDispatch → SHIPPED both directions: pi as a dispatch SOURCE
@@ -741,7 +753,7 @@ export const PI_ENGINE_CAPABILITIES: EngineCapabilities = {
   voice: false,
   hostedMcp: true,
   backgroundTasks: false,
-  subagents: false,
+  subagents: true,
   plan: true,
   fork: false,
   forkFromMessage: false,

@@ -22,13 +22,13 @@ import { logger } from '../services/logger'
 import { piAuthProvider } from '../auth/PiAuthProvider'
 import { locatePiBinary } from './pi-locate'
 import { PiRpcClient } from './PiRpcClient'
-import { mapPiEvent, createPiMapperState } from './event-mapper'
-import type { PiMapperOutput, PiMapperState } from './event-mapper'
+import { mapPiEvent, createPiMapperState, buildPiChatMessage } from './event-mapper'
+import type { PiMapperOutput, PiMapperState, PiSubagentUpdatePayload } from './event-mapper'
 import type { PiGetCommandsData, PiGetSessionStatsData, PiGetStateData, PiRpcCommand } from './pi-protocol'
 import { getPiModelCatalog } from './model-discovery'
 import { findPiSessionFile, loadPiSessionHistory } from '../services/pi-session-list'
 import { recordUsageEvent } from '../services/usage-recorder'
-import { PiBridgeHost, writeBridgeExtension } from './PiBridgeHost'
+import { PiBridgeHost, writeBridgeExtension, writeSubagentExtension } from './PiBridgeHost'
 import type { GateDecision, PiHostedToolHandler, PiHostedToolPayload, PiHostedToolResult, PiToolCallPayload } from './PiBridgeHost'
 // Hosted tools (M4a) — the SAME in-process MCP tool factories Claude/opencode
 // use (mermaid-tool.ts/mockup-tool.ts); handleHostedTool below extracts
@@ -202,6 +202,19 @@ export class PiSession extends BaseSession {
    * unboundedly.
    */
   private hostedGrants = new Map<string, string>()
+
+  // ── In-pi subagents (M5b) ─────────────────────────────────────────────────
+  /**
+   * Dedup guard for handleSubagentUpdate's per-agent usage recording —
+   * `<toolUseId>:<agent-array-index>`, added the FIRST time that slot reaches
+   * status done/error with a usage payload. Prevents double-counting cost if
+   * the terminal payload arrives via BOTH the last `tool_execution_update`
+   * AND the final toolResult `message_end`'s `details` (event-mapper.ts emits
+   * a `subagent_update` from either path — see its doc comment). Bounded
+   * like `hostedGrants` above (oldest evicted first) so a long-running
+   * session's cumulative subagent calls can't grow this unboundedly.
+   */
+  private recordedSubagentUsage = new Set<string>()
 
   // ── Cost / usage accounting ────────────────────────────────────────────────
   private mapperState: PiMapperState = createPiMapperState()
@@ -437,6 +450,14 @@ export class PiSession extends BaseSession {
       const bridgePath = writeBridgeExtension()
 
       const args = ['--mode', 'rpc', '-e', bridgePath]
+      // In-pi subagents (M5b): a SECOND, separate `-e` extension
+      // (pi-subagent-source.ts), added AFTER the bridge's — gated on the
+      // STATIC capability (mirrors hostedMcp/plan below), independent of
+      // whether any user-level agent .md files actually exist (the extension
+      // itself no-ops — registers no tool — when discovery finds zero).
+      if (this.capabilities.subagents) {
+        args.push('-e', writeSubagentExtension())
+      }
       if (this.resumeSessionId) {
         // Resolve the on-disk file for the resume id; fall back to the raw id
         // (verified: --session accepts an absolute file path) if not found —
@@ -459,6 +480,17 @@ export class PiSession extends BaseSession {
           // on whether this session's mode happens to be 'plan' right now
           // (that's a separate, later step — see the re-entry send below).
           ...(this.capabilities.plan ? { CLAUDEUI_PI_PLAN_TOOLS: '1' } : {}),
+          // In-pi subagents (M5b): CLAUDEUI_PI_SUBAGENT_DEFAULT_MODEL is a
+          // spawn-time SNAPSHOT of this._model — a mid-session model switch
+          // (setModel) does not retarget the already-spawned subagent
+          // extension (it re-reads process.env fresh on every `subagent` tool
+          // call, but the CHILD pi process's env was fixed at ITS OWN spawn
+          // time here). Acceptable v1 (documented, not a bug) — an agent
+          // definition's OWN `model:` frontmatter field always overrides this
+          // default regardless.
+          ...(this.capabilities.subagents
+            ? { CLAUDEUI_PI_SUBAGENTS: '1', CLAUDEUI_PI_SUBAGENT_DEFAULT_MODEL: this._model }
+            : {}),
           ...this.computeSkillDirsEnv()
         }
       })
@@ -891,6 +923,10 @@ export class PiSession extends BaseSession {
         this.sendStatusLine()
         break
 
+      case 'subagent_update':
+        this.handleSubagentUpdate(output.toolUseId, output.payload)
+        break
+
       case 'result':
         this.isProcessing = false
         this.accTotalDurationMs += output.durationMs
@@ -916,6 +952,81 @@ export class PiSession extends BaseSession {
       case 'ignore':
         break
     }
+  }
+
+  /**
+   * In-pi subagents (M5b) — event-mapper.ts validated `payload.agents` and
+   * handed us the raw pi child messages verbatim; this converts them into
+   * the SAME `session:subagent-*` payload shapes cross-engine-dispatcher.ts's
+   * `forwardPiTargetMessage` emits (byte-matched, so TaskCard/SubagentMessages
+   * consume both engine-native and dispatch-target subagent streams
+   * identically): assistant messages -> `buildPiChatMessage` (the EXISTING
+   * helper — child messages are the same AssistantMessage wire shape) ->
+   * `session:subagent-message`; toolResult messages -> `session:subagent-tool-result`.
+   * `newMessages` is a DELTA per the extension's own contract (pi-subagent-
+   * source.ts's emitUpdate flushes `pendingNew` after every call) — no
+   * dedup needed here.
+   *
+   * Usage (one recordUsageEvent row per agent, on that agent's OWN
+   * done/error, never re-fired for the same agent slot — the subagent tool's
+   * FINAL result may re-carry the same terminal payload event-mapper.ts's
+   * `tool_execution_update` path already emitted once, per that file's doc
+   * comment) does NOT touch this session's own totalCostUsd/token sums —
+   * mirrors opencode's child-message attribution posture (a subagent's spend
+   * is its own accounting row, not folded into the parent's running total).
+   */
+  private handleSubagentUpdate(toolUseId: string, payload: PiSubagentUpdatePayload): void {
+    payload.agents.forEach((agent, index) => {
+      for (const msg of agent.newMessages) {
+        if (msg.role === 'assistant') {
+          const message = buildPiChatMessage(uuid(), msg.content)
+          this.send('session:subagent-message', { toolUseId, message })
+        } else if (msg.role === 'toolResult') {
+          const result = msg.content
+            .filter((b): b is Extract<typeof b, { type: 'text' }> => b.type === 'text')
+            .map((b) => b.text)
+            .join('')
+          this.send('session:subagent-tool-result', {
+            toolUseId,
+            toolResultToolUseId: msg.toolCallId,
+            result,
+            isError: msg.isError
+          })
+        }
+        // user/bashExecution: never emitted by the child's own JSON-mode
+        // event stream (README.md "Behavior gotchas" — mirrors why the main
+        // event-mapper's message_end never sees them either) — no case needed.
+      }
+
+      if ((agent.status === 'done' || agent.status === 'error') && agent.usage) {
+        const dedupeKey = `${toolUseId}:${index}`
+        if (this.recordedSubagentUsage.has(dedupeKey)) return
+        this.recordedSubagentUsage.add(dedupeKey)
+        if (this.recordedSubagentUsage.size > 256) {
+          const oldest = this.recordedSubagentUsage.values().next().value
+          if (oldest !== undefined) this.recordedSubagentUsage.delete(oldest)
+        }
+        const ref = engineMeta('pi').decodeModelValue(agent.model ?? this._model)
+        recordUsageEvent({
+          engineId: 'pi',
+          vendorId: ref.vendorId,
+          accountId: piAuthProvider.buildPiAccountRef(ref.vendorId)?.accountId ?? null,
+          accountUuid: null,
+          modelId: ref.modelId,
+          tokens: {
+            input: agent.usage.input,
+            output: agent.usage.output,
+            cacheWrite: agent.usage.cacheWrite,
+            cacheWrite1h: 0,
+            cacheRead: agent.usage.cacheRead
+          },
+          engineCostUsd: agent.usage.cost,
+          sessionId: this.piSessionId,
+          messageId: `subagent-${toolUseId}-${agent.agent}-${index}`,
+          source: 'live'
+        })
+      }
+    })
   }
 
   async interrupt(): Promise<void> {

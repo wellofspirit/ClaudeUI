@@ -35,6 +35,13 @@
  * Claude's ExitPlanMode does, with the SAME `{plan}` input shape — it's a
  * lifted kind (MessageBubble.renderToolBlock routes it to ExitPlanModeCard
  * before ever consulting displayName), engine-agnostic by design.
+ *
+ * M5b: in-pi subagents — a SECOND bare-name `pi.registerTool()` registration
+ * (`subagent`, from the separate pi-subagent-source.ts extension, gated on
+ * CLAUDEUI_PI_SUBAGENTS) also maps to 'task', reusing TaskCard alongside
+ * dispatch_agent. Disambiguated by input shape in piNormalize's 'task' case:
+ * dispatch_agent always carries `engine`; subagent carries `agent`+`task`
+ * (single) or `tasks: [...]` (parallel) — never `engine`.
  */
 
 import type { EngineToolMap, ToolKind, ToolView } from '../../../../../shared/tool-kinds'
@@ -83,6 +90,14 @@ function piKindOf(toolName: string): ToolKind {
     case 'show_mockup':
       return 'mockup'
     case 'dispatch_agent':
+      return 'task'
+    // In-pi subagents (M5b) — the subagent-discovery extension's OWN
+    // registered tool (pi-subagent-source.ts, gated on CLAUDEUI_PI_SUBAGENTS).
+    // Reuses the SAME 'task' kind dispatch_agent does — TaskCard is
+    // engine-neutral and disambiguates by input shape (see piNormalize's
+    // 'task' case below). Mirrors permission-engine.ts's piToolKind IDENTICAL
+    // case (single-source guard test).
+    case 'subagent':
       return 'task'
     default:
       return 'unknown'
@@ -176,11 +191,10 @@ function piNormalize(
       }
 
     case 'task': {
-      // Cross-engine dispatch (M4b) — dispatch_agent is the ONLY producer of
-      // 'task' kind for pi (no native subagent-spawning tool of its own to
-      // disambiguate from, unlike Claude's Task/opencode's task). `engine` is
-      // the discriminator, mirroring Claude/OpencodeEngineToolMap's identical
-      // dispatch branch verbatim.
+      // Cross-engine dispatch (M4b) — dispatch_agent's `engine` field is the
+      // discriminator, mirroring Claude/OpencodeEngineToolMap's identical
+      // dispatch branch verbatim. Checked FIRST since dispatch_agent's input
+      // shape never overlaps with subagent's (below).
       if (typeof inp.engine === 'string') {
         return {
           kind: 'task',
@@ -189,9 +203,30 @@ function piNormalize(
           subagent: inp.model != null ? `${inp.engine} · ${String(inp.model)}` : String(inp.engine)
         }
       }
+      // In-pi subagents (M5b) — pi-subagent-source.ts's `subagent` tool.
+      // Parallel form: { tasks: [{agent, task}, ...] }.
+      if (Array.isArray(inp.tasks)) {
+        const list = inp.tasks as Array<{ agent?: unknown; task?: unknown }>
+        const names = list.map((t) => (t.agent != null ? String(t.agent) : '?'))
+        return {
+          kind: 'task',
+          description: `Subagents: ${names.join(', ')}`,
+          prompt: list.map((t) => `[${t.agent != null ? String(t.agent) : '?'}] ${t.task != null ? String(t.task) : ''}`).join('\n\n'),
+          subagent: names.join(', ')
+        }
+      }
+      // Single form: { agent, task }.
+      if (typeof inp.agent === 'string') {
+        return {
+          kind: 'task',
+          description: `Subagent: ${inp.agent}`,
+          prompt: inp.task != null ? String(inp.task) : '',
+          subagent: inp.agent
+        }
+      }
       // Defensive fallback (unreachable for pi today — dispatch_agent always
-      // supplies `engine`), kept for structural parity with Claude/opencode's
-      // task normalizer.
+      // supplies `engine`, subagent always supplies `agent`/`tasks`), kept for
+      // structural parity with Claude/opencode's task normalizer.
       return {
         kind: 'task',
         description: '',
@@ -227,7 +262,8 @@ const PI_DISPLAY_NAMES: Record<string, string> = {
   render_mermaid: 'Mermaid',
   create_mockup: 'Mockup',
   show_mockup: 'Mockup',
-  dispatch_agent: 'Dispatch'
+  dispatch_agent: 'Dispatch',
+  subagent: 'Subagent'
 }
 
 function piDisplayName(toolName: string): string {

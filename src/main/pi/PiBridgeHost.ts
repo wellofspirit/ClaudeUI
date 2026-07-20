@@ -41,6 +41,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { logger } from '../services/logger'
 import { PI_BRIDGE_EXTENSION_SOURCE, PI_BRIDGE_VERSION } from './pi-bridge-source'
+import { PI_SUBAGENT_EXTENSION_SOURCE, PI_SUBAGENT_VERSION } from './pi-subagent-source'
 
 /** Body size cap for POST /tool-call — generous for any realistic tool input, small enough to bound abuse. */
 const MAX_BODY_BYTES = 2 * 1024 * 1024
@@ -308,6 +309,35 @@ export function writeBridgeExtension(): string {
   if (!matches) {
     mkdirSync(dir, { recursive: true })
     writeFileSync(file, PI_BRIDGE_EXTENSION_SOURCE, 'utf-8')
+  }
+  return file
+}
+
+/**
+ * Ensure the version-keyed in-pi subagent extension file (M5b,
+ * pi-subagent-source.ts) exists on disk AND matches
+ * `PI_SUBAGENT_EXTENSION_SOURCE` byte-for-byte, then return its absolute path
+ * for `-e <path>`. SAME content-verify-on-every-call posture as
+ * `writeBridgeExtension` above (rewrite on any mismatch — preplanted,
+ * corrupted, or hand-edited) — a SEPARATE tmp dir + version counter
+ * (`claudeui-pi-subagent/<PI_SUBAGENT_VERSION>/`, not nested under the
+ * bridge's own dir) since the two extensions version independently. Lives
+ * under `os.tmpdir()` — NEVER `~/.pi/**`, which is user space.
+ */
+export function writeSubagentExtension(): string {
+  const dir = join(tmpdir(), 'claudeui-pi-subagent', PI_SUBAGENT_VERSION)
+  const file = join(dir, 'claudeui-subagent.ts')
+  let matches = false
+  if (existsSync(file)) {
+    try {
+      matches = readFileSync(file, 'utf-8') === PI_SUBAGENT_EXTENSION_SOURCE
+    } catch {
+      matches = false // unreadable — treat exactly like a mismatch, rewrite below.
+    }
+  }
+  if (!matches) {
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(file, PI_SUBAGENT_EXTENSION_SOURCE, 'utf-8')
   }
   return file
 }

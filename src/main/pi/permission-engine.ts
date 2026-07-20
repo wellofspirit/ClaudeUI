@@ -83,6 +83,13 @@ export function piToolKind(toolName: string): ToolKind {
       return 'mockup'
     case 'dispatch_agent':
       return 'task'
+    // In-pi subagents (M5b): the subagent-discovery extension's OWN
+    // registered tool (pi-subagent-source.ts, gated on CLAUDEUI_PI_SUBAGENTS)
+    // — reuses the SAME 'task' kind dispatch_agent does (TaskCard is
+    // engine-neutral). Mirrors PiEngineToolMap.kindOf's IDENTICAL case (the
+    // single-source guard test asserts the two tables agree).
+    case 'subagent':
+      return 'task'
     default:
       return 'unknown'
   }

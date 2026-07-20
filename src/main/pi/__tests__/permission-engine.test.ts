@@ -70,6 +70,11 @@ describe('piToolKind', () => {
   it('maps exit_plan (bridge extension, M5a) to the "plan" kind', () => {
     expect(piToolKind('exit_plan')).toBe('plan')
   })
+
+  it('maps subagent (the SECOND extension, pi-subagent-source.ts, M5b) to the SAME "task" kind as dispatch_agent', () => {
+    expect(piToolKind('subagent')).toBe('task')
+    expect(piToolKind('subagent')).toBe(piToolKind('dispatch_agent'))
+  })
 })
 
 describe('decide — mode base (no rules, no sessionAllows)', () => {
@@ -148,6 +153,10 @@ describe('decide — plan mode base (M5a)', () => {
   it('an unmapped/unrecognized tool kind denies (fail toward deny, not allow)', () => {
     expect(decide('dispatch_agent', { engine: 'claude', prompt: 'x' }, ctx())).toBe('deny')
     expect(decide('mystery_tool', {}, ctx())).toBe('deny')
+  })
+
+  it('subagent (the "task" kind, M5b) ALSO denies in plan mode — same fallback as dispatch_agent, no special case', () => {
+    expect(decide('subagent', { agent: 'echoer', task: 'x' }, ctx())).toBe('deny')
   })
 
   it('the hosted three still auto-allow in plan mode — they do not mutate the repo', () => {
@@ -302,6 +311,12 @@ describe('decide — PI_AUTO_ALLOW_HOSTED_TOOLS (M4a)', () => {
   it('dispatch_agent is NOT auto-allowed — normal mode-base gating (allow in full)', () => {
     const ctx = { mode: 'full', rules: rules(), sessionAllows: NO_SESSION_ALLOWS }
     expect(decide('dispatch_agent', {}, ctx)).toBe('allow')
+  })
+
+  it('subagent (M5b) is NOT auto-allowed either — same normal "task" kind mode-base gating: ask in default, allow in full, deny in plan', () => {
+    expect(decide('subagent', {}, { mode: 'default', rules: rules(), sessionAllows: NO_SESSION_ALLOWS })).toBe('ask')
+    expect(decide('subagent', {}, { mode: 'full', rules: rules(), sessionAllows: NO_SESSION_ALLOWS })).toBe('allow')
+    expect(decide('subagent', {}, { mode: 'plan', rules: rules(), sessionAllows: NO_SESSION_ALLOWS })).toBe('deny')
   })
 
   it('checks deny rules BEFORE the hosted-tool auto-allow short-circuit (source-order guard)', () => {

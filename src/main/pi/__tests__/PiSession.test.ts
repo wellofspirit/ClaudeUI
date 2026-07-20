@@ -34,6 +34,7 @@ const {
   mockBridgeHostDispose,
   MockPiBridgeHost,
   mockWriteBridgeExtension,
+  mockWriteSubagentExtension,
   bridgeCaptured,
   mockLoadClaudePermissions,
   mockSaveClaudePermissions,
@@ -87,6 +88,10 @@ const {
     return { start: mockBridgeHostStart, dispose: mockBridgeHostDispose }
   })
   const mockWriteBridgeExtension = vi.fn().mockReturnValue('/fake/tmp/claudeui-bridge.ts')
+  // In-pi subagents (M5b) — writeSubagentExtension is a SECOND export of the
+  // same '../PiBridgeHost' module, mocked alongside writeBridgeExtension so
+  // doStart() never does real fs I/O in this unit test.
+  const mockWriteSubagentExtension = vi.fn().mockReturnValue('/fake/tmp/claudeui-subagent.ts')
 
   // Hosted tools (M4a): mermaid/mockup are MOCKED (per the kickoff spec) —
   // the real tool handlers do real fs I/O (mockup-tool.ts writes under
@@ -137,6 +142,7 @@ const {
     mockBridgeHostDispose,
     MockPiBridgeHost,
     mockWriteBridgeExtension,
+    mockWriteSubagentExtension,
     bridgeCaptured,
     mockLoadClaudePermissions: vi.fn().mockReturnValue({
       allow: [],
@@ -201,7 +207,8 @@ vi.mock('../../services/cross-engine-dispatcher', () => ({
 }))
 vi.mock('../PiBridgeHost', () => ({
   PiBridgeHost: MockPiBridgeHost,
-  writeBridgeExtension: mockWriteBridgeExtension
+  writeBridgeExtension: mockWriteBridgeExtension,
+  writeSubagentExtension: mockWriteSubagentExtension
 }))
 vi.mock('../../auth/PiAuthProvider', () => ({
   piAuthProvider: { probe: mockPiAuthProbe, buildPiAccountRef: mockBuildPiAccountRef }
@@ -269,6 +276,7 @@ beforeEach(() => {
   mockBridgeHostDispose.mockClear()
   MockPiBridgeHost.mockClear()
   mockWriteBridgeExtension.mockClear().mockReturnValue('/fake/tmp/claudeui-bridge.ts')
+  mockWriteSubagentExtension.mockClear().mockReturnValue('/fake/tmp/claudeui-subagent.ts')
   bridgeCaptured.handler = null
   bridgeCaptured.hostedToolHandler = null
   mockLoadClaudePermissions.mockReset().mockReturnValue({
@@ -380,16 +388,20 @@ describe('PiSession.run — sends a prompt', () => {
     // crossEngineDispatchAvailable('pi') defaults to true in this mock (see
     // the vi.hoisted comment) — dedicated tests below cover the "off" paths.
     // Plan mode (M5a): CLAUDEUI_PI_PLAN_TOOLS is '1' by default too — `plan`
-    // is a static-true engine capability, same as hostedMcp above.
+    // is a static-true engine capability, same as hostedMcp above. In-pi
+    // subagents (M5b): a SECOND -e <subagent file>, plus its own two env vars
+    // — `subagents` is likewise a static-true engine capability.
     expect(MockPiRpcClient).toHaveBeenCalledWith('/fake/pi', {
       cwd: '/cwd',
-      args: ['--mode', 'rpc', '-e', '/fake/tmp/claudeui-bridge.ts'],
+      args: ['--mode', 'rpc', '-e', '/fake/tmp/claudeui-bridge.ts', '-e', '/fake/tmp/claudeui-subagent.ts'],
       env: {
         CLAUDEUI_PI_BRIDGE_URL: 'http://127.0.0.1:9999',
         CLAUDEUI_PI_BRIDGE_TOKEN: 'test-bridge-token',
         CLAUDEUI_PI_HOSTED_TOOLS: '1',
         CLAUDEUI_PI_DISPATCH_ENABLED: '1',
-        CLAUDEUI_PI_PLAN_TOOLS: '1'
+        CLAUDEUI_PI_PLAN_TOOLS: '1',
+        CLAUDEUI_PI_SUBAGENTS: '1',
+        CLAUDEUI_PI_SUBAGENT_DEFAULT_MODEL: 'anthropic/claude-sonnet-4-6'
       }
     })
     expect(MockPiBridgeHost).toHaveBeenCalledTimes(1)
@@ -2311,5 +2323,273 @@ describe('PiSession — usage account attribution (A11, post-M3 gap)', () => {
     })
 
     expect(mockRecordUsageEvent).toHaveBeenCalledWith(expect.objectContaining({ accountId: null, accountUuid: null }))
+  })
+})
+
+describe('PiSession — in-pi subagents (M5b) — env gating at spawn', () => {
+  it('sets CLAUDEUI_PI_SUBAGENTS=1 + CLAUDEUI_PI_SUBAGENT_DEFAULT_MODEL and adds a SECOND -e flag by default (subagents is a static-true engine capability)', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-subagents-env-1', win as never, '/cwd', { model: 'openai-codex/gpt-5.6-luna' })
+    await session.run('hi')
+    const opts = lastSpawnOpts()
+    expect(opts.args).toEqual(['--mode', 'rpc', '-e', '/fake/tmp/claudeui-bridge.ts', '-e', '/fake/tmp/claudeui-subagent.ts'])
+    expect(opts.env.CLAUDEUI_PI_SUBAGENTS).toBe('1')
+    expect(opts.env.CLAUDEUI_PI_SUBAGENT_DEFAULT_MODEL).toBe('openai-codex/gpt-5.6-luna')
+    expect(mockWriteSubagentExtension).toHaveBeenCalledTimes(1)
+  })
+
+  it('CLAUDEUI_PI_SUBAGENT_DEFAULT_MODEL is a spawn-time snapshot — a later setModel() does not retarget the already-spawned extension', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-subagents-env-2', win as never, '/cwd', { model: 'anthropic/claude-sonnet-4-6' })
+    await session.run('hi')
+    expect(lastSpawnOpts().env.CLAUDEUI_PI_SUBAGENT_DEFAULT_MODEL).toBe('anthropic/claude-sonnet-4-6')
+
+    await session.setModel('openai-codex/gpt-5.6-luna')
+    // Same (already-spawned) process — no second PiRpcClient construction,
+    // so the env captured at spawn time is untouched.
+    expect(MockPiRpcClient).toHaveBeenCalledTimes(1)
+    expect(lastSpawnOpts().env.CLAUDEUI_PI_SUBAGENT_DEFAULT_MODEL).toBe('anthropic/claude-sonnet-4-6')
+  })
+})
+
+describe('PiSession — in-pi subagents (M5b) — subagent_update dispatch', () => {
+  /** A single valid cuiSubagent tool_execution_update event, mirroring exactly what pi-subagent-source.ts's onUpdate() call produces. */
+  function subagentUpdateEvent(toolCallId: string, agentOverrides: Record<string, unknown> = {}): PiEvent {
+    return {
+      type: 'tool_execution_update',
+      toolCallId,
+      toolName: 'subagent',
+      args: {},
+      partialResult: {
+        content: [{ type: 'text', text: '[echoer] running' }],
+        details: {
+          cuiSubagent: {
+            v: 1,
+            agents: [
+              {
+                agent: 'echoer',
+                model: 'anthropic/claude-haiku-4-5',
+                status: 'running',
+                newMessages: [{ role: 'assistant', content: [{ type: 'text', text: 'hi' }] }],
+                ...agentOverrides
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+
+  it('an assistant newMessage -> session:subagent-message with a ChatMessage built via buildPiChatMessage, keyed by the outer toolUseId', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-subagent-msg-1', win as never, '/cwd', {})
+    await session.run('hi')
+
+    lastEventHandler()(subagentUpdateEvent('outer-call-1'))
+
+    const messages = sentPayloads(win, 'session:subagent-message') as Array<{
+      toolUseId: string
+      message: { role: string; content: Array<{ type: string; text?: string }> }
+    }>
+    expect(messages).toHaveLength(1)
+    expect(messages[0].toolUseId).toBe('outer-call-1')
+    expect(messages[0].message.role).toBe('assistant')
+    expect(messages[0].message.content).toEqual([{ type: 'text', text: 'hi' }])
+  })
+
+  it('a toolResult newMessage -> session:subagent-tool-result with {toolUseId, toolResultToolUseId, result, isError} — byte-matches forwardPiTargetMessage\'s shape', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-subagent-msg-2', win as never, '/cwd', {})
+    await session.run('hi')
+
+    lastEventHandler()(
+      subagentUpdateEvent('outer-call-2', {
+        newMessages: [
+          { role: 'toolResult', toolCallId: 'child-tc-1', toolName: 'read', content: [{ type: 'text', text: 'file body' }], isError: false }
+        ]
+      })
+    )
+
+    const results = sentPayloads(win, 'session:subagent-tool-result') as Array<{
+      toolUseId: string
+      toolResultToolUseId: string
+      result: string
+      isError: boolean
+    }>
+    expect(results).toHaveLength(1)
+    expect(results[0]).toEqual({
+      toolUseId: 'outer-call-2',
+      toolResultToolUseId: 'child-tc-1',
+      result: 'file body',
+      isError: false
+    })
+  })
+
+  it('an ERRORING child toolResult -> isError:true propagates through', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-subagent-msg-3', win as never, '/cwd', {})
+    await session.run('hi')
+
+    lastEventHandler()(
+      subagentUpdateEvent('outer-call-3', {
+        newMessages: [
+          { role: 'toolResult', toolCallId: 'child-tc-2', toolName: 'bash', content: [{ type: 'text', text: 'boom' }], isError: true }
+        ]
+      })
+    )
+
+    const results = sentPayloads(win, 'session:subagent-tool-result') as Array<{ isError: boolean }>
+    expect(results[0].isError).toBe(true)
+  })
+
+  it('assistant text deltas are NOT re-streamed — no session:stream carries subagent content (message-granularity only)', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-subagent-msg-4', win as never, '/cwd', {})
+    await session.run('hi')
+
+    const streamsBefore = sentPayloads(win, 'session:stream').length
+    lastEventHandler()(subagentUpdateEvent('outer-call-4'))
+    expect(sentPayloads(win, 'session:stream').length).toBe(streamsBefore)
+  })
+
+  it('a malformed cuiSubagent payload (invalid status) never reaches session:subagent-message — the pure mapper already filtered it, PiSession never crashes', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-subagent-malformed', win as never, '/cwd', {})
+    await session.run('hi')
+
+    expect(() =>
+      lastEventHandler()({
+        type: 'tool_execution_update',
+        toolCallId: 'outer-call-5',
+        toolName: 'subagent',
+        args: {},
+        partialResult: { content: [], details: { cuiSubagent: { v: 1, agents: [{ agent: 'x', status: 'bogus', newMessages: [] }] } } }
+      })
+    ).not.toThrow()
+    expect(sentPayloads(win, 'session:subagent-message')).toHaveLength(0)
+  })
+})
+
+describe('PiSession — in-pi subagents (M5b) — usage attribution', () => {
+  function doneCuiSubagent(toolCallId: string, agent: Record<string, unknown>): PiEvent {
+    return {
+      type: 'tool_execution_update',
+      toolCallId,
+      toolName: 'subagent',
+      args: {},
+      partialResult: { content: [], details: { cuiSubagent: { v: 1, agents: [agent] } } }
+    }
+  }
+
+  it('records ONE recordUsageEvent row per agent on done, engineId "pi", tokens/cost from the payload, source "live"', async () => {
+    mockBuildPiAccountRef.mockReturnValue({
+      engineId: 'pi',
+      vendorId: 'anthropic',
+      billingType: 'apiKey',
+      authState: 'authenticated',
+      accountId: 'acct-echoer'
+    })
+    const win = new MockWindow()
+    const session = new PiSession('rid-subagent-usage-1', win as never, '/cwd', {})
+    await session.run('hi')
+    mockRecordUsageEvent.mockClear() // drop the parent turn's own usage row from run('hi')'s message_end, if any
+
+    lastEventHandler()(
+      doneCuiSubagent('outer-call-usage-1', {
+        agent: 'echoer',
+        model: 'anthropic/claude-haiku-4-5',
+        status: 'done',
+        newMessages: [],
+        usage: { input: 10, output: 5, cacheRead: 1, cacheWrite: 2, cost: 0.0123, turns: 3 }
+      })
+    )
+
+    expect(mockRecordUsageEvent).toHaveBeenCalledTimes(1)
+    expect(mockRecordUsageEvent).toHaveBeenCalledWith({
+      engineId: 'pi',
+      vendorId: 'anthropic',
+      accountId: 'acct-echoer',
+      accountUuid: null,
+      modelId: 'claude-haiku-4-5',
+      tokens: { input: 10, output: 5, cacheWrite: 2, cacheWrite1h: 0, cacheRead: 1 },
+      engineCostUsd: 0.0123,
+      sessionId: 'pi-sess-1',
+      messageId: 'subagent-outer-call-usage-1-echoer-0',
+      source: 'live'
+    })
+  })
+
+  it('falls back to the PARENT session\'s model when the agent payload carries no model', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-subagent-usage-2', win as never, '/cwd', { model: 'anthropic/claude-opus-4-8' })
+    await session.run('hi')
+    mockRecordUsageEvent.mockClear()
+
+    lastEventHandler()(
+      doneCuiSubagent('outer-call-usage-2', {
+        agent: 'echoer',
+        status: 'error',
+        newMessages: [],
+        usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: 0.001, turns: 1 }
+      })
+    )
+
+    expect(mockRecordUsageEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ vendorId: 'anthropic', modelId: 'claude-opus-4-8' })
+    )
+  })
+
+  it('does NOT double-record — a repeated done payload for the SAME agent slot (e.g. both the last tool_execution_update AND the final toolResult path) records usage only ONCE', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-subagent-usage-3', win as never, '/cwd', {})
+    await session.run('hi')
+    mockRecordUsageEvent.mockClear()
+
+    const event = doneCuiSubagent('outer-call-usage-3', {
+      agent: 'echoer',
+      status: 'done',
+      newMessages: [],
+      usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: 0.001, turns: 1 }
+    })
+    lastEventHandler()(event)
+    lastEventHandler()(event) // simulates the SAME terminal payload arriving via the OTHER carrier path
+
+    expect(mockRecordUsageEvent).toHaveBeenCalledTimes(1)
+  })
+
+  it('a "running" status agent (not yet done/error) never records usage, even when a usage object is present', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-subagent-usage-4', win as never, '/cwd', {})
+    await session.run('hi')
+    mockRecordUsageEvent.mockClear()
+
+    lastEventHandler()(
+      doneCuiSubagent('outer-call-usage-4', {
+        agent: 'echoer',
+        status: 'running',
+        newMessages: [],
+        usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: 0.001, turns: 1 }
+      })
+    )
+
+    expect(mockRecordUsageEvent).not.toHaveBeenCalled()
+  })
+
+  it('does NOT touch the parent session\'s own totalCostUsd (subagent spend is its own accounting row, mirrors opencode\'s child-message attribution posture)', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-subagent-usage-5', win as never, '/cwd', {})
+    await session.run('hi')
+    const costBefore = session.status.totalCostUsd
+
+    lastEventHandler()(
+      doneCuiSubagent('outer-call-usage-5', {
+        agent: 'echoer',
+        status: 'done',
+        newMessages: [],
+        usage: { input: 100, output: 100, cacheRead: 0, cacheWrite: 0, cost: 5, turns: 1 }
+      })
+    )
+
+    expect(session.status.totalCostUsd).toBe(costBefore)
   })
 })
