@@ -1084,13 +1084,14 @@ export class PiSession extends BaseSession {
     const decision = decide(toolName, input, {
       mode: this.permissionMode,
       rules,
-      sessionAllows: this.sessionAllows
+      sessionAllows: this.sessionAllows,
+      cwd: this.cwd
     })
 
     if (decision === 'allow') return { behavior: 'allow' }
 
     if (decision === 'deny') {
-      const matched = firstMatchingRule(rules.deny, toolName, input)
+      const matched = firstMatchingRule(rules.deny, toolName, input, this.cwd)
       if (matched) {
         return { behavior: 'deny', reason: `Denied by permission rule: ${matched}` }
       }

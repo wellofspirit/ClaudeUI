@@ -25,6 +25,7 @@ import {
   sessionAllowKey,
   normalizeWhitespace,
   mergedClaudeRulesFor,
+  claudeGlobMatches,
   PI_AUTO_ALLOW_HOSTED_TOOLS,
   PI_HOSTED_TOOL_NAMES,
   EMPTY_RULES,
@@ -407,26 +408,35 @@ describe('decide — Bash prefix/exact rules', () => {
   })
 })
 
-describe('decide — path-glob (and other non-bash specifier) rules are skipped, never default-allow', () => {
-  it('a specifier\'d Edit rule (path glob) never matches — falls through to the mode base', () => {
+describe('decide — path-glob specifier rules (Edit/Write/Read/Grep/Glob/LS) are now evaluated', () => {
+  it('a scoped Edit(src/**) allow rule matches a path under src/ (no cwd — raw-path fallback)', () => {
     const ctx = {
       mode: 'default', // mode base for edit is 'ask'
       rules: rules({ allow: ['Edit(src/**)'] }),
       sessionAllows: NO_SESSION_ALLOWS
     }
-    expect(decide('edit', { path: 'src/foo.ts' }, ctx)).toBe('ask')
+    expect(decide('edit', { path: 'src/foo.ts' }, ctx)).toBe('allow')
   })
 
-  it('an unevaluated ask-tier specifier rule does not force ask — still falls through to the (legitimate) mode-base allow', () => {
+  it('the SAME rule does NOT match a path outside its scope — falls through to the mode base', () => {
+    const ctx = {
+      mode: 'default',
+      rules: rules({ allow: ['Edit(src/**)'] }),
+      sessionAllows: NO_SESSION_ALLOWS
+    }
+    expect(decide('edit', { path: 'lib/foo.ts' }, ctx)).toBe('ask')
+  })
+
+  it('an ask-tier specifier rule that DOES match now forces ask, overriding a would-be mode-base allow', () => {
     const ctx = {
       mode: 'acceptEdits', // mode base for fileEdit is 'allow'
       rules: rules({ ask: ['Edit(src/**)'] }),
       sessionAllows: NO_SESSION_ALLOWS
     }
-    expect(decide('edit', { path: 'src/foo.ts' }, ctx)).toBe('allow')
+    expect(decide('edit', { path: 'src/foo.ts' }, ctx)).toBe('ask')
   })
 
-  it('a bare Edit rule (no specifier) still matches normally alongside a skipped specifier rule', () => {
+  it('a bare Edit rule (no specifier) still matches unconditionally alongside a non-matching specifier rule', () => {
     const ctx = {
       mode: 'default',
       rules: rules({ allow: ['Edit(src/**)', 'Edit'] }),
@@ -435,17 +445,159 @@ describe('decide — path-glob (and other non-bash specifier) rules are skipped,
     expect(decide('edit', { path: 'anywhere.ts' }, ctx)).toBe('allow')
   })
 
-  it('logs the skipped rule only once even across repeated calls (de-duplicated)', async () => {
-    const { logger } = (await import('../../services/logger')) as unknown as {
-      logger: { debug: ReturnType<typeof vi.fn> }
+  it('Read(**) (a broad glob) is honored for read', () => {
+    const ctx = { mode: 'default', rules: rules({ deny: ['Read(**)'] }), sessionAllows: NO_SESSION_ALLOWS }
+    expect(decide('read', { path: 'anything/at/all.ts' }, ctx)).toBe('deny')
+  })
+
+  it('a scoped Read(docs/**) matches only under docs/', () => {
+    const ctx = { mode: 'default', rules: rules({ deny: ['Read(docs/**)'] }), sessionAllows: NO_SESSION_ALLOWS }
+    expect(decide('read', { path: 'docs/readme.md' }, ctx)).toBe('deny')
+    // Mode base for read is 'allow' — the deny rule not matching falls through to it.
+    expect(decide('read', { path: 'src/foo.ts' }, ctx)).toBe('allow')
+  })
+
+  it('deny precedence: a scoped Deny Edit(src/secret/**) wins even in full (allow-everything) mode', () => {
+    const ctx = { mode: 'full', rules: rules({ deny: ['Edit(src/secret/**)'] }), sessionAllows: NO_SESSION_ALLOWS }
+    expect(decide('edit', { path: 'src/secret/keys.ts' }, ctx)).toBe('deny')
+    // A different path under the same mode falls through to full mode's allow-everything base.
+    expect(decide('edit', { path: 'src/other.ts' }, ctx)).toBe('allow')
+  })
+
+  it('a path-bearing rule never default-allows when the input has no usable path', () => {
+    const ctx = { mode: 'default', rules: rules({ allow: ['Edit(src/**)'] }), sessionAllows: NO_SESSION_ALLOWS }
+    // No `path`/`file_path` on the input at all — falls through to mode base ('ask' for edit).
+    expect(decide('edit', {}, ctx)).toBe('ask')
+  })
+
+  it('search kind (grep/find/ls) path-scoping: a rule matches the search-root `path` field', () => {
+    const ctx = { mode: 'default', rules: rules({ deny: ['Grep(secrets/**)'] }), sessionAllows: NO_SESSION_ALLOWS }
+    expect(decide('grep', { pattern: 'TODO', path: 'secrets/vault' }, ctx)).toBe('deny')
+    expect(decide('grep', { pattern: 'TODO', path: 'src' }, ctx)).toBe('allow') // mode base for search is allow
+  })
+
+  it('a Grep(TODO)-style search-TERM specifier is attempted as a path glob and (correctly) never matches a real path — falls through, never default-allows', () => {
+    const ctx = { mode: 'default', rules: rules({ deny: ['Grep(TODO)'] }), sessionAllows: NO_SESSION_ALLOWS }
+    expect(decide('grep', { pattern: 'TODO', path: 'src' }, ctx)).toBe('allow') // mode base for search — deny rule didn't match
+  })
+
+  it('cwd-relative matching: an ABSOLUTE path inside cwd relativizes and matches a relative glob', () => {
+    const ctx = {
+      mode: 'default',
+      rules: rules({ allow: ['Edit(src/**)'] }),
+      sessionAllows: NO_SESSION_ALLOWS,
+      cwd: '/repo'
     }
-    logger.debug.mockClear()
-    const ctx = { mode: 'default', rules: rules({ allow: ['Edit(some/unique/glob/**)'] }), sessionAllows: NO_SESSION_ALLOWS }
-    decide('edit', {}, ctx)
-    decide('edit', {}, ctx)
-    decide('edit', {}, ctx)
-    const matching = logger.debug.mock.calls.filter((c) => String(c[1] ?? '').includes('some/unique/glob'))
-    expect(matching.length).toBeLessThanOrEqual(1)
+    expect(decide('edit', { path: '/repo/src/foo.ts' }, ctx)).toBe('allow')
+  })
+
+  it('cwd-relative matching: an ABSOLUTE path OUTSIDE cwd relativizes to ../… and does NOT match', () => {
+    const ctx = {
+      mode: 'default',
+      rules: rules({ allow: ['Edit(src/**)'] }),
+      sessionAllows: NO_SESSION_ALLOWS,
+      cwd: '/repo'
+    }
+    expect(decide('edit', { path: '/elsewhere/src/foo.ts' }, ctx)).toBe('ask') // falls through to mode base
+  })
+
+  it('cwd-relative matching: a relative input path is resolved against cwd first, then relativized (round-trips to itself)', () => {
+    const ctx = {
+      mode: 'default',
+      rules: rules({ allow: ['Edit(src/**)'] }),
+      sessionAllows: NO_SESSION_ALLOWS,
+      cwd: '/repo'
+    }
+    expect(decide('edit', { path: 'src/foo.ts' }, ctx)).toBe('allow')
+  })
+
+  it('Windows-style backslash-separated input matches a forward-slash rule glob (both normalized before comparing)', () => {
+    const ctx = {
+      mode: 'default',
+      rules: rules({ allow: ['Edit(src/**)'] }),
+      sessionAllows: NO_SESSION_ALLOWS,
+      cwd: 'D:\\repo'
+    }
+    expect(decide('edit', { path: 'D:\\repo\\src\\foo.ts' }, ctx)).toBe('allow')
+  })
+
+  it('no-cwd fallback: matches the RAW input path as-is (documented best-effort) when the caller omits cwd', () => {
+    const ctx = { mode: 'default', rules: rules({ allow: ['Edit(src/**)'] }), sessionAllows: NO_SESSION_ALLOWS }
+    // No cwd -> raw path used directly; an absolute path is compared literally
+    // and does NOT match a relative-style glob (documents the limitation).
+    expect(decide('edit', { path: '/repo/src/foo.ts' }, ctx)).toBe('ask')
+    // But a raw path that's ALREADY in the glob's own relative form still matches.
+    expect(decide('edit', { path: 'src/foo.ts' }, ctx)).toBe('allow')
+  })
+
+  it('legacy file_path alias is honored for edit/write/read when path is absent', () => {
+    const ctx = { mode: 'default', rules: rules({ deny: ['Edit(src/**)'] }), sessionAllows: NO_SESSION_ALLOWS }
+    expect(decide('edit', { file_path: 'src/foo.ts' }, ctx)).toBe('deny')
+  })
+})
+
+describe('additionalDirectories / defaultMode — deliberately deferred, must stay inert (never default-allow)', () => {
+  it('additionalDirectories present in rules does not widen access for a path outside cwd/scope', () => {
+    const ctx = {
+      mode: 'default', // mode base for edit is 'ask'
+      rules: rules({ additionalDirectories: ['/extra'] }),
+      sessionAllows: NO_SESSION_ALLOWS,
+      cwd: '/repo'
+    }
+    // A path under the "additional directory" gets NO special treatment —
+    // behaves exactly like any other out-of-cwd path (falls through to mode base).
+    expect(decide('edit', { path: '/extra/notes.md' }, ctx)).toBe('ask')
+  })
+
+  it('additionalDirectories does not make an unrelated allow rule match a path it otherwise would not', () => {
+    const ctx = {
+      mode: 'default',
+      rules: rules({ allow: ['Edit(src/**)'], additionalDirectories: ['/extra'] }),
+      sessionAllows: NO_SESSION_ALLOWS,
+      cwd: '/repo'
+    }
+    expect(decide('edit', { path: '/extra/notes.md' }, ctx)).toBe('ask')
+  })
+
+  it('defaultMode present in rules does not override the live session mode', () => {
+    const ctx = {
+      mode: 'default', // live mode chosen by the user/session — mode base for edit is 'ask'
+      rules: rules({ defaultMode: 'bypassPermissions' }), // would mean allow-everything if honored
+      sessionAllows: NO_SESSION_ALLOWS
+    }
+    expect(decide('edit', { path: 'x.ts' }, ctx)).toBe('ask')
+  })
+})
+
+describe('claudeGlobMatches — parity with opencode\'s real Wildcard.match (vendor/opencode-src/packages/core/src/util/wildcard.ts)', () => {
+  // Independently re-derived from the vendored source (not a call into the
+  // same implementation) — an oracle to catch drift if claudeGlobMatches'
+  // port is ever edited out of step with what it's supposed to mirror.
+  function referenceWildcardMatch(input: string, pattern: string): boolean {
+    const normalized = input.replaceAll('\\', '/')
+    let escaped = pattern
+      .replaceAll('\\', '/')
+      .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+      .replace(/\*/g, '.*')
+      .replace(/\?/g, '.')
+    if (escaped.endsWith(' .*')) escaped = escaped.slice(0, -3) + '( .*)?'
+    return new RegExp('^' + escaped + '$', process.platform === 'win32' ? 'si' : 's').test(normalized)
+  }
+
+  const cases: [string, string][] = [
+    ['src/foo.ts', 'src/**'],
+    ['src/a/b/c.ts', 'src/**'],
+    ['lib/foo.ts', 'src/**'],
+    ['docs/readme.md', 'docs/**'],
+    ['anything/at/all.ts', '**'],
+    ['foo.ts', '*.ts'],
+    ['foo.txt', '*.ts'],
+    ['a/b.ts', 'a/?.ts'],
+    ['a/bb.ts', 'a/?.ts']
+  ]
+
+  it.each(cases)('claudeGlobMatches(%j, %j) agrees with the independently re-derived reference', (input, pattern) => {
+    expect(claudeGlobMatches(input, pattern)).toBe(referenceWildcardMatch(input, pattern))
   })
 })
 
