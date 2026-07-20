@@ -518,6 +518,24 @@ interface PiTargetEntry {
    * pending delivery. See `resolveAndRunPi`'s stop/timeout/abort branch.
    */
   settled: ((outcome: PiTurnOutcome) => void) | null
+  /**
+   * RACE NOTE (pi-specific, same root cause as `settled`'s RACE NOTE above):
+   * the ABANDONED turn's own in-flight terminal event sequence can carry a
+   * `/tool-call` 'ask' that lands AFTER `resolveAndRunPi`'s timeout/abort/stop
+   * branch has already run `dismissPendingForTarget` — pi's wire has no
+   * per-event turn correlation, so the gate has no other way to recognize
+   * that ask as belonging to a turn the caller was already told is
+   * stopped/failed. Without this flag, that late ask would register a FRESH
+   * `pendingApprovals` entry and emit a `session:approval-request` for a
+   * dispatch that already settled — orphaned until a manual deny or
+   * `disposeFor`. Set true as the FIRST action in the timeout/abort/stop
+   * winner branch (before the `abort` RPC even sends, so no event can race
+   * ahead of it); `gatePiTargetToolCall` checks this FIRST and short-circuits
+   * to `deny` — never registers a pending approval while draining. Cleared at
+   * the start of `drivePiTurn` — a fresh continuation turn is no longer
+   * draining.
+   */
+  draining: boolean
 }
 
 /** What a pi dispatch turn settles with — see `PiTargetEntry.settled`. */
@@ -747,30 +765,56 @@ async function defaultSpawnClaudeQuery(opts: ClaudeQuerySpawnOpts): Promise<Quer
  *    `get_state`/`set_model`/`prompt`/`get_last_assistant_text`/`abort` all
  *    work normally under `--no-session`, same as `model-discovery.ts`'s own
  *    ephemeral-probe precedent).
- *  - NO `CLAUDEUI_PI_HOSTED_TOOLS` / `CLAUDEUI_PI_DISPATCH_ENABLED` env vars —
- *    the bridge extension's hosted-tool registrations (render_mermaid/
- *    create_mockup/show_mockup/dispatch_agent) are gated on these
- *    (pi-bridge-source.ts); omitting them means the target's OWN pi process
- *    never has a `dispatch_agent` tool to call in the first place —
- *    recursion is impossible at the wire level, not just by policy (mirrors
- *    ADR-033 §4's "dispatcher-created targets never get the collab server").
- *    The approval gate (the extension's `tool_call` hook) still activates
- *    normally — it depends ONLY on `CLAUDEUI_PI_BRIDGE_URL`/`TOKEN`,
- *    independent of the hosted-tools gate (verified against
- *    pi-bridge-source.ts's own independence design).
+ *  - NO `CLAUDEUI_PI_HOSTED_TOOLS` / `CLAUDEUI_PI_DISPATCH_ENABLED` /
+ *    `CLAUDEUI_PI_SKILL_DIRS` in the target's env — `buildPiTargetChildEnv`
+ *    both OMITS them from what it builds AND explicitly overrides them to
+ *    `''` in the returned env object (PiRpcClient spawns with `{...process.
+ *    env, ...opts.env}`, so omission ALONE would leak through whatever the
+ *    ClaudeUI process's OWN env happens to carry — see buildPiTargetChildEnv's
+ *    doc comment for the full recursion-guard rationale). The bridge
+ *    extension's hosted-tool registrations (render_mermaid/create_mockup/
+ *    show_mockup/dispatch_agent) are gated on the first two
+ *    (pi-bridge-source.ts); disabling them means the target's OWN pi process
+ *    never has a `dispatch_agent` tool to call in the first place — recursion
+ *    is impossible at the wire level, not just by policy (mirrors ADR-033
+ *    §4's "dispatcher-created targets never get the collab server"). Belt-
+ *    and-suspenders even if a hosted tool were somehow still registered: this
+ *    `PiBridgeHost` below is constructed with ONLY `opts.gateHandler` (no
+ *    `hostedToolHandler`), so any `/hosted-tool` execute against this target
+ *    fails closed with an isError result — never actually runs anything (see
+ *    `PiBridgeHost.processHostedToolBody`'s own documented no-handler
+ *    fail-closed default). The approval gate (the extension's `tool_call`
+ *    hook) still activates normally — it depends ONLY on
+ *    `CLAUDEUI_PI_BRIDGE_URL`/`TOKEN`, independent of the hosted-tools gate
+ *    (verified against pi-bridge-source.ts's own independence design).
  */
 /**
  * The env vars a pi dispatch TARGET's child process gets. Extracted as a pure
  * function (rather than inlined into `defaultSpawnPiTarget`) so the
  * recursion-guard property is DIRECTLY unit-testable without mocking
  * PiRpcClient/PiBridgeHost/locatePiBinary: NO `CLAUDEUI_PI_HOSTED_TOOLS` /
- * `CLAUDEUI_PI_DISPATCH_ENABLED` — see `defaultSpawnPiTarget`'s doc comment
- * for the full rationale.
+ * `CLAUDEUI_PI_DISPATCH_ENABLED` / `CLAUDEUI_PI_SKILL_DIRS` — see
+ * `defaultSpawnPiTarget`'s doc comment for the full rationale.
+ *
+ * The three gate vars are set to `''` EXPLICITLY, not merely left out of this
+ * object: `PiRpcClient` spawns with `{...process.env, ...opts.env}` (this
+ * object is `opts.env`), so plain omission would let the flag leak straight
+ * through from the ClaudeUI process's OWN env if IT happens to carry one
+ * (e.g. a dev shell that exports `CLAUDEUI_PI_HOSTED_TOOLS=1` for its own pi
+ * session) — the target would then see hosted tools registered (still unable
+ * to execute them, see `defaultSpawnPiTarget`'s doc comment, but visible and
+ * always-erroring to the model). The bridge extension's gates are plain
+ * truthiness/`=== '1'` checks (pi-bridge-source.ts) — `''` is falsy against
+ * both, so this reliably disables all three regardless of what the parent
+ * process happens to have set.
  */
 export function buildPiTargetChildEnv(bridge: { url: string; token: string }): NodeJS.ProcessEnv {
   return {
     CLAUDEUI_PI_BRIDGE_URL: bridge.url,
-    CLAUDEUI_PI_BRIDGE_TOKEN: bridge.token
+    CLAUDEUI_PI_BRIDGE_TOKEN: bridge.token,
+    CLAUDEUI_PI_HOSTED_TOOLS: '',
+    CLAUDEUI_PI_DISPATCH_ENABLED: '',
+    CLAUDEUI_PI_SKILL_DIRS: ''
   }
 }
 
@@ -2044,6 +2088,32 @@ export class CrossEngineDispatcher {
     }
   }
 
+  /**
+   * Shared cost-delta bookkeeping for a NON-success pi turn outcome (timeout/
+   * stop/err) — mirrors the Claude target's failed-subtype handling (§ "the
+   * cap is a SPEND limit, not a success limit", :1797-1802): a turn that
+   * streamed real spend before erroring/timing-out/being stopped must still
+   * count that spend toward the cap and the dispatching session's cost
+   * breakdown, exactly like a successful turn does. `entry.mapperState.
+   * totalCostUsd` is the right source here (NOT anything derived from the
+   * turn's own outcome, since a non-success outcome carries no such number):
+   * it is the mapper's per-PROCESS running total, incremented by `mapPiEvent`
+   * on every cost-bearing assistant message REGARDLESS of which turn produced
+   * it or how that turn ended (see event-mapper.ts's `PiMapperState.
+   * totalCostUsd` doc) — so it already reflects whatever the abandoned turn
+   * actually spent by the time the caller reads it. Returns the turn's own
+   * delta (>= 0) for the caller to fold into a usage row.
+   */
+  private accountPiNonSuccessCost(entry: PiTargetEntry, ctx: DispatchContext, model: string): number {
+    const turnCostUsd = Math.max(0, entry.mapperState.totalCostUsd - entry.lastReportedTotalCostUsd)
+    entry.lastReportedTotalCostUsd = entry.mapperState.totalCostUsd
+    entry.cumulativeCostUsd += turnCostUsd
+    if (turnCostUsd > 0) {
+      ctx.addDispatchedCost?.('pi', model, turnCostUsd)
+    }
+    return turnCostUsd
+  }
+
   // ── pi direction (M4c) ────────────────────────────────────────────────────
 
   /**
@@ -2175,6 +2245,10 @@ export class CrossEngineDispatcher {
       const winner = await Promise.race([turnPromise, timeoutPromise, abortPromise, stopPromise])
 
       if (winner.kind === 'timeout' || winner.kind === 'abort' || winner.kind === 'stop') {
+        // See PiTargetEntry.draining's doc comment — set FIRST, synchronously,
+        // before the `abort` RPC even sends, so no late 'ask' from this turn
+        // can possibly race ahead of it.
+        entry.draining = true
         // DIVERGES FROM CLAUDE: pi's `abort` interrupts the CURRENT TURN only
         // (session survives — verified; see PiTargetEntry's doc comment) —
         // mirrors the OPENCODE target's survive-the-process pattern, so the
@@ -2198,6 +2272,11 @@ export class CrossEngineDispatcher {
         ])
         if (graceTimer) clearTimeout(graceTimer)
         entry.settled = null // belt-and-suspenders if the grace period elapsed first
+        // Read AFTER the grace-period wait, not before — the abandoned turn's
+        // own trailing cost-bearing events can still land during that window
+        // (see the RACE GUARD above), so this is the earliest point the
+        // mapper's running total can be trusted as final for this turn.
+        const turnCostUsd = this.accountPiNonSuccessCost(entry, ctx, model)
         if (entry.sessionId) this.dismissPendingForTarget(entry.sessionId)
         const text =
           winner.kind === 'timeout'
@@ -2207,8 +2286,13 @@ export class CrossEngineDispatcher {
               : 'Dispatch cancelled.'
         const status = winner.kind === 'timeout' ? 'failed' : 'stopped'
         emitDispatchNotification(ctx, entry.sessionId ?? '', status, text)
-        // Recorded for 'failed' (timeout) only — 'stopped' is never recorded
-        // (ADR-033 M4-B: no usage numbers for a turn that never returned).
+        // Row vs spend accounting are DELIBERATELY split here: a 'stopped' turn
+        // gets no usage ROW (ADR-033 M4-B: no usage numbers for a turn that
+        // never returned) — but its cost/cap accounting above (`entry.
+        // cumulativeCostUsd` / `addDispatchedCost`) still applies regardless of
+        // status, via `accountPiNonSuccessCost` — a stopped turn can have
+        // burned real spend before the stop landed, and that spend counts
+        // toward the cap exactly like a timeout's or a success's does.
         if (status === 'failed') {
           this.safeRecordUsage({
             ts: this.now(),
@@ -2218,8 +2302,8 @@ export class CrossEngineDispatcher {
             targetModel: model,
             targetSessionId: entry.sessionId,
             toolUseId: ctx.toolUseId ?? null,
-            totalTokens: null,
-            costUsd: null,
+            totalTokens: entry.turnTotalTokens > 0 ? entry.turnTotalTokens : null,
+            costUsd: turnCostUsd > 0 ? turnCostUsd : null,
             durationMs: null
           })
         }
@@ -2234,6 +2318,7 @@ export class CrossEngineDispatcher {
         // "process is not running"), so no extra liveness tracking is needed
         // here — see the M4c report for the full rationale.
         if (entry.sessionId) this.dismissPendingForTarget(entry.sessionId)
+        const turnCostUsd = this.accountPiNonSuccessCost(entry, ctx, model)
         emitDispatchNotification(
           ctx,
           entry.sessionId ?? '',
@@ -2248,8 +2333,8 @@ export class CrossEngineDispatcher {
           targetModel: model,
           targetSessionId: entry.sessionId,
           toolUseId: ctx.toolUseId ?? null,
-          totalTokens: null,
-          costUsd: null,
+          totalTokens: entry.turnTotalTokens > 0 ? entry.turnTotalTokens : null,
+          costUsd: turnCostUsd > 0 ? turnCostUsd : null,
           durationMs: null
         })
         return errorResult(`Dispatched turn failed: ${winner.message}`, entry.sessionId ?? '')
@@ -2346,7 +2431,8 @@ export class CrossEngineDispatcher {
       turnTotalTokens: 0,
       mapperState: createPiMapperState(),
       model,
-      settled: null
+      settled: null,
+      draining: false
     }
 
     const gateHandler: PiBridgeHandler = (payload) => this.gatePiTargetToolCall(entry, payload)
@@ -2432,6 +2518,9 @@ export class CrossEngineDispatcher {
    */
   private drivePiTurn(entry: PiTargetEntry, prompt: string): Promise<PiTurnOutcome> {
     entry.mapperState.startTimeMs = Date.now()
+    // A fresh turn (first turn, or a continuation after a prior stop/timeout/
+    // abort) is never draining — see PiTargetEntry.draining's doc comment.
+    entry.draining = false
     return new Promise<PiTurnOutcome>((resolve) => {
       entry.settled = resolve
       entry.client.request({ type: 'prompt', message: prompt }).then(
@@ -2566,6 +2655,11 @@ export class CrossEngineDispatcher {
    * limited to a future INTERACTIVE pi session, not this or a future dispatch.
    */
   private gatePiTargetToolCall(entry: PiTargetEntry, payload: PiToolCallPayload): Promise<GateDecision> {
+    // See PiTargetEntry.draining's doc comment — a late 'ask' from an already
+    // stopped/timed-out/aborted turn must never register a pending approval.
+    if (entry.draining) {
+      return Promise.resolve({ behavior: 'deny', reason: 'Dispatch stopped' })
+    }
     const decision = decide(payload.toolName, payload.input, {
       mode: entry.autonomyMode,
       rules: EMPTY_PI_RULES,

@@ -3013,6 +3013,71 @@ describe('CrossEngineDispatcher — pi direction (M4c): timeout / abort / stop (
     expect(target.spawnCalls).toHaveLength(1)
   })
 
+  it("a late 'ask' arriving after stop has already reported — the entry is draining — is denied immediately with NO approval registered/emitted (see PiTargetEntry.draining's doc comment; the bug this closes: an orphaned approval card no manual action could otherwise clear)", async () => {
+    const target = makeFakePiTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
+      spawnPiTarget: target.spawnPiTarget
+    })
+    const ctx = makeCtx({ fromEngine: 'claude', autonomyMode: 'default', toolUseId: 'toolu_draining_1' })
+    const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
+    await tick()
+
+    expect(dispatcher.stopDispatch('toolu_draining_1')).toBe(true)
+    const result = await pending
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain('stopped')
+
+    // The ABANDONED turn's own tool_call hook fires its 'ask' only now — the
+    // realistic late-arrival case (pi's abort→tool_call latency is what the
+    // grace period bounds, but nothing stops it landing even after the grace
+    // period itself has elapsed and resolveAndRunPi has already returned).
+    const decision = await target.gateHandler()({
+      toolCallId: 'pi-call-late',
+      toolName: 'bash',
+      input: { command: 'rm -rf x' }
+    })
+    expect(decision).toEqual({ behavior: 'deny', reason: 'Dispatch stopped' })
+    // No approval-request was ever emitted for it — never registered as a
+    // pending approval in the first place (not merely dismissed after the fact).
+    expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:approval-request')).toBe(false)
+  })
+
+  it('a NEW continuation turn after the stop clears draining — gate asks flow normally again', async () => {
+    const target = makeFakePiTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
+      spawnPiTarget: target.spawnPiTarget
+    })
+    const ctx = makeCtx({ fromEngine: 'claude', autonomyMode: 'default', toolUseId: 'toolu_draining_2' })
+    const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
+    await tick()
+    expect(dispatcher.stopDispatch('toolu_draining_2')).toBe(true)
+    const result = await pending
+    expect(result.isError).toBe(true)
+
+    // Fresh continuation on the surviving process — drivePiTurn clears draining.
+    const cont = dispatcher.dispatch({ engine: 'pi', prompt: 'y', sessionId: 'pi-target-1' }, ctx)
+    await tick()
+
+    const decisionPromise = target.gateHandler()({
+      toolCallId: 'pi-call-after-cont',
+      toolName: 'bash',
+      input: { command: 'x' }
+    })
+    await tick()
+    const approval = ctx.emit.mock.calls.find((c) => c[0] === 'session:approval-request')?.[1] as
+      | { requestId: string }
+      | undefined
+    expect(approval).toBeTruthy()
+    dispatcher.resolveApproval(approval!.requestId, 'allow')
+    expect(await decisionPromise).toEqual({ behavior: 'allow' })
+
+    target.pushEvent(piAssistantMessageEnd({ text: 'recovered' }))
+    target.pushEvent(PI_AGENT_SETTLED)
+    expect((await cont).isError).toBeUndefined()
+  })
+
   it('per-dispatch timeout interrupts the turn (status "failed", recorded) — the entry is ALSO kept alive for continuation', async () => {
     const target = makeFakePiTarget()
     const { dispatcher } = makeHarness({
@@ -3419,6 +3484,121 @@ describe('CrossEngineDispatcher — pi direction (M4c): streaming, usage, notifi
   })
 })
 
+describe('CrossEngineDispatcher — pi direction (M4c): non-success turn cost accounting (B1)', () => {
+  it('an errored turn that streamed cost still advances cumulativeCostUsd/addDispatchedCost and records the spend+tokens on the usage row; a later successful turn does NOT double-count it', async () => {
+    const recordDispatchedUsage = vi.fn()
+    const target = makeFakePiTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({
+        dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna', maxCostUsd: 0.05 }
+      })),
+      spawnPiTarget: target.spawnPiTarget,
+      recordDispatchedUsage
+    })
+    const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_err_cost' })
+    const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
+    await tick()
+    // Streams real usage/cost BEFORE the extension errors out — the turn
+    // burned real spend even though it never reached agent_settled.
+    target.pushEvent(piAssistantMessageEnd({ text: 'partial', cost: 0.04, input: 100, output: 40 }))
+    target.pushEvent({
+      type: 'extension_error',
+      extensionPath: 'x.ts',
+      event: 'tool_call',
+      error: 'bridge crashed'
+    })
+    const result = await pending
+    expect(result.isError).toBe(true)
+
+    expect(recordDispatchedUsage).toHaveBeenCalledWith(
+      expect.objectContaining({ toolUseId: 'toolu_err_cost', costUsd: 0.04, totalTokens: 140 })
+    )
+    expect(ctx.addDispatchedCost).toHaveBeenCalledWith('pi', 'openai-codex/gpt-5.6-luna', 0.04)
+
+    // KEY REGRESSION ASSERTION: cumulativeCostUsd/lastReportedTotalCostUsd
+    // were advanced by the FAILED turn's 0.04 — a continuation that streams
+    // only 0.02 MORE (mapper totalCostUsd: 0.04+0.02=0.06 cumulative) must
+    // report a per-turn delta of ~0.02, NOT the raw 0.06 (which is what a
+    // never-advanced baseline would produce, double-counting the failed
+    // turn's spend into this turn's row) — and crossing the 0.05 cap this
+    // way (0.04 already spent + 0.02 now = 0.06) proves cumulativeCostUsd
+    // itself carried the failed turn's spend forward too.
+    const cont = dispatcher.dispatch({ engine: 'pi', prompt: 'two', sessionId: 'pi-target-1' }, ctx)
+    await tick()
+    target.pushEvent(piAssistantMessageEnd({ text: 'second', cost: 0.02 }))
+    target.pushEvent(PI_AGENT_SETTLED)
+    const contResult = await cont
+    expect(contResult.isError).toBeUndefined()
+    expect(contResult.text).toContain('[dispatch cost cap reached')
+    expect(recordDispatchedUsage).toHaveBeenLastCalledWith(
+      expect.objectContaining({ costUsd: expect.closeTo(0.02, 10) })
+    )
+    expect(ctx.addDispatchedCost).toHaveBeenLastCalledWith(
+      'pi',
+      'openai-codex/gpt-5.6-luna',
+      expect.closeTo(0.02, 10)
+    )
+  })
+
+  it('a timed-out turn that streamed cost still advances cumulativeCostUsd/addDispatchedCost and records the spend+tokens on the usage row', async () => {
+    const recordDispatchedUsage = vi.fn()
+    const target = makeFakePiTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
+      spawnPiTarget: target.spawnPiTarget,
+      recordDispatchedUsage,
+      dispatchTimeoutMs: 30
+    })
+    const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_timeout_cost' })
+    const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
+    await tick()
+    target.pushEvent(piAssistantMessageEnd({ text: 'partial', cost: 0.03, input: 20, output: 10 }))
+    // Never push agent_settled — the turn hangs until the timeout fires.
+    const result = await pending
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain('timed out')
+
+    expect(recordDispatchedUsage).toHaveBeenCalledWith(
+      expect.objectContaining({ toolUseId: 'toolu_timeout_cost', costUsd: 0.03, totalTokens: 30 })
+    )
+    expect(ctx.addDispatchedCost).toHaveBeenCalledWith('pi', 'openai-codex/gpt-5.6-luna', 0.03)
+  })
+
+  it('a stopped turn that streamed cost advances cumulativeCostUsd/addDispatchedCost but records NO usage row (ADR-033 M4-B: no usage numbers for a turn that never returned) — cap accounting still applies', async () => {
+    const recordDispatchedUsage = vi.fn()
+    const target = makeFakePiTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({
+        dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna', maxCostUsd: 0.05 }
+      })),
+      spawnPiTarget: target.spawnPiTarget,
+      recordDispatchedUsage
+    })
+    const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_stop_cost' })
+    const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
+    await tick()
+    target.pushEvent(piAssistantMessageEnd({ text: 'partial', cost: 0.05 }))
+    expect(dispatcher.stopDispatch('toolu_stop_cost')).toBe(true)
+    const result = await pending
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain('stopped')
+
+    // No usage ROW for the stopped turn (row ≠ spend accounting — see the
+    // resolveAndRunPi comment)...
+    expect(recordDispatchedUsage).not.toHaveBeenCalled()
+    // ...but the fold-in and cap accounting still ran: proven directly via
+    // addDispatchedCost, and via a fresh continuation now being rejected
+    // outright (cumulativeCostUsd already meets the 0.05 cap).
+    expect(ctx.addDispatchedCost).toHaveBeenCalledWith('pi', 'openai-codex/gpt-5.6-luna', 0.05)
+    const cont = await dispatcher.dispatch(
+      { engine: 'pi', prompt: 'two', sessionId: 'pi-target-1' },
+      ctx
+    )
+    expect(cont.isError).toBe(true)
+    expect(cont.text).toContain('cost cap')
+  })
+})
+
 describe('CrossEngineDispatcher — pi direction (M4c): cost cap (ADR-033 M4-C)', () => {
   it('a continuation turn is rejected once cumulative cost meets the cap; target survives; no second prompt is sent', async () => {
     const target = makeFakePiTarget()
@@ -3536,13 +3716,32 @@ describe('CrossEngineDispatcher — pi direction (M4c): disposeFor', () => {
 })
 
 describe('buildPiTargetChildEnv (ADR-033 M4c — recursion guard)', () => {
-  it('NEVER includes CLAUDEUI_PI_HOSTED_TOOLS or CLAUDEUI_PI_DISPATCH_ENABLED — a dispatch target cannot itself register/call dispatch_agent', () => {
+  it('explicitly overrides CLAUDEUI_PI_HOSTED_TOOLS/DISPATCH_ENABLED/SKILL_DIRS to empty string — never mere omission, since PiRpcClient spawns with {...process.env, ...opts.env} and would otherwise leak the parent shell\'s own flags through', () => {
     const env = buildPiTargetChildEnv({ url: 'http://127.0.0.1:54321', token: 'test-token' })
-    expect(env).not.toHaveProperty('CLAUDEUI_PI_HOSTED_TOOLS')
-    expect(env).not.toHaveProperty('CLAUDEUI_PI_DISPATCH_ENABLED')
+    expect(env.CLAUDEUI_PI_HOSTED_TOOLS).toBe('')
+    expect(env.CLAUDEUI_PI_DISPATCH_ENABLED).toBe('')
+    expect(env.CLAUDEUI_PI_SKILL_DIRS).toBe('')
     expect(env.CLAUDEUI_PI_BRIDGE_URL).toBe('http://127.0.0.1:54321')
     expect(env.CLAUDEUI_PI_BRIDGE_TOKEN).toBe('test-token')
-    // Exactly these two keys — nothing else sneaks in either.
-    expect(Object.keys(env).sort()).toEqual(['CLAUDEUI_PI_BRIDGE_TOKEN', 'CLAUDEUI_PI_BRIDGE_URL'])
+    // Exactly these five keys — nothing else sneaks in either.
+    expect(Object.keys(env).sort()).toEqual([
+      'CLAUDEUI_PI_BRIDGE_TOKEN',
+      'CLAUDEUI_PI_BRIDGE_URL',
+      'CLAUDEUI_PI_DISPATCH_ENABLED',
+      'CLAUDEUI_PI_HOSTED_TOOLS',
+      'CLAUDEUI_PI_SKILL_DIRS'
+    ])
+  })
+
+  it('the empty-string override survives a parent-env spread — {...process.env, ...opts.env} would otherwise let a dev-shell CLAUDEUI_PI_HOSTED_TOOLS=1 leak through', () => {
+    // Mirrors PiRpcClient's actual spawn-env merge order (opts.env spread
+    // LAST, so it wins) without needing to mock PiRpcClient itself.
+    const parentEnv = { CLAUDEUI_PI_HOSTED_TOOLS: '1', CLAUDEUI_PI_DISPATCH_ENABLED: '1' }
+    const merged = {
+      ...parentEnv,
+      ...buildPiTargetChildEnv({ url: 'http://127.0.0.1:1', token: 't' })
+    }
+    expect(merged.CLAUDEUI_PI_HOSTED_TOOLS).toBe('')
+    expect(merged.CLAUDEUI_PI_DISPATCH_ENABLED).toBe('')
   })
 })
