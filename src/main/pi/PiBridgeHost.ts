@@ -12,11 +12,21 @@
  *    — this class only owns transport (listen/auth/body-cap/dispatch/dispose),
  *    never policy.
  *  - `POST /hosted-tool` (M4a+b) — executes a registered hosted tool
- *    (render_mermaid/create_mockup/show_mockup/dispatch_agent) AFTER the
- *    /tool-call gate has already allowed it (pi's tool_call hook fires for
- *    registered tools too — verified — so this route never re-gates). The
- *    caller supplies the optional second `hostedToolHandler`
- *    (PiSession.handleHostedTool).
+ *    (render_mermaid/create_mockup/show_mockup/dispatch_agent). This class
+ *    itself STILL never re-runs `decide()` here — transport only, same as
+ *    /tool-call — but naively trusting "the /tool-call gate must have already
+ *    run" was a real hole: the bearer token is the ONLY thing this route
+ *    checks, and that same token sits in the pi child's env, reachable from
+ *    any already-approved shell command (e.g. `curl`). The caller-supplied
+ *    handler (PiSession.handleHostedTool) closes that gap with a one-shot
+ *    GRANT: PiSession's gateToolCall wrapper records `toolCallId -> toolName`
+ *    only when /tool-call decided 'allow' for a name in PI_HOSTED_TOOL_NAMES,
+ *    and handleHostedTool requires (and consumes) a matching grant before
+ *    executing anything — a /hosted-tool POST that skipped /tool-call, or
+ *    whose toolCallId/toolName doesn't match what was actually granted, fails
+ *    closed. The caller supplies the optional second `hostedToolHandler`
+ *    (PiSession.handleHostedTool); omitting it just fails closed on every
+ *    /hosted-tool request (see processHostedToolBody).
  *
  * `dispose()` MUST be called on session teardown (cancel/dispose/unexpected
  * exit) — an open server otherwise leaks a port and can keep the process
@@ -25,8 +35,8 @@
 import { createServer } from 'node:http'
 import type { IncomingMessage, Server, ServerResponse } from 'node:http'
 import type { Socket } from 'node:net'
-import { randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import { randomUUID, timingSafeEqual } from 'node:crypto'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { logger } from '../services/logger'
@@ -130,17 +140,33 @@ export class PiBridgeHost {
       res.writeHead(404).end()
       return
     }
-    if (req.headers.authorization !== `Bearer ${this.token}`) {
+    // Timing-safe compare — a naive `!==` leaks the token byte-by-byte via
+    // response-time side channel (early-exit string comparison). Length is
+    // checked explicitly first: timingSafeEqual THROWS on a length mismatch
+    // rather than returning false, and a missing header (`undefined`) or a
+    // wrong-length guess must still land on the same 401, not a 500.
+    const expected = Buffer.from(`Bearer ${this.token}`, 'utf-8')
+    const provided = Buffer.from(req.headers.authorization ?? '', 'utf-8')
+    if (provided.length !== expected.length || !timingSafeEqual(provided, expected)) {
       res.writeHead(401).end()
       return
     }
 
-    let body = ''
+    // Accumulate raw Buffers and decode ONCE at 'end' — decoding each chunk
+    // independently (the previous `body += chunk.toString('utf-8')` pattern)
+    // corrupts any multibyte UTF-8 character whose bytes straddle a TCP chunk
+    // boundary: Node replaces the truncated trailing bytes with U+FFFD in the
+    // FIRST chunk's decode, which is unrecoverable once concatenated with the
+    // next chunk's (independently correct) decode — a spurious JSON parse
+    // failure (fail-closed deny) for input that was never actually malformed.
+    const chunks: Buffer[] = []
+    let totalBytes = 0
     let tooLarge = false
     req.on('data', (chunk: Buffer) => {
       if (tooLarge) return
-      body += chunk.toString('utf-8')
-      if (Buffer.byteLength(body, 'utf-8') > MAX_BODY_BYTES) {
+      chunks.push(chunk)
+      totalBytes += chunk.length
+      if (totalBytes > MAX_BODY_BYTES) {
         tooLarge = true
         res.writeHead(413).end()
         req.destroy()
@@ -148,6 +174,7 @@ export class PiBridgeHost {
     })
     req.on('end', () => {
       if (tooLarge) return
+      const body = Buffer.concat(chunks).toString('utf-8')
       if (route === 'tool-call') void this.processToolCallBody(body, res)
       else void this.processHostedToolBody(body, res)
     })
@@ -250,10 +277,19 @@ export class PiBridgeHost {
 }
 
 /**
- * Ensure the version-keyed bridge extension file exists on disk (write-if-
- * absent — content is version-keyed by directory, so a stale file from a
- * previous ClaudeUI build never shadows an edit to pi-bridge-source.ts), and
- * return its absolute path for `-e <path>`.
+ * Ensure the version-keyed bridge extension file exists on disk AND matches
+ * `PI_BRIDGE_EXTENSION_SOURCE` byte-for-byte, then return its absolute path
+ * for `-e <path>`.
+ *
+ * Content is version-keyed by directory (a stale file from a previous
+ * ClaudeUI build never shadows an edit to pi-bridge-source.ts) — but that
+ * alone is only half the story: on POSIX, `os.tmpdir()` (`/tmp`) is normally
+ * world-writable, so another local user could preplant this exact path with
+ * attacker-controlled TypeScript BEFORE ClaudeUI ever spawns pi with
+ * `-e <path>`, injecting arbitrary code into every pi child. Reading the
+ * existing file back and comparing content on every call closes that gap —
+ * a mismatch of ANY kind (preplanted, corrupted, hand-edited) is rewritten
+ * unconditionally, not just a missing file.
  *
  * Lives under `os.tmpdir()` — NEVER `~/.pi/**`, which is user space (ADR-026
  * constraint carried over from the M2a kickoff spec).
@@ -261,7 +297,15 @@ export class PiBridgeHost {
 export function writeBridgeExtension(): string {
   const dir = join(tmpdir(), 'claudeui-pi-bridge', PI_BRIDGE_VERSION)
   const file = join(dir, 'claudeui-bridge.ts')
-  if (!existsSync(file)) {
+  let matches = false
+  if (existsSync(file)) {
+    try {
+      matches = readFileSync(file, 'utf-8') === PI_BRIDGE_EXTENSION_SOURCE
+    } catch {
+      matches = false // unreadable — treat exactly like a mismatch, rewrite below.
+    }
+  }
+  if (!matches) {
     mkdirSync(dir, { recursive: true })
     writeFileSync(file, PI_BRIDGE_EXTENSION_SOURCE, 'utf-8')
   }

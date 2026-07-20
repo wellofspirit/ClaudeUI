@@ -25,7 +25,9 @@ import {
   sessionAllowKey,
   normalizeWhitespace,
   mergedClaudeRulesFor,
-  PI_AUTO_ALLOW_HOSTED_TOOLS
+  PI_AUTO_ALLOW_HOSTED_TOOLS,
+  PI_HOSTED_TOOL_NAMES,
+  EMPTY_RULES
 } from '../permission-engine'
 
 function rules(partial: Partial<MergedClaudeRules> = {}): MergedClaudeRules {
@@ -358,5 +360,50 @@ describe('mergedClaudeRulesFor', () => {
     })
     expect(() => mergedClaudeRulesFor('/cwd')).not.toThrow()
     expect(mergedClaudeRulesFor('/cwd')).toEqual(rules())
+  })
+
+  it('the catch-path result is a FRESH, mutable object — not `{...EMPTY_RULES}` sharing EMPTY_RULES\' frozen arrays (A9)', () => {
+    mockLoadClaudePermissions.mockImplementation(() => {
+      throw new Error('disk on fire')
+    })
+    const result = mergedClaudeRulesFor('/cwd')
+
+    expect(result).not.toBe(EMPTY_RULES)
+    expect(result.allow).not.toBe(EMPTY_RULES.allow)
+    expect(() => result.allow.push('Read')).not.toThrow()
+    expect(result.allow).toEqual(['Read'])
+  })
+})
+
+describe('EMPTY_RULES — frozen (A9)', () => {
+  it('the object itself is frozen', () => {
+    expect(Object.isFrozen(EMPTY_RULES)).toBe(true)
+  })
+
+  it('every array property is ALSO frozen (deep freeze, not just the top-level object)', () => {
+    expect(Object.isFrozen(EMPTY_RULES.allow)).toBe(true)
+    expect(Object.isFrozen(EMPTY_RULES.deny)).toBe(true)
+    expect(Object.isFrozen(EMPTY_RULES.ask)).toBe(true)
+    expect(Object.isFrozen(EMPTY_RULES.additionalDirectories)).toBe(true)
+  })
+
+  it('mutating an EMPTY_RULES array never actually changes it (frozen — throws in strict mode, ES modules are always strict)', () => {
+    try {
+      EMPTY_RULES.allow.push('Read')
+    } catch {
+      // Expected: a frozen array throws on mutation in strict mode.
+    }
+    expect(EMPTY_RULES.allow).toEqual([])
+  })
+})
+
+describe('PI_HOSTED_TOOL_NAMES (A1)', () => {
+  it('is the superset of PI_AUTO_ALLOW_HOSTED_TOOLS plus dispatch_agent', () => {
+    expect([...PI_HOSTED_TOOL_NAMES].sort()).toEqual(
+      ['create_mockup', 'dispatch_agent', 'render_mermaid', 'show_mockup'].sort()
+    )
+    for (const name of PI_AUTO_ALLOW_HOSTED_TOOLS) {
+      expect(PI_HOSTED_TOOL_NAMES.has(name)).toBe(true)
+    }
   })
 })

@@ -294,6 +294,34 @@ describe('mapPiEvent — malformed/unknown event', () => {
       { kind: 'ignore' }
     ])
   })
+
+  it('agent_end (distinct from agent_settled, the real turn-complete signal) also maps to ignore', () => {
+    const state = createPiMapperState()
+    const out = mapPiEvent({ type: 'agent_end', messages: [], willRetry: false }, state)
+    expect(out).toEqual([{ kind: 'ignore' }])
+  })
+})
+
+describe('mapPiEvent — agent_settled durationMs guard', () => {
+  it('startTimeMs > 0: reports the elapsed wall-clock span', () => {
+    const state = createPiMapperState()
+    state.startTimeMs = Date.now() - 1000
+    const out = mapPiEvent({ type: 'agent_settled' }, state)
+    expect(out[0].kind).toBe('result')
+    if (out[0].kind === 'result') {
+      expect(out[0].durationMs).toBeGreaterThanOrEqual(1000)
+    }
+  })
+
+  it('startTimeMs === 0 (never set by the caller): reports 0, not Date.now() - 0', () => {
+    const state = createPiMapperState()
+    expect(state.startTimeMs).toBe(0)
+    const out = mapPiEvent({ type: 'agent_settled' }, state)
+    expect(out[0].kind).toBe('result')
+    if (out[0].kind === 'result') {
+      expect(out[0].durationMs).toBe(0)
+    }
+  })
 })
 
 describe('mapPiEvent — extension_error', () => {

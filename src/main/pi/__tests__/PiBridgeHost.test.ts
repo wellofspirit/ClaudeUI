@@ -5,9 +5,24 @@
  * this is the transport layer itself). See PiSession.test.ts for the gating
  * DECISION logic (permission-engine.ts) tested against a mocked host.
  */
-import { describe, it, expect, afterEach } from 'vitest'
-import { PiBridgeHost } from '../PiBridgeHost'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import http from 'node:http'
+import { mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+
+// writeBridgeExtension() (A2 tests below) redirects os.tmpdir() to a fresh
+// per-test scratch dir — mirrors pi-session-list.test.ts's identical
+// os.homedir() redirection technique, so no test ever touches the real
+// system tmpdir.
+const { mockTmpdir } = vi.hoisted(() => ({ mockTmpdir: vi.fn() }))
+vi.mock('node:os', async () => {
+  const actual = await vi.importActual<typeof import('node:os')>('node:os')
+  return { ...actual, tmpdir: mockTmpdir, default: { ...actual, tmpdir: mockTmpdir } }
+})
+
+import { PiBridgeHost, writeBridgeExtension } from '../PiBridgeHost'
 import type { GateDecision, PiHostedToolPayload, PiHostedToolResult, PiToolCallPayload } from '../PiBridgeHost'
+import { PI_BRIDGE_EXTENSION_SOURCE, PI_BRIDGE_VERSION } from '../pi-bridge-source'
 
 describe('PiBridgeHost', () => {
   let host: PiBridgeHost | null = null
@@ -77,6 +92,25 @@ describe('PiBridgeHost', () => {
     expect(called).toBe(false)
   })
 
+  it('rejects a WRONG token of the SAME LENGTH as the real one with 401 (exercises timingSafeEqual itself, not just the length-mismatch short-circuit)', async () => {
+    host = new PiBridgeHost(async () => ({ behavior: 'allow' }))
+    const { url, token } = await host.start()
+
+    // Flip the token's first character but keep IDENTICAL length — 'Bearer
+    // wrong-token' (the test above) differs in LENGTH from a real UUID
+    // token too, so it never actually exercises timingSafeEqual's byte
+    // comparison, only the length-mismatch fast path.
+    const sameLengthWrongToken = token[0] === '0' ? '1' + token.slice(1) : '0' + token.slice(1)
+    expect(sameLengthWrongToken.length).toBe(token.length)
+
+    const res = await fetch(`${url}/tool-call`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${sameLengthWrongToken}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ toolCallId: 'c1', toolName: 'bash', input: {} })
+    })
+    expect(res.status).toBe(401)
+  })
+
   it('404s any route other than POST /tool-call or POST /hosted-tool', async () => {
     host = new PiBridgeHost(
       async () => ({ behavior: 'allow' }),
@@ -132,6 +166,62 @@ describe('PiBridgeHost', () => {
     })
     expect(res.status).toBe(400)
     expect(called).toBe(false)
+  })
+
+  it('reassembles a multibyte UTF-8 character split MID-BYTE-SEQUENCE across two TCP-level chunks (A7)', async () => {
+    let receivedInput: Record<string, unknown> | null = null
+    host = new PiBridgeHost(async (payload) => {
+      receivedInput = payload.input
+      return { behavior: 'allow' }
+    })
+    const { url, token } = await host.start()
+
+    // A CJK character ('中') is a 3-byte UTF-8 sequence (0xE4 0xB8 0xAD).
+    // Splitting the raw request body's bytes ONE byte into that sequence
+    // reproduces a TCP-chunk boundary landing mid-character — decoding each
+    // chunk independently (the pre-fix behavior) would corrupt it to U+FFFD
+    // and break JSON.parse.
+    const marker = '中'
+    const bodyBuf = Buffer.from(
+      JSON.stringify({ toolCallId: 'c-multibyte', toolName: 'bash', input: { command: `echo ${marker} done` } }),
+      'utf-8'
+    )
+    const markerByteIdx = bodyBuf.indexOf(Buffer.from(marker, 'utf-8'))
+    expect(markerByteIdx).toBeGreaterThan(-1)
+    const splitAt = markerByteIdx + 1 // AFTER the marker's first byte only.
+    const chunk1 = bodyBuf.subarray(0, splitAt)
+    const chunk2 = bodyBuf.subarray(splitAt)
+
+    const { status, body } = await new Promise<{ status: number; body: string }>((resolve, reject) => {
+      const parsed = new URL(url)
+      const req = http.request(
+        {
+          hostname: parsed.hostname,
+          port: Number(parsed.port),
+          path: '/tool-call',
+          method: 'POST',
+          headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }
+        },
+        (res) => {
+          let data = ''
+          res.on('data', (chunk: Buffer) => (data += chunk.toString('utf-8')))
+          res.on('end', () => resolve({ status: res.statusCode ?? 0, body: data }))
+        }
+      )
+      req.on('error', reject)
+      // Delay between writes so the OS delivers them as SEPARATE reads
+      // (synchronous back-to-back writes risk being coalesced into one).
+      req.write(chunk1, () => {
+        setTimeout(() => {
+          req.write(chunk2)
+          req.end()
+        }, 20)
+      })
+    })
+
+    expect(status).toBe(200)
+    expect(JSON.parse(body)).toEqual({ behavior: 'allow' })
+    expect(receivedInput).toEqual({ command: `echo ${marker} done` })
   })
 
   it('rejects a body over the ~2MB cap with 413 without invoking the handler', async () => {
@@ -360,5 +450,56 @@ describe('PiBridgeHost — POST /hosted-tool (M4a+b)', () => {
         body: '{}'
       })
     ).rejects.toThrow()
+  })
+})
+
+describe('writeBridgeExtension (A2 — content-verify against tampering/preplanting)', () => {
+  let scratchRoot: string
+
+  beforeEach(async () => {
+    // vi.importActual bypasses the 'node:os' mock above (which redirects
+    // `tmpdir` for the PRODUCT code under test) to get the GENUINE tmpdir,
+    // purely so this test's own scratch dir doesn't depend on itself.
+    const realOs = await vi.importActual<typeof import('node:os')>('node:os')
+    scratchRoot = mkdtempSync(join(realOs.tmpdir(), 'pi-bridge-host-test-'))
+    mockTmpdir.mockReturnValue(scratchRoot)
+  })
+
+  afterEach(() => {
+    rmSync(scratchRoot, { recursive: true, force: true })
+  })
+
+  function extensionFilePath(): string {
+    return join(scratchRoot, 'claudeui-pi-bridge', PI_BRIDGE_VERSION, 'claudeui-bridge.ts')
+  }
+
+  it('writes the file when absent', () => {
+    const file = writeBridgeExtension()
+
+    expect(file).toBe(extensionFilePath())
+    expect(readFileSync(file, 'utf-8')).toBe(PI_BRIDGE_EXTENSION_SOURCE)
+  })
+
+  it('rewrites when the on-disk content differs from PI_BRIDGE_EXTENSION_SOURCE (tampered/preplanted)', () => {
+    const file = writeBridgeExtension()
+    writeFileSync(file, '// TAMPERED — attacker-controlled content, e.g. preplanted before ClaudeUI ever spawned', 'utf-8')
+
+    const secondPath = writeBridgeExtension()
+
+    expect(secondPath).toBe(file)
+    expect(readFileSync(file, 'utf-8')).toBe(PI_BRIDGE_EXTENSION_SOURCE)
+  })
+
+  it('leaves the file COMPLETELY untouched (no rewrite) when content already matches', () => {
+    const file = writeBridgeExtension()
+    // Set a deliberately ancient mtime — a real rewrite would bump it to
+    // "now" (2020 vs. today is unmistakable, unlike a same-millisecond
+    // false-negative risk from comparing against "before this test ran").
+    const oldTime = new Date('2020-01-01T00:00:00.000Z')
+    utimesSync(file, oldTime, oldTime)
+
+    writeBridgeExtension() // second call — content is already identical.
+
+    expect(statSync(file).mtime.getTime()).toBe(oldTime.getTime())
   })
 })

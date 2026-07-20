@@ -238,6 +238,41 @@ describe('loadPiSessionHistory — active-branch walk (fork)', () => {
   it('returns [] for an unknown sessionId', async () => {
     expect(await loadPiSessionHistory('does-not-exist')).toEqual([])
   })
+
+  it('a cyclic parentId chain resolves without hanging — the `seen` guard breaks the loop (best-effort branch)', async () => {
+    // e1 <-> e2 point at EACH OTHER — no root is ever reached. activeBranchEntries'
+    // `seen` set must stop the walk the second time it revisits an id rather
+    // than looping forever.
+    writeSessionFile('--proj-cycle--', 'x_sess-cycle.jsonl', [
+      { type: 'session', version: 3, id: 'sess-cycle', timestamp: '2024-01-01T00:00:00.000Z', cwd: '/proj/cycle' },
+      userEntry('e1', 'e2', 'first'),
+      userEntry('e2', 'e1', 'second')
+    ])
+
+    const messages = await loadPiSessionHistory('sess-cycle')
+    expect(messages.length).toBeGreaterThan(0)
+    expect(messages.length).toBeLessThanOrEqual(2)
+  })
+
+  it('skips a single corrupt mid-file JSONL line — every entry before and after it still parses', async () => {
+    const dir = join(sessionsRoot(), '--proj-corrupt--')
+    mkdirSync(dir, { recursive: true })
+    const file = join(dir, 'x_sess-corrupt.jsonl')
+    const header = JSON.stringify({
+      type: 'session',
+      version: 3,
+      id: 'sess-corrupt',
+      timestamp: '2024-01-01T00:00:00.000Z',
+      cwd: '/proj/corrupt'
+    })
+    const goodEntry1 = JSON.stringify(userEntry('e1', null, 'before the corrupt line'))
+    const corruptLine = '{not valid json at all'
+    const goodEntry2 = JSON.stringify(userEntry('e2', 'e1', 'after the corrupt line'))
+    writeFileSync(file, [header, goodEntry1, corruptLine, goodEntry2].join('\n') + '\n', 'utf-8')
+
+    const messages = await loadPiSessionHistory('sess-corrupt')
+    expect(messages.map((m) => m.id)).toEqual(['e1', 'e2'])
+  })
 })
 
 describe('findPiSessionFile', () => {

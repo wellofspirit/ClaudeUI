@@ -104,6 +104,23 @@ export const PI_AUTO_ALLOW_HOSTED_TOOLS: ReadonlySet<string> = new Set([
   'show_mockup'
 ])
 
+/**
+ * ALL FOUR tools registered via `pi.registerTool()` in the bridge extension
+ * (M4a+b) — PI_AUTO_ALLOW_HOSTED_TOOLS above is a STRICT SUBSET (the three
+ * auto-allowed ones; `dispatch_agent` gets normal mode-base gating instead,
+ * see PI_AUTO_ALLOW_HOSTED_TOOLS' doc comment for why). PiSession's
+ * gateToolCall wrapper checks THIS superset — not the auto-allow set — to
+ * decide which allow decisions mint a one-shot `/hosted-tool` execution grant
+ * (security fix: a call outside this set has no `/hosted-tool` counterpart to
+ * ever execute, so no grant is needed or minted for it).
+ */
+export const PI_HOSTED_TOOL_NAMES: ReadonlySet<string> = new Set([
+  'render_mermaid',
+  'create_mockup',
+  'show_mockup',
+  'dispatch_agent'
+])
+
 // ---------------------------------------------------------------------------
 // Claude rule string -> pi kind mapping (for evaluating the user's rules)
 // ---------------------------------------------------------------------------
@@ -276,14 +293,23 @@ export function decide(
  * the user's interactive-session Claude permission rules (only the target's
  * fixed autonomy mode governs it). See cross-engine-dispatcher.ts's
  * `gatePiTargetToolCall`.
+ *
+ * Frozen — object AND every array property — since this is a SHARED singleton
+ * every caller reads by reference: without freezing, one caller mutating
+ * `EMPTY_RULES.allow` in place (e.g. via `.push()`) would silently corrupt it
+ * for every other caller for the lifetime of the process. `mergedClaudeRulesFor`'s
+ * catch path below deliberately does NOT return this object (or a shallow
+ * `{...EMPTY_RULES}` of it, which would still share these same frozen array
+ * references) — a caller of THAT function is allowed to treat its result as
+ * mutable.
  */
-export const EMPTY_RULES: MergedClaudeRules = {
-  allow: [],
-  deny: [],
-  ask: [],
-  additionalDirectories: [],
+export const EMPTY_RULES: MergedClaudeRules = Object.freeze({
+  allow: Object.freeze([] as string[]) as string[],
+  deny: Object.freeze([] as string[]) as string[],
+  ask: Object.freeze([] as string[]) as string[],
+  additionalDirectories: Object.freeze([] as string[]) as string[],
   defaultMode: undefined
-}
+})
 
 /**
  * Merge the user/project/local Claude permission scopes for `cwd` (mirrors
@@ -314,6 +340,10 @@ export function mergedClaudeRulesFor(cwd: string): MergedClaudeRules {
       'PiPermissionEngine',
       `mergedClaudeRulesFor failed (best-effort -> empty rules): ${err instanceof Error ? err.message : String(err)}`
     )
-    return { ...EMPTY_RULES }
+    // A fresh literal, NOT `{ ...EMPTY_RULES }` — a shallow spread would copy
+    // the top-level object but still alias EMPTY_RULES' (frozen) arrays,
+    // handing the caller a result that throws on mutation despite this
+    // function's contract being "best-effort mutable rules".
+    return { allow: [], deny: [], ask: [], additionalDirectories: [], defaultMode: undefined }
   }
 }

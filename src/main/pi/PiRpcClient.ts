@@ -116,11 +116,6 @@ export class PiRpcClient {
     })
   }
 
-  /** Fire-and-forget send — no id correlation, no response awaited (e.g. extension_ui_response, M2). */
-  send(obj: Record<string, unknown>): void {
-    this.writeLine(obj)
-  }
-
   /** Subscribe to every non-response stdout JSON line (agent events). Returns an unsubscribe function. */
   onEvent(cb: (ev: PiEvent) => void): () => void {
     this.eventHandlers.push(cb)

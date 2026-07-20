@@ -195,7 +195,11 @@ export function mapPiEvent(ev: PiEvent, state: PiMapperState): PiMapperOutput[] 
         {
           kind: 'result',
           totalCostUsd: state.totalCostUsd,
-          durationMs: Math.max(0, Date.now() - state.startTimeMs),
+          // startTimeMs === 0 means the caller never set it (e.g. a settle
+          // with no preceding run() — shouldn't happen, but Date.now() - 0
+          // would otherwise report a multi-decade "duration") — report 0
+          // rather than a bogus near-epoch span.
+          durationMs: state.startTimeMs > 0 ? Math.max(0, Date.now() - state.startTimeMs) : 0,
           sessionId: state.sessionId
         }
       ]

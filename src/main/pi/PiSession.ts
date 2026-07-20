@@ -36,10 +36,11 @@ import type { GateDecision, PiHostedToolHandler, PiHostedToolPayload, PiHostedTo
 // opencode-hosted-tools.ts's identical reuse pattern.
 import { createMermaidServer } from '../services/mermaid-tool'
 import { createMockupServer } from '../services/mockup-tool'
-// Cross-engine dispatch (M4b, ADR-033) — pi as a dispatch SOURCE only (pi as
-// a TARGET is a separate later milestone). CALLED, never modified — mirrors
-// collab-tool.ts's Claude-side DispatchContext construction, NOT via MCP (pi
-// has no MCP client of its own).
+// Cross-engine dispatch (M4b, ADR-033) — pi as a dispatch SOURCE here; pi as
+// a TARGET is handled separately (M4c, shipped — see cross-engine-dispatcher.ts's
+// gatePiTargetToolCall). CALLED, never modified — mirrors collab-tool.ts's
+// Claude-side DispatchContext construction, NOT via MCP (pi has no MCP
+// client of its own).
 import { crossEngineDispatcher, crossEngineDispatchAvailable } from '../services/cross-engine-dispatcher'
 import type { DispatchContext, DispatchRequest } from '../services/cross-engine-dispatcher'
 import {
@@ -48,7 +49,8 @@ import {
   sessionAllowKey,
   firstMatchingRule,
   normalizeWhitespace,
-  PI_TOOL_TO_CLAUDE_TOOL
+  PI_TOOL_TO_CLAUDE_TOOL,
+  PI_HOSTED_TOOL_NAMES
 } from './permission-engine'
 import type { MergedClaudeRules } from './permission-engine'
 import { loadClaudePermissions, saveClaudePermissions } from '../services/claude-settings'
@@ -150,18 +152,6 @@ export class PiSession extends BaseSession {
   private permissionMode: string
   private resumeSessionId: string | undefined
 
-  // ── Slash commands + skills (M2b) ────────────────────────────────────────────
-  /** Command names discovered via `get_commands` (doStart(), once per spawn),
-   *  RAW as pi reports them (e.g. 'skill:brave-search' — NOT '/'-prefixed, NOT
-   *  skill:-stripped; those transforms happen only in the session:slash-commands
-   *  / session:skills emissions below). UNLIKE OpencodeSession's
-   *  identically-named field, pi needs NO routing off this set: pi's own
-   *  `prompt` command expands `/skill:name`/`/template` and executes extension
-   *  commands directly, server-side (verified — docs/protocol-pi/README.md
-   *  "Extensions") — so run(prompt) already forwards every prompt, slash-prefixed
-   *  or not, verbatim. Kept for parity/future use. */
-  private knownCommandNames = new Set<string>()
-
   // ── Live bash output streaming (M2b) ─────────────────────────────────────────
   /** Reused AS-IS from opencode (src/main/opencode/bash-stream-gate.ts) — pure
    *  dedup + trailing-edge throttle, no opencode-specific assumption. Dedups
@@ -193,6 +183,22 @@ export class PiSession extends BaseSession {
   // ── Hosted tools (M4a) ───────────────────────────────────────────────────────
   /** Memoized once per session (constructing it is cheap, but there's no reason to redo it on every render_mermaid call — mockup is NOT memoized, see handleHostedTool's mockup case for why). */
   private mermaidServer: ReturnType<typeof createMermaidServer> | null = null
+  /**
+   * SECURITY (A1): one-shot `/hosted-tool` execution grants, `toolCallId ->
+   * toolName`, minted by gateToolCall's wrapper (below) the instant `/tool-
+   * call` decides 'allow' for a name in PI_HOSTED_TOOL_NAMES, and consumed
+   * (deleted) by handleHostedTool on first use. Without this, the bearer
+   * token alone gated `/hosted-tool` — and that token sits in the pi child's
+   * env, reachable from any ALREADY-APPROVED bash command (`curl
+   * $CLAUDEUI_PI_BRIDGE_URL/hosted-tool -d '{"toolName":"dispatch_agent",...}'`),
+   * bypassing dispatch_agent's own deliberate 'ask' gating entirely. Cleared
+   * wholesale by rejectAllPendingGates (interrupt/cancel/unexpected exit) —
+   * a grant minted for a turn that no longer exists must not survive it.
+   * Bounded to 256 entries (oldest evicted first, Map insertion order) so a
+   * long-running session that never executes a granted call can't grow this
+   * unboundedly.
+   */
+  private hostedGrants = new Map<string, string>()
 
   // ── Cost / usage accounting ────────────────────────────────────────────────
   private mapperState: PiMapperState = createPiMapperState()
@@ -405,40 +411,52 @@ export class PiSession extends BaseSession {
     // RESOLVED capability (this.capabilities — the public getter, ANDed with
     // crossEngineDispatchAvailable('pi') for crossEngineDispatch) so the
     // extension never registers a tool ClaudeUI itself considers unavailable.
-    const bridgeHost = new PiBridgeHost(this.gateToolCall, this.handleHostedTool)
+    // Belt-and-braces (A1 security fix): only wire the /hosted-tool handler
+    // when the capability is actually on — even though handleHostedTool
+    // itself now fails closed without a matching grant regardless (see
+    // hostedGrants below), a session with hostedMcp off should never expose a
+    // working /hosted-tool route at all, matching what the bridge extension
+    // itself is told to register (CLAUDEUI_PI_HOSTED_TOOLS below).
+    const bridgeHost = new PiBridgeHost(this.gateToolCall, this.capabilities.hostedMcp ? this.handleHostedTool : undefined)
     let bridge: { url: string; token: string }
     try {
       bridge = await bridgeHost.start()
     } catch (err) {
       throw err instanceof Error ? err : new Error(String(err))
     }
-    const bridgePath = writeBridgeExtension()
 
-    const args = ['--mode', 'rpc', '-e', bridgePath]
-    if (this.resumeSessionId) {
-      // Resolve the on-disk file for the resume id; fall back to the raw id
-      // (verified: --session accepts an absolute file path) if not found —
-      // pi will then report whatever it can, rather than us refusing to spawn.
-      const resolvedPath = findPiSessionFile(this.resumeSessionId)
-      args.push('--session', resolvedPath ?? this.resumeSessionId)
-    }
-
-    const client = new PiRpcClient(bin, {
-      cwd: this.cwd,
-      args,
-      env: {
-        CLAUDEUI_PI_BRIDGE_URL: bridge.url,
-        CLAUDEUI_PI_BRIDGE_TOKEN: bridge.token,
-        ...(this.capabilities.hostedMcp ? { CLAUDEUI_PI_HOSTED_TOOLS: '1' } : {}),
-        ...(this.capabilities.crossEngineDispatch ? { CLAUDEUI_PI_DISPATCH_ENABLED: '1' } : {}),
-        ...this.computeSkillDirsEnv()
-      }
-    })
+    // Everything from here through a successful client.start() can throw
+    // (writeBridgeExtension does real fs I/O) with `bridgeHost` already
+    // listening — dispose it on ANY failure in this block rather than leaking
+    // the port/process.
+    let client: PiRpcClient
     try {
+      const bridgePath = writeBridgeExtension()
+
+      const args = ['--mode', 'rpc', '-e', bridgePath]
+      if (this.resumeSessionId) {
+        // Resolve the on-disk file for the resume id; fall back to the raw id
+        // (verified: --session accepts an absolute file path) if not found —
+        // pi will then report whatever it can, rather than us refusing to spawn.
+        const resolvedPath = findPiSessionFile(this.resumeSessionId)
+        args.push('--session', resolvedPath ?? this.resumeSessionId)
+      }
+
+      client = new PiRpcClient(bin, {
+        cwd: this.cwd,
+        args,
+        env: {
+          CLAUDEUI_PI_BRIDGE_URL: bridge.url,
+          CLAUDEUI_PI_BRIDGE_TOKEN: bridge.token,
+          ...(this.capabilities.hostedMcp ? { CLAUDEUI_PI_HOSTED_TOOLS: '1' } : {}),
+          ...(this.capabilities.crossEngineDispatch ? { CLAUDEUI_PI_DISPATCH_ENABLED: '1' } : {}),
+          ...this.computeSkillDirsEnv()
+        }
+      })
       await client.start()
     } catch (err) {
       bridgeHost.dispose()
-      throw err
+      throw err instanceof Error ? err : new Error(String(err))
     }
     this.bridgeHost = bridgeHost
     this.client = client
@@ -457,7 +475,9 @@ export class PiSession extends BaseSession {
       // The process is gone — any pending gate can never be resolved by it;
       // deny is the only sane resolution (also prevents a ghost approval card
       // from silently persisting-a-rule for a tool call that no longer exists
-      // if the user later clicks it).
+      // if the user later clicks it). Also drops any outstanding hosted-tool
+      // grants — a /hosted-tool POST racing this exit has nothing left to
+      // execute against anyway.
       this.rejectAllPendingGates('Interrupted')
       if (this.bridgeHost) {
         this.bridgeHost.dispose()
@@ -471,24 +491,41 @@ export class PiSession extends BaseSession {
       this.sendStatus()
     })
 
-    const stateResp = await client.request<PiGetStateData>({ type: 'get_state' })
-    if (stateResp.success && stateResp.data) {
-      this.piSessionId = stateResp.data.sessionId ?? null
-      this.mapperState.sessionId = this.piSessionId
+    // `this.client`/`this.bridgeHost` are now live — an uncaught rejection
+    // from here on (e.g. get_state hanging/erroring) would otherwise leave a
+    // running process + open port that the NEXT doStart() respawn overwrites
+    // without ever disposing. client.dispose() below asynchronously fires the
+    // onExit handler above once the OS reports the exit; that handler
+    // null-checks everything it touches, so this synchronous cleanup and that
+    // later async one are safe to both run (dispose() is documented idempotent).
+    try {
+      const stateResp = await client.request<PiGetStateData>({ type: 'get_state' })
+      if (stateResp.success && stateResp.data) {
+        this.piSessionId = stateResp.data.sessionId ?? null
+        this.mapperState.sessionId = this.piSessionId
 
-      // No explicit model request → pi keeps its OWN model (settings.json
-      // default, or the one restored from a resumed session's model_change
-      // entries). Adopt what the engine actually reports so status.model is
-      // honest instead of parroting the PI_DEFAULT_MODEL constructor fallback
-      // that never reached the wire. The "unknown" placeholder (no model
-      // configured — verified doc drift #3) is skipped: keep the local default
-      // rather than reporting a non-model.
-      const engineModel = stateResp.data.model
-      if (!this.requestedModel && engineModel && engineModel.id !== 'unknown') {
-        this._model = `${engineModel.provider}/${engineModel.id}`
-        this._capabilities = await this.resolveCapsForModel(this._model).catch(() => this._capabilities)
-        this.sendStatus()
+        // No explicit model request → pi keeps its OWN model (settings.json
+        // default, or the one restored from a resumed session's model_change
+        // entries). Adopt what the engine actually reports so status.model is
+        // honest instead of parroting the PI_DEFAULT_MODEL constructor fallback
+        // that never reached the wire. The "unknown" placeholder (no model
+        // configured — verified doc drift #3) is skipped: keep the local default
+        // rather than reporting a non-model.
+        const engineModel = stateResp.data.model
+        if (!this.requestedModel && engineModel && engineModel.id !== 'unknown') {
+          this._model = `${engineModel.provider}/${engineModel.id}`
+          this._capabilities = await this.resolveCapsForModel(this._model).catch(() => this._capabilities)
+          this.sendStatus()
+        }
       }
+    } catch (err) {
+      this.client?.dispose()
+      this.client = null
+      if (this.bridgeHost) {
+        this.bridgeHost.dispose()
+        this.bridgeHost = null
+      }
+      throw err instanceof Error ? err : new Error(String(err))
     }
 
     // Only set_model when the CALLER explicitly requested one — an omitted
@@ -559,8 +596,7 @@ export class PiSession extends BaseSession {
         // user-facing slash menu.
         const persistent = resp.data.commands.filter((c) => c.sourceInfo?.scope !== 'temporary')
 
-        this.knownCommandNames = new Set(persistent.map((c) => c.name))
-        logger.debug('PiSession', `get_commands discovered ${this.knownCommandNames.size} command(s)`)
+        logger.debug('PiSession', `get_commands discovered ${persistent.length} command(s)`)
 
         // EXACT contract as OpencodeSession.eagerConnect (names get the '/'
         // prefix; renderer slash menu is engine-neutral).
@@ -731,20 +767,32 @@ export class PiSession extends BaseSession {
     try {
       const resp = await this.client.request(command)
       if (!resp.success) {
-        this.isProcessing = false
+        // wasBusy (steer path): the ORIGINAL turn is still streaming — a
+        // rejected steer must not flip isProcessing back to false out from
+        // under it. Flipping it here would report idle mid-turn AND, worse,
+        // let a subsequent run() send a bare `prompt` with no
+        // `streamingBehavior`, which pi rejects outright while still
+        // streaming (README.md "Commands"). Only a non-busy failure (this
+        // WAS the turn) resets processing/the inactivity timer.
+        if (!wasBusy) {
+          this.isProcessing = false
+          this.resetInactivityTimer()
+        }
         this.send('session:error', resp.error ?? 'pi rejected the prompt')
         this.sendStatus()
-        this.resetInactivityTimer()
         return
       }
       // Busy-path ack: lets the renderer's shared queued-message UI resolve
       // (onSteerConsumed → consumeQueuedText) exactly as Claude/opencode do.
       if (wasBusy) this.send('session:steer-consumed', { prompt })
     } catch (err) {
-      this.isProcessing = false
+      // Same wasBusy carve-out as the !resp.success branch above.
+      if (!wasBusy) {
+        this.isProcessing = false
+        this.resetInactivityTimer()
+      }
       this.send('session:error', err instanceof Error ? err.message : String(err))
       this.sendStatus()
-      this.resetInactivityTimer()
     }
   }
 
@@ -794,9 +842,12 @@ export class PiSession extends BaseSession {
         recordUsageEvent({
           engineId: 'pi',
           vendorId: output.provider,
-          // pi has no auth-provider integration in M1 (PiAuthProvider is M3).
-          accountId: null,
-          accountUuid: null,
+          // Mirrors OpencodeSession.recordTurnUsage's identical pattern
+          // (opencodeAuthProvider.buildAccountRef(...).accountId ?? null) —
+          // PiAuthProvider shipped in M3, so this is no longer the M1 gap the
+          // old comment here described.
+          accountId: piAuthProvider.buildPiAccountRef(output.provider)?.accountId ?? null,
+          accountUuid: null, // pi's auth.json has no OAuth account UUID field (same gap as opencode's)
           modelId: output.modelId,
           tokens: {
             input: output.tokens.input,
@@ -887,15 +938,14 @@ export class PiSession extends BaseSession {
   // ── Approval bridge (M2a) ────────────────────────────────────────────────────
 
   /**
-   * Handler passed to PiBridgeHost — invoked once per `tool_call` hook firing
-   * in the pi child. Runs the pure PiPermissionEngine against the live
-   * autonomy mode + the user's merged Claude permission rules; 'allow'/'deny'
-   * answer immediately, 'ask' surfaces a `session:approval-request` and awaits
-   * the human via resolveApproval(). Bound as a class field (not a prototype
-   * method) so passing a bare reference to `new PiBridgeHost(this.gateToolCall)`
-   * keeps `this` correct.
+   * The actual gating decision — runs the pure PiPermissionEngine against the
+   * live autonomy mode + the user's merged Claude permission rules;
+   * 'allow'/'deny' answer immediately, 'ask' surfaces a
+   * `session:approval-request` and awaits the human via resolveApproval().
+   * Wrapped by the public `gateToolCall` field below (SECURITY, A1) — this
+   * inner fn only decides; it never mints a hosted-tool grant itself.
    */
-  private gateToolCall = async (payload: PiToolCallPayload): Promise<GateDecision> => {
+  private gateToolCallInner = async (payload: PiToolCallPayload): Promise<GateDecision> => {
     const { toolCallId, toolName, input } = payload
     const rules = this.currentRules()
     const decision = decide(toolName, input, {
@@ -931,12 +981,48 @@ export class PiSession extends BaseSession {
     })
   }
 
-  /** Resolve every in-flight 'ask' gate with a deny (used by interrupt/cancel/an unexpected exit) and clear the map. */
+  /**
+   * Handler passed to PiBridgeHost — invoked once per `tool_call` hook firing
+   * in the pi child. Bound as a class field (not a prototype method) so
+   * passing a bare reference to `new PiBridgeHost(this.gateToolCall)` keeps
+   * `this` correct.
+   *
+   * SECURITY (A1): wraps gateToolCallInner's decision and, iff it allowed a
+   * name in PI_HOSTED_TOOL_NAMES, mints a one-shot `/hosted-tool` execution
+   * grant for this EXACT `toolCallId` + `toolName` — the ONLY seam that ever
+   * populates hostedGrants, covering both the immediate-allow path and the
+   * human-approved 'ask' path (resolveApproval's `pending.resolve()` below
+   * resumes the awaited promise gateToolCallInner returned, which resolves
+   * right back through here before the caller ever sees it). See
+   * handleHostedTool for the consuming side.
+   */
+  private gateToolCall = async (payload: PiToolCallPayload): Promise<GateDecision> => {
+    const decision = await this.gateToolCallInner(payload)
+    if (decision.behavior === 'allow' && PI_HOSTED_TOOL_NAMES.has(payload.toolName)) {
+      this.hostedGrants.set(payload.toolCallId, payload.toolName)
+      // Bound the map — evict the OLDEST entry (Map iteration/insertion
+      // order) rather than letting an abandoned session's never-executed
+      // grants accumulate forever.
+      if (this.hostedGrants.size > 256) {
+        const oldestKey = this.hostedGrants.keys().next().value
+        if (oldestKey !== undefined) this.hostedGrants.delete(oldestKey)
+      }
+    }
+    return decision
+  }
+
+  /**
+   * Resolve every in-flight 'ask' gate with a deny (used by interrupt/cancel/
+   * an unexpected exit) and clear the map. Also clears hostedGrants — a grant
+   * minted for a turn that's being torn down must not survive it (e.g. a
+   * cancel racing an in-flight `/hosted-tool` POST).
+   */
   private rejectAllPendingGates(reason: string): void {
     for (const pending of this.pendingGates.values()) {
       pending.resolve({ behavior: 'deny', reason })
     }
     this.pendingGates.clear()
+    this.hostedGrants.clear()
   }
 
   /** Lazily load (and cache) the merged user/project/local Claude permission rules for this session's cwd. */
@@ -1048,12 +1134,22 @@ export class PiSession extends BaseSession {
 
   /**
    * Handler passed to PiBridgeHost as the SECOND (hosted-tool) constructor
-   * arg — invoked once per `POST /hosted-tool`, i.e. only AFTER the
-   * `tool_call` gate (gateToolCall above + permission-engine.ts's
-   * PI_AUTO_ALLOW_HOSTED_TOOLS / mode-base ladder) has already allowed the
-   * call (verified — pi's tool_call hook fires for registered/extension
-   * tools too, so a registered tool is a two-stage flow: gate, then
-   * execute). Does NOT re-gate.
+   * arg — invoked once per `POST /hosted-tool`.
+   *
+   * SECURITY (A1): the FIRST thing this does is require a matching one-shot
+   * grant in `hostedGrants` — `toolCallId -> toolName` minted by gateToolCall
+   * ONLY when `/tool-call` (permission-engine.ts's PI_AUTO_ALLOW_HOSTED_TOOLS
+   * / mode-base ladder) already decided 'allow' for this exact call. Without
+   * this check, the bearer token alone gated `/hosted-tool` — and that token
+   * lives in the pi child's env, reachable from any already-approved bash
+   * command, bypassing dispatch_agent's deliberate 'ask' gating entirely
+   * (verified — pi's tool_call hook fires for registered tools too, but
+   * nothing stops a direct POST that skips it). A present-but-mismatched
+   * grant (e.g. granted for render_mermaid, executed as dispatch_agent with
+   * the same toolCallId) fails closed identically to an absent one. The
+   * grant is consumed (deleted) on the FIRST matching lookup — a second
+   * execute() with the same toolCallId fails closed too, even though pi
+   * itself would never legitimately send one.
    *
    * render_mermaid/create_mockup/show_mockup delegate to the SAME in-process
    * MCP tool handlers Claude/opencode use (mermaid-tool.ts/mockup-tool.ts —
@@ -1067,6 +1163,16 @@ export class PiSession extends BaseSession {
     payload: PiHostedToolPayload
   ): Promise<PiHostedToolResult> => {
     const { toolName, input, toolCallId } = payload
+
+    const grantedName = this.hostedGrants.get(toolCallId)
+    if (grantedName === undefined || grantedName !== toolName) {
+      return {
+        content: [{ type: 'text', text: 'hosted tool call was not approved through the tool gate' }],
+        isError: true
+      }
+    }
+    this.hostedGrants.delete(toolCallId) // one-shot — consumed on first (matching) use.
+
     switch (toolName) {
       case 'render_mermaid': {
         if (!this.mermaidServer) this.mermaidServer = createMermaidServer()
@@ -1097,9 +1203,12 @@ export class PiSession extends BaseSession {
   }
 
   /**
-   * dispatch_agent (M4b, ADR-033) — pi as a dispatch SOURCE only (pi as a
-   * TARGET is a separate later milestone; the dispatcher's own engine guard
-   * already rejects 'pi' as `req.engine`). Mirrors collab-tool.ts's Claude-side
+   * dispatch_agent (M4b, ADR-033) — pi as a dispatch SOURCE (this method).
+   * pi as a dispatch TARGET is handled separately, in
+   * cross-engine-dispatcher.ts's `gatePiTargetToolCall` (M4c, shipped);
+   * same-engine (pi→pi) dispatch still stays rejected regardless of which
+   * side initiates — the dispatcher's own engine guard rejects 'pi' as
+   * `req.engine` here. Mirrors collab-tool.ts's Claude-side
    * DispatchContext construction verbatim (fromEngine/fromRoutingId/cwd/
    * autonomyMode/emit/addDispatchedCost/toolUseId), NOT via MCP — pi has no
    * MCP client of its own, so this calls crossEngineDispatcher.dispatch()

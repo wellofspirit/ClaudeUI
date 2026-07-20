@@ -1,7 +1,7 @@
 /**
  * Hand-written minimal TS types for the pi `--mode rpc` wire protocol — only
- * the shapes ClaudeUI actually consumes. No runtime code (types + a couple of
- * type-only re-exports only).
+ * the shapes ClaudeUI actually consumes. No runtime code: every export below
+ * is a type/interface declared directly in this file, not a re-export.
  *
  * Sources (all version-pinned to package.json#piCliVersion, verified against
  * the real binary — see docs/protocol-pi/README.md for the M0 probe notes):

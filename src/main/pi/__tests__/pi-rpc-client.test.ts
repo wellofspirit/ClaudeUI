@@ -124,6 +124,23 @@ describe('PiRpcClient — framing', () => {
     proc.stdout.emit('data', JSON.stringify({ type: 'response', id: 'r1', command: 'abort', success: true }) + '\n')
     expect(events).toEqual([])
   })
+
+  it('dispatches multiple complete JSON lines delivered in ONE stdout chunk, all in order', async () => {
+    const { client, proc } = await startClient()
+    const events: unknown[] = []
+    client.onEvent((ev) => events.push(ev))
+
+    const chunk =
+      JSON.stringify({ type: 'agent_start' }) +
+      '\n' +
+      JSON.stringify({ type: 'turn_start' }) +
+      '\n' +
+      JSON.stringify({ type: 'agent_settled' }) +
+      '\n'
+    proc.stdout.emit('data', chunk)
+
+    expect(events).toEqual([{ type: 'agent_start' }, { type: 'turn_start' }, { type: 'agent_settled' }])
+  })
 })
 
 describe('PiRpcClient — request/response correlation', () => {
@@ -202,14 +219,7 @@ describe('PiRpcClient — request/response correlation', () => {
   })
 })
 
-describe('PiRpcClient — send / dispose / onExit', () => {
-  it('send() writes fire-and-forget with no id required', async () => {
-    const { client, proc } = await startClient()
-    client.send({ type: 'extension_ui_response', id: 'ui1', value: 'ok' })
-    const written = lastWrittenCommand(proc)
-    expect(written).toEqual({ type: 'extension_ui_response', id: 'ui1', value: 'ok' })
-  })
-
+describe('PiRpcClient — dispose / onExit', () => {
   it('onExit fires with the exit code/signal', async () => {
     const { client, proc } = await startClient()
     const exits: Array<[number | null, NodeJS.Signals | null]> = []

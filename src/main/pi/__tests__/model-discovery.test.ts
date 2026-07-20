@@ -197,6 +197,14 @@ describe('discoverPiModels', () => {
     expect(MockPiRpcClient).toHaveBeenCalledTimes(1)
   })
 
+  it('does NOT cache an empty catalog — a second (sequential) call re-spawns rather than sticking with a transient empty result', async () => {
+    mockRequest.mockResolvedValue({ success: true, data: { models: [] } })
+    const { discoverPiModels } = await importFresh()
+    await discoverPiModels()
+    await discoverPiModels()
+    expect(MockPiRpcClient).toHaveBeenCalledTimes(2)
+  })
+
   it('invalidatePiModelCache() clears the cache so the next call re-spawns', async () => {
     mockRequest.mockResolvedValue({ success: true, data: { models: CATALOG } })
     const { discoverPiModels, invalidatePiModelCache } = await importFresh()

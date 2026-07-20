@@ -322,6 +322,49 @@ async function hostedTool(
   }>
 }
 
+/**
+ * A1 SECURITY FIX test helper: mint a one-shot `/hosted-tool` execution grant
+ * via the SAME `/tool-call` gate a real bridge extension would hit, for an
+ * AUTO-ALLOWED hosted tool (render_mermaid/create_mockup/show_mockup —
+ * PI_AUTO_ALLOW_HOSTED_TOOLS) — resolves immediately, no approval-request
+ * round trip needed. Every hostedTool() call below now REQUIRES a matching
+ * grant (gateToolCall's wrapper mints one iff the /tool-call decision was
+ * 'allow' for a PI_HOSTED_TOOL_NAMES member); this is the "happy path" half
+ * of that contract for the three always-allowed tools.
+ */
+async function grantAutoAllow(toolCallId: string, toolName: string, input: Record<string, unknown>): Promise<void> {
+  const decision = await gate(toolCallId, toolName, input)
+  if (decision.behavior !== 'allow') {
+    throw new Error(`grantAutoAllow: expected an auto-allow for "${toolName}", got ${JSON.stringify(decision)}`)
+  }
+}
+
+/**
+ * A1 SECURITY FIX test helper: mint a `/hosted-tool` grant for `dispatch_agent`
+ * via the human-approval ('ask') path — dispatch_agent is deliberately NOT in
+ * PI_AUTO_ALLOW_HOSTED_TOOLS (permission-engine.ts), so every autonomy mode
+ * asks (verified in permission-engine.test.ts). Drives the SAME
+ * session:approval-request / resolveApproval('allow') round trip a real user
+ * click would, then returns once the gate has resolved (and the grant has
+ * been minted).
+ */
+async function grantViaApproval(
+  win: MockWindow,
+  session: PiSession,
+  toolCallId: string,
+  input: Record<string, unknown>
+): Promise<void> {
+  const pending = gate(toolCallId, 'dispatch_agent', input)
+  await vi.waitFor(() => {
+    const approvals = sentPayloads(win, 'session:approval-request') as Array<{ toolUseId: string }>
+    expect(approvals.some((a) => a.toolUseId === toolCallId)).toBe(true)
+  })
+  const approvals = sentPayloads(win, 'session:approval-request') as Array<{ requestId: string; toolUseId: string }>
+  const approval = approvals.find((a) => a.toolUseId === toolCallId)!
+  session.resolveApproval(approval.requestId, 'allow')
+  await pending
+}
+
 describe('PiSession.run — sends a prompt', () => {
   it('spawns the process and sends {type:"prompt", message} on the first run()', async () => {
     const win = new MockWindow()
@@ -1502,6 +1545,7 @@ describe('PiSession.handleHostedTool — render_mermaid (M4a)', () => {
     const session = new PiSession('rid-hosted-mermaid-1', win as never, '/cwd', {})
     await session.run('hi')
 
+    await grantAutoAllow('call_m1', 'render_mermaid', { source: 'graph TD; A-->B', title: 'Flow' })
     const result = await hostedTool('render_mermaid', { source: 'graph TD; A-->B', title: 'Flow' }, 'call_m1')
 
     expect(mockMermaidHandler).toHaveBeenCalledWith({ source: 'graph TD; A-->B', title: 'Flow' }, undefined)
@@ -1513,8 +1557,10 @@ describe('PiSession.handleHostedTool — render_mermaid (M4a)', () => {
     const session = new PiSession('rid-hosted-mermaid-2', win as never, '/cwd', {})
     await session.run('hi')
 
-    await hostedTool('render_mermaid', { source: 'graph TD; A-->B' })
-    await hostedTool('render_mermaid', { source: 'graph LR; C-->D' })
+    await grantAutoAllow('call_mm1', 'render_mermaid', { source: 'graph TD; A-->B' })
+    await hostedTool('render_mermaid', { source: 'graph TD; A-->B' }, 'call_mm1')
+    await grantAutoAllow('call_mm2', 'render_mermaid', { source: 'graph LR; C-->D' })
+    await hostedTool('render_mermaid', { source: 'graph LR; C-->D' }, 'call_mm2')
 
     expect(mockCreateMermaidServer).toHaveBeenCalledTimes(1)
     expect(mockMermaidHandler).toHaveBeenCalledTimes(2)
@@ -1529,7 +1575,8 @@ describe('PiSession.handleHostedTool — render_mermaid (M4a)', () => {
     const session = new PiSession('rid-hosted-mermaid-3', win as never, '/cwd', {})
     await session.run('hi')
 
-    const result = await hostedTool('render_mermaid', { source: 'not a diagram' })
+    await grantAutoAllow('call_mm3', 'render_mermaid', { source: 'not a diagram' })
+    const result = await hostedTool('render_mermaid', { source: 'not a diagram' }, 'call_mm3')
     expect(result.isError).toBe(true)
   })
 })
@@ -1540,6 +1587,7 @@ describe('PiSession.handleHostedTool — create_mockup / show_mockup (M4a)', () 
     const session = new PiSession('rid-hosted-mockup-1', win as never, '/cwd', {})
     await session.run('hi')
 
+    await grantAutoAllow('call_mk1', 'create_mockup', { html: '<div>hi</div>', title: 'My UI' })
     const result = await hostedTool('create_mockup', { html: '<div>hi</div>', title: 'My UI' }, 'call_mk1')
 
     expect(mockCreateMockupServer).toHaveBeenCalledWith('/cwd')
@@ -1552,7 +1600,8 @@ describe('PiSession.handleHostedTool — create_mockup / show_mockup (M4a)', () 
     const session = new PiSession('rid-hosted-mockup-2', win as never, '/cwd', {})
     await session.run('hi')
 
-    const result = await hostedTool('show_mockup', { directory: 'abc123' })
+    await grantAutoAllow('call_mk2', 'show_mockup', { directory: 'abc123' })
+    const result = await hostedTool('show_mockup', { directory: 'abc123' }, 'call_mk2')
 
     expect(mockShowMockupHandler).toHaveBeenCalledWith({ directory: 'abc123' }, undefined)
     expect(result.content[0].text).toContain('Mockup displayed')
@@ -1563,8 +1612,10 @@ describe('PiSession.handleHostedTool — create_mockup / show_mockup (M4a)', () 
     const session = new PiSession('rid-hosted-mockup-3', win as never, '/cwd', {})
     await session.run('hi')
 
-    await hostedTool('create_mockup', { html: '<div>a</div>' })
-    await hostedTool('show_mockup', { directory: 'abc123' })
+    await grantAutoAllow('call_mk3a', 'create_mockup', { html: '<div>a</div>' })
+    await hostedTool('create_mockup', { html: '<div>a</div>' }, 'call_mk3a')
+    await grantAutoAllow('call_mk3b', 'show_mockup', { directory: 'abc123' })
+    await hostedTool('show_mockup', { directory: 'abc123' }, 'call_mk3b')
 
     expect(mockCreateMockupServer).toHaveBeenCalledTimes(2)
   })
@@ -1578,21 +1629,27 @@ describe('PiSession.handleHostedTool — create_mockup / show_mockup (M4a)', () 
     const session = new PiSession('rid-hosted-mockup-4', win as never, '/cwd', {})
     await session.run('hi')
 
-    const result = await hostedTool('show_mockup', { directory: 'missing' })
+    await grantAutoAllow('call_mk4', 'show_mockup', { directory: 'missing' })
+    const result = await hostedTool('show_mockup', { directory: 'missing' }, 'call_mk4')
     expect(result.isError).toBe(true)
   })
 })
 
 describe('PiSession.handleHostedTool — unknown toolName (M4a+b)', () => {
-  it('an unrecognized hosted toolName returns isError without touching mermaid/mockup/dispatch', async () => {
+  it('an unrecognized hosted toolName can never earn a grant (not in PI_HOSTED_TOOL_NAMES) — fails closed before the switch, without touching mermaid/mockup/dispatch', async () => {
     const win = new MockWindow()
     const session = new PiSession('rid-hosted-unknown', win as never, '/cwd', {})
     await session.run('hi')
 
+    // No gate() call at all — even if one WERE made and approved, gateToolCall's
+    // wrapper only mints a grant for a name in PI_HOSTED_TOOL_NAMES, which
+    // 'mystery_tool' isn't, so the "not approved" fail-closed path (A1) is
+    // the only reachable outcome — the switch's own unknownHostedTool default
+    // case is unreachable through the real gate flow.
     const result = await hostedTool('mystery_tool', {})
 
     expect(result.isError).toBe(true)
-    expect(result.content[0].text).toContain('mystery_tool')
+    expect(result.content[0].text).toContain('not approved')
     expect(mockCreateMermaidServer).not.toHaveBeenCalled()
     expect(mockCreateMockupServer).not.toHaveBeenCalled()
     expect(mockDispatch).not.toHaveBeenCalled()
@@ -1607,6 +1664,7 @@ describe('PiSession.handleHostedTool — dispatch_agent (M4b, ADR-033)', () => {
     await session.setPermissionMode('acceptEdits')
     await session.run('hi')
 
+    await grantViaApproval(win, session, 'call_dispatch_1', { engine: 'opencode', prompt: 'what is the answer' })
     const result = await hostedTool(
       'dispatch_agent',
       { engine: 'opencode', prompt: 'what is the answer' },
@@ -1635,12 +1693,9 @@ describe('PiSession.handleHostedTool — dispatch_agent (M4b, ADR-033)', () => {
     const session = new PiSession('rid-dispatch-2', win as never, '/cwd', {})
     await session.run('hi')
 
-    await hostedTool('dispatch_agent', {
-      engine: 'opencode',
-      prompt: 'continue',
-      model: 'openai/gpt-5',
-      session_id: 'prev-sess'
-    })
+    const input = { engine: 'opencode', prompt: 'continue', model: 'openai/gpt-5', session_id: 'prev-sess' }
+    await grantViaApproval(win, session, 'call_dispatch_2', input)
+    await hostedTool('dispatch_agent', input, 'call_dispatch_2')
 
     expect(mockDispatch).toHaveBeenCalledWith(
       { engine: 'opencode', prompt: 'continue', model: 'openai/gpt-5', sessionId: 'prev-sess' },
@@ -1654,7 +1709,8 @@ describe('PiSession.handleHostedTool — dispatch_agent (M4b, ADR-033)', () => {
     const session = new PiSession('rid-dispatch-3', win as never, '/cwd', {})
     await session.run('hi')
 
-    const result = await hostedTool('dispatch_agent', { engine: 'claude', prompt: 'x' })
+    await grantViaApproval(win, session, 'call_dispatch_3', { engine: 'claude', prompt: 'x' })
+    const result = await hostedTool('dispatch_agent', { engine: 'claude', prompt: 'x' }, 'call_dispatch_3')
 
     expect(result.content[0].text).toBe('Dispatch failed: boom')
     expect(result.isError).toBe(true)
@@ -1665,7 +1721,10 @@ describe('PiSession.handleHostedTool — dispatch_agent (M4b, ADR-033)', () => {
     const session = new PiSession('rid-dispatch-4', win as never, '/cwd', {})
     await session.run('hi')
 
-    const result = await hostedTool('dispatch_agent', { prompt: 'x' })
+    // Grant covers the toolCallId/toolName pair, NOT input shape — malformed
+    // input is validated INSIDE handleDispatchAgent, after the grant check.
+    await grantViaApproval(win, session, 'call_dispatch_4', { prompt: 'x' })
+    const result = await hostedTool('dispatch_agent', { prompt: 'x' }, 'call_dispatch_4')
 
     expect(result.isError).toBe(true)
     expect(mockDispatch).not.toHaveBeenCalled()
@@ -1676,7 +1735,8 @@ describe('PiSession.handleHostedTool — dispatch_agent (M4b, ADR-033)', () => {
     const session = new PiSession('rid-dispatch-5', win as never, '/cwd', {})
     await session.run('hi')
 
-    const result = await hostedTool('dispatch_agent', { engine: 'opencode' })
+    await grantViaApproval(win, session, 'call_dispatch_5', { engine: 'opencode' })
+    const result = await hostedTool('dispatch_agent', { engine: 'opencode' }, 'call_dispatch_5')
 
     expect(result.isError).toBe(true)
     expect(mockDispatch).not.toHaveBeenCalled()
@@ -1687,7 +1747,8 @@ describe('PiSession.handleHostedTool — dispatch_agent (M4b, ADR-033)', () => {
     const session = new PiSession('rid-dispatch-6', win as never, '/cwd', {})
     await session.run('hi')
 
-    const result = await hostedTool('dispatch_agent', { engine: 'pi', prompt: 'x' })
+    await grantViaApproval(win, session, 'call_dispatch_6', { engine: 'pi', prompt: 'x' })
+    const result = await hostedTool('dispatch_agent', { engine: 'pi', prompt: 'x' }, 'call_dispatch_6')
 
     expect(result.isError).toBe(true)
     expect(mockDispatch).not.toHaveBeenCalled()
@@ -1702,8 +1763,316 @@ describe('PiSession.handleHostedTool — dispatch_agent (M4b, ADR-033)', () => {
     const session = new PiSession('rid-dispatch-7', win as never, '/cwd', {})
     await session.run('hi')
 
+    await grantViaApproval(win, session, 'call_dispatch_7', { engine: 'opencode', prompt: 'x' })
     await hostedTool('dispatch_agent', { engine: 'opencode', prompt: 'x' }, 'call_dispatch_7')
 
     expect(sentChannels(win)).toContain('session:task-notification')
+  })
+})
+
+describe('PiSession — hosted-tool one-shot grants (A1 security fix)', () => {
+  it('execute() WITHOUT a prior gate-allow is fail-closed — isError, and the underlying tool handler is NEVER invoked', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-grant-1', win as never, '/cwd', {})
+    await session.run('hi')
+
+    const result = await hostedTool('render_mermaid', { source: 'graph TD; A-->B' }, 'call_ungated')
+
+    expect(result.isError).toBe(true)
+    expect(result.content[0].text).toContain('not approved')
+    expect(mockCreateMermaidServer).not.toHaveBeenCalled()
+  })
+
+  it("gate-allow (auto-allow path, render_mermaid) then execute succeeds; a SECOND execute with the SAME toolCallId is fail-closed (one-shot, consumed)", async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-grant-2', win as never, '/cwd', {})
+    await session.run('hi')
+
+    await grantAutoAllow('call_g1', 'render_mermaid', { source: 'graph TD; A-->B' })
+
+    const first = await hostedTool('render_mermaid', { source: 'graph TD; A-->B' }, 'call_g1')
+    expect(first.isError).toBeFalsy()
+
+    const second = await hostedTool('render_mermaid', { source: 'graph TD; A-->B' }, 'call_g1')
+    expect(second.isError).toBe(true)
+    expect(second.content[0].text).toContain('not approved')
+    // The handler only ran for the FIRST (granted) call — the consumed grant
+    // means the second never reached createMermaidServer at all.
+    expect(mockCreateMermaidServer).toHaveBeenCalledTimes(1)
+  })
+
+  it('gate-allow for render_mermaid but execute() claims dispatch_agent with the SAME toolCallId is fail-closed (name mismatch)', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-grant-3', win as never, '/cwd', {})
+    await session.run('hi')
+
+    await grantAutoAllow('call_g2', 'render_mermaid', { source: 'x' })
+
+    const result = await hostedTool('dispatch_agent', { engine: 'opencode', prompt: 'x' }, 'call_g2')
+
+    expect(result.isError).toBe(true)
+    expect(result.content[0].text).toContain('not approved')
+    expect(mockDispatch).not.toHaveBeenCalled()
+  })
+
+  it("a human-approved dispatch_agent (ask -> resolveApproval('allow')) mints a grant too — execute() then dispatches", async () => {
+    mockDispatch.mockResolvedValue({ text: 'ok', sessionId: 'sess-x' })
+    const win = new MockWindow()
+    const session = new PiSession('rid-grant-4', win as never, '/cwd', {})
+    await session.run('hi') // default mode — dispatch_agent (kind 'task') always asks
+
+    await grantViaApproval(win, session, 'call_g3', { engine: 'opencode', prompt: 'x' })
+    const result = await hostedTool('dispatch_agent', { engine: 'opencode', prompt: 'x' }, 'call_g3')
+
+    expect(mockDispatch).toHaveBeenCalledTimes(1)
+    expect(result.isError).toBeFalsy()
+  })
+
+  it('grants are cleared on cancel() — a gate-allow followed by cancel() leaves a subsequent execute() fail-closed', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-grant-5', win as never, '/cwd', {})
+    await session.run('hi')
+
+    await grantAutoAllow('call_g4', 'render_mermaid', { source: 'x' })
+    session.cancel()
+
+    const result = await hostedTool('render_mermaid', { source: 'x' }, 'call_g4')
+    expect(result.isError).toBe(true)
+    expect(mockCreateMermaidServer).not.toHaveBeenCalled()
+  })
+
+  it('grants are cleared on interrupt() too', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-grant-6', win as never, '/cwd', {})
+    await session.run('hi')
+
+    await grantAutoAllow('call_g5', 'render_mermaid', { source: 'x' })
+    await session.interrupt()
+
+    const result = await hostedTool('render_mermaid', { source: 'x' }, 'call_g5')
+    expect(result.isError).toBe(true)
+    expect(mockCreateMermaidServer).not.toHaveBeenCalled()
+  })
+})
+
+describe('PiSession.run — steer failure must not flip isProcessing while the original turn streams (A3)', () => {
+  it('busy session (turn in flight): a rejected steer ({success:false}) emits session:error but isProcessing STAYS true', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-a3-1', win as never, '/cwd', {})
+
+    let promptCalls = 0
+    let resolveFirstPrompt!: (v: unknown) => void
+    mockRequest.mockImplementation((cmd: { type: string }) => {
+      if (cmd.type === 'prompt') {
+        promptCalls++
+        if (promptCalls === 1) {
+          return new Promise((resolve) => {
+            resolveFirstPrompt = resolve
+          })
+        }
+        // The steer (second prompt) is rejected at the APPLICATION level.
+        return Promise.resolve({ type: 'response', command: 'prompt', success: false, error: 'steer rejected' })
+      }
+      return defaultRequestImpl(cmd)
+    })
+
+    const firstRun = session.run('first')
+    await vi.waitFor(() => expect(session.willQueue).toBe(true))
+
+    await session.run('second') // the steer
+
+    expect(sentChannels(win)).toContain('session:error')
+    // isProcessing must STAY true — the ORIGINAL turn is still streaming; a
+    // subsequent run() must still be able to send streamingBehavior:'steer'
+    // rather than a bare prompt (which pi would reject while busy).
+    expect(session.willQueue).toBe(true)
+    expect(session.status.state).toBe('running')
+
+    resolveFirstPrompt({ type: 'response', command: 'prompt', success: true })
+    await firstRun
+  })
+
+  it('busy session: a steer REQUEST REJECTION (thrown/rejected promise, not just success:false) ALSO leaves isProcessing true', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-a3-2', win as never, '/cwd', {})
+
+    let promptCalls = 0
+    let resolveFirstPrompt!: (v: unknown) => void
+    mockRequest.mockImplementation((cmd: { type: string }) => {
+      if (cmd.type === 'prompt') {
+        promptCalls++
+        if (promptCalls === 1) {
+          return new Promise((resolve) => {
+            resolveFirstPrompt = resolve
+          })
+        }
+        return Promise.reject(new Error('process wedged'))
+      }
+      return defaultRequestImpl(cmd)
+    })
+
+    const firstRun = session.run('first')
+    await vi.waitFor(() => expect(session.willQueue).toBe(true))
+
+    await session.run('second')
+
+    expect(sentChannels(win)).toContain('session:error')
+    expect(session.willQueue).toBe(true)
+
+    resolveFirstPrompt({ type: 'response', command: 'prompt', success: true })
+    await firstRun
+  })
+
+  it('non-busy run() failure still resets isProcessing to false (existing behavior preserved)', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-a3-3', win as never, '/cwd', {})
+    mockRequest.mockImplementation((cmd: { type: string }) =>
+      cmd.type === 'prompt'
+        ? Promise.resolve({ type: 'response', command: 'prompt', success: false, error: 'rejected' })
+        : defaultRequestImpl(cmd)
+    )
+
+    await session.run('hi')
+
+    expect(sentChannels(win)).toContain('session:error')
+    expect(session.willQueue).toBe(false)
+    expect(session.status.state).toBe('idle')
+  })
+})
+
+describe('PiSession.doStart — cleanup on a post-assignment failure (A4 leak fix)', () => {
+  it('get_state rejecting after client/bridgeHost are assigned disposes BOTH and lets the NEXT run() respawn fresh', async () => {
+    mockRequest.mockImplementation((cmd: { type: string }) =>
+      cmd.type === 'get_state' ? Promise.reject(new Error('get_state wedged')) : defaultRequestImpl(cmd)
+    )
+    const win = new MockWindow()
+    const session = new PiSession('rid-a4-1', win as never, '/cwd', {})
+
+    await session.run('hi')
+
+    expect(sentChannels(win)).toContain('session:error')
+    // The client that WAS constructed (and started) must be disposed, not leaked.
+    expect(mockDispose).toHaveBeenCalledTimes(1)
+    expect(mockBridgeHostDispose).toHaveBeenCalledTimes(1)
+
+    // A subsequent run() must respawn a FRESH client (startedPromise was
+    // cleared) rather than being permanently stuck on the failed spawn.
+    mockRequest.mockImplementation(defaultRequestImpl)
+    MockPiRpcClient.mockClear()
+    await session.run('hi again')
+    expect(MockPiRpcClient).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('PiSession — crash path (onExit handler, A5 — previously zero coverage)', () => {
+  async function spawnAndGetOnExit(routingId: string): Promise<{ win: MockWindow; session: PiSession; onExit: () => void }> {
+    const win = new MockWindow()
+    const session = new PiSession(routingId, win as never, '/cwd', {})
+    await session.run('hi')
+    const calls = mockOnExit.mock.calls
+    const onExit = calls[calls.length - 1][0] as () => void
+    return { win, session, onExit }
+  }
+
+  it('status becomes disconnected + isProcessing false', async () => {
+    const { win, session, onExit } = await spawnAndGetOnExit('rid-a5-1')
+    onExit()
+    expect(session.status.state).toBe('disconnected')
+    expect(session.willQueue).toBe(false)
+    expect(sentChannels(win)).toContain('session:status')
+  })
+
+  it('a pending "ask" gate resolves deny', async () => {
+    const { win, onExit } = await spawnAndGetOnExit('rid-a5-2')
+    const pending = gate('call_a5_2', 'edit', { path: 'x.ts' }) // default mode -> edit asks
+    await vi.waitFor(() => expect(sentChannels(win)).toContain('session:approval-request'))
+    onExit()
+    await expect(pending).resolves.toEqual({ behavior: 'deny', reason: 'Interrupted' })
+  })
+
+  it('bridgeHost.dispose() is called', async () => {
+    const { onExit } = await spawnAndGetOnExit('rid-a5-3')
+    mockBridgeHostDispose.mockClear()
+    onExit()
+    expect(mockBridgeHostDispose).toHaveBeenCalledTimes(1)
+  })
+
+  it('bashStreamGate timers are cancelled — no late session:bash-output after the exit', async () => {
+    const { win, onExit } = await spawnAndGetOnExit('rid-a5-4')
+    const handler = lastEventHandler()
+    handler({
+      type: 'tool_execution_update',
+      toolCallId: 'call_a5_4',
+      toolName: 'bash',
+      args: {},
+      partialResult: { content: [{ type: 'text', text: 'partial' }] }
+    })
+    onExit()
+    await new Promise((r) => setTimeout(r, 150))
+    expect(sentChannels(win)).not.toContain('session:bash-output')
+  })
+
+  it('a subsequent run() respawns — a SECOND client is constructed', async () => {
+    const { session, onExit } = await spawnAndGetOnExit('rid-a5-5')
+    onExit() // clears startedPromise — see doStart()'s onExit handler
+    MockPiRpcClient.mockClear()
+
+    await session.run('hi again')
+
+    expect(MockPiRpcClient).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('PiSession — usage account attribution (A11, post-M3 gap)', () => {
+  it('resolves accountId via piAuthProvider.buildPiAccountRef(output.provider) when the mock returns an entry', async () => {
+    mockBuildPiAccountRef.mockImplementation((vendorId: string) =>
+      vendorId === 'anthropic'
+        ? { engineId: 'pi', vendorId: 'anthropic', billingType: 'apiKey', authState: 'authenticated', accountId: 'acct-123' }
+        : null
+    )
+    const win = new MockWindow()
+    const session = new PiSession('rid-a11-1', win as never, '/cwd', {})
+    await session.run('hi')
+
+    const handler = lastEventHandler()
+    handler({
+      type: 'message_end',
+      message: {
+        role: 'assistant',
+        content: [{ type: 'text', text: 'hi' }],
+        api: 'a',
+        provider: 'anthropic',
+        model: 'claude-sonnet-4-6',
+        usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+        stopReason: 'stop',
+        timestamp: 1
+      }
+    })
+
+    expect(mockRecordUsageEvent).toHaveBeenCalledWith(expect.objectContaining({ accountId: 'acct-123', accountUuid: null }))
+  })
+
+  it('accountId is null when buildPiAccountRef has no entry for the provider', async () => {
+    mockBuildPiAccountRef.mockReturnValue(null)
+    const win = new MockWindow()
+    const session = new PiSession('rid-a11-2', win as never, '/cwd', {})
+    await session.run('hi')
+
+    const handler = lastEventHandler()
+    handler({
+      type: 'message_end',
+      message: {
+        role: 'assistant',
+        content: [{ type: 'text', text: 'hi' }],
+        api: 'a',
+        provider: 'some-unknown-provider',
+        model: 'm',
+        usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+        stopReason: 'stop',
+        timestamp: 1
+      }
+    })
+
+    expect(mockRecordUsageEvent).toHaveBeenCalledWith(expect.objectContaining({ accountId: null, accountUuid: null }))
   })
 })

@@ -358,3 +358,91 @@ describe('PI_BRIDGE_EXTENSION_SOURCE — execute()/fetch contract (executed in-p
     })
   })
 })
+
+// ---------------------------------------------------------------------------
+// tool_call gate hook (M2a) — the approval-gate fetch/fail-closed contract.
+// The registration-matrix tests above only assert events.has('tool_call');
+// none of them ever INVOKE the handler — this closes that gap by calling it
+// directly with a stubbed global fetch, mirroring the execute()/fetch
+// contract block above (same withEnv/runExtension harness).
+// ---------------------------------------------------------------------------
+
+describe('PI_BRIDGE_EXTENSION_SOURCE — tool_call gate hook (executed in-process)', () => {
+  const originalFetch = globalThis.fetch
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+  })
+
+  type ToolCallEvent = { toolCallId: string; toolName: string; input: Record<string, unknown> }
+  type HookResult = { block?: boolean; reason?: string } | undefined
+
+  function getToolCallHook(): (event: ToolCallEvent) => Promise<HookResult> {
+    const { events } = runExtension()
+    const hook = events.get('tool_call')
+    if (!hook) throw new Error('tool_call hook was not registered')
+    return hook as (event: ToolCallEvent) => Promise<HookResult>
+  }
+
+  it('fetch rejects (host unreachable) -> block:true', async () => {
+    globalThis.fetch = (async () => {
+      throw new Error('ECONNREFUSED')
+    }) as typeof fetch
+
+    await withEnv(BRIDGE_CREDS, async () => {
+      const result = await getToolCallHook()({ toolCallId: 'c1', toolName: 'bash', input: { command: 'ls' } })
+      expect(result?.block).toBe(true)
+    })
+  })
+
+  it('fetch resolves non-2xx -> block:true', async () => {
+    globalThis.fetch = (async () => ({ ok: false, status: 500 })) as unknown as typeof fetch
+
+    await withEnv(BRIDGE_CREDS, async () => {
+      const result = await getToolCallHook()({ toolCallId: 'c1', toolName: 'bash', input: {} })
+      expect(result?.block).toBe(true)
+    })
+  })
+
+  it('fetch resolves 2xx with malformed JSON (res.json() rejects) -> block:true', async () => {
+    globalThis.fetch = (async () => ({
+      ok: true,
+      status: 200,
+      json: async () => {
+        throw new Error('not json')
+      }
+    })) as unknown as typeof fetch
+
+    await withEnv(BRIDGE_CREDS, async () => {
+      const result = await getToolCallHook()({ toolCallId: 'c1', toolName: 'bash', input: {} })
+      expect(result?.block).toBe(true)
+    })
+  })
+
+  it('2xx {behavior:"allow"} -> hook returns undefined (non-blocking)', async () => {
+    globalThis.fetch = (async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ behavior: 'allow' })
+    })) as unknown as typeof fetch
+
+    await withEnv(BRIDGE_CREDS, async () => {
+      const result = await getToolCallHook()({ toolCallId: 'c1', toolName: 'bash', input: { command: 'ls' } })
+      expect(result).toBeUndefined()
+    })
+  })
+
+  it('2xx {behavior:"deny", reason} -> block:true with the reason propagated', async () => {
+    globalThis.fetch = (async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ behavior: 'deny', reason: 'not allowed right now' })
+    })) as unknown as typeof fetch
+
+    await withEnv(BRIDGE_CREDS, async () => {
+      const result = await getToolCallHook()({ toolCallId: 'c1', toolName: 'bash', input: {} })
+      expect(result?.block).toBe(true)
+      expect(result?.reason).toBe('not allowed right now')
+    })
+  })
+})
